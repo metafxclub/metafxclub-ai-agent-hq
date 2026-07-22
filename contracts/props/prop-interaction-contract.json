@@ -1,0 +1,36 @@
+{
+  "version": "prop-interaction-contract-v003",
+  "purpose": "Define every clickable room prop as a workstation, report surface, mission target, or approval surface.",
+  "role_map": "./contracts/props/property-role-map.json",
+  "prop_schema": {
+    "id": "prop safe slug",
+    "label": "visible prop name",
+    "layer": "server_bridge|workstations|signal_nodes|registered_prop_layers",
+    "asset": "project-relative png",
+    "status": "ready|active|stable|offline|blocked",
+    "reportType": "bridge_report|mission_report|backtest_report|optimization_report|vps_report|telegram_report|risk_report|memory_report",
+    "linkedAgents": ["agent ids"],
+    "linkedTools": ["tool ids"],
+    "requiresApprovalFor": ["action ids"],
+    "position": {
+      "x": 0,
+      "y": 0,
+      "w": 0,
+      "h": 0
+    },
+    "collision": {
+      "blocksWalking": true,
+      "blocksClicks": false
+    },
+    "popup": {
+      "defaultTab": "tasks",
+      "showsChat": false,
+      "showsTasks": true,
+      "showsReports": true,
+      "showsApproval": true
+    }
+  },
+  "runtime_rule": "Clicking a prop opens a dashboard/report popup only. Chat belongs to Agent characters; props never own a chat composer.",
+  "backend_rule": "GET /api/props/:id/report must merge prop metadata, strictly routed missions and reports, agent events, memory cards, relevant meeting records, sanitized bridge status, and contract-owned capability status.",
+  "capability_rule": "A prop receives only capabilities whose linkedPropIds includes that prop; disabled or unimplemented adapters must remain visibly fail-closed."
+}

@@ -1,0 +1,23 @@
+name: Verify safe runtime
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ตรวจโครงสร้างและกฎความปลอดภัย
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: ตรวจไวยากรณ์ JavaScript
+        run: node --check frontend/src/app/main.js
+

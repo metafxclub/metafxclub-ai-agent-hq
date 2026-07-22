@@ -1,0 +1,52 @@
+# Local Python environments and caches
+runner/.venv/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Local identity, authentication, and secrets
+.env
+.env.*
+!.env.example
+.codex/
+**/auth.json
+**/config.toml
+**/*token*
+**/*credential*
+**/*cookie*
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Runtime state, audit logs, imported reports, and user memory
+data/runtime/**
+!data/runtime/.gitkeep
+data/memory/**
+!data/memory/.gitkeep
+data/imports/**
+!data/imports/.gitkeep
+*.log
+*.jsonl
+*.bak
+*.tmp
+
+# Local source/backups and generated release payloads
+assets-source/
+frontend/legacy-static/
+dist/
+release/
+*.zip
+*.sha256
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+

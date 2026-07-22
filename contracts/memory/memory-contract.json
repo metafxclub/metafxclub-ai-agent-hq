@@ -1,0 +1,79 @@
+{
+  "version": "memory-contract-v002",
+  "project": "Metafxclub AI Agent HQ Virtual Office",
+  "purpose": "Local-first durable memory and archive layer for agent recall, mission handoff, meeting context, and report discovery.",
+  "storage_root": "./data/memory",
+  "principles": [
+    "Runtime UI session is not long-term memory.",
+    "Agent events are append-only operational logs.",
+    "Memory index stores durable summaries and pointers to source files.",
+    "Secrets, tokens, cookies, and live trading credentials must never be stored here.",
+    "Old work should be summarized before being pulled into a new mission thread."
+  ],
+  "stores": {
+    "memory_index": {
+      "path": "./data/memory/memory-index.json",
+      "description": "Searchable metadata cards for old work, docs, reports, contracts, and handoff notes."
+    },
+    "agent_notes": {
+      "path": "./data/memory/agent-notes/",
+      "description": "Role-specific notes and durable working preferences."
+    },
+    "meeting_transcripts": {
+      "path": "./data/memory/meetings/meeting-transcripts.jsonl",
+      "description": "Append-only meeting sessions, turns, decisions, and next actions."
+    },
+    "mission_summaries": {
+      "path": "./data/memory/summaries/",
+      "description": "Closed-session summaries that can be searched by Mission Archivist."
+    },
+    "reports": {
+      "path": "./data/memory/reports/",
+      "description": "Backtest, optimization, VPS, Telegram, and executive reports."
+    },
+    "artifacts": {
+      "path": "./data/memory/artifacts/",
+      "description": "Non-secret generated files linked from reports and missions."
+    },
+    "screenshots": {
+      "path": "./data/memory/screenshots/",
+      "description": "Visual evidence for UI, reports, or trading workflow reviews."
+    }
+  },
+  "runtime_endpoints": [
+    "GET /api/memory",
+    "GET /api/memory/search?q=keyword",
+    "POST /api/memory/items",
+    "GET /api/meetings",
+    "POST /api/meetings",
+    "POST /api/meetings/turn",
+    "GET /api/props/:id/report"
+  ],
+  "memory_item_schema": {
+    "id": "string",
+    "title": "string",
+    "kind": "agent_bible|build_log|contract|runtime_log|mission_summary|meeting|report|ai_report|asset_registry|external_reference",
+    "summary": "string",
+    "tags": ["string"],
+    "agents": ["agent_id"],
+    "sourcePath": "project-relative path",
+    "createdAt": "ISO-8601",
+    "updatedAt": "ISO-8601",
+    "safety": {
+      "containsSecret": false,
+      "approvalRequired": false,
+      "publicShareable": false
+    }
+  },
+  "agent_access": {
+    "ceo": ["executive reports", "approvals", "high-level summaries"],
+    "manager": ["all non-secret mission memory", "meeting transcripts", "agent reports"],
+    "ea_developer": ["EA specs", "compile notes", "code change reports"],
+    "backtest_analyst": ["backtest reports", "equity/drawdown metrics", "report caveats"],
+    "optimization_agent": ["parameter sets", "optimization notes", "overfit warnings"],
+    "vps_watch": ["VPS snapshots", "incidents", "terminal health"],
+    "telegram_ops": ["alert templates", "delivery summaries", "approval history"],
+    "risk_guard": ["audit decisions", "approval gates", "security flags"],
+    "mission_archivist": ["all non-secret summaries and index cards"]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "version": "meeting-contract-v002",
+  "purpose": "Agent-to-agent meeting transcript contract for visible office collaboration.",
+  "meeting_schema": {
+    "id": "meeting-{timestamp}",
+    "kind": "meeting|meeting.turn",
+    "hostAgentId": "manager",
+    "participantAgentIds": ["agent ids"],
+    "agenda": "what the meeting is about",
+    "linkedMissionId": "mission id or null",
+    "linkedPropId": "prop id or null",
+    "summary": "short meeting summary",
+    "decisions": ["decision text"],
+    "nextActions": ["action text"],
+    "simulation": false,
+    "createdAt": "ISO-8601"
+  },
+  "turn_schema": {
+    "speakerAgentId": "agent id",
+    "message": "agent utterance",
+    "intent": "handoff|status|risk_review|report|question|decision",
+    "targetAgentId": "agent id or null",
+    "createdAt": "ISO-8601"
+  },
+  "storage": {
+    "transcript_jsonl": "./data/memory/meetings/meeting-transcripts.jsonl",
+    "report_cards": "./data/memory/reports/"
+  },
+  "frontend_rule": "Agent-to-agent chat is visible as dialogue bubbles, meetings, and report cards, but durable truth is the backend transcript and mission result. Autonomous patrol and visual simulation are never written as durable meetings."
+}

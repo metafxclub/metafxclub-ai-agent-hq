@@ -1,0 +1,468 @@
+{
+  "version": "male-roster-set-a-core-command-operators-v001",
+  "generatedAt": "2026-06-12",
+  "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+  "note": "Static alpha crops extracted from the supplied male roster sheet. True directional walk cycles can replace these files later without changing agent IDs.",
+  "assets": [
+    {
+      "id": "male_roster_set_a_ceo_v001",
+      "agent_id": "ceo",
+      "name": "CEO",
+      "role": "Owner / Executive Approver",
+      "type": "Character",
+      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "file": "./characters/01-ceo-male-static-v001.png",
+      "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/01-ceo-male-static-v001.png",
+      "source_bbox": [
+        58,
+        139,
+        451,
+        734
+      ],
+      "crop_bbox": [
+        30,
+        111,
+        479,
+        762
+      ],
+      "size": [
+        449,
+        651
+      ],
+      "asset_status": "static-alpha-crop",
+      "office_states": [
+        "idle",
+        "walking-css",
+        "talking",
+        "meeting",
+        "working",
+        "reporting",
+        "waiting_approval",
+        "resting"
+      ],
+      "walk_anchor": "center-bottom",
+      "talk_anchor": "head",
+      "meeting_anchor": "foot",
+      "tool_affinity": [
+        "approval_gate",
+        "executive_report",
+        "mission_strategy_table"
+      ],
+      "mcp_capability_hint": "Approves guarded work; does not run tools directly."
+    },
+    {
+      "id": "male_roster_set_a_hq_manager_v001",
+      "agent_id": "hq_manager_male",
+      "name": "HQ Manager",
+      "role": "Manager Agent",
+      "type": "Character",
+      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "file": "./characters/02-hq-manager-male-static-v001.png",
+      "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/02-hq-manager-male-static-v001.png",
+      "source_bbox": [
+        516,
+        161,
+        829,
+        734
+      ],
+      "crop_bbox": [
+        488,
+        133,
+        857,
+        762
+      ],
+      "size": [
+        369,
+        629
+      ],
+      "asset_status": "static-alpha-crop",
+      "office_states": [
+        "idle",
+        "walking-css",
+        "talking",
+        "meeting",
+        "working",
+        "reporting",
+        "waiting_approval",
+        "resting"
+      ],
+      "walk_anchor": "center-bottom",
+      "talk_anchor": "head",
+      "meeting_anchor": "foot",
+      "tool_affinity": [
+        "mission_strategy_table",
+        "codex_mcp_portal",
+        "right_tool_console"
+      ],
+      "mcp_capability_hint": "Splits missions and routes specialists through the local bridge."
+    },
+    {
+      "id": "male_roster_set_a_backtest_analyst_v001",
+      "agent_id": "backtest_analyst",
+      "name": "Backtest Analyst",
+      "role": "Backtest Report Analyst",
+      "type": "Character",
+      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "file": "./characters/03-backtest-analyst-male-static-v001.png",
+      "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/03-backtest-analyst-male-static-v001.png",
+      "source_bbox": [
+        890,
+        161,
+        1223,
+        730
+      ],
+      "crop_bbox": [
+        862,
+        133,
+        1251,
+        758
+      ],
+      "size": [
+        389,
+        625
+      ],
+      "asset_status": "static-alpha-crop",
+      "office_states": [
+        "idle",
+        "walking-css",
+        "talking",
+        "meeting",
+        "working",
+        "reporting",
+        "waiting_approval",
+        "resting"
+      ],
+      "walk_anchor": "center-bottom",
+      "talk_anchor": "head",
+      "meeting_anchor": "foot",
+      "tool_affinity": [
+        "left_analytics_console",
+        "left_report_board",
+        "report_archive"
+      ],
+      "mcp_capability_hint": "Reads reports and produces metric findings."
+    },
+    {
+      "id": "male_roster_set_a_telegram_ops_v001",
+      "agent_id": "telegram_ops",
+      "name": "Telegram Ops",
+      "role": "Alert Operator",
+      "type": "Character",
+      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "file": "./characters/04-telegram-ops-male-static-v001.png",
+      "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/04-telegram-ops-male-static-v001.png",
+      "source_bbox": [
+        1307,
+        167,
+        1587,
+        718
+      ],
+      "crop_bbox": [
+        1279,
+        139,
+        1615,
+        746
+      ],
+      "size": [
+        336,
+        607
+      ],
+      "asset_status": "static-alpha-crop",
+      "office_states": [
+        "idle",
+        "walking-css",
+        "talking",
+        "meeting",
+        "working",
+        "reporting",
+        "waiting_approval",
+        "resting"
+      ],
+      "walk_anchor": "center-bottom",
+      "talk_anchor": "head",
+      "meeting_anchor": "foot",
+      "tool_affinity": [
+        "right_tool_console",
+        "right_status_crystals",
+        "left_audit_crystals"
+      ],
+      "mcp_capability_hint": "Prepares alerts; public send requires approval."
+    },
+    {
+      "id": "male_roster_set_a_optimization_agent_v001",
+      "agent_id": "optimization_agent",
+      "name": "Optimization Agent",
+      "role": "Parameter Search Specialist",
+      "type": "Character",
+      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "file": "./characters/05-optimization-agent-male-static-v001.png",
+      "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/05-optimization-agent-male-static-v001.png",
+      "source_bbox": [
+        1675,
+        161,
+        1989,
+        728
+      ],
+      "crop_bbox": [
+        1647,
+        133,
+        2017,
+        756
+      ],
+      "size": [
+        370,
+        623
+      ],
+      "asset_status": "static-alpha-crop",
+      "office_states": [
+        "idle",
+        "walking-css",
+        "talking",
+        "meeting",
+        "working",
+        "reporting",
+        "waiting_approval",
+        "resting"
+      ],
+      "walk_anchor": "center-bottom",
+      "talk_anchor": "head",
+      "meeting_anchor": "foot",
+      "tool_affinity": [
+        "left_queue_lanes",
+        "right_queue_lanes",
+        "left_analytics_console"
+      ],
+      "mcp_capability_hint": "Compares parameter candidates and flags overfit risk."
+    },
+    {
+      "id": "male_roster_set_a_ea_developer_v001",
+      "agent_id": "ea_developer",
+      "name": "EA Developer",
+      "role": "MT4/MT5 EA Developer",
+      "type": "Character",
+      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "file": "./characters/06-ea-developer-male-static-v001.png",
+      "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/06-ea-developer-male-static-v001.png",
+      "source_bbox": [
+        71,
+        805,
+        427,
+        1382
+      ],
+      "crop_bbox": [
+        43,
+        777,
+        455,
+        1410
+      ],
+      "size": [
+        412,
+        633
+      ],
+      "asset_status": "static-alpha-crop",
+      "office_states": [
+        "idle",
+        "walking-css",
+        "talking",
+        "meeting",
+        "working",
+        "reporting",
+        "waiting_approval",
+        "resting"
+      ],
+      "walk_anchor": "center-bottom",
+      "talk_anchor": "head",
+      "meeting_anchor": "foot",
+      "tool_affinity": [
+        "terminal_workstation",
+        "code_workspace",
+        "compile_log"
+      ],
+      "mcp_capability_hint": "Drafts or reviews EA logic through guarded runner tasks."
+    },
+    {
+      "id": "male_roster_set_a_codex_mcp_operator_v001",
+      "agent_id": "codex_mcp_operator",
+      "name": "Codex MCP Operator",
+      "role": "Bridge Operator",
+      "type": "Character",
+      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "file": "./characters/07-codex-mcp-operator-male-static-v001.png",
+      "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/07-codex-mcp-operator-male-static-v001.png",
+      "source_bbox": [
+        458,
+        816,
+        819,
+        1373
+      ],
+      "crop_bbox": [
+        430,
+        788,
+        847,
+        1401
+      ],
+      "size": [
+        417,
+        613
+      ],
+      "asset_status": "static-alpha-crop",
+      "office_states": [
+        "idle",
+        "walking-css",
+        "talking",
+        "meeting",
+        "working",
+        "reporting",
+        "waiting_approval",
+        "resting"
+      ],
+      "walk_anchor": "center-bottom",
+      "talk_anchor": "head",
+      "meeting_anchor": "foot",
+      "tool_affinity": [
+        "codex_mcp_portal",
+        "right_tool_console",
+        "mission_strategy_table"
+      ],
+      "mcp_capability_hint": "Internal support role for runner/bridge diagnostics."
+    },
+    {
+      "id": "male_roster_set_a_vps_watch_v001",
+      "agent_id": "vps_watch",
+      "name": "VPS Watch",
+      "role": "Infrastructure Monitor",
+      "type": "Character",
+      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "file": "./characters/08-vps-watch-male-static-v001.png",
+      "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/08-vps-watch-male-static-v001.png",
+      "source_bbox": [
+        868,
+        812,
+        1177,
+        1371
+      ],
+      "crop_bbox": [
+        840,
+        784,
+        1205,
+        1399
+      ],
+      "size": [
+        365,
+        615
+      ],
+      "asset_status": "static-alpha-crop",
+      "office_states": [
+        "idle",
+        "walking-css",
+        "talking",
+        "meeting",
+        "working",
+        "reporting",
+        "waiting_approval",
+        "resting"
+      ],
+      "walk_anchor": "center-bottom",
+      "talk_anchor": "head",
+      "meeting_anchor": "foot",
+      "tool_affinity": [
+        "left_server_racks",
+        "right_server_racks",
+        "right_status_crystals"
+      ],
+      "mcp_capability_hint": "Checks health snapshots and reports incidents."
+    },
+    {
+      "id": "male_roster_set_a_risk_guard_v001",
+      "agent_id": "risk_guard",
+      "name": "Risk Guard",
+      "role": "Security / Compliance Gate",
+      "type": "Character",
+      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "file": "./characters/09-risk-guard-male-static-v001.png",
+      "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/09-risk-guard-male-static-v001.png",
+      "source_bbox": [
+        1226,
+        813,
+        1608,
+        1378
+      ],
+      "crop_bbox": [
+        1198,
+        785,
+        1636,
+        1406
+      ],
+      "size": [
+        438,
+        621
+      ],
+      "asset_status": "static-alpha-crop",
+      "office_states": [
+        "idle",
+        "walking-css",
+        "talking",
+        "meeting",
+        "working",
+        "reporting",
+        "waiting_approval",
+        "resting"
+      ],
+      "walk_anchor": "center-bottom",
+      "talk_anchor": "head",
+      "meeting_anchor": "foot",
+      "tool_affinity": [
+        "left_audit_crystals",
+        "right_status_crystals",
+        "mission_strategy_table"
+      ],
+      "mcp_capability_hint": "Reviews secret exposure, live trading, and risky actions."
+    },
+    {
+      "id": "male_roster_set_a_mission_archivist_v001",
+      "agent_id": "mission_archivist",
+      "name": "Mission Archivist",
+      "role": "Archive / Memory Clerk",
+      "type": "Character",
+      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "file": "./characters/10-mission-archivist-male-static-v001.png",
+      "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/10-mission-archivist-male-static-v001.png",
+      "source_bbox": [
+        1668,
+        816,
+        1989,
+        1378
+      ],
+      "crop_bbox": [
+        1640,
+        788,
+        2017,
+        1406
+      ],
+      "size": [
+        377,
+        618
+      ],
+      "asset_status": "static-alpha-crop",
+      "office_states": [
+        "idle",
+        "walking-css",
+        "talking",
+        "meeting",
+        "working",
+        "reporting",
+        "waiting_approval",
+        "resting"
+      ],
+      "walk_anchor": "center-bottom",
+      "talk_anchor": "head",
+      "meeting_anchor": "foot",
+      "tool_affinity": [
+        "left_report_board",
+        "mission_strategy_table",
+        "report_archive"
+      ],
+      "mcp_capability_hint": "Retrieves old summaries and files for meeting context."
+    }
+  ]
+}

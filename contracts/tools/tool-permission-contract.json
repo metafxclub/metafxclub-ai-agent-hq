@@ -1,0 +1,127 @@
+{
+  "version": "tool-permission-contract-v003",
+  "purpose": "Map visual office tools to backend permissions and approval rules.",
+  "tools": [
+    {
+      "id": "manager_delegate",
+      "label": "Manager Auto Delegation",
+      "defaultMode": "local_queue_only",
+      "linkedPropIds": ["mission_strategy_table"],
+      "adapterStatus": "implemented_queue_only",
+      "realExecutionAvailable": false,
+      "autoRunnable": true,
+      "approvalRequired": false,
+      "risk": "low",
+      "allowedAgents": ["manager", "ceo"],
+      "modelTier": "manager_quality"
+    },
+    {
+      "id": "manager_mission",
+      "label": "Manager Mission",
+      "defaultMode": "simulated_or_queue_only",
+      "linkedPropIds": ["mission_strategy_table"],
+      "adapterStatus": "implemented_queue_only",
+      "realExecutionAvailable": false,
+      "autoRunnable": false,
+      "approvalRequired": false,
+      "risk": "low",
+      "allowedAgents": ["manager", "ceo"],
+      "modelTier": "manager_quality"
+    },
+    {
+      "id": "codex_status",
+      "label": "Codex Runner Status",
+      "defaultMode": "read_only",
+      "linkedPropIds": ["codex_mcp_portal"],
+      "adapterStatus": "runtime_detected",
+      "realExecutionAvailable": false,
+      "autoRunnable": true,
+      "approvalRequired": false,
+      "risk": "low",
+      "allowedAgents": ["manager", "codex_mcp_operator", "risk_guard"],
+      "modelTier": "specialist_fast"
+    },
+    {
+      "id": "codex_cli_smoke",
+      "label": "Codex CLI Smoke Test",
+      "defaultMode": "read_only",
+      "linkedPropIds": ["codex_mcp_portal"],
+      "adapterStatus": "runtime_detected",
+      "realExecutionAvailable": true,
+      "autoRunnable": true,
+      "approvalRequired": false,
+      "risk": "low",
+      "allowedAgents": ["manager", "codex_mcp_operator", "risk_guard"],
+      "modelTier": "specialist_fast"
+    },
+    {
+      "id": "codex_cli_task",
+      "label": "Real Codex Task",
+      "defaultMode": "read_only_diagnostic",
+      "linkedPropIds": ["codex_mcp_portal", "left_analytics_console", "terminal_workstation", "right_server_racks", "right_tool_console", "left_audit_crystals", "left_server_racks", "left_signal_cube"],
+      "adapterStatus": "implemented_guarded",
+      "realExecutionAvailable": true,
+      "autoRunnable": false,
+      "approvalRequired": true,
+      "risk": "medium",
+      "allowedAgents": ["manager", "codex_mcp_operator", "ea_developer", "backtest_analyst", "optimization_agent", "vps_watch", "telegram_ops", "risk_guard", "mission_archivist"],
+      "modelTier": "role_default"
+    },
+    {
+      "id": "mcp_tool_run",
+      "label": "MCP Tool Run",
+      "defaultMode": "backend_only",
+      "linkedPropIds": ["codex_mcp_portal"],
+      "adapterStatus": "unimplemented",
+      "realExecutionAvailable": false,
+      "autoRunnable": false,
+      "approvalRequired": true,
+      "risk": "medium",
+      "allowedAgents": ["manager", "risk_guard", "codex_mcp_operator"],
+      "modelTier": "specialist_balanced"
+    },
+    {
+      "id": "send_telegram",
+      "label": "Send Telegram Message",
+      "defaultMode": "disabled_until_adapter_review",
+      "linkedPropIds": ["right_tool_console", "left_audit_crystals"],
+      "adapterStatus": "disabled_unimplemented",
+      "realExecutionAvailable": false,
+      "autoRunnable": false,
+      "approvalRequired": true,
+      "risk": "high",
+      "allowedAgents": ["manager", "telegram_ops", "risk_guard"],
+      "modelTier": "specialist_fast"
+    },
+    {
+      "id": "live_trading",
+      "label": "Live Trading Action",
+      "defaultMode": "disabled",
+      "linkedPropIds": ["left_signal_cube", "left_audit_crystals"],
+      "adapterStatus": "disabled",
+      "realExecutionAvailable": false,
+      "autoRunnable": false,
+      "approvalRequired": true,
+      "risk": "high",
+      "allowedAgents": ["manager", "risk_guard"],
+      "modelTier": "risk_quality"
+    }
+  ],
+  "blocked_everywhere": [
+    "send_secret_to_frontend",
+    "print_auth_token",
+    "unapproved_live_trade",
+    "unapproved_delete",
+    "unapproved_public_publish",
+    "frontend_selected_model",
+    "frontend_selected_budget",
+    "frontend_approval_boolean"
+  ],
+  "enforcement": {
+    "owner": "backend/local-runner",
+    "unknownToolDefault": "deny",
+    "unknownAgentDefault": "deny",
+    "frontendIsIntentOnly": true,
+    "orchestrationContract": "./contracts/orchestration/orchestration-contract.json"
+  }
+}

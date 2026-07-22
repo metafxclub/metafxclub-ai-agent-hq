@@ -1,0 +1,54 @@
+{
+  "version": "agent-spawn-contract-v001",
+  "purpose": "Define how Metafxclub AI Agent HQ can add temporary or permanent agents without letting the frontend create uncontrolled workers.",
+  "authority": {
+    "may_spawn": ["manager"],
+    "must_review": ["risk_guard"],
+    "human_approval_required_for": ["codex_cli_task", "mcp_tool_run", "live_trading", "production_deploy", "send_public_telegram"]
+  },
+  "spawn_request_schema": {
+    "id": "agent-safe-slug",
+    "parentAgentId": "manager",
+    "missionId": "mission id that needs the worker",
+    "roleTemplate": "research_worker|qa_worker|ea_helper|report_reader|vps_helper|content_helper",
+    "displayName": "short visible name",
+    "goal": "specific job for this worker",
+    "allowedTools": ["tool ids"],
+    "blockedActions": ["blocked action ids"],
+    "approvalRequiredActions": ["action ids"],
+    "creditBudget": {
+      "maxRuns": 1,
+      "maxMinutes": 20,
+      "maxOutputKb": 256
+    },
+    "ttl": {
+      "mode": "mission|session|permanent",
+      "expiresAfterMinutes": 120
+    },
+    "visual": {
+      "assetPackage": "male-roster-set-a-core-command-operators-v001",
+      "staticImage": "project-relative png",
+      "spawnPoint": {
+        "roomId": "codex_mcp_agent_workroom",
+        "targetId": "mission_strategy_table"
+      }
+    },
+    "memoryScope": "mission-only summary unless promoted by Manager",
+    "reportTarget": "prop id or mission id"
+  },
+  "lifecycle": [
+    "Manager detects workload or specialist gap.",
+    "Manager creates a spawn request with a bounded goal, TTL, and tool budget.",
+    "Risk Guard checks blocked actions and approval requirements.",
+    "Backend/local runner writes the runtime agent record and audit event.",
+    "Frontend renders the new agent from the approved runtime record.",
+    "Agent writes reports to mission, prop, and memory stores.",
+    "Manager retires, archives, or promotes the worker."
+  ],
+  "storage": {
+    "runtime_agents": "./data/runtime/agents/",
+    "spawn_audit": "./data/runtime/audit-logs/",
+    "memory_summary": "./data/memory/summaries/"
+  },
+  "frontend_rule": "Frontend may show the Add Agent button later, but it must only submit a spawn intent to the backend. It must not mint workers or tool permissions by itself."
+}

@@ -1,0 +1,62 @@
+{
+  "asset_id": "manager-exec-v001",
+  "agent_role_slug": "manager",
+  "variant_slug": "exec",
+  "version": "v001",
+  "frame_size": 192,
+  "walk": {
+    "down": [
+      "frames/walk/agent-manager-exec-walk-down-01-192-v001.png",
+      "frames/walk/agent-manager-exec-walk-down-02-192-v001.png",
+      "frames/walk/agent-manager-exec-walk-down-03-192-v001.png",
+      "frames/walk/agent-manager-exec-walk-down-04-192-v001.png"
+    ],
+    "left": [
+      "frames/walk/agent-manager-exec-walk-left-01-192-v001.png",
+      "frames/walk/agent-manager-exec-walk-left-02-192-v001.png",
+      "frames/walk/agent-manager-exec-walk-left-03-192-v001.png",
+      "frames/walk/agent-manager-exec-walk-left-04-192-v001.png"
+    ],
+    "right": [
+      "frames/walk/agent-manager-exec-walk-right-01-192-v001.png",
+      "frames/walk/agent-manager-exec-walk-right-02-192-v001.png",
+      "frames/walk/agent-manager-exec-walk-right-03-192-v001.png",
+      "frames/walk/agent-manager-exec-walk-right-04-192-v001.png"
+    ],
+    "up": [
+      "frames/walk/agent-manager-exec-walk-up-01-192-v001.png",
+      "frames/walk/agent-manager-exec-walk-up-02-192-v001.png",
+      "frames/walk/agent-manager-exec-walk-up-03-192-v001.png",
+      "frames/walk/agent-manager-exec-walk-up-04-192-v001.png"
+    ]
+  },
+  "status": {
+    "idle": "frames/status/agent-manager-exec-status-idle-192-v001.png",
+    "resting": "frames/status/agent-manager-exec-status-resting-192-v001.png",
+    "planning": "frames/status/agent-manager-exec-status-planning-192-v001.png",
+    "meeting": "frames/status/agent-manager-exec-status-meeting-192-v001.png",
+    "working": "frames/status/agent-manager-exec-status-working-192-v001.png",
+    "waiting": "frames/status/agent-manager-exec-status-waiting-192-v001.png",
+    "waiting_approval": "frames/status/agent-manager-exec-status-waiting-approval-192-v001.png",
+    "blocked": "frames/status/agent-manager-exec-status-blocked-192-v001.png",
+    "reporting": "frames/status/agent-manager-exec-status-reporting-192-v001.png",
+    "completed": "frames/status/agent-manager-exec-status-completed-192-v001.png",
+    "archived": "frames/status/agent-manager-exec-status-archived-192-v001.png",
+    "offline_sleep": "frames/status/agent-manager-exec-status-offline-sleep-192-v001.png"
+  },
+  "runtime_hints": {
+    "walk_loop_order": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "recommended_walk_fps": 8,
+    "alpha": "RGBA transparent PNG",
+    "anchor": "bottom foot anchor preserved from normalized source sheets",
+    "walk_orientation": "upright vertical character frames",
+    "status_orientation": "upright vertical character frames",
+    "walk_sheet_layout": "rows=direction, columns=frame; row1=down, row2=left, row3=right, row4=up"
+  },
+  "updated_at": "2026-06-09T02:39:19.164576+00:00"
+}

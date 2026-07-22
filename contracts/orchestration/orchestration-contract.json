@@ -1,0 +1,192 @@
+{
+  "version": "orchestration-contract-v003",
+  "purpose": "Backend-owned Manager delegation, model tiering, cost/rate guard, approval, and report aggregation rules for the Metafxclub AI Agent HQ Visual Office.",
+  "managerAutoDelegation": {
+    "endpoint": "POST /api/manager/delegate",
+    "allowedRequesters": ["manager", "ceo"],
+    "plannerMode": "deterministic_guarded_mission_queue",
+    "defaultSubtaskToolId": "codex_cli_task",
+    "realExecutionRequiresMissionApproval": true,
+    "maxSubtasks": 6,
+    "summaryTargetPropId": "mission_strategy_table",
+    "fallback": {
+      "agentId": "manager",
+      "targetPropId": "mission_strategy_table",
+      "reportType": "mission_plan",
+      "modelTier": "manager_quality",
+      "toolId": "codex_cli_task"
+    },
+    "specialistRules": [
+      {
+        "id": "risk_review",
+        "priority": 100,
+        "keywords": ["risk", "approval", "secret", "token", "password", "live trading", "live order", "deploy", "delete", "send telegram"],
+        "agentId": "risk_guard",
+        "targetPropId": "left_audit_crystals",
+        "reportType": "risk_review",
+        "modelTier": "risk_quality"
+      },
+      {
+        "id": "backtest_review",
+        "priority": 80,
+        "keywords": ["backtest", "drawdown", "profit factor", "equity", "win rate", "trade report"],
+        "agentId": "backtest_analyst",
+        "targetPropId": "left_analytics_console",
+        "reportType": "backtest_report",
+        "modelTier": "specialist_balanced"
+      },
+      {
+        "id": "optimization_review",
+        "priority": 80,
+        "keywords": ["optimize", "optimization", "parameter", "overfit", "walk forward"],
+        "agentId": "optimization_agent",
+        "targetPropId": "left_analytics_console",
+        "reportType": "optimization_report",
+        "modelTier": "specialist_balanced"
+      },
+      {
+        "id": "ea_build",
+        "priority": 70,
+        "keywords": ["ea", "mt4", "mt5", "mql4", "mql5", "indicator", "compile"],
+        "agentId": "ea_developer",
+        "targetPropId": "terminal_workstation",
+        "reportType": "code_change_report",
+        "modelTier": "specialist_balanced"
+      },
+      {
+        "id": "vps_status",
+        "priority": 70,
+        "keywords": ["vps", "latency", "uptime", "cpu", "ram", "disk", "terminal status"],
+        "agentId": "vps_watch",
+        "targetPropId": "right_server_racks",
+        "reportType": "vps_report",
+        "modelTier": "specialist_fast"
+      },
+      {
+        "id": "auto_trading_status",
+        "priority": 75,
+        "keywords": ["auto trade", "auto trading", "ai trader", "ea status", "position", "signal"],
+        "agentId": "vps_watch",
+        "targetPropId": "left_signal_cube",
+        "reportType": "auto_trading_status_report",
+        "modelTier": "specialist_fast"
+      },
+      {
+        "id": "telegram_draft",
+        "priority": 70,
+        "keywords": ["telegram", "alert", "notification", "n8n", "automation"],
+        "agentId": "telegram_ops",
+        "targetPropId": "right_tool_console",
+        "reportType": "telegram_tool_report",
+        "modelTier": "specialist_fast"
+      },
+      {
+        "id": "codex_mcp_status",
+        "priority": 70,
+        "keywords": ["codex", "mcp", "plugin", "bridge", "runner", "cli"],
+        "agentId": "codex_mcp_operator",
+        "targetPropId": "codex_mcp_portal",
+        "reportType": "bridge_status_report",
+        "modelTier": "specialist_fast"
+      },
+      {
+        "id": "memory_recall",
+        "priority": 60,
+        "keywords": ["archive", "history", "memory", "old mission", "meeting transcript"],
+        "agentId": "mission_archivist",
+        "targetPropId": "left_server_racks",
+        "reportType": "archive_report",
+        "modelTier": "specialist_fast"
+      }
+    ]
+  },
+  "modelTiers": {
+    "manager_quality": {
+      "reasoningEffort": "high",
+      "model": "gpt-5.5",
+      "maxSeconds": 300,
+      "maxOutputChars": 16000,
+      "maxRunsPerHour": 6,
+      "use": "planning, delegation, cross-agent review, executive synthesis"
+    },
+    "risk_quality": {
+      "reasoningEffort": "high",
+      "model": "gpt-5.5",
+      "maxSeconds": 240,
+      "maxOutputChars": 12000,
+      "maxRunsPerHour": 10,
+      "use": "security, approval, live-trading and compliance review"
+    },
+    "specialist_balanced": {
+      "reasoningEffort": "medium",
+      "model": "gpt-5.5",
+      "maxSeconds": 180,
+      "maxOutputChars": 10000,
+      "maxRunsPerHour": 16,
+      "use": "EA, backtest, optimization and analytical specialist work"
+    },
+    "specialist_fast": {
+      "reasoningEffort": "low",
+      "model": "gpt-5.5",
+      "maxSeconds": 120,
+      "maxOutputChars": 7000,
+      "maxRunsPerHour": 24,
+      "use": "status, monitoring, archive search, alert drafts and tool checks"
+    }
+  },
+  "costRateGuard": {
+    "maxPromptChars": 8000,
+    "maxRequestBytes": 65536,
+    "hardTimeoutSeconds": { "min": 15, "max": 600 },
+    "hardOutputChars": 20000,
+    "maxConcurrentRealRuns": 1,
+    "managerDelegationsPerHour": 30,
+    "managerDelegationCooldownSeconds": 2,
+    "approvalTtlMinutes": 15,
+    "semaphoreBusyConsumesHourlyRate": false,
+    "codexLimitReachedSource": "official_sanitized_backend_quota_read_model_only",
+    "unavailableOrStaleQuotaIsNeverTreatedAsZero": true,
+    "logFields": ["missionId", "ownerAgentId", "toolId", "modelTier", "timeoutSeconds", "outputLimitChars", "durationMs", "status"]
+  },
+  "approvalGate": {
+    "frontendApprovedBooleanTrusted": false,
+    "approvalIsMissionBound": true,
+    "approvalIsSingleUse": true,
+    "frontendApprovalActor": "human_only",
+    "riskGuardApprovalSource": "backend_deterministic_policy_v1",
+    "riskGuardReview": {
+      "ruleVersion": "risk-guard-v1",
+      "trigger": "after_explicit_human_approval_for_required_high_risk_missions",
+      "implementedToolAllowlist": ["codex_cli_task"],
+      "blockedIntentKeywords": ["live trading", "live order", "send telegram", "delete", "deploy", "publish external", "spend credit", "restart vps"],
+      "disabledOrUnimplementedAdapters": "reject_fail_closed",
+      "decisionBinding": "mission_payload_digest",
+      "frontendMayClaimRiskGuardActor": false
+    },
+    "missionDigestRecheckedOnApproveAndExecute": true,
+    "missionDigestFields": ["owner", "toolId", "targetId", "detail", "modelTier", "budget", "risk", "reportType"],
+    "mediumRiskRequiredActors": ["human"],
+    "highRiskRequiredActors": ["human", "risk_guard"],
+    "approveEndpoint": "POST /api/missions/:id/approval",
+    "executeEndpoint": "POST /api/missions/:id/execute",
+    "rejectDecision": "rejected",
+    "liveTradingDefault": "disabled"
+  },
+  "reportAggregation": {
+    "specialistsReturnStructuredReports": true,
+    "managerSummaryReportType": "executive_summary",
+    "managerSummaryTargetPropId": "mission_strategy_table",
+    "routeByLinkedPropBeforeKeywords": true,
+    "archivePreservesPreviousStatus": true,
+    "archivedChildCountsAsSuccessOnlyWhenArchivedFromCompleted": true,
+    "managerFinalReportUpdateMode": "stable_id_regenerated_from_current_child_outcomes"
+  },
+  "capabilityRegistry": {
+    "endpoint": "GET /api/capabilities",
+    "source": "contracts/tools/tool-permission-contract.json",
+    "frontendSafeFields": ["id", "label", "defaultMode", "risk", "approvalRequired", "allowedAgents", "modelTier", "linkedPropIds", "adapterStatus", "realExecutionAvailable", "autoRunnable"],
+    "runtimeOverrides": ["codex_status", "codex_cli_smoke", "codex_cli_task", "mcp_tool_run"],
+    "unknownToolDefault": "deny",
+    "propReportsIncludeFilteredCapabilities": true
+  }
+}

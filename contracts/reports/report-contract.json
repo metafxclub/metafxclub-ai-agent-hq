@@ -1,0 +1,52 @@
+{
+  "version": "report-contract-v002",
+  "purpose": "Standard output shapes for every agent, prop popup, mission, bridge check, and memory card.",
+  "base_report_schema": {
+    "id": "report-{timestamp}",
+    "type": "executive_summary|mission_plan|code_change_report|backtest_report|optimization_report|backtest_optimization_report|vps_report|telegram_report|telegram_tool_report|risk_review|bridge_status_report|memory_recall_packet|archive_report|auto_trading_status_report|ops_overview_report|prop_report",
+    "title": "short title",
+    "summary": "dashboard-ready summary",
+    "ownerAgentId": "agent id",
+    "linkedMissionId": "mission id or null",
+    "linkedPropId": "prop id or null",
+    "status": "draft|ready|needs_approval|blocked|published|archived",
+    "findings": ["bullet text"],
+    "metrics": {},
+    "risks": ["risk text"],
+    "nextActions": ["action text"],
+    "artifacts": ["project-relative paths"],
+    "safety": {
+      "containsSecret": false,
+      "secretRedacted": false,
+      "approvalRequired": false,
+      "publicShareable": false
+    },
+    "createdAt": "ISO-8601"
+  },
+  "report_targets": {
+    "executive_summary": ["ceo", "mission_strategy_table"],
+    "mission_plan": ["manager", "mission_strategy_table"],
+    "code_change_report": ["ea_developer", "terminal_workstation"],
+    "backtest_report": ["backtest_analyst", "left_analytics_console"],
+    "optimization_report": ["optimization_agent", "left_analytics_console"],
+    "vps_report": ["vps_watch", "right_server_racks"],
+    "telegram_report": ["telegram_ops", "right_tool_console"],
+    "telegram_tool_report": ["telegram_ops", "right_tool_console"],
+    "risk_review": ["risk_guard", "left_audit_crystals", "right_status_crystals"],
+    "bridge_status_report": ["codex_mcp_operator", "codex_mcp_portal"],
+    "memory_recall_packet": ["mission_archivist", "left_server_racks"],
+    "archive_report": ["mission_archivist", "left_server_racks"],
+    "backtest_optimization_report": ["backtest_analyst", "optimization_agent", "left_analytics_console"],
+    "auto_trading_status_report": ["vps_watch", "risk_guard", "left_signal_cube"],
+    "ops_overview_report": ["manager", "right_status_crystals"]
+  },
+  "storage": {
+    "runtime_reports": "./data/runtime/reports/",
+    "durable_reports": "./data/memory/reports/",
+    "artifacts": "./data/memory/artifacts/"
+  },
+  "security": [
+    "Do not store secrets, tokens, cookies, auth files, credentials, or live account details.",
+    "Reports that mention real trading, public Telegram, VPS restart, deploy, or paid API usage must include an approval note."
+  ]
+}

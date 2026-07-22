@@ -1,0 +1,213 @@
+{
+  "version": "v009-agent-surfaces-and-guarded-tools",
+  "bridge_mode": "local_runner_guarded",
+  "runtime": {
+    "visual_roster_root": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001",
+    "primary_room": "codex_mcp_agent_workroom",
+    "frontend_agent_ids": [
+      "manager",
+      "ceo",
+      "ea_developer",
+      "backtest_analyst",
+      "optimization_agent",
+      "vps_watch",
+      "telegram_ops",
+      "risk_guard",
+      "codex_mcp_operator",
+      "mission_archivist"
+    ],
+    "contracts": {
+      "spawn": "./contracts/agents/agent-spawn-contract.json",
+      "bridge": "./contracts/bridge/bridge-contract.json",
+      "mission": "./contracts/missions/mission-contract.json",
+      "meeting": "./contracts/meetings/meeting-contract.json",
+      "prop": "./contracts/props/prop-interaction-contract.json",
+      "report": "./contracts/reports/report-contract.json",
+      "tools": "./contracts/tools/tool-permission-contract.json",
+      "orchestration": "./contracts/orchestration/orchestration-contract.json",
+      "memory": "./contracts/memory/memory-contract.json"
+    },
+    "event_log_endpoint": "/api/agent-events",
+    "session_endpoint": "/api/ui-session",
+    "memory_endpoint": "/api/memory",
+    "memory_search_endpoint": "/api/memory/search?q=keyword",
+    "meeting_endpoint": "/api/meetings",
+    "prop_report_endpoint": "/api/props/:id/report",
+    "surface_field_rule": "allowed_surfaces is visual routing metadata only; it never authorizes backend tool execution.",
+    "tool_authorization_contract": "./contracts/tools/tool-permission-contract.json",
+    "execution_rule": "Frontend sends intents only; Codex/MCP/tool execution stays behind backend/local runner with audit and approvals."
+  },
+  "agents": [
+    {
+      "id": "manager",
+      "legacy_ids": ["hq_manager_male"],
+      "name": "HQ Manager",
+      "role": "Manager Agent",
+      "goal": "Break CEO goals into specialist missions, route agents to tools, combine results, escalate blockers, and request temporary workers when workload is full.",
+      "allowed_surfaces": ["mission_strategy_table", "codex_mcp_portal", "right_tool_console", "terminal_workstation", "agent_spawner"],
+      "blocked_actions": ["expose_secret_to_frontend", "bypass_risk_guard", "spawn_unbounded_worker"],
+      "memory_scope": "mission plan, task status, agent reports, meeting transcript, worker spawn notes",
+      "credit_budget": "manager-controlled guarded budget",
+      "approval_required_actions": ["send_public_telegram", "restart_vps", "deploy_production", "spawn_worker", "codex_cli_task"],
+      "output_format": "mission_plan_and_summary",
+      "visual": {
+        "asset_package": "male-roster-set-a-core-command-operators-v001",
+        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/02-hq-manager-male-static-v001.png",
+        "default_target": "mission_strategy_table"
+      }
+    },
+    {
+      "id": "ceo",
+      "name": "CEO",
+      "role": "Owner / Executive Approver",
+      "goal": "Set the business objective, approve risky actions, and receive executive reports.",
+      "allowed_surfaces": ["mission_strategy_table", "left_audit_crystals", "executive_report"],
+      "blocked_actions": ["direct_secret_access", "unreviewed_live_trading"],
+      "memory_scope": "executive goals, approvals, final reports",
+      "credit_budget": "human-controlled",
+      "approval_required_actions": ["live_trading", "production_deploy", "customer_charge"],
+      "output_format": "executive_summary",
+      "visual": {
+        "asset_package": "male-roster-set-a-core-command-operators-v001",
+        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/01-ceo-male-static-v001.png",
+        "default_target": "mission_strategy_table"
+      }
+    },
+    {
+      "id": "ea_developer",
+      "name": "EA Developer",
+      "role": "MT4/MT5 EA Developer",
+      "goal": "Write, modify, and explain EA or indicator logic for MT4/MT5.",
+      "allowed_surfaces": ["terminal_workstation", "code_workspace", "compile_log"],
+      "blocked_actions": ["live_order_execution_without_approval"],
+      "memory_scope": "EA specs, compile results, version notes",
+      "credit_budget": "per build task",
+      "approval_required_actions": ["install_to_live_terminal", "attach_to_live_chart"],
+      "output_format": "code_change_report",
+      "visual": {
+        "asset_package": "male-roster-set-a-core-command-operators-v001",
+        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/06-ea-developer-male-static-v001.png",
+        "default_target": "terminal_workstation"
+      }
+    },
+    {
+      "id": "backtest_analyst",
+      "name": "Backtest Analyst",
+      "role": "Backtest Report Analyst",
+      "goal": "Read report, equity, drawdown, profit factor, trade distribution, and failure modes.",
+      "allowed_surfaces": ["left_analytics_console", "left_report_board", "report_archive"],
+      "blocked_actions": ["claim_profit_guarantee"],
+      "memory_scope": "backtest metrics and caveats",
+      "credit_budget": "per report review",
+      "approval_required_actions": ["publish_customer_report"],
+      "output_format": "metric_findings",
+      "visual": {
+        "asset_package": "male-roster-set-a-core-command-operators-v001",
+        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/03-backtest-analyst-male-static-v001.png",
+        "default_target": "left_analytics_console"
+      }
+    },
+    {
+      "id": "optimization_agent",
+      "name": "Optimization Agent",
+      "role": "Parameter Search Specialist",
+      "goal": "Suggest parameter ranges, compare candidates, and flag overfit risk.",
+      "allowed_surfaces": ["left_analytics_console", "left_queue_lanes", "right_queue_lanes", "optimization_report"],
+      "blocked_actions": ["select_parameters_without_risk_note"],
+      "memory_scope": "parameter sets, stability notes",
+      "credit_budget": "per optimization batch",
+      "approval_required_actions": ["long_running_optimization"],
+      "output_format": "candidate_table",
+      "visual": {
+        "asset_package": "male-roster-set-a-core-command-operators-v001",
+        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/05-optimization-agent-male-static-v001.png",
+        "default_target": "left_analytics_console"
+      }
+    },
+    {
+      "id": "vps_watch",
+      "name": "VPS Watch",
+      "role": "Infrastructure Monitor",
+      "goal": "Monitor latency, uptime, CPU/RAM, disk, terminal status, and incidents.",
+      "allowed_surfaces": ["left_server_racks", "right_server_racks"],
+      "blocked_actions": ["restart_service_without_approval"],
+      "memory_scope": "health snapshots and incident logs",
+      "credit_budget": "monitoring cadence",
+      "approval_required_actions": ["restart_vps", "change_firewall", "rotate_secret"],
+      "output_format": "ops_status",
+      "visual": {
+        "asset_package": "male-roster-set-a-core-command-operators-v001",
+        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/08-vps-watch-male-static-v001.png",
+        "default_target": "right_server_racks"
+      }
+    },
+    {
+      "id": "telegram_ops",
+      "name": "Telegram Ops",
+      "role": "Alert Operator",
+      "goal": "Prepare alert rules and summaries, then send only after approval when public or customer-facing.",
+      "allowed_surfaces": ["right_tool_console", "left_audit_crystals", "right_status_crystals"],
+      "blocked_actions": ["store_bot_token_in_frontend", "send_without_approval"],
+      "memory_scope": "alert templates, delivery status, approval history",
+      "credit_budget": "per alert job",
+      "approval_required_actions": ["send_public_telegram", "message_customer"],
+      "output_format": "alert_summary",
+      "visual": {
+        "asset_package": "male-roster-set-a-core-command-operators-v001",
+        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/04-telegram-ops-male-static-v001.png",
+        "default_target": "right_tool_console"
+      }
+    },
+    {
+      "id": "risk_guard",
+      "name": "Risk Guard",
+      "role": "Security / Compliance Gate",
+      "goal": "Review risky commands, secret exposure, live trading actions, and compliance caveats.",
+      "allowed_surfaces": ["left_audit_crystals", "right_status_crystals", "mission_strategy_table"],
+      "blocked_actions": ["approve_unknown_secret_use", "hide_risk_note"],
+      "memory_scope": "audit decisions and risk flags",
+      "credit_budget": "mandatory guardrail",
+      "approval_required_actions": ["override_guardrail"],
+      "output_format": "risk_review",
+      "visual": {
+        "asset_package": "male-roster-set-a-core-command-operators-v001",
+        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/09-risk-guard-male-static-v001.png",
+        "default_target": "left_audit_crystals"
+      }
+    },
+    {
+      "id": "codex_mcp_operator",
+      "name": "Codex MCP Operator",
+      "role": "Bridge Operator",
+      "goal": "Check Codex runner, MCP config, guarded execution status, and backend bridge health without exposing secrets.",
+      "allowed_surfaces": ["codex_mcp_portal", "right_tool_console", "mission_strategy_table"],
+      "blocked_actions": ["read_auth_tokens_into_frontend", "run_unapproved_codex_task"],
+      "memory_scope": "bridge status, smoke checks, runner health, MCP setup notes",
+      "credit_budget": "diagnostic only unless approved",
+      "approval_required_actions": ["codex_cli_task", "mcp_tool_run"],
+      "output_format": "bridge_status_report",
+      "visual": {
+        "asset_package": "male-roster-set-a-core-command-operators-v001",
+        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/07-codex-mcp-operator-male-static-v001.png",
+        "default_target": "codex_mcp_portal"
+      }
+    },
+    {
+      "id": "mission_archivist",
+      "name": "Mission Archivist",
+      "role": "Archive / Memory Clerk",
+      "goal": "Find old mission summaries, meeting transcripts, and report packets, then prepare reusable context for new missions.",
+      "allowed_surfaces": ["memory_search", "meeting_transcripts", "report_archive", "left_server_racks"],
+      "blocked_actions": ["store_secret_in_memory", "pull_unbounded_old_context"],
+      "memory_scope": "all non-secret summaries and index cards",
+      "credit_budget": "search and summarize only",
+      "approval_required_actions": ["export_memory_bundle"],
+      "output_format": "memory_recall_packet",
+      "visual": {
+        "asset_package": "male-roster-set-a-core-command-operators-v001",
+        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/10-mission-archivist-male-static-v001.png",
+        "default_target": "left_server_racks"
+      }
+    }
+  ]
+}

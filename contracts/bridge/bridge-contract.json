@@ -1,0 +1,98 @@
+{
+  "version": "bridge-contract-v006",
+  "purpose": "Local backend boundary for Codex CLI, MCP, filesystem, VPS, MT4/MT5, Telegram, and other real tools.",
+  "base_url": "http://127.0.0.1:4186",
+  "principles": [
+    "Frontend sends intents only.",
+    "Secrets, tokens, cookies, auth files, and credentials stay outside the frontend.",
+    "Real Codex/MCP/tool execution requires backend audit and approval gates.",
+    "Dangerous actions default to blocked or waiting_approval."
+  ],
+  "endpoints": {
+    "GET /api/health": "Fast side-effect-free Bridge and critical UI readiness check. It does not invoke Codex CLI or MCP.",
+    "GET /api/bridge/status": "Detect local runner, Codex auth state, MCP config, and approval policy.",
+    "GET /api/capabilities": "Read the sanitized, contract-owned capability registry and distinguish ready, approval-gated, unimplemented, and disabled adapters.",
+    "GET /api/codex/rate-limits": "Read a cached, frontend-safe Codex account quota snapshot from the authenticated local Codex app-server. No auth, account, plan, credit, path, or raw error data is exposed.",
+    "POST /api/bridge/run": "Create a guarded backend mission; approval-required tools are never executed in this request.",
+    "POST /api/manager/delegate": "Create a Manager parent plan and bounded queue-only specialist subtasks.",
+    "GET /api/missions": "Read active mission queue.",
+    "POST /api/missions": "Create a mission without direct tool execution.",
+    "POST /api/missions/:id/approval": "Record the local human decision against the complete execution packet; required high-risk review is then issued only by backend Risk Guard policy.",
+    "POST /api/missions/:id/execute": "Execute only when stored mission approval is complete and unused, and the JSON body confirms the exact mission id.",
+    "POST /api/missions/:id/archive": "Archive a closed mission.",
+    "GET /api/agents": "Read agent contract.",
+    "GET /api/agent-events": "Read visual office event log.",
+    "POST /api/agent-events": "Append agent speech, route, report, or meeting event.",
+    "GET /api/props/:id/report": "Merge the prop contract, strictly routed missions/reports, memory, events, relevant meetings, sanitized Bridge state, and filtered capabilities into one dashboard read model.",
+    "GET /api/memory": "Read memory index.",
+    "GET /api/memory/search?q=keyword": "Search durable non-secret memory cards.",
+    "POST /api/memory/items": "Upsert memory card.",
+    "GET /api/meetings": "Read agent-to-agent meeting transcript records.",
+    "POST /api/meetings": "Create meeting record.",
+    "POST /api/meetings/turn": "Append one agent-to-agent meeting turn.",
+    "GET /api/tools": "Read the sanitized tool permission matrix.",
+    "GET /api/orchestration": "Read Manager delegation, model tier, budget, and approval policy.",
+    "GET /api/reports": "Read structured runtime report cards."
+  },
+  "approval_required_actions": [
+    "codex_cli_task",
+    "mcp_tool_run",
+    "live_trading",
+    "send_telegram",
+    "delete_files",
+    "publish_external",
+    "spend_credit",
+    "restart_vps",
+    "production_deploy",
+    "spawn_worker"
+  ],
+  "static_serving": {
+    "allowed": ["/", "/index.html", "/frontend/*", "/contracts/*"],
+    "denied": ["/data/*", "/backend/*", "/runner/*", "/scripts/*", "/assets-source/*", "/docs/*"]
+  },
+  "runner_mode": {
+    "default": "read-only diagnostic/report mode",
+    "write_enabled_requires": ["explicit human approval", "Risk Guard note", "mission audit id"],
+    "codex_cli": {
+      "script": "./runner/codex_cli_runner.py",
+      "sandbox": "read-only by default",
+      "artifacts": "./data/runtime/codex-runs/"
+    }
+  },
+  "codex_rate_limit_telemetry": {
+    "ownerAgentId": "codex_mcp_operator",
+    "source": "account/rateLimits/read through the authenticated local Codex app-server",
+    "frontendFields": [
+      "status",
+      "missionId",
+      "ownerAgentId",
+      "usedPercent",
+      "remainingPercent",
+      "windowDurationMinutes",
+      "resetsAt",
+      "limitReached",
+      "checkedAt",
+      "stale"
+    ],
+    "forbiddenFrontendFields": [
+      "token",
+      "cookie",
+      "authorization",
+      "email",
+      "account",
+      "planType",
+      "credits",
+      "balance",
+      "codexHome",
+      "binaryPath",
+      "rawError"
+    ],
+    "cache": {
+      "storage": "backend memory only",
+      "ttlSeconds": 75,
+      "maxStaleSeconds": 900,
+      "clearOnAuthRequired": true
+    },
+    "executionPolicy": "Read-only telemetry. It reports the official quota and never bypasses, resets, or evades a Codex rate limit. Official limitReached=true blocks a new guarded Codex run; unavailable data is never converted to fake zero usage."
+  }
+}

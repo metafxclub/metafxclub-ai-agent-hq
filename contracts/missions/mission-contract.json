@@ -1,0 +1,75 @@
+{
+  "version": "mission-contract-v004",
+  "purpose": "Shared mission shape for visual work, backend queueing, prop reports, and memory summaries.",
+  "schema": {
+    "id": "mission-{timestamp}",
+    "title": "short mission title",
+    "detail": "human-readable mission instruction",
+    "owner": "agent id",
+    "requester": "agent id or human",
+    "parentMissionId": "parent mission id or null",
+    "subtaskIds": ["child mission ids"],
+    "targetId": "prop id, room id, or agent id",
+    "toolId": "manager_mission|codex_cli_task|codex_status|codex_cli_smoke|future tool id",
+    "status": "queued|waiting_approval|running|blocked|completed|failed|archived",
+    "risk": "low|medium|high",
+    "modelTier": "manager_quality|risk_quality|specialist_balanced|specialist_fast",
+    "reportType": "report contract type",
+    "idempotencyKey": "caller supplied opaque key or null",
+    "budget": {
+      "timeoutSeconds": 120,
+      "outputLimitChars": 7000,
+      "maxRuns": 1
+    },
+    "approval": {
+      "required": false,
+      "id": "approval id or null",
+      "state": "not_required|pending|approved|rejected|consumed|expired|invalidated",
+      "requiredActors": ["human"],
+      "decisions": [],
+      "expiresAt": null,
+      "consumedAt": null,
+      "payloadDigest": null
+    },
+    "riskGuardReview": {
+      "decision": "approved|rejected or omitted",
+      "reason": "backend policy reason code",
+      "ruleVersion": "backend Risk Guard rule version",
+      "payloadDigest": "same bound digest as approval",
+      "reviewedAt": "ISO-8601"
+    },
+    "result": "dashboard-ready summary",
+    "artifactPath": "project-relative artifact path",
+    "reportIds": ["report ids"],
+    "createdAt": "ISO-8601",
+    "updatedAt": "ISO-8601",
+    "completedAt": "ISO-8601 or null",
+    "archivedFromStatus": "previous mission status or null",
+    "archivedSuccessful": "true only when archivedFromStatus was completed"
+  },
+  "status_rules": {
+    "queued": "Mission exists but no worker is actively running it.",
+    "waiting_approval": "Mission needs human or Risk Guard approval before real execution.",
+    "running": "Backend worker or simulated office action is active.",
+    "blocked": "Worker cannot proceed and must report why.",
+    "completed": "Worker wrote result and optional memory/report card.",
+    "failed": "Backend runner returned an error or invalid output.",
+    "archived": "Mission was closed and summarized."
+  },
+  "execution_rules": {
+    "frontendReadModel": "GET /api/missions derives readyToExecute on the backend and never exposes payloadDigest.",
+    "twoStepGate": "Approval never runs a tool automatically. A second POST /api/missions/:id/execute is required.",
+    "exactConfirmation": "The execute body must contain confirmMissionId equal to the URL mission id.",
+    "completePacketDigest": "Approval binds owner, toolId, targetId, detail, modelTier, budget, risk, and reportType; mutation invalidates approval.",
+    "backendRiskGuard": "High-risk review is backend-owned and digest-bound; the frontend may submit only the human decision.",
+    "singleUse": "The approval becomes consumed before the guarded runner starts.",
+    "restartRecovery": "A consumed running mission found during Bridge startup becomes failed/interrupted without automatic retry.",
+    "archiveOutcome": "Archive preserves archivedFromStatus; only a mission archived from completed counts as successful Manager aggregation."
+  },
+  "storage": {
+    "active_queue": "./data/runtime/missions.json",
+    "archive": "Archived records stay in ./data/runtime/missions.json with status=archived; they are not deleted or truncated.",
+    "future_durable_archive": "SQLite WAL or ./data/runtime/archive/missions/ after a reviewed migration",
+    "summaries": "./data/memory/summaries/"
+  }
+}

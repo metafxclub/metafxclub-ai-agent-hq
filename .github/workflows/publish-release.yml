@@ -1,0 +1,72 @@
+name: Publish student release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - VERSION
+      - .github/workflows/publish-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - name: Check out verified source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify safe runtime
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -p "test_*.py" -v
+          node --check frontend/src/app/main.js
+
+      - name: Build release package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content -LiteralPath 'VERSION' -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "VERSION must use semantic version format, for example 0.1.0"
+          }
+
+          $tag = "v$version"
+          $archive = "Metafxclub-AI-Agent-HQ-$tag-Windows.zip"
+          $checksum = "$archive.sha256"
+
+          if (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null) {
+            Write-Host "Release $tag already exists. No duplicate release was created."
+            exit 0
+          }
+
+          git archive --format=zip --prefix="Metafxclub-AI-Agent-HQ-$tag/" --output=$archive HEAD
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $archive" | Set-Content -LiteralPath $checksum -Encoding ascii
+
+          $notes = @'
+          ชุดติดตั้ง Metafxclub AI Agent HQ สำหรับ Windows
+
+          วิธีติดตั้ง:
+          1. ดาวน์โหลดไฟล์ ZIP และแตกไฟล์
+          2. ดับเบิลคลิก 1-INSTALL-HQ.bat
+          3. เปิดโปรแกรมจาก Shortcut ที่ตัวติดตั้งสร้างให้
+
+          ระบบเริ่มต้นในโหมด Demo/Read-only และไม่รวม Token, Password, Log, Memory หรือข้อมูลส่วนตัวจากเครื่องผู้พัฒนา
+          '@
+
+          gh release create $tag $archive $checksum `
+            --repo $env:GITHUB_REPOSITORY `
+            --target $env:GITHUB_SHA `
+            --title "Metafxclub AI Agent HQ $tag" `
+            --notes $notes
+        env:
+          GH_TOKEN: ${{ github.token }}

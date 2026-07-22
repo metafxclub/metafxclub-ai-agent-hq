@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Metafxclub AI Pixel HQ - ห้องทำงาน Agent Codex/MCP</title>
+  <link rel="icon" href="data:," />
+  <base href="../" />
+  <link rel="stylesheet" href="./frontend/src/app/styles.css?v=20260715-thai-task-detail-v003" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Metafxclub AI Pixel HQ</p>
+          <h1>ห้องทำงาน Agent Codex/MCP</h1>
+        </div>
+        <div class="topbar-actions">
+          <button class="icon-button" id="fitModeButton" type="button" title="สลับโหมดพอดีจอ" aria-label="สลับโหมดพอดีจอ">
+            <span aria-hidden="true">[]</span>
+          </button>
+          <button class="text-button" id="agentRouteButton" type="button">เดินตามเส้นทาง</button>
+          <button class="text-button" id="agentMeetingButton" type="button">โต๊ะวางแผน</button>
+          <button class="text-button" id="resetButton" type="button">รีเซ็ตมุมมอง</button>
+        </div>
+      </header>
+
+      <aside
+        class="codex-rate-tab"
+        id="codexRateWidget"
+        data-state="loading"
+        aria-label="โควตาบัญชี Codex"
+        aria-live="polite"
+      >
+        <div class="codex-rate-heading">
+          <div>
+            <p class="eyebrow">โควตาการใช้งาน Codex</p>
+            <strong id="codexRateSummary">กำลังตรวจสอบโควตา...</strong>
+          </div>
+          <button
+            class="codex-rate-refresh"
+            id="codexRateRefreshButton"
+            type="button"
+            aria-label="ตรวจสอบโควตา Codex อีกครั้ง"
+            title="ตรวจสอบโควตา Codex อีกครั้ง"
+          >
+            ↻
+          </button>
+        </div>
+        <div
+          class="codex-rate-track"
+          id="codexRateProgressTrack"
+          role="progressbar"
+          aria-label="โควตา Codex ที่ใช้แล้ว"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuetext="กำลังตรวจสอบ"
+        >
+          <span class="codex-rate-progress" id="codexRateProgress"></span>
+        </div>
+        <div class="codex-rate-meta">
+          <span id="codexRateReset">รอข้อมูลเวลารีเซ็ต</span>
+          <span id="codexRateFreshness">กำลังตรวจสอบ</span>
+        </div>
+        <div class="codex-rate-secondary" id="codexRateSecondary" hidden>
+          <div class="codex-rate-secondary-copy">
+            <span id="codexRateSecondaryLabel">รอบโควตารอง</span>
+            <strong id="codexRateSecondarySummary">--%</strong>
+          </div>
+          <div
+            class="codex-rate-track compact"
+            id="codexRateSecondaryTrack"
+            role="progressbar"
+            aria-label="โควตารองของ Codex ที่ใช้แล้ว"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuetext="ไม่มีข้อมูล"
+          >
+            <span class="codex-rate-progress" id="codexRateSecondaryProgress"></span>
+          </div>
+        </div>
+      </aside>
+
+      <aside class="layer-panel" aria-label="ตัวควบคุมเลเยอร์">
+        <div class="panel-heading">
+          <p class="eyebrow">เลเยอร์</p>
+          <strong>องค์ประกอบห้อง</strong>
+        </div>
+        <div id="layerList" class="layer-list"></div>
+      </aside>
+
+      <section class="stage-wrap" aria-label="ฉากห้องแบบโต้ตอบ">
+        <div class="room-stage layered" id="roomStage">
+          <img
+            id="roomImage"
+            class="room-image"
+            src="./frontend/public/assets/maps/command-room/metafx-aihq-room-codex-mcp-agent-workroom-wide-symmetric-v002.png"
+            alt="พื้นหลังห้องทำงาน Agent Codex/MCP แบบมุมมองไอโซเมตริก"
+            draggable="false"
+          />
+          <div id="propLayer" class="prop-layer" aria-label="อุปกรณ์ภายในห้องที่กดได้"></div>
+          <svg id="pathLayer" class="path-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg>
+          <div id="agentLayer" class="agent-layer" aria-label="เลเยอร์ตัวละคร Agent ที่เดินได้"></div>
+          <div id="scanLayer" class="scan-layer" aria-hidden="true"></div>
+        </div>
+      </section>
+
+      <aside class="report-panel" id="reportPanel" aria-live="polite">
+        <div class="panel-heading">
+          <p class="eyebrow" id="selectedLayer">คอนโซล HQ</p>
+          <strong id="reportTitle">ศูนย์สั่งงาน Agent</strong>
+        </div>
+        <p id="reportSummary" class="report-summary">
+          กด Agent หรืออุปกรณ์ภายในห้องเพื่อเปิดหน้าสั่งงานและดูผลลัพธ์
+        </p>
+        <dl class="metric-grid" id="metricGrid"></dl>
+        <div class="mission-list" id="missionList"></div>
+        <div class="command-console" aria-label="หน้าสั่งงาน Agent ผู้จัดการ">
+          <div class="console-heading">
+            <div>
+              <p class="eyebrow">ทางลัดของผู้จัดการ</p>
+              <strong>ศูนย์ควบคุม Mission</strong>
+            </div>
+            <span class="bridge-chip" id="bridgeModeLabel">Bridge แบบตัวอย่าง</span>
+          </div>
+          <div class="bridge-dashboard" id="bridgeDashboard">
+            <div>
+              <span>ระบบหลังบ้าน</span>
+              <strong id="bridgeStatusText">กำลังตรวจสอบ</strong>
+            </div>
+            <div>
+              <span>Codex</span>
+              <strong id="codexStatusText">ไม่ทราบสถานะ</strong>
+            </div>
+            <div>
+              <span>MCP</span>
+              <strong id="mcpStatusText">ไม่ทราบสถานะ</strong>
+            </div>
+          </div>
+          <label class="command-input">
+            <span>คำสั่ง Mission สำหรับ Agent ผู้จัดการ</span>
+            <textarea id="managerCommandInput" rows="3" maxlength="4000" spellcheck="false">ตรวจสถานะ Bridge Codex/MCP และเตรียม Mission ถัดไปแบบปลอดภัย</textarea>
+          </label>
+          <div class="console-actions manager-shortcuts">
+            <button class="console-button" id="openAgentButton" type="button">เปิด Agent ผู้จัดการ</button>
+            <button class="console-button" id="openCeoButton" type="button">เปิด CEO</button>
+            <button class="console-button" id="openMissionTableButton" type="button">โต๊ะ Mission</button>
+            <button class="console-button" id="runCommandButton" type="button">กระจายงานเข้าคิว</button>
+            <button class="console-button" id="openBridgeButton" type="button">ตรวจสอบ Bridge</button>
+          </div>
+          <p class="console-note">สร้าง Task ให้ Agent ผู้เชี่ยวชาญจากหน้าพื้นที่ทำงานของ Agent ส่วนนี้ใช้วางแผนโดย Agent ผู้จัดการหรือ CEO และดูสถานะ Bridge แบบอ่านอย่างเดียว</p>
+          <div class="bridge-event-list" id="bridgeEventList"></div>
+          <p class="decision-log" id="decisionLog">Agent ผู้จัดการพร้อมรับงาน</p>
+        </div>
+      </aside>
+
+      <div class="game-modal-backdrop" id="gameModalBackdrop" aria-hidden="true"></div>
+      <section class="game-modal" id="gameModal" aria-modal="true" aria-hidden="true" role="dialog">
+        <button class="modal-close" id="modalCloseButton" type="button" aria-label="ปิดหน้าต่าง">x</button>
+        <div class="game-modal-body">
+          <aside class="modal-portrait-panel" id="modalPortraitPanel">
+            <div class="portrait-frame">
+              <img id="modalPortrait" alt="" draggable="false" />
+            </div>
+            <p class="modal-eyebrow" id="modalKind">Agent</p>
+            <h2 id="modalTitle">Agent ผู้จัดการ HQ</h2>
+            <p id="modalSubtitle">พร้อมรับคำสั่งครับ</p>
+            <div class="modal-status-grid" id="modalStatusGrid"></div>
+          </aside>
+          <div class="modal-content-panel">
+            <div class="dialogue-box">
+              <p class="speaker-name" id="modalSpeaker">Agent ผู้จัดการ HQ</p>
+              <p id="modalDialogue">สวัสดีครับ บอกเป้าหมายมาได้เลยครับ</p>
+            </div>
+            <div class="modal-tabs" id="modalTabs" role="tablist" aria-label="ส่วนต่าง ๆ ของพื้นที่ทำงาน">
+              <button type="button" class="modal-tab active" data-tab="chat" data-surfaces="agent">แชท</button>
+              <button type="button" class="modal-tab" data-tab="tasks" data-surfaces="agent">Task ของฉัน</button>
+              <button type="button" class="modal-tab" data-tab="dashboard" data-surfaces="dashboard">Dashboard</button>
+              <button type="button" class="modal-tab" data-tab="kanban" data-surfaces="kanban">Mission ทั้งหมด</button>
+            </div>
+            <div class="modal-tab-panel active" id="modalChatPanel" data-panel="chat" data-surfaces="agent">
+              <div class="chat-log" id="modalChatLog"></div>
+            </div>
+            <div class="modal-tab-panel" id="modalTasksPanel" data-panel="tasks" data-surfaces="agent">
+              <div class="task-board" id="modalTaskBoard"></div>
+            </div>
+            <div class="modal-tab-panel" id="modalDashboardPanel" data-panel="dashboard" data-surfaces="dashboard">
+              <div class="prop-dashboard-kpis" id="modalDashboardKpis"></div>
+              <div class="prop-dashboard-layout">
+                <section class="dashboard-section">
+                  <div class="section-heading">
+                    <span>งานปัจจุบัน</span>
+                    <small id="modalDashboardWorkCount">Mission 0 รายการ</small>
+                  </div>
+                  <div class="dashboard-list" id="modalDashboardWork"></div>
+                </section>
+                <section class="dashboard-section">
+                  <div class="section-heading">
+                    <span>รายงานและหลักฐาน</span>
+                    <small>ข้อมูลในเครื่องเท่านั้น</small>
+                  </div>
+                  <div class="dashboard-list" id="modalDashboardReports"></div>
+                </section>
+                <section class="dashboard-section dashboard-section-wide">
+                  <div class="section-heading">
+                    <span>สถานะและข้อควบคุม</span>
+                    <small id="modalDashboardFreshness">รอข้อมูลในเครื่อง</small>
+                  </div>
+                  <div class="dashboard-list dashboard-status-list" id="modalDashboardStatus"></div>
+                </section>
+              </div>
+              <div class="dashboard-navigation">
+                <button class="modal-action primary" id="modalDashboardOpenMissionTable" type="button">เปิดโต๊ะ Mission</button>
+                <button class="modal-action" id="modalDashboardOpenOwnerAgent" type="button">เปิด Agent เจ้าของงาน</button>
+              </div>
+            </div>
+            <div class="modal-tab-panel" id="modalKanbanPanel" data-panel="kanban" data-surfaces="kanban">
+              <div class="kanban-toolbar">
+                <label class="kanban-search">
+                  <span>ค้นหา Mission ทั้งหมด</span>
+                  <input id="modalKanbanSearch" type="search" maxlength="160" placeholder="Mission, เจ้าของ, อุปกรณ์ หรือเครื่องมือ..." />
+                </label>
+                <div class="kanban-toolbar-actions">
+                  <button class="modal-action" id="modalKanbanArchiveToggle" type="button" aria-pressed="false">คลัง (0)</button>
+                  <button class="modal-action" id="modalKanbanRefresh" type="button">รีเฟรชคิว</button>
+                </div>
+              </div>
+              <div class="kanban-layout">
+                <div class="kanban-board" id="modalKanbanBoard" aria-label="คอลัมน์สถานะ Mission ทั้งหมด"></div>
+              </div>
+            </div>
+            <div class="agent-composer" id="modalAgentComposer">
+              <label class="modal-input">
+                <span>แชทหรือสร้าง Task ให้ Agent นี้</span>
+                <textarea id="modalCommandInput" rows="3" maxlength="4000" spellcheck="false"></textarea>
+              </label>
+              <div class="modal-actions">
+                <button class="modal-action primary" id="modalSendButton" type="button">ส่งข้อความ</button>
+                <button class="modal-action" id="modalAssignButton" type="button">สร้าง Task</button>
+                <button class="modal-action manager-only-action" id="modalMeetingButton" type="button">เรียกประชุม</button>
+                <button class="modal-action manager-only-action" id="modalDelegateButton" type="button">กระจายงานเข้าคิว</button>
+              </div>
+              <p class="surface-note">หน้าเว็บเก็บบทสนทนาและส่งเฉพาะคำสั่งที่ต้องการ ส่วนเครื่องมือจริงทำงานผ่าน Local Runner ที่มีระบบตรวจสอบ</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <dialog class="task-detail-dialog" id="taskDetailDialog" aria-labelledby="modalKanbanDetailTitle">
+        <section class="kanban-detail task-detail-shell" id="modalKanbanDetail" aria-live="polite">
+          <div class="section-heading task-detail-heading">
+            <div>
+              <p class="modal-eyebrow">รายละเอียด Task</p>
+              <span id="modalKanbanDetailTitle">เลือก Mission</span>
+            </div>
+            <button class="detail-close" id="modalKanbanCloseDetail" type="button" aria-label="ปิดรายละเอียด Task">x</button>
+          </div>
+          <div class="kanban-detail-body" id="modalKanbanDetailBody">
+            เลือก Task เพื่อดูรายละเอียด ผู้รับผิดชอบ ความเสี่ยง ผลล่าสุด และขั้นตอนถัดไป
+          </div>
+          <div class="modal-actions kanban-detail-actions">
+            <button class="modal-action approval-only-action" id="modalKanbanApprove" type="button" hidden>อนุมัติคำสั่งโดยยังไม่รัน</button>
+            <button class="modal-action danger approval-only-action" id="modalKanbanReject" type="button" hidden>ปฏิเสธ Mission</button>
+            <label class="mission-execute-confirmation" id="modalKanbanExecuteConfirmation" hidden>
+              <span>ยืนยัน Mission ID ให้ตรงก่อนรัน</span>
+              <input id="modalKanbanExecuteMissionId" type="text" maxlength="160" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="พิมพ์ Mission ID ให้ตรง" />
+              <small id="modalKanbanExecuteStatus">การอนุมัติจะไม่เริ่มรันโดยอัตโนมัติ</small>
+            </label>
+            <button class="modal-action execute-only-action" id="modalKanbanExecute" type="button" hidden disabled>รัน Mission ที่อนุมัติแล้ว</button>
+            <button class="modal-action" id="modalKanbanOpenOwnerAgent" type="button">เปิด Agent เจ้าของงาน</button>
+            <button class="modal-action" id="modalKanbanOpenTargetProp" type="button">เปิด Dashboard เป้าหมาย</button>
+          </div>
+        </section>
+      </dialog>
+
+      <footer class="status-strip">
+        <span class="status-pill online" id="bridgeStatusPill">กำลังตรวจสอบ Bridge</span>
+        <span class="status-pill" id="hotspotCountPill">เลเยอร์อุปกรณ์</span>
+        <span class="status-pill">เชื่อมสัญญาระบบแล้ว</span>
+        <span class="status-pill">ระบบรันงาน Manager Exec v001</span>
+        <span class="status-pill">ระบบแสดงผลภาพ</span>
+        <span class="status-pill">Agent 10 บทบาท</span>
+        <span class="status-note">หน้าเว็บส่งเฉพาะคำสั่งที่ต้องการ ส่วนสิทธิ์ งบประมาณ การอนุมัติ และเครื่องมือจริงอยู่หลัง Local Runner</span>
+      </footer>
+    </main>
+
+    <aside class="boot-diagnostic" id="bootDiagnostic" data-level="starting" role="status" aria-live="polite">
+      <div class="boot-diagnostic-copy">
+        <span class="boot-diagnostic-dot" aria-hidden="true"></span>
+        <div>
+          <strong id="bootDiagnosticTitle">กำลังเริ่ม Visual Office</strong>
+          <p id="bootDiagnosticMessage">กำลังโหลดระบบหน้าเว็บในเครื่อง</p>
+          <code id="bootDiagnosticResource">frontend/src/app/main.js</code>
+        </div>
+      </div>
+      <div class="boot-diagnostic-actions">
+        <button id="bootRetryButton" type="button">ลองโหลดหน้าเว็บใหม่</button>
+        <button id="bootCheckBridgeButton" type="button">ตรวจสอบ Bridge</button>
+      </div>
+    </aside>
+
+    <noscript>
+      <div class="boot-noscript">ต้องเปิด JavaScript เพื่อแสดง AI Agent Visual Office</div>
+    </noscript>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const RUNTIME_BUILD_VERSION = "20260715-thai-task-detail-v003";
+      const EXPECTED_AGENT_COUNT = 10;
+      const RUNTIME_PATH = "./frontend/src/app/main.js";
+      const diagnostic = document.getElementById("bootDiagnostic");
+      const title = document.getElementById("bootDiagnosticTitle");
+      const message = document.getElementById("bootDiagnosticMessage");
+      const resource = document.getElementById("bootDiagnosticResource");
+      const retryButton = document.getElementById("bootRetryButton");
+      const checkBridgeButton = document.getElementById("bootCheckBridgeButton");
+      const failures = new Map();
+      let runtimeLoaded = false;
+      let watchdogTimer = null;
+      let readyHideTimer = null;
+
+      const safeText = (value, fallback = "ไม่ทราบทรัพยากร") => {
+        const normalized = String(value || fallback).replace(/\s+/g, " ").trim();
+        return normalized
+          .replace(/([?&](?:token|api[_-]?key|auth|cookie|password|secret)=)[^&\s]+/gi, "$1[ปกปิด]")
+          .replace(/\bbearer\s+[^\s]+/gi, "Bearer [ปกปิด]")
+          .slice(0, 280);
+      };
+
+      const showDiagnostic = ({ level, heading, detail, failedResource }) => {
+        window.clearTimeout(readyHideTimer);
+        diagnostic.hidden = false;
+        diagnostic.dataset.level = level;
+        title.textContent = safeText(heading, "การตรวจสอบ Visual Office");
+        message.textContent = safeText(detail, "กำลังรอสถานะหน้าเว็บ");
+        resource.textContent = safeText(failedResource, RUNTIME_PATH);
+      };
+
+      const reportFailure = ({ failedResource, detail, blocking = false }) => {
+        const key = safeText(failedResource, "ระบบหน้าเว็บ");
+        failures.set(key, {
+          failedResource: key,
+          detail: safeText(detail, "ไม่สามารถใช้งานทรัพยากรนี้ได้"),
+          blocking: Boolean(blocking),
+        });
+        const failure = failures.get(key);
+        showDiagnostic({
+          level: failure.blocking ? "error" : "warning",
+          heading: failure.blocking ? "Visual Office ต้องได้รับการตรวจสอบ" : "Visual Office กำลังทำงานในโหมดสำรอง",
+          detail: failure.detail,
+          failedResource: failure.failedResource,
+        });
+      };
+
+      const checkAgents = ({ final = false } = {}) => {
+        const agentCount = document.querySelectorAll("#agentLayer .agent-unit").length;
+        if (agentCount === EXPECTED_AGENT_COUNT) return true;
+        if (final) {
+          reportFailure({
+            failedResource: "#agentLayer .agent-unit",
+            detail: `ระบบเฝ้าระวังตอนเริ่มต้นพบ Agent ${agentCount}/${EXPECTED_AGENT_COUNT} ตัว โปรดลองโหลดหน้าเว็บใหม่หรือตรวจสอบ Bridge`,
+            blocking: true,
+          });
+        }
+        return false;
+      };
+
+      window.MetafxHqBoot = {
+        buildVersion: RUNTIME_BUILD_VERSION,
+        expectedAgentCount: EXPECTED_AGENT_COUNT,
+        reportFailure,
+        markRuntimeLoaded() {
+          runtimeLoaded = true;
+        },
+        markReady({ agentCount } = {}) {
+          window.clearTimeout(watchdogTimer);
+          const actualCount = Number.isFinite(agentCount)
+            ? agentCount
+            : document.querySelectorAll("#agentLayer .agent-unit").length;
+          if (actualCount !== EXPECTED_AGENT_COUNT) {
+            reportFailure({
+              failedResource: "#agentLayer .agent-unit",
+              detail: `หน้าเว็บรายงาน Agent ${actualCount}/${EXPECTED_AGENT_COUNT} ตัว`,
+              blocking: true,
+            });
+            return;
+          }
+          if (failures.size) {
+            const latestFailure = [...failures.values()].at(-1);
+            showDiagnostic({
+              level: latestFailure.blocking ? "error" : "warning",
+              heading: latestFailure.blocking ? "Visual Office ต้องได้รับการตรวจสอบ" : "Agent 10 ตัวพร้อมใช้งาน - กำลังใช้โหมดสำรอง",
+              detail: latestFailure.detail,
+              failedResource: latestFailure.failedResource,
+            });
+            return;
+          }
+          showDiagnostic({
+            level: "ready",
+            heading: "Visual Office พร้อมใช้งาน",
+            detail: `แสดง Agent สำเร็จ ${actualCount}/${EXPECTED_AGENT_COUNT} ตัว`,
+            failedResource: `build ${RUNTIME_BUILD_VERSION}`,
+          });
+          readyHideTimer = window.setTimeout(() => {
+            diagnostic.hidden = true;
+          }, 1200);
+        },
+        checkAgents,
+      };
+
+      retryButton.addEventListener("click", () => {
+        retryButton.disabled = true;
+        showDiagnostic({
+          level: "starting",
+          heading: "กำลังโหลด Visual Office ใหม่",
+          detail: "กำลังโหลดรุ่นหน้าเว็บที่เสถียรอีกครั้ง",
+          failedResource: `build ${RUNTIME_BUILD_VERSION}`,
+        });
+        window.location.reload();
+      });
+
+      checkBridgeButton.addEventListener("click", async () => {
+        checkBridgeButton.disabled = true;
+        showDiagnostic({
+          level: "starting",
+          heading: "กำลังตรวจสอบ Bridge ในเครื่อง",
+          detail: "กำลังขอสถานะพร้อมใช้งานของ Bridge แบบอ่านอย่างเดียว",
+          failedResource: "/api/health",
+        });
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), 4000);
+        try {
+          const response = await fetch("/api/health", {
+            cache: "no-store",
+            signal: controller.signal,
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          showDiagnostic({
+            level: "ready",
+            heading: "เชื่อมต่อ Bridge ได้แล้ว",
+            detail: "Bridge ในเครื่องตอบกลับการตรวจสอบสถานะแบบอ่านอย่างเดียวแล้ว",
+            failedResource: "/api/health",
+          });
+        } catch (error) {
+          showDiagnostic({
+            level: "error",
+            heading: "Bridge ออฟไลน์หรือเข้าถึงไม่ได้",
+            detail: error?.name === "AbortError" ? "หมดเวลารอการตรวจสอบ Bridge หลังจาก 4 วินาที" : safeText(error?.message, "ส่งคำขอไปยัง Bridge ไม่สำเร็จ"),
+            failedResource: "/api/health",
+          });
+        } finally {
+          window.clearTimeout(timeoutId);
+          checkBridgeButton.disabled = false;
+        }
+      });
+
+      window.addEventListener("error", (event) => {
+        const target = event.target;
+        const failedResource = target?.src || target?.href;
+        if (failedResource) {
+          reportFailure({
+            failedResource,
+            detail: "โหลดรูปภาพ ไฟล์รูปแบบหน้าเว็บ หรือสคริปต์ของหน้าเว็บไม่สำเร็จ",
+            blocking: target?.tagName === "SCRIPT",
+          });
+          return;
+        }
+        if (event.filename?.includes("main.js")) {
+          reportFailure({
+            failedResource: event.filename,
+            detail: event.message || "ระบบหน้าเว็บหยุดทำงานระหว่างเริ่มต้น",
+            blocking: true,
+          });
+        }
+      }, true);
+
+      const runtimeScript = document.createElement("script");
+      runtimeScript.async = false;
+      runtimeScript.dataset.build = RUNTIME_BUILD_VERSION;
+      runtimeScript.src = `${RUNTIME_PATH}?v=${encodeURIComponent(RUNTIME_BUILD_VERSION)}`;
+      runtimeScript.onload = () => {
+        window.MetafxHqBoot.markRuntimeLoaded();
+      };
+      runtimeScript.onerror = () => {
+        reportFailure({
+          failedResource: runtimeScript.src,
+          detail: "โหลดสคริปต์ของ Visual Office ไม่สำเร็จ โปรดตรวจสอบว่า Bridge ในเครื่องกำลังให้บริการโปรเจกต์นี้อยู่",
+          blocking: true,
+        });
+      };
+      document.body.appendChild(runtimeScript);
+
+      watchdogTimer = window.setTimeout(() => {
+        if (checkAgents()) {
+          window.MetafxHqBoot.markReady({ agentCount: EXPECTED_AGENT_COUNT });
+        } else if (!runtimeLoaded || !checkAgents()) {
+          checkAgents({ final: true });
+        }
+      }, 9000);
+    })();
+  </script>
+  </body>
+</html>

@@ -1,0 +1,542 @@
+{
+  "room": {
+    "id": "codex_mcp_agent_workroom",
+    "name": "Codex/MCP Agent Workroom",
+    "version": "v032-male-roster-guarded-navigation",
+    "image": "./assets/metafx-aihq-room-codex-mcp-agent-workroom-wide-symmetric-v002.png",
+    "nativeSize": {
+      "width": 1672,
+      "height": 941
+    },
+    "purpose": "Wide full-screen prototype room with user-supplied props registered to the original v002 crop positions.",
+    "productionNote": "v032 treats the user-supplied walkable mask plus blocker rectangles as the source of truth. Walk speed is controlled from frontend/src/app/main.js DEFAULT_WALK_SPEED so edits there apply immediately after cache refresh.",
+    "propSet": "./assets/custom-props-registered-v011/custom-props-registered-v011-manifest.json"
+  },
+  "navigation": {
+    "version": "walkable-mask-v001",
+    "walkableMask": "./assets/navigation/metafx-aihq-walkable-mask-user-v002.png",
+    "maskMode": "strict",
+    "blockerMode": "mask-and-blockers",
+    "maskAlphaThreshold": 96,
+    "agentFootprint": {
+      "xRadius": 0.45,
+      "yRadius": 0.55
+    },
+    "agentBlockerFootprint": {
+      "xRadius": 2.4,
+      "yBackRadius": 0.55,
+      "yFrontRadius": 0.8
+    },
+    "grid": {
+      "columns": 140,
+      "rows": 80
+    },
+    "blockers": [
+      {
+        "id": "codex_mcp_portal_collision",
+        "label": "Codex/MCP Portal body",
+        "type": "rect",
+        "x": 43.3,
+        "y": 0.0,
+        "w": 13.6,
+        "h": 34.0
+      },
+      {
+        "id": "left_server_racks_collision",
+        "label": "Left server racks",
+        "type": "rect",
+        "x": 26.0,
+        "y": 5.0,
+        "w": 17.0,
+        "h": 29.0
+      },
+      {
+        "id": "right_server_racks_collision",
+        "label": "Right server racks",
+        "type": "rect",
+        "x": 57.0,
+        "y": 5.0,
+        "w": 17.0,
+        "h": 29.0
+      },
+      {
+        "id": "left_analytics_console_collision",
+        "label": "Analytics Console footprint",
+        "type": "polygon",
+        "points": [
+          { "x": 0.0, "y": 30.0 },
+          { "x": 23.8, "y": 30.0 },
+          { "x": 25.8, "y": 45.0 },
+          { "x": 9.8, "y": 56.4 },
+          { "x": 0.0, "y": 52.0 }
+        ]
+      },
+      {
+        "id": "right_tool_console_collision",
+        "label": "Tool Runner Console footprint",
+        "type": "polygon",
+        "points": [
+          { "x": 74.2, "y": 30.0 },
+          { "x": 100.0, "y": 30.0 },
+          { "x": 100.0, "y": 52.4 },
+          { "x": 89.0, "y": 56.8 },
+          { "x": 74.2, "y": 45.2 }
+        ]
+      },
+      {
+        "id": "mission_strategy_table_collision",
+        "label": "Mission Strategy Table footprint",
+        "type": "polygon",
+        "points": [
+          { "x": 49.4, "y": 45.0 },
+          { "x": 61.4, "y": 52.6 },
+          { "x": 54.2, "y": 65.0 },
+          { "x": 38.8, "y": 57.6 }
+        ]
+      },
+      {
+        "id": "terminal_workstation_collision",
+        "label": "Terminal Workstation footprint",
+        "type": "polygon",
+        "points": [
+          { "x": 76.2, "y": 61.6 },
+          { "x": 88.0, "y": 61.2 },
+          { "x": 88.6, "y": 72.4 },
+          { "x": 76.4, "y": 74.2 }
+        ]
+      },
+      {
+        "id": "left_audit_crystals_collision",
+        "label": "Audit Crystal Nodes footprint",
+        "type": "rect",
+        "x": 0.0,
+        "y": 50.0,
+        "w": 11.4,
+        "h": 17.4
+      },
+      {
+        "id": "left_signal_cube_collision",
+        "label": "Left Signal Cube footprint",
+        "type": "rect",
+        "x": 16.8,
+        "y": 59.0,
+        "w": 3.9,
+        "h": 6.8
+      },
+      {
+        "id": "right_status_crystals_collision",
+        "label": "Status Crystal Nodes footprint",
+        "type": "rect",
+        "x": 90.0,
+        "y": 51.2,
+        "w": 8.7,
+        "h": 19.2
+      }
+    ]
+  },
+  "layers": [
+    {
+      "id": "background",
+      "name": "Background",
+      "description": "Dark void and wide castle shell",
+      "defaultVisible": true
+    },
+    {
+      "id": "floor",
+      "name": "Walkable Floor",
+      "description": "Open meeting floor and agent placement space",
+      "defaultVisible": true
+    },
+    {
+      "id": "walls_back",
+      "name": "Castle Walls",
+      "description": "Back wall, plaques, banners, side wall structure",
+      "defaultVisible": true
+    },
+    {
+      "id": "server_bridge",
+      "name": "Server Bridge",
+      "description": "Central portal and server rack infrastructure",
+      "defaultVisible": true
+    },
+    {
+      "id": "workstations",
+      "name": "Workstations",
+      "description": "Mission table, side consoles, tool runner panels",
+      "defaultVisible": true
+    },
+    {
+      "id": "fx_nodes",
+      "name": "Signal Nodes",
+      "description": "Crystals, queue lights, audit nodes and glow",
+      "defaultVisible": true
+    },
+    {
+      "id": "ui_overlay",
+      "name": "Registered Prop Layers",
+      "description": "Transparent PNG props registered to exact crop positions from the original background",
+      "defaultVisible": true
+    }
+  ],
+  "hotspots": [],
+  "defaultSelection": "codex_mcp_portal",
+  "props": [
+    {
+      "id": "codex_mcp_portal",
+      "layer": "server_bridge",
+      "label": "Codex/MCP Portal",
+      "status": "online",
+      "summary": "Registered v011 doorway aligned to the original portal crop; used for Codex/MCP bridge handoff.",
+      "metrics": {
+        "Runner": "Ready",
+        "Queue": "3 jobs",
+        "Approval": "On",
+        "Asset": "Registered v011"
+      },
+      "missions": [
+        {
+          "title": "Open Report",
+          "detail": "Click Codex/MCP Portal to inspect the related AI Agent Office report."
+        }
+      ],
+      "asset_id": "registered_codex_mcp_portal_v011",
+      "asset": "./assets/custom-props-registered-v011/metafx-aihq-registered-codex_mcp_portal-v011.png",
+      "size": [
+        204,
+        306
+      ],
+      "position": {
+        "x": 43.8995,
+        "y": 0.4251,
+        "w": 12.201,
+        "z": 80
+      },
+      "glow": "25, 190, 255",
+      "layerMode": "registered_exact_crop_v011"
+    },
+    {
+      "id": "left_server_racks",
+      "layer": "server_bridge",
+      "label": "Left Server Racks",
+      "status": "stable",
+      "summary": "Registered v011 server rack layer aligned to the original left rack crop.",
+      "metrics": {
+        "Asset": "Registered v011",
+        "Layer": "server_bridge",
+        "Placement": "Exact crop",
+        "Hover": "Glow"
+      },
+      "missions": [
+        {
+          "title": "Open Report",
+          "detail": "Click Left Server Racks to inspect the related AI Agent Office report."
+        }
+      ],
+      "asset_id": "registered_left_server_racks_v011",
+      "asset": "./assets/custom-props-registered-v011/metafx-aihq-registered-left_server_racks-v011.png",
+      "size": [
+        245,
+        250
+      ],
+      "position": {
+        "x": 27.1531,
+        "y": 6.1637,
+        "w": 14.6531,
+        "z": 72
+      },
+      "glow": "37, 215, 122",
+      "layerMode": "registered_exact_crop_v011"
+    },
+    {
+      "id": "right_server_racks",
+      "layer": "server_bridge",
+      "label": "Right Server Racks",
+      "status": "stable",
+      "summary": "Registered v011 server rack layer aligned to the original right rack crop.",
+      "metrics": {
+        "Asset": "Registered v011",
+        "Layer": "server_bridge",
+        "Placement": "Exact crop",
+        "Hover": "Glow"
+      },
+      "missions": [
+        {
+          "title": "Open Report",
+          "detail": "Click Right Server Racks to inspect the related AI Agent Office report."
+        }
+      ],
+      "asset_id": "registered_right_server_racks_v011",
+      "asset": "./assets/custom-props-registered-v011/metafx-aihq-registered-right_server_racks-v011.png",
+      "size": [
+        246,
+        250
+      ],
+      "position": {
+        "x": 58.134,
+        "y": 6.1637,
+        "w": 14.7129,
+        "z": 73
+      },
+      "glow": "37, 215, 122",
+      "layerMode": "registered_exact_crop_v011"
+    },
+    {
+      "id": "left_analytics_console",
+      "layer": "workstations",
+      "label": "Analytics Console",
+      "status": "monitoring",
+      "summary": "Registered v011 left-facing analytics console using the newly supplied correct-angle monitor asset.",
+      "metrics": {
+        "Side": "Left",
+        "Angle": "Corrected",
+        "Asset": "Registered v011",
+        "Mode": "Monitor"
+      },
+      "missions": [
+        {
+          "title": "Open Report",
+          "detail": "Click Analytics Console to inspect the related AI Agent Office report."
+        }
+      ],
+      "asset_id": "registered_left_analytics_console_v011",
+      "asset": "./assets/custom-props-registered-v011/metafx-aihq-registered-left_analytics_console-v011.png",
+      "strictPixelHit": true,
+      "hitArea": {
+        "type": "polygon",
+        "points": [
+          { "x": 0.1, "y": 0.39 },
+          { "x": 0.77, "y": 0.02 },
+          { "x": 0.98, "y": 0.3 },
+          { "x": 0.94, "y": 0.55 },
+          { "x": 0.72, "y": 0.72 },
+          { "x": 0.32, "y": 0.92 },
+          { "x": 0.05, "y": 0.67 }
+        ]
+      },
+      "size": [
+        353,
+        212
+      ],
+      "position": {
+        "x": -4,
+        "y": 16.6,
+        "w": 33,
+        "z": 77
+      },
+      "glow": "39, 212, 255",
+      "layerMode": "registered_exact_crop_v011"
+    },
+    {
+      "id": "right_tool_console",
+      "layer": "workstations",
+      "label": "Tool Runner Console",
+      "status": "ready",
+      "summary": "Registered v011 right-side tool console aligned to the original right console crop.",
+      "metrics": {
+        "Side": "Right",
+        "Angle": "Correct",
+        "Asset": "Registered v011",
+        "Mode": "Tool"
+      },
+      "missions": [
+        {
+          "title": "Open Report",
+          "detail": "Click Tool Runner Console to inspect the related AI Agent Office report."
+        }
+      ],
+      "asset_id": "registered_right_tool_console_v011",
+      "asset": "./assets/custom-props-registered-v011/metafx-aihq-registered-right_tool_console-v011.png",
+      "strictPixelHit": true,
+      "hitArea": {
+        "type": "polygon",
+        "points": [
+          { "x": 0.17, "y": 0.03 },
+          { "x": 0.89, "y": 0.31 },
+          { "x": 0.9, "y": 0.58 },
+          { "x": 0.84, "y": 0.75 },
+          { "x": 0.63, "y": 0.93 },
+          { "x": 0.22, "y": 0.72 },
+          { "x": 0.02, "y": 0.52 },
+          { "x": 0.03, "y": 0.3 }
+        ]
+      },
+      "size": [
+        373,
+        212
+      ],
+      "position": {
+        "x": 70.4,
+        "y": 17.1,
+        "w": 34.5,
+        "z": 78
+      },
+      "glow": "37, 215, 122",
+      "layerMode": "registered_exact_crop_v011"
+    },
+    {
+      "id": "mission_strategy_table",
+      "layer": "workstations",
+      "label": "Mission Strategy Table",
+      "status": "active",
+      "summary": "Registered v011 central planning table aligned to the original mission-table crop.",
+      "metrics": {
+        "Asset": "Registered v011",
+        "Layer": "workstations",
+        "Placement": "Exact crop",
+        "Hover": "Glow"
+      },
+      "missions": [
+        {
+          "title": "Open Report",
+          "detail": "Click Mission Strategy Table to inspect the related AI Agent Office report."
+        }
+      ],
+      "asset_id": "registered_mission_strategy_table_v011",
+      "asset": "./assets/custom-props-registered-v011/metafx-aihq-registered-mission_strategy_table-v011.png",
+      "size": [
+        281,
+        214
+      ],
+      "position": {
+        "x": 41.5,
+        "y": 45.3773,
+        "w": 16.8062,
+        "z": 79
+      },
+      "glow": "39, 212, 255",
+      "layerMode": "registered_exact_crop_v011"
+    },
+    {
+      "id": "terminal_workstation",
+      "layer": "workstations",
+      "label": "Terminal Workstation",
+      "status": "ready",
+      "summary": "Registered v011 terminal workstation shifted to the exact original workstation crop.",
+      "metrics": {
+        "Asset": "Registered v011",
+        "Layer": "workstations",
+        "Placement": "Exact crop",
+        "Hover": "Glow"
+      },
+      "missions": [
+        {
+          "title": "Open Report",
+          "detail": "Click Terminal Workstation to inspect the related AI Agent Office report."
+        }
+      ],
+      "asset_id": "registered_terminal_workstation_v011",
+      "asset": "./assets/custom-props-registered-v011/metafx-aihq-registered-terminal_workstation-v011.png",
+      "size": [
+        199,
+        156
+      ],
+      "position": {
+        "x": 74,
+        "y": 55,
+        "w": 16,
+        "z": 82
+      },
+      "glow": "37, 215, 122",
+      "layerMode": "registered_exact_crop_v011"
+    },
+    {
+      "id": "left_audit_crystals",
+      "layer": "fx_nodes",
+      "label": "Audit Crystal Nodes",
+      "status": "logging",
+      "summary": "Registered v011 audit crystal group aligned to the original left crystal-node crop.",
+      "metrics": {
+        "Asset": "Registered v011",
+        "Layer": "fx_nodes",
+        "Placement": "Exact crop",
+        "Hover": "Glow"
+      },
+      "missions": [
+        {
+          "title": "Open Report",
+          "detail": "Click Audit Crystal Nodes to inspect the related AI Agent Office report."
+        }
+      ],
+      "asset_id": "registered_left_audit_crystals_v011",
+      "asset": "./assets/custom-props-registered-v011/metafx-aihq-registered-left_audit_crystals-v011.png",
+      "size": [
+        170,
+        191
+      ],
+      "position": {
+        "x": 3.1,
+        "y": 46.8,
+        "w": 12.5,
+        "z": 83
+      },
+      "glow": "39, 212, 255",
+      "layerMode": "registered_exact_crop_v011"
+    },
+    {
+      "id": "left_signal_cube",
+      "layer": "fx_nodes",
+      "label": "Left Signal Cube",
+      "status": "logging",
+      "summary": "User-supplied dicut5 hologram cube added as its own interactive layer at the captured left-side floor position.",
+      "metrics": {
+        "Asset": "dicut5 v013",
+        "Layer": "fx_nodes",
+        "Placement": "Captured left floor",
+        "Hover": "Glow"
+      },
+      "missions": [
+        {
+          "title": "Open Report",
+          "detail": "Click Left Signal Cube to inspect the related AI Agent Office signal report."
+        }
+      ],
+      "asset_id": "registered_left_signal_cube_v013",
+      "asset": "./assets/custom-props-registered-v011/metafx-aihq-registered-left_signal_cube-v013.png",
+      "size": [
+        258,
+        380
+      ],
+      "position": {
+        "x": 15,
+        "y": 55.4,
+        "w": 6.3,
+        "z": 85
+      },
+      "glow": "39, 212, 255",
+      "layerMode": "registered_signal_cube_v013"
+    },
+    {
+      "id": "right_status_crystals",
+      "layer": "fx_nodes",
+      "label": "Status Crystal Nodes",
+      "status": "watching",
+      "summary": "Registered v011 status crystal group using the correct tall blue crystal type and aligned to the original crop.",
+      "metrics": {
+        "Asset": "Registered v011",
+        "Layer": "fx_nodes",
+        "Placement": "Exact crop",
+        "Hover": "Glow"
+      },
+      "missions": [
+        {
+          "title": "Open Report",
+          "detail": "Click Status Crystal Nodes to inspect the related AI Agent Office report."
+        }
+      ],
+      "asset_id": "registered_right_status_crystals_v011",
+      "asset": "./assets/custom-props-registered-v011/metafx-aihq-registered-right_status_crystals-v011.png",
+      "size": [
+        162,
+        191
+      ],
+      "position": {
+        "x": 86.5,
+        "y": 47.4,
+        "w": 12,
+        "z": 84
+      },
+      "glow": "39, 212, 255",
+      "layerMode": "registered_exact_crop_v011"
+    }
+  ]
+}

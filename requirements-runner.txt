@@ -1,0 +1,9 @@
+# Runtime dependencies verified in the instructor build on 2026-07-22.
+# Keep every version pinned so each student receives the same Codex runner.
+annotated-types==0.7.0
+openai-codex==0.1.0b3
+openai-codex-cli-bin==0.137.0a4
+pydantic==2.13.4
+pydantic-core==2.46.4
+typing-inspection==0.4.2
+typing-extensions==4.15.0

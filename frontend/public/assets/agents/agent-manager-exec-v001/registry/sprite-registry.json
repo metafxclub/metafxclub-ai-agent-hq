@@ -1,0 +1,672 @@
+{
+  "asset_id": "manager-exec-v001",
+  "project": "Metafxclub AI Pixel HQ",
+  "agent_role_slug": "manager",
+  "variant_slug": "exec",
+  "version": "v001",
+  "frame_size": {
+    "w": 192,
+    "h": 192
+  },
+  "output_root": "assets/agents/manager-exec-v001",
+  "technical_rules": {
+    "resized": false,
+    "grid_crop_only": true,
+    "alpha_preserved": true,
+    "required_mode": "RGBA",
+    "transparent_png": true,
+    "orientation_corrected": true,
+    "orientation_correction": "walk frames are upright vertical; walk sheet transposed to rows=direction and columns=frame; no resize; status unchanged",
+    "walk_sheet_contract_corrected": true
+  },
+  "source_sheets": {
+    "walk": {
+      "path": "source/agent-manager-exec-walk-sheet-192-v001.png",
+      "original_input": "outputs/metafx_ai_agent_walkcycle_4dir_4x4_768_alpha_normalized.png",
+      "size": {
+        "w": 768,
+        "h": 768
+      },
+      "grid": {
+        "columns": 4,
+        "rows": 4
+      },
+      "row_map": {
+        "1": "down",
+        "2": "left",
+        "3": "right",
+        "4": "up"
+      },
+      "sha256": "b398d1e64ef1d0c0f034d6cf548de5a1172f5a97cefc8427d032567af656c126",
+      "layout": "rows=direction, columns=frame"
+    },
+    "status": {
+      "path": "source/agent-manager-exec-status-sheet-192-v001.png",
+      "original_input": "outputs/metafx_ai_agent_status_poses_12_4x3_768x576_alpha_normalized.png",
+      "size": {
+        "w": 768,
+        "h": 576
+      },
+      "grid": {
+        "columns": 4,
+        "rows": 3
+      },
+      "order": [
+        "idle",
+        "resting",
+        "planning",
+        "meeting",
+        "working",
+        "waiting",
+        "waiting_approval",
+        "blocked",
+        "reporting",
+        "completed",
+        "archived",
+        "offline_sleep"
+      ],
+      "sha256": "68c6fd1c4beaf967ee5f95aa2f66b8ce64fa320de841003fe915f1d0678524be"
+    }
+  },
+  "frames": {
+    "walk": [
+      {
+        "id": "agent-manager-exec-walk-down-01-v001",
+        "type": "walk_frame",
+        "direction": "down",
+        "frame_index": 1,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 0,
+          "y": 0,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-down-01-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "b3fc2f95444b64094e3301093dfb184e519b956351dabb81fcb2735f71737ccc",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-walk-down-02-v001",
+        "type": "walk_frame",
+        "direction": "down",
+        "frame_index": 2,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 192,
+          "y": 0,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-down-02-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "6db4017e3ef3435e3e81cdcd61d528b47552c13f0719f9f285197ae93d99ed25",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-walk-down-03-v001",
+        "type": "walk_frame",
+        "direction": "down",
+        "frame_index": 3,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 384,
+          "y": 0,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-down-03-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "f5c680a8c36e6d6f7f6c552dee04916a54776072083e4165d85005258fbaf444",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-walk-down-04-v001",
+        "type": "walk_frame",
+        "direction": "down",
+        "frame_index": 4,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 576,
+          "y": 0,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-down-04-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "0bd4335d03cf39529766827831bc656cb0291e6b09acd4904f21ecc8381cf18e",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-walk-left-01-v001",
+        "type": "walk_frame",
+        "direction": "left",
+        "frame_index": 1,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 0,
+          "y": 192,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-left-01-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "e34f4e850730ba5741a94ec83864b70a77bae83e0780f9529c52178b9fe5ea66",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-walk-left-02-v001",
+        "type": "walk_frame",
+        "direction": "left",
+        "frame_index": 2,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 192,
+          "y": 192,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-left-02-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "d91058ff113a968bff6a74378a1e0eba6e02d745a42f9c063b189af3c79f61b0",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-walk-left-03-v001",
+        "type": "walk_frame",
+        "direction": "left",
+        "frame_index": 3,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 384,
+          "y": 192,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-left-03-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "02cbe72606d83120eb34090bc935680b8a026bc5480d5402866cc8500709ba36",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-walk-left-04-v001",
+        "type": "walk_frame",
+        "direction": "left",
+        "frame_index": 4,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 576,
+          "y": 192,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-left-04-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "05d09679ccf8def0e220c4d02c0a8798d62e7e3fc0f4443ef30097a98012b764",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-walk-right-01-v001",
+        "type": "walk_frame",
+        "direction": "right",
+        "frame_index": 1,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 0,
+          "y": 384,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-right-01-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "46c7aa91866e40a1f01d90b46eec1d24e6dc61f9fee3171d98f340fc276b6fa3",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-walk-right-02-v001",
+        "type": "walk_frame",
+        "direction": "right",
+        "frame_index": 2,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 192,
+          "y": 384,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-right-02-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "29b6618062931a80ba8d4a58f69dab9992213a1b1d04c9e58eb2bad7ebb054ab",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-walk-right-03-v001",
+        "type": "walk_frame",
+        "direction": "right",
+        "frame_index": 3,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 384,
+          "y": 384,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-right-03-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "9a5abf4694afc1dfc7aa33eaf7a5ae0ee5b8bed76b715ae8d3569cfacfae81c0",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-walk-right-04-v001",
+        "type": "walk_frame",
+        "direction": "right",
+        "frame_index": 4,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 576,
+          "y": 384,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-right-04-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "c5686a6a25e520da70df53797d14ed2cf7d18f42cd39da0dfee4352bdc27f56e",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-walk-up-01-v001",
+        "type": "walk_frame",
+        "direction": "up",
+        "frame_index": 1,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 0,
+          "y": 576,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-up-01-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "6f6f7209073fe569a840dd2e23629b0a8c488ac3145b0929decafd99a5f608df",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-walk-up-02-v001",
+        "type": "walk_frame",
+        "direction": "up",
+        "frame_index": 2,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 192,
+          "y": 576,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-up-02-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "d4223f3fb995193ba1eb5cf169ea06a32a02915bb3ccb29b166d807bc0082306",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-walk-up-03-v001",
+        "type": "walk_frame",
+        "direction": "up",
+        "frame_index": 3,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 384,
+          "y": 576,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-up-03-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "6e6b0ac481782b3cd8a4f4e9b9a06199a6a083e45d24df68ed143e64a4810ebd",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-walk-up-04-v001",
+        "type": "walk_frame",
+        "direction": "up",
+        "frame_index": 4,
+        "source_sheet": "source/agent-manager-exec-walk-sheet-192-v001.png",
+        "source_rect": {
+          "x": 576,
+          "y": 576,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/walk/agent-manager-exec-walk-up-04-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "f295b62c7e9b5834a129e80617fc54b6132253353c613f7fb155e43fb9faf5dc",
+        "orientation": "upright_vertical"
+      }
+    ],
+    "status": [
+      {
+        "id": "agent-manager-exec-status-idle-v001",
+        "type": "status_frame",
+        "status": "idle",
+        "source_order": 1,
+        "source_sheet": "source/agent-manager-exec-status-sheet-192-v001.png",
+        "source_rect": {
+          "x": 0,
+          "y": 0,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/status/agent-manager-exec-status-idle-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "737840e2f37ccd012b3ac6e8d242405449e187f3d9b9d7d10dd533621852b792",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-status-resting-v001",
+        "type": "status_frame",
+        "status": "resting",
+        "source_order": 2,
+        "source_sheet": "source/agent-manager-exec-status-sheet-192-v001.png",
+        "source_rect": {
+          "x": 192,
+          "y": 0,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/status/agent-manager-exec-status-resting-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "45b36bb0cb7f72ef1963d0dafe16718684a247bffae59d0945ebea4f1ad44731",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-status-planning-v001",
+        "type": "status_frame",
+        "status": "planning",
+        "source_order": 3,
+        "source_sheet": "source/agent-manager-exec-status-sheet-192-v001.png",
+        "source_rect": {
+          "x": 384,
+          "y": 0,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/status/agent-manager-exec-status-planning-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "f1dfc49c534c0b692e9f00e25d3b067fa2a201a06eb9132f63754bbd0d135150",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-status-meeting-v001",
+        "type": "status_frame",
+        "status": "meeting",
+        "source_order": 4,
+        "source_sheet": "source/agent-manager-exec-status-sheet-192-v001.png",
+        "source_rect": {
+          "x": 576,
+          "y": 0,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/status/agent-manager-exec-status-meeting-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "54a2ec21b1f289a9ff6f967bf7c1d8e800faf258c46ebd4d3acc8233aed0c045",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-status-working-v001",
+        "type": "status_frame",
+        "status": "working",
+        "source_order": 5,
+        "source_sheet": "source/agent-manager-exec-status-sheet-192-v001.png",
+        "source_rect": {
+          "x": 0,
+          "y": 192,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/status/agent-manager-exec-status-working-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "f1d1c097f1099d97d699e3c42fb4f240cafe759441a6a1ad3dca72cc05290859",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-status-waiting-v001",
+        "type": "status_frame",
+        "status": "waiting",
+        "source_order": 6,
+        "source_sheet": "source/agent-manager-exec-status-sheet-192-v001.png",
+        "source_rect": {
+          "x": 192,
+          "y": 192,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/status/agent-manager-exec-status-waiting-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "b2b5b37a835758cb2ee1c758ee187bc856fad4bea7bc8770d842348fda6a8b48",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-status-waiting_approval-v001",
+        "type": "status_frame",
+        "status": "waiting_approval",
+        "source_order": 7,
+        "source_sheet": "source/agent-manager-exec-status-sheet-192-v001.png",
+        "source_rect": {
+          "x": 384,
+          "y": 192,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/status/agent-manager-exec-status-waiting-approval-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "de31a1e9b47f39a6f180bf38eafddf18183db447627ca1975cbdf2762ba3b41e",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-status-blocked-v001",
+        "type": "status_frame",
+        "status": "blocked",
+        "source_order": 8,
+        "source_sheet": "source/agent-manager-exec-status-sheet-192-v001.png",
+        "source_rect": {
+          "x": 576,
+          "y": 192,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/status/agent-manager-exec-status-blocked-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "65c55406f558210b4d15996b50d325a3d8beac01ab174c0dbcd48ca348fd07ad",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-status-reporting-v001",
+        "type": "status_frame",
+        "status": "reporting",
+        "source_order": 9,
+        "source_sheet": "source/agent-manager-exec-status-sheet-192-v001.png",
+        "source_rect": {
+          "x": 0,
+          "y": 384,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/status/agent-manager-exec-status-reporting-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "f0d529b13b728914adf8017dcb0f82d5f4c5a43bdb97b8f52e588a1194e3915a",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-status-completed-v001",
+        "type": "status_frame",
+        "status": "completed",
+        "source_order": 10,
+        "source_sheet": "source/agent-manager-exec-status-sheet-192-v001.png",
+        "source_rect": {
+          "x": 192,
+          "y": 384,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/status/agent-manager-exec-status-completed-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "b9d60a1810e56d3e8fdb7ccc72ab4792a65281d4cc92e917a9208e1ff740c89b",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-status-archived-v001",
+        "type": "status_frame",
+        "status": "archived",
+        "source_order": 11,
+        "source_sheet": "source/agent-manager-exec-status-sheet-192-v001.png",
+        "source_rect": {
+          "x": 384,
+          "y": 384,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/status/agent-manager-exec-status-archived-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "4efcd22c1596c97ac594e925e9545d70efec5655960fabccb671017324fc11e9",
+        "orientation": "upright_vertical"
+      },
+      {
+        "id": "agent-manager-exec-status-offline_sleep-v001",
+        "type": "status_frame",
+        "status": "offline_sleep",
+        "source_order": 12,
+        "source_sheet": "source/agent-manager-exec-status-sheet-192-v001.png",
+        "source_rect": {
+          "x": 576,
+          "y": 384,
+          "w": 192,
+          "h": 192
+        },
+        "path": "frames/status/agent-manager-exec-status-offline-sleep-192-v001.png",
+        "size": {
+          "w": 192,
+          "h": 192
+        },
+        "mode": "RGBA",
+        "sha256": "3ad7a5d3ca6242a5e60b965d8f846f6f8c7c601e162d3236997d7d64516e70f2",
+        "orientation": "upright_vertical"
+      }
+    ]
+  },
+  "counts": {
+    "walk_frames": 16,
+    "status_frames": 12,
+    "total_frames": 28
+  },
+  "created_at": "2026-06-08T18:25:22.910328+00:00",
+  "updated_at": "2026-06-09T02:39:19.163073+00:00"
+}
