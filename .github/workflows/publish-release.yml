@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: write
+  statuses: write
 
 jobs:
   publish:
@@ -45,14 +46,12 @@ jobs:
 
           if (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null) {
             Write-Host "Release $tag already exists. No duplicate release was created."
-            exit 0
-          }
+          } else {
+            git archive --format=zip --prefix="Metafxclub-AI-Agent-HQ-$tag/" --output=$archive HEAD
+            $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $archive" | Set-Content -LiteralPath $checksum -Encoding ascii
 
-          git archive --format=zip --prefix="Metafxclub-AI-Agent-HQ-$tag/" --output=$archive HEAD
-          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $archive" | Set-Content -LiteralPath $checksum -Encoding ascii
-
-          $notes = @'
+            $notes = @'
           ชุดติดตั้ง Metafxclub AI Agent HQ สำหรับ Windows
 
           วิธีติดตั้ง:
@@ -63,10 +62,18 @@ jobs:
           ระบบเริ่มต้นในโหมด Demo/Read-only และไม่รวม Token, Password, Log, Memory หรือข้อมูลส่วนตัวจากเครื่องผู้พัฒนา
           '@
 
-          gh release create $tag $archive $checksum `
-            --repo $env:GITHUB_REPOSITORY `
-            --target $env:GITHUB_SHA `
-            --title "Metafxclub AI Agent HQ $tag" `
-            --notes $notes
+            gh release create $tag $archive $checksum `
+              --repo $env:GITHUB_REPOSITORY `
+              --target $env:GITHUB_SHA `
+              --title "Metafxclub AI Agent HQ $tag" `
+              --notes $notes
+          }
+
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          gh api --method POST "repos/$env:GITHUB_REPOSITORY/statuses/$env:GITHUB_SHA" `
+            -f state=success `
+            -f context=metafxclub/release `
+            -f "description=Release $tag published" `
+            -f "target_url=$runUrl"
         env:
           GH_TOKEN: ${{ github.token }}
