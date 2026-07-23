@@ -29,6 +29,8 @@ data/memory/**
 !data/memory/.gitkeep
 data/imports/**
 !data/imports/.gitkeep
+workspace/**
+!workspace/.gitkeep
 *.log
 *.jsonl
 *.bak
@@ -37,6 +39,8 @@ data/imports/**
 # Local source/backups and generated release payloads
 assets-source/
 frontend/legacy-static/
+docs/design-qa/
+design-qa.md
 dist/
 release/
 *.zip
@@ -49,4 +53,3 @@ Desktop.ini
 .idea/
 .vscode/
 *.swp
-

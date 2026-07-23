@@ -1,7 +1,7 @@
 {
   "version": "male-roster-set-a-core-command-operators-v001",
   "generatedAt": "2026-06-12",
-  "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+  "source": "metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
   "note": "Static alpha crops extracted from the supplied male roster sheet. True directional walk cycles can replace these files later without changing agent IDs.",
   "assets": [
     {
@@ -10,7 +10,7 @@
       "name": "CEO",
       "role": "Owner / Executive Approver",
       "type": "Character",
-      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "source": "metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
       "file": "./characters/01-ceo-male-static-v001.png",
       "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/01-ceo-male-static-v001.png",
       "source_bbox": [
@@ -56,7 +56,7 @@
       "name": "HQ Manager",
       "role": "Manager Agent",
       "type": "Character",
-      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "source": "metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
       "file": "./characters/02-hq-manager-male-static-v001.png",
       "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/02-hq-manager-male-static-v001.png",
       "source_bbox": [
@@ -102,7 +102,7 @@
       "name": "Backtest Analyst",
       "role": "Backtest Report Analyst",
       "type": "Character",
-      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "source": "metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
       "file": "./characters/03-backtest-analyst-male-static-v001.png",
       "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/03-backtest-analyst-male-static-v001.png",
       "source_bbox": [
@@ -148,7 +148,7 @@
       "name": "Telegram Ops",
       "role": "Alert Operator",
       "type": "Character",
-      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "source": "metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
       "file": "./characters/04-telegram-ops-male-static-v001.png",
       "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/04-telegram-ops-male-static-v001.png",
       "source_bbox": [
@@ -194,7 +194,7 @@
       "name": "Optimization Agent",
       "role": "Parameter Search Specialist",
       "type": "Character",
-      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "source": "metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
       "file": "./characters/05-optimization-agent-male-static-v001.png",
       "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/05-optimization-agent-male-static-v001.png",
       "source_bbox": [
@@ -240,7 +240,7 @@
       "name": "EA Developer",
       "role": "MT4/MT5 EA Developer",
       "type": "Character",
-      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "source": "metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
       "file": "./characters/06-ea-developer-male-static-v001.png",
       "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/06-ea-developer-male-static-v001.png",
       "source_bbox": [
@@ -286,7 +286,7 @@
       "name": "Codex MCP Operator",
       "role": "Bridge Operator",
       "type": "Character",
-      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "source": "metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
       "file": "./characters/07-codex-mcp-operator-male-static-v001.png",
       "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/07-codex-mcp-operator-male-static-v001.png",
       "source_bbox": [
@@ -332,7 +332,7 @@
       "name": "VPS Watch",
       "role": "Infrastructure Monitor",
       "type": "Character",
-      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "source": "metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
       "file": "./characters/08-vps-watch-male-static-v001.png",
       "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/08-vps-watch-male-static-v001.png",
       "source_bbox": [
@@ -378,7 +378,7 @@
       "name": "Risk Guard",
       "role": "Security / Compliance Gate",
       "type": "Character",
-      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "source": "metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
       "file": "./characters/09-risk-guard-male-static-v001.png",
       "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/09-risk-guard-male-static-v001.png",
       "source_bbox": [
@@ -424,7 +424,7 @@
       "name": "Mission Archivist",
       "role": "Archive / Memory Clerk",
       "type": "Character",
-      "source": "C:\\Users\\META\\OneDrive\\Desktop\\AI Agent HQ\\Character design\\Male\\metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
+      "source": "metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
       "file": "./characters/10-mission-archivist-male-static-v001.png",
       "web_path": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/10-mission-archivist-male-static-v001.png",
       "source_bbox": [

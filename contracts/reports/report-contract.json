@@ -1,9 +1,9 @@
 {
-  "version": "report-contract-v002",
+  "version": "report-contract-v004",
   "purpose": "Standard output shapes for every agent, prop popup, mission, bridge check, and memory card.",
   "base_report_schema": {
     "id": "report-{timestamp}",
-    "type": "executive_summary|mission_plan|code_change_report|backtest_report|optimization_report|backtest_optimization_report|vps_report|telegram_report|telegram_tool_report|risk_review|bridge_status_report|memory_recall_packet|archive_report|auto_trading_status_report|ops_overview_report|prop_report",
+    "type": "executive_summary|mission_plan|code_change_report|backtest_report|optimization_report|backtest_optimization_report|vps_report|telegram_report|telegram_tool_report|risk_review|bridge_status_report|memory_recall_packet|archive_report|auto_trading_status_report|ops_overview_report|dashboard_connection_report|terminal_discovery_report|terminal_selection_report|prop_report",
     "title": "short title",
     "summary": "dashboard-ready summary",
     "ownerAgentId": "agent id",
@@ -28,8 +28,8 @@
     "mission_plan": ["manager", "mission_strategy_table"],
     "code_change_report": ["ea_developer", "terminal_workstation"],
     "backtest_report": ["backtest_analyst", "left_analytics_console"],
-    "optimization_report": ["optimization_agent", "left_analytics_console"],
-    "vps_report": ["vps_watch", "right_server_racks"],
+    "optimization_report": ["optimization_agent", "right_server_racks"],
+    "vps_report": ["vps_watch", "right_status_crystals"],
     "telegram_report": ["telegram_ops", "right_tool_console"],
     "telegram_tool_report": ["telegram_ops", "right_tool_console"],
     "risk_review": ["risk_guard", "left_audit_crystals", "right_status_crystals"],
@@ -38,7 +38,10 @@
     "archive_report": ["mission_archivist", "left_server_racks"],
     "backtest_optimization_report": ["backtest_analyst", "optimization_agent", "left_analytics_console"],
     "auto_trading_status_report": ["vps_watch", "risk_guard", "left_signal_cube"],
-    "ops_overview_report": ["manager", "right_status_crystals"]
+    "ops_overview_report": ["manager", "right_status_crystals"],
+    "dashboard_connection_report": ["mission_strategy_table", "codex_mcp_portal", "left_server_racks", "right_server_racks", "left_analytics_console", "right_tool_console", "terminal_workstation", "left_audit_crystals", "left_signal_cube", "right_status_crystals"],
+    "terminal_discovery_report": ["right_server_racks", "left_analytics_console", "terminal_workstation", "left_signal_cube"],
+    "terminal_selection_report": ["right_server_racks", "left_analytics_console", "terminal_workstation", "left_signal_cube"]
   },
   "storage": {
     "runtime_reports": "./data/runtime/reports/",
@@ -47,6 +50,7 @@
   },
   "security": [
     "Do not store secrets, tokens, cookies, auth files, credentials, or live account details.",
+    "Terminal selection reports may contain only an opaque candidate id, platform, safe Thai label, bounded detection/running/configuration status, and adapter readiness; never a path, PID, account, or broker.",
     "Reports that mention real trading, public Telegram, VPS restart, deploy, or paid API usage must include an approval note."
   ]
 }

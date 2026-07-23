@@ -6,13 +6,16 @@ const MANAGER_STATIC_FRAME = `${MALE_ROSTER_ASSET_ROOT}/characters/02-hq-manager
 const SESSION_STORAGE_KEY = "metafx-ai-agent-hq-session-v001";
 const UI_SESSION_ENDPOINT = "/api/ui-session";
 const AGENT_EVENTS_ENDPOINT = "/api/agent-events";
+const AGENT_CHAT_ENDPOINT = "/api/agents/chat";
 const MEMORY_ENDPOINT = "/api/memory";
 const MEMORY_SEARCH_ENDPOINT = "/api/memory/search";
 const MEETINGS_ENDPOINT = "/api/meetings";
 const CODEX_RATE_LIMIT_ENDPOINT = "/api/codex/rate-limits";
+const OPERATOR_MODE_ENDPOINT = "/api/operator-mode";
 const CODEX_RATE_LIMIT_POLL_MS = 60000;
 const CODEX_RATE_LIMIT_FETCH_TIMEOUT_MS = 25000;
 const CODEX_RATE_LIMIT_STALE_MAX_MS = 15 * 60 * 1000;
+const OPERATOR_MODE_POLL_MS = 30000;
 const MISSION_POLL_MS = 12000;
 const OFFICE_AUTONOMY_MS = 7800;
 const ROOM_CONTRACT_PATH = "./contracts/rooms/command-room.json?v=32";
@@ -33,6 +36,19 @@ const STATUS_LABELS = {
   online: "ออนไลน์",
   offline: "ออฟไลน์",
   connected: "เชื่อมต่อแล้ว",
+  detected: "ตรวจพบแล้ว",
+  configured: "ตั้งค่าแล้ว",
+  not_connected: "ยังไม่เชื่อม",
+  not_checked: "ยังไม่ได้ตรวจ",
+  not_configured: "ยังไม่ได้ตั้งค่า",
+  not_found: "ยังไม่พบ",
+  needs_attention: "ต้องตรวจสอบ",
+  coming_soon: "Coming Soon",
+  partial: "เชื่อมต่อบางส่วน",
+  manual: "สั่งทำงานเอง",
+  ai_every_2h: "AI ตรวจทุก 2 ชั่วโมง",
+  enabled: "เปิดใช้งานแล้ว",
+  disabled: "ยังไม่เปิดใช้งาน",
   guarded: "มีระบบป้องกัน",
   read_only: "ดูข้อมูลอย่างเดียว",
   logging: "กำลังบันทึก",
@@ -71,6 +87,8 @@ const STATUS_LABELS = {
   config_present: "พบ Config แล้ว",
   implemented_guarded: "เชื่อมระบบแล้วและมีการป้องกัน",
   read_only_diagnostic: "ตรวจข้อมูลแบบไม่แก้ไข",
+  auto_guarded: "อัตโนมัติ — Full Access ใน Workspace",
+  manual_guarded: "ตรวจสอบก่อนเริ่มงาน",
   role_default: "ใช้ค่าตามหน้าที่ Agent",
   ai_report: "รายงานจาก AI",
   build_log: "บันทึกการพัฒนา",
@@ -96,6 +114,41 @@ const CAPABILITY_DISPLAY = {
   mt5_task: "งาน MT5 ผ่าน Local Runner",
   telegram_send: "ส่ง Telegram หลังได้รับอนุมัติ",
 };
+
+const DASHBOARD_FIELD_LABELS = {
+  diagnosticstatus: "สถานะการตรวจ",
+  connectioncount: "จำนวนรายการเชื่อมต่อ",
+  readycount: "รายการที่พร้อม",
+  comingsooncount: "รายการ Coming Soon",
+  mt4installedcount: "MT4 ที่ตรวจพบ",
+  mt4runningcount: "MT4 ที่กำลังทำงาน",
+  mt5installedcount: "MT5 ที่ตรวจพบ",
+  mt5runningcount: "MT5 ที่กำลังทำงาน",
+  usedpercent: "ใช้โควตาแล้ว",
+  remainingpercent: "โควตาคงเหลือ",
+  windowdurationminutes: "รอบโควตา (นาที)",
+  outputchars: "ความยาวผลลัพธ์",
+  timeoutseconds: "เวลารอสูงสุด (วินาที)",
+  outputlimitchars: "ขีดจำกัดผลลัพธ์",
+  secretredacted: "มีการปกปิดข้อมูลลับ",
+};
+
+function dashboardFieldLabel(value) {
+  const raw = String(value || "").trim();
+  const compact = raw.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (DASHBOARD_FIELD_LABELS[compact]) return DASHBOARD_FIELD_LABELS[compact];
+  return raw
+    .replace(/[_-]+/g, " ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .trim() || "ข้อมูลเพิ่มเติม";
+}
+
+function dashboardMetricValue(name, value) {
+  const compact = String(name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (compact.endsWith("status") && typeof value === "string") return displayStatus(value);
+  if (typeof value === "boolean") return value ? "ใช่" : "ไม่ใช่";
+  return formatDashboardValue(value);
+}
 
 const RISK_LABELS = {
   low: "ต่ำ",
@@ -181,14 +234,14 @@ const AGENT_DISPLAY = {
 const PROP_DISPLAY = {
   codex_mcp_portal: "ประตูเชื่อม Codex/MCP",
   left_server_racks: "ตู้ข้อมูลและรายงานย้อนหลัง",
-  right_server_racks: "สถานะ VPS และ Terminal",
-  left_analytics_console: "จอวิเคราะห์ Backtest และ Optimization",
+  right_server_racks: "ตู้ Optimization Lab MT4/MT5",
+  left_analytics_console: "จอ EA Discovery Lab และ Backtest",
   right_tool_console: "จอ Telegram และ Tool Runner",
   mission_strategy_table: "โต๊ะวางแผน Mission",
   terminal_workstation: "โต๊ะพัฒนา EA สำหรับ MT4/MT5",
   left_audit_crystals: "คริสตัลตรวจความเสี่ยงและการอนุมัติ",
   left_signal_cube: "คิวบิกสถานะ Auto Trading",
-  right_status_crystals: "คริสตัลสถานะรวม HQ",
+  right_status_crystals: "คริสตัลสถานะ VPS และภาพรวม HQ",
   front_entry_gate: "จุดเข้า Agent",
 };
 
@@ -304,12 +357,20 @@ const state = {
     selectedMissionId: null,
     showArchived: false,
     searchText: "",
+    kanbanScrollTop: {},
     pendingRun: null,
     runInFlight: false,
     approvalInFlight: false,
     executionInFlight: false,
   },
   chatLog: [],
+  agentChat: {
+    inFlight: false,
+    agentId: null,
+    sessionIds: {},
+    message: "พร้อมคุยกับ Codex ผ่าน Local Runner",
+    tone: "neutral",
+  },
   lastAutonomyMeetingAt: 0,
   agentRouteIndex: 0,
   agentMoveTimer: null,
@@ -324,6 +385,22 @@ const state = {
     timer: null,
     visibilityHandlerBound: false,
   },
+  operatorMode: {
+    mode: "unknown",
+    labelTh: "กำลังตรวจสอบ Backend...",
+    autoExecute: false,
+    backendAvailable: false,
+    fallback: false,
+    guardrails: {
+      autoEligibleTools: [],
+      maxRisk: null,
+      alwaysRequireHumanApprovalFor: [],
+    },
+    updatedAt: null,
+    inFlight: false,
+    timer: null,
+    visibilityHandlerBound: false,
+  },
   missionSync: {
     inFlight: false,
     timer: null,
@@ -331,6 +408,13 @@ const state = {
     lastUpdatedAt: null,
   },
   managerCommandInFlight: false,
+  connectionAction: {
+    inFlight: false,
+    propId: null,
+    message: "",
+    tone: "neutral",
+  },
+  metatraderCandidateChoice: {},
   supportMoveTimers: new Map(),
   supportMoveFrames: new Map(),
   supportSpriteTimers: new Map(),
@@ -432,6 +516,14 @@ const els = {
   propLayer: document.getElementById("propLayer"),
   pathLayer: document.getElementById("pathLayer"),
   agentLayer: document.getElementById("agentLayer"),
+  agentStatusPanel: document.getElementById("agentStatusPanel"),
+  agentStatusList: document.getElementById("agentStatusList"),
+  todayWorkPanel: document.getElementById("todayWorkPanel"),
+  todayWorkDate: document.getElementById("todayWorkDate"),
+  todayRunningList: document.getElementById("todayRunningList"),
+  todayRunningCount: document.getElementById("todayRunningCount"),
+  todayCompletedList: document.getElementById("todayCompletedList"),
+  todayCompletedCount: document.getElementById("todayCompletedCount"),
   layerList: document.getElementById("layerList"),
   selectedLayer: document.getElementById("selectedLayer"),
   reportTitle: document.getElementById("reportTitle"),
@@ -456,6 +548,14 @@ const els = {
   codexRateSecondarySummary: document.getElementById("codexRateSecondarySummary"),
   codexRateSecondaryTrack: document.getElementById("codexRateSecondaryTrack"),
   codexRateSecondaryProgress: document.getElementById("codexRateSecondaryProgress"),
+  operatorModeControl: document.getElementById("operatorModeControl"),
+  operatorModeButton: document.getElementById("operatorModeButton"),
+  operatorModeLabel: document.getElementById("operatorModeLabel"),
+  operatorModePanel: document.getElementById("operatorModePanel"),
+  operatorModePanelTitle: document.getElementById("operatorModePanelTitle"),
+  operatorModeDescription: document.getElementById("operatorModeDescription"),
+  operatorModePolicy: document.getElementById("operatorModePolicy"),
+  operatorModeToggle: document.getElementById("operatorModeToggle"),
   bridgeModeLabel: document.getElementById("bridgeModeLabel"),
   bridgeStatusPill: document.getElementById("bridgeStatusPill"),
   bridgeStatusText: document.getElementById("bridgeStatusText"),
@@ -488,6 +588,9 @@ const els = {
   modalMeetingButton: document.getElementById("modalMeetingButton"),
   modalDelegateButton: document.getElementById("modalDelegateButton"),
   modalAgentComposer: document.getElementById("modalAgentComposer"),
+  modalComposerLabel: document.getElementById("modalComposerLabel"),
+  modalChatStatus: document.getElementById("modalChatStatus"),
+  modalChatUsageNote: document.getElementById("modalChatUsageNote"),
   modalTaskBoard: document.getElementById("modalTaskBoard"),
   modalDashboardKpis: document.getElementById("modalDashboardKpis"),
   modalDashboardWork: document.getElementById("modalDashboardWork"),
@@ -495,6 +598,20 @@ const els = {
   modalDashboardReports: document.getElementById("modalDashboardReports"),
   modalDashboardStatus: document.getElementById("modalDashboardStatus"),
   modalDashboardFreshness: document.getElementById("modalDashboardFreshness"),
+  modalDashboardConnectionList: document.getElementById("modalDashboardConnectionList"),
+  modalDashboardConnectionOverall: document.getElementById("modalDashboardConnectionOverall"),
+  modalDashboardConnectionCheckedAt: document.getElementById("modalDashboardConnectionCheckedAt"),
+  modalDashboardModuleName: document.getElementById("modalDashboardModuleName"),
+  modalDashboardModuleAvailability: document.getElementById("modalDashboardModuleAvailability"),
+  modalDashboardOperationMode: document.getElementById("modalDashboardOperationMode"),
+  modalDashboardScheduleStatus: document.getElementById("modalDashboardScheduleStatus"),
+  modalDashboardRefreshConnections: document.getElementById("modalDashboardRefreshConnections"),
+  modalDashboardDiscoverMetatrader: document.getElementById("modalDashboardDiscoverMetatrader"),
+  modalDashboardConnectionActionStatus: document.getElementById("modalDashboardConnectionActionStatus"),
+  modalDashboardMetatraderSelection: document.getElementById("modalDashboardMetatraderSelection"),
+  modalDashboardMetatraderSummary: document.getElementById("modalDashboardMetatraderSummary"),
+  modalDashboardMetatraderCandidates: document.getElementById("modalDashboardMetatraderCandidates"),
+  modalDashboardConfirmMetatrader: document.getElementById("modalDashboardConfirmMetatrader"),
   modalDashboardOpenMissionTable: document.getElementById("modalDashboardOpenMissionTable"),
   modalDashboardOpenOwnerAgent: document.getElementById("modalDashboardOpenOwnerAgent"),
   modalKanbanSearch: document.getElementById("modalKanbanSearch"),
@@ -514,25 +631,31 @@ const els = {
   modalKanbanOpenOwnerAgent: document.getElementById("modalKanbanOpenOwnerAgent"),
   modalKanbanOpenTargetProp: document.getElementById("modalKanbanOpenTargetProp"),
   taskDetailDialog: document.getElementById("taskDetailDialog"),
+  dashboardResultDialog: document.getElementById("dashboardResultDialog"),
+  dashboardResultDetailTitle: document.getElementById("dashboardResultDetailTitle"),
+  dashboardResultDetailBody: document.getElementById("dashboardResultDetailBody"),
+  dashboardResultDetailClose: document.getElementById("dashboardResultDetailClose"),
 };
 
 let taskDetailReturnFocus = null;
 let taskDetailShouldRestoreFocus = true;
 let taskDetailReturnMissionId = null;
 let taskDetailReturnContainerId = null;
+let dashboardResultReturnFocus = null;
+let dashboardResultShouldRestoreFocus = true;
 
 const agentWaypoints = {
   front_entry_gate: { x: 35.0, y: 73.0, label: "จุดเข้า Agent" },
   mission_strategy_table: { x: 43.5, y: 67.2, label: "หน้าโต๊ะวางแผน Mission" },
   codex_mcp_portal: { x: 42.0, y: 46.0, label: "ประตูเชื่อม Codex/MCP" },
-  left_analytics_console: { x: 27.0, y: 58.0, label: "จอวิเคราะห์ Backtest และ Optimization" },
+  left_analytics_console: { x: 27.0, y: 58.0, label: "จอ EA Discovery Lab และ Backtest" },
   right_tool_console: { x: 73.0, y: 58.0, label: "จอ Telegram และ Tool Runner" },
   terminal_workstation: { x: 72.5, y: 70.0, label: "โต๊ะพัฒนา EA สำหรับ MT4/MT5" },
   left_server_racks: { x: 28.0, y: 46.0, label: "ตู้ข้อมูลและรายงานย้อนหลัง" },
-  right_server_racks: { x: 70.0, y: 46.0, label: "สถานะ VPS และ Terminal" },
+  right_server_racks: { x: 70.0, y: 46.0, label: "ตู้ Optimization Lab MT4/MT5" },
   left_audit_crystals: { x: 22.0, y: 72.0, label: "คริสตัลตรวจความเสี่ยงและการอนุมัติ" },
   left_signal_cube: { x: 24.2, y: 66.0, label: "คิวบิกสถานะ Auto Trading" },
-  right_status_crystals: { x: 77.0, y: 59.0, label: "คริสตัลสถานะรวม HQ" },
+  right_status_crystals: { x: 77.0, y: 59.0, label: "คริสตัลสถานะ VPS และภาพรวม HQ" },
 };
 
 const agentRoute = [
@@ -607,9 +730,9 @@ const officeAgentDefinitions = [
     role: AGENT_DISPLAY.optimization_agent.role,
     summary: AGENT_DISPLAY.optimization_agent.summary,
     image: `${MALE_ROSTER_ASSET_ROOT}/characters/05-optimization-agent-male-static-v001.png`,
-    defaultTarget: "left_analytics_console",
-    homeTarget: "mission_strategy_table",
-    tools: ["left_queue_lanes", "right_queue_lanes", "left_analytics_console"],
+    defaultTarget: "right_server_racks",
+    homeTarget: "right_server_racks",
+    tools: ["right_server_racks", "left_analytics_console", "mission_strategy_table"],
     status: AGENT_DISPLAY.optimization_agent.status,
     x: 55.5,
     y: 73.0,
@@ -621,9 +744,9 @@ const officeAgentDefinitions = [
     role: AGENT_DISPLAY.vps_watch.role,
     summary: AGENT_DISPLAY.vps_watch.summary,
     image: `${MALE_ROSTER_ASSET_ROOT}/characters/08-vps-watch-male-static-v001.png`,
-    defaultTarget: "right_server_racks",
-    homeTarget: "right_server_racks",
-    tools: ["left_server_racks", "right_server_racks", "right_status_crystals"],
+    defaultTarget: "right_status_crystals",
+    homeTarget: "right_status_crystals",
+    tools: ["right_status_crystals", "left_signal_cube", "right_server_racks"],
     status: AGENT_DISPLAY.vps_watch.status,
     x: 70.0,
     y: 61.5,
@@ -744,6 +867,7 @@ async function init() {
   renderLayers();
   renderProps();
   renderAgent();
+  renderOperationalSidebars();
   const renderedAgentCount = els.agentLayer.querySelectorAll(".agent-unit").length;
   if (officeAgentDefinitions.length !== EXPECTED_OFFICE_AGENT_COUNT) {
     reportBootResourceFailure(
@@ -754,6 +878,7 @@ async function init() {
   }
   window.MetafxHqBoot?.markReady({ agentCount: renderedAgentCount });
   window.setTimeout(startCodexRateLimitPolling, 0);
+  window.setTimeout(startOperatorModePolling, 0);
   window.setTimeout(startMissionPolling, 0);
 
   loadAgentAnimationMap().then(() => {
@@ -962,6 +1087,7 @@ function renderCodexRateLimit(snapshot = state.codexRate.snapshot) {
     els.codexRateFreshness.textContent = loading ? "กำลังตรวจ" : copy[2];
     updateCodexRateProgress(els.codexRateProgressTrack, els.codexRateProgress, null, "Codex");
     els.codexRateSecondary.hidden = true;
+    refreshOpenDashboardConnectionPanel();
     return;
   }
 
@@ -986,6 +1112,7 @@ function renderCodexRateLimit(snapshot = state.codexRate.snapshot) {
     els.codexRateSecondary.hidden = true;
     updateCodexRateProgress(els.codexRateSecondaryTrack, els.codexRateSecondaryProgress, null, "Codex secondary");
   }
+  refreshOpenDashboardConnectionPanel();
 }
 
 async function fetchCodexRateLimitPayload({ manual = false } = {}) {
@@ -1116,6 +1243,172 @@ async function postJson(path, payload = {}) {
   return body;
 }
 
+function normalizeOperatorModePayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("invalid_operator_mode_response");
+  }
+  const mode = String(payload.mode || "").trim().toLowerCase();
+  if (!["auto_guarded", "manual_guarded"].includes(mode)) {
+    throw new Error("invalid_operator_mode_response");
+  }
+  const guardrails = payload.guardrails && typeof payload.guardrails === "object" && !Array.isArray(payload.guardrails)
+    ? payload.guardrails
+    : {};
+  const safeList = (value) => (
+    Array.isArray(value)
+      ? value.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim().slice(0, 100)).slice(0, 40)
+      : []
+  );
+  return {
+    mode,
+    labelTh: safeDashboardDisplayText(
+      payload.labelTh,
+      mode === "auto_guarded" ? "อัตโนมัติ — Full Access ใน Workspace" : "ตรวจสอบก่อนเริ่มงาน",
+    ),
+    autoExecute: payload.autoExecute === true,
+    backendAvailable: true,
+    fallback: false,
+    guardrails: {
+      autoEligibleTools: safeList(guardrails.autoEligibleTools),
+      maxRisk: typeof guardrails.maxRisk === "string" ? guardrails.maxRisk.slice(0, 40) : null,
+      alwaysRequireHumanApprovalFor: safeList(guardrails.alwaysRequireHumanApprovalFor),
+    },
+    updatedAt: typeof payload.updatedAt === "string" ? payload.updatedAt : null,
+  };
+}
+
+function renderOperatorModeControl() {
+  if (!els.operatorModeControl) return;
+  const operatorMode = state.operatorMode;
+  const isAutoMode = operatorMode.mode === "auto_guarded";
+  const autoExecutionActive = isAutoMode && operatorMode.autoExecute === true;
+  const visibleMode = operatorMode.inFlight ? "setting" : operatorMode.mode;
+  const label = isAutoMode
+    ? "อัตโนมัติ — Full Access ใน Workspace"
+    : operatorMode.mode === "manual_guarded"
+      ? "ตรวจสอบก่อนเริ่มงาน"
+      : "กำลังตรวจสอบ Backend...";
+
+  els.operatorModeControl.dataset.mode = visibleMode;
+  if (els.operatorModeLabel) els.operatorModeLabel.textContent = label;
+  if (els.operatorModePanelTitle) {
+    els.operatorModePanelTitle.textContent = operatorMode.fallback
+      ? "ตรวจสอบก่อนเริ่มงาน — ค่าปลอดภัย"
+      : label;
+  }
+  if (els.operatorModeDescription) {
+    els.operatorModeDescription.textContent = autoExecutionActive
+      ? "งานที่ Backend อนุญาตสามารถแก้ไฟล์และรันงานในโฟลเดอร์โปรเจกต์ได้อัตโนมัติ แล้วส่งรายงานกลับอุปกรณ์โดยไม่ต้องกดอนุมัติซ้ำ"
+      : operatorMode.backendAvailable
+        ? "ระบบจะตรวจ Mission และสิทธิ์กับ Backend ก่อนเริ่มงานจริงทุกครั้ง"
+        : "ยังอ่านโหมดจาก Backend ไม่ได้ จึงใช้ค่าปลอดภัยแบบตรวจสอบก่อนเริ่มงาน และไม่เปิดสิทธิ์จาก Frontend";
+  }
+  if (els.operatorModePolicy) {
+    const toolCount = operatorMode.guardrails.autoEligibleTools.length;
+    const riskText = operatorMode.guardrails.maxRisk ? displayRisk(operatorMode.guardrails.maxRisk) : "ตามที่ Backend กำหนด";
+    els.operatorModePolicy.textContent = autoExecutionActive
+      ? `Backend ยืนยันงานอัตโนมัติ ${toolCount} เครื่องมือ • ระดับความเสี่ยงสูงสุด ${riskText} • ทุกงานมี Mission, Audit และ Report`
+      : "Frontend ไม่จัดประเภทเครื่องมือและไม่ข้าม Approval Gate สิทธิ์ทั้งหมดตัดสินโดย Backend";
+  }
+  if (els.operatorModeToggle) {
+    els.operatorModeToggle.disabled = operatorMode.inFlight || !operatorMode.backendAvailable;
+    els.operatorModeToggle.textContent = operatorMode.inFlight
+      ? "กำลังบันทึกที่ Backend..."
+      : isAutoMode
+        ? "เปลี่ยนเป็นตรวจสอบก่อนเริ่มงาน"
+        : operatorMode.backendAvailable
+          ? "เปิดอัตโนมัติใน Workspace"
+          : "รอการเชื่อมต่อ Backend";
+  }
+}
+
+function setOperatorModePanelOpen(open) {
+  if (!els.operatorModePanel || !els.operatorModeButton) return;
+  const nextOpen = Boolean(open);
+  els.operatorModePanel.hidden = !nextOpen;
+  els.operatorModeButton.setAttribute("aria-expanded", String(nextOpen));
+}
+
+async function refreshOperatorMode() {
+  if (state.operatorMode.inFlight) return null;
+  state.operatorMode.inFlight = true;
+  renderOperatorModeControl();
+  try {
+    const payload = await fetchJson(OPERATOR_MODE_ENDPOINT);
+    const normalized = normalizeOperatorModePayload(payload);
+    state.operatorMode = {
+      ...state.operatorMode,
+      ...normalized,
+      inFlight: false,
+      timer: state.operatorMode.timer,
+      visibilityHandlerBound: state.operatorMode.visibilityHandlerBound,
+    };
+    return normalized;
+  } catch {
+    state.operatorMode = {
+      ...state.operatorMode,
+      mode: "manual_guarded",
+      labelTh: "ตรวจสอบก่อนเริ่มงาน",
+      autoExecute: false,
+      backendAvailable: false,
+      fallback: true,
+      inFlight: false,
+    };
+    return null;
+  } finally {
+    state.operatorMode.inFlight = false;
+    renderOperatorModeControl();
+  }
+}
+
+async function setOperatorMode(mode) {
+  if (!["auto_guarded", "manual_guarded"].includes(mode) || state.operatorMode.inFlight) return null;
+  state.operatorMode.inFlight = true;
+  renderOperatorModeControl();
+  try {
+    const payload = await postJson(OPERATOR_MODE_ENDPOINT, { mode });
+    const normalized = normalizeOperatorModePayload(payload);
+    state.operatorMode = {
+      ...state.operatorMode,
+      ...normalized,
+      inFlight: false,
+      timer: state.operatorMode.timer,
+      visibilityHandlerBound: state.operatorMode.visibilityHandlerBound,
+    };
+    addBridgeEvent("เปลี่ยนโหมด Agent แล้ว", normalized.mode === "auto_guarded"
+      ? "Backend เปิดงานอัตโนมัติที่ผ่านเกณฑ์ใน Workspace โดยยังคงระบบป้องกันงานนอกขอบเขตและงานเสี่ยง"
+      : "Backend เปลี่ยนเป็นตรวจสอบก่อนเริ่มงาน");
+    updateDecisionLog(normalized.mode === "auto_guarded"
+      ? "เปิดโหมดอัตโนมัติใน Workspace แล้ว สิทธิ์จริงยังคงถูกตรวจโดย Backend"
+      : "เปลี่ยนเป็นโหมดตรวจสอบก่อนเริ่มงานแล้ว");
+    await loadBridgeMissions({ replaceEvents: false, persist: false });
+    return normalized;
+  } catch (error) {
+    addBridgeEvent("เปลี่ยนโหมดไม่สำเร็จ", error.message || "Backend ไม่รับการเปลี่ยนโหมด");
+    updateDecisionLog("Backend ไม่รับการเปลี่ยนโหมด จึงคงค่าปลอดภัยเดิมไว้");
+    return null;
+  } finally {
+    state.operatorMode.inFlight = false;
+    renderOperatorModeControl();
+  }
+}
+
+function startOperatorModePolling() {
+  renderOperatorModeControl();
+  void refreshOperatorMode();
+  if (!state.operatorMode.timer) {
+    state.operatorMode.timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refreshOperatorMode();
+    }, OPERATOR_MODE_POLL_MS);
+  }
+  if (!state.operatorMode.visibilityHandlerBound) {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") void refreshOperatorMode();
+    });
+    state.operatorMode.visibilityHandlerBound = true;
+  }
+}
+
 const potentialSecretPatterns = [
   /\b(?:api[_ -]?key|token|password|passwd|secret|authorization|cookie|bot[_ -]?token|broker[_ -]?password|database[_ -]?url|connection[_ -]?string|private[_ -]?key|aws[_ -]?secret[_ -]?access[_ -]?key|github[_ -]?token)\b["']?\s*[:=]\s*["']?[^\s,;}"']{4,}/i,
   /\bbearer\s+[a-z0-9._~+/-]{12,}/i,
@@ -1201,6 +1494,7 @@ function saveSessionSnapshot() {
           toolId: state.modal.pendingRun.toolId || null,
         } : null,
       },
+      agentChatSessions: { ...state.agentChat.sessionIds },
       memoryStatus: state.memoryStatus,
       bridge: state.bridge,
     };
@@ -1268,6 +1562,17 @@ function applySessionSnapshot(snapshot) {
   state.officeEventLog = [];
   state.meetingTranscript = [];
   state.chatLog = [];
+  if (snapshot.agentChatSessions && typeof snapshot.agentChatSessions === "object" && !Array.isArray(snapshot.agentChatSessions)) {
+    state.agentChat.sessionIds = Object.fromEntries(
+      Object.entries(snapshot.agentChatSessions)
+        .filter(([agentId, sessionId]) => (
+          getOfficeAgent(agentId)
+          && typeof sessionId === "string"
+          && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(sessionId)
+        ))
+        .slice(0, EXPECTED_OFFICE_AGENT_COUNT),
+    );
+  }
   if (snapshot.modal) {
     state.modal = {
       ...state.modal,
@@ -1704,8 +2009,8 @@ function createBoardCard(item = {}) {
   const card = document.createElement("div");
   card.className = `board-card ${item.status || ""}`;
   const title = document.createElement("strong");
-  const rawTitle = item.title || item.id || "ยังไม่มีชื่อ";
-  const rawDetail = item.detail || item.result || item.summary || "ยังไม่มีรายละเอียด";
+  const rawTitle = safeDashboardDisplayText(item.title || item.id || "ยังไม่มีชื่อ");
+  const rawDetail = safeDashboardDisplayText(item.detail || item.result || item.summary || "ยังไม่มีรายละเอียด");
   const originalTitleHidden = isPredominantlyEnglishText(rawTitle);
   title.textContent = item.status
     ? `[${displayStatus(item.status)}] ${originalTitleHidden ? `รายงานจาก ${displayAgentName(item.owner, "ระบบ")}` : rawTitle}`
@@ -1740,21 +2045,87 @@ function renderCardList(container, items, emptyText) {
     container.appendChild(createBoardCard({ title: "ยังไม่มีข้อมูล", detail: emptyText, status: "empty" }));
     return;
   }
-  items.forEach((item) => container.appendChild(createBoardCard(item)));
+  items.forEach((item) => {
+    const card = createBoardCard(item);
+    const hint = document.createElement("span");
+    card.classList.add("dashboard-result-card");
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
+    card.setAttribute("aria-haspopup", "dialog");
+    card.setAttribute("aria-label", `เปิดรายละเอียด ${safeDashboardDisplayText(item?.title, "ผลลัพธ์งาน")}`);
+    hint.className = "dashboard-result-open-hint";
+    hint.textContent = "กดเพื่อดูรายละเอียด";
+    card.appendChild(hint);
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("details")) return;
+      openDashboardResultDetail(item, card);
+    });
+    card.addEventListener("keydown", (event) => {
+      if (!["Enter", " "].includes(event.key) || event.target.closest("details")) return;
+      event.preventDefault();
+      openDashboardResultDetail(item, card);
+    });
+    container.appendChild(card);
+  });
+}
+
+function appendDashboardResultFact(container, label, value) {
+  const term = document.createElement("dt");
+  const detail = document.createElement("dd");
+  term.textContent = label;
+  detail.textContent = safeDashboardDisplayText(value, "-");
+  container.append(term, detail);
+}
+
+function openDashboardResultDetail(item, trigger = null) {
+  if (!item || !els.dashboardResultDialog || !els.dashboardResultDetailBody) return;
+  const title = safeDashboardDisplayText(item.title, "รายละเอียดผลลัพธ์งาน");
+  const summary = safeDashboardDisplayText(item.detail, "ยังไม่มีรายละเอียดเพิ่มเติมจาก Local Runner");
+  const facts = document.createElement("dl");
+  const summaryText = document.createElement("p");
+  dashboardResultShouldRestoreFocus = true;
+  dashboardResultReturnFocus = trigger instanceof HTMLElement ? trigger : document.activeElement;
+  if (els.dashboardResultDetailTitle) els.dashboardResultDetailTitle.textContent = title;
+  els.dashboardResultDetailBody.innerHTML = "";
+  summaryText.className = "dashboard-result-detail-summary";
+  summaryText.textContent = summary;
+  facts.className = "kanban-detail-grid";
+  appendDashboardResultFact(facts, "สถานะ", displayStatus(item.status || "ready"));
+  appendDashboardResultFact(
+    facts,
+    "ผู้รับผิดชอบ",
+    item.owner ? displayAgentName(getAgentIdFromOwner(item.owner) || item.owner, item.owner) : "ยังไม่ได้ระบุ",
+  );
+  appendDashboardResultFact(facts, "แหล่งข้อมูล", "รายงานที่ผ่าน Backend/Local Runner และปกปิดข้อมูลลับแล้ว");
+  els.dashboardResultDetailBody.append(summaryText, facts);
+  if (!els.dashboardResultDialog.open) els.dashboardResultDialog.showModal();
+}
+
+function closeDashboardResultDetail({ restoreFocus = true } = {}) {
+  dashboardResultShouldRestoreFocus = restoreFocus;
+  if (els.dashboardResultDialog?.open) {
+    els.dashboardResultDialog.close();
+    return;
+  }
+  if (restoreFocus) dashboardResultReturnFocus?.focus?.();
+  dashboardResultReturnFocus = null;
 }
 
 function createTaskCard(mission = {}, options = {}) {
   const { variant = "board-card", source = "list" } = options;
-  const status = normalizeMissionStatus(mission.status);
+  const status = getMissionPresentationStatus(mission);
+  const autoEligible = isBackendAutoEligibleMission(mission);
   const card = document.createElement("button");
   const topline = document.createElement("span");
   const badge = document.createElement("span");
   const owner = document.createElement("span");
   const title = document.createElement("strong");
+  const destination = document.createElement("span");
   const hint = document.createElement("span");
 
   card.type = "button";
   card.className = `task-card ${variant} ${status}`;
+  card.classList.toggle("auto-eligible", autoEligible);
   card.dataset.taskMissionId = mission.id || "";
   card.setAttribute("aria-haspopup", "dialog");
   card.setAttribute("aria-label", `เปิดรายละเอียด Task ${mission.title || mission.id || "ที่เลือก"}`);
@@ -1772,9 +2143,19 @@ function createTaskCard(mission = {}, options = {}) {
 
   title.className = "task-card-title";
   title.textContent = mission.title || mission.id || "Task ที่ยังไม่มีชื่อ";
+  destination.className = "task-card-destination";
+  destination.textContent = `รายงานที่: ${displayPropName(mission.targetId || "mission_strategy_table")}`;
   hint.className = "task-card-summary";
-  hint.textContent = "กดเพื่อดูรายละเอียด";
-  card.append(topline, title, hint);
+  hint.textContent = status === "completed"
+    ? (autoEligible ? "งานอัตโนมัติเสร็จแล้ว • เปิดดูรายงาน" : "เปิดดูผลลัพธ์และรายงาน")
+    : ["blocked", "failed"].includes(status)
+      ? "เปิดดูสาเหตุและรายละเอียด"
+      : autoEligible
+        ? "Backend ดูแลงานนี้อัตโนมัติ"
+        : "กดเพื่อดูรายละเอียด";
+  card.append(topline, title);
+  if (source === "kanban") card.appendChild(destination);
+  card.appendChild(hint);
   card.addEventListener("click", () => openTaskDetail(mission.id, card, { source }));
   return card;
 }
@@ -1808,7 +2189,8 @@ function renderChatLog(subject, type) {
   if (!els.modalChatLog) return;
   const scoped = state.chatLog
     .filter((line) => line.scopeType === type && line.scopeId === subject?.id)
-    .slice(0, 16);
+    .slice(0, 16)
+    .reverse();
   const transcript = type === "agent"
     ? state.meetingTranscript
       .filter((line) => line.from === subject.id || line.to === subject.id || line.participants?.includes(subject.id))
@@ -1842,6 +2224,7 @@ function renderChatLog(subject, type) {
     item.append(speaker, text);
     els.modalChatLog.appendChild(item);
   });
+  els.modalChatLog.scrollTop = els.modalChatLog.scrollHeight;
 }
 
 const MISSION_KANBAN_COLUMNS = [
@@ -1872,6 +2255,50 @@ function normalizeMissionStatus(status = "queued") {
     return normalized;
   }
   return "queued";
+}
+
+function getMissionPresentationStatus(mission = {}) {
+  const storedStatus = normalizeMissionStatus(mission.status);
+  const counts = mission?.delegation?.subtaskStatusCounts;
+  const hasDelegatedChildren = (
+    Array.isArray(mission.subtaskIds) && mission.subtaskIds.length > 0
+  ) || Number(mission?.delegation?.subtaskCount || 0) > 0;
+  if (!hasDelegatedChildren || !counts || typeof counts !== "object" || Array.isArray(counts)) {
+    return storedStatus;
+  }
+  const count = (status) => Math.max(0, Number(counts[status]) || 0);
+  if (count("running") > 0) return "running";
+  if (count("waiting_approval") > 0) return "waiting_approval";
+  if (count("queued") > 0) return "queued";
+  if (count("failed") > 0) return "failed";
+  if (count("blocked") > 0) return "blocked";
+  const terminalSuccess = count("completed") + count("archived");
+  const subtaskCount = Math.max(0, Number(mission?.delegation?.subtaskCount || mission.subtaskIds?.length) || 0);
+  if (subtaskCount > 0 && terminalSuccess >= subtaskCount) return "completed";
+  return storedStatus;
+}
+
+function isBackendAutoEligibleMission(mission) {
+  const directlyAutoEligible = Boolean(
+    mission?.executionMode === "auto_guarded"
+    && mission?.autoEligible === true
+    && mission?.requiresHumanApproval === false
+  );
+  if (directlyAutoEligible) return true;
+  if (mission?.toolId !== "manager_delegate" || mission?.requiresHumanApproval === true) return false;
+  const childIds = Array.isArray(mission?.subtaskIds) ? mission.subtaskIds.filter(Boolean) : [];
+  if (!childIds.length) return false;
+  const childMissions = childIds
+    .map((id) => state.missions.find((item) => item.id === id))
+    .filter(Boolean);
+  return Boolean(
+    childMissions.length === childIds.length
+    && childMissions.every((child) => (
+      child.executionMode === "auto_guarded"
+      && child.autoEligible === true
+      && child.requiresHumanApproval === false
+    ))
+  );
 }
 
 function getAgentIdFromOwner(owner) {
@@ -1908,6 +2335,424 @@ function formatDashboardValue(value) {
   return String(value ?? "-");
 }
 
+function safeDashboardDisplayText(value, fallback = "-") {
+  const text = String(value ?? fallback).replace(/\s+/g, " ").trim() || fallback;
+  return text
+    .replace(/\b(?:pid|process[_ -]?id)\b\s*["']?\s*[:=#-]?\s*\d+\b/gi, "PID [ปกปิด]")
+    .replace(/\bbearer\s+[^\s,;|]+/gi, "Bearer [ปกปิด]")
+    .replace(/\b((?:api[_ .-]?key|token|password|passwd|secret|authorization|cookie|bot[_ .-]?token|broker[_ .-]?password|account(?:[_ .-]?(?:number|id|login))?|broker[_ .-]?server|terminal[_ .-]?path|process[_ .-]?id|pid))\b\s*["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^,;|•]+)/gi, "$1: [ปกปิด]")
+    .replace(/\b[A-Za-z]:\\[^,\n;|]+/g, "[ปกปิดตำแหน่งไฟล์]")
+    .replace(/\\\\[^,\n;|]+/g, "[ปกปิดตำแหน่งไฟล์]")
+    .replace(/(^|\s)\/(?:Users|home|root|var|etc|tmp|opt|srv)\/[^,\n;|]+/gi, "$1[ปกปิดตำแหน่งไฟล์]")
+    .slice(0, 600);
+}
+
+function safeAgentChatReplyText(value, fallback = "Agent ยังไม่ส่งคำตอบกลับมา") {
+  const text = String(value ?? fallback)
+    .replace(/\u0000/g, "")
+    .replace(/\r\n?/g, "\n")
+    .trim() || fallback;
+  return text
+    .replace(/\b(?:pid|process[_ -]?id)\b\s*["']?\s*[:=#-]?\s*\d+\b/gi, "PID [ปกปิด]")
+    .replace(/\bbearer\s+[^\s,;|]+/gi, "Bearer [ปกปิด]")
+    .replace(/\b((?:api[_ .-]?key|token|password|passwd|secret|authorization|cookie|bot[_ .-]?token|broker[_ .-]?password|account(?:[_ .-]?(?:number|id|login))?|broker[_ .-]?server|terminal[_ .-]?path|process[_ .-]?id|pid))\b\s*["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^,;|•\n]+)/gi, "$1: [ปกปิด]")
+    .replace(/\b[A-Za-z]:\\[^,\n;|]+/g, "[ปกปิดตำแหน่งไฟล์]")
+    .replace(/\\\\[^,\n;|]+/g, "[ปกปิดตำแหน่งไฟล์]")
+    .replace(/(^|\s)\/(?:Users|home|root|var|etc|tmp|opt|srv)\/[^,\n;|]+/gi, "$1[ปกปิดตำแหน่งไฟล์]")
+    .slice(0, 5000);
+}
+
+function normalizeConnectionStatus(value = "not_connected") {
+  const normalized = String(value || "not_connected").trim().toLowerCase().replace(/[ -]+/g, "_");
+  if (["connected", "online", "ready", "available", "active", "enabled", "healthy", "ok", "detected", "configured"].includes(normalized)) {
+    return "connected";
+  }
+  if (["coming_soon", "planned", "unimplemented", "not_implemented", "disabled_unimplemented"].includes(normalized)) {
+    return "coming_soon";
+  }
+  if (["partial", "degraded", "warning", "needs_attention"].includes(normalized)) return "partial";
+  if (["checking", "loading", "running", "not_checked"].includes(normalized)) return "checking";
+  if (["error", "failed", "blocked", "config_error", "auth_required", "needs_login", "not_configured", "not_found", "unavailable"].includes(normalized)) return "error";
+  return "not_connected";
+}
+
+function connectionStatusLabel(value, fallback = "ยังไม่เชื่อม") {
+  const normalized = String(value || "not_connected").trim().toLowerCase().replace(/[ -]+/g, "_");
+  const labels = {
+    connected: "เชื่อมแล้ว",
+    online: "เชื่อมแล้ว",
+    ready: "พร้อมใช้งาน",
+    available: "พร้อมใช้งาน",
+    active: "กำลังใช้งาน",
+    enabled: "เปิดใช้งานแล้ว",
+    healthy: "ทำงานปกติ",
+    ok: "ทำงานปกติ",
+    detected: "ตรวจพบแล้ว",
+    configured: "ตั้งค่าแล้ว",
+    not_connected: "ยังไม่เชื่อม",
+    disconnected: "ยังไม่เชื่อม",
+    offline: "ออฟไลน์",
+    unavailable: "ยังไม่พร้อมใช้งาน",
+    not_found: "ยังไม่พบระบบ",
+    not_configured: "ยังไม่ได้ตั้งค่า",
+    not_checked: "ยังไม่ได้ตรวจ",
+    needs_login: "ต้องเข้าสู่ระบบก่อน",
+    needs_attention: "ต้องตรวจสอบ",
+    not_required: "ไม่จำเป็นสำหรับ Dashboard นี้",
+    missing: "ยังไม่พบระบบ",
+    disabled: "ยังไม่เปิดใช้งาน",
+    coming_soon: "Coming Soon",
+    planned: "Coming Soon",
+    unimplemented: "Coming Soon",
+    not_implemented: "Coming Soon",
+    disabled_unimplemented: "Coming Soon",
+    partial: "เชื่อมต่อบางส่วน",
+    degraded: "เชื่อมต่อบางส่วน",
+    warning: "ควรตรวจสอบ",
+    checking: "กำลังตรวจสอบ",
+    loading: "กำลังตรวจสอบ",
+    running: "กำลังทำงาน",
+    error: "ตรวจไม่สำเร็จ",
+    failed: "ตรวจไม่สำเร็จ",
+    blocked: "ถูกระงับไว้",
+    auth_required: "ต้อง Login Codex",
+    config_error: "Codex Config มีปัญหา",
+  };
+  return labels[normalized] || STATUS_LABELS[normalized] || fallback;
+}
+
+function getDashboardDataAvailability(profile, hasReport = false) {
+  const availability = profile?.availability;
+  const dataAvailability = availability && typeof availability === "object" && !Array.isArray(availability)
+    ? availability.data
+    : availability;
+  const status = dataAvailability && typeof dataAvailability === "object" && !Array.isArray(dataAvailability)
+    ? (dataAvailability.status || dataAvailability.value || dataAvailability.state)
+    : dataAvailability;
+  const label = dataAvailability && typeof dataAvailability === "object" && !Array.isArray(dataAvailability)
+    ? (dataAvailability.labelTh || dataAvailability.label)
+    : "";
+  const safeStatus = typeof status === "string" && status.trim()
+    ? status
+    : (hasReport ? "available" : "checking");
+  return {
+    status: safeStatus,
+    label: label || profile?.labelTh || connectionStatusLabel(safeStatus, "กำลังตรวจสอบ"),
+  };
+}
+
+function setConnectionBadge(element, status, label = "") {
+  if (!element) return;
+  const displayState = normalizeConnectionStatus(status);
+  element.dataset.status = displayState;
+  element.textContent = safeDashboardDisplayText(label || connectionStatusLabel(status));
+}
+
+function formatConnectionInterval(minutes) {
+  const value = Number(minutes);
+  if (!Number.isFinite(value) || value <= 0) return "";
+  if (value % 60 === 0) return `ทุก ${value / 60} ชั่วโมง`;
+  return `ทุก ${Math.round(value)} นาที`;
+}
+
+function dashboardUsesCodex(report, items = []) {
+  const capabilities = Array.isArray(report?.capabilities) ? report.capabilities : [];
+  return capabilities.some((item) => /^codex(?:_|$)/i.test(String(item?.id || "")))
+    || items.some((item) => /codex/i.test(`${item?.id || ""} ${item?.labelTh || ""}`));
+}
+
+function codexQuotaConnectionItem(codexUsage = {}) {
+  const snapshot = state.codexRate.snapshot;
+  const activityLabel = codexUsage?.activeNow
+    ? "Dashboard นี้มีงาน Codex กำลังทำงานอยู่"
+    : "ขณะนี้ Dashboard นี้ไม่ได้กำลังใช้ Codex";
+  if (!snapshot?.primary) {
+    return {
+      id: "codex_account_quota",
+      labelTh: "โควตาบัญชี Codex",
+      status: snapshot?.status === "loading" ? "checking" : (snapshot?.status || "not_connected"),
+      detailTh: snapshot?.status === "auth_required"
+        ? "ต้อง Login Codex ในเครื่องก่อน จึงจะอ่านโควตาได้"
+        : snapshot?.status === "config_error"
+          ? "Codex Config มีปัญหา จึงยังอ่านโควตาไม่ได้"
+          : "ยังไม่ได้รับข้อมูลโควตาจาก Local Runner",
+      required: false,
+      action: null,
+    };
+  }
+  return {
+    id: "codex_account_quota",
+    labelTh: "โควตาบัญชี Codex",
+    status: snapshot.limitReached ? "blocked" : "connected",
+    detailTh: `${activityLabel} • ข้อมูลรวมของบัญชี: เหลือ ${formatCodexRatePercent(snapshot.primary.remainingPercent)} • ใช้แล้ว ${formatCodexRatePercent(snapshot.primary.usedPercent)} • ${formatCodexRateReset(snapshot.primary.resetsAt)}`,
+    required: false,
+    action: null,
+  };
+}
+
+function createConnectionChecklistRow(item = {}) {
+  const row = document.createElement("div");
+  const heading = document.createElement("div");
+  const label = document.createElement("strong");
+  const badges = document.createElement("div");
+  const status = document.createElement("span");
+  const detail = document.createElement("p");
+  const normalizedStatus = normalizeConnectionStatus(item.status);
+
+  row.className = "connection-check-item";
+  row.dataset.status = normalizedStatus;
+  heading.className = "connection-check-heading";
+  label.textContent = safeDashboardDisplayText(item.labelTh, "รายการเชื่อมต่อ");
+  badges.className = "connection-check-badges";
+  status.className = "connection-badge";
+  setConnectionBadge(status, item.status);
+  badges.appendChild(status);
+
+  if (item.required === true) {
+    const required = document.createElement("span");
+    required.className = "connection-required-badge";
+    required.textContent = "จำเป็น";
+    badges.appendChild(required);
+  }
+
+  heading.append(label, badges);
+  detail.textContent = safeDashboardDisplayText(item.detailTh, normalizedStatus === "coming_soon" ? "ส่วนนี้ยังเป็น Coming Soon" : "ยังไม่มีรายละเอียดจาก Local Runner");
+  row.append(heading, detail);
+  return row;
+}
+
+function normalizeMetatraderCandidate(candidate) {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+  const candidateId = String(candidate.candidateId || "").trim();
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(candidateId)) return null;
+  const platformValue = String(candidate.platform || "").trim().toUpperCase();
+  if (!["MT4", "MT5"].includes(platformValue)) return null;
+  const runningStateValue = String(candidate.runningState || "unknown").trim().toLowerCase();
+  const runningState = ["unknown", "platform_running_detected", "not_running_detected"].includes(runningStateValue)
+    ? runningStateValue
+    : "unknown";
+  const safeLabel = safeDashboardDisplayText(candidate.labelTh || `${platformValue} Terminal ที่ตรวจพบ`);
+  return {
+    candidateId,
+    platform: platformValue,
+    labelTh: safeLabel.includes("[ปกปิด") ? `${platformValue} Terminal ที่ตรวจพบ` : safeLabel,
+    detected: candidate.detected === true,
+    runningState,
+  };
+}
+
+function getMetatraderSelectionModel(checklist) {
+  const rawSelection = checklist?.metatraderSelection && typeof checklist.metatraderSelection === "object"
+    ? checklist.metatraderSelection
+    : {};
+  const candidates = [];
+  const seenIds = new Set();
+  const appendCandidate = (value) => {
+    const candidate = normalizeMetatraderCandidate(value);
+    if (!candidate || seenIds.has(candidate.candidateId)) return;
+    seenIds.add(candidate.candidateId);
+    candidates.push(candidate);
+  };
+  (Array.isArray(rawSelection.candidates) ? rawSelection.candidates : []).slice(0, 24).forEach(appendCandidate);
+  appendCandidate(rawSelection.selectedCandidate);
+  const selectedCandidate = normalizeMetatraderCandidate(rawSelection.selectedCandidate);
+  const declaredCount = Number(rawSelection.candidateCount);
+  return {
+    candidates,
+    selectedCandidate,
+    candidateCount: Number.isFinite(declaredCount)
+      ? Math.max(candidates.length, Math.min(1000, Math.max(0, Math.trunc(declaredCount))))
+      : candidates.length,
+    canSelect: rawSelection.canSelect !== false && candidates.length > 0,
+    detailTh: safeDashboardDisplayText(rawSelection.detailTh || "เลือก Terminal เป้าหมายได้เมื่อ Local Runner ตรวจพบรายการแบบอ่านอย่างเดียว"),
+  };
+}
+
+function renderMetatraderSelection(subject, checklist, canDiscoverMetatrader) {
+  if (!els.modalDashboardMetatraderSelection || !els.modalDashboardMetatraderCandidates) return;
+  els.modalDashboardMetatraderSelection.hidden = !canDiscoverMetatrader;
+  if (!canDiscoverMetatrader) {
+    els.modalDashboardMetatraderCandidates.innerHTML = "";
+    if (els.modalDashboardConfirmMetatrader) els.modalDashboardConfirmMetatrader.disabled = true;
+    return;
+  }
+
+  const selection = getMetatraderSelectionModel(checklist);
+  const backendSelectedId = selection.selectedCandidate?.candidateId || "";
+  let chosenId = String(state.metatraderCandidateChoice[subject.id] || "");
+  if (!selection.candidates.some((candidate) => candidate.candidateId === chosenId)) {
+    chosenId = backendSelectedId;
+    if (chosenId) state.metatraderCandidateChoice[subject.id] = chosenId;
+    else delete state.metatraderCandidateChoice[subject.id];
+  }
+  const chosenCandidate = selection.candidates.find((candidate) => candidate.candidateId === chosenId) || null;
+
+  if (els.modalDashboardMetatraderSummary) {
+    els.modalDashboardMetatraderSummary.textContent = selection.selectedCandidate
+      ? `เลือกแล้ว: ${selection.selectedCandidate.labelTh} (${selection.selectedCandidate.platform})${selection.selectedCandidate.detected ? "" : " • ไม่พบในการตรวจล่าสุด"}`
+      : chosenCandidate
+        ? `พบแล้ว ${selection.candidateCount} รายการ • เลือกไว้ ${chosenCandidate.labelTh} กรุณากดยืนยัน`
+        : selection.candidateCount
+          ? `พบแล้ว ${selection.candidateCount} รายการ • กรุณาเลือก Terminal เป้าหมาย`
+          : "พบแล้ว 0 รายการ • กด ‘ค้นหา MT4 / MT5’ เพื่ออัปเดต";
+  }
+
+  els.modalDashboardMetatraderCandidates.innerHTML = "";
+  if (!selection.candidates.length) {
+    const empty = document.createElement("p");
+    empty.className = "metatrader-candidates-empty";
+    empty.textContent = selection.detailTh;
+    els.modalDashboardMetatraderCandidates.appendChild(empty);
+  } else {
+    selection.candidates.forEach((candidate, index) => {
+      const card = document.createElement("label");
+      const input = document.createElement("input");
+      const copy = document.createElement("span");
+      const title = document.createElement("strong");
+      const detail = document.createElement("span");
+      const badges = document.createElement("span");
+      const platform = document.createElement("span");
+      const status = document.createElement("span");
+      const isBackendSelected = candidate.candidateId === backendSelectedId;
+
+      card.className = "metatrader-candidate-card";
+      card.classList.toggle("selected", candidate.candidateId === chosenId);
+      input.type = "radio";
+      input.name = `metatrader-candidate-${subject.id}`;
+      input.value = candidate.candidateId;
+      input.checked = candidate.candidateId === chosenId;
+      input.disabled = state.connectionAction.inFlight || !selection.canSelect || !candidate.detected;
+      input.setAttribute("aria-label", `${candidate.labelTh} ${candidate.platform}`);
+      input.addEventListener("change", () => {
+        state.metatraderCandidateChoice[subject.id] = candidate.candidateId;
+        renderMetatraderSelection(subject, checklist, canDiscoverMetatrader);
+      });
+
+      copy.className = "metatrader-candidate-copy";
+      title.textContent = candidate.labelTh;
+      detail.textContent = !candidate.detected
+        ? "ไม่พบรายการนี้ในการตรวจล่าสุด และยังไม่ได้เชื่อม Adapter"
+        : candidate.runningState === "platform_running_detected"
+        ? "พบโปรแกรมกำลังทำงาน แต่ยังไม่ได้เชื่อม Adapter"
+        : candidate.runningState === "not_running_detected"
+          ? "พบการติดตั้ง แต่ยังไม่พบว่ากำลังทำงาน และยังไม่ได้เชื่อม Adapter"
+          : "ระบบตรวจพบรายการนี้แบบอ่านอย่างเดียว ยังไม่ได้เชื่อม Adapter";
+      copy.append(title, detail);
+
+      badges.className = "metatrader-candidate-badges";
+      platform.className = "metatrader-platform-badge";
+      platform.textContent = candidate.platform;
+      status.className = "connection-badge";
+      setConnectionBadge(
+        status,
+        isBackendSelected ? "configured" : candidate.detected ? "detected" : "not_found",
+        isBackendSelected ? "เลือกแล้ว" : candidate.detected ? "พบแล้ว" : "ไม่พบล่าสุด",
+      );
+      badges.append(platform, status);
+      card.append(input, copy, badges);
+      els.modalDashboardMetatraderCandidates.appendChild(card);
+    });
+  }
+
+  if (els.modalDashboardConfirmMetatrader) {
+    els.modalDashboardConfirmMetatrader.disabled = state.connectionAction.inFlight
+      || !selection.canSelect
+      || !chosenId
+      || !chosenCandidate?.detected
+      || chosenId === backendSelectedId;
+  }
+}
+
+function renderDashboardConnectionPanel(subject, propertyRole = null) {
+  if (!subject || !els.modalDashboardConnectionList) return;
+  const report = state.propReports[subject.id] || null;
+  const rawChecklist = report?.connectionChecklist;
+  const checklist = rawChecklist && (!rawChecklist.dashboardId || rawChecklist.dashboardId === subject.id)
+    ? rawChecklist
+    : null;
+  const profile = report?.dashboardProfile || null;
+  const operationMode = checklist?.operationMode || {};
+  const aiSchedule = operationMode?.aiEveryTwoHours || {};
+  const backendItems = Array.isArray(checklist?.items) ? checklist.items.slice(0, 20) : [];
+  const items = [...backendItems];
+  const codexUsage = checklist?.codexUsage || {};
+  const codexDependency = String(codexUsage?.dependency || "").trim().toLowerCase();
+  const shouldShowCodexQuota = codexDependency
+    ? codexDependency !== "none"
+    : dashboardUsesCodex(report, backendItems);
+
+  if (shouldShowCodexQuota && !items.some((item) => ["codex_account_quota", "codex_quota"].includes(item?.id))) {
+    items.push(codexQuotaConnectionItem(codexUsage));
+  }
+
+  const moduleName = profile?.moduleNameTh || propertyRole?.displayTitle || displayPropName(subject.id, subject.label);
+  const dataAvailability = getDashboardDataAvailability(profile, Boolean(report));
+  if (els.modalDashboardModuleName) els.modalDashboardModuleName.textContent = safeDashboardDisplayText(moduleName, "โมดูลของอุปกรณ์");
+  setConnectionBadge(els.modalDashboardModuleAvailability, dataAvailability.status, dataAvailability.label);
+
+  const currentMode = operationMode?.current || "manual";
+  const currentModeLabel = operationMode?.labelTh || (currentMode === "ai_every_2h" ? "AI ตรวจทุก 2 ชั่วโมง" : "สั่งทำงานเอง");
+  if (els.modalDashboardOperationMode) {
+    els.modalDashboardOperationMode.textContent = safeDashboardDisplayText(currentModeLabel, "สั่งทำงานเอง");
+  }
+
+  const scheduleInterval = formatConnectionInterval(aiSchedule?.intervalMinutes);
+  const scheduleLabel = aiSchedule?.labelTh || connectionStatusLabel(aiSchedule?.status || "disabled", "ยังไม่เปิดใช้งาน");
+  if (els.modalDashboardScheduleStatus) {
+    els.modalDashboardScheduleStatus.textContent = safeDashboardDisplayText(
+      [scheduleLabel, scheduleInterval].filter(Boolean).join(" • "),
+      "ยังไม่เปิดใช้งาน",
+    );
+  }
+
+  const overallStatus = checklist?.overallStatus || (normalizeConnectionStatus(dataAvailability.status) === "coming_soon" ? "coming_soon" : (report ? "not_connected" : "checking"));
+  setConnectionBadge(els.modalDashboardConnectionOverall, overallStatus);
+  if (els.modalDashboardConnectionCheckedAt) {
+    els.modalDashboardConnectionCheckedAt.textContent = checklist?.checkedAt
+      ? `ตรวจล่าสุด ${formatThaiDateTime(checklist.checkedAt)}`
+      : "รอการตรวจจาก Local Runner";
+  }
+
+  els.modalDashboardConnectionList.innerHTML = "";
+  if (!items.length) {
+    const emptyStatus = normalizeConnectionStatus(dataAvailability.status) === "coming_soon" ? "coming_soon" : "not_connected";
+    els.modalDashboardConnectionList.appendChild(createConnectionChecklistRow({
+      labelTh: emptyStatus === "coming_soon" ? "โมดูลนี้ยังไม่เปิดใช้งาน" : "ยังไม่มีผลตรวจการเชื่อมต่อ",
+      status: emptyStatus,
+      detailTh: emptyStatus === "coming_soon"
+        ? "Coming Soon — ระบบจะแสดง Checklist เมื่อโมดูลพร้อมเชื่อมต่อ"
+        : "กด ‘ตรวจการเชื่อมต่อใหม่’ เพื่อขอข้อมูลจาก Local Runner",
+      required: false,
+    }));
+  } else {
+    items.forEach((item) => els.modalDashboardConnectionList.appendChild(createConnectionChecklistRow(item)));
+  }
+
+  const canDiscoverMetatrader = backendItems.some((item) => item?.action === "discover_metatrader");
+  renderMetatraderSelection(subject, checklist, canDiscoverMetatrader);
+  const actionMatches = state.connectionAction.propId === subject.id;
+  if (els.modalDashboardRefreshConnections) {
+    els.modalDashboardRefreshConnections.disabled = state.connectionAction.inFlight;
+  }
+  if (els.modalDashboardDiscoverMetatrader) {
+    els.modalDashboardDiscoverMetatrader.hidden = !canDiscoverMetatrader;
+    els.modalDashboardDiscoverMetatrader.disabled = state.connectionAction.inFlight;
+  }
+  if (els.modalDashboardConnectionActionStatus) {
+    els.modalDashboardConnectionActionStatus.dataset.tone = actionMatches ? state.connectionAction.tone : "neutral";
+    els.modalDashboardConnectionActionStatus.textContent = actionMatches && state.connectionAction.message
+      ? safeDashboardDisplayText(state.connectionAction.message)
+      : "ปุ่มนี้ส่งคำขอแบบอ่านอย่างเดียวไปยัง Local Runner และไม่เปิดเผย Path, PID หรือข้อมูลลับ";
+  }
+}
+
+function refreshOpenDashboardConnectionPanel() {
+  if (!state.modal.open || state.modal.type !== "prop") return;
+  const subject = getModalSubject();
+  if (!subject || getModalSurface("prop", subject.id) !== "dashboard") return;
+  renderDashboardConnectionPanel(subject, getPropertyRole(subject));
+}
+
 function structuredDashboardItems(value, section, status, owner) {
   if (value === null || value === undefined || value === "") return [];
   const rows = Array.isArray(value)
@@ -1915,18 +2760,19 @@ function structuredDashboardItems(value, section, status, owner) {
     : (value && typeof value === "object" ? Object.entries(value).map(([name, detail]) => ({ name, detail })) : [value]);
   return rows.slice(0, 8).map((row, index) => {
     if (row && typeof row === "object" && !Array.isArray(row)) {
-      const rowTitle = row.title || row.label || row.name || row.id || `${section} ${index + 1}`;
+      const rawRowTitle = row.title || row.label || row.name || row.id || `${section} ${index + 1}`;
+      const rowTitle = section === "ตัวชี้วัด" ? dashboardFieldLabel(rawRowTitle) : rawRowTitle;
       const rowDetail = row.detail ?? row.summary ?? row.message ?? row.value ?? row.finding ?? row.action ?? row.risk ?? row;
       return {
-        title: `${section}: ${rowTitle}`,
-        detail: formatDashboardValue(rowDetail),
+        title: safeDashboardDisplayText(`${section}: ${rowTitle}`),
+        detail: safeDashboardDisplayText(section === "ตัวชี้วัด" ? dashboardMetricValue(rawRowTitle, rowDetail) : formatDashboardValue(rowDetail)),
         status: row.status || status,
         owner: row.ownerAgentId || row.owner || owner,
       };
     }
     return {
       title: `${section} ${index + 1}`,
-      detail: formatDashboardValue(row),
+      detail: safeDashboardDisplayText(formatDashboardValue(row)),
       status,
       owner,
     };
@@ -1937,8 +2783,8 @@ function structuredReportItems(item) {
   const owner = item?.ownerAgentId || item?.owner || "mission_archivist";
   return [
     {
-      title: item?.title || item?.id || "รายงานแบบมีโครงสร้าง",
-      detail: item?.summary || displayStatus(item?.status) || "รายงานนี้ถูกส่งมาที่ Dashboard แล้ว",
+      title: safeDashboardDisplayText(item?.title || item?.id || "รายงานแบบมีโครงสร้าง"),
+      detail: safeDashboardDisplayText(item?.summary || displayStatus(item?.status) || "รายงานนี้ถูกส่งมาที่ Dashboard แล้ว"),
       status: item?.status || "ready",
       owner,
     },
@@ -2012,7 +2858,7 @@ function renderDashboardKpis(subject, report, missions) {
   if (!els.modalDashboardKpis) return;
   els.modalDashboardKpis.innerHTML = "";
   const openStatuses = new Set(["queued", "running", "waiting_approval", "blocked"]);
-  const openCount = missions.filter((mission) => openStatuses.has(normalizeMissionStatus(mission.status))).length;
+  const openCount = missions.filter((mission) => openStatuses.has(getMissionPresentationStatus(mission))).length;
   const latestReport = Array.isArray(report?.reports) ? report.reports[0] : null;
   const reportMetrics = Object.entries(latestReport?.metrics || {}).slice(0, 3);
   const capabilitySummary = report?.capabilitySummary || null;
@@ -2026,15 +2872,15 @@ function renderDashboardKpis(subject, report, missions) {
       ["ระบบพร้อม", `${capabilitySummary.runtimeReady || 0}/${capabilitySummary.total || 0}`, "online"],
       ["ต้องผ่านการอนุมัติ", String(capabilitySummary.approvalGated || 0), "active"],
     ] : []),
-    ...reportMetrics.map(([name, value]) => [name, formatDashboardValue(value), "metric"]),
+    ...reportMetrics.map(([name, value]) => [safeDashboardDisplayText(dashboardFieldLabel(name)), safeDashboardDisplayText(dashboardMetricValue(name, value)), "metric"]),
   ];
   kpis.forEach(([label, value, tone]) => {
     const card = document.createElement("div");
     const name = document.createElement("span");
     const metric = document.createElement("strong");
     card.className = `dashboard-kpi ${tone}`;
-    name.textContent = label;
-    metric.textContent = value;
+    name.textContent = safeDashboardDisplayText(label);
+    metric.textContent = safeDashboardDisplayText(value);
     card.append(name, metric);
     els.modalDashboardKpis.appendChild(card);
   });
@@ -2080,6 +2926,7 @@ function renderPropDashboard(subject, propertyRole) {
   renderTaskList(els.modalDashboardWork, missions.slice(0, 12), "ยังไม่มี Task ที่ส่งมาที่ Dashboard นี้");
   renderCardList(els.modalDashboardReports, [...reportItems, ...meetingItems], "ยังไม่มีรายงานหรือหลักฐานที่ส่งมาที่ Dashboard นี้");
   renderCardList(els.modalDashboardStatus, statusItems, "ยังไม่มีสถานะจากระบบในเครื่อง");
+  renderDashboardConnectionPanel(subject, propertyRole);
   if (els.modalDashboardWorkCount) els.modalDashboardWorkCount.textContent = `${missions.length} Mission`;
   if (els.modalDashboardFreshness) {
     const updatedAt = report?.updatedAt ? new Date(report.updatedAt) : null;
@@ -2146,6 +2993,7 @@ function hasHumanApprovalDecision(mission) {
 
 function isMissionReadyForExplicitExecution(mission) {
   if (!mission?.id || normalizeMissionStatus(mission.status) !== "waiting_approval") return false;
+  if (isBackendAutoEligibleMission(mission)) return false;
   return mission.readyToExecute === true;
 }
 
@@ -2238,16 +3086,33 @@ function appendTaskDetailSection(container, titleText, value, className = "") {
 }
 
 function getMissionNextStep(mission) {
-  const status = normalizeMissionStatus(mission?.status);
-  if (status === "queued") return "รอ Agent ผู้รับผิดชอบเริ่มงาน";
-  if (status === "running") return "รอ Agent ทำงานและส่งรายงานกลับมายังจุดแสดงผล";
+  const status = getMissionPresentationStatus(mission);
+  const autoEligible = isBackendAutoEligibleMission(mission);
+  const waitingChildren = Math.max(0, Number(mission?.delegation?.subtaskStatusCounts?.waiting_approval) || 0);
+  if (status === "queued") {
+    return autoEligible
+      ? "Backend รับงานเข้าคิวอัตโนมัติแล้ว Agent จะเริ่มเมื่อ Runner ว่าง"
+      : "รอ Agent ผู้รับผิดชอบเริ่มงาน";
+  }
+  if (status === "running") {
+    return autoEligible
+      ? "Agent กำลังทำงานผ่าน Local Runner และจะส่งรายงานกลับอุปกรณ์ที่กำหนด"
+      : "รอ Agent ทำงานและส่งรายงานกลับมายังจุดแสดงผล";
+  }
   if (status === "waiting_approval") {
+    if (waitingChildren > 0) {
+      return `Task ย่อย ${waitingChildren} งานกำลังรอการตรวจสอบ ยังไม่มี Runner ของ Task เหล่านี้เริ่มทำงาน`;
+    }
     return isMissionReadyForExplicitExecution(mission)
       ? "อนุมัติครบแล้ว แต่ยังไม่รันอัตโนมัติ ต้องยืนยัน Mission ID ที่โต๊ะ Mission ก่อน"
       : "รอผู้ใช้และ Risk Guard ตรวจสอบก่อน งานจริงจะยังไม่เริ่ม";
   }
   if (status === "blocked") return "เปิดรายละเอียดสาเหตุ แล้วให้ Manager Agent หรือ Risk Guard ช่วยปลดข้อขัดข้อง";
-  if (status === "completed") return "ตรวจรายงานที่ส่งกลับมา แล้วเก็บ Mission เข้าคลังเมื่อใช้งานเสร็จ";
+  if (status === "completed") {
+    return autoEligible
+      ? "งานอัตโนมัติเสร็จแล้ว เปิดรายงานที่อุปกรณ์ปลายทางเพื่อตรวจผล"
+      : "ตรวจรายงานที่ส่งกลับมา แล้วเก็บ Mission เข้าคลังเมื่อใช้งานเสร็จ";
+  }
   if (status === "failed") return "ตรวจสาเหตุและรายงานก่อนสร้าง Task ใหม่ ระบบจะไม่ลองรันซ้ำเอง";
   if (status === "archived") return "Mission นี้ถูกเก็บในคลังแล้ว เปิดดูได้โดยไม่กระทบงานปัจจุบัน";
   return "รอข้อมูลขั้นตอนถัดไปจาก Manager Agent";
@@ -2277,11 +3142,14 @@ function renderMissionDetail(mission) {
   const nextText = document.createElement("p");
   friendly.className = "task-detail-friendly";
   facts.className = "task-detail-facts";
-  appendMissionDetailRow(facts, "สถานะ", displayStatus(normalizeMissionStatus(mission.status)));
+  const presentationStatus = getMissionPresentationStatus(mission);
+  const autoEligible = isBackendAutoEligibleMission(mission);
+  appendMissionDetailRow(facts, "สถานะ", displayStatus(presentationStatus));
   appendMissionDetailRow(facts, "ผู้รับผิดชอบ", displayAgentName(getAgentIdFromOwner(mission.owner) || mission.owner, "ยังไม่ได้มอบหมาย"));
   appendMissionDetailRow(facts, "จุดแสดงผล", displayPropName(mission.targetId || "mission_strategy_table"));
   appendMissionDetailRow(facts, "ความเสี่ยง", displayRisk(mission.risk));
-  appendMissionDetailRow(facts, "การอนุมัติ", displayApproval(mission.approval?.state));
+  appendMissionDetailRow(facts, "รูปแบบการทำงาน", autoEligible ? "Backend อนุญาตให้อัตโนมัติ" : displayStatus(mission.executionMode || "manual_guarded"));
+  appendMissionDetailRow(facts, "การอนุมัติ", autoEligible ? "งานนี้ไม่ต้องกดอนุมัติซ้ำ" : displayApproval(mission.approval?.state));
   appendMissionDetailRow(facts, "อัปเดตล่าสุด", formatThaiDateTime(mission.updatedAt || mission.createdAt));
   friendly.appendChild(facts);
   appendTaskDetailSection(friendly, "สิ่งที่ได้รับมอบหมาย", mission.detail || "ยังไม่มีคำอธิบายเพิ่มเติม", "task-detail-instruction");
@@ -2304,6 +3172,9 @@ function renderMissionDetail(mission) {
   appendMissionDetailRow(systemGrid, "ID ผู้ขอ", mission.requester || mission.requesterId || "human");
   appendMissionDetailRow(systemGrid, "ID จุดแสดงผล", mission.targetId || "mission_strategy_table");
   appendMissionDetailRow(systemGrid, "Tool ID", mission.toolId || "queue_only");
+  appendMissionDetailRow(systemGrid, "โหมดจาก Backend", mission.executionMode || "manual_guarded");
+  appendMissionDetailRow(systemGrid, "เริ่มอัตโนมัติได้", mission.autoEligible === true ? "true" : "false");
+  appendMissionDetailRow(systemGrid, "ต้องให้ผู้ใช้อนุมัติ", mission.requiresHumanApproval === true ? "true" : "false");
   appendMissionDetailRow(systemGrid, "ระดับโมเดล", mission.modelTier || "local_default");
   appendMissionDetailRow(systemGrid, "งบประมาณ", mission.budget || "local_defaults");
   appendMissionDetailRow(systemGrid, "Mission หลัก", mission.parentMissionId || "-");
@@ -2318,7 +3189,16 @@ function renderMissionDetail(mission) {
   systemDisclosure.append(systemSummary, systemGrid);
   els.modalKanbanDetailBody.append(friendly, systemDisclosure);
 
-  if (normalizeMissionStatus(mission.status) === "waiting_approval") {
+  if (autoEligible) {
+    const notice = document.createElement("p");
+    notice.className = "kanban-readonly-notice auto-eligible";
+    notice.textContent = presentationStatus === "completed"
+      ? `Backend ทำ Task นี้เสร็จแล้ว และส่งรายงานไปที่ ${displayPropName(mission.targetId || "mission_strategy_table")}`
+      : "Backend ยืนยันว่า Task นี้เริ่มอัตโนมัติได้ จึงไม่มีปุ่มอนุมัติหรือปุ่มยืนยันการรันซ้ำบน Frontend";
+    els.modalKanbanDetailBody.appendChild(notice);
+  }
+
+  if (normalizeMissionStatus(mission.status) === "waiting_approval" && !autoEligible) {
     const notice = document.createElement("p");
     notice.className = "kanban-readonly-notice";
     notice.textContent = isMissionReadyForExplicitExecution(mission)
@@ -2334,6 +3214,7 @@ function renderMissionDetail(mission) {
   const canRecordApproval = openedFromKanban
     && normalizeMissionStatus(mission.status) === "waiting_approval"
     && Boolean(mission.approval?.required)
+    && !autoEligible
     && !approvalClosed
     && !hasHumanApprovalDecision(mission);
   if (els.modalKanbanApprove) {
@@ -2415,16 +3296,25 @@ function refreshOpenTaskDetail() {
   renderMissionDetail(mission);
 }
 
-function renderMissionKanban() {
+function renderMissionKanban({ preserveScroll = true } = {}) {
   if (!els.modalKanbanBoard) return;
-  const archivedCount = state.missions.filter((mission) => normalizeMissionStatus(mission.status) === "archived").length;
+  if (preserveScroll) {
+    els.modalKanbanBoard.querySelectorAll(".kanban-column[data-status]").forEach((section) => {
+      const status = section.dataset.status;
+      const list = section.querySelector(".kanban-column-list");
+      if (status && list) state.modal.kanbanScrollTop[status] = list.scrollTop;
+    });
+  } else {
+    state.modal.kanbanScrollTop = {};
+  }
+  const archivedCount = state.missions.filter((mission) => getMissionPresentationStatus(mission) === "archived").length;
   const query = String(state.modal.searchText || "").trim().toLowerCase();
   const columns = state.modal.showArchived
     ? [...MISSION_KANBAN_COLUMNS, { id: "archived", label: "เก็บเข้าคลังแล้ว" }]
     : MISSION_KANBAN_COLUMNS;
   const visibleStatuses = new Set(columns.map((column) => column.id));
   const missions = state.missions.filter((mission) => (
-    visibleStatuses.has(normalizeMissionStatus(mission.status))
+    visibleStatuses.has(getMissionPresentationStatus(mission))
     && missionMatchesSearch(mission, query)
   ));
 
@@ -2439,13 +3329,14 @@ function renderMissionKanban() {
 
   els.modalKanbanBoard.innerHTML = "";
   columns.forEach((column) => {
-    const columnMissions = missions.filter((mission) => normalizeMissionStatus(mission.status) === column.id);
+    const columnMissions = missions.filter((mission) => getMissionPresentationStatus(mission) === column.id);
     const section = document.createElement("section");
     const heading = document.createElement("div");
     const label = document.createElement("strong");
     const count = document.createElement("span");
     const list = document.createElement("div");
     section.className = `kanban-column status-${column.id}`;
+    section.dataset.status = column.id;
     heading.className = "kanban-column-heading";
     label.textContent = column.label;
     count.textContent = String(columnMissions.length);
@@ -2461,6 +3352,10 @@ function renderMissionKanban() {
     }
     section.append(heading, list);
     els.modalKanbanBoard.appendChild(section);
+    list.scrollTop = Math.max(0, Number(state.modal.kanbanScrollTop[column.id] || 0));
+    list.addEventListener("scroll", () => {
+      state.modal.kanbanScrollTop[column.id] = list.scrollTop;
+    }, { passive: true });
   });
 
   const selectedVisible = missions.find((mission) => mission.id === state.modal.selectedMissionId);
@@ -2554,7 +3449,7 @@ async function executeApprovedKanbanMission() {
       ? `${mission.id}: งานผ่านระบบป้องกันเสร็จแล้ว ให้ตรวจรายงานที่ถูกส่งกลับมา`
       : `${mission.id}: Backend จบงานโดยยังไม่มีรายงานสำเร็จ และระบบไม่ได้ลองรันซ้ำอัตโนมัติ`;
     feedbackTone = result.ok ? "ready" : "error";
-    addBridgeEvent("ผลการรัน", `${mission.id}: ${displayStatus(result.mission?.status || (result.ok ? "completed" : "failed"))}`);
+    addBridgeEvent("ผลการรัน", `${mission.id}: ${displayStatus(result.mission ? getMissionPresentationStatus(result.mission) : (result.ok ? "completed" : "failed"))}`);
     updateDecisionLog(feedbackMessage);
   } catch (error) {
     if (error.body?.mission) mergeBackendMission(error.body.mission);
@@ -2577,7 +3472,7 @@ function setModalTab(tabName) {
   const surface = getModalSurface();
   const allowedTabs = {
     agent: ["chat", "tasks"],
-    dashboard: ["dashboard"],
+    dashboard: ["connections", "tasks", "results"],
     kanban: ["kanban"],
   }[surface];
   state.modal.activeTab = allowedTabs.includes(tabName) ? tabName : allowedTabs[0];
@@ -2595,6 +3490,34 @@ function setModalTab(tabName) {
   saveSessionSnapshot();
 }
 
+function renderAgentComposer(subject) {
+  if (!subject || !els.modalAgentComposer) return;
+  const isCurrentChat = state.agentChat.agentId === subject.id;
+  const chatBusy = state.agentChat.inFlight;
+  if (els.modalComposerLabel) els.modalComposerLabel.textContent = `ข้อความถึง ${subject.name}`;
+  if (els.modalSendButton) {
+    els.modalSendButton.disabled = chatBusy;
+    els.modalSendButton.textContent = chatBusy ? "กำลังคิด..." : "คุยกับ Codex";
+  }
+  if (els.modalAssignButton) els.modalAssignButton.textContent = "สร้าง Task ทางลัด";
+  if (els.modalChatStatus) {
+    els.modalChatStatus.textContent = isCurrentChat
+      ? state.agentChat.message
+      : chatBusy
+        ? "Agent อีกตัวกำลังตอบผ่าน Codex กรุณารอให้คำตอบเดิมเสร็จก่อน"
+        : "พร้อมคุยกับ Codex ผ่าน Local Runner";
+    els.modalChatStatus.dataset.tone = isCurrentChat
+      ? state.agentChat.tone
+      : chatBusy ? "working" : "neutral";
+  }
+  if (els.modalChatUsageNote) {
+    const autoMode = state.operatorMode.mode === "auto_guarded" && state.operatorMode.autoExecute === true;
+    els.modalChatUsageNote.textContent = autoMode
+      ? "คุยได้ทั้งถามและสั่งงาน หาก Backend ยืนยันว่าเป็นงานอัตโนมัติที่ทำได้ ระบบจะสร้าง Mission เริ่มงาน และส่งรายงานไปยังอุปกรณ์เอง งานเงินจริง การส่งออกภายนอก Deploy และลบไฟล์ยังต้องอนุมัติ"
+      : "คุยได้ทั้งถามและสั่งงาน หากคำตอบสร้าง Task ระบบจะแสดงสถานะจริงจาก Backend งานที่ยังไม่ผ่านเกณฑ์จะรอตรวจสอบ สามารถใช้ปุ่ม “สร้าง Task ทางลัด” ได้เช่นกัน";
+  }
+}
+
 function renderGameModal() {
   const subject = getModalSubject();
   if (!subject || !els.gameModal) return;
@@ -2603,11 +3526,15 @@ function renderGameModal() {
   const surface = getModalSurface(type, subject.id);
   const isKanban = surface === "kanban";
   const propertyRole = isAgent ? null : getPropertyRole(subject);
+  const dashboardProfile = isAgent ? null : state.propReports[subject.id]?.dashboardProfile;
+  const dashboardAvailability = isAgent ? null : getDashboardDataAvailability(dashboardProfile, Boolean(state.propReports[subject.id]));
   els.gameModal.classList.toggle("agent-modal", isAgent);
   els.gameModal.classList.toggle("prop-modal", !isAgent);
   els.gameModal.classList.toggle("dashboard-modal", surface === "dashboard");
   els.gameModal.classList.toggle("kanban-modal", isKanban);
-  const title = isAgent ? subject.name : (propertyRole?.displayTitle || displayPropName(subject.id, subject.label));
+  const title = isAgent
+    ? subject.name
+    : safeDashboardDisplayText(dashboardProfile?.moduleNameTh || propertyRole?.displayTitle || displayPropName(subject.id, subject.label));
   const role = isAgent ? subject.role : (propertyRole?.displayTitle || displayPropName(subject.id, subject.layer));
   const summary = isAgent ? (subject.summary || "") : (propertyRole?.purpose || subject.summary || "");
   const speech = isAgent
@@ -2624,7 +3551,10 @@ function renderGameModal() {
   els.modalPortrait.src = getSubjectImage(subject, type);
   els.modalPortrait.alt = title;
   if (isAgent && els.modalCommandInput && document.activeElement !== els.modalCommandInput) {
-    els.modalCommandInput.value = state.modal.lastPrompt || `ช่วยรับงานนี้และรายงานกลับเป็นภาษาไทย: ${getAgentSpeech(subject.id, "idle")}`;
+    els.modalCommandInput.value = state.modal.lastPrompt || "";
+    els.modalCommandInput.placeholder = isManagerWorkspace(subject)
+      ? `ถาม ${subject.name} เพื่อช่วยคิด วางแผน หรือสรุปเป็นภาษาไทย...`
+      : `ถาม ${subject.name} เกี่ยวกับหน้าที่ ${role} เป็นภาษาไทย...`;
   }
   if (els.modalAgentComposer) els.modalAgentComposer.hidden = !isAgent;
 
@@ -2638,6 +3568,7 @@ function renderGameModal() {
     ]);
     renderChatLog(subject, type);
     renderTaskList(els.modalTaskBoard, getRelevantMissionsForSubject(subject, type), "ยังไม่มี Task ที่มอบหมายให้ Agent นี้");
+    renderAgentComposer(subject);
     const canManage = isManagerWorkspace(subject);
     if (els.modalMeetingButton) els.modalMeetingButton.hidden = !canManage;
     if (els.modalDelegateButton) els.modalDelegateButton.hidden = !canManage;
@@ -2648,7 +3579,7 @@ function renderGameModal() {
   if (isKanban) {
     const counts = Object.fromEntries(MISSION_KANBAN_COLUMNS.map((column) => [
       column.id,
-      state.missions.filter((mission) => normalizeMissionStatus(mission.status) === column.id).length,
+      state.missions.filter((mission) => getMissionPresentationStatus(mission) === column.id).length,
     ]));
     renderStatusGrid([
       ["Task ทั้งหมด", String(state.missions.length)],
@@ -2661,6 +3592,8 @@ function renderGameModal() {
     renderMissionKanban();
   } else {
     renderStatusGrid([
+      ["โมดูล", safeDashboardDisplayText(dashboardProfile?.moduleNameTh || propertyRole?.displayTitle || displayPropName(subject.id, subject.label))],
+      ["ความพร้อมของข้อมูล", safeDashboardDisplayText(dashboardAvailability?.label || "กำลังตรวจสอบ")],
       ["หน้าที่", propertyRole?.displayTitle || displayPropName(subject.id, subject.layer)],
       ["ผู้รับผิดชอบ", (propertyRole?.ownerAgents || []).map((id) => displayAgentName(id)).join(", ") || "-"],
       ["ประเภทรายงาน", propertyRole?.reportType || "prop_report"],
@@ -2676,15 +3609,16 @@ function renderGameModal() {
 
 function openGameModal(type, id, tab = "chat") {
   if (els.taskDetailDialog?.open) closeTaskDetail({ restoreFocus: false });
+  if (els.dashboardResultDialog?.open) closeDashboardResultDetail({ restoreFocus: false });
   state.modal.open = true;
   state.modal.type = type;
   state.modal.id = id;
   const surface = getModalSurface(type, id);
-  state.modal.activeTab = surface === "agent" ? tab : surface;
+  state.modal.activeTab = surface === "agent" ? tab : surface === "dashboard" ? "connections" : "kanban";
   document.body.classList.add("modal-open");
   const subject = getModalSubject();
   if (subject && type === "agent") {
-    state.modal.lastPrompt = `ช่วยรับงานนี้และรายงานกลับเป็นภาษาไทย: ${getAgentSpeech(subject.id, "idle")}`;
+    state.modal.lastPrompt = "";
   } else {
     state.modal.lastPrompt = "";
   }
@@ -2698,6 +3632,7 @@ function openGameModal(type, id, tab = "chat") {
 
 function closeGameModal() {
   if (els.taskDetailDialog?.open) closeTaskDetail({ restoreFocus: false });
+  if (els.dashboardResultDialog?.open) closeDashboardResultDetail({ restoreFocus: false });
   state.modal.open = false;
   document.body.classList.remove("modal-open");
   els.gameModal?.classList.remove("open");
@@ -2733,8 +3668,197 @@ async function openPropDialog(propId, tab = null) {
   if (report) renderGameModal();
 }
 
+function setConnectionActionState(propId, { inFlight = false, message = "", tone = "neutral" } = {}) {
+  state.connectionAction = {
+    inFlight: Boolean(inFlight),
+    propId,
+    message: safeDashboardDisplayText(message, ""),
+    tone: ["neutral", "working", "success", "error"].includes(tone) ? tone : "neutral",
+  };
+  if (state.modal.open && state.modal.type === "prop" && state.modal.id === propId) {
+    renderDashboardConnectionPanel(getModalSubject(), getPropertyRole(getModalSubject()));
+  }
+}
+
+async function updatePropReportFromDashboardAction(propId, response) {
+  if (response?.connectionChecklist && typeof response.connectionChecklist === "object" && !Array.isArray(response.connectionChecklist)) {
+    state.propReports[propId] = {
+      ...(state.propReports[propId] || {}),
+      connectionChecklist: response.connectionChecklist,
+    };
+  }
+
+  if (response?.propReport && typeof response.propReport === "object" && !Array.isArray(response.propReport)) {
+    state.propReports[propId] = {
+      ...(state.propReports[propId] || {}),
+      ...response.propReport,
+      ...(response.connectionChecklist ? { connectionChecklist: response.connectionChecklist } : {}),
+    };
+    return state.propReports[propId];
+  }
+
+  const reloadedReport = await loadPropReport(propId);
+  return reloadedReport || state.propReports[propId] || null;
+}
+
+async function refreshDashboardConnections(propId) {
+  if (!propId || state.connectionAction.inFlight) return null;
+  setConnectionActionState(propId, {
+    inFlight: true,
+    message: "กำลังขอให้ Local Runner ตรวจการเชื่อมต่อแบบอ่านอย่างเดียว",
+    tone: "working",
+  });
+  updateDecisionLog(`กำลังตรวจการเชื่อมต่อของ ${displayPropName(propId)}`);
+  try {
+    const response = await postJson(`/api/props/${encodeURIComponent(propId)}/connections/refresh`, { propId });
+    await updatePropReportFromDashboardAction(propId, response);
+    const message = safeDashboardDisplayText(response?.messageTh || response?.message, "ตรวจการเชื่อมต่อเสร็จแล้ว");
+    setConnectionActionState(propId, { message, tone: "success" });
+    updateDecisionLog(`ตรวจการเชื่อมต่อของ ${displayPropName(propId)} เสร็จแล้ว`);
+    addBridgeEvent("ตรวจการเชื่อมต่อแล้ว", `${displayPropName(propId)} อัปเดตสถานะจาก Local Runner แล้ว`);
+    return response;
+  } catch {
+    setConnectionActionState(propId, {
+      message: "ตรวจการเชื่อมต่อไม่สำเร็จ กรุณาตรวจว่า Local Runner กำลังทำงานอยู่",
+      tone: "error",
+    });
+    updateDecisionLog(`ยังตรวจการเชื่อมต่อของ ${displayPropName(propId)} ไม่สำเร็จ`);
+    return null;
+  } finally {
+    state.connectionAction.inFlight = false;
+    if (state.modal.open && state.modal.type === "prop" && state.modal.id === propId) renderGameModal();
+  }
+}
+
+async function discoverMetatraderConnections(propId) {
+  if (!propId || state.connectionAction.inFlight) return null;
+  const report = state.propReports[propId];
+  const canDiscover = Array.isArray(report?.connectionChecklist?.items)
+    && report.connectionChecklist.items.some((item) => item?.action === "discover_metatrader");
+  if (!canDiscover) return null;
+
+  setConnectionActionState(propId, {
+    inFlight: true,
+    message: "กำลังส่งคำขอให้ Local Runner ค้นหา MT4 / MT5 แบบอ่านอย่างเดียว",
+    tone: "working",
+  });
+  updateDecisionLog(`กำลังค้นหา MT4 / MT5 สำหรับ ${displayPropName(propId)}`);
+  try {
+    const response = await postJson("/api/integrations/metatrader/discover", { propId });
+    await updatePropReportFromDashboardAction(propId, response);
+    const message = safeDashboardDisplayText(response?.messageTh || response?.message, "ค้นหา MT4 / MT5 เสร็จแล้ว และอัปเดตเฉพาะสถานะที่ปลอดภัย");
+    setConnectionActionState(propId, { message, tone: "success" });
+    updateDecisionLog(`ค้นหา MT4 / MT5 สำหรับ ${displayPropName(propId)} เสร็จแล้ว`);
+    addBridgeEvent("ค้นหา MT4 / MT5 แล้ว", `${displayPropName(propId)} ได้รับสถานะที่ปกปิดข้อมูลเครื่องแล้ว`);
+    return response;
+  } catch {
+    setConnectionActionState(propId, {
+      message: "ค้นหา MT4 / MT5 ไม่สำเร็จ ระบบไม่ได้แก้ไขไฟล์และไม่ได้เปิด Terminal",
+      tone: "error",
+    });
+    updateDecisionLog(`ยังค้นหา MT4 / MT5 สำหรับ ${displayPropName(propId)} ไม่สำเร็จ`);
+    return null;
+  } finally {
+    state.connectionAction.inFlight = false;
+    if (state.modal.open && state.modal.type === "prop" && state.modal.id === propId) renderGameModal();
+  }
+}
+
+async function confirmMetatraderSelection(propId) {
+  if (!propId || state.connectionAction.inFlight) return null;
+  const checklist = state.propReports[propId]?.connectionChecklist;
+  const canDiscover = Array.isArray(checklist?.items)
+    && checklist.items.some((item) => item?.action === "discover_metatrader");
+  const selection = getMetatraderSelectionModel(checklist);
+  const candidateId = String(state.metatraderCandidateChoice[propId] || "");
+  const candidate = selection.candidates.find((item) => item.candidateId === candidateId && item.detected);
+  if (!canDiscover || !selection.canSelect || !candidate) return null;
+
+  setConnectionActionState(propId, {
+    inFlight: true,
+    message: `กำลังยืนยัน ${candidate.labelTh} เป็น Terminal เป้าหมายกับ Local Runner`,
+    tone: "working",
+  });
+  updateDecisionLog(`กำลังยืนยัน Terminal เป้าหมายสำหรับ ${displayPropName(propId)}`);
+  try {
+    await postJson("/api/integrations/metatrader/select", { propId, candidateId });
+    const refreshedReport = await loadPropReport(propId);
+    if (!refreshedReport) throw new Error("report_reload_failed");
+    const refreshedSelection = getMetatraderSelectionModel(refreshedReport.connectionChecklist);
+    if (refreshedSelection.selectedCandidate?.candidateId !== candidateId) throw new Error("selection_not_confirmed");
+    state.metatraderCandidateChoice[propId] = refreshedSelection.selectedCandidate.candidateId;
+    setConnectionActionState(propId, {
+      message: `เลือก ${candidate.labelTh} แล้ว • Adapter สั่งงานจริงยังไม่พร้อม`,
+      tone: "success",
+    });
+    updateDecisionLog(`เลือก Terminal เป้าหมายของ ${displayPropName(propId)} แล้ว โดยยังไม่เชื่อม Adapter สั่งงานจริง`);
+    addBridgeEvent("เลือก Terminal เป้าหมายแล้ว", `${displayPropName(propId)} บันทึกเฉพาะ Opaque Candidate ID ผ่าน Local Runner`);
+    return refreshedReport;
+  } catch {
+    setConnectionActionState(propId, {
+      message: "ยังยืนยัน Terminal ที่เลือกไม่สำเร็จ ระบบไม่ได้เปิด Terminal และไม่ได้เชื่อมบัญชี",
+      tone: "error",
+    });
+    updateDecisionLog(`ยังยืนยัน Terminal เป้าหมายของ ${displayPropName(propId)} ไม่สำเร็จ`);
+    return null;
+  } finally {
+    state.connectionAction.inFlight = false;
+    if (state.modal.open && state.modal.type === "prop" && state.modal.id === propId) renderGameModal();
+  }
+}
+
+function isMetatraderDiscoveryIntent(prompt) {
+  const text = String(prompt || "").trim().toLowerCase();
+  const mentionsTerminal = /(^|[^a-z0-9])(mt4|mt5|metatrader|terminal)([^a-z0-9]|$)/.test(text)
+    || ["เทอร์มินัล", "โปรแกรมเทรด"].some((keyword) => text.includes(keyword));
+  const asksToInspect = [
+    "check", "search", "find", "scan", "detect", "discover", "list", "status",
+    "ตรวจ", "ตรวจสอบ", "เช็ค", "เชค", "ค้น", "ค้นหา", "หา", "ดูสถานะ", "มีกี่", "มีไหม",
+  ].some((keyword) => text.includes(keyword));
+  return mentionsTerminal && asksToInspect;
+}
+
+function reportSupportsMetatraderDiscovery(report) {
+  return Array.isArray(report?.connectionChecklist?.items)
+    && report.connectionChecklist.items.some((item) => item?.action === "discover_metatrader");
+}
+
+async function resolveMetatraderDiscoveryProp(subject) {
+  const preferredIds = [subject?.defaultTarget, subject?.homeTarget, "terminal_workstation"]
+    .filter((value, index, values) => value && values.indexOf(value) === index);
+  for (const propId of preferredIds) {
+    const report = state.propReports[propId] || await loadPropReport(propId);
+    if (reportSupportsMetatraderDiscovery(report)) return propId;
+  }
+  return null;
+}
+
+async function runMetatraderDiscoveryIntent(subject) {
+  const propId = await resolveMetatraderDiscoveryProp(subject);
+  if (!propId) {
+    return {
+      ok: false,
+      kind: "metatrader_discovery_unavailable",
+      propId: null,
+      candidateCount: 0,
+      reply: "ยังไม่พบ Dashboard ที่รองรับการค้นหา MT4 / MT5 จึงยังไม่มี Tool ใดทำงาน",
+    };
+  }
+  const response = await discoverMetatraderConnections(propId);
+  const selection = getMetatraderSelectionModel(state.propReports[propId]?.connectionChecklist);
+  return {
+    ok: Boolean(response),
+    kind: "metatrader_discovery",
+    propId,
+    candidateCount: selection.candidateCount,
+    reply: response
+      ? `Local Runner ตรวจแบบอ่านอย่างเดียวแล้ว พบ ${selection.candidateCount} Terminal กรุณาเลือก Terminal เป้าหมายใน ${displayPropName(propId)} • Adapter สั่งงานจริงยังไม่พร้อม และระบบไม่ได้เปิด MT4 / MT5`
+      : "ค้นหา MT4 / MT5 ไม่สำเร็จ ระบบไม่ได้เปิด Terminal ไม่ได้เชื่อมบัญชี และไม่ได้เรียก Codex",
+  };
+}
+
 function getPromptFromModal() {
-  const prompt = els.modalCommandInput?.value.trim() || state.modal.lastPrompt || "สรุปสถานะงานปัจจุบันเป็นภาษาไทย";
+  const prompt = String(els.modalCommandInput?.value || state.modal.lastPrompt || "").trim();
   state.modal.lastPrompt = prompt;
   return prompt;
 }
@@ -2745,22 +3869,170 @@ function isExplicitDelegationIntent(prompt) {
     .some((keyword) => text.includes(keyword));
 }
 
-async function persistAgentIntent(subject, prompt) {
-  return postJson(AGENT_EVENTS_ENDPOINT, {
-    kind: "user_intent",
-    agentId: subject.id,
-    title: `คำขอสำหรับ ${subject.name}`,
-    detail: prompt,
-    targetId: subject.defaultTarget || "mission_strategy_table",
+function createAgentChatOpaqueId(prefix) {
+  const randomValue = window.crypto?.randomUUID?.()
+    || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${String(randomValue).replace(/[^a-zA-Z0-9._:-]/g, "-")}`.slice(0, 160);
+}
+
+function getAgentChatSessionId(agentId) {
+  const current = String(state.agentChat.sessionIds[agentId] || "");
+  if (/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(current)) return current;
+  const sessionId = createAgentChatOpaqueId(`visual-chat-${agentId}`);
+  state.agentChat.sessionIds[agentId] = sessionId;
+  saveSessionSnapshot();
+  return sessionId;
+}
+
+function setAgentChatStatus(agentId, message, tone = "neutral") {
+  state.agentChat.agentId = agentId || null;
+  state.agentChat.message = safeDashboardDisplayText(message, "กำลังตรวจสอบสถานะแชท");
+  state.agentChat.tone = ["neutral", "working", "ready", "error"].includes(tone) ? tone : "neutral";
+  if (state.modal.open && state.modal.type === "agent" && state.modal.id === agentId && els.modalChatStatus) {
+    els.modalChatStatus.textContent = state.agentChat.message;
+    els.modalChatStatus.dataset.tone = state.agentChat.tone;
+  }
+}
+
+function validateAgentChatResponse(response, subject) {
+  const sessionId = String(response?.sessionId || "");
+  const turnId = String(response?.turnId || "");
+  const taskCreated = response?.taskCreated === true;
+  const taskMissionIds = Array.isArray(response?.taskMissionIds)
+    ? response.taskMissionIds.map((item) => String(item || "")).filter(Boolean)
+    : null;
+  const taskStatus = String(response?.taskStatus || "").trim().toLowerCase().replace(/[ -]+/g, "_");
+  const autoExecute = response?.autoExecute === true;
+  const validMissionIds = taskMissionIds !== null
+    && taskMissionIds.length <= 20
+    && taskMissionIds.every((item) => /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(item));
+  const validTaskContract = typeof response?.taskCreated === "boolean"
+    && typeof response?.autoExecute === "boolean"
+    && validMissionIds
+    && (taskCreated ? taskMissionIds.length > 0 : taskMissionIds.length === 0)
+    && (!taskCreated || ["queued", "running", "waiting_approval", "blocked", "completed", "failed", "archived"].includes(taskStatus))
+    && (!autoExecute || taskCreated);
+  const idempotentReplay = response?.usage?.idempotentReplay === true;
+  const quotaConsumptionStatus = String(response?.usage?.quotaConsumptionStatus || "");
+  const quotaFlagIsValid = idempotentReplay
+    ? response?.consumesCodexQuota === false && quotaConsumptionStatus === "none"
+    : response?.consumesCodexQuota === true && quotaConsumptionStatus === "confirmed";
+  const exactSuccess = response?.ok === true
+    && response?.kind === "agent_chat"
+    && response?.status === "completed"
+    && response?.agentId === subject.id
+    && typeof response?.agentName === "string"
+    && typeof response?.reply === "string"
+    && response.reply.trim().length > 0
+    && typeof response?.modelTier === "string"
+    && quotaFlagIsValid
+    && typeof response?.toolsExecuted === "boolean"
+    && validTaskContract
+    && response?.usage
+    && typeof response.usage === "object"
+    && !Array.isArray(response.usage)
+    && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(sessionId)
+    && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(turnId);
+  if (!exactSuccess) {
+    const error = new Error("invalid_agent_chat_response");
+    error.kind = "invalid_agent_chat_response";
+    throw error;
+  }
+  return {
+    reply: safeAgentChatReplyText(response.reply),
+    sessionId,
+    idempotentReplay,
+    quotaConsumptionStatus,
+    taskCreated,
+    taskMissionIds,
+    taskStatus: taskCreated ? taskStatus : null,
+    autoExecute,
+    toolsExecuted: response.toolsExecuted,
+  };
+}
+
+async function syncAgentChatCreatedTasks(subject, validated) {
+  if (!validated.taskCreated) return [];
+  await loadBridgeMissions({ replaceEvents: false, persist: false });
+  const missions = validated.taskMissionIds
+    .map((missionId) => state.missions.find((mission) => mission.id === missionId))
+    .filter(Boolean);
+  const targetIds = [...new Set(missions.map((mission) => mission.targetId).filter(Boolean))];
+
+  missions.forEach((mission) => {
+    const ownerAgentId = getAgentIdFromOwner(mission.owner);
+    if (ownerAgentId && mission.targetId && getTargetPoint(mission.targetId)) {
+      routeAgentToTargetId(ownerAgentId, mission.targetId, `Task ${displayStatus(getMissionPresentationStatus(mission))}`, {
+        select: false,
+        persist: false,
+      });
+    }
   });
+  await Promise.all(targetIds.map((targetId) => loadPropReport(targetId)));
+
+  const primaryMission = missions[0];
+  const destination = primaryMission?.targetId
+    ? displayPropName(primaryMission.targetId)
+    : "อุปกรณ์ที่ Backend กำหนด";
+  const status = primaryMission ? getMissionPresentationStatus(primaryMission) : validated.taskStatus;
+  const statusMessage = validated.autoExecute
+    ? `สร้าง ${validated.taskMissionIds.length} Task แล้ว • Backend รับไปทำอัตโนมัติ • รายงานที่ ${destination}`
+    : `สร้าง ${validated.taskMissionIds.length} Task แล้ว • สถานะ ${displayStatus(status || "queued")} • รายงานที่ ${destination}`;
+  setAgentChatStatus(subject.id, statusMessage, "ready");
+  addBridgeEvent(
+    validated.autoExecute ? "Agent เริ่มงานจากบทสนทนาแล้ว" : "Agent สร้าง Task จากบทสนทนาแล้ว",
+    `${validated.taskMissionIds.length} Task • ${displayStatus(status || "queued")} → ${destination}`,
+  );
+  updateDecisionLog(`${subject.name} สร้าง Mission จากบทสนทนาแล้ว ไม่ต้องกดสร้าง Task ซ้ำ`);
+  return missions;
+}
+
+function agentChatErrorMessage(error) {
+  const kind = String(error?.body?.kind || error?.kind || "").trim().toLowerCase();
+  if (error?.status === 429 || ["rate_limited", "codex_limit_reached"].includes(kind)) {
+    return "โควตา Codex ยังไม่พร้อมสำหรับข้อความนี้ กรุณารอตามเวลาที่ระบบกำหนดแล้วลองใหม่";
+  }
+  if (error?.status === 409 || ["idempotency_conflict", "runner_busy"].includes(kind)) {
+    return "Codex กำลังตอบคำขออื่นอยู่ กรุณารอสักครู่แล้วส่งข้อความนี้ใหม่";
+  }
+  if (error?.status === 413 || kind === "message_too_large") {
+    return "ข้อความยาวเกินขอบเขตที่ปลอดภัย กรุณาย่อข้อความแล้วลองใหม่";
+  }
+  if (kind === "secret_blocked") {
+    return "Risk Guard หยุดข้อความนี้ เพราะอาจมีรหัสผ่าน Token หรือข้อมูลลับ กรุณาลบข้อมูลลับก่อนส่งใหม่";
+  }
+  if (error?.status === 422 || kind === "invalid_request") {
+    return "ข้อความนี้ยังไม่ผ่านเงื่อนไขของระบบ กรุณาเขียนคำถามใหม่โดยไม่ใส่ข้อมูลลับหรือคำสั่งรันงานจริง";
+  }
+  if (error?.status === 503 || ["runner_not_ready", "auth_required", "config_error"].includes(kind)) {
+    return "ระบบแชท Codex ใน Local Runner ยังไม่พร้อม กรุณาตรวจสถานะ Codex Login และ Config ก่อนลองใหม่";
+  }
+  if (error?.status === 504 || kind === "timeout") {
+    return "Codex ใช้เวลาตอบเกินกำหนด ระบบหยุดคำขอนี้แล้วและจะไม่ส่งซ้ำอัตโนมัติ";
+  }
+  if (error?.status === 404) {
+    return "ระบบแชท Agent ยังไม่พร้อมใช้งานใน Local Runner เวอร์ชันนี้";
+  }
+  if (kind === "invalid_agent_chat_response") {
+    return "Backend ส่งผลแชทกลับมาไม่ครบตามสัญญาความปลอดภัย จึงไม่แสดงคำตอบนี้";
+  }
+  if (error?.status >= 500) {
+    return "Agent ยังตอบไม่ได้เพราะ Local Runner มีปัญหาชั่วคราว กรุณาเปิด Mission Table ตรวจว่ามี Task ถูกสร้างไว้หรือไม่ก่อนส่งข้อความซ้ำ";
+  }
+  return "ติดต่อระบบแชท Agent ไม่สำเร็จ กรุณาตรวจว่า Local Runner กำลังทำงาน แล้วลองใหม่";
 }
 
 async function handleModalSend() {
-  // Audit contract: No tool was run.
   const subject = getModalSubject();
-  if (!subject || state.modal.type !== "agent") return;
+  if (!subject || state.modal.type !== "agent" || state.agentChat.inFlight) return;
   const prompt = getPromptFromModal();
+  if (!prompt) {
+    setAgentChatStatus(subject.id, "กรุณาพิมพ์ข้อความที่ต้องการคุยกับ Agent ก่อนส่ง", "error");
+    els.modalCommandInput?.focus();
+    return;
+  }
   if (blockSecretIntent(prompt, state.modal.type, subject.id)) {
+    setAgentChatStatus(subject.id, "Risk Guard หยุดข้อความที่อาจมีข้อมูลลับก่อนส่งออกจากหน้าเว็บ", "error");
     renderGameModal();
     return;
   }
@@ -2772,29 +4044,70 @@ async function handleModalSend() {
     side: "user",
   });
 
-  if (els.modalSendButton) els.modalSendButton.disabled = true;
-  let reply = "คำขอนี้ยังอยู่เฉพาะบนหน้าเว็บ Backend ยังไม่ได้รับ และยังไม่มี Tool ใดทำงาน";
+  state.agentChat.inFlight = true;
+  state.agentChat.agentId = subject.id;
+  renderAgentStatusPanel();
+  if (els.modalSendButton) {
+    els.modalSendButton.disabled = true;
+    els.modalSendButton.textContent = "กำลังคิด...";
+  }
+  setAgentChatStatus(subject.id, "Agent กำลังตอบและให้ Backend ตรวจว่าคำสั่งนี้ควรสร้าง Task หรือไม่", "working");
+  setAgentSpeech(subject.id, "กำลังคิดคำตอบให้คุณครับ", "working");
+  let reply = "";
+  let dashboardToOpen = null;
   try {
-    if (isManagerWorkspace(subject) && isExplicitDelegationIntent(prompt)) {
-      const result = await submitManagerCommand(prompt, subject.id);
-      if (result?.parent?.id) {
-        reply = `Local Runner รับคำขอเป็น ${result.parent.id} แล้ว และสร้าง Task ย่อยแบบมีระบบป้องกัน ${result.subtasks?.length || 0} งาน โดยยังไม่มี Tool ใดเริ่มอัตโนมัติ`;
-      } else {
-        reply = `ยังสร้างคิวงานไม่ได้: ${result?.message || result?.error || "ระบบป้องกันของ Backend ไม่รับคำขอนี้"} และยังไม่มี Tool ใดทำงาน`;
-      }
+    if (isMetatraderDiscoveryIntent(prompt)) {
+      setAgentChatStatus(subject.id, "กำลังส่งคำสั่งตรวจ MT4 / MT5 แบบอ่านอย่างเดียวไปยัง Local Runner โดยไม่ใช้โควตา Codex", "working");
+      const result = await runMetatraderDiscoveryIntent(subject);
+      reply = result.reply;
+      dashboardToOpen = result.ok ? result.propId : null;
+      setAgentChatStatus(
+        subject.id,
+        result.ok
+          ? "ตรวจแบบอ่านอย่างเดียวเสร็จแล้ว • ไม่ใช้โควตา Codex • ไม่เปิด Terminal"
+          : "ยังตรวจ MT4 / MT5 ไม่สำเร็จ • ไม่ได้เรียก Codex และไม่ได้เปิด Terminal",
+        result.ok ? "ready" : "error",
+      );
     } else {
-      const result = await persistAgentIntent(subject, prompt);
-      reply = result?.ok
-        ? "บันทึกคำขอไว้ใน Audit Log ของ Backend แล้ว แต่ยังไม่มี Tool ใดทำงาน หากต้องการสร้าง Mission ให้กด ‘มอบหมาย Task’ หรือให้ Manager/CEO แจกงาน"
-        : "Backend ยังไม่ยืนยันคำขอนี้ ข้อมูลจึงยังอยู่เฉพาะบนหน้าเว็บและยังไม่มี Tool ใดทำงาน";
+      const response = await postJson(AGENT_CHAT_ENDPOINT, {
+        agentId: subject.id,
+        message: prompt,
+        sessionId: getAgentChatSessionId(subject.id),
+        idempotencyKey: createAgentChatOpaqueId("visual-agent-chat"),
+      });
+      const validated = validateAgentChatResponse(response, subject);
+      state.agentChat.sessionIds[subject.id] = validated.sessionId;
+      reply = validated.reply;
+      if (validated.taskCreated) {
+        await syncAgentChatCreatedTasks(subject, validated);
+      } else {
+        setAgentChatStatus(
+          subject.id,
+          validated.idempotentReplay
+            ? "Agent คืนคำตอบเดิมจากคำขอที่บันทึกไว้ • ไม่ใช้โควตา Codex ซ้ำ"
+            : "Agent ตอบแล้ว • ยังไม่มี Task ใหม่จากข้อความนี้",
+          "ready",
+        );
+      }
+      void refreshCodexRateLimits({ manual: false });
+      saveSessionSnapshot();
     }
   } catch (error) {
-    reply = `คำขอยังอยู่เฉพาะบนหน้าเว็บ เพราะ Backend ติดต่อไม่ได้ (${error.message}) และยังไม่มี Tool ใดทำงาน`;
+    reply = agentChatErrorMessage(error);
+    setAgentChatStatus(subject.id, reply, "error");
   } finally {
+    state.agentChat.inFlight = false;
+    renderAgentStatusPanel();
+    state.modal.lastPrompt = "";
+    if (els.modalCommandInput) els.modalCommandInput.value = "";
     setAgentSpeech(subject.id, reply, "talking");
     pushChatLine({ scopeType: "agent", scopeId: subject.id, speaker: subject.name, text: reply, side: "agent" });
-    if (els.modalSendButton) els.modalSendButton.disabled = false;
-    renderGameModal();
+    if (els.modalSendButton) {
+      els.modalSendButton.disabled = false;
+      els.modalSendButton.textContent = "คุยกับ Codex";
+    }
+    if (dashboardToOpen) await openPropDialog(dashboardToOpen);
+    else renderGameModal();
   }
 }
 
@@ -2802,6 +4115,11 @@ async function handleModalAssignTask() {
   const subject = getModalSubject();
   if (!subject || state.modal.type !== "agent") return;
   const prompt = getPromptFromModal();
+  if (!prompt) {
+    setAgentChatStatus(subject.id, "กรุณาพิมพ์รายละเอียดงานก่อนสร้าง Task", "error");
+    els.modalCommandInput?.focus();
+    return;
+  }
   if (blockSecretIntent(prompt, state.modal.type, subject.id)) {
     renderGameModal();
     return;
@@ -2822,13 +4140,26 @@ async function handleModalAssignTask() {
     return;
   }
   const assignee = getOfficeAgent(mission.owner) || getOfficeAgent(state.selectedAgentId);
+  const presentationStatus = getMissionPresentationStatus(mission);
+  const autoEligible = isBackendAutoEligibleMission(mission);
   pushChatLine({
     scopeType: state.modal.type,
     scopeId: subject.id,
     speaker: assignee?.name || "Manager Agent",
-    text: `Backend สร้างคิว ${mission.id} ให้ ${assignee?.name || mission.owner} ที่ ${displayPropName(mission.targetId)} แล้ว โดยยังไม่มี Tool ใดเริ่มอัตโนมัติ`,
+    text: autoEligible
+      ? `Backend สร้าง Task ${mission.id} ให้ ${assignee?.name || mission.owner} แล้ว • ${displayStatus(presentationStatus)} • ผลงานจะส่งไปที่ ${displayPropName(mission.targetId)}`
+      : `Backend สร้าง Task ${mission.id} ให้ ${assignee?.name || mission.owner} แล้ว • ${displayStatus(presentationStatus)} • รอขั้นตอนตามระบบป้องกัน`,
     side: "agent",
   });
+  state.modal.lastPrompt = "";
+  if (els.modalCommandInput) els.modalCommandInput.value = "";
+  setAgentChatStatus(
+    subject.id,
+    autoEligible
+      ? `Task ${mission.id} ${displayStatus(presentationStatus)} อัตโนมัติแล้ว • ไม่ต้องกดอนุมัติซ้ำ`
+      : `สร้าง Task ${mission.id} แล้ว • ${displayStatus(presentationStatus)} • Backend จะตรวจสิทธิ์ก่อนเริ่ม`,
+    "ready",
+  );
   state.modal.activeTab = "tasks";
   renderGameModal();
 }
@@ -4390,6 +5721,7 @@ function showAgentPanel(agentId = state.selectedAgentId, setActiveObject = true)
       status: "guarded",
     },
   ]);
+  renderAgentStatusPanel();
   saveSessionSnapshot();
 }
 
@@ -4463,7 +5795,7 @@ function propReportToMissionItems(report, owner = "mission_archivist") {
   if (!report) return [];
   const missionItems = (report.missions || []).slice(0, 3).map((mission) => ({
     title: `Mission: ${mission.title || mission.id}`,
-    detail: mission.result || mission.detail || displayStatus(mission.status) || "Mission นี้ถูกส่งมาที่อุปกรณ์นี้",
+    detail: mission.result || mission.detail || displayStatus(getMissionPresentationStatus(mission)) || "Mission นี้ถูกส่งมาที่อุปกรณ์นี้",
     owner: mission.owner || owner,
     status: mission.status || "mission",
   }));
@@ -4487,6 +5819,7 @@ async function loadPropReport(propId) {
   try {
     const report = await fetchJson(`/api/props/${encodeURIComponent(propId)}/report`);
     state.propReports[propId] = report;
+    renderOperationalSidebars();
     if (state.panelObject === propId) selectObject(propId, { loadBackendReport: false });
     return report;
   } catch {
@@ -4585,7 +5918,7 @@ function renderMissionItems(items) {
     item.className = "mission-item";
     const title = document.createElement("strong");
     const detail = document.createElement("span");
-    title.textContent = mission.status ? `[${displayStatus(mission.status)}] ${mission.title}` : mission.title;
+    title.textContent = mission.status ? `[${displayStatus(getMissionPresentationStatus(mission))}] ${mission.title}` : mission.title;
     detail.textContent = mission.detail;
     item.append(title, detail);
     els.missionList.appendChild(item);
@@ -4598,11 +5931,11 @@ async function assignTask(agentId, task) {
   const taskText = `${title} ${detail}`;
   if (blockSecretIntent(taskText, "agent", agentId || "risk_guard")) return null;
   const selectedAgent = getOfficeAgent(agentId);
-  const routedAgentId = pickAgentForTask(taskText);
-  const hasSpecialistRoute = routedAgentId !== "manager";
-  const assignee = hasSpecialistRoute
-    ? (getOfficeAgent(routedAgentId) || getOfficeAgent(state.agent.id))
-    : (selectedAgent || getOfficeAgent(state.agent.id));
+  const assignee = selectedAgent || getOfficeAgent(state.agent.id);
+  const hasSpecialistRoute = Boolean(
+    selectedAgent
+    && !["manager", "ceo"].includes(selectedAgent.id),
+  );
   const inferredTargetId = pickTargetForTask(taskText);
   const targetId = inferredTargetId !== "mission_strategy_table" || assignee.id === "manager" || assignee.id === "ceo"
     ? inferredTargetId
@@ -4618,31 +5951,29 @@ async function assignTask(agentId, task) {
   };
 
   state.missions.unshift(mission);
+  renderOperationalSidebars();
   updateDecisionLog(`กำลังส่งคำขอสร้าง Task แบบมีระบบป้องกันให้ ${assignee.name} → ${target?.label || targetId}`);
   let backendMission = null;
   try {
-    const routingHints = {
-      ea_developer: "EA MT4 MT5 compile",
-      backtest_analyst: "backtest drawdown profit factor",
-      optimization_agent: "optimization parameter overfit",
-      vps_watch: targetId === "left_signal_cube" ? "auto trading status" : "VPS latency uptime",
-      telegram_ops: "Telegram alert draft",
-      risk_guard: "risk approval review",
-      codex_mcp_operator: "Codex MCP bridge status",
-      mission_archivist: "memory archive old mission",
-    };
-    const delegatedGoal = hasSpecialistRoute
-      ? `ส่ง Task โดยตรง: ${routingHints[assignee.id] || assignee.role}; ผู้รับผิดชอบ ${assignee.id}; จุดแสดงผล ${targetId}. ${detail}`
-      : detail;
     const result = await postJson("/api/manager/delegate", {
       agentId: selectedAgent?.id === "ceo" ? "ceo" : "manager",
-      goal: delegatedGoal,
+      goal: detail,
       idempotencyKey: mission.id,
+      ...(hasSpecialistRoute
+        ? {
+            requestedOwnerAgentId: assignee.id,
+            requestedTargetId: targetId,
+          }
+        : {}),
     });
     const subtasks = Array.isArray(result?.subtasks) ? result.subtasks : [];
-    const matchedMission = subtasks.find((item) => item.owner === assignee.id && item.targetId === targetId)
-      || subtasks.find((item) => item.owner === assignee.id)
-      || subtasks[0];
+    const matchedMission = hasSpecialistRoute
+      ? (
+          subtasks.find((item) => item.owner === assignee.id && item.targetId === targetId)
+          || subtasks.find((item) => item.owner === assignee.id)
+          || subtasks[0]
+        )
+      : (subtasks[0] || result.parent);
     if (!matchedMission) throw new Error("Manager Agent ยังไม่ได้ส่ง Mission ของ Agent ผู้เชี่ยวชาญกลับมา");
     state.missions = state.missions.filter((item) => item.id !== mission.id);
     mergeBackendMission(result.parent);
@@ -4652,29 +5983,34 @@ async function assignTask(agentId, task) {
     mission.status = "failed";
     mission.detail = `คิวงานในเครื่องยังไม่รับ Task นี้: ${error.message}`;
     mission.backendAccepted = false;
+    renderOperationalSidebars();
     updateDecisionLog(`${mission.id}: Backend ยังไม่รับคำขอสร้าง Task และยังไม่มี Tool ใดทำงาน`);
     if (state.modal.open) renderGameModal();
     return mission;
   }
-  updateDecisionLog(`Backend สร้างคิว ${backendMission.id}: ${title} และส่ง ${assignee.name} ไปยัง ${target?.label || targetId}`);
-  setAgentSpeech(assignee.id, `${getAgentSpeech(assignee.id, "task")} เป้าหมายคือ ${target?.label || targetId}`, "working");
-  setAgentSpeech(state.agent.id, `ผมมอบหมายงานให้ ${assignee.name} แล้วครับ`, "talking");
-  recordOfficeEvent("มอบหมาย Task แล้ว", `${assignee.name}: ${title} → ${target?.label || targetId}`, {
-    agentId: assignee.id,
+  const backendAssignee = getOfficeAgent(backendMission.owner) || assignee;
+  const backendTargetId = backendMission.targetId || targetId;
+  const backendTarget = getTargetPoint(backendTargetId) || target;
+  const presentationStatus = getMissionPresentationStatus(backendMission);
+  updateDecisionLog(`Backend สร้าง Task ${backendMission.id}: ${title} • ${displayStatus(presentationStatus)} • ${backendAssignee.name} → ${backendTarget?.label || backendTargetId}`);
+  setAgentSpeech(backendAssignee.id, `${getAgentSpeech(backendAssignee.id, "task")} เป้าหมายคือ ${backendTarget?.label || backendTargetId}`, "working");
+  setAgentSpeech(state.agent.id, `ผมมอบหมายงานให้ ${backendAssignee.name} แล้วครับ`, "talking");
+  recordOfficeEvent("มอบหมาย Task แล้ว", `${backendAssignee.name}: ${title} → ${backendTarget?.label || backendTargetId}`, {
+    agentId: backendAssignee.id,
     kind: "task",
     missionId: backendMission.id,
-    targetId,
+    targetId: backendTargetId,
   });
-  if (assignee.id !== state.agent.id) {
+  if (backendAssignee.id !== state.agent.id) {
     agentTalk({
       fromAgentId: state.agent.id,
-      toAgentId: assignee.id,
-      message: `รับงาน "${title}" แล้วไปที่ ${target?.label || targetId}`,
+      toAgentId: backendAssignee.id,
+      message: `รับงาน "${title}" แล้วไปที่ ${backendTarget?.label || backendTargetId}`,
       silentRoute: true,
     });
   }
-  showAgentPanel(assignee.id, false);
-  routeAgentToTargetId(assignee.id, targetId, "กำลังไปทำ Task");
+  showAgentPanel(backendAssignee.id, false);
+  routeAgentToTargetId(backendAssignee.id, backendTargetId, `Task ${displayStatus(presentationStatus)}`);
   if (state.modal.open) renderGameModal();
   return backendMission;
 }
@@ -4710,13 +6046,13 @@ function pickTargetForTask(text) {
   const lower = text.toLowerCase();
   if (hasTaskKeyword(lower, taskKeywords.archive)) return "left_server_racks";
   if (hasTaskKeyword(lower, taskKeywords.backtest)) return "left_analytics_console";
-  if (hasTaskKeyword(lower, taskKeywords.optimization)) return "left_analytics_console";
+  if (hasTaskKeyword(lower, taskKeywords.optimization)) return "right_server_racks";
   if (hasTaskKeyword(lower, taskKeywords.autoTrading)) return "left_signal_cube";
   if (hasTaskKeyword(lower, taskKeywords.codex)) return "codex_mcp_portal";
   if (hasTaskKeyword(lower, taskKeywords.telegram)) return "right_tool_console";
   if (hasTaskKeyword(lower, taskKeywords.risk)) return "left_audit_crystals";
   if (hasTaskKeyword(lower, taskKeywords.eaBuild)) return "terminal_workstation";
-  if (hasTaskKeyword(lower, taskKeywords.vps)) return "right_server_racks";
+  if (hasTaskKeyword(lower, taskKeywords.vps)) return "right_status_crystals";
   return "mission_strategy_table";
 }
 
@@ -4854,13 +6190,14 @@ function mergeBackendMission(mission, resultOverride = "") {
   const index = state.missions.findIndex((row) => row.id === mission.id);
   if (index >= 0) state.missions[index] = item;
   else state.missions.unshift(item);
+  renderOperationalSidebars();
 }
 
 function applyBridgeResponse(result, { agentId, toolId } = {}) {
   if (result.bridge) applyBridgeStatus(result.bridge);
   if (result.mission) {
     mergeBackendMission(result.mission, result.finalMessage || result.mission.result || "");
-    addBridgeEvent(result.mission.title, `${displayStatus(result.mission.status || "queued")} → ${displayPropName(result.mission.targetId || "mission_strategy_table")}`);
+    addBridgeEvent(result.mission.title, `${displayStatus(getMissionPresentationStatus(result.mission))} → ${displayPropName(result.mission.targetId || "mission_strategy_table")}`);
   } else {
     addBridgeEvent("สถานะ Bridge", result.message || "ตรวจสถานะแล้ว");
   }
@@ -5033,11 +6370,11 @@ async function loadBridgeMissions(options = {}) {
     }
 
     const events = activeMissions
-      .filter((mission) => normalizeMissionStatus(mission.status) !== "archived")
+      .filter((mission) => getMissionPresentationStatus(mission) !== "archived")
       .slice(0, 4)
       .map((mission) => ({
       title: mission.title,
-      detail: `${displayStatus(mission.status || "queued")} → ${displayPropName(mission.targetId || "mission_strategy_table")}`,
+      detail: `${displayStatus(getMissionPresentationStatus(mission))} → ${displayPropName(mission.targetId || "mission_strategy_table")}`,
       }));
     if (events.length && (replaceEvents || !state.bridgeEvents.length)) renderBridgeEvents(events, { persist });
     state.missionSync.lastUpdatedAt = data.updatedAt || new Date().toISOString();
@@ -5050,14 +6387,221 @@ async function loadBridgeMissions(options = {}) {
 }
 
 function getActiveMissionForAgent(agentId) {
-  const priority = { running: 0, waiting_approval: 1, blocked: 2, queued: 3 };
   return state.missions
-    .filter((mission) => getAgentIdFromOwner(mission.owner) === agentId && priority[normalizeMissionStatus(mission.status)] !== undefined)
-    .sort((left, right) => {
-      const statusDelta = priority[normalizeMissionStatus(left.status)] - priority[normalizeMissionStatus(right.status)];
-      if (statusDelta) return statusDelta;
-      return String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || ""));
-    })[0] || null;
+    .filter((mission) => (
+      getAgentIdFromOwner(mission.owner) === agentId
+      && getMissionPresentationStatus(mission) === "running"
+    ))
+    .sort((left, right) => getMissionActivityTime(right) - getMissionActivityTime(left))[0] || null;
+}
+
+function getAgentSidebarState(agent) {
+  const mission = state.missions
+    .filter((item) => (
+      getAgentIdFromOwner(item.owner) === agent.id
+      && getMissionPresentationStatus(item) === "running"
+    ))
+    .sort((left, right) => getMissionActivityTime(right) - getMissionActivityTime(left))[0] || null;
+  const agentRuntimeStatus = String(agent?.runtimeStatus || "").trim().toLowerCase().replace(/[ -]+/g, "_");
+  const codexRuntimeStatus = String(state.bridge.codex?.status || "").trim().toLowerCase().replace(/[ -]+/g, "_");
+  const confirmedRuntimeUnavailable = (
+    agent?.runtimeReachable === false
+    || ["offline", "unavailable"].includes(agentRuntimeStatus)
+    || state.bridge.status === "Backend ออฟไลน์"
+    || (
+      state.bridge.apiOnline === true
+      && ["auth_required", "config_error", "guard_config_error", "missing", "unavailable", "blocked", "degraded"].includes(codexRuntimeStatus)
+    )
+  );
+
+  if (confirmedRuntimeUnavailable) {
+    return {
+      key: "unavailable",
+      label: "ติดต่อไม่ได้",
+      mission,
+      activityText: "ยังติดต่อระบบ Agent ไม่ได้",
+    };
+  }
+  if (state.agentChat.inFlight && state.agentChat.agentId === agent.id) {
+    return {
+      key: "busy",
+      label: "กำลังตอบคุณ",
+      mission,
+      activityText: "Agent กำลังคิดและตอบข้อความของคุณ",
+    };
+  }
+  if (mission) {
+    return {
+      key: "busy",
+      label: "กำลังทำงาน",
+      mission,
+      taskStateLabel: "Task กำลังทำ",
+    };
+  }
+  return { key: "available", label: "ว่าง", mission: null };
+}
+
+function createAgentStatusCard(agent) {
+  const workload = getAgentSidebarState(agent);
+  const mission = workload.mission;
+  const targetId = mission?.targetId || agent.defaultTarget || agent.currentTarget || "mission_strategy_table";
+  const targetLabel = state.propReports[targetId]?.propertyRole?.displayTitle
+    || displayPropName(targetId, targetId || "ยังไม่กำหนดอุปกรณ์");
+  const targetExists = getInteractiveObjects().some((item) => item.id === targetId);
+  const card = document.createElement("article");
+  const agentButton = document.createElement("button");
+  const identity = document.createElement("span");
+  const dot = document.createElement("i");
+  const name = document.createElement("strong");
+  const status = document.createElement("b");
+  const task = document.createElement("span");
+  const target = document.createElement("span");
+  const actions = document.createElement("span");
+  const taskButton = document.createElement("button");
+  const targetButton = document.createElement("button");
+
+  card.className = `agent-status-card ${workload.key}`;
+  card.dataset.agentId = agent.id;
+  card.classList.toggle("selected", state.selectedAgentId === agent.id);
+  card.setAttribute("aria-label", `สถานะ ${agent.name}: ${workload.label}`);
+
+  agentButton.type = "button";
+  agentButton.className = "agent-status-card-heading";
+  agentButton.setAttribute(
+    "aria-label",
+    `เปิดหน้าคุยและรายละเอียดของ ${agent.name}`,
+  );
+  identity.className = "agent-status-identity";
+  dot.className = `agent-state-dot ${workload.key}`;
+  dot.setAttribute("aria-hidden", "true");
+  name.textContent = agent.name;
+  identity.append(dot, name);
+  status.className = "agent-status-label";
+  status.textContent = workload.label;
+  agentButton.append(identity, status);
+  agentButton.addEventListener("click", () => openAgentDialog(agent.id));
+
+  task.className = "agent-status-task";
+  task.textContent = workload.activityText
+    || (mission ? `${workload.taskStateLabel}: ${mission?.title || mission?.id}` : "พร้อมรับ Task ใหม่");
+  target.className = "agent-status-target";
+  target.textContent = `รายงานที่: ${targetLabel}`;
+  actions.className = "agent-status-actions";
+  taskButton.type = "button";
+  taskButton.textContent = mission?.id ? "ดูรายละเอียด Task" : "ดูหน้า Task";
+  taskButton.setAttribute("aria-label", mission?.id
+    ? `เปิดรายละเอียด Task ${mission.title || mission.id} ของ ${agent.name}`
+    : `เปิดหน้า Task ของ ${agent.name}`);
+  taskButton.addEventListener("click", () => {
+    if (mission?.id && state.missions.some((item) => item.id === mission.id)) {
+      openTaskDetail(mission.id, taskButton, { source: "agent-status" });
+      return;
+    }
+    openAgentDialog(agent.id, "tasks");
+  });
+  targetButton.type = "button";
+  targetButton.textContent = targetExists ? "เปิดอุปกรณ์รายงาน" : "ยังไม่ผูกอุปกรณ์";
+  targetButton.setAttribute("aria-label", `เปิด ${targetLabel} ของ ${agent.name}`);
+  targetButton.disabled = !targetExists;
+  if (targetExists) targetButton.addEventListener("click", () => openPropReport(targetId));
+  actions.append(taskButton, targetButton);
+  card.append(agentButton, task, target, actions);
+  return card;
+}
+
+function renderAgentStatusPanel() {
+  if (!els.agentStatusList) return;
+  els.agentStatusList.innerHTML = "";
+  state.officeAgents.forEach((agent) => {
+    els.agentStatusList.appendChild(createAgentStatusCard(agent));
+  });
+}
+
+function getMissionActivityTime(mission) {
+  const value = mission.completedAt || mission.updatedAt || mission.createdAt || "";
+  const parsed = value ? new Date(value).getTime() : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function isMissionCompletedToday(mission, now = new Date()) {
+  if (getMissionPresentationStatus(mission) !== "completed") return false;
+  const value = mission.completedAt || mission.updatedAt;
+  if (!value) return false;
+  const completedAt = new Date(value);
+  if (Number.isNaN(completedAt.getTime())) return false;
+  return (
+    completedAt.getFullYear() === now.getFullYear()
+    && completedAt.getMonth() === now.getMonth()
+    && completedAt.getDate() === now.getDate()
+  );
+}
+
+function createTodayWorkCard(mission) {
+  const status = getMissionPresentationStatus(mission);
+  const targetId = mission.targetId || "mission_strategy_table";
+  const targetLabel = state.propReports[targetId]?.propertyRole?.displayTitle
+    || displayPropName(mission.targetId || "mission_strategy_table", targetId);
+  const card = document.createElement("button");
+  const topline = document.createElement("span");
+  const badge = document.createElement("span");
+  const owner = document.createElement("span");
+  const title = document.createElement("strong");
+  const target = document.createElement("span");
+
+  card.type = "button";
+  card.className = `today-work-card ${status}`;
+  card.dataset.taskMissionId = mission.id || "";
+  card.setAttribute("aria-haspopup", "dialog");
+  card.setAttribute("aria-label", `เปิดรายละเอียด Task ${mission.title || mission.id || "ที่เลือก"}`);
+  badge.className = "task-status-badge";
+  badge.textContent = displayStatus(status);
+  owner.className = "today-work-owner";
+  owner.textContent = displayAgentName(getAgentIdFromOwner(mission.owner) || mission.owner, "ยังไม่ได้มอบหมาย");
+  topline.className = "today-work-card-topline";
+  topline.append(badge, owner);
+  title.textContent = mission.title || mission.id || "Task ที่ยังไม่มีชื่อ";
+  target.className = "today-work-target";
+  target.textContent = `รายงานที่: ${targetLabel}`;
+  card.append(topline, title, target);
+  card.addEventListener("click", () => openTaskDetail(mission.id, card, { source: "today-work" }));
+  return card;
+}
+
+function renderTodayWorkList(container, missions, emptyText) {
+  if (!container) return;
+  container.innerHTML = "";
+  if (!missions.length) {
+    const empty = document.createElement("div");
+    empty.className = "today-work-empty";
+    empty.textContent = emptyText;
+    container.appendChild(empty);
+    return;
+  }
+  missions.forEach((mission) => container.appendChild(createTodayWorkCard(mission)));
+}
+
+function renderTodayWorkPanel() {
+  const running = state.missions
+    .filter((mission) => getMissionPresentationStatus(mission) === "running")
+    .sort((left, right) => getMissionActivityTime(right) - getMissionActivityTime(left));
+  const completed = state.missions
+    .filter((mission) => isMissionCompletedToday(mission))
+    .sort((left, right) => getMissionActivityTime(right) - getMissionActivityTime(left));
+
+  if (els.todayWorkDate) {
+    els.todayWorkDate.textContent = new Intl.DateTimeFormat("th-TH", {
+      dateStyle: "long",
+    }).format(new Date());
+  }
+  if (els.todayRunningCount) els.todayRunningCount.textContent = String(running.length);
+  if (els.todayCompletedCount) els.todayCompletedCount.textContent = String(completed.length);
+  renderTodayWorkList(els.todayRunningList, running, "ตอนนี้ยังไม่มี Task ที่กำลังทำ");
+  renderTodayWorkList(els.todayCompletedList, completed, "วันนี้ยังไม่มี Task ที่เสร็จสิ้น");
+}
+
+function renderOperationalSidebars() {
+  renderAgentStatusPanel();
+  renderTodayWorkPanel();
 }
 
 function reconcileAgentMissionState() {
@@ -5078,7 +6622,7 @@ function reconcileAgentMissionState() {
       return;
     }
 
-    const status = normalizeMissionStatus(mission.status);
+    const status = getMissionPresentationStatus(mission);
     const targetId = mission.targetId || agent.defaultTarget || "mission_strategy_table";
     const assignmentKey = `${mission.id}:${status}:${targetId}`;
     const changed = agent.activeMissionKey !== assignmentKey;
@@ -5102,6 +6646,7 @@ function reconcileAgentMissionState() {
     agent.currentTarget = targetId;
     moveSupportAgentToPoint(agent, target, `Mission: ${displayStatus(status)}`, { persist: false });
   });
+  renderOperationalSidebars();
 }
 
 async function pollMissionReadModel() {
@@ -5223,6 +6768,46 @@ async function submitManagerCommand(goalOverride = "", requesterAgentId = "manag
   if (blockSecretIntent(goal, "agent", requester)) return { ok: false, kind: "secret_blocked" };
   if (state.managerCommandInFlight) return { ok: false, kind: "in_flight" };
 
+  if (isMetatraderDiscoveryIntent(goal)) {
+    state.managerCommandInFlight = true;
+    if (els.runCommandButton) {
+      els.runCommandButton.disabled = true;
+      els.runCommandButton.textContent = "กำลังค้นหา Terminal...";
+    }
+    state.bridge.status = "กำลังตรวจ MT4 / MT5 แบบอ่านอย่างเดียว";
+    updateBridgeLabel();
+    setAgentSpeech(requester, "กำลังขอให้ Local Runner ตรวจ MT4 / MT5 แบบอ่านอย่างเดียว โดยไม่เรียก Codex และไม่เปิด Terminal", "working");
+    try {
+      const subject = getOfficeAgent(requester) || getOfficeAgent("manager");
+      const result = await runMetatraderDiscoveryIntent(subject);
+      setAgentSpeech(requester, result.reply, "talking");
+      updateDecisionLog(result.reply);
+      if (result.ok && result.propId) {
+        state.bridge.status = "guarded";
+        state.bridge.apiOnline = true;
+        updateBridgeLabel();
+        routeAgentToTargetId(requester, result.propId, "กำลังดูรายการ Terminal");
+        await openPropDialog(result.propId);
+      }
+      return result;
+    } catch {
+      const result = {
+        ok: false,
+        kind: "metatrader_discovery_failed",
+        reply: "ค้นหา MT4 / MT5 ไม่สำเร็จ ระบบไม่ได้เปิด Terminal ไม่ได้เชื่อมบัญชี และไม่ได้เรียก Codex",
+      };
+      setAgentSpeech(requester, result.reply, "talking");
+      updateDecisionLog(result.reply);
+      return result;
+    } finally {
+      state.managerCommandInFlight = false;
+      if (els.runCommandButton) {
+        els.runCommandButton.disabled = false;
+        els.runCommandButton.textContent = "ให้ Manager แจกงาน";
+      }
+    }
+  }
+
   state.managerCommandInFlight = true;
   if (els.runCommandButton) {
     els.runCommandButton.disabled = true;
@@ -5230,7 +6815,7 @@ async function submitManagerCommand(goalOverride = "", requesterAgentId = "manag
   }
   state.bridge.status = "กำลังวางแผน";
   updateBridgeLabel();
-  setAgentSpeech(requester, "กำลังแบ่งเป้าหมายเป็น Task ที่ยังไม่รันจริง และเลือก Agent ผู้เชี่ยวชาญครับ", "working");
+  setAgentSpeech(requester, "กำลังแบ่งเป้าหมายเป็น Task และให้ Backend ตรวจว่างานใดเริ่มอัตโนมัติได้ครับ", "working");
   routeAgentToTargetId("manager", "mission_strategy_table", "กำลังวางแผน");
 
   try {
@@ -5241,22 +6826,24 @@ async function submitManagerCommand(goalOverride = "", requesterAgentId = "manag
     });
     mergeBackendMission(result.parent);
     (result.subtasks || []).forEach((mission) => mergeBackendMission(mission));
+    const autoTaskCount = (result.subtasks || []).filter((mission) => isBackendAutoEligibleMission(mission)).length;
     const participants = [...new Set((result.subtasks || []).map((mission) => mission.owner).filter((id) => id && id !== "manager"))];
     if (participants.length) {
       callMeeting({
         hostAgentId: "manager",
         participantAgentIds: participants,
-        agenda: `Manager Agent แจก Task ย่อยแบบยังไม่รันจริง ${result.subtasks.length} งาน สำหรับ Mission ${result.parent?.id || "ใหม่"}`,
+        agenda: `Manager Agent แจก Task ย่อย ${result.subtasks.length} งาน สำหรับ Mission ${result.parent?.id || "ใหม่"} • Backend อนุญาตอัตโนมัติ ${autoTaskCount} งาน`,
         linkedMissionId: result.parent?.id || null,
       });
     }
     (result.subtasks || []).forEach((mission) => {
       if (getOfficeAgent(mission.owner) && getTargetPoint(mission.targetId)) {
-        setAgentSpeech(mission.owner, `รับ Task ย่อย ${mission.id} แล้วครับ กำลังไปที่ ${getTargetPoint(mission.targetId)?.label || mission.targetId}`, "working");
-        routeAgentToTargetId(mission.owner, mission.targetId, "รับมอบหมายแล้ว", { select: false });
+        const missionStatus = getMissionPresentationStatus(mission);
+        setAgentSpeech(mission.owner, `รับ Task ย่อย ${mission.id} แล้วครับ • ${displayStatus(missionStatus)} • ไปที่ ${getTargetPoint(mission.targetId)?.label || mission.targetId}`, "working");
+        routeAgentToTargetId(mission.owner, mission.targetId, `Task ${displayStatus(missionStatus)}`, { select: false });
       }
     });
-    addBridgeEvent("แผนของ Manager Agent", `${result.subtasks?.length || 0} Task ย่อย → โต๊ะวางแผน Mission`);
+    addBridgeEvent("แผนของ Manager Agent", `${result.subtasks?.length || 0} Task ย่อย • อัตโนมัติ ${autoTaskCount} งาน → โต๊ะวางแผน Mission`);
     state.bridge.status = "guarded";
     state.bridge.apiOnline = true;
     updateBridgeLabel();
@@ -5316,6 +6903,7 @@ els.resetButton.addEventListener("click", () => {
   renderAgentSelector();
   clearPathPreview();
   renderAgent();
+  renderOperationalSidebars();
   selectObject(state.data.defaultSelection || "mission_strategy_table");
   updateDecisionLog("รีเซ็ตมุมมองแล้ว และ Manager Agent กลับไปยังจุดเข้า");
   saveSessionSnapshot();
@@ -5376,6 +6964,20 @@ els.codexRateRefreshButton?.addEventListener("click", () => {
   void refreshCodexRateLimits({ manual: true });
 });
 
+els.operatorModeButton?.addEventListener("click", () => {
+  setOperatorModePanelOpen(Boolean(els.operatorModePanel?.hidden));
+});
+
+els.operatorModeToggle?.addEventListener("click", () => {
+  const nextMode = state.operatorMode.mode === "auto_guarded" ? "manual_guarded" : "auto_guarded";
+  void setOperatorMode(nextMode);
+});
+
+document.addEventListener("click", (event) => {
+  if (els.operatorModePanel?.hidden || els.operatorModeControl?.contains(event.target)) return;
+  setOperatorModePanelOpen(false);
+});
+
 els.modalCloseButton?.addEventListener("click", closeGameModal);
 els.gameModalBackdrop?.addEventListener("click", closeGameModal);
 
@@ -5395,6 +6997,11 @@ els.modalMeetingButton?.addEventListener("click", () => {
   const subject = getModalSubject();
   if (state.modal.type !== "agent" || !isManagerWorkspace(subject)) return;
   const agenda = getPromptFromModal();
+  if (!agenda) {
+    setAgentChatStatus(subject.id, "กรุณาพิมพ์หัวข้อประชุมก่อนเรียก Agent เข้าประชุม", "error");
+    els.modalCommandInput?.focus();
+    return;
+  }
   const participants = ["ea_developer", "backtest_analyst", "optimization_agent", "vps_watch", "telegram_ops", "risk_guard"];
   callMeeting({
     hostAgentId: subject.id,
@@ -5409,6 +7016,11 @@ els.modalDelegateButton?.addEventListener("click", async () => {
   const subject = getModalSubject();
   if (state.modal.type !== "agent" || !isManagerWorkspace(subject) || state.managerCommandInFlight) return;
   const goal = getPromptFromModal();
+  if (!goal) {
+    setAgentChatStatus(subject.id, "กรุณาพิมพ์เป้าหมายก่อนให้ Manager กระจายงานเข้าคิว", "error");
+    els.modalCommandInput?.focus();
+    return;
+  }
   await submitManagerCommand(goal, subject.id);
   state.modal.activeTab = "tasks";
   renderGameModal();
@@ -5423,15 +7035,30 @@ els.modalDashboardOpenOwnerAgent?.addEventListener("click", () => {
   if (agentId && getOfficeAgent(agentId)) openAgentDialog(agentId);
 });
 
+els.modalDashboardRefreshConnections?.addEventListener("click", () => {
+  if (state.modal.type !== "prop" || getModalSurface() !== "dashboard") return;
+  void refreshDashboardConnections(state.modal.id);
+});
+
+els.modalDashboardDiscoverMetatrader?.addEventListener("click", () => {
+  if (state.modal.type !== "prop" || getModalSurface() !== "dashboard") return;
+  void discoverMetatraderConnections(state.modal.id);
+});
+
+els.modalDashboardConfirmMetatrader?.addEventListener("click", () => {
+  if (state.modal.type !== "prop" || getModalSurface() !== "dashboard") return;
+  void confirmMetatraderSelection(state.modal.id);
+});
+
 els.modalKanbanSearch?.addEventListener("input", () => {
   state.modal.searchText = els.modalKanbanSearch.value;
-  renderMissionKanban();
+  renderMissionKanban({ preserveScroll: false });
 });
 
 els.modalKanbanArchiveToggle?.addEventListener("click", () => {
   state.modal.showArchived = !state.modal.showArchived;
   state.modal.selectedMissionId = null;
-  renderMissionKanban();
+  renderMissionKanban({ preserveScroll: false });
   saveSessionSnapshot();
 });
 
@@ -5470,6 +7097,25 @@ els.taskDetailDialog?.addEventListener("close", () => {
   saveSessionSnapshot();
 });
 
+els.dashboardResultDetailClose?.addEventListener("click", () => {
+  closeDashboardResultDetail();
+});
+
+els.dashboardResultDialog?.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeDashboardResultDetail();
+});
+
+els.dashboardResultDialog?.addEventListener("click", (event) => {
+  if (event.target === els.dashboardResultDialog) closeDashboardResultDetail();
+});
+
+els.dashboardResultDialog?.addEventListener("close", () => {
+  if (dashboardResultShouldRestoreFocus) dashboardResultReturnFocus?.focus?.();
+  dashboardResultReturnFocus = null;
+  dashboardResultShouldRestoreFocus = true;
+});
+
 els.modalKanbanApprove?.addEventListener("click", () => {
   recordKanbanApprovalDecision("approved");
 });
@@ -5504,6 +7150,17 @@ els.modalKanbanOpenTargetProp?.addEventListener("click", () => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  if (!els.operatorModePanel?.hidden) {
+    setOperatorModePanelOpen(false);
+    els.operatorModeButton?.focus();
+    return;
+  }
+  if (els.dashboardResultDialog?.open) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeDashboardResultDetail();
+    return;
+  }
   if (els.taskDetailDialog?.open) {
     event.preventDefault();
     event.stopPropagation();
@@ -5566,6 +7223,7 @@ init().catch((error) => {
     const renderedAgentCount = els.agentLayer.querySelectorAll(".agent-unit").length;
     window.MetafxHqBoot?.markReady({ agentCount: renderedAgentCount });
     window.setTimeout(startCodexRateLimitPolling, 0);
+    window.setTimeout(startOperatorModePolling, 0);
     window.setTimeout(startMissionPolling, 0);
   } catch (fallbackError) {
     reportBootResourceFailure("ระบบแสดง Agent สำรอง", fallbackError, { blocking: true });

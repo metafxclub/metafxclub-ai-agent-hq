@@ -1,0 +1,110 @@
+{
+  "version": "agent-chat-contract-v002",
+  "purpose": "กำหนดให้ตัวละคร Agent ทั้ง 10 ตัวสนทนาผ่าน Codex จริง และให้ Backend สร้าง Mission แบบปลอดภัยเมื่อ Chat จำแนกเจตนาเป็น task_request",
+  "endpoint": "POST /api/agents/chat",
+  "request": {
+    "allowedFields": ["agentId", "message", "sessionId", "idempotencyKey"],
+    "requiredFields": ["agentId", "message", "sessionId", "idempotencyKey"],
+    "maxMessageChars": 4000,
+    "frontendMaySelectModel": false,
+    "frontendMaySetBudget": false,
+    "frontendMayApproveExecution": false
+  },
+  "response": {
+    "frontendSafeFields": [
+      "ok",
+      "kind",
+      "turnId",
+      "sessionId",
+      "agentId",
+      "agentName",
+      "reply",
+      "status",
+      "modelTier",
+      "consumesCodexQuota",
+      "toolsExecuted",
+      "intent",
+      "taskCreated",
+      "taskMissionIds",
+      "taskStatus",
+      "autoExecute",
+      "usage",
+      "rateLimit"
+    ],
+    "usageFields": [
+      "durationMs",
+      "outputChars",
+      "timeoutSeconds",
+      "outputLimitChars",
+      "contextTurns",
+      "secretRedacted",
+      "idempotentReplay",
+      "quotaConsumptionStatus"
+    ],
+    "quotaConsumptionStatusValues": ["none", "possible", "confirmed"],
+    "forbiddenFields": [
+      "token",
+      "cookie",
+      "authorization",
+      "account",
+      "email",
+      "codexHome",
+      "binaryPath",
+      "rawStdout",
+      "rawStderr",
+      "artifactPath"
+    ]
+  },
+  "execution": {
+    "engine": "authenticated_local_codex_cli",
+    "sandbox": "read-only",
+    "consumesCodexQuota": true,
+    "toolsEnabled": false,
+    "computerUseEnabled": false,
+    "outputSchema": {
+      "intentValues": ["conversation", "task_request"],
+      "taskGoalMaxChars": 4000,
+      "conversationTaskGoalMustBeEmpty": true
+    },
+    "createsTask": "only_when_intent_is_task_request",
+    "approvalRequired": false,
+    "taskPath": "Chat Runner ไม่มี Tool และส่งเพียง intent กับ taskGoal จากนั้น Backend สร้าง Mission แบบ idempotent และใช้ Operator Mode, Risk Guard และ Approval Gate",
+    "taskIdempotency": {
+      "scope": "agentId + sessionId + chat idempotencyKey",
+      "missionKeyPrefix": "chat-task-",
+      "replayCreatesDuplicate": false
+    },
+    "taskRouting": {
+      "managerAndCeo": "manager_delegate",
+      "specialist": "one direct codex_cli_task",
+      "targetSelection": "backend validates Agent role and chooses a permitted workstation from taskGoal",
+      "frontendMaySelectToolModelBudgetRiskOrApproval": false
+    },
+    "highImpactTask": "Backend checks both the raw user message and model taskGoal; waiting_approval_or_blocked_never_auto_execute",
+    "secretPolicy": "reject_and_do_not_persist",
+    "transcriptStorage": "backend_sanitized_append_only",
+    "conversationContext": {
+      "key": "agentId + sessionId",
+      "recentTurns": 8,
+      "maxContextChars": 12000,
+      "crossAgentContext": false,
+      "idempotentReplayConsumesQuota": false
+    },
+    "auditEvents": ["agent.chat_start", "agent.chat_end", "agent.chat_blocked", "agent.chat_task_created", "agent.chat_task_create_failed"]
+  },
+  "roleBinding": {
+    "source": "contracts/agents/agents.json",
+    "fields": ["id", "name", "role", "goal", "blocked_actions", "memory_scope", "output_format"],
+    "replyLanguage": "Thai",
+    "technicalTermsMayRemainEnglish": true,
+    "greetingStyle": "natural_role_specific"
+  },
+  "ui": {
+    "agentTabs": ["chat", "tasks"],
+    "chatButtonLabelTh": "คุยกับ Codex",
+    "taskButtonLabelTh": "สร้าง Task ทางลัด",
+    "taskRequestFromChatCreatesMission": true,
+    "quotaDisclosureRequired": true,
+    "propDashboardHasChat": false
+  }
+}

@@ -1,0 +1,237 @@
+{
+  "version": "dashboard-connection-contract-v003",
+  "purpose": "กำหนด Checklist การเชื่อมต่อ ความพร้อม โหมดทำงาน และเส้นทางรายงานของ Dashboard ทั้ง 9 จุด โดยให้ Backend เป็นผู้ตรวจสถานะจริง",
+  "statusVocabulary": [
+    "connected",
+    "ready",
+    "detected",
+    "configured",
+    "not_checked",
+    "needs_login",
+    "not_configured",
+    "not_found",
+    "unavailable",
+    "coming_soon",
+    "disabled",
+    "not_required",
+    "partial",
+    "needs_attention"
+  ],
+  "safety": {
+    "host": "127.0.0.1",
+    "frontendIsIntentOnly": true,
+    "terminalDiscoveryReadOnly": true,
+    "scheduledRunsBackendOwned": true,
+    "scheduledRunsDefaultEnabled": false,
+    "liveTradingDefault": "disabled",
+    "forbiddenFrontendData": [
+      "token",
+      "cookie",
+      "authorization",
+      "password",
+      "account_number",
+      "broker_server",
+      "terminal_path",
+      "process_id"
+    ]
+  },
+  "dashboardUi": {
+    "dashboardCount": 9,
+    "missionStrategyTableIsKanban": true,
+    "missionStrategyTableExcludedFromDashboardTabs": true,
+    "defaultTab": "connections",
+    "tabs": [
+      {
+        "id": "connections",
+        "labelTh": "การเชื่อมต่อ",
+        "purpose": "แสดงสถานะ Bridge, Codex, Plugin, Terminal และ Adapter พร้อมปุ่มตรวจใหม่แบบ Backend-owned"
+      },
+      {
+        "id": "tasks",
+        "labelTh": "งานของอุปกรณ์",
+        "purpose": "แสดง Mission ที่ Route มายังอุปกรณ์นี้ แยกสถานะและกดดูรายละเอียด Task ได้"
+      },
+      {
+        "id": "results",
+        "labelTh": "ผลลัพธ์งาน",
+        "purpose": "แสดง Structured Report และหลักฐานของงานที่เสร็จแล้ว โดยกดเปิดรายละเอียดได้"
+      }
+    ],
+    "propChatEnabled": false,
+    "taskCardsOpenDetails": true,
+    "reportCardsOpenDetails": true,
+    "connectionTabDoesNotCreateTasks": true
+  },
+  "terminalTargetSelection": {
+    "intent": "select_metatrader_target",
+    "endpoint": "POST /api/integrations/metatrader/select",
+    "eligibleDashboardIds": ["right_server_racks", "left_analytics_console", "terminal_workstation", "left_signal_cube"],
+    "requestFields": ["propId", "candidateId"],
+    "candidateFrontendSafeFields": ["candidateId", "platform", "labelTh", "detected", "runningState"],
+    "selectionFrontendSafeFields": ["propId", "required", "detectedStatus", "status", "configurationStatus", "candidateCount", "candidates", "selectedCandidate", "selectedAt", "staleSelection", "adapterConnection", "adapterReady", "canSelect", "detailTh"],
+    "selectedCandidateFrontendSafeFields": ["candidateId", "platform", "labelTh", "detected", "runningState"],
+    "forbiddenFrontendFields": ["path", "terminal_path", "pid", "process_id", "account", "account_number", "broker", "broker_server"],
+    "stateSemantics": {
+      "checklistTerminal": "detected",
+      "candidateDetected": true,
+      "candidateRunningState": ["unknown", "platform_running_detected", "not_running_detected"],
+      "targetConfiguration": "configured",
+      "selectionRecord": "selected",
+      "adapterConnection": "coming_soon",
+      "liveTrading": "disabled"
+    },
+    "selectionSubstateVocabulary": ["selected", "not_selected", "not_required"],
+    "configurationSubstateVocabulary": ["configured", "not_configured", "not_required"],
+    "selectionSubstateIsOverallStatus": false,
+    "persistence": "backend_only_per_prop",
+    "selectionIsConnection": false,
+    "selectionEnablesLiveTrading": false
+  },
+  "profiles": {
+    "codex_mcp_portal": {
+      "moduleNameTh": "ศูนย์ควบคุม Codex / MCP",
+      "availability": {"ui": "ready", "data": "partial", "execution": "guarded"},
+      "connections": [
+        {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
+        {"id": "codex_runner", "labelTh": "Codex CLI และบัญชีที่ Login", "required": true, "adapterStatus": "runtime_detected"},
+        {"id": "codex_quota", "labelTh": "Rate Limit ของ Codex", "required": false, "adapterStatus": "runtime_detected"},
+        {"id": "mcp_config", "labelTh": "การตั้งค่า MCP", "required": false, "adapterStatus": "runtime_detected"},
+        {"id": "mcp_execution_adapter", "labelTh": "การสั่ง MCP จาก HQ", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "computer_use_adapter", "labelTh": "การควบคุมโปรแกรมในเครื่องผ่าน Computer Use", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "report_routing", "labelTh": "ส่งรายงานกลับประตู Codex / MCP", "required": true, "adapterStatus": "implemented"}
+      ],
+      "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["ai_every_2_hours"], "intervalMinutes": 120, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
+      "reportRoute": {"targetPropId": "codex_mcp_portal", "primaryReportType": "bridge_status_report", "summaryTargetPropId": "mission_strategy_table"}
+    },
+    "left_server_racks": {
+      "moduleNameTh": "System Scout และ EA Radar R1",
+      "availability": {"ui": "ready", "data": "partial", "execution": "coming_soon"},
+      "connections": [
+        {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
+        {"id": "memory_store", "labelTh": "คลังความจำและงานย้อนหลัง", "required": true, "adapterStatus": "implemented"},
+        {"id": "report_store", "labelTh": "คลังรายงาน", "required": true, "adapterStatus": "implemented"},
+        {"id": "system_scout_plugin", "labelTh": "Plugin System Scout", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "ea_radar_plugin", "labelTh": "Plugin EA Radar R1 รายวัน", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "backend_scheduler", "labelTh": "AI ตรวจและสรุปทุก 2 ชั่วโมง", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "report_routing", "labelTh": "ส่งผลกลับตู้ System Scout", "required": true, "adapterStatus": "implemented"}
+      ],
+      "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["ai_every_2_hours"], "intervalMinutes": 120, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
+      "reportRoute": {"targetPropId": "left_server_racks", "primaryReportType": "archive_report", "summaryTargetPropId": "mission_strategy_table"}
+    },
+    "right_server_racks": {
+      "moduleNameTh": "Optimization Lab MT4 / MT5",
+      "availability": {"ui": "ready", "data": "partial", "execution": "coming_soon"},
+      "connections": [
+        {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
+        {"id": "mt4_terminal", "labelTh": "โปรแกรม MT4 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
+        {"id": "mt5_terminal", "labelTh": "โปรแกรม MT5 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
+        {"id": "optimization_adapter", "labelTh": "ตัวรัน Optimization", "required": true, "adapterStatus": "coming_soon"},
+        {"id": "backend_scheduler", "labelTh": "AI ตรวจงานทุก 2 ชั่วโมง", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "report_routing", "labelTh": "ส่งผล Optimization กลับตู้นี้", "required": true, "adapterStatus": "implemented"}
+      ],
+      "connectionRequirements": {"anyOf": ["mt4_terminal", "mt5_terminal"]},
+      "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["ai_every_2_hours"], "intervalMinutes": 120, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
+      "reportRoute": {"targetPropId": "right_server_racks", "primaryReportType": "optimization_report", "summaryTargetPropId": "mission_strategy_table"}
+    },
+    "left_analytics_console": {
+      "moduleNameTh": "EA Discovery Lab และ Backtest Analysis",
+      "availability": {"ui": "ready", "data": "partial", "execution": "guarded"},
+      "connections": [
+        {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
+        {"id": "mt4_terminal", "labelTh": "โปรแกรม MT4 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
+        {"id": "mt5_terminal", "labelTh": "โปรแกรม MT5 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
+        {"id": "backtest_parser", "labelTh": "ตัวอ่านรายงาน Backtest", "required": true, "adapterStatus": "coming_soon"},
+        {"id": "codex_runner", "labelTh": "Codex สำหรับช่วยวิเคราะห์", "required": false, "adapterStatus": "runtime_detected"},
+        {"id": "codex_quota", "labelTh": "Rate Limit เมื่อใช้ AI วิเคราะห์", "required": false, "adapterStatus": "runtime_detected"},
+        {"id": "report_routing", "labelTh": "ส่งผล Backtest กลับจอ Analysis", "required": true, "adapterStatus": "implemented"}
+      ],
+      "connectionRequirements": {"anyOf": ["mt4_terminal", "mt5_terminal"]},
+      "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["ai_every_2_hours"], "intervalMinutes": 120, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
+      "reportRoute": {"targetPropId": "left_analytics_console", "primaryReportType": "backtest_optimization_report", "summaryTargetPropId": "mission_strategy_table"}
+    },
+    "right_tool_console": {
+      "moduleNameTh": "Open Interest และ Automation Tool Runner",
+      "availability": {"ui": "ready", "data": "partial", "execution": "coming_soon"},
+      "connections": [
+        {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
+        {"id": "tool_registry", "labelTh": "ทะเบียน Plugin / Tool", "required": true, "adapterStatus": "implemented"},
+        {"id": "oi_plugin", "labelTh": "Plugin Open Interest", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "telegram_adapter", "labelTh": "การส่ง Telegram จริง", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "backend_scheduler", "labelTh": "AI ตรวจและสรุปทุก 2 ชั่วโมง", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "report_routing", "labelTh": "ส่งผลกลับจอ Tool Runner", "required": true, "adapterStatus": "implemented"}
+      ],
+      "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["ai_every_2_hours"], "intervalMinutes": 120, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
+      "reportRoute": {"targetPropId": "right_tool_console", "primaryReportType": "telegram_tool_report", "summaryTargetPropId": "mission_strategy_table"}
+    },
+    "terminal_workstation": {
+      "moduleNameTh": "EA Builder MT4 / MT5",
+      "availability": {"ui": "ready", "data": "partial", "execution": "guarded"},
+      "connections": [
+        {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
+        {"id": "workspace_adapter", "labelTh": "พื้นที่งาน EA ในเครื่อง", "required": true, "adapterStatus": "implemented"},
+        {"id": "mt4_terminal", "labelTh": "โปรแกรม MT4 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
+        {"id": "mt5_terminal", "labelTh": "โปรแกรม MT5 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
+        {"id": "metaeditor_compiler", "labelTh": "MetaEditor / Compiler Adapter", "required": true, "adapterStatus": "coming_soon"},
+        {"id": "codex_runner", "labelTh": "Codex สำหรับสร้างหรือแก้ EA", "required": false, "adapterStatus": "runtime_detected"},
+        {"id": "codex_quota", "labelTh": "Rate Limit เมื่อใช้ AI สร้าง EA", "required": false, "adapterStatus": "runtime_detected"},
+        {"id": "report_routing", "labelTh": "ส่งผล Build กลับโต๊ะนี้", "required": true, "adapterStatus": "implemented"}
+      ],
+      "connectionRequirements": {"anyOf": ["mt4_terminal", "mt5_terminal"]},
+      "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
+      "reportRoute": {"targetPropId": "terminal_workstation", "primaryReportType": "code_change_report", "summaryTargetPropId": "mission_strategy_table"}
+    },
+    "left_audit_crystals": {
+      "moduleNameTh": "Risk Guard และ Approval Gate",
+      "availability": {"ui": "ready", "data": "ready", "execution": "guarded"},
+      "connections": [
+        {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
+        {"id": "risk_policy", "labelTh": "กฎ Risk Guard", "required": true, "adapterStatus": "implemented"},
+        {"id": "audit_log", "labelTh": "Audit Log", "required": true, "adapterStatus": "implemented"},
+        {"id": "approval_service", "labelTh": "ระบบอนุมัติงานเสี่ยง", "required": true, "adapterStatus": "implemented"},
+        {"id": "report_routing", "labelTh": "ส่งผลตรวจความเสี่ยงกลับคริสตัล", "required": true, "adapterStatus": "implemented"}
+      ],
+      "codexUsage": {"dependency": "none", "blockAiRunWhenLimitReached": false, "keepReadOnlyDashboardAvailable": true},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
+      "reportRoute": {"targetPropId": "left_audit_crystals", "primaryReportType": "risk_review", "summaryTargetPropId": "mission_strategy_table"}
+    },
+    "left_signal_cube": {
+      "moduleNameTh": "AI Trader แบบหลาย Agent โหวต",
+      "availability": {"ui": "ready", "data": "coming_soon", "execution": "disabled"},
+      "connections": [
+        {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
+        {"id": "mt4_terminal", "labelTh": "โปรแกรม MT4 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
+        {"id": "mt5_terminal", "labelTh": "โปรแกรม MT5 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
+        {"id": "trading_state_adapter", "labelTh": "อ่านสถานะการเทรดแบบ Read-only", "required": true, "adapterStatus": "coming_soon"},
+        {"id": "ai_trader_ensemble", "labelTh": "ระบบหลาย Agent วิเคราะห์และโหวต", "required": true, "adapterStatus": "coming_soon"},
+        {"id": "risk_policy", "labelTh": "Risk Guard / Kill Switch", "required": true, "adapterStatus": "implemented"},
+        {"id": "live_trading", "labelTh": "ส่งคำสั่ง Live Trading", "required": false, "adapterStatus": "disabled"},
+        {"id": "report_routing", "labelTh": "ส่งผลโหวตกลับ Signal Cube", "required": true, "adapterStatus": "implemented"}
+      ],
+      "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["ai_every_2_hours"], "intervalMinutes": 120, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
+      "reportRoute": {"targetPropId": "left_signal_cube", "primaryReportType": "auto_trading_status_report", "summaryTargetPropId": "mission_strategy_table"}
+    },
+    "right_status_crystals": {
+      "moduleNameTh": "AI Dashboard และภาพรวม HQ",
+      "availability": {"ui": "ready", "data": "ready", "execution": "read_only"},
+      "connections": [
+        {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
+        {"id": "mission_store", "labelTh": "Mission Queue", "required": true, "adapterStatus": "implemented"},
+        {"id": "agent_event_store", "labelTh": "สถานะและเหตุการณ์ของ Agent", "required": true, "adapterStatus": "implemented"},
+        {"id": "codex_quota", "labelTh": "ภาพรวม Rate Limit ของ Codex", "required": false, "adapterStatus": "runtime_detected"},
+        {"id": "ai_dashboard_project", "labelTh": "โครงการ AI Dashboard จาก GitHub", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "backend_scheduler", "labelTh": "AI สรุปภาพรวมทุก 2 ชั่วโมง", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "report_routing", "labelTh": "ส่งภาพรวมกลับคริสตัลนี้", "required": true, "adapterStatus": "implemented"}
+      ],
+      "codexUsage": {"dependency": "display_only", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["ai_every_2_hours"], "intervalMinutes": 120, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
+      "reportRoute": {"targetPropId": "right_status_crystals", "primaryReportType": "ops_overview_report", "summaryTargetPropId": "mission_strategy_table"}
+    }
+  }
+}

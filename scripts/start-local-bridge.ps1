@@ -1,13 +1,20 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateSet("Start", "Status", "Stop", "Restart")]
     [string]$Action = "Start",
 
     [ValidateRange(5, 120)]
-    [int]$HealthTimeoutSeconds = 25
+    [int]$HealthTimeoutSeconds = 25,
+
+    [ValidateRange(0, 65535)]
+    [int]$Port = 0
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($Port -ne 0 -and $Port -lt 1024) {
+    throw "Port ต้องเป็น 0 หรืออยู่ในช่วง 1024-65535"
+}
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $projectPython = Join-Path $projectRoot "runner\.venv\Scripts\python.exe"
@@ -16,6 +23,7 @@ $serverPath = Join-Path $projectRoot "backend\local-runner\bridge_server.py"
 $runtimePath = Join-Path $projectRoot "data\runtime"
 $logPath = Join-Path $runtimePath "logs"
 $statePath = Join-Path $runtimePath "bridge-lifecycle-state.json"
+$endpointPath = Join-Path $runtimePath "bridge-endpoint.json"
 $stdoutPath = Join-Path $logPath "bridge-stdout.log"
 $stderrPath = Join-Path $logPath "bridge-stderr.log"
 $auditPath = Join-Path $logPath "bridge-lifecycle-audit.jsonl"
@@ -25,7 +33,10 @@ $bridgeUrl = "http://${bridgeHost}:$bridgePort/"
 $healthUrl = "${bridgeUrl}api/health"
 $maxLogBytes = 5MB
 $logGenerations = 3
-$mutexName = "Local\MetafxclubAgentHQBridge4186Lifecycle"
+$mutexName = "Local\MetafxclubAgentHQBridgeLifecycle"
+$bridgeInventoryConflict = @()
+$requestedBridgePort = if ($Port -ge 1024) { $Port } else { 0 }
+$confirmedEndpointRequired = $false
 
 function Get-UtcTimestamp {
     return [DateTime]::UtcNow.ToString("o")
@@ -56,20 +67,140 @@ function Split-CommandLine {
     return $tokens.ToArray()
 }
 
-function Test-BridgeProcess {
+function Set-BridgeEndpointContext {
+    param([Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$Port)
+
+    $script:bridgeHost = "127.0.0.1"
+    $script:bridgePort = $Port
+    $script:bridgeUrl = "http://127.0.0.1:$Port/"
+    $script:healthUrl = "${script:bridgeUrl}api/health"
+}
+
+function Read-BridgeEndpoint {
+    if (-not (Test-Path -LiteralPath $endpointPath -PathType Leaf)) {
+        return $null
+    }
+
+    try {
+        $endpoint = Get-Content -LiteralPath $endpointPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([string]$endpoint.host -cne "127.0.0.1") {
+            return $null
+        }
+        $port = [int]$endpoint.port
+        if ($port -lt 1024 -or $port -gt 65535) {
+            return $null
+        }
+        return [pscustomobject]@{
+            Host = "127.0.0.1"
+            Port = $port
+            Url = "http://127.0.0.1:$port/"
+            HealthUrl = "http://127.0.0.1:$port/api/health"
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Write-BridgeEndpoint {
+    param([Parameter(Mandatory = $true)]$Health)
+
+    if (-not $Health -or -not $Health.endpoint) {
+        throw "Bridge health response did not include a confirmed endpoint."
+    }
+    $reportedHost = [string]$Health.endpoint.host
+    $reportedPort = [int]$Health.endpoint.port
+    if ($reportedHost -cne "127.0.0.1" -or $reportedPort -ne $bridgePort) {
+        throw "Bridge health endpoint did not match the requested loopback host and port."
+    }
+
+    New-Item -ItemType Directory -Path $runtimePath -Force | Out-Null
+    $endpoint = [ordered]@{
+        version = 1
+        host = "127.0.0.1"
+        port = $bridgePort
+        url = $bridgeUrl
+        health_url = $healthUrl
+        confirmed_at = Get-UtcTimestamp
+    }
+    $json = $endpoint | ConvertTo-Json -Depth 3
+    $temporaryPath = "$endpointPath.tmp.$([Guid]::NewGuid().ToString('N'))"
+    $utf8 = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($temporaryPath, $json + [Environment]::NewLine, $utf8)
+    Move-Item -LiteralPath $temporaryPath -Destination $endpointPath -Force
+}
+
+function Test-LoopbackPortAvailable {
+    param([Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$Port)
+
+    $listener = $null
+    try {
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
+        $listener.Start()
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($listener) {
+            try { $listener.Stop() } catch { }
+        }
+    }
+}
+
+function Select-RandomAvailableBridgePort {
+    $attempted = New-Object 'System.Collections.Generic.HashSet[int]'
+    for ($attempt = 0; $attempt -lt 256; $attempt++) {
+        $candidate = Get-Random -Minimum 42000 -Maximum 50000
+        if (-not $attempted.Add($candidate)) {
+            continue
+        }
+        if ((@(Get-ListenerProcessIds -Port $candidate)).Count -eq 0 -and (Test-LoopbackPortAvailable -Port $candidate)) {
+            return $candidate
+        }
+    }
+    throw "No available local port was found in the guarded range 42000-49999."
+}
+
+function Select-StartBridgeEndpoint {
+    $listenerProcessIds = @(Get-ListenerProcessIds)
+    $bridgeProcesses = @(Get-BridgeProcesses)
+    $bridgeProcessIds = @($bridgeProcesses | Select-Object -ExpandProperty ProcessId)
+    $foreignListeners = @($listenerProcessIds | Where-Object { $bridgeProcessIds -notcontains $_ })
+    $portUnavailable = $listenerProcessIds.Count -eq 0 -and -not (Test-LoopbackPortAvailable -Port $bridgePort)
+
+    if ($foreignListeners.Count -eq 0 -and -not $portUnavailable) {
+        return
+    }
+
+    if ($confirmedEndpointRequired) {
+        throw "พอร์ตที่ยืนยันไว้ ($bridgePort) ไม่ว่างแล้ว ระบบหยุดโดยไม่เปลี่ยนไปใช้ URL อื่น กรุณาเลือกพอร์ตใหม่"
+    }
+
+    $previousPort = $bridgePort
+    $selectedPort = Select-RandomAvailableBridgePort
+    Set-BridgeEndpointContext -Port $selectedPort
+    Write-AuditEvent `
+        -Operation "endpoint_select" `
+        -Outcome "foreign_port_preserved" `
+        -Message "Port $previousPort was unavailable; selected a free loopback port without stopping another process."
+}
+
+function Get-BridgeProcessIdentity {
     param([Parameter(Mandatory = $true)]$ProcessRecord)
 
     if (-not $ProcessRecord -or -not $ProcessRecord.CommandLine -or -not $ProcessRecord.ExecutablePath) {
-        return $false
+        return $null
     }
 
     if ($ProcessRecord.Name -notin @("python.exe", "pythonw.exe")) {
-        return $false
+        return $null
     }
 
     $tokens = @(Split-CommandLine -CommandLine ([string]$ProcessRecord.CommandLine))
     if ($tokens.Count -ne 6) {
-        return $false
+        return $null
     }
 
     $commandExecutable = Get-ComparablePath -Path $tokens[0]
@@ -77,18 +208,46 @@ function Test-BridgeProcess {
     $commandServer = Get-ComparablePath -Path $tokens[1]
     $expectedServer = Get-ComparablePath -Path $serverPath
 
-    return (
-        $commandExecutable -and
-        $recordExecutable -and
-        $commandServer -and
-        $expectedServer -and
-        $commandExecutable.Equals($recordExecutable, [StringComparison]::OrdinalIgnoreCase) -and
-        $commandServer.Equals($expectedServer, [StringComparison]::OrdinalIgnoreCase) -and
-        $tokens[2] -ceq "--host" -and
-        $tokens[3] -ceq $bridgeHost -and
-        $tokens[4] -ceq "--port" -and
-        $tokens[5] -ceq ([string]$bridgePort)
+    if (
+        -not $commandExecutable -or
+        -not $recordExecutable -or
+        -not $commandServer -or
+        -not $expectedServer -or
+        -not $commandExecutable.Equals($recordExecutable, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $commandServer.Equals($expectedServer, [StringComparison]::OrdinalIgnoreCase) -or
+        $tokens[2] -cne "--host" -or
+        $tokens[3] -cne "127.0.0.1" -or
+        $tokens[4] -cne "--port"
+    ) {
+        return $null
+    }
+
+    $parsedPort = 0
+    if (-not [int]::TryParse([string]$tokens[5], [ref]$parsedPort) -or $parsedPort -lt 1024 -or $parsedPort -gt 65535) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        ProcessId = [int]$ProcessRecord.ProcessId
+        Port = $parsedPort
+        Record = $ProcessRecord
+    }
+}
+
+function Test-BridgeProcess {
+    param(
+        [Parameter(Mandatory = $true)]$ProcessRecord,
+        [Nullable[int]]$ExpectedPort = $null
     )
+
+    $identity = Get-BridgeProcessIdentity -ProcessRecord $ProcessRecord
+    if (-not $identity) {
+        return $false
+    }
+    if ($null -ne $ExpectedPort -and [int]$identity.Port -ne [int]$ExpectedPort) {
+        return $false
+    }
+    return $true
 }
 
 function Get-ProcessRecord {
@@ -97,30 +256,63 @@ function Get-ProcessRecord {
     return Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
 }
 
-function Get-BridgeProcesses {
+function Get-AllBridgeProcessIdentities {
     $pythonProcesses = Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'pythonw.exe'" -ErrorAction Stop
-    return @($pythonProcesses | Where-Object { Test-BridgeProcess -ProcessRecord $_ })
+    $identities = New-Object System.Collections.Generic.List[object]
+    foreach ($processRecord in @($pythonProcesses)) {
+        $identity = Get-BridgeProcessIdentity -ProcessRecord $processRecord
+        if ($identity) {
+            $identities.Add($identity)
+        }
+    }
+    return $identities.ToArray()
+}
+
+function Get-BridgeProcesses {
+    return @(
+        Get-AllBridgeProcessIdentities |
+            Where-Object { [int]$_.Port -eq $bridgePort } |
+            ForEach-Object { $_.Record }
+    )
 }
 
 function Get-ListenerProcessIds {
+    param([int]$Port = $bridgePort)
+
     return @(
-        Get-NetTCPConnection -LocalPort $bridgePort -State Listen -ErrorAction SilentlyContinue |
+        Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty OwningProcess -Unique
     )
 }
 
-function Test-BridgeHealth {
+function Get-ConfirmedBridgeHealth {
+    param([int]$Port = $bridgePort)
+
+    $targetHealthUrl = "http://127.0.0.1:$Port/api/health"
     try {
-        $response = Invoke-WebRequest -Uri $healthUrl -Method Get -UseBasicParsing -TimeoutSec 2
+        $response = Invoke-WebRequest -Uri $targetHealthUrl -Method Get -UseBasicParsing -TimeoutSec 2
         if ($response.StatusCode -ne 200) {
-            return $false
+            return $null
         }
         $health = $response.Content | ConvertFrom-Json
-        return $health.ok -eq $true -and $health.status -eq "ready"
+        if (
+            $health.ok -ne $true -or
+            $health.status -ne "ready" -or
+            -not $health.endpoint -or
+            [string]$health.endpoint.host -cne "127.0.0.1" -or
+            [int]$health.endpoint.port -ne $Port
+        ) {
+            return $null
+        }
+        return $health
     }
     catch {
-        return $false
+        return $null
     }
+}
+
+function Test-BridgeHealth {
+    return $null -ne (Get-ConfirmedBridgeHealth -Port $bridgePort)
 }
 
 function Wait-ForBridgeHealth {
@@ -130,16 +322,29 @@ function Wait-ForBridgeHealth {
     )
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $missingPolls = 0
     do {
-        # Always re-discover the exact command. On Windows, a venv launcher can
-        # temporarily coexist with the base Python listener under another PID.
-        $candidates = @(Get-BridgeProcesses)
-
+        $candidate = Get-ProcessRecord -ProcessId $ProcessId
+        if (-not $candidate) {
+            $missingPolls++
+            if ($missingPolls -ge 4) {
+                return $null
+            }
+            Start-Sleep -Milliseconds 250
+            continue
+        }
+        $missingPolls = 0
         $listenerProcessIds = @(Get-ListenerProcessIds)
-        foreach ($candidate in $candidates) {
-            $candidateId = [int]$candidate.ProcessId
-            if ($listenerProcessIds -contains $candidateId -and (Test-BridgeHealth)) {
-                return $candidateId
+        if (
+            (Test-BridgeProcess -ProcessRecord $candidate -ExpectedPort $bridgePort) -and
+            $listenerProcessIds -contains $ProcessId
+        ) {
+            $health = Get-ConfirmedBridgeHealth -Port $bridgePort
+            if ($health) {
+                return [pscustomobject]@{
+                    ProcessId = $ProcessId
+                    Health = $health
+                }
             }
         }
 
@@ -147,6 +352,92 @@ function Wait-ForBridgeHealth {
     } while ([DateTime]::UtcNow -lt $deadline)
 
     return $null
+}
+
+function Get-BridgeIdentityHealth {
+    param([Parameter(Mandatory = $true)]$Identity)
+
+    $identityPort = [int]$Identity.Port
+    $listenerProcessIds = @(Get-ListenerProcessIds -Port $identityPort)
+    if ($listenerProcessIds -notcontains [int]$Identity.ProcessId) {
+        return $null
+    }
+    return Get-ConfirmedBridgeHealth -Port $identityPort
+}
+
+function Initialize-BridgeEndpointContext {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("start", "status", "stop", "restart")]
+        [string]$Operation
+    )
+
+    $savedEndpoint = Read-BridgeEndpoint
+    $identities = @(Get-AllBridgeProcessIdentities)
+    $script:bridgeInventoryConflict = @()
+
+    if ($identities.Count -gt 1) {
+        $script:bridgeInventoryConflict = $identities
+        if ($savedEndpoint) {
+            Set-BridgeEndpointContext -Port ([int]$savedEndpoint.Port)
+        }
+        else {
+            Set-BridgeEndpointContext -Port 4186
+        }
+        if ($Operation -eq "status") {
+            return "inventory_conflict"
+        }
+        $ids = @($identities | ForEach-Object { $_.ProcessId })
+        throw "Multiple exact Metafx bridge processes were found (PID $($ids -join ', ')). Refusing to guess which instance owns the saved endpoint."
+    }
+
+    if ($identities.Count -eq 1) {
+        $identity = $identities[0]
+        if (
+            $Operation -eq "start" -and
+            $requestedBridgePort -ge 1024 -and
+            [int]$identity.Port -ne $requestedBridgePort
+        ) {
+            throw "พบ HQ Bridge เดิมทำงานอยู่ที่พอร์ต $($identity.Port) แต่คำขอนี้ระบุพอร์ต $requestedBridgePort ระบบจึงไม่เปิด Instance ซ้ำ"
+        }
+        Set-BridgeEndpointContext -Port ([int]$identity.Port)
+        $health = Get-BridgeIdentityHealth -Identity $identity
+        if ($health) {
+            if ($savedEndpoint -and [int]$savedEndpoint.Port -eq [int]$identity.Port) {
+                $script:confirmedEndpointRequired = $true
+                return "saved_verified"
+            }
+            try {
+                Write-BridgeEndpoint -Health $health
+                $script:confirmedEndpointRequired = $true
+                return "recovered_verified"
+            }
+            catch {
+                if ($Operation -in @("status", "stop", "restart")) {
+                    return "recovered_unpersisted"
+                }
+                throw
+            }
+        }
+        return "exact_process_unhealthy"
+    }
+
+    if ($Operation -eq "start" -and $requestedBridgePort -ge 1024) {
+        Set-BridgeEndpointContext -Port $requestedBridgePort
+        $script:confirmedEndpointRequired = $true
+        return "user_confirmed"
+    }
+
+    if ($savedEndpoint) {
+        Set-BridgeEndpointContext -Port ([int]$savedEndpoint.Port)
+        if ($Operation -in @("start", "restart")) {
+            $script:confirmedEndpointRequired = $true
+        }
+        return "saved"
+    }
+
+    Set-BridgeEndpointContext -Port 4186
+    return "default"
 }
 
 function Rotate-LogFile {
@@ -276,7 +567,7 @@ function Stop-VerifiedProcess {
     if (-not $record) {
         return $false
     }
-    if (-not (Test-BridgeProcess -ProcessRecord $record)) {
+    if (-not (Test-BridgeProcess -ProcessRecord $record -ExpectedPort $bridgePort)) {
         throw "Refusing to stop PID $ProcessId because its exact command line is not the Metafx bridge command."
     }
 
@@ -290,14 +581,10 @@ function Start-Bridge {
         throw "Bridge server not found at $serverPath"
     }
 
-    $bridgeProcesses = @(Get-BridgeProcesses)
-    $listenerProcessIds = @(Get-ListenerProcessIds)
+    Select-StartBridgeEndpoint
+    $candidates = @(Get-BridgeProcesses)
+    $bridgeProcesses = $candidates
     $bridgeProcessIds = @($bridgeProcesses | Select-Object -ExpandProperty ProcessId)
-    $foreignListeners = @($listenerProcessIds | Where-Object { $bridgeProcessIds -notcontains $_ })
-
-    if ($foreignListeners.Count -gt 0) {
-        throw "Port $bridgePort is already used by an unrelated process (PID $($foreignListeners -join ', ')). It was not stopped."
-    }
     if ($bridgeProcesses.Count -gt 1) {
         throw "Multiple exact Metafx bridge processes were found (PID $($bridgeProcessIds -join ', ')). Run Restart to cleanly replace them."
     }
@@ -305,10 +592,12 @@ function Start-Bridge {
     if ($bridgeProcesses.Count -eq 1) {
         $existing = $bridgeProcesses[0]
         $existingId = [int]$existing.ProcessId
-        $healthyExistingId = Wait-ForBridgeHealth -ProcessId $existingId -TimeoutSeconds $HealthTimeoutSeconds
-        if ($healthyExistingId) {
+        $healthyExistingResult = Wait-ForBridgeHealth -ProcessId $existingId -TimeoutSeconds $HealthTimeoutSeconds
+        if ($healthyExistingResult) {
+            $healthyExistingId = [int]$healthyExistingResult.ProcessId
             $healthyExisting = Get-ProcessRecord -ProcessId $healthyExistingId
             $startedAt = if ($healthyExisting.CreationDate) { ([DateTime]$healthyExisting.CreationDate).ToUniversalTime().ToString("o") } else { "" }
+            Write-BridgeEndpoint -Health $healthyExistingResult.Health
             Write-LifecycleState -Status "running" -ProcessId $healthyExistingId -PythonPath ([string]$healthyExisting.ExecutablePath) -StartedAt $startedAt
             Write-AuditEvent -Operation "start" -Outcome "already_running" -ProcessId $healthyExistingId -Message "Healthy exact bridge instance reused."
             Write-Host "Metafx Local Bridge is already healthy at $bridgeUrl (PID $healthyExistingId)."
@@ -320,49 +609,98 @@ function Start-Bridge {
 
     $pythonPath = Resolve-PythonExecutable
     New-Item -ItemType Directory -Path $logPath -Force | Out-Null
-    Rotate-LogFile -Path $stdoutPath -ArchiveCurrent
-    Rotate-LogFile -Path $stderrPath -ArchiveCurrent
 
-    $startedAt = Get-UtcTimestamp
-    Write-LifecycleState -Status "starting" -PythonPath $pythonPath -StartedAt $startedAt
-    $arguments = @(
-        ('"{0}"' -f $serverPath),
-        "--host",
-        $bridgeHost,
-        "--port",
-        ([string]$bridgePort)
-    )
-
-    $startedProcess = Start-Process `
-        -FilePath $pythonPath `
-        -ArgumentList $arguments `
-        -WorkingDirectory $projectRoot `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $stdoutPath `
-        -RedirectStandardError $stderrPath `
-        -PassThru
-
-    $startedId = [int]$startedProcess.Id
-    Write-LifecycleState -Status "starting" -ProcessId $startedId -PythonPath $pythonPath -StartedAt $startedAt
-
-    $healthyProcessId = Wait-ForBridgeHealth -ProcessId $startedId -TimeoutSeconds $HealthTimeoutSeconds
-    if (-not $healthyProcessId) {
-        # There was no exact instance before this guarded start. Clean up any
-        # exact verified child left by a failed venv redirector launch.
-        foreach ($record in @(Get-BridgeProcesses)) {
-            Stop-VerifiedProcess -ProcessId ([int]$record.ProcessId) | Out-Null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if ($attempt -gt 1) {
+            if ($confirmedEndpointRequired) {
+                throw "พอร์ตที่ผู้ใช้ยืนยันไม่สามารถเริ่ม Bridge ได้ ระบบหยุดโดยไม่สลับไป URL อื่น"
+            }
+            $previousPort = $bridgePort
+            $retryPort = Select-RandomAvailableBridgePort
+            Set-BridgeEndpointContext -Port $retryPort
+            Write-AuditEvent -Operation "start" -Outcome "retry_port_selected" -Message "Retry $attempt selected port $retryPort after port $previousPort failed without stopping another process."
         }
-        Write-LifecycleState -Status "failed" -PythonPath $pythonPath -StartedAt $startedAt -LastError "Health check did not pass within $HealthTimeoutSeconds seconds."
-        throw "Bridge startup failed its health check after $HealthTimeoutSeconds seconds. See $stderrPath"
+
+        Select-StartBridgeEndpoint
+        $attemptBridgeProcesses = @(Get-BridgeProcesses)
+        if ($attemptBridgeProcesses.Count -gt 0) {
+            $ids = @($attemptBridgeProcesses | Select-Object -ExpandProperty ProcessId)
+            throw "An exact Metafx bridge process appeared during startup (PID $($ids -join ', ')). Refusing to launch a duplicate."
+        }
+
+        $attemptListenerIds = @(Get-ListenerProcessIds)
+        if ($attemptListenerIds.Count -gt 0 -or -not (Test-LoopbackPortAvailable -Port $bridgePort)) {
+            Write-AuditEvent -Operation "start" -Outcome "port_race_detected" -Message "Attempt $attempt found port $bridgePort unavailable and preserved its listener."
+            if ($attempt -lt 3) {
+                continue
+            }
+            throw "Bridge could not reserve a local port after 3 guarded attempts. No foreign process was stopped."
+        }
+
+        Rotate-LogFile -Path $stdoutPath -ArchiveCurrent
+        Rotate-LogFile -Path $stderrPath -ArchiveCurrent
+        $startedAt = Get-UtcTimestamp
+        Write-LifecycleState -Status "starting" -PythonPath $pythonPath -StartedAt $startedAt
+        $arguments = @(
+            ('"{0}"' -f $serverPath),
+            "--host",
+            $bridgeHost,
+            "--port",
+            ([string]$bridgePort)
+        )
+
+        $startedProcess = Start-Process `
+            -FilePath $pythonPath `
+            -ArgumentList $arguments `
+            -WorkingDirectory $projectRoot `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -PassThru
+
+        $startedId = [int]$startedProcess.Id
+        Write-LifecycleState -Status "starting" -ProcessId $startedId -PythonPath $pythonPath -StartedAt $startedAt
+
+        $healthyProcessResult = Wait-ForBridgeHealth -ProcessId $startedId -TimeoutSeconds $HealthTimeoutSeconds
+        if (-not $healthyProcessResult) {
+            $startedRecord = Get-ProcessRecord -ProcessId $startedId
+            if ($startedRecord -and (Test-BridgeProcess -ProcessRecord $startedRecord -ExpectedPort $bridgePort)) {
+                Stop-VerifiedProcess -ProcessId $startedId | Out-Null
+            }
+            Write-LifecycleState -Status "failed" -PythonPath $pythonPath -StartedAt $startedAt -LastError "Startup attempt $attempt did not pass its endpoint-bound health check."
+            Write-AuditEvent -Operation "start" -Outcome "attempt_failed" -ProcessId $startedId -Message "Attempt $attempt failed health or bind verification; only its exact launched PID was eligible for cleanup."
+            if ($attempt -lt 3) {
+                continue
+            }
+            throw "Bridge startup failed after 3 guarded attempts. See $stderrPath"
+        }
+
+        $healthyProcessId = [int]$healthyProcessResult.ProcessId
+        $healthyRecord = Get-ProcessRecord -ProcessId $healthyProcessId
+        $healthyPythonPath = if ($healthyRecord -and $healthyRecord.ExecutablePath) { [string]$healthyRecord.ExecutablePath } else { $pythonPath }
+        try {
+            Write-BridgeEndpoint -Health $healthyProcessResult.Health
+            Write-LifecycleState -Status "running" -ProcessId $healthyProcessId -PythonPath $healthyPythonPath -StartedAt $startedAt
+        }
+        catch {
+            $persistError = [string]$_.Exception.Message
+            $verifiedRecord = Get-ProcessRecord -ProcessId $healthyProcessId
+            if ($verifiedRecord -and (Test-BridgeProcess -ProcessRecord $verifiedRecord -ExpectedPort $bridgePort)) {
+                Stop-VerifiedProcess -ProcessId $healthyProcessId | Out-Null
+            }
+            try {
+                Write-AuditEvent -Operation "start" -Outcome "persistence_failed_process_stopped" -ProcessId $healthyProcessId -Message "The newly launched verified PID was stopped because endpoint/state persistence failed."
+            }
+            catch { }
+            throw "Bridge passed Health but endpoint/state persistence failed; the newly launched process was stopped. $persistError"
+        }
+        Write-AuditEvent -Operation "start" -Outcome "started" -ProcessId $healthyProcessId -Message "Bridge passed the endpoint-bound HTTP health check."
+        Write-Host "Metafx Local Bridge is healthy at $bridgeUrl (PID $healthyProcessId)."
+        Write-Host "Logs: $stdoutPath and $stderrPath"
+        return 0
     }
 
-    $healthyRecord = Get-ProcessRecord -ProcessId $healthyProcessId
-    $healthyPythonPath = if ($healthyRecord -and $healthyRecord.ExecutablePath) { [string]$healthyRecord.ExecutablePath } else { $pythonPath }
-    Write-LifecycleState -Status "running" -ProcessId $healthyProcessId -PythonPath $healthyPythonPath -StartedAt $startedAt
-    Write-AuditEvent -Operation "start" -Outcome "started" -ProcessId $healthyProcessId -Message "Bridge passed the HTTP health check."
-    Write-Host "Metafx Local Bridge is healthy at $bridgeUrl (PID $healthyProcessId)."
-    Write-Host "Logs: $stdoutPath and $stderrPath"
-    return 0
+    throw "Bridge startup exhausted its guarded retries."
 }
 
 function Stop-Bridge {
@@ -395,6 +733,13 @@ function Stop-Bridge {
 }
 
 function Get-BridgeStatus {
+    if (@($bridgeInventoryConflict).Count -gt 1) {
+        $ids = @($bridgeInventoryConflict | ForEach-Object { $_.ProcessId })
+        Write-AuditEvent -Operation "status" -Outcome "multiple_instances" -Message "Multiple exact bridge processes were found across local ports."
+        Write-Host "UNHEALTHY: multiple exact Metafx bridge processes found (PID $($ids -join ', '))."
+        return 5
+    }
+
     $bridgeProcesses = @(Get-BridgeProcesses)
     $listenerProcessIds = @(Get-ListenerProcessIds)
 
@@ -447,7 +792,8 @@ try {
         throw "Another bridge lifecycle action is still running. Try again shortly."
     }
 
-    Write-AuditEvent -Operation $operation -Outcome "requested" -Message "Lifecycle action requested."
+    $endpointSource = Initialize-BridgeEndpointContext -Operation $operation
+    Write-AuditEvent -Operation $operation -Outcome "requested" -Message "Lifecycle action requested with $endpointSource loopback endpoint."
     switch ($Action) {
         "Start" {
             $exitCode = Start-Bridge
@@ -461,6 +807,9 @@ try {
         "Restart" {
             Write-AuditEvent -Operation "restart" -Outcome "stopping" -Message "Restart requested; stopping exact bridge instance first."
             Stop-Bridge | Out-Null
+            if ($requestedBridgePort -ge 1024) {
+                Set-BridgeEndpointContext -Port $requestedBridgePort
+            }
             $exitCode = Start-Bridge
             if ($exitCode -eq 0) {
                 Write-AuditEvent -Operation "restart" -Outcome "started" -Message "Restart completed and health check passed."
