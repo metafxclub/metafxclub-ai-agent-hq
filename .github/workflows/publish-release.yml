@@ -57,9 +57,11 @@ jobs:
           วิธีติดตั้ง:
           1. ดาวน์โหลดไฟล์ ZIP และแตกไฟล์
           2. ดับเบิลคลิก 1-INSTALL-HQ.bat
-          3. เปิดโปรแกรมจาก Shortcut ที่ตัวติดตั้งสร้างให้
+          3. ยืนยัน Local URL ที่ตัวติดตั้งตรวจว่าว่าง
+          4. เปิดโปรแกรมจาก Shortcut ที่ตัวติดตั้งสร้างให้
 
-          ระบบเริ่มต้นในโหมด Demo/Read-only และไม่รวม Token, Password, Log, Memory หรือข้อมูลส่วนตัวจากเครื่องผู้พัฒนา
+          หลังติดตั้ง ระบบตรวจ Health, Codex และ Rate Limit ของบัญชีที่ Login อยู่ในเครื่องนั้น
+          ระบบเริ่มต้นในโหมด Demo/Read-only และไม่รวม Token, Password, Auth, Log, Memory หรือข้อมูลส่วนตัวจากเครื่องผู้พัฒนา
           '@
 
             gh release create $tag $archive $checksum `

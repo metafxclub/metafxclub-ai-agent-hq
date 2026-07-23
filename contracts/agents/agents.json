@@ -112,7 +112,7 @@
       "name": "Optimization Agent",
       "role": "Parameter Search Specialist",
       "goal": "Suggest parameter ranges, compare candidates, and flag overfit risk.",
-      "allowed_surfaces": ["left_analytics_console", "left_queue_lanes", "right_queue_lanes", "optimization_report"],
+      "allowed_surfaces": ["right_server_racks", "left_analytics_console", "left_queue_lanes", "right_queue_lanes", "optimization_report"],
       "blocked_actions": ["select_parameters_without_risk_note"],
       "memory_scope": "parameter sets, stability notes",
       "credit_budget": "per optimization batch",
@@ -121,7 +121,7 @@
       "visual": {
         "asset_package": "male-roster-set-a-core-command-operators-v001",
         "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/05-optimization-agent-male-static-v001.png",
-        "default_target": "left_analytics_console"
+        "default_target": "right_server_racks"
       }
     },
     {
@@ -129,7 +129,7 @@
       "name": "VPS Watch",
       "role": "Infrastructure Monitor",
       "goal": "Monitor latency, uptime, CPU/RAM, disk, terminal status, and incidents.",
-      "allowed_surfaces": ["left_server_racks", "right_server_racks"],
+      "allowed_surfaces": ["right_status_crystals", "left_signal_cube", "right_server_racks"],
       "blocked_actions": ["restart_service_without_approval"],
       "memory_scope": "health snapshots and incident logs",
       "credit_budget": "monitoring cadence",
@@ -138,7 +138,7 @@
       "visual": {
         "asset_package": "male-roster-set-a-core-command-operators-v001",
         "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/08-vps-watch-male-static-v001.png",
-        "default_target": "right_server_racks"
+        "default_target": "right_status_crystals"
       }
     },
     {

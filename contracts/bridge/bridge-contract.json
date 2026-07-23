@@ -1,7 +1,17 @@
 {
-  "version": "bridge-contract-v006",
+  "version": "bridge-contract-v010",
   "purpose": "Local backend boundary for Codex CLI, MCP, filesystem, VPS, MT4/MT5, Telegram, and other real tools.",
   "base_url": "http://127.0.0.1:4186",
+  "base_url_semantics": "Preferred first-run URL only; the confirmed runtime URL comes from runtime_endpoint.source.",
+  "default_base_url": "http://127.0.0.1:4186",
+  "runtime_endpoint": {
+    "host": "127.0.0.1",
+    "preferredPort": 4186,
+    "fallbackPortRange": [42000, 49999],
+    "source": "data/runtime/bridge-endpoint.json",
+    "confirmAfter": "GET /api/health returns the same host and port",
+    "rule": "Never randomize the IP, expose LAN/public binding, stop another process, or store secrets in the endpoint file."
+  },
   "principles": [
     "Frontend sends intents only.",
     "Secrets, tokens, cookies, auth files, and credentials stay outside the frontend.",
@@ -11,10 +21,13 @@
   "endpoints": {
     "GET /api/health": "Fast side-effect-free Bridge and critical UI readiness check. It does not invoke Codex CLI or MCP.",
     "GET /api/bridge/status": "Detect local runner, Codex auth state, MCP config, and approval policy.",
+    "GET /api/operator-mode": "Read manual_guarded or auto_guarded mode, Thai label, auto-execution policy, worker state, and updated time.",
+    "POST /api/operator-mode": "Accept exactly one mode field, persist the local operator mode, and write an audit record. The installation default remains manual_guarded.",
     "GET /api/capabilities": "Read the sanitized, contract-owned capability registry and distinguish ready, approval-gated, unimplemented, and disabled adapters.",
     "GET /api/codex/rate-limits": "Read a cached, frontend-safe Codex account quota snapshot from the authenticated local Codex app-server. No auth, account, plan, credit, path, or raw error data is exposed.",
+    "POST /api/agents/chat": "Run one role-bound, tool-free Codex conversation turn. The request contains only agentId, message, sessionId, and idempotencyKey. The Chat Runner returns conversation or task_request plus a safe taskGoal; for task_request the Backend creates an idempotent guarded Mission and returns taskCreated, taskMissionIds, taskStatus, and autoExecute.",
     "POST /api/bridge/run": "Create a guarded backend mission; approval-required tools are never executed in this request.",
-    "POST /api/manager/delegate": "Create a Manager parent plan and bounded queue-only specialist subtasks.",
+    "POST /api/manager/delegate": "Create a Manager parent plan and bounded specialist subtasks. Optional requestedOwnerAgentId and requestedTargetId are backend validated; when target is omitted the Backend selects one permitted workstation from the goal.",
     "GET /api/missions": "Read active mission queue.",
     "POST /api/missions": "Create a mission without direct tool execution.",
     "POST /api/missions/:id/approval": "Record the local human decision against the complete execution packet; required high-risk review is then issued only by backend Risk Guard policy.",
@@ -24,6 +37,10 @@
     "GET /api/agent-events": "Read visual office event log.",
     "POST /api/agent-events": "Append agent speech, route, report, or meeting event.",
     "GET /api/props/:id/report": "Merge the prop contract, strictly routed missions/reports, memory, events, relevant meetings, sanitized Bridge state, and filtered capabilities into one dashboard read model.",
+    "GET /api/props/:id/connections": "Read the cached/backend-computed Connection Checklist for one Dashboard without durable writes or frontend readiness inference.",
+    "POST /api/props/:id/connections/refresh": "Accept an explicit frontend intent, then run a cooldown-guarded read-only connection diagnostic with mission id, owner, status, audit, and a report routed back to that Dashboard.",
+    "POST /api/integrations/metatrader/discover": "Search bounded standard locations and process image names for MT4/MT5 in read-only mode. It never launches, closes, attaches, trades, or returns paths, PIDs, account, broker, or credentials.",
+    "POST /api/integrations/metatrader/select": "Accept only propId plus an opaque candidateId from a detected safe candidate, persist that dashboard's local target selection behind the Bridge, and create mission/report/audit records. Selection never attaches to a terminal, enables an adapter, or enables live trading.",
     "GET /api/memory": "Read memory index.",
     "GET /api/memory/search?q=keyword": "Search durable non-secret memory cards.",
     "POST /api/memory/items": "Upsert memory card.",
@@ -51,12 +68,34 @@
     "denied": ["/data/*", "/backend/*", "/runner/*", "/scripts/*", "/assets-source/*", "/docs/*"]
   },
   "runner_mode": {
-    "default": "read-only diagnostic/report mode",
-    "write_enabled_requires": ["explicit human approval", "Risk Guard note", "mission audit id"],
+    "default": "manual_guarded",
+    "auto_guarded_requires": ["local operator mode", "digest-bound Backend Risk Guard approval", "explicit auto execution marker", "mission audit id"],
     "codex_cli": {
       "script": "./runner/codex_cli_runner.py",
-      "sandbox": "read-only by default",
+      "sandbox": "read-only in manual_guarded; PROJECT_ROOT/workspace plus explicit frontend, docs, and assets-source write roots in safe auto_guarded mode",
+      "autoWorkingDirectory": "./workspace/",
+      "autoWriteRoots": ["./workspace/", "./frontend/", "./docs/", "./assets-source/"],
+      "autoReadOnlyControlPlaneRoots": ["./backend/", "./runner/", "./contracts/", "./data/runtime/", "./scripts/", "./installer/", "./.git/"],
+      "autoForbidden": ["network", "external apps", "live trading", "real external messages", "deploy or public publish", "file deletion", "secret or credential access", "money or credit spending"],
+      "sessionMode": "ephemeral",
       "artifacts": "./data/runtime/codex-runs/"
+    },
+    "agent_chat": {
+      "mode": "read_only_conversation",
+      "consumesCodexQuota": true,
+      "toolsEnabled": false,
+      "classification": ["conversation", "task_request"],
+      "taskExecution": "Backend creates an idempotent Mission only for task_request; Chat itself executes no tools",
+      "transcript": "./data/runtime/agent-chat-transcripts.jsonl"
+    },
+    "mission_worker": {
+      "queue": "./data/runtime/missions.json",
+      "heartbeat": true,
+      "backoff": true,
+      "legacyAutoMigration": false,
+      "restartRecovery": "fail closed without automatic retry",
+      "shutdown": "cancel and verify active process tree",
+      "timeoutWatchdog": "terminate active process tree and fail the mission without automatic retry"
     }
   },
   "codex_rate_limit_telemetry": {
