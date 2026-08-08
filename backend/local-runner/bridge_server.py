@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-BRIDGE_RUNTIME_VERSION = "0.9.1"
+BRIDGE_RUNTIME_VERSION = "0.9.2"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_STARTED_MONOTONIC = time.monotonic()
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
