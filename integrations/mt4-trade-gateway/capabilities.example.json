@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "metafx-hq-mt4-capabilities-v1",
+  "channelId": "mtc-demo-01",
+  "commandSchemaVersion": "metafx-hq-mt4-command-v2",
+  "ackSchemaVersion": "metafx-hq-mt4-ack-v3",
+  "shadowValidationAvailable": true,
+  "demoExecutionAvailable": true,
+  "signedEnvelopeSchemaVersion": "metafx-hq-mt4-signed-envelope-v1",
+  "signatureAlgorithm": "HMAC-SHA256",
+  "activeSigningKeyId": "hk-630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd",
+  "signingKeyPinned": false,
+  "signedCommandVerification": true,
+  "liveExecutionAvailable": false,
+  "liveBlockReason": "LIVE_SIGNING_KEY_NOT_PINNED",
+  "portfolioGuardScope": "MANAGED_MAGIC_NUMBERS_ACCOUNT_WIDE",
+  "historyScope": "MT4_LOADED_ACCOUNT_HISTORY",
+  "managedMagicNumbers": "4186001",
+  "positionLifecycleMode": "SLTP_ONLY",
+  "outcomeTracking": true,
+  "postOrderVerification": true,
+  "executionUnknownRecovery": "EA_RECONCILE_OR_BACKEND_QUARANTINE"
+}

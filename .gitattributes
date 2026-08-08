@@ -12,6 +12,9 @@
 *.md text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+*.mq4 text eol=lf
+*.mq5 text eol=lf
+*.mqh text eol=lf
 
 *.png binary
 *.jpg binary

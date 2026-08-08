@@ -99,7 +99,8 @@
     {
       "id": "male_roster_set_a_backtest_analyst_v001",
       "agent_id": "backtest_analyst",
-      "name": "Backtest Analyst",
+      "name": "Price Action Consultant",
+      "legacy_name": "Backtest Analyst",
       "role": "Backtest Report Analyst",
       "type": "Character",
       "source": "metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
@@ -140,7 +141,14 @@
         "left_report_board",
         "report_archive"
       ],
-      "mcp_capability_hint": "Reads reports and produces metric findings."
+      "mcp_capability_hint": "Reads reports and produces metric findings.",
+      "ai_trade_council_assignment": {
+        "role_id": "price_action",
+        "title_th": "ที่ปรึกษากราฟเปล่าและ Price Action • สมาชิกสภา AI ชั้นสูง",
+        "dashboard_surface": "left_analytics_console",
+        "click_action": "open_agent_chat",
+        "status_source": "backend_council_mission"
+      }
     },
     {
       "id": "male_roster_set_a_telegram_ops_v001",
@@ -191,7 +199,8 @@
     {
       "id": "male_roster_set_a_optimization_agent_v001",
       "agent_id": "optimization_agent",
-      "name": "Optimization Agent",
+      "name": "Technical Consultant",
+      "legacy_name": "Optimization Agent",
       "role": "Parameter Search Specialist",
       "type": "Character",
       "source": "metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
@@ -232,7 +241,14 @@
         "right_queue_lanes",
         "left_analytics_console"
       ],
-      "mcp_capability_hint": "Compares parameter candidates and flags overfit risk."
+      "mcp_capability_hint": "Compares parameter candidates and flags overfit risk.",
+      "ai_trade_council_assignment": {
+        "role_id": "technical",
+        "title_th": "ที่ปรึกษา Technical Analysis และ Indicator • สมาชิกสภา AI ชั้นสูง",
+        "dashboard_surface": "left_analytics_console",
+        "click_action": "open_agent_chat",
+        "status_source": "backend_council_mission"
+      }
     },
     {
       "id": "male_roster_set_a_ea_developer_v001",
@@ -283,7 +299,8 @@
     {
       "id": "male_roster_set_a_codex_mcp_operator_v001",
       "agent_id": "codex_mcp_operator",
-      "name": "Codex MCP Operator",
+      "name": "News Consultant",
+      "legacy_name": "Codex MCP Operator",
       "role": "Bridge Operator",
       "type": "Character",
       "source": "metafx-aihq-male-roster-set-a-core-command-operators-v001-alpha-2048x1536.png",
@@ -324,7 +341,14 @@
         "right_tool_console",
         "mission_strategy_table"
       ],
-      "mcp_capability_hint": "Internal support role for runner/bridge diagnostics."
+      "mcp_capability_hint": "Internal support role for runner/bridge diagnostics.",
+      "ai_trade_council_assignment": {
+        "role_id": "news",
+        "title_th": "ที่ปรึกษาข่าวและ Market Context • สมาชิกสภา AI ชั้นสูง",
+        "dashboard_surface": "left_analytics_console",
+        "click_action": "open_agent_chat",
+        "status_source": "backend_council_mission"
+      }
     },
     {
       "id": "male_roster_set_a_vps_watch_v001",

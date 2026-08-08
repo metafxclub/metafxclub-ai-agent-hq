@@ -1,5 +1,5 @@
 {
-  "version": "dashboard-connection-contract-v003",
+  "version": "dashboard-connection-contract-v006",
   "purpose": "กำหนด Checklist การเชื่อมต่อ ความพร้อม โหมดทำงาน และเส้นทางรายงานของ Dashboard ทั้ง 9 จุด โดยให้ Backend เป็นผู้ตรวจสถานะจริง",
   "statusVocabulary": [
     "connected",
@@ -29,6 +29,9 @@
       "cookie",
       "authorization",
       "password",
+      "signing_key",
+      "signing_secret",
+      "signature",
       "account_number",
       "broker_server",
       "terminal_path",
@@ -39,33 +42,32 @@
     "dashboardCount": 9,
     "missionStrategyTableIsKanban": true,
     "missionStrategyTableExcludedFromDashboardTabs": true,
-    "defaultTab": "connections",
-    "tabs": [
-      {
-        "id": "connections",
-        "labelTh": "การเชื่อมต่อ",
-        "purpose": "แสดงสถานะ Bridge, Codex, Plugin, Terminal และ Adapter พร้อมปุ่มตรวจใหม่แบบ Backend-owned"
+    "defaultView": "work_results",
+    "tabsEnabled": false,
+    "layout": {
+      "leftRail": {
+        "shows": ["prop_image", "short_description", "connection_checklist", "connection_actions"],
+        "doesNotShow": ["owner_summary", "report_type", "mission_count", "memory_count", "generic_prop_status"]
       },
-      {
-        "id": "tasks",
-        "labelTh": "งานของอุปกรณ์",
-        "purpose": "แสดง Mission ที่ Route มายังอุปกรณ์นี้ แยกสถานะและกดดูรายละเอียด Task ได้"
-      },
-      {
-        "id": "results",
-        "labelTh": "ผลลัพธ์งาน",
-        "purpose": "แสดง Structured Report และหลักฐานของงานที่เสร็จแล้ว โดยกดเปิดรายละเอียดได้"
+      "mainWorkspace": {
+        "showsOnly": ["missions", "structured_reports", "report_attachments"],
+        "statusGroups": {
+          "running": ["queued", "running", "draft"],
+          "completed": ["completed", "archived", "ready", "published"],
+          "blocked": ["waiting_approval", "needs_approval", "blocked", "failed", "error"]
+        }
       }
-    ],
+    },
     "propChatEnabled": false,
     "taskCardsOpenDetails": true,
     "reportCardsOpenDetails": true,
-    "connectionTabDoesNotCreateTasks": true
+    "connectionRailDoesNotCreateTasks": true,
+    "reportDetailsSupportTextMetricsAndImages": true
   },
   "terminalTargetSelection": {
     "intent": "select_metatrader_target",
     "endpoint": "POST /api/integrations/metatrader/select",
-    "eligibleDashboardIds": ["right_server_racks", "left_analytics_console", "terminal_workstation", "left_signal_cube"],
+    "eligibleDashboardIds": ["right_server_racks", "right_tool_console", "left_analytics_console"],
     "requestFields": ["propId", "candidateId"],
     "candidateFrontendSafeFields": ["candidateId", "platform", "labelTh", "detected", "runningState"],
     "selectionFrontendSafeFields": ["propId", "required", "detectedStatus", "status", "configurationStatus", "candidateCount", "candidates", "selectedCandidate", "selectedAt", "staleSelection", "adapterConnection", "adapterReady", "canSelect", "detailTh"],
@@ -85,152 +87,325 @@
     "selectionSubstateIsOverallStatus": false,
     "persistence": "backend_only_per_prop",
     "selectionIsConnection": false,
-    "selectionEnablesLiveTrading": false
+    "selectionEnablesLiveTrading": false,
+    "eaSnapshotChannelUi": {
+      "sourcePriority": [
+        "metatraderReadOnly.installPreparation.snapshotChannel",
+        "aiTradeCouncil.tradeGateway.selectedCandidateId",
+        "metatraderReadOnly.selectedCandidateId",
+        "connectionChecklist.metatraderSelection.selectedCandidate.candidateId"
+      ],
+      "requiredPrefix": "mtc-",
+      "displayWhen": "channel_available_or_missing_guidance",
+      "displayIndependentOfSnapshotAvailability": true,
+      "copyAction": true,
+      "httpPortIsChannel": false
+    }
+  },
+  "discoveryLabMt4Readiness": {
+    "eligibleDashboardIds": ["left_analytics_console", "right_server_racks", "right_tool_console"],
+    "frontendSafeFields": ["applicable", "status", "detailTh", "pluginId", "pluginBindingAvailable", "adapterReady", "realExecutionAvailable", "selectedMt4", "terminalRunning", "offlineDemoOnly", "liveTradingAllowed", "stages"],
+    "stageFrontendSafeFields": ["id", "labelTh", "status", "ready"],
+    "pluginBindingAvailable": false,
+    "adapterReady": false,
+    "realExecutionAvailable": false,
+    "offlineDemoOnly": true,
+    "liveTradingAllowed": false,
+    "truthRule": "Detected or selected MT4 never means Compile, Backtest, Optimization, or Plugin execution is ready."
   },
   "profiles": {
     "codex_mcp_portal": {
-      "moduleNameTh": "ศูนย์ควบคุม Codex / MCP",
-      "availability": {"ui": "ready", "data": "partial", "execution": "guarded"},
+      "moduleNameTh": "เรดาร์ระบบเทรดโลกและ EA",
+      "availability": {"ui": "ready", "data": "public_research_ready", "execution": "guarded_read_only_research", "googleSheets": "coming_soon"},
+      "localTabs": [
+        {"id": "systems", "labelTh": "ระบบเทรดใหม่", "actionIds": ["discover_trading_systems"]},
+        {"id": "ea_updates", "labelTh": "EA และงานวิจัยใหม่", "actionIds": ["discover_ea_updates"]},
+        {"id": "schedule", "labelTh": "ตารางค้นหารายวัน", "actionIds": ["save_discovery_schedule"]},
+        {"id": "catalog", "labelTh": "คลังรายการและ Google Sheet", "actionIds": [], "viewOnly": true}
+      ],
       "connections": [
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
         {"id": "codex_runner", "labelTh": "Codex CLI และบัญชีที่ Login", "required": true, "adapterStatus": "runtime_detected"},
+        {"id": "codex_public_web_research", "labelTh": "ค้นข้อมูลสาธารณะผ่าน Codex Web Research", "required": true, "adapterStatus": "implemented", "mode": "guarded_read_only"},
+        {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
+        {"id": "dedup_catalog", "labelTh": "ตรวจรายการซ้ำในคลัง Local", "required": true, "adapterStatus": "implemented", "mode": "backend_contract"},
         {"id": "codex_quota", "labelTh": "Rate Limit ของ Codex", "required": false, "adapterStatus": "runtime_detected"},
-        {"id": "mcp_config", "labelTh": "การตั้งค่า MCP", "required": false, "adapterStatus": "runtime_detected"},
-        {"id": "mcp_execution_adapter", "labelTh": "การสั่ง MCP จาก HQ", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "computer_use_adapter", "labelTh": "การควบคุมโปรแกรมในเครื่องผ่าน Computer Use", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "report_routing", "labelTh": "ส่งรายงานกลับประตู Codex / MCP", "required": true, "adapterStatus": "implemented"}
+        {"id": "google_sheets_adapter", "labelTh": "เชื่อม Google Sheets", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "backend_scheduler", "labelTh": "ตัวรันค้นหารายวันตามเวลา", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "report_routing", "labelTh": "ส่งผลกลับเรดาร์และ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["ai_every_2_hours"], "intervalMinutes": 120, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
-      "reportRoute": {"targetPropId": "codex_mcp_portal", "primaryReportType": "bridge_status_report", "summaryTargetPropId": "mission_strategy_table"}
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["daily_schedule"], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false, "scheduleConfigurationIntent": "save_discovery_schedule", "scheduleExecutionAdapterStatus": "coming_soon"},
+      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "googleSheetsSync": "coming_soon", "recurringScheduler": "coming_soon"},
+      "reportRoute": {"targetPropId": "codex_mcp_portal", "primaryReportType": "trading_system_discovery_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "left_server_racks": {
-      "moduleNameTh": "System Scout และ EA Radar R1",
-      "availability": {"ui": "ready", "data": "partial", "execution": "coming_soon"},
+      "moduleNameTh": "คลังวิจัยระบบเทรดเชิงลึก",
+      "availability": {"ui": "ready", "data": "local_archive_ready", "execution": "guarded_read_only_research", "googleSheets": "coming_soon"},
+      "localTabs": [
+        {"id": "research_queue", "labelTh": "คิววิจัย", "actionIds": ["deep_research_system"]},
+        {"id": "verified_archive", "labelTh": "คลังที่ตรวจสอบแล้ว", "actionIds": [], "viewOnly": true},
+        {"id": "application", "labelTh": "แนวทางประยุกต์", "actionIds": [], "viewOnly": true},
+        {"id": "evidence", "labelTh": "หลักฐานย้อนหลัง", "actionIds": [], "viewOnly": true}
+      ],
       "connections": [
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
         {"id": "memory_store", "labelTh": "คลังความจำและงานย้อนหลัง", "required": true, "adapterStatus": "implemented"},
         {"id": "report_store", "labelTh": "คลังรายงาน", "required": true, "adapterStatus": "implemented"},
-        {"id": "system_scout_plugin", "labelTh": "Plugin System Scout", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "ea_radar_plugin", "labelTh": "Plugin EA Radar R1 รายวัน", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "backend_scheduler", "labelTh": "AI ตรวจและสรุปทุก 2 ชั่วโมง", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "report_routing", "labelTh": "ส่งผลกลับตู้ System Scout", "required": true, "adapterStatus": "implemented"}
+        {"id": "radar_report_link", "labelTh": "รับรายการจากเรดาร์ระบบเทรดโลก", "required": true, "adapterStatus": "implemented", "mode": "backend_contract"},
+        {"id": "codex_public_web_research", "labelTh": "วิจัยแหล่งสาธารณะแบบอ่านอย่างเดียว", "required": true, "adapterStatus": "implemented", "mode": "guarded_read_only"},
+        {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
+        {"id": "google_sheets_adapter", "labelTh": "ซิงก์งานวิจัยไป Google Sheets", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "report_routing", "labelTh": "ส่งผลกลับคลังวิจัยและ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["ai_every_2_hours"], "intervalMinutes": 120, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
-      "reportRoute": {"targetPropId": "left_server_racks", "primaryReportType": "archive_report", "summaryTargetPropId": "mission_strategy_table"}
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
+      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "durableArchive": "ready", "googleSheetsSync": "coming_soon"},
+      "reportRoute": {"targetPropId": "left_server_racks", "primaryReportType": "trading_system_research_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "right_server_racks": {
-      "moduleNameTh": "Optimization Lab MT4 / MT5",
-      "availability": {"ui": "ready", "data": "partial", "execution": "coming_soon"},
+      "moduleNameTh": "โรงงานสร้าง EA และ Indicator",
+      "availability": {"ui": "ready", "data": "source_inputs_ready", "execution": "codex_workspace_ready", "compile": "coming_soon"},
+      "localTabs": [
+        {"id": "builder", "labelTh": "สร้าง EA / Indicator", "actionIds": ["build_strategy_code"]},
+        {"id": "code_review", "labelTh": "ตรวจ Source Code", "actionIds": ["review_source_code"]},
+        {"id": "compile", "labelTh": "สถานะ Compile", "actionIds": [], "viewOnly": true},
+        {"id": "outputs", "labelTh": "ไฟล์ผลลัพธ์", "actionIds": [], "viewOnly": true}
+      ],
       "connections": [
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
+        {"id": "source_catalog", "labelTh": "ระบบต้นฉบับจากเรดาร์และคลังวิจัย", "required": true, "adapterStatus": "implemented", "mode": "backend_contract"},
+        {"id": "codex_workspace", "labelTh": "พื้นที่สร้าง Source Code ผ่าน Codex", "required": true, "adapterStatus": "implemented", "mode": "guarded_workspace"},
         {"id": "mt4_terminal", "labelTh": "โปรแกรม MT4 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
         {"id": "mt5_terminal", "labelTh": "โปรแกรม MT5 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
-        {"id": "optimization_adapter", "labelTh": "ตัวรัน Optimization", "required": true, "adapterStatus": "coming_soon"},
-        {"id": "backend_scheduler", "labelTh": "AI ตรวจงานทุก 2 ชั่วโมง", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "report_routing", "labelTh": "ส่งผล Optimization กลับตู้นี้", "required": true, "adapterStatus": "implemented"}
+        {"id": "metaeditor_compile_adapter", "labelTh": "Compile MQL4/MQL5 ผ่าน MetaEditor", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "pine_compile_adapter", "labelTh": "ตรวจ Compile Pine Script บน TradingView", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
+        {"id": "report_routing", "labelTh": "ส่งผล Build กลับโรงงานและ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
-      "connectionRequirements": {"anyOf": ["mt4_terminal", "mt5_terminal"]},
+      "connectionRequirements": {"anyOf": ["mt4_terminal", "mt5_terminal"], "requiredForSourceGeneration": ["codex_workspace"], "anyOfForFutureMqlCompile": ["mt4_terminal", "mt5_terminal"], "notRequiredForPineSourceGeneration": true},
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["ai_every_2_hours"], "intervalMinutes": 120, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
-      "reportRoute": {"targetPropId": "right_server_racks", "primaryReportType": "optimization_report", "summaryTargetPropId": "mission_strategy_table"}
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
+      "workflowReadiness": {"codexSourceGenerationWorkspace": "ready_guarded", "sourceCodeReview": "ready_guarded", "missionReportAudit": "ready", "metaEditorCompile": "coming_soon", "pineCompileValidation": "coming_soon"},
+      "reportRoute": {"targetPropId": "right_server_racks", "primaryReportType": "ea_build_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "left_analytics_console": {
-      "moduleNameTh": "EA Discovery Lab และ Backtest Analysis",
-      "availability": {"ui": "ready", "data": "partial", "execution": "guarded"},
+      "moduleNameTh": "สภา AI Trade",
+      "availability": {"ui": "ready", "data": "partial", "execution": "guarded_trade_gateway", "mt4Execution": "source_ready_requires_ea_install", "liveTrading": "ea_controlled_off_by_default"},
+      "localTabs": [
+        {"id": "daily_summary", "labelTh": "สรุปวันนี้"},
+        {"id": "live_analysis", "labelTh": "กราฟและบทวิเคราะห์สด"},
+        {"id": "decision_pipeline", "labelTh": "ขั้นตอนตัดสินใจ"},
+        {"id": "history", "labelTh": "ประวัติทั้งหมด"}
+      ],
+      "defaultLiveAnalysisSubTab": "chart_overview",
+      "liveAnalysisSubTabs": [
+        {"id": "chart_overview", "labelTh": "ภาพรวมสภา AI", "purpose": "แสดงการ์ดตัวละครผู้เชี่ยวชาญ 3 ตัว สถานะการวิเคราะห์ ความเห็นรายตัว และมติล่าสุดของสภา AI โดยไม่แสดงกราฟหรือชุดควบคุม Indicator"},
+        {"id": "price_action", "labelTh": "กราฟเปล่าและโครงสร้างราคา", "purpose": "แสดงกราฟเปล่า แนวรับแนวต้าน Trendline Fibonacci Divergence และโครงสร้างราคา"},
+        {"id": "technical_deep", "labelTh": "Technical 300", "purpose": "แสดงค่า Indicator รายแท่งย้อนหลัง 300 แท่งจาก Deep Analysis"},
+        {"id": "news_context", "labelTh": "ข่าวและบริบทตลาด", "purpose": "แสดงหลักฐานข่าว แนวโน้มระยะสั้น กลาง ยาว และผลจาก News Consultant"}
+      ],
       "connections": [
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
         {"id": "mt4_terminal", "labelTh": "โปรแกรม MT4 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
         {"id": "mt5_terminal", "labelTh": "โปรแกรม MT5 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
-        {"id": "backtest_parser", "labelTh": "ตัวอ่านรายงาน Backtest", "required": true, "adapterStatus": "coming_soon"},
+        {"id": "trading_state_adapter", "labelTh": "ข้อมูลกราฟและสถานะจาก MetafxHQ AI Council EA", "required": true, "adapterStatus": "implemented_unified_ea_snapshot", "action": "refresh_mt4_snapshot"},
+        {"id": "ai_trader_ensemble", "labelTh": "ผู้เชี่ยวชาญ 3 ตัวลงคะแนนบน Snapshot และ Horizon เดียวกัน", "required": true, "adapterStatus": "implemented_guarded_closed_bar", "action": "run_ai_trade_council_analysis"},
+        {"id": "risk_policy", "labelTh": "Council Quality Gate + Risk Guard + EA Gate", "required": true, "adapterStatus": "implemented"},
+        {"id": "mt4_trade_gateway", "labelTh": "ช่องรับคำสั่งของ MetafxHQ AI Council EA (Fixed Lot ที่ EA)", "required": true, "adapterStatus": "source_ready_requires_ea_install", "action": "inspect_trade_gateway"},
+        {"id": "kill_switch_adapter", "labelTh": "Kill Switch Adapter", "required": true, "adapterStatus": "implemented_in_trade_gateway"},
+        {"id": "live_trading", "labelTh": "ส่งคำสั่ง Live Trading", "required": false, "adapterStatus": "ea_local_arm_required"},
         {"id": "codex_runner", "labelTh": "Codex สำหรับช่วยวิเคราะห์", "required": false, "adapterStatus": "runtime_detected"},
         {"id": "codex_quota", "labelTh": "Rate Limit เมื่อใช้ AI วิเคราะห์", "required": false, "adapterStatus": "runtime_detected"},
-        {"id": "report_routing", "labelTh": "ส่งผล Backtest กลับจอ Analysis", "required": true, "adapterStatus": "implemented"}
+        {"id": "report_routing", "labelTh": "ส่งผล Council กลับจอ Analysis", "required": true, "adapterStatus": "implemented"}
       ],
       "connectionRequirements": {"anyOf": ["mt4_terminal", "mt5_terminal"]},
+      "chartWindowPolicy": {
+        "displayBars": {"owner": "frontend_client_only", "allowedValues": [40, 60, 120, 240, 500, 1000], "affectsAnalysis": false},
+        "analysisBarCount": {"owner": "backend_audited_setting", "allowedValues": [120, 180, 240, 300, 500, 1000], "default": 120, "requestedAndUsedMustMatch": true},
+        "closedBarsOnly": true,
+        "indicatorFormulaVersion": "metafx-deterministic-core20-price-action-v3",
+        "snapshotBars": {"minimum": 20, "maximum": 1000},
+        "sourceDisplayScope": "full_validated_source_snapshot_up_to_1000_closed_bars",
+        "missionAnalysisScope": "exact_backend_sliced_analysisBarCount_with_features_recalculated_before_artifact_write",
+        "priceActionFeatureFamilies": ["confirmed_swing_pivots", "support_resistance", "trendlines", "fibonacci_latest_confirmed_swing", "rsi_divergence", "macd_divergence"]
+      },
+      "liveTradingPolicy": {
+        "enabled": false,
+        "implementationAvailable": true,
+        "orderSubmission": "ea_mode_guarded",
+        "activationFromFrontend": false,
+        "requiresKillSwitchAdapter": true,
+        "signedEnvelopeRequired": true,
+        "signingKeySource": "backend_and_ea_local_storage_only",
+        "trustedSigningKeyIdSource": "mt4_ea_input_only_for_live",
+        "requiresMatchingPinnedSigningKeyId": true,
+        "fixedLotSource": "mt4_ea_input_only",
+        "aiMaySetLotOrRisk": false,
+        "protectivePricePolicy": "price_action_is_primary_ai_proposer_or_backend_builds_same_snapshot_deterministic_fallback_on_hold",
+        "aiMaySetStopLossAndTakeProfit": true,
+        "protectivePriceOwnerAgentRole": "price_action_only",
+        "protectivePlanFallback": {
+          "source": "backend_deterministic_fallback",
+          "policyVersion": "metafx-protective-plan-atr-structure-v1",
+          "trigger": "directional_consensus_price_action_hold_null_prices_no_opposite_no_news_veto",
+          "closedBarsOnly": true,
+          "snapshotArtifactDigestRequired": true,
+          "snapshotArtifactPathPattern": "ai-trade-council/snapshots/<artifact-sha256>.json",
+          "technicalNoDataAllowed": false,
+          "priceActionNoDataAllowed": false,
+          "modelCallAllowed": false,
+          "terminalActionAllowed": false,
+          "failClosed": true
+        },
+        "minimumConfidencePerAgent": 70,
+        "sameHorizonRequired": true,
+        "newsEventRiskVetoEnabled": true,
+        "defaultGatewayMode": "shadow"
+      },
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["ai_every_2_hours"], "intervalMinutes": 120, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
-      "reportRoute": {"targetPropId": "left_analytics_console", "primaryReportType": "backtest_optimization_report", "summaryTargetPropId": "mission_strategy_table"}
+      "operation": {
+        "defaultMode": "manual",
+        "allowedModes": ["manual", "auto_on_new_closed_bar"],
+        "triggerPolicy": "new_closed_bar",
+        "activationPolicy": "wait_next_closed_bar",
+        "backlogPolicy": "latest_only_cancel_stale_round",
+        "councilExecution": "parallel_with_round_deadline",
+        "snapshotPollSeconds": 5,
+        "autoSupportedTimeframes": ["M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"],
+        "manualOnlyTimeframes": ["M1"],
+        "scheduleBackendOwned": true,
+        "scheduleDefaultEnabled": false,
+        "liveOrderSubmission": "only_when_ea_is_live_armed"
+      },
+      "reportRoute": {"targetPropId": "left_analytics_console", "primaryReportType": "ai_trade_council_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "right_tool_console": {
-      "moduleNameTh": "Open Interest และ Automation Tool Runner",
-      "availability": {"ui": "ready", "data": "partial", "execution": "coming_soon"},
+      "moduleNameTh": "ห้องทดลอง EA อัตโนมัติ",
+      "availability": {"ui": "ready", "data": "plan_inputs_ready", "execution": "plan_only", "strategyTester": "coming_soon", "optimization": "coming_soon", "eaDiscovery": "coming_soon"},
+      "localTabs": [
+        {"id": "backtest", "labelTh": "Auto Backtest", "actionIds": ["prepare_backtest_plan"]},
+        {"id": "optimization", "labelTh": "Auto Optimization", "actionIds": ["prepare_optimization_plan"]},
+        {"id": "ea_discovery", "labelTh": "EA Discovery", "actionIds": ["prepare_ea_discovery_plan"]},
+        {"id": "history", "labelTh": "ผลทดลองและประวัติ", "actionIds": [], "viewOnly": true}
+      ],
       "connections": [
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
-        {"id": "tool_registry", "labelTh": "ทะเบียน Plugin / Tool", "required": true, "adapterStatus": "implemented"},
-        {"id": "oi_plugin", "labelTh": "Plugin Open Interest", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "telegram_adapter", "labelTh": "การส่ง Telegram จริง", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "backend_scheduler", "labelTh": "AI ตรวจและสรุปทุก 2 ชั่วโมง", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "report_routing", "labelTh": "ส่งผลกลับจอ Tool Runner", "required": true, "adapterStatus": "implemented"}
+        {"id": "source_catalog", "labelTh": "Source Code และ Inspiration จาก 3 จุดก่อนหน้า", "required": true, "adapterStatus": "implemented", "mode": "backend_contract"},
+        {"id": "mt4_terminal", "labelTh": "โปรแกรม MT4 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
+        {"id": "mt5_terminal", "labelTh": "โปรแกรม MT5 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
+        {"id": "strategy_tester_adapter", "labelTh": "ตัวรัน Strategy Tester / Auto Backtest", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "optimization_adapter", "labelTh": "ตัวรัน Auto Optimization", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "ea_discovery_plugin", "labelTh": "Plugin EA Discovery", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit สำหรับแผนทดลอง", "required": true, "adapterStatus": "implemented"},
+        {"id": "report_routing", "labelTh": "ส่งผลกลับห้องทดลองและ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
+      "connectionRequirements": {"anyOf": ["mt4_terminal", "mt5_terminal"], "anyOfForFutureMetatraderRun": ["mt4_terminal", "mt5_terminal"], "notRequiredForPlanPreparation": true},
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["ai_every_2_hours"], "intervalMinutes": 120, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
-      "reportRoute": {"targetPropId": "right_tool_console", "primaryReportType": "telegram_tool_report", "summaryTargetPropId": "mission_strategy_table"}
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
+      "workflowReadiness": {"missionPlanReportAudit": "ready", "strategyTesterBacktest": "coming_soon", "metatraderOptimization": "coming_soon", "eaDiscoveryPlugin": "coming_soon"},
+      "reportRoute": {"targetPropId": "right_tool_console", "primaryReportType": "ea_experiment_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "terminal_workstation": {
-      "moduleNameTh": "EA Builder MT4 / MT5",
-      "availability": {"ui": "ready", "data": "partial", "execution": "guarded"},
+      "moduleNameTh": "สตูดิโอพัฒนา EA",
+      "availability": {"ui": "ready", "data": "source_lineage_ready", "execution": "guarded_workspace_ready", "compile": "coming_soon", "artifactDownload": "coming_soon"},
+      "localTabs": [
+        {"id": "source", "labelTh": "Source EA ต้นทาง", "actionIds": ["inspect_ea_source"]},
+        {"id": "development_brief", "labelTh": "โจทย์พัฒนา", "actionIds": ["develop_ea_source"]},
+        {"id": "performance_goals", "labelTh": "เป้าหมายประสิทธิภาพ", "actionIds": ["propose_ea_performance_improvements"]},
+        {"id": "outputs", "labelTh": "ผลงานและสถานะตรวจ", "actionIds": [], "viewOnly": true}
+      ],
       "connections": [
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
-        {"id": "workspace_adapter", "labelTh": "พื้นที่งาน EA ในเครื่อง", "required": true, "adapterStatus": "implemented"},
-        {"id": "mt4_terminal", "labelTh": "โปรแกรม MT4 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
-        {"id": "mt5_terminal", "labelTh": "โปรแกรม MT5 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
-        {"id": "metaeditor_compiler", "labelTh": "MetaEditor / Compiler Adapter", "required": true, "adapterStatus": "coming_soon"},
-        {"id": "codex_runner", "labelTh": "Codex สำหรับสร้างหรือแก้ EA", "required": false, "adapterStatus": "runtime_detected"},
+        {"id": "source_catalog", "labelTh": "Source จาก Workspace และรายงานต้นทาง", "required": true, "adapterStatus": "implemented", "mode": "opaque_backend_references_only"},
+        {"id": "workspace_adapter", "labelTh": "Guarded Workspace สำหรับ Source MQL4/MQL5", "required": true, "adapterStatus": "implemented"},
+        {"id": "codex_runner", "labelTh": "Codex สำหรับตรวจและพัฒนา Source", "required": true, "adapterStatus": "runtime_detected"},
+        {"id": "source_review", "labelTh": "ตรวจ Source แบบ Static", "required": true, "adapterStatus": "implemented"},
+        {"id": "metaeditor_compiler", "labelTh": "MetaEditor / Compiler Adapter", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "artifact_manifest", "labelTh": "รายการ Artifact แบบไม่เปิดเผย Path", "required": true, "adapterStatus": "implemented"},
+        {"id": "artifact_download", "labelTh": "ดาวน์โหลด Source Artifact ผ่าน URL ที่ Backend อนุญาต", "required": false, "adapterStatus": "coming_soon"},
         {"id": "codex_quota", "labelTh": "Rate Limit เมื่อใช้ AI สร้าง EA", "required": false, "adapterStatus": "runtime_detected"},
-        {"id": "report_routing", "labelTh": "ส่งผล Build กลับโต๊ะนี้", "required": true, "adapterStatus": "implemented"}
+        {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
+        {"id": "report_routing", "labelTh": "ส่งผลพัฒนากลับสตูดิโอและ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
-      "connectionRequirements": {"anyOf": ["mt4_terminal", "mt5_terminal"]},
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
       "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
-      "reportRoute": {"targetPropId": "terminal_workstation", "primaryReportType": "code_change_report", "summaryTargetPropId": "mission_strategy_table"}
+      "workflowReadiness": {"sourceInspection": "ready_guarded_workspace", "sourceDevelopment": "ready_guarded_workspace", "sourceReview": "ready_guarded_workspace", "metaEditorCompile": "coming_soon", "artifactManifest": "ready", "artifactDownload": "coming_soon", "voiceCapture": "frontend_transcript_only"},
+      "reportRoute": {"targetPropId": "terminal_workstation", "primaryReportType": "ea_development_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "left_audit_crystals": {
-      "moduleNameTh": "Risk Guard และ Approval Gate",
-      "availability": {"ui": "ready", "data": "ready", "execution": "guarded"},
-      "connections": [
-        {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
-        {"id": "risk_policy", "labelTh": "กฎ Risk Guard", "required": true, "adapterStatus": "implemented"},
-        {"id": "audit_log", "labelTh": "Audit Log", "required": true, "adapterStatus": "implemented"},
-        {"id": "approval_service", "labelTh": "ระบบอนุมัติงานเสี่ยง", "required": true, "adapterStatus": "implemented"},
-        {"id": "report_routing", "labelTh": "ส่งผลตรวจความเสี่ยงกลับคริสตัล", "required": true, "adapterStatus": "implemented"}
+      "moduleNameTh": "เรดาร์เว็บไซต์ Indicator",
+      "availability": {"ui": "ready", "data": "public_research_ready", "execution": "guarded_read_only_research", "screenshot": "coming_soon", "scheduler": "coming_soon"},
+      "localTabs": [
+        {"id": "discoveries", "labelTh": "Indicator ที่ค้นพบใหม่", "actionIds": ["discover_new_indicators"]},
+        {"id": "evidence", "labelTh": "หลักฐานและแหล่งข้อมูล", "actionIds": [], "viewOnly": true},
+        {"id": "schedule", "labelTh": "เวลาที่ต้องการให้ค้นหา", "actionIds": ["save_indicator_scout_schedule"]},
+        {"id": "archive", "labelTh": "ประวัติการค้นหา", "actionIds": [], "viewOnly": true}
       ],
-      "codexUsage": {"dependency": "none", "blockAiRunWhenLimitReached": false, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
-      "reportRoute": {"targetPropId": "left_audit_crystals", "primaryReportType": "risk_review", "summaryTargetPropId": "mission_strategy_table"}
-    },
-    "left_signal_cube": {
-      "moduleNameTh": "AI Trader แบบหลาย Agent โหวต",
-      "availability": {"ui": "ready", "data": "coming_soon", "execution": "disabled"},
       "connections": [
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
-        {"id": "mt4_terminal", "labelTh": "โปรแกรม MT4 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
-        {"id": "mt5_terminal", "labelTh": "โปรแกรม MT5 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
-        {"id": "trading_state_adapter", "labelTh": "อ่านสถานะการเทรดแบบ Read-only", "required": true, "adapterStatus": "coming_soon"},
-        {"id": "ai_trader_ensemble", "labelTh": "ระบบหลาย Agent วิเคราะห์และโหวต", "required": true, "adapterStatus": "coming_soon"},
-        {"id": "risk_policy", "labelTh": "Risk Guard / Kill Switch", "required": true, "adapterStatus": "implemented"},
-        {"id": "live_trading", "labelTh": "ส่งคำสั่ง Live Trading", "required": false, "adapterStatus": "disabled"},
-        {"id": "report_routing", "labelTh": "ส่งผลโหวตกลับ Signal Cube", "required": true, "adapterStatus": "implemented"}
+        {"id": "codex_runner", "labelTh": "Codex CLI และบัญชีที่ Login", "required": true, "adapterStatus": "runtime_detected"},
+        {"id": "codex_public_web_research", "labelTh": "ค้นเว็บไซต์สาธารณะแบบอ่านอย่างเดียว", "required": true, "adapterStatus": "implemented", "mode": "guarded_read_only"},
+        {"id": "dedup_store", "labelTh": "ตรวจรายการซ้ำในคลัง Local", "required": true, "adapterStatus": "implemented", "mode": "backend_contract"},
+        {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
+        {"id": "screenshot_adapter", "labelTh": "จับภาพเว็บไซต์เป็นหลักฐาน", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "backend_scheduler", "labelTh": "รันค้นหา 1-2 ครั้งต่อวัน", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "report_routing", "labelTh": "ส่งผลกลับเรดาร์และ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["ai_every_2_hours"], "intervalMinutes": 120, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
-      "reportRoute": {"targetPropId": "left_signal_cube", "primaryReportType": "auto_trading_status_report", "summaryTargetPropId": "mission_strategy_table"}
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["one_or_two_runs_per_day"], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false, "scheduleConfigurationIntent": "save_indicator_scout_schedule", "schedulePreferenceMaxRunsPerDay": 2, "scheduleExecutionAdapterStatus": "coming_soon"},
+      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "dedup": "ready_contract", "missionReportAudit": "ready", "screenshotAdapter": "coming_soon", "recurringScheduler": "coming_soon"},
+      "reportRoute": {"targetPropId": "left_audit_crystals", "primaryReportType": "indicator_scout_report", "summaryTargetPropId": "mission_strategy_table"}
+    },
+    "left_signal_cube": {
+      "moduleNameTh": "ข่าวตลาดวันนี้และมุมมอง 28 คู่เงิน",
+      "availability": {"ui": "ready", "data": "public_research_ready", "execution": "analysis_only", "economicCalendar": "coming_soon", "scheduler": "coming_soon"},
+      "localTabs": [
+        {"id": "today", "labelTh": "ข่าวตลาดวันนี้", "actionIds": ["analyze_daily_market_news"]},
+        {"id": "pair_bias", "labelTh": "มุมมอง 28 คู่เงิน", "actionIds": ["build_fx_pair_bias"]},
+        {"id": "horizons", "labelTh": "ผลกระทบตามช่วงเวลา", "actionIds": [], "viewOnly": true},
+        {"id": "schedule_history", "labelTh": "เวลาอัปเดตและประวัติ", "actionIds": ["save_news_bias_schedule"]}
+      ],
+      "connections": [
+        {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
+        {"id": "codex_runner", "labelTh": "Codex CLI และบัญชีที่ Login", "required": true, "adapterStatus": "runtime_detected"},
+        {"id": "codex_public_web_research", "labelTh": "ค้นข่าวสาธารณะแบบอ่านอย่างเดียว", "required": true, "adapterStatus": "implemented", "mode": "guarded_read_only"},
+        {"id": "fx_bias_analysis", "labelTh": "วิเคราะห์ Bias 28 คู่เงินจากหลักฐานข่าว", "required": true, "adapterStatus": "implemented", "mode": "analysis_only"},
+        {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
+        {"id": "economic_calendar_adapter", "labelTh": "Economic Calendar Feed โดยตรง", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "backend_scheduler", "labelTh": "อัปเดตข่าวและ Bias 1-2 ครั้งต่อวัน", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "report_routing", "labelTh": "ส่งผลกลับจุดข่าวและ Mission Table", "required": true, "adapterStatus": "implemented"}
+      ],
+      "liveTradingPolicy": {"enabled": false, "orderSubmission": "disabled", "activationFromFrontend": false, "analysisIsNotTradeSignal": true},
+      "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["one_or_two_runs_per_day"], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false, "scheduleConfigurationIntent": "save_news_bias_schedule", "schedulePreferenceMaxRunsPerDay": 2, "scheduleExecutionAdapterStatus": "coming_soon"},
+      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "fxBiasAnalysis": "ready_analysis_only", "missionReportAudit": "ready", "economicCalendarFeed": "coming_soon", "recurringScheduler": "coming_soon"},
+      "reportRoute": {"targetPropId": "left_signal_cube", "primaryReportType": "fx_news_bias_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "right_status_crystals": {
-      "moduleNameTh": "AI Dashboard และภาพรวม HQ",
-      "availability": {"ui": "ready", "data": "ready", "execution": "read_only"},
+      "moduleNameTh": "สถานะ VPS, HQ และตั้งค่า Agent",
+      "availability": {"ui": "ready", "data": "backend_local_health_ready", "execution": "read_only_and_safe_settings", "externalVpsApi": "coming_soon"},
+      "localTabs": [
+        {"id": "vps", "labelTh": "สถานะ VPS", "actionIds": ["refresh_vps_hq_status"]},
+        {"id": "hq_bridge", "labelTh": "สถานะ HQ และ Bridge", "actionIds": [], "viewOnly": true},
+        {"id": "agent_settings", "labelTh": "ตั้งค่า Agent", "actionIds": ["save_agent_preferences"]},
+        {"id": "activity_history", "labelTh": "ประวัติกิจกรรม", "actionIds": [], "viewOnly": true}
+      ],
       "connections": [
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
         {"id": "mission_store", "labelTh": "Mission Queue", "required": true, "adapterStatus": "implemented"},
-        {"id": "agent_event_store", "labelTh": "สถานะและเหตุการณ์ของ Agent", "required": true, "adapterStatus": "implemented"},
+        {"id": "agent_event_store", "labelTh": "Event และ Activity History", "required": true, "adapterStatus": "implemented"},
+        {"id": "vps_local_health", "labelTh": "สถานะเครื่องและ VPS ที่ Backend ตรวจได้", "required": true, "adapterStatus": "runtime_detected", "mode": "read_only"},
+        {"id": "hq_bridge_health", "labelTh": "สถานะ HQ, Local Runner และ Mission Worker", "required": true, "adapterStatus": "implemented", "mode": "read_only"},
+        {"id": "agent_preferences_store", "labelTh": "ตั้งค่า Agent ที่ผ่าน Backend Validation", "required": true, "adapterStatus": "implemented", "mode": "safe_settings_only"},
         {"id": "codex_quota", "labelTh": "ภาพรวม Rate Limit ของ Codex", "required": false, "adapterStatus": "runtime_detected"},
-        {"id": "ai_dashboard_project", "labelTh": "โครงการ AI Dashboard จาก GitHub", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "backend_scheduler", "labelTh": "AI สรุปภาพรวมทุก 2 ชั่วโมง", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "report_routing", "labelTh": "ส่งภาพรวมกลับคริสตัลนี้", "required": true, "adapterStatus": "implemented"}
+        {"id": "external_vps_api", "labelTh": "Provider VPS Metrics ภายนอก", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "report_routing", "labelTh": "ส่งผลกลับศูนย์สถานะและ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
-      "codexUsage": {"dependency": "display_only", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["ai_every_2_hours"], "intervalMinutes": 120, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
+      "codexUsage": {"dependency": "none_for_health_and_settings", "blockAiRunWhenLimitReached": false, "keepReadOnlyDashboardAvailable": true},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
+      "agentPreferenceSafety": {"backendValidationRequired": true, "allowedFields": ["language", "modelTier", "tokenBudget", "timeoutSeconds", "outputLimitChars", "rateReservePercent"], "providerModelIdAllowed": false, "secretFieldsAllowed": false},
+      "workflowReadiness": {"localBridgeHealth": "ready", "missionWorkerHealth": "ready", "vpsMetrics": "runtime_detected", "safeAgentPreferences": "ready_backend_validated", "activityHistory": "ready", "externalVpsApi": "coming_soon"},
       "reportRoute": {"targetPropId": "right_status_crystals", "primaryReportType": "ops_overview_report", "summaryTargetPropId": "mission_strategy_table"}
     }
   }

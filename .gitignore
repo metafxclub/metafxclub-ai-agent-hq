@@ -41,6 +41,12 @@ assets-source/
 frontend/legacy-static/
 docs/design-qa/
 design-qa.md
+outputs/
+**/node_modules/
+artifacts/**
+!artifacts/mt4-ai-council-ea-v2.14-broker-compat-hardening/
+!artifacts/mt4-ai-council-ea-v2.14-broker-compat-hardening/**
+artifacts/mt4-ai-council-ea-v2.14-broker-compat-hardening/*.log
 dist/
 release/
 *.zip

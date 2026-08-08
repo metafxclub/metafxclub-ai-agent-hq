@@ -13,6 +13,8 @@
 
 เมื่อผมเลือกแล้ว ให้ติดตั้งด้วย Port ที่ผมยืนยัน ห้ามสลับ URL เอง จากนั้นตรวจ Health, ตรวจการเชื่อม Codex และ Rate Limit ของบัญชีที่ Login อยู่ใน Windows User เครื่องนี้ แล้วเปิด URL ที่ผ่าน Health check ให้ผม
 
+เมื่อ Health ผ่านแล้ว ให้ถามผมว่าจะเปิด Bridge อัตโนมัติหลังเข้าสู่ Windows หรือไม่ ถ้าผมตอบตกลง ให้รัน scripts/register-bridge-autostart.cmd และยืนยันว่า Scheduled Task ถูกสร้างสำเร็จ
+
 ให้เริ่มในโหมด Demo/Read-only ห้ามเปิด Live Trading ห้ามส่ง Telegram จริง และห้ามแสดงหรือคัดลอก Token, Cookie, API key, Codex Auth หรือรหัสผ่านใด ๆ
 ```
 
@@ -37,6 +39,26 @@
 6. เมื่อติดตั้งสำเร็จ ให้ดับเบิลคลิก `Open Metafx Agent HQ.cmd`
 
 ลิงก์เข้าโปรแกรมจะแสดงก่อนและหลังติดตั้ง เช่น `http://127.0.0.1:4186/` หาก Port นี้ถูกใช้อยู่ ระบบจะเสนอ URL อื่นและรอคำยืนยัน ระบบจะไม่ปิดโปรแกรมอื่นหรือสลับ URL เอง
+
+## ถ้าติดตั้งด้วย GitHub Clone
+
+```powershell
+git clone https://github.com/metafxclub/metafxclub-ai-agent-hq.git
+cd metafxclub-ai-agent-hq
+.\1-INSTALL-HQ.bat
+```
+
+- โฟลเดอร์ Clone คือ Source สำหรับเรียนและแก้โค้ด
+- โปรแกรมที่เปิดใช้งานจริงอยู่ที่ `%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ`
+- เมื่อต้องการรับรุ่นใหม่ ให้ Commit หรือสำรองงานของตนเองให้เรียบร้อย แล้วดับเบิลคลิก `UPDATE-HQ.bat`
+- ตัวอัปเดตยอมรับเฉพาะการอัปเดตแบบ fast-forward หากมีไฟล์แก้ค้างหรือประวัติคนละทาง ระบบจะหยุดก่อนและไม่ทับงาน
+- ถ้าต้องการส่งงานกลับ GitHub ให้ Fork Repository แล้ว Push Branch ของตนเองเพื่อเปิด Pull Request ห้าม Push Runtime, Memory, Log, Token หรือ Auth
+
+## เปิด Bridge อัตโนมัติหลังเปิดเครื่อง
+
+หลังติดตั้งและยืนยัน URL แล้ว ให้ดับเบิลคลิก `scripts/register-bridge-autostart.cmd` หนึ่งครั้ง ระบบจะสร้าง Scheduled Task ของ Windows User คนนี้ พร้อมลองใหม่เมื่อเปิดไม่สำเร็จและตรวจ Bridge ทุก 5 นาที
+
+ระบบไม่เปิด Browser หรือ MT4/MT5 เอง เมื่อต้องการเปิดหน้าจอให้ใช้ Shortcut `Metafxclub AI Agent HQ` บน Desktop หากไม่ต้องการเปิด Bridge อัตโนมัติแล้ว ให้ดับเบิลคลิก `scripts/unregister-bridge-autostart.cmd`
 
 ## ถ้าเปิดโปรแกรมไม่ได้
 

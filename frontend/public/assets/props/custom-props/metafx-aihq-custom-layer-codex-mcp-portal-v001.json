@@ -1,8 +1,8 @@
 {
   "version": "v001",
-  "source": "C:\\Users\\META\\Downloads\\ChatGPT Image 7 มิ.ย. 2569 22_24_06 (1).png",
-  "output": "C:\\Users\\META\\Documents\\Codex\\2026-06-06\\new-chat\\outputs\\ai-pixel-hq-layered-room\\assets\\custom-props\\metafx-aihq-custom-layer-codex-mcp-portal-v001.png",
-  "preview": "C:\\Users\\META\\Documents\\Codex\\2026-06-06\\new-chat\\outputs\\ai-pixel-hq-layered-room\\assets\\custom-props\\metafx-aihq-custom-layer-codex-mcp-portal-v001-preview-dark.png",
+  "source": "source asset excluded from the student distribution",
+  "output": "./metafx-aihq-custom-layer-codex-mcp-portal-v001.png",
+  "preview": "./metafx-aihq-custom-layer-codex-mcp-portal-v001-preview-dark.png",
   "size": [
     204,
     306

@@ -1,20 +1,46 @@
 {
-  "version": "mission-contract-v004",
+  "version": "mission-contract-v009",
   "purpose": "Shared mission shape for visual work, backend queueing, prop reports, and memory summaries.",
   "schema": {
     "id": "mission-{timestamp}",
+    "missionId": "same value as id; canonical workflow envelope id",
     "title": "short mission title",
     "detail": "human-readable mission instruction",
     "owner": "agent id",
+    "ownerAgentId": "same value as owner; canonical workflow owner",
     "requester": "agent id or human",
     "parentMissionId": "parent mission id or null",
     "subtaskIds": ["child mission ids"],
     "targetId": "prop id, room id, or agent id",
-    "toolId": "manager_mission|codex_cli_task|codex_status|codex_cli_smoke|future tool id",
+    "targetPropId": "canonical prop id for dashboard actions and report routing, or null for non-prop missions",
+    "actionId": "canonical dashboard action id or null",
+    "toolId": "manager_mission|agent_collaboration|codex_cli_task|codex_web_research|codex_status|codex_cli_smoke|future tool id",
     "status": "queued|waiting_approval|running|blocked|completed|failed|archived",
     "risk": "low|medium|high",
     "modelTier": "manager_quality|risk_quality|specialist_balanced|specialist_fast",
     "reportType": "report contract type",
+    "sourceLineage": {
+      "sourcePropIds": ["source prop ids carried by an Agent Mission/Report transfer"],
+      "sourceMissionIds": ["source mission ids carried by an Agent Mission/Report transfer"],
+      "sourceReportIds": ["source report ids carried by an Agent Mission/Report transfer"],
+      "sourceArtifactIds": ["opaque backend artifact ids"]
+    },
+    "agentTransfer": {
+      "mode": "agent_mission_report",
+      "sourceReportId": "backend-validated source report id",
+      "sourcePropId": "backend-derived source prop id",
+      "sourceMissionId": "backend-derived completed source mission id",
+      "transferAgentId": "backend-selected canonical agent id that owns the destination action",
+      "sourceOwnerAgentId": "backend-derived owner of the source report",
+      "targetPropId": "destination dashboard prop id",
+      "handoffMissionId": "completed Agent handoff mission id that records delivery",
+      "status": "recorded"
+    },
+    "reportRoute": {
+      "targetPropId": "same canonical dashboard prop id",
+      "primaryReportType": "report contract type",
+      "summaryTargetPropId": "mission_strategy_table"
+    },
     "idempotencyKey": "caller supplied opaque key or null",
     "budget": {
       "timeoutSeconds": 120,
@@ -39,8 +65,19 @@
       "reviewedAt": "ISO-8601"
     },
     "result": "dashboard-ready summary",
+    "workStatus": "completed|blocked|waiting_input|failed",
+    "blockedCapability": "backend capability id or empty",
+    "evidence": [{"label": "public source title", "url": "https://...", "note": "why this source supports the result"}],
+    "webSearchUsed": "true only when the runner recorded a native Codex Web Search tool event",
+    "webSearchEvidenceVerified": "true only when Web Search was used and safe public evidence URLs were returned",
     "artifactPath": "project-relative artifact path",
     "reportIds": ["report ids"],
+    "timestamps": {
+      "createdAt": "ISO-8601",
+      "updatedAt": "ISO-8601",
+      "startedAt": "ISO-8601 or null",
+      "completedAt": "ISO-8601 or null"
+    },
     "createdAt": "ISO-8601",
     "updatedAt": "ISO-8601",
     "completedAt": "ISO-8601 or null",
@@ -57,6 +94,7 @@
     "archived": "Mission was closed and summarized."
   },
   "execution_rules": {
+    "agentCollaboration": "A scheduled collaboration Mission consumes Codex quota but runs with tools and task creation disabled; Manager must provide the final summary.",
     "frontendReadModel": "GET /api/missions derives readyToExecute on the backend and never exposes payloadDigest.",
     "twoStepGate": "Approval never runs a tool automatically. A second POST /api/missions/:id/execute is required.",
     "exactConfirmation": "The execute body must contain confirmMissionId equal to the URL mission id.",
@@ -64,7 +102,10 @@
     "backendRiskGuard": "High-risk review is backend-owned and digest-bound; the frontend may submit only the human decision.",
     "singleUse": "The approval becomes consumed before the guarded runner starts.",
     "restartRecovery": "A consumed running mission found during Bridge startup becomes failed/interrupted without automatic retry.",
-    "archiveOutcome": "Archive preserves archivedFromStatus; only a mission archived from completed counts as successful Manager aggregation."
+    "archiveOutcome": "Archive preserves archivedFromStatus; only a mission archived from completed counts as successful Manager aggregation.",
+    "workflowEnvelope": "Every dashboard action must persist missionId, targetPropId, ownerAgentId, sourceLineage, agentTransfer when a report crosses dashboards, timestamps, status, and reportRoute before the result is exposed to a prop or Mission Strategy Table.",
+    "independentDashboards": "Workflow dashboards are independent workspaces, not ordered pipeline stages. Mission Strategy Table is a global ledger only.",
+    "crossDashboardTransfer": "A cross-dashboard report may be consumed only through a backend-owned agent_mission_report record. Frontend may submit sourceReportId only; Backend derives sourcePropId, sourceMissionId, transferAgentId, targetPropId, and validates the completed source Mission/Report binding."
   },
   "storage": {
     "active_queue": "./data/runtime/missions.json",

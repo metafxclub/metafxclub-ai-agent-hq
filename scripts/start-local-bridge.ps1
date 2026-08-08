@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet("Start", "Status", "Stop", "Restart")]
+    [ValidateSet("Start", "Ensure", "Status", "Stop", "Restart")]
     [string]$Action = "Start",
 
     [ValidateRange(5, 120)]
@@ -136,6 +136,15 @@ function Test-LoopbackPortAvailable {
     $listener = $null
     try {
         $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
+        # Restart can leave client connections in TIME_WAIT even though no
+        # process owns a listening socket. Match Python HTTPServer's guarded
+        # reuse behavior so that state is not mistaken for a foreign listener.
+        # Every caller still checks Get-ListenerProcessIds first.
+        $listener.Server.SetSocketOption(
+            [Net.Sockets.SocketOptionLevel]::Socket,
+            [Net.Sockets.SocketOptionName]::ReuseAddress,
+            $true
+        )
         $listener.Start()
         return $true
     }
@@ -368,7 +377,7 @@ function Get-BridgeIdentityHealth {
 function Initialize-BridgeEndpointContext {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet("start", "status", "stop", "restart")]
+        [ValidateSet("start", "ensure", "status", "stop", "restart")]
         [string]$Operation
     )
 
@@ -394,11 +403,16 @@ function Initialize-BridgeEndpointContext {
     if ($identities.Count -eq 1) {
         $identity = $identities[0]
         if (
-            $Operation -eq "start" -and
+            $Operation -in @("start", "ensure") -and
             $requestedBridgePort -ge 1024 -and
             [int]$identity.Port -ne $requestedBridgePort
         ) {
             throw "พบ HQ Bridge เดิมทำงานอยู่ที่พอร์ต $($identity.Port) แต่คำขอนี้ระบุพอร์ต $requestedBridgePort ระบบจึงไม่เปิด Instance ซ้ำ"
+        }
+        if ($Operation -in @("start", "ensure") -and $requestedBridgePort -ge 1024) {
+            # Keep an explicitly confirmed port fail-closed even when the exact
+            # process exists but Health is unavailable and Ensure must replace it.
+            $script:confirmedEndpointRequired = $true
         }
         Set-BridgeEndpointContext -Port ([int]$identity.Port)
         $health = Get-BridgeIdentityHealth -Identity $identity
@@ -422,7 +436,7 @@ function Initialize-BridgeEndpointContext {
         return "exact_process_unhealthy"
     }
 
-    if ($Operation -eq "start" -and $requestedBridgePort -ge 1024) {
+    if ($Operation -in @("start", "ensure") -and $requestedBridgePort -ge 1024) {
         Set-BridgeEndpointContext -Port $requestedBridgePort
         $script:confirmedEndpointRequired = $true
         return "user_confirmed"
@@ -430,7 +444,7 @@ function Initialize-BridgeEndpointContext {
 
     if ($savedEndpoint) {
         Set-BridgeEndpointContext -Port ([int]$savedEndpoint.Port)
-        if ($Operation -in @("start", "restart")) {
+        if ($Operation -in @("start", "ensure", "restart")) {
             $script:confirmedEndpointRequired = $true
         }
         return "saved"
@@ -703,6 +717,33 @@ function Start-Bridge {
     throw "Bridge startup exhausted its guarded retries."
 }
 
+function Ensure-Bridge {
+    $bridgeProcesses = @(Get-BridgeProcesses)
+    if ($bridgeProcesses.Count -gt 1) {
+        $ids = @($bridgeProcesses | Select-Object -ExpandProperty ProcessId)
+        throw "Multiple exact Metafx bridge processes were found (PID $($ids -join ', ')). Refusing automatic recovery."
+    }
+
+    if ($bridgeProcesses.Count -eq 0) {
+        Write-AuditEvent -Operation "ensure" -Outcome "process_missing_starting" -Message "Watchdog found no exact bridge process and requested a guarded start."
+        return Start-Bridge
+    }
+
+    $existing = $bridgeProcesses[0]
+    $existingId = [int]$existing.ProcessId
+    $healthyExisting = Wait-ForBridgeHealth -ProcessId $existingId -TimeoutSeconds $HealthTimeoutSeconds
+    if ($healthyExisting) {
+        # Reuse the normal start path so endpoint and lifecycle state are
+        # refreshed with the same identity checks used by an interactive start.
+        return Start-Bridge
+    }
+
+    Write-AuditEvent -Operation "ensure" -Outcome "verified_unhealthy_restarting" -ProcessId $existingId -Message "Watchdog verified the exact HQ process but Health stayed unavailable; replacing only that verified PID."
+    Stop-VerifiedProcess -ProcessId $existingId | Out-Null
+    Write-LifecycleState -Status "stopped" -LastError "Watchdog replaced a verified unhealthy bridge process."
+    return Start-Bridge
+}
+
 function Stop-Bridge {
     $bridgeProcesses = @(Get-BridgeProcesses)
     if ($bridgeProcesses.Count -eq 0) {
@@ -797,6 +838,9 @@ try {
     switch ($Action) {
         "Start" {
             $exitCode = Start-Bridge
+        }
+        "Ensure" {
+            $exitCode = Ensure-Bridge
         }
         "Status" {
             $exitCode = Get-BridgeStatus

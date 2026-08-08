@@ -1,0 +1,226 @@
+from pathlib import Path
+import re
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class DashboardEquipmentFrontendTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.main = (ROOT / "frontend" / "src" / "app" / "main.js").read_text(encoding="utf-8")
+        cls.styles = (ROOT / "frontend" / "src" / "app" / "styles.css").read_text(encoding="utf-8")
+
+    def fallback_prop_block(self, prop_id: str, next_prop_id: str | None = None) -> str:
+        start = self.main.index(f"  {prop_id}: {{", self.main.index("const WORKFLOW_DASHBOARD_FALLBACKS"))
+        if next_prop_id:
+            end = self.main.index(f"  {next_prop_id}: {{", start)
+        else:
+            end = self.main.index("\n});", start)
+        return self.main[start:end]
+
+    def test_four_new_devices_have_exact_canonical_tabs(self):
+        expected = {
+            "left_audit_crystals": ["discoveries", "evidence", "schedule", "archive"],
+            "left_signal_cube": ["today", "pair_bias", "horizons", "schedule_history"],
+            "terminal_workstation": ["source", "development_brief", "performance_goals", "outputs"],
+            "right_status_crystals": ["vps", "hq_bridge", "agent_settings", "activity_history"],
+        }
+        prop_ids = list(expected)
+        for index, prop_id in enumerate(prop_ids):
+            block = self.fallback_prop_block(prop_id, prop_ids[index + 1] if index + 1 < len(prop_ids) else None)
+            tabs = block[block.index("tabs: ["):block.index("\n    actions:")]
+            self.assertEqual(re.findall(r'\bid:\s*"([^"]+)"', tabs), expected[prop_id])
+
+    def test_canonical_action_ids_are_wired(self):
+        for action_id in (
+            "discover_new_indicators",
+            "save_indicator_scout_schedule",
+            "analyze_daily_market_news",
+            "build_fx_pair_bias",
+            "save_news_bias_schedule",
+            "inspect_ea_source",
+            "develop_ea_source",
+            "propose_ea_performance_improvements",
+            "refresh_vps_hq_status",
+            "save_agent_preferences",
+        ):
+            self.assertIn(f'id: "{action_id}"', self.main)
+
+    def test_fx_bias_uses_exact_28_pair_universe_without_mock_values(self):
+        start = self.main.index("const FX_BIAS_PAIR_UNIVERSE")
+        end = self.main.index("\n]);", start)
+        pairs = re.findall(r'"([A-Z]{6})"', self.main[start:end])
+        self.assertEqual(len(pairs), 28)
+        self.assertEqual(len(set(pairs)), 28)
+        self.assertEqual(
+            pairs,
+            "AUDCAD AUDCHF AUDJPY AUDNZD AUDUSD CADCHF CADJPY CHFJPY EURAUD EURCAD EURCHF EURGBP EURJPY EURNZD EURUSD GBPAUD GBPCAD GBPCHF GBPJPY GBPNZD GBPUSD NZDCAD NZDCHF NZDJPY NZDUSD USDCAD USDCHF USDJPY".split(),
+        )
+        self.assertIn('short: "unavailable"', self.main)
+        self.assertIn('medium: "unavailable"', self.main)
+        self.assertIn('long: "unavailable"', self.main)
+        self.assertIn('summary: "รอข้อมูลจริงจาก Backend"', self.main)
+        normalizer_start = self.main.index("function normalizeFxNewsBiasDomain", start)
+        normalizer_end = self.main.index("function normalizeVpsHqDomain", normalizer_start)
+        self.assertNotIn("Math.random()", self.main[normalizer_start:normalizer_end])
+
+    def test_indicator_scout_shows_source_date_dedup_and_truthful_adapter(self):
+        self.assertIn("sourceUrl", self.main)
+        self.assertIn("discoveredAt", self.main)
+        self.assertIn("dedupStatus", self.main)
+        self.assertIn('status: "coming_soon"', self.main)
+        self.assertIn('labelTh: "Screenshot Adapter: Coming Soon"', self.main)
+        self.assertIn("ไม่มีภาพจำลอง", self.main)
+
+    def test_web_speech_dictation_handles_unsupported_and_permission_states(self):
+        self.assertIn("window.SpeechRecognition || window.webkitSpeechRecognition", self.main)
+        self.assertIn('recognition.lang = "th-TH"', self.main)
+        self.assertIn("เบราว์เซอร์นี้ไม่รองรับการพิมพ์ด้วยเสียง", self.main)
+        self.assertIn('"not-allowed", "service-not-allowed"', self.main)
+        self.assertIn("ไมโครโฟนยังไม่ได้รับอนุญาต", self.main)
+        self.assertIn("stopWorkflowVoiceDictation", self.main)
+        self.assertIn("voiceDictation: field?.voiceDictation === true", self.main)
+
+    def test_safe_artifact_download_is_backend_gated_and_same_origin(self):
+        start = self.main.index("function getSafeReportArtifactUrl")
+        end = self.main.index("function appendDashboardVisualEvidence", start)
+        block = self.main[start:end]
+        self.assertIn("parsed.origin !== window.location.origin", block)
+        self.assertIn("(?:attachments|artifacts|downloads)", block)
+        self.assertIn("item.available !== true", block)
+        self.assertIn("kind:", block)
+        self.assertIn("fileName:", block)
+        self.assertIn("item.mediaType", block)
+        self.assertIn("contentType:", block)
+        self.assertIn("ยังไม่มีไฟล์ที่ Backend อนุญาตให้ดาวน์โหลด", self.main)
+        self.assertNotIn("file://", block)
+
+    def test_ea_source_uses_only_backend_catalog_without_file_or_path_input(self):
+        self.assertIn("function normalizeWorkflowSourceCatalog", self.main)
+        self.assertIn("backend.workspaceSources", self.main)
+        self.assertIn('"workspaceSourceId"', self.main)
+        self.assertIn('rawType === "workspace_source"', self.main)
+        self.assertIn('field.sourceKind === "workspace_source"', self.main)
+        self.assertIn('data-workflow-field="workspaceSourceId"', self.main)
+        self.assertIn("validateWorkflowSourceChoice", self.main)
+        self.assertIn("เลือกได้เพียงอย่างเดียว", self.main)
+        self.assertIn("Approved Workspace Source Catalog", self.main)
+        self.assertIn("นำ Source เข้า Workspace ผ่าน Backend ก่อน", self.main)
+        self.assertIn("Direct Import จากหน้าเว็บ: Coming Soon", self.main)
+        self.assertIn("หน้าเว็บไม่รับการวาง Path", self.main)
+        self.assertNotIn('type: "file"', self.fallback_prop_block("terminal_workstation", "right_status_crystals"))
+
+    def test_vps_and_hq_panels_only_render_backend_values(self):
+        self.assertIn("function normalizeVpsHqDomain", self.main)
+        self.assertIn("function renderVpsHqPanel", self.main)
+        self.assertIn("ยังไม่มีค่าตรวจ VPS จริงจาก Backend", self.main)
+        self.assertIn("ยังไม่มีสถานะ HQ/Bridge ที่ Backend เปิดเผย", self.main)
+        self.assertIn("Uptime", self.main)
+        self.assertIn("Latency", self.main)
+        self.assertIn("CPU", self.main)
+        self.assertIn("RAM", self.main)
+
+    def test_agent_settings_match_backend_safe_preferences_and_bounds(self):
+        block = self.fallback_prop_block("right_status_crystals")
+        action_start = block.index('id: "save_agent_preferences"')
+        fields_start = block.index("formFields: [", action_start)
+        fields_end = block.index("\n        ],", fields_start)
+        fields = block[fields_start:fields_end]
+        ids = re.findall(r'\{\s*id:\s*"([^"]+)"[^\n]*type:', fields)
+        self.assertEqual(ids, [
+            "language",
+            "modelTier",
+            "tokenBudget",
+            "timeoutSeconds",
+            "outputLimitChars",
+            "rateReservePercent",
+        ])
+        self.assertNotIn("agentId", fields)
+        self.assertNotIn("responseStyle", fields)
+        self.assertNotIn("notificationLevel", fields)
+        self.assertNotIn('type: "password"', block)
+        self.assertNotIn('type: "file"', block)
+        self.assertIn("tokenBudget: { min: 256, max: 100000, step: 1 }", self.main)
+        self.assertIn("timeoutSeconds: { min: 15, max: 1800, step: 1 }", self.main)
+        self.assertIn("outputLimitChars: { min: 1000, max: 100000, step: 1 }", self.main)
+        self.assertIn("rateReservePercent: { min: 0, max: 90, step: 1 }", self.main)
+        self.assertIn('field.integer ? Math.trunc(numeric) : numeric', self.main)
+
+    def test_field_guard_allows_canonical_budget_and_tier_but_denies_privileged_ids(self):
+        guard_line = next(line for line in self.main.splitlines() if line.startswith("const WORKFLOW_FIELD_DENY_PATTERN"))
+        self.assertIn("token(?!budget)", guard_line)
+        self.assertIn("model[_-]?id", guard_line)
+        self.assertNotIn("|budget|model|", guard_line)
+        self.assertIn("provider", guard_line)
+        self.assertIn("tool", guard_line)
+
+    def test_agent_equipment_targets_follow_repurposed_props(self):
+        start = self.main.index("const officeAgentDefinitions")
+        end = self.main.index("const meetingSeats", start)
+        roster = self.main[start:end]
+
+        def agent_block(agent_id: str, next_agent_id: str) -> str:
+            agent_start = roster.index(f'id: "{agent_id}"')
+            return roster[agent_start:roster.index(f'id: "{next_agent_id}"', agent_start)]
+
+        vps = agent_block("vps_watch", "telegram_ops")
+        telegram = agent_block("telegram_ops", "risk_guard")
+        risk = agent_block("risk_guard", "codex_mcp_operator")
+        codex = agent_block("codex_mcp_operator", "mission_archivist")
+        archivist = roster[roster.index('id: "mission_archivist"'):]
+        self.assertIn('tools: ["right_status_crystals"]', vps)
+        self.assertNotIn("left_signal_cube", vps)
+        self.assertNotIn("right_server_racks", vps)
+        self.assertIn('defaultTarget: "mission_strategy_table"', telegram)
+        self.assertIn('homeTarget: "mission_strategy_table"', telegram)
+        self.assertIn('tools: ["mission_strategy_table"]', telegram)
+        self.assertNotIn("right_tool_console", telegram)
+        self.assertNotIn("right_status_crystals", telegram)
+        self.assertNotIn("left_audit_crystals", telegram)
+        self.assertIn('defaultTarget: "mission_strategy_table"', risk)
+        self.assertIn('homeTarget: "mission_strategy_table"', risk)
+        self.assertNotIn("left_audit_crystals", risk)
+        self.assertIn("left_audit_crystals", codex)
+        self.assertIn("left_signal_cube", codex)
+        self.assertIn("left_audit_crystals", archivist)
+
+    def test_task_routing_for_new_devices_precedes_legacy_routes(self):
+        pick_target = self.main[self.main.index("function pickTargetForTask"):self.main.index("function pickAgentForTask")]
+        positions = {
+            name: pick_target.index(f"taskKeywords.{name}")
+            for name in ("indicatorScout", "fxNewsBias", "eaDevelopment", "vpsAgentSettings")
+        }
+        legacy = min(pick_target.index("taskKeywords.risk"), pick_target.index("taskKeywords.autoTradeCouncil"))
+        self.assertTrue(all(position < legacy for position in positions.values()))
+        self.assertIn('return "left_audit_crystals"', pick_target)
+        self.assertIn('return "left_signal_cube"', pick_target)
+        self.assertIn('return "terminal_workstation"', pick_target)
+        self.assertIn('return "right_status_crystals"', pick_target)
+        self.assertIn('taskKeywords.autoTradingStatus)) return AI_TRADE_COUNCIL_PROP_ID', pick_target)
+        self.assertIn('taskKeywords.risk)) return "mission_strategy_table"', pick_target)
+        self.assertNotIn('taskKeywords.autoTradingStatus)) return "left_signal_cube"', pick_target)
+        self.assertNotIn('taskKeywords.risk)) return "left_audit_crystals"', pick_target)
+        self.assertIn('const AI_TRADE_COUNCIL_PROP_ID = "left_analytics_console"', self.main)
+        self.assertIn('return "mission_strategy_table";', pick_target)
+
+    def test_responsive_domain_layout_prevents_horizontal_page_overlap(self):
+        for selector in (
+            ".workflow-domain-panel",
+            ".workflow-table-scroll",
+            ".workflow-domain-table",
+            ".workflow-indicator-grid",
+            ".workflow-news-grid",
+            ".workflow-vps-grid",
+            ".workflow-voice-toolbar",
+        ):
+            self.assertIn(selector, self.styles)
+        self.assertIn("overflow-x: auto", self.styles)
+        self.assertIn("@media (max-width: 900px)", self.styles)
+        self.assertIn("@media (max-width: 520px)", self.styles)
+        self.assertIn("grid-template-columns: minmax(0, 1fr)", self.styles)
+
+
+if __name__ == "__main__":
+    unittest.main()

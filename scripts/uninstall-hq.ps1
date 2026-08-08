@@ -12,12 +12,28 @@ $expectedRoot = [IO.Path]::GetFullPath("$env:LOCALAPPDATA\Metafxclub\AI-Agent-HQ
 if (-not $installRoot.Equals($expectedRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw "ปฏิเสธการถอนการติดตั้ง เพราะ Path ไม่ตรงกับตำแหน่งที่อนุญาต"
 }
-if (-not (Test-Path -LiteralPath $installRoot -PathType Container)) {
-    Write-Host "ไม่พบ Metafxclub AI Agent HQ ในเครื่องนี้"
-    exit 0
-}
 if ($RemoveUserData -and $ConfirmUserDataRemoval -cne "DELETE-METAFX-DATA") {
     throw "หากต้องการลบข้อมูลผู้ใช้จริง ให้ระบุ -ConfirmUserDataRemoval DELETE-METAFX-DATA ด้วย การถอนปกติจะเก็บข้อมูลไว้"
+}
+
+$unregisterAutostart = Join-Path $installRoot "scripts\unregister-bridge-autostart.ps1"
+if (Test-Path -LiteralPath $unregisterAutostart -PathType Leaf) {
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $unregisterAutostart
+    if ($LASTEXITCODE -ne 0) {
+        throw "ยกเลิก Task เปิด Bridge อัตโนมัติไม่สำเร็จ จึงยังไม่ถอนโปรแกรม"
+    }
+}
+elseif (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) {
+    $taskName = "Metafxclub AI Agent HQ Bridge"
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($task) {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+    }
+}
+
+if (-not (Test-Path -LiteralPath $installRoot -PathType Container)) {
+    Write-Host "ไม่พบตัวโปรแกรมในเครื่อง และยกเลิก Scheduled Task ที่อาจค้างอยู่แล้ว"
+    exit 0
 }
 
 $lifecycle = Join-Path $installRoot "scripts\start-local-bridge.ps1"
@@ -42,7 +58,7 @@ if ((Test-Path -LiteralPath $startMenuFolder -PathType Container) -and -not (Get
     Remove-Item -LiteralPath $startMenuFolder -Force
 }
 
-foreach ($directoryName in @("backend", "contracts", "docs", "frontend", "installer", "runner", "tests")) {
+foreach ($directoryName in @("artifacts", "backend", "contracts", "docs", "frontend", "installer", "integrations", "runner", "tests")) {
     $path = Join-Path $installRoot $directoryName
     if (Test-Path -LiteralPath $path) {
         Remove-Item -LiteralPath $path -Recurse -Force
@@ -51,7 +67,7 @@ foreach ($directoryName in @("backend", "contracts", "docs", "frontend", "instal
 
 $rootFiles = @(
     "index.html", "Open Metafx Agent HQ.cmd", "README.md", "requirements-runner.txt",
-    "1-INSTALL-HQ.bat", "REPAIR-HQ.bat", "AGENTS.md", ".gitignore", "LICENSE", "LICENSE.md", "SECURITY.md", "VERSION", "STUDENT-QUICKSTART-TH.md"
+    "1-INSTALL-HQ.bat", "UPDATE-HQ.bat", "REPAIR-HQ.bat", "AGENTS.md", ".gitignore", "LICENSE", "LICENSE.md", "SECURITY.md", "VERSION", "STUDENT-QUICKSTART-TH.md"
 )
 foreach ($fileName in $rootFiles) {
     $path = Join-Path $installRoot $fileName

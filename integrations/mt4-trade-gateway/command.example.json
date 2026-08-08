@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "metafx-hq-mt4-command-v2",
+  "commandId": "cmd-20260731-0001",
+  "idempotencyKey": "idem-20260731-0001",
+  "channelId": "mtc-demo-01",
+  "missionId": "mission-20260731-0001",
+  "councilDecisionId": "council-20260731-0001",
+  "ownerAgentId": "manager",
+  "snapshotId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "snapshotObservedAt": 1785445195,
+  "barTime": 1785430800,
+  "referencePrice": 3300.0,
+  "action": "BUY",
+  "symbol": "XAUUSD",
+  "timeframe": "H4",
+  "stopLoss": 3275.0,
+  "takeProfit": 3350.0,
+  "issuedAt": 1785445200,
+  "expiresAt": 1785445260,
+  "heartbeatId": "hb-20260731-0001"
+}

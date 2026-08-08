@@ -17,6 +17,8 @@ AI Agent Visual Office แบบ Local สำหรับจัดการ Miss
 
 เมื่อผมเลือกแล้ว ให้ใช้ตัวติดตั้งที่โปรเจกต์จัดเตรียมไว้กับ Port ที่ผมยืนยัน ห้ามสลับ URL เอง จากนั้นตรวจ Health, ตรวจการเชื่อม Codex และ Rate Limit ของบัญชีที่ Login อยู่ใน Windows User เครื่องนี้ แล้วเปิด URL ที่ผ่าน Health check ให้ผม
 
+เมื่อ Health ผ่านแล้ว ให้ถามผมว่าจะเปิด Bridge อัตโนมัติหลังเข้าสู่ Windows หรือไม่ ถ้าผมตอบตกลง ให้รัน scripts/register-bridge-autostart.cmd และยืนยันว่า Scheduled Task ถูกสร้างสำเร็จ
+
 ให้เริ่มในโหมด Demo/Read-only ห้ามเปิด Live Trading ห้ามส่ง Telegram จริง และห้ามแสดงหรือคัดลอก Token, Cookie, API key, Codex Auth หรือรหัสผ่านใด ๆ
 ```
 
@@ -38,6 +40,22 @@ Codex จะดำเนินการตามลำดับ `ดาวน์
 
 คู่มือฉบับย่อสำหรับส่งให้นักเรียนอยู่ที่ [STUDENT-QUICKSTART-TH.md](STUDENT-QUICKSTART-TH.md)
 
+## ดาวน์โหลดและอัปเดตจาก GitHub
+
+Repository หลัก: `https://github.com/metafxclub/metafxclub-ai-agent-hq`
+
+สำหรับนักเรียนที่เรียน GitHub ให้ Clone เก็บเป็น Source และปล่อยให้ตัวติดตั้งวาง Runtime ที่ใช้งานจริงไว้ใน `%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ` แยกกัน:
+
+```powershell
+git clone https://github.com/metafxclub/metafxclub-ai-agent-hq.git
+cd metafxclub-ai-agent-hq
+.\1-INSTALL-HQ.bat
+```
+
+เมื่อต้องการรับรุ่นใหม่และ Source ไม่มีไฟล์ที่แก้ค้างอยู่ ให้ดับเบิลคลิก `UPDATE-HQ.bat` ระบบจะใช้ `fetch --all --prune` และ `merge --ff-only` เท่านั้น จากนั้นติดตั้ง Source รุ่นใหม่ไปยังตำแหน่งถาวรและรันชุดตรวจอีกครั้ง หาก Git มีงานของนักเรียนที่ยังไม่ Commit ระบบจะหยุดก่อนโดยไม่ Stash, Merge หรือทับไฟล์ให้อัตโนมัติ
+
+นักเรียนที่ต้องการส่งโค้ดกลับควร Fork Repository ของตนเอง แล้วใช้ Branch → Commit → Push → Pull Request ตามบทเรียน GitHub โดยไม่ Commit โฟลเดอร์ `data/runtime`, `data/memory`, `outputs`, `.env`, `.codex`, Token, Auth หรือข้อมูลบัญชีใด ๆ ตัวติดตั้งใน `%LOCALAPPDATA%` ไม่ใช่ Git Repository และไม่ควรใช้เป็นโฟลเดอร์เขียนโค้ด
+
 ## วิธีตรวจว่าพร้อมใช้งาน
 
 การเห็นหน้าต่างคำสั่งเปิดขึ้นมาอย่างเดียวยังไม่ถือว่าติดตั้งสำเร็จ ต้องตรวจครบดังนี้:
@@ -50,6 +68,8 @@ Codex จะดำเนินการตามลำดับ `ดาวน์
 
 หากเปิดไม่ได้ ให้รัน `scripts/repair-hq.cmd` แล้วตรวจสถานะอีกครั้ง ระบบจะไม่ปิดโปรแกรมอื่นที่ใช้ Port เดิมและจะไม่เปลี่ยน URL เองโดยไม่ถามผู้ใช้
 
+หากต้องการให้ Bridge กลับมาทำงานเองหลังเข้าสู่ Windows ให้รัน `scripts/register-bridge-autostart.cmd` หนึ่งครั้งหลังยืนยัน Endpoint แล้ว ระบบจะสร้าง Scheduled Task สำหรับ Windows User ปัจจุบัน ลองเปิดใหม่เมื่อเริ่มไม่สำเร็จ และตรวจ Bridge ซ้ำทุก 5 นาที คำสั่งนี้เปิดเฉพาะ Bridge แบบซ่อน ไม่เปิด Browser หรือ MT4/MT5 และยกเลิกได้ด้วย `scripts/unregister-bridge-autostart.cmd`
+
 ## สิ่งที่ใช้งานได้ในโหมดเริ่มต้น
 
 - เปิด Visual Office และดู Agent ทั้ง 10 บทบาท
@@ -60,18 +80,29 @@ Codex จะดำเนินการตามลำดับ `ดาวน์
 - เปิด Dashboard ของอุปกรณ์ 9 จุดผ่าน 3 แท็บ: `การเชื่อมต่อ`, `งานของอุปกรณ์` และ `ผลลัพธ์งาน`
 - กดหัวข้อ Task หรือ Report เพื่อเปิดรายละเอียด และดู Mission ทั้งหมดที่โต๊ะ Mission Kanban
 - ตรวจ Bridge, Codex/MCP status และ Codex Rate Limit ของบัญชีที่ Login อยู่ในเครื่อง
+- ตั้งช่วงเวลาให้ Agent หลายบทบาทคุยผ่าน Codex แล้วให้ Manager สรุปกลับโต๊ะ Mission โดยจำกัดจำนวนรอบ จำนวนครั้งต่อวัน และโควตาที่ต้องสำรองไว้
 - ทุกงานจริงมี Mission ID, เจ้าของงาน, สถานะ, Audit log และ Report
+
+หน้า `สภา AI Trade` มีหน้าวิเคราะห์เพิ่มสำหรับ Price Action, ตาราง Technical ย้อนหลัง 300 แท่ง และข่าว/แนวโน้ม การเปิดดูหรือสร้างแพ็กเกจ Local ไม่เรียก Codex; จะใช้ Rate Limit เมื่อกดให้ AI วิเคราะห์หรือ Trigger วิเคราะห์เมื่อเกิดแท่งใหม่เท่านั้น รายละเอียดข้อมูลจริงที่ส่งให้ Specialist อยู่ที่ [docs/ai-trade-deep-analysis-300-th.md](docs/ai-trade-deep-analysis-300-th.md)
 
 การ Login Codex เป็นขั้นตอนแยก ผู้เรียนต้อง Login ด้วยบัญชีของตนเอง ระบบจะไม่แจกหรือคัดลอกบัญชีของผู้สอน หาก Codex แสดง `auth_required` แต่หน้า Office และ Health พร้อม แปลว่า HQ ติดตั้งสำเร็จแล้วและเหลือเพียง Login บัญชี Codex
 
 Agent Chat ไม่มีสิทธิ์เรียก Tool เอง โดยจะคืนเฉพาะคำตอบและประเภทคำขอให้ Backend หากเป็นคำสั่งงาน Backend จึงค่อยสร้าง Mission และให้ Worker ทำงานผ่าน Local Runner ภายใต้สิทธิ์ของโหมดที่เลือก ปัจจุบัน Computer Use, MCP execution, Plugin execution, Telegram จริง และ MT4/MT5 execution adapter ยังไม่เปิดใช้งาน
+
+## Agent คุยกันเอง
+
+- เปิดแผง `Agent คุยกันเอง` ด้านบนเพื่อกำหนดหัวข้อ ช่วงเวลา ระยะห่าง จำนวนคำตอบ จำนวนครั้งสูงสุดต่อวัน และเปอร์เซ็นต์ Rate Limit ที่ต้องเก็บไว้
+- ค่าเริ่มต้นปิดอยู่ และ Backend จะเริ่มได้เมื่อเปิด Full Access, Codex Runner ว่าง และข้อมูล Rate Limit สดและเหลือเหนือเกณฑ์
+- แต่ละรอบเป็นการปรึกษาแบบปิด Tool: Specialist เสนอ/ตรวจข้อเสนอ และ Manager เป็นผู้สรุปรอบสุดท้าย ระบบไม่เปิดโปรแกรม ไม่เรียก Plugin/MCP และไม่สร้าง Task ต่อเอง
+- ทุกการประชุมจริงสร้าง Mission, Transcript, Audit และ `collaboration_report` ที่โต๊ะ Mission ส่วนภาพการประชุมจำลองจะหยุดชั่วคราวระหว่างรอบจริง
+- ฟังก์ชันนี้ใช้โควตา Codex ตามจำนวนคำตอบที่ตั้งไว้ หาก Rate Limit อ่านไม่ได้ ข้อมูลเก่า ต่ำกว่าเกณฑ์ หรือครบจำนวนต่อวัน ระบบจะพักโดยไม่ลองซ้ำถี่ ๆ
 
 ## โหมดการทำงานมุมขวาบน
 
 - `ตรวจสอบก่อนเริ่มงาน` — เหมาะกับเครื่องนักเรียนและการทดลอง งานที่เรียก Codex Task จะรอการยืนยันตามกฎเดิม
 - `อัตโนมัติ — Full Access ใน Workspace` — งานที่ Backend อนุญาตสามารถอ่าน สร้าง และแก้ไฟล์ภายในโฟลเดอร์โปรเจกต์นี้ แล้วส่ง Report กลับ Dashboard โดยอัตโนมัติ
 - คำว่า Full Access ในที่นี้ไม่ใช่การข้าม Sandbox และไม่ใช่สิทธิ์ทั้งเครื่อง งานจะรันด้วย `workspace-write` ภายใน `PROJECT_ROOT` เท่านั้น
-- Live Trading, การส่ง Telegram จริง, Deploy/Publish ภายนอก, ลบไฟล์, Restart VPS, ใช้เงินจริง/เครดิต และงานที่มี Secret ยังคงถูกหยุดหรือรอการอนุมัติ
+- การส่ง Telegram จริง, Deploy/Publish ภายนอก, ลบไฟล์, Restart VPS, ใช้เงินจริง/เครดิต และงานที่มี Secret ยังคงถูกหยุดหรือรอการอนุมัติ ส่วน Live Trading ใช้สิทธิ์ถาวรที่ Inputs ของ EA พร้อม Signed Command และ Risk Guard โดย Frontend เปิดแทนไม่ได้
 - Mission เก่าที่สร้างก่อนเปิดโหมดอัตโนมัติจะไม่ถูกหยิบไปรันย้อนหลังโดยอัตโนมัติ
 
 ## ขอบเขตความปลอดภัย
@@ -80,7 +111,7 @@ Agent Chat ไม่มีสิทธิ์เรียก Tool เอง โ�
 - Bridge รับการเชื่อมต่อเฉพาะ `127.0.0.1`; ตัวติดตั้งเสนอ Port ว่างให้ผู้ใช้ยืนยัน และบันทึก Port หลัง Health check ผ่านเท่านั้น
 - งานทั่วไปในโหมดอัตโนมัติผ่านการตรวจสิทธิ์และ Risk Guard ของ Backend แบบผูกกับ Mission โดยไม่ต้องกดอนุมัติซ้ำ
 - งานเสี่ยงยังคงแยกการอนุมัติออกจากการ Execute และต้องผ่าน Risk Guard/Approval Gate
-- Live Trading ปิดไว้ จนกว่าจะมี Risk limit, Account allowlist, Kill switch และการอนุมัติอย่างชัดเจน
+- Live Trading ปิดโดยค่าเริ่มต้น และเปิดได้เฉพาะใน MT4 EA เมื่อผ่าน Shadow/Demo, Risk limit, Kill Switch, Signed Envelope, Key pin/match และตั้ง `GatewayMode=GATEWAY_LIVE` กับ `LiveArmed=true`; ไม่ต้องอนุมัติทีละ Order และ AI/Frontend เปลี่ยนค่านี้ไม่ได้
 - ห้ามนำ `.env`, `.venv`, `data/runtime`, Log, Memory หรือ `%USERPROFILE%\.codex` ของบุคคลอื่นมาใส่ในชุดติดตั้ง
 
 ## โครงสร้างระบบสำหรับผู้พัฒนา
@@ -96,10 +127,13 @@ Agent Chat ไม่มีสิทธิ์เรียก Tool เอง โ�
 คำสั่งดูแลระบบ:
 
 - `Open Metafx Agent HQ.cmd` — เปิด HQ
+- `UPDATE-HQ.bat` — รับ Source รุ่นใหม่จาก GitHub แบบ fast-forward และติดตั้งซ้ำอย่างปลอดภัย
 - `scripts/status-local-bridge.cmd` — ตรวจสถานะ
 - `scripts/check-codex-readiness.cmd` — ตรวจ Codex login และ Rate Limit ของบัญชีเครื่องนี้
 - `scripts/repair-hq.cmd` — ซ่อมการติดตั้งและตรวจใหม่
 - `scripts/restart-local-bridge.cmd` — Restart Bridge อย่างควบคุม
 - `scripts/stop-local-bridge.cmd` — หยุดเฉพาะ HQ Bridge ที่ตรวจสอบตัวตนแล้ว
+- `scripts/register-bridge-autostart.cmd` — เปิด Bridge อัตโนมัติหลังเข้าสู่ Windows
+- `scripts/unregister-bridge-autostart.cmd` — ยกเลิกการเปิดอัตโนมัติ
 
 รายละเอียดการทำงานภายในดูได้ที่ `scripts/README-bridge-lifecycle.md` และเอกสารใน `docs/`

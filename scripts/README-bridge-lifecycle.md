@@ -8,6 +8,8 @@ Use these launchers from this folder:
 - `stop-local-bridge.cmd` stops only a process whose exact Python command targets this project's `bridge_server.py` on the confirmed `127.0.0.1` endpoint.
 - `restart-local-bridge.cmd` safely stops the verified Bridge and starts a healthy replacement.
 - `bridge-control.cmd Start|Status|Stop|Restart` provides the same actions from one entrypoint.
+- `register-bridge-autostart.cmd` explicitly registers a current-user Windows Scheduled Task. It starts only the hidden Local Bridge after sign-in, reuses the confirmed loopback endpoint, retries startup failures three times, and checks the Bridge every five minutes. It does not open a browser or MT4/MT5.
+- `unregister-bridge-autostart.cmd` removes that exact Scheduled Task and also cleans up the legacy Startup shortcut if present.
 
 Runtime files are intentionally kept outside the frontend:
 
@@ -22,3 +24,5 @@ Logs rotate to at most three prior generations. A running Bridge is never stoppe
 For a new installation, `installer/install.ps1 -ListAvailableEndpoints` proposes three loopback URLs before any installation change. The user confirms one URL, and the installer starts the Bridge with that exact Port. If the confirmed Port becomes unavailable, the controller stops safely and asks for a new selection instead of silently changing the URL. Normal Open/Status/Stop operations continue to use the endpoint that passed Health and was saved in `data/runtime/bridge-endpoint.json`.
 
 `scripts/check-codex-readiness.cmd` reads only the sanitized Bridge status and Codex Rate Limit endpoints. It reports the current Windows user's Codex readiness without reading or copying auth files.
+
+Automatic startup is opt-in. The installer still does not silently register it; run `register-bridge-autostart.cmd` only after the user has confirmed the local endpoint. The Scheduled Task runs as the current interactive Windows user because Codex login and Rate Limit belong to that user. The current state is recorded in `data/runtime/bridge-autostart.json`.

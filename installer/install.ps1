@@ -19,6 +19,9 @@ $installLog = Join-Path $env:LOCALAPPDATA "Metafxclub\AI-Agent-HQ-Install.log"
 $requirementsName = "requirements-runner.txt"
 $bridgeEndpointPath = Join-Path $installRoot "data\runtime\bridge-endpoint.json"
 $installResultPath = Join-Path $installRoot "data\runtime\install-result.json"
+$bridgeTaskName = "Metafxclub AI Agent HQ Bridge"
+$bridgeTaskWatchdogMinutes = 5
+$bridgeTaskPreviousPort = 0
 
 if ($Port -ne 0 -and $Port -lt 1024) {
     throw "Port ต้องเป็น 0 หรืออยู่ในช่วง 1024-65535"
@@ -316,6 +319,8 @@ function Assert-SafeSource {
     $requiredFiles = @(
         "backend\local-runner\bridge_server.py",
         "frontend\index.html",
+        "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4",
+        "artifacts\mt4-ai-council-ea-v2.14-broker-compat-hardening\MetafxHQTradeGateway.ex4",
         "runner\codex_cli_runner.py",
         "scripts\start-local-bridge.ps1",
         $requirementsName
@@ -330,37 +335,161 @@ function Assert-SafeSource {
         ".env", ".env.local", ".env.production", "credentials.json", "cookies.json",
         "auth.json", "secrets.json", "config.toml", "id_rsa", "id_ed25519"
     )
-    $allowedDirectories = @("backend", "contracts", "docs", "frontend", "installer", "runner", "scripts", "tests")
+    $allowedDirectories = @("backend", "contracts", "docs", "frontend", "installer", "integrations", "runner", "scripts", "tests")
+    $excludedDirectoryNames = @(".venv", "__pycache__", "node_modules", ".pytest_cache", "dist", "build")
     foreach ($directoryName in $allowedDirectories) {
         $directory = Join-Path $sourceRoot $directoryName
         if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
             continue
         }
-        foreach ($item in Get-ChildItem -LiteralPath $directory -Recurse -Force) {
-            if (
-                $item.FullName -match "[\\/]\.venv(?:[\\/]|$)" -or
-                $item.FullName -match "[\\/]__pycache__(?:[\\/]|$)"
-            ) {
-                continue
-            }
-            if ($item.PSIsContainer -and $item.Name -ieq ".codex") {
-                throw "หยุดติดตั้งเพื่อความปลอดภัย: พบโฟลเดอร์ .codex ในชุดแจก"
-            }
-            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw "หยุดติดตั้งเพื่อความปลอดภัย: ชุดแจกมี Link/Junction ที่ไม่ได้รับอนุญาต ($($item.Name))"
-            }
-            if ($item.PSIsContainer) {
-                continue
-            }
-            if (
-                $blockedNames -contains $item.Name.ToLowerInvariant() -or
-                $item.Name -match "(?i)(token|credential|cookie)" -or
-                $item.Name -match "(?i)^(auth|secret)s?.*\.json$" -or
-                $item.Extension.ToLowerInvariant() -in @(".pem", ".key", ".pfx", ".p12", ".log", ".jsonl", ".bak", ".tmp")
-            ) {
-                throw "หยุดติดตั้งเพื่อความปลอดภัย: พบไฟล์ที่อาจเป็นข้อมูลลับในชุดแจก ($($item.Name))"
+        $pendingDirectories = New-Object 'System.Collections.Generic.Stack[string]'
+        $pendingDirectories.Push($directory)
+        while ($pendingDirectories.Count -gt 0) {
+            $currentDirectory = $pendingDirectories.Pop()
+            foreach ($item in Get-ChildItem -LiteralPath $currentDirectory -Force) {
+                if ($item.PSIsContainer -and $excludedDirectoryNames -contains $item.Name) {
+                    # Do not recurse into generated dependency/build trees.
+                    continue
+                }
+                if ($item.PSIsContainer -and $item.Name -ieq ".codex") {
+                    throw "หยุดติดตั้งเพื่อความปลอดภัย: พบโฟลเดอร์ .codex ในชุดแจก"
+                }
+                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "หยุดติดตั้งเพื่อความปลอดภัย: ชุดแจกมี Link/Junction ที่ไม่ได้รับอนุญาต ($($item.Name))"
+                }
+                if ($item.PSIsContainer) {
+                    $pendingDirectories.Push($item.FullName)
+                    continue
+                }
+                if ($item.Extension.ToLowerInvariant() -in @(".log", ".jsonl", ".bak", ".tmp")) {
+                    # ไฟล์เหล่านี้ถูกตัดออกโดย Robocopy อยู่แล้ว จึงไม่เป็นส่วนหนึ่งของชุดติดตั้ง
+                    continue
+                }
+                if (
+                    $blockedNames -contains $item.Name.ToLowerInvariant() -or
+                    $item.Name -match "(?i)(token|credential|cookie)" -or
+                    $item.Name -match "(?i)^(auth|secret)s?.*\.json$" -or
+                    $item.Extension.ToLowerInvariant() -in @(".pem", ".key", ".pfx", ".p12")
+                ) {
+                    throw "หยุดติดตั้งเพื่อความปลอดภัย: พบไฟล์ที่อาจเป็นข้อมูลลับในชุดแจก ($($item.Name))"
+                }
             }
         }
+    }
+}
+
+function Suspend-BridgeScheduledTask {
+    if (
+        -not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) -or
+        -not (Get-Command Disable-ScheduledTask -ErrorAction SilentlyContinue) -or
+        -not (Get-Command Stop-ScheduledTask -ErrorAction SilentlyContinue)
+    ) {
+        return $false
+    }
+
+    $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction SilentlyContinue
+    if (-not $task -or [string]$task.State -ceq "Disabled") {
+        return $false
+    }
+
+    $autostartStatePath = Join-Path $installRoot "data\runtime\bridge-autostart.json"
+    if (Test-Path -LiteralPath $autostartStatePath -PathType Leaf) {
+        try {
+            $autostartState = Get-Content -LiteralPath $autostartStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $savedWatchdogMinutes = [int]$autostartState.watchdog_minutes
+            if ($savedWatchdogMinutes -ge 1 -and $savedWatchdogMinutes -le 30) {
+                $script:bridgeTaskWatchdogMinutes = $savedWatchdogMinutes
+            }
+        }
+        catch {
+            throw "ข้อมูล Autostart เดิมไม่สมบูรณ์ จึงหยุดก่อนเปลี่ยน Scheduled Task"
+        }
+    }
+    if (Test-Path -LiteralPath $bridgeEndpointPath -PathType Leaf) {
+        try {
+            $previousEndpoint = Get-Content -LiteralPath $bridgeEndpointPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ([string]$previousEndpoint.host -cne "127.0.0.1") {
+                throw "host ไม่ถูกต้อง"
+            }
+            $previousPort = [int]$previousEndpoint.port
+            if ($previousPort -lt 1024 -or $previousPort -gt 65535) {
+                throw "port ไม่ถูกต้อง"
+            }
+            $script:bridgeTaskPreviousPort = $previousPort
+        }
+        catch {
+            throw "Endpoint เดิมของ Autostart ไม่สมบูรณ์ จึงหยุดก่อนอัปเดต"
+        }
+    }
+
+    Write-Step "กำลังพัก Watchdog ของ Bridge ระหว่างอัปเดตไฟล์"
+    Disable-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop | Out-Null
+    $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
+    if ([string]$task.State -in @("Running", "Queued")) {
+        Stop-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
+        $deadline = [DateTime]::UtcNow.AddSeconds(15)
+        do {
+            Start-Sleep -Milliseconds 250
+            $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
+        } while ([string]$task.State -in @("Running", "Queued") -and [DateTime]::UtcNow -lt $deadline)
+        if ([string]$task.State -in @("Running", "Queued")) {
+            throw "พัก Watchdog ไม่สำเร็จ จึงหยุดก่อนแก้ไฟล์โปรแกรม"
+        }
+    }
+    return $true
+}
+
+function Restore-BridgeScheduledTask {
+    param([Parameter(Mandatory = $true)][bool]$WasEnabled)
+
+    if (-not $WasEnabled) {
+        return
+    }
+    if (-not (Get-Command Enable-ScheduledTask -ErrorAction SilentlyContinue)) {
+        throw "ไม่สามารถเปิด Watchdog ของ Bridge คืนหลังติดตั้งได้"
+    }
+
+    $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction SilentlyContinue
+    if (-not $task) {
+        throw "Scheduled Task ของ Bridge หายไประหว่างติดตั้ง"
+    }
+    Enable-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop | Out-Null
+    Write-Step "เปิด Watchdog ของ Bridge คืนแล้ว"
+}
+
+function Rebind-BridgeScheduledTask {
+    param([Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$ConfirmedPort)
+
+    $registerScript = Join-Path $installRoot "scripts\register-bridge-autostart.ps1"
+    if (-not (Test-Path -LiteralPath $registerScript -PathType Leaf)) {
+        throw "ไม่พบ Script สำหรับผูก Scheduled Task กับ Endpoint ใหม่"
+    }
+
+    $previousTaskXml = Export-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
+    try {
+        Write-Step "กำลังผูก Watchdog กับพอร์ตที่ผ่าน Health check ($ConfirmedPort)"
+        & powershell.exe `
+            -NoLogo `
+            -NoProfile `
+            -NonInteractive `
+            -ExecutionPolicy Bypass `
+            -File $registerScript `
+            -WatchdogMinutes $bridgeTaskWatchdogMinutes | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "ผูก Scheduled Task กับพอร์ต $ConfirmedPort ไม่สำเร็จ"
+        }
+
+        $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
+        $expectedArgument = "-Action Ensure -Port $ConfirmedPort"
+        if (@($task.Actions).Count -ne 1 -or [string]$task.Actions[0].Arguments -notlike "*$expectedArgument*") {
+            throw "Scheduled Task ไม่ได้บันทึกพอร์ตที่ผ่าน Health check"
+        }
+    }
+    catch {
+        $rebindError = [string]$_.Exception.Message
+        Unregister-ScheduledTask -TaskName $bridgeTaskName -Confirm:$false -ErrorAction SilentlyContinue
+        Register-ScheduledTask -TaskName $bridgeTaskName -Xml $previousTaskXml -Force | Out-Null
+        throw "ผูก Watchdog ใหม่ไม่สำเร็จและคืน Task เดิมแล้ว: $rebindError"
     }
 }
 
@@ -397,8 +526,11 @@ function Sync-Directory {
         $sourceDirectory, $destinationDirectory, "/MIR", "/XJ", "/R:2", "/W:1",
         "/NFL", "/NDL", "/NJH", "/NJS", "/NP",
         "/XF", ".env", ".env.*", "config.toml", "*token*", "*credential*", "*cookie*", "*.pem", "*.key", "*.pfx", "*.p12", "*.log", "*.jsonl", "*.bak", "*.tmp", "auth*.json", "secret*.json",
-        "/XD", ".git", ".codex", ".venv", "__pycache__", (Join-Path $sourceDirectory ".git"), (Join-Path $sourceDirectory ".codex"), (Join-Path $sourceDirectory ".venv"), (Join-Path $sourceDirectory "__pycache__"),
-        (Join-Path $destinationDirectory ".git"), (Join-Path $destinationDirectory ".codex"), (Join-Path $destinationDirectory ".venv"), (Join-Path $destinationDirectory "__pycache__")
+        "/XD", ".git", ".codex", ".venv", "__pycache__", "node_modules", ".pytest_cache", "dist", "build",
+        (Join-Path $sourceDirectory ".git"), (Join-Path $sourceDirectory ".codex"), (Join-Path $sourceDirectory ".venv"), (Join-Path $sourceDirectory "__pycache__"),
+        (Join-Path $sourceDirectory "node_modules"), (Join-Path $sourceDirectory ".pytest_cache"), (Join-Path $sourceDirectory "dist"), (Join-Path $sourceDirectory "build"),
+        (Join-Path $destinationDirectory ".git"), (Join-Path $destinationDirectory ".codex"), (Join-Path $destinationDirectory ".venv"), (Join-Path $destinationDirectory "__pycache__"),
+        (Join-Path $destinationDirectory "node_modules"), (Join-Path $destinationDirectory ".pytest_cache"), (Join-Path $destinationDirectory "dist"), (Join-Path $destinationDirectory "build")
     )
     & robocopy.exe @arguments | Out-Null
     if ($LASTEXITCODE -gt 7) {
@@ -414,13 +546,14 @@ function Copy-ApplicationFiles {
 
     Write-Step "กำลังคัดลอกเฉพาะไฟล์โปรแกรมที่อนุญาต"
     New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
-    foreach ($directoryName in @("backend", "contracts", "docs", "frontend", "installer", "runner", "scripts", "tests")) {
+    foreach ($directoryName in @("backend", "contracts", "docs", "frontend", "installer", "integrations", "runner", "scripts", "tests")) {
         Sync-Directory -DirectoryName $directoryName
     }
+    Sync-Directory -DirectoryName "artifacts\mt4-ai-council-ea-v2.14-broker-compat-hardening"
 
     $rootFiles = @(
         "index.html", "Open Metafx Agent HQ.cmd", "README.md", $requirementsName,
-        "1-INSTALL-HQ.bat", "REPAIR-HQ.bat", "UNINSTALL-HQ.bat",
+        "1-INSTALL-HQ.bat", "UPDATE-HQ.bat", "REPAIR-HQ.bat", "UNINSTALL-HQ.bat",
         "AGENTS.md", ".gitignore", "LICENSE", "LICENSE.md", "SECURITY.md", "VERSION", "STUDENT-QUICKSTART-TH.md"
     )
     foreach ($fileName in $rootFiles) {
@@ -736,32 +869,51 @@ try {
     $selectedBridgePort = Confirm-BridgeEndpoint
     Write-InstallLog -Message ("เริ่ม {0} หลังผู้ใช้ยืนยัน http://127.0.0.1:{1}/" -f `
         $(if ($RepairOnly) { "ซ่อมแซม" } else { "ติดตั้ง" }), $selectedBridgePort)
-    Stop-ExistingBridge
-    if (-not (Test-LoopbackPortAvailable -CandidatePort $selectedBridgePort)) {
-        throw "พอร์ตที่ผู้ใช้ยืนยัน ($selectedBridgePort) ไม่ว่างหลังหยุด HQ เดิม ระบบหยุดโดยไม่เปลี่ยน URL"
-    }
-    if (-not $RepairOnly) {
-        Copy-ApplicationFiles
-    }
-    elseif (-not (Get-ComparablePath -Path $sourceRoot).Equals((Get-ComparablePath -Path $installRoot), [StringComparison]::OrdinalIgnoreCase)) {
-        throw "การซ่อมแซมต้องเรียกจากชุด Installer ที่อยู่ในโฟลเดอร์ติดตั้ง"
-    }
-
-    Initialize-UserDataDirectories
-    $venvPython = Initialize-PythonEnvironment
-    Test-InstalledApplication -PythonPath $venvPython
-    if (-not $SkipShortcuts) {
-        Install-Shortcuts
-    }
-
     $bridgeEndpoint = $null
     $codexReadiness = $null
-    if (-not $SkipLaunch) {
-        $bridgeEndpoint = Start-And-TestBridge -ConfirmedPort $selectedBridgePort
-        $codexReadiness = Get-SafeCodexReadiness -Endpoint $bridgeEndpoint
-        Show-CodexReadiness -Readiness $codexReadiness
-        Write-InstallResult -Endpoint $bridgeEndpoint -Readiness $codexReadiness
-        Start-Process $bridgeEndpoint.Url
+    $bridgeTaskWasEnabled = Suspend-BridgeScheduledTask
+    try {
+        if (
+            $SkipLaunch -and
+            $bridgeTaskWasEnabled -and
+            ($bridgeTaskPreviousPort -lt 1024 -or $bridgeTaskPreviousPort -ne $selectedBridgePort)
+        ) {
+            throw "เมื่อเปิด Autostart อยู่ การติดตั้งแบบ SkipLaunch ต้องใช้พอร์ตเดิม เพราะพอร์ตใหม่ยังไม่ผ่าน Health check"
+        }
+        Stop-ExistingBridge
+        if (-not (Test-LoopbackPortAvailable -CandidatePort $selectedBridgePort)) {
+            throw "พอร์ตที่ผู้ใช้ยืนยัน ($selectedBridgePort) ไม่ว่างหลังหยุด HQ เดิม ระบบหยุดโดยไม่เปลี่ยน URL"
+        }
+        if (-not $RepairOnly) {
+            Copy-ApplicationFiles
+        }
+        elseif (-not (Get-ComparablePath -Path $sourceRoot).Equals((Get-ComparablePath -Path $installRoot), [StringComparison]::OrdinalIgnoreCase)) {
+            throw "การซ่อมแซมต้องเรียกจากชุด Installer ที่อยู่ในโฟลเดอร์ติดตั้ง"
+        }
+
+        Initialize-UserDataDirectories
+        $venvPython = Initialize-PythonEnvironment
+        Test-InstalledApplication -PythonPath $venvPython
+        if (-not $SkipShortcuts) {
+            Install-Shortcuts
+        }
+
+        if (-not $SkipLaunch) {
+            $bridgeEndpoint = Start-And-TestBridge -ConfirmedPort $selectedBridgePort
+            $codexReadiness = Get-SafeCodexReadiness -Endpoint $bridgeEndpoint
+            Show-CodexReadiness -Readiness $codexReadiness
+            Write-InstallResult -Endpoint $bridgeEndpoint -Readiness $codexReadiness
+            if ($bridgeTaskWasEnabled) {
+                Rebind-BridgeScheduledTask -ConfirmedPort $selectedBridgePort
+                # The registration script enabled and verified the replacement
+                # task already, so the finally block must not restore the old one.
+                $bridgeTaskWasEnabled = $false
+            }
+            Start-Process $bridgeEndpoint.Url
+        }
+    }
+    finally {
+        Restore-BridgeScheduledTask -WasEnabled $bridgeTaskWasEnabled
     }
 
     Write-Step "ติดตั้งและตรวจสอบสำเร็จ ข้อมูลเริ่มต้นเป็นแบบ Local/Demo และไม่ได้ Login หรือเปิด Live Trading ให้อัตโนมัติ"

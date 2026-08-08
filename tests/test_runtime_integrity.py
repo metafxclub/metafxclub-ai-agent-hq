@@ -3,11 +3,13 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import sys
 import tempfile
 import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -18,7 +20,11 @@ FRONTEND_INDEX_PATH = PROJECT_ROOT / "frontend" / "index.html"
 FRONTEND_MAIN_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "main.js"
 FRONTEND_STYLES_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "styles.css"
 LIFECYCLE_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "start-local-bridge.ps1"
+AUTOSTART_REGISTER_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "register-bridge-autostart.ps1"
+AUTOSTART_UNREGISTER_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "unregister-bridge-autostart.ps1"
+UPDATE_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "update-hq.ps1"
 INSTALLER_SCRIPT_PATH = PROJECT_ROOT / "installer" / "install.ps1"
+UNINSTALL_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "uninstall-hq.ps1"
 CODEX_READINESS_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "check-codex-readiness.ps1"
 DASHBOARD_CONNECTION_PATH = PROJECT_ROOT / "contracts" / "connections" / "dashboard-connection-contract.json"
 AGENT_CHAT_CONTRACT_PATH = PROJECT_ROOT / "contracts" / "agents" / "agent-chat-contract.json"
@@ -56,6 +62,320 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn("manager", agent_ids)
         self.assertIn("risk_guard", agent_ids)
 
+    def test_visual_roster_and_daily_council_session_migrate_without_overlap(self) -> None:
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("const EXPECTED_OFFICE_AGENT_COUNT = 10;", main)
+        self.assertIn("const OFFICE_LAYOUT_VERSION = 2;", main)
+        self.assertIn("const SIGNAL_DASHBOARD_VERSION = 6;", main)
+        self.assertIn(
+            "const SIGNAL_CHART_DISPLAY_BAR_OPTIONS = [40, 60, 120, 240, 500, 1000];",
+            main,
+        )
+        self.assertIn(
+            "const SIGNAL_ANALYSIS_BAR_OPTIONS = [120, 180, 240, 300, 500, 1000];",
+            main,
+        )
+        for contract_path in (
+            PROJECT_ROOT / "contracts" / "connections" / "dashboard-connection-contract.json",
+            PROJECT_ROOT / "contracts" / "props" / "property-role-map.json",
+        ):
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            serialized = json.dumps(contract, ensure_ascii=False, separators=(",", ":"))
+            self.assertIn(
+                '"displayBars":{"owner":"frontend_client_only","allowedValues":[40,60,120,240,500,1000],"affectsAnalysis":false}',
+                serialized,
+            )
+        self.assertIn("function savedOfficeAgentsOverlap(snapshot)", main)
+        self.assertIn("function migrateOfficeSessionLayout(snapshot)", main)
+        self.assertIn("function selectNewestSessionSnapshot(localSession, backendSession)", main)
+        self.assertIn("localDashboardVersion > backendDashboardVersion", main)
+        self.assertIn("staleSignalDashboard", main)
+        self.assertIn(
+            "const legacyDeepTab = SIGNAL_DEEP_ANALYSIS_TABS.includes(legacySignalTab)",
+            main,
+        )
+        self.assertIn('legacyDeepTab\n      ? "live_analysis"', main)
+        self.assertIn("migratedModal.signalLiveTab = legacyDeepTab || (", main)
+        self.assertIn(': "chart_overview"', main)
+        self.assertIn(
+            "migratedModal.signalChartDisplayBars = SIGNAL_CHART_DEFAULT_DISPLAY_BARS;",
+            main,
+        )
+        self.assertIn("signalDashboardVersion: SIGNAL_DASHBOARD_VERSION", main)
+        self.assertIn(
+            'codex_mcp_operator: { x: 33.5, y: 61.0, label: `จุดวิเคราะห์ข่าวของ ${AI_TRADE_COUNCIL_PUBLIC_NAMES.codex_mcp_operator}` }',
+            main,
+        )
+        self.assertNotIn(
+            'telegram_ops: { x: 33.5, y: 61.0, label: "จุดวิเคราะห์ข่าวของ Telegram Ops" }',
+            main,
+        )
+
+    def test_ui_session_store_rejects_an_older_dashboard_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_path = self.bridge.UI_SESSION_PATH
+            self.bridge.UI_SESSION_PATH = Path(temp_dir) / "ui-session.json"
+            try:
+                current = {
+                    "savedAt": "2026-08-01T13:46:20Z",
+                    "modal": {
+                        "signalDashboardVersion": 6,
+                        "signalTab": "live_analysis",
+                        "signalLiveTab": "technical_deep",
+                    },
+                }
+                stale = {
+                    "savedAt": "2026-08-01T13:47:20Z",
+                    "modal": {
+                        "signalDashboardVersion": 5,
+                        "signalTab": "price_action",
+                    },
+                }
+                stored = self.bridge.store_ui_session(current)
+                ignored = self.bridge.store_ui_session(stale)
+                payload = json.loads(self.bridge.UI_SESSION_PATH.read_text(encoding="utf-8"))
+            finally:
+                self.bridge.UI_SESSION_PATH = original_path
+
+        self.assertFalse(stored["ignored"])
+        self.assertTrue(ignored["ignored"])
+        self.assertEqual(ignored["reason"], "older_dashboard_version")
+        self.assertEqual(payload["session"]["modal"]["signalDashboardVersion"], 6)
+        self.assertEqual(payload["session"]["modal"]["signalLiveTab"], "technical_deep")
+
+    def test_ai_trade_council_keeps_ea_channel_visible_after_snapshot_ready(self) -> None:
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+        styles = FRONTEND_STYLES_PATH.read_text(encoding="utf-8")
+        daily_start = main.index("function renderSignalDailyPanel(report = {})")
+        daily_end = main.index("async function setAiTradeCouncilAutomation", daily_start)
+        daily = main[daily_start:daily_end]
+
+        self.assertIn("function signalSnapshotChannel(report = {})", main)
+        self.assertIn("report?.metatraderReadOnly?.installPreparation?.snapshotChannel", main)
+        self.assertIn("council?.tradeGateway?.selectedCandidateId", main)
+        self.assertIn("const snapshotChannel = signalSnapshotChannel(report);", daily)
+        self.assertIn("data-signal-channel-code", daily)
+        self.assertIn("data-signal-copy-channel", daily)
+        self.assertIn("SnapshotChannel", daily)
+        self.assertNotIn("!daily.available && snapshotChannel", daily)
+        self.assertIn(".signal-channel-card", styles)
+
+    def test_ai_trade_council_explains_signed_live_readiness_without_false_positive(self) -> None:
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("gatewayLiveArmed: gateway.liveArmed === true", main)
+        self.assertIn("signedCommandRequiredForLive", main)
+        self.assertIn("backendSignedCommandVerificationAvailable", main)
+        self.assertIn("signedCommandVerificationAvailable", main)
+        self.assertIn("signingKeyMatch", main)
+        self.assertIn("signingKeyPinned", main)
+        self.assertIn("ลายเซ็นคำสั่งจาก Local Runner", main)
+        self.assertIn("Key ID สำหรับตั้ง Live", main)
+        self.assertIn("คัดลอก Signing Key ID สำหรับตั้งค่า Live ที่ EA", main)
+        self.assertIn("Key สำหรับบัญชีจริง", main)
+        self.assertIn("ยังไม่เทรดจริง • EA อยู่ SHADOW", main)
+        self.assertIn("ยังไม่เทรดจริง • ต้องเปิด LiveArmed ที่ EA", main)
+        self.assertIn("ต้องปักหมุด Trusted Signing Key ID ที่ EA", main)
+        self.assertNotIn('"ปิดที่ EA"', main)
+
+    def test_ai_trade_council_hold_is_abstention_veto_is_news_blocker_and_ui_is_explicit(self) -> None:
+        prompts = json.loads(
+            (
+                PROJECT_ROOT
+                / "contracts"
+                / "orchestration"
+                / "ai-trade-council-prompts.json"
+            ).read_text(encoding="utf-8")
+        )
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+        index = FRONTEND_INDEX_PATH.read_text(encoding="utf-8")
+        policy = prompts["sharedPolicy"]
+        news = next(agent for agent in prompts["agents"] if agent["roleId"] == "news")
+
+        self.assertEqual(policy["qualityGate"]["newsEventRiskBlockingValues"], ["VETO"])
+        self.assertIn("HOLD เป็นการงดออกเสียงและไม่บล็อก Order", policy["consensusPolicy"])
+        self.assertIn("Only eventRisk=VETO blocks the entire round", news["roleOutputRule"])
+        self.assertIn("อย่างน้อย 2 โดเมนสาธารณะที่ต่างกัน", news["promptTemplate"])
+        self.assertIn('if (normalized === "HOLD") return "งดออกเสียง";', main)
+        self.assertIn('eventRiskVeto ? "หยุดเพราะข่าว (VETO)"', main)
+        self.assertIn('"งดออกเสียง • ไม่หยุดรอบ"', main)
+        self.assertIn("LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT", main)
+        self.assertIn("DEMO_MODE_REQUIRES_DEMO_ACCOUNT", main)
+        self.assertIn("ACCOUNT_IDENTITY_UNAVAILABLE", main)
+        self.assertIn("DECISION_DISPATCH_WINDOW_EXPIRED", main)
+        self.assertIn("20260808-workflow-transfer-v050", index)
+
+    def test_ai_trade_council_shows_protective_plan_source_and_thai_block_reason(self) -> None:
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+        styles = FRONTEND_STYLES_PATH.read_text(encoding="utf-8")
+        index = FRONTEND_INDEX_PATH.read_text(encoding="utf-8")
+        orchestration = json.loads(
+            (PROJECT_ROOT / "contracts" / "orchestration" / "orchestration-contract.json")
+            .read_text(encoding="utf-8")
+        )
+        reports = json.loads(
+            (PROJECT_ROOT / "contracts" / "reports" / "report-contract.json")
+            .read_text(encoding="utf-8")
+        )
+        prompts = json.loads(
+            (PROJECT_ROOT / "contracts" / "orchestration" / "ai-trade-council-prompts.json")
+            .read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(orchestration["version"], "orchestration-contract-v009")
+        self.assertEqual(reports["version"], "report-contract-v011")
+        policy = orchestration["aiTradeCouncilAutoAnalysis"]["consensusPolicy"]
+        self.assertEqual(
+            policy["protectivePlanSources"],
+            ["price_action_agent", "backend_deterministic_fallback", "unavailable"],
+        )
+        self.assertEqual(
+            policy["protectivePlanFallback"]["ownerRole"],
+            "backend_deterministic_guard",
+        )
+        trade_plan = reports["typed_report_schemas"]["ai_trade_council_report"]["consensus"]["tradePlan"]
+        self.assertEqual(
+            trade_plan["protectivePlanProvenance"]["schemaVersion"],
+            "ai-trade-council-protective-plan-v1",
+        )
+        self.assertIn("backend_deterministic_fallback", prompts["sharedPolicy"]["protectiveFallbackPolicy"])
+        self.assertIn("function signalProtectivePlanViewModel(", main)
+        self.assertIn("function renderSignalProtectivePlanProvenance(", main)
+        self.assertGreaterEqual(main.count("data-signal-plan-provenance"), 4)
+        self.assertIn("SL/TP จาก Price Action AI", main)
+        self.assertIn("SL/TP สำรองจาก Backend", main)
+        self.assertIn("SL/TP จาก Price Action ไม่ผ่าน", main)
+        self.assertIn("ไม่พบลายนิ้วมือดิจิทัลของ Snapshot", main)
+        self.assertIn("ลายนิ้วมือดิจิทัลของ Snapshot ไม่ตรงกัน", main)
+        self.assertIn("fallback_snapshot_digest_missing", main)
+        self.assertIn("fallback_snapshot_digest_mismatch", main)
+        self.assertIn('.signal-protective-plan-provenance[data-state="blocked"]', styles)
+        self.assertIn("20260808-workflow-transfer-v050", index)
+
+    def test_daily_council_frontend_consumes_v2_votes_and_finishes_read_only_pipeline(self) -> None:
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+        styles = FRONTEND_STYLES_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("const parentSource = response?.parent || response?.manager;", main)
+        self.assertIn("function signalCurrentConsensusSource(", main)
+        self.assertIn("sourceMissionId === parentId", main)
+        self.assertIn("sourceSnapshotId === runSnapshotId", main)
+        self.assertIn("const sourceVotes = Array.isArray(consensusSelection.source?.votes)", main)
+        self.assertIn("view.decision || view.direction || view.vote", main)
+        self.assertIn("Array.isArray(view.observations)", main)
+        self.assertIn('.replaceAll("_", " ")', main)
+        self.assertIn('canvas.dataset.signalDeepPriceChart = "";', main)
+        self.assertIn(
+            '["4", "Council Quality Gate", states.quality]',
+            main,
+        )
+        self.assertIn('["5", "Risk / EA Gate", states.riskEa]', main)
+        self.assertIn('["6", "ส่ง Command และรอ ACK",', main)
+        self.assertIn('["7", "ตรวจ Fill / Recovery", states.fill]', main)
+        self.assertIn("function signalCouncilQualityModel(", main)
+        self.assertIn("function signalTradeOperationsModel(", main)
+        self.assertIn("function signalRoundHealthModel(", main)
+        self.assertIn("Specialist 3 ตัว ลงคะแนน", main)
+        self.assertIn("ทั้งบัญชี MT4 (Account-wide)", main)
+        self.assertIn("เฉพาะ AI Council (Council-managed)", main)
+        self.assertIn("ACK EXECUTED ไม่ถูกตีความเป็น Fill ที่ตรวจแล้ว", main)
+        self.assertIn(".signal-assurance-grid", styles)
+        self.assertIn("repeat(auto-fit, minmax(240px, 1fr))", styles)
+        self.assertNotIn("min-width: 1110px;", styles)
+        self.assertIn("riskGuard.terminalActions === false", main)
+        self.assertIn("gatewayRun.commandPublished === true", main)
+
+    def test_current_council_round_never_reuses_a_historical_gateway_command(self) -> None:
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+        self.assertIn("function signalCommandMatchesCurrentRound(", main)
+        self.assertIn("commandMissionId !== expectedMissionId", main)
+        self.assertIn("commandSnapshotId === expectedSnapshotId", main)
+        self.assertIn('if (!run.parent || !run.snapshotId) return { source: {}, current: false, run };', main)
+        self.assertIn("gatewayCommandMatchesCurrentRound: Boolean(gatewayCommand)", main)
+        self.assertIn("gatewayLatestHistoricalCommand: latestCommand", main)
+        self.assertNotIn(
+            'const gatewayCommand = gateway.activeCommand && typeof gateway.activeCommand === "object"',
+            main,
+        )
+
+        summary = self.bridge._mt4_trade_gateway_command_summary({
+            "command": {
+                "commandId": "cmd-current-round",
+                "missionId": "mission-current-round",
+                "snapshotId": "a" * 64,
+                "councilDecisionId": "council-current-round",
+                "action": "BUY",
+                "symbol": "XAUUSD",
+                "timeframe": "M5",
+                "stopLoss": 4300.0,
+                "takeProfit": 4400.0,
+            },
+            "status": "published",
+            "outstanding": True,
+        })
+        self.assertEqual(summary["missionId"], "mission-current-round")
+        self.assertEqual(summary["snapshotId"], "a" * 64)
+
+    def test_quality_gate_and_agent_cards_fail_closed_on_stale_or_truncated_evidence(self) -> None:
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+
+        quality_start = main.index("function signalCouncilQualityModel(")
+        quality_end = main.index("\nfunction ", quality_start + 10)
+        quality = main[quality_start:quality_end]
+        self.assertIn("gateMatchesCurrentRun", quality)
+        self.assertIn("missionId === expectedMissionId && snapshotId === expectedSnapshotId", quality)
+        self.assertIn("currentConsensusSelection.current", quality)
+        self.assertNotIn("].find((value) => value && typeof value === \"object\") || null", quality)
+
+        agent_start = main.index("function signalAgentViews(")
+        agent_end = main.index("\nfunction ", agent_start + 10)
+        agent_views = main[agent_start:agent_end]
+        self.assertIn('reason !== "[TRUNCATED]"', agent_views)
+        self.assertIn("เปิดรายละเอียด Mission เพื่อดูข้อมูลฉบับเต็ม", agent_views)
+
+    def test_agent_sidebar_tracks_pending_and_blocked_work_and_mission_poll_is_change_aware(self) -> None:
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+        self.assertIn("function missionReadModelSignature(missions = [])", main)
+        self.assertIn("const missionChanged = hasBackendMissionList", main)
+        self.assertIn("if (persist && missionChanged) saveSessionSnapshot();", main)
+
+        mission_start = main.index("function getActiveMissionForAgent(")
+        mission_end = main.index("\nfunction getAgentSidebarState", mission_start)
+        mission_block = main[mission_start:mission_end]
+        for status in ("running", "blocked", "failed", "waiting_approval", "queued"):
+            self.assertIn(f"{status}:", mission_block)
+        sidebar_start = main.index("function getAgentSidebarState(")
+        sidebar_end = main.index("\nfunction createAgentStatusCard", sidebar_start)
+        sidebar = main[sidebar_start:sidebar_end]
+        self.assertIn('signalMissionReason(mission, "เปิดรายละเอียด Task เพื่อดูสาเหตุและวิธีแก้")', sidebar)
+
+    def test_today_work_sidebar_uses_progressive_rendering_instead_of_mounting_full_history(self) -> None:
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+        styles = FRONTEND_STYLES_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("const AGENT_COLLABORATION_POLL_MS = 15000;", main)
+        self.assertIn("todayWorkView", main)
+        self.assertIn("missions.slice(0, limit)", main)
+        self.assertIn("ดูเพิ่มอีก ${nextBatch} งาน", main)
+        self.assertIn("state.todayWorkView.completedLimit += count", main)
+        self.assertIn(".today-work-more", styles)
+        self.assertIn("runtime.gatewayConnected", main)
+        self.assertIn("Array.isArray(pipeline.items) ? pipeline.items : []", main)
+        self.assertIn("const suppliedMissions = Array.isArray(pipeline.items)", main)
+        self.assertIn("function signalCouncilRunModel(report = {})", main)
+        self.assertIn("run.counts.blocked > 0", main)
+        self.assertIn("data-signal-run-reason", main)
+        self.assertIn("signalMissionStatusLabel(event)", main)
+        self.assertIn("function signalSnapshotComparisonText(", main)
+        self.assertIn("เป็นข้อมูลคนละรอบ", main)
+        decision_panel = main[
+            main.index("function renderSignalDecisionPanel("):
+            main.index("function signalHistoryEntries(")
+        ]
+        self.assertNotIn("runtime.liveOrderExecutionAvailable", decision_panel)
+        self.assertIn("function renderSignalConsensusPanel(tabName, report = {})", main)
+
     def test_room_declares_nine_dashboards_and_one_mission_kanban(self) -> None:
         room = json.loads((PROJECT_ROOT / "contracts" / "rooms" / "command-room.json").read_text(encoding="utf-8"))
         roles = json.loads((PROJECT_ROOT / "contracts" / "props" / "property-role-map.json").read_text(encoding="utf-8"))["properties"]
@@ -65,6 +385,94 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertEqual(len(prop_ids), 10)
         self.assertEqual(len(dashboards), 9)
         self.assertEqual(kanban, {"mission_strategy_table"})
+
+    def test_repurposed_props_keep_canonical_roles_and_safe_report_routes(self) -> None:
+        role_map = json.loads(
+            (PROJECT_ROOT / "contracts" / "props" / "property-role-map.json")
+            .read_text(encoding="utf-8")
+        )["properties"]
+        profiles = json.loads(DASHBOARD_CONNECTION_PATH.read_text(encoding="utf-8"))["profiles"]
+        report_targets = json.loads(
+            (PROJECT_ROOT / "contracts" / "reports" / "report-contract.json")
+            .read_text(encoding="utf-8")
+        )["report_targets"]
+
+        canonical = {
+            "left_audit_crystals": {
+                "functionName": "Indicator Website Scout",
+                "owner": "codex_mcp_operator",
+                "primaryReportType": "indicator_scout_report",
+                "actions": {"discover_new_indicators", "save_indicator_scout_schedule"},
+            },
+            "left_signal_cube": {
+                "functionName": "Daily Market News & FX Bias",
+                "owner": "codex_mcp_operator",
+                "primaryReportType": "fx_news_bias_report",
+                "actions": {
+                    "analyze_daily_market_news",
+                    "build_fx_pair_bias",
+                    "save_news_bias_schedule",
+                },
+            },
+            "terminal_workstation": {
+                "functionName": "EA Development Studio",
+                "owner": "ea_developer",
+                "primaryReportType": "ea_development_report",
+                "actions": {
+                    "inspect_ea_source",
+                    "develop_ea_source",
+                    "propose_ea_performance_improvements",
+                },
+            },
+            "right_status_crystals": {
+                "functionName": "VPS / HQ Health & Agent Settings",
+                "owner": "vps_watch",
+                "primaryReportType": "ops_overview_report",
+                "actions": {"refresh_vps_hq_status", "save_agent_preferences"},
+            },
+        }
+        for prop_id, expected in canonical.items():
+            with self.subTest(prop=prop_id):
+                role = role_map[prop_id]
+                profile = profiles[prop_id]
+                self.assertEqual(role["functionName"], expected["functionName"])
+                self.assertEqual(role["primaryOwnerAgentId"], expected["owner"])
+                self.assertEqual(role["primaryReportType"], expected["primaryReportType"])
+                self.assertEqual(set(role["allowedDashboardActions"]), expected["actions"])
+                self.assertIn(expected["primaryReportType"], role["acceptedReportTypes"])
+                self.assertIn(prop_id, report_targets[expected["primaryReportType"]])
+                self.assertEqual(profile["reportRoute"]["targetPropId"], prop_id)
+                self.assertEqual(
+                    profile["reportRoute"]["primaryReportType"],
+                    expected["primaryReportType"],
+                )
+                self.assertEqual(
+                    profile["reportRoute"]["summaryTargetPropId"],
+                    "mission_strategy_table",
+                )
+                connection_ids = {item["id"] for item in profile["connections"]}
+                self.assertTrue(
+                    "mission_report_audit" in connection_ids
+                    or {"mission_store", "agent_event_store", "report_routing"}.issubset(connection_ids),
+                    f"{prop_id} must retain Mission / Report / Audit tracking",
+                )
+
+        news_policy = role_map["left_signal_cube"]["executionPolicy"]
+        self.assertEqual(news_policy["mode"], "analysis_only")
+        self.assertFalse(news_policy["liveTradingEnabled"])
+        self.assertFalse(news_policy["orderSubmissionEnabled"])
+        self.assertFalse(news_policy["frontendMayEnableExecution"])
+        self.assertFalse(role_map["terminal_workstation"]["artifactPolicy"]["rawPathAllowed"])
+        self.assertFalse(role_map["terminal_workstation"]["briefInputs"]["audioUploadToRunner"])
+        self.assertNotIn("risk_review", role_map["left_audit_crystals"]["acceptedReportTypes"])
+        self.assertNotIn("auto_trading_status_report", role_map["left_signal_cube"]["acceptedReportTypes"])
+        self.assertIn("risk_review", role_map["mission_strategy_table"]["acceptedReportTypes"])
+        self.assertIn("mission_strategy_table", report_targets["risk_review"])
+        self.assertIn(
+            "auto_trading_status_report",
+            role_map["left_analytics_console"]["acceptedReportTypes"],
+        )
+        self.assertIn("left_analytics_console", report_targets["auto_trading_status_report"])
 
     def test_agent_chat_contract_uses_real_codex_and_backend_owned_structured_task_intent(self) -> None:
         agents = json.loads(
@@ -108,7 +516,8 @@ class RuntimeIntegrityTests(unittest.TestCase):
         )
         self.assertTrue(chat["execution"]["outputSchema"]["conversationTaskGoalMustBeEmpty"])
         self.assertEqual(chat["execution"]["taskRouting"]["managerAndCeo"], "manager_delegate")
-        self.assertEqual(chat["execution"]["taskRouting"]["specialist"], "one direct codex_cli_task")
+        self.assertIn("codex_web_research", chat["execution"]["taskRouting"]["specialist"])
+        self.assertIn("publicWebResearch", chat["execution"]["taskRouting"])
         self.assertFalse(chat["execution"]["taskRouting"]["frontendMaySelectToolModelBudgetRiskOrApproval"])
         self.assertEqual(
             chat["execution"]["highImpactTask"],
@@ -140,24 +549,763 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertLessEqual(guard["agentChatMaxMessageChars"], 4000)
         self.assertLessEqual(guard["agentChatMaxOutputChars"], 5000)
 
-    def test_prop_dashboards_have_connection_task_and_result_tabs(self) -> None:
+    def test_prop_dashboards_use_connection_rail_and_single_work_results_view(self) -> None:
         contract = json.loads(DASHBOARD_CONNECTION_PATH.read_text(encoding="utf-8"))
         ui = contract["dashboardUi"]
         self.assertEqual(ui["dashboardCount"], 9)
         self.assertTrue(ui["missionStrategyTableIsKanban"])
         self.assertTrue(ui["missionStrategyTableExcludedFromDashboardTabs"])
-        self.assertEqual(ui["defaultTab"], "connections")
+        self.assertEqual(ui["defaultView"], "work_results")
+        self.assertFalse(ui["tabsEnabled"])
         self.assertEqual(
-            [(item["id"], item["labelTh"]) for item in ui["tabs"]],
-            [
-                ("connections", "การเชื่อมต่อ"),
-                ("tasks", "งานของอุปกรณ์"),
-                ("results", "ผลลัพธ์งาน"),
-            ],
+            set(ui["layout"]["leftRail"]["shows"]),
+            {"prop_image", "short_description", "connection_checklist", "connection_actions"},
+        )
+        self.assertEqual(
+            set(ui["layout"]["leftRail"]["doesNotShow"]),
+            {"owner_summary", "report_type", "mission_count", "memory_count", "generic_prop_status"},
+        )
+        self.assertEqual(
+            set(ui["layout"]["mainWorkspace"]["showsOnly"]),
+            {"missions", "structured_reports", "report_attachments"},
+        )
+        status_groups = ui["layout"]["mainWorkspace"]["statusGroups"]
+        self.assertEqual(set(status_groups), {"running", "completed", "blocked"})
+        self.assertTrue({"queued", "running", "draft"}.issubset(status_groups["running"]))
+        self.assertTrue({"completed", "archived", "ready", "published"}.issubset(status_groups["completed"]))
+        self.assertTrue(
+            {"waiting_approval", "needs_approval", "blocked", "failed", "error"}.issubset(status_groups["blocked"])
         )
         self.assertFalse(ui["propChatEnabled"])
         self.assertTrue(ui["taskCardsOpenDetails"])
         self.assertTrue(ui["reportCardsOpenDetails"])
+        self.assertTrue(ui["connectionRailDoesNotCreateTasks"])
+        self.assertTrue(ui["reportDetailsSupportTextMetricsAndImages"])
+
+    def test_ai_trade_council_uses_four_top_tabs_and_four_accessible_live_analysis_subtabs(self) -> None:
+        html = FRONTEND_INDEX_PATH.read_text(encoding="utf-8")
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+        connection_contract = json.loads(DASHBOARD_CONNECTION_PATH.read_text(encoding="utf-8"))
+        role_map = json.loads(
+            (PROJECT_ROOT / "contracts" / "props" / "property-role-map.json").read_text(encoding="utf-8")
+        )["properties"]
+        agents = json.loads(
+            (PROJECT_ROOT / "contracts" / "agents" / "agents.json").read_text(encoding="utf-8")
+        )["agents"]
+
+        self.assertFalse(connection_contract["dashboardUi"]["tabsEnabled"])
+        self.assertEqual(connection_contract["dashboardUi"]["defaultView"], "work_results")
+        self.assertIn("localTabs", connection_contract["profiles"]["left_analytics_console"])
+        self.assertEqual(
+            [item["id"] for item in connection_contract["profiles"]["left_analytics_console"]["localTabs"]],
+            [
+                "daily_summary",
+                "live_analysis",
+                "decision_pipeline",
+                "history",
+            ],
+        )
+        self.assertEqual(
+            connection_contract["profiles"]["left_analytics_console"]["defaultLiveAnalysisSubTab"],
+            "chart_overview",
+        )
+        self.assertEqual(
+            [
+                item["id"]
+                for item in connection_contract["profiles"]["left_analytics_console"]["liveAnalysisSubTabs"]
+            ],
+            ["chart_overview", "price_action", "technical_deep", "news_context"],
+        )
+        news_profile = connection_contract["profiles"]["left_signal_cube"]
+        self.assertEqual(
+            [item["id"] for item in news_profile["localTabs"]],
+            ["today", "pair_bias", "horizons", "schedule_history"],
+        )
+        self.assertEqual(news_profile["reportRoute"]["primaryReportType"], "fx_news_bias_report")
+        self.assertEqual(news_profile["reportRoute"]["targetPropId"], "left_signal_cube")
+        self.assertFalse(news_profile["liveTradingPolicy"]["enabled"])
+        self.assertFalse(news_profile["liveTradingPolicy"]["activationFromFrontend"])
+        self.assertTrue(news_profile["liveTradingPolicy"]["analysisIsNotTradeSignal"])
+        self.assertIn("localTabs", role_map["left_analytics_console"])
+        self.assertEqual(
+            [item["id"] for item in role_map["left_analytics_console"]["localTabs"]],
+            [
+                "daily_summary",
+                "live_analysis",
+                "decision_pipeline",
+                "history",
+            ],
+        )
+        self.assertEqual(
+            role_map["left_analytics_console"]["defaultLiveAnalysisSubTab"],
+            "chart_overview",
+        )
+        self.assertEqual(
+            [item["id"] for item in role_map["left_analytics_console"]["liveAnalysisSubTabs"]],
+            ["chart_overview", "price_action", "technical_deep", "news_context"],
+        )
+        self.assertEqual(
+            role_map["left_analytics_console"]["dashboardSections"],
+            ["daily_summary", "live_analysis", "decision_pipeline", "history"],
+        )
+        for contract_source in (
+            connection_contract["profiles"]["left_analytics_console"]["liveAnalysisSubTabs"],
+            role_map["left_analytics_console"]["liveAnalysisSubTabs"],
+        ):
+            sub_tabs = {item["id"]: item for item in contract_source}
+            self.assertEqual(sub_tabs["chart_overview"]["labelTh"], "ภาพรวมสภา AI")
+            self.assertIn("ผู้เชี่ยวชาญ 3 ตัว", sub_tabs["chart_overview"]["purpose"])
+            self.assertIn("สถานะการวิเคราะห์", sub_tabs["chart_overview"]["purpose"])
+            self.assertIn("มติล่าสุด", sub_tabs["chart_overview"]["purpose"])
+            self.assertIn("ไม่แสดงกราฟ", sub_tabs["chart_overview"]["purpose"])
+            self.assertEqual(
+                sub_tabs["price_action"]["labelTh"],
+                "กราฟเปล่าและโครงสร้างราคา",
+            )
+            for item in contract_source:
+                self.assertTrue(str(item.get("labelTh") or "").strip())
+                self.assertTrue(str(item.get("purpose") or "").strip())
+        self.assertEqual(role_map["left_analytics_console"]["defaultTab"], "daily_summary")
+        self.assertEqual(
+            [item["id"] for item in role_map["left_signal_cube"]["localTabs"]],
+            ["today", "pair_bias", "horizons", "schedule_history"],
+        )
+        self.assertEqual(role_map["left_signal_cube"]["primaryReportType"], "fx_news_bias_report")
+        self.assertEqual(role_map["left_signal_cube"]["executionPolicy"]["mode"], "analysis_only")
+        self.assertFalse(role_map["left_signal_cube"]["executionPolicy"]["liveTradingEnabled"])
+        self.assertEqual(role_map["left_analytics_console"]["primaryOwnerAgentId"], "manager")
+        manager = next(agent for agent in agents if agent["id"] == "manager")
+        self.assertIn("left_analytics_console", manager["allowed_surfaces"])
+
+        shared_tab_start = main.index("function setModalTab(")
+        shared_tab_end = main.find("\nfunction ", shared_tab_start + 1)
+        shared_tab_block = main[shared_tab_start:shared_tab_end if shared_tab_end >= 0 else len(main)]
+        self.assertIn('dashboard: ["results"]', shared_tab_block)
+        for nested_key in (
+            "daily_summary",
+            "live_analysis",
+            "chart_overview",
+            "price_action",
+            "technical_deep",
+            "news_context",
+            "decision_pipeline",
+            "history",
+        ):
+            self.assertNotIn(f'dashboard: ["{nested_key}"', shared_tab_block)
+
+        self.assertIn('const AI_TRADE_COUNCIL_PROP_ID = "left_analytics_console";', main)
+        self.assertNotIn('const AI_TRADE_COUNCIL_PROP_ID = "left_signal_cube";', main)
+        council_render_start = main.index("function renderSignalConsensusDashboard(")
+        council_render_end = main.find("\nfunction ", council_render_start + 1)
+        council_render_block = main[
+            council_render_start:council_render_end if council_render_end >= 0 else len(main)
+        ]
+        self.assertIn("subject.id !== AI_TRADE_COUNCIL_PROP_ID", council_render_block)
+
+        prop_render_start = main.index("function renderPropDashboard(")
+        prop_render_end = main.find("\nfunction ", prop_render_start + 1)
+        prop_render_block = main[prop_render_start:prop_render_end if prop_render_end >= 0 else len(main)]
+        self.assertIn("subject.id === AI_TRADE_COUNCIL_PROP_ID", prop_render_block)
+
+        dashboard_panel_start = html.index('id="modalDashboardPanel"')
+        signal_workspace_start = html.index('id="modalSignalConsensusWorkspace"')
+        kanban_panel_start = html.index('id="modalKanbanPanel"')
+        self.assertLess(dashboard_panel_start, signal_workspace_start)
+        self.assertLess(signal_workspace_start, kanban_panel_start)
+
+        def opening_tag(element_id: str) -> str:
+            match = re.search(
+                rf'<[a-z][a-z0-9-]*\b(?=[^>]*\bid="{re.escape(element_id)}")[^>]*>',
+                html,
+                re.IGNORECASE,
+            )
+            self.assertIsNotNone(match, f"missing element #{element_id}")
+            return match.group(0)
+
+        tablist = opening_tag("signalConsensusTabs")
+        self.assertIn('role="tablist"', tablist)
+        self.assertIn("aria-label=", tablist)
+
+        expected_top_tabs = (
+            ("signalConsensusDailyTab", "daily_summary", "signalConsensusDailyPanel", True),
+            ("signalConsensusLiveTab", "live_analysis", "signalConsensusLivePanel", False),
+            ("signalConsensusDecisionTab", "decision_pipeline", "signalConsensusDecisionPanel", False),
+            ("signalConsensusHistoryTab", "history", "signalConsensusHistoryPanel", False),
+        )
+        for tab_id, tab_key, panel_id, selected in expected_top_tabs:
+            with self.subTest(tab=tab_key):
+                tab = opening_tag(tab_id)
+                panel = opening_tag(panel_id)
+                self.assertIn('type="button"', tab)
+                self.assertIn('role="tab"', tab)
+                self.assertIn(f'data-signal-tab="{tab_key}"', tab)
+                self.assertIn(f'aria-controls="{panel_id}"', tab)
+                self.assertIn(f'aria-selected="{str(selected).lower()}"', tab)
+                self.assertIn(f'tabindex="{"0" if selected else "-1"}"', tab)
+                self.assertIn('role="tabpanel"', panel)
+                self.assertIn(f'aria-labelledby="{tab_id}"', panel)
+                self.assertIn(f'data-signal-panel="{tab_key}"', panel)
+                if selected:
+                    self.assertNotIn(" hidden", panel)
+                else:
+                    self.assertIn(" hidden", panel)
+
+        live_tablist = opening_tag("signalConsensusLiveTabs")
+        self.assertIn('role="tablist"', live_tablist)
+        self.assertIn("aria-label=", live_tablist)
+        self.assertLess(
+            html.index('id="signalConsensusLivePanel"'),
+            html.index('id="signalConsensusLiveTabs"'),
+        )
+        self.assertLess(
+            html.index('id="signalConsensusLiveTabs"'),
+            html.index('id="signalConsensusDecisionPanel"'),
+        )
+
+        expected_live_subtabs = (
+            (
+                "signalConsensusLiveOverviewTab",
+                "chart_overview",
+                "signalConsensusLiveOverviewPanel",
+                True,
+            ),
+            (
+                "signalConsensusPriceActionTab",
+                "price_action",
+                "signalConsensusPriceActionPanel",
+                False,
+            ),
+            (
+                "signalConsensusTechnicalTab",
+                "technical_deep",
+                "signalConsensusTechnicalPanel",
+                False,
+            ),
+            (
+                "signalConsensusNewsTab",
+                "news_context",
+                "signalConsensusNewsPanel",
+                False,
+            ),
+        )
+        for tab_id, tab_key, panel_id, selected in expected_live_subtabs:
+            with self.subTest(live_subtab=tab_key):
+                tab = opening_tag(tab_id)
+                panel = opening_tag(panel_id)
+                self.assertIn('type="button"', tab)
+                self.assertIn('role="tab"', tab)
+                self.assertIn(f'data-signal-live-tab="{tab_key}"', tab)
+                self.assertIn(f'aria-controls="{panel_id}"', tab)
+                self.assertIn(f'aria-selected="{str(selected).lower()}"', tab)
+                self.assertIn(f'tabindex="{"0" if selected else "-1"}"', tab)
+                self.assertIn('role="tabpanel"', panel)
+                self.assertIn(f'aria-labelledby="{tab_id}"', panel)
+                self.assertIn(f'data-signal-live-panel="{tab_key}"', panel)
+                if selected:
+                    self.assertNotIn(" hidden", panel)
+                else:
+                    self.assertIn(" hidden", panel)
+
+        self.assertEqual(html.count('data-signal-tab="'), 4)
+        self.assertEqual(html.count('data-signal-panel="'), 4)
+        self.assertEqual(html.count('data-signal-live-tab="'), 4)
+        self.assertEqual(html.count('data-signal-live-panel="'), 4)
+
+    def test_ai_trade_council_overview_is_three_character_cards_without_chart_controls(self) -> None:
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+
+        def function_block(signature: str) -> str:
+            start = main.index(signature)
+            end = main.find("\nfunction ", start + len(signature))
+            return main[start:end if end >= 0 else len(main)]
+
+        agent_ids_match = re.search(
+            r"const AI_TRADE_COUNCIL_AGENT_IDS = \[(.*?)\];",
+            main,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(agent_ids_match, "missing AI Trade Council character roster")
+        agent_ids = re.findall(r'"([a-z_]+)"', agent_ids_match.group(1))
+        self.assertEqual(
+            agent_ids,
+            ["optimization_agent", "backtest_analyst", "codex_mcp_operator"],
+        )
+
+        agent_views = function_block("function signalAgentViews(")
+        self.assertEqual(
+            re.findall(r'agentId:\s*"([a-z_]+)"', agent_views),
+            agent_ids,
+            "the overview must resolve exactly the three council characters",
+        )
+
+        overview = function_block("function renderSignalLivePanel(report = {})")
+        card = function_block("function createSignalCouncilOverviewCard(view)")
+        self.assertIn("const views = signalAgentViews(report, runtime);", overview)
+        self.assertIn("signal-council-overview-grid", overview)
+        self.assertIn("data-signal-agent-grid", overview)
+        self.assertIn(
+            "views.forEach((view) => agentGrid?.appendChild(createSignalCouncilOverviewCard(view)))",
+            overview,
+        )
+        self.assertIn("signal-council-agent-card", card)
+        self.assertIn("createSignalAgentSprite(view", card)
+        self.assertIn("card.dataset.workState", card)
+
+        for forbidden_anchor in (
+            "data-signal-chart",
+            "signal-chart-controls",
+            "data-signal-display-bars",
+            "data-signal-analysis-bars",
+            "data-signal-overlay",
+            "data-signal-indicator-filter",
+            "data-signal-core20-grid",
+        ):
+            with self.subTest(forbidden_overview_anchor=forbidden_anchor):
+                self.assertNotIn(forbidden_anchor, overview)
+
+        price_action = function_block("function renderSignalPriceActionDeepPanel()")
+        self.assertIn('canvas.dataset.signalDeepPriceChart = "";', price_action)
+
+        daily = function_block("function renderSignalDailyPanel(report = {})")
+        self.assertIn("signal-daily-team-grid--hero", daily)
+        self.assertIn(
+            "team?.appendChild(createSignalCouncilOverviewCard(view));",
+            daily,
+            "daily refreshes must keep the same full-size council character cards",
+        )
+        self.assertNotIn('card.className = "signal-daily-agent";', daily)
+
+        analyze = function_block("async function runAiTradeCouncilAnalysis(snapshotId = \"\")")
+        self.assertNotIn(
+            'state.modal.signalTab = "decision_pipeline";',
+            analyze,
+            "analysis must preserve the tab selected by the user",
+        )
+
+    def test_ai_trade_council_top_and_live_subtabs_have_keyboard_and_aria_state_hooks(self) -> None:
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "function setSignalConsensusTab(",
+            main,
+            "AI Trade Council nested tabs need a dedicated state synchronizer",
+        )
+        tab_state_start = main.index("function setSignalConsensusTab(")
+        tab_state_end = main.find("\nfunction ", tab_state_start + 1)
+        tab_state_block = main[tab_state_start:tab_state_end if tab_state_end >= 0 else len(main)]
+        self.assertIn('setAttribute("aria-selected"', tab_state_block)
+        self.assertIn(".tabIndex =", tab_state_block)
+        self.assertIn(".hidden =", tab_state_block)
+        self.assertIn(".classList.toggle(", tab_state_block)
+        self.assertIn(".focus()", tab_state_block)
+
+        keyboard_match = re.search(
+            r'els\.signalConsensusTabs\??\.addEventListener\("keydown"',
+            main,
+        )
+        self.assertIsNotNone(keyboard_match, "AI Trade Council tablist needs its own keyboard handler")
+        keyboard_block = main[keyboard_match.start():keyboard_match.start() + 2600]
+        for key in ("ArrowLeft", "ArrowRight", "Home", "End"):
+            with self.subTest(key=key):
+                self.assertIn(f'"{key}"', keyboard_block)
+        self.assertIn("event.preventDefault()", keyboard_block)
+        self.assertIn("setSignalConsensusTab(", keyboard_block)
+        self.assertIn("{ focus: true }", keyboard_block)
+
+        click_match = re.search(
+            r'els\.signalConsensusTabs\??\.addEventListener\("click"',
+            main,
+        )
+        self.assertIsNotNone(click_match, "AI Trade Council tabs need a click handler")
+
+        self.assertIn(
+            "function setSignalLiveAnalysisTab(",
+            main,
+            "Live Analysis sub-tabs need a dedicated state synchronizer",
+        )
+        live_state_start = main.index("function setSignalLiveAnalysisTab(")
+        live_state_end = main.find("\nfunction ", live_state_start + 1)
+        live_state_block = main[
+            live_state_start:live_state_end if live_state_end >= 0 else len(main)
+        ]
+        self.assertIn('querySelectorAll("[data-signal-live-tab]")', live_state_block)
+        self.assertIn('setAttribute("aria-selected"', live_state_block)
+        self.assertIn(".tabIndex =", live_state_block)
+        self.assertIn(".hidden =", live_state_block)
+        self.assertIn(".classList.toggle(", live_state_block)
+        self.assertIn(".focus()", live_state_block)
+
+        live_keyboard_match = re.search(
+            r'els\.signalConsensusLiveTabs\??\.addEventListener\("keydown"',
+            main,
+        )
+        self.assertIsNotNone(
+            live_keyboard_match,
+            "Live Analysis sub-tablist needs its own keyboard handler",
+        )
+        live_keyboard_block = main[
+            live_keyboard_match.start():live_keyboard_match.start() + 2600
+        ]
+        for key in ("ArrowLeft", "ArrowRight", "Home", "End"):
+            with self.subTest(live_subtab_key=key):
+                self.assertIn(f'"{key}"', live_keyboard_block)
+        self.assertIn("event.preventDefault()", live_keyboard_block)
+        self.assertIn("SIGNAL_LIVE_ANALYSIS_TABS", live_keyboard_block)
+        self.assertIn("setSignalLiveAnalysisTab(", live_keyboard_block)
+        self.assertIn("{ focus: true }", live_keyboard_block)
+
+        live_click_match = re.search(
+            r'els\.signalConsensusLiveTabs\??\.addEventListener\("click"',
+            main,
+        )
+        self.assertIsNotNone(
+            live_click_match,
+            "Live Analysis sub-tabs need a click handler",
+        )
+
+    def test_ai_trade_council_and_auto_trading_status_routes_do_not_cross(self) -> None:
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+        orchestration = json.loads(
+            (PROJECT_ROOT / "contracts" / "orchestration" / "orchestration-contract.json")
+            .read_text(encoding="utf-8")
+        )
+        routing_rules = orchestration["managerAutoDelegation"]["specialistRules"]
+        council_rule = next(
+            item for item in routing_rules
+            if item["id"] == "ai_trade_council"
+        )
+        status_rule = next(
+            item for item in routing_rules
+            if item["id"] == "ea_runtime_status"
+        )
+        self.assertEqual(council_rule["agentId"], "manager")
+        self.assertEqual(status_rule["agentId"], "vps_watch")
+        self.assertEqual(council_rule["targetPropId"], "left_analytics_console")
+        self.assertEqual(status_rule["targetPropId"], "left_analytics_console")
+        self.assertEqual(council_rule["reportType"], "ai_trade_council_report")
+        self.assertEqual(status_rule["reportType"], "auto_trading_status_report")
+        self.assertIn("ai trade council", council_rule["keywords"])
+        self.assertIn("auto trade status", status_rule["keywords"])
+        self.assertLess(routing_rules.index(status_rule), routing_rules.index(council_rule))
+        self.assertEqual(
+            self.bridge.pick_target_for_task("check auto trade status and terminal status"),
+            "left_analytics_console",
+        )
+        self.assertEqual(
+            self.bridge.pick_target_for_task("ask AI Trade Council for a consensus vote"),
+            "left_analytics_console",
+        )
+
+        target_start = main.index("function pickTargetForTask(")
+        target_end = main.find("\nfunction ", target_start + 1)
+        target_block = main[target_start:target_end if target_end >= 0 else len(main)]
+        status_target = (
+            'if (hasTaskKeyword(lower, taskKeywords.autoTradingStatus)) '
+            'return AI_TRADE_COUNCIL_PROP_ID;'
+        )
+        council_target = (
+            "if (hasTaskKeyword(lower, taskKeywords.autoTradeCouncil)) "
+            "return AI_TRADE_COUNCIL_PROP_ID;"
+        )
+        self.assertIn(status_target, target_block)
+        self.assertIn(council_target, target_block)
+        self.assertLess(target_block.index(status_target), target_block.index(council_target))
+
+        agent_start = main.index("function pickAgentForTask(")
+        agent_end = main.find("\nfunction ", agent_start + 1)
+        agent_block = main[agent_start:agent_end if agent_end >= 0 else len(main)]
+        status_agent = (
+            'if (hasTaskKeyword(lower, taskKeywords.autoTradingStatus)) '
+            'return "vps_watch";'
+        )
+        council_agent = (
+            'if (hasTaskKeyword(lower, taskKeywords.autoTradeCouncil)) '
+            'return "manager";'
+        )
+        self.assertIn(status_agent, agent_block)
+        self.assertIn(council_agent, agent_block)
+        self.assertLess(agent_block.index(status_agent), agent_block.index(council_agent))
+
+    def test_ai_trade_council_terminal_detection_never_claims_adapter_or_live_trading_ready(self) -> None:
+        fake_bridge = {
+            "mode": "Codex Runner Ready",
+            "status": "guarded",
+            "codex": {"status": "ready"},
+            "mcp": {"status": "config_present", "configPresent": True},
+            "time": "2026-07-23T00:00:00+00:00",
+        }
+        terminals = self.bridge.metatrader_status_read_model(
+            {"mt4": 1, "mt5": 1},
+            {"supported": True, "mt4": 1, "mt5": 1},
+        )
+        originals = {
+            "metatrader_snapshot_read_model": self.bridge.metatrader_snapshot_read_model,
+            "mt4_trade_gateway_status_read_model": self.bridge.mt4_trade_gateway_status_read_model,
+        }
+        try:
+            self.bridge.metatrader_snapshot_read_model = lambda prop_id: (
+                self.bridge._empty_metatrader_snapshot_read_model(
+                    prop_id,
+                    "not_selected",
+                    "selected_terminal_missing",
+                )
+            )
+            self.bridge.mt4_trade_gateway_status_read_model = lambda: (
+                self.bridge._empty_mt4_trade_gateway_status(
+                    status="not_selected",
+                    reason_code="selected_mt4_terminal_missing",
+                )
+            )
+            checklist = self.bridge.dashboard_connection_checklist(
+                "left_analytics_console",
+                bridge=fake_bridge,
+                quota={"ok": True, "status": "ready", "primary": {"usedPercent": 15, "remainingPercent": 85}},
+                terminals=terminals,
+            )
+        finally:
+            for name, value in originals.items():
+                setattr(self.bridge, name, value)
+        items = {item["id"]: item for item in checklist["items"]}
+
+        self.assertEqual(items["mt4_terminal"]["status"], "detected")
+        self.assertEqual(items["mt5_terminal"]["status"], "detected")
+        self.assertFalse(items["mt4_terminal"]["adapterReady"])
+        self.assertFalse(items["mt5_terminal"]["adapterReady"])
+        self.assertEqual(items["mt4_terminal"]["executionAdapterStatus"], "coming_soon")
+        self.assertEqual(items["mt5_terminal"]["executionAdapterStatus"], "coming_soon")
+        self.assertEqual(items["trading_state_adapter"]["status"], "not_selected")
+        self.assertEqual(items["ai_trader_ensemble"]["status"], "waiting_snapshot")
+        self.assertEqual(items["mt4_trade_gateway"]["status"], "not_selected")
+        self.assertEqual(items["live_trading"]["status"], "disabled")
+        self.assertEqual(checklist["overallStatus"], "needs_attention")
+        self.assertFalse(checklist["metatraderSelection"]["adapterReady"])
+
+        role_map = json.loads(
+            (PROJECT_ROOT / "contracts" / "props" / "property-role-map.json").read_text(encoding="utf-8")
+        )["properties"]
+        self.assertIn("executionPolicy", role_map["left_analytics_console"])
+        execution_policy = role_map["left_analytics_console"]["executionPolicy"]
+        self.assertEqual(execution_policy["mode"], "guarded_trade_gateway")
+        self.assertFalse(execution_policy["liveTradingEnabled"])
+        self.assertEqual(execution_policy["orderSubmissionEnabled"], "ea_mode_only")
+        self.assertFalse(execution_policy["frontendMayEnableExecution"])
+        self.assertFalse(execution_policy["aiMaySetLotOrRisk"])
+        self.assertEqual(execution_policy["fixedLotSource"], "mt4_ea_input_only")
+        self.assertEqual(execution_policy["minimumAutomaticTimeframe"], "M5")
+        self.assertEqual(execution_policy["defaultGatewayMode"], "shadow")
+
+        report_contract = json.loads(
+            (PROJECT_ROOT / "contracts" / "reports" / "report-contract.json").read_text(encoding="utf-8")
+        )
+        council_schema = report_contract["typed_report_schemas"]["prop_report"]["properties"]["aiTradeCouncil"]
+        self.assertEqual(council_schema["scope"], "left_analytics_console only")
+        self.assertNotIn("left_signal_cube", council_schema["scope"])
+        self.assertEqual(council_schema["schemaVersion"], "ai-trade-council-v2")
+        self.assertEqual(
+            council_schema["tabOrder"],
+            ["dailySummary", "liveAnalysis", "decisionPipeline", "history"],
+        )
+        for section in ("runtimeTruth", "dailySummary", "chartSnapshot", "analysisReadiness", "liveAnalysis", "decisionPipeline", "history"):
+            self.assertIn(section, council_schema)
+        self.assertFalse(council_schema["runtimeTruth"]["terminalDetection"]["adapterReady"])
+        self.assertFalse(council_schema["runtimeTruth"]["liveTradingEnabled"])
+        self.assertFalse(council_schema["runtimeTruth"]["liveOrderExecutionAvailable"])
+        self.assertEqual(
+            council_schema["decisionPipeline"]["sourceScope"],
+            "exact_analytics_console_mission_routing",
+        )
+        self.assertEqual(
+            council_schema["history"]["sourceScope"],
+            "exact_analytics_console_linked_reports_only",
+        )
+        self.assertFalse(council_schema["history"]["memoryIncluded"])
+        self.assertFalse(council_schema["history"]["meetingsIncluded"])
+        self.assertGreaterEqual(len(council_schema["truthRules"]), 5)
+
+        tool_contract = json.loads(
+            (PROJECT_ROOT / "contracts" / "tools" / "tool-permission-contract.json").read_text(encoding="utf-8")
+        )
+        live_tool = next(tool for tool in tool_contract["tools"] if tool["id"] == "live_trading")
+        self.assertEqual(live_tool["adapterStatus"], "disabled")
+        self.assertFalse(live_tool["realExecutionAvailable"])
+        self.assertFalse(live_tool["autoRunnable"])
+
+    def test_ai_trade_council_backend_payload_is_exclusive_to_analytics_console(self) -> None:
+        fake_bridge = {
+            "mode": "Codex Runner Ready",
+            "status": "guarded",
+            "codex": {"status": "ready"},
+            "mcp": {"status": "config_present", "configPresent": True},
+            "time": "2026-07-29T00:00:00+00:00",
+        }
+        fake_checklist = {
+            "overallStatus": "partial",
+            "checkedAt": "2026-07-29T00:00:00Z",
+            "metatraderSelection": {
+                "candidates": [],
+                "selectedCandidate": None,
+                "adapterReady": False,
+            },
+            "items": [
+                {"id": "mt4_terminal", "status": "not_found"},
+                {"id": "mt5_terminal", "status": "not_found"},
+                {"id": "trading_state_adapter", "status": "coming_soon", "adapterStatus": "coming_soon"},
+                {"id": "ai_trader_ensemble", "status": "coming_soon", "adapterStatus": "coming_soon"},
+                {"id": "risk_policy", "status": "ready", "adapterStatus": "implemented"},
+                {"id": "live_trading", "status": "disabled", "adapterStatus": "disabled"},
+            ],
+        }
+        reports = [
+            {
+                "id": "report-analytics-council",
+                "type": "auto_trading_status_report",
+                "title": "Analytics Council report",
+                "summary": "Read-only analytics result",
+                "status": "ready",
+                "linkedPropId": "left_analytics_console",
+            },
+            {
+                "id": "report-signal-cube",
+                "type": "auto_trading_status_report",
+                "title": "Signal cube report",
+                "summary": "Must not enter Council history",
+                "status": "ready",
+                "linkedPropId": "left_signal_cube",
+            },
+        ]
+        runtime_sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(runtime_sandbox.cleanup)
+        isolated_runtime = Path(runtime_sandbox.name) / "runtime"
+        originals = {
+            "RUNTIME_DIR": self.bridge.RUNTIME_DIR,
+            "AUDIT_PATH": self.bridge.AUDIT_PATH,
+            "load_missions": self.bridge.load_missions,
+            "load_agent_events": self.bridge.load_agent_events,
+            "load_runtime_reports": self.bridge.load_runtime_reports,
+            "load_meeting_records": self.bridge.load_meeting_records,
+            "search_memory_items": self.bridge.search_memory_items,
+            "bridge_status": self.bridge.bridge_status,
+            "capability_registry": self.bridge.capability_registry,
+            "dashboard_connection_checklist": self.bridge.dashboard_connection_checklist,
+            "metatrader_snapshot_read_model": self.bridge.metatrader_snapshot_read_model,
+            "mt4_trade_gateway_status_read_model": self.bridge.mt4_trade_gateway_status_read_model,
+            "load_ai_trade_council_automation_store": self.bridge.load_ai_trade_council_automation_store,
+        }
+        try:
+            self.bridge.RUNTIME_DIR = isolated_runtime
+            self.bridge.AUDIT_PATH = isolated_runtime / "bridge-audit.jsonl"
+            self.bridge.load_missions = lambda: []
+            self.bridge.load_agent_events = lambda limit=120: []
+            self.bridge.load_runtime_reports = lambda limit=120: reports
+            self.bridge.load_meeting_records = lambda limit=120: []
+            self.bridge.search_memory_items = lambda query="", limit=6: []
+            self.bridge.bridge_status = lambda: fake_bridge
+            self.bridge.capability_registry = lambda status: {
+                "bridge": status,
+                "capabilities": [],
+            }
+            self.bridge.dashboard_connection_checklist = (
+                lambda prop_id, bridge=None: fake_checklist
+            )
+            self.bridge.metatrader_snapshot_read_model = lambda prop_id: (
+                self.bridge._empty_metatrader_snapshot_read_model(
+                    prop_id,
+                    "not_selected",
+                    "selected_terminal_missing",
+                )
+            )
+            self.bridge.mt4_trade_gateway_status_read_model = lambda: (
+                self.bridge._empty_mt4_trade_gateway_status(
+                    status="not_selected",
+                    reason_code="selected_mt4_terminal_missing",
+                )
+            )
+            self.bridge.load_ai_trade_council_automation_store = (
+                lambda: self.bridge._ai_trade_council_automation_default_store()
+            )
+
+            analytics_report = self.bridge.prop_report("left_analytics_console")
+            signal_cube_report = self.bridge.prop_report("left_signal_cube")
+        finally:
+            for name, value in originals.items():
+                setattr(self.bridge, name, value)
+
+        self.assertIn("aiTradeCouncil", analytics_report)
+        self.assertNotIn("aiTradeCouncil", signal_cube_report)
+        council = analytics_report["aiTradeCouncil"]
+        self.assertEqual(council["schemaVersion"], "ai-trade-council-v2")
+        self.assertEqual(
+            set(council),
+            {
+                "schemaVersion",
+                "tabOrder",
+                "runtimeTruth",
+                "dailySummary",
+                "chartSnapshot",
+                "analysisReadiness",
+                "autoAnalysis",
+                "tradeGateway",
+                "liveAnalysis",
+                "decisionPipeline",
+                "history",
+            },
+        )
+        runtime_truth = council["runtimeTruth"]
+        self.assertEqual(runtime_truth["scope"], "terminal_detection_only")
+        self.assertFalse(runtime_truth["terminalDetection"]["adapterReady"])
+        self.assertEqual(council["liveAnalysis"]["dataScope"], "terminal_detection_only")
+        self.assertFalse(council["tradeGateway"]["connected"])
+        self.assertFalse(runtime_truth["tradingStateAdapter"]["available"])
+        self.assertEqual(runtime_truth["tradingStateAdapter"]["status"], "not_selected")
+        self.assertFalse(runtime_truth["ensemble"]["available"])
+        self.assertEqual(runtime_truth["ensemble"]["status"], "coming_soon")
+        self.assertFalse(runtime_truth["tradingKillSwitchAvailable"])
+        self.assertFalse(runtime_truth["liveTradingEnabled"])
+        self.assertEqual(
+            runtime_truth["liveTradingStatus"],
+            "selected_mt4_terminal_missing",
+        )
+        self.assertFalse(runtime_truth["liveOrderExecutionAvailable"])
+        automation = council["autoAnalysis"]
+        self.assertEqual(
+            automation["config"]["triggerMode"],
+            "last_closed_candle_time_change",
+        )
+        self.assertEqual(automation["config"]["pollSeconds"], 5)
+        self.assertEqual(automation["config"]["settleSeconds"], 10)
+        self.assertFalse(automation["config"]["enabled"])
+
+        live_analysis = council["liveAnalysis"]
+        self.assertFalse(live_analysis["available"])
+        self.assertEqual(live_analysis["status"], "not_selected")
+        self.assertEqual(
+            live_analysis["positionsSummary"],
+            {
+                "available": False,
+                "count": None,
+                "items": None,
+                "reasonCode": "selected_terminal_missing",
+            },
+        )
+        self.assertFalse(live_analysis["latestSignal"]["available"])
+        self.assertIsNone(live_analysis["latestSignal"]["direction"])
+        self.assertFalse(live_analysis["consensus"]["available"])
+        self.assertIsNone(live_analysis["consensus"]["decision"])
+        self.assertFalse(council["history"]["memoryIncluded"])
+        self.assertFalse(council["history"]["meetingsIncluded"])
+        self.assertEqual(
+            council["decisionPipeline"]["sourceScope"],
+            "exact_analytics_console_mission_routing",
+        )
+        self.assertEqual(
+            council["history"]["sourceScope"],
+            "exact_analytics_console_linked_reports_only",
+        )
+        council_history_ids = {
+            item["id"] for item in council["history"]["items"]
+        }
+        self.assertEqual(council_history_ids, {"report-analytics-council"})
+        self.assertNotIn("report-signal-cube", council_history_ids)
 
     def test_every_dashboard_has_backend_owned_connection_profile(self) -> None:
         roles = json.loads((PROJECT_ROOT / "contracts" / "props" / "property-role-map.json").read_text(encoding="utf-8"))["properties"]
@@ -176,12 +1324,27 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.assertFalse(profile["operation"]["scheduleDefaultEnabled"])
                 self.assertEqual(profile["reportRoute"]["targetPropId"], prop_id)
                 for item in profile["connections"]:
-                    self.assertIn(item["adapterStatus"], {"implemented", "runtime_detected", "coming_soon", "disabled"})
+                    self.assertIn(
+                        item["adapterStatus"],
+                        {
+                            "implemented",
+                            "implemented_read_only_snapshot",
+                            "implemented_unified_ea_snapshot",
+                            "implemented_guarded_manual",
+                            "implemented_guarded_closed_bar",
+                            "source_ready_requires_ea_install",
+                            "implemented_in_trade_gateway",
+                            "ea_local_arm_required",
+                            "runtime_detected",
+                            "coming_soon",
+                            "disabled",
+                        },
+                    )
                     if item["adapterStatus"] in {"coming_soon", "disabled"}:
                         self.assertNotEqual(item["adapterStatus"], "implemented")
 
         self.assertTrue({"partial", "needs_attention"}.issubset(set(contract["statusVocabulary"])))
-        mt_any_of_dashboards = {"right_server_racks", "left_analytics_console", "terminal_workstation"}
+        mt_any_of_dashboards = {"right_server_racks", "right_tool_console", "left_analytics_console"}
         for prop_id in mt_any_of_dashboards:
             profile = profiles[prop_id]
             connection_ids = {item["id"] for item in profile["connections"]}
@@ -196,12 +1359,12 @@ class RuntimeIntegrityTests(unittest.TestCase):
         rules = {item["id"]: item for item in orchestration["managerAutoDelegation"]["specialistRules"]}
         reports = json.loads((PROJECT_ROOT / "contracts" / "reports" / "report-contract.json").read_text(encoding="utf-8"))["report_targets"]
         self.assertEqual(rules["backtest_review"]["targetPropId"], "left_analytics_console")
-        self.assertEqual(rules["optimization_review"]["targetPropId"], "right_server_racks")
+        self.assertEqual(rules["optimization_review"]["targetPropId"], "right_tool_console")
         self.assertEqual(rules["vps_status"]["targetPropId"], "right_status_crystals")
-        self.assertEqual(agent_map["optimization_agent"]["visual"]["default_target"], "right_server_racks")
+        self.assertEqual(agent_map["optimization_agent"]["visual"]["default_target"], "right_tool_console")
         self.assertEqual(agent_map["vps_watch"]["visual"]["default_target"], "right_status_crystals")
         self.assertIn("left_analytics_console", reports["backtest_report"])
-        self.assertIn("right_server_racks", reports["optimization_report"])
+        self.assertIn("right_tool_console", reports["optimization_report"])
         self.assertIn("right_status_crystals", reports["vps_report"])
 
     def test_primary_report_routes_agent_homes_and_specialist_routes_are_semantically_aligned(self) -> None:
@@ -217,10 +1380,10 @@ class RuntimeIntegrityTests(unittest.TestCase):
             "ceo": "mission_strategy_table",
             "ea_developer": "terminal_workstation",
             "backtest_analyst": "left_analytics_console",
-            "optimization_agent": "right_server_racks",
+            "optimization_agent": "right_tool_console",
             "vps_watch": "right_status_crystals",
-            "telegram_ops": "right_tool_console",
-            "risk_guard": "left_audit_crystals",
+            "telegram_ops": "mission_strategy_table",
+            "risk_guard": "mission_strategy_table",
             "codex_mcp_operator": "codex_mcp_portal",
             "mission_archivist": "left_server_racks",
         }
@@ -248,11 +1411,42 @@ class RuntimeIntegrityTests(unittest.TestCase):
 
         self.assertEqual(
             role_map["right_server_racks"]["acceptedReportTypes"],
-            ["optimization_report", "dashboard_connection_report", "terminal_discovery_report", "terminal_selection_report"],
+            [
+                "ea_build_report",
+                "ea_compile_report",
+                "code_change_report",
+                "trading_system_research_report",
+                "trading_system_discovery_report",
+                "dashboard_connection_report",
+                "terminal_discovery_report",
+                "terminal_selection_report",
+            ],
+        )
+        self.assertEqual(
+            role_map["right_tool_console"]["acceptedReportTypes"],
+            [
+                "ea_experiment_report",
+                "backtest_report",
+                "optimization_report",
+                "ea_discovery_report",
+                "ea_build_report",
+                "ea_compile_report",
+                "dashboard_connection_report",
+                "terminal_discovery_report",
+                "terminal_selection_report",
+            ],
         )
         self.assertEqual(
             role_map["left_analytics_console"]["acceptedReportTypes"],
-            ["backtest_report", "backtest_optimization_report", "dashboard_connection_report", "terminal_discovery_report", "terminal_selection_report"],
+            [
+                "ai_trade_council_report",
+                "auto_trading_status_report",
+                "backtest_report",
+                "backtest_optimization_report",
+                "dashboard_connection_report",
+                "terminal_discovery_report",
+                "terminal_selection_report",
+            ],
         )
 
     def test_terminal_target_selection_contract_is_fail_closed_and_frontend_safe(self) -> None:
@@ -263,7 +1457,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         role_map = json.loads((contracts / "props" / "property-role-map.json").read_text(encoding="utf-8"))["properties"]
         bridge_contract = json.loads((contracts / "bridge" / "bridge-contract.json").read_text(encoding="utf-8"))
 
-        expected_props = {"right_server_racks", "left_analytics_console", "terminal_workstation", "left_signal_cube"}
+        expected_props = {"right_server_racks", "right_tool_console", "left_analytics_console"}
         selection = connection_contract["terminalTargetSelection"]
         self.assertEqual(selection["intent"], "select_metatrader_target")
         self.assertEqual(selection["endpoint"], "POST /api/integrations/metatrader/select")
@@ -295,6 +1489,21 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertFalse(selection["selectionSubstateIsOverallStatus"])
         self.assertFalse(selection["selectionIsConnection"])
         self.assertFalse(selection["selectionEnablesLiveTrading"])
+        channel_ui = selection["eaSnapshotChannelUi"]
+        self.assertEqual(
+            channel_ui["sourcePriority"],
+            [
+                "metatraderReadOnly.installPreparation.snapshotChannel",
+                "aiTradeCouncil.tradeGateway.selectedCandidateId",
+                "metatraderReadOnly.selectedCandidateId",
+                "connectionChecklist.metatraderSelection.selectedCandidate.candidateId",
+            ],
+        )
+        self.assertEqual(channel_ui["requiredPrefix"], "mtc-")
+        self.assertEqual(channel_ui["displayWhen"], "channel_available_or_missing_guidance")
+        self.assertTrue(channel_ui["displayIndependentOfSnapshotAvailability"])
+        self.assertTrue(channel_ui["copyAction"])
+        self.assertFalse(channel_ui["httpPortIsChannel"])
 
         tools = {tool["id"]: tool for tool in tool_contract["tools"]}
         select_tool = tools["terminal_target_select"]
@@ -346,7 +1555,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         for forbidden in ("778899", "Broker-Live", "D:\\MT5", "9876"):
             self.assertNotIn(forbidden, free_text_serialized)
 
-    def test_visual_routing_matches_optimization_and_vps_contracts(self) -> None:
+    def test_visual_routing_matches_builder_experiment_and_vps_contracts(self) -> None:
         main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
         optimization_start = main.index('id: "optimization_agent"')
         vps_start = main.index('id: "vps_watch"', optimization_start)
@@ -357,13 +1566,18 @@ class RuntimeIntegrityTests(unittest.TestCase):
         target_end = main.index("\nfunction pickAgentForTask(text)", target_start)
         target_block = main[target_start:target_end]
 
-        self.assertIn('right_server_racks: "ตู้ Optimization Lab MT4/MT5"', main)
-        self.assertIn('right_status_crystals: "คริสตัลสถานะ VPS และภาพรวม HQ"', main)
-        self.assertIn('defaultTarget: "right_server_racks"', optimization_block)
-        self.assertIn('homeTarget: "right_server_racks"', optimization_block)
+        self.assertIn('right_server_racks: "โรงงานสร้าง EA และ Indicator"', main)
+        self.assertIn('right_tool_console: "ห้องทดลอง EA"', main)
+        self.assertIn('terminal_workstation: "EA Development Studio"', main)
+        self.assertIn('left_audit_crystals: "Indicator Scout"', main)
+        self.assertIn('left_signal_cube: "ข่าวรายวันและแนวโน้ม Forex"', main)
+        self.assertIn('right_status_crystals: "สถานะ VPS/HQ และตั้งค่า Agent"', main)
+        self.assertIn('defaultTarget: "right_tool_console"', optimization_block)
+        self.assertIn('homeTarget: "right_tool_console"', optimization_block)
         self.assertIn('defaultTarget: "right_status_crystals"', vps_block)
         self.assertIn('homeTarget: "right_status_crystals"', vps_block)
-        self.assertIn('taskKeywords.optimization)) return "right_server_racks"', target_block)
+        self.assertIn('taskKeywords.optimization)) return "right_tool_console"', target_block)
+        self.assertIn('taskKeywords.eaBuild)) return "right_server_racks"', target_block)
         self.assertIn('taskKeywords.vps)) return "right_status_crystals"', target_block)
 
         original_role_loader = self.bridge.load_property_role_map
@@ -535,16 +1749,16 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 candidate = discovered["candidates"][0]
                 results = [
                     self.bridge.select_metatrader_target("right_server_racks", candidate["candidateId"]),
-                    self.bridge.select_metatrader_target("terminal_workstation", candidate["candidateId"]),
+                    self.bridge.select_metatrader_target("right_tool_console", candidate["candidateId"]),
                 ]
 
-                for result, prop_id in zip(results, ("right_server_racks", "terminal_workstation")):
+                for result, prop_id in zip(results, ("right_server_racks", "right_tool_console")):
                     self.assertTrue(result["ok"])
                     self.assertEqual(result["status"], "completed")
                     self.assertEqual(result["selection"]["propId"], prop_id)
                     self.assertEqual(result["selection"]["status"], "selected")
                     self.assertEqual(result["selection"]["configurationStatus"], "configured")
-                    self.assertEqual(result["selection"]["adapterConnection"], "coming_soon")
+                    self.assertEqual(result["selection"]["adapterConnection"], "read_only_snapshot")
                     self.assertFalse(result["selection"]["adapterReady"])
                     self.assertEqual(set(result["selection"]["selectedCandidate"]), {"candidateId", "platform", "labelTh", "detected", "runningState"})
                     self.assertEqual(result["report"]["type"], "terminal_selection_report")
@@ -558,24 +1772,24 @@ class RuntimeIntegrityTests(unittest.TestCase):
                     )
                     self.assertEqual(selected_item["detectionStatus"], "detected")
                     self.assertEqual(selected_item["configurationStatus"], "configured")
-                    self.assertEqual(selected_item["executionAdapterStatus"], "coming_soon")
+                    self.assertEqual(selected_item["executionAdapterStatus"], "read_only_snapshot")
                     self.assertFalse(selected_item["adapterReady"])
 
                 persisted = json.loads((runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME).read_text(encoding="utf-8"))
-                self.assertEqual(set(persisted["selections"]), {"right_server_racks", "terminal_workstation"})
+                self.assertEqual(set(persisted["selections"]), {"right_server_racks", "right_tool_console"})
                 self.assertEqual(persisted["selections"]["right_server_racks"]["candidateId"], candidate["candidateId"])
-                self.assertEqual(persisted["selections"]["terminal_workstation"]["candidateId"], candidate["candidateId"])
+                self.assertEqual(persisted["selections"]["right_tool_console"]["candidateId"], candidate["candidateId"])
 
                 missions = self.bridge.load_missions()
                 self.assertEqual(len(missions), 2)
                 self.assertTrue(all(mission["toolId"] == "terminal_target_select" for mission in missions))
                 self.assertTrue(all(mission["status"] == "completed" for mission in missions))
                 reports = [report for report in self.bridge.load_runtime_reports() if report["type"] == "terminal_selection_report"]
-                self.assertEqual({report["linkedPropId"] for report in reports}, {"right_server_racks", "terminal_workstation"})
+                self.assertEqual({report["linkedPropId"] for report in reports}, {"right_server_racks", "right_tool_console"})
                 audit = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH)
                 selected_events = [item for item in audit if item.get("type") == "terminal.target_selected"]
-                self.assertEqual({item["dashboardId"] for item in selected_events}, {"right_server_racks", "terminal_workstation"})
-                self.assertTrue(all(item["adapterConnection"] == "coming_soon" and item["adapterReady"] is False for item in selected_events))
+                self.assertEqual({item["dashboardId"] for item in selected_events}, {"right_server_racks", "right_tool_console"})
+                self.assertTrue(all(item["adapterConnection"] == "read_only_snapshot" and item["adapterReady"] is False for item in selected_events))
 
                 serialized_public = json.dumps(results, ensure_ascii=False).lower()
                 self.assertNotIn(str(terminal_root).lower(), serialized_public)
@@ -610,12 +1824,22 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertEqual(items["mt5_terminal"]["status"], "detected")
         self.assertEqual(items["mt4_terminal"]["adapterStatus"], "runtime_detected")
         self.assertEqual(items["mt4_terminal"]["executionAdapterStatus"], "coming_soon")
-        self.assertEqual(items["optimization_adapter"]["status"], "coming_soon")
+        self.assertEqual(items["metaeditor_compile_adapter"]["status"], "coming_soon")
         self.assertEqual(checklist["connectionRequirements"]["anyOf"], ["mt4_terminal", "mt5_terminal"])
         self.assertTrue(checklist["connectionRequirements"]["anyOfSatisfied"])
         self.assertEqual(checklist["overallStatus"], "partial")
-        self.assertEqual(checklist["operationMode"]["aiEveryTwoHours"]["status"], "coming_soon")
+        self.assertEqual(checklist["operationMode"]["aiEveryTwoHours"]["status"], "not_required")
         self.assertFalse(checklist["operationMode"]["aiEveryTwoHours"]["enabled"])
+
+        experiment_checklist = self.bridge.dashboard_connection_checklist(
+            "right_tool_console",
+            bridge=fake_bridge,
+            quota={"ok": True, "status": "ready", "primary": {"usedPercent": 15, "remainingPercent": 85}},
+            terminals=terminals,
+        )
+        experiment_items = {item["id"]: item for item in experiment_checklist["items"]}
+        self.assertEqual(experiment_items["optimization_adapter"]["status"], "coming_soon")
+        self.assertEqual(experiment_items["strategy_tester_adapter"]["status"], "coming_soon")
 
     def test_mt_any_of_requirement_accepts_one_platform_and_rejects_none(self) -> None:
         fake_bridge = {
@@ -721,7 +1945,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.bridge.AGENT_EVENTS_PATH = runtime / "agent-events.jsonl"
                 self.bridge.RUNTIME_REPORTS_DIR = runtime / "reports"
                 self.bridge.metatrader_status = lambda force=False: terminal_state
-                result = self.bridge.run_metatrader_discovery("terminal_workstation")
+                result = self.bridge.run_metatrader_discovery("right_server_racks")
                 self.assertTrue(result["ok"])
                 self.assertEqual(result["status"], "completed")
                 self.assertTrue(result["missionId"].startswith("mission-"))
@@ -731,7 +1955,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.assertEqual(mission["status"], "completed")
                 reports = self.bridge.load_runtime_reports()
                 report = next(item for item in reports if item["linkedMissionId"] == mission["id"])
-                self.assertEqual(report["linkedPropId"], "terminal_workstation")
+                self.assertEqual(report["linkedPropId"], "right_server_racks")
                 allowed_report_statuses = set(
                     json.loads((PROJECT_ROOT / "contracts" / "reports" / "report-contract.json").read_text(encoding="utf-8"))["base_report_schema"]["status"].split("|")
                 )
@@ -759,7 +1983,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             (
                 "terminal_discovery",
                 "metatrader_status",
-                lambda: self.bridge.run_metatrader_discovery("terminal_workstation"),
+                lambda: self.bridge.run_metatrader_discovery("right_server_racks"),
                 "terminal.discovery_failed",
                 "terminal_discovery_failed",
             ),
@@ -953,6 +2177,100 @@ class RuntimeIntegrityTests(unittest.TestCase):
         save_end = main.index("\nfunction clearSessionSnapshot()", save_start)
         self.assertNotIn("codexRate", main[save_start:save_end])
 
+    def test_equipment_dashboard_keeps_connections_left_and_work_results_in_three_columns(self) -> None:
+        html = FRONTEND_INDEX_PATH.read_text(encoding="utf-8")
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+
+        connection_rail_start = html.index('id="modalDashboardConnectionRail"')
+        portrait_panel_end = html.index("</aside>", connection_rail_start)
+        dashboard_workspace_start = html.index('id="modalDashboardPanel"')
+        self.assertLess(connection_rail_start, portrait_panel_end)
+        self.assertLess(portrait_panel_end, dashboard_workspace_start)
+        self.assertNotIn('data-tab="connections"', html)
+        self.assertNotIn('data-tab="results" data-surfaces="dashboard"', html)
+
+        for element_id in (
+            "modalDashboardConnectionRail",
+            "modalDashboardWorkCount",
+            "modalDashboardFreshness",
+            "modalDashboardRunningCount",
+            "modalDashboardCompletedCount",
+            "modalDashboardBlockedCount",
+            "modalDashboardRunning",
+            "modalDashboardCompleted",
+            "modalDashboardBlocked",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+            self.assertIn(f'document.getElementById("{element_id}")', main)
+
+        self.assertEqual(html.count('class="dashboard-work-column"'), 3)
+        for state in ("running", "completed", "blocked"):
+            self.assertIn(f'data-state="{state}"', html)
+        self.assertIn("function renderDashboardWorkColumn(", main)
+        self.assertIn("function createDashboardReportCard(", main)
+        self.assertIn("function openDashboardResultDetail(", main)
+        self.assertIn("function appendDashboardMetricSection(", main)
+        self.assertIn("function appendDashboardVisualEvidence(", main)
+        work_state_start = main.index("function getDashboardWorkState(")
+        work_state_end = main.index("\nfunction getDashboardItemTime(", work_state_start)
+        work_state_block = main[work_state_start:work_state_end]
+        self.assertIn('["completed", "archived", "ready", "published"]', work_state_block)
+        self.assertIn(
+            '["waiting_approval", "needs_approval", "blocked", "failed", "error"]',
+            work_state_block,
+        )
+        self.assertIn('return "blocked"', work_state_block)
+        safe_url_start = main.index("function getSafeReportImageUrl(")
+        safe_url_end = main.index("\nfunction appendDashboardVisualEvidence(", safe_url_start)
+        safe_url_block = main[safe_url_start:safe_url_end]
+        self.assertIn("parsed.origin !== window.location.origin", safe_url_block)
+        self.assertIn(r"\/api\/reports\/", safe_url_block)
+        self.assertIn(r"\/attachments\/", safe_url_block)
+        self.assertNotIn(r"\/evidence\/", safe_url_block)
+
+    def test_scrollable_agent_and_dashboard_cards_keep_natural_height(self) -> None:
+        styles = FRONTEND_STYLES_PATH.read_text(encoding="utf-8")
+
+        def css_rule(selector: str) -> str:
+            start = styles.index(f"{selector} {{")
+            end = styles.index("\n}", start)
+            return styles[start:end]
+
+        agent_list_rule = css_rule(".agent-status-list")
+        self.assertIn("flex: 1 1 0;", agent_list_rule)
+        self.assertIn("grid-auto-rows: max-content;", agent_list_rule)
+        self.assertIn("align-content: start;", agent_list_rule)
+        self.assertIn("overflow-y: auto;", agent_list_rule)
+        self.assertIn("scrollbar-gutter: stable;", agent_list_rule)
+
+        agent_actions_rule = css_rule(".agent-status-actions button")
+        self.assertIn("min-height: 34px;", agent_actions_rule)
+        self.assertIn("white-space: normal;", agent_actions_rule)
+        self.assertNotIn("white-space: nowrap;", agent_actions_rule)
+
+        dashboard_list_rule = css_rule(".dashboard-work-column > .dashboard-list")
+        self.assertIn("grid-auto-rows: max-content;", dashboard_list_rule)
+        self.assertIn("align-content: start;", dashboard_list_rule)
+        self.assertIn("overflow-y: auto;", dashboard_list_rule)
+        self.assertIn("scrollbar-gutter: stable;", dashboard_list_rule)
+
+        dashboard_heading_rule = css_rule(".dashboard-workspace-heading")
+        self.assertIn("padding: 2px 52px 12px 2px;", dashboard_heading_rule)
+        self.assertIn("min-width: 0;", dashboard_heading_rule)
+
+        report_title_rule = css_rule(".dashboard-report-card > strong")
+        self.assertIn("-webkit-line-clamp: 2;", report_title_rule)
+        report_summary_rule = css_rule(
+            ".dashboard-report-card > span:not(.dashboard-report-card-topline):not(.dashboard-report-card-footer)"
+        )
+        self.assertIn("-webkit-line-clamp: 3;", report_summary_rule)
+
+        compact = styles[styles.index("@media (max-width: 900px)"):]
+        self.assertIn(".game-modal.dashboard-modal .game-modal-body", compact)
+        self.assertIn("grid-template-columns: minmax(0, 1fr);", compact)
+        self.assertIn("grid-template-rows: minmax(180px, 34%) minmax(0, 1fr);", compact)
+        self.assertIn("grid-template-columns: repeat(3, minmax(260px, 80vw));", compact)
+
     def test_frontend_dashboard_connection_controls_are_backend_intents_only(self) -> None:
         html = FRONTEND_INDEX_PATH.read_text(encoding="utf-8")
         main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
@@ -1000,11 +2318,13 @@ class RuntimeIntegrityTests(unittest.TestCase):
         for forbidden in ("candidate.path", "candidate.pid", "candidate.processId", "candidate.account", "candidate.broker", "candidate.status"):
             self.assertNotIn(forbidden, normalize_block)
 
-        render_start = main.index("function renderMetatraderSelection(subject, checklist, canDiscoverMetatrader)")
+        render_start = main.index("function renderMetatraderSelection(subject, checklist, canDiscoverMetatrader, report = null)")
         render_end = main.index("\nfunction renderDashboardConnectionPanel", render_start)
         render_block = main[render_start:render_end]
         self.assertIn("hidden = !canDiscoverMetatrader", render_block)
         self.assertIn("modalDashboardConfirmMetatrader.disabled", render_block)
+        self.assertIn("gatewayConnected && snapshotConnected", render_block)
+        self.assertIn("EA Gateway และข้อมูล Snapshot ของ Terminal นี้เชื่อมกับ Local Runner แล้ว", render_block)
 
         confirm_start = main.index("async function confirmMetatraderSelection(propId)")
         confirm_end = main.index("\nfunction isMetatraderDiscoveryIntent", confirm_start)
@@ -1024,10 +2344,11 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn("window.setTimeout(startMissionPolling, 0);", main)
         self.assertIn("function reconcileAgentMissionState()", main)
         self.assertIn("&& !agent.activeMissionId", main)
-        self.assertIn("structuredReportItems", main)
-        self.assertIn("capabilityDashboardItems", main)
-        self.assertIn("report?.meetings", main)
-        self.assertIn("report?.bridge", main)
+        self.assertIn("Array.isArray(report?.reports)", main)
+        self.assertIn("memoryCardsToMissionItems", main)
+        self.assertIn("getDashboardWorkState(item, kind)", main)
+        self.assertIn("createDashboardReportCard(item)", main)
+        self.assertIn("item.attachments", main)
         for status in ("queued", "running", "waiting_approval", "blocked", "completed", "failed", "archived"):
             self.assertIn(f".kanban-column.status-{status}", styles)
 
@@ -1063,6 +2384,71 @@ class RuntimeIntegrityTests(unittest.TestCase):
             self.assertIn(".agent-status-panel", responsive_block)
             self.assertIn(".today-work-panel", responsive_block)
 
+    def test_topbar_keeps_only_the_full_access_control(self) -> None:
+        html = FRONTEND_INDEX_PATH.read_text(encoding="utf-8")
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+        styles = FRONTEND_STYLES_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('id="operatorModeControl"', html)
+        self.assertIn('id="operatorModeButton"', html)
+        self.assertIn('id="operatorModePanel"', html)
+        self.assertIn('? "Full Access"', main)
+        self.assertIn('"เปิด Full Access"', main)
+
+        self.assertIn("@media (min-width: 1181px)", styles)
+        self.assertIn("right: calc(100% + 12px);", styles)
+        self.assertIn(
+            '.app-shell:has(.operator-mode-button[aria-expanded="true"]) .today-work-panel',
+            styles,
+        )
+
+        for removed_id in (
+            "fitModeButton",
+            "agentRouteButton",
+            "agentMeetingButton",
+            "resetButton",
+        ):
+            self.assertNotIn(f'id="{removed_id}"', html)
+            self.assertNotIn(f'document.getElementById("{removed_id}")', main)
+            self.assertNotIn(f"els.{removed_id}.addEventListener", main)
+
+    def test_topbar_popovers_stay_above_the_depth_sorted_room(self) -> None:
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+        styles = FRONTEND_STYLES_PATH.read_text(encoding="utf-8")
+
+        def css_integer(variable: str) -> int:
+            match = re.search(rf"{re.escape(variable)}:\s*(\d+);", styles)
+            self.assertIsNotNone(match, f"Missing CSS layer variable: {variable}")
+            return int(match.group(1))
+
+        def css_block(selector: str) -> str:
+            start = styles.index(f"{selector} {{")
+            return styles[start:styles.index("}", start) + 1]
+
+        scene_layer = css_integer("--z-office-scene")
+        topbar_layer = css_integer("--z-office-topbar")
+        popover_layer = css_integer("--z-office-popover")
+        modal_backdrop_layer = css_integer("--z-office-modal-backdrop")
+
+        self.assertLess(scene_layer, topbar_layer)
+        self.assertGreaterEqual(popover_layer, topbar_layer)
+        self.assertLess(popover_layer, modal_backdrop_layer)
+        self.assertIn("return Math.round(clamp(y, 0, 100) * 10);", main)
+
+        stage_block = css_block(".stage-wrap")
+        self.assertIn("z-index: var(--z-office-scene);", stage_block)
+        self.assertIn("isolation: isolate;", stage_block)
+
+        topbar_block = css_block(".topbar")
+        self.assertIn("z-index: var(--z-office-topbar);", topbar_block)
+        self.assertIn("overflow: visible;", topbar_block)
+
+        for selector in (".agent-collab-panel", ".operator-mode-panel"):
+            with self.subTest(selector=selector):
+                panel_block = css_block(selector)
+                self.assertIn("z-index: var(--z-office-popover);", panel_block)
+                self.assertIn("pointer-events: auto;", panel_block)
+
     def test_agent_status_sidebar_reserves_red_for_confirmed_runtime_unavailability(self) -> None:
         agents = json.loads(
             (PROJECT_ROOT / "contracts" / "agents" / "agents.json").read_text(encoding="utf-8")
@@ -1091,11 +2477,13 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn('label: "ติดต่อไม่ได้"', status_block)
         self.assertNotIn('key: "blocked"', status_block)
         self.assertNotIn('label: "ติดขัด"', status_block)
-        self.assertIn('getMissionPresentationStatus(item) === "running"', status_block)
-        for inactive_status in ("waiting_approval", "queued", "blocked"):
-            self.assertNotIn(f'getMissionPresentationStatus(item) === "{inactive_status}"', status_block)
+        self.assertIn("getActiveMissionForAgent(agent.id)", status_block)
+        active_block = function_block("getActiveMissionForAgent")
+        for outstanding_status in ("running", "waiting_approval", "queued", "blocked", "failed"):
+            self.assertIn(f"{outstanding_status}:", active_block)
         self.assertNotIn("taskLabelByStatus", status_block)
-        self.assertNotIn("missionStatus", status_block)
+        self.assertIn("missionStatus", status_block)
+        self.assertIn('key: "busy"', status_block)
         self.assertRegex(status_block, r'return\s*\{\s*key:\s*"busy"')
         self.assertIn('state.bridge.status === "Backend ออฟไลน์"', status_block)
         self.assertNotIn("if (!state.bridge.apiOnline)", status_block)
@@ -1104,9 +2492,13 @@ class RuntimeIntegrityTests(unittest.TestCase):
             status_block.index("if (mission)"),
             "Confirmed runtime unavailability must be evaluated independently from Mission status.",
         )
-        self.assertIn("state.officeAgents.forEach", render_block)
+        self.assertIn("getAgentStatusPriorityOrder(state.officeAgents)", render_block)
         self.assertIn("createAgentStatusCard(agent)", render_block)
         self.assertNotIn(".slice(", render_block)
+        priority_start = main.index("const AGENT_STATUS_PRIORITY = Object.freeze([")
+        priority_end = main.index("]);", priority_start)
+        priority_block = main[priority_start:priority_end]
+        self.assertLess(priority_block.index('"ceo"'), priority_block.index('"manager"'))
 
         self.assertIn('document.createElement("button")', card_block)
         self.assertIn("card.dataset.agentId = agent.id", card_block)
@@ -1147,7 +2539,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn('getMissionPresentationStatus(mission) === "running"', today_panel)
         for inactive_status in ("waiting_approval", "blocked"):
             self.assertNotIn(f'"{inactive_status}"', today_panel)
-        self.assertIn("isMissionCompletedToday(mission)", today_panel)
+        self.assertIn("isMissionCompletedToday(mission, now)", today_panel)
         self.assertIn("todayRunningCount", today_panel)
         self.assertIn("todayCompletedCount", today_panel)
         self.assertIn("renderTodayWorkList(els.todayRunningList", today_panel)
@@ -1161,7 +2553,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn("openPropDialog(targetId)", main)
 
         # The side-panel redesign must not replace the existing Agent chat,
-        # nine-dashboard tabs, Mission Kanban, or shared detail dialogs.
+        # nine equipment dashboards, Mission Kanban, or shared detail dialogs.
         for preserved_id in (
             "gameModal",
             "modalChatPanel",
@@ -1172,7 +2564,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         ):
             self.assertIn(f'id="{preserved_id}"', html)
         self.assertIn('agent: ["chat", "tasks"]', main)
-        self.assertIn('dashboard: ["connections", "tasks", "results"]', main)
+        self.assertIn('dashboard: ["results"]', main)
         self.assertIn('kanban: ["kanban"]', main)
         self.assertIn("postJson(AGENT_CHAT_ENDPOINT", main)
 
@@ -1192,8 +2584,23 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn("height: 100%;", body_rule)
         self.assertIn("min-height: 0;", body_rule)
 
-        self.assertIn(".game-modal.dashboard-modal #modalDashboardPanel.active", styles)
-        self.assertIn("grid-template-rows: auto minmax(0, 1fr) auto;", styles)
+        dashboard_panel_start = styles.index(".game-modal.dashboard-modal #modalDashboardPanel.active")
+        dashboard_panel_end = styles.index("\n}", dashboard_panel_start)
+        dashboard_panel_rule = styles[dashboard_panel_start:dashboard_panel_end]
+        self.assertIn("grid-template-rows: minmax(0, 1fr);", dashboard_panel_rule)
+        self.assertIn("overflow: hidden;", dashboard_panel_rule)
+        self.assertIn(".game-modal.dashboard-modal .game-modal-body", styles)
+        self.assertIn("grid-template-columns: 370px minmax(0, 1fr);", styles)
+        self.assertIn(".dashboard-report-workspace", styles)
+        self.assertIn("grid-template-rows: auto auto minmax(0, 1fr);", styles)
+        self.assertIn(".dashboard-work-columns", styles)
+        self.assertIn("grid-template-columns: repeat(3, minmax(0, 1fr));", styles)
+        self.assertIn(".dashboard-result-dialog", styles)
+        self.assertIn("width: min(1180px, calc(100vw - 40px));", styles)
+        mobile = styles[styles.index("@media (max-width: 720px)"):]
+        self.assertIn(".game-modal.dashboard-modal .game-modal-body", mobile)
+        self.assertIn("grid-template-rows: minmax(0, 44%) minmax(0, 1fr);", mobile)
+        self.assertIn("grid-template-columns: repeat(3, minmax(250px, 82vw));", mobile)
         self.assertIn(".game-modal.kanban-modal #modalKanbanPanel.active", styles)
         self.assertIn(".kanban-detail-body", styles)
         self.assertIn("height: 100%;\n  max-height: none;\n  overflow: auto;", styles)
@@ -1269,7 +2676,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn('list.addEventListener("scroll"', kanban_block)
         self.assertIn('id: "completed"', main)
 
-    def test_task_detail_dialog_uses_task_only_renderers_without_raw_payload_dump(self) -> None:
+    def test_task_and_dashboard_report_details_use_safe_structured_renderers(self) -> None:
         html = FRONTEND_INDEX_PATH.read_text(encoding="utf-8")
         main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
 
@@ -1302,15 +2709,33 @@ class RuntimeIntegrityTests(unittest.TestCase):
         prop_dashboard_block = function_block("renderPropDashboard")
         kanban_block = function_block("renderMissionKanban")
         self.assertIn("renderTaskList(els.modalTaskBoard", modal_block)
-        self.assertIn("renderTaskList(els.modalDashboardWork", prop_dashboard_block)
         self.assertTrue(
             "renderTaskList(" in kanban_block or "createTaskCard(" in kanban_block,
             "Kanban must use the same task-card renderer as the Agent and Current Work surfaces.",
         )
-        self.assertNotIn("renderTaskList(els.modalDashboardReports", main)
-        self.assertNotIn("renderTaskList(els.modalDashboardStatus", main)
-        self.assertIn("renderCardList(els.modalDashboardReports", prop_dashboard_block)
-        self.assertIn("renderCardList(els.modalDashboardStatus", prop_dashboard_block)
+        for destination in (
+            "els.modalDashboardRunning",
+            "els.modalDashboardCompleted",
+            "els.modalDashboardBlocked",
+        ):
+            self.assertIn(f"renderDashboardWorkColumn(\n    {destination}", prop_dashboard_block)
+        self.assertIn("renderDashboardConnectionPanel(subject, propertyRole)", prop_dashboard_block)
+        self.assertNotIn("renderStatusGrid(", prop_dashboard_block)
+        self.assertIn("els.modalDashboardConnectionRail.hidden = surface !== \"dashboard\"", modal_block)
+        self.assertIn("els.modalStatusGrid.hidden = surface === \"dashboard\"", modal_block)
+
+        report_card_block = function_block("createDashboardReportCard")
+        self.assertIn('document.createElement("button")', report_card_block)
+        self.assertIn('card.setAttribute("aria-haspopup", "dialog")', report_card_block)
+        self.assertIn("openDashboardResultDetail(report, card)", report_card_block)
+        self.assertIn("report.attachments", report_card_block)
+
+        dashboard_detail_block = function_block("openDashboardResultDetail")
+        for structured_field in ("item.metrics", "item.findings", "item.risks", "item.nextActions"):
+            self.assertIn(structured_field, dashboard_detail_block)
+        self.assertIn("item.attachments", dashboard_detail_block)
+        self.assertIn("item.evidence", dashboard_detail_block)
+        self.assertNotIn("JSON.stringify(item", dashboard_detail_block)
 
         detail_block = function_block("renderMissionDetail")
         has_details_disclosure = '<details' in html.lower() or 'createElement("details")' in detail_block
@@ -1373,7 +2798,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertNotIn("submitManagerCommand", block)
 
     def test_agent_chat_runtime_version_and_executive_tiers(self) -> None:
-        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.0")
+        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.1")
         self.assertEqual(self.bridge.role_default_model_tier("ceo"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("manager"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("risk_guard"), "risk_quality")
@@ -1489,6 +2914,39 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertEqual(calls[0], [str(RUNNER_PATH), "--version"])
         self.assertNotIn("login", calls[0])
         self.assertNotIn("--ignore-user-config", calls[0])
+
+    def test_runner_status_does_not_false_block_guarded_exec_on_login_probe(self) -> None:
+        original_bin = self.runner.CODEX_BIN
+        original_command = self.runner.run_command
+
+        def fake_command(command, timeout=30, stdin=None):
+            if command[-1] == "--version":
+                return {
+                    "ok": True,
+                    "exitCode": 0,
+                    "stdout": "codex-cli 0.test",
+                    "stderr": "",
+                    "durationMs": 1,
+                }
+            return {
+                "ok": False,
+                "exitCode": 1,
+                "stdout": "Not logged in",
+                "stderr": "",
+                "durationMs": 1,
+            }
+
+        try:
+            self.runner.CODEX_BIN = RUNNER_PATH
+            self.runner.run_command = fake_command
+            status = self.runner.status()
+        finally:
+            self.runner.CODEX_BIN = original_bin
+            self.runner.run_command = original_command
+
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["status"], "ready_guarded")
+        self.assertFalse(status["authChecked"])
 
     def test_agent_chat_runner_returns_structured_task_intent_and_rejects_secret_goal(self) -> None:
         original_status = self.runner.chat_status
@@ -1992,6 +3450,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
 
     def test_agent_chat_structured_task_routing_is_idempotent_and_high_impact_fails_closed(self) -> None:
         original_runtime = self.bridge.RUNTIME_DIR
+        original_reports_dir = self.bridge.RUNTIME_REPORTS_DIR
         original_missions = self.bridge.MISSIONS_PATH
         original_operator_mode = self.bridge.OPERATOR_MODE_PATH
         original_audit = self.bridge.AUDIT_PATH
@@ -2088,6 +3547,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             runtime = Path(directory)
             try:
                 self.bridge.RUNTIME_DIR = runtime
+                self.bridge.RUNTIME_REPORTS_DIR = runtime / "reports"
                 self.bridge.MISSIONS_PATH = runtime / "missions.json"
                 self.bridge.OPERATOR_MODE_PATH = runtime / "operator-mode.json"
                 self.bridge.AUDIT_PATH = runtime / "bridge-audit.jsonl"
@@ -2199,6 +3659,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.assertTrue(all(item["treeKill"] for item in calls))
             finally:
                 self.bridge.RUNTIME_DIR = original_runtime
+                self.bridge.RUNTIME_REPORTS_DIR = original_reports_dir
                 self.bridge.MISSIONS_PATH = original_missions
                 self.bridge.OPERATOR_MODE_PATH = original_operator_mode
                 self.bridge.AUDIT_PATH = original_audit
@@ -2321,6 +3782,75 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn("$nativeExitCode = $LASTEXITCODE", installer)
         self.assertIn("$statusExitCode -notin @(3, 4)", installer)
 
+    def test_bridge_autostart_is_explicit_reversible_and_reuses_confirmed_loopback_endpoint(self) -> None:
+        register = AUTOSTART_REGISTER_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        unregister = AUTOSTART_UNREGISTER_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        lifecycle = LIFECYCLE_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+
+        self.assertIn('"data\\runtime\\bridge-endpoint.json"', register)
+        self.assertIn('[string]$endpoint.host -cne "127.0.0.1"', register)
+        self.assertIn('-WindowStyle Hidden', register)
+        self.assertIn('-File "{0}" -Action Ensure -Port {1}', register)
+        self.assertIn('-Action Ensure `', register)
+        self.assertIn('-Port $confirmedPort', register)
+        self.assertIn("New-ScheduledTaskTrigger -AtLogOn", register)
+        self.assertIn("-RepetitionInterval (New-TimeSpan -Minutes $WatchdogMinutes)", register)
+        self.assertIn("-RestartCount 3", register)
+        self.assertIn("-MultipleInstances IgnoreNew", register)
+        self.assertIn("Register-ScheduledTask", register)
+        self.assertIn("Export-ScheduledTask", register)
+        self.assertIn("ย้อนกลับ Task เดิมแล้ว", register)
+        self.assertNotIn("Start-Process", register)
+        self.assertNotIn("CreateShortcut", register)
+        self.assertNotIn("http://127.0.0.1:$confirmedPort/\"", register.split("$arguments", 1)[0])
+        self.assertIn('[ValidateSet("Start", "Ensure", "Status", "Stop", "Restart")]', lifecycle)
+        self.assertIn('function Ensure-Bridge', lifecycle)
+        self.assertIn('verified_unhealthy_restarting', lifecycle)
+        self.assertIn('Stop-VerifiedProcess -ProcessId $existingId', lifecycle)
+        self.assertIn('$Operation -in @("start", "ensure") -and $requestedBridgePort -ge 1024) {', lifecycle)
+        self.assertIn("Unregister-ScheduledTask", unregister)
+        self.assertIn('"Metafxclub AI Agent HQ Bridge.lnk"', unregister)
+        self.assertIn("Remove-Item -LiteralPath $legacyShortcutPath -Force", unregister)
+
+    def test_install_update_and_uninstall_coordinate_with_the_bridge_watchdog(self) -> None:
+        installer = INSTALLER_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        uninstaller = UNINSTALL_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+
+        self.assertIn('function Suspend-BridgeScheduledTask', installer)
+        self.assertIn('Disable-ScheduledTask -TaskName $bridgeTaskName', installer)
+        self.assertIn('Stop-ScheduledTask -TaskName $bridgeTaskName', installer)
+        self.assertIn('$bridgeTaskWasEnabled = Suspend-BridgeScheduledTask', installer)
+        self.assertIn('Rebind-BridgeScheduledTask -ConfirmedPort $selectedBridgePort', installer)
+        self.assertIn('$expectedArgument = "-Action Ensure -Port $ConfirmedPort"', installer)
+        self.assertIn('ผูก Watchdog ใหม่ไม่สำเร็จและคืน Task เดิมแล้ว', installer)
+        self.assertIn('การติดตั้งแบบ SkipLaunch ต้องใช้พอร์ตเดิม', installer)
+        self.assertIn('finally {\n        Restore-BridgeScheduledTask -WasEnabled $bridgeTaskWasEnabled', installer)
+        self.assertIn('Enable-ScheduledTask -TaskName $bridgeTaskName', installer)
+        self.assertIn('"node_modules", ".pytest_cache", "dist", "build"', installer)
+        self.assertIn('"scripts\\unregister-bridge-autostart.ps1"', uninstaller)
+        self.assertIn('Unregister-ScheduledTask -TaskName $taskName', uninstaller)
+
+    def test_student_git_updater_is_fast_forward_only_and_never_pushes_or_overwrites_dirty_source(self) -> None:
+        updater = UPDATE_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+
+        self.assertIn('@("status", "--porcelain", "--untracked-files=normal")', updater)
+        self.assertIn('@("fetch", "--all", "--prune")', updater)
+        self.assertIn('@("merge", "--ff-only", $upstream)', updater)
+        self.assertIn('"Metafxclub\\AI-Agent-HQ"', updater)
+        self.assertIn("-EndpointConfirmed", updater)
+        self.assertNotIn("reset --hard", updater.lower())
+        self.assertNotIn("git push", updater.lower())
+        self.assertNotIn("git.exe -C $projectRoot push", updater)
+
+    def test_student_installer_copies_mt4_integrations_and_curated_gateway_build(self) -> None:
+        installer = INSTALLER_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+
+        self.assertIn('"integrations\\mt4-trade-gateway\\MetafxHQTradeGateway.mq4"', installer)
+        self.assertIn('"artifacts\\mt4-ai-council-ea-v2.14-broker-compat-hardening\\MetafxHQTradeGateway.ex4"', installer)
+        self.assertIn('"integrations", "runner", "scripts", "tests"', installer)
+        self.assertIn('Sync-Directory -DirectoryName "artifacts\\mt4-ai-council-ea-v2.14-broker-compat-hardening"', installer)
+        self.assertIn('"1-INSTALL-HQ.bat", "UPDATE-HQ.bat"', installer)
+
     def test_student_installer_requires_confirmed_loopback_endpoint_and_checks_codex_quota(self) -> None:
         lifecycle = LIFECYCLE_SCRIPT_PATH.read_text(encoding="utf-8-sig")
         installer = INSTALLER_SCRIPT_PATH.read_text(encoding="utf-8-sig")
@@ -2335,7 +3865,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         main_start = installer.rindex("\ntry {")
         self.assertLess(
             installer.index("$selectedBridgePort = Confirm-BridgeEndpoint", main_start),
-            installer.index("\n    Stop-ExistingBridge", main_start),
+            installer.index("Stop-ExistingBridge", main_start),
         )
         self.assertIn("-Port $ConfirmedPort", installer)
         self.assertIn("api/codex/rate-limits?refresh=true", installer)
@@ -2345,6 +3875,8 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn("$confirmedEndpointRequired", lifecycle)
         self.assertIn("ระบบหยุดโดยไม่เปลี่ยนไปใช้ URL อื่น", lifecycle)
         self.assertIn("user_confirmed", lifecycle)
+        self.assertIn("[Net.Sockets.SocketOptionName]::ReuseAddress", lifecycle)
+        self.assertIn("Get-ListenerProcessIds", lifecycle)
         self.assertIn("api/codex/rate-limits", readiness)
         self.assertIn("127.0.0.1", readiness)
         self.assertNotIn("auth.json", readiness.lower())
@@ -2362,8 +3894,12 @@ class RuntimeIntegrityTests(unittest.TestCase):
             / "asset-registry.json"
         )
         registry_text = registry_path.read_text(encoding="utf-8-sig")
-        self.assertEqual(version, "0.9.0")
+        attributes = (PROJECT_ROOT / ".gitattributes").read_text(encoding="utf-8-sig")
+        self.assertEqual(version, "0.9.1")
         self.assertNotRegex(registry_text, r"(?i)[a-z]:\\\\users\\\\")
+        self.assertIn("*.mq4 text eol=lf", attributes)
+        self.assertIn("*.mq5 text eol=lf", attributes)
+        self.assertIn("*.mqh text eol=lf", attributes)
 
     def test_durable_json_write_keeps_last_valid_backup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2407,14 +3943,24 @@ class RuntimeIntegrityTests(unittest.TestCase):
             run_directory = Path(directory) / "codex-runs"
             raw_output_paths = []
             original_runs_dir = self.runner.CODEX_RUNS_DIR
-            original_status = self.runner.status
+            original_status = self.runner.chat_status
             original_run_chat_command = self.runner.run_chat_command
 
             def fake_run_chat_command(command, timeout, stdin, cwd, output_limit=60000):
                 raw_path = Path(command[command.index("-o") + 1])
                 raw_output_paths.append(raw_path)
                 self.assertNotEqual(raw_path.parent.resolve(), run_directory.resolve())
-                raw_path.write_text("token=supersecretvalue\nSafe report body", encoding="utf-8")
+                raw_path.write_text(
+                    json.dumps({
+                        "status": "completed",
+                        "summary": "token=supersecretvalue Safe report body",
+                        "findings": ["Safe finding"],
+                        "nextSteps": [],
+                        "evidence": [],
+                        "blockedCapability": "",
+                    }),
+                    encoding="utf-8",
+                )
                 return {
                     "ok": True,
                     "exitCode": 0,
@@ -2427,12 +3973,12 @@ class RuntimeIntegrityTests(unittest.TestCase):
 
             try:
                 self.runner.CODEX_RUNS_DIR = run_directory
-                self.runner.status = lambda: {"status": "ready"}
+                self.runner.chat_status = lambda: {"ok": True, "status": "runtime_ready"}
                 self.runner.run_chat_command = fake_run_chat_command
                 result = self.runner.run_codex("Review this report", "manager", "mission-test")
             finally:
                 self.runner.CODEX_RUNS_DIR = original_runs_dir
-                self.runner.status = original_status
+                self.runner.chat_status = original_status
                 self.runner.run_chat_command = original_run_chat_command
 
             self.assertTrue(result["ok"])
@@ -2442,6 +3988,1700 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.assertNotIn("supersecretvalue", content)
             self.assertTrue(raw_output_paths)
             self.assertFalse(raw_output_paths[0].exists())
+
+    def test_report_image_attachments_are_allowlisted_projected_and_path_opaque(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original_memory_dir = self.bridge.MEMORY_DIR
+            original_runtime_dir = self.bridge.RUNTIME_DIR
+            original_reports_dir = self.bridge.RUNTIME_REPORTS_DIR
+            try:
+                self.bridge.MEMORY_DIR = root / "memory"
+                self.bridge.RUNTIME_DIR = root / "runtime"
+                self.bridge.RUNTIME_REPORTS_DIR = self.bridge.RUNTIME_DIR / "reports"
+                screenshot_dir = self.bridge.MEMORY_DIR / "screenshots"
+                artifact_dir = self.bridge.MEMORY_DIR / "artifacts"
+                codex_runs_dir = self.bridge.RUNTIME_DIR / "codex-runs"
+                for path in (screenshot_dir, artifact_dir, codex_runs_dir, self.bridge.RUNTIME_REPORTS_DIR):
+                    path.mkdir(parents=True, exist_ok=True)
+
+                valid_png = screenshot_dir / "equity-proof.png"
+                valid_png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"safe-report-image")
+                invalid_magic = screenshot_dir / "not-really-an-image.png"
+                invalid_magic.write_text("plain text", encoding="utf-8")
+                unsupported_svg = screenshot_dir / "unsafe.svg"
+                unsupported_svg.write_text("<svg></svg>", encoding="utf-8")
+                outside_root = root / "outside.png"
+                outside_root.write_bytes(b"\x89PNG\r\n\x1a\n" + b"outside")
+
+                report = {
+                    "id": "report-attachment-test",
+                    "title": "ผล Backtest",
+                    "summary": "รายงานพร้อมรูป Equity",
+                    "status": "ready",
+                    "artifacts": [
+                        {"storageRef": str(valid_png), "label": "Equity Curve"},
+                        {"storageRef": str(invalid_magic), "label": "Wrong magic"},
+                        {"storageRef": str(unsupported_svg), "label": "SVG"},
+                        {"storageRef": str(outside_root), "label": "Outside allowlist"},
+                        {"storageRef": str(screenshot_dir / ".." / "outside.png"), "label": "Traversal"},
+                    ],
+                }
+                projected = self.bridge.report_read_model_item(report)
+                self.assertEqual(projected["artifactCount"], 5)
+                self.assertEqual(len(projected["attachments"]), 1)
+                attachment = projected["attachments"][0]
+                self.assertEqual(attachment["kind"], "image")
+                self.assertEqual(attachment["label"], "Equity Curve")
+                self.assertEqual(attachment["mediaType"], "image/png")
+                self.assertRegex(
+                    attachment["url"],
+                    r"^/api/reports/report-attachment-test/attachments/image-[a-f0-9]{20}$",
+                )
+                serialized = json.dumps(projected, ensure_ascii=False)
+                for forbidden_path in (str(valid_png), str(screenshot_dir), str(root)):
+                    self.assertNotIn(forbidden_path, serialized)
+
+                self.bridge.write_json(
+                    self.bridge.RUNTIME_REPORTS_DIR / "report-attachment-test.json",
+                    report,
+                    keep_backup=False,
+                )
+                attachment_id = attachment["id"]
+                resolved = self.bridge.resolve_report_attachment("report-attachment-test", attachment_id)
+                self.assertIsNotNone(resolved)
+                self.assertEqual(resolved[0], valid_png.resolve())
+                self.assertEqual(resolved[1], "image/png")
+                self.assertIsNone(self.bridge.resolve_report_attachment("../report", attachment_id))
+                self.assertIsNone(self.bridge.resolve_report_attachment("report-attachment-test", "../image"))
+
+                for rejected in (
+                    invalid_magic,
+                    unsupported_svg,
+                    outside_root,
+                    screenshot_dir / ".." / "outside.png",
+                ):
+                    with self.subTest(rejected=rejected):
+                        self.assertIsNone(self.bridge.resolve_report_image_artifact(str(rejected)))
+            finally:
+                self.bridge.MEMORY_DIR = original_memory_dir
+                self.bridge.RUNTIME_DIR = original_runtime_dir
+                self.bridge.RUNTIME_REPORTS_DIR = original_reports_dir
+
+    def test_codex_web_research_requires_a_real_search_event_and_public_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_directory = Path(directory) / "codex-runs"
+            original_runs_dir = self.runner.CODEX_RUNS_DIR
+            original_status = self.runner.chat_status
+            original_run_chat_command = self.runner.run_chat_command
+            captured_commands = []
+
+            def fake_run_chat_command(command, timeout, stdin, cwd, output_limit=60000):
+                captured_commands.append(list(command))
+                raw_path = Path(command[command.index("-o") + 1])
+                raw_path.write_text(
+                    json.dumps({
+                        "status": "completed",
+                        "summary": "Web research complete",
+                        "findings": ["Public source checked"],
+                        "nextSteps": [],
+                        "evidence": [{
+                            "label": "Official source",
+                            "url": "https://example.com/public",
+                            "note": "Public evidence",
+                        }],
+                        "blockedCapability": "",
+                    }),
+                    encoding="utf-8",
+                )
+                return {
+                    "ok": True,
+                    "exitCode": 0,
+                    "stdout": (
+                        json.dumps({
+                            "type": "item.completed",
+                            "item": {
+                                "id": "item-web-1",
+                                "type": "web_search",
+                                "query": "official public source",
+                                "action": {"type": "search", "query": "official public source"},
+                            },
+                        })
+                        if len(captured_commands) == 1
+                        else ""
+                    ),
+                    "stderr": "",
+                    "durationMs": 1,
+                    "processStarted": True,
+                    "processTreeTerminated": False,
+                }
+
+            try:
+                self.runner.CODEX_RUNS_DIR = run_directory
+                self.runner.chat_status = lambda: {"ok": True, "status": "runtime_ready"}
+                self.runner.run_chat_command = fake_run_chat_command
+                completed = self.runner.run_codex(
+                    "Find a public source",
+                    "ea_developer",
+                    "web-research-completed",
+                    web_search=True,
+                )
+                unverified = self.runner.run_codex(
+                    "Find another public source",
+                    "ea_developer",
+                    "web-research-unverified",
+                    web_search=True,
+                )
+            finally:
+                self.runner.CODEX_RUNS_DIR = original_runs_dir
+                self.runner.chat_status = original_status
+                self.runner.run_chat_command = original_run_chat_command
+
+            self.assertTrue(completed["ok"])
+            self.assertTrue(completed["webSearchUsed"])
+            self.assertTrue(completed["webSearchEvidenceVerified"])
+            command = captured_commands[0]
+            self.assertIn("--search", command)
+            self.assertIn("--json", command)
+            self.assertIn("--ask-for-approval", command)
+            self.assertIn("never", command)
+            self.assertIn('web_search="live"', command)
+            self.assertIn('sandbox_mode="read-only"', command)
+            self.assertIn("plugins", command)
+            self.assertIn("computer_use", command)
+            self.assertEqual(command[-1], "-")
+
+            self.assertFalse(unverified["ok"])
+            self.assertEqual(unverified["status"], "blocked")
+            self.assertFalse(unverified["webSearchUsed"])
+            self.assertFalse(unverified["webSearchEvidenceVerified"])
+            self.assertEqual(
+                unverified["blockedCapability"],
+                "Native Codex Web Search verification",
+            )
+
+    def test_native_web_search_event_is_detected_before_diagnostic_truncation(self) -> None:
+        event = json.dumps({
+            "type": "item.completed",
+            "item": {
+                "id": "item-web-after-noise",
+                "type": "web_search",
+                "query": "XAUUSD latest market news",
+                "action": {"type": "search", "query": "XAUUSD latest market news"},
+            },
+        })
+        script = f"import sys; sys.stdout.write('x' * 50000 + '\\n' + {event!r} + '\\n')"
+        result = self.runner.run_chat_command(
+            [sys.executable, "-c", script],
+            timeout=10,
+            stdin="",
+            cwd=PROJECT_ROOT,
+            output_limit=40000,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["nativeWebSearchUsed"])
+        self.assertEqual(result["nativeWebSearchVerificationSource"], "codex_exec_jsonl")
+        self.assertNotIn("item-web-after-noise", result["stdout"])
+        self.assertTrue(self.runner.native_web_search_used(result))
+
+    def test_native_web_search_jsonl_detector_rejects_unfinished_or_model_text(self) -> None:
+        unfinished = json.dumps({
+            "type": "item.started",
+            "item": {
+                "id": "item-web-started",
+                "type": "web_search",
+                "query": "market news",
+            },
+        })
+        model_text = json.dumps({
+            "type": "item.completed",
+            "item": {
+                "id": "item-agent-message",
+                "type": "agent_message",
+                "text": '{"type":"item.completed","item":{"type":"web_search","query":"fake"}}',
+            },
+        })
+        empty_query = json.dumps({
+            "type": "item.completed",
+            "item": {"id": "item-web-empty", "type": "web_search", "query": ""},
+        })
+
+        self.assertFalse(self.runner.native_web_search_jsonl_used(unfinished))
+        self.assertFalse(self.runner.native_web_search_jsonl_used(model_text))
+        self.assertFalse(self.runner.native_web_search_jsonl_used(empty_query))
+        used, source = self.runner.detect_native_web_search_use(
+            "",
+            "web search: legacy marker without a completed JSONL event",
+            structured_event_mode=True,
+        )
+        self.assertFalse(used)
+        self.assertEqual(source, "")
+
+    def test_news_verification_block_has_clear_thai_dashboard_guidance(self) -> None:
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+        capability = '"Native Codex Web Search verification"'
+        reason = "ตัวค้นข่าวทำงานแล้ว แต่ระบบหลังบ้านยังยืนยันบันทึก Web Search ไม่ได้"
+        next_step = "ไม่ต้องอนุมัติงานนี้ซ้ำ ให้ตรวจการยืนยัน Web Search ของ Local Runner"
+        generic = "if (mission?.blockedCapability) {"
+
+        self.assertIn(capability, main)
+        self.assertIn(reason, main)
+        self.assertIn(next_step, main)
+        self.assertLess(main.index(next_step), main.index(generic, main.index(next_step)))
+
+    def test_ai_trade_council_snapshot_reference_is_relative_to_workspace_root(self) -> None:
+        snapshot_id = "a" * 64
+        snapshot_model = {
+            "dailySummary": {
+                "available": True,
+                "serverDay": "2026-07-29",
+                "profit": 12.5,
+            },
+            "chartSnapshot": {
+                "available": True,
+                "status": "fresh",
+                "snapshotId": snapshot_id,
+                "observedAt": "2026-07-29T02:00:00Z",
+                "symbol": "XAUUSD",
+                "timeframe": "H4",
+                "bid": 2400.0,
+                "ask": 2400.2,
+                "spreadPoints": 20,
+                "barCount": 1,
+                "bars": [{"time": "2026-07-29T00:00:00Z", "close": 2400.0}],
+            },
+        }
+        original_workspace = self.bridge.AI_TRADE_COUNCIL_WORKSPACE_DIR
+        original_snapshot_dir = self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                workspace = Path(directory) / "workspace"
+                self.bridge.AI_TRADE_COUNCIL_WORKSPACE_DIR = workspace
+                self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR = (
+                    workspace / "ai-trade-council" / "snapshots"
+                )
+                reference = self.bridge._write_ai_trade_council_snapshot_artifact(
+                    snapshot_model
+                )
+                expected_digest = (
+                    self.bridge._ai_trade_council_snapshot_artifact_digest(
+                        self.bridge._ai_trade_council_snapshot_artifact_core(
+                            snapshot_model
+                        )
+                    )
+                )
+                self.assertEqual(
+                    reference,
+                    (
+                        "ai-trade-council/snapshots/"
+                        f"{expected_digest}.json"
+                    ),
+                )
+                self.assertFalse(reference.startswith("workspace/"))
+                artifact = workspace / reference
+                self.assertTrue(artifact.is_file())
+                stored = json.loads(artifact.read_text(encoding="utf-8"))
+                self.assertEqual(stored["snapshotId"], snapshot_id)
+                self.assertEqual(stored["artifactDigest"], expected_digest)
+                self.assertEqual(
+                    self.bridge._ai_trade_council_snapshot_artifact_digest(
+                        stored
+                    ),
+                    expected_digest,
+                )
+                self.assertEqual(stored["dailySummary"]["serverDay"], "2026-07-29")
+
+                contract = self.bridge.load_ai_trade_council_prompt_contract()
+                news = next(
+                    row
+                    for row in contract["agents"]
+                    if row["agentId"] == "codex_mcp_operator"
+                )
+                prompt = self.bridge._render_ai_trade_council_prompt(
+                    news,
+                    snapshot_id,
+                    reference,
+                    contract["outputSchema"],
+                )
+                self.assertIn(reference, prompt)
+                self.assertNotIn(f"workspace/{reference}", prompt)
+                self.assertNotIn("COUNCIL_VOTE_JSON:", prompt)
+                self.assertNotIn("status, summary, findings", prompt)
+                tools = json.loads(
+                    (
+                        PROJECT_ROOT
+                        / "contracts"
+                        / "tools"
+                        / "tool-permission-contract.json"
+                    ).read_text(encoding="utf-8")
+                )["tools"]
+                for tool_id in ("codex_cli_task", "codex_web_research"):
+                    policy = next(
+                        item["aiTradeCouncilPolicy"]
+                        for item in tools
+                        if item["id"] == tool_id
+                    )
+                    self.assertEqual(policy["sandbox"], "read-only")
+                    self.assertFalse(policy["shellAllowed"])
+                    self.assertFalse(policy["mt4TerminalAllowed"])
+                    self.assertFalse(policy["secretAccessAllowed"])
+                    self.assertEqual(
+                        policy["allowedWorkspaceArtifactPattern"],
+                        (
+                            "ai-trade-council/snapshots/"
+                            "<artifact-sha256>.json"
+                        ),
+                    )
+            finally:
+                self.bridge.AI_TRADE_COUNCIL_WORKSPACE_DIR = original_workspace
+                self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR = original_snapshot_dir
+
+    def test_ai_trade_council_digest_only_snapshot_path_fits_windows_max_path(self) -> None:
+        snapshot_id = "a" * 64
+        artifact_digest = "b" * 64
+        reference = self.bridge.ai_trade_council_snapshot_reference(
+            snapshot_id,
+            artifact_digest,
+        )
+        self.assertEqual(
+            reference,
+            f"ai-trade-council/snapshots/{artifact_digest}.json",
+        )
+        self.assertEqual(Path(reference).name, f"{artifact_digest}.json")
+
+        artifact_path = self.bridge.AI_TRADE_COUNCIL_WORKSPACE_DIR / reference
+        temporary_path = artifact_path.with_name(
+            f".{artifact_path.name}.{threading.get_ident()}.tmp"
+        )
+        if sys.platform == "win32":
+            self.assertLess(len(str(artifact_path.resolve())), 260)
+            self.assertLess(len(str(temporary_path.resolve())), 260)
+
+        legacy_name = f"{snapshot_id}-{artifact_digest}.json"
+        legacy_temporary = artifact_path.with_name(
+            f".{legacy_name}.{threading.get_ident()}.tmp"
+        )
+        self.assertGreater(
+            len(str(legacy_temporary)),
+            len(str(temporary_path)) + 64,
+        )
+
+    def test_ai_trade_council_requires_backend_reference_prices_exact_three_votes_and_no_ai_sizing(self) -> None:
+        snapshot_id = "9" * 64
+        reference_price = 2400.1
+        expected_roles = [
+            ("optimization_agent", "technical"),
+            ("backtest_analyst", "price_action"),
+            ("codex_mcp_operator", "news"),
+        ]
+        self.assertEqual(
+            list(self.runner.AI_TRADE_COUNCIL_ROLE_BY_AGENT.items()),
+            expected_roles,
+        )
+
+        output_schema = self.runner.build_ai_trade_council_output_schema(
+            snapshot_id,
+            "optimization_agent",
+            "technical",
+        )
+        expected_vote_fields = {
+            "snapshotId",
+            "agentId",
+            "roleId",
+            "decision",
+            "confidence",
+            "horizonBars",
+            "validUntilBarTime",
+            "stopLossPrice",
+            "takeProfitPrice",
+            "indicatorValidation",
+            "volatilityState",
+            "eventRisk",
+            "horizon",
+            "observations",
+            "invalidation",
+            "evidence",
+            "warnings",
+        }
+        self.assertFalse(output_schema["additionalProperties"])
+        self.assertEqual(set(output_schema["properties"]), expected_vote_fields)
+        self.assertEqual(set(output_schema["required"]), expected_vote_fields)
+        self.assertNotIn("referencePrice", output_schema["properties"])
+        for forbidden in (
+            "lot",
+            "lots",
+            "fixedLot",
+            "volume",
+            "positionSize",
+            "risk",
+            "riskPercent",
+        ):
+            self.assertNotIn(forbidden, output_schema["properties"])
+
+        horizon_bars = 1
+        valid_until_bar_time = int(time.time()) + 7200
+        round_deadline_at = (
+            datetime.now(timezone.utc) + timedelta(minutes=5)
+        ).isoformat()
+
+        def vote_payload(
+            agent_id: str,
+            role_id: str,
+            *,
+            decision: str = "BUY",
+            stop_loss_price: float | None = 2390.0,
+            take_profit_price: float | None = 2410.0,
+        ) -> dict:
+            evidence = []
+            if role_id == "news":
+                evidence = [
+                    {
+                        "label": "Official source one",
+                        "observedAt": datetime.now(timezone.utc).isoformat(),
+                        "sourceUrl": "https://example.com/source-one",
+                    },
+                    {
+                        "label": "Official source two",
+                        "observedAt": datetime.now(timezone.utc).isoformat(),
+                        "sourceUrl": "https://example.org/source-two",
+                    },
+                ]
+            return {
+                "snapshotId": snapshot_id,
+                "agentId": agent_id,
+                "roleId": role_id,
+                "decision": decision,
+                "confidence": 70,
+                "horizonBars": horizon_bars,
+                "validUntilBarTime": valid_until_bar_time,
+                "stopLossPrice": stop_loss_price if role_id == "price_action" else None,
+                "takeProfitPrice": take_profit_price if role_id == "price_action" else None,
+                "indicatorValidation": "PASS" if role_id == "technical" else None,
+                "volatilityState": "NORMAL" if role_id == "technical" else None,
+                "eventRisk": "ALLOW" if role_id == "news" else None,
+                "horizon": "4 hours",
+                "observations": ["The bounded snapshot supports this vote."],
+                "invalidation": "The closed-candle structure changes.",
+                "evidence": evidence,
+                "warnings": [],
+            }
+
+        technical_context = {
+            "snapshotId": snapshot_id,
+            "agentId": "optimization_agent",
+            "roleId": "technical",
+            "referencePrice": reference_price,
+            "horizonBars": horizon_bars,
+            "validUntilBarTime": valid_until_bar_time,
+            "volatilityState": "NORMAL",
+            "readOnly": True,
+        }
+        valid_buy = vote_payload("optimization_agent", "technical")
+        parsed_buy = self.bridge.validate_ai_trade_council_vote(
+            json.dumps(valid_buy),
+            technical_context,
+        )
+        self.assertIsNotNone(parsed_buy)
+        self.assertIsNone(parsed_buy["stopLossPrice"])
+        self.assertIsNone(parsed_buy["takeProfitPrice"])
+
+        price_action_context = {
+            "snapshotId": snapshot_id,
+            "agentId": "backtest_analyst",
+            "roleId": "price_action",
+            "referencePrice": reference_price,
+            "horizonBars": horizon_bars,
+            "validUntilBarTime": valid_until_bar_time,
+            "readOnly": True,
+        }
+        valid_price_action = vote_payload("backtest_analyst", "price_action")
+        for missing_field in ("stopLossPrice", "takeProfitPrice"):
+            with self.subTest(missing_protective_price=missing_field):
+                missing = dict(valid_price_action)
+                missing[missing_field] = None
+                self.assertIsNone(
+                    self.bridge.validate_ai_trade_council_vote(
+                        json.dumps(missing),
+                        price_action_context,
+                    )
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "protective prices",
+                ):
+                    self.runner.parse_ai_trade_council_result(
+                        json.dumps(missing),
+                        snapshot_id,
+                        "backtest_analyst",
+                        "price_action",
+                    )
+
+        invalid_sell = vote_payload(
+            "backtest_analyst",
+            "price_action",
+            decision="SELL",
+            stop_loss_price=2390.0,
+            take_profit_price=2410.0,
+        )
+        self.assertIsNone(
+            self.bridge.validate_ai_trade_council_vote(
+                json.dumps(invalid_sell),
+                price_action_context,
+            )
+        )
+        valid_sell = vote_payload(
+            "backtest_analyst",
+            "price_action",
+            decision="SELL",
+            stop_loss_price=2410.0,
+            take_profit_price=2390.0,
+        )
+        self.assertIsNotNone(
+            self.bridge.validate_ai_trade_council_vote(
+                json.dumps(valid_sell),
+                price_action_context,
+            )
+        )
+
+        for forbidden_field in (
+            "lot",
+            "lots",
+            "fixedLot",
+            "volume",
+            "positionSize",
+            "risk",
+            "riskPercent",
+        ):
+            with self.subTest(forbidden_ai_sizing=forbidden_field):
+                sized_vote = {**valid_buy, forbidden_field: 0.01}
+                self.assertIsNone(
+                    self.bridge.validate_ai_trade_council_vote(
+                        json.dumps(sized_vote),
+                        technical_context,
+                    )
+                )
+
+        sanitized_votes = []
+        for index, (agent_id, role_id) in enumerate(expected_roles):
+            context = {
+                "snapshotId": snapshot_id,
+                "agentId": agent_id,
+                "roleId": role_id,
+                "referencePrice": reference_price,
+                "horizonBars": horizon_bars,
+                "validUntilBarTime": valid_until_bar_time,
+                "volatilityState": "NORMAL" if role_id == "technical" else None,
+                "qualityPolicy": {
+                    "maximumNewsAgeSeconds": 86400,
+                    "maximumFutureEvidenceSkewSeconds": 300,
+                    "minimumDistinctNewsDomains": 2,
+                },
+                "readOnly": True,
+            }
+            vote = vote_payload(
+                agent_id,
+                role_id,
+                stop_loss_price=2389.0 + index,
+                take_profit_price=2410.0 + index,
+            )
+            sanitized = self.bridge.validate_ai_trade_council_vote(
+                json.dumps(vote),
+                context,
+            )
+            self.assertIsNotNone(sanitized)
+            sanitized_votes.append(sanitized)
+
+        parent = {
+            "analysisContext": {
+                "kind": "ai_trade_council_parent",
+                "snapshotId": snapshot_id,
+                "referencePrice": reference_price,
+                "horizonBars": horizon_bars,
+                "validUntilBarTime": valid_until_bar_time,
+                "roundDeadlineAt": round_deadline_at,
+                "qualityGate": {
+                    "passed": True,
+                    "reasonCodes": [],
+                    "confidenceFloorDefault": 70,
+                    "confidenceFloorByRole": {
+                        "technical": 70,
+                        "price_action": 70,
+                        "news": 70,
+                    },
+                    "minimumRewardRiskRatio": 1.0,
+                    "technical": {"volatilityState": "NORMAL"},
+                    "marketState": {"status": "available", "marketOpen": True},
+                    "executionEligibility": {
+                        "shadow": True,
+                        "demo": True,
+                        "live": True,
+                    },
+                },
+                "readOnly": True,
+            }
+        }
+        children = [
+            {"owner": agent_id, "councilVote": sanitized_votes[index]}
+            for index, (agent_id, _role_id) in enumerate(expected_roles)
+        ]
+        incomplete = self.bridge.ai_trade_council_consensus(parent, children[:2])
+        self.assertFalse(incomplete["ready"])
+        self.assertEqual(incomplete["voteCount"], 2)
+        self.assertEqual(incomplete["decision"], "NO_DATA")
+        self.assertFalse(incomplete["tradePlan"]["available"])
+
+        complete = self.bridge.ai_trade_council_consensus(parent, children)
+        self.assertTrue(complete["ready"])
+        self.assertEqual(complete["voteCount"], 3)
+        self.assertTrue(complete["unanimous"])
+        self.assertEqual(complete["decision"], "BUY")
+        self.assertEqual(complete["tradePlan"]["stopLossPrice"], 2390.0)
+        self.assertEqual(complete["tradePlan"]["takeProfitPrice"], 2411.0)
+        self.assertEqual(
+            set(complete["tradePlan"]),
+            {
+                "available",
+                "direction",
+                "stopLossPrice",
+                "takeProfitPrice",
+                "protectivePriceOwnerRole",
+                "rewardRiskRatio",
+                "priceAggregation",
+                "protectivePlanSource",
+                "protectivePlanReasonCode",
+                "protectivePlanPolicyVersion",
+                "protectivePlanFallbackUsed",
+                "protectivePlanProvenance",
+                "lotPolicy",
+                "aiLotAllowed",
+            },
+        )
+        self.assertEqual(
+            complete["tradePlan"]["protectivePlanSource"],
+            "price_action_agent",
+        )
+        self.assertFalse(complete["tradePlan"]["protectivePlanFallbackUsed"])
+        self.assertEqual(complete["tradePlan"]["lotPolicy"], "ea_fixed_lot_only")
+        self.assertFalse(complete["tradePlan"]["aiLotAllowed"])
+
+    def test_ai_trade_council_automation_rejects_m1_and_supports_m5(self) -> None:
+        supported = self.bridge.AI_TRADE_COUNCIL_AUTOMATION_SUPPORTED_TIMEFRAMES
+        self.assertNotIn("M1", supported)
+        self.assertIn("M5", supported)
+
+        candidate_id = "mtc-timeframe-policy"
+        symbol = "XAUUSD"
+        closed_bar_time = 1785445200
+        snapshot_id = "8" * 64
+        original_runtime = self.bridge.RUNTIME_DIR
+        original_audit = self.bridge.AUDIT_PATH
+        original_snapshot_reader = self.bridge.metatrader_snapshot_read_model
+        current_timeframe = {"value": "M1"}
+
+        def snapshot_model(_prop_id: str) -> dict:
+            return {
+                "selectedCandidateId": candidate_id,
+                "adapter": {"ready": True},
+                "chartSnapshot": {
+                    "available": True,
+                    "snapshotId": snapshot_id,
+                    "symbol": symbol,
+                    "timeframe": current_timeframe["value"],
+                    "bars": [{"time": closed_bar_time}],
+                },
+            }
+
+        def store_for(timeframe: str) -> dict:
+            store = self.bridge._ai_trade_council_automation_default_store()
+            store["config"]["enabled"] = True
+            store["state"].update({
+                "status": "idle",
+                "reason": "waiting_for_new_closed_bar",
+                "startupId": self.bridge.SERVER_STARTED_AT,
+                "dailyRunDate": self.bridge._automation_day_key(),
+                "candidateId": candidate_id,
+                "streamKey": self.bridge.payload_digest(
+                    candidate_id,
+                    symbol,
+                    timeframe,
+                ),
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "lastObservedClosedBarTime": closed_bar_time,
+            })
+            return store
+
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                self.bridge.RUNTIME_DIR = Path(directory) / "runtime"
+                self.bridge.AUDIT_PATH = Path(directory) / "audit.jsonl"
+                self.bridge.metatrader_snapshot_read_model = snapshot_model
+
+                self.bridge._save_ai_trade_council_automation_store(store_for("M1"))
+                m1_result = self.bridge.ai_trade_council_automation_tick()
+                self.assertFalse(m1_result["ok"])
+                self.assertEqual(
+                    m1_result["kind"],
+                    "ai_trade_council_automation_unsupported_timeframe",
+                )
+                self.assertEqual(
+                    m1_result["automation"]["state"]["status"],
+                    "unsupported_timeframe",
+                )
+
+                current_timeframe["value"] = "M5"
+                self.bridge._save_ai_trade_council_automation_store(store_for("M5"))
+                m5_result = self.bridge.ai_trade_council_automation_tick()
+                self.assertTrue(m5_result["ok"])
+                self.assertEqual(
+                    m5_result["kind"],
+                    "ai_trade_council_automation_idle",
+                )
+                self.assertNotEqual(
+                    m5_result["automation"]["state"]["status"],
+                    "unsupported_timeframe",
+                )
+            finally:
+                self.bridge.RUNTIME_DIR = original_runtime
+                self.bridge.AUDIT_PATH = original_audit
+                self.bridge.metatrader_snapshot_read_model = original_snapshot_reader
+
+    def _runner_council_snapshot_payload(
+        self,
+        snapshot_id: str,
+        analysis_bar_count: int = 120,
+    ) -> dict:
+        start_time = 1785283200
+        bars = [
+            {
+                "time": start_time + (index * 14400),
+                "open": 2300 + index,
+                "high": 2301 + index,
+                "low": 2299 + index,
+                "close": 2300.5 + index,
+                "volume": 100 + index,
+            }
+            for index in range(analysis_bar_count)
+        ]
+        payload = {
+            "schemaVersion": "ai-trade-council-input-v1",
+            "snapshotId": snapshot_id,
+            "createdAt": "2026-07-29T02:00:00Z",
+            "sourceMode": "mt4_read_only_snapshot",
+            "dailySummary": {
+                "available": True,
+                "serverDay": "2026-07-29",
+                "profit": 12.5,
+            },
+            "chartSnapshot": {
+                "available": True,
+                "status": "fresh",
+                "snapshotId": snapshot_id,
+                "observedAt": "2026-07-29T02:00:00Z",
+                "symbol": "XAUUSD",
+                "timeframe": "H4",
+                "bid": 2400.0,
+                "ask": 2400.2,
+                "spreadPoints": 20,
+                "barCount": analysis_bar_count,
+                "sourceBarCount": analysis_bar_count,
+                "analysisWindow": {
+                    "requestedBars": analysis_bar_count,
+                    "usedBars": analysis_bar_count,
+                    "startTime": bars[0]["time"],
+                    "endTime": bars[-1]["time"],
+                    "closedBarsOnly": True,
+                    "sourceBarCount": analysis_bar_count,
+                    "indicatorFormulaVersion": "metafx-deterministic-core20-price-action-v3",
+                },
+                "bars": bars,
+                "technicalIndicators": {
+                    "formulaVersion": "metafx-deterministic-core20-price-action-v3",
+                    "basis": "backend_calculated_closed_bars_only",
+                    "moduleCount": 14,
+                    "modules": [
+                        "sma_family",
+                        "ema_family",
+                        "rsi14",
+                        "macd_12_26_9",
+                        "stochastic_14_3_3",
+                        "atr14",
+                        "bollinger_20_2",
+                        "adx_dmi14",
+                        "cci20",
+                        "williams_r14",
+                        "roc12",
+                        "momentum10",
+                        "obv",
+                        "mfi14",
+                    ],
+                    "ema20": 2400.0,
+                    "ema50": 2380.0,
+                    "rsi14": 60.0,
+                    "atr14": 4.0,
+                    "macdLine": 2.0,
+                    "series": [
+                        {
+                            "time": item["time"],
+                            "ema20": item["close"] - 2.0,
+                            "rsi14": 60.0,
+                        }
+                        for item in bars
+                    ],
+                },
+                "priceActionFeatures": {
+                    "available": True,
+                    "basis": "backend_calculated_confirmed_closed_bars_only",
+                    "formulaVersion": "metafx-deterministic-core20-price-action-v3",
+                    "barCount": analysis_bar_count,
+                    "moduleCount": 6,
+                    "modules": [
+                        "confirmed_swing_pivots",
+                        "support_resistance",
+                        "trendlines",
+                        "fibonacci_latest_confirmed_swing",
+                        "rsi_divergence",
+                        "macd_divergence",
+                    ],
+                    "swings": {"highs": [], "lows": []},
+                    "supportResistance": {"supports": [], "resistances": []},
+                    "trendlines": {"support": None, "resistance": None},
+                    "fibonacci": {"available": False},
+                    "divergences": {
+                        "rsi": {"bullish": None, "bearish": None},
+                        "macd": {"bullish": None, "bearish": None},
+                    },
+                },
+            },
+            "policy": {
+                "readOnly": True,
+                "sameSnapshotRequired": True,
+                "terminalActionsAllowed": False,
+                "riskGuardVoting": False,
+                "sourceBarCount": analysis_bar_count,
+                "analysisBarCountRequested": analysis_bar_count,
+                "analysisBarCountUsed": analysis_bar_count,
+                "indicatorFormulaVersion": "metafx-deterministic-core20-price-action-v3",
+                "analysisWindow": {
+                    "requestedBars": analysis_bar_count,
+                    "usedBars": analysis_bar_count,
+                    "startTime": bars[0]["time"],
+                    "endTime": bars[-1]["time"],
+                    "closedBarsOnly": True,
+                    "sourceBarCount": analysis_bar_count,
+                    "indicatorFormulaVersion": "metafx-deterministic-core20-price-action-v3",
+                },
+                "qualityGate": {
+                    "horizonBars": 1,
+                    "validUntilBarTime": 1900000000,
+                    "technical": {
+                        "indicatorDataSufficient": True,
+                        "volatilityState": "NORMAL",
+                    },
+                },
+            },
+        }
+        payload["artifactDigest"] = (
+            self.runner.ai_trade_council_snapshot_artifact_digest(payload)
+        )
+        return payload
+
+    def test_ai_trade_council_runner_embeds_bounded_snapshot_and_returns_exact_vote_json(self) -> None:
+        snapshot_id = "b" * 64
+        vote = {
+            "snapshotId": snapshot_id,
+            "agentId": "codex_mcp_operator",
+            "roleId": "news",
+            "decision": "HOLD",
+            "confidence": 64,
+            "horizonBars": 1,
+            "validUntilBarTime": 1900000000,
+            "stopLossPrice": None,
+            "takeProfitPrice": None,
+            "indicatorValidation": None,
+            "volatilityState": None,
+            "eventRisk": "HOLD",
+            "horizon": "4 hours",
+            "observations": ["No immediate high-impact event changed the view."],
+            "invalidation": "A new verified high-impact release changes the context.",
+            "evidence": [
+                {
+                    "label": "Official source one",
+                    "observedAt": datetime.now(timezone.utc).isoformat(),
+                    "sourceUrl": "https://example.com/source-one",
+                },
+                {
+                    "label": "Official source two",
+                    "observedAt": datetime.now(timezone.utc).isoformat(),
+                    "sourceUrl": "https://example.org/source-two",
+                },
+            ],
+            "warnings": [],
+        }
+        original_workspace = self.runner.AUTO_WORKSPACE_ROOT
+        original_additional_roots = self.runner.AUTO_ADDITIONAL_WRITE_ROOTS
+        original_runs_dir = self.runner.CODEX_RUNS_DIR
+        original_status = self.runner.chat_status
+        original_run_chat_command = self.runner.run_chat_command
+        captured = {}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            snapshot_payload = self._runner_council_snapshot_payload(
+                snapshot_id,
+                180,
+            )
+            artifact_digest = snapshot_payload["artifactDigest"]
+            artifact = (
+                workspace
+                / "ai-trade-council"
+                / "snapshots"
+                / f"{artifact_digest}.json"
+            )
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text(
+                json.dumps(snapshot_payload),
+                encoding="utf-8",
+            )
+
+            def fake_run_chat_command(command, timeout, stdin, cwd, output_limit=60000):
+                captured["command"] = list(command)
+                captured["stdin"] = stdin
+                captured["cwd"] = cwd
+                schema_path = Path(command[command.index("--output-schema") + 1])
+                captured["schema"] = json.loads(schema_path.read_text(encoding="utf-8"))
+                raw_path = Path(command[command.index("-o") + 1])
+                raw_path.write_text(json.dumps(vote), encoding="utf-8")
+                return {
+                    "ok": True,
+                    "exitCode": 0,
+                    "stdout": json.dumps({
+                        "type": "item.completed",
+                        "item": {
+                            "id": "item-council-news-web",
+                            "type": "web_search",
+                            "query": "official market sources",
+                            "action": {"type": "search", "query": "official market sources"},
+                        },
+                    }),
+                    "stderr": "",
+                    "durationMs": 1,
+                    "processStarted": True,
+                    "processTreeTerminated": False,
+                }
+
+            try:
+                self.runner.AUTO_WORKSPACE_ROOT = workspace
+                self.runner.AUTO_ADDITIONAL_WRITE_ROOTS = ()
+                self.runner.CODEX_RUNS_DIR = root / "codex-runs"
+                self.runner.chat_status = lambda: {"ok": True, "status": "runtime_ready"}
+                self.runner.run_chat_command = fake_run_chat_command
+                result = self.runner.run_codex(
+                    "Analyze the Backend-supplied Council snapshot.",
+                    "codex_mcp_operator",
+                    "council-news-schema-mode",
+                    execution_mode="auto_guarded",
+                    web_search=True,
+                    result_mode="ai_trade_council_vote",
+                    council_snapshot_id=snapshot_id,
+                    council_role_id="news",
+                    council_snapshot_digest=artifact_digest,
+                )
+            finally:
+                self.runner.AUTO_WORKSPACE_ROOT = original_workspace
+                self.runner.AUTO_ADDITIONAL_WRITE_ROOTS = original_additional_roots
+                self.runner.CODEX_RUNS_DIR = original_runs_dir
+                self.runner.chat_status = original_status
+                self.runner.run_chat_command = original_run_chat_command
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["workStatus"], "completed")
+        self.assertEqual(result["resultMode"], "ai_trade_council_vote")
+        self.assertTrue(result["webSearchUsed"])
+        self.assertTrue(result["webSearchEvidenceVerified"])
+        self.assertEqual(set(json.loads(result["finalMessage"])), set(vote))
+        self.assertNotIn("status", json.loads(result["finalMessage"]))
+        command = captured["command"]
+        self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
+        self.assertIn("shell_tool", command)
+        self.assertIn("--json", command)
+        self.assertNotIn("--add-dir", command)
+        self.assertEqual(captured["cwd"], workspace)
+        self.assertEqual(
+            captured["schema"]["properties"]["snapshotId"]["enum"],
+            [snapshot_id],
+        )
+        self.assertEqual(
+            set(captured["schema"]["required"]),
+            {
+                "snapshotId",
+                "agentId",
+                "roleId",
+                "decision",
+                "confidence",
+                "horizonBars",
+                "validUntilBarTime",
+                "stopLossPrice",
+                "takeProfitPrice",
+                "indicatorValidation",
+                "volatilityState",
+                "eventRisk",
+                "horizon",
+                "observations",
+                "invalidation",
+                "evidence",
+                "warnings",
+            },
+        )
+        self.assertNotIn("referencePrice", captured["schema"]["properties"])
+        for forbidden in (
+            "lot",
+            "lots",
+            "fixedLot",
+            "volume",
+            "positionSize",
+            "risk",
+            "riskPercent",
+        ):
+            self.assertNotIn(forbidden, captured["schema"]["properties"])
+        injected_prompt = captured["stdin"]
+        self.assertIn("Backend-supplied Council snapshot JSON", injected_prompt)
+        self.assertIn('"serverDay":"2026-07-29"', injected_prompt)
+        self.assertIn('"barsIncluded":0', injected_prompt)
+        self.assertNotIn('"bars":[', injected_prompt)
+        self.assertNotIn("accountNumber", injected_prompt)
+        self.assertLess(len(injected_prompt), 30000)
+
+    def test_ai_trade_council_runner_rejects_mutated_digest_bound_artifact(self) -> None:
+        snapshot_id = "7" * 64
+        payload = self._runner_council_snapshot_payload(snapshot_id, 120)
+        artifact_digest = payload["artifactDigest"]
+        original_workspace = self.runner.AUTO_WORKSPACE_ROOT
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            artifact = (
+                workspace
+                / "ai-trade-council"
+                / "snapshots"
+                / f"{artifact_digest}.json"
+            )
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text(json.dumps(payload), encoding="utf-8")
+            try:
+                self.runner.AUTO_WORKSPACE_ROOT = workspace
+                reference, loaded = (
+                    self.runner.load_ai_trade_council_snapshot(
+                        snapshot_id,
+                        artifact_digest,
+                    )
+                )
+                self.assertEqual(
+                    reference,
+                    (
+                        "ai-trade-council/snapshots/"
+                        f"{artifact_digest}.json"
+                    ),
+                )
+                self.assertEqual(loaded["artifactDigest"], artifact_digest)
+
+                payload["chartSnapshot"]["bars"][5]["high"] += 50
+                artifact.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                    self.runner.load_ai_trade_council_snapshot(
+                        snapshot_id,
+                        artifact_digest,
+                    )
+            finally:
+                self.runner.AUTO_WORKSPACE_ROOT = original_workspace
+
+    def test_ai_trade_council_runner_embeds_exact_backend_bound_bar_count(self) -> None:
+        for count in (120, 240, 300):
+            with self.subTest(count=count):
+                payload = self._runner_council_snapshot_payload("c" * 64, count)
+                compact = self.runner.compact_ai_trade_council_snapshot(
+                    payload,
+                    "technical",
+                )
+                chart = compact["chartSnapshot"]
+                self.assertNotIn("bars", chart)
+                bars_columnar = chart["barsColumnar"]
+                self.assertEqual(bars_columnar["encoding"], "field_columns_v1")
+                self.assertEqual(
+                    bars_columnar["fields"],
+                    list(self.runner.AI_TRADE_COUNCIL_RAW_BAR_FIELDS),
+                )
+                self.assertEqual(bars_columnar["pointCount"], count)
+                decoded_bars = [
+                    {
+                        field: bars_columnar["columns"][field_index][row_index]
+                        for field_index, field in enumerate(bars_columnar["fields"])
+                    }
+                    for row_index in range(bars_columnar["pointCount"])
+                ]
+                self.assertEqual(decoded_bars, payload["chartSnapshot"]["bars"])
+                self.assertEqual(chart["barsIncluded"], count)
+                self.assertEqual(chart["analysisWindow"]["usedBars"], count)
+                self.assertEqual(
+                    compact["policy"]["analysisBarCountUsed"],
+                    count,
+                )
+
+    def test_ai_trade_council_runner_enforces_role_data_separation(self) -> None:
+        payload = self._runner_council_snapshot_payload("d" * 64, 120)
+        technical = self.runner.compact_ai_trade_council_snapshot(
+            payload,
+            "technical",
+        )["chartSnapshot"]
+        price_action = self.runner.compact_ai_trade_council_snapshot(
+            payload,
+            "price_action",
+        )["chartSnapshot"]
+        news_compact = self.runner.compact_ai_trade_council_snapshot(
+            payload,
+            "news",
+        )
+        news = news_compact["chartSnapshot"]
+
+        self.assertEqual(technical["barsIncluded"], 120)
+        self.assertIn("barsColumnar", technical)
+        self.assertNotIn("bars", technical)
+        self.assertIn("technicalIndicators", technical)
+        self.assertEqual(
+            technical["technicalIndicators"]["formulaVersion"],
+            "metafx-deterministic-core20-price-action-v3",
+        )
+        self.assertNotIn("series", technical["technicalIndicators"])
+        self.assertEqual(
+            technical["technicalIndicators"]["importantSeriesColumnar"][
+                "pointCount"
+            ],
+            120,
+        )
+        self.assertEqual(
+            technical["technicalIndicators"]["latestDetailSeriesColumnar"][
+                "pointCount"
+            ],
+            60,
+        )
+
+        self.assertEqual(price_action["barsIncluded"], 120)
+        self.assertIn("bars", price_action)
+        self.assertIn("priceActionFeatures", price_action)
+        self.assertEqual(
+            price_action["priceActionFeatures"]["formulaVersion"],
+            "metafx-deterministic-core20-price-action-v3",
+        )
+        self.assertNotIn("technicalIndicators", price_action)
+        self.assertNotIn("technicalSeries", price_action)
+        self.assertNotIn("indicatorSeries", price_action)
+        self.assertEqual(
+            price_action["analysisWindow"]["indicatorFormulaVersion"],
+            "metafx-deterministic-core20-price-action-v3",
+        )
+
+        self.assertEqual(news["barsIncluded"], 0)
+        self.assertNotIn("bars", news)
+        self.assertNotIn("technicalIndicators", news)
+        self.assertNotIn("technicalSeries", news)
+        self.assertNotIn("indicatorSeries", news)
+        self.assertNotIn("priceActionFeatures", news)
+        self.assertNotIn("barsColumnar", news)
+        self.assertNotIn("indicatorFormulaVersion", news["analysisWindow"])
+        self.assertNotIn("indicatorFormulaVersion", news_compact["policy"])
+        self.assertNotIn("technical", news_compact["policy"]["qualityGate"])
+
+    def test_ai_trade_council_runner_compacts_1000_bar_prompt_with_audited_scope(self) -> None:
+        payload = self._runner_council_snapshot_payload("a" * 64, 1000)
+        payload["chartSnapshot"].update(
+            self.bridge._ai_trade_council_analysis_feature_bundle(
+                payload["chartSnapshot"]["bars"]
+            )
+        )
+        self.assertLess(
+            len(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
+            self.runner.AI_TRADE_COUNCIL_SNAPSHOT_MAX_BYTES,
+        )
+        technical = self.runner.compact_ai_trade_council_snapshot(
+            payload,
+            "technical",
+        )
+        technical_scope = technical["promptScope"]
+        self.assertEqual(technical_scope["artifactAnalysisBars"], 1000)
+        self.assertEqual(technical_scope["analysisMode"], "smart_300")
+        self.assertEqual(technical_scope["rawBarsIncluded"], 300)
+        self.assertEqual(technical_scope["technicalSeriesIncluded"], 300)
+        self.assertEqual(
+            technical_scope["technicalImportantSeriesIncluded"],
+            300,
+        )
+        self.assertEqual(technical_scope["technicalDetailSeriesIncluded"], 60)
+        self.assertEqual(
+            technical_scope["rawBarsScope"],
+            "latest_closed_bars_prompt_limited",
+        )
+        self.assertEqual(
+            technical_scope["technicalImportantSeriesScope"],
+            "latest_closed_bars_prompt_limited",
+        )
+        self.assertFalse(
+            technical_scope["fullWindowCompressedEvidenceIncluded"]
+        )
+        self.assertEqual(
+            technical_scope["technicalSummaryScope"],
+            "all_module_summaries_full_analysis_window",
+        )
+        self.assertLessEqual(
+            len(json.dumps(technical, ensure_ascii=False, separators=(",", ":"))),
+            self.runner.AI_TRADE_COUNCIL_EMBEDDED_SOFT_MAX_CHARS,
+        )
+        full_prompt = self.runner.build_prompt(
+            "x" * 8000,
+            "optimization_agent",
+            "prompt-cap-test",
+            "specialist_balanced",
+            7000,
+            "auto_guarded",
+            False,
+            "ai_trade_council_vote",
+            (
+                "ai-trade-council/snapshots/"
+                + ("b" * 64)
+                + ".json"
+            ),
+            technical,
+        )
+        self.assertLessEqual(
+            len(full_prompt),
+            self.runner.AI_TRADE_COUNCIL_PROMPT_MAX_CHARS,
+        )
+
+        price_action = self.runner.compact_ai_trade_council_snapshot(
+            payload,
+            "price_action",
+        )
+        price_scope = price_action["promptScope"]
+        self.assertEqual(price_scope["artifactAnalysisBars"], 1000)
+        self.assertEqual(price_scope["rawBarsIncluded"], 500)
+        self.assertEqual(
+            price_scope["priceActionFeaturesScope"],
+            "all_backend_features_full_analysis_window",
+        )
+        self.assertIn("priceActionFeatures", price_action["chartSnapshot"])
+        self.assertNotIn("technicalIndicators", price_action["chartSnapshot"])
+
+        news = self.runner.compact_ai_trade_council_snapshot(payload, "news")
+        self.assertEqual(news["promptScope"]["rawBarsIncluded"], 0)
+        self.assertNotIn("bars", news["chartSnapshot"])
+        self.assertNotIn("technicalIndicators", news["chartSnapshot"])
+        self.assertNotIn("priceActionFeatures", news["chartSnapshot"])
+
+    def test_runner_separates_1000_source_bars_from_300_bar_mission_artifact(self) -> None:
+        payload = self._runner_council_snapshot_payload("9" * 64, 300)
+        payload["chartSnapshot"]["sourceBarCount"] = 1000
+        payload["chartSnapshot"]["analysisWindow"]["sourceBarCount"] = 1000
+        payload["policy"]["sourceBarCount"] = 1000
+        payload["policy"]["analysisWindow"]["sourceBarCount"] = 1000
+        for index, bar in enumerate(payload["chartSnapshot"]["bars"]):
+            close = 2300.0 + (index * 0.137) + ((index % 17) * 0.019)
+            bar.update({
+                "open": round(close - ((index % 5) * 0.071), 8),
+                "high": round(close + 1.113 + ((index % 7) * 0.037), 8),
+                "low": round(close - 1.207 - ((index % 11) * 0.029), 8),
+                "close": round(close, 8),
+                "volume": 100 + ((index * 13) % 211),
+            })
+        payload["chartSnapshot"].update(
+            self.bridge._ai_trade_council_analysis_feature_bundle(
+                payload["chartSnapshot"]["bars"]
+            )
+        )
+        self.assertLess(
+            len(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
+            self.runner.AI_TRADE_COUNCIL_SNAPSHOT_MAX_BYTES,
+        )
+
+        technical = self.runner.compact_ai_trade_council_snapshot(
+            payload,
+            "technical",
+            {"analysisMode": "deep_300"},
+        )
+        scope = technical["promptScope"]
+        self.assertEqual(scope["analysisMode"], "deep_300")
+        self.assertFalse(scope["analysisModeDefaulted"])
+        self.assertEqual(scope["sourceSnapshotBars"], 1000)
+        self.assertEqual(scope["missionArtifactBars"], 300)
+        self.assertEqual(scope["artifactAnalysisBars"], 300)
+        self.assertEqual(
+            scope["artifactScope"],
+            "exact_backend_audited_analysis_window_not_full_source_snapshot",
+        )
+        self.assertEqual(technical["policy"]["analysisBarCountUsed"], 300)
+        self.assertEqual(len(payload["chartSnapshot"]["bars"]), 300)
+        self.assertEqual(scope["rawBarsIncluded"], 300)
+        self.assertEqual(scope["rawBarsScope"], "full_analysis_window")
+        self.assertEqual(scope["technicalSeriesIncluded"], 300)
+        self.assertEqual(scope["technicalSeriesScope"], "full_analysis_window")
+        self.assertEqual(scope["technicalImportantSeriesIncluded"], 300)
+        self.assertEqual(scope["technicalDetailSeriesIncluded"], 60)
+        self.assertEqual(
+            scope["technicalDetailSeriesScope"],
+            "latest_closed_bars_prompt_limited",
+        )
+        self.assertEqual(
+            scope["technicalDetailIndicatorFieldCount"],
+            27,
+        )
+        self.assertTrue(scope["fullWindowCompressedEvidenceIncluded"])
+        self.assertFalse(scope["fallbackApplied"])
+        self.assertTrue(scope["softLimitSatisfied"])
+        self.assertTrue(scope["hardLimitSatisfied"])
+        chart = technical["chartSnapshot"]
+        self.assertNotIn("bars", chart)
+        self.assertEqual(chart["barsColumnar"]["pointCount"], 300)
+        indicators = chart["technicalIndicators"]
+        self.assertNotIn("series", indicators)
+        self.assertEqual(
+            indicators["importantSeriesColumnar"]["pointCount"],
+            300,
+        )
+        self.assertEqual(
+            indicators["importantSeriesColumnar"]["fields"],
+            list(
+                self.runner.AI_TRADE_COUNCIL_TECHNICAL_IMPORTANT_SERIES_FIELDS
+            ),
+        )
+        self.assertEqual(
+            indicators["latestDetailSeriesColumnar"]["pointCount"],
+            60,
+        )
+        self.assertEqual(
+            indicators["latestDetailSeriesColumnar"]["fields"],
+            list(
+                self.runner.AI_TRADE_COUNCIL_TECHNICAL_DETAIL_SERIES_FIELDS
+            ),
+        )
+        self.assertLessEqual(
+            len(json.dumps(technical, ensure_ascii=False, separators=(",", ":"))),
+            self.runner.AI_TRADE_COUNCIL_EMBEDDED_SOFT_MAX_CHARS,
+        )
+        technical_prompt = self.runner.build_prompt(
+            "x" * 8000,
+            "optimization_agent",
+            "source-1000-analysis-300-cap-test",
+            "specialist_balanced",
+            7000,
+            "auto_guarded",
+            False,
+            "ai_trade_council_vote",
+            (
+                "ai-trade-council/snapshots/"
+                + ("8" * 64)
+                + ".json"
+            ),
+            technical,
+        )
+        self.assertLessEqual(
+            len(technical_prompt),
+            self.runner.AI_TRADE_COUNCIL_PROMPT_MAX_CHARS,
+        )
+
+        price_action = self.runner.compact_ai_trade_council_snapshot(
+            payload,
+            "price_action",
+        )
+        self.assertEqual(price_action["promptScope"]["sourceSnapshotBars"], 1000)
+        self.assertEqual(price_action["promptScope"]["missionArtifactBars"], 300)
+        self.assertEqual(price_action["promptScope"]["rawBarsIncluded"], 300)
+        self.assertEqual(
+            price_action["chartSnapshot"]["priceActionFeatures"]["barCount"],
+            300,
+        )
+
+        payload["policy"]["sourceBarCount"] = 999
+        with self.assertRaisesRegex(ValueError, "source and analysis bar scopes"):
+            self.runner.compact_ai_trade_council_snapshot(payload, "technical")
+
+    def test_smart_300_fallback_reports_every_reduced_scope_truthfully(self) -> None:
+        payload = self._runner_council_snapshot_payload("8" * 64, 300)
+        payload["chartSnapshot"].update(
+            self.bridge._ai_trade_council_analysis_feature_bundle(
+                payload["chartSnapshot"]["bars"]
+            )
+        )
+        original_soft_limit = (
+            self.runner.AI_TRADE_COUNCIL_EMBEDDED_SOFT_MAX_CHARS
+        )
+        try:
+            self.runner.AI_TRADE_COUNCIL_EMBEDDED_SOFT_MAX_CHARS = 12000
+            compact = self.runner.compact_ai_trade_council_snapshot(
+                payload,
+                "technical",
+                {"analysisMode": "smart_300"},
+            )
+        finally:
+            self.runner.AI_TRADE_COUNCIL_EMBEDDED_SOFT_MAX_CHARS = (
+                original_soft_limit
+            )
+
+        scope = compact["promptScope"]
+        self.assertTrue(scope["fallbackApplied"])
+        self.assertFalse(scope["fullWindowCompressedEvidenceIncluded"])
+        self.assertLessEqual(scope["rawBarsIncluded"], 300)
+        self.assertLessEqual(scope["technicalImportantSeriesIncluded"], 300)
+        if scope["rawBarsIncluded"] < 300:
+            self.assertNotEqual(scope["rawBarsScope"], "full_analysis_window")
+        if scope["technicalImportantSeriesIncluded"] < 300:
+            self.assertNotEqual(
+                scope["technicalImportantSeriesScope"],
+                "full_analysis_window",
+            )
+        self.assertEqual(
+            scope["promptPayloadCharacters"],
+            len(
+                json.dumps(
+                    compact,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            ),
+        )
+        self.assertLessEqual(
+            scope["promptPayloadCharacters"],
+            self.runner.AI_TRADE_COUNCIL_EMBEDDED_MAX_CHARS,
+        )
+
+    def test_ai_trade_council_runner_rejects_silent_bar_count_reduction(self) -> None:
+        payload = self._runner_council_snapshot_payload("e" * 64, 240)
+        payload["policy"]["analysisBarCountRequested"] = 300
+        with self.assertRaisesRegex(ValueError, "analysis bar count"):
+            self.runner.compact_ai_trade_council_snapshot(payload, "technical")
+
+        payload = self._runner_council_snapshot_payload("f" * 64, 120)
+        payload["chartSnapshot"]["bars"].append(
+            dict(payload["chartSnapshot"]["bars"][-1])
+        )
+        with self.assertRaisesRegex(ValueError, "bound analysis count"):
+            self.runner.compact_ai_trade_council_snapshot(payload, "price_action")
+
+    def test_ai_trade_council_auto_worker_passes_bound_schema_mode_to_runner(self) -> None:
+        snapshot_id = "d" * 64
+        snapshot_artifact_digest = "e" * 64
+        snapshot_reference = (
+            "ai-trade-council/snapshots/"
+            f"{snapshot_artifact_digest}.json"
+        )
+        vote = {
+            "snapshotId": snapshot_id,
+            "agentId": "codex_mcp_operator",
+            "roleId": "news",
+            "decision": "HOLD",
+            "confidence": 60,
+            "horizonBars": 1,
+            "validUntilBarTime": int(time.time()) + 7200,
+            "stopLossPrice": None,
+            "takeProfitPrice": None,
+            "indicatorValidation": None,
+            "volatilityState": None,
+            "eventRisk": "HOLD",
+            "horizon": "4 hours",
+            "observations": ["Verified public context is neutral."],
+            "invalidation": "A new high-impact release changes the context.",
+            "evidence": [
+                {
+                    "label": "Source one",
+                    "observedAt": datetime.now(timezone.utc).isoformat(),
+                    "sourceUrl": "https://example.com/one",
+                },
+                {
+                    "label": "Source two",
+                    "observedAt": datetime.now(timezone.utc).isoformat(),
+                    "sourceUrl": "https://example.org/two",
+                },
+            ],
+            "warnings": [],
+        }
+        originals = {
+            "OPERATOR_MODE_PATH": self.bridge.OPERATOR_MODE_PATH,
+            "MISSIONS_PATH": self.bridge.MISSIONS_PATH,
+            "RUNTIME_REPORTS_DIR": self.bridge.RUNTIME_REPORTS_DIR,
+            "AUDIT_PATH": self.bridge.AUDIT_PATH,
+            "CODEX_RUNNER_PYTHON": self.bridge.CODEX_RUNNER_PYTHON,
+            "CODEX_RUNNER_SCRIPT": self.bridge.CODEX_RUNNER_SCRIPT,
+            "bridge_status": self.bridge.bridge_status,
+            "codex_rate_limits": self.bridge.codex_rate_limits,
+            "check_rate_limit": self.bridge.check_rate_limit,
+            "run_safe_command": self.bridge.run_safe_command,
+            "REAL_RUN_SEMAPHORE": self.bridge.REAL_RUN_SEMAPHORE,
+        }
+        runner_calls = []
+
+        def fake_command(
+            command,
+            timeout=8,
+            output_limit=1200,
+            input_text=None,
+            *,
+            kill_process_tree_on_timeout=False,
+            cancel_event=None,
+            tracking_key=None,
+        ):
+            runner_calls.append(list(command))
+            result = {
+                "ok": True,
+                "status": "completed",
+                "workStatus": "completed",
+                "finalMessage": json.dumps(vote),
+                "durationMs": 4,
+                "processStarted": True,
+                "processTreeTerminated": False,
+                "workingDirectory": "workspace",
+                "writeRoots": [],
+                "controlPlaneWritable": False,
+                "webSearchEnabled": True,
+                "webSearchMode": "live",
+                "webSearchUsed": True,
+                "webSearchEvidenceVerified": True,
+                "evidence": vote["evidence"],
+                "artifacts": {},
+            }
+            return {
+                "ok": True,
+                "exitCode": 0,
+                "output": json.dumps(result),
+                "durationMs": 4,
+                "processStarted": True,
+                "processTreeTerminated": False,
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            try:
+                self.bridge.OPERATOR_MODE_PATH = runtime / "operator-mode.json"
+                self.bridge.MISSIONS_PATH = runtime / "missions.json"
+                self.bridge.RUNTIME_REPORTS_DIR = runtime / "reports"
+                self.bridge.AUDIT_PATH = runtime / "audit.jsonl"
+                self.bridge.CODEX_RUNNER_PYTHON = Path(__file__)
+                self.bridge.CODEX_RUNNER_SCRIPT = Path(__file__)
+                self.bridge.bridge_status = lambda: {"codex": {"status": "ready"}}
+                self.bridge.codex_rate_limits = lambda force=False: {
+                    "ok": True,
+                    "status": "ready",
+                    "limitReached": False,
+                    "stale": False,
+                }
+                self.bridge.check_rate_limit = lambda *args, **kwargs: (True, 0)
+                self.bridge.run_safe_command = fake_command
+                self.bridge.REAL_RUN_SEMAPHORE = threading.BoundedSemaphore(value=1)
+                self.bridge.RATE_LIMIT_STATE.clear()
+                self.assertTrue(
+                    self.bridge.set_operator_mode({"mode": "auto_guarded"})["ok"]
+                )
+                parent_id = "mission-council-worker-parent"
+                contract_digest = "f" * 64
+                mission = self.bridge.create_mission({
+                    "title": "Council news analysis",
+                    "prompt": "Analyze the validated read-only Council snapshot.",
+                    "agentId": "codex_mcp_operator",
+                    "requester": "manager",
+                    "parentMissionId": parent_id,
+                    "toolId": "codex_web_research",
+                    "targetId": "left_analytics_console",
+                    "risk": "medium",
+                    "reportType": "ai_trade_council_vote",
+                    "analysisContext": {
+                        "kind": "ai_trade_council_vote",
+                        "contractDigest": contract_digest,
+                        "snapshotId": snapshot_id,
+                        "snapshotArtifact": snapshot_reference,
+                        "snapshotArtifactDigest": snapshot_artifact_digest,
+                        "agentId": "codex_mcp_operator",
+                        "roleId": "news",
+                        "referencePrice": 2400.1,
+                        "horizonBars": vote["horizonBars"],
+                        "validUntilBarTime": vote["validUntilBarTime"],
+                        "roundDeadlineAt": (
+                            datetime.now(timezone.utc) + timedelta(minutes=5)
+                        ).isoformat(),
+                        "qualityPolicy": {
+                            "maximumNewsAgeSeconds": 86400,
+                            "maximumFutureEvidenceSkewSeconds": 300,
+                            "minimumDistinctNewsDomains": 2,
+                        },
+                        "propId": "left_analytics_console",
+                        "readOnly": True,
+                    },
+                }, status="queued", allow_analysis_context=True)
+                # A Council vote is executable only as part of one atomically
+                # committed three-specialist round. Build that production
+                # invariant here while keeping this test focused on runner
+                # argument binding for the news specialist.
+                child_ids = [mission["id"]]
+                siblings = []
+                for sibling_agent in ("optimization_agent", "backtest_analyst"):
+                    sibling_id = f"mission-council-worker-{sibling_agent}"
+                    child_ids.append(sibling_id)
+                    siblings.append({
+                        "id": sibling_id,
+                        "status": "queued",
+                        "owner": sibling_agent,
+                        "toolId": self.bridge.AI_TRADE_COUNCIL_ALLOWED_TOOLS[
+                            sibling_agent
+                        ],
+                        "parentMissionId": parent_id,
+                        "analysisContext": {
+                            "kind": "ai_trade_council_vote",
+                            "agentId": sibling_agent,
+                            "roleId": self.bridge.AI_TRADE_COUNCIL_AGENT_ROLES[
+                                sibling_agent
+                            ],
+                            "snapshotId": snapshot_id,
+                            "contractDigest": contract_digest,
+                        },
+                    })
+                parent = {
+                    "id": parent_id,
+                    "status": "queued",
+                    "phase": "council_specialists_queued",
+                    "subtaskIds": child_ids,
+                    "analysisContext": {
+                        "kind": "ai_trade_council_parent",
+                        "snapshotId": snapshot_id,
+                        "contractDigest": contract_digest,
+                    },
+                }
+                self.bridge.save_missions([parent, mission, *siblings])
+                self.assertTrue(mission["autoEligible"])
+                self.bridge.process_auto_mission("council-worker-test", mission)
+                finished = self.bridge.find_mission(mission["id"])
+            finally:
+                for name, value in originals.items():
+                    setattr(self.bridge, name, value)
+
+        self.assertEqual(len(runner_calls), 1, finished)
+        command = runner_calls[0]
+        self.assertEqual(
+            command[command.index("--result-mode") + 1],
+            "ai_trade_council_vote",
+        )
+        self.assertEqual(
+            command[command.index("--council-snapshot-id") + 1],
+            snapshot_id,
+        )
+        self.assertEqual(
+            command[command.index("--council-snapshot-digest") + 1],
+            snapshot_artifact_digest,
+        )
+        self.assertEqual(
+            command[command.index("--council-role-id") + 1],
+            "news",
+        )
+        self.assertIn("--web-search", command)
+        self.assertEqual(finished["status"], "completed")
+        self.assertEqual(finished["councilVote"]["snapshotId"], snapshot_id)
+        self.assertEqual(finished["execution"]["writeRoots"], [])
+        self.assertTrue(finished["webSearchEvidenceVerified"])
 
     def test_codex_rate_limit_runner_drops_account_and_secret_fields(self) -> None:
         payload = self.runner.sanitize_rate_limits_response({
@@ -2777,6 +6017,23 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.bridge.MISSIONS_PATH = original_missions
                 self.bridge.AUDIT_PATH = original_audit
 
+    def test_web_research_intent_is_routed_only_for_explicit_web_goals(self) -> None:
+        self.assertTrue(
+            self.bridge.goal_requires_web_research(
+                "หา EA จากเว็บไซต์ต่างประเทศ 2 แหล่งและสรุป URL"
+            )
+        )
+        self.assertTrue(
+            self.bridge.goal_requires_web_research(
+                "Research https://example.com and summarize the public page"
+            )
+        )
+        self.assertFalse(
+            self.bridge.goal_requires_web_research(
+                "วิเคราะห์ไฟล์ Backtest ที่อยู่ใน Workspace"
+            )
+        )
+
     def test_capability_registry_is_contract_owned_sanitized_and_prop_filtered(self) -> None:
         fake_status = {
             "mode": "Codex Runner Ready",
@@ -2786,12 +6043,16 @@ class RuntimeIntegrityTests(unittest.TestCase):
             "time": "2026-07-15T00:00:00+00:00",
         }
         registry = self.bridge.capability_registry(fake_status)
-        self.assertEqual(registry["contractVersion"], "tool-permission-contract-v007")
+        self.assertEqual(registry["contractVersion"], "tool-permission-contract-v012")
         self.assertFalse(registry["policy"]["frontendSecrets"])
         self.assertTrue(registry["policy"]["disabledToolsFailClosed"])
         telegram = next(item for item in registry["capabilities"] if item["id"] == "send_telegram")
         self.assertFalse(telegram["realExecutionAvailable"])
         self.assertFalse(telegram["autoRunnable"])
+        web_research = next(item for item in registry["capabilities"] if item["id"] == "codex_web_research")
+        self.assertTrue(web_research["runtimeReady"])
+        self.assertTrue(web_research["webSearchEnabled"])
+        self.assertEqual(web_research["webSearchMode"], "live")
         serialized = json.dumps(registry).lower()
         for forbidden in ("api_key", "authorization", "cookie", "password"):
             self.assertNotIn(forbidden, serialized)
@@ -3181,6 +6442,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             *,
             kill_process_tree_on_timeout=False,
             cancel_event=None,
+            tracking_key=None,
         ):
             runner_calls.append({
                 "command": list(command),
@@ -3470,23 +6732,25 @@ class RuntimeIntegrityTests(unittest.TestCase):
             original_audit = self.bridge.AUDIT_PATH
             original_process = self.bridge.MISSION_WORKER_PROCESS
             original_job = self.bridge.MISSION_WORKER_JOB_HOLDER
+            original_processes = dict(self.bridge.MISSION_WORKER_PROCESSES)
             original_state = dict(self.bridge.MISSION_WORKER_STATE)
             original_terminate = self.bridge._terminate_command_process_tree
-
-            class FakeRunningProcess:
-                pid = 424242
-
-                @staticmethod
-                def poll():
-                    return None
 
             try:
                 self.bridge.RUNTIME_DIR = runtime
                 self.bridge.MISSIONS_PATH = runtime / "missions.json"
                 self.bridge.RUNTIME_REPORTS_DIR = runtime / "reports"
                 self.bridge.AUDIT_PATH = runtime / "bridge-audit.jsonl"
-                self.bridge.MISSION_WORKER_PROCESS = FakeRunningProcess()
+                fake_process = object.__new__(self.bridge.subprocess.Popen)
+                fake_process.pid = 424242
+                fake_process.poll = lambda: None
+                self.bridge.MISSION_WORKER_PROCESS = fake_process
                 self.bridge.MISSION_WORKER_JOB_HOLDER = {"fake": True}
+                self.bridge.MISSION_WORKER_PROCESSES.clear()
+                self.bridge.MISSION_WORKER_PROCESSES["mission-overdue-watchdog"] = {
+                    "process": fake_process,
+                    "jobHolder": {"fake": True},
+                }
                 self.bridge.MISSION_WORKER_STATE.update({
                     "currentMissionId": "mission-overdue-watchdog",
                     "status": "running",
@@ -3543,6 +6807,8 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.bridge.AUDIT_PATH = original_audit
                 self.bridge.MISSION_WORKER_PROCESS = original_process
                 self.bridge.MISSION_WORKER_JOB_HOLDER = original_job
+                self.bridge.MISSION_WORKER_PROCESSES.clear()
+                self.bridge.MISSION_WORKER_PROCESSES.update(original_processes)
                 self.bridge.MISSION_WORKER_STATE.clear()
                 self.bridge.MISSION_WORKER_STATE.update(original_state)
                 self.bridge._terminate_command_process_tree = original_terminate
@@ -3627,6 +6893,676 @@ class RuntimeIntegrityTests(unittest.TestCase):
         gitignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("workspace/**", gitignore)
         self.assertIn("!workspace/.gitkeep", gitignore)
+
+    def test_agent_collaboration_contract_and_frontend_are_backend_owned(self) -> None:
+        tools = json.loads(
+            (PROJECT_ROOT / "contracts" / "tools" / "tool-permission-contract.json")
+            .read_text(encoding="utf-8")
+        )
+        orchestration = json.loads(
+            (PROJECT_ROOT / "contracts" / "orchestration" / "orchestration-contract.json")
+            .read_text(encoding="utf-8")
+        )
+        bridge = json.loads(
+            (PROJECT_ROOT / "contracts" / "bridge" / "bridge-contract.json")
+            .read_text(encoding="utf-8")
+        )
+        collaboration = next(item for item in tools["tools"] if item["id"] == "agent_collaboration")
+        discovery_lab = next(item for item in tools["tools"] if item["id"] == "discovery_lab_mt4")
+        self.assertTrue(collaboration["realExecutionAvailable"])
+        self.assertTrue(collaboration["consumesCodexQuota"])
+        self.assertFalse(collaboration["toolsEnabled"])
+        self.assertFalse(collaboration["taskCreationEnabled"])
+        self.assertFalse(discovery_lab["realExecutionAvailable"])
+        self.assertFalse(discovery_lab["pluginBindingAvailable"])
+        self.assertFalse(discovery_lab["liveTradingAllowed"])
+        policy = orchestration["agentCollaboration"]
+        self.assertFalse(policy["defaultEnabled"])
+        self.assertTrue(policy["freshRateLimitRequiredBeforeEveryTurn"])
+        self.assertTrue(policy["managerAlwaysFinalTurn"])
+        self.assertFalse(policy["autoCreateFollowup"])
+        self.assertIn("GET /api/collaboration/schedule", bridge["endpoints"])
+        self.assertIn("POST /api/collaboration/run-now", bridge["endpoints"])
+
+        html = FRONTEND_INDEX_PATH.read_text(encoding="utf-8")
+        main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+        for element_id in (
+            "agentCollabControl",
+            "agentCollabPanel",
+            "agentCollabTopic",
+            "agentCollabRunNow",
+            "agentCollabToggle",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn('const AGENT_COLLABORATION_ENDPOINT = "/api/collaboration/schedule";', main)
+        self.assertIn('const AGENT_COLLABORATION_RUN_ENDPOINT = "/api/collaboration/run-now";', main)
+        self.assertNotIn("participants:", main[main.index("function collaborationFormPayload"):main.index("async function saveAgentCollaborationSchedule")])
+        collaboration_visual_start = main.index("function collaborationOwnsOfficeVisuals()")
+        collaboration_visual_end = main.index("\nfunction syncAgentCollaborationVisual(", collaboration_visual_start)
+        collaboration_visual_block = main[collaboration_visual_start:collaboration_visual_end]
+        self.assertIn("collaboration.enabled", collaboration_visual_block)
+        self.assertIn("collaboration.activeMeetingId", collaboration_visual_block)
+        self.assertIn('["loading", "starting", "running"].includes(collaboration.status)', collaboration_visual_block)
+        bridge_source = BRIDGE_PATH.read_text(encoding="utf-8")
+        self.assertIn("cancel_event=COLLABORATION_SCHEDULER_STOP", bridge_source)
+        self.assertIn("def _record_collaboration_session_failure(", bridge_source)
+
+    def test_collaboration_schedule_validation_persists_only_allowlisted_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            originals = {
+                "COLLABORATION_SCHEDULE_PATH": self.bridge.COLLABORATION_SCHEDULE_PATH,
+                "OPERATOR_MODE_PATH": self.bridge.OPERATOR_MODE_PATH,
+                "AUDIT_PATH": self.bridge.AUDIT_PATH,
+            }
+            with self.bridge.CODEX_RATE_LIMIT_CACHE_LOCK:
+                original_cache = dict(self.bridge.CODEX_RATE_LIMIT_CACHE)
+                self.bridge.CODEX_RATE_LIMIT_CACHE.update({
+                    "payload": {
+                        "ok": True,
+                        "status": "ready",
+                        "primary": {"remainingPercent": 80},
+                        "secondary": {"remainingPercent": 70},
+                        "limitReached": False,
+                        "stale": False,
+                    },
+                    "fetchedMonotonic": time.monotonic(),
+                    "invalidated": False,
+                })
+            try:
+                self.bridge.COLLABORATION_SCHEDULE_PATH = runtime / "collaboration-schedule.json"
+                self.bridge.OPERATOR_MODE_PATH = runtime / "operator-mode.json"
+                self.bridge.AUDIT_PATH = runtime / "audit.jsonl"
+                self.bridge.write_json(
+                    self.bridge.OPERATOR_MODE_PATH,
+                    {"mode": "auto_guarded", "updatedAt": self.bridge.utc_now()},
+                )
+                rejected = self.bridge.set_collaboration_schedule({"participants": ["ceo"]})
+                self.assertFalse(rejected["ok"])
+                self.assertEqual(rejected["kind"], "invalid_collaboration_schedule_request")
+                secret = self.bridge.set_collaboration_schedule({"topic": "api_key=abcdefghijklmnop"})
+                self.assertFalse(secret["ok"])
+                saved = self.bridge.set_collaboration_schedule({
+                    "enabled": True,
+                    "topic": "ช่วยกันตรวจ UX รายงาน Backtest ให้คนทั่วไปอ่านเข้าใจได้ง่ายขึ้น",
+                    "startTime": "22:00",
+                    "endTime": "06:00",
+                    "intervalMinutes": 120,
+                    "maxTurns": 3,
+                    "maxDailyRuns": 2,
+                    "minRemainingPercent": 40,
+                })
+                self.assertTrue(saved["ok"])
+                stored = self.bridge.load_collaboration_schedule_store()
+                self.assertTrue(stored["config"]["enabled"])
+                self.assertEqual(stored["config"]["participants"][-1], "manager")
+                self.assertFalse(stored["config"]["autoCreateFollowup"])
+                self.assertEqual(stored["config"]["timezone"], "Asia/Bangkok")
+            finally:
+                for name, value in originals.items():
+                    setattr(self.bridge, name, value)
+                with self.bridge.CODEX_RATE_LIMIT_CACHE_LOCK:
+                    self.bridge.CODEX_RATE_LIMIT_CACHE.clear()
+                    self.bridge.CODEX_RATE_LIMIT_CACHE.update(original_cache)
+
+    def test_collaboration_window_and_rate_reserve_fail_closed(self) -> None:
+        config = {
+            "startTime": "22:00",
+            "endTime": "06:00",
+            "minRemainingPercent": 30,
+        }
+        self.assertTrue(
+            self.bridge._collaboration_inside_window(
+                config,
+                self.bridge.datetime(2026, 7, 24, 23, 30, tzinfo=self.bridge.THAILAND_TIMEZONE),
+            )
+        )
+        self.assertTrue(
+            self.bridge._collaboration_inside_window(
+                config,
+                self.bridge.datetime(2026, 7, 25, 5, 30, tzinfo=self.bridge.THAILAND_TIMEZONE),
+            )
+        )
+        self.assertFalse(
+            self.bridge._collaboration_inside_window(
+                config,
+                self.bridge.datetime(2026, 7, 25, 12, 0, tzinfo=self.bridge.THAILAND_TIMEZONE),
+            )
+        )
+        original_peek = self.bridge.peek_codex_rate_limits
+        try:
+            self.bridge.peek_codex_rate_limits = lambda: {
+                "ok": True,
+                "status": "ready",
+                "primary": {"remainingPercent": 70},
+                "secondary": {"remainingPercent": 25},
+                "limitReached": False,
+                "stale": False,
+            }
+            blocked = self.bridge._collaboration_quota_gate(config, refresh=False)
+            self.assertFalse(blocked["allowed"])
+            self.assertEqual(blocked["reason"], "quota_below_reserve")
+            self.bridge.peek_codex_rate_limits = lambda: {
+                "ok": True,
+                "status": "ready",
+                "primary": {"remainingPercent": 70},
+                "limitReached": False,
+                "stale": True,
+            }
+            stale = self.bridge._collaboration_quota_gate(config, refresh=False)
+            self.assertFalse(stale["allowed"])
+            self.assertEqual(stale["reason"], "quota_stale")
+        finally:
+            self.bridge.peek_codex_rate_limits = original_peek
+
+    def test_collaboration_runner_strips_task_authority_even_if_chat_classifies_task(self) -> None:
+        original_chat = self.runner.run_agent_chat
+        try:
+            self.runner.run_agent_chat = lambda *args, **kwargs: {
+                "ok": True,
+                "status": "completed",
+                "finalMessage": "เสนอให้เพิ่มการทดสอบ UX ก่อนปล่อยรุ่นถัดไป",
+                "intent": "task_request",
+                "taskGoal": "create a task",
+                "agentName": "EA Developer",
+                "durationMs": 12,
+                "modelTier": "specialist_fast",
+                "model": "gpt-5.5",
+                "reasoningEffort": "low",
+                "quotaAttempted": True,
+                "quotaConsumption": "confirmed",
+                "usage": {"outputChars": 48},
+                "guardrails": {
+                    "toolsEnabled": False,
+                    "computerUseEnabled": False,
+                    "projectWorkspaceExposed": False,
+                    "ephemeral": True,
+                },
+            }
+            result = self.runner.run_agent_collaboration_turn(
+                "ช่วยกันทบทวน Product",
+                "ea_developer",
+                "meeting-test",
+            )
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["taskCreationEnabled"])
+            self.assertFalse(result["guardrails"]["taskCreationEnabled"])
+            self.assertNotIn("taskGoal", result)
+            self.assertNotIn("intent", result)
+        finally:
+            self.runner.run_agent_chat = original_chat
+
+    def test_collaboration_session_writes_mission_transcript_report_and_manager_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            originals = {
+                "RUNTIME_DIR": self.bridge.RUNTIME_DIR,
+                "MISSIONS_PATH": self.bridge.MISSIONS_PATH,
+                "RUNTIME_REPORTS_DIR": self.bridge.RUNTIME_REPORTS_DIR,
+                "AUDIT_PATH": self.bridge.AUDIT_PATH,
+                "MEMORY_DIR": self.bridge.MEMORY_DIR,
+                "MEMORY_INDEX_PATH": self.bridge.MEMORY_INDEX_PATH,
+                "MEETING_TRANSCRIPTS_PATH": self.bridge.MEETING_TRANSCRIPTS_PATH,
+                "COLLABORATION_SCHEDULE_PATH": self.bridge.COLLABORATION_SCHEDULE_PATH,
+                "OPERATOR_MODE_PATH": self.bridge.OPERATOR_MODE_PATH,
+                "REAL_RUN_SEMAPHORE": self.bridge.REAL_RUN_SEMAPHORE,
+                "_collaboration_quota_gate": self.bridge._collaboration_quota_gate,
+                "_run_collaboration_agent_turn": self.bridge._run_collaboration_agent_turn,
+            }
+            original_runtime_state = dict(self.bridge.COLLABORATION_STATE)
+            original_rate_state = dict(self.bridge.RATE_LIMIT_STATE)
+            try:
+                self.bridge.RUNTIME_DIR = runtime
+                self.bridge.MISSIONS_PATH = runtime / "missions.json"
+                self.bridge.RUNTIME_REPORTS_DIR = runtime / "reports"
+                self.bridge.AUDIT_PATH = runtime / "audit.jsonl"
+                self.bridge.MEMORY_DIR = runtime / "memory"
+                self.bridge.MEMORY_INDEX_PATH = runtime / "memory" / "memory-index.json"
+                self.bridge.MEETING_TRANSCRIPTS_PATH = runtime / "memory" / "meetings" / "meeting-transcripts.jsonl"
+                self.bridge.COLLABORATION_SCHEDULE_PATH = runtime / "collaboration-schedule.json"
+                self.bridge.OPERATOR_MODE_PATH = runtime / "operator-mode.json"
+                self.bridge.REAL_RUN_SEMAPHORE = threading.BoundedSemaphore(value=1)
+                self.bridge._collaboration_quota_gate = lambda config, refresh: {
+                    "allowed": True,
+                    "reason": "ready",
+                    "remainingPercent": 80,
+                }
+                self.bridge._run_collaboration_agent_turn = lambda **kwargs: {
+                    "ok": True,
+                    "status": "completed",
+                    "message": (
+                        "สรุปให้ทดสอบกับผู้ใช้จริงและวัดเวลาอ่านรายงาน"
+                        if kwargs["speaker_agent_id"] == "manager"
+                        else f"ข้อเสนอจาก {kwargs['speaker_agent_id']}"
+                    ),
+                }
+                self.bridge.write_json(
+                    self.bridge.OPERATOR_MODE_PATH,
+                    {"mode": "auto_guarded", "updatedAt": self.bridge.utc_now()},
+                )
+                store = self.bridge.ensure_collaboration_schedule_store()
+                store["config"]["topic"] = "ช่วยกันตรวจรูปแบบรายงาน Backtest ให้เข้าใจง่ายและวัดผลได้"
+                store["config"]["maxTurns"] = 3
+                store = self.bridge._save_collaboration_schedule_store(store)
+                mission = self.bridge.create_mission({
+                    "title": "Agent ร่วมประชุม: ทดสอบ",
+                    "prompt": store["config"]["topic"],
+                    "agentId": "manager",
+                    "requester": "manager",
+                    "toolId": "agent_collaboration",
+                    "targetId": "mission_strategy_table",
+                    "risk": "low",
+                    "modelTier": "manager_quality",
+                    "reportType": "collaboration_report",
+                }, status="queued")
+                self.assertTrue(self.bridge.COLLABORATION_RUN_LOCK.acquire(blocking=False))
+                self.bridge.COLLABORATION_SCHEDULER_STOP.clear()
+                self.bridge._complete_collaboration_session("manual", store, mission)
+
+                missions = self.bridge.load_missions()
+                self.assertEqual(len(missions), 1)
+                self.assertEqual(missions[0]["toolId"], "agent_collaboration")
+                self.assertEqual(missions[0]["status"], "completed")
+                reports = self.bridge.load_runtime_reports()
+                self.assertEqual(len(reports), 1)
+                self.assertEqual(reports[0]["type"], "collaboration_report")
+                self.assertEqual(reports[0]["linkedPropId"], "mission_strategy_table")
+                self.assertFalse(reports[0]["metrics"]["toolsExecuted"])
+                meetings = self.bridge.load_meeting_records()
+                self.assertTrue(any(item.get("kind") == "meeting" for item in meetings))
+                self.assertTrue(any(item.get("kind") == "meeting.turn" for item in meetings))
+                final_meeting = next(item for item in meetings if item.get("kind") == "meeting")
+                self.assertTrue(final_meeting["decisions"])
+                self.assertEqual(final_meeting["status"], "completed")
+                audit = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH, limit=100)
+                end = next(item for item in audit if item.get("type") == "collaboration.session_end")
+                self.assertFalse(end["toolsExecuted"])
+                self.assertFalse(end["taskCreated"])
+            finally:
+                for name, value in originals.items():
+                    setattr(self.bridge, name, value)
+                self.bridge.COLLABORATION_STATE.clear()
+                self.bridge.COLLABORATION_STATE.update(original_runtime_state)
+                self.bridge.RATE_LIMIT_STATE.clear()
+                self.bridge.RATE_LIMIT_STATE.update(original_rate_state)
+                self.bridge.COLLABORATION_SCHEDULER_STOP.clear()
+                if self.bridge.COLLABORATION_RUN_LOCK.locked():
+                    self.bridge.COLLABORATION_RUN_LOCK.release()
+
+    def test_discovery_lab_readiness_never_equates_detection_with_execution(self) -> None:
+        readiness = self.bridge._discovery_lab_readiness_read_model(
+            "left_analytics_console",
+            {
+                "platforms": {
+                    "mt4": {"installedCount": 4, "runningCount": 0},
+                }
+            },
+            {
+                "selectedCandidate": {
+                    "candidateId": "mtc-safe",
+                    "platform": "mt4",
+                    "runningState": "not_running_detected",
+                }
+            },
+        )
+        self.assertTrue(readiness["selectedMt4"])
+        self.assertFalse(readiness["terminalRunning"])
+        self.assertFalse(readiness["pluginBindingAvailable"])
+        self.assertFalse(readiness["adapterReady"])
+        self.assertFalse(readiness["realExecutionAvailable"])
+        self.assertFalse(readiness["liveTradingAllowed"])
+        self.assertFalse(readiness["applicable"])
+        self.assertEqual(readiness["status"], "not_required")
+        self.assertEqual(readiness["stages"], [])
+
+    def test_discovery_lab_best_case_detection_still_requires_missing_adapter(self) -> None:
+        readiness = self.bridge._discovery_lab_readiness_read_model(
+            "left_analytics_console",
+            {
+                "platforms": {
+                    "mt4": {"installedCount": 4, "runningCount": 1},
+                }
+            },
+            {
+                "selectedCandidate": {
+                    "candidateId": "mtc-safe",
+                    "platform": "mt4",
+                    "runningState": "platform_running_detected",
+                }
+            },
+        )
+        self.assertTrue(readiness["selectedMt4"])
+        self.assertTrue(readiness["terminalRunning"])
+        self.assertFalse(readiness["applicable"])
+        self.assertEqual(readiness["status"], "not_required")
+        self.assertFalse(readiness["pluginBindingAvailable"])
+        self.assertFalse(readiness["adapterReady"])
+        self.assertFalse(readiness["realExecutionAvailable"])
+        self.assertEqual(readiness["stages"], [])
+        tools = json.loads(
+            (PROJECT_ROOT / "contracts" / "tools" / "tool-permission-contract.json")
+            .read_text(encoding="utf-8")
+        )
+        policy = next(item for item in tools["tools"] if item["id"] == "discovery_lab_mt4")
+        self.assertFalse(policy["approvalRequired"])
+        self.assertTrue(policy["unavailableDoesNotRequestApproval"])
+
+    def test_real_metatrader_intent_never_falls_through_to_generic_codex_task(self) -> None:
+        for goal in (
+            "ช่วยรัน Discovery Lab แล้ว Compile EA และทำ Backtest บน MT4",
+            "ช่วย Backtest EA ตัวนี้บน MT4",
+            "ทดสอบ EA ตัวนี้บน MT4",
+            "ช่วย Optimize EA ตัวนี้บน MT4",
+        ):
+            self.assertEqual(self.bridge.tool_for_agent_goal(goal), "discovery_lab_mt4")
+        for goal in (
+            "วิเคราะห์รายงาน Backtest ที่แนบมาและสรุป Drawdown",
+            "วิเคราะห์รายงาน Discovery Lab ที่แนบมา",
+            "วิเคราะห์ผล Backtest EA MT4 จากรายงานเดิม",
+            "สรุปรายงานที่ได้จากการ run backtest ให้หน่อย",
+            "ตรวจรายงาน Strategy Tester ที่แนบมา",
+            "วิเคราะห์ screenshot จาก MetaEditor",
+        ):
+            self.assertEqual(self.bridge.tool_for_agent_goal(goal), "codex_cli_task")
+        for goal in (
+            "ช่วยวิเคราะห์รายงานเดิม แล้วรัน Backtest ใหม่บน MT4",
+            "วิเคราะห์รายงานเดิม แล้วเปิด MT4",
+            "วิเคราะห์รายงานแล้วคอมไพล์ EA",
+            "วิเคราะห์รายงานก่อน จากนั้นทำ Backtest ใหม่บน MT4",
+            "analyze report then open mt4",
+            "analyze report then compile ea",
+            "analyze report and backtest this ea",
+            "analyze report and optimize this ea",
+            "วิเคราะห์รายงานแล้ว Backtest EA บน MT4",
+            "วิเคราะห์รายงานแล้ว Optimize EA บน MT4",
+        ):
+            self.assertEqual(self.bridge.tool_for_agent_goal(goal), "discovery_lab_mt4")
+        with tempfile.TemporaryDirectory() as directory:
+            original_audit = self.bridge.AUDIT_PATH
+            original_missions = self.bridge.MISSIONS_PATH
+            try:
+                self.bridge.AUDIT_PATH = Path(directory) / "audit.jsonl"
+                self.bridge.MISSIONS_PATH = Path(directory) / "missions.json"
+                result = self.bridge.run_bridge_task({
+                    "agentId": "ea_developer",
+                    "toolId": "discovery_lab_mt4",
+                    "prompt": "รัน Discovery Lab MT4 แบบ Offline",
+                })
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["kind"], "capability_unavailable")
+                self.assertEqual(result["_httpStatus"], 501)
+                self.assertFalse(self.bridge.MISSIONS_PATH.exists())
+            finally:
+                self.bridge.AUDIT_PATH = original_audit
+                self.bridge.MISSIONS_PATH = original_missions
+
+    def test_mt_execution_report_defaults_to_analysis_only_without_visible_proof(self) -> None:
+        analysis = self.bridge.report_execution_evidence_read_model({}, "backtest_report")
+        self.assertEqual(analysis["sourceKind"], "analysis_only")
+        self.assertFalse(analysis["mtExecutionVerified"])
+        self.assertIn("ยังไม่ได้ยืนยัน", analysis["scopeLabelTh"])
+        forged = self.bridge.report_execution_evidence_read_model({
+            "sourceKind": "mt4_visible_run",
+            "toolId": "discovery_lab_mt4",
+            "platform": "mt4",
+            "terminalCandidateId": "mtc-safe",
+            "compileProofVerified": True,
+            "visualBacktestProofVerified": True,
+        }, "backtest_report")
+        self.assertFalse(forged["mtExecutionVerified"])
+        self.assertEqual(forged["sourceKind"], "analysis_only")
+
+        with tempfile.TemporaryDirectory() as directory:
+            original_audit = self.bridge.AUDIT_PATH
+            original_missions = self.bridge.MISSIONS_PATH
+            try:
+                self.bridge.AUDIT_PATH = Path(directory) / "audit.jsonl"
+                self.bridge.MISSIONS_PATH = Path(directory) / "missions.json"
+                mission_id = "mission-visible-mt4-proof"
+                verification_id = "mt-proof-a1b2c3"
+                self.bridge.write_json(self.bridge.MISSIONS_PATH, {
+                    "missions": [{
+                        "id": mission_id,
+                        "status": "completed",
+                        "toolId": "discovery_lab_mt4",
+                    }]
+                })
+                self.bridge.append_audit({
+                    "type": "metatrader.execution_verified",
+                    "verificationId": verification_id,
+                    "missionId": mission_id,
+                    "toolId": "discovery_lab_mt4",
+                    "platform": "mt4",
+                    "terminalCandidateId": "mtc-safe",
+                    "status": "completed",
+                    "visibleApplicationProof": True,
+                    "liveTrading": False,
+                    "compileArtifactSha256": "a" * 64,
+                    "visualBacktestImageSha256": "b" * 64,
+                })
+                verified = self.bridge.report_execution_evidence_read_model({
+                    "sourceKind": "mt4_visible_run",
+                    "toolId": "discovery_lab_mt4",
+                    "platform": "mt4",
+                    "terminalCandidateId": "mtc-safe",
+                    "backendVerificationId": verification_id,
+                }, "backtest_report", mission_id)
+                self.assertTrue(verified["mtExecutionVerified"])
+                self.assertEqual(verified["sourceKind"], "mt4_visible_run")
+                self.assertTrue(verified["compileProofVerified"])
+                self.assertTrue(verified["visualBacktestProofVerified"])
+            finally:
+                self.bridge.AUDIT_PATH = original_audit
+                self.bridge.MISSIONS_PATH = original_missions
+
+    def test_discovery_lab_is_unavailable_without_requesting_approval(self) -> None:
+        bridge_contract = json.loads(
+            (PROJECT_ROOT / "contracts" / "bridge" / "bridge-contract.json")
+            .read_text(encoding="utf-8")
+        )
+        self.assertNotIn("discovery_lab_mt4", bridge_contract["approval_required_actions"])
+
+    def test_collaboration_recovery_closes_non_terminal_mission_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            originals = {
+                "MISSIONS_PATH": self.bridge.MISSIONS_PATH,
+                "RUNTIME_REPORTS_DIR": self.bridge.RUNTIME_REPORTS_DIR,
+                "AUDIT_PATH": self.bridge.AUDIT_PATH,
+                "COLLABORATION_SCHEDULE_PATH": self.bridge.COLLABORATION_SCHEDULE_PATH,
+            }
+            try:
+                self.bridge.MISSIONS_PATH = runtime / "missions.json"
+                self.bridge.RUNTIME_REPORTS_DIR = runtime / "reports"
+                self.bridge.AUDIT_PATH = runtime / "audit.jsonl"
+                self.bridge.COLLABORATION_SCHEDULE_PATH = runtime / "collaboration-schedule.json"
+                self.bridge.write_json(self.bridge.MISSIONS_PATH, {
+                    "missions": [{
+                        "id": "mission-collab-restart",
+                        "title": "Agent ร่วมประชุม",
+                        "detail": "ทบทวน Product",
+                        "owner": "manager",
+                        "toolId": "agent_collaboration",
+                        "targetId": "mission_strategy_table",
+                        "status": "running",
+                        "reportIds": [],
+                        "createdAt": self.bridge.utc_now(),
+                        "updatedAt": self.bridge.utc_now(),
+                    }]
+                })
+                recovered = self.bridge.recover_interrupted_collaboration_missions()
+                self.assertEqual(recovered, 1)
+                mission = self.bridge.load_missions()[0]
+                self.assertEqual(mission["status"], "failed")
+                self.assertEqual(mission["errorCode"], "bridge_restart_interrupted")
+                self.assertTrue(mission["reportIds"])
+                self.assertEqual(self.bridge.load_runtime_reports()[0]["status"], "blocked")
+            finally:
+                for name, value in originals.items():
+                    setattr(self.bridge, name, value)
+
+    def test_collaboration_runner_busy_finishes_as_blocked_instead_of_staying_blue(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            originals = {
+                "MISSIONS_PATH": self.bridge.MISSIONS_PATH,
+                "RUNTIME_REPORTS_DIR": self.bridge.RUNTIME_REPORTS_DIR,
+                "AUDIT_PATH": self.bridge.AUDIT_PATH,
+                "COLLABORATION_SCHEDULE_PATH": self.bridge.COLLABORATION_SCHEDULE_PATH,
+                "REAL_RUN_SEMAPHORE": self.bridge.REAL_RUN_SEMAPHORE,
+            }
+            busy = threading.BoundedSemaphore(value=1)
+            busy.acquire()
+            try:
+                self.bridge.MISSIONS_PATH = runtime / "missions.json"
+                self.bridge.RUNTIME_REPORTS_DIR = runtime / "reports"
+                self.bridge.AUDIT_PATH = runtime / "audit.jsonl"
+                self.bridge.COLLABORATION_SCHEDULE_PATH = runtime / "collaboration-schedule.json"
+                self.bridge.REAL_RUN_SEMAPHORE = busy
+                store = self.bridge.ensure_collaboration_schedule_store()
+                mission = self.bridge.create_mission({
+                    "title": "Agent ร่วมประชุม: Runner busy",
+                    "prompt": store["config"]["topic"],
+                    "agentId": "manager",
+                    "requester": "manager",
+                    "toolId": "agent_collaboration",
+                    "targetId": "mission_strategy_table",
+                    "risk": "low",
+                    "modelTier": "manager_quality",
+                    "reportType": "collaboration_report",
+                }, status="queued")
+                self.assertTrue(self.bridge.COLLABORATION_RUN_LOCK.acquire(blocking=False))
+                self.bridge._complete_collaboration_session("manual", store, mission)
+                stored = self.bridge.find_mission(mission["id"])
+                self.assertEqual(stored["status"], "blocked")
+                self.assertEqual(stored["errorCode"], "runner_busy")
+                self.assertTrue(stored["reportIds"])
+                self.assertFalse(self.bridge.COLLABORATION_RUN_LOCK.locked())
+            finally:
+                busy.release()
+                for name, value in originals.items():
+                    setattr(self.bridge, name, value)
+                if self.bridge.COLLABORATION_RUN_LOCK.locked():
+                    self.bridge.COLLABORATION_RUN_LOCK.release()
+
+    def test_collaboration_queue_rechecks_shutdown_after_gate(self) -> None:
+        original_gate = self.bridge._collaboration_gate
+        stop_was_set = self.bridge.COLLABORATION_SCHEDULER_STOP.is_set()
+        try:
+            self.bridge.COLLABORATION_SCHEDULER_STOP.clear()
+
+            def gate_then_stop(*_args, **_kwargs):
+                self.bridge.COLLABORATION_SCHEDULER_STOP.set()
+                return {"config": {}}, {"allowed": True}
+
+            self.bridge._collaboration_gate = gate_then_stop
+            result = self.bridge.queue_collaboration_session("manual")
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["kind"], "collaboration_stopping")
+            self.assertFalse(self.bridge.COLLABORATION_RUN_LOCK.locked())
+        finally:
+            self.bridge._collaboration_gate = original_gate
+            if stop_was_set:
+                self.bridge.COLLABORATION_SCHEDULER_STOP.set()
+            else:
+                self.bridge.COLLABORATION_SCHEDULER_STOP.clear()
+            if self.bridge.COLLABORATION_RUN_LOCK.locked():
+                self.bridge.COLLABORATION_RUN_LOCK.release()
+
+    def test_collaboration_worker_honors_shutdown_between_semaphore_and_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            originals = {
+                "MISSIONS_PATH": self.bridge.MISSIONS_PATH,
+                "RUNTIME_REPORTS_DIR": self.bridge.RUNTIME_REPORTS_DIR,
+                "AUDIT_PATH": self.bridge.AUDIT_PATH,
+                "COLLABORATION_SCHEDULE_PATH": self.bridge.COLLABORATION_SCHEDULE_PATH,
+                "REAL_RUN_SEMAPHORE": self.bridge.REAL_RUN_SEMAPHORE,
+                "save_missions": self.bridge.save_missions,
+            }
+            stop_was_set = self.bridge.COLLABORATION_SCHEDULER_STOP.is_set()
+            status_writes = []
+
+            class StopOnAcquireSemaphore:
+                def acquire(inner_self, blocking=False):
+                    self.assertFalse(blocking)
+                    with self.bridge.COLLABORATION_STATE_LOCK:
+                        self.bridge.COLLABORATION_SCHEDULER_STOP.set()
+                    return True
+
+                def release(inner_self):
+                    return None
+
+            try:
+                self.bridge.MISSIONS_PATH = runtime / "missions.json"
+                self.bridge.RUNTIME_REPORTS_DIR = runtime / "reports"
+                self.bridge.AUDIT_PATH = runtime / "audit.jsonl"
+                self.bridge.COLLABORATION_SCHEDULE_PATH = runtime / "collaboration-schedule.json"
+                store = self.bridge.ensure_collaboration_schedule_store()
+                mission = self.bridge.create_mission({
+                    "title": "Agent collaboration shutdown",
+                    "prompt": store["config"]["topic"],
+                    "agentId": "manager",
+                    "requester": "manager",
+                    "toolId": "agent_collaboration",
+                    "targetId": "mission_strategy_table",
+                    "risk": "low",
+                    "reportType": "collaboration_report",
+                }, status="queued")
+                original_save_missions = self.bridge.save_missions
+
+                def recording_save_missions(missions):
+                    status_writes.extend(
+                        item.get("status")
+                        for item in missions
+                        if item.get("id") == mission["id"]
+                    )
+                    return original_save_missions(missions)
+
+                self.bridge.save_missions = recording_save_missions
+                self.bridge.REAL_RUN_SEMAPHORE = StopOnAcquireSemaphore()
+                self.assertTrue(self.bridge.COLLABORATION_RUN_LOCK.acquire(blocking=False))
+                self.bridge.COLLABORATION_SCHEDULER_STOP.clear()
+                self.bridge._complete_collaboration_session("manual", store, mission)
+                stored = self.bridge.find_mission(mission["id"])
+                self.assertEqual(stored["status"], "blocked")
+                self.assertEqual(stored["errorCode"], "bridge_shutdown")
+                self.assertNotIn("running", status_writes)
+                self.assertFalse(self.bridge.COLLABORATION_RUN_LOCK.locked())
+            finally:
+                for name, value in originals.items():
+                    setattr(self.bridge, name, value)
+                if stop_was_set:
+                    self.bridge.COLLABORATION_SCHEDULER_STOP.set()
+                else:
+                    self.bridge.COLLABORATION_SCHEDULER_STOP.clear()
+                if self.bridge.COLLABORATION_RUN_LOCK.locked():
+                    self.bridge.COLLABORATION_RUN_LOCK.release()
+
+    def test_queued_collaboration_mission_cannot_be_archived(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_missions = self.bridge.MISSIONS_PATH
+            original_audit = self.bridge.AUDIT_PATH
+            try:
+                self.bridge.MISSIONS_PATH = Path(directory) / "missions.json"
+                self.bridge.AUDIT_PATH = Path(directory) / "audit.jsonl"
+                mission = self.bridge.create_mission({
+                    "title": "Agent collaboration queued",
+                    "prompt": "Product review",
+                    "agentId": "manager",
+                    "requester": "manager",
+                    "toolId": "agent_collaboration",
+                    "targetId": "mission_strategy_table",
+                    "risk": "low",
+                    "reportType": "collaboration_report",
+                }, status="queued")
+                result = self.bridge.archive_mission(mission["id"])
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["kind"], "mission_active")
+                self.assertEqual(self.bridge.find_mission(mission["id"])["status"], "queued")
+            finally:
+                self.bridge.MISSIONS_PATH = original_missions
+                self.bridge.AUDIT_PATH = original_audit
 
     def test_static_publish_boundary_stays_closed(self) -> None:
         allowed = self.bridge.BridgeHandler.static_path_allowed

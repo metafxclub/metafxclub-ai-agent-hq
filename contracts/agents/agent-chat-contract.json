@@ -1,6 +1,6 @@
 {
-  "version": "agent-chat-contract-v002",
-  "purpose": "กำหนดให้ตัวละคร Agent ทั้ง 10 ตัวสนทนาผ่าน Codex จริง และให้ Backend สร้าง Mission แบบปลอดภัยเมื่อ Chat จำแนกเจตนาเป็น task_request",
+  "version": "agent-chat-contract-v004-council-context",
+  "purpose": "กำหนดให้ตัวละคร Agent ทั้ง 10 ตัวสนทนาผ่าน Codex จริง ให้ Agent ในสภา AI Trade อธิบายผลโหวตล่าสุดของตัวเองจากบริบทที่ Backend ตรวจสอบแล้ว และให้ Backend สร้าง Mission แบบปลอดภัยเมื่อ Chat จำแนกเจตนาเป็น task_request",
   "endpoint": "POST /api/agents/chat",
   "request": {
     "allowedFields": ["agentId", "message", "sessionId", "idempotencyKey"],
@@ -76,7 +76,8 @@
     },
     "taskRouting": {
       "managerAndCeo": "manager_delegate",
-      "specialist": "one direct codex_cli_task",
+      "specialist": "one direct codex_cli_task or codex_web_research selected by Backend from the validated goal",
+      "publicWebResearch": "explicit website, URL, online, internet, or web-search intent routes to codex_web_research; Chat itself remains tool-free",
       "targetSelection": "backend validates Agent role and chooses a permitted workstation from taskGoal",
       "frontendMaySelectToolModelBudgetRiskOrApproval": false
     },
@@ -90,11 +91,24 @@
       "crossAgentContext": false,
       "idempotentReplayConsumesQuota": false
     },
+    "internalCouncilContext": {
+      "schemaVersion": "agent-chat-council-context-v1",
+      "appliesToAgentIds": ["optimization_agent", "backtest_analyst", "codex_mcp_operator"],
+      "source": "Backend อ่านผลโหวตล่าสุดจาก Mission/Report ที่บันทึกถาวร แล้วตรวจ agentId, roleId, snapshotId, freshness และข้อมูลต้องห้ามก่อนส่งเข้า Chat Runner",
+      "frontendMaySupplyOrModify": false,
+      "agentIsolationRequired": true,
+      "allowedFields": ["status", "reasonCode", "agentId", "roleId", "snapshotId", "snapshotIdPrefix", "symbol", "timeframe", "observedAt", "direction", "confidence", "stopLossPrice", "takeProfitPrice", "reasons", "evidence", "freshness", "ageSeconds", "sourceStatus", "sourceUpdatedAt"],
+      "publicHttpEvidenceOnly": true,
+      "maxContextChars": 12000,
+      "auditStores": ["context status", "snapshot id prefix"],
+      "transcriptStoresContext": false,
+      "missingContextPolicy": "Agent ต้องบอกว่ายังไม่มีผลโหวตล่าสุดที่ยืนยันได้ และห้ามแต่ง Direction, Confidence, SL/TP, เหตุผล หรือข่าว"
+    },
     "auditEvents": ["agent.chat_start", "agent.chat_end", "agent.chat_blocked", "agent.chat_task_created", "agent.chat_task_create_failed"]
   },
   "roleBinding": {
     "source": "contracts/agents/agents.json",
-    "fields": ["id", "name", "role", "goal", "blocked_actions", "memory_scope", "output_format"],
+    "fields": ["id", "name", "role", "goal", "blocked_actions", "memory_scope", "output_format", "chat_profile", "ai_trade_council"],
     "replyLanguage": "Thai",
     "technicalTermsMayRemainEnglish": true,
     "greetingStyle": "natural_role_specific"

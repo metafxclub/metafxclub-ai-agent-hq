@@ -1,12 +1,13 @@
 <!doctype html>
 <html lang="th">
   <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="metafx-hq-previous-build" content="20260808-workflow-transfer-v050" />
     <title>Metafxclub AI Pixel HQ - ห้องทำงาน Agent Codex/MCP</title>
   <link rel="icon" href="data:," />
   <base href="../" />
-  <link rel="stylesheet" href="./frontend/src/app/styles.css?v=20260723-auto-guarded-v007" />
+  <link rel="stylesheet" href="./frontend/src/app/styles.css?v=20260808-workflow-friendly-v053" />
   </head>
   <body>
     <main class="app-shell">
@@ -16,6 +17,91 @@
           <h1>ห้องทำงาน Agent Codex/MCP</h1>
         </div>
         <div class="topbar-actions">
+          <div class="agent-collab-control" id="agentCollabControl" data-state="loading">
+            <button
+              class="agent-collab-button"
+              id="agentCollabButton"
+              type="button"
+              aria-expanded="false"
+              aria-controls="agentCollabPanel"
+            >
+              <span class="agent-collab-dot" aria-hidden="true"></span>
+              <span>
+                <small>Agent คุยกันเอง</small>
+                <strong id="agentCollabLabel">กำลังตรวจสอบ...</strong>
+              </span>
+              <span class="agent-collab-chevron" aria-hidden="true">▾</span>
+            </button>
+            <section class="agent-collab-panel" id="agentCollabPanel" aria-label="ตั้งเวลาประชุมของ Agent" hidden>
+              <div class="agent-collab-panel-heading">
+                <div>
+                  <p class="eyebrow">ประชุมผ่าน Codex แบบปิด Tool</p>
+                  <strong id="agentCollabPanelTitle">กำลังอ่านตารางจาก Backend</strong>
+                </div>
+                <span class="agent-collab-state-badge" id="agentCollabStateBadge">กำลังตรวจสอบ</span>
+              </div>
+              <p class="agent-collab-message" id="agentCollabMessage">ระบบจะเริ่มเฉพาะเมื่อ Full Access เปิดและ Rate Limit เหลือเหนือเกณฑ์</p>
+              <label class="agent-collab-field wide">
+                <span>หัวข้อที่ให้ Agent ช่วยกันพัฒนา</span>
+                <textarea id="agentCollabTopic" rows="3" maxlength="600" placeholder="เช่น ช่วยกันทบทวน UX และความถูกต้องของรายงาน Backtest"></textarea>
+              </label>
+              <div class="agent-collab-grid">
+                <label class="agent-collab-field">
+                  <span>เริ่มเวลา</span>
+                  <input id="agentCollabStartTime" type="time" step="60" />
+                </label>
+                <label class="agent-collab-field">
+                  <span>หยุดเวลา</span>
+                  <input id="agentCollabEndTime" type="time" step="60" />
+                </label>
+                <label class="agent-collab-field">
+                  <span>เว้นระยะ</span>
+                  <select id="agentCollabInterval">
+                    <option value="60">ทุก 1 ชั่วโมง</option>
+                    <option value="120">ทุก 2 ชั่วโมง</option>
+                    <option value="240">ทุก 4 ชั่วโมง</option>
+                    <option value="480">ทุก 8 ชั่วโมง</option>
+                  </select>
+                </label>
+                <label class="agent-collab-field">
+                  <span>จำนวนคำตอบ</span>
+                  <select id="agentCollabMaxTurns">
+                    <option value="2">2 รอบ</option>
+                    <option value="3">3 รอบ</option>
+                    <option value="4">4 รอบ</option>
+                  </select>
+                </label>
+                <label class="agent-collab-field">
+                  <span>สูงสุดต่อวัน</span>
+                  <select id="agentCollabMaxDailyRuns">
+                    <option value="1">1 ครั้ง</option>
+                    <option value="2">2 ครั้ง</option>
+                    <option value="3">3 ครั้ง</option>
+                    <option value="4">4 ครั้ง</option>
+                  </select>
+                </label>
+                <label class="agent-collab-field">
+                  <span>เก็บโควตาไว้</span>
+                  <select id="agentCollabMinRemaining">
+                    <option value="20">อย่างน้อย 20%</option>
+                    <option value="30">อย่างน้อย 30%</option>
+                    <option value="40">อย่างน้อย 40%</option>
+                    <option value="50">อย่างน้อย 50%</option>
+                  </select>
+                </label>
+              </div>
+              <div class="agent-collab-summary">
+                <span id="agentCollabUsage">วันนี้ 0/3 ครั้ง</span>
+                <span id="agentCollabNextRun">ยังไม่เปิดตาราง</span>
+              </div>
+              <p class="agent-collab-safety">Agent จะคุยและสรุปเท่านั้น ไม่เปิดโปรแกรม ไม่เรียก Plugin/MCP ไม่สร้าง Task ต่อเอง และผลจะกลับไปที่โต๊ะ Mission</p>
+              <div class="agent-collab-actions">
+                <button id="agentCollabSave" type="button">บันทึกเวลา</button>
+                <button id="agentCollabRunNow" type="button">ประชุมตอนนี้</button>
+                <button id="agentCollabToggle" type="button" class="primary">เปิดอัตโนมัติ</button>
+              </div>
+            </section>
+          </div>
           <div class="operator-mode-control" id="operatorModeControl" data-mode="unknown">
             <button
               class="operator-mode-button"
@@ -26,8 +112,8 @@
             >
               <span class="operator-mode-dot" aria-hidden="true"></span>
               <span>
-                <small>โหมด Agent</small>
-                <strong id="operatorModeLabel">กำลังตรวจสอบ Backend...</strong>
+                <small>สิทธิ์การทำงาน</small>
+                <strong id="operatorModeLabel">กำลังตรวจสอบสิทธิ์...</strong>
               </span>
               <span class="operator-mode-chevron" aria-hidden="true">▾</span>
             </button>
@@ -45,12 +131,6 @@
               </button>
             </section>
           </div>
-          <button class="icon-button" id="fitModeButton" type="button" title="สลับโหมดพอดีจอ" aria-label="สลับโหมดพอดีจอ">
-            <span aria-hidden="true">[]</span>
-          </button>
-          <button class="text-button" id="agentRouteButton" type="button">เดินตามเส้นทาง</button>
-          <button class="text-button" id="agentMeetingButton" type="button">โต๊ะวางแผน</button>
-          <button class="text-button" id="resetButton" type="button">รีเซ็ตมุมมอง</button>
         </div>
       </header>
 
@@ -203,6 +283,82 @@
             <h2 id="modalTitle">Agent ผู้จัดการ HQ</h2>
             <p id="modalSubtitle">พร้อมรับคำสั่งครับ</p>
             <div class="modal-status-grid" id="modalStatusGrid"></div>
+            <section class="dashboard-connection-rail" id="modalDashboardConnectionRail" aria-labelledby="modalDashboardConnectionHeading" hidden>
+              <div class="dashboard-connection-rail-heading">
+                <div>
+                  <p class="modal-eyebrow" id="modalDashboardConnectionHeading">การเชื่อมต่อและตั้งค่า</p>
+                  <strong id="modalDashboardModuleName">กำลังตรวจสอบอุปกรณ์</strong>
+                </div>
+                <strong class="connection-badge" id="modalDashboardConnectionOverall" data-status="checking">กำลังตรวจสอบ</strong>
+              </div>
+              <div class="connection-profile-row">
+                <div class="connection-profile-copy">
+                  <span>ความพร้อมของข้อมูล</span>
+                  <strong id="modalDashboardConnectionCheckedAt">รอการตรวจจาก Local Runner</strong>
+                </div>
+                <span class="connection-badge" id="modalDashboardModuleAvailability" data-status="checking">กำลังตรวจสอบ</span>
+              </div>
+              <div class="connection-mode-grid">
+                <div>
+                  <span>รูปแบบการทำงาน</span>
+                  <strong id="modalDashboardOperationMode">สั่งทำงานเอง</strong>
+                </div>
+                <div>
+                  <span>AI ตรวจตามรอบเวลา</span>
+                  <strong id="modalDashboardScheduleStatus">ยังไม่เปิดใช้งาน</strong>
+                </div>
+              </div>
+              <div class="connection-checklist" id="modalDashboardConnectionList" aria-live="polite"></div>
+              <div class="connection-actions">
+                <button class="modal-action" id="modalDashboardRefreshConnections" type="button">ตรวจการเชื่อมต่อใหม่</button>
+                <button class="modal-action primary" id="modalDashboardDiscoverMetatrader" type="button" hidden>ค้นหา MT4 / MT5</button>
+              </div>
+              <p class="connection-action-status" id="modalDashboardConnectionActionStatus" role="status">ส่งคำขอแบบอ่านอย่างเดียวไปยัง Local Runner โดยไม่เปิดเผยข้อมูลลับ</p>
+              <div class="metatrader-selection" id="modalDashboardMetatraderSelection" hidden>
+                <div class="metatrader-selection-heading">
+                  <div>
+                    <span>เลือก Terminal เป้าหมาย</span>
+                    <strong id="modalDashboardMetatraderSummary">ยังไม่พบ Terminal ที่เลือกได้</strong>
+                  </div>
+                  <span class="connection-badge" data-status="coming_soon">Adapter ยังไม่พร้อม</span>
+                </div>
+                <div class="metatrader-candidates" id="modalDashboardMetatraderCandidates" role="radiogroup" aria-label="รายการ MT4 และ MT5 ที่ตรวจพบ"></div>
+                <p class="metatrader-adapter-note">การเลือกนี้กำหนดเป้าหมายให้ Backend เท่านั้น ยังไม่เปิด Terminal หรือเชื่อมบัญชีจากหน้าเว็บ</p>
+                <button class="modal-action primary" id="modalDashboardConfirmMetatrader" type="button" disabled>ยืนยัน Terminal ที่เลือก</button>
+              </div>
+            </section>
+            <section class="workflow-settings-rail" id="workflowSettingsRail" aria-labelledby="workflowSettingsRailTitle" hidden>
+              <header>
+                <p class="modal-eyebrow">ตั้งค่าอุปกรณ์</p>
+                <strong id="workflowSettingsRailTitle">การทำงานอัตโนมัติ</strong>
+              </header>
+              <div class="workflow-settings-rail-content" id="workflowSettingsRailContent"></div>
+            </section>
+            <section class="workflow-agent-handoff workflow-agent-handoff-rail" id="workflowAgentHandoffRail" aria-labelledby="workflowHandoffTitle" hidden>
+              <div class="workflow-agent-handoff-copy">
+                <span class="workflow-handoff-kicker">ส่งต่อโดย Agent</span>
+                <div>
+                  <h4 id="workflowHandoffTitle">ส่ง Report ไปอุปกรณ์ถัดไป</h4>
+                  <p>Backend จะบันทึก Mission และเส้นทางของ Report ก่อนส่งต่อ</p>
+                </div>
+              </div>
+              <label class="workflow-handoff-field" for="workflowHandoffReport">
+                <span>Report จากอุปกรณ์นี้</span>
+                <select id="workflowHandoffReport"></select>
+              </label>
+              <label class="workflow-handoff-field" for="workflowHandoffTarget">
+                <span>อุปกรณ์ปลายทาง</span>
+                <select id="workflowHandoffTarget"></select>
+              </label>
+              <label class="workflow-handoff-field" for="workflowHandoffAction">
+                <span>งานที่จะรับ Report</span>
+                <select id="workflowHandoffAction"></select>
+              </label>
+              <button class="workflow-handoff-button" id="workflowHandoffButton" type="button">
+                ให้ Agent ส่งต่อ Report
+              </button>
+              <p class="workflow-handoff-status" id="workflowHandoffStatus" data-tone="neutral" aria-live="polite"></p>
+            </section>
           </aside>
           <div class="modal-content-panel">
             <div class="dialogue-box">
@@ -212,9 +368,6 @@
             <div class="modal-tabs" id="modalTabs" role="tablist" aria-label="ส่วนต่าง ๆ ของพื้นที่ทำงาน">
               <button type="button" class="modal-tab active" data-tab="chat" data-surfaces="agent">คุยกับ Agent</button>
               <button type="button" class="modal-tab" data-tab="tasks" data-surfaces="agent">Task ของ Agent</button>
-              <button type="button" class="modal-tab" data-tab="connections" data-surfaces="dashboard">การเชื่อมต่อ</button>
-              <button type="button" class="modal-tab" data-tab="tasks" data-surfaces="dashboard">งานของอุปกรณ์</button>
-              <button type="button" class="modal-tab" data-tab="results" data-surfaces="dashboard">ผลลัพธ์งาน</button>
               <button type="button" class="modal-tab" data-tab="kanban" data-surfaces="kanban">Mission ทั้งหมด</button>
             </div>
             <div class="modal-tab-panel active" id="modalChatPanel" data-panel="chat" data-surfaces="agent">
@@ -223,86 +376,309 @@
             <div class="modal-tab-panel" id="modalTasksPanel" data-panel="tasks" data-surfaces="agent">
               <div class="task-board" id="modalTaskBoard"></div>
             </div>
-            <div class="modal-tab-panel" id="modalDashboardPanel" data-panel="connections" data-surfaces="dashboard">
-              <div class="prop-dashboard-kpis" id="modalDashboardKpis"></div>
-              <div class="prop-dashboard-layout connection-dashboard-layout">
-                <section class="dashboard-section dashboard-section-wide connection-checklist-section" aria-labelledby="modalDashboardConnectionHeading">
-                  <div class="section-heading">
-                    <span id="modalDashboardConnectionHeading">Checklist การเชื่อมต่อ</span>
-                    <small id="modalDashboardConnectionCheckedAt">รอการตรวจจาก Local Runner</small>
+            <div class="modal-tab-panel dashboard-workspace-panel" id="modalDashboardPanel" data-panel="results" data-surfaces="dashboard">
+              <section class="dashboard-report-workspace" id="modalGenericDashboardWorkspace" aria-labelledby="modalDashboardWorkspaceHeading">
+                <div class="dashboard-workspace-heading">
+                  <div>
+                    <p class="modal-eyebrow">รายงานจาก Agent</p>
+                    <h3 id="modalDashboardWorkspaceHeading">ผลลัพธ์ Task ของอุปกรณ์</h3>
+                    <p>เลือกการ์ดเพื่อดูข้อความ ตัวเลข และรูปหลักฐานแบบขยายเต็มพื้นที่</p>
                   </div>
-                  <div class="connection-profile-row">
-                    <div class="connection-profile-copy">
-                      <span>โมดูลของอุปกรณ์</span>
-                      <strong id="modalDashboardModuleName">กำลังตรวจสอบ</strong>
-                    </div>
-                    <span class="connection-badge" id="modalDashboardModuleAvailability" data-status="checking">กำลังตรวจสอบ</span>
-                  </div>
-                  <div class="connection-mode-grid">
-                    <div>
-                      <span>รูปแบบการทำงาน</span>
-                      <strong id="modalDashboardOperationMode">สั่งทำงานเอง</strong>
-                    </div>
-                    <div>
-                      <span>AI ตรวจทุก 2 ชั่วโมง</span>
-                      <strong id="modalDashboardScheduleStatus">ยังไม่เปิดใช้งาน</strong>
-                    </div>
-                    <div>
-                      <span>สถานะรวม</span>
-                      <strong class="connection-badge" id="modalDashboardConnectionOverall" data-status="checking">กำลังตรวจสอบ</strong>
-                    </div>
-                  </div>
-                  <div class="connection-actions">
-                    <button class="modal-action" id="modalDashboardRefreshConnections" type="button">ตรวจการเชื่อมต่อใหม่</button>
-                    <button class="modal-action primary" id="modalDashboardDiscoverMetatrader" type="button" hidden>ค้นหา MT4 / MT5</button>
-                  </div>
-                  <p class="connection-action-status" id="modalDashboardConnectionActionStatus" role="status">ปุ่มนี้ส่งคำขอแบบอ่านอย่างเดียวไปยัง Local Runner และไม่เปิดเผย Path, PID หรือข้อมูลลับ</p>
-                  <div class="metatrader-selection" id="modalDashboardMetatraderSelection" hidden>
-                    <div class="metatrader-selection-heading">
-                      <div>
-                        <span>เลือก Terminal เป้าหมาย</span>
-                        <strong id="modalDashboardMetatraderSummary">ยังไม่พบ Terminal ที่เลือกได้</strong>
-                      </div>
-                      <span class="connection-badge" data-status="coming_soon">Adapter ยังไม่พร้อม</span>
-                    </div>
-                    <div class="metatrader-candidates" id="modalDashboardMetatraderCandidates" role="radiogroup" aria-label="รายการ MT4 และ MT5 ที่ตรวจพบ"></div>
-                    <p class="metatrader-adapter-note">การเลือกนี้เป็นเพียงการกำหนดเป้าหมายให้ Backend เท่านั้น — Adapter สั่งงานจริงยังไม่พร้อม และระบบจะไม่เปิด Terminal หรือเชื่อมบัญชีจากหน้าเว็บ</p>
-                    <button class="modal-action primary" id="modalDashboardConfirmMetatrader" type="button" disabled>ยืนยัน Terminal ที่เลือก</button>
-                  </div>
-                  <div class="connection-checklist" id="modalDashboardConnectionList" aria-live="polite"></div>
-                </section>
-                <section class="dashboard-section dashboard-section-wide">
-                  <div class="section-heading">
-                    <span>สถานะและข้อควบคุม</span>
-                    <small>ข้อมูลจาก Local Runner</small>
-                  </div>
-                  <div class="dashboard-list dashboard-status-list" id="modalDashboardStatus"></div>
-                </section>
-              </div>
-            </div>
-            <div class="modal-tab-panel dashboard-focused-panel" id="modalDashboardWorkPanel" data-panel="tasks" data-surfaces="dashboard">
-              <section class="dashboard-section dashboard-section-fill">
-                <div class="section-heading">
-                  <span>งานของอุปกรณ์</span>
-                  <small id="modalDashboardWorkCount">Mission 0 รายการ</small>
-                </div>
-                <p class="dashboard-tab-intro">กดหัวข้อ Task เพื่อดูสถานะ ผู้รับผิดชอบ ความเสี่ยง และรายละเอียดทั้งหมด</p>
-                <div class="dashboard-list" id="modalDashboardWork"></div>
-              </section>
-            </div>
-            <div class="modal-tab-panel dashboard-focused-panel" id="modalDashboardResultsPanel" data-panel="results" data-surfaces="dashboard">
-              <section class="dashboard-section dashboard-section-fill">
-                  <div class="section-heading">
-                    <span>ผลลัพธ์งานและรายงาน</span>
+                  <div class="dashboard-workspace-meta">
+                    <strong id="modalDashboardWorkCount">0 รายการ</strong>
                     <small id="modalDashboardFreshness">รอข้อมูลในเครื่อง</small>
                   </div>
-                  <p class="dashboard-tab-intro">กดหัวข้อผลลัพธ์เพื่อเปิดรายละเอียดฉบับเต็ม โดยข้อมูลลับยังคงถูกปกปิด</p>
-                  <div class="dashboard-list" id="modalDashboardReports"></div>
+                </div>
+                <div class="dashboard-work-summary" aria-label="สรุปสถานะงานของอุปกรณ์">
+                  <div data-state="running"><span>กำลังทำ</span><strong id="modalDashboardRunningCount">0</strong></div>
+                  <div data-state="completed"><span>สำเร็จ</span><strong id="modalDashboardCompletedCount">0</strong></div>
+                  <div data-state="blocked"><span>ติดขัด</span><strong id="modalDashboardBlockedCount">0</strong></div>
+                </div>
+                <div class="dashboard-work-columns">
+                  <section class="dashboard-work-column" data-state="running">
+                    <div class="dashboard-work-column-heading">
+                      <span class="dashboard-state-dot" aria-hidden="true"></span>
+                      <strong>กำลังทำ</strong>
+                      <small>รวมงานรอเริ่มและงานที่ Agent กำลังดำเนินการ</small>
+                    </div>
+                    <div class="dashboard-list" id="modalDashboardRunning"></div>
+                  </section>
+                  <section class="dashboard-work-column" data-state="completed">
+                    <div class="dashboard-work-column-heading">
+                      <span class="dashboard-state-dot" aria-hidden="true"></span>
+                      <strong>สำเร็จ</strong>
+                      <small>รายงานและผลลัพธ์ที่ส่งกลับมาแล้ว</small>
+                    </div>
+                    <div class="dashboard-list" id="modalDashboardCompleted"></div>
+                  </section>
+                  <section class="dashboard-work-column" data-state="blocked">
+                    <div class="dashboard-work-column-heading">
+                      <span class="dashboard-state-dot" aria-hidden="true"></span>
+                      <strong>ติดขัด</strong>
+                      <small>งานที่ต้องตรวจสาเหตุหรือยังไปต่อไม่ได้</small>
+                    </div>
+                    <div class="dashboard-list" id="modalDashboardBlocked"></div>
+                  </section>
+                </div>
               </section>
-              <div class="dashboard-navigation">
-                <button class="modal-action primary" id="modalDashboardOpenMissionTable" type="button">เปิดโต๊ะ Mission</button>
-                <button class="modal-action" id="modalDashboardOpenOwnerAgent" type="button">เปิด Agent เจ้าของงาน</button>
-              </div>
+              <section
+                class="workflow-dashboard-workspace"
+                id="modalWorkflowDashboardWorkspace"
+                aria-label="Dashboard งานและรายงานของอุปกรณ์"
+                hidden
+              >
+                <section class="workflow-command-deck" aria-label="มุมมองงานของอุปกรณ์">
+                  <div
+                    class="workflow-tabs"
+                    id="workflowDashboardTabs"
+                    role="tablist"
+                    aria-label="มุมมองงานภายในอุปกรณ์"
+                  ></div>
+                </section>
+                <div class="workflow-dashboard-scroll">
+                  <section class="workflow-results" id="workflowResultsPanel" aria-labelledby="workflowResultsTitle">
+                    <div class="workflow-results-heading">
+                      <div>
+                        <p class="modal-eyebrow" id="workflowResultsEyebrow">อัปเดตวันนี้</p>
+                        <h4 id="workflowResultsTitle">งานหลักและผลล่าสุด</h4>
+                      </div>
+                      <p id="workflowResultsCopy">กดรายการเพื่อดูรายละเอียดและหลักฐานจาก Local Runner</p>
+                    </div>
+                    <div class="workflow-result-summary" id="workflowResultSummary" aria-label="สรุปสถานะงาน"></div>
+                    <div class="workflow-result-columns">
+                      <section class="workflow-result-column" data-state="running">
+                        <header><span aria-hidden="true"></span><strong>กำลังทำ</strong><small id="workflowRunningCount">0</small></header>
+                        <div class="dashboard-list" id="workflowRunningList"></div>
+                      </section>
+                      <section class="workflow-result-column" data-state="completed">
+                        <header><span aria-hidden="true"></span><strong>สำเร็จ</strong><small id="workflowCompletedCount">0</small></header>
+                        <div class="dashboard-list" id="workflowCompletedList"></div>
+                      </section>
+                      <section class="workflow-result-column" data-state="blocked">
+                        <header><span aria-hidden="true"></span><strong>ติดขัด</strong><small id="workflowBlockedCount">0</small></header>
+                        <div class="dashboard-list" id="workflowBlockedList"></div>
+                      </section>
+                    </div>
+                  </section>
+                  <section
+                    class="workflow-tab-content"
+                    id="workflowDashboardContent"
+                    role="tabpanel"
+                    tabindex="0"
+                  ></section>
+                </div>
+                <p class="workflow-action-status" id="workflowActionStatus" data-tone="neutral" aria-live="polite">
+                  หน้าเว็บส่งเฉพาะคำขอ งานจริงและ Audit Log อยู่หลัง Local Runner
+                </p>
+              </section>
+              <section
+                class="signal-consensus-workspace"
+                id="modalSignalConsensusWorkspace"
+                aria-label="AI Trade Council"
+                hidden
+              >
+                <div
+                  class="signal-consensus-tabs"
+                  id="signalConsensusTabs"
+                  role="tablist"
+                  aria-label="หน้าจอ AI Trade Council"
+                >
+                  <button
+                    class="signal-consensus-tab active"
+                    id="signalConsensusDailyTab"
+                    type="button"
+                    role="tab"
+                    data-signal-tab="daily_summary"
+                    aria-controls="signalConsensusDailyPanel"
+                    aria-selected="true"
+                    tabindex="0"
+                  >
+                    <span aria-hidden="true">1</span>
+                    สรุปวันนี้
+                  </button>
+                  <button
+                    class="signal-consensus-tab"
+                    id="signalConsensusLiveTab"
+                    type="button"
+                    role="tab"
+                    data-signal-tab="live_analysis"
+                    aria-controls="signalConsensusLivePanel"
+                    aria-selected="false"
+                    tabindex="-1"
+                  >
+                    <span aria-hidden="true">2</span>
+                    กราฟและบทวิเคราะห์สด
+                  </button>
+                  <button
+                    class="signal-consensus-tab"
+                    id="signalConsensusDecisionTab"
+                    type="button"
+                    role="tab"
+                    data-signal-tab="decision_pipeline"
+                    aria-controls="signalConsensusDecisionPanel"
+                    aria-selected="false"
+                    tabindex="-1"
+                  >
+                    <span aria-hidden="true">3</span>
+                    ขั้นตอนตัดสินใจ
+                  </button>
+                  <button
+                    class="signal-consensus-tab"
+                    id="signalConsensusHistoryTab"
+                    type="button"
+                    role="tab"
+                    data-signal-tab="history"
+                    aria-controls="signalConsensusHistoryPanel"
+                    aria-selected="false"
+                    tabindex="-1"
+                  >
+                    <span aria-hidden="true">4</span>
+                    ประวัติทั้งหมด
+                  </button>
+                </div>
+                <div
+                  class="signal-consensus-tab-panel active"
+                  id="signalConsensusDailyPanel"
+                  role="tabpanel"
+                  aria-labelledby="signalConsensusDailyTab"
+                  data-signal-panel="daily_summary"
+                  tabindex="0"
+                >
+                  <div id="signalConsensusDailyContent"></div>
+                </div>
+                <div
+                  class="signal-consensus-tab-panel"
+                  id="signalConsensusLivePanel"
+                  role="tabpanel"
+                  aria-labelledby="signalConsensusLiveTab"
+                  data-signal-panel="live_analysis"
+                  tabindex="0"
+                  hidden
+                >
+                  <div id="signalConsensusLiveContent" class="signal-live-analysis-workspace">
+                    <div
+                      id="signalConsensusLiveTabs"
+                      class="signal-live-analysis-tabs"
+                      role="tablist"
+                      aria-label="มุมมองกราฟและบทวิเคราะห์สด"
+                    >
+                      <button
+                        id="signalConsensusLiveOverviewTab"
+                        class="signal-live-analysis-tab active"
+                        type="button"
+                        role="tab"
+                        data-signal-live-tab="chart_overview"
+                        aria-controls="signalConsensusLiveOverviewPanel"
+                        aria-selected="true"
+                        tabindex="0"
+                      >
+                        ภาพรวมสภา AI
+                      </button>
+                      <button
+                        id="signalConsensusPriceActionTab"
+                        class="signal-live-analysis-tab"
+                        type="button"
+                        role="tab"
+                        data-signal-live-tab="price_action"
+                        aria-controls="signalConsensusPriceActionPanel"
+                        aria-selected="false"
+                        tabindex="-1"
+                      >
+                        กราฟเปล่าและโครงสร้างราคา
+                      </button>
+                      <button
+                        id="signalConsensusTechnicalTab"
+                        class="signal-live-analysis-tab"
+                        type="button"
+                        role="tab"
+                        data-signal-live-tab="technical_deep"
+                        aria-controls="signalConsensusTechnicalPanel"
+                        aria-selected="false"
+                        tabindex="-1"
+                      >
+                        Technical ย้อนหลัง
+                      </button>
+                      <button
+                        id="signalConsensusNewsTab"
+                        class="signal-live-analysis-tab"
+                        type="button"
+                        role="tab"
+                        data-signal-live-tab="news_context"
+                        aria-controls="signalConsensusNewsPanel"
+                        aria-selected="false"
+                        tabindex="-1"
+                      >
+                        ข่าวและแนวโน้ม
+                      </button>
+                    </div>
+                    <div
+                      id="signalConsensusLiveOverviewPanel"
+                      class="signal-live-analysis-panel active"
+                      role="tabpanel"
+                      aria-labelledby="signalConsensusLiveOverviewTab"
+                      data-signal-live-panel="chart_overview"
+                      tabindex="0"
+                    >
+                      <div id="signalConsensusLiveOverviewContent"></div>
+                    </div>
+                    <div
+                      id="signalConsensusPriceActionPanel"
+                      class="signal-live-analysis-panel"
+                      role="tabpanel"
+                      aria-labelledby="signalConsensusPriceActionTab"
+                      data-signal-live-panel="price_action"
+                      tabindex="0"
+                      hidden
+                    >
+                      <div id="signalConsensusPriceActionContent"></div>
+                    </div>
+                    <div
+                      id="signalConsensusTechnicalPanel"
+                      class="signal-live-analysis-panel"
+                      role="tabpanel"
+                      aria-labelledby="signalConsensusTechnicalTab"
+                      data-signal-live-panel="technical_deep"
+                      tabindex="0"
+                      hidden
+                    >
+                      <div id="signalConsensusTechnicalContent"></div>
+                    </div>
+                    <div
+                      id="signalConsensusNewsPanel"
+                      class="signal-live-analysis-panel"
+                      role="tabpanel"
+                      aria-labelledby="signalConsensusNewsTab"
+                      data-signal-live-panel="news_context"
+                      tabindex="0"
+                      hidden
+                    >
+                      <div id="signalConsensusNewsContent"></div>
+                    </div>
+                  </div>
+                </div>
+                <div
+                  class="signal-consensus-tab-panel"
+                  id="signalConsensusDecisionPanel"
+                  role="tabpanel"
+                  aria-labelledby="signalConsensusDecisionTab"
+                  data-signal-panel="decision_pipeline"
+                  tabindex="0"
+                  hidden
+                >
+                  <div id="signalConsensusDecisionContent"></div>
+                </div>
+                <div
+                  class="signal-consensus-tab-panel"
+                  id="signalConsensusHistoryPanel"
+                  role="tabpanel"
+                  aria-labelledby="signalConsensusHistoryTab"
+                  data-signal-panel="history"
+                  tabindex="0"
+                  hidden
+                >
+                  <div id="signalConsensusHistoryContent"></div>
+                </div>
+              </section>
             </div>
             <div class="modal-tab-panel" id="modalKanbanPanel" data-panel="kanban" data-surfaces="kanban">
               <div class="kanban-toolbar">
@@ -404,7 +780,7 @@
     (() => {
       "use strict";
 
-      const RUNTIME_BUILD_VERSION = "20260723-auto-guarded-v007";
+      const RUNTIME_BUILD_VERSION = "20260808-workflow-friendly-v053";
       const EXPECTED_AGENT_COUNT = 10;
       const RUNTIME_PATH = "./frontend/src/app/main.js";
       const diagnostic = document.getElementById("bootDiagnostic");

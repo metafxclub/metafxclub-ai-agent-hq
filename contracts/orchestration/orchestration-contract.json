@@ -1,13 +1,13 @@
 {
-  "version": "orchestration-contract-v005",
+  "version": "orchestration-contract-v009",
   "purpose": "Backend-owned Manager delegation, model tiering, cost/rate guard, approval, and report aggregation rules for the Metafxclub AI Agent HQ Visual Office.",
   "operatorMode": {
     "endpoint": "GET/POST /api/operator-mode",
     "defaultMode": "manual_guarded",
     "supportedModes": ["manual_guarded", "auto_guarded"],
-    "autoEligibleTools": ["codex_cli_task"],
+    "autoEligibleTools": ["codex_cli_task", "codex_web_research"],
     "maxRisk": "medium",
-    "allowedToolModes": ["read_only_diagnostic", "guarded_project_workspace"],
+    "allowedToolModes": ["read_only_diagnostic", "guarded_project_workspace", "public_web_read_only"],
     "alwaysRequireHumanApprovalTools": ["live_trading", "send_telegram", "production_deploy", "delete_files", "restart_vps", "spend_credit", "publish_external"],
     "alwaysRequireHumanApprovalFor": ["live trading", "real Telegram send", "deploy", "delete", "restart VPS", "money or credit", "secret-bearing work"],
     "blockedIntentKeywords": [
@@ -69,6 +69,7 @@
       "writeRoots": ["workspace", "frontend", "docs", "assets-source"],
       "readOnlyControlPlaneRoots": ["backend", "runner", "contracts", "data/runtime", "scripts", "installer", ".git"],
       "network": false,
+      "nativeWebSearch": "live_for_codex_web_research_only",
       "externalApps": false,
       "destructiveCommands": false,
       "projectInstructionsRequired": true
@@ -95,11 +96,42 @@
       {
         "id": "risk_review",
         "priority": 100,
-        "keywords": ["risk", "approval", "secret", "token", "password", "live trading", "live order", "deploy", "delete", "send telegram"],
+        "keywords": ["risk", "approval", "secret", "token", "password", "enable live trading", "start live trading", "activate live trading", "live order", "deploy", "delete", "send telegram"],
         "agentId": "risk_guard",
-        "targetPropId": "left_audit_crystals",
+        "targetPropId": "mission_strategy_table",
         "reportType": "risk_review",
         "modelTier": "risk_quality"
+      },
+      {
+        "id": "ea_runtime_status",
+        "priority": 95,
+        "keywords": ["auto trade status", "auto trading status", "live trading status", "ea status", "terminal status", "mt4 status", "mt5 status", "terminal connection", "adapter status", "ea running"],
+        "agentId": "vps_watch",
+        "targetPropId": "left_analytics_console",
+        "reportType": "auto_trading_status_report",
+        "modelTier": "specialist_fast"
+      },
+      {
+        "id": "ai_trade_council",
+        "priority": 90,
+        "keywords": [
+          "ai trade council",
+          "trade council",
+          "multi-agent trading",
+          "agent vote",
+          "consensus",
+          "ai trader",
+          "auto trade",
+          "auto trading",
+          "position",
+          "signal",
+          "chart analysis",
+          "news analysis"
+        ],
+        "agentId": "manager",
+        "targetPropId": "left_analytics_console",
+        "reportType": "ai_trade_council_report",
+        "modelTier": "manager_quality"
       },
       {
         "id": "backtest_review",
@@ -115,7 +147,7 @@
         "priority": 80,
         "keywords": ["optimize", "optimization", "parameter", "overfit", "walk forward"],
         "agentId": "optimization_agent",
-        "targetPropId": "right_server_racks",
+        "targetPropId": "right_tool_console",
         "reportType": "optimization_report",
         "modelTier": "specialist_balanced"
       },
@@ -131,19 +163,10 @@
       {
         "id": "vps_status",
         "priority": 70,
-        "keywords": ["vps", "latency", "uptime", "cpu", "ram", "disk", "terminal status"],
+        "keywords": ["vps", "latency", "uptime", "cpu", "ram", "disk"],
         "agentId": "vps_watch",
         "targetPropId": "right_status_crystals",
         "reportType": "vps_report",
-        "modelTier": "specialist_fast"
-      },
-      {
-        "id": "auto_trading_status",
-        "priority": 75,
-        "keywords": ["auto trade", "auto trading", "ai trader", "ea status", "position", "signal"],
-        "agentId": "vps_watch",
-        "targetPropId": "left_signal_cube",
-        "reportType": "auto_trading_status_report",
         "modelTier": "specialist_fast"
       },
       {
@@ -151,7 +174,7 @@
         "priority": 70,
         "keywords": ["telegram", "alert", "notification", "n8n", "automation"],
         "agentId": "telegram_ops",
-        "targetPropId": "right_tool_console",
+        "targetPropId": "mission_strategy_table",
         "reportType": "telegram_tool_report",
         "modelTier": "specialist_fast"
       },
@@ -174,6 +197,118 @@
         "modelTier": "specialist_fast"
       }
     ]
+  },
+  "aiTradeCouncilAutoAnalysis": {
+    "endpoint": "GET/POST /api/ai-trade-council/automation",
+    "runtimeStore": "data/runtime/ai-trade-council-automation.json",
+    "defaultEnabled": false,
+    "triggerPolicy": "new_closed_bar",
+    "activationPolicy": "wait_next_closed_bar",
+    "barIdentityFields": ["candidateId", "symbol", "timeframe", "lastClosedBarTime"],
+    "snapshotPollSeconds": 5,
+    "settleSeconds": 10,
+    "supportedTimeframes": ["M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"],
+    "manualOnlyTimeframes": ["M1"],
+    "analysisOrder": [
+      {"agentId": "optimization_agent", "roleId": "technical", "scope": "core14_indicator_module_summaries_plus_bounded_recent_series"},
+      {"agentId": "backtest_analyst", "roleId": "price_action", "scope": "full_window_swing_sr_trendline_fibonacci_rsi_macd_divergence_features_plus_max_500_recent_ohlc"},
+      {"agentId": "codex_mcp_operator", "roleId": "news", "scope": "short_medium_long_current_context"}
+    ],
+    "consensusPolicy": {
+      "requiredVotes": 3,
+      "allowedRequiredVotes": [1, 2, 3],
+      "directionalAgreement": "configurable_n_of_three_with_opposite_direction_veto",
+      "holdPolicy": "abstain_from_directional_count",
+      "oppositeDirectionPolicy": "any_buy_and_sell_means_no_trade",
+      "configurationEffectiveFrom": "next_analysis_round",
+      "protectivePriceAggregation": "price_action_single_owner_or_backend_deterministic_fallback",
+      "protectivePlanSources": [
+        "price_action_agent",
+        "backend_deterministic_fallback",
+        "unavailable"
+      ],
+      "protectivePlanFallback": {
+        "schemaVersion": "ai-trade-council-protective-plan-v1",
+        "source": "backend_deterministic_fallback",
+        "policyVersion": "metafx-protective-plan-atr-structure-v1",
+        "eligibleOnlyWhen": "price_action_hold_and_directional_consensus_otherwise_qualifies",
+        "ownerRole": "backend_deterministic_guard",
+        "closedBarsOnly": true,
+        "sameSnapshotRequired": true,
+        "snapshotArtifactDigestRequired": true,
+        "snapshotArtifactPathPattern": "ai-trade-council/snapshots/<artifact-sha256>.json",
+        "technicalNoDataAllowed": false,
+        "priceActionNoDataAllowed": false,
+        "modelCallAllowed": false,
+        "terminalActionAllowed": false,
+        "minimumRewardRiskRatioSource": "backend_quality_policy",
+        "failurePolicy": "fail_closed_no_trade"
+      },
+      "actionableFields": ["direction", "stopLossPrice", "takeProfitPrice"],
+      "forbiddenAiFields": ["lot", "lots", "fixedLot", "volume", "positionSize", "riskPercent"],
+      "lotSource": "mt4_ea_input_only"
+    },
+    "backlogPolicy": "latest_only",
+    "maxDailyRounds": 24,
+    "defaultMinRemainingPercent": 30,
+    "freshRateLimitRequired": true,
+    "fullAccessRequired": true,
+    "singleCouncilRoundAtATime": true,
+    "oneAutomaticRoundPerClosedBar": true,
+    "browserIndependent": true,
+    "terminalActions": "analysis_agents_false_backend_gateway_conditional",
+    "liveOrderSubmission": "ea_local_mode_and_live_arm_only",
+    "postConsensusGateway": {
+      "adapter": "MetafxHQTradeGateway",
+      "defaultMode": "shadow",
+      "executionModeSource": "mt4_ea_input_only",
+      "fixedLotSource": "mt4_ea_input_only",
+      "commandTransport": "FILE_COMMON_flat_json",
+      "requiresFreshHeartbeat": true,
+      "oneOrderPerBar": true,
+      "liveRequiresLocalEaArm": true,
+      "humanApprovalPerOrder": false,
+      "executionAuthorizationSource": "persistent_local_ea_mode_and_live_armed_inputs",
+      "frontendMayChangeAuthorization": false
+    },
+    "auditEvents": [
+      "ai_trade_council.auto_config_changed",
+      "ai_trade_council.auto_baseline",
+      "ai_trade_council.auto_bar_detected",
+      "ai_trade_council.auto_queued",
+      "ai_trade_council.auto_paused",
+      "ai_trade_council.trade_gateway_published",
+      "mt4_trade_gateway.ack_ingested",
+      "mt4_trade_gateway.command_expired"
+    ]
+  },
+  "agentCollaboration": {
+    "endpoint": "GET/POST /api/collaboration/schedule",
+    "runNowEndpoint": "POST /api/collaboration/run-now",
+    "runtimeStore": "data/runtime/collaboration-schedule.json",
+    "defaultEnabled": false,
+    "timezone": "Asia/Bangkok",
+    "defaultWindow": {
+      "startTime": "09:00",
+      "endTime": "18:00"
+    },
+    "defaultIntervalMinutes": 120,
+    "defaultMaxTurns": 3,
+    "defaultMaxDailyRuns": 3,
+    "defaultMinRemainingPercent": 30,
+    "participants": ["ea_developer", "backtest_analyst", "optimization_agent", "manager"],
+    "managerAlwaysFinalTurn": true,
+    "freshRateLimitRequiredBeforeEveryTurn": true,
+    "minimumUsesLowestAvailableQuotaWindow": true,
+    "fullAccessRequired": true,
+    "singleSessionAtATime": true,
+    "toolsEnabledDuringMeeting": false,
+    "computerUseEnabledDuringMeeting": false,
+    "taskCreationEnabledDuringMeeting": false,
+    "autoCreateFollowup": false,
+    "reportType": "collaboration_report",
+    "reportTargetPropId": "mission_strategy_table",
+    "durableRecords": ["mission", "meeting.start", "meeting.turn", "meeting", "report", "audit"]
   },
   "modelTiers": {
     "manager_quality": {
@@ -222,6 +357,13 @@
     "agentChatMaxMessageChars": 4000,
     "agentChatMaxOutputChars": 5000,
     "agentChatTimeoutSeconds": 120,
+    "collaborationTurnsPerHour": 12,
+    "collaborationSchedulerPollSeconds": 60,
+    "collaborationManualCooldownMinutes": 5,
+    "aiTradeCouncilAutoPollSeconds": 5,
+    "aiTradeCouncilAutoSettleSeconds": 10,
+    "aiTradeCouncilAutoMaxDailyRounds": 24,
+    "aiTradeCouncilAutoMinRemainingPercent": 30,
     "approvalTtlMinutes": 15,
     "autoApprovalTtlMinutes": 1440,
     "semaphoreBusyConsumesHourlyRate": false,
@@ -256,7 +398,7 @@
     "riskGuardReview": {
       "ruleVersion": "risk-guard-v1",
       "trigger": "after_explicit_human_approval_for_required_high_risk_missions",
-      "implementedToolAllowlist": ["codex_cli_task"],
+      "implementedToolAllowlist": ["codex_cli_task", "codex_web_research"],
       "blockedIntentKeywords": ["live trading", "live order", "live account", "open position", "send telegram", "send email", "delete file", "delete folder", "rm ", "rmdir ", "deploy", "publish external", "post publicly", "read auth.json", "credentials", "spend", "restart vps", "reboot vps", "เทรดจริง", "เปิด position", "ยิงออเดอร์", "เปิดออเดอร์", "ปิดออเดอร์", "ส่งเทเลแกรมจริง", "ส่งข้อความเข้า telegram", "ส่งอีเมล", "ลบไฟล์", "ล้างไฟล์", "ดีพลอย", "รีสตาร์ต vps", "รีบูต vps"],
       "disabledOrUnimplementedAdapters": "reject_fail_closed",
       "decisionBinding": "mission_payload_digest",
@@ -283,8 +425,8 @@
   "capabilityRegistry": {
     "endpoint": "GET /api/capabilities",
     "source": "contracts/tools/tool-permission-contract.json",
-    "frontendSafeFields": ["id", "label", "defaultMode", "risk", "approvalRequired", "allowedAgents", "modelTier", "linkedPropIds", "adapterStatus", "realExecutionAvailable", "autoRunnable"],
-    "runtimeOverrides": ["codex_status", "codex_cli_smoke", "codex_cli_task", "mcp_tool_run"],
+    "frontendSafeFields": ["id", "label", "defaultMode", "risk", "approvalRequired", "allowedAgents", "modelTier", "linkedPropIds", "adapterStatus", "realExecutionAvailable", "autoRunnable", "webSearchEnabled", "webSearchMode"],
+    "runtimeOverrides": ["codex_status", "codex_cli_smoke", "codex_cli_task", "codex_web_research", "mcp_tool_run"],
     "unknownToolDefault": "deny",
     "propReportsIncludeFilteredCapabilities": true
   }

@@ -1,56 +1,954 @@
 {
-  "version": "report-contract-v004",
+  "version": "report-contract-v011",
   "purpose": "Standard output shapes for every agent, prop popup, mission, bridge check, and memory card.",
   "base_report_schema": {
     "id": "report-{timestamp}",
-    "type": "executive_summary|mission_plan|code_change_report|backtest_report|optimization_report|backtest_optimization_report|vps_report|telegram_report|telegram_tool_report|risk_review|bridge_status_report|memory_recall_packet|archive_report|auto_trading_status_report|ops_overview_report|dashboard_connection_report|terminal_discovery_report|terminal_selection_report|prop_report",
+    "type": "executive_summary|mission_plan|collaboration_report|code_change_report|backtest_report|optimization_report|backtest_optimization_report|vps_report|telegram_report|telegram_tool_report|risk_review|bridge_status_report|memory_recall_packet|archive_report|trading_system_discovery_report|trading_system_research_report|indicator_scout_report|fx_news_bias_report|ea_development_report|ea_build_report|ea_compile_report|ea_experiment_report|ea_discovery_report|ai_trade_council_report|auto_trading_status_report|ops_overview_report|dashboard_connection_report|terminal_discovery_report|terminal_selection_report|prop_report",
     "title": "short title",
     "summary": "dashboard-ready summary",
     "ownerAgentId": "agent id",
+    "missionId": "canonical mission id; required for every dashboard action report",
+    "targetPropId": "canonical dashboard prop id; required for routed dashboard reports",
     "linkedMissionId": "mission id or null",
     "linkedPropId": "prop id or null",
     "status": "draft|ready|needs_approval|blocked|published|archived",
+    "sourceLineage": {
+      "sourcePropIds": ["source prop ids carried by an Agent Mission/Report transfer"],
+      "sourceMissionIds": ["source mission ids carried by an Agent Mission/Report transfer"],
+      "sourceReportIds": ["source report ids carried by an Agent Mission/Report transfer"],
+      "sourceArtifactIds": ["opaque backend artifact ids"]
+    },
+    "agentTransfer": {
+      "mode": "agent_mission_report",
+      "sourceReportId": "backend-validated source report id",
+      "sourcePropId": "backend-derived source prop id",
+      "sourceMissionId": "backend-derived completed source mission id",
+      "transferAgentId": "backend-selected canonical agent id that owns the destination action",
+      "sourceOwnerAgentId": "backend-derived owner of the source report",
+      "targetPropId": "destination dashboard prop id",
+      "handoffMissionId": "completed Agent handoff mission id that records delivery",
+      "status": "recorded"
+    },
+    "timestamps": {
+      "createdAt": "ISO-8601",
+      "updatedAt": "ISO-8601",
+      "startedAt": "ISO-8601 or null",
+      "completedAt": "ISO-8601 or null"
+    },
+    "reportRoute": {
+      "targetPropId": "canonical dashboard prop id",
+      "primaryReportType": "same value as type",
+      "summaryTargetPropId": "mission_strategy_table"
+    },
     "findings": ["bullet text"],
     "metrics": {},
     "risks": ["risk text"],
     "nextActions": ["action text"],
-    "artifacts": ["project-relative paths"],
+    "evidence": [
+      {
+        "label": "public source title",
+        "url": "https://...",
+        "note": "why this source supports the result"
+      }
+    ],
+    "executionEvidence": {
+      "sourceKind": "analysis_only|existing_report|mt4_visible_run|mt5_visible_run",
+      "toolId": "backend tool id or null",
+      "platform": "mt4|mt5|null",
+      "terminalCandidateId": "opaque backend candidate id or null",
+      "backendVerificationId": "opaque id of a matching backend-owned execution audit event or null",
+      "compileProofVerified": false,
+      "visualBacktestProofVerified": false,
+      "optimizationProofVerified": false,
+      "mtExecutionVerified": false,
+      "scopeLabelTh": "คำอธิบายภาษาไทยว่าผลนี้เป็นเพียงการวิเคราะห์หรือยืนยันจากโปรแกรมจริง"
+    },
+    "artifacts": ["backend-only project-relative paths; never returned to frontend"],
+    "attachments": [
+      {
+        "id": "opaque attachment id",
+        "kind": "image",
+        "label": "ชื่อรูปหลักฐาน",
+        "mediaType": "image/png|image/jpeg|image/webp",
+        "url": "/api/reports/{reportId}/attachments/{attachmentId}",
+        "byteSize": 0
+      }
+    ],
     "safety": {
       "containsSecret": false,
       "secretRedacted": false,
       "approvalRequired": false,
       "publicShareable": false
     },
-    "createdAt": "ISO-8601"
+    "createdAt": "ISO-8601",
+    "updatedAt": "ISO-8601"
+  },
+  "typed_report_schemas": {
+    "ai_trade_council_report": {
+      "schemaVersion": "ai-trade-council-report-v3",
+      "purpose": "A three-specialist Auto Trade report routed to left_analytics_console. Specialist votes are not approvals. An actionable plan requires all three results from the same Snapshot and Horizon, the configured 1/3, 2/3, or 3/3 directional threshold with no BUY/SELL conflict, applicable confidence, data/news quality, Price Action-owned SL/TP or a same-Snapshot deterministic Backend fallback, Council Quality Gate, Risk/EA Gate, and a matching EA acknowledgement.",
+      "analysisMode": "read_only_agents_guarded_gateway",
+      "inputEvidence": {
+        "available": false,
+        "reportIds": [],
+        "observedAt": null,
+        "sourceBarCount": null,
+        "analysisBarCountRequested": null,
+        "analysisBarCountUsed": null,
+        "closedBarsOnly": true,
+        "indicatorFormulaVersion": "metafx-deterministic-core20-price-action-v3",
+        "reasonCode": "verified_input_not_available"
+      },
+      "agentViewpoints": [],
+      "consensus": {
+        "available": false,
+        "decision": null,
+        "confidence": null,
+        "votes": null,
+        "tradePlan": {
+          "available": false,
+          "direction": null,
+          "stopLossPrice": null,
+          "takeProfitPrice": null,
+          "protectivePlanSource": "unavailable",
+          "protectivePlanReasonCode": "consensus_not_trade_eligible",
+          "protectivePlanPolicyVersion": "metafx-protective-plan-atr-structure-v1",
+          "protectivePlanFallbackUsed": false,
+          "protectivePlanProvenance": {
+            "schemaVersion": "ai-trade-council-protective-plan-v1",
+            "source": "unavailable",
+            "reasonCode": "consensus_not_trade_eligible",
+            "policyVersion": "metafx-protective-plan-atr-structure-v1",
+            "snapshotId": null,
+            "snapshotArtifactDigest": null,
+            "closedBarsOnly": true,
+            "formulaVersion": null,
+            "atr14": null,
+            "structureAnchorType": null,
+            "structureAnchorPrice": null,
+            "targetBasis": null,
+            "minimumRewardRiskRatio": null
+          },
+          "lotPolicy": "ea_fixed_lot_only",
+          "aiLotAllowed": false
+        },
+        "reasonCode": "ai_trader_ensemble_missing"
+      },
+      "qualityGate": {
+        "available": false,
+        "passed": false,
+        "reasonCodes": ["quality_gate_not_observed"],
+        "snapshotFresh": null,
+        "dataQualityPassed": null,
+        "horizonBars": null,
+        "validUntilBarTime": null,
+        "minimumConfidencePerRole": null,
+        "newsEventRisk": null,
+        "protectivePriceOwnerRole": null,
+        "protectivePlanFallbackUsed": null,
+        "protectivePlanReasonCode": null
+      },
+      "executionState": {
+        "liveTradingEnabled": false,
+        "orderSubmissionAvailable": false,
+        "tradingKillSwitchAvailable": false,
+        "gatewayMode": "not_observed",
+        "gatewayConnected": false,
+        "fixedLotSource": "mt4_ea_input_only",
+        "commandStatus": null,
+        "ackStatus": null,
+        "fillVerificationStatus": null,
+        "recoveryStatus": null
+      },
+      "outcomeTracking": {
+        "status": "unavailable",
+        "evaluationBars": [1, 3, 5],
+        "evaluations": []
+      },
+      "truthRules": [
+        "A Council report is not proof of execution until a matching EA ACK is recorded.",
+        "Three specialist votes are analytical opinions, not three execution approvals.",
+        "Price Action is the only AI protective-price proposer; when Price Action HOLDs and directional consensus otherwise qualifies, Backend may create a same-Snapshot deterministic fallback. Technical and News never set protective prices.",
+        "A direction that reaches the configured 1/3, 2/3, or 3/3 threshold is not actionable when BUY conflicts with SELL, or unless the deterministic Council Quality Gate and the Risk/EA Gate both pass.",
+        "Missing evidence, viewpoints, consensus, or trading values remain unavailable and null rather than zero.",
+        "AI and Frontend cannot set Lot, Risk Percent, Gateway Mode, Live Armed, Spread, Slippage, or Magic Number.",
+        "displayBars is a client-only chart preference and cannot change the evidence used by any specialist vote.",
+        "analysisBarCount is Backend-audited, limited to 120, 180, 240, 300, 500, or 1000 closed bars, and requested must equal used or the round fails closed.",
+        "Live trading remains off until the installed EA reports Live mode, LiveArmed, a pinned signing key id matching the Backend active key id, successful signed-envelope verification, a ready Kill Switch, and a matching execution ACK.",
+        "Memory cards and meeting transcripts are context only and are never counted as trading results."
+      ]
+    },
+    "auto_trading_status_report": {
+      "schemaVersion": "auto-trading-status-v1",
+      "purpose": "A backend-observed Auto Trading and EA status snapshot routed to left_analytics_console. Terminal detection or target selection alone never proves that trading data, positions, signals, a kill switch, or live order execution are available.",
+      "dataScope": "terminal_detection_only|demo_snapshot|paper_snapshot|live_snapshot",
+      "snapshotId": "opaque backend snapshot id or null",
+      "observedAt": "ISO-8601 timestamp from the trading-state adapter or null",
+      "terminal": {
+        "detectionAvailable": true,
+        "detected": false,
+        "selected": false,
+        "platform": "mt4|mt5|null",
+        "adapterReady": false
+      },
+      "market": {
+        "available": false,
+        "symbol": null,
+        "timeframe": null,
+        "price": null,
+        "reasonCode": "trading_state_adapter_missing"
+      },
+      "eaHealth": {
+        "available": false,
+        "status": null,
+        "reasonCode": "trading_state_adapter_missing"
+      },
+      "positionsSummary": {
+        "available": false,
+        "count": null,
+        "items": null,
+        "reasonCode": "trading_state_adapter_missing"
+      },
+      "latestSignal": {
+        "available": false,
+        "direction": null,
+        "confidence": null,
+        "generatedAt": null,
+        "reasonCode": "trading_state_adapter_missing"
+      },
+      "safetyState": {
+        "missionRiskGuardReady": true,
+        "tradingKillSwitchReady": false,
+        "liveTradingEnabled": false,
+        "liveOrderExecutionAvailable": false
+      },
+      "truthRules": [
+        "Unknown trading values use null together with available=false; zero must never mean not observed.",
+        "Terminal detected and terminal selected never imply adapterReady.",
+        "demo_snapshot, paper_snapshot, and live_snapshot require a backend-owned adapter snapshot id and audit evidence.",
+        "Live trading remains false until a separate live adapter, trading risk engine, account allowlist, and trading kill switch are implemented.",
+        "Memory cards and meeting transcripts are not trading results."
+      ]
+    },
+    "trading_system_discovery_report": {
+      "schemaVersion": "trading-system-discovery-report-v1",
+      "purpose": "รายงานค้นหาระบบเทรดหรือ EA จากแหล่งข้อมูลสาธารณะสำหรับ codex_mcp_portal พร้อมหลักฐานและสถานะตรวจรายการซ้ำ",
+      "discoveryKind": "trading_system|ea_update",
+      "searchWindow": {"startedAt": null, "completedAt": null, "queries": []},
+      "catalogTemplate": "contracts/research/trading-system-sheet-template.csv",
+      "deduplication": {
+        "performed": false,
+        "basis": ["source_url", "system_name", "market", "timeframe"],
+        "duplicateCount": null
+      },
+      "entries": [
+        {
+          "recordId": "opaque record id",
+          "recordType": "trading_system|ea_update",
+          "systemName": "ชื่อระบบ",
+          "authorOrTrader": null,
+          "market": null,
+          "symbols": [],
+          "timeframes": [],
+          "entryRulesSummary": null,
+          "exitRulesSummary": null,
+          "stopLossSummary": null,
+          "takeProfitSummary": null,
+          "recoveryOrAveragingSummary": null,
+          "specialConditions": [],
+          "suitableFor": [],
+          "sourceEvidence": [],
+          "verificationStatus": "unverified|partially_verified|verified",
+          "duplicateStatus": "not_checked|unique|duplicate|possible_duplicate",
+          "deepResearchReady": false
+        }
+      ],
+      "runtimeReadiness": {
+        "publicCodexWebResearch": "ready_guarded_read_only",
+        "missionReportAudit": "ready",
+        "localCatalogTemplate": "ready",
+        "googleSheetsSync": "coming_soon",
+        "recurringScheduler": "coming_soon"
+      },
+      "truthRules": [
+        "Every discovered item must include at least one public source URL; two independent sources are preferred before verified status.",
+        "Claims about performance remain unverified unless the report contains reproducible evidence.",
+        "A saved schedule is configuration intent only until the Backend recurring scheduler adapter is implemented.",
+        "Google Sheets sync remains unavailable until a Backend-owned adapter is implemented; Frontend never receives Google credentials."
+      ]
+    },
+    "trading_system_research_report": {
+      "schemaVersion": "trading-system-research-report-v1",
+      "purpose": "รายงานวิจัยเชิงลึกสำหรับ left_server_racks ซึ่งขยายและตรวจสอบระบบที่เลือกจากเรดาร์ก่อนส่งต่อไปสร้าง EA/Indicator",
+      "sourceDiscoveryReportId": null,
+      "sourceRecordId": null,
+      "verificationStatus": "not_started|in_progress|partially_verified|verified|insufficient_evidence",
+      "systemRules": {
+        "market": null,
+        "symbols": [],
+        "timeframes": [],
+        "entryRules": [],
+        "exitRules": [],
+        "stopLossRules": [],
+        "takeProfitRules": [],
+        "positionSizingRules": [],
+        "recoveryOrAveragingRules": [],
+        "specialConditions": []
+      },
+      "application": {"suitableFor": [], "limitations": [], "implementationNotes": [], "candidatePlatforms": []},
+      "sourceEvidence": [],
+      "runtimeReadiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "durableArchive": "ready", "googleSheetsSync": "coming_soon"},
+      "truthRules": [
+        "Research expands and verifies source material; it does not invent missing rules or performance.",
+        "Conflicting sources must remain visible and must lower verificationStatus.",
+        "A verified research report is design input, not proof that an EA compiles, backtests, or is profitable."
+      ]
+    },
+    "ea_build_report": {
+      "schemaVersion": "ea-build-report-v1",
+      "purpose": "รายงานสร้างหรือตรวจ Source Code สำหรับ right_server_racks โดยแยกความพร้อมของ Source Generation ออกจาก Compile จริง",
+      "sourceReference": {"propId": null, "reportId": null, "recordId": null, "freeformBrief": null},
+      "target": {"platform": "mt4|mt5|tradingview", "language": "mql4|mql5|pine_script", "artifactKind": "ea|indicator|strategy"},
+      "sourceGeneration": {"available": true, "status": "queued|running|completed|failed", "workspaceScope": "PROJECT_ROOT/workspace", "artifactIds": []},
+      "sourceReview": {"available": true, "status": "not_started|running|completed|failed", "findings": []},
+      "compile": {"available": false, "status": "coming_soon", "compiler": null, "errors": null, "warnings": null, "proofId": null},
+      "runtimeReadiness": {"codexSourceGenerationWorkspace": "ready_guarded", "sourceCodeReview": "ready_guarded", "missionReportAudit": "ready", "metaEditorCompile": "coming_soon", "pineCompileValidation": "coming_soon"},
+      "truthRules": [
+        "Source generated in the guarded Workspace is not compiled proof.",
+        "Compile status remains unavailable until a Backend-owned MetaEditor or TradingView validation adapter returns matching audit evidence.",
+        "Frontend receives only opaque artifact ids or allowlisted download URLs, never unrestricted filesystem paths."
+      ]
+    },
+    "ea_compile_report": {
+      "schemaVersion": "ea-compile-report-v1",
+      "purpose": "ผล Compile แบบแยกจากรายงานสร้าง Source Code; ค่าเริ่มต้นต้องเป็น Coming Soon จนมีหลักฐานจาก Adapter จริง",
+      "buildReportId": null,
+      "platform": "mt4|mt5|tradingview|null",
+      "compilerAdapterAvailable": false,
+      "status": "coming_soon|queued|running|passed|failed",
+      "errors": null,
+      "warnings": null,
+      "artifactDigestSha256": null,
+      "backendVerificationId": null,
+      "truthRules": [
+        "passed requires a matching Backend compile audit event and artifact SHA-256.",
+        "Static code review cannot be labeled Compile passed.",
+        "Missing compiler evidence remains null and Coming Soon."
+      ]
+    },
+    "ea_experiment_report": {
+      "schemaVersion": "ea-experiment-report-v1",
+      "purpose": "รายงานแผนและผลการทดลองสำหรับ right_tool_console โดยแยก Auto Backtest, Auto Optimization และ EA Discovery",
+      "experimentMode": "auto_backtest|auto_optimization|ea_discovery",
+      "sourceReference": {"propId": null, "reportId": null, "artifactId": null, "recordId": null},
+      "plan": {
+        "available": true,
+        "platform": null,
+        "symbol": null,
+        "timeframe": null,
+        "dateRange": null,
+        "profitTarget": null,
+        "maximumDrawdown": null,
+        "minimumTradeCount": null,
+        "parameterRanges": [],
+        "validationMethod": null
+      },
+      "execution": {"available": false, "status": "coming_soon", "adapterId": null, "backendVerificationId": null},
+      "results": {"available": false, "netProfit": null, "drawdown": null, "profitFactor": null, "winRate": null, "tradeCount": null, "overfitWarnings": []},
+      "runtimeReadiness": {"missionPlanReportAudit": "ready", "strategyTesterBacktest": "coming_soon", "metatraderOptimization": "coming_soon", "eaDiscoveryPlugin": "coming_soon"},
+      "truthRules": [
+        "A prepared plan is not a completed Backtest, Optimization, or Discovery run.",
+        "Results remain unavailable and null until a matching Backend execution audit and evidence artifact exist.",
+        "Profit targets are experiment objectives, not promises or fabricated results."
+      ]
+    },
+    "ea_discovery_report": {
+      "schemaVersion": "ea-discovery-report-v1",
+      "purpose": "รายงาน EA Discovery หรือ EA update ที่แยกเป้าหมายและ Inspiration ออกจากการรัน Plugin จริง",
+      "discoveryScope": "public_ea_update|target_driven_ea_discovery",
+      "targets": {"profit": null, "maximumDrawdown": null, "minimumTradeCount": null, "platform": null, "symbol": null, "timeframe": null},
+      "inspiration": {"sourcePropId": null, "sourceReportId": null, "sourceRecordId": null, "summary": null},
+      "plan": {"available": true, "status": "draft|ready|blocked"},
+      "pluginExecution": {"available": false, "status": "coming_soon", "adapterId": null},
+      "candidates": [],
+      "truthRules": [
+        "Target values are design constraints, not guaranteed performance.",
+        "Candidate results remain empty until the EA Discovery Plugin adapter executes and returns audited evidence.",
+        "Public EA updates require source URLs and must not be represented as locally tested."
+      ]
+    },
+    "indicator_scout_report": {
+      "schemaVersion": "indicator-scout-report-v1",
+      "purpose": "รายงานค้นหา Indicator, EA Tool และเครื่องมือวิเคราะห์ใหม่จากเว็บไซต์สาธารณะสำหรับ left_audit_crystals พร้อมหลักฐาน สถานะตรวจซ้ำ และสถานะ Adapter ที่ตรงความจริง",
+      "searchScope": {
+        "query": null,
+        "platform": "any|mt4|mt5|tradingview",
+        "category": "any|trend|momentum|volatility|volume|price_action|machine_learning",
+        "searchedAt": "ISO-8601",
+        "publicSourcesOnly": true
+      },
+      "deduplication": {
+        "performed": false,
+        "basis": ["sourceUrl", "toolName", "platform", "version"],
+        "duplicateCount": null
+      },
+      "entries": [
+        {
+          "recordId": "opaque backend id",
+          "toolName": "ชื่อ Indicator หรือ EA Tool",
+          "toolKind": "indicator|ea_tool|analysis_tool|library|research",
+          "platform": "mt4|mt5|tradingview|multi_platform|unknown",
+          "version": null,
+          "summaryTh": "สรุปภาษาไทย",
+          "sourceUrl": "https://public-source.example",
+          "sourceTitle": "ชื่อหน้าเว็บ",
+          "publishedAt": null,
+          "checkedAt": "ISO-8601",
+          "verificationStatus": "unverified|partially_verified|verified|insufficient_evidence",
+          "duplicateStatus": "not_checked|unique|duplicate|possible_duplicate",
+          "screenshot": {"available": false, "status": "coming_soon", "attachmentId": null}
+        }
+      ],
+      "schedulePreference": {
+        "enabledWhenAdapterReady": false,
+        "times": [],
+        "timezone": "Asia/Bangkok",
+        "maximumRunsPerDay": 2,
+        "configurationSaved": false,
+        "recurringSchedulerAvailable": false
+      },
+      "runtimeReadiness": {
+        "publicCodexWebResearch": "ready_guarded_read_only",
+        "missionReportAudit": "ready",
+        "localDedup": "ready_contract",
+        "screenshotAdapter": "coming_soon",
+        "recurringScheduler": "coming_soon"
+      },
+      "truthRules": [
+        "Every discovered entry must contain a public source URL and checkedAt timestamp.",
+        "A saved schedule is a Backend preference only until the recurring scheduler adapter is implemented.",
+        "Screenshot evidence remains unavailable until a Backend-owned screenshot adapter returns an attachment id.",
+        "No discovered performance claim is treated as verified without reproducible evidence."
+      ]
+    },
+    "fx_news_bias_report": {
+      "schemaVersion": "fx-news-bias-report-v1",
+      "purpose": "รายงานข่าวตลาดรายวัน ช่วงระวัง EA และมุมมอง 28 คู่เงินระยะสั้น กลาง และยาวสำหรับ left_signal_cube โดยเป็น Analysis Only และต้องอ้างอิงแหล่งสาธารณะ",
+      "marketDate": "YYYY-MM-DD",
+      "generatedAt": "ISO-8601",
+      "highImpactEvents": [
+        {
+          "eventId": "opaque backend id",
+          "currency": "USD",
+          "title": "ชื่อเหตุการณ์",
+          "scheduledAt": "ISO-8601 or null",
+          "impact": "low|medium|high|unknown",
+          "summaryTh": "สรุปภาษาไทย",
+          "sourceEvidenceIds": ["evidence ids"]
+        }
+      ],
+      "eaCautionWindows": [
+        {
+          "currency": "USD",
+          "startsAt": "ISO-8601",
+          "endsAt": "ISO-8601",
+          "reasonTh": "เหตุผลที่ควรระวัง",
+          "sourceEvidenceIds": ["evidence ids"]
+        }
+      ],
+      "fxPairUniverse": ["AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDUSD", "CADCHF", "CADJPY", "CHFJPY", "EURAUD", "EURCAD", "EURCHF", "EURGBP", "EURJPY", "EURNZD", "EURUSD", "GBPAUD", "GBPCAD", "GBPCHF", "GBPJPY", "GBPNZD", "GBPUSD", "NZDCAD", "NZDCHF", "NZDJPY", "NZDUSD", "USDCAD", "USDCHF", "USDJPY"],
+      "pairBias": [
+        {
+          "pair": "EURUSD",
+          "short": {"bias": "bullish|bearish|sideway|insufficient_data", "confidence": null, "reasonTh": null, "sourceEvidenceIds": []},
+          "medium": {"bias": "bullish|bearish|sideway|insufficient_data", "confidence": null, "reasonTh": null, "sourceEvidenceIds": []},
+          "long": {"bias": "bullish|bearish|sideway|insufficient_data", "confidence": null, "reasonTh": null, "sourceEvidenceIds": []}
+        }
+      ],
+      "sourceEvidence": [
+        {"id": "opaque evidence id", "title": "public source title", "url": "https://...", "publishedAt": null, "checkedAt": "ISO-8601", "noteTh": "เหตุผลที่ใช้แหล่งนี้"}
+      ],
+      "schedulePreference": {"enabledWhenAdapterReady": false, "times": [], "timezone": "Asia/Bangkok", "maximumRunsPerDay": 2, "configurationSaved": false, "recurringSchedulerAvailable": false},
+      "runtimeReadiness": {"publicCodexWebResearch": "ready_guarded_read_only", "fxBiasAnalysis": "ready_analysis_only", "missionReportAudit": "ready", "economicCalendarFeed": "coming_soon", "recurringScheduler": "coming_soon"},
+      "truthRules": [
+        "The pair universe must contain exactly the 28 canonical FX pairs and each pair has short, medium, and long horizons.",
+        "Bias is market analysis, not an order, recommendation guarantee, or approval to trade.",
+        "Every event and non-insufficient bias must point to source evidence recorded by Backend.",
+        "A saved schedule does not imply that recurring execution is active."
+      ]
+    },
+    "ea_development_report": {
+      "schemaVersion": "ea-development-report-v1",
+      "purpose": "รายงานตรวจ พัฒนา และเสนอแนวทางปรับปรุง Source MQL4/MQL5 สำหรับ terminal_workstation โดยผูก Source Lineage และแยก Source Development ออกจาก Compile หรือ Backtest จริง",
+      "sourceReference": {
+        "sourceKind": "linked_report|workspace_source",
+        "sourceReportId": null,
+        "workspaceSourceId": null,
+        "sourceArtifactId": null,
+        "sourcePropId": null,
+        "platform": "mql4|mql5",
+        "fileName": null
+      },
+      "brief": {
+        "text": null,
+        "voiceCaptureOwner": "frontend",
+        "voiceTranscript": null,
+        "backendReceivesAudio": false
+      },
+      "performanceGoals": {
+        "targetProfitPercent": null,
+        "maxDrawdownPercent": null,
+        "targetTrades": null,
+        "semantics": "design_targets_not_performance_promises"
+      },
+      "development": {"available": true, "status": "queued|running|completed|failed", "workspaceScope": "PROJECT_ROOT/workspace", "changedArtifactIds": []},
+      "review": {"available": true, "status": "not_started|running|completed|failed", "findings": [], "riskNotes": []},
+      "compile": {"available": false, "status": "coming_soon", "compiler": null, "errors": null, "warnings": null, "proofId": null},
+      "backtest": {"available": false, "status": "not_run", "proofId": null},
+      "artifactManifest": [
+        {"artifactId": "opaque backend id", "fileName": "example.mq4", "platform": "mql4", "mediaType": "text/plain", "byteSize": 0, "downloadAvailable": false, "downloadUrl": null}
+      ],
+      "runtimeReadiness": {"workspaceSourceCatalog": "ready_backend_opaque_ids", "linkedReportSource": "ready", "codexSourceDevelopment": "ready_guarded_workspace", "sourceReview": "ready_guarded_workspace", "metaEditorCompile": "coming_soon", "artifactDownload": "coming_soon"},
+      "truthRules": [
+        "Frontend may select only a linked source report or an opaque workspaceSourceId from the Backend-approved .mq4/.mq5 catalog; raw paths are forbidden.",
+        "Voice capture belongs to Frontend and Backend receives only a bounded sanitized transcript, never microphone credentials or raw audio.",
+        "Performance goals are design constraints and never imply profit, drawdown, trade-count, Backtest, or Optimization proof.",
+        "Compile remains Coming Soon until a Backend-owned Compiler Adapter returns matching audit evidence.",
+        "Frontend download is available only when Backend emits an opaque artifactId and allowlisted same-origin downloadUrl."
+      ]
+    },
+    "ops_overview_report": {
+      "schemaVersion": "ops-overview-report-v1",
+      "purpose": "รายงานสถานะ VPS, HQ, Local Bridge และ Preference ของ Agent ที่ปลอดภัยสำหรับ right_status_crystals โดยไม่ปะปน Risk Review หรือ Auto Trading Status",
+      "vpsHealth": {"available": false, "observedAt": null, "uptimeSeconds": null, "cpuPercent": null, "ramPercent": null, "diskPercent": null, "latencyMs": null, "source": "backend_local_probe|external_provider|unavailable"},
+      "hqBridgeHealth": {"available": false, "observedAt": null, "bridgeStatus": null, "missionWorkerStatus": null, "codexStatus": null, "rateLimitStatus": null, "blockers": []},
+      "agentPreferences": {"language": "th", "modelTier": "specialist_balanced", "tokenBudget": null, "timeoutSeconds": null, "outputLimitChars": null, "rateReservePercent": null, "updatedAt": null, "updatedBy": null},
+      "activityHistory": [{"missionId": "mission id", "actionId": null, "ownerAgentId": "agent id", "status": "queued|waiting_approval|running|blocked|completed|failed|archived", "createdAt": "ISO-8601", "updatedAt": "ISO-8601"}],
+      "runtimeReadiness": {"localBridgeHealth": "ready", "missionWorkerHealth": "ready", "vpsMetrics": "runtime_detected", "safeAgentPreferences": "ready_backend_validated", "activityHistory": "ready", "externalVpsApi": "coming_soon"},
+      "truthRules": [
+        "Unknown health metrics remain null and never use fabricated zero values.",
+        "Agent preferences accept only language, modelTier, tokenBudget, timeoutSeconds, outputLimitChars, and rateReservePercent after Backend bounds validation.",
+        "Provider model ids, tokens, API keys, cookies, auth files, passwords, SSH keys, and broker credentials are forbidden.",
+        "risk_review routes to Mission Strategy Table and auto_trading_status_report routes to left_analytics_console; neither report type is accepted by this VPS/HQ dashboard."
+      ]
+    },
+    "prop_report": {
+      "schemaVersion": "prop-report-v2",
+      "properties": {
+        "aiTradeCouncil": {
+          "scope": "left_analytics_console only",
+          "schemaVersion": "ai-trade-council-v2",
+          "tabOrder": ["dailySummary", "liveAnalysis", "decisionPipeline", "history"],
+          "runtimeTruth": {
+            "scope": "backend_validated_snapshot_and_ea_gateway_status",
+            "terminalDetection": {
+              "available": true,
+              "detected": false,
+              "platforms": [],
+              "processDetected": false,
+              "selected": false,
+              "selectedPlatform": null,
+              "adapterReady": false,
+              "checkedAt": "ISO-8601 or null"
+            },
+            "tradingStateAdapter": {
+              "available": false,
+              "status": "awaiting_snapshot",
+              "adapterStatus": "implemented_read_only_snapshot",
+              "mode": "read_only"
+            },
+            "ensemble": {
+              "available": false,
+              "status": "waiting_snapshot"
+            },
+            "missionRiskGuardAvailable": true,
+            "tradingKillSwitchAvailable": false,
+            "liveTradingEnabled": false,
+            "liveTradingStatus": "disabled",
+            "liveOrderExecutionAvailable": false,
+            "demoOrderExecutionAvailable": false,
+            "shadowValidationAvailable": false,
+            "tradeGateway": "sanitized MT4 Trade Gateway status object",
+            "tradingDataObservedAt": null,
+            "messageTh": "คำอธิบายสถานะตามข้อมูลที่ Backend ยืนยันได้"
+          },
+          "dailySummary": {
+            "available": false,
+            "status": "awaiting_snapshot",
+            "reasonCode": "snapshot_not_observed",
+            "basis": "broker_server_day",
+            "serverDay": null,
+            "currency": null,
+            "realizedProfit": null,
+            "floatingProfit": null,
+            "netPnl": null,
+            "balance": null,
+            "equity": null,
+            "tradesClosed": null,
+            "wins": null,
+            "losses": null,
+            "openPositions": null
+          },
+          "chartSnapshot": {
+            "available": false,
+            "status": "awaiting_snapshot",
+            "reasonCode": "snapshot_not_observed",
+            "snapshotId": null,
+            "observedAt": null,
+            "ageSeconds": null,
+            "symbol": null,
+            "timeframe": null,
+            "bid": null,
+            "ask": null,
+            "spreadPoints": null,
+            "barCount": 0,
+            "sourceBarCount": 0,
+            "analysisWindow": {
+              "requestedBars": 120,
+              "usedBars": 0,
+              "startTime": null,
+              "endTime": null,
+              "closedBarsOnly": true,
+              "indicatorFormulaVersion": "metafx-deterministic-core20-price-action-v3"
+            },
+            "bars": [],
+            "technicalIndicators": {
+              "available": false,
+              "basis": "backend_calculated_closed_bars_only",
+              "formulaVersion": "metafx-deterministic-core20-price-action-v3",
+              "barCount": 0,
+              "series": []
+            },
+            "priceActionFeatures": {
+              "available": false,
+              "basis": "backend_calculated_full_closed_bar_window",
+              "formulaVersion": "metafx-deterministic-core20-price-action-v3",
+              "barCount": 0,
+              "families": ["confirmed_swing_pivots", "support_resistance", "trendlines", "fibonacci_latest_confirmed_swing", "rsi_divergence", "macd_divergence"]
+            }
+          },
+          "analysisReadiness": {
+            "available": false,
+            "status": "waiting_snapshot",
+            "snapshotId": null,
+            "managerAgentId": "manager",
+            "riskGuardAgentId": "risk_guard",
+            "riskGuardVoting": false,
+            "agentCount": 3,
+            "agents": [
+              {"agentId": "optimization_agent", "roleId": "technical", "ready": false},
+              {"agentId": "backtest_analyst", "roleId": "price_action", "ready": false},
+              {"agentId": "codex_mcp_operator", "roleId": "news", "ready": false}
+            ],
+            "liveOrderActionAvailable": false
+          },
+          "autoAnalysis": {
+            "schemaVersion": "ai-trade-council-auto-v1",
+            "available": true,
+            "config": {
+              "enabled": false,
+              "triggerMode": "last_closed_candle_time_change",
+              "pollSeconds": 5,
+              "settleSeconds": 10,
+              "maxDailyRounds": 24,
+              "minRemainingPercent": 30,
+              "analysisBarCount": 120,
+              "allowedAnalysisBarCounts": [120, 180, 240, 300, 500, 1000],
+              "supportedTimeframes": ["M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"],
+              "manualOnlyTimeframes": ["M1"],
+            "backlogPolicy": "latest_only_cancel_stale_round",
+            "roundExecution": "bounded_parallel_three_specialists",
+              "activationPolicy": "wait_next_closed_bar"
+            },
+            "state": {
+              "status": "disabled",
+              "reason": "disabled",
+              "symbol": null,
+              "timeframe": null,
+              "lastObservedClosedBarTime": null,
+              "lastAnalyzedClosedBarTime": null,
+              "dailyRunCount": 0,
+              "lastMissionId": null
+            },
+            "liveOrderSubmission": "conditional_on_unanimous_trade_plan_and_ea_gateway"
+          },
+          "tradeGateway": {
+            "connected": false,
+            "mode": null,
+            "liveArmed": false,
+            "fixedLot": null,
+            "fixedLotSource": "ea_input_read_only",
+            "aiCanSetLotOrRisk": false,
+            "signedCommandVerificationAvailable": false,
+            "activeSigningKeyId": null,
+            "signingKeyPinned": false,
+            "signingKeyMatch": false,
+            "signatureAlgorithm": null,
+            "lastSignatureVerificationStatus": null,
+            "killSwitchActive": false,
+            "shadowValidationAvailable": false,
+            "demoOrderExecutionAvailable": false,
+            "liveOrderExecutionAvailable": false,
+            "initStatus": {
+              "available": false,
+              "readStatus": "not_observed",
+              "readReasonCode": "gateway_init_status_not_observed",
+              "sourceSchemaVersion": null,
+              "eaVersion": null,
+              "gatewayMode": null,
+              "accountMode": null,
+              "liveArmed": false,
+              "severity": null,
+              "stage": null,
+              "reasonCode": null,
+              "warningCode": null,
+              "returnCode": null,
+              "observedAt": null,
+              "ageSeconds": null,
+              "stale": false,
+              "supersededByLiveStatus": false
+            },
+            "activeCommand": null,
+            "ackEvents": []
+          },
+          "liveAnalysis": {
+            "available": false,
+            "status": "awaiting_snapshot",
+            "dataScope": "terminal_detection_only",
+            "observedAt": null,
+            "market": {
+              "available": false,
+              "symbol": null,
+              "timeframe": null,
+              "price": null,
+              "reasonCode": "trading_state_adapter_missing"
+            },
+            "eaHealth": {
+              "available": false,
+              "status": null,
+              "mode": null,
+              "reasonCode": "gateway_status_not_observed"
+            },
+            "positionsSummary": {
+              "available": false,
+              "count": null,
+              "items": null,
+              "reasonCode": "trading_state_adapter_missing"
+            },
+            "latestSignal": {
+              "available": false,
+              "direction": null,
+              "confidence": null,
+              "generatedAt": null,
+              "reasonCode": "trading_state_adapter_missing"
+            },
+            "consensus": {
+              "available": false,
+              "decision": null,
+              "confidence": null,
+              "votes": null,
+              "tradePlan": {
+                "available": false,
+                "direction": null,
+                "stopLossPrice": null,
+                "takeProfitPrice": null,
+                "protectivePlanSource": "unavailable",
+                "protectivePlanReasonCode": "consensus_not_trade_eligible",
+                "protectivePlanPolicyVersion": "metafx-protective-plan-atr-structure-v1",
+                "protectivePlanFallbackUsed": false,
+                "protectivePlanProvenance": {
+                  "schemaVersion": "ai-trade-council-protective-plan-v1",
+                  "source": "unavailable",
+                  "reasonCode": "consensus_not_trade_eligible",
+                  "policyVersion": "metafx-protective-plan-atr-structure-v1",
+                  "snapshotId": null,
+                  "snapshotArtifactDigest": null,
+                  "closedBarsOnly": true,
+                  "formulaVersion": null,
+                  "atr14": null,
+                  "structureAnchorType": null,
+                  "structureAnchorPrice": null,
+                  "targetBasis": null,
+                  "minimumRewardRiskRatio": null
+                },
+                "lotPolicy": "ea_fixed_lot_only",
+                "aiLotAllowed": false
+              },
+              "reasonCode": "ai_trader_ensemble_missing"
+            },
+            "qualityGate": {
+              "available": false,
+              "passed": false,
+              "reasonCodes": ["quality_gate_not_observed"],
+              "horizonBars": null,
+              "validUntilBarTime": null,
+              "confidence": null,
+              "newsEventRisk": null,
+              "protectivePriceOwnerRole": null,
+              "protectivePlanFallbackUsed": null,
+              "protectivePlanReasonCode": null
+            },
+            "executionLifecycle": {
+              "stages": ["snapshot", "specialist_votes", "consensus", "quality_gate", "risk_ea_gate", "command_ack", "fill_recovery"],
+              "command": null,
+              "ack": null,
+              "fillVerification": null,
+              "recovery": null
+            }
+          },
+          "decisionPipeline": {
+            "available": true,
+            "status": "active|needs_attention|idle",
+            "summary": "mission summary object",
+            "items": [],
+            "activeItems": [],
+            "completedItems": [],
+            "blockedItems": [],
+            "archivedItems": [],
+            "hasMore": false,
+            "sourceScope": "exact_analytics_console_mission_routing"
+          },
+          "history": {
+            "available": true,
+            "summary": "report summary object",
+            "items": [],
+            "tradingReports": [],
+            "connectionReports": [],
+            "otherReports": [],
+            "hasMore": false,
+            "sourceScope": "exact_analytics_console_linked_reports_only",
+            "memoryIncluded": false,
+            "meetingsIncluded": false
+          },
+          "truthRules": [
+            "This extension is emitted only for left_analytics_console.",
+            "runtimeTruth is not a dashboard tab and must remain visible with every tab.",
+            "The four stable tab keys are dailySummary, liveAnalysis, decisionPipeline, and history.",
+            "Terminal detection and target selection never imply adapterReady.",
+            "dailySummary and chartSnapshot come only from the selected MT4 read-only snapshot channel.",
+            "All three specialist missions must consume the same snapshotId.",
+            "Technical indicators are calculated deterministically by Backend from closed bars only.",
+            "The report API retains chartSnapshot.bars and feature series for the full validated source snapshot, up to 1000 closed bars, so displayBars may render the requested source history.",
+            "displayBars is client-only; it changes only the visible candle count and never changes the specialist input.",
+            "analysisBarCount is Backend-audited and must use exactly 120, 180, 240, 300, 500, or 1000 closed bars with requestedBars equal to usedBars.",
+            "Before a specialist Mission is created, Backend slices the source to analysisBarCount and recalculates technicalIndicators and priceActionFeatures; the Mission artifact never labels sourceBarCount as embedded analysis evidence.",
+            "Risk Guard is non-voting; execution status comes only from the backend-owned Trade Gateway and EA ACK.",
+            "Price Action alone may propose stopLossPrice and takeProfitPrice; Technical and News must return null prices, and Lot remains an EA input.",
+            "A trade command is eligible only after all three votes are returned, the configured 1/3, 2/3, or 3/3 BUY or SELL threshold is reached without an opposing-direction vote, and Snapshot freshness, data quality, Horizon, Confidence, news Event Risk, protective-price, Risk, and EA gates all pass.",
+            "Per-order human approval is not required; the locally configured EA mode and LiveArmed inputs are the persistent execution authorization.",
+            "Unknown trading values remain null with available=false.",
+            "history accepts only exact linked runtime reports; memory cards and meeting transcripts are excluded.",
+            "Live execution remains false until Backend signing and EA signature verification are ready, their key ids match, TrustedSigningKeyId is pinned, and the installed EA reports Live mode plus LiveArmed with Kill Switch ready."
+          ]
+        },
+        "autoTradingStatus": {
+          "scope": "left_analytics_console only",
+          "schemaVersion": "auto-trading-status-dashboard-v1",
+          "runtimeTruth": {
+            "scope": "terminal_detection_only",
+            "terminalDetection": {
+              "available": true,
+              "detected": false,
+              "platforms": [],
+              "processDetected": false,
+              "selected": false,
+              "selectedPlatform": null,
+              "adapterReady": false,
+              "checkedAt": "ISO-8601 or null"
+            },
+            "tradingStateAdapter": {
+              "available": false,
+              "status": "coming_soon",
+              "adapterStatus": "coming_soon"
+            },
+            "missionRiskGuardAvailable": true,
+            "tradingKillSwitchAvailable": false,
+            "liveTradingEnabled": false,
+            "liveTradingStatus": "disabled",
+            "liveOrderExecutionAvailable": false,
+            "tradingDataObservedAt": null,
+            "messageTh": "คำอธิบายสถานะตามข้อมูลที่ Backend ยืนยันได้"
+          },
+          "status": {
+            "available": false,
+            "status": "adapter_missing",
+            "dataScope": "terminal_detection_only",
+            "observedAt": null,
+            "market": {"available": false, "symbol": null, "timeframe": null, "price": null, "reasonCode": "trading_state_adapter_missing"},
+            "eaHealth": {"available": false, "status": null, "reasonCode": "trading_state_adapter_missing"},
+            "positionsSummary": {"available": false, "count": null, "items": null, "reasonCode": "trading_state_adapter_missing"},
+            "latestSignal": {"available": false, "direction": null, "confidence": null, "generatedAt": null, "reasonCode": "trading_state_adapter_missing"}
+          },
+          "history": {
+            "available": true,
+            "summary": "report summary object",
+            "items": [],
+            "statusReports": [],
+            "connectionReports": [],
+            "otherReports": [],
+            "hasMore": false,
+            "sourceScope": "exact_left_analytics_console_linked_reports_only",
+            "memoryIncluded": false,
+            "meetingsIncluded": false
+          },
+          "truthRules": [
+            "This extension is emitted only for left_analytics_console and never for the repurposed left_signal_cube FX News Dashboard or right_status_crystals VPS/HQ Dashboard.",
+            "It is a status and monitoring model, not the AI Trade Council.",
+            "Terminal detection and target selection never imply adapterReady.",
+            "Unknown trading values remain null with available=false.",
+            "Live trading and live order execution remain false until the dedicated trading adapters and safety controls exist."
+          ]
+        }
+      }
+    }
   },
   "report_targets": {
     "executive_summary": ["ceo", "mission_strategy_table"],
     "mission_plan": ["manager", "mission_strategy_table"],
-    "code_change_report": ["ea_developer", "terminal_workstation"],
-    "backtest_report": ["backtest_analyst", "left_analytics_console"],
-    "optimization_report": ["optimization_agent", "right_server_racks"],
+    "collaboration_report": ["manager", "mission_strategy_table"],
+    "code_change_report": ["ea_developer", "terminal_workstation", "right_server_racks"],
+    "backtest_report": ["backtest_analyst", "right_tool_console", "left_analytics_console"],
+    "optimization_report": ["optimization_agent", "right_tool_console"],
     "vps_report": ["vps_watch", "right_status_crystals"],
-    "telegram_report": ["telegram_ops", "right_tool_console"],
-    "telegram_tool_report": ["telegram_ops", "right_tool_console"],
-    "risk_review": ["risk_guard", "left_audit_crystals", "right_status_crystals"],
+    "telegram_report": ["telegram_ops", "mission_strategy_table"],
+    "telegram_tool_report": ["telegram_ops", "mission_strategy_table"],
+    "risk_review": ["risk_guard", "mission_strategy_table"],
     "bridge_status_report": ["codex_mcp_operator", "codex_mcp_portal"],
     "memory_recall_packet": ["mission_archivist", "left_server_racks"],
     "archive_report": ["mission_archivist", "left_server_racks"],
+    "trading_system_discovery_report": ["codex_mcp_operator", "mission_archivist", "codex_mcp_portal"],
+    "trading_system_research_report": ["mission_archivist", "backtest_analyst", "left_server_racks"],
+    "indicator_scout_report": ["codex_mcp_operator", "mission_archivist", "left_audit_crystals"],
+    "fx_news_bias_report": ["codex_mcp_operator", "manager", "left_signal_cube"],
+    "ea_development_report": ["ea_developer", "terminal_workstation"],
+    "ea_build_report": ["ea_developer", "right_server_racks"],
+    "ea_compile_report": ["ea_developer", "right_server_racks"],
+    "ea_experiment_report": ["backtest_analyst", "optimization_agent", "right_tool_console"],
+    "ea_discovery_report": ["ea_developer", "backtest_analyst", "codex_mcp_portal", "right_tool_console"],
     "backtest_optimization_report": ["backtest_analyst", "optimization_agent", "left_analytics_console"],
-    "auto_trading_status_report": ["vps_watch", "risk_guard", "left_signal_cube"],
-    "ops_overview_report": ["manager", "right_status_crystals"],
+    "ai_trade_council_report": ["manager", "optimization_agent", "backtest_analyst", "codex_mcp_operator", "ea_developer", "risk_guard", "left_analytics_console"],
+    "auto_trading_status_report": ["vps_watch", "risk_guard", "left_analytics_console"],
+    "ops_overview_report": ["vps_watch", "manager", "right_status_crystals"],
     "dashboard_connection_report": ["mission_strategy_table", "codex_mcp_portal", "left_server_racks", "right_server_racks", "left_analytics_console", "right_tool_console", "terminal_workstation", "left_audit_crystals", "left_signal_cube", "right_status_crystals"],
-    "terminal_discovery_report": ["right_server_racks", "left_analytics_console", "terminal_workstation", "left_signal_cube"],
-    "terminal_selection_report": ["right_server_racks", "left_analytics_console", "terminal_workstation", "left_signal_cube"]
+    "terminal_discovery_report": ["right_server_racks", "right_tool_console", "left_analytics_console"],
+    "terminal_selection_report": ["right_server_racks", "right_tool_console", "left_analytics_console"]
   },
   "storage": {
     "runtime_reports": "./data/runtime/reports/",
     "durable_reports": "./data/memory/reports/",
-    "artifacts": "./data/memory/artifacts/"
+    "artifacts": "./data/memory/artifacts/",
+    "screenshots": "./data/memory/screenshots/"
   },
   "security": [
     "Do not store secrets, tokens, cookies, auth files, credentials, or live account details.",
+    "Frontend report read models may expose only opaque same-origin attachment URLs; never artifact paths or storage references.",
+    "Image attachments are limited to regular PNG, JPEG, or WebP files inside the allowlisted local report evidence roots.",
+    "SVG, HTML, path traversal, symlink escape, oversized files, file URLs, data URLs, and arbitrary external image embedding are forbidden.",
     "Terminal selection reports may contain only an opaque candidate id, platform, safe Thai label, bounded detection/running/configuration status, and adapter readiness; never a path, PID, account, or broker.",
-    "Reports that mention real trading, public Telegram, VPS restart, deploy, or paid API usage must include an approval note."
+    "EA Development reports may reference only a linked source report or an opaque Backend-issued workspaceSourceId from the approved .mq4/.mq5 catalog; raw paths, arbitrary filesystem locations, and frontend-supplied artifact paths are forbidden.",
+    "Agent settings reports accept only language, modelTier, tokenBudget, timeoutSeconds, outputLimitChars, and rateReservePercent after Backend bounds validation; provider model ids and credentials are forbidden.",
+    "Backtest, optimization, or compile reports default to analysis_only. A real MT4/MT5 execution claim requires a completed matching Mission and a backend-owned metatrader.execution_verified audit event containing an opaque verification id plus SHA-256 compile and visible Strategy Tester proof.",
+    "Reports that mention real trading must include the EA execution mode, LiveArmed state, signed-envelope verification status, non-secret signing key id match state, Kill Switch state, command id, and ACK evidence; AI and Frontend cannot activate live execution.",
+    "Workflow dashboards are independent. A report crossing dashboards must carry a backend-owned agent_mission_report record bound to a completed source Mission and Report; Frontend may submit only sourceReportId and may not assert lineage fields."
   ]
 }

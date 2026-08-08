@@ -184,19 +184,19 @@
     {
       "id": "codex_mcp_portal",
       "layer": "server_bridge",
-      "label": "Codex/MCP Portal",
+      "label": "เรดาร์ระบบเทรดโลกและ EA",
       "status": "online",
-      "summary": "Registered v011 doorway aligned to the original portal crop; used for Codex/MCP bridge handoff.",
+      "summary": "ศูนย์ค้นหาระบบเทรดและ EA ใหม่จากแหล่งสาธารณะทั่วโลก ตรวจรายการซ้ำ และส่งรายการที่เลือกไปวิจัยเชิงลึกผ่าน Mission/Report/Audit ของ Backend",
       "metrics": {
-        "Runner": "Ready",
-        "Queue": "3 jobs",
-        "Approval": "On",
-        "Asset": "Registered v011"
+        "Web Research": "พร้อมใช้งาน",
+        "Mission/Report/Audit": "พร้อมใช้งาน",
+        "Google Sheets": "Coming Soon",
+        "อัปเดตรายวัน": "ตั้งเวลาได้"
       },
       "missions": [
         {
-          "title": "Open Report",
-          "detail": "Click Codex/MCP Portal to inspect the related AI Agent Office report."
+          "title": "ค้นหาระบบเทรดและ EA ใหม่",
+          "detail": "เปิดเรดาร์เพื่อสร้าง Mission ค้นหาข้อมูลสาธารณะ ดูแหล่งอ้างอิง และส่งรายการที่เลือกไปวิจัยต่อ"
         }
       ],
       "asset_id": "registered_codex_mcp_portal_v011",
@@ -217,19 +217,19 @@
     {
       "id": "left_server_racks",
       "layer": "server_bridge",
-      "label": "Left Server Racks",
+      "label": "คลังวิจัยระบบเทรดเชิงลึก",
       "status": "stable",
-      "summary": "Registered v011 server rack layer aligned to the original left rack crop.",
+      "summary": "รับระบบจากเรดาร์มาตรวจสอบหลักฐาน ขยายกฎเข้าออก การจัดการความเสี่ยง เงื่อนไขพิเศษ และแนวทางประยุกต์ก่อนส่งไปสร้าง EA/Indicator",
       "metrics": {
-        "Asset": "Registered v011",
-        "Layer": "server_bridge",
-        "Placement": "Exact crop",
-        "Hover": "Glow"
+        "Public Research": "พร้อมใช้งาน",
+        "คลังรายงาน": "พร้อมใช้งาน",
+        "Google Sheets": "Coming Soon",
+        "ขั้นตอน": "2/4"
       },
       "missions": [
         {
-          "title": "Open Report",
-          "detail": "Click Left Server Racks to inspect the related AI Agent Office report."
+          "title": "วิจัยระบบที่เลือกให้ละเอียด",
+          "detail": "เปิดคิววิจัย ตรวจแหล่งข้อมูล ขยายกฎระบบ และเตรียมข้อมูลส่งต่อไปโรงงานสร้าง EA/Indicator"
         }
       ],
       "asset_id": "registered_left_server_racks_v011",
@@ -250,19 +250,19 @@
     {
       "id": "right_server_racks",
       "layer": "server_bridge",
-      "label": "Right Server Racks",
+      "label": "โรงงานสร้าง EA และ Indicator",
       "status": "stable",
-      "summary": "Registered v011 server rack layer aligned to the original right rack crop.",
+      "summary": "สร้างและตรวจ Source Code สำหรับ MT4/MQL4, MT5/MQL5 และ TradingView/Pine Script จากระบบที่เลือก โดย Compile จริงยังรอ Adapter",
       "metrics": {
-        "Asset": "Registered v011",
-        "Layer": "server_bridge",
-        "Placement": "Exact crop",
-        "Hover": "Glow"
+        "Source Code": "พร้อมผ่าน Codex",
+        "MT4 / MT5 / Pine": "เลือกได้",
+        "Compile จริง": "Coming Soon",
+        "ขั้นตอน": "3/4"
       },
       "missions": [
         {
-          "title": "Open Report",
-          "detail": "Click Right Server Racks to inspect the related AI Agent Office report."
+          "title": "สร้างหรือแก้ EA และ Indicator",
+          "detail": "เลือกต้นฉบับและแพลตฟอร์ม สร้าง Source Code ตรวจทาน และเปิดรายงานไฟล์ผลลัพธ์จาก Backend"
         }
       ],
       "asset_id": "registered_right_server_racks_v011",
@@ -283,19 +283,19 @@
     {
       "id": "left_analytics_console",
       "layer": "workstations",
-      "label": "Analytics Console",
+      "label": "สภา AI Trade",
       "status": "monitoring",
-      "summary": "Registered v011 left-facing analytics console using the newly supplied correct-angle monitor asset.",
+      "summary": "ศูนย์วิเคราะห์ระบบ Auto Trade จากหลาย Agent พร้อม Unified EA สำหรับส่ง Snapshot และรับคำสั่ง โดยค่าเริ่มต้นเป็น Shadow Mode และยังไม่ส่ง Order จริง",
       "metrics": {
-        "Side": "Left",
-        "Angle": "Corrected",
-        "Asset": "Registered v011",
-        "Mode": "Monitor"
+        "โหมด": "Read-only",
+        "ข้อมูลตลาด": "อ่านผ่าน MT4 Snapshot แบบ Read-only",
+        "Order จริง": "ปิด",
+        "Dashboard": "4 แท็บ"
       },
       "missions": [
         {
-          "title": "Open Report",
-          "detail": "Click Analytics Console to inspect the related AI Agent Office report."
+          "title": "เปิดสภา AI Trade",
+          "detail": "เปิดดูสรุปวันนี้ กราฟสด ผลวิเคราะห์จาก Agent 3 ตัว ขั้นตอนตัดสินใจ และประวัติที่ผูกกับจอนี้"
         }
       ],
       "asset_id": "registered_left_analytics_console_v011",
@@ -329,19 +329,19 @@
     {
       "id": "right_tool_console",
       "layer": "workstations",
-      "label": "Tool Runner Console",
+      "label": "ห้องทดลอง EA อัตโนมัติ",
       "status": "ready",
-      "summary": "Registered v011 right-side tool console aligned to the original right console crop.",
+      "summary": "เตรียม Auto Backtest, Auto Optimization และ EA Discovery พร้อมเป้าหมายกำไร Drawdown จำนวน Order และหลักฐาน โดย Adapter ที่รันโปรแกรมจริงยังเป็น Coming Soon",
       "metrics": {
-        "Side": "Right",
-        "Angle": "Correct",
-        "Asset": "Registered v011",
-        "Mode": "Tool"
+        "Backtest Plan": "พร้อมใช้งาน",
+        "Optimization Plan": "พร้อมใช้งาน",
+        "EA Discovery Plan": "พร้อมใช้งาน",
+        "ตัวรันจริง": "Coming Soon"
       },
       "missions": [
         {
-          "title": "Open Report",
-          "detail": "Click Tool Runner Console to inspect the related AI Agent Office report."
+          "title": "เตรียมการทดลอง EA",
+          "detail": "เลือก Auto Backtest, Auto Optimization หรือ EA Discovery แล้วสร้าง Mission พร้อมเงื่อนไขและเป้าหมายการทดลอง"
         }
       ],
       "asset_id": "registered_right_tool_console_v011",
@@ -409,19 +409,19 @@
     {
       "id": "terminal_workstation",
       "layer": "workstations",
-      "label": "Terminal Workstation",
+      "label": "สตูดิโอพัฒนา EA",
       "status": "ready",
-      "summary": "Registered v011 terminal workstation shifted to the exact original workstation crop.",
+      "summary": "พื้นที่ตรวจและพัฒนา Source MQL4/MQL5 จาก Workspace หรือรายงานต้นทาง พร้อม Brief เป้าหมายประสิทธิภาพ Review และ Artifact โดย Compiler Adapter ยัง Coming Soon",
       "metrics": {
-        "Asset": "Registered v011",
-        "Layer": "workstations",
-        "Placement": "Exact crop",
-        "Hover": "Glow"
+        "Source": "Workspace / Upstream Report",
+        "Development": "Guarded Workspace",
+        "Review": "พร้อมใช้งาน",
+        "Compile": "Coming Soon"
       },
       "missions": [
         {
-          "title": "Open Report",
-          "detail": "Click Terminal Workstation to inspect the related AI Agent Office report."
+          "title": "เปิดสตูดิโอพัฒนา EA",
+          "detail": "เลือก Source ส่ง Brief กำหนดเป้าหมาย และติดตาม Report หรือ Artifact ที่ Backend บันทึก"
         }
       ],
       "asset_id": "registered_terminal_workstation_v011",
@@ -442,19 +442,19 @@
     {
       "id": "left_audit_crystals",
       "layer": "fx_nodes",
-      "label": "Audit Crystal Nodes",
-      "status": "logging",
-      "summary": "Registered v011 audit crystal group aligned to the original left crystal-node crop.",
+      "label": "เรดาร์เว็บไซต์ Indicator",
+      "status": "ready",
+      "summary": "ค้นหา Indicator และ EA Tool ใหม่จากเว็บไซต์สาธารณะ พร้อม URL หลักฐาน ตรวจรายการซ้ำ และ Preference เวลา 1-2 รอบต่อวัน",
       "metrics": {
-        "Asset": "Registered v011",
-        "Layer": "fx_nodes",
-        "Placement": "Exact crop",
-        "Hover": "Glow"
+        "Research": "Public Web Read-only",
+        "Evidence": "URL Required",
+        "Dedup": "Backend Contract",
+        "Scheduler": "Coming Soon"
       },
       "missions": [
         {
-          "title": "Open Report",
-          "detail": "Click Audit Crystal Nodes to inspect the related AI Agent Office report."
+          "title": "เปิดเรดาร์ Indicator",
+          "detail": "ค้นรายการใหม่ ดูหลักฐาน บันทึกเวลา และเปิดประวัติ Mission/Report"
         }
       ],
       "asset_id": "registered_left_audit_crystals_v011",
@@ -475,19 +475,19 @@
     {
       "id": "left_signal_cube",
       "layer": "fx_nodes",
-      "label": "Left Signal Cube",
-      "status": "logging",
-      "summary": "User-supplied dicut5 hologram cube added as its own interactive layer at the captured left-side floor position.",
+      "label": "ข่าวตลาดวันนี้และมุมมอง 28 คู่เงิน",
+      "status": "ready",
+      "summary": "สรุปข่าวแรง ช่วงระวัง EA และ Bias ของ 28 คู่เงินในระยะสั้น กลาง และยาวจากแหล่งสาธารณะ โดยไม่ส่งคำสั่งเทรด",
       "metrics": {
-        "Asset": "dicut5 v013",
-        "Layer": "fx_nodes",
-        "Placement": "Captured left floor",
-        "Hover": "Glow"
+        "Pairs": "28 คู่เงิน",
+        "Horizons": "สั้น / กลาง / ยาว",
+        "Evidence": "URL Required",
+        "Execution": "Analysis Only"
       },
       "missions": [
         {
-          "title": "Open Report",
-          "detail": "Click Left Signal Cube to inspect the related AI Agent Office signal report."
+          "title": "เปิดข่าวและ FX Bias",
+          "detail": "วิเคราะห์ข่าววันนี้ สร้างมุมมอง 28 คู่เงิน ตั้งเวลา และเปิดประวัติรายงาน"
         }
       ],
       "asset_id": "registered_left_signal_cube_v013",
@@ -508,19 +508,19 @@
     {
       "id": "right_status_crystals",
       "layer": "fx_nodes",
-      "label": "Status Crystal Nodes",
+      "label": "ศูนย์สถานะ VPS, HQ และตั้งค่า Agent",
       "status": "watching",
-      "summary": "Registered v011 status crystal group using the correct tall blue crystal type and aligned to the original crop.",
+      "summary": "ตรวจสุขภาพ VPS, HQ และ Local Bridge พร้อมตั้งค่า Agent ที่ปลอดภัยและเปิดประวัติกิจกรรม โดยไม่รับหรือแสดง Secret",
       "metrics": {
-        "Asset": "Registered v011",
-        "Layer": "fx_nodes",
-        "Placement": "Exact crop",
-        "Hover": "Glow"
+        "VPS": "Read-only Health",
+        "HQ / Bridge": "Backend Truth",
+        "Agent Settings": "Backend Validated",
+        "Secrets": "ไม่รับและไม่แสดง"
       },
       "missions": [
         {
-          "title": "Open Report",
-          "detail": "Click Status Crystal Nodes to inspect the related AI Agent Office report."
+          "title": "เปิดศูนย์สถานะ",
+          "detail": "ตรวจ VPS/HQ บันทึก Preference ของ Agent และดู Activity History จาก Backend"
         }
       ],
       "asset_id": "registered_right_status_crystals_v011",

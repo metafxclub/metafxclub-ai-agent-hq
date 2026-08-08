@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "metafx-hq-mt4-outcome-v1",
+  "channelId": "mtc-demo-01",
+  "commandId": "cmd-0123456789abcdef01234567",
+  "executionState": "CLOSED",
+  "observedAt": 1785448800,
+  "ticket": 12345678,
+  "symbol": "XAUUSD",
+  "action": "BUY",
+  "openedAt": 1785445201,
+  "closedAt": 1785448799,
+  "openPrice": 3300.12,
+  "stopLoss": 3275.0,
+  "takeProfit": 3350.0,
+  "lots": 0.01,
+  "magicNumber": 4186001,
+  "comment": "HQ:cmd-0123456789abcdef01234567",
+  "closedPnl": 4.25
+}

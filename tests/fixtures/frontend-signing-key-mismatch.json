@@ -1,0 +1,14 @@
+{
+  "runtime": {
+    "backendSigningKeyId": "hk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "activeSigningKeyId": "hk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "signingKeyPinned": true,
+    "signingKeyMatch": false
+  },
+  "expected": {
+    "copySource": "backendSigningKeyId",
+    "copyValue": "hk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ready": false,
+    "message": "Key ID ของ EA ไม่ตรงกับ Backend • คัดลอก Key ID จาก Backend ไปใส่ที่ EA"
+  }
+}
