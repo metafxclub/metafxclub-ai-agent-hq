@@ -11798,6 +11798,13 @@ def _ai_trade_council_deep_analysis_existing_package(
     package_dir: Path,
     snapshot_id: str,
 ) -> dict:
+    # Windows hosted runners can expose the same Temp directory once through
+    # an 8.3 alias (RUNNER~1) and once through its long path (runneradmin).
+    # Resolve both sides after the package exists before applying the
+    # containment check; comparing the raw spellings makes a valid package
+    # look as if it escaped the workspace.
+    package_dir = package_dir.resolve(strict=False)
+    workspace_root = AI_TRADE_COUNCIL_WORKSPACE_DIR.resolve(strict=False)
     manifest_path = package_dir / "manifest.json"
     manifest = read_json(manifest_path, None)
     if (
@@ -11809,9 +11816,10 @@ def _ai_trade_council_deep_analysis_existing_package(
         or manifest.get("readOnly") is not True
     ):
         raise DataIntegrityError("Deep-analysis package manifest is invalid.")
-    package_relative_dir = package_dir.relative_to(
-        AI_TRADE_COUNCIL_WORKSPACE_DIR
-    ).as_posix()
+    try:
+        package_relative_dir = package_dir.relative_to(workspace_root).as_posix()
+    except ValueError as error:
+        raise DataIntegrityError("Deep-analysis package escapes Workspace.") from error
     expected_names = {
         "bars-300.csv",
         "technical-300.csv",
