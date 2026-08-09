@@ -67,7 +67,7 @@ foreach ($directoryName in @("artifacts", "backend", "contracts", "docs", "front
 
 $rootFiles = @(
     "index.html", "Open Metafx Agent HQ.cmd", "README.md", "requirements-runner.txt",
-    "1-INSTALL-HQ.bat", "UPDATE-HQ.bat", "REPAIR-HQ.bat", "AGENTS.md", ".gitignore", "LICENSE", "LICENSE.md", "SECURITY.md", "VERSION", "STUDENT-QUICKSTART-TH.md"
+    "1-INSTALL-HQ.bat", "UPDATE-HQ.bat", "REPAIR-HQ.bat", "AGENTS.md", ".gitattributes", ".gitignore", "LICENSE", "LICENSE.md", "SECURITY.md", "VERSION", "STUDENT-QUICKSTART-TH.md"
 )
 foreach ($fileName in $rootFiles) {
     $path = Join-Path $installRoot $fileName

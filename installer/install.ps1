@@ -317,12 +317,16 @@ function Invoke-CheckedNative {
 
 function Assert-SafeSource {
     $requiredFiles = @(
+        ".gitattributes",
+        ".gitignore",
+        "VERSION",
         "backend\local-runner\bridge_server.py",
         "frontend\index.html",
         "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4",
         "artifacts\mt4-ai-council-ea-v2.14-broker-compat-hardening\MetafxHQTradeGateway.ex4",
         "runner\codex_cli_runner.py",
         "scripts\start-local-bridge.ps1",
+        "tests\test_runtime_integrity.py",
         $requirementsName
     )
     foreach ($relativePath in $requiredFiles) {
@@ -554,7 +558,7 @@ function Copy-ApplicationFiles {
     $rootFiles = @(
         "index.html", "Open Metafx Agent HQ.cmd", "README.md", $requirementsName,
         "1-INSTALL-HQ.bat", "UPDATE-HQ.bat", "REPAIR-HQ.bat", "UNINSTALL-HQ.bat",
-        "AGENTS.md", ".gitignore", "LICENSE", "LICENSE.md", "SECURITY.md", "VERSION", "STUDENT-QUICKSTART-TH.md"
+        "AGENTS.md", ".gitattributes", ".gitignore", "LICENSE", "LICENSE.md", "SECURITY.md", "VERSION", "STUDENT-QUICKSTART-TH.md"
     )
     foreach ($fileName in $rootFiles) {
         $sourceFile = Join-Path $sourceRoot $fileName

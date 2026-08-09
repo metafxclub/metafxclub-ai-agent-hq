@@ -37,7 +37,7 @@ from equipment_workflow_profiles import (  # noqa: E402 - local guarded contract
     validate_equipment_workflow_contract,
 )
 
-BRIDGE_RUNTIME_VERSION = "0.9.2"
+BRIDGE_RUNTIME_VERSION = "0.9.3"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_STARTED_MONOTONIC = time.monotonic()
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"

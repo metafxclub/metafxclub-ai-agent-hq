@@ -51,6 +51,57 @@ jobs:
             $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $archive" | Set-Content -LiteralPath $checksum -Encoding ascii
 
+            # Test the exact ZIP layout and the installed Runtime before the
+            # public Release is created. Source-only tests cannot detect a
+            # root file that the installer forgot to copy.
+            $smokeRoot = Join-Path $env:RUNNER_TEMP "metafxclub-release-smoke-$tag"
+            $packageRoot = Join-Path $smokeRoot "Metafxclub-AI-Agent-HQ-$tag"
+            Expand-Archive -LiteralPath $archive -DestinationPath $smokeRoot -Force
+            foreach ($requiredFile in @(
+              ".gitattributes",
+              ".gitignore",
+              "VERSION",
+              "installer\install.ps1",
+              "tests\test_runtime_integrity.py"
+            )) {
+              if (-not (Test-Path -LiteralPath (Join-Path $packageRoot $requiredFile) -PathType Leaf)) {
+                throw "Release package is missing required file: $requiredFile"
+              }
+            }
+
+            $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+            $listener.Start()
+            $smokePort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+            $listener.Stop()
+            $originalLocalAppData = $env:LOCALAPPDATA
+            try {
+              $env:LOCALAPPDATA = Join-Path $smokeRoot "LocalAppData"
+              & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+                -File (Join-Path $packageRoot "installer\install.ps1") `
+                -Port $smokePort -EndpointConfirmed -SkipLaunch -SkipShortcuts
+              if ($LASTEXITCODE -ne 0) {
+                throw "Release ZIP installation smoke test failed with exit code $LASTEXITCODE"
+              }
+
+              $installedRoot = Join-Path $env:LOCALAPPDATA "Metafxclub\AI-Agent-HQ"
+              foreach ($requiredInstalledFile in @(".gitattributes", ".gitignore", "VERSION")) {
+                if (-not (Test-Path -LiteralPath (Join-Path $installedRoot $requiredInstalledFile) -PathType Leaf)) {
+                  throw "Installed Runtime is missing required file: $requiredInstalledFile"
+                }
+              }
+              $installedVersion = (Get-Content -LiteralPath (Join-Path $installedRoot "VERSION") -Raw).Trim()
+              if ($installedVersion -cne $version) {
+                throw "Installed Runtime version '$installedVersion' does not match Release '$version'"
+              }
+              node --check (Join-Path $installedRoot "frontend\src\app\main.js")
+              if ($LASTEXITCODE -ne 0) {
+                throw "Installed Runtime frontend syntax check failed with exit code $LASTEXITCODE"
+              }
+            }
+            finally {
+              $env:LOCALAPPDATA = $originalLocalAppData
+            }
+
             $notes = @'
           ชุดติดตั้ง Metafxclub AI Agent HQ สำหรับ Windows
 

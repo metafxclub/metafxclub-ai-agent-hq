@@ -27,6 +27,7 @@ UPDATE_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "update-hq.ps1"
 INSTALLER_SCRIPT_PATH = PROJECT_ROOT / "installer" / "install.ps1"
 UNINSTALL_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "uninstall-hq.ps1"
 CODEX_READINESS_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "check-codex-readiness.ps1"
+RELEASE_WORKFLOW_PATH = PROJECT_ROOT / ".github" / "workflows" / "publish-release.yml"
 DASHBOARD_CONNECTION_PATH = PROJECT_ROOT / "contracts" / "connections" / "dashboard-connection-contract.json"
 AGENT_CHAT_CONTRACT_PATH = PROJECT_ROOT / "contracts" / "agents" / "agent-chat-contract.json"
 
@@ -2801,7 +2802,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertNotIn("submitManagerCommand", block)
 
     def test_agent_chat_runtime_version_and_executive_tiers(self) -> None:
-        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.2")
+        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.3")
         self.assertEqual(self.bridge.role_default_model_tier("ceo"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("manager"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("risk_guard"), "risk_quality")
@@ -3873,12 +3874,22 @@ class RuntimeIntegrityTests(unittest.TestCase):
 
     def test_student_installer_copies_mt4_integrations_and_curated_gateway_build(self) -> None:
         installer = INSTALLER_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        uninstaller = UNINSTALL_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        release_workflow = RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8-sig")
 
         self.assertIn('"integrations\\mt4-trade-gateway\\MetafxHQTradeGateway.mq4"', installer)
         self.assertIn('"artifacts\\mt4-ai-council-ea-v2.14-broker-compat-hardening\\MetafxHQTradeGateway.ex4"', installer)
         self.assertIn('"integrations", "runner", "scripts", "tests"', installer)
         self.assertIn('Sync-Directory -DirectoryName "artifacts\\mt4-ai-council-ea-v2.14-broker-compat-hardening"', installer)
         self.assertIn('"1-INSTALL-HQ.bat", "UPDATE-HQ.bat"', installer)
+        self.assertIn('"AGENTS.md", ".gitattributes", ".gitignore"', installer)
+        self.assertIn('"AGENTS.md", ".gitattributes", ".gitignore"', uninstaller)
+        self.assertIn('"tests\\test_runtime_integrity.py",', installer)
+        self.assertIn('".gitattributes",\n        ".gitignore",\n        "VERSION",', installer)
+        self.assertIn('".gitattributes",', release_workflow)
+        self.assertIn("Release ZIP installation smoke test failed", release_workflow)
+        self.assertIn("Installed Runtime is missing required file", release_workflow)
+        self.assertIn('node --check (Join-Path $installedRoot "frontend\\src\\app\\main.js")', release_workflow)
 
     def test_student_installer_requires_confirmed_loopback_endpoint_and_checks_codex_quota(self) -> None:
         lifecycle = LIFECYCLE_SCRIPT_PATH.read_text(encoding="utf-8-sig")
@@ -3924,7 +3935,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         )
         registry_text = registry_path.read_text(encoding="utf-8-sig")
         attributes = (PROJECT_ROOT / ".gitattributes").read_text(encoding="utf-8-sig")
-        self.assertEqual(version, "0.9.2")
+        self.assertEqual(version, "0.9.3")
         self.assertNotRegex(registry_text, r"(?i)[a-z]:\\\\users\\\\")
         self.assertIn("*.mq4 text eol=lf", attributes)
         self.assertIn("*.mq5 text eol=lf", attributes)
