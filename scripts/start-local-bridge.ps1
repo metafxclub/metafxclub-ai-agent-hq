@@ -24,6 +24,7 @@ $runtimePath = Join-Path $projectRoot "data\runtime"
 $logPath = Join-Path $runtimePath "logs"
 $statePath = Join-Path $runtimePath "bridge-lifecycle-state.json"
 $endpointPath = Join-Path $runtimePath "bridge-endpoint.json"
+$controlPath = Join-Path $runtimePath "bridge-control.json"
 $stdoutPath = Join-Path $logPath "bridge-stdout.log"
 $stderrPath = Join-Path $logPath "bridge-stderr.log"
 $auditPath = Join-Path $logPath "bridge-lifecycle-audit.jsonl"
@@ -33,6 +34,8 @@ $bridgeUrl = "http://${bridgeHost}:$bridgePort/"
 $healthUrl = "${bridgeUrl}api/health"
 $maxLogBytes = 5MB
 $logGenerations = 3
+$gracefulShutdownRequestTimeoutSeconds = 3
+$gracefulShutdownWaitSeconds = 15
 $mutexName = "Local\MetafxclubAgentHQBridgeLifecycle"
 $bridgeInventoryConflict = @()
 $requestedBridgePort = if ($Port -ge 1024) { $Port } else { 0 }
@@ -574,8 +577,166 @@ function Resolve-PythonExecutable {
     return $command.Source
 }
 
+function Get-BridgeControlRecord {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$Port
+    )
+
+    $unavailable = {
+        param([string]$Reason)
+        return [pscustomobject]@{
+            Usable = $false
+            Reason = $Reason
+            ShutdownToken = $null
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $controlPath -PathType Leaf)) {
+        return & $unavailable "control_file_missing"
+    }
+
+    try {
+        $control = Get-Content -LiteralPath $controlPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([string]$control.schemaVersion -cne "1.0.0") {
+            return & $unavailable "control_schema_invalid"
+        }
+        $recordProjectRoot = Get-ComparablePath -Path ([string]$control.projectRoot)
+        $expectedProjectRoot = Get-ComparablePath -Path $projectRoot
+        if (
+            -not $recordProjectRoot -or
+            -not $expectedProjectRoot -or
+            -not $recordProjectRoot.Equals($expectedProjectRoot, [StringComparison]::OrdinalIgnoreCase)
+        ) {
+            return & $unavailable "control_project_mismatch"
+        }
+        if ([int]$control.processId -ne $ProcessId) {
+            return & $unavailable "control_process_mismatch"
+        }
+        if ([int]$control.port -ne $Port) {
+            return & $unavailable "control_port_mismatch"
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$control.startedAt)) {
+            return & $unavailable "control_started_at_missing"
+        }
+        $shutdownToken = [string]$control.shutdownToken
+        if (
+            [string]::IsNullOrWhiteSpace($shutdownToken) -or
+            $shutdownToken -notmatch '^[A-Za-z0-9_-]{32,256}$'
+        ) {
+            return & $unavailable "control_token_invalid"
+        }
+        return [pscustomobject]@{
+            Usable = $true
+            Reason = "ready"
+            ShutdownToken = $shutdownToken
+        }
+    }
+    catch {
+        return & $unavailable "control_file_invalid"
+    }
+}
+
+function Wait-ForBridgeProcessExit {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 120)][int]$TimeoutSeconds
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        if (-not (Get-ProcessRecord -ProcessId $ProcessId)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $null -eq (Get-ProcessRecord -ProcessId $ProcessId)
+}
+
+function Remove-MatchingBridgeControlFile {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$Port
+    )
+
+    $control = Get-BridgeControlRecord -ProcessId $ProcessId -Port $Port
+    if ($control.Usable -and (Test-Path -LiteralPath $controlPath -PathType Leaf)) {
+        Remove-Item -LiteralPath $controlPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Request-BridgeGracefulShutdown {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$Port
+    )
+
+    $control = Get-BridgeControlRecord -ProcessId $ProcessId -Port $Port
+    if (-not $control.Usable) {
+        Write-AuditEvent `
+            -Operation "shutdown" `
+            -Outcome "graceful_unavailable" `
+            -ProcessId $ProcessId `
+            -Message "Graceful shutdown control was unavailable ($($control.Reason)); a verified force-stop fallback may be required."
+        return $false
+    }
+
+    $shutdownUrl = "http://127.0.0.1:$Port/api/admin/shutdown"
+    try {
+        $response = Invoke-WebRequest `
+            -Uri $shutdownUrl `
+            -Method Post `
+            -Headers @{ "X-Metafx-Bridge-Control" = [string]$control.ShutdownToken } `
+            -ContentType "application/json" `
+            -Body "{}" `
+            -UseBasicParsing `
+            -TimeoutSec $gracefulShutdownRequestTimeoutSeconds
+        if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) {
+            Write-AuditEvent `
+                -Operation "shutdown" `
+                -Outcome "graceful_rejected" `
+                -ProcessId $ProcessId `
+                -Message "Graceful shutdown endpoint returned HTTP $([int]$response.StatusCode); a verified force-stop fallback may be required."
+            return $false
+        }
+        Write-AuditEvent `
+            -Operation "shutdown" `
+            -Outcome "graceful_requested" `
+            -ProcessId $ProcessId `
+            -Message "Authenticated loopback shutdown was accepted; waiting up to $gracefulShutdownWaitSeconds seconds for clean process exit."
+    }
+    catch {
+        $errorType = $_.Exception.GetType().Name
+        Write-AuditEvent `
+            -Operation "shutdown" `
+            -Outcome "graceful_request_failed" `
+            -ProcessId $ProcessId `
+            -Message "Graceful shutdown POST failed ($errorType); a verified force-stop fallback may be required."
+        return $false
+    }
+
+    if (Wait-ForBridgeProcessExit -ProcessId $ProcessId -TimeoutSeconds $gracefulShutdownWaitSeconds) {
+        Write-AuditEvent `
+            -Operation "shutdown" `
+            -Outcome "graceful_stopped" `
+            -ProcessId $ProcessId `
+            -Message "Bridge exited cleanly after the authenticated shutdown request."
+        return $true
+    }
+
+    Write-AuditEvent `
+        -Operation "shutdown" `
+        -Outcome "graceful_timeout" `
+        -ProcessId $ProcessId `
+        -Message "Bridge did not exit within $gracefulShutdownWaitSeconds seconds; a verified force-stop fallback may be required."
+    return $false
+}
+
 function Stop-VerifiedProcess {
-    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [switch]$GracefulFirst
+    )
 
     $record = Get-ProcessRecord -ProcessId $ProcessId
     if (-not $record) {
@@ -585,8 +746,35 @@ function Stop-VerifiedProcess {
         throw "Refusing to stop PID $ProcessId because its exact command line is not the Metafx bridge command."
     }
 
+    if ($GracefulFirst) {
+        if (Request-BridgeGracefulShutdown -ProcessId $ProcessId -Port $bridgePort) {
+            Remove-MatchingBridgeControlFile -ProcessId $ProcessId -Port $bridgePort
+            return $true
+        }
+
+        # Re-read and re-verify immediately before force. The original PID may
+        # have exited after the bounded request or may have been reused.
+        $record = Get-ProcessRecord -ProcessId $ProcessId
+        if (-not $record) {
+            Remove-MatchingBridgeControlFile -ProcessId $ProcessId -Port $bridgePort
+            Write-AuditEvent -Operation "shutdown" -Outcome "exited_before_force" -ProcessId $ProcessId -Message "Bridge exited before the verified fallback was needed."
+            return $true
+        }
+        if (-not (Test-BridgeProcess -ProcessRecord $record -ExpectedPort $bridgePort)) {
+            throw "Refusing force-stop fallback for PID $ProcessId because its process identity changed after the graceful shutdown attempt."
+        }
+        Write-AuditEvent -Operation "shutdown" -Outcome "graceful_fallback_force" -ProcessId $ProcessId -Message "Graceful shutdown did not complete; force-stopping only the re-verified exact bridge PID."
+    }
+    else {
+        Write-AuditEvent -Operation "shutdown" -Outcome "forced_stop_requested" -ProcessId $ProcessId -Message "Force-stop requested for an exact bridge process during guarded startup cleanup."
+    }
+
     Stop-Process -Id $ProcessId -Force -ErrorAction Stop
     Wait-Process -Id $ProcessId -Timeout 10 -ErrorAction SilentlyContinue
+    if (Get-ProcessRecord -ProcessId $ProcessId) {
+        throw "Verified bridge PID $ProcessId did not exit after force-stop."
+    }
+    Remove-MatchingBridgeControlFile -ProcessId $ProcessId -Port $bridgePort
     return $true
 }
 
@@ -739,7 +927,7 @@ function Ensure-Bridge {
     }
 
     Write-AuditEvent -Operation "ensure" -Outcome "verified_unhealthy_restarting" -ProcessId $existingId -Message "Watchdog verified the exact HQ process but Health stayed unavailable; replacing only that verified PID."
-    Stop-VerifiedProcess -ProcessId $existingId | Out-Null
+    Stop-VerifiedProcess -ProcessId $existingId -GracefulFirst | Out-Null
     Write-LifecycleState -Status "stopped" -LastError "Watchdog replaced a verified unhealthy bridge process."
     return Start-Bridge
 }
@@ -762,7 +950,7 @@ function Stop-Bridge {
     $stoppedIds = New-Object System.Collections.Generic.List[int]
     foreach ($processRecord in $bridgeProcesses) {
         $processId = [int]$processRecord.ProcessId
-        if (Stop-VerifiedProcess -ProcessId $processId) {
+        if (Stop-VerifiedProcess -ProcessId $processId -GracefulFirst) {
             $stoppedIds.Add($processId)
         }
     }

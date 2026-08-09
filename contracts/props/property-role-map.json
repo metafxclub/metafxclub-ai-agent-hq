@@ -71,7 +71,7 @@
       "localTabs": [
         {"id": "systems", "labelTh": "ค้นหาระบบเทรด", "purpose": "ค้นหาระบบใหม่พร้อมแหล่งอ้างอิงและตรวจรายการซ้ำ", "actionIds": ["discover_trading_systems"]},
         {"id": "ea_updates", "labelTh": "ค้นหา EA ใหม่", "purpose": "ค้นหา EA, Indicator และแนวคิดอัตโนมัติจากข้อมูลสาธารณะ", "actionIds": ["discover_ea_updates"]},
-        {"id": "schedule", "labelTh": "ตั้งเวลาค้นหา", "purpose": "บันทึกเวลาที่ต้องการไว้ที่ Backend; Scheduler จริงยังไม่พร้อม", "actionIds": ["save_discovery_schedule"]},
+        {"id": "schedule", "labelTh": "ตั้งเวลาค้นหา", "purpose": "ตั้งเวลาค้นหาระบบเทรดแบบอ่านอย่างเดียวผ่าน Backend", "actionIds": ["save_discovery_schedule"]},
         {"id": "catalog", "labelTh": "ประวัติและรายงาน", "purpose": "ดู Mission, Report, แหล่งอ้างอิง และสถานะคลังข้อมูล", "actionIds": [], "viewOnly": true}
       ],
       "workflow": {
@@ -84,12 +84,13 @@
         "transferPolicy": {"mode": "agent_mission_only", "requiredRecordFields": ["sourceReportId", "sourcePropId", "sourceMissionId", "transferAgentId"], "frontendMaySubmitFields": ["sourceReportId"], "backendDerivesLineage": true, "missionStrategyTableRole": "global_ledger_only"},
         "recordTemplate": "contracts/research/trading-system-sheet-template.csv",
         "deduplication": {"required": true, "matchKeys": ["source_url", "system_name", "market", "timeframe"], "owner": "backend"},
-        "schedule": {"configurationIntentReady": true, "recurringSchedulerAdapterStatus": "coming_soon", "defaultEnabled": false, "timezone": "Asia/Bangkok"},
+        "schedule": {"configurationIntentReady": true, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": false, "timezone": "Asia/Bangkok", "scheduledActionIds": ["discover_trading_systems"], "manualOrAgentHandoffActionIds": ["discover_ea_updates"]},
         "readiness": {
           "publicCodexWebResearch": "ready_guarded_read_only",
           "missionReportAudit": "ready",
           "localCatalogTemplate": "ready",
-          "googleSheetsSync": "coming_soon"
+          "googleSheetsSync": "coming_soon",
+          "recurringScheduler": "ready_guarded_read_only"
         }
       },
       "dashboardSections": ["discovery_summary", "systems", "ea_updates", "duplicate_check", "schedule", "catalog", "source_evidence", "recent_audit"],
@@ -103,7 +104,7 @@
         "historyReportTabId": "catalog",
         "historyReportTabPosition": "last",
         "leftRailSections": [
-          {"id": "schedule", "labelTh": "ตั้งเวลา", "purpose": "บันทึกเวลาไว้ที่ Backend; Scheduler จริงอาจยังไม่พร้อม", "mode": "backend_preference", "actionIds": ["save_discovery_schedule"]},
+          {"id": "schedule", "labelTh": "ตั้งเวลา", "purpose": "ตั้งเวลาค้นหาระบบเทรดผ่าน Backend; ค้นหา EA ยังสั่งแยก", "mode": "backend_preference", "actionIds": ["save_discovery_schedule"]},
           {"id": "quota", "labelTh": "โควตา Codex", "purpose": "ดูโควตาจาก Backend แบบอ่านอย่างเดียว", "mode": "backend_read_only"},
           {"id": "agent_handoff", "labelTh": "ส่งต่อผ่าน Agent", "purpose": "ส่ง Report ด้วย Mission ที่ Backend ตรวจ lineage แล้ว", "mode": "mission_report_only", "direction": "send_receive"}
         ],
@@ -485,7 +486,7 @@
     "left_audit_crystals": {
       "functionName": "Indicator Website Scout",
       "displayTitle": "เรดาร์เว็บไซต์ Indicator",
-      "purpose": "ค้นหา Indicator, EA Tool และเครื่องมือวิเคราะห์ใหม่จากเว็บไซต์สาธารณะ เก็บ URL หลักฐาน วันที่ตรวจ และสถานะรายการซ้ำ พร้อมบันทึกเวลาที่ต้องการให้ค้นหา 1-2 ครั้งต่อวัน โดย Screenshot Adapter และ Scheduler จริงต้องแสดง Coming Soon จนกว่าจะมี Adapter",
+      "purpose": "ค้นหา Indicator, EA Tool และเครื่องมือวิเคราะห์ใหม่จากเว็บไซต์สาธารณะ เก็บ URL หลักฐาน วันที่ตรวจ และสถานะรายการซ้ำ พร้อมตั้งเวลาให้ Backend ค้นหาแบบอ่านอย่างเดียว 1-2 ครั้งต่อวัน โดย Screenshot Adapter ยังเป็น Coming Soon",
       "interactionMode": "dashboard",
       "connectionProfileId": "left_audit_crystals",
       "departmentId": "indicator_market_intelligence",
@@ -499,7 +500,7 @@
       "localTabs": [
         {"id": "discoveries", "labelTh": "ค้นหา Indicator", "purpose": "ค้นหาเครื่องมือใหม่พร้อมแพลตฟอร์ม ประเภท และ URL", "actionIds": ["discover_new_indicators"]},
         {"id": "evidence", "labelTh": "หลักฐาน", "purpose": "ดู Source URL วันที่ตรวจ ความน่าเชื่อถือ และข้อจำกัด", "actionIds": [], "viewOnly": true},
-        {"id": "schedule", "labelTh": "ตั้งเวลาค้นหา", "purpose": "บันทึกเวลาไว้ที่ Backend; Scheduler จริงยังไม่พร้อม", "actionIds": ["save_indicator_scout_schedule"]},
+        {"id": "schedule", "labelTh": "ตั้งเวลาค้นหา", "purpose": "ตั้งเวลาค้นหาแบบอ่านอย่างเดียวผ่าน Backend", "actionIds": ["save_indicator_scout_schedule"]},
         {"id": "archive", "labelTh": "ประวัติและรายงาน", "purpose": "ดู Mission, Report และสถานะตรวจรายการซ้ำ", "actionIds": [], "viewOnly": true}
       ],
       "dashboardSections": ["discovery_summary", "indicator_entries", "source_evidence", "deduplication", "schedule_preference", "archive"],
@@ -512,7 +513,7 @@
         "historyReportTabId": "archive",
         "historyReportTabPosition": "last",
         "leftRailSections": [
-          {"id": "schedule", "labelTh": "ตั้งเวลา", "purpose": "บันทึกเวลาไว้ที่ Backend; Scheduler จริงอาจยังไม่พร้อม", "mode": "backend_preference", "actionIds": ["save_indicator_scout_schedule"]},
+          {"id": "schedule", "labelTh": "ตั้งเวลา", "purpose": "ตั้งเวลาให้ Backend ค้นหา 1-2 ครั้งต่อวัน", "mode": "backend_preference", "actionIds": ["save_indicator_scout_schedule"]},
           {"id": "quota", "labelTh": "โควตา Codex", "purpose": "ดูโควตาจาก Backend แบบอ่านอย่างเดียว", "mode": "backend_read_only"}
         ],
         "crossDevicePolicy": "agent_mission_report_only",
@@ -532,12 +533,12 @@
         "directDashboardDependency": false,
         "transferPolicy": {"mode": "agent_mission_only", "requiredRecordFields": ["sourceReportId", "sourcePropId", "sourceMissionId", "transferAgentId"], "frontendMaySubmitFields": ["sourceReportId"], "backendDerivesLineage": true, "missionStrategyTableRole": "global_ledger_only"},
         "deduplication": {"required": true, "matchKeys": ["sourceUrl", "toolName", "platform", "version"], "owner": "backend"},
-        "schedule": {"preferenceRunsPerDay": [1, 2], "configurationIntentReady": true, "recurringSchedulerAdapterStatus": "coming_soon", "defaultEnabled": false, "timezone": "Asia/Bangkok"},
-        "readiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "localDedup": "ready_contract", "screenshotAdapter": "coming_soon", "recurringScheduler": "coming_soon"}
+        "schedule": {"preferenceRunsPerDay": [1, 2], "configurationIntentReady": true, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": false, "timezone": "Asia/Bangkok", "scheduledActionIds": ["discover_new_indicators"]},
+        "readiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "localDedup": "ready_contract", "screenshotAdapter": "coming_soon", "recurringScheduler": "ready_guarded_read_only"}
       },
       "workflowTracking": {"required": true, "fields": ["missionId", "targetPropId", "ownerAgentId", "sourceLineage", "agentTransfer", "timestamps", "status", "reportRoute"]},
       "doNotShow": ["tokens", "cookies", "auth files", "passwords", "private repository credentials"],
-      "openingMessage": "เรดาร์นี้ค้นหา Indicator และ EA Tool ใหม่จากเว็บไซต์สาธารณะครับ ทุกผลต้องมี URL และหลักฐาน ส่วน Screenshot อัตโนมัติและการรันตามเวลายังเป็น Coming Soon"
+      "openingMessage": "เรดาร์นี้ค้นหา Indicator และ EA Tool ใหม่จากเว็บไซต์สาธารณะครับ ทุกผลต้องมี URL และหลักฐาน ตั้งเวลาค้นหาแบบอ่านอย่างเดียวได้ ส่วน Screenshot อัตโนมัติยังเป็น Coming Soon"
     },
     "left_signal_cube": {
       "functionName": "Daily Market News & FX Bias",
@@ -569,7 +570,7 @@
         "historyReportTabId": "schedule_history",
         "historyReportTabPosition": "last",
         "leftRailSections": [
-          {"id": "schedule", "labelTh": "ตั้งเวลา", "purpose": "บันทึกเวลาไว้ที่ Backend; Scheduler จริงอาจยังไม่พร้อม", "mode": "backend_preference", "actionIds": ["save_news_bias_schedule"]},
+          {"id": "schedule", "labelTh": "ตั้งเวลา", "purpose": "ตั้งเวลาอัปเดตข่าวผ่าน Backend; Bias ยังสั่งแยก", "mode": "backend_preference", "actionIds": ["save_news_bias_schedule"]},
           {"id": "quota", "labelTh": "โควตา Codex", "purpose": "ดูโควตาจาก Backend แบบอ่านอย่างเดียว", "mode": "backend_read_only"},
           {"id": "agent_handoff", "labelTh": "ส่งต่อผ่าน Agent", "purpose": "ส่ง Report ภายในงานข่าวด้วย Mission ที่ตรวจ lineage แล้ว", "mode": "mission_report_only", "direction": "internal_only"}
         ],
@@ -592,8 +593,8 @@
         "fxPairs": ["AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDUSD", "CADCHF", "CADJPY", "CHFJPY", "EURAUD", "EURCAD", "EURCHF", "EURGBP", "EURJPY", "EURNZD", "EURUSD", "GBPAUD", "GBPCAD", "GBPCHF", "GBPJPY", "GBPNZD", "GBPUSD", "NZDCAD", "NZDCHF", "NZDJPY", "NZDUSD", "USDCAD", "USDCHF", "USDJPY"],
         "horizons": ["short", "medium", "long"],
         "biasVocabulary": ["bullish", "bearish", "sideway", "insufficient_data"],
-        "schedule": {"preferenceRunsPerDay": [1, 2], "configurationIntentReady": true, "recurringSchedulerAdapterStatus": "coming_soon", "defaultEnabled": false, "timezone": "Asia/Bangkok"},
-        "readiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "economicCalendarAdapter": "coming_soon", "recurringScheduler": "coming_soon"}
+        "schedule": {"preferenceRunsPerDay": [1, 2], "configurationIntentReady": true, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": false, "timezone": "Asia/Bangkok", "scheduledActionIds": ["analyze_daily_market_news"], "manualOrAgentHandoffActionIds": ["build_fx_pair_bias"]},
+        "readiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "economicCalendarAdapter": "coming_soon", "recurringScheduler": "ready_guarded_read_only"}
       },
       "workflowTracking": {"required": true, "fields": ["missionId", "targetPropId", "ownerAgentId", "sourceLineage", "agentTransfer", "timestamps", "status", "reportRoute"]},
       "executionPolicy": {"mode": "analysis_only", "liveTradingEnabled": false, "orderSubmissionEnabled": false, "frontendMayEnableExecution": false},

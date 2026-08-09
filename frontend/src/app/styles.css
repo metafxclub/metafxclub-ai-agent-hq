@@ -5535,6 +5535,160 @@ button:disabled {
   opacity: 0.78;
 }
 
+.workflow-plugin-profile,
+.workflow-automation-summary {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(37, 215, 122, 0.3);
+  background:
+    linear-gradient(120deg, rgba(37, 215, 122, 0.07), transparent 55%),
+    rgba(2, 12, 18, 0.82);
+}
+
+.workflow-plugin-profile-top,
+.workflow-automation-summary > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.workflow-plugin-profile-top strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--green);
+  font-size: 9px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-plugin-profile-top span,
+.workflow-automation-summary > div:first-child > strong {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border: 1px solid rgba(39, 212, 255, 0.44);
+  color: var(--cyan);
+  font-size: 8px;
+  font-weight: 900;
+}
+
+.workflow-plugin-profile-top span[data-mode="mission_interactive"] {
+  border-color: rgba(255, 178, 63, 0.5);
+  color: var(--amber);
+}
+
+.workflow-plugin-profile > p,
+.workflow-automation-summary > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.workflow-plugin-profile details {
+  min-width: 0;
+  border-top: 1px solid rgba(84, 119, 142, 0.26);
+  padding-top: 6px;
+}
+
+.workflow-plugin-profile summary {
+  color: #b8d4df;
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.workflow-plugin-profile details > div {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.workflow-plugin-profile details > div > div {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid rgba(84, 119, 142, 0.3);
+  background: rgba(2, 10, 16, 0.72);
+}
+
+.workflow-plugin-profile b {
+  color: var(--cyan);
+  font-size: 8px;
+}
+
+.workflow-plugin-profile details span {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+.workflow-automation-summary {
+  border-left: 3px solid var(--green);
+}
+
+.workflow-automation-summary > div:first-child > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.workflow-automation-summary > div:first-child span {
+  color: var(--cyan);
+  font-size: 8px;
+  font-weight: 900;
+}
+
+.workflow-automation-summary h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.workflow-automation-summary > div:first-child > strong[data-tone="scheduled"] {
+  border-color: rgba(37, 215, 122, 0.55);
+  color: var(--green);
+}
+
+.workflow-automation-summary ol {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: workflow-step;
+}
+
+.workflow-automation-summary li {
+  position: relative;
+  min-width: 0;
+  padding: 8px 8px 8px 29px;
+  border: 1px solid rgba(84, 119, 142, 0.32);
+  color: #b8cbd4;
+  font-size: 9px;
+  line-height: 1.45;
+  counter-increment: workflow-step;
+}
+
+.workflow-automation-summary li::before {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  color: var(--green);
+  content: counter(workflow-step);
+  font-weight: 900;
+}
+
 .workflow-action-heading > div {
   min-width: 0;
 }
@@ -11346,6 +11500,11 @@ button:disabled {
     width: 100%;
   }
 
+  .workflow-automation-summary ol,
+  .workflow-plugin-profile details > div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .workflow-result-columns {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -11414,6 +11573,18 @@ button:disabled {
   .workflow-domain-card-heading {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .workflow-plugin-profile-top,
+  .workflow-automation-summary > div:first-child {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .workflow-plugin-profile-top span,
+  .workflow-automation-summary > div:first-child > strong {
+    align-self: flex-start;
+    white-space: normal;
   }
 
   .workflow-indicator-card dl,

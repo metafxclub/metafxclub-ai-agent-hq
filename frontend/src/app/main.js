@@ -472,6 +472,22 @@ const WORKFLOW_DASHBOARD_SETTING_ACTION_IDS = new Set([
   "save_agent_preferences",
 ]);
 
+const WORKFLOW_ACTION_COPY_OVERRIDES = Object.freeze({
+  save_discovery_schedule: {
+    labelTh: "ตั้งเวลาค้นหาระบบเทรดรายวัน",
+    descriptionTh: "ตั้งเวลาเฉพาะงานค้นหาระบบเทรดแบบอ่านอย่างเดียว งานค้นหา EA เป็น Mission แยกและจะไม่ถูกรันตามตารางเวลานี้",
+  },
+});
+
+const WORKFLOW_TAB_COPY_OVERRIDES = Object.freeze({
+  codex_mcp_portal: {
+    schedule: {
+      labelTh: "เวลาค้นหาระบบเทรด",
+      descriptionTh: "ตารางเวลานี้ใช้กับการค้นหาระบบเทรดเท่านั้น งานค้นหา EA ต้องสั่งเป็น Mission แยก",
+    },
+  },
+});
+
 const WORKFLOW_DASHBOARD_SETTING_TAB_IDS = new Set(["schedule", "agent_settings"]);
 
 const WORKFLOW_DASHBOARD_HISTORY_TAB_IDS = new Set([
@@ -649,7 +665,7 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
     tabs: [
       { id: "systems", labelTh: "ระบบเทรดใหม่", descriptionTh: "ค้นหาแนวคิด กลยุทธ์ และกติกาการเทรดใหม่แบบไม่ซ้ำกับข้อมูลเดิม", actionIds: ["discover_trading_systems"] },
       { id: "ea_updates", labelTh: "EA และเครื่องมือใหม่", descriptionTh: "ติดตาม EA, Indicator และงานวิจัยระบบอัตโนมัติที่เพิ่งเผยแพร่", actionIds: ["discover_ea_updates"] },
-      { id: "schedule", labelTh: "เวลาอัปเดตรายวัน", descriptionTh: "บันทึกช่วงเวลาที่ต้องการให้งานค้นหาทำงานเมื่อระบบตั้งเวลาเชื่อมพร้อม", actionIds: ["save_discovery_schedule"] },
+      { id: "schedule", labelTh: "เวลาอัปเดตรายวัน", descriptionTh: "เปิดหรือปิดรอบค้นหาแบบอ่านอย่างเดียวตามเวลาไทย พร้อมดูครั้งล่าสุด รอบถัดไป และสาเหตุเมื่อระบบพักงาน", actionIds: ["save_discovery_schedule"] },
       {
         id: "catalog",
         labelTh: "คลังและแบบฟอร์มข้อมูล",
@@ -685,11 +701,11 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
       {
         id: "save_discovery_schedule",
         tabId: "schedule",
-        labelTh: "บันทึกเวลาค้นหารายวัน",
-        descriptionTh: "บันทึกความต้องการไว้ที่ Local Runner การทำงานอัตโนมัติจะเริ่มเมื่อ Scheduler ฝั่งหลังบ้านพร้อมเท่านั้น",
+        labelTh: "บันทึกเวลาค้นหาระบบเทรดรายวัน",
+        descriptionTh: "เปิดหรือปิด Local Scheduler สำหรับค้นหาระบบเทรดแบบอ่านอย่างเดียว งานค้นหา EA เป็น Mission แยกเพื่อไม่ใช้ Rate Limit เพิ่มโดยไม่ตั้งใจ",
         availability: { status: "ready" },
         formFields: [
-          { id: "enabled", labelTh: "เปิดใช้ตารางเวลาเมื่อระบบพร้อม", type: "checkbox", required: false },
+          { id: "enabled", labelTh: "เปิดรอบค้นหาอัตโนมัติ", type: "checkbox", required: false },
           { id: "times", labelTh: "เวลาที่ต้องการ เช่น 08:00, 18:00", type: "list", required: true },
           { id: "timezone", labelTh: "เขตเวลา", type: "select", required: true, options: ["Asia/Bangkok", "UTC"] },
         ],
@@ -830,7 +846,7 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
         emptyMessageTh: "แสดงเฉพาะ URL และหลักฐานจาก Backend • Screenshot Adapter: Coming Soon • ไม่มีภาพจำลอง",
         actionIds: [],
       },
-      { id: "schedule", labelTh: "รอบค้นหารายวัน", descriptionTh: "บันทึกเวลาที่ต้องการไว้ โดยจะไม่อ้างว่ารันอัตโนมัติจนกว่า Scheduler พร้อม", actionIds: ["save_indicator_scout_schedule"] },
+      { id: "schedule", labelTh: "รอบค้นหารายวัน", descriptionTh: "ตั้งรอบค้นหา Indicator แบบอ่านอย่างเดียว พร้อมดูครั้งล่าสุด รอบถัดไป และสาเหตุที่ระบบรอ", actionIds: ["save_indicator_scout_schedule"] },
       { id: "archive", labelTh: "คลังย้อนหลัง", descriptionTh: "ดู Mission และรายงาน Indicator ที่เคยส่งกลับมาที่อุปกรณ์นี้", actionIds: [] },
     ],
     actions: [
@@ -850,10 +866,10 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
         id: "save_indicator_scout_schedule",
         tabId: "schedule",
         labelTh: "บันทึกรอบค้นหา",
-        descriptionTh: "ส่ง Intent บันทึกเวลาเท่านั้น งานอัตโนมัติจะเริ่มเมื่อ Backend Scheduler รายงานว่าพร้อม",
+        descriptionTh: "เปิดหรือปิด Local Scheduler สำหรับค้นหา Indicator แบบอ่านอย่างเดียว โดยทุกครั้งต้องมี Mission, Audit, URL และ Report",
         availability: { status: "configuration_required" },
         formFields: [
-          { id: "enabled", labelTh: "เปิดใช้เมื่อ Scheduler พร้อม", type: "checkbox", required: false },
+          { id: "enabled", labelTh: "เปิดรอบค้นหาอัตโนมัติ", type: "checkbox", required: false },
           { id: "times", labelTh: "เวลาที่ต้องการ เช่น 08:00, 18:00", type: "list", required: true },
           { id: "timezone", labelTh: "เขตเวลา", type: "select", required: true, options: ["Asia/Bangkok", "UTC"] },
         ],
@@ -867,7 +883,7 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
       { id: "today", labelTh: "ข่าวสำคัญวันนี้", descriptionTh: "ข่าวผลกระทบสูงและช่วงเวลาที่ EA ควรระวัง พร้อมลิงก์แหล่งข้อมูล", actionIds: ["analyze_daily_market_news"] },
       { id: "pair_bias", labelTh: "แนวโน้ม 28 คู่เงิน", descriptionTh: "ดู Bullish, Bearish หรือ Sideway ของคู่เงินมาตรฐาน 28 คู่ โดยไม่เติมข้อมูลจำลอง", actionIds: ["build_fx_pair_bias"] },
       { id: "horizons", labelTh: "มุมมองสั้น กลาง ยาว", descriptionTh: "เปรียบเทียบแนวโน้มระยะสั้น ระยะกลาง และระยะยาวจากข้อมูลที่มีหลักฐาน", actionIds: [] },
-      { id: "schedule_history", labelTh: "เวลาอัปเดตและย้อนหลัง", descriptionTh: "บันทึกเวลาที่ต้องการและเปิดรายงานข่าวหรือ FX Bias ย้อนหลัง", actionIds: ["save_news_bias_schedule"] },
+      { id: "schedule_history", labelTh: "เวลาอัปเดตและย้อนหลัง", descriptionTh: "ตั้งรอบอ่านข่าวสาธารณะตามเวลาไทย และเปิดรายงานข่าวหรือ FX Bias ย้อนหลัง", actionIds: ["save_news_bias_schedule"] },
     ],
     actions: [
       {
@@ -896,10 +912,10 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
         id: "save_news_bias_schedule",
         tabId: "schedule_history",
         labelTh: "บันทึกเวลาอัปเดตข่าว",
-        descriptionTh: "ส่ง Intent บันทึกเวลาเท่านั้น ไม่สร้างข่าวหรือค่า Bias จำลองเมื่อแหล่งข้อมูลยังไม่พร้อม",
+        descriptionTh: "เปิดหรือปิด Local Scheduler สำหรับอ่านข่าวสาธารณะ ระบบไม่สร้างข่าวหรือค่า Bias จำลองเมื่อหลักฐานไม่พร้อม",
         availability: { status: "configuration_required" },
         formFields: [
-          { id: "enabled", labelTh: "เปิดใช้เมื่อ Scheduler พร้อม", type: "checkbox", required: false },
+          { id: "enabled", labelTh: "เปิดรอบอัปเดตอัตโนมัติ", type: "checkbox", required: false },
           { id: "times", labelTh: "เวลาที่ต้องการ เช่น 07:00, 13:00, 19:00", type: "list", required: true },
           { id: "timezone", labelTh: "เขตเวลา", type: "select", required: true, options: ["Asia/Bangkok", "UTC"] },
         ],
@@ -982,12 +998,12 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
         id: "save_agent_preferences",
         tabId: "agent_settings",
         labelTh: "บันทึกการตั้งค่า Agent",
-        descriptionTh: "บันทึกเฉพาะระดับโมเดลและขอบเขตการใช้งานที่ Backend อนุญาต ไม่รับ Provider Model ID, Password, API Key หรือการเปลี่ยนสิทธิ์ Tool",
+        descriptionTh: "บันทึกเฉพาะระดับโมเดลและขอบเขตการใช้งานที่ Backend อนุญาต งบ Token เป็นค่าประมาณสำหรับ Audit ไม่ใช่เพดานที่ Codex CLI บังคับ และไม่รับ Provider Model ID, Password, API Key หรือการเปลี่ยนสิทธิ์ Tool",
         availability: { status: "configuration_required" },
         formFields: [
           { id: "language", labelTh: "ภาษาหลัก", type: "select", required: false, options: ["th", "en"] },
           { id: "modelTier", labelTh: "ระดับโมเดล", type: "select", required: false, options: ["manager_quality", "risk_quality", "specialist_balanced", "specialist_fast"] },
-          { id: "tokenBudget", labelTh: "งบ Token ต่อภารกิจ", type: "integer", required: false },
+          { id: "tokenBudget", labelTh: "งบ Token โดยประมาณต่อภารกิจ (Audit)", type: "integer", required: false },
           { id: "timeoutSeconds", labelTh: "เวลาสูงสุดต่อภารกิจ (วินาที)", type: "integer", required: false },
           { id: "outputLimitChars", labelTh: "ขนาดผลลัพธ์สูงสุด (ตัวอักษร)", type: "integer", required: false },
           { id: "rateReservePercent", labelTh: "Rate Limit สำรอง (%)", type: "integer", required: false },
@@ -1001,9 +1017,9 @@ const WORKFLOW_FIELD_DENY_PATTERN = /(secret|password|cookie|credential|auth|api
 
 const WORKFLOW_NUMERIC_FIELD_BOUNDS = Object.freeze({
   tokenBudget: { min: 256, max: 100000, step: 1 },
-  timeoutSeconds: { min: 15, max: 1800, step: 1 },
-  outputLimitChars: { min: 1000, max: 100000, step: 1 },
-  rateReservePercent: { min: 0, max: 90, step: 1 },
+  timeoutSeconds: { min: 15, max: 600, step: 1 },
+  outputLimitChars: { min: 1000, max: 20000, step: 1 },
+  rateReservePercent: { min: 10, max: 80, step: 1 },
 });
 
 const LAYER_DISPLAY = {
@@ -3533,11 +3549,83 @@ function appendDashboardDetailList(container, titleText, values, className = "")
   container.appendChild(section);
 }
 
+const DASHBOARD_STRUCTURED_VALUE_LIMITS = Object.freeze({
+  maxDepth: 3,
+  maxArrayItems: 20,
+  maxObjectFields: 20,
+  maxNodesPerMetricSection: 360,
+});
+
+function dashboardStructuredValueSummary(value) {
+  if (Array.isArray(value)) return `เปิดดูรายละเอียด ${value.length} รายการ`;
+  if (value && typeof value === "object") return `เปิดดูรายละเอียด ${Object.keys(value).length} ช่องข้อมูล`;
+  return safeDashboardDisplayText(formatDashboardValue(value), "-");
+}
+
+function appendDashboardStructuredValue(container, value, depth = 0, budget = { remaining: 120 }) {
+  if (!container) return;
+  if (budget.remaining <= 0) {
+    const note = document.createElement("small");
+    note.className = "dashboard-structured-truncated";
+    note.textContent = "แสดงบางส่วนเพื่อให้หน้า Dashboard ทำงานได้ลื่น กรุณาดู Artifact หรือรายงานต้นทางหากต้องการข้อมูลทั้งหมด";
+    container.appendChild(note);
+    return;
+  }
+  budget.remaining -= 1;
+  const structured = value && typeof value === "object";
+  if (!structured || depth >= DASHBOARD_STRUCTURED_VALUE_LIMITS.maxDepth) {
+    const text = document.createElement("span");
+    text.textContent = safeDashboardDisplayText(formatDashboardValue(value, depth), "-");
+    container.appendChild(text);
+    return;
+  }
+  const isArray = Array.isArray(value);
+  const limit = isArray
+    ? DASHBOARD_STRUCTURED_VALUE_LIMITS.maxArrayItems
+    : DASHBOARD_STRUCTURED_VALUE_LIMITS.maxObjectFields;
+  const totalEntries = isArray ? value.length : Object.keys(value).length;
+  const visibleEntries = isArray
+    ? value.slice(0, limit).map((item, index) => [String(index + 1), item])
+    : Object.entries(value).slice(0, limit);
+  if (isArray) {
+    const list = document.createElement("ol");
+    list.className = "dashboard-structured-list";
+    visibleEntries.forEach(([, item]) => {
+      if (budget.remaining <= 0) return;
+      const row = document.createElement("li");
+      appendDashboardStructuredValue(row, item, depth + 1, budget);
+      list.appendChild(row);
+    });
+    container.appendChild(list);
+  } else {
+    const list = document.createElement("dl");
+    list.className = "dashboard-structured-grid";
+    visibleEntries.forEach(([name, detail]) => {
+      if (budget.remaining <= 0) return;
+      const term = document.createElement("dt");
+      const valueNode = document.createElement("dd");
+      term.textContent = safeDashboardDisplayText(dashboardFieldLabel(name), "ข้อมูล");
+      appendDashboardStructuredValue(valueNode, detail, depth + 1, budget);
+      list.append(term, valueNode);
+    });
+    container.appendChild(list);
+  }
+  if (totalEntries > visibleEntries.length || budget.remaining <= 0) {
+    const note = document.createElement("small");
+    note.className = "dashboard-structured-truncated";
+    note.textContent = totalEntries > visibleEntries.length
+      ? `แสดงบางส่วน • มีข้อมูลอีก ${totalEntries - visibleEntries.length} รายการในรายงาน Backend`
+      : "แสดงบางส่วนเพื่อให้หน้า Dashboard ทำงานได้ลื่น กรุณาดู Artifact หรือรายงานต้นทางหากต้องการข้อมูลทั้งหมด";
+    container.appendChild(note);
+  }
+}
+
 function appendDashboardMetricSection(container, metrics) {
   if (!metrics || typeof metrics !== "object" || Array.isArray(metrics) || !Object.keys(metrics).length) return;
   const section = document.createElement("section");
   const title = document.createElement("h3");
   const grid = document.createElement("div");
+  const structuredBudget = { remaining: DASHBOARD_STRUCTURED_VALUE_LIMITS.maxNodesPerMetricSection };
   section.className = "dashboard-result-section dashboard-result-metrics";
   title.textContent = "ตัวเลขสำคัญ";
   grid.className = "dashboard-result-metric-grid";
@@ -3546,8 +3634,18 @@ function appendDashboardMetricSection(container, metrics) {
     const label = document.createElement("span");
     const metric = document.createElement("strong");
     label.textContent = safeDashboardDisplayText(dashboardFieldLabel(name), name);
-    metric.textContent = safeDashboardDisplayText(dashboardMetricValue(name, value), "-");
-    card.append(label, metric);
+    if (value && typeof value === "object") {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      details.className = "dashboard-structured-details";
+      summary.textContent = dashboardStructuredValueSummary(value);
+      details.appendChild(summary);
+      appendDashboardStructuredValue(details, value, 0, structuredBudget);
+      card.append(label, details);
+    } else {
+      metric.textContent = safeDashboardDisplayText(dashboardMetricValue(name, value), "-");
+      card.append(label, metric);
+    }
     grid.appendChild(card);
   });
   section.append(title, grid);
@@ -3668,18 +3766,18 @@ function appendDashboardSourceLinks(container, evidence) {
   section.className = "dashboard-result-section dashboard-result-sources";
   title.textContent = "แหล่งข้อมูล";
   evidence.slice(0, 20).forEach((item) => {
-    const rawUrl = String(item?.url || "").trim();
+    const safeUrl = getSafeExternalHttpUrl(item?.url);
+    if (!safeUrl) return;
     let parsed;
     try {
-      parsed = new URL(rawUrl, window.location.href);
+      parsed = new URL(safeUrl);
     } catch {
       return;
     }
-    if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) return;
     const row = document.createElement("li");
     const link = document.createElement("a");
     const note = document.createElement("span");
-    link.href = parsed.href;
+    link.href = safeUrl;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     link.textContent = safeDashboardDisplayText(item?.label, parsed.hostname);
@@ -3752,7 +3850,7 @@ function getDashboardWorkState(item, kind = "mission") {
   const status = kind === "mission"
     ? getMissionPresentationStatus(item)
     : String(item?.status || "ready").trim().toLowerCase().replace(/[ -]+/g, "_");
-  if (["completed", "archived", "ready", "published"].includes(status)) return "completed";
+  if (["completed", "archived", "ready", "verified", "published"].includes(status)) return "completed";
   if (["waiting_approval", "needs_approval", "blocked", "failed", "error"].includes(status)) return "blocked";
   return "running";
 }
@@ -4045,15 +4143,26 @@ function getPropOwnerAgentId(subject) {
   return candidates.map(getAgentIdFromOwner).find(Boolean) || null;
 }
 
-function formatDashboardValue(value) {
-  if (Array.isArray(value)) return value.join(", ");
-  if (value && typeof value === "object") {
-    return Object.entries(value)
-      .slice(0, 8)
-      .map(([name, detail]) => `${name}: ${detail && typeof detail === "object" ? "มีข้อมูลรายละเอียด" : detail}`)
-      .join(" • ");
+function formatDashboardValue(value, depth = 0) {
+  if (value === null || value === undefined || value === "") return "-";
+  if (Array.isArray(value)) {
+    if (!value.length) return "ไม่มีรายการ";
+    if (depth >= 2) return `${value.length} รายการ`;
+    const preview = value.slice(0, 8).map((item) => formatDashboardValue(item, depth + 1));
+    if (value.length > preview.length) preview.push(`และอีก ${value.length - preview.length} รายการ`);
+    return preview.join(" • ");
   }
-  return String(value ?? "-");
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value);
+    if (!entries.length) return "ไม่มีข้อมูล";
+    if (depth >= 2) return `${entries.length} ช่องข้อมูล`;
+    const preview = entries
+      .slice(0, 8)
+      .map(([name, detail]) => `${safeDashboardDisplayText(dashboardFieldLabel(name), "ข้อมูล")}: ${formatDashboardValue(detail, depth + 1)}`);
+    if (entries.length > preview.length) preview.push(`และอีก ${entries.length - preview.length} ช่องข้อมูล`);
+    return preview.join(" • ");
+  }
+  return safeDashboardDisplayText(String(value), "-");
 }
 
 function safeDashboardDisplayText(value, fallback = "-") {
@@ -8581,21 +8690,20 @@ function appendSignalDeepEvidenceList(container, evidence) {
   const list = document.createElement("ul");
   list.className = "signal-deep-news-evidence";
   items.forEach((item) => {
-    const rawUrl = String(item.sourceUrl || item.url || item.link || "").trim();
+    const safeUrl = getSafeExternalHttpUrl(item.sourceUrl || item.url || item.link);
     let parsed = null;
     try {
-      parsed = rawUrl ? new URL(rawUrl) : null;
+      parsed = safeUrl ? new URL(safeUrl) : null;
     } catch {
       parsed = null;
     }
-    if (parsed && (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password)) parsed = null;
     const row = document.createElement("li");
     const label = safeDashboardDisplayText(item.label || item.title || item.name, parsed?.hostname || "หลักฐานจาก Backend");
     const note = document.createElement("span");
     note.textContent = safeDashboardDisplayText(item.note || item.summary || item.detail || item.observedAt, "");
     if (parsed) {
       const link = document.createElement("a");
-      link.href = parsed.href;
+      link.href = safeUrl;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
       link.textContent = label;
@@ -10068,6 +10176,7 @@ function normalizeWorkflowField(field = {}) {
 function normalizeWorkflowAction(rawAction = {}, fallbackAction = {}) {
   const id = String(rawAction?.id || fallbackAction?.id || "").trim();
   if (!/^[a-z0-9_-]{1,80}$/i.test(id)) return null;
+  const copyOverride = WORKFLOW_ACTION_COPY_OVERRIDES[id] || {};
   const rawAvailability = rawAction?.availability && typeof rawAction.availability === "object"
     ? rawAction.availability
     : fallbackAction?.availability || {};
@@ -10081,12 +10190,66 @@ function normalizeWorkflowAction(rawAction = {}, fallbackAction = {}) {
     (Array.isArray(fallbackAction?.formFields) ? fallbackAction.formFields : [])
       .map((field) => [String(field?.id || ""), field]),
   );
+  const rawPluginProfile = rawAction?.pluginProfile && typeof rawAction.pluginProfile === "object"
+    ? rawAction.pluginProfile
+    : (fallbackAction?.pluginProfile && typeof fallbackAction.pluginProfile === "object" ? fallbackAction.pluginProfile : {});
+  const automationMode = ["scheduled_read_only", "mission_on_demand", "mission_interactive", "local_read_only", "settings_only"]
+    .includes(String(rawPluginProfile.automationMode || ""))
+    ? String(rawPluginProfile.automationMode)
+    : "mission_on_demand";
+  const procedureKind = rawPluginProfile.procedureKind === "custom_plugin_skill"
+    ? "custom_plugin_skill"
+    : "backend_procedure";
+  const pluginInvocationMode = ["codex_skill_guided", "backend_owned_procedure", "unavailable"]
+    .includes(String(rawPluginProfile.pluginInvocationMode || ""))
+    ? String(rawPluginProfile.pluginInvocationMode)
+    : (procedureKind === "custom_plugin_skill" ? "codex_skill_guided" : "backend_owned_procedure");
+  const skillInstalled = rawPluginProfile.skillInstalled === true
+    ? true
+    : (rawPluginProfile.skillInstalled === false ? false : null);
+  const inputPreset = {};
+  Object.entries(rawPluginProfile.inputPreset && typeof rawPluginProfile.inputPreset === "object" ? rawPluginProfile.inputPreset : {})
+    .slice(0, 30)
+    .forEach(([key, value]) => {
+      if (!/^[a-zA-Z0-9_-]{1,60}$/.test(key)) return;
+      if (["string", "number", "boolean"].includes(typeof value)) inputPreset[key] = value;
+      else if (Array.isArray(value)) inputPreset[key] = value.slice(0, 12).map((item) => safeDashboardDisplayText(item, "")).filter(Boolean);
+    });
+  const safeProfileList = (value) => (Array.isArray(value) ? value : [])
+    .slice(0, 20)
+    .map((item) => safeDashboardDisplayText(item, ""))
+    .filter(Boolean);
+  const pluginSelectionField = /^[a-zA-Z0-9_-]{1,60}$/.test(String(rawPluginProfile.pluginSelectionField || ""))
+    ? String(rawPluginProfile.pluginSelectionField)
+    : "";
+  const pluginCandidates = (Array.isArray(rawPluginProfile.pluginCandidates) ? rawPluginProfile.pluginCandidates : [])
+    .slice(0, 10)
+    .map((candidate) => {
+      const candidateSkillId = safeDashboardDisplayText(candidate?.pluginSkillId, "");
+      const values = safeProfileList(candidate?.values);
+      if (!candidateSkillId || !values.length) return null;
+      return {
+        pluginSkillId: candidateSkillId,
+        pluginVersion: safeDashboardDisplayText(candidate?.pluginVersion, ""),
+        procedureKind: candidate?.procedureKind === "custom_plugin_skill" ? "custom_plugin_skill" : "backend_procedure",
+        referencePluginSkillId: safeDashboardDisplayText(candidate?.referencePluginSkillId, ""),
+        referencePluginVersion: safeDashboardDisplayText(candidate?.referencePluginVersion, ""),
+        referenceSkillInstalled: candidate?.referenceSkillInstalled === true
+          ? true
+          : (candidate?.referenceSkillInstalled === false ? false : null),
+        referenceInstalledVersion: safeDashboardDisplayText(candidate?.referenceInstalledVersion, ""),
+        referenceVersionMatch: candidate?.referenceVersionMatch === true,
+        values,
+      };
+    })
+    .filter(Boolean);
   return {
     id,
     tabId: String(rawAction?.tabId || fallbackAction?.tabId || "").trim(),
-    labelTh: safeDashboardDisplayText(rawAction?.labelTh || fallbackAction?.labelTh, "สร้าง Mission"),
+    ownerAgentId: String(rawAction?.ownerAgentId || fallbackAction?.ownerAgentId || "manager").trim(),
+    labelTh: safeDashboardDisplayText(copyOverride.labelTh || rawAction?.labelTh || fallbackAction?.labelTh, "สร้าง Mission"),
     descriptionTh: safeDashboardDisplayText(
-      rawAction?.descriptionTh || fallbackAction?.descriptionTh,
+      copyOverride.descriptionTh || rawAction?.descriptionTh || fallbackAction?.descriptionTh,
       "ส่งคำขอไปยัง Local Runner และรอรายงานกลับมาที่อุปกรณ์นี้",
     ),
     sourceRequired: rawAction?.sourceRequired === true || fallbackAction?.sourceRequired === true,
@@ -10095,12 +10258,111 @@ function normalizeWorkflowAction(rawAction = {}, fallbackAction = {}) {
       status,
       realToolAvailable: rawAvailability?.realToolAvailable === true,
     },
+    pluginProfile: {
+      pluginSkillId: safeDashboardDisplayText(rawPluginProfile.pluginSkillId, "Backend Guarded Workflow"),
+      pluginVersion: safeDashboardDisplayText(rawPluginProfile.pluginVersion, ""),
+      referencePluginSkillId: safeDashboardDisplayText(rawPluginProfile.referencePluginSkillId, ""),
+      referencePluginVersion: safeDashboardDisplayText(rawPluginProfile.referencePluginVersion, ""),
+      referenceSkillInstalled: rawPluginProfile.referenceSkillInstalled === true
+        ? true
+        : (rawPluginProfile.referenceSkillInstalled === false ? false : null),
+      referenceInstalledVersion: safeDashboardDisplayText(rawPluginProfile.referenceInstalledVersion, ""),
+      referenceVersionMatch: rawPluginProfile.referenceVersionMatch === true,
+      procedureKind,
+      pluginInvocationMode,
+      skillInstalled,
+      installedVersion: safeDashboardDisplayText(rawPluginProfile.installedVersion, ""),
+      versionMatch: rawPluginProfile.versionMatch === true,
+      automationMode,
+      pluginSelectionField,
+      pluginCandidates,
+      inputPreset,
+      outputFields: safeProfileList(rawPluginProfile.outputFields),
+      evidenceRequired: safeProfileList(rawPluginProfile.evidenceRequired),
+      failureHelpTh: safeDashboardDisplayText(rawPluginProfile.failureHelpTh, "ตรวจสถานะ Local Runner และเปิดรายละเอียด Mission เพื่อดูสาเหตุที่ติดขัด"),
+      adapterStatus: safeDashboardDisplayText(rawPluginProfile.adapterStatus, ""),
+      screenshotPolicy: safeDashboardDisplayText(rawPluginProfile.screenshotPolicy, ""),
+    },
     formFields: rawFields
       .map((field) => normalizeWorkflowField({
         ...(fallbackFieldMap.get(String(field?.id || "")) || {}),
         ...(field && typeof field === "object" ? field : {}),
       }))
       .filter(Boolean),
+  };
+}
+
+function workflowProcedurePresentation(pluginProfile = {}) {
+  const procedureId = safeDashboardDisplayText(pluginProfile.pluginSkillId, "ขั้นตอนที่ Backend กำหนด");
+  if (pluginProfile.procedureKind !== "custom_plugin_skill") {
+    const unavailable = pluginProfile.pluginInvocationMode === "unavailable"
+      || ["contract_unavailable", "profile_not_mapped"].includes(String(pluginProfile.adapterStatus || ""));
+    const referencePluginId = safeDashboardDisplayText(pluginProfile.referencePluginSkillId, "");
+    const referenceVersion = safeDashboardDisplayText(pluginProfile.referencePluginVersion, "");
+    const referenceInstalledVersion = safeDashboardDisplayText(pluginProfile.referenceInstalledVersion, "");
+    const adaptedFromPlugin = Boolean(referencePluginId);
+    return {
+      title: adaptedFromPlugin ? "ขั้นตอน Backend ที่ปรับจาก Custom Plugin" : "ขั้นตอน Backend",
+      procedureId,
+      status: unavailable
+        ? "ขั้นตอน Backend ยังไม่พร้อม"
+        : (adaptedFromPlugin
+          ? `ต้นแบบ ${referencePluginId} • ${pluginProfile.referenceSkillInstalled === true ? "พบในเครื่อง" : "ไม่ใช้ Plugin โดยตรง"}`
+          : "ไม่ต้องติดตั้ง Custom Plugin"),
+      version: unavailable
+        ? "ตรวจสัญญา Workflow และรีสตาร์ต Local Runner"
+        : (adaptedFromPlugin
+          ? `ต้นแบบ ${referenceVersion || "ไม่ระบุ Version"}${referenceInstalledVersion ? ` • พบ ${referenceInstalledVersion}` : ""}`
+          : "Version ถูกควบคุมโดย Local Runner"),
+      flowStep: "Local Runner ใช้ขั้นตอน Backend",
+      explanation: adaptedFromPlugin
+        ? "Backend นำความต้องการจาก Custom Plugin มาทำเป็นขั้นตอนคลิกเดียว โดยไม่ฝืนเรียก Workflow เต็มที่ยังต้องถามข้อมูลหรือใช้ Adapter เพิ่ม"
+        : "อุปกรณ์นี้ใช้ขั้นตอนที่ Backend กำหนด ไม่ได้เรียก Custom Plugin โดยตรง",
+    };
+  }
+
+  const requestedVersion = safeDashboardDisplayText(pluginProfile.pluginVersion, "ไม่ระบุ");
+  const installedVersion = safeDashboardDisplayText(pluginProfile.installedVersion, "ไม่พบข้อมูล");
+  let status = "รอสถานะการติดตั้งจาก Backend";
+  if (pluginProfile.skillInstalled === false) {
+    status = "ยังไม่พบ Custom Plugin นี้ใน Codex ของผู้ใช้";
+  } else if (pluginProfile.skillInstalled === true && pluginProfile.versionMatch !== true) {
+    status = `Version ไม่ตรงกัน • ต้องการ ${requestedVersion} • ติดตั้งอยู่ ${installedVersion}`;
+  } else if (pluginProfile.skillInstalled === true) {
+    status = `ติดตั้งแล้ว • Version ${installedVersion}`;
+  }
+  return {
+    title: "Codex ใช้ขั้นตอนจาก Custom Plugin",
+    procedureId,
+    status,
+    version: requestedVersion === "installed"
+      ? `ใช้ Version ที่ติดตั้งอยู่ • พบ ${installedVersion}`
+      : `Workflow ต้องการ ${requestedVersion} • พบ ${installedVersion}`,
+    flowStep: "Codex ใช้ขั้นตอนจาก Custom Plugin",
+    explanation: "Local Runner ส่ง Skill และขั้นตอนให้ Codex ใช้เป็นแนวทาง ไม่ใช่การเรียก Plugin โดยตรงจากหน้าเว็บ",
+  };
+}
+
+function workflowPluginProfileForSelection(pluginProfile = {}, selectionValue = "") {
+  const normalizedValue = String(selectionValue || "").trim().toLowerCase();
+  if (!normalizedValue || !Array.isArray(pluginProfile.pluginCandidates)) return pluginProfile;
+  const candidate = pluginProfile.pluginCandidates.find((item) => (
+    Array.isArray(item?.values)
+    && item.values.some((value) => String(value || "").trim().toLowerCase() === normalizedValue)
+  ));
+  if (!candidate) return pluginProfile;
+  const procedureKind = candidate.procedureKind === "custom_plugin_skill"
+    ? "custom_plugin_skill"
+    : "backend_procedure";
+  return {
+    ...pluginProfile,
+    ...candidate,
+    procedureKind,
+    pluginInvocationMode: procedureKind === "custom_plugin_skill"
+      ? "codex_skill_guided"
+      : "backend_owned_procedure",
+    selectedBy: pluginProfile.pluginSelectionField,
+    selectedValue: normalizedValue,
   };
 }
 
@@ -10202,13 +10464,14 @@ function normalizeWorkflowDashboard(subject, propertyRole, report = {}) {
     const fallbackTab = (fallback.tabs || []).find((item) => item.id === (tab?.id || tab)) || {};
     const id = String(tab?.id || tab || `tab-${index + 1}`).trim();
     if (!/^[a-z0-9_-]{1,60}$/i.test(id)) return null;
+    const copyOverride = WORKFLOW_TAB_COPY_OVERRIDES[subject?.id]?.[id] || {};
     const requestedActionIds = Array.isArray(tab?.actionIds)
       ? tab.actionIds
       : (Array.isArray(fallbackTab.actionIds) ? fallbackTab.actionIds : []);
     return {
       id,
-      labelTh: safeDashboardDisplayText(tab?.labelTh || tab?.label || fallbackTab.labelTh, `ส่วนที่ ${index + 1}`),
-      descriptionTh: safeDashboardDisplayText(tab?.descriptionTh || fallbackTab.descriptionTh, "เลือกเพื่อดูงานและผลลัพธ์"),
+      labelTh: safeDashboardDisplayText(copyOverride.labelTh || tab?.labelTh || tab?.label || fallbackTab.labelTh, `ส่วนที่ ${index + 1}`),
+      descriptionTh: safeDashboardDisplayText(copyOverride.descriptionTh || tab?.descriptionTh || fallbackTab.descriptionTh, "เลือกเพื่อดูงานและผลลัพธ์"),
       emptyMessageTh: safeDashboardDisplayText(tab?.emptyMessageTh || fallbackTab.emptyMessageTh, ""),
       actionIds: requestedActionIds.filter((actionId) => actionMap.has(actionId)),
     };
@@ -10306,18 +10569,20 @@ function renderWorkflowTabs(propId, dashboard, selectedTab) {
   }
 }
 
-function workflowAvailabilityCopy(action, hasSources) {
+function workflowAvailabilityCopy(action, hasSources, schedule = null) {
   if (WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(action.id)) {
     return action.id === "save_agent_preferences"
       ? {
           tone: "ready",
           label: "บันทึกการตั้งค่าได้",
-          detail: "Local Runner จะเก็บเฉพาะค่าการทำงานที่ปลอดภัยและไม่รับ Token, Cookie หรือ Secret",
+          detail: "Local Runner จะเก็บเฉพาะค่าการทำงานที่ปลอดภัย งบ Token ใช้ประมาณการและบันทึก Audit เท่านั้น ไม่ใช่ Hard Limit และระบบไม่รับ Token, Cookie หรือ Secret",
         }
       : {
           tone: "ready",
-          label: "บันทึกเวลาได้",
-          detail: "บันทึกเวลาที่ต้องการไว้ใน Local Runner; ระบบตั้งเวลาอัตโนมัติจะทำงานเมื่อ Scheduler พร้อม",
+          label: schedule?.automaticRunsImplemented === true ? "ตั้งเวลาอัตโนมัติได้" : "บันทึกเวลาได้",
+          detail: schedule?.automaticRunsImplemented === true
+            ? "Local Runner จะเริ่มงาน Read-only ตามเวลาที่เปิดไว้ พร้อม Mission, Audit และ Report"
+            : "บันทึกเวลาที่ต้องการไว้ใน Local Runner; ระบบตั้งเวลาอัตโนมัติจะทำงานเมื่อ Scheduler พร้อม",
         };
   }
   if (action.sourceRequired && !hasSources) {
@@ -10327,7 +10592,7 @@ function workflowAvailabilityCopy(action, hasSources) {
     return { tone: "ready", label: "พร้อมตรวจสถานะ", detail: "อ่านสถานะ Local Runner, HQ และ Mission Worker จาก Backend โดยไม่เรียก Codex" };
   }
   if (action.id === "save_agent_preferences") {
-    return { tone: "ready", label: "บันทึกค่า Agent แบบปลอดภัยได้", detail: "เก็บเฉพาะภาษา ระดับการประมวลผล งบ เวลา ขนาดรายงาน และ Rate Limit สำรองใน Local Runner" };
+    return { tone: "ready", label: "บันทึกค่า Agent แบบปลอดภัยได้", detail: "เก็บภาษา ระดับการประมวลผล งบ Token โดยประมาณ เวลา ขนาดรายงาน และ Rate Limit สำรองใน Local Runner โดยไม่อ้างว่า Token เป็น Hard Limit" };
   }
   if (action.availability.status === "ready") {
     return action.analysisOnly || !action.availability.realToolAvailable
@@ -10506,7 +10771,7 @@ function toggleWorkflowVoiceDictation(button) {
   updateWorkflowVoiceControls();
 }
 
-function createWorkflowField(field, dashboard, actionId) {
+function createWorkflowField(field, dashboard, action) {
   const wrapper = document.createElement("div");
   const label = document.createElement("label");
   let control;
@@ -10548,6 +10813,7 @@ function createWorkflowField(field, dashboard, actionId) {
       control.inputMode = field.integer ? "numeric" : "decimal";
     }
   }
+  const actionId = action.id;
   const controlId = `workflow-${String(state.modal.id || "prop")}-${actionId}-${field.id}`;
   control.id = controlId;
   label.htmlFor = controlId;
@@ -10559,6 +10825,27 @@ function createWorkflowField(field, dashboard, actionId) {
       if ([...control.options].some((option) => option.value === candidate)) control.value = candidate;
     } else if (control instanceof HTMLInputElement && control.type === "number" && Number.isFinite(Number(preferenceValue))) {
       control.value = String(preferenceValue);
+    }
+  } else {
+    const schedule = dashboard.schedule && typeof dashboard.schedule === "object" ? dashboard.schedule : null;
+    const scheduleValue = WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(actionId) && schedule
+      ? ({
+          enabled: schedule.requestedEnabled ?? schedule.enabled,
+          times: schedule.times,
+          timezone: schedule.timezone,
+          minimumImpact: schedule.minimumImpact,
+        }[field.id])
+      : undefined;
+    const presetValue = scheduleValue ?? action.pluginProfile?.inputPreset?.[field.id];
+    if (presetValue !== undefined && presetValue !== null) {
+      if (control instanceof HTMLInputElement && control.type === "checkbox") {
+        control.checked = Boolean(presetValue);
+      } else if (control instanceof HTMLSelectElement) {
+        const candidate = String(presetValue);
+        if ([...control.options].some((option) => option.value === candidate)) control.value = candidate;
+      } else if ("value" in control) {
+        control.value = Array.isArray(presetValue) ? presetValue.join(", ") : String(presetValue);
+      }
     }
   }
   wrapper.append(label, control);
@@ -10607,7 +10894,7 @@ function createWorkflowActionCard(action, dashboard) {
         field.sourceKind === "workspace_source" ? dashboard.workspaceSources.length > 0 : dashboard.agentDeliveredSources.length > 0
       ))
     : dashboard.agentDeliveredSources.length > 0;
-  const availabilityCopy = workflowAvailabilityCopy(action, hasSources);
+  const availabilityCopy = workflowAvailabilityCopy(action, hasSources, dashboard.schedule);
   const inFlight = state.modal.workflowAction.inFlight
     && state.modal.workflowAction.propId === state.modal.id
     && state.modal.workflowAction.actionId === action.id;
@@ -10624,7 +10911,7 @@ function createWorkflowActionCard(action, dashboard) {
   headingCopy.append(title, description);
   heading.append(headingCopy, availability);
   fieldGrid.className = "workflow-field-grid";
-  action.formFields.forEach((field) => fieldGrid.appendChild(createWorkflowField(field, dashboard, action.id)));
+  action.formFields.forEach((field) => fieldGrid.appendChild(createWorkflowField(field, dashboard, action)));
   const sourceSelectors = [...fieldGrid.querySelectorAll("select[data-workflow-source-kind]")];
   sourceSelectors.forEach((selector) => {
     selector.addEventListener("change", () => {
@@ -10638,10 +10925,65 @@ function createWorkflowActionCard(action, dashboard) {
         const platformControl = fieldGrid.querySelector('[data-workflow-field="platform"]');
         if (platform && platformControl instanceof HTMLSelectElement) {
           platformControl.value = platform;
+          platformControl.dispatchEvent(new Event("change"));
         }
       }
     });
   });
+  const profile = document.createElement("section");
+  const profileTop = document.createElement("div");
+  const plugin = document.createElement("strong");
+  const mode = document.createElement("span");
+  const flow = document.createElement("p");
+  const profileDetails = document.createElement("details");
+  const profileSummary = document.createElement("summary");
+  const profileGrid = document.createElement("div");
+  const automationLabels = {
+    scheduled_read_only: "อ่านข้อมูลตามเวลา",
+    mission_on_demand: "สั่งงานเมื่อพร้อม",
+    mission_interactive: "ต้องเลือกเครื่องมือจริง",
+    local_read_only: "ตรวจในเครื่อง",
+    settings_only: "บันทึกการตั้งค่า",
+  };
+  profile.className = "workflow-plugin-profile";
+  profileTop.className = "workflow-plugin-profile-top";
+  profileSummary.textContent = "ดูข้อมูลที่ระบบส่งกลับและหลักฐานที่ต้องมี";
+  const appendProfileFact = (label, values, emptyText) => {
+    const block = document.createElement("div");
+    const title = document.createElement("b");
+    const detail = document.createElement("span");
+    title.textContent = label;
+    detail.textContent = values.length ? values.join(" • ") : emptyText;
+    block.append(title, detail);
+    profileGrid.appendChild(block);
+  };
+  const renderSelectedPluginProfile = (selectedProfile) => {
+    const procedure = workflowProcedurePresentation(selectedProfile);
+    plugin.textContent = procedure.title;
+    mode.textContent = automationLabels[selectedProfile.automationMode] || "สั่งงานผ่าน Mission";
+    mode.dataset.mode = selectedProfile.automationMode;
+    flow.textContent = `คำขอ → ${displayAgentName(action.ownerAgentId || "manager", "Agent ผู้รับงาน")} → Local Runner → ${procedure.flowStep} → Report ที่อุปกรณ์นี้`;
+    profileGrid.replaceChildren();
+    appendProfileFact("ขั้นตอนที่เลือก", [procedure.procedureId], "ขั้นตอนที่ Backend กำหนด");
+    appendProfileFact("สถานะ Skill", [procedure.status], "รอสถานะจาก Backend");
+    appendProfileFact("Version", [procedure.version], "ยังไม่มีข้อมูล Version");
+    appendProfileFact("การทำงานจริง", [procedure.explanation], "ทำงานผ่าน Local Runner");
+    appendProfileFact("ผลลัพธ์", selectedProfile.outputFields, "สรุปและ Report จาก Backend");
+    appendProfileFact("หลักฐาน", selectedProfile.evidenceRequired, "Mission, Audit และเวลาที่ตรวจ");
+    appendProfileFact("ถ้าติดขัด", [selectedProfile.failureHelpTh], "เปิดรายละเอียด Mission เพื่อตรวจสาเหตุ");
+  };
+  renderSelectedPluginProfile(action.pluginProfile);
+  if (action.pluginProfile.pluginSelectionField) {
+    const selectionControl = fieldGrid.querySelector(`[data-workflow-field="${action.pluginProfile.pluginSelectionField}"]`);
+    selectionControl?.addEventListener("change", () => {
+      renderSelectedPluginProfile(
+        workflowPluginProfileForSelection(action.pluginProfile, selectionControl.value),
+      );
+    });
+  }
+  profileTop.append(plugin, mode);
+  profileDetails.append(profileSummary, profileGrid);
+  profile.append(profileTop, flow, profileDetails);
   footer.className = "workflow-action-footer";
   truth.textContent = availabilityCopy.detail;
   submit.type = "submit";
@@ -10655,8 +10997,55 @@ function createWorkflowActionCard(action, dashboard) {
     ? (isSettingsAction ? "กำลังบันทึก..." : "กำลังส่งคำขอ...")
     : idleSubmitLabel;
   footer.append(truth, submit);
-  form.append(heading, fieldGrid, footer);
+  form.append(heading, profile, fieldGrid, footer);
   return form;
+}
+
+function renderWorkflowAutomationSummary(container, dashboard, actions) {
+  const primaryAction = actions.find((action) => !WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(action.id));
+  if (!primaryAction) return;
+  const section = document.createElement("section");
+  const top = document.createElement("div");
+  const copy = document.createElement("div");
+  const eyebrow = document.createElement("span");
+  const title = document.createElement("h4");
+  const status = document.createElement("strong");
+  const steps = document.createElement("ol");
+  const schedule = dashboard.schedule && typeof dashboard.schedule === "object" ? dashboard.schedule : null;
+  const scheduleRequested = schedule?.requestedEnabled ?? schedule?.enabled;
+  const scheduleEnabled = schedule?.effectiveEnabled ?? schedule?.enabled;
+  const procedure = workflowProcedurePresentation(primaryAction.pluginProfile);
+  section.className = "workflow-automation-summary";
+  eyebrow.textContent = "วิธีทำงานของอุปกรณ์";
+  title.textContent = primaryAction.labelTh;
+  status.dataset.tone = scheduleEnabled ? "scheduled" : primaryAction.pluginProfile.automationMode;
+  status.textContent = schedule
+    ? (scheduleEnabled
+        ? `เปิดอัตโนมัติ • ${schedule.times?.join(", ") || "ตามเวลาที่ตั้ง"}`
+        : (scheduleRequested ? "เปิดไว้ แต่ Local Scheduler ยังไม่ทำงาน" : "สั่งงานเอง / ยังไม่เปิดเวลา"))
+    : ({ mission_interactive: "เลือกข้อมูลแล้วสั่งงาน", local_read_only: "ตรวจจาก Local Runner", settings_only: "ตั้งค่าในเครื่อง" }[primaryAction.pluginProfile.automationMode] || "กดสั่งงานเมื่อพร้อม");
+  [
+    `รับ Intent และเลือก ${procedure.procedureId} จากสัญญาของ Backend`,
+    `มอบหมาย ${displayAgentName(primaryAction.ownerAgentId || "manager", "Agent ผู้รับงาน")} ผ่าน Mission และ Local Runner`,
+    `${procedure.flowStep} • ${procedure.status}`,
+    "คืน Report, URL/หลักฐาน, สถานะ และวิธีแก้เมื่อมีงานติดขัด",
+  ].forEach((text) => {
+    const item = document.createElement("li");
+    item.textContent = text;
+    steps.appendChild(item);
+  });
+  copy.append(eyebrow, title);
+  top.append(copy, status);
+  section.append(top, steps);
+  if (schedule) {
+    const timing = document.createElement("p");
+    const lastRun = schedule.lastRunAt ? formatThaiDateTime(schedule.lastRunAt) : "ยังไม่เคยรัน";
+    const nextRun = schedule.nextRunAt ? formatThaiDateTime(schedule.nextRunAt) : "ยังไม่มีรอบถัดไป";
+    const lastResult = safeDashboardDisplayText(schedule.lastStatusLabelTh || schedule.statusLabelTh, "รอสถานะจาก Backend");
+    timing.textContent = `ครั้งล่าสุด: ${lastRun} • ครั้งถัดไป: ${nextRun} • ${lastResult}`;
+    section.appendChild(timing);
+  }
+  container.appendChild(section);
 }
 
 function renderWorkflowSourceCards(container, sources) {
@@ -10792,12 +11181,106 @@ function findWorkflowCurrentPropReportProjection(source = {}, propId = state.mod
   return reports.find((report) => String(report?.id || "") === reportId) || source;
 }
 
+const EXTERNAL_URL_BLOCKED_HOST_SUFFIXES = Object.freeze([".localhost", ".local", ".internal"]);
+const EXTERNAL_URL_SENSITIVE_QUERY_NAME_PATTERN = /(^|_)(?:api_?key|access_?token|auth|authorization|bearer|cookie|credential|googleaccessid|awsaccesskeyid|jwt|key|oauth_?code|authorization_?code|pass(?:word|wd)?|secret|session(?:_?id)?|sig|signature|signed|token)(?:_|$)/i;
+
+function parseExternalIpv4Literal(value) {
+  const parts = String(value || "").trim().split(".");
+  if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part))) return null;
+  const octets = parts.map(Number);
+  return octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255) ? octets : null;
+}
+
+function isBlockedExternalIpv4Literal(octets) {
+  if (!Array.isArray(octets) || octets.length !== 4) return false;
+  const [first, second, third] = octets;
+  return first === 0
+    || first === 10
+    || first === 127
+    || (first === 100 && second >= 64 && second <= 127)
+    || (first === 169 && second === 254)
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 0 && [0, 2].includes(third))
+    || (first === 192 && second === 168)
+    || (first === 198 && [18, 19, 51].includes(second))
+    || (first === 203 && second === 0 && third === 113)
+    || first >= 224;
+}
+
+function parseExternalIpv6Literal(value) {
+  let text = String(value || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (!text.includes(":") || text.includes("%")) return null;
+  const lastColon = text.lastIndexOf(":");
+  const ipv4Tail = parseExternalIpv4Literal(text.slice(lastColon + 1));
+  if (ipv4Tail) {
+    const high = ((ipv4Tail[0] << 8) | ipv4Tail[1]).toString(16);
+    const low = ((ipv4Tail[2] << 8) | ipv4Tail[3]).toString(16);
+    text = `${text.slice(0, lastColon + 1)}${high}:${low}`;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const parseHalf = (half) => (half ? half.split(":") : []);
+  const left = parseHalf(halves[0]);
+  const right = parseHalf(halves[1]);
+  const explicitCount = left.length + right.length;
+  if (halves.length === 1 && explicitCount !== 8) return null;
+  if (halves.length === 2 && explicitCount >= 8) return null;
+  const groups = [
+    ...left,
+    ...Array(halves.length === 2 ? 8 - explicitCount : 0).fill("0"),
+    ...right,
+  ];
+  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null;
+  return groups.map((group) => Number.parseInt(group, 16));
+}
+
+function isBlockedExternalIpv6Literal(hostname) {
+  const groups = parseExternalIpv6Literal(hostname);
+  if (!groups) return true;
+  const first = groups[0];
+  if ((first & 0xfe00) === 0xfc00) return true;
+  if ((first & 0xffc0) === 0xfe80 || (first & 0xffc0) === 0xfec0) return true;
+  if ((first & 0xff00) === 0xff00) return true;
+  if (first === 0x2001 && groups[1] === 0x0db8) return true;
+  const ipv4Mapped = groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff;
+  const ipv4Compatible = groups.slice(0, 6).every((group) => group === 0);
+  if (ipv4Mapped || ipv4Compatible) {
+    return isBlockedExternalIpv4Literal([
+      groups[6] >> 8,
+      groups[6] & 0xff,
+      groups[7] >> 8,
+      groups[7] & 0xff,
+    ]);
+  }
+  return false;
+}
+
+function isBlockedExternalHostname(value) {
+  const hostname = String(value || "").trim().toLowerCase().replace(/\.$/, "");
+  if (!hostname) return true;
+  if (hostname === "localhost" || EXTERNAL_URL_BLOCKED_HOST_SUFFIXES.some((suffix) => hostname.endsWith(suffix))) return true;
+  const unwrapped = hostname.replace(/^\[|\]$/g, "");
+  const ipv4 = parseExternalIpv4Literal(unwrapped);
+  if (ipv4) return isBlockedExternalIpv4Literal(ipv4);
+  if (unwrapped.includes(":")) return isBlockedExternalIpv6Literal(unwrapped);
+  return false;
+}
+
+function hasSensitiveExternalQueryName(searchParams) {
+  for (const name of searchParams.keys()) {
+    const normalized = String(name || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
+    if (EXTERNAL_URL_SENSITIVE_QUERY_NAME_PATTERN.test(normalized)) return true;
+  }
+  return false;
+}
+
 function getSafeExternalHttpUrl(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
   try {
     const parsed = new URL(raw, window.location.href);
     if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) return "";
+    if (isBlockedExternalHostname(parsed.hostname) || hasSensitiveExternalQueryName(parsed.searchParams)) return "";
     return parsed.href;
   } catch {
     return "";
@@ -10831,16 +11314,41 @@ function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
     const structured = workflowDomainArray(item.metrics?.discoveries, item.metrics?.items, item.findings)
       .filter((finding) => finding && typeof finding === "object" && !Array.isArray(finding));
     if (structured.length) candidates.push(...structured.map((finding) => ({ ...finding, reportId: item.id })));
-    else candidates.push({
-      id: item.id,
-      reportId: item.id,
-      title: item.title,
-      summary: item.summary,
-      updatedAt: item.updatedAt || item.createdAt,
-      sourceUrl: item.evidence?.[0]?.url,
-      sourceLabel: item.evidence?.[0]?.label,
-      dedupStatus: item.metrics?.dedupStatus || item.metrics?.duplicateStatus,
-    });
+    else {
+      const metrics = workflowDomainObject(item.metrics);
+      const directContractResult = [
+        "indicatorName",
+        "sourceUrl",
+        "publishedAt",
+        "checkedAt",
+        "featureSummary",
+        "duplicateFingerprint",
+      ].some((field) => metrics[field] !== undefined && metrics[field] !== null && metrics[field] !== "");
+      const limitations = Array.isArray(metrics.limitations)
+        ? metrics.limitations.slice(0, 4).map((value) => safeDashboardDisplayText(value, "")).filter(Boolean)
+        : [];
+      const summaryParts = [
+        metrics.featureSummary,
+        metrics.availability ? `สถานะเผยแพร่: ${formatDashboardValue(metrics.availability)}` : "",
+        limitations.length ? `ข้อจำกัด: ${limitations.join(" • ")}` : "",
+      ].map((value) => safeDashboardDisplayText(value, "")).filter(Boolean);
+      candidates.push({
+        id: item.id,
+        reportId: item.id,
+        title: directContractResult ? (metrics.indicatorName || item.title) : item.title,
+        summary: summaryParts.join(" • ") || item.summary,
+        updatedAt: item.updatedAt || item.createdAt,
+        checkedAt: metrics.checkedAt,
+        publishedAt: metrics.publishedAt,
+        sourceUrl: metrics.sourceUrl || item.evidence?.[0]?.url,
+        sourceLabel: item.evidence?.[0]?.label,
+        dedupStatus: metrics.duplicateFingerprint
+          ? `ตรวจ Fingerprint แล้ว • ${safeDashboardDisplayText(metrics.duplicateFingerprint, "").slice(0, 20)}`
+          : (metrics.dedupStatus || metrics.duplicateStatus),
+        platform: metrics.platform,
+        category: metrics.category,
+      });
+    }
   });
   const seen = new Set();
   const discoveries = candidates.slice(0, 100).map((item, index) => {
@@ -10883,16 +11391,59 @@ function normalizeFxBiasValue(value) {
   return "unavailable";
 }
 
+function workflowSourceLinkRows(...values) {
+  const rows = [];
+  const seen = new Set();
+  values.forEach((value) => {
+    (Array.isArray(value) ? value : []).slice(0, 40).forEach((item) => {
+      const row = item && typeof item === "object" ? item : { url: item };
+      const url = getSafeExternalHttpUrl(row.url || row.sourceUrl);
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      rows.push({ ...row, url });
+    });
+  });
+  return rows.slice(0, 40);
+}
+
+function workflowItemSourceUrl(item = {}, sharedLinks = []) {
+  const directLinks = workflowSourceLinkRows(item.sourceLinks, item.sources, item.evidence);
+  const directUrl = getSafeExternalHttpUrl(item.sourceUrl || item.url || directLinks[0]?.url);
+  if (directUrl) return directUrl;
+  const refs = [
+    ...(Array.isArray(item.sourceRefs) ? item.sourceRefs : []),
+    ...(item.sourceRef ? [item.sourceRef] : []),
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+  if (!refs.length) return "";
+  const matched = sharedLinks.find((link) => refs.some((reference) => (
+    [link.id, link.ref, link.sourceId].some((value) => String(value || "").trim() === reference)
+  )));
+  return getSafeExternalHttpUrl(matched?.url);
+}
+
+function deriveFxOverallBias(explicitValue, horizonValues = []) {
+  const explicit = normalizeFxBiasValue(explicitValue);
+  if (explicit !== "unavailable") return explicit;
+  const known = horizonValues.map(normalizeFxBiasValue).filter((value) => value !== "unavailable");
+  if (known.length < 2) return "unavailable";
+  const counts = known.reduce((result, value) => ({ ...result, [value]: (result[value] || 0) + 1 }), {});
+  const ranked = Object.entries(counts).sort((left, right) => right[1] - left[1]);
+  if (!ranked.length || (ranked[1] && ranked[0][1] === ranked[1][1])) return "unavailable";
+  return ranked[0][0];
+}
+
 function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
   const reports = workflowReportRows(report, "fx_news_bias_report");
   const latestMetrics = workflowDomainObject(reports[0]?.metrics);
   const root = workflowDomainObject(
+    backend.fxBias,
     backend.fxNewsBias,
     backend.marketNewsBias,
     backend.domainData?.fxNewsBias,
     report.fxNewsBias,
     latestMetrics,
   );
+  const sharedSourceLinks = workflowSourceLinkRows(root.sourceLinks, latestMetrics.sourceLinks);
   const rawNews = workflowDomainArray(root.news, root.events, root.highImpactNews, latestMetrics.news, latestMetrics.events);
   const news = rawNews.slice(0, 80).map((item, index) => ({
     id: safeDashboardDisplayText(item?.id, `news-${index + 1}`),
@@ -10900,7 +11451,7 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
     summary: safeDashboardDisplayText(item?.summary || item?.impactSummary || item?.detail, "ยังไม่มีบทสรุปจาก Backend"),
     impact: safeDashboardDisplayText(item?.impact || item?.importance, "ยังไม่ระบุผลกระทบ"),
     eventAt: item?.eventAt || item?.publishedAt || item?.time || null,
-    sourceUrl: getSafeExternalHttpUrl(item?.sourceUrl || item?.url || item?.evidence?.[0]?.url),
+    sourceUrl: workflowItemSourceUrl(item, sharedSourceLinks),
     sourceLabel: safeDashboardDisplayText(item?.sourceLabel || item?.source, "เปิดแหล่งข่าว"),
   }));
   const rawDanger = workflowDomainArray(root.dangerWindows, root.eaCautionWindows, root.riskWindows, latestMetrics.dangerWindows);
@@ -10922,15 +11473,21 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
   rows.forEach((item) => {
     const pair = String(item?.pair || item?.symbol || "").trim().toUpperCase();
     if (!FX_BIAS_PAIR_UNIVERSE.includes(pair)) return;
+    const short = normalizeFxBiasValue(item?.shortBias || item?.short || item?.shortTerm || item?.horizons?.short);
+    const medium = normalizeFxBiasValue(item?.mediumBias || item?.medium || item?.mediumTerm || item?.horizons?.medium);
+    const long = normalizeFxBiasValue(item?.longBias || item?.long || item?.longTerm || item?.horizons?.long);
     pairMap.set(pair, {
       pair,
-      bias: normalizeFxBiasValue(item?.bias || item?.overall),
-      short: normalizeFxBiasValue(item?.short || item?.shortTerm || item?.horizons?.short),
-      medium: normalizeFxBiasValue(item?.medium || item?.mediumTerm || item?.horizons?.medium),
-      long: normalizeFxBiasValue(item?.long || item?.longTerm || item?.horizons?.long),
-      summary: safeDashboardDisplayText(item?.summary || item?.reason, ""),
+      bias: deriveFxOverallBias(item?.bias || item?.overall, [short, medium, long]),
+      short,
+      medium,
+      long,
+      summary: safeDashboardDisplayText(
+        item?.summary || item?.reason || (item?.confidence !== undefined && item?.confidence !== null ? `ความเชื่อมั่น ${item.confidence}%` : ""),
+        "",
+      ),
       updatedAt: item?.updatedAt || item?.observedAt || null,
-      sourceUrl: getSafeExternalHttpUrl(item?.sourceUrl || item?.url || item?.evidence?.[0]?.url),
+      sourceUrl: workflowItemSourceUrl(item, sharedSourceLinks),
     });
   });
   return {
@@ -11077,7 +11634,10 @@ function renderIndicatorScoutPanel(container, tabId, domain) {
     const note = document.createElement("p");
     note.className = "workflow-schedule-note";
     const times = Array.isArray(domain.schedule?.times) ? domain.schedule.times.join(", ") : "ยังไม่ได้กำหนด";
-    note.textContent = `เวลาที่บันทึกไว้: ${times || "ยังไม่ได้กำหนด"} • Scheduler และ Screenshot Adapter ยังไม่ทำงานอัตโนมัติ`;
+    const schedulerStatus = domain.schedule?.automaticRunsImplemented === true
+      ? (domain.schedule?.effectiveEnabled === true ? "Scheduler เปิดทำงานแล้ว" : "Scheduler พร้อม แต่ยังไม่ได้เปิดรอบอัตโนมัติ")
+      : "Scheduler ยังไม่พร้อม";
+    note.textContent = `เวลาที่บันทึกไว้: ${times || "ยังไม่ได้กำหนด"} • ${schedulerStatus} • ภาพหน้าจอจะแสดงเมื่อรายงานมีหลักฐานภาพจริงจาก Adapter`;
     section.appendChild(note);
   } else {
     if (!domain.reports.length) section.appendChild(createWorkflowTruthEmpty("ยังไม่มีรายงาน Indicator Scout ย้อนหลัง"));
@@ -11204,7 +11764,10 @@ function renderFxNewsBiasPanel(container, tabId, domain) {
     const note = document.createElement("p");
     note.className = "workflow-schedule-note";
     const times = Array.isArray(domain.schedule?.times) ? domain.schedule.times.join(", ") : "ยังไม่ได้กำหนด";
-    note.textContent = `เวลาที่บันทึกไว้: ${times || "ยังไม่ได้กำหนด"} • ระบบไม่สร้างข่าวหรือ Bias จำลองเมื่อแหล่งข้อมูลยังไม่พร้อม`;
+    const schedulerStatus = domain.schedule?.automaticRunsImplemented === true
+      ? (domain.schedule?.effectiveEnabled === true ? "Scheduler เปิดทำงานแล้ว" : "Scheduler พร้อม แต่ยังไม่ได้เปิดรอบอัตโนมัติ")
+      : "Scheduler ยังไม่พร้อม";
+    note.textContent = `เวลาที่บันทึกไว้: ${times || "ยังไม่ได้กำหนด"} • ${schedulerStatus} • ระบบไม่สร้างข่าวหรือ Bias จำลองเมื่อแหล่งข้อมูลจริงยังไม่พร้อม`;
     section.appendChild(note);
     if (domain.reports.length) renderWorkflowSourceCards(section, domain.reports.map((item) => ({
       reportId: item.id,
@@ -11357,7 +11920,7 @@ function renderWorkflowDomainPanel(container, subject, selectedTab, dashboard, r
     renderFxNewsBiasPanel(container, selectedTab.id, dashboard.domainData.fxNewsBias);
     return true;
   }
-  if (subject.id === "terminal_workstation") {
+  if (["terminal_workstation", "right_server_racks"].includes(subject.id)) {
     if (selectedTab.id === "source") {
       renderTerminalSourceCatalogPanel(container, dashboard);
       return true;
@@ -11859,6 +12422,7 @@ function renderWorkflowDashboard(subject, propertyRole, report = {}) {
       els.workflowDashboardContent.appendChild(intro);
     }
     const actions = (selectedTab?.actionIds || []).map((actionId) => dashboard.actions.find((action) => action.id === actionId)).filter(Boolean);
+    if (isPrimaryTab && actions.length) renderWorkflowAutomationSummary(els.workflowDashboardContent, dashboard, actions);
     let renderedCatalog = false;
     if (subject.id === "codex_mcp_portal" && selectedTab?.id === "catalog") {
       renderWorkflowCatalog(els.workflowDashboardContent, dashboard);
@@ -12270,18 +12834,18 @@ function appendTaskEvidenceSection(container, evidence) {
   title.textContent = "แหล่งข้อมูลที่ตรวจสอบ";
   list.className = "task-evidence-list";
   evidence.slice(0, 20).forEach((item) => {
-    const rawUrl = String(item?.url || "").trim();
+    const safeUrl = getSafeExternalHttpUrl(item?.url);
+    if (!safeUrl) return;
     let parsed;
     try {
-      parsed = new URL(rawUrl);
+      parsed = new URL(safeUrl);
     } catch {
       return;
     }
-    if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) return;
     const row = document.createElement("li");
     const link = document.createElement("a");
     const note = document.createElement("span");
-    link.href = parsed.href;
+    link.href = safeUrl;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     link.textContent = safeDashboardDisplayText(item?.label, parsed.hostname);
@@ -12412,7 +12976,7 @@ function renderMissionDetail(mission) {
   appendMissionDetailRow(systemGrid, "เริ่มอัตโนมัติได้", mission.autoEligible === true ? "true" : "false");
   appendMissionDetailRow(systemGrid, "ต้องให้ผู้ใช้อนุมัติ", mission.requiresHumanApproval === true ? "true" : "false");
   appendMissionDetailRow(systemGrid, "ระดับโมเดล", mission.modelTier || "local_default");
-  appendMissionDetailRow(systemGrid, "งบประมาณ", mission.budget || "local_defaults");
+  appendMissionDetailRow(systemGrid, "งบและขีดจำกัด (Token เป็นค่าประมาณ)", mission.budget || "local_defaults");
   appendMissionDetailRow(systemGrid, "Mission หลัก", mission.parentMissionId || "-");
   appendMissionDetailRow(systemGrid, "ID ของ Task ย่อย", mission.subtaskIds || []);
   appendMissionDetailRow(systemGrid, "ประเภทรายงาน", mission.reportType || "-");

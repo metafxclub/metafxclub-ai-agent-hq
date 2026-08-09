@@ -66,6 +66,75 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
         normalizer_end = self.main.index("function normalizeVpsHqDomain", normalizer_start)
         self.assertNotIn("Math.random()", self.main[normalizer_start:normalizer_end])
 
+    def test_fx_bias_consumes_current_backend_read_model_and_shared_sources(self):
+        start = self.main.index("function normalizeFxNewsBiasDomain")
+        end = self.main.index("function normalizeVpsHqDomain", start)
+        block = self.main[start:end]
+        self.assertIn("backend.fxBias", block)
+        self.assertIn("item?.shortBias", block)
+        self.assertIn("item?.mediumBias", block)
+        self.assertIn("item?.longBias", block)
+        self.assertIn("deriveFxOverallBias", block)
+        self.assertIn("workflowItemSourceUrl(item, sharedSourceLinks)", block)
+        source_helper = self.main[
+            self.main.index("function workflowSourceLinkRows"):start
+        ]
+        self.assertIn("item.sourceLinks", source_helper)
+        self.assertIn("item.sourceRefs", source_helper)
+        self.assertIn("link.sourceId", source_helper)
+
+    def test_indicator_scout_projects_direct_output_contract_fields(self):
+        start = self.main.index("function normalizeIndicatorScoutDomain")
+        end = self.main.index("function normalizeFxBiasValue", start)
+        block = self.main[start:end]
+        for field in (
+            "indicatorName",
+            "sourceUrl",
+            "publishedAt",
+            "checkedAt",
+            "featureSummary",
+            "availability",
+            "limitations",
+            "duplicateFingerprint",
+            "platform",
+            "category",
+        ):
+            self.assertIn(field, block)
+        self.assertIn("ตรวจ Fingerprint แล้ว", block)
+
+    def test_structured_report_metrics_are_bounded_and_human_readable(self):
+        formatter = self.main[
+            self.main.index("function formatDashboardValue"):
+            self.main.index("function safeDashboardDisplayText")
+        ]
+        self.assertNotIn('value.join(", ")', formatter)
+        self.assertIn("formatDashboardValue(item, depth + 1)", formatter)
+        self.assertIn("dashboardFieldLabel(name)", formatter)
+        renderer = self.main[
+            self.main.index("const DASHBOARD_STRUCTURED_VALUE_LIMITS"):
+            self.main.index("function getSafeReportImageUrl")
+        ]
+        self.assertIn("maxDepth: 3", renderer)
+        self.assertIn("maxArrayItems: 20", renderer)
+        self.assertIn("maxObjectFields: 20", renderer)
+        self.assertIn("maxNodesPerMetricSection: 360", renderer)
+        self.assertIn('document.createElement("details")', renderer)
+        self.assertIn("appendDashboardStructuredValue", renderer)
+        self.assertIn("แสดงบางส่วน", renderer)
+
+    def test_verified_reports_are_grouped_as_completed(self):
+        start = self.main.index("function getDashboardWorkState")
+        end = self.main.index("function getDashboardItemTime", start)
+        block = self.main[start:end]
+        self.assertIn('"verified"', block)
+        self.assertIn('return "completed"', block)
+
+    def test_portal_schedule_copy_excludes_ea_discovery(self):
+        self.assertIn('labelTh: "ตั้งเวลาค้นหาระบบเทรดรายวัน"', self.main)
+        self.assertIn("งานค้นหา EA เป็น Mission แยก", self.main)
+        self.assertIn('labelTh: "เวลาค้นหาระบบเทรด"', self.main)
+        self.assertIn("ตารางเวลานี้ใช้กับการค้นหาระบบเทรดเท่านั้น", self.main)
+
     def test_indicator_scout_shows_source_date_dedup_and_truthful_adapter(self):
         self.assertIn("sourceUrl", self.main)
         self.assertIn("discoveredAt", self.main)
@@ -96,6 +165,50 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
         self.assertIn("contentType:", block)
         self.assertIn("ยังไม่มีไฟล์ที่ Backend อนุญาตให้ดาวน์โหลด", self.main)
         self.assertNotIn("file://", block)
+
+    def test_external_evidence_urls_block_private_hosts_credentials_and_sensitive_queries(self):
+        start = self.main.index("const EXTERNAL_URL_BLOCKED_HOST_SUFFIXES")
+        end = self.main.index("function workflowDomainObject", start)
+        block = self.main[start:end]
+        self.assertIn('[".localhost", ".local", ".internal"]', block)
+        self.assertIn("parsed.username || parsed.password", block)
+        self.assertIn("isBlockedExternalIpv4Literal", block)
+        self.assertIn("first === 10", block)
+        self.assertIn("first === 127", block)
+        self.assertIn("first === 172 && second >= 16 && second <= 31", block)
+        self.assertIn("first === 192 && second === 168", block)
+        self.assertIn("isBlockedExternalIpv6Literal", block)
+        self.assertIn("(first & 0xfe00) === 0xfc00", block)
+        self.assertIn("(first & 0xffc0) === 0xfe80", block)
+        self.assertIn("groups[5] === 0xffff", block)
+        self.assertIn("EXTERNAL_URL_SENSITIVE_QUERY_NAME_PATTERN", block)
+        self.assertIn("hasSensitiveExternalQueryName(parsed.searchParams)", block)
+
+    def test_all_generic_external_evidence_renderers_use_the_hardened_url_guard(self):
+        renderers = (
+            ("function appendDashboardSourceLinks", "function openDashboardResultDetail"),
+            ("function appendSignalDeepEvidenceList", "function renderSignalNewsHorizonCard"),
+            ("function appendTaskEvidenceSection", "function getMissionNextStep"),
+        )
+        for start_marker, end_marker in renderers:
+            block = self.main[self.main.index(start_marker):self.main.index(end_marker, self.main.index(start_marker))]
+            self.assertIn("getSafeExternalHttpUrl", block)
+            self.assertNotIn('link.href = parsed.href', block)
+
+    def test_ea_factory_outputs_tab_renders_verified_backend_downloads(self):
+        output_start = self.main.index("function renderTerminalOutputPanel")
+        output_end = self.main.index("function renderTerminalSourceCatalogPanel", output_start)
+        output_block = self.main[output_start:output_end]
+        self.assertIn('"ea_build_report"', output_block)
+        self.assertIn("item.downloads", output_block)
+        self.assertIn("appendDashboardArtifactLinks(section, artifacts)", output_block)
+
+        router_start = self.main.index("function renderWorkflowDomainPanel")
+        router_end = self.main.index("function renderWorkflowCatalog", router_start)
+        router_block = self.main[router_start:router_end]
+        self.assertIn('["terminal_workstation", "right_server_racks"].includes(subject.id)', router_block)
+        self.assertIn('selectedTab.id === "outputs"', router_block)
+        self.assertIn("renderTerminalOutputPanel(container, report)", router_block)
 
     def test_ea_source_uses_only_backend_catalog_without_file_or_path_input(self):
         self.assertIn("function normalizeWorkflowSourceCatalog", self.main)
@@ -143,9 +256,9 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
         self.assertNotIn('type: "password"', block)
         self.assertNotIn('type: "file"', block)
         self.assertIn("tokenBudget: { min: 256, max: 100000, step: 1 }", self.main)
-        self.assertIn("timeoutSeconds: { min: 15, max: 1800, step: 1 }", self.main)
-        self.assertIn("outputLimitChars: { min: 1000, max: 100000, step: 1 }", self.main)
-        self.assertIn("rateReservePercent: { min: 0, max: 90, step: 1 }", self.main)
+        self.assertIn("timeoutSeconds: { min: 15, max: 600, step: 1 }", self.main)
+        self.assertIn("outputLimitChars: { min: 1000, max: 20000, step: 1 }", self.main)
+        self.assertIn("rateReservePercent: { min: 10, max: 80, step: 1 }", self.main)
         self.assertIn('field.integer ? Math.trunc(numeric) : numeric', self.main)
 
     def test_field_guard_allows_canonical_budget_and_tier_but_denies_privileged_ids(self):

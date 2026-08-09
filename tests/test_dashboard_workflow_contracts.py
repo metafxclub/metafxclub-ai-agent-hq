@@ -355,8 +355,8 @@ class DashboardWorkflowContractTests(unittest.TestCase):
 
     def test_adapter_readiness_is_truthful_for_new_devices(self) -> None:
         expected_coming_soon = {
-            "left_audit_crystals": {"screenshot_adapter", "backend_scheduler"},
-            "left_signal_cube": {"economic_calendar_adapter", "backend_scheduler"},
+            "left_audit_crystals": {"screenshot_adapter"},
+            "left_signal_cube": {"economic_calendar_adapter"},
             "terminal_workstation": {"metaeditor_compiler", "artifact_download"},
             "right_status_crystals": {"external_vps_api"},
         }
@@ -374,6 +374,82 @@ class DashboardWorkflowContractTests(unittest.TestCase):
         }
         self.assertTrue(all(not item["compileIncluded"] for item in terminal_tools.values()))
         self.assertFalse(terminal_tools["propose_ea_performance_improvements"]["backtestIncluded"])
+
+    def test_three_read_only_schedulers_are_ready_without_overclaiming_follow_up_work(self) -> None:
+        expected = {
+            "codex_mcp_portal": {
+                "toolId": "save_discovery_schedule",
+                "scheduled": ["discover_trading_systems"],
+                "manual": ["discover_ea_updates"],
+            },
+            "left_audit_crystals": {
+                "toolId": "save_indicator_scout_schedule",
+                "scheduled": ["discover_new_indicators"],
+                "manual": [],
+            },
+            "left_signal_cube": {
+                "toolId": "save_news_bias_schedule",
+                "scheduled": ["analyze_daily_market_news"],
+                "manual": ["build_fx_pair_bias"],
+            },
+        }
+        tools = {
+            item["id"]: item
+            for item in self.permissions["tools"]
+            if isinstance(item, dict) and item.get("id")
+        }
+        for prop_id, spec in expected.items():
+            role_workflow = self.role_map["properties"][prop_id]["workflow"]
+            connection = self.connections["profiles"][prop_id]
+            operation = connection["operation"]
+            backend_scheduler = next(
+                item for item in connection["connections"]
+                if item["id"] == "backend_scheduler"
+            )
+            tool = tools[spec["toolId"]]
+
+            self.assertFalse(role_workflow["schedule"]["defaultEnabled"])
+            self.assertEqual(
+                role_workflow["schedule"]["recurringSchedulerAdapterStatus"],
+                "implemented_guarded_read_only",
+            )
+            self.assertEqual(
+                role_workflow["readiness"]["recurringScheduler"],
+                "ready_guarded_read_only",
+            )
+            self.assertEqual(
+                backend_scheduler["adapterStatus"],
+                "implemented_guarded_read_only",
+            )
+            self.assertEqual(
+                operation["scheduleExecutionAdapterStatus"],
+                "implemented_guarded_read_only",
+            )
+            self.assertEqual(operation["scheduledActionIds"], spec["scheduled"])
+            self.assertEqual(
+                operation.get("manualOrAgentHandoffActionIds", []),
+                spec["manual"],
+            )
+            self.assertTrue(tool["recurringSchedulerAvailable"])
+            self.assertEqual(tool["readiness"], "ready_guarded_read_only")
+            self.assertEqual(tool["scheduledActionIds"], spec["scheduled"])
+            self.assertEqual(
+                tool.get("manualOrAgentHandoffActionIds", []),
+                spec["manual"],
+            )
+
+        portal_connections = {
+            item["id"]: item
+            for item in self.connections["profiles"]["codex_mcp_portal"]["connections"]
+        }
+        self.assertEqual(
+            portal_connections["google_sheets_adapter"]["adapterStatus"],
+            "coming_soon",
+        )
+        self.assertTrue(
+            portal_connections["google_sheets_adapter"]["externalWriteRequiresUserConfirmation"]
+        )
+        self.assertTrue(tools["google_sheet_catalog_sync"]["externalWriteRequiresUserConfirmation"])
 
     def test_agent_settings_accept_only_six_safe_fields(self) -> None:
         safe_fields = {

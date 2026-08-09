@@ -1,0 +1,448 @@
+{
+  "version": "equipment-plugin-map-v1",
+  "purpose": "Backend-owned mapping from every independent HQ equipment action to a one-click Backend procedure, with optional Custom Plugin references, defaults, execution mode, evidence requirements, report route, and truthful limitations.",
+  "inputContract": {
+    "acceptedFieldsSource": "backend/local-runner/bridge_server.py:DASHBOARD_WORKFLOW_ACTIONS.formFields",
+    "integrationAcceptedFieldsSource": "backend/local-runner/bridge_server.py:/api/integrations/metatrader/discover|select",
+    "inputPresetRole": "trusted_defaults_only",
+    "frontendMaySubmitUnknownFields": false,
+    "noteTh": "Mission ใช้ฟิลด์จาก Backend action registry ส่วนการค้นหาและเลือก MetaTrader ใช้ Payload ของ Integration endpoint ที่ระบุไว้เท่านั้น; inputPreset เป็นเพียงค่าเริ่มต้นที่เชื่อถือได้"
+  },
+  "security": {
+    "frontendIntentOnly": true,
+    "backendOwnsExecution": true,
+    "credentialsAcceptedFromFrontend": false,
+    "externalWritesDefault": false,
+    "liveTradingAllowed": false,
+    "secretFields": []
+  },
+  "automationModes": {
+    "scheduled_read_only": "รันตามเวลาได้เฉพาะการอ่านข้อมูลสาธารณะ ไม่ Sign in ไม่เขียนข้อมูลภายนอก และไม่ควบคุม MetaTrader",
+    "mission_on_demand": "เริ่มเมื่อผู้ใช้หรือ Agent ส่ง Mission และมีข้อมูลต้นทางครบ",
+    "mission_interactive": "ต้องเลือก Terminal/ไฟล์/โฟลเดอร์ และเก็บหลักฐานหน้าจอจริง จึงไม่รันตามเวลาโดยลำพัง",
+    "local_read_only": "อ่านสถานะที่ Local Runner มองเห็นโดยไม่เรียก Codex และไม่เปลี่ยนระบบภายนอก",
+    "settings_only": "บันทึกค่าที่ Backend อนุญาตเท่านั้น"
+  },
+  "equipment": {
+    "codex_mcp_portal": {
+      "titleTh": "เรดาร์ระบบเทรดโลกและ EA",
+      "referencePrimarySkillId": "metafx-online-system-scout",
+      "ownerAgentId": "codex_mcp_operator",
+      "schedule": {
+        "supported": true,
+        "timezone": "Asia/Bangkok",
+        "defaultTimes": ["09:00"],
+        "actions": ["discover_trading_systems"],
+        "manualOrAgentHandoffActions": ["discover_ea_updates"]
+      },
+      "actions": {
+        "discover_trading_systems": {
+          "pluginSkillId": "backend-readonly-system-scout",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "referencePluginSkillId": "metafx-online-system-scout",
+          "referencePluginVersion": "0.1.2",
+          "automationMode": "scheduled_read_only",
+          "inputPreset": {
+            "query": "ค้นหาระบบเทรด Forex ใหม่ที่อธิบายกฎเข้า ออก การจัดการความเสี่ยง และตรวจสอบแหล่งที่มาได้",
+            "market": "Forex",
+            "timeframe": "any",
+            "maxItems": 5,
+            "sourcePolicy": "public_read_only"
+          },
+          "outputFields": ["systemName", "sourceUrl", "sourceTitle", "checkedAt", "market", "timeframe", "entryRules", "exitRules", "riskRules", "filters", "eaReadiness", "assumptions", "duplicateFingerprint"],
+          "evidenceRequired": ["source_url", "checked_at", "quoted_fact_summary"],
+          "screenshotPolicy": "optional_when_backend_adapter_available",
+          "reportType": "trading_system_discovery_report",
+          "failureHelpTh": "ตรวจ Bridge, Codex Login, Rate Limit และการเข้าถึงเว็บไซต์สาธารณะ แล้วสั่งใหม่จากอุปกรณ์นี้"
+        },
+        "discover_ea_updates": {
+          "pluginSkillId": "backend-readonly-ea-scout",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "referencePluginSkillId": "metafx-online-system-scout",
+          "referencePluginVersion": "0.1.2",
+          "automationMode": "mission_on_demand",
+          "inputPreset": {
+            "query": "ค้นหา EA งานวิจัย และแนวคิดระบบอัตโนมัติใหม่ที่มีรายละเอียดตรวจสอบได้",
+            "market": "Forex",
+            "platform": "any",
+            "maxItems": 5,
+            "sourcePolicy": "public_read_only"
+          },
+          "outputFields": ["itemName", "itemType", "platform", "sourceUrl", "checkedAt", "strategySummary", "availability", "limitations", "duplicateFingerprint"],
+          "evidenceRequired": ["source_url", "checked_at", "public_availability_status"],
+          "screenshotPolicy": "optional_when_backend_adapter_available",
+          "reportType": "ea_discovery_report",
+          "failureHelpTh": "ตรวจ Bridge, Codex Login, Rate Limit และ URL ต้นทาง ห้ามดาวน์โหลดไฟล์ Crack หรือไฟล์ที่ไม่ทราบแหล่ง"
+        },
+        "save_discovery_schedule": {
+          "pluginSkillId": "backend-dashboard-scheduler",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "automationMode": "settings_only",
+          "inputPreset": {"enabled": false, "times": ["09:00"], "timezone": "Asia/Bangkok"},
+          "outputFields": ["requestedEnabled", "effectiveEnabled", "times", "timezone", "lastRunStatus", "savedAt"],
+          "evidenceRequired": ["local_settings_record", "scheduler_state"],
+          "screenshotPolicy": "not_required",
+          "reportType": "trading_system_discovery_report",
+          "failureHelpTh": "ตรวจว่า Local Runner และ Scheduler ทำงานอยู่ แล้วบันทึกเวลาแบบ HH:MM ตามเวลาไทยใหม่อีกครั้ง"
+        }
+      }
+    },
+    "left_server_racks": {
+      "titleTh": "คลังวิจัยระบบเทรดเชิงลึก",
+      "referencePrimarySkillId": "metafx-online-system-scout",
+      "ownerAgentId": "mission_archivist",
+      "schedule": {"supported": false, "reasonTh": "ต้องเลือกรายงานต้นทางที่ Agent ส่งมาก่อน"},
+      "actions": {
+        "deep_research_system": {
+          "pluginSkillId": "backend-readonly-deep-research",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "referencePluginSkillId": "metafx-online-system-scout",
+          "referencePluginVersion": "0.1.2",
+          "automationMode": "mission_on_demand",
+          "requiredInputs": ["sourceReportId"],
+          "inputPreset": {"brief": "ตรวจหลายแหล่ง แยกข้อเท็จจริงจากสมมติฐาน และอธิบายวิธีประยุกต์โดยไม่อ้างผลกำไร"},
+          "outputFields": ["verifiedRules", "conflictingEvidence", "riskModel", "specialConditions", "suitableMarket", "suitableTimeframe", "implementationNotes", "sourceLinks", "checkedAt", "limitations"],
+          "evidenceRequired": ["at_least_two_source_urls", "checked_at", "limitations"],
+          "screenshotPolicy": "optional_when_backend_adapter_available",
+          "reportType": "trading_system_research_report",
+          "failureHelpTh": "ให้ Agent ส่งรายงานจากเรดาร์ระบบเทรดมาที่ตู้นี้ก่อน แล้วเลือกรายงานต้นทางเพื่อเริ่มวิจัย"
+        }
+      }
+    },
+    "right_server_racks": {
+      "titleTh": "โรงงานสร้าง EA และ Indicator",
+      "referencePrimarySkillId": "metafx-system6-ea-builder-mt4",
+      "ownerAgentId": "ea_developer",
+      "schedule": {"supported": false, "reasonTh": "งานสร้างและตรวจจริงต้องเลือกแพลตฟอร์ม Source และ Terminal"},
+      "actions": {
+        "discover_metatrader": {
+          "pluginSkillId": "backend-metatrader-discovery",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "actionKind": "integration_action",
+          "automationMode": "local_read_only",
+          "inputPreset": {},
+          "outputFields": ["status", "mode", "sideEffects", "processProbeSupported", "adapterConnection", "adapterReady", "candidateCount", "candidates", "platforms", "checkedAt", "privacy"],
+          "evidenceRequired": ["backend_observed_at", "frontend_safe_candidate_registry"],
+          "screenshotPolicy": "not_required",
+          "reportType": "terminal_discovery_report",
+          "failureHelpTh": "ติดตั้งหรือเปิด MT4/MT5 ในเครื่อง แล้วกดค้นหาใหม่ การค้นหานี้ไม่เปิดโปรแกรมและไม่ส่งคำสั่งเทรด"
+        },
+        "select_metatrader_target": {
+          "pluginSkillId": "backend-metatrader-target-selection",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "actionKind": "integration_action",
+          "automationMode": "settings_only",
+          "requiredInputs": ["candidateId"],
+          "inputPreset": {},
+          "outputFields": ["propId", "status", "configurationStatus", "selectedCandidate", "selectedAt", "adapterConnection", "adapterReady"],
+          "evidenceRequired": ["local_terminal_selection_record"],
+          "screenshotPolicy": "not_required",
+          "reportType": "terminal_selection_report",
+          "failureHelpTh": "กดค้นหา MT4/MT5 ก่อน แล้วเลือกเฉพาะรายการที่ Backend ตรวจพบจริง"
+        },
+        "build_strategy_code": {
+          "pluginSkillId": "backend-mql4-source-builder",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "referencePluginSkillId": "metafx-system6-ea-builder-mt4",
+          "referencePluginVersion": "0.1.4",
+          "pluginSelectionField": "platform",
+          "pluginCandidates": [
+            {"pluginSkillId": "backend-mql4-source-builder", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-system6-ea-builder-mt4", "referencePluginVersion": "0.1.4", "values": ["mt4"]},
+            {"pluginSkillId": "backend-mql5-source-builder", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-system6-ea-builder-mt5", "referencePluginVersion": "0.1.1+codex.20260616", "values": ["mt5"]},
+            {"pluginSkillId": "backend-tradingview-source-builder", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": null, "referencePluginVersion": null, "values": ["tradingview"]}
+          ],
+          "automationMode": "mission_on_demand",
+          "requiredInputs": ["sourceReportId", "platform"],
+          "inputPreset": {"brief": "สร้าง Source ที่อ่านง่าย มี Inputs และ Safety Guard พร้อมป้าย SOURCE-ONLY / UNCOMPILED"},
+          "outputFields": ["sourceFiles", "sourceDigest", "strategyProfile", "functionMap", "compileChecklist", "knownRisks", "nextValidationStep"],
+          "evidenceRequired": ["project_relative_source_path", "source_digest", "uncompiled_status"],
+          "screenshotPolicy": "required_only_when_visible_compile_adapter_runs",
+          "reportType": "ea_build_report",
+          "failureHelpTh": "เลือกข้อมูลต้นทางและแพลตฟอร์มก่อน หากต้องการ Compile/Backtest ให้เชื่อม MetaEditor/Terminal ที่ถูกต้องและรันขั้นตรวจจริง"
+        },
+        "review_source_code": {
+          "pluginSkillId": "backend-static-source-review",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "automationMode": "mission_on_demand",
+          "requiredInputs": ["sourceReportId", "platform"],
+          "inputPreset": {"brief": "ตรวจ Static Source เรื่อง trade logic, look-ahead, repaint, lifecycle, money management และ error handling"},
+          "outputFields": ["sourceDigest", "issues", "severity", "lineReferences", "riskNotes", "repairPlan", "compileStatus"],
+          "evidenceRequired": ["source_digest", "review_scope", "compile_status_truth"],
+          "screenshotPolicy": "not_required_for_static_review",
+          "reportType": "ea_build_report",
+          "failureHelpTh": "ส่ง Source Report จากโรงงานนี้ผ่าน Agent ก่อน แล้วเลือกไฟล์ที่ Backend ตรวจชนิดและสายงานแล้ว"
+        }
+      }
+    },
+    "right_tool_console": {
+      "titleTh": "ห้องทดลอง EA อัตโนมัติ",
+      "referencePrimarySkillId": "metafx-ea-discovery-lab-mt4",
+      "ownerAgentId": "backtest_analyst",
+      "schedule": {"supported": false, "reasonTh": "ต้องเลือก Terminal, EA, ช่วงข้อมูล และเก็บหลักฐานจาก Strategy Tester จริง"},
+      "actions": {
+        "discover_metatrader": {
+          "pluginSkillId": "backend-metatrader-discovery",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "actionKind": "integration_action",
+          "automationMode": "local_read_only",
+          "inputPreset": {},
+          "outputFields": ["status", "mode", "sideEffects", "processProbeSupported", "adapterConnection", "adapterReady", "candidateCount", "candidates", "platforms", "checkedAt", "privacy"],
+          "evidenceRequired": ["backend_observed_at", "frontend_safe_candidate_registry"],
+          "screenshotPolicy": "not_required",
+          "reportType": "terminal_discovery_report",
+          "failureHelpTh": "ติดตั้งหรือเปิด MT4/MT5 ในเครื่อง แล้วกดค้นหาใหม่ การค้นหานี้ไม่รัน Backtest หรือ Optimization"
+        },
+        "select_metatrader_target": {
+          "pluginSkillId": "backend-metatrader-target-selection",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "actionKind": "integration_action",
+          "automationMode": "settings_only",
+          "requiredInputs": ["candidateId"],
+          "inputPreset": {},
+          "outputFields": ["propId", "status", "configurationStatus", "selectedCandidate", "selectedAt", "adapterConnection", "adapterReady"],
+          "evidenceRequired": ["local_terminal_selection_record"],
+          "screenshotPolicy": "not_required",
+          "reportType": "terminal_selection_report",
+          "failureHelpTh": "กดค้นหา MT4/MT5 ก่อน แล้วเลือก Terminal ที่ต้องการใช้กับงานทดลอง"
+        },
+        "prepare_backtest_plan": {
+          "pluginSkillId": "backend-backtest-plan-mt4",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "referencePluginSkillId": "metafx-ea-full-cycle",
+          "referencePluginVersion": "0.1.7+codex.20260611184944",
+          "pluginSelectionField": "platform",
+          "pluginCandidates": [
+            {"pluginSkillId": "backend-backtest-plan-mt4", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-ea-full-cycle", "referencePluginVersion": "0.1.7+codex.20260611184944", "values": ["mt4"]},
+            {"pluginSkillId": "backend-backtest-plan-mt5", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-ea-full-cycle-mt5", "referencePluginVersion": "0.1.1+codex.20260616", "values": ["mt5"]}
+          ],
+          "automationMode": "mission_interactive",
+          "requiredInputs": ["sourceReportId"],
+          "inputPreset": {"platform": "mt4", "timeframe": "H1", "validationMethod": "train_test"},
+          "outputFields": ["terminalSelection", "testModel", "symbol", "timeframe", "dateRange", "spread", "deposit", "acceptanceCriteria", "artifactPlan"],
+          "evidenceRequired": ["source_reference", "backtest_plan", "acceptance_criteria", "adapter_status_truth"],
+          "completionEvidenceRequired": ["terminal_identity", "tester_settings", "visual_result_screenshot", "html_report"],
+          "adapterStatus": "plan_ready_terminal_runner_not_connected",
+          "reportType": "ea_experiment_report",
+          "failureHelpTh": "ปัจจุบันสร้างแผนได้ก่อน งาน Backtest จริงต้องเลือก Terminal และต่อ Strategy Tester Adapter พร้อมภาพหลักฐาน"
+        },
+        "prepare_optimization_plan": {
+          "pluginSkillId": "backend-optimization-plan-mt4",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "referencePluginSkillId": "metafx-optimization-lab-mt4",
+          "referencePluginVersion": "0.1.4+codex.20260607131357",
+          "ownerAgentId": "optimization_agent",
+          "pluginSelectionField": "platform",
+          "pluginCandidates": [
+            {"pluginSkillId": "backend-optimization-plan-mt4", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-optimization-lab-mt4", "referencePluginVersion": "0.1.4+codex.20260607131357", "values": ["mt4"]},
+            {"pluginSkillId": "backend-optimization-plan-mt5", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-optimization-lab-mt5", "referencePluginVersion": "0.1.1+codex.20260616", "values": ["mt5"]}
+          ],
+          "automationMode": "mission_interactive",
+          "requiredInputs": ["sourceReportId"],
+          "inputPreset": {"platform": "mt4", "timeframe": "H1", "validationMethod": "walk_forward"},
+          "outputFields": ["parameterRanges", "startStepStop", "selectionCriteria", "overfitGuards", "validationSplit", "candidateGroups", "nextRanges"],
+          "evidenceRequired": ["source_reference", "parameter_plan", "overfit_guard", "adapter_status_truth"],
+          "completionEvidenceRequired": ["terminal_identity", "optimization_settings", "tester_log", "result_report", "set_files", "screenshots"],
+          "adapterStatus": "plan_ready_terminal_runner_not_connected",
+          "reportType": "ea_experiment_report",
+          "failureHelpTh": "ปัจจุบันสร้างแผนได้ก่อน งาน Optimization จริงต้องเลือก Terminal และเชื่อม Strategy Tester Adapter"
+        },
+        "prepare_ea_discovery_plan": {
+          "pluginSkillId": "backend-ea-discovery-plan-mt4",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "referencePluginSkillId": "metafx-ea-discovery-lab-mt4",
+          "referencePluginVersion": "0.1.4+codex.20260607132750",
+          "ownerAgentId": "ea_developer",
+          "pluginSelectionField": "platform",
+          "pluginCandidates": [
+            {"pluginSkillId": "backend-ea-discovery-plan-mt4", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-ea-discovery-lab-mt4", "referencePluginVersion": "0.1.4+codex.20260607132750", "values": ["mt4"]},
+            {"pluginSkillId": "backend-ea-discovery-plan-mt5", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-ea-discovery-lab-mt5", "referencePluginVersion": "0.1.4+codex.20260616liveguard", "values": ["mt5"]}
+          ],
+          "automationMode": "mission_interactive",
+          "requiredInputs": ["sourceReportId"],
+          "inputPreset": {"platform": "mt4", "symbol": "XAUUSD", "timeframe": "H1", "validationMethod": "walk_forward", "maxLoops": 5},
+          "outputFields": ["blueprint", "versionPlan", "profitTarget", "drawdownLimit", "tradeTarget", "rejectionCriteria", "outputFolderPlan"],
+          "evidenceRequired": ["source_reference", "discovery_blueprint", "rejection_criteria", "adapter_status_truth"],
+          "completionEvidenceRequired": ["terminal_identity", "zero_compile_errors", "binary_file", "visual_backtest", "report", "screenshots", "version_history"],
+          "adapterStatus": "plan_ready_discovery_runner_not_connected",
+          "reportType": "ea_discovery_report",
+          "failureHelpTh": "ปัจจุบันสร้างแผน Discovery ได้ก่อน การวนสร้าง/Compile/Backtest จริงต้องเลือก Terminal และ Output Folder"
+        }
+      }
+    },
+    "left_audit_crystals": {
+      "titleTh": "เรดาร์เว็บไซต์ Indicator",
+      "referencePrimarySkillId": "metafx-online-system-scout",
+      "ownerAgentId": "codex_mcp_operator",
+      "schedule": {"supported": true, "timezone": "Asia/Bangkok", "defaultTimes": ["09:00"], "actions": ["discover_new_indicators"]},
+      "actions": {
+        "discover_new_indicators": {
+          "pluginSkillId": "backend-readonly-indicator-scout",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "referencePluginSkillId": "metafx-online-system-scout",
+          "referencePluginVersion": "0.1.2",
+          "automationMode": "scheduled_read_only",
+          "inputPreset": {"query": "ค้นหา Indicator หรือเครื่องมือวิเคราะห์ใหม่ที่มีแหล่งเผยแพร่สาธารณะ", "platform": "any", "category": "any", "maxItems": 6},
+          "outputFields": ["indicatorName", "platform", "category", "sourceUrl", "publishedAt", "checkedAt", "featureSummary", "availability", "limitations", "duplicateFingerprint"],
+          "evidenceRequired": ["source_url", "checked_at", "public_availability_status"],
+          "screenshotPolicy": "optional_when_backend_adapter_available",
+          "reportType": "indicator_scout_report",
+          "failureHelpTh": "ตรวจ Bridge, Codex Login, Rate Limit และ URL ต้นทาง ภาพจะปรากฏเมื่อ Screenshot Adapter เก็บภาพจริงได้เท่านั้น"
+        },
+        "save_indicator_scout_schedule": {
+          "pluginSkillId": "backend-dashboard-scheduler",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "automationMode": "settings_only",
+          "inputPreset": {"enabled": false, "times": ["09:00"], "timezone": "Asia/Bangkok"},
+          "outputFields": ["requestedEnabled", "effectiveEnabled", "times", "timezone", "lastRunStatus", "savedAt"],
+          "evidenceRequired": ["local_settings_record", "scheduler_state"],
+          "screenshotPolicy": "not_required",
+          "reportType": "indicator_scout_report",
+          "failureHelpTh": "ตรวจว่า Local Runner และ Scheduler ทำงานอยู่ แล้วบันทึกเวลาแบบ HH:MM ตามเวลาไทยใหม่อีกครั้ง"
+        }
+      }
+    },
+    "left_signal_cube": {
+      "titleTh": "ข่าวตลาดวันนี้และมุมมอง 28 คู่เงิน",
+      "primaryProcedureId": "guarded-web-research",
+      "ownerAgentId": "codex_mcp_operator",
+      "schedule": {"supported": true, "timezone": "Asia/Bangkok", "defaultTimes": ["07:00", "13:00", "19:00"], "actions": ["analyze_daily_market_news"], "manualOrAgentHandoffActions": ["build_fx_pair_bias"]},
+      "actions": {
+        "analyze_daily_market_news": {
+          "pluginSkillId": "guarded-web-research",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "automationMode": "scheduled_read_only",
+          "inputPreset": {"minimumImpact": "high", "brief": "สรุปข่าวที่กระทบ Forex พร้อมเวลาไทย คู่เงินที่เกี่ยวข้อง และช่วงที่ EA ควรระวัง"},
+          "outputFields": ["events", "publishedAt", "eventAt", "checkedAt", "impact", "affectedCurrencies", "dangerWindows", "sourceLinks", "limitations"],
+          "evidenceRequired": ["source_url", "published_or_event_time", "checked_at"],
+          "screenshotPolicy": "optional_when_backend_adapter_available",
+          "reportType": "fx_news_bias_report",
+          "failureHelpTh": "ตรวจ Bridge, Codex Login, Rate Limit และแหล่งข่าว หากไม่มีหลักฐานให้แสดง unknown และไม่สร้างข่าวแทน"
+        },
+        "build_fx_pair_bias": {
+          "pluginSkillId": "guarded-web-research",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "automationMode": "mission_on_demand",
+          "requiredInputs": ["sourceReportId"],
+          "inputPreset": {"brief": "สร้าง Bias ระยะสั้น กลาง ยาว ครบ 28 คู่ โดยทุกแถวอ้างอิงข่าวต้นทางหรือระบุ unknown"},
+          "outputFields": ["pairBias", "sourceLinks", "updatedAt"],
+          "evidenceRequired": ["28_pair_rows", "source_url_per_supported_bias", "unknown_when_unverified", "updated_at"],
+          "screenshotPolicy": "not_required",
+          "reportType": "fx_news_bias_report",
+          "failureHelpTh": "ให้ Agent ส่งรายงานข่าวที่เสร็จแล้วมายังแท็บนี้ก่อน หากหลักฐานไม่พอคู่เงินนั้นต้องเป็น unknown"
+        },
+        "save_news_bias_schedule": {
+          "pluginSkillId": "backend-dashboard-scheduler",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "automationMode": "settings_only",
+          "inputPreset": {"enabled": false, "times": ["07:00", "13:00", "19:00"], "timezone": "Asia/Bangkok", "minimumImpact": "high"},
+          "outputFields": ["requestedEnabled", "effectiveEnabled", "times", "timezone", "minimumImpact", "lastRunStatus", "savedAt"],
+          "evidenceRequired": ["local_settings_record", "scheduler_state"],
+          "screenshotPolicy": "not_required",
+          "reportType": "fx_news_bias_report",
+          "failureHelpTh": "ตรวจว่า Local Runner และ Scheduler ทำงานอยู่ แล้วบันทึกเวลาและระดับความสำคัญของข่าวใหม่อีกครั้ง"
+        }
+      }
+    },
+    "terminal_workstation": {
+      "titleTh": "สตูดิโอพัฒนา EA",
+      "referencePrimarySkillId": "metafx-ea-full-cycle",
+      "ownerAgentId": "ea_developer",
+      "schedule": {"supported": false, "reasonTh": "ต้องเลือก Source ใน Workspace และระบุโจทย์พัฒนา"},
+      "actions": {
+        "inspect_ea_source": {
+          "pluginSkillId": "backend-static-ea-inspection",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "automationMode": "mission_on_demand",
+          "requiredInputsAnyOf": ["sourceReportId", "workspaceSourceId"],
+          "inputPreset": {"platform": "mql4", "brief": "ตรวจ Source-only ก่อนพัฒนา โดยไม่ Compile หรือเปิด Terminal"},
+          "outputFields": ["sourcePath", "sourceDigest", "strategySummary", "codeRisks", "tradeLifecycle", "moneyManagement", "repairPriority", "compileChecklist"],
+          "evidenceRequired": ["project_relative_source_path", "source_digest", "inspection_scope"],
+          "reportType": "ea_development_report",
+          "failureHelpTh": "เลือก Source Report หรือไฟล์ MQL4/MQL5 ใน Workspace ที่ Backend แสดงให้เลือก"
+        },
+        "develop_ea_source": {
+          "pluginSkillId": "backend-mql4-source-developer",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "referencePluginSkillId": "metafx-ea-full-cycle",
+          "referencePluginVersion": "0.1.7+codex.20260611184944",
+          "pluginSelectionField": "platform",
+          "pluginCandidates": [
+            {"pluginSkillId": "backend-mql4-source-developer", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-ea-full-cycle", "referencePluginVersion": "0.1.7+codex.20260611184944", "values": ["mql4"]},
+            {"pluginSkillId": "backend-mql5-source-developer", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-ea-full-cycle-mt5", "referencePluginVersion": "0.1.1+codex.20260616", "values": ["mql5"]}
+          ],
+          "automationMode": "mission_on_demand",
+          "requiredInputsAnyOf": ["sourceReportId", "workspaceSourceId"],
+          "requiredInputs": ["brief", "platform"],
+          "inputPreset": {"platform": "mql4", "brief": "พัฒนา Source ใน Workspace พร้อม changelog, risk note และ checklist การ Compile/Test จริง"},
+          "outputFields": ["changedFiles", "sourceDigest", "changeSummary", "riskNotes", "compileChecklist", "downloadArtifacts"],
+          "evidenceRequired": ["project_relative_source_path", "source_digest", "change_summary", "uncompiled_status"],
+          "reportType": "ea_development_report",
+          "failureHelpTh": "เลือก Source และเขียนโจทย์พัฒนาให้ชัด งานจะหยุดที่ Source-only จนกว่าจะเชื่อม Compile/Tester Adapter"
+        },
+        "propose_ea_performance_improvements": {
+          "pluginSkillId": "backend-ea-improvement-planner",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "automationMode": "mission_on_demand",
+          "requiredInputsAnyOf": ["sourceReportId", "workspaceSourceId"],
+          "inputPreset": {"brief": "เสนอสมมติฐานปรับปรุง กำหนด rejection criteria และ validation plan โดยไม่รับประกันกำไร"},
+          "outputFields": ["sourceDigest", "baselineReference", "codeHypotheses", "parameterHypotheses", "validationPlan", "rejectionCriteria", "expectedTradeoffs"],
+          "evidenceRequired": ["source_digest", "baseline_reference", "no_unverified_profit_claim"],
+          "reportType": "ea_development_report",
+          "failureHelpTh": "เลือก Source และใส่เป้าหมายที่ต้องการ หากยังไม่มีผล Backtest ให้ระบุว่าเป็นสมมติฐานเท่านั้น"
+        }
+      }
+    },
+    "right_status_crystals": {
+      "titleTh": "ศูนย์สถานะ VPS, HQ และ Agent",
+      "referencePrimarySkillId": "metafx-agent-hq-runtime-builder",
+      "ownerAgentId": "vps_watch",
+      "schedule": {"supported": false, "reasonTh": "Frontend อ่านสถานะ Local Runner ตามรอบ Refresh อยู่แล้ว"},
+      "actions": {
+        "refresh_vps_hq_status": {
+          "pluginSkillId": "backend-hq-health-snapshot",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "automationMode": "local_read_only",
+          "inputPreset": {},
+          "outputFields": ["checkedAt", "bridgeStatus", "missionWorkerStatus", "schedulerStatus", "codexStatus", "uptime", "limitations"],
+          "evidenceRequired": ["backend_observed_at", "local_health_snapshot"],
+          "reportType": "ops_overview_report",
+          "failureHelpTh": "ตรวจว่า bridge_server.py ทำงานที่ 127.0.0.1 และเปิดดู log ของ Local Runner โดยไม่ส่ง Secret มาหน้าเว็บ"
+        },
+        "save_agent_preferences": {
+          "pluginSkillId": "backend-agent-preferences",
+          "pluginVersion": "backend-v1",
+          "procedureKind": "backend_procedure",
+          "ownerAgentId": "manager",
+          "automationMode": "settings_only",
+          "inputPreset": {"language": "th", "modelTier": "specialist_balanced", "tokenBudget": 12000, "timeoutSeconds": 120, "outputLimitChars": 7000, "rateReservePercent": 30},
+          "outputFields": ["language", "modelTier", "tokenBudget", "timeoutSeconds", "outputLimitChars", "rateReservePercent", "savedAt"],
+          "evidenceRequired": ["local_settings_record"],
+          "reportType": "ops_overview_report",
+          "failureHelpTh": "ใช้เฉพาะค่าที่หน้าจอรองรับ ห้ามกรอก Model ID, Token, Auth, Cookie หรือ Credential"
+        }
+      }
+    }
+  }
+}

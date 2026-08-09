@@ -253,8 +253,9 @@
       "label": "บันทึกตารางค้นหารายวัน",
       "defaultMode": "backend_configuration_intent_only",
       "linkedPropIds": ["codex_mcp_portal"],
-      "adapterStatus": "mission_queue_ready_scheduler_adapter_missing",
-      "realExecutionAvailable": false,
+      "adapterStatus": "implemented_guarded_read_only",
+      "realExecutionAvailable": true,
+      "realExecutionScope": "local_schedule_storage_and_guarded_read_only_discover_trading_systems",
       "autoRunnable": false,
       "approvalRequired": false,
       "unavailableDoesNotRequestApproval": true,
@@ -263,8 +264,11 @@
       "modelTier": "specialist_fast",
       "frontendIntentFields": ["propId", "actionId", "inputs", "idempotencyKey"],
       "configurationIntentAvailable": true,
-      "recurringSchedulerAvailable": false,
-      "readiness": "coming_soon"
+      "recurringSchedulerAvailable": true,
+      "recurringSchedulerAdapterStatus": "implemented_guarded_read_only",
+      "scheduledActionIds": ["discover_trading_systems"],
+      "manualOrAgentHandoffActionIds": ["discover_ea_updates"],
+      "readiness": "ready_guarded_read_only"
     },
     {
       "id": "deep_research_system",
@@ -419,7 +423,7 @@
       "linkedPropIds": ["left_audit_crystals"],
       "adapterStatus": "implemented_backend_configuration_only",
       "realExecutionAvailable": true,
-      "realExecutionScope": "local_preference_storage_only",
+      "realExecutionScope": "local_schedule_storage_and_guarded_read_only_indicator_scout",
       "autoRunnable": false,
       "approvalRequired": false,
       "requiresMission": true,
@@ -433,8 +437,10 @@
       "frontendIntentFields": ["propId", "actionId", "inputs", "idempotencyKey"],
       "configurationIntentAvailable": true,
       "schedulePreferenceMaxRunsPerDay": 2,
-      "recurringSchedulerAvailable": false,
-      "recurringSchedulerAdapterStatus": "coming_soon"
+      "recurringSchedulerAvailable": true,
+      "recurringSchedulerAdapterStatus": "implemented_guarded_read_only",
+      "scheduledActionIds": ["discover_new_indicators"],
+      "readiness": "ready_guarded_read_only"
     },
     {
       "id": "analyze_daily_market_news",
@@ -486,12 +492,12 @@
     },
     {
       "id": "save_news_bias_schedule",
-      "label": "บันทึกเวลาอัปเดตข่าวและ Bias",
+      "label": "บันทึกเวลาอัปเดตข่าวตลาด",
       "defaultMode": "backend_configuration_intent_only",
       "linkedPropIds": ["left_signal_cube"],
       "adapterStatus": "implemented_backend_configuration_only",
       "realExecutionAvailable": true,
-      "realExecutionScope": "local_preference_storage_only",
+      "realExecutionScope": "local_schedule_storage_and_guarded_read_only_daily_news",
       "autoRunnable": false,
       "approvalRequired": false,
       "requiresMission": true,
@@ -505,8 +511,11 @@
       "frontendIntentFields": ["propId", "actionId", "inputs", "idempotencyKey"],
       "configurationIntentAvailable": true,
       "schedulePreferenceMaxRunsPerDay": 2,
-      "recurringSchedulerAvailable": false,
-      "recurringSchedulerAdapterStatus": "coming_soon"
+      "recurringSchedulerAvailable": true,
+      "recurringSchedulerAdapterStatus": "implemented_guarded_read_only",
+      "scheduledActionIds": ["analyze_daily_market_news"],
+      "manualOrAgentHandoffActionIds": ["build_fx_pair_bias"],
+      "readiness": "ready_guarded_read_only"
     },
     {
       "id": "inspect_ea_source",
@@ -642,6 +651,7 @@
       "allowedAgents": ["manager", "codex_mcp_operator", "mission_archivist", "risk_guard"],
       "modelTier": "specialist_fast",
       "frontendMayHoldCredentials": false,
+      "externalWriteRequiresUserConfirmation": true,
       "readiness": "coming_soon"
     },
     {

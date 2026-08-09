@@ -128,15 +128,15 @@
         {"id": "codex_runner", "labelTh": "Codex CLI และบัญชีที่ Login", "required": true, "adapterStatus": "runtime_detected"},
         {"id": "codex_public_web_research", "labelTh": "ค้นข้อมูลสาธารณะผ่าน Codex Web Research", "required": true, "adapterStatus": "implemented", "mode": "guarded_read_only"},
         {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
-        {"id": "dedup_catalog", "labelTh": "ตรวจรายการซ้ำในคลัง Local", "required": true, "adapterStatus": "implemented", "mode": "backend_contract"},
+        {"id": "dedup_catalog", "labelTh": "ช่วยเทียบรายการกับคลัง Local", "required": false, "adapterStatus": "prompt_assisted_unverified", "mode": "local_report_catalog_only"},
         {"id": "codex_quota", "labelTh": "Rate Limit ของ Codex", "required": false, "adapterStatus": "runtime_detected"},
-        {"id": "google_sheets_adapter", "labelTh": "เชื่อม Google Sheets", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "backend_scheduler", "labelTh": "ตัวรันค้นหารายวันตามเวลา", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "google_sheets_adapter", "labelTh": "เชื่อม Google Sheets", "required": false, "adapterStatus": "coming_soon", "externalWriteRequiresUserConfirmation": true},
+        {"id": "backend_scheduler", "labelTh": "ตัวรันค้นหาระบบเทรดรายวันตามเวลา", "required": false, "adapterStatus": "implemented_guarded_read_only"},
         {"id": "report_routing", "labelTh": "ส่งผลกลับเรดาร์และ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["daily_schedule"], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false, "scheduleConfigurationIntent": "save_discovery_schedule", "scheduleExecutionAdapterStatus": "coming_soon"},
-      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "googleSheetsSync": "coming_soon", "recurringScheduler": "coming_soon"},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual", "daily_schedule"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false, "scheduleConfigurationIntent": "save_discovery_schedule", "scheduleExecutionAdapterStatus": "implemented_guarded_read_only", "scheduledActionIds": ["discover_trading_systems"], "manualOrAgentHandoffActionIds": ["discover_ea_updates"]},
+      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "googleSheetsSync": "coming_soon", "recurringScheduler": "ready_guarded_read_only"},
       "reportRoute": {"targetPropId": "codex_mcp_portal", "primaryReportType": "trading_system_discovery_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "left_server_racks": {
@@ -335,7 +335,7 @@
     },
     "left_audit_crystals": {
       "moduleNameTh": "เรดาร์เว็บไซต์ Indicator",
-      "availability": {"ui": "ready", "data": "public_research_ready", "execution": "guarded_read_only_research", "screenshot": "coming_soon", "scheduler": "coming_soon"},
+      "availability": {"ui": "ready", "data": "public_research_ready", "execution": "guarded_read_only_research", "screenshot": "coming_soon", "scheduler": "implemented_guarded_read_only"},
       "localTabs": [
         {"id": "discoveries", "labelTh": "Indicator ที่ค้นพบใหม่", "actionIds": ["discover_new_indicators"]},
         {"id": "evidence", "labelTh": "หลักฐานและแหล่งข้อมูล", "actionIds": [], "viewOnly": true},
@@ -346,20 +346,20 @@
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
         {"id": "codex_runner", "labelTh": "Codex CLI และบัญชีที่ Login", "required": true, "adapterStatus": "runtime_detected"},
         {"id": "codex_public_web_research", "labelTh": "ค้นเว็บไซต์สาธารณะแบบอ่านอย่างเดียว", "required": true, "adapterStatus": "implemented", "mode": "guarded_read_only"},
-        {"id": "dedup_store", "labelTh": "ตรวจรายการซ้ำในคลัง Local", "required": true, "adapterStatus": "implemented", "mode": "backend_contract"},
+        {"id": "dedup_store", "labelTh": "ช่วยเทียบ Indicator กับคลัง Local", "required": false, "adapterStatus": "prompt_assisted_unverified", "mode": "local_report_catalog_only"},
         {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
         {"id": "screenshot_adapter", "labelTh": "จับภาพเว็บไซต์เป็นหลักฐาน", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "backend_scheduler", "labelTh": "รันค้นหา 1-2 ครั้งต่อวัน", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "backend_scheduler", "labelTh": "รันค้นหา 1-2 ครั้งต่อวัน", "required": false, "adapterStatus": "implemented_guarded_read_only"},
         {"id": "report_routing", "labelTh": "ส่งผลกลับเรดาร์และ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["one_or_two_runs_per_day"], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false, "scheduleConfigurationIntent": "save_indicator_scout_schedule", "schedulePreferenceMaxRunsPerDay": 2, "scheduleExecutionAdapterStatus": "coming_soon"},
-      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "dedup": "ready_contract", "missionReportAudit": "ready", "screenshotAdapter": "coming_soon", "recurringScheduler": "coming_soon"},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual", "one_or_two_runs_per_day"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false, "scheduleConfigurationIntent": "save_indicator_scout_schedule", "schedulePreferenceMaxRunsPerDay": 2, "scheduleExecutionAdapterStatus": "implemented_guarded_read_only", "scheduledActionIds": ["discover_new_indicators"]},
+      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "dedup": "ready_contract", "missionReportAudit": "ready", "screenshotAdapter": "coming_soon", "recurringScheduler": "ready_guarded_read_only"},
       "reportRoute": {"targetPropId": "left_audit_crystals", "primaryReportType": "indicator_scout_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "left_signal_cube": {
       "moduleNameTh": "ข่าวตลาดวันนี้และมุมมอง 28 คู่เงิน",
-      "availability": {"ui": "ready", "data": "public_research_ready", "execution": "analysis_only", "economicCalendar": "coming_soon", "scheduler": "coming_soon"},
+      "availability": {"ui": "ready", "data": "public_research_ready", "execution": "analysis_only", "economicCalendar": "coming_soon", "scheduler": "implemented_guarded_read_only"},
       "localTabs": [
         {"id": "today", "labelTh": "ข่าวตลาดวันนี้", "actionIds": ["analyze_daily_market_news"]},
         {"id": "pair_bias", "labelTh": "มุมมอง 28 คู่เงิน", "actionIds": ["build_fx_pair_bias"]},
@@ -373,13 +373,13 @@
         {"id": "fx_bias_analysis", "labelTh": "วิเคราะห์ Bias 28 คู่เงินจากหลักฐานข่าว", "required": true, "adapterStatus": "implemented", "mode": "analysis_only"},
         {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
         {"id": "economic_calendar_adapter", "labelTh": "Economic Calendar Feed โดยตรง", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "backend_scheduler", "labelTh": "อัปเดตข่าวและ Bias 1-2 ครั้งต่อวัน", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "backend_scheduler", "labelTh": "อัปเดตข่าวตลาด 1-2 ครั้งต่อวัน", "required": false, "adapterStatus": "implemented_guarded_read_only"},
         {"id": "report_routing", "labelTh": "ส่งผลกลับจุดข่าวและ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
       "liveTradingPolicy": {"enabled": false, "orderSubmission": "disabled", "activationFromFrontend": false, "analysisIsNotTradeSignal": true},
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": ["one_or_two_runs_per_day"], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false, "scheduleConfigurationIntent": "save_news_bias_schedule", "schedulePreferenceMaxRunsPerDay": 2, "scheduleExecutionAdapterStatus": "coming_soon"},
-      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "fxBiasAnalysis": "ready_analysis_only", "missionReportAudit": "ready", "economicCalendarFeed": "coming_soon", "recurringScheduler": "coming_soon"},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual", "one_or_two_runs_per_day"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false, "scheduleConfigurationIntent": "save_news_bias_schedule", "schedulePreferenceMaxRunsPerDay": 2, "scheduleExecutionAdapterStatus": "implemented_guarded_read_only", "scheduledActionIds": ["analyze_daily_market_news"], "manualOrAgentHandoffActionIds": ["build_fx_pair_bias"]},
+      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "fxBiasAnalysis": "ready_analysis_only", "missionReportAudit": "ready", "economicCalendarFeed": "coming_soon", "recurringScheduler": "ready_guarded_read_only"},
       "reportRoute": {"targetPropId": "left_signal_cube", "primaryReportType": "fx_news_bias_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "right_status_crystals": {

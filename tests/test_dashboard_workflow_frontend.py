@@ -386,6 +386,64 @@ class DashboardWorkflowFrontendTests(unittest.TestCase):
         self.assertIn('setAttribute("aria-selected", active ? "true" : "false")', self.main)
         self.assertIn('event.key === "ArrowRight"', self.main)
 
+    def test_custom_plugin_profile_and_automatic_schedule_truth_are_visible(self):
+        self.assertIn("rawPluginProfile", self.main)
+        self.assertIn('pluginSkillId: safeDashboardDisplayText', self.main)
+        self.assertIn('automationMode', self.main)
+        self.assertIn('className = "workflow-plugin-profile"', self.main)
+        self.assertIn('className = "workflow-automation-summary"', self.main)
+        self.assertIn("renderWorkflowAutomationSummary", self.main)
+        self.assertIn("schedule?.automaticRunsImplemented === true", self.main)
+        self.assertIn("schedule.requestedEnabled ?? schedule.enabled", self.main)
+        self.assertIn("schedule.nextRunAt", self.main)
+        self.assertIn("schedule.lastRunAt", self.main)
+        self.assertIn(".workflow-plugin-profile", self.styles)
+        self.assertIn(".workflow-automation-summary", self.styles)
+
+    def test_custom_plugin_wording_does_not_claim_direct_dispatch(self):
+        self.assertIn("function workflowProcedurePresentation", self.main)
+        self.assertIn('title: "Codex ใช้ขั้นตอนจาก Custom Plugin"', self.main)
+        self.assertIn('"ขั้นตอน Backend ที่ปรับจาก Custom Plugin"', self.main)
+        self.assertIn('"ขั้นตอน Backend"', self.main)
+        self.assertIn("Backend นำความต้องการจาก Custom Plugin มาทำเป็นขั้นตอนคลิกเดียว", self.main)
+        self.assertIn("ไม่ใช่การเรียก Plugin โดยตรงจากหน้าเว็บ", self.main)
+        self.assertIn("ยังไม่พบ Custom Plugin นี้ใน Codex ของผู้ใช้", self.main)
+        self.assertIn("Version ไม่ตรงกัน", self.main)
+        self.assertIn("Workflow ต้องการ", self.main)
+        self.assertNotIn(" / Plugin → Local Runner", self.main)
+
+    def test_platform_selection_updates_the_visible_backend_and_reference_profile(self):
+        self.assertIn("function workflowPluginProfileForSelection", self.main)
+        self.assertIn("pluginSelectionField", self.main)
+        self.assertIn("pluginCandidates", self.main)
+        self.assertIn("renderSelectedPluginProfile", self.main)
+        self.assertIn("workflowPluginProfileForSelection(action.pluginProfile, selectionControl.value)", self.main)
+        self.assertIn('platformControl.dispatchEvent(new Event("change"))', self.main)
+
+    def test_plugin_profile_never_expands_frontend_execution_authority(self):
+        action_start = self.main.index("function createWorkflowActionCard")
+        action_end = self.main.index("function renderWorkflowAutomationSummary", action_start)
+        action_block = self.main[action_start:action_end]
+        self.assertNotIn("fetch(", action_block)
+        self.assertNotIn("WebSocket", action_block)
+        self.assertNotIn("localStorage.setItem", action_block)
+        self.assertNotIn('type = "password"', action_block)
+        self.assertIn("action.pluginProfile", action_block)
+
+    def test_plugin_flow_labels_do_not_reference_an_out_of_scope_agent_name(self):
+        self.assertNotIn(
+            'displayAgentName(action.ownerAgentId || "manager", agentName)',
+            self.main,
+        )
+        self.assertNotIn(
+            'displayAgentName(primaryAction.ownerAgentId || "manager", agentName)',
+            self.main,
+        )
+        self.assertIn(
+            'displayAgentName(action.ownerAgentId || "manager", "Agent ผู้รับงาน")',
+            self.main,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

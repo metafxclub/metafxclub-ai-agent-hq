@@ -12,6 +12,7 @@ This folder is the shared agreement between the visual frontend, the local backe
 - `bridge/bridge-contract.json` defines backend/local-runner boundaries.
 - `tools/tool-permission-contract.json` defines what can run and what needs approval.
 - `orchestration/orchestration-contract.json` defines Manager delegation, model tiers, budgets, rate limits, report aggregation, and mission-bound approval.
+- `workflows/equipment-plugin-map.json` binds each independent equipment action to its Backend-owned Custom Plugin procedure, safe defaults, automation mode, expected outputs, evidence, and Thai recovery guidance.
 - `memory/memory-contract.json` defines durable non-secret memory storage.
 
 Rule: frontend may display and submit intents, but real tool execution, Codex CLI, MCP, filesystem, VPS, MT4/MT5, Telegram, and approvals must remain behind the backend/local runner.
