@@ -47,6 +47,13 @@ artifacts/**
 !artifacts/mt4-ai-council-ea-v2.14-broker-compat-hardening/
 !artifacts/mt4-ai-council-ea-v2.14-broker-compat-hardening/**
 artifacts/mt4-ai-council-ea-v2.14-broker-compat-hardening/*.log
+!artifacts/mt4-ai-council-ea-v2.15-execution-provenance/
+!artifacts/mt4-ai-council-ea-v2.15-execution-provenance/**
+artifacts/mt4-ai-council-ea-v2.15-execution-provenance/*.log
+!artifacts/mt4-ai-council-ea-v2.16-stream-transition-hardening/
+!artifacts/mt4-ai-council-ea-v2.16-stream-transition-hardening/**
+artifacts/mt4-ai-council-ea-v2.16-stream-transition-hardening/*.log
+integrations/mt4-trade-gateway/*.ex4
 dist/
 release/
 *.zip

@@ -192,6 +192,87 @@ class AiTradeCouncilChatContextTests(unittest.TestCase):
             self.bridge.AI_TRADE_COUNCIL_CHAT_CONTEXT_MAX_CHARS,
         )
 
+    def test_chat_freshness_uses_utc_evidence_not_broker_bar_clock(self) -> None:
+        observed = datetime.now(timezone.utc) - timedelta(minutes=2)
+        expected_observed_at = observed.isoformat().replace("+00:00", "Z")
+
+        for broker_offset_hours in (3, -5):
+            with self.subTest(broker_offset_hours=broker_offset_hours):
+                mission = self.mission(
+                    "optimization_agent",
+                    "technical",
+                    "BUY",
+                    "BROKER_CLOCK_TEST",
+                    2,
+                )
+                mission["analysisContext"]["snapshotObservedAt"] = (
+                    expected_observed_at
+                )
+                mission["analysisContext"]["closedBarIdentity"][
+                    "closedBarTime"
+                ] = (
+                    int(observed.timestamp())
+                    + broker_offset_hours * 60 * 60
+                    - 5 * 60
+                )
+
+                with (
+                    mock.patch.object(
+                        self.bridge,
+                        "load_missions",
+                        return_value=[mission],
+                    ),
+                    mock.patch.object(
+                        self.bridge,
+                        "load_runtime_reports",
+                        return_value=[],
+                    ),
+                ):
+                    context = self.bridge.ai_trade_council_agent_chat_context(
+                        "optimization_agent"
+                    )
+
+                self.assertEqual(context["observedAt"], expected_observed_at)
+                self.assertEqual(context["freshness"], "fresh")
+                self.assertLess(context["ageSeconds"], 600)
+
+    def test_chat_context_falls_back_to_zoned_mission_time_only(self) -> None:
+        mission = self.mission(
+            "optimization_agent",
+            "technical",
+            "BUY",
+            "MISSION_TIME_TEST",
+            2,
+        )
+        mission["analysisContext"].pop("snapshotObservedAt", None)
+        expected = mission["completedAt"]
+        symbol, timeframe, observed_at, _ = (
+            self.bridge._ai_trade_council_chat_source_context(
+                mission,
+                {mission["id"]: mission},
+            )
+        )
+        self.assertEqual((symbol, timeframe), ("XAUUSD", "M5"))
+        self.assertEqual(
+            observed_at,
+            self.bridge.parse_iso(expected)
+            .astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        )
+
+        mission["completedAt"] = "2026-08-13T03:00:00"
+        mission["updatedAt"] = "2026-08-13T03:00:00"
+        mission["createdAt"] = "2026-08-13T03:00:00"
+        _, _, observed_at, observed_time = (
+            self.bridge._ai_trade_council_chat_source_context(
+                mission,
+                {mission["id"]: mission},
+            )
+        )
+        self.assertIsNone(observed_at)
+        self.assertIsNone(observed_time)
+
     def test_runner_rejects_cross_agent_and_secret_context(self) -> None:
         technical = self.mission(
             "optimization_agent",

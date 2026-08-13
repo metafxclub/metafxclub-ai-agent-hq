@@ -297,8 +297,8 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
         self.assertEqual(low_form["rateReservePercent"], 10)
         self.assertEqual(high_form["rateReservePercent"], 80)
 
-    def test_news_retry_after_midnight_uses_original_pending_slot_date(self) -> None:
-        """Retrying a Bangkok slot must not silently research a different market date."""
+    def test_news_pending_slot_expires_at_midnight_without_researching_prior_date(self) -> None:
+        """A prior Bangkok-day slot must expire, never run as today's news."""
 
         captured: list[dict] = []
 
@@ -353,12 +353,20 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
                     retry_time,
                     refresh_quota=False,
                 )
+                stored = self.bridge.load_dashboard_workflow_settings()["newsBiasSchedule"]
 
         self.assertEqual(len(captured_slots), 1)
-        self.assertTrue(result["dispatched"])
-        self.assertEqual(len(captured), 1)
-        self.assertEqual(captured[0]["form"]["marketDate"], "2026-08-09")
-        self.assertEqual(captured[0]["form"]["minimumImpact"], "high")
+        self.assertFalse(result["dispatched"])
+        self.assertEqual(result["kind"], "scheduler_idle")
+        self.assertEqual(captured, [])
+        self.assertIsNone(stored["pendingSlotKey"])
+        self.assertIsNone(stored["pendingScheduledAt"])
+        self.assertEqual(stored["dailyExecutionDate"], "2026-08-10")
+        self.assertEqual(stored["dailyExecutionCount"], 0)
+        self.assertEqual(
+            stored["lastResultKind"],
+            "pending_expired_at_bangkok_day_boundary",
+        )
 
 
 if __name__ == "__main__":

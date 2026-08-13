@@ -67,7 +67,6 @@ class MT4TradeGatewayTests(unittest.TestCase):
     def intent(self, **overrides) -> dict[str, object]:
         payload: dict[str, object] = {
             "channelId": "mtc-demo-01",
-            "streamKey": "b" * 64,
             "snapshotId": "a" * 64,
             "snapshotObservedAt": 1785466800,
             "barTime": 1785466800,
@@ -82,6 +81,12 @@ class MT4TradeGatewayTests(unittest.TestCase):
             "takeProfit": 3350.0,
         }
         payload.update(overrides)
+        if "streamKey" not in overrides:
+            payload["streamKey"] = self.gateway_module._stream_key(
+                str(payload["channelId"]),
+                str(payload["symbol"]).upper(),
+                str(payload["timeframe"]).upper(),
+            )
         return payload
 
     def next_bar(self, **overrides) -> dict[str, object]:
@@ -140,6 +145,56 @@ class MT4TradeGatewayTests(unittest.TestCase):
             / "acks"
             / f"{command['commandId']}.json"
         )
+
+    def outcome_path(self, command: dict[str, object]) -> Path:
+        return (
+            self.file_common
+            / "MetafxHQ"
+            / str(command["channelId"])
+            / "trade-gateway"
+            / "outcomes"
+            / f"{command['commandId']}.json"
+        )
+
+    def write_outcome(
+        self,
+        command: dict[str, object],
+        *,
+        wire_digits: int = 8,
+        **overrides,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "schemaVersion": self.gateway_module.OUTCOME_SCHEMA_VERSION,
+            "channelId": command["channelId"],
+            "commandId": command["commandId"],
+            "executionState": "OPEN",
+            "observedAt": int(self.clock.current.timestamp()) + 2,
+            "ticket": 123456,
+            "symbol": command["symbol"],
+            "action": command["action"],
+            "openedAt": int(self.clock.current.timestamp()) + 1,
+            "closedAt": None,
+            "openPrice": command["referencePrice"],
+            "stopLoss": command["stopLoss"],
+            "takeProfit": command["takeProfit"],
+            "lots": 0.01,
+            "magicNumber": 4186001,
+            "comment": f"HQ:{command['commandId']}",
+            "closedPnl": None,
+        }
+        payload.update(overrides)
+        path = self.outcome_path(command)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw = json.dumps(payload, separators=(",", ":"))
+        for field in ("openPrice", "stopLoss", "takeProfit"):
+            encoded = json.dumps(payload[field], separators=(",", ":"))
+            raw = raw.replace(
+                f'"{field}":{encoded}',
+                f'"{field}":{float(payload[field]):.{wire_digits}f}',
+                1,
+            )
+        path.write_text(raw, encoding="ascii")
+        return payload
 
     def ack(self, command: dict[str, object], **overrides) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -305,6 +360,159 @@ class MT4TradeGatewayTests(unittest.TestCase):
         self.assertTrue(status["signedCommandVerificationAvailable"])
         self.assertTrue(status["liveExecutionAvailable"])
         self.assertIsNone(status["liveBlockReason"])
+
+    def test_wire_numbers_are_plain_decimal_and_precision_is_bounded(self) -> None:
+        gateway = self.gateway()
+        result = gateway.queue_trade_intent(self.intent(
+            referencePrice=0.00000002,
+            stopLoss=0.00000001,
+            takeProfit=0.00000003,
+        ))
+        envelope = self.read_envelope(self.command_path())
+        wire = bytes.fromhex(str(envelope["payloadHex"])).decode("ascii")
+
+        self.assertIn('"referencePrice":0.00000002', wire)
+        self.assertIn('"stopLoss":0.00000001', wire)
+        self.assertIn('"takeProfit":0.00000003', wire)
+        self.assertNotRegex(
+            wire,
+            r":-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?[eE][+-]?[0-9]+(?=[,}])",
+        )
+        self.assertEqual(
+            gateway.read_command(str(result["command"]["commandId"]))["command"],
+            result["command"],
+        )
+
+        with self.assertRaises(self.gateway_module.GatewayValidationError) as raised:
+            gateway.queue_trade_intent(self.intent(
+                referencePrice=0.000000002,
+                stopLoss=0.000000001,
+                takeProfit=0.000000003,
+            ))
+        self.assertEqual(
+            raised.exception.code,
+            "invalid_stop_loss_precision",
+        )
+
+    def test_executed_ack_must_match_the_command_stops(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+
+        for field, value, expected_code in (
+            ("actualStopLoss", command["stopLoss"] + 1, "ack_actualStopLoss_mismatch"),
+            ("actualTakeProfit", command["takeProfit"] + 1, "ack_actualTakeProfit_mismatch"),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaises(self.gateway_module.AckValidationError) as raised:
+                    gateway.ingest_ack(self.ack(
+                        command,
+                        status="EXECUTED",
+                        reasonCode="ORDER_ACCEPTED",
+                        mode="demo",
+                        ticket=983283721,
+                        **{field: value},
+                    ))
+                self.assertEqual(raised.exception.code, expected_code)
+                self.assertTrue(
+                    gateway.read_command(str(command["commandId"]))["outstanding"]
+                )
+
+    def test_broker_digit_normalized_ack_and_outcome_remain_bound(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent(
+            referencePrice=3300.125,
+            stopLoss=3275.005,
+            takeProfit=3350.005,
+        ))["command"]
+        ticket = 983283721
+
+        def write_ack_with_prices(stop_loss: str, *, inconsistent: bool = False) -> Path:
+            ack = self.ack(
+                command,
+                status="EXECUTED",
+                reasonCode="ORDER_ACCEPTED",
+                mode="demo",
+                ticket=ticket,
+                filledPrice=3300.13,
+                actualStopLoss=float(stop_loss),
+                actualTakeProfit=3350.01,
+            )
+            raw = json.dumps(ack, separators=(",", ":"))
+            rendered = {
+                "filledPrice": "3300.13",
+                "actualStopLoss": stop_loss,
+                "actualTakeProfit": "3350.010" if inconsistent else "3350.01",
+            }
+            for field, wire_value in rendered.items():
+                encoded = json.dumps(ack[field], separators=(",", ":"))
+                before = f'"{field}":{encoded}'
+                self.assertIn(before, raw)
+                raw = raw.replace(before, f'"{field}":{wire_value}', 1)
+            path = self.ack_path(command)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(raw, encoding="ascii")
+            return path
+
+        inconsistent_path = write_ack_with_prices("3275.01", inconsistent=True)
+        with self.assertRaises(self.gateway_module.AckValidationError) as raised:
+            gateway.ingest_ack_file(inconsistent_path)
+        self.assertEqual(
+            raised.exception.code,
+            "invalid_ack_execution_price_precision",
+        )
+
+        mismatched_path = write_ack_with_prices("3275.02")
+        with self.assertRaises(self.gateway_module.AckValidationError) as raised:
+            gateway.ingest_ack_file(mismatched_path)
+        self.assertEqual(raised.exception.code, "ack_actualStopLoss_mismatch")
+
+        accepted = gateway.ingest_ack_file(write_ack_with_prices("3275.01"))
+        self.assertTrue(accepted["outstandingReleased"])
+
+        outcome = self.write_outcome(
+            command,
+            wire_digits=2,
+            ticket=ticket,
+            openPrice=3300.13,
+            stopLoss=3275.01,
+            takeProfit=3350.01,
+        )
+        self.assertEqual(
+            gateway.read_outcome(str(command["commandId"])),
+            outcome,
+        )
+
+    def test_duplicate_json_keys_fail_closed_at_durable_boundaries(self) -> None:
+        with self.assertRaises(ValueError):
+            self.gateway_module._strict_json_object('{"value":NaN}')
+
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        ack = self.ack(command)
+        raw_ack = json.dumps(ack, separators=(",", ":"))
+        raw_ack = raw_ack.replace(
+            '"status":"SHADOWED"',
+            '"status":"EXECUTED","status":"SHADOWED"',
+            1,
+        )
+        ack_path = self.ack_path(command)
+        ack_path.parent.mkdir(parents=True, exist_ok=True)
+        ack_path.write_text(raw_ack, encoding="ascii")
+
+        with self.assertRaises(self.gateway_module.AckValidationError) as raised:
+            gateway.ingest_ack_file(ack_path)
+        self.assertEqual(raised.exception.code, "invalid_ack_json")
+
+        ledger_path = self.state_root / "mt4-trade-gateway-ledger.json"
+        raw_ledger = ledger_path.read_text(encoding="ascii")
+        raw_ledger = raw_ledger.replace(
+            '"revision":',
+            '"revision":0,"revision":',
+            1,
+        )
+        ledger_path.write_text(raw_ledger, encoding="ascii")
+        with self.assertRaises(self.gateway_module.LedgerIntegrityError):
+            gateway.status()
 
     def test_hmac_rfc4231_and_exact_signed_envelope_vector(self) -> None:
         self.assertEqual(
@@ -639,6 +847,42 @@ class MT4TradeGatewayTests(unittest.TestCase):
         self.assertEqual(result["command"]["timeframe"], "M5")
         self.assertNotIn("M1", self.gateway_module.ALLOWED_TIMEFRAMES)
 
+    def test_list_commands_is_newest_first_bounded_and_validates_limit(self) -> None:
+        gateway = self.gateway()
+        first = gateway.queue_trade_intent(self.intent())["command"]
+        self.clock.advance(2)
+        self.release(gateway, first)
+        self.clock.advance(2)
+        second = gateway.queue_trade_intent(
+            self.next_bar(
+                missionId="mission-20260731-0002",
+                councilDecisionId="council-20260731-0002",
+            )
+        )["command"]
+
+        records = gateway.list_commands(limit=2)
+        self.assertEqual(
+            [item["command"]["commandId"] for item in records],
+            [second["commandId"], first["commandId"]],
+        )
+        self.assertEqual(
+            gateway.list_commands(limit=1)[0]["command"]["commandId"],
+            second["commandId"],
+        )
+        self.assertEqual(records[1]["status"], "ack_SHADOWED")
+        self.assertIsNotNone(records[1]["ack"])
+
+        for invalid_limit in (True, False, 0, 501, 1.5, "2", None):
+            with self.subTest(limit=invalid_limit):
+                with self.assertRaises(
+                    self.gateway_module.GatewayValidationError
+                ) as raised:
+                    gateway.list_commands(limit=invalid_limit)
+                self.assertEqual(
+                    raised.exception.code,
+                    "invalid_command_history_limit",
+                )
+
     def test_exact_replay_survives_restart_and_repairs_missing_slot(self) -> None:
         first_gateway = self.gateway()
         first = first_gateway.queue_trade_intent(self.intent())
@@ -659,6 +903,66 @@ class MT4TradeGatewayTests(unittest.TestCase):
             restarted.status()["activeCommandId"],
             first_command["commandId"],
         )
+
+    def test_durable_command_history_can_be_paged_without_silent_truncation(self) -> None:
+        gateway = self.gateway()
+        commands = []
+        for index, timeframe in enumerate(("M5", "M15", "M30"), start=1):
+            command = gateway.queue_trade_intent(self.intent(
+                snapshotId=f"{index}" * 64,
+                snapshotObservedAt=1785466800 + index,
+                barTime=1785466800,
+                missionId=f"mission-page-{index}",
+                timeframe=timeframe,
+            ))["command"]
+            commands.append(command)
+            self.release(gateway, command)
+            self.clock.advance(1)
+
+        first = gateway.list_commands_page(limit=2)
+        self.assertEqual(first["total"], 3)
+        self.assertTrue(first["hasMore"])
+        self.assertTrue(first["cursorFound"])
+        self.assertEqual(len(first["records"]), 2)
+        self.assertEqual(
+            first["nextCursor"],
+            first["records"][-1]["command"]["commandId"],
+        )
+
+        second = gateway.list_commands_page(
+            limit=2,
+            cursor=str(first["nextCursor"]),
+        )
+        self.assertEqual(second["total"], 3)
+        self.assertFalse(second["hasMore"])
+        self.assertTrue(second["cursorFound"])
+        self.assertEqual(len(second["records"]), 1)
+        seen = {
+            record["command"]["commandId"]
+            for record in (*first["records"], *second["records"])
+        }
+        self.assertEqual(seen, {command["commandId"] for command in commands})
+
+        missing = gateway.list_commands_page(limit=2, cursor="cmd-" + "f" * 24)
+        self.assertFalse(missing["cursorFound"])
+        self.assertEqual(missing["records"], [])
+        self.assertFalse(missing["hasMore"])
+
+        selected = gateway.list_commands_page(
+            limit=1,
+            channel_id="mtc-demo-01",
+        )
+        self.assertEqual(selected["channelId"], "mtc-demo-01")
+        self.assertEqual(selected["total"], 3)
+        self.assertTrue(selected["hasMore"])
+        self.assertTrue(all(
+            record["command"]["channelId"] == "mtc-demo-01"
+            for record in selected["records"]
+        ))
+
+        with self.assertRaises(self.gateway_module.GatewayValidationError) as raised:
+            gateway.list_commands_page(channel_id="../../other")
+        self.assertEqual(raised.exception.code, "invalid_command_history_channel")
 
     def test_single_outstanding_survives_ttl_until_persisted_terminal_ack(self) -> None:
         gateway = self.gateway(command_ttl_seconds=10)
@@ -700,6 +1004,118 @@ class MT4TradeGatewayTests(unittest.TestCase):
         replay = gateway.queue_trade_intent(self.intent())
         self.assertTrue(replay["idempotentReplay"])
         self.assertFalse(replay["outstanding"])
+
+    def test_bar_claim_is_exactly_once_per_channel_symbol_timeframe_stream(self) -> None:
+        gateway = self.gateway()
+        bar_time = 1785466800
+
+        first = gateway.queue_trade_intent(self.intent(barTime=bar_time))["command"]
+        first_entry = gateway.read_command(str(first["commandId"]))
+        self.release(gateway, first)
+
+        switched_timeframe = gateway.queue_trade_intent(self.intent(
+            snapshotId="d" * 64,
+            missionId="mission-stream-m5",
+            timeframe="M5",
+            barTime=bar_time,
+        ))["command"]
+        timeframe_entry = gateway.read_command(str(switched_timeframe["commandId"]))
+        self.release(gateway, switched_timeframe)
+
+        suffixed_symbol = gateway.queue_trade_intent(self.intent(
+            snapshotId="e" * 64,
+            missionId="mission-stream-suffix",
+            symbol="XAUUSD.r",
+            barTime=bar_time,
+        ))["command"]
+        suffix_entry = gateway.read_command(str(suffixed_symbol["commandId"]))
+        self.release(gateway, suffixed_symbol)
+
+        switched_channel = gateway.queue_trade_intent(self.intent(
+            channelId="mtc-demo-02",
+            snapshotId="f" * 64,
+            missionId="mission-stream-channel",
+            barTime=bar_time,
+        ))["command"]
+        channel_entry = gateway.read_command(str(switched_channel["commandId"]))
+        self.release(gateway, switched_channel)
+
+        entries = (
+            first_entry,
+            timeframe_entry,
+            suffix_entry,
+            channel_entry,
+        )
+        self.assertTrue(all(entry is not None for entry in entries))
+        bar_keys = {
+            entry["backendIdentity"]["barKey"]
+            for entry in entries
+            if entry is not None
+        }
+        self.assertEqual(len(bar_keys), 4)
+
+        duplicate_suffix_bar = self.intent(
+            snapshotId="1" * 64,
+            missionId="mission-stream-suffix-duplicate",
+            action="SELL",
+            symbol="XAUUSD.r",
+            barTime=bar_time,
+            stopLoss=3350.0,
+            takeProfit=3275.0,
+        )
+        with self.assertRaises(self.gateway_module.OneOrderPerBarError):
+            gateway.queue_trade_intent(duplicate_suffix_bar)
+
+    def test_stream_key_is_bound_to_selected_channel_symbol_and_timeframe(self) -> None:
+        gateway = self.gateway()
+        with self.assertRaises(self.gateway_module.GatewayValidationError) as raised:
+            gateway.queue_trade_intent(self.intent(streamKey="b" * 64))
+        self.assertEqual(raised.exception.code, "stream_key_mismatch")
+
+        published = gateway.queue_trade_intent(self.intent(streamKey=""))
+        entry = gateway.read_command(str(published["command"]["commandId"]))
+        self.assertIsNotNone(entry)
+        self.assertEqual(
+            entry["backendIdentity"]["streamKey"],
+            self.gateway_module._stream_key("mtc-demo-01", "XAUUSD", "H4"),
+        )
+
+    def test_hash_broker_suffix_is_supported_but_plus_remains_rejected(self) -> None:
+        gateway = self.gateway()
+        published = gateway.queue_trade_intent(self.intent(
+            symbol="eurusd#",
+            missionId="mission-hash-suffix",
+        ))
+        command = published["command"]
+        self.assertEqual(command["symbol"], "EURUSD#")
+        entry = gateway.read_command(str(command["commandId"]))
+        self.assertIsNotNone(entry)
+        self.assertEqual(
+            entry["backendIdentity"]["streamKey"],
+            self.gateway_module._stream_key("mtc-demo-01", "EURUSD#", "H4"),
+        )
+
+        with self.assertRaises(self.gateway_module.GatewayValidationError) as raised:
+            gateway.queue_trade_intent(self.intent(
+                channelId="mtc-plus-test",
+                symbol="EURUSD+",
+            ))
+        self.assertEqual(raised.exception.code, "invalid_symbol")
+
+    def test_existing_v3_ledger_with_mismatched_stream_identity_fails_closed(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        self.release(gateway, command)
+        ledger_path = self.state_root / "mt4-trade-gateway-ledger.json"
+        ledger = json.loads(ledger_path.read_text(encoding="ascii"))
+        ledger["commands"][command["commandId"]]["backendIdentity"][
+            "streamKey"
+        ] = "b" * 64
+        ledger_path.write_text(json.dumps(ledger), encoding="ascii")
+
+        restarted = self.gateway()
+        with self.assertRaises(self.gateway_module.LedgerIntegrityError):
+            restarted.status()
 
     def test_unowned_or_tampered_command_slot_fails_closed(self) -> None:
         gateway = self.gateway()
@@ -979,6 +1395,371 @@ class MT4TradeGatewayTests(unittest.TestCase):
                 observedAt=int(self.clock.current.timestamp()),
             ))
 
+    def test_expiry_preserves_unknown_and_repairs_legacy_overwrite(self) -> None:
+        gateway = self.gateway(command_ttl_seconds=1)
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        unknown_ack = self.ack(
+            command,
+            status="EXECUTION_UNKNOWN",
+            reasonCode="ORDER_POST_SEND_VERIFICATION_MISMATCH",
+            mode="demo",
+            ticket=123456,
+            filledPrice=3300.25,
+            filledSlippagePoints=22.0,
+            actualStopLoss=command["stopLoss"],
+            actualTakeProfit=command["takeProfit"],
+            actualMagicNumber=4186001,
+            actualComment=f"HQ:{command['commandId']}",
+            verificationStatus="MISMATCH",
+            executionState="OPEN",
+        )
+        gateway.ingest_ack(unknown_ack)
+        self.clock.advance(2)
+
+        expired = gateway.expire_pending()
+        self.assertEqual(expired["expiredCount"], 0)
+        self.assertEqual(
+            gateway.read_command(str(command["commandId"]))["status"],
+            "ack_EXECUTION_UNKNOWN",
+        )
+        self.assertEqual(gateway.status()["activeCommandId"], command["commandId"])
+
+        ledger_path = self.state_root / "mt4-trade-gateway-ledger.json"
+        legacy = json.loads(ledger_path.read_text(encoding="ascii"))
+        legacy["commands"][command["commandId"]]["status"] = "expired_waiting_ack"
+        ledger_path.write_text(json.dumps(legacy), encoding="ascii")
+
+        repaired = gateway.read_command(str(command["commandId"]))
+        self.assertEqual(repaired["status"], "ack_EXECUTION_UNKNOWN")
+        self.assertTrue(repaired["outstanding"])
+        migrated = json.loads(ledger_path.read_text(encoding="ascii"))
+        self.assertEqual(
+            migrated["commands"][command["commandId"]]["statusMigration"]["reasonCode"],
+            "RESTORE_DURABLE_EXECUTION_UNKNOWN",
+        )
+
+    def test_exact_unknown_outcome_reconciliation_releases_once_with_warning(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        unknown_ack = self.ack(
+            command,
+            status="EXECUTION_UNKNOWN",
+            reasonCode="ORDER_POST_SEND_VERIFICATION_MISMATCH",
+            mode="demo",
+            ticket=983283721,
+            filledPrice=3300.25,
+            filledSlippagePoints=22.0,
+            actualStopLoss=command["stopLoss"],
+            actualTakeProfit=command["takeProfit"],
+            actualMagicNumber=4186001,
+            actualComment=f"HQ:{command['commandId']}",
+            verificationStatus="MISMATCH",
+            executionState="OPEN",
+        )
+        gateway.ingest_ack(unknown_ack)
+        self.write_outcome(
+            command,
+            ticket=983283721,
+            openPrice=3300.25,
+        )
+
+        reconciled = gateway.reconcile_execution_unknown(
+            str(command["commandId"])
+        )
+        self.assertTrue(reconciled["outstandingReleased"])
+        self.assertTrue(reconciled["barClaimRetained"])
+        self.assertEqual(reconciled["executionQuality"], "warning")
+        self.assertEqual(reconciled["status"], "ack_EXECUTED")
+        self.assertEqual(
+            reconciled["ack"]["reasonCode"],
+            "EXECUTION_RECONCILED_WITH_WARNING",
+        )
+        self.assertEqual(
+            reconciled["ack"]["observedAt"],
+            unknown_ack["observedAt"],
+        )
+        persisted = json.loads(
+            (self.state_root / "mt4-trade-gateway-ledger.json").read_text(
+                encoding="ascii"
+            )
+        )["commands"][command["commandId"]]
+        self.assertEqual(
+            persisted["recovery"]["originalAckObservedAt"],
+            unknown_ack["observedAt"],
+        )
+        self.assertIsNone(gateway.status()["activeCommandId"])
+
+        replay = gateway.reconcile_execution_unknown(str(command["commandId"]))
+        self.assertTrue(replay["idempotentReplay"])
+        self.assertTrue(replay["outstandingReleased"])
+
+        with self.assertRaises(self.gateway_module.OneOrderPerBarError):
+            gateway.queue_trade_intent(self.intent(
+                snapshotId="d" * 64,
+                missionId="mission-20260731-retry",
+            ))
+
+    def test_unknown_reconciliation_rejects_mismatched_ticket_without_release(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        unknown_ack = self.ack(
+            command,
+            status="EXECUTION_UNKNOWN",
+            reasonCode="ORDER_POST_SEND_VERIFICATION_MISMATCH",
+            mode="demo",
+            ticket=123456,
+            filledPrice=3300.25,
+            filledSlippagePoints=22.0,
+            actualStopLoss=command["stopLoss"],
+            actualTakeProfit=command["takeProfit"],
+            actualMagicNumber=4186001,
+            actualComment=f"HQ:{command['commandId']}",
+            verificationStatus="MISMATCH",
+            executionState="OPEN",
+        )
+        gateway.ingest_ack(unknown_ack)
+        self.write_outcome(
+            command,
+            ticket=654321,
+            openPrice=3300.25,
+        )
+
+        with self.assertRaises(self.gateway_module.GatewayValidationError):
+            gateway.reconcile_execution_unknown(str(command["commandId"]))
+        current = gateway.read_command(str(command["commandId"]))
+        self.assertEqual(current["status"], "ack_EXECUTION_UNKNOWN")
+        self.assertTrue(current["outstanding"])
+
+    def test_pending_scan_auto_reconciles_existing_unknown_from_exact_outcome(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        unknown_ack = self.ack(
+            command,
+            status="EXECUTION_UNKNOWN",
+            reasonCode="ORDER_POST_SEND_VERIFICATION_MISMATCH",
+            mode="demo",
+            ticket=983283721,
+            filledPrice=3300.25,
+            filledSlippagePoints=22.0,
+            actualStopLoss=command["stopLoss"],
+            actualTakeProfit=command["takeProfit"],
+            actualMagicNumber=4186001,
+            actualComment=f"HQ:{command['commandId']}",
+            verificationStatus="MISMATCH",
+            executionState="OPEN",
+        )
+        gateway.ingest_ack(unknown_ack)
+        ack_path = self.ack_path(command)
+        ack_path.parent.mkdir(parents=True, exist_ok=True)
+        ack_path.write_text(json.dumps(unknown_ack), encoding="ascii")
+        self.write_outcome(
+            command,
+            ticket=983283721,
+            openPrice=3300.25,
+        )
+
+        events = gateway.ingest_pending_acks()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["kind"], "mt4_execution_unknown_reconciled")
+        self.assertTrue(events[0]["outstandingReleased"])
+        self.assertIsNone(gateway.status()["activeCommandId"])
+
+    def test_unknown_can_upgrade_to_exact_closed_terminal_ack_with_tp_suffix(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        unknown_ack = self.ack(
+            command,
+            status="EXECUTION_UNKNOWN",
+            reasonCode="ORDER_POST_SEND_VERIFICATION_MISMATCH",
+            mode="demo",
+            ticket=123456,
+            filledPrice=3300.25,
+            filledSlippagePoints=22.0,
+            actualStopLoss=command["stopLoss"],
+            actualTakeProfit=command["takeProfit"],
+            actualMagicNumber=4186001,
+            actualComment=f"HQ:{command['commandId']}",
+            verificationStatus="MISMATCH",
+            executionState="OPEN",
+        )
+        gateway.ingest_ack(unknown_ack)
+        truncated = f"HQ:{command['commandId']}"[:-8] + "[tp]"
+        upgraded = gateway.ingest_ack(self.ack(
+            command,
+            status="EXECUTED",
+            reasonCode="RECOVERED_ORDER_FOUND",
+            mode="demo",
+            ticket=123456,
+            filledPrice=3300.25,
+            filledSlippagePoints=0.0,
+            actualStopLoss=command["stopLoss"],
+            actualTakeProfit=command["takeProfit"],
+            actualMagicNumber=4186001,
+            actualComment=truncated,
+            verificationStatus="VERIFIED_CLOSED",
+            executionState="CLOSED",
+            closedAt=int(self.clock.current.timestamp()) + 60,
+            closedPnl=7.58,
+        ))
+        self.assertTrue(upgraded["outstandingReleased"])
+        self.assertEqual(upgraded["status"], "ack_EXECUTED")
+        self.assertEqual(
+            upgraded["ack"]["reasonCode"],
+            "EXECUTION_RECONCILED_WITH_WARNING",
+        )
+        self.assertEqual(
+            upgraded["ack"]["observedAt"],
+            unknown_ack["observedAt"],
+        )
+        self.assertEqual(upgraded["ack"]["filledSlippagePoints"], 22.0)
+        self.assertEqual(
+            upgraded["ack"]["actualComment"],
+            f"HQ:{command['commandId']}",
+        )
+        ledger = json.loads(
+            (self.state_root / "mt4-trade-gateway-ledger.json").read_text(
+                encoding="ascii"
+            )
+        )
+        self.assertEqual(
+            ledger["commands"][command["commandId"]]["recovery"]["action"],
+            "reconcile_terminal_ack",
+        )
+
+    def test_durable_reconciliation_accepts_exact_later_closed_lifecycle_ack(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        unknown_ack = self.ack(
+            command,
+            status="EXECUTION_UNKNOWN",
+            reasonCode="ORDER_POST_SEND_VERIFICATION_MISMATCH",
+            mode="demo",
+            ticket=983283721,
+            filledPrice=3300.25,
+            filledSlippagePoints=22.0,
+            actualStopLoss=command["stopLoss"],
+            actualTakeProfit=command["takeProfit"],
+            actualMagicNumber=4186001,
+            actualComment=f"HQ:{command['commandId']}",
+            verificationStatus="MISMATCH",
+            executionState="OPEN",
+        )
+        gateway.ingest_ack(unknown_ack)
+        self.write_outcome(command, ticket=983283721, openPrice=3300.25)
+        gateway.reconcile_execution_unknown(str(command["commandId"]))
+
+        self.clock.advance(120)
+        truncated = f"HQ:{command['commandId']}"[:-8] + "[tp]"
+        closed = gateway.ingest_ack(self.ack(
+            command,
+            status="EXECUTED",
+            reasonCode="RECOVERED_ORDER_FOUND",
+            mode="demo",
+            ticket=983283721,
+            filledPrice=3300.25,
+            filledSlippagePoints=0.0,
+            actualStopLoss=command["stopLoss"],
+            actualTakeProfit=command["takeProfit"],
+            actualMagicNumber=4186001,
+            actualComment=truncated,
+            verificationStatus="VERIFIED_CLOSED",
+            executionState="CLOSED",
+            eaClosedBarTime=int(command["barTime"]) + 300,
+            closedAt=int(self.clock.current.timestamp()) + 60,
+            closedPnl=7.58,
+        ))
+        self.assertEqual(closed["ack"]["executionState"], "CLOSED")
+        self.assertEqual(closed["ack"]["verificationStatus"], "VERIFIED_CLOSED")
+        self.assertEqual(closed["ack"]["observedAt"], unknown_ack["observedAt"])
+        self.assertEqual(closed["ack"]["filledSlippagePoints"], 22.0)
+        self.assertEqual(
+            closed["ack"]["actualComment"],
+            f"HQ:{command['commandId']}",
+        )
+        ledger = json.loads(
+            (self.state_root / "mt4-trade-gateway-ledger.json").read_text(
+                encoding="ascii"
+            )
+        )["commands"][command["commandId"]]
+        self.assertEqual(
+            ledger["recovery"]["action"],
+            "reconcile_terminal_lifecycle_ack",
+        )
+        self.assertFalse(ledger["outstanding"])
+        self.assertEqual(
+            closed["referencePriceBinding"],
+            "recovered_order_lifecycle_current_closed_bar",
+        )
+
+    def test_pending_scan_reads_exact_inactive_recovery_lifecycle_ack_once(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        gateway.ingest_ack(self.ack(
+            command,
+            status="EXECUTION_UNKNOWN",
+            reasonCode="ORDER_POST_SEND_VERIFICATION_MISMATCH",
+            mode="demo",
+            ticket=983283721,
+            filledPrice=3300.25,
+            filledSlippagePoints=22.0,
+            actualStopLoss=command["stopLoss"],
+            actualTakeProfit=command["takeProfit"],
+            actualMagicNumber=4186001,
+            actualComment=f"HQ:{command['commandId']}",
+            verificationStatus="MISMATCH",
+            executionState="OPEN",
+        ))
+        self.write_outcome(command, ticket=983283721, openPrice=3300.25)
+        gateway.reconcile_execution_unknown(str(command["commandId"]))
+        self.clock.advance(120)
+        recovered_ack = self.ack(
+            command,
+            status="EXECUTED",
+            reasonCode="RECOVERED_ORDER_FOUND",
+            mode="demo",
+            ticket=983283721,
+            filledPrice=3300.25,
+            filledSlippagePoints=0.0,
+            actualStopLoss=command["stopLoss"],
+            actualTakeProfit=command["takeProfit"],
+            actualMagicNumber=4186001,
+            actualComment=f"HQ:{command['commandId']}"[:-8] + "[tp]",
+            verificationStatus="VERIFIED_CLOSED",
+            executionState="CLOSED",
+            eaClosedBarTime=int(command["barTime"]) + 300,
+            closedAt=int(self.clock.current.timestamp()) + 60,
+            closedPnl=7.58,
+        )
+        path = self.ack_path(command)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(recovered_ack), encoding="ascii")
+
+        events = gateway.ingest_pending_acks()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["ack"]["executionState"], "CLOSED")
+        self.assertEqual(
+            events[0]["referencePriceBinding"],
+            "recovered_order_lifecycle_current_closed_bar",
+        )
+        self.assertEqual(gateway.ingest_pending_acks(), [])
+
+    def test_normal_executed_ack_still_rejects_wrong_closed_bar(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        with self.assertRaises(self.gateway_module.AckValidationError) as raised:
+            gateway.ingest_ack(self.ack(
+                command,
+                status="EXECUTED",
+                reasonCode="ORDER_ACCEPTED",
+                mode="demo",
+                ticket=123456,
+                eaClosedBarTime=int(command["barTime"]) + 300,
+            ))
+        self.assertEqual(
+            raised.exception.code,
+            "ack_ea_closed_bar_time_mismatch",
+        )
+
     def test_ack_file_path_and_pending_scan_match_ea_contract(self) -> None:
         gateway = self.gateway()
         command = gateway.queue_trade_intent(self.intent())["command"]
@@ -1027,6 +1808,8 @@ class MT4TradeGatewayTests(unittest.TestCase):
         outcome.update({
             "channelId": command["channelId"],
             "commandId": command["commandId"],
+            "ticket": 123456,
+            "openPrice": command["referencePrice"],
             "comment": f"HQ:{command['commandId']}",
         })
         outcome_path = (
@@ -1038,9 +1821,17 @@ class MT4TradeGatewayTests(unittest.TestCase):
             / f"{command['commandId']}.json"
         )
         outcome_path.parent.mkdir(parents=True, exist_ok=True)
-        outcome_path.write_text(json.dumps(outcome), encoding="ascii")
+        outcome_raw = json.dumps(outcome, separators=(",", ":"))
+        for field in ("openPrice", "stopLoss", "takeProfit"):
+            encoded = json.dumps(outcome[field], separators=(",", ":"))
+            outcome_raw = outcome_raw.replace(
+                f'"{field}":{encoded}',
+                f'"{field}":{float(outcome[field]):.2f}',
+                1,
+            )
+        outcome_path.write_text(outcome_raw, encoding="ascii")
         observed = gateway.read_outcome(str(command["commandId"]))
-        self.assertEqual(observed["ticket"], 12345678)
+        self.assertEqual(observed["ticket"], 123456)
         self.assertEqual(observed["executionState"], "CLOSED")
         self.assertEqual(observed["closedPnl"], 4.25)
 

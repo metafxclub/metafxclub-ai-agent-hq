@@ -283,10 +283,10 @@
       }
     },
     "left_audit_crystals": {
-      "titleTh": "เรดาร์เว็บไซต์ Indicator",
+      "titleTh": "Radar Website Tool",
       "referencePrimarySkillId": "metafx-online-system-scout",
       "ownerAgentId": "codex_mcp_operator",
-      "schedule": {"supported": true, "timezone": "Asia/Bangkok", "defaultTimes": ["09:00"], "actions": ["discover_new_indicators"]},
+      "schedule": {"supported": true, "timezone": "Asia/Bangkok", "defaultTimes": ["09:00"], "maximumRunsPerDay": 2, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "actions": ["discover_new_indicators"]},
       "actions": {
         "discover_new_indicators": {
           "pluginSkillId": "backend-readonly-indicator-scout",
@@ -295,20 +295,27 @@
           "referencePluginSkillId": "metafx-online-system-scout",
           "referencePluginVersion": "0.1.2",
           "automationMode": "scheduled_read_only",
-          "inputPreset": {"query": "ค้นหา Indicator หรือเครื่องมือวิเคราะห์ใหม่ที่มีแหล่งเผยแพร่สาธารณะ", "platform": "any", "category": "any", "maxItems": 6},
-          "outputFields": ["indicatorName", "platform", "category", "sourceUrl", "publishedAt", "checkedAt", "featureSummary", "availability", "limitations", "duplicateFingerprint"],
-          "evidenceRequired": ["source_url", "checked_at", "public_availability_status"],
+          "inputPreset": {"query": "ค้นหา Indicator, EA หรือ Tool ใหม่ที่มีแหล่งเผยแพร่สาธารณะ", "platform": "any", "category": "any", "maxItems": 6},
+          "outputFields": ["entries"],
+          "entryContract": {
+            "containerField": "entries",
+            "minimumItemsPerRun": 1,
+            "maximumItemsPerRun": 6,
+            "workerRequiredFields": ["toolName", "toolKind", "platform", "category", "version", "summaryTh", "sourceTitle", "sourceUrl", "publishedAt", "checkedAt", "verificationStatus", "availability", "eaReadiness", "missingRules", "sourceLimitations", "screenshot"],
+            "backendComputedFields": ["recordId", "duplicateFingerprint", "duplicateStatus", "duplicateScope"]
+          },
+          "evidenceRequired": ["source_url", "source_title", "checked_at", "ea_readiness", "public_availability_status"],
           "screenshotPolicy": "optional_when_backend_adapter_available",
           "reportType": "indicator_scout_report",
-          "failureHelpTh": "ตรวจ Bridge, Codex Login, Rate Limit และ URL ต้นทาง ภาพจะปรากฏเมื่อ Screenshot Adapter เก็บภาพจริงได้เท่านั้น"
+          "failureHelpTh": "ตรวจ Bridge, Codex Login, Rate Limit และ URL ต้นทาง ระบบจะไม่อ้างว่ามีภาพหรือเขียน Google Sheet จนกว่า Backend Adapter จะยืนยันหลักฐานจริง"
         },
         "save_indicator_scout_schedule": {
           "pluginSkillId": "backend-dashboard-scheduler",
           "pluginVersion": "backend-v1",
           "procedureKind": "backend_procedure",
           "automationMode": "settings_only",
-          "inputPreset": {"enabled": false, "times": ["09:00"], "timezone": "Asia/Bangkok"},
-          "outputFields": ["requestedEnabled", "effectiveEnabled", "times", "timezone", "lastRunStatus", "savedAt"],
+          "inputPreset": {"enabled": false, "times": ["09:00"], "timezone": "Asia/Bangkok", "maximumRunsPerDay": 2, "googleSheetUrlOrId": null, "googleSheetTabName": null},
+          "outputFields": ["requestedEnabled", "effectiveEnabled", "times", "maxConfiguredTimes", "timezone", "lastRunStatus", "savedAt", "googleSheet"],
           "evidenceRequired": ["local_settings_record", "scheduler_state"],
           "screenshotPolicy": "not_required",
           "reportType": "indicator_scout_report",
@@ -320,17 +327,17 @@
       "titleTh": "ข่าวตลาดวันนี้และมุมมอง 28 คู่เงิน",
       "primaryProcedureId": "guarded-web-research",
       "ownerAgentId": "codex_mcp_operator",
-      "schedule": {"supported": true, "timezone": "Asia/Bangkok", "defaultTimes": ["07:00", "13:00", "19:00"], "actions": ["analyze_daily_market_news"], "manualOrAgentHandoffActions": ["build_fx_pair_bias"]},
+      "schedule": {"supported": true, "timezone": "Asia/Bangkok", "defaultTimes": ["07:00"], "maximumTimes": 2, "maximumRunsPerDay": 2, "actions": ["analyze_daily_market_news"], "manualOrAgentHandoffActions": ["build_fx_pair_bias"]},
       "actions": {
         "analyze_daily_market_news": {
           "pluginSkillId": "guarded-web-research",
           "pluginVersion": "backend-v1",
           "procedureKind": "backend_procedure",
           "automationMode": "scheduled_read_only",
-          "inputPreset": {"minimumImpact": "high", "brief": "สรุปข่าวที่กระทบ Forex พร้อมเวลาไทย คู่เงินที่เกี่ยวข้อง และช่วงที่ EA ควรระวัง"},
-          "outputFields": ["events", "publishedAt", "eventAt", "checkedAt", "impact", "affectedCurrencies", "dangerWindows", "sourceLinks", "limitations"],
-          "evidenceRequired": ["source_url", "published_or_event_time", "checked_at"],
-          "screenshotPolicy": "optional_when_backend_adapter_available",
+          "inputPreset": {"minimumImpact": "high", "brief": "งานเดียว: สรุปข่าว Forex ปัจจุบัน ช่วงระวัง EA และ Bias ระยะสั้น กลาง ยาวครบ 28 คู่ จากหลักฐานเว็บสาธารณะ; Forex Factory เป็นแหล่งที่ควรใช้เมื่อเข้าถึงได้แต่ไม่มี Direct Adapter"},
+          "outputFields": ["events", "dangerWindows", "pairBias", "sourceLinks", "checkedAt", "updatedAt", "limitations"],
+          "evidenceRequired": ["source_url", "published_or_event_time", "checked_at", "28_pair_rows", "source_url_per_supported_bias", "unknown_when_unverified", "updated_at"],
+          "screenshotPolicy": "not_required",
           "reportType": "fx_news_bias_report",
           "failureHelpTh": "ตรวจ Bridge, Codex Login, Rate Limit และแหล่งข่าว หากไม่มีหลักฐานให้แสดง unknown และไม่สร้างข่าวแทน"
         },
@@ -339,8 +346,9 @@
           "pluginVersion": "backend-v1",
           "procedureKind": "backend_procedure",
           "automationMode": "mission_on_demand",
+          "legacyManualCompatibility": true,
           "requiredInputs": ["sourceReportId"],
-          "inputPreset": {"brief": "สร้าง Bias ระยะสั้น กลาง ยาว ครบ 28 คู่ โดยทุกแถวอ้างอิงข่าวต้นทางหรือระบุ unknown"},
+          "inputPreset": {"brief": "โหมด Legacy/manual: สร้าง Bias ระยะสั้น กลาง ยาว ครบ 28 คู่ โดยทุกแถวอ้างอิงข่าวต้นทางหรือใช้ insufficient_data"},
           "outputFields": ["pairBias", "sourceLinks", "updatedAt"],
           "evidenceRequired": ["28_pair_rows", "source_url_per_supported_bias", "unknown_when_unverified", "updated_at"],
           "screenshotPolicy": "not_required",
@@ -352,7 +360,7 @@
           "pluginVersion": "backend-v1",
           "procedureKind": "backend_procedure",
           "automationMode": "settings_only",
-          "inputPreset": {"enabled": false, "times": ["07:00", "13:00", "19:00"], "timezone": "Asia/Bangkok", "minimumImpact": "high"},
+          "inputPreset": {"enabled": false, "times": ["07:00"], "maximumTimes": 2, "maximumRunsPerDay": 2, "timezone": "Asia/Bangkok", "minimumImpact": "high"},
           "outputFields": ["requestedEnabled", "effectiveEnabled", "times", "timezone", "minimumImpact", "lastRunStatus", "savedAt"],
           "evidenceRequired": ["local_settings_record", "scheduler_state"],
           "screenshotPolicy": "not_required",
@@ -414,7 +422,7 @@
       }
     },
     "right_status_crystals": {
-      "titleTh": "ศูนย์สถานะ VPS, HQ และ Agent",
+      "titleTh": "ศูนย์รวมสถานะการเชื่อมต่ออุปกรณ์",
       "referencePrimarySkillId": "metafx-agent-hq-runtime-builder",
       "ownerAgentId": "vps_watch",
       "schedule": {"supported": false, "reasonTh": "Frontend อ่านสถานะ Local Runner ตามรอบ Refresh อยู่แล้ว"},
@@ -425,7 +433,7 @@
           "procedureKind": "backend_procedure",
           "automationMode": "local_read_only",
           "inputPreset": {},
-          "outputFields": ["checkedAt", "bridgeStatus", "missionWorkerStatus", "schedulerStatus", "codexStatus", "uptime", "limitations"],
+          "outputFields": ["checkedAt", "bridgeStatus", "missionWorkerStatus", "schedulerStatus", "codexStatus", "connectionCenter", "privacy", "limitations"],
           "evidenceRequired": ["backend_observed_at", "local_health_snapshot"],
           "reportType": "ops_overview_report",
           "failureHelpTh": "ตรวจว่า bridge_server.py ทำงานที่ 127.0.0.1 และเปิดดู log ของ Local Runner โดยไม่ส่ง Secret มาหน้าเว็บ"

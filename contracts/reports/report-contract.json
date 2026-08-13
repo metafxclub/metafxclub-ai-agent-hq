@@ -142,6 +142,8 @@
         "dataQualityPassed": null,
         "horizonBars": null,
         "validUntilBarTime": null,
+        "validUntilBarTimeDomain": "mt4_broker_clock",
+        "decisionExpirySource": "round_deadline_at_utc",
         "minimumConfidencePerRole": null,
         "newsEventRisk": null,
         "protectivePriceOwnerRole": null,
@@ -378,8 +380,8 @@
       ]
     },
     "indicator_scout_report": {
-      "schemaVersion": "indicator-scout-report-v1",
-      "purpose": "รายงานค้นหา Indicator, EA Tool และเครื่องมือวิเคราะห์ใหม่จากเว็บไซต์สาธารณะสำหรับ left_audit_crystals พร้อมหลักฐาน สถานะตรวจซ้ำ และสถานะ Adapter ที่ตรงความจริง",
+      "schemaVersion": "radar-website-tool-report-v1",
+      "purpose": "รายงาน Radar Website Tool สำหรับค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะ พร้อมหลักฐาน ตรวจซ้ำกับคลัง Report ในเครื่อง และมุมมอง Today + 7 วัน",
       "searchScope": {
         "query": null,
         "platform": "any|mt4|mt5|tradingview",
@@ -388,93 +390,154 @@
         "publicSourcesOnly": true
       },
       "deduplication": {
-        "performed": false,
-        "basis": ["sourceUrl", "toolName", "platform", "version"],
+        "performed": true,
+        "mode": "deterministic_local_report_catalog",
+        "basis": ["normalizedSourceUrl", "toolName", "platform", "version"],
+        "googleSheetCompared": false,
         "duplicateCount": null
+      },
+      "workerOutputEnvelope": {
+        "contractFields": [
+          {
+            "field": "entries",
+            "value": "JSON array with 1..6 entries"
+          }
+        ],
+        "minimumItemsPerRun": 1,
+        "maximumItemsPerRun": 6,
+        "workerRequiredFields": ["toolName", "toolKind", "platform", "category", "version", "summaryTh", "sourceTitle", "sourceUrl", "publishedAt", "checkedAt", "verificationStatus", "availability", "eaReadiness", "missingRules", "sourceLimitations", "screenshot"],
+        "backendComputedFields": ["recordId", "duplicateFingerprint", "duplicateStatus", "duplicateScope"],
+        "unknownFieldsRejected": true,
+        "invalidEntryFailsWholeResult": true
       },
       "entries": [
         {
           "recordId": "opaque backend id",
           "toolName": "ชื่อ Indicator หรือ EA Tool",
-          "toolKind": "indicator|ea_tool|analysis_tool|library|research",
+          "toolKind": "indicator|ea|tool",
           "platform": "mt4|mt5|tradingview|multi_platform|unknown",
-          "version": null,
+          "category": "หมวดของเครื่องมือหรือ unknown",
+          "version": "unknown",
           "summaryTh": "สรุปภาษาไทย",
           "sourceUrl": "https://public-source.example",
           "sourceTitle": "ชื่อหน้าเว็บ",
           "publishedAt": null,
           "checkedAt": "ISO-8601",
           "verificationStatus": "unverified|partially_verified|verified|insufficient_evidence",
-          "duplicateStatus": "not_checked|unique|duplicate|possible_duplicate",
-          "screenshot": {"available": false, "status": "coming_soon", "attachmentId": null}
+          "availability": "public|commercial|open_source|unknown",
+          "eaReadiness": "ready|needs_clarification|not_ea_ready",
+          "missingRules": [],
+          "sourceLimitations": [],
+          "duplicateFingerprint": "backend-normalized SHA-256 prefix",
+          "duplicateStatus": "unique|duplicate",
+          "duplicateScope": "none|local_report_catalog|current_result_batch",
+          "screenshot": {"available": false, "status": "not_available|verified_report_attachment", "attachmentId": null, "artifactRef": null}
         }
       ],
       "schedulePreference": {
-        "enabledWhenAdapterReady": false,
+        "enabledWhenAdapterReady": true,
         "times": [],
         "timezone": "Asia/Bangkok",
         "maximumRunsPerDay": 2,
+        "hardRuntimeEnforced": true,
+        "counterPersistence": "backend_local_settings",
+        "countingPolicy": "pre_dispatch_fail_closed_reservation",
+        "stalePendingPolicy": "expire_at_bangkok_day_boundary",
+        "catchUpPolicy": "latest_same_day_slot_only",
         "configurationSaved": false,
-        "recurringSchedulerAvailable": false
+        "recurringSchedulerAvailable": true
+      },
+      "googleSheet": {
+        "configurationMayBeSaved": true,
+        "privateSheetDefaultIncluded": false,
+        "adapterStatus": "not_connected",
+        "externalWriteEnabled": false,
+        "writeRequiresExplicitUserConfirmation": true,
+        "credentialsAcceptedByFrontend": false
+      },
+      "readModel": {
+        "schemaVersion": "radar-website-tool-v1",
+        "primaryViews": ["today", "history_7_days"],
+        "todayEntries": [],
+        "sevenDayEntries": [],
+        "historyWindowDays": 7,
+        "searchScheduleAndSheetLocation": "left_rail"
       },
       "runtimeReadiness": {
         "publicCodexWebResearch": "ready_guarded_read_only",
         "missionReportAudit": "ready",
-        "localDedup": "ready_contract",
-        "screenshotAdapter": "coming_soon",
-        "recurringScheduler": "coming_soon"
+        "localDedup": "implemented_deterministic_local_report_catalog",
+        "googleSheetsAdapter": "not_connected",
+        "screenshotAdapter": "not_connected",
+        "recurringScheduler": "ready_guarded_read_only"
       },
       "truthRules": [
         "Every discovered entry must contain a public source URL and checkedAt timestamp.",
-        "A saved schedule is a Backend preference only until the recurring scheduler adapter is implemented.",
-        "Screenshot evidence remains unavailable until a Backend-owned screenshot adapter returns an attachment id.",
+        "The Backend scheduler reserves and persists at most two actual Radar dispatch attempts per Bangkok calendar day; schedule edits and restarts cannot reset the counter, stale pending work expires at the day boundary, and ambiguous dispatch failures consume capacity fail closed.",
+        "A Google Sheet reference may be saved only after safe URL or ID validation; no Sheet rows are read or written until a Backend-owned adapter is connected and an external write is explicitly confirmed.",
+        "Screenshot evidence remains unavailable unless a Backend-owned adapter returns a verified report attachment.",
+        "Each screenshot must explicitly match that entry by attachmentId or artifactRef; the first report image is never broadcast to unmatched entries.",
+        "recordId, duplicateFingerprint, duplicateStatus, and duplicateScope are computed by Backend and worker-supplied values have no authority.",
         "No discovered performance claim is treated as verified without reproducible evidence."
       ]
     },
     "fx_news_bias_report": {
-      "schemaVersion": "fx-news-bias-report-v1",
-      "purpose": "รายงานข่าวตลาดรายวัน ช่วงระวัง EA และมุมมอง 28 คู่เงินระยะสั้น กลาง และยาวสำหรับ left_signal_cube โดยเป็น Analysis Only และต้องอ้างอิงแหล่งสาธารณะ",
+      "schemaVersion": "fx-news-bias-report-v2",
+      "purpose": "รายงานเดียวจาก analyze_daily_market_news ที่ให้ทั้งข่าวตลาดปัจจุบัน ช่วงระวัง EA และมุมมอง 28 คู่เงินระยะสั้น กลาง และยาวสำหรับ left_signal_cube โดยเป็น Analysis Only และต้องอ้างอิงแหล่งสาธารณะ",
       "marketDate": "YYYY-MM-DD",
-      "generatedAt": "ISO-8601",
-      "highImpactEvents": [
+      "checkedAt": "ISO-8601",
+      "updatedAt": "ISO-8601",
+      "events": [
         {
           "eventId": "opaque backend id",
-          "currency": "USD",
-          "title": "ชื่อเหตุการณ์",
+          "currencies": ["USD"],
+          "titleTh": "ชื่อเหตุการณ์",
           "scheduledAt": "ISO-8601 or null",
           "impact": "low|medium|high|unknown",
           "summaryTh": "สรุปภาษาไทย",
-          "sourceEvidenceIds": ["evidence ids"]
+          "actual": null,
+          "forecast": null,
+          "previous": null,
+          "sourceRefs": ["source ids"]
         }
       ],
-      "eaCautionWindows": [
+      "dangerWindows": [
         {
-          "currency": "USD",
+          "windowId": "opaque backend id",
+          "currencies": ["USD"],
           "startsAt": "ISO-8601",
           "endsAt": "ISO-8601",
           "reasonTh": "เหตุผลที่ควรระวัง",
-          "sourceEvidenceIds": ["evidence ids"]
+          "sourceRefs": ["source ids"]
         }
       ],
       "fxPairUniverse": ["AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDUSD", "CADCHF", "CADJPY", "CHFJPY", "EURAUD", "EURCAD", "EURCHF", "EURGBP", "EURJPY", "EURNZD", "EURUSD", "GBPAUD", "GBPCAD", "GBPCHF", "GBPJPY", "GBPNZD", "GBPUSD", "NZDCAD", "NZDCHF", "NZDJPY", "NZDUSD", "USDCAD", "USDCHF", "USDJPY"],
       "pairBias": [
         {
           "pair": "EURUSD",
-          "short": {"bias": "bullish|bearish|sideway|insufficient_data", "confidence": null, "reasonTh": null, "sourceEvidenceIds": []},
-          "medium": {"bias": "bullish|bearish|sideway|insufficient_data", "confidence": null, "reasonTh": null, "sourceEvidenceIds": []},
-          "long": {"bias": "bullish|bearish|sideway|insufficient_data", "confidence": null, "reasonTh": null, "sourceEvidenceIds": []}
+          "short": {"bias": "bullish|bearish|sideway|insufficient_data", "confidence": null, "reasonTh": null, "sourceRefs": []},
+          "medium": {"bias": "bullish|bearish|sideway|insufficient_data", "confidence": null, "reasonTh": null, "sourceRefs": []},
+          "long": {"bias": "bullish|bearish|sideway|insufficient_data", "confidence": null, "reasonTh": null, "sourceRefs": []},
+          "sourceRefs": []
         }
       ],
-      "sourceEvidence": [
-        {"id": "opaque evidence id", "title": "public source title", "url": "https://...", "publishedAt": null, "checkedAt": "ISO-8601", "noteTh": "เหตุผลที่ใช้แหล่งนี้"}
+      "sourceLinks": [
+        {"id": "opaque source id", "title": "public source title", "url": "https://...", "publishedAt": null, "checkedAt": "ISO-8601"}
       ],
-      "schedulePreference": {"enabledWhenAdapterReady": false, "times": [], "timezone": "Asia/Bangkok", "maximumRunsPerDay": 2, "configurationSaved": false, "recurringSchedulerAvailable": false},
-      "runtimeReadiness": {"publicCodexWebResearch": "ready_guarded_read_only", "fxBiasAnalysis": "ready_analysis_only", "missionReportAudit": "ready", "economicCalendarFeed": "coming_soon", "recurringScheduler": "coming_soon"},
+      "limitations": [],
+      "schedulePreference": {"defaultEnabled": false, "defaultTimes": ["07:00"], "times": ["07:00"], "timezone": "Asia/Bangkok", "maximumTimes": 2, "maximumRunsPerDay": 2, "configurationSaved": false, "recurringSchedulerAvailable": true},
+      "presentation": {"primaryViews": ["pair_bias", "today"], "defaultView": "pair_bias", "historyTab": false, "scheduleAndMethodLocation": "left_rail"},
+      "freshnessReadModel": {"asOf": "ISO-8601 or null", "currentBangkokDate": "YYYY-MM-DD", "reportBangkokDate": "YYYY-MM-DD or null", "stale": false, "currentDataAvailable": false, "staleDataPolicy": "empty_today_events_danger_windows_and_directional_bias"},
+      "runtimeReadiness": {"publicCodexWebResearch": "ready_guarded_read_only", "fxBiasAnalysis": "ready_analysis_only", "missionReportAudit": "ready", "forexFactoryPreferredPublicSource": true, "forexFactoryDirectAdapter": "not_connected", "economicCalendarFeed": "coming_soon", "recurringScheduler": "ready_guarded_read_only"},
       "truthRules": [
+        "One analyze_daily_market_news report must provide events, dangerWindows, and exactly 28 pairBias rows together; build_fx_pair_bias remains legacy manual compatibility only.",
         "The pair universe must contain exactly the 28 canonical FX pairs and each pair has short, medium, and long horizons.",
         "Bias is market analysis, not an order, recommendation guarantee, or approval to trade.",
-        "Every event and non-insufficient bias must point to source evidence recorded by Backend.",
-        "A saved schedule does not imply that recurring execution is active."
+        "Every event, danger window, and non-insufficient bias must point to a public source URL recorded as Backend report evidence.",
+        "Forex Factory is a preferred compatible public source when accessible, but the product must not claim a direct Forex Factory adapter or feed.",
+        "Unsupported or unverified directional claims remain insufficient_data; the Backend never fabricates missing news or bias.",
+        "A report from a different Asia/Bangkok calendar day is marked stale and its events or danger windows are never presented as today's news.",
+        "The Backend scheduler supports one default run at 07:00 and at most two runs per Bangkok calendar day."
       ]
     },
     "ea_development_report": {
@@ -518,17 +581,20 @@
       ]
     },
     "ops_overview_report": {
-      "schemaVersion": "ops-overview-report-v1",
-      "purpose": "รายงานสถานะ VPS, HQ, Local Bridge และ Preference ของ Agent ที่ปลอดภัยสำหรับ right_status_crystals โดยไม่ปะปน Risk Review หรือ Auto Trading Status",
-      "vpsHealth": {"available": false, "observedAt": null, "uptimeSeconds": null, "cpuPercent": null, "ramPercent": null, "diskPercent": null, "latencyMs": null, "source": "backend_local_probe|external_provider|unavailable"},
-      "hqBridgeHealth": {"available": false, "observedAt": null, "bridgeStatus": null, "missionWorkerStatus": null, "codexStatus": null, "rateLimitStatus": null, "blockers": []},
+      "schemaVersion": "ops-overview-report-v2",
+      "purpose": "รายงานศูนย์รวมสถานะการเชื่อมต่อของอุปกรณ์ 9 จุด พร้อม Local Bridge, Codex CLI, MCP, Mission Worker, Scheduler, MT4/MT5, Adapter และ Preference ของ Agent ที่ปลอดภัยสำหรับ right_status_crystals",
+      "connectionCenter": {"schemaVersion": "hq-equipment-connection-center-v1", "checkedAt": null, "summary": {"deviceCount": 9, "readyCount": 0, "partialCount": 0, "attentionCount": 0, "notCheckedCount": 9}, "devices": [], "services": {"localBridge": {}, "codexCli": {}, "mcp": {}, "missionWorker": {}, "scheduler": {}, "codexQuota": {}}, "privacy": {"secretsExposed": false, "filesystemPathsExposed": false, "processIdsExposed": false, "accountDetailsExposed": false, "channelIdsExposed": false, "keysExposed": false}},
+      "localHealth": {"available": true, "observedAt": null, "bridgeStatus": null, "missionWorkerStatus": null, "schedulerStatus": null, "codexStatus": null, "vpsMetricsObserved": false},
       "agentPreferences": {"language": "th", "modelTier": "specialist_balanced", "tokenBudget": null, "timeoutSeconds": null, "outputLimitChars": null, "rateReservePercent": null, "updatedAt": null, "updatedBy": null},
-      "activityHistory": [{"missionId": "mission id", "actionId": null, "ownerAgentId": "agent id", "status": "queued|waiting_approval|running|blocked|completed|failed|archived", "createdAt": "ISO-8601", "updatedAt": "ISO-8601"}],
-      "runtimeReadiness": {"localBridgeHealth": "ready", "missionWorkerHealth": "ready", "vpsMetrics": "runtime_detected", "safeAgentPreferences": "ready_backend_validated", "activityHistory": "ready", "externalVpsApi": "coming_soon"},
+      "presentation": {"primaryTabs": ["connections"], "defaultTab": "connections", "coreServicesPresentation": "status_strip", "agentSettingsLocation": "left_rail", "historyTab": false},
+      "runtimeReadiness": {"localBridgeHealth": "ready", "missionWorkerHealth": "ready", "equipmentConnectionProjection": "ready_bounded_read_only", "vpsMetrics": "not_connected", "safeAgentPreferences": "ready_backend_validated", "externalVpsApi": "coming_soon"},
       "truthRules": [
-        "Unknown health metrics remain null and never use fabricated zero values.",
+        "The connection center uses one bounded shared Backend snapshot for exactly nine equipment dashboards and never probes once per prop.",
+        "Unknown or metadata-only runtime states remain not_checked and never become ready merely because a static contract says an adapter exists.",
+        "AI Trade snapshot, ensemble, gateway, kill-switch, and live states require their dedicated runtime probes and remain not_checked in the generic connection center until observed.",
+        "Unknown VPS health metrics remain null and never use fabricated zero values.",
         "Agent preferences accept only language, modelTier, tokenBudget, timeoutSeconds, outputLimitChars, and rateReservePercent after Backend bounds validation.",
-        "Provider model ids, tokens, API keys, cookies, auth files, passwords, SSH keys, and broker credentials are forbidden.",
+        "Provider model ids, tokens, API keys, cookies, auth files, passwords, SSH keys, broker credentials, filesystem paths, process ids, account details, channel ids, and signing keys are forbidden.",
         "risk_review routes to Mission Strategy Table and auto_trading_status_report routes to left_analytics_console; neither report type is accepted by this VPS/HQ dashboard."
       ]
     },
@@ -650,14 +716,21 @@
               "triggerMode": "last_closed_candle_time_change",
               "pollSeconds": 5,
               "settleSeconds": 10,
+              "dailyRoundLimitMode": "unlimited",
+              "dailyRoundLimitEnabled": false,
               "maxDailyRounds": 24,
+              "effectiveMaxDailyRounds": null,
               "minRemainingPercent": 30,
               "analysisBarCount": 120,
               "allowedAnalysisBarCounts": [120, 180, 240, 300, 500, 1000],
+              "requiredVotes": 3,
+              "allowedRequiredVotes": [1, 2, 3],
+              "maxManagedOrders": 1,
+              "allowedMaxManagedOrders": [1, 3, 5, 10],
               "supportedTimeframes": ["M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"],
               "manualOnlyTimeframes": ["M1"],
-            "backlogPolicy": "latest_only_cancel_stale_round",
-            "roundExecution": "bounded_parallel_three_specialists",
+              "backlogPolicy": "durable_fifo_exact_snapshot_audit_only_when_stale",
+              "roundExecution": "bounded_parallel_three_specialists",
               "activationPolicy": "wait_next_closed_bar"
             },
             "state": {
@@ -689,6 +762,15 @@
             "shadowValidationAvailable": false,
             "demoOrderExecutionAvailable": false,
             "liveOrderExecutionAvailable": false,
+            "managedOrderLimit": {
+              "configuredMaxManagedOrders": 1,
+              "eaMaxManagedPositions": null,
+              "effectiveMaxManagedOrders": null,
+              "currentManagedPositions": null,
+              "reached": false,
+              "source": "backend_dispatch_cap",
+              "eaInputUnchanged": true
+            },
             "initStatus": {
               "available": false,
               "readStatus": "not_observed",
@@ -782,6 +864,8 @@
               "reasonCodes": ["quality_gate_not_observed"],
               "horizonBars": null,
               "validUntilBarTime": null,
+              "validUntilBarTimeDomain": "mt4_broker_clock",
+              "decisionExpirySource": "round_deadline_at_utc",
               "confidence": null,
               "newsEventRisk": null,
               "protectivePriceOwnerRole": null,
@@ -810,6 +894,21 @@
           },
           "history": {
             "available": true,
+            "analysisHistory": {
+              "schemaVersion": "ai-trade-council-analysis-history-v1",
+              "available": true,
+              "items": [],
+              "summary": {"expected": 0, "analyzed": 0, "skipped": 0, "pending": 0, "reconciled": true, "completeThreeOfThree": 0},
+              "sourceScope": "durable_council_parent_missions_plus_automation_coverage_store",
+              "skippedRowsNeverContainVotes": true,
+              "backlogTradePolicy": "never_dispatch_stale_snapshot"
+            },
+            "orderExecutions": {
+              "schemaVersion": "ai-trade-council-order-history-v1",
+              "available": false,
+              "items": [],
+              "summary": {"total": 0, "verified": 0, "unverifiedExecutionUnknown": 0}
+            },
             "summary": "report summary object",
             "items": [],
             "tradingReports": [],
@@ -835,9 +934,17 @@
             "Risk Guard is non-voting; execution status comes only from the backend-owned Trade Gateway and EA ACK.",
             "Price Action alone may propose stopLossPrice and takeProfitPrice; Technical and News must return null prices, and Lot remains an EA input.",
             "A trade command is eligible only after all three votes are returned, the configured 1/3, 2/3, or 3/3 BUY or SELL threshold is reached without an opposing-direction vote, and Snapshot freshness, data quality, Horizon, Confidence, news Event Risk, protective-price, Risk, and EA gates all pass.",
+            "maxManagedOrders accepts only 1, 3, 5, or 10. Backend uses the lower of that value and the EA limit, and reconciles fresh EA telemetry with selected-channel durable EXECUTED ACK Order history before publishing another command.",
             "Per-order human approval is not required; the locally configured EA mode and LiveArmed inputs are the persistent execution authorization.",
             "Unknown trading values remain null with available=false.",
             "history accepts only exact linked runtime reports; memory cards and meeting transcripts are excluded.",
+            "analysisHistory projects each exact Council parent with Technical, Price Action, and News vote/confidence/status, completeness, consensus, no-trade, and exact Order linkage; skipped coverage rows contain no fabricated specialist votes.",
+            "A ticket-bearing EXECUTION_UNKNOWN appears only when the selected channel and independent ticket/magic/comment/SL/TP identity match; it is amber unverified and is excluded from verified/executed counts.",
+            "Automation coverage is durable FIFO: every observed bar is analyzed, skipped, or pending; stale backlog analysis can never publish a trade command.",
+            "validUntilBarTime stays in raw MT4 broker-clock domain only for specialist vote and bar identity; Backend never compares it with UTC or guesses an offset, and roundDeadlineAt is the sole UTC decision expiry gate.",
+            "OPEN outcome observedAt is EA UTC evidence with a bounded freshness age; CLOSED outcome observedAt and closedAt are raw broker OrderCloseTime values and must never be rendered as UTC or assigned a UTC age without explicit offset evidence.",
+            "Agent chat freshness uses snapshotObservedAt or Mission completion timestamps with an explicit timezone; raw MT4 closedBarTime remains broker-clock identity only and is never formatted or aged as UTC.",
+            "Active Order history fails closed during a terminal selection transition instead of querying one MT4 channel and labeling or filtering it as another.",
             "Live execution remains false until Backend signing and EA signature verification are ready, their key ids match, TrustedSigningKeyId is pinned, and the installed EA reports Live mode plus LiveArmed with Kill Switch ready."
           ]
         },

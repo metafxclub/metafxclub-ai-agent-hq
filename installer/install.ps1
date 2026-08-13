@@ -4,6 +4,7 @@ param(
     [switch]$SkipLaunch,
     [switch]$SkipShortcuts,
     [switch]$ListAvailableEndpoints,
+    [switch]$PackageSmoke,
     [ValidateRange(0, 65535)]
     [int]$Port = 0,
     [switch]$EndpointConfirmed
@@ -20,8 +21,15 @@ $requirementsName = "requirements-runner.txt"
 $bridgeEndpointPath = Join-Path $installRoot "data\runtime\bridge-endpoint.json"
 $installResultPath = Join-Path $installRoot "data\runtime\install-result.json"
 $bridgeTaskName = "Metafxclub AI Agent HQ Bridge"
-$bridgeTaskWatchdogMinutes = 5
+$bridgeTaskWatchdogMinutes = 15
 $bridgeTaskPreviousPort = 0
+$bridgeTaskExisted = $false
+$applicationRollbackState = $null
+$applicationMutationStarted = $false
+$previousBridgeWasRunning = $false
+$previousBridgeWasStopped = $false
+$candidateBridgeMayBeRunning = $false
+$rollbackIncomplete = $false
 
 if ($Port -ne 0 -and $Port -lt 1024) {
     throw "Port ต้องเป็น 0 หรืออยู่ในช่วง 1024-65535"
@@ -260,7 +268,11 @@ function Test-PythonCommand {
             return $null
         }
         $details = ($raw | Select-Object -Last 1) | ConvertFrom-Json
-        if ([int]$details.major -ne 3 -or [int]$details.minor -lt 10) {
+        if (
+            [int]$details.major -ne 3 -or
+            [int]$details.minor -lt 10 -or
+            [int]$details.minor -gt 14
+        ) {
             return $null
         }
         return [pscustomobject]@{
@@ -295,7 +307,7 @@ function Resolve-SystemPython {
         }
     }
 
-    throw "ไม่พบ Python 3.10 ขึ้นไป กรุณาติดตั้ง Python จาก python.org และเลือก Add Python to PATH แล้วเปิด Installer อีกครั้ง ระบบจะไม่ดาวน์โหลด Python หรือขอสิทธิ์ Administrator ให้อัตโนมัติ"
+    throw "ไม่พบ Python 3.10-3.14 กรุณาติดตั้ง Python จาก python.org และเลือก Add Python to PATH แล้วเปิด Installer อีกครั้ง ระบบจะไม่ดาวน์โหลด Python หรือขอสิทธิ์ Administrator ให้อัตโนมัติ"
 }
 
 function Invoke-CheckedNative {
@@ -323,8 +335,15 @@ function Assert-SafeSource {
         "backend\local-runner\bridge_server.py",
         "frontend\index.html",
         "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4",
-        "artifacts\mt4-ai-council-ea-v2.14-broker-compat-hardening\MetafxHQTradeGateway.ex4",
+        "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\MetafxHQTradeGateway.mq4",
+        "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\MetafxHQTradeGateway.ex4",
+        "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\README_TH.md",
+        "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\AUDIT_TH.md",
+        "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\SHA256SUMS.txt",
+        "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\BUILD_LOG.txt",
         "runner\codex_cli_runner.py",
+        "scripts\register-bridge-autostart.ps1",
+        "scripts\run-bridge-watchdog-hidden.vbs",
         "scripts\start-local-bridge.ps1",
         "tests\test_runtime_integrity.py",
         $requirementsName
@@ -339,7 +358,7 @@ function Assert-SafeSource {
         ".env", ".env.local", ".env.production", "credentials.json", "cookies.json",
         "auth.json", "secrets.json", "config.toml", "id_rsa", "id_ed25519"
     )
-    $allowedDirectories = @("backend", "contracts", "docs", "frontend", "installer", "integrations", "runner", "scripts", "tests")
+    $allowedDirectories = @(".github", "backend", "contracts", "docs", "frontend", "installer", "integrations", "runner", "scripts", "tests")
     $excludedDirectoryNames = @(".venv", "__pycache__", "node_modules", ".pytest_cache", "dist", "build")
     foreach ($directoryName in $allowedDirectories) {
         $directory = Join-Path $sourceRoot $directoryName
@@ -380,6 +399,116 @@ function Assert-SafeSource {
             }
         }
     }
+
+    Assert-EaArtifactIntegrity
+    Assert-NoEmbeddedHighConfidenceSecrets
+}
+
+function Assert-EaArtifactIntegrity {
+    param([string]$CandidateRoot = $sourceRoot)
+
+    $artifactDirectory = Join-Path $CandidateRoot "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening"
+    $manifestPath = Join-Path $artifactDirectory "SHA256SUMS.txt"
+    $expectedHashes = @{}
+    foreach ($line in Get-Content -LiteralPath $manifestPath -Encoding UTF8) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+        if ($line -notmatch '^([A-Fa-f0-9]{64})\s+([^\\/]+)$') {
+            throw "Manifest SHA-256 ของ EA มีรูปแบบไม่ถูกต้อง"
+        }
+        $expectedHashes[$Matches[2]] = $Matches[1].ToUpperInvariant()
+    }
+
+    foreach ($fileName in @("MetafxHQTradeGateway.mq4", "MetafxHQTradeGateway.ex4")) {
+        if (-not $expectedHashes.ContainsKey($fileName)) {
+            throw "Manifest SHA-256 ของ EA ไม่มีรายการ $fileName"
+        }
+        $artifactPath = Join-Path $artifactDirectory $fileName
+        $actualHash = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToUpperInvariant()
+        if ($actualHash -cne [string]$expectedHashes[$fileName]) {
+            throw "หยุดติดตั้ง: SHA-256 ของ $fileName ไม่ตรงกับ Manifest"
+        }
+    }
+
+    $integrationSource = Join-Path $CandidateRoot "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4"
+    $artifactSource = Join-Path $artifactDirectory "MetafxHQTradeGateway.mq4"
+    $integrationHash = (Get-FileHash -LiteralPath $integrationSource -Algorithm SHA256).Hash.ToUpperInvariant()
+    $artifactSourceHash = (Get-FileHash -LiteralPath $artifactSource -Algorithm SHA256).Hash.ToUpperInvariant()
+    if ($integrationHash -cne $artifactSourceHash) {
+        throw "หยุดติดตั้ง: Source EA ใน Integration ไม่ตรงกับ Source ที่ใช้สร้าง Artifact"
+    }
+
+    $buildLogPath = Join-Path $artifactDirectory "BUILD_LOG.txt"
+    $buildLog = Get-Content -LiteralPath $buildLogPath -Raw -Encoding UTF8
+    if (
+        $buildLog -notmatch '(?m)^Result:\s*0 errors, 0 warnings,' -or
+        $buildLog -notmatch ("(?m)^SourceSHA256:\s*{0}\s*$" -f [regex]::Escape($integrationHash)) -or
+        $buildLog -notmatch ("(?m)^BinarySHA256:\s*{0}\s*$" -f [regex]::Escape([string]$expectedHashes["MetafxHQTradeGateway.ex4"]))
+    ) {
+        throw "หยุดติดตั้ง: หลักฐาน Compile ของ EA ไม่ตรงกับ Source/Binary ใน Artifact"
+    }
+    if ($buildLog -match '(?i)(?:[A-Z]:\\|/Users/|/home/)') {
+        throw "หยุดติดตั้ง: BUILD_LOG ของ EA มี Absolute local path"
+    }
+}
+
+function Assert-NoEmbeddedHighConfidenceSecrets {
+    param([string]$CandidateRoot = $sourceRoot)
+
+    $productionRoots = @(".github", "backend", "contracts", "docs", "frontend", "installer", "integrations", "runner", "scripts", "tests")
+    $textExtensions = @(".bat", ".cmd", ".css", ".html", ".js", ".json", ".md", ".mq4", ".ps1", ".py", ".txt", ".vbs", ".yaml", ".yml")
+    $secretPatterns = @(
+        '(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{32,}',
+        '(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{30,}',
+        '(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{20,}',
+        '(?<![A-Z0-9])AKIA[A-Z0-9]{16}(?![A-Z0-9])',
+        '(?<![0-9])\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])',
+        '-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'
+    )
+
+    foreach ($relativeRoot in $productionRoots) {
+        $root = Join-Path $CandidateRoot $relativeRoot
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+            continue
+        }
+        foreach ($file in Get-ChildItem -LiteralPath $root -Recurse -File -Force) {
+            if ($file.Extension.ToLowerInvariant() -notin $textExtensions) {
+                continue
+            }
+            if ($file.FullName -match '[\\/](?:\.venv|node_modules|__pycache__|dist|build)[\\/]') {
+                continue
+            }
+            $content = [IO.File]::ReadAllText($file.FullName)
+            foreach ($pattern in $secretPatterns) {
+                if ($content -match $pattern) {
+                    throw "หยุดติดตั้ง: พบข้อมูลที่มีรูปแบบคล้าย Secret ในไฟล์โปรแกรม ($($file.Name))"
+                }
+            }
+        }
+    }
+
+    $additionalTextFiles = @(
+        "index.html", "Open Metafx Agent HQ.cmd", "README.md", $requirementsName,
+        "1-INSTALL-HQ.bat", "UPDATE-HQ.bat", "REPAIR-HQ.bat", "UNINSTALL-HQ.bat",
+        "STUDENT-QUICKSTART-TH.md", "AGENTS.md", "SECURITY.md", "LICENSE", "LICENSE.md",
+        "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\README_TH.md",
+        "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\AUDIT_TH.md",
+        "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\BUILD_LOG.txt",
+        "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\SHA256SUMS.txt"
+    )
+    foreach ($relativePath in $additionalTextFiles) {
+        $path = Join-Path $CandidateRoot $relativePath
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            continue
+        }
+        $content = [IO.File]::ReadAllText($path)
+        foreach ($pattern in $secretPatterns) {
+            if ($content -match $pattern) {
+                throw "หยุดติดตั้ง: พบข้อมูลที่มีรูปแบบคล้าย Secret ในไฟล์ชุดแจก ($relativePath)"
+            }
+        }
+    }
 }
 
 function Suspend-BridgeScheduledTask {
@@ -392,9 +521,10 @@ function Suspend-BridgeScheduledTask {
     }
 
     $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction SilentlyContinue
-    if (-not $task -or [string]$task.State -ceq "Disabled") {
+    if (-not $task) {
         return $false
     }
+    $script:bridgeTaskExisted = $true
 
     $autostartStatePath = Join-Path $installRoot "data\runtime\bridge-autostart.json"
     if (Test-Path -LiteralPath $autostartStatePath -PathType Leaf) {
@@ -402,7 +532,17 @@ function Suspend-BridgeScheduledTask {
             $autostartState = Get-Content -LiteralPath $autostartStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
             $savedWatchdogMinutes = [int]$autostartState.watchdog_minutes
             if ($savedWatchdogMinutes -ge 1 -and $savedWatchdogMinutes -le 30) {
-                $script:bridgeTaskWatchdogMinutes = $savedWatchdogMinutes
+                $savedStateVersion = 0
+                $versionProperty = $autostartState.PSObject.Properties["version"]
+                if ($versionProperty) {
+                    $savedStateVersion = [int]$versionProperty.Value
+                }
+                if ($savedStateVersion -lt 3 -and $savedWatchdogMinutes -eq 5) {
+                    $script:bridgeTaskWatchdogMinutes = 15
+                }
+                else {
+                    $script:bridgeTaskWatchdogMinutes = $savedWatchdogMinutes
+                }
             }
         }
         catch {
@@ -426,21 +566,41 @@ function Suspend-BridgeScheduledTask {
         }
     }
 
-    Write-Step "กำลังพัก Watchdog ของ Bridge ระหว่างอัปเดตไฟล์"
-    Disable-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop | Out-Null
-    $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
-    if ([string]$task.State -in @("Running", "Queued")) {
-        Stop-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
-        $deadline = [DateTime]::UtcNow.AddSeconds(15)
-        do {
-            Start-Sleep -Milliseconds 250
-            $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
-        } while ([string]$task.State -in @("Running", "Queued") -and [DateTime]::UtcNow -lt $deadline)
-        if ([string]$task.State -in @("Running", "Queued")) {
-            throw "พัก Watchdog ไม่สำเร็จ จึงหยุดก่อนแก้ไฟล์โปรแกรม"
-        }
+    if ([string]$task.State -ceq "Disabled") {
+        return $false
     }
-    return $true
+
+    $taskWasDisabled = $false
+    try {
+        Write-Step "กำลังพัก Watchdog ของ Bridge ระหว่างอัปเดตไฟล์"
+        Disable-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop | Out-Null
+        $taskWasDisabled = $true
+        $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
+        if ([string]$task.State -in @("Running", "Queued")) {
+            Stop-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            do {
+                Start-Sleep -Milliseconds 250
+                $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
+            } while ([string]$task.State -in @("Running", "Queued") -and [DateTime]::UtcNow -lt $deadline)
+            if ([string]$task.State -in @("Running", "Queued")) {
+                throw "พัก Watchdog ไม่สำเร็จ จึงหยุดก่อนแก้ไฟล์โปรแกรม"
+            }
+        }
+        return $true
+    }
+    catch {
+        $suspendError = [string]$_.Exception.Message
+        if ($taskWasDisabled -and (Get-Command Enable-ScheduledTask -ErrorAction SilentlyContinue)) {
+            try {
+                Enable-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop | Out-Null
+            }
+            catch {
+                throw "พัก Watchdog ล้มเหลวและเปิด Task เดิมคืนไม่สำเร็จ: $suspendError | $($_.Exception.Message)"
+            }
+        }
+        throw $suspendError
+    }
 }
 
 function Restore-BridgeScheduledTask {
@@ -462,7 +622,10 @@ function Restore-BridgeScheduledTask {
 }
 
 function Rebind-BridgeScheduledTask {
-    param([Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$ConfirmedPort)
+    param(
+        [Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$ConfirmedPort,
+        [Parameter(Mandatory = $true)][bool]$EnableAfterRebind
+    )
 
     $registerScript = Join-Path $installRoot "scripts\register-bridge-autostart.ps1"
     if (-not (Test-Path -LiteralPath $registerScript -PathType Leaf)) {
@@ -484,9 +647,24 @@ function Rebind-BridgeScheduledTask {
         }
 
         $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
-        $expectedArgument = "-Action Ensure -Port $ConfirmedPort"
-        if (@($task.Actions).Count -ne 1 -or [string]$task.Actions[0].Arguments -notlike "*$expectedArgument*") {
-            throw "Scheduled Task ไม่ได้บันทึกพอร์ตที่ผ่าน Health check"
+        $taskActions = @($task.Actions)
+        $expectedArgument = "/Port:$ConfirmedPort"
+        if (
+            $taskActions.Count -ne 1 -or
+            [IO.Path]::GetFileName([string]$taskActions[0].Execute) -ine "wscript.exe" -or
+            [string]$taskActions[0].Arguments -notlike "*//B*" -or
+            [string]$taskActions[0].Arguments -notlike "*run-bridge-watchdog-hidden.vbs*" -or
+            [string]$taskActions[0].Arguments -notlike "*$expectedArgument*"
+        ) {
+            throw "Scheduled Task ไม่ได้บันทึกตัวเปิดแบบไม่มีหน้าต่างและพอร์ตที่ผ่าน Health check"
+        }
+        if (-not $EnableAfterRebind) {
+            Disable-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop | Out-Null
+            $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
+            if ([string]$task.State -cne "Disabled") {
+                throw "อัปเกรด Watchdog แล้วแต่คืนสถานะปิดเดิมไม่สำเร็จ"
+            }
+            Write-Step "อัปเกรด Watchdog แบบไม่มีหน้าต่างแล้ว และคงสถานะปิดตามเดิม"
         }
     }
     catch {
@@ -517,13 +695,16 @@ function Stop-ExistingBridge {
 }
 
 function Sync-Directory {
-    param([Parameter(Mandatory = $true)][string]$DirectoryName)
+    param(
+        [Parameter(Mandatory = $true)][string]$DirectoryName,
+        [string]$DestinationRoot = $installRoot
+    )
 
     $sourceDirectory = Join-Path $sourceRoot $DirectoryName
     if (-not (Test-Path -LiteralPath $sourceDirectory -PathType Container)) {
         return
     }
-    $destinationDirectory = Join-Path $installRoot $DirectoryName
+    $destinationDirectory = Join-Path $DestinationRoot $DirectoryName
     New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
 
     $arguments = @(
@@ -543,17 +724,22 @@ function Sync-Directory {
 }
 
 function Copy-ApplicationFiles {
-    if ((Get-ComparablePath -Path $sourceRoot).Equals((Get-ComparablePath -Path $installRoot), [StringComparison]::OrdinalIgnoreCase)) {
+    param([string]$DestinationRoot = $installRoot)
+
+    if (
+        (Get-ComparablePath -Path $sourceRoot).Equals((Get-ComparablePath -Path $installRoot), [StringComparison]::OrdinalIgnoreCase) -and
+        (Get-ComparablePath -Path $DestinationRoot).Equals((Get-ComparablePath -Path $installRoot), [StringComparison]::OrdinalIgnoreCase)
+    ) {
         Write-Step "กำลังซ่อมแซมจากโฟลเดอร์ที่ติดตั้งอยู่ โดยไม่คัดลอกทับข้อมูลผู้ใช้"
         return
     }
 
     Write-Step "กำลังคัดลอกเฉพาะไฟล์โปรแกรมที่อนุญาต"
-    New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
-    foreach ($directoryName in @("backend", "contracts", "docs", "frontend", "installer", "integrations", "runner", "scripts", "tests")) {
-        Sync-Directory -DirectoryName $directoryName
+    New-Item -ItemType Directory -Path $DestinationRoot -Force | Out-Null
+    foreach ($directoryName in @(".github", "backend", "contracts", "docs", "frontend", "installer", "integrations", "runner", "scripts", "tests")) {
+        Sync-Directory -DirectoryName $directoryName -DestinationRoot $DestinationRoot
     }
-    Sync-Directory -DirectoryName "artifacts\mt4-ai-council-ea-v2.14-broker-compat-hardening"
+    Sync-Directory -DirectoryName "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening" -DestinationRoot $DestinationRoot
 
     $rootFiles = @(
         "index.html", "Open Metafx Agent HQ.cmd", "README.md", $requirementsName,
@@ -563,8 +749,236 @@ function Copy-ApplicationFiles {
     foreach ($fileName in $rootFiles) {
         $sourceFile = Join-Path $sourceRoot $fileName
         if (Test-Path -LiteralPath $sourceFile -PathType Leaf) {
-            Copy-Item -LiteralPath $sourceFile -Destination (Join-Path $installRoot $fileName) -Force
+            Copy-Item -LiteralPath $sourceFile -Destination (Join-Path $DestinationRoot $fileName) -Force
         }
+    }
+}
+
+function Get-InstallerTemporaryParent {
+    return [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd("\")
+}
+
+function Assert-InstallerTemporaryDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][ValidateSet("stage", "rollback")][string]$Kind
+    )
+
+    $resolved = [IO.Path]::GetFullPath($Path).TrimEnd("\")
+    $expectedParent = Get-InstallerTemporaryParent
+    $actualParent = [IO.Path]::GetDirectoryName($resolved).TrimEnd("\")
+    $expectedName = if ($Kind -ceq "stage") {
+        '^mfxhq-stage-[a-f0-9]{32}$'
+    }
+    else {
+        '^mfxhq-rollback-[a-f0-9]{32}$'
+    }
+    if (
+        -not $actualParent.Equals($expectedParent, [StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFileName($resolved) -cnotmatch $expectedName
+    ) {
+        throw "ปฏิเสธ Temporary path ของ Installer ที่อยู่นอกพื้นที่หรือรูปแบบที่กำหนด"
+    }
+    return $resolved
+}
+
+function Remove-StagedApplication {
+    param([Parameter(Mandatory = $true)][string]$StagingRoot)
+
+    $resolved = Assert-InstallerTemporaryDirectory -Path $StagingRoot -Kind stage
+    if (Test-Path -LiteralPath $resolved) {
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+    }
+}
+
+function Stop-CandidateBridgeAfterFailedStart {
+    param([ValidateRange(1024, 65535)][int]$CandidatePort)
+
+    $lifecycle = Join-Path $installRoot "scripts\start-local-bridge.ps1"
+    if (-not (Test-Path -LiteralPath $lifecycle -PathType Leaf)) {
+        throw "ไม่พบ Lifecycle สำหรับหยุด Candidate Bridge ก่อน Rollback"
+    }
+    try {
+        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File $lifecycle -Action Stop -Port $CandidatePort | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "Lifecycle คืนรหัส $LASTEXITCODE"
+        }
+        $listener = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $CandidatePort -State Listen -ErrorAction SilentlyContinue
+        if ($listener) {
+            throw "ยังพบ Listener ที่พอร์ต $CandidatePort"
+        }
+        return $true
+    }
+    catch {
+        throw "หยุด Candidate Bridge ที่พอร์ต $CandidatePort ไม่สำเร็จ จึงไม่เขียนทับไฟล์ระหว่าง Rollback: $($_.Exception.Message)"
+    }
+}
+
+function Start-PreviousBridgeAfterRollback {
+    if ($script:bridgeTaskPreviousPort -lt 1024 -or $script:bridgeTaskPreviousPort -gt 65535) {
+        return
+    }
+    $lifecycle = Join-Path $installRoot "scripts\start-local-bridge.ps1"
+    if (-not (Test-Path -LiteralPath $lifecycle -PathType Leaf)) {
+        return
+    }
+    try {
+        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File $lifecycle `
+            -Action Start `
+            -HealthTimeoutSeconds 45 `
+            -Port $script:bridgeTaskPreviousPort | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "คืนไฟล์ Last-good แล้ว แต่เปิด Bridge เดิมที่พอร์ต $($script:bridgeTaskPreviousPort) ไม่สำเร็จ"
+        }
+    }
+    catch {
+        Write-Warning "คืนไฟล์ Last-good แล้ว แต่เปิด Bridge เดิมไม่สำเร็จ: $($_.Exception.Message)"
+    }
+}
+
+function New-StagedApplication {
+    # Staging beside a long LOCALAPPDATA path can push valid, deeply nested
+    # assets beyond legacy Win32 MAX_PATH. Use the short system temp root and
+    # validate every staged and projected installed file before mutation.
+    $stagingParent = Get-InstallerTemporaryParent
+    New-Item -ItemType Directory -Path $stagingParent -Force | Out-Null
+    $stagingRoot = Join-Path $stagingParent ("mfxhq-stage-{0}" -f [Guid]::NewGuid().ToString("N"))
+    try {
+        Copy-ApplicationFiles -DestinationRoot $stagingRoot
+        foreach ($file in Get-ChildItem -LiteralPath $stagingRoot -Recurse -File -Force) {
+            if ($file.FullName.Length -ge 260) {
+                throw "Staged path ยาวเกินขอบเขต Win32 ที่รองรับ ($($file.Name))"
+            }
+            $relativePath = $file.FullName.Substring($stagingRoot.Length).TrimStart("\")
+            $installedPath = Join-Path $installRoot $relativePath
+            if ($installedPath.Length -ge 260) {
+                throw "ตำแหน่งติดตั้งทำให้ Path ของไฟล์ยาวเกินขอบเขต Win32 กรุณาใช้ Windows user path ที่สั้นลง"
+            }
+        }
+        Assert-EaArtifactIntegrity -CandidateRoot $stagingRoot
+        Assert-NoEmbeddedHighConfidenceSecrets -CandidateRoot $stagingRoot
+        $candidatePython = Join-Path $sourceRoot "runner\.venv\Scripts\python.exe"
+        if (-not (Test-Path -LiteralPath $candidatePython -PathType Leaf)) {
+            $resolved = Resolve-SystemPython
+            $candidatePython = [string]$resolved.FilePath
+            $candidatePrefix = @($resolved.PrefixArguments)
+        }
+        else {
+            $candidatePrefix = @()
+        }
+        Push-Location $stagingRoot
+        try {
+            $arguments = @($candidatePrefix) + @(
+                "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py", "-v"
+            )
+            Invoke-CheckedNative -FilePath $candidatePython -Arguments $arguments -FailureMessage "ชุดทดสอบของ Staged application ไม่ผ่าน"
+        }
+        finally {
+            Pop-Location
+        }
+        return $stagingRoot
+    }
+    catch {
+        Remove-StagedApplication -StagingRoot $stagingRoot
+        throw
+    }
+}
+
+function Publish-StagedApplication {
+    param([Parameter(Mandatory = $true)][string]$StagingRoot)
+
+    foreach ($directoryName in @(".github", "backend", "contracts", "docs", "frontend", "installer", "integrations", "runner", "scripts", "tests")) {
+        $sourceDirectory = Join-Path $StagingRoot $directoryName
+        if (-not (Test-Path -LiteralPath $sourceDirectory -PathType Container)) {
+            continue
+        }
+        $destinationDirectory = Join-Path $installRoot $directoryName
+        New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
+        & robocopy.exe $sourceDirectory $destinationDirectory /MIR /XJ /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($LASTEXITCODE -gt 7) {
+            throw "Publish staged directory $directoryName ไม่สำเร็จ (Robocopy รหัส $LASTEXITCODE)"
+        }
+    }
+    $artifactDirectory = "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening"
+    $artifactSource = Join-Path $StagingRoot $artifactDirectory
+    $artifactDestination = Join-Path $installRoot $artifactDirectory
+    New-Item -ItemType Directory -Path $artifactDestination -Force | Out-Null
+    & robocopy.exe $artifactSource $artifactDestination /MIR /XJ /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+    if ($LASTEXITCODE -gt 7) {
+        throw "Publish staged EA artifact ไม่สำเร็จ (Robocopy รหัส $LASTEXITCODE)"
+    }
+    foreach ($file in Get-ChildItem -LiteralPath $StagingRoot -File) {
+        Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $installRoot $file.Name) -Force
+    }
+}
+
+function New-ApplicationRollbackSnapshot {
+    $rollbackParent = Get-InstallerTemporaryParent
+    New-Item -ItemType Directory -Path $rollbackParent -Force | Out-Null
+    $snapshotRoot = Join-Path $rollbackParent ("mfxhq-rollback-{0}" -f [Guid]::NewGuid().ToString("N"))
+    $installExisted = Test-Path -LiteralPath $installRoot -PathType Container
+    New-Item -ItemType Directory -Path $snapshotRoot -Force | Out-Null
+
+    if ($installExisted) {
+        Write-Step "กำลังเก็บ Last-good application ก่อนอัปเดต"
+        $arguments = @(
+            $installRoot, $snapshotRoot, "/MIR", "/XJ", "/R:2", "/W:1",
+            "/NFL", "/NDL", "/NJH", "/NJS", "/NP",
+            "/XD", "data", "workspace", ".git", ".codex", "node_modules", "__pycache__", ".pytest_cache",
+            (Join-Path $installRoot "data"), (Join-Path $installRoot "workspace"),
+            (Join-Path $installRoot ".git"), (Join-Path $installRoot ".codex")
+        )
+        & robocopy.exe @arguments | Out-Null
+        if ($LASTEXITCODE -gt 7) {
+            Remove-Item -LiteralPath $snapshotRoot -Recurse -Force -ErrorAction SilentlyContinue
+            throw "เก็บ Last-good application ไม่สำเร็จ (Robocopy รหัส $LASTEXITCODE)"
+        }
+    }
+
+    return [pscustomobject]@{
+        SnapshotRoot = $snapshotRoot
+        InstallExisted = [bool]$installExisted
+    }
+}
+
+function Restore-ApplicationRollbackSnapshot {
+    param([Parameter(Mandatory = $true)]$RollbackState)
+
+    $snapshotRoot = Assert-InstallerTemporaryDirectory -Path ([string]$RollbackState.SnapshotRoot) -Kind rollback
+
+    Write-Step "การติดตั้งไม่สำเร็จ กำลังคืน Last-good application"
+    if ([bool]$RollbackState.InstallExisted) {
+        New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
+        $arguments = @(
+            $snapshotRoot, $installRoot, "/MIR", "/XJ", "/R:3", "/W:1",
+            "/NFL", "/NDL", "/NJH", "/NJS", "/NP",
+            "/XD", "data", "workspace", ".git", ".codex",
+            (Join-Path $installRoot "data"), (Join-Path $installRoot "workspace"),
+            (Join-Path $installRoot ".git"), (Join-Path $installRoot ".codex")
+        )
+        & robocopy.exe @arguments | Out-Null
+        if ($LASTEXITCODE -gt 7) {
+            throw "คืน Last-good application ไม่สำเร็จ (Robocopy รหัส $LASTEXITCODE)"
+        }
+    }
+    elseif (Test-Path -LiteralPath $installRoot) {
+        $resolvedInstall = [IO.Path]::GetFullPath($installRoot).TrimEnd("\")
+        $expectedInstall = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "Metafxclub\AI-Agent-HQ")).TrimEnd("\")
+        if (-not $resolvedInstall.Equals($expectedInstall, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "ปฏิเสธการลบ Installation ที่ไม่สมบูรณ์เพราะ Path ไม่ตรงกับพื้นที่ที่กำหนด"
+        }
+        Remove-Item -LiteralPath $installRoot -Recurse -Force
+    }
+}
+
+function Remove-ApplicationRollbackSnapshot {
+    param([Parameter(Mandatory = $true)]$RollbackState)
+
+    $snapshotRoot = Assert-InstallerTemporaryDirectory -Path ([string]$RollbackState.SnapshotRoot) -Kind rollback
+    if (Test-Path -LiteralPath $snapshotRoot) {
+        Remove-Item -LiteralPath $snapshotRoot -Recurse -Force
     }
 }
 
@@ -608,7 +1022,7 @@ function Initialize-PythonEnvironment {
     }
 
     Write-Step "กำลังติดตั้ง Dependency ที่ล็อกเวอร์ชันไว้"
-    Invoke-CheckedNative -FilePath $venvPython -Arguments @("-m", "pip", "install", "--disable-pip-version-check", "--upgrade", "--requirement", $requirements) -FailureMessage "ติดตั้ง Dependency ไม่สำเร็จ กรุณาตรวจอินเทอร์เน็ตแล้วลองใหม่"
+    Invoke-CheckedNative -FilePath $venvPython -Arguments @("-m", "pip", "install", "--disable-pip-version-check", "--require-hashes", "--upgrade", "--requirement", $requirements) -FailureMessage "ติดตั้ง Dependency ไม่สำเร็จ กรุณาตรวจอินเทอร์เน็ตแล้วลองใหม่"
     Invoke-CheckedNative -FilePath $venvPython -Arguments @("-m", "pip", "check") -FailureMessage "Dependency ตรวจสอบไม่ผ่าน"
 
     $codexBinary = Join-Path $venvRoot "Lib\site-packages\codex_cli_bin\bin\codex.exe"
@@ -822,10 +1236,11 @@ function Write-InstallResult {
         "unknown"
     }
     $result = [ordered]@{
-        version = 1
+        version = 2
         installed_at = [DateTime]::UtcNow.ToString("o")
         application_version = $version
-        install_root = $installRoot
+        install_root = "%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ"
+        install_scope = "current_windows_user"
         endpoint = [ordered]@{
             host = "127.0.0.1"
             port = [int]$Endpoint.Port
@@ -871,12 +1286,55 @@ try {
     }
 
     $selectedBridgePort = Confirm-BridgeEndpoint
+    if ($PackageSmoke -and -not ($SkipLaunch -and $SkipShortcuts)) {
+        throw "PackageSmoke ต้องใช้ร่วมกับ SkipLaunch และ SkipShortcuts เท่านั้น"
+    }
     Write-InstallLog -Message ("เริ่ม {0} หลังผู้ใช้ยืนยัน http://127.0.0.1:{1}/" -f `
         $(if ($RepairOnly) { "ซ่อมแซม" } else { "ติดตั้ง" }), $selectedBridgePort)
     $bridgeEndpoint = $null
     $codexReadiness = $null
-    $bridgeTaskWasEnabled = Suspend-BridgeScheduledTask
+    $stagingRoot = $null
+    $previousBridgeWasRunning = $false
+    $previousHealthyEndpoint = $null
+    $previousBridgeRestored = $false
+    if (-not $RepairOnly) {
+        # Validate the complete candidate while the current installation and
+        # Bridge are still untouched. A bad source tree must not cause downtime.
+        $stagingRoot = New-StagedApplication
+    }
+    elseif (-not (Get-ComparablePath -Path $sourceRoot).Equals((Get-ComparablePath -Path $installRoot), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "การซ่อมแซมต้องเรียกจากชุด Installer ที่อยู่ในโฟลเดอร์ติดตั้ง"
+    }
+    if ($PackageSmoke) {
+        $runnerTemp = [string]$env:RUNNER_TEMP
+        $localAppDataFull = [IO.Path]::GetFullPath([string]$env:LOCALAPPDATA).TrimEnd("\")
+        $runnerTempFull = if ($runnerTemp) { [IO.Path]::GetFullPath($runnerTemp).TrimEnd("\") } else { "" }
+        if (
+            [string]$env:GITHUB_ACTIONS -cne "true" -or
+            -not $runnerTempFull -or
+            -not $localAppDataFull.StartsWith($runnerTempFull + "\", [StringComparison]::OrdinalIgnoreCase)
+        ) {
+            throw "PackageSmoke ใช้ได้เฉพาะ GitHub Actions ที่แยก LOCALAPPDATA ไว้ใต้ RUNNER_TEMP"
+        }
+        # CI/package validation owns an isolated LOCALAPPDATA tree and must not
+        # inspect, stop, or reconfigure a real user Bridge or Scheduled Task.
+        Publish-StagedApplication -StagingRoot $stagingRoot
+        Remove-StagedApplication -StagingRoot $stagingRoot
+        $stagingRoot = $null
+        Initialize-UserDataDirectories
+        $venvPython = Initialize-PythonEnvironment
+        Test-InstalledApplication -PythonPath $venvPython
+        Write-Step "Package Smoke ผ่านโดยไม่แก้ Bridge, Watchdog, Shortcut หรือ Browser"
+        exit 0
+    }
+    $previousHealthyEndpoint = Get-HealthySavedEndpoint
+    if ($previousHealthyEndpoint) {
+        $script:bridgeTaskPreviousPort = [int]$previousHealthyEndpoint.Port
+        $previousBridgeWasRunning = $true
+    }
+    $bridgeTaskWasEnabled = $false
     try {
+        $bridgeTaskWasEnabled = Suspend-BridgeScheduledTask
         if (
             $SkipLaunch -and
             $bridgeTaskWasEnabled -and
@@ -884,40 +1342,122 @@ try {
         ) {
             throw "เมื่อเปิด Autostart อยู่ การติดตั้งแบบ SkipLaunch ต้องใช้พอร์ตเดิม เพราะพอร์ตใหม่ยังไม่ผ่าน Health check"
         }
+        $script:previousBridgeWasStopped = $previousBridgeWasRunning
         Stop-ExistingBridge
         if (-not (Test-LoopbackPortAvailable -CandidatePort $selectedBridgePort)) {
             throw "พอร์ตที่ผู้ใช้ยืนยัน ($selectedBridgePort) ไม่ว่างหลังหยุด HQ เดิม ระบบหยุดโดยไม่เปลี่ยน URL"
         }
         if (-not $RepairOnly) {
-            Copy-ApplicationFiles
+            # The candidate already passed its tests before the Bridge was
+            # stopped. The rollback snapshot covers the short publish,
+            # dependency, installed-test, and health window that follows.
+            $script:applicationRollbackState = New-ApplicationRollbackSnapshot
+            $script:applicationMutationStarted = $true
+            Publish-StagedApplication -StagingRoot $stagingRoot
+            Remove-StagedApplication -StagingRoot $stagingRoot
+            $stagingRoot = $null
         }
-        elseif (-not (Get-ComparablePath -Path $sourceRoot).Equals((Get-ComparablePath -Path $installRoot), [StringComparison]::OrdinalIgnoreCase)) {
-            throw "การซ่อมแซมต้องเรียกจากชุด Installer ที่อยู่ในโฟลเดอร์ติดตั้ง"
+        elseif (-not $script:applicationRollbackState) {
+            $script:applicationRollbackState = New-ApplicationRollbackSnapshot
+            $script:applicationMutationStarted = $true
         }
 
         Initialize-UserDataDirectories
         $venvPython = Initialize-PythonEnvironment
         Test-InstalledApplication -PythonPath $venvPython
-        if (-not $SkipShortcuts) {
-            Install-Shortcuts
-        }
-
         if (-not $SkipLaunch) {
+            # The lifecycle command may start a process and then fail a later
+            # endpoint/health assertion. Mark it before the call so rollback
+            # always attempts to stop that candidate safely.
+            $script:candidateBridgeMayBeRunning = $true
             $bridgeEndpoint = Start-And-TestBridge -ConfirmedPort $selectedBridgePort
             $codexReadiness = Get-SafeCodexReadiness -Endpoint $bridgeEndpoint
             Show-CodexReadiness -Readiness $codexReadiness
             Write-InstallResult -Endpoint $bridgeEndpoint -Readiness $codexReadiness
-            if ($bridgeTaskWasEnabled) {
-                Rebind-BridgeScheduledTask -ConfirmedPort $selectedBridgePort
+            if ($bridgeTaskExisted) {
+                Rebind-BridgeScheduledTask `
+                    -ConfirmedPort $selectedBridgePort `
+                    -EnableAfterRebind $bridgeTaskWasEnabled
                 # The registration script enabled and verified the replacement
                 # task already, so the finally block must not restore the old one.
                 $bridgeTaskWasEnabled = $false
             }
-            Start-Process $bridgeEndpoint.Url
+        }
+        if ($script:applicationRollbackState) {
+            Remove-ApplicationRollbackSnapshot -RollbackState $script:applicationRollbackState
+            $script:applicationRollbackState = $null
+            $script:applicationMutationStarted = $false
+        }
+        if (-not $SkipShortcuts) {
+            try {
+                Install-Shortcuts
+            }
+            catch {
+                Write-Warning "ติดตั้งและตรวจระบบสำเร็จ แต่สร้าง Shortcut ไม่สำเร็จ: $($_.Exception.Message)"
+            }
+        }
+        if ($bridgeEndpoint) {
+            try {
+                Start-Process $bridgeEndpoint.Url
+            }
+            catch {
+                Write-Warning "ระบบพร้อมใช้งานแล้ว แต่เปิด Browser อัตโนมัติไม่สำเร็จ กรุณาเปิด $($bridgeEndpoint.Url) เอง"
+            }
         }
     }
+    catch {
+        $installError = [string]$_.Exception.Message
+        if ($stagingRoot) {
+            Remove-StagedApplication -StagingRoot $stagingRoot
+            $stagingRoot = $null
+        }
+        if ($script:applicationMutationStarted -and $script:applicationRollbackState) {
+            $rollbackRestored = $false
+            try {
+                if ($script:candidateBridgeMayBeRunning) {
+                    # A new candidate Bridge may already be healthy. Stop only
+                    # that exact process before restoring its application files.
+                    Stop-CandidateBridgeAfterFailedStart -CandidatePort $selectedBridgePort
+                    $bridgeEndpoint = $null
+                    $script:candidateBridgeMayBeRunning = $false
+                }
+                Restore-ApplicationRollbackSnapshot -RollbackState $script:applicationRollbackState
+                $rollbackRestored = $true
+            }
+            catch {
+                $rollbackError = [string]$_.Exception.Message
+                $recoveryPath = [string]$script:applicationRollbackState.SnapshotRoot
+                $script:rollbackIncomplete = $true
+                throw "การติดตั้งล้มเหลวและ Rollback ไม่สมบูรณ์: $installError | $rollbackError | เก็บ Last-good ไว้ที่ $recoveryPath"
+            }
+            finally {
+                if ($rollbackRestored) {
+                    Remove-ApplicationRollbackSnapshot -RollbackState $script:applicationRollbackState
+                    $script:applicationRollbackState = $null
+                    $script:applicationMutationStarted = $false
+                }
+            }
+            if ($rollbackRestored -and $previousBridgeWasRunning) {
+                Start-PreviousBridgeAfterRollback
+                $previousBridgeRestored = $true
+            }
+        }
+        elseif ($script:previousBridgeWasStopped -and $previousBridgeWasRunning) {
+            # Port races and snapshot/pre-publish failures occur before any
+            # application mutation, but the verified old Bridge was already
+            # stopped. Restore its service independently of file rollback.
+            Start-PreviousBridgeAfterRollback
+            $previousBridgeRestored = $true
+        }
+        throw $installError
+    }
     finally {
-        Restore-BridgeScheduledTask -WasEnabled $bridgeTaskWasEnabled
+        if ($script:rollbackIncomplete) {
+            Write-Warning "คง Watchdog ไว้ในสถานะปิด เพราะ Rollback ไม่สมบูรณ์ กรุณาตรวจ Last-good ที่แจ้งไว้ก่อนเปิดระบบ"
+        }
+        else {
+            Restore-BridgeScheduledTask -WasEnabled $bridgeTaskWasEnabled
+        }
     }
 
     Write-Step "ติดตั้งและตรวจสอบสำเร็จ ข้อมูลเริ่มต้นเป็นแบบ Local/Demo และไม่ได้ Login หรือเปิด Live Trading ให้อัตโนมัติ"

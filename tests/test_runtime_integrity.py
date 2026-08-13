@@ -23,6 +23,7 @@ FRONTEND_STYLES_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "styles.css"
 LIFECYCLE_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "start-local-bridge.ps1"
 AUTOSTART_REGISTER_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "register-bridge-autostart.ps1"
 AUTOSTART_UNREGISTER_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "unregister-bridge-autostart.ps1"
+AUTOSTART_HIDDEN_LAUNCHER_PATH = PROJECT_ROOT / "scripts" / "run-bridge-watchdog-hidden.vbs"
 UPDATE_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "update-hq.ps1"
 INSTALLER_SCRIPT_PATH = PROJECT_ROOT / "installer" / "install.ps1"
 UNINSTALL_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "uninstall-hq.ps1"
@@ -401,7 +402,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
 
         canonical = {
             "left_audit_crystals": {
-                "functionName": "Indicator Website Scout",
+                "functionName": "Radar Website Tool",
                 "owner": "codex_mcp_operator",
                 "primaryReportType": "indicator_scout_report",
                 "actions": {"discover_new_indicators", "save_indicator_scout_schedule"},
@@ -427,7 +428,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 },
             },
             "right_status_crystals": {
-                "functionName": "VPS / HQ Health & Agent Settings",
+                "functionName": "HQ Equipment Connection Center",
                 "owner": "vps_watch",
                 "primaryReportType": "ops_overview_report",
                 "actions": {"refresh_vps_hq_status", "save_agent_preferences"},
@@ -453,9 +454,24 @@ class RuntimeIntegrityTests(unittest.TestCase):
                     "mission_strategy_table",
                 )
                 connection_ids = {item["id"] for item in profile["connections"]}
+                workflow_tracking = role.get("workflowTracking", {})
+                workflow_tracking_fields = set(workflow_tracking.get("fields", []))
+                contract_backed_tracking = (
+                    {"mission_store", "report_routing"}.issubset(connection_ids)
+                    and workflow_tracking.get("required") is True
+                    and {
+                        "missionId",
+                        "targetPropId",
+                        "ownerAgentId",
+                        "timestamps",
+                        "status",
+                        "reportRoute",
+                    }.issubset(workflow_tracking_fields)
+                )
                 self.assertTrue(
                     "mission_report_audit" in connection_ids
-                    or {"mission_store", "agent_event_store", "report_routing"}.issubset(connection_ids),
+                    or {"mission_store", "agent_event_store", "report_routing"}.issubset(connection_ids)
+                    or contract_backed_tracking,
                     f"{prop_id} must retain Mission / Report / Audit tracking",
                 )
 
@@ -561,15 +577,31 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertFalse(ui["tabsEnabled"])
         self.assertEqual(
             set(ui["layout"]["leftRail"]["shows"]),
-            {"prop_image", "short_description", "connection_checklist", "connection_actions"},
+            {"prop_image", "short_description", "how_to", "device_actions", "settings"},
         )
         self.assertEqual(
             set(ui["layout"]["leftRail"]["doesNotShow"]),
-            {"owner_summary", "report_type", "mission_count", "memory_count", "generic_prop_status"},
+            {
+                "connection_checklist",
+                "connection_status",
+                "owner_summary",
+                "report_type",
+                "mission_count",
+                "memory_count",
+                "generic_prop_status",
+            },
         )
         self.assertEqual(
             set(ui["layout"]["mainWorkspace"]["showsOnly"]),
             {"missions", "structured_reports", "report_attachments"},
+        )
+        self.assertEqual(
+            ui["layout"]["mainWorkspace"]["connectionStatusLocation"],
+            "right_status_crystals.connectionCenter",
+        )
+        self.assertEqual(
+            set(ui["layout"]["mainWorkspace"]["aiTradeSafetyMainPanelException"]),
+            {"council_quality_gate", "risk_ea_gate", "gateway_ack_fill_recovery"},
         )
         status_groups = ui["layout"]["mainWorkspace"]["statusGroups"]
         self.assertEqual(set(status_groups), {"running", "completed", "blocked"})
@@ -621,8 +653,14 @@ class RuntimeIntegrityTests(unittest.TestCase):
         news_profile = connection_contract["profiles"]["left_signal_cube"]
         self.assertEqual(
             [item["id"] for item in news_profile["localTabs"]],
-            ["today", "pair_bias", "horizons", "schedule_history"],
+            ["pair_bias", "today"],
         )
+        self.assertEqual(news_profile["readModel"]["defaultView"], "pair_bias")
+        self.assertEqual(
+            news_profile["readModel"]["oneAnalyzeReportFeeds"],
+            ["events", "dangerWindows", "pairBias"],
+        )
+        self.assertFalse(news_profile["readModel"]["historyPresentationTab"])
         self.assertEqual(news_profile["reportRoute"]["primaryReportType"], "fx_news_bias_report")
         self.assertEqual(news_profile["reportRoute"]["targetPropId"], "left_signal_cube")
         self.assertFalse(news_profile["liveTradingPolicy"]["enabled"])
@@ -670,8 +708,10 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertEqual(role_map["left_analytics_console"]["defaultTab"], "daily_summary")
         self.assertEqual(
             [item["id"] for item in role_map["left_signal_cube"]["localTabs"]],
-            ["today", "pair_bias", "horizons", "schedule_history"],
+            ["pair_bias", "today"],
         )
+        self.assertEqual(role_map["left_signal_cube"]["defaultTab"], "pair_bias")
+        self.assertIsNone(role_map["left_signal_cube"]["dashboardUx"]["historyReportTabId"])
         self.assertEqual(role_map["left_signal_cube"]["primaryReportType"], "fx_news_bias_report")
         self.assertEqual(role_map["left_signal_cube"]["executionPolicy"]["mode"], "analysis_only")
         self.assertFalse(role_map["left_signal_cube"]["executionPolicy"]["liveTradingEnabled"])
@@ -1196,7 +1236,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         try:
             self.bridge.RUNTIME_DIR = isolated_runtime
             self.bridge.AUDIT_PATH = isolated_runtime / "bridge-audit.jsonl"
-            self.bridge.load_missions = lambda: []
+            self.bridge.load_missions = lambda **_kwargs: []
             self.bridge.load_agent_events = lambda limit=120: []
             self.bridge.load_runtime_reports = lambda limit=120: reports
             self.bridge.load_meeting_records = lambda limit=120: []
@@ -1207,7 +1247,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 "capabilities": [],
             }
             self.bridge.dashboard_connection_checklist = (
-                lambda prop_id, bridge=None: fake_checklist
+                lambda prop_id, bridge=None, **_kwargs: fake_checklist
             )
             self.bridge.metatrader_snapshot_read_model = lambda prop_id: (
                 self.bridge._empty_metatrader_snapshot_read_model(
@@ -1335,11 +1375,14 @@ class RuntimeIntegrityTests(unittest.TestCase):
                             "implemented_guarded_manual",
                             "implemented_guarded_read_only",
                             "implemented_guarded_closed_bar",
+                            "implemented_deterministic",
+                            "configuration_only_adapter_not_connected",
                             "source_ready_requires_ea_install",
                             "implemented_in_trade_gateway",
                             "ea_local_arm_required",
                             "runtime_detected",
                             "prompt_assisted_unverified",
+                            "not_connected",
                             "coming_soon",
                             "disabled",
                         },
@@ -1573,9 +1616,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn('right_server_racks: "โรงงานสร้าง EA และ Indicator"', main)
         self.assertIn('right_tool_console: "ห้องทดลอง EA"', main)
         self.assertIn('terminal_workstation: "EA Development Studio"', main)
-        self.assertIn('left_audit_crystals: "Indicator Scout"', main)
-        self.assertIn('left_signal_cube: "ข่าวรายวันและแนวโน้ม Forex"', main)
-        self.assertIn('right_status_crystals: "สถานะ VPS/HQ และตั้งค่า Agent"', main)
+        self.assertIn('left_audit_crystals: "Radar Website Tool"', main)
+        self.assertIn('left_signal_cube: "ศูนย์แนวโน้ม 28 คู่เงินและข่าว Forex"', main)
+        self.assertIn('right_status_crystals: "ศูนย์การเชื่อมต่ออุปกรณ์ HQ"', main)
         self.assertIn('defaultTarget: "right_tool_console"', optimization_block)
         self.assertIn('homeTarget: "right_tool_console"', optimization_block)
         self.assertIn('defaultTarget: "right_status_crystals"', vps_block)
@@ -2058,7 +2101,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         }
         try:
             self.bridge.bridge_status = lambda: fake_status
-            self.bridge.load_missions = lambda: []
+            self.bridge.load_missions = lambda **_kwargs: []
             self.bridge.load_agent_events = lambda limit=120: []
             self.bridge.load_runtime_reports = lambda limit=120: reports
             self.bridge.load_meeting_records = lambda limit=120: []
@@ -2344,7 +2387,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
         main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
         styles = FRONTEND_STYLES_PATH.read_text(encoding="utf-8")
 
-        self.assertIn("const MISSION_POLL_MS = 12000;", main)
+        self.assertIn("const MISSION_POLL_MS = 30000;", main)
+        self.assertIn("const MISSION_FETCH_TIMEOUT_MS = 25000;", main)
+        self.assertIn('"/api/missions?scope=runtime&limit=100"', main)
         self.assertIn("window.setTimeout(startMissionPolling, 0);", main)
         self.assertIn("function reconcileAgentMissionState()", main)
         self.assertIn("&& !agent.activeMissionId", main)
@@ -2725,7 +2770,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             self.assertIn(f"renderDashboardWorkColumn(\n    {destination}", prop_dashboard_block)
         self.assertIn("renderDashboardConnectionPanel(subject, propertyRole)", prop_dashboard_block)
         self.assertNotIn("renderStatusGrid(", prop_dashboard_block)
-        self.assertIn("els.modalDashboardConnectionRail.hidden = surface !== \"dashboard\"", modal_block)
+        self.assertIn("els.modalDashboardConnectionRail.hidden = true", modal_block)
         self.assertIn("els.modalStatusGrid.hidden = surface === \"dashboard\"", modal_block)
 
         report_card_block = function_block("createDashboardReportCard")
@@ -3815,14 +3860,20 @@ class RuntimeIntegrityTests(unittest.TestCase):
     def test_bridge_autostart_is_explicit_reversible_and_reuses_confirmed_loopback_endpoint(self) -> None:
         register = AUTOSTART_REGISTER_SCRIPT_PATH.read_text(encoding="utf-8-sig")
         unregister = AUTOSTART_UNREGISTER_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        hidden_launcher = AUTOSTART_HIDDEN_LAUNCHER_PATH.read_text(encoding="utf-8-sig")
         lifecycle = LIFECYCLE_SCRIPT_PATH.read_text(encoding="utf-8-sig")
 
         self.assertIn('"data\\runtime\\bridge-endpoint.json"', register)
         self.assertIn('[string]$endpoint.host -cne "127.0.0.1"', register)
-        self.assertIn('-WindowStyle Hidden', register)
-        self.assertIn('-File "{0}" -Action Ensure -Port {1}', register)
-        self.assertIn('-Action Ensure `', register)
-        self.assertIn('-Port $confirmedPort', register)
+        self.assertIn('[int]$WatchdogMinutes = 15', register)
+        self.assertIn('"run-bridge-watchdog-hidden.vbs"', register)
+        self.assertIn('$wscriptPath = Join-Path $systemRoot "System32\\wscript.exe"', register)
+        self.assertIn('$cscriptPath = Join-Path $systemRoot "System32\\cscript.exe"', register)
+        self.assertIn("$arguments = '//B //NoLogo", register)
+        self.assertIn('/Port:{1}', register)
+        self.assertNotIn('-WindowStyle Hidden', register)
+        self.assertIn('& $cscriptPath `', register)
+        self.assertIn('"/Port:$confirmedPort"', register)
         self.assertIn("New-ScheduledTaskTrigger -AtLogOn", register)
         self.assertIn("-RepetitionInterval (New-TimeSpan -Minutes $WatchdogMinutes)", register)
         self.assertIn("-RestartCount 3", register)
@@ -3833,6 +3884,12 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertNotIn("Start-Process", register)
         self.assertNotIn("CreateShortcut", register)
         self.assertNotIn("http://127.0.0.1:$confirmedPort/\"", register.split("$arguments", 1)[0])
+        self.assertIn('WScript.Arguments.Named.Exists("Port")', hidden_launcher)
+        self.assertIn('portNumber < 1024 Or portNumber > 65535', hidden_launcher)
+        self.assertIn('"start-local-bridge.ps1"', hidden_launcher)
+        self.assertIn('"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"', hidden_launcher)
+        self.assertIn('" -Action Ensure -Port "', hidden_launcher)
+        self.assertIn('shell.Run(command, 0, True)', hidden_launcher)
         self.assertIn('[ValidateSet("Start", "Ensure", "Status", "Stop", "Restart")]', lifecycle)
         self.assertIn('function Ensure-Bridge', lifecycle)
         self.assertIn('verified_unhealthy_restarting', lifecycle)
@@ -3850,11 +3907,20 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn('Disable-ScheduledTask -TaskName $bridgeTaskName', installer)
         self.assertIn('Stop-ScheduledTask -TaskName $bridgeTaskName', installer)
         self.assertIn('$bridgeTaskWasEnabled = Suspend-BridgeScheduledTask', installer)
-        self.assertIn('Rebind-BridgeScheduledTask -ConfirmedPort $selectedBridgePort', installer)
-        self.assertIn('$expectedArgument = "-Action Ensure -Port $ConfirmedPort"', installer)
+        self.assertIn('$script:bridgeTaskExisted = $true', installer)
+        self.assertIn('if ($bridgeTaskExisted) {', installer)
+        self.assertIn('-EnableAfterRebind $bridgeTaskWasEnabled', installer)
+        self.assertIn('Disable-ScheduledTask -TaskName $bridgeTaskName', installer)
+        self.assertIn('$bridgeTaskWatchdogMinutes = 15', installer)
+        self.assertIn('"scripts\\run-bridge-watchdog-hidden.vbs"', installer)
+        self.assertIn('$expectedArgument = "/Port:$ConfirmedPort"', installer)
+        self.assertIn('[IO.Path]::GetFileName([string]$taskActions[0].Execute) -ine "wscript.exe"', installer)
+        self.assertIn('$savedStateVersion -lt 3 -and $savedWatchdogMinutes -eq 5', installer)
         self.assertIn('ผูก Watchdog ใหม่ไม่สำเร็จและคืน Task เดิมแล้ว', installer)
         self.assertIn('การติดตั้งแบบ SkipLaunch ต้องใช้พอร์ตเดิม', installer)
-        self.assertIn('finally {\n        Restore-BridgeScheduledTask -WasEnabled $bridgeTaskWasEnabled', installer)
+        self.assertIn('finally {\n        if ($script:rollbackIncomplete)', installer)
+        self.assertIn('Restore-BridgeScheduledTask -WasEnabled $bridgeTaskWasEnabled', installer)
+        self.assertIn('คง Watchdog ไว้ในสถานะปิด เพราะ Rollback ไม่สมบูรณ์', installer)
         self.assertIn('Enable-ScheduledTask -TaskName $bridgeTaskName', installer)
         self.assertIn('"node_modules", ".pytest_cache", "dist", "build"', installer)
         self.assertIn('"scripts\\unregister-bridge-autostart.ps1"', uninstaller)
@@ -3878,9 +3944,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
         release_workflow = RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8-sig")
 
         self.assertIn('"integrations\\mt4-trade-gateway\\MetafxHQTradeGateway.mq4"', installer)
-        self.assertIn('"artifacts\\mt4-ai-council-ea-v2.14-broker-compat-hardening\\MetafxHQTradeGateway.ex4"', installer)
+        self.assertIn('"artifacts\\mt4-ai-council-ea-v2.16-stream-transition-hardening\\MetafxHQTradeGateway.ex4"', installer)
         self.assertIn('"integrations", "runner", "scripts", "tests"', installer)
-        self.assertIn('Sync-Directory -DirectoryName "artifacts\\mt4-ai-council-ea-v2.14-broker-compat-hardening"', installer)
+        self.assertIn('Sync-Directory -DirectoryName "artifacts\\mt4-ai-council-ea-v2.16-stream-transition-hardening"', installer)
         self.assertIn('"1-INSTALL-HQ.bat", "UPDATE-HQ.bat"', installer)
         self.assertIn('"AGENTS.md", ".gitattributes", ".gitignore"', installer)
         self.assertIn('"AGENTS.md", ".gitattributes", ".gitignore"', uninstaller)
@@ -6126,7 +6192,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         }
         try:
             self.bridge.bridge_status = lambda: fake_status
-            self.bridge.load_missions = lambda: []
+            self.bridge.load_missions = lambda **_kwargs: []
             self.bridge.load_agent_events = lambda limit=120: []
             self.bridge.load_runtime_reports = lambda limit=120: []
             self.bridge.load_meeting_records = lambda limit=120: [{"id": "meeting-1", "linkedPropId": "codex_mcp_portal", "participants": ["codex_mcp_operator"]}]

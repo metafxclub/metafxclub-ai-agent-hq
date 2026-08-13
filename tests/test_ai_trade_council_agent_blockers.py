@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -10,6 +11,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "bridge_server.py"
 MAIN_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "main.js"
 STYLES_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "styles.css"
+COUNCIL_PROMPTS_PATH = (
+    PROJECT_ROOT / "contracts" / "orchestration" / "ai-trade-council-prompts.json"
+)
 
 
 def load_bridge():
@@ -77,6 +81,43 @@ class AiTradeCouncilAgentBlockerTests(unittest.TestCase):
         self.assertFalse(blocker["processStarted"])
         self.assertTrue(blocker["terminalActionBlocked"])
         self.assertGreaterEqual(len(blocker["resolutionStepsTh"]), 2)
+
+    def test_terminal_timeout_is_not_masked_by_previous_quota_deferral(self) -> None:
+        mission = self.rate_limited_mission()
+        mission.update(
+            {
+                "status": "failed",
+                "workStatus": "timeout",
+                "phase": "auto_guarded_timeout",
+                "errorCode": "timeout",
+                "runnerStatus": "timeout",
+            }
+        )
+        mission["execution"].update(
+            {
+                "lastDeferredReason": "quota_unavailable_or_stale",
+                "processStarted": True,
+            }
+        )
+
+        blocker = self.bridge._mission_blocker_read_model(mission)
+
+        self.assertIsNotNone(blocker)
+        self.assertEqual(blocker["reasonCode"], "timeout")
+        self.assertEqual(blocker["rootCauseCode"], "timeout")
+        self.assertTrue(blocker["processStarted"])
+
+    def test_news_consultant_has_bounded_ninety_second_timeout(self) -> None:
+        contract = json.loads(COUNCIL_PROMPTS_PATH.read_text(encoding="utf-8"))
+        agents = {
+            item["roleId"]: item
+            for item in contract["agents"]
+        }
+
+        self.assertEqual(contract["sharedPolicy"]["qualityGate"]["roundDeadlineSeconds"], 240)
+        self.assertEqual(agents["technical"]["timeoutSeconds"], 60)
+        self.assertEqual(agents["price_action"]["timeoutSeconds"], 60)
+        self.assertEqual(agents["news"]["timeoutSeconds"], 90)
 
     def test_safe_mission_read_model_contains_blocker_without_private_context(self) -> None:
         item = self.bridge.mission_read_model_item(self.rate_limited_mission())

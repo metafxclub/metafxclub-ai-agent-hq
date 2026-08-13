@@ -40,6 +40,8 @@
         "news": 70
       },
       "horizonBars": 1,
+      "validUntilBarTimeDomain": "mt4_broker_clock",
+      "decisionExpirySource": "round_deadline_at_utc",
       "roundDeadlineSeconds": 240,
       "maximumSnapshotSpreadPoints": 1000,
       "maximumNewsAgeSeconds": 86400,
@@ -119,7 +121,7 @@
       "chatAnswerScopeTh": "อธิบายข่าวและสถานการณ์จากแหล่งข้อมูลสาธารณะที่ตรวจสอบได้ พร้อมเวลาและแหล่งอ้างอิง หากตรวจสอบข้อมูลปัจจุบันไม่ได้ต้องบอกตามตรงและห้ามแต่งข่าว",
       "toolId": "codex_web_research",
       "modelTier": "specialist_fast",
-      "timeoutSeconds": 60,
+      "timeoutSeconds": 90,
       "outputLimitChars": 7000,
       "roleInputScope": "market_metadata_without_ohlc_or_indicators_plus_public_web_sources",
       "roleOutputRule": "News owns no protective price. Return stopLossPrice, takeProfitPrice, indicatorValidation and volatilityState as null. Copy horizonBars and validUntilBarTime exactly from policy. Return eventRisk as ALLOW, HOLD or VETO. A directional BUY/SELL vote requires eventRisk=ALLOW plus fresh evidence from at least two distinct public domains. decision=HOLD is an abstention and never blocks an actionable consensus. eventRisk=HOLD means the news evidence is insufficient for a directional news vote but does not stop other qualified votes. Only eventRisk=VETO blocks the entire round.",

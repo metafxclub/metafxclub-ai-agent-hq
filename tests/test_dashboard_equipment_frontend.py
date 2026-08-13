@@ -20,6 +20,27 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
             end = self.main.index("\n});", start)
         return self.main[start:end]
 
+    def test_boot_contract_urls_resolve_from_bridge_root_not_frontend_directory(self):
+        self.assertIn('const ROOM_CONTRACT_PATH = "/contracts/rooms/command-room.json?v=32";', self.main)
+        self.assertIn('const AGENT_CONTRACT_PATH = "/contracts/agents/agents.json?v=10";', self.main)
+        self.assertNotIn('"./contracts/rooms/command-room.json', self.main)
+        self.assertNotIn('"./contracts/agents/agents.json', self.main)
+
+    def test_heavy_local_assets_and_prop_reports_have_explicit_startup_timeouts(self):
+        self.assertIn("const BOOT_CONTRACT_FETCH_TIMEOUT_MS = 20000;", self.main)
+        self.assertIn("const UI_SESSION_FETCH_TIMEOUT_MS = 5000;", self.main)
+        self.assertIn("const PROP_REPORT_FETCH_TIMEOUT_MS = 20000;", self.main)
+        self.assertIn("const NAVIGATION_MASK_LOAD_TIMEOUT_MS = 20000;", self.main)
+        self.assertIn("{ timeoutMs: UI_SESSION_FETCH_TIMEOUT_MS }", self.main)
+        self.assertIn("{ timeoutMs: PROP_REPORT_FETCH_TIMEOUT_MS, signal }", self.main)
+        self.assertIn("}, NAVIGATION_MASK_LOAD_TIMEOUT_MS);", self.main)
+        self.assertEqual(
+            self.main.count("{ timeoutMs: BOOT_CONTRACT_FETCH_TIMEOUT_MS }"),
+            2,
+        )
+        self.assertNotIn("reportBootResourceFailure(UI_SESSION_ENDPOINT", self.main)
+        self.assertIn("UI session unavailable; using the local session snapshot.", self.main)
+
     def test_four_new_devices_have_exact_canonical_tabs(self):
         expected = {
             "left_audit_crystals": ["discoveries", "evidence", "schedule", "archive"],
@@ -142,6 +163,133 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
         self.assertIn('status: "coming_soon"', self.main)
         self.assertIn('labelTh: "Screenshot Adapter: Coming Soon"', self.main)
         self.assertIn("ไม่มีภาพจำลอง", self.main)
+
+    def test_radar_website_tool_keeps_canonical_tabs_but_presents_only_today_and_seven_days(self):
+        fallback = self.fallback_prop_block("left_audit_crystals", "left_signal_cube")
+        tabs = fallback[fallback.index("tabs: ["):fallback.index("\n    actions:")]
+        self.assertEqual(
+            re.findall(r'\bid:\s*"([^"]+)"', tabs),
+            ["discoveries", "evidence", "schedule", "archive"],
+        )
+        self.assertIn('left_audit_crystals: "Radar Website Tool"', self.main)
+        self.assertIn('labelTh: "RADAR WEBSITE TOOL"', self.main)
+        normalization = self.main[
+            self.main.index("const tabs = visibleTabs.map"):
+            self.main.index("const deliveredSourceRows", self.main.index("const tabs = visibleTabs.map"))
+        ]
+        self.assertIn("INDICATOR_SCOUT_PRESENTATION_TAB_IDS", normalization)
+        self.assertIn('tab.id === "discoveries" ? "วันนี้" : "ย้อนหลัง 7 วัน"', normalization)
+
+    def test_radar_actions_live_only_in_left_settings_rail(self):
+        rail = self.main[
+            self.main.index("function workflowRailActions"):
+            self.main.index("function getWorkflowHandoffReports", self.main.index("function workflowRailActions"))
+        ]
+        dashboard = self.main[
+            self.main.index("function renderWorkflowDashboard("):
+            self.main.index("function setWorkflowDashboardTab", self.main.index("function renderWorkflowDashboard("))
+        ]
+        self.assertIn("INDICATOR_SCOUT_RAIL_ACTION_IDS", rail)
+        self.assertIn('"discover_new_indicators"', self.main)
+        self.assertIn('"save_indicator_scout_schedule"', self.main)
+        self.assertIn("centralActionIds", dashboard)
+        self.assertIn("!centralActionIds.has(action.id)", dashboard)
+        self.assertIn("usesDomainHistory", dashboard)
+
+    def test_radar_left_rail_shows_masked_sheet_and_hard_daily_cap_truth(self):
+        rail = self.main[
+            self.main.index("function createRadarRailTruthCard"):
+            self.main.index("function getWorkflowHandoffReports", self.main.index("function createRadarRailTruthCard"))
+        ]
+        self.assertIn("sheetReferenceMasked", rail)
+        self.assertIn("runsReservedToday", rail)
+        self.assertIn("remainingRunsToday", rail)
+        self.assertIn("ยังไม่เชื่อม Adapter", rail)
+        self.assertNotIn("sheetId", rail)
+        self.assertIn('field.id === "googleSheetUrlOrId"', self.main)
+        self.assertIn("googleSheetTabName: radarSheet?.tabName", self.main)
+        self.assertIn(".workflow-radar-rail-truth", self.styles)
+
+    def test_radar_normalizes_contract_entries_categories_and_safe_report_images(self):
+        start = self.main.index("function normalizeIndicatorScoutDomain")
+        end = self.main.index("function normalizeFxBiasValue", start)
+        block = self.main[start:end]
+        for field in (
+            "root.entries",
+            "metrics.entries",
+            "toolName",
+            "toolKind",
+            "sourceTitle",
+            "checkedAt",
+            "duplicateStatus",
+            "verificationStatus",
+            "screenshot",
+        ):
+            self.assertIn(field, block)
+        self.assertIn('indicator: "Indicator", ea: "EA", tool: "Tool"', self.main)
+        screenshot_helper = self.main[
+            self.main.index("function indicatorScoutSafeScreenshotUrl"):
+            self.main.index("function indicatorScoutTimestamp")
+        ]
+        self.assertIn("getSafeReportImageUrl", screenshot_helper)
+        self.assertIn("screenshot.available === true", screenshot_helper)
+        self.assertIn("/api/reports/${reportId}/attachments/${attachmentId}", screenshot_helper)
+        self.assertNotIn("http://", screenshot_helper)
+        image_guard = self.main[
+            self.main.index("function getSafeReportImageUrl"):
+            self.main.index("function getSafeReportArtifactUrl")
+        ]
+        self.assertIn("parsed.origin !== window.location.origin", image_guard)
+        self.assertIn("parsed.username || parsed.password", image_guard)
+        self.assertIn("parsed.search || parsed.hash", image_guard)
+
+    def test_radar_filters_by_bangkok_today_and_rolling_seven_days(self):
+        date_helpers = self.main[
+            self.main.index("function indicatorScoutBangkokDateKey"):
+            self.main.index("function normalizeIndicatorScoutDomain")
+        ]
+        self.assertIn('timeZone: "Asia/Bangkok"', date_helpers)
+        self.assertIn("formatToParts", date_helpers)
+        self.assertIn("7 * 24 * 60 * 60 * 1000", date_helpers)
+        renderer = self.main[
+            self.main.index("function renderIndicatorScoutPanel"):
+            self.main.index("function renderFxBiasTable", self.main.index("function renderIndicatorScoutPanel"))
+        ]
+        self.assertIn("filterIndicatorScoutToday", renderer)
+        self.assertIn("filterIndicatorScoutRollingSevenDays", renderer)
+        self.assertIn("domain?.todayEntries", renderer)
+        self.assertIn("domain?.sevenDayEntries", renderer)
+        self.assertIn("same-origin Report attachment", renderer)
+
+        normalizer = self.main[
+            self.main.index("function normalizeIndicatorScoutDomain"):
+            self.main.index("function normalizeFxBiasValue")
+        ]
+        self.assertIn("backend.radarWebsiteTool", normalizer)
+        self.assertIn("const hasCanonicalTruth", normalizer)
+        self.assertIn("projectCanonicalRows(canonicalTodayRows)", normalizer)
+        self.assertIn("projectCanonicalRows(canonicalSevenDayRows)", normalizer)
+        self.assertIn("filterIndicatorScoutToday(discoveries)", normalizer)
+        self.assertIn("filterIndicatorScoutRollingSevenDays(discoveries)", normalizer)
+        self.assertIn("todayEntries,", normalizer)
+        self.assertIn("sevenDayEntries,", normalizer)
+        self.assertIn("if (!hasCanonicalTruth) reports.forEach", normalizer)
+        self.assertIn('`${reportId}\\u001f${recordId}\\u001f${checkedAt}`', normalizer)
+
+    def test_radar_cards_are_responsive_and_have_honest_image_source_detail_states(self):
+        for selector in (
+            ".workflow-radar-website-tool",
+            ".workflow-radar-card-media",
+            ".workflow-radar-card-actions",
+            ".workflow-radar-history-day",
+            '.workflow-settings-rail[data-dashboard-identity="indicator-scout"]',
+        ):
+            self.assertIn(selector, self.styles)
+        self.assertIn("aspect-ratio: 16 / 8", self.styles)
+        self.assertIn("object-fit: cover", self.styles)
+        self.assertIn("grid-template-columns: minmax(0, 1fr)", self.styles)
+        self.assertIn("ยังไม่มี URL ที่ผ่านการตรวจ", self.main)
+        self.assertIn("ดูรายละเอียด", self.main)
 
     def test_web_speech_dictation_handles_unsupported_and_permission_states(self):
         self.assertIn("window.SpeechRecognition || window.webkitSpeechRecognition", self.main)

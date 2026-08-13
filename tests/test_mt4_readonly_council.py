@@ -88,6 +88,41 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
         self.bridge = load_bridge()
         self.runner = load_runner()
 
+    def test_decision_horizon_preserves_broker_clock_identity_across_offsets(self) -> None:
+        observed = datetime(2026, 8, 13, 3, 0, 2, tzinfo=timezone.utc)
+
+        for broker_offset_hours in (3, -5):
+            with self.subTest(broker_offset_hours=broker_offset_hours):
+                raw_broker_closed_bar = (
+                    int(observed.timestamp())
+                    + broker_offset_hours * 60 * 60
+                    - 5 * 60
+                )
+                expected_broker_clock_identity = raw_broker_closed_bar + 2 * 5 * 60
+                actual = self.bridge._ai_trade_council_expected_valid_until(
+                    raw_broker_closed_bar,
+                    "M5",
+                    1,
+                )
+
+                self.assertEqual(actual, expected_broker_clock_identity)
+
+    def test_decision_horizon_identity_fails_closed_on_invalid_inputs(self) -> None:
+        for closed_bar_time in (
+            None,
+            True,
+            "1786589700",
+            100,
+        ):
+            with self.subTest(closed_bar_time=closed_bar_time):
+                self.assertIsNone(
+                    self.bridge._ai_trade_council_expected_valid_until(
+                        closed_bar_time,
+                        "M5",
+                        1,
+                    )
+                )
+
     def test_analytics_connection_panel_uses_backend_closed_bar_automation_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -461,6 +496,18 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
                 {"codex_cli_task", "codex_web_research"},
             )
             parent_context = parent["analysisContext"]
+            self.assertEqual(
+                parent_context["validUntilBarTime"],
+                parent_context["closedBarIdentity"]["closedBarTime"] + 2 * 4 * 60 * 60,
+            )
+            self.assertEqual(
+                parent_context["validUntilBarTimeDomain"],
+                "mt4_broker_clock",
+            )
+            self.assertEqual(
+                parent_context["decisionExpirySource"],
+                "round_deadline_at_utc",
+            )
             artifact_reference = parent_context["snapshotArtifact"]
             artifact_digest = parent_context["snapshotArtifactDigest"]
             self.assertEqual(
@@ -586,7 +633,11 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
                 "contractDigest": "contract-v2",
                 "closedBarIdentity": {
                     "candidateId": "mtc-test",
-                    "streamKey": "b" * 64,
+                    "streamKey": self.bridge.payload_digest(
+                        "mtc-test",
+                        "XAUUSD",
+                        "H4",
+                    ),
                     "symbol": "XAUUSD",
                     "timeframe": "H4",
                     "closedBarTime": int(now.timestamp()) - 14400,
@@ -693,6 +744,18 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
         analyzed_snapshot_id = "a" * 64
         current_snapshot_id = "b" * 64
         parent_mission_id = "mission-council-completed"
+        candidate_id = "mtc-consensus-projection"
+        closed_bar_identity = {
+            "candidateId": candidate_id,
+            "streamKey": self.bridge._ai_trade_council_stream_key(
+                candidate_id,
+                "XAUUSD",
+                "H4",
+            ),
+            "symbol": "XAUUSD",
+            "timeframe": "H4",
+            "closedBarTime": 1_785_254_400,
+        }
         parent = {
             "id": parent_mission_id,
             "title": "สภา AI Trade วิเคราะห์ XAUUSD H4",
@@ -705,6 +768,7 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
             "analysisContext": {
                 "kind": "ai_trade_council_parent",
                 "snapshotId": analyzed_snapshot_id,
+                "closedBarIdentity": closed_bar_identity,
             },
             "delegation": {
                 "mode": "ai_trade_council_read_only",
@@ -730,6 +794,11 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
                     for agent_id, role_id in self.bridge.AI_TRADE_COUNCIL_AGENT_ROLES.items()
                 ],
                 "averageConfidence": 60,
+                "decisionProvenance": {
+                    "schemaVersion": "ai-trade-council-decision-provenance-v1",
+                    "snapshotId": analyzed_snapshot_id,
+                    "closedBarIdentity": closed_bar_identity,
+                },
                 "riskGuard": {
                     "agentId": "risk_guard",
                     "voting": False,
@@ -740,6 +809,7 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
             },
         }
         snapshot = {
+            "selectedCandidateId": candidate_id,
             "adapter": {"ready": True, "status": "ready", "reasonCode": "ready"},
             "chartSnapshot": {
                 "available": True,
@@ -777,10 +847,19 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
             "status": "queued",
             "createdAt": "2026-07-28T00:00:00Z",
         }
+        older_parent = json.loads(json.dumps(parent))
+        older_parent.update({
+            "id": "mission-council-older-array-first",
+            "createdAt": "2026-07-28T12:00:00Z",
+            "updatedAt": "2026-07-28T12:03:00Z",
+        })
+        older_parent["councilDecision"]["snapshotId"] = "c" * 64
+        older_parent["analysisContext"]["snapshotId"] = "c" * 64
+        older_parent["delegation"]["snapshotId"] = "c" * 64
         try:
             self.bridge.metatrader_snapshot_read_model = lambda _prop_id: snapshot
             model = self.bridge._ai_trade_council_read_model(
-                [unrelated_active, parent],
+                [unrelated_active, older_parent, parent],
                 [],
                 checklist,
             )
@@ -792,13 +871,35 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
         self.assertTrue(live_consensus["available"])
         self.assertEqual(live_consensus["sourceMissionId"], parent_mission_id)
         self.assertEqual(live_consensus["snapshotId"], analyzed_snapshot_id)
+        self.assertTrue(live_consensus["identityValid"])
+        self.assertEqual(live_consensus["candidateId"], candidate_id)
+        self.assertEqual(live_consensus["channelId"], candidate_id)
+        self.assertEqual(
+            live_consensus["streamKey"],
+            closed_bar_identity["streamKey"],
+        )
+        self.assertEqual(live_consensus["symbol"], "XAUUSD")
+        self.assertEqual(live_consensus["timeframe"], "H4")
+        self.assertEqual(
+            live_consensus["closedBarIdentity"],
+            closed_bar_identity,
+        )
+        self.assertEqual(
+            live_consensus["streamIdentity"]["snapshotId"],
+            analyzed_snapshot_id,
+        )
+        self.assertEqual(
+            live_consensus["decisionProvenance"]["closedBarIdentity"],
+            closed_bar_identity,
+        )
         self.assertEqual(live_consensus["currentSnapshotId"], current_snapshot_id)
         self.assertFalse(live_consensus["matchesCurrentSnapshot"])
+        self.assertFalse(live_consensus["matchesCurrentContext"])
         self.assertEqual(pipeline_snapshot["id"], analyzed_snapshot_id)
         self.assertEqual(pipeline_snapshot["currentId"], current_snapshot_id)
         self.assertFalse(pipeline_snapshot["matchesCurrent"])
         self.assertIsNone(pipeline_snapshot["observedAt"])
-        self.assertEqual(model["decisionPipeline"]["summary"]["total"], 1)
+        self.assertEqual(model["decisionPipeline"]["summary"]["total"], 2)
         self.assertEqual(model["decisionPipeline"]["summary"]["active"], 0)
         self.assertNotIn(
             unrelated_active["id"],
@@ -1055,10 +1156,16 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
                     }
                 )
 
-                def fake_council(request, *, automation_context=None):
+                def fake_council(
+                    request,
+                    *,
+                    automation_context=None,
+                    _snapshot_model=None,
+                ):
                     calls.append({
                         "request": request,
                         "automation": automation_context,
+                        "snapshotModel": _snapshot_model,
                     })
                     return {
                         "ok": True,
@@ -1125,6 +1232,7 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
                     calls[0]["automation"]["closedBarTime"],
                     next_bar_time,
                 )
+                self.assertIsInstance(calls[0]["snapshotModel"], dict)
                 replay = self.bridge.ai_trade_council_automation_tick()
                 self.assertEqual(
                     replay["kind"],
@@ -1137,7 +1245,9 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
 
             state = self.bridge.ai_trade_council_automation_read_model()["state"]
             self.assertEqual(state["lastObservedClosedBarTime"], next_bar_time)
-            self.assertEqual(state["lastAnalyzedClosedBarTime"], next_bar_time)
+            # Queueing is not completion. The analyzed cursor is advanced only
+            # after the parent reaches a terminal state with durable children.
+            self.assertIsNone(state["lastAnalyzedClosedBarTime"])
             self.assertEqual(state["dailyRunCount"], 1)
             self.assertEqual(state["lastMissionId"], "mission-auto-1")
 
@@ -1626,6 +1736,549 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
         source = BRIDGE_PATH.read_text(encoding="utf-8")
         self.assertIn("target=ai_trade_council_worker_loop", source)
         self.assertIn("for index in range(1, 4)", source)
+
+    def test_order_history_joins_only_the_exact_mission_and_snapshot(self) -> None:
+        snapshot_id = "a" * 64
+        mission_id = "mission-order-history-001"
+        council_decision_id = (
+            f"council-{self.bridge.payload_digest(mission_id, snapshot_id)[:24]}"
+        )
+        order = {
+            "commandId": "cmd-" + "1" * 24,
+            "missionId": mission_id,
+            "councilDecisionId": council_decision_id,
+            "snapshotId": snapshot_id,
+            "side": "BUY",
+            "symbol": "XAUUSD",
+            "timeframe": "M5",
+            "ticket": 983059471,
+            "executionState": "OPEN",
+            "provenByEa": True,
+        }
+        mission = {
+            "id": mission_id,
+            "title": "AI Council BUY XAUUSD M5",
+            "councilDecision": {
+                "ready": True,
+                "snapshotId": snapshot_id,
+                "selectedDirection": "BUY",
+                "requiredVotes": 1,
+                "voteCount": 3,
+                "directionCounts": {
+                    "BUY": 1,
+                    "HOLD": 2,
+                    "SELL": 0,
+                    "NO_DATA": 0,
+                },
+                "votes": [
+                    {
+                        "agentId": "optimization_agent",
+                        "roleId": "technical",
+                        "decision": "HOLD",
+                    },
+                    {
+                        "agentId": "backtest_analyst",
+                        "roleId": "price_action",
+                        "decision": "BUY",
+                    },
+                    {
+                        "agentId": "codex_mcp_operator",
+                        "roleId": "news",
+                        "decision": "HOLD",
+                    },
+                ],
+            },
+        }
+
+        model = self.bridge._ai_trade_order_history_read_model(
+            {
+                "available": True,
+                "items": [order],
+                "hasMore": False,
+                "reasonCode": "ok",
+            },
+            [mission],
+        )
+
+        self.assertTrue(model["available"])
+        self.assertEqual(model["summary"]["total"], 1)
+        self.assertEqual(model["summary"]["verified"], 1)
+        item = model["items"][0]
+        self.assertTrue(item["verified"])
+        self.assertTrue(item["councilProvenanceVerified"])
+        self.assertEqual(item["councilDecisionId"], council_decision_id)
+        self.assertEqual(item["requiredVotes"], 1)
+        self.assertEqual(
+            item["directionCounts"],
+            {"BUY": 1, "HOLD": 2, "SELL": 0, "NO_DATA": 0},
+        )
+        self.assertEqual(item["directionalVoters"], ["Price Action Consultant"])
+        self.assertEqual(item["voteSummaryTh"], "BUY 1 / HOLD 2 / SELL 0")
+        self.assertIn("Price Action Consultant", item["reasonTh"])
+        self.assertIn("BUY 1", item["reasonTh"])
+        self.assertEqual(item["missionTitle"], mission["title"])
+
+    def test_order_history_does_not_infer_votes_from_snapshot_mismatch(self) -> None:
+        order_snapshot_id = "b" * 64
+        mission_snapshot_id = "c" * 64
+        mission_id = "mission-order-history-mismatch"
+        council_decision_id = (
+            f"council-{self.bridge.payload_digest(mission_id, order_snapshot_id)[:24]}"
+        )
+        order = {
+            "commandId": "cmd-" + "2" * 24,
+            "missionId": mission_id,
+            "councilDecisionId": council_decision_id,
+            "snapshotId": order_snapshot_id,
+            "side": "SELL",
+            "symbol": "XAUUSD",
+            "timeframe": "M5",
+            "ticket": 983059472,
+            "executionState": "OPEN",
+            "provenByEa": True,
+        }
+        mission = {
+            "id": mission_id,
+            "title": "Mismatched council record",
+            "councilDecision": {
+                "ready": True,
+                "snapshotId": mission_snapshot_id,
+                "selectedDirection": "SELL",
+                "requiredVotes": 1,
+                "voteCount": 3,
+                "directionCounts": {
+                    "BUY": 0,
+                    "HOLD": 2,
+                    "SELL": 1,
+                    "NO_DATA": 0,
+                },
+                "votes": [
+                    {
+                        "agentId": "optimization_agent",
+                        "roleId": "technical",
+                        "decision": "HOLD",
+                    },
+                    {
+                        "agentId": "backtest_analyst",
+                        "roleId": "price_action",
+                        "decision": "SELL",
+                    },
+                    {
+                        "agentId": "codex_mcp_operator",
+                        "roleId": "news",
+                        "decision": "HOLD",
+                    },
+                ],
+            },
+        }
+
+        model = self.bridge._ai_trade_order_history_read_model(
+            {"available": True, "items": [order]},
+            [mission],
+        )
+
+        item = model["items"][0]
+        self.assertFalse(item["councilProvenanceVerified"])
+        self.assertFalse(item["verified"])
+        self.assertIsNone(item["requiredVotes"])
+        self.assertIsNone(item["directionCounts"])
+        self.assertEqual(item["directionalVoters"], [])
+        self.assertNotIn("Price Action Consultant", item["reasonTh"])
+        self.assertEqual(
+            item["voteSummaryTh"],
+            "ไม่พบผลโหวตที่ยืนยันได้",
+        )
+        self.assertEqual(model["summary"]["verified"], 0)
+
+    def test_order_history_rejects_non_deterministic_id_and_inconsistent_vote_evidence(self) -> None:
+        snapshot_id = "d" * 64
+        mission_id = "mission-order-history-integrity"
+        council_decision_id = (
+            f"council-{self.bridge.payload_digest(mission_id, snapshot_id)[:24]}"
+        )
+        order = {
+            "commandId": "cmd-" + "3" * 24,
+            "missionId": mission_id,
+            "councilDecisionId": council_decision_id,
+            "snapshotId": snapshot_id,
+            "side": "BUY",
+            "symbol": "XAUUSD",
+            "timeframe": "M5",
+            "ticket": 983059473,
+            "executionState": "OPEN",
+            "provenByEa": True,
+        }
+        mission = {
+            "id": mission_id,
+            "title": "Integrity checked council record",
+            "councilDecision": {
+                "ready": True,
+                "snapshotId": snapshot_id,
+                "selectedDirection": "BUY",
+                "requiredVotes": 1,
+                "voteCount": 3,
+                "directionCounts": {
+                    "BUY": 1,
+                    "HOLD": 2,
+                    "SELL": 0,
+                    "NO_DATA": 0,
+                },
+                "votes": [
+                    {
+                        "agentId": "optimization_agent",
+                        "roleId": "technical",
+                        "decision": "HOLD",
+                    },
+                    {
+                        "agentId": "backtest_analyst",
+                        "roleId": "price_action",
+                        "decision": "BUY",
+                    },
+                    {
+                        "agentId": "codex_mcp_operator",
+                        "roleId": "news",
+                        "decision": "HOLD",
+                    },
+                ],
+            },
+        }
+
+        cases: list[tuple[str, dict, dict]] = []
+
+        wrong_id_order = json.loads(json.dumps(order))
+        wrong_id_order["councilDecisionId"] = "council-" + "f" * 24
+        cases.append(("non_deterministic_council_id", wrong_id_order, mission))
+
+        wrong_counts_mission = json.loads(json.dumps(mission))
+        wrong_counts_mission["councilDecision"]["directionCounts"]["BUY"] = 2
+        wrong_counts_mission["councilDecision"]["directionCounts"]["HOLD"] = 1
+        cases.append(("counts_do_not_match_votes", order, wrong_counts_mission))
+
+        wrong_vote_count_mission = json.loads(json.dumps(mission))
+        wrong_vote_count_mission["councilDecision"]["voteCount"] = 2
+        cases.append(("declared_vote_count_is_not_three", order, wrong_vote_count_mission))
+
+        unmet_threshold_mission = json.loads(json.dumps(mission))
+        unmet_threshold_mission["councilDecision"]["requiredVotes"] = 2
+        cases.append(("threshold_exceeds_directional_votes", order, unmet_threshold_mission))
+
+        duplicate_role_mission = json.loads(json.dumps(mission))
+        duplicate_role_mission["councilDecision"]["votes"][2]["roleId"] = "technical"
+        cases.append(("specialist_roles_are_not_exact", order, duplicate_role_mission))
+
+        for case_name, case_order, case_mission in cases:
+            with self.subTest(case=case_name):
+                model = self.bridge._ai_trade_order_history_read_model(
+                    {"available": True, "items": [case_order]},
+                    [case_mission],
+                )
+                item = model["items"][0]
+                self.assertFalse(item["councilProvenanceVerified"])
+                self.assertFalse(item["verified"])
+                self.assertIsNone(item["requiredVotes"])
+                self.assertIsNone(item["directionCounts"])
+                self.assertEqual(item["directionalVoters"], [])
+                self.assertEqual(model["summary"]["verified"], 0)
+
+    def test_gateway_order_history_filters_selected_channel_and_never_infers_lifecycle(self) -> None:
+        now = int(datetime.now(timezone.utc).timestamp())
+        selected_channel = "mtc-selected-history"
+
+        def record(command_suffix: str, channel_id: str, ticket: int) -> dict:
+            command_id = "cmd-" + command_suffix * 24
+            return {
+                "command": {
+                    "commandId": command_id,
+                    "channelId": channel_id,
+                    "missionId": f"mission-{command_suffix}",
+                    "snapshotId": command_suffix * 64,
+                    "councilDecisionId": "council-" + command_suffix * 24,
+                    "action": "BUY",
+                    "symbol": "XAUUSD",
+                    "timeframe": "M5",
+                    "stopLoss": 4320.0,
+                    "takeProfit": 4360.0,
+                },
+                "ack": {
+                    "status": "EXECUTED",
+                    "reasonCode": "ORDER_ACCEPTED",
+                    "mode": "demo",
+                    "observedAt": now,
+                    "ticket": ticket,
+                    "fixedLot": 0.01,
+                    "filledPrice": 4340.0,
+                    "filledSlippagePoints": 0,
+                    "actualStopLoss": 4320.0,
+                    "actualTakeProfit": 4360.0,
+                    "actualMagicNumber": 4186001,
+                    "actualComment": f"HQ:{command_id}",
+                    "verificationStatus": "VERIFIED_OPEN",
+                    "executionState": "OPEN",
+                    "errorCode": 0,
+                    "statePersisted": True,
+                },
+                "status": "ack_EXECUTED",
+                "outstanding": False,
+                "createdAt": "2026-08-11T11:06:18Z",
+                "updatedAt": "2026-08-11T11:06:19Z",
+            }
+
+        missing = record("4", selected_channel, 1004)
+        stale = record("5", selected_channel, 1005)
+        mismatch = record("6", selected_channel, 1006)
+        other_channel = record("7", "mtc-not-selected", 1007)
+        outcomes = {
+            stale["command"]["commandId"]: {
+                "observedAt": now - 120,
+                "ticket": 1005,
+                "magicNumber": 4186001,
+                "comment": stale["ack"]["actualComment"],
+                "executionState": "OPEN",
+                "lots": 0.01,
+                "openPrice": 4340.0,
+                "stopLoss": 4320.0,
+                "takeProfit": 4360.0,
+                "openedAt": now - 180,
+            },
+            mismatch["command"]["commandId"]: {
+                "observedAt": now,
+                "ticket": 9999,
+                "magicNumber": 4186001,
+                "comment": mismatch["ack"]["actualComment"],
+                "executionState": "OPEN",
+                "lots": 0.02,
+                "openPrice": 4350.0,
+                "stopLoss": 4330.0,
+                "takeProfit": 4370.0,
+                "openedAt": now - 60,
+            },
+            other_channel["command"]["commandId"]: {
+                "observedAt": now,
+                "ticket": 1007,
+                "magicNumber": 4186001,
+                "comment": other_channel["ack"]["actualComment"],
+                "executionState": "OPEN",
+                "lots": 0.01,
+                "openPrice": 4340.0,
+                "stopLoss": 4320.0,
+                "takeProfit": 4360.0,
+                "openedAt": now - 60,
+            },
+        }
+
+        class FakeGateway:
+            def __init__(self) -> None:
+                self.requested_limits: list[int] = []
+
+            def list_commands(self, limit: int) -> list[dict]:
+                self.requested_limits.append(limit)
+                return [missing, stale, mismatch, other_channel]
+
+            def read_outcome(self, command_id: str) -> dict | None:
+                return outcomes.get(command_id)
+
+        gateway = FakeGateway()
+        history = self.bridge._mt4_trade_gateway_order_history(
+            gateway,
+            selected_candidate_id=selected_channel,
+            limit=10,
+        )
+
+        self.assertEqual(gateway.requested_limits, [500])
+        self.assertTrue(history["available"])
+        self.assertEqual(history["totalExecuted"], 3)
+        self.assertEqual(len(history["items"]), 3)
+        self.assertNotIn(
+            other_channel["command"]["commandId"],
+            {item["commandId"] for item in history["items"]},
+        )
+
+        by_command = {item["commandId"]: item for item in history["items"]}
+        missing_item = by_command[missing["command"]["commandId"]]
+        self.assertEqual(missing_item["executionState"], "CONFIRMED_UNKNOWN")
+        self.assertFalse(missing_item["outcomeAvailable"])
+        self.assertFalse(missing_item["outcomeIdentityVerified"])
+        self.assertFalse(missing_item["outcomeFresh"])
+
+        stale_item = by_command[stale["command"]["commandId"]]
+        self.assertEqual(stale_item["executionState"], "CONFIRMED_UNKNOWN")
+        self.assertTrue(stale_item["outcomeAvailable"])
+        self.assertTrue(stale_item["outcomeIdentityVerified"])
+        self.assertFalse(stale_item["outcomeFresh"])
+        self.assertEqual(stale_item["outcomeObservedAtDomain"], "utc")
+        self.assertEqual(stale_item["outcomeObservedAtSource"], "ea_now_utc")
+        self.assertIsNone(stale_item["outcomeObservedAtBroker"])
+        self.assertIsNotNone(stale_item["outcomeObservedAt"])
+        self.assertIsNotNone(stale_item["outcomeAgeSeconds"])
+
+        mismatch_item = by_command[mismatch["command"]["commandId"]]
+        self.assertEqual(mismatch_item["executionState"], "CONFIRMED_UNKNOWN")
+        self.assertTrue(mismatch_item["outcomeAvailable"])
+        self.assertFalse(mismatch_item["outcomeIdentityVerified"])
+        self.assertFalse(mismatch_item["outcomeFresh"])
+        self.assertEqual(mismatch_item["lot"], 0.01)
+        self.assertEqual(mismatch_item["openPrice"], 4340.0)
+
+    def test_reconciled_order_history_does_not_use_late_outcome_time_as_open_time(self) -> None:
+        channel_id = "mtc-selected"
+        created_at = "2026-08-11T17:36:16.673Z"
+        command_id = "cmd-" + "8" * 24
+        record = {
+            "command": {
+                "commandId": command_id,
+                "channelId": channel_id,
+                "missionId": "mission-reconciled-time",
+                "snapshotId": "8" * 64,
+                "councilDecisionId": "council-" + "8" * 24,
+                "action": "SELL",
+                "symbol": "XAUUSD",
+                "timeframe": "M5",
+                "stopLoss": 4384.0,
+                "takeProfit": 4368.88,
+            },
+            "status": "ack_EXECUTED",
+            "outstanding": False,
+            "createdAt": created_at,
+            "updatedAt": "2026-08-12T03:33:13.630Z",
+            "ack": {
+                "status": "EXECUTED",
+                "reasonCode": "EXECUTION_RECONCILED_WITH_WARNING",
+                "observedAt": 1786471199,
+                "ticket": 983283721,
+                "filledPrice": 4376.4,
+                "actualStopLoss": 4384.0,
+                "actualTakeProfit": 4368.88,
+                "actualMagicNumber": 4186001,
+                "actualComment": f"HQ:{command_id}",
+                "verificationStatus": "VERIFIED_OPEN",
+                "statePersisted": True,
+                "mode": "demo",
+            },
+        }
+        outcome = {
+            "observedAt": 1786471199,
+            "ticket": 983283721,
+            "magicNumber": 4186001,
+            "comment": f"HQ:{command_id}",
+            "executionState": "OPEN",
+            "lots": 0.01,
+            "openPrice": 4376.4,
+            "stopLoss": 4384.0,
+            "takeProfit": 4368.88,
+            "openedAt": 1786480577,
+        }
+
+        class FakeGateway:
+            def list_commands(self, limit: int) -> list[dict]:
+                return [record]
+
+            def read_outcome(self, requested_command_id: str) -> dict:
+                self_outer.assertEqual(requested_command_id, command_id)
+                return outcome
+
+        self_outer = self
+        history = self.bridge._mt4_trade_gateway_order_history(
+            FakeGateway(),
+            selected_candidate_id=channel_id,
+            limit=10,
+        )
+        self.assertEqual(history["items"][0]["openedAt"], created_at)
+        self.assertEqual(
+            history["items"][0]["openedAtSource"],
+            "command_created_at_legacy_reconciliation_fallback",
+        )
+
+    def test_closed_outcome_upgrades_effective_verification_status(self) -> None:
+        channel_id = "mtc-selected"
+        command_id = "cmd-" + "c" * 24
+        record = {
+            "command": {
+                "commandId": command_id,
+                "channelId": channel_id,
+                "missionId": "mission-closed-evidence",
+                "snapshotId": "c" * 64,
+                "councilDecisionId": "council-" + "c" * 24,
+                "action": "BUY",
+                "symbol": "XAUUSD",
+                "timeframe": "M5",
+                "stopLoss": 4380.3,
+                "takeProfit": 4420.45,
+            },
+            "status": "ack_EXECUTED",
+            "outstanding": False,
+            "createdAt": "2026-08-11T11:06:18Z",
+            "updatedAt": "2026-08-11T15:34:29Z",
+            "ack": {
+                "status": "EXECUTED",
+                "reasonCode": "ORDER_ACCEPTED",
+                "observedAt": 1786471578,
+                "ticket": 983059471,
+                "fixedLot": 0.01,
+                "filledPrice": 4391.41,
+                "actualStopLoss": 4380.3,
+                "actualTakeProfit": 4420.45,
+                "actualMagicNumber": 4186001,
+                "actualComment": f"HQ:cmd-{'c' * 16}[sl]",
+                "verificationStatus": "VERIFIED_OPEN",
+                "statePersisted": True,
+                "mode": "demo",
+            },
+        }
+        outcome = {
+            "observedAt": 1786481669,
+            "ticket": 983059471,
+            "magicNumber": 4186001,
+            "comment": f"HQ:{command_id}",
+            "executionState": "CLOSED",
+            "lots": 0.01,
+            "openPrice": 4391.41,
+            "stopLoss": 4380.3,
+            "takeProfit": 4420.45,
+            "openedAt": 1786471578,
+            "closedAt": 1786481669,
+            "closedPnl": -11.5,
+        }
+
+        class FakeGateway:
+            def list_commands(self, limit: int) -> list[dict]:
+                return [record]
+
+            def read_outcome(self, requested_command_id: str) -> dict:
+                self_outer.assertEqual(requested_command_id, command_id)
+                return outcome
+
+        self_outer = self
+        history = self.bridge._mt4_trade_gateway_order_history(
+            FakeGateway(),
+            selected_candidate_id=channel_id,
+            limit=10,
+        )
+
+        item = history["items"][0]
+        self.assertEqual(item["executionState"], "CLOSED")
+        self.assertEqual(item["verificationStatus"], "VERIFIED_CLOSED")
+        self.assertEqual(item["closedPnl"], -11.5)
+        self.assertTrue(item["provenByEa"])
+        self.assertTrue(item["outcomeIdentityVerified"])
+        self.assertIsNone(item["outcomeFresh"])
+        self.assertIsNone(item["outcomeObservedAt"])
+        self.assertEqual(item["outcomeObservedAtBroker"], 1786481669)
+        self.assertEqual(item["outcomeObservedAtDomain"], "broker_server")
+        self.assertEqual(
+            item["outcomeObservedAtSource"],
+            "ea_order_close_time_broker_clock",
+        )
+        self.assertIsNone(item["outcomeAgeSeconds"])
+
+        record["ack"]["actualComment"] = f"HQ:cmd-{'d' * 16}[sl]"
+        mismatched = self.bridge._mt4_trade_gateway_order_history(
+            FakeGateway(),
+            selected_candidate_id=channel_id,
+            limit=10,
+        )["items"][0]
+        self.assertFalse(mismatched["outcomeIdentityVerified"])
+        self.assertEqual(mismatched["executionState"], "CONFIRMED_UNKNOWN")
+        self.assertIsNone(mismatched["closedPnl"])
 
     def test_runner_schema_binds_horizon_and_role_specific_ownership(self) -> None:
         snapshot_id = "9" * 64

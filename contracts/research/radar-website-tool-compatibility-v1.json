@@ -1,0 +1,270 @@
+{
+  "schemaVersion": "radar-website-tool-compatibility-v1",
+  "status": "compatibility_target",
+  "propId": "left_audit_crystals",
+  "workflowId": "indicator_website_scout",
+  "canonicalName": "Radar Website Tool",
+  "referencePlugin": {
+    "skillId": "metafx-online-system-scout",
+    "version": "0.1.2",
+    "integrationMode": "backend_guarded_read_only_subset"
+  },
+  "presentation": {
+    "mainTabId": "today",
+    "historyIncludedInTabId": "seven_days",
+    "tabs": [
+      {
+        "id": "today",
+        "backendCanonicalId": "discoveries",
+        "labelTh": "วันนี้"
+      },
+      {
+        "id": "seven_days",
+        "backendCanonicalId": "archive",
+        "labelTh": "ย้อนหลัง 7 วัน"
+      }
+    ],
+    "leftRailSections": [
+      {
+        "id": "settings",
+        "labelTh": "ตั้งค่า",
+        "actionIds": [
+          "save_indicator_scout_schedule"
+        ],
+        "fieldIds": [
+          "googleSheetUrlOrId",
+          "enabled",
+          "times"
+        ]
+      }
+    ]
+  },
+  "entryContract": {
+    "containerField": "entries",
+    "minimumItemsPerRun": 1,
+    "maximumItemsPerRun": 6,
+    "toolKindField": "toolKind",
+    "toolKinds": [
+      "indicator",
+      "ea",
+      "tool"
+    ],
+    "requiredFields": [
+      "recordId",
+      "toolName",
+      "toolKind",
+      "platform",
+      "category",
+      "version",
+      "summaryTh",
+      "sourceTitle",
+      "sourceUrl",
+      "publishedAt",
+      "checkedAt",
+      "verificationStatus",
+      "availability",
+      "eaReadiness",
+      "missingRules",
+      "sourceLimitations",
+      "duplicateFingerprint",
+      "duplicateStatus",
+      "duplicateScope",
+      "screenshot"
+    ],
+    "workerRequiredFields": [
+      "toolName",
+      "toolKind",
+      "platform",
+      "category",
+      "version",
+      "summaryTh",
+      "sourceTitle",
+      "sourceUrl",
+      "publishedAt",
+      "checkedAt",
+      "verificationStatus",
+      "availability",
+      "eaReadiness",
+      "missingRules",
+      "sourceLimitations",
+      "screenshot"
+    ],
+    "backendComputedFields": [
+      "recordId",
+      "duplicateFingerprint",
+      "duplicateStatus",
+      "duplicateScope"
+    ],
+    "verificationStatuses": [
+      "unverified",
+      "partially_verified",
+      "verified",
+      "insufficient_evidence"
+    ],
+    "eaReadinessStatuses": [
+      "ready",
+      "needs_clarification",
+      "not_ea_ready"
+    ],
+    "unknownValuesMustRemainExplicit": true
+  },
+  "sourceEvidence": {
+    "requiredFields": [
+      "sourceTitle",
+      "sourceUrl",
+      "checkedAt"
+    ],
+    "allowedSchemes": [
+      "http",
+      "https"
+    ],
+    "publicHostsOnly": true,
+    "embeddedCredentialsAllowed": false,
+    "sensitiveQueryParametersAllowed": false,
+    "sourceUrlMustMatchEvidenceUrl": true,
+    "unsupportedClaimsMustBeListedInSourceLimitations": true,
+    "inventedRulesAllowed": false
+  },
+  "readinessTruth": {
+    "backendAuthorityRequired": true,
+    "defaultStatus": "needs_clarification",
+    "readyRequires": [
+      "entryRules",
+      "exitRules",
+      "riskRules",
+      "sourceUrl",
+      "checkedAt"
+    ],
+    "missingRulesMustBeArray": true,
+    "sourceLimitationsMustBeArray": true
+  },
+  "deduplicationTruth": {
+    "backendAuthorityRequired": true,
+    "defaultStatus": "unique",
+    "statuses": [
+      "unique",
+      "duplicate"
+    ],
+    "fingerprintFields": [
+      "sourceUrl",
+      "toolName",
+      "platform",
+      "version"
+    ],
+    "positiveStatusRequiresBackendFingerprint": true,
+    "frontendMayNotUpgradeStatus": true
+  },
+  "filters": {
+    "timestampField": "checkedAt",
+    "timezone": "Asia/Bangkok",
+    "today": {
+      "tabId": "today",
+      "mode": "calendar_day",
+      "startInclusive": true,
+      "endExclusive": true
+    },
+    "sevenDays": {
+      "tabId": "seven_days",
+      "mode": "rolling_days",
+      "days": 7,
+      "startInclusive": true,
+      "endInclusive": true
+    },
+    "undatedEntriesVisibleInFilteredTabs": false,
+    "futureEntriesVisible": false
+  },
+  "settings": {
+    "googleSheetUrl": {
+      "fieldId": "googleSheetUrlOrId",
+      "required": false,
+      "allowedScheme": "https",
+      "allowedHost": "docs.google.com",
+      "requiredPathPrefix": "/spreadsheets/d/",
+      "storedBy": "backend_local_settings",
+      "frontendCredentialsAccepted": false,
+      "sheetWriteAdapterStatus": "coming_soon",
+      "externalWriteDefault": false
+    },
+    "schedule": {
+      "enabledFieldId": "enabled",
+      "timesFieldId": "times",
+      "timezone": "Asia/Bangkok",
+      "allowedRunsPerDayWhenEnabled": [
+        1,
+        2
+      ],
+      "maximumRunsPerDay": 2,
+      "hardRuntimeEnforced": true,
+      "counterPersistence": "backend_local_settings",
+      "countingPolicy": "pre_dispatch_fail_closed_reservation",
+      "stalePendingPolicy": "expire_at_bangkok_day_boundary",
+      "catchUpPolicy": "latest_same_day_slot_only",
+      "uniqueTimesRequired": true,
+      "timeFormat": "HH:MM",
+      "defaultEnabled": false,
+      "executionMode": "scheduled_read_only"
+    }
+  },
+  "screenshotEvidence": {
+    "optional": true,
+    "backendAttachmentOnly": true,
+    "sameOriginOnly": true,
+    "externalImageUrlsAllowed": false,
+    "fabricatedPlaceholderAllowed": false,
+    "entryIdentityRequired": true,
+    "identityFields": [
+      "attachmentId",
+      "artifactRef"
+    ],
+    "firstReportImageFallbackAllowed": false,
+    "workerAvailableTrueRequiresFields": [
+      "artifactRef"
+    ],
+    "backendReadModelAvailableTrueRequiresFields": [
+      "attachmentId"
+    ],
+    "allowedMimeTypes": [
+      "image/png",
+      "image/jpeg",
+      "image/webp"
+    ],
+    "unavailableShape": {
+      "available": false,
+      "status": "not_available",
+      "attachmentId": null,
+      "artifactRef": null
+    }
+  },
+  "security": {
+    "frontendIntentOnly": true,
+    "backendOwnsResearchAndPersistence": true,
+    "frontendAcceptedCredentialFields": [],
+    "forbiddenFieldNameFragments": [
+      "token",
+      "apiKey",
+      "cookie",
+      "password",
+      "credential",
+      "auth",
+      "secret"
+    ],
+    "downloadOrInstallDiscoveredSoftware": false,
+    "liveTradingAllowed": false,
+    "externalWritesDefault": false,
+    "missionAuditAndReportRequired": true
+  },
+  "migrationCompatibility": {
+    "retainedActionIds": [
+      "discover_new_indicators",
+      "save_indicator_scout_schedule"
+    ],
+    "normalizedFrontendFields": [
+      "entries",
+      "todayEntries",
+      "sevenDayEntries",
+      "schedule",
+      "settings"
+    ],
+    "backendTabIdsMayRemainCanonical": true
+  }
+}

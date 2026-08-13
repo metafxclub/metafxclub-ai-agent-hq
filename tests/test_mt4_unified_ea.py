@@ -268,7 +268,10 @@ class MT4UnifiedEATests(unittest.TestCase):
         finder = named_block(self.code, r"\bint\s+FindManagedCommandTicket\s*\([^)]*\)")
         process = named_block(self.code, r"\bvoid\s+ProcessCommandFile\s*\([^)]*\)")
         self.assertIn("OrderMagicNumber", finder)
+        self.assertIn("IsManagedMagic(OrderMagicNumber())", finder)
+        self.assertNotIn("OrderMagicNumber() == MagicNumber", finder)
         self.assertIn("OrderComment", finder)
+        self.assertIn("CurrentChannelOwnsCommandId(command.command_id)", finder)
         self.assertIn("RECOVERED_ORDER_FOUND", reconcile)
         self.assertIn("EXECUTION_UNKNOWN", reconcile)
         self.assertIn("RESTART_RECONCILIATION_REQUIRED", reconcile)
@@ -290,6 +293,76 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("MaxManagedWeeklyLossPercent", self.code)
         self.assertIn("ReadManagedLossStreak", self.code)
         self.assertIn("CONSECUTIVE_LOSS_COOLDOWN_ACTIVE", self.code)
+        current_risk = named_block(
+            self.code,
+            r"\bbool\s+ValidateCurrentRiskState\s*\([^)]*\)",
+        )
+        self.assertIn("ReadManagedOpenState", current_risk)
+        self.assertIn("MaxManagedOpenPositions", current_risk)
+        self.assertNotIn("SnapshotChannel", current_risk)
+        self.assertNotIn("CommandLedgerPath", current_risk)
+        account_lock = named_block(
+            self.code,
+            r"\bbool\s+AccountExecutionLockPath\s*\([^)]*\)",
+        )
+        self.assertNotIn("SnapshotChannel", account_lock)
+
+    def test_broker_order_time_arithmetic_stays_in_the_broker_clock_domain(self) -> None:
+        loss_streak = named_block(
+            self.code,
+            r"\bvoid\s+ReadManagedLossStreak\s*\([^)]*\)",
+        )
+        current_risk = named_block(
+            self.code,
+            r"\bbool\s+ValidateCurrentRiskState\s*\([^)]*\)",
+        )
+        lifecycle = named_block(
+            self.code,
+            r"\bvoid\s+ApplyOptionalPositionLifecycle\s*\([^)]*\)",
+        )
+
+        self.assertIn("OrderCloseTime", loss_streak)
+        self.assertRegex(
+            loss_streak,
+            r"cooldown_until\s*=\s*\(int\)newest_time\s*\+\s*ConsecutiveLossCooldownMinutes\s*\*\s*60",
+        )
+        self.assertIn("int broker_now = (int)TimeCurrent();", current_risk)
+        self.assertRegex(current_risk, r"broker_now\s*<\s*cooldown_until")
+        self.assertNotRegex(current_risk, r"NowUtc\s*\(\s*\)\s*<\s*cooldown_until")
+        self.assertIn("datetime broker_now = TimeCurrent();", lifecycle)
+        self.assertRegex(
+            lifecycle,
+            r"broker_now\s*>=\s*OrderOpenTime\s*\(\s*\)\s*\+\s*MaxHoldingMinutes\s*\*\s*60",
+        )
+        self.assertNotRegex(
+            lifecycle,
+            r"NowUtc\s*\(\s*\)\s*>=\s*[^;]*OrderOpenTime",
+        )
+        self.assertIn('"observedAt\\\":" + IntegerToString(NowUtc())', lifecycle)
+
+        utc_now = 1_800_000_000
+        offsets = (3 * 60 * 60, -5 * 60 * 60)
+
+        cooldown_results = []
+        old_mixed_cooldown_results = []
+        holding_results = []
+        old_mixed_holding_results = []
+        for broker_offset in offsets:
+            broker_now = utc_now + broker_offset
+            broker_close_time = broker_now - 30 * 60
+            cooldown_until = broker_close_time + 4 * 60 * 60
+            broker_open_time = broker_now - 90 * 60
+            holding_deadline = broker_open_time + 60 * 60
+
+            cooldown_results.append(broker_now < cooldown_until)
+            old_mixed_cooldown_results.append(utc_now < cooldown_until)
+            holding_results.append(broker_now >= holding_deadline)
+            old_mixed_holding_results.append(utc_now >= holding_deadline)
+
+        self.assertEqual(cooldown_results, [True, True])
+        self.assertEqual(holding_results, [True, True])
+        self.assertEqual(old_mixed_cooldown_results, [True, False])
+        self.assertEqual(old_mixed_holding_results, [False, True])
 
     def test_position_lifecycle_is_explicit_and_safe_by_default(self) -> None:
         self.assertRegex(
@@ -317,6 +390,7 @@ class MT4UnifiedEATests(unittest.TestCase):
             "OrderOpenPrice",
             "SlippagePoints",
             "slippage_within_limit",
+            "identity_matches",
             "OrderStopLoss",
             "OrderTakeProfit",
             "OrderMagicNumber",
@@ -324,6 +398,15 @@ class MT4UnifiedEATests(unittest.TestCase):
             "ORDER_POST_SEND_VERIFICATION_MISMATCH",
         ):
             self.assertIn(token, verify)
+        identity_start = verify.find("bool identity_matches")
+        identity_end = verify.find("if(!identity_matches)")
+        self.assertGreaterEqual(identity_start, 0)
+        self.assertGreater(identity_end, identity_start)
+        self.assertNotIn(
+            "slippage_within_limit",
+            verify[identity_start:identity_end],
+        )
+        self.assertIn("ORDER_ACCEPTED_WITH_SLIPPAGE_WARNING", verify)
         for field in (
             "filledPrice",
             "filledSlippagePoints",
@@ -338,6 +421,117 @@ class MT4UnifiedEATests(unittest.TestCase):
             self.assertIn(field, ack)
         timer = named_block(self.code, r"\bvoid\s+OnTimer\s*\([^)]*\)")
         self.assertIn("RefreshManagedOutcomeFiles", timer)
+
+    def test_ticket_mapping_survives_broker_tp_sl_comment_rewrite(self) -> None:
+        ensure = named_block(self.code, r"\bvoid\s+EnsureFolders\s*\([^)]*\)")
+        writer = named_block(self.code, r"\bbool\s+WriteTicketCommandMap\s*\([^)]*\)")
+        reader = named_block(self.code, r"\bbool\s+ReadSelectedOrderTicketMap\s*\([^)]*\)")
+        outcome = named_block(self.code, r"\bbool\s+WriteSelectedOrderOutcome\s*\([^)]*\)")
+        refresh = named_block(self.code, r"\bvoid\s+RefreshManagedOutcomeFiles\s*\([^)]*\)")
+        reconcile = named_block(self.code, r"\bvoid\s+ReconcileExecutingCommand\s*\([^)]*\)")
+        process = named_block(self.code, r"\bvoid\s+ProcessCommandFile\s*\([^)]*\)")
+        self.assertIn('"\\\\tickets"', ensure)
+        self.assertIn("metafx-hq-mt4-ticket-map-v1", writer)
+        self.assertIn("OrderTicket", reader)
+        self.assertIn("OrderMagicNumber", reader)
+        self.assertIn("IsBrokerClosedGatewayComment", reader)
+        self.assertIn("[tp]", self.code)
+        self.assertIn("[sl]", self.code)
+        self.assertIn('JsonString("HQ:" + command_id)', outcome)
+        self.assertIn("ResolveSelectedOrderCommandId", refresh)
+        self.assertIn("WriteTicketCommandMap", reconcile)
+        self.assertIn('processed_status == "EXECUTION_UNKNOWN"', process)
+
+    def test_startup_backfill_is_bounded_exact_idempotent_and_never_resends(self) -> None:
+        backfill = named_block(
+            self.code,
+            r"\bvoid\s+BackfillLegacyExecutionMapsAndOutcomes\s*\([^)]*\)",
+        )
+        parser = named_block(
+            self.code,
+            r"\bbool\s+ParseLegacyExecutedAck\s*\([^)]*\)",
+        )
+        matcher = named_block(
+            self.code,
+            r"\bbool\s+SelectedOrderMatchesLegacyExecutedAck\s*\([^)]*\)",
+        )
+        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        self.assertTrue(backfill)
+        self.assertIn("LEGACY_BACKFILL_MAX_ACKS", backfill)
+        self.assertIn("FileFindFirst", backfill)
+        self.assertIn("processed\\\\commands\\\\*.json", backfill)
+        self.assertIn("LegacyBackfillTicketIsAmbiguous", backfill)
+        self.assertIn("ReadSelectedOrderTicketMap", backfill)
+        self.assertIn("WriteSelectedOrderLegacyTicketMap", backfill)
+        self.assertIn("WriteSelectedOrderOutcome", backfill)
+        self.assertIn("automaticRetry", backfill)
+        self.assertNotIn("OrderSend", backfill)
+        self.assertIn("BackfillLegacyExecutionMapsAndOutcomes", on_init)
+        for token in (
+            "EXECUTED",
+            "statePersisted",
+            "signatureVerificationStatus",
+            "ticket",
+            "actualMagicNumber",
+            "fixedLot",
+            "filledPrice",
+            "filledSlippagePoints",
+            "actualStopLoss",
+            "actualTakeProfit",
+            "actualComment",
+        ):
+            self.assertIn(token, parser)
+        for token in (
+            "OrderTicket",
+            "OrderMagicNumber",
+            "OrderSymbol",
+            "OrderType",
+            "OrderLots",
+            "OrderOpenPrice",
+            "OrderStopLoss",
+            "OrderTakeProfit",
+            "IsBrokerClosedGatewayComment",
+        ):
+            self.assertIn(token, matcher)
+
+    def test_atomic_writer_retries_with_backoff_and_failure_telemetry(self) -> None:
+        attempt = named_block(
+            self.code,
+            r"\bbool\s+TryWriteCommonTextAtomic\s*\([^)]*\)",
+        )
+        retry = named_block(
+            self.code,
+            r"\bbool\s+WriteCommonTextAtomicWithTemporary\s*\([^)]*\)",
+        )
+        snapshot = named_block(self.code, r"\bbool\s+WriteSnapshot\s*\([^)]*\)")
+        chart = named_block(self.code, r"\bvoid\s+UpdateChartStatus\s*\([^)]*\)")
+        self.assertIn("FileWriteString", attempt)
+        self.assertIn("FileMove", attempt)
+        self.assertGreaterEqual(attempt.count("GetLastError"), 2)
+        self.assertIn("ATOMIC_WRITE_MAX_ATTEMPTS", retry)
+        self.assertIn("TryWriteCommonTextAtomic", retry)
+        self.assertIn("Sleep", retry)
+        self.assertIn("g_consecutive_atomic_write_failures++", retry)
+        self.assertIn("g_last_atomic_write_error", retry)
+        self.assertIn("WriteCommonTextAtomicWithTemporary", snapshot)
+        self.assertIn("g_consecutive_atomic_write_failures", chart)
+        self.assertIn("g_last_atomic_write_error", chart)
+
+    def test_closed_outcome_payload_is_stable_and_not_rewritten(self) -> None:
+        outcome = named_block(
+            self.code,
+            r"\bbool\s+WriteSelectedOrderOutcome\s*\([^)]*\)",
+        )
+        self.assertIn("outcome_observed_at", outcome)
+        self.assertIn("OrderCloseTime", outcome)
+        self.assertIn("existing_payload", outcome)
+        self.assertRegex(
+            outcome,
+            r"Trimmed\s*\(\s*existing_payload\s*\)\s*==\s*payload",
+        )
+        compare_at = outcome.find("existing_payload")
+        write_at = outcome.rfind("WriteCommonTextAtomic")
+        self.assertGreater(write_at, compare_at)
 
     def test_signed_command_verifier_is_dynamic_and_snapshot_reports_market_state(self) -> None:
         signed = named_block(self.code, r"\bbool\s+SignedCommandVerificationAvailable\s*\([^)]*\)")
@@ -357,8 +551,9 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("liveExecutionAvailable", capabilities)
         self.assertIn("MT4_LOADED_ACCOUNT_HISTORY", capabilities)
 
-    def test_status_v4_exposes_account_mode_and_protection_telemetry(self) -> None:
-        self.assertIn('metafx-hq-mt4-status-v4', self.code)
+    def test_status_v5_exposes_account_policy_and_protection_telemetry(self) -> None:
+        self.assertIn('metafx-hq-mt4-status-v5', self.code)
+        self.assertNotIn('metafx-hq-mt4-status-v4', self.code)
         self.assertNotIn('metafx-hq-mt4-status-v3', self.code)
         status = named_block(self.code, r"\bstring\s+BuildStatusJson\s*\([^)]*\)")
         for field in (
@@ -369,6 +564,14 @@ class MT4UnifiedEATests(unittest.TestCase):
             "ackSchemaVersion",
             "executionGuardReady",
             "executionGuardReason",
+            "portfolioPolicyStatus",
+            "portfolioPolicyDigest",
+            "portfolioGuardScope",
+            "managedMagicNumbers",
+            "allowedSymbols",
+            "allowedTimeframes",
+            "same_windows_user_file_common",
+            "crossVpsDistributedLock",
             "maxManagedPositions",
             "currentManagedPositions",
             "maxManagedLots",
@@ -582,8 +785,8 @@ class MT4UnifiedEATests(unittest.TestCase):
         ack = named_block(self.code, r"\bstring\s+BuildAckJson\s*\([^)]*\)")
         self.assertIn("signatureVerificationStatus", ack)
         self.assertIn("metafx-hq-mt4-ack-v3", self.code)
-        self.assertIn('version   "2.14"', self.code)
-        self.assertIn('EA_VERSION = "2.14"', self.code)
+        self.assertIn('version   "2.16"', self.code)
+        self.assertIn('EA_VERSION = "2.16"', self.code)
         self.assertIn("JsonNumber(command.reference_price, 8)", ack)
 
     def test_risk_estimate_normalizes_broker_tick_size_without_point_double_count(self) -> None:
@@ -601,9 +804,17 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("base_length < 6", matcher)
         self.assertIn("suffix_length > 8", matcher)
         self.assertIn("IsBrokerSuffixCharacter", matcher)
+        suffix_character = named_block(
+            self.code,
+            r"\bbool\s+IsBrokerSuffixCharacter\s*\([^)]*\)",
+        )
+        self.assertIn("code == '#'", suffix_character)
+        self.assertNotIn("code == '+'", suffix_character)
         runtime = named_block(self.code, r"\bbool\s+ValidateRuntime\s*\([^)]*\)")
         self.assertIn("IsAllowedBrokerSymbol(AllowedSymbols, command.symbol)", runtime)
         self.assertIn("Uppercase(Symbol()) != command.symbol", runtime)
+        execute = named_block(self.code, r"\bvoid\s+ExecuteCommand\s*\([^)]*\)")
+        self.assertRegex(execute, r"OrderSend\s*\(\s*Symbol\s*\(\s*\)")
         on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
         self.assertIn("IsAllowedBrokerSymbol(AllowedSymbols, Symbol())", on_init)
 
@@ -637,6 +848,145 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertGreater(claim, execute.rfind("ValidateMarginPreflight"))
         self.assertGreater(claim, execute.rfind("ReverifyCommandEnvelope"))
         self.assertLess(claim, order_send)
+
+    def test_bar_claim_state_is_scoped_to_exact_channel_symbol_and_timeframe(self) -> None:
+        path = named_block(self.code, r"\bstring\s+LastOrderBarPath\s*\([^)]*\)")
+        read = named_block(self.code, r"\bbool\s+ReadLastOrderBar\s*\([^)]*\)")
+        write = named_block(self.code, r"\bbool\s+WriteLastOrderBar\s*\([^)]*\)")
+        migrate = named_block(
+            self.code,
+            r"\bbool\s+MigrateLegacyLastOrderBarState\s*\([^)]*\)",
+        )
+        self.assertIn("BasePath", path)
+        self.assertIn("Uppercase(Symbol())", path)
+        self.assertIn("CurrentTimeframeName", path)
+        for token in ("SnapshotChannel", "Uppercase(Symbol())", "CurrentTimeframeName"):
+            self.assertIn(token, read)
+            self.assertIn(token, write)
+        self.assertIn("FileIsExist", read)
+        self.assertLess(migrate.find("WriteLastOrderBar"), migrate.find("FileDelete"))
+
+    def test_account_execution_lock_wraps_mutable_guards_claim_and_ordersend(self) -> None:
+        path = named_block(
+            self.code,
+            r"\bbool\s+AccountExecutionLockPath\s*\([^)]*\)",
+        )
+        identity = named_block(
+            self.code,
+            r"\bbool\s+AccountIdentityDigest\s*\([^)]*\)",
+        )
+        acquire = named_block(
+            self.code,
+            r"\bbool\s+AcquireAccountExecutionLock\s*\([^)]*\)",
+        )
+        execute = named_block(self.code, r"\bvoid\s+ExecuteCommand\s*\([^)]*\)")
+        self.assertIn("AccountIdentityDigest", path)
+        self.assertIn("AccountNumber", identity)
+        self.assertIn("AccountServer", identity)
+        self.assertIn("Uppercase(Trimmed(AccountServer()))", identity)
+        self.assertIn("Sha256Bytes", identity)
+        self.assertIn("FILE_SHARE_READ", acquire)
+        self.assertNotIn("FILE_SHARE_WRITE", acquire)
+        lock = execute.find("AcquireAccountExecutionLock")
+        self.assertGreater(lock, 0)
+        self.assertLess(lock, execute.rfind("ValidateRuntime"))
+        self.assertLess(lock, execute.rfind("WriteLastOrderBar"))
+        self.assertLess(lock, execute.find("OrderSend"))
+        self.assertGreater(execute.find("ReleaseAccountExecutionLock"), execute.find("OrderSend"))
+
+    def test_account_portfolio_policy_is_normalized_leased_and_fail_closed(self) -> None:
+        normalize = named_block(
+            self.code,
+            r"\bbool\s+NormalizedManagedMagicNumbers\s*\([^)]*\)",
+        )
+        policy = named_block(
+            self.code,
+            r"\bbool\s+BuildPortfolioPolicyCanonical\s*\([^)]*\)",
+        )
+        acquire = named_block(
+            self.code,
+            r"\bbool\s+AcquirePortfolioPolicyLease\s*\([^)]*\)",
+        )
+        release = named_block(
+            self.code,
+            r"\bvoid\s+ReleasePortfolioPolicyLease\s*\([^)]*\)",
+        )
+        directory = named_block(
+            self.code,
+            r"\bbool\s+AccountPortfolioPolicyDirectoryPath\s*\([^)]*\)",
+        )
+        self.assertIn("values[right] < values[left]", normalize)
+        self.assertIn("values[sorted_index] == values[sorted_index - 1]", normalize)
+        for field in (
+            "managedMagicNumbers",
+            "maxManagedOpenPositions",
+            "maxManagedTotalLots",
+            "maxTradesPerBrokerDay",
+            "maxDailyLossPercent",
+            "maxManagedWeeklyLossPercent",
+            "maxConsecutiveManagedLosses",
+            "consecutiveLossCooldownMinutes",
+            "maxAccountEquityDrawdownPercent",
+        ):
+            self.assertIn(field, policy)
+        self.assertIn("Sha256TextHex", policy)
+        self.assertIn("AccountIdentityDigest", directory)
+        self.assertNotIn("SnapshotChannel", directory)
+        self.assertIn("FileFindFirst", acquire)
+        self.assertIn("PORTFOLIO_POLICY_MISMATCH", acquire)
+        self.assertIn("active_digest != expected_digest", acquire)
+        self.assertIn("active_lease_count > 0", acquire)
+        self.assertIn("WriteCommonTextAtomic(policy_path, canonical)", acquire)
+        self.assertIn("FILE_SHARE_READ", acquire)
+        self.assertNotIn("FILE_SHARE_WRITE", acquire)
+        self.assertIn("FileClose(g_portfolio_policy_lease_handle)", release)
+        self.assertIn("FileDelete(lease_path, FILE_COMMON)", release)
+
+        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        account_lock = on_init.find("AcquireAccountExecutionLock")
+        policy_lease = on_init.find("AcquirePortfolioPolicyLease")
+        account_unlock = on_init.find("ReleaseAccountExecutionLock", policy_lease)
+        self.assertLess(account_lock, policy_lease)
+        self.assertLess(policy_lease, account_unlock)
+        self.assertIn('"portfolio_policy"', on_init)
+        self.assertIn("ReleasePortfolioPolicyLease", on_init)
+        on_deinit = named_block(self.code, r"\bvoid\s+OnDeinit\s*\([^)]*\)")
+        self.assertIn("ReleasePortfolioPolicyLease", on_deinit)
+
+    def test_outcome_and_history_recovery_are_isolated_to_exact_channel(self) -> None:
+        resolve = named_block(
+            self.code,
+            r"\bbool\s+ResolveSelectedOrderCommandId\s*\([^)]*\)",
+        )
+        outcome = named_block(
+            self.code,
+            r"\bbool\s+WriteSelectedOrderOutcome\s*\([^)]*\)",
+        )
+        refresh = named_block(
+            self.code,
+            r"\bvoid\s+RefreshManagedOutcomeFiles\s*\([^)]*\)",
+        )
+        legacy = named_block(
+            self.code,
+            r"\bbool\s+ParseLegacyExecutedAck\s*\([^)]*\)",
+        )
+        self.assertGreaterEqual(resolve.count("CurrentChannelOwnsCommandId"), 2)
+        self.assertIn("CurrentChannelOwnsCommandId", outcome)
+        self.assertIn("IsManagedMarketOrderSelected", refresh)
+        self.assertNotIn("OrderMagicNumber() != MagicNumber", refresh)
+        self.assertIn("IsManagedMagic(ack.magic_number)", legacy)
+
+    def test_chart_transition_invalidates_old_runtime_before_unlocking_channel(self) -> None:
+        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        on_deinit = named_block(self.code, r"\bvoid\s+OnDeinit\s*\([^)]*\)")
+        invalidate = named_block(
+            self.code,
+            r"\bvoid\s+InvalidatePublishedRuntimeState\s*\([^)]*\)",
+        )
+        for token in ("StatusPath", "CapabilitiesPath", "SnapshotPath"):
+            self.assertIn(token, invalidate)
+        self.assertGreater(on_init.find("InvalidatePublishedRuntimeState"), on_init.find("AcquireChannelLock"))
+        self.assertLess(on_deinit.find("InvalidatePublishedRuntimeState"), on_deinit.find("ReleaseChannelLock"))
 
     def test_duplicate_command_does_not_overwrite_original_idempotency_ledger(self) -> None:
         duplicate = named_block(self.code, r"\bvoid\s+WriteDuplicateAck\s*\([^)]*\)")

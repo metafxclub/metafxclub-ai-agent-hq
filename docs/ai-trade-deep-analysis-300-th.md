@@ -52,6 +52,6 @@
 
 ## การเปิดระบบหลังรีสตาร์ต Windows
 
-- `scripts/register-bridge-autostart.cmd` เปิด Local Bridge แบบซ่อนหลังผู้ใช้เข้าสู่ Windows และตรวจซ้ำทุก 5 นาทีผ่าน Task Scheduler โดยอ่าน endpoint ที่ยืนยันไว้
+- `scripts/register-bridge-autostart.cmd` เปิด Local Bridge แบบซ่อนหลังผู้ใช้เข้าสู่ Windows และตรวจซ้ำทุก 15 นาทีโดยค่าเริ่มต้นผ่าน Task Scheduler โดยอ่าน endpoint ที่ยืนยันไว้และไม่เปิด Windows Terminal
 - `scripts/unregister-bridge-autostart.cmd` ยกเลิก Scheduled Task และล้าง Startup shortcut รุ่นเก่าถ้ามี
 - Auto-start เปิดเฉพาะ Bridge เท่านั้น ไม่เปิด Browser, MT4 หรือ MT5 และไม่เปลี่ยนพอร์ตเองเมื่อพอร์ตที่ยืนยันไม่ว่าง

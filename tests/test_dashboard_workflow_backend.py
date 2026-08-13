@@ -102,7 +102,8 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
 
     def test_tabs_reference_only_actions_owned_by_the_same_prop(self) -> None:
         for prop_id, tabs in self.bridge.DASHBOARD_WORKFLOW_TABS.items():
-            self.assertEqual(len(tabs), 4, prop_id)
+            expected_count = 2 if prop_id == "left_signal_cube" else 1 if prop_id == "right_status_crystals" else 4
+            self.assertEqual(len(tabs), expected_count, prop_id)
             for tab in tabs:
                 for action_id in tab["actionIds"]:
                     self.assertEqual(
@@ -442,9 +443,17 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
 
     def test_schedule_persists_user_request_and_reports_runtime_state_truthfully(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            settings_path = Path(temp_dir) / "dashboard-workflow-settings.json"
+            runtime_dir = Path(temp_dir) / "runtime"
+            settings_path = runtime_dir / "dashboard-workflow-settings.json"
+            missions_path = runtime_dir / "missions.json"
+            reports_dir = runtime_dir / "reports"
+            events_path = runtime_dir / "agent-events.jsonl"
             with (
+                mock.patch.object(self.bridge, "RUNTIME_DIR", runtime_dir),
                 mock.patch.object(self.bridge, "DASHBOARD_WORKFLOW_SETTINGS_PATH", settings_path),
+                mock.patch.object(self.bridge, "MISSIONS_PATH", missions_path),
+                mock.patch.object(self.bridge, "RUNTIME_REPORTS_DIR", reports_dir),
+                mock.patch.object(self.bridge, "AGENT_EVENTS_PATH", events_path),
                 mock.patch.object(self.bridge, "find_room_prop", return_value={"id": "codex_mcp_portal"}),
                 mock.patch.object(self.bridge, "append_audit"),
             ):
@@ -463,6 +472,81 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertTrue(result["schedule"]["automaticRunsImplemented"])
         self.assertFalse(result["schedule"]["automaticExternalActions"])
         self.assertEqual(stored["discoverySchedule"]["times"], ["09:00", "18:30"])
+
+    def test_mission_store_retries_transient_access_denied_and_commits_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir) / "runtime"
+            missions_path = runtime_dir / "missions.json"
+            with (
+                mock.patch.object(self.bridge, "RUNTIME_DIR", runtime_dir),
+                mock.patch.object(self.bridge, "RUNTIME_REPORTS_DIR", runtime_dir / "reports"),
+                mock.patch.object(self.bridge, "MISSIONS_PATH", missions_path),
+            ):
+                self.bridge.save_missions([{"id": "mission-old"}])
+                original_replace = self.bridge.os.replace
+                destination_attempts = 0
+
+                def transient_replace(source, destination):
+                    nonlocal destination_attempts
+                    if Path(destination) == missions_path:
+                        destination_attempts += 1
+                        if destination_attempts < 3:
+                            raise PermissionError(5, "temporary access denied")
+                    return original_replace(source, destination)
+
+                with (
+                    mock.patch.object(self.bridge.os, "replace", side_effect=transient_replace),
+                    mock.patch.object(self.bridge.time, "sleep") as sleeper,
+                ):
+                    self.bridge.save_missions([{"id": "mission-new"}])
+
+                stored = self.bridge.read_json(missions_path, {})
+                backup = self.bridge.read_json(missions_path.with_name("missions.json.bak"), {})
+                leftovers = list(runtime_dir.glob(".missions.json.*.tmp"))
+
+        self.assertEqual(destination_attempts, 3)
+        self.assertEqual(sleeper.call_count, 2)
+        self.assertEqual([item["id"] for item in stored["missions"]], ["mission-new"])
+        self.assertEqual([item["id"] for item in backup["missions"]], ["mission-old"])
+        self.assertEqual(leftovers, [])
+
+    def test_mission_store_exhausted_access_denied_keeps_last_good_and_cleans_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir) / "runtime"
+            missions_path = runtime_dir / "missions.json"
+            with (
+                mock.patch.object(self.bridge, "RUNTIME_DIR", runtime_dir),
+                mock.patch.object(self.bridge, "RUNTIME_REPORTS_DIR", runtime_dir / "reports"),
+                mock.patch.object(self.bridge, "MISSIONS_PATH", missions_path),
+            ):
+                self.bridge.save_missions([{"id": "mission-last-good"}])
+                original = self.bridge.read_json(missions_path, {})
+                original_replace = self.bridge.os.replace
+                destination_attempts = 0
+
+                def denied_replace(source, destination):
+                    nonlocal destination_attempts
+                    if Path(destination) == missions_path:
+                        destination_attempts += 1
+                        raise PermissionError(5, "persistent access denied")
+                    return original_replace(source, destination)
+
+                with (
+                    mock.patch.object(self.bridge.os, "replace", side_effect=denied_replace),
+                    mock.patch.object(self.bridge.time, "sleep") as sleeper,
+                ):
+                    with self.assertRaises(PermissionError):
+                        self.bridge.save_missions([{"id": "mission-must-not-commit"}])
+
+                stored = self.bridge.read_json(missions_path, {})
+                backup = self.bridge.read_json(missions_path.with_name("missions.json.bak"), {})
+                leftovers = list(runtime_dir.glob(".missions.json.*.tmp"))
+
+        self.assertEqual(destination_attempts, self.bridge.MISSIONS_REPLACE_MAX_ATTEMPTS)
+        self.assertEqual(sleeper.call_count, self.bridge.MISSIONS_REPLACE_MAX_ATTEMPTS - 1)
+        self.assertEqual(stored, original)
+        self.assertEqual(backup, original)
+        self.assertEqual(leftovers, [])
 
     def test_local_workflow_contract_is_persisted_and_replay_returns_same_result(self) -> None:
         action = dict(self.bridge.DASHBOARD_WORKFLOW_ACTIONS["save_discovery_schedule"])
@@ -1391,9 +1475,9 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
     def test_new_dashboard_tabs_actions_and_agent_preferences_are_canonical(self) -> None:
         expected_tabs = {
             "left_audit_crystals": ["discoveries", "evidence", "schedule", "archive"],
-            "left_signal_cube": ["today", "pair_bias", "horizons", "schedule_history"],
+            "left_signal_cube": ["pair_bias", "today"],
             "terminal_workstation": ["source", "development_brief", "performance_goals", "outputs"],
-            "right_status_crystals": ["vps", "hq_bridge", "agent_settings", "activity_history"],
+            "right_status_crystals": ["connections"],
         }
         for prop_id, tab_ids in expected_tabs.items():
             self.assertEqual(
@@ -1462,7 +1546,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertEqual(empty["pairCount"], 28)
         self.assertEqual([row["pair"] for row in empty["pairs"]], list(self.bridge.FX_BIAS_PAIRS))
         self.assertEqual(empty["verifiedPairCount"], 0)
-        self.assertTrue(all(row["shortBias"] == "unknown" for row in empty["pairs"]))
+        self.assertTrue(all(row["shortBias"] == "insufficient_data" for row in empty["pairs"]))
         self.assertFalse(empty["fabricatedData"])
 
         report = {
@@ -1470,37 +1554,398 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             "linkedPropId": "left_signal_cube",
             "type": "fx_news_bias_report",
             "status": "ready",
+            "updatedAt": "2026-08-12T00:01:00Z",
+            "workflowContext": {
+                "propId": "left_signal_cube",
+                "actionId": "analyze_daily_market_news",
+            },
+            "metrics": {
+                "sourceLinks": [
+                    {"id": "source-1", "title": "Public source", "url": "https://example.com/fx"},
+                ],
+                "pairBias": [
+                    {
+                        "pair": "EURUSD",
+                        "shortBias": "buy",
+                        "mediumBias": "neutral",
+                        "longBias": "sell",
+                        "confidence": 77,
+                        "sourceRef": "source-1",
+                    },
+                    {
+                        "pair": "GBPUSD",
+                        "shortBias": "bullish",
+                    },
+                ],
+            },
+            "evidence": [{"label": "Public source", "url": "https://example.com/fx"}],
+        }
+        model = self.bridge._fx_bias_read_model(
+            [report],
+            now_local=datetime.fromisoformat("2026-08-12T08:00:00+07:00"),
+        )
+        eurusd = next(row for row in model["pairs"] if row["pair"] == "EURUSD")
+        gbpusd = next(row for row in model["pairs"] if row["pair"] == "GBPUSD")
+        self.assertEqual((eurusd["shortBias"], eurusd["mediumBias"], eurusd["longBias"]), ("bullish", "sideway", "bearish"))
+        self.assertEqual(eurusd["status"], "source_backed")
+        self.assertEqual(gbpusd["status"], "insufficient_data")
+        self.assertEqual(gbpusd["shortBias"], "insufficient_data")
+        self.assertEqual(model["verifiedPairCount"], 1)
+        self.assertTrue(model["complete28"])
+
+    def test_one_analyze_report_feeds_news_dangers_and_all_28_pair_bias_rows(self) -> None:
+        source_url = "https://example.com/public-fx-calendar"
+        pair_rows = []
+        for pair in self.bridge.FX_BIAS_PAIRS:
+            if pair == "EURUSD":
+                pair_rows.append({
+                    "pair": pair,
+                    "shortBias": "bullish",
+                    "mediumBias": "sideway",
+                    "longBias": "bearish",
+                    "confidence": 74,
+                    "sourceRef": "public-1",
+                })
+            else:
+                pair_rows.append({
+                    "pair": pair,
+                    "shortBias": "insufficient_data",
+                    "mediumBias": "insufficient_data",
+                    "longBias": "insufficient_data",
+                    "verified": False,
+                })
+        report = {
+            "id": "fx-all-in-one-1",
+            "linkedPropId": "left_signal_cube",
+            "type": "fx_news_bias_report",
+            "status": "ready",
+            "createdAt": "2026-08-12T00:00:00Z",
+            "updatedAt": "2026-08-12T00:01:00Z",
+            "workflowContext": {
+                "propId": "left_signal_cube",
+                "actionId": "analyze_daily_market_news",
+            },
+            "metrics": {
+                "events": [{
+                    "eventId": "event-1",
+                    "titleTh": "ข่าวทดสอบจากแหล่งสาธารณะ",
+                    "summaryTh": "ข้อมูลตัวอย่างสำหรับทดสอบการฉายผลเท่านั้น",
+                    "currencies": ["USD"],
+                    "scheduledAt": "2026-08-12T01:00:00Z",
+                    "impact": "high",
+                    "sourceRef": "public-1",
+                }],
+                "dangerWindows": [{
+                    "windowId": "window-1",
+                    "currencies": ["USD"],
+                    "startsAt": "2026-08-12T00:45:00Z",
+                    "endsAt": "2026-08-12T01:15:00Z",
+                    "reasonTh": "ช่วงประกาศข่าวแรง",
+                    "sourceRef": "public-1",
+                }],
+                "pairBias": pair_rows,
+                "sourceLinks": [{
+                    "id": "public-1",
+                    "title": "Public FX calendar",
+                    "url": source_url,
+                    "checkedAt": "2026-08-12T00:00:00Z",
+                }],
+            },
+            "evidence": [{"label": "Public FX calendar", "url": source_url}],
+        }
+        news = self.bridge._fx_news_read_model(
+            [report],
+            now_local=datetime.fromisoformat("2026-08-12T08:00:00+07:00"),
+        )
+        bias = self.bridge._fx_bias_read_model(
+            [report],
+            now_local=datetime.fromisoformat("2026-08-12T08:00:00+07:00"),
+        )
+        self.assertEqual(news["sourceReportId"], report["id"])
+        self.assertEqual(bias["sourceReportId"], report["id"])
+        self.assertEqual(news["eventCount"], 1)
+        self.assertEqual(len(news["dangerWindows"]), 1)
+        self.assertEqual(bias["pairCount"], 28)
+        self.assertTrue(bias["complete28"])
+        self.assertEqual(bias["sourceBackedPairCount"], 1)
+
+        # A newer legacy/manual bias report cannot replace the bias half of a
+        # valid all-in-one analyze report and create mixed-current data.
+        legacy = {
+            **report,
+            "id": "fx-legacy-newer",
+            "updatedAt": "2026-08-12T00:02:00Z",
             "workflowContext": {
                 "propId": "left_signal_cube",
                 "actionId": "build_fx_pair_bias",
             },
-            "metrics": {
-                "pairBias": [
-                    {
-                        "pair": "EURUSD",
-                        "short": "buy",
-                        "medium": "neutral",
-                        "long": "sell",
-                        "confidence": 77,
-                        "sourceLinks": [{"label": "Public source", "url": "https://example.com/fx"}],
-                    },
-                    {
-                        "pair": "GBPUSD",
-                        "short": "bullish",
-                        "sourceLinks": [],
-                    },
-                ],
-            },
         }
-        model = self.bridge._fx_bias_read_model([report])
-        eurusd = next(row for row in model["pairs"] if row["pair"] == "EURUSD")
-        gbpusd = next(row for row in model["pairs"] if row["pair"] == "GBPUSD")
-        self.assertEqual((eurusd["shortBias"], eurusd["mediumBias"], eurusd["longBias"]), ("bullish", "neutral", "bearish"))
-        self.assertEqual(eurusd["status"], "verified")
-        self.assertEqual(gbpusd["status"], "pending")
-        self.assertEqual(gbpusd["shortBias"], "unknown")
-        self.assertEqual(model["verifiedPairCount"], 1)
-        self.assertFalse(model["complete28"])
+        self.assertEqual(
+            self.bridge._fx_bias_read_model(
+                [report, legacy],
+                now_local=datetime.fromisoformat("2026-08-12T08:00:00+07:00"),
+            )["sourceReportId"],
+            report["id"],
+        )
+
+    def test_market_news_rollover_never_presents_yesterday_report_as_today(self) -> None:
+        source_url = "https://example.com/public-fx-calendar"
+        report = {
+            "id": "fx-news-yesterday",
+            "linkedPropId": "left_signal_cube",
+            "type": "fx_news_bias_report",
+            "status": "ready",
+            "updatedAt": "2026-08-11T12:00:00Z",
+            "workflowContext": {
+                "propId": "left_signal_cube",
+                "actionId": "analyze_daily_market_news",
+            },
+            "metrics": {
+                "events": [{
+                    "eventId": "event-old",
+                    "titleTh": "ข่าวเมื่อวาน",
+                    "summaryTh": "หลักฐานเก่าต้องไม่แสดงเป็นข่าววันนี้",
+                    "currencies": ["USD"],
+                    "scheduledAt": "2026-08-11T13:00:00Z",
+                    "impact": "high",
+                    "sourceRefs": ["source-old"],
+                }],
+                "dangerWindows": [],
+                "pairBias": [{
+                    "pair": "EURUSD",
+                    "shortBias": "bullish",
+                    "mediumBias": "sideway",
+                    "longBias": "bearish",
+                    "confidence": 80,
+                    "sourceRefs": ["source-old"],
+                }],
+                "sourceLinks": [{
+                    "id": "source-old",
+                    "title": "Public FX calendar",
+                    "url": source_url,
+                    "publishedAt": "2026-08-11T10:00:00Z",
+                    "checkedAt": "2026-08-11T12:00:00Z",
+                }],
+            },
+            "evidence": [{"label": "Public FX calendar", "url": source_url}],
+        }
+        now_local = datetime.fromisoformat("2026-08-12T08:00:00+07:00")
+        model = self.bridge._fx_news_read_model(
+            [report],
+            now_local=now_local,
+        )
+        bias = self.bridge._fx_bias_read_model([report], now_local=now_local)
+
+        self.assertEqual(model["dataStatus"], "stale")
+        self.assertTrue(model["stale"])
+        self.assertFalse(model["currentDataAvailable"])
+        self.assertEqual(model["currentBangkokDate"], "2026-08-12")
+        self.assertEqual(model["reportBangkokDate"], "2026-08-11")
+        self.assertEqual(model["eventCount"], 0)
+        self.assertEqual(model["events"], [])
+        self.assertEqual(model["sourceReportId"], "fx-news-yesterday")
+        self.assertEqual(bias["dataStatus"], "stale")
+        self.assertTrue(bias["stale"])
+        self.assertFalse(bias["currentDataAvailable"])
+        self.assertEqual(bias["currentBangkokDate"], "2026-08-12")
+        self.assertEqual(bias["reportBangkokDate"], "2026-08-11")
+        self.assertEqual(bias["sourceReportId"], "fx-news-yesterday")
+        self.assertEqual(bias["pairCount"], 28)
+        self.assertEqual(bias["sourceBackedPairCount"], 0)
+        self.assertTrue(
+            all(row["status"] == "insufficient_data" for row in bias["pairs"])
+        )
+
+    def test_connection_center_uses_one_bounded_probe_set_and_exposes_no_runtime_identity(self) -> None:
+        profiles = self.bridge.load_dashboard_connection_contract()["profiles"]
+        roles = self.bridge.load_property_role_map()
+        settings = self.bridge._default_dashboard_workflow_settings()
+        checked_at = "2026-08-12T00:00:00Z"
+        quota = {
+            "ok": True,
+            "status": "ready",
+            "limitReached": False,
+            "checkedAt": checked_at,
+            "primary": {"usedPercent": 12, "remainingPercent": 88},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            terminal_root = Path(temp_dir)
+            (terminal_root / "MQL4").mkdir()
+            candidate_id = "mtc-release-gate-1"
+            terminals = {
+                "status": "detected",
+                "checkedAt": checked_at,
+                "adapterConnection": "coming_soon",
+                "candidates": [{
+                    "candidateId": candidate_id,
+                    "platform": "mt4",
+                    "labelTh": "MT4 ทดสอบ",
+                    "runningState": "platform_running_detected",
+                }],
+                "platforms": {
+                    "mt4": {"status": "detected", "detailTh": "ตรวจพบ MT4"},
+                    "mt5": {"status": "not_found", "detailTh": "ไม่พบ MT5"},
+                },
+            }
+            target_store = {
+                "candidates": {
+                    candidate_id: {
+                        "candidateId": candidate_id,
+                        "platform": "mt4",
+                        "localPath": str(terminal_root),
+                        "identityKey": self.bridge._metatrader_identity_key("mt4", str(terminal_root)),
+                        "available": True,
+                    },
+                },
+                "selections": {
+                    "left_analytics_console": {
+                        "candidateId": candidate_id,
+                        "selectedAt": checked_at,
+                    },
+                },
+            }
+            worker = {"status": "idle", "operational": True, "operationalReason": None, "watchdogAlive": True}
+            scheduler = {"status": "idle", "operational": True, "operationalReason": None}
+            bridge_model = {
+                "status": "connected",
+                "checkedAt": checked_at,
+                "codex": {"status": "ready_guarded"},
+                "mcp": {"status": "config_present", "configPresent": True},
+            }
+            raw_bridge = {
+                "status": "connected",
+                "time": checked_at,
+                "codex": {"status": "ready_guarded"},
+                "mcp": {"status": "config_present", "configPresent": True},
+                "privatePath": "C:\\PRIVATE-HQ-SENTINEL",
+                "processId": 998877,
+                "accountValue": "ACCOUNT-SENTINEL-998877",
+                "channelValue": "CHANNEL-SENTINEL-998877",
+                "keyValue": "KEY-SENTINEL-998877",
+                "secretValue": "SECRET-SENTINEL-998877",
+            }
+            with (
+                mock.patch.object(self.bridge, "bridge_status_read_model", return_value=bridge_model),
+                mock.patch.object(self.bridge, "peek_codex_rate_limits", return_value=quota) as quota_probe,
+                mock.patch.object(self.bridge, "peek_metatrader_status", return_value=terminals) as terminal_probe,
+                mock.patch.object(self.bridge, "load_missions", return_value=[{"status": "running", "targetId": "left_signal_cube", "prompt": "SECRET-SENTINEL-998877"}]) as mission_load,
+                mock.patch.object(self.bridge, "load_dashboard_connection_contract", return_value={"profiles": profiles}) as contract_load,
+                mock.patch.object(self.bridge, "load_dashboard_workflow_settings", return_value=settings) as settings_load,
+                mock.patch.object(self.bridge, "load_property_role_map", return_value=roles) as role_load,
+                mock.patch.object(self.bridge, "mission_worker_read_model", return_value=worker) as worker_probe,
+                mock.patch.object(self.bridge, "dashboard_workflow_scheduler_read_model", return_value=scheduler) as scheduler_probe,
+                mock.patch.object(self.bridge, "_load_metatrader_target_store_unlocked", return_value=target_store) as target_load,
+            ):
+                model = self.bridge._equipment_connection_center_read_model(raw_bridge, use_cache=False)
+
+        self.assertEqual(model["summary"]["deviceCount"], 9)
+        self.assertEqual([item["propId"] for item in model["devices"]], list(self.bridge.EQUIPMENT_CONNECTION_CENTER_PROP_IDS))
+        probe_counts = {
+            "quota": quota_probe.call_count,
+            "terminal": terminal_probe.call_count,
+            "missions": mission_load.call_count,
+            "connection_contract": contract_load.call_count,
+            "settings": settings_load.call_count,
+            "role_map": role_load.call_count,
+            "worker": worker_probe.call_count,
+            "scheduler": scheduler_probe.call_count,
+            "target_store": target_load.call_count,
+        }
+        self.assertEqual(probe_counts, {key: 1 for key in probe_counts})
+        worker_probe.assert_called_once_with(include_queue_count=False)
+
+        ai_trade = next(item for item in model["devices"] if item["propId"] == "left_analytics_console")
+        by_id = {item["id"]: item for item in ai_trade["items"]}
+        self.assertTrue(by_id["mt4_terminal"]["selected"])
+        self.assertEqual(by_id["mt4_terminal"]["selectionStatus"], "selected")
+        self.assertEqual(by_id["mt4_terminal"]["configurationStatus"], "configured")
+        for item_id in {"trading_state_adapter", "ai_trader_ensemble", "mt4_trade_gateway", "kill_switch_adapter", "live_trading"}:
+            self.assertEqual(by_id[item_id]["status"], "not_checked")
+            self.assertEqual(by_id[item_id]["statusSource"], "connection_center_conservative")
+
+        serialized = json.dumps(model, ensure_ascii=False)
+        for forbidden in (
+            str(terminal_root),
+            "PRIVATE-HQ-SENTINEL",
+            "998877",
+            "ACCOUNT-SENTINEL",
+            "CHANNEL-SENTINEL",
+            "KEY-SENTINEL",
+            "SECRET-SENTINEL",
+        ):
+            self.assertNotIn(forbidden, serialized)
+        self.assertEqual(model["privacy"], {
+            "secretsExposed": False,
+            "filesystemPathsExposed": False,
+            "processIdsExposed": False,
+            "accountDetailsExposed": False,
+            "channelIdsExposed": False,
+            "keysExposed": False,
+        })
+
+    def test_full_connection_workflow_reuses_hub_worker_and_scheduler_snapshot(self) -> None:
+        checked_at = "2026-08-12T00:00:00Z"
+        settings = self.bridge._default_dashboard_workflow_settings()
+        quota = {
+            "ok": True,
+            "status": "ready",
+            "limitReached": False,
+            "checkedAt": checked_at,
+            "primary": {"usedPercent": 10, "remainingPercent": 90},
+        }
+        terminals = {
+            "status": "not_found",
+            "checkedAt": checked_at,
+            "candidates": [],
+            "platforms": {},
+        }
+        worker = {"status": "idle", "operational": True, "operationalReason": None}
+        scheduler = {"status": "idle", "operational": True, "operationalReason": None}
+        raw_bridge = {
+            "status": "connected",
+            "time": checked_at,
+            "codex": {"status": "ready_guarded"},
+            "mcp": {"status": "config_present", "configPresent": True},
+        }
+        bridge_model = {
+            "status": "connected",
+            "checkedAt": checked_at,
+            "codex": {"status": "ready_guarded"},
+            "mcp": {"status": "config_present", "configPresent": True},
+        }
+        with (
+            mock.patch.object(self.bridge, "find_property_role", return_value={
+                "displayTitle": "ศูนย์รวมสถานะการเชื่อมต่ออุปกรณ์",
+                "allowedDashboardActions": ["refresh_vps_hq_status", "save_agent_preferences"],
+                "workflow": {"displayOrder": 9},
+            }),
+            mock.patch.object(self.bridge, "bridge_status_read_model", return_value=bridge_model),
+            mock.patch.object(self.bridge, "peek_codex_rate_limits", return_value=quota),
+            mock.patch.object(self.bridge, "peek_metatrader_status", return_value=terminals),
+            mock.patch.object(self.bridge, "load_missions", return_value=[]),
+            mock.patch.object(self.bridge, "load_dashboard_workflow_settings", return_value=settings),
+            mock.patch.object(self.bridge, "mission_worker_read_model", return_value=worker) as worker_probe,
+            mock.patch.object(self.bridge, "dashboard_workflow_scheduler_read_model", return_value=scheduler) as scheduler_probe,
+            mock.patch.object(self.bridge, "_load_metatrader_target_store_unlocked", return_value={"candidates": {}, "selections": {}}),
+        ):
+            model = self.bridge.workflow_dashboard_read_model(
+                "right_status_crystals",
+                reports=[],
+                bridge=raw_bridge,
+            )
+
+        worker_probe.assert_called_once_with(include_queue_count=False)
+        scheduler_probe.assert_called_once_with()
+        self.assertEqual(model["connectionCenter"]["summary"]["deviceCount"], 9)
+        self.assertTrue(model["health"]["derivedFromConnectionCenter"])
+        self.assertEqual(
+            model["health"]["missionWorkerStatus"],
+            model["connectionCenter"]["services"]["missionWorker"],
+        )
+        self.assertEqual(
+            model["health"]["schedulerStatus"],
+            model["connectionCenter"]["services"]["scheduler"],
+        )
 
     def test_indicator_news_and_terminal_actions_dispatch_only_the_canonical_guarded_tools(self) -> None:
         captured: list[dict] = []
@@ -2161,6 +2606,115 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 },
             )
         self.assertEqual(raised.exception.status, 422)
+
+    def test_radar_google_sheet_reference_is_canonical_and_rejects_unsafe_urls(self) -> None:
+        sheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_987654321"
+        bare = self.bridge._normalize_google_sheet_reference(sheet_id)
+        linked = self.bridge._normalize_google_sheet_reference(
+            f"https://docs.google.com/spreadsheets/u/0/d/{sheet_id}/edit?gid=42#gid=42"
+        )
+        self.assertEqual(bare, linked)
+        self.assertEqual(
+            linked["canonicalUrl"],
+            f"https://docs.google.com/spreadsheets/d/{sheet_id}",
+        )
+        rejected = (
+            "https://evil.example/spreadsheets/d/" + sheet_id,
+            "http://docs.google.com/spreadsheets/d/" + sheet_id,
+            "https://user:pass@docs.google.com/spreadsheets/d/" + sheet_id,
+            "https://docs.google.com/spreadsheets/d/" + sheet_id + "?token=hidden-value",
+            "short-id",
+        )
+        for value in rejected:
+            with self.subTest(value=value), self.assertRaises(self.bridge.RequestError):
+                self.bridge._normalize_google_sheet_reference(value)
+
+    def test_radar_schedule_is_hard_capped_at_two_and_sheet_id_is_masked(self) -> None:
+        sheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_987654321"
+        action = self.bridge.DASHBOARD_WORKFLOW_ACTIONS["save_indicator_scout_schedule"]
+        form = self.bridge._sanitize_dashboard_workflow_form(
+            action,
+            {
+                "enabled": False,
+                "times": ["07:00", "12:00", "18:00"],
+                "googleSheetUrlOrId": f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit?gid=0",
+                "googleSheetTabName": "Radar Daily",
+            },
+        )
+        self.assertEqual(form["times"], ["07:00", "12:00"])
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            self.bridge,
+            "DASHBOARD_WORKFLOW_SETTINGS_PATH",
+            Path(temp_dir) / "dashboard-workflow-settings.json",
+        ):
+            saved = self.bridge._save_dashboard_schedule_preference(
+                "indicatorScoutSchedule",
+                form,
+            )
+            stored = self.bridge.load_dashboard_workflow_settings()
+        self.assertEqual(saved["times"], ["07:00", "12:00"])
+        self.assertEqual(saved["maxConfiguredTimes"], 2)
+        self.assertTrue(saved["googleSheet"]["configured"])
+        self.assertNotIn(sheet_id, json.dumps(saved, ensure_ascii=False))
+        self.assertEqual(stored["indicatorScoutSheet"]["sheetId"], sheet_id)
+        self.assertFalse(saved["googleSheet"]["connected"])
+        self.assertFalse(saved["googleSheet"]["externalWriteEnabled"])
+
+    def test_radar_read_model_exposes_today_and_seven_days_with_local_dedup_truth(self) -> None:
+        workflow_context = {
+            "propId": "left_audit_crystals",
+            "actionId": "discover_new_indicators",
+        }
+
+        def report(report_id: str, checked_at: str, source_url: str) -> dict:
+            return {
+                "id": report_id,
+                "type": "indicator_scout_report",
+                "linkedPropId": "left_audit_crystals",
+                "workflowContext": workflow_context,
+                "createdAt": checked_at,
+                "metrics": {
+                    "toolName": "Example Radar",
+                    "toolKind": "indicator",
+                    "platform": "mt4",
+                    "version": "1.0",
+                    "category": "trend",
+                    "sourceUrl": source_url,
+                    "checkedAt": checked_at,
+                    "summaryTh": "ตัวอย่าง",
+                    "verificationStatus": "verified",
+                    "availability": "public",
+                    "eaReadiness": "not_applicable",
+                    "sourceLimitations": "ไม่มีไฟล์ให้ดาวน์โหลด",
+                },
+            }
+
+        model = self.bridge._radar_website_tool_read_model(
+            [
+                report("old-seed", "2026-08-01T01:00:00Z", "https://example.com/tool"),
+                report("today-duplicate", "2026-08-12T02:00:00Z", "https://example.com/tool"),
+                report("today-unique", "2026-08-12T03:00:00Z", "https://example.com/tool-v2"),
+            ],
+            settings={},
+            now_local=datetime(2026, 8, 12, 12, 0),
+        )
+        self.assertEqual(model["historyWindowDays"], 7)
+        self.assertEqual(len(model["history7Days"]), 7)
+        self.assertEqual(len(model["todayEntries"]), 2)
+        self.assertEqual(len(model["sevenDayEntries"]), 2)
+        self.assertEqual(model["today"]["duplicateCount"], 1)
+        self.assertEqual(model["today"]["uniqueCount"], 1)
+        duplicate = next(
+            item for item in model["todayEntries"] if item["sourceUrl"].endswith("/tool")
+        )
+        self.assertEqual(duplicate["duplicateStatus"], "duplicate")
+        self.assertEqual(duplicate["duplicateScope"], "local_report_catalog")
+        self.assertEqual(duplicate["toolName"], "Example Radar")
+        self.assertEqual(duplicate["eaReadiness"], "not_ea_ready")
+        self.assertIsInstance(duplicate["sourceLimitations"], list)
+        self.assertEqual(duplicate["screenshotStatus"], "not_available")
+        self.assertFalse(duplicate["screenshotClaimAllowed"])
+        self.assertFalse(model["deduplication"]["googleSheetCompared"])
 
 
 if __name__ == "__main__":

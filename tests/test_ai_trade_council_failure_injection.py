@@ -378,6 +378,307 @@ class AiTradeCouncilFailureInjectionTests(unittest.TestCase):
         self.assertFalse(allowed_after_restart)
         self.assertGreater(retry_after, 0)
 
+    def test_stale_duplicate_workers_debit_rate_only_after_successful_claim(self) -> None:
+        """Only the worker that wins the mission lease may consume hourly budget."""
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=240)
+        snapshot_id = "c" * 64
+        snapshot_digest = "1" * 64
+        mission = {
+            "id": "mission-single-debit",
+            "owner": "optimization_agent",
+            "toolId": "codex_cli_task",
+            "modelTier": "specialist_balanced",
+            "status": "queued",
+            "budget": {"timeoutSeconds": 60, "outputLimitChars": 7000},
+            "analysisContext": {
+                "kind": "ai_trade_council_vote",
+                "snapshotId": snapshot_id,
+                "snapshotArtifactDigest": snapshot_digest,
+                "snapshotArtifact": self.bridge.ai_trade_council_snapshot_reference(
+                    snapshot_id,
+                    snapshot_digest,
+                ),
+                "agentId": "optimization_agent",
+                "roleId": "technical",
+                "readOnly": True,
+                "roundDeadlineAt": deadline.isoformat(),
+            },
+        }
+        claimed = {
+            **mission,
+            "status": "running",
+            "execution": {"leaseId": "lease-single-debit"},
+        }
+        claim_results = [claimed, None, None]
+        rate_calls: list[bool] = []
+
+        def fake_rate(_key, _max_runs, cooldown_seconds=0, consume=True):
+            self.assertEqual(cooldown_seconds, 0)
+            rate_calls.append(bool(consume))
+            return True, 0
+
+        with (
+            mock.patch.object(self.bridge, "CODEX_RUNNER_PYTHON", Path(__file__)),
+            mock.patch.object(self.bridge, "CODEX_RUNNER_SCRIPT", Path(__file__)),
+            mock.patch.object(
+                self.bridge,
+                "bridge_status",
+                return_value={"codex": {"status": "ready_guarded"}},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "codex_rate_limits",
+                return_value={"ok": True, "stale": False, "limitReached": False},
+            ),
+            mock.patch.object(self.bridge, "check_rate_limit", side_effect=fake_rate),
+            mock.patch.object(
+                self.bridge,
+                "claim_auto_mission",
+                side_effect=lambda *_args: claim_results.pop(0),
+            ) as claim,
+            mock.patch.object(self.bridge, "heartbeat_auto_mission", return_value=None),
+            mock.patch.object(
+                self.bridge,
+                "run_safe_command",
+                return_value={"output": "{}", "processStarted": False, "exitCode": 0},
+            ) as runner,
+            mock.patch.object(self.bridge, "finish_auto_mission", return_value=claimed),
+        ):
+            for _index in range(3):
+                self.bridge.process_auto_mission("worker-duplicate", dict(mission))
+
+        self.assertEqual(claim.call_count, 3)
+        self.assertEqual(rate_calls.count(False), 3)
+        self.assertEqual(rate_calls.count(True), 1)
+        self.assertEqual(runner.call_count, 1)
+
+    def test_rate_denial_after_claim_stops_before_runner_without_leaving_blue(self) -> None:
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=240)
+        snapshot_id = "d" * 64
+        snapshot_digest = "2" * 64
+        mission = {
+            "id": "mission-rate-denied-after-claim",
+            "owner": "optimization_agent",
+            "toolId": "codex_cli_task",
+            "modelTier": "specialist_balanced",
+            "status": "queued",
+            "budget": {"timeoutSeconds": 60, "outputLimitChars": 7000},
+            "analysisContext": {
+                "kind": "ai_trade_council_vote",
+                "snapshotId": snapshot_id,
+                "snapshotArtifactDigest": snapshot_digest,
+                "snapshotArtifact": self.bridge.ai_trade_council_snapshot_reference(
+                    snapshot_id,
+                    snapshot_digest,
+                ),
+                "agentId": "optimization_agent",
+                "roleId": "technical",
+                "readOnly": True,
+                "roundDeadlineAt": deadline.isoformat(),
+            },
+        }
+        claimed = {
+            **mission,
+            "status": "running",
+            "execution": {"leaseId": "lease-rate-denied"},
+        }
+
+        def fake_rate(_key, _max_runs, cooldown_seconds=0, consume=True):
+            return ((False, 75) if consume else (True, 0))
+
+        with (
+            mock.patch.object(self.bridge, "CODEX_RUNNER_PYTHON", Path(__file__)),
+            mock.patch.object(self.bridge, "CODEX_RUNNER_SCRIPT", Path(__file__)),
+            mock.patch.object(
+                self.bridge,
+                "bridge_status",
+                return_value={"codex": {"status": "ready_guarded"}},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "codex_rate_limits",
+                return_value={"ok": True, "stale": False, "limitReached": False},
+            ),
+            mock.patch.object(self.bridge, "check_rate_limit", side_effect=fake_rate),
+            mock.patch.object(self.bridge, "claim_auto_mission", return_value=claimed),
+            mock.patch.object(self.bridge, "run_safe_command") as runner,
+            mock.patch.object(self.bridge, "finish_auto_mission", return_value=claimed) as finish,
+        ):
+            self.bridge.process_auto_mission("worker-rate-denied", mission)
+
+        runner.assert_not_called()
+        finish.assert_called_once()
+        result = finish.call_args.args[3]
+        self.assertEqual(result["workStatus"], "blocked")
+        self.assertEqual(result["status"], "local_rate_limited_after_claim")
+
+    def test_invalid_claimed_council_context_never_debits_or_runs_workspace_write(self) -> None:
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=240)
+        mission = {
+            "id": "mission-invalid-claimed-council-context",
+            "owner": "optimization_agent",
+            "toolId": "codex_cli_task",
+            "modelTier": "specialist_balanced",
+            "status": "queued",
+            "budget": {"timeoutSeconds": 60, "outputLimitChars": 7000},
+            "analysisContext": {
+                "kind": "ai_trade_council_vote",
+                # All three empty values used to compare equal because the
+                # canonical reference helper deliberately returns "" for an
+                # invalid id/digest. This must still fail closed.
+                "snapshotId": "",
+                "snapshotArtifactDigest": "",
+                "snapshotArtifact": "",
+                "agentId": "optimization_agent",
+                "roleId": "technical",
+                "readOnly": True,
+                "roundDeadlineAt": deadline.isoformat(),
+            },
+        }
+        claimed = {
+            **mission,
+            "status": "running",
+            "execution": {"leaseId": "lease-invalid-council-context"},
+        }
+        rate_calls: list[bool] = []
+
+        def fake_rate(_key, _max_runs, cooldown_seconds=0, consume=True):
+            rate_calls.append(bool(consume))
+            return True, 0
+
+        with (
+            mock.patch.object(self.bridge, "CODEX_RUNNER_PYTHON", Path(__file__)),
+            mock.patch.object(self.bridge, "CODEX_RUNNER_SCRIPT", Path(__file__)),
+            mock.patch.object(
+                self.bridge,
+                "bridge_status",
+                return_value={"codex": {"status": "ready_guarded"}},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "codex_rate_limits",
+                return_value={"ok": True, "stale": False, "limitReached": False},
+            ),
+            mock.patch.object(self.bridge, "check_rate_limit", side_effect=fake_rate),
+            mock.patch.object(self.bridge, "claim_auto_mission", return_value=claimed),
+            mock.patch.object(self.bridge, "run_safe_command") as runner,
+            mock.patch.object(self.bridge, "finish_auto_mission", return_value=claimed) as finish,
+        ):
+            self.bridge.process_auto_mission("worker-invalid-context", mission)
+
+        runner.assert_not_called()
+        self.assertEqual(rate_calls, [False])
+        finish.assert_called_once()
+        result = finish.call_args.args[3]
+        self.assertEqual(result["workStatus"], "blocked")
+        self.assertEqual(result["status"], "council_claim_context_invalid")
+
+    def test_claim_and_preclaim_expiry_are_mutually_exclusive(self) -> None:
+        self._configure_selected_mt4()
+        snapshot_id = self.bridge.metatrader_snapshot_read_model(
+            self.bridge.AI_TRADE_COUNCIL_PROP_ID
+        )["chartSnapshot"]["snapshotId"]
+        queued = self._queue_analysis(snapshot_id)
+        mission = queued["subtasks"][0]
+        barrier = threading.Barrier(2)
+
+        def race_claim():
+            barrier.wait(timeout=5)
+            return self.bridge.claim_auto_mission(mission["id"], "worker-cas-race")
+
+        def race_expire():
+            barrier.wait(timeout=5)
+            return self.bridge._expire_ai_trade_council_vote_mission(
+                mission["id"],
+                "council_round_deadline_insufficient",
+                expected_status="queued",
+            )
+
+        with mock.patch.object(
+            self.bridge,
+            "load_operator_mode_record",
+            return_value={"mode": "auto_guarded", "updatedAt": self.bridge.utc_now()},
+        ):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                claim_future = pool.submit(race_claim)
+                expire_future = pool.submit(race_expire)
+                claimed = claim_future.result(timeout=10)
+                expired = expire_future.result(timeout=10)
+
+        self.assertNotEqual(claimed is None, expired is None)
+        stored = self.bridge.find_mission(mission["id"])
+        if claimed is not None:
+            self.assertEqual(stored["status"], "running")
+            self.assertEqual(
+                stored["execution"]["leaseId"],
+                claimed["execution"]["leaseId"],
+            )
+        else:
+            self.assertEqual(stored["status"], "blocked")
+            self.assertEqual(stored["execution"]["dispatchState"], "blocked")
+
+    def test_expired_claim_terminalizes_execution_state(self) -> None:
+        mission = {
+            "id": "mission-expired-after-claim",
+            "owner": "optimization_agent",
+            "toolId": "codex_cli_task",
+            "status": "running",
+            "phase": "auto_guarded_running",
+            "analysisContext": {
+                "kind": "ai_trade_council_vote",
+                "snapshotId": "e" * 64,
+                "agentId": "optimization_agent",
+                "roleId": "technical",
+                "roundDeadlineAt": (
+                    datetime.now(timezone.utc) - timedelta(seconds=1)
+                ).isoformat(),
+            },
+            "execution": {
+                "schema": "auto-guarded-execution-v1",
+                "dispatchState": "running",
+                "leaseId": "lease-expired",
+                "processStarted": False,
+            },
+        }
+        self.bridge.save_missions([mission])
+
+        lease_missing = self.bridge._expire_ai_trade_council_vote_mission(
+            mission["id"],
+            "council_round_deadline_insufficient",
+            expected_status="running",
+        )
+        self.assertIsNone(lease_missing)
+        self.assertEqual(self.bridge.find_mission(mission["id"])["status"], "running")
+
+        lease_mismatch = self.bridge._expire_ai_trade_council_vote_mission(
+            mission["id"],
+            "council_round_deadline_insufficient",
+            expected_status="running",
+            expected_lease_id="lease-other-worker",
+        )
+        self.assertIsNone(lease_mismatch)
+        self.assertEqual(self.bridge.find_mission(mission["id"])["status"], "running")
+
+        expired = self.bridge._expire_ai_trade_council_vote_mission(
+            mission["id"],
+            "council_round_deadline_insufficient",
+            expected_status="running",
+            expected_lease_id="lease-expired",
+        )
+
+        self.assertEqual(expired["status"], "blocked")
+        self.assertEqual(expired["execution"]["dispatchState"], "blocked")
+        self.assertIsNone(expired["execution"]["nextAttemptAt"])
+        self.assertTrue(expired["execution"]["completedAt"])
+
+        already_terminal = self.bridge._expire_ai_trade_council_vote_mission(
+            mission["id"],
+            "council_round_deadline_insufficient",
+            expected_status="running",
+            expected_lease_id="lease-expired",
+        )
+        self.assertIsNone(already_terminal)
+
     def test_quota_backoff_never_schedules_council_vote_past_round_deadline(self) -> None:
         """A known-impossible retry should become terminal immediately, not stay blue."""
         deadline = datetime.now(timezone.utc) + timedelta(seconds=240)
@@ -538,7 +839,7 @@ class AiTradeCouncilFailureInjectionTests(unittest.TestCase):
         checklist_calls: list[str] = []
         snapshot_calls: list[str] = []
 
-        def fake_checklist(prop_id: str, bridge=None) -> dict:
+        def fake_checklist(prop_id: str, bridge=None, **_kwargs) -> dict:
             checklist_calls.append(prop_id)
             return {
                 "metatraderSelection": {

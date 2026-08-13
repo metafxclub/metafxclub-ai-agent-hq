@@ -113,25 +113,34 @@ class DashboardWorkflowFrontendTests(unittest.TestCase):
         self.assertIn('id: "verified_archive"', self.main)
         self.assertIn('id: "outputs"', self.main)
 
-    def test_each_workflow_device_opens_on_main_work_and_ends_with_history_reports(self):
+    def test_each_workflow_device_opens_on_main_work_and_only_history_devices_end_with_reports(self):
         expected_last_ids = {
             "codex_mcp_portal": "catalog",
             "left_server_racks": "evidence",
             "right_server_racks": "outputs",
             "right_tool_console": "history",
             "left_audit_crystals": "archive",
-            "left_signal_cube": "schedule_history",
             "terminal_workstation": "outputs",
-            "right_status_crystals": "activity_history",
         }
+        no_history_props = {"left_signal_cube", "right_status_crystals"}
+        single_view_props = {"right_status_crystals": "connections"}
         for prop_id in WORKFLOW_PROP_IDS:
             role = self.role_map[prop_id]
             tabs = role["localTabs"]
             ux = role["dashboardUx"]
             with self.subTest(prop_id=prop_id):
-                self.assertGreaterEqual(len(tabs), 2)
+                if prop_id in single_view_props:
+                    self.assertEqual(len(tabs), 1)
+                    self.assertEqual(tabs[0]["id"], single_view_props[prop_id])
+                else:
+                    self.assertGreaterEqual(len(tabs), 2)
                 self.assertEqual(role["defaultTab"], tabs[0]["id"])
                 self.assertEqual(ux["mainWorkTabId"], tabs[0]["id"])
+                if prop_id in no_history_props:
+                    self.assertIsNone(ux["historyReportTabId"])
+                    self.assertIsNone(ux["historyReportTabPosition"])
+                    self.assertNotIn(tabs[-1]["id"], {"schedule_history", "activity_history"})
+                    continue
                 self.assertEqual(ux["historyReportTabId"], expected_last_ids[prop_id])
                 self.assertEqual(tabs[-1]["id"], expected_last_ids[prop_id])
                 self.assertEqual(tabs[-1]["labelTh"], "ประวัติและรายงาน")
@@ -224,6 +233,32 @@ class DashboardWorkflowFrontendTests(unittest.TestCase):
         self.assertIn("Frontend ไม่รับ Token, Credential หรือ Secret", self.main)
         self.assertIn("credentialsAcceptedByFrontend: false", self.main)
 
+    def test_workflow_actions_wait_for_authoritative_read_model_without_false_connection_error(self):
+        normalize_start = self.main.index("function normalizeWorkflowDashboard")
+        normalize_end = self.main.index("function getWorkflowSelectedTab", normalize_start)
+        normalize = self.main[normalize_start:normalize_end]
+        availability_start = self.main.index("function workflowAvailabilityCopy")
+        availability_end = self.main.index("function createWorkflowSourceSelect", availability_start)
+        availability = self.main[availability_start:availability_end]
+        card_start = self.main.index("function createWorkflowActionCard")
+        card_end = self.main.index("function renderWorkflowAutomationSummary", card_start)
+        card = self.main[card_start:card_end]
+        open_start = self.main.index("async function openPropDialog")
+        open_end = self.main.index("function setConnectionActionState", open_start)
+        open_dialog = self.main[open_start:open_end]
+
+        self.assertIn("const hasAuthoritativeReadModel = Array.isArray(backend.actions)", normalize)
+        self.assertIn("workflowReadModel,", normalize)
+        self.assertIn("workflowReadModel.authoritative !== true", availability)
+        self.assertIn('label: "กำลังตรวจสอบสถานะ..."', availability)
+        self.assertIn('label: "โหลดสถานะไม่สำเร็จ"', availability)
+        self.assertIn("ปิดและเปิดอุปกรณ์นี้ใหม่เพื่อลองอีกครั้ง", availability)
+        self.assertIn("dashboard.workflowReadModel?.authoritative === true", card)
+        self.assertIn("submit.disabled = !canSubmit || inFlight", card)
+        self.assertLess(open_dialog.index("const reportRequest = loadPropReport(propId)"), open_dialog.index("openGameModal("))
+        self.assertIn("await reportRequest", open_dialog)
+        self.assertIn("state.modal.id === propId", open_dialog)
+
     def test_workflow_submit_has_opaque_retry_safe_idempotency(self):
         self.assertIn("function createWorkflowIdempotencyKey", self.main)
         self.assertIn("globalThis.crypto?.randomUUID?.()", self.main)
@@ -287,8 +322,10 @@ class DashboardWorkflowFrontendTests(unittest.TestCase):
         handoff_end = self.main.index("function workflowHandoffErrorMessage", handoff_start)
         handoff = self.main[handoff_start:handoff_end]
 
-        self.assertIn("WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(action.id)", settings)
-        self.assertIn("els.workflowSettingsRail.hidden = !actions.length", settings)
+        self.assertIn("function workflowRailActions", self.main)
+        self.assertIn("WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(left.id)", self.main)
+        self.assertIn("els.workflowSettingsRail.hidden = false", settings)
+        self.assertIn("createWorkflowUseGuideCard(subject)", settings)
         self.assertIn("els.workflowSettingsRailContent.innerHTML = \"\"", settings)
         self.assertIn("els.workflowAgentHandoffRail.hidden = !selectedRoute", handoff)
         self.assertIn("getWorkflowReportTransferRoutes(subject.id, selectedReport)", handoff)
@@ -303,7 +340,7 @@ class DashboardWorkflowFrontendTests(unittest.TestCase):
         render = self.main[render_start:render_end]
 
         self.assertIn("const isPrimaryTab = selectedTab?.id === dashboard.tabs[0]?.id", render)
-        self.assertIn("const isHistoryTab = selectedTab?.id === dashboard.tabs.at(-1)?.id", render)
+        self.assertIn("const isHistoryTab = WORKFLOW_DASHBOARD_HISTORY_TAB_IDS.has(selectedTab?.id)", render)
         self.assertIn("els.workflowResultsPanel.hidden = !isHistoryTab", render)
         self.assertIn('els.workflowResultsTitle.textContent = "ประวัติและรายงาน"', render)
         self.assertIn("if (!isPrimaryTab && !isHistoryTab)", render)

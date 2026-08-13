@@ -68,7 +68,7 @@ cd metafxclub-ai-agent-hq
 
 หากเปิดไม่ได้ ให้รัน `scripts/repair-hq.cmd` แล้วตรวจสถานะอีกครั้ง ระบบจะไม่ปิดโปรแกรมอื่นที่ใช้ Port เดิมและจะไม่เปลี่ยน URL เองโดยไม่ถามผู้ใช้
 
-หากต้องการให้ Bridge กลับมาทำงานเองหลังเข้าสู่ Windows ให้รัน `scripts/register-bridge-autostart.cmd` หนึ่งครั้งหลังยืนยัน Endpoint แล้ว ระบบจะสร้าง Scheduled Task สำหรับ Windows User ปัจจุบัน ลองเปิดใหม่เมื่อเริ่มไม่สำเร็จ และตรวจ Bridge ซ้ำทุก 5 นาที คำสั่งนี้เปิดเฉพาะ Bridge แบบซ่อน ไม่เปิด Browser หรือ MT4/MT5 และยกเลิกได้ด้วย `scripts/unregister-bridge-autostart.cmd`
+หากต้องการให้ Bridge กลับมาทำงานเองหลังเข้าสู่ Windows ให้รัน `scripts/register-bridge-autostart.cmd` หนึ่งครั้งหลังยืนยัน Endpoint แล้ว ระบบจะสร้าง Scheduled Task สำหรับ Windows User ปัจจุบัน ลองเปิดใหม่เมื่อเริ่มไม่สำเร็จ และตรวจ Bridge ซ้ำทุก 15 นาทีโดยค่าเริ่มต้นผ่านตัวเปิดแบบไม่มีหน้าต่าง คำสั่งนี้เปิดเฉพาะ Bridge แบบซ่อน ไม่เปิด Browser หรือ MT4/MT5 และยกเลิกได้ด้วย `scripts/unregister-bridge-autostart.cmd`
 
 ## สิ่งที่ใช้งานได้ในโหมดเริ่มต้น
 

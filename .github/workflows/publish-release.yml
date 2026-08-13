@@ -29,7 +29,13 @@ jobs:
         shell: pwsh
         run: |
           python -m unittest discover -s tests -p "test_*.py" -v
+          if ($LASTEXITCODE -ne 0) {
+            throw "Python regression suite failed with exit code $LASTEXITCODE"
+          }
           node --check frontend/src/app/main.js
+          if ($LASTEXITCODE -ne 0) {
+            throw "Frontend syntax check failed with exit code $LASTEXITCODE"
+          }
 
       - name: Build release package
         shell: pwsh
@@ -44,30 +50,71 @@ jobs:
           $archive = "Metafxclub-AI-Agent-HQ-$tag-Windows.zip"
           $checksum = "$archive.sha256"
 
-          if (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null) {
-            Write-Host "Release $tag already exists. No duplicate release was created."
-          } else {
-            git archive --format=zip --prefix="Metafxclub-AI-Agent-HQ-$tag/" --output=$archive HEAD
-            $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash  $archive" | Set-Content -LiteralPath $checksum -Encoding ascii
+          $existingRelease = $false
+          $existingTarget = $null
+          $releaseView = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>&1
+          $releaseViewExit = $LASTEXITCODE
+          if ($releaseViewExit -eq 0) {
+            $existingRelease = $true
+            try {
+              $releasePayload = ($releaseView -join "`n") | ConvertFrom-Json
+              if ([string]$releasePayload.tag_name -cne $tag) {
+                throw "tag_name mismatch"
+              }
+            }
+            catch {
+              throw "Release $tag exists but its GitHub API response is invalid."
+            }
+            git fetch --force origin "refs/tags/$tag`:refs/tags/$tag"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Release $tag exists but its Git tag cannot be fetched for verification."
+            }
+            $existingTarget = (git rev-list -n 1 $tag).Trim()
+            if ($existingTarget -and $existingTarget -cne $env:GITHUB_SHA) {
+              throw "Release $tag already exists for '$existingTarget', not current SHA '$env:GITHUB_SHA'. Bump VERSION instead of reusing the tag."
+            }
+          }
+          else {
+            $httpStatus = $null
+            $statusProbe = gh api --include "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>&1
+            if (($statusProbe -join "`n") -match '(?im)^HTTP/\S+\s+(\d{3})\b') {
+              $httpStatus = [int]$Matches[1]
+            }
+            if ($httpStatus -ne 404) {
+              throw "Unable to determine whether Release $tag already exists (HTTP $httpStatus): $releaseView"
+            }
+          }
 
-            # Test the exact ZIP layout and the installed Runtime before the
-            # public Release is created. Source-only tests cannot detect a
-            # root file that the installer forgot to copy.
-            $smokeRoot = Join-Path $env:RUNNER_TEMP "metafxclub-release-smoke-$tag"
-            $packageRoot = Join-Path $smokeRoot "Metafxclub-AI-Agent-HQ-$tag"
-            Expand-Archive -LiteralPath $archive -DestinationPath $smokeRoot -Force
-            foreach ($requiredFile in @(
+          # Always build and smoke-test the exact current archive. An existing
+          # release tag must never bypass package integrity verification.
+          git archive --format=zip --prefix="Metafxclub-AI-Agent-HQ-$tag/" --output=$archive HEAD
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $archive" | Set-Content -LiteralPath $checksum -Encoding ascii
+
+          # Test the exact ZIP layout and the installed Runtime before the
+          # public Release is created. Source-only tests cannot detect a
+          # root file that the installer forgot to copy.
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "metafxclub-release-smoke-$tag"
+          $packageRoot = Join-Path $smokeRoot "Metafxclub-AI-Agent-HQ-$tag"
+          Expand-Archive -LiteralPath $archive -DestinationPath $smokeRoot -Force
+          foreach ($requiredFile in @(
               ".gitattributes",
               ".gitignore",
               "VERSION",
               "installer\install.ps1",
-              "tests\test_runtime_integrity.py"
-            )) {
-              if (-not (Test-Path -LiteralPath (Join-Path $packageRoot $requiredFile) -PathType Leaf)) {
-                throw "Release package is missing required file: $requiredFile"
-              }
+              "tests\test_runtime_integrity.py",
+              "scripts\run-bridge-watchdog-hidden.vbs",
+              "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\MetafxHQTradeGateway.mq4",
+              "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\MetafxHQTradeGateway.ex4",
+              "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\README_TH.md",
+              "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\AUDIT_TH.md",
+              "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\SHA256SUMS.txt",
+              "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\BUILD_LOG.txt"
+          )) {
+            if (-not (Test-Path -LiteralPath (Join-Path $packageRoot $requiredFile) -PathType Leaf)) {
+              throw "Release package is missing required file: $requiredFile"
             }
+          }
 
             $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
             $listener.Start()
@@ -78,7 +125,7 @@ jobs:
               $env:LOCALAPPDATA = Join-Path $smokeRoot "LocalAppData"
               & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
                 -File (Join-Path $packageRoot "installer\install.ps1") `
-                -Port $smokePort -EndpointConfirmed -SkipLaunch -SkipShortcuts
+                -Port $smokePort -EndpointConfirmed -SkipLaunch -SkipShortcuts -PackageSmoke
               if ($LASTEXITCODE -ne 0) {
                 throw "Release ZIP installation smoke test failed with exit code $LASTEXITCODE"
               }
@@ -102,6 +149,7 @@ jobs:
               $env:LOCALAPPDATA = $originalLocalAppData
             }
 
+          if (-not $existingRelease) {
             $notes = @'
           ชุดติดตั้ง Metafxclub AI Agent HQ สำหรับ Windows
 
@@ -125,13 +173,44 @@ jobs:
               --target $env:GITHUB_SHA `
               --title "Metafxclub AI Agent HQ $tag" `
               --notes $notes
+            if ($LASTEXITCODE -ne 0) {
+              throw "Release $tag could not be created."
+            }
+          } else {
+            # Same-SHA reruns repair partial/corrupt assets rather than merely
+            # reporting success for an incomplete existing Release.
+            gh release upload $tag $archive $checksum `
+              --repo $env:GITHUB_REPOSITORY `
+              --clobber
+            if ($LASTEXITCODE -ne 0) {
+              throw "Release $tag exists at this SHA, but its assets could not be repaired."
+            }
+            $verifyRoot = Join-Path $env:RUNNER_TEMP "metafxclub-release-verify-$tag"
+            New-Item -ItemType Directory -Path $verifyRoot -Force | Out-Null
+            gh release download $tag `
+              --repo $env:GITHUB_REPOSITORY `
+              --dir $verifyRoot `
+              --pattern $archive `
+              --pattern $checksum `
+              --clobber
+            if ($LASTEXITCODE -ne 0) {
+              throw "Release $tag assets were uploaded but could not be downloaded for verification."
+            }
+            $remoteArchive = Join-Path $verifyRoot $archive
+            $remoteChecksum = Join-Path $verifyRoot $checksum
+            $remoteHash = (Get-FileHash -LiteralPath $remoteArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+            $remoteChecksumLine = (Get-Content -LiteralPath $remoteChecksum -Raw).Trim()
+            if ($remoteHash -cne $hash -or $remoteChecksumLine -cne "$hash  $archive") {
+              throw "Release $tag remote assets do not match the verified local package."
+            }
+            Write-Host "Release $tag already exists at the current SHA. Verified assets were uploaded with clobber; no duplicate release was created."
           }
 
           $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           gh api --method POST "repos/$env:GITHUB_REPOSITORY/statuses/$env:GITHUB_SHA" `
             -f state=success `
             -f context=metafxclub/release `
-            -f "description=Release $tag published" `
+            -f "description=Release $tag verified" `
             -f "target_url=$runUrl"
         env:
           GH_TOKEN: ${{ github.token }}

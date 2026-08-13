@@ -243,6 +243,46 @@ class AiTradeCouncilVoteThresholdTests(unittest.TestCase):
             completed_at.isoformat().replace("+00:00", "Z"),
         )
 
+    def test_broker_clock_horizon_is_never_compared_with_utc(self) -> None:
+        now = datetime.now(timezone.utc)
+        for broker_offset_hours in (3, -5):
+            with self.subTest(broker_offset_hours=broker_offset_hours):
+                parent, children = self.council_round(1, {
+                    "technical": "SELL",
+                    "price_action": "SELL",
+                    "news": "HOLD",
+                })
+                raw_closed_bar = (
+                    int(now.timestamp())
+                    + broker_offset_hours * 60 * 60
+                    - 5 * 60
+                )
+                broker_clock_horizon = raw_closed_bar + 2 * 5 * 60
+                parent["analysisContext"]["validUntilBarTime"] = (
+                    broker_clock_horizon
+                )
+                for child in children:
+                    child["councilVote"]["validUntilBarTime"] = (
+                        broker_clock_horizon
+                    )
+
+                consensus = self.bridge.ai_trade_council_consensus(
+                    parent,
+                    children,
+                )
+
+                self.assertTrue(consensus["qualityGate"]["passed"])
+                self.assertFalse(consensus["qualityGate"]["roundExpired"])
+                self.assertFalse(consensus["qualityGate"]["horizonExpired"])
+                self.assertEqual(
+                    consensus["qualityGate"]["validUntilBarTimeDomain"],
+                    "mt4_broker_clock",
+                )
+                self.assertEqual(
+                    consensus["qualityGate"]["decisionExpirySource"],
+                    "round_deadline_at_utc",
+                )
+
     def test_expired_round_never_dispatches_historical_trade_plan(self) -> None:
         parent, children = self.council_round(1, {
             "technical": "SELL",
@@ -809,6 +849,83 @@ class AiTradeCouncilVoteThresholdTests(unittest.TestCase):
                 })
                 self.assertFalse(rejected["ok"])
                 self.assertEqual(rejected["kind"], "invalid_requiredVotes")
+            finally:
+                self.bridge.RUNTIME_DIR = original_runtime
+                self.bridge.AUDIT_PATH = original_audit
+
+    def test_max_managed_orders_defaults_persists_and_rejects_non_allowlisted_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "runtime"
+            original_runtime = self.bridge.RUNTIME_DIR
+            original_audit = self.bridge.AUDIT_PATH
+            try:
+                self.bridge.RUNTIME_DIR = runtime
+                self.bridge.AUDIT_PATH = runtime / "bridge-audit.jsonl"
+
+                default_model = self.bridge.ai_trade_council_automation_read_model()
+                self.assertEqual(default_model["config"]["maxManagedOrders"], 1)
+                self.assertEqual(
+                    default_model["config"]["allowedMaxManagedOrders"],
+                    [1, 3, 5, 10],
+                )
+
+                for allowed_value in (3, 5, 10, 1):
+                    with self.subTest(allowed=allowed_value):
+                        updated = self.bridge.set_ai_trade_council_automation({
+                            "maxManagedOrders": allowed_value,
+                        })
+                        self.assertTrue(updated["ok"])
+                        self.assertEqual(
+                            updated["automation"]["config"]["maxManagedOrders"],
+                            allowed_value,
+                        )
+                        self.assertEqual(
+                            self.bridge.load_ai_trade_council_automation_store()[
+                                "config"
+                            ]["maxManagedOrders"],
+                            allowed_value,
+                        )
+
+                for rejected_value in (2, 4, 11, True, "3"):
+                    with self.subTest(rejected=rejected_value):
+                        rejected = self.bridge.set_ai_trade_council_automation({
+                            "maxManagedOrders": rejected_value,
+                        })
+                        self.assertFalse(rejected["ok"])
+                        self.assertEqual(rejected["kind"], "invalid_maxManagedOrders")
+                        self.assertEqual(
+                            rejected["allowedMaxManagedOrders"],
+                            [1, 3, 5, 10],
+                        )
+                        self.assertEqual(
+                            self.bridge.load_ai_trade_council_automation_store()[
+                                "config"
+                            ]["maxManagedOrders"],
+                            1,
+                        )
+
+                audit = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH)
+                accepted = [
+                    event
+                    for event in audit
+                    if event.get("type") == "ai_trade_council.automation_changed"
+                    and "maxManagedOrders" in event
+                ]
+                rejected_events = [
+                    event
+                    for event in audit
+                    if event.get("type")
+                    == "ai_trade_council.automation_change_rejected"
+                    and event.get("reason") == "invalid_max_managed_orders"
+                ]
+                self.assertEqual(
+                    [event["maxManagedOrders"] for event in accepted],
+                    [3, 5, 10, 1],
+                )
+                self.assertEqual(len(rejected_events), 5)
+                self.assertTrue(
+                    all(event.get("terminalActions") is False for event in rejected_events)
+                )
             finally:
                 self.bridge.RUNTIME_DIR = original_runtime
                 self.bridge.AUDIT_PATH = original_audit

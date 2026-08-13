@@ -5,6 +5,7 @@ import json
 import tempfile
 import time
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -50,6 +51,10 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def test_snapshot_symbol_boundary_accepts_hash_but_not_plus_suffix(self) -> None:
+        self.assertEqual(self.bridge._safe_snapshot_symbol("EURUSD#"), "EURUSD#")
+        self.assertIsNone(self.bridge._safe_snapshot_symbol("EURUSD+"))
+
     def status_path(self) -> Path:
         return (
             self.bridge.METATRADER_COMMON_FILES_DIR
@@ -84,7 +89,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
 
     def write_ea_status(self, **overrides) -> dict:
         payload = {
-            "schemaVersion": "metafx-hq-mt4-status-v4",
+            "schemaVersion": "metafx-hq-mt4-status-v5",
             "channelId": self.candidate["candidateId"],
             "profile": "special",
             "mode": "shadow",
@@ -107,6 +112,14 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             "lastSignatureVerificationStatus": "NOT_CHECKED",
             "executionGuardReady": True,
             "executionGuardReason": "READY",
+            "portfolioPolicyStatus": "ready",
+            "portfolioPolicyDigest": "a" * 64,
+            "portfolioGuardScope": "MANAGED_MAGIC_NUMBERS_ACCOUNT_WIDE",
+            "managedMagicNumbers": "4186001",
+            "allowedSymbols": "XAUUSD",
+            "allowedTimeframes": "M5,M15,M30,H1,H4,D1,W1,MN1",
+            "concurrencyBoundary": "same_windows_user_file_common",
+            "crossVpsDistributedLock": False,
             "maxManagedPositions": 1,
             "currentManagedPositions": 0,
             "maxManagedLots": 0.10,
@@ -166,7 +179,11 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
                 ).isoformat(),
                 "closedBarIdentity": {
                     "candidateId": self.candidate["candidateId"],
-                    "streamKey": "b" * 64,
+                    "streamKey": self.bridge.payload_digest(
+                        self.candidate["candidateId"],
+                        "XAUUSD",
+                        timeframe,
+                    ),
                     "symbol": "XAUUSD",
                     "timeframe": timeframe,
                     "closedBarTime": 1_785_445_200,
@@ -203,12 +220,22 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             },
         }
 
+    @contextmanager
     def selected_candidate(self):
-        return mock.patch.object(
+        selection_token = {
+            "candidateId": self.candidate["candidateId"],
+            "selectionRevision": 1,
+        }
+        with mock.patch.object(
             self.bridge,
             "_selected_metatrader_candidate_record",
             return_value=dict(self.candidate),
-        )
+        ), mock.patch.object(
+            self.bridge,
+            "_metatrader_selection_token",
+            return_value=selection_token,
+        ):
+            yield
 
     def test_gateway_status_reads_fixed_lot_as_ea_owned_read_only_state(self) -> None:
         self.write_ea_status(fixedLot=0.07)
@@ -255,6 +282,22 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.assertEqual(init_status["readReasonCode"], "gateway_init_status_schema_invalid")
         self.assertNotIn("must-not-leak", json.dumps(status))
 
+    def test_fresh_portfolio_policy_mismatch_is_exposed_without_stale_status(self) -> None:
+        self.write_ea_init_status(
+            stage="portfolio_policy",
+            reasonCode="PORTFOLIO_POLICY_MISMATCH",
+        )
+        with self.selected_candidate():
+            status = self.bridge.mt4_trade_gateway_status_read_model()
+
+        self.assertFalse(status["connected"])
+        self.assertEqual(status["portfolioPolicyStatus"], "mismatch")
+        self.assertIsNone(status["portfolioPolicyDigest"])
+        self.assertEqual(
+            status["initStatus"]["reasonCode"],
+            "PORTFOLIO_POLICY_MISMATCH",
+        )
+
     def test_stale_init_error_never_replaces_fresh_live_gateway_status(self) -> None:
         self.write_ea_init_status(observedAt=int(time.time()) - (2 * 24 * 60 * 60))
         self.write_ea_status()
@@ -292,7 +335,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             self.bridge._mt4_trade_gateway_init_status_message_th(status["initStatus"]),
         )
 
-    def test_gateway_status_exposes_v4_execution_guard_and_signing_state_read_only(self) -> None:
+    def test_gateway_status_exposes_v5_portfolio_policy_and_execution_state(self) -> None:
         self.write_ea_status(
             eaVersion="2.12",
             mode="demo",
@@ -312,6 +355,23 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.assertEqual(status["eaVersion"], "2.12")
         self.assertTrue(status["executionGuardReady"])
         self.assertEqual(status["executionGuardReason"], "READY")
+        self.assertEqual(status["portfolioPolicyStatus"], "ready")
+        self.assertEqual(status["portfolioPolicyDigest"], "a" * 64)
+        self.assertEqual(
+            status["portfolioGuardScope"],
+            "MANAGED_MAGIC_NUMBERS_ACCOUNT_WIDE",
+        )
+        self.assertEqual(status["managedMagicNumbers"], "4186001")
+        self.assertEqual(status["allowedSymbols"], "XAUUSD")
+        self.assertEqual(
+            status["allowedTimeframes"],
+            "M5,M15,M30,H1,H4,D1,W1,MN1",
+        )
+        self.assertEqual(
+            status["concurrencyBoundary"],
+            "same_windows_user_file_common",
+        )
+        self.assertFalse(status["crossVpsDistributedLock"])
         self.assertEqual(status["commandSchemaVersion"], "metafx-hq-mt4-command-v2")
         self.assertEqual(status["ackSchemaVersion"], "metafx-hq-mt4-ack-v3")
         self.assertTrue(status["signedCommandVerificationAvailable"])
@@ -340,6 +400,32 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.assertFalse(status["connected"])
         self.assertEqual(status["status"], "awaiting_ea")
         self.assertEqual(status["reasonCode"], "gateway_status_value_invalid")
+
+    def test_gateway_status_rejects_malformed_v5_portfolio_evidence(self) -> None:
+        cases = (
+            {"portfolioPolicyStatus": "not_ready"},
+            {"portfolioPolicyDigest": "A" * 64},
+            {"portfolioGuardScope": "PER_CHART"},
+            {"managedMagicNumbers": "4186002,4186001"},
+            {"managedMagicNumbers": "4186001,4186001"},
+            {"allowedSymbols": "xauusd"},
+            {"allowedSymbols": "XAUUSD,XAUUSD"},
+            {"allowedTimeframes": "M5,M5"},
+            {"allowedTimeframes": "M2"},
+            {"concurrencyBoundary": "per_chart"},
+            {"crossVpsDistributedLock": True},
+        )
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                self.write_ea_status(**overrides)
+                with self.selected_candidate():
+                    status = self.bridge.mt4_trade_gateway_status_read_model()
+
+                self.assertFalse(status["connected"])
+                self.assertEqual(
+                    status["reasonCode"],
+                    "gateway_status_portfolio_policy_invalid",
+                )
 
     def test_gateway_status_rejects_malformed_v4_signing_state(self) -> None:
         cases = (
@@ -529,10 +615,18 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
                 self.assertEqual(status["reasonCode"], expected_reason)
                 self.assertFalse(status["demoOrderExecutionAvailable"])
 
-    def test_v3_ea_status_remains_connected_but_cannot_enable_execution(self) -> None:
-        payload = self.write_ea_status(schemaVersion="metafx-hq-mt4-status-v3")
-        payload.pop("demoAccount")
-        payload.pop("accountMode")
+    def test_v4_ea_status_remains_connected_but_requires_portfolio_evidence(self) -> None:
+        payload = self.write_ea_status(
+            schemaVersion="metafx-hq-mt4-status-v4",
+            mode="demo",
+            autoTradingAllowed=True,
+            tradeAllowed=True,
+        )
+        for field in (
+            self.bridge.MT4_TRADE_GATEWAY_STATUS_FIELDS
+            - self.bridge.MT4_TRADE_GATEWAY_V4_STATUS_FIELDS
+        ):
+            payload.pop(field)
         self.status_path().write_text(json.dumps(payload), encoding="ascii")
         with self.selected_candidate():
             status = self.bridge.mt4_trade_gateway_status_read_model()
@@ -541,8 +635,32 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.assertEqual(status["status"], "legacy_status_read_only")
         self.assertEqual(
             status["reasonCode"],
-            "gateway_status_account_identity_unavailable",
+            "portfolio_policy_evidence_required",
         )
+        self.assertFalse(status["executionGuardReady"])
+        self.assertEqual(
+            status["executionGuardReason"],
+            "PORTFOLIO_POLICY_EVIDENCE_REQUIRED",
+        )
+        self.assertFalse(status["demoOrderExecutionAvailable"])
+        self.assertFalse(status["liveOrderExecutionAvailable"])
+
+    def test_v3_ea_status_remains_connected_but_cannot_enable_execution(self) -> None:
+        payload = self.write_ea_status(schemaVersion="metafx-hq-mt4-status-v3")
+        for field in (
+            self.bridge.MT4_TRADE_GATEWAY_STATUS_FIELDS
+            - self.bridge.MT4_TRADE_GATEWAY_V4_STATUS_FIELDS
+        ):
+            payload.pop(field)
+        payload.pop("demoAccount")
+        payload.pop("accountMode")
+        self.status_path().write_text(json.dumps(payload), encoding="ascii")
+        with self.selected_candidate():
+            status = self.bridge.mt4_trade_gateway_status_read_model()
+
+        self.assertTrue(status["connected"])
+        self.assertEqual(status["status"], "legacy_status_read_only")
+        self.assertEqual(status["reasonCode"], "portfolio_policy_evidence_required")
         self.assertIsNone(status["demoAccount"])
         self.assertFalse(status["accountModeMatchesGateway"])
         self.assertFalse(status["demoOrderExecutionAvailable"])

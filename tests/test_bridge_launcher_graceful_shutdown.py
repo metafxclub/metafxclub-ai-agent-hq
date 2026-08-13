@@ -50,6 +50,37 @@ class BridgeLauncherGracefulShutdownTests(unittest.TestCase):
         )
         self.assertIn('Outcome "graceful_fallback_force"', stop)
 
+    def test_force_stop_uses_bounded_process_wait_instead_of_stale_cim_truth(self) -> None:
+        wait = self._function_body(
+            "Wait-ForBridgeProcessExit",
+            "Remove-MatchingBridgeControlFile",
+        )
+        stop = self._function_body("Stop-VerifiedProcess", "Start-Bridge")
+
+        self.assertIn("Get-Process -Id $ProcessId -ErrorAction SilentlyContinue", wait)
+        self.assertNotIn("Get-ProcessRecord -ProcessId $ProcessId", wait)
+        self.assertIn(
+            "Wait-ForBridgeProcessExit -ProcessId $ProcessId -TimeoutSeconds $forceShutdownWaitSeconds",
+            stop,
+        )
+        self.assertIn('Outcome "force_stopped"', stop)
+
+    def test_watchdog_confirms_health_and_recovers_after_process_record_race(self) -> None:
+        ensure = self._function_body("Ensure-Bridge", "Stop-Bridge")
+
+        self.assertGreaterEqual(ensure.count("Wait-ForBridgeHealth"), 2)
+        self.assertIn('Outcome "health_recheck_wait"', ensure)
+        self.assertIn('Outcome "health_recovered"', ensure)
+        self.assertIn('Outcome "post_stop_race_recovered"', ensure)
+        self.assertIn(
+            "Wait-ForBridgeProcessExit -ProcessId $existingId -TimeoutSeconds $forceShutdownWaitSeconds",
+            ensure,
+        )
+        self.assertLess(
+            ensure.index('Outcome "post_stop_race_recovered"'),
+            ensure.index("return Start-Bridge", ensure.index('Outcome "post_stop_race_recovered"')),
+        )
+
     def test_stop_restart_and_watchdog_replacement_request_graceful_shutdown(self) -> None:
         self.assertIn(
             "Stop-VerifiedProcess -ProcessId $existingId -GracefulFirst",

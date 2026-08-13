@@ -442,19 +442,21 @@
     {
       "id": "left_audit_crystals",
       "layer": "fx_nodes",
-      "label": "เรดาร์เว็บไซต์ Indicator",
+      "label": "Radar Website Tool",
       "status": "ready",
-      "summary": "ค้นหา Indicator และ EA Tool ใหม่จากเว็บไซต์สาธารณะ พร้อม URL หลักฐาน ตรวจรายการซ้ำ และ Preference เวลา 1-2 รอบต่อวัน",
+      "summary": "ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะ แสดงวันนี้และย้อนหลัง 7 วัน พร้อมตรวจซ้ำในเครื่องและตั้งเวลาได้สูงสุด 2 รอบต่อวัน",
       "metrics": {
         "Research": "Public Web Read-only",
         "Evidence": "URL Required",
-        "Dedup": "Backend Contract",
-        "Scheduler": "Coming Soon"
+        "Dedup": "Local Report Catalog",
+        "Scheduler": "Ready · Max 2/Day",
+        "Google Sheet": "Config Only · Adapter Not Connected",
+        "Screenshot": "Adapter Not Connected"
       },
       "missions": [
         {
-          "title": "เปิดเรดาร์ Indicator",
-          "detail": "ค้นรายการใหม่ ดูหลักฐาน บันทึกเวลา และเปิดประวัติ Mission/Report"
+          "title": "เปิด Radar Website Tool",
+          "detail": "ดูรายการวันนี้และย้อนหลัง 7 วัน; ค้นหา ตั้งเวลา และบันทึก Google Sheet จากแถบซ้าย"
         }
       ],
       "asset_id": "registered_left_audit_crystals_v011",
@@ -486,8 +488,8 @@
       },
       "missions": [
         {
-          "title": "เปิดข่าวและ FX Bias",
-          "detail": "วิเคราะห์ข่าววันนี้ สร้างมุมมอง 28 คู่เงิน ตั้งเวลา และเปิดประวัติรายงาน"
+          "title": "เปิดมุมมอง 28 คู่เงิน",
+          "detail": "ดู Bias ครบ 28 คู่เป็นหน้าแรก แล้วเปิดข่าวและช่วงระวังจากรายงานรอบเดียวกัน; การตั้งเวลาอยู่ด้านซ้าย"
         }
       ],
       "asset_id": "registered_left_signal_cube_v013",
@@ -508,19 +510,19 @@
     {
       "id": "right_status_crystals",
       "layer": "fx_nodes",
-      "label": "ศูนย์สถานะ VPS, HQ และตั้งค่า Agent",
+      "label": "ศูนย์รวมสถานะการเชื่อมต่ออุปกรณ์",
       "status": "watching",
-      "summary": "ตรวจสุขภาพ VPS, HQ และ Local Bridge พร้อมตั้งค่า Agent ที่ปลอดภัยและเปิดประวัติกิจกรรม โดยไม่รับหรือแสดง Secret",
+      "summary": "รวมสถานะการเชื่อมต่อของอุปกรณ์ 9 จุด, Local Bridge, Codex CLI, MCP, Adapter และตารางงานจาก Backend Snapshot เดียว โดยไม่รับหรือแสดง Secret",
       "metrics": {
-        "VPS": "Read-only Health",
-        "HQ / Bridge": "Backend Truth",
+        "Equipment": "9 Dashboards",
+        "Core Services": "Backend Truth",
         "Agent Settings": "Backend Validated",
         "Secrets": "ไม่รับและไม่แสดง"
       },
       "missions": [
         {
           "title": "เปิดศูนย์สถานะ",
-          "detail": "ตรวจ VPS/HQ บันทึก Preference ของ Agent และดู Activity History จาก Backend"
+          "detail": "ตรวจการเชื่อมต่อทุกอุปกรณ์และบริการหลัก แล้วบันทึก Preference ของ Agent ที่ Backend อนุญาต"
         }
       ],
       "asset_id": "registered_right_status_crystals_v011",

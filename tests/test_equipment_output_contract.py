@@ -4,6 +4,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -662,9 +663,13 @@ class EquipmentOutputContractTests(unittest.TestCase):
             "status": "ready",
             "workflowContext": {"propId": "left_signal_cube", "actionId": "build_fx_pair_bias"},
             "metrics": metrics,
+            "evidence": [{"label": "Public FX evidence", "url": "https://example.com/fx", "note": "Checked"}],
             "updatedAt": "2026-08-09T00:00:00+00:00",
         }
-        model = self.bridge._fx_bias_read_model([report])
+        model = self.bridge._fx_bias_read_model(
+            [report],
+            now_local=datetime.fromisoformat("2026-08-09T08:00:00+00:00"),
+        )
         eurusd = next(row for row in model["pairs"] if row["pair"] == "EURUSD")
         self.assertTrue(contract["valid"])
         self.assertFalse(malformed_time_contract["valid"])
@@ -672,7 +677,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
         self.assertIsInstance(metrics["pairBias"], list)
         self.assertEqual(model["verifiedPairCount"], 1)
         self.assertEqual(eurusd["shortBias"], "bullish")
-        self.assertEqual(eurusd["mediumBias"], "neutral")
+        self.assertEqual(eurusd["mediumBias"], "sideway")
         self.assertEqual(eurusd["sourceLinks"][0]["url"], "https://example.com/fx")
 
     def test_unknown_evidence_kind_fails_closed(self) -> None:
@@ -710,6 +715,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
             "checked_at",
             "compile_status_truth",
             "discovery_blueprint",
+            "ea_readiness",
             "inspection_scope",
             "limitations",
             "local_health_snapshot",
@@ -728,6 +734,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
             "scheduler_state",
             "source_digest",
             "source_reference",
+            "source_title",
             "source_url",
             "source_url_per_supported_bias",
             "uncompiled_status",
@@ -766,9 +773,10 @@ class EquipmentOutputContractTests(unittest.TestCase):
             "backend_observed_at": {"checkedAt", "backendObservedAt"},
             "backtest_plan": {"testModel", "dateRange", "artifactPlan"},
             "change_summary": {"changeSummary"},
-            "checked_at": {"checkedAt"},
+            "checked_at": {"checkedAt", "entries"},
             "compile_status_truth": {"compileStatus"},
             "discovery_blueprint": {"blueprint", "versionPlan"},
+            "ea_readiness": {"eaReadiness", "entries"},
             "inspection_scope": {
                 "strategySummary",
                 "codeRisks",
@@ -811,8 +819,8 @@ class EquipmentOutputContractTests(unittest.TestCase):
                 "sourcePath",
                 "downloadArtifacts",
             },
-            "public_availability_status": {"availability"},
-            "published_or_event_time": {"publishedAt", "eventAt"},
+            "public_availability_status": {"availability", "entries"},
+            "published_or_event_time": {"publishedAt", "eventAt", "events", "sourceLinks"},
             "quoted_fact_summary": {
                 "entryRules",
                 "exitRules",
@@ -823,6 +831,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
             "review_scope": {"issues", "lineReferences", "reviewScope"},
             "scheduler_state": {"effectiveEnabled", "nextRunAt", "lastRunStatus"},
             "source_digest": {"sourceDigest"},
+            "source_title": {"sourceTitle", "entries"},
             "source_url_per_supported_bias": {"pairBias"},
             "uncompiled_status": {
                 "compileChecklist",

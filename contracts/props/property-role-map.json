@@ -484,9 +484,9 @@
       "openingMessage": "สตูดิโอนี้ใช้ตรวจและพัฒนา Source MQL4/MQL5 ผ่าน Backend ครับ การสร้างหรือแก้ Source ทำได้ใน Guarded Workspace แต่ Compile จริงยังเป็น Coming Soon จนกว่า Compiler Adapter จะพร้อม"
     },
     "left_audit_crystals": {
-      "functionName": "Indicator Website Scout",
-      "displayTitle": "เรดาร์เว็บไซต์ Indicator",
-      "purpose": "ค้นหา Indicator, EA Tool และเครื่องมือวิเคราะห์ใหม่จากเว็บไซต์สาธารณะ เก็บ URL หลักฐาน วันที่ตรวจ และสถานะรายการซ้ำ พร้อมตั้งเวลาให้ Backend ค้นหาแบบอ่านอย่างเดียว 1-2 ครั้งต่อวัน โดย Screenshot Adapter ยังเป็น Coming Soon",
+      "functionName": "Radar Website Tool",
+      "displayTitle": "Radar Website Tool",
+      "purpose": "ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะ เก็บ URL วันที่ตรวจ และสถานะซ้ำจากคลัง Report ในเครื่อง พร้อมตั้งเวลาได้สูงสุดวันละ 2 รอบ; Google Sheet และ Screenshot แสดงตามสถานะ Adapter จริงเท่านั้น",
       "interactionMode": "dashboard",
       "connectionProfileId": "left_audit_crystals",
       "departmentId": "indicator_market_intelligence",
@@ -498,12 +498,12 @@
       "primaryReportType": "indicator_scout_report",
       "acceptedReportTypes": ["indicator_scout_report", "dashboard_connection_report"],
       "localTabs": [
-        {"id": "discoveries", "labelTh": "ค้นหา Indicator", "purpose": "ค้นหาเครื่องมือใหม่พร้อมแพลตฟอร์ม ประเภท และ URL", "actionIds": ["discover_new_indicators"]},
+        {"id": "discoveries", "labelTh": "รายการวันนี้", "purpose": "ดู Indicator, EA และ Tool ที่ค้นพบวันนี้พร้อม URL", "actionIds": ["discover_new_indicators"]},
         {"id": "evidence", "labelTh": "หลักฐาน", "purpose": "ดู Source URL วันที่ตรวจ ความน่าเชื่อถือ และข้อจำกัด", "actionIds": [], "viewOnly": true},
         {"id": "schedule", "labelTh": "ตั้งเวลาค้นหา", "purpose": "ตั้งเวลาค้นหาแบบอ่านอย่างเดียวผ่าน Backend", "actionIds": ["save_indicator_scout_schedule"]},
-        {"id": "archive", "labelTh": "ประวัติและรายงาน", "purpose": "ดู Mission, Report และสถานะตรวจรายการซ้ำ", "actionIds": [], "viewOnly": true}
+        {"id": "archive", "labelTh": "ประวัติและรายงาน", "purpose": "ดูรายการย้อนหลัง 7 วันและ Mission/Report ที่เกี่ยวข้อง", "actionIds": [], "viewOnly": true}
       ],
-      "dashboardSections": ["discovery_summary", "indicator_entries", "source_evidence", "deduplication", "schedule_preference", "archive"],
+      "dashboardSections": ["today_entries", "seven_day_entries", "source_evidence", "deduplication", "archive"],
       "allowedDashboardActions": ["discover_new_indicators", "save_indicator_scout_schedule"],
       "reportType": "indicator_scout_report",
       "ownerAgents": ["codex_mcp_operator", "mission_archivist", "ea_developer", "risk_guard"],
@@ -513,32 +513,36 @@
         "historyReportTabId": "archive",
         "historyReportTabPosition": "last",
         "leftRailSections": [
-          {"id": "schedule", "labelTh": "ตั้งเวลา", "purpose": "ตั้งเวลาให้ Backend ค้นหา 1-2 ครั้งต่อวัน", "mode": "backend_preference", "actionIds": ["save_indicator_scout_schedule"]},
+          {"id": "schedule", "labelTh": "ค้นหาและตั้งค่า", "purpose": "ค้นหา ตั้งเวลาไม่เกิน 2 รอบ และบันทึก Sheet ที่ตรวจแล้ว", "mode": "backend_preference", "actionIds": ["save_indicator_scout_schedule"]},
           {"id": "quota", "labelTh": "โควตา Codex", "purpose": "ดูโควตาจาก Backend แบบอ่านอย่างเดียว", "mode": "backend_read_only"}
         ],
+        "leftRailControls": ["discover_new_indicators", "schedule_max_2", "validated_google_sheet_reference"],
+        "primaryViews": ["today", "history_7_days"],
         "crossDevicePolicy": "agent_mission_report_only",
         "directDashboardPipeline": false,
         "missionStrategyTableRole": "global_ledger_only"
       },
-      "shows": ["new Indicator and EA tools", "public source links", "dedup status", "schedule preference", "research history"],
-      "accepts": ["ค้นหา Indicator ใหม่", "ค้นหา EA Tool", "ตรวจรายการซ้ำ", "ตั้งเวลาค้นหา"],
+      "shows": ["Indicator, EA and Tool today", "7-day history", "public source links", "local dedup status", "truth-safe Sheet and screenshot status"],
+      "accepts": ["ค้นหา Indicator ใหม่", "ค้นหา EA ใหม่", "ค้นหา Tool ใหม่", "ตรวจรายการซ้ำ", "ตั้งเวลาค้นหา", "บันทึก Google Sheet URL หรือ ID"],
       "actions": ["Discover public tools", "Save schedule preference", "Open evidence", "Open archive"],
-      "dataSources": ["guarded public web research", "data/runtime/missions.json", "data/runtime/reports/", "data/memory/reports/"],
+      "dataSources": ["guarded public web research", "data/runtime/missions.json", "data/runtime/reports/", "data/runtime/dashboard-workflow-settings.json"],
       "workflow": {
-        "id": "indicator_website_scout",
+        "id": "radar_website_tool",
         "displayOrder": 5,
         "independent": true,
         "coordinationMode": "agent_mission_only",
         "agentTransferOnly": true,
         "directDashboardDependency": false,
         "transferPolicy": {"mode": "agent_mission_only", "requiredRecordFields": ["sourceReportId", "sourcePropId", "sourceMissionId", "transferAgentId"], "frontendMaySubmitFields": ["sourceReportId"], "backendDerivesLineage": true, "missionStrategyTableRole": "global_ledger_only"},
-        "deduplication": {"required": true, "matchKeys": ["sourceUrl", "toolName", "platform", "version"], "owner": "backend"},
-        "schedule": {"preferenceRunsPerDay": [1, 2], "configurationIntentReady": true, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": false, "timezone": "Asia/Bangkok", "scheduledActionIds": ["discover_new_indicators"]},
-        "readiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "localDedup": "ready_contract", "screenshotAdapter": "coming_soon", "recurringScheduler": "ready_guarded_read_only"}
+        "deduplication": {"required": true, "mode": "deterministic_local_report_catalog", "matchKeys": ["normalizedSourceUrl", "toolName", "platform", "version"], "googleSheetCompared": false, "owner": "backend"},
+        "schedule": {"preferenceRunsPerDay": [1, 2], "maximumRunsPerDay": 2, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "configurationIntentReady": true, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": false, "timezone": "Asia/Bangkok", "scheduledActionIds": ["discover_new_indicators"]},
+        "googleSheet": {"configurationMayBeSaved": true, "privateDefaultIncluded": false, "adapterStatus": "not_connected", "externalWriteEnabled": false, "writeRequiresExplicitUserConfirmation": true},
+        "readModel": {"schemaVersion": "radar-website-tool-v1", "todayEntries": true, "sevenDayEntries": true, "historyWindowDays": 7},
+        "readiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "localDedup": "implemented_deterministic_local_report_catalog", "googleSheetsAdapter": "not_connected", "screenshotAdapter": "not_connected", "recurringScheduler": "ready_guarded_read_only"}
       },
       "workflowTracking": {"required": true, "fields": ["missionId", "targetPropId", "ownerAgentId", "sourceLineage", "agentTransfer", "timestamps", "status", "reportRoute"]},
       "doNotShow": ["tokens", "cookies", "auth files", "passwords", "private repository credentials"],
-      "openingMessage": "เรดาร์นี้ค้นหา Indicator และ EA Tool ใหม่จากเว็บไซต์สาธารณะครับ ทุกผลต้องมี URL และหลักฐาน ตั้งเวลาค้นหาแบบอ่านอย่างเดียวได้ ส่วน Screenshot อัตโนมัติยังเป็น Coming Soon"
+      "openingMessage": "Radar Website Tool ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะครับ หน้าแรกแสดงวันนี้และย้อนหลัง 7 วัน ส่วนการค้นหา เวลา และ Google Sheet อยู่ด้านซ้าย โดยจะไม่อ้างว่าเขียน Sheet หรือจับภาพแล้วจนกว่า Adapter จริงจะยืนยัน"
     },
     "left_signal_cube": {
       "functionName": "Daily Market News & FX Bias",
@@ -555,32 +559,31 @@
       "primaryReportType": "fx_news_bias_report",
       "acceptedReportTypes": ["fx_news_bias_report", "dashboard_connection_report"],
       "localTabs": [
-        {"id": "today", "labelTh": "วิเคราะห์ข่าววันนี้", "purpose": "ดูข่าวแรง เวลาประกาศ คู่เงินที่กระทบ และช่วงระวัง EA", "actionIds": ["analyze_daily_market_news"]},
-        {"id": "pair_bias", "labelTh": "มุมมอง 28 คู่เงิน", "purpose": "ดู Bias ระยะสั้น กลาง และยาวของแต่ละคู่เงิน", "actionIds": ["build_fx_pair_bias"]},
-        {"id": "horizons", "labelTh": "แนวโน้มตามช่วงเวลา", "purpose": "เปรียบเทียบแนวโน้ม Confidence และข้อจำกัดแต่ละช่วง", "actionIds": [], "viewOnly": true},
-        {"id": "schedule_history", "labelTh": "ประวัติและรายงาน", "purpose": "ดู Report เดิมและเวลาอัปเดตที่ Backend บันทึก", "actionIds": ["save_news_bias_schedule"]}
+        {"id": "pair_bias", "labelTh": "มุมมอง 28 คู่เงิน", "purpose": "ดู Bias ระยะสั้น กลาง และยาวที่สร้างจากรอบวิเคราะห์ข่าวเดียวกัน", "actionIds": ["analyze_daily_market_news"]},
+        {"id": "today", "labelTh": "วิเคราะห์ข่าววันนี้", "purpose": "ดูข่าวแรง เวลาประกาศ คู่เงินที่กระทบ และช่วงระวัง EA", "actionIds": ["analyze_daily_market_news"], "viewOnly": true}
       ],
-      "dashboardSections": ["high_impact_news", "ea_caution_windows", "fx_pair_bias", "horizon_comparison", "source_evidence", "schedule_preference", "history"],
+      "dashboardSections": ["current_news", "ea_caution_windows", "fx_pair_bias", "source_evidence"],
       "allowedDashboardActions": ["analyze_daily_market_news", "build_fx_pair_bias", "save_news_bias_schedule"],
       "reportType": "fx_news_bias_report",
       "ownerAgents": ["codex_mcp_operator", "manager", "backtest_analyst", "risk_guard"],
-      "defaultTab": "today",
+      "defaultTab": "pair_bias",
       "dashboardUx": {
-        "mainWorkTabId": "today",
-        "historyReportTabId": "schedule_history",
-        "historyReportTabPosition": "last",
+        "mainWorkTabId": "pair_bias",
+        "historyReportTabId": null,
+        "historyReportTabPosition": null,
         "leftRailSections": [
-          {"id": "schedule", "labelTh": "ตั้งเวลา", "purpose": "ตั้งเวลาอัปเดตข่าวผ่าน Backend; Bias ยังสั่งแยก", "mode": "backend_preference", "actionIds": ["save_news_bias_schedule"]},
-          {"id": "quota", "labelTh": "โควตา Codex", "purpose": "ดูโควตาจาก Backend แบบอ่านอย่างเดียว", "mode": "backend_read_only"},
-          {"id": "agent_handoff", "labelTh": "ส่งต่อผ่าน Agent", "purpose": "ส่ง Report ภายในงานข่าวด้วย Mission ที่ตรวจ lineage แล้ว", "mode": "mission_report_only", "direction": "internal_only"}
+          {"id": "schedule", "labelTh": "ตั้งเวลา", "purpose": "ตั้งค่าเริ่มต้นวันละ 1 รอบ และเพิ่มได้สูงสุด 2 รอบผ่าน Backend", "mode": "backend_preference", "actionIds": ["save_news_bias_schedule"]},
+          {"id": "workflow_method", "labelTh": "วิธีการทำงาน", "purpose": "หนึ่ง Mission สร้างข่าว ช่วงระวัง และ Bias ครบ 28 คู่ โดยเป็น Analysis Only", "mode": "read_only_explanation"},
+          {"id": "source_status", "labelTh": "สถานะแหล่งข้อมูล", "purpose": "ใช้เว็บสาธารณะ; Forex Factory เป็นแหล่งที่ควรใช้เมื่อเข้าถึงได้ แต่ยังไม่มี Direct Adapter", "mode": "backend_read_only"},
+          {"id": "quota", "labelTh": "โควตา Codex", "purpose": "ดูโควตาจาก Backend แบบอ่านอย่างเดียว", "mode": "backend_read_only"}
         ],
         "crossDevicePolicy": "agent_mission_report_only",
         "directDashboardPipeline": false,
         "missionStrategyTableRole": "global_ledger_only"
       },
-      "shows": ["high-impact news", "EA caution windows", "28-pair bias", "short medium long horizons", "source links", "history"],
-      "accepts": ["วิเคราะห์ข่าวตลาดวันนี้", "หาเวลาที่ควรระวัง EA", "สร้าง Bias 28 คู่เงิน", "ตั้งเวลาอัปเดต"],
-      "actions": ["Analyze daily news", "Build 28-pair bias", "Save schedule preference", "Open source evidence"],
+      "shows": ["current public-source news", "EA caution windows", "28-pair bias", "short medium long horizons", "source links"],
+      "accepts": ["วิเคราะห์ข่าวตลาดและ Bias 28 คู่ในรอบเดียว", "หาเวลาที่ควรระวัง EA", "ตั้งเวลาอัปเดตสูงสุดวันละ 2 รอบ"],
+      "actions": ["Analyze news and 28-pair bias", "Save schedule preference", "Open source evidence"],
       "dataSources": ["guarded public web research", "linked fx_news_bias_report", "data/runtime/missions.json", "data/runtime/reports/"],
       "workflow": {
         "id": "daily_market_news_fx_bias",
@@ -593,8 +596,8 @@
         "fxPairs": ["AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDUSD", "CADCHF", "CADJPY", "CHFJPY", "EURAUD", "EURCAD", "EURCHF", "EURGBP", "EURJPY", "EURNZD", "EURUSD", "GBPAUD", "GBPCAD", "GBPCHF", "GBPJPY", "GBPNZD", "GBPUSD", "NZDCAD", "NZDCHF", "NZDJPY", "NZDUSD", "USDCAD", "USDCHF", "USDJPY"],
         "horizons": ["short", "medium", "long"],
         "biasVocabulary": ["bullish", "bearish", "sideway", "insufficient_data"],
-        "schedule": {"preferenceRunsPerDay": [1, 2], "configurationIntentReady": true, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": false, "timezone": "Asia/Bangkok", "scheduledActionIds": ["analyze_daily_market_news"], "manualOrAgentHandoffActionIds": ["build_fx_pair_bias"]},
-        "readiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "economicCalendarAdapter": "coming_soon", "recurringScheduler": "ready_guarded_read_only"}
+        "schedule": {"preferenceRunsPerDay": [1, 2], "defaultTimes": ["07:00"], "maximumTimes": 2, "maximumRunsPerDay": 2, "configurationIntentReady": true, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": false, "timezone": "Asia/Bangkok", "scheduledActionIds": ["analyze_daily_market_news"], "legacyManualActionIds": ["build_fx_pair_bias"]},
+        "readiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "forexFactoryPreferredPublicSource": true, "forexFactoryDirectAdapter": "not_connected", "economicCalendarAdapter": "coming_soon", "recurringScheduler": "ready_guarded_read_only"}
       },
       "workflowTracking": {"required": true, "fields": ["missionId", "targetPropId", "ownerAgentId", "sourceLineage", "agentTransfer", "timestamps", "status", "reportRoute"]},
       "executionPolicy": {"mode": "analysis_only", "liveTradingEnabled": false, "orderSubmissionEnabled": false, "frontendMayEnableExecution": false},
@@ -602,9 +605,9 @@
       "openingMessage": "จุดนี้สรุปข่าวตลาดและ Bias ของ 28 คู่เงินครับ ทุกข้อสรุปต้องมีแหล่งอ้างอิง และผลเป็นเพียงข้อมูลประกอบ ไม่ส่งคำสั่งซื้อขาย"
     },
     "right_status_crystals": {
-      "functionName": "VPS / HQ Health & Agent Settings",
-      "displayTitle": "ศูนย์สถานะ VPS, HQ และตั้งค่า Agent",
-      "purpose": "ตรวจสุขภาพ VPS, Local Bridge และระบบ HQ แบบ Read-only พร้อมบันทึก Preference ของ Agent ที่ปลอดภัย เช่น ภาษา Model Tier งบงาน Timeout ขนาดผลลัพธ์ และ Rate Reserve โดย Backend ตรวจช่วงค่าและไม่รับ Secret หรือ Provider Credential",
+      "functionName": "HQ Equipment Connection Center",
+      "displayTitle": "ศูนย์รวมสถานะการเชื่อมต่ออุปกรณ์",
+      "purpose": "ดูสถานะ Local Bridge, Codex CLI, MCP, MT4/MT5, Adapter และตารางเวลาของอุปกรณ์ทุกจุดจาก Snapshot ร่วมแบบ Read-only พร้อมตั้งค่า Agent ที่ปลอดภัย โดยไม่ส่ง Secret, Path, PID, Account, Channel ID หรือ Key มาหน้าเว็บ",
       "interactionMode": "dashboard",
       "connectionProfileId": "right_status_crystals",
       "departmentId": "vps_hq_operations",
@@ -616,20 +619,17 @@
       "primaryReportType": "ops_overview_report",
       "acceptedReportTypes": ["ops_overview_report", "vps_report", "bridge_status_report", "dashboard_connection_report"],
       "localTabs": [
-        {"id": "vps", "labelTh": "ตรวจสถานะระบบ", "purpose": "ดู Uptime, CPU, RAM, Disk, Latency และข้อมูลล่าสุด", "actionIds": ["refresh_vps_hq_status"]},
-        {"id": "hq_bridge", "labelTh": "HQ และ Bridge", "purpose": "ดู Local Runner, Mission Worker และเหตุขัดข้องโดยไม่แสดง Secret", "actionIds": [], "viewOnly": true},
-        {"id": "agent_settings", "labelTh": "ตั้งค่า Agent", "purpose": "บันทึก Model Tier, Budget, Timeout และ Rate Reserve ที่ปลอดภัย", "actionIds": ["save_agent_preferences"]},
-        {"id": "activity_history", "labelTh": "ประวัติและรายงาน", "purpose": "ดู Mission, Event, Report และประวัติการตั้งค่า", "actionIds": [], "viewOnly": true}
+        {"id": "connections", "labelTh": "การเชื่อมต่ออุปกรณ์", "purpose": "ดูอุปกรณ์ 9 จุดและสถานะบริการหลักในหน้าเดียว", "actionIds": ["refresh_vps_hq_status"]}
       ],
-      "dashboardSections": ["vps_health", "hq_health", "bridge_health", "agent_preferences", "activity_history"],
+      "dashboardSections": ["device_connections", "core_services", "adapter_status", "schedule_status", "agent_preferences"],
       "allowedDashboardActions": ["refresh_vps_hq_status", "save_agent_preferences"],
       "reportType": "ops_overview_report",
       "ownerAgents": ["vps_watch", "manager", "codex_mcp_operator", "risk_guard"],
-      "defaultTab": "vps",
+      "defaultTab": "connections",
       "dashboardUx": {
-        "mainWorkTabId": "vps",
-        "historyReportTabId": "activity_history",
-        "historyReportTabPosition": "last",
+        "mainWorkTabId": "connections",
+        "historyReportTabId": null,
+        "historyReportTabPosition": null,
         "leftRailSections": [
           {"id": "settings", "labelTh": "ตั้งค่า Agent", "purpose": "บันทึกเฉพาะค่าที่ Backend อนุญาต", "mode": "backend_validated", "actionIds": ["save_agent_preferences"]},
           {"id": "quota", "labelTh": "โควตา Codex", "purpose": "ดูโควตาและ Rate Reserve จาก Backend", "mode": "backend_read_only"}
@@ -638,10 +638,10 @@
         "directDashboardPipeline": false,
         "missionStrategyTableRole": "global_ledger_only"
       },
-      "shows": ["VPS health", "HQ and Bridge health", "safe Agent preferences", "activity and configuration history"],
-      "accepts": ["ตรวจ VPS", "ตรวจ HQ และ Bridge", "ตั้งค่า Agent", "ดูประวัติกิจกรรม"],
-      "actions": ["Refresh VPS and HQ health", "Save safe Agent preferences", "Open activity history"],
-      "dataSources": ["backend-local health probes", "data/runtime/missions.json", "data/runtime/agent-events.jsonl", "data/runtime/reports/", "backend-safe preference store"],
+      "shows": ["device connection status", "core service status", "adapter and schedule status", "safe Agent preferences"],
+      "accepts": ["ตรวจการเชื่อมต่อทุกอุปกรณ์", "ตรวจ Local Bridge, Codex CLI, MCP และ Scheduler", "ตั้งค่า Agent"],
+      "actions": ["Refresh equipment connection center", "Save safe Agent preferences"],
+      "dataSources": ["bounded shared backend probes", "dashboard connection profiles", "backend schedule settings", "backend-safe preference store"],
       "agentPreferenceContract": {
         "fields": {
           "language": {"type": "enum", "allowed": ["th", "en"], "default": "th"},
@@ -656,10 +656,10 @@
         "providerModelIdAccepted": false,
         "credentialsAccepted": false
       },
-      "workflow": {"id": "vps_hq_health_agent_settings", "displayOrder": 8, "independent": true, "coordinationMode": "agent_mission_only", "agentTransferOnly": true, "directDashboardDependency": false, "transferPolicy": {"mode": "agent_mission_only", "requiredRecordFields": ["sourceReportId", "sourcePropId", "sourceMissionId", "transferAgentId"], "frontendMaySubmitFields": ["sourceReportId"], "backendDerivesLineage": true, "missionStrategyTableRole": "global_ledger_only"}, "readiness": {"localBridgeHealth": "ready", "missionWorkerHealth": "ready", "vpsMetrics": "runtime_detected", "safeAgentPreferences": "ready_backend_validated", "externalVpsApi": "coming_soon"}},
+      "workflow": {"id": "hq_equipment_connection_center", "displayOrder": 8, "independent": true, "coordinationMode": "agent_mission_only", "agentTransferOnly": true, "directDashboardDependency": false, "readModel": {"schemaVersion": "hq-equipment-connection-center-v1", "deviceCount": 9, "sharedProbeSnapshot": true, "cacheTtlSeconds": 5, "unobservedRuntimeStatus": "not_checked", "privacyProjectionRequired": true}, "transferPolicy": {"mode": "agent_mission_only", "requiredRecordFields": ["sourceReportId", "sourcePropId", "sourceMissionId", "transferAgentId"], "frontendMaySubmitFields": ["sourceReportId"], "backendDerivesLineage": true, "missionStrategyTableRole": "global_ledger_only"}, "readiness": {"localBridgeHealth": "ready", "missionWorkerHealth": "ready", "deviceConnectionProjection": "ready_bounded_read_only", "safeAgentPreferences": "ready_backend_validated", "externalVpsApi": "coming_soon"}},
       "workflowTracking": {"required": true, "fields": ["missionId", "targetPropId", "ownerAgentId", "sourceLineage", "agentTransfer", "timestamps", "status", "reportRoute"]},
-      "doNotShow": ["tokens", "API keys", "cookies", "auth files", "passwords", "SSH keys", "broker credentials", "raw process paths", "provider model credentials"],
-      "openingMessage": "ศูนย์นี้ใช้ตรวจสถานะ VPS, HQ และ Bridge พร้อมตั้งค่า Agent ที่ปลอดภัยครับ ค่าทั้งหมดถูกตรวจและเก็บโดย Backend และจะไม่แสดง Secret"
+      "doNotShow": ["tokens", "API keys", "cookies", "auth files", "passwords", "SSH keys", "broker credentials", "raw process paths", "PID", "account details", "channel ids", "provider model credentials"],
+      "openingMessage": "ศูนย์นี้รวมสถานะการเชื่อมต่อของอุปกรณ์ทั้งหมดครับ รายการที่ Backend ยังไม่ตรวจจะขึ้น not_checked และจะไม่แสดง Secret, Path, PID, Account, Channel ID หรือ Key"
     }
   }
 }

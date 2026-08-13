@@ -1,0 +1,7 @@
+MetaEditor: RoboForex MT4 MetaEditor
+Source: MetafxHQTradeGateway.mq4
+CompiledAtLocal: 2026-08-12 17:44:50 Asia/Bangkok
+Result: 0 errors, 0 warnings, 98 msec elapsed
+SourceSHA256: 998C8C127A85F75C79C562932A573F84253B52F727A37228CDF3A0B45E38F215
+BinarySHA256: 1F3258E2FAB57C9CCEE7679C6EAD5CAEF540F2436D87E067B49EA0397A994B39
+Safety: Compile only; no deploy, EA reload, POST, restart, or trade command was performed.

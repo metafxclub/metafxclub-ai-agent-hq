@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [ValidateRange(1, 30)]
-    [int]$WatchdogMinutes = 5
+    [int]$WatchdogMinutes = 15
 )
 
 Set-StrictMode -Version Latest
@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot)).TrimEnd("\")
 $lifecyclePath = Join-Path $PSScriptRoot "start-local-bridge.ps1"
+$hiddenLauncherPath = Join-Path $PSScriptRoot "run-bridge-watchdog-hidden.vbs"
 $endpointPath = Join-Path $projectRoot "data\runtime\bridge-endpoint.json"
 $statePath = Join-Path $projectRoot "data\runtime\bridge-autostart.json"
 $taskName = "Metafxclub AI Agent HQ Bridge"
@@ -22,6 +23,9 @@ else {
 
 if (-not (Test-Path -LiteralPath $lifecyclePath -PathType Leaf)) {
     throw "ไม่พบตัวควบคุม Local Bridge: $lifecyclePath"
+}
+if (-not (Test-Path -LiteralPath $hiddenLauncherPath -PathType Leaf)) {
+    throw "ไม่พบตัวเปิด Watchdog แบบไม่มีหน้าต่าง: $hiddenLauncherPath"
 }
 if (-not (Test-Path -LiteralPath $endpointPath -PathType Leaf)) {
     throw "ยังไม่มี Local endpoint ที่ยืนยัน กรุณาเปิด Bridge และยืนยันพอร์ตก่อน"
@@ -49,11 +53,22 @@ foreach ($commandName in $requiredCommands) {
     }
 }
 
-$powerShellPath = (Get-Command powershell.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-$arguments = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Action Ensure -Port {1}' -f $lifecyclePath, $confirmedPort
+$systemRoot = [Environment]::GetEnvironmentVariable("SystemRoot")
+if ([string]::IsNullOrWhiteSpace($systemRoot)) {
+    throw "ไม่พบ Windows SystemRoot จึงไม่สามารถตั้ง Watchdog แบบไม่มีหน้าต่างได้"
+}
+$wscriptPath = Join-Path $systemRoot "System32\wscript.exe"
+if (-not (Test-Path -LiteralPath $wscriptPath -PathType Leaf)) {
+    throw "ไม่พบ Windows Script Host: $wscriptPath"
+}
+$cscriptPath = Join-Path $systemRoot "System32\cscript.exe"
+if (-not (Test-Path -LiteralPath $cscriptPath -PathType Leaf)) {
+    throw "ไม่พบตัวตรวจสอบ Windows Script Host: $cscriptPath"
+}
+$arguments = '//B //NoLogo "{0}" /Port:{1}' -f $hiddenLauncherPath, $confirmedPort
 $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $action = New-ScheduledTaskAction `
-    -Execute $powerShellPath `
+    -Execute $wscriptPath `
     -Argument $arguments `
     -WorkingDirectory $projectRoot
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
@@ -96,21 +111,26 @@ try {
     if (-not $registeredTask) {
         throw "สร้าง Scheduled Task สำหรับ Bridge ไม่สำเร็จ"
     }
+    $registeredActions = @($registeredTask.Actions)
+    if (
+        $registeredActions.Count -ne 1 -or
+        -not [string]::Equals([string]$registeredActions[0].Execute, $wscriptPath, [StringComparison]::OrdinalIgnoreCase) -or
+        [string]$registeredActions[0].Arguments -cne $arguments
+    ) {
+        throw "Scheduled Task ไม่ได้ใช้ Watchdog แบบไม่มีหน้าต่างตามที่กำหนด"
+    }
 
-    & powershell.exe `
-        -NoLogo `
-        -NoProfile `
-        -NonInteractive `
-        -ExecutionPolicy Bypass `
-        -File $lifecyclePath `
-        -Action Ensure `
-        -Port $confirmedPort | Out-Host
+    & $cscriptPath `
+        //B `
+        //NoLogo `
+        $hiddenLauncherPath `
+        "/Port:$confirmedPort" | Out-Host
     if ($LASTEXITCODE -ne 0) {
-        throw "ลงทะเบียน Task แล้ว แต่ Bridge ยังไม่ผ่าน Health check ที่พอร์ต $confirmedPort"
+        throw "ลงทะเบียน Task แล้ว แต่ตัวเปิดแบบไม่มีหน้าต่างหรือ Bridge ยังไม่ผ่านการตรวจที่พอร์ต $confirmedPort"
     }
 
     $state = [ordered]@{
-        version = 2
+        version = 3
         enabled = $true
         scope = "current_user_scheduled_task"
         host = "127.0.0.1"
@@ -118,6 +138,7 @@ try {
         task_name = $taskName
         user = $currentUser
         watchdog_minutes = $WatchdogMinutes
+        launch_method = "wscript_hidden_v1"
         restart_count = 3
         restart_interval_minutes = 1
         legacy_startup_shortcut_removed = $legacyShortcutRemoved

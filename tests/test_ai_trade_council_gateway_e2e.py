@@ -41,10 +41,17 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
         self.original_status_reader = (
             self.bridge.mt4_trade_gateway_status_read_model
         )
+        self.original_selection_token_reader = (
+            self.bridge._metatrader_selection_token
+        )
         self.bridge.RUNTIME_DIR = self.root / "runtime"
         self.bridge.AUDIT_PATH = self.bridge.RUNTIME_DIR / "bridge-audit.jsonl"
         self.bridge.METATRADER_COMMON_FILES_DIR = self.root / "common"
         self.bridge.MT4_TRADE_GATEWAY_MODULE = None
+        self.bridge._metatrader_selection_token = lambda _prop_id: {
+            "candidateId": "mtc-safe-e2e-test",
+            "selectionRevision": 1,
+        }
 
     def tearDown(self) -> None:
         self.bridge.RUNTIME_DIR = self.original_runtime_dir
@@ -54,17 +61,27 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
         self.bridge.mt4_trade_gateway_status_read_model = (
             self.original_status_reader
         )
+        self.bridge._metatrader_selection_token = (
+            self.original_selection_token_reader
+        )
         self.temp.cleanup()
 
-    def council_round(self) -> tuple[dict, list[dict]]:
+    def council_round(
+        self,
+        *,
+        broker_offset_hours: int = 3,
+    ) -> tuple[dict, list[dict]]:
         now = datetime.now(timezone.utc)
-        valid_until = int((now + timedelta(hours=1)).timestamp())
         snapshot_id = "a" * 64
-        # MT4 represents iTime in broker/server-clock epoch.  A UTC+3 broker
-        # therefore appears to be ahead of snapshotObservedAt even though it is
-        # the same latest closed M5 bar.  This reproduces the production fault
-        # without contacting a terminal.
-        broker_closed_bar = int(now.timestamp()) + (3 * 60 * 60) - (5 * 60)
+        # MT4 represents iTime in broker/server-clock epoch.  Keep both the
+        # closed-bar and horizon identity in that domain; only roundDeadlineAt
+        # is eligible for UTC expiry comparisons.
+        broker_closed_bar = (
+            int(now.timestamp())
+            + (broker_offset_hours * 60 * 60)
+            - (5 * 60)
+        )
+        valid_until = broker_closed_bar + 2 * 5 * 60
         parent = {
             "id": "mission-safe-e2e-demo-simulation",
             "analysisContext": {
@@ -78,7 +95,11 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
                 "roundDeadlineAt": (now + timedelta(minutes=4)).isoformat(),
                 "closedBarIdentity": {
                     "candidateId": "mtc-safe-e2e-test",
-                    "streamKey": "b" * 64,
+                    "streamKey": self.bridge.payload_digest(
+                        "mtc-safe-e2e-test",
+                        "XAUUSD",
+                        "M5",
+                    ),
                     "symbol": "XAUUSD",
                     "timeframe": "M5",
                     "closedBarTime": broker_closed_bar,
@@ -182,16 +203,13 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
             "statePersisted": True,
         }
 
-    def test_vote_to_signed_command_to_verified_ack_and_fill_simulation(self) -> None:
-        parent, children = self.council_round()
-        consensus = self.bridge.ai_trade_council_consensus(parent, children)
-        self.assertTrue(consensus["ready"])
-        self.assertTrue(consensus["qualityGate"]["passed"])
-        self.assertEqual(consensus["decision"], "BUY")
-        self.assertEqual(consensus["directionalVoteCount"], 1)
-        self.assertEqual(consensus["requiredVotes"], 1)
-
-        self.bridge.mt4_trade_gateway_status_read_model = lambda: {
+    def gateway_status(
+        self,
+        *,
+        ea_max_managed_positions: int = 1,
+        current_managed_positions: int = 0,
+    ) -> dict:
+        return {
             "connected": True,
             "selectedCandidateId": "mtc-safe-e2e-test",
             "symbol": "XAUUSD",
@@ -203,7 +221,94 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
             "executionGuardReady": True,
             "demoOrderExecutionAvailable": True,
             "liveOrderExecutionAvailable": False,
+            "maxManagedPositions": ea_max_managed_positions,
+            "currentManagedPositions": current_managed_positions,
         }
+
+    def configure_max_managed_orders(self, value: int) -> None:
+        updated = self.bridge.set_ai_trade_council_automation({
+            "maxManagedOrders": value,
+        })
+        self.assertTrue(updated["ok"])
+        self.assertEqual(
+            updated["automation"]["config"]["maxManagedOrders"],
+            value,
+        )
+
+    def assert_ea_proven_history_blocks_at_ai_cap(
+        self,
+        execution_state: str,
+    ) -> None:
+        self.configure_max_managed_orders(1)
+        parent, children = self.council_round()
+        consensus = self.bridge.ai_trade_council_consensus(parent, children)
+        status = self.gateway_status(
+            ea_max_managed_positions=10,
+            current_managed_positions=0,
+        )
+        status["orderHistory"] = {
+            "schemaVersion": "metafx-hq-mt4-order-history-v1",
+            "available": True,
+            # Gateway history is already filtered to selectedCandidateId. An
+            # EA-proven EXECUTED ACK is an order even when lifecycle telemetry
+            # is missing/stale and therefore CONFIRMED_UNKNOWN.
+            "items": [{
+                "commandId": f"cmd-history-{execution_state.lower()}",
+                "ticket": 987650,
+                "side": "BUY",
+                "symbol": "XAUUSD",
+                "timeframe": "M5",
+                "executionState": execution_state,
+                "verificationStatus": "VERIFIED_OPEN",
+                "provenByEa": True,
+            }],
+            "totalExecuted": 1,
+            "hasMore": False,
+            "reasonCode": "ready",
+            "sourceScope": "durable_gateway_ledger_executed_ack_only",
+        }
+        self.bridge.mt4_trade_gateway_status_read_model = lambda: dict(status)
+
+        blocked = self.bridge.dispatch_ai_trade_council_trade_plan(
+            parent,
+            consensus,
+        )
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["reasonCode"], "max_managed_orders_reached")
+        self.assertFalse(blocked["commandPublished"])
+        self.assertEqual(
+            blocked["managedOrderLimit"]["configuredMaxManagedOrders"],
+            1,
+        )
+        self.assertEqual(
+            blocked["managedOrderLimit"]["eaMaxManagedPositions"],
+            10,
+        )
+        self.assertEqual(
+            blocked["managedOrderLimit"]["effectiveMaxManagedOrders"],
+            1,
+        )
+        self.assertGreaterEqual(
+            blocked["managedOrderLimit"]["currentManagedPositions"],
+            1,
+        )
+        self.assertTrue(blocked["managedOrderLimit"]["reached"])
+        self.assertEqual(
+            self.bridge._mt4_trade_gateway_instance().list_commands(limit=10),
+            [],
+        )
+
+    def test_vote_to_signed_command_to_verified_ack_and_fill_simulation(self) -> None:
+        parent, children = self.council_round()
+        consensus = self.bridge.ai_trade_council_consensus(parent, children)
+        self.assertTrue(consensus["ready"])
+        self.assertTrue(consensus["qualityGate"]["passed"])
+        self.assertEqual(consensus["decision"], "BUY")
+        self.assertEqual(consensus["directionalVoteCount"], 1)
+        self.assertEqual(consensus["requiredVotes"], 1)
+
+        self.bridge.mt4_trade_gateway_status_read_model = self.gateway_status
         dispatched = self.bridge.dispatch_ai_trade_council_trade_plan(
             parent,
             consensus,
@@ -283,6 +388,169 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
         )
         self.assertEqual(reconciled["status"], "ack_executed")
         self.assertTrue(reconciled["orderExecutionConfirmed"])
+
+    def test_utc_minus_five_broker_horizon_uses_utc_dispatch_deadline(self) -> None:
+        parent, children = self.council_round(broker_offset_hours=-5)
+        consensus = self.bridge.ai_trade_council_consensus(parent, children)
+        self.assertTrue(consensus["qualityGate"]["passed"])
+        self.assertLess(
+            consensus["validUntilBarTime"],
+            int(datetime.now(timezone.utc).timestamp()),
+        )
+        self.bridge.mt4_trade_gateway_status_read_model = self.gateway_status
+
+        dispatched = self.bridge.dispatch_ai_trade_council_trade_plan(
+            parent,
+            consensus,
+        )
+
+        self.assertEqual(dispatched["status"], "queued")
+        self.assertTrue(dispatched["commandPublished"])
+
+    def test_dispatch_uses_lower_ai_limit_when_ea_limit_is_higher(self) -> None:
+        self.configure_max_managed_orders(3)
+        parent, children = self.council_round()
+        consensus = self.bridge.ai_trade_council_consensus(parent, children)
+        self.bridge.mt4_trade_gateway_status_read_model = lambda: self.gateway_status(
+            ea_max_managed_positions=10,
+            current_managed_positions=2,
+        )
+
+        dispatched = self.bridge.dispatch_ai_trade_council_trade_plan(
+            parent,
+            consensus,
+        )
+
+        self.assertEqual(dispatched["status"], "queued")
+        self.assertTrue(dispatched["commandPublished"])
+        self.assertEqual(dispatched["managedOrderLimit"], {
+            "configuredMaxManagedOrders": 3,
+            "eaMaxManagedPositions": 10,
+            "effectiveMaxManagedOrders": 3,
+            "currentManagedPositions": 2,
+            "reached": False,
+            "source": "backend_dispatch_cap",
+            "eaInputUnchanged": True,
+        })
+
+    def test_dispatch_uses_lower_ea_limit_when_ai_limit_is_higher(self) -> None:
+        self.configure_max_managed_orders(10)
+        parent, children = self.council_round()
+        consensus = self.bridge.ai_trade_council_consensus(parent, children)
+        self.bridge.mt4_trade_gateway_status_read_model = lambda: self.gateway_status(
+            ea_max_managed_positions=3,
+            current_managed_positions=2,
+        )
+
+        dispatched = self.bridge.dispatch_ai_trade_council_trade_plan(
+            parent,
+            consensus,
+        )
+
+        self.assertEqual(dispatched["status"], "queued")
+        self.assertTrue(dispatched["commandPublished"])
+        self.assertEqual(dispatched["managedOrderLimit"], {
+            "configuredMaxManagedOrders": 10,
+            "eaMaxManagedPositions": 3,
+            "effectiveMaxManagedOrders": 3,
+            "currentManagedPositions": 2,
+            "reached": False,
+            "source": "backend_dispatch_cap",
+            "eaInputUnchanged": True,
+        })
+
+    def test_dispatch_blocks_when_current_positions_reach_effective_limit(self) -> None:
+        parent, children = self.council_round()
+        consensus = self.bridge.ai_trade_council_consensus(parent, children)
+        scenarios = (
+            (3, 5, 3, 3),
+            (10, 3, 4, 3),
+        )
+        for configured, ea_limit, current, effective in scenarios:
+            with self.subTest(
+                configured=configured,
+                ea_limit=ea_limit,
+                current=current,
+            ):
+                self.configure_max_managed_orders(configured)
+                self.bridge.mt4_trade_gateway_status_read_model = (
+                    lambda ea_limit=ea_limit, current=current: self.gateway_status(
+                        ea_max_managed_positions=ea_limit,
+                        current_managed_positions=current,
+                    )
+                )
+                blocked = self.bridge.dispatch_ai_trade_council_trade_plan(
+                    parent,
+                    consensus,
+                )
+
+                self.assertEqual(blocked["status"], "blocked")
+                self.assertEqual(
+                    blocked["reasonCode"],
+                    "max_managed_orders_reached",
+                )
+                self.assertFalse(blocked["commandPublished"])
+                self.assertEqual(blocked["managedOrderLimit"], {
+                    "configuredMaxManagedOrders": configured,
+                    "eaMaxManagedPositions": ea_limit,
+                    "effectiveMaxManagedOrders": effective,
+                    "currentManagedPositions": current,
+                    "reached": True,
+                    "source": "backend_dispatch_cap",
+                    "eaInputUnchanged": True,
+                })
+
+    def test_dispatch_fails_closed_when_managed_position_telemetry_is_missing(self) -> None:
+        self.configure_max_managed_orders(5)
+        parent, children = self.council_round()
+        consensus = self.bridge.ai_trade_council_consensus(parent, children)
+
+        for missing_field in ("maxManagedPositions", "currentManagedPositions"):
+            with self.subTest(missing=missing_field):
+                status = self.gateway_status(
+                    ea_max_managed_positions=10,
+                    current_managed_positions=0,
+                )
+                status.pop(missing_field)
+                self.bridge.mt4_trade_gateway_status_read_model = (
+                    lambda status=status: dict(status)
+                )
+
+                blocked = self.bridge.dispatch_ai_trade_council_trade_plan(
+                    parent,
+                    consensus,
+                )
+
+                self.assertEqual(blocked["status"], "blocked")
+                self.assertEqual(
+                    blocked["reasonCode"],
+                    "managed_position_telemetry_unavailable",
+                )
+                self.assertFalse(blocked["commandPublished"])
+                self.assertEqual(
+                    blocked["managedOrderLimit"]["configuredMaxManagedOrders"],
+                    5,
+                )
+                self.assertIsNone(
+                    blocked["managedOrderLimit"][
+                        "eaMaxManagedPositions"
+                        if missing_field == "maxManagedPositions"
+                        else "currentManagedPositions"
+                    ]
+                )
+                self.assertEqual(
+                    blocked["managedOrderLimit"]["source"],
+                    "backend_dispatch_cap",
+                )
+                self.assertTrue(
+                    blocked["managedOrderLimit"]["eaInputUnchanged"]
+                )
+
+    def test_dispatch_counts_ea_proven_open_history_when_status_count_is_zero(self) -> None:
+        self.assert_ea_proven_history_blocks_at_ai_cap("OPEN")
+
+    def test_dispatch_counts_ea_proven_unknown_history_when_status_count_is_zero(self) -> None:
+        self.assert_ea_proven_history_blocks_at_ai_cap("CONFIRMED_UNKNOWN")
 
 
 if __name__ == "__main__":

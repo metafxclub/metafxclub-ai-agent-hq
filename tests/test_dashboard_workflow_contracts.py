@@ -23,9 +23,9 @@ WORKFLOW_DEVICE_TAB_IDS = {
     "right_server_racks": ["builder", "code_review", "compile", "outputs"],
     "right_tool_console": ["backtest", "optimization", "ea_discovery", "history"],
     "left_audit_crystals": ["discoveries", "evidence", "schedule", "archive"],
-    "left_signal_cube": ["today", "pair_bias", "horizons", "schedule_history"],
+    "left_signal_cube": ["pair_bias", "today"],
     "terminal_workstation": ["source", "development_brief", "performance_goals", "outputs"],
-    "right_status_crystals": ["vps", "hq_bridge", "agent_settings", "activity_history"],
+    "right_status_crystals": ["connections"],
 }
 
 WORKFLOW_DEVICE_LEFT_RAIL_IDS = {
@@ -34,7 +34,7 @@ WORKFLOW_DEVICE_LEFT_RAIL_IDS = {
     "right_server_racks": ["quota", "agent_handoff"],
     "right_tool_console": ["quota", "agent_handoff"],
     "left_audit_crystals": ["schedule", "quota"],
-    "left_signal_cube": ["schedule", "quota", "agent_handoff"],
+    "left_signal_cube": ["schedule", "workflow_method", "source_status", "quota"],
     "terminal_workstation": ["quota", "agent_handoff"],
     "right_status_crystals": ["settings", "quota"],
 }
@@ -93,7 +93,7 @@ class DashboardWorkflowContractTests(unittest.TestCase):
         cls.agents = load_json("contracts/agents/agents.json")
         cls.orchestration = load_json("contracts/orchestration/orchestration-contract.json")
 
-    def test_eight_workflow_devices_have_exactly_four_canonical_tabs(self) -> None:
+    def test_workflow_devices_have_their_canonical_tabs(self) -> None:
         for prop_id, tab_ids in WORKFLOW_DEVICE_TAB_IDS.items():
             role = self.role_map["properties"][prop_id]
             connection = self.connections["profiles"][prop_id]
@@ -102,10 +102,11 @@ class DashboardWorkflowContractTests(unittest.TestCase):
             self.assertEqual([item["id"] for item in connection["localTabs"]], tab_ids)
             self.assertEqual([item["id"] for item in backend_tabs], tab_ids)
             self.assertEqual(role["defaultTab"], tab_ids[0])
-            self.assertEqual(len(tab_ids), 4)
-            self.assertEqual(len(set(tab_ids)), 4)
+            self.assertEqual(len(set(tab_ids)), len(tab_ids))
+            expected_count = 2 if prop_id == "left_signal_cube" else 1 if prop_id == "right_status_crystals" else 4
+            self.assertEqual(len(tab_ids), expected_count)
 
-    def test_eight_workflow_devices_open_on_main_work_and_end_with_history_reports(self) -> None:
+    def test_workflow_devices_open_on_main_work_and_only_legacy_devices_end_with_history(self) -> None:
         self.assertEqual(self.role_map["version"], "property-role-map-v002")
         for prop_id, tab_ids in WORKFLOW_DEVICE_TAB_IDS.items():
             role = self.role_map["properties"][prop_id]
@@ -114,9 +115,14 @@ class DashboardWorkflowContractTests(unittest.TestCase):
 
             self.assertEqual(role["defaultTab"], tab_ids[0])
             self.assertEqual(ux["mainWorkTabId"], tab_ids[0])
-            self.assertEqual(ux["historyReportTabId"], tab_ids[-1])
-            self.assertEqual(ux["historyReportTabPosition"], "last")
-            self.assertEqual(tabs[-1]["labelTh"], "ประวัติและรายงาน")
+            if prop_id in {"left_signal_cube", "right_status_crystals"}:
+                self.assertIsNone(ux["historyReportTabId"])
+                self.assertIsNone(ux["historyReportTabPosition"])
+                self.assertNotIn("ประวัติ", " ".join(item["labelTh"] for item in tabs))
+            else:
+                self.assertEqual(ux["historyReportTabId"], tab_ids[-1])
+                self.assertEqual(ux["historyReportTabPosition"], "last")
+                self.assertEqual(tabs[-1]["labelTh"], "ประวัติและรายงาน")
             self.assertTrue(tabs[0]["actionIds"], prop_id)
             self.assertLessEqual(len(tabs[0]["labelTh"]), 24)
             for tab in tabs:
@@ -127,13 +133,12 @@ class DashboardWorkflowContractTests(unittest.TestCase):
                     self.assertNotIn(forbidden, plain_text)
 
     def test_left_rail_metadata_only_exposes_relevant_safe_sections(self) -> None:
-        supported_sections = {"settings", "schedule", "quota", "agent_handoff"}
+        supported_sections = {"settings", "schedule", "quota", "agent_handoff", "workflow_method", "source_status"}
         handoff_props = {
             "codex_mcp_portal",
             "left_server_racks",
             "right_server_racks",
             "right_tool_console",
-            "left_signal_cube",
             "terminal_workstation",
         }
         for prop_id, expected_ids in WORKFLOW_DEVICE_LEFT_RAIL_IDS.items():
@@ -259,6 +264,15 @@ class DashboardWorkflowContractTests(unittest.TestCase):
             for forbidden in ("token", "api_key", "cookie", "password", "secret"):
                 self.assertNotIn(forbidden, field_ids)
 
+        self.assertEqual(
+            self.bridge.DASHBOARD_WORKFLOW_ACTIONS["refresh_vps_hq_status"]["tabId"],
+            "connections",
+        )
+        self.assertEqual(
+            self.bridge.DASHBOARD_WORKFLOW_ACTIONS["save_agent_preferences"]["tabId"],
+            "connections",
+        )
+
     def test_unavailable_external_adapters_remain_explicitly_disabled(self) -> None:
         tools = {
             item["id"]: item
@@ -354,18 +368,18 @@ class DashboardWorkflowContractTests(unittest.TestCase):
         self.assertFalse(tool["orderSubmissionAllowed"])
 
     def test_adapter_readiness_is_truthful_for_new_devices(self) -> None:
-        expected_coming_soon = {
-            "left_audit_crystals": {"screenshot_adapter"},
-            "left_signal_cube": {"economic_calendar_adapter"},
-            "terminal_workstation": {"metaeditor_compiler", "artifact_download"},
-            "right_status_crystals": {"external_vps_api"},
+        expected_unavailable = {
+            "left_audit_crystals": {"screenshot_adapter": "not_connected"},
+            "left_signal_cube": {"economic_calendar_adapter": "coming_soon"},
+            "terminal_workstation": {"metaeditor_compiler": "coming_soon", "artifact_download": "coming_soon"},
+            "right_status_crystals": {"external_vps_api": "coming_soon"},
         }
-        for prop_id, adapter_ids in expected_coming_soon.items():
+        for prop_id, adapter_statuses in expected_unavailable.items():
             connections = {
                 item["id"]: item for item in self.connections["profiles"][prop_id]["connections"]
             }
-            for adapter_id in adapter_ids:
-                self.assertEqual(connections[adapter_id]["adapterStatus"], "coming_soon")
+            for adapter_id, expected_status in adapter_statuses.items():
+                self.assertEqual(connections[adapter_id]["adapterStatus"], expected_status)
         eligible = self.connections["discoveryLabMt4Readiness"]["eligibleDashboardIds"]
         self.assertNotIn("terminal_workstation", eligible)
         terminal_tools = {
@@ -536,11 +550,41 @@ class DashboardWorkflowContractTests(unittest.TestCase):
             "left_audit_crystals": "Indicator",
             "left_signal_cube": "28 คู่เงิน",
             "terminal_workstation": "พัฒนา EA",
-            "right_status_crystals": "VPS",
+            "right_status_crystals": "เชื่อมต่อ",
         }
         for prop_id, term in expected_terms.items():
             combined = f"{room_props[prop_id]['label']} {room_props[prop_id]['summary']}"
             self.assertIn(term, combined)
+
+    def test_radar_website_tool_contract_is_truthful_and_backwards_compatible(self) -> None:
+        prop_id = "left_audit_crystals"
+        role = self.role_map["properties"][prop_id]
+        connection = self.connections["profiles"][prop_id]
+        report = self.reports["typed_report_schemas"]["indicator_scout_report"]
+        plugin = load_json("contracts/workflows/equipment-plugin-map.json")["equipment"][prop_id]
+        room_prop = next(item for item in self.room["props"] if item["id"] == prop_id)
+
+        self.assertEqual(role["functionName"], "Radar Website Tool")
+        self.assertEqual(room_prop["label"], "Radar Website Tool")
+        self.assertEqual(connection["moduleNameTh"], "Radar Website Tool")
+        self.assertEqual(plugin["schedule"]["maximumRunsPerDay"], 2)
+        self.assertEqual(connection["operation"]["scheduleHardMaximumRunsPerDay"], 2)
+        self.assertEqual(role["workflow"]["readModel"]["historyWindowDays"], 7)
+        self.assertEqual(report["readModel"]["primaryViews"], ["today", "history_7_days"])
+        self.assertFalse(report["googleSheet"]["privateSheetDefaultIncluded"])
+        self.assertFalse(report["googleSheet"]["externalWriteEnabled"])
+        self.assertEqual(report["runtimeReadiness"]["googleSheetsAdapter"], "not_connected")
+        self.assertEqual(report["runtimeReadiness"]["screenshotAdapter"], "not_connected")
+        fields = plugin["actions"]["discover_new_indicators"]["outputFields"]
+        self.assertEqual(fields, ["entries"])
+        entry_contract = plugin["actions"]["discover_new_indicators"]["entryContract"]
+        self.assertEqual(entry_contract["containerField"], "entries")
+        self.assertEqual(entry_contract["minimumItemsPerRun"], 1)
+        self.assertEqual(entry_contract["maximumItemsPerRun"], 6)
+        self.assertEqual(
+            set(entry_contract["backendComputedFields"]),
+            {"recordId", "duplicateFingerprint", "duplicateStatus", "duplicateScope"},
+        )
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ const OFFICE_LAYOUT_VERSION = 2;
 const SIGNAL_DASHBOARD_VERSION = 6;
 const SIGNAL_CHART_DISPLAY_BAR_OPTIONS = [40, 60, 120, 240, 500, 1000];
 const SIGNAL_ANALYSIS_BAR_OPTIONS = [120, 180, 240, 300, 500, 1000];
+const SIGNAL_MANAGED_ORDER_OPTIONS = [1, 3, 5, 10];
 const SIGNAL_CHART_DEFAULT_DISPLAY_BARS = 120;
 const SIGNAL_DEFAULT_ANALYSIS_BARS = 120;
 const SIGNAL_CHART_OVERLAY_LIMIT = 5;
@@ -58,6 +59,7 @@ const MEMORY_SEARCH_ENDPOINT = "/api/memory/search";
 const MEETINGS_ENDPOINT = "/api/meetings";
 const CODEX_RATE_LIMIT_ENDPOINT = "/api/codex/rate-limits";
 const OPERATOR_MODE_ENDPOINT = "/api/operator-mode";
+const AI_TRADE_COUNCIL_HISTORY_ENDPOINT = "/api/ai-trade-council/history";
 const AI_TRADE_COUNCIL_DEEP_ANALYSIS_ENDPOINT = "/api/ai-trade-council/deep-analysis";
 const AI_TRADE_COUNCIL_DEEP_PACKAGE_ENDPOINT = "/api/ai-trade-council/deep-analysis/package";
 const AGENT_COLLABORATION_ENDPOINT = "/api/collaboration/schedule";
@@ -67,12 +69,28 @@ const CODEX_RATE_LIMIT_FETCH_TIMEOUT_MS = 25000;
 const CODEX_RATE_LIMIT_STALE_MAX_MS = 15 * 60 * 1000;
 const OPERATOR_MODE_POLL_MS = 30000;
 const AGENT_COLLABORATION_POLL_MS = 15000;
-const MISSION_POLL_MS = 12000;
+const MISSION_POLL_MS = 30000;
+const MISSION_FETCH_TIMEOUT_MS = 25000;
+const PROP_REPORT_POLL_TTL_MS = 60000;
+const POLLING_LEADER_STORAGE_KEY = "metafx-hq-polling-leader-v1";
+const POLLING_LEADER_LEASE_MS = 45000;
+const POLLING_LEADER_RENEW_MS = 10000;
+const POLLING_INSTANCE_ID = (() => {
+  try {
+    return globalThis.crypto?.randomUUID?.() || `hq-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  } catch {
+    return `hq-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+})();
 const OFFICE_AUTONOMY_MS = 7800;
-const ROOM_CONTRACT_PATH = "./contracts/rooms/command-room.json?v=32";
-const AGENT_CONTRACT_PATH = "./contracts/agents/agents.json?v=10";
+const ROOM_CONTRACT_PATH = "/contracts/rooms/command-room.json?v=32";
+const AGENT_CONTRACT_PATH = "/contracts/agents/agents.json?v=10";
 const EXPECTED_OFFICE_AGENT_COUNT = 10;
 const DEFAULT_FETCH_TIMEOUT_MS = 6000;
+const BOOT_CONTRACT_FETCH_TIMEOUT_MS = 20000;
+const UI_SESSION_FETCH_TIMEOUT_MS = 5000;
+const PROP_REPORT_FETCH_TIMEOUT_MS = 20000;
+const NAVIGATION_MASK_LOAD_TIMEOUT_MS = 20000;
 
 const STATUS_LABELS = {
   queued: "รอเริ่มงาน",
@@ -338,9 +356,9 @@ const PROP_DISPLAY = {
   right_tool_console: "ห้องทดลอง EA",
   mission_strategy_table: "โต๊ะวางแผน Mission",
   terminal_workstation: "EA Development Studio",
-  left_audit_crystals: "Indicator Scout",
-  left_signal_cube: "ข่าวรายวันและแนวโน้ม Forex",
-  right_status_crystals: "สถานะ VPS/HQ และตั้งค่า Agent",
+  left_audit_crystals: "Radar Website Tool",
+  left_signal_cube: "ศูนย์แนวโน้ม 28 คู่เงินและข่าว Forex",
+  right_status_crystals: "ศูนย์การเชื่อมต่ออุปกรณ์ HQ",
   front_entry_gate: "จุดเข้า Agent",
 };
 
@@ -386,16 +404,16 @@ const WORKFLOW_DASHBOARD_IDENTITIES = Object.freeze({
   },
   left_audit_crystals: {
     id: "indicator-scout",
-    mark: "IS",
-    labelTh: "INDICATOR SCOUT",
-    eyebrowTh: "หน่วยค้นหาและตรวจข้อมูล Indicator",
+    mark: "RW",
+    labelTh: "RADAR WEBSITE TOOL",
+    eyebrowTh: "เรดาร์ค้นหา Indicator, EA และ Tool จากเว็บไซต์",
     handoffAgentId: "ea_developer",
   },
   left_signal_cube: {
     id: "market-news-bias",
     mark: "FX",
-    labelTh: "MARKET NEWS",
-    eyebrowTh: "ศูนย์ข่าวรายวันและแนวโน้ม Forex",
+    labelTh: "FX BIAS CENTER",
+    eyebrowTh: "ภาพรวม 28 คู่เงิน ข่าว และช่วงเวลาที่ EA ควรระวัง",
     handoffAgentId: "manager",
   },
   terminal_workstation: {
@@ -408,8 +426,8 @@ const WORKFLOW_DASHBOARD_IDENTITIES = Object.freeze({
   right_status_crystals: {
     id: "hq-vps-settings",
     mark: "HQ",
-    labelTh: "HQ / VPS",
-    eyebrowTh: "ศูนย์สถานะ HQ, VPS และตั้งค่า Agent",
+    labelTh: "HQ CONNECTION CENTER",
+    eyebrowTh: "ศูนย์รวมการเชื่อมต่อทุกอุปกรณ์ สถานะ VPS และตั้งค่า Agent",
     handoffAgentId: "manager",
   },
 });
@@ -440,16 +458,16 @@ const WORKFLOW_DASHBOARD_PRIMARY_TABS = Object.freeze({
     emptyMessageTh: "ยังไม่มีผล Backtest หรือ Optimization ในวันนี้",
   },
   left_audit_crystals: {
-    labelTh: "Indicator วันนี้",
-    descriptionTh: "ดู Indicator ที่ค้นพบใหม่พร้อมสถานะหลักฐานล่าสุด",
-    overviewTitleTh: "Indicator ที่ค้นพบวันนี้",
-    emptyMessageTh: "วันนี้ยังไม่มี Indicator ใหม่จาก Local Runner",
+    labelTh: "วันนี้",
+    descriptionTh: "ดู Indicator, EA และ Tool ที่ Radar ค้นพบในวันนี้ตามเวลาไทย",
+    overviewTitleTh: "รายการใหม่จากเว็บไซต์วันนี้",
+    emptyMessageTh: "วันนี้ยังไม่มีรายการใหม่จาก Local Runner",
   },
   left_signal_cube: {
-    labelTh: "ข่าวและ Bias วันนี้",
-    descriptionTh: "ดูข่าวสำคัญและมุมมองตลาดที่อัปเดตวันนี้",
-    overviewTitleTh: "ข่าวสำคัญและ Bias ล่าสุด",
-    emptyMessageTh: "ยังไม่มีข่าวจริงและ Bias ที่ยืนยันจาก Backend",
+    labelTh: "แนวโน้ม 28 คู่เงิน",
+    descriptionTh: "ดูภาพรวมแนวโน้ม 28 คู่เงินก่อน แล้วเปิดข่าวและผลกระทบเมื่อต้องการรายละเอียด",
+    overviewTitleTh: "ภาพรวมแนวโน้ม Forex 28 คู่เงิน",
+    emptyMessageTh: "ยังไม่มีแนวโน้มที่ยืนยันจาก Backend จึงแสดงสถานะรอข้อมูลตามจริง",
   },
   terminal_workstation: {
     labelTh: "งานพัฒนาวันนี้",
@@ -458,10 +476,10 @@ const WORKFLOW_DASHBOARD_PRIMARY_TABS = Object.freeze({
     emptyMessageTh: "ยังไม่มี Source หรืองานพัฒนา EA ที่พร้อมใช้งาน",
   },
   right_status_crystals: {
-    labelTh: "สถานะระบบวันนี้",
-    descriptionTh: "ดูความพร้อมของ VPS, HQ และ Local Runner ล่าสุด",
-    overviewTitleTh: "สถานะระบบล่าสุด",
-    emptyMessageTh: "ยังไม่มีผลตรวจระบบจริงจาก Backend",
+    labelTh: "การเชื่อมต่อทุกอุปกรณ์",
+    descriptionTh: "ดูความพร้อม จุดติดขัด และวิธีแก้ของอุปกรณ์ทุกกล่องจากศูนย์กลางเดียว",
+    overviewTitleTh: "ภาพรวมการเชื่อมต่อ HQ",
+    emptyMessageTh: "ยังไม่มีผลตรวจการเชื่อมต่อจริงจาก Backend",
   },
 });
 
@@ -471,6 +489,22 @@ const WORKFLOW_DASHBOARD_SETTING_ACTION_IDS = new Set([
   "save_news_bias_schedule",
   "save_agent_preferences",
 ]);
+
+const INDICATOR_SCOUT_PROP_ID = "left_audit_crystals";
+const INDICATOR_SCOUT_PRESENTATION_TAB_IDS = Object.freeze(["discoveries", "archive"]);
+const INDICATOR_SCOUT_RAIL_ACTION_IDS = new Set([
+  "discover_new_indicators",
+  "save_indicator_scout_schedule",
+]);
+const FX_NEWS_BIAS_PROP_ID = "left_signal_cube";
+const FX_NEWS_BIAS_PRESENTATION_TAB_IDS = Object.freeze(["pair_bias", "today"]);
+const FX_NEWS_BIAS_RAIL_ACTION_IDS = new Set([
+  "analyze_daily_market_news",
+  "save_news_bias_schedule",
+]);
+const HQ_CONNECTION_HUB_PROP_ID = "right_status_crystals";
+const HQ_CONNECTION_HUB_PRESENTATION_TAB_IDS = Object.freeze(["connections", "vps"]);
+const HQ_CONNECTION_HUB_FILTER_IDS = Object.freeze(["all", "ready", "attention", "checking", "coming_soon"]);
 
 const WORKFLOW_ACTION_COPY_OVERRIDES = Object.freeze({
   save_discovery_schedule: {
@@ -835,8 +869,8 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
     ],
   },
   left_audit_crystals: {
-    titleTh: "Indicator Scout",
-    summaryTh: "ค้นหา Indicator ใหม่จากแหล่งสาธารณะ เก็บ URL วันที่ และผลตรวจรายการซ้ำ โดยยังไม่ดาวน์โหลดหรือติดตั้งไฟล์อัตโนมัติ",
+    titleTh: "Radar Website Tool",
+    summaryTh: "ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะ พร้อม URL เวลาไทย ผลตรวจรายการซ้ำ และภาพหลักฐานที่ Backend อนุญาตให้แสดง",
     tabs: [
       { id: "discoveries", labelTh: "Indicator ที่ค้นพบ", descriptionTh: "ดูรายการใหม่ แหล่งต้นทาง วันที่ค้นพบ และสถานะตรวจซ้ำ", actionIds: ["discover_new_indicators"] },
       {
@@ -853,11 +887,11 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
       {
         id: "discover_new_indicators",
         tabId: "discoveries",
-        labelTh: "ค้นหา Indicator ใหม่",
-        descriptionTh: "สร้าง Mission ค้นข้อมูลสาธารณะแบบอ่านอย่างเดียว พร้อม URL วันที่ และการตรวจรายการซ้ำ",
+        labelTh: "ค้นหา Indicator, EA และ Tool ใหม่",
+        descriptionTh: "สร้าง Mission ให้ Radar ค้นเว็บไซต์สาธารณะแบบอ่านอย่างเดียว พร้อม URL เวลาไทย และการตรวจรายการซ้ำ",
         availability: { status: "configuration_required" },
         formFields: [
-          { id: "query", labelTh: "หัวข้อหรือ Indicator ที่สนใจ", type: "textarea", required: true },
+          { id: "query", labelTh: "หัวข้อ Indicator, EA หรือ Tool ที่สนใจ", type: "textarea", required: true },
           { id: "platform", labelTh: "แพลตฟอร์ม", type: "select", required: true, options: ["MT4", "MT5", "TradingView", "ไม่จำกัด"] },
           { id: "categories", labelTh: "หมวดที่สนใจ", type: "list", required: false, placeholderTh: "Trend, Momentum, Volume, Price Action" },
         ],
@@ -865,8 +899,8 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
       {
         id: "save_indicator_scout_schedule",
         tabId: "schedule",
-        labelTh: "บันทึกรอบค้นหา",
-        descriptionTh: "เปิดหรือปิด Local Scheduler สำหรับค้นหา Indicator แบบอ่านอย่างเดียว โดยทุกครั้งต้องมี Mission, Audit, URL และ Report",
+        labelTh: "ตั้งเวลาทำงานของ Radar",
+        descriptionTh: "เปิดหรือปิด Local Scheduler สำหรับค้นหา Indicator, EA และ Tool แบบอ่านอย่างเดียว โดยทุกครั้งต้องมี Mission, Audit, URL และ Report",
         availability: { status: "configuration_required" },
         formFields: [
           { id: "enabled", labelTh: "เปิดรอบค้นหาอัตโนมัติ", type: "checkbox", required: false },
@@ -877,13 +911,13 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
     ],
   },
   left_signal_cube: {
-    titleTh: "ข่าวรายวันและแนวโน้ม Forex",
-    summaryTh: "สรุปข่าวผลกระทบสูง ช่วงเวลาที่ EA ควรระวัง และแนวโน้มคู่เงิน 28 คู่จากข้อมูลจริงที่ Backend ส่งมาเท่านั้น",
+    titleTh: "ศูนย์แนวโน้ม 28 คู่เงินและข่าว Forex",
+    summaryTh: "หน้าแรกแสดงแนวโน้มสั้น กลาง และยาวของคู่เงินมาตรฐาน 28 คู่ ส่วนข่าวและช่วงเวลาที่ EA ควรระวังอยู่ในแท็บถัดไป โดยใช้ข้อมูลจริงจาก Backend เท่านั้น",
     tabs: [
-      { id: "today", labelTh: "ข่าวสำคัญวันนี้", descriptionTh: "ข่าวผลกระทบสูงและช่วงเวลาที่ EA ควรระวัง พร้อมลิงก์แหล่งข้อมูล", actionIds: ["analyze_daily_market_news"] },
-      { id: "pair_bias", labelTh: "แนวโน้ม 28 คู่เงิน", descriptionTh: "ดู Bullish, Bearish หรือ Sideway ของคู่เงินมาตรฐาน 28 คู่ โดยไม่เติมข้อมูลจำลอง", actionIds: ["build_fx_pair_bias"] },
-      { id: "horizons", labelTh: "มุมมองสั้น กลาง ยาว", descriptionTh: "เปรียบเทียบแนวโน้มระยะสั้น ระยะกลาง และระยะยาวจากข้อมูลที่มีหลักฐาน", actionIds: [] },
-      { id: "schedule_history", labelTh: "เวลาอัปเดตและย้อนหลัง", descriptionTh: "ตั้งรอบอ่านข่าวสาธารณะตามเวลาไทย และเปิดรายงานข่าวหรือ FX Bias ย้อนหลัง", actionIds: ["save_news_bias_schedule"] },
+      { id: "today", labelTh: "ข่าวและผลกระทบ", descriptionTh: "ดูข่าวผลกระทบสูง ช่วงเวลาที่ EA ควรระวัง และลิงก์แหล่งข้อมูลจริง", actionIds: [] },
+      { id: "pair_bias", labelTh: "แนวโน้ม 28 คู่เงิน", descriptionTh: "ดู Bullish, Bearish หรือ Sideway พร้อมมุมมองสั้น กลาง และยาว โดยไม่เติมข้อมูลจำลอง", actionIds: [] },
+      { id: "horizons", labelTh: "มุมมองรายระยะ", descriptionTh: "ข้อมูลสั้น กลาง และยาวรวมอยู่ในการ์ด 28 คู่เงินบนหน้าหลักแล้ว", actionIds: [] },
+      { id: "schedule_history", labelTh: "ตั้งเวลาอัปเดต", descriptionTh: "ตั้งรอบอ่านข่าวสาธารณะตามเวลาไทยจากแถบคำสั่งด้านซ้าย", actionIds: ["save_news_bias_schedule"] },
     ],
     actions: [
       {
@@ -916,7 +950,7 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
         availability: { status: "configuration_required" },
         formFields: [
           { id: "enabled", labelTh: "เปิดรอบอัปเดตอัตโนมัติ", type: "checkbox", required: false },
-          { id: "times", labelTh: "เวลาที่ต้องการ เช่น 07:00, 13:00, 19:00", type: "list", required: true },
+          { id: "times", labelTh: "เวลาที่ต้องการ สูงสุด 2 เวลา เช่น 07:00, 18:00", type: "list", required: true },
           { id: "timezone", labelTh: "เขตเวลา", type: "select", required: true, options: ["Asia/Bangkok", "UTC"] },
         ],
       },
@@ -975,13 +1009,13 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
     ],
   },
   right_status_crystals: {
-    titleTh: "สถานะ VPS/HQ และตั้งค่า Agent",
-    summaryTh: "ดูข้อมูล VPS, Bridge และคิวงานจาก Backend พร้อมตั้งค่าการแสดงผลของ Agent ที่ปลอดภัย โดยไม่รับ Secret หรือสิทธิ์ระบบจากหน้าเว็บ",
+    titleTh: "ศูนย์การเชื่อมต่ออุปกรณ์ HQ",
+    summaryTh: "รวมสถานะการเชื่อมต่อ จุดติดขัด และวิธีแก้ของอุปกรณ์ทุกกล่อง พร้อมสถานะบริการ VPS/HQ และการตั้งค่า Agent ที่ปลอดภัย โดยไม่แสดง Secret หรือข้อมูลระบบอ่อนไหว",
     tabs: [
-      { id: "vps", labelTh: "สถานะ VPS", descriptionTh: "ดู Uptime, Latency, CPU และ RAM เฉพาะค่าที่ Backend ตรวจพบจริง", actionIds: ["refresh_vps_hq_status"] },
-      { id: "hq_bridge", labelTh: "HQ และ Bridge", descriptionTh: "ดูสถานะ Local Runner, Codex และคิวงาน โดยไม่แสดง Process ID หรือข้อมูลลับ", actionIds: [] },
-      { id: "agent_settings", labelTh: "ตั้งค่า Agent แบบปลอดภัย", descriptionTh: "ตั้งภาษา ระดับการประมวลผล งบงาน เวลา และขนาดรายงาน โดยไม่รับ Provider Model ID, สิทธิ์ Tool หรือ Credential", actionIds: ["save_agent_preferences"] },
-      { id: "activity_history", labelTh: "ประวัติการเปลี่ยนแปลง", descriptionTh: "เปิด Mission รายงาน และเหตุการณ์ตั้งค่าที่ Backend ส่งกลับมา", actionIds: [] },
+      { id: "vps", labelTh: "VPS และบริการ HQ", descriptionTh: "ดู Uptime, Latency, CPU, RAM, Local Runner, Codex และ Mission Worker เฉพาะค่าที่ Backend ตรวจพบจริง", actionIds: [] },
+      { id: "hq_bridge", labelTh: "การเชื่อมต่ออุปกรณ์", descriptionTh: "สถานะการเชื่อมต่อทุกอุปกรณ์รวมอยู่ในแท็บศูนย์กลางที่ระบบจัดให้", actionIds: [] },
+      { id: "agent_settings", labelTh: "ตั้งค่า Agent แบบปลอดภัย", descriptionTh: "ตั้งค่าภาษา ระดับการประมวลผล เวลา และขนาดรายงานจากแถบด้านซ้าย", actionIds: ["save_agent_preferences"] },
+      { id: "activity_history", labelTh: "ข้อมูลการทำงานระบบ", descriptionTh: "ข้อมูลหลักแสดงในศูนย์การเชื่อมต่อและแท็บ VPS โดยไม่เพิ่มหน้าประวัติแยก", actionIds: [] },
     ],
     actions: [
       {
@@ -1079,11 +1113,8 @@ function formatThaiDateTime(value, fallback = "ยังไม่มีเวล
 }
 
 function formatBrokerBarTime(value, fallback = "ยังไม่มีข้อมูลแท่ง") {
-  const numeric = Number(value);
-  const normalized = Number.isFinite(numeric) && numeric > 0 && numeric < 100_000_000_000
-    ? numeric * 1000
-    : value;
-  return formatThaiDateTime(normalized, fallback);
+  const brokerDateTime = signalBrokerDateTime(value);
+  return brokerDateTime ? `เวลา Broker ${brokerDateTime}` : fallback;
 }
 
 function reportBootResourceFailure(failedResource, error, { blocking = false } = {}) {
@@ -1148,10 +1179,15 @@ const state = {
     signalDeepTechnicalQuery: "",
     signalDeepTechnicalIndicator: "all",
     signalDeepTechnicalRange: "300",
+    signalHistoryTab: "orders",
+    signalHistoryScope: "all",
     signalHistoryQuery: "",
     signalHistoryType: "all",
     signalHistoryStatus: "all",
+    signalHistoryOrderPage: 1,
+    signalHistoryAnalysisPage: 1,
     workflowTabs: {},
+    connectionHubFilter: "all",
     workflowAction: {
       inFlight: false,
       propId: null,
@@ -1259,9 +1295,21 @@ const state = {
     inFlight: false,
     timer: null,
     visibilityHandlerBound: false,
+    status: "idle",
+    errorMessage: "",
+    lastAttemptAt: null,
     lastUpdatedAt: null,
     signature: "",
   },
+  pollingLeadership: {
+    storageAvailable: null,
+    initialReadStarted: false,
+    renewalTimer: null,
+    lifecycleHandlersBound: false,
+    abortControllers: new Set(),
+  },
+  propReportLoadedAt: {},
+  propReportLoadState: {},
   todayWorkView: {
     dateKey: "",
     runningLimit: 12,
@@ -1290,6 +1338,56 @@ const state = {
     message: "",
     tone: "neutral",
     pendingRequiredVotes: null,
+  },
+  aiTradeCouncilOrderLimit: {
+    inFlight: false,
+    message: "",
+    tone: "neutral",
+    pendingMaxManagedOrders: null,
+  },
+  aiTradeCouncilStreamContext: {
+    initialized: false,
+    key: "",
+    candidateId: "",
+    symbol: "",
+    timeframe: "",
+    previousKey: "",
+    previousCandidateId: "",
+    previousSymbol: "",
+    previousTimeframe: "",
+    changedAt: null,
+  },
+  aiTradeCouncilHistoryPages: {
+    orders: {
+      items: [],
+      initialized: false,
+      inFlight: false,
+      hasMore: false,
+      nextCursor: "",
+      summary: null,
+      page: null,
+      scope: null,
+      errorMessage: "",
+      updatedAt: null,
+      sourceReportUpdatedAt: null,
+      scopeKey: "",
+      generation: 0,
+    },
+    analysis: {
+      items: [],
+      initialized: false,
+      inFlight: false,
+      hasMore: false,
+      nextCursor: "",
+      summary: null,
+      page: null,
+      scope: null,
+      errorMessage: "",
+      updatedAt: null,
+      sourceReportUpdatedAt: null,
+      scopeKey: "",
+      generation: 0,
+    },
   },
   aiTradeCouncilDeepAnalysis: {
     data: null,
@@ -1385,6 +1483,8 @@ const state = {
     },
   },
 };
+
+const propReportInFlight = new Map();
 
 const PROP_HIT_ALPHA_THRESHOLD = 42;
 const DEFAULT_WALK_SPEED = {
@@ -1496,6 +1596,7 @@ const els = {
   modalGenericDashboardWorkspace: document.getElementById("modalGenericDashboardWorkspace"),
   modalWorkflowDashboardWorkspace: document.getElementById("modalWorkflowDashboardWorkspace"),
   workflowSettingsRail: document.getElementById("workflowSettingsRail"),
+  workflowSettingsRailTitle: document.getElementById("workflowSettingsRailTitle"),
   workflowSettingsRailContent: document.getElementById("workflowSettingsRailContent"),
   workflowAgentHandoffRail: document.getElementById("workflowAgentHandoffRail"),
   workflowHandoffReport: document.getElementById("workflowHandoffReport"),
@@ -1579,6 +1680,7 @@ let taskDetailReturnMissionId = null;
 let taskDetailReturnContainerId = null;
 let dashboardResultReturnFocus = null;
 let dashboardResultShouldRestoreFocus = true;
+let gameModalReturnFocus = null;
 
 const agentWaypoints = {
   front_entry_gate: { x: 35.0, y: 73.0, label: "จุดเข้า Agent" },
@@ -1589,9 +1691,9 @@ const agentWaypoints = {
   terminal_workstation: { x: 72.5, y: 70.0, label: "โต๊ะพัฒนา EA สำหรับ MT4/MT5" },
   left_server_racks: { x: 28.0, y: 46.0, label: "คลังวิจัยระบบเทรด" },
   right_server_racks: { x: 70.0, y: 46.0, label: "โรงงานสร้าง EA และ Indicator" },
-  left_audit_crystals: { x: 22.0, y: 72.0, label: "Indicator Scout" },
-  left_signal_cube: { x: 24.2, y: 66.0, label: "ข่าวรายวันและแนวโน้ม Forex" },
-  right_status_crystals: { x: 77.0, y: 59.0, label: "คริสตัลสถานะ VPS และภาพรวม HQ" },
+  left_audit_crystals: { x: 22.0, y: 72.0, label: "Radar Website Tool" },
+  left_signal_cube: { x: 24.2, y: 66.0, label: "ศูนย์แนวโน้ม 28 คู่เงินและข่าว Forex" },
+  right_status_crystals: { x: 77.0, y: 59.0, label: "ศูนย์การเชื่อมต่ออุปกรณ์ HQ" },
 };
 
 const agentRoute = [
@@ -1769,8 +1871,8 @@ const sharedWorkstationSeats = {
 
 async function init() {
   const [roomResult, agentResult] = await Promise.allSettled([
-    fetchJson(ROOM_CONTRACT_PATH, { timeoutMs: 5000 }),
-    fetchJson(AGENT_CONTRACT_PATH, { timeoutMs: 3000 }),
+    fetchJson(ROOM_CONTRACT_PATH, { timeoutMs: BOOT_CONTRACT_FETCH_TIMEOUT_MS }),
+    fetchJson(AGENT_CONTRACT_PATH, { timeoutMs: BOOT_CONTRACT_FETCH_TIMEOUT_MS }),
   ]);
 
   if (roomResult.status === "fulfilled" && roomResult.value?.room && Array.isArray(roomResult.value.layers)) {
@@ -1824,10 +1926,8 @@ async function init() {
     );
   }
   window.MetafxHqBoot?.markReady({ agentCount: renderedAgentCount });
-  window.setTimeout(startCodexRateLimitPolling, 0);
-  window.setTimeout(startOperatorModePolling, 0);
-  window.setTimeout(startAgentCollaborationPolling, 0);
-  window.setTimeout(startMissionPolling, 0);
+  initializePollingLeadership();
+  window.setTimeout(startAutomaticPolling, 0);
 
   loadAgentAnimationMap().then(() => {
     const managerFrame = document.getElementById("agentFrameImage");
@@ -1847,13 +1947,202 @@ async function init() {
     recordEvent: !savedSession,
     preserveDecisionLog: Boolean(savedSession),
   });
-  loadBridgeMissions({ replaceEvents: !savedSession });
   loadMemoryStatus({ recordEvent: !savedSession });
   startOfficeAutonomy();
 }
 
-async function fetchJson(path, { timeoutMs = DEFAULT_FETCH_TIMEOUT_MS } = {}) {
+function readPollingLeaderLease() {
+  try {
+    const raw = window.localStorage.getItem(POLLING_LEADER_STORAGE_KEY);
+    state.pollingLeadership.storageAvailable = true;
+    if (!raw) return null;
+    let parsed = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      window.localStorage.removeItem(POLLING_LEADER_STORAGE_KEY);
+      return null;
+    }
+    const ownerId = String(parsed?.ownerId || "").trim();
+    const expiresAt = Number(parsed?.expiresAt);
+    return ownerId && Number.isFinite(expiresAt) ? { ownerId, expiresAt } : null;
+  } catch {
+    state.pollingLeadership.storageAvailable = false;
+    return null;
+  }
+}
+
+function writePollingLeaderLease(expiresAt) {
+  try {
+    window.localStorage.setItem(POLLING_LEADER_STORAGE_KEY, JSON.stringify({
+      ownerId: POLLING_INSTANCE_ID,
+      expiresAt,
+    }));
+    state.pollingLeadership.storageAvailable = true;
+    return true;
+  } catch {
+    state.pollingLeadership.storageAvailable = false;
+    return false;
+  }
+}
+
+function claimPollingLeadership() {
+  if (document.visibilityState !== "visible") return false;
+  const now = Date.now();
+  const current = readPollingLeaderLease();
+  if (state.pollingLeadership.storageAvailable === false) return true;
+  if (current && current.ownerId !== POLLING_INSTANCE_ID && current.expiresAt > now) return false;
+  if (!writePollingLeaderLease(now + POLLING_LEADER_LEASE_MS)) return true;
+  const confirmed = readPollingLeaderLease();
+  return state.pollingLeadership.storageAvailable === false || confirmed?.ownerId === POLLING_INSTANCE_ID;
+}
+
+function isAutomaticPollingLeader() {
+  if (document.visibilityState !== "visible") return false;
+  const now = Date.now();
+  const current = readPollingLeaderLease();
+  if (state.pollingLeadership.storageAvailable === false) return true;
+  if (current?.ownerId === POLLING_INSTANCE_ID && current.expiresAt > now) {
+    if (current.expiresAt - now <= POLLING_LEADER_RENEW_MS * 2) {
+      writePollingLeaderLease(now + POLLING_LEADER_LEASE_MS);
+    }
+    return true;
+  }
+  if (!current || current.expiresAt <= now) return claimPollingLeadership();
+  return false;
+}
+
+function releasePollingLeadership() {
+  if (state.pollingLeadership.storageAvailable === false) return;
+  try {
+    const current = readPollingLeaderLease();
+    if (current?.ownerId === POLLING_INSTANCE_ID) {
+      window.localStorage.removeItem(POLLING_LEADER_STORAGE_KEY);
+    }
+  } catch {
+    state.pollingLeadership.storageAvailable = false;
+  }
+}
+
+function abortAutomaticPollingRequests() {
+  state.pollingLeadership.abortControllers.forEach((controller) => controller.abort());
+  state.pollingLeadership.abortControllers.clear();
+}
+
+function runAutomaticPollingTask(task) {
+  if (!isAutomaticPollingLeader()) return null;
   const controller = new AbortController();
+  state.pollingLeadership.abortControllers.add(controller);
+  const request = Promise.resolve()
+    .then(() => {
+      if (controller.signal.aborted || !isAutomaticPollingLeader()) return null;
+      return task(controller.signal);
+    })
+    .catch(() => null)
+    .finally(() => state.pollingLeadership.abortControllers.delete(controller));
+  return request;
+}
+
+function runAutomaticPollingBurst() {
+  void runAutomaticPollingTask((signal) => refreshCodexRateLimits({ signal }));
+  void runAutomaticPollingTask((signal) => refreshOperatorMode({ signal }));
+  if (!state.agentCollaboration.editing) {
+    void runAutomaticPollingTask((signal) => refreshAgentCollaboration({ signal }));
+  }
+  void runAutomaticPollingTask((signal) => pollMissionReadModel({ signal }));
+}
+
+function runInitialPollingRead() {
+  if (state.pollingLeadership.initialReadStarted || document.visibilityState !== "visible") return;
+  state.pollingLeadership.initialReadStarted = true;
+
+  // A fresh tab may legitimately be a follower while another visible tab owns
+  // the polling lease.  Recurring work remains leader-only, but every tab must
+  // resolve its initial read model once instead of displaying permanent
+  // "checking" placeholders until the other tab closes or its lease expires.
+  void refreshCodexRateLimits();
+  void refreshOperatorMode();
+  if (!state.agentCollaboration.editing) void refreshAgentCollaboration();
+  void pollMissionReadModel({ manual: true });
+}
+
+function stopAutomaticPolling() {
+  if (state.codexRate.timer) window.clearInterval(state.codexRate.timer);
+  if (state.operatorMode.timer) window.clearInterval(state.operatorMode.timer);
+  if (state.agentCollaboration.timer) window.clearInterval(state.agentCollaboration.timer);
+  if (state.missionSync.timer) window.clearInterval(state.missionSync.timer);
+  if (state.pollingLeadership.renewalTimer) window.clearInterval(state.pollingLeadership.renewalTimer);
+  state.codexRate.timer = null;
+  state.operatorMode.timer = null;
+  state.agentCollaboration.timer = null;
+  state.missionSync.timer = null;
+  state.pollingLeadership.renewalTimer = null;
+  abortAutomaticPollingRequests();
+}
+
+function startPollingLeadershipRenewal() {
+  if (state.pollingLeadership.renewalTimer) return;
+  state.pollingLeadership.renewalTimer = window.setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    const current = readPollingLeaderLease();
+    if (state.pollingLeadership.storageAvailable === false) return;
+    if (current?.ownerId === POLLING_INSTANCE_ID) {
+      writePollingLeaderLease(Date.now() + POLLING_LEADER_LEASE_MS);
+    } else if (!current || current.expiresAt <= Date.now()) {
+      if (claimPollingLeadership()) runAutomaticPollingBurst();
+    }
+  }, POLLING_LEADER_RENEW_MS);
+}
+
+function startAutomaticPolling() {
+  if (document.visibilityState !== "visible") return;
+  runInitialPollingRead();
+  claimPollingLeadership();
+  startPollingLeadershipRenewal();
+  startCodexRateLimitPolling();
+  startOperatorModePolling();
+  startAgentCollaborationPolling();
+  startMissionPolling();
+  runAutomaticPollingBurst();
+}
+
+function initializePollingLeadership() {
+  if (document.visibilityState === "visible") claimPollingLeadership();
+  if (state.pollingLeadership.lifecycleHandlersBound) return;
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      startAutomaticPolling();
+    } else {
+      stopAutomaticPolling();
+      releasePollingLeadership();
+    }
+  });
+  window.addEventListener("pagehide", () => {
+    stopAutomaticPolling();
+    releasePollingLeadership();
+  });
+  window.addEventListener("pageshow", () => {
+    if (document.visibilityState === "visible") startAutomaticPolling();
+  });
+  window.addEventListener("storage", (event) => {
+    if (event.key !== POLLING_LEADER_STORAGE_KEY) return;
+    const current = readPollingLeaderLease();
+    if (current && current.ownerId !== POLLING_INSTANCE_ID && current.expiresAt > Date.now()) {
+      abortAutomaticPollingRequests();
+      return;
+    }
+    if (document.visibilityState === "visible" && (!current || current.expiresAt <= Date.now())) {
+      if (claimPollingLeadership()) runAutomaticPollingBurst();
+    }
+  });
+  state.pollingLeadership.lifecycleHandlersBound = true;
+}
+
+async function fetchJson(path, { timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, signal = null } = {}) {
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener?.("abort", abortFromParent, { once: true });
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(path, {
@@ -1864,6 +2153,7 @@ async function fetchJson(path, { timeoutMs = DEFAULT_FETCH_TIMEOUT_MS } = {}) {
     return await response.json();
   } finally {
     window.clearTimeout(timeoutId);
+    signal?.removeEventListener?.("abort", abortFromParent);
   }
 }
 
@@ -2063,8 +2353,11 @@ function renderCodexRateLimit(snapshot = state.codexRate.snapshot) {
   refreshOpenDashboardConnectionPanel();
 }
 
-async function fetchCodexRateLimitPayload({ manual = false } = {}) {
+async function fetchCodexRateLimitPayload({ manual = false, signal = null } = {}) {
   const controller = new AbortController();
+  const abortFromParent = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener?.("abort", abortFromParent, { once: true });
   const timeoutId = window.setTimeout(() => controller.abort(), CODEX_RATE_LIMIT_FETCH_TIMEOUT_MS);
   try {
     const endpoint = manual ? `${CODEX_RATE_LIMIT_ENDPOINT}?refresh=1` : CODEX_RATE_LIMIT_ENDPOINT;
@@ -2082,12 +2375,14 @@ async function fetchCodexRateLimitPayload({ manual = false } = {}) {
     return payload;
   } finally {
     window.clearTimeout(timeoutId);
+    signal?.removeEventListener?.("abort", abortFromParent);
   }
 }
 
-async function refreshCodexRateLimits({ manual = false } = {}) {
+async function refreshCodexRateLimits({ manual = false, signal = null } = {}) {
   if (!els.codexRateWidget || state.codexRate.inFlight) return null;
   if (!manual && document.visibilityState !== "visible") return null;
+  if (!manual && signal?.aborted) return null;
 
   state.codexRate.inFlight = true;
   if (!state.codexRate.lastGood) {
@@ -2099,7 +2394,7 @@ async function refreshCodexRateLimits({ manual = false } = {}) {
 
   let failureStatus = "unavailable";
   try {
-    const payload = await fetchCodexRateLimitPayload({ manual });
+    const payload = await fetchCodexRateLimitPayload({ manual, signal });
     const snapshot = normalizeCodexRatePayload(payload);
     failureStatus = snapshot.status;
     if (!snapshot.primary) {
@@ -2119,7 +2414,8 @@ async function refreshCodexRateLimits({ manual = false } = {}) {
       secondary: snapshot.secondary ? { ...snapshot.secondary } : null,
     };
     return snapshot;
-  } catch {
+  } catch (error) {
+    if (!manual && error?.name === "AbortError") return null;
     const lastGoodTime = state.codexRate.lastGood?.checkedAt
       ? new Date(state.codexRate.lastGood.checkedAt).getTime()
       : 0;
@@ -2151,25 +2447,10 @@ async function refreshCodexRateLimits({ manual = false } = {}) {
 function startCodexRateLimitPolling() {
   if (!els.codexRateWidget) return;
   renderCodexRateLimit(state.codexRate.snapshot || { status: "loading", primary: null, secondary: null });
-  void refreshCodexRateLimits();
-
   if (!state.codexRate.timer) {
     state.codexRate.timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void refreshCodexRateLimits();
+      void runAutomaticPollingTask((signal) => refreshCodexRateLimits({ signal }));
     }, CODEX_RATE_LIMIT_POLL_MS);
-  }
-
-  if (!state.codexRate.visibilityHandlerBound) {
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState !== "visible") return;
-      const checkedAt = state.codexRate.snapshot?.checkedAt
-        ? new Date(state.codexRate.snapshot.checkedAt).getTime()
-        : 0;
-      if (!Number.isFinite(checkedAt) || Date.now() - checkedAt >= CODEX_RATE_LIMIT_POLL_MS) {
-        void refreshCodexRateLimits();
-      }
-    });
-    state.codexRate.visibilityHandlerBound = true;
   }
 }
 
@@ -2278,12 +2559,13 @@ function setOperatorModePanelOpen(open) {
   if (nextOpen) setAgentCollaborationPanelOpen(false);
 }
 
-async function refreshOperatorMode() {
+async function refreshOperatorMode({ manual = false, signal = null } = {}) {
   if (state.operatorMode.inFlight) return null;
+  if (!manual && (document.visibilityState !== "visible" || signal?.aborted)) return null;
   state.operatorMode.inFlight = true;
   renderOperatorModeControl();
   try {
-    const payload = await fetchJson(OPERATOR_MODE_ENDPOINT);
+    const payload = await fetchJson(OPERATOR_MODE_ENDPOINT, { signal });
     const normalized = normalizeOperatorModePayload(payload);
     state.operatorMode = {
       ...state.operatorMode,
@@ -2293,7 +2575,8 @@ async function refreshOperatorMode() {
       visibilityHandlerBound: state.operatorMode.visibilityHandlerBound,
     };
     return normalized;
-  } catch {
+  } catch (error) {
+    if (!manual && error?.name === "AbortError") return null;
     state.operatorMode = {
       ...state.operatorMode,
       mode: "manual_guarded",
@@ -2344,17 +2627,10 @@ async function setOperatorMode(mode) {
 
 function startOperatorModePolling() {
   renderOperatorModeControl();
-  void refreshOperatorMode();
   if (!state.operatorMode.timer) {
     state.operatorMode.timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void refreshOperatorMode();
+      void runAutomaticPollingTask((signal) => refreshOperatorMode({ signal }));
     }, OPERATOR_MODE_POLL_MS);
-  }
-  if (!state.operatorMode.visibilityHandlerBound) {
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") void refreshOperatorMode();
-    });
-    state.operatorMode.visibilityHandlerBound = true;
   }
 }
 
@@ -2555,10 +2831,12 @@ function syncAgentCollaborationVisual(previous, current) {
   }
 }
 
-async function refreshAgentCollaboration() {
+async function refreshAgentCollaboration({ manual = false, signal = null } = {}) {
   if (state.agentCollaboration.inFlight) return null;
+  if (!manual && (document.visibilityState !== "visible" || signal?.aborted)) return null;
+  state.agentCollaboration.inFlight = true;
   try {
-    const payload = await fetchJson(AGENT_COLLABORATION_ENDPOINT);
+    const payload = await fetchJson(AGENT_COLLABORATION_ENDPOINT, { signal });
     const normalized = normalizeAgentCollaborationPayload(payload);
     const previous = { ...state.agentCollaboration };
     state.agentCollaboration = {
@@ -2574,7 +2852,8 @@ async function refreshAgentCollaboration() {
     renderAgentCollaborationControl();
     syncAgentCollaborationVisual(previous, state.agentCollaboration);
     return normalized;
-  } catch {
+  } catch (error) {
+    if (!manual && error?.name === "AbortError") return null;
     const activeStatus = ["starting", "running"].includes(state.agentCollaboration.status)
       ? state.agentCollaboration.status
       : null;
@@ -2588,6 +2867,9 @@ async function refreshAgentCollaboration() {
     };
     renderAgentCollaborationControl();
     return null;
+  } finally {
+    state.agentCollaboration.inFlight = false;
+    renderAgentCollaborationControl();
   }
 }
 
@@ -2645,7 +2927,7 @@ async function runAgentCollaborationNow() {
       inFlight: false,
     };
     addBridgeEvent("ส่งคำขอประชุม Agent แล้ว", safeDashboardDisplayText(response.messageTh, "Backend รับคำขอแล้ว"));
-    window.setTimeout(() => void refreshAgentCollaboration(), 1200);
+    window.setTimeout(() => void refreshAgentCollaboration({ manual: true }), 1200);
     return normalized;
   } catch (error) {
     state.agentCollaboration.messageTh = safeDashboardDisplayText(
@@ -2662,21 +2944,12 @@ async function runAgentCollaborationNow() {
 
 function startAgentCollaborationPolling() {
   renderAgentCollaborationControl();
-  void refreshAgentCollaboration();
   if (!state.agentCollaboration.timer) {
     state.agentCollaboration.timer = window.setInterval(() => {
-      if (document.visibilityState === "visible" && !state.agentCollaboration.editing) {
-        void refreshAgentCollaboration();
+      if (!state.agentCollaboration.editing) {
+        void runAutomaticPollingTask((signal) => refreshAgentCollaboration({ signal }));
       }
     }, AGENT_COLLABORATION_POLL_MS);
-  }
-  if (!state.agentCollaboration.visibilityHandlerBound) {
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible" && !state.agentCollaboration.editing) {
-        void refreshAgentCollaboration();
-      }
-    });
-    state.agentCollaboration.visibilityHandlerBound = true;
   }
 }
 
@@ -2741,10 +3014,12 @@ function selectNewestSessionSnapshot(localSession, backendSession) {
 async function loadSessionSnapshot() {
   const localSession = loadLocalSessionSnapshot();
   try {
-    const payload = await fetchJson(UI_SESSION_ENDPOINT, { timeoutMs: 1500 });
+    const payload = await fetchJson(UI_SESSION_ENDPOINT, { timeoutMs: UI_SESSION_FETCH_TIMEOUT_MS });
     return selectNewestSessionSnapshot(localSession, payload.session);
   } catch (error) {
-    reportBootResourceFailure(UI_SESSION_ENDPOINT, error);
+    // Session persistence is optional. A slow or missing session endpoint must
+    // not downgrade an otherwise healthy Visual Office into fallback mode.
+    console.warn("UI session unavailable; using the local session snapshot.", error);
     return localSession;
   }
 }
@@ -2884,9 +3159,13 @@ function saveSessionSnapshot() {
         signalDeepTechnicalQuery: state.modal.signalDeepTechnicalQuery,
         signalDeepTechnicalIndicator: state.modal.signalDeepTechnicalIndicator,
         signalDeepTechnicalRange: state.modal.signalDeepTechnicalRange,
+        signalHistoryTab: state.modal.signalHistoryTab,
+        signalHistoryScope: state.modal.signalHistoryScope,
         signalHistoryQuery: state.modal.signalHistoryQuery,
         signalHistoryType: state.modal.signalHistoryType,
         signalHistoryStatus: state.modal.signalHistoryStatus,
+        signalHistoryOrderPage: state.modal.signalHistoryOrderPage,
+        signalHistoryAnalysisPage: state.modal.signalHistoryAnalysisPage,
         workflowTabs: { ...state.modal.workflowTabs },
         selectedMissionId: state.modal.selectedMissionId,
         showArchived: state.modal.showArchived,
@@ -3013,6 +3292,12 @@ function applySessionSnapshot(snapshot) {
       )
         ? String(snapshot.modal.signalDeepTechnicalRange || "300")
         : "300",
+      signalHistoryTab: ["orders", "analysis"].includes(snapshot.modal.signalHistoryTab)
+        ? snapshot.modal.signalHistoryTab
+        : "orders",
+      signalHistoryScope: ["all", "active"].includes(snapshot.modal.signalHistoryScope)
+        ? snapshot.modal.signalHistoryScope
+        : "all",
       signalHistoryQuery: String(snapshot.modal.signalHistoryQuery || ""),
       signalHistoryType: ["all", "mission", "report"].includes(snapshot.modal.signalHistoryType)
         ? snapshot.modal.signalHistoryType
@@ -3020,6 +3305,8 @@ function applySessionSnapshot(snapshot) {
       signalHistoryStatus: ["all", "active", "completed", "blocked"].includes(snapshot.modal.signalHistoryStatus)
         ? snapshot.modal.signalHistoryStatus
         : "all",
+      signalHistoryOrderPage: Math.max(1, Math.min(100, Math.trunc(Number(snapshot.modal.signalHistoryOrderPage) || 1))),
+      signalHistoryAnalysisPage: Math.max(1, Math.min(100, Math.trunc(Number(snapshot.modal.signalHistoryAnalysisPage) || 1))),
       workflowTabs: Object.fromEntries(
         Object.entries(snapshot.modal.workflowTabs || {})
           .filter(([propId, tabId]) => (
@@ -3657,7 +3944,8 @@ function getSafeReportImageUrl(value) {
   if (!raw) return "";
   try {
     const parsed = new URL(raw, window.location.href);
-    if (parsed.origin !== window.location.origin) return "";
+    if (parsed.origin !== window.location.origin || parsed.username || parsed.password) return "";
+    if (parsed.search || parsed.hash) return "";
     if (
       !/^\/api\/reports\/[a-zA-Z0-9._-]+\/attachments\/[a-zA-Z0-9._-]+$/.test(parsed.pathname)
     ) return "";
@@ -4805,6 +5093,8 @@ function renderDashboardKpis(subject, report, missions) {
 const AI_TRADE_COUNCIL_PROP_ID = "left_analytics_console";
 const SIGNAL_DEEP_ANALYSIS_TABS = ["price_action", "technical_deep", "news_context"];
 const SIGNAL_CONSENSUS_TABS = ["daily_summary", "live_analysis", "decision_pipeline", "history"];
+const SIGNAL_HISTORY_TABS = ["orders", "analysis"];
+const SIGNAL_HISTORY_PAGE_SIZE = 40;
 const SIGNAL_LIVE_ANALYSIS_TABS = ["chart_overview", ...SIGNAL_DEEP_ANALYSIS_TABS];
 const SIGNAL_DEEP_TAB_DEFINITIONS = Object.freeze([
   {
@@ -4875,10 +5165,540 @@ function normalizeSignalRequiredVotes(value) {
   return [1, 2, 3].includes(parsed) ? parsed : 3;
 }
 
+function normalizeSignalMaxManagedOrders(value) {
+  const parsed = Math.trunc(Number(value));
+  return SIGNAL_MANAGED_ORDER_OPTIONS.includes(parsed) ? parsed : 1;
+}
+
 function signalCouncilModel(report = {}) {
   return report?.aiTradeCouncil && typeof report.aiTradeCouncil === "object"
     ? report.aiTradeCouncil
     : {};
+}
+
+function signalStreamToken(value, { uppercase = false } = {}) {
+  const text = safeDashboardDisplayText(value, "").trim();
+  return uppercase ? text.toUpperCase() : text;
+}
+
+function signalStreamContextFromSource(source = {}, fallbackCandidateId = "") {
+  const value = source && typeof source === "object" && !Array.isArray(source) ? source : {};
+  const market = value.market && typeof value.market === "object" ? value.market : {};
+  const closedBar = value.closedBarIdentity && typeof value.closedBarIdentity === "object"
+    ? value.closedBarIdentity
+    : {};
+  return {
+    candidateId: signalStreamToken(
+      value.candidateId
+        || value.selectedCandidateId
+        || value.channelId
+        || value.snapshotChannel
+        || closedBar.candidateId
+        || fallbackCandidateId,
+    ),
+    streamKey: signalStreamToken(value.streamKey || closedBar.streamKey),
+    // Preserve the broker's exact Symbol spelling/suffix in the UI and request
+    // identity; comparisons are case-insensitive in signalStreamContextsMatch.
+    symbol: signalStreamToken(value.symbol || market.symbol || closedBar.symbol),
+    timeframe: signalStreamToken(
+      value.timeframe || value.timeFrame || market.timeframe || closedBar.timeframe,
+      { uppercase: true },
+    ),
+    snapshotId: signalStreamToken(value.snapshotId || closedBar.snapshotId),
+    observedAt: value.observedAt || value.updatedAt || null,
+  };
+}
+
+function signalAnalysisSourceStreamContext(source = {}) {
+  const metrics = signalHistoryObject(source?.metrics);
+  const provenance = signalHistoryObject(
+    source?.decisionProvenance
+      || source?.provenance
+      || metrics.decisionProvenance,
+  );
+  const closedBar = signalHistoryObject(
+    provenance.closedBarIdentity
+      || source?.closedBarIdentity
+      || metrics.closedBarIdentity,
+  );
+  return signalStreamContextFromSource({
+    ...closedBar,
+    candidateId: closedBar.candidateId || source?.candidateId || metrics.candidateId,
+    streamKey: closedBar.streamKey || source?.streamKey || metrics.streamKey,
+    symbol: closedBar.symbol || source?.symbol || metrics.symbol,
+    timeframe: closedBar.timeframe || source?.timeframe || metrics.timeframe,
+    snapshotId: source?.snapshotId || metrics.snapshotId || provenance.snapshotId,
+  });
+}
+
+function signalStreamContextsMatch(left = {}, right = {}) {
+  if (
+    left.symbol
+    && right.symbol
+    && String(left.symbol).toUpperCase() !== String(right.symbol).toUpperCase()
+  ) return false;
+  if (
+    left.timeframe
+    && right.timeframe
+    && String(left.timeframe).toUpperCase() !== String(right.timeframe).toUpperCase()
+  ) return false;
+  if (left.candidateId && right.candidateId && left.candidateId !== right.candidateId) return false;
+  if (left.streamKey && right.streamKey && left.streamKey !== right.streamKey) return false;
+  return true;
+}
+
+function signalStreamContextIdentityComplete(context = {}) {
+  return Boolean(
+    context.candidateId
+    && context.streamKey
+    && context.symbol
+    && context.timeframe
+    && context.snapshotId
+  );
+}
+
+function signalActiveStreamContext(report = {}) {
+  const council = signalCouncilModel(report);
+  const chart = council.chartSnapshot && typeof council.chartSnapshot === "object"
+    ? council.chartSnapshot
+    : {};
+  const liveMarket = council.liveAnalysis?.market && typeof council.liveAnalysis.market === "object"
+    ? council.liveAnalysis.market
+    : {};
+  const gateway = council.tradeGateway && typeof council.tradeGateway === "object"
+    ? council.tradeGateway
+    : {};
+  const automation = council.autoAnalysis && typeof council.autoAnalysis === "object"
+    ? council.autoAnalysis
+    : (council.automation && typeof council.automation === "object" ? council.automation : {});
+  const automationState = automation.state && typeof automation.state === "object"
+    ? automation.state
+    : automation;
+  const streamReadModel = automationState.activeStream && typeof automationState.activeStream === "object"
+    ? {
+        active: automationState.activeStream,
+        previous: automationState.transition?.previous,
+        transition: automationState.transition,
+      }
+    : council.streamContext && typeof council.streamContext === "object"
+      ? council.streamContext
+      : (council.activeStream && typeof council.activeStream === "object" ? council.activeStream : {});
+  const explicitActive = [
+    streamReadModel.active,
+    streamReadModel.current,
+    council.runtimeTruth?.activeStream,
+    council.runtimeTruth?.streamContext,
+  ].find((item) => item && typeof item === "object") || streamReadModel;
+  const transition = [
+    streamReadModel.transition,
+    council.streamTransition,
+    council.runtimeTruth?.streamTransition,
+    automationState.streamTransition,
+    automationState.transition,
+  ].find((item) => item && typeof item === "object") || {};
+  const candidateId = signalStreamToken(
+    explicitActive.candidateId
+      || explicitActive.selectedCandidateId
+      || gateway.selectedCandidateId
+      || report?.metatraderReadOnly?.selectedCandidateId
+      || report?.connectionChecklist?.metatraderSelection?.selectedCandidate?.candidateId,
+  );
+  const contexts = [
+    ["Backend", signalStreamContextFromSource(explicitActive, candidateId)],
+    ["Snapshot", signalStreamContextFromSource(chart, candidateId)],
+    ["Live", signalStreamContextFromSource(liveMarket, candidateId)],
+    ["EA Gateway", signalStreamContextFromSource(gateway, candidateId)],
+    ["Automation", signalStreamContextFromSource(automationState, candidateId)],
+  ].filter(([, item]) => item.symbol || item.timeframe || item.streamKey);
+  const preferred = contexts.find(([label, item]) => label === "Backend" && item.symbol && item.timeframe)
+    || contexts.find(([label, item]) => label === "Snapshot" && item.symbol && item.timeframe)
+    || contexts.find(([, item]) => item.symbol && item.timeframe)
+    || ["", signalStreamContextFromSource({}, candidateId)];
+  const current = {
+    ...preferred[1],
+    candidateId: preferred[1].candidateId || candidateId,
+  };
+  const mismatches = contexts
+    .filter(([, item]) => item.symbol && item.timeframe && !signalStreamContextsMatch(current, item))
+    .map(([label, item]) => `${label} ${item.symbol} ${item.timeframe}`);
+  const transitionStatus = signalStreamToken(
+    transition.status || transition.state || transition.reasonCode,
+    { uppercase: false },
+  ).toLowerCase();
+  const transitionActive = transition.active === true
+    || transition.inProgress === true
+    || ["transitioning", "pending", "resetting", "stream_change_detected"].includes(transitionStatus);
+  const previousSource = transition.previous && typeof transition.previous === "object"
+    ? transition.previous
+    : (streamReadModel.previous && typeof streamReadModel.previous === "object"
+      ? streamReadModel.previous
+      : {});
+  const previous = signalStreamContextFromSource(previousSource);
+  const available = Boolean(current.symbol && current.timeframe);
+  const key = available
+    ? `${current.candidateId || "selected"}|${current.symbol}|${current.timeframe}`
+    : (current.candidateId ? `${current.candidateId}|pending|pending` : "");
+  return {
+    ...current,
+    available,
+    key,
+    stable: available && !transitionActive && mismatches.length === 0,
+    transitioning: transitionActive || mismatches.length > 0,
+    mismatches,
+    previous,
+    transitionReasonCode: signalStreamToken(transition.reasonCode || transition.reason || transitionStatus),
+    transitionChangedAt: transition.changedAt || transition.startedAt || transition.updatedAt || null,
+  };
+}
+
+function signalHistoryPageScopeKey(report = {}) {
+  const context = signalActiveStreamContext(report);
+  const requestedScope = state.modal.signalHistoryScope === "active" ? "active" : "all";
+  if (requestedScope === "all") return "all";
+  return `active:${context.key || signalSnapshotChannel(report) || "unscoped"}:${context.streamKey || "no-stream"}`;
+}
+
+function signalHistoryScopeCapability(report = {}) {
+  const context = signalActiveStreamContext(report);
+  const council = signalCouncilModel(report);
+  const history = council.history && typeof council.history === "object" ? council.history : {};
+  const advertised = history.scopeCapabilities && typeof history.scopeCapabilities === "object"
+    ? history.scopeCapabilities
+    : {};
+  const advertisedModes = Array.isArray(advertised.modes) ? advertised.modes : [];
+  const advertisedIdentityFields = Array.isArray(advertised.activeIdentityFields)
+    ? advertised.activeIdentityFields
+    : [];
+  const advertisedAuthoritative = advertised.authoritative === true
+    && ["all", "active"].every((mode) => advertisedModes.includes(mode))
+    && ["candidateId", "streamKey", "symbol", "timeframe"]
+      .every((field) => advertisedIdentityFields.includes(field))
+    && advertised.filterStage === "before_summary_and_pagination"
+    && advertised.endpoint === AI_TRADE_COUNCIL_HISTORY_ENDPOINT;
+  const scopes = [
+    history.orderExecutions?.scope,
+    history.analysisHistory?.scope || council.analysisHistory?.scope,
+  ].filter((scope) => scope && typeof scope === "object");
+  const backendAuthoritative = advertisedAuthoritative || (
+    scopes.length === 2
+    && scopes.every((scope) => scope.authoritative === true && ["all", "active"].includes(scope.mode))
+  );
+  const identityReady = Boolean(
+    context.stable
+      && context.candidateId
+      && context.streamKey
+      && context.symbol
+      && context.timeframe,
+  );
+  return {
+    available: backendAuthoritative && identityReady,
+    backendAuthoritative,
+    identityReady,
+    context,
+    reason: !backendAuthoritative
+      ? "Backend รุ่นนี้ยังไม่ยืนยันตัวกรองและยอดนับแบบแยกกราฟ"
+      : !identityReady
+        ? "กำลังรอ Active Stream จาก EA ให้ครบ Channel, Stream, Symbol และ TF"
+        : "",
+  };
+}
+
+function signalHistoryRequestScope(report = {}) {
+  const capability = signalHistoryScopeCapability(report);
+  if (state.modal.signalHistoryScope !== "active" || !capability.available) {
+    return { mode: "all", capability };
+  }
+  return {
+    mode: "active",
+    capability,
+    candidateId: capability.context.candidateId,
+    streamKey: capability.context.streamKey,
+    symbol: capability.context.symbol,
+    timeframe: capability.context.timeframe,
+  };
+}
+
+function signalHistoryScopeQuery(report = {}) {
+  const scope = signalHistoryRequestScope(report);
+  const params = new URLSearchParams({ scope: scope.mode });
+  if (scope.mode === "active") {
+    params.set("candidateId", scope.candidateId);
+    params.set("streamKey", scope.streamKey);
+    params.set("symbol", scope.symbol);
+    params.set("timeframe", scope.timeframe);
+  }
+  return params;
+}
+
+function syncAiTradeCouncilStreamContext(report = {}) {
+  const context = signalActiveStreamContext(report);
+  const tracked = state.aiTradeCouncilStreamContext;
+  if (!context.stable) return context;
+  if (!tracked.initialized) {
+    Object.assign(tracked, {
+      initialized: true,
+      key: context.key,
+      candidateId: context.candidateId,
+      symbol: context.symbol,
+      timeframe: context.timeframe,
+    });
+    if (
+      state.modal.signalHistoryScope === "active"
+      && signalHistoryScopeCapability(report).available
+    ) {
+      resetSignalHistoryPageCache();
+    }
+    return context;
+  }
+  if (!context.key || context.key === tracked.key) return context;
+  Object.assign(tracked, {
+    initialized: true,
+    previousKey: tracked.key,
+    previousCandidateId: tracked.candidateId,
+    previousSymbol: tracked.symbol,
+    previousTimeframe: tracked.timeframe,
+    key: context.key,
+    candidateId: context.candidateId,
+    symbol: context.symbol,
+    timeframe: context.timeframe,
+    changedAt: context.transitionChangedAt || new Date().toISOString(),
+  });
+  resetSignalHistoryPageCache();
+  state.modal.signalHistoryOrderPage = 1;
+  state.modal.signalHistoryAnalysisPage = 1;
+  state.aiTradeCouncilDeepAnalysis.data = null;
+  state.aiTradeCouncilDeepAnalysis.requestKey = "";
+  state.aiTradeCouncilDeepAnalysis.message = "กราฟหรือ Timeframe เปลี่ยนแล้ว • รอข้อมูลเชิงลึกของกราฟปัจจุบัน";
+  state.aiTradeCouncilDeepAnalysis.tone = "working";
+  if (
+    state.modal.signalHistoryScope === "active"
+    && signalHistoryScopeCapability(report).available
+  ) {
+    Promise.resolve().then(() => {
+      void loadSignalHistoryScopeFirstPages(
+        state.propReports[AI_TRADE_COUNCIL_PROP_ID] || report,
+      );
+    });
+  }
+  return context;
+}
+
+function signalHistoryMatchesActiveContext(item = {}, context = {}) {
+  if (!context.available) return false;
+  const itemContext = signalStreamContextFromSource(item);
+  return Boolean(itemContext.symbol && itemContext.timeframe)
+    && signalStreamContextsMatch(
+      { symbol: itemContext.symbol, timeframe: itemContext.timeframe },
+      { symbol: context.symbol, timeframe: context.timeframe },
+    )
+    && (!itemContext.candidateId || !context.candidateId || itemContext.candidateId === context.candidateId);
+}
+
+function createSignalStreamContextBanner(report = {}, { historyControls = false } = {}) {
+  const context = syncAiTradeCouncilStreamContext(report);
+  const tracked = state.aiTradeCouncilStreamContext;
+  const council = signalCouncilModel(report);
+  const gateway = council.tradeGateway && typeof council.tradeGateway === "object"
+    ? council.tradeGateway
+    : {};
+  const automation = council.autoAnalysis && typeof council.autoAnalysis === "object"
+    ? council.autoAnalysis
+    : {};
+  const supportedTimeframes = Array.isArray(automation.config?.supportedTimeframes)
+    ? automation.config.supportedTimeframes.map((item) => signalStreamToken(item)).filter(Boolean)
+    : [];
+  const runtime = getSignalRuntimeTruth(report);
+  const gatewayCodes = [
+    gateway.executionGuardReason,
+    gateway.initStatus?.warningCode,
+    gateway.initStatus?.reasonCode,
+  ].map((item) => signalStreamToken(item, { uppercase: true })).filter(Boolean);
+  const symbolOrTimeframeBlocked = gatewayCodes.includes("SYMBOL_OR_TIMEFRAME_NOT_ALLOWED");
+  const section = document.createElement("section");
+  const copy = document.createElement("div");
+  const eyebrow = document.createElement("span");
+  const title = document.createElement("strong");
+  const detail = document.createElement("small");
+  const candidate = document.createElement("code");
+  section.className = "signal-stream-context";
+  section.setAttribute("role", "status");
+  section.setAttribute("aria-live", "polite");
+  eyebrow.textContent = "กราฟที่ EA ใช้งานปัจจุบัน";
+  title.textContent = context.available
+    ? `${context.symbol} • ${context.timeframe}`
+    : "กำลังรอคู่เงินและ Timeframe จาก EA";
+  const previousSymbol = context.previous.symbol || tracked.previousSymbol;
+  const previousTimeframe = context.previous.timeframe || tracked.previousTimeframe;
+  if (context.transitioning) {
+    section.dataset.tone = "transition";
+    detail.textContent = previousSymbol && previousTimeframe
+      ? `กำลังยืนยันการเปลี่ยนจาก ${previousSymbol} ${previousTimeframe} • ระหว่างนี้จะไม่ปนผลวิเคราะห์เดิมกับกราฟใหม่`
+      : "Snapshot, Gateway และระบบอัตโนมัติกำลังยืนยันกราฟเดียวกัน • ระหว่างนี้ผลเดิมจะไม่ถูกแสดงเป็นผลปัจจุบัน";
+  } else if (tracked.previousKey && tracked.key === context.key) {
+    section.dataset.tone = "changed";
+    detail.textContent = `เปลี่ยนจาก ${tracked.previousSymbol} ${tracked.previousTimeframe} แล้ว • ประวัติเก่ายังคงอยู่ในมุมมองทุกคู่เงิน/TF`;
+  } else if (context.available) {
+    section.dataset.tone = "ready";
+    detail.textContent = "ข้อมูลปัจจุบันผูกกับคู่เงินและ Timeframe นี้ ส่วนประวัติเดิมยังเก็บแยกตามคู่เงิน/TF";
+  } else {
+    section.dataset.tone = "waiting";
+    detail.textContent = "ระบบจะไม่ตีความผลเดิมว่าเป็นกราฟปัจจุบันจนกว่า Backend จะยืนยันบริบทใหม่";
+  }
+  candidate.textContent = context.candidateId
+    ? `Channel ${context.candidateId}`
+    : "ยังไม่มี Channel ที่ยืนยัน";
+  copy.append(eyebrow, title, detail);
+  section.append(copy, candidate);
+
+  if (supportedTimeframes.length || symbolOrTimeframeBlocked) {
+    const prerequisite = document.createElement("p");
+    prerequisite.className = "signal-stream-prerequisite";
+    if (symbolOrTimeframeBlocked) {
+      prerequisite.dataset.tone = "error";
+      prerequisite.setAttribute("role", "alert");
+      prerequisite.textContent = "EA แจ้งว่าคู่เงินหรือ Timeframe นี้ไม่ผ่าน AllowedSymbols/Timeframe • ตรวจ Inputs ของ EA บนกราฟนี้";
+    } else {
+      prerequisite.textContent = `Timeframe อัตโนมัติที่ Backend รองรับ: ${supportedTimeframes.join(", ")}`;
+    }
+    section.appendChild(prerequisite);
+  }
+
+  const checklist = document.createElement("ul");
+  const addCheck = (label, value, tone = "neutral") => {
+    const item = document.createElement("li");
+    const name = document.createElement("span");
+    const detailNode = document.createElement("strong");
+    item.dataset.tone = tone;
+    name.textContent = label;
+    detailNode.textContent = value;
+    item.append(name, detailNode);
+    checklist.appendChild(item);
+  };
+  checklist.className = "signal-stream-checklist";
+  checklist.setAttribute("aria-label", "รายการตรวจเมื่อเปลี่ยนคู่เงินหรือ Timeframe");
+  addCheck(
+    "AllowedSymbols",
+    symbolOrTimeframeBlocked
+      ? "EA ระบุว่าไม่ผ่าน • ตรวจ Input"
+      : gateway.connected === true
+        ? "EA ไม่ได้รายงานข้อผิดพลาด allowlist"
+        : "รอสถานะจาก EA",
+    symbolOrTimeframeBlocked ? "error" : gateway.connected === true ? "ready" : "waiting",
+  );
+  addCheck(
+    "Timeframe อัตโนมัติ",
+    supportedTimeframes.length
+      ? (context.timeframe && supportedTimeframes.includes(context.timeframe)
+        ? `${context.timeframe} รองรับ`
+        : `รองรับ ${supportedTimeframes.join(", ")}`)
+      : "รอรายการจาก Backend",
+    context.timeframe && supportedTimeframes.includes(context.timeframe) ? "ready" : "waiting",
+  );
+  addCheck(
+    "Channel ไม่ซ้ำ",
+    gatewayCodes.includes("SNAPSHOT_CHANNEL_ALREADY_OWNED")
+      ? "EA แจ้งว่า Channel ถูกใช้อยู่"
+      : gateway.connected === true && context.candidateId
+        ? `EA ยืนยัน ${context.candidateId}`
+        : "รอ EA ยืนยัน Channel",
+    gatewayCodes.includes("SNAPSHOT_CHANNEL_ALREADY_OWNED")
+      ? "error"
+      : gateway.connected === true && context.candidateId ? "ready" : "waiting",
+  );
+  const managedPositions = runtime.gatewayRiskTelemetry?.currentManagedPositions;
+  const managedPositionCap = runtime.gatewayRiskTelemetry?.maxManagedPositions;
+  const portfolioPolicyStatus = runtime.gatewayRiskTelemetry?.portfolioPolicyStatus || "not_observed";
+  const managedMagicNumbers = runtime.gatewayRiskTelemetry?.managedMagicNumbers || "";
+  const localConcurrencyBoundary = runtime.gatewayRiskTelemetry?.concurrencyBoundary
+    === "same_windows_user_file_common";
+  addCheck(
+    "ManagedMagicNumbers portfolio",
+    portfolioPolicyStatus === "ready" && managedPositions !== null && managedPositionCap !== null
+      ? `${managedPositions}/${managedPositionCap} Position • Magic ${managedMagicNumbers || "ยืนยันแล้ว"}`
+      : ["not_ready", "mismatch"].includes(portfolioPolicyStatus)
+        ? "นโยบาย Managed Magic / ขีดจำกัดของ EA ไม่ตรงกัน"
+        : "รอ EA v2.16 ยืนยันนโยบาย Portfolio ร่วม",
+    portfolioPolicyStatus === "ready" && managedPositions !== null && managedPositionCap !== null
+      ? "ready"
+      : ["not_ready", "mismatch"].includes(portfolioPolicyStatus) ? "error" : "waiting",
+  );
+  addCheck(
+    "ขอบเขตการล็อกบัญชี",
+    localConcurrencyBoundary && runtime.gatewayRiskTelemetry?.crossVpsDistributedLock === false
+      ? "คุมร่วมกันใน Windows / FILE_COMMON นี้ • ห้ามเปิดบัญชีเดียวกันหลาย VPS พร้อมกัน"
+      : "ยังไม่ยืนยันขอบเขตการล็อก • อย่าเปิดบัญชีเดียวกันหลายเครื่อง",
+    localConcurrencyBoundary ? "warning" : "waiting",
+  );
+  const spread = firstFiniteSignalNumber(
+    council.liveAnalysis?.market?.spreadPoints,
+    council.chartSnapshot?.spreadPoints,
+  );
+  const maxDrift = runtime.gatewayRiskTelemetry?.maxSignalDriftPoints;
+  addCheck(
+    "Point / Spread / Slippage / Drift",
+    spread !== null && maxDrift !== null
+      ? `Spread ${spread} points • Drift สูงสุด ${maxDrift} points • ทบทวนตาม Point ของ Symbol นี้`
+      : "ตรวจค่าตาม Point ของ Symbol นี้ใน Inputs ของ EA",
+    "neutral",
+  );
+  section.appendChild(checklist);
+
+  if (historyControls) {
+    const scopeCapability = signalHistoryScopeCapability(report);
+    if (state.modal.signalHistoryScope === "active" && !scopeCapability.available) {
+      state.modal.signalHistoryScope = "all";
+    }
+    const controls = document.createElement("div");
+    const label = document.createElement("span");
+    const allButton = document.createElement("button");
+    const activeButton = document.createElement("button");
+    const selectedScope = ["all", "active"].includes(state.modal.signalHistoryScope)
+      ? state.modal.signalHistoryScope
+      : "all";
+    controls.className = "signal-history-scope-controls";
+    controls.setAttribute("role", "group");
+    controls.setAttribute("aria-label", "เลือกขอบเขตประวัติตามคู่เงินและ Timeframe");
+    label.textContent = "ขอบเขตประวัติ";
+    allButton.type = "button";
+    allButton.dataset.signalHistoryScope = "all";
+    allButton.textContent = "ทุกคู่เงิน / ทุก TF";
+    activeButton.type = "button";
+    activeButton.dataset.signalHistoryScope = "active";
+    activeButton.textContent = context.available
+      ? `เฉพาะ ${context.symbol} ${context.timeframe}`
+      : "เฉพาะกราฟปัจจุบัน";
+    activeButton.disabled = !scopeCapability.available;
+    if (!scopeCapability.available) {
+      activeButton.title = scopeCapability.reason;
+      activeButton.setAttribute("aria-describedby", "signalHistoryScopeAvailability");
+    }
+    [allButton, activeButton].forEach((button) => {
+      const active = button.dataset.signalHistoryScope === selectedScope;
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+      button.addEventListener("click", () => {
+        const nextScope = button.dataset.signalHistoryScope;
+        if (!["all", "active"].includes(nextScope) || nextScope === state.modal.signalHistoryScope) return;
+        state.modal.signalHistoryScope = nextScope;
+        state.modal.signalHistoryOrderPage = 1;
+        state.modal.signalHistoryAnalysisPage = 1;
+        resetSignalHistoryPageCache();
+        renderSignalHistoryPanel(state.propReports[AI_TRADE_COUNCIL_PROP_ID] || report);
+        saveSessionSnapshot();
+        void loadSignalHistoryScopeFirstPages(
+          state.propReports[AI_TRADE_COUNCIL_PROP_ID] || report,
+        );
+      });
+    });
+    controls.append(label, allButton, activeButton);
+    if (!scopeCapability.available) {
+      const availability = document.createElement("small");
+      availability.id = "signalHistoryScopeAvailability";
+      availability.textContent = `${scopeCapability.reason} • จึงแสดงทุกคู่เงิน/TF เพื่อไม่ให้ยอดนับคลาดเคลื่อน`;
+      controls.appendChild(availability);
+    }
+    section.appendChild(controls);
+  }
+  return section;
 }
 
 function signalSnapshotChannel(report = {}) {
@@ -5143,6 +5963,14 @@ function getSignalRuntimeTruth(report = {}) {
     gatewayExecutionGuardReady: gateway.executionGuardReady === true,
     gatewayExecutionGuardReason,
     gatewayRiskTelemetry: {
+      portfolioPolicyStatus: safeDashboardDisplayText(gateway.portfolioPolicyStatus, "not_observed"),
+      managedMagicNumbers: safeDashboardDisplayText(gateway.managedMagicNumbers, ""),
+      allowedSymbols: safeDashboardDisplayText(gateway.allowedSymbols, ""),
+      allowedTimeframes: safeDashboardDisplayText(gateway.allowedTimeframes, ""),
+      concurrencyBoundary: safeDashboardDisplayText(gateway.concurrencyBoundary, ""),
+      crossVpsDistributedLock: typeof gateway.crossVpsDistributedLock === "boolean"
+        ? gateway.crossVpsDistributedLock
+        : null,
       maxManagedPositions: gatewayNumber("maxManagedPositions"),
       currentManagedPositions: gatewayNumber("currentManagedPositions"),
       maxManagedLots: gatewayNumber("maxManagedLots"),
@@ -5324,34 +6152,81 @@ function signalCouncilAutomationModel(report = {}) {
     : (council.automation && typeof council.automation === "object" ? council.automation : {});
   const config = supplied.config && typeof supplied.config === "object" ? supplied.config : supplied;
   const runtimeState = supplied.state && typeof supplied.state === "object" ? supplied.state : supplied;
+  const pending = runtimeState.pending && typeof runtimeState.pending === "object"
+    ? runtimeState.pending
+    : {};
+  const waitingGate = runtimeState.waitingGate && typeof runtimeState.waitingGate === "object"
+    ? runtimeState.waitingGate
+    : {};
   const supported = Array.isArray(config.supportedTimeframes)
     ? config.supportedTimeframes.map((item) => String(item || "").toUpperCase()).filter(Boolean)
     : ["M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"];
+  const allowedMaxManagedOrders = Array.isArray(config.allowedMaxManagedOrders)
+    ? config.allowedMaxManagedOrders
+      .map((value) => Math.trunc(Number(value)))
+      .filter((value) => [1, 3, 5, 10].includes(value))
+    : [1, 3, 5, 10];
   const status = safeDashboardDisplayText(
     runtimeState.status || runtimeState.lastStatus || supplied.status,
     config.enabled ? "watching" : "disabled",
   ).toLowerCase();
-  const reason = safeDashboardDisplayText(
-    runtimeState.reason || runtimeState.lastReason || supplied.reason,
+  const rawReason = safeDashboardDisplayText(
+    runtimeState.reasonCode
+      || runtimeState.reason
+      || waitingGate.reasonCode
+      || runtimeState.lastReason
+      || supplied.reasonCode
+      || supplied.reason,
     "",
   );
+  const legacyMaxDailyRounds = firstFiniteSignalNumber(
+    config.maxDailyRounds,
+    config.maxDailyRuns,
+    supplied.maxDailyRounds,
+    supplied.maxDailyRuns,
+  );
+  const effectiveMaxDailyRounds = firstFiniteSignalNumber(
+    config.effectiveMaxDailyRounds,
+    supplied.effectiveMaxDailyRounds,
+  );
+  const dailyRoundLimitMode = safeDashboardDisplayText(
+    config.dailyRoundLimitMode || supplied.dailyRoundLimitMode,
+    "unlimited",
+  ).toLowerCase();
+  const dailyRoundLimitEnabled = config.dailyRoundLimitEnabled === true
+    || supplied.dailyRoundLimitEnabled === true
+    || dailyRoundLimitMode === "limited";
+  const staleDailyLimitReasons = new Set([
+    "daily_cap_reached",
+    "daily_round_limit_reached",
+    "daily_limit_reached",
+  ]);
+  const reason = !dailyRoundLimitEnabled && staleDailyLimitReasons.has(rawReason)
+    ? ""
+    : rawReason;
   const reasonLabels = {
     automation_disabled: "ปิดการวิเคราะห์อัตโนมัติอยู่",
     baseline_required: "กำลังตั้งแท่งปัจจุบันเป็นจุดเริ่ม โดยจะไม่เรียกงานย้อนหลัง",
     baseline_set: "ตั้งจุดเริ่มแล้ว และกำลังรอแท่งปิดถัดไป",
     waiting_new_bar: "ยังเป็นแท่งเดิม จึงยังไม่เรียก Codex",
+    waiting_for_new_closed_bar: "แท่งปัจจุบันยังไม่ปิด • แท่งปิดใหม่จะเริ่มวิเคราะห์เมื่อระบบพร้อม",
     unsupported_timeframe: "กรอบเวลานี้ใช้ปุ่มวิเคราะห์เองเพื่อป้องกันการใช้ Rate Limit ถี่เกินไป",
     full_access_required: "เปิด Full Access ก่อน ระบบจึงจะสร้าง Mission อัตโนมัติได้",
     terminal_not_selected: "กรุณาเลือก MT4 เป้าหมายก่อน",
     snapshot_missing: "ยังไม่พบ Snapshot จาก MT4",
     snapshot_not_ready: "Snapshot ยังไม่พร้อมสำหรับการวิเคราะห์",
     snapshot_stale: "Snapshot เก่าเกินกำหนด กำลังรอข้อมูลใหม่จาก MT4",
+    durable_snapshot_unavailable: "หยุดรอบอัตโนมัติชั่วคราว • Snapshot ถาวรของหัวคิวอ่านไม่ได้ จึงยังไม่เริ่มวิเคราะห์",
+    snapshot_artifact_capture_failed: "หยุดรอบอัตโนมัติชั่วคราว • บันทึก Snapshot ถาวรไม่สำเร็จ",
+    pending_queue_capacity_exceeded: "คิววิเคราะห์เต็ม • แท่งล่าสุดถูกข้ามและยังไม่เริ่มวิเคราะห์",
     closed_bar_identity_unavailable: "ยังอ่านเวลาแท่งปิดล่าสุดไม่ได้",
     codex_auth_required: "Codex ต้อง Login ก่อน",
     codex_runner_unavailable: "Codex Runner ยังไม่พร้อม",
     rate_limit_unavailable: "ยังอ่าน Rate Limit ของ Codex ไม่ได้ จึงพักไว้ก่อน",
     rate_limit_reached: "Rate Limit เต็มแล้ว จึงพักการวิเคราะห์อัตโนมัติ",
+    quota_limit_reached: "โควตา Codex ถึงขีดจำกัดแล้ว • แท่งใหม่ยังถูกบันทึกเข้าคิว แต่จะไม่เริ่มวิเคราะห์จนกว่าโควตาพร้อม",
     quota_reserve: "Rate Limit คงเหลือต่ำกว่าค่าสำรองที่กำหนด",
+    quota_below_reserve: "พักการวิเคราะห์ เพราะ Codex คงเหลือต่ำกว่าค่าสำรองที่กำหนด • แท่งปิดใหม่จะอยู่ในคิวถาวรตามลำดับ",
     daily_cap_reached: "ครบจำนวนรอบวิเคราะห์อัตโนมัติของวันนี้แล้ว",
     mission_running: "กำลังรอ Council รอบก่อนหน้าทำเสร็จ",
     council_round_already_active: "กำลังรอ Council รอบก่อนหน้าทำเสร็จ",
@@ -5360,6 +6235,7 @@ function signalCouncilAutomationModel(report = {}) {
     codex_runner_not_ready: "Codex Runner ยังไม่พร้อม",
     remaining_percent_below_reserve: "Rate Limit คงเหลือต่ำกว่าค่าสำรองที่กำหนด",
     daily_round_limit_reached: "ครบจำนวนรอบวิเคราะห์อัตโนมัติของวันนี้แล้ว",
+    daily_limit_reached: "ครบจำนวนรอบวิเคราะห์อัตโนมัติของวันนี้แล้ว",
   };
   const currentTimeframe = safeDashboardDisplayText(
     runtimeState.timeframe || runtimeState.currentTimeframe || supplied.timeframe,
@@ -5371,30 +6247,104 @@ function signalCouncilAutomationModel(report = {}) {
   );
   const enabled = config.enabled === true;
   const timeframeSupported = !currentTimeframe || supported.includes(currentTimeframe);
+  const lastObservedClosedBarTime = firstFiniteSignalNumber(
+    runtimeState.lastObservedClosedBarTime,
+    supplied.lastObservedClosedBarTime,
+  );
+  const lastAnalyzedClosedBarTime = firstFiniteSignalNumber(
+    runtimeState.lastAnalyzedClosedBarTime,
+    runtimeState.lastQueuedClosedBarTime,
+    supplied.lastAnalyzedClosedBarTime,
+  );
+  const lastMissionId = safeDashboardDisplayText(
+    runtimeState.lastMissionId || supplied.lastMissionId,
+    "",
+  );
+  const pendingCount = Math.max(0, Math.trunc(Number(
+    runtimeState.pendingCount ?? pending.queueDepth ?? supplied.pendingCount ?? 0,
+  ) || 0));
+  const newBarPending = enabled && (
+    pendingCount > 0
+    || (
+      lastObservedClosedBarTime !== null
+      && (
+        lastAnalyzedClosedBarTime === null
+        || lastObservedClosedBarTime > lastAnalyzedClosedBarTime
+      )
+    )
+  );
+  const blockedReasons = new Set([
+    "unsupported_timeframe",
+    "full_access_required",
+    "terminal_not_selected",
+    "snapshot_missing",
+    "snapshot_not_ready",
+    "snapshot_stale",
+    "durable_snapshot_unavailable",
+    "snapshot_artifact_capture_failed",
+    "pending_queue_capacity_exceeded",
+    "closed_bar_identity_unavailable",
+    "timeframe_not_supported",
+    "codex_auth_required",
+    "codex_runner_unavailable",
+    "codex_runner_not_ready",
+    "rate_limit_unavailable",
+    "rate_limit_reached",
+    "quota_limit_reached",
+    "quota_reserve",
+    "quota_below_reserve",
+    "remaining_percent_below_reserve",
+    "mission_running",
+    "council_round_already_active",
+    ...(dailyRoundLimitEnabled ? Array.from(staleDailyLimitReasons) : []),
+  ]);
+  const blockedStatuses = new Set([
+    "unsupported_timeframe",
+    "quota_guard",
+    "quota_unavailable",
+    "daily_limit",
+    "operator_mode",
+    "snapshot_unavailable",
+    "snapshot_stale",
+    "skipped",
+    "error",
+    "waiting_gate",
+  ]);
+  const blocked = enabled && (blockedReasons.has(reason) || blockedStatuses.has(status));
   const statusLabels = {
     disabled: "ปิดอยู่",
-    idle: enabled ? "กำลังรอข้อมูล MT4" : "ปิดอยู่",
-    baseline: "ตั้งจุดเริ่มแล้ว • รอแท่งใหม่",
-    watching: "กำลังเฝ้าดูแท่งใหม่",
-    pending: "พบแท่งใหม่ • รอข้อมูลนิ่ง",
-    pending_settle: "พบแท่งใหม่ • รอข้อมูลนิ่ง",
+    idle: enabled ? "เปิดอยู่ • แท่งปิดใหม่จะเริ่มวิเคราะห์เมื่อระบบพร้อม" : "ปิดอยู่",
+    baseline: "ตั้งจุดเริ่มแล้ว • แท่งถัดไปปิดแล้ววิเคราะห์",
+    watching: "เปิดอยู่ • เฝ้าแท่งปิดใหม่",
+    pending: "แท่งใหม่ปิดแล้ว • รอข้อมูลนิ่ง",
+    pending_settle: "แท่งใหม่ปิดแล้ว • รอข้อมูลนิ่ง",
     dispatching: "กำลังสร้างรอบวิเคราะห์",
     queued: "ส่งให้ Specialist 3 ตัวแล้ว",
     active_round: "รอรอบก่อนหน้าทำเสร็จ",
     unsupported_timeframe: "กรอบเวลานี้ใช้ปุ่มวิเคราะห์เอง",
     quota_guard: "พักเพื่อสำรอง Rate Limit",
+    waiting_gate: "พักที่ Safety Gate • แท่งปิดใหม่กำลังรอในคิว",
     quota_unavailable: "พักเพราะยังอ่าน Rate Limit ไม่ได้",
-    daily_limit: "ครบจำนวนรอบอัตโนมัติวันนี้",
+    daily_limit: dailyRoundLimitEnabled
+      ? "ครบจำนวนรอบอัตโนมัติวันนี้"
+      : "เปิดอยู่ • เฝ้าแท่งปิดใหม่",
     operator_mode: "พักจนกว่าจะเปิด Full Access",
     snapshot_unavailable: "รอ Snapshot จาก MT4",
     snapshot_stale: "รอ Snapshot ที่สด",
+    skipped: "รอบล่าสุดถูกข้าม • ตรวจสาเหตุก่อนเริ่มวิเคราะห์รอบถัดไป",
     error: "ระบบเฝ้าดูมีปัญหา",
   };
+  const statusLabel = !enabled
+    ? "ปิดอยู่"
+    : blocked
+      ? (reasonLabels[reason] || statusLabels[status] || "ระบบยังไม่พร้อมเริ่มรอบถัดไป")
+      : (reasonLabels[reason] || statusLabels[status] || "เปิดอยู่ • เฝ้าแท่งปิดใหม่");
   return {
     available: supplied.available !== false,
     enabled,
     status,
-    statusLabel: statusLabels[status] || (enabled ? "กำลังเฝ้าดูแท่งใหม่" : "ปิดอยู่"),
+    statusLabel,
+    blocked,
     reason,
     reasonMessage: reasonLabels[reason] || "",
     supported,
@@ -5403,17 +6353,111 @@ function signalCouncilAutomationModel(report = {}) {
     timeframeSupported,
     pollSeconds: Number(config.pollSeconds || supplied.pollSeconds || 5),
     settleSeconds: Number(config.settleSeconds || supplied.settleSeconds || 10),
-    maxDailyRounds: Number(config.maxDailyRounds || config.maxDailyRuns || supplied.maxDailyRounds || 24),
+    dailyRoundLimitMode: dailyRoundLimitEnabled ? "limited" : "unlimited",
+    dailyRoundLimitEnabled,
+    effectiveMaxDailyRounds: dailyRoundLimitEnabled
+      ? (effectiveMaxDailyRounds ?? legacyMaxDailyRounds)
+      : null,
+    maxDailyRounds: legacyMaxDailyRounds,
     minRemainingPercent: Number(config.minRemainingPercent || supplied.minRemainingPercent || 30),
     analysisBarCount: normalizeSignalAnalysisBars(
       config.analysisBarCount || supplied.analysisBarCount,
     ),
+    maxManagedOrders: normalizeSignalMaxManagedOrders(
+      state.aiTradeCouncilOrderLimit.pendingMaxManagedOrders
+        ?? config.maxManagedOrders
+        ?? supplied.maxManagedOrders,
+    ),
+    allowedMaxManagedOrders: allowedMaxManagedOrders.length
+      ? allowedMaxManagedOrders
+      : [1, 3, 5, 10],
     dailyRunCount: Number(runtimeState.dailyRunCount || supplied.dailyRunCount || 0),
-    lastObservedClosedBarTime: runtimeState.lastObservedClosedBarTime || supplied.lastObservedClosedBarTime || null,
-    lastAnalyzedClosedBarTime: runtimeState.lastAnalyzedClosedBarTime
-      || runtimeState.lastQueuedClosedBarTime
-      || supplied.lastAnalyzedClosedBarTime
-      || null,
+    lastObservedClosedBarTime,
+    lastAnalyzedClosedBarTime,
+    lastMissionId,
+    newBarPending,
+    pending: Object.keys(pending).length ? {
+      attemptId: safeDashboardDisplayText(pending.recordId, ""),
+      closedBarTime: firstFiniteSignalNumber(pending.closedBarTime),
+      snapshotId: safeDashboardDisplayText(pending.snapshotId, ""),
+      reasonCode: safeDashboardDisplayText(pending.reasonCode, ""),
+      detectedAt: pending.detectedAt || null,
+      queuePosition: firstFiniteSignalNumber(pending.queuePosition),
+      queueDepth: firstFiniteSignalNumber(pending.queueDepth, pendingCount),
+      executionPolicy: safeDashboardDisplayText(pending.executionPolicy, ""),
+    } : null,
+    pendingCount,
+    waitingGateActive: waitingGate.active === true || status === "waiting_gate",
+    backlogPolicy: supplied.backlogPolicy && typeof supplied.backlogPolicy === "object"
+      ? supplied.backlogPolicy
+      : {},
+  };
+}
+
+function signalManagedOrderLimitModel(report = {}, runtime = getSignalRuntimeTruth(report)) {
+  const council = signalCouncilModel(report);
+  const gateway = council.tradeGateway && typeof council.tradeGateway === "object"
+    ? council.tradeGateway
+    : (council.runtimeTruth?.tradeGateway && typeof council.runtimeTruth.tradeGateway === "object"
+      ? council.runtimeTruth.tradeGateway
+      : {});
+  const supplied = gateway.managedOrderLimit && typeof gateway.managedOrderLimit === "object"
+    ? gateway.managedOrderLimit
+    : {};
+  const automation = signalCouncilAutomationModel(report);
+  const configuredMaxManagedOrders = normalizeSignalMaxManagedOrders(
+    state.aiTradeCouncilOrderLimit.pendingMaxManagedOrders
+      ?? supplied.configuredMaxManagedOrders
+      ?? automation.maxManagedOrders,
+  );
+  const numberOrNull = (value, minimum = 0) => {
+    if (value === null || value === undefined || value === "") return null;
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed >= minimum ? parsed : null;
+  };
+  const eaMaxManagedPositions = numberOrNull(
+    supplied.eaMaxManagedPositions ?? runtime.gatewayRiskTelemetry?.maxManagedPositions,
+    1,
+  );
+  const currentManagedPositions = numberOrNull(
+    supplied.currentManagedPositions ?? runtime.gatewayRiskTelemetry?.currentManagedPositions,
+    0,
+  );
+  const suppliedEffective = numberOrNull(supplied.effectiveMaxManagedOrders, 1);
+  const effectiveMaxManagedOrders = suppliedEffective
+    ?? (eaMaxManagedPositions === null
+      ? null
+      : Math.min(configuredMaxManagedOrders, eaMaxManagedPositions));
+  const source = safeDashboardDisplayText(supplied.source, "backend_dispatch_cap");
+  const backendAuthoritative = source === "backend_dispatch_cap";
+  const reached = effectiveMaxManagedOrders !== null
+    && currentManagedPositions !== null
+    && currentManagedPositions >= effectiveMaxManagedOrders;
+  let statusMessage = "รอข้อมูลจำนวน Position และเพดานจาก EA";
+  let tone = "warning";
+  if (effectiveMaxManagedOrders !== null && currentManagedPositions !== null) {
+    if (configuredMaxManagedOrders > eaMaxManagedPositions) {
+      statusMessage = `HQ ตั้ง ${configuredMaxManagedOrders} Order แต่ EA อนุญาต ${eaMaxManagedPositions} จึงใช้จริง ${effectiveMaxManagedOrders} Order`;
+      tone = reached ? "blocked" : "warning";
+    } else if (reached) {
+      statusMessage = `เปิดครบ ${effectiveMaxManagedOrders} Order แล้ว ระบบจะไม่ส่ง Order ใหม่จนกว่าจำนวนจะลดลง`;
+      tone = "blocked";
+    } else {
+      statusMessage = `กำลังเปิด ${currentManagedPositions} จากเพดานที่ใช้จริง ${effectiveMaxManagedOrders} Order`;
+      tone = "ready";
+    }
+  }
+  return {
+    configuredMaxManagedOrders,
+    eaMaxManagedPositions,
+    effectiveMaxManagedOrders,
+    currentManagedPositions,
+    reached,
+    source,
+    backendAuthoritative,
+    eaInputUnchanged: supplied.eaInputUnchanged !== false,
+    statusMessage,
+    tone,
   };
 }
 
@@ -5627,17 +6671,29 @@ function renderSignalDailyPanel(report = {}) {
   const activeCouncilRound = councilRun.hasActiveRound;
   const analysisBusy = state.aiTradeCouncilAnalysis.inFlight || activeCouncilRound;
   const automation = signalCouncilAutomationModel(report);
-  const automationBusy = state.aiTradeCouncilAutomation.inFlight;
+  const automationBusy = state.aiTradeCouncilAutomation.inFlight
+    || state.aiTradeCouncilConsensusPolicy.inFlight
+    || state.aiTradeCouncilOrderLimit.inFlight;
   const automationTone = automation.enabled
-    ? (automation.timeframeSupported ? "ready" : "warning")
+    ? (automation.blocked || !automation.timeframeSupported ? "warning" : "ready")
     : "muted";
-  const automationMessage = state.aiTradeCouncilAutomation.message
+  const automationBaseMessage = state.aiTradeCouncilAutomation.message
     || automation.reasonMessage
     || (
       automation.enabled
-        ? "Snapshot ยังอัปเดตทุก 5 วินาที แต่ Codex จะถูกเรียกเมื่อแท่งปิดใหม่เท่านั้น"
-        : "เปิดเมื่อต้องการให้ Agent วิเคราะห์อัตโนมัติทุกครั้งที่เกิดแท่งปิดใหม่"
+        ? `Snapshot ตรวจทุก ${automation.pollSeconds} วินาที • เมื่อพบแท่งปิดใหม่จะเริ่มวิเคราะห์เมื่อระบบพร้อม โดยทุกแท่งจะเข้าคิวถาวรตามลำดับ FIFO`
+        : "เปิดเมื่อต้องการให้ Agent เฝ้าแท่งปิดใหม่และเริ่มวิเคราะห์เมื่อระบบพร้อม"
     );
+  const automationQueueMessage = automation.pendingCount > 0
+    ? ` • รอคิว ${automation.pendingCount} แท่ง${automation.pending?.closedBarTime
+      ? ` • แท่งเก่าสุด ${formatBrokerBarTime(automation.pending.closedBarTime)}`
+      : ""}${automation.pending?.detectedAt
+      ? ` • รอตั้งแต่ ${formatThaiDateTime(automation.pending.detectedAt)}`
+      : ""}${automation.pending?.queuePosition !== null && automation.pending?.queuePosition !== undefined
+      ? ` • หัวคิว ${Math.trunc(automation.pending.queuePosition)}/${Math.trunc(automation.pending.queueDepth || automation.pendingCount)}`
+      : ""}`
+    : "";
+  const automationMessage = `${automationBaseMessage}${automationQueueMessage}`;
   const initDiagnostic = signalGatewayInitStatusMessage(runtime.gatewayInitStatus);
   const managed = runtime.gatewayRiskTelemetry || {};
   const managedValuesAvailable = [
@@ -5728,8 +6784,10 @@ function renderSignalDailyPanel(report = {}) {
               <dd>${automation.currentSymbol || "รอข้อมูล"} ${automation.currentTimeframe || ""}</dd>
             </div>
             <div>
-              <dt>รอบวันนี้</dt>
-              <dd>${automation.dailyRunCount}/${automation.maxDailyRounds}</dd>
+              <dt>นโยบายการวิเคราะห์</dt>
+              <dd>${automation.dailyRoundLimitEnabled && automation.effectiveMaxDailyRounds !== null
+                ? `${automation.dailyRunCount}/${automation.effectiveMaxDailyRounds} รอบวันนี้`
+                : `แท่งปิดใหม่ • วันนี้ ${automation.dailyRunCount} รอบ`}</dd>
             </div>
             <div>
               <dt>Rate Limit สำรอง</dt>
@@ -5741,7 +6799,9 @@ function renderSignalDailyPanel(report = {}) {
             </div>
           </dl>
           <small>
-            อัตโนมัติ: ${automation.supported.join(", ")} • M1 ปิดอัตโนมัติ โดย M5 เป็น Timeframe ต่ำสุด
+            ${automation.dailyRoundLimitEnabled && automation.effectiveMaxDailyRounds !== null
+              ? `เพดานรายวัน ${automation.effectiveMaxDailyRounds} รอบ`
+              : "ไม่มีเพดานรายวัน"} • ประมวลผลคิวแท่งปิดตามลำดับ FIFO • รอบย้อนหลังใช้ตรวจสอบเท่านั้นและห้ามส่ง Order เก่า • รองรับ ${automation.supported.join(", ")}
           </small>
         </section>
         <button type="button" class="signal-secondary-action" data-signal-refresh>
@@ -5779,6 +6839,7 @@ function renderSignalDailyPanel(report = {}) {
       </aside>
     </div>
   `;
+  container.querySelector(".signal-daily-hero")?.after(createSignalStreamContextBanner(report));
   container.querySelector("[data-signal-daily-message]").textContent = daily.readinessMessage;
   container.querySelector("[data-signal-daily-observed]").textContent = daily.observedAt
     ? formatThaiDateTime(daily.observedAt)
@@ -5871,10 +6932,13 @@ function renderSignalDailyPanel(report = {}) {
 }
 
 async function setAiTradeCouncilAutomation(enabled, configOverrides = {}) {
-  if (state.aiTradeCouncilAutomation.inFlight) return null;
+  if (
+    state.aiTradeCouncilAutomation.inFlight
+    || state.aiTradeCouncilConsensusPolicy.inFlight
+    || state.aiTradeCouncilOrderLimit.inFlight
+  ) return null;
   const report = state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {};
   const currentConfig = signalCouncilAutomationModel(report);
-  const consensusPolicy = signalCouncilConsensusPolicyModel(report);
   const analysisBarCount = normalizeSignalAnalysisBars(
     configOverrides.analysisBarCount ?? currentConfig.analysisBarCount,
   );
@@ -5891,13 +6955,11 @@ async function setAiTradeCouncilAutomation(enabled, configOverrides = {}) {
   };
   renderSignalConsensusPanel(state.modal.signalTab, report);
   try {
-    const response = await postJson("/api/ai-trade-council/automation", {
+    const update = {
       enabled: Boolean(enabled),
-      maxDailyRounds: Math.trunc(currentConfig.maxDailyRounds),
-      minRemainingPercent: Math.trunc(currentConfig.minRemainingPercent),
-      analysisBarCount,
-      requiredVotes: consensusPolicy.requiredVotes,
-    });
+    };
+    if (analysisCountChanged) update.analysisBarCount = analysisBarCount;
+    const response = await postJson("/api/ai-trade-council/automation", update);
     state.aiTradeCouncilAutomation.message = analysisCountChanged
       ? `บันทึกแล้ว • AI จะใช้ ${analysisBarCount} แท่งปิดตั้งแต่รอบวิเคราะห์ถัดไป`
       : enabled
@@ -5943,12 +7005,12 @@ async function setAiTradeCouncilRequiredVotes(requiredVotes) {
   if (
     state.aiTradeCouncilConsensusPolicy.inFlight
     || state.aiTradeCouncilAutomation.inFlight
+    || state.aiTradeCouncilOrderLimit.inFlight
   ) return null;
   const nextRequiredVotes = normalizeSignalRequiredVotes(requiredVotes);
   const report = state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {};
   const currentPolicy = signalCouncilConsensusPolicyModel(report);
   if (nextRequiredVotes === currentPolicy.requiredVotes) return report;
-  const currentConfig = signalCouncilAutomationModel(report);
   state.aiTradeCouncilConsensusPolicy = {
     inFlight: true,
     message: `กำลังบันทึกเกณฑ์ ${nextRequiredVotes} ใน 3`,
@@ -5958,10 +7020,6 @@ async function setAiTradeCouncilRequiredVotes(requiredVotes) {
   renderSignalLivePanel(report);
   try {
     const response = await postJson("/api/ai-trade-council/automation", {
-      enabled: Boolean(currentConfig.enabled),
-      maxDailyRounds: Math.trunc(currentConfig.maxDailyRounds),
-      minRemainingPercent: Math.trunc(currentConfig.minRemainingPercent),
-      analysisBarCount: normalizeSignalAnalysisBars(currentConfig.analysisBarCount),
       requiredVotes: nextRequiredVotes,
     });
     state.aiTradeCouncilConsensusPolicy.message = `บันทึกแล้ว • ใช้เกณฑ์ ${nextRequiredVotes} ใน 3 ตั้งแต่รอบวิเคราะห์ถัดไป`;
@@ -5982,6 +7040,57 @@ async function setAiTradeCouncilRequiredVotes(requiredVotes) {
   } finally {
     state.aiTradeCouncilConsensusPolicy.inFlight = false;
     state.aiTradeCouncilConsensusPolicy.pendingRequiredVotes = null;
+    if (state.modal.open && state.modal.id === AI_TRADE_COUNCIL_PROP_ID) {
+      renderSignalConsensusDashboard(
+        getModalSubject(),
+        getPropertyRole(getModalSubject()),
+        state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {},
+      );
+    }
+  }
+}
+
+async function setAiTradeCouncilMaxManagedOrders(maxManagedOrders) {
+  if (
+    state.aiTradeCouncilOrderLimit.inFlight
+    || state.aiTradeCouncilConsensusPolicy.inFlight
+    || state.aiTradeCouncilAutomation.inFlight
+  ) return null;
+  const nextMaxManagedOrders = normalizeSignalMaxManagedOrders(maxManagedOrders);
+  const report = state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {};
+  const currentConfig = signalCouncilAutomationModel(report);
+  if (nextMaxManagedOrders === currentConfig.maxManagedOrders) return report;
+  state.aiTradeCouncilOrderLimit = {
+    inFlight: true,
+    message: `กำลังบันทึกเพดาน ${nextMaxManagedOrders} Order`,
+    tone: "working",
+    pendingMaxManagedOrders: nextMaxManagedOrders,
+  };
+  renderSignalLivePanel(report);
+  try {
+    const response = await postJson("/api/ai-trade-council/automation", {
+      maxManagedOrders: nextMaxManagedOrders,
+    });
+    state.aiTradeCouncilOrderLimit.message = (
+      `บันทึกแล้ว • AI จะไม่ส่ง Order ใหม่เมื่อครบเพดาน ${nextMaxManagedOrders} Order`
+    );
+    state.aiTradeCouncilOrderLimit.tone = "success";
+    addBridgeEvent(
+      "เปลี่ยนเพดาน Order ของ AI Council",
+      `ตั้งเพดานฝั่ง Backend เป็น ${nextMaxManagedOrders} Order • ไม่เปลี่ยน EA Input และไม่ปิด Position เดิม`,
+    );
+    const latest = await loadPropReport(AI_TRADE_COUNCIL_PROP_ID);
+    return latest || response;
+  } catch (error) {
+    state.aiTradeCouncilOrderLimit.message = safeDashboardDisplayText(
+      error?.body?.messageTh || error?.message,
+      "บันทึกเพดาน Order ไม่สำเร็จ กรุณาตรวจ Local Runner",
+    );
+    state.aiTradeCouncilOrderLimit.tone = "error";
+    return null;
+  } finally {
+    state.aiTradeCouncilOrderLimit.inFlight = false;
+    state.aiTradeCouncilOrderLimit.pendingMaxManagedOrders = null;
     if (state.modal.open && state.modal.id === AI_TRADE_COUNCIL_PROP_ID) {
       renderSignalConsensusDashboard(
         getModalSubject(),
@@ -6312,25 +7421,95 @@ function signalSnapshotComparisonText(analyzedSnapshotId = "", currentSnapshotId
 
 function signalCouncilRunModel(report = {}) {
   const pipeline = signalCouncilModel(report).decisionPipeline || {};
+  const automation = signalCouncilAutomationModel(report);
+  const currentRun = pipeline.currentRun && typeof pipeline.currentRun === "object"
+    ? pipeline.currentRun
+    : {};
   const items = Array.isArray(pipeline.items)
     ? pipeline.items.filter((item) => item && typeof item === "object")
     : [];
-  const parents = items
+  const suppliedCurrentParent = currentRun.parent && typeof currentRun.parent === "object"
+    ? currentRun.parent
+    : (currentRun.mission && typeof currentRun.mission === "object"
+      ? currentRun.mission
+      : null);
+  const parentCandidates = suppliedCurrentParent
+    ? [suppliedCurrentParent, ...items]
+    : items;
+  const parents = parentCandidates
     .filter((item) => (
       item.reportType === "ai_trade_council_report"
       || item?.delegation?.mode === "ai_trade_council_read_only"
+      || item === suppliedCurrentParent
     ))
+    .filter((item, index, source) => {
+      const missionId = String(item?.id || "");
+      return !missionId || source.findIndex((candidate) => String(candidate?.id || "") === missionId) === index;
+    })
     .sort((left, right) => signalMissionCreatedTime(right) - signalMissionCreatedTime(left));
-  const parent = parents[0] || null;
+  const historicalParent = parents[0] || null;
   const activeParent = parents.find((item) => signalMissionUiState(item) === "running") || null;
+  const currentRunParentId = safeDashboardDisplayText(
+    currentRun.parentMissionId
+      || suppliedCurrentParent?.id,
+    "",
+  );
+  const consensusParentId = safeDashboardDisplayText(
+    pipeline?.consensus?.sourceMissionId,
+    "",
+  );
+  const currentRunParent = currentRun.available === false || currentRun.current === false
+    ? null
+    : (
+      parents.find((item) => String(item?.id || "") === currentRunParentId)
+      || suppliedCurrentParent
+      || null
+    );
+  const automationParent = automation.lastMissionId
+    ? parents.find((item) => String(item?.id || "") === automation.lastMissionId) || null
+    : null;
+  const consensusParent = !automation.lastMissionId && consensusParentId
+    ? parents.find((item) => String(item?.id || "") === consensusParentId) || null
+    : null;
+  const waitingForCurrentRound = automation.newBarPending === true && !activeParent;
+  if (waitingForCurrentRound) {
+    return {
+      parent: null,
+      activeParent: null,
+      historicalParent,
+      currentRun,
+      hasActiveRound: false,
+      children: [],
+      byAgent: new Map(),
+      counts: { running: 0, completed: 0, blocked: 0 },
+      state: "waiting_current_round",
+      statusLabel: "รอรอบวิเคราะห์แท่งล่าสุด",
+      reason: "พบแท่งใหม่ กำลังรอรอบวิเคราะห์",
+      snapshotId: "",
+      current: false,
+    };
+  }
+  const hasExplicitCurrentIdentity = Boolean(
+    currentRunParentId || automation.lastMissionId || consensusParentId,
+  );
+  const parent = activeParent
+    || currentRunParent
+    || automationParent
+    || consensusParent
+    || (!hasExplicitCurrentIdentity ? historicalParent : null);
   const parentId = String(parent?.id || "");
-  const childIds = new Set(Array.isArray(parent?.subtaskIds) ? parent.subtaskIds : []);
-  const childPool = items
+  const childIds = new Set(
+    (Array.isArray(parent?.subtaskIds) ? parent.subtaskIds : []).map((value) => String(value || "")),
+  );
+  const suppliedCurrentChildren = Array.isArray(currentRun.children)
+    ? currentRun.children.filter((item) => item && typeof item === "object")
+    : [];
+  const childPool = [...suppliedCurrentChildren, ...items]
     .filter((item) => (
       AI_TRADE_COUNCIL_AGENT_IDS.includes(item?.owner)
       && (
-        (parentId && item?.parentMissionId === parentId)
-        || childIds.has(item?.id)
+        (parentId && String(item?.parentMissionId || "") === parentId)
+        || childIds.has(String(item?.id || ""))
       )
     ))
     .sort((left, right) => signalMissionCreatedTime(right) - signalMissionCreatedTime(left));
@@ -6360,6 +7539,8 @@ function signalCouncilRunModel(report = {}) {
   return {
     parent,
     activeParent,
+    historicalParent,
+    currentRun,
     hasActiveRound: Boolean(activeParent),
     children,
     byAgent,
@@ -6368,6 +7549,7 @@ function signalCouncilRunModel(report = {}) {
     statusLabel: signalMissionStatusLabel(parent),
     reason: signalMissionReason(parent, "ยังไม่มี Mission วิเคราะห์จาก Backend"),
     snapshotId: safeDashboardDisplayText(parent?.delegation?.snapshotId, ""),
+    current: Boolean(parent),
   };
 }
 
@@ -6375,6 +7557,7 @@ function signalCurrentConsensusSource(report = {}, run = signalCouncilRunModel(r
   const council = signalCouncilModel(report);
   const live = council.liveAnalysis || {};
   const pipeline = council.decisionPipeline || {};
+  const activeStream = signalActiveStreamContext(report);
   const candidates = [live.consensus, pipeline.consensus]
     .filter((item) => item && typeof item === "object")
     .filter((item) => (
@@ -6389,10 +7572,17 @@ function signalCurrentConsensusSource(report = {}, run = signalCouncilRunModel(r
   const source = candidates.find((item) => {
     const sourceMissionId = String(item?.sourceMissionId || "");
     const sourceSnapshotId = safeDashboardDisplayText(item?.snapshotId, "");
+    const sourceStream = signalAnalysisSourceStreamContext(item);
+    const streamMatches = activeStream.stable === true
+      && signalStreamContextIdentityComplete(activeStream)
+      && signalStreamContextIdentityComplete(sourceStream)
+      && item.identityValid !== false
+      && signalStreamContextsMatch(activeStream, sourceStream);
     return Boolean(sourceMissionId)
       && sourceMissionId === parentId
       && Boolean(sourceSnapshotId)
-      && sourceSnapshotId === runSnapshotId;
+      && sourceSnapshotId === runSnapshotId
+      && streamMatches;
   });
   return { source: source || {}, current: Boolean(source), run };
 }
@@ -6429,6 +7619,9 @@ function signalAgentViews(report = {}, runtime = getSignalRuntimeTruth(report)) 
   ];
   return defaults.map((definition) => {
     const mission = run.byAgent.get(definition.agentId) || null;
+    const waitingReason = run.state === "waiting_current_round"
+      ? run.reason
+      : definition.waitingReason;
     const view = supplied.find((item) => (
       String(item?.id || item?.agentId || item?.role || "").toLowerCase() === definition.id
       || String(item?.agentId || "").toLowerCase() === definition.agentId
@@ -6486,10 +7679,10 @@ function signalAgentViews(report = {}, runtime = getSignalRuntimeTruth(report)) 
         ? Number(view.takeProfitPrice)
         : null,
       reasons: missionWins
-        ? [mission ? signalMissionReason(mission) : definition.waitingReason]
+        ? [mission ? signalMissionReason(mission) : waitingReason]
         : available
         ? readableReasons.slice(0, 3)
-        : [mission ? signalMissionReason(mission) : definition.waitingReason],
+        : [mission ? signalMissionReason(mission) : waitingReason],
       observedAt: available
         ? (view.observedAt || evidenceObservedAt || mission?.completedAt || mission?.createdAt || null)
         : (mission?.completedAt || mission?.updatedAt || mission?.createdAt || null),
@@ -6733,8 +7926,16 @@ function signalConsensusModel(report = {}, runtime = getSignalRuntimeTruth(repor
     .trim()
     .toUpperCase()
     .replaceAll("_", " ");
+  const activeStream = signalActiveStreamContext(report);
+  const analyzedStream = signalAnalysisSourceStreamContext(source);
+  const matchesCurrentStream = activeStream.stable === true
+    && signalStreamContextIdentityComplete(activeStream)
+    && signalStreamContextIdentityComplete(analyzedStream)
+    && source.identityValid !== false
+    && signalStreamContextsMatch(activeStream, analyzedStream);
   const available = (
     consensusSelection.current
+    && matchesCurrentStream
     &&
     (source.available === true || source.ready === true || votes.length > 0)
     && voteCount === AI_TRADE_COUNCIL_AGENT_IDS.length
@@ -6761,12 +7962,16 @@ function signalConsensusModel(report = {}, runtime = getSignalRuntimeTruth(repor
     source.currentSnapshotId || market.snapshotId,
     "",
   );
-  const matchesCurrentSnapshot = source.matchesCurrentSnapshot === true
-    || Boolean(
-      analyzedSnapshotId
-      && currentSnapshotId
-      && analyzedSnapshotId === currentSnapshotId,
-    );
+  const matchesCurrentSnapshot = matchesCurrentStream && (
+    source.matchesCurrentSnapshot === true
+      || Boolean(
+        analyzedSnapshotId
+        && currentSnapshotId
+        && analyzedSnapshotId === currentSnapshotId,
+      )
+  );
+  const snapshotIdentityAvailable = Boolean(analyzedSnapshotId && currentSnapshotId);
+  const currentDataAvailable = available && snapshotIdentityAvailable && matchesCurrentSnapshot;
   const sourceMissionId = safeDashboardDisplayText(source.sourceMissionId, "");
   const averageConfidence = firstFiniteSignalNumber(source.averageConfidence, source.confidence);
   const tradePlan = source.tradePlan && typeof source.tradePlan === "object"
@@ -6853,11 +8058,11 @@ function signalConsensusModel(report = {}, runtime = getSignalRuntimeTruth(repor
         ? "พบทั้ง BUY และ SELL ในรอบเดียวกัน ระบบจึงสรุป NO TRADE และไม่ส่ง Order"
         : `คะแนนยังไม่ถึงเกณฑ์ ${requiredVotes} ใน 3 หรือแผนยังไม่ครบ ระบบจึงสรุป NO TRADE และไม่ส่ง Order`;
   return {
-    available,
+    available: currentDataAvailable,
     buy: count("buy"),
     hold: count("hold"),
     sell: count("sell"),
-    decision: available ? safeDisplayDecision : (run.state === "blocked" ? "ติดขัด" : "ข้อมูลไม่ครบ"),
+    decision: currentDataAvailable ? safeDisplayDecision : (run.state === "blocked" ? "ติดขัด" : "ข้อมูลไม่ครบ"),
     voteCount,
     votes,
     averageConfidence,
@@ -6869,6 +8074,9 @@ function signalConsensusModel(report = {}, runtime = getSignalRuntimeTruth(repor
     snapshotId: analyzedSnapshotId,
     currentSnapshotId,
     matchesCurrentSnapshot,
+    matchesCurrentStream,
+    symbol: analyzedStream.symbol,
+    timeframe: analyzedStream.timeframe,
     sourceMissionId,
     belongsToLatestRun,
     tradePlan: {
@@ -7260,16 +8468,6 @@ function signalRoundHealthModel(report = {}, automation = signalCouncilAutomatio
   const automationConfig = suppliedAutomation.config && typeof suppliedAutomation.config === "object"
     ? suppliedAutomation.config
     : suppliedAutomation;
-  const automationState = suppliedAutomation.state && typeof suppliedAutomation.state === "object"
-    ? suppliedAutomation.state
-    : suppliedAutomation;
-  const dailyQuotaAvailable = ["maxDailyRounds", "maxDailyRuns"].some((key) => (
-    Object.prototype.hasOwnProperty.call(automationConfig, key)
-    || Object.prototype.hasOwnProperty.call(suppliedAutomation, key)
-  )) && ["dailyRunCount"].some((key) => (
-    Object.prototype.hasOwnProperty.call(automationState, key)
-    || Object.prototype.hasOwnProperty.call(suppliedAutomation, key)
-  ));
   const reserveAvailable = Object.prototype.hasOwnProperty.call(automationConfig, "minRemainingPercent")
     || Object.prototype.hasOwnProperty.call(suppliedAutomation, "minRemainingPercent");
   const createdAt = run.parent?.createdAt ? new Date(run.parent.createdAt).getTime() : null;
@@ -7305,10 +8503,18 @@ function signalRoundHealthModel(report = {}, automation = signalCouncilAutomatio
         detail: roundDeadlineSeconds === null ? "ไม่สร้างเวลาเส้นตายใน Frontend" : `นโยบาย ${roundDeadlineSeconds} วินาที`,
       },
       {
-        label: "Quota วันนี้",
-        state: !dailyQuotaAvailable ? "unavailable" : automation.dailyRunCount >= automation.maxDailyRounds ? "blocked" : "complete",
-        value: dailyQuotaAvailable ? `${automation.dailyRunCount}/${automation.maxDailyRounds} รอบ` : "ยังไม่มีข้อมูลรอบจาก Backend",
-        detail: reserveAvailable ? `สำรอง Rate Limit อย่างน้อย ${automation.minRemainingPercent}%` : "ยังไม่มีเกณฑ์สำรองจาก Backend",
+        label: "รอบวิเคราะห์แท่งปิด",
+        state: automation.dailyRoundLimitEnabled
+          && automation.effectiveMaxDailyRounds !== null
+          && automation.dailyRunCount >= automation.effectiveMaxDailyRounds
+          ? "blocked"
+          : "complete",
+        value: automation.dailyRoundLimitEnabled && automation.effectiveMaxDailyRounds !== null
+          ? `${automation.dailyRunCount}/${automation.effectiveMaxDailyRounds} รอบวันนี้`
+          : `ไม่จำกัด • วันนี้ ${automation.dailyRunCount} รอบ`,
+        detail: automation.dailyRoundLimitEnabled
+          ? "Backend เปิดเพดานรอบรายวันไว้"
+          : "แท่งปิดใหม่จะเริ่มวิเคราะห์เมื่อระบบพร้อม และอยู่ในคิวถาวรตามลำดับ FIFO",
       },
       {
         label: "Codex คงเหลือ",
@@ -7591,7 +8797,7 @@ function signalSigningKeyCopyState(runtime = {}) {
   };
 }
 
-function renderSignalRiskList(container, runtime) {
+function renderSignalRiskList(container, runtime, managedOrderLimit = null) {
   if (!container) return;
   const telemetry = runtime.gatewayRiskTelemetry || {};
   const currentVsMax = (current, maximum, suffix = "") => (
@@ -7626,6 +8832,9 @@ function renderSignalRiskList(container, runtime) {
                 : !signedLiveReady
                   ? "ยังไม่เทรดจริง • ตัวตรวจลายเซ็น Live ยังไม่พร้อม"
                   : "ยังไม่พร้อม • ตรวจระบบป้องกันของ EA";
+  const effectiveManagedLimit = managedOrderLimit?.effectiveMaxManagedOrders ?? null;
+  const managedCurrent = managedOrderLimit?.currentManagedPositions
+    ?? telemetry.currentManagedPositions;
   const items = [
     ["Risk Guard ของ Mission (ไม่ร่วมโหวต)", runtime.missionRiskGuardAvailable, runtime.missionRiskGuardAvailable ? "พร้อมตรวจ Mission" : "ยังไม่พร้อม"],
     ["ข้อมูลสถานะการเทรด", runtime.tradingStateAvailable, runtime.tradingStateAvailable ? "พร้อมใช้งาน" : "รอ Adapter"],
@@ -7635,7 +8844,8 @@ function renderSignalRiskList(container, runtime) {
       ? [["โหมด EA / ประเภทบัญชี", modeAccount.ready, modeAccount.value]]
       : []),
     ["Execution Guard ของ EA", guardReady, signalExecutionGuardSummary(runtime)],
-    ["Position ที่ EA ดูแล", telemetry.currentManagedPositions !== null, currentVsMax(telemetry.currentManagedPositions, telemetry.maxManagedPositions)],
+    ["Position ของ Managed Magic ทั้งบัญชี", managedCurrent !== null, currentVsMax(managedCurrent, telemetry.maxManagedPositions)],
+    ["เพดาน Order ฝั่ง AI ที่ใช้จริง", effectiveManagedLimit !== null, currentVsMax(managedCurrent, effectiveManagedLimit)],
     ["Lot รวมที่ EA ดูแล", telemetry.currentManagedLots !== null, currentVsMax(telemetry.currentManagedLots, telemetry.maxManagedLots)],
     ["รายการที่ EA ดูแลวันนี้", telemetry.currentTradesToday !== null, currentVsMax(telemetry.currentTradesToday, telemetry.maxTradesToday)],
     ["กำไร/ขาดทุนของ EA วันนี้", telemetry.managedDailyPnl !== null, telemetry.managedDailyPnl === null ? "รอข้อมูลจาก EA" : String(telemetry.managedDailyPnl)],
@@ -9233,10 +10443,17 @@ function renderSignalLivePanel(report = {}) {
   const views = signalAgentViews(report, runtime);
   const consensus = signalConsensusModel(report, runtime);
   const consensusPolicy = signalCouncilConsensusPolicyModel(report);
+  const managedOrderLimit = signalManagedOrderLimitModel(report, runtime);
   const policyBusy = state.aiTradeCouncilConsensusPolicy.inFlight
+    || state.aiTradeCouncilAutomation.inFlight
+    || state.aiTradeCouncilOrderLimit.inFlight;
+  const orderLimitBusy = state.aiTradeCouncilOrderLimit.inFlight
+    || state.aiTradeCouncilConsensusPolicy.inFlight
     || state.aiTradeCouncilAutomation.inFlight;
   const policyMessage = state.aiTradeCouncilConsensusPolicy.message
     || `เกณฑ์นี้ใช้กับรอบวิเคราะห์ถัดไป • ผลโหวตเก่าจะไม่ถูกนำกลับมาส่ง Order`;
+  const orderLimitMessage = state.aiTradeCouncilOrderLimit.message
+    || managedOrderLimit.statusMessage;
   container.innerHTML = `
     <div class="signal-market-strip" data-signal-market-strip></div>
     <div class="signal-live-layout signal-council-overview-layout">
@@ -9324,6 +10541,57 @@ function renderSignalLivePanel(report = {}) {
             aria-live="polite"
           ></small>
         </section>
+        <section class="signal-council-card signal-managed-order-card" aria-labelledby="signalManagedOrderTitle">
+          <div class="signal-consensus-policy-heading">
+            <div>
+              <span>เพดาน Order ของ AI Council</span>
+              <h4 id="signalManagedOrderTitle">เปิดพร้อมกันได้สูงสุดกี่ Order</h4>
+            </div>
+            <span class="signal-state-badge ${orderLimitBusy ? "working" : managedOrderLimit.tone}">
+              ${orderLimitBusy
+                ? "กำลังบันทึก"
+                : managedOrderLimit.effectiveMaxManagedOrders === null
+                  ? "รอ EA"
+                  : `ใช้จริง ${managedOrderLimit.effectiveMaxManagedOrders}`}
+            </span>
+          </div>
+          <div
+            class="signal-max-order-options"
+            role="radiogroup"
+            aria-label="จำนวน Order สูงสุดที่ AI อนุญาตให้เปิดพร้อมกัน"
+          >
+            ${[1, 3, 5, 10].map((value) => `
+              <button
+                type="button"
+                role="radio"
+                aria-checked="${managedOrderLimit.configuredMaxManagedOrders === value ? "true" : "false"}"
+                data-signal-max-managed-orders="${value}"
+                ${orderLimitBusy ? "disabled" : ""}
+              >
+                <strong>${value}</strong>
+                <span>Order</span>
+              </button>
+            `).join("")}
+          </div>
+          <div class="signal-managed-order-facts">
+            <span><small>ตั้งใน HQ</small><strong>${managedOrderLimit.configuredMaxManagedOrders}</strong></span>
+            <span><small>ขีดจำกัด EA</small><strong>${managedOrderLimit.eaMaxManagedPositions ?? "—"}</strong></span>
+            <span><small>ใช้จริง</small><strong>${managedOrderLimit.effectiveMaxManagedOrders ?? "—"}</strong></span>
+            <span><small>เปิดอยู่</small><strong>${managedOrderLimit.currentManagedPositions ?? "—"}</strong></span>
+          </div>
+          <p class="signal-managed-order-message" data-tone="${managedOrderLimit.tone}">
+            ${orderLimitMessage}
+          </p>
+          <small class="signal-consensus-gate-note">
+            เป็นเพดานฝั่ง Backend เท่านั้น • ไม่เปลี่ยน MaxManagedOpenPositions ใน EA และไม่ปิด Order ที่เปิดอยู่
+          </small>
+          <small
+            class="signal-consensus-policy-status"
+            data-signal-max-order-status
+            data-tone="${state.aiTradeCouncilOrderLimit.tone}"
+            aria-live="polite"
+          ></small>
+        </section>
         <section class="signal-council-card signal-risk-gate-card">
           <h4>Risk / EA Gate</h4>
           <p class="signal-gate-note">Risk Guard ไม่ร่วมโหวต และสถานะพร้อมเทรดต้องยืนยันจาก EA</p>
@@ -9337,6 +10605,7 @@ function renderSignalLivePanel(report = {}) {
       </aside>
     </div>
   `;
+  container.querySelector("[data-signal-market-strip]")?.after(createSignalStreamContextBanner(report));
   renderSignalMarketStrip(container.querySelector("[data-signal-market-strip]"), report, runtime);
   const agentGrid = container.querySelector("[data-signal-agent-grid]");
   views.forEach((view) => agentGrid?.appendChild(createSignalCouncilOverviewCard(view)));
@@ -9372,12 +10641,23 @@ function renderSignalLivePanel(report = {}) {
     );
     consensusSnapshot.dataset.current = consensus.matchesCurrentSnapshot ? "true" : "false";
   }
-  renderSignalRiskList(container.querySelector("[data-signal-risk-list]"), runtime);
+  renderSignalRiskList(
+    container.querySelector("[data-signal-risk-list]"),
+    runtime,
+    managedOrderLimit,
+  );
   const policyStatus = container.querySelector("[data-signal-consensus-policy-status]");
   if (policyStatus) policyStatus.textContent = policyMessage;
   container.querySelectorAll("[data-signal-required-votes]").forEach((button) => {
     button.addEventListener("click", () => {
       void setAiTradeCouncilRequiredVotes(button.dataset.signalRequiredVotes);
+    });
+  });
+  const orderLimitStatus = container.querySelector("[data-signal-max-order-status]");
+  if (orderLimitStatus) orderLimitStatus.textContent = state.aiTradeCouncilOrderLimit.message;
+  container.querySelectorAll("[data-signal-max-managed-orders]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void setAiTradeCouncilMaxManagedOrders(button.dataset.signalMaxManagedOrders);
     });
   });
   const gatewayAction = container.querySelector("[data-signal-gateway-action]");
@@ -9434,6 +10714,7 @@ function renderSignalDecisionPanel(report = {}) {
   const market = signalMarketModel(report);
   const views = signalAgentViews(report, runtime);
   const consensus = signalConsensusModel(report, runtime);
+  const managedOrderLimit = signalManagedOrderLimitModel(report, runtime);
   const run = consensus.run || signalCouncilRunModel(report);
   const currentSnapshotId = safeDashboardDisplayText(
     market.snapshotId || pipeline?.snapshot?.currentId,
@@ -9622,6 +10903,7 @@ function renderSignalDecisionPanel(report = {}) {
       <div data-signal-timeline></div>
     </section>
   `;
+  container.querySelector("[data-signal-market-strip]")?.after(createSignalStreamContextBanner(report));
   renderSignalMarketStrip(container.querySelector("[data-signal-market-strip]"), report, runtime);
   renderSignalPipelineSteps(container.querySelector("[data-signal-pipeline]"), states);
   const qualityCard = container.querySelector("[data-signal-quality-card]");
@@ -9712,7 +10994,11 @@ function renderSignalDecisionPanel(report = {}) {
     );
     consensusSnapshot.dataset.current = consensus.matchesCurrentSnapshot ? "true" : "false";
   }
-  renderSignalRiskList(container.querySelector("[data-signal-risk-list]"), runtime);
+  renderSignalRiskList(
+    container.querySelector("[data-signal-risk-list]"),
+    runtime,
+    managedOrderLimit,
+  );
   const timeline = container.querySelector("[data-signal-timeline]");
   const events = run.parent
     ? [run.parent, ...run.children]
@@ -9831,124 +11117,1814 @@ function createSignalHistoryRow(entry) {
   return row;
 }
 
-function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
+function signalHistoryBaseReadModel(report = {}, kind = "analysis") {
+  const council = signalCouncilModel(report);
+  if (kind === "orders") {
+    return signalHistoryObject(council?.history?.orderExecutions);
+  }
+  return signalHistoryObject(council?.history?.analysisHistory || council?.analysisHistory);
+}
+
+function signalHistoryAttemptKey(item = {}, kind = "analysis", index = 0) {
+  const attemptId = safeDashboardDisplayText(item.attemptId, "");
+  if (attemptId) return `attempt:${attemptId}`;
+  if (kind === "orders") {
+    const commandId = safeDashboardDisplayText(item.commandId, "");
+    if (commandId) return `legacy-command:${commandId}`;
+    if (item.ticket !== null && item.ticket !== undefined && item.ticket !== "") {
+      return `legacy-ticket:${String(item.ticket)}`;
+    }
+  }
+  const recordId = safeDashboardDisplayText(
+    item.missionId || item.linkedMissionId || item.id || item.reportId,
+    "",
+  );
+  if (recordId) return `legacy-record:${recordId}`;
+  const timestamp = signalHistoryTimestamp(
+    item.timestamp,
+    item.openedAt,
+    item.completedAt,
+    item.createdAt,
+    item.updatedAt,
+  );
+  // Do not collapse retries by Snapshot or bar identity. Legacy rows without an
+  // attempt ID stay distinct until Backend supplies a durable identifier.
+  return `legacy-unidentified:${kind}:${timestamp || "unknown"}:${index}`;
+}
+
+function signalHistoryMergedReadModel(report = {}, kind = "analysis") {
+  const base = signalHistoryBaseReadModel(report, kind);
+  const pageState = state.aiTradeCouncilHistoryPages?.[kind] || {};
+  const requestedScope = signalHistoryRequestScope(report);
+  const scopeKey = signalHistoryPageScopeKey(report);
+  const pageScopeMatches = pageState.scopeKey === scopeKey;
+  const baseScope = base.scope && typeof base.scope === "object" ? base.scope : {};
+  // The prop report historically contains the selected gateway channel only.
+  // Never relabel that payload as "all"; only an authoritative Backend scope
+  // may satisfy either the global or active-stream view.
+  const baseMatchesRequestedScope = baseScope.authoritative === true
+    && baseScope.mode === requestedScope.mode
+    && (
+      requestedScope.mode !== "active"
+      || signalStreamContextsMatch(requestedScope, signalStreamContextFromSource(baseScope))
+    );
+  const baseItems = baseMatchesRequestedScope && Array.isArray(base.items) ? base.items : [];
+  const loadedItems = pageScopeMatches && Array.isArray(pageState.items) ? pageState.items : [];
+  const seen = new Set();
+  const items = [...baseItems, ...loadedItems].filter((item, index) => {
+    if (!item || typeof item !== "object") return false;
+    const key = signalHistoryAttemptKey(item, kind, index);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const useLoadedPage = pageScopeMatches && pageState.initialized === true;
+  return {
+    ...base,
+    items,
+    summary: useLoadedPage && pageState.summary && typeof pageState.summary === "object"
+      ? pageState.summary
+      : baseMatchesRequestedScope
+        ? base.summary
+        : null,
+    hasMore: useLoadedPage
+      ? pageState.hasMore === true
+      : baseMatchesRequestedScope && base.hasMore === true,
+    nextCursor: useLoadedPage
+      ? safeDashboardDisplayText(pageState.nextCursor, "")
+      : baseMatchesRequestedScope
+        ? safeDashboardDisplayText(base.nextCursor || base.page?.nextCursor, "")
+        : "",
+    page: useLoadedPage && pageState.page && typeof pageState.page === "object"
+      ? pageState.page
+      : baseMatchesRequestedScope ? base.page : null,
+    paginationLoading: pageState.inFlight === true,
+    paginationError: safeDashboardDisplayText(pageState.errorMessage, ""),
+    paginationUpdatedAt: pageState.updatedAt || null,
+    scope: useLoadedPage && pageState.scope && typeof pageState.scope === "object"
+      ? pageState.scope
+      : base.scope,
+    scopePending: !useLoadedPage && !baseMatchesRequestedScope,
+  };
+}
+
+function resetSignalHistoryPageCache(kind = null) {
+  const kinds = kind && SIGNAL_HISTORY_TABS.includes(kind) ? [kind] : SIGNAL_HISTORY_TABS;
+  kinds.forEach((itemKind) => {
+    const pageState = state.aiTradeCouncilHistoryPages?.[itemKind];
+    if (!pageState) return;
+    Object.assign(pageState, {
+      items: [],
+      initialized: false,
+      hasMore: false,
+      nextCursor: "",
+      summary: null,
+      page: null,
+      scope: null,
+      errorMessage: "",
+      updatedAt: null,
+      sourceReportUpdatedAt: null,
+      scopeKey: "",
+      generation: Math.max(0, Math.trunc(Number(pageState.generation) || 0)) + 1,
+    });
+  });
+}
+
+function signalHistoryResponseMatchesRequest(scope = {}, request = {}) {
+  if (!scope || scope.authoritative !== true || scope.mode !== request.mode) return false;
+  if (request.mode !== "active") return true;
+  return ["candidateId", "streamKey", "symbol", "timeframe"]
+    .every((field) => String(scope[field] || "") === String(request[field] || ""));
+}
+
+async function loadSignalHistoryPage(kind, report = {}, { firstPage = false } = {}) {
+  if (!SIGNAL_HISTORY_TABS.includes(kind)) return false;
+  const pageState = state.aiTradeCouncilHistoryPages?.[kind];
+  if (!pageState || pageState.inFlight) return false;
+  const requestScope = signalHistoryRequestScope(report);
+  if (state.modal.signalHistoryScope === "active" && requestScope.mode !== "active") return false;
+  const current = signalHistoryMergedReadModel(report, kind);
+  const cursor = firstPage
+    ? ""
+    : safeDashboardDisplayText(current.nextCursor || current.page?.nextCursor, "");
+  if (!firstPage && (current.hasMore !== true || !cursor)) return false;
+  const requestScopeKey = signalHistoryPageScopeKey(report);
+  const requestGeneration = Math.max(0, Math.trunc(Number(pageState.generation) || 0));
+  pageState.inFlight = true;
+  pageState.errorMessage = "";
+  if (state.modal.open && state.modal.id === AI_TRADE_COUNCIL_PROP_ID) {
+    renderSignalHistoryPanel(report);
+  }
+  try {
+    const params = signalHistoryScopeQuery(report);
+    params.set("kind", kind);
+    params.set("limit", "50");
+    if (cursor) params.set("cursor", cursor);
+    const path = `${AI_TRADE_COUNCIL_HISTORY_ENDPOINT}?${params.toString()}`;
+    const payload = await fetchJson(path, { timeoutMs: 15000 });
+    const history = signalHistoryObject(payload?.history);
+    if (
+      payload?.kind !== kind
+      || history.available !== true
+      || !Array.isArray(history.items)
+      || !signalHistoryResponseMatchesRequest(history.scope, requestScope)
+    ) {
+      throw new Error("invalid_history_page");
+    }
+    const nextCursor = safeDashboardDisplayText(history.nextCursor || history.page?.nextCursor, "");
+    if (history.hasMore === true && (!nextCursor || nextCursor === cursor)) {
+      throw new Error("invalid_history_cursor_progress");
+    }
+    const latestReport = state.propReports[AI_TRADE_COUNCIL_PROP_ID] || report;
+    if (
+      requestGeneration !== Math.max(0, Math.trunc(Number(pageState.generation) || 0))
+      || requestScopeKey !== signalHistoryPageScopeKey(latestReport)
+    ) {
+      return false;
+    }
+    const combined = firstPage ? history.items : [...pageState.items, ...history.items];
+    const seen = new Set();
+    pageState.items = combined.filter((item, index) => {
+      if (!item || typeof item !== "object") return false;
+      const key = signalHistoryAttemptKey(item, kind, index);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    pageState.initialized = true;
+    pageState.hasMore = history.hasMore === true;
+    pageState.nextCursor = nextCursor;
+    pageState.summary = history.summary && typeof history.summary === "object"
+      ? history.summary
+      : pageState.summary;
+    pageState.page = history.page && typeof history.page === "object" ? history.page : null;
+    pageState.scope = history.scope;
+    pageState.updatedAt = payload.updatedAt || new Date().toISOString();
+    pageState.sourceReportUpdatedAt = safeDashboardDisplayText(report?.updatedAt, "");
+    pageState.scopeKey = requestScopeKey;
+    return true;
+  } catch (error) {
+    pageState.errorMessage = /HTTP 409/.test(String(error?.message || ""))
+      ? "กราฟเปลี่ยนระหว่างโหลดประวัติ • รอ Active Stream ล่าสุดแล้วกดตรวจใหม่"
+      : "โหลดประวัติจาก Backend ไม่สำเร็จ • กดตรวจใหม่เพื่อเริ่มจากหน้าล่าสุด";
+    return false;
+  } finally {
+    pageState.inFlight = false;
+    if (state.modal.open && state.modal.id === AI_TRADE_COUNCIL_PROP_ID) {
+      renderSignalHistoryPanel(state.propReports[AI_TRADE_COUNCIL_PROP_ID] || report);
+    }
+  }
+}
+
+function loadSignalHistoryFirstPage(kind, report = {}) {
+  return loadSignalHistoryPage(kind, report, { firstPage: true });
+}
+
+function loadSignalHistoryNextPage(kind, report = {}) {
+  return loadSignalHistoryPage(kind, report);
+}
+
+function loadSignalHistoryScopeFirstPages(report = {}) {
+  const requestedScope = signalHistoryRequestScope(report);
+  if (state.modal.signalHistoryScope === "active" && requestedScope.mode !== "active") {
+    return Promise.resolve([]);
+  }
+  const scopeKey = signalHistoryPageScopeKey(report);
+  const reportUpdatedAt = safeDashboardDisplayText(report?.updatedAt, "");
+  return Promise.all(SIGNAL_HISTORY_TABS.map((kind) => {
+    const pageState = state.aiTradeCouncilHistoryPages?.[kind];
+    if (!pageState || pageState.inFlight) return Promise.resolve(false);
+    if (
+      pageState.initialized === true
+      && pageState.scopeKey === scopeKey
+      && (!reportUpdatedAt || pageState.sourceReportUpdatedAt === reportUpdatedAt)
+    ) {
+      return Promise.resolve(true);
+    }
+    return loadSignalHistoryFirstPage(kind, report);
+  }));
+}
+
+function signalOrderHistoryEntries(report = {}, readModel = null) {
+  const orderHistory = readModel && typeof readModel === "object"
+    ? readModel
+    : signalHistoryMergedReadModel(report, "orders");
+  return Array.isArray(orderHistory?.items)
+    ? orderHistory.items.filter((item) => item && typeof item === "object")
+    : [];
+}
+
+function signalOrderNumber(value, maximumFractionDigits = 5) {
+  if (value === null || value === undefined || value === "") return "—";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  return new Intl.NumberFormat("th-TH", {
+    minimumFractionDigits: Math.min(2, maximumFractionDigits),
+    maximumFractionDigits,
+  }).format(number);
+}
+
+function signalThaiDateTime(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) return "ไม่ทราบเวลา";
+  return new Intl.DateTimeFormat("th-TH", {
+    timeZone: "Asia/Bangkok",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function signalBrokerDateTime(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return "";
+  const date = new Date(seconds * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("th-TH", {
+    timeZone: "UTC",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function signalOrderOpenedTime(order = {}) {
+  const value = order.openedAt || order.createdAt || order.updatedAt || "";
+  const parsed = value ? new Date(value).getTime() : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function signalHistoryObject(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string") return {};
+  const text = value.trim();
+  if (!text.startsWith("{") || !text.endsWith("}")) return {};
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function signalHistoryDecision(value) {
+  const token = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
+  if (["BUY", "SELL", "HOLD", "NO_TRADE", "NO_DATA"].includes(token)) return token;
+  if (["ABSTAIN", "ABSTAINED", "SKIP", "SKIPPED", "NOT_RUN"].includes(token)) return "NO_DATA";
+  return "";
+}
+
+function signalHistoryTimestamp(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+      const milliseconds = Math.abs(numeric) < 1_000_000_000_000
+        ? numeric * 1000
+        : numeric;
+      const numericDate = new Date(milliseconds);
+      if (!Number.isNaN(numericDate.getTime())) return numericDate.toISOString();
+    }
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+  }
+  return "";
+}
+
+function signalHistorySkipReasonLabel(value) {
+  const code = String(value || "").trim();
+  if (!code) return "";
+  const labels = {
+    restart_baseline: "ข้ามรอบตั้งต้นหลังระบบเริ่มใหม่",
+    stream_change_baseline: "ข้ามรอบตั้งต้นหลังเปลี่ยนกราฟหรือ Timeframe",
+    first_observation_baseline: "ข้ามแท่งแรกที่ระบบเริ่มตรวจพบ",
+    bar_time_regression_baseline: "ข้ามเพราะเวลาแท่งย้อนกลับ",
+    snapshot_not_captured_during_gap: "ไม่มี Snapshot ของแท่งนี้ในช่วงที่ระบบเว้นห่าง",
+    snapshot_artifact_capture_failed: "บันทึก Snapshot สำหรับแท่งนี้ไม่สำเร็จ",
+    durable_snapshot_unavailable: "ไม่พบ Snapshot ถาวรสำหรับวิเคราะห์ย้อนหลัง",
+  };
+  return labels[code] ? `${labels[code]} (${code})` : code;
+}
+
+function signalHistoryRoleId(value = {}) {
+  const text = [
+    value.roleId,
+    value.role,
+    value.specialistRole,
+    value.agentId,
+    value.ownerAgentId,
+    value.owner,
+    value.id,
+    value.label,
+    value.title,
+  ].filter(Boolean).join(" ").toLowerCase().replace(/[\s-]+/g, "_");
+  if (text.includes("price_action") || text.includes("backtest_analyst") || text.includes("priceaction")) {
+    return "price_action";
+  }
+  if (text.includes("technical") || text.includes("optimization_agent") || text.includes("indicator")) {
+    return "technical";
+  }
+  if (text.includes("news") || text.includes("codex_mcp_operator") || text.includes("market_context")) {
+    return "news";
+  }
+  return "";
+}
+
+function signalHistoryMissionPayload(item = {}) {
+  const candidates = [
+    item.vote,
+    item.output,
+    item.analysis,
+    item.localResult,
+    item.workflowOutputContract,
+    item.result,
+  ];
+  return candidates.reduce((best, candidate) => {
+    const parsed = signalHistoryObject(candidate);
+    return Object.keys(best).length || !Object.keys(parsed).length ? best : parsed;
+  }, {});
+}
+
+function signalHistoryVote(value = {}, fallbackRole = "") {
+  const source = value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : { decision: value };
+  const roleId = signalHistoryRoleId(source) || signalHistoryRoleId({ roleId: fallbackRole });
+  if (!roleId) return null;
+  const rawStatus = String(source.status || source.state || source.workStatus || "").toLowerCase();
+  const reportedDecision = signalHistoryDecision(
+    source.decision
+      || source.direction
+      || source.vote
+      || source.signal
+      || source.result,
+  );
+  const decision = source.hasVerifiedVote === false ? "" : reportedDecision;
+  const skipped = source.skipped === true
+    || (source.hasVerifiedVote !== false && decision === "NO_DATA")
+    || ["skipped", "skip", "not_run", "no_data", "unavailable"].includes(rawStatus);
+  const confidence = firstFiniteSignalNumber(
+    source.confidence,
+    source.confidencePercent,
+    source.score,
+    source.probability,
+  );
+  const reason = safeDashboardDisplayText(
+    source.reasonTh
+      || source.reason
+      || source.messageTh
+      || source.message
+      || source.reasonCode
+      || source.errorCode
+      || source.blocker?.causeTh
+      || source.blocker,
+    "",
+  );
+  return {
+    roleId,
+    decision,
+    confidence,
+    skipped,
+    complete: ["BUY", "SELL", "HOLD"].includes(decision) && !skipped,
+    reason,
+  };
+}
+
+function signalHistoryFindingVotes(findings) {
+  const values = Array.isArray(findings) ? findings : (findings ? [findings] : []);
+  return values.map((finding) => {
+    const text = String(finding || "").trim();
+    const match = text.match(/^([^:]+):\s*(BUY|SELL|HOLD|NO[_\s-]?DATA|SKIPPED?)(?:\s*\(([0-9]+(?:\.[0-9]+)?)%\))?/i);
+    if (!match) return null;
+    return signalHistoryVote({
+      agentId: match[1],
+      decision: match[2],
+      confidence: match[3],
+      reason: text,
+    });
+  }).filter(Boolean);
+}
+
+function signalHistoryVotesFromSource(source = {}) {
+  const metrics = signalHistoryObject(source.metrics);
+  const consensus = signalHistoryObject(
+    source.consensus
+      || source.councilDecision
+      || source.decisionSummary
+      || metrics.consensus,
+  );
+  const specialistMap = signalHistoryObject(
+    source.specialists
+      || source.specialistVotes
+      || source.agentVotesByRole
+      || metrics.specialists,
+  );
+  const arrays = [
+    source.votes,
+    source.agentVotes,
+    source.specialistVotes,
+    consensus.votes,
+    metrics.votes,
+  ].filter(Array.isArray);
+  const votes = arrays.flatMap((items) => items.map((item) => signalHistoryVote(item)).filter(Boolean));
+  [
+    ["technical", source.technical || source.technicalVote || specialistMap.technical],
+    ["price_action", source.priceAction || source.price_action || source.priceActionVote || specialistMap.price_action || specialistMap.priceAction],
+    ["news", source.news || source.newsVote || specialistMap.news],
+  ].forEach(([roleId, item]) => {
+    if (item !== null && item !== undefined) {
+      const vote = signalHistoryVote(item, roleId);
+      if (vote) votes.push(vote);
+    }
+  });
+  votes.push(...signalHistoryFindingVotes(source.findings));
+  return votes;
+}
+
+function signalHistoryMergeVotes(...voteGroups) {
+  const voteMap = new Map();
+  voteGroups.flat().filter(Boolean).forEach((vote) => {
+    const existing = voteMap.get(vote.roleId);
+    if (!existing) {
+      voteMap.set(vote.roleId, vote);
+      return;
+    }
+    const preferred = vote.complete && !existing.complete ? vote : existing;
+    voteMap.set(vote.roleId, {
+      ...preferred,
+      decision: preferred.decision || vote.decision || existing.decision,
+      confidence: preferred.confidence ?? vote.confidence ?? existing.confidence,
+      reason: preferred.reason || vote.reason || existing.reason,
+      skipped: preferred.skipped || (!preferred.decision && (vote.skipped || existing.skipped)),
+    });
+  });
+  return voteMap;
+}
+
+function signalHistoryMetricObject(source = {}) {
+  const metrics = signalHistoryObject(source.metrics);
+  const decision = signalHistoryObject(source.consensus || source.councilDecision || metrics.consensus);
+  return Object.keys(decision).length ? { ...metrics, ...decision } : metrics;
+}
+
+function signalHistoryRoundIdentity(source = {}) {
+  const metrics = signalHistoryMetricObject(source);
+  const provenance = signalHistoryObject(metrics.decisionProvenance || source.decisionProvenance);
+  const closedBar = signalHistoryObject(
+    provenance.closedBarIdentity
+      || metrics.closedBarIdentity
+      || source.closedBarIdentity
+      || source.market,
+  );
+  const missionId = safeDashboardDisplayText(
+    source.linkedMissionId || source.missionId || source.parentMissionId || source.sourceMissionId,
+    "",
+  );
+  const snapshotId = safeDashboardDisplayText(
+    source.snapshotId || metrics.snapshotId || provenance.snapshotId,
+    "",
+  );
+  const barTime = firstFiniteSignalNumber(
+    source.closedBarTime,
+    source.barTime,
+    source.latestClosedBarTime,
+    metrics.closedBarTime,
+    metrics.barTime,
+    closedBar.closedBarTime,
+  );
+  return {
+    missionId,
+    snapshotId,
+    symbol: safeDashboardDisplayText(
+      source.symbol || metrics.symbol || closedBar.symbol,
+      "—",
+    ).toUpperCase(),
+    timeframe: safeDashboardDisplayText(
+      source.timeframe || metrics.timeframe || closedBar.timeframe,
+      "—",
+    ).toUpperCase(),
+    barTime,
+  };
+}
+
+function signalHistoryFinalDecision(source = {}) {
+  const metrics = signalHistoryMetricObject(source);
+  const consensus = signalHistoryObject(
+    source.consensus
+      || source.councilDecision
+      || source.decisionSummary
+      || metrics.consensus,
+  );
+  const direct = signalHistoryDecision(
+    source.finalDecision
+      || source.finalSignal
+      || source.selectedDirection
+      || source.decision
+      || consensus.finalDecision
+      || consensus.selectedDirection
+      || consensus.decision
+      || metrics.finalDecision
+      || metrics.selectedDirection
+      || metrics.decision,
+  );
+  if (direct) return direct;
+  const summary = String(source.summary || source.result || source.detail || "");
+  const match = summary.match(/(?:มติของสภา|final(?:\s+decision)?|consensus)\s*[:=]\s*(BUY|SELL|HOLD|NO[_\s-]?TRADE|NO[_\s-]?DATA)/i);
+  return signalHistoryDecision(match?.[1]);
+}
+
+function signalHistoryAnalysisSources(report = {}, canonicalOverride = null) {
+  const council = signalCouncilModel(report);
+  const history = council?.history && typeof council.history === "object" ? council.history : {};
+  const rawCanonicalHistory = canonicalOverride && typeof canonicalOverride === "object"
+    ? canonicalOverride
+    : (history.analysisHistory || council.analysisHistory);
+  const canonicalHistory = signalHistoryObject(rawCanonicalHistory);
+  const canonicalRounds = [
+    history.analysisRounds,
+    history.barAnalysisRounds,
+    history.councilRounds,
+    history.analysisDecisions,
+    council.analysisRounds,
+    Array.isArray(rawCanonicalHistory) ? rawCanonicalHistory : null,
+    canonicalHistory.items,
+    canonicalHistory.rounds,
+    history.rounds,
+  ].find(Array.isArray) || [];
+  const tradingReports = Array.isArray(history.tradingReports)
+    ? history.tradingReports
+    : (Array.isArray(history.items)
+        ? history.items.filter((item) => String(item?.type || item?.reportType || "").toLowerCase().includes("ai_trade_council"))
+        : []);
+  const pipeline = council?.decisionPipeline && typeof council.decisionPipeline === "object"
+    ? council.decisionPipeline
+    : {};
+  const pipelineItems = Array.isArray(pipeline.items) ? pipeline.items : [];
+  const hasCanonicalReadModel = Boolean(
+    canonicalHistory.schemaVersion
+    || Array.isArray(canonicalHistory.items)
+    || canonicalHistory.available === false,
+  );
+  return {
+    council,
+    history,
+    canonicalHistory,
+    canonicalRounds,
+    tradingReports,
+    pipelineItems,
+    hasCanonicalReadModel,
+  };
+}
+
+function signalHistoryPipelineGroups(pipelineItems = []) {
+  const parents = new Map();
+  const childrenByParent = new Map();
+  pipelineItems.filter((item) => item && typeof item === "object").forEach((item) => {
+    const parentId = safeDashboardDisplayText(item.parentMissionId, "");
+    if (!parentId) {
+      const id = safeDashboardDisplayText(item.id || item.missionId, "");
+      if (id) parents.set(id, item);
+      return;
+    }
+    const payload = signalHistoryMissionPayload(item);
+    const vote = signalHistoryVote({
+      ...payload,
+      roleId: payload.roleId || signalHistoryRoleId(item),
+      status: payload.status || item.status,
+      reason: payload.reason || item.blocker?.causeTh || item.result,
+    });
+    if (!childrenByParent.has(parentId)) childrenByParent.set(parentId, []);
+    if (vote) childrenByParent.get(parentId).push(vote);
+  });
+  return { parents, childrenByParent };
+}
+
+function signalHistoryOrderState(source, identity, orderItems = []) {
+  const metrics = signalHistoryMetricObject(source);
+  const gateway = signalHistoryObject(source.tradeGateway || metrics.tradeGateway || metrics.execution);
+  const linkage = signalHistoryObject(source.orderLinkage || metrics.orderLinkage);
+  const coverageStatus = String(
+    source.coverageStatus || source.status || metrics.coverageStatus || "",
+  ).trim().toLowerCase();
+  const sourceStatus = String(source.status || metrics.status || "").trim().toLowerCase();
+  // A retry can legitimately reuse the same Snapshot. Prefer the exact Mission
+  // link and only use Snapshot matching for legacy rows that have no Mission ID.
+  const legacySnapshotMatches = identity.missionId ? [] : orderItems.filter((order) => (
+    identity.snapshotId
+    && !safeDashboardDisplayText(order.missionId || order.linkedMissionId, "")
+    && safeDashboardDisplayText(order.snapshotId, "") === identity.snapshotId
+  ));
+  const matchedOrder = identity.missionId
+    ? orderItems.find((order) => (
+        safeDashboardDisplayText(order.missionId || order.linkedMissionId, "") === identity.missionId
+      ))
+    : (legacySnapshotMatches.length === 1 ? legacySnapshotMatches[0] : null);
+  if (matchedOrder) {
+    const side = signalHistoryDecision(matchedOrder.side) || "";
+    return {
+      tone: matchedOrder.verified === true ? "confirmed" : "attention",
+      label: `เปิด ${side || "Order"}`,
+      detail: matchedOrder.ticket ? `Ticket ${matchedOrder.ticket}` : "EA ยืนยันการเปิดแล้ว",
+    };
+  }
+  if (linkage.available === true) {
+    const verified = linkage.verified === true && linkage.unverified !== true;
+    const status = String(linkage.status || "").trim().toLowerCase();
+    const statusLabels = {
+      open: "เปิดอยู่",
+      closed: "ปิดแล้ว",
+      confirmed_unknown: "เปิดสำเร็จ • ไม่ทราบสถานะล่าสุด",
+    };
+    const details = [
+      linkage.ticket ? `Ticket ${safeDashboardDisplayText(linkage.ticket, "—")}` : "ไม่พบ Ticket",
+      status ? `สถานะ ${statusLabels[status] || safeDashboardDisplayText(status, "ไม่ทราบ")}` : "ไม่พบสถานะล่าสุด",
+      linkage.commandId ? `Command ${safeDashboardDisplayText(linkage.commandId, "—")}` : "",
+    ].filter(Boolean);
+    return {
+      tone: verified ? "confirmed" : "attention",
+      label: verified ? "เชื่อม Order แล้ว" : "พบ Order • หลักฐานยังไม่ครบ",
+      detail: details.join(" • "),
+    };
+  }
+  const finalDecision = signalHistoryFinalDecision(source);
+  const gatewayStatus = String(gateway.status || gateway.ackStatus || source.orderStatus || "").toLowerCase();
+  const reasonCode = String(gateway.reasonCode || source.orderReasonCode || "").trim();
+  if (gateway.orderExecutionConfirmed === true || gatewayStatus.includes("ack_executed")) {
+    return { tone: "confirmed", label: "EA ยืนยันเปิด", detail: "ยังไม่พบ Ticket ในหน้าต่างประวัตินี้" };
+  }
+  if (gateway.commandPublished === true || gatewayStatus.includes("waiting_ack")) {
+    return { tone: "pending", label: "ส่งคำสั่งแล้ว", detail: "กำลังรอ ACK จาก EA" };
+  }
+  if (coverageStatus === "skipped" || source.skipReasonCode || metrics.skipReasonCode) {
+    const reason = signalHistorySkipReasonLabel(source.skipReasonCode || metrics.skipReasonCode);
+    return {
+      tone: "none",
+      label: "ข้ามรอบ • ไม่มีคำสั่ง",
+      detail: reason || "Backend ข้ามรอบนี้ก่อนการลงมติ",
+    };
+  }
+  if (
+    source.roundPending === true
+    || source.roundRunning === true
+    || ["pending", "queued", "running", "settling", "waiting"].includes(coverageStatus)
+  ) {
+    const running = source.roundRunning === true
+      || ["running", "active", "dispatching"].includes(coverageStatus)
+      || ["queued", "running", "active", "dispatching"].includes(sourceStatus);
+    return {
+      tone: running ? "pending" : "none",
+      label: running ? "กำลังวิเคราะห์ • ยังไม่มีคำสั่ง" : "รอวิเคราะห์ • ยังไม่มีคำสั่ง",
+      detail: running
+        ? "Specialist กำลังทำงานและ Backend ยังไม่มีมติสุดท้าย"
+        : "แท่งนี้อยู่ในคิว FIFO และยังไม่เริ่มลงมติ",
+    };
+  }
+  if (source.roundTerminalPartial === true || source.roundFailed === true) {
+    return {
+      tone: "blocked",
+      label: source.roundFailed === true
+        ? "ไม่มีคำสั่ง • รอบล้มเหลว"
+        : "ไม่มีคำสั่ง • รอบจบบางส่วน",
+      detail: source.roundFailed === true
+        ? "รอบสิ้นสุดด้วยข้อผิดพลาดหรือ Safety Gate ก่อนครบ 3/3"
+        : "รอบสิ้นสุดโดยมีผล Specialist เพียงบางส่วน",
+    };
+  }
+  if (["BUY", "SELL"].includes(finalDecision)) {
+    const reasonLabels = {
+      single_outstanding_command: "มีคำสั่งก่อนหน้าที่ยังไม่จบ",
+      max_managed_orders_reached: "ถึงจำนวน Order สูงสุด",
+      council_quality_gate_failed: "ไม่ผ่าน Quality Gate",
+      execution_guard_not_ready: "Execution Guard ยังไม่พร้อม",
+    };
+    return {
+      tone: "blocked",
+      label: "ไม่ได้เปิด Order",
+      detail: reasonLabels[reasonCode] || safeDashboardDisplayText(reasonCode, "ไม่พบหลักฐานการส่งคำสั่ง"),
+    };
+  }
+  if (["HOLD", "NO_TRADE"].includes(finalDecision)) {
+    return { tone: "none", label: "ไม่มีคำสั่ง", detail: "มติเป็น HOLD / NO TRADE" };
+  }
+  return {
+    tone: "none",
+    label: "ยังไม่ประเมินคำสั่ง",
+    detail: "ยังไม่มีมติสุดท้ายจาก Backend",
+  };
+}
+
+function signalHistoryNormalizeRound(source = {}, supplementalVotes = [], orderItems = [], attemptMissionId = "") {
+  const rawIdentity = signalHistoryRoundIdentity(source);
+  const identity = {
+    ...rawIdentity,
+    missionId: rawIdentity.missionId || safeDashboardDisplayText(attemptMissionId, ""),
+  };
+  const metrics = signalHistoryMetricObject(source);
+  const voteMap = signalHistoryMergeVotes(
+    signalHistoryVotesFromSource(source),
+    signalHistoryVotesFromSource(metrics),
+    supplementalVotes,
+  );
+  const roles = ["technical", "price_action", "news"];
+  const completeCount = roles.filter((roleId) => voteMap.get(roleId)?.complete).length;
+  const skippedCount = roles.filter((roleId) => voteMap.get(roleId)?.skipped).length;
+  const missingCount = roles.filter((roleId) => {
+    const vote = voteMap.get(roleId);
+    return !vote || (!vote.complete && !vote.skipped);
+  }).length;
+  const coverageStatus = String(source.coverageStatus || source.status || metrics.coverageStatus || "").toLowerCase();
+  const skipReason = signalHistorySkipReasonLabel(
+    source.skipReasonCode
+      || metrics.skipReasonCode
+      || source.skipReasonTh
+      || source.reasonTh
+      || source.reason
+      || source.blocker?.causeTh,
+  );
+  const roundSkipped = coverageStatus === "skipped" || Boolean(source.skipReasonCode || metrics.skipReasonCode);
+  const failureStatuses = new Set([
+    "blocked", "failed", "error", "cancelled", "canceled", "timeout", "timed_out", "deadline_exceeded",
+  ]);
+  const sourceStatus = String(source.status || metrics.status || "").toLowerCase();
+  const roundFailed = !roundSkipped && failureStatuses.has(sourceStatus);
+  const roundRunning = !roundFailed && !roundSkipped && (
+    ["running", "active", "dispatching"].includes(coverageStatus)
+    || ["queued", "running", "active", "dispatching"].includes(sourceStatus)
+  );
+  const roundPending = !roundFailed && !roundSkipped && !roundRunning
+    && ["pending", "queued", "settling", "waiting"].includes(coverageStatus);
+  const complete = completeCount === 3;
+  const roundTerminalPartial = !complete
+    && !roundSkipped
+    && !roundPending
+    && !roundRunning;
+  const displayState = roundSkipped
+    ? "skipped"
+    : roundPending
+      ? "waiting"
+      : roundRunning
+        ? "running"
+        : roundTerminalPartial
+          ? (roundFailed ? "failed" : "partial")
+          : "complete";
+  const votes = Object.fromEntries(roles.map((roleId) => {
+    const existing = voteMap.get(roleId);
+    return [roleId, existing ? {
+      ...existing,
+      displayState: existing.complete ? "" : (existing.skipped ? "skipped" : displayState),
+    } : {
+      roleId,
+      decision: "",
+      confidence: null,
+      skipped: false,
+      complete: false,
+      reason: "",
+      displayState,
+    }];
+  }));
+  // Never invent a NO TRADE consensus merely because some specialists voted.
+  // A missing Backend final decision remains explicit NO DATA.
+  const finalDecision = signalHistoryFinalDecision(source) || "NO_DATA";
+  const averageConfidence = firstFiniteSignalNumber(
+    source.averageConfidence,
+    source.confidence,
+    metrics.averageConfidence,
+    metrics.confidence,
+  );
+  const createdAt = signalHistoryTimestamp(
+    source.timestamp,
+    metrics.timestamp,
+    source.completedAt,
+    source.createdAt,
+    source.updatedAt,
+  );
+  return {
+    attemptId: safeDashboardDisplayText(
+      source.attemptId || attemptMissionId || source.id || source.reportId,
+      "",
+    ),
+    id: safeDashboardDisplayText(
+      source.attemptId || identity.missionId || source.id || source.reportId,
+      `${identity.symbol}:${identity.timeframe}:${identity.barTime || createdAt}`,
+    ),
+    ...identity,
+    createdAt,
+    votes,
+    completeCount,
+    skippedCount,
+    missingCount,
+    complete,
+    coverageStatus,
+    roundSkipped,
+    roundPending,
+    roundRunning,
+    roundFailed,
+    roundTerminalPartial,
+    displayState,
+    finalDecision,
+    averageConfidence,
+    order: signalHistoryOrderState({
+      ...source,
+      roundPending,
+      roundRunning,
+      roundTerminalPartial,
+      roundFailed,
+    }, identity, orderItems),
+    sourceStatus,
+    skipReason,
+    queue: source.queue && typeof source.queue === "object" ? source.queue : null,
+  };
+}
+
+function signalAnalysisHistoryEntries(report = {}, canonicalOverride = null, orderOverride = null) {
+  const {
+    canonicalRounds,
+    tradingReports,
+    pipelineItems,
+    hasCanonicalReadModel,
+  } = signalHistoryAnalysisSources(report, canonicalOverride);
+  const { parents, childrenByParent } = signalHistoryPipelineGroups(pipelineItems);
+  const orderItems = signalOrderHistoryEntries(report, orderOverride);
+  // A canonical attempt page and its summary are one read model. Do not append
+  // legacy reports or the compact pipeline to it, because that would make the
+  // visible rows disagree with Backend's before-pagination totals.
+  const sources = (hasCanonicalReadModel
+    ? [...canonicalRounds]
+    : [...canonicalRounds, ...tradingReports, ...parents.values()])
+    .filter((item) => item && typeof item === "object");
+  const rounds = [];
+  const seen = new Set();
+  sources.forEach((source, sourceIndex) => {
+    const identity = signalHistoryRoundIdentity(source);
+    const explicitMissionId = safeDashboardDisplayText(
+      source.linkedMissionId || source.missionId || source.parentMissionId || source.sourceMissionId,
+      "",
+    );
+    const sourceRecordId = safeDashboardDisplayText(source.id || source.reportId, "");
+    const attemptId = safeDashboardDisplayText(source.attemptId, "");
+    const attemptMissionId = explicitMissionId
+      || (parents.has(sourceRecordId) ? sourceRecordId : "");
+    const createdAt = signalHistoryTimestamp(
+      source.timestamp,
+      source.completedAt,
+      source.createdAt,
+      source.updatedAt,
+    );
+    // Deduplicate only the same recorded attempt. Snapshot and bar identities
+    // are deliberately not aliases because retries can share both values.
+    const key = attemptId
+      ? `attempt:${attemptId}`
+      : attemptMissionId
+        ? `attempt:${attemptMissionId}`
+      : sourceRecordId
+        ? `attempt:${sourceRecordId}`
+        : `legacy-unidentified:${createdAt || sourceIndex}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const supplementalVotes = childrenByParent.get(attemptMissionId) || [];
+    rounds.push(signalHistoryNormalizeRound(source, supplementalVotes, orderItems, attemptMissionId));
+  });
+  return rounds.sort((left, right) => {
+    const leftTime = Number(left.barTime) > 0
+      ? Number(left.barTime) * 1000
+      : new Date(left.createdAt || 0).getTime();
+    const rightTime = Number(right.barTime) > 0
+      ? Number(right.barTime) * 1000
+      : new Date(right.createdAt || 0).getTime();
+    return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+  });
+}
+
+function signalAnalysisHistorySummary(report = {}, rounds = [], canonicalOverride = null) {
+  const { history, canonicalHistory } = signalHistoryAnalysisSources(report, canonicalOverride);
+  const supplied = signalHistoryObject(
+    canonicalHistory.summary
+      || history.analysisSummary
+      || history.analysisHistorySummary,
+  );
+  const suppliedNumber = (aliases, fallback) => {
+    const value = firstFiniteSignalNumber(...aliases.map((name) => supplied[name]));
+    return value === null ? fallback : Math.max(0, Math.floor(value));
+  };
+  const derived = {
+    total: rounds.length,
+    complete: rounds.filter((round) => round.complete).length,
+    noTrade: rounds.filter((round) => ["HOLD", "NO_TRADE"].includes(round.finalDecision)).length,
+    noData: rounds.filter((round) => round.complete && round.finalDecision === "NO_DATA").length,
+    buy: rounds.filter((round) => round.finalDecision === "BUY").length,
+    sell: rounds.filter((round) => round.finalDecision === "SELL").length,
+    waiting: rounds.filter((round) => round.roundPending).length,
+    running: rounds.filter((round) => round.roundRunning).length,
+    skipped: rounds.filter((round) => round.roundSkipped).length,
+    partialFailed: rounds.filter((round) => round.roundTerminalPartial || round.roundFailed).length,
+    attention: rounds.filter((round) => round.roundTerminalPartial || round.roundFailed).length,
+  };
+  const decisionCounts = signalHistoryObject(supplied.decisionCounts);
+  const canonicalAttemptSummary = supplied.source === "canonical_attempt_rows_before_pagination";
+  if (canonicalAttemptSummary) {
+    const running = suppliedNumber(["running"], derived.running);
+    const pending = suppliedNumber(["pending"], derived.waiting + running);
+    const waiting = suppliedNumber(["waiting"], Math.max(0, pending - running));
+    const partialFailed = suppliedNumber(["partialTerminal"], derived.partialFailed);
+    const hasDecisionCounts = Object.keys(decisionCounts).length > 0;
+    const noTrade = hasDecisionCounts
+      ? Math.max(0, Math.floor(Number(decisionCounts.NO_TRADE || 0)))
+        + Math.max(0, Math.floor(Number(decisionCounts.HOLD || 0)))
+      : suppliedNumber(["noTrade", "hold"], derived.noTrade);
+    return {
+      total: suppliedNumber(["expected", "total", "roundCount"], derived.total),
+      complete: suppliedNumber(["completeThreeOfThree", "complete", "completeRounds"], derived.complete),
+      noTrade,
+      noData: hasDecisionCounts
+        ? Math.max(0, Math.floor(Number(decisionCounts.NO_DATA || 0)))
+        : derived.noData,
+      buy: Math.max(0, Math.floor(Number(decisionCounts.BUY || 0))),
+      sell: Math.max(0, Math.floor(Number(decisionCounts.SELL || 0))),
+      waiting,
+      running,
+      skipped: suppliedNumber(["skipped"], derived.skipped),
+      partialFailed,
+      attention: partialFailed,
+      backendTotal: suppliedNumber(["expected", "total", "roundCount"], derived.total),
+      backendAttention: partialFailed,
+      loaded: rounds.length,
+      exactTotal: true,
+    };
+  }
+  const suppliedAttention = firstFiniteSignalNumber(
+    supplied.attention,
+    supplied.skippedIncomplete,
+    supplied.skippedOrIncomplete,
+    supplied.incomplete,
+  );
+  const suppliedAnalyzed = firstFiniteSignalNumber(supplied.analyzed);
+  const suppliedSkipped = firstFiniteSignalNumber(supplied.skipped);
+  const suppliedPending = firstFiniteSignalNumber(supplied.pending);
+  const suppliedComplete = firstFiniteSignalNumber(
+    supplied.complete,
+    supplied.completeRounds,
+    supplied.completeThreeOfThree,
+    supplied.fullAnalysis,
+  );
+  // Keep reading legacy summary aliases for cursor/backward compatibility, but
+  // render one internally consistent set of counts from the attempt rows that
+  // are actually present. Pending is never folded into an "incomplete" total.
+  const canonicalAttention = suppliedAttention !== null
+    ? Math.max(0, Math.floor(suppliedAttention))
+    : [suppliedAnalyzed, suppliedSkipped, suppliedPending, suppliedComplete].some((value) => value !== null)
+      ? Math.max(0, Math.floor((suppliedAnalyzed || 0) - (suppliedComplete || 0)))
+      : derived.attention;
+  return {
+    total: derived.total,
+    complete: derived.complete,
+    noTrade: derived.noTrade,
+    noData: derived.noData,
+    buy: derived.buy,
+    sell: derived.sell,
+    waiting: derived.waiting,
+    running: derived.running,
+    skipped: derived.skipped,
+    partialFailed: derived.partialFailed,
+    attention: derived.attention,
+    backendTotal: suppliedNumber(["total", "totalBars", "recordedBars", "roundCount", "expected"], derived.total),
+    backendAttention: canonicalAttention,
+    loaded: rounds.length,
+    exactTotal: canonicalHistory.hasMore !== true && history.hasMore !== true,
+  };
+}
+
+function signalHistoryDecisionLabel(decision, { specialist = false } = {}) {
+  if (decision === "BUY" || decision === "SELL" || decision === "HOLD") return decision;
+  if (decision === "NO_TRADE") return "NO TRADE";
+  if (decision === "NO_DATA") return specialist ? "ข้าม" : "NO DATA";
+  return specialist ? "ไม่มีผล" : "NO DATA";
+}
+
+function createSignalAnalysisVoteCell(vote, labelTh) {
+  const cell = document.createElement("div");
+  const pill = document.createElement("strong");
+  const detail = document.createElement("small");
+  const decision = vote?.decision || "";
+  const displayState = String(vote?.displayState || "");
+  cell.className = "signal-analysis-vote-cell";
+  cell.dataset.label = labelTh;
+  cell.dataset.decision = decision || displayState.toUpperCase() || "NO_DATA";
+  pill.className = "signal-analysis-vote-pill";
+  pill.textContent = decision
+    ? signalHistoryDecisionLabel(decision, { specialist: true })
+    : displayState === "waiting"
+      ? "รอผล"
+      : displayState === "running"
+        ? "กำลังทำ"
+        : displayState === "skipped"
+          ? "ข้าม"
+          : "ไม่มีผล";
+  if (vote?.complete && Number.isFinite(vote.confidence)) {
+    detail.textContent = `ความมั่นใจ ${Math.round(vote.confidence * 10) / 10}%`;
+  } else if (vote?.skipped) {
+    detail.textContent = safeDashboardDisplayText(vote.reason, "Agent ข้ามรอบนี้เพราะข้อมูลไม่พอ");
+  } else if (displayState === "waiting") {
+    detail.textContent = "แท่งนี้ยังอยู่ในคิว FIFO";
+  } else if (displayState === "running") {
+    detail.textContent = "กำลังรอ Agent ตัวนี้ส่งผล";
+  } else if (displayState === "skipped") {
+    detail.textContent = "Backend ข้ามรอบนี้โดยไม่มีผลจาก Agent";
+  } else if (vote) {
+    detail.textContent = safeDashboardDisplayText(vote.reason, "รอบสิ้นสุดโดยไม่มีผลที่ใช้ได้จาก Agent ตัวนี้");
+  } else {
+    detail.textContent = "รอบสิ้นสุดแล้วโดยไม่พบผลจาก Agent ตัวนี้";
+  }
+  cell.append(pill, detail);
+  return cell;
+}
+
+function createSignalAnalysisHistoryRow(round) {
+  const row = document.createElement("article");
+  const time = document.createElement("div");
+  const symbol = document.createElement("div");
+  const timeframe = document.createElement("div");
+  const final = document.createElement("div");
+  const order = document.createElement("div");
+  const timeMain = document.createElement("b");
+  const timeDetail = document.createElement("small");
+  const finalPill = document.createElement("strong");
+  const finalDetail = document.createElement("small");
+  const orderLabel = document.createElement("strong");
+  const orderDetail = document.createElement("small");
+  const brokerTime = signalBrokerDateTime(round.barTime);
+
+  row.className = "signal-analysis-round-row";
+  row.setAttribute("role", "listitem");
+  row.dataset.attemptId = round.attemptId || round.id || "";
+  row.dataset.completeness = round.complete ? "complete" : round.displayState;
+  row.dataset.finalDecision = round.finalDecision || "NO_DATA";
+  row.dataset.coverageStatus = round.coverageStatus || "unknown";
+  time.dataset.label = "เวลาแท่ง";
+  timeMain.textContent = brokerTime || signalThaiDateTime(round.createdAt);
+  if (round.roundSkipped) {
+    timeDetail.textContent = `รอบถูกข้าม • ${round.skipReason || "Backend ไม่ได้ส่งเหตุผล"}`;
+  } else if (round.roundPending) {
+    const queuePosition = firstFiniteSignalNumber(round.queue?.position, round.queue?.queuePosition);
+    const queueDepth = firstFiniteSignalNumber(round.queue?.depth, round.queue?.queueDepth);
+    const queueText = queuePosition !== null
+      ? ` • คิว ${Math.trunc(queuePosition)}${queueDepth !== null ? `/${Math.trunc(queueDepth)}` : ""}`
+      : "";
+    timeDetail.textContent = `รอคิว FIFO${queueText} • ${round.completeCount}/3 ครบ`;
+  } else if (round.roundRunning) {
+    timeDetail.textContent = `กำลังวิเคราะห์ • ได้ผลแล้ว ${round.completeCount}/3`;
+  } else if (round.roundFailed) {
+    timeDetail.textContent = `รอบล้มเหลว • ได้ผล ${round.completeCount}/3`;
+  } else if (round.roundTerminalPartial) {
+    timeDetail.textContent = `รอบสิ้นสุด • ได้ผล ${round.completeCount}/3`;
+  } else {
+    timeDetail.textContent = brokerTime
+      ? `แท่ง MT4 • ${round.completeCount}/3 ครบ`
+      : `เวลาที่ Backend บันทึก • ${round.completeCount}/3 ครบ`;
+  }
+  if (round.roundTerminalPartial && (round.skippedCount || round.missingCount)) {
+    timeDetail.textContent += ` • ข้าม ${round.skippedCount} • ขาด ${round.missingCount}`;
+  }
+  time.append(timeMain, timeDetail);
+
+  symbol.dataset.label = "สัญลักษณ์";
+  symbol.textContent = round.symbol;
+  timeframe.dataset.label = "TF";
+  timeframe.textContent = round.timeframe;
+
+  final.className = "signal-analysis-final-cell";
+  final.dataset.label = "มติสุดท้าย";
+  finalPill.className = "signal-analysis-vote-pill";
+  finalPill.dataset.decision = round.finalDecision || "NO_DATA";
+  finalPill.textContent = round.roundPending
+    ? "รอผล"
+    : round.roundRunning
+      ? "กำลังวิเคราะห์"
+      : round.roundSkipped
+        ? "ข้าม"
+        : round.roundFailed
+          ? "ล้มเหลว"
+        : round.roundTerminalPartial && round.finalDecision === "NO_DATA"
+          ? "รอบจบบางส่วน"
+          : signalHistoryDecisionLabel(round.finalDecision);
+  if (round.roundSkipped) {
+    finalDetail.textContent = `ข้ามรอบนี้ • ${round.skipReason || "Backend ไม่ได้ส่งเหตุผล"}`;
+  } else if (round.roundPending) {
+    finalDetail.textContent = `กำลังรอผลวิเคราะห์ • ${round.completeCount}/3`;
+  } else if (round.roundRunning) {
+    finalDetail.textContent = `Specialist กำลังทำงาน • ได้ผลแล้ว ${round.completeCount}/3`;
+  } else if (round.roundTerminalPartial) {
+    finalDetail.textContent = round.roundFailed
+      ? `รอบล้มเหลวหรือถูก Safety Gate หยุด • ได้ผล ${round.completeCount}/3`
+      : `รอบสิ้นสุดโดยมีผลบางส่วน • ได้ผล ${round.completeCount}/3`;
+  } else {
+    finalDetail.textContent = Number.isFinite(round.averageConfidence)
+      ? `เฉลี่ย ${Math.round(round.averageConfidence * 10) / 10}% • ${round.completeCount}/3`
+      : `${round.completeCount}/3 Agent ให้ผลครบ`;
+    if (!round.complete && round.skipReason) finalDetail.textContent += ` • ${round.skipReason}`;
+  }
+  final.append(finalPill, finalDetail);
+
+  order.className = "signal-analysis-order-cell";
+  order.dataset.label = "Order";
+  order.dataset.tone = round.order.tone;
+  orderLabel.textContent = round.order.label;
+  orderDetail.textContent = round.order.detail;
+  order.append(orderLabel, orderDetail);
+
+  row.append(
+    time,
+    symbol,
+    timeframe,
+    createSignalAnalysisVoteCell(round.votes.technical, "Technical"),
+    createSignalAnalysisVoteCell(round.votes.price_action, "Price Action"),
+    createSignalAnalysisVoteCell(round.votes.news, "ข่าว"),
+    final,
+    order,
+  );
+  return row;
+}
+
+function createSignalOrderHistoryRow(order) {
+  const row = document.createElement("article");
+  const openedAt = document.createElement("div");
+  const side = document.createElement("strong");
+  const market = document.createElement("div");
+  const lot = document.createElement("span");
+  const openPrice = document.createElement("span");
+  const stopLoss = document.createElement("span");
+  const takeProfit = document.createElement("span");
+  const reason = document.createElement("div");
+  const evidence = document.createElement("div");
+  const sideValue = safeDashboardDisplayText(order.side, "—").toUpperCase();
+  const brokerTime = signalBrokerDateTime(order.brokerOpenedAt);
+  row.className = "signal-order-history-row";
+  row.setAttribute("role", "listitem");
+  row.dataset.side = sideValue;
+  row.dataset.verified = order.verified === true ? "true" : "false";
+  row.dataset.status = ["open", "closed", "confirmed_unknown"].includes(order.status)
+    ? order.status
+    : "confirmed_unknown";
+
+  const localTime = document.createElement("b");
+  const broker = document.createElement("small");
+  localTime.textContent = `เวลาไทย ${signalThaiDateTime(order.openedAt || order.createdAt)}`;
+  broker.textContent = brokerTime ? `เวลา MT4 ${brokerTime}` : "ไม่มีเวลา MT4 แยก";
+  openedAt.append(localTime, broker);
+
+  side.textContent = sideValue;
+  market.innerHTML = `<b></b><small></small>`;
+  market.querySelector("b").textContent = safeDashboardDisplayText(order.symbol, "ไม่ทราบคู่เงิน");
+  market.querySelector("small").textContent = safeDashboardDisplayText(order.timeframe, "ไม่ทราบ Timeframe");
+  lot.textContent = signalOrderNumber(order.lot, 2);
+  openPrice.textContent = signalOrderNumber(order.openPrice);
+  stopLoss.textContent = signalOrderNumber(order.stopLoss);
+  takeProfit.textContent = signalOrderNumber(order.takeProfit);
+
+  const reasonCopy = document.createElement("p");
+  const vote = document.createElement("small");
+  reasonCopy.textContent = safeDashboardDisplayText(
+    order.reasonTh,
+    "EA ยืนยันเปิดออเดอร์ แต่ยังไม่มีคำอธิบายผลโหวต",
+  );
+  vote.textContent = `ผลตอนเปิด: ${safeDashboardDisplayText(order.voteSummaryTh, "ไม่พบผลโหวต")}`;
+  reason.append(reasonCopy, vote);
+
+  const status = document.createElement("b");
+  const ticket = document.createElement("small");
+  const mode = document.createElement("small");
+  const mission = document.createElement("small");
+  status.textContent = safeDashboardDisplayText(
+    order.statusTh,
+    order.status === "closed"
+      ? "ปิดแล้ว"
+      : order.status === "open"
+        ? "เปิดอยู่"
+        : "เปิดสำเร็จ • ไม่ทราบสถานะล่าสุด",
+  );
+  ticket.textContent = `Ticket ${safeDashboardDisplayText(order.ticket, "—")}`;
+  mode.textContent = order.mode
+    ? `โหมด ${safeDashboardDisplayText(String(order.mode).toUpperCase(), "ไม่ทราบ")}`
+    : "ไม่พบโหมดบัญชีจาก ACK";
+  mission.textContent = order.verified === true
+    ? `ยืนยันจาก EA • ${safeDashboardDisplayText(order.missionId, "ไม่พบ Mission")}`
+    : "หลักฐานเชื่อม Mission ยังไม่ครบ";
+  evidence.append(status, ticket, mode, mission);
+
+  row.append(openedAt, side, market, lot, openPrice, stopLoss, takeProfit, reason, evidence);
+  return row;
+}
+
+function renderSignalHistoryPanelLegacy(report = {}, { focusSearch = false } = {}) {
   const container = els.signalConsensusHistoryContent;
   if (!container) return;
   const council = signalCouncilModel(report);
+  const orderHistory = council?.history?.orderExecutions && typeof council.history.orderExecutions === "object"
+    ? council.history.orderExecutions
+    : {};
+  const allOrders = signalOrderHistoryEntries(report);
   const allEntries = signalHistoryEntries(report);
-  const query = String(state.modal.signalHistoryQuery || "").trim().toLowerCase();
-  const filtered = allEntries.filter((entry) => {
-    if (state.modal.signalHistoryType !== "all" && entry.kind !== state.modal.signalHistoryType) return false;
-    if (state.modal.signalHistoryStatus !== "all" && signalHistoryStatusBucket(entry) !== state.modal.signalHistoryStatus) return false;
+  let query = String(state.modal.signalHistoryQuery || "").trim().toLowerCase();
+  let filtered = allOrders.filter((order) => {
     if (!query) return true;
-    const item = entry.item || {};
     return [
-      item.id,
-      item.title,
-      item.summary,
-      item.detail,
-      item.result,
-      item.status,
-      item.ownerAgentId,
-      item.owner,
-      signalHistoryTypeLabel(entry),
+      order.ticket,
+      order.commandId,
+      order.missionId,
+      order.symbol,
+      order.timeframe,
+      order.side,
+      order.statusTh,
+      order.reasonTh,
+      order.voteSummaryTh,
     ].join(" ").toLowerCase().includes(query);
   });
-  const completed = allEntries.filter((entry) => signalHistoryStatusBucket(entry) === "completed").length;
-  const blocked = allEntries.filter((entry) => signalHistoryStatusBucket(entry) === "blocked").length;
-  const active = allEntries.filter((entry) => signalHistoryStatusBucket(entry) === "active").length;
+  // Session v0.9.3 used this field for the former technical-history filter.
+  // Clear a stale saved query only on initial render so a real Order cannot be
+  // hidden after upgrading; never interrupt the user while they are typing.
+  if (!focusSearch && query && allOrders.length && !filtered.length) {
+    state.modal.signalHistoryQuery = "";
+    query = "";
+    filtered = allOrders.slice();
+  }
+  const summary = orderHistory.summary && typeof orderHistory.summary === "object"
+    ? orderHistory.summary
+    : {
+        total: allOrders.length,
+        buy: allOrders.filter((order) => order.side === "BUY").length,
+        sell: allOrders.filter((order) => order.side === "SELL").length,
+        open: allOrders.filter((order) => order.status === "open").length,
+      };
   container.innerHTML = `
     <div class="signal-history-heading">
       <div>
-        <span>ประวัติจาก Local Runner</span>
-        <h3>ประวัติการวิเคราะห์และ Task ล่าสุด</h3>
-        <p>แสดง Mission และ Report ล่าสุดที่ผูกกับสภา AI Trade จริง ไม่รวม Memory หรือบทสนทนาทั่วไป</p>
+        <span>หลักฐานจาก EA และ Local Runner</span>
+        <h3>ประวัติการเปิด Order</h3>
+        <p>แสดงเฉพาะ Order ที่ EA ตอบกลับว่าเปิดสำเร็จและมี Ticket จริง พร้อมผลโหวตของรอบที่เป็นต้นทาง สัญญาณรอบใหม่จะไม่เขียนทับเหตุผลเดิม</p>
       </div>
       <small data-signal-history-count></small>
     </div>
     <div class="signal-history-toolbar">
       <label>
         <span>ค้นหา</span>
-        <input type="search" data-signal-history-search maxlength="160" placeholder="ค้นหา Mission, Report หรือสถานะ..." />
-      </label>
-      <label>
-        <span>ประเภท</span>
-        <select data-signal-history-type>
-          <option value="all">ทั้งหมด</option>
-          <option value="mission">Mission</option>
-          <option value="report">Report</option>
-        </select>
-      </label>
-      <label>
-        <span>สถานะ</span>
-        <select data-signal-history-status>
-          <option value="all">ทั้งหมด</option>
-          <option value="active">กำลังดำเนินการ</option>
-          <option value="completed">สำเร็จ</option>
-          <option value="blocked">ติดขัด</option>
-        </select>
+        <input type="search" data-signal-history-search maxlength="160" placeholder="ค้นหา Ticket, BUY/SELL, คู่เงิน หรือ Mission..." />
       </label>
     </div>
-    <div class="signal-history-summary" aria-label="สรุปประวัติ">
-      <div><span>รายการล่าสุด</span><strong data-signal-history-total></strong></div>
-      <div><span>กำลังดำเนินการ</span><strong data-signal-history-active></strong></div>
-      <div><span>สำเร็จ</span><strong data-signal-history-completed></strong></div>
-      <div><span>ติดขัด</span><strong data-signal-history-blocked></strong></div>
+    <div class="signal-history-summary" aria-label="สรุปประวัติ Order">
+      <div><span>เปิดสำเร็จทั้งหมด</span><strong data-signal-history-total></strong></div>
+      <div><span>กำลังเปิดอยู่</span><strong data-signal-history-open></strong></div>
+      <div><span>BUY</span><strong data-signal-history-buy></strong></div>
+      <div><span>SELL</span><strong data-signal-history-sell></strong></div>
     </div>
-    <div class="signal-history-table">
-      <div class="signal-history-table-head" aria-hidden="true">
-        <span>วันเวลา</span><span>ประเภท</span><span>รายการ</span><span>สถานะ</span><span>ผลสรุป</span><span></span>
+    <div class="signal-order-history-scroll">
+      <div class="signal-order-history-table">
+        <div class="signal-order-history-head" aria-hidden="true">
+          <span>วัน/เวลา</span><span>ฝั่ง</span><span>คู่เงิน/TF</span><span>Lot</span><span>ราคาเปิด</span><span>SL</span><span>TP</span><span>เหตุผลที่เปิด</span><span>หลักฐาน</span>
+        </div>
+        <div class="signal-order-history-list" data-signal-history-list role="list"></div>
       </div>
-      <div class="signal-history-list" data-signal-history-list role="list"></div>
     </div>
+    <p class="signal-order-history-note">เวลาแถวแรกเป็นเวลาไทยจาก ACK ของ Backend ส่วน “เวลา MT4” เป็นนาฬิกา Broker และจะแสดงแยกโดยไม่เดาเขตเวลา</p>
+    <details class="signal-analysis-history-details">
+      <summary>ประวัติการวิเคราะห์และ Task สำหรับตรวจสอบเชิงเทคนิค (${allEntries.length} รายการ)</summary>
+      <div class="signal-history-table signal-analysis-history-table">
+        <div class="signal-history-table-head" aria-hidden="true">
+          <span>วันเวลา</span><span>ประเภท</span><span>รายการ</span><span>สถานะ</span><span>ผลสรุป</span><span></span>
+        </div>
+        <div class="signal-history-list" data-signal-analysis-history-list role="list"></div>
+      </div>
+    </details>
   `;
   const search = container.querySelector("[data-signal-history-search]");
-  const type = container.querySelector("[data-signal-history-type]");
-  const status = container.querySelector("[data-signal-history-status]");
   const list = container.querySelector("[data-signal-history-list]");
+  const analysisList = container.querySelector("[data-signal-analysis-history-list]");
   search.value = state.modal.signalHistoryQuery;
-  type.value = state.modal.signalHistoryType;
-  status.value = state.modal.signalHistoryStatus;
-  const historyHasMore = council?.history?.hasMore === true
-    || council?.decisionPipeline?.hasMore === true;
-  container.querySelector("[data-signal-history-count]").textContent = historyHasMore
-    ? `แสดง ${filtered.length} จาก ${allEntries.length} รายการล่าสุด • ยังมีรายการเก่ากว่า`
-    : `แสดง ${filtered.length} จาก ${allEntries.length} รายการล่าสุด`;
-  container.querySelector("[data-signal-history-total]").textContent = String(allEntries.length);
-  container.querySelector("[data-signal-history-active]").textContent = String(active);
-  container.querySelector("[data-signal-history-completed]").textContent = String(completed);
-  container.querySelector("[data-signal-history-blocked]").textContent = String(blocked);
+  container.querySelector("[data-signal-history-count]").textContent = orderHistory.hasMore === true
+    ? `แสดง ${filtered.length} จาก ${allOrders.length} รายการล่าสุด`
+    : `${allOrders.length} Order ที่ EA ยืนยัน`;
+  container.querySelector("[data-signal-history-total]").textContent = String(summary.total || 0);
+  container.querySelector("[data-signal-history-open]").textContent = String(summary.open || 0);
+  container.querySelector("[data-signal-history-buy]").textContent = String(summary.buy || 0);
+  container.querySelector("[data-signal-history-sell]").textContent = String(summary.sell || 0);
   if (!filtered.length) {
     const empty = document.createElement("div");
     empty.className = "signal-empty-state";
-    empty.textContent = allEntries.length
-      ? "ไม่พบรายการที่ตรงกับตัวกรอง"
-      : "ยังไม่มี Mission หรือ Report จริงของสภา AI Trade";
+    empty.textContent = allOrders.length
+      ? "ไม่พบ Order ที่ตรงกับคำค้นหา"
+      : "ยังไม่มี Order ที่ EA ยืนยันว่าเปิดสำเร็จ";
     list.appendChild(empty);
   } else {
     filtered
-      .sort((left, right) => getDashboardItemTime(right.item) - getDashboardItemTime(left.item))
-      .forEach((entry) => list.appendChild(createSignalHistoryRow(entry)));
+      .sort((left, right) => signalOrderOpenedTime(right) - signalOrderOpenedTime(left))
+      .forEach((order) => list.appendChild(createSignalOrderHistoryRow(order)));
+  }
+  allEntries
+    .sort((left, right) => getDashboardItemTime(right.item) - getDashboardItemTime(left.item))
+    .slice(0, 30)
+    .forEach((entry) => analysisList.appendChild(createSignalHistoryRow(entry)));
+  if (!allEntries.length) {
+    const empty = document.createElement("div");
+    empty.className = "signal-empty-state";
+    empty.textContent = "ยังไม่มี Mission หรือ Report ของสภา AI Trade";
+    analysisList.appendChild(empty);
   }
   search.addEventListener("input", () => {
     state.modal.signalHistoryQuery = search.value;
     renderSignalHistoryPanel(report, { focusSearch: true });
     saveSessionSnapshot();
   });
-  type.addEventListener("change", () => {
-    state.modal.signalHistoryType = type.value;
-    renderSignalHistoryPanel(report);
-    saveSessionSnapshot();
-  });
-  status.addEventListener("change", () => {
-    state.modal.signalHistoryStatus = status.value;
-    renderSignalHistoryPanel(report);
-    saveSessionSnapshot();
-  });
   if (focusSearch) {
     const refreshed = container.querySelector("[data-signal-history-search]");
     refreshed?.focus();
     refreshed?.setSelectionRange(refreshed.value.length, refreshed.value.length);
+  }
+}
+
+function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
+  const container = els.signalConsensusHistoryContent;
+  if (!container) return;
+  const council = signalCouncilModel(report);
+  const scopeRequest = signalHistoryRequestScope(report);
+  const scopeContext = scopeRequest.capability?.context || signalActiveStreamContext(report);
+  const scopeLabel = scopeRequest.mode === "active"
+    ? `${scopeContext.symbol} ${scopeContext.timeframe}`
+    : "ทุกคู่เงิน / ทุก TF";
+  const activeHistoryTab = SIGNAL_HISTORY_TABS.includes(state.modal.signalHistoryTab)
+    ? state.modal.signalHistoryTab
+    : "orders";
+  const orderHistory = signalHistoryMergedReadModel(report, "orders");
+  const canonicalAnalysis = activeHistoryTab === "analysis"
+    ? signalHistoryMergedReadModel(report, "analysis")
+    : signalHistoryBaseReadModel(report, "analysis");
+  const activeReadModel = activeHistoryTab === "orders" ? orderHistory : canonicalAnalysis;
+  const reportLoadState = state.propReportLoadState?.[AI_TRADE_COUNCIL_PROP_ID] || {};
+  const hasCachedReport = Boolean(report && typeof report === "object" && Object.keys(report).length);
+  const activeReadModelAvailable = activeHistoryTab === "orders"
+    ? orderHistory.available !== false
+    : canonicalAnalysis.available !== false && council?.history?.available !== false;
+  const allOrders = activeHistoryTab === "orders" ? signalOrderHistoryEntries(report, orderHistory) : [];
+  const analysisRounds = activeHistoryTab === "analysis"
+    ? signalAnalysisHistoryEntries(report, canonicalAnalysis, orderHistory)
+    : [];
+  const analysisSummary = activeHistoryTab === "analysis"
+    ? signalAnalysisHistorySummary(report, analysisRounds, canonicalAnalysis)
+    : null;
+  let query = String(state.modal.signalHistoryQuery || "").trim().toLowerCase();
+  let filtered = allOrders.filter((order) => {
+    if (!query) return true;
+    return [
+      order.ticket,
+      order.commandId,
+      order.missionId,
+      order.symbol,
+      order.timeframe,
+      order.side,
+      order.statusTh,
+      order.reasonTh,
+      order.voteSummaryTh,
+    ].join(" ").toLowerCase().includes(query);
+  });
+  // Session v0.9.3 used this field for a former technical-history filter.
+  // Clear it only on initial render so an upgraded session cannot hide a real
+  // Order, but never interrupt a user who is currently typing.
+  if (!focusSearch && query && allOrders.length && !filtered.length) {
+    state.modal.signalHistoryQuery = "";
+    query = "";
+    filtered = allOrders.slice();
+  }
+  const sortedOrders = filtered
+    .slice()
+    .sort((left, right) => signalOrderOpenedTime(right) - signalOrderOpenedTime(left));
+  const orderPage = Math.max(1, Math.trunc(Number(state.modal.signalHistoryOrderPage) || 1));
+  const analysisPage = Math.max(1, Math.trunc(Number(state.modal.signalHistoryAnalysisPage) || 1));
+  const visibleOrders = sortedOrders.slice(0, orderPage * SIGNAL_HISTORY_PAGE_SIZE);
+  const visibleAnalysisRounds = analysisRounds.slice(0, analysisPage * SIGNAL_HISTORY_PAGE_SIZE);
+  const orderHasLocalMore = visibleOrders.length < sortedOrders.length;
+  const analysisHasLocalMore = visibleAnalysisRounds.length < analysisRounds.length;
+  const activeHasBackendMore = activeReadModel.hasMore === true;
+  const activeNextCursor = safeDashboardDisplayText(
+    activeReadModel.nextCursor || activeReadModel.page?.nextCursor || activeReadModel.pageInfo?.nextCursor,
+    "",
+  );
+  const orderSummary = orderHistory.summary && typeof orderHistory.summary === "object"
+    ? orderHistory.summary
+    : {
+        total: allOrders.length,
+        buy: allOrders.filter((order) => order.side === "BUY").length,
+        sell: allOrders.filter((order) => order.side === "SELL").length,
+        open: allOrders.filter((order) => order.status === "open").length,
+      };
+
+  let readTone = "ready";
+  let readTitle = "ข้อมูลประวัติพร้อมใช้งาน";
+  let readDetail = "ข้อมูลนี้มาจาก Local Runner และจะแสดงเฉพาะหลักฐานที่ Backend ส่งกลับมา";
+  if (reportLoadState.status === "loading" && !hasCachedReport) {
+    readTone = "loading";
+    readTitle = "กำลังโหลดประวัติจาก Local Runner";
+    readDetail = "รอข้อมูลจริงก่อน ระบบจะไม่สร้างรายการจำลอง";
+  } else if (reportLoadState.status === "loading") {
+    readTone = "loading";
+    readTitle = "กำลังตรวจข้อมูลประวัติล่าสุด";
+    readDetail = "ระหว่างนี้ยังแสดงข้อมูลที่ Backend ยืนยันไว้จากรอบก่อน";
+  } else if (reportLoadState.status === "error" && hasCachedReport) {
+    readTone = "stale";
+    readTitle = "กำลังแสดงข้อมูลเดิม • รีเฟรชล่าสุดไม่สำเร็จ";
+    readDetail = `${safeDashboardDisplayText(reportLoadState.errorMessage, "ติดต่อ Local Runner ไม่สำเร็จ")} • กดตรวจใหม่เพื่อยืนยันข้อมูลล่าสุด`;
+  } else if (reportLoadState.status === "error") {
+    readTone = "error";
+    readTitle = "โหลดประวัติไม่สำเร็จ";
+    readDetail = safeDashboardDisplayText(reportLoadState.errorMessage, "กรุณาตรวจ Local Runner แล้วลองใหม่");
+  } else if (!activeReadModelAvailable) {
+    readTone = "unavailable";
+    readTitle = "Backend ระบุว่าประวัติส่วนนี้ยังอ่านไม่ได้";
+    const reasonCode = safeDashboardDisplayText(
+      activeReadModel.reasonCode || activeReadModel.error?.code,
+      "read_model_unavailable",
+    );
+    readDetail = `ระบบหยุดแสดงผลแบบ Fail-closed จึงไม่ตีความรายการว่างว่าไม่มีประวัติ • รหัส ${reasonCode}`;
+  } else if (activeReadModel.scopePending) {
+    readTone = "loading";
+    readTitle = `กำลังโหลดประวัติเฉพาะ ${scopeLabel}`;
+    readDetail = "รอยอดนับและรายการที่ Backend กรองก่อนแสดงผล • จะไม่นำประวัติทุกกราฟมาปนระหว่างรอ";
+  } else if (activeReadModel.paginationError) {
+    readTone = "stale";
+    readTitle = "แสดงรายการที่โหลดไว้ • โหลดหน้าถัดไปไม่สำเร็จ";
+    readDetail = activeReadModel.paginationError;
+  } else if (activeReadModel.paginationLoading) {
+    readTone = "loading";
+    readTitle = "กำลังโหลดประวัติหน้าถัดไป";
+    readDetail = "รายการเดิมยังคงแสดงอยู่ และจะรวมรายการใหม่ตาม Attempt ID เมื่อ Backend ตอบกลับ";
+  } else if (state.missionSync.status === "loading") {
+    readTone = "loading";
+    readTitle = "ประวัติพร้อม • กำลังตรวจสถานะ Mission ล่าสุด";
+    readDetail = "รายการ Order และผลวิเคราะห์ยังแสดงตามหลักฐานเดิมระหว่างรอ Mission";
+  } else if (state.missionSync.status === "error") {
+    readTone = "stale";
+    readTitle = "ประวัติพร้อม แต่สถานะ Mission อาจเก่า";
+    readDetail = `${safeDashboardDisplayText(state.missionSync.errorMessage, "โหลด Mission ล่าสุดไม่สำเร็จ")} • รายการ Order และผลวิเคราะห์ที่มีอยู่ยังแสดงตามหลักฐานเดิม`;
+  }
+  if (readTone === "ready") {
+    readDetail = `${readDetail} • ขอบเขต: ${scopeLabel}`;
+  }
+  const shouldOfferRetry = ["stale", "error", "unavailable"].includes(readTone);
+
+  container.innerHTML = `
+    <section class="signal-history-read-state" data-tone="${readTone}" role="status" aria-live="polite">
+      <div><strong data-signal-history-read-title></strong><span data-signal-history-read-detail></span></div>
+      ${shouldOfferRetry ? '<button type="button" data-signal-history-retry>ตรวจใหม่</button>' : ""}
+    </section>
+    <div class="signal-history-subtabs" role="tablist" aria-label="เลือกประเภทประวัติ AI Trade">
+      <button id="signalOrderHistoryTab" type="button" role="tab" data-signal-history-tab="orders" aria-controls="signalOrderHistoryPanel" aria-selected="${activeHistoryTab === "orders"}" tabindex="${activeHistoryTab === "orders" ? "0" : "-1"}">ประวัติการเปิดออเดอร์</button>
+      <button id="signalAnalysisHistoryTab" type="button" role="tab" data-signal-history-tab="analysis" aria-controls="signalAnalysisHistoryPanel" aria-selected="${activeHistoryTab === "analysis"}" tabindex="${activeHistoryTab === "analysis" ? "0" : "-1"}">ประวัติการวิเคราะห์</button>
+    </div>
+    <section id="signalOrderHistoryPanel" class="signal-history-subpanel" data-signal-history-panel="orders" role="tabpanel" aria-labelledby="signalOrderHistoryTab" tabindex="0" ${activeHistoryTab === "orders" ? "" : "hidden"}>
+      <div class="signal-history-heading">
+        <div>
+          <span>หลักฐานจาก EA และ Local Runner</span>
+          <h3>ประวัติการเปิด Order</h3>
+          <p>แสดงเฉพาะ Order ที่ Backend ได้รับหลักฐานจาก EA พร้อม Ticket จริง แถวสีเหลืองหมายถึงเปิด Order แล้วแต่หลักฐานเชื่อม Mission หรือการยืนยันล่าสุดยังไม่ครบ</p>
+        </div>
+        <small data-signal-history-count></small>
+      </div>
+      <div class="signal-history-toolbar">
+        <label>
+          <span>ค้นหา Order</span>
+          <input type="search" data-signal-history-search maxlength="160" placeholder="ค้นหา Ticket, BUY/SELL, คู่เงิน หรือ Mission..." />
+        </label>
+      </div>
+      <div class="signal-history-summary" aria-label="สรุปประวัติ Order">
+        <div><span>เปิดสำเร็จทั้งหมด</span><strong data-signal-history-total></strong></div>
+        <div><span>กำลังเปิดอยู่</span><strong data-signal-history-open></strong></div>
+        <div><span>BUY</span><strong data-signal-history-buy></strong></div>
+        <div><span>SELL</span><strong data-signal-history-sell></strong></div>
+      </div>
+      <div class="signal-order-history-scroll">
+        <div class="signal-order-history-table">
+          <div class="signal-order-history-head" aria-hidden="true">
+            <span>วัน/เวลา</span><span>ฝั่ง</span><span>คู่เงิน/TF</span><span>Lot</span><span>ราคาเปิด</span><span>SL</span><span>TP</span><span>เหตุผลที่เปิด</span><span>หลักฐาน</span>
+          </div>
+          <div class="signal-order-history-list" data-signal-history-list role="list"></div>
+        </div>
+      </div>
+      <div class="signal-history-pagination">
+        <span data-signal-order-page-status></span>
+        <button type="button" data-signal-order-more data-next-cursor="" hidden>แสดงเพิ่ม</button>
+      </div>
+      <p class="signal-order-history-note">เวลาแถวแรกเป็นเวลาไทยจาก ACK ของ Backend ส่วน “เวลา MT4” เป็นนาฬิกา Broker และจะแสดงแยกโดยไม่เดาเขตเวลา</p>
+    </section>
+    <section id="signalAnalysisHistoryPanel" class="signal-history-subpanel" data-signal-history-panel="analysis" role="tabpanel" aria-labelledby="signalAnalysisHistoryTab" tabindex="0" ${activeHistoryTab === "analysis" ? "" : "hidden"}>
+      <div class="signal-history-heading signal-analysis-history-heading">
+        <div>
+          <span>ผลวิเคราะห์แยกตามแท่งที่ Backend บันทึก</span>
+          <h3>ประวัติการวิเคราะห์ของ Agent 3 ตัว</h3>
+          <p>หนึ่งแถวต่อหนึ่ง Attempt ID แยก Retry ของแท่งเดียวกัน พร้อมสถานะรอคิว กำลังทำ ข้าม จบบางส่วน และครบ 3/3 โดยไม่สร้าง HOLD แทนผลที่ไม่มี</p>
+        </div>
+        <small data-signal-analysis-count></small>
+      </div>
+      <div class="signal-analysis-history-summary" aria-label="สรุปประวัติการวิเคราะห์">
+        <div><span>รอบที่บันทึก</span><strong data-signal-analysis-total></strong></div>
+        <div><span>ครบ 3/3</span><strong data-signal-analysis-complete></strong></div>
+        <div data-tone="waiting"><span>รอคิว FIFO</span><strong data-signal-analysis-waiting></strong></div>
+        <div data-tone="running"><span>กำลังวิเคราะห์</span><strong data-signal-analysis-running></strong></div>
+        <div data-tone="skipped"><span>ข้ามโดย Backend</span><strong data-signal-analysis-skipped></strong></div>
+        <div data-tone="attention"><span>จบบางส่วน / ล้มเหลว</span><strong data-signal-analysis-attention></strong></div>
+        <div><span>NO TRADE / HOLD</span><strong data-signal-analysis-no-trade></strong></div>
+        <div><span>ไม่มีมติ / NO DATA</span><strong data-signal-analysis-no-data></strong></div>
+        <div data-tone="buy"><span>สัญญาณ BUY</span><strong data-signal-analysis-buy></strong></div>
+        <div data-tone="sell"><span>สัญญาณ SELL</span><strong data-signal-analysis-sell></strong></div>
+      </div>
+      <div class="signal-analysis-history-scroll">
+        <div class="signal-analysis-round-table">
+          <div class="signal-analysis-round-head" aria-hidden="true">
+            <span>เวลาแท่ง</span><span>สัญลักษณ์</span><span>TF</span><span>Technical</span><span>Price Action</span><span>ข่าว</span><span>มติสุดท้าย</span><span>Order</span>
+          </div>
+          <div class="signal-analysis-round-list" data-signal-analysis-round-list role="list"></div>
+        </div>
+      </div>
+      <div class="signal-history-pagination">
+        <span data-signal-analysis-page-status></span>
+        <button type="button" data-signal-analysis-more data-next-cursor="" hidden>แสดงเพิ่ม</button>
+      </div>
+      <p class="signal-order-history-note">เวลาแท่ง MT4 แสดงตามนาฬิกา Broker โดยไม่เดาเขตเวลา หาก Backend ไม่มีตัวตนแท่งจะแสดงเวลาที่บันทึกผลวิเคราะห์แทน</p>
+    </section>
+  `;
+  container.querySelector("[data-signal-history-read-title]").textContent = readTitle;
+  container.querySelector("[data-signal-history-read-detail]").textContent = readDetail;
+  container.querySelector(".signal-history-read-state")
+    ?.after(createSignalStreamContextBanner(report, { historyControls: true }));
+
+  const historyTabs = [...container.querySelectorAll("[data-signal-history-tab]")];
+  const activateHistoryTab = (nextTab, { focus = false } = {}) => {
+    if (!SIGNAL_HISTORY_TABS.includes(nextTab)) return;
+    state.modal.signalHistoryTab = nextTab;
+    renderSignalHistoryPanel(report);
+    saveSessionSnapshot();
+    if (focus) {
+      window.requestAnimationFrame(() => {
+        [...(els.signalConsensusHistoryContent?.querySelectorAll("[data-signal-history-tab]") || [])]
+          .find((tab) => tab.dataset.signalHistoryTab === nextTab)
+          ?.focus();
+      });
+    }
+  };
+  historyTabs.forEach((button) => {
+    button.addEventListener("click", () => {
+      const nextTab = button.dataset.signalHistoryTab;
+      if (nextTab === state.modal.signalHistoryTab) return;
+      activateHistoryTab(nextTab);
+    });
+    button.addEventListener("keydown", (event) => {
+      const currentIndex = historyTabs.indexOf(button);
+      let nextIndex = currentIndex;
+      if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % historyTabs.length;
+      else if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + historyTabs.length) % historyTabs.length;
+      else if (event.key === "Home") nextIndex = 0;
+      else if (event.key === "End") nextIndex = historyTabs.length - 1;
+      else return;
+      event.preventDefault();
+      activateHistoryTab(historyTabs[nextIndex].dataset.signalHistoryTab, { focus: true });
+    });
+  });
+
+  const search = container.querySelector("[data-signal-history-search]");
+  const orderList = container.querySelector("[data-signal-history-list]");
+  const orderMore = container.querySelector("[data-signal-order-more]");
+  const analysisMore = container.querySelector("[data-signal-analysis-more]");
+  search.value = state.modal.signalHistoryQuery;
+  if (activeHistoryTab === "orders") {
+    orderMore.dataset.nextCursor = activeNextCursor;
+    const totalOrders = Math.max(allOrders.length, Math.trunc(Number(orderSummary.total) || 0));
+    container.querySelector("[data-signal-history-count]").textContent = orderHistory.scopePending
+      ? `กำลังโหลด ${scopeLabel}`
+      : orderHistory.hasMore === true
+        ? `${totalOrders} Order • ${scopeLabel} • โหลดแล้ว ${allOrders.length}`
+        : `${totalOrders} Order ที่ EA ยืนยัน • ${scopeLabel}`;
+    container.querySelector("[data-signal-history-total]").textContent = orderHistory.scopePending
+      ? "…"
+      : String(orderSummary.total || 0);
+    container.querySelector("[data-signal-history-open]").textContent = orderHistory.scopePending
+      ? "…"
+      : String(orderSummary.open || 0);
+    container.querySelector("[data-signal-history-buy]").textContent = orderHistory.scopePending
+      ? "…"
+      : String(orderSummary.buy || 0);
+    container.querySelector("[data-signal-history-sell]").textContent = orderHistory.scopePending
+      ? "…"
+      : String(orderSummary.sell || 0);
+  }
+  if (activeHistoryTab === "orders" && !activeReadModelAvailable) {
+    const unavailable = document.createElement("div");
+    unavailable.className = "signal-empty-state";
+    unavailable.textContent = "ประวัติ Order ใช้งานไม่ได้ในขณะนี้ • ไม่ได้หมายความว่าไม่มี Order";
+    orderList.appendChild(unavailable);
+  } else if (activeHistoryTab === "orders" && orderHistory.scopePending) {
+    const loading = document.createElement("div");
+    loading.className = "signal-empty-state";
+    loading.textContent = `กำลังขอประวัติเฉพาะ ${scopeLabel} จาก Backend`;
+    orderList.appendChild(loading);
+  } else if (activeHistoryTab === "orders" && !filtered.length) {
+    const empty = document.createElement("div");
+    empty.className = "signal-empty-state";
+    empty.textContent = allOrders.length
+      ? "ไม่พบ Order ที่ตรงกับคำค้นหา"
+      : "ยังไม่มี Order ที่ EA ยืนยันว่าเปิดสำเร็จ";
+    orderList.appendChild(empty);
+  } else if (activeHistoryTab === "orders") {
+    visibleOrders.forEach((order) => orderList.appendChild(createSignalOrderHistoryRow(order)));
+  }
+  search.addEventListener("input", () => {
+    state.modal.signalHistoryQuery = search.value;
+    state.modal.signalHistoryOrderPage = 1;
+    renderSignalHistoryPanel(report, { focusSearch: true });
+    saveSessionSnapshot();
+  });
+
+  const analysisList = container.querySelector("[data-signal-analysis-round-list]");
+  if (activeHistoryTab === "analysis") {
+    analysisMore.dataset.nextCursor = activeNextCursor;
+    container.querySelector("[data-signal-analysis-count]").textContent = canonicalAnalysis.scopePending
+      ? `กำลังโหลด ${scopeLabel}`
+      : analysisSummary.exactTotal
+        ? `${analysisSummary.total} รอบ • ${scopeLabel} • โหลดแล้ว ${analysisRounds.length}`
+        : `โหลดแล้ว ${analysisRounds.length} รอบ • ${scopeLabel} • Backend มีรายการเก่ากว่านี้`;
+    container.querySelector("[data-signal-analysis-total]").textContent = canonicalAnalysis.scopePending
+      ? "…"
+      : analysisSummary.exactTotal
+      ? String(analysisSummary.total)
+      : `${analysisSummary.total}+`;
+    const analysisMetric = (value) => canonicalAnalysis.scopePending ? "…" : String(value);
+    container.querySelector("[data-signal-analysis-complete]").textContent = analysisMetric(analysisSummary.complete);
+    container.querySelector("[data-signal-analysis-waiting]").textContent = analysisMetric(analysisSummary.waiting);
+    container.querySelector("[data-signal-analysis-running]").textContent = analysisMetric(analysisSummary.running);
+    container.querySelector("[data-signal-analysis-skipped]").textContent = analysisMetric(analysisSummary.skipped);
+    container.querySelector("[data-signal-analysis-no-trade]").textContent = analysisMetric(analysisSummary.noTrade);
+    container.querySelector("[data-signal-analysis-no-data]").textContent = analysisMetric(analysisSummary.noData);
+    container.querySelector("[data-signal-analysis-buy]").textContent = analysisMetric(analysisSummary.buy);
+    container.querySelector("[data-signal-analysis-sell]").textContent = analysisMetric(analysisSummary.sell);
+    container.querySelector("[data-signal-analysis-attention]").textContent = analysisMetric(analysisSummary.partialFailed);
+  }
+  if (activeHistoryTab === "analysis" && !activeReadModelAvailable) {
+    const unavailable = document.createElement("div");
+    unavailable.className = "signal-empty-state";
+    unavailable.textContent = "ประวัติการวิเคราะห์ใช้งานไม่ได้ในขณะนี้ • ระบบจะไม่สร้างผล 0/3 แทนข้อมูลที่อ่านไม่ได้";
+    analysisList.appendChild(unavailable);
+  } else if (activeHistoryTab === "analysis" && canonicalAnalysis.scopePending) {
+    const loading = document.createElement("div");
+    loading.className = "signal-empty-state";
+    loading.textContent = `กำลังขอประวัติการวิเคราะห์เฉพาะ ${scopeLabel} จาก Backend`;
+    analysisList.appendChild(loading);
+  } else if (activeHistoryTab === "analysis" && !analysisRounds.length) {
+    const empty = document.createElement("div");
+    empty.className = "signal-empty-state";
+    empty.textContent = "ยังไม่มีผลวิเคราะห์รายแท่งจาก Backend";
+    analysisList.appendChild(empty);
+  } else if (activeHistoryTab === "analysis") {
+    visibleAnalysisRounds.forEach((round) => analysisList.appendChild(createSignalAnalysisHistoryRow(round)));
+  }
+
+  const orderPageStatus = container.querySelector("[data-signal-order-page-status]");
+  if (activeHistoryTab === "orders") {
+    orderPageStatus.textContent = orderHistory.scopePending
+      ? `กำลังยืนยันยอดนับ ${scopeLabel}`
+      : orderHistory.paginationError
+        || `แสดง ${visibleOrders.length} จาก ${sortedOrders.length} รายการที่โหลดแล้ว • ${scopeLabel}`;
+    orderMore.hidden = !(orderHasLocalMore || activeHasBackendMore);
+    orderMore.disabled = orderHistory.paginationLoading === true
+      || (!orderHasLocalMore && (!activeHasBackendMore || !activeNextCursor));
+    orderMore.textContent = orderHistory.paginationLoading === true
+      ? "กำลังโหลดจาก Backend…"
+      : orderHasLocalMore
+        ? "แสดง Order เพิ่ม"
+        : "โหลด Order เก่าจาก Backend";
+    orderMore.addEventListener("click", async () => {
+      if (orderHasLocalMore) {
+        state.modal.signalHistoryOrderPage = orderPage + 1;
+        renderSignalHistoryPanel(report);
+        saveSessionSnapshot();
+        return;
+      }
+      if (await loadSignalHistoryNextPage("orders", report)) {
+        state.modal.signalHistoryOrderPage = orderPage + 1;
+        renderSignalHistoryPanel(state.propReports[AI_TRADE_COUNCIL_PROP_ID] || report);
+        saveSessionSnapshot();
+      }
+    });
+  }
+  const analysisPageStatus = container.querySelector("[data-signal-analysis-page-status]");
+  if (activeHistoryTab === "analysis") {
+    analysisPageStatus.textContent = canonicalAnalysis.scopePending
+      ? `กำลังยืนยันยอดนับ ${scopeLabel}`
+      : canonicalAnalysis.paginationError
+        || `แสดง ${visibleAnalysisRounds.length} จาก ${analysisRounds.length} รอบที่โหลดแล้ว • ${scopeLabel}`;
+    analysisMore.hidden = !(analysisHasLocalMore || activeHasBackendMore);
+    analysisMore.disabled = canonicalAnalysis.paginationLoading === true
+      || (!analysisHasLocalMore && (!activeHasBackendMore || !activeNextCursor));
+    analysisMore.textContent = canonicalAnalysis.paginationLoading === true
+      ? "กำลังโหลดจาก Backend…"
+      : analysisHasLocalMore
+        ? "แสดงรอบวิเคราะห์เพิ่ม"
+        : "โหลดรอบเก่าจาก Backend";
+    analysisMore.addEventListener("click", async () => {
+      if (analysisHasLocalMore) {
+        state.modal.signalHistoryAnalysisPage = analysisPage + 1;
+        renderSignalHistoryPanel(report);
+        saveSessionSnapshot();
+        return;
+      }
+      if (await loadSignalHistoryNextPage("analysis", report)) {
+        state.modal.signalHistoryAnalysisPage = analysisPage + 1;
+        renderSignalHistoryPanel(state.propReports[AI_TRADE_COUNCIL_PROP_ID] || report);
+        saveSessionSnapshot();
+      }
+    });
+  }
+
+  container.querySelector("[data-signal-history-retry]")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = "กำลังตรวจ…";
+    resetSignalHistoryPageCache(activeHistoryTab);
+    const [, latestReport] = await Promise.all([
+      loadBridgeMissions({ replaceEvents: false, persist: false, refreshUi: false }),
+      loadPropReport(AI_TRADE_COUNCIL_PROP_ID),
+    ]);
+    if (state.modal.open && state.modal.id === AI_TRADE_COUNCIL_PROP_ID) {
+      renderSignalHistoryPanel(latestReport || state.propReports[AI_TRADE_COUNCIL_PROP_ID] || report);
+    }
+  });
+
+  if (focusSearch && activeHistoryTab === "orders") {
+    const refreshed = container.querySelector("[data-signal-history-search]");
+    refreshed?.focus();
+    refreshed?.setSelectionRange(refreshed.value.length, refreshed.value.length);
+  }
+  const activeHistoryPageState = state.aiTradeCouncilHistoryPages?.[activeHistoryTab] || {};
+  const reportUpdatedAt = safeDashboardDisplayText(report?.updatedAt, "");
+  const scopedPageNeedsRefresh = activeReadModel.scopePending || Boolean(
+    reportUpdatedAt
+      && activeHistoryPageState.initialized === true
+      && activeHistoryPageState.sourceReportUpdatedAt !== reportUpdatedAt,
+  );
+  if (
+    scopedPageNeedsRefresh
+    && activeHistoryPageState.inFlight !== true
+    && !activeHistoryPageState.errorMessage
+  ) {
+    Promise.resolve().then(() => {
+      void loadSignalHistoryScopeFirstPages(
+        state.propReports[AI_TRADE_COUNCIL_PROP_ID] || report,
+      );
+    });
   }
 }
 
@@ -10437,6 +13413,14 @@ function normalizeWorkflowDashboard(subject, propertyRole, report = {}) {
   const backend = report?.workflowDashboard && typeof report.workflowDashboard === "object"
     ? report.workflowDashboard
     : {};
+  const hasAuthoritativeReadModel = Array.isArray(backend.actions);
+  const trackedLoadState = state.propReportLoadState?.[subject?.id] || {};
+  const workflowReadModel = {
+    authoritative: hasAuthoritativeReadModel,
+    status: hasAuthoritativeReadModel
+      ? "ready"
+      : (trackedLoadState.status === "error" || trackedLoadState.status === "ready" ? "error" : "loading"),
+  };
   const fallbackActionMap = new Map((fallback.actions || []).map((action) => [action.id, action]));
   const rawActions = Array.isArray(backend.actions)
     ? backend.actions
@@ -10506,6 +13490,43 @@ function normalizeWorkflowDashboard(subject, propertyRole, report = {}) {
       actionIds: tab.actionIds.filter((actionId) => !WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(actionId)),
     };
   });
+  let presentationTabs = tabs;
+  if (subject?.id === INDICATOR_SCOUT_PROP_ID) {
+    presentationTabs = tabs
+      .filter((tab) => INDICATOR_SCOUT_PRESENTATION_TAB_IDS.includes(tab.id))
+      .map((tab) => ({
+        ...tab,
+        labelTh: tab.id === "discoveries" ? "วันนี้" : "ย้อนหลัง 7 วัน",
+        descriptionTh: tab.id === "discoveries"
+          ? "ดู Indicator, EA และ Tool ที่พบในวันนี้ตามเวลา Asia/Bangkok"
+          : "ดูรายการที่ Backend ส่งกลับมาในช่วง 7 วันล่าสุด พร้อมแหล่งข้อมูลและหลักฐานจริง",
+      }));
+  } else if (subject?.id === FX_NEWS_BIAS_PROP_ID) {
+    const tabMap = new Map(tabs.map((tab) => [tab.id, tab]));
+    presentationTabs = FX_NEWS_BIAS_PRESENTATION_TAB_IDS
+      .map((id) => tabMap.get(id))
+      .filter(Boolean)
+      .map((tab) => ({
+        ...tab,
+        actionIds: [],
+        labelTh: tab.id === "pair_bias" ? "แนวโน้ม 28 คู่เงิน" : "ข่าวและผลกระทบ",
+        descriptionTh: tab.id === "pair_bias"
+          ? "ภาพรวม Bullish, Bearish หรือ Sideway พร้อมมุมมองสั้น กลาง และยาวของ 28 คู่เงิน"
+          : "ข่าวสำคัญและช่วงเวลาที่ EA ควรระวังจากข้อมูลจริงที่ Backend ส่งมา",
+      }));
+  } else if (subject?.id === HQ_CONNECTION_HUB_PROP_ID) {
+    const vpsTab = tabs.find((tab) => tab.id === "vps");
+    presentationTabs = [
+      {
+        id: "connections",
+        labelTh: "การเชื่อมต่อทุกอุปกรณ์",
+        descriptionTh: "ดูสถานะ จุดติดขัด และวิธีแก้ของ Dashboard ทุกกล่องในหน้าเดียว",
+        emptyMessageTh: "",
+        actionIds: [],
+      },
+      vpsTab ? { ...vpsTab, actionIds: [], labelTh: "สถานะ VPS" } : null,
+    ].filter(Boolean);
+  }
   const deliveredSourceRows = Array.isArray(backend.agentDeliveredSources)
     ? backend.agentDeliveredSources
     : [];
@@ -10525,7 +13546,8 @@ function normalizeWorkflowDashboard(subject, propertyRole, report = {}) {
   return {
     titleTh: safeDashboardDisplayText(backend.titleTh || roleWorkflow.titleTh || fallback.titleTh, displayPropName(subject?.id)),
     summaryTh: safeDashboardDisplayText(backend.summaryTh || roleWorkflow.summaryTh || fallback.summaryTh, propertyRole?.purpose || ""),
-    tabs: tabs.length ? tabs : fallback.tabs || [],
+    workflowReadModel,
+    tabs: presentationTabs.length ? presentationTabs : fallback.tabs || [],
     actions,
     agentDeliveredSources,
     workspaceSources: normalizeWorkflowSourceCatalog(backend.workspaceSources || backend.sourceCatalog),
@@ -10569,7 +13591,20 @@ function renderWorkflowTabs(propId, dashboard, selectedTab) {
   }
 }
 
-function workflowAvailabilityCopy(action, hasSources, schedule = null) {
+function workflowAvailabilityCopy(action, hasSources, schedule = null, workflowReadModel = {}) {
+  if (workflowReadModel.authoritative !== true) {
+    return workflowReadModel.status === "error"
+      ? {
+          tone: "warning",
+          label: "โหลดสถานะไม่สำเร็จ",
+          detail: "ยังไม่ได้รับสถานะที่ยืนยันจาก Local Runner ปุ่มจึงยังปิดเพื่อความปลอดภัย • ตรวจว่า Local Runner ทำงานอยู่ แล้วปิดและเปิดอุปกรณ์นี้ใหม่เพื่อลองอีกครั้ง",
+        }
+      : {
+          tone: "neutral",
+          label: "กำลังตรวจสอบสถานะ...",
+          detail: "กำลังโหลดสถานะที่ยืนยันจาก Local Runner ปุ่มสร้าง Mission จะเปิดเมื่อระบบตรวจสอบเสร็จ",
+        };
+  }
   if (WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(action.id)) {
     return action.id === "save_agent_preferences"
       ? {
@@ -10605,7 +13640,11 @@ function workflowAvailabilityCopy(action, hasSources, schedule = null) {
   if (action.availability.status === "coming_soon") {
     return { tone: "warning", label: "Coming Soon", detail: "วางหน้าจอไว้แล้ว แต่ระบบหลังบ้านส่วนนี้ยังไม่เปิดใช้งาน" };
   }
-  return { tone: "warning", label: "ต้องเชื่อมระบบก่อน", detail: "ตรวจการเชื่อมต่อด้านซ้าย เมื่อพร้อมแล้วปุ่มเริ่มงานจะเปิดใช้งาน" };
+  return {
+    tone: "warning",
+    label: "ต้องเชื่อมระบบก่อน",
+    detail: "เปิดศูนย์การเชื่อมต่ออุปกรณ์ HQ จากปุ่มด้านซ้าย แล้วตรวจรายการที่ต้องแก้ก่อนเริ่มงาน",
+  };
 }
 
 function createWorkflowSourceSelect(field, sources) {
@@ -10818,6 +13857,14 @@ function createWorkflowField(field, dashboard, action) {
   control.id = controlId;
   label.htmlFor = controlId;
   if (field.placeholderTh && "placeholder" in control) control.placeholder = field.placeholderTh;
+  const radarSheet = dashboard?.domainData?.indicatorScout?.googleSheet;
+  if (
+    field.id === "googleSheetUrlOrId"
+    && radarSheet?.configured === true
+    && "placeholder" in control
+  ) {
+    control.placeholder = `บันทึกแล้ว: ${safeDashboardDisplayText(radarSheet.sheetReferenceMasked, "Google Sheet")} • วาง URL/ID ใหม่เมื่อต้องการเปลี่ยน`;
+  }
   const preferenceValue = dashboard.domainData?.vpsHqStatus?.agentPreferences?.[field.id];
   if (preferenceValue !== undefined && preferenceValue !== null) {
     if (control instanceof HTMLSelectElement) {
@@ -10834,6 +13881,7 @@ function createWorkflowField(field, dashboard, action) {
           times: schedule.times,
           timezone: schedule.timezone,
           minimumImpact: schedule.minimumImpact,
+          googleSheetTabName: radarSheet?.tabName,
         }[field.id])
       : undefined;
     const presetValue = scheduleValue ?? action.pluginProfile?.inputPreset?.[field.id];
@@ -10894,11 +13942,18 @@ function createWorkflowActionCard(action, dashboard) {
         field.sourceKind === "workspace_source" ? dashboard.workspaceSources.length > 0 : dashboard.agentDeliveredSources.length > 0
       ))
     : dashboard.agentDeliveredSources.length > 0;
-  const availabilityCopy = workflowAvailabilityCopy(action, hasSources, dashboard.schedule);
+  const availabilityCopy = workflowAvailabilityCopy(
+    action,
+    hasSources,
+    dashboard.schedule,
+    dashboard.workflowReadModel,
+  );
   const inFlight = state.modal.workflowAction.inFlight
     && state.modal.workflowAction.propId === state.modal.id
     && state.modal.workflowAction.actionId === action.id;
-  const canSubmit = ["ready", "settings_only"].includes(action.availability.status) && (!action.sourceRequired || hasSources);
+  const canSubmit = dashboard.workflowReadModel?.authoritative === true
+    && ["ready", "settings_only"].includes(action.availability.status)
+    && (!action.sourceRequired || hasSources);
   form.className = "workflow-action-card";
   form.dataset.workflowActionForm = action.id;
   form.setAttribute("aria-busy", inFlight ? "true" : "false");
@@ -11301,85 +14356,324 @@ function workflowReportRows(report, types) {
     .filter((item) => item && accepted.has(String(item.type || "")));
 }
 
+function indicatorScoutObjectRows(...values) {
+  return values
+    .filter(Array.isArray)
+    .flatMap((value) => value)
+    .filter((item) => item && typeof item === "object" && !Array.isArray(item));
+}
+
+function indicatorScoutSourceRows(...values) {
+  return values
+    .filter(Array.isArray)
+    .flatMap((value) => value)
+    .map((item) => (item && typeof item === "object" ? item : { url: item }))
+    .map((item) => {
+      const url = getSafeExternalHttpUrl(item.url || item.sourceUrl);
+      if (!url) return null;
+      return {
+        url,
+        label: safeDashboardDisplayText(item.label || item.sourceTitle || item.title, "เปิดแหล่งต้นทาง"),
+        note: safeDashboardDisplayText(item.note || item.summary, ""),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 20);
+}
+
+function normalizeIndicatorScoutToolKind(value, title = "") {
+  const text = `${String(value || "")} ${String(title || "")}`.trim().toLowerCase();
+  if (/\b(?:ea|expert\s*advisor|robot)\b/.test(text) || text.startsWith("ea_")) return "ea";
+  if (/\b(?:indicator|อินดิเคเตอร์|อินดี้)\b/.test(text)) return "indicator";
+  return "tool";
+}
+
+function indicatorScoutToolKindLabel(value) {
+  return { indicator: "Indicator", ea: "EA", tool: "Tool" }[value] || "Tool";
+}
+
+function indicatorScoutSafeScreenshotUrl(item = {}) {
+  const screenshot = workflowDomainObject(item.screenshot);
+  const directCandidates = [screenshot.url, screenshot.imageUrl, item.imageUrl, item.screenshotUrl];
+  for (const candidate of directCandidates) {
+    const safeUrl = getSafeReportImageUrl(candidate);
+    if (safeUrl) return safeUrl;
+  }
+  const reportId = String(item.reportId || "").trim();
+  const attachmentId = String(screenshot.attachmentId || item.screenshotAttachmentId || "").trim();
+  if (
+    screenshot.available === true
+    && /^[a-zA-Z0-9._-]+$/.test(reportId)
+    && /^[a-zA-Z0-9._-]+$/.test(attachmentId)
+  ) {
+    const safeUrl = getSafeReportImageUrl(`/api/reports/${reportId}/attachments/${attachmentId}`);
+    if (safeUrl) return safeUrl;
+  }
+  const visualRows = indicatorScoutObjectRows(
+    item.visualEvidence,
+    item.attachments,
+    item.reportVisualEvidence,
+  );
+  for (const row of visualRows) {
+    const safeUrl = getSafeReportImageUrl(row.url || row.imageUrl);
+    if (safeUrl) return safeUrl;
+  }
+  return "";
+}
+
+function indicatorScoutTimestamp(item = {}) {
+  const value = item.checkedAt || item.discoveredAt || item.updatedAt || item.createdAt || "";
+  const parsed = value ? new Date(value).getTime() : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function indicatorScoutBangkokDateKey(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Bangkok",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}`;
+  } catch {
+    return "";
+  }
+}
+
+function filterIndicatorScoutToday(items, now = Date.now()) {
+  const todayKey = indicatorScoutBangkokDateKey(now);
+  return (Array.isArray(items) ? items : []).filter((item) => (
+    todayKey && indicatorScoutBangkokDateKey(indicatorScoutTimestamp(item)) === todayKey
+  ));
+}
+
+function filterIndicatorScoutRollingSevenDays(items, now = Date.now()) {
+  const current = Number(now);
+  const earliest = current - (7 * 24 * 60 * 60 * 1000);
+  return (Array.isArray(items) ? items : []).filter((item) => {
+    const timestamp = indicatorScoutTimestamp(item);
+    return timestamp >= earliest && timestamp <= current;
+  });
+}
+
 function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
+  const canonical = workflowDomainObject(
+    backend.radarWebsiteTool,
+    backend.domainData?.radarWebsiteTool,
+    report.radarWebsiteTool,
+  );
   const root = workflowDomainObject(
+    canonical,
     backend.indicatorScout,
     backend.indicatorScoutData,
     backend.domainData?.indicatorScout,
     report.indicatorScout,
   );
   const reports = workflowReportRows(report, "indicator_scout_report");
-  const candidates = [...workflowDomainArray(root.discoveries, root.items, root.indicators)];
-  reports.forEach((item) => {
-    const structured = workflowDomainArray(item.metrics?.discoveries, item.metrics?.items, item.findings)
-      .filter((finding) => finding && typeof finding === "object" && !Array.isArray(finding));
-    if (structured.length) candidates.push(...structured.map((finding) => ({ ...finding, reportId: item.id })));
-    else {
-      const metrics = workflowDomainObject(item.metrics);
-      const directContractResult = [
-        "indicatorName",
-        "sourceUrl",
-        "publishedAt",
-        "checkedAt",
-        "featureSummary",
-        "duplicateFingerprint",
-      ].some((field) => metrics[field] !== undefined && metrics[field] !== null && metrics[field] !== "");
-      const limitations = Array.isArray(metrics.limitations)
-        ? metrics.limitations.slice(0, 4).map((value) => safeDashboardDisplayText(value, "")).filter(Boolean)
-        : [];
-      const summaryParts = [
-        metrics.featureSummary,
-        metrics.availability ? `สถานะเผยแพร่: ${formatDashboardValue(metrics.availability)}` : "",
-        limitations.length ? `ข้อจำกัด: ${limitations.join(" • ")}` : "",
-      ].map((value) => safeDashboardDisplayText(value, "")).filter(Boolean);
-      candidates.push({
-        id: item.id,
+  const canonicalTodayRows = Array.isArray(canonical.todayEntries)
+    ? canonical.todayEntries
+    : (Array.isArray(backend.todayEntries) ? backend.todayEntries : null);
+  const canonicalSevenDayRows = Array.isArray(canonical.sevenDayEntries)
+    ? canonical.sevenDayEntries
+    : (Array.isArray(backend.sevenDayEntries) ? backend.sevenDayEntries : null);
+  const hasCanonicalTruth = canonicalTodayRows !== null && canonicalSevenDayRows !== null;
+  const candidates = hasCanonicalTruth
+    ? [...canonicalSevenDayRows]
+    : indicatorScoutObjectRows(root.entries, root.discoveries, root.items, root.indicators);
+  if (!hasCanonicalTruth) reports.forEach((item) => {
+    const metrics = workflowDomainObject(item.metrics);
+    const structured = indicatorScoutObjectRows(
+      metrics.entries,
+      item.entries,
+      metrics.discoveries,
+      metrics.items,
+      item.findings,
+    );
+    if (structured.length) {
+      candidates.push(...structured.map((finding) => ({
+        ...finding,
         reportId: item.id,
-        title: directContractResult ? (metrics.indicatorName || item.title) : item.title,
-        summary: summaryParts.join(" • ") || item.summary,
-        updatedAt: item.updatedAt || item.createdAt,
-        checkedAt: metrics.checkedAt,
-        publishedAt: metrics.publishedAt,
-        sourceUrl: metrics.sourceUrl || item.evidence?.[0]?.url,
-        sourceLabel: item.evidence?.[0]?.label,
-        dedupStatus: metrics.duplicateFingerprint
-          ? `ตรวจ Fingerprint แล้ว • ${safeDashboardDisplayText(metrics.duplicateFingerprint, "").slice(0, 20)}`
-          : (metrics.dedupStatus || metrics.duplicateStatus),
-        platform: metrics.platform,
-        category: metrics.category,
-      });
+        reportStatus: item.status,
+        reportUpdatedAt: item.updatedAt || item.createdAt,
+        reportVisualEvidence: workflowDomainArray(item.attachments, item.visualEvidence),
+        reportEvidence: item.evidence,
+        ownerAgentId: item.ownerAgentId,
+      })));
+      return;
     }
+    const directContractResult = [
+      "indicatorName",
+      "toolName",
+      "sourceUrl",
+      "publishedAt",
+      "checkedAt",
+      "featureSummary",
+      "summaryTh",
+      "duplicateFingerprint",
+    ].some((field) => metrics[field] !== undefined && metrics[field] !== null && metrics[field] !== "");
+    const limitations = Array.isArray(metrics.limitations)
+      ? metrics.limitations.slice(0, 4).map((value) => safeDashboardDisplayText(value, "")).filter(Boolean)
+      : [];
+    const summaryParts = [
+      metrics.summaryTh || metrics.featureSummary,
+      metrics.availability ? `สถานะเผยแพร่: ${formatDashboardValue(metrics.availability)}` : "",
+      limitations.length ? `ข้อจำกัด: ${limitations.join(" • ")}` : "",
+    ].map((value) => safeDashboardDisplayText(value, "")).filter(Boolean);
+    candidates.push({
+      id: item.id,
+      recordId: metrics.recordId,
+      reportId: item.id,
+      reportStatus: item.status,
+      title: directContractResult ? (metrics.toolName || metrics.indicatorName || item.title) : item.title,
+      summary: summaryParts.join(" • ") || item.summary,
+      updatedAt: item.updatedAt || item.createdAt,
+      checkedAt: metrics.checkedAt,
+      publishedAt: metrics.publishedAt,
+      sourceUrl: metrics.sourceUrl || item.evidence?.[0]?.url,
+      sourceLabel: metrics.sourceTitle || item.evidence?.[0]?.label,
+      dedupStatus: metrics.duplicateFingerprint
+        ? `ตรวจ Fingerprint แล้ว • ${safeDashboardDisplayText(metrics.duplicateFingerprint, "").slice(0, 20)}`
+        : (metrics.dedupStatus || metrics.duplicateStatus),
+      duplicateStatus: metrics.duplicateStatus,
+      verificationStatus: metrics.verificationStatus,
+      platform: metrics.platform,
+      version: metrics.version,
+      category: metrics.category,
+      toolKind: metrics.toolKind,
+      screenshot: metrics.screenshot,
+      reportVisualEvidence: workflowDomainArray(item.attachments, item.visualEvidence),
+      reportEvidence: item.evidence,
+      ownerAgentId: item.ownerAgentId,
+    });
+  });
+  const normalizedCandidates = candidates.slice(0, 300).map((item, index) => {
+    const rawEvidence = indicatorScoutSourceRows(item?.evidence, item?.sources, item?.reportEvidence);
+    const sourceUrl = getSafeExternalHttpUrl(item?.sourceUrl || item?.url || rawEvidence[0]?.url);
+    const title = safeDashboardDisplayText(
+      item?.toolName || item?.title || item?.name || item?.indicatorName,
+      `รายการจากเว็บไซต์ ${index + 1}`,
+    );
+    const toolKind = normalizeIndicatorScoutToolKind(item?.toolKind || item?.kind || item?.category, title);
+    const reportId = String(item?.reportId || "").trim();
+    const checkedAt = item?.checkedAt || item?.discoveredAt || item?.reportUpdatedAt || item?.updatedAt || item?.createdAt || null;
+    const imageUrl = indicatorScoutSafeScreenshotUrl({ ...item, reportId });
+    const visualEvidence = imageUrl
+      ? [{ url: imageUrl, label: `ภาพหลักฐาน ${title}` }]
+      : [];
+    const evidence = rawEvidence.length
+      ? rawEvidence
+      : (sourceUrl ? [{ url: sourceUrl, label: safeDashboardDisplayText(item?.sourceLabel, "เปิดแหล่งต้นทาง"), note: "" }] : []);
+    const recordId = safeDashboardDisplayText(item?.recordId || item?.id || item?.discoveryId, `radar-${index + 1}`);
+    const platform = safeDashboardDisplayText(item?.platform, "ยังไม่ระบุแพลตฟอร์ม");
+    const version = safeDashboardDisplayText(item?.version, "");
+    const dedupeKey = String(
+      item?.recordId
+      || item?.discoveryId
+      || sourceUrl
+      || `${title}|${platform}|${version}`,
+    ).trim().toLowerCase();
+    return {
+      id: recordId,
+      recordId,
+      reportId,
+      title,
+      summary: safeDashboardDisplayText(item?.summaryTh || item?.summary || item?.description, "ยังไม่มีบทสรุปเพิ่มเติมจาก Backend"),
+      toolKind,
+      toolKindLabel: indicatorScoutToolKindLabel(toolKind),
+      platform,
+      version,
+      sourceUrl,
+      sourceLabel: safeDashboardDisplayText(item?.sourceTitle || item?.sourceLabel || evidence[0]?.label, sourceUrl ? "เปิดแหล่งต้นทาง" : "ยังไม่มี URL จาก Backend"),
+      checkedAt,
+      discoveredAt: checkedAt,
+      publishedAt: item?.publishedAt || item?.sourcePublishedAt || null,
+      updatedAt: checkedAt,
+      dedupStatus: safeDashboardDisplayText(item?.dedupStatus || item?.duplicateStatus, "รอผลตรวจรายการซ้ำจาก Backend"),
+      verificationStatus: safeDashboardDisplayText(item?.verificationStatus, "ยังไม่ระบุผลตรวจจาก Backend"),
+      screenshotStatus: imageUrl
+        ? "available"
+        : safeDashboardDisplayText(item?.screenshot?.status || item?.screenshotStatus, "not_available"),
+      imageUrl,
+      attachments: visualEvidence,
+      visualEvidence,
+      evidence,
+      ownerAgentId: String(item?.ownerAgentId || ""),
+      status: safeDashboardDisplayText(item?.reportStatus || item?.status, "reported"),
+      metrics: {
+        toolKind: indicatorScoutToolKindLabel(toolKind),
+        platform,
+        version: version || "ยังไม่ระบุ",
+        verificationStatus: safeDashboardDisplayText(item?.verificationStatus, "ยังไม่ระบุ"),
+        duplicateStatus: safeDashboardDisplayText(item?.duplicateStatus || item?.dedupStatus, "ยังไม่ระบุ"),
+      },
+      dedupeKey,
+    };
   });
   const seen = new Set();
-  const discoveries = candidates.slice(0, 100).map((item, index) => {
-    const evidence = workflowDomainArray(item?.evidence, item?.sources);
-    const sourceUrl = getSafeExternalHttpUrl(item?.sourceUrl || item?.url || evidence[0]?.url);
-    const title = safeDashboardDisplayText(item?.title || item?.name || item?.indicatorName, `Indicator รายการที่ ${index + 1}`);
-    const key = String(item?.id || item?.discoveryId || sourceUrl || title).trim().toLowerCase();
-    if (!key || seen.has(key)) return null;
-    seen.add(key);
-    return {
-      id: safeDashboardDisplayText(item?.id || item?.discoveryId, `indicator-${index + 1}`),
-      reportId: String(item?.reportId || ""),
-      title,
-      summary: safeDashboardDisplayText(item?.summary || item?.description, "ยังไม่มีบทสรุปเพิ่มเติมจาก Backend"),
-      sourceUrl,
-      sourceLabel: safeDashboardDisplayText(item?.sourceLabel || evidence[0]?.label, sourceUrl ? "เปิดแหล่งต้นทาง" : "ยังไม่มี URL จาก Backend"),
-      discoveredAt: item?.discoveredAt || item?.checkedAt || item?.updatedAt || null,
-      publishedAt: item?.publishedAt || item?.sourcePublishedAt || null,
-      dedupStatus: safeDashboardDisplayText(item?.dedupStatus || item?.duplicateStatus, "รอผลตรวจรายการซ้ำจาก Backend"),
-      platform: safeDashboardDisplayText(item?.platform, "ยังไม่ระบุแพลตฟอร์ม"),
-    };
-  }).filter(Boolean);
+  const fallbackDiscoveries = normalizedCandidates
+    .sort((left, right) => indicatorScoutTimestamp(right) - indicatorScoutTimestamp(left))
+    .filter((item) => {
+      if (!item.dedupeKey || seen.has(item.dedupeKey)) return false;
+      seen.add(item.dedupeKey);
+      return true;
+    })
+    .slice(0, 100)
+    .map(({ dedupeKey, ...item }) => item);
+  const canonicalEntryKey = (item = {}) => {
+    const reportId = String(item.reportId || "").trim();
+    const recordId = String(
+      item.recordId || item.id || item.discoveryId || item.sourceUrl || item.url || "",
+    ).trim();
+    const checkedAt = String(item.checkedAt || item.discoveredAt || item.updatedAt || "").trim();
+    return `${reportId}\u001f${recordId}\u001f${checkedAt}`;
+  };
+  const canonicalEntryMap = new Map(
+    normalizedCandidates.map((item) => [canonicalEntryKey(item), item]),
+  );
+  const projectCanonicalRows = (rows) => rows
+    .slice(0, 100)
+    .map((item) => canonicalEntryMap.get(canonicalEntryKey(item)))
+    .filter(Boolean)
+    .map(({ dedupeKey, ...item }) => item);
+  const discoveries = hasCanonicalTruth
+    ? projectCanonicalRows(canonicalSevenDayRows)
+    : fallbackDiscoveries;
+  const todayEntries = hasCanonicalTruth
+    ? projectCanonicalRows(canonicalTodayRows)
+    : filterIndicatorScoutToday(discoveries);
+  const sevenDayEntries = hasCanonicalTruth
+    ? discoveries
+    : filterIndicatorScoutRollingSevenDays(discoveries);
+  const fallbackAdapter = {
+    status: "coming_soon",
+    labelTh: "Screenshot Adapter: Coming Soon",
+    detailTh: "ยังไม่มี Adapter จับภาพจริง จึงไม่แสดงภาพจำลองหรืออ้างว่ามี Screenshot แล้ว",
+  };
+  const adapter = workflowDomainObject(root.screenshotAdapter, backend.screenshotAdapter);
+  const hasScreenshot = discoveries.some((item) => Boolean(item.imageUrl));
   return {
     discoveries,
+    todayEntries,
+    sevenDayEntries,
     reports,
     schedule: workflowDomainObject(root.schedule, backend.schedule),
-    screenshotAdapter: {
-      status: "coming_soon",
-      labelTh: "Screenshot Adapter: Coming Soon",
-      detailTh: "ยังไม่มี Adapter จับภาพจริง จึงไม่แสดงภาพจำลองหรืออ้างว่ามี Screenshot แล้ว",
-    },
+    googleSheet: workflowDomainObject(root.googleSheet, backend.googleSheet),
+    screenshotAdapter: hasScreenshot
+      ? {
+          status: "ready",
+          labelTh: "มีภาพหลักฐานจาก Backend",
+          detailTh: "แสดงเฉพาะไฟล์ภาพจาก Report attachment แบบ same-origin ที่ผ่านตัวกรองแล้ว",
+        }
+      : {
+          ...fallbackAdapter,
+          status: safeDashboardDisplayText(adapter.status, fallbackAdapter.status),
+          labelTh: safeDashboardDisplayText(adapter.labelTh, fallbackAdapter.labelTh),
+          detailTh: safeDashboardDisplayText(adapter.detailTh, fallbackAdapter.detailTh),
+        },
   };
 }
 
@@ -11389,6 +14683,30 @@ function normalizeFxBiasValue(value) {
   if (["bearish", "sell", "down", "negative", "ขาลง"].includes(normalized)) return "bearish";
   if (["sideway", "sideways", "neutral", "hold", "flat", "แกว่งตัว"].includes(normalized)) return "sideway";
   return "unavailable";
+}
+
+function fxBiasHorizonValue(...values) {
+  const value = values.find((item) => item !== undefined && item !== null && item !== "");
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value.bias ?? value.value ?? value.direction ?? value.status ?? "";
+  }
+  return value ?? "";
+}
+
+function normalizeFxFreshness(root = {}) {
+  const dataStatus = String(root?.dataStatus || "unknown").trim().toLowerCase().replace(/[\s-]+/g, "_") || "unknown";
+  const stale = root?.stale === true || dataStatus === "stale";
+  const currentDataAvailable = typeof root?.currentDataAvailable === "boolean"
+    ? root.currentDataAvailable
+    : null;
+  return {
+    asOf: root?.asOf || null,
+    currentBangkokDate: safeDashboardDisplayText(root?.currentBangkokDate, ""),
+    reportBangkokDate: safeDashboardDisplayText(root?.reportBangkokDate, ""),
+    stale,
+    currentDataAvailable,
+    dataStatus,
+  };
 }
 
 function workflowSourceLinkRows(...values) {
@@ -11435,55 +14753,150 @@ function deriveFxOverallBias(explicitValue, horizonValues = []) {
 function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
   const reports = workflowReportRows(report, "fx_news_bias_report");
   const latestMetrics = workflowDomainObject(reports[0]?.metrics);
-  const root = workflowDomainObject(
-    backend.fxBias,
+  const legacyRoot = workflowDomainObject(
     backend.fxNewsBias,
     backend.marketNewsBias,
     backend.domainData?.fxNewsBias,
     report.fxNewsBias,
     latestMetrics,
   );
-  const sharedSourceLinks = workflowSourceLinkRows(root.sourceLinks, latestMetrics.sourceLinks);
-  const rawNews = workflowDomainArray(root.news, root.events, root.highImpactNews, latestMetrics.news, latestMetrics.events);
-  const news = rawNews.slice(0, 80).map((item, index) => ({
-    id: safeDashboardDisplayText(item?.id, `news-${index + 1}`),
-    title: safeDashboardDisplayText(item?.title || item?.event || item?.name, `ข่าวรายการที่ ${index + 1}`),
-    summary: safeDashboardDisplayText(item?.summary || item?.impactSummary || item?.detail, "ยังไม่มีบทสรุปจาก Backend"),
-    impact: safeDashboardDisplayText(item?.impact || item?.importance, "ยังไม่ระบุผลกระทบ"),
-    eventAt: item?.eventAt || item?.publishedAt || item?.time || null,
-    sourceUrl: workflowItemSourceUrl(item, sharedSourceLinks),
-    sourceLabel: safeDashboardDisplayText(item?.sourceLabel || item?.source, "เปิดแหล่งข่าว"),
-  }));
-  const rawDanger = workflowDomainArray(root.dangerWindows, root.eaCautionWindows, root.riskWindows, latestMetrics.dangerWindows);
-  const dangerWindows = rawDanger.slice(0, 40).map((item, index) => ({
-    id: safeDashboardDisplayText(item?.id, `window-${index + 1}`),
-    title: safeDashboardDisplayText(item?.title || item?.label, `ช่วงเฝ้าระวังที่ ${index + 1}`),
-    startAt: item?.startAt || item?.start || null,
-    endAt: item?.endAt || item?.end || null,
-    reason: safeDashboardDisplayText(item?.reason || item?.summary, "รอเหตุผลจาก Backend"),
-  }));
-  const rawPairs = root.pairBias || root.pairs || latestMetrics.pairBias || latestMetrics.pairs || {};
+  const marketNewsRoot = workflowDomainObject(
+    backend.marketNews,
+    backend.domainData?.marketNews,
+    latestMetrics.marketNews,
+    legacyRoot,
+  );
+  const fxBiasRoot = workflowDomainObject(
+    backend.fxBias,
+    backend.domainData?.fxBias,
+    latestMetrics.fxBias,
+    legacyRoot,
+  );
+  const marketNewsFreshness = normalizeFxFreshness(marketNewsRoot);
+  const fxBiasFreshness = normalizeFxFreshness(fxBiasRoot);
+  const marketNewsIsCurrent = marketNewsFreshness.stale !== true
+    && marketNewsFreshness.currentDataAvailable !== false;
+  const fxBiasIsCurrent = fxBiasFreshness.stale !== true
+    && fxBiasFreshness.currentDataAvailable !== false;
+  const newsSourceLinks = workflowSourceLinkRows(
+    marketNewsRoot.sources,
+    marketNewsRoot.sourceLinks,
+    legacyRoot.sources,
+    legacyRoot.sourceLinks,
+    latestMetrics.sources,
+    latestMetrics.sourceLinks,
+  );
+  const biasSourceLinks = workflowSourceLinkRows(
+    fxBiasRoot.sources,
+    fxBiasRoot.sourceLinks,
+    legacyRoot.sources,
+    legacyRoot.sourceLinks,
+    latestMetrics.sources,
+    latestMetrics.sourceLinks,
+  );
+  const rawNews = marketNewsIsCurrent
+    ? workflowDomainArray(
+        marketNewsRoot.news,
+        marketNewsRoot.events,
+        marketNewsRoot.highImpactNews,
+        legacyRoot.news,
+        legacyRoot.events,
+        latestMetrics.news,
+        latestMetrics.events,
+      )
+    : [];
+  const news = rawNews.slice(0, 80).map((item, index) => {
+    const currencies = workflowDomainArray(item?.currencies, item?.currencyCodes)
+      .map((value) => String(value || "").trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, 12);
+    return {
+      id: safeDashboardDisplayText(item?.eventId || item?.id, `news-${index + 1}`),
+      title: safeDashboardDisplayText(item?.titleTh || item?.title || item?.event || item?.name, `ข่าวรายการที่ ${index + 1}`),
+      summary: safeDashboardDisplayText(item?.summaryTh || item?.summary || item?.impactSummary || item?.detail, "ยังไม่มีบทสรุปจาก Backend"),
+      impact: safeDashboardDisplayText(item?.impact || item?.importance, "ยังไม่ระบุผลกระทบ"),
+      eventAt: item?.scheduledAt || item?.eventAt || item?.publishedAt || item?.time || null,
+      currencies,
+      sourceUrl: workflowItemSourceUrl(item, newsSourceLinks),
+      sourceLabel: safeDashboardDisplayText(item?.sourceLabel || item?.source, "เปิดแหล่งข่าว"),
+    };
+  });
+  const rawDanger = marketNewsIsCurrent
+    ? workflowDomainArray(
+        marketNewsRoot.dangerWindows,
+        marketNewsRoot.eaCautionWindows,
+        marketNewsRoot.riskWindows,
+        legacyRoot.dangerWindows,
+        latestMetrics.dangerWindows,
+      )
+    : [];
+  const dangerWindows = rawDanger.slice(0, 40).map((item, index) => {
+    const currencies = workflowDomainArray(item?.currencies, item?.currencyCodes)
+      .map((value) => String(value || "").trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, 12);
+    return {
+      id: safeDashboardDisplayText(item?.windowId || item?.id, `window-${index + 1}`),
+      title: safeDashboardDisplayText(
+        item?.titleTh || item?.title || item?.label,
+        currencies.length ? `ช่วงเฝ้าระวัง ${currencies.join(", ")}` : `ช่วงเฝ้าระวังที่ ${index + 1}`,
+      ),
+      startAt: item?.startsAt || item?.startAt || item?.start || null,
+      endAt: item?.endsAt || item?.endAt || item?.end || null,
+      reason: safeDashboardDisplayText(item?.reasonTh || item?.reason || item?.summaryTh || item?.summary, "รอเหตุผลจาก Backend"),
+      currencies,
+      sourceUrl: workflowItemSourceUrl(item, newsSourceLinks),
+    };
+  });
+  const rawPairs = fxBiasIsCurrent
+    ? (fxBiasRoot.pairBias
+      || fxBiasRoot.pairs
+      || legacyRoot.pairBias
+      || legacyRoot.pairs
+      || latestMetrics.pairBias
+      || latestMetrics.pairs
+      || {})
+    : {};
   const rows = Array.isArray(rawPairs)
     ? rawPairs
     : Object.entries(rawPairs && typeof rawPairs === "object" ? rawPairs : {}).map(([pair, value]) => ({
         pair,
         ...(value && typeof value === "object" ? value : { bias: value }),
       }));
+  const sharedSourceLinks = biasSourceLinks;
   const pairMap = new Map();
   rows.forEach((item) => {
     const pair = String(item?.pair || item?.symbol || "").trim().toUpperCase();
     if (!FX_BIAS_PAIR_UNIVERSE.includes(pair)) return;
-    const short = normalizeFxBiasValue(item?.shortBias || item?.short || item?.shortTerm || item?.horizons?.short);
-    const medium = normalizeFxBiasValue(item?.mediumBias || item?.medium || item?.mediumTerm || item?.horizons?.medium);
-    const long = normalizeFxBiasValue(item?.longBias || item?.long || item?.longTerm || item?.horizons?.long);
+    const rowStatus = String(item?.status || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+    const insufficientData = ["insufficient_data", "unknown", "unavailable", "not_checked"].includes(rowStatus);
+    const short = insufficientData
+      ? "unavailable"
+      : normalizeFxBiasValue(fxBiasHorizonValue(item?.shortBias, item?.short, item?.shortTerm, item?.horizons?.short));
+    const medium = insufficientData
+      ? "unavailable"
+      : normalizeFxBiasValue(fxBiasHorizonValue(item?.mediumBias, item?.medium, item?.mediumTerm, item?.horizons?.medium));
+    const long = insufficientData
+      ? "unavailable"
+      : normalizeFxBiasValue(fxBiasHorizonValue(item?.longBias, item?.long, item?.longTerm, item?.horizons?.long));
+    const horizonReasons = [
+      item?.horizons?.short?.reasonTh,
+      item?.horizons?.medium?.reasonTh,
+      item?.horizons?.long?.reasonTh,
+    ].map((value) => String(value || "").trim()).filter(Boolean);
     pairMap.set(pair, {
       pair,
-      bias: deriveFxOverallBias(item?.bias || item?.overall, [short, medium, long]),
+      bias: insufficientData ? "unavailable" : deriveFxOverallBias(item?.bias || item?.overallBias || item?.overall, [short, medium, long]),
       short,
       medium,
       long,
       summary: safeDashboardDisplayText(
-        item?.summary || item?.reason || (item?.confidence !== undefined && item?.confidence !== null ? `ความเชื่อมั่น ${item.confidence}%` : ""),
+        item?.summaryTh
+          || item?.summary
+          || item?.reasonTh
+          || item?.reason
+          || horizonReasons.join(" • ")
+          || (item?.confidence !== undefined && item?.confidence !== null ? `ความเชื่อมั่น ${item.confidence}%` : ""),
         "",
       ),
       updatedAt: item?.updatedAt || item?.observedAt || null,
@@ -11503,8 +14916,62 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
       updatedAt: null,
       sourceUrl: "",
     }),
+    freshness: {
+      marketNews: marketNewsFreshness,
+      fxBias: fxBiasFreshness,
+    },
     reports,
-    schedule: workflowDomainObject(root.schedule, backend.schedule),
+    schedule: workflowDomainObject(marketNewsRoot.schedule, fxBiasRoot.schedule, legacyRoot.schedule, backend.schedule),
+  };
+}
+
+function normalizeConnectionCenterDevice(item = {}, index = 0) {
+  const propId = String(item?.propId || item?.dashboardId || item?.id || "").trim();
+  const checklist = workflowDomainObject(item?.connectionChecklist, item?.checklist);
+  const checklistItems = workflowDomainArray(item?.items, checklist.items, item?.checks).slice(0, 30);
+  const explicitIssue = workflowDomainObject(item?.firstIssue, item?.blockingItem, item?.issue);
+  const firstIssue = Object.keys(explicitIssue).length
+    ? explicitIssue
+    : (checklistItems.find((row) => row?.required === true && normalizeConnectionStatus(row?.status) !== "connected")
+      || checklistItems.find((row) => !["connected", "coming_soon"].includes(normalizeConnectionStatus(row?.status)))
+      || {});
+  const rawStatus = item?.overallStatus || item?.status || item?.connectionStatus || checklist?.overallStatus || "checking";
+  const status = normalizeConnectionStatus(rawStatus);
+  const counts = workflowDomainObject(item?.counts);
+  const readyItems = Number.isFinite(Number(item?.readyItems))
+    ? Number(item.readyItems)
+    : (Number.isFinite(Number(counts.ready))
+        ? Number(counts.ready)
+        : checklistItems.filter((row) => normalizeConnectionStatus(row?.status) === "connected").length);
+  const itemCount = Number.isFinite(Number(item?.itemCount || item?.totalItems))
+    ? Number(item.itemCount || item.totalItems)
+    : (Number.isFinite(Number(counts.total)) ? Number(counts.total) : checklistItems.length);
+  const fallbackTitle = propId ? displayPropName(propId) : `อุปกรณ์ ${index + 1}`;
+  return {
+    propId: propId || `connection-device-${index + 1}`,
+    title: safeDashboardDisplayText(item?.moduleNameTh || item?.titleTh || item?.title || item?.labelTh, fallbackTitle),
+    rawStatus,
+    status,
+    group: item?.stale === true ? "attention" : connectionHubStatusGroup(rawStatus),
+    statusLabel: safeDashboardDisplayText(item?.statusLabelTh || item?.statusLabel, connectionStatusLabel(rawStatus, "ยังไม่ทราบสถานะ")),
+    checkedAt: item?.checkedAt || checklist?.checkedAt || item?.updatedAt || null,
+    issueLabel: safeDashboardDisplayText(
+      item?.issueLabelTh || firstIssue?.labelTh || firstIssue?.label || firstIssue?.titleTh,
+      "",
+    ),
+    remedy: safeDashboardDisplayText(
+      item?.remedyTh || item?.remedy || item?.nextStepTh || item?.recommendedActionTh
+        || firstIssue?.remedyTh || firstIssue?.actionTh || firstIssue?.nextStepTh || firstIssue?.detailTh || firstIssue?.detail,
+      status === "connected"
+        ? "พร้อมใช้งาน ไม่พบจุดเชื่อมต่อที่ต้องแก้ในผลตรวจล่าสุด"
+        : (status === "coming_soon"
+            ? "ส่วนเชื่อมต่อนี้ยังเป็น Coming Soon จึงยังไม่ต้องตั้งค่าเพิ่ม"
+            : "เปิดอุปกรณ์นี้เพื่อดูผลตรวจและวิธีแก้เฉพาะจุดจาก Local Runner"),
+    ),
+    readyItems: Math.max(0, readyItems),
+    itemCount: Math.max(0, itemCount),
+    stale: item?.stale === true,
+    schedule: workflowDomainObject(item?.schedule),
   };
 }
 
@@ -11532,7 +14999,34 @@ function normalizeVpsHqDomain(backend = {}, report = {}) {
   }));
   const bridge = workflowDomainObject(root.hqBridge, root.bridge, report.bridge);
   const agentPreferences = workflowDomainObject(root.agentPreferences, backend.agentPreferences);
-  return { vps, bridge, agentPreferences, reports };
+  const connectionCenterRoot = workflowDomainObject(
+    backend.connectionCenter,
+    root.connectionCenter,
+    report.connectionCenter,
+    latestMetrics.connectionCenter,
+  );
+  const connectionCenterDevices = workflowDomainArray(
+    connectionCenterRoot.devices,
+    connectionCenterRoot.equipment,
+    connectionCenterRoot.items,
+  ).slice(0, 40).map(normalizeConnectionCenterDevice);
+  const connectionCenterSummary = workflowDomainObject(
+    connectionCenterRoot.summary,
+    connectionCenterRoot.counts,
+  );
+  return {
+    vps,
+    bridge,
+    agentPreferences,
+    reports,
+    connectionCenter: {
+      authoritative: Object.keys(connectionCenterRoot).length > 0,
+      devices: connectionCenterDevices,
+      summary: connectionCenterSummary,
+      checkedAt: connectionCenterRoot.checkedAt || connectionCenterRoot.updatedAt || null,
+      services: workflowDomainObject(connectionCenterRoot.services),
+    },
+  };
 }
 
 function normalizeWorkflowDomainData(propId, backend = {}, report = {}) {
@@ -11570,84 +15064,183 @@ function workflowBiasLabel(value) {
   }[value] || "รอข้อมูล";
 }
 
+function formatIndicatorScoutHistoryDay(item) {
+  const timestamp = indicatorScoutTimestamp(item);
+  if (!timestamp) return "ไม่ทราบวันที่";
+  try {
+    return new Intl.DateTimeFormat("th-TH", {
+      timeZone: "Asia/Bangkok",
+      dateStyle: "long",
+    }).format(new Date(timestamp));
+  } catch {
+    return formatThaiDateTime(timestamp);
+  }
+}
+
+function createIndicatorScoutCard(item, screenshotAdapter = {}) {
+  const card = document.createElement("article");
+  const media = document.createElement("figure");
+  const body = document.createElement("div");
+  const heading = document.createElement("div");
+  const badges = document.createElement("div");
+  const kindBadge = document.createElement("span");
+  const platformBadge = document.createElement("span");
+  const title = document.createElement("h5");
+  const summary = document.createElement("p");
+  const meta = document.createElement("dl");
+  const actions = document.createElement("div");
+  const safeImageUrl = getSafeReportImageUrl(item.imageUrl);
+  card.className = "workflow-indicator-card workflow-radar-card";
+  card.dataset.toolKind = item.toolKind;
+  media.className = "workflow-radar-card-media";
+  body.className = "workflow-radar-card-body";
+  heading.className = "workflow-radar-card-heading";
+  badges.className = "workflow-radar-card-badges";
+  kindBadge.className = "workflow-radar-kind-badge";
+  kindBadge.dataset.kind = item.toolKind;
+  kindBadge.textContent = item.toolKindLabel;
+  platformBadge.className = "workflow-radar-platform-badge";
+  platformBadge.textContent = item.platform;
+  badges.append(kindBadge, platformBadge);
+  title.textContent = item.title;
+  heading.append(badges, title);
+  summary.className = "workflow-radar-card-summary";
+  summary.textContent = item.summary;
+  if (safeImageUrl) {
+    const image = document.createElement("img");
+    const caption = document.createElement("figcaption");
+    image.src = safeImageUrl;
+    image.alt = `ภาพหลักฐาน ${item.title}`;
+    image.loading = "lazy";
+    caption.textContent = "ภาพหลักฐานจาก Report attachment";
+    image.addEventListener("error", () => {
+      media.dataset.state = "error";
+      image.remove();
+      caption.textContent = "โหลดภาพไม่สำเร็จ กรุณาเปิดรายละเอียดเพื่อตรวจไฟล์จาก Local Runner";
+    });
+    media.append(image, caption);
+  } else {
+    const emptyIcon = document.createElement("span");
+    const emptyTitle = document.createElement("strong");
+    const emptyCopy = document.createElement("small");
+    media.dataset.state = "empty";
+    emptyIcon.textContent = "◇";
+    emptyTitle.textContent = "ยังไม่มีภาพหลักฐาน";
+    emptyCopy.textContent = screenshotAdapter.status === "ready"
+      ? "รายการนี้ยังไม่มี Screenshot attachment จาก Backend"
+      : "Screenshot Adapter ยังไม่พร้อม และระบบจะไม่สร้างภาพจำลอง";
+    media.append(emptyIcon, emptyTitle, emptyCopy);
+  }
+  [
+    ["ตรวจพบ", item.checkedAt ? formatThaiDateTime(item.checkedAt) : "ยังไม่มีเวลา Backend"],
+    ["เผยแพร่", item.publishedAt ? formatThaiDateTime(item.publishedAt) : "ยังไม่ระบุ"],
+    ["ตรวจซ้ำ", item.dedupStatus],
+    ["ตรวจแหล่งข้อมูล", item.verificationStatus],
+  ].forEach(([term, value]) => {
+    const dt = document.createElement("dt");
+    const dd = document.createElement("dd");
+    dt.textContent = term;
+    dd.textContent = value;
+    meta.append(dt, dd);
+  });
+  actions.className = "workflow-radar-card-actions";
+  const source = createWorkflowExternalSource(item.sourceUrl, "เปิดแหล่งต้นทาง");
+  if (source) actions.appendChild(source);
+  else {
+    const sourceMissing = document.createElement("span");
+    sourceMissing.className = "workflow-radar-source-missing";
+    sourceMissing.textContent = "ยังไม่มี URL ที่ผ่านการตรวจ";
+    actions.appendChild(sourceMissing);
+  }
+  const detail = document.createElement("button");
+  detail.type = "button";
+  detail.className = "workflow-card-detail";
+  detail.setAttribute("aria-haspopup", "dialog");
+  detail.textContent = "ดูรายละเอียด";
+  detail.addEventListener("click", () => {
+    const reportProjection = findWorkflowCurrentPropReportProjection({ reportId: item.reportId, ...item });
+    openDashboardResultDetail({
+      ...reportProjection,
+      ...item,
+      attachments: item.attachments?.length ? item.attachments : reportProjection.attachments,
+      visualEvidence: item.visualEvidence?.length ? item.visualEvidence : reportProjection.visualEvidence,
+      evidence: item.evidence?.length ? item.evidence : reportProjection.evidence,
+    }, detail);
+  });
+  actions.appendChild(detail);
+  body.append(heading, summary, meta, actions);
+  card.append(media, body);
+  return card;
+}
+
 function renderIndicatorScoutPanel(container, tabId, domain) {
   const section = document.createElement("section");
-  section.className = "workflow-domain-panel workflow-indicator-scout";
-  if (tabId === "discoveries") {
+  const heading = document.createElement("header");
+  const headingCopy = document.createElement("div");
+  const kicker = document.createElement("span");
+  const title = document.createElement("h4");
+  const description = document.createElement("p");
+  const count = document.createElement("strong");
+  const isToday = tabId === "discoveries";
+  const discoveries = Array.isArray(domain?.discoveries) ? domain.discoveries : [];
+  const entries = isToday
+    ? (Array.isArray(domain?.todayEntries) ? domain.todayEntries : filterIndicatorScoutToday(discoveries))
+    : (Array.isArray(domain?.sevenDayEntries) ? domain.sevenDayEntries : filterIndicatorScoutRollingSevenDays(discoveries));
+  section.className = "workflow-domain-panel workflow-indicator-scout workflow-radar-website-tool";
+  heading.className = "workflow-radar-heading";
+  kicker.textContent = "RADAR WEBSITE TOOL";
+  title.textContent = isToday ? "รายการใหม่วันนี้" : "ประวัติย้อนหลัง 7 วัน";
+  description.textContent = isToday
+    ? "แสดงเฉพาะรายการที่ Backend ตรวจพบในวันปัจจุบันตามเวลา Asia/Bangkok"
+    : "รวม Indicator, EA และ Tool ในช่วง 7 วันล่าสุด โดยไม่แสดงรายการเก่าหรือข้อมูลจำลอง";
+  count.textContent = `${entries.length} รายการ`;
+  headingCopy.append(kicker, title, description);
+  heading.append(headingCopy, count);
+  section.appendChild(heading);
+  if (!entries.length) {
+    section.appendChild(createWorkflowTruthEmpty(
+      isToday
+        ? "วันนี้ยังไม่มีรายการใหม่จาก Backend หากมีรายการเก่าให้เปิดแท็บ ย้อนหลัง 7 วัน"
+        : "ยังไม่มีรายการที่มีเวลาตรวจสอบจริงภายใน 7 วันล่าสุด",
+    ));
+    container.appendChild(section);
+    return;
+  }
+  const screenshotCount = entries.filter((item) => Boolean(item.imageUrl)).length;
+  const screenshotTruth = document.createElement("p");
+  screenshotTruth.className = "workflow-radar-screenshot-truth";
+  screenshotTruth.dataset.tone = screenshotCount ? "ready" : "waiting";
+  screenshotTruth.textContent = screenshotCount
+    ? `มีภาพหลักฐานที่ Backend อนุญาต ${screenshotCount} จาก ${entries.length} รายการ • คลิกภาพในรายละเอียดเพื่อดูขนาดเต็ม`
+    : `${domain.screenshotAdapter.labelTh} • ไม่มีภาพจำลอง และจะแสดงภาพเมื่อมี same-origin Report attachment เท่านั้น`;
+  section.appendChild(screenshotTruth);
+  if (isToday) {
     const grid = document.createElement("div");
-    grid.className = "workflow-indicator-grid";
-    domain.discoveries.forEach((item) => {
-      const card = document.createElement("article");
-      const heading = document.createElement("div");
-      const title = document.createElement("h5");
-      const badge = document.createElement("span");
-      const summary = document.createElement("p");
-      const meta = document.createElement("dl");
-      card.className = "workflow-indicator-card";
-      heading.className = "workflow-domain-card-heading";
-      title.textContent = item.title;
-      badge.textContent = item.platform;
-      summary.textContent = item.summary;
-      [
-        ["วันที่ค้นพบ", item.discoveredAt ? formatThaiDateTime(item.discoveredAt) : "ยังไม่มีวันที่จาก Backend"],
-        ["วันที่เผยแพร่", item.publishedAt ? formatThaiDateTime(item.publishedAt) : "ยังไม่ระบุ"],
-        ["ตรวจรายการซ้ำ", item.dedupStatus],
-      ].forEach(([term, value]) => {
-        const dt = document.createElement("dt");
-        const dd = document.createElement("dd");
-        dt.textContent = term;
-        dd.textContent = value;
-        meta.append(dt, dd);
-      });
-      heading.append(title, badge);
-      card.append(heading, summary, meta);
-      const source = createWorkflowExternalSource(item.sourceUrl, item.sourceLabel);
-      if (source) card.appendChild(source);
-      else card.appendChild(createWorkflowTruthEmpty("ยังไม่มี URL ต้นทางที่ Backend ส่งมา"));
-      if (item.reportId) {
-        const detail = document.createElement("button");
-        detail.type = "button";
-        detail.className = "workflow-card-detail";
-        detail.textContent = "เปิดรายงานฉบับเต็ม";
-        detail.addEventListener("click", () => openDashboardResultDetail(findWorkflowCurrentPropReportProjection({ reportId: item.reportId, ...item }), detail));
-        card.appendChild(detail);
-      }
-      grid.appendChild(card);
-    });
-    section.appendChild(domain.discoveries.length ? grid : createWorkflowTruthEmpty());
-  } else if (tabId === "evidence") {
-    const notice = document.createElement("article");
-    const title = document.createElement("h5");
-    const detail = document.createElement("p");
-    notice.className = "workflow-adapter-notice";
-    notice.dataset.tone = "coming-soon";
-    title.textContent = domain.screenshotAdapter.labelTh;
-    detail.textContent = domain.screenshotAdapter.detailTh;
-    notice.append(title, detail);
-    section.appendChild(notice);
-    const sources = domain.discoveries
-      .filter((item) => item.sourceUrl)
-      .map((item) => ({ url: item.sourceUrl, label: item.title, note: item.sourceLabel }));
-    appendDashboardSourceLinks(section, sources);
-    if (!sources.length) section.appendChild(createWorkflowTruthEmpty("ยังไม่มี URL หลักฐานจาก Backend และไม่มีภาพจำลอง"));
-  } else if (tabId === "schedule") {
-    const note = document.createElement("p");
-    note.className = "workflow-schedule-note";
-    const times = Array.isArray(domain.schedule?.times) ? domain.schedule.times.join(", ") : "ยังไม่ได้กำหนด";
-    const schedulerStatus = domain.schedule?.automaticRunsImplemented === true
-      ? (domain.schedule?.effectiveEnabled === true ? "Scheduler เปิดทำงานแล้ว" : "Scheduler พร้อม แต่ยังไม่ได้เปิดรอบอัตโนมัติ")
-      : "Scheduler ยังไม่พร้อม";
-    note.textContent = `เวลาที่บันทึกไว้: ${times || "ยังไม่ได้กำหนด"} • ${schedulerStatus} • ภาพหน้าจอจะแสดงเมื่อรายงานมีหลักฐานภาพจริงจาก Adapter`;
-    section.appendChild(note);
+    grid.className = "workflow-indicator-grid workflow-radar-grid";
+    entries.forEach((item) => grid.appendChild(createIndicatorScoutCard(item, domain.screenshotAdapter)));
+    section.appendChild(grid);
   } else {
-    if (!domain.reports.length) section.appendChild(createWorkflowTruthEmpty("ยังไม่มีรายงาน Indicator Scout ย้อนหลัง"));
-    else renderWorkflowSourceCards(section, domain.reports.map((item) => ({
-      reportId: item.id,
-      sourcePropId: item.linkedPropId,
-      title: item.title,
-      summary: item.summary,
-      status: item.status,
-    })));
+    const groups = new Map();
+    entries.forEach((item) => {
+      const key = indicatorScoutBangkokDateKey(indicatorScoutTimestamp(item)) || "unknown";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    });
+    groups.forEach((items) => {
+      const day = document.createElement("section");
+      const dayHeading = document.createElement("header");
+      const dayTitle = document.createElement("h5");
+      const dayCount = document.createElement("span");
+      const grid = document.createElement("div");
+      day.className = "workflow-radar-history-day";
+      dayTitle.textContent = formatIndicatorScoutHistoryDay(items[0]);
+      dayCount.textContent = `${items.length} รายการ`;
+      dayHeading.append(dayTitle, dayCount);
+      grid.className = "workflow-indicator-grid workflow-radar-grid";
+      items.forEach((item) => grid.appendChild(createIndicatorScoutCard(item, domain.screenshotAdapter)));
+      day.append(dayHeading, grid);
+      section.appendChild(day);
+    });
   }
   container.appendChild(section);
 }
@@ -11710,9 +15303,90 @@ function renderFxBiasTable(container, rows, { horizons = false } = {}) {
   container.appendChild(scroll);
 }
 
+function renderFxBiasGrid(container, rows = []) {
+  const summary = document.createElement("header");
+  const copy = document.createElement("div");
+  const title = document.createElement("h5");
+  const detail = document.createElement("p");
+  const count = document.createElement("strong");
+  const grid = document.createElement("div");
+  const availableCount = rows.filter((item) => item.bias !== "unavailable").length;
+  summary.className = "workflow-fx-bias-summary";
+  title.textContent = "ภาพรวมแนวโน้ม 28 คู่เงิน";
+  detail.textContent = "แต่ละการ์ดแสดงแนวโน้มรวมและมุมมองระยะสั้น กลาง ยาว ข้อมูลที่ Backend ยังไม่ส่งจะแสดงเป็น ‘รอข้อมูล’";
+  count.textContent = `${availableCount}/${rows.length || FX_BIAS_PAIR_UNIVERSE.length} คู่มีข้อมูล`;
+  copy.append(title, detail);
+  summary.append(copy, count);
+  grid.className = "workflow-fx-bias-grid";
+
+  rows.forEach((item) => {
+    const card = document.createElement("article");
+    const heading = document.createElement("header");
+    const pair = document.createElement("strong");
+    const overall = document.createElement("span");
+    const horizons = document.createElement("div");
+    const cardSummary = document.createElement("p");
+    const footer = document.createElement("footer");
+    card.className = "workflow-fx-bias-card";
+    card.dataset.bias = item.bias;
+    pair.textContent = item.pair;
+    overall.className = "workflow-bias-badge";
+    overall.dataset.bias = item.bias;
+    overall.textContent = workflowBiasLabel(item.bias);
+    heading.append(pair, overall);
+    horizons.className = "workflow-fx-horizons";
+    [
+      ["สั้น", item.short],
+      ["กลาง", item.medium],
+      ["ยาว", item.long],
+    ].forEach(([label, bias]) => {
+      const horizon = document.createElement("div");
+      const horizonLabel = document.createElement("span");
+      const horizonValue = document.createElement("strong");
+      horizonLabel.textContent = label;
+      horizonValue.dataset.bias = bias;
+      horizonValue.textContent = workflowBiasLabel(bias);
+      horizon.append(horizonLabel, horizonValue);
+      horizons.appendChild(horizon);
+    });
+    cardSummary.textContent = item.summary || "รอข้อมูลจริงจาก Backend";
+    const updated = document.createElement("small");
+    updated.textContent = item.updatedAt ? `อัปเดต ${formatThaiDateTime(item.updatedAt)}` : "ยังไม่มีเวลาอัปเดต";
+    footer.appendChild(updated);
+    const source = createWorkflowExternalSource(item.sourceUrl, "หลักฐาน");
+    if (source) footer.appendChild(source);
+    card.append(heading, horizons, cardSummary, footer);
+    grid.appendChild(card);
+  });
+
+  container.append(summary, grid);
+}
+
+function createFxFreshnessBanner(freshness = {}) {
+  if (freshness?.stale !== true && freshness?.currentDataAvailable !== false) return null;
+  const banner = document.createElement("div");
+  const title = document.createElement("strong");
+  const detail = document.createElement("p");
+  const currentDate = safeDashboardDisplayText(freshness?.currentBangkokDate, "");
+  const reportDate = safeDashboardDisplayText(freshness?.reportBangkokDate, "");
+  banner.className = "workflow-freshness-banner";
+  banner.dataset.state = "stale";
+  title.textContent = "ยังไม่มีข้อมูลของวันนี้";
+  detail.textContent = currentDate && reportDate
+    ? `ข้อมูลล่าสุดเป็นวันที่ ${reportDate} แต่วันที่ปัจจุบันคือ ${currentDate} ระบบจึงไม่ใช้ข่าวหรือแนวโน้มเดิมเป็นข้อมูลวันนี้`
+    : "Backend ยังไม่มีข้อมูลที่ยืนยันว่าเป็นของวันนี้ ระบบจึงแสดงสถานะรอข้อมูลเท่านั้น";
+  banner.append(title, detail);
+  return banner;
+}
+
 function renderFxNewsBiasPanel(container, tabId, domain) {
   const section = document.createElement("section");
   section.className = "workflow-domain-panel workflow-fx-news-bias";
+  const freshness = tabId === "today"
+    ? domain?.freshness?.marketNews
+    : domain?.freshness?.fxBias;
+  const freshnessBanner = createFxFreshnessBanner(freshness);
+  if (freshnessBanner) section.appendChild(freshnessBanner);
   if (tabId === "today") {
     const dangerTitle = document.createElement("h5");
     dangerTitle.textContent = "ช่วงเวลาที่ EA ควรระวัง";
@@ -11730,6 +15404,8 @@ function renderFxNewsBiasPanel(container, tabId, domain) {
         time.textContent = `${item.startAt ? formatThaiDateTime(item.startAt) : "ยังไม่ระบุเวลาเริ่ม"} — ${item.endAt ? formatThaiDateTime(item.endAt) : "ยังไม่ระบุเวลาสิ้นสุด"}`;
         reason.textContent = item.reason;
         card.append(title, time, reason);
+        const source = createWorkflowExternalSource(item.sourceUrl, "เปิดหลักฐานข่าว");
+        if (source) card.appendChild(source);
         dangerGrid.appendChild(card);
       });
       section.appendChild(dangerGrid);
@@ -11746,7 +15422,11 @@ function renderFxNewsBiasPanel(container, tabId, domain) {
         const meta = document.createElement("span");
         const title = document.createElement("h5");
         const summary = document.createElement("p");
-        meta.textContent = `${item.impact} • ${item.eventAt ? formatThaiDateTime(item.eventAt) : "ยังไม่ระบุเวลา"}`;
+        meta.textContent = [
+          item.impact,
+          item.currencies?.length ? item.currencies.join(", ") : "",
+          item.eventAt ? formatThaiDateTime(item.eventAt) : "ยังไม่ระบุเวลา",
+        ].filter(Boolean).join(" • ");
         title.textContent = item.title;
         summary.textContent = item.summary;
         card.append(meta, title, summary);
@@ -11757,26 +15437,10 @@ function renderFxNewsBiasPanel(container, tabId, domain) {
       section.appendChild(newsGrid);
     }
   } else if (tabId === "pair_bias") {
-    renderFxBiasTable(section, domain.pairBias);
+    renderFxBiasGrid(section, domain.pairBias);
   } else if (tabId === "horizons") {
     renderFxBiasTable(section, domain.pairBias, { horizons: true });
-  } else {
-    const note = document.createElement("p");
-    note.className = "workflow-schedule-note";
-    const times = Array.isArray(domain.schedule?.times) ? domain.schedule.times.join(", ") : "ยังไม่ได้กำหนด";
-    const schedulerStatus = domain.schedule?.automaticRunsImplemented === true
-      ? (domain.schedule?.effectiveEnabled === true ? "Scheduler เปิดทำงานแล้ว" : "Scheduler พร้อม แต่ยังไม่ได้เปิดรอบอัตโนมัติ")
-      : "Scheduler ยังไม่พร้อม";
-    note.textContent = `เวลาที่บันทึกไว้: ${times || "ยังไม่ได้กำหนด"} • ${schedulerStatus} • ระบบไม่สร้างข่าวหรือ Bias จำลองเมื่อแหล่งข้อมูลจริงยังไม่พร้อม`;
-    section.appendChild(note);
-    if (domain.reports.length) renderWorkflowSourceCards(section, domain.reports.map((item) => ({
-      reportId: item.id,
-      sourcePropId: item.linkedPropId,
-      title: item.title,
-      summary: item.summary,
-      status: item.status,
-    })));
-  }
+  } else section.appendChild(createWorkflowTruthEmpty("ส่วนนี้ไม่มีข้อมูลสำหรับแสดง"));
   container.appendChild(section);
 }
 
@@ -11841,10 +15505,196 @@ function renderTerminalSourceCatalogPanel(container, dashboard) {
   container.appendChild(section);
 }
 
+function connectionHubStatusGroup(status) {
+  const normalized = normalizeConnectionStatus(status);
+  if (normalized === "connected") return "ready";
+  if (normalized === "coming_soon") return "coming_soon";
+  if (normalized === "checking") return "checking";
+  return "attention";
+}
+
+function workflowConnectionHubEntries(connectionCenter = {}) {
+  if (connectionCenter.authoritative === true) {
+    return Array.isArray(connectionCenter.devices) ? connectionCenter.devices : [];
+  }
+  const propIds = [...new Set([AI_TRADE_COUNCIL_PROP_ID, ...WORKFLOW_DASHBOARD_PROP_IDS])];
+  return propIds.map((propId) => {
+    const report = state.propReports[propId] || null;
+    const rawChecklist = report?.connectionChecklist;
+    const checklist = rawChecklist && (!rawChecklist.dashboardId || rawChecklist.dashboardId === propId)
+      ? rawChecklist
+      : null;
+    const items = Array.isArray(checklist?.items) ? checklist.items.slice(0, 30) : [];
+    const availability = getDashboardDataAvailability(report?.dashboardProfile, Boolean(report));
+    const rawStatus = checklist?.overallStatus
+      || (report ? availability.status : "checking");
+    const status = normalizeConnectionStatus(rawStatus);
+    const firstIssue = items.find((item) => normalizeConnectionStatus(item?.status) !== "connected");
+    const readyItems = items.filter((item) => normalizeConnectionStatus(item?.status) === "connected").length;
+    let remedy = "เปิดอุปกรณ์นี้เพื่อดูผลตรวจและวิธีแก้เฉพาะจุดจาก Local Runner";
+    if (!report) {
+      remedy = "เปิดอุปกรณ์นี้ 1 ครั้งเพื่อโหลดผลตรวจล่าสุดจาก Local Runner";
+    } else if (status === "connected") {
+      remedy = "พร้อมใช้งาน ไม่พบจุดเชื่อมต่อที่ต้องแก้ในผลตรวจล่าสุด";
+    } else if (status === "coming_soon") {
+      remedy = "ส่วนเชื่อมต่อนี้ยังเป็น Coming Soon จึงยังไม่ต้องตั้งค่าเพิ่ม";
+    } else if (firstIssue) {
+      remedy = safeDashboardDisplayText(
+        firstIssue.remedyTh || firstIssue.actionTh || firstIssue.nextStepTh || firstIssue.detailTh || firstIssue.detail,
+        remedy,
+      );
+    }
+    return {
+      propId,
+      title: safeDashboardDisplayText(
+        report?.dashboardProfile?.moduleNameTh || report?.propertyRole?.displayTitle,
+        displayPropName(propId),
+      ),
+      rawStatus,
+      status,
+      group: connectionHubStatusGroup(rawStatus),
+      statusLabel: connectionStatusLabel(rawStatus, "ยังไม่ทราบสถานะ"),
+      checkedAt: checklist?.checkedAt || report?.generatedAt || report?.updatedAt || null,
+      issueLabel: firstIssue
+        ? safeDashboardDisplayText(firstIssue.labelTh || firstIssue.label, "รายการที่ต้องตรวจสอบ")
+        : "",
+      remedy,
+      readyItems,
+      itemCount: items.length,
+    };
+  });
+}
+
+function renderConnectionHubServices(container, services = {}) {
+  const definitions = [
+    ["localBridge", "Local Bridge"],
+    ["codexCli", "Codex CLI"],
+    ["mcp", "MCP"],
+    ["missionWorker", "Mission Worker"],
+    ["scheduler", "Scheduler"],
+    ["codexQuota", "Codex Quota"],
+  ];
+  const rows = definitions
+    .map(([id, label]) => [id, label, workflowDomainObject(services[id])])
+    .filter(([, , value]) => Object.keys(value).length);
+  if (!rows.length) return;
+  const strip = document.createElement("div");
+  strip.className = "workflow-connection-services";
+  rows.forEach(([id, label, value]) => {
+    const item = document.createElement("div");
+    const name = document.createElement("span");
+    const status = document.createElement("strong");
+    const rawStatus = id === "codexQuota" && value.limitReached === true
+      ? "blocked"
+      : (value.status || (value.operational === true || value.configured === true ? "connected" : "checking"));
+    item.dataset.status = connectionHubStatusGroup(rawStatus);
+    name.textContent = label;
+    status.textContent = id === "codexQuota" && Number.isFinite(Number(value.remainingPercent))
+      ? `${Number(value.remainingPercent)}% เหลือ`
+      : connectionStatusLabel(rawStatus, "รอข้อมูล");
+    item.append(name, status);
+    strip.appendChild(item);
+  });
+  container.appendChild(strip);
+}
+
+function renderConnectionHubPanel(container, connectionCenter = {}) {
+  const entries = workflowConnectionHubEntries(connectionCenter);
+  const requestedFilter = String(state.modal.connectionHubFilter || "all");
+  const selectedFilter = HQ_CONNECTION_HUB_FILTER_IDS.includes(requestedFilter) ? requestedFilter : "all";
+  const filteredEntries = selectedFilter === "all"
+    ? entries
+    : entries.filter((entry) => entry.group === selectedFilter);
+  const heading = document.createElement("header");
+  const headingCopy = document.createElement("div");
+  const title = document.createElement("h5");
+  const detail = document.createElement("p");
+  const count = document.createElement("strong");
+  const filters = document.createElement("div");
+  const grid = document.createElement("div");
+  const filterLabels = {
+    all: "ทั้งหมด",
+    ready: "พร้อม",
+    attention: "ต้องแก้",
+    checking: "รอตรวจ",
+    coming_soon: "Coming Soon",
+  };
+  title.textContent = "ศูนย์รวมการเชื่อมต่ออุปกรณ์";
+  detail.textContent = "สรุปจาก Snapshot กลางของ Backend เท่านั้น กดเปิดอุปกรณ์เพื่อดูรายละเอียดหรือขอผลตรวจใหม่";
+  const authoritativeReady = Number(connectionCenter?.summary?.readyCount);
+  const authoritativeTotal = Number(connectionCenter?.summary?.deviceCount);
+  count.textContent = Number.isFinite(authoritativeReady) && Number.isFinite(authoritativeTotal)
+    ? `${authoritativeReady}/${authoritativeTotal} พร้อม`
+    : `${entries.filter((entry) => entry.group === "ready").length}/${entries.length} พร้อม`;
+  heading.className = "workflow-connection-hub-heading";
+  headingCopy.append(title, detail);
+  heading.append(headingCopy, count);
+  filters.className = "workflow-connection-hub-filters";
+  filters.setAttribute("aria-label", "กรองสถานะการเชื่อมต่อ");
+  HQ_CONNECTION_HUB_FILTER_IDS.forEach((filterId) => {
+    const button = document.createElement("button");
+    const filterCount = filterId === "all"
+      ? entries.length
+      : entries.filter((entry) => entry.group === filterId).length;
+    button.type = "button";
+    button.className = "workflow-connection-filter";
+    button.dataset.connectionHubFilter = filterId;
+    button.classList.toggle("active", filterId === selectedFilter);
+    button.setAttribute("aria-pressed", filterId === selectedFilter ? "true" : "false");
+    button.textContent = `${filterLabels[filterId]} ${filterCount}`;
+    filters.appendChild(button);
+  });
+  grid.className = "workflow-connection-hub-grid";
+  filteredEntries.forEach((entry) => {
+    const card = document.createElement("article");
+    const cardHeading = document.createElement("header");
+    const cardTitle = document.createElement("h5");
+    const status = document.createElement("span");
+    const checked = document.createElement("p");
+    const remedy = document.createElement("div");
+    const remedyLabel = document.createElement("strong");
+    const remedyCopy = document.createElement("p");
+    const footer = document.createElement("footer");
+    const itemSummary = document.createElement("small");
+    const openButton = document.createElement("button");
+    card.className = "workflow-connection-hub-card";
+    card.dataset.connectionStatus = entry.group;
+    cardTitle.textContent = entry.title;
+    status.className = "connection-badge";
+    status.dataset.status = entry.status;
+    status.textContent = entry.statusLabel;
+    cardHeading.append(cardTitle, status);
+    checked.textContent = entry.checkedAt
+      ? `ตรวจล่าสุด ${formatThaiDateTime(entry.checkedAt)}${entry.stale ? " • ข้อมูลเก่า ควรตรวจใหม่" : ""}`
+      : "ยังไม่มีเวลาตรวจจาก Local Runner";
+    remedy.className = "workflow-connection-remedy";
+    remedyLabel.textContent = entry.issueLabel ? `จุดที่ต้องดู: ${entry.issueLabel}` : "คำแนะนำ";
+    remedyCopy.textContent = entry.remedy;
+    remedy.append(remedyLabel, remedyCopy);
+    itemSummary.textContent = entry.itemCount
+      ? `Checklist พร้อม ${entry.readyItems}/${entry.itemCount} รายการ`
+      : "ยังไม่มี Checklist ในหน้านี้";
+    openButton.type = "button";
+    openButton.className = "workflow-open-device-button";
+    openButton.dataset.openConnectionDevice = entry.propId;
+    openButton.textContent = entry.propId === HQ_CONNECTION_HUB_PROP_ID ? "กำลังเปิดอยู่" : "เปิดอุปกรณ์";
+    openButton.disabled = entry.propId === HQ_CONNECTION_HUB_PROP_ID;
+    footer.append(itemSummary, openButton);
+    card.append(cardHeading, checked, remedy, footer);
+    grid.appendChild(card);
+  });
+  if (!filteredEntries.length) grid.appendChild(createWorkflowTruthEmpty("ไม่มีอุปกรณ์ในตัวกรองนี้"));
+  container.append(heading, filters);
+  renderConnectionHubServices(container, connectionCenter.services);
+  container.appendChild(grid);
+}
+
 function renderVpsHqPanel(container, tabId, domain) {
   const section = document.createElement("section");
   section.className = "workflow-domain-panel workflow-vps-hq";
-  if (tabId === "vps") {
+  if (tabId === "connections") {
+    renderConnectionHubPanel(section, domain.connectionCenter);
+  } else if (tabId === "vps") {
     if (!domain.vps.length) section.appendChild(createWorkflowTruthEmpty("ยังไม่มีค่าตรวจ VPS จริงจาก Backend"));
     else {
       const grid = document.createElement("div");
@@ -11887,26 +15737,7 @@ function renderVpsHqPanel(container, tabId, domain) {
       });
       section.appendChild(grid);
     }
-  } else if (tabId === "agent_settings") {
-    const notice = document.createElement("article");
-    const title = document.createElement("h5");
-    const copy = document.createElement("p");
-    notice.className = "workflow-adapter-notice";
-    notice.dataset.tone = "ready";
-    title.textContent = "ตั้งค่าเฉพาะ Preference ที่ปลอดภัย";
-    copy.textContent = "หน้านี้ไม่รับ Token, API Key, Password, Cookie, Credential และไม่เปลี่ยนสิทธิ์ Tool หรือสิทธิ์ระบบของ Agent";
-    notice.append(title, copy);
-    section.appendChild(notice);
-  } else {
-    if (!domain.reports.length) section.appendChild(createWorkflowTruthEmpty("ยังไม่มีประวัติตรวจสถานะหรือเปลี่ยน Preference จาก Backend"));
-    else renderWorkflowSourceCards(section, domain.reports.map((item) => ({
-      reportId: item.id,
-      sourcePropId: item.linkedPropId,
-      title: item.title,
-      summary: item.summary,
-      status: item.status,
-    })));
-  }
+  } else section.appendChild(createWorkflowTruthEmpty("ส่วนนี้ไม่มีข้อมูลสำหรับแสดง"));
   container.appendChild(section);
 }
 
@@ -12088,12 +15919,125 @@ function getWorkflowDashboardIdentity(propId) {
   };
 }
 
+function createRadarRailTruthCard(dashboard = {}) {
+  const card = document.createElement("section");
+  const title = document.createElement("h4");
+  const facts = document.createElement("dl");
+  const note = document.createElement("p");
+  const domain = dashboard?.domainData?.indicatorScout || {};
+  const sheet = domain.googleSheet && typeof domain.googleSheet === "object"
+    ? domain.googleSheet
+    : {};
+  const schedule = dashboard?.schedule && typeof dashboard.schedule === "object"
+    ? dashboard.schedule
+    : (domain.schedule && typeof domain.schedule === "object" ? domain.schedule : {});
+  const rows = [
+    [
+      "Google Sheet",
+      sheet.configured === true
+        ? `${safeDashboardDisplayText(sheet.sheetReferenceMasked, "บันทึกแล้ว")}${sheet.tabName ? ` • ${safeDashboardDisplayText(sheet.tabName, "")}` : ""}`
+        : "ยังไม่ได้บันทึก Sheet",
+    ],
+    [
+      "การซิงก์ข้อมูล",
+      sheet.connected === true
+        ? "เชื่อมต่อแล้ว"
+        : "ยังไม่เชื่อม Adapter • ยังไม่อ่านหรือเขียน Sheet",
+    ],
+    [
+      "รอบวันนี้",
+      Number.isFinite(Number(schedule.runsReservedToday)) && Number.isFinite(Number(schedule.maximumRunsPerDay))
+        ? `${Number(schedule.runsReservedToday)}/${Number(schedule.maximumRunsPerDay)} • เหลือ ${Math.max(0, Number(schedule.remainingRunsToday) || 0)} รอบ`
+        : "สูงสุด 2 รอบต่อวันตามเวลาไทย",
+    ],
+  ];
+  card.className = "workflow-radar-rail-truth";
+  title.textContent = "สถานะการค้นหาและคลังข้อมูล";
+  facts.className = "workflow-radar-rail-facts";
+  rows.forEach(([labelText, valueText]) => {
+    const row = document.createElement("div");
+    const label = document.createElement("dt");
+    const value = document.createElement("dd");
+    label.textContent = labelText;
+    value.textContent = valueText;
+    row.append(label, value);
+    facts.appendChild(row);
+  });
+  note.textContent = "ระบบตรวจรายการซ้ำกับคลัง Report ในเครื่องแล้ว ส่วนการเทียบและบันทึกลง Google Sheet จะเริ่มเมื่อเชื่อม Adapter และยืนยันการเขียนจากผู้ใช้เท่านั้น";
+  card.append(title, facts, note);
+  return card;
+}
+
+function workflowRailActions(subject, dashboard) {
+  const actions = dashboard?.actions || [];
+  if (subject?.id === INDICATOR_SCOUT_PROP_ID) {
+    return actions.filter((action) => INDICATOR_SCOUT_RAIL_ACTION_IDS.has(action.id));
+  }
+  if (subject?.id === FX_NEWS_BIAS_PROP_ID) {
+    return actions.filter((action) => FX_NEWS_BIAS_RAIL_ACTION_IDS.has(action.id));
+  }
+  return [...actions].sort((left, right) => (
+    Number(WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(left.id))
+    - Number(WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(right.id))
+  ));
+}
+
+function createWorkflowUseGuideCard(subject) {
+  const guides = {
+    [INDICATOR_SCOUT_PROP_ID]: [
+      "ดูรายการ Indicator, EA และ Tool ที่ Radar พบในหน้าหลัก",
+      "กำหนดหัวข้อหรือเวลาค้นหาในคำสั่งด้านล่าง",
+      "เปิดแหล่งข้อมูลและภาพหลักฐานก่อนนำไปใช้",
+    ],
+    [FX_NEWS_BIAS_PROP_ID]: [
+      "ดูแนวโน้มครบ 28 คู่เงินจากหน้าแรก",
+      "เปิดแท็บข่าวและผลกระทบเพื่อดูช่วงที่ EA ควรระวัง",
+      "สั่งวิเคราะห์หรือตั้งเวลาอัปเดตจากแถบด้านซ้ายนี้",
+    ],
+    [HQ_CONNECTION_HUB_PROP_ID]: [
+      "กรองอุปกรณ์ตามสถานะ พร้อม ต้องแก้ หรือรอตรวจ",
+      "อ่านจุดติดขัดและคำแนะนำบนการ์ด",
+      "กดเปิดอุปกรณ์เพื่อดูรายละเอียดหรือขอผลตรวจใหม่",
+    ],
+  };
+  const steps = guides[subject?.id] || [
+    "ดูผลงานหรือข้อมูลล่าสุดในพื้นที่หลัก",
+    "ตั้งค่าหรือเริ่มงานจากคำสั่งด้านล่าง",
+    "ตรวจสถานะการเชื่อมต่อรวมที่คริสตัลสถานะ HQ",
+  ];
+  const card = document.createElement("article");
+  const title = document.createElement("strong");
+  const list = document.createElement("ol");
+  card.className = "workflow-use-guide";
+  title.textContent = "ใช้งานอย่างไร";
+  steps.forEach((step) => {
+    const item = document.createElement("li");
+    item.textContent = step;
+    list.appendChild(item);
+  });
+  card.append(title, list);
+  if (subject?.id !== HQ_CONNECTION_HUB_PROP_ID) {
+    const openHub = document.createElement("button");
+    openHub.type = "button";
+    openHub.className = "workflow-open-connection-hub";
+    openHub.dataset.openConnectionHub = "true";
+    openHub.textContent = "ดูการเชื่อมต่อทุกอุปกรณ์";
+    card.appendChild(openHub);
+  }
+  return card;
+}
+
 function renderWorkflowSettingsRail(subject, dashboard, identity = getWorkflowDashboardIdentity(subject?.id)) {
   if (!els.workflowSettingsRail || !els.workflowSettingsRailContent) return;
-  const actions = (dashboard?.actions || []).filter((action) => WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(action.id));
-  els.workflowSettingsRail.hidden = !actions.length;
+  const actions = workflowRailActions(subject, dashboard);
+  els.workflowSettingsRail.hidden = false;
   els.workflowSettingsRail.dataset.dashboardIdentity = identity.id;
+  if (els.workflowSettingsRailTitle) els.workflowSettingsRailTitle.textContent = "วิธีใช้และคำสั่ง";
   els.workflowSettingsRailContent.innerHTML = "";
+  els.workflowSettingsRailContent.appendChild(createWorkflowUseGuideCard(subject));
+  if (subject?.id === INDICATOR_SCOUT_PROP_ID) {
+    els.workflowSettingsRailContent.appendChild(createRadarRailTruthCard(dashboard));
+  }
   actions.forEach((action) => {
     const card = createWorkflowActionCard(action, dashboard);
     card.classList.add("workflow-rail-action-card");
@@ -12390,7 +16334,7 @@ function renderWorkflowDashboard(subject, propertyRole, report = {}) {
   const selectedTab = getWorkflowSelectedTab(subject.id, dashboard);
   const identity = getWorkflowDashboardIdentity(subject.id);
   const isPrimaryTab = selectedTab?.id === dashboard.tabs[0]?.id;
-  const isHistoryTab = selectedTab?.id === dashboard.tabs.at(-1)?.id;
+  const isHistoryTab = WORKFLOW_DASHBOARD_HISTORY_TAB_IDS.has(selectedTab?.id);
   if (selectedTab) state.modal.workflowTabs[subject.id] = selectedTab.id;
   if (els.modalWorkflowDashboardWorkspace) {
     els.modalWorkflowDashboardWorkspace.dataset.dashboardIdentity = identity.id;
@@ -12400,7 +16344,8 @@ function renderWorkflowDashboard(subject, propertyRole, report = {}) {
   renderWorkflowAgentHandoff(subject, report, identity);
   renderWorkflowTabs(subject.id, dashboard, selectedTab);
   if (els.workflowResultsPanel) {
-    els.workflowResultsPanel.hidden = !isHistoryTab;
+    const usesDomainHistory = subject.id === INDICATOR_SCOUT_PROP_ID && isHistoryTab;
+    els.workflowResultsPanel.hidden = !isHistoryTab || usesDomainHistory;
     els.workflowResultsPanel.dataset.mode = "history";
   }
   if (els.workflowResultsEyebrow) els.workflowResultsEyebrow.textContent = "ข้อมูลย้อนหลัง";
@@ -12421,7 +16366,10 @@ function renderWorkflowDashboard(subject, propertyRole, report = {}) {
       intro.append(title, description);
       els.workflowDashboardContent.appendChild(intro);
     }
-    const actions = (selectedTab?.actionIds || []).map((actionId) => dashboard.actions.find((action) => action.id === actionId)).filter(Boolean);
+    const centralActionIds = new Set(workflowRailActions(subject, dashboard).map((action) => action.id));
+    const actions = (selectedTab?.actionIds || [])
+      .map((actionId) => dashboard.actions.find((action) => action.id === actionId))
+      .filter((action) => action && !centralActionIds.has(action.id));
     if (isPrimaryTab && actions.length) renderWorkflowAutomationSummary(els.workflowDashboardContent, dashboard, actions);
     let renderedCatalog = false;
     if (subject.id === "codex_mcp_portal" && selectedTab?.id === "catalog") {
@@ -13357,7 +17305,7 @@ function renderGameModal() {
       : `ถาม ${subject.name} เกี่ยวกับหน้าที่ ${role} เป็นภาษาไทย...`;
   }
   if (els.modalAgentComposer) els.modalAgentComposer.hidden = !isAgent;
-  if (els.modalDashboardConnectionRail) els.modalDashboardConnectionRail.hidden = surface !== "dashboard";
+  if (els.modalDashboardConnectionRail) els.modalDashboardConnectionRail.hidden = true;
   if (els.workflowSettingsRail) els.workflowSettingsRail.hidden = !isWorkflowDashboard;
   if (els.workflowAgentHandoffRail) els.workflowAgentHandoffRail.hidden = true;
   if (els.modalPortraitPanel && !isWorkflowDashboard) delete els.modalPortraitPanel.dataset.dashboardIdentity;
@@ -13401,9 +17349,54 @@ function renderGameModal() {
   setModalTab(state.modal.activeTab);
 }
 
+function gameModalFocusableElements() {
+  if (!els.gameModal) return [];
+  return [...els.gameModal.querySelectorAll(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  )].filter((node) => !node.hidden && !node.closest("[hidden]") && node.getAttribute("aria-hidden") !== "true");
+}
+
+function focusGameModalInitialControl() {
+  if (!state.modal.open || !els.gameModal) return;
+  const activeTab = gameModalFocusableElements().find((node) => (
+    node.getAttribute("role") === "tab" && node.getAttribute("aria-selected") === "true"
+  ));
+  (activeTab || els.modalCloseButton || els.gameModal).focus();
+}
+
+function trapGameModalFocus(event) {
+  if (!state.modal.open || !els.gameModal?.classList.contains("open")) return;
+  if (els.taskDetailDialog?.open || els.dashboardResultDialog?.open) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeGameModal();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = gameModalFocusableElements();
+  if (!focusable.length) {
+    event.preventDefault();
+    els.gameModal.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && (document.activeElement === first || !els.gameModal.contains(document.activeElement))) {
+    event.preventDefault();
+    last.focus();
+  } else if (
+    !event.shiftKey
+    && (document.activeElement === last || !els.gameModal.contains(document.activeElement))
+  ) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
 function openGameModal(type, id, tab = "chat") {
   if (els.taskDetailDialog?.open) closeTaskDetail({ restoreFocus: false });
   if (els.dashboardResultDialog?.open) closeDashboardResultDetail({ restoreFocus: false });
+  if (!state.modal.open) gameModalReturnFocus = document.activeElement;
   state.modal.open = true;
   state.modal.type = type;
   state.modal.id = id;
@@ -13421,13 +17414,17 @@ function openGameModal(type, id, tab = "chat") {
   }
   els.gameModal?.classList.add("open");
   els.gameModalBackdrop?.classList.add("open");
+  els.gameModal?.removeAttribute("inert");
   els.gameModal?.setAttribute("aria-hidden", "false");
   els.gameModalBackdrop?.setAttribute("aria-hidden", "false");
   renderGameModal();
+  window.requestAnimationFrame(focusGameModalInitialControl);
   saveSessionSnapshot();
 }
 
 function closeGameModal() {
+  const closingType = state.modal.type;
+  const closingId = state.modal.id;
   if (els.taskDetailDialog?.open) closeTaskDetail({ restoreFocus: false });
   if (els.dashboardResultDialog?.open) closeDashboardResultDetail({ restoreFocus: false });
   if (state.modal.workflowVoice.recognition) stopWorkflowVoiceDictation();
@@ -13436,8 +17433,22 @@ function closeGameModal() {
   els.gameModal?.classList.remove("open");
   els.gameModal?.classList.remove("agent-modal", "prop-modal", "dashboard-modal", "signal-consensus-modal", "workflow-dashboard-modal", "kanban-modal");
   els.gameModalBackdrop?.classList.remove("open");
+  els.gameModal?.setAttribute("inert", "");
   els.gameModal?.setAttribute("aria-hidden", "true");
   els.gameModalBackdrop?.setAttribute("aria-hidden", "true");
+  const savedReturnTarget = gameModalReturnFocus?.isConnected
+    && gameModalReturnFocus !== document.body
+    && !els.gameModal?.contains(gameModalReturnFocus)
+    ? gameModalReturnFocus
+    : null;
+  const semanticReturnTarget = closingType === "prop"
+    ? [...document.querySelectorAll(".prop-button")].find((node) => node.dataset.id === closingId)
+    : closingType === "agent"
+      ? [...document.querySelectorAll(".agent-unit")].find((node) => node.dataset.agentId === closingId)
+      : null;
+  const returnTarget = savedReturnTarget || semanticReturnTarget || els.agentCollabButton || els.operatorModeButton;
+  gameModalReturnFocus = null;
+  returnTarget?.focus?.();
   saveSessionSnapshot();
 }
 
@@ -13461,9 +17472,10 @@ function openAgentDialog(agentId, tab = "chat") {
 
 async function openPropDialog(propId, tab = null) {
   selectObject(propId, { loadBackendReport: false });
+  const reportRequest = loadPropReport(propId);
   openGameModal("prop", propId, tab || (propId === "mission_strategy_table" ? "kanban" : "dashboard"));
-  const report = await loadPropReport(propId);
-  if (report) renderGameModal();
+  await reportRequest;
+  if (state.modal.open && state.modal.type === "prop" && state.modal.id === propId) renderGameModal();
 }
 
 function setConnectionActionState(propId, { inFlight = false, message = "", tone = "neutral" } = {}) {
@@ -13887,7 +17899,7 @@ async function handleModalSend() {
           "ready",
         );
       }
-      void refreshCodexRateLimits({ manual: false });
+      void refreshCodexRateLimits({ manual: true });
       saveSessionSnapshot();
     }
   } catch (error) {
@@ -13996,7 +18008,7 @@ async function loadNavigationMask(navigation = {}) {
       image.onload = null;
       image.onerror = null;
       reject(new Error(`โหลดพื้นที่เดิน ${navigation.walkableMask} ไม่สำเร็จภายในเวลาที่กำหนด`));
-    }, 4000);
+    }, NAVIGATION_MASK_LOAD_TIMEOUT_MS);
     image.onload = () => {
       window.clearTimeout(timeoutId);
       resolve();
@@ -15627,15 +19639,46 @@ function propReportToMissionItems(report, owner = "mission_archivist") {
   return [...missionItems, ...reportItems, ...eventItems, ...memoryItems];
 }
 
-async function loadPropReport(propId) {
+async function loadPropReport(propId, { signal = null } = {}) {
+  const key = String(propId || "").trim();
+  if (!key) return null;
+  const existing = propReportInFlight.get(key);
+  if (existing) return existing;
+  state.propReportLoadState[key] = {
+    status: "loading",
+    errorMessage: "",
+    lastAttemptAt: new Date().toISOString(),
+  };
+  const request = (async () => {
+    try {
+      const report = await fetchJson(
+        `/api/props/${encodeURIComponent(key)}/report`,
+        { timeoutMs: PROP_REPORT_FETCH_TIMEOUT_MS, signal },
+      );
+      state.propReports[key] = report;
+      state.propReportLoadedAt[key] = Date.now();
+      state.propReportLoadState[key] = {
+        status: "ready",
+        errorMessage: "",
+        lastAttemptAt: new Date().toISOString(),
+      };
+      renderOperationalSidebars();
+      if (state.panelObject === key) selectObject(key, { loadBackendReport: false });
+      return report;
+    } catch (error) {
+      state.propReportLoadState[key] = {
+        status: signal?.aborted ? (state.propReports[key] ? "ready" : "idle") : "error",
+        errorMessage: signal?.aborted ? "" : "โหลดข้อมูลจาก Local Runner ไม่สำเร็จ",
+        lastAttemptAt: new Date().toISOString(),
+      };
+      return null;
+    }
+  })();
+  propReportInFlight.set(key, request);
   try {
-    const report = await fetchJson(`/api/props/${encodeURIComponent(propId)}/report`);
-    state.propReports[propId] = report;
-    renderOperationalSidebars();
-    if (state.panelObject === propId) selectObject(propId, { loadBackendReport: false });
-    return report;
-  } catch {
-    return null;
+    return await request;
+  } finally {
+    if (propReportInFlight.get(key) === request) propReportInFlight.delete(key);
   }
 }
 
@@ -15956,7 +19999,7 @@ function agentTalk({ fromAgentId = state.agent.id, toAgentId = "risk_guard", mes
     blockSecretIntent(message, "agent", fromAgent.id);
     return { ok: false, error: "Risk Guard หยุดข้อความที่อาจมีข้อมูลลับก่อนแสดงภาพประกอบ" };
   }
-  if (String(message).includes("à¸")) {
+  if (String(message).includes("\u00e0\u00b8")) {
     message = "ตรวจสถานะงานแล้วส่งรายงานกลับ Mission Table";
   }
   const line = `ภาพประกอบ: ${fromAgent.name} ส่งต่องานให้ ${toAgent.name}: ${message}`;
@@ -16191,9 +20234,20 @@ function missionReadModelSignature(missions = []) {
 }
 
 async function loadBridgeMissions(options = {}) {
-  const { replaceEvents = false, persist = true, refreshUi = true } = options;
+  const {
+    replaceEvents = false,
+    persist = true,
+    refreshUi = true,
+    signal = null,
+  } = options;
+  state.missionSync.status = "loading";
+  state.missionSync.errorMessage = "";
+  state.missionSync.lastAttemptAt = new Date().toISOString();
   try {
-    const data = await fetchJson("/api/missions");
+    const data = await fetchJson(
+      "/api/missions?scope=runtime&limit=100",
+      { timeoutMs: MISSION_FETCH_TIMEOUT_MS, signal },
+    );
     const activeMissions = Array.isArray(data.missions) ? data.missions : (Array.isArray(data.items) ? data.items : []);
     const archivedMissions = Array.isArray(data.archivedMissions)
       ? data.archivedMissions
@@ -16237,11 +20291,15 @@ async function loadBridgeMissions(options = {}) {
       renderBridgeEvents(events, { persist });
     }
     state.missionSync.lastUpdatedAt = data.updatedAt || new Date().toISOString();
+    state.missionSync.status = "ready";
+    state.missionSync.errorMessage = "";
     if (persist && missionChanged) saveSessionSnapshot();
     data.missionReadModelChanged = missionChanged;
     return data;
-  } catch {
+  } catch (error) {
     // The frontend can run as a static demo before the local bridge is started.
+    state.missionSync.status = signal?.aborted ? (state.missions.length ? "ready" : "idle") : "error";
+    state.missionSync.errorMessage = signal?.aborted ? "" : "โหลด Mission จาก Local Runner ไม่สำเร็จ";
     return null;
   }
 }
@@ -16571,15 +20629,22 @@ function reconcileAgentMissionState() {
   renderOperationalSidebars();
 }
 
-async function pollMissionReadModel() {
-  if (state.missionSync.inFlight || document.visibilityState !== "visible") return null;
+async function pollMissionReadModel({ manual = false, signal = null } = {}) {
+  if (state.missionSync.inFlight || (!manual && document.visibilityState !== "visible")) return null;
+  if (!manual && signal?.aborted) return null;
+  if (!manual && !isAutomaticPollingLeader()) return null;
   state.missionSync.inFlight = true;
   try {
-    const data = await loadBridgeMissions({ replaceEvents: false, persist: false, refreshUi: true });
+    const data = await loadBridgeMissions({ replaceEvents: false, persist: false, refreshUi: true, signal });
+    if (!manual && signal?.aborted) return null;
     if (state.modal.open && state.modal.type === "prop" && state.modal.id !== "mission_strategy_table") {
-      await loadPropReport(state.modal.id);
-      const userIsEditing = document.activeElement?.matches?.("textarea, input, select, [contenteditable='true']");
-      if (!userIsEditing) renderGameModal();
+      const lastLoadedAt = Number(state.propReportLoadedAt[state.modal.id] || 0);
+      const reportTtlExpired = !Number.isFinite(lastLoadedAt) || Date.now() - lastLoadedAt >= PROP_REPORT_POLL_TTL_MS;
+      if (data?.missionReadModelChanged === true || reportTtlExpired) {
+        await loadPropReport(state.modal.id, { signal });
+        const userIsEditing = document.activeElement?.matches?.("textarea, input, select, [contenteditable='true']");
+        if (!userIsEditing) renderGameModal();
+      }
     }
     return data;
   } finally {
@@ -16590,15 +20655,8 @@ async function pollMissionReadModel() {
 function startMissionPolling() {
   if (!state.missionSync.timer) {
     state.missionSync.timer = window.setInterval(() => {
-      void pollMissionReadModel();
+      void runAutomaticPollingTask((signal) => pollMissionReadModel({ signal }));
     }, MISSION_POLL_MS);
-  }
-  window.setTimeout(() => void pollMissionReadModel(), 3000);
-  if (!state.missionSync.visibilityHandlerBound) {
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") void pollMissionReadModel();
-    });
-    state.missionSync.visibilityHandlerBound = true;
   }
 }
 
@@ -16865,6 +20923,7 @@ document.addEventListener("click", (event) => {
 
 els.modalCloseButton?.addEventListener("click", closeGameModal);
 els.gameModalBackdrop?.addEventListener("click", closeGameModal);
+els.gameModal?.addEventListener("keydown", trapGameModalFocus);
 
 els.modalTabs?.addEventListener("click", (event) => {
   const tab = event.target.closest(".modal-tab");
@@ -16922,6 +20981,22 @@ els.workflowDashboardContent?.addEventListener("submit", (event) => {
 });
 
 els.workflowDashboardContent?.addEventListener("click", (event) => {
+  const filter = event.target.closest("[data-connection-hub-filter]");
+  if (filter && els.workflowDashboardContent.contains(filter) && state.modal.id === HQ_CONNECTION_HUB_PROP_ID) {
+    event.preventDefault();
+    const filterId = String(filter.dataset.connectionHubFilter || "all");
+    state.modal.connectionHubFilter = HQ_CONNECTION_HUB_FILTER_IDS.includes(filterId) ? filterId : "all";
+    const subject = getModalSubject();
+    renderWorkflowDashboard(subject, getPropertyRole(subject), state.propReports[HQ_CONNECTION_HUB_PROP_ID] || {});
+    return;
+  }
+  const openDevice = event.target.closest("[data-open-connection-device]");
+  if (openDevice && els.workflowDashboardContent.contains(openDevice)) {
+    event.preventDefault();
+    const propId = String(openDevice.dataset.openConnectionDevice || "");
+    if (propId && propId !== HQ_CONNECTION_HUB_PROP_ID) openPropReport(propId);
+    return;
+  }
   const button = event.target.closest("[data-workflow-dictation]");
   if (!button || !els.workflowDashboardContent.contains(button)) return;
   event.preventDefault();
@@ -16936,6 +21011,12 @@ els.workflowSettingsRailContent?.addEventListener("submit", (event) => {
 });
 
 els.workflowSettingsRailContent?.addEventListener("click", (event) => {
+  const openHub = event.target.closest("[data-open-connection-hub]");
+  if (openHub && els.workflowSettingsRailContent.contains(openHub)) {
+    event.preventDefault();
+    openPropReport(HQ_CONNECTION_HUB_PROP_ID);
+    return;
+  }
   const button = event.target.closest("[data-workflow-dictation]");
   if (!button || !els.workflowSettingsRailContent.contains(button)) return;
   event.preventDefault();
@@ -17275,6 +21356,7 @@ init().catch((error) => {
     renderAgent();
     const renderedAgentCount = els.agentLayer.querySelectorAll(".agent-unit").length;
     window.MetafxHqBoot?.markReady({ agentCount: renderedAgentCount });
+    initializePollingLeadership();
     window.setTimeout(startCodexRateLimitPolling, 0);
     window.setTimeout(startOperatorModePolling, 0);
     window.setTimeout(startAgentCollaborationPolling, 0);

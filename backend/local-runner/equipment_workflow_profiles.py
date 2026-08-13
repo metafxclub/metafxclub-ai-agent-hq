@@ -37,6 +37,7 @@ REVIEWED_EVIDENCE_KINDS = {
     "checked_at",
     "compile_status_truth",
     "discovery_blueprint",
+    "ea_readiness",
     "frontend_safe_candidate_registry",
     "inspection_scope",
     "limitations",
@@ -55,6 +56,7 @@ REVIEWED_EVIDENCE_KINDS = {
     "scheduler_state",
     "source_digest",
     "source_reference",
+    "source_title",
     "source_url",
     "source_url_per_supported_bias",
     "uncompiled_status",
@@ -83,9 +85,10 @@ EVIDENCE_OUTPUT_ANY = {
     "backend_observed_at": {"checkedAt", "backendObservedAt"},
     "backtest_plan": {"testModel", "dateRange", "artifactPlan"},
     "change_summary": {"changeSummary"},
-    "checked_at": {"checkedAt"},
+    "checked_at": {"checkedAt", "entries"},
     "compile_status_truth": {"compileStatus"},
     "discovery_blueprint": {"blueprint", "versionPlan"},
+    "ea_readiness": {"eaReadiness", "entries"},
     "frontend_safe_candidate_registry": {"candidates", "candidateCount", "privacy"},
     "inspection_scope": {"strategySummary", "codeRisks", "tradeLifecycle", "moneyManagement"},
     "limitations": {"limitations", "knownRisks", "riskNotes", "conflictingEvidence"},
@@ -96,13 +99,14 @@ EVIDENCE_OUTPUT_ANY = {
     "overfit_guard": {"overfitGuards", "validationSplit"},
     "parameter_plan": {"parameterRanges", "startStepStop", "nextRanges"},
     "project_relative_source_path": {"sourceFiles", "changedFiles", "sourcePath", "downloadArtifacts"},
-    "public_availability_status": {"availability"},
-    "published_or_event_time": {"publishedAt", "eventAt"},
+    "public_availability_status": {"availability", "entries"},
+    "published_or_event_time": {"publishedAt", "eventAt", "events", "sourceLinks"},
     "quoted_fact_summary": {"entryRules", "exitRules", "strategySummary", "featureSummary"},
     "rejection_criteria": {"rejectionCriteria"},
     "review_scope": {"issues", "lineReferences", "reviewScope"},
     "scheduler_state": {"effectiveEnabled", "nextRunAt", "lastRunStatus"},
     "source_digest": {"sourceDigest"},
+    "source_title": {"sourceTitle", "entries"},
     "source_url_per_supported_bias": {"pairBias"},
     "uncompiled_status": {"compileChecklist", "compileStatus", "nextValidationStep"},
     "unknown_when_unverified": {"pairBias"},
@@ -117,6 +121,32 @@ EVIDENCE_OUTPUT_ALL = {
         "codexStatus",
     },
     "local_terminal_selection_record": {"selectedCandidate", "selectedAt"},
+}
+
+RADAR_ACTION_ID = "discover_new_indicators"
+RADAR_ENTRY_WORKER_REQUIRED_FIELDS = {
+    "toolName",
+    "toolKind",
+    "platform",
+    "category",
+    "version",
+    "summaryTh",
+    "sourceTitle",
+    "sourceUrl",
+    "publishedAt",
+    "checkedAt",
+    "verificationStatus",
+    "availability",
+    "eaReadiness",
+    "missingRules",
+    "sourceLimitations",
+    "screenshot",
+}
+RADAR_ENTRY_BACKEND_COMPUTED_FIELDS = {
+    "recordId",
+    "duplicateFingerprint",
+    "duplicateStatus",
+    "duplicateScope",
 }
 NON_OUTPUT_EVIDENCE_KINDS = {
     "source_url",
@@ -263,6 +293,25 @@ def _validated_payload(raw: Any) -> dict[str, Any]:
                     f"unsupported_evidence_kind:{prop_id}:{action_id}:{sorted(unsupported)[0]}"
                 )
             output_field_set = set(output_fields)
+            if action_id == RADAR_ACTION_ID:
+                entry_contract = action_profile.get("entryContract")
+                if output_fields != ["entries"] or not isinstance(entry_contract, dict):
+                    raise EquipmentWorkflowContractError(
+                        f"invalid_radar_entry_container:{prop_id}:{action_id}"
+                    )
+                if (
+                    entry_contract.get("containerField") != "entries"
+                    or entry_contract.get("minimumItemsPerRun") != 1
+                    or not isinstance(entry_contract.get("maximumItemsPerRun"), int)
+                    or not 1 <= entry_contract["maximumItemsPerRun"] <= 6
+                    or set(entry_contract.get("workerRequiredFields") or [])
+                    != RADAR_ENTRY_WORKER_REQUIRED_FIELDS
+                    or set(entry_contract.get("backendComputedFields") or [])
+                    != RADAR_ENTRY_BACKEND_COMPUTED_FIELDS
+                ):
+                    raise EquipmentWorkflowContractError(
+                        f"invalid_radar_entry_contract:{prop_id}:{action_id}"
+                    )
             for evidence_kind in evidence_kinds:
                 required_any = EVIDENCE_OUTPUT_ANY.get(evidence_kind)
                 if required_any is not None and not output_field_set.intersection(required_any):

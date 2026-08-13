@@ -1,5 +1,5 @@
 {
-  "version": "bridge-contract-v015",
+  "version": "bridge-contract-v016",
   "purpose": "Local backend boundary for Codex CLI, MCP, filesystem, VPS, MT4/MT5, Telegram, and other real tools.",
   "base_url": "http://127.0.0.1:4186",
   "base_url_semantics": "Preferred first-run URL only; the confirmed runtime URL comes from runtime_endpoint.source.",
@@ -19,7 +19,8 @@
     "Dangerous actions default to blocked or waiting_approval.",
     "The three AI Trade Council agents remain read-only. The Backend waits for all three snapshot-bound votes, applies the audited 1/3, 2/3, or 3/3 directional threshold with an any-BUY-plus-SELL veto, and dispatches only when validated stopLossPrice, takeProfitPrice, Quality, Risk, and EA gates also pass.",
     "AI Trade Council displayBars is a frontend-only chart preference; analysisBarCount is Backend-owned, audited, closed-bars-only, and must never be silently reduced.",
-    "AI and Frontend never provide Lot, Risk Percent, position size, Gateway mode, or Live arm state. Fixed Lot, mode, and LiveArmed remain installed MT4 EA inputs."
+    "AI and Frontend never provide Lot, Risk Percent, position size, Gateway mode, or Live arm state. Fixed Lot, mode, and LiveArmed remain installed MT4 EA inputs.",
+    "maxManagedOrders is a human-selected Backend dispatch cap with allowed values 1, 3, 5, or 10. The effective cap is the lower of this value and the fresh EA MaxManagedOpenPositions telemetry. Current usage is the higher of fresh EA telemetry and selected-channel OPEN or not-yet-reconciled Orders proven by durable EXECUTED ACK, preventing status-publish lag from exceeding the cap. It never changes the EA input, never closes an existing position, and fails closed when telemetry is unavailable."
   ],
   "endpoints": {
     "GET /api/health": "Fast side-effect-free Bridge and critical UI readiness check. It does not invoke Codex CLI or MCP.",
@@ -34,7 +35,8 @@
     "POST /api/agents/chat": "Run one role-bound, tool-free Codex conversation turn. The request contains only agentId, message, sessionId, and idempotencyKey. The Chat Runner returns conversation or task_request plus a safe taskGoal; for task_request the Backend creates an idempotent guarded Mission, routes explicit public-web intent to codex_web_research, and returns taskCreated, taskMissionIds, taskStatus, and autoExecute.",
     "POST /api/bridge/run": "Create a guarded backend mission; approval-required tools are never executed in this request.",
     "POST /api/manager/delegate": "Create a Manager parent plan and bounded specialist subtasks. Optional requestedOwnerAgentId and requestedTargetId are backend validated; when target is omitted the Backend selects one permitted workstation from the goal.",
-    "GET /api/missions": "Read active mission queue.",
+    "GET /api/missions": "Read the bounded runtime Mission queue by default; scope=all, admin, or full is required for the complete archive.",
+    "GET /api/missions/:id": "Read one complete frontend-safe Mission detail by exact id. Mission Table summary rows use this endpoint lazily.",
     "POST /api/missions": "Create a mission without direct tool execution.",
     "POST /api/missions/:id/approval": "Record the local human decision against the complete execution packet; required high-risk review is then issued only by backend Risk Guard policy.",
     "POST /api/missions/:id/execute": "Execute only when stored mission approval is complete and unused, and the JSON body confirms the exact mission id.",
@@ -42,16 +44,17 @@
     "GET /api/agents": "Read agent contract.",
     "GET /api/agent-events": "Read visual office event log.",
     "POST /api/agent-events": "Append agent speech, route, report, or meeting event.",
-    "GET /api/props/:id/report": "Merge the prop contract, strictly routed missions/reports, memory, events, relevant meetings, sanitized Bridge state, and filtered capabilities into one dashboard read model.",
+    "GET /api/props/:id/report": "Merge the prop contract, strictly routed missions/reports, memory, events, relevant meetings, sanitized Bridge state, and filtered capabilities into one dashboard read model. AI Council history and Mission Table rows are bounded cursor pages by default; scope=all, admin, or full is the explicit diagnostic export.",
     "GET /api/props/:id/connections": "Read the cached/backend-computed Connection Checklist for one Dashboard without durable writes or frontend readiness inference.",
     "POST /api/props/:id/connections/refresh": "Accept an explicit frontend intent, then run a cooldown-guarded read-only connection diagnostic with mission id, owner, status, audit, and a report routed back to that Dashboard.",
     "POST /api/integrations/metatrader/discover": "Search bounded standard locations and process image names for MT4/MT5 in read-only mode. It never launches, closes, attaches, trades, or returns paths, PIDs, account, broker, or credentials.",
     "POST /api/integrations/metatrader/select": "Accept only propId plus an opaque candidateId from a detected safe candidate, persist that dashboard's local target selection behind the Bridge, and create mission/report/audit records. Selection never attaches to a terminal, enables an adapter, or enables live trading.",
-    "GET /api/ai-trade-council/status": "Read the sanitized Council state, current MT4 snapshot readiness, latest consensus, and backend-owned new-closed-bar automation status without running Codex.",
-    "GET /api/ai-trade-council/automation": "Read whether automatic analysis is enabled, its supported timeframes, Backend-audited analysisBarCount, current closed-bar cursor, daily count, quota reserve, and pause reason. This endpoint never creates a Mission.",
-    "POST /api/ai-trade-council/automation": "Enable or disable backend-owned analysis on a new closed bar, select analysisBarCount from 120, 180, 240, 300, 500, or 1000, and select requiredVotes from 1, 2, or 3. The first observed bar becomes a baseline; a requiredVotes change is audited and applies from the next analysis round. The frontend cannot provide a bar key, model, tool, budget, or displayBars as analysis evidence.",
+    "GET /api/ai-trade-council/status": "Read the sanitized Council state, current MT4 snapshot readiness, latest consensus, and backend-owned new-closed-bar automation status without running Codex. liveAnalysis.consensus exposes identityValid plus candidateId/channelId, canonical streamKey, exact display symbol, timeframe, snapshotId, closedBarIdentity, and streamIdentity only when the immutable parent context and decision provenance agree exactly; a mismatch nulls the identity fields so the Frontend can fail closed.",
+    "GET /api/ai-trade-council/history": "Read a bounded cursor page with kind=analysis or kind=orders. scope=all is the default and Order history scans every durable Gateway channel page even when no MT4 target is currently selected; scope=active resolves the Backend-owned current candidateId, uppercase-canonical streamKey, exact display symbol and timeframe before filtering, summary calculation, and pagination and still requires the exact selected MT4 channel. Optional candidateId, streamKey, symbol and timeframe are validated optimistic-concurrency guards and never select an arbitrary historical stream. Analysis identity is attemptId first and closed-bar identity second; Order linkage uses exact mission id, with Snapshot fallback only for legacy ACK records that have no mission id. Response scope is authoritative and Order historyWindow truthfully declares scan completeness, ledger command count, and whether older rows remain.",
+    "GET /api/ai-trade-council/automation": "Read whether automatic analysis is enabled, its supported timeframes, Backend-audited analysisBarCount, durable FIFO/coverage cursor, pending count, daily count, quota reserve, and pause reason. This endpoint never creates a Mission.",
+    "POST /api/ai-trade-council/automation": "Enable or disable backend-owned analysis on a new closed bar, select analysisBarCount from 120, 180, 240, 300, 500, or 1000, select requiredVotes from 1, 2, or 3, set the human-selected Backend maxManagedOrders cap to 1, 3, 5, or 10, and select dailyRoundLimitMode as unlimited or limited. Every newly observed supported closed bar is recorded once in the durable FIFO. Backend captures an immutable snapshot at detection; gates retain the queue, while a delayed/stale snapshot is analysis-only and can never dispatch a trade command. Restart or jump bars without an exact captured snapshot become explicit skipped coverage rows. Unlimited mode returns effectiveMaxDailyRounds null; the stored maxDailyRounds value is compatibility data and is enforced only in limited mode. maxManagedOrders never changes the EA input and is enforced before command publication together with the EA final guard. The frontend cannot provide a bar key, model, tool, budget, or displayBars as analysis evidence.",
     "POST /api/ai-trade-council/analyze": "Queue one explicit read-only Council round for the latest validated MT4 snapshot with optional analysisBarCount of 120, 180, 240, 300, 500, or 1000. Backend binds three specialist Missions to one exact closed-bar window and fails closed if requested and used counts differ.",
-    "GET /api/mt4-trade-gateway/status": "Read the sanitized post-consensus MT4 Trade Gateway status without queuing a command or changing EA state. The default mode is shadow, automatic Council dispatch starts at M5, M1 remains manual-only, and only a configured 1/3, 2/3, or 3/3 direction with no opposing BUY/SELL vote and validated SL/TP is eligible for Backend dispatch.",
+    "GET /api/mt4-trade-gateway/status": "Read the sanitized post-consensus MT4 Trade Gateway status without queuing a command or changing EA state. Status v5 exposes validated account-wide portfolio-policy and same-Windows-user concurrency evidence. Status v4/v3 remains readable for diagnostics but is execution read-only with reason portfolio_policy_evidence_required. A fresh init failure PORTFOLIO_POLICY_MISMATCH is exposed as portfolioPolicyStatus=mismatch without accepting stale status. The default mode is shadow, automatic Council dispatch starts at M5, M1 remains manual-only, and only a configured 1/3, 2/3, or 3/3 direction with no opposing BUY/SELL vote and validated SL/TP is eligible for Backend dispatch.",
     "GET /api/mt4-trade-gateway/outcome?commandId={commandId}": "Read the validated OPEN or CLOSED lifecycle evidence written by the EA for one exact command. This endpoint is read-only and never infers a fill.",
     "POST /api/mt4-trade-gateway/execution-unknown/quarantine": "Fail closed for one exact EXECUTION_UNKNOWN command using commandId plus the latest expectedLedgerRevision. The Backend activates the channel Kill Switch, retains the bar claim, releases only the durable command slot, audits the action, and never retries the order.",
     "GET /api/memory": "Read memory index.",
@@ -62,7 +65,9 @@
     "POST /api/meetings/turn": "Append one agent-to-agent meeting turn.",
     "GET /api/tools": "Read the sanitized tool permission matrix.",
     "GET /api/orchestration": "Read Manager delegation, model tier, budget, and approval policy.",
+    "GET /api/mission-strategy-table": "Read a compact cursor page of Mission and report summaries by default. scope=all, admin, or full explicitly returns the complete frontend-safe diagnostic archive.",
     "GET /api/reports": "Read structured runtime report cards with frontend-safe metadata and opaque image attachment URLs.",
+    "GET /api/reports/{reportId}": "Read one complete frontend-safe report by exact id. Mission Table summary rows use this endpoint lazily.",
     "GET /api/reports/{reportId}/attachments/{attachmentId}": "Stream one allowlisted PNG, JPEG, or WebP report image through a same-origin opaque attachment id. Local paths and unsupported files are never returned."
   },
   "approval_required_actions": [
@@ -158,6 +163,7 @@
       "executionUnknownRecovery": "exact command and optimistic ledger revision only; activate Kill Switch, retain bar claim, no inference, no automatic retry",
       "perOrderHumanApproval": false,
       "persistentExecutionAuthorization": "local MT4 EA GatewayMode, LiveArmed, and TrustedSigningKeyId inputs only; Frontend and AI cannot change these values",
+      "portfolioPolicyEvidence": "Fresh strict status v5 only: portfolioPolicyStatus ready, lowercase SHA-256 digest, account-wide managed-magic scope, normalized managed magic/symbol/timeframe allowlists, same_windows_user_file_common concurrency boundary, and crossVpsDistributedLock false. Status v4/v3 is diagnostic read-only and cannot authorize publication.",
       "auditRequired": true,
       "eaAckRequiredForExecutionClaim": true
     },

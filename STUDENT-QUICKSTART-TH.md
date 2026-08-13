@@ -56,7 +56,7 @@ cd metafxclub-ai-agent-hq
 
 ## เปิด Bridge อัตโนมัติหลังเปิดเครื่อง
 
-หลังติดตั้งและยืนยัน URL แล้ว ให้ดับเบิลคลิก `scripts/register-bridge-autostart.cmd` หนึ่งครั้ง ระบบจะสร้าง Scheduled Task ของ Windows User คนนี้ พร้อมลองใหม่เมื่อเปิดไม่สำเร็จและตรวจ Bridge ทุก 5 นาที
+หลังติดตั้งและยืนยัน URL แล้ว ให้ดับเบิลคลิก `scripts/register-bridge-autostart.cmd` หนึ่งครั้ง ระบบจะสร้าง Scheduled Task ของ Windows User คนนี้ พร้อมลองใหม่เมื่อเปิดไม่สำเร็จและตรวจ Bridge ทุก 15 นาทีโดยค่าเริ่มต้นผ่านตัวเปิดแบบไม่มีหน้าต่าง
 
 ระบบไม่เปิด Browser หรือ MT4/MT5 เอง เมื่อต้องการเปิดหน้าจอให้ใช้ Shortcut `Metafxclub AI Agent HQ` บน Desktop หากไม่ต้องการเปิด Bridge อัตโนมัติแล้ว ให้ดับเบิลคลิก `scripts/unregister-bridge-autostart.cmd`
 

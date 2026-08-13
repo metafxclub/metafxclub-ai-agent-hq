@@ -36,6 +36,8 @@ $maxLogBytes = 5MB
 $logGenerations = 3
 $gracefulShutdownRequestTimeoutSeconds = 3
 $gracefulShutdownWaitSeconds = 15
+$forceShutdownWaitSeconds = 30
+$watchdogHealthConfirmationDelaySeconds = 5
 $mutexName = "Local\MetafxclubAgentHQBridgeLifecycle"
 $bridgeInventoryConflict = @()
 $requestedBridgePort = if ($Port -ge 1024) { $Port } else { 0 }
@@ -645,12 +647,15 @@ function Wait-ForBridgeProcessExit {
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
-        if (-not (Get-ProcessRecord -ProcessId $ProcessId)) {
+        # Get-CimInstance can briefly retain a terminated process record on
+        # Windows.  Get-Process is the authoritative local PID liveness check
+        # for this bounded post-stop wait.
+        if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
             return $true
         }
         Start-Sleep -Milliseconds 200
     } while ([DateTime]::UtcNow -lt $deadline)
-    return $null -eq (Get-ProcessRecord -ProcessId $ProcessId)
+    return $null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
 }
 
 function Remove-MatchingBridgeControlFile {
@@ -770,10 +775,10 @@ function Stop-VerifiedProcess {
     }
 
     Stop-Process -Id $ProcessId -Force -ErrorAction Stop
-    Wait-Process -Id $ProcessId -Timeout 10 -ErrorAction SilentlyContinue
-    if (Get-ProcessRecord -ProcessId $ProcessId) {
+    if (-not (Wait-ForBridgeProcessExit -ProcessId $ProcessId -TimeoutSeconds $forceShutdownWaitSeconds)) {
         throw "Verified bridge PID $ProcessId did not exit after force-stop."
     }
+    Write-AuditEvent -Operation "shutdown" -Outcome "force_stopped" -ProcessId $ProcessId -Message "Verified bridge PID exited after the bounded force-stop fallback."
     Remove-MatchingBridgeControlFile -ProcessId $ProcessId -Port $bridgePort
     return $true
 }
@@ -926,8 +931,33 @@ function Ensure-Bridge {
         return Start-Bridge
     }
 
+    # A visible dashboard can temporarily saturate the threaded development
+    # server while a large read model is being serialized.  Confirm the same
+    # exact PID is still unhealthy in a second bounded window before replacing
+    # it, so one slow watchdog probe cannot take a healthy HQ offline.
+    Write-AuditEvent -Operation "ensure" -Outcome "health_recheck_wait" -ProcessId $existingId -Message "First Health window timed out; waiting briefly before the replacement decision."
+    Start-Sleep -Seconds $watchdogHealthConfirmationDelaySeconds
+    $healthyExisting = Wait-ForBridgeHealth -ProcessId $existingId -TimeoutSeconds $HealthTimeoutSeconds
+    if ($healthyExisting) {
+        Write-AuditEvent -Operation "ensure" -Outcome "health_recovered" -ProcessId $existingId -Message "The exact bridge recovered during the confirmation window and was preserved."
+        return Start-Bridge
+    }
+
     Write-AuditEvent -Operation "ensure" -Outcome "verified_unhealthy_restarting" -ProcessId $existingId -Message "Watchdog verified the exact HQ process but Health stayed unavailable; replacing only that verified PID."
-    Stop-VerifiedProcess -ProcessId $existingId -GracefulFirst | Out-Null
+    try {
+        Stop-VerifiedProcess -ProcessId $existingId -GracefulFirst | Out-Null
+    }
+    catch {
+        # A terminating process can disappear between Stop-Process and the CIM
+        # identity refresh.  Recover only when the local PID and listener are
+        # both definitively gone; otherwise keep the original fail-closed error.
+        $pidExited = Wait-ForBridgeProcessExit -ProcessId $existingId -TimeoutSeconds $forceShutdownWaitSeconds
+        $remainingListeners = @(Get-ListenerProcessIds)
+        if (-not $pidExited -or $remainingListeners -contains $existingId) {
+            throw
+        }
+        Write-AuditEvent -Operation "ensure" -Outcome "post_stop_race_recovered" -ProcessId $existingId -Message "The verified PID exited after a transient Windows process-record race; guarded startup will continue."
+    }
     Write-LifecycleState -Status "stopped" -LastError "Watchdog replaced a verified unhealthy bridge process."
     return Start-Bridge
 }

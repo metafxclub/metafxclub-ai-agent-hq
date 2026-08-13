@@ -44,13 +44,15 @@
     "missionStrategyTableExcludedFromDashboardTabs": true,
     "defaultView": "work_results",
     "tabsEnabled": false,
-    "layout": {
+      "layout": {
       "leftRail": {
-        "shows": ["prop_image", "short_description", "connection_checklist", "connection_actions"],
-        "doesNotShow": ["owner_summary", "report_type", "mission_count", "memory_count", "generic_prop_status"]
+        "shows": ["prop_image", "short_description", "how_to", "device_actions", "settings"],
+        "doesNotShow": ["connection_checklist", "connection_status", "owner_summary", "report_type", "mission_count", "memory_count", "generic_prop_status"]
       },
       "mainWorkspace": {
         "showsOnly": ["missions", "structured_reports", "report_attachments"],
+        "connectionStatusLocation": "right_status_crystals.connectionCenter",
+        "aiTradeSafetyMainPanelException": ["council_quality_gate", "risk_ea_gate", "gateway_ack_fill_recovery"],
         "statusGroups": {
           "running": ["queued", "running", "draft"],
           "completed": ["completed", "archived", "ready", "published"],
@@ -269,7 +271,7 @@
         "allowedModes": ["manual", "auto_on_new_closed_bar"],
         "triggerPolicy": "new_closed_bar",
         "activationPolicy": "wait_next_closed_bar",
-        "backlogPolicy": "latest_only_cancel_stale_round",
+        "backlogPolicy": "durable_fifo_exact_snapshot_audit_only_when_stale",
         "councilExecution": "parallel_with_round_deadline",
         "snapshotPollSeconds": 5,
         "autoSupportedTimeframes": ["M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"],
@@ -334,10 +336,10 @@
       "reportRoute": {"targetPropId": "terminal_workstation", "primaryReportType": "ea_development_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "left_audit_crystals": {
-      "moduleNameTh": "เรดาร์เว็บไซต์ Indicator",
-      "availability": {"ui": "ready", "data": "public_research_ready", "execution": "guarded_read_only_research", "screenshot": "coming_soon", "scheduler": "implemented_guarded_read_only"},
+      "moduleNameTh": "Radar Website Tool",
+      "availability": {"ui": "ready", "data": "public_research_ready", "execution": "guarded_read_only_research", "googleSheets": "configuration_only_adapter_not_connected", "screenshot": "not_connected", "scheduler": "implemented_guarded_read_only"},
       "localTabs": [
-        {"id": "discoveries", "labelTh": "Indicator ที่ค้นพบใหม่", "actionIds": ["discover_new_indicators"]},
+        {"id": "discoveries", "labelTh": "รายการวันนี้", "actionIds": ["discover_new_indicators"]},
         {"id": "evidence", "labelTh": "หลักฐานและแหล่งข้อมูล", "actionIds": [], "viewOnly": true},
         {"id": "schedule", "labelTh": "เวลาที่ต้องการให้ค้นหา", "actionIds": ["save_indicator_scout_schedule"]},
         {"id": "archive", "labelTh": "ประวัติการค้นหา", "actionIds": [], "viewOnly": true}
@@ -346,25 +348,25 @@
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
         {"id": "codex_runner", "labelTh": "Codex CLI และบัญชีที่ Login", "required": true, "adapterStatus": "runtime_detected"},
         {"id": "codex_public_web_research", "labelTh": "ค้นเว็บไซต์สาธารณะแบบอ่านอย่างเดียว", "required": true, "adapterStatus": "implemented", "mode": "guarded_read_only"},
-        {"id": "dedup_store", "labelTh": "ช่วยเทียบ Indicator กับคลัง Local", "required": false, "adapterStatus": "prompt_assisted_unverified", "mode": "local_report_catalog_only"},
+        {"id": "dedup_store", "labelTh": "ตรวจซ้ำกับคลัง Report ในเครื่อง", "required": false, "adapterStatus": "implemented_deterministic", "mode": "local_report_catalog_only", "googleSheetCompared": false},
+        {"id": "google_sheets_config", "labelTh": "บันทึก Google Sheet URL หรือ ID", "required": false, "adapterStatus": "configuration_only_adapter_not_connected", "externalWriteEnabled": false, "writeRequiresExplicitUserConfirmation": true, "privateDefaultIncluded": false},
         {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
-        {"id": "screenshot_adapter", "labelTh": "จับภาพเว็บไซต์เป็นหลักฐาน", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "screenshot_adapter", "labelTh": "จับภาพเว็บไซต์เป็นหลักฐาน", "required": false, "adapterStatus": "not_connected"},
         {"id": "backend_scheduler", "labelTh": "รันค้นหา 1-2 ครั้งต่อวัน", "required": false, "adapterStatus": "implemented_guarded_read_only"},
         {"id": "report_routing", "labelTh": "ส่งผลกลับเรดาร์และ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "manual", "allowedModes": ["manual", "one_or_two_runs_per_day"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false, "scheduleConfigurationIntent": "save_indicator_scout_schedule", "schedulePreferenceMaxRunsPerDay": 2, "scheduleExecutionAdapterStatus": "implemented_guarded_read_only", "scheduledActionIds": ["discover_new_indicators"]},
-      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "dedup": "ready_contract", "missionReportAudit": "ready", "screenshotAdapter": "coming_soon", "recurringScheduler": "ready_guarded_read_only"},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual", "one_or_two_runs_per_day"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false, "scheduleConfigurationIntent": "save_indicator_scout_schedule", "schedulePreferenceMaxRunsPerDay": 2, "scheduleHardMaximumRunsPerDay": 2, "scheduleHardMaximumRuntimeEnforced": true, "scheduleDailyCounterPersistence": "backend_local_settings", "scheduleCountingPolicy": "pre_dispatch_fail_closed_reservation", "scheduleStalePendingPolicy": "expire_at_bangkok_day_boundary", "scheduleCatchUpPolicy": "latest_same_day_slot_only", "scheduleExecutionAdapterStatus": "implemented_guarded_read_only", "scheduledActionIds": ["discover_new_indicators"]},
+      "readModel": {"schemaVersion": "radar-website-tool-v1", "primaryViews": ["today", "history_7_days"], "todayEntries": true, "sevenDayEntries": true, "searchScheduleAndSheetLocation": "left_rail"},
+      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "dedup": "implemented_deterministic_local_report_catalog", "googleSheetsAdapter": "not_connected", "missionReportAudit": "ready", "screenshotAdapter": "not_connected", "recurringScheduler": "ready_guarded_read_only"},
       "reportRoute": {"targetPropId": "left_audit_crystals", "primaryReportType": "indicator_scout_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "left_signal_cube": {
       "moduleNameTh": "ข่าวตลาดวันนี้และมุมมอง 28 คู่เงิน",
       "availability": {"ui": "ready", "data": "public_research_ready", "execution": "analysis_only", "economicCalendar": "coming_soon", "scheduler": "implemented_guarded_read_only"},
       "localTabs": [
-        {"id": "today", "labelTh": "ข่าวตลาดวันนี้", "actionIds": ["analyze_daily_market_news"]},
-        {"id": "pair_bias", "labelTh": "มุมมอง 28 คู่เงิน", "actionIds": ["build_fx_pair_bias"]},
-        {"id": "horizons", "labelTh": "ผลกระทบตามช่วงเวลา", "actionIds": [], "viewOnly": true},
-        {"id": "schedule_history", "labelTh": "เวลาอัปเดตและประวัติ", "actionIds": ["save_news_bias_schedule"]}
+        {"id": "pair_bias", "labelTh": "มุมมอง 28 คู่เงิน", "actionIds": ["analyze_daily_market_news"]},
+        {"id": "today", "labelTh": "ข่าวตลาดวันนี้", "actionIds": ["analyze_daily_market_news"], "viewOnly": true}
       ],
       "connections": [
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
@@ -378,25 +380,23 @@
       ],
       "liveTradingPolicy": {"enabled": false, "orderSubmission": "disabled", "activationFromFrontend": false, "analysisIsNotTradeSignal": true},
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "manual", "allowedModes": ["manual", "one_or_two_runs_per_day"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false, "scheduleConfigurationIntent": "save_news_bias_schedule", "schedulePreferenceMaxRunsPerDay": 2, "scheduleExecutionAdapterStatus": "implemented_guarded_read_only", "scheduledActionIds": ["analyze_daily_market_news"], "manualOrAgentHandoffActionIds": ["build_fx_pair_bias"]},
+      "operation": {"defaultMode": "manual", "allowedModes": ["manual", "one_or_two_runs_per_day"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false, "scheduleDefaultTimes": ["07:00"], "scheduleConfigurationIntent": "save_news_bias_schedule", "schedulePreferenceMaxRunsPerDay": 2, "scheduleHardMaximumRunsPerDay": 2, "scheduleExecutionAdapterStatus": "implemented_guarded_read_only", "scheduledActionIds": ["analyze_daily_market_news"], "manualOrAgentHandoffActionIds": ["build_fx_pair_bias"], "legacyManualCompatibilityActionIds": ["build_fx_pair_bias"]},
+      "readModel": {"schemaVersion": "fx-news-bias-dashboard-v2", "primaryViews": ["pair_bias", "today"], "defaultView": "pair_bias", "oneAnalyzeReportFeeds": ["events", "dangerWindows", "pairBias"], "pairCount": 28, "unknownValue": "insufficient_data", "scheduleAndMethodLocation": "left_rail", "historyPresentationTab": false, "todayFreshnessFields": ["asOf", "currentBangkokDate", "reportBangkokDate", "stale", "currentDataAvailable"], "staleTodayPolicy": "empty_events_danger_windows_and_directional_bias"},
       "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "fxBiasAnalysis": "ready_analysis_only", "missionReportAudit": "ready", "economicCalendarFeed": "coming_soon", "recurringScheduler": "ready_guarded_read_only"},
       "reportRoute": {"targetPropId": "left_signal_cube", "primaryReportType": "fx_news_bias_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "right_status_crystals": {
-      "moduleNameTh": "สถานะ VPS, HQ และตั้งค่า Agent",
-      "availability": {"ui": "ready", "data": "backend_local_health_ready", "execution": "read_only_and_safe_settings", "externalVpsApi": "coming_soon"},
+      "moduleNameTh": "ศูนย์รวมสถานะการเชื่อมต่ออุปกรณ์",
+      "availability": {"ui": "ready", "data": "bounded_shared_connection_snapshot", "execution": "read_only_and_safe_settings", "externalVpsApi": "coming_soon"},
       "localTabs": [
-        {"id": "vps", "labelTh": "สถานะ VPS", "actionIds": ["refresh_vps_hq_status"]},
-        {"id": "hq_bridge", "labelTh": "สถานะ HQ และ Bridge", "actionIds": [], "viewOnly": true},
-        {"id": "agent_settings", "labelTh": "ตั้งค่า Agent", "actionIds": ["save_agent_preferences"]},
-        {"id": "activity_history", "labelTh": "ประวัติกิจกรรม", "actionIds": [], "viewOnly": true}
+        {"id": "connections", "labelTh": "การเชื่อมต่ออุปกรณ์", "actionIds": ["refresh_vps_hq_status"]}
       ],
       "connections": [
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
+        {"id": "codex_runner", "labelTh": "Codex CLI", "required": true, "adapterStatus": "runtime_detected"},
+        {"id": "mcp_config", "labelTh": "การตั้งค่า MCP", "required": false, "adapterStatus": "runtime_detected"},
         {"id": "mission_store", "labelTh": "Mission Queue", "required": true, "adapterStatus": "implemented"},
-        {"id": "agent_event_store", "labelTh": "Event และ Activity History", "required": true, "adapterStatus": "implemented"},
-        {"id": "vps_local_health", "labelTh": "สถานะเครื่องและ VPS ที่ Backend ตรวจได้", "required": true, "adapterStatus": "runtime_detected", "mode": "read_only"},
-        {"id": "hq_bridge_health", "labelTh": "สถานะ HQ, Local Runner และ Mission Worker", "required": true, "adapterStatus": "implemented", "mode": "read_only"},
+        {"id": "backend_scheduler", "labelTh": "ตารางงานของอุปกรณ์", "required": false, "adapterStatus": "runtime_detected", "mode": "read_only"},
         {"id": "agent_preferences_store", "labelTh": "ตั้งค่า Agent ที่ผ่าน Backend Validation", "required": true, "adapterStatus": "implemented", "mode": "safe_settings_only"},
         {"id": "codex_quota", "labelTh": "ภาพรวม Rate Limit ของ Codex", "required": false, "adapterStatus": "runtime_detected"},
         {"id": "external_vps_api", "labelTh": "Provider VPS Metrics ภายนอก", "required": false, "adapterStatus": "coming_soon"},
@@ -405,7 +405,8 @@
       "codexUsage": {"dependency": "none_for_health_and_settings", "blockAiRunWhenLimitReached": false, "keepReadOnlyDashboardAvailable": true},
       "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
       "agentPreferenceSafety": {"backendValidationRequired": true, "allowedFields": ["language", "modelTier", "tokenBudget", "timeoutSeconds", "outputLimitChars", "rateReservePercent"], "providerModelIdAllowed": false, "secretFieldsAllowed": false},
-      "workflowReadiness": {"localBridgeHealth": "ready", "missionWorkerHealth": "ready", "vpsMetrics": "runtime_detected", "safeAgentPreferences": "ready_backend_validated", "activityHistory": "ready", "externalVpsApi": "coming_soon"},
+      "readModel": {"schemaVersion": "hq-equipment-connection-center-v1", "deviceCount": 9, "primaryViews": ["connections"], "defaultView": "connections", "coreServicesPresentation": "status_strip", "agentSettingsLocation": "left_rail", "sharedProbeSnapshot": true, "cacheTtlSeconds": 5, "unobservedDynamicStatus": "not_checked", "summaryFields": ["deviceCount", "readyCount", "partialCount", "attentionCount", "notCheckedCount"], "deviceFields": ["propId", "titleTh", "overallStatus", "checkedAt", "stale", "counts", "items", "schedule"], "serviceFields": ["localBridge", "codexCli", "mcp", "missionWorker", "scheduler", "codexQuota"], "privacy": {"secretsExposed": false, "filesystemPathsExposed": false, "processIdsExposed": false, "accountDetailsExposed": false, "channelIdsExposed": false, "keysExposed": false}, "historyPresentationTab": false},
+      "workflowReadiness": {"localBridgeHealth": "ready", "missionWorkerHealth": "ready", "equipmentConnectionProjection": "ready_bounded_read_only", "safeAgentPreferences": "ready_backend_validated", "externalVpsApi": "coming_soon"},
       "reportRoute": {"targetPropId": "right_status_crystals", "primaryReportType": "ops_overview_report", "summaryTargetPropId": "mission_strategy_table"}
     }
   }

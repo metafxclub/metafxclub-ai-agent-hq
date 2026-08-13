@@ -40,12 +40,6 @@ MAX_SIGNED_PAYLOAD_BYTES = 64 * 1024
 # timestamp because the EA must compare it exactly with iTime(..., 1), but
 # reject leads beyond the largest real-world UTC offset.
 MAX_BROKER_CLOCK_LEAD_SECONDS = 14 * 60 * 60
-ACK_REFERENCE_PRICE_PATTERN = re.compile(
-    r'"referencePrice"\s*:\s*'
-    r'(-?(?:0|[1-9][0-9]*)(?:\.([0-9]{1,8}))?)'
-    r'(?=\s*[,}])'
-)
-
 SIGNED_ENVELOPE_FIELDS = (
     "schemaVersion",
     "algorithm",
@@ -200,14 +194,93 @@ ACK_VERIFICATION_STATUSES = frozenset({
     "VERIFIED_CLOSED",
 })
 ACK_EXECUTION_STATES = frozenset({"NONE", "UNKNOWN", "OPEN", "CLOSED"})
+BROKER_CLOSE_COMMENT_SUFFIXES = ("[tp]", "[sl]")
 
 SAFE_CHANNEL_PATTERN = re.compile(r"mtc-[A-Za-z0-9_-]{1,116}")
 SAFE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,119}")
-SAFE_SYMBOL_PATTERN = re.compile(r"[A-Z0-9._-]{2,24}")
+SAFE_SYMBOL_PATTERN = re.compile(r"[A-Z0-9._#-]{2,24}")
 SAFE_REASON_PATTERN = re.compile(r"[A-Z0-9][A-Z0-9_]{0,119}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 COMMAND_ID_PATTERN = re.compile(r"cmd-[0-9a-f]{24}")
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"idem-[0-9a-f]{32}")
+
+
+def _broker_comment_matches_command(
+    comment: object,
+    command_id: str,
+    *,
+    allow_close_suffix: bool,
+) -> bool:
+    """Match the canonical MT4 comment or a broker-truncated TP/SL comment.
+
+    MT4 brokers may replace the tail of a 31-character order comment with
+    ``[tp]`` or ``[sl]`` when moving the order into Account History.  A short
+    prefix alone is never accepted: the caller must already bind the exact
+    ticket and execution identity, and this helper requires at least 16 hex
+    characters from the command digest before accepting a close suffix.
+    """
+    actual = str(comment or "")
+    expected = f"HQ:{command_id}"
+    if actual == expected:
+        return True
+    if not allow_close_suffix:
+        return False
+    for suffix in BROKER_CLOSE_COMMENT_SUFFIXES:
+        if not actual.endswith(suffix):
+            continue
+        prefix = actual[: -len(suffix)]
+        minimum_prefix_length = len("HQ:cmd-") + 16
+        return (
+            len(prefix) >= minimum_prefix_length
+            and expected.startswith(prefix)
+        )
+    return False
+
+
+def _same_decimal(left: object, right: object) -> bool:
+    try:
+        return Decimal(str(left)) == Decimal(str(right))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
+def _wire_number_decimal_places(text: str, field: str) -> int | None:
+    """Return one flat JSON number's explicit precision, or None if ambiguous."""
+    pattern = re.compile(
+        rf'"{re.escape(field)}"\s*:\s*'
+        r'(-?(?:0|[1-9][0-9]*)(?:\.([0-9]{1,8}))?)'
+        r'(?=\s*[,}])'
+    )
+    matches = list(pattern.finditer(text))
+    if len(matches) != 1:
+        return None
+    return len(matches[0].group(2) or "")
+
+
+def _same_ea_normalized_price(
+    actual: object,
+    command_price: object,
+    wire_decimal_places: int | None,
+) -> bool:
+    """Bind broker-normalized evidence to the command at proven EA precision."""
+    if wire_decimal_places is None:
+        return _same_decimal(actual, command_price)
+    if not 0 <= wire_decimal_places <= 8:
+        return False
+    try:
+        actual_decimal = Decimal(str(actual))
+        command_decimal = Decimal(str(command_price))
+        if not actual_decimal.is_finite() or not command_decimal.is_finite():
+            return False
+        quantum = Decimal(1).scaleb(-wire_decimal_places)
+        return actual_decimal == command_decimal.quantize(
+            quantum,
+            rounding=ROUND_HALF_UP,
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
 HEARTBEAT_ID_PATTERN = re.compile(r"hb-[0-9a-f]{24}")
 SIGNING_KEY_ID_PATTERN = re.compile(r"hk-[0-9a-f]{64}")
 LOWER_HEX_PATTERN = re.compile(r"[0-9a-f]+")
@@ -294,7 +367,14 @@ def _strict_json_object(text: str) -> dict[str, object]:
             result[key] = value
         return result
 
-    value = json.loads(text, object_pairs_hook=reject_duplicates)
+    def reject_non_standard_constant(value: str) -> object:
+        raise ValueError(f"Non-standard JSON constant: {value}")
+
+    value = json.loads(
+        text,
+        object_pairs_hook=reject_duplicates,
+        parse_constant=reject_non_standard_constant,
+    )
     if not isinstance(value, dict):
         raise ValueError("JSON root must be an object.")
     return value
@@ -302,6 +382,17 @@ def _strict_json_object(text: str) -> dict[str, object]:
 
 def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("ascii")).hexdigest()
+
+
+def _stream_key(channel_id: str, symbol: str, timeframe: str) -> str:
+    """Match the bridge closed-bar stream identity exactly.
+
+    The selected MT4 candidate is the channel id.  Binding the supplied
+    stream key again at the publisher boundary prevents stale analysis from a
+    previous chart from being relabelled as the currently selected stream.
+    """
+    joined = "\n".join((channel_id, symbol, timeframe))
+    return hashlib.sha256(joined.encode("utf-8", errors="replace")).hexdigest()
 
 
 def _contract_digest(schema_version: str, value: object) -> str:
@@ -436,6 +527,7 @@ def _number(
     *,
     field: str,
     maximum: Decimal = Decimal("1000000000"),
+    maximum_decimal_places: int = 8,
 ) -> Decimal:
     if isinstance(value, bool):
         raise GatewayValidationError(f"{field} must be numeric.", code=f"invalid_{field}")
@@ -451,12 +543,48 @@ def _number(
             f"{field} is outside the allowed range.",
             code=f"invalid_{field}",
         )
-    return number.normalize()
+    normalized = number.normalize()
+    decimal_places = max(0, -normalized.as_tuple().exponent)
+    if decimal_places > maximum_decimal_places:
+        raise GatewayValidationError(
+            f"{field} exceeds the EA's decimal precision.",
+            code=f"invalid_{field}_precision",
+        )
+    return normalized
 
 
 def _json_number(value: Decimal) -> int | float:
     integral = value.to_integral_value()
     return int(integral) if value == integral else float(value)
+
+
+def _wire_json_scalar(value: object) -> str:
+    """Serialize one flat EA scalar without scientific numeric notation.
+
+    MQL4's strict flat-JSON parser intentionally accepts ordinary decimal
+    tokens only. ``json.dumps`` switches small floats such as ``0.00000001``
+    to ``1e-08``, which is valid JSON but not valid for that parser. Format
+    finite numbers through ``Decimal`` so every signed payload remains an
+    exact plain-decimal wire value.
+    """
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return json.dumps(value, ensure_ascii=True, allow_nan=False)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise GatewayValidationError(
+                "Non-finite JSON number.",
+                code="non_finite_json",
+            )
+        rendered = format(Decimal(str(value)), "f")
+        if "." in rendered:
+            rendered = rendered.rstrip("0").rstrip(".")
+        return rendered or "0"
+    raise GatewayValidationError(
+        "Only JSON scalars are allowed.",
+        code="non_flat_json",
+    )
 
 
 def _flat_json(payload: Mapping[str, object], *, exact_fields: tuple[str, ...] | None = None) -> None:
@@ -812,12 +940,12 @@ class MT4TradeGateway:
         fields: tuple[str, ...],
     ) -> bytes:
         _flat_json(payload, exact_fields=fields)
-        serialized = json.dumps(
-            _ordered_packet(payload, fields),
-            ensure_ascii=True,
-            allow_nan=False,
-            separators=(",", ":"),
-        )
+        ordered = _ordered_packet(payload, fields)
+        serialized = "{" + ",".join(
+            json.dumps(field, ensure_ascii=True) + ":" +
+            _wire_json_scalar(ordered[field])
+            for field in fields
+        ) + "}"
         encoded = serialized.encode("ascii")
         if not 0 < len(encoded) <= MAX_SIGNED_PAYLOAD_BYTES:
             raise GatewayValidationError(
@@ -935,9 +1063,15 @@ class MT4TradeGateway:
     def _load_ledger(self) -> dict[str, Any]:
         if not self._ledger_path.exists():
             return _empty_ledger(self._now())
+        if self._ledger_path.is_symlink() or not self._ledger_path.is_file():
+            raise LedgerIntegrityError(
+                "Trade ledger must be a regular local file."
+            )
         try:
-            ledger = json.loads(self._ledger_path.read_text(encoding="ascii"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            ledger = _strict_json_object(
+                self._ledger_path.read_text(encoding="ascii")
+            )
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
             raise LedgerIntegrityError(
                 "Trade ledger is unreadable; restore its backup before continuing."
             ) from error
@@ -961,6 +1095,7 @@ class MT4TradeGateway:
             or not isinstance(ledger.get("barClaims"), dict)
             or isinstance(ledger.get("revision"), bool)
             or not isinstance(ledger.get("revision"), int)
+            or int(ledger.get("revision")) < 0
             or (
                 ledger.get("activeCommandId") is not None
                 and ledger.get("activeCommandId") not in ledger["commands"]
@@ -968,6 +1103,7 @@ class MT4TradeGateway:
         ):
             raise LedgerIntegrityError("Trade ledger has an invalid schema.")
         outstanding_ids: list[str] = []
+        repaired_unknown_status = False
         for command_id, entry in ledger["commands"].items():
             command = entry.get("command") if isinstance(entry, dict) else None
             backend_identity = entry.get("backendIdentity") if isinstance(entry, dict) else None
@@ -997,6 +1133,11 @@ class MT4TradeGateway:
                     )
                 )
                 or backend_identity.get("barKey") != entry.get("barKey")
+                or backend_identity.get("streamKey") != _stream_key(
+                    str(command.get("channelId") or ""),
+                    str(command.get("symbol") or ""),
+                    str(command.get("timeframe") or ""),
+                )
                 or not SHA256_PATTERN.fullmatch(
                     str(backend_identity.get("streamKey") or "")
                 )
@@ -1021,6 +1162,24 @@ class MT4TradeGateway:
                 raise LedgerIntegrityError(
                     "Trade ledger contains unsanitized EA sizing data."
                 )
+            if (
+                entry.get("status") == "expired_waiting_ack"
+                and entry.get("outstanding") is True
+                and isinstance(stored_ack, dict)
+                and stored_ack.get("status") == "EXECUTION_UNKNOWN"
+            ):
+                # Gateway versions before this migration allowed command TTL
+                # to overwrite the stronger durable ACK status. Restore the
+                # exact unknown state without releasing the slot or bar claim,
+                # so deterministic reconciliation/quarantine remains usable.
+                entry["status"] = "ack_EXECUTION_UNKNOWN"
+                entry["statusMigration"] = {
+                    "from": "expired_waiting_ack",
+                    "to": "ack_EXECUTION_UNKNOWN",
+                    "reasonCode": "RESTORE_DURABLE_EXECUTION_UNKNOWN",
+                    "migratedAt": _iso(self._now()),
+                }
+                repaired_unknown_status = True
         active_id = ledger.get("activeCommandId")
         if len(outstanding_ids) > 1 or (
             outstanding_ids and active_id != outstanding_ids[0]
@@ -1030,6 +1189,8 @@ class MT4TradeGateway:
             raise LedgerIntegrityError(
                 "Trade ledger violates the single-outstanding-command invariant."
             )
+        if repaired_unknown_status:
+            return self._save_ledger(ledger)
         return ledger
 
     def _save_ledger(self, ledger: dict[str, Any]) -> dict[str, Any]:
@@ -1040,8 +1201,10 @@ class MT4TradeGateway:
         self.state_root.mkdir(parents=True, exist_ok=True)
         if self._ledger_path.exists():
             try:
-                existing = json.loads(self._ledger_path.read_text(encoding="ascii"))
-            except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                existing = _strict_json_object(
+                    self._ledger_path.read_text(encoding="ascii")
+                )
+            except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
                 raise LedgerIntegrityError(
                     "Refusing to overwrite a corrupt trade ledger."
                 ) from error
@@ -1119,12 +1282,6 @@ class MT4TradeGateway:
         stream_key = str(intent.get("streamKey") or "").strip().lower()
         if stream_key and not SHA256_PATTERN.fullmatch(stream_key):
             raise GatewayValidationError("Invalid streamKey.", code="invalid_stream_key")
-        if not stream_key:
-            stream_key = _digest({
-                "channelId": channel_id,
-                "symbol": str(intent.get("symbol") or "").upper(),
-                "timeframe": str(intent.get("timeframe") or "").upper(),
-            })
         bar_time = intent.get("barTime")
         if (
             isinstance(bar_time, bool)
@@ -1149,6 +1306,13 @@ class MT4TradeGateway:
                 "Timeframe must be M5 or higher and supported by the EA.",
                 code="invalid_timeframe",
             )
+        expected_stream_key = _stream_key(channel_id, symbol, timeframe)
+        if stream_key and not hmac.compare_digest(stream_key, expected_stream_key):
+            raise GatewayValidationError(
+                "streamKey does not match channelId, symbol, and timeframe.",
+                code="stream_key_mismatch",
+            )
+        stream_key = expected_stream_key
         stop_loss = _number(intent.get("stopLoss"), field="stop_loss")
         take_profit = _number(intent.get("takeProfit"), field="take_profit")
         reference_price = _number(
@@ -1313,7 +1477,7 @@ class MT4TradeGateway:
         path = self._command_path(channel_id)
         if not path.exists():
             return None, False
-        if not path.is_file():
+        if path.is_symlink() or not path.is_file():
             raise OutstandingCommandError(
                 "The EA command slot is not a regular file."
             )
@@ -1410,6 +1574,27 @@ class MT4TradeGateway:
             "queueFileName": "command.json",
         }
 
+    @staticmethod
+    def _mark_expired_waiting_ack(
+        entry: dict[str, object],
+        *,
+        now: datetime,
+    ) -> bool:
+        """Record transport expiry without destroying durable ACK semantics.
+
+        An ACK, including ``EXECUTION_UNKNOWN`` or an unpersisted terminal
+        result, is stronger evidence than command TTL.  Keeping its status is
+        required for exact reconciliation and for a later persisted ACK
+        upgrade.  Only pre-terminal transport states may become
+        ``expired_waiting_ack``.
+        """
+        current_status = str(entry.get("status") or "")
+        if current_status not in {"writing", "published", "ack_EXECUTING"}:
+            return False
+        entry["status"] = "expired_waiting_ack"
+        entry["updatedAt"] = _iso(now)
+        return True
+
     def queue_trade_intent(self, intent: Mapping[str, object]) -> dict[str, object]:
         """Publish one command slot; never accept EA-owned sizing/risk policy."""
         normalized = self._normalize_intent(intent)
@@ -1431,10 +1616,9 @@ class MT4TradeGateway:
                 if entry.get("outstanding"):
                     expires_at = int(entry["command"]["expiresAt"])
                     if expires_at <= _now_epoch(now):
-                        entry["status"] = "expired_waiting_ack"
-                        entry["updatedAt"] = _iso(now)
-                        ledger = self._save_ledger(ledger)
-                        entry = ledger["commands"][existing_id]
+                        if self._mark_expired_waiting_ack(entry, now=now):
+                            ledger = self._save_ledger(ledger)
+                            entry = ledger["commands"][existing_id]
                     else:
                         fresh = self._fresh_heartbeat(entry["command"], now)
                         self._write_heartbeat(fresh)
@@ -1518,9 +1702,8 @@ class MT4TradeGateway:
             if not isinstance(entry, dict) or not entry.get("outstanding"):
                 raise LedgerIntegrityError("Active command state is inconsistent.")
             if int(entry["command"]["expiresAt"]) <= _now_epoch(now):
-                entry["status"] = "expired_waiting_ack"
-                entry["updatedAt"] = _iso(now)
-                self._save_ledger(ledger)
+                if self._mark_expired_waiting_ack(entry, now=now):
+                    self._save_ledger(ledger)
                 raise GatewaySafetyError(
                     "Cannot refresh an expired command.",
                     code="command_expired",
@@ -1773,7 +1956,11 @@ class MT4TradeGateway:
             if (
                 ticket is None
                 or any(value is None for value in execution_evidence)
-                or not actual_comment.startswith(f"HQ:{command_id}")
+                or not _broker_comment_matches_command(
+                    actual_comment,
+                    command_id,
+                    allow_close_suffix=execution_state == "CLOSED",
+                )
                 or verification_status not in {"VERIFIED_OPEN", "VERIFIED_CLOSED"}
                 or execution_state not in {"OPEN", "CLOSED"}
             ):
@@ -1865,6 +2052,7 @@ class MT4TradeGateway:
         ack: Mapping[str, object],
         *,
         reference_price_wire_decimals: int | None = None,
+        execution_price_wire_decimals: int | None = None,
     ) -> str:
         command = entry["command"]
         for field in ("commandId", "idempotencyKey", "channelId"):
@@ -1889,6 +2077,20 @@ class MT4TradeGateway:
                     f"ACK {field} does not match the command.",
                     code=f"ack_{field}_mismatch",
                 )
+        if ack.get("status") == "EXECUTED":
+            for ack_field, command_field in (
+                ("actualStopLoss", "stopLoss"),
+                ("actualTakeProfit", "takeProfit"),
+            ):
+                if not _same_ea_normalized_price(
+                    ack.get(ack_field),
+                    command.get(command_field),
+                    execution_price_wire_decimals,
+                ):
+                    raise AckValidationError(
+                        f"ACK {ack_field} does not match the command.",
+                        code=f"ack_{ack_field}_mismatch",
+                    )
         price_binding = "exact"
         if ack.get("referencePrice") != command.get("referencePrice"):
             # Gateway EA <= 2.11 wrote the echoed command reference price with
@@ -1923,18 +2125,38 @@ class MT4TradeGateway:
                     code="ack_referencePrice_mismatch",
                 )
             price_binding = "legacy_rejected_wire_rounding"
-        if ack.get("eaClosedBarTime") != command.get("barTime"):
+        lifecycle_recovery_bar_compatible = bool(
+            ack.get("status") == "EXECUTED"
+            and ack.get("reasonCode") == "RECOVERED_ORDER_FOUND"
+            and ack.get("statePersisted") is True
+            and ack.get("signatureVerificationStatus") == "VERIFIED"
+            and ack.get("verificationStatus")
+            in {"VERIFIED_OPEN", "VERIFIED_CLOSED"}
+            and isinstance(ack.get("ticket"), int)
+            and not isinstance(ack.get("ticket"), bool)
+            and int(ack["ticket"]) > 0
+        )
+        if (
+            ack.get("eaClosedBarTime") != command.get("barTime")
+            and not lifecycle_recovery_bar_compatible
+        ):
             raise AckValidationError(
                 "ACK EA closed bar does not match the command bar.",
                 code="ack_ea_closed_bar_time_mismatch",
             )
-        return price_binding
+        return (
+            "recovered_order_lifecycle_current_closed_bar"
+            if lifecycle_recovery_bar_compatible
+            and ack.get("eaClosedBarTime") != command.get("barTime")
+            else price_binding
+        )
 
     def ingest_ack(
         self,
         ack: Mapping[str, object],
         *,
         reference_price_wire_decimals: int | None = None,
+        execution_price_wire_decimals: int | None = None,
     ) -> dict[str, object]:
         """Ingest one EA ACK and release the slot only on persisted final ACK."""
         normalized, ea_sizing_reported = self._normalize_ack(ack)
@@ -1952,6 +2174,7 @@ class MT4TradeGateway:
                 entry,
                 normalized,
                 reference_price_wire_decimals=reference_price_wire_decimals,
+                execution_price_wire_decimals=execution_price_wire_decimals,
             )
             ack_digests = entry.get("ackDigests")
             if not isinstance(ack_digests, list):
@@ -1972,6 +2195,8 @@ class MT4TradeGateway:
             next_status = str(normalized["status"])
             current_ack = entry.get("ack")
             persisted_upgrade = False
+            unknown_reconciliation_upgrade = False
+            recovered_lifecycle_upgrade = False
             if (
                 isinstance(current_ack, dict)
                 and current_status == f"ack_{next_status}"
@@ -1991,9 +2216,113 @@ class MT4TradeGateway:
                 }
                 persisted_upgrade = old_identity == new_identity
             if (
+                isinstance(current_ack, dict)
+                and current_status == "ack_EXECUTION_UNKNOWN"
+                and current_ack.get("status") == "EXECUTION_UNKNOWN"
+                and current_ack.get("statePersisted") is True
+                and next_status == "EXECUTED"
+                and normalized.get("statePersisted") is True
+            ):
+                identity_fields = (
+                    "ticket",
+                    "filledPrice",
+                    "actualStopLoss",
+                    "actualTakeProfit",
+                    "actualMagicNumber",
+                )
+                unknown_reconciliation_upgrade = all(
+                    current_ack.get(field) is not None
+                    and normalized.get(field) is not None
+                    and _same_decimal(
+                        current_ack.get(field),
+                        normalized.get(field),
+                    )
+                    for field in identity_fields
+                ) and all(
+                    _broker_comment_matches_command(
+                        candidate,
+                        command_id,
+                        allow_close_suffix=True,
+                    )
+                    for candidate in (
+                        current_ack.get("actualComment"),
+                        normalized.get("actualComment"),
+                    )
+                )
+                if unknown_reconciliation_upgrade:
+                    # A later EA recovery observation may report zero
+                    # slippage because the original submitted price is no
+                    # longer available after restart.  Preserve the original
+                    # fill-quality evidence and UTC provenance while allowing
+                    # only the verified lifecycle fields to advance.
+                    normalized = {
+                        **normalized,
+                        "reasonCode": "EXECUTION_RECONCILED_WITH_WARNING",
+                        "observedAt": current_ack.get("observedAt"),
+                        "filledSlippagePoints": current_ack.get(
+                            "filledSlippagePoints"
+                        ),
+                        "actualComment": current_ack.get("actualComment"),
+                    }
+            recovery = entry.get("recovery")
+            if (
+                isinstance(current_ack, dict)
+                and current_status == "ack_EXECUTED"
+                and entry.get("outstanding") is False
+                and isinstance(recovery, dict)
+                and recovery.get("action") == "reconcile_durable_outcome"
+                and next_status == "EXECUTED"
+                and normalized.get("reasonCode") == "RECOVERED_ORDER_FOUND"
+                and normalized.get("statePersisted") is True
+                and normalized.get("signatureVerificationStatus") == "VERIFIED"
+                and normalized.get("verificationStatus")
+                in {"VERIFIED_OPEN", "VERIFIED_CLOSED"}
+            ):
+                identity_fields = (
+                    "ticket",
+                    "filledPrice",
+                    "actualStopLoss",
+                    "actualTakeProfit",
+                    "actualMagicNumber",
+                )
+                recovered_lifecycle_upgrade = all(
+                    current_ack.get(field) is not None
+                    and normalized.get(field) is not None
+                    and _same_decimal(
+                        current_ack.get(field),
+                        normalized.get(field),
+                    )
+                    for field in identity_fields
+                ) and all(
+                    _broker_comment_matches_command(
+                        candidate,
+                        command_id,
+                        allow_close_suffix=True,
+                    )
+                    for candidate in (
+                        current_ack.get("actualComment"),
+                        normalized.get("actualComment"),
+                    )
+                )
+                if recovered_lifecycle_upgrade:
+                    # Preserve the original execution evidence and timestamp;
+                    # this recovery ACK is a later lifecycle observation, not
+                    # a second fill.  Only lifecycle fields may advance.
+                    normalized = {
+                        **normalized,
+                        "reasonCode": current_ack.get("reasonCode"),
+                        "observedAt": current_ack.get("observedAt"),
+                        "filledSlippagePoints": current_ack.get(
+                            "filledSlippagePoints"
+                        ),
+                        "actualComment": current_ack.get("actualComment"),
+                    }
+            if (
                 current_status.startswith("ack_")
                 and not entry.get("outstanding")
                 and not persisted_upgrade
+                and not unknown_reconciliation_upgrade
+                and not recovered_lifecycle_upgrade
             ):
                 raise AckConflictError("Command already has a different terminal ACK.")
             if current_status == "ack_EXECUTING" and next_status == "EXECUTING":
@@ -2002,6 +2331,8 @@ class MT4TradeGateway:
                 current_status.startswith("ack_")
                 and current_status != "ack_EXECUTING"
                 and not persisted_upgrade
+                and not unknown_reconciliation_upgrade
+                and not recovered_lifecycle_upgrade
             ):
                 raise AckConflictError("Command already has a terminal ACK.")
 
@@ -2012,6 +2343,39 @@ class MT4TradeGateway:
             entry["ack"] = normalized
             entry["eaSizingReported"] = ea_sizing_reported
             ack_digests.append(ack_digest)
+            if unknown_reconciliation_upgrade:
+                entry["recovery"] = {
+                    "action": "reconcile_terminal_ack",
+                    "reasonCode": "EXACT_TICKET_IDENTITY_VERIFIED",
+                    "originalAckStatus": "EXECUTION_UNKNOWN",
+                    "originalAckReasonCode": str(
+                        current_ack.get("reasonCode") or ""
+                    ),
+                    "originalAckObservedAt": current_ack.get("observedAt"),
+                    "originalFilledSlippagePoints": current_ack.get(
+                        "filledSlippagePoints"
+                    ),
+                    "barClaimRetained": True,
+                    "recoveredAt": _iso(self._now()),
+                }
+            elif recovered_lifecycle_upgrade:
+                entry["recovery"] = {
+                    "action": "reconcile_terminal_lifecycle_ack",
+                    "reasonCode": "EXACT_TICKET_LIFECYCLE_IDENTITY_VERIFIED",
+                    "previousAction": "reconcile_durable_outcome",
+                    "originalAckStatus": recovery.get("originalAckStatus"),
+                    "originalAckReasonCode": recovery.get(
+                        "originalAckReasonCode"
+                    ),
+                    "originalAckObservedAt": recovery.get(
+                        "originalAckObservedAt",
+                        current_ack.get("observedAt"),
+                    ),
+                    "terminalRecoveryReasonCode": "RECOVERED_ORDER_FOUND",
+                    "executionQuality": "warning",
+                    "barClaimRetained": True,
+                    "recoveredAt": _iso(self._now()),
+                }
             if persisted_terminal:
                 entry["outstanding"] = False
                 if ledger.get("activeCommandId") == command_id:
@@ -2037,6 +2401,11 @@ class MT4TradeGateway:
             }
 
     def _validate_ack_path(self, path: Path) -> tuple[str, str]:
+        if path.is_symlink() or not path.is_file():
+            raise AckValidationError(
+                "ACK path is not a regular EA ACK file.",
+                code="unsafe_ack_path",
+            )
         try:
             relative = path.resolve().relative_to(self.file_common_root.resolve())
         except (OSError, ValueError) as error:
@@ -2058,8 +2427,8 @@ class MT4TradeGateway:
         channel_id, file_command_id = self._validate_ack_path(ack_path)
         try:
             raw_text = ack_path.read_text(encoding="ascii")
-            raw = json.loads(raw_text)
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raw = _strict_json_object(raw_text)
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
             raise AckValidationError("ACK file is unreadable.", code="invalid_ack_json") from error
         if not isinstance(raw, dict):
             raise AckValidationError("ACK file must contain an object.", code="invalid_ack_json")
@@ -2068,23 +2437,106 @@ class MT4TradeGateway:
                 "ACK file path identity does not match its payload.",
                 code="ack_path_identity_mismatch",
             )
-        reference_price_matches = list(ACK_REFERENCE_PRICE_PATTERN.finditer(raw_text))
-        reference_price_wire_decimals = None
-        if len(reference_price_matches) == 1:
-            fraction = reference_price_matches[0].group(2)
-            reference_price_wire_decimals = len(fraction or "")
+        reference_price_wire_decimals = _wire_number_decimal_places(
+            raw_text,
+            "referencePrice",
+        )
+        execution_price_wire_decimals = None
+        if str(raw.get("status") or "").upper() == "EXECUTED":
+            execution_precisions = tuple(
+                _wire_number_decimal_places(raw_text, field)
+                for field in (
+                    "filledPrice",
+                    "actualStopLoss",
+                    "actualTakeProfit",
+                )
+            )
+            if (
+                any(value is None for value in execution_precisions)
+                or any(
+                    int(value) > int(execution_precisions[0])
+                    for value in execution_precisions[1:]
+                )
+            ):
+                raise AckValidationError(
+                    "EXECUTED ACK price precision is missing or inconsistent.",
+                    code="invalid_ack_execution_price_precision",
+                )
+            # BuildAckJson uses Digits for all three values. Accept omitted
+            # insignificant trailing zeroes, but never let a stop claim more
+            # precision than the filled-price field that proves broker Digits.
+            execution_price_wire_decimals = int(execution_precisions[0])
         return self.ingest_ack(
             raw,
             reference_price_wire_decimals=reference_price_wire_decimals,
+            execution_price_wire_decimals=execution_price_wire_decimals,
         )
 
     def ingest_pending_acks(self) -> list[dict[str, object]]:
-        """Ingest only the current outstanding ACK; ignore last-invalid.json."""
+        """Ingest the active ACK or an exact post-reconciliation lifecycle ACK.
+
+        The normal path remains single-outstanding.  A bounded inactive scan is
+        allowed only for commands already released through the durable-outcome
+        reconciliation marker and only when the EA has replaced the wire file
+        with ``EXECUTED / RECOVERED_ORDER_FOUND``.  ``ingest_ack_file`` then
+        applies the same strict ticket/fill/SL/TP/magic/comment checks.
+        """
         with self._lock:
             ledger = self._load_ledger()
             active_id = ledger.get("activeCommandId")
             if not active_id:
-                return []
+                recovery_paths: list[Path] = []
+                recovery_entries = sorted(
+                    (
+                        entry
+                        for entry in ledger["commands"].values()
+                        if isinstance(entry, dict)
+                        and entry.get("status") == "ack_EXECUTED"
+                        and entry.get("outstanding") is False
+                        and isinstance(entry.get("recovery"), dict)
+                        and entry["recovery"].get("action")
+                        == "reconcile_durable_outcome"
+                    ),
+                    key=lambda entry: str(
+                        entry.get("updatedAt") or entry.get("createdAt") or ""
+                    ),
+                    reverse=True,
+                )[:16]
+                for recovery_entry in recovery_entries:
+                    command = recovery_entry.get("command")
+                    if not isinstance(command, dict):
+                        continue
+                    candidate = self._ack_path(
+                        str(command.get("channelId") or ""),
+                        str(command.get("commandId") or ""),
+                    )
+                    if candidate.is_symlink() or not candidate.is_file():
+                        continue
+                    try:
+                        raw_candidate = _strict_json_object(
+                            candidate.read_text(encoding="ascii")
+                        )
+                    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+                        continue
+                    if (
+                        isinstance(raw_candidate, dict)
+                        and raw_candidate.get("status") == "EXECUTED"
+                        and raw_candidate.get("reasonCode")
+                        == "RECOVERED_ORDER_FOUND"
+                    ):
+                        recovery_paths.append(candidate)
+                results: list[dict[str, object]] = []
+                for recovery_path in recovery_paths:
+                    try:
+                        results.append(self.ingest_ack_file(recovery_path))
+                    except TradeGatewayError as error:
+                        results.append({
+                            "ok": False,
+                            "kind": "mt4_trade_ack_rejected",
+                            "code": error.code,
+                            "fileName": recovery_path.name,
+                        })
+                return results
             entry = ledger["commands"].get(active_id)
             if not isinstance(entry, dict):
                 raise LedgerIntegrityError("Active command points to no ledger entry.")
@@ -2092,7 +2544,18 @@ class MT4TradeGateway:
         if not path.is_file():
             return []
         try:
-            return [self.ingest_ack_file(path)]
+            result = self.ingest_ack_file(path)
+            ack = result.get("ack")
+            if isinstance(ack, dict) and ack.get("status") == "EXECUTION_UNKNOWN":
+                try:
+                    return [self.reconcile_execution_unknown(str(active_id))]
+                except TradeGatewayError as error:
+                    # Keep the stronger uncertain state and its single slot.
+                    # A missing or mismatched outcome is expected while MT4 is
+                    # still persisting evidence and must never become a retry.
+                    result["reconciliationStatus"] = "pending_exact_evidence"
+                    result["reconciliationCode"] = error.code
+            return [result]
         except TradeGatewayError as error:
             return [{
                 "ok": False,
@@ -2115,10 +2578,8 @@ class MT4TradeGateway:
                 if (
                     entry.get("outstanding")
                     and int(entry["command"]["expiresAt"]) <= _now_epoch(now)
-                    and entry.get("status") != "expired_waiting_ack"
+                    and self._mark_expired_waiting_ack(entry, now=now)
                 ):
-                    entry["status"] = "expired_waiting_ack"
-                    entry["updatedAt"] = _iso(now)
                     expired_ids.append(active_id)
                     ledger = self._save_ledger(ledger)
         return {
@@ -2134,6 +2595,11 @@ class MT4TradeGateway:
         path = self._heartbeat_path(channel_id)
         if not path.is_file():
             return None
+        if path.is_symlink():
+            raise GatewayValidationError(
+                "Heartbeat file must be a regular local file.",
+                code="invalid_heartbeat_file",
+            )
         try:
             value = _strict_json_object(path.read_text(encoding="ascii"))
         except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
@@ -2184,6 +2650,142 @@ class MT4TradeGateway:
                 "updatedAt": entry.get("updatedAt"),
             }
 
+    def list_commands(self, *, limit: int = 100) -> list[dict[str, object]]:
+        """Return a bounded newest-first copy of durable command records.
+
+        This is intentionally ledger-backed.  Consumers must not reconstruct
+        an Order from a chart position or a Mission alone because only a
+        terminal ACK can prove whether ``OrderSend`` actually succeeded.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise GatewayValidationError(
+                "Command history limit must be 1-500.",
+                code="invalid_command_history_limit",
+            )
+        with self._lock:
+            commands = self._load_ledger()["commands"]
+            command_ids = sorted(
+                commands,
+                key=lambda command_id: str(
+                    commands[command_id].get("createdAt")
+                    or commands[command_id].get("updatedAt")
+                    or ""
+                ),
+                reverse=True,
+            )[:limit]
+            records: list[dict[str, object]] = []
+            for command_id in command_ids:
+                entry = commands[command_id]
+                records.append({
+                    "wireSchemaVersion": str(entry["wireSchemaVersion"]),
+                    "command": _ordered_packet(entry["command"], COMMAND_FIELDS),
+                    "heartbeat": _ordered_packet(entry["heartbeat"], HEARTBEAT_FIELDS),
+                    "backendIdentity": dict(entry["backendIdentity"]),
+                    "status": str(entry.get("status") or "unknown"),
+                    "outstanding": bool(entry.get("outstanding")),
+                    "ack": dict(entry["ack"]) if isinstance(entry.get("ack"), dict) else None,
+                    "eaSizingStatus": (
+                        "reported_read_only"
+                        if entry.get("eaSizingReported")
+                        else "not_reported"
+                    ),
+                    "createdAt": entry.get("createdAt"),
+                    "updatedAt": entry.get("updatedAt"),
+                })
+            return records
+
+    def list_commands_page(
+        self,
+        *,
+        limit: int = 500,
+        cursor: str | None = None,
+        channel_id: str | None = None,
+    ) -> dict[str, object]:
+        """Return one stable, bounded newest-first durable-history page.
+
+        ``cursor`` is the command id of the last record returned by the
+        previous page.  Existing ``list_commands`` callers stay unchanged;
+        history consumers can page without loading an unbounded ledger result
+        into the UI or silently treating the newest 500 commands as complete.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise GatewayValidationError(
+                "Command history page limit must be 1-500.",
+                code="invalid_command_history_limit",
+            )
+        normalized_cursor = str(cursor or "").strip()
+        if normalized_cursor and not COMMAND_ID_PATTERN.fullmatch(normalized_cursor):
+            raise GatewayValidationError(
+                "Invalid command history cursor.",
+                code="invalid_command_history_cursor",
+            )
+        normalized_channel_id = str(channel_id or "").strip()
+        if normalized_channel_id and not SAFE_CHANNEL_PATTERN.fullmatch(
+            normalized_channel_id
+        ):
+            raise GatewayValidationError(
+                "Invalid command history channel.",
+                code="invalid_command_history_channel",
+            )
+        with self._lock:
+            commands = self._load_ledger()["commands"]
+            command_ids = sorted(
+                (
+                    command_id
+                    for command_id, entry in commands.items()
+                    if not normalized_channel_id
+                    or entry["command"].get("channelId") == normalized_channel_id
+                ),
+                key=lambda command_id: (
+                    str(
+                        commands[command_id].get("createdAt")
+                        or commands[command_id].get("updatedAt")
+                        or ""
+                    ),
+                    command_id,
+                ),
+                reverse=True,
+            )
+            total = len(command_ids)
+            cursor_found = not normalized_cursor
+            start = 0
+            if normalized_cursor:
+                try:
+                    start = command_ids.index(normalized_cursor) + 1
+                    cursor_found = True
+                except ValueError:
+                    start = 0
+                    cursor_found = False
+            page_ids = command_ids[start : start + limit] if cursor_found else []
+            records: list[dict[str, object]] = []
+            for command_id in page_ids:
+                entry = commands[command_id]
+                records.append({
+                    "wireSchemaVersion": str(entry["wireSchemaVersion"]),
+                    "command": _ordered_packet(entry["command"], COMMAND_FIELDS),
+                    "heartbeat": _ordered_packet(entry["heartbeat"], HEARTBEAT_FIELDS),
+                    "backendIdentity": dict(entry["backendIdentity"]),
+                    "status": str(entry.get("status") or "unknown"),
+                    "outstanding": bool(entry.get("outstanding")),
+                    "ack": dict(entry["ack"]) if isinstance(entry.get("ack"), dict) else None,
+                    "eaSizingStatus": (
+                        "reported_read_only"
+                        if entry.get("eaSizingReported")
+                        else "not_reported"
+                    ),
+                    "createdAt": entry.get("createdAt"),
+                    "updatedAt": entry.get("updatedAt"),
+                })
+            has_more = cursor_found and start + len(page_ids) < total
+            return {
+                "records": records,
+                "total": total,
+                "hasMore": has_more,
+                "nextCursor": page_ids[-1] if has_more and page_ids else None,
+                "cursorFound": cursor_found,
+                "channelId": normalized_channel_id or None,
+            }
+
     def read_outcome(self, command_id: str) -> dict[str, object] | None:
         """Read the EA's independently refreshed OPEN/CLOSED outcome artifact."""
         if not COMMAND_ID_PATTERN.fullmatch(str(command_id or "")):
@@ -2194,13 +2796,24 @@ class MT4TradeGateway:
             if not isinstance(entry, dict):
                 return None
             command = dict(entry["command"])
+            stored_ack = (
+                dict(entry["ack"])
+                if isinstance(entry.get("ack"), dict)
+                else None
+            )
             channel_id = str(command["channelId"])
         path = self._outcome_path(channel_id, command_id)
         if not path.is_file():
             return None
+        if path.is_symlink():
+            raise GatewayValidationError(
+                "MT4 outcome file must be a regular local file.",
+                code="invalid_mt4_outcome",
+            )
         try:
-            outcome = json.loads(path.read_text(encoding="ascii"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raw_text = path.read_text(encoding="ascii")
+            outcome = _strict_json_object(raw_text)
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
             raise GatewayValidationError(
                 "MT4 outcome file is unreadable.",
                 code="invalid_mt4_outcome",
@@ -2258,15 +2871,64 @@ class MT4TradeGateway:
                 "MT4 outcome price/lot evidence is invalid.",
                 code="invalid_mt4_outcome",
             )
+        outcome_price_precisions = tuple(
+            _wire_number_decimal_places(raw_text, field)
+            for field in ("openPrice", "stopLoss", "takeProfit")
+        )
+        if (
+            any(value is None for value in outcome_price_precisions)
+            or len(set(outcome_price_precisions)) != 1
+        ):
+            raise GatewayValidationError(
+                "MT4 outcome price precision is missing or inconsistent.",
+                code="invalid_mt4_outcome",
+            )
+        # EA emits all three order prices with the symbol's Digits. Requiring
+        # one shared precision prevents a forged coarse stop from widening the
+        # acceptable command-to-broker normalization boundary.
+        outcome_price_wire_decimals = int(outcome_price_precisions[0])
         if (
             outcome.get("symbol") != command.get("symbol")
             or outcome.get("action") != command.get("action")
             or outcome.get("comment") != f"HQ:{command_id}"
+            or not _same_ea_normalized_price(
+                outcome.get("stopLoss"),
+                command.get("stopLoss"),
+                outcome_price_wire_decimals,
+            )
+            or not _same_ea_normalized_price(
+                outcome.get("takeProfit"),
+                command.get("takeProfit"),
+                outcome_price_wire_decimals,
+            )
         ):
             raise GatewayValidationError(
                 "MT4 outcome identity is invalid.",
                 code="invalid_mt4_outcome",
             )
+        if stored_ack is not None:
+            evidence_pairs = (
+                (stored_ack.get("ticket"), outcome.get("ticket")),
+                (stored_ack.get("filledPrice"), outcome.get("openPrice")),
+                (stored_ack.get("actualStopLoss"), outcome.get("stopLoss")),
+                (stored_ack.get("actualTakeProfit"), outcome.get("takeProfit")),
+                (stored_ack.get("actualMagicNumber"), outcome.get("magicNumber")),
+            )
+            if any(
+                expected is not None and not _same_decimal(expected, actual)
+                for expected, actual in evidence_pairs
+            ) or (
+                stored_ack.get("actualComment")
+                and not _broker_comment_matches_command(
+                    stored_ack.get("actualComment"),
+                    command_id,
+                    allow_close_suffix=outcome["executionState"] == "CLOSED",
+                )
+            ):
+                raise GatewayValidationError(
+                    "MT4 outcome does not match the durable ACK evidence.",
+                    code="invalid_mt4_outcome",
+                )
         if outcome["executionState"] == "CLOSED" and (
             isinstance(outcome.get("closedAt"), bool)
             or not isinstance(outcome.get("closedAt"), int)
@@ -2280,6 +2942,150 @@ class MT4TradeGateway:
                 code="invalid_mt4_outcome",
             )
         return _ordered_packet(outcome, OUTCOME_FIELDS)
+
+    def reconcile_execution_unknown(
+        self,
+        command_id: str,
+    ) -> dict[str, object]:
+        """Release one uncertain slot only from exact, durable MT4 evidence.
+
+        Reconciliation never sends or retries an order.  It requires the
+        original persisted ``EXECUTION_UNKNOWN`` ACK to contain a ticket and
+        complete post-send evidence, then binds that evidence to the EA's
+        independently refreshed outcome artifact.  The bar claim is retained.
+        """
+        if not COMMAND_ID_PATTERN.fullmatch(str(command_id or "")):
+            raise GatewayValidationError("Invalid commandId.", code="invalid_command_id")
+        with self._lock:
+            ledger = self._load_ledger()
+            entry = ledger["commands"].get(command_id)
+            if not isinstance(entry, dict):
+                raise GatewaySafetyError(
+                    "Execution reconciliation references an unknown command.",
+                    code="execution_unknown_not_confirmed",
+                )
+            recovery = entry.get("recovery")
+            if (
+                entry.get("status") == "ack_EXECUTED"
+                and entry.get("outstanding") is False
+                and isinstance(recovery, dict)
+                and recovery.get("action") == "reconcile_durable_outcome"
+            ):
+                return {
+                    "ok": True,
+                    "kind": "mt4_execution_unknown_reconciled",
+                    "idempotentReplay": True,
+                    "commandId": command_id,
+                    "status": "ack_EXECUTED",
+                    "outstandingReleased": True,
+                    "executionQuality": "warning",
+                    "barClaimRetained": (
+                        ledger["barClaims"].get(entry["barKey"]) == command_id
+                    ),
+                    "ack": dict(entry["ack"]),
+                    "outcome": self.read_outcome(command_id),
+                    "ledgerRevision": ledger["revision"],
+                }
+            ack = entry.get("ack")
+            if (
+                ledger.get("activeCommandId") != command_id
+                or entry.get("outstanding") is not True
+                or entry.get("status") not in {
+                    "ack_EXECUTION_UNKNOWN",
+                    # Compatibility for ledgers written before expiry stopped
+                    # overwriting the stronger unknown ACK status.
+                    "expired_waiting_ack",
+                }
+                or not isinstance(ack, dict)
+                or ack.get("status") != "EXECUTION_UNKNOWN"
+                or ack.get("reasonCode") != "ORDER_POST_SEND_VERIFICATION_MISMATCH"
+                or ack.get("statePersisted") is not True
+                or ack.get("signatureVerificationStatus") != "VERIFIED"
+            ):
+                raise GatewaySafetyError(
+                    "Command is not an active durable EXECUTION_UNKNOWN state.",
+                    code="execution_unknown_not_confirmed",
+                )
+            required_evidence = (
+                "ticket",
+                "filledPrice",
+                "filledSlippagePoints",
+                "actualStopLoss",
+                "actualTakeProfit",
+                "actualMagicNumber",
+                "actualComment",
+            )
+            if any(ack.get(field) in {None, ""} for field in required_evidence):
+                raise GatewaySafetyError(
+                    "Execution reconciliation needs complete post-send evidence.",
+                    code="execution_unknown_evidence_incomplete",
+                )
+            outcome = self.read_outcome(command_id)
+            if outcome is None:
+                raise GatewaySafetyError(
+                    "No durable MT4 outcome is available for reconciliation.",
+                    code="execution_unknown_outcome_missing",
+                )
+
+            reconciled_ack = dict(ack)
+            reconciled_ack.update({
+                "status": "EXECUTED",
+                "reasonCode": "EXECUTION_RECONCILED_WITH_WARNING",
+                "verificationStatus": (
+                    "VERIFIED_CLOSED"
+                    if outcome["executionState"] == "CLOSED"
+                    else "VERIFIED_OPEN"
+                ),
+                "executionState": outcome["executionState"],
+                "closedAt": outcome["closedAt"],
+                "closedPnl": outcome["closedPnl"],
+                "statePersisted": True,
+            })
+            ack_digests = entry.get("ackDigests")
+            if not isinstance(ack_digests, list):
+                raise LedgerIntegrityError("ACK digest history is invalid.")
+            reconciled_digest = _contract_digest(
+                ACK_SCHEMA_VERSION,
+                reconciled_ack,
+            )
+            if reconciled_digest not in ack_digests:
+                ack_digests.append(reconciled_digest)
+            entry["ack"] = reconciled_ack
+            entry["status"] = "ack_EXECUTED"
+            entry["outstanding"] = False
+            entry["updatedAt"] = _iso(self._now())
+            entry["recovery"] = {
+                "action": "reconcile_durable_outcome",
+                "reasonCode": "EXACT_TICKET_AND_OUTCOME_IDENTITY_VERIFIED",
+                "executionQuality": "warning",
+                "warningReasonCode": str(ack.get("reasonCode") or ""),
+                "originalAckStatus": "EXECUTION_UNKNOWN",
+                "originalAckReasonCode": str(ack.get("reasonCode") or ""),
+                # The original EA ACK time is the closest durable UTC evidence
+                # for when OrderSend succeeded.  Outcome.observedAt is only the
+                # later lifecycle refresh time and must never replace it.
+                "originalAckObservedAt": int(ack["observedAt"]),
+                "barClaimRetained": True,
+                "recoveredAt": _iso(self._now()),
+            }
+            ledger["activeCommandId"] = None
+            ledger = self._save_ledger(ledger)
+            persisted = ledger["commands"][command_id]
+            return {
+                "ok": True,
+                "kind": "mt4_execution_unknown_reconciled",
+                "idempotentReplay": False,
+                "commandId": command_id,
+                "status": persisted["status"],
+                "outstandingReleased": True,
+                "executionQuality": "warning",
+                "barClaimRetained": (
+                    ledger["barClaims"].get(persisted["barKey"]) == command_id
+                ),
+                "ack": dict(persisted["ack"]),
+                "outcome": dict(outcome),
+                "ledgerRevision": ledger["revision"],
+            }
 
     def quarantine_execution_unknown(
         self,
@@ -2428,6 +3234,14 @@ def read_trade_outcome(
 ) -> dict[str, object] | None:
     """Import-friendly read-only outcome adapter."""
     return gateway.read_outcome(command_id)
+
+
+def reconcile_trade_execution_unknown(
+    gateway: MT4TradeGateway,
+    command_id: str,
+) -> dict[str, object]:
+    """Reconcile exact durable evidence without sending or retrying an order."""
+    return gateway.reconcile_execution_unknown(command_id)
 
 
 def quarantine_trade_execution_unknown(
