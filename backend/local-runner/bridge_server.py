@@ -1271,6 +1271,7 @@ FX_MAJOR_CURRENCIES = frozenset({"AUD", "CAD", "CHF", "EUR", "GBP", "JPY", "NZD"
 FX_DAILY_NEWS_MAX_EVENTS_PER_REPORT = 6
 FX_DAILY_NEWS_MAX_WINDOWS_PER_REPORT = 3
 FX_DAILY_NEWS_MAX_SOURCES_PER_REPORT = 3
+FX_DAILY_NEWS_TIMEOUT_FLOOR_SECONDS = 300
 EQUIPMENT_CONNECTION_CENTER_CACHE_TTL_SECONDS = 5
 EQUIPMENT_CONNECTION_CENTER_CACHE_STALE_MAX_SECONDS = 2 * 60
 EQUIPMENT_CONNECTION_CENTER_CACHE_WAIT_SECONDS = 0.75
@@ -6204,6 +6205,37 @@ def _dashboard_agent_preferences_read_model(settings: object | None = None) -> d
     }
 
 
+def _dashboard_workflow_execution_preferences(
+    action_id: str,
+    settings: object | None = None,
+) -> dict:
+    """Return the trusted effective budget for one dashboard action.
+
+    The daily FX calendar performs bounded live research and then serializes a
+    strict 3-source/6-event/28-pair result.  A generic 120-second preference can
+    finish its searches but be killed before emitting the final JSON, so this
+    action receives a Backend-owned floor.  Higher saved preferences remain in
+    force and the orchestration hard cap is unchanged.
+    """
+
+    preferences = _dashboard_agent_preferences_read_model(settings)
+    if action_id != "analyze_daily_market_news":
+        return preferences
+    return {
+        **preferences,
+        "timeoutSeconds": max(
+            FX_DAILY_NEWS_TIMEOUT_FLOOR_SECONDS,
+            clamp_int(preferences.get("timeoutSeconds"), 120, 15, 600),
+        ),
+        # This action already requires the hard-bounded 20k envelope so the
+        # final 28-pair read model is not truncated after successful research.
+        "outputLimitChars": max(
+            20000,
+            clamp_int(preferences.get("outputLimitChars"), 20000, 1000, 20000),
+        ),
+    }
+
+
 def _empty_fx_bias_rows() -> list[dict]:
     return [
         {
@@ -10566,26 +10598,10 @@ def run_dashboard_workflow_action(
                 "_httpStatus": 200,
             }
         else:
-            execution_preferences = _dashboard_agent_preferences_read_model(
-                load_dashboard_workflow_settings()
+            execution_preferences = _dashboard_workflow_execution_preferences(
+                action_id,
+                load_dashboard_workflow_settings(),
             )
-            if action_id == "analyze_daily_market_news":
-                # A compact daily calendar plus the exact 28-pair aggregate is
-                # structurally larger than ordinary dashboard reports.  This
-                # is a trusted per-action floor, still bounded by the existing
-                # 20k hard report/runner ceiling.
-                execution_preferences = {
-                    **execution_preferences,
-                    "outputLimitChars": max(
-                        20000,
-                        clamp_int(
-                            execution_preferences.get("outputLimitChars"),
-                            20000,
-                            1000,
-                            20000,
-                        ),
-                    ),
-                }
             result = run_bridge_task({
                 "toolId": action.get("toolId"),
                 "agentId": action.get("ownerAgentId"),

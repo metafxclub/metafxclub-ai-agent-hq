@@ -717,6 +717,128 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
         self.assertRegex(form["marketDate"], r"^\d{4}-\d{2}-\d{2}$")
         self.assertEqual(form["minimumImpact"], "low")
 
+    def test_manual_news_action_applies_trusted_timeout_floor_and_exposes_budget(self) -> None:
+        captured: dict = {}
+
+        def fake_run_bridge_task(payload: dict, **kwargs) -> dict:
+            captured["payload"] = payload
+            captured["preferences"] = kwargs.get("trusted_execution_preferences")
+            captured["context"] = kwargs.get("trusted_workflow_context")
+            return {
+                "ok": True,
+                "kind": "mission_auto_queued",
+                "mission": {
+                    "id": "mission-news-timeout-manual",
+                    "status": "queued",
+                    "budget": dict(payload["budget"]),
+                },
+            }
+
+        settings = {
+            "agentPreferences": {
+                "modelTier": "specialist_balanced",
+                "tokenBudget": 12000,
+                "timeoutSeconds": 120,
+                "outputLimitChars": 7000,
+                "rateReservePercent": 30,
+            }
+        }
+        with (
+            mock.patch.object(self.bridge, "find_room_prop", return_value={"id": "left_signal_cube"}),
+            mock.patch.object(self.bridge, "_workflow_action_contract_gate", return_value={"allowed": True}),
+            mock.patch.object(self.bridge, "find_mission_by_idempotency", return_value=None),
+            mock.patch.object(self.bridge, "load_dashboard_workflow_settings", return_value=settings),
+            mock.patch.object(self.bridge, "run_bridge_task", side_effect=fake_run_bridge_task),
+            mock.patch.object(self.bridge, "append_audit"),
+        ):
+            result = self.bridge.run_dashboard_workflow_action(
+                "left_signal_cube",
+                {
+                    "actionId": "analyze_daily_market_news",
+                    "form": {"marketDate": "2026-08-14", "minimumImpact": "low"},
+                    "idempotencyKey": "news-timeout-manual",
+                },
+            )
+
+        expected_timeout = self.bridge.FX_DAILY_NEWS_TIMEOUT_FLOOR_SECONDS
+        self.assertEqual(expected_timeout, 300)
+        self.assertEqual(captured["payload"]["budget"]["timeoutSeconds"], expected_timeout)
+        self.assertEqual(captured["preferences"]["timeoutSeconds"], expected_timeout)
+        self.assertEqual(captured["payload"]["budget"]["outputLimitChars"], 20000)
+        self.assertEqual(captured["context"]["triggerSource"], "frontend")
+        self.assertEqual(result["mission"]["budget"]["timeoutSeconds"], expected_timeout)
+        visible = self.bridge.mission_read_model_item(result["mission"])
+        self.assertEqual(visible["budget"]["timeoutSeconds"], expected_timeout)
+
+    def test_scheduled_news_action_uses_same_timeout_floor_but_preserves_higher_setting(self) -> None:
+        captured: list[dict] = []
+
+        def fake_run_bridge_task(payload: dict, **kwargs) -> dict:
+            captured.append({
+                "payload": payload,
+                "preferences": kwargs.get("trusted_execution_preferences"),
+                "context": kwargs.get("trusted_workflow_context"),
+            })
+            return {
+                "ok": True,
+                "kind": "mission_auto_queued",
+                "mission": {
+                    "id": f"mission-news-timeout-schedule-{len(captured)}",
+                    "status": "queued",
+                    "budget": dict(payload["budget"]),
+                },
+            }
+
+        def dispatch(timeout_seconds: int, key: str) -> dict:
+            settings = {
+                "agentPreferences": {
+                    "modelTier": "specialist_balanced",
+                    "tokenBudget": 12000,
+                    "timeoutSeconds": timeout_seconds,
+                    "outputLimitChars": 7000,
+                    "rateReservePercent": 30,
+                }
+            }
+            with mock.patch.object(
+                self.bridge,
+                "load_dashboard_workflow_settings",
+                return_value=settings,
+            ):
+                return self.bridge.run_dashboard_workflow_action(
+                    "left_signal_cube",
+                    {
+                        "actionId": "analyze_daily_market_news",
+                        "form": {"marketDate": "2026-08-14", "minimumImpact": "low"},
+                        "idempotencyKey": key,
+                    },
+                    trusted_trigger_source="schedule",
+                )
+
+        with (
+            mock.patch.object(self.bridge, "find_room_prop", return_value={"id": "left_signal_cube"}),
+            mock.patch.object(self.bridge, "_workflow_action_contract_gate", return_value={"allowed": True}),
+            mock.patch.object(self.bridge, "find_mission_by_idempotency", return_value=None),
+            mock.patch.object(self.bridge, "run_bridge_task", side_effect=fake_run_bridge_task),
+            mock.patch.object(self.bridge, "append_audit"),
+        ):
+            floored = dispatch(90, "dashboard-schedule:news-timeout-floor")
+            preserved = dispatch(480, "dashboard-schedule:news-timeout-preserved")
+
+        self.assertEqual(captured[0]["payload"]["budget"]["timeoutSeconds"], 300)
+        self.assertEqual(captured[0]["preferences"]["timeoutSeconds"], 300)
+        self.assertEqual(floored["mission"]["budget"]["timeoutSeconds"], 300)
+        self.assertEqual(captured[1]["payload"]["budget"]["timeoutSeconds"], 480)
+        self.assertEqual(captured[1]["preferences"]["timeoutSeconds"], 480)
+        self.assertEqual(preserved["mission"]["budget"]["timeoutSeconds"], 480)
+        self.assertTrue(all(row["context"]["triggerSource"] == "schedule" for row in captured))
+        self.assertTrue(all(row["payload"]["budget"]["outputLimitChars"] == 20000 for row in captured))
+
+        unrelated = self.bridge._dashboard_workflow_execution_preferences(
+            "discover_trading_systems",
+            {"agentPreferences": {"timeoutSeconds": 90}},
+        )
+        self.assertEqual(unrelated["timeoutSeconds"], 90)
+
 
 if __name__ == "__main__":
     unittest.main()
