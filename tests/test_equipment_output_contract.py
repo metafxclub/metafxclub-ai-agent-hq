@@ -509,6 +509,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
                 "longBias": "UNKNOWN",
                 "verified": pair == "EURUSD",
                 "sourceRefs": ["public-1"] if pair == "EURUSD" else [],
+                "allHorizonsEvidence": pair == "EURUSD",
             }
             for pair in pairs
         ]
@@ -617,13 +618,14 @@ class EquipmentOutputContractTests(unittest.TestCase):
                 "confidence": 72 if pair == "EURUSD" else None,
                 "verified": pair == "EURUSD",
                 "sourceRefs": ["source-1"] if pair == "EURUSD" else [],
+                "allHorizonsEvidence": pair == "EURUSD",
             }
             for pair in pairs
         ]
         result = self._result(
             fields={
                 "pairBias": rows,
-                "sourceLinks": [{"id": "source-1", "url": "https://example.com/fx"}],
+                "sourceLinks": [{"id": "source-1", "url": "https://example.com/fx", "checkedAt": "2026-08-09T00:00:00+00:00"}],
                 "updatedAt": "2026-08-09T00:00:00+00:00",
             },
             evidence_kinds=["28_pair_rows", "source_url_per_supported_bias", "unknown_when_unverified", "updated_at"],

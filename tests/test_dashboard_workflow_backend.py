@@ -1558,17 +1558,20 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             "workflowContext": {
                 "propId": "left_signal_cube",
                 "actionId": "analyze_daily_market_news",
+                "inputs": {"marketDate": "2026-08-12"},
             },
             "metrics": {
+                "marketDate": "2026-08-12",
+                "sourceStatus": "success",
                 "sourceLinks": [
-                    {"id": "source-1", "title": "Public source", "url": "https://example.com/fx"},
+                    {"id": "source-1", "title": "Public source", "url": "https://example.com/fx", "checkedAt": "2026-08-12T00:00:00Z"},
                 ],
                 "pairBias": [
                     {
                         "pair": "EURUSD",
-                        "shortBias": "buy",
-                        "mediumBias": "neutral",
-                        "longBias": "sell",
+                        "short": {"bias": "buy", "sourceRefs": ["source-1"]},
+                        "medium": {"bias": "neutral", "sourceRefs": ["source-1"]},
+                        "long": {"bias": "sell", "sourceRefs": ["source-1"]},
                         "confidence": 77,
                         "sourceRef": "source-1",
                     },
@@ -1600,9 +1603,9 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             if pair == "EURUSD":
                 pair_rows.append({
                     "pair": pair,
-                    "shortBias": "bullish",
-                    "mediumBias": "sideway",
-                    "longBias": "bearish",
+                    "short": {"bias": "bullish", "sourceRefs": ["public-1"]},
+                    "medium": {"bias": "sideway", "sourceRefs": ["public-1"]},
+                    "long": {"bias": "bearish", "sourceRefs": ["public-1"]},
                     "confidence": 74,
                     "sourceRef": "public-1",
                 })
@@ -1624,14 +1627,21 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             "workflowContext": {
                 "propId": "left_signal_cube",
                 "actionId": "analyze_daily_market_news",
+                "inputs": {"marketDate": "2026-08-12"},
             },
             "metrics": {
+                "marketDate": "2026-08-12",
+                "sourceStatus": "success",
+                "quietDay": False,
                 "events": [{
                     "eventId": "event-1",
                     "titleTh": "ข่าวทดสอบจากแหล่งสาธารณะ",
                     "summaryTh": "ข้อมูลตัวอย่างสำหรับทดสอบการฉายผลเท่านั้น",
                     "currencies": ["USD"],
                     "scheduledAt": "2026-08-12T01:00:00Z",
+                    "timeKind": "timed",
+                    "actual": None,
+                    "actualStatus": "pending",
                     "impact": "high",
                     "sourceRef": "public-1",
                 }],
@@ -1699,8 +1709,11 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             "workflowContext": {
                 "propId": "left_signal_cube",
                 "actionId": "analyze_daily_market_news",
+                "inputs": {"marketDate": "2026-08-11"},
             },
             "metrics": {
+                "marketDate": "2026-08-11",
+                "sourceStatus": "success",
                 "events": [{
                     "eventId": "event-old",
                     "titleTh": "ข่าวเมื่อวาน",

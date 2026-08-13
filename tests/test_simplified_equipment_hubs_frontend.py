@@ -127,7 +127,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
     def test_connection_guidance_points_to_the_central_hub_and_news_schedule_caps_two_times(self):
         self.assertNotIn("ตรวจการเชื่อมต่อด้านซ้าย", self.main)
         self.assertIn("เปิดศูนย์การเชื่อมต่ออุปกรณ์ HQ จากปุ่มด้านซ้าย", self.main)
-        self.assertIn("เวลาที่ต้องการ สูงสุด 2 เวลา เช่น 07:00, 18:00", self.main)
+        self.assertIn("เวลาที่ต้องการ สูงสุด 2 เวลา เช่น 07:00, 20:00", self.main)
         self.assertNotIn("เวลาที่ต้องการ เช่น 07:00, 13:00, 19:00", self.main)
 
     def test_grid_hub_and_compact_rail_have_responsive_styles(self):
@@ -193,6 +193,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
                 "stale": False,
                 "currentDataAvailable": True,
                 "dataStatus": "current",
+                "sources": [{"id": "source-cpi", "url": "https://example.com/cpi"}, {"id": "source-window", "url": "https://example.com/cpi-window"}],
                 "events": [
                     {
                         "eventId": "event-cpi",
@@ -222,6 +223,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
                 "stale": False,
                 "currentDataAvailable": True,
                 "dataStatus": "current",
+                "sources": [{"id": "bias-eurusd", "url": "https://example.com/eurusd"}],
                 "pairs": [
                     {
                         "pair": "EURUSD",
@@ -260,6 +262,14 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             "normalizeFxFreshness",
             "workflowSourceLinkRows",
             "workflowItemSourceUrl",
+            "isFxNewsReferenceOnlyUrl",
+            "fxNewsVerifiedSourceLinks",
+            "fxNewsVerifiedItemSources",
+            "normalizeFxNewsImpact",
+            "normalizeFxNewsMetric",
+            "normalizeFxNewsPairImpactRows",
+            "fxNewsCalendarRows",
+            "normalizeFxNewsEvent",
             "deriveFxOverallBias",
             "normalizeFxNewsBiasDomain",
         )
@@ -357,6 +367,14 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             "normalizeFxFreshness",
             "workflowSourceLinkRows",
             "workflowItemSourceUrl",
+            "isFxNewsReferenceOnlyUrl",
+            "fxNewsVerifiedSourceLinks",
+            "fxNewsVerifiedItemSources",
+            "normalizeFxNewsImpact",
+            "normalizeFxNewsMetric",
+            "normalizeFxNewsPairImpactRows",
+            "fxNewsCalendarRows",
+            "normalizeFxNewsEvent",
             "deriveFxOverallBias",
             "normalizeFxNewsBiasDomain",
         )
@@ -387,6 +405,10 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             "stale": True,
             "currentDataAvailable": False,
             "dataStatus": "stale",
+            "evidenceStatus": "unknown",
+            "failClosed": False,
+            "verifiedEmpty": False,
+            "reasonCode": "",
         })
         self.assertEqual(domain["freshness"]["fxBias"], domain["freshness"]["marketNews"])
         self.assertEqual(domain["news"], [])
@@ -402,9 +424,290 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
         panel = self.function_block("renderFxNewsBiasPanel", "renderTerminalOutputPanel")
         self.assertIn("ยังไม่มีข้อมูลของวันนี้", banner)
         self.assertIn("freshness?.stale !== true", banner)
-        self.assertIn("freshness?.currentDataAvailable !== false", banner)
+        self.assertIn("calendar?.verifiedEmpty", panel)
+        self.assertIn('"source_failure"', panel)
+        self.assertIn('"no_verified_data"', panel)
         self.assertIn("domain?.freshness?.marketNews", panel)
         self.assertIn("domain?.freshness?.fxBias", panel)
+
+    def test_daily_news_calendar_normalizes_canonical_truth_without_client_time_inference(self):
+        fixture = {
+            "marketNews": {
+                "schemaVersion": "fx-market-news-read-model-v2",
+                "calendarDate": "2026-08-14",
+                "currentBangkokDate": "2026-08-14",
+                "reportBangkokDate": "2026-08-14",
+                "dataStatus": "verified",
+                "stale": False,
+                "currentDataAvailable": True,
+                "sources": [{"id": "official-cpi", "title": "Official CPI", "url": "https://example.com/official-cpi"}],
+                "events": [
+                    {
+                        "eventId": "cpi-us",
+                        "titleTh": "US CPI",
+                        "summaryTh": "ผลเงินเฟ้อสหรัฐ",
+                        "detailTh": "ตรวจผลจากแหล่งข้อมูลทางการ",
+                        "scheduledAtUtc": "2026-08-14T12:30:00Z",
+                        "timeKind": "timed",
+                        "timingState": "past",
+                        "releaseState": "released",
+                        "actualStatus": "released",
+                        "analysisStatus": "analyzed",
+                        "currencies": ["USD"],
+                        "impact": "high",
+                        "actual": 0,
+                        "forecast": "0.2%",
+                        "previous": "0.1%",
+                        "outcomeTh": "USD อ่อนกว่าคาด",
+                        "sourceLinks": [{"id": "official-cpi", "url": "https://example.com/official-cpi"}],
+                        "pairImpactComplete": True,
+                        "pairImpactSnapshot": [
+                            {"pair": pair, "impact": "bearish" if pair.endswith("USD") else "insufficient_data", "confidence": 0 if pair == "EURUSD" else None}
+                            for pair in [
+                                "AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDUSD",
+                                "CADCHF", "CADJPY", "CHFJPY",
+                                "EURAUD", "EURCAD", "EURCHF", "EURGBP", "EURJPY", "EURNZD", "EURUSD",
+                                "GBPAUD", "GBPCAD", "GBPCHF", "GBPJPY", "GBPNZD", "GBPUSD",
+                                "NZDCAD", "NZDCHF", "NZDJPY", "NZDUSD", "USDCAD", "USDCHF", "USDJPY",
+                            ]
+                        ],
+                    },
+                    {
+                        "eventId": "holiday-jp",
+                        "titleTh": "Japan Holiday",
+                        "summaryTh": "วันหยุดตลาดญี่ปุ่น",
+                        "timeKind": "holiday",
+                        "timingState": "future",
+                        "releaseState": "scheduled",
+                        "actualStatus": "not_applicable",
+                        "analysisStatus": "pending_release",
+                        "currencies": ["JPY"],
+                        "impact": "non_economic",
+                        "sourceLinks": [{"id": "official-cpi", "url": "https://example.com/official-cpi"}],
+                    },
+                    {  # Stable duplicate identity must not render twice.
+                        "eventId": "holiday-jp",
+                        "titleTh": "Japan Holiday duplicate",
+                        "timeKind": "holiday",
+                        "timingState": "future",
+                        "releaseState": "scheduled",
+                    },
+                ],
+            }
+        }
+        pair_universe = [
+            "AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDUSD", "CADCHF", "CADJPY", "CHFJPY",
+            "EURAUD", "EURCAD", "EURCHF", "EURGBP", "EURJPY", "EURNZD", "EURUSD",
+            "GBPAUD", "GBPCAD", "GBPCHF", "GBPJPY", "GBPNZD", "GBPUSD",
+            "NZDCAD", "NZDCHF", "NZDJPY", "NZDUSD", "USDCAD", "USDCHF", "USDJPY",
+        ]
+        function_names = (
+            "workflowDomainObject", "workflowDomainArray", "workflowReportRows", "normalizeFxBiasValue",
+            "fxBiasHorizonValue", "normalizeFxFreshness", "workflowSourceLinkRows", "workflowItemSourceUrl",
+            "isFxNewsReferenceOnlyUrl", "fxNewsVerifiedSourceLinks", "fxNewsVerifiedItemSources",
+            "normalizeFxNewsImpact", "normalizeFxNewsMetric", "normalizeFxNewsPairImpactRows",
+            "fxNewsCalendarRows", "normalizeFxNewsEvent", "deriveFxOverallBias", "normalizeFxNewsBiasDomain",
+        )
+        script = "\n".join([
+            f"const FX_BIAS_PAIR_UNIVERSE = Object.freeze({json.dumps(pair_universe)});",
+            "const safeDashboardDisplayText = (value, fallback = '') => String(value ?? '').trim() || fallback;",
+            "const getSafeExternalHttpUrl = (value) => { try { const url = new URL(String(value || '')); return ['http:', 'https:'].includes(url.protocol) ? url.href : ''; } catch { return ''; } };",
+            *(self.function_source(name) for name in function_names),
+            f"const fixture = {json.dumps(fixture, ensure_ascii=False)};",
+            "const domain = normalizeFxNewsBiasDomain(fixture, {});",
+            "const released = domain.releasedNews[0]; const upcoming = domain.upcomingNews[0];",
+            "process.stdout.write(JSON.stringify({count: domain.news.length, released, upcoming, unconfirmedCount: domain.unconfirmedNews.length}));",
+        ])
+        result = subprocess.run(
+            [self.node_binary(), "-e", script], check=True, capture_output=True, text=True, encoding="utf-8",
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(payload["released"]["actual"], "0")
+        self.assertEqual(payload["released"]["actualStatus"], "released")
+        self.assertEqual(payload["released"]["eventAt"], "2026-08-14T12:30:00Z")
+        self.assertFalse(payload["released"]["pairImpactComplete"])
+        self.assertEqual(payload["released"]["pairImpactRows"][14]["confidence"], 0)
+        self.assertIsNone(payload["released"]["pairImpactRows"][0]["confidence"])
+        self.assertEqual(payload["upcoming"]["timeKind"], "holiday")
+        self.assertEqual(payload["unconfirmedCount"], 0)
+
+    def test_daily_news_dialog_and_original_calendar_ui_are_accessible(self):
+        html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="newsEventDialog" aria-labelledby="newsEventDetailTitle" aria-describedby="newsEventDetailIntro"', html)
+        self.assertIn('id="newsEventDetailClose" type="button" aria-label="ปิดรายละเอียดข่าว"', html)
+        self.assertIn('button.setAttribute("aria-haspopup", "dialog")', self.main)
+        self.assertIn('els.newsEventDialog?.addEventListener("cancel"', self.main)
+        self.assertIn('if (event.target === els.newsEventDialog) closeFxNewsEventDetail()', self.main)
+        self.assertIn('if (newsEventShouldRestoreFocus) newsEventReturnFocus?.focus?.()', self.main)
+        self.assertIn('els.dashboardResultDialog?.open || els.newsEventDialog?.open', self.main)
+        self.assertIn("ปฏิทินข่าวเศรษฐกิจ", self.main)
+        self.assertNotIn("Forex Factory feed", self.main)
+        self.assertIn(".workflow-news-event-button:focus-visible", self.styles)
+        self.assertIn(".news-event-dialog", self.styles)
+
+    def test_daily_news_preserves_zoned_instants_and_rejects_naive_source_time(self):
+        pair_universe = [
+            "AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDUSD", "CADCHF", "CADJPY", "CHFJPY",
+            "EURAUD", "EURCAD", "EURCHF", "EURGBP", "EURJPY", "EURNZD", "EURUSD",
+            "GBPAUD", "GBPCAD", "GBPCHF", "GBPJPY", "GBPNZD", "GBPUSD",
+            "NZDCAD", "NZDCHF", "NZDJPY", "NZDUSD", "USDCAD", "USDCHF", "USDJPY",
+        ]
+        function_names = (
+            "workflowDomainArray", "normalizeFxBiasValue", "workflowSourceLinkRows", "workflowItemSourceUrl",
+            "isFxNewsReferenceOnlyUrl", "fxNewsVerifiedSourceLinks", "fxNewsVerifiedItemSources",
+            "normalizeFxNewsImpact", "normalizeFxNewsMetric", "normalizeFxNewsPairImpactRows", "normalizeFxNewsEvent",
+        )
+        events = [
+            {"eventId": "ny-standard", "scheduledAtUtc": "2026-03-08T01:30:00-05:00"},
+            {"eventId": "ny-daylight", "scheduledAtUtc": "2026-03-08T03:30:00-04:00"},
+            {"eventId": "utc-plus-three", "scheduledAtUtc": "2026-08-14T22:00:00+03:00"},
+            {"eventId": "naive", "scheduledAt": "2026-08-14T12:00:00"},
+        ]
+        for event in events:
+            event.update({
+                "titleTh": event["eventId"], "summaryTh": "verified", "currencies": ["USD"],
+                "timeKind": "timed", "timingState": "future", "releaseState": "scheduled",
+                "actualStatus": "pending", "analysisStatus": "pending_release",
+                "sourceLinks": [{"id": "source", "url": "https://example.com/source"}],
+            })
+        script = "\n".join([
+            f"const FX_BIAS_PAIR_UNIVERSE = Object.freeze({json.dumps(pair_universe)});",
+            "const safeDashboardDisplayText = (value, fallback = '') => String(value ?? '').trim() || fallback;",
+            "const getSafeExternalHttpUrl = (value) => { try { const url = new URL(String(value || '')); return ['http:', 'https:'].includes(url.protocol) ? url.href : ''; } catch { return ''; } };",
+            *(self.function_source(name) for name in function_names),
+            f"const events = {json.dumps(events, ensure_ascii=False)};",
+            "const sources = [{id:'source',url:'https://example.com/source'}];",
+            "const rows = events.map((event, index) => normalizeFxNewsEvent(event, index, sources));",
+            "const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Bangkok',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date(rows[2].eventAt)).map((part) => [part.type, part.value]));",
+            "process.stdout.write(JSON.stringify({rows,bangkokDate:`${parts.year}-${parts.month}-${parts.day}`}));",
+        ])
+        result = subprocess.run(
+            [self.node_binary(), "-e", script], check=True, capture_output=True, text=True, encoding="utf-8",
+        )
+        payload = json.loads(result.stdout)
+        rows = payload["rows"]
+        self.assertEqual(rows[0]["eventAt"], "2026-03-08T01:30:00-05:00")
+        self.assertEqual(rows[1]["eventAt"], "2026-03-08T03:30:00-04:00")
+        self.assertEqual(rows[2]["eventAt"], "2026-08-14T22:00:00+03:00")
+        self.assertEqual(payload["bangkokDate"], "2026-08-15")
+        self.assertIsNone(rows[3]["eventAt"])
+        self.assertTrue(all(row["releaseState"] == "scheduled" for row in rows))
+
+    def test_daily_news_bangkok_formatter_is_independent_of_browser_timezone(self):
+        formatter = self.function_source("fxNewsBangkokDateTimeLabel")
+        self.assertIn('timeZone: "Asia/Bangkok"', formatter)
+        script = "\n".join([
+            formatter,
+            "process.stdout.write(JSON.stringify([",
+            "  fxNewsBangkokDateTimeLabel('2026-03-08T01:30:00-05:00'),",
+            "  fxNewsBangkokDateTimeLabel('2026-08-14T22:00:00+03:00'),",
+            "]));",
+        ])
+        outputs = []
+        for timezone in ("UTC", "America/New_York"):
+            result = subprocess.run(
+                [self.node_binary(), "-e", script],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env={**__import__("os").environ, "TZ": timezone},
+            )
+            outputs.append(json.loads(result.stdout))
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertNotEqual(outputs[0][0], outputs[0][1])
+
+    def test_reference_only_or_legacy_news_cannot_authorize_events_or_pair_direction(self):
+        fixture = {
+            "marketNews": {
+                "dataStatus": "verified",
+                "currentDataAvailable": True,
+                "stale": False,
+                "sources": [{"id": "official", "url": "https://example.com/official-release"}],
+                "events": [
+                    {
+                        "eventId": "unlinked", "titleTh": "Unlinked row", "summaryTh": "must be rejected",
+                        "currencies": ["USD"], "releaseState": "released", "timingState": "past",
+                        "sourceLinks": [{"id": "other", "url": "https://example.net/unverified"}],
+                    },
+                    {
+                        "eventId": "official-row", "titleTh": "Verified row", "summaryTh": "kept",
+                        "currencies": ["USD"], "releaseState": "released", "timingState": "past",
+                        "sourceRefs": ["official"],
+                    },
+                ],
+                "dangerWindows": [{
+                    "windowId": "ff-danger", "reasonTh": "reference only must not authorize",
+                    "currencies": ["USD"], "startsAt": "2026-08-14T12:00:00Z", "endsAt": "2026-08-14T13:00:00Z",
+                    "sourceLinks": [{"id": "ff", "url": "https://nfs.faireconomy.media/ff_calendar_thisweek.json"}],
+                }],
+            },
+            "fxBias": {
+                "dataStatus": "verified",
+                "currentDataAvailable": True,
+                "stale": False,
+                "sources": [{"id": "ff", "url": "https://www.forexfactory.com/calendar"}],
+                "pairs": [{
+                    "pair": "EURUSD", "status": "source_backed", "shortBias": "bullish",
+                    "mediumBias": "bullish", "longBias": "bullish",
+                    "sourceLinks": [{"id": "ff", "url": "https://www.forexfactory.com/calendar"}],
+                }],
+            },
+        }
+        verified_empty_fixture = {
+            "marketNews": {
+                "calendarDate": "2026-08-15",
+                "currentBangkokDate": "2026-08-15",
+                "reportBangkokDate": "2026-08-15",
+                "dataStatus": "verified_empty",
+                "verifiedEmpty": True,
+                "emptyReasonTh": "verified holiday with no qualifying events",
+                "currentDataAvailable": True,
+                "stale": False,
+                "sources": [{"id": "official", "url": "https://example.com/official-release"}],
+                "events": [],
+                "dangerWindows": [],
+            }
+        }
+        pair_universe = [
+            "AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDUSD", "CADCHF", "CADJPY", "CHFJPY",
+            "EURAUD", "EURCAD", "EURCHF", "EURGBP", "EURJPY", "EURNZD", "EURUSD",
+            "GBPAUD", "GBPCAD", "GBPCHF", "GBPJPY", "GBPNZD", "GBPUSD",
+            "NZDCAD", "NZDCHF", "NZDJPY", "NZDUSD", "USDCAD", "USDCHF", "USDJPY",
+        ]
+        function_names = (
+            "workflowDomainObject", "workflowDomainArray", "workflowReportRows", "normalizeFxBiasValue",
+            "fxBiasHorizonValue", "normalizeFxFreshness", "workflowSourceLinkRows", "workflowItemSourceUrl",
+            "isFxNewsReferenceOnlyUrl", "fxNewsVerifiedSourceLinks", "fxNewsVerifiedItemSources", "normalizeFxNewsImpact",
+            "normalizeFxNewsMetric", "normalizeFxNewsPairImpactRows", "fxNewsCalendarRows",
+            "normalizeFxNewsEvent", "deriveFxOverallBias", "normalizeFxNewsBiasDomain",
+        )
+        script = "\n".join([
+            f"const FX_BIAS_PAIR_UNIVERSE = Object.freeze({json.dumps(pair_universe)});",
+            "const safeDashboardDisplayText = (value, fallback = '') => String(value ?? '').trim() || fallback;",
+            "const getSafeExternalHttpUrl = (value) => { try { const url = new URL(String(value || '')); return ['http:', 'https:'].includes(url.protocol) ? url.href : ''; } catch { return ''; } };",
+            *(self.function_source(name) for name in function_names),
+            f"const fixture = {json.dumps(fixture, ensure_ascii=False)};",
+            f"const verifiedEmptyFixture = {json.dumps(verified_empty_fixture, ensure_ascii=False)};",
+            "const domain = normalizeFxNewsBiasDomain(fixture, {});",
+            "const emptyDomain = normalizeFxNewsBiasDomain(verifiedEmptyFixture, {});",
+            "process.stdout.write(JSON.stringify({news:domain.news,dangerWindows:domain.dangerWindows,eurusd:domain.pairBias.find((row)=>row.pair==='EURUSD'),verifiedEmpty:emptyDomain.calendar.verifiedEmpty,emptyReason:emptyDomain.calendar.emptyReason,emptyNews:emptyDomain.news}));",
+        ])
+        result = subprocess.run(
+            [self.node_binary(), "-e", script], check=True, capture_output=True, text=True, encoding="utf-8",
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual([row["id"] for row in payload["news"]], ["official-row"])
+        self.assertEqual(payload["dangerWindows"], [])
+        self.assertEqual(payload["eurusd"]["bias"], "unavailable")
+        self.assertEqual(payload["eurusd"]["sourceUrl"], "")
+        self.assertTrue(payload["verifiedEmpty"])
+        self.assertEqual(payload["emptyReason"], "verified holiday with no qualifying events")
+        self.assertEqual(payload["emptyNews"], [])
+
+        listener = self.main[self.main.index('document.addEventListener("keydown"'):]
+        self.assertLess(listener.index("els.newsEventDialog?.open"), listener.index("els.dashboardResultDialog?.open"))
 
 
 if __name__ == "__main__":

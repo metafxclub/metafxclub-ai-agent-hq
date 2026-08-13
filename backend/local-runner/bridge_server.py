@@ -1268,6 +1268,9 @@ FX_BIAS_PAIRS = (
     "NZDCAD", "NZDCHF", "NZDJPY", "NZDUSD", "USDCAD", "USDCHF", "USDJPY",
 )
 FX_MAJOR_CURRENCIES = frozenset({"AUD", "CAD", "CHF", "EUR", "GBP", "JPY", "NZD", "USD"})
+FX_DAILY_NEWS_MAX_EVENTS_PER_REPORT = 6
+FX_DAILY_NEWS_MAX_WINDOWS_PER_REPORT = 3
+FX_DAILY_NEWS_MAX_SOURCES_PER_REPORT = 3
 EQUIPMENT_CONNECTION_CENTER_CACHE_TTL_SECONDS = 5
 EQUIPMENT_CONNECTION_CENTER_CACHE_STALE_MAX_SECONDS = 2 * 60
 EQUIPMENT_CONNECTION_CENTER_CACHE_WAIT_SECONDS = 0.75
@@ -1360,7 +1363,7 @@ def parse_iso(value: str | None) -> datetime | None:
 def clamp_int(value, default: int, minimum: int, maximum: int) -> int:
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         number = default
     return max(minimum, min(maximum, number))
 
@@ -3814,6 +3817,21 @@ def _contract_pair_bias_rows(provided_fields: dict[str, str]) -> list[dict] | No
             value = row.get(field) if row.get(field) is not None else nested.get("bias")
             if str(value or "").strip().upper() not in allowed_biases:
                 return None
+            horizon_confidence = nested.get("confidence")
+            if horizon_confidence is not None and (
+                isinstance(horizon_confidence, bool)
+                or not isinstance(horizon_confidence, (int, float))
+                or not math.isfinite(float(horizon_confidence))
+                or not 0 <= float(horizon_confidence) <= 100
+            ):
+                return None
+            if len(str(nested.get("reasonTh") or nested.get("reason") or "")) > 20:
+                return None
+            horizon_refs = _contract_nested_strings(
+                nested.get("sourceRef") or nested.get("sourceRefs")
+            )
+            if len(horizon_refs) > 1 or any(not safe_reference(ref) for ref in horizon_refs):
+                return None
         confidence = row.get("confidence")
         if confidence is not None and (
             isinstance(confidence, bool)
@@ -3869,6 +3887,23 @@ def _dashboard_workflow_semantic_evidence_valid(
     field_present = lambda *names: any(
         str(provided_fields.get(name) or "").strip() for name in names
     )
+    raw_context = (
+        mission_row.get("workflowContext")
+        if isinstance(mission_row.get("workflowContext"), dict)
+        else {}
+    )
+    is_daily_fx_news = raw_context.get("actionId") == "analyze_daily_market_news"
+
+    def admissible_evidence_urls() -> set[str]:
+        urls: set[str] = set()
+        for row in evidence_rows:
+            normalized = _normalized_contract_public_url(row.get("url"))
+            if not normalized:
+                continue
+            if is_daily_fx_news and _fx_reference_only_host(normalized):
+                continue
+            urls.add(normalized)
+        return urls
     radar_entries = (
         _radar_contract_entries(provided_fields)
         if procedure.get("pluginSkillId") == RADAR_WORKFLOW_PROCEDURE_ID
@@ -3902,7 +3937,7 @@ def _dashboard_workflow_semantic_evidence_valid(
                 for entry in radar_entries
             )
     if evidence_kind == "source_url":
-        return len(evidence_rows) >= 1
+        return bool(admissible_evidence_urls())
     if evidence_kind == "at_least_two_source_urls":
         return len(evidence_rows) >= 2
     if evidence_kind in {"checked_at", "backend_observed_at"}:
@@ -3951,19 +3986,7 @@ def _dashboard_workflow_semantic_evidence_valid(
         rows = _contract_pair_bias_rows(provided_fields)
         if rows is None:
             return False
-        supported = []
-        for row in rows:
-            values = []
-            for horizon, field in (("short", "shortBias"), ("medium", "mediumBias"), ("long", "longBias")):
-                nested = row.get(horizon) if isinstance(row.get(horizon), dict) else {}
-                values.append(_normalize_fx_bias(row.get(field) if row.get(field) is not None else nested.get("bias")))
-            if any(value != "insufficient_data" for value in values):
-                supported.append(row)
-        evidence_urls = {
-            normalized
-            for row in evidence_rows
-            if (normalized := _normalized_contract_public_url(row.get("url")))
-        }
+        evidence_urls = admissible_evidence_urls()
         source_links = _contract_decoded_value(provided_fields.get("sourceLinks", ""))
         link_urls_by_ref: dict[str, set[str]] = {}
         if isinstance(source_links, dict):
@@ -3983,10 +4006,10 @@ def _dashboard_workflow_semantic_evidence_valid(
                     if reference:
                         link_urls_by_ref.setdefault(reference, set()).add(normalized)
 
-        def supported_row_has_verified_url(row: dict) -> bool:
+        def verified_urls(container: dict) -> set[str]:
             candidates = (
-                _contract_nested_strings(row.get("sourceUrl"))
-                + _contract_nested_strings(row.get("sourceUrls"))
+                _contract_nested_strings(container.get("sourceUrl"))
+                + _contract_nested_strings(container.get("sourceUrls"))
             )
             normalized_candidates = {
                 normalized
@@ -3994,14 +4017,40 @@ def _dashboard_workflow_semantic_evidence_valid(
                 if (normalized := _normalized_contract_public_url(candidate))
             }
             references = (
-                _contract_nested_strings(row.get("sourceRef"))
-                + _contract_nested_strings(row.get("sourceRefs"))
+                _contract_nested_strings(container.get("sourceRef"))
+                + _contract_nested_strings(container.get("sourceRefs"))
             )
             for reference in references:
                 normalized_candidates.update(link_urls_by_ref.get(reference, set()))
-            return bool(normalized_candidates.intersection(evidence_urls))
+            return normalized_candidates.intersection(evidence_urls)
 
-        return bool(evidence_urls and all(supported_row_has_verified_url(row) for row in supported)) if supported else True
+        supported_horizons = 0
+        for row in rows:
+            shared_urls = verified_urls(row)
+            for horizon, field in (("short", "shortBias"), ("medium", "mediumBias"), ("long", "longBias")):
+                nested = row.get(horizon) if isinstance(row.get(horizon), dict) else {}
+                bias = _normalize_fx_bias(
+                    row.get(field) if row.get(field) is not None else nested.get("bias")
+                )
+                if bias == "insufficient_data":
+                    continue
+                supported_horizons += 1
+                # The all-in-one daily calendar must prove each directional
+                # horizon independently.  A generic pair/event source cannot
+                # silently authorize short, medium and long forecasts.  The
+                # legacy manual builder may reuse a row source only when the
+                # worker explicitly attests that it supports every horizon.
+                horizon_urls = verified_urls(nested)
+                if (
+                    not horizon_urls
+                    and not (
+                        not is_daily_fx_news
+                        and row.get("allHorizonsEvidence") is True
+                        and shared_urls
+                    )
+                ):
+                    return False
+        return bool(evidence_urls) if supported_horizons else True
     if evidence_kind == "unknown_when_unverified":
         rows = _contract_pair_bias_rows(provided_fields)
         if rows is None:
@@ -4207,6 +4256,17 @@ def validate_dashboard_workflow_output_contract(mission: object, result: object)
                 sort_keys=True,
                 separators=(",", ":"),
             )
+    normalized_action_id = (
+        context.get("actionId") if isinstance(context, dict) else raw_context.get("actionId")
+    )
+    if normalized_action_id == "analyze_daily_market_news":
+        calendar_valid, calendar_errors = _fx_daily_calendar_contract_valid(
+            provided_fields,
+            evidence_rows,
+            mission_row=mission_row,
+        )
+        if not calendar_valid:
+            entry_errors.extend(calendar_errors)
     provided_evidence = []
     for item in (
         result_row.get("evidenceKinds")
@@ -4239,7 +4299,12 @@ def validate_dashboard_workflow_output_contract(mission: object, result: object)
     )
     if contract_value_chars > aggregate_contract_limit:
         oversized_fields.append("__aggregate__")
-    valid = not missing_fields and not missing_evidence and not oversized_fields
+    valid = (
+        not missing_fields
+        and not missing_evidence
+        and not oversized_fields
+        and not entry_errors
+    )
     return sanitize_json_value({
         "applicable": True,
         "valid": valid,
@@ -5457,7 +5522,7 @@ DASHBOARD_WORKFLOW_SCHEDULE_JOBS = (
         "settingsKey": "newsBiasSchedule",
         "propId": "left_signal_cube",
         "actionId": "analyze_daily_market_news",
-        "defaultTimes": ["07:00"],
+        "defaultTimes": ["07:00", "20:00"],
         "maxTimes": 2,
         "maxRunsPerDay": 2,
     },
@@ -5489,10 +5554,11 @@ def _default_dashboard_workflow_settings() -> dict:
         },
         "newsBiasSchedule": {
             "requestedEnabled": False,
-            "times": ["07:00"],
-            "minimumImpact": "high",
+            "times": ["07:00", "20:00"],
+            "minimumImpact": "low",
             "timezone": "Asia/Bangkok",
             "savedAt": None,
+            "automaticDailyCalendarVersion": 2,
             **copy.deepcopy(DASHBOARD_WORKFLOW_SCHEDULE_STATE_DEFAULTS),
         },
         "agentPreferences": {
@@ -5510,6 +5576,11 @@ def _default_dashboard_workflow_settings() -> dict:
 def _dashboard_workflow_settings_shape(value: object) -> dict:
     defaults = _default_dashboard_workflow_settings()
     source = copy.deepcopy(value) if isinstance(value, dict) else {}
+    raw_news_schedule = (
+        copy.deepcopy(source.get("newsBiasSchedule"))
+        if isinstance(source.get("newsBiasSchedule"), dict)
+        else None
+    )
     result = source
     for key, default_value in defaults.items():
         if isinstance(default_value, dict):
@@ -5517,6 +5588,24 @@ def _dashboard_workflow_settings_shape(value: object) -> dict:
             result[key] = {**copy.deepcopy(default_value), **copy.deepcopy(stored)}
         elif key not in result:
             result[key] = copy.deepcopy(default_value)
+    # Normalize only untouched legacy schedule suggestions.  Never enable a
+    # recurring Codex job during a schema migration: enabling consumes quota
+    # and remains an explicit operator action in each installation.
+    news_schedule = (
+        result.get("newsBiasSchedule")
+        if isinstance(result.get("newsBiasSchedule"), dict)
+        else {}
+    )
+    if (
+        raw_news_schedule is not None
+        and not raw_news_schedule.get("automaticDailyCalendarVersion")
+        and not raw_news_schedule.get("savedAt")
+    ):
+        news_schedule["requestedEnabled"] = False
+        news_schedule["times"] = ["07:00", "20:00"]
+        news_schedule["minimumImpact"] = "low"
+        news_schedule["automaticDailyCalendarVersion"] = 2
+        result["newsBiasSchedule"] = news_schedule
     result["version"] = "dashboard-workflow-settings-v1"
     return result
 
@@ -5882,6 +5971,12 @@ def _dashboard_schedule_read_model(
     scheduler_alive = bool(scheduler_model.get("alive"))
     scheduler_operational = bool(scheduler_model.get("operational"))
     gate_model = {"allowed": False, "reason": "scheduler_not_operational"}
+    if not requested_enabled:
+        gate_model = {
+            "allowed": False,
+            "reason": "disabled_by_operator",
+            "messageTh": "ปิดการทำงานอัตโนมัติตามการตั้งค่าของผู้ใช้",
+        }
     if requested_enabled and scheduler_operational:
         gate_model = (
             gate
@@ -6146,33 +6241,48 @@ def _fx_report_source_catalog(report: dict) -> tuple[list[dict], dict[str, dict]
     evidence_urls = {str(item.get("url") or "") for item in evidence_rows}
     sources: list[dict] = []
     seen_urls: set[str] = set()
-    for index, item in enumerate(raw_links[:80]):
+    report_observed_at = _fx_offset_datetime(
+        report.get("updatedAt") or report.get("createdAt")
+    )
+    now_utc = (
+        report_observed_at.astimezone(timezone.utc)
+        if report_observed_at is not None
+        else datetime.now(timezone.utc)
+    )
+    for index, item in enumerate(raw_links[:40]):
         if not isinstance(item, dict):
             continue
         url = _normalized_contract_public_url(item.get("url"))
-        if not url or url not in evidence_urls or url in seen_urls:
+        # Forex Factory remains a user-facing reference link only.  Its terms
+        # prohibit copying/redistributing the calendar/feed, so neither it nor
+        # the Fair Economy export hosts may authorize persisted event values.
+        reference_only = _fx_reference_only_host(url)
+        if not url or reference_only or url not in evidence_urls or url in seen_urls:
             continue
         source_id = safe_reference(item.get("id") or item.get("ref") or item.get("sourceId"))
+        checked_at = _fx_offset_datetime(item.get("checkedAt"))
+        published_at = item.get("publishedAt")
+        published_time = (
+            _fx_offset_datetime(published_at)
+            if published_at not in {None, ""}
+            else None
+        )
+        if (
+            checked_at is None
+            or checked_at.astimezone(timezone.utc) > now_utc + timedelta(minutes=5)
+            or (published_at not in {None, ""} and published_time is None)
+        ):
+            continue
         sources.append({
             "id": source_id or f"source-{index + 1}",
             "title": redact_text(str(item.get("title") or item.get("label") or f"Public source {index + 1}"), 300),
             "url": url,
-            "publishedAt": item.get("publishedAt") if parse_iso(str(item.get("publishedAt") or "")) else None,
-            "checkedAt": item.get("checkedAt") if parse_iso(str(item.get("checkedAt") or "")) else report.get("updatedAt") or report.get("createdAt"),
+            "publishedAt": published_time.isoformat() if published_time is not None else None,
+            "checkedAt": checked_at.isoformat(),
         })
         seen_urls.add(url)
-    for index, item in enumerate(evidence_rows[:40]):
-        url = str(item.get("url") or "")
-        if not url or url in seen_urls:
-            continue
-        sources.append({
-            "id": f"evidence-{index + 1}",
-            "title": redact_text(str(item.get("label") or f"Public evidence {index + 1}"), 300),
-            "url": url,
-            "publishedAt": None,
-            "checkedAt": report.get("updatedAt") or report.get("createdAt"),
-        })
-        seen_urls.add(url)
+    # Evidence rows prove URLs, but they cannot synthesize the source's own
+    # checkedAt timestamp or become authorizing calendar sources by themselves.
     by_id = {str(item["id"]): item for item in sources}
     by_url = {str(item["url"]): item for item in sources}
     return sources, by_id, by_url
@@ -6227,160 +6337,1020 @@ def _latest_fx_report(reports: list[dict], action_ids: set[str], *, require_pair
     return max(candidates, key=sort_key, default=None)
 
 
+def _fx_report_bangkok_date(report: object) -> str | None:
+    row = report if isinstance(report, dict) else {}
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    context = row.get("workflowContext") if isinstance(row.get("workflowContext"), dict) else {}
+    inputs = context.get("inputs") if isinstance(context.get("inputs"), dict) else {}
+    declared = str(metrics.get("marketDate") or inputs.get("marketDate") or "").strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", declared):
+        return declared
+    observed_at = parse_iso(str(row.get("updatedAt") or row.get("createdAt") or ""))
+    return (
+        observed_at.astimezone(THAILAND_TIMEZONE).date().isoformat()
+        if observed_at is not None
+        else None
+    )
+
+
+def _fx_event_identity_parts(
+    item: dict,
+    currencies: list[str],
+    scheduled_at: object,
+    event_sources: list[dict] | None = None,
+) -> tuple[str, str, str | None]:
+    """Return stable event id, revision group, and optional publisher identity.
+
+    A release-time revision is a new version of an occurrence, not a new
+    occurrence.  The preferred identity therefore binds a publisher namespace
+    to its event id and deliberately excludes mutable schedule time.  When a
+    publisher id is unavailable, the Backend-owned group key uses market day,
+    currencies, time kind and normalized title.  The caller uses schedule time
+    only to disambiguate two genuinely separate same-title releases.
+    """
+
+    parsed = _fx_offset_datetime(scheduled_at)
+    day_key = (
+        parsed.astimezone(THAILAND_TIMEZONE).date().isoformat()
+        if parsed is not None
+        else str(item.get("marketDate") or "unknown-date").strip()
+    )
+    title_key = " ".join(
+        str(item.get("titleTh") or item.get("title") or "").casefold().split()
+    )
+    time_kind = str(item.get("timeKind") or "timed").strip().lower()
+    group_key = payload_digest(
+        "fx-event-group-v3",
+        day_key,
+        ",".join(sorted(currencies)),
+        time_kind,
+        title_key,
+    )[:24]
+    source_event_id = safe_reference(item.get("eventId") or item.get("id"))
+    publisher_hosts = sorted({
+        (urlparse(str(source.get("url") or "")).hostname or "").lower().rstrip(".")
+        for source in (event_sources or [])
+        if isinstance(source, dict) and source.get("url")
+    })
+    publisher_hosts = [host for host in publisher_hosts if host]
+    publisher_identity = (
+        payload_digest(
+            "fx-event-publisher-v3",
+            ",".join(publisher_hosts),
+            source_event_id,
+        )[:24]
+        if source_event_id and publisher_hosts
+        else None
+    )
+    occurrence_time = (
+        parsed.astimezone(timezone.utc).replace(second=0, microsecond=0).isoformat()
+        if parsed is not None
+        else time_kind
+    )
+    stable_key = publisher_identity or payload_digest(
+        "fx-event-occurrence-v3",
+        group_key,
+        occurrence_time,
+    )[:24]
+    return f"fxevent-{stable_key}", group_key, publisher_identity
+
+
+def _fx_event_stable_id(
+    item: dict,
+    currencies: list[str],
+    scheduled_at: object,
+    event_sources: list[dict] | None = None,
+) -> str:
+    """Compatibility wrapper for the Backend-owned event identity."""
+
+    return _fx_event_identity_parts(
+        item,
+        currencies,
+        scheduled_at,
+        event_sources,
+    )[0]
+
+
+def _fx_offset_datetime(value: object) -> datetime | None:
+    """Economic-event instants must carry an explicit UTC offset."""
+
+    text = str(value or "").strip()
+    if not text or not re.search(r"(?:Z|[+-]\d{2}:\d{2})$", text):
+        return None
+    return parse_iso(text)
+
+
+def _fx_scalar_text(value: object, limit: int = 80) -> str | None:
+    if value is None or isinstance(value, (dict, list)):
+        return None
+    return redact_text(str(value), limit) or None
+
+
+def _fx_actual_scalar_text(value: object, limit: int = 80) -> str | None:
+    """Normalize a released value while preserving numeric zero fail closed."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return _fx_scalar_text(value, limit)
+
+
+def _fx_reference_only_host(url: object) -> bool:
+    normalized = _normalized_contract_public_url(url)
+    host = (
+        (urlparse(normalized).hostname or "").lower().rstrip(".")
+        if normalized
+        else ""
+    )
+    return bool(
+        host == "forexfactory.com"
+        or host.endswith(".forexfactory.com")
+        or host == "faireconomy.media"
+        or host.endswith(".faireconomy.media")
+    )
+
+
+def _fx_daily_calendar_contract_valid(
+    provided_fields: dict[str, str],
+    evidence_rows: list[dict],
+    *,
+    mission_row: dict,
+) -> tuple[bool, list[str]]:
+    """Validate the all-in-one calendar before it can become report metrics."""
+
+    errors: list[str] = []
+    raw_context = (
+        mission_row.get("workflowContext")
+        if isinstance(mission_row.get("workflowContext"), dict)
+        else {}
+    )
+    inputs = raw_context.get("inputs") if isinstance(raw_context.get("inputs"), dict) else {}
+    market_date = str(
+        _contract_decoded_value(provided_fields.get("marketDate", ""))
+        or inputs.get("marketDate")
+        or ""
+    ).strip()
+    try:
+        parsed_market_date = datetime.strptime(market_date, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        parsed_market_date = None
+    requested_market_date = str(inputs.get("marketDate") or "").strip()
+    if (
+        parsed_market_date != market_date
+        or requested_market_date != market_date
+    ):
+        errors.append("market_date_invalid")
+    checked_at = _fx_offset_datetime(
+        _contract_decoded_value(provided_fields.get("checkedAt", ""))
+    )
+    updated_at = _fx_offset_datetime(
+        _contract_decoded_value(provided_fields.get("updatedAt", ""))
+    )
+    real_now_utc = datetime.now(timezone.utc)
+    mission_created_at = _fx_offset_datetime(mission_row.get("createdAt"))
+    validation_now_utc = (
+        mission_created_at.astimezone(timezone.utc)
+        if mission_created_at is not None
+        else real_now_utc
+    )
+    if (
+        checked_at is None
+        or checked_at.astimezone(timezone.utc) > validation_now_utc + timedelta(minutes=5)
+    ):
+        errors.append("checked_at_invalid")
+    if (
+        updated_at is None
+        or updated_at.astimezone(timezone.utc) > validation_now_utc + timedelta(minutes=5)
+    ):
+        errors.append("updated_at_invalid")
+    source_links = _contract_decoded_value(provided_fields.get("sourceLinks", ""))
+    if (
+        not isinstance(source_links, list)
+        or not source_links
+        or len(source_links) > FX_DAILY_NEWS_MAX_SOURCES_PER_REPORT
+    ):
+        errors.append("source_links_missing")
+        source_links = []
+    source_ids: set[str] = set()
+    duplicate_source_ids: set[str] = set()
+    evidence_urls = {
+        normalized
+        for row in evidence_rows
+        if (normalized := _normalized_contract_public_url(row.get("url")))
+        and not _fx_reference_only_host(normalized)
+    }
+    now_utc = checked_at.astimezone(timezone.utc) if checked_at is not None else validation_now_utc
+    for source in source_links[:40]:
+        if not isinstance(source, dict):
+            errors.append("source_link_invalid")
+            continue
+        source_id = safe_reference(source.get("id") or source.get("sourceId") or source.get("ref"))
+        url = _normalized_contract_public_url(source.get("url"))
+        checked_at = _fx_offset_datetime(source.get("checkedAt"))
+        published_at = source.get("publishedAt")
+        published_time = (
+            _fx_offset_datetime(published_at)
+            if published_at not in {None, ""}
+            else None
+        )
+        if (
+            not source_id
+            or not url
+            or len(url) > 120
+            or len(str(source.get("title") or source.get("label") or "")) > 40
+            or _fx_reference_only_host(url)
+            or url not in evidence_urls
+            or checked_at is None
+            or checked_at.astimezone(timezone.utc) > now_utc + timedelta(minutes=5)
+            or (published_at not in {None, ""} and published_time is None)
+        ):
+            errors.append("source_link_not_admissible")
+            continue
+        if source_id in source_ids:
+            duplicate_source_ids.add(source_id)
+        source_ids.add(source_id)
+    if duplicate_source_ids:
+        errors.append("source_id_duplicate")
+    events = _contract_decoded_value(provided_fields.get("events", ""))
+    if not isinstance(events, list) or len(events) > FX_DAILY_NEWS_MAX_EVENTS_PER_REPORT:
+        errors.append("events_invalid")
+        events = []
+    for event in events:
+        if not isinstance(event, dict):
+            errors.append("event_invalid")
+            continue
+        title = str(event.get("titleTh") or event.get("title") or "").strip()
+        summary = str(event.get("summaryTh") or event.get("summary") or "").strip()
+        currencies = {
+            str(item or "").strip().upper()
+            for item in _contract_nested_strings(
+                event.get("currencies") or event.get("currency")
+            )
+        }
+        refs = {
+            safe_reference(item)
+            for item in _contract_nested_strings(event.get("sourceRef") or event.get("sourceRefs"))
+        }
+        refs.discard(None)
+        time_kind = str(event.get("timeKind") or "").strip().lower()
+        scheduled = event.get("scheduledAt") or event.get("eventAt")
+        event_time = _fx_offset_datetime(scheduled) if time_kind == "timed" else None
+        event_date = (
+            event_time.astimezone(THAILAND_TIMEZONE).date().isoformat()
+            if event_time is not None
+            else str(event.get("marketDate") or market_date).strip()
+        )
+        actual_status = str(event.get("actualStatus") or "").strip().lower()
+        impact = str(event.get("impact") or "").strip().lower()
+        actual_value = event.get("actual")
+        actual_text = _fx_actual_scalar_text(actual_value)
+        if (
+            not title
+            or not summary
+            or not currencies
+            or not currencies.issubset(FX_MAJOR_CURRENCIES)
+            or not refs
+            or not refs.issubset(source_ids)
+            or time_kind not in {"timed", "all_day", "tentative", "holiday"}
+            or (time_kind == "timed" and event_time is None)
+            or (time_kind != "timed" and scheduled not in {None, ""})
+            or event_date != market_date
+            or impact not in {"low", "medium", "high", "unknown"}
+            or actual_status not in {"pending", "released", "revised", "unavailable", "not_applicable"}
+            or len(title) > 60
+            or len(summary) > 100
+            or len(str(event.get("detailTh") or event.get("detail") or "")) > 100
+            or len(str(event.get("outcomeTh") or event.get("resultTh") or "")) > 80
+            or len(str(event.get("surprise") or "")) > 40
+            or (actual_status in {"released", "revised"} and actual_text is None)
+            or (actual_status not in {"released", "revised"} and actual_value is not None)
+            or (time_kind in {"all_day", "holiday"} and actual_status not in {"not_applicable", "unavailable"})
+        ):
+            errors.append("event_semantic_invalid")
+        raw_pair_impacts = event.get("pairImpacts") or event.get("pairImpactSnapshot")
+        if raw_pair_impacts is not None:
+            impact_rows: list[tuple[str, object]] = []
+            if isinstance(raw_pair_impacts, dict):
+                impact_rows = [
+                    (str(pair or "").strip().upper(), value)
+                    for pair, value in raw_pair_impacts.items()
+                ]
+            elif isinstance(raw_pair_impacts, list):
+                impact_rows = [
+                    (str(row.get("pair") or "").strip().upper(), row)
+                    for row in raw_pair_impacts
+                    if isinstance(row, dict)
+                ]
+                if len(impact_rows) != len(raw_pair_impacts):
+                    errors.append("event_pair_impact_invalid")
+            else:
+                errors.append("event_pair_impacts_invalid")
+            if len(impact_rows) > 2:
+                errors.append("event_pair_impacts_too_many")
+            seen_pairs: set[str] = set()
+            for pair, raw_impact in impact_rows:
+                row = raw_impact if isinstance(raw_impact, dict) else {}
+                raw_bias = (
+                    row.get("impact") or row.get("bias") or row.get("direction")
+                    if row
+                    else raw_impact
+                )
+                bias = _normalize_fx_bias(raw_bias)
+                confidence = row.get("confidence") if row else None
+                pair_refs = {
+                    safe_reference(value)
+                    for value in _contract_nested_strings(
+                        row.get("sourceRef") or row.get("sourceRefs")
+                    )
+                }
+                pair_refs.discard(None)
+                if (
+                    pair not in FX_BIAS_PAIRS
+                    or pair in seen_pairs
+                    or (bias != "insufficient_data" and not row)
+                    or (
+                        confidence is not None
+                        and (
+                            isinstance(confidence, bool)
+                            or not isinstance(confidence, (int, float))
+                            or not math.isfinite(float(confidence))
+                            or not 0 <= float(confidence) <= 100
+                        )
+                    )
+                    or (
+                        bias != "insufficient_data"
+                        and (not pair_refs or not pair_refs.issubset(source_ids))
+                    )
+                ):
+                    errors.append("event_pair_impact_invalid")
+                seen_pairs.add(pair)
+    windows = _contract_decoded_value(provided_fields.get("dangerWindows", ""))
+    if not isinstance(windows, list) or len(windows) > FX_DAILY_NEWS_MAX_WINDOWS_PER_REPORT:
+        errors.append("danger_windows_invalid")
+        windows = []
+    for window in windows:
+        if not isinstance(window, dict):
+            errors.append("danger_window_invalid")
+            continue
+        starts = _fx_offset_datetime(window.get("startsAt"))
+        ends = _fx_offset_datetime(window.get("endsAt"))
+        currencies = {
+            str(item or "").strip().upper()
+            for item in _contract_nested_strings(window.get("currencies") or window.get("currency"))
+        }
+        refs = {
+            safe_reference(item)
+            for item in _contract_nested_strings(window.get("sourceRef") or window.get("sourceRefs"))
+        }
+        refs.discard(None)
+        if (
+            starts is None
+            or ends is None
+            or ends <= starts
+            or (ends - starts) > timedelta(hours=6)
+            or starts.astimezone(THAILAND_TIMEZONE).date().isoformat() != market_date
+            or not currencies
+            or not currencies.issubset(FX_MAJOR_CURRENCIES)
+            or not refs
+            or not refs.issubset(source_ids)
+            or len(str(window.get("reasonTh") or window.get("reason") or "")) > 120
+        ):
+            errors.append("danger_window_semantic_invalid")
+    source_status = str(
+        _contract_decoded_value(provided_fields.get("sourceStatus", "")) or ""
+    ).strip().lower()
+    quiet_day_value = _contract_decoded_value(provided_fields.get("quietDay", ""))
+    quiet_day = quiet_day_value is True
+    if not isinstance(quiet_day_value, bool):
+        errors.append("quiet_day_invalid")
+    if source_status not in {"success", "verified", "quiet_day"}:
+        errors.append("source_status_invalid")
+    if quiet_day != (source_status == "quiet_day"):
+        errors.append("quiet_day_status_mismatch")
+    if quiet_day and (events or windows):
+        errors.append("quiet_day_has_content")
+    if not events and not (
+        source_status in {"success", "verified", "quiet_day"}
+        and quiet_day
+        and source_ids
+    ):
+        errors.append("empty_calendar_not_verified")
+    return not errors, list(dict.fromkeys(errors))
+
+
+def _fx_event_pair_impact_rows(
+    item: dict,
+    *,
+    source_event_id: str | None,
+    metrics: dict,
+    event_sources: list[dict],
+) -> tuple[list[dict], bool]:
+    """Project one compact event impact map into bounded source-backed rows.
+
+    Workers may return either an embedded ``pairImpacts`` map/list or a row in
+    the report-level ``eventPairImpacts`` list.  Unsupported/missing values are
+    omitted; the Backend never derives a direction merely because a pair
+    contains the event currency. Exact 28-row completeness belongs only to the
+    aggregate ``fxBias`` model, preventing an 80 x 28 response explosion.
+    """
+
+    raw_impacts: object = item.get("pairImpacts") or item.get("pairImpactSnapshot")
+    report_rows = (
+        metrics.get("eventPairImpacts")
+        if isinstance(metrics.get("eventPairImpacts"), list)
+        else []
+    )
+    if raw_impacts is None and source_event_id:
+        for candidate in report_rows[:80]:
+            if not isinstance(candidate, dict):
+                continue
+            if safe_reference(candidate.get("eventId")) == source_event_id:
+                raw_impacts = candidate.get("impacts") or candidate.get("pairs")
+                break
+    by_pair: dict[str, object] = {}
+    if isinstance(raw_impacts, dict):
+        by_pair = {
+            str(pair or "").strip().upper(): value
+            for pair, value in raw_impacts.items()
+        }
+    elif isinstance(raw_impacts, list):
+        for row in raw_impacts[:56]:
+            if not isinstance(row, dict):
+                continue
+            pair = str(row.get("pair") or "").strip().upper()
+            if pair:
+                by_pair[pair] = row
+    structurally_complete = set(by_pair) == set(FX_BIAS_PAIRS)
+    source_ids = {
+        str(source.get("id") or "").strip()
+        for source in event_sources
+        if isinstance(source, dict) and str(source.get("id") or "").strip()
+    }
+    source_urls = {
+        str(source.get("url") or "").strip()
+        for source in event_sources
+        if isinstance(source, dict) and str(source.get("url") or "").strip()
+    }
+    all_rows_source_backed = bool(by_pair)
+    rows = []
+    for pair in FX_BIAS_PAIRS:
+        if pair not in by_pair:
+            continue
+        raw = by_pair[pair]
+        raw_row = raw if isinstance(raw, dict) else {}
+        raw_bias = (
+            raw_row.get("impact")
+            or raw_row.get("bias")
+            or raw_row.get("direction")
+            if raw_row
+            else raw
+        )
+        bias = _normalize_fx_bias(raw_bias)
+        row_refs = {
+            str(reference or "").strip()
+            for reference in (
+                _contract_nested_strings(raw_row.get("sourceRef"))
+                + _contract_nested_strings(raw_row.get("sourceRefs"))
+            )
+            if str(reference or "").strip()
+        }
+        row_urls = {
+            normalized
+            for raw_url in (
+                _contract_nested_strings(raw_row.get("sourceUrl"))
+                + _contract_nested_strings(raw_row.get("sourceUrls"))
+            )
+            if (normalized := _normalized_contract_public_url(raw_url))
+        }
+        claim_source_backed = bool(
+            row_refs.intersection(source_ids) or row_urls.intersection(source_urls)
+        )
+        if bias != "insufficient_data" and not claim_source_backed:
+            all_rows_source_backed = False
+            bias = "insufficient_data"
+        if bias == "insufficient_data":
+            continue
+        confidence = raw_row.get("confidence") if raw_row else None
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence))
+            or not 0 <= float(confidence) <= 100
+        ):
+            confidence = None
+        rows.append({
+            "pair": pair,
+            "impact": bias,
+            "confidence": float(confidence) if confidence is not None else None,
+            "reasonTh": (
+                redact_text(str(raw_row.get("reasonTh") or raw_row.get("reason") or ""), 400)
+                if raw_row
+                else None
+            ) or None,
+            "status": "source_backed" if bias != "insufficient_data" else "insufficient_data",
+        })
+    evidence_complete = bool(structurally_complete and all_rows_source_backed)
+    return rows[:14], evidence_complete
+
+
+def _empty_fx_news_read_model(
+    *,
+    current_bangkok_date: str,
+    stale_report: dict | None = None,
+) -> dict:
+    report_bangkok_date = _fx_report_bangkok_date(stale_report)
+    stale = bool(stale_report and report_bangkok_date != current_bangkok_date)
+    return {
+        "schemaVersion": "fx-market-news-read-model-v3",
+        "calendarDate": current_bangkok_date,
+        "events": [],
+        "pastEvents": [],
+        "currentEvents": [],
+        "futureEvents": [],
+        "dangerWindows": [],
+        "eventCount": 0,
+        "pastEventCount": 0,
+        "currentEventCount": 0,
+        "futureEventCount": 0,
+        "scheduledCount": 0,
+        "releasedCount": 0,
+        "highImpactCount": 0,
+        "dataStatus": "stale" if stale else "no_verified_data",
+        "sourceStatus": "stale" if stale else "no_report",
+        "verifiedEmpty": False,
+        "evidenceStatus": "stale" if stale else "unavailable",
+        "sourceReportId": safe_reference((stale_report or {}).get("id")),
+        "sourceReportIds": [],
+        "checkedAt": (stale_report or {}).get("updatedAt") or (stale_report or {}).get("createdAt"),
+        "asOf": (stale_report or {}).get("updatedAt") or (stale_report or {}).get("createdAt"),
+        "currentBangkokDate": current_bangkok_date,
+        "reportBangkokDate": report_bangkok_date,
+        "stale": stale,
+        "currentDataAvailable": False,
+        "failClosed": True,
+        "durableStore": "backend_runtime_reports",
+        "deduplication": "backend_event_identity_v3",
+        "sources": [],
+        "evidenceMode": "guarded_public_web_research",
+        "forexFactoryCompatibility": {
+            "compatibleFields": ["currency", "title", "scheduledAt", "impact", "actual", "forecast", "previous"],
+            "referenceLinkOnly": True,
+            "copyOrRedistributionAdapter": False,
+            "directAdapterConnected": False,
+            "directFeedClaimed": False,
+        },
+        "fabricatedData": False,
+    }
+
+
 def _fx_news_read_model(
     reports: list[dict] | None = None,
     *,
     now_local: datetime | None = None,
 ) -> dict:
     rows = reports if isinstance(reports, list) else load_runtime_reports(limit=240)
-    report = _latest_fx_report(rows, {"analyze_daily_market_news"})
     reference_local = now_local or datetime.now(timezone.utc).astimezone(THAILAND_TIMEZONE)
     if reference_local.tzinfo is None:
         reference_local = reference_local.replace(tzinfo=THAILAND_TIMEZONE)
     else:
         reference_local = reference_local.astimezone(THAILAND_TIMEZONE)
     current_bangkok_date = reference_local.date().isoformat()
-    report_as_of = (
-        parse_iso(str(report.get("updatedAt") or report.get("createdAt") or ""))
+    attempt_candidates = [
+        report
+        for report in rows
         if isinstance(report, dict)
-        else None
+        and report.get("linkedPropId") == "left_signal_cube"
+        and report.get("type") == "fx_news_bias_report"
+        and isinstance(report.get("workflowContext"), dict)
+        and report["workflowContext"].get("propId") == "left_signal_cube"
+        and report["workflowContext"].get("actionId") == "analyze_daily_market_news"
+    ]
+    attempt_candidates.sort(
+        key=lambda report: (
+            parse_iso(str(report.get("updatedAt") or report.get("createdAt") or ""))
+            or datetime.min.replace(tzinfo=timezone.utc)
+        )
     )
-    report_bangkok_date = (
-        report_as_of.astimezone(THAILAND_TIMEZONE).date().isoformat()
-        if report_as_of is not None
-        else None
-    )
-    if not isinstance(report, dict):
-        return {
-            "schemaVersion": "fx-market-news-read-model-v1",
-            "events": [],
-            "dangerWindows": [],
-            "eventCount": 0,
-            "highImpactCount": 0,
-            "dataStatus": "no_verified_data",
-            "sourceReportId": None,
-            "checkedAt": None,
-            "asOf": None,
-            "currentBangkokDate": current_bangkok_date,
-            "reportBangkokDate": None,
+    report_candidates = [
+        report
+        for report in attempt_candidates
+        if str(report.get("status") or "").lower() in DASHBOARD_WORKFLOW_SOURCE_READY_STATUSES
+    ]
+    current_reports = [
+        report
+        for report in report_candidates
+        if _fx_report_bangkok_date(report) == current_bangkok_date
+    ]
+    latest_report = attempt_candidates[-1] if attempt_candidates else None
+    if not current_reports:
+        model = _empty_fx_news_read_model(
+            current_bangkok_date=current_bangkok_date,
+            stale_report=latest_report,
+        )
+        if (
+            isinstance(latest_report, dict)
+            and _fx_report_bangkok_date(latest_report) == current_bangkok_date
+            and str(latest_report.get("status") or "").strip().lower()
+            not in DASHBOARD_WORKFLOW_SOURCE_READY_STATUSES
+        ):
+            model.update({
+                "dataStatus": "source_failure",
+                "sourceStatus": "source_failure",
+                "latestAttemptReportId": safe_reference(latest_report.get("id")),
+                "lastFailureAt": latest_report.get("updatedAt") or latest_report.get("createdAt"),
+                "stale": False,
+                "currentDataAvailable": False,
+                "failClosed": True,
+            })
+        return model
+
+    event_by_id: dict[str, dict] = {}
+    event_ids_by_group: dict[str, list[str]] = {}
+    danger_by_key: dict[str, dict] = {}
+    all_sources_by_url: dict[str, dict] = {}
+    accepted_reports: list[dict] = []
+    now_utc = reference_local.astimezone(timezone.utc)
+    for report in current_reports:
+        metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
+        context_inputs = (
+            (report.get("workflowContext") or {}).get("inputs")
+            if isinstance((report.get("workflowContext") or {}).get("inputs"), dict)
+            else {}
+        )
+        declared_market_date = str(
+            metrics.get("marketDate") or context_inputs.get("marketDate") or ""
+        ).strip()
+        if declared_market_date and declared_market_date != current_bangkok_date:
+            continue
+        source_status = str(metrics.get("sourceStatus") or "unknown").strip().lower()
+        if source_status not in {"success", "verified", "quiet_day"}:
+            continue
+        accepted_reports.append(report)
+        if metrics.get("quietDay") is True and source_status in {"success", "verified", "quiet_day"}:
+            # A later verified quiet-day snapshot is authoritative for the
+            # requested Bangkok day and clears provisional earlier content.
+            event_by_id.clear()
+            event_ids_by_group.clear()
+            danger_by_key.clear()
+        sources, by_id, by_url = _fx_report_source_catalog(report)
+        for source in sources:
+            all_sources_by_url[str(source.get("url") or "")] = source
+        raw_events = metrics.get("events") if isinstance(metrics.get("events"), list) else []
+        for item in raw_events[:FX_DAILY_NEWS_MAX_EVENTS_PER_REPORT]:
+            if not isinstance(item, dict):
+                continue
+            linked_sources = _fx_item_verified_sources(item, by_id, by_url)
+            if not linked_sources:
+                continue
+            title = redact_text(str(item.get("titleTh") or item.get("title") or ""), 300)
+            summary = redact_text(str(item.get("summaryTh") or item.get("summary") or ""), 800)
+            if not title or not summary:
+                continue
+            currencies = []
+            for raw_currency in _contract_nested_strings(
+                item.get("currencies") or item.get("affectedCurrencies") or item.get("currency")
+            ):
+                currency = str(raw_currency or "").strip().upper()
+                if currency in FX_MAJOR_CURRENCIES and currency not in currencies:
+                    currencies.append(currency)
+            if not currencies:
+                continue
+            time_kind = str(item.get("timeKind") or "timed").strip().lower()
+            if time_kind not in {"timed", "all_day", "tentative", "holiday"}:
+                time_kind = "timed"
+            scheduled_at = item.get("scheduledAt") or item.get("eventAt")
+            scheduled_time = _fx_offset_datetime(scheduled_at) if time_kind == "timed" else None
+            if time_kind == "timed" and scheduled_time is None:
+                continue
+            event_market_date = (
+                scheduled_time.astimezone(THAILAND_TIMEZONE).date().isoformat()
+                if scheduled_time is not None
+                else str(item.get("marketDate") or declared_market_date or "").strip()
+            )
+            if event_market_date != current_bangkok_date:
+                continue
+            scheduled_at = (
+                scheduled_time.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                if scheduled_time is not None
+                else None
+            )
+            source_event_id = safe_reference(item.get("eventId") or item.get("id"))
+            event_id, event_group, publisher_identity = _fx_event_identity_parts(
+                item,
+                currencies,
+                scheduled_at,
+                linked_sources,
+            )
+            group_candidates = event_ids_by_group.get(event_group, [])
+            if event_id not in event_by_id and group_candidates:
+                # A publisher may revise both its event id and time between the
+                # morning and evening runs.  Reconcile a close occurrence in
+                # the same Backend group, while keeping genuinely separate
+                # same-title releases apart.
+                for candidate_id in group_candidates:
+                    candidate = event_by_id.get(candidate_id, {})
+                    same_publisher_identity = bool(
+                        publisher_identity
+                        and candidate.get("_publisherIdentity") == publisher_identity
+                    )
+                    if same_publisher_identity:
+                        event_id = candidate_id
+                        break
+            event_ids_by_group.setdefault(event_group, [])
+            if event_id not in event_ids_by_group[event_group]:
+                event_ids_by_group[event_group].append(event_id)
+            impact = str(item.get("impact") or "unknown").strip().lower()
+            if impact not in {"low", "medium", "high", "unknown"}:
+                impact = "unknown"
+            actual = _fx_actual_scalar_text(item.get("actual"))
+            forecast = _fx_scalar_text(item.get("forecast"))
+            previous = _fx_scalar_text(item.get("previous"))
+            actual_status = str(item.get("actualStatus") or "").strip().lower()
+            if actual_status not in {"pending", "released", "revised", "unavailable", "not_applicable"}:
+                actual_status = (
+                    "released" if actual is not None
+                    else "not_applicable" if time_kind in {"holiday", "all_day"}
+                    else "pending"
+                )
+            if (
+                (actual_status in {"released", "revised"} and actual is None)
+                or (actual_status not in {"released", "revised"} and actual is not None)
+            ):
+                continue
+            if scheduled_time is None:
+                if actual_status in {"released", "revised"} and actual is not None:
+                    timing_state = "past"
+                    release_state = "released"
+                else:
+                    timing_state = "current" if time_kind in {"all_day", "holiday"} else "future"
+                    release_state = "not_applicable" if time_kind in {"all_day", "holiday"} else "scheduled"
+            else:
+                delta_seconds = (scheduled_time.astimezone(timezone.utc) - now_utc).total_seconds()
+                timing_state = "future" if delta_seconds > 900 else "past" if delta_seconds < -900 else "current"
+                release_state = "released" if actual_status in {"released", "revised"} else "scheduled"
+            pair_impacts, pair_evidence_complete = _fx_event_pair_impact_rows(
+                item,
+                source_event_id=source_event_id,
+                metrics=metrics,
+                event_sources=linked_sources,
+            )
+            has_directional_pair_impact = any(
+                row["impact"] != "insufficient_data" for row in pair_impacts
+            )
+            if release_state == "scheduled":
+                analysis_status = "prepared"
+            elif release_state == "released" and actual is not None and has_directional_pair_impact:
+                analysis_status = "analyzed"
+            elif timing_state == "past" and actual_status == "pending":
+                analysis_status = "awaiting_actual"
+            else:
+                analysis_status = "insufficient_data"
+            previous_row = event_by_id.get(event_id, {})
+            previous_actual_status = str(previous_row.get("actualStatus") or "").lower()
+            actual_status_rank = {
+                "pending": 0,
+                "unavailable": 0,
+                "not_applicable": 0,
+                "released": 1,
+                "revised": 2,
+            }
+            if actual_status_rank.get(previous_actual_status, -1) > actual_status_rank.get(actual_status, -1):
+                actual_status = previous_actual_status
+                release_state = "released"
+                actual = previous_row.get("actual")
+                analysis_status = previous_row.get("analysisStatus") or analysis_status
+                pair_impacts = previous_row.get("affectedPairImpacts") or pair_impacts
+                pair_evidence_complete = bool(
+                    previous_row.get("pairAnalysisComplete") or pair_evidence_complete
+                )
+            combined_sources = {
+                str(source.get("url") or ""): source
+                for source in [*(previous_row.get("sourceLinks") or []), *linked_sources]
+                if source.get("url")
+            }
+            event_by_id[event_id] = {
+                "eventId": event_id,
+                "_dedupGroup": event_group,
+                "_publisherIdentity": publisher_identity or previous_row.get("_publisherIdentity"),
+                "sourceEventId": source_event_id,
+                "titleTh": title,
+                "currencies": currencies,
+                "scheduledAt": scheduled_at,
+                "scheduledAtUtc": scheduled_at,
+                "marketDate": event_market_date,
+                "timeKind": time_kind,
+                "impact": impact,
+                "summaryTh": summary,
+                "detailTh": redact_text(
+                    str(item.get("detailTh") or item.get("detail") or summary),
+                    1600,
+                ),
+                "actual": actual if actual is not None else previous_row.get("actual"),
+                "forecast": forecast if forecast is not None else previous_row.get("forecast"),
+                "previous": previous if previous is not None else previous_row.get("previous"),
+                "actualStatus": actual_status,
+                "releaseState": release_state,
+                "timingState": timing_state,
+                "analysisStatus": analysis_status,
+                "analyzedAt": (
+                    report.get("updatedAt") or report.get("createdAt")
+                    if analysis_status == "analyzed"
+                    else previous_row.get("analyzedAt")
+                ),
+                "outcomeTh": redact_text(
+                    str(item.get("outcomeTh") or item.get("resultTh") or item.get("outcome") or ""),
+                    1200,
+                ) or previous_row.get("outcomeTh"),
+                "surprise": _fx_scalar_text(item.get("surprise"), 160) or previous_row.get("surprise"),
+                "affectedPairs": [
+                    pair for pair in FX_BIAS_PAIRS
+                    if any(currency in {pair[:3], pair[3:]} for currency in currencies)
+                ],
+                "affectedPairImpacts": pair_impacts,
+                "analyzedPairCount": len(pair_impacts),
+                "pairUniverseCount": len(FX_BIAS_PAIRS),
+                "pairAnalysisComplete": pair_evidence_complete,
+                "sourceLinks": list(combined_sources.values()),
+                "sourceReportIds": list(dict.fromkeys([
+                    *(previous_row.get("sourceReportIds") or []),
+                    safe_reference(report.get("id")),
+                ])),
+            }
+        raw_windows = metrics.get("dangerWindows") if isinstance(metrics.get("dangerWindows"), list) else []
+        for item in raw_windows[:FX_DAILY_NEWS_MAX_WINDOWS_PER_REPORT]:
+            if not isinstance(item, dict):
+                continue
+            linked_sources = _fx_item_verified_sources(item, by_id, by_url)
+            starts_at = item.get("startsAt")
+            ends_at = item.get("endsAt")
+            starts_time = _fx_offset_datetime(starts_at)
+            ends_time = _fx_offset_datetime(ends_at)
+            if (
+                not linked_sources
+                or starts_time is None
+                or ends_time is None
+                or ends_time <= starts_time
+                or (ends_time - starts_time) > timedelta(hours=6)
+                or starts_time.astimezone(THAILAND_TIMEZONE).date().isoformat()
+                != current_bangkok_date
+            ):
+                continue
+            currencies = list(dict.fromkeys([
+                value
+                for value in (
+                    str(raw or "").strip().upper()
+                    for raw in _contract_nested_strings(item.get("currencies") or item.get("currency"))
+                )
+                if value in FX_MAJOR_CURRENCIES
+            ]))
+            if not currencies:
+                continue
+            normalized_start = starts_time.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            normalized_end = ends_time.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            window_key = payload_digest(
+                "fx-danger-window-v2",
+                normalized_start,
+                normalized_end,
+                ",".join(currencies),
+            )[:24]
+            danger_by_key[window_key] = {
+                "windowId": f"fxwindow-{window_key}",
+                "currencies": currencies,
+                "startsAt": normalized_start,
+                "endsAt": normalized_end,
+                "reasonTh": redact_text(str(item.get("reasonTh") or item.get("reason") or ""), 600),
+                "sourceLinks": linked_sources,
+            }
+
+    if not accepted_reports:
+        model = _empty_fx_news_read_model(
+            current_bangkok_date=current_bangkok_date,
+            stale_report=current_reports[-1],
+        )
+        model.update({
+            "dataStatus": "source_failure",
+            "sourceStatus": "source_failure",
+            "evidenceStatus": "unavailable",
             "stale": False,
-            "currentDataAvailable": False,
-            "evidenceMode": "public_web_forex_factory_compatible",
-            "forexFactoryCompatibility": {
-                "compatibleFields": ["currency", "title", "scheduledAt", "impact", "actual", "forecast", "previous"],
-                "preferredPublicSource": True,
-                "directAdapterConnected": False,
-                "directFeedClaimed": False,
-            },
-            "fabricatedData": False,
-        }
-    if report_bangkok_date != current_bangkok_date:
-        return {
-            "schemaVersion": "fx-market-news-read-model-v1",
-            "events": [],
-            "dangerWindows": [],
-            "eventCount": 0,
-            "highImpactCount": 0,
-            "dataStatus": "stale",
-            "sourceReportId": safe_reference(report.get("id")),
-            "checkedAt": report.get("updatedAt") or report.get("createdAt"),
-            "asOf": report.get("updatedAt") or report.get("createdAt"),
-            "currentBangkokDate": current_bangkok_date,
-            "reportBangkokDate": report_bangkok_date,
-            "stale": True,
-            "currentDataAvailable": False,
-            "evidenceMode": "public_web_forex_factory_compatible",
-            "forexFactoryCompatibility": {
-                "compatibleFields": ["currency", "title", "scheduledAt", "impact", "actual", "forecast", "previous"],
-                "preferredPublicSource": True,
-                "directAdapterConnected": False,
-                "directFeedClaimed": False,
-            },
-            "fabricatedData": False,
-        }
-    metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
-    sources, by_id, by_url = _fx_report_source_catalog(report)
-    events = []
-    for index, item in enumerate(metrics.get("events") if isinstance(metrics.get("events"), list) else []):
-        if not isinstance(item, dict) or len(events) >= 40:
-            continue
-        linked_sources = _fx_item_verified_sources(item, by_id, by_url)
-        if not linked_sources:
-            continue
-        title = redact_text(str(item.get("titleTh") or item.get("title") or ""), 300)
-        summary = redact_text(str(item.get("summaryTh") or item.get("summary") or ""), 1200)
-        if not title or not summary:
-            continue
-        currencies = []
-        raw_currencies = item.get("currencies") or item.get("affectedCurrencies") or item.get("currency")
-        for currency in (_contract_nested_strings(raw_currencies)):
-            value = str(currency or "").strip().upper()
-            if value in FX_MAJOR_CURRENCIES and value not in currencies:
-                currencies.append(value)
-        if not currencies:
-            continue
-        impact = str(item.get("impact") or "unknown").strip().lower()
-        if impact not in {"low", "medium", "high", "unknown"}:
-            impact = "unknown"
-        scheduled_at = item.get("scheduledAt") or item.get("eventAt")
-        if scheduled_at and parse_iso(str(scheduled_at)) is None:
-            scheduled_at = None
-        events.append({
-            "eventId": safe_reference(item.get("eventId") or item.get("id")) or f"event-{index + 1}",
-            "titleTh": title,
-            "currencies": currencies,
-            "scheduledAt": scheduled_at,
-            "impact": impact,
-            "summaryTh": summary,
-            "actual": redact_text(str(item.get("actual") or ""), 80) or None,
-            "forecast": redact_text(str(item.get("forecast") or ""), 80) or None,
-            "previous": redact_text(str(item.get("previous") or ""), 80) or None,
-            "sourceLinks": linked_sources,
         })
-    danger_windows = []
-    for index, item in enumerate(metrics.get("dangerWindows") if isinstance(metrics.get("dangerWindows"), list) else []):
-        if not isinstance(item, dict) or len(danger_windows) >= 30:
-            continue
-        linked_sources = _fx_item_verified_sources(item, by_id, by_url)
-        if not linked_sources:
-            continue
-        starts_at = item.get("startsAt")
-        ends_at = item.get("endsAt")
-        if parse_iso(str(starts_at or "")) is None or parse_iso(str(ends_at or "")) is None:
-            continue
-        currencies = [
-            value for value in (
-                str(raw or "").strip().upper()
-                for raw in _contract_nested_strings(item.get("currencies") or item.get("currency"))
-            ) if value in FX_MAJOR_CURRENCIES
-        ]
-        danger_windows.append({
-            "windowId": safe_reference(item.get("windowId") or item.get("id")) or f"window-{index + 1}",
-            "currencies": list(dict.fromkeys(currencies)),
-            "startsAt": starts_at,
-            "endsAt": ends_at,
-            "reasonTh": redact_text(str(item.get("reasonTh") or item.get("reason") or ""), 600),
-            "sourceLinks": linked_sources,
-        })
+        return model
+
+    events = sorted(
+        (
+            {
+                key: value
+                for key, value in item.items()
+                if not key.startswith("_")
+            }
+            for item in event_by_id.values()
+        ),
+        key=lambda item: (
+            parse_iso(str(item.get("scheduledAt") or ""))
+            or datetime.max.replace(tzinfo=timezone.utc),
+            item["eventId"],
+        ),
+    )[:60]
+    past_events = [item for item in events if item["timingState"] == "past"]
+    current_events = [item for item in events if item["timingState"] == "current"]
+    future_events = [item for item in events if item["timingState"] == "future"]
+    report = accepted_reports[-1]
+    current_attempts = [
+        report
+        for report in attempt_candidates
+        if _fx_report_bangkok_date(report) == current_bangkok_date
+    ]
+    latest_attempt = current_attempts[-1] if current_attempts else current_reports[-1]
+    latest_attempt_metrics = (
+        latest_attempt.get("metrics")
+        if isinstance(latest_attempt.get("metrics"), dict)
+        else {}
+    )
+    latest_attempt_report_status = str(latest_attempt.get("status") or "").strip().lower()
+    latest_attempt_status = str(latest_attempt_metrics.get("sourceStatus") or "unknown").strip().lower()
+    degraded_last_good = bool(
+        latest_attempt_report_status not in DASHBOARD_WORKFLOW_SOURCE_READY_STATUSES
+        or latest_attempt_status not in {"success", "verified", "quiet_day"}
+    )
+    if degraded_last_good and latest_attempt_status == "unknown":
+        latest_attempt_status = "source_failure"
+    latest_metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
+    latest_source_status = str(latest_metrics.get("sourceStatus") or "unknown").strip().lower()
+    verified_empty = bool(
+        not events
+        and latest_metrics.get("quietDay") is True
+        and latest_source_status in {"success", "verified", "quiet_day"}
+        and all_sources_by_url
+    )
     return {
-        "schemaVersion": "fx-market-news-read-model-v1",
+        "schemaVersion": "fx-market-news-read-model-v3",
+        "calendarDate": current_bangkok_date,
         "events": events,
-        "dangerWindows": danger_windows,
+        "pastEvents": past_events,
+        "currentEvents": current_events,
+        "futureEvents": future_events,
+        "dangerWindows": sorted(danger_by_key.values(), key=lambda item: str(item["startsAt"])),
         "eventCount": len(events),
+        "pastEventCount": len(past_events),
+        "currentEventCount": len(current_events),
+        "futureEventCount": len(future_events),
+        "scheduledCount": sum(1 for item in events if item["releaseState"] == "scheduled"),
+        "releasedCount": sum(1 for item in events if item["releaseState"] == "released"),
         "highImpactCount": sum(1 for item in events if item["impact"] == "high"),
-        "dataStatus": "verified" if events else "no_verified_data",
+        "dataStatus": (
+            "degraded_last_good"
+            if degraded_last_good and (events or verified_empty)
+            else "verified" if events
+            else "verified_empty" if verified_empty
+            else "source_failure"
+        ),
+        "sourceStatus": (
+            latest_attempt_status if degraded_last_good
+            else latest_source_status if (events or verified_empty)
+            else "source_failure"
+        ),
+        "verifiedEmpty": verified_empty,
+        "evidenceStatus": "verified" if (events or verified_empty) else "unavailable",
         "sourceReportId": safe_reference(report.get("id")),
+        "latestAttemptReportId": safe_reference(latest_attempt.get("id")),
+        "sourceReportIds": [
+            report_id
+            for report_id in (safe_reference(item.get("id")) for item in accepted_reports)
+            if report_id
+        ],
         "checkedAt": report.get("updatedAt") or report.get("createdAt"),
+        "lastSuccessfulAt": report.get("updatedAt") or report.get("createdAt"),
+        "lastFailureAt": (
+            latest_attempt.get("updatedAt") or latest_attempt.get("createdAt")
+            if degraded_last_good
+            else None
+        ),
+        "lastFailureError": (
+            redact_text(
+                str(
+                    latest_attempt_metrics.get("error")
+                    or latest_attempt_metrics.get("message")
+                    or "source collection did not produce a verified calendar"
+                ),
+                500,
+            )
+            if degraded_last_good
+            else None
+        ),
         "asOf": report.get("updatedAt") or report.get("createdAt"),
         "currentBangkokDate": current_bangkok_date,
-        "reportBangkokDate": report_bangkok_date,
+        "reportBangkokDate": current_bangkok_date,
         "stale": False,
-        "currentDataAvailable": bool(events),
-        "sources": sources,
-        "evidenceMode": "public_web_forex_factory_compatible",
+        "currentDataAvailable": bool((events or verified_empty) and not degraded_last_good),
+        "failClosed": bool(degraded_last_good or not (events or verified_empty)),
+        "durableStore": "backend_runtime_reports",
+        "deduplication": "backend_event_identity_v3",
+        "sources": list(all_sources_by_url.values()),
+        "evidenceMode": "guarded_public_web_research",
         "forexFactoryCompatibility": {
             "compatibleFields": ["currency", "title", "scheduledAt", "impact", "actual", "forecast", "previous"],
-            "preferredPublicSource": True,
+            "referenceLinkOnly": True,
+            "copyOrRedistributionAdapter": False,
             "directAdapterConnected": False,
             "directFeedClaimed": False,
         },
@@ -6400,11 +7370,29 @@ def _fx_bias_read_model(
     # report.  A newer legacy/manual build may be shown only when no completed
     # analyze report with pairBias exists; it must never replace the bias half
     # of an otherwise valid current-news report.
+    analyze_attempts = [
+        report
+        for report in candidates
+        if isinstance(report, dict)
+        and report.get("linkedPropId") == "left_signal_cube"
+        and report.get("type") == "fx_news_bias_report"
+        and isinstance(report.get("workflowContext"), dict)
+        and report["workflowContext"].get("propId") == "left_signal_cube"
+        and report["workflowContext"].get("actionId") == "analyze_daily_market_news"
+    ]
+    latest_analyze_attempt = max(
+        analyze_attempts,
+        key=lambda report: (
+            parse_iso(str(report.get("updatedAt") or report.get("createdAt") or ""))
+            or datetime.min.replace(tzinfo=timezone.utc)
+        ),
+        default=None,
+    )
     verified_report = _latest_fx_report(
         candidates,
         {"analyze_daily_market_news"},
     )
-    if verified_report is None:
+    if verified_report is None and latest_analyze_attempt is None:
         verified_report = _latest_fx_report(
             candidates,
             {"build_fx_pair_bias"},
@@ -6421,55 +7409,115 @@ def _fx_bias_read_model(
         if isinstance(verified_report, dict)
         else None
     )
-    report_bangkok_date = (
-        report_as_of.astimezone(THAILAND_TIMEZONE).date().isoformat()
-        if report_as_of is not None
-        else None
-    )
+    report_bangkok_date = _fx_report_bangkok_date(verified_report)
+    declared_market_date = None
+    source_status = None
+    if isinstance(verified_report, dict):
+        candidate_metrics = (
+            verified_report.get("metrics")
+            if isinstance(verified_report.get("metrics"), dict)
+            else {}
+        )
+        context_inputs = (
+            (verified_report.get("workflowContext") or {}).get("inputs")
+            if isinstance((verified_report.get("workflowContext") or {}).get("inputs"), dict)
+            else {}
+        )
+        declared_market_date = str(
+            candidate_metrics.get("marketDate") or context_inputs.get("marketDate") or ""
+        ).strip() or report_bangkok_date
+        candidate_action_id = str(
+            (verified_report.get("workflowContext") or {}).get("actionId") or ""
+        )
+        source_status = str(
+            candidate_metrics.get("sourceStatus")
+            or ("success" if candidate_action_id == "build_fx_pair_bias" else "unknown")
+        ).strip().lower()
     stale = bool(
         isinstance(verified_report, dict)
-        and report_bangkok_date != current_bangkok_date
+        and (
+            report_bangkok_date != current_bangkok_date
+            or declared_market_date != current_bangkok_date
+            or source_status not in {"success", "verified", "quiet_day"}
+        )
     )
+    latest_attempt_failed = bool(
+        isinstance(latest_analyze_attempt, dict)
+        and _fx_report_bangkok_date(latest_analyze_attempt) == current_bangkok_date
+        and str(latest_analyze_attempt.get("status") or "").strip().lower()
+        not in DASHBOARD_WORKFLOW_SOURCE_READY_STATUSES
+    )
+    if latest_attempt_failed:
+        stale = True
+        source_status = "source_failure"
     source_backed_count = 0
+    top_sources_by_url: dict[str, dict] = {}
     if isinstance(verified_report, dict) and not stale:
         metrics = verified_report.get("metrics") if isinstance(verified_report.get("metrics"), dict) else {}
         pair_bias = metrics.get("pairBias") if isinstance(metrics.get("pairBias"), list) else []
-        shared_source_links = metrics.get("sourceLinks")
         _, source_by_id, source_by_url = _fx_report_source_catalog(verified_report)
+        workflow_context = (
+            verified_report.get("workflowContext")
+            if isinstance(verified_report.get("workflowContext"), dict)
+            else {}
+        )
+        is_daily_news_report = workflow_context.get("actionId") == "analyze_daily_market_news"
+
+        def confidence_or_none(value: object) -> float | int | None:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not 0 <= float(value) <= 100
+            ):
+                return None
+            return value
+
         for item in pair_bias[:56]:
             if not isinstance(item, dict):
                 continue
             pair = str(item.get("pair") or "").strip().upper()
             if pair not in by_pair:
                 continue
-            links = _fx_item_verified_sources(item, source_by_id, source_by_url)
-            if not links:
-                # Keep the exact canonical universe but never display an
-                # unsupported directional view as if it were sourced.
-                continue
+            shared_links = _fx_item_verified_sources(item, source_by_id, source_by_url)
             row = by_pair[pair]
             horizon_models = {}
+            row_links_by_url: dict[str, dict] = {}
             for horizon, flat_field in (("short", "shortBias"), ("medium", "mediumBias"), ("long", "longBias")):
                 nested = item.get(horizon) if isinstance(item.get(horizon), dict) else {}
                 bias = _normalize_fx_bias(item.get(flat_field) if item.get(flat_field) is not None else nested.get("bias"))
                 if item.get("verified") is False:
                     bias = "insufficient_data"
-                horizon_links = _fx_item_verified_sources(nested, source_by_id, source_by_url) or links
+                horizon_links = _fx_item_verified_sources(nested, source_by_id, source_by_url)
+                if (
+                    not horizon_links
+                    and not is_daily_news_report
+                    and item.get("allHorizonsEvidence") is True
+                ):
+                    horizon_links = shared_links
+                if bias != "insufficient_data" and not horizon_links:
+                    bias = "insufficient_data"
+                for source in horizon_links:
+                    if source.get("url"):
+                        row_links_by_url[str(source["url"])] = source
+                        top_sources_by_url[str(source["url"])] = source
                 confidence_value = nested.get("confidence") if nested.get("confidence") is not None else item.get("confidence")
+                confidence = confidence_or_none(confidence_value)
                 horizon_models[horizon] = {
                     "bias": bias,
-                    "confidence": clamp_int(confidence_value, 0, 0, 100) if confidence_value is not None else None,
+                    "confidence": clamp_int(confidence, 0, 0, 100) if confidence is not None else None,
                     "reasonTh": redact_text(str(nested.get("reasonTh") or item.get(f"{horizon}ReasonTh") or ""), 500) or None,
                     "sourceLinks": horizon_links if bias != "insufficient_data" else [],
                 }
             supported = any(model["bias"] != "insufficient_data" for model in horizon_models.values())
+            row_confidence = confidence_or_none(item.get("confidence"))
             row.update({
                 "shortBias": horizon_models["short"]["bias"],
                 "mediumBias": horizon_models["medium"]["bias"],
                 "longBias": horizon_models["long"]["bias"],
                 "horizons": horizon_models,
-                "confidence": clamp_int(item.get("confidence"), 0, 0, 100) if item.get("confidence") is not None else None,
-                "sourceLinks": links if supported else [],
+                "confidence": clamp_int(row_confidence, 0, 0, 100) if row_confidence is not None else None,
+                "sourceLinks": list(row_links_by_url.values()) if supported else [],
                 "status": "source_backed" if supported else "insufficient_data",
                 "updatedAt": verified_report.get("updatedAt") or verified_report.get("createdAt"),
             })
@@ -6485,11 +7533,20 @@ def _fx_bias_read_model(
         "pairUniverseComplete": len(rows) == len(FX_BIAS_PAIRS),
         "complete28": len(rows) == len(FX_BIAS_PAIRS),
         "dataStatus": (
-            "stale"
-            if stale
+            "source_failure"
+            if latest_attempt_failed
+            or (
+                isinstance(verified_report, dict)
+                and source_status not in {"success", "verified", "quiet_day"}
+            )
+            else "stale" if stale
             else "verified" if source_backed_count else "no_verified_data"
         ),
+        "sourceStatus": source_status or "no_report",
+        "sources": list(top_sources_by_url.values()),
+        "sourceLinks": list(top_sources_by_url.values()),
         "sourceReportId": safe_reference(verified_report.get("id")) if isinstance(verified_report, dict) else None,
+        "latestAttemptReportId": safe_reference(latest_analyze_attempt.get("id")) if isinstance(latest_analyze_attempt, dict) else None,
         "asOf": (
             verified_report.get("updatedAt") or verified_report.get("createdAt")
             if isinstance(verified_report, dict)
@@ -6646,7 +7703,7 @@ def _build_equipment_connection_center_read_model(
     schedule_specs = {
         "codex_mcp_portal": ("discoverySchedule", ["09:00"], 6),
         "left_audit_crystals": ("indicatorScoutSchedule", ["09:00"], 2),
-        "left_signal_cube": ("newsBiasSchedule", ["07:00"], 2),
+        "left_signal_cube": ("newsBiasSchedule", ["07:00", "20:00"], 2),
     }
     ready_statuses = {"connected", "ready", "detected", "configured", "active"}
     attention_statuses = {
@@ -7619,7 +8676,12 @@ def _trusted_workflow_plugin_profile(
     })
 
 
-def _workflow_effective_form(plugin_profile: dict, form: dict) -> dict:
+def _workflow_effective_form(
+    plugin_profile: dict,
+    form: dict,
+    *,
+    action_id: str | None = None,
+) -> dict:
     """Merge Backend-owned presets with the already-sanitized user intent."""
 
     preset = (
@@ -7627,10 +8689,16 @@ def _workflow_effective_form(plugin_profile: dict, form: dict) -> dict:
         if isinstance(plugin_profile.get("inputPreset"), dict)
         else {}
     )
-    return {
+    result = {
         **(preset if isinstance(preset, dict) else {}),
         **form,
     }
+    if (
+        action_id == "analyze_daily_market_news"
+        and not result.get("marketDate")
+    ):
+        result["marketDate"] = datetime.now(THAILAND_TIMEZONE).date().isoformat()
+    return result
 
 
 def _workflow_profile_input_present(form: dict, field_name: object) -> bool:
@@ -8112,7 +9180,7 @@ def workflow_dashboard_read_model(
     elif prop_id == "left_signal_cube":
         model["schedule"] = _dashboard_saved_schedule_read_model(
             "newsBiasSchedule",
-            default_times=["07:00"],
+            default_times=["07:00", "20:00"],
             max_times=2,
         )
         model["marketNews"] = _fx_news_read_model(reports)
@@ -8136,7 +9204,9 @@ def workflow_dashboard_read_model(
         model["newsTruth"] = {
             "publicWebReadOnly": True,
             "liveFeedConnected": False,
-            "forexFactoryPreferredPublicSource": True,
+            "authoritativePublicSourcesRequired": True,
+            "forexFactoryReferenceOnly": True,
+            "forexFactoryMayAuthorizeEvidence": False,
             "forexFactoryDirectAdapterConnected": False,
             "forexFactoryDirectFeedClaimAllowed": False,
             "automaticSchedulerImplemented": True,
@@ -8555,14 +9625,15 @@ def _workflow_prompt(
         ),
         "analyze_daily_market_news": (
             "ทำงานเดียวให้จบ: ค้นและวิเคราะห์ข่าวตลาด Forex ปัจจุบันจากเว็บไซต์สาธารณะแบบอ่านอย่างเดียว "
-            "แล้วคืนทั้งข่าว ช่วงที่ EA ควรระวัง และ Bias 28 คู่เงินใน Report เดียว. Forex Factory เป็นแหล่งสาธารณะที่ควรใช้เมื่อเข้าถึงได้ "
-            "แต่ห้ามอ้างว่ามี Direct Feed หรือ Adapter; ใช้แหล่งสาธารณะอื่นที่ตรวจย้อนกลับได้เมื่อจำเป็น. "
-            "contractFields.events ต้องเป็น JSON array; แต่ละข่าวมี titleTh, currencies, scheduledAt, impact, summaryTh, "
-            "actual, forecast, previous และ sourceRefs. contractFields.dangerWindows ต้องเป็น JSON array ที่มี currencies, startsAt, endsAt, reasonTh และ sourceRefs. "
-            "contractFields.sourceLinks ต้องเป็น JSON array ของ id, title, public URL, publishedAt และ checkedAt; sourceRefs ทุกจุดต้องอ้าง id ในรายการนี้. "
+            "แล้วคืนทั้งข่าว ช่วงที่ EA ควรระวัง และ Bias 28 คู่เงินใน Report เดียว. ใช้แหล่งสาธารณะต้นทาง/ทางการที่อนุญาตและตรวจย้อนกลับได้ พร้อมสังเคราะห์ปฏิทินต้นฉบับของระบบเอง. "
+            "Forex Factory และ Fair Economy เป็นลิงก์อ้างอิงให้ผู้ใช้กดดูเท่านั้น ห้ามอ่านอัตโนมัติ คัดลอก แจกจ่าย ใช้ Export/Feed/HTML/JSON หรือใช้เป็น Evidence ของค่าปฏิทิน. "
+            "contractFields.marketDate ต้องเป็นวัน Asia/Bangkok; sourceStatus ต้องเป็น success/verified/quiet_day และ quietDay เป็น boolean. "
+            "contractFields.events ต้องเป็น JSON array แบบกระชับไม่เกิน 6 ข่าวต่อรอบ (เลือกเหตุการณ์ที่เกี่ยวข้องสูงสุด; รอบเย็นอัปเดต/เติมเหตุการณ์ด้วย eventId เดิม); titleTh ไม่เกิน 60 ตัวอักษร, summaryTh/detailTh ไม่เกินอย่างละ 100, outcomeTh ไม่เกิน 80. แต่ละข่าวมี titleTh, currencies, scheduledAt ที่มี UTC offset, timeKind, impact, summaryTh, "
+            "actual, actualStatus, forecast, previous, outcomeTh, surprise และ sourceRefs. pairImpacts เป็น optional sparse array ไม่เกิน 2 คู่ที่เกี่ยวข้องที่สุดต่อข่าว; ทุกแถวที่มีทิศทางต้องมี pair, impact, confidence และ sourceRefs เฉพาะข้อสรุปนั้น. contractFields.dangerWindows ต้องเป็น JSON array ไม่เกิน 3 ช่วงที่มี currencies, startsAt, endsAt, reasonTh และ sourceRefs. "
+            "contractFields.sourceLinks ต้องเป็น JSON array ไม่เกิน 3 แหล่งของ id ไม่ซ้ำ, title ไม่เกิน 40 ตัวอักษร, public URL ไม่เกิน 120 ตัวอักษร, publishedAt และ checkedAt ที่มี UTC offset; sourceRefs ทุกจุดต้องอ้าง id ในรายการนี้. "
             "contractFields.pairBias ต้องมี 28 แถวพอดีสำหรับ: "
             + ", ".join(FX_BIAS_PAIRS)
-            + ". แต่ละแถวใช้ pair, shortBias, mediumBias, longBias, confidence, verified และ sourceRefs. "
+            + ". แต่ละแถวใช้ pair และ short/medium/long object ซึ่งมี bias, confidence, reasonTh ไม่เกิน 20 ตัวอักษร และ sourceRefs ไม่เกิน 1 id ของแต่ละช่วงเวลาเอง; ถ้า INSUFFICIENT_DATA ให้ละ reasonTh และ sourceRefs เพื่อลด payload. "
             "ค่า Bias ใช้เฉพาะ BULLISH, BEARISH, SIDEWAY หรือ INSUFFICIENT_DATA. คู่หรือช่วงเวลาที่หลักฐานไม่พอต้องเป็น INSUFFICIENT_DATA; "
             "ทุกค่าอื่นต้องมี public source ที่ตรงกับ evidence ของ Mission. ระบุ checkedAt, updatedAt และ limitations. "
             "ห้ามอ้างว่าเป็น Live Feed ห้ามแต่งข่าว ราคา actual/forecast/previous หรือ Bias และห้าม Sign in กรอกฟอร์ม ดาวน์โหลด ส่ง Order หรือส่งข้อมูลไปบริการภายนอก."
@@ -8571,10 +9642,10 @@ def _workflow_prompt(
             "โหมด Legacy/manual: ใช้เฉพาะรายงานข่าวต้นทางที่ Backend ตรวจสายงานแล้วเพื่อจัดทำ Bias สำหรับ 28 คู่เงินต่อไปนี้เท่านั้น: "
             + ", ".join(FX_BIAS_PAIRS)
             + ". contractFields.pairBias ต้องเป็น JSON array แบบกระชับจำนวน 28 แถวพอดี โดยแต่ละแถวใช้คีย์ "
-            "pair, shortBias, mediumBias, longBias, confidence, verified, sourceRefs; ค่า Bias ต้องเป็น "
+            "pair และ short/medium/long object ซึ่งมี bias, confidence, reasonTh, sourceRefs; ค่า Bias ต้องเป็น "
             "BULLISH/BEARISH/SIDEWAY/INSUFFICIENT_DATA เท่านั้น. contractFields.sourceLinks ต้องเป็น JSON array ของ "
-            "id กับ public URL และ sourceRefs ของแต่ละแถวต้องอ้าง id ในรายการนี้. "
-            "ทุกคู่ต้องแยกระยะสั้น กลาง ยาว พร้อม confidence และหลักฐานของแถวนั้น. "
+            "id กับ public URL และ sourceRefs ของแต่ละช่วงเวลาต้องอ้าง id ในรายการนี้. "
+            "ทุกคู่ต้องแยกระยะสั้น กลาง ยาว พร้อม confidence และหลักฐานเฉพาะช่วงเวลานั้น. "
             "ถ้าหลักฐานไม่พอให้ใช้ INSUFFICIENT_DATA ห้ามอนุมานเป็นข้อมูลจริง ห้ามแต่งข่าว ราคา หรือสภาวะตลาด. "
             "นี่เป็น Analysis-only ไม่ใช่คำสั่งเทรด และห้ามเรียก MetaTrader หรือส่ง Order."
         ),
@@ -8662,7 +9733,11 @@ def save_dashboard_discovery_schedule(form: dict) -> dict:
 
 
 def _save_dashboard_schedule_preference(settings_key: str, form: dict) -> dict:
-    defaults = ["09:00"] if settings_key == "indicatorScoutSchedule" else ["07:00"]
+    defaults = (
+        ["09:00"]
+        if settings_key == "indicatorScoutSchedule"
+        else ["07:00", "20:00"]
+    )
     if settings_key not in {"indicatorScoutSchedule", "newsBiasSchedule"}:
         raise RequestError("Unknown dashboard schedule settings key.", 500)
 
@@ -9373,7 +10448,11 @@ def run_dashboard_workflow_action(
             if plugin_profile.get("versionMatch") is not True:
                 stage = "plugin_skill_version_mismatch"
                 raise RequestError("Version ของ Custom Plugin ที่ติดตั้งไม่ตรงกับ Workflow Contract กรุณาอัปเดต Plugin ก่อน", 409)
-        form = _workflow_effective_form(plugin_profile, submitted_form)
+        form = _workflow_effective_form(
+            plugin_profile,
+            submitted_form,
+            action_id=action_id,
+        )
         _validate_workflow_profile_inputs(plugin_profile, form)
         stage = "invalid_source"
         source = _workflow_selected_source(prop_id, action_id, form)
@@ -9427,6 +10506,23 @@ def run_dashboard_workflow_action(
             execution_preferences = _dashboard_agent_preferences_read_model(
                 load_dashboard_workflow_settings()
             )
+            if action_id == "analyze_daily_market_news":
+                # A compact daily calendar plus the exact 28-pair aggregate is
+                # structurally larger than ordinary dashboard reports.  This
+                # is a trusted per-action floor, still bounded by the existing
+                # 20k hard report/runner ceiling.
+                execution_preferences = {
+                    **execution_preferences,
+                    "outputLimitChars": max(
+                        20000,
+                        clamp_int(
+                            execution_preferences.get("outputLimitChars"),
+                            20000,
+                            1000,
+                            20000,
+                        ),
+                    ),
+                }
             result = run_bridge_task({
                 "toolId": action.get("toolId"),
                 "agentId": action.get("ownerAgentId"),
@@ -9950,9 +11046,9 @@ def _dashboard_workflow_schedule_form(
 ) -> dict:
     if settings_key != "newsBiasSchedule":
         return {}
-    minimum_impact = str(schedule.get("minimumImpact") or "high").strip().lower()
+    minimum_impact = str(schedule.get("minimumImpact") or "low").strip().lower()
     if minimum_impact not in {"low", "medium", "high"}:
-        minimum_impact = "high"
+        minimum_impact = "low"
     return {
         "marketDate": scheduled_local.strftime("%Y-%m-%d"),
         "minimumImpact": minimum_impact,

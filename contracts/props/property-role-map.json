@@ -572,9 +572,9 @@
         "historyReportTabId": null,
         "historyReportTabPosition": null,
         "leftRailSections": [
-          {"id": "schedule", "labelTh": "ตั้งเวลา", "purpose": "ตั้งค่าเริ่มต้นวันละ 1 รอบ และเพิ่มได้สูงสุด 2 รอบผ่าน Backend", "mode": "backend_preference", "actionIds": ["save_news_bias_schedule"]},
+          {"id": "schedule", "labelTh": "ตั้งเวลา", "purpose": "เวลาแนะนำ 07:00 และ 20:00 โดย Backend จำกัดสูงสุด 2 รอบต่อวัน และไม่เปิดอัตโนมัติจนผู้ดูแลยืนยัน", "mode": "backend_preference", "actionIds": ["save_news_bias_schedule"]},
           {"id": "workflow_method", "labelTh": "วิธีการทำงาน", "purpose": "หนึ่ง Mission สร้างข่าว ช่วงระวัง และ Bias ครบ 28 คู่ โดยเป็น Analysis Only", "mode": "read_only_explanation"},
-          {"id": "source_status", "labelTh": "สถานะแหล่งข้อมูล", "purpose": "ใช้เว็บสาธารณะ; Forex Factory เป็นแหล่งที่ควรใช้เมื่อเข้าถึงได้ แต่ยังไม่มี Direct Adapter", "mode": "backend_read_only"},
+          {"id": "source_status", "labelTh": "สถานะแหล่งข้อมูล", "purpose": "ใช้แหล่งสาธารณะต้นทางที่อนุญาต; Forex Factory/Fair Economy เป็นลิงก์อ้างอิงให้ผู้ใช้เท่านั้นและห้ามใช้เป็น Evidence หรือแหล่งนำเข้าปฏิทิน", "mode": "backend_read_only"},
           {"id": "quota", "labelTh": "โควตา Codex", "purpose": "ดูโควตาจาก Backend แบบอ่านอย่างเดียว", "mode": "backend_read_only"}
         ],
         "crossDevicePolicy": "agent_mission_report_only",
@@ -596,8 +596,8 @@
         "fxPairs": ["AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDUSD", "CADCHF", "CADJPY", "CHFJPY", "EURAUD", "EURCAD", "EURCHF", "EURGBP", "EURJPY", "EURNZD", "EURUSD", "GBPAUD", "GBPCAD", "GBPCHF", "GBPJPY", "GBPNZD", "GBPUSD", "NZDCAD", "NZDCHF", "NZDJPY", "NZDUSD", "USDCAD", "USDCHF", "USDJPY"],
         "horizons": ["short", "medium", "long"],
         "biasVocabulary": ["bullish", "bearish", "sideway", "insufficient_data"],
-        "schedule": {"preferenceRunsPerDay": [1, 2], "defaultTimes": ["07:00"], "maximumTimes": 2, "maximumRunsPerDay": 2, "configurationIntentReady": true, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": false, "timezone": "Asia/Bangkok", "scheduledActionIds": ["analyze_daily_market_news"], "legacyManualActionIds": ["build_fx_pair_bias"]},
-        "readiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "forexFactoryPreferredPublicSource": true, "forexFactoryDirectAdapter": "not_connected", "economicCalendarAdapter": "coming_soon", "recurringScheduler": "ready_guarded_read_only"}
+        "schedule": {"preferenceRunsPerDay": [1, 2], "defaultTimes": ["07:00", "20:00"], "minimumImpact": "low", "maximumTimes": 2, "maximumRunsPerDay": 2, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "configurationIntentReady": true, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": false, "timezone": "Asia/Bangkok", "scheduledActionIds": ["analyze_daily_market_news"], "legacyManualActionIds": ["build_fx_pair_bias"]},
+        "readiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "authoritativePublicSourcesRequired": true, "forexFactoryReferenceOnly": true, "forexFactoryEvidenceAllowed": false, "economicCalendarMode": "guarded_original_synthesis", "recurringScheduler": "ready_guarded_read_only"}
       },
       "workflowTracking": {"required": true, "fields": ["missionId", "targetPropId", "ownerAgentId", "sourceLineage", "agentTransfer", "timestamps", "status", "reportRoute"]},
       "executionPolicy": {"mode": "analysis_only", "liveTradingEnabled": false, "orderSubmissionEnabled": false, "frontendMayEnableExecution": false},
