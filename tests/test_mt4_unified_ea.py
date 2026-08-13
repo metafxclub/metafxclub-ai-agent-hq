@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import unittest
 from pathlib import Path
@@ -41,6 +42,111 @@ def named_block(source: str, signature: str) -> str:
             if depth == 0:
                 return source[opening + 1 : index]
     return ""
+
+
+COMPACT_POLICY_LEASE_RE = re.compile(
+    r"^policy-p-([0-9a-f]{16})-c-([0-9a-f]{16})\.lease$"
+)
+LEGACY_POLICY_LEASE_RE = re.compile(
+    r"^policy-([0-9a-f]{64})-channel-([0-9a-f]{64})\.lease$"
+)
+
+
+def compact_policy_lease_name(policy_digest: str, channel_digest: str) -> str:
+    return f"policy-p-{policy_digest[:16]}-c-{channel_digest[:16]}.lease"
+
+
+def snapshot_channel_digest(channel: str) -> str:
+    return hashlib.sha256(channel.encode("ascii")).hexdigest()
+
+
+def compact_policy_lease_payload(
+    account_digest: str,
+    policy_digest: str,
+    channel: str,
+    observed_at: int = 1_700_000_000,
+) -> str:
+    digest = snapshot_channel_digest(channel)
+    return (
+        "MetafxHQPortfolioPolicyV2|"
+        f"{account_digest}|{policy_digest}|{digest}|{channel}|{observed_at}"
+    )
+
+
+def parse_policy_lease_model(
+    file_name: str,
+    raw: str,
+    expected_account_digest: str,
+) -> tuple[str, str]:
+    compact = COMPACT_POLICY_LEASE_RE.fullmatch(file_name)
+    legacy = LEGACY_POLICY_LEASE_RE.fullmatch(file_name)
+    if (compact is None) == (legacy is None):
+        raise ValueError("PORTFOLIO_POLICY_STATE_INVALID")
+    parts = raw.strip().split("|")
+    if compact is not None:
+        if (
+            len(parts) != 6
+            or parts[0] != "MetafxHQPortfolioPolicyV2"
+            or any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in parts[1:4])
+            or parts[1] != expected_account_digest
+            or parts[2][:16] != compact.group(1)
+            or parts[3][:16] != compact.group(2)
+            or re.fullmatch(r"mtc-[A-Za-z0-9_-]{1,116}", parts[4]) is None
+            or snapshot_channel_digest(parts[4]) != parts[3]
+            or not parts[5].isdigit()
+            or int(parts[5]) < 946_684_800
+        ):
+            raise ValueError("PORTFOLIO_POLICY_STATE_INVALID")
+        return parts[2], parts[3]
+    assert legacy is not None
+    if (
+        len(parts) != 4
+        or parts[0] != "MetafxHQPortfolioPolicy"
+        or re.fullmatch(r"[0-9a-f]{64}", parts[1]) is None
+        or not parts[2].startswith("mtc-")
+        or not parts[3].isdigit()
+        or int(parts[3]) < 946_684_800
+        or parts[1] != legacy.group(1)
+    ):
+        raise ValueError("PORTFOLIO_POLICY_STATE_INVALID")
+    legacy_channel_digest = hashlib.sha256(parts[2].encode("ascii")).hexdigest()
+    if legacy_channel_digest != legacy.group(2):
+        raise ValueError("PORTFOLIO_POLICY_STATE_INVALID")
+    return parts[1], legacy_channel_digest
+
+
+def inspect_policy_leases_model(
+    records: list[dict[str, object]],
+    expected_account_digest: str,
+    expected_policy_digest: str,
+    *,
+    first_scan_error: bool = False,
+    next_scan_error_at: int | None = None,
+) -> tuple[str, int]:
+    active_count = 0
+    if first_scan_error:
+        return "PORTFOLIO_POLICY_STATE_INVALID", active_count
+    for index, record in enumerate(records):
+        if not record.get("active", True):
+            # The exclusive probe succeeds, so stale evidence is deleted
+            # before any payload parsing is attempted.
+            continue
+        if not record.get("readable", True):
+            return "PORTFOLIO_POLICY_STATE_INVALID", active_count
+        try:
+            policy_digest, _ = parse_policy_lease_model(
+                str(record["name"]),
+                str(record["payload"]),
+                expected_account_digest,
+            )
+        except (KeyError, ValueError):
+            return "PORTFOLIO_POLICY_STATE_INVALID", active_count
+        active_count += 1
+        if policy_digest != expected_policy_digest:
+            return "PORTFOLIO_POLICY_MISMATCH", active_count
+        if next_scan_error_at == index:
+            return "PORTFOLIO_POLICY_STATE_INVALID", active_count
+    return "READY", active_count
 
 
 class MT4UnifiedEATests(unittest.TestCase):
@@ -907,6 +1013,14 @@ class MT4UnifiedEATests(unittest.TestCase):
             self.code,
             r"\bbool\s+AcquirePortfolioPolicyLease\s*\([^)]*\)",
         )
+        inspect = named_block(
+            self.code,
+            r"\bbool\s+InspectPortfolioPolicyLeases\s*\([^)]*\)",
+        )
+        parse = named_block(
+            self.code,
+            r"\bbool\s+ParsePortfolioPolicyLeaseEvidence\s*\([^)]*\)",
+        )
         release = named_block(
             self.code,
             r"\bvoid\s+ReleasePortfolioPolicyLease\s*\([^)]*\)",
@@ -932,13 +1046,29 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("Sha256TextHex", policy)
         self.assertIn("AccountIdentityDigest", directory)
         self.assertNotIn("SnapshotChannel", directory)
-        self.assertIn("FileFindFirst", acquire)
-        self.assertIn("PORTFOLIO_POLICY_MISMATCH", acquire)
-        self.assertIn("active_digest != expected_digest", acquire)
+        self.assertIn("InspectPortfolioPolicyLeases", acquire)
+        self.assertIn("FileFindFirst", inspect)
+        self.assertIn('directory + "\\\\*"', inspect)
+        self.assertIn("find_next_error != 0", inspect)
+        self.assertIn("g_portfolio_policy_lease_scan_error", inspect)
+        self.assertIn("PORTFOLIO_POLICY_MISMATCH", inspect)
+        self.assertIn("active_policy_digest != expected_policy_digest", inspect)
         self.assertIn("active_lease_count > 0", acquire)
+        self.assertIn("scan-anchor-v1.txt", acquire)
+        self.assertLess(
+            inspect.find("int stale_handle = FileOpen"),
+            inspect.find("ReadCommonText(lease_path, 512, raw)"),
+        )
         self.assertIn("WriteCommonTextAtomic(policy_path, canonical)", acquire)
         self.assertIn("FILE_SHARE_READ", acquire)
         self.assertNotIn("FILE_SHARE_WRITE", acquire)
+        self.assertIn("ReadCommonText(lease_path, 512, raw)", inspect)
+        self.assertIn("ParsePortfolioPolicyLeaseEvidence", inspect)
+        self.assertIn("MetafxHQPortfolioPolicyV2", parse)
+        self.assertIn("expected_account_digest", parse)
+        self.assertIn("legacy_policy_digest", parse)
+        self.assertIn("legacy_channel_digest", parse)
+        self.assertIn("PORTFOLIO_POLICY_STATE_INVALID", inspect)
         self.assertIn("FileClose(g_portfolio_policy_lease_handle)", release)
         self.assertIn("FileDelete(lease_path, FILE_COMMON)", release)
 
@@ -952,6 +1082,248 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("ReleasePortfolioPolicyLease", on_init)
         on_deinit = named_block(self.code, r"\bvoid\s+OnDeinit\s*\([^)]*\)")
         self.assertIn("ReleasePortfolioPolicyLease", on_deinit)
+
+    def test_portfolio_policy_lease_path_is_bounded_and_payload_authoritative(self) -> None:
+        path = named_block(
+            self.code,
+            r"\bbool\s+AccountPortfolioPolicyLeasePath\s*\([^)]*\)",
+        )
+        expanded = named_block(
+            self.code,
+            r"\bint\s+CommonFilesExpandedPathLength\s*\([^)]*\)",
+        )
+        parse = named_block(
+            self.code,
+            r"\bbool\s+ParsePortfolioPolicyLeaseEvidence\s*\([^)]*\)",
+        )
+        acquire = named_block(
+            self.code,
+            r"\bbool\s+AcquirePortfolioPolicyLease\s*\([^)]*\)",
+        )
+        diagnostic = named_block(
+            self.code,
+            r"\bbool\s+RecordInitDiagnostic\s*\([^)]*\)",
+        )
+
+        self.assertIn('"\\\\policy-p-"', path)
+        self.assertIn('"-c-"', path)
+        self.assertIn("PORTFOLIO_POLICY_PREFIX_HEX_LENGTH", path)
+        self.assertNotIn('"-channel-"', path)
+        self.assertIn("TERMINAL_COMMONDATA_PATH", expanded)
+        self.assertIn('StringLen("\\\\Files\\\\")', expanded)
+        self.assertIn("PORTFOLIO_POLICY_MAX_EXPANDED_PATH_LENGTH", acquire)
+        self.assertIn("MetafxHQPortfolioPolicyV2", acquire)
+        self.assertIn("account_digest", acquire)
+        self.assertIn("expected_digest", acquire)
+        self.assertIn("channel_digest", acquire)
+        self.assertIn("SnapshotChannel", acquire)
+        self.assertIn("GetLastError", acquire)
+        self.assertIn("portfolioPolicyLeaseOpenErrorCode", diagnostic)
+        self.assertIn("portfolioPolicyLeaseScanErrorCode", diagnostic)
+        self.assertIn("portfolioPolicyLeaseExpandedPathLength", diagnostic)
+        self.assertIn("portfolioPolicyLeaseMaxPathLength", diagnostic)
+
+        # The prefixes select only a slot. Full account/policy/channel SHA-256
+        # values in the bounded V2 payload are the evidence that is validated.
+        self.assertIn("parts[1] != expected_account_digest", parse)
+        self.assertIn("parts[2]", parse)
+        self.assertIn("parts[3]", parse)
+        self.assertIn("IsSafeChannel(parts[4])", parse)
+        self.assertIn("Sha256TextHex(parts[4], observed_channel_digest)", parse)
+        self.assertIn("observed_channel_digest != parts[3]", parse)
+        self.assertIn("policy_digest = parts[2]", parse)
+        self.assertIn("channel_digest = observed_channel_digest", parse)
+
+        common_files_prefix = (
+            "C:\\Users\\META\\AppData\\Roaming\\MetaQuotes\\Terminal\\Common\\Files\\"
+        )
+        account_directory = "MetafxHQ\\account-policies\\" + "a" * 64
+        compact_name = "policy-p-" + "b" * 16 + "-c-" + "c" * 16 + ".lease"
+        legacy_name = "policy-" + "b" * 64 + "-channel-" + "c" * 64 + ".lease"
+        compact_expanded_length = len(
+            common_files_prefix + account_directory + "\\" + compact_name
+        )
+        legacy_expanded_length = len(
+            common_files_prefix + account_directory + "\\" + legacy_name
+        )
+        self.assertEqual(len(compact_name), 50)
+        self.assertEqual(compact_expanded_length, 204)
+        self.assertLessEqual(compact_expanded_length, 259)
+        self.assertGreater(legacy_expanded_length, 259)
+
+        compact_pattern = re.compile(
+            r"^policy-p-([0-9a-f]{16})-c-([0-9a-f]{16})\.lease$"
+        )
+        legacy_pattern = re.compile(
+            r"^policy-([0-9a-f]{64})-channel-([0-9a-f]{64})\.lease$"
+        )
+        self.assertIsNotNone(compact_pattern.fullmatch(compact_name))
+        self.assertIsNotNone(legacy_pattern.fullmatch(legacy_name))
+        self.assertIsNone(compact_pattern.fullmatch("policy-p-bad-c-bad.lease"))
+        self.assertIsNone(legacy_pattern.fullmatch(compact_name))
+
+    def test_compact_lease_full_digest_mismatch_fails_closed_despite_same_prefix(self) -> None:
+        account_digest = "a" * 64
+        expected_policy = "b" * 64
+        conflicting_policy = "b" * 16 + "d" * 48
+        channel = "mtc-model-prefix-collision"
+        digest = snapshot_channel_digest(channel)
+        self.assertEqual(
+            compact_policy_lease_name(expected_policy, digest),
+            compact_policy_lease_name(conflicting_policy, digest),
+        )
+        reason, active_count = inspect_policy_leases_model(
+            [
+                {
+                    "name": compact_policy_lease_name(
+                        conflicting_policy, digest
+                    ),
+                    "payload": compact_policy_lease_payload(
+                        account_digest, conflicting_policy, channel
+                    ),
+                    "active": True,
+                }
+            ],
+            account_digest,
+            expected_policy,
+        )
+        self.assertEqual(reason, "PORTFOLIO_POLICY_MISMATCH")
+        self.assertEqual(active_count, 1)
+
+    def test_corrupt_or_unreadable_active_compact_lease_is_state_invalid(self) -> None:
+        account_digest = "a" * 64
+        policy_digest = "b" * 64
+        channel = "mtc-model-corrupt"
+        digest = snapshot_channel_digest(channel)
+        name = compact_policy_lease_name(policy_digest, digest)
+        corrupt_reason, _ = inspect_policy_leases_model(
+            [{"name": name, "payload": "corrupt", "active": True}],
+            account_digest,
+            policy_digest,
+        )
+        unreadable_reason, _ = inspect_policy_leases_model(
+            [
+                {
+                    "name": name,
+                    "payload": compact_policy_lease_payload(
+                        account_digest, policy_digest, channel
+                    ),
+                    "active": True,
+                    "readable": False,
+                }
+            ],
+            account_digest,
+            policy_digest,
+        )
+        self.assertEqual(corrupt_reason, "PORTFOLIO_POLICY_STATE_INVALID")
+        self.assertEqual(unreadable_reason, "PORTFOLIO_POLICY_STATE_INVALID")
+
+    def test_empty_or_partial_stale_compact_lease_is_cleaned_before_parse(self) -> None:
+        account_digest = "a" * 64
+        policy_digest = "b" * 64
+        channel = "mtc-model-stale-crash"
+        name = compact_policy_lease_name(
+            policy_digest, snapshot_channel_digest(channel)
+        )
+        reason, active_count = inspect_policy_leases_model(
+            [
+                {"name": name, "payload": "", "active": False},
+                {"name": name, "payload": "MetafxHQPortfolio", "active": False},
+            ],
+            account_digest,
+            policy_digest,
+        )
+        self.assertEqual(reason, "READY")
+        self.assertEqual(active_count, 0)
+
+    def test_compact_lease_rejects_channel_digest_tail_only_corruption(self) -> None:
+        account_digest = "a" * 64
+        policy_digest = "b" * 64
+        channel = "mtc-model-tail-corruption"
+        digest = snapshot_channel_digest(channel)
+        name = compact_policy_lease_name(policy_digest, digest)
+        payload_parts = compact_policy_lease_payload(
+            account_digest, policy_digest, channel
+        ).split("|")
+        payload_parts[3] = payload_parts[3][:16] + (
+            "0" if payload_parts[3][16] != "0" else "1"
+        ) + payload_parts[3][17:]
+        self.assertEqual(payload_parts[3][:16], digest[:16])
+        self.assertNotEqual(payload_parts[3], digest)
+
+        reason, active_count = inspect_policy_leases_model(
+            [{"name": name, "payload": "|".join(payload_parts), "active": True}],
+            account_digest,
+            policy_digest,
+        )
+        self.assertEqual(reason, "PORTFOLIO_POLICY_STATE_INVALID")
+        self.assertEqual(active_count, 0)
+
+    def test_compact_lease_enumeration_errors_fail_closed(self) -> None:
+        account_digest = "a" * 64
+        policy_digest = "b" * 64
+        channel = "mtc-model-enumeration"
+        digest = snapshot_channel_digest(channel)
+        record = {
+            "name": compact_policy_lease_name(policy_digest, digest),
+            "payload": compact_policy_lease_payload(
+                account_digest, policy_digest, channel
+            ),
+            "active": True,
+        }
+        first_reason, first_count = inspect_policy_leases_model(
+            [],
+            account_digest,
+            policy_digest,
+            first_scan_error=True,
+        )
+        next_reason, next_count = inspect_policy_leases_model(
+            [record],
+            account_digest,
+            policy_digest,
+            next_scan_error_at=0,
+        )
+        self.assertEqual(first_reason, "PORTFOLIO_POLICY_STATE_INVALID")
+        self.assertEqual(first_count, 0)
+        self.assertEqual(next_reason, "PORTFOLIO_POLICY_STATE_INVALID")
+        self.assertEqual(next_count, 1)
+
+    def test_two_channels_with_same_full_policy_coexist_and_current_path_is_bounded(self) -> None:
+        account_digest = "a" * 64
+        policy_digest = "b" * 64
+        channel_one = "mtc-model-channel-one"
+        channel_two = "mtc-model-channel-two"
+        records = [
+            {
+                "name": compact_policy_lease_name(
+                    policy_digest, snapshot_channel_digest(channel)
+                ),
+                "payload": compact_policy_lease_payload(
+                    account_digest, policy_digest, channel
+                ),
+                "active": True,
+            }
+            for channel in (channel_one, channel_two)
+        ]
+        self.assertNotEqual(records[0]["name"], records[1]["name"])
+        reason, active_count = inspect_policy_leases_model(
+            records, account_digest, policy_digest
+        )
+        self.assertEqual(reason, "READY")
+        self.assertEqual(active_count, 2)
+
+        current_common_files = (
+            "C:\\Users\\META\\AppData\\Roaming\\MetaQuotes\\Terminal\\Common\\Files"
+        )
+        current_relative_path = (
+            "MetafxHQ\\account-policies\\"
+            + account_digest
+            + "\\"
+            + str(records[0]["name"])
+        )
+        current_expanded_path = current_common_files + "\\" + current_relative_path
+        self.assertEqual(len(current_expanded_path), 204)
+        self.assertLess(len(current_expanded_path), 260)
 
     def test_outcome_and_history_recovery_are_isolated_to_exact_channel(self) -> None:
         resolve = named_block(

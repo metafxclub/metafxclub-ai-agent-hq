@@ -1,7 +1,7 @@
-MetaEditor: RoboForex MT4 MetaEditor
+﻿MetaEditor: RoboForex MT4 MetaEditor
 Source: MetafxHQTradeGateway.mq4
-CompiledAtLocal: 2026-08-13 19:29:43 Asia/Bangkok
-Result: 0 errors, 0 warnings, 81 msec elapsed
-SourceSHA256: 902449DF001B4CC974EF954D9A5BB6387A3FD8C0A105B54E95C4B82F917E8688
-BinarySHA256: 1CE1AE79FED8F79315C113E62997E13F39C0A17B9C687BC36E8A064626B675E6
-Safety: Compile and offline tests only; no deploy, EA reload, POST, restart, or trade command was performed.
+CompiledAtLocal: 2026-08-14 02:00:22 Asia/Bangkok
+Result: 0 errors, 0 warnings, 102 msec elapsed
+SourceSHA256: 6781A1052AD91C4A225233D74E979F50E0EDDD1A1D4787EAB5D9D68DC3412D9A
+BinarySHA256: D2C41D3C2C74BEE16D1A4D0A196BCC21FEB58305B15096F5E1D26630D9AB48A7
+Safety: This corrected build was compiled from an ignored offline copy; it was not deployed, reloaded, posted to MT4, or used to send a trade command during this build step.

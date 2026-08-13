@@ -71,6 +71,8 @@ string EA_VERSION = "2.16";
 const int ATOMIC_WRITE_MAX_ATTEMPTS = 3;
 const int ATOMIC_WRITE_BACKOFF_MILLIS = 25;
 const int LEGACY_BACKFILL_MAX_ACKS = 256;
+const int PORTFOLIO_POLICY_PREFIX_HEX_LENGTH = 16;
+const int PORTFOLIO_POLICY_MAX_EXPANDED_PATH_LENGTH = 259;
 int g_last_snapshot_attempt_at = 0;
 int g_last_snapshot_success_at = 0;
 bool g_last_snapshot_write_ok = false;
@@ -87,6 +89,9 @@ int g_account_execution_lock_handle = INVALID_HANDLE;
 int g_portfolio_policy_lease_handle = INVALID_HANDLE;
 string g_portfolio_policy_lease_path = "";
 string g_portfolio_policy_digest = "";
+int g_portfolio_policy_lease_open_error = 0;
+int g_portfolio_policy_lease_scan_error = 0;
+int g_portfolio_policy_lease_expanded_path_length = 0;
 uint g_last_tick_millis = 0;
 int g_risk_cache_at = 0;
 int g_cached_managed_positions = 0;
@@ -1902,18 +1907,41 @@ bool AccountPortfolioPolicyLeasePath(
    if(!AccountPortfolioPolicyDirectoryPath(directory) ||
       !Sha256TextHex(SnapshotChannel, channel_digest))
       return false;
-   path = directory + "\\policy-" + policy_digest + "-channel-" +
-      channel_digest + ".lease";
+   // Keep the legacy policy-*.lease namespace so an older v2.16 instance
+   // sees this compact slot and stops fail-closed instead of running beside
+   // an instance whose lease format it cannot validate.  Prefixes only select
+   // the filesystem slot; full digests in the V2 payload authorize the lease.
+   path = directory + "\\policy-p-" + StringSubstr(
+      policy_digest,
+      0,
+      PORTFOLIO_POLICY_PREFIX_HEX_LENGTH
+   ) + "-c-" + StringSubstr(
+      channel_digest,
+      0,
+      PORTFOLIO_POLICY_PREFIX_HEX_LENGTH
+   ) + ".lease";
    return true;
 }
 
 
-bool PortfolioPolicyDigestFromLeaseName(
+int CommonFilesExpandedPathLength(const string relative_path)
+{
+   string common_root = TerminalInfoString(TERMINAL_COMMONDATA_PATH);
+   if(StringLen(common_root) < 3 || StringLen(relative_path) < 1)
+      return -1;
+   return StringLen(common_root) + StringLen("\\Files\\") +
+      StringLen(relative_path);
+}
+
+
+bool LegacyPortfolioPolicyDigestsFromLeaseName(
    const string file_name,
-   string &policy_digest
+   string &policy_digest,
+   string &channel_digest
 )
 {
    policy_digest = "";
+   channel_digest = "";
    string prefix = "policy-";
    string channel_marker = "-channel-";
    string suffix = ".lease";
@@ -1932,7 +1960,7 @@ bool PortfolioPolicyDigestFromLeaseName(
       ) != suffix)
       return false;
    policy_digest = StringSubstr(file_name, StringLen(prefix), 64);
-   string channel_digest = StringSubstr(
+   channel_digest = StringSubstr(
       file_name,
       StringLen(prefix) + 64 + StringLen(channel_marker),
       64
@@ -1941,39 +1969,158 @@ bool PortfolioPolicyDigestFromLeaseName(
 }
 
 
-bool AcquirePortfolioPolicyLease(string &reason)
+bool CompactPortfolioPolicyPrefixesFromLeaseName(
+   const string file_name,
+   string &policy_prefix,
+   string &channel_prefix
+)
 {
-   reason = "";
-   if(g_portfolio_policy_lease_handle != INVALID_HANDLE)
-      return true;
-   string canonical = "";
-   string expected_digest = "";
-   string directory = "";
-   string policy_path = "";
-   if(!BuildPortfolioPolicyCanonical(canonical, expected_digest) ||
-      !AccountPortfolioPolicyDirectoryPath(directory) ||
-      !AccountPortfolioPolicyPath(policy_path))
-   {
-      reason = "PORTFOLIO_POLICY_STATE_INVALID";
+   policy_prefix = "";
+   channel_prefix = "";
+   string prefix = "policy-p-";
+   string channel_marker = "-c-";
+   string suffix = ".lease";
+   int expected_length = StringLen(prefix) +
+      PORTFOLIO_POLICY_PREFIX_HEX_LENGTH + StringLen(channel_marker) +
+      PORTFOLIO_POLICY_PREFIX_HEX_LENGTH + StringLen(suffix);
+   if(StringLen(file_name) != expected_length ||
+      StringSubstr(file_name, 0, StringLen(prefix)) != prefix ||
+      StringSubstr(
+         file_name,
+         StringLen(prefix) + PORTFOLIO_POLICY_PREFIX_HEX_LENGTH,
+         StringLen(channel_marker)
+      ) != channel_marker ||
+      StringSubstr(
+         file_name,
+         expected_length - StringLen(suffix)
+      ) != suffix)
       return false;
-   }
-   // Keep the expected non-secret policy digest available to init diagnostics
-   // even when another live instance holds a mismatched policy and OnInit
-   // stops fail-closed before status.json can be published.
-   g_portfolio_policy_digest = expected_digest;
+   policy_prefix = StringSubstr(
+      file_name,
+      StringLen(prefix),
+      PORTFOLIO_POLICY_PREFIX_HEX_LENGTH
+   );
+   channel_prefix = StringSubstr(
+      file_name,
+      StringLen(prefix) + PORTFOLIO_POLICY_PREFIX_HEX_LENGTH +
+         StringLen(channel_marker),
+      PORTFOLIO_POLICY_PREFIX_HEX_LENGTH
+   );
+   return IsLowerHexIdentifierPart(
+      policy_prefix,
+      0,
+      PORTFOLIO_POLICY_PREFIX_HEX_LENGTH
+   ) && IsLowerHexIdentifierPart(
+      channel_prefix,
+      0,
+      PORTFOLIO_POLICY_PREFIX_HEX_LENGTH
+   );
+}
 
-   int active_lease_count = 0;
+
+bool ParsePortfolioPolicyLeaseEvidence(
+   const string file_name,
+   const string raw,
+   const string expected_account_digest,
+   string &policy_digest,
+   string &channel_digest
+)
+{
+   policy_digest = "";
+   channel_digest = "";
+   string legacy_policy_digest = "";
+   string legacy_channel_digest = "";
+   bool legacy_name = LegacyPortfolioPolicyDigestsFromLeaseName(
+      file_name,
+      legacy_policy_digest,
+      legacy_channel_digest
+   );
+   string compact_policy_prefix = "";
+   string compact_channel_prefix = "";
+   bool compact_name = CompactPortfolioPolicyPrefixesFromLeaseName(
+      file_name,
+      compact_policy_prefix,
+      compact_channel_prefix
+   );
+   if(legacy_name == compact_name)
+      return false;
+
+   string parts[];
+   int count = StringSplit(Trimmed(raw), '|', parts);
+   if(legacy_name)
+   {
+      if(count != 4 || parts[0] != "MetafxHQPortfolioPolicy" ||
+         !IsSha256Hex(parts[1]) || !IsSafeChannel(parts[2]) ||
+         !IsIntegerToken(parts[3]) ||
+         (int)StringToInteger(parts[3]) < 946684800 ||
+         parts[1] != legacy_policy_digest ||
+         !Sha256TextHex(parts[2], channel_digest) ||
+         channel_digest != legacy_channel_digest)
+         return false;
+      policy_digest = parts[1];
+      return true;
+   }
+
+   if(count != 6 || parts[0] != "MetafxHQPortfolioPolicyV2" ||
+      !IsSha256Hex(parts[1]) || !IsSha256Hex(parts[2]) ||
+      !IsSha256Hex(parts[3]) || !IsSafeChannel(parts[4]) ||
+      !IsIntegerToken(parts[5]) ||
+      (int)StringToInteger(parts[5]) < 946684800 ||
+      parts[1] != expected_account_digest ||
+      StringSubstr(
+         parts[2],
+         0,
+         PORTFOLIO_POLICY_PREFIX_HEX_LENGTH
+      ) != compact_policy_prefix ||
+      StringSubstr(parts[3], 0, PORTFOLIO_POLICY_PREFIX_HEX_LENGTH) !=
+         compact_channel_prefix)
+      return false;
+   // The compact filename is only a slot selector.  Recompute the complete
+   // digest from the non-secret channel carried by the bounded V2 payload so
+   // a tail-only digest mutation cannot borrow a valid 16-hex slot prefix.
+   string observed_channel_digest = "";
+   if(!Sha256TextHex(parts[4], observed_channel_digest) ||
+      observed_channel_digest != parts[3])
+      return false;
+   policy_digest = parts[2];
+   channel_digest = observed_channel_digest;
+   return true;
+}
+
+
+bool InspectPortfolioPolicyLeases(
+   const string directory,
+   const string expected_account_digest,
+   const string expected_policy_digest,
+   int &active_lease_count,
+   string &reason
+)
+{
+   active_lease_count = 0;
    string file_name = "";
+   // AcquirePortfolioPolicyLease ensures the canonical policy file exists
+   // before this call.  Enumerating the whole account-policy directory means
+   // INVALID_HANDLE can therefore never mean an ordinary empty result.
+   ResetLastError();
    long search_handle = FileFindFirst(
-      directory + "\\policy-*.lease",
+      directory + "\\*",
       file_name,
       FILE_COMMON
    );
-   if(search_handle != INVALID_HANDLE)
+   if(search_handle == INVALID_HANDLE)
    {
-      do
+      g_portfolio_policy_lease_scan_error = GetLastError();
+      reason = "PORTFOLIO_POLICY_STATE_INVALID";
+      return false;
+   }
+   while(true)
+   {
+      if(StringSubstr(file_name, 0, StringLen("policy-")) == "policy-")
       {
          string lease_path = directory + "\\" + file_name;
+         // Probe ownership before parsing. A crash may leave an empty or
+         // partial file, but once its exclusive handle is gone it is stale
+         // evidence and can be removed safely without trusting its payload.
          ResetLastError();
          int stale_handle = FileOpen(
             lease_path,
@@ -1990,26 +2137,105 @@ bool AcquirePortfolioPolicyLease(string &reason)
                reason = "PORTFOLIO_POLICY_STALE_LEASE_CLEANUP_FAILED";
                return false;
             }
-            continue;
          }
-
-         string active_digest = "";
-         if(!PortfolioPolicyDigestFromLeaseName(file_name, active_digest))
+         else
          {
-            FileFindClose(search_handle);
-            reason = "PORTFOLIO_POLICY_STATE_INVALID";
-            return false;
-         }
-         active_lease_count++;
-         if(active_digest != expected_digest)
-         {
-            FileFindClose(search_handle);
-            reason = "PORTFOLIO_POLICY_MISMATCH";
-            return false;
+            string raw = "";
+            string active_policy_digest = "";
+            string active_channel_digest = "";
+            if(!ReadCommonText(lease_path, 512, raw) ||
+               !ParsePortfolioPolicyLeaseEvidence(
+                  file_name,
+                  raw,
+                  expected_account_digest,
+                  active_policy_digest,
+                  active_channel_digest
+               ))
+            {
+               FileFindClose(search_handle);
+               reason = "PORTFOLIO_POLICY_STATE_INVALID";
+               return false;
+            }
+            active_lease_count++;
+            if(active_policy_digest != expected_policy_digest)
+            {
+               FileFindClose(search_handle);
+               reason = "PORTFOLIO_POLICY_MISMATCH";
+               return false;
+            }
          }
       }
-      while(FileFindNext(search_handle, file_name));
+
+      ResetLastError();
+      bool has_next = FileFindNext(search_handle, file_name);
+      int find_next_error = GetLastError();
+      if(has_next)
+         continue;
       FileFindClose(search_handle);
+      if(find_next_error != 0)
+      {
+         g_portfolio_policy_lease_scan_error = find_next_error;
+         reason = "PORTFOLIO_POLICY_STATE_INVALID";
+         return false;
+      }
+      return true;
+   }
+   reason = "PORTFOLIO_POLICY_STATE_INVALID";
+   return false;
+}
+
+
+bool AcquirePortfolioPolicyLease(string &reason)
+{
+   reason = "";
+   if(g_portfolio_policy_lease_handle != INVALID_HANDLE)
+      return true;
+   string canonical = "";
+   string expected_digest = "";
+   string directory = "";
+   string policy_path = "";
+   string account_digest = "";
+   string channel_digest = "";
+   if(!BuildPortfolioPolicyCanonical(canonical, expected_digest) ||
+      !AccountPortfolioPolicyDirectoryPath(directory) ||
+      !AccountPortfolioPolicyPath(policy_path) ||
+      !AccountIdentityDigest(account_digest) ||
+      !Sha256TextHex(SnapshotChannel, channel_digest))
+   {
+      reason = "PORTFOLIO_POLICY_STATE_INVALID";
+      return false;
+   }
+   // Keep the expected non-secret policy digest available to init diagnostics
+   // even when another live instance holds a mismatched policy and OnInit
+   // stops fail-closed before status.json can be published.
+   g_portfolio_policy_digest = expected_digest;
+   g_portfolio_policy_lease_scan_error = 0;
+
+   // Seed a non-authorizing marker before enumeration so FileFindFirst
+   // returning an invalid handle is an I/O/state failure, never an ambiguous
+   // empty match. Do not repair the canonical policy before active leases have
+   // been inspected; missing/corrupt policy with an owner must remain invalid.
+   string scan_anchor_path = directory + "\\scan-anchor-v1.txt";
+   if(!FileIsExist(scan_anchor_path, FILE_COMMON) &&
+      !WriteCommonTextAtomic(
+         scan_anchor_path,
+         "MetafxHQPortfolioPolicyScanAnchorV1"
+      ))
+   {
+      reason = "PORTFOLIO_POLICY_STATE_INVALID";
+      return false;
+   }
+
+   int active_lease_count = 0;
+   if(!InspectPortfolioPolicyLeases(
+      directory,
+      account_digest,
+      expected_digest,
+      active_lease_count,
+      reason
+   ))
+   {
+      return false;
    }
 
    if(active_lease_count > 0)
@@ -2035,6 +2261,16 @@ bool AcquirePortfolioPolicyLease(string &reason)
       reason = "PORTFOLIO_POLICY_STATE_INVALID";
       return false;
    }
+   g_portfolio_policy_lease_open_error = 0;
+   g_portfolio_policy_lease_expanded_path_length =
+      CommonFilesExpandedPathLength(own_lease_path);
+   if(g_portfolio_policy_lease_expanded_path_length < 1 ||
+      g_portfolio_policy_lease_expanded_path_length >
+         PORTFOLIO_POLICY_MAX_EXPANDED_PATH_LENGTH)
+   {
+      reason = "PORTFOLIO_POLICY_STATE_INVALID";
+      return false;
+   }
    ResetLastError();
    int lease_handle = FileOpen(
       own_lease_path,
@@ -2043,16 +2279,29 @@ bool AcquirePortfolioPolicyLease(string &reason)
    );
    if(lease_handle == INVALID_HANDLE)
    {
+      g_portfolio_policy_lease_open_error = GetLastError();
       reason = "PORTFOLIO_POLICY_LEASE_UNAVAILABLE";
       return false;
    }
    FileSeek(lease_handle, 0, SEEK_SET);
-   FileWriteString(
+   string lease_payload =
+      "MetafxHQPortfolioPolicyV2|" + account_digest + "|" +
+      expected_digest + "|" + channel_digest + "|" +
+      SnapshotChannel + "|" +
+      IntegerToString(NowUtc());
+   uint written = FileWriteString(
       lease_handle,
-      "MetafxHQPortfolioPolicy|" + expected_digest + "|" +
-      SnapshotChannel + "|" + IntegerToString(NowUtc())
+      lease_payload
    );
    FileFlush(lease_handle);
+   if(written != (uint)StringLen(lease_payload))
+   {
+      g_portfolio_policy_lease_open_error = GetLastError();
+      FileClose(lease_handle);
+      FileDelete(own_lease_path, FILE_COMMON);
+      reason = "PORTFOLIO_POLICY_STATE_INVALID";
+      return false;
+   }
    g_portfolio_policy_lease_handle = lease_handle;
    g_portfolio_policy_lease_path = own_lease_path;
    g_portfolio_policy_digest = expected_digest;
@@ -5121,6 +5370,14 @@ bool RecordInitDiagnostic(
    payload += "\"stage\":" + JsonString(stage) + ",";
    payload += "\"reasonCode\":" + JsonString(reason_code) + ",";
    payload += "\"warningCode\":" + JsonString(g_init_warning_code) + ",";
+   payload += "\"portfolioPolicyLeaseOpenErrorCode\":" +
+      IntegerToString(g_portfolio_policy_lease_open_error) + ",";
+   payload += "\"portfolioPolicyLeaseScanErrorCode\":" +
+      IntegerToString(g_portfolio_policy_lease_scan_error) + ",";
+   payload += "\"portfolioPolicyLeaseExpandedPathLength\":" +
+      IntegerToString(g_portfolio_policy_lease_expanded_path_length) + ",";
+   payload += "\"portfolioPolicyLeaseMaxPathLength\":" +
+      IntegerToString(PORTFOLIO_POLICY_MAX_EXPANDED_PATH_LENGTH) + ",";
    payload += "\"returnCode\":" + IntegerToString(return_code) + ",";
    payload += "\"observedAt\":" + IntegerToString(NowUtc());
    payload += "}";

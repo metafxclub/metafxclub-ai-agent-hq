@@ -11,12 +11,14 @@
 - ใช้ Account Execution Lock แบบ OS file handle ครอบ mutable guards, Bar Claim และ `OrderSend()` ข้ามทุก Channel ที่ใช้บัญชีเดียวกัน; Process ล้มแล้ว OS คืน Handle จึงไม่เกิด stale-lock deadlock
 - Max Position/Lot/Trades/Loss ยังคงนับแบบ account-wide ตาม `ManagedMagicNumbers` ไม่ใช่จำนวนรายการในประวัติ Channel เดียว
 - Account Portfolio Policy Lease บังคับให้ชุด Managed Magic และ Portfolio caps ตรงกันทุก EA ของบัญชีเดียวกัน; ค่าต่างกันหยุดด้วย `PORTFOLIO_POLICY_MISMATCH` และ Crash lease ถูกล้างได้หลัง OS คืน Handle
+- แก้ Lease path ที่เคยขยายเป็น 304 ตัวอักษรบนเครื่องเป้าหมาย: ใช้ชื่อช่องแบบสั้น `policy-p-<policy-prefix16>-c-<channel-prefix16>.lease` และบังคับงบพาธ 259 ตัวอักษร โดย prefix ใช้เลือกไฟล์เท่านั้น ส่วน Payload V2 เก็บ Account/Policy/Channel SHA-256 เต็ม 64 hex พร้อม Snapshot Channel ที่ไม่ใช่ Secret แล้วคำนวณ Channel SHA-256 ซ้ำให้ตรงครบทั้งค่า
+- ตัวสแกนยังตรวจ Lease แบบ Legacy `policy-<64>-channel-<64>.lease`; probe ownership แบบ exclusive ก่อน parse จึงลบ stale lease ที่ว่าง/เขียนค้างจาก crash ได้ ส่วน Lease ที่ยังมี owner แต่ชื่อ/ข้อมูลเสีย, อ่านไม่ได้, digest ส่วนท้ายผิด, full digest ไม่ตรง, prefix ชนกัน หรือการ enumerate ผิดพลาดต้องหยุด fail-closed และ `init-status.json` รายงานเฉพาะ Error Code/ความยาวพาธโดยไม่เผยพาธจริง
 - Status schema v5 รายงาน Policy Digest/Scope, Managed Magic, Allowed Symbol/Timeframe และขอบเขต Lock แบบ `same_windows_user_file_common` โดยตรง; Cross-VPS distributed lock เป็น `false`
 - ต้องอัปเกรด EA ที่ทำงานพร้อมกันทั้งหมดเป็น v2.16; ไม่รองรับการรัน v2.16 ปะปน v2.15 หรือต่ำกว่าในบัญชีเดียวกัน
 - Backend Gateway มีประวัติแบบ cursor pagination เพื่อไม่ให้รายการเก่าหายเงียบหลังเกิน 500 Command
 - Consecutive-loss Cooldown และ Max Holding เปรียบเทียบ `OrderCloseTime`/`OrderOpenTime` กับ `TimeCurrent()` ใน clock domain ของ Broker เดียวกัน จึงไม่เลื่อนเร็วหรือช้าตาม Broker UTC+3/UTC-5; Wire `observedAt` ยังคงใช้ UTC
 
-ผล Compile ด้วย MetaEditor ของ RoboForex MT4 เมื่อ 13 สิงหาคม 2569:
+ผล Compile ด้วย MetaEditor ของ RoboForex MT4 เมื่อ 14 สิงหาคม 2569:
 
 ```text
 Result: 0 errors, 0 warnings, 81 msec elapsed
