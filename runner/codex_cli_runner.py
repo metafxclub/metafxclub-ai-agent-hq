@@ -3487,6 +3487,16 @@ def run_codex(
             if result_mode == "ai_trade_council_vote"
             else WORK_DISABLED_FEATURES
         )
+        if web_search:
+            # ``--search`` exposes Codex's first-party, read-only search tool.
+            # Leaving this feature in the disable list makes the CLI accept the
+            # live-search flags while withholding the tool from the worker.
+            # Keep every other Browser, MCP, app and Shell guard unchanged.
+            disabled_features = tuple(
+                feature
+                for feature in disabled_features
+                if feature != "standalone_web_search"
+            )
         for feature in disabled_features:
             command.extend(["--disable", feature])
         command.append("-")

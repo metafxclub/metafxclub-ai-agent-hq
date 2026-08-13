@@ -4051,8 +4051,10 @@ class RuntimeIntegrityTests(unittest.TestCase):
             original_runs_dir = self.runner.CODEX_RUNS_DIR
             original_status = self.runner.chat_status
             original_run_chat_command = self.runner.run_chat_command
+            captured_commands = []
 
             def fake_run_chat_command(command, timeout, stdin, cwd, output_limit=60000):
+                captured_commands.append(list(command))
                 raw_path = Path(command[command.index("-o") + 1])
                 raw_output_paths.append(raw_path)
                 self.assertNotEqual(raw_path.parent.resolve(), run_directory.resolve())
@@ -4094,6 +4096,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.assertNotIn("supersecretvalue", content)
             self.assertTrue(raw_output_paths)
             self.assertFalse(raw_output_paths[0].exists())
+            self.assertEqual(len(captured_commands), 1)
+            self.assertNotIn("--search", captured_commands[0])
+            self.assertIn("standalone_web_search", captured_commands[0])
 
     def test_report_image_attachments_are_allowlisted_projected_and_path_opaque(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -4255,6 +4260,15 @@ class RuntimeIntegrityTests(unittest.TestCase):
             self.assertIn('sandbox_mode="read-only"', command)
             self.assertIn("plugins", command)
             self.assertIn("computer_use", command)
+            self.assertNotIn("standalone_web_search", command)
+            for guarded_feature in (
+                "browser_use",
+                "browser_use_external",
+                "in_app_browser",
+                "apps",
+                "plugins",
+            ):
+                self.assertIn(guarded_feature, command)
             self.assertEqual(command[-1], "-")
 
             self.assertFalse(unverified["ok"])
@@ -5193,6 +5207,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         command = captured["command"]
         self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
         self.assertIn("shell_tool", command)
+        self.assertNotIn("standalone_web_search", command)
         self.assertIn("--json", command)
         self.assertNotIn("--add-dir", command)
         self.assertEqual(captured["cwd"], workspace)
