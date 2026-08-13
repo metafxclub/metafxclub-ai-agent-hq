@@ -228,6 +228,83 @@ class EquipmentOutputContractTests(unittest.TestCase):
         self.assertIn("__aggregate__", contract["oversizedFields"])
         self.assertEqual(contract["contractValueLimitChars"], 7000)
 
+    def test_full_result_envelope_over_budget_fails_even_when_contract_values_fit(self) -> None:
+        raw_result = {
+            "status": "completed",
+            "summary": "Verified daily research result with a bounded structured receipt.",
+            "findings": ["The published result was checked against the cited primary source. " * 5],
+            "nextSteps": ["Refresh the same market date after the next scheduled release. " * 4],
+            "evidence": [
+                {
+                    "label": "Official statistical release",
+                    "url": "https://example.gov/releases/daily-market-update",
+                    "note": "Read-only verification of the published value and timestamp.",
+                }
+            ],
+            "blockedCapability": "",
+            "contractFields": [
+                {"field": "first", "value": "a" * 9800},
+                {"field": "second", "value": "b" * 9800},
+            ],
+            "evidenceKinds": [],
+        }
+        compact_result = json.dumps(
+            raw_result,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        self.assertLessEqual(
+            sum(len(item["value"]) for item in raw_result["contractFields"]),
+            20000,
+        )
+        self.assertGreater(len(compact_result), 20000)
+
+        with self.assertRaisesRegex(ValueError, "result envelope values exceed output limit"):
+            self.runner.parse_work_result(compact_result, 20000)
+
+        mission = self._mission_for_contract(
+            output_fields=["first", "second"],
+            evidence_required=[],
+            action_id="full-result-envelope",
+        )
+        mission["budget"] = {"outputLimitChars": 20000}
+        contract = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            raw_result,
+        )
+        self.assertFalse(contract["valid"])
+        self.assertNotIn("__aggregate__", contract["oversizedFields"])
+        self.assertIn("__result__", contract["oversizedFields"])
+        self.assertGreater(contract["resultEnvelopeChars"], 20000)
+        self.assertEqual(contract["resultEnvelopeLimitChars"], 20000)
+
+    def test_full_result_budget_uses_compact_json_not_pretty_print_whitespace(self) -> None:
+        raw_result = {
+            "status": "completed",
+            "summary": "A compact structured receipt remains within budget.",
+            "findings": ["Verified the bounded payload."],
+            "nextSteps": ["No follow-up action is required."],
+            "evidence": [],
+            "blockedCapability": "",
+            "contractFields": [{"field": "payload", "value": "x" * 6000}],
+            "evidenceKinds": [],
+        }
+        compact_result = json.dumps(
+            raw_result,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        pretty_result = json.dumps(
+            raw_result,
+            ensure_ascii=False,
+            indent=100,
+        )
+        self.assertLess(len(compact_result), 7000)
+        self.assertGreater(len(pretty_result), 7000)
+
+        parsed = self.runner.parse_work_result(pretty_result, 7000)
+        self.assertEqual(parsed["structuredResultChars"], len(compact_result))
+
     def test_complete_declared_outputs_and_real_public_url_pass(self) -> None:
         mission, procedure = self._mission()
         fields = [

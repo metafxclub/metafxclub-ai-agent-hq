@@ -6317,7 +6317,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertEqual(result["kind"], "mission_confirmation_required")
         self.assertEqual(result["_httpStatus"], 422)
 
-    def test_runner_busy_does_not_consume_hourly_rate_counter(self) -> None:
+    def test_ready_guarded_manual_execute_reaches_runner_but_degraded_does_not(self) -> None:
         class BusySemaphore:
             def acquire(self, blocking=False):
                 return False
@@ -6335,7 +6335,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             try:
                 self.bridge.MISSIONS_PATH = runtime / "missions.json"
                 self.bridge.AUDIT_PATH = runtime / "bridge-audit.jsonl"
-                self.bridge.bridge_status = lambda: {"codex": {"status": "ready"}}
+                self.bridge.bridge_status = lambda: {"codex": {"status": "ready_guarded"}}
                 self.bridge.codex_rate_limits = lambda force=False: {"ok": False, "status": "unavailable", "stale": False}
                 self.bridge.REAL_RUN_SEMAPHORE = BusySemaphore()
                 self.bridge.RATE_LIMIT_STATE.clear()
@@ -6357,6 +6357,29 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.bridge.save_missions([mission])
                 result = self.bridge.execute_mission(mission["id"], {"confirmMissionId": mission["id"]})
                 self.assertEqual(result["kind"], "runner_busy")
+                self.assertEqual(self.bridge.RATE_LIMIT_STATE, {})
+
+                blocked_mission = {
+                    **mission,
+                    "id": "mission-runner-degraded",
+                    "status": "waiting_approval",
+                }
+                blocked_mission["approval"] = {
+                    "required": True,
+                    "state": "approved",
+                    "payloadDigest": self.bridge.mission_payload_digest(blocked_mission),
+                }
+                self.bridge.save_missions([blocked_mission])
+                self.bridge.bridge_status = lambda: {
+                    "codex": {"status": "degraded", "message": "Codex runner degraded"}
+                }
+                blocked = self.bridge.execute_mission(
+                    blocked_mission["id"],
+                    {"confirmMissionId": blocked_mission["id"]},
+                )
+                self.assertEqual(blocked["kind"], "runner_not_ready")
+                self.assertEqual(blocked["_httpStatus"], 503)
+                self.assertEqual(blocked["mission"]["runnerStatus"], "degraded")
                 self.assertEqual(self.bridge.RATE_LIMIT_STATE, {})
             finally:
                 self.bridge.MISSIONS_PATH = original_missions
@@ -6630,7 +6653,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.bridge.AUDIT_PATH = original_audit
                 self.bridge.MISSION_WORKER_WAKE.clear()
 
-    def test_auto_guarded_worker_executes_safe_codex_once_reports_and_completes_parent(self) -> None:
+    def test_ready_guarded_auto_worker_executes_safe_codex_once_reports_and_completes_parent(self) -> None:
         original_operator_mode = self.bridge.OPERATOR_MODE_PATH
         original_missions = self.bridge.MISSIONS_PATH
         original_reports = self.bridge.RUNTIME_REPORTS_DIR
@@ -6688,7 +6711,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.bridge.AUDIT_PATH = runtime / "bridge-audit.jsonl"
                 self.bridge.CODEX_RUNNER_PYTHON = Path(__file__)
                 self.bridge.CODEX_RUNNER_SCRIPT = Path(__file__)
-                self.bridge.bridge_status = lambda: {"codex": {"status": "ready"}}
+                self.bridge.bridge_status = lambda: {"codex": {"status": "ready_guarded"}}
                 self.bridge.codex_rate_limits = lambda force=False: {
                     "ok": True,
                     "status": "ready",

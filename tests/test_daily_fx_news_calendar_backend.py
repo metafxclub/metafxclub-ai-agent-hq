@@ -12,6 +12,7 @@ from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "bridge_server.py"
+RUNNER_PATH = PROJECT_ROOT / "runner" / "codex_cli_runner.py"
 
 
 def load_module(name: str, path: Path):
@@ -27,6 +28,7 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.bridge = load_module("metafx_daily_fx_news_bridge", BRIDGE_PATH)
+        cls.runner = load_module("metafx_daily_fx_news_runner", RUNNER_PATH)
 
     def pair_rows(self, source_ref: str = "official-1") -> list[dict]:
         return [
@@ -552,7 +554,7 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
         horizon = {
             "bias": "SIDEWAY",
             "confidence": 100,
-            "reasonTh": "x" * 20,
+            "reasonTh": "x" * 18,
             "sourceRefs": ["official-1"],
         }
         pair_rows = [
@@ -649,13 +651,21 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
         result = {
             "status": "completed",
             "summary": "compact daily calendar",
-            "findings": [],
-            "nextSteps": [],
+            "findings": [
+                "Verified six bounded calendar events against the listed public sources."
+            ],
+            "nextSteps": [
+                "Refresh this market date after the next scheduled official release."
+            ],
             "blockedCapability": "",
             "contractFields": contract_fields,
             "evidenceKinds": list(procedure["evidenceRequired"]),
             "evidence": [
-                {"label": "Official", "url": source["url"], "note": "Checked"}
+                {
+                    "label": "Official",
+                    "url": source["url"],
+                    "note": "Checked read-only against the published release.",
+                }
                 for source in fields["sourceLinks"]
             ],
         }
@@ -664,6 +674,8 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
         self.assertLessEqual(len(values["events"]), 12000)
         self.assertLessEqual(len(values["pairBias"]), 12000)
         self.assertLessEqual(len(envelope), 20000)
+        parsed = self.runner.parse_work_result(envelope, 20000)
+        self.assertEqual(parsed["structuredResultChars"], len(envelope))
         mission = {
             "createdAt": "2026-08-14T12:00:00Z",
             "budget": {"outputLimitChars": 20000},
@@ -674,8 +686,24 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
                 "pluginProcedure": procedure,
             },
         }
-        contract = self.bridge.validate_dashboard_workflow_output_contract(mission, result)
+        runner_transport = {
+            "workStatus": parsed["workStatus"],
+            "structuredSummary": parsed["summary"],
+            "structuredResultChars": parsed["structuredResultChars"],
+            "findings": parsed["findings"],
+            "nextSteps": parsed["nextSteps"],
+            "evidence": parsed["evidence"],
+            "blockedCapability": parsed["blockedCapability"],
+            "contractFields": parsed["contractFields"],
+            "evidenceKinds": parsed["evidenceKinds"],
+        }
+        contract = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            runner_transport,
+        )
         self.assertTrue(contract["valid"], contract)
+        self.assertLessEqual(contract["resultEnvelopeChars"], 20000)
+        self.assertEqual(contract["resultEnvelopeChars"], len(envelope))
 
     def test_manual_effective_form_gets_backend_bangkok_date(self) -> None:
         profile = self.bridge._trusted_workflow_plugin_profile(

@@ -2965,6 +2965,23 @@ def parse_work_result(raw: str, output_limit: int) -> dict:
     payload = json.loads(str(raw or ""))
     if not isinstance(payload, dict):
         raise ValueError("work result must be an object")
+    # ``outputLimitChars`` bounds the complete logical work result, not only
+    # the values nested inside contractFields.  Count a canonical compact JSON
+    # representation so harmless pretty-print whitespace does not consume the
+    # budget, while summary/findings/nextSteps/evidence and envelope keys do.
+    # This check intentionally happens before any per-field normalization;
+    # otherwise an over-budget model response could be made to look valid by
+    # silently dropping or truncating its surrounding prose.
+    result_envelope_limit = max(1000, min(20000, output_limit))
+    result_envelope_chars = len(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+    if result_envelope_chars > result_envelope_limit:
+        raise ValueError("work result envelope values exceed output limit")
     status_name = str(payload.get("status") or "").strip()
     if status_name not in WORK_RESULT_STATUSES:
         raise ValueError("unsupported work status")
@@ -3066,6 +3083,7 @@ def parse_work_result(raw: str, output_limit: int) -> dict:
         "blockedCapability": blocked_capability,
         "contractFields": contract_fields,
         "evidenceKinds": evidence_kinds,
+        "structuredResultChars": result_envelope_chars,
     }
 
 
@@ -3184,6 +3202,7 @@ def build_prompt(
 - Return status blocked when a required capability or policy boundary prevents the work.
 - Return evidence with public http/https URLs for web research. Never fabricate a source.
 - If the mission text contains Backend outputFields and evidenceRequired, contractFields must contain every named output field with a truthful non-empty value, and evidenceKinds must list every required evidence kind that was actually produced.
+- Keep the complete compact JSON result within {output_limit} characters. This limit includes status, summary, findings, nextSteps, evidence, blockedCapability, contractFields, evidenceKinds, and every JSON key/delimiter; it is not only a contractFields value budget.
 - If any required output field or evidence kind cannot be produced, return blocked instead of completed. For missions without such a contract, return empty contractFields and evidenceKinds."""
     )
     snapshot_packet = (
@@ -3609,6 +3628,8 @@ def run_codex(
         "approvalPolicy": "never",
         "reasoningEffort": reasoning_effort,
         "workStatus": work_status or result_status,
+        "structuredSummary": (structured_result or {}).get("summary", ""),
+        "structuredResultChars": (structured_result or {}).get("structuredResultChars", 0),
         "findings": (structured_result or {}).get("findings", []),
         "nextSteps": (structured_result or {}).get("nextSteps", []),
         "evidence": (structured_result or {}).get("evidence", []),

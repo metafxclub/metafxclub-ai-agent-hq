@@ -4146,6 +4146,50 @@ def _dashboard_workflow_semantic_evidence_valid(
     return False
 
 
+def _dashboard_workflow_result_envelope_chars(result: object) -> int:
+    """Measure the schema-level work result without runner transport metadata.
+
+    The Runner wraps a structured work result with process, sandbox, usage and
+    artifact metadata before returning it to the Bridge.  Those transport
+    fields are not part of the declared work-output budget, while the complete
+    structured result is.  Project both direct schema results and Runner
+    results into the same compact logical envelope for a defense-in-depth
+    Backend check.
+    """
+
+    row = result if isinstance(result, dict) else {}
+    summary_key = "structuredSummary" if "structuredSummary" in row else "summary"
+    envelope = {
+        "status": str(row.get("workStatus") or row.get("status") or "").strip(),
+        "summary": str(row.get(summary_key) or "").strip(),
+        "findings": row.get("findings") if isinstance(row.get("findings"), list) else [],
+        "nextSteps": row.get("nextSteps") if isinstance(row.get("nextSteps"), list) else [],
+        "evidence": row.get("evidence") if isinstance(row.get("evidence"), list) else [],
+        "blockedCapability": str(row.get("blockedCapability") or "").strip(),
+        "contractFields": (
+            row.get("contractFields")
+            if isinstance(row.get("contractFields"), list)
+            else []
+        ),
+        "evidenceKinds": (
+            row.get("evidenceKinds")
+            if isinstance(row.get("evidenceKinds"), list)
+            else []
+        ),
+    }
+    try:
+        return len(
+            json.dumps(
+                envelope,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+    except (TypeError, ValueError, OverflowError):
+        # An unserializable schema value can never be a valid bounded result.
+        return DASHBOARD_WORKFLOW_MAX_CONTRACT_FIELD_CHARS + 1_000_000
+
+
 def validate_dashboard_workflow_output_contract(mission: object, result: object) -> dict:
     """Fail closed when a completed equipment workflow omits its declared output."""
 
@@ -4299,6 +4343,16 @@ def validate_dashboard_workflow_output_contract(mission: object, result: object)
     )
     if contract_value_chars > aggregate_contract_limit:
         oversized_fields.append("__aggregate__")
+    result_envelope_chars = _dashboard_workflow_result_envelope_chars(result_row)
+    if result_envelope_chars > aggregate_contract_limit:
+        oversized_fields.append("__result__")
+    runner_result_chars = result_row.get("structuredResultChars")
+    if (
+        isinstance(runner_result_chars, int)
+        and not isinstance(runner_result_chars, bool)
+        and runner_result_chars > aggregate_contract_limit
+    ):
+        oversized_fields.append("__runner_result__")
     valid = (
         not missing_fields
         and not missing_evidence
@@ -4321,6 +4375,15 @@ def validate_dashboard_workflow_output_contract(mission: object, result: object)
         "oversizedFields": oversized_fields,
         "contractValueChars": contract_value_chars,
         "contractValueLimitChars": aggregate_contract_limit,
+        "resultEnvelopeChars": result_envelope_chars,
+        "resultEnvelopeLimitChars": aggregate_contract_limit,
+        "runnerStructuredResultChars": (
+            runner_result_chars
+            if isinstance(runner_result_chars, int)
+            and not isinstance(runner_result_chars, bool)
+            and runner_result_chars >= 0
+            else None
+        ),
         "sourceUrlCount": source_url_count,
         "checkedAt": utc_now(),
     })
@@ -29365,7 +29428,7 @@ def execute_mission(mission_id: str, payload: dict | None = None) -> dict:
         return {"ok": False, "kind": "adapter_not_implemented", "mission": mission, "message": mission["result"], "_httpStatus": 501}
 
     status = bridge_status()
-    if status.get("codex", {}).get("status") != "ready":
+    if status.get("codex", {}).get("status") not in {"ready", "ready_guarded"}:
         mission["status"] = "waiting_approval"
         mission["runnerStatus"] = status.get("codex", {}).get("status")
         mission["result"] = status.get("codex", {}).get("message") or "Codex Runner ยังไม่พร้อมใช้งาน"
