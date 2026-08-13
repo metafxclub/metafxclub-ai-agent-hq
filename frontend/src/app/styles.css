@@ -8136,6 +8136,10 @@ button:disabled {
   border-top-color: var(--cyan);
 }
 
+.signal-council-agent-card.ready {
+  border-top-color: var(--green);
+}
+
 .signal-council-agent-card.completed,
 .signal-council-agent-card.buy {
   border-top-color: var(--green);
@@ -9436,6 +9440,10 @@ button:disabled {
 
 .signal-agent-work-status[data-tone="working"] {
   color: var(--cyan);
+}
+
+.signal-agent-work-status[data-tone="ready"] {
+  color: var(--green);
 }
 
 .signal-agent-work-status[data-tone="completed"],

@@ -11413,6 +11413,7 @@ def _ai_trade_council_read_model(
     *,
     history_limit: int | None = AI_TRADE_COUNCIL_HISTORY_DEFAULT_LIMIT,
     history_cursor: str | None = None,
+    gateway_snapshot: dict | None = None,
 ) -> dict:
     """Expose only backend-observed trading facts; missing adapters remain unavailable."""
     selection = (
@@ -11455,7 +11456,14 @@ def _ai_trade_council_read_model(
     analysis_readiness = snapshot.get("analysisReadiness") if isinstance(snapshot.get("analysisReadiness"), dict) else {}
     terminal_adapter_ready = snapshot_adapter.get("ready") is True
     trading_state_available = terminal_adapter_ready
-    trade_gateway = mt4_trade_gateway_status_read_model()
+    # One caller-owned Gateway observation may be shared by every projection in
+    # a prop report.  Copy before adding Council-only fields so the canonical
+    # observation remains immutable for sibling read models.
+    trade_gateway = dict(
+        gateway_snapshot
+        if isinstance(gateway_snapshot, dict)
+        else mt4_trade_gateway_status_read_model()
+    )
     trade_gateway["managedOrderLimit"] = (
         _ai_trade_council_managed_order_limit_model(trade_gateway)
     )
@@ -12019,6 +12027,8 @@ def _ai_trade_council_read_model(
 def _auto_trading_status_read_model(
     reports: list[dict],
     connection_checklist: dict,
+    *,
+    gateway_snapshot: dict | None = None,
 ) -> dict:
     """Monitor the canonical Council runtime without copying its decisions."""
     unavailable_runtime = _ai_trade_council_read_model(
@@ -12026,6 +12036,7 @@ def _auto_trading_status_read_model(
         [],
         connection_checklist,
         prop_id=AI_TRADE_COUNCIL_PROP_ID,
+        gateway_snapshot=gateway_snapshot,
     )
     runtime_truth = {
         key: value
@@ -12392,11 +12403,20 @@ def prop_report(
     connection_source_profile = find_dashboard_connection_profile(
         connection_source_prop_id
     )
+    # The Gateway status file can change while MT4 is starting, deploying, or
+    # switching modes.  Capture it once so checklist, Council and legacy status
+    # projections cannot expose mutually contradictory states in one response.
+    gateway_snapshot = (
+        mt4_trade_gateway_status_read_model()
+        if connection_source_prop_id == AI_TRADE_COUNCIL_PROP_ID
+        else None
+    )
     connection_checklist = (
         dashboard_connection_checklist(
             connection_source_prop_id,
             bridge=live_bridge_status,
             missions=all_missions,
+            gateway_snapshot=gateway_snapshot,
         )
         if connection_source_profile
         else {}
@@ -12461,10 +12481,12 @@ def prop_report(
             connection_checklist,
             history_limit=history_limit,
             history_cursor=history_cursor,
+            gateway_snapshot=gateway_snapshot,
         )
         response["autoTradingStatus"] = _auto_trading_status_read_model(
             council_reports,
             connection_checklist,
+            gateway_snapshot=gateway_snapshot,
         )
     elif prop_id == AUTO_TRADING_STATUS_PROP_ID:
         status_reports = [
@@ -12475,6 +12497,7 @@ def prop_report(
         response["autoTradingStatus"] = _auto_trading_status_read_model(
             status_reports,
             connection_checklist,
+            gateway_snapshot=gateway_snapshot,
         )
     if is_global_mission_view:
         response.update({
@@ -21796,6 +21819,7 @@ def dashboard_connection_checklist(
     quota: dict | None = None,
     terminals: dict | None = None,
     missions: list[dict] | None = None,
+    gateway_snapshot: dict | None = None,
 ) -> dict:
     profile = find_dashboard_connection_profile(prop_id)
     if not profile:
@@ -21868,7 +21892,11 @@ def dashboard_connection_checklist(
             and quota_model.get("limitReached") is not True
         )
         operator_auto = load_operator_mode_record().get("mode") == "auto_guarded"
-        trade_gateway = mt4_trade_gateway_status_read_model()
+        trade_gateway = (
+            gateway_snapshot
+            if isinstance(gateway_snapshot, dict)
+            else mt4_trade_gateway_status_read_model()
+        )
         gateway_init_status = (
             trade_gateway.get("initStatus")
             if isinstance(trade_gateway.get("initStatus"), dict)

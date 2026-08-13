@@ -285,6 +285,77 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
             selection_block.index("|| consensusParent"),
         )
 
+    def test_terminal_previous_snapshot_is_history_not_current_agent_state(self) -> None:
+        current_snapshot = function_block(self.main, "function signalCurrentSnapshotId(report = {})")
+        model = function_block(self.main, "function signalCouncilRunModel(report = {})")
+        views = function_block(self.main, "function signalAgentViews(report = {}, runtime = getSignalRuntimeTruth(report))")
+
+        self.assertIn("council.chartSnapshot?.snapshotId", current_snapshot)
+        self.assertIn("council.decisionPipeline?.snapshot?.currentId", current_snapshot)
+        self.assertIn("selectedSnapshotId !== currentSnapshotId", model)
+        self.assertIn('signalMissionUiState(parent) === "blocked"', model)
+        self.assertIn('state: "ready_current_snapshot"', model)
+        self.assertIn("historicalParent: parent", model)
+        self.assertIn("previousRound: parent", model)
+        self.assertIn("parent: null", model)
+        self.assertIn('run.state === "ready_current_snapshot"', views)
+        self.assertIn('? "ready" : missionState', views)
+        self.assertIn("ผลรอบก่อนหน้าเก็บอยู่ในแท็บประวัติทั้งหมด", views)
+
+        safe_display = function_block(self.main, "function safeDashboardDisplayText(value")
+        automation = function_block(self.main, "function signalCouncilAutomationModel(report = {})")
+        mission_status = function_block(self.main, "function signalMissionStatusValue(mission = {})")
+        mission_ui = function_block(self.main, "function signalMissionUiState(mission = null)")
+        mission_created = function_block(self.main, "function signalMissionCreatedTime(mission = {})")
+        script = "\n".join([
+            "const state = { aiTradeCouncilOrderLimit: {}, aiTradeCouncilConsensusPolicy: {} };",
+            "const SIGNAL_MANAGED_ORDER_OPTIONS = [1, 3, 5, 10];",
+            "const signalCouncilModel = (report = {}) => report.aiTradeCouncil || {};",
+            "const normalizeSignalAnalysisBars = (value) => Number(value || 120);",
+            "const normalizeSignalMaxManagedOrders = (value) => Number(value || 1);",
+            "const firstFiniteSignalNumber = (...values) => { for (const value of values) { if (value === null || value === undefined || value === '') continue; const number = Number(value); if (Number.isFinite(number)) return number; } return null; };",
+            "const AI_TRADE_COUNCIL_AGENT_IDS = ['optimization_agent', 'backtest_analyst', 'codex_mcp_operator'];",
+            "const signalMissionStatusLabel = (mission) => mission?.status || 'idle';",
+            "const signalMissionReason = (mission, fallback) => mission?.reason || fallback;",
+            safe_display,
+            automation,
+            mission_status,
+            mission_ui,
+            mission_created,
+            current_snapshot,
+            model,
+            "const oldParent = { id: 'mission-old', status: 'blocked', reportType: 'ai_trade_council_report', createdAt: '2026-08-13T18:25:00Z', delegation: { mode: 'ai_trade_council_read_only', snapshotId: 'old-snapshot' }, subtaskIds: ['child-old'] };",
+            "const oldChild = { id: 'child-old', owner: 'optimization_agent', status: 'blocked', parentMissionId: 'mission-old', createdAt: '2026-08-13T18:25:01Z' };",
+            "const report = { aiTradeCouncil: { chartSnapshot: { snapshotId: 'current-snapshot' }, autoAnalysis: { config: { enabled: false }, state: { lastMissionId: 'mission-old' } }, decisionPipeline: { items: [oldParent, oldChild], snapshot: { currentId: 'current-snapshot' } } } };",
+            "const result = signalCouncilRunModel(report);",
+            "process.stdout.write(JSON.stringify({ state: result.state, parent: result.parent, previousId: result.previousRound?.id, childCount: result.children.length, blocked: result.counts.blocked }));",
+        ])
+        result = subprocess.run(
+            [self.node_binary(), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["state"], "ready_current_snapshot")
+        self.assertIsNone(payload["parent"])
+        self.assertEqual(payload["previousId"], "mission-old")
+        self.assertEqual(payload["childCount"], 0)
+        self.assertEqual(payload["blocked"], 0)
+
+        completed_script = script.replace("status: 'blocked'", "status: 'completed'")
+        completed_result = subprocess.run(
+            [self.node_binary(), "-e", completed_script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        completed_payload = json.loads(completed_result.stdout)
+        self.assertNotEqual(completed_payload["state"], "ready_current_snapshot")
+        self.assertEqual(completed_payload["parent"]["id"], "mission-old")
+
     def test_disabled_automation_ignores_stale_closed_bar_timestamps(self) -> None:
         automation = function_block(self.main, "function signalCouncilAutomationModel(report = {})")
 

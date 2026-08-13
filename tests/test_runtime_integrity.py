@@ -4993,6 +4993,88 @@ class RuntimeIntegrityTests(unittest.TestCase):
         )
         return payload
 
+    def test_ai_trade_council_runner_loads_bridge_candidate_bound_artifact(self) -> None:
+        snapshot_id = "6" * 64
+        candidate_id = "mtc-runner-bridge-contract"
+        fixture = self._runner_council_snapshot_payload(snapshot_id, 120)
+        snapshot_model = {
+            "selectedCandidateId": candidate_id,
+            "dailySummary": fixture["dailySummary"],
+            "chartSnapshot": fixture["chartSnapshot"],
+            "councilQualityGate": fixture["policy"]["qualityGate"],
+        }
+        original_bridge_workspace = self.bridge.AI_TRADE_COUNCIL_WORKSPACE_DIR
+        original_bridge_snapshot_dir = self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR
+        original_runner_workspace = self.runner.AUTO_WORKSPACE_ROOT
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            try:
+                self.bridge.AI_TRADE_COUNCIL_WORKSPACE_DIR = workspace
+                self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR = (
+                    workspace / "ai-trade-council" / "snapshots"
+                )
+                self.runner.AUTO_WORKSPACE_ROOT = workspace
+
+                reference = self.bridge._write_ai_trade_council_snapshot_artifact(
+                    snapshot_model
+                )
+                artifact_path = workspace / reference
+                stored = json.loads(artifact_path.read_text(encoding="utf-8"))
+                artifact_digest = stored["artifactDigest"]
+
+                self.assertEqual(stored["selectedCandidateId"], candidate_id)
+                self.assertEqual(
+                    self.runner.ai_trade_council_snapshot_artifact_digest(stored),
+                    artifact_digest,
+                )
+                loaded_reference, loaded = (
+                    self.runner.load_ai_trade_council_snapshot(
+                        snapshot_id,
+                        artifact_digest,
+                    )
+                )
+                self.assertEqual(loaded_reference, reference)
+                self.assertEqual(loaded["selectedCandidateId"], candidate_id)
+                self.assertEqual(
+                    self.runner.compact_ai_trade_council_snapshot(
+                        loaded,
+                        "technical",
+                    )["selectedCandidateId"],
+                    candidate_id,
+                )
+
+                candidate_tamper = json.loads(json.dumps(stored))
+                candidate_tamper["selectedCandidateId"] = "mtc-other-stream"
+                artifact_path.write_text(
+                    json.dumps(candidate_tamper),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                    self.runner.load_ai_trade_council_snapshot(
+                        snapshot_id,
+                        artifact_digest,
+                    )
+
+                invalid_candidate = json.loads(json.dumps(stored))
+                invalid_candidate["selectedCandidateId"] = "other-stream"
+                artifact_path.write_text(
+                    json.dumps(invalid_candidate),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, "read-only policy"):
+                    self.runner.load_ai_trade_council_snapshot(
+                        snapshot_id,
+                        artifact_digest,
+                    )
+            finally:
+                self.bridge.AI_TRADE_COUNCIL_WORKSPACE_DIR = (
+                    original_bridge_workspace
+                )
+                self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR = (
+                    original_bridge_snapshot_dir
+                )
+                self.runner.AUTO_WORKSPACE_ROOT = original_runner_workspace
+
     def test_ai_trade_council_runner_embeds_bounded_snapshot_and_returns_exact_vote_json(self) -> None:
         snapshot_id = "b" * 64
         vote = {
@@ -5190,6 +5272,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
                     ),
                 )
                 self.assertEqual(loaded["artifactDigest"], artifact_digest)
+                # Keep the original v1 artifact shape readable for already
+                # queued work, while any present candidate field is strict.
+                self.assertNotIn("selectedCandidateId", loaded)
 
                 payload["chartSnapshot"]["bars"][5]["high"] += 50
                 artifact.write_text(json.dumps(payload), encoding="utf-8")

@@ -65,7 +65,9 @@ class FrontendPollingStabilityTests(unittest.TestCase):
         self.assertIn('window.addEventListener("storage"', lifecycle)
         self.assertIn("releasePollingLeadership();", lifecycle)
         self.assertIn("stopAutomaticPolling();", lifecycle)
-        self.assertNotIn("force: true", lifecycle)
+        self.assertNotIn("claimPollingLeadership({ force", lifecycle)
+        self.assertIn('window.addEventListener("focus"', lifecycle)
+        self.assertIn("void pollOpenPropReport({ force: true });", lifecycle)
 
     def test_periodic_pollers_are_leader_gated_but_manual_rate_refresh_remains_available(self) -> None:
         for name in (
@@ -104,19 +106,57 @@ class FrontendPollingStabilityTests(unittest.TestCase):
         self.assertLess(start.index("runInitialPollingRead();"), start.index("claimPollingLeadership();"))
 
     def test_open_prop_report_reload_is_change_or_ttl_driven(self) -> None:
-        self.assertIn("const PROP_REPORT_POLL_TTL_MS = 60000;", self.main)
+        self.assertIn("const OPEN_PROP_REPORT_POLL_TTL_MS = 30000;", self.main)
         load_report = function_block(self.main, "loadPropReport")
         self.assertIn("state.propReportLoadedAt[key] = Date.now();", load_report)
         self.assertIn("propReportInFlight.get(key)", load_report)
         self.assertIn("propReportInFlight.set(key, request)", load_report)
         self.assertIn("propReportInFlight.delete(key)", load_report)
-        poll = self.main[
-            self.main.index("async function pollMissionReadModel("):
-            self.main.index("\nfunction startMissionPolling", self.main.index("async function pollMissionReadModel("))
-        ]
-        self.assertIn("data?.missionReadModelChanged === true || reportTtlExpired", poll)
-        self.assertIn("Date.now() - lastLoadedAt >= PROP_REPORT_POLL_TTL_MS", poll)
-        self.assertEqual(poll.count("await loadPropReport(state.modal.id, { signal })"), 1)
+        mission_poll = function_block(self.main, "pollMissionReadModel")
+        open_report_poll = function_block(self.main, "pollOpenPropReport")
+        mission_timer = function_block(self.main, "startMissionPolling")
+        automatic_start = function_block(self.main, "startAutomaticPolling")
+        self.assertIn("force: data?.missionReadModelChanged === true", mission_poll)
+        self.assertIn("Date.now() - lastLoadedAt >= OPEN_PROP_REPORT_POLL_TTL_MS", open_report_poll)
+        self.assertIn("await loadPropReport(propId, { signal })", open_report_poll)
+        self.assertIn("void pollOpenPropReport();", mission_timer)
+        self.assertIn("void pollOpenPropReport({ force: true });", automatic_start)
+        self.assertIn('typeof document.hasFocus === "function" && !document.hasFocus()', open_report_poll)
+        self.assertLess(
+            mission_timer.index("void pollOpenPropReport();"),
+            mission_timer.index("runAutomaticPollingTask"),
+        )
+
+        executable_poll = f"async {open_report_poll}"
+        script = "\n".join([
+            "const OPEN_PROP_REPORT_POLL_TTL_MS = 30000;",
+            "let loadCount = 0; let renderCount = 0;",
+            "let focused = true;",
+            "const document = { visibilityState: 'visible', hasFocus: () => focused, activeElement: { matches: () => false } };",
+            "const state = { modal: { open: true, type: 'prop', id: 'left_analytics_console' }, propReportLoadedAt: { left_analytics_console: 0 }, propReports: {} };",
+            "const loadPropReport = async (id) => { loadCount += 1; state.propReportLoadedAt[id] = Date.now(); state.propReports[id] = { generation: loadCount }; return state.propReports[id]; };",
+            "const renderGameModal = () => { renderCount += 1; };",
+            executable_poll,
+            "(async () => {",
+            "  await pollOpenPropReport();",
+            "  await pollOpenPropReport();",
+            "  focused = false;",
+            "  await pollOpenPropReport({ force: true });",
+            "  focused = true;",
+            "  document.visibilityState = 'hidden';",
+            "  await pollOpenPropReport({ force: true });",
+            "  process.stdout.write(JSON.stringify({ loadCount, renderCount, generation: state.propReports.left_analytics_console.generation }));",
+            "})().catch((error) => { console.error(error); process.exit(1); });",
+        ])
+        result = subprocess.run(
+            [self.node_binary(), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload, {"loadCount": 1, "renderCount": 1, "generation": 1})
 
     def test_hidden_or_pagehide_clears_and_aborts_every_automatic_poller(self) -> None:
         stop = function_block(self.main, "stopAutomaticPolling")

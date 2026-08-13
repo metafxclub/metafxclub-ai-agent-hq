@@ -71,7 +71,7 @@ const OPERATOR_MODE_POLL_MS = 30000;
 const AGENT_COLLABORATION_POLL_MS = 15000;
 const MISSION_POLL_MS = 30000;
 const MISSION_FETCH_TIMEOUT_MS = 25000;
-const PROP_REPORT_POLL_TTL_MS = 60000;
+const OPEN_PROP_REPORT_POLL_TTL_MS = 30000;
 const POLLING_LEADER_STORAGE_KEY = "metafx-hq-polling-leader-v1";
 const POLLING_LEADER_LEASE_MS = 45000;
 const POLLING_LEADER_RENEW_MS = 10000;
@@ -2097,6 +2097,7 @@ function startPollingLeadershipRenewal() {
 function startAutomaticPolling() {
   if (document.visibilityState !== "visible") return;
   runInitialPollingRead();
+  void pollOpenPropReport({ force: true });
   claimPollingLeadership();
   startPollingLeadershipRenewal();
   startCodexRateLimitPolling();
@@ -2123,6 +2124,11 @@ function initializePollingLeadership() {
   });
   window.addEventListener("pageshow", () => {
     if (document.visibilityState === "visible") startAutomaticPolling();
+  });
+  window.addEventListener("focus", () => {
+    if (document.visibilityState === "visible") {
+      void pollOpenPropReport({ force: true });
+    }
   });
   window.addEventListener("storage", (event) => {
     if (event.key !== POLLING_LEADER_STORAGE_KEY) return;
@@ -6540,6 +6546,7 @@ function signalCouncilTeamViews() {
 function signalAgentTone(view = {}) {
   if (view.state === "blocked") return "blocked";
   if (view.state === "running") return "working";
+  if (view.state === "ready") return "ready";
   if (view.direction === "BUY") return "buy";
   if (view.direction === "SELL") return "sell";
   if (view.direction === "HOLD") return "hold";
@@ -6555,6 +6562,8 @@ function signalAgentWorkStatus(view = {}) {
       ? "ติดขัด"
       : tone === "working"
         ? "กำลังวิเคราะห์"
+        : tone === "ready"
+          ? "พร้อมวิเคราะห์"
         : ["completed", "buy", "hold", "sell"].includes(tone)
           ? "เสร็จ"
           : "รอข้อมูล",
@@ -7419,6 +7428,17 @@ function signalSnapshotComparisonText(analyzedSnapshotId = "", currentSnapshotId
   return "ยังไม่มี Snapshot จาก Backend";
 }
 
+function signalCurrentSnapshotId(report = {}) {
+  const council = signalCouncilModel(report);
+  return safeDashboardDisplayText(
+    council.chartSnapshot?.snapshotId
+      || council.analysisReadiness?.snapshotId
+      || council.decisionPipeline?.snapshot?.currentId
+      || council.liveAnalysis?.consensus?.currentSnapshotId,
+    "",
+  );
+}
+
 function signalCouncilRunModel(report = {}) {
   const pipeline = signalCouncilModel(report).decisionPipeline || {};
   const automation = signalCouncilAutomationModel(report);
@@ -7497,6 +7517,38 @@ function signalCouncilRunModel(report = {}) {
     || automationParent
     || consensusParent
     || (!hasExplicitCurrentIdentity ? historicalParent : null);
+  const selectedSnapshotId = safeDashboardDisplayText(
+    parent?.delegation?.snapshotId,
+    "",
+  );
+  const currentSnapshotId = signalCurrentSnapshotId(report);
+  const previousRoundOnly = Boolean(
+    parent
+    && !activeParent
+    && signalMissionUiState(parent) === "blocked"
+    && selectedSnapshotId
+    && currentSnapshotId
+    && selectedSnapshotId !== currentSnapshotId,
+  );
+  if (previousRoundOnly) {
+    return {
+      parent: null,
+      activeParent: null,
+      historicalParent: parent,
+      previousRound: parent,
+      currentRun,
+      hasActiveRound: false,
+      children: [],
+      byAgent: new Map(),
+      counts: { running: 0, completed: 0, blocked: 0 },
+      state: "ready_current_snapshot",
+      statusLabel: "พร้อมวิเคราะห์ Snapshot ปัจจุบัน",
+      reason: "ผลของรอบก่อนหน้าเก็บอยู่ในแท็บประวัติ และจะไม่ถูกแสดงเป็นสถานะของ Snapshot ปัจจุบัน",
+      snapshotId: "",
+      currentSnapshotId,
+      current: false,
+    };
+  }
   const parentId = String(parent?.id || "");
   const childIds = new Set(
     (Array.isArray(parent?.subtaskIds) ? parent.subtaskIds : []).map((value) => String(value || "")),
@@ -7589,6 +7641,10 @@ function signalCurrentConsensusSource(report = {}, run = signalCouncilRunModel(r
 
 function signalAgentViews(report = {}, runtime = getSignalRuntimeTruth(report)) {
   const run = signalCouncilRunModel(report);
+  const council = signalCouncilModel(report);
+  const currentSnapshotObservedAt = council.chartSnapshot?.observedAt
+    || council.liveAnalysis?.observedAt
+    || null;
   const consensusSelection = signalCurrentConsensusSource(report, run);
   const sourceVotes = Array.isArray(consensusSelection.source?.votes)
     ? consensusSelection.source.votes
@@ -7619,6 +7675,7 @@ function signalAgentViews(report = {}, runtime = getSignalRuntimeTruth(report)) 
   ];
   return defaults.map((definition) => {
     const mission = run.byAgent.get(definition.agentId) || null;
+    const readyForCurrentSnapshot = run.state === "ready_current_snapshot";
     const waitingReason = run.state === "waiting_current_round"
       ? run.reason
       : definition.waitingReason;
@@ -7664,7 +7721,7 @@ function signalAgentViews(report = {}, runtime = getSignalRuntimeTruth(report)) 
         ? missionState
         : available
           ? (direction === "NO_DATA" ? "blocked" : "completed")
-          : missionState,
+          : readyForCurrentSnapshot ? "ready" : missionState,
       statusLabel: missionWins
         ? signalMissionStatusLabel(mission)
         : available
@@ -7682,10 +7739,14 @@ function signalAgentViews(report = {}, runtime = getSignalRuntimeTruth(report)) 
         ? [mission ? signalMissionReason(mission) : waitingReason]
         : available
         ? readableReasons.slice(0, 3)
-        : [mission ? signalMissionReason(mission) : waitingReason],
+        : readyForCurrentSnapshot
+          ? ["Snapshot ปัจจุบันพร้อมแล้ว • ผลรอบก่อนหน้าเก็บอยู่ในแท็บประวัติทั้งหมด"]
+          : [mission ? signalMissionReason(mission) : waitingReason],
       observedAt: available
         ? (view.observedAt || evidenceObservedAt || mission?.completedAt || mission?.createdAt || null)
-        : (mission?.completedAt || mission?.updatedAt || mission?.createdAt || null),
+        : readyForCurrentSnapshot
+          ? currentSnapshotObservedAt
+          : (mission?.completedAt || mission?.updatedAt || mission?.createdAt || null),
       blocker,
     };
   });
@@ -20637,24 +20698,43 @@ async function pollMissionReadModel({ manual = false, signal = null } = {}) {
   try {
     const data = await loadBridgeMissions({ replaceEvents: false, persist: false, refreshUi: true, signal });
     if (!manual && signal?.aborted) return null;
-    if (state.modal.open && state.modal.type === "prop" && state.modal.id !== "mission_strategy_table") {
-      const lastLoadedAt = Number(state.propReportLoadedAt[state.modal.id] || 0);
-      const reportTtlExpired = !Number.isFinite(lastLoadedAt) || Date.now() - lastLoadedAt >= PROP_REPORT_POLL_TTL_MS;
-      if (data?.missionReadModelChanged === true || reportTtlExpired) {
-        await loadPropReport(state.modal.id, { signal });
-        const userIsEditing = document.activeElement?.matches?.("textarea, input, select, [contenteditable='true']");
-        if (!userIsEditing) renderGameModal();
-      }
-    }
+    await pollOpenPropReport({
+      force: data?.missionReadModelChanged === true,
+      signal,
+    });
     return data;
   } finally {
     state.missionSync.inFlight = false;
   }
 }
 
+async function pollOpenPropReport({ force = false, signal = null } = {}) {
+  if (document.visibilityState !== "visible" || signal?.aborted) return null;
+  if (typeof document.hasFocus === "function" && !document.hasFocus()) return null;
+  if (!state.modal.open || state.modal.type !== "prop" || state.modal.id === "mission_strategy_table") return null;
+  const propId = state.modal.id;
+  const lastLoadedAt = Number(state.propReportLoadedAt[propId] || 0);
+  const reportTtlExpired = !Number.isFinite(lastLoadedAt)
+    || Date.now() - lastLoadedAt >= OPEN_PROP_REPORT_POLL_TTL_MS;
+  if (!force && !reportTtlExpired) return state.propReports[propId] || null;
+  const report = await loadPropReport(propId, { signal });
+  if (signal?.aborted || !report) return report;
+  const userIsEditing = document.activeElement?.matches?.("textarea, input, select, [contenteditable='true']");
+  if (
+    !userIsEditing
+    && state.modal.open
+    && state.modal.type === "prop"
+    && state.modal.id === propId
+  ) renderGameModal();
+  return report;
+}
+
 function startMissionPolling() {
   if (!state.missionSync.timer) {
     state.missionSync.timer = window.setInterval(() => {
+      // Every visible tab refreshes its own open report. Only the heavier
+      // mission read-model poll remains leader-only.
+      void pollOpenPropReport();
       void runAutomaticPollingTask((signal) => pollMissionReadModel({ signal }));
     }, MISSION_POLL_MS);
   }

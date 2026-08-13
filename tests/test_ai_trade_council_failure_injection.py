@@ -837,10 +837,12 @@ class AiTradeCouncilFailureInjectionTests(unittest.TestCase):
     def test_council_status_uses_the_canonical_council_connection_source(self) -> None:
         """The status prop must not create an independent MT4 selection universe."""
         checklist_calls: list[str] = []
+        checklist_gateway_snapshots: list[dict | None] = []
         snapshot_calls: list[str] = []
 
         def fake_checklist(prop_id: str, bridge=None, **_kwargs) -> dict:
             checklist_calls.append(prop_id)
+            checklist_gateway_snapshots.append(_kwargs.get("gateway_snapshot"))
             return {
                 "metatraderSelection": {
                     "status": "not_selected",
@@ -857,6 +859,16 @@ class AiTradeCouncilFailureInjectionTests(unittest.TestCase):
                 "not_selected",
                 "selected_terminal_missing",
             )
+
+        gateway_snapshot = self.bridge._empty_mt4_trade_gateway_status()
+        gateway_snapshot.update({
+            "connected": True,
+            "status": "shadow",
+            "reasonCode": "ready",
+            "executionGuardReady": True,
+            "executionGuardReason": "ATOMIC_SNAPSHOT_TEST",
+            "portfolioPolicyStatus": "ready",
+        })
 
         with (
             mock.patch.object(self.bridge, "load_missions", return_value=[]),
@@ -888,8 +900,8 @@ class AiTradeCouncilFailureInjectionTests(unittest.TestCase):
             mock.patch.object(
                 self.bridge,
                 "mt4_trade_gateway_status_read_model",
-                return_value=self.bridge._empty_mt4_trade_gateway_status(),
-            ),
+                return_value=gateway_snapshot,
+            ) as gateway_reader,
             mock.patch.object(
                 self.bridge,
                 "load_ai_trade_council_automation_store",
@@ -907,6 +919,22 @@ class AiTradeCouncilFailureInjectionTests(unittest.TestCase):
         self.assertEqual(
             checklist_calls,
             [self.bridge.AI_TRADE_COUNCIL_PROP_ID],
+        )
+        self.assertEqual(gateway_reader.call_count, 1)
+        self.assertEqual(checklist_gateway_snapshots, [gateway_snapshot])
+        self.assertEqual(
+            report["aiTradeCouncil"]["tradeGateway"]["executionGuardReason"],
+            "ATOMIC_SNAPSHOT_TEST",
+        )
+        self.assertEqual(
+            report["aiTradeCouncil"]["runtimeTruth"]["tradeGateway"]
+            ["executionGuardReason"],
+            "ATOMIC_SNAPSHOT_TEST",
+        )
+        self.assertEqual(
+            report["autoTradingStatus"]["runtimeTruth"]["tradeGateway"]
+            ["executionGuardReason"],
+            "ATOMIC_SNAPSHOT_TEST",
         )
         self.assertGreaterEqual(len(snapshot_calls), 2)
         self.assertEqual(

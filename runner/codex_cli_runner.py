@@ -2071,6 +2071,11 @@ def ai_trade_council_snapshot_artifact_digest(payload: dict) -> str:
             "policy",
         )
     }
+    # Bridge v1 artifacts created before chart-channel selection was durable do
+    # not carry this field.  New artifacts do, and the candidate identity must
+    # be part of the digest instead of being silently treated as legacy data.
+    if "selectedCandidateId" in payload:
+        canonical["selectedCandidateId"] = payload.get("selectedCandidateId")
     encoded = json.dumps(
         canonical,
         ensure_ascii=False,
@@ -2104,18 +2109,38 @@ def load_ai_trade_council_snapshot(
     if artifact_path.stat().st_size > AI_TRADE_COUNCIL_SNAPSHOT_MAX_BYTES:
         raise ValueError("Council snapshot artifact is too large")
     payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    legacy_keys = {
+        "schemaVersion",
+        "snapshotId",
+        "createdAt",
+        "sourceMode",
+        "dailySummary",
+        "chartSnapshot",
+        "policy",
+        "artifactDigest",
+    }
+    payload_keys = set(payload) if isinstance(payload, dict) else set()
+    allowed_payload_keys = {
+        frozenset(legacy_keys),
+        frozenset(legacy_keys | {"selectedCandidateId"}),
+    }
+    candidate_id = (
+        payload.get("selectedCandidateId")
+        if isinstance(payload, dict) and "selectedCandidateId" in payload
+        else None
+    )
+    candidate_identity_valid = (
+        "selectedCandidateId" not in payload_keys
+        or (
+            type(candidate_id) is str
+            and candidate_id.startswith("mtc-")
+            and SAFE_ID_PATTERN.fullmatch(candidate_id) is not None
+        )
+    )
     if (
         not isinstance(payload, dict)
-        or set(payload) != {
-            "schemaVersion",
-            "snapshotId",
-            "createdAt",
-            "sourceMode",
-            "dailySummary",
-            "chartSnapshot",
-            "policy",
-            "artifactDigest",
-        }
+        or frozenset(payload_keys) not in allowed_payload_keys
+        or not candidate_identity_valid
         or payload.get("schemaVersion") != "ai-trade-council-input-v1"
         or payload.get("snapshotId") != snapshot_id
         or payload.get("sourceMode") != "mt4_read_only_snapshot"
@@ -2367,6 +2392,8 @@ def compact_ai_trade_council_snapshot(
         "policy": compact_policy,
         "promptScope": prompt_scope,
     }
+    if "selectedCandidateId" in payload:
+        compact["selectedCandidateId"] = payload.get("selectedCandidateId")
 
     if role_id == "technical":
         source_series = list(chart["technicalIndicators"].get("series") or [])
