@@ -549,6 +549,106 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
             )
             self.assertFalse(valid, errors)
 
+    def test_live_combined_status_and_event_aliases_stay_fail_closed_with_exact_prompt_enums(self) -> None:
+        procedure = self.bridge.equipment_action_profile(
+            "left_signal_cube",
+            "analyze_daily_market_news",
+        )
+        prompt = self.bridge._workflow_prompt(
+            "analyze_daily_market_news",
+            {"marketDate": "2026-08-14", "minimumImpact": "low"},
+            None,
+            procedure,
+        )
+        self.assertIn('["success","verified","quiet_day"]', prompt)
+        self.assertIn('ห้ามใช้ "scheduled" หรือ "published"', prompt)
+        self.assertIn(
+            'actual ต้องเป็น null เมื่อ actualStatus เป็น pending/unavailable/not_applicable',
+            prompt,
+        )
+        report_contract = json.loads(
+            (PROJECT_ROOT / "contracts" / "reports" / "report-contract.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        enum_rules = report_contract["typed_report_schemas"]["fx_news_bias_report"]["enumRules"]
+        self.assertEqual(enum_rules["sourceStatus"], ["success", "verified", "quiet_day"])
+        self.assertEqual(
+            enum_rules["events[].timeKind"],
+            ["timed", "tentative", "all_day", "holiday"],
+        )
+
+        released = self.event(actual="0.4% q/q", actual_status="released")
+        released["timeKind"] = "published"
+        pending = self.event(
+            event_id="official-upcoming-1",
+            title="Eurostat GDP/จ้างงาน Q2",
+        )
+        pending["timeKind"] = "scheduled"
+        fields = {
+            "marketDate": "2026-08-14",
+            # Exact malformed scalar observed in the live Mission: this is
+            # two alternatives, not one trustworthy enum choice.
+            "sourceStatus": "success/verified",
+            "quietDay": False,
+            "events": [released, pending],
+            "dangerWindows": [],
+            "pairBias": self.pair_rows(),
+            "sourceLinks": [{
+                "id": "official-1",
+                "url": "https://www.bls.gov/news.release/cpi.nr0.htm",
+                "checkedAt": "2026-08-14T01:00:00Z",
+            }],
+            "checkedAt": "2026-08-14T01:00:00Z",
+            "updatedAt": "2026-08-14T01:00:00Z",
+            "limitations": [],
+        }
+        encoded = {
+            key: (
+                value
+                if isinstance(value, str)
+                else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            )
+            for key, value in fields.items()
+        }
+        mission = {
+            "createdAt": "2026-08-14T12:00:00Z",
+            "workflowContext": {
+                "actionId": "analyze_daily_market_news",
+                "inputs": {"marketDate": "2026-08-14"},
+            },
+        }
+        valid, errors = self.bridge._fx_daily_calendar_contract_valid(
+            encoded,
+            [{"url": "https://www.bls.gov/news.release/cpi.nr0.htm"}],
+            mission_row=mission,
+        )
+        self.assertFalse(valid)
+        self.assertIn("event_semantic_invalid", errors)
+        self.assertIn("source_status_invalid", errors)
+
+        # The Backend does not guess between combined values or reinterpret
+        # release-state aliases.  A canonical retry is accepted once every
+        # field makes one explicit, coherent choice.
+        released["timeKind"] = "timed"
+        pending["timeKind"] = "timed"
+        fields["sourceStatus"] = "verified"
+        fields["events"] = [released, pending]
+        canonical = {
+            key: (
+                value
+                if isinstance(value, str)
+                else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            )
+            for key, value in fields.items()
+        }
+        valid, errors = self.bridge._fx_daily_calendar_contract_valid(
+            canonical,
+            [{"url": "https://www.bls.gov/news.release/cpi.nr0.htm"}],
+            mission_row=mission,
+        )
+        self.assertTrue(valid, errors)
+
     def test_maximum_compact_runner_envelope_fits_daily_budget_and_field_caps(self) -> None:
         source_url = "https://www.bls.gov/news.release/cpi.nr0.htm"
         horizon = {
