@@ -389,7 +389,7 @@ MT4_TRADE_GATEWAY_STATUS_FRESH_SECONDS = 20
 MT4_TRADE_GATEWAY_INIT_STATUS_SCHEMA_VERSION = "metafx-hq-mt4-init-status-v1"
 MT4_TRADE_GATEWAY_INIT_STATUS_MAX_BYTES = 8 * 1024
 MT4_TRADE_GATEWAY_INIT_STATUS_FRESH_SECONDS = 24 * 60 * 60
-MT4_TRADE_GATEWAY_INIT_STATUS_FIELDS = frozenset({
+MT4_TRADE_GATEWAY_INIT_STATUS_LEGACY_FIELDS = frozenset({
     "schemaVersion",
     "eaVersion",
     "channelId",
@@ -404,6 +404,18 @@ MT4_TRADE_GATEWAY_INIT_STATUS_FIELDS = frozenset({
     "returnCode",
     "observedAt",
 })
+MT4_TRADE_GATEWAY_INIT_STATUS_DIAGNOSTIC_FIELDS = frozenset({
+    "portfolioPolicyLeaseOpenErrorCode",
+    "portfolioPolicyLeaseScanErrorCode",
+    "portfolioPolicyLeaseExpandedPathLength",
+    "portfolioPolicyLeaseMaxPathLength",
+})
+MT4_TRADE_GATEWAY_INIT_STATUS_FIELDS = (
+    MT4_TRADE_GATEWAY_INIT_STATUS_LEGACY_FIELDS
+    | MT4_TRADE_GATEWAY_INIT_STATUS_DIAGNOSTIC_FIELDS
+)
+MT4_TRADE_GATEWAY_INIT_STATUS_ERROR_CODE_MAX = 2_147_483_647
+MT4_TRADE_GATEWAY_INIT_STATUS_PATH_LENGTH_MAX = 32_767
 MT4_TRADE_GATEWAY_V4_STATUS_FIELDS = frozenset({
     "schemaVersion",
     "channelId",
@@ -15177,12 +15189,59 @@ def _empty_mt4_trade_gateway_init_status(
         "stage": None,
         "reasonCode": None,
         "warningCode": None,
+        "portfolioPolicyLeaseOpenErrorCode": None,
+        "portfolioPolicyLeaseScanErrorCode": None,
+        "portfolioPolicyLeaseExpandedPathLength": None,
+        "portfolioPolicyLeaseMaxPathLength": None,
         "returnCode": None,
         "observedAt": None,
         "ageSeconds": None,
         "stale": False,
         "supersededByLiveStatus": False,
     }
+
+
+def _validated_mt4_trade_gateway_init_status_diagnostics(
+    payload: dict,
+) -> dict | None:
+    """Validate optional v2.16 integer diagnostics without exposing a path."""
+    payload_fields = set(payload)
+    if payload_fields == MT4_TRADE_GATEWAY_INIT_STATUS_LEGACY_FIELDS:
+        return {
+            field: None
+            for field in MT4_TRADE_GATEWAY_INIT_STATUS_DIAGNOSTIC_FIELDS
+        }
+    if payload_fields != MT4_TRADE_GATEWAY_INIT_STATUS_FIELDS:
+        return None
+
+    values = {
+        field: payload.get(field)
+        for field in MT4_TRADE_GATEWAY_INIT_STATUS_DIAGNOSTIC_FIELDS
+    }
+    if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in values.values()
+    ):
+        return None
+    if not all(
+        0 <= int(values[field]) <= MT4_TRADE_GATEWAY_INIT_STATUS_ERROR_CODE_MAX
+        for field in (
+            "portfolioPolicyLeaseOpenErrorCode",
+            "portfolioPolicyLeaseScanErrorCode",
+        )
+    ):
+        return None
+    if not all(
+        0 <= int(values[field]) <= MT4_TRADE_GATEWAY_INIT_STATUS_PATH_LENGTH_MAX
+        for field in (
+            "portfolioPolicyLeaseExpandedPathLength",
+            "portfolioPolicyLeaseMaxPathLength",
+        )
+    ):
+        return None
+    if int(values["portfolioPolicyLeaseMaxPathLength"]) < 1:
+        return None
+    return {field: int(value) for field, value in values.items()}
 
 
 def _read_mt4_trade_gateway_init_status(selected_candidate: dict) -> dict:
@@ -15220,9 +15279,14 @@ def _read_mt4_trade_gateway_init_status(selected_candidate: dict) -> dict:
             read_status="invalid",
             read_reason_code="gateway_init_status_json_invalid",
         )
+    init_diagnostics = (
+        _validated_mt4_trade_gateway_init_status_diagnostics(payload)
+        if isinstance(payload, dict)
+        else None
+    )
     if (
         not isinstance(payload, dict)
-        or set(payload) != MT4_TRADE_GATEWAY_INIT_STATUS_FIELDS
+        or init_diagnostics is None
         or payload.get("schemaVersion") != MT4_TRADE_GATEWAY_INIT_STATUS_SCHEMA_VERSION
         or payload.get("channelId") != candidate_id
         or payload.get("profile") != "special"
@@ -15289,6 +15353,7 @@ def _read_mt4_trade_gateway_init_status(selected_candidate: dict) -> dict:
         "stage": str(payload["stage"]),
         "reasonCode": str(payload["reasonCode"]),
         "warningCode": str(payload["warningCode"]) or None,
+        **init_diagnostics,
         "returnCode": int(payload["returnCode"]),
         "observedAt": datetime.fromtimestamp(observed_at, tz=timezone.utc).isoformat(),
         "ageSeconds": age_seconds,

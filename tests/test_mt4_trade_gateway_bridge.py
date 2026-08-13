@@ -265,12 +265,93 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.assertEqual(init_status["severity"], "error")
         self.assertEqual(init_status["stage"], "chart")
         self.assertEqual(init_status["reasonCode"], "SYMBOL_OR_TIMEFRAME_NOT_ALLOWED")
+        self.assertIsNone(init_status["portfolioPolicyLeaseOpenErrorCode"])
+        self.assertIsNone(init_status["portfolioPolicyLeaseScanErrorCode"])
+        self.assertIsNone(init_status["portfolioPolicyLeaseExpandedPathLength"])
+        self.assertIsNone(init_status["portfolioPolicyLeaseMaxPathLength"])
         self.assertNotIn("channelId", init_status)
         self.assertNotIn("profile", init_status)
         self.assertIn(
             "คู่เงินหรือ Timeframe ของกราฟไม่อยู่ในรายการที่อนุญาต",
             self.bridge._mt4_trade_gateway_init_status_message_th(init_status),
         )
+
+    def test_gateway_status_accepts_exact_v216_ready_init_diagnostic_shape(self) -> None:
+        self.write_ea_init_status(
+            eaVersion="2.16",
+            gatewayMode="shadow",
+            accountMode="demo",
+            liveArmed=False,
+            severity="info",
+            stage="ready",
+            reasonCode="INIT_SUCCEEDED",
+            warningCode="",
+            portfolioPolicyLeaseOpenErrorCode=0,
+            portfolioPolicyLeaseScanErrorCode=0,
+            portfolioPolicyLeaseExpandedPathLength=204,
+            portfolioPolicyLeaseMaxPathLength=259,
+            returnCode=0,
+        )
+        self.write_ea_status(eaVersion="2.16")
+        with self.selected_candidate():
+            status = self.bridge.mt4_trade_gateway_status_read_model()
+
+        init_status = status["initStatus"]
+        self.assertTrue(init_status["available"])
+        self.assertEqual(init_status["readReasonCode"], "ready")
+        self.assertEqual(init_status["stage"], "ready")
+        self.assertEqual(init_status["reasonCode"], "INIT_SUCCEEDED")
+        self.assertEqual(init_status["portfolioPolicyLeaseOpenErrorCode"], 0)
+        self.assertEqual(init_status["portfolioPolicyLeaseScanErrorCode"], 0)
+        self.assertEqual(init_status["portfolioPolicyLeaseExpandedPathLength"], 204)
+        self.assertEqual(init_status["portfolioPolicyLeaseMaxPathLength"], 259)
+        self.assertNotIn("channelId", init_status)
+        self.assertNotIn("profile", init_status)
+        self.assertFalse(
+            any(
+                isinstance(value, str) and ("\\" in value or "/" in value)
+                for value in init_status.values()
+            )
+        )
+
+    def test_gateway_status_rejects_partial_or_unbounded_init_diagnostics(self) -> None:
+        invalid_overrides = (
+            {"portfolioPolicyLeaseOpenErrorCode": 0},
+            {
+                "portfolioPolicyLeaseOpenErrorCode": True,
+                "portfolioPolicyLeaseScanErrorCode": 0,
+                "portfolioPolicyLeaseExpandedPathLength": 204,
+                "portfolioPolicyLeaseMaxPathLength": 259,
+            },
+            {
+                "portfolioPolicyLeaseOpenErrorCode": 2_147_483_648,
+                "portfolioPolicyLeaseScanErrorCode": 0,
+                "portfolioPolicyLeaseExpandedPathLength": 204,
+                "portfolioPolicyLeaseMaxPathLength": 259,
+            },
+            {
+                "portfolioPolicyLeaseOpenErrorCode": 0,
+                "portfolioPolicyLeaseScanErrorCode": 0,
+                "portfolioPolicyLeaseExpandedPathLength": 32_768,
+                "portfolioPolicyLeaseMaxPathLength": 259,
+            },
+            {
+                "portfolioPolicyLeaseOpenErrorCode": 0,
+                "portfolioPolicyLeaseScanErrorCode": 0,
+                "portfolioPolicyLeaseExpandedPathLength": 204,
+                "portfolioPolicyLeaseMaxPathLength": 0,
+            },
+        )
+        for overrides in invalid_overrides:
+            with self.subTest(overrides=overrides):
+                self.write_ea_init_status(**overrides)
+                with self.selected_candidate():
+                    status = self.bridge.mt4_trade_gateway_status_read_model()
+                self.assertFalse(status["initStatus"]["available"])
+                self.assertEqual(
+                    status["initStatus"]["readReasonCode"],
+                    "gateway_init_status_schema_invalid",
+                )
 
     def test_gateway_status_rejects_init_status_with_unknown_secret_field(self) -> None:
         self.write_ea_init_status(brokerPassword="must-not-leak")
