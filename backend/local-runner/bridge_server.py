@@ -16573,8 +16573,9 @@ def _mt4_trade_gateway_publish_for_selection(
     *,
     expected_candidate_id: str,
     expected_selection_revision: int | None,
+    expected_closed_bar_identity: dict,
 ) -> dict:
-    """Atomically revalidate target generation and cross the publish boundary."""
+    """Atomically revalidate target/bar identity and cross the publish boundary."""
     with MT4_TRADE_GATEWAY_LOCK:
         current_selection = _metatrader_selection_token(
             AI_TRADE_COUNCIL_PROP_ID
@@ -16588,6 +16589,30 @@ def _mt4_trade_gateway_publish_for_selection(
             return {
                 "ok": False,
                 "reasonCode": "terminal_selection_changed_before_publish",
+                "published": None,
+                "command": None,
+            }
+        current_snapshot = metatrader_snapshot_read_model(
+            AI_TRADE_COUNCIL_PROP_ID
+        )
+        current_identity, current_identity_reason = (
+            _ai_trade_council_closed_bar_identity(current_snapshot)
+        )
+        if current_identity is None:
+            return {
+                "ok": False,
+                "reasonCode": "current_closed_bar_unavailable_before_publish",
+                "detailCode": current_identity_reason,
+                "published": None,
+                "command": None,
+            }
+        if not _ai_trade_council_pending_matches_current_closed_bar(
+            expected_closed_bar_identity,
+            current_identity,
+        ):
+            return {
+                "ok": False,
+                "reasonCode": "closed_bar_advanced_during_analysis",
                 "published": None,
                 "command": None,
             }
@@ -17936,6 +17961,20 @@ def _mt4_trade_gateway_order_history(
     }
 
 
+def _mt4_trade_gateway_ack_event_read_model(item: dict) -> dict:
+    ack = item.get("ack") if isinstance(item.get("ack"), dict) else {}
+    return {
+        "kind": str(item.get("kind") or ""),
+        "commandId": safe_reference(item.get("commandId")),
+        "status": str(item.get("status") or ""),
+        "code": redact_text(str(item.get("code") or ""), 96) or None,
+        "reasonCode": redact_text(
+            str(item.get("reasonCode") or ack.get("reasonCode") or ""),
+            96,
+        ) or None,
+    }
+
+
 def mt4_trade_gateway_status_read_model() -> dict:
     """Reconcile the backend ledger and expose a sanitized EA status model."""
     record = _selected_metatrader_candidate_record(AI_TRADE_COUNCIL_PROP_ID)
@@ -18325,11 +18364,7 @@ def mt4_trade_gateway_status_read_model() -> dict:
         "latestCommand": latest_command,
         "executionUnknownRecovery": execution_unknown_recovery,
         "ackEvents": [
-            {
-                "kind": str(item.get("kind") or ""),
-                "commandId": safe_reference(item.get("commandId")),
-                "status": str(item.get("status") or ""),
-            }
+            _mt4_trade_gateway_ack_event_read_model(item)
             for item in ack_events
             if isinstance(item, dict)
         ],
@@ -18497,6 +18532,55 @@ def _ai_trade_council_stream_key(
     if not channel or not symbol_identity or not timeframe_identity:
         return None
     return payload_digest(channel, symbol_identity, timeframe_identity)
+
+
+def _ai_trade_council_pending_matches_current_closed_bar(
+    pending: object,
+    current_identity: object,
+) -> bool:
+    """Bind trade eligibility to immutable stream/bar identity, not tick state.
+
+    ``snapshotId`` intentionally covers the complete MT4 snapshot, including
+    quote/risk fields that can change on every EA publication.  A Council round
+    analyzes the durable artifact captured for one closed bar; it remains the
+    current bar while candidate, stream, broker symbol, timeframe, and closed
+    bar time are unchanged.  Dispatch still revalidates the live Gateway/EA
+    risk envelope and the EA finally requires this exact closed bar.
+    """
+    if not isinstance(pending, dict) or not isinstance(current_identity, dict):
+        return False
+    candidate_id = safe_reference(pending.get("candidateId"))
+    current_candidate_id = safe_reference(current_identity.get("candidateId"))
+    symbol_identity = _ai_trade_council_symbol_identity(pending.get("symbol"))
+    current_symbol_identity = _ai_trade_council_symbol_identity(
+        current_identity.get("symbol")
+    )
+    timeframe = _safe_snapshot_timeframe(pending.get("timeframe"))
+    current_timeframe = _safe_snapshot_timeframe(current_identity.get("timeframe"))
+    stream_key = str(pending.get("streamKey") or "")
+    current_stream_key = str(current_identity.get("streamKey") or "")
+    pending_bar_time = _automation_optional_count(pending.get("closedBarTime"))
+    current_bar_time = _automation_optional_count(
+        current_identity.get("lastClosedBarTime")
+    )
+    expected_stream_key = _ai_trade_council_stream_key(
+        candidate_id,
+        pending.get("symbol"),
+        timeframe,
+    )
+    return bool(
+        candidate_id
+        and candidate_id == current_candidate_id
+        and symbol_identity
+        and symbol_identity == current_symbol_identity
+        and timeframe
+        and timeframe == current_timeframe
+        and re.fullmatch(r"[0-9a-f]{64}", stream_key)
+        and stream_key == current_stream_key
+        and stream_key == expected_stream_key
+        and pending_bar_time is not None
+        and pending_bar_time == current_bar_time
+    )
 
 
 def _safe_snapshot_timeframe(value: object) -> str | None:
@@ -25410,15 +25494,15 @@ def ai_trade_council_automation_tick() -> dict:
         # Codex/quota/operator gate.  Check it before those transient gates so
         # a stale record whose immutable artifact is missing cannot remain
         # advertised as runnable pending work forever while a gate is closed.
-        is_current_exact = bool(
-            pending_bar_time == closed_bar_time
-            and pending.get("snapshotId") == identity["snapshotId"]
+        is_current_exact = _ai_trade_council_pending_matches_current_closed_bar(
+            pending,
+            identity,
         )
-        analysis_snapshot = (
-            snapshot
-            if is_current_exact
-            else _ai_trade_council_snapshot_from_artifact(pending)
-        )
+        # Always analyze the immutable capture. The live snapshot can change
+        # between detection and settle because bid/ask/risk telemetry moves;
+        # substituting it would violate same-Snapshot voting even on the same
+        # still-current closed bar.
+        analysis_snapshot = _ai_trade_council_snapshot_from_artifact(pending)
         if not isinstance(analysis_snapshot, dict):
             completed_at = utc_now()
             pending.update({
@@ -28042,6 +28126,7 @@ def dispatch_ai_trade_council_trade_plan(
             intent,
             expected_candidate_id=channel_id,
             expected_selection_revision=selection_revision,
+            expected_closed_bar_identity=bar_identity,
         )
         if selection_publish.get("ok") is not True:
             return _ai_trade_council_gateway_result(
@@ -28463,6 +28548,14 @@ def _refresh_parent_mission_locked(parent_mission_id: str | None) -> dict | None
                     f"{council_consensus.get('requiredVotes') or 3}/3 "
                     "จึงไม่มีคำสั่งส่งไป MT4"
                 )
+                gateway_reason = str(
+                    trade_gateway_result.get("reasonCode") or ""
+                )
+                if gateway_reason == "audit_only_backlog_never_dispatches":
+                    gateway_message = (
+                        "รอบนี้วิเคราะห์เพื่อ Audit เท่านั้น เพราะแท่งปิดไม่ใช่แท่ง"
+                        "ปัจจุบันแล้ว จึงไม่ส่งคำสั่งย้อนหลังไป MT4"
+                    )
             elif trade_gateway_result.get("orderExecutionConfirmed") is True:
                 gateway_message = "EA ยืนยันการส่ง Order แล้ว และบันทึก ACK กลับสู่ Audit"
             elif trade_gateway_result.get("shadowValidationConfirmed") is True:

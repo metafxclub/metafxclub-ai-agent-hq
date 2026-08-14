@@ -1050,6 +1050,15 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
             {"channelId": "mtc-chart-a"},
             expected_candidate_id="mtc-chart-a",
             expected_selection_revision=1,
+            expected_closed_bar_identity={
+                "candidateId": "mtc-chart-a",
+                "streamKey": self.bridge._ai_trade_council_stream_key(
+                    "mtc-chart-a", "XAUUSD", "M5"
+                ),
+                "symbol": "XAUUSD",
+                "timeframe": "M5",
+                "closedBarTime": 1_786_470_000,
+            },
         )
 
         self.assertFalse(result["ok"])

@@ -47,6 +47,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             "ordinal": 1,
             "runningState": "platform_running_detected",
         }
+        self.current_closed_bar_time = 1_785_445_200
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -234,6 +235,20 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             self.bridge,
             "_metatrader_selection_token",
             return_value=selection_token,
+        ), mock.patch.object(
+            self.bridge,
+            "metatrader_snapshot_read_model",
+            return_value={
+                "selectedCandidateId": self.candidate["candidateId"],
+                "adapter": {"ready": True},
+                "chartSnapshot": {
+                    "available": True,
+                    "snapshotId": "f" * 64,
+                    "symbol": "XAUUSD",
+                    "timeframe": "M5",
+                    "bars": [{"time": self.current_closed_bar_time}],
+                },
+            },
         ):
             yield
 
@@ -250,6 +265,25 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.assertTrue(status["shadowValidationAvailable"])
         self.assertFalse(status["demoOrderExecutionAvailable"])
         self.assertFalse(status["liveOrderExecutionAvailable"])
+
+    def test_ack_event_projection_exposes_nested_terminal_rejection_reason(self) -> None:
+        projected = self.bridge._mt4_trade_gateway_ack_event_read_model({
+            "ok": True,
+            "kind": "mt4_trade_ack_ingested",
+            "commandId": "cmd-safe-rejected-ack",
+            "status": "ack_REJECTED",
+            "ack": {
+                "status": "REJECTED",
+                "reasonCode": "CLOSED_BAR_IDENTITY_MISMATCH",
+            },
+        })
+
+        self.assertEqual(projected["status"], "ack_REJECTED")
+        self.assertEqual(
+            projected["reasonCode"],
+            "CLOSED_BAR_IDENTITY_MISMATCH",
+        )
+        self.assertIsNone(projected["code"])
 
     def test_gateway_status_exposes_sanitized_on_init_error_without_replacing_status(self) -> None:
         self.write_ea_init_status()
@@ -870,6 +904,22 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             "liveArmed",
         }
         self.assertTrue(forbidden.isdisjoint(command))
+
+    def test_advanced_closed_bar_is_blocked_before_command_publish(self) -> None:
+        self.write_ea_status()
+        self.current_closed_bar_time = 1_785_445_500
+        with self.selected_candidate():
+            result = self.bridge.dispatch_ai_trade_council_trade_plan(
+                self.parent(),
+                self.consensus(),
+            )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(
+            result["reasonCode"],
+            "closed_bar_advanced_during_analysis",
+        )
+        self.assertFalse(self.status_path().with_name("command.json").exists())
 
     def test_m1_trade_plan_is_blocked_before_gateway_publish(self) -> None:
         self.write_ea_status(timeframe="M5")

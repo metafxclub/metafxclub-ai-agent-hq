@@ -2136,20 +2136,38 @@ class MT4TradeGateway:
             and not isinstance(ack.get("ticket"), bool)
             and int(ack["ticket"]) > 0
         )
+        rejected_closed_bar_mismatch_compatible = bool(
+            ack.get("status") == "REJECTED"
+            and ack.get("reasonCode") == "CLOSED_BAR_IDENTITY_MISMATCH"
+            and ack.get("statePersisted") is True
+            and ack.get("signatureVerificationStatus") == "VERIFIED"
+            and ack.get("verificationStatus") == "NOT_APPLICABLE"
+            and ack.get("executionState") == "NONE"
+            and ack.get("ticket") is None
+        )
         if (
             ack.get("eaClosedBarTime") != command.get("barTime")
             and not lifecycle_recovery_bar_compatible
+            and not rejected_closed_bar_mismatch_compatible
         ):
             raise AckValidationError(
                 "ACK EA closed bar does not match the command bar.",
                 code="ack_ea_closed_bar_time_mismatch",
             )
-        return (
-            "recovered_order_lifecycle_current_closed_bar"
-            if lifecycle_recovery_bar_compatible
+        if (
+            lifecycle_recovery_bar_compatible
             and ack.get("eaClosedBarTime") != command.get("barTime")
-            else price_binding
-        )
+        ):
+            return "recovered_order_lifecycle_current_closed_bar"
+        if (
+            rejected_closed_bar_mismatch_compatible
+            and ack.get("eaClosedBarTime") != command.get("barTime")
+        ):
+            # The differing EA bar is the exact evidence for this persisted,
+            # signed, no-execution rejection. Accepting it releases the global
+            # command slot; it never authorizes an order or a retry.
+            return "rejected_closed_bar_mismatch_evidence"
+        return price_binding
 
     def ingest_ack(
         self,

@@ -44,6 +44,7 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
         self.original_selection_token_reader = (
             self.bridge._metatrader_selection_token
         )
+        self.original_snapshot_reader = self.bridge.metatrader_snapshot_read_model
         self.bridge.RUNTIME_DIR = self.root / "runtime"
         self.bridge.AUDIT_PATH = self.bridge.RUNTIME_DIR / "bridge-audit.jsonl"
         self.bridge.METATRADER_COMMON_FILES_DIR = self.root / "common"
@@ -51,6 +52,18 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
         self.bridge._metatrader_selection_token = lambda _prop_id: {
             "candidateId": "mtc-safe-e2e-test",
             "selectionRevision": 1,
+        }
+        self.current_broker_closed_bar = 1_785_466_800
+        self.bridge.metatrader_snapshot_read_model = lambda _prop_id: {
+            "selectedCandidateId": "mtc-safe-e2e-test",
+            "adapter": {"ready": True},
+            "chartSnapshot": {
+                "available": True,
+                "snapshotId": "f" * 64,
+                "symbol": "XAUUSD",
+                "timeframe": "M5",
+                "bars": [{"time": self.current_broker_closed_bar}],
+            },
         }
 
     def tearDown(self) -> None:
@@ -64,6 +77,7 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
         self.bridge._metatrader_selection_token = (
             self.original_selection_token_reader
         )
+        self.bridge.metatrader_snapshot_read_model = self.original_snapshot_reader
         self.temp.cleanup()
 
     def council_round(
@@ -81,6 +95,7 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
             + (broker_offset_hours * 60 * 60)
             - (5 * 60)
         )
+        self.current_broker_closed_bar = broker_closed_bar
         valid_until = broker_closed_bar + 2 * 5 * 60
         parent = {
             "id": "mission-safe-e2e-demo-simulation",

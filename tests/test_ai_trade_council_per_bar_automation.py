@@ -74,6 +74,7 @@ class AiTradeCouncilPerBarAutomationTests(unittest.TestCase):
             self.calls.append({
                 "request": request,
                 "automationContext": automation_context,
+                "snapshotModel": _snapshot_model,
             })
             return {
                 "ok": True,
@@ -182,6 +183,79 @@ class AiTradeCouncilPerBarAutomationTests(unittest.TestCase):
         )
         self.assertFalse(automation["config"]["dailyRoundLimitEnabled"])
         self.assertIsNone(automation["config"]["effectiveMaxDailyRounds"])
+
+    def test_same_closed_bar_survives_mutable_tick_snapshot_id_change(self) -> None:
+        self._save_observed_store()
+        self._advance_bar()
+        captured_snapshot_id = self.snapshot_id
+        detected = self.bridge.ai_trade_council_automation_tick()
+        self.assertEqual(detected["kind"], "ai_trade_council_automation_settling")
+
+        # The EA republishes a different full snapshot as quotes/risk telemetry
+        # move, while the immutable stream and most recent closed bar stay the
+        # same. This must not demote a current bar to audit-only.
+        self.snapshot_id = "f" * 64
+        queued = self._finish_settle()
+
+        self.assertEqual(queued["kind"], "ai_trade_council_queued")
+        self.assertEqual(len(self.calls), 1)
+        call = self.calls[0]
+        self.assertEqual(call["request"]["snapshotId"], captured_snapshot_id)
+        self.assertEqual(
+            call["snapshotModel"]["chartSnapshot"]["snapshotId"],
+            captured_snapshot_id,
+        )
+        self.assertEqual(
+            call["automationContext"]["executionPolicy"],
+            "current_exact_snapshot",
+        )
+        self.assertTrue(call["automationContext"]["tradeCommandAllowed"])
+
+    def test_closed_bar_identity_match_ignores_only_snapshot_id(self) -> None:
+        stream_key = self.bridge._ai_trade_council_stream_key(
+            self.candidate_id,
+            self.symbol,
+            self.timeframe,
+        )
+        pending = {
+            "candidateId": self.candidate_id,
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "streamKey": stream_key,
+            "closedBarTime": self.closed_bar_time,
+            "snapshotId": "a" * 64,
+        }
+        current = {
+            "candidateId": self.candidate_id,
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "streamKey": stream_key,
+            "lastClosedBarTime": self.closed_bar_time,
+            "snapshotId": "f" * 64,
+        }
+        self.assertTrue(
+            self.bridge._ai_trade_council_pending_matches_current_closed_bar(
+                pending,
+                current,
+            )
+        )
+        mutations = {
+            "candidateId": "mtc-other-candidate",
+            "symbol": "EURUSD",
+            "timeframe": "H1",
+            "streamKey": "0" * 64,
+            "lastClosedBarTime": self.closed_bar_time + 300,
+        }
+        for field, value in mutations.items():
+            changed = dict(current)
+            changed[field] = value
+            with self.subTest(field=field):
+                self.assertFalse(
+                    self.bridge._ai_trade_council_pending_matches_current_closed_bar(
+                        pending,
+                        changed,
+                    )
+                )
 
     def test_restart_establishes_baseline_without_catching_up(self) -> None:
         self._save_observed_store(

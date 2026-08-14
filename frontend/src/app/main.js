@@ -8775,6 +8775,10 @@ function signalExecutionGuardReasonLabel(value) {
     ACK_TIMEOUT: "หมดเวลารอ ACK จาก EA",
     PREVIOUS_COMMAND_UNRESOLVED: "คำสั่งก่อนหน้ายังไม่ทราบผล ระบบไม่ส่งซ้ำ",
     DECISION_DISPATCH_WINDOW_EXPIRED: "รอบวิเคราะห์นี้เก่าเกินเวลาส่ง Order แล้ว ระบบจะรอข้อมูลแท่งใหม่และไม่ส่งคำสั่งย้อนหลัง",
+    CLOSED_BAR_IDENTITY_MISMATCH: "แท่งปิดเปลี่ยนระหว่างวิเคราะห์ • EA ปฏิเสธคำสั่งเก่าและไม่ได้เปิด Order",
+    CLOSED_BAR_ADVANCED_DURING_ANALYSIS: "มีแท่งใหม่ปิดระหว่างวิเคราะห์ • Backend ไม่ส่งคำสั่งย้อนหลัง",
+    CURRENT_CLOSED_BAR_UNAVAILABLE_BEFORE_PUBLISH: "Backend ตรวจแท่งปัจจุบันก่อนส่งคำสั่งไม่ได้ จึงหยุดแบบปลอดภัย",
+    AUDIT_ONLY_BACKLOG_NEVER_DISPATCHES: "รอบนี้เป็น Audit-only • ไม่ส่งคำสั่งย้อนหลังไป MT4",
     NO_TRADE: "มติ NO TRADE จึงไม่มีคำสั่งไปยัง EA",
   };
   return labels[code]
@@ -8809,6 +8813,9 @@ function signalExecutionGuardSummary(runtime = {}) {
     return "ยังไม่เชื่อม EA • วิธีแก้: ใส่ Channel ID ให้ตรงกัน แล้วกดตรวจข้อมูล MT4 ใหม่";
   }
   if (runtime.gatewayExecutionGuardReady === true) {
+    if (String(runtime.gatewayMode || "").toLowerCase() === "shadow") {
+      return "Execution Guard พร้อมตรวจคำสั่ง • SHADOW ใช้ตรวจสอบเท่านั้นและไม่ส่ง Order";
+    }
     return "Execution Guard พร้อมรับคำสั่งจากรอบวิเคราะห์ใหม่";
   }
   return `${signalExecutionGuardReasonLabel(runtime.gatewayExecutionGuardReason)} • วิธีแก้: ${signalExecutionGuardRecoveryLabel(runtime.gatewayExecutionGuardReason)}`;
@@ -8911,7 +8918,13 @@ function renderSignalRiskList(container, runtime, managedOrderLimit = null) {
     ["Risk Guard ของ Mission (ไม่ร่วมโหวต)", runtime.missionRiskGuardAvailable, runtime.missionRiskGuardAvailable ? "พร้อมตรวจ Mission" : "ยังไม่พร้อม"],
     ["ข้อมูลสถานะการเทรด", runtime.tradingStateAvailable, runtime.tradingStateAvailable ? "พร้อมใช้งาน" : "รอ Adapter"],
     ["ระบบหลาย Agent", runtime.ensembleAvailable, runtime.ensembleAvailable ? "พร้อมวิเคราะห์" : "รอ Adapter"],
-    ["MetafxHQ AI Council EA", runtime.gatewayConnected, runtime.gatewayConnected ? runtime.gatewayMode.toUpperCase() : "ยังไม่เชื่อม"],
+    [
+      "MetafxHQ AI Council EA",
+      runtime.gatewayConnected && runtime.gatewayMode !== "shadow",
+      runtime.gatewayConnected
+        ? (runtime.gatewayMode === "shadow" ? "SHADOW • ไม่ส่ง Order" : runtime.gatewayMode.toUpperCase())
+        : "ยังไม่เชื่อม",
+    ],
     ...(modeAccount.observed
       ? [["โหมด EA / ประเภทบัญชี", modeAccount.ready, modeAccount.value]]
       : []),
@@ -10735,12 +10748,14 @@ function renderSignalLivePanel(report = {}) {
   const gatewayAction = container.querySelector("[data-signal-gateway-action]");
   const gatewayDetail = container.querySelector("[data-signal-gateway-detail]");
   if (gatewayAction) {
-    gatewayAction.textContent = runtime.gatewayExecutionGuardReady
-      ? `พร้อมรับคำสั่งรอบใหม่ • ${runtime.gatewayMode.toUpperCase()}`
+    gatewayAction.textContent = runtime.gatewayMode === "shadow"
+      ? "SHADOW • ตรวจคำสั่งได้แต่ไม่ส่ง Order"
+      : runtime.gatewayExecutionGuardReady
+        ? `พร้อมรับคำสั่งรอบใหม่ • ${runtime.gatewayMode.toUpperCase()}`
       : runtime.gatewayConnected
         ? `เชื่อม EA แล้ว • ยังไม่พร้อมส่ง Order`
         : "ยังไม่เชื่อม EA";
-    gatewayAction.dataset.ready = runtime.gatewayExecutionGuardReady ? "true" : "false";
+    gatewayAction.dataset.ready = runtime.gatewayExecutionGuardReady && runtime.gatewayMode !== "shadow" ? "true" : "false";
   }
   if (gatewayDetail) {
     const fixedLot = runtime.gatewayFixedLot === null
@@ -10815,6 +10830,10 @@ function renderSignalDecisionPanel(report = {}) {
     gatewayRun.ackStatus || gatewayRun?.command?.ack?.status || "",
   ).toUpperCase();
   const gatewayRunStatus = String(gatewayRun.status || "");
+  const gatewayRunReason = safeDashboardDisplayText(
+    gatewayRun.reasonCode || gatewayRun?.command?.ack?.reasonCode,
+    "",
+  );
   const gatewayRunBlocked = gatewayRunStatus === "blocked";
   const quality = signalCouncilQualityModel(report, consensus, market);
   const operations = signalTradeOperationsModel(report, runtime, consensus);
@@ -10862,6 +10881,10 @@ function renderSignalDecisionPanel(report = {}) {
     ? "EA ยืนยัน Order แล้ว"
     : gatewayAckStatus === "SHADOWED"
       ? "Shadow ตรวจคำสั่งผ่าน"
+      : gatewayAckStatus === "REJECTED"
+        ? `EA ปฏิเสธคำสั่ง • ${signalExecutionGuardReasonLabel(gatewayRunReason)}`
+      : gatewayRunReason === "audit_only_backlog_never_dispatches"
+        ? signalExecutionGuardReasonLabel(gatewayRunReason)
       : gatewayRun.commandPublished === true
         ? `ส่งคำสั่งแล้ว • รอ ACK`
         : gatewayRunStatus === "waiting_previous_ack"
@@ -10872,6 +10895,8 @@ function renderSignalDecisionPanel(report = {}) {
           && ["demo", "live"].includes(runtime.gatewayMode)
           && !runtime.gatewayExecutionGuardReady
           ? `ยังไม่ส่ง Order • ${signalExecutionGuardReasonLabel(runtime.gatewayExecutionGuardReason)}`
+        : consensus.tradePlan.available && runtime.gatewayMode === "shadow"
+          ? "SHADOW • ตรวจคำสั่งได้แต่ไม่ส่ง Order"
         : consensus.tradePlan.available && runtime.gatewayConnected
           ? `Execution Guard พร้อม • ${runtime.gatewayMode.toUpperCase()}`
     : consensus.tradePlan.available

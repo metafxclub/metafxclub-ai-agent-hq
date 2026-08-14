@@ -743,6 +743,38 @@ class MT4TradeGatewayTests(unittest.TestCase):
         accepted = gateway.ingest_ack(self.ack(command))
         self.assertTrue(accepted["outstandingReleased"])
 
+    def test_persisted_closed_bar_mismatch_rejection_releases_command_slot(self) -> None:
+        gateway = self.gateway()
+        published = gateway.queue_trade_intent(self.intent(timeframe="M5"))
+        command = published["command"]
+        rejected = self.ack(
+            command,
+            status="REJECTED",
+            reasonCode="CLOSED_BAR_IDENTITY_MISMATCH",
+            mode="shadow",
+            eaClosedBarTime=int(command["barTime"]) + 300,
+        )
+        path = self.ack_path(command)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(rejected, separators=(",", ":")), encoding="ascii")
+
+        ingested = gateway.ingest_pending_acks()
+
+        self.assertEqual(len(ingested), 1)
+        self.assertTrue(ingested[0]["ok"])
+        self.assertTrue(ingested[0]["outstandingReleased"])
+        self.assertEqual(
+            ingested[0]["referencePriceBinding"],
+            "rejected_closed_bar_mismatch_evidence",
+        )
+        stored = gateway.read_command(str(command["commandId"]))
+        self.assertEqual(stored["status"], "ack_REJECTED")
+        self.assertFalse(stored["outstanding"])
+        self.assertEqual(
+            stored["ack"]["reasonCode"],
+            "CLOSED_BAR_IDENTITY_MISMATCH",
+        )
+
     def test_schema_salt_and_snapshot_evidence_change_durable_identity(self) -> None:
         self.assertNotEqual(
             self.gateway_module._contract_digest("schema-a", {"value": 1}),

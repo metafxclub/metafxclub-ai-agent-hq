@@ -125,6 +125,24 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn("ยังไม่ส่ง Order •", decision)
         self.assertIn("signalExecutionGuardReasonLabel(runtime.gatewayExecutionGuardReason)", decision)
 
+    def test_shadow_and_closed_bar_rejections_are_not_presented_as_real_orders(self) -> None:
+        reason = function_block(self.main, "function signalExecutionGuardReasonLabel(value)")
+        summary = function_block(self.main, "function signalExecutionGuardSummary(runtime = {})")
+        risk_list = function_block(self.main, "function renderSignalRiskList(")
+        live = function_block(self.main, "function renderSignalLivePanel(report = {})")
+        decision = function_block(self.main, "function renderSignalDecisionPanel(report = {})")
+
+        self.assertIn("CLOSED_BAR_IDENTITY_MISMATCH", reason)
+        self.assertIn("CLOSED_BAR_ADVANCED_DURING_ANALYSIS", reason)
+        self.assertIn("AUDIT_ONLY_BACKLOG_NEVER_DISPATCHES", reason)
+        self.assertIn("SHADOW ใช้ตรวจสอบเท่านั้นและไม่ส่ง Order", summary)
+        self.assertIn("SHADOW • ไม่ส่ง Order", risk_list)
+        self.assertIn("SHADOW • ตรวจคำสั่งได้แต่ไม่ส่ง Order", live)
+        self.assertIn('runtime.gatewayMode === "shadow"', decision)
+        self.assertIn("SHADOW • ตรวจคำสั่งได้แต่ไม่ส่ง Order", decision)
+        self.assertIn('gatewayAckStatus === "REJECTED"', decision)
+        self.assertIn('gatewayRunReason === "audit_only_backlog_never_dispatches"', decision)
+
     def test_terminal_selection_uses_connected_gateway_as_authoritative_truth(self) -> None:
         render = function_block(self.main, "function renderMetatraderSelection(")
         runtime = function_block(self.main, "function getSignalRuntimeTruth(report = {})")
