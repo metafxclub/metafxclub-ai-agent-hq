@@ -116,7 +116,13 @@ class AiTradeCouncilVoteThresholdTests(unittest.TestCase):
             })
         return parent, children
 
-    def install_snapshot_artifact(self, root: Path, parent: dict) -> Path:
+    def install_snapshot_artifact(
+        self,
+        root: Path,
+        parent: dict,
+        *,
+        selected_candidate_id: str | None = None,
+    ) -> Path:
         context = parent["analysisContext"]
         snapshot_id = context["snapshotId"]
         bars = []
@@ -175,6 +181,8 @@ class AiTradeCouncilVoteThresholdTests(unittest.TestCase):
                 "terminalActionsAllowed": False,
             },
         }
+        if selected_candidate_id is not None:
+            artifact["selectedCandidateId"] = selected_candidate_id
         artifact_digest = (
             self.bridge._ai_trade_council_snapshot_artifact_digest(artifact)
         )
@@ -674,6 +682,58 @@ class AiTradeCouncilVoteThresholdTests(unittest.TestCase):
                             "price_action_protective_plan_failed",
                             consensus["qualityGate"]["reasonCodes"],
                         )
+        finally:
+            self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR = original_snapshot_dir
+
+    def test_candidate_bound_snapshot_artifact_can_supply_protective_fallback(self) -> None:
+        original_snapshot_dir = self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                parent, children = self.council_round(1, {
+                    "technical": "BUY",
+                    "price_action": "HOLD",
+                    "news": "HOLD",
+                })
+                self.install_snapshot_artifact(
+                    Path(directory),
+                    parent,
+                    selected_candidate_id="mtc-deterministic-fallback-test",
+                )
+
+                consensus = self.bridge.ai_trade_council_consensus(parent, children)
+
+                self.assertEqual(consensus["decision"], "BUY")
+                self.assertTrue(consensus["qualityGate"]["passed"])
+                self.assertTrue(consensus["tradePlan"]["available"])
+                self.assertTrue(
+                    consensus["tradePlan"]["protectivePlanFallbackUsed"]
+                )
+        finally:
+            self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR = original_snapshot_dir
+
+    def test_candidate_bound_snapshot_artifact_rejects_wrong_candidate(self) -> None:
+        original_snapshot_dir = self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                parent, children = self.council_round(1, {
+                    "technical": "BUY",
+                    "price_action": "HOLD",
+                    "news": "HOLD",
+                })
+                self.install_snapshot_artifact(
+                    Path(directory),
+                    parent,
+                    selected_candidate_id="mtc-other-candidate",
+                )
+
+                consensus = self.bridge.ai_trade_council_consensus(parent, children)
+
+                self.assertEqual(consensus["decision"], "NO_TRADE")
+                self.assertFalse(consensus["tradePlan"]["available"])
+                self.assertIn(
+                    "fallback_snapshot_digest_mismatch",
+                    consensus["qualityGate"]["reasonCodes"],
+                )
         finally:
             self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR = original_snapshot_dir
 

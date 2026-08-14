@@ -26608,7 +26608,7 @@ def _ai_trade_council_deterministic_protective_plan(
         return unavailable("fallback_snapshot_mismatch")
     if not isinstance(artifact, dict):
         return unavailable("fallback_snapshot_mismatch")
-    if set(artifact) != {
+    legacy_artifact_keys = {
         "schemaVersion",
         "snapshotId",
         "createdAt",
@@ -26617,7 +26617,23 @@ def _ai_trade_council_deterministic_protective_plan(
         "chartSnapshot",
         "policy",
         "artifactDigest",
+    }
+    artifact_keys = set(artifact)
+    if artifact_keys not in {
+        frozenset(legacy_artifact_keys),
+        frozenset(legacy_artifact_keys | {"selectedCandidateId"}),
     }:
+        return unavailable("fallback_snapshot_digest_mismatch")
+    closed_bar_identity = (
+        context.get("closedBarIdentity")
+        if isinstance(context.get("closedBarIdentity"), dict)
+        else {}
+    )
+    if "selectedCandidateId" in artifact_keys and (
+        not safe_reference(artifact.get("selectedCandidateId"))
+        or safe_reference(artifact.get("selectedCandidateId"))
+        != safe_reference(closed_bar_identity.get("candidateId"))
+    ):
         return unavailable("fallback_snapshot_digest_mismatch")
     try:
         observed_artifact_digest = (
