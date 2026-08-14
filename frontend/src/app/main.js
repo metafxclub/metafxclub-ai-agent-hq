@@ -464,10 +464,10 @@ const WORKFLOW_DASHBOARD_PRIMARY_TABS = Object.freeze({
     emptyMessageTh: "วันนี้ยังไม่มีรายการใหม่จาก Local Runner",
   },
   left_signal_cube: {
-    labelTh: "แนวโน้ม 28 คู่เงิน",
-    descriptionTh: "ดูภาพรวมแนวโน้ม 28 คู่เงินก่อน แล้วเปิดข่าวและผลกระทบเมื่อต้องการรายละเอียด",
-    overviewTitleTh: "ภาพรวมแนวโน้ม Forex 28 คู่เงิน",
-    emptyMessageTh: "ยังไม่มีแนวโน้มที่ยืนยันจาก Backend จึงแสดงสถานะรอข้อมูลตามจริง",
+    labelTh: "ผลประเมิน 28 คู่เงิน",
+    descriptionTh: "ดูสถานะการประเมินครบ 28 คู่ก่อน แล้วอ่านเฉพาะทิศทางที่ Backend ยืนยันไว้จริง",
+    overviewTitleTh: "ผลประเมินข่าวของ Forex 28 คู่เงิน",
+    emptyMessageTh: "ยังไม่มีผลประเมินที่ยืนยันจาก Backend จึงแสดงสถานะรอข้อมูลตามจริง",
   },
   terminal_workstation: {
     labelTh: "งานพัฒนาวันนี้",
@@ -497,11 +497,9 @@ const INDICATOR_SCOUT_RAIL_ACTION_IDS = new Set([
   "save_indicator_scout_schedule",
 ]);
 const FX_NEWS_BIAS_PROP_ID = "left_signal_cube";
-const FX_NEWS_BIAS_PRESENTATION_TAB_IDS = Object.freeze(["pair_bias", "today"]);
-const FX_NEWS_BIAS_RAIL_ACTION_IDS = new Set([
-  "analyze_daily_market_news",
-  "save_news_bias_schedule",
-]);
+const FX_NEWS_BIAS_PRESENTATION_TAB_IDS = Object.freeze(["pair_bias", "today", "history"]);
+const FX_NEWS_BIAS_DEFAULT_TIMES = Object.freeze(["00:00", "12:00"]);
+const FX_NEWS_BIAS_TIMEZONE = "Asia/Bangkok";
 const HQ_CONNECTION_HUB_PROP_ID = "right_status_crystals";
 const HQ_CONNECTION_HUB_PRESENTATION_TAB_IDS = Object.freeze(["connections", "vps"]);
 const HQ_CONNECTION_HUB_FILTER_IDS = Object.freeze(["all", "ready", "attention", "checking", "coming_soon"]);
@@ -597,13 +595,6 @@ const WORKFLOW_REPORT_TRANSFER_ROUTES = Object.freeze([
       "ea_build_report",
       "ea_compile_report",
     ],
-  },
-  {
-    actionId: "build_fx_pair_bias",
-    targetPropId: "left_signal_cube",
-    agentId: "codex_mcp_operator",
-    sourcePropIds: ["left_signal_cube"],
-    reportTypes: ["fx_news_bias_report"],
   },
   {
     actionId: "inspect_ea_source",
@@ -912,49 +903,13 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
   },
   left_signal_cube: {
     titleTh: "ศูนย์แนวโน้ม 28 คู่เงินและข่าว Forex",
-    summaryTh: "หน้าแรกแสดงแนวโน้มสั้น กลาง และยาวของคู่เงินมาตรฐาน 28 คู่ ส่วนข่าวและช่วงเวลาที่ EA ควรระวังอยู่ในแท็บถัดไป โดยใช้ข้อมูลจริงจาก Backend เท่านั้น",
+    summaryTh: "อัปเดตข่าวรายวันและผลประเมินคู่เงินมาตรฐาน 28 คู่จาก Read Model ของ Backend โดยตรง ไม่สร้างข่าวหรือทิศทางทดแทนเมื่อข้อมูลยังไม่พร้อม",
     tabs: [
-      { id: "today", labelTh: "ข่าวและผลกระทบ", descriptionTh: "ดูข่าวผลกระทบระดับต่ำขึ้นไป ช่วงเวลาที่ EA ควรระวัง และลิงก์แหล่งข้อมูลจริง", actionIds: [] },
-      { id: "pair_bias", labelTh: "แนวโน้ม 28 คู่เงิน", descriptionTh: "ดู Bullish, Bearish หรือ Sideway พร้อมมุมมองสั้น กลาง และยาว โดยไม่เติมข้อมูลจำลอง", actionIds: [] },
-      { id: "horizons", labelTh: "มุมมองรายระยะ", descriptionTh: "ข้อมูลสั้น กลาง และยาวรวมอยู่ในการ์ด 28 คู่เงินบนหน้าหลักแล้ว", actionIds: [] },
-      { id: "schedule_history", labelTh: "ตั้งเวลาอัปเดต", descriptionTh: "ตั้งรอบอ่านข่าวสาธารณะตามเวลาไทยจากแถบคำสั่งด้านซ้าย", actionIds: ["save_news_bias_schedule"] },
+      { id: "pair_bias", labelTh: "ผลประเมิน 28 คู่เงิน", descriptionTh: "ดูสถานะของแต่ละคู่ และแสดง Bullish, Bearish หรือ Sideway เฉพาะเมื่อ Backend ยืนยัน", actionIds: [] },
+      { id: "today", labelTh: "ข่าวและผลกระทบ", descriptionTh: "ดูข่าวที่กำลังจะประกาศ ข่าวที่ประกาศแล้ว และรายละเอียดผลจาก Backend", actionIds: [] },
+      { id: "history", labelTh: "ประวัติอัปเดต", descriptionTh: "ดูผลการอัปเดตย้อนหลังที่ Backend ส่งมา โดยไม่ปะปนกับคิวงานอื่น", actionIds: [] },
     ],
-    actions: [
-      {
-        id: "analyze_daily_market_news",
-        tabId: "today",
-        labelTh: "วิเคราะห์ข่าวตลาดวันนี้",
-        descriptionTh: "สร้าง Mission อ่านข่าวจากแหล่งสาธารณะและสรุปช่วงอันตรายสำหรับ EA โดยไม่ส่งคำสั่งเทรด",
-        availability: { status: "configuration_required" },
-        formFields: [
-          { id: "currencies", labelTh: "สกุลเงินที่ต้องการเน้น", type: "list", required: false, placeholderTh: "USD, EUR, GBP, JPY" },
-          { id: "brief", labelTh: "ประเด็นที่ต้องการให้เน้น", type: "textarea", required: false },
-        ],
-      },
-      {
-        id: "build_fx_pair_bias",
-        tabId: "pair_bias",
-        labelTh: "สร้างตารางแนวโน้ม 28 คู่เงิน",
-        descriptionTh: "สร้าง Mission ประเมินแนวโน้มจากข่าวและหลักฐานล่าสุด ผลลัพธ์ที่ไม่มีข้อมูลจะคงสถานะรอข้อมูล",
-        availability: { status: "configuration_required" },
-        formFields: [
-          { id: "horizon", labelTh: "ระยะที่ต้องการเน้น", type: "select", required: true, options: ["สั้น", "กลาง", "ยาว", "ครบทุกระยะ"] },
-          { id: "brief", labelTh: "เงื่อนไขเพิ่มเติม", type: "textarea", required: false },
-        ],
-      },
-      {
-        id: "save_news_bias_schedule",
-        tabId: "schedule_history",
-        labelTh: "บันทึกเวลาอัปเดตข่าว",
-        descriptionTh: "เปิดหรือปิด Local Scheduler สำหรับอ่านข่าวสาธารณะ ระบบไม่สร้างข่าวหรือค่า Bias จำลองเมื่อหลักฐานไม่พร้อม",
-        availability: { status: "configuration_required" },
-        formFields: [
-          { id: "enabled", labelTh: "เปิดรอบอัปเดตอัตโนมัติ", type: "checkbox", required: false },
-          { id: "times", labelTh: "เวลาที่ต้องการ สูงสุด 2 เวลา เช่น 07:00, 20:00", type: "list", required: true },
-          { id: "timezone", labelTh: "เขตเวลา", type: "select", required: true, options: ["Asia/Bangkok", "UTC"] },
-        ],
-      },
-    ],
+    actions: [],
   },
   terminal_workstation: {
     titleTh: "EA Development Studio",
@@ -13883,15 +13838,27 @@ function normalizeWorkflowDashboard(subject, propertyRole, report = {}) {
   } else if (subject?.id === FX_NEWS_BIAS_PROP_ID) {
     const tabMap = new Map(tabs.map((tab) => [tab.id, tab]));
     presentationTabs = FX_NEWS_BIAS_PRESENTATION_TAB_IDS
-      .map((id) => tabMap.get(id))
+      .map((id) => tabMap.get(id) || (id === "history" ? {
+        id: "history",
+        labelTh: "ประวัติอัปเดต",
+        descriptionTh: "ดูผลการอัปเดตย้อนหลังจาก Backend",
+        emptyMessageTh: "",
+        actionIds: [],
+      } : null))
       .filter(Boolean)
       .map((tab) => ({
         ...tab,
         actionIds: [],
-        labelTh: tab.id === "pair_bias" ? "แนวโน้ม 28 คู่เงิน" : "ข่าวและผลกระทบ",
-        descriptionTh: tab.id === "pair_bias"
-          ? "ภาพรวม Bullish, Bearish หรือ Sideway พร้อมมุมมองสั้น กลาง และยาวของ 28 คู่เงิน"
-          : "ข่าวสำคัญและช่วงเวลาที่ EA ควรระวังจากข้อมูลจริงที่ Backend ส่งมา",
+        labelTh: {
+          pair_bias: "ผลประเมิน 28 คู่เงิน",
+          today: "ข่าวและผลกระทบ",
+          history: "ประวัติอัปเดต",
+        }[tab.id] || tab.labelTh,
+        descriptionTh: {
+          pair_bias: "ผลประเมินสั้น กลาง และยาวของ 28 คู่เงินตามที่ Backend ยืนยัน โดยไม่คาดเดาทิศทางเพิ่ม",
+          today: "ข่าวที่กำลังจะประกาศ ข่าวที่ประกาศแล้ว และรายละเอียดผลจาก Backend",
+          history: "สถานะการอัปเดตย้อนหลัง เวลา แหล่งข้อมูล และจำนวนผลที่ Backend บันทึกไว้",
+        }[tab.id] || tab.descriptionTh,
       }));
   } else if (subject?.id === HQ_CONNECTION_HUB_PROP_ID) {
     const vpsTab = tabs.find((tab) => tab.id === "vps");
@@ -15079,9 +15046,9 @@ function normalizeFxFreshness(root = {}) {
     ? root.currentDataAvailable
     : null;
   return {
-    asOf: root?.asOf || null,
-    currentBangkokDate: safeDashboardDisplayText(root?.currentBangkokDate, ""),
-    reportBangkokDate: safeDashboardDisplayText(root?.reportBangkokDate, ""),
+    asOf: root?.asOf || root?.updatedAt || root?.createdAt || null,
+    currentBangkokDate: safeDashboardDisplayText(root?.currentBangkokDate || root?.marketDate, ""),
+    reportBangkokDate: safeDashboardDisplayText(root?.reportBangkokDate || root?.marketDate, ""),
     stale,
     currentDataAvailable,
     dataStatus,
@@ -15259,14 +15226,21 @@ function normalizeFxNewsEvent(item = {}, index = 0, sharedLinks = []) {
     ? rawEventAt.trim()
     : null;
   const actual = normalizeFxNewsMetric(item?.actual ?? item?.actualValue);
-  const explicitRelease = String(item?.releaseState || item?.releaseStatus || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const rawPublicationStatus = String(item?.publicationStatus || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const releaseAliases = { published: "released", publish: "released", pending: "scheduled" };
+  const explicitReleaseRaw = String(item?.releaseState || item?.releaseStatus || rawPublicationStatus).trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const explicitRelease = releaseAliases[explicitReleaseRaw] || explicitReleaseRaw;
   const releaseState = ["scheduled", "released", "unconfirmed", "not_applicable"].includes(explicitRelease)
     ? explicitRelease
     : "unconfirmed";
   const explicitTiming = String(item?.timingState || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const parsedEventAt = eventAt ? new Date(eventAt).getTime() : Number.NaN;
+  const inferredTiming = releaseState === "released"
+    ? "past"
+    : (Number.isFinite(parsedEventAt) ? (parsedEventAt > Date.now() ? "future" : "current") : "unknown");
   const timingState = ["past", "current", "future", "unknown"].includes(explicitTiming)
     ? explicitTiming
-    : "unknown";
+    : inferredTiming;
   const explicitActualStatus = String(item?.actualStatus || item?.resultStatus || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   const actualStatus = ["pending", "released", "revised", "unavailable", "not_applicable"].includes(explicitActualStatus)
     ? explicitActualStatus
@@ -15284,7 +15258,7 @@ function normalizeFxNewsEvent(item = {}, index = 0, sharedLinks = []) {
   const canonicalAnalysis = analysisStatusAliases[explicitAnalysis] || explicitAnalysis;
   const analysisStatus = ["pending_release", "awaiting_actual", "pending_analysis", "analyzed", "insufficient_data", "error"].includes(canonicalAnalysis)
     ? canonicalAnalysis
-    : "insufficient_data";
+    : (releaseState === "scheduled" ? "pending_release" : "insufficient_data");
   const currencies = workflowDomainArray(item?.currencies, item?.currencyCodes, item?.affectedCurrencies)
     .map((value) => String(value || "").trim().toUpperCase())
     .filter(Boolean)
@@ -15411,6 +15385,175 @@ function deriveFxPairAssessmentSummary(rows = []) {
   };
 }
 
+function normalizeFxNewsScheduleTime(value) {
+  const match = /^(\d{2}):(\d{2})$/.exec(String(value || "").trim());
+  if (!match) return "";
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours > 23 || minutes > 59) return "";
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function normalizeFxNewsSchedule(rawSchedule = {}, calendar = {}) {
+  const schedule = rawSchedule && typeof rawSchedule === "object" ? rawSchedule : {};
+  const defaultTimes = typeof FX_NEWS_BIAS_DEFAULT_TIMES === "undefined"
+    ? ["00:00", "12:00"]
+    : FX_NEWS_BIAS_DEFAULT_TIMES;
+  const timezone = typeof FX_NEWS_BIAS_TIMEZONE === "undefined" ? "Asia/Bangkok" : FX_NEWS_BIAS_TIMEZONE;
+  const suppliedTimes = workflowDomainArray(schedule.times, schedule.runTimes, schedule.scheduleTimes)
+    .map(normalizeFxNewsScheduleTime)
+    .filter(Boolean);
+  const times = [];
+  [...suppliedTimes, ...defaultTimes].forEach((time) => {
+    if (times.length < 2 && !times.includes(time)) times.push(time);
+  });
+  while (times.length < 2) times.push(defaultTimes[times.length]);
+  const enabled = typeof schedule.requestedEnabled === "boolean"
+    ? schedule.requestedEnabled
+    : (typeof schedule.effectiveEnabled === "boolean" ? schedule.effectiveEnabled : schedule.enabled === true);
+  const minimumImpact = ["low", "medium", "high"].includes(String(schedule.minimumImpact || "").toLowerCase())
+    ? String(schedule.minimumImpact).toLowerCase()
+    : "low";
+  return {
+    enabled,
+    times: times.slice(0, 2),
+    timezone,
+    minimumImpact,
+    lastUpdatedAt: schedule.lastSuccessfulAt
+      || schedule.lastRunAt
+      || schedule.lastUpdatedAt
+      || calendar.updatedAt
+      || null,
+    nextUpdatedAt: schedule.nextRunAt
+      || schedule.nextScheduledAt
+      || schedule.nextRefreshAt
+      || calendar.nextRefreshAt
+      || null,
+    sourceStatus: safeDashboardDisplayText(
+      calendar.sourceStatus || schedule.sourceStatus || schedule.adapterStatus,
+      "unknown",
+    ).toLowerCase().replace(/[\s-]+/g, "_"),
+  };
+}
+
+function normalizeFxNewsHistoryItem(item = {}, index = 0) {
+  const metrics = workflowDomainObject(item?.metrics, item?.domainData, item);
+  const marketNews = workflowDomainObject(metrics.marketNews, item?.marketNews, metrics.fxNewsBias, metrics);
+  const fxBias = workflowDomainObject(metrics.fxBias, item?.fxBias, metrics.fxNewsBias, metrics);
+  const rawEvents = fxNewsCalendarRows(marketNews);
+  const eventSourceRows = rawEvents.flatMap((event) => workflowDomainArray(
+    event?.sourceLinks,
+    event?.sources,
+    event?.evidence,
+  ));
+  const sourceLinks = fxNewsVerifiedSourceLinks(
+    marketNews.sources,
+    marketNews.sourceLinks,
+    item?.sources,
+    item?.sourceLinks,
+    eventSourceRows,
+  );
+  const events = rawEvents
+    .slice(0, 120)
+    .map((event, eventIndex) => normalizeFxNewsEvent(event, eventIndex, sourceLinks))
+    .filter((event) => event.sources.length > 0);
+  const pairRows = Array.isArray(fxBias.pairs)
+    ? fxBias.pairs
+    : (Array.isArray(fxBias.pairBias) ? fxBias.pairBias : []);
+  const summary = workflowDomainObject(fxBias.pairAssessmentSummary, fxBias.assessmentSummary);
+  const numericOrFallback = (value, fallback) => (
+    Number.isFinite(Number(value)) ? Math.max(0, Math.trunc(Number(value))) : fallback
+  );
+  const dataStatus = safeDashboardDisplayText(
+    marketNews.dataStatus || marketNews.status || item?.status,
+    item?.marketDate || marketNews.marketDate ? "stored_history" : "unknown",
+  ).toLowerCase().replace(/[\s-]+/g, "_");
+  return {
+    id: safeDashboardDisplayText(item?.reportId || item?.id, `news-history-${index + 1}`),
+    calendarDate: safeDashboardDisplayText(
+      marketNews.calendarDate || marketNews.marketDate || marketNews.reportBangkokDate || item?.calendarDate || item?.marketDate,
+      "",
+    ),
+    updatedAt: marketNews.updatedAt
+      || marketNews.lastUpdatedAt
+      || marketNews.asOf
+      || item?.updatedAt
+      || item?.lastUpdatedAt
+      || item?.createdAt
+      || null,
+    dataStatus,
+    sourceStatus: safeDashboardDisplayText(
+      marketNews.sourceStatus || marketNews.evidenceStatus,
+      "unknown",
+    ).toLowerCase().replace(/[\s-]+/g, "_"),
+    verifiedEmpty: marketNews.verifiedEmpty === true
+      || ["verified_empty", "holiday", "weekend"].includes(dataStatus),
+    errorMessage: safeDashboardDisplayText(
+      marketNews.errorMessage || marketNews.error?.message || item?.errorMessage,
+      "",
+    ),
+    eventCount: numericOrFallback(marketNews.counts?.total ?? marketNews.eventCount, events.length),
+    releasedCount: numericOrFallback(
+      marketNews.counts?.released ?? marketNews.releasedCount,
+      events.filter((event) => (
+        event?.releaseState === "released" || String(event?.publicationStatus || "").toLowerCase() === "published"
+      )).length,
+    ),
+    assessedPairCount: summary.assessedPairCount !== undefined || fxBias.assessedPairCount !== undefined || pairRows.length
+      ? numericOrFallback(
+          summary.assessedPairCount ?? fxBias.assessedPairCount,
+          pairRows.filter((row) => row?.assessmentComplete === true).length,
+        )
+      : null,
+    directionalPairCount: summary.directionalPairCount !== undefined || fxBias.directionalPairCount !== undefined || pairRows.length
+      ? numericOrFallback(
+          summary.directionalPairCount ?? fxBias.directionalPairCount,
+          pairRows.filter((row) => (
+            String(row?.assessmentStatus || "").toLowerCase() === "directional_ready"
+            && row?.assessmentComplete === true
+          )).length,
+        )
+      : null,
+    events,
+    summary: safeDashboardDisplayText(item?.summaryTh || item?.summary, ""),
+  };
+}
+
+function normalizeFxNewsHistory(...sources) {
+  const rows = sources
+    .flatMap((items, sourcePriority) => (Array.isArray(items) ? items.map((item, rowPriority) => ({
+      item,
+      sourcePriority,
+      rowPriority,
+    })) : []))
+    .filter(({ item }) => item && typeof item === "object" && !Array.isArray(item))
+    .map(({ item, sourcePriority, rowPriority }) => ({
+      ...normalizeFxNewsHistoryItem(item, rowPriority),
+      sourcePriority,
+      rowPriority,
+    }));
+  const canonicalByDay = new Map();
+  rows.forEach((item) => {
+    const dayKey = item.calendarDate || `${item.id}\u001f${item.updatedAt || ""}`;
+    const previous = canonicalByDay.get(dayKey);
+    const itemTime = item.updatedAt ? new Date(item.updatedAt).getTime() : 0;
+    const previousTime = previous?.updatedAt ? new Date(previous.updatedAt).getTime() : 0;
+    const higherPriority = !previous || item.sourcePriority < previous.sourcePriority;
+    const newerSamePriority = previous
+      && item.sourcePriority === previous.sourcePriority
+      && (Number.isFinite(itemTime) ? itemTime : 0) > (Number.isFinite(previousTime) ? previousTime : 0);
+    if (higherPriority || newerSamePriority) canonicalByDay.set(dayKey, item);
+  });
+  return [...canonicalByDay.values()]
+    .sort((left, right) => {
+      const leftAt = left.updatedAt ? new Date(left.updatedAt).getTime() : 0;
+      const rightAt = right.updatedAt ? new Date(right.updatedAt).getTime() : 0;
+      return (Number.isFinite(rightAt) ? rightAt : 0) - (Number.isFinite(leftAt) ? leftAt : 0);
+    })
+    .map(({ sourcePriority, rowPriority, ...item }) => item)
+    .slice(0, 60);
+}
+
 function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
   const reports = workflowReportRows(report, "fx_news_bias_report");
   const latestMetrics = workflowDomainObject(reports[0]?.metrics);
@@ -15434,7 +15577,7 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
     legacyRoot,
   );
   const marketNewsFreshness = normalizeFxFreshness(marketNewsRoot);
-  const fxBiasFreshness = normalizeFxFreshness(fxBiasRoot);
+  const fxBiasFreshness = normalizeFxFreshness({ ...marketNewsRoot, ...fxBiasRoot });
   const newsSourceLinks = fxNewsVerifiedSourceLinks(
     marketNewsRoot.sources,
     marketNewsRoot.sourceLinks,
@@ -15446,6 +15589,8 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
   const biasSourceLinks = fxNewsVerifiedSourceLinks(
     fxBiasRoot.sources,
     fxBiasRoot.sourceLinks,
+    marketNewsRoot.sources,
+    marketNewsRoot.sourceLinks,
     legacyRoot.sources,
     legacyRoot.sourceLinks,
     latestMetrics.sources,
@@ -15453,11 +15598,11 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
   );
   const marketNewsIsCurrent = marketNewsFreshness.stale !== true
     && marketNewsFreshness.currentDataAvailable === true
-    && ["verified", "current"].includes(marketNewsFreshness.dataStatus)
+    && ["verified", "current", "degraded", "verified_empty"].includes(marketNewsFreshness.dataStatus)
     && newsSourceLinks.length > 0;
   const fxBiasIsCurrent = fxBiasFreshness.stale !== true
     && fxBiasFreshness.currentDataAvailable === true
-    && ["verified", "current", "source_backed"].includes(fxBiasFreshness.dataStatus)
+    && ["verified", "current", "source_backed", "degraded", "verified_empty"].includes(fxBiasFreshness.dataStatus)
     && biasSourceLinks.length > 0;
   const pairAssessmentRoot = workflowDomainObject(
     fxBiasRoot.pairAssessmentSummary,
@@ -15465,13 +15610,30 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
     fxBiasRoot.newsAssessmentSummary,
     fxBiasRoot,
   );
-  const fxAssessmentIsCurrent = pairAssessmentRoot.assessmentComplete === true
+  const rawPairCandidate = fxBiasRoot.pairBias
+    || fxBiasRoot.pairs
+    || legacyRoot.pairBias
+    || legacyRoot.pairs
+    || latestMetrics.pairBias
+    || latestMetrics.pairs
+    || {};
+  const rawPairCandidateRows = Array.isArray(rawPairCandidate)
+    ? rawPairCandidate
+    : Object.values(rawPairCandidate && typeof rawPairCandidate === "object" ? rawPairCandidate : {});
+  const directAssessmentShape = rawPairCandidateRows.length === FX_BIAS_PAIR_UNIVERSE.length
+    && rawPairCandidateRows.every((row) => (
+      row && typeof row === "object"
+      && (Object.prototype.hasOwnProperty.call(row, "verified")
+        || Object.prototype.hasOwnProperty.call(row, "assessmentComplete")
+        || Object.prototype.hasOwnProperty.call(row, "assessed"))
+    ));
+  const fxAssessmentIsCurrent = (pairAssessmentRoot.assessmentComplete === true || directAssessmentShape)
     && fxBiasFreshness.stale !== true
     && fxBiasFreshness.currentDataAvailable === true
-    && ["verified", "current", "source_backed", "verified_empty"].includes(fxBiasFreshness.dataStatus)
+    && ["verified", "current", "source_backed", "degraded", "verified_empty"].includes(fxBiasFreshness.dataStatus)
     && marketNewsFreshness.stale !== true
     && marketNewsFreshness.currentDataAvailable === true
-    && ["verified", "current", "verified_empty", "holiday", "weekend"].includes(marketNewsFreshness.dataStatus)
+    && ["verified", "current", "degraded", "verified_empty", "holiday", "weekend"].includes(marketNewsFreshness.dataStatus)
     && newsSourceLinks.length > 0;
   const rawNews = marketNewsIsCurrent
     ? (() => {
@@ -15530,13 +15692,7 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
     };
   }).filter(Boolean);
   const rawPairs = (fxBiasIsCurrent || fxAssessmentIsCurrent)
-    ? (fxBiasRoot.pairBias
-      || fxBiasRoot.pairs
-      || legacyRoot.pairBias
-      || legacyRoot.pairs
-      || latestMetrics.pairBias
-      || latestMetrics.pairs
-      || {})
+    ? rawPairCandidate
     : {};
   const rows = Array.isArray(rawPairs)
     ? rawPairs
@@ -15545,12 +15701,29 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
         ...(value && typeof value === "object" ? value : { bias: value }),
       }));
   const sharedSourceLinks = biasSourceLinks;
+  const coverageCurrencies = new Set(workflowDomainArray(
+    fxBiasRoot.coverageCurrencies,
+    marketNewsRoot.coverageCurrencies,
+  ).map((value) => String(value || "").trim().toUpperCase()).filter(Boolean));
+  const failedCurrencies = new Set(workflowDomainArray(
+    fxBiasRoot.failedCurrencies,
+    marketNewsRoot.failedCurrencies,
+  ).map((value) => String(value || "").trim().toUpperCase()).filter(Boolean));
+  const hasCoverageMetadata = coverageCurrencies.size > 0 || failedCurrencies.size > 0;
   const pairMap = new Map();
   rows.forEach((item) => {
     const pair = String(item?.pair || item?.symbol || "").trim().toUpperCase();
     if (!FX_BIAS_PAIR_UNIVERSE.includes(pair)) return;
     const rowStatus = String(item?.status || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
-    const verifiedSourceUrl = workflowItemSourceUrl(item, sharedSourceLinks);
+    const nestedSourceRefs = [item?.short, item?.medium, item?.long, item?.horizons?.short, item?.horizons?.medium, item?.horizons?.long]
+      .flatMap((horizon) => (Array.isArray(horizon?.sourceRefs) ? horizon.sourceRefs : []));
+    const verifiedSourceUrl = workflowItemSourceUrl({
+      ...item,
+      sourceRefs: [
+        ...(Array.isArray(item?.sourceRefs) ? item.sourceRefs : []),
+        ...nestedSourceRefs,
+      ],
+    }, sharedSourceLinks);
     const sourceBacked = Boolean(verifiedSourceUrl)
       && !isFxNewsReferenceOnlyUrl(verifiedSourceUrl)
       && sharedSourceLinks.some((source) => source.url === verifiedSourceUrl);
@@ -15570,12 +15743,17 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
       item?.horizons?.medium?.reasonTh,
       item?.horizons?.long?.reasonTh,
     ].map((value) => String(value || "").trim()).filter(Boolean);
+    // Direction is never synthesized in the browser.  Each displayed overall
+    // and horizon value must be present in the Backend read model itself.
     const bias = insufficientData
       ? "unavailable"
-      : deriveFxOverallBias(item?.bias || item?.overallBias || item?.overall, [short, medium, long]);
+      : normalizeFxBiasValue(item?.bias || item?.overallBias || item?.overall);
     const hasDirectionalHorizon = [short, medium, long].some((value) => value !== "unavailable");
     const assessmentRoot = workflowDomainObject(item?.newsAssessment, item?.assessment, item);
     const pairCurrencies = [pair.slice(0, 3), pair.slice(3, 6)];
+    const pairCoverageComplete = !hasCoverageMetadata || pairCurrencies.every((currency) => (
+      coverageCurrencies.has(currency) && !failedCurrencies.has(currency)
+    ));
     const rawRelevantEvents = workflowDomainArray(assessmentRoot.relevantEvents);
     const verifiedPairEvents = news.filter((event) => (
       event.currencies.some((currency) => pairCurrencies.includes(currency))
@@ -15608,7 +15786,11 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
       relevantEvents,
       hasDirectionalHorizon,
     );
-    const explicitlyAssessed = assessmentRoot.assessmentComplete === true || assessmentRoot.assessed === true;
+    const explicitlyAssessed = assessmentRoot.assessmentComplete === true
+      || assessmentRoot.assessed === true
+      || (directAssessmentShape
+        && pairCoverageComplete
+        && Object.prototype.hasOwnProperty.call(item, "verified"));
     const assessmentStatus = hasDirectionalHorizon
       ? "directional_ready"
       : (fxAssessmentIsCurrent && explicitlyAssessed ? requestedAssessmentStatus : "unavailable");
@@ -15659,6 +15841,67 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
     nextEvent: null,
   });
   const pairAssessmentSummary = deriveFxPairAssessmentSummary(pairBias);
+  const calendar = {
+    schemaVersion: safeDashboardDisplayText(marketNewsRoot.schemaVersion, "fx-market-news-read-model-v1"),
+    date: safeDashboardDisplayText(marketNewsRoot.calendarDate || marketNewsRoot.marketDate || marketNewsRoot.currentBangkokDate, ""),
+    status: safeDashboardDisplayText(marketNewsRoot.status || marketNewsRoot.dataStatus, "unknown").toLowerCase(),
+    errorMessage: safeDashboardDisplayText(marketNewsRoot.errorMessage || marketNewsRoot.error?.message, ""),
+    sourceStatus: safeDashboardDisplayText(marketNewsRoot.sourceStatus || marketNewsRoot.evidenceStatus, "unknown").toLowerCase(),
+    verifiedEmpty: marketNewsRoot.verifiedEmpty === true
+      || marketNewsRoot.quietDay === true
+      || ["verified_empty", "holiday", "weekend"].includes(String(marketNewsRoot.dataStatus || "").toLowerCase()),
+    emptyReason: safeDashboardDisplayText(marketNewsRoot.emptyReasonTh || marketNewsRoot.emptyReason || marketNewsRoot.reasonTh, ""),
+    updatedAt: marketNewsRoot.updatedAt || marketNewsRoot.asOf || marketNewsRoot.lastSuccessfulAt || null,
+    nextRefreshAt: marketNewsRoot.nextRefreshAt || marketNewsRoot.nextScheduledAt || null,
+    counts: workflowDomainObject(marketNewsRoot.counts),
+  };
+  const schedule = normalizeFxNewsSchedule(
+    workflowDomainObject(marketNewsRoot.schedule, fxBiasRoot.schedule, legacyRoot.schedule, backend.schedule),
+    calendar,
+  );
+  const serviceRoot = workflowDomainObject(
+    backend.directNewsService,
+    backend.newsService,
+    backend.serviceStatus,
+    marketNewsRoot.service,
+    backend.newsTruth,
+  );
+  const rawSourceHealth = workflowDomainArray(
+    serviceRoot.sourceHealth,
+    marketNewsRoot.sourceHealth,
+  );
+  const sourceHealth = rawSourceHealth.slice(0, 20).map((source, index) => {
+    const row = source && typeof source === "object" ? source : {};
+    const url = getSafeExternalHttpUrl(row.url || row.sourceUrl);
+    let hostname = "";
+    try {
+      hostname = url ? new URL(url).hostname : "";
+    } catch {
+      hostname = "";
+    }
+    return {
+      id: safeDashboardDisplayText(row.sourceId || row.id, `news-source-${index + 1}`),
+      label: safeDashboardDisplayText(row.labelTh || row.title || row.label || row.name, hostname || `แหล่งข้อมูล ${index + 1}`),
+      status: safeDashboardDisplayText(row.status || row.healthStatus || row.evidenceStatus, "unknown").toLowerCase().replace(/[\s-]+/g, "_"),
+      lastCheckedAt: row.lastCheckedAt || row.checkedAt || null,
+      lastSuccessAt: row.lastSuccessAt || row.lastSuccessfulAt || null,
+      eventCount: Number.isFinite(Number(row.eventCount)) ? Math.max(0, Math.trunc(Number(row.eventCount))) : null,
+      errorCode: safeDashboardDisplayText(row.errorCode || row.reasonCode, ""),
+      errorMessage: safeDashboardDisplayText(row.errorMessage || row.error?.message || row.reasonTh, ""),
+      url,
+    };
+  });
+  const history = normalizeFxNewsHistory(
+    serviceRoot.historyDays,
+    marketNewsRoot.historyDays,
+    marketNewsRoot.history,
+    marketNewsRoot.updateHistory,
+    fxBiasRoot.history,
+    backend.historyDays,
+    backend.history,
+    backend.updateHistory,
+    reports,
+  );
   return {
     news,
     releasedNews,
@@ -15672,20 +15915,32 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
       marketNews: marketNewsFreshness,
       fxBias: fxBiasFreshness,
     },
-    calendar: {
-      schemaVersion: safeDashboardDisplayText(marketNewsRoot.schemaVersion, "fx-market-news-read-model-v1"),
-      date: safeDashboardDisplayText(marketNewsRoot.calendarDate || marketNewsRoot.currentBangkokDate, ""),
-      status: safeDashboardDisplayText(marketNewsRoot.status || marketNewsRoot.dataStatus, "unknown").toLowerCase(),
-      errorMessage: safeDashboardDisplayText(marketNewsRoot.errorMessage || marketNewsRoot.error?.message, ""),
-      sourceStatus: safeDashboardDisplayText(marketNewsRoot.sourceStatus || marketNewsRoot.evidenceStatus, "unknown").toLowerCase(),
-      verifiedEmpty: marketNewsRoot.verifiedEmpty === true || ["verified_empty", "holiday", "weekend"].includes(String(marketNewsRoot.dataStatus || "").toLowerCase()),
-      emptyReason: safeDashboardDisplayText(marketNewsRoot.emptyReasonTh || marketNewsRoot.emptyReason || marketNewsRoot.reasonTh, ""),
-      updatedAt: marketNewsRoot.updatedAt || marketNewsRoot.asOf || marketNewsRoot.lastSuccessfulAt || null,
-      nextRefreshAt: marketNewsRoot.nextRefreshAt || marketNewsRoot.nextScheduledAt || null,
-      counts: workflowDomainObject(marketNewsRoot.counts),
-    },
+    calendar,
     reports,
-    schedule: workflowDomainObject(marketNewsRoot.schedule, fxBiasRoot.schedule, legacyRoot.schedule, backend.schedule),
+    schedule,
+    history,
+    service: {
+      status: safeDashboardDisplayText(
+        serviceRoot.status || serviceRoot.serviceStatus || calendar.sourceStatus,
+        "unknown",
+      ).toLowerCase().replace(/[\s-]+/g, "_"),
+      label: safeDashboardDisplayText(serviceRoot.labelTh || serviceRoot.label, "บริการข่าว Backend"),
+      directRefreshAvailable: true,
+      refreshInProgress: serviceRoot.refreshInProgress === true,
+      lastAttemptAt: serviceRoot.lastAttemptAt || null,
+      lastSuccessAt: serviceRoot.lastSuccessAt || serviceRoot.lastSuccessfulAt || schedule.lastUpdatedAt,
+      nextRunAt: serviceRoot.nextRunAt || serviceRoot.nextScheduledAt || schedule.nextUpdatedAt,
+      errorMessage: safeDashboardDisplayText(serviceRoot.errorMessage || serviceRoot.error?.message, ""),
+      storeVersion: safeDashboardDisplayText(serviceRoot.storeVersion, ""),
+      providerMode: safeDashboardDisplayText(serviceRoot.providerMode, ""),
+      historyCount: Number.isFinite(Number(serviceRoot.historyCount))
+        ? Math.max(0, Math.trunc(Number(serviceRoot.historyCount)))
+        : history.length,
+      historyDayCount: Number.isFinite(Number(serviceRoot.historyDayCount))
+        ? Math.max(0, Math.trunc(Number(serviceRoot.historyDayCount)))
+        : history.length,
+      sources: sourceHealth,
+    },
   };
 }
 
@@ -16566,6 +16821,226 @@ function closeFxNewsEventDetail({ restoreFocus = true } = {}) {
   newsEventShouldRestoreFocus = true;
 }
 
+function fxNewsServiceStatusLabel(status) {
+  return {
+    healthy: "พร้อมใช้งาน",
+    ready: "พร้อมใช้งาน",
+    ok: "พร้อมใช้งาน",
+    success: "พร้อมใช้งาน",
+    verified: "ตรวจสอบแล้ว",
+    verified_empty: "ตรวจแล้ว • ไม่มีข่าว",
+    quiet_day: "ตรวจแล้ว • ไม่มีข่าว",
+    refreshing: "กำลังอัปเดต",
+    degraded: "บางแหล่งมีปัญหา",
+    partial: "ได้ข้อมูลบางส่วน",
+    partial_success: "ได้ข้อมูลบางส่วน",
+    failed: "อัปเดตไม่สำเร็จ",
+    error: "อัปเดตไม่สำเร็จ",
+    source_failure: "แหล่งข้อมูลขัดข้อง",
+    unavailable: "ยังใช้บริการไม่ได้",
+    unknown: "รอสถานะจาก Backend",
+  }[String(status || "unknown").toLowerCase()] || safeDashboardDisplayText(status, "รอสถานะจาก Backend");
+}
+
+function fxNewsSourceHealthState(service = {}) {
+  const rows = Array.isArray(service?.sources) ? service.sources : [];
+  const readyStates = new Set(["healthy", "ready", "ok", "online", "success", "verified", "verified_empty", "quiet_day"]);
+  const failedStates = new Set(["failed", "error", "offline", "source_failure", "unavailable"]);
+  const readyCount = rows.filter((row) => readyStates.has(String(row?.status || "").toLowerCase())).length;
+  const failedCount = rows.filter((row) => failedStates.has(String(row?.status || "").toLowerCase())).length;
+  return {
+    rows,
+    readyCount,
+    failedCount,
+    partial: readyCount > 0 && failedCount > 0,
+    allFailed: rows.length > 0 && readyCount === 0 && failedCount === rows.length,
+  };
+}
+
+function appendFxNewsBackendState(container, domain = {}, { view = "today" } = {}) {
+  const loadState = state.propReportLoadState?.[FX_NEWS_BIAS_PROP_ID] || {};
+  const service = domain?.service || {};
+  const sourceHealth = fxNewsSourceHealthState(service);
+  const assessment = domain?.pairAssessmentSummary || {};
+  const assessedPairCount = Number(assessment.assessedPairCount) || 0;
+  const noDirectEventPairCount = Number(assessment.noDirectEventPairCount) || 0;
+  const hasViewData = view === "today" ? Boolean(domain?.news?.length) : assessedPairCount > 0;
+  const calendarStatus = String(domain?.freshness?.marketNews?.dataStatus || domain?.calendar?.status || "unknown").toLowerCase();
+  const serviceStatus = String(service?.status || "unknown").toLowerCase();
+
+  if (loadState.status === "loading" && !hasViewData) {
+    container.appendChild(createFxNewsCalendarBanner(
+      "loading",
+      view === "today" ? "กำลังดึงปฏิทินข่าวของวันนี้" : "กำลังดึงผลประเมิน 28 คู่เงิน",
+      "กำลังโหลดข้อมูลจาก Backend โดยตรง และจะไม่สร้างข่าวหรือทิศทางจำลองระหว่างรอ",
+    ));
+  } else if (loadState.status === "error") {
+    container.appendChild(createFxNewsCalendarBanner(
+      "error",
+      hasViewData ? "อัปเดตรอบล่าสุดไม่สำเร็จ" : "โหลดข้อมูลข่าวไม่สำเร็จ",
+      hasViewData
+        ? "กำลังแสดงข้อมูลที่ Backend โหลดสำเร็จครั้งก่อน โปรดตรวจเวลาอัปเดตก่อนใช้งาน"
+        : "ยังไม่มีข้อมูลจริงให้แสดง กรุณาตรวจสถานะ Backend แล้วลองใหม่",
+    ));
+  }
+
+  if (sourceHealth.partial || ["degraded", "partial", "partial_success"].includes(serviceStatus)) {
+    container.appendChild(createFxNewsCalendarBanner(
+      "warning",
+      "ได้รับข้อมูลที่ยืนยันแล้วเพียงบางแหล่ง",
+      `ยังแสดงรายการที่ตรวจสอบได้ตามจริง • แหล่งพร้อม ${sourceHealth.readyCount} • แหล่งมีปัญหา ${sourceHealth.failedCount}`,
+    ));
+  } else if (sourceHealth.allFailed || ["failed", "error", "source_failure", "unavailable"].includes(serviceStatus)) {
+    container.appendChild(createFxNewsCalendarBanner(
+      "error",
+      "บริการข่าวหรือแหล่งข้อมูลยังไม่พร้อม",
+      service?.errorMessage || "Backend ไม่สามารถยืนยันข้อมูลรอบนี้ได้ จึงไม่สร้างข่าวหรือทิศทางแทนข้อมูลจริง",
+    ));
+  }
+
+  const verifiedQuietDay = (
+    (domain?.calendar?.verifiedEmpty || domain?.freshness?.marketNews?.verifiedEmpty)
+    && assessedPairCount === FX_BIAS_PAIR_UNIVERSE.length
+    && noDirectEventPairCount === FX_BIAS_PAIR_UNIVERSE.length
+  );
+  if (verifiedQuietDay) {
+    container.appendChild(createFxNewsCalendarBanner(
+      "empty",
+      "ตรวจสอบวันนี้แล้ว • ไม่มีข่าวตรง • ประเมินครบ 28/28",
+      domain?.calendar?.emptyReason || "ทั้ง 28 คู่ถูกประเมินเป็น no_direct_event และไม่มีการสร้าง Bias ทิศทาง",
+    ));
+    return;
+  }
+
+  if (domain?.calendar?.errorMessage) {
+    container.appendChild(createFxNewsCalendarBanner(
+      "error",
+      "Backend แจ้งว่ารอบรวบรวมข่าวมีปัญหา",
+      domain.calendar.errorMessage,
+    ));
+  }
+  if (!hasViewData && loadState.status !== "loading" && loadState.status !== "error") {
+    if (domain?.calendar?.verifiedEmpty || domain?.freshness?.marketNews?.verifiedEmpty) {
+      container.appendChild(createFxNewsCalendarBanner(
+        "empty",
+        "ตรวจสอบปฏิทินวันนี้แล้ว • ไม่มีรายการตามเกณฑ์",
+        domain?.calendar?.emptyReason || "วันนี้ไม่มีข่าวที่ Backend ยืนยันว่าตรงตามเกณฑ์",
+      ));
+    } else if (["source_failure", "failed", "error"].includes(calendarStatus)) {
+      container.appendChild(createFxNewsCalendarBanner(
+        "error",
+        "แหล่งข้อมูลข่าวยังตรวจสอบไม่สำเร็จ",
+        "ระบบไม่สร้างข่าวหรือผลประเมินแทนข้อมูลจริง",
+      ));
+    } else if (["no_verified_data", "unavailable", "no_report", "unknown"].includes(calendarStatus)) {
+      container.appendChild(createFxNewsCalendarBanner(
+        "waiting",
+        "ยังไม่มีข้อมูลข่าวที่ยืนยันได้ของวันนี้",
+        "กำลังรอรอบอัปเดตอัตโนมัติหรือการตอบกลับจากแหล่งข้อมูลต้นทาง",
+      ));
+    }
+  }
+}
+
+function fxNewsHistoryStatusLabel(item = {}) {
+  if (item.verifiedEmpty) return "ตรวจแล้ว • ไม่มีข่าว";
+  return {
+    ready: "พร้อมใช้งาน",
+    verified: "ตรวจสอบแล้ว",
+    complete: "อัปเดตสำเร็จ",
+    degraded: "ข้อมูลบางส่วน",
+    partial: "ข้อมูลบางส่วน",
+    source_failure: "แหล่งข้อมูลขัดข้อง",
+    failed: "อัปเดตไม่สำเร็จ",
+    error: "อัปเดตไม่สำเร็จ",
+    unknown: "ยังไม่ทราบสถานะ",
+    stored_history: "บันทึกจาก Backend",
+  }[item.dataStatus] || safeDashboardDisplayText(item.dataStatus, "ยังไม่ทราบสถานะ");
+}
+
+function renderFxNewsHistory(container, domain = {}) {
+  const heading = document.createElement("header");
+  const headingCopy = document.createElement("div");
+  const title = document.createElement("h5");
+  const detail = document.createElement("p");
+  const count = document.createElement("strong");
+  const history = Array.isArray(domain?.history) ? domain.history : [];
+  heading.className = "workflow-news-history-heading";
+  title.textContent = "ประวัติอัปเดตข่าวรายวัน";
+  detail.textContent = "แสดงเฉพาะรอบย้อนหลังที่ Backend เก็บไว้ ไม่เติมข่าวหรือผลประเมินที่ไม่มีหลักฐาน";
+  const backendHistoryCount = Number(domain?.service?.historyDayCount)
+    || Number(domain?.service?.historyCount)
+    || history.length;
+  count.textContent = `${history.length}/${backendHistoryCount} วันที่โหลดมา`;
+  headingCopy.append(title, detail);
+  heading.append(headingCopy, count);
+  container.appendChild(heading);
+
+  const loadState = state.propReportLoadState?.[FX_NEWS_BIAS_PROP_ID] || {};
+  if (loadState.status === "loading" && !history.length) {
+    container.appendChild(createFxNewsCalendarBanner("loading", "กำลังโหลดประวัติ", "กำลังอ่านประวัติที่ Backend เก็บไว้"));
+    return;
+  }
+  if (loadState.status === "error") {
+    container.appendChild(createFxNewsCalendarBanner(
+      "error",
+      history.length ? "โหลดประวัติรอบล่าสุดไม่สำเร็จ" : "โหลดประวัติไม่สำเร็จ",
+      history.length ? "กำลังแสดงประวัติที่โหลดสำเร็จก่อนหน้านี้" : "ยังไม่มีประวัติที่ยืนยันได้ให้แสดง",
+    ));
+  }
+  if (!history.length) {
+    container.appendChild(createWorkflowTruthEmpty("Backend ยังไม่มีประวัติอัปเดตรายวันให้แสดง"));
+    return;
+  }
+
+  const list = document.createElement("div");
+  list.className = "workflow-news-history-list";
+  history.forEach((item) => {
+    const card = document.createElement("article");
+    const header = document.createElement("header");
+    const date = document.createElement("strong");
+    const status = document.createElement("span");
+    const facts = document.createElement("dl");
+    card.className = "workflow-news-history-card";
+    card.dataset.status = item.dataStatus;
+    date.textContent = item.calendarDate || fxNewsBangkokDateTimeLabel(item.updatedAt, "ไม่ทราบวันที่");
+    status.textContent = fxNewsHistoryStatusLabel(item);
+    header.append(date, status);
+    const factRows = [
+      ["เวลาอัปเดต", fxNewsBangkokDateTimeLabel(item.updatedAt, "ยังไม่มีเวลา")],
+      ["ข่าวทั้งหมด", `${item.eventCount} รายการ`],
+      ["ประกาศแล้ว", `${item.releasedCount} รายการ`],
+    ];
+    if (item.assessedPairCount !== null) factRows.push(["ประเมินคู่เงิน", `${item.assessedPairCount}/28`]);
+    if (item.directionalPairCount !== null) factRows.push(["มี Bias ยืนยัน", `${item.directionalPairCount} คู่`]);
+    factRows.forEach(([labelText, valueText]) => {
+      const row = document.createElement("div");
+      const label = document.createElement("dt");
+      const value = document.createElement("dd");
+      label.textContent = labelText;
+      value.textContent = valueText;
+      row.append(label, value);
+      facts.appendChild(row);
+    });
+    card.append(header, facts);
+    if (item.summary || item.errorMessage) {
+      const note = document.createElement("p");
+      note.textContent = item.errorMessage || item.summary;
+      card.appendChild(note);
+    }
+    if (item.events.length) {
+      const eventTitle = document.createElement("h6");
+      const eventList = document.createElement("div");
+      eventTitle.textContent = "ข่าวที่บันทึกในวันนี้";
+      eventList.className = "workflow-news-calendar-list workflow-news-history-events";
+      item.events.forEach((event) => eventList.appendChild(createFxNewsEventCard(event)));
+      card.append(eventTitle, eventList);
+    }
+    list.appendChild(card);
+  });
+  container.appendChild(list);
+}
+
 function renderFxNewsBiasPanel(container, tabId, domain) {
   const section = document.createElement("section");
   section.className = "workflow-domain-panel workflow-fx-news-bias";
@@ -16575,53 +17050,9 @@ function renderFxNewsBiasPanel(container, tabId, domain) {
   const freshnessBanner = createFxFreshnessBanner(freshness);
   if (freshnessBanner) section.appendChild(freshnessBanner);
   if (tabId === "today") {
-    const loadState = state.propReportLoadState?.[FX_NEWS_BIAS_PROP_ID] || {};
-    const dataStatus = String(domain?.freshness?.marketNews?.dataStatus || domain?.calendar?.status || "unknown").toLowerCase();
     section.appendChild(createFxNewsCalendarHeader(domain));
     section.appendChild(createFxNewsImpactFilters());
-    if (loadState.status === "loading" && !domain.news.length) {
-      section.appendChild(createFxNewsCalendarBanner(
-        "loading",
-        "กำลังดึงปฏิทินข่าวของวันนี้",
-        "Local Runner กำลังโหลดข้อมูลจาก Backend ระบบจะไม่สร้างข่าวจำลองระหว่างรอ",
-      ));
-    } else if (loadState.status === "error") {
-      section.appendChild(createFxNewsCalendarBanner(
-        "error",
-        domain.news.length ? "อัปเดตรอบล่าสุดไม่สำเร็จ" : "โหลดปฏิทินข่าวไม่สำเร็จ",
-        domain.news.length
-          ? "กำลังแสดงข้อมูลที่โหลดสำเร็จครั้งก่อน โปรดตรวจเวลาอัปเดตก่อนใช้งาน"
-          : "ยังไม่มีข้อมูลจริงให้แสดง กรุณาตรวจ Local Runner หรือกดเปิด Dashboard นี้ใหม่",
-      ));
-    }
-    if (domain?.calendar?.errorMessage) {
-      section.appendChild(createFxNewsCalendarBanner(
-        "error",
-        "Backend แจ้งว่ารอบรวบรวมข่าวมีปัญหา",
-        domain.calendar.errorMessage,
-      ));
-    }
-    if (!domain.news.length && loadState.status !== "loading" && loadState.status !== "error") {
-      if (domain?.calendar?.verifiedEmpty || domain?.freshness?.marketNews?.verifiedEmpty) {
-        section.appendChild(createFxNewsCalendarBanner(
-          "empty",
-          "ตรวจสอบปฏิทินวันนี้แล้ว • ไม่มีรายการตามเกณฑ์",
-          domain?.calendar?.emptyReason || "อาจเป็นวันหยุด สุดสัปดาห์ หรือไม่มีข่าวตามระดับผลกระทบที่ตั้งไว้",
-        ));
-      } else if (["source_failure", "failed", "error"].includes(dataStatus)) {
-        section.appendChild(createFxNewsCalendarBanner(
-          "error",
-          "แหล่งข้อมูลข่าวยังตรวจสอบไม่สำเร็จ",
-          "ระบบปิดความเสี่ยงไว้และไม่สร้างข่าวหรือผลวิเคราะห์แทนข้อมูลจริง",
-        ));
-      } else if (["no_verified_data", "unavailable", "no_report", "unknown"].includes(dataStatus)) {
-        section.appendChild(createFxNewsCalendarBanner(
-          "waiting",
-          "ยังไม่มีรายงานข่าวที่ยืนยันได้ของวันนี้",
-          "ระบบกำลังรอรอบรวบรวมข่าวอัตโนมัติหรือหลักฐานจากแหล่งข้อมูลสาธารณะ",
-        ));
-      }
-    }
+    appendFxNewsBackendState(section, domain, { view: "today" });
     const dangerTitle = document.createElement("h5");
     dangerTitle.textContent = "ช่วงเวลาที่ EA ควรระวัง";
     section.appendChild(dangerTitle);
@@ -16659,7 +17090,10 @@ function renderFxNewsBiasPanel(container, tabId, domain) {
       if (unconfirmedNews.length) renderFxNewsGroup(section, "รอ Backend ยืนยันสถานะ", unconfirmedNews, "ไม่มีรายการที่รอยืนยัน");
     }
   } else if (tabId === "pair_bias") {
+    appendFxNewsBackendState(section, domain, { view: "pairs" });
     renderFxBiasGrid(section, domain.pairBias, domain.pairAssessmentSummary);
+  } else if (tabId === "history") {
+    renderFxNewsHistory(section, domain);
   } else if (tabId === "horizons") {
     renderFxBiasTable(section, domain.pairBias, { horizons: true });
   } else section.appendChild(createWorkflowTruthEmpty("ส่วนนี้ไม่มีข้อมูลสำหรับแสดง"));
@@ -17126,6 +17560,12 @@ function renderWorkflowActionStatus(propId) {
   const status = state.modal.workflowAction;
   const current = status.propId === propId && status.message;
   els.workflowActionStatus.dataset.tone = current ? status.tone : "neutral";
+  if (propId === FX_NEWS_BIAS_PROP_ID) {
+    els.workflowActionStatus.textContent = current
+      ? status.message
+      : "ข้อมูลข่าวอ่านจากบริการ Backend โดยตรง และไม่มีการสร้างทิศทางจำลอง";
+    return;
+  }
   els.workflowActionStatus.textContent = current
     ? status.message
     : "หน้าเว็บส่งเฉพาะคำขอ งานจริงและ Audit Log อยู่หลัง Local Runner";
@@ -17195,9 +17635,7 @@ function workflowRailActions(subject, dashboard) {
   if (subject?.id === INDICATOR_SCOUT_PROP_ID) {
     return actions.filter((action) => INDICATOR_SCOUT_RAIL_ACTION_IDS.has(action.id));
   }
-  if (subject?.id === FX_NEWS_BIAS_PROP_ID) {
-    return actions.filter((action) => FX_NEWS_BIAS_RAIL_ACTION_IDS.has(action.id));
-  }
+  if (subject?.id === FX_NEWS_BIAS_PROP_ID) return [];
   return [...actions].sort((left, right) => (
     Number(WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(left.id))
     - Number(WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(right.id))
@@ -17210,11 +17648,6 @@ function createWorkflowUseGuideCard(subject) {
       "ดูรายการ Indicator, EA และ Tool ที่ Radar พบในหน้าหลัก",
       "กำหนดหัวข้อหรือเวลาค้นหาในคำสั่งด้านล่าง",
       "เปิดแหล่งข้อมูลและภาพหลักฐานก่อนนำไปใช้",
-    ],
-    [FX_NEWS_BIAS_PROP_ID]: [
-      "ดูแนวโน้มครบ 28 คู่เงินจากหน้าแรก",
-      "เปิดแท็บข่าวและผลกระทบเพื่อดูช่วงที่ EA ควรระวัง",
-      "สั่งวิเคราะห์หรือตั้งเวลาอัปเดตจากแถบด้านซ้ายนี้",
     ],
     [HQ_CONNECTION_HUB_PROP_ID]: [
       "กรองอุปกรณ์ตามสถานะ พร้อม ต้องแก้ หรือรอตรวจ",
@@ -17249,8 +17682,273 @@ function createWorkflowUseGuideCard(subject) {
   return card;
 }
 
+function createFxNewsRailFact(labelText, valueText) {
+  const row = document.createElement("div");
+  const label = document.createElement("dt");
+  const value = document.createElement("dd");
+  label.textContent = labelText;
+  value.textContent = valueText;
+  row.append(label, value);
+  return row;
+}
+
+function mergeFxNewsDirectResponse(response = {}) {
+  if (!response || typeof response !== "object" || Array.isArray(response)) return;
+  const current = state.propReports[FX_NEWS_BIAS_PROP_ID] || {};
+  const workflowDashboard = current.workflowDashboard && typeof current.workflowDashboard === "object"
+    ? current.workflowDashboard
+    : {};
+  const nextDashboard = { ...workflowDashboard };
+  ["directNewsService", "marketNews", "fxBias"].forEach((field) => {
+    if (response[field] && typeof response[field] === "object" && !Array.isArray(response[field])) {
+      nextDashboard[field] = response[field];
+    }
+  });
+  state.propReports[FX_NEWS_BIAS_PROP_ID] = { ...current, workflowDashboard: nextDashboard };
+}
+
+async function saveFxNewsSchedule(form) {
+  if (state.modal.workflowAction.inFlight) return;
+  const controls = [...form.querySelectorAll("[data-fx-news-schedule-time]")];
+  controls.forEach((control) => control.setCustomValidity(""));
+  const times = controls.map((control) => normalizeFxNewsScheduleTime(control.value));
+  if (controls.length !== 2 || times.some((time) => !time) || new Set(times).size !== 2) {
+    controls[0]?.setCustomValidity("กรุณาระบุเวลาไทย 2 เวลาที่ไม่ซ้ำกัน");
+    form.reportValidity();
+    return;
+  }
+  const enabled = Boolean(form.querySelector("[data-fx-news-schedule-enabled]")?.checked);
+  state.modal.workflowAction = {
+    inFlight: true,
+    propId: FX_NEWS_BIAS_PROP_ID,
+    actionId: "save_news_bias_schedule",
+    idempotencyKey: "",
+    formSignature: "",
+    message: "กำลังบันทึกเวลาอัปเดตข่าวกับ Backend โดยตรง",
+    tone: "working",
+  };
+  const subject = getModalSubject();
+  if (subject?.id === FX_NEWS_BIAS_PROP_ID) {
+    renderWorkflowDashboard(subject, getPropertyRole(subject), state.propReports[FX_NEWS_BIAS_PROP_ID] || {});
+  }
+  try {
+    const response = await postJson(`/api/props/${encodeURIComponent(FX_NEWS_BIAS_PROP_ID)}/news/schedule`, {
+      enabled,
+      times,
+    });
+    if (response?.ok !== true) throw new Error("Backend ไม่ยืนยันการบันทึกเวลาอัปเดตข่าว");
+    mergeFxNewsDirectResponse(response);
+    state.modal.workflowAction = {
+      inFlight: false,
+      propId: FX_NEWS_BIAS_PROP_ID,
+      actionId: "save_news_bias_schedule",
+      idempotencyKey: "",
+      formSignature: "",
+      message: "บันทึกเวลาอัปเดตข่าวแล้ว • ใช้เวลา Asia/Bangkok",
+      tone: "success",
+    };
+    await loadPropReport(FX_NEWS_BIAS_PROP_ID);
+  } catch (error) {
+    state.modal.workflowAction = {
+      inFlight: false,
+      propId: FX_NEWS_BIAS_PROP_ID,
+      actionId: "save_news_bias_schedule",
+      idempotencyKey: "",
+      formSignature: "",
+      message: safeDashboardDisplayText(error?.message, "บันทึกเวลาอัปเดตข่าวไม่สำเร็จ"),
+      tone: "error",
+    };
+  } finally {
+    if (state.modal.open && state.modal.id === FX_NEWS_BIAS_PROP_ID) renderGameModal();
+  }
+}
+
+async function refreshFxNewsDirect() {
+  if (state.modal.workflowAction.inFlight) return;
+  state.modal.workflowAction = {
+    inFlight: true,
+    propId: FX_NEWS_BIAS_PROP_ID,
+    actionId: "refresh_daily_market_news",
+    idempotencyKey: "",
+    formSignature: "",
+    message: "กำลังอัปเดตข่าวจากบริการ Backend โดยตรง",
+    tone: "working",
+  };
+  const subject = getModalSubject();
+  if (subject?.id === FX_NEWS_BIAS_PROP_ID) {
+    renderWorkflowDashboard(subject, getPropertyRole(subject), state.propReports[FX_NEWS_BIAS_PROP_ID] || {});
+  }
+  try {
+    const response = await postJson(`/api/props/${encodeURIComponent(FX_NEWS_BIAS_PROP_ID)}/news/refresh`, {});
+    const responseKind = String(response?.kind || "");
+    if (!/^news_direct_refresh(?:_|$)/.test(responseKind)) {
+      throw new Error("Backend ไม่ยืนยันผลอัปเดตข่าวโดยตรง");
+    }
+    mergeFxNewsDirectResponse(response);
+    const serviceStatus = String(response?.directNewsService?.status || "").toLowerCase();
+    const sourceFailure = responseKind.includes("source_failure")
+      || ["failed", "error", "source_failure", "unavailable"].includes(serviceStatus);
+    const partial = responseKind.includes("partial") || ["degraded", "partial", "partial_success"].includes(serviceStatus);
+    state.modal.workflowAction = {
+      inFlight: false,
+      propId: FX_NEWS_BIAS_PROP_ID,
+      actionId: "refresh_daily_market_news",
+      idempotencyKey: "",
+      formSignature: "",
+      message: sourceFailure
+        ? "Backend อัปเดตแล้วแต่ยังยืนยันข้อมูลจากแหล่งต้นทางไม่ได้"
+        : (partial
+            ? "อัปเดตแล้ว • ได้ข้อมูลที่ยืนยันแล้วจากบางแหล่ง"
+            : (response?.idempotentReplay === true
+                ? "โหลดผลอัปเดตรอบเดิมจาก Backend แล้ว"
+                : "อัปเดตข่าวจาก Backend แล้ว")),
+      tone: sourceFailure ? "error" : (partial ? "warning" : "success"),
+    };
+    await loadPropReport(FX_NEWS_BIAS_PROP_ID);
+  } catch (error) {
+    state.modal.workflowAction = {
+      inFlight: false,
+      propId: FX_NEWS_BIAS_PROP_ID,
+      actionId: "refresh_daily_market_news",
+      idempotencyKey: "",
+      formSignature: "",
+      message: safeDashboardDisplayText(error?.message, "อัปเดตข่าวจาก Backend ไม่สำเร็จ"),
+      tone: "error",
+    };
+  } finally {
+    if (state.modal.open && state.modal.id === FX_NEWS_BIAS_PROP_ID) renderGameModal();
+  }
+}
+
+function renderFxNewsSettingsRail(dashboard, identity) {
+  const domain = dashboard?.domainData?.fxNewsBias || {};
+  const schedule = domain.schedule || normalizeFxNewsSchedule();
+  const service = domain.service || {};
+  const actionState = state.modal.workflowAction;
+  const inFlight = actionState.inFlight && actionState.propId === FX_NEWS_BIAS_PROP_ID;
+  els.workflowSettingsRail.hidden = false;
+  els.workflowSettingsRail.dataset.dashboardIdentity = identity.id;
+  if (els.workflowSettingsRailTitle) els.workflowSettingsRailTitle.textContent = "อัปเดตข่าวอัตโนมัติ";
+  els.workflowSettingsRailContent.innerHTML = "";
+
+  const form = document.createElement("form");
+  const toggle = document.createElement("label");
+  const checkbox = document.createElement("input");
+  const toggleCopy = document.createElement("span");
+  const timezone = document.createElement("p");
+  const times = document.createElement("div");
+  const save = document.createElement("button");
+  form.className = "workflow-fx-news-settings";
+  form.dataset.fxNewsScheduleForm = "true";
+  toggle.className = "workflow-fx-news-toggle";
+  checkbox.type = "checkbox";
+  checkbox.checked = schedule.enabled === true;
+  checkbox.dataset.fxNewsScheduleEnabled = "true";
+  toggleCopy.textContent = "เปิดอัปเดตอัตโนมัติ";
+  toggle.append(checkbox, toggleCopy);
+  timezone.className = "workflow-fx-news-timezone";
+  timezone.textContent = "เวลาไทย • Asia/Bangkok • สูงสุด 2 รอบต่อวัน";
+  times.className = "workflow-fx-news-times";
+  schedule.times.slice(0, 2).forEach((time, index) => {
+    const label = document.createElement("label");
+    const caption = document.createElement("span");
+    const input = document.createElement("input");
+    label.className = "workflow-fx-news-time";
+    caption.textContent = `รอบที่ ${index + 1}`;
+    input.type = "time";
+    input.required = true;
+    input.step = 60;
+    input.value = time;
+    input.dataset.fxNewsScheduleTime = String(index);
+    label.append(caption, input);
+    times.appendChild(label);
+  });
+  save.type = "submit";
+  save.className = "workflow-fx-news-save";
+  save.disabled = inFlight;
+  save.textContent = inFlight && actionState.actionId === "save_news_bias_schedule" ? "กำลังบันทึก..." : "บันทึกเวลา";
+  form.append(toggle, timezone, times, save);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void saveFxNewsSchedule(form);
+  });
+  els.workflowSettingsRailContent.appendChild(form);
+
+  const serviceCard = document.createElement("section");
+  const serviceTitle = document.createElement("strong");
+  const serviceFacts = document.createElement("dl");
+  serviceCard.className = "workflow-fx-news-service";
+  serviceCard.dataset.status = service.status || "unknown";
+  serviceTitle.textContent = "สถานะบริการข่าว Backend";
+  serviceFacts.className = "workflow-fx-news-service-facts";
+  serviceFacts.append(
+    createFxNewsRailFact("สถานะ", service.refreshInProgress ? "กำลังอัปเดต" : fxNewsServiceStatusLabel(service.status)),
+    createFxNewsRailFact("อัปเดตสำเร็จล่าสุด", fxNewsBangkokDateTimeLabel(service.lastSuccessAt, "ยังไม่มี")),
+    createFxNewsRailFact("รอบถัดไป", fxNewsBangkokDateTimeLabel(service.nextRunAt, schedule.enabled ? "Backend ยังไม่ส่งเวลา" : "ปิดอัปเดตอัตโนมัติ")),
+    createFxNewsRailFact("ประวัติที่เก็บ", `${Number(service.historyCount) || 0} วัน`),
+  );
+  serviceCard.append(serviceTitle, serviceFacts);
+  if (service.errorMessage) {
+    const error = document.createElement("p");
+    error.className = "workflow-fx-news-service-error";
+    error.textContent = service.errorMessage;
+    serviceCard.appendChild(error);
+  }
+  const sourceTitle = document.createElement("h5");
+  const sourceList = document.createElement("div");
+  sourceTitle.textContent = "สุขภาพแหล่งข้อมูล";
+  sourceList.className = "workflow-fx-news-source-list";
+  (service.sources || []).forEach((source) => {
+    const row = document.createElement("article");
+    const heading = document.createElement("div");
+    const label = document.createElement("strong");
+    const status = document.createElement("span");
+    const detail = document.createElement("small");
+    row.className = "workflow-fx-news-source";
+    row.dataset.status = source.status;
+    label.textContent = source.label;
+    status.textContent = fxNewsServiceStatusLabel(source.status);
+    heading.append(label, status);
+    detail.textContent = source.errorCode
+      ? `รหัสปัญหา ${source.errorCode}`
+      : `ตรวจล่าสุด ${fxNewsBangkokDateTimeLabel(source.lastCheckedAt, "ยังไม่มีเวลา")} • ${source.eventCount ?? 0} ข่าว`;
+    row.append(heading, detail);
+    const link = createWorkflowExternalSource(source.url, "เปิดแหล่งต้นทาง");
+    if (link) row.appendChild(link);
+    sourceList.appendChild(row);
+  });
+  if (!sourceList.childElementCount) sourceList.appendChild(createWorkflowTruthEmpty("Backend ยังไม่ส่งสถานะแหล่งข้อมูล"));
+  serviceCard.append(sourceTitle, sourceList);
+  els.workflowSettingsRailContent.appendChild(serviceCard);
+
+  if (service.directRefreshAvailable === true) {
+    const actions = document.createElement("div");
+    const refresh = document.createElement("button");
+    actions.className = "workflow-fx-news-rail-actions";
+    refresh.type = "button";
+    refresh.className = "workflow-fx-news-refresh";
+    refresh.disabled = inFlight || service.refreshInProgress === true;
+    refresh.textContent = refresh.disabled ? "กำลังอัปเดต..." : "อัปเดตตอนนี้";
+    refresh.addEventListener("click", () => void refreshFxNewsDirect());
+    actions.appendChild(refresh);
+    els.workflowSettingsRailContent.appendChild(actions);
+  }
+  if (actionState.propId === FX_NEWS_BIAS_PROP_ID && actionState.message) {
+    const status = document.createElement("p");
+    status.className = "workflow-fx-news-rail-status";
+    status.dataset.tone = actionState.tone;
+    status.setAttribute("aria-live", "polite");
+    status.textContent = actionState.message;
+    els.workflowSettingsRailContent.appendChild(status);
+  }
+}
+
 function renderWorkflowSettingsRail(subject, dashboard, identity = getWorkflowDashboardIdentity(subject?.id)) {
   if (!els.workflowSettingsRail || !els.workflowSettingsRailContent) return;
+  if (subject?.id === FX_NEWS_BIAS_PROP_ID) {
+    renderFxNewsSettingsRail(dashboard, identity);
+    return;
+  }
   const actions = workflowRailActions(subject, dashboard);
   els.workflowSettingsRail.hidden = false;
   els.workflowSettingsRail.dataset.dashboardIdentity = identity.id;
@@ -17563,17 +18261,25 @@ function renderWorkflowDashboard(subject, propertyRole, report = {}) {
   }
   if (els.modalPortraitPanel) els.modalPortraitPanel.dataset.dashboardIdentity = identity.id;
   renderWorkflowSettingsRail(subject, dashboard, identity);
-  renderWorkflowAgentHandoff(subject, report, identity);
+  const isFxNewsDashboard = subject.id === FX_NEWS_BIAS_PROP_ID;
+  if (isFxNewsDashboard) {
+    if (els.workflowAgentHandoffRail) els.workflowAgentHandoffRail.hidden = true;
+  } else {
+    renderWorkflowAgentHandoff(subject, report, identity);
+  }
   renderWorkflowTabs(subject.id, dashboard, selectedTab);
   if (els.workflowResultsPanel) {
-    const usesDomainHistory = subject.id === INDICATOR_SCOUT_PROP_ID && isHistoryTab;
-    els.workflowResultsPanel.hidden = !isHistoryTab || usesDomainHistory;
+    const usesDomainHistory = isHistoryTab
+      && [INDICATOR_SCOUT_PROP_ID, FX_NEWS_BIAS_PROP_ID].includes(subject.id);
+    els.workflowResultsPanel.hidden = isFxNewsDashboard || !isHistoryTab || usesDomainHistory;
     els.workflowResultsPanel.dataset.mode = "history";
   }
-  if (els.workflowResultsEyebrow) els.workflowResultsEyebrow.textContent = "ข้อมูลย้อนหลัง";
-  if (els.workflowResultsTitle) els.workflowResultsTitle.textContent = "ประวัติและรายงาน";
+  if (els.workflowResultsEyebrow) els.workflowResultsEyebrow.textContent = isFxNewsDashboard ? "ข้อมูลจาก Backend" : "ข้อมูลย้อนหลัง";
+  if (els.workflowResultsTitle) els.workflowResultsTitle.textContent = isFxNewsDashboard ? "ประวัติอัปเดตข่าว" : "ประวัติและรายงาน";
   if (els.workflowResultsCopy) {
-    els.workflowResultsCopy.textContent = "กดรายการเพื่อดูรายละเอียด Mission, Report และหลักฐานย้อนหลัง";
+    els.workflowResultsCopy.textContent = isFxNewsDashboard
+      ? "ดูรอบอัปเดตย้อนหลังจากบริการข่าวโดยตรง"
+      : "กดรายการเพื่อดูรายละเอียด Mission, Report และหลักฐานย้อนหลัง";
   }
   if (els.workflowDashboardContent) {
     els.workflowDashboardContent.innerHTML = "";
@@ -17627,7 +18333,7 @@ function renderWorkflowDashboard(subject, propertyRole, report = {}) {
     }
     if (isHistoryTab && !els.workflowDashboardContent.childElementCount) els.workflowDashboardContent.hidden = true;
   }
-  renderWorkflowResults(subject, report);
+  if (!isFxNewsDashboard) renderWorkflowResults(subject, report);
   renderWorkflowActionStatus(subject.id);
 }
 

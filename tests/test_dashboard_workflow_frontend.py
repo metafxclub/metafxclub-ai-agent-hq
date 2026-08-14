@@ -116,13 +116,14 @@ class DashboardWorkflowFrontendTests(unittest.TestCase):
     def test_each_workflow_device_opens_on_main_work_and_only_history_devices_end_with_reports(self):
         expected_last_ids = {
             "codex_mcp_portal": "catalog",
+            "left_signal_cube": "history",
             "left_server_racks": "evidence",
             "right_server_racks": "outputs",
             "right_tool_console": "history",
             "left_audit_crystals": "archive",
             "terminal_workstation": "outputs",
         }
-        no_history_props = {"left_signal_cube", "right_status_crystals"}
+        no_history_props = {"right_status_crystals"}
         single_view_props = {"right_status_crystals": "connections"}
         for prop_id in WORKFLOW_PROP_IDS:
             role = self.role_map[prop_id]
@@ -143,7 +144,10 @@ class DashboardWorkflowFrontendTests(unittest.TestCase):
                     continue
                 self.assertEqual(ux["historyReportTabId"], expected_last_ids[prop_id])
                 self.assertEqual(tabs[-1]["id"], expected_last_ids[prop_id])
-                self.assertEqual(tabs[-1]["labelTh"], "ประวัติและรายงาน")
+                self.assertEqual(
+                    tabs[-1]["labelTh"],
+                    "ประวัติข่าว" if prop_id == "left_signal_cube" else "ประวัติและรายงาน",
+                )
                 self.assertEqual(ux["historyReportTabPosition"], "last")
 
         self.assertIn("const WORKFLOW_DASHBOARD_PRIMARY_TABS", self.main)
@@ -341,8 +345,8 @@ class DashboardWorkflowFrontendTests(unittest.TestCase):
 
         self.assertIn("const isPrimaryTab = selectedTab?.id === dashboard.tabs[0]?.id", render)
         self.assertIn("const isHistoryTab = WORKFLOW_DASHBOARD_HISTORY_TAB_IDS.has(selectedTab?.id)", render)
-        self.assertIn("els.workflowResultsPanel.hidden = !isHistoryTab", render)
-        self.assertIn('els.workflowResultsTitle.textContent = "ประวัติและรายงาน"', render)
+        self.assertIn("els.workflowResultsPanel.hidden = isFxNewsDashboard", render)
+        self.assertIn('isFxNewsDashboard ? "ประวัติอัปเดตข่าว" : "ประวัติและรายงาน"', render)
         self.assertIn("if (!isPrimaryTab && !isHistoryTab)", render)
         self.assertIn('note.className = "workflow-empty-message"', render)
         self.assertIn(
@@ -373,12 +377,12 @@ class DashboardWorkflowFrontendTests(unittest.TestCase):
             "prepare_backtest_plan",
             "prepare_optimization_plan",
             "prepare_ea_discovery_plan",
-            "build_fx_pair_bias",
             "inspect_ea_source",
             "develop_ea_source",
             "propose_ea_performance_improvements",
         ):
             self.assertIn(f'actionId: "{action_id}"', route_block)
+        self.assertNotIn('actionId: "build_fx_pair_bias"', route_block)
         self.assertIn("WORKFLOW_REPORT_TRANSFER_READY_STATUSES", self.main)
         self.assertIn("getWorkflowReportTransferRoutes", self.main)
         self.assertIn("Report นี้ไม่มีเส้นทางปลายทางที่ Backend อนุญาต", self.main)

@@ -68,6 +68,9 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
                     return_value=self._queued_result(),
                 ) as runner,
             ):
+                self.bridge.save_direct_daily_fx_news_schedule(
+                    {"enabled": False, "times": ["00:00", "12:00"]}
+                )
                 self.bridge.save_dashboard_discovery_schedule(
                     {"enabled": True, "times": ["09:00"]}
                 )

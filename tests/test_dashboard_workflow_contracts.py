@@ -23,7 +23,7 @@ WORKFLOW_DEVICE_TAB_IDS = {
     "right_server_racks": ["builder", "code_review", "compile", "outputs"],
     "right_tool_console": ["backtest", "optimization", "ea_discovery", "history"],
     "left_audit_crystals": ["discoveries", "evidence", "schedule", "archive"],
-    "left_signal_cube": ["pair_bias", "today"],
+    "left_signal_cube": ["pair_bias", "today", "history"],
     "terminal_workstation": ["source", "development_brief", "performance_goals", "outputs"],
     "right_status_crystals": ["connections"],
 }
@@ -34,7 +34,7 @@ WORKFLOW_DEVICE_LEFT_RAIL_IDS = {
     "right_server_racks": ["quota", "agent_handoff"],
     "right_tool_console": ["quota", "agent_handoff"],
     "left_audit_crystals": ["schedule", "quota"],
-    "left_signal_cube": ["schedule", "workflow_method", "source_status", "quota"],
+    "left_signal_cube": ["schedule", "refresh", "source_status"],
     "terminal_workstation": ["quota", "agent_handoff"],
     "right_status_crystals": ["settings", "quota"],
 }
@@ -42,18 +42,12 @@ WORKFLOW_DEVICE_LEFT_RAIL_IDS = {
 WORKFLOW_DEVICE_SCHEDULE_ACTIONS = {
     "codex_mcp_portal": "save_discovery_schedule",
     "left_audit_crystals": "save_indicator_scout_schedule",
-    "left_signal_cube": "save_news_bias_schedule",
 }
 
 NEW_DEVICE_ACTIONS = {
     "left_audit_crystals": {
         "discover_new_indicators": ("codex_mcp_operator", "indicator_scout_report"),
         "save_indicator_scout_schedule": ("codex_mcp_operator", "indicator_scout_report"),
-    },
-    "left_signal_cube": {
-        "analyze_daily_market_news": ("codex_mcp_operator", "fx_news_bias_report"),
-        "build_fx_pair_bias": ("codex_mcp_operator", "fx_news_bias_report"),
-        "save_news_bias_schedule": ("codex_mcp_operator", "fx_news_bias_report"),
     },
     "terminal_workstation": {
         "inspect_ea_source": ("ea_developer", "ea_development_report"),
@@ -103,7 +97,7 @@ class DashboardWorkflowContractTests(unittest.TestCase):
             self.assertEqual([item["id"] for item in backend_tabs], tab_ids)
             self.assertEqual(role["defaultTab"], tab_ids[0])
             self.assertEqual(len(set(tab_ids)), len(tab_ids))
-            expected_count = 2 if prop_id == "left_signal_cube" else 1 if prop_id == "right_status_crystals" else 4
+            expected_count = 3 if prop_id == "left_signal_cube" else 1 if prop_id == "right_status_crystals" else 4
             self.assertEqual(len(tab_ids), expected_count)
 
     def test_workflow_devices_open_on_main_work_and_only_legacy_devices_end_with_history(self) -> None:
@@ -115,15 +109,20 @@ class DashboardWorkflowContractTests(unittest.TestCase):
 
             self.assertEqual(role["defaultTab"], tab_ids[0])
             self.assertEqual(ux["mainWorkTabId"], tab_ids[0])
-            if prop_id in {"left_signal_cube", "right_status_crystals"}:
+            if prop_id == "right_status_crystals":
                 self.assertIsNone(ux["historyReportTabId"])
                 self.assertIsNone(ux["historyReportTabPosition"])
                 self.assertNotIn("ประวัติ", " ".join(item["labelTh"] for item in tabs))
+            elif prop_id == "left_signal_cube":
+                self.assertEqual(tabs[-1]["labelTh"], "ประวัติข่าว")
             else:
                 self.assertEqual(ux["historyReportTabId"], tab_ids[-1])
                 self.assertEqual(ux["historyReportTabPosition"], "last")
                 self.assertEqual(tabs[-1]["labelTh"], "ประวัติและรายงาน")
-            self.assertTrue(tabs[0]["actionIds"], prop_id)
+            if prop_id == "left_signal_cube":
+                self.assertEqual(tabs[0]["actionIds"], [])
+            else:
+                self.assertTrue(tabs[0]["actionIds"], prop_id)
             self.assertLessEqual(len(tabs[0]["labelTh"]), 24)
             for tab in tabs:
                 self.assertLessEqual(len(tab["labelTh"]), 24)
@@ -133,7 +132,7 @@ class DashboardWorkflowContractTests(unittest.TestCase):
                     self.assertNotIn(forbidden, plain_text)
 
     def test_left_rail_metadata_only_exposes_relevant_safe_sections(self) -> None:
-        supported_sections = {"settings", "schedule", "quota", "agent_handoff", "workflow_method", "source_status"}
+        supported_sections = {"settings", "schedule", "refresh", "quota", "agent_handoff", "workflow_method", "source_status"}
         handoff_props = {
             "codex_mcp_portal",
             "left_server_racks",
@@ -150,6 +149,26 @@ class DashboardWorkflowContractTests(unittest.TestCase):
             self.assertEqual(section_ids, expected_ids)
             self.assertTrue(set(section_ids).issubset(supported_sections))
             self.assertEqual(len(section_ids), len(set(section_ids)))
+            if prop_id == "left_signal_cube":
+                self.assertEqual(ux["crossDevicePolicy"], "direct_local_service_only")
+                self.assertTrue(ux["directDashboardPipeline"])
+                self.assertIsNone(ux["missionStrategyTableRole"])
+                by_id = {item["id"]: item for item in sections}
+                self.assertEqual(by_id["schedule"]["mode"], "direct_backend_preference")
+                self.assertEqual(
+                    by_id["schedule"]["endpoint"],
+                    "/api/props/left_signal_cube/news/schedule",
+                )
+                self.assertEqual(by_id["schedule"]["fields"], ["enabled", "times"])
+                self.assertEqual(by_id["refresh"]["mode"], "direct_backend_action")
+                self.assertEqual(
+                    by_id["refresh"]["endpoint"],
+                    "/api/props/left_signal_cube/news/refresh",
+                )
+                self.assertEqual(by_id["source_status"]["mode"], "backend_read_only")
+                self.assertNotIn("quota", by_id)
+                self.assertNotIn("agent_handoff", by_id)
+                continue
             self.assertEqual(ux["crossDevicePolicy"], "agent_mission_report_only")
             self.assertFalse(ux["directDashboardPipeline"])
             self.assertEqual(ux["missionStrategyTableRole"], "global_ledger_only")
@@ -201,6 +220,15 @@ class DashboardWorkflowContractTests(unittest.TestCase):
             workflow = self.role_map["properties"][prop_id]["workflow"]
             self.assertEqual(workflow["displayOrder"], expected_order)
             self.assertTrue(workflow["independent"])
+            if prop_id == "left_signal_cube":
+                self.assertEqual(workflow["coordinationMode"], "deterministic_backend_direct")
+                self.assertFalse(workflow["agentTransferOnly"])
+                self.assertFalse(workflow["directDashboardDependency"])
+                self.assertEqual(workflow["transferPolicy"]["mode"], "none")
+                self.assertFalse(workflow["transferPolicy"]["missionCreated"])
+                self.assertFalse(workflow["transferPolicy"]["agentUsed"])
+                self.assertFalse(workflow["transferPolicy"]["aiUsed"])
+                continue
             self.assertEqual(workflow["coordinationMode"], "agent_mission_only")
             self.assertTrue(workflow["agentTransferOnly"])
             self.assertFalse(workflow["directDashboardDependency"])
@@ -237,6 +265,11 @@ class DashboardWorkflowContractTests(unittest.TestCase):
                 self.assertTrue(tool["requiresAuditLog"])
                 self.assertTrue(tool["workflowEnvelopeRequired"])
 
+        direct_role = self.role_map["properties"]["left_signal_cube"]
+        self.assertEqual(direct_role["allowedDashboardActions"], [])
+        self.assertEqual(direct_role["ownerAgents"], [])
+        self.assertEqual(direct_role["workflow"]["coordinationMode"], "deterministic_backend_direct")
+
     def test_google_sheet_template_and_backend_projection_are_exactly_42_fields(self) -> None:
         template = PROJECT_ROOT / "contracts" / "research" / "trading-system-sheet-template.csv"
         with template.open("r", encoding="utf-8", newline="") as handle:
@@ -256,6 +289,10 @@ class DashboardWorkflowContractTests(unittest.TestCase):
         for action_id, action in self.bridge.DASHBOARD_WORKFLOW_ACTIONS.items():
             prop_id = action["propId"]
             role = self.role_map["properties"][prop_id]
+            if prop_id == "left_signal_cube":
+                self.assertNotIn(action_id, role["allowedDashboardActions"])
+                self.assertIn(action_id, role["legacyGenericActionIdsRejected"])
+                continue
             self.assertIn(action_id, role["allowedDashboardActions"])
             self.assertIn(action_id, tool_rows)
             self.assertIn(prop_id, tool_rows[action_id]["linkedPropIds"])
@@ -370,7 +407,6 @@ class DashboardWorkflowContractTests(unittest.TestCase):
     def test_adapter_readiness_is_truthful_for_new_devices(self) -> None:
         expected_unavailable = {
             "left_audit_crystals": {"screenshot_adapter": "not_connected"},
-            "left_signal_cube": {"economic_calendar_adapter": "coming_soon"},
             "terminal_workstation": {"metaeditor_compiler": "coming_soon", "artifact_download": "coming_soon"},
             "right_status_crystals": {"external_vps_api": "coming_soon"},
         }
@@ -380,6 +416,14 @@ class DashboardWorkflowContractTests(unittest.TestCase):
             }
             for adapter_id, expected_status in adapter_statuses.items():
                 self.assertEqual(connections[adapter_id]["adapterStatus"], expected_status)
+        news_connections = {
+            item["id"]: item
+            for item in self.connections["profiles"]["left_signal_cube"]["connections"]
+        }
+        self.assertEqual(news_connections["official_structured_sources"]["adapterStatus"], "implemented_allowlist")
+        self.assertEqual(news_connections["fx_bias_analysis"]["adapterStatus"], "implemented")
+        self.assertEqual(news_connections["direct_news_store"]["adapterStatus"], "implemented_atomic_local_store")
+        self.assertEqual(news_connections["backend_scheduler"]["adapterStatus"], "implemented_direct_backend")
         eligible = self.connections["discoveryLabMt4Readiness"]["eligibleDashboardIds"]
         self.assertNotIn("terminal_workstation", eligible)
         terminal_tools = {
@@ -400,11 +444,6 @@ class DashboardWorkflowContractTests(unittest.TestCase):
                 "toolId": "save_indicator_scout_schedule",
                 "scheduled": ["discover_new_indicators"],
                 "manual": [],
-            },
-            "left_signal_cube": {
-                "toolId": "save_news_bias_schedule",
-                "scheduled": ["analyze_daily_market_news"],
-                "manual": ["build_fx_pair_bias"],
             },
         }
         tools = {
@@ -451,6 +490,21 @@ class DashboardWorkflowContractTests(unittest.TestCase):
                 tool.get("manualOrAgentHandoffActionIds", []),
                 spec["manual"],
             )
+
+        news_role = self.role_map["properties"]["left_signal_cube"]
+        news_schedule = news_role["workflow"]["schedule"]
+        news_operation = self.connections["profiles"]["left_signal_cube"]["operation"]
+        self.assertTrue(news_schedule["defaultEnabled"])
+        self.assertEqual(news_schedule["defaultTimes"], ["00:00", "12:00"])
+        self.assertEqual(news_schedule["recurringSchedulerAdapterStatus"], "implemented_direct_backend")
+        self.assertEqual(news_role["workflow"]["readiness"]["recurringScheduler"], "ready_direct_backend")
+        self.assertEqual(news_operation["scheduleExecutionAdapterStatus"], "implemented_direct_backend")
+        self.assertEqual(news_operation["scheduledActionIds"], [])
+        self.assertEqual(news_operation["manualOrAgentHandoffActionIds"], [])
+        self.assertEqual(
+            news_operation["refreshEndpoint"],
+            "/api/props/left_signal_cube/news/refresh",
+        )
 
         portal_connections = {
             item["id"]: item

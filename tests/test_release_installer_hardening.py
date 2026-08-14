@@ -146,7 +146,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         requirements = (ROOT / "requirements-runner.txt").read_text(encoding="utf-8")
         self.assertGreaterEqual(requirements.count("--hash=sha256:"), 11)
         requirement_blocks = [block for block in re.split(r"\n(?=[A-Za-z0-9_.-]+==)", requirements) if "==" in block]
-        self.assertEqual(7, len(requirement_blocks))
+        self.assertEqual(8, len(requirement_blocks))
         self.assertTrue(all("--hash=sha256:" in block for block in requirement_blocks))
         self.assertIn("[int]$details.minor -gt 14", installer)
         self.assertIn("[switch]$PackageSmoke", installer)

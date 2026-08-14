@@ -38,6 +38,11 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
     def ready_bridge(self) -> dict:
         return {"codex": {"status": "ready_guarded"}}
 
+    def disable_direct_news_schedule(self) -> None:
+        self.bridge.save_direct_daily_fx_news_schedule(
+            {"enabled": False, "times": ["00:00", "12:00"]}
+        )
+
     def test_ready_guarded_codex_is_connected_in_dashboard_checklists(self) -> None:
         freshness = {
             "bridge": self.bridge._connection_probe_freshness({}),
@@ -78,11 +83,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 "discover_new_indicators",
                 "save_indicator_scout_schedule",
             },
-            "left_signal_cube": {
-                "analyze_daily_market_news",
-                "build_fx_pair_bias",
-                "save_news_bias_schedule",
-            },
+            "left_signal_cube": set(),
             "terminal_workstation": {
                 "inspect_ea_source",
                 "develop_ea_source",
@@ -95,6 +96,15 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         }
         actual = {prop_id: set() for prop_id in expected}
         for action_id, action in self.bridge.DASHBOARD_WORKFLOW_ACTIONS.items():
+            if action["propId"] == "left_signal_cube":
+                self.assertIn(
+                    action_id,
+                    {
+                        "refresh_daily_market_news",
+                        "save_news_bias_schedule",
+                    },
+                )
+                continue
             actual[action["propId"]].add(action_id)
             self.assertTrue(action["analysisOnly"])
             self.assertIn(action.get("toolId"), {None, "codex_cli_task", "codex_web_research"})
@@ -102,7 +112,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
 
     def test_tabs_reference_only_actions_owned_by_the_same_prop(self) -> None:
         for prop_id, tabs in self.bridge.DASHBOARD_WORKFLOW_TABS.items():
-            expected_count = 2 if prop_id == "left_signal_cube" else 1 if prop_id == "right_status_crystals" else 4
+            expected_count = 3 if prop_id == "left_signal_cube" else 1 if prop_id == "right_status_crystals" else 4
             self.assertEqual(len(tabs), expected_count, prop_id)
             for tab in tabs:
                 for action_id in tab["actionIds"]:
@@ -768,6 +778,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 mock.patch.object(self.bridge, "append_audit"),
                 mock.patch.object(self.bridge, "run_dashboard_workflow_action") as runner,
             ):
+                self.disable_direct_news_schedule()
                 result = self.bridge.dashboard_workflow_scheduler_tick(
                     datetime(2026, 8, 9, 9, 0, tzinfo=self.bridge.THAILAND_TIMEZONE),
                     refresh_quota=False,
@@ -805,6 +816,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                     side_effect=fake_action,
                 ),
             ):
+                self.disable_direct_news_schedule()
                 with mock.patch.object(
                     self.bridge,
                     "utc_now",
@@ -870,6 +882,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                     side_effect=fake_action,
                 ),
             ):
+                self.disable_direct_news_schedule()
                 self.bridge.save_dashboard_discovery_schedule(
                     {"enabled": True, "times": ["09:00"]}
                 )
@@ -925,6 +938,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 ),
             )
             with common_patches[0], common_patches[1], common_patches[2], common_patches[3]:
+                self.disable_direct_news_schedule()
                 self.bridge.save_dashboard_discovery_schedule(
                     {"enabled": True, "times": ["09:00"]}
                 )
@@ -986,6 +1000,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 ),
                 mock.patch.object(self.bridge, "run_dashboard_workflow_action") as runner,
             ):
+                self.disable_direct_news_schedule()
                 self.bridge.save_dashboard_discovery_schedule(
                     {"enabled": True, "times": ["09:00"]}
                 )
@@ -1049,15 +1064,16 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertEqual(model["lastError"], "runner_timeout")
         self.assertEqual(model["lastErrorAt"], "2026-08-09T02:02:00+00:00")
 
-    def test_news_schedule_builds_bangkok_date_form_without_followup_bias_job(self) -> None:
+    def test_news_schedule_refreshes_direct_snapshot_without_followup_mission(self) -> None:
         captured: list[dict] = []
 
-        def fake_action(_prop_id: str, payload: dict, *, trusted_trigger_source: str) -> dict:
-            captured.append(payload)
+        def fake_refresh(**kwargs) -> dict:
+            captured.append(kwargs)
             return {
                 "ok": True,
-                "kind": "mission_auto_queued",
-                "mission": {"id": "mission-news-1", "status": "queued"},
+                "kind": "news_direct_refresh",
+                "snapshotId": "fx-news-direct-1",
+                "marketNews": {"dataStatus": "verified"},
             }
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1068,33 +1084,27 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 mock.patch.object(self.bridge, "append_audit"),
                 mock.patch.object(
                     self.bridge,
-                    "_dashboard_workflow_scheduler_gate",
-                    return_value={"allowed": True, "reason": "ready"},
+                    "refresh_deterministic_daily_fx_news",
+                    side_effect=fake_refresh,
                 ),
-                mock.patch.object(
-                    self.bridge,
-                    "run_dashboard_workflow_action",
-                    side_effect=fake_action,
-                ),
+                mock.patch.object(self.bridge, "run_dashboard_workflow_action") as mission_runner,
             ):
-                self.bridge._save_dashboard_schedule_preference(
-                    "newsBiasSchedule",
-                    {
-                        "enabled": True,
-                        "times": ["13:00"],
-                        "minimumImpact": "medium",
-                    },
+                self.bridge.save_direct_daily_fx_news_schedule(
+                    {"enabled": True, "times": ["13:00"]}
                 )
-                self.bridge.dashboard_workflow_scheduler_tick(
+                result = self.bridge.dashboard_workflow_scheduler_tick(
                     datetime(2026, 8, 9, 13, 0, tzinfo=self.bridge.THAILAND_TIMEZONE),
                     refresh_quota=False,
                 )
         self.assertEqual(len(captured), 1)
-        self.assertEqual(captured[0]["actionId"], "analyze_daily_market_news")
         self.assertEqual(
-            captured[0]["form"],
-            {"marketDate": "2026-08-09", "minimumImpact": "medium"},
+            captured[0]["idempotency_key"],
+            "dashboard-schedule:newsBiasSchedule:2026-08-09:1300",
         )
+        self.assertEqual(captured[0]["trigger_source"], "schedule")
+        self.assertTrue(result["dispatched"])
+        self.assertIsNone(result["missionId"])
+        mission_runner.assert_not_called()
 
     def test_trusted_schedule_trigger_is_persisted_without_accepting_frontend_spoofing(self) -> None:
         captured: dict = {}
@@ -1475,7 +1485,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
     def test_new_dashboard_tabs_actions_and_agent_preferences_are_canonical(self) -> None:
         expected_tabs = {
             "left_audit_crystals": ["discoveries", "evidence", "schedule", "archive"],
-            "left_signal_cube": ["pair_bias", "today"],
+            "left_signal_cube": ["pair_bias", "today", "history"],
             "terminal_workstation": ["source", "development_brief", "performance_goals", "outputs"],
             "right_status_crystals": ["connections"],
         }
@@ -2034,11 +2044,15 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 "left_audit_crystals",
                 {"actionId": "discover_new_indicators", "form": {"query": "public trend indicator"}},
             )
-            with mock.patch.object(self.bridge, "_workflow_transfer_sources", return_value=source_rows):
+            with (
+                mock.patch.object(self.bridge, "_workflow_transfer_sources", return_value=source_rows),
+                self.assertRaises(self.bridge.RequestError) as rejected,
+            ):
                 self.bridge.run_dashboard_workflow_action(
                     "left_signal_cube",
                     {"actionId": "build_fx_pair_bias", "form": {"sourceReportId": "news-report-1"}},
                 )
+            self.assertEqual(rejected.exception.status, 410)
             self.bridge.run_dashboard_workflow_action(
                 "terminal_workstation",
                 {
@@ -2046,13 +2060,11 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                     "form": {"workspaceSourceId": "workspace-source-1", "platform": "mql4"},
                 },
             )
-        self.assertEqual([item["toolId"] for item in captured], ["codex_web_research", "codex_web_research", "codex_cli_task"])
-        self.assertEqual([item["targetId"] for item in captured], ["left_audit_crystals", "left_signal_cube", "terminal_workstation"])
+        self.assertEqual([item["toolId"] for item in captured], ["codex_web_research", "codex_cli_task"])
+        self.assertEqual([item["targetId"] for item in captured], ["left_audit_crystals", "terminal_workstation"])
         self.assertIn("ห้าม Sign in", captured[0]["prompt"])
-        self.assertIn("28 คู่เงิน", captured[1]["prompt"])
-        self.assertEqual(captured[1]["prompt"].count("EURUSD"), 1)
-        self.assertIn("SOURCE-ONLY", captured[2]["prompt"])
-        self.assertEqual(captured[2]["workflowContext"]["source"]["artifactId"], "workspace-source-1")
+        self.assertIn("SOURCE-ONLY", captured[1]["prompt"])
+        self.assertEqual(captured[1]["workflowContext"]["source"]["artifactId"], "workspace-source-1")
 
     def test_terminal_source_selection_requires_exactly_one_backend_approved_source(self) -> None:
         workspace_rows = [{

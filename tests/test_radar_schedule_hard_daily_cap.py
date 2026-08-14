@@ -56,6 +56,12 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
             mock.patch.object(bridge, "utc_now", return_value="2026-08-12T01:00:00Z"),
         )
 
+    @staticmethod
+    def _disable_direct_news_schedule(bridge) -> None:
+        bridge.save_direct_daily_fx_news_schedule(
+            {"enabled": False, "times": ["00:00", "12:00"]}
+        )
+
     def test_schedule_edits_cannot_create_a_third_execution_same_bangkok_day(self) -> None:
         calls: list[dict] = []
 
@@ -68,6 +74,7 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
             settings_path = Path(temp_dir) / "settings.json"
             patches = self._runtime_patches(self.bridge, settings_path, runner)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                self._disable_direct_news_schedule(self.bridge)
                 self.bridge._save_dashboard_schedule_preference(
                     "indicatorScoutSchedule",
                     {"enabled": True, "times": ["09:00", "10:00"]},
@@ -109,6 +116,7 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
             settings_path = Path(temp_dir) / "settings.json"
             patches = self._runtime_patches(self.bridge, settings_path, runner)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                self._disable_direct_news_schedule(self.bridge)
                 self.bridge._save_dashboard_schedule_preference(
                     "indicatorScoutSchedule",
                     {"enabled": True, "times": ["09:00", "10:00"]},
@@ -145,6 +153,7 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
             settings_path = Path(temp_dir) / "settings.json"
             patches = self._runtime_patches(self.bridge, settings_path, runner)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                self._disable_direct_news_schedule(self.bridge)
                 self.bridge._save_dashboard_schedule_preference(
                     "indicatorScoutSchedule",
                     {"enabled": True, "times": ["23:59"]},
@@ -180,6 +189,7 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
             settings_path = Path(temp_dir) / "settings.json"
             patches = self._runtime_patches(self.bridge, settings_path, runner)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                self._disable_direct_news_schedule(self.bridge)
                 self.bridge._save_dashboard_schedule_preference(
                     "indicatorScoutSchedule",
                     {"enabled": True, "times": ["09:00", "10:00"]},
@@ -214,6 +224,7 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
             settings_path = Path(temp_dir) / "settings.json"
             patches = self._runtime_patches(self.bridge, settings_path, runner)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                self._disable_direct_news_schedule(self.bridge)
                 self.bridge._save_dashboard_schedule_preference(
                     "indicatorScoutSchedule",
                     {"enabled": True, "times": ["09:00", "10:00"]},
@@ -238,6 +249,7 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
             settings_path = Path(temp_dir) / "settings.json"
             patches = self._runtime_patches(self.bridge, settings_path, runner)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                self._disable_direct_news_schedule(self.bridge)
                 self.bridge._save_dashboard_schedule_preference(
                     "indicatorScoutSchedule",
                     {"enabled": True, "times": ["09:00"]},

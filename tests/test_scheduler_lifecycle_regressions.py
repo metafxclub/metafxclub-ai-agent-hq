@@ -271,6 +271,10 @@ class SchedulerLifecycleRegressionTests(unittest.TestCase):
                     side_effect=fake_action,
                 ),
             ):
+                self.bridge._save_dashboard_schedule_preference(
+                    "newsBiasSchedule",
+                    {"enabled": False, "times": ["00:00", "12:00"]},
+                )
                 self.bridge.save_dashboard_discovery_schedule(
                     {"enabled": True, "times": ["09:00"]}
                 )

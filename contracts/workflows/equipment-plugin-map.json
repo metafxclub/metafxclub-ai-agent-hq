@@ -325,11 +325,18 @@
     },
     "left_signal_cube": {
       "titleTh": "ข่าวตลาดวันนี้และมุมมอง 28 คู่เงิน",
-      "primaryProcedureId": "guarded-web-research",
-      "ownerAgentId": "codex_mcp_operator",
-      "schedule": {"supported": true, "defaultEnabled": false, "timezone": "Asia/Bangkok", "defaultTimes": ["07:00", "20:00"], "maximumTimes": 2, "maximumRunsPerDay": 2, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "actions": ["analyze_daily_market_news"], "manualOrAgentHandoffActions": ["build_fx_pair_bias"]},
+      "primaryProcedureId": "official-structured-fx-news-direct",
+      "ownerAgentId": null,
+      "serviceMode": "deterministic_backend_direct",
+      "allowedActionIds": [],
+      "legacyGenericActionIdsRejected": ["save_news_bias_schedule", "refresh_daily_market_news", "analyze_daily_market_news", "build_fx_pair_bias"],
+      "directEndpoints": {"refresh": "/api/props/left_signal_cube/news/refresh", "schedule": "/api/props/left_signal_cube/news/schedule"},
+      "schedule": {"supported": true, "defaultEnabled": true, "timezone": "Asia/Bangkok", "defaultTimes": ["00:00", "12:00"], "maximumTimes": 2, "maximumRunsPerDay": 2, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "actions": [], "manualOrAgentHandoffActions": [], "directBackendHandler": "news_bias_direct_refresh"},
+      "legacyActionDefinitionsOnly": true,
       "actions": {
         "analyze_daily_market_news": {
+          "retired": true,
+          "rejection": "direct_service_required",
           "pluginSkillId": "guarded-web-research",
           "pluginVersion": "backend-v1",
           "procedureKind": "backend_procedure",
@@ -342,6 +349,8 @@
           "failureHelpTh": "ตรวจ Bridge, Codex Login, Rate Limit และแหล่งข่าว หากไม่มีหลักฐานให้แสดง unknown และไม่สร้างข่าวแทน"
         },
         "build_fx_pair_bias": {
+          "retired": true,
+          "rejection": "direct_service_required",
           "pluginSkillId": "guarded-web-research",
           "pluginVersion": "backend-v1",
           "procedureKind": "backend_procedure",
@@ -356,11 +365,13 @@
           "failureHelpTh": "ให้ Agent ส่งรายงานข่าวที่เสร็จแล้วมายังแท็บนี้ก่อน หากหลักฐานไม่พอคู่เงินนั้นต้องเป็น unknown"
         },
         "save_news_bias_schedule": {
+          "retired": true,
+          "rejection": "direct_service_required",
           "pluginSkillId": "backend-dashboard-scheduler",
           "pluginVersion": "backend-v1",
           "procedureKind": "backend_procedure",
           "automationMode": "settings_only",
-          "inputPreset": {"enabled": false, "times": ["07:00", "20:00"], "maximumTimes": 2, "maximumRunsPerDay": 2, "timezone": "Asia/Bangkok", "minimumImpact": "low"},
+          "inputPreset": {"enabled": true, "times": ["00:00", "12:00"], "maximumTimes": 2, "maximumRunsPerDay": 2, "timezone": "Asia/Bangkok", "minimumImpact": "low"},
           "outputFields": ["requestedEnabled", "effectiveEnabled", "times", "timezone", "minimumImpact", "lastRunStatus", "savedAt"],
           "evidenceRequired": ["local_settings_record", "scheduler_state"],
           "screenshotPolicy": "not_required",

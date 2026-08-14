@@ -44,7 +44,7 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
     def test_four_new_devices_have_exact_canonical_tabs(self):
         expected = {
             "left_audit_crystals": ["discoveries", "evidence", "schedule", "archive"],
-            "left_signal_cube": ["today", "pair_bias", "horizons", "schedule_history"],
+            "left_signal_cube": ["pair_bias", "today", "history"],
             "terminal_workstation": ["source", "development_brief", "performance_goals", "outputs"],
             "right_status_crystals": ["vps", "hq_bridge", "agent_settings", "activity_history"],
         }
@@ -58,9 +58,6 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
         for action_id in (
             "discover_new_indicators",
             "save_indicator_scout_schedule",
-            "analyze_daily_market_news",
-            "build_fx_pair_bias",
-            "save_news_bias_schedule",
             "inspect_ea_source",
             "develop_ea_source",
             "propose_ea_performance_improvements",
@@ -68,6 +65,11 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
             "save_agent_preferences",
         ):
             self.assertIn(f'id: "{action_id}"', self.main)
+        news = self.fallback_prop_block("left_signal_cube", "terminal_workstation")
+        self.assertNotIn("analyze_daily_market_news", news)
+        self.assertNotIn("build_fx_pair_bias", news)
+        self.assertIn("/news/refresh", self.main)
+        self.assertIn("/news/schedule", self.main)
 
     def test_fx_bias_uses_exact_28_pair_universe_without_mock_values(self):
         start = self.main.index("const FX_BIAS_PAIR_UNIVERSE")
@@ -95,8 +97,10 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
         self.assertIn("item?.shortBias", block)
         self.assertIn("item?.mediumBias", block)
         self.assertIn("item?.longBias", block)
-        self.assertIn("deriveFxOverallBias", block)
-        self.assertIn("workflowItemSourceUrl(item, sharedSourceLinks)", block)
+        self.assertNotIn("deriveFxOverallBias(", block)
+        self.assertIn("nestedSourceRefs", block)
+        self.assertIn("pairCoverageComplete", block)
+        self.assertIn("workflowItemSourceUrl({", block)
         source_helper = self.main[
             self.main.index("function workflowSourceLinkRows"):start
         ]

@@ -409,13 +409,10 @@ class RuntimeIntegrityTests(unittest.TestCase):
             },
             "left_signal_cube": {
                 "functionName": "Daily Market News & FX Bias",
-                "owner": "codex_mcp_operator",
+                "owner": None,
                 "primaryReportType": "fx_news_bias_report",
-                "actions": {
-                    "analyze_daily_market_news",
-                    "build_fx_pair_bias",
-                    "save_news_bias_schedule",
-                },
+                "actions": set(),
+                "direct": True,
             },
             "terminal_workstation": {
                 "functionName": "EA Development Studio",
@@ -449,6 +446,18 @@ class RuntimeIntegrityTests(unittest.TestCase):
                     profile["reportRoute"]["primaryReportType"],
                     expected["primaryReportType"],
                 )
+                if expected.get("direct"):
+                    self.assertIsNone(profile["reportRoute"]["missionReportRoute"])
+                    self.assertEqual(
+                        profile["reportRoute"]["primaryStore"],
+                        "fx-daily-news-direct-store-v1",
+                    )
+                    self.assertEqual(
+                        role["workflowTracking"]["missionFields"],
+                        [],
+                    )
+                    self.assertNotIn("missionId", role["workflowTracking"]["fields"])
+                    continue
                 self.assertEqual(
                     profile["reportRoute"]["summaryTargetPropId"],
                     "mission_strategy_table",
@@ -653,14 +662,15 @@ class RuntimeIntegrityTests(unittest.TestCase):
         news_profile = connection_contract["profiles"]["left_signal_cube"]
         self.assertEqual(
             [item["id"] for item in news_profile["localTabs"]],
-            ["pair_bias", "today"],
+            ["pair_bias", "today", "history"],
         )
         self.assertEqual(news_profile["readModel"]["defaultView"], "pair_bias")
         self.assertEqual(
-            news_profile["readModel"]["oneAnalyzeReportFeeds"],
-            ["events", "dangerWindows", "pairBias"],
+            news_profile["readModel"]["directSnapshotFeeds"],
+            ["events", "dangerWindows", "pairBias", "sourceHealth", "historyDays"],
         )
-        self.assertFalse(news_profile["readModel"]["historyPresentationTab"])
+        self.assertTrue(news_profile["readModel"]["historyPresentationTab"])
+        self.assertTrue(news_profile["readModel"]["historyOfficialSourceLinksClickable"])
         self.assertEqual(news_profile["reportRoute"]["primaryReportType"], "fx_news_bias_report")
         self.assertEqual(news_profile["reportRoute"]["targetPropId"], "left_signal_cube")
         self.assertFalse(news_profile["liveTradingPolicy"]["enabled"])
@@ -708,10 +718,10 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertEqual(role_map["left_analytics_console"]["defaultTab"], "daily_summary")
         self.assertEqual(
             [item["id"] for item in role_map["left_signal_cube"]["localTabs"]],
-            ["pair_bias", "today"],
+            ["pair_bias", "today", "history"],
         )
         self.assertEqual(role_map["left_signal_cube"]["defaultTab"], "pair_bias")
-        self.assertIsNone(role_map["left_signal_cube"]["dashboardUx"]["historyReportTabId"])
+        self.assertEqual(role_map["left_signal_cube"]["dashboardUx"]["historyReportTabId"], "history")
         self.assertEqual(role_map["left_signal_cube"]["primaryReportType"], "fx_news_bias_report")
         self.assertEqual(role_map["left_signal_cube"]["executionPolicy"]["mode"], "analysis_only")
         self.assertFalse(role_map["left_signal_cube"]["executionPolicy"]["liveTradingEnabled"])
@@ -1361,9 +1371,15 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 profile = profiles[prop_id]
                 self.assertTrue(profile.get("moduleNameTh"))
                 self.assertTrue(profile.get("connections"))
-                self.assertEqual(profile["operation"]["defaultMode"], "manual")
-                self.assertTrue(profile["operation"]["scheduleBackendOwned"])
-                self.assertFalse(profile["operation"]["scheduleDefaultEnabled"])
+                if prop_id == "left_signal_cube":
+                    self.assertEqual(profile["operation"]["defaultMode"], "one_or_two_runs_per_day")
+                    self.assertTrue(profile["operation"]["scheduleBackendOwned"])
+                    self.assertTrue(profile["operation"]["scheduleDefaultEnabled"])
+                    self.assertEqual(profile["operation"]["scheduleDefaultTimes"], ["00:00", "12:00"])
+                else:
+                    self.assertEqual(profile["operation"]["defaultMode"], "manual")
+                    self.assertTrue(profile["operation"]["scheduleBackendOwned"])
+                    self.assertFalse(profile["operation"]["scheduleDefaultEnabled"])
                 self.assertEqual(profile["reportRoute"]["targetPropId"], prop_id)
                 for item in profile["connections"]:
                     self.assertIn(
@@ -1376,6 +1392,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
                             "implemented_guarded_read_only",
                             "implemented_guarded_closed_bar",
                             "implemented_deterministic",
+                            "implemented_allowlist",
+                            "implemented_atomic_local_store",
+                            "implemented_direct_backend",
                             "configuration_only_adapter_not_connected",
                             "source_ready_requires_ea_install",
                             "implemented_in_trade_gateway",

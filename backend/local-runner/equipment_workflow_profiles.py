@@ -378,6 +378,9 @@ def _validated_payload(raw: Any) -> dict[str, Any]:
             default_times = schedule.get("defaultTimes")
             schedule_actions = schedule.get("actions")
             manual_actions = schedule.get("manualOrAgentHandoffActions", [])
+            direct_backend_handler = str(
+                schedule.get("directBackendHandler") or ""
+            ).strip()
             if (
                 not isinstance(default_times, list)
                 or not default_times
@@ -390,13 +393,38 @@ def _validated_payload(raw: Any) -> dict[str, Any]:
                 raise EquipmentWorkflowContractError(f"invalid_schedule_times:{prop_id}")
             if (
                 not isinstance(schedule_actions, list)
-                or not schedule_actions
                 or not isinstance(manual_actions, list)
                 or len(set(schedule_actions)) != len(schedule_actions)
                 or len(set(manual_actions)) != len(manual_actions)
                 or set(schedule_actions).intersection(manual_actions)
+                or (
+                    not schedule_actions
+                    and not direct_backend_handler
+                )
+                or (
+                    direct_backend_handler
+                    and (schedule_actions or manual_actions)
+                )
             ):
                 raise EquipmentWorkflowContractError(f"invalid_schedule_actions:{prop_id}")
+            if direct_backend_handler:
+                direct_endpoints = equipment_profile.get("directEndpoints")
+                if (
+                    equipment_profile.get("serviceMode")
+                    != "deterministic_backend_direct"
+                    or equipment_profile.get("ownerAgentId") is not None
+                    or equipment_profile.get("allowedActionIds") != []
+                    or not isinstance(direct_endpoints, dict)
+                    or not all(
+                        str(direct_endpoints.get(key) or "").startswith(
+                            "/api/props/"
+                        )
+                        for key in ("refresh", "schedule")
+                    )
+                ):
+                    raise EquipmentWorkflowContractError(
+                        f"invalid_direct_schedule_contract:{prop_id}"
+                    )
             for scheduled_action_id in schedule_actions:
                 scheduled_action = actions.get(str(scheduled_action_id or ""))
                 if (

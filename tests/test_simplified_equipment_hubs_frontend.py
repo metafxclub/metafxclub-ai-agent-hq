@@ -62,10 +62,10 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-    def test_fx_default_presentation_is_28_pair_grid_without_history(self):
+    def test_fx_default_presentation_has_assessments_news_and_backend_history(self):
         self.assertIn('left_signal_cube: "ศูนย์แนวโน้ม 28 คู่เงินและข่าว Forex"', self.main)
         self.assertIn(
-            'const FX_NEWS_BIAS_PRESENTATION_TAB_IDS = Object.freeze(["pair_bias", "today"]);',
+            'const FX_NEWS_BIAS_PRESENTATION_TAB_IDS = Object.freeze(["pair_bias", "today", "history"]);',
             self.main,
         )
         normalize = self.main[
@@ -73,15 +73,17 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             self.main.index("function getWorkflowSelectedTab(")
         ]
         self.assertIn("FX_NEWS_BIAS_PRESENTATION_TAB_IDS", normalize)
-        self.assertIn('labelTh: tab.id === "pair_bias" ? "แนวโน้ม 28 คู่เงิน" : "ข่าวและผลกระทบ"', normalize)
+        self.assertIn('pair_bias: "ผลประเมิน 28 คู่เงิน"', normalize)
+        self.assertIn('history: "ประวัติอัปเดต"', normalize)
         self.assertIn("actionIds: []", normalize)
-        self.assertNotIn('id: "history"', normalize[normalize.index("subject?.id === FX_NEWS_BIAS_PROP_ID"):])
+        self.assertIn('id: "history"', normalize[normalize.index("subject?.id === FX_NEWS_BIAS_PROP_ID"):])
 
         domain = self.function_block("normalizeFxNewsBiasDomain", "normalizeConnectionCenterDevice")
         self.assertIn("FX_BIAS_PAIR_UNIVERSE.map", domain)
         self.assertIn('summary: "รอข้อมูลจริงจาก Backend"', domain)
         panel = self.function_block("renderFxNewsBiasPanel", "renderTerminalOutputPanel")
         self.assertIn("renderFxBiasGrid(section, domain.pairBias, domain.pairAssessmentSummary)", panel)
+        self.assertIn("renderFxNewsHistory(section, domain)", panel)
         self.assertNotIn("renderWorkflowSourceCards", panel)
 
     def test_history_is_explicit_so_fx_news_and_status_tabs_never_become_history_by_position(self):
@@ -91,7 +93,8 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             render,
         )
         self.assertNotIn("selectedTab?.id === dashboard.tabs.at(-1)?.id", render)
-        self.assertIn("els.workflowResultsPanel.hidden = !isHistoryTab", render)
+        self.assertIn("[INDICATOR_SCOUT_PROP_ID, FX_NEWS_BIAS_PROP_ID]", render)
+        self.assertIn("els.workflowResultsPanel.hidden = isFxNewsDashboard", render)
 
     def test_connection_hub_uses_backend_connection_center_as_authority_without_fanout(self):
         self.assertIn('right_status_crystals: "ศูนย์การเชื่อมต่ออุปกรณ์ HQ"', self.main)
@@ -123,17 +126,20 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
         self.assertNotIn('modalDashboardConnectionRail.hidden = surface !== "dashboard"', modal)
         self.assertIn('signal-consensus-modal", surface === "dashboard" && subject.id === AI_TRADE_COUNCIL_PROP_ID', modal)
 
-    def test_how_to_and_device_actions_live_in_left_rail(self):
+    def test_daily_news_uses_a_direct_backend_only_left_rail(self):
         rail_actions = self.function_block("workflowRailActions", "createWorkflowUseGuideCard")
         self.assertIn("INDICATOR_SCOUT_RAIL_ACTION_IDS", rail_actions)
-        self.assertIn("FX_NEWS_BIAS_RAIL_ACTION_IDS", rail_actions)
+        self.assertIn("if (subject?.id === FX_NEWS_BIAS_PROP_ID) return [];", rail_actions)
         self.assertIn("return [...actions]", rail_actions)
-        guide = self.function_block("createWorkflowUseGuideCard", "renderWorkflowSettingsRail")
-        self.assertIn('title.textContent = "ใช้งานอย่างไร"', guide)
-        self.assertIn("สั่งวิเคราะห์หรือตั้งเวลาอัปเดตจากแถบด้านซ้ายนี้", guide)
-        self.assertNotIn("สั่งวิเคราะห์หรือตั้งเวลาอัปเดตจากด้านล่าง", guide)
-        self.assertIn("data", guide)
+        direct_rail = self.function_block("renderFxNewsSettingsRail", "renderWorkflowSettingsRail")
+        self.assertIn('checkbox.dataset.fxNewsScheduleEnabled = "true"', direct_rail)
+        self.assertIn("schedule.times.slice(0, 2)", direct_rail)
+        self.assertIn('timezone.textContent = "เวลาไทย • Asia/Bangkok • สูงสุด 2 รอบต่อวัน"', direct_rail)
+        self.assertIn("service.sources", direct_rail)
+        self.assertIn("service.directRefreshAvailable === true", direct_rail)
         settings = self.function_block("renderWorkflowSettingsRail", "getWorkflowHandoffReports")
+        self.assertIn("renderFxNewsSettingsRail(dashboard, identity)", settings)
+        self.assertIn("return;", settings)
         self.assertIn("workflowRailActions(subject, dashboard)", settings)
         self.assertIn("createWorkflowUseGuideCard(subject)", settings)
         self.assertIn("els.workflowSettingsRail.hidden = false", settings)
@@ -141,8 +147,8 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
     def test_connection_guidance_points_to_the_central_hub_and_news_schedule_caps_two_times(self):
         self.assertNotIn("ตรวจการเชื่อมต่อด้านซ้าย", self.main)
         self.assertIn("เปิดศูนย์การเชื่อมต่ออุปกรณ์ HQ จากปุ่มด้านซ้าย", self.main)
-        self.assertIn("เวลาที่ต้องการ สูงสุด 2 เวลา เช่น 07:00, 20:00", self.main)
-        self.assertNotIn("เวลาที่ต้องการ เช่น 07:00, 13:00, 19:00", self.main)
+        self.assertIn('const FX_NEWS_BIAS_DEFAULT_TIMES = Object.freeze(["00:00", "12:00"]);', self.main)
+        self.assertIn("schedule.times.slice(0, 2)", self.main)
 
     def test_grid_hub_and_compact_rail_have_responsive_styles(self):
         for selector in (
@@ -288,6 +294,10 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             "normalizeFxPairAssessmentEvent",
             "normalizeFxPairAssessmentStatus",
             "deriveFxPairAssessmentSummary",
+            "normalizeFxNewsScheduleTime",
+            "normalizeFxNewsSchedule",
+            "normalizeFxNewsHistoryItem",
+            "normalizeFxNewsHistory",
             "normalizeFxNewsBiasDomain",
         )
         script = "\n".join(
@@ -318,7 +328,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
         self.assertEqual(payload["eurusd"]["short"], "bullish")
         self.assertEqual(payload["eurusd"]["medium"], "bullish")
         self.assertEqual(payload["eurusd"]["long"], "sideway")
-        self.assertEqual(payload["eurusd"]["bias"], "bullish")
+        self.assertEqual(payload["eurusd"]["bias"], "unavailable")
         self.assertEqual(payload["eurusd"]["sourceUrl"], "https://example.com/eurusd")
         self.assertEqual(payload["gbpusd"]["bias"], "unavailable")
         self.assertEqual(payload["gbpusd"]["short"], "unavailable")
@@ -411,7 +421,8 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             "normalizeFxNewsImpact", "normalizeFxNewsMetric", "normalizeFxNewsPairImpactRows",
             "fxNewsCalendarRows", "normalizeFxNewsEvent", "deriveFxOverallBias",
             "normalizeFxPairAssessmentEvent", "normalizeFxPairAssessmentStatus",
-            "deriveFxPairAssessmentSummary", "normalizeFxNewsBiasDomain",
+            "deriveFxPairAssessmentSummary", "normalizeFxNewsScheduleTime", "normalizeFxNewsSchedule",
+            "normalizeFxNewsHistoryItem", "normalizeFxNewsHistory", "normalizeFxNewsBiasDomain",
         )
         script = "\n".join([
             f"const FX_BIAS_PAIR_UNIVERSE = Object.freeze({json.dumps(pair_universe)});",
@@ -482,7 +493,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
         self.assertIn("เหตุการณ์ตลอดวัน", self.main)
 
         html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-        self.assertIn("20260814-trade-lifecycle-v058", html)
+        self.assertIn("20260814-daily-news-direct-v059", html)
         self.assertNotIn("20260814-pair-news-assessment-v055", html)
         self.assertNotIn("20260814-runtime-truth-v054", html)
         self.assertNotIn("20260808-workflow-friendly-v053", html)
@@ -557,6 +568,10 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             "normalizeFxPairAssessmentEvent",
             "normalizeFxPairAssessmentStatus",
             "deriveFxPairAssessmentSummary",
+            "normalizeFxNewsScheduleTime",
+            "normalizeFxNewsSchedule",
+            "normalizeFxNewsHistoryItem",
+            "normalizeFxNewsHistory",
             "normalizeFxNewsBiasDomain",
         )
         script = "\n".join(
@@ -597,11 +612,12 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
 
         banner = self.function_source("createFxFreshnessBanner")
         panel = self.function_block("renderFxNewsBiasPanel", "renderTerminalOutputPanel")
+        backend_state = self.function_source("appendFxNewsBackendState")
         self.assertIn("ยังไม่มีข้อมูลของวันนี้", banner)
         self.assertIn("freshness?.stale !== true", banner)
-        self.assertIn("calendar?.verifiedEmpty", panel)
-        self.assertIn('"source_failure"', panel)
-        self.assertIn('"no_verified_data"', panel)
+        self.assertIn("calendar?.verifiedEmpty", backend_state)
+        self.assertIn('"source_failure"', backend_state)
+        self.assertIn('"no_verified_data"', backend_state)
         self.assertIn("domain?.freshness?.marketNews", panel)
         self.assertIn("domain?.freshness?.fxBias", panel)
 
@@ -700,7 +716,8 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             "normalizeFxNewsImpact", "normalizeFxNewsMetric", "normalizeFxNewsPairImpactRows",
             "fxNewsCalendarRows", "normalizeFxNewsEvent", "deriveFxOverallBias",
             "normalizeFxPairAssessmentEvent", "normalizeFxPairAssessmentStatus",
-            "deriveFxPairAssessmentSummary", "normalizeFxNewsBiasDomain",
+            "deriveFxPairAssessmentSummary", "normalizeFxNewsScheduleTime", "normalizeFxNewsSchedule",
+            "normalizeFxNewsHistoryItem", "normalizeFxNewsHistory", "normalizeFxNewsBiasDomain",
         )
         script = "\n".join([
             f"const FX_BIAS_PAIR_UNIVERSE = Object.freeze({json.dumps(pair_universe)});",
@@ -885,7 +902,8 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             "isFxNewsReferenceOnlyUrl", "fxNewsVerifiedSourceLinks", "fxNewsVerifiedItemSources", "normalizeFxNewsImpact",
             "normalizeFxNewsMetric", "normalizeFxNewsPairImpactRows", "fxNewsCalendarRows",
             "normalizeFxNewsEvent", "deriveFxOverallBias", "normalizeFxPairAssessmentEvent",
-            "normalizeFxPairAssessmentStatus", "deriveFxPairAssessmentSummary", "normalizeFxNewsBiasDomain",
+            "normalizeFxPairAssessmentStatus", "deriveFxPairAssessmentSummary", "normalizeFxNewsScheduleTime",
+            "normalizeFxNewsSchedule", "normalizeFxNewsHistoryItem", "normalizeFxNewsHistory", "normalizeFxNewsBiasDomain",
         )
         script = "\n".join([
             f"const FX_BIAS_PAIR_UNIVERSE = Object.freeze({json.dumps(pair_universe)});",

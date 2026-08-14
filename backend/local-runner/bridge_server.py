@@ -43,6 +43,7 @@ from equipment_workflow_profiles import (  # noqa: E402 - local guarded contract
     equipment_action_profile,
     validate_equipment_workflow_contract,
 )
+import fx_news_direct  # noqa: E402 - isolated deterministic official-source service
 
 BRIDGE_RUNTIME_VERSION = "0.9.3"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
@@ -53,6 +54,7 @@ MISSIONS_PATH = RUNTIME_DIR / "missions.json"
 OPERATOR_MODE_PATH = RUNTIME_DIR / "operator-mode.json"
 COLLABORATION_SCHEDULE_PATH = RUNTIME_DIR / "collaboration-schedule.json"
 DASHBOARD_WORKFLOW_SETTINGS_PATH = RUNTIME_DIR / "dashboard-workflow-settings.json"
+FX_DAILY_NEWS_DIRECT_STATE_PATH = RUNTIME_DIR / "fx-daily-news-direct-state.json"
 BRIDGE_CONTROL_PATH = RUNTIME_DIR / "bridge-control.json"
 AUDIT_PATH = RUNTIME_DIR / "bridge-audit.jsonl"
 UI_SESSION_PATH = RUNTIME_DIR / "ui-session.json"
@@ -78,6 +80,14 @@ AGENT_EVENTS_LOCK = threading.Lock()
 MEETING_TRANSCRIPTS_LOCK = threading.Lock()
 COLLABORATION_SCHEDULE_LOCK = threading.RLock()
 DASHBOARD_WORKFLOW_SETTINGS_LOCK = threading.RLock()
+FX_DAILY_NEWS_DIRECT_LOCK = threading.RLock()
+FX_DAILY_NEWS_DIRECT_REFRESH_LOCK = threading.Lock()
+FX_DAILY_NEWS_DIRECT_RUNTIME = {
+    "refreshInProgress": False,
+    "lastAttemptAt": None,
+    "lastSuccessAt": None,
+    "lastErrorCode": None,
+}
 DASHBOARD_WORKFLOW_SCHEDULER_STATE_LOCK = threading.RLock()
 DASHBOARD_WORKFLOW_SCHEDULER_RUN_LOCK = threading.Lock()
 COLLABORATION_RUN_LOCK = threading.Lock()
@@ -801,13 +811,19 @@ DASHBOARD_WORKFLOW_TABS = {
             "id": "pair_bias",
             "labelTh": "มุมมอง 28 คู่เงิน",
             "descriptionTh": "ดู Bias ระยะสั้น กลาง และยาวจากรอบวิเคราะห์ข่าวเดียวกัน; คู่ที่หลักฐานไม่พอแสดง insufficient_data",
-            "actionIds": ["analyze_daily_market_news"],
+            "actionIds": [],
         },
         {
             "id": "today",
             "labelTh": "ข่าวตลาดวันนี้",
             "descriptionTh": "วิเคราะห์ข่าวและเหตุการณ์ปัจจุบันจากเว็บสาธารณะที่มี URL อ้างอิง พร้อมช่วงระวัง EA",
-            "actionIds": ["analyze_daily_market_news"],
+            "actionIds": [],
+        },
+        {
+            "id": "history",
+            "labelTh": "ประวัติข่าว",
+            "descriptionTh": "ดูเหตุการณ์ย้อนหลังจาก Direct Store พร้อมเปิดแหล่งข่าวทางการของแต่ละรายการ",
+            "actionIds": [],
         },
     ),
     "terminal_workstation": (
@@ -1051,38 +1067,19 @@ DASHBOARD_WORKFLOW_ACTIONS = {
             {"id": "googleSheetTabName", "labelTh": "ชื่อแท็บ Google Sheet", "type": "sheet_tab_name", "required": False},
         ),
     },
-    "analyze_daily_market_news": {
+    "refresh_daily_market_news": {
         "propId": "left_signal_cube",
-        "tabId": "pair_bias",
+        "tabId": "market_news",
         "labelTh": "วิเคราะห์ข่าวตลาดวันนี้",
         "descriptionTh": "ค้นข่าวสาธารณะจริง พร้อมเวลาข่าว ผลกระทบ ช่วงระวัง EA และ Bias ครบ 28 คู่ใน Mission เดียว",
-        "toolId": "codex_web_research",
-        "ownerAgentId": "codex_mcp_operator",
+        "toolId": None,
+        "ownerAgentId": None,
         "reportType": "fx_news_bias_report",
-        "executionScope": "public_web_read_only",
+        "executionScope": "official_structured_sources_read_only",
         "analysisOnly": True,
         "sourceRequired": False,
-        "formFields": (
-            {"id": "marketDate", "labelTh": "วันที่ตลาด", "type": "text", "required": False},
-            {"id": "minimumImpact", "labelTh": "ระดับผลกระทบขั้นต่ำ", "type": "select", "required": False, "options": ["low", "medium", "high"]},
-            {"id": "brief", "labelTh": "ประเด็นที่ต้องการเน้น", "type": "textarea", "required": False},
-        ),
-    },
-    "build_fx_pair_bias": {
-        "propId": "left_signal_cube",
-        "tabId": "pair_bias",
-        "labelTh": "สร้าง Bias สำหรับ 28 คู่เงิน",
-        "descriptionTh": "โหมดเดิมสำหรับสร้าง Bias จาก Report ข่าวที่เลือกเอง; หน้าใช้งานหลักไม่จำเป็นต้องรันขั้นนี้",
-        "toolId": "codex_web_research",
-        "ownerAgentId": "codex_mcp_operator",
-        "reportType": "fx_news_bias_report",
-        "executionScope": "public_web_read_only",
-        "analysisOnly": True,
-        "sourceRequired": True,
-        "formFields": (
-            {"id": "sourceReportId", "labelTh": "รายงานข่าวต้นทาง", "type": "source_report", "required": True},
-            {"id": "brief", "labelTh": "เงื่อนไขเพิ่มเติม", "type": "textarea", "required": False},
-        ),
+        "localHandler": "news_bias_direct_refresh",
+        "formFields": (),
     },
     "save_news_bias_schedule": {
         "propId": "left_signal_cube",
@@ -1099,7 +1096,6 @@ DASHBOARD_WORKFLOW_ACTIONS = {
         "formFields": (
             {"id": "enabled", "labelTh": "เปิดการวิเคราะห์ข่าวอัตโนมัติตามเวลานี้", "type": "boolean", "required": False},
             {"id": "times", "labelTh": "เวลาที่ต้องการ (สูงสุด 2 เวลา)", "type": "time_list", "required": True, "maxItems": 2},
-            {"id": "minimumImpact", "labelTh": "ระดับผลกระทบขั้นต่ำ", "type": "select", "required": False, "options": ["low", "medium", "high"]},
         ),
     },
     "inspect_ea_source": {
@@ -1233,10 +1229,6 @@ DASHBOARD_WORKFLOW_SOURCE_POLICIES = {
             "ea_compile_report",
         },
     },
-    "build_fx_pair_bias": {
-        "propIds": {"left_signal_cube"},
-        "reportTypes": {"fx_news_bias_report"},
-    },
     "inspect_ea_source": {
         "propIds": {"right_server_racks", "terminal_workstation"},
         "reportTypes": {"ea_build_report", "ea_compile_report", "ea_development_report", "code_change_report"},
@@ -1281,6 +1273,10 @@ FX_DAILY_NEWS_MAX_WINDOWS_PER_REPORT = 3
 FX_DAILY_NEWS_MAX_SOURCES_PER_REPORT = 3
 FX_PAIR_ASSESSMENT_EVENT_LIMIT = 3
 FX_DAILY_NEWS_TIMEOUT_FLOOR_SECONDS = 300
+FX_DAILY_NEWS_DIRECT_TIMEOUT_SECONDS = fx_news_direct.DEFAULT_TIMEOUT_SECONDS
+FX_DAILY_NEWS_DIRECT_MAX_BYTES = fx_news_direct.MAX_BODY_BYTES
+FX_DAILY_NEWS_DIRECT_MAX_EVENTS = 120
+FX_DAILY_NEWS_DIRECT_SOURCES = fx_news_direct.OFFICIAL_SOURCES
 EQUIPMENT_CONNECTION_CENTER_CACHE_TTL_SECONDS = 5
 EQUIPMENT_CONNECTION_CENTER_CACHE_STALE_MAX_SECONDS = 2 * 60
 EQUIPMENT_CONNECTION_CENTER_CACHE_WAIT_SECONDS = 0.75
@@ -5597,6 +5593,7 @@ DASHBOARD_WORKFLOW_SCHEDULE_STATE_DEFAULTS = {
     "lastAttemptSlotKey": None,
     "lastRunAt": None,
     "lastMissionId": None,
+    "lastSnapshotId": None,
     "lastSlotKey": None,
     "lastRunStatus": "never",
     "lastResultKind": None,
@@ -5632,8 +5629,8 @@ DASHBOARD_WORKFLOW_SCHEDULE_JOBS = (
     {
         "settingsKey": "newsBiasSchedule",
         "propId": "left_signal_cube",
-        "actionId": "analyze_daily_market_news",
-        "defaultTimes": ["07:00", "20:00"],
+        "actionId": "refresh_daily_market_news",
+        "defaultTimes": ["00:00", "12:00"],
         "maxTimes": 2,
         "maxRunsPerDay": 2,
     },
@@ -5664,12 +5661,12 @@ def _default_dashboard_workflow_settings() -> dict:
             "savedAt": None,
         },
         "newsBiasSchedule": {
-            "requestedEnabled": False,
-            "times": ["07:00", "20:00"],
+            "requestedEnabled": True,
+            "times": ["00:00", "12:00"],
             "minimumImpact": "low",
             "timezone": "Asia/Bangkok",
             "savedAt": None,
-            "automaticDailyCalendarVersion": 2,
+            "automaticDailyCalendarVersion": 3,
             **copy.deepcopy(DASHBOARD_WORKFLOW_SCHEDULE_STATE_DEFAULTS),
         },
         "agentPreferences": {
@@ -5699,24 +5696,32 @@ def _dashboard_workflow_settings_shape(value: object) -> dict:
             result[key] = {**copy.deepcopy(default_value), **copy.deepcopy(stored)}
         elif key not in result:
             result[key] = copy.deepcopy(default_value)
-    # Normalize only untouched legacy schedule suggestions.  Never enable a
-    # recurring Codex job during a schema migration: enabling consumes quota
-    # and remains an explicit operator action in each installation.
+    # v3 is a one-time migration from the retired Mission/Codex schedule to
+    # the local deterministic service.  It intentionally resets stale Mission
+    # reservations.  Once v3 is persisted, later user time/enabled edits are
+    # preserved unchanged.
     news_schedule = (
         result.get("newsBiasSchedule")
         if isinstance(result.get("newsBiasSchedule"), dict)
         else {}
     )
     if (
-        raw_news_schedule is not None
-        and not raw_news_schedule.get("automaticDailyCalendarVersion")
-        and not raw_news_schedule.get("savedAt")
+        not isinstance(raw_news_schedule, dict)
+        or clamp_int(raw_news_schedule.get("automaticDailyCalendarVersion"), 0, 0, 99) < 3
     ):
-        news_schedule["requestedEnabled"] = False
-        news_schedule["times"] = ["07:00", "20:00"]
+        news_schedule["requestedEnabled"] = True
+        news_schedule["times"] = ["00:00", "12:00"]
         news_schedule["minimumImpact"] = "low"
-        news_schedule["automaticDailyCalendarVersion"] = 2
+        news_schedule["savedAt"] = None
+        for key, value in DASHBOARD_WORKFLOW_SCHEDULE_STATE_DEFAULTS.items():
+            news_schedule[key] = copy.deepcopy(value)
+        news_schedule["automaticDailyCalendarVersion"] = 3
         result["newsBiasSchedule"] = news_schedule
+    # Impact is a service-owned deterministic policy, not a user-editable
+    # preference.  Preserve only enabled/times after the v3 migration.
+    news_schedule["minimumImpact"] = "low"
+    news_schedule["timezone"] = "Asia/Bangkok"
+    result["newsBiasSchedule"] = news_schedule
     result["version"] = "dashboard-workflow-settings-v1"
     return result
 
@@ -5748,11 +5753,19 @@ def _mutate_dashboard_workflow_settings(mutator) -> dict:
 def load_dashboard_workflow_settings() -> dict:
     ensure_runtime_dir()
     with DASHBOARD_WORKFLOW_SETTINGS_LOCK:
+        existed = DASHBOARD_WORKFLOW_SETTINGS_PATH.exists()
         payload = read_json(
             DASHBOARD_WORKFLOW_SETTINGS_PATH,
             _default_dashboard_workflow_settings(),
         )
-        return _dashboard_workflow_settings_shape(payload)
+        shaped = _dashboard_workflow_settings_shape(payload)
+        if not existed or shaped != payload:
+            write_json(
+                DASHBOARD_WORKFLOW_SETTINGS_PATH,
+                shaped,
+                keep_backup=existed,
+            )
+        return shaped
 
 
 def _dashboard_workflow_scheduler_alive() -> bool:
@@ -6089,11 +6102,18 @@ def _dashboard_schedule_read_model(
             "messageTh": "ปิดการทำงานอัตโนมัติตามการตั้งค่าของผู้ใช้",
         }
     if requested_enabled and scheduler_operational:
-        gate_model = (
-            gate
-            if isinstance(gate, dict)
-            else _dashboard_workflow_scheduler_gate(refresh_quota=False)
-        )
+        if settings_key == "newsBiasSchedule":
+            gate_model = {
+                "allowed": True,
+                "reason": "direct_news_service_ready",
+                "messageTh": "บริการข่าวแบบ deterministic พร้อมทำงานโดยตรง",
+            }
+        else:
+            gate_model = (
+                gate
+                if isinstance(gate, dict)
+                else _dashboard_workflow_scheduler_gate(refresh_quota=False)
+            )
     gate_allowed = bool(gate_model.get("allowed"))
     effective_enabled = bool(requested_enabled and scheduler_operational and gate_allowed)
     pending = bool(schedule.get("pendingSlotKey"))
@@ -6164,6 +6184,7 @@ def _dashboard_schedule_read_model(
         "lastAttemptAt": schedule.get("lastAttemptAt"),
         "lastRunAt": schedule.get("lastRunAt"),
         "lastMissionId": safe_reference(schedule.get("lastMissionId")),
+        "lastSnapshotId": safe_reference(schedule.get("lastSnapshotId")),
         "lastRunStatus": redact_text(str(schedule.get("lastRunStatus") or "never"), 40),
         "lastResultKind": redact_text(str(schedule.get("lastResultKind") or ""), 80) or None,
         "lastIdempotentReplay": bool(schedule.get("lastIdempotentReplay", False)),
@@ -6195,9 +6216,17 @@ def _dashboard_schedule_read_model(
             "hardDailyLimitEnforced": True,
             "dailyExecutionCountingPolicy": "pre_dispatch_fail_closed_reservation",
         })
-    minimum_impact = str(schedule.get("minimumImpact") or "").strip().lower()
-    if minimum_impact in {"low", "medium", "high"}:
-        model["minimumImpact"] = minimum_impact
+    if settings_key == "newsBiasSchedule":
+        model.update({
+            "providerMode": fx_news_direct.PROVIDER_MODE,
+            "missionCreated": False,
+            "agentUsed": False,
+            "aiUsed": False,
+        })
+    else:
+        minimum_impact = str(schedule.get("minimumImpact") or "").strip().lower()
+        if minimum_impact in {"low", "medium", "high"}:
+            model["minimumImpact"] = minimum_impact
     return model
 
 
@@ -7015,6 +7044,401 @@ def _fx_event_pair_impact_rows(
     return rows[:14], evidence_complete
 
 
+def _load_fx_daily_news_direct_store() -> dict:
+    ensure_runtime_dir()
+    with FX_DAILY_NEWS_DIRECT_LOCK:
+        payload = read_json(
+            FX_DAILY_NEWS_DIRECT_STATE_PATH,
+            fx_news_direct.empty_store(),
+        )
+        return fx_news_direct.normalize_store(payload)
+
+
+def _save_fx_daily_news_direct_store(store: dict) -> dict:
+    normalized = fx_news_direct.normalize_store(store)
+    ensure_runtime_dir()
+    with FX_DAILY_NEWS_DIRECT_LOCK:
+        existed = FX_DAILY_NEWS_DIRECT_STATE_PATH.exists()
+        write_json(
+            FX_DAILY_NEWS_DIRECT_STATE_PATH,
+            normalized,
+            keep_backup=existed,
+            replace_max_attempts=MISSIONS_REPLACE_MAX_ATTEMPTS,
+            replace_initial_delay_seconds=MISSIONS_REPLACE_INITIAL_DELAY_SECONDS,
+        )
+    return normalized
+
+
+def _fx_daily_news_direct_snapshot_report(snapshot: dict) -> dict:
+    """Adapt a direct snapshot to the established read-model input shape.
+
+    The adapter is in-memory only.  Direct snapshots remain in their dedicated
+    store and are never written into Mission report storage.
+    """
+
+    snapshot_id = safe_reference(snapshot.get("snapshotId")) or safe_id(None, "fxnews")
+    checked_at = snapshot.get("updatedAt") or snapshot.get("createdAt")
+    ready = snapshot.get("currentDataAvailable") is True
+    source_links = [
+        row for row in (snapshot.get("sourceLinks") or [])
+        if isinstance(row, dict)
+    ]
+    return {
+        "id": snapshot_id,
+        "linkedPropId": "left_signal_cube",
+        "type": "fx_news_bias_report",
+        "status": "ready" if ready else "failed",
+        "createdAt": snapshot.get("createdAt") or checked_at,
+        "updatedAt": checked_at,
+        "workflowContext": {
+            "propId": "left_signal_cube",
+            "actionId": "refresh_daily_market_news",
+            "triggerSource": snapshot.get("triggerSource") or "backend",
+            "inputs": {"marketDate": snapshot.get("marketDate")},
+        },
+        "metrics": {
+            "marketDate": snapshot.get("marketDate"),
+            "sourceStatus": snapshot.get("sourceStatus"),
+            "dataStatus": snapshot.get("dataStatus"),
+            "quietDay": bool(snapshot.get("quietDay")),
+            "partialQuietDay": bool(snapshot.get("partialQuietDay")),
+            "coverageCurrencies": list(snapshot.get("coverageCurrencies") or []),
+            "failedCurrencies": list(snapshot.get("failedCurrencies") or []),
+            "events": list(snapshot.get("events") or []),
+            "dangerWindows": list(snapshot.get("dangerWindows") or []),
+            "pairBias": list(snapshot.get("pairBias") or []),
+            "sourceLinks": source_links,
+            "sourceHealth": list(snapshot.get("sourceHealth") or []),
+            "providerMode": fx_news_direct.PROVIDER_MODE,
+            "directBackend": True,
+            "aiUsed": False,
+            "missionCreated": False,
+        },
+        "evidence": [
+            {"label": row.get("title"), "url": row.get("url")}
+            for row in source_links
+            if row.get("url")
+        ],
+    }
+
+
+def _fx_daily_news_direct_reports(store: dict | None = None) -> list[dict]:
+    source = store if isinstance(store, dict) else _load_fx_daily_news_direct_store()
+    return [
+        _fx_daily_news_direct_snapshot_report(snapshot)
+        for snapshot in source.get("history", [])
+        if isinstance(snapshot, dict)
+    ]
+
+
+def _fx_current_projection_reports(
+    reports: list[dict],
+    current_bangkok_date: str,
+) -> list[dict]:
+    """Make the latest direct snapshot authoritative for today's projection.
+
+    Direct history is immutable, but the live projection must not merge an
+    older source result back into a later partial snapshot.  For example, when
+    USD fails on the second run, an older USD event must not survive beside the
+    newer coverage declaration that explicitly excludes USD.
+    """
+
+    direct_current = [
+        report
+        for report in reports
+        if isinstance(report, dict)
+        and isinstance(report.get("workflowContext"), dict)
+        and report["workflowContext"].get("actionId") == "refresh_daily_market_news"
+        and _fx_report_bangkok_date(report) == current_bangkok_date
+    ]
+    if not direct_current:
+        return reports
+    latest_direct = max(
+        direct_current,
+        key=lambda report: (
+            parse_iso(str(report.get("updatedAt") or report.get("createdAt") or ""))
+            or datetime.min.replace(tzinfo=timezone.utc)
+        ),
+    )
+    return [
+        latest_direct,
+    ]
+
+
+def _fx_daily_news_direct_history_read_model(
+    store: dict,
+    *,
+    now_local: datetime | None = None,
+    limit: int = 14,
+) -> list[dict]:
+    """Project persisted direct snapshots through the canonical UI contract."""
+
+    normalized = fx_news_direct.normalize_store(store)
+    reference = now_local or datetime.now(timezone.utc).astimezone(THAILAND_TIMEZONE)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=THAILAND_TIMEZONE)
+    else:
+        reference = reference.astimezone(THAILAND_TIMEZONE)
+    dates = sorted(
+        {
+            str(snapshot.get("marketDate") or "")
+            for snapshot in normalized.get("history", [])
+            if isinstance(snapshot, dict) and snapshot.get("marketDate")
+        },
+        reverse=True,
+    )[: max(1, min(int(limit), 31))]
+    rows: list[dict] = []
+    for calendar_date in dates:
+        snapshots = [
+            snapshot
+            for snapshot in normalized.get("history", [])
+            if isinstance(snapshot, dict)
+            and str(snapshot.get("marketDate") or "") == calendar_date
+        ]
+        reports = [_fx_daily_news_direct_snapshot_report(snapshot) for snapshot in snapshots]
+        day_reference = (
+            reference
+            if calendar_date == reference.date().isoformat()
+            else datetime.fromisoformat(f"{calendar_date}T23:59:59+07:00")
+        )
+        model = _fx_news_read_model(reports, now_local=day_reference)
+        rows.append({
+            "calendarDate": calendar_date,
+            "marketDate": calendar_date,
+            "events": list(model.get("events") or []),
+            "eventCount": int(model.get("eventCount") or 0),
+            "dataStatus": model.get("dataStatus"),
+            "sourceStatus": model.get("sourceStatus"),
+            "verifiedEmpty": bool(model.get("verifiedEmpty")),
+            "coverageCurrencies": list(model.get("coverageCurrencies") or []),
+            "failedCurrencies": list(model.get("failedCurrencies") or []),
+            "lastUpdatedAt": model.get("asOf"),
+        })
+    return rows
+
+
+def _fx_daily_news_direct_service_read_model(
+    *,
+    settings: dict | None = None,
+    store: dict | None = None,
+    now_local: datetime | None = None,
+) -> dict:
+    source = store if isinstance(store, dict) else _load_fx_daily_news_direct_store()
+    source = fx_news_direct.normalize_store(source)
+    latest = fx_news_direct.latest_snapshot(source)
+    latest_success = fx_news_direct.latest_successful_snapshot(source)
+    schedule_settings = (
+        _dashboard_workflow_settings_shape(settings)
+        if isinstance(settings, dict)
+        else load_dashboard_workflow_settings()
+    )
+    schedule = (
+        schedule_settings.get("newsBiasSchedule")
+        if isinstance(schedule_settings.get("newsBiasSchedule"), dict)
+        else {}
+    )
+    times = _dashboard_schedule_times(schedule, ["00:00", "12:00"], max_times=2)
+    with FX_DAILY_NEWS_DIRECT_LOCK:
+        runtime = copy.deepcopy(FX_DAILY_NEWS_DIRECT_RUNTIME)
+    latest_status = str((latest or {}).get("dataStatus") or "").strip().lower()
+    if runtime.get("refreshInProgress"):
+        status = "refreshing"
+    elif latest_status in {"verified", "verified_empty"}:
+        status = "ready"
+    elif latest_status == "degraded":
+        status = "degraded"
+    elif latest_status == "source_failure" and latest_success:
+        status = "degraded_last_good"
+    elif latest_status == "source_failure":
+        status = "source_failure"
+    else:
+        status = "awaiting_first_run"
+    source_health = list((latest or {}).get("sourceHealth") or [])
+    if not source_health:
+        source_health = [
+            {
+                "sourceId": row["sourceId"],
+                "label": row["label"],
+                "url": row["url"],
+                "currency": row["currency"],
+                "status": "not_checked",
+                "lastCheckedAt": None,
+                "lastSuccessAt": None,
+                "eventCount": 0,
+                "errorCode": None,
+                "notModified": False,
+            }
+            for row in FX_DAILY_NEWS_DIRECT_SOURCES
+        ]
+    history = _fx_daily_news_direct_history_read_model(
+        source,
+        now_local=now_local,
+        limit=14,
+    )
+    return {
+        "status": status,
+        "refreshInProgress": bool(runtime.get("refreshInProgress")),
+        "lastAttemptAt": source.get("lastAttemptAt") or runtime.get("lastAttemptAt"),
+        "lastSuccessAt": source.get("lastSuccessAt") or runtime.get("lastSuccessAt"),
+        "nextRunAt": _dashboard_schedule_next_run_at(
+            "newsBiasSchedule",
+            schedule,
+            times,
+            now_local=now_local,
+        ),
+        "sourceHealth": source_health,
+        "storeVersion": fx_news_direct.STORE_VERSION,
+        "providerMode": fx_news_direct.PROVIDER_MODE,
+        "historyCount": len(source.get("history") or []),
+        "historyDayCount": len(history),
+        "historyDays": history,
+        "lastSnapshotId": safe_reference((latest or {}).get("snapshotId")),
+        "lastSuccessfulSnapshotId": safe_reference((latest_success or {}).get("snapshotId")),
+        "coverageCurrencies": list((latest or {}).get("coverageCurrencies") or []),
+        "failedCurrencies": list((latest or {}).get("failedCurrencies") or []),
+        "configuredCurrencies": sorted({row["currency"] for row in FX_DAILY_NEWS_DIRECT_SOURCES}),
+        "configuredSourceCount": len(FX_DAILY_NEWS_DIRECT_SOURCES),
+        "fixedMinimumImpact": "low",
+        "directRefreshAvailable": True,
+        "refreshEndpoint": "/api/props/left_signal_cube/news/refresh",
+        "scheduleEndpoint": "/api/props/left_signal_cube/news/schedule",
+        "missionCreated": False,
+        "agentUsed": False,
+        "aiUsed": False,
+        "forexFactoryScraping": False,
+        "fairEconomyScraping": False,
+    }
+
+
+def refresh_deterministic_daily_fx_news(
+    *,
+    trigger_source: str = "frontend",
+    idempotency_key: str = "",
+    fetcher=None,
+    now_utc: datetime | None = None,
+) -> dict:
+    """Refresh today's Bangkok calendar without creating a Mission or event."""
+
+    trigger = str(trigger_source or "backend").strip().lower()
+    if trigger not in {"frontend", "schedule", "backend"}:
+        trigger = "backend"
+    raw_key = str(idempotency_key or "").strip()
+    digest = payload_digest("fx-news-direct-v1", raw_key) if raw_key else None
+    store = _load_fx_daily_news_direct_store()
+    if digest:
+        existing = next(
+            (
+                row for row in reversed(store.get("history") or [])
+                if row.get("idempotencyKeyDigest") == digest
+            ),
+            None,
+        )
+        if isinstance(existing, dict):
+            return {
+                "ok": True,
+                "kind": "news_direct_refresh_replayed",
+                "idempotentReplay": True,
+                "snapshotId": existing.get("snapshotId"),
+                "directNewsService": _fx_daily_news_direct_service_read_model(store=store),
+                "marketNews": _fx_news_read_model(),
+                "fxBias": _fx_bias_read_model(),
+                "mission": None,
+                "missionCreated": False,
+                "agentUsed": False,
+                "aiUsed": False,
+            }
+    if not FX_DAILY_NEWS_DIRECT_REFRESH_LOCK.acquire(blocking=False):
+        raise RequestError("Daily news refresh is already in progress.", 409)
+    try:
+        reference = now_utc or datetime.now(timezone.utc)
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=timezone.utc)
+        else:
+            reference = reference.astimezone(timezone.utc)
+        attempt_at = reference.isoformat().replace("+00:00", "Z")
+        market_date = reference.astimezone(THAILAND_TIMEZONE).date().isoformat()
+        with FX_DAILY_NEWS_DIRECT_LOCK:
+            FX_DAILY_NEWS_DIRECT_RUNTIME.update({
+                "refreshInProgress": True,
+                "lastAttemptAt": attempt_at,
+                "lastErrorCode": None,
+            })
+        collection = fx_news_direct.collect_official_sources(
+            market_date,
+            now_utc=reference,
+            fetcher=fetcher,
+            previous_cache=store.get("sourceCache"),
+        )
+        snapshot = fx_news_direct.build_snapshot(
+            collection,
+            trigger_source=trigger,
+            idempotency_digest=digest,
+        )
+        store = fx_news_direct.append_snapshot(
+            store,
+            snapshot,
+            collection.get("sourceCache") if isinstance(collection.get("sourceCache"), dict) else {},
+        )
+        store = _save_fx_daily_news_direct_store(store)
+        success = snapshot.get("currentDataAvailable") is True
+        with FX_DAILY_NEWS_DIRECT_LOCK:
+            FX_DAILY_NEWS_DIRECT_RUNTIME.update({
+                "lastSuccessAt": snapshot.get("updatedAt") if success else FX_DAILY_NEWS_DIRECT_RUNTIME.get("lastSuccessAt"),
+                "lastErrorCode": None if success else "source_failure",
+            })
+        append_audit({
+            "type": "fx_news.direct_refresh_completed",
+            "triggerSource": trigger,
+            "snapshotId": snapshot.get("snapshotId"),
+            "marketDate": market_date,
+            "sourceStatus": snapshot.get("sourceStatus"),
+            "successfulSourceCount": snapshot.get("successfulSourceCount"),
+            "failedSourceCount": snapshot.get("failedSourceCount"),
+            "eventCount": len(snapshot.get("events") or []),
+            "idempotencyKeyDigest": digest[:16] if digest else None,
+            "missionCreated": False,
+            "agentUsed": False,
+            "aiUsed": False,
+            "externalWrites": False,
+            "metaTraderActions": False,
+        })
+        return {
+            "ok": True,
+            "kind": (
+                "news_direct_refresh"
+                if success
+                else "news_direct_refresh_source_failure"
+            ),
+            "idempotentReplay": False,
+            "snapshotId": snapshot.get("snapshotId"),
+            "directNewsService": _fx_daily_news_direct_service_read_model(store=store),
+            "marketNews": _fx_news_read_model(),
+            "fxBias": _fx_bias_read_model(),
+            "mission": None,
+            "missionCreated": False,
+            "agentUsed": False,
+            "aiUsed": False,
+        }
+    except RequestError:
+        raise
+    except Exception as error:
+        with FX_DAILY_NEWS_DIRECT_LOCK:
+            FX_DAILY_NEWS_DIRECT_RUNTIME["lastErrorCode"] = type(error).__name__.lower()
+        append_audit({
+            "type": "fx_news.direct_refresh_failed",
+            "triggerSource": trigger,
+            "errorCode": type(error).__name__.lower(),
+            "missionCreated": False,
+            "agentUsed": False,
+            "aiUsed": False,
+        })
+        raise
+    finally:
+        with FX_DAILY_NEWS_DIRECT_LOCK:
+            FX_DAILY_NEWS_DIRECT_RUNTIME["refreshInProgress"] = False
+        FX_DAILY_NEWS_DIRECT_REFRESH_LOCK.release()
+
+
 def _empty_fx_news_read_model(
     *,
     current_bangkok_date: str,
@@ -7070,13 +7494,22 @@ def _fx_news_read_model(
     *,
     now_local: datetime | None = None,
 ) -> dict:
-    rows = reports if isinstance(reports, list) else load_runtime_reports(limit=240)
+    rows = (
+        reports
+        if isinstance(reports, list)
+        else [
+            *load_runtime_reports(limit=240),
+            *_fx_daily_news_direct_reports(),
+        ]
+    )
     reference_local = now_local or datetime.now(timezone.utc).astimezone(THAILAND_TIMEZONE)
     if reference_local.tzinfo is None:
         reference_local = reference_local.replace(tzinfo=THAILAND_TIMEZONE)
     else:
         reference_local = reference_local.astimezone(THAILAND_TIMEZONE)
     current_bangkok_date = reference_local.date().isoformat()
+    projection_history = list(rows)
+    rows = _fx_current_projection_reports(list(rows), current_bangkok_date)
     attempt_candidates = [
         report
         for report in rows
@@ -7085,7 +7518,8 @@ def _fx_news_read_model(
         and report.get("type") == "fx_news_bias_report"
         and isinstance(report.get("workflowContext"), dict)
         and report["workflowContext"].get("propId") == "left_signal_cube"
-        and report["workflowContext"].get("actionId") == "analyze_daily_market_news"
+        and report["workflowContext"].get("actionId")
+        in {"analyze_daily_market_news", "refresh_daily_market_news"}
     ]
     attempt_candidates.sort(
         key=lambda report: (
@@ -7124,6 +7558,44 @@ def _fx_news_read_model(
                 "currentDataAvailable": False,
                 "failClosed": True,
             })
+            last_good_direct = max(
+                (
+                    report
+                    for report in projection_history
+                    if isinstance(report, dict)
+                    and isinstance(report.get("workflowContext"), dict)
+                    and report["workflowContext"].get("actionId")
+                    == "refresh_daily_market_news"
+                    and str(report.get("status") or "").strip().lower()
+                    in DASHBOARD_WORKFLOW_SOURCE_READY_STATUSES
+                    and str(
+                        (
+                            report.get("metrics")
+                            if isinstance(report.get("metrics"), dict)
+                            else {}
+                        ).get("sourceStatus")
+                        or ""
+                    ).strip().lower()
+                    in {"success", "verified", "quiet_day", "partial_success"}
+                ),
+                key=lambda report: (
+                    parse_iso(str(report.get("updatedAt") or report.get("createdAt") or ""))
+                    or datetime.min.replace(tzinfo=timezone.utc)
+                ),
+                default=None,
+            )
+            if isinstance(last_good_direct, dict):
+                model.update({
+                    "dataStatus": "degraded_last_good",
+                    "stale": True,
+                    "durableStore": fx_news_direct.STORE_VERSION,
+                    "evidenceMode": fx_news_direct.PROVIDER_MODE,
+                    "lastSuccessfulAt": (
+                        last_good_direct.get("updatedAt")
+                        or last_good_direct.get("createdAt")
+                    ),
+                    "lastGoodCalendarDate": _fx_report_bangkok_date(last_good_direct),
+                })
         return model
 
     event_by_id: dict[str, dict] = {}
@@ -7145,7 +7617,7 @@ def _fx_news_read_model(
         if declared_market_date and declared_market_date != current_bangkok_date:
             continue
         source_status = str(metrics.get("sourceStatus") or "unknown").strip().lower()
-        if source_status not in {"success", "verified", "quiet_day"}:
+        if source_status not in {"success", "verified", "quiet_day", "partial_success"}:
             continue
         accepted_reports.append(report)
         if metrics.get("quietDay") is True and source_status in {"success", "verified", "quiet_day"}:
@@ -7158,7 +7630,16 @@ def _fx_news_read_model(
         for source in sources:
             all_sources_by_url[str(source.get("url") or "")] = source
         raw_events = metrics.get("events") if isinstance(metrics.get("events"), list) else []
-        for item in raw_events[:FX_DAILY_NEWS_MAX_EVENTS_PER_REPORT]:
+        direct_report = (
+            (report.get("workflowContext") or {}).get("actionId")
+            == "refresh_daily_market_news"
+        )
+        event_limit = (
+            FX_DAILY_NEWS_DIRECT_MAX_EVENTS
+            if direct_report
+            else FX_DAILY_NEWS_MAX_EVENTS_PER_REPORT
+        )
+        for item in raw_events[:event_limit]:
             if not isinstance(item, dict):
                 continue
             linked_sources = _fx_item_verified_sources(item, by_id, by_url)
@@ -7239,7 +7720,11 @@ def _fx_news_read_model(
                 or (actual_status not in {"released", "revised"} and actual is not None)
             ):
                 continue
-            if scheduled_time is None:
+            publication_status = str(item.get("publicationStatus") or "").strip().lower()
+            if publication_status == "published":
+                timing_state = "past"
+                release_state = "released"
+            elif scheduled_time is None:
                 if actual_status in {"released", "revised"} and actual is not None:
                     timing_state = "past"
                     release_state = "released"
@@ -7310,6 +7795,15 @@ def _fx_news_read_model(
                 "marketDate": event_market_date,
                 "timeKind": time_kind,
                 "impact": impact,
+                "eventCategory": redact_text(
+                    str(item.get("eventCategory") or "economic_release"),
+                    80,
+                ),
+                "actionableMacro": (
+                    item.get("actionableMacro") is True
+                    if direct_report
+                    else item.get("actionableMacro") is not False
+                ),
                 "summaryTh": summary,
                 "detailTh": redact_text(
                     str(item.get("detailTh") or item.get("detail") or summary),
@@ -7439,7 +7933,7 @@ def _fx_news_read_model(
     latest_attempt_status = str(latest_attempt_metrics.get("sourceStatus") or "unknown").strip().lower()
     degraded_last_good = bool(
         latest_attempt_report_status not in DASHBOARD_WORKFLOW_SOURCE_READY_STATUSES
-        or latest_attempt_status not in {"success", "verified", "quiet_day"}
+        or latest_attempt_status not in {"success", "verified", "quiet_day", "partial_success"}
     )
     if degraded_last_good and latest_attempt_status == "unknown":
         latest_attempt_status = "source_failure"
@@ -7451,6 +7945,27 @@ def _fx_news_read_model(
         and latest_source_status in {"success", "verified", "quiet_day"}
         and all_sources_by_url
     )
+    partial_verified_empty = bool(
+        not events
+        and latest_metrics.get("partialQuietDay") is True
+        and latest_source_status == "partial_success"
+        and all_sources_by_url
+    )
+    direct_report = (
+        (report.get("workflowContext") or {}).get("actionId")
+        == "refresh_daily_market_news"
+    )
+    coverage_currencies = sorted({
+        str(value or "").upper()
+        for value in (latest_metrics.get("coverageCurrencies") or [])
+        if str(value or "").upper() in FX_MAJOR_CURRENCIES
+    })
+    failed_currencies = sorted({
+        str(value or "").upper()
+        for value in (latest_metrics.get("failedCurrencies") or [])
+        if str(value or "").upper() in FX_MAJOR_CURRENCIES
+    })
+    usable_current = bool(events or verified_empty or partial_verified_empty)
     return {
         "schemaVersion": "fx-market-news-read-model-v3",
         "calendarDate": current_bangkok_date,
@@ -7466,20 +7981,24 @@ def _fx_news_read_model(
         "scheduledCount": sum(1 for item in events if item["releaseState"] == "scheduled"),
         "releasedCount": sum(1 for item in events if item["releaseState"] == "released"),
         "highImpactCount": sum(1 for item in events if item["impact"] == "high"),
+        "actionableMacroCount": sum(1 for item in events if item.get("actionableMacro") is True),
+        "informationalEventCount": sum(1 for item in events if item.get("actionableMacro") is not True),
         "dataStatus": (
             "degraded_last_good"
-            if degraded_last_good and (events or verified_empty)
+            if degraded_last_good and usable_current
+            else "degraded" if latest_source_status == "partial_success" and usable_current
             else "verified" if events
             else "verified_empty" if verified_empty
             else "source_failure"
         ),
         "sourceStatus": (
             latest_attempt_status if degraded_last_good
-            else latest_source_status if (events or verified_empty)
+            else latest_source_status if usable_current
             else "source_failure"
         ),
         "verifiedEmpty": verified_empty,
-        "evidenceStatus": "verified" if (events or verified_empty) else "unavailable",
+        "partialVerifiedEmpty": partial_verified_empty,
+        "evidenceStatus": "verified" if usable_current else "unavailable",
         "sourceReportId": safe_reference(report.get("id")),
         "latestAttemptReportId": safe_reference(latest_attempt.get("id")),
         "sourceReportIds": [
@@ -7510,17 +8029,24 @@ def _fx_news_read_model(
         "currentBangkokDate": current_bangkok_date,
         "reportBangkokDate": current_bangkok_date,
         "stale": False,
-        "currentDataAvailable": bool((events or verified_empty) and not degraded_last_good),
-        "failClosed": bool(degraded_last_good or not (events or verified_empty)),
-        "durableStore": "backend_runtime_reports",
+        "currentDataAvailable": bool(usable_current and not degraded_last_good),
+        "failClosed": bool(degraded_last_good or not usable_current),
+        "coverageCurrencies": coverage_currencies,
+        "failedCurrencies": failed_currencies,
+        "durableStore": (
+            fx_news_direct.STORE_VERSION if direct_report else "backend_runtime_reports"
+        ),
         "deduplication": "backend_event_identity_v3",
         "sources": list(all_sources_by_url.values()),
-        "evidenceMode": "guarded_public_web_research",
+        "sourceHealth": list(latest_metrics.get("sourceHealth") or []),
+        "evidenceMode": (
+            fx_news_direct.PROVIDER_MODE if direct_report else "guarded_public_web_research"
+        ),
         "forexFactoryCompatibility": {
             "compatibleFields": ["currency", "title", "scheduledAt", "impact", "actual", "forecast", "previous"],
             "referenceLinkOnly": True,
             "copyOrRedistributionAdapter": False,
-            "directAdapterConnected": False,
+            "directAdapterConnected": direct_report,
             "directFeedClaimed": False,
         },
         "fabricatedData": False,
@@ -7558,6 +8084,8 @@ def _fx_pair_assessment_event(event: dict) -> dict:
         "actualStatus": str(event.get("actualStatus") or "unavailable"),
         "releaseState": str(event.get("releaseState") or "scheduled"),
         "analysisStatus": str(event.get("analysisStatus") or "insufficient_data"),
+        "eventCategory": str(event.get("eventCategory") or "economic_release"),
+        "actionableMacro": event.get("actionableMacro") is True,
         "actual": event.get("actual"),
         "forecast": event.get("forecast"),
         "previous": event.get("previous"),
@@ -7613,7 +8141,22 @@ def _fx_bias_read_model(
 ) -> dict:
     rows = _empty_fx_bias_rows()
     by_pair = {row["pair"]: row for row in rows}
-    candidates = reports if isinstance(reports, list) else load_runtime_reports(limit=240)
+    candidates = (
+        reports
+        if isinstance(reports, list)
+        else [
+            *load_runtime_reports(limit=240),
+            *_fx_daily_news_direct_reports(),
+        ]
+    )
+    candidate_history = list(candidates)
+    reference_local = now_local or datetime.now(timezone.utc).astimezone(THAILAND_TIMEZONE)
+    if reference_local.tzinfo is None:
+        reference_local = reference_local.replace(tzinfo=THAILAND_TIMEZONE)
+    else:
+        reference_local = reference_local.astimezone(THAILAND_TIMEZONE)
+    current_bangkok_date = reference_local.date().isoformat()
+    candidates = _fx_current_projection_reports(list(candidates), current_bangkok_date)
     # Current news and current bias must come from the same all-in-one analyze
     # report.  A newer legacy/manual build may be shown only when no completed
     # analyze report with pairBias exists; it must never replace the bias half
@@ -7626,7 +8169,8 @@ def _fx_bias_read_model(
         and report.get("type") == "fx_news_bias_report"
         and isinstance(report.get("workflowContext"), dict)
         and report["workflowContext"].get("propId") == "left_signal_cube"
-        and report["workflowContext"].get("actionId") == "analyze_daily_market_news"
+        and report["workflowContext"].get("actionId")
+        in {"analyze_daily_market_news", "refresh_daily_market_news"}
     ]
     latest_analyze_attempt = max(
         analyze_attempts,
@@ -7638,7 +8182,7 @@ def _fx_bias_read_model(
     )
     verified_report = _latest_fx_report(
         candidates,
-        {"analyze_daily_market_news"},
+        {"analyze_daily_market_news", "refresh_daily_market_news"},
     )
     if verified_report is None and latest_analyze_attempt is None:
         verified_report = _latest_fx_report(
@@ -7646,16 +8190,10 @@ def _fx_bias_read_model(
             {"build_fx_pair_bias"},
             require_pair_bias=True,
         )
-    reference_local = now_local or datetime.now(timezone.utc).astimezone(THAILAND_TIMEZONE)
-    if reference_local.tzinfo is None:
-        reference_local = reference_local.replace(tzinfo=THAILAND_TIMEZONE)
-    else:
-        reference_local = reference_local.astimezone(THAILAND_TIMEZONE)
-    current_bangkok_date = reference_local.date().isoformat()
-    news_model = _fx_news_read_model(candidates, now_local=reference_local)
+    news_model = _fx_news_read_model(candidate_history, now_local=reference_local)
     news_assessment_available = bool(
-        news_model.get("dataStatus") in {"verified", "verified_empty"}
-        and news_model.get("sourceStatus") in {"success", "verified", "quiet_day"}
+        news_model.get("dataStatus") in {"verified", "verified_empty", "degraded"}
+        and news_model.get("sourceStatus") in {"success", "verified", "quiet_day", "partial_success"}
         and news_model.get("currentDataAvailable") is True
         and news_model.get("failClosed") is False
     )
@@ -7702,7 +8240,7 @@ def _fx_bias_read_model(
         and (
             report_bangkok_date != current_bangkok_date
             or declared_market_date != current_bangkok_date
-            or source_status not in {"success", "verified", "quiet_day"}
+            or source_status not in {"success", "verified", "quiet_day", "partial_success"}
         )
     )
     latest_attempt_failed = bool(
@@ -7725,7 +8263,10 @@ def _fx_bias_read_model(
             if isinstance(verified_report.get("workflowContext"), dict)
             else {}
         )
-        is_daily_news_report = workflow_context.get("actionId") == "analyze_daily_market_news"
+        is_daily_news_report = workflow_context.get("actionId") in {
+            "analyze_daily_market_news",
+            "refresh_daily_market_news",
+        }
 
         def confidence_or_none(value: object) -> float | int | None:
             if (
@@ -7842,6 +8383,14 @@ def _fx_bias_read_model(
         "unavailable": 0,
     }
     assessed_pair_count = 0
+    coverage_currencies = {
+        str(value or "").upper()
+        for value in (news_model.get("coverageCurrencies") or [])
+        if str(value or "").upper() in FX_MAJOR_CURRENCIES
+    }
+    direct_coverage_declared = bool(
+        news_model.get("evidenceMode") == fx_news_direct.PROVIDER_MODE
+    )
     for row in rows:
         directional_ready = row.get("status") == "source_backed"
         pair_currencies = {row["baseCurrency"], row["quoteCurrency"]}
@@ -7849,6 +8398,10 @@ def _fx_bias_read_model(
             event
             for event in canonical_news_events
             if pair_currencies.intersection(event.get("currencies") or [])
+            and (
+                not direct_coverage_declared
+                or event.get("actionableMacro") is True
+            )
         ]
         relevant_event_models = [
             _fx_pair_assessment_event(event)
@@ -7866,7 +8419,11 @@ def _fx_bias_read_model(
             ),
             None,
         )
-        if news_assessment_available:
+        pair_coverage_complete = bool(
+            not direct_coverage_declared
+            or pair_currencies.issubset(coverage_currencies)
+        )
+        if news_assessment_available and pair_coverage_complete:
             assessment_status = _fx_pair_assessment_status(
                 directional_ready=directional_ready,
                 relevant_events=relevant_events,
@@ -7921,16 +8478,28 @@ def _fx_bias_read_model(
         "pairUniverseComplete": pair_universe_complete,
         "complete28": pair_universe_complete,
         "dataStatus": (
-            "source_failure"
+            "degraded_last_good"
+            if (
+                news_model.get("dataStatus") == "degraded_last_good"
+                and news_model.get("evidenceMode") == fx_news_direct.PROVIDER_MODE
+            )
+            else "source_failure"
             if latest_attempt_failed
             or (
                 isinstance(verified_report, dict)
-                and source_status not in {"success", "verified", "quiet_day"}
+                and source_status not in {"success", "verified", "quiet_day", "partial_success"}
             )
             else "stale" if stale
+            else "degraded"
+            if (
+                news_model.get("dataStatus") == "degraded"
+                or source_status == "partial_success"
+            )
             else "verified" if assessed_pair_count else "no_verified_data"
         ),
         "sourceStatus": source_status or "no_report",
+        "coverageCurrencies": sorted(coverage_currencies),
+        "failedCurrencies": list(news_model.get("failedCurrencies") or []),
         "sources": list(top_sources_by_url.values()),
         "sourceLinks": list(top_sources_by_url.values()),
         "sourceReportId": safe_reference(verified_report.get("id")) if isinstance(verified_report, dict) else None,
@@ -8091,7 +8660,7 @@ def _build_equipment_connection_center_read_model(
     schedule_specs = {
         "codex_mcp_portal": ("discoverySchedule", ["09:00"], 6),
         "left_audit_crystals": ("indicatorScoutSchedule", ["09:00"], 2),
-        "left_signal_cube": ("newsBiasSchedule", ["07:00", "20:00"], 2),
+        "left_signal_cube": ("newsBiasSchedule", ["00:00", "12:00"], 2),
     }
     ready_statuses = {"connected", "ready", "detected", "configured", "active"}
     attention_statuses = {
@@ -9056,6 +9625,8 @@ def _trusted_workflow_plugin_profile(
         "contractVersion",
         "ownerAgentId",
         "equipmentTitleTh",
+        "retired",
+        "rejection",
     }
     return sanitize_json_value({
         key: value
@@ -9423,6 +9994,11 @@ def workflow_dashboard_read_model(
     for action_id, action in DASHBOARD_WORKFLOW_ACTIONS.items():
         if action.get("propId") != prop_id:
             continue
+        if prop_id == "left_signal_cube":
+            # This prop is served only by dedicated direct endpoints.  Generic
+            # workflow actions would imply Mission/agent semantics and are not
+            # advertised even though legacy identifiers remain rejectable.
+            continue
         plugin_profile = _trusted_workflow_plugin_profile(prop_id, action_id)
         availability = _workflow_action_availability(prop_id, action_id, action, bridge_truth)
         if (
@@ -9567,28 +10143,44 @@ def workflow_dashboard_read_model(
         }
     elif prop_id == "left_signal_cube":
         fx_now_local = datetime.now(timezone.utc).astimezone(THAILAND_TIMEZONE)
+        workflow_settings = load_dashboard_workflow_settings()
+        direct_store = _load_fx_daily_news_direct_store()
+        direct_reports = _fx_daily_news_direct_reports(direct_store)
+        combined_news_reports = [
+            *(reports if isinstance(reports, list) else load_runtime_reports(limit=240)),
+            *direct_reports,
+        ]
         model["schedule"] = _dashboard_saved_schedule_read_model(
             "newsBiasSchedule",
-            default_times=["07:00", "20:00"],
+            default_times=["00:00", "12:00"],
             max_times=2,
+            settings=workflow_settings,
         )
         model["marketNews"] = _fx_news_read_model(
-            reports,
+            combined_news_reports,
             now_local=fx_now_local,
         )
         model["fxBias"] = _fx_bias_read_model(
-            reports,
+            combined_news_reports,
             now_local=fx_now_local,
         )
-        model["primaryViews"] = ["pair_bias", "today"]
+        model["directNewsService"] = _fx_daily_news_direct_service_read_model(
+            settings=workflow_settings,
+            store=direct_store,
+            now_local=fx_now_local,
+        )
+        model["primaryViews"] = ["pair_bias", "today", "history"]
         model["leftRail"] = {
-            "analysisActionId": "analyze_daily_market_news",
-            "settingsActionId": "save_news_bias_schedule",
+            "refreshEndpoint": "/api/props/left_signal_cube/news/refresh",
+            "scheduleEndpoint": "/api/props/left_signal_cube/news/schedule",
             "schedule": model["schedule"],
             "method": {
-                "mode": "public_web_read_only",
+                "mode": fx_news_direct.PROVIDER_MODE,
                 "labelTh": "วิธีการทำงาน",
-                "oneMissionProducesNewsAndBias": True,
+                "oneMissionProducesNewsAndBias": False,
+                "missionCreated": False,
+                "agentUsed": False,
+                "aiUsed": False,
                 "analysisOnly": True,
                 "orderSubmissionAllowed": False,
                 "unsupportedBiasValue": "insufficient_data",
@@ -9598,17 +10190,46 @@ def workflow_dashboard_read_model(
         }
         model["newsTruth"] = {
             "publicWebReadOnly": True,
-            "liveFeedConnected": False,
+            "liveFeedConnected": True,
+            "providerMode": fx_news_direct.PROVIDER_MODE,
+            "officialStructuredSourcesConfigured": True,
             "authoritativePublicSourcesRequired": True,
-            "forexFactoryReferenceOnly": True,
+            "forexFactoryReferenceOnly": False,
             "forexFactoryMayAuthorizeEvidence": False,
             "forexFactoryDirectAdapterConnected": False,
             "forexFactoryDirectFeedClaimAllowed": False,
+            "forexFactoryScraping": False,
+            "fairEconomyScraping": False,
             "automaticSchedulerImplemented": True,
             "insufficientDataWhenUnverified": True,
             "oneScheduledRunProducesNewsAnd28PairBias": True,
+            "missionCreated": False,
+            "agentUsed": False,
+            "aiUsed": False,
             "fabricatedDataAllowed": False,
         }
+        model.update({
+            "schemaVersion": "dashboard-direct-news-v1",
+            "coordinationMode": "direct_backend_service",
+            "agentTransferOnly": False,
+            "directDashboardDependency": False,
+            "allowedActionIds": [],
+            "actions": [],
+            "agentTransferDestinations": [],
+            "agentDeliveredSources": [],
+            "transferPolicy": {
+                "mode": "not_applicable",
+                "agentTransferOnly": False,
+                "directDashboardDependency": False,
+                "missionStrategyTableRole": "legacy_history_only",
+            },
+            "guardrails": [
+                "Official HTTPS allowlist and structured RSS/ICS only.",
+                "No Mission, Agent, Codex, AI, approval, MetaTrader action, or external write.",
+                "No Forex Factory or FairEconomy scraping.",
+                "Directional bias requires deterministic Actual-versus-Forecast evidence.",
+            ],
+        })
     elif prop_id == "terminal_workstation":
         model["workspaceSources"] = _workspace_source_read_model()
         model["adapters"] = {
@@ -10138,7 +10759,7 @@ def _save_dashboard_schedule_preference(settings_key: str, form: dict) -> dict:
     defaults = (
         ["09:00"]
         if settings_key == "indicatorScoutSchedule"
-        else ["07:00", "20:00"]
+        else ["00:00", "12:00"]
     )
     if settings_key not in {"indicatorScoutSchedule", "newsBiasSchedule"}:
         raise RequestError("Unknown dashboard schedule settings key.", 500)
@@ -10151,6 +10772,9 @@ def _save_dashboard_schedule_preference(settings_key: str, form: dict) -> dict:
             default_times=defaults,
             max_times=max_times,
         )
+        if settings_key == "newsBiasSchedule":
+            settings[settings_key]["minimumImpact"] = "low"
+            settings[settings_key]["automaticDailyCalendarVersion"] = 3
         if settings_key == "indicatorScoutSchedule":
             previous_sheet = (
                 settings.get("indicatorScoutSheet")
@@ -10191,6 +10815,48 @@ def _save_dashboard_schedule_preference(settings_key: str, form: dict) -> dict:
     if settings_key == "indicatorScoutSchedule":
         result["googleSheet"] = _dashboard_indicator_sheet_read_model(settings)
     return result
+
+
+def save_direct_daily_fx_news_schedule(payload: object) -> dict:
+    request = payload if isinstance(payload, dict) else {}
+    if set(request) != {"enabled", "times"}:
+        raise RequestError("News schedule accepts exactly enabled and times.", 422)
+    if not isinstance(request.get("enabled"), bool):
+        raise RequestError("News schedule enabled must be boolean.", 422)
+    raw_times = request.get("times")
+    if not isinstance(raw_times, list) or not 1 <= len(raw_times) <= 2:
+        raise RequestError("News schedule requires one or two Bangkok times.", 422)
+    times: list[str] = []
+    for raw in raw_times:
+        candidate = str(raw or "").strip()
+        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", candidate):
+            raise RequestError("News schedule times must use HH:MM.", 422)
+        if candidate in times:
+            raise RequestError("News schedule times must be unique.", 422)
+        times.append(candidate)
+    schedule = _save_dashboard_schedule_preference(
+        "newsBiasSchedule",
+        {"enabled": request["enabled"], "times": sorted(times)},
+    )
+    append_audit({
+        "type": "fx_news.direct_schedule_saved",
+        "enabled": bool(request["enabled"]),
+        "times": sorted(times),
+        "timezone": "Asia/Bangkok",
+        "missionCreated": False,
+        "agentUsed": False,
+        "aiUsed": False,
+    })
+    return {
+        "ok": True,
+        "kind": "news_direct_schedule_saved",
+        "schedule": schedule,
+        "directNewsService": _fx_daily_news_direct_service_read_model(),
+        "mission": None,
+        "missionCreated": False,
+        "agentUsed": False,
+        "aiUsed": False,
+    }
 
 
 def _save_dashboard_agent_preferences(form: dict) -> dict:
@@ -10796,6 +11462,13 @@ def run_dashboard_workflow_action(
 ) -> dict:
     request = payload if isinstance(payload, dict) else {}
     action_id = str(request.get("actionId") or "").strip()
+    if prop_id == "left_signal_cube" and action_id in {
+        "save_news_bias_schedule",
+        "refresh_daily_market_news",
+        "analyze_daily_market_news",
+        "build_fx_pair_bias",
+    }:
+        raise RequestError("direct_service_required", 410)
     trigger_source = str(trusted_trigger_source or "frontend").strip().lower()
     if trigger_source not in {"frontend", "schedule", "backend"}:
         trigger_source = "backend"
@@ -11430,15 +12103,7 @@ def _dashboard_workflow_schedule_form(
     schedule: dict,
     scheduled_local: datetime,
 ) -> dict:
-    if settings_key != "newsBiasSchedule":
-        return {}
-    minimum_impact = str(schedule.get("minimumImpact") or "low").strip().lower()
-    if minimum_impact not in {"low", "medium", "high"}:
-        minimum_impact = "low"
-    return {
-        "marketDate": scheduled_local.strftime("%Y-%m-%d"),
-        "minimumImpact": minimum_impact,
-    }
+    return {}
 
 
 def _dashboard_workflow_retry_ready(schedule: dict, now_utc: datetime) -> bool:
@@ -11532,6 +12197,136 @@ def dashboard_workflow_scheduler_tick(
                 "skippedJobs": skipped_jobs,
                 "captured": captured,
             }
+        # Daily news is an independent local service.  Dispatch it before the
+        # Mission gate and never inspect/create an active Mission for it.
+        direct_news_pending = next(
+            (
+                item for item in eligible_jobs
+                if item.get("settingsKey") == "newsBiasSchedule"
+                and item.get("actionId") == "refresh_daily_market_news"
+            ),
+            None,
+        )
+        if direct_news_pending is not None:
+            idempotency_key = f"dashboard-schedule:{direct_news_pending['slotKey']}"
+            try:
+                with DASHBOARD_WORKFLOW_SETTINGS_LOCK:
+                    if not _dashboard_workflow_pending_is_current(direct_news_pending):
+                        return {
+                            "ok": True,
+                            "kind": "schedule_pending_cancelled",
+                            "dispatched": False,
+                            "settingsKey": "newsBiasSchedule",
+                            "slotKey": direct_news_pending["slotKey"],
+                            "skippedJobs": skipped_jobs,
+                            "captured": captured,
+                        }
+                    reservation = _dashboard_workflow_reserve_daily_execution(
+                        direct_news_pending,
+                        local_now,
+                    )
+                if not reservation.get("allowed"):
+                    return {
+                        "ok": True,
+                        "kind": str(reservation.get("kind") or "daily_execution_guarded"),
+                        "dispatched": False,
+                        "settingsKey": "newsBiasSchedule",
+                        "slotKey": direct_news_pending["slotKey"],
+                        "skippedJobs": skipped_jobs,
+                        "captured": captured,
+                    }
+                result = refresh_deterministic_daily_fx_news(
+                    trigger_source="schedule",
+                    idempotency_key=idempotency_key,
+                    now_utc=local_now.astimezone(timezone.utc),
+                )
+                snapshot_id = safe_reference(result.get("snapshotId"))
+                if not result.get("ok") or not snapshot_id:
+                    raise RuntimeError("direct news refresh returned no durable snapshot")
+            except Exception as error:
+                failed_at = utc_now()
+                _dashboard_workflow_update_schedule_state(
+                    "newsBiasSchedule",
+                    {
+                        "lastAttemptAt": failed_at,
+                        "lastAttemptSlotKey": direct_news_pending["slotKey"],
+                        "lastRunAt": failed_at,
+                        "lastMissionId": None,
+                        "lastSnapshotId": None,
+                        "lastSlotKey": direct_news_pending["slotKey"],
+                        "lastRunStatus": "failed",
+                        "lastResultKind": "news_direct_refresh_exception",
+                        "lastError": f"{type(error).__name__}: {redact_text(str(error), 120)}",
+                        "lastErrorAt": failed_at,
+                        "pendingSlotKey": None,
+                        "pendingScheduledAt": None,
+                    },
+                )
+                append_audit({
+                    "type": "fx_news.direct_schedule_failed",
+                    "settingsKey": "newsBiasSchedule",
+                    "slotKey": direct_news_pending["slotKey"],
+                    "errorCode": type(error).__name__.lower(),
+                    "missionCreated": False,
+                    "agentUsed": False,
+                    "aiUsed": False,
+                })
+                return {
+                    "ok": False,
+                    "kind": "news_direct_refresh_exception",
+                    "dispatched": False,
+                    "settingsKey": "newsBiasSchedule",
+                    "slotKey": direct_news_pending["slotKey"],
+                    "skippedJobs": skipped_jobs,
+                    "captured": captured,
+                }
+            completed_at = utc_now()
+            market_news = result.get("marketNews") if isinstance(result.get("marketNews"), dict) else {}
+            _dashboard_workflow_update_schedule_state(
+                "newsBiasSchedule",
+                {
+                    "lastAttemptAt": completed_at,
+                    "lastAttemptSlotKey": direct_news_pending["slotKey"],
+                    "lastRunAt": completed_at,
+                    "lastMissionId": None,
+                    "lastSnapshotId": snapshot_id,
+                    "lastSlotKey": direct_news_pending["slotKey"],
+                    "lastRunStatus": str(market_news.get("dataStatus") or "completed"),
+                    "lastResultKind": redact_text(str(result.get("kind") or "news_direct_refresh"), 80),
+                    "lastIdempotentReplay": bool(result.get("idempotentReplay", False)),
+                    "lastError": None,
+                    "lastErrorAt": None,
+                    "pendingSlotKey": None,
+                    "pendingScheduledAt": None,
+                },
+            )
+            append_audit({
+                "type": "fx_news.direct_schedule_completed",
+                "settingsKey": "newsBiasSchedule",
+                "slotKey": direct_news_pending["slotKey"],
+                "snapshotId": snapshot_id,
+                "idempotencyKeyDigest": payload_digest(idempotency_key)[:16],
+                "idempotentReplay": bool(result.get("idempotentReplay", False)),
+                "missionCreated": False,
+                "agentUsed": False,
+                "aiUsed": False,
+            })
+            return {
+                "ok": True,
+                "kind": str(result.get("kind") or "news_direct_refresh"),
+                "dispatched": True,
+                "settingsKey": "newsBiasSchedule",
+                "slotKey": direct_news_pending["slotKey"],
+                "snapshotId": snapshot_id,
+                "missionId": None,
+                "idempotentReplay": bool(result.get("idempotentReplay", False)),
+                "skippedJobs": skipped_jobs,
+                "captured": captured,
+            }
+        eligible_jobs = [
+            item for item in eligible_jobs
+            if item.get("settingsKey") != "newsBiasSchedule"
+        ]
         runnable_jobs: list[dict] = []
         for pending in eligible_jobs:
             active = _active_dashboard_workflow_schedule_mission(
@@ -13945,6 +14740,11 @@ def prop_report(
             bridge=live_bridge_status,
             missions=all_missions,
         )
+        if prop_id == "left_signal_cube":
+            direct_dashboard = response["workflowDashboard"]
+            response["directNewsService"] = direct_dashboard.get("directNewsService")
+            response["marketNews"] = direct_dashboard.get("marketNews")
+            response["fxBias"] = direct_dashboard.get("fxBias")
     if prop_id == AI_TRADE_COUNCIL_PROP_ID:
         council_missions = [
             mission
@@ -35364,6 +36164,18 @@ class BridgeHandler(SimpleHTTPRequestHandler):
                 if not SAFE_ID_PATTERN.fullmatch(prop_id) or not find_room_prop(prop_id):
                     raise RequestError("Unknown dashboard id.", 404)
                 self.send_result(refresh_dashboard_connections(prop_id))
+                return
+            if path == "/api/props/left_signal_cube/news/refresh":
+                if payload:
+                    raise RequestError("Daily news refresh accepts an empty JSON body.", 422)
+                self.send_result(
+                    refresh_deterministic_daily_fx_news(
+                        trigger_source="frontend",
+                    )
+                )
+                return
+            if path == "/api/props/left_signal_cube/news/schedule":
+                self.send_result(save_direct_daily_fx_news_schedule(payload))
                 return
             workflow_action = re.fullmatch(r"/api/props/([^/]+)/workflow/actions", path)
             if workflow_action:

@@ -133,33 +133,47 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
             } if actual_status in {"released", "revised"} else {},
         }
 
-    def test_default_and_legacy_migration_remain_opt_in_but_suggest_two_daily_runs(self) -> None:
+    def test_direct_service_v3_migrates_once_then_preserves_enabled_and_times(self) -> None:
         default = self.bridge._default_dashboard_workflow_settings()["newsBiasSchedule"]
-        self.assertFalse(default["requestedEnabled"])
-        self.assertEqual(default["times"], ["07:00", "20:00"])
+        self.assertTrue(default["requestedEnabled"])
+        self.assertEqual(default["times"], ["00:00", "12:00"])
         self.assertEqual(default["minimumImpact"], "low")
+        self.assertEqual(default["automaticDailyCalendarVersion"], 3)
         legacy = self.bridge._dashboard_workflow_settings_shape({
             "newsBiasSchedule": {
                 "requestedEnabled": False,
                 "times": ["07:00", "13:00", "19:00"],
                 "minimumImpact": "high",
-                "savedAt": None,
+                "savedAt": "2026-08-13T00:00:00Z",
+                "automaticDailyCalendarVersion": 2,
+                "pendingSlotKey": "2026-08-13@20:00",
+                "pendingScheduledAt": "2026-08-13T13:00:00Z",
+                "dailyExecutionDate": "2026-08-13",
+                "dailyExecutionCount": 2,
+                "dailyExecutionSlotKeys": ["2026-08-13@07:00", "2026-08-13@20:00"],
             }
         })["newsBiasSchedule"]
-        self.assertFalse(legacy["requestedEnabled"])
-        self.assertEqual(legacy["times"], ["07:00", "20:00"])
+        self.assertTrue(legacy["requestedEnabled"])
+        self.assertEqual(legacy["times"], ["00:00", "12:00"])
         self.assertEqual(legacy["minimumImpact"], "low")
+        self.assertEqual(legacy["automaticDailyCalendarVersion"], 3)
+        self.assertIsNone(legacy["pendingSlotKey"])
+        self.assertIsNone(legacy["pendingScheduledAt"])
+        self.assertIsNone(legacy["dailyExecutionDate"])
+        self.assertEqual(legacy["dailyExecutionCount"], 0)
+        self.assertEqual(legacy["dailyExecutionSlotKeys"], [])
         saved = self.bridge._dashboard_workflow_settings_shape({
             "newsBiasSchedule": {
-                "requestedEnabled": True,
+                "requestedEnabled": False,
                 "times": ["09:15"],
                 "minimumImpact": "high",
                 "savedAt": "2026-08-14T00:00:00Z",
+                "automaticDailyCalendarVersion": 3,
             }
         })["newsBiasSchedule"]
-        self.assertTrue(saved["requestedEnabled"])
+        self.assertFalse(saved["requestedEnabled"])
         self.assertEqual(saved["times"], ["09:15"])
-        self.assertEqual(saved["minimumImpact"], "high")
+        self.assertEqual(saved["minimumImpact"], "low")
 
     def test_same_event_is_upserted_and_released_zero_never_regresses_to_pending(self) -> None:
         morning = self.report(
@@ -708,7 +722,7 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
                 bridge={},
                 missions=[],
             )
-        news_now = news_reader.call_args.kwargs["now_local"]
+        news_now = news_reader.call_args_list[0].kwargs["now_local"]
         bias_now = bias_reader.call_args.kwargs["now_local"]
         self.assertIs(news_now, bias_now)
         self.assertEqual(news_now.tzinfo, self.bridge.THAILAND_TIMEZONE)
@@ -967,7 +981,10 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
             )
         )
         enum_rules = report_contract["typed_report_schemas"]["fx_news_bias_report"]["enumRules"]
-        self.assertEqual(enum_rules["sourceStatus"], ["success", "verified", "quiet_day"])
+        self.assertEqual(
+            enum_rules["sourceStatus"],
+            ["success", "verified", "quiet_day", "partial_success", "source_failure"],
+        )
         self.assertEqual(
             enum_rules["events[].timeKind"],
             ["timed", "tentative", "all_day", "holiday"],
@@ -1204,139 +1221,380 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
         self.assertLessEqual(contract["resultEnvelopeChars"], 20000)
         self.assertEqual(contract["resultEnvelopeChars"], len(envelope))
 
-    def test_manual_effective_form_gets_backend_bangkok_date(self) -> None:
+    def test_retired_mission_form_is_not_used_by_direct_service(self) -> None:
         profile = self.bridge._trusted_workflow_plugin_profile(
             "left_signal_cube", "analyze_daily_market_news"
         )
+        self.assertTrue(profile["retired"])
+        self.assertEqual(profile["rejection"], "direct_service_required")
         form = self.bridge._workflow_effective_form(
             profile,
             {},
             action_id="analyze_daily_market_news",
         )
-        self.assertRegex(form["marketDate"], r"^\d{4}-\d{2}-\d{2}$")
+        # The parser remains available solely for validating historical reports;
+        # the generic route rejects before this compatibility form can dispatch.
         self.assertEqual(form["minimumImpact"], "low")
 
-    def test_manual_news_action_applies_trusted_timeout_floor_and_exposes_budget(self) -> None:
-        captured: dict = {}
+    def test_legacy_news_actions_reject_before_any_mission_or_agent_work(self) -> None:
+        with (
+            mock.patch.object(self.bridge, "run_bridge_task") as run_bridge_task,
+            mock.patch.object(self.bridge, "find_room_prop") as find_room_prop,
+            mock.patch.object(self.bridge, "append_audit") as append_audit,
+        ):
+            for action_id in (
+                "save_news_bias_schedule",
+                "refresh_daily_market_news",
+                "analyze_daily_market_news",
+                "build_fx_pair_bias",
+            ):
+                with self.subTest(action_id=action_id):
+                    with self.assertRaises(self.bridge.RequestError) as caught:
+                        self.bridge.run_dashboard_workflow_action(
+                            "left_signal_cube",
+                            {"actionId": action_id, "form": {}},
+                        )
+                    self.assertEqual(caught.exception.status, 410)
+                    self.assertEqual(str(caught.exception), "direct_service_required")
+        run_bridge_task.assert_not_called()
+        find_room_prop.assert_not_called()
+        append_audit.assert_not_called()
 
-        def fake_run_bridge_task(payload: dict, **kwargs) -> dict:
-            captured["payload"] = payload
-            captured["preferences"] = kwargs.get("trusted_execution_preferences")
-            captured["context"] = kwargs.get("trusted_workflow_context")
-            return {
-                "ok": True,
-                "kind": "mission_auto_queued",
-                "mission": {
-                    "id": "mission-news-timeout-manual",
-                    "status": "queued",
-                    "budget": dict(payload["budget"]),
-                },
-            }
-
-        settings = {
-            "agentPreferences": {
-                "modelTier": "specialist_balanced",
-                "tokenBudget": 12000,
-                "timeoutSeconds": 120,
-                "outputLimitChars": 7000,
-                "rateReservePercent": 30,
-            }
+    def test_direct_schedule_accepts_only_enabled_and_times_without_mission(self) -> None:
+        saved = {
+            "requestedEnabled": True,
+            "times": ["00:00", "12:00"],
+            "minimumImpact": "low",
+            "timezone": "Asia/Bangkok",
         }
         with (
-            mock.patch.object(self.bridge, "find_room_prop", return_value={"id": "left_signal_cube"}),
-            mock.patch.object(self.bridge, "_workflow_action_contract_gate", return_value={"allowed": True}),
-            mock.patch.object(self.bridge, "find_mission_by_idempotency", return_value=None),
-            mock.patch.object(self.bridge, "load_dashboard_workflow_settings", return_value=settings),
-            mock.patch.object(self.bridge, "run_bridge_task", side_effect=fake_run_bridge_task),
+            mock.patch.object(self.bridge, "_save_dashboard_schedule_preference", return_value=saved) as save,
+            mock.patch.object(self.bridge, "_fx_daily_news_direct_service_read_model", return_value={"status": "ready"}),
+            mock.patch.object(self.bridge, "run_bridge_task") as run_bridge_task,
             mock.patch.object(self.bridge, "append_audit"),
         ):
-            result = self.bridge.run_dashboard_workflow_action(
-                "left_signal_cube",
-                {
-                    "actionId": "analyze_daily_market_news",
-                    "form": {"marketDate": "2026-08-14", "minimumImpact": "low"},
-                    "idempotencyKey": "news-timeout-manual",
-                },
-            )
-
-        expected_timeout = self.bridge.FX_DAILY_NEWS_TIMEOUT_FLOOR_SECONDS
-        self.assertEqual(expected_timeout, 300)
-        self.assertEqual(captured["payload"]["budget"]["timeoutSeconds"], expected_timeout)
-        self.assertEqual(captured["preferences"]["timeoutSeconds"], expected_timeout)
-        self.assertEqual(captured["payload"]["budget"]["outputLimitChars"], 20000)
-        self.assertEqual(captured["context"]["triggerSource"], "frontend")
-        self.assertEqual(result["mission"]["budget"]["timeoutSeconds"], expected_timeout)
-        visible = self.bridge.mission_read_model_item(result["mission"])
-        self.assertEqual(visible["budget"]["timeoutSeconds"], expected_timeout)
-
-    def test_scheduled_news_action_uses_same_timeout_floor_but_preserves_higher_setting(self) -> None:
-        captured: list[dict] = []
-
-        def fake_run_bridge_task(payload: dict, **kwargs) -> dict:
-            captured.append({
-                "payload": payload,
-                "preferences": kwargs.get("trusted_execution_preferences"),
-                "context": kwargs.get("trusted_workflow_context"),
+            result = self.bridge.save_direct_daily_fx_news_schedule({
+                "enabled": True,
+                "times": ["12:00", "00:00"],
             })
-            return {
-                "ok": True,
-                "kind": "mission_auto_queued",
-                "mission": {
-                    "id": f"mission-news-timeout-schedule-{len(captured)}",
-                    "status": "queued",
-                    "budget": dict(payload["budget"]),
-                },
-            }
+        save.assert_called_once_with(
+            "newsBiasSchedule",
+            {"enabled": True, "times": ["00:00", "12:00"]},
+        )
+        run_bridge_task.assert_not_called()
+        self.assertIsNone(result["mission"])
+        self.assertFalse(result["missionCreated"])
+        self.assertFalse(result["agentUsed"])
+        self.assertFalse(result["aiUsed"])
+        with self.assertRaises(self.bridge.RequestError):
+            self.bridge.save_direct_daily_fx_news_schedule({
+                "enabled": True,
+                "times": ["00:00"],
+                "minimumImpact": "high",
+            })
 
-        def dispatch(timeout_seconds: int, key: str) -> dict:
-            settings = {
-                "agentPreferences": {
-                    "modelTier": "specialist_balanced",
-                    "tokenBudget": 12000,
-                    "timeoutSeconds": timeout_seconds,
-                    "outputLimitChars": 7000,
-                    "rateReservePercent": 30,
-                }
-            }
-            with mock.patch.object(
-                self.bridge,
-                "load_dashboard_workflow_settings",
-                return_value=settings,
-            ):
-                return self.bridge.run_dashboard_workflow_action(
-                    "left_signal_cube",
-                    {
-                        "actionId": "analyze_daily_market_news",
-                        "form": {"marketDate": "2026-08-14", "minimumImpact": "low"},
-                        "idempotencyKey": key,
-                    },
-                    trusted_trigger_source="schedule",
-                )
-
+    def test_direct_refresh_persists_snapshot_without_mission_or_agent_dispatch(self) -> None:
+        empty_store = self.bridge.fx_news_direct.empty_store()
+        collection = {"marketDate": "2026-08-14", "sourceCache": {}}
+        snapshot = {
+            "snapshotId": "fxnews-2026-08-14-unit",
+            "marketDate": "2026-08-14",
+            "updatedAt": "2026-08-14T05:00:00Z",
+            "currentDataAvailable": True,
+            "sourceStatus": "quiet_day",
+            "dataStatus": "verified_empty",
+            "events": [],
+        }
+        persisted = {
+            **empty_store,
+            "latestSnapshotId": snapshot["snapshotId"],
+            "latestSuccessfulSnapshotId": snapshot["snapshotId"],
+            "history": [snapshot],
+        }
         with (
-            mock.patch.object(self.bridge, "find_room_prop", return_value={"id": "left_signal_cube"}),
-            mock.patch.object(self.bridge, "_workflow_action_contract_gate", return_value={"allowed": True}),
-            mock.patch.object(self.bridge, "find_mission_by_idempotency", return_value=None),
-            mock.patch.object(self.bridge, "run_bridge_task", side_effect=fake_run_bridge_task),
+            mock.patch.object(self.bridge, "_load_fx_daily_news_direct_store", return_value=empty_store),
+            mock.patch.object(self.bridge.fx_news_direct, "collect_official_sources", return_value=collection),
+            mock.patch.object(self.bridge.fx_news_direct, "build_snapshot", return_value=snapshot),
+            mock.patch.object(self.bridge.fx_news_direct, "append_snapshot", return_value=persisted),
+            mock.patch.object(self.bridge, "_save_fx_daily_news_direct_store", return_value=persisted) as save_store,
+            mock.patch.object(self.bridge, "_fx_daily_news_direct_service_read_model", return_value={"status": "ready"}),
+            mock.patch.object(self.bridge, "_fx_news_read_model", return_value={"dataStatus": "verified_empty"}),
+            mock.patch.object(self.bridge, "_fx_bias_read_model", return_value={"assessedPairCount": 28}),
+            mock.patch.object(self.bridge, "run_bridge_task") as run_bridge_task,
             mock.patch.object(self.bridge, "append_audit"),
         ):
-            floored = dispatch(90, "dashboard-schedule:news-timeout-floor")
-            preserved = dispatch(480, "dashboard-schedule:news-timeout-preserved")
+            result = self.bridge.refresh_deterministic_daily_fx_news(
+                trigger_source="frontend",
+                now_utc=datetime.fromisoformat("2026-08-14T05:00:00+00:00"),
+            )
+        save_store.assert_called_once_with(persisted)
+        run_bridge_task.assert_not_called()
+        self.assertEqual(result["snapshotId"], snapshot["snapshotId"])
+        self.assertIsNone(result["mission"])
+        self.assertFalse(result["missionCreated"])
+        self.assertFalse(result["agentUsed"])
+        self.assertFalse(result["aiUsed"])
 
-        self.assertEqual(captured[0]["payload"]["budget"]["timeoutSeconds"], 300)
-        self.assertEqual(captured[0]["preferences"]["timeoutSeconds"], 300)
-        self.assertEqual(floored["mission"]["budget"]["timeoutSeconds"], 300)
-        self.assertEqual(captured[1]["payload"]["budget"]["timeoutSeconds"], 480)
-        self.assertEqual(captured[1]["preferences"]["timeoutSeconds"], 480)
-        self.assertEqual(preserved["mission"]["budget"]["timeoutSeconds"], 480)
-        self.assertTrue(all(row["context"]["triggerSource"] == "schedule" for row in captured))
-        self.assertTrue(all(row["payload"]["budget"]["outputLimitChars"] == 20000 for row in captured))
-
-        unrelated = self.bridge._dashboard_workflow_execution_preferences(
-            "discover_trading_systems",
-            {"agentPreferences": {"timeoutSeconds": 90}},
+    def test_partial_direct_coverage_assesses_only_pairs_with_both_currencies(self) -> None:
+        report = self.report(
+            "direct-partial-quiet",
+            updated_at="2026-08-14T05:00:00Z",
+            events=[],
+            source_status="partial_success",
         )
-        self.assertEqual(unrelated["timeoutSeconds"], 90)
+        report["workflowContext"]["actionId"] = "refresh_daily_market_news"
+        report["metrics"].update({
+            "partialQuietDay": True,
+            "coverageCurrencies": ["EUR", "USD"],
+            "failedCurrencies": ["AUD", "CAD", "CHF", "GBP", "JPY", "NZD"],
+            "pairBias": self.insufficient_pair_rows(),
+        })
+        model = self.bridge._fx_bias_read_model(
+            [report],
+            now_local=datetime.fromisoformat("2026-08-14T12:00:00+07:00"),
+        )
+        self.assertEqual(model["dataStatus"], "degraded")
+        self.assertEqual(model["sourceStatus"], "partial_success")
+        self.assertEqual(model["assessedPairCount"], 1)
+        self.assertEqual(model["noDirectEventPairCount"], 1)
+        self.assertEqual(model["unavailablePairCount"], 27)
+        self.assertFalse(model["assessmentComplete"])
+        eurusd = next(row for row in model["pairs"] if row["pair"] == "EURUSD")
+        self.assertTrue(eurusd["assessmentComplete"])
+        self.assertEqual(eurusd["assessmentStatus"], "no_direct_event")
+        audusd = next(row for row in model["pairs"] if row["pair"] == "AUDUSD")
+        self.assertFalse(audusd["assessmentComplete"])
+        self.assertEqual(audusd["assessmentStatus"], "unavailable")
+
+    def test_current_direct_snapshot_excludes_legacy_ai_news_and_bias(self) -> None:
+        direct = self.report(
+            "direct-quiet",
+            updated_at="2026-08-14T01:00:00Z",
+            events=[],
+            quiet_day=True,
+            source_status="quiet_day",
+        )
+        direct["workflowContext"]["actionId"] = "refresh_daily_market_news"
+        direct["metrics"].update({
+            "coverageCurrencies": sorted(self.bridge.FX_MAJOR_CURRENCIES),
+            "failedCurrencies": [],
+            "pairBias": self.insufficient_pair_rows(),
+        })
+        legacy = self.report(
+            "legacy-ai-later",
+            updated_at="2026-08-14T02:00:00Z",
+            events=[self.event(actual="0.1%", actual_status="released")],
+        )
+        now = datetime.fromisoformat("2026-08-14T12:00:00+07:00")
+        news = self.bridge._fx_news_read_model([direct, legacy], now_local=now)
+        bias = self.bridge._fx_bias_read_model([direct, legacy], now_local=now)
+        self.assertEqual(news["eventCount"], 0)
+        self.assertTrue(news["verifiedEmpty"])
+        self.assertEqual(news["sourceReportId"], "direct-quiet")
+        self.assertEqual(bias["directionalPairCount"], 0)
+        self.assertEqual(bias["assessedPairCount"], 28)
+        self.assertEqual(bias["noDirectEventPairCount"], 28)
+        self.assertEqual(bias["sourceReportId"], "direct-quiet")
+
+    def test_latest_partial_direct_snapshot_evicts_prior_failed_currency_event_and_window(self) -> None:
+        morning = self.report(
+            "direct-morning-usd",
+            updated_at="2026-08-14T01:00:00Z",
+            events=[self.event(title="US CPI")],
+            danger_windows=[{
+                "currencies": ["USD"],
+                "startsAt": "2026-08-14T12:15:00Z",
+                "endsAt": "2026-08-14T12:45:00Z",
+                "reasonTh": "US CPI",
+                "sourceRefs": ["official-1"],
+            }],
+        )
+        morning["workflowContext"]["actionId"] = "refresh_daily_market_news"
+        morning["metrics"].update({
+            "coverageCurrencies": sorted(self.bridge.FX_MAJOR_CURRENCIES),
+            "failedCurrencies": [],
+        })
+        morning["metrics"]["events"][0]["actionableMacro"] = True
+
+        aud_event = self.event(
+            title="AUD CPI",
+            event_id="aud-cpi",
+            scheduled_at="2026-08-14T08:00:00Z",
+        )
+        aud_event["currencies"] = ["AUD"]
+        aud_event["pairImpacts"] = {}
+        aud_event["actionableMacro"] = True
+        later = self.report(
+            "direct-later-partial",
+            updated_at="2026-08-14T05:00:00Z",
+            events=[aud_event],
+            source_status="partial_success",
+        )
+        later["workflowContext"]["actionId"] = "refresh_daily_market_news"
+        later["metrics"].update({
+            "coverageCurrencies": ["AUD", "EUR"],
+            "failedCurrencies": ["USD"],
+            "partialQuietDay": False,
+            "pairBias": self.insufficient_pair_rows(),
+        })
+
+        now = datetime.fromisoformat("2026-08-14T12:00:00+07:00")
+        news = self.bridge._fx_news_read_model([morning, later], now_local=now)
+        bias = self.bridge._fx_bias_read_model([morning, later], now_local=now)
+        self.assertEqual(news["sourceReportId"], "direct-later-partial")
+        self.assertEqual(news["eventCount"], 1)
+        self.assertEqual(news["events"][0]["currencies"], ["AUD"])
+        self.assertEqual(news["dangerWindows"], [])
+        self.assertNotIn("USD", news["coverageCurrencies"])
+        self.assertEqual(bias["dataStatus"], "degraded")
+        self.assertEqual(bias["assessedPairCount"], 1)
+        self.assertEqual(bias["unavailablePairCount"], 27)
+
+    def test_all_direct_sources_fail_with_history_is_degraded_last_good_not_blank_unknown(self) -> None:
+        last_good = self.report(
+            "direct-last-good",
+            updated_at="2026-08-14T05:00:00Z",
+            events=[self.event()],
+        )
+        last_good["workflowContext"]["actionId"] = "refresh_daily_market_news"
+        last_good["metrics"].update({
+            "coverageCurrencies": sorted(self.bridge.FX_MAJOR_CURRENCIES),
+            "failedCurrencies": [],
+        })
+        failed = self.report(
+            "direct-current-failure",
+            updated_at="2026-08-15T05:00:00Z",
+            events=[],
+            source_status="source_failure",
+        )
+        failed["status"] = "failed"
+        failed["workflowContext"]["actionId"] = "refresh_daily_market_news"
+        failed["workflowContext"]["inputs"]["marketDate"] = "2026-08-15"
+        failed["metrics"].update({
+            "marketDate": "2026-08-15",
+            "coverageCurrencies": [],
+            "failedCurrencies": sorted(self.bridge.FX_MAJOR_CURRENCIES),
+        })
+        now = datetime.fromisoformat("2026-08-15T12:00:00+07:00")
+        news = self.bridge._fx_news_read_model([last_good, failed], now_local=now)
+        bias = self.bridge._fx_bias_read_model([last_good, failed], now_local=now)
+        self.assertEqual(news["dataStatus"], "degraded_last_good")
+        self.assertEqual(news["sourceStatus"], "source_failure")
+        self.assertTrue(news["stale"])
+        self.assertFalse(news["currentDataAvailable"])
+        self.assertEqual(news["eventCount"], 0)
+        self.assertEqual(news["lastGoodCalendarDate"], "2026-08-14")
+        self.assertEqual(bias["dataStatus"], "degraded_last_good")
+        self.assertEqual(bias["assessedPairCount"], 0)
+
+    def test_direct_service_history_uses_canonical_event_contract(self) -> None:
+        event = self.event(title="US CPI", scheduled_at="2026-08-14T12:30:00Z")
+        event["actionableMacro"] = True
+        snapshot = {
+            "snapshotId": "fxnews-history-canonical",
+            "marketDate": "2026-08-14",
+            "createdAt": "2026-08-14T01:00:00Z",
+            "updatedAt": "2026-08-14T01:00:00Z",
+            "triggerSource": "schedule",
+            "providerMode": self.bridge.fx_news_direct.PROVIDER_MODE,
+            "sourceStatus": "success",
+            "dataStatus": "verified",
+            "quietDay": False,
+            "partialQuietDay": False,
+            "currentDataAvailable": True,
+            "failClosed": False,
+            "coverageCurrencies": sorted(self.bridge.FX_MAJOR_CURRENCIES),
+            "failedCurrencies": [],
+            "successfulSourceCount": 8,
+            "failedSourceCount": 0,
+            "sourceHealth": [],
+            "sourceLinks": [{
+                "id": "official-1",
+                "title": "BLS release",
+                "url": "https://www.bls.gov/news.release/cpi.nr0.htm",
+                "checkedAt": "2026-08-14T01:00:00Z",
+            }],
+            "events": [event],
+            "dangerWindows": [],
+            "pairBias": self.insufficient_pair_rows(),
+        }
+        store = self.bridge.fx_news_direct.append_snapshot(
+            self.bridge.fx_news_direct.empty_store(),
+            snapshot,
+            {},
+        )
+        service = self.bridge._fx_daily_news_direct_service_read_model(
+            settings=self.bridge._default_dashboard_workflow_settings(),
+            store=store,
+            now_local=datetime.fromisoformat("2026-08-14T10:00:00+07:00"),
+        )
+        self.assertTrue(service["directRefreshAvailable"])
+        self.assertEqual(service["refreshEndpoint"], "/api/props/left_signal_cube/news/refresh")
+        self.assertEqual(service["scheduleEndpoint"], "/api/props/left_signal_cube/news/schedule")
+        history = service["historyDays"][0]
+        self.assertEqual(history["calendarDate"], "2026-08-14")
+        canonical = history["events"][0]
+        self.assertTrue(all(
+            field in canonical
+            for field in (
+                "releaseState", "timingState", "analysisStatus", "actualStatus", "sourceLinks"
+            )
+        ))
+        self.assertNotIn("publicationStatus", canonical)
+
+    def test_macro_press_conference_precedes_broad_informational_conference_rule(self) -> None:
+        macro = "ECB monetary policy press conference"
+        research = "Central bank research conference on productivity"
+        self.assertEqual(self.bridge.fx_news_direct.impact_for_title(macro), "medium")
+        self.assertEqual(
+            self.bridge.fx_news_direct.event_taxonomy(macro),
+            ("economic_release", True),
+        )
+        self.assertEqual(self.bridge.fx_news_direct.impact_for_title(research), "low")
+        self.assertEqual(
+            self.bridge.fx_news_direct.event_taxonomy(research),
+            ("informational_publication", False),
+        )
+
+    def test_scheduler_runs_direct_news_before_mission_gate(self) -> None:
+        pending = {
+            "settingsKey": "newsBiasSchedule",
+            "propId": "left_signal_cube",
+            "actionId": "refresh_daily_market_news",
+            "slotKey": "2026-08-14@12:00",
+            "schedule": {},
+        }
+        direct_result = {
+            "ok": True,
+            "kind": "news_direct_refresh",
+            "snapshotId": "fxnews-2026-08-14-direct",
+            "marketNews": {"dataStatus": "verified_empty"},
+            "idempotentReplay": False,
+        }
+        with (
+            mock.patch.object(self.bridge, "_dashboard_workflow_reconcile_schedule_states"),
+            mock.patch.object(self.bridge, "_dashboard_workflow_capture_due_slots", return_value=[]),
+            mock.patch.object(self.bridge, "_dashboard_workflow_pending_jobs", return_value=[pending]),
+            mock.patch.object(self.bridge, "_dashboard_workflow_pending_is_current", return_value=True),
+            mock.patch.object(self.bridge, "_dashboard_workflow_retry_ready", return_value=True),
+            mock.patch.object(self.bridge, "_dashboard_workflow_reserve_daily_execution", return_value={"allowed": True}),
+            mock.patch.object(self.bridge, "refresh_deterministic_daily_fx_news", return_value=direct_result) as refresh,
+            mock.patch.object(self.bridge, "_dashboard_workflow_update_schedule_state") as update_state,
+            mock.patch.object(self.bridge, "_active_dashboard_workflow_schedule_mission") as active_mission,
+            mock.patch.object(self.bridge, "run_dashboard_workflow_action") as mission_dispatch,
+            mock.patch.object(self.bridge, "append_audit"),
+        ):
+            result = self.bridge.dashboard_workflow_scheduler_tick(
+                datetime.fromisoformat("2026-08-14T12:00:00+07:00"),
+                refresh_quota=False,
+            )
+        refresh.assert_called_once()
+        active_mission.assert_not_called()
+        mission_dispatch.assert_not_called()
+        self.assertTrue(update_state.called)
+        self.assertTrue(result["dispatched"])
+        self.assertEqual(result["snapshotId"], "fxnews-2026-08-14-direct")
+        self.assertIsNone(result["missionId"])
 
 
 if __name__ == "__main__":

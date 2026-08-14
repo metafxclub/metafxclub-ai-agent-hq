@@ -483,14 +483,19 @@
     },
     "fx_news_bias_report": {
       "schemaVersion": "fx-news-bias-report-v3",
-      "purpose": "รายงานเดียวจาก analyze_daily_market_news ที่ให้ทั้งข่าวตลาดปัจจุบัน ช่วงระวัง EA และมุมมอง 28 คู่เงินระยะสั้น กลาง และยาวสำหรับ left_signal_cube โดยเป็น Analysis Only และต้องอ้างอิงแหล่งสาธารณะ",
+      "storageMode": "direct_snapshot_store_not_mission_report",
+      "providerMode": "official_structured_allowlist",
+      "missionCreated": false,
+      "agentUsed": false,
+      "aiUsed": false,
+      "purpose": "Snapshot จาก Backend Direct Service ที่รวมข่าวตลาด ช่วงระวัง EA สถานะแหล่งข้อมูล และผลประเมิน 28 คู่เงินสำหรับ left_signal_cube โดยไม่สร้าง Mission หรือเรียก Agent/AI",
       "marketDate": "YYYY-MM-DD",
       "sourceStatus": "success",
       "quietDay": false,
       "checkedAt": "ISO-8601",
       "updatedAt": "ISO-8601",
       "enumRules": {
-        "sourceStatus": ["success", "verified", "quiet_day"],
+        "sourceStatus": ["success", "verified", "quiet_day", "partial_success", "source_failure"],
         "events[].timeKind": ["timed", "tentative", "all_day", "holiday"],
         "events[].actualStatus": ["pending", "released", "revised", "unavailable", "not_applicable"],
         "events[].impact": ["low", "medium", "high", "unknown"]
@@ -515,7 +520,7 @@
           "pairImpacts": [{"pair": "EURUSD", "impact": "bullish|bearish|sideway|insufficient_data", "confidence": null, "reasonTh": null, "sourceRefs": ["claim-specific source ids"]}]
         }
       ],
-      "payloadBounds": {"maximumEventsPerRun": 6, "maximumDangerWindowsPerRun": 3, "maximumSourcesPerRun": 3, "maximumSourceTitleChars": 40, "maximumSourceUrlChars": 120, "singleContractFieldChars": 12000, "fullResultChars": 20000, "compactMergeAcrossRuns": true},
+      "payloadBounds": {"maximumEventsPerRun": 120, "maximumDangerWindowsPerRun": 3, "maximumSourcesPerRun": 8, "maximumSourceTitleChars": 160, "maximumSourceUrlChars": 1000, "historyDaysPresented": 14, "compactMergeAcrossRuns": false},
       "dangerWindows": [
         {
           "windowId": "opaque backend id",
@@ -540,8 +545,8 @@
         {"id": "opaque source id", "title": "public source title", "url": "https://...", "publishedAt": null, "checkedAt": "ISO-8601"}
       ],
       "limitations": [],
-      "schedulePreference": {"defaultEnabled": false, "defaultTimes": ["07:00", "20:00"], "times": ["07:00", "20:00"], "timezone": "Asia/Bangkok", "minimumImpact": "low", "maximumTimes": 2, "maximumRunsPerDay": 2, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "configurationSaved": false, "recurringSchedulerAvailable": true},
-      "presentation": {"primaryViews": ["pair_bias", "today"], "defaultView": "pair_bias", "historyTab": false, "scheduleAndMethodLocation": "left_rail"},
+      "schedulePreference": {"defaultEnabled": true, "defaultTimes": ["00:00", "12:00"], "times": ["00:00", "12:00"], "timezone": "Asia/Bangkok", "minimumImpact": "low", "minimumImpactEditable": false, "maximumTimes": 2, "maximumRunsPerDay": 2, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "configurationSaved": true, "recurringSchedulerAvailable": true, "refreshEndpoint": "/api/props/left_signal_cube/news/refresh", "scheduleEndpoint": "/api/props/left_signal_cube/news/schedule"},
+      "presentation": {"primaryViews": ["pair_bias", "today", "history"], "defaultView": "pair_bias", "historyTab": true, "historyView": "history", "historySource": "directNewsService.historyDays", "historyOfficialSourceLinksClickable": true, "scheduleAndMethodLocation": "left_rail"},
       "freshnessReadModel": {"asOf": "ISO-8601 or null", "currentBangkokDate": "YYYY-MM-DD", "reportBangkokDate": "YYYY-MM-DD or null", "stale": false, "currentDataAvailable": false, "staleDataPolicy": "empty_today_events_danger_windows_and_directional_bias"},
       "pairAssessmentReadModel": {
         "schemaVersion": "fx-pair-bias-read-model-v3",
@@ -551,21 +556,21 @@
         "eventMetadataFields": ["eventId", "titleTh", "currencies", "impact", "timeKind", "scheduledAt", "scheduledAtUtc", "scheduledAtBangkok", "marketDate", "timingState", "actualStatus", "releaseState", "analysisStatus", "actual", "forecast", "previous"],
         "maximumRelevantEventMetadataPerPair": 3,
         "verifiedCalendarCoveragePolicy": "A current source-verified calendar or verified quiet day assesses all 28 pairs even when zero directional horizons are evidence-backed.",
-        "directionalTruthPolicy": "Assessment coverage never upgrades insufficient_data to bullish, bearish, or sideway. For analyze_daily_market_news, a directional horizon requires a related released or revised event with scalar Actual and claim-specific evidence shared with that event; pre-event schedules provide caution/assessment only."
+        "directionalTruthPolicy": "Assessment coverage never upgrades insufficient_data to bullish, bearish, or sideway. Direction is emitted only for an actionable macro event with one currency, comparable numeric Actual and Forecast, and an explicit deterministic indicator rule; pre-event schedules provide caution/assessment only."
       },
-      "runtimeReadiness": {"publicCodexWebResearch": "ready_guarded_read_only", "fxBiasAnalysis": "ready_analysis_only", "missionReportAudit": "ready", "authoritativePublicSourcesRequired": true, "forexFactoryReferenceOnly": true, "forexFactoryEvidenceAllowed": false, "economicCalendarMode": "guarded_original_synthesis", "recurringScheduler": "ready_guarded_read_only"},
+      "runtimeReadiness": {"officialStructuredSources": "ready_allowlisted_read_only", "fxBiasAnalysis": "ready_deterministic", "directStoreAudit": "ready", "authoritativePublicSourcesRequired": true, "forexFactoryScraping": false, "fairEconomyScraping": false, "economicCalendarMode": "official_structured_direct", "recurringScheduler": "ready_direct_backend"},
       "truthRules": [
-        "One analyze_daily_market_news report must provide events, dangerWindows, and exactly 28 pairBias rows together; build_fx_pair_bias remains legacy manual compatibility only.",
+        "One immutable direct snapshot provides events, dangerWindows, exactly 28 pairBias rows, source health, and per-currency coverage without creating a Mission, Agent event, or AI request.",
         "The pair universe must contain exactly the 28 canonical FX pairs and each pair has short, medium, and long horizons.",
         "Bias is market analysis, not an order, recommendation guarantee, or approval to trade.",
         "Every event, danger window, event-pair impact, and non-insufficient bias horizon must point to its own admissible public source recorded as Backend report evidence.",
-        "Forex Factory and Fair Economy are optional user-click reference links only; the Backend must not ingest, copy, redistribute, or use their feed, export, HTML, or JSON as report evidence.",
+        "The Backend must not ingest, scrape, copy, redistribute, or use Forex Factory or Fair Economy feed, export, HTML, or JSON as evidence.",
         "Unsupported or unverified directional claims remain insufficient_data; the Backend never fabricates missing news or bias.",
         "Every enum field contains exactly one value from enumRules; combined forms such as success/verified and aliases such as scheduled or published are invalid.",
         "A timed event must carry an explicitly offset scheduledAt whose Asia/Bangkok date equals marketDate; non-timed events omit scheduledAt or set it to null.",
         "Actual is null for pending, unavailable, and not_applicable events, and is a verified scalar for released or revised events.",
         "A report from a different Asia/Bangkok calendar day is marked stale and its events or danger windows are never presented as today's news.",
-        "The Backend scheduler suggests two guarded runs at 07:00 and 20:00 and enforces at most two runs per Bangkok calendar day."
+        "The Backend direct scheduler defaults to 00:00 and 12:00 Asia/Bangkok and enforces at most two runs per Bangkok calendar day."
       ]
     },
     "ea_development_report": {

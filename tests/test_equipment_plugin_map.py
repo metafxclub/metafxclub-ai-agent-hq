@@ -58,6 +58,30 @@ class EquipmentPluginMapTests(unittest.TestCase):
         self.assertEqual(set(equipment), EXPECTED_PROPS)
         for prop_id, profile in equipment.items():
             with self.subTest(prop_id=prop_id):
+                if profile.get("serviceMode") == "deterministic_backend_direct":
+                    self.assertEqual(prop_id, "left_signal_cube")
+                    self.assertIsNone(profile["ownerAgentId"])
+                    self.assertEqual(profile["allowedActionIds"], [])
+                    self.assertEqual(self.roles[prop_id]["allowedDashboardActions"], [])
+                    self.assertEqual(profile["schedule"]["actions"], [])
+                    self.assertEqual(profile["schedule"]["manualOrAgentHandoffActions"], [])
+                    self.assertEqual(
+                        profile["schedule"]["directBackendHandler"],
+                        "news_bias_direct_refresh",
+                    )
+                    self.assertEqual(
+                        profile["directEndpoints"],
+                        {
+                            "refresh": "/api/props/left_signal_cube/news/refresh",
+                            "schedule": "/api/props/left_signal_cube/news/schedule",
+                        },
+                    )
+                    self.assertTrue(profile["legacyActionDefinitionsOnly"])
+                    self.assertTrue(profile["actions"])
+                    for action in profile["actions"].values():
+                        self.assertTrue(action["retired"])
+                        self.assertEqual(action["rejection"], "direct_service_required")
+                    continue
                 self.assertIn(profile["ownerAgentId"], {
                     "codex_mcp_operator", "mission_archivist", "ea_developer",
                     "backtest_analyst", "vps_watch",
@@ -83,6 +107,13 @@ class EquipmentPluginMapTests(unittest.TestCase):
                 continue
             self.assertEqual(schedule["timezone"], "Asia/Bangkok")
             self.assertTrue(schedule["defaultTimes"])
+            if profile.get("serviceMode") == "deterministic_backend_direct":
+                self.assertEqual(schedule["actions"], [])
+                self.assertEqual(schedule["manualOrAgentHandoffActions"], [])
+                self.assertEqual(schedule["directBackendHandler"], "news_bias_direct_refresh")
+                self.assertTrue(schedule["defaultEnabled"])
+                self.assertEqual(schedule["defaultTimes"], ["00:00", "12:00"])
+                continue
             self.assertTrue(schedule["actions"])
             for action_id in schedule["actions"]:
                 action = profile["actions"][action_id]
