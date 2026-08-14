@@ -273,7 +273,7 @@ class MissionRadarAutoFrontendTests(unittest.TestCase):
         self.assertFalse(payload["stringValue"])
 
     def test_cache_version_is_mission_radar_v061(self) -> None:
-        self.assertIn("20260814-mission-radar-auto-v061", self.index)
+        self.assertIn("20260814-radar-contract-v062", self.index)
         self.assertNotIn("20260814-daily-news-direct-v060", self.index)
 
     def test_radar_uses_custom_rail_not_generic_mission_action_cards(self) -> None:

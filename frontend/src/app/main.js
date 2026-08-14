@@ -83,7 +83,7 @@ const POLLING_INSTANCE_ID = (() => {
   }
 })();
 const OFFICE_AUTONOMY_MS = 7800;
-const ROOM_CONTRACT_PATH = "/contracts/rooms/command-room.json?v=32";
+const ROOM_CONTRACT_PATH = "/contracts/rooms/command-room.json?v=33";
 const AGENT_CONTRACT_PATH = "/contracts/agents/agents.json?v=10";
 const EXPECTED_OFFICE_AGENT_COUNT = 10;
 const DEFAULT_FETCH_TIMEOUT_MS = 6000;

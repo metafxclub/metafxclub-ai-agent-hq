@@ -21,7 +21,7 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
         return self.main[start:end]
 
     def test_boot_contract_urls_resolve_from_bridge_root_not_frontend_directory(self):
-        self.assertIn('const ROOM_CONTRACT_PATH = "/contracts/rooms/command-room.json?v=32";', self.main)
+        self.assertIn('const ROOM_CONTRACT_PATH = "/contracts/rooms/command-room.json?v=33";', self.main)
         self.assertIn('const AGENT_CONTRACT_PATH = "/contracts/agents/agents.json?v=10";', self.main)
         self.assertNotIn('"./contracts/rooms/command-room.json', self.main)
         self.assertNotIn('"./contracts/agents/agents.json', self.main)

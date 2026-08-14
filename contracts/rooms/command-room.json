@@ -444,12 +444,12 @@
       "layer": "fx_nodes",
       "label": "Radar Website Tool",
       "status": "ready",
-      "summary": "ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะ แสดงวันนี้และย้อนหลัง 7 วัน พร้อมตรวจซ้ำในเครื่องและตั้งเวลาได้สูงสุด 2 รอบต่อวัน",
+      "summary": "ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะ แสดงวันนี้และย้อนหลัง 7 วัน พร้อมตรวจซ้ำในเครื่องและทำงานอัตโนมัติวันละครั้ง เวลา 09:00 น. ตามเวลาไทย",
       "metrics": {
         "Research": "Public Web Read-only",
         "Evidence": "URL Required",
         "Dedup": "Local Report Catalog",
-        "Scheduler": "Ready · Max 2/Day",
+        "Scheduler": "Ready · 09:00 Bangkok · Max 1/Day",
         "Google Sheet": "Config Only · Adapter Not Connected",
         "Screenshot": "Adapter Not Connected"
       },

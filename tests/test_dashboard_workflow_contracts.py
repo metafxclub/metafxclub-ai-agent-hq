@@ -100,6 +100,19 @@ class DashboardWorkflowContractTests(unittest.TestCase):
             expected_count = 3 if prop_id == "left_signal_cube" else 1 if prop_id == "right_status_crystals" else 4
             self.assertEqual(len(tab_ids), expected_count)
 
+    def test_radar_room_metadata_matches_the_once_daily_schedule(self) -> None:
+        radar = next(
+            item for item in self.room["props"]
+            if item.get("id") == "left_audit_crystals"
+        )
+        summary = str(radar.get("summary") or "")
+        scheduler = str((radar.get("metrics") or {}).get("Scheduler") or "")
+
+        self.assertIn("วันละครั้ง", summary)
+        self.assertIn("09:00", summary)
+        self.assertNotIn("2 รอบ", summary)
+        self.assertEqual(scheduler, "Ready · 09:00 Bangkok · Max 1/Day")
+
     def test_workflow_devices_open_on_main_work_and_only_legacy_devices_end_with_history(self) -> None:
         self.assertEqual(self.role_map["version"], "property-role-map-v002")
         for prop_id, tab_ids in WORKFLOW_DEVICE_TAB_IDS.items():
