@@ -1366,6 +1366,61 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
         self.assertFalse(audusd["assessmentComplete"])
         self.assertEqual(audusd["assessmentStatus"], "unavailable")
 
+    def test_informational_aud_jpy_news_does_not_reduce_seven_currency_coverage(self) -> None:
+        events = []
+        for event_id, currency, title in (
+            ("rba-board-appointment", "AUD", "Appointment to the Monetary Policy Board"),
+            ("boj-research-paper", "JPY", "Research Paper on productivity and wages"),
+        ):
+            event = self.event(
+                event_id=event_id,
+                title=title,
+                actual_status="not_applicable",
+            )
+            event.update({
+                "currencies": [currency],
+                "impact": "low",
+                "eventCategory": "informational_publication",
+                "actionableMacro": False,
+                "actual": None,
+                "forecast": None,
+                "publicationStatus": "published",
+                "pairImpacts": {},
+            })
+            events.append(event)
+
+        report = self.report(
+            "direct-seven-currency-informational",
+            updated_at="2026-08-14T10:37:50Z",
+            events=events,
+            source_status="partial_success",
+        )
+        report["workflowContext"]["actionId"] = "refresh_daily_market_news"
+        report["metrics"].update({
+            "coverageCurrencies": ["AUD", "CAD", "CHF", "EUR", "GBP", "JPY", "USD"],
+            "failedCurrencies": ["NZD"],
+            "pairBias": self.insufficient_pair_rows(),
+        })
+
+        now = datetime.fromisoformat("2026-08-14T18:00:00+07:00")
+        news = self.bridge._fx_news_read_model([report], now_local=now)
+        bias = self.bridge._fx_bias_read_model([report], now_local=now)
+
+        self.assertEqual(news["eventCount"], 2)
+        self.assertTrue(all(event["actionableMacro"] is False for event in news["events"]))
+        self.assertEqual(bias["assessedPairCount"], 21)
+        self.assertEqual(bias["noDirectEventPairCount"], 21)
+        self.assertEqual(bias["unavailablePairCount"], 7)
+        for pair in ("AUDUSD", "USDJPY"):
+            row = next(item for item in bias["pairs"] if item["pair"] == pair)
+            self.assertTrue(row["assessmentComplete"])
+            self.assertEqual(row["assessmentStatus"], "no_direct_event")
+            self.assertEqual(row["relevantEventCount"], 0)
+            self.assertEqual(row["relevantEvents"], [])
+        nzdusd = next(item for item in bias["pairs"] if item["pair"] == "NZDUSD")
+        self.assertFalse(nzdusd["assessmentComplete"])
+        self.assertEqual(nzdusd["assessmentStatus"], "unavailable")
+
     def test_current_direct_snapshot_excludes_legacy_ai_news_and_bias(self) -> None:
         direct = self.report(
             "direct-quiet",

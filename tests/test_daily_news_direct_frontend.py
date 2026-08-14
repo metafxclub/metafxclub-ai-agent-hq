@@ -129,7 +129,7 @@ class DailyNewsDirectFrontendTests(unittest.TestCase):
         for field in ("fxNewsActualDisplay(item)", "item.forecast", "item.previous", "item.sources"):
             self.assertIn(field, detail_modal)
 
-    def test_raw_partial_direct_snapshot_keeps_failed_currency_pairs_unavailable(self):
+    def test_partial_live_shape_keeps_informational_events_out_of_pair_relevance(self):
         pairs = "AUDCAD AUDCHF AUDJPY AUDNZD AUDUSD CADCHF CADJPY CHFJPY EURAUD EURCAD EURCHF EURGBP EURJPY EURNZD EURUSD GBPAUD GBPCAD GBPCHF GBPJPY GBPNZD GBPUSD NZDCAD NZDCHF NZDJPY NZDUSD USDCAD USDCHF USDJPY".split()
         helpers = (
             "workflowDomainObject", "workflowDomainArray", "workflowReportRows", "normalizeFxBiasValue",
@@ -149,19 +149,40 @@ class DailyNewsDirectFrontendTests(unittest.TestCase):
                 "currentDataAvailable": True,
                 "coverageCurrencies": ["AUD", "CAD", "CHF", "EUR", "GBP", "JPY", "USD"],
                 "failedCurrencies": ["NZD"],
-                "sourceLinks": [{"id": "official-aud", "url": "https://example.com/aud"}],
-                "events": [{
-                    "eventId": "aud-publication",
-                    "title": "RBA publication",
-                    "currencies": ["AUD"],
-                    "scheduledAt": "2026-08-14T02:00:00Z",
-                    "marketDate": "2026-08-14",
-                    "timeKind": "timed",
-                    "impact": "low",
-                    "publicationStatus": "published",
-                    "actualStatus": "not_applicable",
-                    "sourceRef": "official-aud",
-                }],
+                "sourceLinks": [
+                    {"id": "official-aud", "url": "https://example.com/aud"},
+                    {"id": "official-jpy", "url": "https://example.com/jpy"},
+                ],
+                "events": [
+                    {
+                        "eventId": "aud-publication",
+                        "title": "RBA informational publication",
+                        "currencies": ["AUD"],
+                        "scheduledAt": "2026-08-14T02:00:00Z",
+                        "marketDate": "2026-08-14",
+                        "timeKind": "timed",
+                        "impact": "low",
+                        "eventCategory": "informational_publication",
+                        "actionableMacro": False,
+                        "publicationStatus": "published",
+                        "actualStatus": "not_applicable",
+                        "sourceRef": "official-aud",
+                    },
+                    {
+                        "eventId": "jpy-publication",
+                        "title": "BOJ informational publication",
+                        "currencies": ["JPY"],
+                        "scheduledAt": "2026-08-14T07:00:00Z",
+                        "marketDate": "2026-08-14",
+                        "timeKind": "timed",
+                        "impact": "low",
+                        "eventCategory": "informational_publication",
+                        "actionableMacro": False,
+                        "publicationStatus": "published",
+                        "actualStatus": "not_applicable",
+                        "sourceRef": "official-jpy",
+                    },
+                ],
             },
             "fxBias": {
                 "marketDate": "2026-08-14",
@@ -170,13 +191,20 @@ class DailyNewsDirectFrontendTests(unittest.TestCase):
                 "currentDataAvailable": True,
                 "coverageCurrencies": ["AUD", "CAD", "CHF", "EUR", "GBP", "JPY", "USD"],
                 "failedCurrencies": ["NZD"],
-                "sourceLinks": [{"id": "official-aud", "url": "https://example.com/aud"}],
+                "sourceLinks": [
+                    {"id": "official-aud", "url": "https://example.com/aud"},
+                    {"id": "official-jpy", "url": "https://example.com/jpy"},
+                ],
                 "pairBias": [{
                     "pair": pair,
                     "short": {"bias": "INSUFFICIENT_DATA", "sourceRefs": []},
                     "medium": {"bias": "INSUFFICIENT_DATA", "sourceRefs": []},
                     "long": {"bias": "INSUFFICIENT_DATA", "sourceRefs": []},
                     "verified": False,
+                    "assessmentStatus": "unavailable" if "NZD" in pair else "no_direct_event",
+                    "assessmentComplete": False if "NZD" in pair else True,
+                    "relevantEventCount": 0,
+                    "relevantEvents": [],
                 } for pair in pairs],
             },
         }
@@ -188,7 +216,8 @@ class DailyNewsDirectFrontendTests(unittest.TestCase):
             f"const fixture = {json.dumps(fixture)};",
             "const domain = normalizeFxNewsBiasDomain(fixture, {});",
             "const failed = domain.pairBias.filter((row) => row.pair.includes('NZD'));",
-            "process.stdout.write(JSON.stringify({calendar:domain.calendar,news:domain.news,summary:domain.pairAssessmentSummary,failed,allBiases:domain.pairBias.map((row)=>row.bias)}));",
+            "const covered = domain.pairBias.filter((row) => !row.pair.includes('NZD'));",
+            "process.stdout.write(JSON.stringify({calendar:domain.calendar,news:domain.news,summary:domain.pairAssessmentSummary,failed,covered,allBiases:domain.pairBias.map((row)=>row.bias)}));",
         ])
         result = self.run_node(source)
         self.assertEqual(result["calendar"]["date"], "2026-08-14")
@@ -197,6 +226,9 @@ class DailyNewsDirectFrontendTests(unittest.TestCase):
         self.assertEqual(result["summary"]["unavailablePairCount"], 7)
         self.assertTrue(all(not row["assessmentComplete"] for row in result["failed"]))
         self.assertTrue(all(row["assessmentStatus"] == "unavailable" for row in result["failed"]))
+        self.assertTrue(all(row["assessmentComplete"] for row in result["covered"]))
+        self.assertTrue(all(row["assessmentStatus"] == "no_direct_event" for row in result["covered"]))
+        self.assertTrue(all(row["relevantEventCount"] == 0 for row in result["covered"]))
         self.assertTrue(all(value == "unavailable" for value in result["allBiases"]))
 
     def test_history_prefers_one_canonical_row_per_market_date_over_legacy_reports(self):

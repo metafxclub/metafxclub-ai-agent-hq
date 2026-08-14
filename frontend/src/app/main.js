@@ -15765,9 +15765,9 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
       const verifiedEvent = verifiedPairEventsById.get(eventId);
       if (verifiedEvent && !orderedVerifiedEvents.includes(verifiedEvent)) orderedVerifiedEvents.push(verifiedEvent);
     });
-    verifiedPairEvents.forEach((event) => {
-      if (!orderedVerifiedEvents.includes(event)) orderedVerifiedEvents.push(event);
-    });
+    // Pair/event relevance is Backend-owned.  Currency overlap alone cannot
+    // promote informational or non-actionable publications into a pair's
+    // assessment; only explicit relevantEvent IDs may be displayed here.
     const relevantEvents = fxAssessmentIsCurrent
       ? orderedVerifiedEvents.slice(0, 4).map((event, index) => normalizeFxPairAssessmentEvent(event, index))
       : [];
