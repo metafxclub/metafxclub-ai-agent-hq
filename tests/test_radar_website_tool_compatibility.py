@@ -55,9 +55,23 @@ class RadarWebsiteToolCompatibilitySnapshotTests(unittest.TestCase):
         self.assertEqual(entries["containerField"], "entries")
         self.assertEqual(entries["toolKinds"], ["indicator", "ea", "tool"])
         self.assertEqual(
+            entries["platformStatuses"],
+            ["mt4", "mt5", "tradingview", "multi_platform", "unknown"],
+        )
+        self.assertEqual(
+            entries["verificationStatuses"],
+            ["unverified", "partially_verified", "verified", "insufficient_evidence"],
+        )
+        self.assertEqual(
+            entries["availabilityStatuses"],
+            ["public", "commercial", "open_source", "unknown"],
+        )
+        self.assertEqual(
             entries["eaReadinessStatuses"],
             ["ready", "needs_clarification", "not_ea_ready"],
         )
+        self.assertTrue(entries["backendCanonicalizesOnlyAllowlistedAliases"])
+        self.assertTrue(entries["enumNormalizationIsAuditOnly"])
         self.assertTrue({
             "sourceTitle",
             "sourceUrl",
@@ -183,6 +197,16 @@ class RadarWebsiteToolProductionCompatibilityTests(unittest.TestCase):
             self.assertEqual(set(action["entryContract"]["workerRequiredFields"]), worker_required)
             self.assertEqual(set(action["entryContract"]["backendComputedFields"]), backend_fields)
             self.assertEqual(required, worker_required | backend_fields)
+            self.assertEqual(action["entryContract"]["toolKindValues"], self.compatibility["entryContract"]["toolKinds"])
+            self.assertEqual(action["entryContract"]["platformValues"], self.compatibility["entryContract"]["platformStatuses"])
+            self.assertEqual(action["entryContract"]["verificationStatusValues"], self.compatibility["entryContract"]["verificationStatuses"])
+            self.assertEqual(action["entryContract"]["availabilityValues"], self.compatibility["entryContract"]["availabilityStatuses"])
+            self.assertEqual(action["entryContract"]["eaReadinessValues"], self.compatibility["entryContract"]["eaReadinessStatuses"])
+            self.assertEqual(action["entryContract"]["toolKindValues"], list(self.bridge.RADAR_TOOL_KIND_VALUES))
+            self.assertEqual(action["entryContract"]["platformValues"], list(self.bridge.RADAR_PLATFORM_VALUES))
+            self.assertEqual(action["entryContract"]["verificationStatusValues"], list(self.bridge.RADAR_VERIFICATION_STATUS_VALUES))
+            self.assertEqual(action["entryContract"]["availabilityValues"], list(self.bridge.RADAR_AVAILABILITY_STATUS_VALUES))
+            self.assertEqual(action["entryContract"]["eaReadinessValues"], list(self.bridge.RADAR_EA_READINESS_STATUS_VALUES))
         with self.subTest(contract="plugin_evidence_required"):
             self.assertTrue({
                 "source_url",

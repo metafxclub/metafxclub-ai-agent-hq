@@ -250,6 +250,105 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
         )
         self.assertLessEqual(backend["resultEnvelopeChars"], 20000)
 
+    def test_sanitized_live_jsonl_alias_result_passes_runner_then_backend(self) -> None:
+        observed = [
+            ("Indicator to Ea Robot Converter", "ea", "MetaTrader 4", "EA converter", "3.2", "public_page_free_download", "needs_clarification", "https://www.mql5.com/en/market/product/119696"),
+            ("Strategy Compare", "tool", "MetaTrader 4/5", "EA analytics", "1.9", "public_page_paid", "not_ea_ready", "https://www.mql5.com/en/market/product/190477"),
+            ("Universal Indicator EA for Your Indicator", "ea", "MetaTrader 4", "EA converter", "12.6", "public_page_paid", "needs_clarification", "https://www.mql5.com/en/market/product/48476"),
+            ("Trading System v2.1", "indicator", "TradingView", "Confluence indicator", "unknown", "public_page_open_source", "not_ea_ready", "https://www.tradingview.com/script/A0nMXq82-Trading-System-v2-1/"),
+            ("Vibe-Trading", "tool", "Python/GitHub", "Research backtesting", "unknown", "public_repository", "not_ea_ready", "https://github.com/HKUDS/Vibe-Trading"),
+            ("Freqtrade", "tool", "Python/GitHub", "Crypto trading bot", "unknown", "public_repository", "not_ea_ready", "https://github.com/freqtrade/freqtrade"),
+        ]
+        entries = []
+        evidence = []
+        for name, kind, platform, category, version, availability, readiness, url in observed:
+            entries.append({
+                "toolName": name,
+                "toolKind": kind,
+                "platform": platform,
+                "category": category,
+                "version": version,
+                "summaryTh": "รายการจากหน้าเว็บสาธารณะที่ Web Search ตรวจพบในรอบ Radar จริง",
+                "sourceTitle": name,
+                "sourceUrl": url,
+                "publishedAt": None,
+                "checkedAt": "2026-08-14T19:09:39+07:00",
+                "verificationStatus": "verified_public_source",
+                "availability": availability,
+                "eaReadiness": readiness,
+                "missingRules": ["ยังไม่ได้ compile หรือ backtest"],
+                "sourceLimitations": ["ตรวจเฉพาะข้อมูลจากหน้าสาธารณะ"],
+                "screenshot": {
+                    "available": False,
+                    "status": "not_available",
+                    "attachmentId": None,
+                    "artifactRef": None,
+                },
+            })
+            evidence.append({"label": name, "url": url, "note": "public source"})
+
+        payload = {
+            "status": "completed",
+            "summary": "Sanitized exact-shape replay of the durable live Radar JSONL result.",
+            "findings": ["six public rows"],
+            "nextSteps": [],
+            "evidence": evidence,
+            "blockedCapability": "",
+            "contractFields": [{
+                "field": "entries",
+                "value": self.compact(entries),
+            }],
+            "evidenceKinds": [
+                "source_url",
+                "source_title",
+                "checked_at",
+                "ea_readiness",
+                "public_availability_status",
+            ],
+        }
+        parsed = self.runner.parse_work_result(
+            self.compact(payload),
+            20000,
+            "radar_website_tool",
+        )
+        procedure = self.bridge.equipment_action_profile(
+            "left_audit_crystals",
+            "discover_new_indicators",
+        )
+        mission = {
+            "id": "mission-live-radar-jsonl-replay",
+            "budget": {"outputLimitChars": 20000},
+            "workflowContext": {
+                "schemaVersion": "dashboard-workflow-lineage-v1",
+                "propId": "left_audit_crystals",
+                "actionId": "discover_new_indicators",
+                "coordinationMode": self.bridge.DASHBOARD_WORKFLOW_COORDINATION_MODE,
+                "source": None,
+                "agentTransfer": None,
+                "inputs": {"maxItems": 6},
+                "inputDigest": "0" * 64,
+                "submittedAt": "2026-08-14T12:09:06Z",
+                "triggerSource": "backend",
+                "pluginProcedure": procedure,
+            },
+        }
+        with mock.patch.object(self.bridge, "_radar_existing_catalog_fingerprints", return_value=set()):
+            receipt = self.bridge.validate_dashboard_workflow_output_contract(mission, parsed)
+        normalized = self.bridge.dashboard_workflow_output_metrics(receipt)["entries"]
+        self.assertTrue(receipt["valid"], receipt)
+        self.assertEqual(len(normalized), 6)
+        self.assertEqual(receipt["missingEvidenceKinds"], [])
+        self.assertEqual(receipt["entryErrors"], [])
+        self.assertEqual(
+            [entry["platform"] for entry in normalized],
+            ["mt4", "multi_platform", "mt4", "tradingview", "unknown", "unknown"],
+        )
+        self.assertEqual(
+            [entry["availability"] for entry in normalized],
+            ["public", "commercial", "commercial", "open_source", "public", "public"],
+        )
+        self.assertEqual(len(receipt["enumNormalizations"]), 17)
+
     def test_runner_command_enforces_read_only_without_add_dir_for_radar(self) -> None:
         commands: list[list[str]] = []
 

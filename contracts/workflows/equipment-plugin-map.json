@@ -303,6 +303,11 @@
             "maximumItemsPerRun": 6,
             "workerRequiredFields": ["toolName", "toolKind", "platform", "category", "version", "summaryTh", "sourceTitle", "sourceUrl", "publishedAt", "checkedAt", "verificationStatus", "availability", "eaReadiness", "missingRules", "sourceLimitations", "screenshot"],
             "backendComputedFields": ["recordId", "duplicateFingerprint", "duplicateStatus", "duplicateScope"],
+            "toolKindValues": ["indicator", "ea", "tool"],
+            "platformValues": ["mt4", "mt5", "tradingview", "multi_platform", "unknown"],
+            "verificationStatusValues": ["unverified", "partially_verified", "verified", "insufficient_evidence"],
+            "availabilityValues": ["public", "commercial", "open_source", "unknown"],
+            "eaReadinessValues": ["ready", "needs_clarification", "not_ea_ready"],
             "maximumContractValueCharacters": 12000,
             "fieldLimits": {"toolName": 80, "category": 40, "version": 32, "summaryTh": 240, "sourceTitle": 120, "sourceUrl": 320, "missingRulesMaximumItems": 2, "missingRuleCharacters": 80, "sourceLimitationsMaximumItems": 2, "sourceLimitationCharacters": 120}
           },

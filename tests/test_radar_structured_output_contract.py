@@ -188,6 +188,9 @@ class RadarStructuredOutputContractTests(unittest.TestCase):
             "private_url": {"sourceUrl": "http://127.0.0.1/tool"},
             "evidence_mismatch": {"sourceUrl": "https://example.com/not-cited"},
             "invalid_enum": {"toolKind": "robot"},
+            "unknown_platform_alias": {"platform": "MetaTrader 6"},
+            "unknown_verification_alias": {"verificationStatus": "verified_official"},
+            "unknown_availability_alias": {"availability": "public_page_trial"},
             "scalar_limitations": {"sourceLimitations": "not an array"},
         }
         for name, updates in cases.items():
@@ -202,6 +205,86 @@ class RadarStructuredOutputContractTests(unittest.TestCase):
                 contract = self.validate([entry], evidence_urls=evidence_urls)
                 self.assertFalse(contract["valid"])
                 self.assertTrue(contract["entryErrors"])
+
+    def test_exact_live_worker_enum_aliases_canonicalize_before_persistence(self) -> None:
+        cases = [
+            (
+                "MetaTrader 4",
+                "public_page_free_download",
+                "mt4",
+                "public",
+            ),
+            (
+                "MetaTrader 4/5",
+                "public_page_paid",
+                "multi_platform",
+                "commercial",
+            ),
+            (
+                "TradingView",
+                "public_page_open_source",
+                "tradingview",
+                "open_source",
+            ),
+            (
+                "Python/GitHub",
+                "public_repository",
+                "unknown",
+                "public",
+            ),
+        ]
+        entries = []
+        for index, (platform, availability, _expected_platform, _expected_availability) in enumerate(
+            cases,
+            start=1,
+        ):
+            entry = self.entry(
+                name=f"Live Radar Tool {index}",
+                source_url=f"https://example.com/live-radar/{index}",
+            )
+            entry.update({
+                "platform": platform,
+                "verificationStatus": "verified_public_source",
+                "availability": availability,
+            })
+            entries.append(entry)
+
+        contract = self.validate(entries)
+        self.assertTrue(contract["valid"], contract)
+        self.assertEqual(contract["providedFields"], ["entries"])
+        self.assertEqual(contract["missingEvidenceKinds"], [])
+        normalized = self.bridge.dashboard_workflow_output_metrics(contract)["entries"]
+        self.assertEqual(
+            [entry["platform"] for entry in normalized],
+            [case[2] for case in cases],
+        )
+        self.assertEqual(
+            [entry["availability"] for entry in normalized],
+            [case[3] for case in cases],
+        )
+        self.assertEqual(
+            {entry["verificationStatus"] for entry in normalized},
+            {"verified"},
+        )
+        self.assertEqual(len(contract["enumNormalizations"]), 11)
+        self.assertIn(
+            {
+                "entryIndex": 1,
+                "field": "platform",
+                "from": "metatrader 4",
+                "to": "mt4",
+            },
+            contract["enumNormalizations"],
+        )
+        self.assertIn(
+            {
+                "entryIndex": 4,
+                "field": "availability",
+                "from": "public_repository",
+                "to": "public",
+            },
+            contract["enumNormalizations"],
+        )
 
     def test_future_checked_at_is_rejected_before_persistence(self) -> None:
         entry = self.entry()
@@ -294,6 +377,13 @@ class RadarStructuredOutputContractTests(unittest.TestCase):
         self.assertIn("เพียงหนึ่งรายการชื่อ entries", prompt)
         self.assertIn("Backend จะคำนวณ", prompt)
         self.assertIn("ห้ามนำภาพของรายการหนึ่งไปใช้กับอีกรายการ", prompt)
+        self.assertIn("platform=[mt4,mt5,tradingview,multi_platform,unknown]", prompt)
+        self.assertIn(
+            "verificationStatus=[unverified,partially_verified,verified,insufficient_evidence]",
+            prompt,
+        )
+        self.assertIn("availability=[public,commercial,open_source,unknown]", prompt)
+        self.assertIn("Python/GitHub ให้เขียน platform=unknown", prompt)
 
 
 if __name__ == "__main__":

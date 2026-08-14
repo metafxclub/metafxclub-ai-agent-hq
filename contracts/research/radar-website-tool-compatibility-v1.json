@@ -95,17 +95,32 @@
       "duplicateStatus",
       "duplicateScope"
     ],
+    "platformStatuses": [
+      "mt4",
+      "mt5",
+      "tradingview",
+      "multi_platform",
+      "unknown"
+    ],
     "verificationStatuses": [
       "unverified",
       "partially_verified",
       "verified",
       "insufficient_evidence"
     ],
+    "availabilityStatuses": [
+      "public",
+      "commercial",
+      "open_source",
+      "unknown"
+    ],
     "eaReadinessStatuses": [
       "ready",
       "needs_clarification",
       "not_ea_ready"
     ],
+    "backendCanonicalizesOnlyAllowlistedAliases": true,
+    "enumNormalizationIsAuditOnly": true,
     "unknownValuesMustRemainExplicit": true
   },
   "sourceEvidence": {

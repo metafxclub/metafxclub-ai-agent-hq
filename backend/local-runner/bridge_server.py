@@ -3593,6 +3593,60 @@ RADAR_ENTRY_BACKEND_FIELDS = frozenset({
     "duplicateStatus",
     "duplicateScope",
 })
+RADAR_TOOL_KIND_VALUES = ("indicator", "ea", "tool")
+RADAR_PLATFORM_VALUES = (
+    "mt4",
+    "mt5",
+    "tradingview",
+    "multi_platform",
+    "unknown",
+)
+RADAR_VERIFICATION_STATUS_VALUES = (
+    "unverified",
+    "partially_verified",
+    "verified",
+    "insufficient_evidence",
+)
+RADAR_AVAILABILITY_STATUS_VALUES = (
+    "public",
+    "commercial",
+    "open_source",
+    "unknown",
+)
+RADAR_EA_READINESS_STATUS_VALUES = (
+    "ready",
+    "needs_clarification",
+    "not_ea_ready",
+)
+RADAR_ALLOWED_TOOL_KINDS = frozenset(RADAR_TOOL_KIND_VALUES)
+RADAR_ALLOWED_PLATFORMS = frozenset(RADAR_PLATFORM_VALUES)
+RADAR_ALLOWED_VERIFICATION_STATUSES = frozenset(RADAR_VERIFICATION_STATUS_VALUES)
+RADAR_ALLOWED_AVAILABILITY_STATUSES = frozenset(RADAR_AVAILABILITY_STATUS_VALUES)
+RADAR_ALLOWED_EA_READINESS_STATUSES = frozenset(RADAR_EA_READINESS_STATUS_VALUES)
+# Keep compatibility deliberately narrow.  These are exact labels observed in
+# a durable, source-backed Radar result.  Unknown prose still fails closed; the
+# Backend only translates aliases whose canonical meaning is unambiguous.
+RADAR_PLATFORM_ALIASES = {
+    "metatrader 4": "mt4",
+    "metatrader 5": "mt5",
+    "metatrader 4/5": "multi_platform",
+    "python/github": "unknown",
+}
+RADAR_VERIFICATION_STATUS_ALIASES = {
+    "verified_public_source": "verified",
+}
+RADAR_AVAILABILITY_STATUS_ALIASES = {
+    "public_page_free_download": "public",
+    "public_page_paid": "commercial",
+    "public_page_open_source": "open_source",
+    # A public repository does not by itself prove an open-source licence.
+    "public_repository": "public",
+}
+
+
+def _radar_canonical_enum(value: object, aliases: dict[str, str]) -> str:
+    normalized = " ".join(str(value or "").split()).strip().lower()
+    return aliases.get(normalized, normalized)
 
 
 def _contract_decoded_value(value: str) -> object:
@@ -3810,12 +3864,12 @@ def _normalize_radar_contract_entries(
     result_row: dict,
     evidence_rows: list[dict],
     value: object,
-) -> tuple[list[dict] | None, list[str]]:
+) -> tuple[list[dict] | None, list[str], list[dict]]:
     if not isinstance(value, list):
-        return None, ["entries_not_array"]
+        return None, ["entries_not_array"], []
     max_items = _radar_contract_max_items(mission_row)
     if not RADAR_ENTRY_MIN_ITEMS <= len(value) <= max_items:
-        return None, ["entries_count_out_of_range"]
+        return None, ["entries_count_out_of_range"], []
     evidence_urls = {
         normalized
         for row in evidence_rows
@@ -3825,18 +3879,8 @@ def _normalize_radar_contract_entries(
     batch_fingerprints: set[str] = set()
     normalized_entries: list[dict] = []
     errors: list[str] = []
+    enum_normalizations: list[dict] = []
     allowed_fields = RADAR_ENTRY_WORKER_REQUIRED_FIELDS | RADAR_ENTRY_BACKEND_FIELDS
-    allowed_tool_kinds = {"indicator", "ea", "tool"}
-    allowed_platforms = {"mt4", "mt5", "tradingview", "multi_platform", "unknown"}
-    allowed_verification = {
-        "unverified",
-        "partially_verified",
-        "verified",
-        "insufficient_evidence",
-    }
-    allowed_availability = {"public", "commercial", "open_source", "unknown"}
-    allowed_readiness = {"ready", "needs_clarification", "not_ea_ready"}
-
     for index, raw_entry in enumerate(value):
         prefix = f"entry_{index + 1}"
         if not isinstance(raw_entry, dict):
@@ -3867,17 +3911,46 @@ def _normalize_radar_contract_entries(
         ):
             errors.append(f"{prefix}_invalid_text")
             continue
-        tool_kind = str(raw_entry.get("toolKind") or "").strip().lower()
-        platform = str(raw_entry.get("platform") or "").strip().lower()
-        verification_status = str(raw_entry.get("verificationStatus") or "").strip().lower()
-        availability = str(raw_entry.get("availability") or "").strip().lower()
-        ea_readiness = str(raw_entry.get("eaReadiness") or "").strip().lower()
+        tool_kind = _radar_canonical_enum(raw_entry.get("toolKind"), {})
+        platform = _radar_canonical_enum(raw_entry.get("platform"), RADAR_PLATFORM_ALIASES)
+        verification_status = _radar_canonical_enum(
+            raw_entry.get("verificationStatus"),
+            RADAR_VERIFICATION_STATUS_ALIASES,
+        )
+        availability = _radar_canonical_enum(
+            raw_entry.get("availability"),
+            RADAR_AVAILABILITY_STATUS_ALIASES,
+        )
+        ea_readiness = _radar_canonical_enum(raw_entry.get("eaReadiness"), {})
+        for field, raw_value, canonical_value, aliases in (
+            ("platform", raw_entry.get("platform"), platform, RADAR_PLATFORM_ALIASES),
+            (
+                "verificationStatus",
+                raw_entry.get("verificationStatus"),
+                verification_status,
+                RADAR_VERIFICATION_STATUS_ALIASES,
+            ),
+            (
+                "availability",
+                raw_entry.get("availability"),
+                availability,
+                RADAR_AVAILABILITY_STATUS_ALIASES,
+            ),
+        ):
+            normalized_raw = " ".join(str(raw_value or "").split()).strip().lower()
+            if normalized_raw in aliases and normalized_raw != canonical_value:
+                enum_normalizations.append({
+                    "entryIndex": index + 1,
+                    "field": field,
+                    "from": normalized_raw,
+                    "to": canonical_value,
+                })
         if (
-            tool_kind not in allowed_tool_kinds
-            or platform not in allowed_platforms
-            or verification_status not in allowed_verification
-            or availability not in allowed_availability
-            or ea_readiness not in allowed_readiness
+            tool_kind not in RADAR_ALLOWED_TOOL_KINDS
+            or platform not in RADAR_ALLOWED_PLATFORMS
+            or verification_status not in RADAR_ALLOWED_VERIFICATION_STATUSES
+            or availability not in RADAR_ALLOWED_AVAILABILITY_STATUSES
+            or ea_readiness not in RADAR_ALLOWED_EA_READINESS_STATUSES
         ):
             errors.append(f"{prefix}_invalid_enum")
             continue
@@ -3963,8 +4036,8 @@ def _normalize_radar_contract_entries(
             "screenshot": screenshot,
         })
     if errors or len(normalized_entries) != len(value):
-        return None, errors or ["entries_invalid"]
-    return normalized_entries, []
+        return None, errors or ["entries_invalid"], enum_normalizations
+    return normalized_entries, [], enum_normalizations
 
 
 def _contract_has_existing_project_relative_path(
@@ -4522,8 +4595,9 @@ def validate_dashboard_workflow_output_contract(mission: object, result: object)
             provided_fields[field] = value
     evidence_rows = _unique_public_evidence_rows(result_row.get("evidence"))
     entry_errors: list[str] = []
+    enum_normalizations: list[dict] = []
     if procedure.get("pluginSkillId") == RADAR_WORKFLOW_PROCEDURE_ID:
-        normalized_entries, entry_errors = _normalize_radar_contract_entries(
+        normalized_entries, entry_errors, enum_normalizations = _normalize_radar_contract_entries(
             mission_row,
             result_row,
             evidence_rows,
@@ -4623,6 +4697,7 @@ def validate_dashboard_workflow_output_contract(mission: object, result: object)
         "providedEvidenceKinds": provided_evidence,
         "missingEvidenceKinds": missing_evidence,
         "entryErrors": entry_errors,
+        "enumNormalizations": enum_normalizations,
         "oversizedFields": oversized_fields,
         "contractValueChars": contract_value_chars,
         "contractValueLimitChars": aggregate_contract_limit,
@@ -11126,7 +11201,14 @@ def _workflow_prompt(
             "ห้ามสร้าง recordId, duplicateFingerprint, duplicateStatus หรือ duplicateScope เพราะ Backend จะคำนวณและตัดสินสถานะเหล่านี้เอง. "
             "screenshot ต้องเป็น JSON object ที่ available=false, status=not_available, attachmentId=null และ artifactRef=null "
             "เว้นแต่มีไฟล์ภาพจริงใน result.artifacts.final และ artifactRef ของรายการตรงกับไฟล์นั้นทุกตัวอักษร; ห้ามนำภาพของรายการหนึ่งไปใช้กับอีกรายการ. "
-            "toolKind ใช้ได้เฉพาะ indicator, ea หรือ tool; eaReadiness ใช้ได้เฉพาะ ready, needs_clarification หรือ not_ea_ready; "
+            "ค่า enum ต้องเป็นรหัส JSON ตามนี้เท่านั้น ห้ามใช้ชื่อเต็มหรือสร้าง alias เอง: "
+            f"toolKind=[{','.join(RADAR_TOOL_KIND_VALUES)}]; platform=[{','.join(RADAR_PLATFORM_VALUES)}]; "
+            f"verificationStatus=[{','.join(RADAR_VERIFICATION_STATUS_VALUES)}]; "
+            f"availability=[{','.join(RADAR_AVAILABILITY_STATUS_VALUES)}]; "
+            f"eaReadiness=[{','.join(RADAR_EA_READINESS_STATUS_VALUES)}]. "
+            "ตัวอย่างการแปลง: MetaTrader 4 ให้เขียน mt4, MetaTrader 4/5 ให้เขียน multi_platform, "
+            "หน้าสาธารณะที่ตรวจหลักฐานแล้วให้เขียน verificationStatus=verified, Marketplace แบบเสียเงินให้เขียน availability=commercial, "
+            "repository สาธารณะที่ไม่ยืนยัน licence ให้เขียน availability=public และแพลตฟอร์ม Python/GitHub ให้เขียน platform=unknown. "
             "missingRules และ sourceLimitations ต้องเป็น JSON array ของข้อความเสมอ. "
             "ใช้ BACKEND_LOCAL_DEDUP_CATALOG เพื่อหลีกเลี่ยงผลซ้ำได้ แต่ห้ามถือว่าตนมีสิทธิ์ยืนยันสถานะซ้ำ. "
             "ห้าม Sign in กรอกฟอร์ม ดาวน์โหลด หรือติดตั้งไฟล์. Google Sheets Adapter ยังไม่เชื่อม จึงห้ามอ้างว่าอ่าน เทียบ หรือเขียน Sheet แล้ว; "
