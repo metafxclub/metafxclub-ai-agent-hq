@@ -439,11 +439,13 @@ class DashboardWorkflowContractTests(unittest.TestCase):
                 "toolId": "save_discovery_schedule",
                 "scheduled": ["discover_trading_systems"],
                 "manual": ["discover_ea_updates"],
+                "defaultEnabled": False,
             },
             "left_audit_crystals": {
                 "toolId": "save_indicator_scout_schedule",
                 "scheduled": ["discover_new_indicators"],
                 "manual": [],
+                "defaultEnabled": True,
             },
         }
         tools = {
@@ -461,7 +463,10 @@ class DashboardWorkflowContractTests(unittest.TestCase):
             )
             tool = tools[spec["toolId"]]
 
-            self.assertFalse(role_workflow["schedule"]["defaultEnabled"])
+            self.assertEqual(
+                role_workflow["schedule"]["defaultEnabled"],
+                spec["defaultEnabled"],
+            )
             self.assertEqual(
                 role_workflow["schedule"]["recurringSchedulerAdapterStatus"],
                 "implemented_guarded_read_only",
@@ -621,8 +626,8 @@ class DashboardWorkflowContractTests(unittest.TestCase):
         self.assertEqual(role["functionName"], "Radar Website Tool")
         self.assertEqual(room_prop["label"], "Radar Website Tool")
         self.assertEqual(connection["moduleNameTh"], "Radar Website Tool")
-        self.assertEqual(plugin["schedule"]["maximumRunsPerDay"], 2)
-        self.assertEqual(connection["operation"]["scheduleHardMaximumRunsPerDay"], 2)
+        self.assertEqual(plugin["schedule"]["maximumRunsPerDay"], 1)
+        self.assertEqual(connection["operation"]["scheduleHardMaximumRunsPerDay"], 1)
         self.assertEqual(role["workflow"]["readModel"]["historyWindowDays"], 7)
         self.assertEqual(report["readModel"]["primaryViews"], ["today", "history_7_days"])
         self.assertFalse(report["googleSheet"]["privateSheetDefaultIncluded"])

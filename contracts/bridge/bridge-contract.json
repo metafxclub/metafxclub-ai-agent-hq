@@ -71,8 +71,6 @@
     "GET /api/reports/{reportId}/attachments/{attachmentId}": "Stream one allowlisted PNG, JPEG, or WebP report image through a same-origin opaque attachment id. Local paths and unsupported files are never returned."
   },
   "approval_required_actions": [
-    "codex_cli_task",
-    "codex_web_research",
     "mcp_tool_run",
     "live_trading",
     "send_telegram",
@@ -83,6 +81,12 @@
     "production_deploy",
     "spawn_worker"
   ],
+  "backend_auto_safe_actions": {
+    "tools": ["codex_cli_task", "codex_web_research"],
+    "conditions": ["bounded internal or public read-only scope", "validated workflow lineage and inputs", "no irreversible external effect", "risk at or below medium"],
+    "authorization": {"mode": "backend_auto_safe", "approvalRequired": false, "singleUse": true, "durableAcrossRestart": true, "expires": false, "payloadDigestIncludesWorkflowContext": true},
+    "highRiskOverride": "explicit human approval remains mandatory"
+  },
   "static_serving": {
     "allowed": ["/", "/index.html", "/frontend/*", "/contracts/*"],
     "denied": ["/data/*", "/backend/*", "/runner/*", "/scripts/*", "/assets-source/*", "/docs/*"]

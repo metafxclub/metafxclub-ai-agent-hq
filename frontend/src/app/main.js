@@ -95,7 +95,7 @@ const NAVIGATION_MASK_LOAD_TIMEOUT_MS = 20000;
 const STATUS_LABELS = {
   queued: "รอเริ่มงาน",
   running: "กำลังทำงาน",
-  waiting_approval: "รออนุมัติ",
+  waiting_approval: "ติดขัด",
   blocked: "ติดขัด",
   completed: "เสร็จแล้ว",
   failed: "ไม่สำเร็จ",
@@ -492,6 +492,9 @@ const WORKFLOW_DASHBOARD_SETTING_ACTION_IDS = new Set([
 
 const INDICATOR_SCOUT_PROP_ID = "left_audit_crystals";
 const INDICATOR_SCOUT_PRESENTATION_TAB_IDS = Object.freeze(["discoveries", "archive"]);
+const INDICATOR_SCOUT_DEFAULT_TIME = "09:00";
+const INDICATOR_SCOUT_TIMEZONE = "Asia/Bangkok";
+const INDICATOR_SCOUT_WORKFLOW_ENDPOINT = "/api/props/left_audit_crystals/workflow/actions";
 const INDICATOR_SCOUT_RAIL_ACTION_IDS = new Set([
   "discover_new_indicators",
   "save_indicator_scout_schedule",
@@ -872,14 +875,14 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
         actionIds: [],
       },
       { id: "schedule", labelTh: "รอบค้นหารายวัน", descriptionTh: "ตั้งรอบค้นหา Indicator แบบอ่านอย่างเดียว พร้อมดูครั้งล่าสุด รอบถัดไป และสาเหตุที่ระบบรอ", actionIds: ["save_indicator_scout_schedule"] },
-      { id: "archive", labelTh: "คลังย้อนหลัง", descriptionTh: "ดู Mission และรายงาน Indicator ที่เคยส่งกลับมาที่อุปกรณ์นี้", actionIds: [] },
+      { id: "archive", labelTh: "คลังย้อนหลัง", descriptionTh: "ดูผลและรายงาน Indicator ที่ Backend บันทึกไว้ย้อนหลัง", actionIds: [] },
     ],
     actions: [
       {
         id: "discover_new_indicators",
         tabId: "discoveries",
         labelTh: "ค้นหา Indicator, EA และ Tool ใหม่",
-        descriptionTh: "สร้าง Mission ให้ Radar ค้นเว็บไซต์สาธารณะแบบอ่านอย่างเดียว พร้อม URL เวลาไทย และการตรวจรายการซ้ำ",
+        descriptionTh: "ให้ Radar ค้นเว็บไซต์สาธารณะแบบอ่านอย่างเดียว พร้อม URL เวลาไทย และการตรวจรายการซ้ำ",
         availability: { status: "configuration_required" },
         formFields: [
           { id: "query", labelTh: "หัวข้อ Indicator, EA หรือ Tool ที่สนใจ", type: "textarea", required: true },
@@ -891,12 +894,11 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
         id: "save_indicator_scout_schedule",
         tabId: "schedule",
         labelTh: "ตั้งเวลาทำงานของ Radar",
-        descriptionTh: "เปิดหรือปิด Local Scheduler สำหรับค้นหา Indicator, EA และ Tool แบบอ่านอย่างเดียว โดยทุกครั้งต้องมี Mission, Audit, URL และ Report",
+        descriptionTh: "เปิดหรือปิด Local Scheduler สำหรับค้นหา Indicator, EA และ Tool แบบอ่านอย่างเดียววันละหนึ่งครั้ง พร้อม Audit, URL และ Report",
         availability: { status: "configuration_required" },
         formFields: [
           { id: "enabled", labelTh: "เปิดรอบค้นหาอัตโนมัติ", type: "checkbox", required: false },
-          { id: "times", labelTh: "เวลาที่ต้องการ เช่น 08:00, 18:00", type: "list", required: true },
-          { id: "timezone", labelTh: "เขตเวลา", type: "select", required: true, options: ["Asia/Bangkok", "UTC"] },
+          { id: "times", labelTh: "เวลาไทยที่ต้องการ เช่น 09:00", type: "list", required: true },
         ],
       },
     ],
@@ -4308,7 +4310,6 @@ function renderChatLog(subject, type) {
 const MISSION_KANBAN_COLUMNS = [
   { id: "queued", label: "รอเริ่มงาน" },
   { id: "running", label: "กำลังทำงาน" },
-  { id: "waiting_approval", label: "รออนุมัติ" },
   { id: "blocked", label: "ติดขัด" },
   { id: "completed", label: "เสร็จแล้ว" },
   { id: "failed", label: "ไม่สำเร็จ" },
@@ -4335,34 +4336,72 @@ function normalizeMissionStatus(status = "queued") {
   return "queued";
 }
 
+function missionRequiresExplicitHumanApproval(mission = {}) {
+  return mission?.requiresHumanApproval === true && mission?.approval?.required === true;
+}
+
+function getMissionAutomaticPolicy(mission = {}) {
+  const policy = mission?.automaticPolicy && typeof mission.automaticPolicy === "object"
+    ? mission.automaticPolicy
+    : {};
+  return {
+    mode: String(policy.mode || "").trim().toLowerCase(),
+    decision: String(policy.decision || "").trim().toLowerCase(),
+    reason: String(policy.reason || "").trim().toLowerCase(),
+    humanApprovalRequired: typeof policy.humanApprovalRequired === "boolean"
+      ? policy.humanApprovalRequired
+      : null,
+  };
+}
+
+function isBackendAutoSafeMission(mission = {}) {
+  const policy = getMissionAutomaticPolicy(mission);
+  return policy.mode === "backend_auto_safe"
+    && policy.decision === "allowed"
+    && policy.humanApprovalRequired === false
+    && mission?.requiresHumanApproval === false
+    && mission?.approval?.required === false
+    && !missionRequiresExplicitHumanApproval(mission);
+}
+
+function missionAutomaticPolicyLabel(mission = {}) {
+  if (isBackendAutoSafeMission(mission)) return "ทำงานอัตโนมัติ • งานภายในหรืออ่านอย่างเดียว";
+  if (missionRequiresExplicitHumanApproval(mission)) return "หยุดตรวจความเสี่ยง • ต้องยืนยันก่อนมีผลภายนอก";
+  if (isBackendAutoEligibleMission(mission)) return "Backend อนุญาตให้ทำงานอัตโนมัติ";
+  return "Backend ควบคุมตามนโยบายความปลอดภัย";
+}
+
 function getMissionPresentationStatus(mission = {}) {
   const storedStatus = normalizeMissionStatus(mission.status);
+  const present = (status) => (status === "waiting_approval" ? "blocked" : status);
   const counts = mission?.delegation?.subtaskStatusCounts;
   const hasDelegatedChildren = (
     Array.isArray(mission.subtaskIds) && mission.subtaskIds.length > 0
   ) || Number(mission?.delegation?.subtaskCount || 0) > 0;
   if (!hasDelegatedChildren || !counts || typeof counts !== "object" || Array.isArray(counts)) {
-    return storedStatus;
+    return present(storedStatus);
   }
   const count = (status) => Math.max(0, Number(counts[status]) || 0);
   if (count("running") > 0) return "running";
-  if (count("waiting_approval") > 0) return "waiting_approval";
+  if (count("waiting_approval") > 0) return "blocked";
   if (count("queued") > 0) return "queued";
   if (count("failed") > 0) return "failed";
   if (count("blocked") > 0) return "blocked";
   const terminalSuccess = count("completed") + count("archived");
   const subtaskCount = Math.max(0, Number(mission?.delegation?.subtaskCount || mission.subtaskIds?.length) || 0);
   if (subtaskCount > 0 && terminalSuccess >= subtaskCount) return "completed";
-  return storedStatus;
+  return present(storedStatus);
 }
 
 function isBackendAutoEligibleMission(mission) {
+  const policyAutoEligible = isBackendAutoSafeMission(mission);
   const directlyAutoEligible = Boolean(
     mission?.executionMode === "auto_guarded"
     && mission?.autoEligible === true
     && mission?.requiresHumanApproval === false
+    && mission?.approval?.required !== true
   );
-  if (directlyAutoEligible) return true;
+  if (policyAutoEligible || directlyAutoEligible) return true;
   if (mission?.toolId !== "manager_delegate" || mission?.requiresHumanApproval === true) return false;
   const childIds = Array.isArray(mission?.subtaskIds) ? mission.subtaskIds.filter(Boolean) : [];
   if (!childIds.length) return false;
@@ -4372,9 +4411,13 @@ function isBackendAutoEligibleMission(mission) {
   return Boolean(
     childMissions.length === childIds.length
     && childMissions.every((child) => (
-      child.executionMode === "auto_guarded"
-      && child.autoEligible === true
-      && child.requiresHumanApproval === false
+      isBackendAutoSafeMission(child)
+      || (
+        child.executionMode === "auto_guarded"
+        && child.autoEligible === true
+        && child.requiresHumanApproval === false
+        && child.approval?.required !== true
+      )
     ))
   );
 }
@@ -5033,7 +5076,7 @@ function meetingDashboardItems(meetings) {
 function renderDashboardKpis(subject, report, missions) {
   if (!els.modalDashboardKpis) return;
   els.modalDashboardKpis.innerHTML = "";
-  const openStatuses = new Set(["queued", "running", "waiting_approval", "blocked"]);
+  const openStatuses = new Set(["queued", "running", "blocked"]);
   const openCount = missions.filter((mission) => openStatuses.has(getMissionPresentationStatus(mission))).length;
   const latestReport = Array.isArray(report?.reports) ? report.reports[0] : null;
   const reportMetrics = Object.entries(latestReport?.metrics || {}).slice(0, 3);
@@ -14806,6 +14849,94 @@ function filterIndicatorScoutRollingSevenDays(items, now = Date.now()) {
   });
 }
 
+function normalizeRadarSchedule(rawSchedule = {}) {
+  const schedule = rawSchedule && typeof rawSchedule === "object" && !Array.isArray(rawSchedule)
+    ? rawSchedule
+    : {};
+  const normalizeTime = (value) => {
+    const match = String(value || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) return "";
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return "";
+    return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  };
+  const requestedEnabled = typeof schedule.requestedEnabled === "boolean"
+    ? schedule.requestedEnabled
+    : schedule.enabled === true;
+  const backendEffective = schedule.effectiveEnabled === true;
+  const effectiveEnabled = requestedEnabled && backendEffective === true;
+  const configuredTime = workflowDomainArray(schedule.times, schedule.runTimes, schedule.scheduleTimes)
+    .map(normalizeTime)
+    .find(Boolean) || INDICATOR_SCOUT_DEFAULT_TIME;
+  const boundedDailyCount = (value) => {
+    if (value === null || value === undefined || value === "") return null;
+    const numeric = Number(value);
+    return Number.isInteger(numeric) && (numeric === 0 || numeric === 1) ? numeric : null;
+  };
+  const runsReservedToday = boundedDailyCount(schedule.runsReservedToday);
+  const suppliedRemainingRuns = boundedDailyCount(schedule.remainingRunsToday);
+  const remainingRunsToday = runsReservedToday === null
+    ? suppliedRemainingRuns
+    : Math.max(0, 1 - runsReservedToday);
+  return {
+    ...schedule,
+    requestedEnabled,
+    effectiveEnabled,
+    times: [configuredTime],
+    timezone: INDICATOR_SCOUT_TIMEZONE,
+    maximumRunsPerDay: 1,
+    runsReservedToday,
+    remainingRunsToday,
+    lastRunAt: schedule.lastRunAt || null,
+    lastRunStatus: safeDashboardDisplayText(schedule.lastRunStatus, "not_run"),
+    lastResultKind: safeDashboardDisplayText(schedule.lastResultKind, ""),
+    lastError: safeDashboardDisplayText(schedule.lastError, ""),
+    lastErrorAt: schedule.lastErrorAt || null,
+    nextRunAt: schedule.nextRunAt || null,
+  };
+}
+
+function radarRetryQuotaAvailable(schedule = {}) {
+  return Number.isFinite(schedule?.remainingRunsToday)
+    && Number.isInteger(schedule.remainingRunsToday)
+    && schedule.remainingRunsToday > 0;
+}
+
+function normalizeRadarServiceHealth(rawService = {}) {
+  const service = rawService && typeof rawService === "object" && !Array.isArray(rawService)
+    ? rawService
+    : {};
+  const normalizeStatus = (value, fallback = "unknown") => (
+    String(value || fallback).trim().toLowerCase().replace(/[\s-]+/g, "_") || fallback
+  );
+  const sourceHealth = (Array.isArray(service.sourceHealth) ? service.sourceHealth : [])
+    .slice(0, 12)
+    .map((source, index) => ({
+      sourceId: safeDashboardDisplayText(source?.sourceId, `source_${index + 1}`),
+      label: safeDashboardDisplayText(source?.label, `แหล่งข้อมูล ${index + 1}`),
+      status: normalizeStatus(source?.status),
+      lastCheckedAt: source?.lastCheckedAt || null,
+      lastSuccessAt: source?.lastSuccessAt || null,
+      errorCode: safeDashboardDisplayText(source?.errorCode, ""),
+    }));
+  const retryEndpoint = String(service.retryEndpoint || "").trim();
+  const retryActionId = String(service.retryActionId || "").trim();
+  const retryContractValid = retryEndpoint === INDICATOR_SCOUT_WORKFLOW_ENDPOINT
+    && retryActionId === "discover_new_indicators";
+  return {
+    status: normalizeStatus(service.status),
+    adapterStatus: normalizeStatus(service.adapterStatus),
+    sourceStatus: normalizeStatus(service.sourceStatus),
+    lastRunStatus: normalizeStatus(service.lastRunStatus, "not_run"),
+    lastError: safeDashboardDisplayText(service.lastError, ""),
+    retryAvailable: service.retryAvailable === true && retryContractValid,
+    retryEndpoint: retryContractValid ? retryEndpoint : "",
+    retryActionId: retryContractValid ? retryActionId : "",
+    sourceHealth,
+  };
+}
+
 function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
   const canonical = workflowDomainObject(
     backend.radarWebsiteTool,
@@ -15001,12 +15132,19 @@ function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
   };
   const adapter = workflowDomainObject(root.screenshotAdapter, backend.screenshotAdapter);
   const hasScreenshot = discoveries.some((item) => Boolean(item.imageUrl));
+  const schedule = normalizeRadarSchedule(workflowDomainObject(root.schedule, backend.schedule));
+  const serviceHealth = normalizeRadarServiceHealth(workflowDomainObject(
+    root.serviceHealth,
+    canonical.serviceHealth,
+    backend.serviceHealth,
+  ));
   return {
     discoveries,
     todayEntries,
     sevenDayEntries,
     reports,
-    schedule: workflowDomainObject(root.schedule, backend.schedule),
+    schedule,
+    serviceHealth,
     googleSheet: workflowDomainObject(root.googleSheet, backend.googleSheet),
     screenshotAdapter: hasScreenshot
       ? {
@@ -17566,6 +17704,12 @@ function renderWorkflowActionStatus(propId) {
       : "ข้อมูลข่าวอ่านจากบริการ Backend โดยตรง และไม่มีการสร้างทิศทางจำลอง";
     return;
   }
+  if (propId === INDICATOR_SCOUT_PROP_ID) {
+    els.workflowActionStatus.textContent = current
+      ? status.message
+      : "Radar ทำงานอัตโนมัติวันละครั้ง และแสดงผลพร้อมสุขภาพแหล่งข้อมูลจาก Backend";
+    return;
+  }
   els.workflowActionStatus.textContent = current
     ? status.message
     : "หน้าเว็บส่งเฉพาะคำขอ งานจริงและ Audit Log อยู่หลัง Local Runner";
@@ -17583,38 +17727,79 @@ function getWorkflowDashboardIdentity(propId) {
 
 function createRadarRailTruthCard(dashboard = {}) {
   const card = document.createElement("section");
+  const heading = document.createElement("div");
   const title = document.createElement("h4");
+  const badge = document.createElement("span");
   const facts = document.createElement("dl");
-  const note = document.createElement("p");
   const domain = dashboard?.domainData?.indicatorScout || {};
   const sheet = domain.googleSheet && typeof domain.googleSheet === "object"
     ? domain.googleSheet
     : {};
-  const schedule = dashboard?.schedule && typeof dashboard.schedule === "object"
-    ? dashboard.schedule
-    : (domain.schedule && typeof domain.schedule === "object" ? domain.schedule : {});
+  const schedule = normalizeRadarSchedule(domain.schedule || dashboard?.schedule);
+  const service = normalizeRadarServiceHealth(domain.serviceHealth);
+  const statusLabel = (value) => ({
+    ready: "พร้อมใช้งาน",
+    healthy: "พร้อมใช้งาน",
+    online: "ออนไลน์",
+    running: "กำลังทำงาน",
+    queued: "อยู่ในคิว",
+    completed: "สำเร็จ",
+    partial: "พร้อมบางส่วน",
+    partial_success: "พร้อมบางส่วน",
+    degraded: "มีแหล่งข้อมูลติดขัด",
+    configuration_required: "ต้องตั้งค่า",
+    configured_not_connected: "บันทึกการตั้งค่าแล้ว • ยังไม่เชื่อมต่อ",
+    not_connected_optional: "ยังไม่เชื่อม • ตัวเลือก",
+    failed: "ทำงานไม่สำเร็จ",
+    error: "เกิดข้อผิดพลาด",
+    unavailable: "ยังไม่พร้อม",
+    not_connected: "ยังไม่เชื่อมต่อ",
+    not_run: "ยังไม่เคยรัน",
+    never: "ยังไม่เคยรัน",
+    unknown: "รอสถานะจาก Backend",
+  }[String(value || "unknown").toLowerCase()] || safeDashboardDisplayText(value, "รอสถานะจาก Backend"));
+  const tone = ["ready", "healthy", "online", "completed"].includes(service.status)
+    ? "ready"
+    : (["failed", "error", "unavailable"].includes(service.status) ? "error" : "warning");
+  const dailyUsageKnown = Number.isFinite(schedule.runsReservedToday)
+    && Number.isFinite(schedule.remainingRunsToday);
   const rows = [
+    ["บริการ Radar", statusLabel(service.status)],
+    ["Adapter", statusLabel(service.adapterStatus)],
+    ["แหล่งข้อมูลรวม", statusLabel(service.sourceStatus)],
+    ["รันล่าสุด", schedule.lastRunAt ? formatThaiDateTime(schedule.lastRunAt) : "ยังไม่เคยรัน"],
+    ["ผลรอบล่าสุด", `${statusLabel(schedule.lastRunStatus)}${schedule.lastResultKind ? ` • ${safeDashboardDisplayText(schedule.lastResultKind, "")}` : ""}`],
+    ["รอบถัดไป", schedule.effectiveEnabled
+      ? (schedule.nextRunAt ? formatThaiDateTime(schedule.nextRunAt) : "Backend ยังไม่ส่งเวลา")
+      : (schedule.requestedEnabled ? "เปิดไว้ แต่ Scheduler ยังไม่พร้อม" : "ปิดการทำงานอัตโนมัติ")],
     [
-      "Google Sheet",
+      "รอบวันนี้",
+      dailyUsageKnown
+        ? `${schedule.runsReservedToday}/1 • เหลือ ${schedule.remainingRunsToday} รอบ`
+        : "สูงสุด 1 รอบต่อวัน",
+    ],
+    ["ผลวันนี้", `${domain.todayEntries?.length || 0} รายการ`],
+    ["ผลย้อนหลัง 7 วัน", `${domain.sevenDayEntries?.length || 0} รายการ`],
+    [
+      "Google Sheet (ตัวเลือก)",
       sheet.configured === true
         ? `${safeDashboardDisplayText(sheet.sheetReferenceMasked, "บันทึกแล้ว")}${sheet.tabName ? ` • ${safeDashboardDisplayText(sheet.tabName, "")}` : ""}`
         : "ยังไม่ได้บันทึก Sheet",
     ],
     [
-      "การซิงก์ข้อมูล",
+      "การซิงก์ Sheet",
       sheet.connected === true
         ? "เชื่อมต่อแล้ว"
-        : "ยังไม่เชื่อม Adapter • ยังไม่อ่านหรือเขียน Sheet",
-    ],
-    [
-      "รอบวันนี้",
-      Number.isFinite(Number(schedule.runsReservedToday)) && Number.isFinite(Number(schedule.maximumRunsPerDay))
-        ? `${Number(schedule.runsReservedToday)}/${Number(schedule.maximumRunsPerDay)} • เหลือ ${Math.max(0, Number(schedule.remainingRunsToday) || 0)} รอบ`
-        : "สูงสุด 2 รอบต่อวันตามเวลาไทย",
+        : "ยังไม่เชื่อม Adapter • เป็นแหล่งตัวเลือกและไม่ทำให้ Radar ล้มเหลว",
     ],
   ];
   card.className = "workflow-radar-rail-truth";
-  title.textContent = "สถานะการค้นหาและคลังข้อมูล";
+  card.dataset.status = tone;
+  heading.className = "workflow-radar-rail-heading";
+  title.textContent = "สถานะ Radar และแหล่งข้อมูล";
+  badge.dataset.tone = tone;
+  badge.textContent = statusLabel(service.status);
+  heading.append(title, badge);
   facts.className = "workflow-radar-rail-facts";
   rows.forEach(([labelText, valueText]) => {
     const row = document.createElement("div");
@@ -17625,9 +17810,263 @@ function createRadarRailTruthCard(dashboard = {}) {
     row.append(label, value);
     facts.appendChild(row);
   });
-  note.textContent = "ระบบตรวจรายการซ้ำกับคลัง Report ในเครื่องแล้ว ส่วนการเทียบและบันทึกลง Google Sheet จะเริ่มเมื่อเชื่อม Adapter และยืนยันการเขียนจากผู้ใช้เท่านั้น";
-  card.append(title, facts, note);
+  card.append(heading, facts);
+  const errorText = service.lastError || schedule.lastError;
+  if (errorText) {
+    const error = document.createElement("p");
+    error.className = "workflow-radar-service-error";
+    error.textContent = `ปัญหาล่าสุด: ${errorText}`;
+    card.appendChild(error);
+  }
+  const sourceTitle = document.createElement("h5");
+  const sourceList = document.createElement("div");
+  sourceTitle.textContent = "สุขภาพแหล่งข้อมูล";
+  sourceList.className = "workflow-radar-source-health";
+  service.sourceHealth.forEach((source) => {
+    const row = document.createElement("article");
+    const top = document.createElement("div");
+    const label = document.createElement("strong");
+    const sourceBadge = document.createElement("span");
+    const detail = document.createElement("small");
+    const optional = source.sourceId === "google_sheet";
+    row.dataset.status = source.status;
+    label.textContent = `${source.label}${optional ? " (ตัวเลือก)" : ""}`;
+    sourceBadge.textContent = statusLabel(source.status);
+    top.append(label, sourceBadge);
+    detail.textContent = source.errorCode
+      ? `รหัสปัญหา ${source.errorCode}`
+      : `ตรวจล่าสุด ${source.lastCheckedAt ? formatThaiDateTime(source.lastCheckedAt) : "ยังไม่มีเวลา"}${source.lastSuccessAt ? ` • สำเร็จ ${formatThaiDateTime(source.lastSuccessAt)}` : ""}`;
+    row.append(top, detail);
+    sourceList.appendChild(row);
+  });
+  if (!sourceList.childElementCount) sourceList.appendChild(createWorkflowTruthEmpty("Backend ยังไม่ส่งสุขภาพแหล่งข้อมูล"));
+  card.append(sourceTitle, sourceList);
+  if (service.retryAvailable === true && radarRetryQuotaAvailable(schedule)) {
+    const retry = document.createElement("button");
+    const inFlight = state.modal.workflowAction.inFlight
+      && state.modal.workflowAction.propId === INDICATOR_SCOUT_PROP_ID;
+    retry.type = "button";
+    retry.className = "workflow-radar-retry";
+    retry.disabled = inFlight;
+    retry.textContent = inFlight ? "กำลังลองใหม่..." : "ลองค้นหาใหม่";
+    retry.addEventListener("click", () => void retryRadarDiscovery());
+    card.appendChild(retry);
+  }
   return card;
+}
+
+function createRadarScheduleCard(dashboard = {}) {
+  const domain = dashboard?.domainData?.indicatorScout || {};
+  const schedule = normalizeRadarSchedule(domain.schedule || dashboard?.schedule);
+  const action = (dashboard.actions || []).find((item) => item.id === "save_indicator_scout_schedule");
+  const authoritative = dashboard.workflowReadModel?.authoritative === true;
+  const canSave = authoritative && action && ["ready", "settings_only"].includes(action.availability.status);
+  const inFlight = state.modal.workflowAction.inFlight
+    && state.modal.workflowAction.propId === INDICATOR_SCOUT_PROP_ID;
+  const form = document.createElement("form");
+  const title = document.createElement("h4");
+  const toggle = document.createElement("label");
+  const checkbox = document.createElement("input");
+  const toggleText = document.createElement("span");
+  const timeLabel = document.createElement("label");
+  const timeCaption = document.createElement("span");
+  const time = document.createElement("input");
+  const meta = document.createElement("p");
+  const save = document.createElement("button");
+  form.className = "workflow-radar-schedule";
+  form.dataset.radarScheduleForm = "true";
+  title.textContent = "ค้นหาอัตโนมัติวันละครั้ง";
+  toggle.className = "workflow-radar-schedule-toggle";
+  checkbox.type = "checkbox";
+  checkbox.checked = schedule.requestedEnabled;
+  checkbox.dataset.radarScheduleEnabled = "true";
+  checkbox.disabled = inFlight || !canSave;
+  toggleText.textContent = "เปิดรอบค้นหารายวัน";
+  toggle.append(checkbox, toggleText);
+  timeLabel.className = "workflow-radar-schedule-time";
+  timeCaption.textContent = "เวลาไทย";
+  time.type = "time";
+  time.step = 60;
+  time.required = true;
+  time.value = schedule.times[0] || INDICATOR_SCOUT_DEFAULT_TIME;
+  time.dataset.radarScheduleTime = "true";
+  time.disabled = inFlight || !canSave;
+  timeLabel.append(timeCaption, time);
+  meta.textContent = `${INDICATOR_SCOUT_TIMEZONE} • สูงสุด 1 รอบต่อวัน • ${schedule.effectiveEnabled ? "Scheduler ทำงานอยู่" : (schedule.requestedEnabled ? "เปิดไว้ แต่ Scheduler ยังไม่พร้อม" : "ปิดอยู่")}`;
+  save.type = "submit";
+  save.className = "workflow-radar-schedule-save";
+  save.disabled = inFlight || !canSave;
+  save.textContent = inFlight && state.modal.workflowAction.actionId === "save_indicator_scout_schedule"
+    ? "กำลังบันทึก..."
+    : "บันทึกเวลา";
+  form.append(title, toggle, timeLabel, meta, save);
+  if (!canSave) {
+    const unavailable = document.createElement("small");
+    unavailable.className = "workflow-radar-schedule-unavailable";
+    unavailable.textContent = authoritative
+      ? "Backend ยังไม่เปิดให้บันทึกตารางเวลา"
+      : "กำลังรอ Read Model จาก Backend";
+    form.appendChild(unavailable);
+  }
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void saveRadarSchedule(form);
+  });
+  return form;
+}
+
+function renderRadarSettingsRail(dashboard, identity) {
+  const actionState = state.modal.workflowAction;
+  els.workflowSettingsRail.hidden = false;
+  els.workflowSettingsRail.dataset.dashboardIdentity = identity.id;
+  if (els.workflowSettingsRailTitle) els.workflowSettingsRailTitle.textContent = "Radar อัตโนมัติ";
+  els.workflowSettingsRailContent.innerHTML = "";
+  els.workflowSettingsRailContent.append(
+    createWorkflowUseGuideCard({ id: INDICATOR_SCOUT_PROP_ID }),
+    createRadarScheduleCard(dashboard),
+    createRadarRailTruthCard(dashboard),
+  );
+  if (actionState.propId === INDICATOR_SCOUT_PROP_ID && actionState.message) {
+    const status = document.createElement("p");
+    status.className = "workflow-radar-action-status";
+    status.dataset.tone = actionState.tone;
+    status.setAttribute("aria-live", "polite");
+    status.textContent = actionState.message;
+    els.workflowSettingsRailContent.appendChild(status);
+  }
+}
+
+async function saveRadarSchedule(form) {
+  if (state.modal.workflowAction.inFlight || state.modal.id !== INDICATOR_SCOUT_PROP_ID) return;
+  const timeControl = form?.querySelector("[data-radar-schedule-time]");
+  const enabledControl = form?.querySelector("[data-radar-schedule-enabled]");
+  if (!(timeControl instanceof HTMLInputElement) || !(enabledControl instanceof HTMLInputElement)) return;
+  timeControl.setCustomValidity("");
+  const rawTime = String(timeControl.value || "").trim();
+  const match = rawTime.match(/^(\d{2}):(\d{2})$/);
+  const validTime = Boolean(match)
+    && Number(match[1]) >= 0
+    && Number(match[1]) <= 23
+    && Number(match[2]) >= 0
+    && Number(match[2]) <= 59;
+  if (!validTime) {
+    timeControl.setCustomValidity("กรุณาระบุเวลาไทยหนึ่งเวลาในรูปแบบ HH:MM");
+    form.reportValidity();
+    return;
+  }
+  const subject = getModalSubject();
+  const propertyRole = getPropertyRole(subject);
+  const report = state.propReports[INDICATOR_SCOUT_PROP_ID] || {};
+  const dashboard = normalizeWorkflowDashboard(subject, propertyRole, report);
+  const action = dashboard.actions.find((item) => item.id === "save_indicator_scout_schedule");
+  if (
+    dashboard.workflowReadModel?.authoritative !== true
+    || !action
+    || !["ready", "settings_only"].includes(action.availability.status)
+  ) return;
+  const idempotencyKey = createWorkflowIdempotencyKey();
+  state.modal.workflowAction = {
+    inFlight: true,
+    propId: INDICATOR_SCOUT_PROP_ID,
+    actionId: "save_indicator_scout_schedule",
+    idempotencyKey,
+    formSignature: "",
+    message: "กำลังบันทึกรอบค้นหา Radar วันละครั้ง",
+    tone: "working",
+  };
+  renderGameModal();
+  try {
+    const response = await postJson(INDICATOR_SCOUT_WORKFLOW_ENDPOINT, {
+      actionId: "save_indicator_scout_schedule",
+      form: { enabled: enabledControl.checked === true, times: [rawTime] },
+      idempotencyKey,
+    });
+    if (response?.ok !== true) throw new Error("Backend ไม่ยืนยันการบันทึกตารางเวลา Radar");
+    if (response?.mission) mergeBackendMission(response.mission);
+    state.modal.workflowAction = {
+      inFlight: false,
+      propId: INDICATOR_SCOUT_PROP_ID,
+      actionId: "save_indicator_scout_schedule",
+      idempotencyKey: "",
+      formSignature: "",
+      message: "บันทึกเวลา Radar แล้ว • สูงสุด 1 รอบต่อวัน • Asia/Bangkok",
+      tone: "success",
+    };
+    await loadPropReport(INDICATOR_SCOUT_PROP_ID);
+  } catch (error) {
+    state.modal.workflowAction = {
+      inFlight: false,
+      propId: INDICATOR_SCOUT_PROP_ID,
+      actionId: "save_indicator_scout_schedule",
+      idempotencyKey: "",
+      formSignature: "",
+      message: safeDashboardDisplayText(error?.message, "บันทึกเวลา Radar ไม่สำเร็จ"),
+      tone: "error",
+    };
+  } finally {
+    if (state.modal.open && state.modal.id === INDICATOR_SCOUT_PROP_ID) renderGameModal();
+  }
+}
+
+async function retryRadarDiscovery() {
+  if (state.modal.workflowAction.inFlight || state.modal.id !== INDICATOR_SCOUT_PROP_ID) return;
+  const subject = getModalSubject();
+  const propertyRole = getPropertyRole(subject);
+  const report = state.propReports[INDICATOR_SCOUT_PROP_ID] || {};
+  const dashboard = normalizeWorkflowDashboard(subject, propertyRole, report);
+  const schedule = normalizeRadarSchedule(
+    dashboard.domainData?.indicatorScout?.schedule || dashboard.schedule,
+  );
+  const service = normalizeRadarServiceHealth(dashboard.domainData?.indicatorScout?.serviceHealth);
+  if (
+    service.retryAvailable !== true
+    || service.retryEndpoint !== INDICATOR_SCOUT_WORKFLOW_ENDPOINT
+    || service.retryActionId !== "discover_new_indicators"
+    || !radarRetryQuotaAvailable(schedule)
+  ) return;
+  const idempotencyKey = createWorkflowIdempotencyKey();
+  state.modal.workflowAction = {
+    inFlight: true,
+    propId: INDICATOR_SCOUT_PROP_ID,
+    actionId: service.retryActionId,
+    idempotencyKey,
+    formSignature: "",
+    message: "กำลังให้ Backend ลองค้นหาใหม่",
+    tone: "working",
+  };
+  renderGameModal();
+  try {
+    const response = await postJson(INDICATOR_SCOUT_WORKFLOW_ENDPOINT, {
+      actionId: service.retryActionId,
+      form: {},
+      idempotencyKey,
+    });
+    if (response?.ok !== true) throw new Error("Backend ยังไม่ยืนยันคำขอลองใหม่");
+    if (response?.mission) mergeBackendMission(response.mission);
+    state.modal.workflowAction = {
+      inFlight: false,
+      propId: INDICATOR_SCOUT_PROP_ID,
+      actionId: service.retryActionId,
+      idempotencyKey: "",
+      formSignature: "",
+      message: safeDashboardDisplayText(response?.messageTh, "Backend รับคำขอลองใหม่แล้ว ระบบจะอัปเดตผลและสุขภาพแหล่งข้อมูลที่หน้านี้"),
+      tone: "success",
+    };
+    await loadPropReport(INDICATOR_SCOUT_PROP_ID);
+  } catch (error) {
+    state.modal.workflowAction = {
+      inFlight: false,
+      propId: INDICATOR_SCOUT_PROP_ID,
+      actionId: "discover_new_indicators",
+      idempotencyKey: "",
+      formSignature: "",
+      message: safeDashboardDisplayText(error?.message, "ลองค้นหาใหม่ไม่สำเร็จ"),
+      tone: "error",
+    };
+    await loadPropReport(INDICATOR_SCOUT_PROP_ID);
+  } finally {
+    if (state.modal.open && state.modal.id === INDICATOR_SCOUT_PROP_ID) renderGameModal();
+  }
 }
 
 function workflowRailActions(subject, dashboard) {
@@ -17646,8 +18085,8 @@ function createWorkflowUseGuideCard(subject) {
   const guides = {
     [INDICATOR_SCOUT_PROP_ID]: [
       "ดูรายการ Indicator, EA และ Tool ที่ Radar พบในหน้าหลัก",
-      "กำหนดหัวข้อหรือเวลาค้นหาในคำสั่งด้านล่าง",
-      "เปิดแหล่งข้อมูลและภาพหลักฐานก่อนนำไปใช้",
+      "เปิดค้นหาอัตโนมัติวันละครั้งและกำหนดเวลาไทยได้หนึ่งเวลา",
+      "ตรวจสุขภาพ Adapter และแหล่งข้อมูล หาก Backend เปิดให้ลองใหม่จึงค่อยกดปุ่ม",
     ],
     [HQ_CONNECTION_HUB_PROP_ID]: [
       "กรองอุปกรณ์ตามสถานะ พร้อม ต้องแก้ หรือรอตรวจ",
@@ -17949,15 +18388,16 @@ function renderWorkflowSettingsRail(subject, dashboard, identity = getWorkflowDa
     renderFxNewsSettingsRail(dashboard, identity);
     return;
   }
+  if (subject?.id === INDICATOR_SCOUT_PROP_ID) {
+    renderRadarSettingsRail(dashboard, identity);
+    return;
+  }
   const actions = workflowRailActions(subject, dashboard);
   els.workflowSettingsRail.hidden = false;
   els.workflowSettingsRail.dataset.dashboardIdentity = identity.id;
   if (els.workflowSettingsRailTitle) els.workflowSettingsRailTitle.textContent = "วิธีใช้และคำสั่ง";
   els.workflowSettingsRailContent.innerHTML = "";
   els.workflowSettingsRailContent.appendChild(createWorkflowUseGuideCard(subject));
-  if (subject?.id === INDICATOR_SCOUT_PROP_ID) {
-    els.workflowSettingsRailContent.appendChild(createRadarRailTruthCard(dashboard));
-  }
   actions.forEach((action) => {
     const card = createWorkflowActionCard(action, dashboard);
     card.classList.add("workflow-rail-action-card");
@@ -18605,6 +19045,7 @@ function hasHumanApprovalDecision(mission) {
 
 function isMissionReadyForExplicitExecution(mission) {
   if (!mission?.id || normalizeMissionStatus(mission.status) !== "waiting_approval") return false;
+  if (!missionRequiresExplicitHumanApproval(mission)) return false;
   if (isBackendAutoEligibleMission(mission)) return false;
   return mission.readyToExecute === true;
 }
@@ -18736,7 +19177,9 @@ function appendTaskEvidenceSection(container, evidence) {
 
 function getMissionNextStep(mission) {
   const status = getMissionPresentationStatus(mission);
+  const storedStatus = normalizeMissionStatus(mission?.status);
   const autoEligible = isBackendAutoEligibleMission(mission);
+  const explicitHumanApproval = missionRequiresExplicitHumanApproval(mission);
   const waitingChildren = Math.max(0, Number(mission?.delegation?.subtaskStatusCounts?.waiting_approval) || 0);
   if (status === "queued") {
     return autoEligible
@@ -18748,15 +19191,18 @@ function getMissionNextStep(mission) {
       ? "Agent กำลังทำงานผ่าน Local Runner และจะส่งรายงานกลับอุปกรณ์ที่กำหนด"
       : "รอ Agent ทำงานและส่งรายงานกลับมายังจุดแสดงผล";
   }
-  if (status === "waiting_approval") {
-    if (waitingChildren > 0) {
-      return `Task ย่อย ${waitingChildren} งานกำลังรอการตรวจสอบ ยังไม่มี Runner ของ Task เหล่านี้เริ่มทำงาน`;
-    }
+  if (storedStatus === "waiting_approval" && explicitHumanApproval) {
     return isMissionReadyForExplicitExecution(mission)
-      ? "อนุมัติครบแล้ว แต่ยังไม่รันอัตโนมัติ ต้องยืนยัน Mission ID ที่โต๊ะ Mission ก่อน"
-      : "รอผู้ใช้และ Risk Guard ตรวจสอบก่อน งานจริงจะยังไม่เริ่ม";
+      ? "ยืนยันความเสี่ยงครบแล้ว แต่ยังไม่รันอัตโนมัติ ต้องยืนยัน Mission ID ที่โต๊ะ Mission ก่อน"
+      : "งานนี้มีผลภายนอกหรือความเสี่ยงสูง จึงหยุดไว้จนกว่าผู้ใช้และ Risk Guard จะยืนยัน";
   }
   if (status === "blocked") {
+    if (waitingChildren > 0) {
+      return `Task ย่อย ${waitingChildren} งานยังผ่านนโยบายความปลอดภัยไม่ครบ เปิดรายละเอียด Task ย่อยเพื่อดูสาเหตุ`;
+    }
+    if (storedStatus === "waiting_approval") {
+      return "สถานะจาก Backend ยังไม่สอดคล้องกับนโยบายอัตโนมัติ Frontend จึงไม่แสดงปุ่มยืนยันและรอ Backend ปรับสถานะให้ถูกต้อง";
+    }
     if (mission?.workStatus === "waiting_input") {
       return "ส่งข้อมูลหรือไฟล์ที่ Agent ระบุไว้ แล้วสร้าง Task ใหม่เพื่อทำงานต่อ";
     }
@@ -18804,12 +19250,15 @@ function renderMissionDetail(mission) {
   facts.className = "task-detail-facts";
   const presentationStatus = getMissionPresentationStatus(mission);
   const autoEligible = isBackendAutoEligibleMission(mission);
+  const explicitHumanApproval = missionRequiresExplicitHumanApproval(mission);
   appendMissionDetailRow(facts, "สถานะ", displayStatus(presentationStatus));
   appendMissionDetailRow(facts, "ผู้รับผิดชอบ", displayAgentName(getAgentIdFromOwner(mission.owner) || mission.owner, "ยังไม่ได้มอบหมาย"));
   appendMissionDetailRow(facts, "จุดแสดงผล", displayPropName(mission.targetId || "mission_strategy_table"));
   appendMissionDetailRow(facts, "ความเสี่ยง", displayRisk(mission.risk));
-  appendMissionDetailRow(facts, "รูปแบบการทำงาน", autoEligible ? "Backend อนุญาตให้อัตโนมัติ" : displayStatus(mission.executionMode || "manual_guarded"));
-  appendMissionDetailRow(facts, "การอนุมัติ", autoEligible ? "งานนี้ไม่ต้องกดอนุมัติซ้ำ" : displayApproval(mission.approval?.state));
+  appendMissionDetailRow(facts, "นโยบายการทำงาน", missionAutomaticPolicyLabel(mission));
+  if (explicitHumanApproval) {
+    appendMissionDetailRow(facts, "การยืนยันงานเสี่ยงสูง", displayApproval(mission.approval?.state));
+  }
   appendMissionDetailRow(
     facts,
     "การค้นเว็บ",
@@ -18850,14 +19299,19 @@ function renderMissionDetail(mission) {
   appendMissionDetailRow(systemGrid, "Tool ID", mission.toolId || "queue_only");
   appendMissionDetailRow(systemGrid, "โหมดจาก Backend", mission.executionMode || "manual_guarded");
   appendMissionDetailRow(systemGrid, "เริ่มอัตโนมัติได้", mission.autoEligible === true ? "true" : "false");
-  appendMissionDetailRow(systemGrid, "ต้องให้ผู้ใช้อนุมัติ", mission.requiresHumanApproval === true ? "true" : "false");
+  appendMissionDetailRow(systemGrid, "โหมดนโยบาย", mission.automaticPolicy?.mode || "-");
+  appendMissionDetailRow(systemGrid, "คำตัดสินนโยบาย", mission.automaticPolicy?.decision || "-");
+  appendMissionDetailRow(systemGrid, "เหตุผลนโยบาย", mission.automaticPolicy?.reason || "-");
+  if (explicitHumanApproval) {
+    appendMissionDetailRow(systemGrid, "ต้องให้ผู้ใช้ยืนยัน", "true");
+    appendMissionDetailRow(systemGrid, "สถานะการยืนยัน", mission.approval?.state || "pending");
+  }
   appendMissionDetailRow(systemGrid, "ระดับโมเดล", mission.modelTier || "local_default");
   appendMissionDetailRow(systemGrid, "งบและขีดจำกัด (Token เป็นค่าประมาณ)", mission.budget || "local_defaults");
   appendMissionDetailRow(systemGrid, "Mission หลัก", mission.parentMissionId || "-");
   appendMissionDetailRow(systemGrid, "ID ของ Task ย่อย", mission.subtaskIds || []);
   appendMissionDetailRow(systemGrid, "ประเภทรายงาน", mission.reportType || "-");
   appendMissionDetailRow(systemGrid, "ID รายงาน", mission.reportIds || []);
-  appendMissionDetailRow(systemGrid, "สถานะการอนุมัติ", mission.approval?.state || "not_required");
   appendMissionDetailRow(systemGrid, "เวลาสร้าง", mission.createdAt || "-");
   appendMissionDetailRow(systemGrid, "เวลาอัปเดต", mission.updatedAt || "-");
   appendMissionDetailRow(systemGrid, "เวลาเสร็จสิ้น", mission.completedAt || "-");
@@ -18870,11 +19324,11 @@ function renderMissionDetail(mission) {
     notice.className = "kanban-readonly-notice auto-eligible";
     notice.textContent = presentationStatus === "completed"
       ? `Backend ทำ Task นี้เสร็จแล้ว และส่งรายงานไปที่ ${displayPropName(mission.targetId || "mission_strategy_table")}`
-      : "Backend ยืนยันว่า Task นี้เริ่มอัตโนมัติได้ จึงไม่มีปุ่มอนุมัติหรือปุ่มยืนยันการรันซ้ำบน Frontend";
+      : "Backend ยืนยันว่า Task นี้ปลอดภัยสำหรับการทำงานอัตโนมัติ Frontend จะแสดงเฉพาะสถานะและผลลัพธ์";
     els.modalKanbanDetailBody.appendChild(notice);
   }
 
-  if (normalizeMissionStatus(mission.status) === "waiting_approval" && !autoEligible) {
+  if (normalizeMissionStatus(mission.status) === "waiting_approval" && explicitHumanApproval) {
     const notice = document.createElement("p");
     notice.className = "kanban-readonly-notice";
     notice.textContent = isMissionReadyForExplicitExecution(mission)
@@ -18887,7 +19341,7 @@ function renderMissionDetail(mission) {
   const approvalState = getMissionApprovalState(mission);
   const approvalClosed = ["approved", "consumed", "rejected", "expired", "invalidated"].includes(approvalState);
   const canRecordApproval = normalizeMissionStatus(mission.status) === "waiting_approval"
-    && Boolean(mission.approval?.required)
+    && missionRequiresExplicitHumanApproval(mission)
     && !autoEligible
     && !approvalClosed
     && !hasHumanApprovalDecision(mission);
@@ -19044,7 +19498,12 @@ function renderMissionKanban({ preserveScroll = true } = {}) {
 
 async function recordKanbanApprovalDecision(decision) {
   const mission = getActiveTaskDetailMission();
-  if (!mission || normalizeMissionStatus(mission.status) !== "waiting_approval" || state.modal.approvalInFlight) return;
+  if (
+    !mission
+    || normalizeMissionStatus(mission.status) !== "waiting_approval"
+    || !missionRequiresExplicitHumanApproval(mission)
+    || state.modal.approvalInFlight
+  ) return;
   state.modal.approvalInFlight = true;
   renderMissionDetail(mission);
   try {
@@ -19266,8 +19725,9 @@ function renderGameModal() {
       ["Task ทั้งหมด", String(state.missions.length)],
       ["รอเริ่มงาน", String(counts.queued || 0)],
       ["กำลังทำงาน", String(counts.running || 0)],
-      ["รออนุมัติ", String(counts.waiting_approval || 0)],
-      ["ติดขัด", String((counts.blocked || 0) + (counts.failed || 0))],
+      ["ติดขัด", String(counts.blocked || 0)],
+      ["เสร็จแล้ว", String(counts.completed || 0)],
+      ["ไม่สำเร็จ", String(counts.failed || 0)],
       ["Bridge", `${displayBridgeValue(state.bridge.mode)} / ${displayBridgeValue(state.bridge.status)}`],
     ]);
     renderMissionKanban();
@@ -19896,7 +20356,7 @@ async function handleModalAssignTask() {
   setAgentChatStatus(
     subject.id,
     autoEligible
-      ? `Task ${mission.id} ${displayStatus(presentationStatus)} อัตโนมัติแล้ว • ไม่ต้องกดอนุมัติซ้ำ`
+      ? `Task ${mission.id} ${displayStatus(presentationStatus)} • Backend ดูแลงานนี้อัตโนมัติ`
       : `สร้าง Task ${mission.id} แล้ว • ${displayStatus(presentationStatus)} • Backend จะตรวจสิทธิ์ก่อนเริ่ม`,
     "ready",
   );
@@ -21664,7 +22124,7 @@ function selectObject(id, options = {}) {
     {
       title: id === "mission_strategy_table" ? "Kanban รวม Task ทั้งหมด" : "Dashboard สำหรับดูผลลัพธ์",
       detail: id === "mission_strategy_table"
-        ? "กดโต๊ะเพื่อดูงานที่รอเริ่ม กำลังทำ รออนุมัติ ติดขัด เสร็จแล้ว ไม่สำเร็จ และเก็บเข้าคลัง"
+        ? "กดโต๊ะเพื่อดูงานที่รอเริ่ม กำลังทำ ติดขัด เสร็จแล้ว ไม่สำเร็จ และเก็บเข้าคลัง • งานเสี่ยงสูงที่ต้องยืนยันจะแสดงในคอลัมน์ติดขัด"
         : "กดอุปกรณ์เพื่อดู KPI สถานะ Task ปัจจุบัน และรายงาน หากต้องการสร้างงานให้เปิด Agent",
       owner: id === "mission_strategy_table" ? "manager" : listText(propertyRole?.ownerAgents, "manager"),
       status: id === "mission_strategy_table" ? "kanban" : "read_only",
@@ -22239,7 +22699,6 @@ function getActiveMissionForAgent(agentId) {
     running: 0,
     blocked: 1,
     failed: 1,
-    waiting_approval: 2,
     queued: 3,
   };
   return state.missions
@@ -22289,14 +22748,12 @@ function getAgentSidebarState(agent) {
     const statusLabels = {
       running: "กำลังทำงาน",
       queued: "รอเริ่มงาน",
-      waiting_approval: "รอระบบตรวจ",
       blocked: "รอแก้ปัญหา",
       failed: "รอแก้ปัญหา",
     };
     const taskStateLabels = {
       running: "Task กำลังทำ",
       queued: "Task รอเริ่ม",
-      waiting_approval: "Task รอระบบตรวจ",
       blocked: "Task ติดขัด",
       failed: "Task ไม่สำเร็จ",
     };
@@ -22540,7 +22997,7 @@ function reconcileAgentMissionState() {
     agent.activeMissionKey = assignmentKey;
     if (changed && agent.visualState !== "walking") {
       const statusLabel = displayStatus(status);
-      agent.visualState = ["blocked", "failed", "waiting_approval", "queued"].includes(status)
+      agent.visualState = ["blocked", "failed", "queued"].includes(status)
         ? "reporting"
         : "working";
       agent.status = `${statusLabel}: ${mission.title || mission.id}`;

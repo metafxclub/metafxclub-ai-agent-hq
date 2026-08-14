@@ -613,8 +613,6 @@ SENSITIVE_FIELD_SUFFIXES = (
 SENSITIVE_FIELD_METADATA = {"containssecret", "secretredacted", "frontendsecrets"}
 
 APPROVAL_REQUIRED = [
-    "codex_cli_task",
-    "codex_web_research",
     "mcp_tool_run",
     "live_trading",
     "send_telegram",
@@ -911,7 +909,7 @@ DASHBOARD_WORKFLOW_ACTIONS = {
         "localHandler": "discovery_schedule",
         "formFields": (
             {"id": "enabled", "labelTh": "เปิดการค้นหาอัตโนมัติตามเวลานี้", "type": "boolean", "required": False},
-            {"id": "times", "labelTh": "เวลาที่ต้องการ (สูงสุด 2 เวลา)", "type": "time_list", "required": True, "maxItems": 2},
+            {"id": "times", "labelTh": "เวลาที่ต้องการ", "type": "time_list", "required": True, "maxItems": 6},
         ),
     },
     "deep_research_system": {
@@ -1052,7 +1050,7 @@ DASHBOARD_WORKFLOW_ACTIONS = {
         "propId": "left_audit_crystals",
         "tabId": "schedule",
         "labelTh": "บันทึกเวลาและ Google Sheet ของ Radar",
-        "descriptionTh": "บันทึกเวลาได้สูงสุดวันละ 2 รอบ และเก็บเฉพาะ Sheet ID/URL ที่ตรวจรูปแบบแล้ว; การเขียน Sheet และ Screenshot ยังต้องรอ Backend Adapter",
+        "descriptionTh": "บันทึกเวลา Radar หนึ่งรอบต่อวันตามเวลา Asia/Bangkok และเก็บเฉพาะ Sheet ID/URL ที่ตรวจรูปแบบแล้ว; การเขียน Sheet และ Screenshot ยังต้องรอ Backend Adapter",
         "toolId": None,
         "ownerAgentId": "codex_mcp_operator",
         "reportType": "indicator_scout_report",
@@ -1062,7 +1060,7 @@ DASHBOARD_WORKFLOW_ACTIONS = {
         "localHandler": "indicator_schedule",
         "formFields": (
             {"id": "enabled", "labelTh": "เปิดการค้นหาอัตโนมัติตามเวลานี้", "type": "boolean", "required": False},
-            {"id": "times", "labelTh": "เวลาที่ต้องการ (สูงสุด 2 เวลา)", "type": "time_list", "required": True, "maxItems": 2},
+            {"id": "times", "labelTh": "เวลาที่ต้องการ (วันละ 1 เวลา)", "type": "time_list", "required": True, "maxItems": 1},
             {"id": "googleSheetUrlOrId", "labelTh": "Google Sheet URL หรือ Sheet ID", "type": "google_sheet_reference", "required": False},
             {"id": "googleSheetTabName", "labelTh": "ชื่อแท็บ Google Sheet", "type": "sheet_tab_name", "required": False},
         ),
@@ -1483,7 +1481,7 @@ def payload_digest(*parts: str) -> str:
 
 
 def mission_payload_digest(mission: dict) -> str:
-    """Bind one approval to the complete execution-relevant mission packet."""
+    """Bind one approval or Backend auto policy to the execution packet."""
     execution = mission.get("execution") if isinstance(mission.get("execution"), dict) else {}
     packet = {
         "owner": str(mission.get("owner") or ""),
@@ -1494,6 +1492,10 @@ def mission_payload_digest(mission: dict) -> str:
         "budget": mission.get("budget") if isinstance(mission.get("budget"), dict) else {},
         "risk": str(mission.get("risk") or ""),
         "reportType": str(mission.get("reportType") or ""),
+        "idempotencyKey": str(mission.get("idempotencyKey") or ""),
+        "idempotencyScopeDigest": str(
+            mission.get("idempotencyScopeDigest") or ""
+        ),
         "executionAuthorization": {
             "executionMode": str(mission.get("executionMode") or ""),
             "autoEligible": mission.get("autoEligible") is True,
@@ -1502,7 +1504,18 @@ def mission_payload_digest(mission: dict) -> str:
             "schema": str(execution.get("schema") or ""),
             "authorizationId": str(execution.get("authorizationId") or ""),
             "authorizationIssuedAt": str(execution.get("authorizationIssuedAt") or ""),
+            "authorizationSource": str(execution.get("authorizationSource") or ""),
+            "authorizationDecision": str(execution.get("authorizationDecision") or ""),
+            "authorizationPolicyVersion": str(
+                execution.get("authorizationPolicyVersion") or ""
+            ),
+            "authorizationReason": str(execution.get("authorizationReason") or ""),
         },
+        # Trusted workflow lineage selects the bounded intent, quota reserve,
+        # sandbox and output validator. It is authorization material too.
+        "workflowContext": _workflow_context_storage(
+            mission.get("workflowContext")
+        ),
     }
     analysis_context = mission.get("analysisContext")
     if isinstance(analysis_context, dict) and analysis_context:
@@ -1818,8 +1831,8 @@ def operator_mode_policy() -> dict:
 
 
 def _operator_mode_default() -> str:
-    configured = str(operator_mode_policy().get("defaultMode") or "manual_guarded")
-    return configured if configured in {"auto_guarded", "manual_guarded"} else "manual_guarded"
+    configured = str(operator_mode_policy().get("defaultMode") or "auto_guarded")
+    return configured if configured in {"auto_guarded", "manual_guarded"} else "auto_guarded"
 
 
 def load_operator_mode_record() -> dict:
@@ -2507,13 +2520,83 @@ def _high_impact_reasons(tool_id: str, detail: str, risk: str) -> list[str]:
     return list(dict.fromkeys(reasons))
 
 
-def auto_guarded_eligibility(mission: dict, *, require_operator_mode: bool = True) -> dict:
+AUTO_SAFE_WORKFLOW_EXECUTION_SCOPES = frozenset({
+    "public_web_read_only",
+    "workspace_analysis_only",
+    "analysis_plan_only",
+    "workspace_source_only",
+    "local_read_only",
+})
+
+
+def _trusted_workflow_guard_intent(mission: object) -> str | None:
+    """Return only user-controlled intent for a trusted bounded workflow.
+
+    Generated workflow prompts deliberately contain phrases such as "do not
+    deploy" and "never expose a token". Scanning that immutable safety text as
+    user intent creates false high-risk gates. The Backend may isolate inputs
+    only after every lineage binding and the input digest are revalidated.
+    Any mismatch returns ``None`` and restores the conservative full-prompt
+    scan.
+    """
+
+    if not isinstance(mission, dict):
+        return None
+    context = _workflow_context_storage(mission.get("workflowContext"))
+    if not context:
+        return None
+    prop_id = str(context.get("propId") or "")
+    action_id = str(context.get("actionId") or "")
+    action = DASHBOARD_WORKFLOW_ACTIONS.get(action_id)
+    if (
+        not isinstance(action, dict)
+        or action.get("propId") != prop_id
+        or action.get("analysisOnly") is not True
+        or str(action.get("executionScope") or "")
+        not in AUTO_SAFE_WORKFLOW_EXECUTION_SCOPES
+        or str(action.get("toolId") or "") != str(mission.get("toolId") or "")
+        or str(action.get("ownerAgentId") or "")
+        != str(mission.get("owner") or mission.get("agentId") or "")
+    ):
+        return None
+    inputs = context.get("inputs") if isinstance(context.get("inputs"), dict) else {}
+    allowed_input_fields = {
+        str(field.get("id") or "")
+        for field in (action.get("formFields") or ())
+        if isinstance(field, dict) and str(field.get("id") or "")
+    }
+    if set(inputs) - allowed_input_fields:
+        return None
+    expected_digest = payload_digest(
+        "dashboard-workflow-input-v1",
+        prop_id,
+        action_id,
+        json.dumps(inputs, ensure_ascii=False, sort_keys=True),
+    )
+    stored_digest = str(context.get("inputDigest") or "")
+    if not stored_digest or not secrets.compare_digest(stored_digest, expected_digest):
+        return None
+    return json.dumps(inputs, ensure_ascii=False, sort_keys=True)
+
+
+def auto_guarded_eligibility(
+    mission: dict,
+    *,
+    require_operator_mode: bool = True,
+    allow_legacy_radar_without_reservation: bool = False,
+) -> dict:
     policy = operator_mode_policy()
     operator = load_operator_mode_record()
     tool_id = str(mission.get("toolId") or "")
     agent_id = str(mission.get("owner") or mission.get("agentId") or "")
     risk = str(mission.get("risk") or "medium").lower()
     detail = str(mission.get("detail") or mission.get("prompt") or "")
+    trusted_workflow_intent = _trusted_workflow_guard_intent(mission)
+    guard_intent = (
+        trusted_workflow_intent
+        if trusted_workflow_intent is not None
+        else detail
+    )
     tool_policy = get_tool_policy(tool_id) or {}
     reasons: list[str] = []
     if require_operator_mode and operator.get("mode") != "auto_guarded":
@@ -2543,6 +2626,19 @@ def auto_guarded_eligibility(mission: dict, *, require_operator_mode: bool = Tru
         reasons.append("adapter_not_implemented")
     if not bool(tool_policy.get("realExecutionAvailable", False)):
         reasons.append("real_execution_unavailable")
+    workflow_context = _workflow_context_storage(mission.get("workflowContext"))
+    trusted_radar_workflow = bool(
+        trusted_workflow_intent is not None
+        and workflow_context
+        and workflow_context.get("propId") == "left_audit_crystals"
+        and workflow_context.get("actionId") == "discover_new_indicators"
+    )
+    if (
+        trusted_radar_workflow
+        and not isinstance(workflow_context.get("executionReservation"), dict)
+        and not allow_legacy_radar_without_reservation
+    ):
+        reasons.append("radar_execution_reservation_missing")
     permission = evaluate_tool_permission(agent_id, tool_id)
     if not permission.get("allowed"):
         reasons.append(str(permission.get("reason") or "permission_denied"))
@@ -2572,7 +2668,7 @@ def auto_guarded_eligibility(mission: dict, *, require_operator_mode: bool = Tru
     reasons.extend(
         _ai_trade_council_high_impact_reasons(tool_id, detail)
         if council_context_valid
-        else _high_impact_reasons(tool_id, detail, risk)
+        else _high_impact_reasons(tool_id, guard_intent, risk)
     )
     return {
         "eligible": not reasons,
@@ -3360,6 +3456,68 @@ def _workflow_context_storage(value: object) -> dict | None:
     if trigger_source not in {"frontend", "schedule", "backend"}:
         trigger_source = "backend"
     plugin_procedure = _plugin_procedure_storage(value.get("pluginProcedure"))
+    execution_reservation = None
+    raw_reservation = value.get("executionReservation")
+    if raw_reservation is not None:
+        if not isinstance(raw_reservation, dict):
+            return None
+        reservation_settings_key = str(raw_reservation.get("settingsKey") or "")
+        reservation_date = str(raw_reservation.get("bangkokDate") or "")
+        reservation_slot = str(raw_reservation.get("slotKey") or "")
+        reservation_source = str(raw_reservation.get("source") or "")
+        try:
+            reservation_date_valid = (
+                datetime.strptime(reservation_date, "%Y-%m-%d").date().isoformat()
+                == reservation_date
+            )
+        except (TypeError, ValueError):
+            reservation_date_valid = False
+        scheduled_slot_match = re.fullmatch(
+            rf"indicatorScoutSchedule:{re.escape(reservation_date)}:(\d{{2}})(\d{{2}})",
+            reservation_slot,
+        )
+        scheduled_slot_valid = bool(
+            scheduled_slot_match
+            and int(scheduled_slot_match.group(1)) <= 23
+            and int(scheduled_slot_match.group(2)) <= 59
+        )
+        manual_slot_valid = bool(
+            re.fullmatch(
+                rf"indicatorScoutSchedule:{re.escape(reservation_date)}:manual-[0-9a-f]{{16}}",
+                reservation_slot,
+            )
+        )
+        allowed_slot = bool(
+            (reservation_source == "schedule" and scheduled_slot_valid)
+            or (
+                reservation_source == "manual_or_backend"
+                and manual_slot_valid
+            )
+        )
+        if not (
+            prop_id == "left_audit_crystals"
+            and action_id == "discover_new_indicators"
+            and reservation_settings_key == "indicatorScoutSchedule"
+            and reservation_date_valid
+            and allowed_slot
+            and raw_reservation.get("maximumRunsPerDay") == 1
+            and reservation_source in {"schedule", "manual_or_backend"}
+            and (
+                (trigger_source == "schedule" and reservation_source == "schedule")
+                or (
+                    trigger_source in {"frontend", "backend"}
+                    and reservation_source == "manual_or_backend"
+                )
+            )
+        ):
+            return None
+        execution_reservation = {
+            "settingsKey": "indicatorScoutSchedule",
+            "bangkokDate": reservation_date,
+            "slotKey": reservation_slot,
+            "maximumRunsPerDay": 1,
+            "source": reservation_source,
+        }
     return {
         "schemaVersion": "dashboard-workflow-lineage-v1",
         "propId": prop_id,
@@ -3371,6 +3529,7 @@ def _workflow_context_storage(value: object) -> dict | None:
         "inputDigest": input_digest,
         "submittedAt": value.get("submittedAt"),
         "triggerSource": trigger_source,
+        "executionReservation": execution_reservation,
         "pluginProcedure": plugin_procedure,
     }
 
@@ -3390,6 +3549,7 @@ def workflow_context_read_model(value: object) -> dict | None:
         "inputFields": sorted(str(key) for key in (context.get("inputs") or {}))[:40],
         "submittedAt": context.get("submittedAt"),
         "triggerSource": context.get("triggerSource"),
+        "executionReservation": context.get("executionReservation"),
         "pluginProcedure": context.get("pluginProcedure"),
     }
 
@@ -3399,6 +3559,16 @@ DASHBOARD_WORKFLOW_MAX_CONTRACT_FIELD_CHARS = 12000
 RADAR_WORKFLOW_PROCEDURE_ID = "backend-readonly-indicator-scout"
 RADAR_ENTRY_MIN_ITEMS = 1
 RADAR_ENTRY_MAX_ITEMS = 6
+RADAR_TOOL_NAME_MAX_CHARS = 80
+RADAR_CATEGORY_MAX_CHARS = 40
+RADAR_VERSION_MAX_CHARS = 32
+RADAR_SUMMARY_MAX_CHARS = 240
+RADAR_SOURCE_TITLE_MAX_CHARS = 120
+RADAR_SOURCE_URL_MAX_CHARS = 320
+RADAR_MISSING_RULE_MAX_ITEMS = 2
+RADAR_MISSING_RULE_MAX_CHARS = 80
+RADAR_SOURCE_LIMITATION_MAX_ITEMS = 2
+RADAR_SOURCE_LIMITATION_MAX_CHARS = 120
 RADAR_ENTRY_WORKER_REQUIRED_FIELDS = frozenset({
     "toolName",
     "toolKind",
@@ -3575,7 +3745,15 @@ def _radar_text_list(value: object, *, item_limit: int, char_limit: int) -> list
 def _radar_iso_value(value: object, *, optional: bool = False) -> str | None:
     if value is None or value == "":
         return None if optional else ""
-    parsed = parse_iso(str(value or ""))
+    raw = str(value or "").strip()
+    # The shared parser accepts naive timestamps for legacy local records.
+    # Public Radar evidence is stricter and must state its UTC offset.
+    if not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})",
+        raw,
+    ):
+        return None
+    parsed = parse_iso(raw)
     if parsed is None:
         return None
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -3676,7 +3854,13 @@ def _normalize_radar_contract_entries(
         summary_th = " ".join(str(raw_entry.get("summaryTh") or "").split()).strip()
         source_title = " ".join(str(raw_entry.get("sourceTitle") or "").split()).strip()
         scalar_values = (tool_name, category, version, summary_th, source_title)
-        scalar_limits = (160, 80, 80, 1000, 300)
+        scalar_limits = (
+            RADAR_TOOL_NAME_MAX_CHARS,
+            RADAR_CATEGORY_MAX_CHARS,
+            RADAR_VERSION_MAX_CHARS,
+            RADAR_SUMMARY_MAX_CHARS,
+            RADAR_SOURCE_TITLE_MAX_CHARS,
+        )
         if any(
             not text or len(text) > limit or contains_potential_secret(text)
             for text, limit in zip(scalar_values, scalar_limits)
@@ -3698,13 +3882,18 @@ def _normalize_radar_contract_entries(
             errors.append(f"{prefix}_invalid_enum")
             continue
         source_url = _normalized_contract_public_url(raw_entry.get("sourceUrl"))
-        if not source_url or source_url not in evidence_urls:
+        if (
+            not source_url
+            or len(source_url) > RADAR_SOURCE_URL_MAX_CHARS
+            or source_url not in evidence_urls
+        ):
             errors.append(f"{prefix}_source_evidence_mismatch")
             continue
         checked_at = _radar_iso_value(raw_entry.get("checkedAt"))
         published_at = _radar_iso_value(raw_entry.get("publishedAt"), optional=True)
         raw_published_at = raw_entry.get("publishedAt")
         parsed_checked_at = parse_iso(checked_at)
+        parsed_published_at = parse_iso(published_at)
         if (
             not checked_at
             or parsed_checked_at is None
@@ -3715,18 +3904,23 @@ def _normalize_radar_contract_entries(
                 and raw_published_at != ""
                 and published_at is None
             )
+            or (
+                parsed_published_at is not None
+                and parsed_published_at.astimezone(timezone.utc)
+                > parsed_checked_at.astimezone(timezone.utc) + timedelta(minutes=5)
+            )
         ):
             errors.append(f"{prefix}_invalid_timestamp")
             continue
         missing_rules = _radar_text_list(
             raw_entry.get("missingRules"),
-            item_limit=20,
-            char_limit=240,
+            item_limit=RADAR_MISSING_RULE_MAX_ITEMS,
+            char_limit=RADAR_MISSING_RULE_MAX_CHARS,
         )
         source_limitations = _radar_text_list(
             raw_entry.get("sourceLimitations"),
-            item_limit=20,
-            char_limit=800,
+            item_limit=RADAR_SOURCE_LIMITATION_MAX_ITEMS,
+            char_limit=RADAR_SOURCE_LIMITATION_MAX_CHARS,
         )
         screenshot = _radar_screenshot_contract_value(raw_entry.get("screenshot"), result_row)
         if missing_rules is None or source_limitations is None or screenshot is None:
@@ -3748,13 +3942,13 @@ def _normalize_radar_contract_entries(
         batch_fingerprints.add(fingerprint)
         normalized_entries.append({
             "recordId": f"radar-{fingerprint}-{index + 1}",
-            "toolName": redact_text(tool_name, 160),
+            "toolName": redact_text(tool_name, RADAR_TOOL_NAME_MAX_CHARS),
             "toolKind": tool_kind,
             "platform": platform,
-            "category": redact_text(category, 80),
-            "version": redact_text(version, 80),
-            "summaryTh": redact_text(summary_th, 1000),
-            "sourceTitle": redact_text(source_title, 300),
+            "category": redact_text(category, RADAR_CATEGORY_MAX_CHARS),
+            "version": redact_text(version, RADAR_VERSION_MAX_CHARS),
+            "summaryTh": redact_text(summary_th, RADAR_SUMMARY_MAX_CHARS),
+            "sourceTitle": redact_text(source_title, RADAR_SOURCE_TITLE_MAX_CHARS),
             "sourceUrl": source_url,
             "publishedAt": published_at,
             "checkedAt": checked_at,
@@ -4338,12 +4532,18 @@ def validate_dashboard_workflow_output_contract(mission: object, result: object)
         if normalized_entries is None:
             provided_fields.pop("entries", None)
         else:
-            provided_fields["entries"] = json.dumps(
+            normalized_entries_json = json.dumps(
                 normalized_entries,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
             )
+            if len(normalized_entries_json) > contract_value_limit:
+                provided_fields.pop("entries", None)
+                if "entries" not in oversized_fields:
+                    oversized_fields.append("entries")
+            else:
+                provided_fields["entries"] = normalized_entries_json
     normalized_action_id = (
         context.get("actionId") if isinstance(context, dict) else raw_context.get("actionId")
     )
@@ -4403,9 +4603,16 @@ def validate_dashboard_workflow_output_contract(mission: object, result: object)
         and not oversized_fields
         and not entry_errors
     )
+    failure_code = None
+    if procedure.get("pluginSkillId") == RADAR_WORKFLOW_PROCEDURE_ID:
+        if oversized_fields:
+            failure_code = "radar_output_too_large"
+        elif entry_errors or missing_fields or missing_evidence:
+            failure_code = "radar_output_contract_invalid"
     return sanitize_json_value({
         "applicable": True,
         "valid": valid,
+        "failureCode": failure_code,
         "procedureId": procedure.get("pluginSkillId"),
         "procedureKind": procedure.get("procedureKind"),
         "expectedFields": expected_fields,
@@ -5126,6 +5333,43 @@ def _mission_blocker_read_model(mission: dict) -> dict | None:
     }
 
 
+def _mission_backend_auto_safe_marker_is_coherent(mission: dict) -> bool:
+    """Validate the durable marker used only to label Backend-auto-safe work.
+
+    This intentionally ignores current operator/quota/runtime readiness: the
+    label describes how this Mission was authorized.  It nevertheless fails
+    closed unless the complete immutable authorization marker and its digest
+    still agree with the Mission execution packet.
+    """
+
+    approval = mission.get("approval") if isinstance(mission.get("approval"), dict) else {}
+    execution = mission.get("execution") if isinstance(mission.get("execution"), dict) else {}
+    authorization_id = str(execution.get("authorizationId") or "")
+    auto_queued_at = str(mission.get("autoQueuedAt") or "")
+    expected_digest = str(execution.get("authorizationPayloadDigest") or "")
+    if not (
+        mission.get("executionMode") == "auto_guarded"
+        and mission.get("autoEligible") is True
+        and mission.get("requiresHumanApproval") is not True
+        and approval.get("required") is False
+        and approval.get("state") == "not_required"
+        and execution.get("schema") == "auto-guarded-execution-v1"
+        and SAFE_ID_PATTERN.fullmatch(authorization_id)
+        and auto_queued_at
+        and str(execution.get("autoQueuedAt") or "") == auto_queued_at
+        and str(execution.get("authorizationIssuedAt") or "") == auto_queued_at
+        and execution.get("authorizationSource") == "backend_auto_policy"
+        and execution.get("authorizationDecision") == "allowed"
+        and execution.get("authorizationPolicyVersion") == AUTO_SAFE_POLICY_VERSION
+        and execution.get("authorizationReason") == "routine_internal_or_read_only"
+        and re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+    ):
+        return False
+    if mission.get("status") == "queued" and execution.get("authorizationConsumedAt"):
+        return False
+    return secrets.compare_digest(expected_digest, mission_payload_digest(mission))
+
+
 def mission_read_model_item(mission: dict) -> dict:
     """Return a frontend-safe mission card without internal approval digests or paths."""
     approval = mission.get("approval") if isinstance(mission.get("approval"), dict) else {}
@@ -5134,6 +5378,35 @@ def mission_read_model_item(mission: dict) -> dict:
     subtask_ids = mission.get("subtaskIds") if isinstance(mission.get("subtaskIds"), list) else []
     report_ids = mission.get("reportIds") if isinstance(mission.get("reportIds"), list) else []
     required_actors = approval.get("requiredActors") if isinstance(approval.get("requiredActors"), list) else []
+    # Either durable Backend flag must keep the UI fail-closed.  An explicit
+    # false value may never mask a still-required approval record.
+    requires_human_approval = bool(
+        mission.get("requiresHumanApproval") is True
+        or approval.get("required") is True
+    )
+    if requires_human_approval and approval.get("required") is True:
+        automatic_policy = {
+            "mode": "human_review",
+            "decision": "required",
+            "reason": "explicit_high_risk_or_external",
+            "version": None,
+            "humanApprovalRequired": True,
+        }
+    else:
+        backend_auto_safe = _mission_backend_auto_safe_marker_is_coherent(mission)
+        automatic_policy = {
+            "mode": "backend_auto_safe" if backend_auto_safe else "manual_guarded",
+            "decision": "allowed" if backend_auto_safe else "manual",
+            "reason": (
+                redact_text(str(execution.get("authorizationReason") or ""), 80)
+                or "operator_mode_manual"
+            ),
+            "version": (
+                redact_text(str(execution.get("authorizationPolicyVersion") or ""), 80)
+                or None
+            ),
+            "humanApprovalRequired": False,
+        }
     return {
         "id": redact_text(str(mission.get("id") or ""), 120),
         "title": redact_text(str(mission.get("title") or "Untitled mission"), 160),
@@ -5170,9 +5443,8 @@ def mission_read_model_item(mission: dict) -> dict:
         "reasonCode": redact_text(str(mission.get("errorCode") or ""), 120) or None,
         "blocker": _mission_blocker_read_model(mission),
         "evidence": evidence_read_model(mission.get("evidence")),
-        "requiresHumanApproval": bool(
-            mission.get("requiresHumanApproval", approval.get("required", False))
-        ),
+        "requiresHumanApproval": requires_human_approval,
+        "automaticPolicy": automatic_policy,
         "startedAt": execution.get("startedAt") or mission.get("startedAt"),
         "heartbeatAt": execution.get("heartbeatAt") or mission.get("heartbeatAt"),
         "archivedFromStatus": redact_text(str(mission.get("archivedFromStatus") or ""), 40) or None,
@@ -5623,8 +5895,8 @@ DASHBOARD_WORKFLOW_SCHEDULE_JOBS = (
         "propId": "left_audit_crystals",
         "actionId": "discover_new_indicators",
         "defaultTimes": ["09:00"],
-        "maxTimes": 2,
-        "maxRunsPerDay": 2,
+        "maxTimes": 1,
+        "maxRunsPerDay": 1,
     },
     {
         "settingsKey": "newsBiasSchedule",
@@ -5648,10 +5920,11 @@ def _default_dashboard_workflow_settings() -> dict:
             **copy.deepcopy(DASHBOARD_WORKFLOW_SCHEDULE_STATE_DEFAULTS),
         },
         "indicatorScoutSchedule": {
-            "requestedEnabled": False,
+            "requestedEnabled": True,
             "times": ["09:00"],
             "timezone": "Asia/Bangkok",
             "savedAt": None,
+            "automaticDailyRadarVersion": 1,
             **copy.deepcopy(DASHBOARD_WORKFLOW_SCHEDULE_STATE_DEFAULTS),
         },
         "indicatorScoutSheet": {
@@ -5689,6 +5962,11 @@ def _dashboard_workflow_settings_shape(value: object) -> dict:
         if isinstance(source.get("newsBiasSchedule"), dict)
         else None
     )
+    raw_radar_schedule = (
+        copy.deepcopy(source.get("indicatorScoutSchedule"))
+        if isinstance(source.get("indicatorScoutSchedule"), dict)
+        else None
+    )
     result = source
     for key, default_value in defaults.items():
         if isinstance(default_value, dict):
@@ -5722,6 +6000,44 @@ def _dashboard_workflow_settings_shape(value: object) -> dict:
     news_schedule["minimumImpact"] = "low"
     news_schedule["timezone"] = "Asia/Bangkok"
     result["newsBiasSchedule"] = news_schedule
+    # v1 replaces the approval-bound two-slot Radar schedule with one safe
+    # automatic 09:00 Bangkok run. Reset stale reservations once; later
+    # operator edits remain authoritative after the version is persisted.
+    radar_schedule = (
+        result.get("indicatorScoutSchedule")
+        if isinstance(result.get("indicatorScoutSchedule"), dict)
+        else {}
+    )
+    if (
+        not isinstance(raw_radar_schedule, dict)
+        or clamp_int(raw_radar_schedule.get("automaticDailyRadarVersion"), 0, 0, 99) < 1
+    ):
+        operator_authored = bool(
+            isinstance(raw_radar_schedule, dict)
+            and raw_radar_schedule.get("savedAt")
+        )
+        radar_schedule["requestedEnabled"] = (
+            bool(raw_radar_schedule.get("requestedEnabled", False))
+            if operator_authored
+            else True
+        )
+        radar_schedule["times"] = (
+            _dashboard_schedule_times(
+                raw_radar_schedule,
+                ["09:00"],
+                max_times=1,
+            )
+            if operator_authored
+            else ["09:00"]
+        )
+        radar_schedule["savedAt"] = (
+            raw_radar_schedule.get("savedAt") if operator_authored else None
+        )
+        for key, value in DASHBOARD_WORKFLOW_SCHEDULE_STATE_DEFAULTS.items():
+            radar_schedule[key] = copy.deepcopy(value)
+        radar_schedule["automaticDailyRadarVersion"] = 1
+    radar_schedule["timezone"] = "Asia/Bangkok"
+    result["indicatorScoutSchedule"] = radar_schedule
     result["version"] = "dashboard-workflow-settings-v1"
     return result
 
@@ -6001,13 +6317,14 @@ def _dashboard_schedule_daily_execution_state(
             candidate = str(item or "").strip()
             if candidate.startswith(prefix) and candidate not in keys:
                 keys.append(candidate)
+        keys = keys[:maximum]
 
     if stored_day == day:
         raw_count = source.get("dailyExecutionCount")
         if raw_count is None:
             count = len(keys)
         elif isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count >= 0:
-            count = max(raw_count, len(keys))
+            count = min(maximum, max(raw_count, len(keys)))
         else:
             # Corrupt or ambiguous same-day state must never reopen capacity.
             count = maximum
@@ -6112,7 +6429,11 @@ def _dashboard_schedule_read_model(
             gate_model = (
                 gate
                 if isinstance(gate, dict)
-                else _dashboard_workflow_scheduler_gate(refresh_quota=False)
+                and str(gate.get("settingsKey") or "") == settings_key
+                else _dashboard_workflow_scheduler_gate(
+                    refresh_quota=False,
+                    settings_key=settings_key,
+                )
             )
     gate_allowed = bool(gate_model.get("allowed"))
     effective_enabled = bool(requested_enabled and scheduler_operational and gate_allowed)
@@ -6192,7 +6513,7 @@ def _dashboard_schedule_read_model(
         "lastErrorAt": schedule.get("lastErrorAt"),
         "pendingSlotKey": redact_text(str(schedule.get("pendingSlotKey") or ""), 120) or None,
         "pendingScheduledAt": schedule.get("pendingScheduledAt"),
-        "automaticExternalActions": effective_enabled,
+        "automaticExternalActions": False,
         "automaticReadOnlyResearch": True,
         "automaticExternalWrites": False,
         "automaticMetaTraderActions": False,
@@ -6214,7 +6535,7 @@ def _dashboard_schedule_read_model(
             "remainingRunsToday": daily_state["remaining"],
             "dailyExecutionDate": daily_state["date"],
             "hardDailyLimitEnforced": True,
-            "dailyExecutionCountingPolicy": "pre_dispatch_fail_closed_reservation",
+            "dailyExecutionCountingPolicy": "post_gate_pre_dispatch_fail_closed_reservation",
         })
     if settings_key == "newsBiasSchedule":
         model.update({
@@ -6287,29 +6608,32 @@ def _dashboard_workflow_execution_preferences(
 ) -> dict:
     """Return the trusted effective budget for one dashboard action.
 
-    The daily FX calendar performs bounded live research and then serializes a
-    strict 3-source/6-event/28-pair result.  A generic 120-second preference can
-    finish its searches but be killed before emitting the final JSON, so this
-    action receives a Backend-owned floor.  Higher saved preferences remain in
-    force and the orchestration hard cap is unchanged.
+    Structured workflows can exceed the generic 7k presentation preference
+    even when their contract is still within the hard 20k result envelope.
+    Radar therefore receives the full Backend ceiling so the runner never
+    truncates valid JSON after successful web research.  Per-field validation
+    remains capped at 12k and the complete canonical envelope at 20k.
     """
 
     preferences = _dashboard_agent_preferences_read_model(settings)
-    if action_id != "analyze_daily_market_news":
+    if action_id not in {"discover_new_indicators", "analyze_daily_market_news"}:
         return preferences
-    return {
+    effective = {
         **preferences,
-        "timeoutSeconds": max(
-            FX_DAILY_NEWS_TIMEOUT_FLOOR_SECONDS,
-            clamp_int(preferences.get("timeoutSeconds"), 120, 15, 600),
-        ),
-        # This action already requires the hard-bounded 20k envelope so the
-        # final 28-pair read model is not truncated after successful research.
         "outputLimitChars": max(
             20000,
             clamp_int(preferences.get("outputLimitChars"), 20000, 1000, 20000),
         ),
     }
+    if action_id == "discover_new_indicators":
+        # Keep worker and scheduler on the same bounded once-daily reserve.
+        effective["rateReservePercent"] = 10
+    if action_id == "analyze_daily_market_news":
+        effective["timeoutSeconds"] = max(
+            FX_DAILY_NEWS_TIMEOUT_FLOOR_SECONDS,
+            clamp_int(preferences.get("timeoutSeconds"), 120, 15, 600),
+        )
+    return effective
 
 
 def _empty_fx_bias_rows() -> list[dict]:
@@ -8626,13 +8950,17 @@ def _build_equipment_connection_center_read_model(
     # does not need.
     worker_model = mission_worker_read_model(include_queue_count=False)
     scheduler_model = dashboard_workflow_scheduler_read_model()
-    shared_schedule_gate = _dashboard_workflow_scheduler_gate(
-        refresh_quota=False,
-        bridge=bridge_source,
-        mission_worker=worker_model,
-        quota=quota_model,
-        settings=workflow_settings,
-    )
+    shared_schedule_gates = {
+        settings_key: _dashboard_workflow_scheduler_gate(
+            refresh_quota=False,
+            settings_key=settings_key,
+            bridge=bridge_source,
+            mission_worker=worker_model,
+            quota=quota_model,
+            settings=workflow_settings,
+        )
+        for settings_key in ("discoverySchedule", "indicatorScoutSchedule")
+    }
     health = _safe_vps_hq_health_snapshot(
         bridge_source,
         worker=worker_model,
@@ -8659,7 +8987,7 @@ def _build_equipment_connection_center_read_model(
     }
     schedule_specs = {
         "codex_mcp_portal": ("discoverySchedule", ["09:00"], 6),
-        "left_audit_crystals": ("indicatorScoutSchedule", ["09:00"], 2),
+        "left_audit_crystals": ("indicatorScoutSchedule", ["09:00"], 1),
         "left_signal_cube": ("newsBiasSchedule", ["00:00", "12:00"], 2),
     }
     ready_statuses = {"connected", "ready", "detected", "configured", "active"}
@@ -8780,7 +9108,7 @@ def _build_equipment_connection_center_read_model(
                 max_times=max_times,
                 settings=workflow_settings,
                 scheduler=scheduler_model,
-                gate=shared_schedule_gate,
+                gate=shared_schedule_gates.get(settings_key),
             )
             schedule = {
                 "supported": True,
@@ -9868,6 +10196,9 @@ def _radar_website_tool_read_model(
     *,
     settings: object | None = None,
     now_local: datetime | None = None,
+    bridge: object | None = None,
+    missions: object | None = None,
+    schedule: object | None = None,
 ) -> dict:
     local_now = _dashboard_scheduler_local_now(now_local)
     dates = [(local_now.date() - timedelta(days=offset)).isoformat() for offset in range(7)]
@@ -9937,6 +10268,159 @@ def _radar_website_tool_read_model(
         for day in history
         for entry in day["entries"]
     ]
+    bridge_truth = bridge if isinstance(bridge, dict) else bridge_status()
+    action = DASHBOARD_WORKFLOW_ACTIONS["discover_new_indicators"]
+    availability = _workflow_action_availability(
+        "left_audit_crystals",
+        "discover_new_indicators",
+        action,
+        bridge_truth,
+    )
+    schedule_model = (
+        schedule
+        if isinstance(schedule, dict)
+        else _dashboard_saved_schedule_read_model(
+            "indicatorScoutSchedule",
+            default_times=["09:00"],
+            settings=settings,
+            max_times=1,
+        )
+    )
+    mission_rows = [
+        item
+        for item in (missions if isinstance(missions, list) else load_missions())
+        if isinstance(item, dict)
+        and _workflow_record_matches_prop(item, "left_audit_crystals")
+        and str((item.get("workflowContext") or {}).get("actionId") or "")
+        == "discover_new_indicators"
+    ]
+    mission_rows.sort(
+        key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or "")
+    )
+    latest_mission = mission_rows[-1] if mission_rows else {}
+    active_mission = next(
+        (
+            item for item in reversed(mission_rows)
+            if item.get("status") in {"queued", "running"}
+        ),
+        None,
+    )
+    completed_mission = next(
+        (
+            item for item in reversed(mission_rows)
+            if item.get("status") == "completed"
+        ),
+        None,
+    )
+    runtime_ready = bool(availability.get("realToolAvailable"))
+    last_error = (
+        redact_text(str(schedule_model.get("lastError") or ""), 240)
+        or (
+            redact_text(
+                str(latest_mission.get("errorCode") or latest_mission.get("result") or ""),
+                240,
+            )
+            if latest_mission.get("status") in {"blocked", "failed"}
+            else None
+        )
+    )
+    last_report_at = (
+        source_reports[-1].get("updatedAt") or source_reports[-1].get("createdAt")
+        if source_reports
+        else None
+    )
+    last_success_at = (completed_mission or {}).get("completedAt") or last_report_at
+    last_attempt_at = (
+        schedule_model.get("lastAttemptAt")
+        or latest_mission.get("updatedAt")
+        or latest_mission.get("createdAt")
+    )
+    if active_mission:
+        source_status = "running"
+    elif not runtime_ready:
+        source_status = "configuration_required"
+    elif last_error:
+        source_status = "degraded"
+    else:
+        source_status = "ready"
+    checked_at = bridge_truth.get("time") or bridge_truth.get("checkedAt") or utc_now()
+    sheet_model = _dashboard_indicator_sheet_read_model(settings)
+    settings_source = (
+        _dashboard_workflow_settings_shape(settings)
+        if isinstance(settings, dict)
+        else load_dashboard_workflow_settings()
+    )
+    radar_schedule_source = (
+        settings_source.get("indicatorScoutSchedule")
+        if isinstance(settings_source.get("indicatorScoutSchedule"), dict)
+        else {}
+    )
+    retry_needed = bool(last_error or not source_reports)
+    retry_cooldown_ready = _dashboard_workflow_retry_ready(
+        radar_schedule_source,
+        datetime.now(timezone.utc),
+    )
+    source_health = [
+        {
+            "sourceId": "codex_web_search",
+            "label": "Codex Native Web Search",
+            "status": "running" if active_mission else ("ready" if runtime_ready else "unavailable"),
+            "lastCheckedAt": checked_at,
+            "lastSuccessAt": last_success_at,
+            "errorCode": None if runtime_ready else redact_text(str(availability.get("adapterStatus") or "codex_not_ready"), 80),
+        },
+        {
+            "sourceId": "local_report_catalog",
+            "label": "Local Radar Report Catalog",
+            "status": "ready",
+            "lastCheckedAt": utc_now(),
+            "lastSuccessAt": last_report_at,
+            "errorCode": None,
+        },
+        {
+            "sourceId": "google_sheet",
+            "label": "Google Sheet Archive",
+            "status": (
+                "configured_not_connected"
+                if sheet_model.get("configured")
+                else "not_connected_optional"
+            ),
+            "lastCheckedAt": sheet_model.get("savedAt"),
+            "lastSuccessAt": None,
+            "errorCode": None,
+        },
+    ]
+    service_health = {
+        "status": source_status,
+        "adapterStatus": redact_text(str(availability.get("adapterStatus") or "unknown"), 80),
+        "sourceStatus": source_status,
+        "lastRunStatus": redact_text(str(schedule_model.get("lastRunStatus") or "never"), 40),
+        "lastResultKind": redact_text(str(schedule_model.get("lastResultKind") or ""), 80) or None,
+        "lastAttemptAt": last_attempt_at,
+        "lastRunAt": schedule_model.get("lastRunAt"),
+        "lastSuccessAt": last_success_at,
+        "lastCheckedAt": checked_at,
+        "lastError": last_error,
+        "activeMissionId": safe_reference((active_mission or {}).get("id")),
+        "retryAvailable": bool(
+            runtime_ready
+            and active_mission is None
+            and retry_needed
+            and retry_cooldown_ready
+            and schedule_model.get("gateAllowed") is True
+            and clamp_int(
+                schedule_model.get("remainingRunsToday"),
+                0,
+                0,
+                1,
+            ) > 0
+        ),
+        "retryActionId": "discover_new_indicators",
+        "retryEndpoint": "/api/props/left_audit_crystals/workflow/actions",
+        "humanApprovalRequired": False,
+        "automaticExecution": True,
+        "sourceHealth": source_health,
+    }
     return sanitize_json_value({
         "schemaVersion": "radar-website-tool-v1",
         "today": history[0],
@@ -9951,7 +10435,8 @@ def _radar_website_tool_read_model(
             "googleSheetCompared": False,
             "fingerprintFields": ["normalizedSourceUrl", "name", "platform", "version"],
         },
-        "googleSheet": _dashboard_indicator_sheet_read_model(settings),
+        "googleSheet": sheet_model,
+        "serviceHealth": service_health,
         "screenshot": {
             "adapterStatus": "not_connected",
             "automaticCaptureAvailable": False,
@@ -10111,12 +10596,15 @@ def workflow_dashboard_read_model(
         model["schedule"] = _dashboard_saved_schedule_read_model(
             "indicatorScoutSchedule",
             default_times=["09:00"],
-            max_times=2,
+            max_times=1,
             settings=workflow_settings,
         )
         radar_model = _radar_website_tool_read_model(
             reports,
             settings=workflow_settings,
+            bridge=bridge_truth,
+            missions=missions,
+            schedule=model["schedule"],
         )
         model["radarWebsiteTool"] = radar_model
         model["todayEntries"] = radar_model.get("todayEntries", [])
@@ -10128,7 +10616,7 @@ def workflow_dashboard_read_model(
             "settingsActionId": "save_indicator_scout_schedule",
             "schedule": model["schedule"],
             "googleSheet": model["googleSheet"],
-            "maxRunsPerDay": 2,
+            "maxRunsPerDay": 1,
             "searchAndSettingsArePrimaryTabs": False,
         }
         model["discoveryTruth"] = {
@@ -10629,6 +11117,12 @@ def _workflow_prompt(
             "contractFields ต้องมีเพียงหนึ่งรายการชื่อ entries และ value ต้องเป็น JSON array จำนวน 1 ถึง maxItems รายการ; "
             "แต่ละรายการต้องมีเฉพาะ toolName, toolKind, platform, category, version, summaryTh, sourceTitle, sourceUrl, "
             "publishedAt, checkedAt, verificationStatus, availability, eaReadiness, missingRules, sourceLimitations และ screenshot. "
+            "checkedAt ต้องเป็นเวลาที่ตรวจแหล่งข้อมูลจริงในรูป ISO 8601 พร้อม UTC offset เช่น 2026-08-14T09:16:00+07:00; "
+            "ห้ามใช้ข้อความชื่อ timezone เช่น '2026-08-14 Asia/Bangkok'. publishedAt ต้องเป็น ISO 8601 พร้อม UTC offset เมื่อแหล่งต้นทางยืนยันเวลาได้ "
+            "และต้องเป็น JSON null เมื่อไม่ทราบ ห้ามเดาวันหรือเวลา. ผลลัพธ์ JSON ทั้ง envelope ต้องไม่เกิน 20000 ตัวอักษร "
+            "และ value ของ contractFields.entries ต้องไม่เกิน 12000 ตัวอักษร. ขีดจำกัดต่อรายการ: toolName 80, category 40, version 32, "
+            "summaryTh 240, sourceTitle 120 และ sourceUrl 320 ตัวอักษร; missingRules ได้ไม่เกิน 2 ข้อ ข้อละ 80 ตัวอักษร และ "
+            "sourceLimitations ได้ไม่เกิน 2 ข้อ ข้อละ 120 ตัวอักษร. summary/findings/nextSteps/evidence ของ envelope ต้องกระชับตาม schema. "
             "ห้ามสร้าง recordId, duplicateFingerprint, duplicateStatus หรือ duplicateScope เพราะ Backend จะคำนวณและตัดสินสถานะเหล่านี้เอง. "
             "screenshot ต้องเป็น JSON object ที่ available=false, status=not_available, attachmentId=null และ artifactRef=null "
             "เว้นแต่มีไฟล์ภาพจริงใน result.artifacts.final และ artifactRef ของรายการตรงกับไฟล์นั้นทุกตัวอักษร; ห้ามนำภาพของรายการหนึ่งไปใช้กับอีกรายการ. "
@@ -10765,7 +11259,7 @@ def _save_dashboard_schedule_preference(settings_key: str, form: dict) -> dict:
         raise RequestError("Unknown dashboard schedule settings key.", 500)
 
     def apply(settings: dict) -> dict:
-        max_times = 2
+        max_times = 1 if settings_key == "indicatorScoutSchedule" else 2
         settings[settings_key] = _dashboard_schedule_entry(
             settings.get(settings_key),
             form,
@@ -10776,6 +11270,7 @@ def _save_dashboard_schedule_preference(settings_key: str, form: dict) -> dict:
             settings[settings_key]["minimumImpact"] = "low"
             settings[settings_key]["automaticDailyCalendarVersion"] = 3
         if settings_key == "indicatorScoutSchedule":
+            settings[settings_key]["automaticDailyRadarVersion"] = 1
             previous_sheet = (
                 settings.get("indicatorScoutSheet")
                 if isinstance(settings.get("indicatorScoutSheet"), dict)
@@ -10810,7 +11305,7 @@ def _save_dashboard_schedule_preference(settings_key: str, form: dict) -> dict:
         settings_key,
         default_times=defaults,
         settings=settings,
-        max_times=2,
+        max_times=1 if settings_key == "indicatorScoutSchedule" else 2,
     )
     if settings_key == "indicatorScoutSchedule":
         result["googleSheet"] = _dashboard_indicator_sheet_read_model(settings)
@@ -11068,7 +11563,7 @@ def _complete_local_dashboard_workflow_action(
             findings = ["read-only scheduler: available", "external write: disabled"]
         elif handler == "indicator_schedule":
             output = _save_dashboard_schedule_preference("indicatorScoutSchedule", form)
-            summary = "บันทึกเวลา Radar Website Tool แล้ว (สูงสุดวันละ 2 รอบ) Local Scheduler จะส่งงานวิจัยแบบอ่านอย่างเดียวเมื่อระบบพร้อม"
+            summary = "บันทึกเวลา Radar Website Tool แล้ว (สูงสุดวันละ 1 รอบ) Local Scheduler จะส่งงานวิจัยแบบอ่านอย่างเดียวเมื่อระบบพร้อม"
             findings = [
                 "read-only scheduler: available",
                 "google sheets adapter: not_connected",
@@ -11554,6 +12049,60 @@ def run_dashboard_workflow_action(
             )
         prompt = _workflow_prompt(action_id, form, source, plugin_profile)
         existing = find_mission_by_idempotency(raw_idempotency_key) if raw_idempotency_key else None
+        radar_reservation = None
+        if (
+            prop_id == "left_audit_crystals"
+            and action_id == "discover_new_indicators"
+            and trigger_source != "schedule"
+            and existing is None
+        ):
+            stage = "radar_daily_execution_limit"
+            radar_reservation = _dashboard_workflow_reserve_manual_radar_execution(
+                raw_idempotency_key,
+            )
+            if not radar_reservation.get("allowed"):
+                raise RequestError(
+                    "Radar Website Tool ทำงานได้สูงสุดวันละ 1 รอบตามเวลา Asia/Bangkok",
+                    409,
+                )
+            lineage["executionReservation"] = {
+                "settingsKey": "indicatorScoutSchedule",
+                "bangkokDate": radar_reservation["bangkokDate"],
+                "slotKey": radar_reservation["slotKey"],
+                "maximumRunsPerDay": 1,
+                "source": "manual_or_backend",
+            }
+        elif (
+            prop_id == "left_audit_crystals"
+            and action_id == "discover_new_indicators"
+            and trigger_source == "schedule"
+            and existing is None
+        ):
+            scheduled_reservation = _dashboard_radar_scheduled_execution_reservation(
+                raw_idempotency_key
+            )
+            if scheduled_reservation is None:
+                stage = "invalid_schedule_reservation"
+                raise RequestError(
+                    "Scheduled Radar workflow has no valid Backend daily reservation.",
+                    409,
+                )
+            lineage["executionReservation"] = scheduled_reservation
+        elif (
+            prop_id == "left_audit_crystals"
+            and action_id == "discover_new_indicators"
+            and trigger_source != "schedule"
+            and isinstance(existing, dict)
+        ):
+            existing_context = _workflow_context_storage(existing.get("workflowContext"))
+            existing_reservation = (
+                existing_context.get("executionReservation")
+                if isinstance(existing_context, dict)
+                and isinstance(existing_context.get("executionReservation"), dict)
+                else None
+            )
+            if existing_reservation is not None:
+                lineage["executionReservation"] = existing_reservation
         stage = "bridge_dispatch"
         existing_context = (
             _workflow_context_storage(existing.get("workflowContext"))
@@ -11598,6 +12147,20 @@ def run_dashboard_workflow_action(
                     "outputLimitChars": execution_preferences.get("outputLimitChars"),
                 },
             }, trusted_workflow_context=lineage, trusted_execution_preferences=execution_preferences)
+        if radar_reservation is not None:
+            reserved_mission = (
+                result.get("mission")
+                if isinstance(result.get("mission"), dict)
+                else {}
+            )
+            # Approval-required is still a real durable Mission which may run
+            # after a human decision, so it must retain the shared daily slot.
+            # Only a definite no-Mission response can safely release capacity.
+            if not safe_reference(reserved_mission.get("id")):
+                _dashboard_workflow_release_daily_execution(
+                    radar_reservation,
+                    str(result.get("kind") or "radar_dispatch_rejected"),
+                )
     except RequestError as exc:
         append_audit({
             "type": "dashboard.workflow_action_rejected",
@@ -11613,6 +12176,55 @@ def run_dashboard_workflow_action(
         if isinstance(result.get("mission"), dict)
         else None
     )
+    if (
+        mission_id
+        and prop_id == "left_audit_crystals"
+        and action_id == "discover_new_indicators"
+        and trigger_source != "schedule"
+    ):
+        linked_mission = result.get("mission") if isinstance(result.get("mission"), dict) else {}
+        linked_context = _workflow_context_storage(linked_mission.get("workflowContext")) or {}
+        linked_reservation = (
+            linked_context.get("executionReservation")
+            if isinstance(linked_context.get("executionReservation"), dict)
+            else {}
+        )
+        linked_slot_key = str(
+            linked_reservation.get("slotKey")
+            or ((radar_reservation or {}).get("slotKey") if isinstance(radar_reservation, dict) else "")
+        ).strip()
+        now_text = utc_now()
+        _dashboard_workflow_update_schedule_state(
+            "indicatorScoutSchedule",
+            {
+                "lastAttemptAt": now_text,
+                "lastAttemptSlotKey": linked_slot_key or None,
+                "lastRunAt": now_text,
+                "lastMissionId": mission_id,
+                "lastSlotKey": linked_slot_key or None,
+                "lastRunStatus": str(linked_mission.get("status") or "queued"),
+                "lastResultKind": redact_text(
+                    str(result.get("kind") or "mission_queued"),
+                    80,
+                ),
+                "lastIdempotentReplay": bool(existing),
+                "lastError": None,
+                "lastErrorAt": None,
+                "pendingSlotKey": None,
+                "pendingScheduledAt": None,
+            },
+        )
+        append_audit({
+            "type": "dashboard.radar_manual_mission_linked",
+            "settingsKey": "indicatorScoutSchedule",
+            "missionId": mission_id,
+            "slotKey": linked_slot_key or None,
+            "resultKind": redact_text(str(result.get("kind") or "mission_queued"), 80),
+            "idempotentReplay": bool(existing),
+            "triggerSource": trigger_source,
+            "externalWrites": False,
+            "metaTraderActions": False,
+        })
     idempotent_replay = bool(existing and mission_id and mission_id == safe_reference(existing.get("id")))
     if idempotent_replay:
         append_audit({
@@ -11967,6 +12579,178 @@ def _dashboard_workflow_reserve_daily_execution(
     return decision
 
 
+def _dashboard_radar_scheduled_execution_reservation(
+    idempotency_key: object,
+) -> dict | None:
+    match = re.fullmatch(
+        r"dashboard-schedule:(indicatorScoutSchedule):(\d{4}-\d{2}-\d{2}):(\d{4})",
+        str(idempotency_key or "").strip(),
+    )
+    if not match:
+        return None
+    settings_key, bangkok_date, hhmm = match.groups()
+    return {
+        "settingsKey": settings_key,
+        "bangkokDate": bangkok_date,
+        "slotKey": f"{settings_key}:{bangkok_date}:{hhmm}",
+        "maximumRunsPerDay": 1,
+        "source": "schedule",
+    }
+
+
+def _dashboard_workflow_reserve_manual_radar_execution(
+    idempotency_key: str,
+    local_now: datetime | None = None,
+) -> dict:
+    """Share Radar's one-per-Bangkok-day ledger with manual/retry runs."""
+
+    now_local = _dashboard_scheduler_local_now(local_now)
+    day = now_local.strftime("%Y-%m-%d")
+    reservation_identity = str(idempotency_key or "").strip() or (
+        f"anonymous:{utc_now()}:{secrets.token_hex(8)}"
+    )
+    slot_key = (
+        f"indicatorScoutSchedule:{day}:manual-"
+        f"{payload_digest(reservation_identity)[:16]}"
+    )
+    decision: dict = {
+        "allowed": False,
+        "kind": "daily_execution_limit_reached",
+        "settingsKey": "indicatorScoutSchedule",
+        "slotKey": slot_key,
+        "bangkokDate": day,
+        "maximumRunsPerDay": 1,
+        "source": "manual_or_backend",
+    }
+
+    def apply(settings: dict) -> dict:
+        nonlocal decision
+        schedule = (
+            settings.get("indicatorScoutSchedule")
+            if isinstance(settings.get("indicatorScoutSchedule"), dict)
+            else {}
+        )
+        daily_state = _dashboard_schedule_daily_execution_state(
+            "indicatorScoutSchedule",
+            schedule,
+            now_local,
+            max_runs_per_day=1,
+        )
+        schedule["dailyExecutionDate"] = daily_state["date"]
+        schedule["dailyExecutionCount"] = daily_state["count"]
+        schedule["dailyExecutionSlotKeys"] = daily_state["slotKeys"]
+        if slot_key in daily_state["slotKeys"]:
+            decision = {
+                **decision,
+                "allowed": True,
+                "kind": "daily_execution_reservation_replayed",
+                "runsReserved": daily_state["count"],
+            }
+        elif daily_state["remaining"] <= 0:
+            decision = {
+                **decision,
+                "runsReserved": daily_state["count"],
+            }
+        else:
+            reserved_at = now_local.astimezone(timezone.utc).isoformat().replace(
+                "+00:00", "Z"
+            )
+            schedule["dailyExecutionCount"] = daily_state["count"] + 1
+            schedule["dailyExecutionSlotKeys"] = [
+                *daily_state["slotKeys"],
+                slot_key,
+            ]
+            schedule["dailyExecutionLastReservedAt"] = reserved_at
+            decision = {
+                **decision,
+                "allowed": True,
+                "kind": "daily_execution_reserved",
+                "runsReserved": daily_state["count"] + 1,
+            }
+        settings["indicatorScoutSchedule"] = schedule
+        return settings
+
+    _mutate_dashboard_workflow_settings(apply)
+    append_audit({
+        "type": (
+            "dashboard.workflow_schedule_daily_execution_reserved"
+            if decision.get("allowed")
+            else "dashboard.workflow_schedule_daily_guard"
+        ),
+        "settingsKey": "indicatorScoutSchedule",
+        "slotKey": slot_key,
+        "reason": decision.get("kind"),
+        "bangkokDate": day,
+        "runsReserved": decision.get("runsReserved"),
+        "maximumRunsPerDay": 1,
+        "triggerSource": "manual_or_backend",
+        "externalWrites": False,
+        "metaTraderActions": False,
+    })
+    return decision
+
+
+def _dashboard_workflow_release_daily_execution(
+    pending: dict,
+    reason: str,
+) -> dict:
+    """Release a reservation only after a definite no-Mission response.
+
+    A raised exception remains ambiguous and keeps its fail-closed reservation.
+    This helper is deliberately narrow so an already-created or replayed
+    Mission can never regain daily capacity.
+    """
+
+    settings_key = str(pending.get("settingsKey") or "")
+    slot_key = str(pending.get("slotKey") or "").strip()
+    released = False
+
+    def apply(settings: dict) -> dict:
+        nonlocal released
+        schedule = (
+            settings.get(settings_key)
+            if isinstance(settings.get(settings_key), dict)
+            else {}
+        )
+        slot_keys = [
+            str(item)
+            for item in (schedule.get("dailyExecutionSlotKeys") or [])
+            if str(item)
+        ]
+        if slot_key not in slot_keys:
+            return settings
+        schedule["dailyExecutionSlotKeys"] = [
+            item for item in slot_keys if item != slot_key
+        ]
+        schedule["dailyExecutionCount"] = len(schedule["dailyExecutionSlotKeys"])
+        schedule["dailyExecutionLastReservedAt"] = None
+        settings[settings_key] = schedule
+        released = True
+        return settings
+
+    _mutate_dashboard_workflow_settings(apply)
+    append_audit({
+        "type": "dashboard.workflow_schedule_daily_execution_released",
+        "settingsKey": settings_key,
+        "slotKey": slot_key,
+        "reason": redact_text(str(reason or "dispatch_rejected"), 80),
+        "released": released,
+        "missionCreated": False,
+        "triggerSource": (
+            "manual_or_backend"
+            if pending.get("source") == "manual_or_backend"
+            else "schedule"
+        ),
+        "externalWrites": False,
+        "metaTraderActions": False,
+    })
+    return {
+        "released": released,
+        "settingsKey": settings_key,
+        "slotKey": slot_key,
+    }
+
+
 def _active_dashboard_workflow_schedule_mission(
     *,
     prop_id: str | None = None,
@@ -12032,6 +12816,7 @@ def _dashboard_workflow_reconcile_schedule_states() -> int:
 def _dashboard_workflow_scheduler_gate(
     *,
     refresh_quota: bool,
+    settings_key: str | None = None,
     operator_mode: dict | None = None,
     bridge: dict | None = None,
     mission_worker: dict | None = None,
@@ -12077,16 +12862,25 @@ def _dashboard_workflow_scheduler_gate(
     preferences = _dashboard_agent_preferences_read_model(
         settings if isinstance(settings, dict) else load_dashboard_workflow_settings()
     )
+    normalized_settings_key = str(settings_key or "").strip()
+    reserve = (
+        10
+        if normalized_settings_key == "indicatorScoutSchedule"
+        else clamp_int(preferences.get("rateReservePercent"), 30, 10, 80)
+    )
     quota_gate = _collaboration_quota_gate(
-        {"minRemainingPercent": preferences.get("rateReservePercent", 30)},
+        {"minRemainingPercent": reserve},
         refresh=refresh_quota,
         quota=quota,
     )
     if quota_gate.get("allowed"):
-        return quota_gate
+        return {
+            **quota_gate,
+            "settingsKey": normalized_settings_key or None,
+            "rateReservePercent": reserve,
+        }
     reason = str(quota_gate.get("reason") or "quota_unavailable")
     remaining = quota_gate.get("remainingPercent")
-    reserve = preferences.get("rateReservePercent", 30)
     if reason == "quota_below_reserve" and remaining is not None:
         message_th = f"Scheduler พักงานไว้ เพราะ Codex เหลือ {remaining:g}% ต่ำกว่า Rate Reserve {reserve}%"
     elif reason == "quota_limit_reached":
@@ -12095,7 +12889,12 @@ def _dashboard_workflow_scheduler_gate(
         message_th = "Scheduler พักงานไว้ เพราะข้อมูล Rate Limit เก่าเกินไป"
     else:
         message_th = "Scheduler พักงานไว้ เพราะยังตรวจสอบ Rate Limit ของ Codex ไม่ครบ"
-    return {**quota_gate, "messageTh": message_th}
+    return {
+        **quota_gate,
+        "messageTh": message_th,
+        "settingsKey": normalized_settings_key or None,
+        "rateReservePercent": reserve,
+    }
 
 
 def _dashboard_workflow_schedule_form(
@@ -12358,27 +13157,6 @@ def dashboard_workflow_scheduler_tick(
                 "slotKey": first_wait.get("slotKey"),
                 "skippedJobs": skipped_jobs,
             }
-        gate = _dashboard_workflow_scheduler_gate(refresh_quota=refresh_quota)
-        if not gate.get("allowed"):
-            for pending in eligible_jobs:
-                _dashboard_workflow_record_scheduler_error(
-                    pending,
-                    str(gate.get("reason") or "scheduler_gate_blocked"),
-                    message=str(gate.get("messageTh") or gate.get("reason") or "scheduler_gate_blocked"),
-                )
-            return {
-                "ok": False,
-                "kind": str(gate.get("reason") or "scheduler_gate_blocked"),
-                "dispatched": False,
-                "blockedJobs": [
-                    {
-                        "settingsKey": item["settingsKey"],
-                        "slotKey": item["slotKey"],
-                    }
-                    for item in eligible_jobs
-                ],
-                "skippedJobs": skipped_jobs,
-            }
         if DASHBOARD_WORKFLOW_SCHEDULER_STOP.is_set():
             return {
                 "ok": True,
@@ -12400,6 +13178,31 @@ def dashboard_workflow_scheduler_tick(
                     "slotKey": pending["slotKey"],
                     "kind": "scheduler_waiting_for_active_mission",
                     "activeMissionId": safe_reference(active.get("id")),
+                })
+                continue
+            # Each rail owns its own quota reserve. In particular Radar uses
+            # 10%, while other Codex jobs retain the operator's global reserve.
+            # This gate must run before the durable daily reservation.
+            gate = _dashboard_workflow_scheduler_gate(
+                refresh_quota=refresh_quota,
+                settings_key=str(pending.get("settingsKey") or ""),
+            )
+            if not gate.get("allowed"):
+                failure_kind = str(gate.get("reason") or "scheduler_gate_blocked")
+                _dashboard_workflow_record_scheduler_error(
+                    pending,
+                    failure_kind,
+                    message=str(
+                        gate.get("messageTh")
+                        or gate.get("reason")
+                        or "scheduler_gate_blocked"
+                    ),
+                )
+                failed_jobs.append({
+                    "settingsKey": pending["settingsKey"],
+                    "slotKey": pending["slotKey"],
+                    "kind": failure_kind,
+                    "reserved": False,
                 })
                 continue
             idempotency_key = f"dashboard-schedule:{pending['slotKey']}"
@@ -12464,8 +13267,15 @@ def dashboard_workflow_scheduler_tick(
                 continue
             mission = result.get("mission") if isinstance(result.get("mission"), dict) else {}
             mission_id = safe_reference(mission.get("id"))
-            if not result.get("ok") or not mission_id:
+            if not mission_id:
                 failure_kind = str(result.get("kind") or "schedule_dispatch_failed")
+                # A synchronous rejection is unambiguous: no Mission owns this
+                # slot, so release it for a later guarded retry. Exceptions
+                # remain fail-closed because dispatch outcome is ambiguous.
+                _dashboard_workflow_release_daily_execution(
+                    pending,
+                    failure_kind,
+                )
                 _dashboard_workflow_record_scheduler_error(
                     pending,
                     failure_kind,
@@ -27522,7 +28332,13 @@ def find_mission(mission_id: str) -> dict | None:
 
 
 def reconcile_stale_approval_missions() -> int:
-    """Fail closed on expired or inconsistent approval-gated records."""
+    """Migrate safe legacy gates and fail closed on true approval records.
+
+    Safe queued auto work is upgraded in place to the durable Backend policy.
+    Historical safe work that was waiting/blocked only because of the retired
+    approval gate is archived without execution, preventing a restart storm.
+    High-risk and external actions retain the original fail-closed behavior.
+    """
     reconciled: list[dict] = []
     parent_ids: set[str] = set()
     now = datetime.now(timezone.utc)
@@ -27531,13 +28347,87 @@ def reconcile_stale_approval_missions() -> int:
         missions = load_missions()
         for mission in missions:
             execution = mission.get("execution") if isinstance(mission.get("execution"), dict) else {}
+            approval = mission.get("approval") if isinstance(mission.get("approval"), dict) else {}
+            new_auto_safe_queue = (
+                mission.get("status") == "queued"
+                and mission.get("autoEligible") is True
+                and mission.get("executionMode") == "auto_guarded"
+                and execution.get("schema") == "auto-guarded-execution-v1"
+                and execution.get("authorizationSource") == "backend_auto_policy"
+                and approval.get("required") is False
+            )
+            if new_auto_safe_queue:
+                # Current durable Backend policy is not approval state and must
+                # never be poisoned by startup reconciliation.
+                continue
             is_auto_queue = (
                 mission.get("status") == "queued"
                 and mission.get("autoEligible") is True
                 and mission.get("executionMode") == "auto_guarded"
                 and execution.get("schema") == "auto-guarded-execution-v1"
             )
-            if mission.get("status") != "waiting_approval" and not is_auto_queue:
+            status = str(mission.get("status") or "")
+            approval_only_block = bool(
+                status == "blocked"
+                and (
+                    mission.get("phase") == "approval_reconciled"
+                    or str(mission.get("errorCode") or "").startswith(
+                        (
+                            "approval_",
+                            "closed_approval_state_",
+                            "legacy_waiting_without_required_approval",
+                        )
+                    )
+                )
+            )
+            safe_legacy_gate = bool(
+                _legacy_trusted_workflow_is_backend_auto_safe(mission)
+                and (status == "waiting_approval" or is_auto_queue or approval_only_block)
+            )
+            if safe_legacy_gate:
+                previous_status = status
+                previous_approval = copy.deepcopy(approval)
+                mission["approval"] = _not_required_approval_record()
+                mission["requiresHumanApproval"] = False
+                mission["autoEligible"] = False
+                mission["status"] = "archived"
+                mission["archivedFromStatus"] = previous_status
+                mission["archivedSuccessful"] = False
+                mission["phase"] = "auto_safe_approval_retired"
+                mission["errorCode"] = "legacy_auto_safe_approval_retired"
+                mission["result"] = (
+                    "Legacy safe work was retired during the approval-policy "
+                    "migration and was not executed. A current scheduler slot "
+                    "or fresh idempotent request may create new work."
+                )
+                mission["updatedAt"] = reconciled_at
+                mission["completedAt"] = reconciled_at
+                if execution:
+                    execution["dispatchState"] = "archived"
+                    execution["heartbeatAt"] = reconciled_at
+                    execution["completedAt"] = reconciled_at
+                    mission["execution"] = execution
+                migration_action = "retired_without_execution"
+                mission["approvalMigration"] = {
+                    "version": AUTO_SAFE_POLICY_VERSION,
+                    "migratedAt": reconciled_at,
+                    "previousStatus": previous_status,
+                    "previousApprovalState": redact_text(
+                        str(previous_approval.get("state") or "unknown"),
+                        40,
+                    ),
+                    "previousApproval": _approval_migration_history_record(
+                        previous_approval
+                    ),
+                    "action": migration_action,
+                    "realToolExecuted": False,
+                }
+                reconciled.append(mission)
+                parent_id = safe_reference(mission.get("parentMissionId"))
+                if parent_id:
+                    parent_ids.add(parent_id)
+                continue
+            if status != "waiting_approval" and not is_auto_queue:
                 continue
             approval = mission.get("approval") if isinstance(mission.get("approval"), dict) else {}
             state = str(approval.get("state") or "not_required")
@@ -27575,13 +28465,23 @@ def reconcile_stale_approval_missions() -> int:
             save_missions(missions)
 
     for mission in reconciled:
+        migration = (
+            mission.get("approvalMigration")
+            if isinstance(mission.get("approvalMigration"), dict)
+            else {}
+        )
         append_audit({
-            "type": "mission.approval_reconciled",
+            "type": (
+                "mission.auto_safe_approval_migrated"
+                if migration.get("version") == AUTO_SAFE_POLICY_VERSION
+                else "mission.approval_reconciled"
+            ),
             "missionId": mission.get("id"),
             "ownerAgentId": mission.get("owner"),
             "toolId": mission.get("toolId"),
             "status": mission.get("status"),
             "reason": mission.get("errorCode"),
+            "migrationAction": migration.get("action"),
             "realToolExecuted": False,
         })
     for parent_id in parent_ids:
@@ -30846,6 +31746,137 @@ def backend_risk_guard_review(mission: dict, approval: dict) -> tuple[str, str]:
     return decision, reason
 
 
+AUTO_SAFE_POLICY_VERSION = "backend-auto-safe-v1"
+
+
+def _not_required_approval_record() -> dict:
+    """Return the canonical absence of a human approval gate.
+
+    Routine internal analysis and read-only public research are authorized by
+    Backend policy, not by manufacturing a short-lived approval record.  This
+    keeps a Bridge restart from turning safe scheduled work into an expired
+    approval failure.
+    """
+
+    return {
+        "required": False,
+        "id": None,
+        "state": "not_required",
+        "gateMode": "not_required",
+        "requiredActors": [],
+        "decisions": [],
+        "expiresAt": None,
+        "consumedAt": None,
+        "payloadDigest": None,
+    }
+
+
+def _mission_is_backend_auto_safe(mission: object) -> bool:
+    """Classify only bounded, implemented, non-high-impact work as auto-safe."""
+
+    if not isinstance(mission, dict):
+        return False
+    eligibility = auto_guarded_eligibility(
+        mission,
+        require_operator_mode=False,
+    )
+    return bool(eligibility.get("eligible"))
+
+
+def _legacy_trusted_workflow_is_backend_auto_safe(mission: object) -> bool:
+    """Re-evaluate old workflow risk without trusting its inflated label.
+
+    Older Bridges marked the generated safety wording itself as high risk. A
+    migration may ignore only that stored label after canonical lineage and
+    the user-input digest are revalidated. High-impact text inside the actual
+    user fields remains visible to the normal guard and is rejected.
+    """
+
+    if not isinstance(mission, dict):
+        return False
+    trusted_intent = _trusted_workflow_guard_intent(mission)
+    if trusted_intent is None:
+        return False
+    tool_policy = get_tool_policy(str(mission.get("toolId") or "")) or {}
+    rechecked = copy.deepcopy(mission)
+    rechecked["risk"] = effective_risk(None, tool_policy.get("risk"))
+    eligibility = auto_guarded_eligibility(
+        rechecked,
+        require_operator_mode=False,
+        allow_legacy_radar_without_reservation=True,
+    )
+    return bool(eligibility.get("eligible"))
+
+
+def _approval_migration_history_record(approval: object) -> dict:
+    source = approval if isinstance(approval, dict) else {}
+    decisions = source.get("decisions") if isinstance(source.get("decisions"), list) else []
+    return sanitize_json_value({
+        "required": bool(source.get("required", False)),
+        "id": safe_reference(source.get("id")),
+        "state": redact_text(str(source.get("state") or "not_required"), 40),
+        "gateMode": redact_text(str(source.get("gateMode") or ""), 60) or None,
+        "requiredActors": [
+            redact_text(str(item), 80) for item in (source.get("requiredActors") or [])[:20]
+        ],
+        "decisions": sanitize_json_value(decisions[:20]),
+        "expiresAt": source.get("expiresAt"),
+        "consumedAt": source.get("consumedAt"),
+        "payloadDigest": (
+            str(source.get("payloadDigest"))
+            if re.fullmatch(r"[0-9a-f]{64}", str(source.get("payloadDigest") or ""))
+            else None
+        ),
+    })
+
+
+def _issue_backend_auto_safe_authorization(
+    mission: dict,
+    *,
+    issued_at: str | None = None,
+) -> None:
+    """Issue a durable, digest-bound authorization without approval state."""
+
+    authorized_at = issued_at or utc_now()
+    execution = (
+        mission.get("execution")
+        if isinstance(mission.get("execution"), dict)
+        else {}
+    )
+    authorization_id = str(execution.get("authorizationId") or "")
+    if not authorization_id or not SAFE_ID_PATTERN.fullmatch(authorization_id):
+        authorization_id = safe_id(None, "auto-auth")
+    mission["executionMode"] = "auto_guarded"
+    mission["autoEligible"] = True
+    mission["requiresHumanApproval"] = False
+    mission["autoQueuedAt"] = str(mission.get("autoQueuedAt") or authorized_at)
+    execution.update({
+        "schema": "auto-guarded-execution-v1",
+        "authorizationId": authorization_id,
+        "authorizationIssuedAt": mission["autoQueuedAt"],
+        "authorizationSource": "backend_auto_policy",
+        "authorizationDecision": "allowed",
+        "authorizationPolicyVersion": AUTO_SAFE_POLICY_VERSION,
+        "authorizationReason": "routine_internal_or_read_only",
+        "dispatchState": str(execution.get("dispatchState") or "queued"),
+        "autoQueuedAt": mission["autoQueuedAt"],
+        "workerId": execution.get("workerId"),
+        "leaseId": execution.get("leaseId"),
+        "startedAt": execution.get("startedAt"),
+        "heartbeatAt": execution.get("heartbeatAt"),
+        "timeoutAt": execution.get("timeoutAt"),
+        "processStarted": bool(execution.get("processStarted", False)),
+        "processTreeTerminated": bool(
+            execution.get("processTreeTerminated", False)
+        ),
+        "nextAttemptAt": execution.get("nextAttemptAt"),
+        "completedAt": execution.get("completedAt"),
+    })
+    mission["approval"] = _not_required_approval_record()
+    mission["execution"] = execution
+    execution["authorizationPayloadDigest"] = mission_payload_digest(mission)
+
+
 def create_mission(
     payload: dict,
     status: str = "queued",
@@ -30863,7 +31894,24 @@ def create_mission(
     tool_id = str(payload.get("toolId") or "manager_mission")
     tool_policy = get_tool_policy(tool_id) or {}
     risk = effective_risk(payload.get("risk"), tool_policy.get("risk"))
-    hard_gate_reasons = [] if tool_id in {"manager_delegate", "manager_mission"} else _high_impact_reasons(tool_id, prompt, risk)
+    workflow_guard_probe = {
+        "workflowContext": workflow_context,
+        "toolId": tool_id,
+        "owner": agent_id,
+        "detail": prompt,
+        "risk": risk,
+    }
+    trusted_workflow_intent = _trusted_workflow_guard_intent(workflow_guard_probe)
+    guard_intent = (
+        trusted_workflow_intent
+        if trusted_workflow_intent is not None
+        else prompt
+    )
+    hard_gate_reasons = (
+        []
+        if tool_id in {"manager_delegate", "manager_mission"}
+        else _high_impact_reasons(tool_id, guard_intent, risk)
+    )
     analysis_context = (
         payload.get("analysisContext")
         if allow_analysis_context and isinstance(payload.get("analysisContext"), dict)
@@ -30973,70 +32021,45 @@ def create_mission(
             mission["agentTransfer"] = safe_workflow_context["agentTransfer"]
     if analysis_context:
         mission["analysisContext"] = sanitize_json_value(analysis_context)
-    eligibility = auto_guarded_eligibility(mission, require_operator_mode=True)
-    auto_eligible = status == "queued" and eligibility.get("eligible") is True
     approval_required = bool(
         tool_policy.get("approvalRequired", False)
         or tool_id in APPROVAL_REQUIRED
         or risk == "high"
     )
+    eligibility = auto_guarded_eligibility(mission, require_operator_mode=True)
+    auto_eligible = bool(
+        status == "queued"
+        and eligibility.get("eligible") is True
+        and not approval_required
+    )
     guard = load_orchestration_contract().get("costRateGuard") or {}
-    approval_minutes_key = "autoApprovalTtlMinutes" if auto_eligible else "approvalTtlMinutes"
-    approval_minutes_default = 1440 if auto_eligible else 15
-    approval_minutes = clamp_int(guard.get(approval_minutes_key), approval_minutes_default, 1, 1440)
-    approval = {
-        "required": approval_required,
-        "id": safe_id(None, "approval") if approval_required else None,
-        "state": "pending" if approval_required else "not_required",
-        "gateMode": "backend_auto_review" if auto_eligible else ("human_review" if approval_required else "not_required"),
-        "requiredActors": (
-            ["risk_guard"]
-            if auto_eligible and approval_required
-            else (required_approval_actors(risk) if approval_required else [])
-        ),
-        "decisions": [],
-        "expiresAt": utc_after(approval_minutes) if approval_required else None,
-        "consumedAt": None,
-        "payloadDigest": None,
-    }
+    approval_minutes = clamp_int(guard.get("approvalTtlMinutes"), 15, 1, 1440)
+    approval = (
+        {
+            "required": True,
+            "id": safe_id(None, "approval"),
+            "state": "pending",
+            "gateMode": "human_review",
+            "requiredActors": required_approval_actors(risk),
+            "decisions": [],
+            "expiresAt": utc_after(approval_minutes),
+            "consumedAt": None,
+            "payloadDigest": None,
+        }
+        if approval_required
+        else _not_required_approval_record()
+    )
     mission["approval"] = approval
     mission["executionMode"] = "auto_guarded" if auto_eligible else "manual_guarded"
     mission["autoEligible"] = bool(auto_eligible)
-    mission["requiresHumanApproval"] = bool(approval_required and not auto_eligible)
+    mission["requiresHumanApproval"] = bool(approval_required)
     if auto_eligible:
-        authorization_id = safe_id(None, "auto-auth")
-        mission["autoQueuedAt"] = now
         mission["phase"] = "auto_guarded_queued"
-        mission["execution"] = {
-            "schema": "auto-guarded-execution-v1",
-            "authorizationId": authorization_id,
-            "authorizationIssuedAt": now,
-            "dispatchState": "queued",
-            "autoQueuedAt": now,
-            "workerId": None,
-            "leaseId": None,
-            "startedAt": None,
-            "heartbeatAt": None,
-            "timeoutAt": None,
-            "processStarted": False,
-            "processTreeTerminated": False,
-            "nextAttemptAt": None,
-            "completedAt": None,
-        }
+        _issue_backend_auto_safe_authorization(mission, issued_at=now)
     elif approval_required and status == "queued":
         mission["status"] = "waiting_approval"
     if approval_required:
         approval["payloadDigest"] = mission_payload_digest(mission)
-    if auto_eligible:
-        decision, reason = backend_auto_guard_review(mission, approval)
-        approval["state"] = "approved" if decision == "approved" else "rejected"
-        if decision != "approved":
-            mission["status"] = "blocked"
-            mission["phase"] = "auto_guarded_review_blocked"
-            mission["errorCode"] = reason
-            mission["result"] = "Backend Risk Guard rejected automatic execution. No tool executed."
-            mission["execution"]["dispatchState"] = "blocked"
-            mission["completedAt"] = utc_now()
     with MISSIONS_LOCK:
         missions = load_missions()
         if idempotency_key:
@@ -31069,14 +32092,24 @@ def create_mission(
     })
     if auto_eligible and mission["status"] == "queued":
         append_audit({
+            "type": "mission.auto_policy_authorized",
+            "missionId": mission["id"],
+            "ownerAgentId": agent_id,
+            "toolId": tool_id,
+            "authorizationSource": "backend_auto_policy",
+            "authorizationPolicyVersion": AUTO_SAFE_POLICY_VERSION,
+            "authorizationReason": "routine_internal_or_read_only",
+            "humanApprovalRequired": False,
+        })
+        append_audit({
             "type": "mission.auto_enqueued",
             "missionId": mission["id"],
             "ownerAgentId": agent_id,
             "toolId": tool_id,
             "executionMode": "auto_guarded",
             "autoQueuedAt": mission["autoQueuedAt"],
-            "approvalState": approval["state"],
-            "gateMode": approval["gateMode"],
+            "approvalState": "not_required",
+            "gateMode": "backend_auto_policy",
         })
         MISSION_WORKER_WAKE.set()
     return mission
@@ -32006,32 +33039,63 @@ def auto_execution_authorization_error(mission: dict, *, require_operator_mode: 
         or str(execution.get("authorizationIssuedAt") or "") != auto_queued_at
     ):
         return "auto_authorization_time_mismatch"
-    if not approval.get("required") or approval.get("gateMode") != "backend_auto_review":
-        return "auto_approval_gate_invalid"
-    if set(approval.get("requiredActors") or []) != {"risk_guard"}:
-        return "auto_required_actors_invalid"
-    if approval.get("state") != "approved":
-        return "auto_approval_not_approved"
-    expected_digest = str(approval.get("payloadDigest") or "")
-    if not expected_digest or not secrets.compare_digest(expected_digest, mission_payload_digest(mission)):
-        return "auto_approval_digest_mismatch"
-    approved_review = next(
-        (
-            item
-            for item in (approval.get("decisions") or [])
-            if isinstance(item, dict)
-            and item.get("actorId") == "risk_guard"
-            and item.get("actorProvenance") == "backend_auto_review"
-            and item.get("decision") == "approved"
-            and secrets.compare_digest(str(item.get("payloadDigest") or ""), expected_digest)
-        ),
-        None,
-    )
-    if not approved_review:
-        return "auto_backend_review_missing"
-    expires_at = parse_iso(approval.get("expiresAt"))
-    if expires_at and datetime.now(timezone.utc) >= expires_at:
-        return "auto_approval_expired"
+    if approval.get("required"):
+        # Transitional compatibility for an already-running mission issued by
+        # an older Bridge. New auto-safe work never enters this branch.
+        if approval.get("gateMode") != "backend_auto_review":
+            return "auto_approval_gate_invalid"
+        if set(approval.get("requiredActors") or []) != {"risk_guard"}:
+            return "auto_required_actors_invalid"
+        if approval.get("state") != "approved":
+            return "auto_approval_not_approved"
+        expected_digest = str(approval.get("payloadDigest") or "")
+        if not expected_digest or not secrets.compare_digest(
+            expected_digest,
+            mission_payload_digest(mission),
+        ):
+            return "auto_approval_digest_mismatch"
+        approved_review = next(
+            (
+                item
+                for item in (approval.get("decisions") or [])
+                if isinstance(item, dict)
+                and item.get("actorId") == "risk_guard"
+                and item.get("actorProvenance") == "backend_auto_review"
+                and item.get("decision") == "approved"
+                and secrets.compare_digest(
+                    str(item.get("payloadDigest") or ""),
+                    expected_digest,
+                )
+            ),
+            None,
+        )
+        if not approved_review:
+            return "auto_backend_review_missing"
+        expires_at = parse_iso(approval.get("expiresAt"))
+        if expires_at and datetime.now(timezone.utc) >= expires_at:
+            return "auto_approval_expired"
+    else:
+        if str(approval.get("state") or "not_required") != "not_required":
+            return "auto_safe_approval_state_invalid"
+        if (
+            mission.get("status") == "queued"
+            and execution.get("authorizationConsumedAt")
+        ):
+            return "auto_policy_already_consumed"
+        if execution.get("authorizationSource") != "backend_auto_policy":
+            return "auto_policy_source_invalid"
+        if execution.get("authorizationDecision") != "allowed":
+            return "auto_policy_decision_invalid"
+        if execution.get("authorizationPolicyVersion") != AUTO_SAFE_POLICY_VERSION:
+            return "auto_policy_version_invalid"
+        if execution.get("authorizationReason") != "routine_internal_or_read_only":
+            return "auto_policy_reason_invalid"
+        expected_digest = str(execution.get("authorizationPayloadDigest") or "")
+        if not expected_digest or not secrets.compare_digest(
+            expected_digest,
+            mission_payload_digest(mission),
+        ):
+            return "auto_policy_digest_mismatch"
     eligibility = auto_guarded_eligibility(mission, require_operator_mode=require_operator_mode)
     if not eligibility.get("eligible"):
         return str((eligibility.get("reasons") or ["auto_guard_policy_denied"])[0])
@@ -32048,7 +33112,7 @@ def block_auto_mission(mission_id: str, reason: str) -> dict | None:
                 continue
             execution = mission.get("execution") if isinstance(mission.get("execution"), dict) else {}
             approval = mission.get("approval") if isinstance(mission.get("approval"), dict) else {}
-            if approval.get("state") == "approved":
+            if approval.get("required") and approval.get("state") == "approved":
                 approval["state"] = "invalidated"
             mission["approval"] = approval
             mission["status"] = "blocked"
@@ -32286,8 +33350,11 @@ def _claim_auto_mission_unlocked(
             budget = mission.get("budget") if isinstance(mission.get("budget"), dict) else {}
             timeout_seconds = clamp_int(budget.get("timeoutSeconds"), 120, 15, 600)
             approval = mission.get("approval") if isinstance(mission.get("approval"), dict) else {}
-            approval["state"] = "consumed"
-            approval["consumedAt"] = now
+            if approval.get("required"):
+                approval["state"] = "consumed"
+                approval["consumedAt"] = now
+            else:
+                approval = _not_required_approval_record()
             mission["approval"] = approval
             mission["status"] = "running"
             mission["phase"] = "auto_guarded_running"
@@ -32303,6 +33370,16 @@ def _claim_auto_mission_unlocked(
                 "dispatchState": "running",
                 "workerId": worker_id,
                 "leaseId": lease_id,
+                "authorizationConsumedAt": (
+                    now
+                    if not approval.get("required")
+                    else execution.get("authorizationConsumedAt")
+                ),
+                "authorizationConsumedLeaseId": (
+                    lease_id
+                    if not approval.get("required")
+                    else execution.get("authorizationConsumedLeaseId")
+                ),
                 "startedAt": now,
                 "heartbeatAt": now,
                 "timeoutAt": (datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)).isoformat(),
@@ -32330,7 +33407,14 @@ def _claim_auto_mission_unlocked(
         "workerId": worker_id,
         "leaseId": (claimed.get("execution") or {}).get("leaseId"),
         "attemptCount": claimed.get("attemptCount"),
-        "approvalState": "consumed",
+        "approvalState": (
+            "consumed"
+            if (claimed.get("approval") or {}).get("required")
+            else "not_required"
+        ),
+        "authorizationPolicyVersion": (
+            (claimed.get("execution") or {}).get("authorizationPolicyVersion")
+        ),
     })
     if parent_id:
         refresh_parent_mission(parent_id)
@@ -32534,20 +33618,53 @@ def finish_auto_mission(mission_id: str, lease_id: str, runner: dict, result: di
             succeeded = False
             work_status = "invalid_council_output"
     output_contract = validate_dashboard_workflow_output_contract(current, result)
+    workflow_context = _workflow_context_storage(current.get("workflowContext"))
+    radar_workflow = bool(
+        workflow_context
+        and workflow_context.get("propId") == "left_audit_crystals"
+        and workflow_context.get("actionId") == "discover_new_indicators"
+    )
+    structured_output_error = str(result.get("structuredOutputError") or "").lower()
+    radar_runner_output_too_large = bool(
+        radar_workflow
+        and (
+            "exceed output limit" in structured_output_error
+            or "contractfields exceed output limit" in structured_output_error
+        )
+    )
     output_contract_failed = bool(
         succeeded
         and output_contract.get("applicable")
         and not output_contract.get("valid")
     )
-    if output_contract_failed:
+    output_failure_code = (
+        "radar_output_too_large"
+        if radar_runner_output_too_large
+        else str(output_contract.get("failureCode") or "")
+        if output_contract_failed
+        else ""
+    )
+    if output_contract_failed or radar_runner_output_too_large:
         succeeded = False
-        work_status = "workflow_output_contract_incomplete"
+        work_status = output_failure_code or "workflow_output_contract_incomplete"
     mission_status = "completed" if succeeded else (
         "blocked"
-        if work_status in {"blocked", "waiting_input", "workflow_output_contract_incomplete"}
+        if work_status in {
+            "blocked",
+            "waiting_input",
+            "workflow_output_contract_incomplete",
+            "radar_output_too_large",
+            "radar_output_contract_invalid",
+        }
         else "failed"
     )
-    if output_contract_failed:
+    if output_failure_code == "radar_output_too_large":
+        summary = (
+            "Radar returned a result larger than the audited 20,000-character "
+            "envelope or 12,000-character entries field. The Backend rejected "
+            "it explicitly without truncating or persisting partial JSON."
+        )
+    elif output_contract_failed:
         summary = redact_text(
             "ผลลัพธ์ยังไม่ครบสัญญาของอุปกรณ์ จึงยังไม่ปิดงานเป็นสำเร็จ "
             f"(ฟิลด์ที่ขาด: {', '.join(output_contract.get('missingFields') or []) or '-'}; "
@@ -32605,8 +33722,8 @@ def finish_auto_mission(mission_id: str, lease_id: str, runner: dict, result: di
         ),
         "artifacts": [artifact_path] if artifact_path else [],
         "risks": [] if succeeded else [
-            "workflow_output_contract_incomplete"
-            if output_contract_failed
+            output_failure_code or "workflow_output_contract_incomplete"
+            if output_contract_failed or radar_runner_output_too_large
             else str(result.get("status") or runner.get("exitCode") or "runner_failed")
         ],
         "workflowContext": current.get("workflowContext"),
@@ -32628,8 +33745,8 @@ def finish_auto_mission(mission_id: str, lease_id: str, runner: dict, result: di
             mission["phase"] = f"auto_guarded_{work_status}"
             mission["workStatus"] = work_status
             mission["errorCode"] = None if mission_status == "completed" else (
-                "workflow_output_contract_incomplete"
-                if output_contract_failed
+                output_failure_code or "workflow_output_contract_incomplete"
+                if output_contract_failed or radar_runner_output_too_large
                 else str(result.get("status") or runner.get("exitCode") or "runner_failed")
             )
             mission["result"] = summary
@@ -32917,6 +34034,128 @@ def _defer_auto_mission_with_round_deadline(
     )
 
 
+def _radar_execution_reservation_bangkok_date(mission: object) -> str | None:
+    """Return the digest-bound Backend Radar reservation date.
+
+    New scheduled and manual/retry Missions carry the shared daily-ledger
+    reservation in their trusted workflow lineage.  The idempotency fallback
+    exists only to retire already-stored scheduled Missions created before the
+    reservation field was introduced.
+    """
+
+    row = mission if isinstance(mission, dict) else {}
+    context = _workflow_context_storage(row.get("workflowContext"))
+    if not (
+        context
+        and context.get("propId") == "left_audit_crystals"
+        and context.get("actionId") == "discover_new_indicators"
+        and _trusted_workflow_guard_intent(row) is not None
+    ):
+        return None
+    reservation = (
+        context.get("executionReservation")
+        if isinstance(context.get("executionReservation"), dict)
+        else {}
+    )
+    reservation_date = str(reservation.get("bangkokDate") or "")
+    if (
+        reservation.get("settingsKey") == "indicatorScoutSchedule"
+        and reservation.get("maximumRunsPerDay") == 1
+        and re.fullmatch(r"\d{4}-\d{2}-\d{2}", reservation_date)
+    ):
+        return reservation_date
+    if context.get("triggerSource") != "schedule":
+        return None
+    match = re.fullmatch(
+        r"dashboard-schedule:indicatorScoutSchedule:(\d{4}-\d{2}-\d{2}):\d{4}",
+        str(row.get("idempotencyKey") or "").strip(),
+    )
+    return match.group(1) if match else None
+
+
+def _expire_prior_day_radar_mission(mission: object) -> bool:
+    """Retire any deferred Radar reservation at Bangkok midnight.
+
+    A prior-day queued Mission must not wake on the next day and combine with
+    that day's 09:00 slot.  The historical Mission remains visible, terminal,
+    and non-retryable; no Runner process is started and its old daily
+    reservation remains as audit evidence for the original day.
+    """
+
+    row = mission if isinstance(mission, dict) else {}
+    slot_date = _radar_execution_reservation_bangkok_date(row)
+    if not slot_date:
+        return False
+    current_date = _dashboard_scheduler_local_now().strftime("%Y-%m-%d")
+    if slot_date >= current_date:
+        return False
+    mission_id = str(row.get("id") or "")
+    expired = None
+    with MISSIONS_LOCK:
+        missions = load_missions()
+        for stored in missions:
+            if (
+                stored.get("id") != mission_id
+                or stored.get("status") != "queued"
+                or _radar_execution_reservation_bangkok_date(stored) != slot_date
+            ):
+                continue
+            now_text = utc_now()
+            stored_context = _workflow_context_storage(stored.get("workflowContext")) or {}
+            scheduled_source = stored_context.get("triggerSource") == "schedule"
+            expiration_code = (
+                "scheduled_radar_slot_expired"
+                if scheduled_source
+                else "radar_daily_reservation_expired"
+            )
+            execution = (
+                stored.get("execution")
+                if isinstance(stored.get("execution"), dict)
+                else {}
+            )
+            stored["status"] = "blocked"
+            stored["phase"] = expiration_code
+            stored["workStatus"] = "blocked"
+            stored["errorCode"] = expiration_code
+            stored["result"] = (
+                "งาน Radar รอบตามเวลานี้ข้ามวันตามเวลา Asia/Bangkok แล้ว "
+                "Backend จึงปิดงานโดยไม่เปิด Codex และไม่ลองรันซ้ำอัตโนมัติ"
+            )
+            stored["updatedAt"] = now_text
+            stored["completedAt"] = now_text
+            stored["execution"] = {
+                **execution,
+                "dispatchState": "blocked",
+                "heartbeatAt": now_text,
+                "completedAt": now_text,
+                "nextAttemptAt": None,
+                "processStarted": False,
+                "automaticRetry": False,
+                "authorizationRetiredAt": now_text,
+                "authorizationRetiredReason": expiration_code,
+            }
+            expired = stored
+            break
+        if expired:
+            save_missions(missions)
+    if not expired:
+        return False
+    append_audit({
+        "type": "dashboard.radar_daily_reservation_expired",
+        "missionId": mission_id,
+        "slotBangkokDate": slot_date,
+        "currentBangkokDate": current_date,
+        "processStarted": False,
+        "automaticRetry": False,
+        "externalWrites": False,
+        "metaTraderActions": False,
+    })
+    parent_id = safe_reference(expired.get("parentMissionId"))
+    if parent_id:
+        refresh_parent_mission(parent_id)
+    return True
+
+
 def process_auto_mission(worker_id: str, mission: dict) -> None:
     mission_id = str(mission.get("id") or "")
     agent_id = str(mission.get("owner") or "manager")
@@ -32935,6 +34174,8 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
         if is_council_candidate
         else REAL_RUN_SEMAPHORE
     )
+    if _expire_prior_day_radar_mission(mission):
+        return
     if (
         round_remaining is not None
         and round_remaining <= round_completion_reserve
@@ -32976,7 +34217,16 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
         )
         return
     workflow_context = _workflow_context_storage(mission.get("workflowContext"))
-    if workflow_context and workflow_context.get("triggerSource") == "schedule":
+    trusted_radar_workflow = bool(
+        workflow_context
+        and workflow_context.get("propId") == "left_audit_crystals"
+        and workflow_context.get("actionId") == "discover_new_indicators"
+        and _trusted_workflow_guard_intent(mission) is not None
+    )
+    if workflow_context and (
+        workflow_context.get("triggerSource") == "schedule"
+        or trusted_radar_workflow
+    ):
         reserve_gate = _collaboration_quota_gate(
             {
                 "minRemainingPercent": clamp_int(
@@ -32991,7 +34241,7 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
         if reserve_gate.get("allowed") is not True:
             _defer_auto_mission_with_round_deadline(
                 mission,
-                str(reserve_gate.get("reason") or "quota_below_schedule_reserve"),
+                str(reserve_gate.get("reason") or "quota_below_workflow_reserve"),
                 config["quotaBackoffSeconds"],
             )
             return
@@ -33102,6 +34352,16 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
             == council_snapshot_reference
             and analysis_context.get("readOnly") is True
         )
+        claimed_workflow_context = _workflow_context_storage(
+            claimed.get("workflowContext")
+        )
+        is_radar_read_only = bool(
+            claimed_workflow_context
+            and claimed_workflow_context.get("propId") == "left_audit_crystals"
+            and claimed_workflow_context.get("actionId") == "discover_new_indicators"
+            and _trusted_workflow_guard_intent(claimed) is not None
+        )
+        read_only_worker = bool(is_council_vote or is_radar_read_only)
         if is_council_candidate and not is_council_vote:
             finish_auto_mission(
                 mission_id,
@@ -33191,9 +34451,9 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
             "tokenBudget": budget.get("tokenBudget"),
             "tokenBudgetMode": budget.get("tokenBudgetMode"),
             "rateReservePercent": budget.get("rateReservePercent"),
-            "requestedSandbox": "read-only" if is_council_vote else "workspace-write",
+            "requestedSandbox": "read-only" if read_only_worker else "workspace-write",
             "workingDirectory": "workspace",
-            "writeRoots": [] if is_council_vote else ["workspace", "frontend", "docs", "assets-source"],
+            "writeRoots": [] if read_only_worker else ["workspace", "frontend", "docs", "assets-source"],
             "controlPlaneWritable": False,
             "webSearchEnabled": tool_id == "codex_web_research",
             "webSearchMode": "live" if tool_id == "codex_web_research" else "disabled",
@@ -33226,6 +34486,12 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
             ]
             if tool_id == "codex_web_research":
                 runner_command.append("--web-search")
+            if is_radar_read_only:
+                runner_command.extend([
+                    "--read-only-work",
+                    "--result-profile",
+                    "radar_website_tool",
+                ])
             if is_council_vote:
                 runner_command.extend([
                     "--result-mode",
@@ -33571,6 +34837,29 @@ def run_bridge_task(
     if idempotency_key and not SAFE_IDEMPOTENCY_PATTERN.fullmatch(idempotency_key):
         return {"ok": False, "kind": "invalid_idempotency_key", "message": "Idempotency key must be a short safe identifier.", "_httpStatus": 422}
     trusted_context = _workflow_context_storage(trusted_workflow_context)
+    trusted_radar_workflow = bool(
+        trusted_context
+        and trusted_context.get("propId") == "left_audit_crystals"
+        and trusted_context.get("actionId") == "discover_new_indicators"
+        and tool_id == "codex_web_research"
+    )
+    if trusted_radar_workflow and not isinstance(
+        trusted_context.get("executionReservation"),
+        dict,
+    ):
+        append_audit({
+            "type": "guard.radar_execution_reservation_missing",
+            "agentId": agent_id,
+            "toolId": tool_id,
+            "missionCreated": False,
+            "realToolExecuted": False,
+        })
+        return {
+            "ok": False,
+            "kind": "radar_execution_reservation_missing",
+            "message": "Trusted Radar work requires a Backend daily execution reservation.",
+            "_httpStatus": 409,
+        }
     internal_schedule_run = bool(
         trusted_context
         and trusted_context.get("triggerSource") == "schedule"
@@ -33642,30 +34931,32 @@ def run_bridge_task(
             "message": "Existing idempotent mission returned; no duplicate mission was created.",
             "_httpStatus": 200,
         }
+    if (
+        mission.get("autoEligible") is True
+        and mission.get("executionMode") == "auto_guarded"
+        and mission.get("requiresHumanApproval") is False
+        and mission.get("approval", {}).get("required") is False
+        and mission.get("status") in {"queued", "running"}
+    ):
+        MISSION_WORKER_WAKE.set()
+        append_audit({
+            "type": "bridge.mission_auto_queued",
+            "missionId": mission["id"],
+            "agentId": agent_id,
+            "toolId": tool_id,
+            "authorizationPolicyVersion": AUTO_SAFE_POLICY_VERSION,
+            "humanApprovalRequired": False,
+        })
+        return {
+            "ok": True,
+            "kind": "mission_auto_queued",
+            "mission": mission,
+            "targetId": mission["targetId"],
+            "bridge": status,
+            "message": "Backend auto-safe policy queued this routine mission without human approval.",
+            "_httpStatus": 202,
+        }
     if mission.get("approval", {}).get("required"):
-        if (
-            mission.get("autoEligible") is True
-            and mission.get("executionMode") == "auto_guarded"
-            and mission.get("requiresHumanApproval") is False
-            and mission.get("approval", {}).get("state") == "approved"
-            and mission.get("status") in {"queued", "running"}
-        ):
-            MISSION_WORKER_WAKE.set()
-            append_audit({
-                "type": "bridge.mission_auto_queued",
-                "missionId": mission["id"],
-                "agentId": agent_id,
-                "toolId": tool_id,
-            })
-            return {
-                "ok": True,
-                "kind": "mission_auto_queued",
-                "mission": mission,
-                "targetId": mission["targetId"],
-                "bridge": status,
-                "message": "Backend approved this guarded mission and queued it for automatic execution.",
-                "_httpStatus": 202,
-            }
         append_audit({"type": "bridge.approval_required", "missionId": mission["id"], "agentId": agent_id, "toolId": tool_id})
         return {
             "ok": False,

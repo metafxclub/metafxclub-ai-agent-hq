@@ -46,8 +46,10 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_path = Path(temp_dir) / "dashboard-workflow-settings.json"
 
-            def disable_during_gate(*, refresh_quota: bool) -> dict:
+            def disable_during_gate(*, refresh_quota: bool, settings_key: str | None = None, **_kwargs) -> dict:
                 self.assertFalse(refresh_quota)
+                if settings_key != "discoverySchedule":
+                    return {"allowed": True, "reason": "ready"}
                 self.bridge.save_dashboard_discovery_schedule(
                     {"enabled": False, "times": ["09:00"]}
                 )
@@ -70,6 +72,10 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
             ):
                 self.bridge.save_direct_daily_fx_news_schedule(
                     {"enabled": False, "times": ["00:00", "12:00"]}
+                )
+                self.bridge._save_dashboard_schedule_preference(
+                    "indicatorScoutSchedule",
+                    {"enabled": False, "times": ["09:00"]},
                 )
                 self.bridge.save_dashboard_discovery_schedule(
                     {"enabled": True, "times": ["09:00"]}
@@ -350,6 +356,10 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
                         "times": ["23:59"],
                         "minimumImpact": "high",
                     },
+                )
+                self.bridge._save_dashboard_schedule_preference(
+                    "indicatorScoutSchedule",
+                    {"enabled": False, "times": ["09:00"]},
                 )
                 captured_slots = self.bridge._dashboard_workflow_capture_due_slots(slot_time)
                 result = self.bridge.dashboard_workflow_scheduler_tick(

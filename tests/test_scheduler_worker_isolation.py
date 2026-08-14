@@ -274,6 +274,10 @@ class SchedulerWorkerIsolationTests(unittest.TestCase):
                     "newsBiasSchedule",
                     {"enabled": False, "times": ["00:00", "12:00"]},
                 )
+                self.bridge._save_dashboard_schedule_preference(
+                    "indicatorScoutSchedule",
+                    {"enabled": False, "times": ["09:00"]},
+                )
                 self.bridge.save_dashboard_discovery_schedule(
                     {"enabled": True, "times": ["09:00"]}
                 )
@@ -333,6 +337,10 @@ class SchedulerWorkerIsolationTests(unittest.TestCase):
                 self.bridge._save_dashboard_schedule_preference(
                     "newsBiasSchedule",
                     {"enabled": False, "times": ["00:00", "12:00"]},
+                )
+                self.bridge._save_dashboard_schedule_preference(
+                    "indicatorScoutSchedule",
+                    {"enabled": False, "times": ["09:00"]},
                 )
                 self.bridge.save_dashboard_discovery_schedule(
                     {"enabled": True, "times": ["09:00"]}

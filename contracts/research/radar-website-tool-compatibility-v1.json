@@ -189,19 +189,17 @@
       "enabledFieldId": "enabled",
       "timesFieldId": "times",
       "timezone": "Asia/Bangkok",
-      "allowedRunsPerDayWhenEnabled": [
-        1,
-        2
-      ],
-      "maximumRunsPerDay": 2,
+      "allowedRunsPerDayWhenEnabled": [1],
+      "maximumRunsPerDay": 1,
       "hardRuntimeEnforced": true,
       "counterPersistence": "backend_local_settings",
-      "countingPolicy": "pre_dispatch_fail_closed_reservation",
+      "countingPolicy": "post_gate_pre_dispatch_fail_closed_reservation",
       "stalePendingPolicy": "expire_at_bangkok_day_boundary",
       "catchUpPolicy": "latest_same_day_slot_only",
       "uniqueTimesRequired": true,
       "timeFormat": "HH:MM",
-      "defaultEnabled": false,
+      "defaultEnabled": true,
+      "defaultTimes": ["09:00"],
       "executionMode": "scheduled_read_only"
     }
   },

@@ -226,7 +226,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             .read_text(encoding="utf-8")
         )
 
-        self.assertEqual(orchestration["version"], "orchestration-contract-v009")
+        self.assertEqual(orchestration["version"], "orchestration-contract-v010")
         self.assertEqual(reports["version"], "report-contract-v011")
         policy = orchestration["aiTradeCouncilAutoAnalysis"]["consensusPolicy"]
         self.assertEqual(
@@ -346,8 +346,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
         mission_start = main.index("function getActiveMissionForAgent(")
         mission_end = main.index("\nfunction getAgentSidebarState", mission_start)
         mission_block = main[mission_start:mission_end]
-        for status in ("running", "blocked", "failed", "waiting_approval", "queued"):
+        for status in ("running", "blocked", "failed", "queued"):
             self.assertIn(f"{status}:", mission_block)
+        self.assertNotIn("waiting_approval:", mission_block)
         sidebar_start = main.index("function getAgentSidebarState(")
         sidebar_end = main.index("\nfunction createAgentStatusCard", sidebar_start)
         sidebar = main[sidebar_start:sidebar_end]
@@ -1376,6 +1377,12 @@ class RuntimeIntegrityTests(unittest.TestCase):
                     self.assertTrue(profile["operation"]["scheduleBackendOwned"])
                     self.assertTrue(profile["operation"]["scheduleDefaultEnabled"])
                     self.assertEqual(profile["operation"]["scheduleDefaultTimes"], ["00:00", "12:00"])
+                elif prop_id == "left_audit_crystals":
+                    self.assertEqual(profile["operation"]["defaultMode"], "once_daily")
+                    self.assertTrue(profile["operation"]["scheduleBackendOwned"])
+                    self.assertTrue(profile["operation"]["scheduleDefaultEnabled"])
+                    self.assertEqual(profile["operation"]["scheduleDefaultTimes"], ["09:00"])
+                    self.assertEqual(profile["operation"]["scheduleHardMaximumRunsPerDay"], 1)
                 else:
                     self.assertEqual(profile["operation"]["defaultMode"], "manual")
                     self.assertTrue(profile["operation"]["scheduleBackendOwned"])
@@ -2417,8 +2424,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn("getDashboardWorkState(item, kind)", main)
         self.assertIn("createDashboardReportCard(item)", main)
         self.assertIn("item.attachments", main)
-        for status in ("queued", "running", "waiting_approval", "blocked", "completed", "failed", "archived"):
+        for status in ("queued", "running", "blocked", "completed", "failed", "archived"):
             self.assertIn(f".kanban-column.status-{status}", styles)
+        self.assertNotIn(".kanban-column.status-waiting_approval", styles)
 
     def test_operational_sidebars_replace_visible_legacy_controls(self) -> None:
         html = FRONTEND_INDEX_PATH.read_text(encoding="utf-8")
@@ -2547,8 +2555,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertNotIn('label: "ติดขัด"', status_block)
         self.assertIn("getActiveMissionForAgent(agent.id)", status_block)
         active_block = function_block("getActiveMissionForAgent")
-        for outstanding_status in ("running", "waiting_approval", "queued", "blocked", "failed"):
+        for outstanding_status in ("running", "queued", "blocked", "failed"):
             self.assertIn(f"{outstanding_status}:", active_block)
+        self.assertNotIn("waiting_approval:", active_block)
         self.assertNotIn("taskLabelByStatus", status_block)
         self.assertIn("missionStatus", status_block)
         self.assertIn('key: "busy"', status_block)
@@ -6095,11 +6104,11 @@ class RuntimeIntegrityTests(unittest.TestCase):
                     self.assertEqual(subtask["executionMode"], "auto_guarded")
                     self.assertTrue(subtask["autoEligible"])
                     self.assertFalse(subtask["requiresHumanApproval"])
-                    self.assertTrue(subtask["approval"]["required"])
-                    self.assertEqual(subtask["approval"]["state"], "approved")
-                    self.assertEqual(subtask["approval"]["gateMode"], "backend_auto_review")
-                    self.assertEqual(subtask["approval"]["requiredActors"], ["risk_guard"])
-                    self.assertTrue(subtask["approval"]["payloadDigest"])
+                    self.assertFalse(subtask["approval"]["required"])
+                    self.assertEqual(subtask["approval"]["state"], "not_required")
+                    self.assertEqual(subtask["approval"]["gateMode"], "not_required")
+                    self.assertEqual(subtask["approval"]["requiredActors"], [])
+                    self.assertTrue(subtask["execution"]["authorizationPayloadDigest"])
 
                 for subtask in result["subtasks"]:
                     subtask["status"] = "completed"
@@ -6287,7 +6296,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             "time": "2026-07-15T00:00:00+00:00",
         }
         registry = self.bridge.capability_registry(fake_status)
-        self.assertEqual(registry["contractVersion"], "tool-permission-contract-v012")
+        self.assertEqual(registry["contractVersion"], "tool-permission-contract-v013")
         self.assertFalse(registry["policy"]["frontendSecrets"])
         self.assertTrue(registry["policy"]["disabledToolsFailClosed"])
         telegram = next(item for item in registry["capabilities"] if item["id"] == "send_telegram")
@@ -6556,7 +6565,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.bridge.MISSIONS_PATH = original_missions
                 self.bridge.AUDIT_PATH = original_audit
 
-    def test_operator_mode_defaults_manual_persists_strict_mode_only_and_audits(self) -> None:
+    def test_operator_mode_defaults_auto_guarded_persists_strict_mode_only_and_audits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
             original_operator_mode = self.bridge.OPERATOR_MODE_PATH
@@ -6567,8 +6576,8 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.bridge.MISSION_WORKER_WAKE.clear()
 
                 default_mode = self.bridge.operator_mode_read_model()
-                self.assertEqual(default_mode["mode"], "manual_guarded")
-                self.assertFalse(default_mode["autoExecute"])
+                self.assertEqual(default_mode["mode"], "auto_guarded")
+                self.assertTrue(default_mode["autoExecute"])
                 self.assertIn("autoEligibleTools", default_mode["guardrails"])
                 self.assertIn("maxRisk", default_mode["guardrails"])
                 self.assertIn("alwaysRequireHumanApprovalFor", default_mode["guardrails"])
@@ -6596,7 +6605,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 events = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH)
                 changes = [item for item in events if item.get("type") == "operator_mode.changed"]
                 self.assertEqual(len(changes), 1)
-                self.assertEqual(changes[0]["previousMode"], "manual_guarded")
+                self.assertEqual(changes[0]["previousMode"], "auto_guarded")
                 self.assertEqual(changes[0]["mode"], "auto_guarded")
                 self.assertTrue(changes[0]["autoExecute"])
             finally:
@@ -6637,18 +6646,13 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.assertEqual(safe["executionMode"], "auto_guarded")
                 self.assertTrue(safe["autoEligible"])
                 self.assertFalse(safe["requiresHumanApproval"])
-                self.assertTrue(safe["approval"]["required"])
-                self.assertEqual(safe["approval"]["gateMode"], "backend_auto_review")
-                self.assertEqual(safe["approval"]["state"], "approved")
-                self.assertEqual(safe["approval"]["requiredActors"], ["risk_guard"])
-                self.assertTrue(safe["approval"]["payloadDigest"])
-                self.assertTrue(any(
-                    item.get("actorId") == "risk_guard"
-                    and item.get("actorProvenance") == "backend_auto_review"
-                    and item.get("decision") == "approved"
-                    and item.get("payloadDigest") == safe["approval"]["payloadDigest"]
-                    for item in safe["approval"]["decisions"]
-                ))
+                self.assertFalse(safe["approval"]["required"])
+                self.assertEqual(safe["approval"]["gateMode"], "not_required")
+                self.assertEqual(safe["approval"]["state"], "not_required")
+                self.assertEqual(safe["approval"]["requiredActors"], [])
+                self.assertEqual(safe["execution"]["authorizationSource"], "backend_auto_policy")
+                self.assertEqual(safe["execution"]["authorizationDecision"], "allowed")
+                self.assertTrue(safe["execution"]["authorizationPayloadDigest"])
 
                 hard_risk = self.bridge.create_mission({
                     "title": "Send live Telegram signal",
@@ -6677,7 +6681,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 events = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH, limit=100)
                 safe_events = [item for item in events if item.get("missionId") == safe["id"]]
                 hard_events = [item for item in events if item.get("missionId") == hard_risk["id"]]
-                self.assertTrue(any(item.get("type") == "mission.auto_guard_review" for item in safe_events))
+                self.assertTrue(any(item.get("type") == "mission.auto_policy_authorized" for item in safe_events))
                 self.assertTrue(any(item.get("type") == "mission.auto_enqueued" for item in safe_events))
                 self.assertFalse(any(item.get("type") == "mission.auto_enqueued" for item in hard_events))
                 self.assertFalse(any(item.get("type") == "bridge.codex_run_start" for item in hard_events))
@@ -6787,7 +6791,8 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.assertEqual(finished["status"], "completed")
                 self.assertEqual(finished["phase"], "auto_guarded_completed")
                 self.assertEqual(finished["attemptCount"], 1)
-                self.assertEqual(finished["approval"]["state"], "consumed")
+                self.assertEqual(finished["approval"]["state"], "not_required")
+                self.assertTrue(finished["execution"]["authorizationConsumedAt"])
                 self.assertEqual(finished["execution"]["dispatchState"], "completed")
                 self.assertFalse(finished["execution"]["automaticRetry"])
                 self.assertEqual(len(finished["reportIds"]), 1)
@@ -6803,7 +6808,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 events = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH, limit=200)
                 child_events = [item for item in events if item.get("missionId") == child["id"]]
                 for event_type in (
-                    "mission.auto_guard_review",
+                    "mission.auto_policy_authorized",
                     "mission.auto_enqueued",
                     "mission.auto_claimed",
                     "mission.auto_run_start",

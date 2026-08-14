@@ -1,5 +1,5 @@
 {
-  "version": "tool-permission-contract-v012",
+  "version": "tool-permission-contract-v013",
   "purpose": "Map visual office tools to backend permissions and approval rules.",
   "workflowExecutionEnvelope": {
     "requiredForEveryDashboardAction": true,
@@ -139,7 +139,7 @@
       "adapterStatus": "implemented_guarded",
       "realExecutionAvailable": true,
       "autoRunnable": true,
-      "autoRunCondition": "operator_mode_auto_guarded_and_backend_risk_guard_approved_digest_bound_mission",
+      "autoRunCondition": "operator_mode_auto_guarded_and_backend_auto_safe_digest_bound_mission",
       "autoMode": "guarded_project_workspace",
       "autoSandbox": "workspace-write",
       "autoWorkspaceRoot": "PROJECT_ROOT/workspace",
@@ -167,7 +167,7 @@
         "mt4TerminalAllowed": false,
         "secretAccessAllowed": false
       },
-      "approvalRequired": true,
+      "approvalRequired": false,
       "risk": "medium",
       "allowedAgents": ["manager", "codex_mcp_operator", "ea_developer", "backtest_analyst", "optimization_agent", "vps_watch", "telegram_ops", "risk_guard", "mission_archivist"],
       "modelTier": "role_default"
@@ -180,11 +180,13 @@
       "adapterStatus": "implemented_codex_native_web_search",
       "realExecutionAvailable": true,
       "autoRunnable": true,
-      "autoRunCondition": "operator_mode_auto_guarded_and_backend_risk_guard_approved_digest_bound_mission",
+      "autoRunCondition": "operator_mode_auto_guarded_and_backend_auto_safe_digest_bound_mission",
       "autoMode": "guarded_native_web_search",
       "autoSandbox": "workspace-write",
+      "trustedPublicWebWorkflowSandbox": "read-only",
       "autoWorkspaceRoot": "PROJECT_ROOT/workspace",
       "autoWriteRoots": ["workspace", "frontend", "docs", "assets-source"],
+      "trustedPublicWebWorkflowWriteRoots": [],
       "autoReadOnlyControlPlaneRoots": ["backend", "runner", "contracts", "data/runtime", "scripts", "installer", ".git"],
       "autoNetworkAllowed": false,
       "autoWebSearchAvailable": true,
@@ -203,7 +205,7 @@
         "nativeWebSearchAllowed": true,
         "minimumPublicEvidenceUrls": 2
       },
-      "approvalRequired": true,
+      "approvalRequired": false,
       "risk": "medium",
       "allowedAgents": ["manager", "codex_mcp_operator", "ea_developer", "backtest_analyst", "optimization_agent", "vps_watch", "telegram_ops", "risk_guard", "mission_archivist"],
       "modelTier": "role_default"
@@ -438,11 +440,11 @@
       "modelTier": "specialist_fast",
       "frontendIntentFields": ["propId", "actionId", "inputs", "idempotencyKey"],
       "configurationIntentAvailable": true,
-      "schedulePreferenceMaxRunsPerDay": 2,
-      "scheduleHardMaximumRunsPerDay": 2,
+      "schedulePreferenceMaxRunsPerDay": 1,
+      "scheduleHardMaximumRunsPerDay": 1,
       "scheduleHardMaximumRuntimeEnforced": true,
       "scheduleDailyCounterPersistence": "backend_local_settings",
-      "scheduleCountingPolicy": "pre_dispatch_fail_closed_reservation",
+      "scheduleCountingPolicy": "post_gate_pre_dispatch_fail_closed_reservation",
       "scheduleStalePendingPolicy": "expire_at_bangkok_day_boundary",
       "googleSheetReferenceValidation": "https_docs_google_com_or_bare_sheet_id",
       "googleSheetAdapterStatus": "not_connected",

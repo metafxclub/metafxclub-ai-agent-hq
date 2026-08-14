@@ -4,7 +4,8 @@
   "authority": {
     "may_spawn": ["manager"],
     "must_review": ["risk_guard"],
-    "human_approval_required_for": ["codex_cli_task", "mcp_tool_run", "live_trading", "production_deploy", "send_public_telegram"]
+    "human_approval_required_for": ["mcp_tool_run", "live_trading", "production_deploy", "send_public_telegram", "secret_or_account_mutation"],
+    "backend_auto_safe_without_human_approval": ["bounded_codex_cli_task", "bounded_public_web_read_only_research"]
   },
   "spawn_request_schema": {
     "id": "agent-safe-slug",

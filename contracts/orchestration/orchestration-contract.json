@@ -1,9 +1,9 @@
 {
-  "version": "orchestration-contract-v009",
+  "version": "orchestration-contract-v010",
   "purpose": "Backend-owned Manager delegation, model tiering, cost/rate guard, approval, and report aggregation rules for the Metafxclub AI Agent HQ Visual Office.",
   "operatorMode": {
     "endpoint": "GET/POST /api/operator-mode",
-    "defaultMode": "manual_guarded",
+    "defaultMode": "auto_guarded",
     "supportedModes": ["manual_guarded", "auto_guarded"],
     "autoEligibleTools": ["codex_cli_task", "codex_web_research"],
     "maxRisk": "medium",
@@ -55,13 +55,16 @@
       "ถอนเงิน"
     ],
     "authorization": {
-      "approvalRequired": true,
-      "reviewActor": "risk_guard",
-      "reviewProvenance": "backend_auto_review",
+      "approvalRequired": false,
+      "mode": "backend_auto_safe",
+      "reason": "routine_internal_or_read_only",
+      "humanApprovalRequiredOnlyFor": ["irreversible_external_action", "live_trading", "message_send", "production_deploy", "secret_or_account_mutation", "destructive_filesystem"],
       "payloadDigestBound": true,
       "singleUse": true,
+      "durableAcrossRestart": true,
+      "expires": false,
       "executionSchema": "auto-guarded-execution-v1",
-      "legacyMissionAutoMigration": false
+      "legacyApprovalMigration": "archive_without_execution_and_preserve_previous_approval"
     },
     "workspaceBoundary": {
       "sandbox": "workspace-write",
@@ -72,7 +75,13 @@
       "nativeWebSearch": "live_for_codex_web_research_only",
       "externalApps": false,
       "destructiveCommands": false,
-      "projectInstructionsRequired": true
+      "projectInstructionsRequired": true,
+      "trustedPublicWebWorkflow": {
+        "sandbox": "read-only",
+        "writeRoots": [],
+        "externalWrites": false,
+        "metatraderActions": false
+      }
     }
   },
   "managerAutoDelegation": {
@@ -429,6 +438,9 @@
     "shutdownBehavior": "cancel_and_verify_process_tree",
     "timeoutBehavior": "terminate_process_tree_and_fail_closed_without_retry",
     "requiredAutoMarkers": ["autoEligible", "executionMode", "autoQueuedAt", "execution.schema", "execution.authorizationId", "execution.authorizationIssuedAt"],
+    "actionSpecificRequiredAutoMarkers": {
+      "left_audit_crystals/discover_new_indicators": ["workflowContext.executionReservation.settingsKey", "workflowContext.executionReservation.bangkokDate", "workflowContext.executionReservation.slotKey", "workflowContext.executionReservation.maximumRunsPerDay", "workflowContext.executionReservation.source"]
+    },
     "legacyQueuedMissionAutoRun": false
   },
   "approvalGate": {
@@ -447,7 +459,7 @@
       "frontendMayClaimRiskGuardActor": false
     },
     "missionDigestRecheckedOnApproveAndExecute": true,
-    "missionDigestFields": ["owner", "toolId", "targetId", "detail", "modelTier", "budget", "risk", "reportType", "executionMode", "autoEligible", "autoQueuedAt", "requiresHumanApproval", "execution.schema", "execution.authorizationId", "execution.authorizationIssuedAt"],
+    "missionDigestFields": ["owner", "toolId", "targetId", "detail", "modelTier", "budget", "risk", "reportType", "idempotencyKey", "idempotencyScopeDigest", "executionMode", "autoEligible", "autoQueuedAt", "requiresHumanApproval", "workflowContext.schemaVersion", "workflowContext.propId", "workflowContext.actionId", "workflowContext.coordinationMode", "workflowContext.source", "workflowContext.agentTransfer", "workflowContext.inputDigest", "workflowContext.inputs", "workflowContext.submittedAt", "workflowContext.triggerSource", "workflowContext.executionReservation", "workflowContext.executionReservation.settingsKey", "workflowContext.executionReservation.bangkokDate", "workflowContext.executionReservation.slotKey", "workflowContext.executionReservation.maximumRunsPerDay", "workflowContext.executionReservation.source", "workflowContext.pluginProcedure", "execution.schema", "execution.authorizationId", "execution.authorizationIssuedAt", "execution.authorizationSource", "execution.authorizationDecision", "execution.authorizationPolicyVersion", "execution.authorizationReason"],
     "mediumRiskRequiredActors": ["human"],
     "highRiskRequiredActors": ["human", "risk_guard"],
     "approveEndpoint": "POST /api/missions/:id/approval",

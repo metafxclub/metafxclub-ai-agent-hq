@@ -210,6 +210,41 @@ class RadarStructuredOutputContractTests(unittest.TestCase):
         self.assertFalse(contract["valid"])
         self.assertIn("entry_1_invalid_timestamp", contract["entryErrors"])
 
+    def test_radar_timestamps_require_explicit_offset_and_bound_publication_time(self) -> None:
+        invalid_checked = (
+            "2026-08-14T09:00:00",
+            "2026-08-14 Asia/Bangkok",
+        )
+        for value in invalid_checked:
+            with self.subTest(checkedAt=value):
+                entry = self.entry()
+                entry["checkedAt"] = value
+                contract = self.validate([entry])
+                self.assertFalse(contract["valid"])
+                self.assertIn("entry_1_invalid_timestamp", contract["entryErrors"])
+
+        for value in (
+            "2026-08-14T02:00:00Z",
+            "2026-08-14T09:00:00+07:00",
+        ):
+            with self.subTest(checkedAt=value):
+                entry = self.entry()
+                entry["checkedAt"] = value
+                contract = self.validate([entry])
+                self.assertTrue(contract["valid"], contract)
+
+        boundary = self.entry()
+        boundary["checkedAt"] = "2026-08-14T09:00:00+07:00"
+        boundary["publishedAt"] = "2026-08-14T09:05:00+07:00"
+        self.assertTrue(self.validate([boundary])["valid"])
+
+        too_late = self.entry()
+        too_late["checkedAt"] = "2026-08-14T09:00:00+07:00"
+        too_late["publishedAt"] = "2026-08-14T09:05:01+07:00"
+        rejected = self.validate([too_late])
+        self.assertFalse(rejected["valid"])
+        self.assertIn("entry_1_invalid_timestamp", rejected["entryErrors"])
+
     def test_report_screenshot_requires_explicit_matching_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             image_path = Path(temp_dir) / "radar.png"

@@ -84,12 +84,12 @@ class RadarWebsiteToolCompatibilitySnapshotTests(unittest.TestCase):
         self.assertTrue(dedupe["positiveStatusRequiresBackendFingerprint"])
         self.assertTrue(dedupe["frontendMayNotUpgradeStatus"])
 
-    def test_snapshot_limits_schedule_to_two_and_google_sheet_url_is_not_a_credential(self) -> None:
+    def test_snapshot_limits_schedule_to_one_and_google_sheet_url_is_not_a_credential(self) -> None:
         settings = self.compatibility["settings"]
         schedule = settings["schedule"]
         sheet = settings["googleSheetUrl"]
-        self.assertEqual(schedule["maximumRunsPerDay"], 2)
-        self.assertEqual(schedule["allowedRunsPerDayWhenEnabled"], [1, 2])
+        self.assertEqual(schedule["maximumRunsPerDay"], 1)
+        self.assertEqual(schedule["allowedRunsPerDayWhenEnabled"], [1])
         self.assertEqual(schedule["timezone"], "Asia/Bangkok")
         self.assertEqual(sheet["fieldId"], "googleSheetUrlOrId")
         self.assertEqual(sheet["allowedHost"], "docs.google.com")

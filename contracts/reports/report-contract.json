@@ -435,16 +435,18 @@
         }
       ],
       "schedulePreference": {
+        "defaultEnabled": true,
+        "defaultTimes": ["09:00"],
         "enabledWhenAdapterReady": true,
-        "times": [],
+        "times": ["09:00"],
         "timezone": "Asia/Bangkok",
-        "maximumRunsPerDay": 2,
+        "maximumRunsPerDay": 1,
         "hardRuntimeEnforced": true,
         "counterPersistence": "backend_local_settings",
-        "countingPolicy": "pre_dispatch_fail_closed_reservation",
+        "countingPolicy": "post_gate_pre_dispatch_fail_closed_reservation",
         "stalePendingPolicy": "expire_at_bangkok_day_boundary",
         "catchUpPolicy": "latest_same_day_slot_only",
-        "configurationSaved": false,
+        "configurationSaved": true,
         "recurringSchedulerAvailable": true
       },
       "googleSheet": {
@@ -473,7 +475,7 @@
       },
       "truthRules": [
         "Every discovered entry must contain a public source URL and checkedAt timestamp.",
-        "The Backend scheduler reserves and persists at most two actual Radar dispatch attempts per Bangkok calendar day; schedule edits and restarts cannot reset the counter, stale pending work expires at the day boundary, and ambiguous dispatch failures consume capacity fail closed.",
+        "The Backend scheduler reserves and persists at most one actual Radar dispatch attempt per Bangkok calendar day after readiness and quota gates pass; schedule edits and restarts cannot reset the counter, stale pending work expires at the day boundary, synchronous no-mission rejections release the reservation, and ambiguous dispatch failures consume capacity fail closed.",
         "A Google Sheet reference may be saved only after safe URL or ID validation; no Sheet rows are read or written until a Backend-owned adapter is connected and an external write is explicitly confirmed.",
         "Screenshot evidence remains unavailable unless a Backend-owned adapter returns a verified report attachment.",
         "Each screenshot must explicitly match that entry by attachmentId or artifactRef; the first report image is never broadcast to unmatched entries.",

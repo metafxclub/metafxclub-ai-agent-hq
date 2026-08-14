@@ -286,7 +286,7 @@
       "titleTh": "Radar Website Tool",
       "referencePrimarySkillId": "metafx-online-system-scout",
       "ownerAgentId": "codex_mcp_operator",
-      "schedule": {"supported": true, "timezone": "Asia/Bangkok", "defaultTimes": ["09:00"], "maximumRunsPerDay": 2, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "actions": ["discover_new_indicators"]},
+      "schedule": {"supported": true, "defaultEnabled": true, "timezone": "Asia/Bangkok", "defaultTimes": ["09:00"], "maximumTimes": 1, "maximumRunsPerDay": 1, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "post_gate_pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "actions": ["discover_new_indicators"]},
       "actions": {
         "discover_new_indicators": {
           "pluginSkillId": "backend-readonly-indicator-scout",
@@ -302,7 +302,9 @@
             "minimumItemsPerRun": 1,
             "maximumItemsPerRun": 6,
             "workerRequiredFields": ["toolName", "toolKind", "platform", "category", "version", "summaryTh", "sourceTitle", "sourceUrl", "publishedAt", "checkedAt", "verificationStatus", "availability", "eaReadiness", "missingRules", "sourceLimitations", "screenshot"],
-            "backendComputedFields": ["recordId", "duplicateFingerprint", "duplicateStatus", "duplicateScope"]
+            "backendComputedFields": ["recordId", "duplicateFingerprint", "duplicateStatus", "duplicateScope"],
+            "maximumContractValueCharacters": 12000,
+            "fieldLimits": {"toolName": 80, "category": 40, "version": 32, "summaryTh": 240, "sourceTitle": 120, "sourceUrl": 320, "missingRulesMaximumItems": 2, "missingRuleCharacters": 80, "sourceLimitationsMaximumItems": 2, "sourceLimitationCharacters": 120}
           },
           "evidenceRequired": ["source_url", "source_title", "checked_at", "ea_readiness", "public_availability_status"],
           "screenshotPolicy": "optional_when_backend_adapter_available",
@@ -314,7 +316,7 @@
           "pluginVersion": "backend-v1",
           "procedureKind": "backend_procedure",
           "automationMode": "settings_only",
-          "inputPreset": {"enabled": false, "times": ["09:00"], "timezone": "Asia/Bangkok", "maximumRunsPerDay": 2, "googleSheetUrlOrId": null, "googleSheetTabName": null},
+          "inputPreset": {"enabled": true, "times": ["09:00"], "timezone": "Asia/Bangkok", "maximumRunsPerDay": 1, "googleSheetUrlOrId": null, "googleSheetTabName": null},
           "outputFields": ["requestedEnabled", "effectiveEnabled", "times", "maxConfiguredTimes", "timezone", "lastRunStatus", "savedAt", "googleSheet"],
           "evidenceRequired": ["local_settings_record", "scheduler_state"],
           "screenshotPolicy": "not_required",

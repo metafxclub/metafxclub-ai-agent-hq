@@ -486,7 +486,7 @@
     "left_audit_crystals": {
       "functionName": "Radar Website Tool",
       "displayTitle": "Radar Website Tool",
-      "purpose": "ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะ เก็บ URL วันที่ตรวจ และสถานะซ้ำจากคลัง Report ในเครื่อง พร้อมตั้งเวลาได้สูงสุดวันละ 2 รอบ; Google Sheet และ Screenshot แสดงตามสถานะ Adapter จริงเท่านั้น",
+      "purpose": "ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะ เก็บ URL วันที่ตรวจ และสถานะซ้ำจากคลัง Report ในเครื่อง โดยทำงานอัตโนมัติสูงสุดวันละ 1 รอบ; Google Sheet และ Screenshot แสดงตามสถานะ Adapter จริงเท่านั้น",
       "interactionMode": "dashboard",
       "connectionProfileId": "left_audit_crystals",
       "departmentId": "indicator_market_intelligence",
@@ -513,10 +513,10 @@
         "historyReportTabId": "archive",
         "historyReportTabPosition": "last",
         "leftRailSections": [
-          {"id": "schedule", "labelTh": "ค้นหาและตั้งค่า", "purpose": "ค้นหา ตั้งเวลาไม่เกิน 2 รอบ และบันทึก Sheet ที่ตรวจแล้ว", "mode": "backend_preference", "actionIds": ["save_indicator_scout_schedule"]},
+          {"id": "schedule", "labelTh": "ค้นหาและตั้งค่า", "purpose": "ค้นหาอัตโนมัติวันละครั้งเวลา 09:00 น. และเก็บการตั้งค่า Google Sheet โดยไม่อ้างว่าเขียน Sheet จนกว่า Adapter จะยืนยัน", "mode": "backend_preference", "actionIds": ["save_indicator_scout_schedule"]},
           {"id": "quota", "labelTh": "โควตา Codex", "purpose": "ดูโควตาจาก Backend แบบอ่านอย่างเดียว", "mode": "backend_read_only"}
         ],
-        "leftRailControls": ["discover_new_indicators", "schedule_max_2", "validated_google_sheet_reference"],
+        "leftRailControls": ["discover_new_indicators", "schedule_once_daily", "validated_google_sheet_reference"],
         "primaryViews": ["today", "history_7_days"],
         "crossDevicePolicy": "agent_mission_report_only",
         "directDashboardPipeline": false,
@@ -535,7 +535,7 @@
         "directDashboardDependency": false,
         "transferPolicy": {"mode": "agent_mission_only", "requiredRecordFields": ["sourceReportId", "sourcePropId", "sourceMissionId", "transferAgentId"], "frontendMaySubmitFields": ["sourceReportId"], "backendDerivesLineage": true, "missionStrategyTableRole": "global_ledger_only"},
         "deduplication": {"required": true, "mode": "deterministic_local_report_catalog", "matchKeys": ["normalizedSourceUrl", "toolName", "platform", "version"], "googleSheetCompared": false, "owner": "backend"},
-        "schedule": {"preferenceRunsPerDay": [1, 2], "maximumRunsPerDay": 2, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "configurationIntentReady": true, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": false, "timezone": "Asia/Bangkok", "scheduledActionIds": ["discover_new_indicators"]},
+        "schedule": {"preferenceRunsPerDay": [1], "defaultTimes": ["09:00"], "maximumTimes": 1, "maximumRunsPerDay": 1, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "post_gate_pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "configurationIntentReady": true, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": true, "timezone": "Asia/Bangkok", "scheduledActionIds": ["discover_new_indicators"]},
         "googleSheet": {"configurationMayBeSaved": true, "privateDefaultIncluded": false, "adapterStatus": "not_connected", "externalWriteEnabled": false, "writeRequiresExplicitUserConfirmation": true},
         "readModel": {"schemaVersion": "radar-website-tool-v1", "todayEntries": true, "sevenDayEntries": true, "historyWindowDays": 7},
         "readiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "localDedup": "implemented_deterministic_local_report_catalog", "googleSheetsAdapter": "not_connected", "screenshotAdapter": "not_connected", "recurringScheduler": "ready_guarded_read_only"}

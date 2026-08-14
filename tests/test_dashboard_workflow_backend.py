@@ -43,6 +43,12 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             {"enabled": False, "times": ["00:00", "12:00"]}
         )
 
+    def disable_radar_schedule(self) -> None:
+        self.bridge._save_dashboard_schedule_preference(
+            "indicatorScoutSchedule",
+            {"enabled": False, "times": ["09:00"]},
+        )
+
     def test_ready_guarded_codex_is_connected_in_dashboard_checklists(self) -> None:
         freshness = {
             "bridge": self.bridge._connection_probe_freshness({}),
@@ -779,6 +785,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 mock.patch.object(self.bridge, "run_dashboard_workflow_action") as runner,
             ):
                 self.disable_direct_news_schedule()
+                self.disable_radar_schedule()
                 result = self.bridge.dashboard_workflow_scheduler_tick(
                     datetime(2026, 8, 9, 9, 0, tzinfo=self.bridge.THAILAND_TIMEZONE),
                     refresh_quota=False,
@@ -883,6 +890,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 ),
             ):
                 self.disable_direct_news_schedule()
+                self.disable_radar_schedule()
                 self.bridge.save_dashboard_discovery_schedule(
                     {"enabled": True, "times": ["09:00"]}
                 )
@@ -939,6 +947,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             )
             with common_patches[0], common_patches[1], common_patches[2], common_patches[3]:
                 self.disable_direct_news_schedule()
+                self.disable_radar_schedule()
                 self.bridge.save_dashboard_discovery_schedule(
                     {"enabled": True, "times": ["09:00"]}
                 )
@@ -2026,6 +2035,12 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             "byteSize": 120,
         }]
         with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            mock.patch.object(
+                self.bridge,
+                "DASHBOARD_WORKFLOW_SETTINGS_PATH",
+                Path(temp_dir) / "dashboard-workflow-settings.json",
+            ),
             mock.patch.object(self.bridge, "find_room_prop", return_value={"id": "any"}),
             mock.patch.object(self.bridge, "_workflow_action_contract_gate", return_value={"allowed": True}),
             mock.patch.object(self.bridge, "run_bridge_task", side_effect=fake_run),
@@ -2673,7 +2688,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(self.bridge.RequestError):
                 self.bridge._normalize_google_sheet_reference(value)
 
-    def test_radar_schedule_is_hard_capped_at_two_and_sheet_id_is_masked(self) -> None:
+    def test_radar_schedule_is_hard_capped_at_one_and_sheet_id_is_masked(self) -> None:
         sheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_987654321"
         action = self.bridge.DASHBOARD_WORKFLOW_ACTIONS["save_indicator_scout_schedule"]
         form = self.bridge._sanitize_dashboard_workflow_form(
@@ -2685,7 +2700,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 "googleSheetTabName": "Radar Daily",
             },
         )
-        self.assertEqual(form["times"], ["07:00", "12:00"])
+        self.assertEqual(form["times"], ["07:00"])
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
             self.bridge,
             "DASHBOARD_WORKFLOW_SETTINGS_PATH",
@@ -2696,8 +2711,8 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 form,
             )
             stored = self.bridge.load_dashboard_workflow_settings()
-        self.assertEqual(saved["times"], ["07:00", "12:00"])
-        self.assertEqual(saved["maxConfiguredTimes"], 2)
+        self.assertEqual(saved["times"], ["07:00"])
+        self.assertEqual(saved["maxConfiguredTimes"], 1)
         self.assertTrue(saved["googleSheet"]["configured"])
         self.assertNotIn(sheet_id, json.dumps(saved, ensure_ascii=False))
         self.assertEqual(stored["indicatorScoutSheet"]["sheetId"], sheet_id)

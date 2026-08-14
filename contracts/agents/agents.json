@@ -48,7 +48,7 @@
       "blocked_actions": ["expose_secret_to_frontend", "bypass_risk_guard", "spawn_unbounded_worker"],
       "memory_scope": "mission plan, task status, agent reports, meeting transcript, worker spawn notes",
       "credit_budget": "manager-controlled guarded budget",
-      "approval_required_actions": ["send_public_telegram", "restart_vps", "deploy_production", "spawn_worker", "codex_cli_task"],
+      "approval_required_actions": ["send_public_telegram", "restart_vps", "deploy_production", "spawn_worker"],
       "output_format": "mission_plan_and_summary",
       "visual": {
         "asset_package": "male-roster-set-a-core-command-operators-v001",
@@ -220,7 +220,7 @@
       "blocked_actions": ["read_auth_tokens_into_frontend", "run_unapproved_codex_task"],
       "memory_scope": "bridge status, smoke checks, runner health, MCP setup notes",
       "credit_budget": "diagnostic only unless approved",
-      "approval_required_actions": ["codex_cli_task", "mcp_tool_run"],
+      "approval_required_actions": ["mcp_tool_run", "high_risk_codex_task", "irreversible_external_action"],
       "output_format": "bridge_status_report",
       "chat_profile": {
         "greeting_th": "สวัสดีครับ ผมคือ News Consultant ผมยังดูแล Codex/MCP ตามหน้าที่เดิม และเชี่ยวชาญข่าวกับบริบทตลาด ถามผมได้เลยว่าข่าวระยะสั้น กลาง และยาวอาจกระทบตลาดอย่างไรครับ",
