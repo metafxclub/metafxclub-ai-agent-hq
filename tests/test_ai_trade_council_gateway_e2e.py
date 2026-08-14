@@ -45,26 +45,20 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
             self.bridge._metatrader_selection_token
         )
         self.original_snapshot_reader = self.bridge.metatrader_snapshot_read_model
+        self.original_snapshot_dir = self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR
         self.bridge.RUNTIME_DIR = self.root / "runtime"
         self.bridge.AUDIT_PATH = self.bridge.RUNTIME_DIR / "bridge-audit.jsonl"
         self.bridge.METATRADER_COMMON_FILES_DIR = self.root / "common"
+        self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR = (
+            self.root / "ai-trade-council" / "snapshots"
+        )
         self.bridge.MT4_TRADE_GATEWAY_MODULE = None
         self.bridge._metatrader_selection_token = lambda _prop_id: {
             "candidateId": "mtc-safe-e2e-test",
             "selectionRevision": 1,
         }
         self.current_broker_closed_bar = 1_785_466_800
-        self.bridge.metatrader_snapshot_read_model = lambda _prop_id: {
-            "selectedCandidateId": "mtc-safe-e2e-test",
-            "adapter": {"ready": True},
-            "chartSnapshot": {
-                "available": True,
-                "snapshotId": "f" * 64,
-                "symbol": "XAUUSD",
-                "timeframe": "M5",
-                "bars": [{"time": self.current_broker_closed_bar}],
-            },
-        }
+        self.bridge.metatrader_snapshot_read_model = self.current_snapshot
 
     def tearDown(self) -> None:
         self.bridge.RUNTIME_DIR = self.original_runtime_dir
@@ -78,7 +72,27 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
             self.original_selection_token_reader
         )
         self.bridge.metatrader_snapshot_read_model = self.original_snapshot_reader
+        self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR = self.original_snapshot_dir
         self.temp.cleanup()
+
+    def current_snapshot(self, _prop_id: str) -> dict:
+        return {
+            "selectedCandidateId": "mtc-safe-e2e-test",
+            "adapter": {"ready": True, "status": "ready"},
+            "chartSnapshot": {
+                "available": True,
+                "snapshotId": "f" * 64,
+                "observedAt": datetime.now(timezone.utc).isoformat(),
+                "ageSeconds": 0,
+                "symbol": "XAUUSD",
+                "timeframe": "M5",
+                "bid": 2399.9,
+                "ask": 2400.1,
+                "spreadPoints": 20.0,
+                "marketOpen": True,
+                "bars": [{"time": self.current_broker_closed_bar}],
+            },
+        }
 
     def council_round(
         self,
@@ -104,6 +118,18 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
                 "snapshotId": snapshot_id,
                 "snapshotObservedAt": now.isoformat(),
                 "referencePrice": 2400.0,
+                "analysisQuote": {
+                    "schemaVersion": "ai-trade-council-analysis-quote-v1",
+                    "snapshotId": snapshot_id,
+                    "bid": 2399.9,
+                    "ask": 2400.1,
+                    "spreadPoints": 20.0,
+                    "derivedPoint": 0.01,
+                    "digits": 2,
+                    "directionalReferencePolicy": (
+                        "ask_for_buy_bid_for_sell"
+                    ),
+                },
                 "horizonBars": 1,
                 "validUntilBarTime": valid_until,
                 "requiredVotes": 1,
@@ -161,7 +187,7 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
                         2380.0 if role_id == "price_action" else None
                     ),
                     "takeProfitPrice": (
-                        2420.0 if role_id == "price_action" else None
+                        2421.0 if role_id == "price_action" else None
                     ),
                     "indicatorValidation": (
                         "PASS" if role_id == "technical" else None
@@ -173,7 +199,56 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
                     "newsEvidence": None,
                 },
             })
+        self.install_analysis_artifact(parent)
         return parent, children
+
+    def install_analysis_artifact(self, parent: dict) -> Path:
+        context = parent["analysisContext"]
+        bar_time = context["closedBarIdentity"]["closedBarTime"]
+        artifact = {
+            "schemaVersion": "ai-trade-council-input-v1",
+            "snapshotId": context["snapshotId"],
+            "createdAt": self.bridge.utc_now(),
+            "sourceMode": "mt4_read_only_snapshot",
+            "dailySummary": None,
+            "chartSnapshot": {
+                "available": True,
+                "snapshotId": context["snapshotId"],
+                "observedAt": context["snapshotObservedAt"],
+                "symbol": context["closedBarIdentity"]["symbol"],
+                "timeframe": context["closedBarIdentity"]["timeframe"],
+                "bid": 2399.9,
+                "ask": 2400.1,
+                "spreadPoints": 20.0,
+                "bars": [{
+                    "time": bar_time,
+                    "open": 2400.0,
+                    "high": 2401.0,
+                    "low": 2399.0,
+                    "close": 2400.0,
+                    "volume": 1.0,
+                }],
+            },
+            "policy": {
+                "readOnly": True,
+                "sameSnapshotRequired": True,
+                "terminalActionsAllowed": False,
+            },
+            "selectedCandidateId": "mtc-safe-e2e-test",
+        }
+        digest = self.bridge._ai_trade_council_snapshot_artifact_digest(
+            artifact
+        )
+        artifact["artifactDigest"] = digest
+        path = self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR / f"{digest}.json"
+        self.bridge.write_json(path, artifact)
+        context.update({
+            "snapshotArtifact": (
+                f"ai-trade-council/snapshots/{digest}.json"
+            ),
+            "snapshotArtifactDigest": digest,
+        })
+        return path
 
     def executed_ack(self, command: dict) -> dict:
         observed_at = max(
@@ -238,6 +313,9 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
             "liveOrderExecutionAvailable": False,
             "maxManagedPositions": ea_max_managed_positions,
             "currentManagedPositions": current_managed_positions,
+            "minRewardRiskRatio": 1.0,
+            "maxSignalDriftPoints": 100,
+            "maxSnapshotAgeSeconds": 300,
         }
 
     def configure_max_managed_orders(self, value: int) -> None:
@@ -336,6 +414,7 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
         gateway = self.bridge._mt4_trade_gateway_instance()
         command = gateway.read_command(command_id)["command"]
         self.assertEqual(command["action"], "BUY")
+        self.assertEqual(command["referencePrice"], 2400.1)
         self.assertEqual(command["barTime"], parent["analysisContext"]["closedBarIdentity"]["closedBarTime"])
         self.assertNotIn("fixedLot", command)
         self.assertNotIn("risk", command)
@@ -372,9 +451,9 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
             "action": command["action"],
             "openedAt": self.executed_ack(command)["observedAt"],
             "closedAt": self.executed_ack(command)["observedAt"] + 60,
-            "openPrice": command["referencePrice"],
-            "stopLoss": command["stopLoss"],
-            "takeProfit": command["takeProfit"],
+            "openPrice": float(command["referencePrice"]),
+            "stopLoss": float(command["stopLoss"]),
+            "takeProfit": float(command["takeProfit"]),
             "lots": 0.01,
             "magicNumber": 4186001,
             "comment": f"HQ:{command['commandId']}",
@@ -391,7 +470,7 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
         outcome_path.parent.mkdir(parents=True, exist_ok=True)
         outcome_path.write_text(json.dumps(outcome), encoding="ascii")
         observed = self.bridge.mt4_trade_gateway_outcome_read_model(command_id)
-        self.assertTrue(observed["ok"])
+        self.assertTrue(observed["ok"], observed)
         self.assertEqual(observed["outcome"]["executionState"], "CLOSED")
         self.assertEqual(observed["outcome"]["ticket"], 987654)
         self.assertEqual(observed["outcome"]["closedPnl"], 4.25)

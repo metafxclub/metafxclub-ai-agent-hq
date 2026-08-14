@@ -15,6 +15,7 @@
 - EA ส่ง Snapshot ทุก 5 วินาทีเพื่อให้ Dashboard ตามกราฟทัน
 - Backend เรียก Agent เมื่อเวลาแท่งปิดล่าสุดเปลี่ยน ไม่ได้เรียก Codex ทุก 5 วินาที
 - Command v2 ต้องผูกกับ `snapshotId`, `snapshotObservedAt`, `barTime` และ `referencePrice`; Backend ต้องคำนวณ `streamKey = SHA256(channelId + "\\n" + UPPERCASE(fullSymbol) + "\\n" + UPPERCASE(timeframe))` ตรงกับ Stream ที่เลือก โดย Normalize ก่อน Hash แม้ Snapshot จะรายงาน Symbol เป็นตัวพิมพ์เล็ก/ผสม
+- `referencePrice` ต้องมาจาก Council Snapshot เดิมตามฝั่งเปิดจริง: BUY ใช้ Ask และ SELL ใช้ Bid ส่วน `snapshotId`, เวลา Snapshot, SL และ TP ห้ามถูก Reprice ตอน Publish; ใต้ Selection/Bar Lock Backend ต้องอ่าน Quote สดของแท่งเดิม บังคับ `marketOpen=true`, ตรวจอายุ Snapshot ด้วยเพดานของ EA และยืนยัน Point ทั้งสองฝั่งเป็นค่าเดียวกันที่สร้างกลับได้ตรงแบบ Decimal จาก `10^-Digits` (`Digits` 0–8) ก่อน Preflight Drift และ Reward/Risk แล้วหยุดก่อนเข้าคิวพร้อมเหตุผลเฉพาะเมื่อหลักฐานใดไม่ผ่าน
 - ก่อนส่ง Order EA ต้องยืนยันว่า `barTime` ตรงกับแท่งปิดล่าสุด `iTime(..., 1)` และราคายังไม่เคลื่อนเกินเพดาน
 - Bar Claim ฝั่ง EA เก็บแยกด้วย Channel + ชื่อ Symbol เต็ม + Timeframe ดังนั้น Timestamp เดียวกันในคนละ Stream ทำงานได้ แต่ Stream เดิมใช้ได้เพียงครั้งเดียว
 

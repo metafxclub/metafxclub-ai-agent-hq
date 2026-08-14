@@ -1059,6 +1059,10 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
                 "timeframe": "M5",
                 "closedBarTime": 1_786_470_000,
             },
+            analysis_context={},
+            maximum_signal_drift_points=100,
+            minimum_reward_risk_ratio=1.0,
+            maximum_snapshot_age_seconds=300,
         )
 
         self.assertFalse(result["ok"])

@@ -482,7 +482,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
         self.assertIn("เหตุการณ์ตลอดวัน", self.main)
 
         html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-        self.assertIn("20260814-trade-chain-v057", html)
+        self.assertIn("20260814-trade-lifecycle-v058", html)
         self.assertNotIn("20260814-pair-news-assessment-v055", html)
         self.assertNotIn("20260814-runtime-truth-v054", html)
         self.assertNotIn("20260808-workflow-friendly-v053", html)

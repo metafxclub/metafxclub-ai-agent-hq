@@ -261,7 +261,7 @@ ownerAgentId
 - `issuedAt` และ `expiresAt` เป็น Unix UTC Seconds
 - `snapshotObservedAt` เป็น Unix UTC Seconds และต้องไม่เก่ากว่า `MaxSnapshotAgeSeconds`
 - `barTime` ต้องตรงกับแท่งปิดล่าสุดของกราฟที่ติด EA
-- `referencePrice` คือราคากลางจาก Snapshot; EA จะปฏิเสธเมื่อราคาเคลื่อนเกิน `MaxSignalDriftPoints`
+- `referencePrice` คือราคาฝั่งเปิดจาก Council Snapshot เดิม: BUY ใช้ Ask และ SELL ใช้ Bid ไม่ใช้ราคากลาง; `snapshotId`, `snapshotObservedAt`, SL และ TP ยังคงผูกกับ Snapshot วิเคราะห์เดิมทั้งหมด ก่อน Publish Local Runner จะอ่าน Quote สดของแท่งเดิมและต้องยืนยัน `marketOpen=true`, อายุ Snapshot ไม่เกิน `MaxSnapshotAgeSeconds`, Point ของ Snapshot เดิมและ Quote สดตรงกันโดยสร้างกลับได้พอดีเป็น `10^-Digits` (`Digits` 0–8), แล้วจึงเทียบ Drift และ Reward/Risk แบบเดียวกับ EA โดยไม่แก้ราคาใน Command และไม่ Retry หากไม่ผ่าน
 - `expiresAt` ต้องยังไม่หมดอายุ และ TTL ต้องไม่เกิน Input ของ EA
 - `stopLoss` และ `takeProfit` เป็นราคา Absolute
 - BUY เปิดที่ `Ask`: ต้องมี `SL < Bid` และ `TP > Ask`

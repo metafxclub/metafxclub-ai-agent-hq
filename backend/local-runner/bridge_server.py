@@ -20,6 +20,13 @@ import threading
 import time
 import zipfile
 from datetime import datetime, timedelta, timezone
+from decimal import (
+    Decimal,
+    InvalidOperation,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_UP,
+)
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -282,11 +289,12 @@ AI_TRADE_COUNCIL_INDICATOR_FORMULA_VERSION = (
     "metafx-deterministic-core20-price-action-v3"
 )
 AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_POLICY_VERSION = (
-    "metafx-protective-plan-atr-structure-v1"
+    "metafx-protective-plan-atr-structure-v2"
 )
 AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_MINIMUM_STOP_ATR = 1.0
 AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_STRUCTURE_BUFFER_ATR = 0.25
 AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_MAX_STRUCTURE_DISTANCE_ATR = 3.0
+AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_RR_CUSHION_POINTS = 2
 AI_TRADE_COUNCIL_ANALYSIS_CACHE_MAX_ENTRIES = 8
 AI_TRADE_COUNCIL_TECHNICAL_MODULES = (
     "sma_family",
@@ -16568,12 +16576,405 @@ def _metatrader_next_selection_revision(selection: object) -> int:
     return clamp_int(current, 1, 1, 2_147_483_646) + 1
 
 
+def _ai_trade_council_utc_epoch_now() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+def _ai_trade_council_execution_quote_preflight(
+    *,
+    current_snapshot: dict,
+    analysis_quote: dict,
+    intent: dict,
+    maximum_signal_drift_points: object,
+    minimum_reward_risk_ratio: object,
+    maximum_snapshot_age_seconds: object,
+) -> dict:
+    """Mirror the EA's action-price drift/RR checks without changing v2."""
+    action = str(intent.get("action") or "").upper()
+    analysis_snapshot_id = str(analysis_quote.get("analysisSnapshotId") or "")
+
+    def result(
+        ok: bool,
+        reason_code: str,
+        **detail: object,
+    ) -> dict:
+        return {
+            "schemaVersion": "ai-trade-council-execution-preflight-v1",
+            "status": "passed" if ok else "blocked",
+            "reasonCode": reason_code,
+            "analysisSnapshotId": analysis_snapshot_id or None,
+            "action": action if action in {"BUY", "SELL"} else None,
+            "actionSide": "ask" if action == "BUY" else "bid" if action == "SELL" else None,
+            "commandFieldsUnchanged": True,
+            "automaticRetry": False,
+            "checkedAt": utc_now(),
+            **detail,
+        }
+
+    if (
+        analysis_quote.get("available") is not True
+        or action not in {"BUY", "SELL"}
+        or intent.get("snapshotId") != analysis_snapshot_id
+    ):
+        return result(
+            False,
+            "analysis_quote_telemetry_unavailable",
+            detailCode=str(
+                analysis_quote.get("detailCode")
+                or "analysis_command_identity_mismatch"
+            ),
+        )
+    intent_reference = _ai_trade_council_decimal_number(
+        intent.get("referencePrice")
+    )
+    analysis_reference = _ai_trade_council_decimal_number(
+        analysis_quote.get("referencePrice")
+    )
+    if (
+        intent_reference is None
+        or analysis_reference is None
+        or intent_reference != analysis_reference
+    ):
+        return result(
+            False,
+            "analysis_quote_telemetry_unavailable",
+            detailCode="command_reference_not_bound_to_analysis_action_quote",
+            analysisReferencePrice=analysis_quote.get("referencePrice"),
+            commandReferencePrice=intent.get("referencePrice"),
+        )
+    analysis_observed_epoch = analysis_quote.get("snapshotObservedAtEpoch")
+    if intent.get("snapshotObservedAt") != analysis_observed_epoch:
+        return result(
+            False,
+            "analysis_quote_telemetry_unavailable",
+            detailCode="command_snapshot_not_bound_to_analysis_artifact",
+            artifactSnapshotObservedAtEpoch=analysis_observed_epoch,
+            commandSnapshotObservedAt=intent.get("snapshotObservedAt"),
+        )
+    if (
+        isinstance(analysis_observed_epoch, bool)
+        or not isinstance(analysis_observed_epoch, int)
+        or not 946684800 <= analysis_observed_epoch <= 2_147_483_647
+        or isinstance(maximum_snapshot_age_seconds, bool)
+        or not isinstance(maximum_snapshot_age_seconds, int)
+        or maximum_snapshot_age_seconds <= 0
+    ):
+        return result(
+            False,
+            "execution_quote_telemetry_unavailable",
+            detailCode="maximum_snapshot_age_or_artifact_time_unavailable",
+        )
+    now_epoch = _ai_trade_council_utc_epoch_now()
+    analysis_snapshot_age_seconds = now_epoch - analysis_observed_epoch
+    analysis_age_detail = {
+        "analysisSnapshotObservedAt": analysis_quote.get(
+            "snapshotObservedAt"
+        ),
+        "analysisSnapshotObservedAtEpoch": analysis_observed_epoch,
+        "analysisSnapshotAgeSeconds": analysis_snapshot_age_seconds,
+        "maximumSnapshotAgeSeconds": maximum_snapshot_age_seconds,
+    }
+    if analysis_snapshot_age_seconds < 0:
+        return result(
+            False,
+            "analysis_snapshot_future_before_publish",
+            **analysis_age_detail,
+        )
+    if analysis_snapshot_age_seconds > maximum_snapshot_age_seconds:
+        return result(
+            False,
+            "analysis_snapshot_stale_before_publish",
+            **analysis_age_detail,
+        )
+    adapter = (
+        current_snapshot.get("adapter")
+        if isinstance(current_snapshot.get("adapter"), dict)
+        else {}
+    )
+    chart = (
+        current_snapshot.get("chartSnapshot")
+        if isinstance(current_snapshot.get("chartSnapshot"), dict)
+        else {}
+    )
+    stale_status = bool(
+        adapter.get("status") == "stale"
+        or adapter.get("reasonCode") == "snapshot_stale"
+        or chart.get("status") == "stale"
+        or chart.get("reasonCode") == "snapshot_stale"
+    )
+    if adapter.get("ready") is not True or chart.get("available") is not True:
+        return result(
+            False,
+            (
+                "execution_quote_stale_before_publish"
+                if stale_status
+                else "execution_quote_telemetry_unavailable"
+            ),
+            detailCode=str(
+                chart.get("reasonCode")
+                or adapter.get("reasonCode")
+                or "current_quote_not_ready"
+            ),
+        )
+    observed_at = parse_iso(str(chart.get("observedAt") or ""))
+    if observed_at is None:
+        return result(
+            False,
+            "execution_quote_telemetry_unavailable",
+            detailCode="current_quote_timestamp_unavailable",
+        )
+    quote_age_seconds = (
+        datetime.now(timezone.utc) - observed_at.astimezone(timezone.utc)
+    ).total_seconds()
+    reported_age = _safe_snapshot_number(
+        chart.get("ageSeconds"),
+        minimum=0,
+        maximum=86_400,
+    )
+    if quote_age_seconds < -10:
+        return result(
+            False,
+            "execution_quote_telemetry_unavailable",
+            detailCode="current_quote_clock_skew",
+        )
+    if (
+        quote_age_seconds > METATRADER_SNAPSHOT_FRESH_SECONDS
+        or reported_age is None
+        or reported_age > METATRADER_SNAPSHOT_FRESH_SECONDS
+    ):
+        return result(
+            False,
+            "execution_quote_stale_before_publish",
+            detailCode="current_quote_stale",
+            currentQuoteAgeSeconds=round(max(0.0, quote_age_seconds), 3),
+        )
+    current_snapshot_id = str(chart.get("snapshotId") or "")
+    current_symbol = _safe_snapshot_symbol(chart.get("symbol"))
+    current_timeframe = _safe_snapshot_timeframe(chart.get("timeframe"))
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", current_snapshot_id)
+        or current_symbol != _safe_snapshot_symbol(intent.get("symbol"))
+        or current_timeframe != _safe_snapshot_timeframe(intent.get("timeframe"))
+    ):
+        return result(
+            False,
+            "execution_quote_telemetry_unavailable",
+            detailCode="current_quote_identity_mismatch",
+            currentSnapshotId=current_snapshot_id or None,
+        )
+    if chart.get("marketOpen") is not True:
+        return result(
+            False,
+            (
+                "execution_quote_market_closed_before_publish"
+                if chart.get("marketOpen") is False
+                else "execution_quote_telemetry_unavailable"
+            ),
+            detailCode=(
+                None
+                if chart.get("marketOpen") is False
+                else "current_market_state_unavailable"
+            ),
+            currentSnapshotId=current_snapshot_id,
+            **analysis_age_detail,
+        )
+    quote = _ai_trade_council_quote_model(
+        bid=chart.get("bid"),
+        ask=chart.get("ask"),
+        spread_points=chart.get("spreadPoints"),
+    )
+    if quote is None:
+        return result(
+            False,
+            "execution_quote_telemetry_unavailable",
+            detailCode="current_quote_point_unavailable",
+            currentSnapshotId=current_snapshot_id,
+            **analysis_age_detail,
+        )
+    analysis_point = _ai_trade_council_decimal_number(
+        analysis_quote.get("derivedPoint")
+    )
+    current_point = _ai_trade_council_decimal_number(
+        quote.get("derivedPoint")
+    )
+    analysis_digits = analysis_quote.get("digits")
+    current_digits = quote.get("digits")
+    if (
+        analysis_point is None
+        or current_point is None
+        or analysis_point != current_point
+        or isinstance(analysis_digits, bool)
+        or not isinstance(analysis_digits, int)
+        or analysis_digits != current_digits
+    ):
+        return result(
+            False,
+            "execution_quote_telemetry_unavailable",
+            detailCode="current_quote_point_mismatch",
+            analysisDerivedPoint=analysis_quote.get("derivedPoint"),
+            currentDerivedPoint=quote.get("derivedPoint"),
+            analysisDigits=analysis_digits,
+            currentDigits=current_digits,
+            currentSnapshotId=current_snapshot_id,
+            **analysis_age_detail,
+        )
+    if (
+        isinstance(maximum_signal_drift_points, bool)
+        or not isinstance(maximum_signal_drift_points, int)
+        or maximum_signal_drift_points < 0
+    ):
+        return result(
+            False,
+            "execution_quote_telemetry_unavailable",
+            detailCode="maximum_signal_drift_points_unavailable",
+            currentSnapshotId=current_snapshot_id,
+        )
+    minimum_ratio = _safe_snapshot_number(
+        minimum_reward_risk_ratio,
+        minimum=0.00000001,
+        maximum=1_000,
+    )
+    if minimum_ratio is None:
+        return result(
+            False,
+            "execution_quote_telemetry_unavailable",
+            detailCode="minimum_reward_risk_ratio_unavailable",
+            currentSnapshotId=current_snapshot_id,
+        )
+    current_action_price = quote["ask"] if action == "BUY" else quote["bid"]
+    current_price_decimal = _ai_trade_council_decimal_number(current_action_price)
+    point_decimal = _ai_trade_council_decimal_number(quote["derivedPoint"])
+    maximum_drift_decimal = Decimal(maximum_signal_drift_points)
+    if current_price_decimal is None or point_decimal is None or point_decimal <= 0:
+        return result(
+            False,
+            "execution_quote_telemetry_unavailable",
+            detailCode="current_quote_decimal_unavailable",
+            currentSnapshotId=current_snapshot_id,
+        )
+    try:
+        drift_points_decimal = abs(
+            current_price_decimal - analysis_reference
+        ) / point_decimal
+    except (InvalidOperation, ZeroDivisionError):
+        return result(
+            False,
+            "execution_quote_telemetry_unavailable",
+            detailCode="price_drift_calculation_unavailable",
+            currentSnapshotId=current_snapshot_id,
+        )
+    common = {
+        "currentSnapshotId": current_snapshot_id,
+        "currentSnapshotObservedAt": chart.get("observedAt"),
+        "sameClosedBar": True,
+        "analysisReferencePrice": float(analysis_reference),
+        "currentActionPrice": current_action_price,
+        "currentBid": quote["bid"],
+        "currentAsk": quote["ask"],
+        "currentSpreadPoints": quote["spreadPoints"],
+        "derivedPoint": quote["derivedPoint"],
+        "digits": quote["digits"],
+        "priceDriftPoints": round(float(drift_points_decimal), 8),
+        "maximumSignalDriftPoints": maximum_signal_drift_points,
+        **analysis_age_detail,
+    }
+    if drift_points_decimal > maximum_drift_decimal:
+        return result(
+            False,
+            "signal_price_drift_exceeded_before_publish",
+            **common,
+        )
+    normalized_stop_loss = _ai_trade_council_quantize_price(
+        intent.get("stopLoss"),
+        quote["derivedPoint"],
+        rounding="nearest",
+    )
+    normalized_take_profit = _ai_trade_council_quantize_price(
+        intent.get("takeProfit"),
+        quote["derivedPoint"],
+        rounding="nearest",
+    )
+    stop_loss = _ai_trade_council_decimal_number(normalized_stop_loss)
+    take_profit = _ai_trade_council_decimal_number(normalized_take_profit)
+    current_bid = _ai_trade_council_decimal_number(quote["bid"])
+    current_ask = _ai_trade_council_decimal_number(quote["ask"])
+    if (
+        stop_loss is None
+        or take_profit is None
+        or current_bid is None
+        or current_ask is None
+        or (
+            action == "BUY"
+            and not (stop_loss < current_bid and take_profit > current_ask)
+        )
+        or (
+            action == "SELL"
+            and not (stop_loss > current_ask and take_profit < current_bid)
+        )
+    ):
+        return result(
+            False,
+            "execution_protective_plan_invalid_before_publish",
+            stopLossPrice=intent.get("stopLoss"),
+            takeProfitPrice=intent.get("takeProfit"),
+            normalizedStopLossPrice=normalized_stop_loss,
+            normalizedTakeProfitPrice=normalized_take_profit,
+            **common,
+        )
+    risk_distance = (
+        current_price_decimal - stop_loss
+        if action == "BUY"
+        else stop_loss - current_price_decimal
+    )
+    reward_distance = (
+        take_profit - current_price_decimal
+        if action == "BUY"
+        else current_price_decimal - take_profit
+    )
+    minimum_ratio_decimal = _ai_trade_council_decimal_number(minimum_ratio)
+    if (
+        risk_distance <= 0
+        or reward_distance <= 0
+        or minimum_ratio_decimal is None
+    ):
+        return result(
+            False,
+            "execution_protective_plan_invalid_before_publish",
+            stopLossPrice=intent.get("stopLoss"),
+            takeProfitPrice=intent.get("takeProfit"),
+            normalizedStopLossPrice=normalized_stop_loss,
+            normalizedTakeProfitPrice=normalized_take_profit,
+            **common,
+        )
+    executable_ratio = reward_distance / risk_distance
+    rr_detail = {
+        "stopLossPrice": intent.get("stopLoss"),
+        "takeProfitPrice": intent.get("takeProfit"),
+        "normalizedStopLossPrice": normalized_stop_loss,
+        "normalizedTakeProfitPrice": normalized_take_profit,
+        "executableRewardRiskRatio": round(float(executable_ratio), 8),
+        "minimumRewardRiskRatio": minimum_ratio,
+        **common,
+    }
+    if executable_ratio < minimum_ratio_decimal:
+        return result(
+            False,
+            "execution_reward_risk_below_minimum_before_publish",
+            **rr_detail,
+        )
+    return result(True, "execution_preflight_passed", **rr_detail)
+
+
 def _mt4_trade_gateway_publish_for_selection(
     intent: dict,
     *,
     expected_candidate_id: str,
     expected_selection_revision: int | None,
     expected_closed_bar_identity: dict,
+    analysis_context: dict,
+    maximum_signal_drift_points: object,
+    minimum_reward_risk_ratio: object,
+    maximum_snapshot_age_seconds: object,
 ) -> dict:
     """Atomically revalidate target/bar identity and cross the publish boundary."""
     with MT4_TRADE_GATEWAY_LOCK:
@@ -16595,6 +16996,40 @@ def _mt4_trade_gateway_publish_for_selection(
         current_snapshot = metatrader_snapshot_read_model(
             AI_TRADE_COUNCIL_PROP_ID
         )
+        analysis_quote = _ai_trade_council_verified_analysis_quote(
+            analysis_context,
+            str(intent.get("action") or "").upper(),
+        )
+        current_adapter = (
+            current_snapshot.get("adapter")
+            if isinstance(current_snapshot.get("adapter"), dict)
+            else {}
+        )
+        current_chart = (
+            current_snapshot.get("chartSnapshot")
+            if isinstance(current_snapshot.get("chartSnapshot"), dict)
+            else {}
+        )
+        if (
+            current_adapter.get("ready") is not True
+            or current_chart.get("available") is not True
+        ):
+            execution_preflight = _ai_trade_council_execution_quote_preflight(
+                current_snapshot=current_snapshot,
+                analysis_quote=analysis_quote,
+                intent=intent,
+                maximum_signal_drift_points=maximum_signal_drift_points,
+                minimum_reward_risk_ratio=minimum_reward_risk_ratio,
+                maximum_snapshot_age_seconds=maximum_snapshot_age_seconds,
+            )
+            return {
+                "ok": False,
+                "reasonCode": execution_preflight.get("reasonCode"),
+                "detailCode": execution_preflight.get("detailCode"),
+                "executionPricePreflight": execution_preflight,
+                "published": None,
+                "command": None,
+            }
         current_identity, current_identity_reason = (
             _ai_trade_council_closed_bar_identity(current_snapshot)
         )
@@ -16616,6 +17051,23 @@ def _mt4_trade_gateway_publish_for_selection(
                 "published": None,
                 "command": None,
             }
+        execution_preflight = _ai_trade_council_execution_quote_preflight(
+            current_snapshot=current_snapshot,
+            analysis_quote=analysis_quote,
+            intent=intent,
+            maximum_signal_drift_points=maximum_signal_drift_points,
+            minimum_reward_risk_ratio=minimum_reward_risk_ratio,
+            maximum_snapshot_age_seconds=maximum_snapshot_age_seconds,
+        )
+        if execution_preflight.get("status") != "passed":
+            return {
+                "ok": False,
+                "reasonCode": execution_preflight.get("reasonCode"),
+                "detailCode": execution_preflight.get("detailCode"),
+                "executionPricePreflight": execution_preflight,
+                "published": None,
+                "command": None,
+            }
         gateway = _mt4_trade_gateway_instance()
         published = gateway.queue_trade_intent(intent)
         command_id = safe_reference(
@@ -16633,6 +17085,7 @@ def _mt4_trade_gateway_publish_for_selection(
             "reasonCode": "published",
             "published": published,
             "command": command,
+            "executionPricePreflight": execution_preflight,
         }
 
 
@@ -22630,6 +23083,10 @@ def load_ai_trade_council_prompt_contract() -> dict:
         != AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_STRUCTURE_BUFFER_ATR
         or protective_fallback.get("maximumStructureDistanceAtr")
         != AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_MAX_STRUCTURE_DISTANCE_ATR
+        or protective_fallback.get("referencePricePolicy")
+        != "snapshot_action_side_ask_buy_bid_sell"
+        or protective_fallback.get("rewardRiskCushionPoints")
+        != AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_RR_CUSHION_POINTS
         or protective_fallback.get("priceActionNoDataAllowed") is not False
         or protective_fallback.get("modelCallAllowed") is not False
         or protective_fallback.get("terminalActionAllowed") is not False
@@ -22758,6 +23215,12 @@ def load_ai_trade_council_prompt_contract() -> dict:
             ),
             "maximumStructureDistanceAtr": (
                 AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_MAX_STRUCTURE_DISTANCE_ATR
+            ),
+            "referencePricePolicy": (
+                "snapshot_action_side_ask_buy_bid_sell"
+            ),
+            "rewardRiskCushionPoints": (
+                AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_RR_CUSHION_POINTS
             ),
             "priceActionNoDataAllowed": False,
             "modelCallAllowed": False,
@@ -22996,8 +23459,13 @@ def validate_ai_trade_council_vote(value: object, context: object) -> dict | Non
         or valid_until_bar_time != expected_valid_until
     ):
         return None
+    action_quote = _ai_trade_council_context_action_quote(context, decision)
     reference_price = _safe_snapshot_number(
-        context.get("referencePrice"),
+        (
+            action_quote.get("referencePrice")
+            if isinstance(action_quote, dict)
+            else context.get("referencePrice")
+        ),
         minimum=0.00000001,
         maximum=1_000_000_000,
     )
@@ -24382,13 +24850,28 @@ def _run_ai_trade_council_analysis_unlocked(
     snapshot_id = str(chart["snapshotId"])
     bid = _safe_snapshot_number(chart.get("bid"), minimum=0.00000001, maximum=1_000_000_000)
     ask = _safe_snapshot_number(chart.get("ask"), minimum=0.00000001, maximum=1_000_000_000)
+    analysis_quote = _ai_trade_council_quote_model(
+        bid=bid,
+        ask=ask,
+        spread_points=chart.get("spreadPoints"),
+    )
     reference_price = (
         round((bid + ask) / 2, 8)
         if bid is not None and ask is not None
         else _safe_snapshot_number(chart.get("price"), minimum=0.00000001, maximum=1_000_000_000)
     )
-    if reference_price is None:
+    if reference_price is None or analysis_quote is None:
         raise RequestError("Snapshot ไม่มีราคาอ้างอิงที่ปลอดภัยสำหรับตรวจ SL และ TP", 409)
+    analysis_quote_context = {
+        "schemaVersion": "ai-trade-council-analysis-quote-v1",
+        "snapshotId": snapshot_id,
+        "bid": analysis_quote["bid"],
+        "ask": analysis_quote["ask"],
+        "spreadPoints": analysis_quote["spreadPoints"],
+        "derivedPoint": analysis_quote["derivedPoint"],
+        "digits": analysis_quote["digits"],
+        "directionalReferencePolicy": "ask_for_buy_bid_for_sell",
+    }
     parent_idempotency = (
         f"ai-council-auto-{automation_packet['streamKey'][:24]}-"
         f"{automation_packet['closedBarTime']}-{contract_digest}-v{required_votes}"
@@ -24563,6 +25046,7 @@ def _run_ai_trade_council_analysis_unlocked(
                 "agentId": row["agentId"],
                 "roleId": row["roleId"],
                 "referencePrice": reference_price,
+                "analysisQuote": analysis_quote_context,
                 "horizonBars": horizon_bars,
                 "validUntilBarTime": valid_until_bar_time,
                 "volatilityState": (council_quality_gate.get("technical") or {}).get("volatilityState"),
@@ -24636,6 +25120,7 @@ def _run_ai_trade_council_analysis_unlocked(
             "snapshotArtifactDigest": snapshot_artifact_digest,
             "propId": prop_id,
             "referencePrice": reference_price,
+            "analysisQuote": analysis_quote_context,
             "snapshotObservedAt": chart.get("observedAt"),
             "horizonBars": horizon_bars,
             "validUntilBarTime": valid_until_bar_time,
@@ -24691,6 +25176,7 @@ def _run_ai_trade_council_analysis_unlocked(
                     "agentId": row["agentId"],
                     "roleId": row["roleId"],
                     "referencePrice": reference_price,
+                    "analysisQuote": analysis_quote_context,
                     "horizonBars": horizon_bars,
                     "validUntilBarTime": valid_until_bar_time,
                     "validUntilBarTimeDomain": AI_TRADE_COUNCIL_VALID_UNTIL_TIME_DOMAIN,
@@ -26512,6 +26998,348 @@ def mission_display_status(mission: dict) -> str:
     return f"archived (from {archived_from})" if status == "archived" else status
 
 
+def _ai_trade_council_decimal_number(value: object) -> Decimal | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return number if number.is_finite() else None
+
+
+def _ai_trade_council_quote_model(
+    *,
+    bid: object,
+    ask: object,
+    spread_points: object,
+) -> dict | None:
+    """Derive the broker point only when the same quote proves its scale."""
+    bid_number = _safe_snapshot_number(
+        bid,
+        minimum=0.00000001,
+        maximum=1_000_000_000,
+    )
+    ask_number = _safe_snapshot_number(
+        ask,
+        minimum=0.00000001,
+        maximum=1_000_000_000,
+    )
+    spread_number = _safe_snapshot_number(
+        spread_points,
+        minimum=0.00000001,
+        maximum=10_000_000,
+    )
+    bid_decimal = _ai_trade_council_decimal_number(bid_number)
+    ask_decimal = _ai_trade_council_decimal_number(ask_number)
+    spread_decimal = _ai_trade_council_decimal_number(spread_number)
+    if (
+        bid_decimal is None
+        or ask_decimal is None
+        or spread_decimal is None
+        or ask_decimal <= bid_decimal
+        or spread_decimal <= 0
+    ):
+        return None
+    price_delta = ask_decimal - bid_decimal
+    matches: list[tuple[int, Decimal]] = []
+    for digits in range(9):
+        point_candidate = Decimal(1).scaleb(-digits)
+        reconstructed_delta = spread_decimal * point_candidate
+        if price_delta != reconstructed_delta:
+            continue
+        try:
+            bid_on_point_grid = (
+                bid_decimal / point_candidate
+            ).to_integral_value(rounding=ROUND_HALF_UP) * point_candidate
+            ask_on_point_grid = (
+                ask_decimal / point_candidate
+            ).to_integral_value(rounding=ROUND_HALF_UP) * point_candidate
+        except (InvalidOperation, ZeroDivisionError):
+            continue
+        if bid_decimal == bid_on_point_grid and ask_decimal == ask_on_point_grid:
+            matches.append((digits, point_candidate))
+    if len(matches) != 1:
+        return None
+    digits, point_decimal = matches[0]
+    return {
+        "bid": float(bid_decimal),
+        "ask": float(ask_decimal),
+        "spreadPoints": float(spread_decimal),
+        "derivedPoint": float(point_decimal),
+        "digits": digits,
+    }
+
+
+def _ai_trade_council_quantize_price(
+    value: object,
+    point: object,
+    *,
+    rounding: str,
+) -> float | None:
+    value_decimal = _ai_trade_council_decimal_number(value)
+    point_decimal = _ai_trade_council_decimal_number(point)
+    rounding_modes = {
+        "floor": ROUND_FLOOR,
+        "ceiling": ROUND_CEILING,
+        "nearest": ROUND_HALF_UP,
+    }
+    rounding_mode = rounding_modes.get(rounding)
+    if (
+        value_decimal is None
+        or point_decimal is None
+        or point_decimal <= 0
+        or rounding_mode is None
+    ):
+        return None
+    try:
+        units = (value_decimal / point_decimal).to_integral_value(
+            rounding=rounding_mode
+        )
+        quantized = units * point_decimal
+    except (InvalidOperation, ZeroDivisionError):
+        return None
+    if not quantized.is_finite() or quantized <= 0:
+        return None
+    return round(float(quantized), 8)
+
+
+def _ai_trade_council_context_action_quote(
+    context: dict,
+    direction: str,
+) -> dict | None:
+    """Read the future-facing action quote cached with the exact Council input."""
+    analysis_quote = (
+        context.get("analysisQuote")
+        if isinstance(context.get("analysisQuote"), dict)
+        else {}
+    )
+    if (
+        direction not in {"BUY", "SELL"}
+        or analysis_quote.get("schemaVersion")
+        != "ai-trade-council-analysis-quote-v1"
+        or analysis_quote.get("snapshotId") != context.get("snapshotId")
+        or analysis_quote.get("directionalReferencePolicy")
+        != "ask_for_buy_bid_for_sell"
+    ):
+        return None
+    quote = _ai_trade_council_quote_model(
+        bid=analysis_quote.get("bid"),
+        ask=analysis_quote.get("ask"),
+        spread_points=analysis_quote.get("spreadPoints"),
+    )
+    expected_point = _ai_trade_council_decimal_number(
+        analysis_quote.get("derivedPoint")
+    )
+    observed_point = _ai_trade_council_decimal_number(
+        (quote or {}).get("derivedPoint")
+    )
+    if (
+        quote is None
+        or isinstance(analysis_quote.get("digits"), bool)
+        or analysis_quote.get("digits") != quote.get("digits")
+        or expected_point is None
+        or observed_point is None
+        or expected_point != observed_point
+    ):
+        return None
+    return {
+        **quote,
+        "action": direction,
+        "actionSide": "ask" if direction == "BUY" else "bid",
+        "referencePrice": (
+            quote["ask"] if direction == "BUY" else quote["bid"]
+        ),
+    }
+
+
+def _ai_trade_council_verified_analysis_quote(
+    context: dict,
+    direction: str,
+) -> dict:
+    """Load and verify the immutable Council artifact before using its quote."""
+    snapshot_id = str(context.get("snapshotId") or "")
+
+    def unavailable(detail_code: str, **detail: object) -> dict:
+        return {
+            "available": False,
+            "reasonCode": "analysis_quote_telemetry_unavailable",
+            "detailCode": detail_code,
+            "analysisSnapshotId": snapshot_id or None,
+            "action": direction if direction in {"BUY", "SELL"} else None,
+            **detail,
+        }
+
+    if direction not in {"BUY", "SELL"} or not re.fullmatch(
+        r"[0-9a-f]{64}", snapshot_id
+    ):
+        return unavailable("analysis_quote_identity_invalid")
+    expected_digest = str(context.get("snapshotArtifactDigest") or "").lower()
+    artifact_reference = str(context.get("snapshotArtifact") or "").replace(
+        "\\", "/"
+    )
+    expected_name = f"{expected_digest}.json"
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+        or artifact_reference
+        != f"ai-trade-council/snapshots/{expected_name}"
+    ):
+        return unavailable("analysis_snapshot_digest_missing")
+    artifact_path = AI_TRADE_COUNCIL_SNAPSHOT_DIR / expected_name
+    try:
+        if (
+            not artifact_path.is_file()
+            or artifact_path.stat().st_size > METATRADER_SNAPSHOT_MAX_BYTES * 8
+        ):
+            return unavailable("analysis_snapshot_artifact_missing")
+        artifact = read_json(artifact_path, None)
+    except (DataIntegrityError, OSError):
+        return unavailable("analysis_snapshot_artifact_unreadable")
+    if not isinstance(artifact, dict):
+        return unavailable("analysis_snapshot_artifact_invalid")
+    legacy_keys = {
+        "schemaVersion",
+        "snapshotId",
+        "createdAt",
+        "sourceMode",
+        "dailySummary",
+        "chartSnapshot",
+        "policy",
+        "artifactDigest",
+    }
+    artifact_keys = set(artifact)
+    if artifact_keys not in {
+        frozenset(legacy_keys),
+        frozenset(legacy_keys | {"selectedCandidateId"}),
+    }:
+        return unavailable("analysis_snapshot_digest_mismatch")
+    closed_bar_identity = (
+        context.get("closedBarIdentity")
+        if isinstance(context.get("closedBarIdentity"), dict)
+        else {}
+    )
+    if "selectedCandidateId" in artifact_keys and (
+        not safe_reference(artifact.get("selectedCandidateId"))
+        or safe_reference(artifact.get("selectedCandidateId"))
+        != safe_reference(closed_bar_identity.get("candidateId"))
+    ):
+        return unavailable("analysis_snapshot_candidate_mismatch")
+    try:
+        observed_digest = _ai_trade_council_snapshot_artifact_digest(artifact)
+    except (TypeError, ValueError):
+        return unavailable("analysis_snapshot_digest_mismatch")
+    if (
+        artifact.get("artifactDigest") != expected_digest
+        or observed_digest != expected_digest
+    ):
+        return unavailable(
+            "analysis_snapshot_digest_mismatch",
+            expectedArtifactDigest=expected_digest,
+            observedArtifactDigest=observed_digest,
+        )
+    chart = (
+        artifact.get("chartSnapshot")
+        if isinstance(artifact.get("chartSnapshot"), dict)
+        else {}
+    )
+    policy = (
+        artifact.get("policy")
+        if isinstance(artifact.get("policy"), dict)
+        else {}
+    )
+    if (
+        artifact.get("schemaVersion") != "ai-trade-council-input-v1"
+        or artifact.get("snapshotId") != snapshot_id
+        or chart.get("snapshotId") != snapshot_id
+        or artifact.get("sourceMode") != "mt4_read_only_snapshot"
+        or policy.get("readOnly") is not True
+        or policy.get("sameSnapshotRequired") is not True
+        or policy.get("terminalActionsAllowed") is not False
+    ):
+        return unavailable("analysis_snapshot_identity_mismatch")
+    artifact_observed_at = parse_iso(str(chart.get("observedAt") or ""))
+    context_observed_at = parse_iso(
+        str(context.get("snapshotObservedAt") or "")
+    )
+    if (
+        artifact_observed_at is None
+        or context_observed_at is None
+        or artifact_observed_at.astimezone(timezone.utc)
+        != context_observed_at.astimezone(timezone.utc)
+    ):
+        return unavailable("analysis_snapshot_observed_at_mismatch")
+    artifact_observed_epoch = int(
+        artifact_observed_at.astimezone(timezone.utc).timestamp()
+    )
+    if not 946684800 <= artifact_observed_epoch <= 2_147_483_647:
+        return unavailable("analysis_snapshot_observed_at_invalid")
+    expected_symbol = _safe_snapshot_symbol(closed_bar_identity.get("symbol"))
+    expected_timeframe = _safe_snapshot_timeframe(
+        closed_bar_identity.get("timeframe")
+    )
+    expected_bar_time = closed_bar_identity.get("closedBarTime")
+    bars = chart.get("bars") if isinstance(chart.get("bars"), list) else []
+    latest_bar = bars[-1] if bars and isinstance(bars[-1], dict) else {}
+    if (
+        not expected_symbol
+        or not expected_timeframe
+        or isinstance(expected_bar_time, bool)
+        or not isinstance(expected_bar_time, int)
+        or _safe_snapshot_symbol(chart.get("symbol")) != expected_symbol
+        or _safe_snapshot_timeframe(chart.get("timeframe"))
+        != expected_timeframe
+        or latest_bar.get("time") != expected_bar_time
+    ):
+        return unavailable("analysis_snapshot_closed_bar_mismatch")
+    quote = _ai_trade_council_quote_model(
+        bid=chart.get("bid"),
+        ask=chart.get("ask"),
+        spread_points=chart.get("spreadPoints"),
+    )
+    if quote is None:
+        return unavailable("analysis_snapshot_point_unavailable")
+    midpoint = (quote["bid"] + quote["ask"]) / 2.0
+    stored_midpoint = _safe_snapshot_number(
+        context.get("referencePrice"),
+        minimum=0.00000001,
+        maximum=1_000_000_000,
+    )
+    if (
+        stored_midpoint is None
+        or abs(stored_midpoint - midpoint)
+        > max(0.00000001, midpoint * 0.00000001)
+    ):
+        return unavailable("analysis_snapshot_midpoint_mismatch")
+    cached_quote = _ai_trade_council_context_action_quote(context, direction)
+    if cached_quote is not None:
+        for field in (
+            "bid",
+            "ask",
+            "spreadPoints",
+            "derivedPoint",
+            "digits",
+        ):
+            expected_value = _ai_trade_council_decimal_number(
+                cached_quote.get(field)
+            )
+            observed_value = _ai_trade_council_decimal_number(quote.get(field))
+            if expected_value is None or expected_value != observed_value:
+                return unavailable("analysis_quote_context_mismatch")
+    action_side = "ask" if direction == "BUY" else "bid"
+    return {
+        "available": True,
+        "reasonCode": "analysis_action_quote_verified",
+        "analysisSnapshotId": snapshot_id,
+        "snapshotArtifactDigest": expected_digest,
+        "action": direction,
+        "actionSide": action_side,
+        "referencePrice": quote[action_side],
+        "snapshotObservedAt": chart.get("observedAt"),
+        "snapshotObservedAtEpoch": artifact_observed_epoch,
+        **quote,
+    }
+
+
 def _ai_trade_council_protective_fallback_result(
     *,
     snapshot_id: str,
@@ -26727,7 +27555,7 @@ def _ai_trade_council_deterministic_protective_plan(
         ):
             return unavailable("fallback_closed_bar_mismatch")
 
-    reference_price = _safe_snapshot_number(
+    context_reference_price = _safe_snapshot_number(
         context.get("referencePrice"),
         minimum=0.00000001,
         maximum=1_000_000_000,
@@ -26738,22 +27566,27 @@ def _ai_trade_council_deterministic_protective_plan(
     ask = _safe_snapshot_number(
         chart.get("ask"), minimum=0.00000001, maximum=1_000_000_000
     )
-    artifact_reference = (
+    quote = _ai_trade_council_quote_model(
+        bid=bid,
+        ask=ask,
+        spread_points=chart.get("spreadPoints"),
+    )
+    artifact_midpoint = (
         (bid + ask) / 2.0
         if bid is not None and ask is not None
-        else _safe_snapshot_number(
-            chart.get("price"),
-            minimum=0.00000001,
-            maximum=1_000_000_000,
-        )
+        else None
     )
     if (
-        reference_price is None
-        or artifact_reference is None
-        or abs(reference_price - artifact_reference)
-        > max(0.00000001, artifact_reference * 0.00000001)
+        context_reference_price is None
+        or artifact_midpoint is None
+        or abs(context_reference_price - artifact_midpoint)
+        > max(0.00000001, artifact_midpoint * 0.00000001)
     ):
         return unavailable("fallback_snapshot_mismatch")
+    if quote is None:
+        return unavailable("fallback_price_point_unavailable")
+    reference_price = quote["ask"] if direction == "BUY" else quote["bid"]
+    reference_point = quote["derivedPoint"]
 
     feature_bundle = _ai_trade_council_analysis_feature_bundle(bars)
     technical = feature_bundle["technicalIndicators"]
@@ -26883,57 +27716,87 @@ def _ai_trade_council_deterministic_protective_plan(
     structure_buffer = (
         atr14 * AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_STRUCTURE_BUFFER_ATR
     )
+    reward_risk_cushion = (
+        reference_point
+        * AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_RR_CUSHION_POINTS
+    )
     if direction == "BUY":
         atr_stop = reference_price - minimum_stop_distance
-        stop_loss = min(
+        raw_stop_loss = min(
             atr_stop,
             (anchor_price - structure_buffer)
             if anchor_price is not None
             else atr_stop,
         )
+        stop_loss = _ai_trade_council_quantize_price(
+            raw_stop_loss,
+            reference_point,
+            rounding="floor",
+        )
+        if stop_loss is None:
+            return unavailable("fallback_plan_invalid")
         risk_distance = reference_price - stop_loss
         minimum_target = (
             reference_price + risk_distance * minimum_reward_risk_ratio
+            + reward_risk_cushion
         )
         eligible_targets = [
             (price, label)
             for price, label in target_candidates
             if minimum_target <= price <= reference_price + risk_distance * max(
                 4.0, minimum_reward_risk_ratio
-            )
+            ) + reward_risk_cushion
         ]
-        take_profit, target_basis = (
+        raw_take_profit, target_basis = (
             min(eligible_targets, key=lambda item: (item[0], item[1]))
             if eligible_targets
             else (minimum_target, "minimum_reward_risk_ratio")
         )
+        take_profit = _ai_trade_council_quantize_price(
+            raw_take_profit,
+            reference_point,
+            rounding="ceiling",
+        )
     else:
         atr_stop = reference_price + minimum_stop_distance
-        stop_loss = max(
+        raw_stop_loss = max(
             atr_stop,
             (anchor_price + structure_buffer)
             if anchor_price is not None
             else atr_stop,
         )
+        stop_loss = _ai_trade_council_quantize_price(
+            raw_stop_loss,
+            reference_point,
+            rounding="ceiling",
+        )
+        if stop_loss is None:
+            return unavailable("fallback_plan_invalid")
         risk_distance = stop_loss - reference_price
         minimum_target = (
             reference_price - risk_distance * minimum_reward_risk_ratio
+            - reward_risk_cushion
         )
         eligible_targets = [
             (price, label)
             for price, label in target_candidates
             if reference_price - risk_distance * max(
                 4.0, minimum_reward_risk_ratio
-            ) <= price <= minimum_target
+            ) - reward_risk_cushion <= price <= minimum_target
         ]
-        take_profit, target_basis = (
+        raw_take_profit, target_basis = (
             max(eligible_targets, key=lambda item: (item[0], item[1]))
             if eligible_targets
             else (minimum_target, "minimum_reward_risk_ratio")
         )
+        take_profit = _ai_trade_council_quantize_price(
+            raw_take_profit,
+            reference_point,
+            rounding="floor",
+        )
 
-    stop_loss = round(float(stop_loss), 8)
-    take_profit = round(float(take_profit), 8)
+    if take_profit is None:
+        return unavailable("fallback_plan_invalid")
     risk_distance = (
         reference_price - stop_loss
         if direction == "BUY"
@@ -26949,11 +27812,28 @@ def _ai_trade_council_deterministic_protective_plan(
         if risk_distance > 0 and reward_distance > 0
         else None
     )
+    risk_decimal = _ai_trade_council_decimal_number(risk_distance)
+    reward_decimal = _ai_trade_council_decimal_number(reward_distance)
+    minimum_ratio_decimal = _ai_trade_council_decimal_number(
+        minimum_reward_risk_ratio
+    )
+    point_decimal = _ai_trade_council_decimal_number(reference_point)
+    reward_risk_cushion_passed = bool(
+        risk_decimal is not None
+        and reward_decimal is not None
+        and minimum_ratio_decimal is not None
+        and point_decimal is not None
+        and reward_decimal
+        >= risk_decimal * minimum_ratio_decimal
+        + point_decimal
+        * AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_RR_CUSHION_POINTS
+    )
     if (
         stop_loss <= 0
         or take_profit <= 0
         or reward_risk_ratio is None
         or reward_risk_ratio < minimum_reward_risk_ratio
+        or not reward_risk_cushion_passed
     ):
         return unavailable(
             "fallback_plan_invalid",
@@ -26990,6 +27870,18 @@ def _ai_trade_council_deterministic_protective_plan(
             "analysisBarCount": len(bars),
             "latestClosedBarTime": bar_times[-1],
             "referencePrice": round(float(reference_price), 8),
+            "referencePriceSource": (
+                "snapshot_ask" if direction == "BUY" else "snapshot_bid"
+            ),
+            "analysisMidpoint": round(float(context_reference_price), 8),
+            "bid": quote["bid"],
+            "ask": quote["ask"],
+            "spreadPoints": quote["spreadPoints"],
+            "derivedPoint": quote["derivedPoint"],
+            "digits": quote["digits"],
+            "rewardRiskCushionPoints": (
+                AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_RR_CUSHION_POINTS
+            ),
             "snapshotArtifactDigest": expected_artifact_digest,
         },
     )
@@ -27233,12 +28125,36 @@ def ai_trade_council_consensus(parent: dict, children: list[dict]) -> dict:
         minimum=0.00000001,
         maximum=1_000_000_000,
     )
+    analysis_action_quote = _ai_trade_council_context_action_quote(
+        context,
+        str(selected_direction or ""),
+    )
     reference_price = _safe_snapshot_number(
-        context.get("referencePrice"),
+        (
+            analysis_action_quote.get("referencePrice")
+            if isinstance(analysis_action_quote, dict)
+            else context.get("referencePrice")
+        ),
         minimum=0.00000001,
         maximum=1_000_000_000,
     )
+    reference_point = _safe_snapshot_number(
+        (
+            analysis_action_quote.get("derivedPoint")
+            if isinstance(analysis_action_quote, dict)
+            else None
+        ),
+        minimum=0.000000000001,
+        maximum=1_000_000,
+    )
+    reward_risk_cushion = (
+        reference_point
+        * AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_RR_CUSHION_POINTS
+        if reference_point is not None
+        else 0.0
+    )
     reward_risk_ratio = None
+    reward_risk_cushion_passed = False
     if (
         selected_direction in {"BUY", "SELL"}
         and price_action_vote.get("decision") == selected_direction
@@ -27258,9 +28174,26 @@ def ai_trade_council_consensus(parent: dict, children: list[dict]) -> dict:
         )
         if risk_distance > 0 and reward_distance > 0:
             reward_risk_ratio = round(reward_distance / risk_distance, 4)
+            risk_decimal = _ai_trade_council_decimal_number(risk_distance)
+            reward_decimal = _ai_trade_council_decimal_number(reward_distance)
+            minimum_ratio_decimal = _ai_trade_council_decimal_number(
+                quality_policy["minimumRewardRiskRatio"]
+            )
+            cushion_decimal = _ai_trade_council_decimal_number(
+                reward_risk_cushion
+            )
+            reward_risk_cushion_passed = bool(
+                risk_decimal is not None
+                and reward_decimal is not None
+                and minimum_ratio_decimal is not None
+                and cushion_decimal is not None
+                and reward_decimal
+                >= risk_decimal * minimum_ratio_decimal + cushion_decimal
+            )
     agent_protective_prices_ready = bool(
         reward_risk_ratio is not None
         and reward_risk_ratio >= quality_policy["minimumRewardRiskRatio"]
+        and reward_risk_cushion_passed
     )
     protective_plan = {
         "available": agent_protective_prices_ready,
@@ -27314,6 +28247,22 @@ def ai_trade_council_consensus(parent: dict, children: list[dict]) -> dict:
             "minimumRewardRiskRatio": quality_policy[
                 "minimumRewardRiskRatio"
             ],
+            "referencePrice": reference_price,
+            "referencePriceSource": (
+                "snapshot_ask"
+                if selected_direction == "BUY"
+                and analysis_action_quote is not None
+                else "snapshot_bid"
+                if selected_direction == "SELL"
+                and analysis_action_quote is not None
+                else "legacy_snapshot_midpoint"
+            ),
+            "rewardRiskCushionPoints": (
+                AI_TRADE_COUNCIL_PROTECTIVE_FALLBACK_RR_CUSHION_POINTS
+                if reference_point is not None
+                else 0
+            ),
+            "derivedPoint": reference_point,
         },
     }
     protective_fallback_attempted = False
@@ -27692,6 +28641,7 @@ def _ai_trade_council_gateway_result(
     gateway_status: dict | None = None,
     command: dict | None = None,
     command_published: bool = False,
+    execution_price_preflight: dict | None = None,
 ) -> dict:
     observed_gateway = gateway_status if isinstance(gateway_status, dict) else {}
     command_ack = (
@@ -27727,6 +28677,11 @@ def _ai_trade_council_gateway_result(
         "orderExecutionConfirmed": ack_status == "EXECUTED",
         "shadowValidationConfirmed": ack_status == "SHADOWED",
         "managedOrderLimit": managed_order_limit,
+        "executionPricePreflight": (
+            execution_price_preflight
+            if isinstance(execution_price_preflight, dict)
+            else None
+        ),
         "updatedAt": utc_now(),
     }
 
@@ -27771,6 +28726,11 @@ def dispatch_ai_trade_council_trade_plan(
                 gateway_status=gateway_status,
                 command=stored_command,
                 command_published=True,
+                execution_price_preflight=(
+                    prior.get("executionPricePreflight")
+                    if isinstance(prior.get("executionPricePreflight"), dict)
+                    else None
+                ),
             )
         # A previously published command is a durable one-way boundary. If its
         # ledger record is unavailable, fail closed instead of reconstructing
@@ -27891,17 +28851,20 @@ def dispatch_ai_trade_council_trade_plan(
         minimum=0.00000001,
         maximum=1_000_000_000,
     )
+    cached_analysis_quote = _ai_trade_council_context_action_quote(
+        context,
+        direction,
+    )
     reference_price = _safe_snapshot_number(
-        context.get("referencePrice"),
+        (
+            cached_analysis_quote.get("referencePrice")
+            if isinstance(cached_analysis_quote, dict)
+            else context.get("referencePrice")
+        ),
         minimum=0.00000001,
         maximum=1_000_000_000,
     )
-    snapshot_observed = parse_iso(str(context.get("snapshotObservedAt") or ""))
-    snapshot_observed_at = (
-        int(snapshot_observed.astimezone(timezone.utc).timestamp())
-        if snapshot_observed is not None
-        else None
-    )
+    snapshot_observed_at = None
     bar_identity = (
         context.get("closedBarIdentity")
         if isinstance(context.get("closedBarIdentity"), dict)
@@ -27947,8 +28910,6 @@ def dispatch_ai_trade_council_trade_plan(
         and isinstance(bar_time, int)
         and not isinstance(bar_time, bool)
         and 946684800 <= bar_time <= 2_147_483_647
-        and isinstance(snapshot_observed_at, int)
-        and 946684800 <= snapshot_observed_at <= 2_147_483_647
         and re.fullmatch(r"[0-9a-f]{64}", snapshot_id)
     ):
         result = _ai_trade_council_gateway_result(
@@ -28118,6 +29079,114 @@ def dispatch_ai_trade_council_trade_plan(
             gateway_status=gateway_status,
         )
 
+    analysis_quote = _ai_trade_council_verified_analysis_quote(
+        context,
+        direction,
+    )
+    verified_reference_price = _safe_snapshot_number(
+        analysis_quote.get("referencePrice"),
+        minimum=0.00000001,
+        maximum=1_000_000_000,
+    )
+    if analysis_quote.get("available") is not True or verified_reference_price is None:
+        execution_preflight = {
+            "schemaVersion": "ai-trade-council-execution-preflight-v1",
+            "status": "blocked",
+            "reasonCode": "analysis_quote_telemetry_unavailable",
+            "detailCode": analysis_quote.get("detailCode"),
+            "analysisSnapshotId": context.get("snapshotId"),
+            "action": direction,
+            "commandFieldsUnchanged": True,
+            "automaticRetry": False,
+            "checkedAt": utc_now(),
+        }
+        return _ai_trade_council_gateway_result(
+            status="blocked",
+            reason_code="analysis_quote_telemetry_unavailable",
+            gateway_status=gateway_status,
+            execution_price_preflight=execution_preflight,
+        )
+    verified_snapshot_observed_at = analysis_quote.get(
+        "snapshotObservedAtEpoch"
+    )
+    if (
+        isinstance(verified_snapshot_observed_at, bool)
+        or not isinstance(verified_snapshot_observed_at, int)
+        or not 946684800
+        <= verified_snapshot_observed_at
+        <= 2_147_483_647
+    ):
+        return _ai_trade_council_gateway_result(
+            status="blocked",
+            reason_code="analysis_quote_telemetry_unavailable",
+            gateway_status=gateway_status,
+            execution_price_preflight={
+                "schemaVersion": "ai-trade-council-execution-preflight-v1",
+                "status": "blocked",
+                "reasonCode": "analysis_quote_telemetry_unavailable",
+                "detailCode": "analysis_snapshot_observed_at_invalid",
+                "analysisSnapshotId": snapshot_id,
+                "action": direction,
+                "commandFieldsUnchanged": True,
+                "automaticRetry": False,
+                "checkedAt": utc_now(),
+            },
+        )
+    snapshot_observed_at = verified_snapshot_observed_at
+    reference_price = verified_reference_price
+    if not (
+        (direction == "BUY" and stop_loss < reference_price < take_profit)
+        or (direction == "SELL" and take_profit < reference_price < stop_loss)
+    ):
+        return _ai_trade_council_gateway_result(
+            status="blocked",
+            reason_code="trade_plan_identity_invalid",
+            gateway_status=gateway_status,
+        )
+
+    council_minimum_reward_risk_ratio = _safe_snapshot_number(
+        ((context.get("qualityGate") or {}).get("minimumRewardRiskRatio")),
+        minimum=0.00000001,
+        maximum=1_000,
+    )
+    ea_minimum_reward_risk_ratio = _safe_snapshot_number(
+        gateway_status.get("minRewardRiskRatio"),
+        minimum=0.00000001,
+        maximum=1_000,
+    )
+    if (
+        council_minimum_reward_risk_ratio is None
+        or ea_minimum_reward_risk_ratio is None
+        or isinstance(gateway_status.get("maxSignalDriftPoints"), bool)
+        or not isinstance(gateway_status.get("maxSignalDriftPoints"), int)
+        or gateway_status.get("maxSignalDriftPoints") < 0
+        or isinstance(gateway_status.get("maxSnapshotAgeSeconds"), bool)
+        or not isinstance(gateway_status.get("maxSnapshotAgeSeconds"), int)
+        or gateway_status.get("maxSnapshotAgeSeconds") <= 0
+    ):
+        return _ai_trade_council_gateway_result(
+            status="blocked",
+            reason_code="execution_quote_telemetry_unavailable",
+            gateway_status=gateway_status,
+            execution_price_preflight={
+                "schemaVersion": "ai-trade-council-execution-preflight-v1",
+                "status": "blocked",
+                "reasonCode": "execution_quote_telemetry_unavailable",
+                "detailCode": (
+                    "ea_drift_reward_risk_or_snapshot_age_policy_unavailable"
+                ),
+                "analysisSnapshotId": snapshot_id,
+                "action": direction,
+                "commandFieldsUnchanged": True,
+                "automaticRetry": False,
+                "checkedAt": utc_now(),
+            },
+        )
+    effective_minimum_reward_risk_ratio = max(
+        council_minimum_reward_risk_ratio,
+        ea_minimum_reward_risk_ratio,
+    )
+
     council_decision_id = (
         f"council-{payload_digest(str(parent.get('id') or ''), snapshot_id)[:24]}"
     )
@@ -28143,13 +29212,40 @@ def dispatch_ai_trade_council_trade_plan(
             expected_candidate_id=channel_id,
             expected_selection_revision=selection_revision,
             expected_closed_bar_identity=bar_identity,
+            analysis_context=context,
+            maximum_signal_drift_points=gateway_status.get(
+                "maxSignalDriftPoints"
+            ),
+            minimum_reward_risk_ratio=effective_minimum_reward_risk_ratio,
+            maximum_snapshot_age_seconds=gateway_status.get(
+                "maxSnapshotAgeSeconds"
+            ),
         )
         if selection_publish.get("ok") is not True:
-            return _ai_trade_council_gateway_result(
+            result = _ai_trade_council_gateway_result(
                 status="blocked",
                 reason_code=str(selection_publish.get("reasonCode")),
                 gateway_status=gateway_status,
+                execution_price_preflight=selection_publish.get(
+                    "executionPricePreflight"
+                ),
             )
+            append_audit({
+                "type": "ai_trade_council.trade_gateway_blocked",
+                "missionId": parent.get("id"),
+                "snapshotId": snapshot_id,
+                "reason": result["reasonCode"],
+                "detailCode": selection_publish.get("detailCode"),
+                "direction": direction,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "executionPricePreflight": selection_publish.get(
+                    "executionPricePreflight"
+                ),
+                "automaticRetry": False,
+                "terminalActions": False,
+            })
+            return result
         published = selection_publish.get("published") or {}
         command = selection_publish.get("command")
         command_id = safe_reference(
@@ -28192,6 +29288,9 @@ def dispatch_ai_trade_council_trade_plan(
         gateway_status=gateway_status,
         command=command,
         command_published=True,
+        execution_price_preflight=selection_publish.get(
+            "executionPricePreflight"
+        ),
     )
     append_audit({
         "type": "ai_trade_council.trade_gateway_published",
@@ -28209,6 +29308,9 @@ def dispatch_ai_trade_council_trade_plan(
         "timeframe": timeframe,
         "stopLossPrice": stop_loss,
         "takeProfitPrice": take_profit,
+        "executionPricePreflight": selection_publish.get(
+            "executionPricePreflight"
+        ),
         "modeObservedFromEa": mode,
         **managed_order_limit,
         "scope": "account_managed_magic_numbers",

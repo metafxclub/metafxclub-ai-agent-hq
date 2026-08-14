@@ -5819,7 +5819,9 @@ function getSignalRuntimeTruth(report = {}) {
   const latestCommand = gateway.latestCommand && typeof gateway.latestCommand === "object"
     ? gateway.latestCommand
     : null;
-  const gatewayCommand = [activeCommand, consensusCommand, latestCommand]
+  // Active is authoritative while outstanding; otherwise the durable latest
+  // command/ACK must override a stale mission copy that may still say queued.
+  const gatewayCommand = [activeCommand, latestCommand, consensusCommand]
     .find((command) => signalCommandMatchesCurrentRound(command, commandCorrelation)) || null;
   const gatewayLastAck = gatewayCommand?.ack && typeof gatewayCommand.ack === "object"
     ? gatewayCommand.ack
@@ -8420,6 +8422,66 @@ function signalCouncilQualityModel(report = {}, consensus = {}, market = signalM
   };
 }
 
+function signalPrepublishExecutionBlockReason(value) {
+  const code = String(value || "").trim().toUpperCase();
+  if ([
+    "SIGNAL_PRICE_DRIFT_BEFORE_PUBLISH",
+    "SIGNAL_PRICE_DRIFT_EXCEEDED_BEFORE_PUBLISH",
+    "EXECUTION_REWARD_RISK_BELOW_MINIMUM",
+    "EXECUTION_REWARD_RISK_BELOW_MINIMUM_BEFORE_PUBLISH",
+    "ANALYSIS_QUOTE_TELEMETRY_UNAVAILABLE",
+    "EXECUTION_QUOTE_TELEMETRY_UNAVAILABLE",
+    "CLOSED_BAR_ADVANCED_DURING_ANALYSIS",
+  ].includes(code)) return code;
+  return code.endsWith("_BEFORE_PUBLISH") ? code : "";
+}
+
+function signalExactClosedOrderOutcome(report = {}, command = null, ack = null) {
+  const commandId = safeDashboardDisplayText(command?.commandId, "");
+  const ticket = Number(ack?.ticket);
+  if (!commandId || !Number.isInteger(ticket) || ticket <= 0) return null;
+  const council = signalCouncilModel(report);
+  const rawGatewayHistory = council.tradeGateway?.orderHistory
+    && typeof council.tradeGateway.orderHistory === "object"
+    ? council.tradeGateway.orderHistory
+    : {};
+  const transformedHistory = signalHistoryBaseReadModel(report, "orders");
+  for (const orderHistory of [rawGatewayHistory, transformedHistory]) {
+    const scope = orderHistory.scope && typeof orderHistory.scope === "object"
+      ? orderHistory.scope
+      : {};
+    const schemaVersion = safeDashboardDisplayText(orderHistory.schemaVersion, "");
+    const sourceScope = safeDashboardDisplayText(orderHistory.sourceScope, "");
+    const trustedRawGatewayHistory = schemaVersion === "metafx-hq-mt4-order-history-v1"
+      && sourceScope.startsWith("durable_")
+      && sourceScope.includes("executed_ack_plus_identity_exact_");
+    const trustedCouncilHistory = schemaVersion === "ai-trade-council-order-history-v1"
+      && sourceScope.startsWith("ea_executed_ack_plus_identity_exact_");
+    if (
+      orderHistory.available !== true
+      || (scope.authoritative !== true && !trustedRawGatewayHistory && !trustedCouncilHistory)
+      || !Array.isArray(orderHistory.items)
+    ) continue;
+    const matches = orderHistory.items.filter((item) => (
+      item
+      && typeof item === "object"
+      && safeDashboardDisplayText(item.commandId, "") === commandId
+      && Number(item.ticket) === ticket
+      && String(item.ackStatus || "").toUpperCase() === "EXECUTED"
+      && item.outcomeIdentityVerified === true
+      && String(item.executionState || "").toUpperCase() === "CLOSED"
+      && (!item.status || String(item.status).toLowerCase() === "closed")
+      && String(item.verificationStatus || "").toUpperCase() === "VERIFIED_CLOSED"
+      && Number.isFinite(Number(item.closedPnl))
+      && Number.isFinite(Number(item.closedAtBroker))
+      && Number(item.closedAtBroker) > 0
+    ));
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) return null;
+  }
+  return null;
+}
+
 function signalTradeOperationsModel(report = {}, runtime = {}, consensus = {}) {
   const gateway = consensus.tradeGateway && typeof consensus.tradeGateway === "object"
     ? consensus.tradeGateway
@@ -8429,38 +8491,41 @@ function signalTradeOperationsModel(report = {}, runtime = {}, consensus = {}) {
   const commandPublished = runtime.gatewayCommandPublished === true || gateway.commandPublished === true;
   const commandStatus = safeDashboardDisplayText(command?.status || gateway.status || runtime.gatewayCommandStatus, "");
   const ackStatus = safeDashboardDisplayText(ack?.status || gateway.ackStatus, "").toUpperCase();
-  const verifiedAckFill = ackStatus === "EXECUTED"
-    && safeDashboardDisplayText(ack?.verificationStatus, "").toUpperCase() === "VERIFIED"
-    && Number.isFinite(Number(ack?.ticket))
-    && Number(ack?.ticket) > 0
-    && Number.isFinite(Number(ack?.filledPrice))
-    && Number(ack?.filledPrice) > 0
-    ? {
-        verified: true,
-        ticket: Number(ack.ticket),
-        filledPrice: Number(ack.filledPrice),
-        slippagePoints: Number.isFinite(Number(ack.filledSlippagePoints))
-          ? Number(ack.filledSlippagePoints)
-          : null,
-        stopLoss: Number.isFinite(Number(ack.actualStopLoss)) ? Number(ack.actualStopLoss) : null,
-        takeProfit: Number.isFinite(Number(ack.actualTakeProfit)) ? Number(ack.actualTakeProfit) : null,
-      }
+  const terminalReasonCode = safeDashboardDisplayText(
+    ack?.reasonCode || command?.reasonCode || gateway.reasonCode,
+    "",
+  );
+  const prepublishBlockReason = !commandPublished
+    ? signalPrepublishExecutionBlockReason(terminalReasonCode)
+    : "";
+  const exactClosedOutcome = ackStatus === "EXECUTED"
+    ? signalExactClosedOrderOutcome(report, command, ack)
     : null;
-  const fill = [command?.fill, ack?.fill, gateway.fill, verifiedAckFill]
+  const fill = [command?.fill, ack?.fill, gateway.fill]
     .find((value) => value && typeof value === "object") || null;
-  const fillVerified = fill?.verified === true || gateway.fillVerified === true;
+  const fillVerified = fill?.verified === true
+    || gateway.fillVerified === true
+    || Boolean(exactClosedOutcome);
+  const terminalAck = ["EXECUTED", "SHADOWED", "REJECTED", "DUPLICATE", "FAILED_FINAL"]
+    .includes(ackStatus);
   const recoveryIncident = ackStatus === "EXECUTION_UNKNOWN"
-    || ["expired_waiting_ack", "recovery_required", "incident"].includes(commandStatus.toLowerCase())
-    || gateway.status === "waiting_previous_ack";
+    || (!terminalAck && (
+      ["expired_waiting_ack", "recovery_required", "incident"].includes(commandStatus.toLowerCase())
+      || gateway.status === "waiting_previous_ack"
+    ));
   const noTrade = consensus.available && !consensus.tradePlan.available;
-  const commandState = commandPublished
+  const commandState = prepublishBlockReason
+    ? "blocked"
+    : commandPublished
     ? "complete"
     : noTrade
       ? "skipped"
       : consensus.tradePlan.available
         ? (runtime.gatewayConnected ? "waiting" : "blocked")
         : "unavailable";
-  const ackState = recoveryIncident
+  const ackState = prepublishBlockReason
+    ? "skipped"
+    : recoveryIncident
     ? "blocked"
     : ackStatus
       ? (["EXECUTED", "SHADOWED", "REJECTED", "DUPLICATE", "FAILED_FINAL"].includes(ackStatus) ? "complete" : "waiting")
@@ -8469,7 +8534,9 @@ function signalTradeOperationsModel(report = {}, runtime = {}, consensus = {}) {
         : noTrade
           ? "skipped"
           : "unavailable";
-  const fillState = recoveryIncident
+  const fillState = prepublishBlockReason
+    ? "skipped"
+    : recoveryIncident
     ? "blocked"
     : fillVerified
       ? "complete"
@@ -8485,30 +8552,49 @@ function signalTradeOperationsModel(report = {}, runtime = {}, consensus = {}) {
     ackState,
     fillState,
     incident: recoveryIncident,
+    commandPublished,
+    ackStatus,
+    terminalReasonCode,
+    prepublishBlocked: Boolean(prepublishBlockReason),
+    exactClosedOutcome,
     rows: [
       {
         label: "Command",
         state: commandState,
-        value: commandPublished ? `ส่งแล้ว • ${safeDashboardDisplayText(command?.commandId, "มี Command ID")}` : noTrade ? "ข้าม: มติ NO TRADE" : "ยังไม่ส่ง",
-        detail: commandStatus || "รอสถานะจาก Trade Gateway",
+        value: commandPublished
+          ? `ส่งแล้ว • ${safeDashboardDisplayText(command?.commandId, "มี Command ID")}`
+          : prepublishBlockReason
+            ? "ไม่ส่ง Command • ถูกบล็อกก่อน Publish"
+            : noTrade
+              ? "ข้าม: มติ NO TRADE"
+              : "ยังไม่ส่ง",
+        detail: prepublishBlockReason
+          ? signalExecutionGuardReasonLabel(prepublishBlockReason)
+          : commandStatus || "รอสถานะจาก Trade Gateway",
       },
       {
         label: "ACK จาก EA",
         state: ackState,
-        value: ackStatus || (commandPublished ? "กำลังรอ ACK" : "ยังไม่มี ACK"),
-        detail: signalExecutionGuardReasonLabel(ack?.reasonCode || gateway.reasonCode),
+        value: prepublishBlockReason
+          ? "ไม่ต้องรอ ACK • ยังไม่ได้ Publish"
+          : ackStatus || (commandPublished ? "กำลังรอ ACK" : "ยังไม่มี ACK"),
+        detail: signalExecutionGuardReasonLabel(terminalReasonCode),
       },
       {
-        label: "Fill / Order จริง",
+        label: "Fill / สถานะ Order ล่าสุด",
         state: fillState,
-        value: fillVerified
+        value: exactClosedOutcome
+          ? `ปิดแล้ว • Ticket ${exactClosedOutcome.ticket} • P/L ${signalOrderSignedPnl(exactClosedOutcome.closedPnl)}`
+          : fillVerified
           ? "Backend ยืนยัน Fill แล้ว"
           : ackStatus === "EXECUTED"
             ? "EA ส่ง ACK EXECUTED"
             : fillState === "skipped"
               ? "ไม่มี Fill ในรอบนี้"
               : "ยังไม่มีข้อมูล Fill",
-        detail: fillVerified
+        detail: exactClosedOutcome
+          ? `ปิดเวลา MT4 ${signalBrokerDateTime(exactClosedOutcome.closedAtBroker)} • Outcome ตรงกับ Command และ Ticket`
+          : fillVerified
           ? safeDashboardDisplayText(fill?.ticket || fill?.orderId, "ยืนยันโดย Backend")
           : ackStatus === "EXECUTED"
             ? "ยังไม่มีข้อมูลตรวจ Fill แยกจาก Backend"
@@ -8522,6 +8608,84 @@ function signalTradeOperationsModel(report = {}, runtime = {}, consensus = {}) {
       },
     ],
   };
+}
+
+function signalTradeGatewayHeadlineLabel(
+  runtime = {},
+  gatewayRun = {},
+  operations = {},
+  consensus = {},
+  { readOnlyPolicyPassed = false, riskEaState = "unavailable" } = {},
+) {
+  const ackStatus = safeDashboardDisplayText(
+    operations.ackStatus
+      || runtime.gatewayLastAck?.status
+      || gatewayRun.ackStatus
+      || gatewayRun?.command?.ack?.status,
+    "",
+  ).toUpperCase();
+  const reasonCode = safeDashboardDisplayText(
+    operations.terminalReasonCode
+      || runtime.gatewayLastAck?.reasonCode
+      || runtime.gatewayCommand?.reasonCode
+      || gatewayRun.reasonCode
+      || gatewayRun?.command?.ack?.reasonCode,
+    "",
+  );
+  const runStatus = safeDashboardDisplayText(
+    runtime.gatewayCommand?.status || gatewayRun.status,
+    "",
+  );
+  const commandPublished = operations.commandPublished === true
+    || runtime.gatewayCommandPublished === true
+    || gatewayRun.commandPublished === true;
+  const exactClosedOutcome = operations.exactClosedOutcome;
+  if (exactClosedOutcome) {
+    return `Order ปิดแล้ว • Ticket ${exactClosedOutcome.ticket} • P/L ${signalOrderSignedPnl(exactClosedOutcome.closedPnl)}`;
+  }
+  if (operations.prepublishBlocked === true) {
+    return `ยังไม่ส่ง Order • ${signalExecutionGuardReasonLabel(reasonCode)}`;
+  }
+  if (operations.incident === true) {
+    return ackStatus === "EXECUTION_UNKNOWN"
+      ? "ผลคำสั่งยังไม่ชัดเจน • ต้องตรวจสถานะกับ EA ก่อนส่งซ้ำ"
+      : "วงจรคำสั่งมี Incident • ต้องตรวจสถานะกับ EA ก่อนส่งซ้ำ";
+  }
+  if (ackStatus === "EXECUTED") return "EA ยืนยัน Order แล้ว";
+  if (ackStatus === "SHADOWED") return "Shadow ตรวจคำสั่งผ่าน";
+  if (ackStatus === "REJECTED") {
+    return `EA ปฏิเสธคำสั่ง • ${signalExecutionGuardReasonLabel(reasonCode)}`;
+  }
+  if (ackStatus === "DUPLICATE") {
+    return `EA พบ Command ซ้ำ • ไม่เปิด Order ซ้ำ • ${signalExecutionGuardReasonLabel(reasonCode)}`;
+  }
+  if (ackStatus === "FAILED_FINAL") {
+    return `คำสั่งล้มเหลวถาวร • ไม่ได้เปิด Order • ${signalExecutionGuardReasonLabel(reasonCode)}`;
+  }
+  if (reasonCode.toLowerCase() === "audit_only_backlog_never_dispatches") {
+    return signalExecutionGuardReasonLabel(reasonCode);
+  }
+  if (commandPublished) return "ส่งคำสั่งแล้ว • รอ ACK";
+  if (runStatus === "waiting_previous_ack") return "รอ EA ตอบรับคำสั่งก่อนหน้า";
+  if (consensus.tradePlan?.available && runtime.gatewayModeAccountMismatch) {
+    return signalExecutionGuardReasonLabel(runtime.gatewayModeAccountMismatchReason);
+  }
+  if (
+    consensus.tradePlan?.available
+    && ["demo", "live"].includes(runtime.gatewayMode)
+    && !runtime.gatewayExecutionGuardReady
+  ) {
+    return `ยังไม่ส่ง Order • ${signalExecutionGuardReasonLabel(runtime.gatewayExecutionGuardReason)}`;
+  }
+  if (consensus.tradePlan?.available && runtime.gatewayMode === "shadow") {
+    return "SHADOW • ตรวจคำสั่งได้แต่ไม่ส่ง Order";
+  }
+  if (consensus.tradePlan?.available && runtime.gatewayConnected) {
+    return `Execution Guard พร้อม • ${safeDashboardDisplayText(runtime.gatewayMode, "").toUpperCase()}`;
+  }
+  if (consensus.tradePlan?.available) return "รอเชื่อม MetafxHQ AI Council EA";
+  if (readOnlyPolicyPassed) return "มติ NO TRADE • ไม่ส่งคำสั่ง";
+  return riskEaState === "blocked" ? "หยุดแบบปลอดภัย" : "กำลังตรวจผลวิเคราะห์";
 }
 
 function signalRoundHealthModel(report = {}, automation = signalCouncilAutomationModel(report), run = signalCouncilRunModel(report)) {
@@ -8778,11 +8942,28 @@ function signalExecutionGuardReasonLabel(value) {
     CLOSED_BAR_IDENTITY_MISMATCH: "แท่งปิดเปลี่ยนระหว่างวิเคราะห์ • EA ปฏิเสธคำสั่งเก่าและไม่ได้เปิด Order",
     CLOSED_BAR_ADVANCED_DURING_ANALYSIS: "มีแท่งใหม่ปิดระหว่างวิเคราะห์ • Backend ไม่ส่งคำสั่งย้อนหลัง",
     CURRENT_CLOSED_BAR_UNAVAILABLE_BEFORE_PUBLISH: "Backend ตรวจแท่งปัจจุบันก่อนส่งคำสั่งไม่ได้ จึงหยุดแบบปลอดภัย",
+    SIGNAL_PRICE_DRIFT_EXCEEDED: "ราคาขยับจากราคาอ้างอิงเกินเกณฑ์ • EA ปฏิเสธและไม่ได้เปิด Order",
+    SIGNAL_PRICE_DRIFT_BEFORE_PUBLISH: "ราคาขยับจากราคาอ้างอิงเกินเกณฑ์ก่อน Publish • Backend ไม่ส่ง Command",
+    SIGNAL_PRICE_DRIFT_EXCEEDED_BEFORE_PUBLISH: "ราคาขยับจากราคาอ้างอิงเกินเกณฑ์ก่อน Publish • Backend ไม่ส่ง Command",
+    EXECUTION_REWARD_RISK_BELOW_MINIMUM: "Reward/Risk ณ ราคาก่อน Publish ต่ำกว่าเกณฑ์ • Backend ไม่ส่ง Command",
+    EXECUTION_REWARD_RISK_BELOW_MINIMUM_BEFORE_PUBLISH: "Reward/Risk ณ ราคาก่อน Publish ต่ำกว่าเกณฑ์ • Backend ไม่ส่ง Command",
+    EXECUTION_QUOTE_STALE_BEFORE_PUBLISH: "ราคาก่อน Publish เก่าเกินกำหนด • Backend ไม่ส่ง Command",
+    EXECUTION_QUOTE_MARKET_CLOSED_BEFORE_PUBLISH: "ตลาดปิดอยู่ก่อน Publish • Backend ไม่ส่ง Command",
+    EXECUTION_PROTECTIVE_PLAN_INVALID_BEFORE_PUBLISH: "SL/TP ไม่ผ่านการตรวจทิศทางก่อน Publish • Backend ไม่ส่ง Command",
+    TERMINAL_SELECTION_CHANGED_BEFORE_PUBLISH: "เป้าหมาย MT4 เปลี่ยนก่อน Publish • Backend ไม่ส่ง Command",
+    ANALYSIS_QUOTE_TELEMETRY_UNAVAILABLE_BEFORE_PUBLISH: "ไม่มีราคา Bid/Ask ที่ตรวจสอบได้ก่อน Publish • Backend ไม่ส่ง Command",
+    EXECUTION_QUOTE_TELEMETRY_UNAVAILABLE_BEFORE_PUBLISH: "ไม่มีราคา Bid/Ask ที่ตรวจสอบได้ก่อน Publish • Backend ไม่ส่ง Command",
+    ANALYSIS_QUOTE_TELEMETRY_UNAVAILABLE: "ไม่มีราคา Bid/Ask ที่ตรวจสอบได้สำหรับรอบวิเคราะห์ • Backend ไม่ส่ง Command",
+    EXECUTION_QUOTE_TELEMETRY_UNAVAILABLE: "ไม่มีราคา Bid/Ask ที่ตรวจสอบได้ก่อนส่งคำสั่ง • Backend ไม่ส่ง Command",
     AUDIT_ONLY_BACKLOG_NEVER_DISPATCHES: "รอบนี้เป็น Audit-only • ไม่ส่งคำสั่งย้อนหลังไป MT4",
     NO_TRADE: "มติ NO TRADE จึงไม่มีคำสั่งไปยัง EA",
   };
   return labels[code]
-    || (code ? `ระบบป้องกันของ EA ยังไม่อนุญาตให้ส่ง Order (${code})` : "ยังไม่ได้รับสถานะจาก EA");
+    || (code.endsWith("_BEFORE_PUBLISH")
+      ? `Backend บล็อกก่อน Publish และไม่ส่ง Command (${code})`
+      : code
+        ? `ระบบป้องกันของ EA ยังไม่อนุญาตให้ส่ง Order (${code})`
+        : "ยังไม่ได้รับสถานะจาก EA");
 }
 
 function signalExecutionGuardRecoveryLabel(value) {
@@ -10826,14 +11007,7 @@ function renderSignalDecisionPanel(report = {}) {
   const allRunAgentsCompleted = run.children.length === AI_TRADE_COUNCIL_AGENT_IDS.length
     && run.counts.completed === AI_TRADE_COUNCIL_AGENT_IDS.length;
   const gatewayRun = consensus.tradeGateway || {};
-  const gatewayAckStatus = String(
-    gatewayRun.ackStatus || gatewayRun?.command?.ack?.status || "",
-  ).toUpperCase();
-  const gatewayRunStatus = String(gatewayRun.status || "");
-  const gatewayRunReason = safeDashboardDisplayText(
-    gatewayRun.reasonCode || gatewayRun?.command?.ack?.reasonCode,
-    "",
-  );
+  const gatewayRunStatus = String(runtime.gatewayCommand?.status || gatewayRun.status || "");
   const gatewayRunBlocked = gatewayRunStatus === "blocked";
   const quality = signalCouncilQualityModel(report, consensus, market);
   const operations = signalTradeOperationsModel(report, runtime, consensus);
@@ -10877,35 +11051,13 @@ function renderSignalDecisionPanel(report = {}) {
     ack: operations.ackState,
     fill: operations.fillState,
   };
-  const gatewayStatusLabel = gatewayAckStatus === "EXECUTED"
-    ? "EA ยืนยัน Order แล้ว"
-    : gatewayAckStatus === "SHADOWED"
-      ? "Shadow ตรวจคำสั่งผ่าน"
-      : gatewayAckStatus === "REJECTED"
-        ? `EA ปฏิเสธคำสั่ง • ${signalExecutionGuardReasonLabel(gatewayRunReason)}`
-      : gatewayRunReason === "audit_only_backlog_never_dispatches"
-        ? signalExecutionGuardReasonLabel(gatewayRunReason)
-      : gatewayRun.commandPublished === true
-        ? `ส่งคำสั่งแล้ว • รอ ACK`
-        : gatewayRunStatus === "waiting_previous_ack"
-          ? "รอ EA ตอบรับคำสั่งก่อนหน้า"
-        : consensus.tradePlan.available && runtime.gatewayModeAccountMismatch
-          ? signalExecutionGuardReasonLabel(runtime.gatewayModeAccountMismatchReason)
-        : consensus.tradePlan.available
-          && ["demo", "live"].includes(runtime.gatewayMode)
-          && !runtime.gatewayExecutionGuardReady
-          ? `ยังไม่ส่ง Order • ${signalExecutionGuardReasonLabel(runtime.gatewayExecutionGuardReason)}`
-        : consensus.tradePlan.available && runtime.gatewayMode === "shadow"
-          ? "SHADOW • ตรวจคำสั่งได้แต่ไม่ส่ง Order"
-        : consensus.tradePlan.available && runtime.gatewayConnected
-          ? `Execution Guard พร้อม • ${runtime.gatewayMode.toUpperCase()}`
-    : consensus.tradePlan.available
-      ? "รอเชื่อม MetafxHQ AI Council EA"
-      : readOnlyPolicyPassed
-        ? "มติ NO TRADE • ไม่ส่งคำสั่ง"
-    : riskEaState === "blocked"
-      ? "หยุดแบบปลอดภัย"
-      : "กำลังตรวจผลวิเคราะห์";
+  const gatewayStatusLabel = signalTradeGatewayHeadlineLabel(
+    runtime,
+    gatewayRun,
+    operations,
+    consensus,
+    { readOnlyPolicyPassed, riskEaState },
+  );
   const runDecision = consensus.belongsToLatestRun
     ? consensus.decision
     : runBlocked
@@ -11022,6 +11174,10 @@ function renderSignalDecisionPanel(report = {}) {
         : operations.commandState;
   if (operationsStatus) operationsStatus.textContent = operations.incident
     ? "มี Incident ต้องตรวจ"
+    : operations.exactClosedOutcome
+      ? `Order ปิดแล้ว • P/L ${signalOrderSignedPnl(operations.exactClosedOutcome.closedPnl)}`
+    : operations.prepublishBlocked
+      ? "บล็อกก่อนส่ง Command"
     : operations.fillState === "complete"
       ? "ยืนยัน Fill แล้ว"
       : operations.commandState === "skipped"
@@ -11461,6 +11617,13 @@ function signalOrderNumber(value, maximumFractionDigits = 5) {
   }).format(number);
 }
 
+function signalOrderSignedPnl(value) {
+  if (value === null || value === undefined || value === "") return "—";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  return `${number > 0 ? "+" : ""}${signalOrderNumber(number, 2)}`;
+}
+
 function signalThaiDateTime(value) {
   const date = value ? new Date(value) : null;
   if (!date || Number.isNaN(date.getTime())) return "ไม่ทราบเวลา";
@@ -11862,17 +12025,123 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
     && !safeDashboardDisplayText(order.missionId || order.linkedMissionId, "")
     && safeDashboardDisplayText(order.snapshotId, "") === identity.snapshotId
   ));
-  const matchedOrder = identity.missionId
-    ? orderItems.find((order) => (
+  const linkageCommandId = safeDashboardDisplayText(linkage.commandId, "");
+  const linkageTicket = Number(linkage.ticket);
+  const exactLinkedOrders = linkage.available === true
+    && linkageCommandId
+    && Number.isInteger(linkageTicket)
+    && linkageTicket > 0
+    ? orderItems.filter((order) => (
+        safeDashboardDisplayText(order.commandId, "") === linkageCommandId
+        && Number(order.ticket) === linkageTicket
+      ))
+    : [];
+  const matchedOrder = linkage.available === true
+    ? (exactLinkedOrders.length === 1 ? exactLinkedOrders[0] : null)
+    : identity.missionId
+      ? orderItems.find((order) => (
         safeDashboardDisplayText(order.missionId || order.linkedMissionId, "") === identity.missionId
       ))
-    : (legacySnapshotMatches.length === 1 ? legacySnapshotMatches[0] : null);
+      : (legacySnapshotMatches.length === 1 ? legacySnapshotMatches[0] : null);
   if (matchedOrder) {
+    const executionUnknown = matchedOrder.status === "execution_unknown_unverified"
+      || matchedOrder.unverified === true
+      || matchedOrder.executionEvidenceStatus === "execution_unknown_unverified";
+    if (executionUnknown) {
+      return {
+        tone: "attention",
+        label: "ผลคำสั่งยังไม่ชัดเจน • ต้องตรวจสถานะ",
+        detail: [
+          matchedOrder.ticket ? `Ticket ที่ต้องตรวจ ${matchedOrder.ticket}` : "ไม่พบ Ticket ที่ยืนยันได้",
+          signalExecutionGuardReasonLabel(matchedOrder.ackReasonCode || "EXECUTION_UNKNOWN"),
+        ].join(" • "),
+      };
+    }
     const side = signalHistoryDecision(matchedOrder.side) || "";
+    const closed = matchedOrder.status === "closed"
+      && String(matchedOrder.executionState || "").toUpperCase() === "CLOSED"
+      && matchedOrder.outcomeIdentityVerified === true
+      && String(matchedOrder.verificationStatus || "").toUpperCase() === "VERIFIED_CLOSED";
+    const closedAtBroker = closed ? signalBrokerDateTime(matchedOrder.closedAtBroker) : "";
+    const details = [
+      matchedOrder.ticket ? `Ticket ${matchedOrder.ticket}` : "EA ยืนยันการเปิดแล้ว",
+      closed && Number.isFinite(Number(matchedOrder.closedPnl))
+        ? `P/L ${signalOrderSignedPnl(matchedOrder.closedPnl)}`
+        : "",
+      closedAtBroker ? `ปิดเวลา MT4 ${closedAtBroker}` : "",
+    ].filter(Boolean);
     return {
       tone: matchedOrder.verified === true ? "confirmed" : "attention",
-      label: `เปิด ${side || "Order"}`,
-      detail: matchedOrder.ticket ? `Ticket ${matchedOrder.ticket}` : "EA ยืนยันการเปิดแล้ว",
+      label: `${closed ? "ปิด" : "เปิด"} ${side || "Order"}`,
+      detail: details.join(" • "),
+    };
+  }
+  const finalDecision = signalHistoryFinalDecision(source);
+  const gatewayCommand = signalHistoryObject(gateway.command);
+  const gatewayAck = signalHistoryObject(gatewayCommand.ack || gateway.ack);
+  const gatewayAckStatus = String(
+    gatewayAck.status
+      || gateway.ackStatus
+      || source.orderAckStatus
+      || metrics.orderAckStatus
+      || "",
+  ).trim().toUpperCase();
+  const gatewayStatus = String(
+    gateway.status || gatewayCommand.status || source.orderStatus || metrics.orderStatus || "",
+  ).toLowerCase();
+  const reasonCode = String(
+    gatewayAck.reasonCode
+      || gateway.reasonCode
+      || gatewayCommand.reasonCode
+      || source.orderReasonCode
+      || metrics.orderReasonCode
+      || "",
+  ).trim();
+  const prepublishBlockReason = signalPrepublishExecutionBlockReason(reasonCode);
+  if (gatewayAckStatus === "REJECTED" || gatewayStatus.includes("ack_rejected")) {
+    return {
+      tone: "blocked",
+      label: "EA ปฏิเสธ • ไม่ได้เปิด Order",
+      detail: signalExecutionGuardReasonLabel(reasonCode),
+    };
+  }
+  if (gatewayAckStatus === "DUPLICATE" || gatewayStatus.includes("ack_duplicate")) {
+    return {
+      tone: "blocked",
+      label: "EA พบ Command ซ้ำ • ไม่เปิด Order ซ้ำ",
+      detail: signalExecutionGuardReasonLabel(reasonCode),
+    };
+  }
+  if (gatewayAckStatus === "FAILED_FINAL" || gatewayStatus.includes("ack_failed_final")) {
+    return {
+      tone: "blocked",
+      label: "คำสั่งล้มเหลวถาวร • ไม่ได้เปิด Order",
+      detail: signalExecutionGuardReasonLabel(reasonCode),
+    };
+  }
+  if (gatewayAckStatus === "SHADOWED" || gatewayStatus.includes("ack_shadowed")) {
+    return {
+      tone: "none",
+      label: "Shadow ตรวจคำสั่งแล้ว • ไม่มี Order จริง",
+      detail: signalExecutionGuardReasonLabel(reasonCode),
+    };
+  }
+  if (
+    gatewayAckStatus === "EXECUTION_UNKNOWN"
+    || gatewayStatus.includes("execution_unknown")
+    || gatewayStatus.includes("expired_waiting_ack")
+  ) {
+    return {
+      tone: "blocked",
+      label: "ผลคำสั่งยังไม่ชัดเจน • ต้องตรวจสถานะ",
+      detail: signalExecutionGuardReasonLabel(reasonCode || "EXECUTION_UNKNOWN"),
+    };
+  }
+  if (prepublishBlockReason && gateway.commandPublished !== true) {
+    return {
+      tone: "blocked",
+      label: "บล็อกก่อนส่ง • ไม่ได้เปิด Order",
+      detail: signalExecutionGuardReasonLabel(prepublishBlockReason),
     };
   }
   if (linkage.available === true) {
@@ -11894,10 +12163,7 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
       detail: details.join(" • "),
     };
   }
-  const finalDecision = signalHistoryFinalDecision(source);
-  const gatewayStatus = String(gateway.status || gateway.ackStatus || source.orderStatus || "").toLowerCase();
-  const reasonCode = String(gateway.reasonCode || source.orderReasonCode || "").trim();
-  if (gateway.orderExecutionConfirmed === true || gatewayStatus.includes("ack_executed")) {
+  if (gateway.orderExecutionConfirmed === true || gatewayAckStatus === "EXECUTED" || gatewayStatus.includes("ack_executed")) {
     return { tone: "confirmed", label: "EA ยืนยันเปิด", detail: "ยังไม่พบ Ticket ในหน้าต่างประวัตินี้" };
   }
   if (gateway.commandPublished === true || gatewayStatus.includes("waiting_ack")) {
@@ -11939,16 +12205,18 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
     };
   }
   if (["BUY", "SELL"].includes(finalDecision)) {
+    const normalizedReason = reasonCode.toUpperCase();
     const reasonLabels = {
-      single_outstanding_command: "มีคำสั่งก่อนหน้าที่ยังไม่จบ",
-      max_managed_orders_reached: "ถึงจำนวน Order สูงสุด",
-      council_quality_gate_failed: "ไม่ผ่าน Quality Gate",
-      execution_guard_not_ready: "Execution Guard ยังไม่พร้อม",
+      SINGLE_OUTSTANDING_COMMAND: "มีคำสั่งก่อนหน้าที่ยังไม่จบ",
+      MAX_MANAGED_ORDERS_REACHED: "ถึงจำนวน Order สูงสุด",
+      COUNCIL_QUALITY_GATE_FAILED: "ไม่ผ่าน Quality Gate",
+      EXECUTION_GUARD_NOT_READY: "Execution Guard ยังไม่พร้อม",
     };
     return {
       tone: "blocked",
       label: "ไม่ได้เปิด Order",
-      detail: reasonLabels[reasonCode] || safeDashboardDisplayText(reasonCode, "ไม่พบหลักฐานการส่งคำสั่ง"),
+      detail: reasonLabels[normalizedReason]
+        || (reasonCode ? signalExecutionGuardReasonLabel(reasonCode) : "ไม่พบหลักฐานการส่งคำสั่ง"),
     };
   }
   if (["HOLD", "NO_TRADE"].includes(finalDecision)) {
@@ -12441,6 +12709,7 @@ function createSignalOrderHistoryRow(order) {
   const ticket = document.createElement("small");
   const mode = document.createElement("small");
   const mission = document.createElement("small");
+  const outcome = document.createElement("small");
   status.textContent = safeDashboardDisplayText(
     order.statusTh,
     order.status === "closed"
@@ -12456,7 +12725,20 @@ function createSignalOrderHistoryRow(order) {
   mission.textContent = order.verified === true
     ? `ยืนยันจาก EA • ${safeDashboardDisplayText(order.missionId, "ไม่พบ Mission")}`
     : "หลักฐานเชื่อม Mission ยังไม่ครบ";
+  const authoritativeClosedOutcome = order.status === "closed"
+    && String(order.executionState || "").toUpperCase() === "CLOSED"
+    && order.outcomeIdentityVerified === true
+    && String(order.verificationStatus || "").toUpperCase() === "VERIFIED_CLOSED";
+  if (authoritativeClosedOutcome) {
+    const closedPnl = Number(order.closedPnl);
+    const closedAtBroker = signalBrokerDateTime(order.closedAtBroker);
+    outcome.textContent = [
+      Number.isFinite(closedPnl) ? `P/L ${signalOrderSignedPnl(closedPnl)}` : "",
+      closedAtBroker ? `ปิดเวลา MT4 ${closedAtBroker}` : "",
+    ].filter(Boolean).join(" • ");
+  }
   evidence.append(status, ticket, mode, mission);
+  if (outcome.textContent) evidence.append(outcome);
 
   row.append(openedAt, side, market, lot, openPrice, stopLoss, takeProfit, reason, evidence);
   return row;

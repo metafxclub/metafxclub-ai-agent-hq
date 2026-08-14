@@ -37,6 +37,16 @@ class AiTradeCouncilVoteThresholdTests(unittest.TestCase):
                 "kind": "ai_trade_council_parent",
                 "snapshotId": snapshot_id,
                 "referencePrice": 2400.0,
+                "analysisQuote": {
+                    "schemaVersion": "ai-trade-council-analysis-quote-v1",
+                    "snapshotId": snapshot_id,
+                    "bid": 2399.9,
+                    "ask": 2400.1,
+                    "spreadPoints": 20.0,
+                    "derivedPoint": 0.01,
+                    "digits": 2,
+                    "directionalReferencePolicy": "ask_for_buy_bid_for_sell",
+                },
                 "horizonBars": 1,
                 "validUntilBarTime": valid_until,
                 "requiredVotes": required_votes,
@@ -82,9 +92,9 @@ class AiTradeCouncilVoteThresholdTests(unittest.TestCase):
                         else None
                     ),
                     "takeProfitPrice": (
-                        2420.0
+                        2421.0
                         if role_id == "price_action" and decision == "BUY"
-                        else 2380.0
+                        else 2379.0
                         if role_id == "price_action" and decision == "SELL"
                         else None
                     ),
@@ -164,10 +174,12 @@ class AiTradeCouncilVoteThresholdTests(unittest.TestCase):
             "chartSnapshot": {
                 "available": True,
                 "snapshotId": snapshot_id,
+                "observedAt": context["snapshotObservedAt"],
                 "symbol": "XAUUSD",
                 "timeframe": "M5",
                 "bid": 2399.9,
                 "ask": 2400.1,
+                "spreadPoints": 20.0,
                 "bars": bars,
                 "analysisWindow": {
                     "requestedBars": len(bars),
@@ -606,6 +618,33 @@ class AiTradeCouncilVoteThresholdTests(unittest.TestCase):
             consensus["qualityGate"]["protectivePlanFallbackUsed"]
         )
 
+    def test_midpoint_rr_one_is_not_enough_for_action_side_execution(self) -> None:
+        for direction, take_profit in (("BUY", 2420.0), ("SELL", 2380.0)):
+            with self.subTest(direction=direction):
+                parent, children = self.council_round(1, {
+                    "technical": "HOLD",
+                    "price_action": direction,
+                    "news": "HOLD",
+                })
+                price_action = next(
+                    child
+                    for child in children
+                    if child["councilVote"]["roleId"] == "price_action"
+                )
+                price_action["councilVote"]["takeProfitPrice"] = take_profit
+
+                consensus = self.bridge.ai_trade_council_consensus(
+                    parent,
+                    children,
+                )
+
+                self.assertEqual(consensus["decision"], "NO_TRADE")
+                self.assertFalse(consensus["tradePlan"]["available"])
+                self.assertIn(
+                    "price_action_protective_plan_failed",
+                    consensus["qualityGate"]["reasonCodes"],
+                )
+
     def test_price_action_hold_uses_closed_bar_fallback_for_passed_thresholds(self) -> None:
         cases = (
             (
@@ -678,6 +717,20 @@ class AiTradeCouncilVoteThresholdTests(unittest.TestCase):
                         self.assertEqual(provenance["snapshotId"], "a" * 64)
                         self.assertEqual(provenance["analysisBarCount"], 120)
                         self.assertTrue(provenance["closedBarsOnly"])
+                        self.assertEqual(
+                            provenance["referencePrice"],
+                            2400.1 if direction == "BUY" else 2399.9,
+                        )
+                        self.assertEqual(
+                            provenance["referencePriceSource"],
+                            "snapshot_ask" if direction == "BUY" else "snapshot_bid",
+                        )
+                        self.assertEqual(provenance["derivedPoint"], 0.01)
+                        self.assertEqual(provenance["rewardRiskCushionPoints"], 2)
+                        self.assertGreater(
+                            consensus["tradePlan"]["rewardRiskRatio"],
+                            1.0,
+                        )
                         self.assertNotIn(
                             "price_action_protective_plan_failed",
                             consensus["qualityGate"]["reasonCodes"],

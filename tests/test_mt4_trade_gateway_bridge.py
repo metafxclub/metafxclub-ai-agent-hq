@@ -38,6 +38,10 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.bridge.RUNTIME_DIR = self.root / "runtime"
         self.bridge.AUDIT_PATH = self.bridge.RUNTIME_DIR / "bridge-audit.jsonl"
         self.bridge.METATRADER_COMMON_FILES_DIR = self.root / "common"
+        self.original_snapshot_dir = self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR
+        self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR = (
+            self.root / "ai-trade-council" / "snapshots"
+        )
         self.bridge.MT4_TRADE_GATEWAY_MODULE = None
         self.bridge.MT4_TRADE_GATEWAY_REJECTED_ACK_EVENTS.clear()
         self.candidate = {
@@ -50,11 +54,45 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.current_closed_bar_time = 1_785_445_200
 
     def tearDown(self) -> None:
+        self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR = self.original_snapshot_dir
         self.temp.cleanup()
 
     def test_snapshot_symbol_boundary_accepts_hash_but_not_plus_suffix(self) -> None:
         self.assertEqual(self.bridge._safe_snapshot_symbol("EURUSD#"), "EURUSD#")
         self.assertIsNone(self.bridge._safe_snapshot_symbol("EURUSD+"))
+
+    def test_quote_model_accepts_only_exact_power_of_ten_broker_points(self) -> None:
+        valid_cases = (
+            (100.0, 103.0, 3.0, 1.0, 0),
+            (100.0, 100.3, 3.0, 0.1, 1),
+            (100.0, 100.03, 3.0, 0.01, 2),
+            (100.0, 100.00000003, 3.0, 0.00000001, 8),
+        )
+        for bid, ask, spread, point, digits in valid_cases:
+            with self.subTest(point=point):
+                quote = self.bridge._ai_trade_council_quote_model(
+                    bid=bid,
+                    ask=ask,
+                    spread_points=spread,
+                )
+                self.assertIsNotNone(quote)
+                self.assertEqual(quote["derivedPoint"], point)
+                self.assertEqual(quote["digits"], digits)
+
+        invalid_cases = (
+            (1.0, 1.2, 3.0),
+            (100.0, 100.2, 19.0),
+            (1.0, 1.00000002, 1.0),
+        )
+        for bid, ask, spread in invalid_cases:
+            with self.subTest(bid=bid, ask=ask, spread=spread):
+                self.assertIsNone(
+                    self.bridge._ai_trade_council_quote_model(
+                        bid=bid,
+                        ask=ask,
+                        spread_points=spread,
+                    )
+                )
 
     def status_path(self) -> Path:
         return (
@@ -67,6 +105,14 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
 
     def init_status_path(self) -> Path:
         return self.status_path().with_name("init-status.json")
+
+    def command_payload(self) -> dict:
+        envelope = json.loads(
+            self.status_path().with_name("command.json").read_text(
+                encoding="ascii"
+            )
+        )
+        return json.loads(bytes.fromhex(envelope["payloadHex"]).decode("ascii"))
 
     def signing_key_id(self) -> str:
         with self.bridge.MT4_TRADE_GATEWAY_LOCK:
@@ -167,17 +213,36 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         path.write_text(json.dumps(payload), encoding="ascii")
         return payload
 
-    def parent(self, *, timeframe: str = "M5") -> dict:
-        return {
+    def parent(
+        self,
+        *,
+        timeframe: str = "M5",
+        snapshot_observed_at: str | None = None,
+    ) -> dict:
+        observed_at = snapshot_observed_at or datetime.now(
+            timezone.utc
+        ).isoformat()
+        parent = {
             "id": "mission-council-test-01",
             "analysisContext": {
                 "kind": "ai_trade_council_parent",
                 "snapshotId": "a" * 64,
                 "referencePrice": 100.0,
-                "snapshotObservedAt": datetime.now(timezone.utc).isoformat(),
+                "analysisQuote": {
+                    "schemaVersion": "ai-trade-council-analysis-quote-v1",
+                    "snapshotId": "a" * 64,
+                    "bid": 99.9,
+                    "ask": 100.1,
+                    "spreadPoints": 20.0,
+                    "derivedPoint": 0.01,
+                    "digits": 2,
+                    "directionalReferencePolicy": "ask_for_buy_bid_for_sell",
+                },
+                "snapshotObservedAt": observed_at,
                 "roundDeadlineAt": (
                     datetime.now(timezone.utc) + timedelta(minutes=4)
                 ).isoformat(),
+                "qualityGate": {"minimumRewardRiskRatio": 1.0},
                 "closedBarIdentity": {
                     "candidateId": self.candidate["candidateId"],
                     "streamKey": self.bridge.payload_digest(
@@ -191,6 +256,54 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
                 },
             },
         }
+        self.install_analysis_artifact(parent)
+        return parent
+
+    def install_analysis_artifact(self, parent: dict) -> Path:
+        context = parent["analysisContext"]
+        bar_time = context["closedBarIdentity"]["closedBarTime"]
+        artifact = {
+            "schemaVersion": "ai-trade-council-input-v1",
+            "snapshotId": context["snapshotId"],
+            "createdAt": self.bridge.utc_now(),
+            "sourceMode": "mt4_read_only_snapshot",
+            "dailySummary": None,
+            "chartSnapshot": {
+                "available": True,
+                "snapshotId": context["snapshotId"],
+                "observedAt": context["snapshotObservedAt"],
+                "symbol": context["closedBarIdentity"]["symbol"],
+                "timeframe": context["closedBarIdentity"]["timeframe"],
+                "bid": 99.9,
+                "ask": 100.1,
+                "spreadPoints": 20.0,
+                "bars": [
+                    {
+                        "time": bar_time,
+                        "open": 100.0,
+                        "high": 101.0,
+                        "low": 99.0,
+                        "close": 100.0,
+                        "volume": 1.0,
+                    }
+                ],
+            },
+            "policy": {
+                "readOnly": True,
+                "sameSnapshotRequired": True,
+                "terminalActionsAllowed": False,
+            },
+            "selectedCandidateId": self.candidate["candidateId"],
+        }
+        digest = self.bridge._ai_trade_council_snapshot_artifact_digest(artifact)
+        artifact["artifactDigest"] = digest
+        path = self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR / f"{digest}.json"
+        self.bridge.write_json(path, artifact)
+        context.update({
+            "snapshotArtifact": f"ai-trade-council/snapshots/{digest}.json",
+            "snapshotArtifactDigest": digest,
+        })
+        return path
 
     @staticmethod
     def consensus() -> dict:
@@ -221,12 +334,71 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             },
         }
 
+    def trade_intent(
+        self,
+        parent: dict,
+        *,
+        snapshot_observed_at: int | None = None,
+    ) -> dict:
+        context = parent["analysisContext"]
+        observed = self.bridge.parse_iso(context["snapshotObservedAt"])
+        self.assertIsNotNone(observed)
+        return {
+            "channelId": self.candidate["candidateId"],
+            "streamKey": context["closedBarIdentity"]["streamKey"],
+            "snapshotId": context["snapshotId"],
+            "snapshotObservedAt": (
+                snapshot_observed_at
+                if snapshot_observed_at is not None
+                else int(observed.timestamp())
+            ),
+            "barTime": self.current_closed_bar_time,
+            "missionId": parent["id"],
+            "councilDecisionId": "council-test",
+            "ownerAgentId": "manager",
+            "action": "BUY",
+            "symbol": "XAUUSD",
+            "timeframe": "M5",
+            "referencePrice": 100.1,
+            "stopLoss": 95.0,
+            "takeProfit": 110.0,
+        }
+
     @contextmanager
-    def selected_candidate(self):
+    def selected_candidate(
+        self,
+        *,
+        bid: float = 99.9,
+        ask: float = 100.1,
+        spread_points: float = 20.0,
+        snapshot_id: str | None = None,
+        observed_at: str | None = None,
+        age_seconds: float = 0.0,
+        adapter_ready: bool = True,
+        chart_available: bool = True,
+        market_open: bool | None = True,
+        include_market_open: bool = True,
+    ):
         selection_token = {
             "candidateId": self.candidate["candidateId"],
             "selectionRevision": 1,
         }
+        chart_snapshot = {
+            "available": chart_available,
+            "status": "ready" if chart_available else "stale",
+            "reasonCode": "ready" if chart_available else "snapshot_stale",
+            "snapshotId": snapshot_id or "f" * 64,
+            "observedAt": observed_at or datetime.now(timezone.utc).isoformat(),
+            "ageSeconds": age_seconds,
+            "symbol": "XAUUSD",
+            "timeframe": "M5",
+            "bid": bid,
+            "ask": ask,
+            "spreadPoints": spread_points,
+            "bars": [{"time": self.current_closed_bar_time}],
+        }
+        if include_market_open:
+            chart_snapshot["marketOpen"] = market_open
         with mock.patch.object(
             self.bridge,
             "_selected_metatrader_candidate_record",
@@ -240,14 +412,12 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             "metatrader_snapshot_read_model",
             return_value={
                 "selectedCandidateId": self.candidate["candidateId"],
-                "adapter": {"ready": True},
-                "chartSnapshot": {
-                    "available": True,
-                    "snapshotId": "f" * 64,
-                    "symbol": "XAUUSD",
-                    "timeframe": "M5",
-                    "bars": [{"time": self.current_closed_bar_time}],
+                "adapter": {
+                    "ready": adapter_ready,
+                    "status": "ready" if adapter_ready else "stale",
+                    "reasonCode": "ready" if adapter_ready else "snapshot_stale",
                 },
+                "chartSnapshot": chart_snapshot,
             },
         ):
             yield
@@ -890,7 +1060,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.assertEqual(command["schemaVersion"], "metafx-hq-mt4-command-v2")
         self.assertEqual(command["action"], "BUY")
         self.assertIsInstance(command["snapshotObservedAt"], int)
-        self.assertEqual(command["referencePrice"], 100)
+        self.assertEqual(command["referencePrice"], 100.1)
         self.assertEqual(command["stopLoss"], 95)
         self.assertEqual(command["takeProfit"], 110)
         forbidden = {
@@ -904,6 +1074,514 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             "liveArmed",
         }
         self.assertTrue(forbidden.isdisjoint(command))
+
+    def test_sell_command_uses_analysis_bid_and_current_bid_preflight(self) -> None:
+        self.write_ea_status()
+        consensus = self.consensus()
+        consensus.update({"decision": "SELL"})
+        consensus["tradePlan"].update({
+            "direction": "SELL",
+            "stopLossPrice": 105.0,
+            "takeProfitPrice": 90.0,
+        })
+        with self.selected_candidate():
+            result = self.bridge.dispatch_ai_trade_council_trade_plan(
+                self.parent(),
+                consensus,
+            )
+
+        self.assertEqual(result["status"], "queued")
+        command = self.command_payload()
+        self.assertEqual(command["action"], "SELL")
+        self.assertEqual(command["referencePrice"], 99.9)
+        preflight = result["executionPricePreflight"]
+        self.assertEqual(preflight["actionSide"], "bid")
+        self.assertEqual(preflight["analysisReferencePrice"], 99.9)
+        self.assertEqual(preflight["currentActionPrice"], 99.9)
+
+    def test_exact_signal_drift_boundary_is_allowed_without_repricing(self) -> None:
+        self.write_ea_status(maxSignalDriftPoints=100)
+        with self.selected_candidate(bid=100.9, ask=101.1):
+            result = self.bridge.dispatch_ai_trade_council_trade_plan(
+                self.parent(),
+                self.consensus(),
+            )
+
+        self.assertEqual(result["status"], "queued")
+        command = self.command_payload()
+        self.assertEqual(command["snapshotId"], "a" * 64)
+        self.assertEqual(command["referencePrice"], 100.1)
+        self.assertEqual(command["stopLoss"], 95)
+        self.assertEqual(command["takeProfit"], 110)
+        preflight = result["executionPricePreflight"]
+        self.assertEqual(preflight["priceDriftPoints"], 100.0)
+        self.assertEqual(preflight["maximumSignalDriftPoints"], 100)
+        self.assertTrue(preflight["commandFieldsUnchanged"])
+
+    def test_signal_drift_above_boundary_blocks_without_publish_or_retry(self) -> None:
+        parent = self.parent()
+        intent = {
+            "channelId": self.candidate["candidateId"],
+            "streamKey": parent["analysisContext"]["closedBarIdentity"]["streamKey"],
+            "snapshotId": "a" * 64,
+            "snapshotObservedAt": int(time.time()),
+            "barTime": self.current_closed_bar_time,
+            "missionId": parent["id"],
+            "councilDecisionId": "council-test",
+            "ownerAgentId": "manager",
+            "action": "BUY",
+            "symbol": "XAUUSD",
+            "timeframe": "M5",
+            "referencePrice": 100.1,
+            "stopLoss": 95.0,
+            "takeProfit": 110.0,
+        }
+        fake_gateway = mock.Mock()
+        with self.selected_candidate(bid=100.91, ask=101.11), mock.patch.object(
+            self.bridge,
+            "_mt4_trade_gateway_instance",
+            return_value=fake_gateway,
+        ):
+            result = self.bridge._mt4_trade_gateway_publish_for_selection(
+                intent,
+                expected_candidate_id=self.candidate["candidateId"],
+                expected_selection_revision=1,
+                expected_closed_bar_identity=parent["analysisContext"][
+                    "closedBarIdentity"
+                ],
+                analysis_context=parent["analysisContext"],
+                maximum_signal_drift_points=100,
+                minimum_reward_risk_ratio=1.0,
+                maximum_snapshot_age_seconds=300,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["reasonCode"],
+            "signal_price_drift_exceeded_before_publish",
+        )
+        self.assertEqual(
+            result["executionPricePreflight"]["priceDriftPoints"],
+            101.0,
+        )
+        self.assertFalse(
+            result["executionPricePreflight"]["automaticRetry"]
+        )
+        fake_gateway.queue_trade_intent.assert_not_called()
+        self.assertFalse(self.status_path().with_name("command.json").exists())
+
+    def test_same_bar_quote_churn_is_prechecked_but_command_stays_analysis_bound(self) -> None:
+        self.write_ea_status()
+        with self.selected_candidate(
+            bid=100.2,
+            ask=100.4,
+            snapshot_id="c" * 64,
+        ):
+            result = self.bridge.dispatch_ai_trade_council_trade_plan(
+                self.parent(),
+                self.consensus(),
+            )
+
+        self.assertEqual(result["status"], "queued")
+        command = self.command_payload()
+        self.assertEqual(command["snapshotId"], "a" * 64)
+        self.assertEqual(command["referencePrice"], 100.1)
+        preflight = result["executionPricePreflight"]
+        self.assertEqual(preflight["currentSnapshotId"], "c" * 64)
+        self.assertEqual(preflight["currentActionPrice"], 100.4)
+        self.assertEqual(preflight["priceDriftPoints"], 30.0)
+
+    def test_midpoint_rr_one_but_buy_executable_rr_below_one_is_blocked(self) -> None:
+        self.write_ea_status(minRewardRiskRatio=1.0)
+        consensus = self.consensus()
+        consensus["tradePlan"].update({
+            "stopLossPrice": 80.0,
+            "takeProfitPrice": 120.0,
+        })
+        with self.selected_candidate():
+            result = self.bridge.dispatch_ai_trade_council_trade_plan(
+                self.parent(),
+                consensus,
+            )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(
+            result["reasonCode"],
+            "execution_reward_risk_below_minimum_before_publish",
+        )
+        self.assertLess(
+            result["executionPricePreflight"]["executableRewardRiskRatio"],
+            1.0,
+        )
+        self.assertFalse(self.status_path().with_name("command.json").exists())
+
+    def test_stale_same_bar_quote_is_blocked_with_explicit_preflight_reason(self) -> None:
+        self.write_ea_status()
+        stale_time = (
+            datetime.now(timezone.utc) - timedelta(seconds=30)
+        ).isoformat()
+        with self.selected_candidate(
+            observed_at=stale_time,
+            age_seconds=30.0,
+        ):
+            result = self.bridge.dispatch_ai_trade_council_trade_plan(
+                self.parent(),
+                self.consensus(),
+            )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(
+            result["reasonCode"],
+            "execution_quote_stale_before_publish",
+        )
+        self.assertFalse(self.status_path().with_name("command.json").exists())
+
+    def test_quote_without_authoritative_point_is_blocked_before_gateway(self) -> None:
+        parent = self.parent()
+        intent = {
+            "channelId": self.candidate["candidateId"],
+            "streamKey": parent["analysisContext"]["closedBarIdentity"]["streamKey"],
+            "snapshotId": "a" * 64,
+            "snapshotObservedAt": int(time.time()),
+            "barTime": self.current_closed_bar_time,
+            "missionId": parent["id"],
+            "councilDecisionId": "council-test",
+            "ownerAgentId": "manager",
+            "action": "BUY",
+            "symbol": "XAUUSD",
+            "timeframe": "M5",
+            "referencePrice": 100.1,
+            "stopLoss": 95.0,
+            "takeProfit": 110.0,
+        }
+        fake_gateway = mock.Mock()
+        with self.selected_candidate(
+            bid=100.0,
+            ask=100.0,
+            spread_points=0.0,
+        ), mock.patch.object(
+            self.bridge,
+            "_mt4_trade_gateway_instance",
+            return_value=fake_gateway,
+        ):
+            result = self.bridge._mt4_trade_gateway_publish_for_selection(
+                intent,
+                expected_candidate_id=self.candidate["candidateId"],
+                expected_selection_revision=1,
+                expected_closed_bar_identity=parent["analysisContext"][
+                    "closedBarIdentity"
+                ],
+                analysis_context=parent["analysisContext"],
+                maximum_signal_drift_points=100,
+                minimum_reward_risk_ratio=1.0,
+                maximum_snapshot_age_seconds=300,
+            )
+
+        self.assertEqual(
+            result["reasonCode"],
+            "execution_quote_telemetry_unavailable",
+        )
+        self.assertEqual(
+            result["detailCode"],
+            "current_quote_point_unavailable",
+        )
+        fake_gateway.queue_trade_intent.assert_not_called()
+
+    def test_current_quote_point_must_match_immutable_analysis_point(self) -> None:
+        self.write_ea_status()
+        with self.selected_candidate(
+            bid=99.0,
+            ask=101.0,
+            spread_points=20.0,
+        ):
+            result = self.bridge.dispatch_ai_trade_council_trade_plan(
+                self.parent(),
+                self.consensus(),
+            )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(
+            result["reasonCode"],
+            "execution_quote_telemetry_unavailable",
+        )
+        self.assertEqual(
+            result["executionPricePreflight"]["detailCode"],
+            "current_quote_point_mismatch",
+        )
+        self.assertEqual(
+            result["executionPricePreflight"]["analysisDigits"],
+            2,
+        )
+        self.assertEqual(
+            result["executionPricePreflight"]["currentDigits"],
+            1,
+        )
+        self.assertFalse(self.status_path().with_name("command.json").exists())
+
+    def test_atomic_publish_requires_explicit_market_open_true(self) -> None:
+        self.write_ea_status()
+        cases = (
+            (False, True, "execution_quote_market_closed_before_publish", None),
+            (None, True, "execution_quote_telemetry_unavailable", "current_market_state_unavailable"),
+            (None, False, "execution_quote_telemetry_unavailable", "current_market_state_unavailable"),
+        )
+        for market_open, include_market_open, reason, detail in cases:
+            with self.subTest(
+                market_open=market_open,
+                include_market_open=include_market_open,
+            ), self.selected_candidate(
+                market_open=market_open,
+                include_market_open=include_market_open,
+            ):
+                result = self.bridge.dispatch_ai_trade_council_trade_plan(
+                    self.parent(),
+                    self.consensus(),
+                )
+
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["reasonCode"], reason)
+            self.assertEqual(
+                result["executionPricePreflight"].get("detailCode"),
+                detail,
+            )
+            self.assertFalse(
+                self.status_path().with_name("command.json").exists()
+            )
+
+    def test_analysis_artifact_and_context_observed_at_must_match(self) -> None:
+        self.write_ea_status()
+        parent = self.parent()
+        parent["analysisContext"]["snapshotObservedAt"] = (
+            datetime.now(timezone.utc) + timedelta(seconds=1)
+        ).isoformat()
+        with self.selected_candidate():
+            result = self.bridge.dispatch_ai_trade_council_trade_plan(
+                parent,
+                self.consensus(),
+            )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(
+            result["reasonCode"],
+            "analysis_quote_telemetry_unavailable",
+        )
+        self.assertEqual(
+            result["executionPricePreflight"]["detailCode"],
+            "analysis_snapshot_observed_at_mismatch",
+        )
+        self.assertFalse(self.status_path().with_name("command.json").exists())
+
+    def test_command_snapshot_epoch_must_bind_to_verified_artifact(self) -> None:
+        parent = self.parent()
+        intent = self.trade_intent(parent)
+        intent["snapshotObservedAt"] += 1
+        fake_gateway = mock.Mock()
+        with self.selected_candidate(), mock.patch.object(
+            self.bridge,
+            "_mt4_trade_gateway_instance",
+            return_value=fake_gateway,
+        ):
+            result = self.bridge._mt4_trade_gateway_publish_for_selection(
+                intent,
+                expected_candidate_id=self.candidate["candidateId"],
+                expected_selection_revision=1,
+                expected_closed_bar_identity=parent["analysisContext"][
+                    "closedBarIdentity"
+                ],
+                analysis_context=parent["analysisContext"],
+                maximum_signal_drift_points=100,
+                minimum_reward_risk_ratio=1.0,
+                maximum_snapshot_age_seconds=300,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["detailCode"],
+            "command_snapshot_not_bound_to_analysis_artifact",
+        )
+        fake_gateway.queue_trade_intent.assert_not_called()
+
+    def test_analysis_snapshot_age_exact_limit_passes_and_uses_artifact_epoch(self) -> None:
+        now_epoch = int(datetime.now(timezone.utc).timestamp())
+        observed_epoch = now_epoch - 300
+        observed_at = datetime.fromtimestamp(
+            observed_epoch,
+            tz=timezone.utc,
+        ).isoformat()
+        self.write_ea_status(maxSnapshotAgeSeconds=300)
+        with mock.patch.object(
+            self.bridge,
+            "_ai_trade_council_utc_epoch_now",
+            return_value=now_epoch,
+        ), self.selected_candidate():
+            result = self.bridge.dispatch_ai_trade_council_trade_plan(
+                self.parent(snapshot_observed_at=observed_at),
+                self.consensus(),
+            )
+
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(
+            self.command_payload()["snapshotObservedAt"],
+            observed_epoch,
+        )
+        self.assertEqual(
+            result["executionPricePreflight"]["analysisSnapshotAgeSeconds"],
+            300,
+        )
+
+    def test_analysis_snapshot_age_above_ea_limit_blocks_without_retry(self) -> None:
+        now_epoch = int(datetime.now(timezone.utc).timestamp())
+        observed_at = datetime.fromtimestamp(
+            now_epoch - 301,
+            tz=timezone.utc,
+        ).isoformat()
+        self.write_ea_status(maxSnapshotAgeSeconds=300)
+        with mock.patch.object(
+            self.bridge,
+            "_ai_trade_council_utc_epoch_now",
+            return_value=now_epoch,
+        ), self.selected_candidate():
+            result = self.bridge.dispatch_ai_trade_council_trade_plan(
+                self.parent(snapshot_observed_at=observed_at),
+                self.consensus(),
+            )
+
+        self.assertEqual(
+            result["reasonCode"],
+            "analysis_snapshot_stale_before_publish",
+        )
+        self.assertFalse(
+            result["executionPricePreflight"]["automaticRetry"]
+        )
+        self.assertFalse(self.status_path().with_name("command.json").exists())
+
+    def test_analysis_snapshot_age_uses_ea_limit_not_backend_default(self) -> None:
+        now_epoch = int(datetime.now(timezone.utc).timestamp())
+        observed_at = datetime.fromtimestamp(
+            now_epoch - 120,
+            tz=timezone.utc,
+        ).isoformat()
+        self.write_ea_status(maxSnapshotAgeSeconds=30)
+        with mock.patch.object(
+            self.bridge,
+            "_ai_trade_council_utc_epoch_now",
+            return_value=now_epoch,
+        ), self.selected_candidate():
+            result = self.bridge.dispatch_ai_trade_council_trade_plan(
+                self.parent(snapshot_observed_at=observed_at),
+                self.consensus(),
+            )
+
+        self.assertEqual(
+            result["reasonCode"],
+            "analysis_snapshot_stale_before_publish",
+        )
+        self.assertEqual(
+            result["executionPricePreflight"]["maximumSnapshotAgeSeconds"],
+            30,
+        )
+        self.assertFalse(self.status_path().with_name("command.json").exists())
+
+    def test_future_analysis_snapshot_blocks_before_gateway_queue(self) -> None:
+        now_epoch = int(datetime.now(timezone.utc).timestamp())
+        observed_at = datetime.fromtimestamp(
+            now_epoch + 1,
+            tz=timezone.utc,
+        ).isoformat()
+        self.write_ea_status(maxSnapshotAgeSeconds=300)
+        with mock.patch.object(
+            self.bridge,
+            "_ai_trade_council_utc_epoch_now",
+            return_value=now_epoch,
+        ), self.selected_candidate():
+            result = self.bridge.dispatch_ai_trade_council_trade_plan(
+                self.parent(snapshot_observed_at=observed_at),
+                self.consensus(),
+            )
+
+        self.assertEqual(
+            result["reasonCode"],
+            "analysis_snapshot_future_before_publish",
+        )
+        self.assertFalse(self.status_path().with_name("command.json").exists())
+
+    def test_nonpositive_snapshot_age_policy_blocks_without_publish(self) -> None:
+        parent = self.parent()
+        intent = self.trade_intent(parent)
+        fake_gateway = mock.Mock()
+        with self.selected_candidate(), mock.patch.object(
+            self.bridge,
+            "_mt4_trade_gateway_instance",
+            return_value=fake_gateway,
+        ):
+            result = self.bridge._mt4_trade_gateway_publish_for_selection(
+                intent,
+                expected_candidate_id=self.candidate["candidateId"],
+                expected_selection_revision=1,
+                expected_closed_bar_identity=parent["analysisContext"][
+                    "closedBarIdentity"
+                ],
+                analysis_context=parent["analysisContext"],
+                maximum_signal_drift_points=100,
+                minimum_reward_risk_ratio=1.0,
+                maximum_snapshot_age_seconds=0,
+            )
+
+        self.assertEqual(
+            result["detailCode"],
+            "maximum_snapshot_age_or_artifact_time_unavailable",
+        )
+        fake_gateway.queue_trade_intent.assert_not_called()
+
+    def test_selection_revision_race_blocks_before_gateway_queue(self) -> None:
+        parent = self.parent()
+        fake_gateway = mock.Mock()
+        intent = {
+            "channelId": self.candidate["candidateId"],
+            "streamKey": parent["analysisContext"]["closedBarIdentity"]["streamKey"],
+            "snapshotId": "a" * 64,
+            "snapshotObservedAt": int(time.time()),
+            "barTime": self.current_closed_bar_time,
+            "missionId": parent["id"],
+            "councilDecisionId": "council-test",
+            "ownerAgentId": "manager",
+            "action": "BUY",
+            "symbol": "XAUUSD",
+            "timeframe": "M5",
+            "referencePrice": 100.1,
+            "stopLoss": 95.0,
+            "takeProfit": 110.0,
+        }
+        with self.selected_candidate(), mock.patch.object(
+            self.bridge,
+            "_metatrader_selection_token",
+            return_value={
+                "candidateId": self.candidate["candidateId"],
+                "selectionRevision": 2,
+            },
+        ), mock.patch.object(
+            self.bridge,
+            "_mt4_trade_gateway_instance",
+            return_value=fake_gateway,
+        ):
+            result = self.bridge._mt4_trade_gateway_publish_for_selection(
+                intent,
+                expected_candidate_id=self.candidate["candidateId"],
+                expected_selection_revision=1,
+                expected_closed_bar_identity=parent["analysisContext"][
+                    "closedBarIdentity"
+                ],
+                analysis_context=parent["analysisContext"],
+                maximum_signal_drift_points=100,
+                minimum_reward_risk_ratio=1.0,
+                maximum_snapshot_age_seconds=300,
+            )
+
+        self.assertEqual(
+            result["reasonCode"],
+            "terminal_selection_changed_before_publish",
+        )
+        fake_gateway.queue_trade_intent.assert_not_called()
 
     def test_advanced_closed_bar_is_blocked_before_command_publish(self) -> None:
         self.write_ea_status()

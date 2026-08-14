@@ -47,6 +47,16 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
                 return candidate
         self.fail("Node.js runtime is required")
 
+    def run_node_json(self, script: str) -> dict[str, object]:
+        result = subprocess.run(
+            [self.node_binary(), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        return json.loads(result.stdout)
+
     def test_broker_bar_time_keeps_broker_wall_clock_across_local_timezones(self) -> None:
         broker_formatter = function_block(self.main, "function formatBrokerBarTime(value")
         broker_date_time = function_block(self.main, "function signalBrokerDateTime(value)")
@@ -111,6 +121,7 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         live = function_block(self.main, "function renderSignalLivePanel(report = {})")
         risk_list = function_block(self.main, "function renderSignalRiskList(")
         decision = function_block(self.main, "function renderSignalDecisionPanel(report = {})")
+        headline = function_block(self.main, "function signalTradeGatewayHeadlineLabel(")
 
         self.assertIn("&& (gatewayMode === \"shadow\" || gateway.executionGuardReady === true)", runtime)
         self.assertIn("gateway.executionGuardReady === true", runtime)
@@ -122,8 +133,9 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn("เชื่อม EA แล้ว • ยังไม่พร้อมส่ง Order", live)
         self.assertIn("signalExecutionGuardSummary(runtime)", live)
         self.assertIn("runtime.liveOrderExecutionAvailable && guardReady", risk_list)
-        self.assertIn("ยังไม่ส่ง Order •", decision)
-        self.assertIn("signalExecutionGuardReasonLabel(runtime.gatewayExecutionGuardReason)", decision)
+        self.assertIn("signalTradeGatewayHeadlineLabel(", decision)
+        self.assertIn("ยังไม่ส่ง Order •", headline)
+        self.assertIn("signalExecutionGuardReasonLabel(runtime.gatewayExecutionGuardReason)", headline)
 
     def test_shadow_and_closed_bar_rejections_are_not_presented_as_real_orders(self) -> None:
         reason = function_block(self.main, "function signalExecutionGuardReasonLabel(value)")
@@ -131,6 +143,7 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         risk_list = function_block(self.main, "function renderSignalRiskList(")
         live = function_block(self.main, "function renderSignalLivePanel(report = {})")
         decision = function_block(self.main, "function renderSignalDecisionPanel(report = {})")
+        headline = function_block(self.main, "function signalTradeGatewayHeadlineLabel(")
 
         self.assertIn("CLOSED_BAR_IDENTITY_MISMATCH", reason)
         self.assertIn("CLOSED_BAR_ADVANCED_DURING_ANALYSIS", reason)
@@ -138,10 +151,207 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn("SHADOW ใช้ตรวจสอบเท่านั้นและไม่ส่ง Order", summary)
         self.assertIn("SHADOW • ไม่ส่ง Order", risk_list)
         self.assertIn("SHADOW • ตรวจคำสั่งได้แต่ไม่ส่ง Order", live)
-        self.assertIn('runtime.gatewayMode === "shadow"', decision)
-        self.assertIn("SHADOW • ตรวจคำสั่งได้แต่ไม่ส่ง Order", decision)
-        self.assertIn('gatewayAckStatus === "REJECTED"', decision)
-        self.assertIn('gatewayRunReason === "audit_only_backlog_never_dispatches"', decision)
+        self.assertIn("signalTradeGatewayHeadlineLabel(", decision)
+        self.assertIn('runtime.gatewayMode === "shadow"', headline)
+        self.assertIn("SHADOW • ตรวจคำสั่งได้แต่ไม่ส่ง Order", headline)
+        self.assertIn('ackStatus === "REJECTED"', headline)
+        self.assertIn('reasonCode.toLowerCase() === "audit_only_backlog_never_dispatches"', headline)
+
+    def test_terminal_ack_overrides_stale_waiting_headline(self) -> None:
+        runtime = function_block(self.main, "function getSignalRuntimeTruth(report = {})")
+        prepublish = function_block(self.main, "function signalPrepublishExecutionBlockReason(value)")
+        operations = function_block(self.main, "function signalTradeOperationsModel(report = {}, runtime = {}, consensus = {})")
+        reason = function_block(self.main, "function signalExecutionGuardReasonLabel(value)")
+        number = function_block(self.main, "function signalOrderNumber(value, maximumFractionDigits = 5)")
+        pnl = function_block(self.main, "function signalOrderSignedPnl(value)")
+        headline = function_block(self.main, "function signalTradeGatewayHeadlineLabel(")
+        self.assertIn("[activeCommand, latestCommand, consensusCommand]", runtime)
+
+        script = "\n".join(
+            [
+                "function safeDashboardDisplayText(value, fallback = '') {",
+                "  if (value === null || value === undefined) return fallback;",
+                "  const text = String(value).trim();",
+                "  return text || fallback;",
+                "}",
+                "function signalExactClosedOrderOutcome() { return null; }",
+                prepublish,
+                reason,
+                number,
+                pnl,
+                operations,
+                headline,
+                "const currentRuntime = { gatewayCommandPublished: true, gatewayCommand: { commandId: 'cmd-rejected', status: 'ack_REJECTED' }, gatewayLastAck: { status: 'REJECTED', reasonCode: 'SIGNAL_PRICE_DRIFT_EXCEEDED' } };",
+                "const staleConsensus = { available: true, tradePlan: { available: true }, tradeGateway: { status: 'waiting_previous_ack', commandPublished: true } };",
+                "const model = signalTradeOperationsModel({}, currentRuntime, staleConsensus);",
+                "const label = signalTradeGatewayHeadlineLabel(currentRuntime, staleConsensus.tradeGateway, model, staleConsensus);",
+                "const unknown = signalTradeGatewayHeadlineLabel(",
+                "  { gatewayCommandPublished: true, gatewayLastAck: { status: 'EXECUTION_UNKNOWN', reasonCode: 'EXECUTION_UNKNOWN' } },",
+                "  { status: 'expired_waiting_ack', commandPublished: true },",
+                "  { commandPublished: true, ackStatus: 'EXECUTION_UNKNOWN', terminalReasonCode: 'EXECUTION_UNKNOWN', incident: true, prepublishBlocked: false, exactClosedOutcome: null },",
+                "  { tradePlan: { available: true } },",
+                ");",
+                "process.stdout.write(JSON.stringify({ label, model, unknown }));",
+            ]
+        )
+        result = self.run_node_json(script)
+        self.assertIn("EA ปฏิเสธคำสั่ง", result["label"])
+        self.assertIn("ไม่ได้เปิด Order", result["label"])
+        self.assertNotIn("รอ ACK", result["label"])
+        self.assertFalse(result["model"]["incident"])
+        self.assertEqual(result["model"]["ackState"], "complete")
+        self.assertIn("ต้องตรวจสถานะกับ EA ก่อนส่งซ้ำ", result["unknown"])
+        self.assertNotIn("รอ ACK", result["unknown"])
+
+    def test_prepublish_execution_blocks_never_wait_for_ack(self) -> None:
+        prepublish = function_block(self.main, "function signalPrepublishExecutionBlockReason(value)")
+        operations = function_block(self.main, "function signalTradeOperationsModel(report = {}, runtime = {}, consensus = {})")
+        reason = function_block(self.main, "function signalExecutionGuardReasonLabel(value)")
+        headline = function_block(self.main, "function signalTradeGatewayHeadlineLabel(")
+        script = "\n".join(
+            [
+                "function safeDashboardDisplayText(value, fallback = '') {",
+                "  if (value === null || value === undefined) return fallback;",
+                "  const text = String(value).trim();",
+                "  return text || fallback;",
+                "}",
+                "function signalExactClosedOrderOutcome() { return null; }",
+                prepublish,
+                reason,
+                operations,
+                headline,
+                "const codes = [",
+                "  'analysis_quote_telemetry_unavailable',",
+                "  'execution_quote_telemetry_unavailable',",
+                "  'execution_quote_stale_before_publish',",
+                "  'execution_quote_market_closed_before_publish',",
+                "  'signal_price_drift_exceeded_before_publish',",
+                "  'execution_protective_plan_invalid_before_publish',",
+                "  'execution_reward_risk_below_minimum_before_publish',",
+                "  'terminal_selection_changed_before_publish',",
+                "  'current_closed_bar_unavailable_before_publish',",
+                "  'closed_bar_advanced_during_analysis',",
+                "];",
+                "const results = codes.map((code) => {",
+                "  const runtime = { gatewayConnected: true, gatewayCommandPublished: false, gatewayMode: 'demo', gatewayExecutionGuardReady: true };",
+                "  const consensus = { available: true, tradePlan: { available: true }, tradeGateway: { status: 'blocked', commandPublished: false, reasonCode: code } };",
+                "  const model = signalTradeOperationsModel({}, runtime, consensus);",
+                "  return { code, model, label: signalTradeGatewayHeadlineLabel(runtime, consensus.tradeGateway, model, consensus) };",
+                "});",
+                "process.stdout.write(JSON.stringify({ results }));",
+            ]
+        )
+        result = self.run_node_json(script)
+        for item in result["results"]:
+            self.assertTrue(item["model"]["prepublishBlocked"])
+            self.assertEqual(item["model"]["commandState"], "blocked")
+            self.assertEqual(item["model"]["ackState"], "skipped")
+            self.assertIn("ไม่ต้องรอ ACK", item["model"]["rows"][1]["value"])
+            self.assertIn("ยังไม่ส่ง Order", item["label"])
+            self.assertNotIn("รอ ACK", item["label"])
+
+    def test_exact_closed_outcome_replaces_open_ack_only_with_matching_identity(self) -> None:
+        exact = function_block(self.main, "function signalExactClosedOrderOutcome(report = {}, command = null, ack = null)")
+        operations = function_block(self.main, "function signalTradeOperationsModel(report = {}, runtime = {}, consensus = {})")
+        reason = function_block(self.main, "function signalExecutionGuardReasonLabel(value)")
+        number = function_block(self.main, "function signalOrderNumber(value, maximumFractionDigits = 5)")
+        pnl = function_block(self.main, "function signalOrderSignedPnl(value)")
+        broker = function_block(self.main, "function signalBrokerDateTime(value)")
+        headline = function_block(self.main, "function signalTradeGatewayHeadlineLabel(")
+        script = "\n".join(
+            [
+                "function safeDashboardDisplayText(value, fallback = '') {",
+                "  if (value === null || value === undefined) return fallback;",
+                "  const text = String(value).trim();",
+                "  return text || fallback;",
+                "}",
+                "function signalCouncilModel(report = {}) { return report.aiTradeCouncil || {}; }",
+                "function signalHistoryBaseReadModel() { return {}; }",
+                reason,
+                number,
+                pnl,
+                broker,
+                exact,
+                operations,
+                headline,
+                "const item = { commandId: 'cmd-closed', ticket: 984795146, ackStatus: 'EXECUTED', outcomeIdentityVerified: true, executionState: 'CLOSED', verificationStatus: 'VERIFIED_CLOSED', closedPnl: -2.86, closedAtBroker: 1786701820 };",
+                "const report = { aiTradeCouncil: { tradeGateway: { status: 'queued', commandPublished: true, orderHistory: { schemaVersion: 'metafx-hq-mt4-order-history-v1', available: true, sourceScope: 'durable_selected_channel_executed_ack_plus_identity_exact_execution_unknown', items: [item] } } } };",
+                "const command = { commandId: 'cmd-closed', status: 'ack_EXECUTED' };",
+                "const ack = { status: 'EXECUTED', ticket: 984795146, reasonCode: 'ORDER_ACCEPTED', verificationStatus: 'VERIFIED_OPEN' };",
+                "const runtime = { gatewayCommand: command, gatewayLastAck: ack, gatewayCommandPublished: true };",
+                "const consensus = { available: true, tradePlan: { available: true }, tradeGateway: report.aiTradeCouncil.tradeGateway };",
+                "const model = signalTradeOperationsModel(report, runtime, consensus);",
+                "const label = signalTradeGatewayHeadlineLabel(runtime, consensus.tradeGateway, model, consensus);",
+                "const wrongTicket = signalExactClosedOrderOutcome(report, command, { ...ack, ticket: 1 });",
+                "const wrongCommand = signalExactClosedOrderOutcome(report, { ...command, commandId: 'cmd-other' }, ack);",
+                "const ambiguous = structuredClone(report);",
+                "ambiguous.aiTradeCouncil.tradeGateway.orderHistory.items.push({ ...item });",
+                "const duplicateIdentity = signalExactClosedOrderOutcome(ambiguous, command, ack);",
+                "process.stdout.write(JSON.stringify({ model, label, wrongTicket, wrongCommand, duplicateIdentity }));",
+            ]
+        )
+        result = self.run_node_json(script)
+        self.assertEqual(result["model"]["fillState"], "complete")
+        self.assertEqual(result["model"]["exactClosedOutcome"]["ticket"], 984795146)
+        self.assertEqual(result["model"]["exactClosedOutcome"]["closedPnl"], -2.86)
+        self.assertIn("Order ปิดแล้ว", result["label"])
+        self.assertIn("Ticket 984795146", result["label"])
+        self.assertIn("P/L -2.86", result["label"])
+        self.assertIsNone(result["wrongTicket"])
+        self.assertIsNone(result["wrongCommand"])
+        self.assertIsNone(result["duplicateIdentity"])
+
+    def test_analysis_history_preserves_terminal_reject_and_exact_order_linkage(self) -> None:
+        history_object = function_block(self.main, "function signalHistoryObject(value)")
+        history_decision = function_block(self.main, "function signalHistoryDecision(value)")
+        skip_reason = function_block(self.main, "function signalHistorySkipReasonLabel(value)")
+        metric = function_block(self.main, "function signalHistoryMetricObject(source = {})")
+        final = function_block(self.main, "function signalHistoryFinalDecision(source = {})")
+        prepublish = function_block(self.main, "function signalPrepublishExecutionBlockReason(value)")
+        guard_reason = function_block(self.main, "function signalExecutionGuardReasonLabel(value)")
+        number = function_block(self.main, "function signalOrderNumber(value, maximumFractionDigits = 5)")
+        pnl = function_block(self.main, "function signalOrderSignedPnl(value)")
+        broker = function_block(self.main, "function signalBrokerDateTime(value)")
+        order_state = function_block(self.main, "function signalHistoryOrderState(")
+        script = "\n".join(
+            [
+                "function safeDashboardDisplayText(value, fallback = '') {",
+                "  if (value === null || value === undefined) return fallback;",
+                "  const text = String(value).trim();",
+                "  return text || fallback;",
+                "}",
+                history_object,
+                history_decision,
+                skip_reason,
+                metric,
+                final,
+                prepublish,
+                guard_reason,
+                number,
+                pnl,
+                broker,
+                order_state,
+                "const rejected = signalHistoryOrderState({ coverageStatus: 'failed', status: 'failed', roundFailed: true, finalDecision: 'BUY', orderLinkage: { available: true, commandId: 'cmd-rejected', ticket: 99, status: 'open', verified: true }, tradeGateway: { status: 'queued', commandPublished: true, ackStatus: 'REJECTED', reasonCode: 'SIGNAL_PRICE_DRIFT_EXCEEDED' } }, { missionId: 'mission-rejected', snapshotId: 'snapshot-rejected' }, []);",
+                "const wrong = { missionId: 'mission-linked', commandId: 'cmd-wrong', ticket: 11, side: 'BUY', status: 'open', verified: true };",
+                "const exact = { missionId: 'mission-linked', commandId: 'cmd-exact', ticket: 22, side: 'SELL', status: 'closed', executionState: 'CLOSED', outcomeIdentityVerified: true, verificationStatus: 'VERIFIED_CLOSED', closedPnl: 4.25, closedAtBroker: 1786701820, verified: true };",
+                "const linked = signalHistoryOrderState({ finalDecision: 'SELL', orderLinkage: { available: true, commandId: 'cmd-exact', ticket: 22, status: 'closed', verified: true } }, { missionId: 'mission-linked', snapshotId: 'snapshot-linked' }, [wrong, exact]);",
+                "const unknownOrder = { missionId: 'mission-unknown', commandId: 'cmd-unknown', ticket: 33, side: 'BUY', status: 'execution_unknown_unverified', unverified: true, executionEvidenceStatus: 'execution_unknown_unverified', ackReasonCode: 'EXECUTION_UNKNOWN' };",
+                "const unknown = signalHistoryOrderState({ finalDecision: 'BUY', orderLinkage: { available: true, commandId: 'cmd-unknown', ticket: 33, status: 'execution_unknown_unverified', unverified: true } }, { missionId: 'mission-unknown', snapshotId: 'snapshot-unknown' }, [unknownOrder]);",
+                "process.stdout.write(JSON.stringify({ rejected, linked, unknown }));",
+            ]
+        )
+        result = self.run_node_json(script)
+        self.assertEqual(result["rejected"]["label"], "EA ปฏิเสธ • ไม่ได้เปิด Order")
+        self.assertIn("ราคาขยับ", result["rejected"]["detail"])
+        self.assertNotIn("รอ ACK", result["rejected"]["detail"])
+        self.assertEqual(result["linked"]["label"], "ปิด SELL")
+        self.assertIn("Ticket 22", result["linked"]["detail"])
+        self.assertIn("P/L +4.25", result["linked"]["detail"])
+        self.assertIn("ปิดเวลา MT4", result["linked"]["detail"])
+        self.assertNotIn("Ticket 11", result["linked"]["detail"])
+        self.assertIn("ผลคำสั่งยังไม่ชัดเจน", result["unknown"]["label"])
+        self.assertIn("Ticket ที่ต้องตรวจ 33", result["unknown"]["detail"])
+        self.assertNotIn("เปิด BUY", result["unknown"]["label"])
 
     def test_terminal_selection_uses_connected_gateway_as_authoritative_truth(self) -> None:
         render = function_block(self.main, "function renderMetatraderSelection(")
@@ -452,6 +662,12 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn("order.voteSummaryTh", row)
         self.assertIn("order.ticket", row)
         self.assertIn("order.verified === true", row)
+        self.assertIn("order.outcomeIdentityVerified === true", row)
+        self.assertIn('String(order.executionState || "").toUpperCase() === "CLOSED"', row)
+        self.assertIn('String(order.verificationStatus || "").toUpperCase() === "VERIFIED_CLOSED"', row)
+        self.assertIn("order.closedPnl", row)
+        self.assertIn("order.closedAtBroker", row)
+        self.assertIn("ปิดเวลา MT4", row)
         self.assertIn("order.mode", row)
         self.assertIn("String(order.mode).toUpperCase()", row)
         self.assertIn("signalOrderOpenedTime(right) - signalOrderOpenedTime(left)", panel)
