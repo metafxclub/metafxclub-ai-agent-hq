@@ -6790,6 +6790,38 @@ button:disabled {
   font-weight: 900;
 }
 
+.workflow-pair-assessment-badge {
+  display: inline-flex;
+  min-width: 68px;
+  justify-content: center;
+  padding: 4px 6px;
+  border: 1px solid rgba(84, 119, 142, 0.5);
+  color: #8095a1;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.workflow-pair-assessment-badge[data-assessment="upcoming_event"],
+.workflow-pair-assessment-badge[data-assessment="awaiting_actual"] {
+  border-color: rgba(255, 178, 63, 0.68);
+  color: var(--amber);
+}
+
+.workflow-pair-assessment-badge[data-assessment="released_no_direction"] {
+  border-color: rgba(120, 178, 255, 0.64);
+  color: #86c7ff;
+}
+
+.workflow-pair-assessment-badge[data-assessment="no_direct_event"] {
+  border-color: rgba(37, 215, 122, 0.5);
+  color: #72dca5;
+}
+
+.workflow-pair-assessment-badge[data-assessment="directional_ready"] {
+  border-color: rgba(37, 215, 122, 0.58);
+  color: var(--green);
+}
+
 .workflow-bias-badge[data-bias="bullish"] {
   border-color: rgba(37, 215, 122, 0.58);
   color: var(--green);
@@ -7271,6 +7303,19 @@ button:disabled {
   border-top-color: var(--amber);
 }
 
+.workflow-fx-bias-card[data-assessment="upcoming_event"],
+.workflow-fx-bias-card[data-assessment="awaiting_actual"] {
+  border-top-color: rgba(255, 178, 63, 0.82);
+}
+
+.workflow-fx-bias-card[data-assessment="released_no_direction"] {
+  border-top-color: rgba(120, 178, 255, 0.82);
+}
+
+.workflow-fx-bias-card[data-assessment="no_direct_event"] {
+  border-top-color: rgba(37, 215, 122, 0.62);
+}
+
 .workflow-fx-bias-card > header,
 .workflow-connection-hub-card > header,
 .workflow-connection-hub-card > footer {
@@ -7287,7 +7332,8 @@ button:disabled {
   letter-spacing: 0.04em;
 }
 
-.workflow-fx-bias-card .workflow-bias-badge {
+.workflow-fx-bias-card .workflow-bias-badge,
+.workflow-fx-bias-card .workflow-pair-assessment-badge {
   min-width: 58px;
   padding: 3px 5px;
 }

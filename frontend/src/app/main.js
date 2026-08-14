@@ -14973,9 +14973,9 @@ function normalizeFxNewsEvent(item = {}, index = 0, sharedLinks = []) {
     "",
   );
   const explicitAnalysis = String(item?.analysisStatus || item?.analysisState || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
-  const analysisStatusAliases = { prepared: "pending_release", awaiting_actual: "pending_analysis" };
+  const analysisStatusAliases = { prepared: "pending_release" };
   const canonicalAnalysis = analysisStatusAliases[explicitAnalysis] || explicitAnalysis;
-  const analysisStatus = ["pending_release", "pending_analysis", "analyzed", "insufficient_data", "error"].includes(canonicalAnalysis)
+  const analysisStatus = ["pending_release", "awaiting_actual", "pending_analysis", "analyzed", "insufficient_data", "error"].includes(canonicalAnalysis)
     ? canonicalAnalysis
     : "insufficient_data";
   const currencies = workflowDomainArray(item?.currencies, item?.currencyCodes, item?.affectedCurrencies)
@@ -15031,6 +15031,79 @@ function deriveFxOverallBias(explicitValue, horizonValues = []) {
   return ranked[0][0];
 }
 
+function normalizeFxPairAssessmentEvent(item = {}, index = 0) {
+  const rawEventAt = item?.scheduledAtUtc || item?.scheduledAt || item?.eventAtUtc || item?.eventAt || null;
+  const eventAt = typeof rawEventAt === "string" && /(?:Z|[+-]\d{2}:\d{2})$/i.test(rawEventAt.trim())
+    ? rawEventAt.trim()
+    : null;
+  const normalizeEnum = (value, allowed, fallback) => {
+    const normalized = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+    return allowed.includes(normalized) ? normalized : fallback;
+  };
+  return {
+    id: safeDashboardDisplayText(item?.eventId || item?.id, `pair-news-${index + 1}`),
+    title: safeDashboardDisplayText(item?.titleTh || item?.title || item?.event, `ข่าวรายการที่ ${index + 1}`),
+    currencies: workflowDomainArray(item?.currencies, item?.currencyCodes, item?.affectedCurrencies)
+      .map((value) => String(value || "").trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, 12),
+    impact: normalizeFxNewsImpact(item?.impact || item?.importance),
+    timeKind: normalizeEnum(item?.timeKind || item?.scheduleKind, ["timed", "tentative", "all_day", "holiday"], "unknown"),
+    eventAt,
+    scheduledAtBangkok: safeDashboardDisplayText(item?.scheduledAtBangkok, ""),
+    marketDate: safeDashboardDisplayText(item?.marketDate, ""),
+    timingState: normalizeEnum(item?.timingState, ["past", "current", "future", "unknown"], "unknown"),
+    actualStatus: normalizeEnum(item?.actualStatus || item?.resultStatus, ["pending", "released", "revised", "unavailable", "not_applicable"], "unavailable"),
+    releaseState: normalizeEnum(item?.releaseState || item?.releaseStatus, ["scheduled", "released", "unconfirmed", "not_applicable"], "unconfirmed"),
+    analysisStatus: normalizeEnum(item?.analysisStatus || item?.analysisState, ["pending_release", "awaiting_actual", "pending_analysis", "analyzed", "insufficient_data", "error"], "insufficient_data"),
+    actual: normalizeFxNewsMetric(item?.actual ?? item?.actualValue),
+    forecast: normalizeFxNewsMetric(item?.forecast ?? item?.forecastValue),
+    previous: normalizeFxNewsMetric(item?.previous ?? item?.previousValue),
+  };
+}
+
+function normalizeFxPairAssessmentStatus(value, relevantEvents = [], directionalReady = false) {
+  const normalized = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const released = relevantEvents.some((event) => (
+    ["released", "revised"].includes(event.actualStatus) || event.releaseState === "released"
+  ));
+  const upcoming = relevantEvents.some((event) => event.timingState === "future");
+  if (normalized === "directional_ready") {
+    if (directionalReady) return "directional_ready";
+    if (released) return "released_no_direction";
+    if (relevantEvents.length) return upcoming ? "upcoming_event" : "awaiting_actual";
+    return "unavailable";
+  }
+  if (["upcoming_event", "awaiting_actual", "released_no_direction"].includes(normalized)) {
+    return relevantEvents.length ? normalized : "unavailable";
+  }
+  if (normalized === "no_direct_event") return relevantEvents.length ? "unavailable" : "no_direct_event";
+  if (directionalReady) return "directional_ready";
+  if (relevantEvents.length) return released ? "released_no_direction" : (upcoming ? "upcoming_event" : "awaiting_actual");
+  return normalized === "unavailable" ? "unavailable" : "no_direct_event";
+}
+
+function deriveFxPairAssessmentSummary(rows = []) {
+  const assessedRows = rows.filter((row) => row.assessmentComplete === true && row.assessmentStatus !== "unavailable");
+  const countStatus = (status) => rows.filter((row) => row.assessmentStatus === status).length;
+  const upcomingEventPairCount = countStatus("upcoming_event");
+  const awaitingActualPairCount = countStatus("awaiting_actual");
+  return {
+    assessedPairCount: assessedRows.length,
+    directionalPairCount: rows.filter((row) => (
+      row.assessmentStatus === "directional_ready"
+      && [row.short, row.medium, row.long].some((bias) => bias !== "unavailable")
+    )).length,
+    awaitingEventPairCount: upcomingEventPairCount + awaitingActualPairCount,
+    upcomingEventPairCount,
+    awaitingActualPairCount,
+    releasedNoDirectionPairCount: countStatus("released_no_direction"),
+    noDirectEventPairCount: countStatus("no_direct_event"),
+    unavailablePairCount: rows.length - assessedRows.length,
+    assessmentComplete: rows.length === FX_BIAS_PAIR_UNIVERSE.length && assessedRows.length === FX_BIAS_PAIR_UNIVERSE.length,
+  };
+}
+
 function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
   const reports = workflowReportRows(report, "fx_news_bias_report");
   const latestMetrics = workflowDomainObject(reports[0]?.metrics);
@@ -15079,6 +15152,20 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
     && fxBiasFreshness.currentDataAvailable === true
     && ["verified", "current", "source_backed"].includes(fxBiasFreshness.dataStatus)
     && biasSourceLinks.length > 0;
+  const pairAssessmentRoot = workflowDomainObject(
+    fxBiasRoot.pairAssessmentSummary,
+    fxBiasRoot.assessmentSummary,
+    fxBiasRoot.newsAssessmentSummary,
+    fxBiasRoot,
+  );
+  const fxAssessmentIsCurrent = pairAssessmentRoot.assessmentComplete === true
+    && fxBiasFreshness.stale !== true
+    && fxBiasFreshness.currentDataAvailable === true
+    && ["verified", "current", "source_backed", "verified_empty"].includes(fxBiasFreshness.dataStatus)
+    && marketNewsFreshness.stale !== true
+    && marketNewsFreshness.currentDataAvailable === true
+    && ["verified", "current", "verified_empty", "holiday", "weekend"].includes(marketNewsFreshness.dataStatus)
+    && newsSourceLinks.length > 0;
   const rawNews = marketNewsIsCurrent
     ? (() => {
         const candidates = [marketNewsRoot, legacyRoot, latestMetrics];
@@ -15135,7 +15222,7 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
       sources,
     };
   }).filter(Boolean);
-  const rawPairs = fxBiasIsCurrent
+  const rawPairs = (fxBiasIsCurrent || fxAssessmentIsCurrent)
     ? (fxBiasRoot.pairBias
       || fxBiasRoot.pairs
       || legacyRoot.pairBias
@@ -15160,7 +15247,7 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
     const sourceBacked = Boolean(verifiedSourceUrl)
       && !isFxNewsReferenceOnlyUrl(verifiedSourceUrl)
       && sharedSourceLinks.some((source) => source.url === verifiedSourceUrl);
-    const insufficientData = !sourceBacked
+    const insufficientData = !fxBiasIsCurrent || !sourceBacked
       || ["insufficient_data", "unknown", "unavailable", "not_checked"].includes(rowStatus);
     const short = insufficientData
       ? "unavailable"
@@ -15176,9 +15263,58 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
       item?.horizons?.medium?.reasonTh,
       item?.horizons?.long?.reasonTh,
     ].map((value) => String(value || "").trim()).filter(Boolean);
+    const bias = insufficientData
+      ? "unavailable"
+      : deriveFxOverallBias(item?.bias || item?.overallBias || item?.overall, [short, medium, long]);
+    const hasDirectionalHorizon = [short, medium, long].some((value) => value !== "unavailable");
+    const assessmentRoot = workflowDomainObject(item?.newsAssessment, item?.assessment, item);
+    const pairCurrencies = [pair.slice(0, 3), pair.slice(3, 6)];
+    const rawRelevantEvents = workflowDomainArray(assessmentRoot.relevantEvents);
+    const verifiedPairEvents = news.filter((event) => (
+      event.currencies.some((currency) => pairCurrencies.includes(currency))
+    ));
+    const verifiedPairEventsById = new Map(verifiedPairEvents.map((event) => [event.id, event]));
+    const orderedVerifiedEvents = [];
+    rawRelevantEvents.forEach((event) => {
+      const eventId = safeDashboardDisplayText(event?.eventId || event?.id, "");
+      const verifiedEvent = verifiedPairEventsById.get(eventId);
+      if (verifiedEvent && !orderedVerifiedEvents.includes(verifiedEvent)) orderedVerifiedEvents.push(verifiedEvent);
+    });
+    verifiedPairEvents.forEach((event) => {
+      if (!orderedVerifiedEvents.includes(event)) orderedVerifiedEvents.push(event);
+    });
+    const relevantEvents = fxAssessmentIsCurrent
+      ? orderedVerifiedEvents.slice(0, 4).map((event, index) => normalizeFxPairAssessmentEvent(event, index))
+      : [];
+    const rawNextEvent = workflowDomainObject(assessmentRoot.nextEvent);
+    const rawNextEventId = safeDashboardDisplayText(rawNextEvent?.eventId || rawNextEvent?.id, "");
+    const verifiedNextEvent = verifiedPairEventsById.get(rawNextEventId) || null;
+    const nextEvent = fxAssessmentIsCurrent
+      ? (verifiedNextEvent
+        ? normalizeFxPairAssessmentEvent(verifiedNextEvent)
+        : (relevantEvents.find((event) => !["released", "revised"].includes(event.actualStatus) && event.releaseState !== "released")
+          || relevantEvents[0]
+          || null))
+      : null;
+    const requestedAssessmentStatus = normalizeFxPairAssessmentStatus(
+      assessmentRoot.assessmentStatus || assessmentRoot.status,
+      relevantEvents,
+      hasDirectionalHorizon,
+    );
+    const explicitlyAssessed = assessmentRoot.assessmentComplete === true || assessmentRoot.assessed === true;
+    const assessmentStatus = hasDirectionalHorizon
+      ? "directional_ready"
+      : (fxAssessmentIsCurrent && explicitlyAssessed ? requestedAssessmentStatus : "unavailable");
+    const assessmentComplete = explicitlyAssessed && assessmentStatus !== "unavailable";
+    const backendRelevantEventCount = Number(assessmentRoot.relevantEventCount);
+    const relevantEventCount = assessmentStatus === "no_direct_event"
+      ? 0
+      : (Number.isFinite(backendRelevantEventCount)
+        ? Math.max(relevantEvents.length, Math.min(160, Math.max(0, Math.trunc(backendRelevantEventCount))))
+        : relevantEvents.length);
     pairMap.set(pair, {
       pair,
-      bias: insufficientData ? "unavailable" : deriveFxOverallBias(item?.bias || item?.overallBias || item?.overall, [short, medium, long]),
+      bias,
       short,
       medium,
       long,
@@ -15193,8 +15329,29 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
       ),
       updatedAt: item?.updatedAt || item?.observedAt || null,
       sourceUrl: sourceBacked ? verifiedSourceUrl : "",
+      assessmentStatus,
+      assessmentComplete,
+      relevantEventCount,
+      relevantEvents,
+      nextEvent,
     });
   });
+  const pairBias = FX_BIAS_PAIR_UNIVERSE.map((pair) => pairMap.get(pair) || {
+    pair,
+    bias: "unavailable",
+    short: "unavailable",
+    medium: "unavailable",
+    long: "unavailable",
+    summary: "รอข้อมูลจริงจาก Backend",
+    updatedAt: null,
+    sourceUrl: "",
+    assessmentStatus: "unavailable",
+    assessmentComplete: false,
+    relevantEventCount: 0,
+    relevantEvents: [],
+    nextEvent: null,
+  });
+  const pairAssessmentSummary = deriveFxPairAssessmentSummary(pairBias);
   return {
     news,
     releasedNews,
@@ -15202,16 +15359,8 @@ function normalizeFxNewsBiasDomain(backend = {}, report = {}) {
     upcomingNews,
     unconfirmedNews,
     dangerWindows,
-    pairBias: FX_BIAS_PAIR_UNIVERSE.map((pair) => pairMap.get(pair) || {
-      pair,
-      bias: "unavailable",
-      short: "unavailable",
-      medium: "unavailable",
-      long: "unavailable",
-      summary: "รอข้อมูลจริงจาก Backend",
-      updatedAt: null,
-      sourceUrl: "",
-    }),
+    pairBias,
+    pairAssessmentSummary,
     freshness: {
       marketNews: marketNewsFreshness,
       fxBias: fxBiasFreshness,
@@ -15611,18 +15760,85 @@ function renderFxBiasTable(container, rows, { horizons = false } = {}) {
   container.appendChild(scroll);
 }
 
-function renderFxBiasGrid(container, rows = []) {
+function fxPairAssessmentLabel(item = {}) {
+  if (item.assessmentStatus === "directional_ready") {
+    return item.bias !== "unavailable" ? workflowBiasLabel(item.bias) : "มี Bias ยืนยัน";
+  }
+  if (item.assessmentStatus === "upcoming_event" && item.nextEvent?.timeKind === "holiday") return "วันหยุดวันนี้";
+  if (item.assessmentStatus === "upcoming_event" && item.nextEvent?.timeKind === "all_day") return "เหตุการณ์วันนี้";
+  return {
+    upcoming_event: "ข่าวยังไม่ถึง",
+    awaiting_actual: "รอ Actual",
+    released_no_direction: "ยังไม่ยืนยัน Bias",
+    no_direct_event: "ประเมินแล้ว",
+    unavailable: "รอ Backend",
+  }[item.assessmentStatus] || "รอ Backend";
+}
+
+function fxPairHorizonLabel(item = {}, bias = "unavailable") {
+  if (bias !== "unavailable") return workflowBiasLabel(bias);
+  if (item.assessmentStatus === "no_direct_event") return "ไม่พบข่าวตรง";
+  if (item.assessmentComplete === true) return "ยังไม่ยืนยัน";
+  return "รอ Backend";
+}
+
+function fxPairAssessmentSummaryText(item = {}) {
+  if (item.assessmentStatus === "directional_ready") {
+    const directionalSummary = item.summary || (item.bias !== "unavailable"
+      ? "มีหลักฐานยืนยันทิศทางจาก Backend แล้ว"
+      : "มี Bias ที่ยืนยันแล้วบางระยะ แต่หลักฐานยังไม่พอสำหรับสรุปแนวโน้มรวม");
+    if (!item.nextEvent) return directionalSummary;
+    const nextCurrency = item.nextEvent.currencies?.join("/") || "สกุลเงินที่เกี่ยวข้อง";
+    const nextTitle = item.nextEvent.title || "ข่าวที่เกี่ยวข้อง";
+    const nextTime = fxNewsEventTimeLabel(item.nextEvent);
+    return `${directionalSummary} • ข่าวถัดไป ${nextCurrency}: ${nextTitle} • ${nextTime} • โปรดระวังความผันผวน`;
+  }
+  if (item.assessmentStatus === "no_direct_event") {
+    return "ไม่พบข่าวตรงของคู่เงินนี้ในปฏิทินรอบปัจจุบัน จึงยังไม่สร้าง Bias ทิศทาง";
+  }
+  if (item.assessmentStatus === "unavailable") {
+    return item.summary || "รอ Backend ประเมินข่าวของคู่เงินนี้";
+  }
+  const event = item.nextEvent || item.relevantEvents?.[0] || null;
+  const currency = event?.currencies?.join("/") || "สกุลเงินที่เกี่ยวข้อง";
+  const eventName = event?.title || "ข่าวที่เกี่ยวข้อง";
+  const eventTime = event ? fxNewsEventTimeLabel(event) : "ยังไม่ยืนยันเวลา";
+  if (item.assessmentStatus === "upcoming_event") {
+    if (event?.timeKind === "holiday") {
+      return `วันหยุด ${currency} วันนี้ • ${eventName} • ยังไม่สร้าง Bias ทิศทาง`;
+    }
+    if (event?.timeKind === "all_day") {
+      return `เหตุการณ์ตลอดวัน ${currency} • ${eventName} • ยังไม่สร้าง Bias ทิศทาง`;
+    }
+    return `ข่าว ${currency} ยังไม่ถึง • ${eventName} • ${eventTime} • ${fxNewsImpactLabel(event?.impact)}`;
+  }
+  if (item.assessmentStatus === "awaiting_actual") {
+    return `รอ Actual ข่าว ${currency} • ${eventName} • ${eventTime} จึงยังไม่ยืนยันทิศทาง`;
+  }
+  if (item.assessmentStatus === "released_no_direction") {
+    return `ข่าวออกแล้วแต่ยังไม่มี Bias ยืนยัน • ${currency} • ${eventName}`;
+  }
+  return item.summary || "ประเมินข่าวแล้ว แต่ยังไม่ยืนยันทิศทาง";
+}
+
+function renderFxBiasGrid(container, rows = [], assessmentSummary = {}) {
   const summary = document.createElement("header");
   const copy = document.createElement("div");
   const title = document.createElement("h5");
   const detail = document.createElement("p");
   const count = document.createElement("strong");
   const grid = document.createElement("div");
-  const availableCount = rows.filter((item) => item.bias !== "unavailable").length;
+  const derivedAssessment = deriveFxPairAssessmentSummary(rows);
+  const assessedCount = Number.isFinite(Number(assessmentSummary.assessedPairCount))
+    ? Number(assessmentSummary.assessedPairCount)
+    : derivedAssessment.assessedPairCount;
+  const directionalCount = Number.isFinite(Number(assessmentSummary.directionalPairCount))
+    ? Number(assessmentSummary.directionalPairCount)
+    : derivedAssessment.directionalPairCount;
   summary.className = "workflow-fx-bias-summary";
-  title.textContent = "ภาพรวมแนวโน้ม 28 คู่เงิน";
-  detail.textContent = "แต่ละการ์ดแสดงแนวโน้มรวมและมุมมองระยะสั้น กลาง ยาว ข้อมูลที่ Backend ยังไม่ส่งจะแสดงเป็น ‘รอข้อมูล’";
-  count.textContent = `${availableCount}/${rows.length || FX_BIAS_PAIR_UNIVERSE.length} คู่มีข้อมูล`;
+  title.textContent = "ผลประเมินข่าวของ 28 คู่เงิน";
+  detail.textContent = "ระบบประเมินข่าวให้ครบทุกคู่ โดยแยกสถานะข่าวออกจาก Bias ทิศทาง และจะแสดง Bullish, Bearish หรือ Sideway เมื่อมี Actual พร้อมหลักฐานยืนยันเท่านั้น";
+  count.textContent = `${assessedCount}/${rows.length || FX_BIAS_PAIR_UNIVERSE.length} คู่ประเมินข่าวแล้ว • ${directionalCount} คู่มี Bias ยืนยัน`;
   copy.append(title, detail);
   summary.append(copy, count);
   grid.className = "workflow-fx-bias-grid";
@@ -15637,10 +15853,14 @@ function renderFxBiasGrid(container, rows = []) {
     const footer = document.createElement("footer");
     card.className = "workflow-fx-bias-card";
     card.dataset.bias = item.bias;
+    card.dataset.assessment = item.assessmentStatus || "unavailable";
     pair.textContent = item.pair;
-    overall.className = "workflow-bias-badge";
+    overall.className = item.assessmentStatus === "directional_ready" && item.bias !== "unavailable"
+      ? "workflow-bias-badge"
+      : "workflow-pair-assessment-badge";
     overall.dataset.bias = item.bias;
-    overall.textContent = workflowBiasLabel(item.bias);
+    overall.dataset.assessment = item.assessmentStatus || "unavailable";
+    overall.textContent = fxPairAssessmentLabel(item);
     heading.append(pair, overall);
     horizons.className = "workflow-fx-horizons";
     [
@@ -15653,13 +15873,15 @@ function renderFxBiasGrid(container, rows = []) {
       const horizonValue = document.createElement("strong");
       horizonLabel.textContent = label;
       horizonValue.dataset.bias = bias;
-      horizonValue.textContent = workflowBiasLabel(bias);
+      horizonValue.textContent = fxPairHorizonLabel(item, bias);
       horizon.append(horizonLabel, horizonValue);
       horizons.appendChild(horizon);
     });
-    cardSummary.textContent = item.summary || "รอข้อมูลจริงจาก Backend";
+    cardSummary.textContent = fxPairAssessmentSummaryText(item);
     const updated = document.createElement("small");
-    updated.textContent = item.updatedAt ? `อัปเดต ${formatThaiDateTime(item.updatedAt)}` : "ยังไม่มีเวลาอัปเดต";
+    updated.textContent = item.updatedAt
+      ? `อัปเดต ${formatThaiDateTime(item.updatedAt)}`
+      : (item.assessmentComplete === true ? "ประเมินข่าวรอบปัจจุบันแล้ว" : "ยังไม่มีเวลาอัปเดต");
     footer.appendChild(updated);
     const source = createWorkflowExternalSource(item.sourceUrl, "หลักฐาน");
     if (source) footer.appendChild(source);
@@ -15701,12 +15923,17 @@ function fxNewsAnalysisLabel(item = {}) {
   if (item.analysisStatus === "analyzed") return "วิเคราะห์แล้ว";
   if (item.analysisStatus === "insufficient_data") return "ข้อมูลไม่พอวิเคราะห์";
   if (item.analysisStatus === "error") return "วิเคราะห์ไม่สำเร็จ";
+  if (item.analysisStatus === "awaiting_actual") return "ผ่านเวลาแล้ว • รอ Actual";
   if (item.analysisStatus === "pending_analysis") return "ประกาศแล้ว • รอวิเคราะห์";
   if (item.releaseState === "unconfirmed") return "ผ่านเวลาแล้ว • รอยืนยันผล";
   return "รอประกาศ";
 }
 
 function fxNewsActualDisplay(item = {}) {
+  if (item.releaseState === "unconfirmed") {
+    if (item.analysisStatus === "awaiting_actual" || item.actualStatus === "pending") return "รอ Actual";
+    return item.actual || "ยังไม่ยืนยัน";
+  }
   if (item.actualStatus === "pending" || item.releaseState === "scheduled") return "รอประกาศ";
   if (item.actualStatus === "not_applicable") return "ไม่เกี่ยวข้อง";
   if (item.actualStatus === "unavailable" && !item.actual) return "ยังไม่ยืนยัน";
@@ -15953,9 +16180,11 @@ function openFxNewsEventDetail(item, trigger = null) {
   outcome.textContent = item.outcome || (
     item.analysisStatus === "pending_release"
       ? "ข่าวยังไม่ประกาศ ระบบจะวิเคราะห์เมื่อมีข้อมูลผลจริงที่ตรวจสอบได้"
-      : item.analysisStatus === "pending_analysis"
-        ? "ข่าวประกาศแล้วและกำลังรอ Backend วิเคราะห์ผลกระทบ"
-        : "Backend ยังไม่มีผลวิเคราะห์ที่ยืนยันได้"
+      : item.analysisStatus === "awaiting_actual"
+        ? "เวลาประกาศผ่านแล้ว แต่ยังไม่มีค่า Actual ที่ยืนยันจากแหล่งข้อมูล ระบบจึงยังไม่วิเคราะห์ผลกระทบหรือสร้าง Bias"
+        : item.analysisStatus === "pending_analysis"
+          ? "ข่าวประกาศแล้วและกำลังรอ Backend วิเคราะห์ผลกระทบ"
+          : "Backend ยังไม่มีผลวิเคราะห์ที่ยืนยันได้"
   );
   analysis.append(analysisTitle, detail, outcome);
 
@@ -16123,7 +16352,7 @@ function renderFxNewsBiasPanel(container, tabId, domain) {
       if (unconfirmedNews.length) renderFxNewsGroup(section, "รอ Backend ยืนยันสถานะ", unconfirmedNews, "ไม่มีรายการที่รอยืนยัน");
     }
   } else if (tabId === "pair_bias") {
-    renderFxBiasGrid(section, domain.pairBias);
+    renderFxBiasGrid(section, domain.pairBias, domain.pairAssessmentSummary);
   } else if (tabId === "horizons") {
     renderFxBiasTable(section, domain.pairBias, { horizons: true });
   } else section.appendChild(createWorkflowTruthEmpty("ส่วนนี้ไม่มีข้อมูลสำหรับแสดง"));

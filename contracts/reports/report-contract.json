@@ -503,7 +503,7 @@
           "scheduledAt": "ISO-8601 or null",
           "scheduledAtUtc": "ISO-8601 with explicit offset or null",
           "timeKind": "timed",
-          "releaseState": "scheduled|released|not_applicable",
+          "releaseState": "scheduled|released|unconfirmed|not_applicable",
           "actualStatus": "pending",
           "analysisStatus": "prepared|awaiting_actual|analyzed|insufficient_data",
           "impact": "low|medium|high|unknown",
@@ -543,6 +543,16 @@
       "schedulePreference": {"defaultEnabled": false, "defaultTimes": ["07:00", "20:00"], "times": ["07:00", "20:00"], "timezone": "Asia/Bangkok", "minimumImpact": "low", "maximumTimes": 2, "maximumRunsPerDay": 2, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "configurationSaved": false, "recurringSchedulerAvailable": true},
       "presentation": {"primaryViews": ["pair_bias", "today"], "defaultView": "pair_bias", "historyTab": false, "scheduleAndMethodLocation": "left_rail"},
       "freshnessReadModel": {"asOf": "ISO-8601 or null", "currentBangkokDate": "YYYY-MM-DD", "reportBangkokDate": "YYYY-MM-DD or null", "stale": false, "currentDataAvailable": false, "staleDataPolicy": "empty_today_events_danger_windows_and_directional_bias"},
+      "pairAssessmentReadModel": {
+        "schemaVersion": "fx-pair-bias-read-model-v3",
+        "coverageFields": ["assessedPairCount", "directionalPairCount", "awaitingEventPairCount", "upcomingEventPairCount", "awaitingActualPairCount", "releasedNoDirectionPairCount", "noDirectEventPairCount", "unavailablePairCount", "assessmentComplete"],
+        "pairFields": ["assessmentStatus", "assessmentComplete", "relevantEventCount", "relevantEvents", "nextEvent"],
+        "assessmentStates": ["directional_ready", "upcoming_event", "awaiting_actual", "released_no_direction", "no_direct_event", "unavailable"],
+        "eventMetadataFields": ["eventId", "titleTh", "currencies", "impact", "timeKind", "scheduledAt", "scheduledAtUtc", "scheduledAtBangkok", "marketDate", "timingState", "actualStatus", "releaseState", "analysisStatus", "actual", "forecast", "previous"],
+        "maximumRelevantEventMetadataPerPair": 3,
+        "verifiedCalendarCoveragePolicy": "A current source-verified calendar or verified quiet day assesses all 28 pairs even when zero directional horizons are evidence-backed.",
+        "directionalTruthPolicy": "Assessment coverage never upgrades insufficient_data to bullish, bearish, or sideway. For analyze_daily_market_news, a directional horizon requires a related released or revised event with scalar Actual and claim-specific evidence shared with that event; pre-event schedules provide caution/assessment only."
+      },
       "runtimeReadiness": {"publicCodexWebResearch": "ready_guarded_read_only", "fxBiasAnalysis": "ready_analysis_only", "missionReportAudit": "ready", "authoritativePublicSourcesRequired": true, "forexFactoryReferenceOnly": true, "forexFactoryEvidenceAllowed": false, "economicCalendarMode": "guarded_original_synthesis", "recurringScheduler": "ready_guarded_read_only"},
       "truthRules": [
         "One analyze_daily_market_news report must provide events, dangerWindows, and exactly 28 pairBias rows together; build_fx_pair_bias remains legacy manual compatibility only.",

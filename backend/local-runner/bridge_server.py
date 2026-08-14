@@ -1271,6 +1271,7 @@ FX_MAJOR_CURRENCIES = frozenset({"AUD", "CAD", "CHF", "EUR", "GBP", "JPY", "NZD"
 FX_DAILY_NEWS_MAX_EVENTS_PER_REPORT = 6
 FX_DAILY_NEWS_MAX_WINDOWS_PER_REPORT = 3
 FX_DAILY_NEWS_MAX_SOURCES_PER_REPORT = 3
+FX_PAIR_ASSESSMENT_EVENT_LIMIT = 3
 FX_DAILY_NEWS_TIMEOUT_FLOOR_SECONDS = 300
 EQUIPMENT_CONNECTION_CENTER_CACHE_TTL_SECONDS = 5
 EQUIPMENT_CONNECTION_CENTER_CACHE_STALE_MAX_SECONDS = 2 * 60
@@ -3988,6 +3989,21 @@ def _dashboard_workflow_semantic_evidence_valid(
         if rows is None:
             return False
         evidence_urls = admissible_evidence_urls()
+        released_events: list[dict] = []
+        if is_daily_fx_news:
+            decoded_events = _contract_decoded_value(
+                provided_fields.get("events", "")
+            )
+            for event in decoded_events if isinstance(decoded_events, list) else []:
+                if not isinstance(event, dict):
+                    continue
+                actual_status = str(event.get("actualStatus") or "").strip().lower()
+                if (
+                    actual_status not in {"released", "revised"}
+                    or _fx_actual_scalar_text(event.get("actual")) is None
+                ):
+                    continue
+                released_events.append(event)
         source_links = _contract_decoded_value(provided_fields.get("sourceLinks", ""))
         link_urls_by_ref: dict[str, set[str]] = {}
         if isinstance(source_links, dict):
@@ -4028,6 +4044,19 @@ def _dashboard_workflow_semantic_evidence_valid(
         supported_horizons = 0
         for row in rows:
             shared_urls = verified_urls(row)
+            pair = str(row.get("pair") or "").strip().upper()
+            pair_currencies = {pair[:3], pair[3:]} if len(pair) == 6 else set()
+            related_released_urls: set[str] = set()
+            if is_daily_fx_news:
+                for event in released_events:
+                    event_currencies = {
+                        str(currency or "").strip().upper()
+                        for currency in _contract_nested_strings(
+                            event.get("currencies") or event.get("currency")
+                        )
+                    }
+                    if pair_currencies.intersection(event_currencies):
+                        related_released_urls.update(verified_urls(event))
             for horizon, field in (("short", "shortBias"), ("medium", "mediumBias"), ("long", "longBias")):
                 nested = row.get(horizon) if isinstance(row.get(horizon), dict) else {}
                 bias = _normalize_fx_bias(
@@ -4036,12 +4065,22 @@ def _dashboard_workflow_semantic_evidence_valid(
                 if bias == "insufficient_data":
                     continue
                 supported_horizons += 1
+                if is_daily_fx_news and not related_released_urls:
+                    # Pre-event schedules can drive caution windows and the
+                    # assessment state, but cannot authorize a factual
+                    # Bullish/Bearish/Sideway claim before Actual is released.
+                    return False
                 # The all-in-one daily calendar must prove each directional
                 # horizon independently.  A generic pair/event source cannot
                 # silently authorize short, medium and long forecasts.  The
                 # legacy manual builder may reuse a row source only when the
                 # worker explicitly attests that it supports every horizon.
                 horizon_urls = verified_urls(nested)
+                if (
+                    is_daily_fx_news
+                    and not horizon_urls.intersection(related_released_urls)
+                ):
+                    return False
                 if (
                     not horizon_urls
                     and not (
@@ -6257,6 +6296,11 @@ def _empty_fx_bias_rows() -> list[dict]:
             "confidence": None,
             "sourceLinks": [],
             "status": "insufficient_data",
+            "assessmentStatus": "unavailable",
+            "assessmentComplete": False,
+            "relevantEventCount": 0,
+            "relevantEvents": [],
+            "nextEvent": None,
             "updatedAt": None,
         }
         for pair in FX_BIAS_PAIRS
@@ -6775,6 +6819,10 @@ def _fx_daily_calendar_contract_valid(
                     )
                     or (
                         bias != "insufficient_data"
+                        and actual_status not in {"released", "revised"}
+                    )
+                    or (
+                        bias != "insufficient_data"
                         and (not pair_refs or not pair_refs.issubset(source_ids))
                     )
                 ):
@@ -6849,6 +6897,16 @@ def _fx_event_pair_impact_rows(
     contains the event currency. Exact 28-row completeness belongs only to the
     aggregate ``fxBias`` model, preventing an 80 x 28 response explosion.
     """
+
+    actual_status = str(item.get("actualStatus") or "").strip().lower()
+    if (
+        actual_status not in {"released", "revised"}
+        or _fx_actual_scalar_text(item.get("actual")) is None
+    ):
+        # Old reports may predate the current contract. A pre-event forecast
+        # remains useful for caution windows, but it cannot become a displayed
+        # directional impact without a verified Actual.
+        return [], False
 
     raw_impacts: object = item.get("pairImpacts") or item.get("pairImpactSnapshot")
     report_rows = (
@@ -7183,7 +7241,15 @@ def _fx_news_read_model(
             else:
                 delta_seconds = (scheduled_time.astimezone(timezone.utc) - now_utc).total_seconds()
                 timing_state = "future" if delta_seconds > 900 else "past" if delta_seconds < -900 else "current"
-                release_state = "released" if actual_status in {"released", "revised"} else "scheduled"
+                if actual_status in {"released", "revised"}:
+                    release_state = "released"
+                elif timing_state == "past":
+                    # A timed release that has passed without verified Actual
+                    # is no longer upcoming.  Keep it visible and fail closed
+                    # as unconfirmed until an authoritative result arrives.
+                    release_state = "unconfirmed"
+                else:
+                    release_state = "scheduled"
             pair_impacts, pair_evidence_complete = _fx_event_pair_impact_rows(
                 item,
                 source_event_id=source_event_id,
@@ -7197,7 +7263,7 @@ def _fx_news_read_model(
                 analysis_status = "prepared"
             elif release_state == "released" and actual is not None and has_directional_pair_impact:
                 analysis_status = "analyzed"
-            elif timing_state == "past" and actual_status == "pending":
+            elif release_state == "unconfirmed" and actual_status in {"pending", "unavailable"}:
                 analysis_status = "awaiting_actual"
             else:
                 analysis_status = "insufficient_data"
@@ -7453,6 +7519,85 @@ def _fx_news_read_model(
     }
 
 
+def _fx_pair_assessment_event(event: dict) -> dict:
+    """Project one verified calendar event into bounded per-pair metadata."""
+    scheduled_at = event.get("scheduledAt") or event.get("scheduledAtUtc")
+    scheduled_time = parse_iso(str(scheduled_at or ""))
+    scheduled_at_bangkok = (
+        scheduled_time.astimezone(THAILAND_TIMEZONE).isoformat()
+        if scheduled_time is not None
+        else None
+    )
+    currencies = list(dict.fromkeys([
+        currency
+        for currency in (
+            str(raw or "").strip().upper()
+            for raw in (event.get("currencies") or [])
+        )
+        if currency in FX_MAJOR_CURRENCIES
+    ]))
+    return {
+        "eventId": safe_reference(event.get("eventId")),
+        "titleTh": redact_text(str(event.get("titleTh") or ""), 300),
+        "currencies": currencies,
+        "impact": str(event.get("impact") or "unknown"),
+        "timeKind": str(event.get("timeKind") or "timed"),
+        "scheduledAt": scheduled_at,
+        "scheduledAtUtc": event.get("scheduledAtUtc") or scheduled_at,
+        "scheduledAtBangkok": scheduled_at_bangkok,
+        "marketDate": safe_reference(event.get("marketDate")),
+        "timingState": str(event.get("timingState") or "current"),
+        "actualStatus": str(event.get("actualStatus") or "unavailable"),
+        "releaseState": str(event.get("releaseState") or "scheduled"),
+        "analysisStatus": str(event.get("analysisStatus") or "insufficient_data"),
+        "actual": event.get("actual"),
+        "forecast": event.get("forecast"),
+        "previous": event.get("previous"),
+    }
+
+
+def _fx_pair_assessment_status(
+    *,
+    directional_ready: bool,
+    relevant_events: list[dict],
+) -> str:
+    """Describe evidence coverage separately from directional bias readiness."""
+    if directional_ready:
+        return "directional_ready"
+    if any(
+        event.get("actualStatus") in {"pending", "unavailable"}
+        and (
+            event.get("releaseState") == "unconfirmed"
+            or event.get("timingState") == "past"
+        )
+        and event.get("timeKind") == "timed"
+        for event in relevant_events
+    ):
+        return "awaiting_actual"
+    if any(
+        event.get("releaseState") not in {"released"}
+        and event.get("actualStatus") not in {"released", "revised"}
+        and (
+            event.get("releaseState") in {"scheduled", "not_applicable"}
+            or event.get("timingState") == "future"
+            or event.get("timeKind") in {"tentative", "all_day", "holiday"}
+        )
+        for event in relevant_events
+    ):
+        return "upcoming_event"
+    if any(
+        event.get("releaseState") == "released"
+        or event.get("actualStatus") in {"released", "revised"}
+        for event in relevant_events
+    ):
+        return "released_no_direction"
+    if relevant_events:
+        # A relevant event with no verified release evidence remains pending;
+        # never describe it as released merely because its schedule is vague.
+        return "awaiting_actual"
+    return "no_direct_event"
+
+
 def _fx_bias_read_model(
     reports: list[dict] | None = None,
     *,
@@ -7499,6 +7644,22 @@ def _fx_bias_read_model(
     else:
         reference_local = reference_local.astimezone(THAILAND_TIMEZONE)
     current_bangkok_date = reference_local.date().isoformat()
+    news_model = _fx_news_read_model(candidates, now_local=reference_local)
+    news_assessment_available = bool(
+        news_model.get("dataStatus") in {"verified", "verified_empty"}
+        and news_model.get("sourceStatus") in {"success", "verified", "quiet_day"}
+        and news_model.get("currentDataAvailable") is True
+        and news_model.get("failClosed") is False
+    )
+    canonical_news_events = (
+        [
+            event
+            for event in (news_model.get("events") or [])
+            if isinstance(event, dict)
+        ]
+        if news_assessment_available
+        else []
+    )
     report_as_of = (
         parse_iso(str(verified_report.get("updatedAt") or verified_report.get("createdAt") or ""))
         if isinstance(verified_report, dict)
@@ -7576,6 +7737,22 @@ def _fx_bias_read_model(
                 continue
             shared_links = _fx_item_verified_sources(item, source_by_id, source_by_url)
             row = by_pair[pair]
+            pair_currencies = {row["baseCurrency"], row["quoteCurrency"]}
+            daily_released_source_urls: set[str] = set()
+            if is_daily_news_report:
+                for event in canonical_news_events:
+                    if (
+                        not pair_currencies.intersection(event.get("currencies") or [])
+                        or event.get("actualStatus") not in {"released", "revised"}
+                        or event.get("actual") is None
+                    ):
+                        continue
+                    for source in event.get("sourceLinks") or []:
+                        if not isinstance(source, dict):
+                            continue
+                        normalized_url = _normalized_contract_public_url(source.get("url"))
+                        if normalized_url:
+                            daily_released_source_urls.add(normalized_url)
             horizon_models = {}
             row_links_by_url: dict[str, dict] = {}
             for horizon, flat_field in (("short", "shortBias"), ("medium", "mediumBias"), ("long", "longBias")):
@@ -7590,22 +7767,48 @@ def _fx_bias_read_model(
                     and item.get("allHorizonsEvidence") is True
                 ):
                     horizon_links = shared_links
+                if bias != "insufficient_data" and is_daily_news_report:
+                    horizon_urls = {
+                        normalized_url
+                        for source in horizon_links
+                        if isinstance(source, dict)
+                        and (
+                            normalized_url := _normalized_contract_public_url(
+                                source.get("url")
+                            )
+                        )
+                    }
+                    if not horizon_urls.intersection(daily_released_source_urls):
+                        bias = "insufficient_data"
                 if bias != "insufficient_data" and not horizon_links:
                     bias = "insufficient_data"
-                for source in horizon_links:
-                    if source.get("url"):
-                        row_links_by_url[str(source["url"])] = source
-                        top_sources_by_url[str(source["url"])] = source
+                if bias != "insufficient_data":
+                    for source in horizon_links:
+                        if source.get("url"):
+                            row_links_by_url[str(source["url"])] = source
+                            top_sources_by_url[str(source["url"])] = source
                 confidence_value = nested.get("confidence") if nested.get("confidence") is not None else item.get("confidence")
                 confidence = confidence_or_none(confidence_value)
                 horizon_models[horizon] = {
                     "bias": bias,
-                    "confidence": clamp_int(confidence, 0, 0, 100) if confidence is not None else None,
-                    "reasonTh": redact_text(str(nested.get("reasonTh") or item.get(f"{horizon}ReasonTh") or ""), 500) or None,
+                    "confidence": (
+                        clamp_int(confidence, 0, 0, 100)
+                        if bias != "insufficient_data" and confidence is not None
+                        else None
+                    ),
+                    "reasonTh": (
+                        redact_text(
+                            str(nested.get("reasonTh") or item.get(f"{horizon}ReasonTh") or ""),
+                            500,
+                        )
+                        or None
+                        if bias != "insufficient_data"
+                        else None
+                    ),
                     "sourceLinks": horizon_links if bias != "insufficient_data" else [],
                 }
             supported = any(model["bias"] != "insufficient_data" for model in horizon_models.values())
-            row_confidence = confidence_or_none(item.get("confidence"))
+            row_confidence = confidence_or_none(item.get("confidence")) if supported else None
             row.update({
                 "shortBias": horizon_models["short"]["bias"],
                 "mediumBias": horizon_models["medium"]["bias"],
@@ -7616,17 +7819,99 @@ def _fx_bias_read_model(
                 "status": "source_backed" if supported else "insufficient_data",
                 "updatedAt": verified_report.get("updatedAt") or verified_report.get("createdAt"),
             })
-            if supported:
-                source_backed_count += 1
+    # Derive coverage from the canonical 28-row projection rather than the
+    # raw worker rows. Duplicate/malformed input can never inflate counts.
+    source_backed_count = sum(
+        1 for row in rows if row.get("status") == "source_backed"
+    )
+
+    assessment_status_counts = {
+        "directional_ready": 0,
+        "upcoming_event": 0,
+        "awaiting_actual": 0,
+        "released_no_direction": 0,
+        "no_direct_event": 0,
+        "unavailable": 0,
+    }
+    assessed_pair_count = 0
+    for row in rows:
+        directional_ready = row.get("status") == "source_backed"
+        pair_currencies = {row["baseCurrency"], row["quoteCurrency"]}
+        relevant_events = [
+            event
+            for event in canonical_news_events
+            if pair_currencies.intersection(event.get("currencies") or [])
+        ]
+        relevant_event_models = [
+            _fx_pair_assessment_event(event)
+            for event in relevant_events[:FX_PAIR_ASSESSMENT_EVENT_LIMIT]
+        ]
+        next_event = next(
+            (
+                _fx_pair_assessment_event(event)
+                for event in relevant_events
+                if event.get("releaseState") == "scheduled"
+                and (
+                    event.get("timingState") in {"future", "current"}
+                    or event.get("timeKind") in {"tentative", "all_day", "holiday"}
+                )
+            ),
+            None,
+        )
+        if news_assessment_available:
+            assessment_status = _fx_pair_assessment_status(
+                directional_ready=directional_ready,
+                relevant_events=relevant_events,
+            )
+            assessment_complete = True
+        elif directional_ready:
+            # Preserve legacy/manual directional compatibility.  This row has
+            # a completed source-backed analysis even though no verified daily
+            # calendar is available to assess the remaining pair universe.
+            assessment_status = "directional_ready"
+            assessment_complete = True
+        else:
+            assessment_status = "unavailable"
+            assessment_complete = False
+            relevant_events = []
+            relevant_event_models = []
+            next_event = None
+        row.update({
+            "assessmentStatus": assessment_status,
+            "assessmentComplete": assessment_complete,
+            "relevantEventCount": len(relevant_events),
+            "relevantEvents": relevant_event_models,
+            "nextEvent": next_event,
+        })
+        assessment_status_counts[assessment_status] += 1
+        if assessment_complete:
+            assessed_pair_count += 1
+
+    pair_universe_complete = len(rows) == len(FX_BIAS_PAIRS)
+    assessment_complete = bool(
+        pair_universe_complete and assessed_pair_count == len(FX_BIAS_PAIRS)
+    )
     return {
-        "schemaVersion": "fx-pair-bias-read-model-v2",
+        "schemaVersion": "fx-pair-bias-read-model-v3",
         "pairs": rows,
         "pairCount": len(rows),
         "verifiedPairCount": source_backed_count,
+        "directionalPairCount": source_backed_count,
         "sourceBackedPairCount": source_backed_count,
         "insufficientDataPairCount": len(rows) - source_backed_count,
-        "pairUniverseComplete": len(rows) == len(FX_BIAS_PAIRS),
-        "complete28": len(rows) == len(FX_BIAS_PAIRS),
+        "assessedPairCount": assessed_pair_count,
+        "awaitingEventPairCount": (
+            assessment_status_counts["upcoming_event"]
+            + assessment_status_counts["awaiting_actual"]
+        ),
+        "upcomingEventPairCount": assessment_status_counts["upcoming_event"],
+        "awaitingActualPairCount": assessment_status_counts["awaiting_actual"],
+        "releasedNoDirectionPairCount": assessment_status_counts["released_no_direction"],
+        "noDirectEventPairCount": assessment_status_counts["no_direct_event"],
+        "unavailablePairCount": assessment_status_counts["unavailable"],
+        "assessmentComplete": assessment_complete,
+        "pairUniverseComplete": pair_universe_complete,
+        "complete28": pair_universe_complete,
         "dataStatus": (
             "source_failure"
             if latest_attempt_failed
@@ -7635,7 +7920,7 @@ def _fx_bias_read_model(
                 and source_status not in {"success", "verified", "quiet_day"}
             )
             else "stale" if stale
-            else "verified" if source_backed_count else "no_verified_data"
+            else "verified" if assessed_pair_count else "no_verified_data"
         ),
         "sourceStatus": source_status or "no_report",
         "sources": list(top_sources_by_url.values()),
@@ -7650,7 +7935,7 @@ def _fx_bias_read_model(
         "currentBangkokDate": current_bangkok_date,
         "reportBangkokDate": report_bangkok_date,
         "stale": stale,
-        "currentDataAvailable": bool(source_backed_count),
+        "currentDataAvailable": bool(assessed_pair_count),
         "fabricatedData": False,
     }
 
@@ -9273,13 +9558,20 @@ def workflow_dashboard_read_model(
             "screenshotClaimAllowed": False,
         }
     elif prop_id == "left_signal_cube":
+        fx_now_local = datetime.now(timezone.utc).astimezone(THAILAND_TIMEZONE)
         model["schedule"] = _dashboard_saved_schedule_read_model(
             "newsBiasSchedule",
             default_times=["07:00", "20:00"],
             max_times=2,
         )
-        model["marketNews"] = _fx_news_read_model(reports)
-        model["fxBias"] = _fx_bias_read_model(reports)
+        model["marketNews"] = _fx_news_read_model(
+            reports,
+            now_local=fx_now_local,
+        )
+        model["fxBias"] = _fx_bias_read_model(
+            reports,
+            now_local=fx_now_local,
+        )
         model["primaryViews"] = ["pair_bias", "today"]
         model["leftRail"] = {
             "analysisActionId": "analyze_daily_market_news",
@@ -9729,7 +10021,9 @@ def _workflow_prompt(
             "events[].actualStatus ต้องเป็นเพียงค่าเดียวจาก [\"pending\",\"released\",\"revised\",\"unavailable\",\"not_applicable\"] และ impact ต้องเป็นเพียงค่าเดียวจาก [\"low\",\"medium\",\"high\",\"unknown\"]. "
             "ข่าวทุกแถวต้องอยู่ใน marketDate เดียวกันเมื่อตีความ scheduledAt เป็น Asia/Bangkok; timeKind=timed ต้องมี scheduledAt พร้อม UTC offset ส่วน timeKind อื่นต้องละ scheduledAt หรือใช้ null. "
             "actual ต้องเป็น null เมื่อ actualStatus เป็น pending/unavailable/not_applicable และต้องเป็น scalar ที่ตรวจได้ (รวมเลข 0 ได้) เมื่อเป็น released/revised; quiet_day ต้องมี events และ dangerWindows ว่างพร้อมแหล่งยืนยัน. "
-            "pairImpacts เป็น optional sparse array ไม่เกิน 2 คู่ที่เกี่ยวข้องที่สุดต่อข่าว; ทุกแถวที่มีทิศทางต้องมี pair, impact, confidence และ sourceRefs เฉพาะข้อสรุปนั้น. contractFields.dangerWindows ต้องเป็น JSON array ไม่เกิน 3 ช่วงที่มี currencies, startsAt, endsAt, reasonTh และ sourceRefs. "
+            "pairImpacts เป็น optional sparse array ไม่เกิน 2 คู่ที่เกี่ยวข้องที่สุดต่อข่าว; ทุกแถวที่มีทิศทางต้องมี pair, impact, confidence และ sourceRefs เฉพาะข้อสรุปนั้น. "
+            "ก่อนข่าวมี actualStatus เป็น released/revised และมี Actual จริง ห้ามส่ง pairImpacts แบบมีทิศทาง และทุก horizon ของคู่เงินที่เกี่ยวข้องต้องเป็น INSUFFICIENT_DATA; ให้ใช้ dangerWindows และสถานะรอข่าวสำหรับการเตรียมตัวก่อนประกาศแทน. "
+            "contractFields.dangerWindows ต้องเป็น JSON array ไม่เกิน 3 ช่วงที่มี currencies, startsAt, endsAt, reasonTh และ sourceRefs. "
             "contractFields.sourceLinks ต้องเป็น JSON array ไม่เกิน 3 แหล่งของ id ไม่ซ้ำ, title ไม่เกิน 40 ตัวอักษร, public URL ไม่เกิน 120 ตัวอักษร, publishedAt และ checkedAt ที่มี UTC offset; sourceRefs ทุกจุดต้องอ้าง id ในรายการนี้. "
             "contractFields.pairBias ต้องมี 28 แถวพอดีสำหรับ: "
             + ", ".join(FX_BIAS_PAIRS)

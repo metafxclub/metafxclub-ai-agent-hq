@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import unittest
 
 
@@ -48,6 +49,19 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
                 return candidate
         self.skipTest("Node.js is required for the frontend normalizer regression")
 
+    def run_node_script(self, script: str) -> subprocess.CompletedProcess[str]:
+        # Windows limits command-line length; execute generated regression scripts from a temp file.
+        with tempfile.TemporaryDirectory() as directory:
+            script_path = Path(directory) / "frontend-regression.js"
+            script_path.write_text(script, encoding="utf-8")
+            return subprocess.run(
+                [self.node_binary(), str(script_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
     def test_fx_default_presentation_is_28_pair_grid_without_history(self):
         self.assertIn('left_signal_cube: "ศูนย์แนวโน้ม 28 คู่เงินและข่าว Forex"', self.main)
         self.assertIn(
@@ -67,7 +81,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
         self.assertIn("FX_BIAS_PAIR_UNIVERSE.map", domain)
         self.assertIn('summary: "รอข้อมูลจริงจาก Backend"', domain)
         panel = self.function_block("renderFxNewsBiasPanel", "renderTerminalOutputPanel")
-        self.assertIn("renderFxBiasGrid(section, domain.pairBias)", panel)
+        self.assertIn("renderFxBiasGrid(section, domain.pairBias, domain.pairAssessmentSummary)", panel)
         self.assertNotIn("renderWorkflowSourceCards", panel)
 
     def test_history_is_explicit_so_fx_news_and_status_tabs_never_become_history_by_position(self):
@@ -271,6 +285,9 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             "fxNewsCalendarRows",
             "normalizeFxNewsEvent",
             "deriveFxOverallBias",
+            "normalizeFxPairAssessmentEvent",
+            "normalizeFxPairAssessmentStatus",
+            "deriveFxPairAssessmentSummary",
             "normalizeFxNewsBiasDomain",
         )
         script = "\n".join(
@@ -287,13 +304,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
                 "process.stdout.write(JSON.stringify({news: domain.news, dangerWindows: domain.dangerWindows, freshness: domain.freshness, pairCount: domain.pairBias.length, eurusd, gbpusd, placeholder}));",
             ]
         )
-        result = subprocess.run(
-            [self.node_binary(), "-e", script],
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
+        result = self.run_node_script(script)
         payload = json.loads(result.stdout)
 
         self.assertEqual(payload["news"][0]["id"], "event-cpi")
@@ -319,7 +330,174 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
         panel = self.function_block("renderFxNewsBiasPanel", "renderTerminalOutputPanel")
         self.assertIn("domain.dangerWindows", panel)
         self.assertIn("domain.news", panel)
-        self.assertIn("renderFxBiasGrid(section, domain.pairBias)", panel)
+        self.assertIn("renderFxBiasGrid(section, domain.pairBias, domain.pairAssessmentSummary)", panel)
+
+    def test_pair_news_assessment_renders_complete_coverage_without_inventing_direction(self):
+        pair_universe = [
+            "AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "AUDUSD",
+            "CADCHF", "CADJPY", "CHFJPY",
+            "EURAUD", "EURCAD", "EURCHF", "EURGBP", "EURJPY", "EURNZD", "EURUSD",
+            "GBPAUD", "GBPCAD", "GBPCHF", "GBPJPY", "GBPNZD", "GBPUSD",
+            "NZDCAD", "NZDCHF", "NZDJPY", "NZDUSD",
+            "USDCAD", "USDCHF", "USDJPY",
+        ]
+        usd_event = {
+            "eventId": "retail-usd", "titleTh": "ยอดค้าปลีกสหรัฐ", "currencies": ["USD"],
+            "impact": "high", "timeKind": "timed", "scheduledAtUtc": "2026-08-14T12:30:00Z",
+            "scheduledAtBangkok": "2026-08-14T19:30:00+07:00", "timingState": "future",
+            "actualStatus": "pending", "releaseState": "scheduled", "analysisStatus": "pending_release",
+            "forecast": "0.4%", "previous": "0.2%", "sourceRefs": ["official-usd"],
+        }
+        cad_event = {
+            "eventId": "factory-cad", "titleTh": "ยอดขายภาคการผลิตแคนาดา", "currencies": ["CAD"],
+            "impact": "medium", "timeKind": "timed", "scheduledAtUtc": "2026-08-14T12:30:00Z",
+            "scheduledAtBangkok": "2026-08-14T19:30:00+07:00", "timingState": "past",
+            "actualStatus": "released", "releaseState": "released", "analysisStatus": "insufficient_data",
+            "actual": "-0.8%", "forecast": "-0.5%", "previous": "0.3%", "sourceRefs": ["official-cad"],
+        }
+        pair_rows = []
+        for pair in pair_universe:
+            if "USD" in pair:
+                assessment_status, events = "upcoming_event", [usd_event]
+            elif "CAD" in pair:
+                assessment_status, events = "released_no_direction", [cad_event]
+            else:
+                assessment_status, events = "no_direct_event", []
+            pair_rows.append({
+                "pair": pair,
+                "status": "insufficient_data",
+                "horizons": {
+                    "short": {"bias": "INSUFFICIENT_DATA"},
+                    "medium": {"bias": "INSUFFICIENT_DATA"},
+                    "long": {"bias": "INSUFFICIENT_DATA"},
+                },
+                "assessmentStatus": assessment_status,
+                "assessmentComplete": True,
+                "relevantEventCount": len(events),
+                "relevantEvents": [
+                    {**event, "titleTh": "ข้อความ row ที่ห้ามใช้แทนข่าวที่ตรวจแหล่งแล้ว"}
+                    for event in events
+                ],
+                "nextEvent": (
+                    {**events[0], "titleTh": "ข้อความ nextEvent ที่ห้ามใช้แทนข่าวที่ตรวจแหล่งแล้ว"}
+                    if events else None
+                ),
+            })
+        fixture = {
+            "marketNews": {
+                "calendarDate": "2026-08-14", "currentBangkokDate": "2026-08-14",
+                "reportBangkokDate": "2026-08-14", "dataStatus": "verified",
+                "currentDataAvailable": True, "stale": False,
+                "sources": [
+                    {"id": "official-usd", "url": "https://example.com/usd"},
+                    {"id": "official-cad", "url": "https://example.com/cad"},
+                ],
+                "events": [usd_event, cad_event],
+            },
+            "fxBias": {
+                "dataStatus": "verified", "currentDataAvailable": True, "stale": False,
+                "assessmentComplete": True,
+                "assessedPairCount": 28, "directionalPairCount": 0,
+                "upcomingEventPairCount": 7, "awaitingActualPairCount": 0,
+                "awaitingEventPairCount": 7, "releasedNoDirectionPairCount": 6,
+                "noDirectEventPairCount": 15, "unavailablePairCount": 0,
+                "pairs": pair_rows,
+            },
+        }
+        function_names = (
+            "workflowDomainObject", "workflowDomainArray", "workflowReportRows", "normalizeFxBiasValue",
+            "fxBiasHorizonValue", "normalizeFxFreshness", "workflowSourceLinkRows", "workflowItemSourceUrl",
+            "isFxNewsReferenceOnlyUrl", "fxNewsVerifiedSourceLinks", "fxNewsVerifiedItemSources",
+            "normalizeFxNewsImpact", "normalizeFxNewsMetric", "normalizeFxNewsPairImpactRows",
+            "fxNewsCalendarRows", "normalizeFxNewsEvent", "deriveFxOverallBias",
+            "normalizeFxPairAssessmentEvent", "normalizeFxPairAssessmentStatus",
+            "deriveFxPairAssessmentSummary", "normalizeFxNewsBiasDomain",
+        )
+        script = "\n".join([
+            f"const FX_BIAS_PAIR_UNIVERSE = Object.freeze({json.dumps(pair_universe)});",
+            "const safeDashboardDisplayText = (value, fallback = '') => String(value ?? '').trim() || fallback;",
+            "const getSafeExternalHttpUrl = (value) => { try { const url = new URL(String(value || '')); return ['http:', 'https:'].includes(url.protocol) ? url.href : ''; } catch { return ''; } };",
+            *(self.function_source(name) for name in function_names),
+            f"const fixture = {json.dumps(fixture, ensure_ascii=False)};",
+            "const domain = normalizeFxNewsBiasDomain(fixture, {});",
+            "const byPair = Object.fromEntries(domain.pairBias.map((row) => [row.pair, row]));",
+            "const incompleteFixture = JSON.parse(JSON.stringify(fixture));",
+            "incompleteFixture.fxBias.pairs.find((row) => row.pair === 'EURUSD').assessmentComplete = false;",
+            "const incomplete = normalizeFxNewsBiasDomain(incompleteFixture, {});",
+            "const staleFixture = JSON.parse(JSON.stringify(fixture));",
+            "Object.assign(staleFixture.fxBias, {stale:true,currentDataAvailable:false,dataStatus:'stale'});",
+            "const stale = normalizeFxNewsBiasDomain(staleFixture, {});",
+            "const partialFixture = JSON.parse(JSON.stringify(fixture));",
+            "partialFixture.fxBias.sources = [{id:'official-usd',url:'https://example.com/usd'}];",
+            "const partialRow = partialFixture.fxBias.pairs.find((row) => row.pair === 'AUDNZD');",
+            "Object.assign(partialRow, {status:'source_backed',assessmentStatus:'directional_ready',sourceLinks:[{url:'https://example.com/usd'}]});",
+            "partialRow.horizons.short.bias = 'BULLISH';",
+            "const partial = normalizeFxNewsBiasDomain(partialFixture, {});",
+            "const partialAudnzd = partial.pairBias.find((row) => row.pair === 'AUDNZD');",
+            "process.stdout.write(JSON.stringify({summary:domain.pairAssessmentSummary,eurusd:byPair.EURUSD,audcad:byPair.AUDCAD,audnzd:byPair.AUDNZD,freshness:domain.freshness.fxBias,incompleteSummary:incomplete.pairAssessmentSummary,incompleteEurusd:incomplete.pairBias.find((row)=>row.pair==='EURUSD'),staleSummary:stale.pairAssessmentSummary,partialSummary:partial.pairAssessmentSummary,partialAudnzd}));",
+        ])
+        result = self.run_node_script(script)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["summary"], {
+            "assessedPairCount": 28,
+            "directionalPairCount": 0,
+            "awaitingEventPairCount": 7,
+            "upcomingEventPairCount": 7,
+            "awaitingActualPairCount": 0,
+            "releasedNoDirectionPairCount": 6,
+            "noDirectEventPairCount": 15,
+            "unavailablePairCount": 0,
+            "assessmentComplete": True,
+        })
+        self.assertTrue(payload["freshness"]["currentDataAvailable"])
+        self.assertEqual(payload["eurusd"]["assessmentStatus"], "upcoming_event")
+        self.assertTrue(payload["eurusd"]["assessmentComplete"])
+        self.assertEqual(payload["eurusd"]["nextEvent"]["title"], "ยอดค้าปลีกสหรัฐ")
+        self.assertTrue(all(payload["eurusd"][key] == "unavailable" for key in ("bias", "short", "medium", "long")))
+        self.assertEqual(payload["audcad"]["assessmentStatus"], "released_no_direction")
+        self.assertEqual(payload["audnzd"]["assessmentStatus"], "no_direct_event")
+        self.assertEqual(payload["audnzd"]["relevantEventCount"], 0)
+        self.assertEqual(payload["incompleteEurusd"]["assessmentStatus"], "unavailable")
+        self.assertFalse(payload["incompleteEurusd"]["assessmentComplete"])
+        self.assertEqual(payload["incompleteSummary"]["assessedPairCount"], 27)
+        self.assertEqual(payload["incompleteSummary"]["unavailablePairCount"], 1)
+        self.assertEqual(payload["staleSummary"]["assessedPairCount"], 0)
+        self.assertEqual(payload["staleSummary"]["unavailablePairCount"], 28)
+        self.assertEqual(payload["partialAudnzd"]["assessmentStatus"], "directional_ready")
+        self.assertEqual(payload["partialAudnzd"]["short"], "bullish")
+        self.assertEqual(payload["partialAudnzd"]["medium"], "unavailable")
+        self.assertEqual(payload["partialAudnzd"]["bias"], "unavailable")
+        self.assertEqual(payload["partialSummary"]["directionalPairCount"], 1)
+
+        grid = self.function_source("renderFxBiasGrid")
+        self.assertIn("คู่ประเมินข่าวแล้ว", grid)
+        self.assertIn("คู่มี Bias ยืนยัน", grid)
+        self.assertIn("fxPairHorizonLabel(item, bias)", grid)
+        self.assertNotIn("คู่มีข้อมูล", grid)
+        self.assertIn("ไม่พบข่าวตรงของคู่เงินนี้ในปฏิทินรอบปัจจุบัน", self.main)
+        self.assertIn("ข่าวออกแล้วแต่ยังไม่มี Bias ยืนยัน", self.main)
+        self.assertIn("รอ Actual ข่าว", self.main)
+        self.assertIn("มี Bias ยืนยัน", self.main)
+        self.assertIn("วันหยุดวันนี้", self.main)
+        self.assertIn("เหตุการณ์ตลอดวัน", self.main)
+
+        html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("20260814-pending-actual-v056", html)
+        self.assertNotIn("20260814-pair-news-assessment-v055", html)
+        self.assertNotIn("20260814-runtime-truth-v054", html)
+        self.assertNotIn("20260808-workflow-friendly-v053", html)
+
+    def test_directional_pair_summary_keeps_verified_next_event_caution(self):
+        script = "\n".join([
+            "const fxNewsEventTimeLabel = () => '19:30';",
+            self.function_source("fxPairAssessmentSummaryText"),
+            "process.stdout.write(fxPairAssessmentSummaryText({assessmentStatus:'directional_ready',bias:'unavailable',summary:'ยืนยัน Bias ระยะสั้น',nextEvent:{title:'ยอดค้าปลีกสหรัฐ',currencies:['USD'],timeKind:'timed',eventAt:'2026-08-14T12:30:00Z'}}));",
+        ])
+        result = self.run_node_script(script)
+        self.assertEqual(
+            result.stdout,
+            "ยืนยัน Bias ระยะสั้น • ข่าวถัดไป USD: ยอดค้าปลีกสหรัฐ • 19:30 • โปรดระวังความผันผวน",
+        )
 
     def test_fx_stale_rollover_preserves_freshness_and_suppresses_old_truth(self):
         fixture = {
@@ -376,6 +554,9 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             "fxNewsCalendarRows",
             "normalizeFxNewsEvent",
             "deriveFxOverallBias",
+            "normalizeFxPairAssessmentEvent",
+            "normalizeFxPairAssessmentStatus",
+            "deriveFxPairAssessmentSummary",
             "normalizeFxNewsBiasDomain",
         )
         script = "\n".join(
@@ -389,13 +570,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
                 "process.stdout.write(JSON.stringify(domain));",
             ]
         )
-        result = subprocess.run(
-            [self.node_binary(), "-e", script],
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
+        result = self.run_node_script(script)
         domain = json.loads(result.stdout)
 
         self.assertEqual(domain["freshness"]["marketNews"], {
@@ -473,6 +648,23 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
                         ],
                     },
                     {
+                        "eventId": "jobs-us-awaiting",
+                        "titleTh": "US Jobless Claims",
+                        "summaryTh": "ผ่านเวลาประกาศแล้วแต่ Actual ยังไม่ยืนยัน",
+                        "detailTh": "รอผลจากแหล่งข้อมูลทางการ",
+                        "scheduledAtUtc": "2026-08-14T11:30:00Z",
+                        "timeKind": "timed",
+                        "timingState": "past",
+                        "releaseState": "unconfirmed",
+                        "actualStatus": "pending",
+                        "analysisStatus": "awaiting_actual",
+                        "currencies": ["USD"],
+                        "impact": "medium",
+                        "forecast": "230K",
+                        "previous": "228K",
+                        "sourceLinks": [{"id": "official-cpi", "url": "https://example.com/official-cpi"}],
+                    },
+                    {
                         "eventId": "holiday-jp",
                         "titleTh": "Japan Holiday",
                         "summaryTh": "วันหยุดตลาดญี่ปุ่น",
@@ -506,23 +698,27 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             "fxBiasHorizonValue", "normalizeFxFreshness", "workflowSourceLinkRows", "workflowItemSourceUrl",
             "isFxNewsReferenceOnlyUrl", "fxNewsVerifiedSourceLinks", "fxNewsVerifiedItemSources",
             "normalizeFxNewsImpact", "normalizeFxNewsMetric", "normalizeFxNewsPairImpactRows",
-            "fxNewsCalendarRows", "normalizeFxNewsEvent", "deriveFxOverallBias", "normalizeFxNewsBiasDomain",
+            "fxNewsCalendarRows", "normalizeFxNewsEvent", "deriveFxOverallBias",
+            "normalizeFxPairAssessmentEvent", "normalizeFxPairAssessmentStatus",
+            "deriveFxPairAssessmentSummary", "normalizeFxNewsBiasDomain",
         )
         script = "\n".join([
             f"const FX_BIAS_PAIR_UNIVERSE = Object.freeze({json.dumps(pair_universe)});",
             "const safeDashboardDisplayText = (value, fallback = '') => String(value ?? '').trim() || fallback;",
             "const getSafeExternalHttpUrl = (value) => { try { const url = new URL(String(value || '')); return ['http:', 'https:'].includes(url.protocol) ? url.href : ''; } catch { return ''; } };",
             *(self.function_source(name) for name in function_names),
+            self.function_source("fxNewsActualDisplay"),
             f"const fixture = {json.dumps(fixture, ensure_ascii=False)};",
             "const domain = normalizeFxNewsBiasDomain(fixture, {});",
             "const released = domain.releasedNews[0]; const upcoming = domain.upcomingNews[0];",
-            "process.stdout.write(JSON.stringify({count: domain.news.length, released, upcoming, unconfirmedCount: domain.unconfirmedNews.length}));",
+            "const unconfirmed = domain.unconfirmedNews[0];",
+            "const pairAssessmentEvent = normalizeFxPairAssessmentEvent(fixture.marketNews.events[1]);",
+            "const unavailableActual = {...unconfirmed,analysisStatus:'insufficient_data',actualStatus:'unavailable'};",
+            "process.stdout.write(JSON.stringify({count: domain.news.length, released, upcoming, unconfirmed, pairAssessmentEvent, awaitingActualDisplay:fxNewsActualDisplay(unconfirmed), unavailableActualDisplay:fxNewsActualDisplay(unavailableActual), upcomingIds:domain.upcomingNews.map((item)=>item.id), unconfirmedIds:domain.unconfirmedNews.map((item)=>item.id)}));",
         ])
-        result = subprocess.run(
-            [self.node_binary(), "-e", script], check=True, capture_output=True, text=True, encoding="utf-8",
-        )
+        result = self.run_node_script(script)
         payload = json.loads(result.stdout)
-        self.assertEqual(payload["count"], 2)
+        self.assertEqual(payload["count"], 3)
         self.assertEqual(payload["released"]["actual"], "0")
         self.assertEqual(payload["released"]["actualStatus"], "released")
         self.assertEqual(payload["released"]["eventAt"], "2026-08-14T12:30:00Z")
@@ -530,7 +726,16 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
         self.assertEqual(payload["released"]["pairImpactRows"][14]["confidence"], 0)
         self.assertIsNone(payload["released"]["pairImpactRows"][0]["confidence"])
         self.assertEqual(payload["upcoming"]["timeKind"], "holiday")
-        self.assertEqual(payload["unconfirmedCount"], 0)
+        self.assertEqual(payload["unconfirmed"]["id"], "jobs-us-awaiting")
+        self.assertEqual(payload["unconfirmed"]["analysisStatus"], "awaiting_actual")
+        self.assertEqual(payload["unconfirmed"]["releaseState"], "unconfirmed")
+        self.assertEqual(payload["pairAssessmentEvent"]["analysisStatus"], "awaiting_actual")
+        self.assertEqual(payload["awaitingActualDisplay"], "รอ Actual")
+        self.assertEqual(payload["unavailableActualDisplay"], "ยังไม่ยืนยัน")
+        self.assertNotIn("jobs-us-awaiting", payload["upcomingIds"])
+        self.assertIn("jobs-us-awaiting", payload["unconfirmedIds"])
+        self.assertIn('if (item.analysisStatus === "awaiting_actual") return "ผ่านเวลาแล้ว • รอ Actual";', self.main)
+        self.assertIn("เวลาประกาศผ่านแล้ว แต่ยังไม่มีค่า Actual ที่ยืนยันจากแหล่งข้อมูล", self.main)
 
     def test_daily_news_dialog_and_original_calendar_ui_are_accessible(self):
         html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
@@ -582,9 +787,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             "const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Bangkok',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date(rows[2].eventAt)).map((part) => [part.type, part.value]));",
             "process.stdout.write(JSON.stringify({rows,bangkokDate:`${parts.year}-${parts.month}-${parts.day}`}));",
         ])
-        result = subprocess.run(
-            [self.node_binary(), "-e", script], check=True, capture_output=True, text=True, encoding="utf-8",
-        )
+        result = self.run_node_script(script)
         payload = json.loads(result.stdout)
         rows = payload["rows"]
         self.assertEqual(rows[0]["eventAt"], "2026-03-08T01:30:00-05:00")
@@ -681,7 +884,8 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             "fxBiasHorizonValue", "normalizeFxFreshness", "workflowSourceLinkRows", "workflowItemSourceUrl",
             "isFxNewsReferenceOnlyUrl", "fxNewsVerifiedSourceLinks", "fxNewsVerifiedItemSources", "normalizeFxNewsImpact",
             "normalizeFxNewsMetric", "normalizeFxNewsPairImpactRows", "fxNewsCalendarRows",
-            "normalizeFxNewsEvent", "deriveFxOverallBias", "normalizeFxNewsBiasDomain",
+            "normalizeFxNewsEvent", "deriveFxOverallBias", "normalizeFxPairAssessmentEvent",
+            "normalizeFxPairAssessmentStatus", "deriveFxPairAssessmentSummary", "normalizeFxNewsBiasDomain",
         )
         script = "\n".join([
             f"const FX_BIAS_PAIR_UNIVERSE = Object.freeze({json.dumps(pair_universe)});",
@@ -694,9 +898,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             "const emptyDomain = normalizeFxNewsBiasDomain(verifiedEmptyFixture, {});",
             "process.stdout.write(JSON.stringify({news:domain.news,dangerWindows:domain.dangerWindows,eurusd:domain.pairBias.find((row)=>row.pair==='EURUSD'),verifiedEmpty:emptyDomain.calendar.verifiedEmpty,emptyReason:emptyDomain.calendar.emptyReason,emptyNews:emptyDomain.news}));",
         ])
-        result = subprocess.run(
-            [self.node_binary(), "-e", script], check=True, capture_output=True, text=True, encoding="utf-8",
-        )
+        result = self.run_node_script(script)
         payload = json.loads(result.stdout)
         self.assertEqual([row["id"] for row in payload["news"]], ["official-row"])
         self.assertEqual(payload["dangerWindows"], [])

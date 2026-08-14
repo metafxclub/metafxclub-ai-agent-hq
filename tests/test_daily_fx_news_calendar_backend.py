@@ -47,6 +47,19 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
             for pair in self.bridge.FX_BIAS_PAIRS
         ]
 
+    def insufficient_pair_rows(self) -> list[dict]:
+        return [
+            {
+                "pair": pair,
+                "short": {"bias": "INSUFFICIENT_DATA", "confidence": None, "sourceRefs": []},
+                "medium": {"bias": "INSUFFICIENT_DATA", "confidence": None, "sourceRefs": []},
+                "long": {"bias": "INSUFFICIENT_DATA", "confidence": None, "sourceRefs": []},
+                "confidence": None,
+                "verified": False,
+            }
+            for pair in self.bridge.FX_BIAS_PAIRS
+        ]
+
     def report(
         self,
         report_id: str,
@@ -406,6 +419,60 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
         ):
             self.assertTrue(self.bridge._fx_reference_only_host(url))
 
+    def test_daily_contract_rejects_directional_horizon_before_related_actual(self) -> None:
+        procedure = self.bridge.equipment_action_profile(
+            "left_signal_cube",
+            "analyze_daily_market_news",
+        )
+        mission = {
+            "createdAt": "2026-08-14T01:00:00Z",
+            "budget": {"outputLimitChars": 20000},
+            "workflowContext": {
+                "propId": "left_signal_cube",
+                "actionId": "analyze_daily_market_news",
+                "inputs": {"marketDate": "2026-08-14"},
+                "pluginProcedure": procedure,
+            },
+        }
+        source_url = "https://www.bls.gov/news.release/cpi.nr0.htm"
+        fields = {
+            "marketDate": "2026-08-14",
+            "sourceStatus": "verified",
+            "quietDay": False,
+            "events": [self.event()],
+            "dangerWindows": [],
+            "pairBias": self.pair_rows(),
+            "sourceLinks": [{
+                "id": "official-1",
+                "title": "BLS release",
+                "url": source_url,
+                "checkedAt": "2026-08-14T01:00:00Z",
+            }],
+            "checkedAt": "2026-08-14T01:00:00Z",
+            "updatedAt": "2026-08-14T01:00:00Z",
+            "limitations": [],
+        }
+        result = {
+            "contractFields": [
+                {
+                    "field": key,
+                    "value": json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+                }
+                for key, value in fields.items()
+            ],
+            "evidenceKinds": list(procedure["evidenceRequired"]),
+            "evidence": [{"label": "BLS release", "url": source_url, "note": ""}],
+        }
+        contract = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            result,
+        )
+        self.assertFalse(contract["valid"])
+        self.assertIn(
+            "source_url_per_supported_bias",
+            contract["missingEvidenceKinds"],
+        )
+
     def test_exact_pair_contract_rejects_nonfinite_and_boolean_horizon_confidence(self) -> None:
         rows = self.pair_rows()
         rows[0] = {
@@ -419,11 +486,27 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
         rows[0]["short"]["confidence"] = 0
         self.assertIsNotNone(self.bridge._contract_pair_bias_rows({"pairBias": json.dumps(rows)}))
 
-    def test_daily_bias_requires_claim_specific_horizon_evidence(self) -> None:
+    def test_daily_bias_requires_released_actual_and_claim_specific_horizon_evidence(self) -> None:
+        pending_report = self.report(
+            "pending-horizon-evidence",
+            updated_at="2026-08-14T01:00:00Z",
+            events=[self.event()],
+        )
+        pending_model = self.bridge._fx_bias_read_model(
+            [pending_report],
+            now_local=datetime.fromisoformat("2026-08-14T10:00:00+07:00"),
+        )
+        pending_eurusd = next(
+            row for row in pending_model["pairs"] if row["pair"] == "EURUSD"
+        )
+        self.assertEqual(pending_eurusd["shortBias"], "insufficient_data")
+        self.assertEqual(pending_eurusd["assessmentStatus"], "upcoming_event")
+        self.assertEqual(pending_model["directionalPairCount"], 0)
+
         report = self.report(
             "horizon-evidence",
             updated_at="2026-08-14T01:00:00Z",
-            events=[self.event()],
+            events=[self.event(actual="0.1%", actual_status="released")],
         )
         report["metrics"]["pairBias"][0]["medium"] = {
             "bias": "BEARISH",
@@ -437,6 +520,243 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
         eurusd = next(row for row in model["pairs"] if row["pair"] == "EURUSD")
         self.assertEqual(eurusd["shortBias"], "bullish")
         self.assertEqual(eurusd["mediumBias"], "insufficient_data")
+        self.assertEqual(eurusd["assessmentStatus"], "directional_ready")
+        self.assertTrue(eurusd["assessmentComplete"])
+        self.assertEqual(model["directionalPairCount"], 1)
+
+    def test_verified_upcoming_calendar_assesses_all_pairs_without_faking_direction(self) -> None:
+        events = [
+            self.event(
+                event_id=f"usd-upcoming-{index}",
+                title=f"USD release {index}",
+                scheduled_at=f"2026-08-14T{12 + index:02d}:30:00Z",
+            )
+            for index in range(4)
+        ]
+        report = self.report(
+            "upcoming-assessment",
+            updated_at="2026-08-14T01:00:00Z",
+            events=events,
+        )
+        report["metrics"]["pairBias"] = self.insufficient_pair_rows()
+
+        model = self.bridge._fx_bias_read_model(
+            [report],
+            now_local=datetime.fromisoformat("2026-08-14T10:00:00+07:00"),
+        )
+
+        self.assertEqual(model["schemaVersion"], "fx-pair-bias-read-model-v3")
+        self.assertEqual(model["assessedPairCount"], 28)
+        self.assertEqual(model["directionalPairCount"], 0)
+        self.assertEqual(model["verifiedPairCount"], 0)
+        self.assertEqual(model["upcomingEventPairCount"], 7)
+        self.assertEqual(model["awaitingEventPairCount"], 7)
+        self.assertEqual(model["noDirectEventPairCount"], 21)
+        self.assertTrue(model["assessmentComplete"])
+        self.assertTrue(model["currentDataAvailable"])
+        self.assertEqual(model["dataStatus"], "verified")
+        eurusd = next(row for row in model["pairs"] if row["pair"] == "EURUSD")
+        self.assertEqual(eurusd["assessmentStatus"], "upcoming_event")
+        self.assertTrue(eurusd["assessmentComplete"])
+        self.assertEqual(eurusd["relevantEventCount"], 4)
+        self.assertEqual(len(eurusd["relevantEvents"]), 3)
+        self.assertTrue(eurusd["nextEvent"]["eventId"].startswith("fxevent-"))
+        self.assertEqual(eurusd["nextEvent"]["titleTh"], "USD release 0")
+        self.assertEqual(
+            eurusd["nextEvent"]["scheduledAtBangkok"],
+            "2026-08-14T19:30:00+07:00",
+        )
+        self.assertTrue(all(
+            eurusd["nextEvent"].get(field) is not None
+            for field in ("titleTh", "currencies", "impact", "timeKind", "actualStatus")
+        ))
+        self.assertTrue(all(
+            eurusd["horizons"][horizon]["bias"] == "insufficient_data"
+            for horizon in ("short", "medium", "long")
+        ))
+        audcad = next(row for row in model["pairs"] if row["pair"] == "AUDCAD")
+        self.assertEqual(audcad["assessmentStatus"], "no_direct_event")
+        self.assertEqual(audcad["relevantEvents"], [])
+        self.assertIsNone(audcad["nextEvent"])
+
+    def test_pair_assessment_distinguishes_awaiting_actual_and_released_without_direction(self) -> None:
+        pending_report = self.report(
+            "pending-actual",
+            updated_at="2026-08-14T13:05:00Z",
+            events=[self.event(scheduled_at="2026-08-14T12:30:00Z")],
+        )
+        pending_report["metrics"]["pairBias"] = self.insufficient_pair_rows()
+        pending_model = self.bridge._fx_bias_read_model(
+            [pending_report],
+            now_local=datetime.fromisoformat("2026-08-14T21:00:00+07:00"),
+        )
+        eurusd_pending = next(
+            row for row in pending_model["pairs"] if row["pair"] == "EURUSD"
+        )
+        self.assertEqual(eurusd_pending["assessmentStatus"], "awaiting_actual")
+        self.assertEqual(pending_model["awaitingActualPairCount"], 7)
+        self.assertEqual(pending_model["awaitingEventPairCount"], 7)
+
+        pending_event = pending_model["pairs"][self.bridge.FX_BIAS_PAIRS.index("EURUSD")][
+            "relevantEvents"
+        ][0]
+        self.assertEqual(pending_event["timingState"], "past")
+        self.assertEqual(pending_event["releaseState"], "unconfirmed")
+        self.assertEqual(pending_event["analysisStatus"], "awaiting_actual")
+
+        news_model = self.bridge._fx_news_read_model(
+            [pending_report],
+            now_local=datetime.fromisoformat("2026-08-14T21:00:00+07:00"),
+        )
+        self.assertEqual(news_model["events"][0]["releaseState"], "unconfirmed")
+        self.assertEqual(news_model["events"][0]["analysisStatus"], "awaiting_actual")
+        self.assertEqual(news_model["scheduledCount"], 0)
+
+        released_event = self.event(
+            actual="0.1%",
+            actual_status="released",
+            scheduled_at="2026-08-14T12:30:00Z",
+        )
+        released_event["pairImpacts"] = {}
+        released_report = self.report(
+            "released-no-direction",
+            updated_at="2026-08-14T13:10:00Z",
+            events=[released_event],
+        )
+        released_report["metrics"]["pairBias"] = self.insufficient_pair_rows()
+        released_model = self.bridge._fx_bias_read_model(
+            [released_report],
+            now_local=datetime.fromisoformat("2026-08-14T21:00:00+07:00"),
+        )
+        eurusd_released = next(
+            row for row in released_model["pairs"] if row["pair"] == "EURUSD"
+        )
+        self.assertEqual(eurusd_released["assessmentStatus"], "released_no_direction")
+        self.assertEqual(eurusd_released["relevantEvents"][0]["actual"], "0.1%")
+        self.assertIsNone(eurusd_released["nextEvent"])
+        self.assertEqual(released_model["releasedNoDirectionPairCount"], 7)
+
+    def test_pair_assessment_never_calls_non_release_released(self) -> None:
+        self.assertEqual(
+            self.bridge._fx_pair_assessment_status(
+                directional_ready=False,
+                relevant_events=[{
+                    "timeKind": "holiday",
+                    "timingState": "current",
+                    "releaseState": "not_applicable",
+                    "actualStatus": "not_applicable",
+                }],
+            ),
+            "upcoming_event",
+        )
+        self.assertEqual(
+            self.bridge._fx_pair_assessment_status(
+                directional_ready=False,
+                relevant_events=[{
+                    "timeKind": "timed",
+                    "timingState": "past",
+                    "releaseState": "unconfirmed",
+                    "actualStatus": "unavailable",
+                }],
+            ),
+            "awaiting_actual",
+        )
+        self.assertEqual(
+            self.bridge._fx_pair_assessment_status(
+                directional_ready=False,
+                relevant_events=[{
+                    "timeKind": "timed",
+                    "timingState": "current",
+                    "releaseState": "scheduled",
+                    "actualStatus": "pending",
+                }],
+            ),
+            "upcoming_event",
+        )
+
+    def test_duplicate_pair_rows_cannot_inflate_directional_count(self) -> None:
+        report = self.report(
+            "duplicate-pair-rows",
+            updated_at="2026-08-14T13:00:00Z",
+            events=[self.event(actual=0, actual_status="released")],
+        )
+        report["metrics"]["pairBias"] = self.pair_rows() * 2
+        model = self.bridge._fx_bias_read_model(
+            [report],
+            now_local=datetime.fromisoformat("2026-08-14T21:00:00+07:00"),
+        )
+        self.assertEqual(model["directionalPairCount"], 1)
+        self.assertEqual(model["verifiedPairCount"], 1)
+        self.assertEqual(model["insufficientDataPairCount"], 27)
+
+    def test_dashboard_news_and_pair_assessment_share_one_bangkok_clock(self) -> None:
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_fx_news_read_model",
+                return_value={"schemaVersion": "news"},
+            ) as news_reader,
+            mock.patch.object(
+                self.bridge,
+                "_fx_bias_read_model",
+                return_value={"schemaVersion": "bias"},
+            ) as bias_reader,
+        ):
+            self.bridge.workflow_dashboard_read_model(
+                "left_signal_cube",
+                reports=[],
+                bridge={},
+                missions=[],
+            )
+        news_now = news_reader.call_args.kwargs["now_local"]
+        bias_now = bias_reader.call_args.kwargs["now_local"]
+        self.assertIs(news_now, bias_now)
+        self.assertEqual(news_now.tzinfo, self.bridge.THAILAND_TIMEZONE)
+
+    def test_verified_quiet_day_assesses_all_pairs_as_no_direct_event(self) -> None:
+        report = self.report(
+            "verified-quiet-assessment",
+            updated_at="2026-08-14T01:00:00Z",
+            events=[],
+            quiet_day=True,
+            source_status="quiet_day",
+        )
+        report["metrics"]["pairBias"] = self.insufficient_pair_rows()
+        model = self.bridge._fx_bias_read_model(
+            [report],
+            now_local=datetime.fromisoformat("2026-08-14T10:00:00+07:00"),
+        )
+        self.assertEqual(model["assessedPairCount"], 28)
+        self.assertEqual(model["noDirectEventPairCount"], 28)
+        self.assertEqual(model["unavailablePairCount"], 0)
+        self.assertTrue(model["assessmentComplete"])
+        self.assertEqual({row["assessmentStatus"] for row in model["pairs"]}, {"no_direct_event"})
+
+    def test_pair_assessment_is_unavailable_when_daily_sources_fail_closed(self) -> None:
+        good = self.report(
+            "assessment-good",
+            updated_at="2026-08-14T01:00:00Z",
+            events=[self.event()],
+        )
+        good["metrics"]["pairBias"] = self.insufficient_pair_rows()
+        failed = self.report(
+            "assessment-failed",
+            updated_at="2026-08-14T02:00:00Z",
+            events=[],
+            source_status="source_failure",
+        )
+        failed["status"] = "blocked"
+        failed["metrics"] = {"marketDate": "2026-08-14", "error": "source timeout"}
+        model = self.bridge._fx_bias_read_model(
+            [good, failed],
+            now_local=datetime.fromisoformat("2026-08-14T10:00:00+07:00"),
+        )
+        self.assertEqual(model["dataStatus"], "source_failure")
+        self.assertEqual(model["assessedPairCount"], 0)
+        self.assertEqual(model["unavailablePairCount"], 28)
+        self.assertFalse(model["assessmentComplete"])
+        self.assertFalse(model["currentDataAvailable"])
+        self.assertEqual({row["assessmentStatus"] for row in model["pairs"]}, {"unavailable"})
 
     def test_daily_contract_rejects_directional_event_pair_without_pair_source(self) -> None:
         event = self.event(actual="0.1%", actual_status="released")
@@ -465,6 +785,81 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
         )
         self.assertFalse(valid)
         self.assertIn("event_pair_impact_invalid", errors)
+
+    def test_daily_contract_rejects_directional_event_pair_before_actual(self) -> None:
+        event = self.event()
+        event["pairImpacts"] = {
+            "EURUSD": {
+                "impact": "BEARISH",
+                "confidence": 70,
+                "sourceRefs": ["official-1"],
+            }
+        }
+        fields = {
+            "marketDate": "2026-08-14",
+            "sourceStatus": "success",
+            "quietDay": False,
+            "events": [event],
+            "dangerWindows": [],
+            "pairBias": self.insufficient_pair_rows(),
+            "sourceLinks": [{
+                "id": "official-1",
+                "title": "BLS release",
+                "url": "https://www.bls.gov/news.release/cpi.nr0.htm",
+                "checkedAt": "2026-08-14T01:00:00Z",
+            }],
+            "checkedAt": "2026-08-14T01:00:00Z",
+            "updatedAt": "2026-08-14T01:00:00Z",
+            "limitations": [],
+        }
+        valid, errors = self.bridge._fx_daily_calendar_contract_valid(
+            {key: json.dumps(value, ensure_ascii=False) for key, value in fields.items()},
+            [{"url": "https://www.bls.gov/news.release/cpi.nr0.htm"}],
+            mission_row={
+                "createdAt": "2026-08-14T01:00:00Z",
+                "workflowContext": {
+                    "actionId": "analyze_daily_market_news",
+                    "inputs": {"marketDate": "2026-08-14"},
+                },
+            },
+        )
+        self.assertFalse(valid)
+        self.assertIn("event_pair_impact_invalid", errors)
+
+    def test_legacy_pending_event_pair_impacts_are_suppressed_on_read(self) -> None:
+        pending = self.event()
+        pending["pairImpacts"] = {
+            "EURUSD": {
+                "impact": "BEARISH",
+                "confidence": 70,
+                "sourceRefs": ["official-1"],
+            }
+        }
+        rows, complete = self.bridge._fx_event_pair_impact_rows(
+            pending,
+            source_event_id="legacy-pending",
+            metrics={},
+            event_sources=[{
+                "id": "official-1",
+                "url": "https://www.bls.gov/news.release/cpi.nr0.htm",
+            }],
+        )
+        self.assertEqual(rows, [])
+        self.assertFalse(complete)
+
+        released = {**pending, "actual": 0, "actualStatus": "released"}
+        released_rows, released_complete = self.bridge._fx_event_pair_impact_rows(
+            released,
+            source_event_id="released",
+            metrics={},
+            event_sources=[{
+                "id": "official-1",
+                "url": "https://www.bls.gov/news.release/cpi.nr0.htm",
+            }],
+        )
+        self.assertEqual(released_rows[0]["pair"], "EURUSD")
+        self.assertEqual(released_rows[0]["impact"], "bearish")
+        self.assertFalse(released_complete)
 
     def test_source_checked_at_must_be_zoned_and_not_future(self) -> None:
         base_fields = {
@@ -675,7 +1070,11 @@ class DailyFxNewsCalendarBackendTests(unittest.TestCase):
                 "detailTh": "d" * 100,
                 "outcomeTh": "o" * 80,
                 "surprise": "p" * 40,
-                "currencies": ["USD"],
+                "currencies": (
+                    sorted(self.bridge.FX_MAJOR_CURRENCIES)
+                    if index == 0
+                    else ["USD"]
+                ),
                 "scheduledAt": f"2026-08-14T{index + 1:02d}:00:00Z",
                 "timeKind": "timed",
                 "impact": "low",

@@ -1563,6 +1563,18 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             "metrics": {
                 "marketDate": "2026-08-12",
                 "sourceStatus": "success",
+                "events": [{
+                    "eventId": "released-usd-1",
+                    "titleTh": "ข่าว USD ที่ประกาศแล้ว",
+                    "summaryTh": "ผลจริงจากแหล่งสาธารณะที่ตรวจสอบได้",
+                    "currencies": ["USD"],
+                    "scheduledAt": "2026-08-12T00:00:00Z",
+                    "timeKind": "timed",
+                    "impact": "high",
+                    "actual": 0,
+                    "actualStatus": "released",
+                    "sourceRefs": ["source-1"],
+                }],
                 "sourceLinks": [
                     {"id": "source-1", "title": "Public source", "url": "https://example.com/fx", "checkedAt": "2026-08-12T00:00:00Z"},
                 ],
@@ -1640,8 +1652,8 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                     "currencies": ["USD"],
                     "scheduledAt": "2026-08-12T01:00:00Z",
                     "timeKind": "timed",
-                    "actual": None,
-                    "actualStatus": "pending",
+                    "actual": 0,
+                    "actualStatus": "released",
                     "impact": "high",
                     "sourceRef": "public-1",
                 }],
@@ -1765,6 +1777,13 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertEqual(bias["sourceReportId"], "fx-news-yesterday")
         self.assertEqual(bias["pairCount"], 28)
         self.assertEqual(bias["sourceBackedPairCount"], 0)
+        self.assertEqual(bias["assessedPairCount"], 0)
+        self.assertEqual(bias["unavailablePairCount"], 28)
+        self.assertFalse(bias["assessmentComplete"])
+        self.assertEqual(
+            {row["assessmentStatus"] for row in bias["pairs"]},
+            {"unavailable"},
+        )
         self.assertTrue(
             all(row["status"] == "insufficient_data" for row in bias["pairs"])
         )
