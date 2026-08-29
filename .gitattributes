@@ -16,6 +16,12 @@
 *.mq5 text eol=lf
 *.mqh text eol=lf
 
+# These curated MT4 sources are build evidence. Preserve the exact bytes that
+# are bound to their checked-in SHA256SUMS and BUILD_LOG records.
+artifacts/mt4-ai-council-ea-v2.15-execution-provenance/MetafxHQTradeGateway.mq4 -text -diff
+artifacts/mt4-ai-council-ea-v2.16-stream-transition-hardening/MetafxHQTradeGateway.mq4 -text -diff
+integrations/mt4-trade-gateway/MetafxHQTradeGateway.mq4 -text -diff
+
 *.png binary
 *.jpg binary
 *.jpeg binary
