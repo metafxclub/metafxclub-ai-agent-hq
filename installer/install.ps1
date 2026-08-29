@@ -4,6 +4,9 @@ param(
     [switch]$SkipLaunch,
     [switch]$SkipShortcuts,
     [switch]$SkipGoogleSetup,
+    [switch]$SkipAutostart,
+    [string]$GoogleClientJsonPath = "",
+    [string]$ExpectedGoogleClientId = "",
     [switch]$ListAvailableEndpoints,
     [switch]$PackageSmoke,
     [ValidateRange(0, 65535)]
@@ -31,6 +34,20 @@ $previousBridgeWasRunning = $false
 $previousBridgeWasStopped = $false
 $candidateBridgeMayBeRunning = $false
 $rollbackIncomplete = $false
+$postInstallFailure = ""
+
+if (
+    [string]::IsNullOrWhiteSpace($GoogleClientJsonPath) -xor
+    [string]::IsNullOrWhiteSpace($ExpectedGoogleClientId)
+) {
+    throw "การตั้งค่า Google แบบครั้งเดียวต้องระบุทั้ง GoogleClientJsonPath และ ExpectedGoogleClientId"
+}
+if (
+    -not [string]::IsNullOrWhiteSpace($ExpectedGoogleClientId) -and
+    $ExpectedGoogleClientId.Trim() -notmatch '^[A-Za-z0-9._-]+\.apps\.googleusercontent\.com$'
+) {
+    throw "ExpectedGoogleClientId ไม่ใช่ Google OAuth Client ID ที่รองรับ"
+}
 
 if ($Port -ne 0 -and $Port -lt 1024) {
     throw "Port ต้องเป็น 0 หรืออยู่ในช่วง 1024-65535"
@@ -699,6 +716,55 @@ function Rebind-BridgeScheduledTask {
     }
 }
 
+function Register-NewBridgeScheduledTask {
+    param([Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$ConfirmedPort)
+
+    if ($SkipAutostart -or $SkipLaunch) {
+        return
+    }
+
+    $registerScript = Join-Path $installRoot "scripts\register-bridge-autostart.ps1"
+    if (-not (Test-Path -LiteralPath $registerScript -PathType Leaf)) {
+        throw "ไม่พบ Script สำหรับเปิด Bridge อัตโนมัติหลังเข้า Windows"
+    }
+    if (Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction SilentlyContinue) {
+        throw "พบ Scheduled Task ของ Bridge ที่ไม่ได้ผ่านขั้นตอนพัก Task จึงหยุดก่อนเขียนทับ"
+    }
+
+    try {
+        Write-Step "กำลังเปิด Bridge อัตโนมัติหลังเข้าสู่ Windows และตั้ง Health watchdog"
+        & powershell.exe `
+            -NoLogo `
+            -NoProfile `
+            -NonInteractive `
+            -ExecutionPolicy Bypass `
+            -File $registerScript `
+            -WatchdogMinutes $bridgeTaskWatchdogMinutes | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "สร้าง Scheduled Task สำหรับ Local Bridge ไม่สำเร็จ"
+        }
+
+        $task = Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction Stop
+        $taskActions = @($task.Actions)
+        $expectedArgument = "/Port:$ConfirmedPort"
+        if (
+            $taskActions.Count -ne 1 -or
+            [IO.Path]::GetFileName([string]$taskActions[0].Execute) -ine "wscript.exe" -or
+            [string]$taskActions[0].Arguments -notlike "*//B*" -or
+            [string]$taskActions[0].Arguments -notlike "*run-bridge-watchdog-hidden.vbs*" -or
+            [string]$taskActions[0].Arguments -notlike "*$expectedArgument*"
+        ) {
+            throw "Scheduled Task ใหม่ไม่ได้ผูกกับ Bridge และพอร์ตที่ผ่าน Health check"
+        }
+        Write-Step "Bridge จะฟื้นตัวอัตโนมัติหลัง Login และตรวจซ้ำทุก $bridgeTaskWatchdogMinutes นาที"
+    }
+    catch {
+        $registrationError = [string]$_.Exception.Message
+        Unregister-ScheduledTask -TaskName $bridgeTaskName -Confirm:$false -ErrorAction SilentlyContinue
+        throw "เปิด Bridge อัตโนมัติไม่สำเร็จและลบ Task ที่สร้างไม่สมบูรณ์แล้ว: $registrationError"
+    }
+}
+
 function Stop-ExistingBridge {
     $lifecycle = Join-Path $installRoot "scripts\start-local-bridge.ps1"
     if (-not (Test-Path -LiteralPath $lifecycle -PathType Leaf)) {
@@ -1100,19 +1166,13 @@ function Invoke-GoogleOAuthFirstRunSetup {
     param([Parameter(Mandatory = $true)][string]$CandidateRoot)
 
     $alreadyConfigured = Test-GoogleOAuthDeploymentConfigured -CandidateRoot $CandidateRoot
-    if ($SkipGoogleSetup -or $SkipLaunch -or $alreadyConfigured) {
+    $explicitClientSetup = -not [string]::IsNullOrWhiteSpace($GoogleClientJsonPath)
+    # Preserve the original optional gate semantics ($SkipGoogleSetup -or $SkipLaunch)
+    # unless an explicit, fully validated one-shot JSON setup was requested.
+    if (($SkipGoogleSetup -and -not $explicitClientSetup) -or $SkipLaunch -or ($alreadyConfigured -and -not $explicitClientSetup)) {
         if ($alreadyConfigured) {
             Write-Host "Google OAuth Client ของ Windows User นี้ตั้งค่าไว้แล้ว" -ForegroundColor Green
         }
-        return
-    }
-
-    Write-Host ""
-    Write-Host "ตั้งค่า Google Sheets แบบ Private ครั้งเดียว (ไม่บังคับ)" -ForegroundColor Cyan
-    Write-Host "ใช้ OAuth Client JSON ประเภท Desktop app ของผู้เรียนเอง ระบบจะตรวจไฟล์และเก็บด้วย Windows DPAPI" -ForegroundColor DarkGray
-    $answer = Read-Host "ต้องการเลือก OAuth Client JSON ตอนนี้หรือไม่? [Y/N]"
-    if ($answer -notmatch '^(?i)y(?:es)?$') {
-        Write-Host "ข้ามขั้นตอน Google ตอนนี้ เปิด 2-SETUP-GOOGLE-HQ.bat ภายหลังได้" -ForegroundColor Yellow
         return
     }
 
@@ -1121,9 +1181,35 @@ function Invoke-GoogleOAuthFirstRunSetup {
         Write-Warning "ไม่พบ Google first-run wizard ในชุดติดตั้ง ระบบหลักจะติดตั้งต่อโดยยังไม่เปิด Google Sheet"
         return
     }
-    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
-        -File $setupScript -SkipBridgeEnsure -SkipOpen
+    if (-not $explicitClientSetup) {
+        Write-Host ""
+        Write-Host "ตั้งค่า Google Sheets แบบ Private ครั้งเดียว (ไม่บังคับ)" -ForegroundColor Cyan
+        Write-Host "ใช้ OAuth Client JSON ประเภท Desktop app ของผู้เรียนเอง ระบบจะตรวจไฟล์และเก็บด้วย Windows DPAPI" -ForegroundColor DarkGray
+        $answer = Read-Host "ต้องการเลือก OAuth Client JSON ตอนนี้หรือไม่? [Y/N]"
+        if ($answer -notmatch '^(?i)y(?:es)?$') {
+            Write-Host "ข้ามขั้นตอน Google ตอนนี้ เปิด 2-SETUP-GOOGLE-HQ.bat ภายหลังได้" -ForegroundColor Yellow
+            return
+        }
+    }
+
+    # Interactive and explicit paths both use -SkipBridgeEnsure -SkipOpen;
+    # the already-verified Bridge stays online while only the DPAPI client is updated.
+    $setupArguments = @(
+        "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", $setupScript,
+        "-SkipBridgeEnsure", "-SkipOpen"
+    )
+    if ($explicitClientSetup) {
+        $setupArguments += @(
+            "-ClientJsonPath", $GoogleClientJsonPath,
+            "-ExpectedClientId", $ExpectedGoogleClientId
+        )
+    }
+    & powershell.exe @setupArguments
     if ($LASTEXITCODE -ne 0) {
+        if ($explicitClientSetup) {
+            throw "ติดตั้ง HQ สำเร็จ แต่การตั้งค่า Google OAuth ที่ระบุไม่ผ่าน กรุณาตรวจ Path และ Client ID แล้วรันติดตั้งซ้ำ"
+        }
         Write-Warning "ยังตั้งค่า Google ไม่สำเร็จ ระบบหลักจะติดตั้งต่อ และสามารถเปิด 2-SETUP-GOOGLE-HQ.bat เพื่อลองใหม่"
     }
 }
@@ -1268,6 +1354,10 @@ function Start-And-TestBridge {
         -not $healthEndpointMatches
     ) {
         throw "Local Bridge ตอบกลับแต่ endpoint จาก Health check ไม่ตรงกับค่าที่บันทึกไว้"
+    }
+    $frontend = Invoke-WebRequest -Uri $endpoint.Url -Method Get -UseBasicParsing -TimeoutSec 10
+    if ([int]$frontend.StatusCode -ne 200 -or [int]$frontend.RawContentLength -le 0) {
+        throw "Local Bridge ผ่าน Health แต่หน้า Agent HQ ที่ $($endpoint.Url) ยังเปิดใช้งานไม่ได้"
     }
     return $endpoint
 }
@@ -1527,29 +1617,45 @@ try {
             $codexReadiness = Get-SafeCodexReadiness -Endpoint $bridgeEndpoint
             Show-CodexReadiness -Readiness $codexReadiness
             Write-InstallResult -Endpoint $bridgeEndpoint -Readiness $codexReadiness
-            if ($bridgeTaskExisted) {
-                Rebind-BridgeScheduledTask `
-                    -ConfirmedPort $selectedBridgePort `
-                    -EnableAfterRebind $bridgeTaskWasEnabled
-                # The registration script enabled and verified the replacement
-                # task already, so the finally block must not restore the old one.
-                $bridgeTaskWasEnabled = $false
-            }
         }
         if ($script:applicationRollbackState) {
             Remove-ApplicationRollbackSnapshot -RollbackState $script:applicationRollbackState
             $script:applicationRollbackState = $null
             $script:applicationMutationStarted = $false
         }
-        # Google setup is optional onboarding, not part of the transactional
-        # application publish. Offer it only after the installed Runtime passed
-        # its full tests and Health check and the rollback snapshot was released.
-        # A cancelled/invalid OAuth JSON must never roll back a healthy HQ.
+        # Watchdog and Google setup are non-transactional onboarding. Run them
+        # only after the installed Runtime passed its full tests and Health
+        # check and the rollback snapshot was released. Their failure must not
+        # turn a healthy, installed HQ into a false rollback report.
+        if (-not $SkipLaunch) {
+            try {
+                if ($bridgeTaskExisted) {
+                    Rebind-BridgeScheduledTask `
+                        -ConfirmedPort $selectedBridgePort `
+                        -EnableAfterRebind $bridgeTaskWasEnabled
+                    # The registration script enabled and verified the replacement
+                    # task already, so the finally block must not restore the old one.
+                    $bridgeTaskWasEnabled = $false
+                }
+                elseif (-not $SkipAutostart) {
+                    Register-NewBridgeScheduledTask -ConfirmedPort $selectedBridgePort
+                }
+            }
+            catch {
+                Write-Warning "ติดตั้งและตรวจระบบสำเร็จ แต่เปิด Watchdog อัตโนมัติไม่สำเร็จ: $($_.Exception.Message)"
+            }
+        }
         try {
             Invoke-GoogleOAuthFirstRunSetup -CandidateRoot $installRoot
         }
         catch {
-            Write-Warning "ติดตั้ง Agent HQ สำเร็จ แต่ยังเปิดขั้นตอน Google ไม่ได้ ให้เปิด 2-SETUP-GOOGLE-HQ.bat ภายหลัง"
+            if (-not [string]::IsNullOrWhiteSpace($GoogleClientJsonPath)) {
+                $postInstallFailure = "Agent HQ ติดตั้งและเปิดใช้งานแล้ว แต่ยังนำเข้า Google OAuth Client ไม่สำเร็จ กรุณาตรวจ JSON/Client ID แล้วเปิด 2-SETUP-GOOGLE-HQ.bat"
+                Write-Warning $postInstallFailure
+            }
+            else {
+                Write-Warning "ติดตั้ง Agent HQ สำเร็จ แต่ยังตั้งค่า Google ไม่ได้ ให้เปิด 2-SETUP-GOOGLE-HQ.bat ภายหลัง: $($_.Exception.Message)"
+            }
         }
         if (-not $SkipShortcuts) {
             try {
@@ -1631,6 +1737,12 @@ try {
     }
     else {
         Write-Host "ยังไม่ได้เปิด Bridge ในขั้นตอนนี้ ให้เปิดจาก Shortcut เพื่อเลือกและยืนยัน Local endpoint" -ForegroundColor Yellow
+    }
+    if (-not [string]::IsNullOrWhiteSpace($postInstallFailure)) {
+        Write-InstallLog -Message ("ติดตั้ง Runtime สำเร็จแต่ขั้นตอนหลังติดตั้งยังไม่ครบ: {0}" -f $postInstallFailure)
+        Write-Host $postInstallFailure -ForegroundColor Red
+        Write-Host "ตัวโปรแกรมไม่ถูก Rollback และยังเปิดใช้ได้จาก URL ด้านบน; รหัสผลลัพธ์ 2 หมายถึง Google setup ยังไม่ครบ" -ForegroundColor Yellow
+        exit 2
     }
     Write-Host "หากต้องใช้ Codex ให้นักเรียน Login ด้วยบัญชีของตนเองภายหลัง" -ForegroundColor Yellow
     exit 0

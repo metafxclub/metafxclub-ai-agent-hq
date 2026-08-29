@@ -424,7 +424,7 @@ class RadarBatchRepairLifecycleTests(unittest.TestCase):
             1,
         )
 
-    def test_report_persist_failure_halts_batch_without_duplicate_rerun(
+    def test_report_persist_failure_retries_same_commit_after_restart_without_rerun(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
@@ -444,7 +444,17 @@ class RadarBatchRepairLifecycleTests(unittest.TestCase):
                 final_name="batch-success-before-report-failure.final.md",
                 run_id="run-batch-report-failure",
             )
-            create_report = mock.Mock(side_effect=OSError("disk unavailable"))
+            real_create_report = self.bridge.create_report
+            create_attempts = 0
+
+            def flaky_create_report(payload: dict) -> dict:
+                nonlocal create_attempts
+                create_attempts += 1
+                if create_attempts == 1:
+                    raise OSError("disk unavailable")
+                return real_create_report(payload)
+
+            create_report = mock.Mock(side_effect=flaky_create_report)
             with mock.patch.object(
                 self.bridge,
                 "create_report",
@@ -459,32 +469,47 @@ class RadarBatchRepairLifecycleTests(unittest.TestCase):
                     {"processStarted": True},
                     valid_result,
                 )
-                duplicate_finish = self.bridge.finish_auto_mission(
-                    mission["id"],
-                    lease_id,
-                    {"processStarted": True},
-                    valid_result,
-                )
+                pending = self.bridge.find_mission(mission["id"])
+                pending["reportPersistenceRetry"]["nextAttemptAt"] = (
+                    datetime.now(self.bridge.timezone.utc) - timedelta(seconds=1)
+                ).isoformat()
+                self.bridge.replace_mission(pending)
                 recovered_count = (
-                    self.bridge.reconcile_current_day_public_research_output_repairs()
+                    self.bridge.reconcile_pending_radar_batch_report_commits()
                 )
             stored = self.bridge.find_mission(mission["id"])
+            schedule = self.bridge.load_dashboard_workflow_settings()[
+                "indicatorScoutSchedule"
+            ]
+            report_files = list(self.bridge.RUNTIME_REPORTS_DIR.glob("*.json"))
 
-        self.assertEqual(create_report.call_count, 1)
-        self.assertIsNone(duplicate_finish)
-        self.assertEqual(recovered_count, 0)
-        self.assertEqual(failed["status"], "failed")
-        self.assertEqual(stored["status"], "failed")
-        self.assertEqual(stored["errorCode"], "report_persist_failed")
-        self.assertEqual(stored["reportIds"], [])
-        self.assertEqual(stored["radarBatchRepair"]["status"], "halted")
-        self.assertIsNone(
-            stored["radarBatchRepair"].get("successfulReportId")
+        self.assertEqual(create_report.call_count, 2)
+        self.assertEqual(recovered_count, 1)
+        self.assertEqual(failed["status"], "running")
+        self.assertEqual(
+            failed["phase"],
+            self.bridge.RADAR_BATCH_REPORT_COMMIT_PENDING_PHASE,
         )
-        self.assertIsNone(
-            stored["radarBatchRepair"].get("successfulBatchArtifact")
+        self.assertEqual(failed["radarBatchReportCommit"]["status"], "pending")
+        self.assertTrue(failed["execution"]["automaticRetry"])
+        retry = failed["reportPersistenceRetry"]
+        self.assertEqual(retry["attemptCount"], 1)
+        self.assertTrue(retry["sameMission"])
+        self.assertTrue(retry["sameDailyReservation"])
+        self.assertFalse(retry["newDailyReservation"])
+        self.assertFalse(retry["webResearchRerun"])
+        self.assertEqual(stored["status"], "completed")
+        self.assertIsNone(stored["errorCode"])
+        self.assertEqual(stored["radarBatchRepair"]["status"], "completed")
+        self.assertEqual(
+            stored["radarBatchReportCommit"]["status"],
+            "completed",
         )
-        self.assertFalse(stored["execution"]["automaticRetry"])
+        self.assertEqual(stored["reportPersistenceRetry"]["status"], "completed")
+        self.assertFalse(stored["reportPersistenceRetry"]["automaticRetry"])
+        self.assertEqual(len(report_files), 1)
+        self.assertEqual(schedule["dailyExecutionCount"], 1)
+        self.assertEqual(schedule["dailyExecutionSlotKeys"], [slot_key])
 
     def test_missing_batch_artifact_is_rejected_without_crash_or_duplicate(
         self,

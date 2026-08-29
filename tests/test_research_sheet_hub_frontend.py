@@ -216,6 +216,8 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
     def test_preview_requires_real_three_tab_evidence_before_confirmation(self):
         normalize = self.block("function normalizeResearchSheetInspection", "function researchSheetHubConfiguredReference")
         render = self.block("function renderResearchSheetHubInspection", "function researchSheetHubSummaryPresentation")
+        header_normalizer = self.block("function normalizeResearchSheetHeaderList", "function normalizeResearchSheetHub")
+        header_summary = self.block("function researchSheetHeaderIssueSummary", "function renderResearchSheetHubInspection")
         self.assertIn("verificationToken", normalize)
         self.assertIn("/^[A-Za-z0-9_-]{32,128}$/", normalize)
         self.assertIn("baseConfigRevision", normalize)
@@ -223,13 +225,77 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
         self.assertIn("cachedRowCount", normalize)
         self.assertIn("observedAt", normalize)
         self.assertIn("probeEvidence", normalize)
+        self.assertIn("missingHeaders: normalizeResearchSheetHeaderList(item?.missingHeaders)", normalize)
+        self.assertIn("duplicateHeaders: normalizeResearchSheetHeaderList(item?.duplicateHeaders)", normalize)
+        self.assertIn(".slice(0, 100)", header_normalizer)
+        self.assertIn(".slice(0, 120)", header_normalizer)
         self.assertIn("consumer.readReady === true && consumer.probeEvidence.confirmed === true", normalize)
         self.assertIn("verifiedConsumerCount === consumers.length", normalize)
         self.assertIn("root.readyForConfirmation === true", normalize)
         self.assertIn("els.researchSheetHubActivate.hidden = !ready", render)
         self.assertIn("consumer.rowCount", render)
         self.assertIn("researchSheetObservedLabel(consumer.observedAt)", render)
+        self.assertIn("researchSheetHeaderIssueSummary(consumer)", render)
+        self.assertIn('summarize("ขาด", consumer.missingHeaders)', header_summary)
+        self.assertIn('summarize("ซ้ำ", consumer.duplicateHeaders)', header_summary)
         self.assertIn("หลักฐาน", render)
+
+    def test_read_only_column_query_is_bounded_and_shows_backend_columns(self):
+        for element_id in (
+            "researchSheetHubQuery",
+            "researchSheetHubQueryFields",
+            "researchSheetHubQueryTab",
+            "researchSheetHubQueryColumn",
+            "researchSheetHubQueryContains",
+            "researchSheetHubQueryLimit",
+            "researchSheetHubQuerySubmit",
+            "researchSheetHubQueryStatus",
+            "researchSheetHubQueryResults",
+        ):
+            self.assertEqual(self.html.count(f'id="{element_id}"'), 1)
+            self.assertEqual(
+                self.main.count(f'document.getElementById("{element_id}")'),
+                1,
+            )
+        query_markup_start = self.html.index('id="researchSheetHubQuery"')
+        query_markup_end = self.html.index('id="researchSheetHubInspection"', query_markup_start)
+        query_markup = self.html[query_markup_start:query_markup_end]
+        for tab_name in ("World_System", "Deep_Research", "Indicator_EA_Tool"):
+            self.assertIn(f'value="{tab_name}"', query_markup)
+        self.assertIn('<option value="">ทุกแท็บ</option>', query_markup)
+        self.assertIn('maxlength="120"', query_markup)
+        self.assertIn('maxlength="200"', query_markup)
+        self.assertIn('min="1" max="100"', query_markup)
+        self.assertIn("ไม่รับ A1 Range", query_markup)
+
+        constants = self.block("const RESEARCH_SHEET_HUB_ENDPOINT", "const RESEARCH_SHEET_CONSUMERS")
+        normalize = self.block("function normalizeResearchSheetQueryResult", "function normalizeResearchSheetHub")
+        can_run = self.block("function researchSheetHubQueryCanRun", "function researchSheetHubQueryIsBusy")
+        render = self.block("function renderResearchSheetHubQuery", "function researchSheetHeaderIssueSummary")
+        request = self.block("async function queryResearchSheetHub", "async function loadResearchSheetGoogleAuth")
+        self.assertIn('${RESEARCH_SHEET_HUB_ENDPOINT}/query', constants)
+        self.assertIn('new Set(["", "World_System", "Deep_Research", "Indicator_EA_Tool"])', constants)
+        self.assertIn("rawMatches.slice(0, RESEARCH_SHEET_QUERY_MAX_MATCHES)", normalize)
+        self.assertIn("normalizeResearchSheetQueryText(item?.value, 1_000)", normalize)
+        self.assertIn("rawSearchedTabs.slice(0, RESEARCH_SHEET_CONSUMERS.length)", normalize)
+        self.assertIn("normalizeResearchSheetHeaderList(item?.availableColumns)", normalize)
+        self.assertIn("Array.isArray(root.availableColumns)", normalize)
+        self.assertIn('data?.operational === true', can_run)
+        self.assertIn('data?.readReady === true', can_run)
+        self.assertIn("data.activeConfigRevision === data.configRevision", can_run)
+        self.assertIn("postJson(RESEARCH_SHEET_HUB_QUERY_ENDPOINT, {", request)
+        for field in ("tabName,", "columnName,", "contains,", "limit,"):
+            self.assertIn(field, request)
+        self.assertIn('errorResult.kind === "research_sheet_column_not_found"', request)
+        self.assertIn("result.searchedTabs.forEach", render)
+        self.assertIn("tab.availableColumns.forEach", render)
+        self.assertIn("result.matches.forEach", render)
+        self.assertIn("value.textContent = match.value", render)
+        self.assertIn("els.researchSheetHubQueryResults.replaceChildren()", render)
+        self.assertNotIn("innerHTML", render)
+        self.assertIn(".research-sheet-hub-query-fields", self.styles)
+        self.assertIn(".research-sheet-hub-query-match-list", self.styles)
+        self.assertIn(".research-sheet-hub-query-columns", self.styles)
 
     def test_activation_is_fail_closed_and_keeps_the_id_visible(self):
         activate = self.block("async function activateResearchSheetHub", "function normalizeOperatorModePayload")
@@ -321,6 +387,7 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
 
     def test_factory_uses_deep_research_without_duplicate_sheet_input(self):
         renderer = self.block("function renderEaFactoryGoogleSheetSync", "function renderEaFactorySourceStage")
+        schema_renderer = self.block("function renderEaFactorySheetSchema", "function renderEaFactoryGoogleSheetSync")
         sync = self.block("async function syncEaFactoryGoogleSheet", "async function createEaFactoryBuild")
         self.assertIn("researchSheetConsumerPresentation(TRADING_RESEARCH_LAB_PROP_ID, { requiresWrite: false })", renderer)
         self.assertIn("Deep_Research", self.main)
@@ -328,6 +395,12 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
         self.assertNotIn('name = "googleSheetUrlOrId"', renderer)
         self.assertIn("{ idempotencyKey }", sync)
         self.assertNotIn("googleSheetUrlOrId", sync)
+        self.assertIn("sheetSchema.sourceRequiredHeaders", schema_renderer)
+        self.assertIn("sheetSchema.sheetTabDefault", schema_renderer)
+        self.assertIn("eaFactorySpreadsheetColumnName(sourceHeaders.length)", schema_renderer)
+        self.assertIn("${sourceHeaders.length} headers", schema_renderer)
+        self.assertIn("ไม่ใช่ช่วงคอลัมน์ Google Sheet", schema_renderer)
+        self.assertNotIn("Schema Google Sheets A-W", schema_renderer)
 
     def test_progress_and_layout_are_accessible_and_responsive(self):
         progress = self.block("function renderResearchSheetHubProgress", "function researchSheetConsumer")

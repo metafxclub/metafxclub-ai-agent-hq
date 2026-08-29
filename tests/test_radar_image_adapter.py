@@ -117,6 +117,13 @@ class RadarImageAdapterTests(unittest.TestCase):
             pass
 
         class FakeContext:
+            # Python 3.11 inspects these SSLContext attributes while
+            # constructing HTTPSConnection. Mirror the secure defaults used
+            # by ssl.create_default_context() so this test double satisfies
+            # the same contract on every supported Python version.
+            verify_mode = adapter.ssl.CERT_REQUIRED
+            check_hostname = True
+
             def wrap_socket(self, raw_socket, *, server_hostname):
                 observations["wrapped_raw"] = raw_socket
                 observations["server_hostname"] = server_hostname

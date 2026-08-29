@@ -64,7 +64,10 @@ def _emit(payload: dict) -> None:
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments in (["--help"], ["-h"]):
-        print("usage: configure_google_oauth_client.py --status | --file <desktop-client.json> | --remove")
+        print(
+            "usage: configure_google_oauth_client.py --status | "
+            "--file <desktop-client.json> [--expected-client-id <id>] | --remove"
+        )
         return 0
     try:
         if arguments == ["--status"]:
@@ -78,9 +81,15 @@ def main(argv: list[str] | None = None) -> int:
                 "store": "empty",
                 "removed": removed.get("removed") is True,
             }
-        elif len(arguments) == 2 and arguments[0] == "--file":
+        elif (
+            len(arguments) in {2, 4}
+            and arguments[0] == "--file"
+            and (len(arguments) == 2 or arguments[2] == "--expected-client-id")
+        ):
+            expected_client_id = arguments[3] if len(arguments) == 4 else ""
             configured = google_sheet_hub.configure_google_oauth_client_json(
-                _read_selected_file(arguments[1])
+                _read_selected_file(arguments[1]),
+                expected_client_id=expected_client_id,
             )
             result = {
                 "ok": True,
@@ -94,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
                     "ok": False,
                     "configured": False,
                     "kind": "invalid_arguments",
-                    "message": "Use --status, --file with one Desktop OAuth JSON file, or --remove.",
+                    "message": "Use --status, --file with one Desktop OAuth JSON file and optional expected Client ID, or --remove.",
                 }
             )
             return 1

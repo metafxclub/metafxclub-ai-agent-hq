@@ -9,7 +9,11 @@ echo   ติดตั้ง Metafxclub AI Agent HQ สำหรับผู้�
 echo ============================================================
 echo.
 
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0installer\install.ps1" %*
+if "%~1"=="" (
+  powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0installer\install.ps1" -Port 4186 -EndpointConfirmed
+) else (
+  powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0installer\install.ps1" %*
+)
 set "INSTALL_EXIT=%ERRORLEVEL%"
 
 if not "%INSTALL_EXIT%"=="0" (

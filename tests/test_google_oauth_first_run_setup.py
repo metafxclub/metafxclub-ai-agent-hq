@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SETUP_SCRIPT = ROOT / "scripts" / "setup-google-oauth.ps1"
 SETUP_BAT = ROOT / "2-SETUP-GOOGLE-HQ.bat"
+INSTALL_BAT = ROOT / "1-INSTALL-HQ.bat"
 INSTALLER = ROOT / "installer" / "install.ps1"
 UNINSTALLER = ROOT / "scripts" / "uninstall-hq.ps1"
 AUTO_INSTALL_PROMPT = ROOT / "docs" / "prompts" / "install-github-google-auto-th.md"
@@ -46,6 +47,9 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertIn("Get-SafeClientJsonPath", script)
         self.assertIn("ReparsePoint", script)
         self.assertIn("64KB", script)
+        self.assertIn('"--expected-client-id"', script)
+        self.assertNotIn("function Assert-ExpectedClientId", script)
+        self.assertNotIn("Get-Content -LiteralPath $Path", script)
         self.assertNotIn("ProtectedData", script)
         self.assertNotIn("SetEnvironmentVariable", script)
         self.assertNotIn("Get-Content -LiteralPath $fullPath", script)
@@ -57,6 +61,12 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertIn('if "%~1"==""', batch)
         self.assertIn('-ClientJsonPath "%~1"', batch)
         self.assertIn("setup-google-oauth.ps1", batch)
+
+    def test_main_install_bat_is_one_click_on_fixed_classroom_endpoint(self) -> None:
+        batch = INSTALL_BAT.read_text(encoding="utf-8-sig")
+        self.assertIn('if "%~1"==""', batch)
+        self.assertIn("-Port 4186 -EndpointConfirmed", batch)
+        self.assertIn('installer\\install.ps1" %*', batch)
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI integration")
     def test_powershell_import_round_trips_through_canonical_backend_store(self) -> None:
@@ -92,6 +102,8 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
                     str(SETUP_SCRIPT),
                     "-ClientJsonPath",
                     str(source_json),
+                    "-ExpectedClientId",
+                    client_id,
                     "-SkipBridgeEnsure",
                     "-SkipOpen",
                 ],
@@ -153,7 +165,18 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
             installer.index("function Invoke-GoogleOAuthFirstRunSetup") :
             installer.index("function Invoke-BridgeLifecycleProcess")
         ]
-        self.assertIn("$SkipGoogleSetup -or $SkipLaunch", first_run_function)
+        self.assertIn("$explicitClientSetup", first_run_function)
+        self.assertIn("$SkipGoogleSetup -and -not $explicitClientSetup", first_run_function)
+        self.assertIn("-ExpectedClientId", first_run_function)
+        post_commit = installer[installer.index("Remove-ApplicationRollbackSnapshot -RollbackState") :]
+        self.assertLess(
+            post_commit.index("Register-NewBridgeScheduledTask"),
+            post_commit.index("Invoke-GoogleOAuthFirstRunSetup"),
+        )
+        self.assertIn("ติดตั้ง Agent HQ สำเร็จ แต่ยังตั้งค่า Google ไม่ได้", post_commit)
+        self.assertIn('$postInstallFailure = "Agent HQ ติดตั้งและเปิดใช้งานแล้ว', post_commit)
+        self.assertIn("exit 2", post_commit)
+        self.assertIn("ตัวโปรแกรมไม่ถูก Rollback", post_commit)
 
     def test_student_docs_keep_json_out_of_browser_and_project(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -175,7 +198,10 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
             self.assertIn(placeholder, prompt)
         self.assertIn("-ListAvailableEndpoints", prompt)
         self.assertIn("available=true", prompt)
-        self.assertIn("-EndpointConfirmed -SkipGoogleSetup", prompt)
+        self.assertIn("-Port 4186 -EndpointConfirmed", prompt)
+        self.assertIn("-GoogleClientJsonPath", prompt)
+        self.assertIn("-ExpectedGoogleClientId", prompt)
+        self.assertNotIn("-EndpointConfirmed -SkipGoogleSetup", prompt)
         self.assertIn("ห้ามใช้ -SkipLaunch", prompt)
         self.assertNotIn("-SkipGoogleSetup -SkipLaunch", prompt)
         self.assertIn(
@@ -185,6 +211,8 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertIn("-ClientJsonPath", prompt)
         self.assertIn("-SkipOpen", prompt)
         self.assertIn("authorization_required", prompt)
+        self.assertIn("Exit code 2", prompt)
+        self.assertIn("partial success", prompt)
         self.assertIn("ห้ามกดปุ่มเชื่อม Google", prompt)
         self.assertIn("Client Secret", prompt)
 

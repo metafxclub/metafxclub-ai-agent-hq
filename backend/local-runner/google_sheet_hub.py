@@ -245,8 +245,22 @@ def parse_google_oauth_client_json(raw_json: str | bytes) -> dict[str, str]:
         raise GoogleSheetHubError(error.code, error.message, 422) from error
 
 
-def configure_google_oauth_client_json(raw_json: str | bytes) -> dict:
+def configure_google_oauth_client_json(
+    raw_json: str | bytes,
+    *,
+    expected_client_id: str = "",
+) -> dict:
     configuration = parse_google_oauth_client_json(raw_json)
+    normalized_expected = str(expected_client_id or "").strip()
+    if normalized_expected and not secrets.compare_digest(
+        configuration["clientId"],
+        normalized_expected,
+    ):
+        raise GoogleSheetHubError(
+            "oauth_client_id_mismatch",
+            "The OAuth JSON does not match the expected Desktop Client ID.",
+            422,
+        )
     try:
         previous = oauth_client_configuration()
     except GoogleSheetHubError:
@@ -1208,7 +1222,25 @@ def upsert_row(
     )
     if not confirmed:
         raise GoogleSheetHubError("write_verification_failed", "Google Sheets did not confirm exactly one updated row.", 502, True)
-    readback = read_values(sheet_id, tab_name, f"A{target_row}:{end_column}{target_row}", environ=environ, open_url=open_url)
+    try:
+        readback = read_values(
+            sheet_id,
+            tab_name,
+            f"A{target_row}:{end_column}{target_row}",
+            environ=environ,
+            open_url=open_url,
+        )
+    except GoogleSheetHubError as error:
+        # The batchUpdate response already confirmed one updated row.  If the
+        # independent read-back cannot complete, the adapter must not turn that
+        # into a terminal read error: the external write may be durable and an
+        # idempotent retry by the same record key is the only safe recovery.
+        raise GoogleSheetHubError(
+            "write_unknown",
+            "Google Sheet write completed but read-back verification could not be completed.",
+            502,
+            True,
+        ) from error
     observed = [str(value or "") for value in (readback[0] if readback else [])]
     observed.extend([""] * (len(headers) - len(observed)))
     if any(observed[index] != value for index, value in owned_by_index.items()):

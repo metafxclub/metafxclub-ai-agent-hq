@@ -14,7 +14,41 @@ permissions:
   statuses: write
 
 jobs:
+  compatibility:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    env:
+      CODEX_HOME: ${{ github.workspace }}\.ci-codex-home
+    steps:
+      - name: Check out compatibility source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up supported Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Verify full runtime on supported Python
+        shell: pwsh
+        run: |
+          python -m venv runner/.venv
+          .\runner\.venv\Scripts\python.exe -m pip install --disable-pip-version-check --require-hashes --requirement requirements-runner.txt
+          if ($LASTEXITCODE -ne 0) {
+            throw "Pinned dependency installation failed on Python ${{ matrix.python-version }} with exit code $LASTEXITCODE"
+          }
+          .\runner\.venv\Scripts\python.exe -m pip check
+          if ($LASTEXITCODE -ne 0) {
+            throw "Pinned dependency check failed on Python ${{ matrix.python-version }} with exit code $LASTEXITCODE"
+          }
+          .\runner\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v
+          if ($LASTEXITCODE -ne 0) {
+            throw "Regression suite failed on Python ${{ matrix.python-version }} with exit code $LASTEXITCODE"
+          }
+
   publish:
+    needs: compatibility
     runs-on: windows-latest
     env:
       # The release gate must pass from a clean student-like Codex profile,
@@ -27,7 +61,9 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: "3.12"
+          # Match the student runtime that exposed the SSL test-double
+          # regression. The compatibility job above gates 3.10-3.14.
+          python-version: "3.11"
 
       - name: Verify safe runtime
         shell: pwsh
@@ -180,15 +216,15 @@ jobs:
           วิธีติดตั้งแบบ ZIP:
           1. ติดตั้ง Python 3.10-3.14 จาก python.org และเลือก Add Python to PATH
           2. ดาวน์โหลดไฟล์ ZIP และแตกไฟล์
-          3. ดับเบิลคลิก 1-INSTALL-HQ.bat
-          4. ยืนยัน Local URL ที่ตัวติดตั้งตรวจว่าว่าง
-          5. หากใช้ Google Sheet แบบ Private ให้เลือก Desktop OAuth JSON ใน First-run wizard หรือเปิด 2-SETUP-GOOGLE-HQ.bat ภายหลัง
-          6. เปิด Agent HQ แล้วกดเชื่อมบัญชี Google ครั้งเดียว จากนั้นกรอก Sheet ID
+          3. ดับเบิลคลิก 1-INSTALL-HQ.bat เพียงครั้งเดียว
+          4. รอให้ระบบติดตั้งที่ %LOCALAPPDATA% เปิด Bridge และตรวจหน้า http://127.0.0.1:4186/
+          5. ระบบเปิด Bridge หลัง Login และตรวจ Health ทุก 15 นาทีให้อัตโนมัติ
+          6. หากใช้ Google Sheet แบบ Private ให้เลือก Desktop OAuth JSON ใน First-run wizard จากนั้นกดเชื่อมบัญชี Google ครั้งเดียวและกรอก Sheet ID
 
           วิธีติดตั้งด้วย Git สำหรับผู้เรียน:
           1. ติดตั้ง Python 3.10-3.14 จาก python.org และเลือก Add Python to PATH
           2. Clone Repository นี้ลงเครื่อง
-          3. ดับเบิลคลิก 1-INSTALL-HQ.bat
+          3. ดับเบิลคลิก 1-INSTALL-HQ.bat ครั้งเดียว แล้วใช้ http://127.0.0.1:4186/
           4. เมื่อต้องการรับเวอร์ชันใหม่ ให้ปิดงานที่กำลังทำและดับเบิลคลิก UPDATE-HQ.bat
 
           หลังติดตั้ง ระบบตรวจ Health, Codex และ Rate Limit ของบัญชีที่ Login อยู่ในเครื่องนั้น

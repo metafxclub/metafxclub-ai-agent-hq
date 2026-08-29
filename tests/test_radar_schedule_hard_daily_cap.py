@@ -255,7 +255,7 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
         self.assertFalse(second["dispatched"])
         self.assertEqual(len(calls), 1)
 
-    def test_dispatch_exception_consumes_fail_closed_reservation(self) -> None:
+    def test_dispatch_exception_preserves_fail_closed_reservation_for_replay(self) -> None:
         runner = mock.Mock(side_effect=RuntimeError("ambiguous dispatch boundary"))
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_path = Path(temp_dir) / "settings.json"
@@ -279,8 +279,11 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
         self.assertFalse(second["dispatched"])
         self.assertEqual(runner.call_count, 1)
         self.assertEqual(stored["dailyExecutionCount"], 1)
-        self.assertIsNone(stored["pendingSlotKey"])
-        self.assertEqual(stored["lastResultKind"], "pending_slot_already_reserved")
+        self.assertEqual(
+            stored["pendingSlotKey"],
+            "indicatorScoutSchedule:2026-08-12:0900",
+        )
+        self.assertEqual(stored["lastResultKind"], "schedule_dispatch_exception")
 
     def test_contracts_declare_runtime_cap_restart_and_midnight_policies(self) -> None:
         compatibility = json.loads(

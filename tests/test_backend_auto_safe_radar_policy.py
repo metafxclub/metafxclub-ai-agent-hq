@@ -465,7 +465,7 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
         self.assertEqual(mission["approval"]["state"], "not_required")
         self.assertFalse(mission["approval"]["required"])
         self.assertEqual(mission["budget"]["outputLimitChars"], 20000)
-        self.assertEqual(mission["budget"]["timeoutSeconds"], 300)
+        self.assertEqual(mission["budget"]["timeoutSeconds"], 600)
         self.assertEqual(mission["budget"]["rateReservePercent"], 15)
         self.assertEqual(public["automaticPolicy"], {
             "mode": "backend_auto_safe",
@@ -1740,7 +1740,7 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
             "runner_response_duplicate_payload_truncated",
         )
         self.assertEqual(repaired["budget"]["rateReservePercent"], 15)
-        self.assertEqual(repaired["budget"]["timeoutSeconds"], 300)
+        self.assertEqual(repaired["budget"]["timeoutSeconds"], 600)
         self.assertEqual(repaired["budget"]["outputLimitChars"], 20000)
         self.assertEqual(schedule["lastMissionId"], mission["id"])
         self.assertEqual(schedule["dailyExecutionCount"], 1)
@@ -2064,7 +2064,7 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
         )
         self.assertTrue(repaired["execution"]["automaticRetry"])
         self.assertEqual(repaired["budget"]["rateReservePercent"], 15)
-        self.assertEqual(repaired["budget"]["timeoutSeconds"], 300)
+        self.assertEqual(repaired["budget"]["timeoutSeconds"], 600)
         self.assertEqual(repaired["budget"]["outputLimitChars"], 20000)
         self.assertEqual(repaired["reportIds"], [])
         self.assertIsNone(repaired["artifactPath"])
@@ -3629,6 +3629,130 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
                         "public_web_evidence_unverified",
                     )
 
+    def test_scheduled_report_persist_failure_requeues_same_mission_and_slot(
+        self,
+    ) -> None:
+        valid_contract = {
+            "applicable": True,
+            "valid": True,
+            "failureCode": None,
+            "procedureId": self.bridge.RADAR_WORKFLOW_PROCEDURE_ID,
+            "providedFields": ["entries"],
+            "missingFields": [],
+            "expectedEvidenceKinds": [],
+            "providedEvidenceKinds": [],
+            "missingEvidenceKinds": [],
+            "entryErrors": [],
+            "oversizedFields": [],
+            "values": {"entries": "[]"},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
+            mission = self.create_safe_radar(
+                idempotency_key="report-persist-retry"
+            )
+            mission_id = mission["id"]
+            slot_key = mission["idempotencyKey"].removeprefix(
+                "dashboard-schedule:"
+            )
+            today = datetime.now(self.bridge.THAILAND_TIMEZONE).date().isoformat()
+            self.bridge._dashboard_workflow_update_schedule_state(
+                "indicatorScoutSchedule",
+                {
+                    "requestedEnabled": True,
+                    "lastMissionId": mission_id,
+                    "lastSlotKey": slot_key,
+                    "lastAttemptSlotKey": slot_key,
+                    "dailyExecutionDate": today,
+                    "dailyExecutionCount": 1,
+                    "dailyExecutionSlotKeys": [slot_key],
+                },
+            )
+            lease_id = "lease-report-persist-retry"
+            mission.update({
+                "status": "running",
+                "phase": "auto_guarded_running",
+                "attemptCount": 1,
+            })
+            mission["execution"].update({
+                "dispatchState": "running",
+                "leaseId": lease_id,
+                "workerId": "worker-report-persist-retry",
+                "processStarted": True,
+            })
+            self.bridge.replace_mission(mission)
+            runner_result = {
+                "ok": True,
+                "status": "completed",
+                "workStatus": "completed",
+                "finalMessage": "verified public research",
+                "processStarted": True,
+                "workingDirectory": "workspace",
+                "writeRoots": [],
+                "controlPlaneWritable": False,
+                "webSearchEnabled": True,
+                "webSearchMode": "live",
+                "webSearchUsed": True,
+                "webSearchEvidenceVerified": True,
+                "evidence": [],
+                "artifacts": {},
+            }
+            with (
+                mock.patch.object(
+                    self.bridge,
+                    "validate_dashboard_workflow_output_contract",
+                    return_value=valid_contract,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_radar_complete_daily_batch_required",
+                    return_value=False,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "create_report",
+                    side_effect=OSError("disk unavailable"),
+                ) as create_report,
+                mock.patch.object(
+                    self.bridge,
+                    "queue_radar_publisher_image_enrichment",
+                ) as queue_image,
+            ):
+                deferred = self.bridge.finish_auto_mission(
+                    mission_id,
+                    lease_id,
+                    {"processStarted": True},
+                    runner_result,
+                )
+            stored = self.bridge.find_mission(mission_id)
+            schedule = self.bridge.load_dashboard_workflow_settings()[
+                "indicatorScoutSchedule"
+            ]
+
+        create_report.assert_called_once()
+        queue_image.assert_not_called()
+        self.assertEqual(deferred["id"], mission_id)
+        self.assertEqual(stored["id"], mission_id)
+        self.assertEqual(stored["status"], "queued")
+        self.assertEqual(
+            stored["phase"],
+            "auto_guarded_scheduled_completion_retry_deferred",
+        )
+        self.assertEqual(stored["reportIds"], [])
+        retry = stored["scheduledCompletionRetry"]
+        self.assertEqual(retry["lastFailureCode"], "report_persist_failed")
+        self.assertTrue(retry["sameMission"])
+        self.assertTrue(retry["sameDailyReservation"])
+        self.assertFalse(retry["newDailyReservation"])
+        self.assertEqual(schedule["lastMissionId"], mission_id)
+        self.assertEqual(schedule["lastSlotKey"], slot_key)
+        self.assertEqual(schedule["dailyExecutionCount"], 1)
+        self.assertEqual(schedule["dailyExecutionSlotKeys"], [slot_key])
+        self.assertEqual(schedule["lastRunStatus"], "deferred")
+        self.assertEqual(
+            schedule["lastResultKind"],
+            "report_persist_retry_deferred",
+        )
+
     def test_finish_exact_evidence_open_failure_retries_once_without_report_or_new_slot(self) -> None:
         today = datetime.now(self.bridge.THAILAND_TIMEZONE).date().isoformat()
         slot_key = f"discoverySchedule:{today}:0900"
@@ -3748,7 +3872,7 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
                         "discoverySchedule"
                     ]
                 )
-                create_report.assert_called_once()
+                create_report.assert_not_called()
 
         self.assertEqual(first["id"], mission_id)
         self.assertEqual(first["status"], "queued")
@@ -3769,9 +3893,30 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
         self.assertEqual(schedule_after_first["dailyExecutionCount"], 1)
         self.assertEqual(schedule_after_first["dailyExecutionSlotKeys"], [slot_key])
         self.assertEqual(second["id"], mission_id)
-        self.assertEqual(second["status"], "failed")
-        self.assertFalse(second["execution"]["automaticRetry"])
+        self.assertEqual(second["status"], "queued")
+        self.assertEqual(
+            second["phase"],
+            "auto_guarded_scheduled_completion_retry_deferred",
+        )
+        self.assertTrue(second["execution"]["automaticRetry"])
+        self.assertEqual(second["execution"]["dispatchState"], "deferred")
+        self.assertTrue(second["execution"]["sameMission"])
+        self.assertTrue(second["execution"]["sameDailyReservation"])
+        self.assertEqual(second["scheduledCompletionRetry"]["attemptCount"], 1)
+        self.assertTrue(second["scheduledCompletionRetry"]["sameMission"])
+        self.assertTrue(
+            second["scheduledCompletionRetry"]["sameDailyReservation"]
+        )
+        self.assertFalse(
+            second["scheduledCompletionRetry"]["newDailyReservation"]
+        )
+        self.assertEqual(second["reportIds"], [])
         self.assertEqual(second["correctiveRetry"]["attemptCount"], 1)
+        self.assertEqual(schedule_after_second["lastRunStatus"], "deferred")
+        self.assertEqual(
+            schedule_after_second["lastResultKind"],
+            "scheduled_completion_retry_deferred",
+        )
         self.assertEqual(schedule_after_second["dailyExecutionCount"], 1)
         self.assertEqual(schedule_after_second["dailyExecutionSlotKeys"], [slot_key])
 

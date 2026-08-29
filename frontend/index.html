@@ -93,6 +93,63 @@
                 <div class="research-sheet-hub-lifecycle" id="researchSheetHubLifecycle" aria-label="สถานะการเชื่อมต่อ Sheet ที่ใช้งาน"></div>
                 <div class="research-sheet-hub-linked-systems" id="researchSheetHubLinkedSystems" aria-label="สถานะ 4 ระบบที่ใช้ Google Sheet กลาง"></div>
               </div>
+              <section
+                class="research-sheet-hub-query"
+                id="researchSheetHubQuery"
+                aria-labelledby="researchSheetHubQueryTitle"
+                aria-busy="false"
+              >
+                <header>
+                  <div>
+                    <span>READ-ONLY QUERY</span>
+                    <strong id="researchSheetHubQueryTitle">ค้นข้อมูลตามชื่อคอลัมน์</strong>
+                    <small>ค้นจาก Sheet ที่เปิดใช้อยู่จริง ไม่ใช่ ID ที่กำลังแก้ไข • ไม่รับ A1 Range</small>
+                  </div>
+                  <b id="researchSheetHubQueryStatus" data-tone="neutral" role="status" aria-live="polite">เปิดใช้ Google Sheet ก่อนค้นข้อมูล</b>
+                </header>
+                <div class="research-sheet-hub-query-fields" id="researchSheetHubQueryFields" role="search">
+                  <label>
+                    <span>แท็บ</span>
+                    <select id="researchSheetHubQueryTab" autocomplete="off">
+                      <option value="">ทุกแท็บ</option>
+                      <option value="World_System">World_System</option>
+                      <option value="Deep_Research">Deep_Research</option>
+                      <option value="Indicator_EA_Tool">Indicator_EA_Tool</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>ชื่อคอลัมน์</span>
+                    <input
+                      id="researchSheetHubQueryColumn"
+                      type="text"
+                      maxlength="120"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="เช่น system_name"
+                    >
+                  </label>
+                  <label>
+                    <span>มีข้อความนี้ (ไม่บังคับ)</span>
+                    <input
+                      id="researchSheetHubQueryContains"
+                      type="text"
+                      maxlength="200"
+                      autocomplete="off"
+                      placeholder="กรองเฉพาะค่าที่มีคำนี้"
+                    >
+                  </label>
+                  <label class="research-sheet-hub-query-limit">
+                    <span>จำนวนสูงสุด</span>
+                    <input id="researchSheetHubQueryLimit" type="number" min="1" max="100" step="1" value="25">
+                  </label>
+                  <button class="modal-action primary" id="researchSheetHubQuerySubmit" type="button">ค้นข้อมูล</button>
+                </div>
+                <div
+                  class="research-sheet-hub-query-results"
+                  id="researchSheetHubQueryResults"
+                  aria-label="ผลการค้นข้อมูลจาก Google Sheet"
+                ></div>
+              </section>
               <section class="research-sheet-hub-inspection" id="researchSheetHubInspection" aria-labelledby="researchSheetHubInspectionTitle" hidden>
                 <header>
                   <div>

@@ -18,7 +18,7 @@ AI Agent Visual Office แบบ Local สำหรับจัดการ Miss
 
 ## ติดตั้งด้วยลิงก์เดียวและ Prompt เดียว
 
-อาจารย์ส่งลิงก์ GitHub Release, Client ID และให้ผู้เรียนคัดลอก Path ของ Desktop OAuth JSON ลงใน [Prompt ติดตั้งอัตโนมัติ](docs/prompts/install-github-google-auto-th.md) จากนั้นวาง Prompt ใน Codex เพียงครั้งเดียว Codex จะดาวน์โหลดและตรวจ Checksum, เลือก Local endpoint ที่ว่าง, เรียก Installer โดยตรง, นำเข้า JSON ผ่าน Backend DPAPI, ตรวจ Bridge/Health และเปิด HQ โดยผู้เรียนไม่ต้องกด BAT
+อาจารย์ส่งลิงก์ GitHub Release, Client ID และให้ผู้เรียนคัดลอก Path ของ Desktop OAuth JSON ลงใน [Prompt ติดตั้งอัตโนมัติ](docs/prompts/install-github-google-auto-th.md) จากนั้นวาง Prompt ใน Codex เพียงครั้งเดียว Codex จะดาวน์โหลดและตรวจ Checksum, เรียก Installer ครั้งเดียวพร้อมนำเข้า JSON ผ่าน Backend DPAPI, ตรวจ Bridge/Health/หน้าเว็บ, เปิด Watchdog หลัง Login และเปิด HQ ที่ `http://127.0.0.1:4186/` โดยผู้เรียนไม่ต้องกด BAT
 
 ขั้นตอนที่ระบบไม่ทำแทนคือการ Login/เลือกบัญชี/กดอนุญาตในหน้าทางการของ Google ผู้เรียนเหลือเพียงกด **เชื่อมบัญชี Google ครั้งเดียว** ใน HQ เท่านั้น
 
@@ -32,11 +32,9 @@ AI Agent Visual Office แบบ Local สำหรับจัดการ Miss
 2. ดาวน์โหลด Asset สำหรับ Windows จาก GitHub Release ที่อาจารย์ส่งให้
 3. แตก ZIP ให้เรียบร้อย ห้ามเปิดตัวติดตั้งจากใน ZIP
 4. ดับเบิลคลิก `1-INSTALL-HQ.bat`
-5. ตัวติดตั้งจะแสดง URL ที่ว่าง เช่น `http://127.0.0.1:4186/` ให้พิมพ์ `Y` เพื่อยืนยัน หรือ `N` เพื่อดูตัวเลือกถัดไป
-6. รอจนตัวติดตั้งแจ้งว่าสำเร็จ พร้อมแสดง Health, Codex และ Rate Limit ของบัญชีเครื่องนี้
-7. ดับเบิลคลิก `Open Metafx Agent HQ.cmd`
-8. หากตั้งค่า Google ใน First-run wizard แล้ว ให้กด **เชื่อมบัญชี Google ครั้งเดียว** ใน Agent HQ จากนั้นกรอก Sheet ID
-9. เปิด URL ที่ตัวติดตั้งบันทึกหลัง Health ผ่าน
+5. ตัวติดตั้งใช้ `http://127.0.0.1:4186/`, รันชุดตรวจ, เปิด Bridge และตรวจทั้ง Health กับหน้าเว็บให้เอง หากพอร์ต 4186 ถูกโปรแกรมอื่นใช้อยู่ ระบบจะหยุดโดยไม่ปิดโปรแกรมนั้น
+6. รอจน Browser เปิดหน้า Agent HQ และตัวติดตั้งแจ้งว่าสำเร็จ พร้อมแสดง Health, Codex และ Rate Limit ของบัญชีเครื่องนี้
+7. หากตั้งค่า Google ใน First-run wizard แล้ว ให้กด **เชื่อมบัญชี Google ครั้งเดียว** ใน Agent HQ จากนั้นกรอก Sheet ID
 
 คู่มือฉบับย่อสำหรับส่งให้นักเรียนอยู่ที่ [STUDENT-QUICKSTART-TH.md](STUDENT-QUICKSTART-TH.md)
 
@@ -68,7 +66,7 @@ cd metafxclub-ai-agent-hq
 
 หากเปิดไม่ได้ ให้รัน `scripts/repair-hq.cmd` แล้วตรวจสถานะอีกครั้ง ระบบจะไม่ปิดโปรแกรมอื่นที่ใช้ Port เดิมและจะไม่เปลี่ยน URL เองโดยไม่ถามผู้ใช้
 
-หากต้องการให้ Bridge กลับมาทำงานเองหลังเข้าสู่ Windows ให้รัน `scripts/register-bridge-autostart.cmd` หนึ่งครั้งหลังยืนยัน Endpoint แล้ว ระบบจะสร้าง Scheduled Task สำหรับ Windows User ปัจจุบัน ลองเปิดใหม่เมื่อเริ่มไม่สำเร็จ และตรวจ Bridge ซ้ำทุก 15 นาทีโดยค่าเริ่มต้นผ่านตัวเปิดแบบไม่มีหน้าต่าง คำสั่งนี้เปิดเฉพาะ Bridge แบบซ่อน ไม่เปิด Browser หรือ MT4/MT5 และยกเลิกได้ด้วย `scripts/unregister-bridge-autostart.cmd`
+ตัวติดตั้งลงทะเบียน Bridge ให้กลับมาทำงานเองหลังเข้าสู่ Windows โดยอัตโนมัติ สร้าง Scheduled Task สำหรับ Windows User ปัจจุบัน ลองเปิดใหม่เมื่อเริ่มไม่สำเร็จ และตรวจ Bridge ซ้ำทุก 15 นาทีผ่านตัวเปิดแบบไม่มีหน้าต่าง Task นี้เปิดเฉพาะ Bridge แบบซ่อน ไม่เปิด Browser หรือ MT4/MT5 และยกเลิกได้ด้วย `scripts/unregister-bridge-autostart.cmd` หากจงใจติดตั้งโดยไม่สร้าง Task ให้เรียก Installer ขั้นสูงด้วย `-SkipAutostart`
 
 ## สิ่งที่ใช้งานได้ในโหมดเริ่มต้น
 

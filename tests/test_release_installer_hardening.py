@@ -317,6 +317,12 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         verify_workflow = (ROOT / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8")
         self.assertIn("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", verify_workflow)
         self.assertIn("actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065", verify_workflow)
+        self.assertIn('python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]', verify_workflow)
+        self.assertIn('python-version: ${{ matrix.python-version }}', verify_workflow)
+        self.assertIn('python-version: "3.11"', workflow)
+        self.assertIn("needs: compatibility", workflow)
+        self.assertIn('python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]', workflow)
+        self.assertIn("Regression suite failed on Python ${{ matrix.python-version }}", workflow)
 
     def test_temporary_installer_paths_are_short_for_deep_windows_assets(self) -> None:
         installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")

@@ -152,6 +152,22 @@ class GoogleOAuthClientConfigurationTests(unittest.TestCase):
         self.assertNotIn(CLIENT_ID, serialized)
         self.assertNotIn(CLIENT_SECRET, serialized)
 
+    def test_expected_client_id_mismatch_fails_before_secure_store_mutation(self) -> None:
+        with (
+            mock.patch.object(hub, "oauth_client_configuration") as previous,
+            mock.patch.object(store, "save_client_configuration") as save,
+            mock.patch.object(store, "delete_refresh_token") as delete,
+        ):
+            with self.assertRaises(hub.GoogleSheetHubError) as caught:
+                hub.configure_google_oauth_client_json(
+                    desktop_client_json(),
+                    expected_client_id=OTHER_CLIENT_ID,
+                )
+        self.assertEqual(caught.exception.code, "oauth_client_id_mismatch")
+        previous.assert_not_called()
+        save.assert_not_called()
+        delete.assert_not_called()
+
     def test_changed_client_clears_refresh_and_pending_oauth_flow(self) -> None:
         calls: list[str] = []
         with hub._OAUTH_FLOW_LOCK:
@@ -446,6 +462,30 @@ class GoogleOAuthClientCliAndFrontendTests(unittest.TestCase):
             self.assertNotIn(CLIENT_ID, serialized)
             self.assertNotIn(CLIENT_SECRET, serialized)
             self.assertNotIn(str(selected), serialized)
+
+            output.seek(0)
+            output.truncate(0)
+            with (
+                mock.patch.object(
+                    cli.google_sheet_hub,
+                    "configure_google_oauth_client_json",
+                    return_value={"clientHint": "14999189…umajd"},
+                ) as configure,
+                redirect_stdout(output),
+            ):
+                exit_code = cli.main(
+                    [
+                        "--file",
+                        str(selected),
+                        "--expected-client-id",
+                        CLIENT_ID,
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            configure.assert_called_once()
+            self.assertEqual(configure.call_args.kwargs["expected_client_id"], CLIENT_ID)
+            self.assertNotIn(CLIENT_ID, output.getvalue())
+            self.assertNotIn(CLIENT_SECRET, output.getvalue())
 
         output = io.StringIO()
         with (

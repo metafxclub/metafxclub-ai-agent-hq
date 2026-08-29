@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import io
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
+from urllib.error import HTTPError
 from urllib.parse import unquote
 
 
@@ -774,6 +776,96 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         ]
         self.assertEqual(len(batch_requests), 2)
 
+    def test_google_sheet_upsert_readback_5xx_is_write_unknown_and_retry_is_idempotent(self) -> None:
+        state = {
+            "rows": [["record_id", "system_name"]],
+            "readback_failures": 1,
+            "post_count": 0,
+        }
+
+        def open_url(request, timeout):
+            method = request.get_method()
+            decoded_url = unquote(request.full_url)
+            if method == "GET" and "!1:1" in decoded_url:
+                return FakeJsonResponse({"values": [state["rows"][0]]})
+            if method == "GET" and "!A2:A10000" in decoded_url:
+                return FakeJsonResponse(
+                    {"values": [[row[0]] for row in state["rows"][1:] if row]}
+                )
+            if method == "POST" and decoded_url.endswith("/values:batchUpdate"):
+                state["post_count"] += 1
+                body = json.loads(request.data.decode("utf-8"))
+                responses = []
+                for value_range in body["data"]:
+                    match = re.search(
+                        r"!([A-Z]+)(\d+):([A-Z]+)(\d+)$",
+                        value_range["range"],
+                    )
+                    self.assertIsNotNone(match)
+                    start_column, row_text, end_column, end_row_text = match.groups()
+                    self.assertEqual(row_text, end_row_text)
+                    row_number = int(row_text)
+                    while len(state["rows"]) < row_number:
+                        state["rows"].append([""] * len(state["rows"][0]))
+                    start_index = ord(start_column) - ord("A")
+                    end_index = ord(end_column) - ord("A")
+                    state["rows"][row_number - 1][start_index : end_index + 1] = (
+                        value_range["values"][0]
+                    )
+                    responses.append({"updatedRows": 1})
+                return FakeJsonResponse({"responses": responses})
+            if method == "GET" and "!A2:B2" in decoded_url:
+                if state["readback_failures"]:
+                    state["readback_failures"] -= 1
+                    raise HTTPError(
+                        request.full_url,
+                        500,
+                        "synthetic read-back failure",
+                        {},
+                        io.BytesIO(b"{}"),
+                    )
+                return FakeJsonResponse({"values": [state["rows"][1]]})
+            raise AssertionError(
+                f"Unexpected Google API request: {method} {decoded_url}"
+            )
+
+        env = {"METAFX_GOOGLE_SHEETS_ACCESS_TOKEN": "backend-only-test-token"}
+        with self.assertRaises(self.hub.GoogleSheetHubError) as caught:
+            self.hub.upsert_row(
+                SHEET_ID,
+                "Test_Tab",
+                "record_id",
+                "REC-READBACK",
+                {"record_id": "REC-READBACK", "system_name": "First"},
+                environ=env,
+                open_url=open_url,
+            )
+
+        self.assertEqual(caught.exception.code, "write_unknown")
+        self.assertTrue(caught.exception.write_unknown)
+        self.assertEqual(state["rows"][1], ["REC-READBACK", "First"])
+
+        retry = self.hub.upsert_row(
+            SHEET_ID,
+            "Test_Tab",
+            "record_id",
+            "REC-READBACK",
+            {"record_id": "REC-READBACK", "system_name": "Recovered"},
+            environ=env,
+            open_url=open_url,
+        )
+
+        self.assertEqual(retry["rowNumber"], 2)
+        self.assertTrue(retry["readBackVerified"])
+        self.assertEqual(state["post_count"], 2)
+        self.assertEqual(
+            state["rows"],
+            [
+                ["record_id", "system_name"],
+                ["REC-READBACK", "Recovered"],
+            ],
+        )
+
     def test_google_sheet_upsert_rejects_existing_duplicate_keys_before_write(self) -> None:
         calls = []
 
@@ -847,6 +939,29 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         retried = self.bridge._load_research_sheet_outbox_unlocked()["items"]
         self.assertEqual(len(retried), 10)
         self.assertEqual(len({item["id"] for item in retried}), 10)
+
+    def test_radar_sheet_rows_include_schedule_and_trigger_provenance(self) -> None:
+        radar = self._radar_report()
+        radar["workflowContext"] = {
+            "triggerSource": "schedule",
+            "executionReservation": {
+                "slotKey": "indicatorScoutSchedule:2026-08-30:09:00",
+            },
+        }
+
+        rows = self.bridge._research_sheet_radar_rows(radar)
+
+        self.assertEqual(len(rows), 6)
+        self.assertTrue(all(
+            set(row) == set(self.bridge.RESEARCH_SHEET_RADAR_WRITE_HEADERS)
+            for row in rows
+        ))
+        self.assertTrue(all(
+            row["latest_schedule_slot_key"]
+            == "indicatorScoutSchedule:2026-08-30:09:00"
+            and row["latest_trigger_source"] == "schedule"
+            for row in rows
+        ))
 
     def test_outbox_capacity_rejects_a_six_row_report_atomically_at_599(self) -> None:
         """A Radar batch must never become a misleading one-of-six archive."""
@@ -947,8 +1062,8 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             settings["researchSheetHub"].get("consumerWriteChecks") or {},
         )
 
-    def test_retry_exhausted_poison_item_does_not_starve_fresh_pending_work(self) -> None:
-        """A permanently failing head item must have a ceiling and fair queueing."""
+    def test_retrying_poison_item_keeps_backoff_and_does_not_starve_fresh_work(self) -> None:
+        """A retry-forever item must back off while fresh work keeps flowing."""
 
         self.configure_hub(revision=13)
         attempt_ceiling = 5
@@ -960,13 +1075,8 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             attempt_count=attempt_ceiling,
             error_code="rate_limited",
         )
-        healthy = self._outbox_item(
-            item_id="sheet-sync-healthy-item",
-            record_key="healthy-record",
-            revision=13,
-        )
         self.bridge._save_research_sheet_outbox_unlocked(
-            {"items": [poison, healthy]}
+            {"items": [poison]}
         )
         written_keys = []
 
@@ -993,23 +1103,91 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             patch.object(self.hub, "upsert_row", side_effect=upsert),
             patch.object(self.bridge, "_refresh_research_sheet_cache"),
         ):
+            # First failure schedules a bounded future retry instead of
+            # converting the durable row to terminal `failed`.
+            self.bridge._flush_research_sheet_outbox(max_items=1)
+            after_failure = self.bridge._load_research_sheet_outbox_unlocked()
+            healthy = self._outbox_item(
+                item_id="sheet-sync-healthy-item",
+                record_key="healthy-record",
+                revision=13,
+            )
+            after_failure["items"].append(healthy)
+            self.bridge._save_research_sheet_outbox_unlocked(after_failure)
+            # The poison row is not due yet, so a brand-new row cannot starve
+            # behind it even though the poison attempt count is already high.
             self.bridge._flush_research_sheet_outbox(max_items=1)
 
         stored = {
             item["id"]: item
             for item in self.bridge._load_research_sheet_outbox_unlocked()["items"]
         }
-        self.assertEqual(written_keys, ["healthy-record"])
+        self.assertEqual(written_keys, ["poison-record", "healthy-record"])
         self.assertEqual(stored["sheet-sync-healthy-item"]["status"], "synced")
-        self.assertEqual(stored["sheet-sync-poison-item"]["status"], "failed")
+        self.assertEqual(stored["sheet-sync-poison-item"]["status"], "retry_pending")
         self.assertEqual(
             stored["sheet-sync-poison-item"]["lastErrorCode"],
-            "retry_attempts_exhausted",
+            "rate_limited",
         )
         self.assertEqual(
             stored["sheet-sync-poison-item"]["attemptCount"],
-            attempt_ceiling,
+            attempt_ceiling + 1,
         )
+        self.assertIsNotNone(
+            self.bridge.parse_iso(
+                stored["sheet-sync-poison-item"]["nextAttemptAt"]
+            )
+        )
+        self.assertIsNone(stored["sheet-sync-healthy-item"]["nextAttemptAt"])
+
+    def test_synced_ledger_prevents_restart_backfill_from_rewriting_old_reports(self) -> None:
+        """Compacting the diagnostic tail must not forget durable successes."""
+
+        self.configure_hub(revision=13)
+        report = self._world_report()
+        queued = self.bridge._research_sheet_queue_report(report, flush=False)
+        self.assertGreater(queued["queued"], 0)
+        writes = []
+
+        def upsert(_sheet_id, _tab, _key_header, record_key, _row):
+            writes.append(record_key)
+            return {
+                "rowNumber": len(writes) + 1,
+                "operation": "updated",
+                "readBackVerified": True,
+            }
+
+        with (
+            patch.object(
+                self.hub,
+                "credential_status",
+                return_value={"configured": True, "mode": "access_token"},
+            ),
+            patch.object(self.hub, "upsert_row", side_effect=upsert),
+            patch.object(self.bridge, "_refresh_research_sheet_cache"),
+        ):
+            flushed = self.bridge._flush_research_sheet_outbox(max_items=20)
+
+        stored = self.bridge._load_research_sheet_outbox_unlocked()
+        self.assertEqual(flushed["synced"], queued["queued"])
+        self.assertEqual(len(writes), queued["queued"])
+        self.assertGreaterEqual(len(stored["syncedLedger"]), queued["queued"])
+
+        # Simulate a restart after successful items have fallen out of the
+        # 25-row diagnostic tail. The durable ledger must still suppress the
+        # deterministic report items without contacting Google again.
+        stored["items"] = []
+        self.bridge._save_research_sheet_outbox_unlocked(stored)
+        replay = self.bridge._research_sheet_queue_report(report, flush=False)
+        self.assertEqual(replay["queued"], 0)
+        self.assertEqual(writes, [item["recordKey"] for item in self.bridge._research_sheet_report_items(report, 13)])
+
+        # A corrected payload with the same stable key must not be hidden by
+        # the acknowledgement for its older digest.
+        corrected = copy.deepcopy(report)
+        corrected["metrics"]["systems"][0]["systemName"] += " corrected"
+        changed = self.bridge._research_sheet_queue_report(corrected, flush=False)
+        self.assertGreaterEqual(changed["queued"], 1)
 
     def test_verify_discards_stale_result_after_same_sheet_aba_revision_change(self) -> None:
         """Sheet A -> B -> A must not let A/rev3 verify overwrite A/rev5."""
@@ -1269,6 +1447,61 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         with self.assertRaises(self.bridge.DataIntegrityError):
             self.bridge._ea_factory_revalidated_snapshot(tampered)
 
+    def test_deep_research_same_source_versions_history_and_only_newest_is_current(self) -> None:
+        first = self._deep_report()
+        self.bridge.write_json(self.reports / f"{first['id']}.json", first)
+        first_rows = self.bridge._research_sheet_deep_rows(first)[0]
+        self.assertEqual(len(first_rows), 1)
+        self.assertEqual(first_rows[0]["research_version"], "1")
+        self.assertEqual(first_rows[0]["is_current"], "TRUE")
+
+        second = copy.deepcopy(first)
+        second.update(
+            {
+                "id": "report-deep-sheet-002",
+                "linkedMissionId": "mission-deep-sheet-002",
+                "createdAt": "2026-08-28T03:00:00Z",
+                "updatedAt": "2026-08-28T03:05:00Z",
+            }
+        )
+        second["metrics"]["entrySteps"] = ["Enter after the confirmed close"]
+        self.bridge.write_json(self.reports / f"{second['id']}.json", second)
+
+        version_rows = self.bridge._research_sheet_deep_rows(second)[0]
+        self.assertEqual(len(version_rows), 2)
+        by_research_id = {row["research_id"]: row for row in version_rows}
+        first_id = first_rows[0]["research_id"]
+        second_id = next(key for key in by_research_id if key != first_id)
+        self.assertEqual(by_research_id[first_id]["research_version"], "1")
+        self.assertEqual(by_research_id[first_id]["is_current"], "FALSE")
+        self.assertEqual(by_research_id[second_id]["research_version"], "2")
+        self.assertEqual(by_research_id[second_id]["is_current"], "TRUE")
+        self.assertEqual(
+            sum(row["is_current"] == "TRUE" for row in version_rows),
+            1,
+        )
+
+        # Model the two keyed upserts: the version-1 demotion is partial and
+        # must preserve its original research fields while version 2 appends.
+        sheet_rows = {first_id: copy.deepcopy(first_rows[0])}
+        for row in version_rows:
+            sheet_rows.setdefault(row["research_id"], {}).update(row)
+        headers = list(self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS)
+        values = [
+            headers,
+            *[
+                [row.get(header, "") for header in headers]
+                for row in sheet_rows.values()
+            ],
+        ]
+        records = self.bridge._ea_factory_parse_deep_research_values(
+            values,
+            "sheet-deep-version-test",
+        )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["recordId"], "world-1")
+        self.assertIn("confirmed close", records[0]["core"]["entry_rules"])
+
     def test_verified_deep_research_cache_feeds_factory_automatically(self) -> None:
         self.configure_hub(revision=14)
         deep_row = self.bridge._research_sheet_deep_rows(self._deep_report())[0][0]
@@ -1448,6 +1681,273 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         self.assertEqual(world["windowEndRow"], 301)
         self.assertEqual(world["rows"][0]["discovery_id"], "D-051")
         self.assertEqual(world["rows"][-1]["discovery_id"], "D-300")
+
+    def test_live_column_query_covers_three_tabs_filters_contains_and_rejects_unknowns(self) -> None:
+        self.configure_hub(revision=24)
+        contracts = self.bridge._research_sheet_tab_contracts()
+        rows_by_tab = {
+            "World_System": {
+                "discovery_id": "world-live-001",
+                "system_name": "Alpha Trend System",
+            },
+            "Deep_Research": {
+                "research_id": "deep-live-001",
+                "system_name": "Deep Mean Reversion",
+            },
+            "Indicator_EA_Tool": {
+                "radar_record_id": "radar-live-001",
+                "tool_name": "Momentum Radar Pro",
+            },
+        }
+        read_calls = []
+
+        def read_values(sheet_id, tab_name, cell_range):
+            self.assertEqual(sheet_id, SHEET_ID)
+            read_calls.append((tab_name, cell_range))
+            contract = next(
+                item
+                for item in contracts.values()
+                if item["tabName"] == tab_name
+            )
+            headers = list(contract["requiredHeaders"])
+            row = rows_by_tab[tab_name]
+            if cell_range == "1:1":
+                return [headers]
+            if cell_range == "A2:A10000":
+                if tab_name == "World_System":
+                    return [[], [row[contract["keyHeader"]]]]
+                return [[row[contract["keyHeader"]]]]
+            if tab_name == "World_System" and cell_range.startswith("A2:") and cell_range.endswith("3"):
+                return [[], [row.get(header, "") for header in headers]]
+            if cell_range.startswith("A2:") and cell_range.endswith("2"):
+                return [[row.get(header, "") for header in headers]]
+            column_range = re.fullmatch(r"([A-Z]+)2:([A-Z]+)10000", cell_range)
+            if column_range:
+                def column_number(value):
+                    number = 0
+                    for character in value:
+                        number = (number * 26) + ord(character) - 64
+                    return number
+
+                start = column_number(column_range.group(1)) - 1
+                end = column_number(column_range.group(2))
+                values = [[row.get(header, "") for header in headers[start:end]]]
+                return [[], *values] if tab_name == "World_System" else values
+            for column_index, header in enumerate(headers, start=1):
+                column = self.bridge._research_sheet_column_letter(column_index)
+                if cell_range == f"{column}2:{column}10000":
+                    values = [[row.get(header, "")]]
+                    return [[], *values] if tab_name == "World_System" else values
+            raise AssertionError((tab_name, cell_range))
+
+        with (
+            patch.object(
+                self.hub,
+                "credential_status",
+                return_value={"configured": True, "mode": "access_token"},
+            ),
+            patch.object(self.hub, "read_values", side_effect=read_values),
+        ):
+            world = self.bridge.query_research_sheet_hub(
+                {
+                    "tabName": "World_System",
+                    "columnName": "system_name",
+                    "contains": "TREND",
+                }
+            )
+            deep = self.bridge.query_research_sheet_hub(
+                {
+                    "consumerId": "deepResearch",
+                    "columnName": "system_name",
+                    "contains": "mean reversion",
+                }
+            )
+            radar = self.bridge.query_research_sheet_hub(
+                {
+                    "tabName": "Indicator_EA_Tool",
+                    "columnName": "tool_name",
+                    "contains": "radar",
+                }
+            )
+            unknown_column = self.bridge.query_research_sheet_hub(
+                {
+                    "tabName": "World_System",
+                    "columnName": "column_that_does_not_exist",
+                    "contains": "anything",
+                }
+            )
+            with self.assertRaises(self.bridge.RequestError) as unknown_tab:
+                self.bridge.query_research_sheet_hub(
+                    {
+                        "tabName": "Arbitrary_Tab",
+                        "columnName": "system_name",
+                    }
+                )
+
+        self.assertEqual(world["matchCount"], 1)
+        self.assertEqual(world["matches"][0]["recordKey"], "world-live-001")
+        self.assertEqual(world["matches"][0]["value"], "Alpha Trend System")
+        self.assertEqual(world["matches"][0]["rowNumber"], 3)
+        self.assertTrue(world["freshRead"])
+        self.assertTrue(world["readOnly"])
+        self.assertEqual(deep["matches"][0]["recordKey"], "deep-live-001")
+        self.assertEqual(radar["matches"][0]["recordKey"], "radar-live-001")
+        self.assertEqual(
+            {tab_name for tab_name, _range in read_calls},
+            {"World_System", "Deep_Research", "Indicator_EA_Tool"},
+        )
+        for _tab_name, cell_range in read_calls:
+            if cell_range == "1:1":
+                continue
+            narrow = re.fullmatch(r"([A-Z]+)2:\1(?:10000)", cell_range)
+            self.assertIsNotNone(narrow, cell_range)
+
+        self.assertFalse(unknown_column["ok"])
+        self.assertEqual(
+            unknown_column["kind"],
+            "research_sheet_column_not_found",
+        )
+        self.assertEqual(unknown_column["_httpStatus"], 422)
+        self.assertEqual(len(unknown_column["searchedTabs"]), 1)
+        self.assertEqual(
+            unknown_column["searchedTabs"][0]["availableColumns"],
+            list(contracts["worldSystem"]["requiredHeaders"]),
+        )
+        self.assertEqual(unknown_tab.exception.status, 422)
+
+    def test_live_column_query_ignores_stale_cached_header_order(self) -> None:
+        revision = 25
+        self.configure_hub(revision=revision)
+        contract = self.bridge._research_sheet_tab_contracts()["worldSystem"]
+        cached_headers = list(contract["requiredHeaders"])
+        live_headers = list(cached_headers)
+        key_header = contract["keyHeader"]
+        target_header = "system_name"
+        key_index = live_headers.index(key_header)
+        target_index = live_headers.index(target_header)
+        live_headers[key_index], live_headers[target_index] = (
+            live_headers[target_index],
+            live_headers[key_index],
+        )
+        stale_cache = self.bridge._research_sheet_cache_default()
+        stale_cache.update(
+            {
+                "sheetDigest": self.bridge.payload_digest(
+                    "research-sheet-id-v1",
+                    SHEET_ID,
+                ),
+                "configRevision": revision,
+                "consumers": {
+                    "worldSystem": {
+                        "tabName": "World_System",
+                        "headers": cached_headers,
+                        "rows": [],
+                        "rowNumbers": [],
+                        "observedAt": self.bridge.utc_now(),
+                    },
+                },
+                "updatedAt": self.bridge.utc_now(),
+            }
+        )
+        self.bridge.write_json(self.bridge.RESEARCH_SHEET_CACHE_PATH, stale_cache)
+        calls = []
+        live_key_column = self.bridge._research_sheet_column_letter(
+            live_headers.index(key_header) + 1
+        )
+        live_value_column = self.bridge._research_sheet_column_letter(
+            live_headers.index(target_header) + 1
+        )
+
+        def read_values(sheet_id, tab_name, cell_range):
+            self.assertEqual(sheet_id, SHEET_ID)
+            self.assertEqual(tab_name, "World_System")
+            calls.append(cell_range)
+            if cell_range == "1:1":
+                return [live_headers]
+            if cell_range == f"{live_key_column}2:{live_key_column}10000":
+                return [["world-live-reordered-001"]]
+            if cell_range == f"{live_value_column}2:{live_value_column}10000":
+                return [["Live Reordered Trend"]]
+            raise AssertionError(cell_range)
+
+        with (
+            patch.object(
+                self.hub,
+                "credential_status",
+                return_value={"configured": True, "mode": "access_token"},
+            ),
+            patch.object(self.hub, "read_values", side_effect=read_values),
+        ):
+            result = self.bridge.query_research_sheet_hub(
+                {
+                    "tabName": "World_System",
+                    "columnName": target_header,
+                }
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                "1:1",
+                f"{live_key_column}2:{live_key_column}10000",
+                f"{live_value_column}2:{live_value_column}10000",
+            ],
+        )
+        self.assertEqual(result["matches"][0]["recordKey"], "world-live-reordered-001")
+        self.assertEqual(result["matches"][0]["value"], "Live Reordered Trend")
+        self.assertTrue(result["freshRead"])
+
+    def test_live_column_query_reads_aw_and_key_as_narrow_deduplicated_ranges(self) -> None:
+        self.configure_hub(revision=26)
+        contract = self.bridge._research_sheet_tab_contracts()["deepResearch"]
+        headers = list(contract["requiredHeaders"])
+        self.assertEqual(headers[0], "research_id")
+        self.assertEqual(headers[-1], "updated_at")
+        self.assertEqual(
+            self.bridge._research_sheet_column_letter(len(headers)),
+            "AW",
+        )
+        calls = []
+
+        def read_values(sheet_id, tab_name, cell_range):
+            self.assertEqual(sheet_id, SHEET_ID)
+            self.assertEqual(tab_name, "Deep_Research")
+            calls.append(cell_range)
+            if cell_range == "1:1":
+                return [headers]
+            if cell_range == "A2:A10000":
+                return [["deep-live-aw-001"]]
+            if cell_range == "AW2:AW10000":
+                return [["2026-08-30T02:30:00Z"]]
+            raise AssertionError(cell_range)
+
+        with (
+            patch.object(
+                self.hub,
+                "credential_status",
+                return_value={"configured": True, "mode": "access_token"},
+            ),
+            patch.object(self.hub, "read_values", side_effect=read_values),
+        ):
+            last_column = self.bridge.query_research_sheet_hub(
+                {
+                    "tabName": "Deep_Research",
+                    "columnName": "updated_at",
+                }
+            )
+            self.assertEqual(calls, ["1:1", "A2:A10000", "AW2:AW10000"])
+            calls.clear()
+            key_column = self.bridge.query_research_sheet_hub(
+                {
+                    "tabName": "Deep_Research",
+                    "columnName": "research_id",
+                }
+            )
+
+        self.assertEqual(calls, ["1:1", "A2:A10000"])
+        self.assertEqual(last_column["matches"][0]["recordKey"], "deep-live-aw-001")
+        self.assertEqual(last_column["matches"][0]["value"], "2026-08-30T02:30:00Z")
+        self.assertEqual(key_column["matches"][0]["value"], "deep-live-aw-001")
 
     def test_deep_research_sheet_cache_is_exposed_as_verified_history(self) -> None:
         self.configure_hub(revision=15)

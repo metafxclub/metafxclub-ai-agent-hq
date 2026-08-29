@@ -1,6 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [string]$ClientJsonPath = "",
+    [string]$ExpectedClientId = "",
     [switch]$SkipBridgeEnsure,
     [switch]$SkipOpen
 )
@@ -85,13 +86,19 @@ function Resolve-SetupPython {
 }
 
 function Import-GoogleOAuthClient {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Expected = ""
+    )
 
     if (-not (Test-Path -LiteralPath $configureCli -PathType Leaf)) {
         throw "ชุดติดตั้งไม่มี Google OAuth configuration CLI"
     }
     $python = Resolve-SetupPython
     $arguments = @($python.PrefixArguments) + @($configureCli, "--file", $Path)
+    if (-not [string]::IsNullOrWhiteSpace($Expected)) {
+        $arguments += @("--expected-client-id", $Expected.Trim())
+    }
     $output = @(& $python.FilePath @arguments 2>&1)
     if ($LASTEXITCODE -ne 0) {
         throw "นำเข้า OAuth Client ไม่สำเร็จ กรุณาใช้ JSON ประเภท Desktop app จาก Google Auth Platform"
@@ -136,7 +143,7 @@ try {
     }
 
     $safePath = Get-SafeClientJsonPath -Path $selectedPath
-    $result = Import-GoogleOAuthClient -Path $safePath
+    $result = Import-GoogleOAuthClient -Path $safePath -Expected $ExpectedClientId
     $clientHint = [string]$result.clientHint
     $hintText = if ($clientHint) { " ($clientHint)" } else { "" }
     Write-Host "บันทึก Google OAuth Client สำหรับ Windows User นี้แล้ว$hintText" -ForegroundColor Green

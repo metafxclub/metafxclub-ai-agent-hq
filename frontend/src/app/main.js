@@ -498,10 +498,14 @@ const EA_FACTORY_PROP_ID = "right_server_racks";
 const RESEARCH_SHEET_HUB_ENDPOINT = "/api/props/mission_strategy_table/research-sheet";
 const RESEARCH_SHEET_HUB_INSPECT_ENDPOINT = `${RESEARCH_SHEET_HUB_ENDPOINT}/inspect`;
 const RESEARCH_SHEET_HUB_ACTIVATE_ENDPOINT = `${RESEARCH_SHEET_HUB_ENDPOINT}/activate`;
+const RESEARCH_SHEET_HUB_QUERY_ENDPOINT = `${RESEARCH_SHEET_HUB_ENDPOINT}/query`;
 const RESEARCH_SHEET_GOOGLE_AUTH_ENDPOINT = `${RESEARCH_SHEET_HUB_ENDPOINT}/auth`;
 const RESEARCH_SHEET_GOOGLE_AUTH_START_ENDPOINT = `${RESEARCH_SHEET_GOOGLE_AUTH_ENDPOINT}/start`;
 const RESEARCH_SHEET_GOOGLE_AUTH_DISCONNECT_ENDPOINT = `${RESEARCH_SHEET_GOOGLE_AUTH_ENDPOINT}/disconnect`;
 const RESEARCH_SHEET_HUB_MAX_AGE_MS = 90_000;
+const RESEARCH_SHEET_QUERY_TABS = new Set(["", "World_System", "Deep_Research", "Indicator_EA_Tool"]);
+const RESEARCH_SHEET_QUERY_MAX_MATCHES = 100;
+const RESEARCH_SHEET_QUERY_MAX_COLUMNS_PER_TAB = 100;
 const RESEARCH_SHEET_GOOGLE_AUTH_MAX_AGE_MS = 30_000;
 const RESEARCH_SHEET_GOOGLE_AUTH_POLL_INTERVAL_MS = 1_500;
 const RESEARCH_SHEET_GOOGLE_AUTH_POLL_TIMEOUT_MS = 120_000;
@@ -1257,6 +1261,13 @@ const state = {
       pollInFlight: false,
       popup: null,
     },
+    query: {
+      status: "idle",
+      result: null,
+      message: "",
+      tone: "neutral",
+      inFlight: false,
+    },
   },
   modal: {
     open: false,
@@ -1749,6 +1760,15 @@ const els = {
   researchSheetGoogleDisconnect: document.getElementById("researchSheetGoogleDisconnect"),
   researchSheetHubLifecycle: document.getElementById("researchSheetHubLifecycle"),
   researchSheetHubLinkedSystems: document.getElementById("researchSheetHubLinkedSystems"),
+  researchSheetHubQuery: document.getElementById("researchSheetHubQuery"),
+  researchSheetHubQueryFields: document.getElementById("researchSheetHubQueryFields"),
+  researchSheetHubQueryTab: document.getElementById("researchSheetHubQueryTab"),
+  researchSheetHubQueryColumn: document.getElementById("researchSheetHubQueryColumn"),
+  researchSheetHubQueryContains: document.getElementById("researchSheetHubQueryContains"),
+  researchSheetHubQueryLimit: document.getElementById("researchSheetHubQueryLimit"),
+  researchSheetHubQuerySubmit: document.getElementById("researchSheetHubQuerySubmit"),
+  researchSheetHubQueryStatus: document.getElementById("researchSheetHubQueryStatus"),
+  researchSheetHubQueryResults: document.getElementById("researchSheetHubQueryResults"),
   researchSheetHubInspection: document.getElementById("researchSheetHubInspection"),
   researchSheetHubInspectionTitle: document.getElementById("researchSheetHubInspectionTitle"),
   researchSheetHubInspectionReference: document.getElementById("researchSheetHubInspectionReference"),
@@ -2738,6 +2758,70 @@ function normalizeResearchSheetTimestamp(value) {
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }
 
+function normalizeResearchSheetHeaderList(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(
+    value
+      .slice(0, 100)
+      .map((header) => safeDashboardDisplayText(header, "").slice(0, 120))
+      .filter(Boolean),
+  )].slice(0, 100);
+}
+
+function normalizeResearchSheetQueryText(value, maximum = 200) {
+  return safeDashboardDisplayText(value, "")
+    .replace(/\u0000/g, "")
+    .trim()
+    .slice(0, maximum);
+}
+
+function normalizeResearchSheetQueryResult(payload = {}) {
+  const root = payload?.query && typeof payload.query === "object" && !Array.isArray(payload.query)
+    ? payload.query
+    : (payload?.result && typeof payload.result === "object" && !Array.isArray(payload.result)
+        ? payload.result
+        : (payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {}));
+  const rawMatches = Array.isArray(root.matches) ? root.matches : [];
+  const matches = rawMatches.slice(0, RESEARCH_SHEET_QUERY_MAX_MATCHES).map((item) => ({
+    tabName: normalizeResearchSheetQueryText(item?.tabName, 80),
+    columnName: normalizeResearchSheetQueryText(item?.columnName || root.columnName, 120),
+    rowNumber: boundedResearchSheetCount(item?.rowNumber, 10_000_000),
+    recordKey: normalizeResearchSheetQueryText(item?.recordKey, 240),
+    value: normalizeResearchSheetQueryText(item?.value, 1_000),
+  }));
+  const rawSearchedTabs = Array.isArray(root.searchedTabs) ? root.searchedTabs : [];
+  const searchedTabs = rawSearchedTabs.slice(0, RESEARCH_SHEET_CONSUMERS.length).map((item) => ({
+    tabName: normalizeResearchSheetQueryText(item?.tabName, 80),
+    rowCount: boundedResearchSheetCount(item?.rowCount, 10_000_000),
+    observedAt: normalizeResearchSheetTimestamp(item?.observedAt),
+    availableColumns: normalizeResearchSheetHeaderList(item?.availableColumns)
+      .slice(0, RESEARCH_SHEET_QUERY_MAX_COLUMNS_PER_TAB),
+  }));
+  if (!searchedTabs.length && Array.isArray(root.availableColumns)) {
+    searchedTabs.push({
+      tabName: normalizeResearchSheetQueryText(root.tabName, 80) || "แท็บที่เลือก",
+      rowCount: 0,
+      observedAt: null,
+      availableColumns: normalizeResearchSheetHeaderList(root.availableColumns)
+        .slice(0, RESEARCH_SHEET_QUERY_MAX_COLUMNS_PER_TAB),
+    });
+  }
+  return {
+    ok: root.ok === true,
+    kind: /^[a-zA-Z0-9_.:-]{1,120}$/.test(String(root.kind || "")) ? String(root.kind) : "",
+    columnName: normalizeResearchSheetQueryText(root.columnName, 120),
+    contains: normalizeResearchSheetQueryText(root.contains, 200),
+    limit: Math.max(1, boundedResearchSheetCount(root.limit, RESEARCH_SHEET_QUERY_MAX_MATCHES) || 50),
+    matchCount: boundedResearchSheetCount(root.matchCount, RESEARCH_SHEET_QUERY_MAX_MATCHES),
+    matches,
+    searchedTabs,
+    freshRead: root.freshRead === true,
+    readOnly: root.readOnly === true,
+    observedAt: normalizeResearchSheetTimestamp(root.observedAt),
+    messageTh: normalizeResearchSheetQueryText(root.messageTh || root.message || root.error, 400),
+  };
+}
+
 function normalizeResearchSheetHub(payload = {}) {
   const root = payload?.researchSheet && typeof payload.researchSheet === "object" && !Array.isArray(payload.researchSheet)
     ? payload.researchSheet
@@ -2991,6 +3075,8 @@ function normalizeResearchSheetInspection(payload = {}) {
       rowCount: boundedResearchSheetCount(item?.rowCount),
       cachedRowCount: boundedResearchSheetCount(item?.cachedRowCount),
       observedAt: normalizeResearchSheetTimestamp(item?.observedAt || item?.rowsObservedAt),
+      missingHeaders: normalizeResearchSheetHeaderList(item?.missingHeaders),
+      duplicateHeaders: normalizeResearchSheetHeaderList(item?.duplicateHeaders),
       probeEvidence: {
         kind: safeDashboardDisplayText(evidence.kind, ""),
         range: safeDashboardDisplayText(evidence.range, ""),
@@ -3007,6 +3093,8 @@ function normalizeResearchSheetInspection(payload = {}) {
       rowCount: 0,
       cachedRowCount: 0,
       observedAt: null,
+      missingHeaders: [],
+      duplicateHeaders: [],
       probeEvidence: { kind: "", range: "", confirmed: false },
     }),
   }));
@@ -3318,6 +3406,164 @@ function renderResearchSheetHubLinkedSystems() {
   });
 }
 
+function resetResearchSheetHubQuery(message = "") {
+  const query = state.researchSheetHub.query;
+  query.status = "idle";
+  query.result = null;
+  query.message = normalizeResearchSheetQueryText(message, 400);
+  query.tone = "neutral";
+  query.inFlight = false;
+}
+
+function researchSheetHubQueryCanRun(data = state.researchSheetHub.data) {
+  return Boolean(
+    data?.active === true
+    && data?.operational === true
+    && data?.connected === true
+    && data?.readReady === true
+    && data?.activeConfigRevision
+    && data.activeConfigRevision === data.configRevision,
+  );
+}
+
+function researchSheetHubQueryIsBusy() {
+  return state.researchSheetHub.query?.inFlight === true;
+}
+
+function researchSheetHubQueryPresentation() {
+  const query = state.researchSheetHub.query;
+  if (query.inFlight) return { tone: "working", label: "กำลังอ่านข้อมูลล่าสุดจาก Google Sheet…" };
+  if (query.status === "not_found") return {
+    tone: "warning",
+    label: query.message || "ไม่พบชื่อคอลัมน์นี้ • ดูรายชื่อคอลัมน์ที่ Backend อ่านได้ด้านล่าง",
+  };
+  if (query.status === "error") return {
+    tone: "error",
+    label: query.message || "ค้นข้อมูลไม่สำเร็จ กรุณาตรวจสถานะ Google Sheet แล้วลองใหม่",
+  };
+  if (query.status === "ready") {
+    const count = query.result?.matches?.length || 0;
+    return {
+      tone: "ready",
+      label: count
+        ? `พบ ${count} รายการ${query.result?.freshRead ? " • อ่านข้อมูลล่าสุดแล้ว" : ""}`
+        : `ไม่พบค่าที่ตรงกับตัวกรอง${query.result?.freshRead ? " • อ่านข้อมูลล่าสุดแล้ว" : ""}`,
+    };
+  }
+  if (!researchSheetHubQueryCanRun()) return { tone: "neutral", label: "เปิดใช้ Google Sheet ก่อนค้นข้อมูล" };
+  return { tone: "neutral", label: "พร้อมค้นจาก Sheet ที่เปิดใช้อยู่" };
+}
+
+function renderResearchSheetHubQuery() {
+  if (!els.researchSheetHubQuery) return;
+  const hub = state.researchSheetHub;
+  const query = hub.query;
+  const canRun = researchSheetHubQueryCanRun();
+  const presentation = researchSheetHubQueryPresentation();
+  els.researchSheetHubQuery.setAttribute("aria-busy", String(query.inFlight));
+  if (els.researchSheetHubQueryStatus) {
+    els.researchSheetHubQueryStatus.dataset.tone = presentation.tone;
+    els.researchSheetHubQueryStatus.textContent = presentation.label;
+  }
+  [
+    els.researchSheetHubQueryTab,
+    els.researchSheetHubQueryColumn,
+    els.researchSheetHubQueryContains,
+    els.researchSheetHubQueryLimit,
+  ].forEach((control) => {
+    if (control) control.disabled = query.inFlight;
+  });
+  if (els.researchSheetHubQuerySubmit) {
+    els.researchSheetHubQuerySubmit.disabled = query.inFlight || hub.inFlight || researchSheetGoogleAuthIsBusy() || !canRun;
+    els.researchSheetHubQuerySubmit.textContent = query.inFlight ? "กำลังค้น…" : "ค้นข้อมูล";
+    els.researchSheetHubQuerySubmit.classList.toggle("is-loading", query.inFlight);
+    els.researchSheetHubQuerySubmit.title = canRun
+      ? "อ่านข้อมูลล่าสุดจาก Google Sheet ตามชื่อคอลัมน์"
+      : "ต้องตรวจและเปิดใช้ Google Sheet ให้ครบ 3 แท็บก่อน";
+  }
+  if (!els.researchSheetHubQueryResults) return;
+  els.researchSheetHubQueryResults.replaceChildren();
+  const result = query.result;
+  if (!result) {
+    const empty = document.createElement("p");
+    empty.className = "research-sheet-hub-query-empty";
+    empty.textContent = canRun
+      ? "เลือกแท็บหรือทุกแท็บ แล้วพิมพ์ชื่อคอลัมน์ที่ต้องการอ่าน"
+      : "ยังค้นไม่ได้จนกว่า Sheet ปัจจุบันจะ Active และอ่านครบทั้ง 3 แท็บ";
+    els.researchSheetHubQueryResults.appendChild(empty);
+    return;
+  }
+  if (query.status === "not_found") {
+    const columns = document.createElement("section");
+    const title = document.createElement("strong");
+    const grid = document.createElement("div");
+    columns.className = "research-sheet-hub-query-columns";
+    title.textContent = `คอลัมน์ที่ Backend อ่านได้${result.columnName ? ` • ไม่พบ “${result.columnName}”` : ""}`;
+    result.searchedTabs.forEach((tab) => {
+      const card = document.createElement("article");
+      const heading = document.createElement("div");
+      const name = document.createElement("strong");
+      const count = document.createElement("b");
+      const list = document.createElement("div");
+      name.textContent = tab.tabName || "Backend ไม่ได้ระบุแท็บ";
+      count.textContent = `${tab.availableColumns.length} คอลัมน์`;
+      tab.availableColumns.forEach((column) => {
+        const item = document.createElement("code");
+        item.textContent = column;
+        list.appendChild(item);
+      });
+      if (!tab.availableColumns.length) {
+        const empty = document.createElement("small");
+        empty.textContent = "Backend ไม่ได้ส่งรายชื่อคอลัมน์ของแท็บนี้";
+        list.appendChild(empty);
+      }
+      heading.append(name, count);
+      card.append(heading, list);
+      grid.appendChild(card);
+    });
+    columns.append(title, grid);
+    els.researchSheetHubQueryResults.appendChild(columns);
+    return;
+  }
+  const summary = document.createElement("p");
+  summary.className = "research-sheet-hub-query-summary";
+  summary.textContent = `คอลัมน์ ${result.columnName || "ไม่ระบุ"} • แสดง ${result.matches.length}/${result.matchCount} รายการ${result.observedAt ? ` • ${researchSheetObservedLabel(result.observedAt)}` : ""}`;
+  els.researchSheetHubQueryResults.appendChild(summary);
+  if (!result.matches.length) return;
+  const list = document.createElement("div");
+  list.className = "research-sheet-hub-query-match-list";
+  result.matches.forEach((match) => {
+    const card = document.createElement("article");
+    const heading = document.createElement("div");
+    const tab = document.createElement("strong");
+    const row = document.createElement("b");
+    const value = document.createElement("p");
+    const meta = document.createElement("small");
+    tab.textContent = match.tabName || "Backend ไม่ได้ระบุแท็บ";
+    row.textContent = match.rowNumber ? `แถว ${match.rowNumber}` : "ไม่ระบุแถว";
+    value.textContent = match.value || "(ค่าว่าง)";
+    meta.textContent = `${match.columnName || result.columnName || "ไม่ระบุคอลัมน์"}${match.recordKey ? ` • Key: ${match.recordKey}` : ""}`;
+    heading.append(tab, row);
+    card.append(heading, value, meta);
+    list.appendChild(card);
+  });
+  els.researchSheetHubQueryResults.appendChild(list);
+}
+
+function researchSheetHeaderIssueSummary(consumer = {}) {
+  const summarize = (label, values) => {
+    const headers = normalizeResearchSheetHeaderList(values);
+    if (!headers.length) return "";
+    const visible = headers.slice(0, 6);
+    const remaining = headers.length - visible.length;
+    return `${label}: ${visible.join(", ")}${remaining > 0 ? ` (+${remaining})` : ""}`;
+  };
+  return [
+    summarize("ขาด", consumer.missingHeaders),
+    summarize("ซ้ำ", consumer.duplicateHeaders),
+  ].filter(Boolean).join(" • ");
+}
+
 function renderResearchSheetHubInspection() {
   const hub = state.researchSheetHub;
   const preview = hub.preview;
@@ -3347,6 +3593,7 @@ function renderResearchSheetHubInspection() {
       const status = document.createElement("b");
       const rows = document.createElement("span");
       const evidence = document.createElement("small");
+      const headerIssues = document.createElement("small");
       const consumerTone = consumer.readReady && consumer.probeEvidence.confirmed
         ? "ready"
         : (researchSheetHardError(consumer.status) ? "error" : "warning");
@@ -3357,8 +3604,10 @@ function renderResearchSheetHubInspection() {
       evidence.textContent = consumer.probeEvidence.confirmed
         ? `หลักฐาน ${consumer.probeEvidence.kind || "read_probe"}${consumer.probeEvidence.range ? ` • ${consumer.probeEvidence.range}` : ""}`
         : "Backend ยังไม่ยืนยันหลักฐานการอ่าน";
+      headerIssues.textContent = researchSheetHeaderIssueSummary(consumer)
+        || (consumer.readReady ? "หัวคอลัมน์ที่จำเป็นครบ" : "Backend ไม่ได้ส่งรายละเอียดหัวคอลัมน์ที่ผิด");
       heading.append(tab, status);
-      card.append(heading, rows, evidence);
+      card.append(heading, rows, headerIssues, evidence);
       els.researchSheetHubInspectionTabs.appendChild(card);
     });
   }
@@ -3490,7 +3739,7 @@ function renderResearchSheetGoogleAuth() {
     els.researchSheetGoogleConnect.textContent = busy
       ? "กำลังรอการยืนยัน…"
       : (presentation.connected ? "เชื่อมบัญชี Google ใหม่" : "เชื่อมบัญชี Google ครั้งเดียว");
-    els.researchSheetGoogleConnect.disabled = busy || !presentation.startAvailable;
+    els.researchSheetGoogleConnect.disabled = busy || researchSheetHubQueryIsBusy() || !presentation.startAvailable;
     els.researchSheetGoogleConnect.classList.toggle("is-loading", busy);
     els.researchSheetGoogleConnect.setAttribute("aria-busy", String(busy));
     els.researchSheetGoogleConnect.title = presentation.startAvailable
@@ -3499,7 +3748,7 @@ function renderResearchSheetGoogleAuth() {
   }
   if (els.researchSheetGoogleDisconnect) {
     els.researchSheetGoogleDisconnect.hidden = !presentation.connected;
-    els.researchSheetGoogleDisconnect.disabled = busy || !presentation.endpointReady;
+    els.researchSheetGoogleDisconnect.disabled = busy || researchSheetHubQueryIsBusy() || !presentation.endpointReady;
   }
 }
 
@@ -3560,7 +3809,7 @@ function researchSheetHubPopoverIsOpen() {
 function setResearchSheetHubPanelOpen(open, { discardPreview = false, focusToggle = false } = {}) {
   const hub = state.researchSheetHub;
   const wantsOpen = Boolean(open);
-  if (!wantsOpen && (hub.inFlight || researchSheetGoogleAuthIsBusy())) return false;
+  if (!wantsOpen && (hub.inFlight || researchSheetGoogleAuthIsBusy() || researchSheetHubQueryIsBusy())) return false;
   hub.panelOpen = wantsOpen;
   if (!wantsOpen && discardPreview) {
     hub.preview = null;
@@ -3580,7 +3829,7 @@ function closeResearchSheetHubPopover({ discardPreview = true, focusToggle = tru
   // An inspection/activation must remain visible until its request settles.
   // This also prevents Escape from accidentally closing the Mission modal
   // behind the global Sheet panel while a write-like action is in flight.
-  if (state.researchSheetHub.inFlight || researchSheetGoogleAuthIsBusy()) return true;
+  if (state.researchSheetHub.inFlight || researchSheetGoogleAuthIsBusy() || researchSheetHubQueryIsBusy()) return true;
   setResearchSheetHubPanelOpen(false, { discardPreview, focusToggle });
   return true;
 }
@@ -3592,7 +3841,8 @@ function renderResearchSheetHub() {
   // visible in the top bar instead of coupling it to the Mission-table modal.
   els.researchSheetHub.hidden = false;
   const popoverOpen = (hub.panelOpen || hub.inFlight || Boolean(hub.preview))
-    || researchSheetGoogleAuthIsBusy();
+    || researchSheetGoogleAuthIsBusy()
+    || researchSheetHubQueryIsBusy();
   if (els.researchSheetHubPopover) {
     els.researchSheetHubPopover.hidden = !popoverOpen;
     els.researchSheetHubPopover.setAttribute("aria-hidden", String(!popoverOpen));
@@ -3604,7 +3854,7 @@ function renderResearchSheetHub() {
   const summary = researchSheetHubSummaryPresentation();
   const activePresentation = researchSheetActivePresentation(hub.data);
   els.researchSheetHub.setAttribute("aria-busy", String(
-    hub.inFlight || hub.status === "loading" || researchSheetGoogleAuthIsBusy(),
+    hub.inFlight || hub.status === "loading" || researchSheetGoogleAuthIsBusy() || researchSheetHubQueryIsBusy(),
   ));
   if (els.researchSheetHubStatus) {
     els.researchSheetHubStatus.dataset.tone = summary.tone;
@@ -3632,7 +3882,7 @@ function renderResearchSheetHub() {
   }
   if (els.researchSheetHubApply) {
     const googleAuth = researchSheetGoogleAuthPresentation();
-    els.researchSheetHubApply.disabled = hub.inFlight || researchSheetGoogleAuthIsBusy() || !googleAuth.connected;
+    els.researchSheetHubApply.disabled = hub.inFlight || researchSheetGoogleAuthIsBusy() || researchSheetHubQueryIsBusy() || !googleAuth.connected;
     const inFlightLabel = hub.operation === "loading"
       ? "กำลังโหลดสถานะ…"
       : (hub.operation === "activate"
@@ -3666,6 +3916,7 @@ function renderResearchSheetHub() {
   renderResearchSheetGoogleAuth();
   renderResearchSheetHubLifecycle();
   renderResearchSheetHubLinkedSystems();
+  renderResearchSheetHubQuery();
   renderResearchSheetHubInspection();
   renderResearchSheetHubProgress();
   if (els.researchSheetHubConsumers) {
@@ -3728,7 +3979,15 @@ async function loadResearchSheetHub({ force = false, signal = null } = {}) {
       signal,
     });
     if (payload?.ok !== true || !payload?.researchSheet) throw new Error("Backend ยังไม่ยืนยัน Research Sheet Hub");
-    hub.data = normalizeResearchSheetHub(payload);
+    const nextData = normalizeResearchSheetHub(payload);
+    if (
+      hub.data?.configRevision
+      && nextData.configRevision
+      && hub.data.configRevision !== nextData.configRevision
+    ) {
+      resetResearchSheetHubQuery("Google Sheet ที่เปิดใช้มี Revision ใหม่ • กรุณาค้นข้อมูลอีกครั้ง");
+    }
+    hub.data = nextData;
     hub.status = "ready";
     hub.lastLoadedAt = Date.now();
     hub.message = "";
@@ -3744,6 +4003,86 @@ async function loadResearchSheetHub({ force = false, signal = null } = {}) {
     hub.inFlight = false;
     hub.operation = "";
     refreshOpenResearchSheetConsumer();
+  }
+}
+
+async function queryResearchSheetHub() {
+  const hub = state.researchSheetHub;
+  const query = hub.query;
+  const columnInput = els.researchSheetHubQueryColumn;
+  const tabInput = els.researchSheetHubQueryTab;
+  const containsInput = els.researchSheetHubQueryContains;
+  const limitInput = els.researchSheetHubQueryLimit;
+  if (!columnInput || query.inFlight || hub.inFlight || researchSheetGoogleAuthIsBusy()) return null;
+  if (!researchSheetHubQueryCanRun()) {
+    query.status = "error";
+    query.result = null;
+    query.message = "ต้องตรวจและเปิดใช้ Google Sheet ให้ครบ 3 แท็บก่อนค้นข้อมูล";
+    query.tone = "error";
+    hub.panelOpen = true;
+    renderResearchSheetHub();
+    return null;
+  }
+  columnInput.setCustomValidity("");
+  tabInput?.setCustomValidity("");
+  limitInput?.setCustomValidity("");
+  const tabName = String(tabInput?.value || "").trim();
+  if (!RESEARCH_SHEET_QUERY_TABS.has(tabName)) {
+    tabInput?.setCustomValidity("เลือกได้เฉพาะทุกแท็บ, World_System, Deep_Research หรือ Indicator_EA_Tool");
+    tabInput?.reportValidity();
+    return null;
+  }
+  const columnName = normalizeResearchSheetQueryText(columnInput.value, 120);
+  if (!columnName) {
+    columnInput.setCustomValidity("กรุณาพิมพ์ชื่อคอลัมน์ที่ต้องการอ่าน");
+    columnInput.reportValidity();
+    return null;
+  }
+  const contains = normalizeResearchSheetQueryText(containsInput?.value, 200);
+  const rawLimit = Number(limitInput?.value || 25);
+  if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > RESEARCH_SHEET_QUERY_MAX_MATCHES) {
+    limitInput?.setCustomValidity(`จำนวนผลลัพธ์ต้องอยู่ระหว่าง 1-${RESEARCH_SHEET_QUERY_MAX_MATCHES}`);
+    limitInput?.reportValidity();
+    return null;
+  }
+  const limit = rawLimit;
+  query.inFlight = true;
+  query.status = "loading";
+  query.result = null;
+  query.message = "กำลังอ่านข้อมูลล่าสุดจาก Google Sheet";
+  query.tone = "working";
+  hub.panelOpen = true;
+  renderResearchSheetHub();
+  try {
+    const payload = await postJson(RESEARCH_SHEET_HUB_QUERY_ENDPOINT, {
+      tabName,
+      columnName,
+      contains,
+      limit,
+    });
+    if (payload?.ok !== true) {
+      const error = new Error(payload?.messageTh || "Backend ยังไม่ยืนยันผลการค้น Google Sheet");
+      error.body = payload;
+      throw error;
+    }
+    query.result = normalizeResearchSheetQueryResult(payload);
+    query.status = "ready";
+    query.message = "";
+    query.tone = "success";
+    return query.result;
+  } catch (error) {
+    const errorResult = normalizeResearchSheetQueryResult(error?.body || {});
+    const columnNotFound = errorResult.kind === "research_sheet_column_not_found";
+    query.result = columnNotFound ? errorResult : null;
+    query.status = columnNotFound ? "not_found" : "error";
+    query.message = errorResult.messageTh
+      || normalizeResearchSheetQueryText(error?.message, 400)
+      || "ค้นข้อมูลจาก Google Sheet ไม่สำเร็จ";
+    query.tone = columnNotFound ? "warning" : "error";
+    return null;
+  } finally {
+    query.inFlight = false;
+    renderResearchSheetHub();
   }
 }
 
@@ -3875,7 +4214,7 @@ async function pollResearchSheetGoogleAuth() {
 async function startResearchSheetGoogleAuth() {
   const hub = state.researchSheetHub;
   const auth = hub.googleAuth;
-  if (researchSheetGoogleAuthIsBusy()) return null;
+  if (researchSheetGoogleAuthIsBusy() || researchSheetHubQueryIsBusy()) return null;
   // Open synchronously inside the click handler so browsers do not classify
   // the OAuth window as an unsolicited popup while the POST is pending.
   const popup = window.open(
@@ -3946,7 +4285,7 @@ async function startResearchSheetGoogleAuth() {
 
 async function disconnectResearchSheetGoogleAuth() {
   const auth = state.researchSheetHub.googleAuth;
-  if (researchSheetGoogleAuthIsBusy()) return null;
+  if (researchSheetGoogleAuthIsBusy() || researchSheetHubQueryIsBusy()) return null;
   if (!window.confirm("ยกเลิกการเชื่อมบัญชี Google จาก Local Bridge ใช่ไหม? Sheet ID จะยังอยู่")) return null;
   stopResearchSheetGoogleAuthPolling({ closePopup: true });
   auth.inFlight = true;
@@ -3969,6 +4308,7 @@ async function disconnectResearchSheetGoogleAuth() {
         : "ยกเลิกการเชื่อมบัญชี Google แล้ว • Sheet ID เดิมยังอยู่และจะยังไม่ถูกตรวจจนกว่าจะเชื่อมใหม่",
     );
     auth.tone = auth.data.connected ? "success" : "warning";
+    resetResearchSheetHubQuery("สิทธิ์ Google เปลี่ยนแล้ว • เชื่อมและค้นข้อมูลใหม่เมื่อพร้อม");
     await Promise.all([
       loadResearchSheetGoogleAuth({ force: true }),
       loadResearchSheetHub({ force: true }),
@@ -4087,6 +4427,7 @@ async function activateResearchSheetHub() {
     const activeData = normalizeResearchSheetHub(payload);
     activeData.active = payload.activation.active === true && activeData.configured === true;
     hub.data = activeData;
+    resetResearchSheetHubQuery("เปิดใช้ Google Sheet Revision ใหม่แล้ว • พร้อมค้นข้อมูลจาก Sheet นี้");
     hub.activation = {
       active: true,
       status: safeDashboardDisplayText(payload.activation.status, "ready"),
@@ -23060,28 +23401,59 @@ function renderEaFactoryStatusStrip(section, domain = {}) {
   section.appendChild(strip);
 }
 
+function eaFactorySpreadsheetColumnName(number) {
+  if (!Number.isInteger(number) || number < 1 || number > 702) return "";
+  let value = number;
+  let result = "";
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    result = String.fromCharCode(65 + remainder) + result;
+    value = Math.floor((value - 1) / 26);
+  }
+  return result;
+}
+
 function renderEaFactorySheetSchema(container, domain = {}) {
+  const sheetSchema = workflowDomainObject(domain.sourceCatalog?.sheetSchema);
+  const sourceHeaders = Array.isArray(sheetSchema.sourceRequiredHeaders)
+    ? sheetSchema.sourceRequiredHeaders
+      .slice(0, 80)
+      .map((header) => safeDashboardDisplayText(header, "").slice(0, 120))
+      .filter(Boolean)
+    : [];
+  const sourceTabName = safeDashboardDisplayText(sheetSchema.sheetTabDefault, "Deep_Research");
+  const sourceEndColumn = eaFactorySpreadsheetColumnName(sourceHeaders.length);
   const details = document.createElement("details");
   const summary = document.createElement("summary");
   const groups = document.createElement("div");
-  summary.textContent = "ดู Schema Google Sheets A-W ที่โรงงานอ่าน";
+  summary.textContent = sourceHeaders.length
+    ? `ดู Schema ${sourceTabName} A-${sourceEndColumn} (${sourceHeaders.length} headers)`
+    : `รอ Schema ${sourceTabName} จาก Backend`;
   groups.className = "ea-factory-sheet-schema";
-  [
-    ["A-M • Strategy Core", EA_FACTORY_SHEET_COLUMNS.slice(0, 13)],
-    ["N-W • Research / Build Tracking", EA_FACTORY_SHEET_COLUMNS.slice(13)],
-  ].forEach(([titleText, columns]) => {
+  if (sourceHeaders.length) {
     const group = document.createElement("section");
     const title = document.createElement("strong");
     const list = document.createElement("div");
-    title.textContent = titleText;
-    columns.forEach(([letter, name]) => {
+    title.textContent = `${sourceTabName} • Source Sheet ที่ Backend ตรวจตามชื่อหัวคอลัมน์`;
+    sourceHeaders.forEach((name, index) => {
       const item = document.createElement("code");
-      item.textContent = `${letter} ${name}`;
+      item.textContent = `${eaFactorySpreadsheetColumnName(index + 1)} ${name}`;
       list.appendChild(item);
     });
     group.append(title, list);
     groups.appendChild(group);
+  }
+  const mappingGroup = document.createElement("section");
+  const mappingTitle = document.createElement("strong");
+  const mappingList = document.createElement("div");
+  mappingTitle.textContent = `Mapping ภายใน ${EA_FACTORY_SHEET_COLUMNS.length} fields • ไม่ใช่ช่วงคอลัมน์ Google Sheet`;
+  EA_FACTORY_SHEET_COLUMNS.forEach(([, name]) => {
+    const item = document.createElement("code");
+    item.textContent = name;
+    mappingList.appendChild(item);
   });
+  mappingGroup.append(mappingTitle, mappingList);
+  groups.appendChild(mappingGroup);
   details.className = "ea-factory-schema-details";
   details.append(summary, groups);
   container.appendChild(details);
@@ -31595,6 +31967,7 @@ els.researchSheetHubDetailsToggle?.addEventListener("click", () => {
   if (!opening && (
     state.researchSheetHub.inFlight
     || researchSheetGoogleAuthIsBusy()
+    || researchSheetHubQueryIsBusy()
     || state.researchSheetHub.preview
   )) return;
   setResearchSheetHubPanelOpen(opening);
@@ -31611,6 +31984,7 @@ document.addEventListener("click", (event) => {
     || els.researchSheetHub?.contains(event.target)
     || hub.inFlight
     || researchSheetGoogleAuthIsBusy()
+    || researchSheetHubQueryIsBusy()
     || hub.preview
   ) return;
   setResearchSheetHubPanelOpen(false);
@@ -31650,6 +32024,28 @@ els.researchSheetHubCancel?.addEventListener("click", () => {
 
 els.researchSheetHubActivate?.addEventListener("click", () => {
   void activateResearchSheetHub();
+});
+
+els.researchSheetHubQuerySubmit?.addEventListener("click", () => {
+  void queryResearchSheetHub();
+});
+
+els.researchSheetHubQueryFields?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  void queryResearchSheetHub();
+});
+
+els.researchSheetHubQueryColumn?.addEventListener("input", () => {
+  els.researchSheetHubQueryColumn.setCustomValidity("");
+});
+
+els.researchSheetHubQueryTab?.addEventListener("change", () => {
+  els.researchSheetHubQueryTab.setCustomValidity("");
+});
+
+els.researchSheetHubQueryLimit?.addEventListener("input", () => {
+  els.researchSheetHubQueryLimit.setCustomValidity("");
 });
 
 els.researchSheetGoogleConnect?.addEventListener("click", () => {

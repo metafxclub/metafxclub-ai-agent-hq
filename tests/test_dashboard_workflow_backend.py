@@ -1469,7 +1469,56 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         )
         self.assertIsNone(stored["discoverySchedule"]["pendingSlotKey"])
 
-    def test_scheduler_keeps_ambiguous_dispatch_reservation_fail_closed(self) -> None:
+    def test_daily_execution_reservation_replays_same_pending_slot_without_incrementing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "dashboard-workflow-settings.json"
+            with (
+                mock.patch.object(self.bridge, "DASHBOARD_WORKFLOW_SETTINGS_PATH", settings_path),
+                mock.patch.object(self.bridge, "load_missions", return_value=[]),
+                mock.patch.object(self.bridge, "append_audit"),
+                mock.patch.object(
+                    self.bridge,
+                    "DASHBOARD_WORKFLOW_SCHEDULE_JOBS",
+                    self.schedule_jobs("discoverySchedule"),
+                ),
+            ):
+                self.bridge.save_dashboard_discovery_schedule(
+                    {"enabled": True, "times": ["09:00"]}
+                )
+                now = datetime(2026, 8, 9, 9, 0, tzinfo=self.bridge.THAILAND_TIMEZONE)
+                captured = self.bridge._dashboard_workflow_capture_due_slots(now)
+                pending = self.bridge._dashboard_workflow_pending_jobs()[0]
+
+                first = self.bridge._dashboard_workflow_reserve_daily_execution(
+                    pending,
+                    now,
+                )
+                replay = self.bridge._dashboard_workflow_reserve_daily_execution(
+                    pending,
+                    now,
+                )
+                stored = self.bridge.load_dashboard_workflow_settings()[
+                    "discoverySchedule"
+                ]
+
+        self.assertEqual(len(captured), 1)
+        self.assertTrue(first["allowed"])
+        self.assertEqual(first["kind"], "daily_execution_reserved")
+        self.assertTrue(replay["allowed"])
+        self.assertEqual(replay["kind"], "daily_execution_reserved_replay")
+        self.assertEqual(first["runsReserved"], 1)
+        self.assertEqual(replay["runsReserved"], 1)
+        self.assertEqual(stored["dailyExecutionCount"], 1)
+        self.assertEqual(
+            stored["dailyExecutionSlotKeys"],
+            ["discoverySchedule:2026-08-09:0900"],
+        )
+        self.assertEqual(
+            stored["pendingSlotKey"],
+            "discoverySchedule:2026-08-09:0900",
+        )
+
+    def test_scheduler_replays_ambiguous_dispatch_reservation_idempotently(self) -> None:
         keys: list[str] = []
 
         def fail_action(_prop_id: str, payload: dict, *, trusted_trigger_source: str) -> dict:
@@ -1553,16 +1602,29 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             "discoverySchedule:2026-08-09:0900",
         )
         self.assertIsNotNone(failure_model["lastErrorAt"])
-        self.assertFalse(recovered["dispatched"])
-        self.assertEqual(recovered["kind"], "scheduler_idle")
-        self.assertEqual(keys, [keys[0]])
+        self.assertTrue(recovered["dispatched"])
+        self.assertEqual(recovered["kind"], "mission_auto_queued")
+        self.assertTrue(recovered["idempotentReplay"])
+        self.assertEqual(
+            keys,
+            [
+                "dashboard-schedule:discoverySchedule:2026-08-09:0900",
+                "dashboard-schedule:discoverySchedule:2026-08-09:0900",
+            ],
+        )
         self.assertIsNone(after_recovery["discoverySchedule"]["pendingSlotKey"])
         self.assertEqual(
             after_recovery["discoverySchedule"]["lastResultKind"],
-            "pending_slot_already_reserved",
+            "mission_auto_queued",
         )
         self.assertEqual(after_recovery["discoverySchedule"]["dailyExecutionCount"], 1)
-        self.assertIsNone(after_recovery["discoverySchedule"]["lastMissionId"])
+        self.assertEqual(
+            after_recovery["discoverySchedule"]["lastMissionId"],
+            "mission-replayed-1",
+        )
+        self.assertTrue(
+            after_recovery["discoverySchedule"]["lastIdempotentReplay"]
+        )
 
     def test_scheduler_waits_for_active_scheduled_mission_without_overlapping(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2149,6 +2211,127 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertEqual(preferences["timeoutSeconds"], 300)
         self.assertEqual(preferences["outputLimitChars"], 20000)
         self.assertEqual(preferences["rateReservePercent"], 15)
+
+    def test_public_discovery_workflows_enforce_600_second_timeout_floor(self) -> None:
+        settings = {
+            "agentPreferences": {
+                "language": "th",
+                "modelTier": "specialist_fast",
+                "tokenBudget": 12000,
+                "timeoutSeconds": 15,
+                "outputLimitChars": 7000,
+                "rateReservePercent": 15,
+            },
+        }
+        for action_id in (
+            "discover_trading_systems",
+            "discover_new_indicators",
+        ):
+            with self.subTest(action_id=action_id):
+                preferences = self.bridge._dashboard_workflow_execution_preferences(
+                    action_id,
+                    settings,
+                )
+                self.assertEqual(preferences["timeoutSeconds"], 600)
+
+    def test_public_discovery_prompts_stay_below_runner_limit_with_large_catalog(self) -> None:
+        reports: list[dict] = []
+        for index in range(300):
+            fingerprint = f"{index:024x}"[-24:]
+            reports.extend((
+                {
+                    "id": f"world-report-{index}",
+                    "type": "trading_system_discovery_report",
+                    "metrics": {
+                        "systems": [{
+                            "systemName": f"Catalog System {index} " + ("W" * 160),
+                            "strategyFamily": "trend_following",
+                            "market": "Forex",
+                            "symbols": ["EURUSD", "GBPUSD"],
+                            "timeframes": ["H1"],
+                            "sourceUrl": f"https://world-{index}.example/system",
+                            "duplicateFingerprint": fingerprint,
+                        }],
+                    },
+                },
+                {
+                    "id": f"radar-report-{index}",
+                    "type": "indicator_scout_report",
+                    "workflowContext": {
+                        "propId": "left_audit_crystals",
+                        "actionId": "discover_new_indicators",
+                    },
+                    "metrics": {
+                        "entries": [{
+                            "toolName": f"Catalog Indicator {index} " + ("R" * 160),
+                            "toolKind": "indicator",
+                            "platform": "mt5",
+                            "version": "1.0",
+                            "sourceUrl": f"https://radar-{index}.example/indicator",
+                        }],
+                    },
+                },
+            ))
+
+        cases = (
+            (
+                "discover_trading_systems",
+                "codex_mcp_portal",
+                "BACKEND_LOCAL_TRADING_SYSTEM_CATALOG",
+            ),
+            (
+                "discover_new_indicators",
+                "left_audit_crystals",
+                "BACKEND_LOCAL_DEDUP_CATALOG",
+            ),
+        )
+        with mock.patch.object(
+            self.bridge,
+            "load_runtime_reports",
+            return_value=reports,
+        ):
+            for action_id, prop_id, catalog_tag in cases:
+                with self.subTest(action_id=action_id):
+                    profile = self.bridge._trusted_workflow_plugin_profile(
+                        prop_id,
+                        action_id,
+                    )
+                    prompt = self.bridge._workflow_prompt(
+                        action_id,
+                        {},
+                        None,
+                        profile,
+                    )
+                    self.assertIn(f"[{catalog_tag}]", prompt)
+                    self.assertIn(f"[/{catalog_tag}]", prompt)
+                    catalog_text = prompt.split(
+                        f"[{catalog_tag}]",
+                        1,
+                    )[1].split(f"[/{catalog_tag}]", 1)[0]
+                    catalog_json = catalog_text.split(":", 1)[1].strip()
+                    catalog = json.loads(catalog_json)
+                    self.assertEqual(catalog["total"], 200)
+                    self.assertEqual(catalog["included"], len(catalog["items"]))
+                    self.assertGreater(catalog["included"], 0)
+                    self.assertEqual(
+                        catalog["truncated"],
+                        catalog["included"] < catalog["total"],
+                    )
+                    self.assertNotIn("[TRUNCATED]", catalog_json)
+                    for identity in catalog["items"]:
+                        self.assertEqual(
+                            set(identity),
+                            {"sourceUrl", "duplicateFingerprint"},
+                        )
+                        self.assertRegex(
+                            identity["duplicateFingerprint"],
+                            r"^[0-9a-f]{24}$",
+                        )
+                        self.assertTrue(identity["sourceUrl"].startswith("https://"))
+                    self.assertLess(
+                        len(prompt),
+                        self.bridge.TRADING_SYSTEM_RUNNER_PROMPT_MAX_CHARS,
+                    )
 
     def test_http_sanitization_preserves_nested_workflow_select_options(self) -> None:
         """The final send_json projection must not turn safe options into placeholders."""

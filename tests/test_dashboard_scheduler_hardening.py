@@ -282,7 +282,9 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
             captured["payload"].get("budget"),
             {
                 "tokenBudget": preferences["tokenBudget"],
-                "timeoutSeconds": preferences["timeoutSeconds"],
+                # Public discovery has a hard 600-second floor so a normal
+                # web-research pass is not terminated by an older preference.
+                "timeoutSeconds": 600,
                 "outputLimitChars": 20000,
             },
         )
