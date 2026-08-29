@@ -11,6 +11,10 @@ jobs:
   test:
     runs-on: windows-latest
     timeout-minutes: 10
+    env:
+      # Keep regression tests independent from skills/plugins already installed
+      # in a developer profile. This mirrors a student's first clean install.
+      CODEX_HOME: ${{ runner.temp }}\codex-home
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5

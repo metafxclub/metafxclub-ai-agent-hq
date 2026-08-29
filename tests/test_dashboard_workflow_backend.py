@@ -3204,32 +3204,44 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertIn("right_tool_console", self.bridge.METATRADER_TARGET_PROP_IDS)
 
     def test_dashboard_read_model_hides_manual_action_but_backend_keeps_plugin_procedure(self) -> None:
-        model = self.bridge.workflow_dashboard_read_model(
-            "codex_mcp_portal",
-            reports=[],
-            bridge=self.ready_bridge(),
-        )
-        self.assertNotIn(
-            "discover_trading_systems",
-            {item["id"] for item in model["actions"]},
-        )
-        self.assertNotIn(
-            "save_discovery_schedule",
-            {item["id"] for item in model["actions"]},
-        )
-        profile = self.bridge._trusted_workflow_plugin_profile(
-            "codex_mcp_portal",
-            "discover_trading_systems",
-        )
-        self.assertEqual(profile["contractVersion"], "equipment-plugin-map-v1")
-        self.assertEqual(profile["pluginSkillId"], "backend-readonly-system-scout")
-        self.assertEqual(profile["procedureKind"], "backend_procedure")
-        self.assertEqual(profile["referencePluginSkillId"], "metafx-online-system-scout")
-        self.assertTrue(profile["referenceSkillInstalled"])
-        self.assertEqual(profile["automationMode"], "scheduled_read_only")
-        self.assertEqual(profile["outputFields"], ["systems"])
-        self.assertEqual(profile["entryContract"]["minimumItemsPerRun"], 3)
-        self.assertIn("source_url", profile["evidenceRequired"])
+        # The Custom Plugin is an optional reference.  Simulate a clean
+        # checkout with no user-level Codex plugin cache and verify that the
+        # packaged Backend procedure remains available and reports that state
+        # accurately instead of inheriting the developer machine's inventory.
+        profile_globals = self.bridge.equipment_action_profile.__globals__
+        with mock.patch.dict(
+            profile_globals,
+            {"_installed_skill": lambda _skill_id: {"installed": False, "version": None}},
+        ):
+            model = self.bridge.workflow_dashboard_read_model(
+                "codex_mcp_portal",
+                reports=[],
+                bridge=self.ready_bridge(),
+            )
+            self.assertNotIn(
+                "discover_trading_systems",
+                {item["id"] for item in model["actions"]},
+            )
+            self.assertNotIn(
+                "save_discovery_schedule",
+                {item["id"] for item in model["actions"]},
+            )
+            profile = self.bridge._trusted_workflow_plugin_profile(
+                "codex_mcp_portal",
+                "discover_trading_systems",
+            )
+            self.assertEqual(profile["contractVersion"], "equipment-plugin-map-v1")
+            self.assertEqual(profile["pluginSkillId"], "backend-readonly-system-scout")
+            self.assertEqual(profile["procedureKind"], "backend_procedure")
+            self.assertEqual(profile["referencePluginSkillId"], "metafx-online-system-scout")
+            self.assertFalse(profile["referenceSkillInstalled"])
+            self.assertIsNone(profile["referenceInstalledVersion"])
+            self.assertFalse(profile["referenceVersionMatch"])
+            self.assertTrue(profile["versionMatch"])
+            self.assertEqual(profile["automationMode"], "scheduled_read_only")
+            self.assertEqual(profile["outputFields"], ["systems"])
+            self.assertEqual(profile["entryContract"]["minimumItemsPerRun"], 3)
+            self.assertIn("source_url", profile["evidenceRequired"])
 
     def test_workflow_dispatch_persists_plugin_procedure_in_prompt_and_lineage(self) -> None:
         with (

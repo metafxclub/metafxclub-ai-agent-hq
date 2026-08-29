@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import threading
 from pathlib import Path
@@ -193,7 +194,7 @@ _EVIDENCE_KIND_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
 _CACHE_LOCK = threading.RLock()
 _CACHE_MTIME_NS: int | None = None
 _CACHE_PAYLOAD: dict[str, Any] | None = None
-_SKILL_INSTALL_CACHE: dict[str, dict[str, Any]] = {}
+_SKILL_INSTALL_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 
 
 class EquipmentWorkflowContractError(RuntimeError):
@@ -510,11 +511,17 @@ def _installed_skill(skill_id: str) -> dict[str, Any]:
     normalized = str(skill_id or "").strip()
     if not normalized:
         return {"installed": False, "version": None}
+    configured_home = str(os.environ.get("CODEX_HOME") or "").strip()
+    codex_home = (
+        Path(configured_home).expanduser()
+        if configured_home
+        else Path.home() / ".codex"
+    )
+    cache_key = (str(codex_home), normalized)
     with _CACHE_LOCK:
-        cached = _SKILL_INSTALL_CACHE.get(normalized)
+        cached = _SKILL_INSTALL_CACHE.get(cache_key)
         if cached is not None:
             return copy.deepcopy(cached)
-    codex_home = Path.home() / ".codex"
     discovered: list[tuple[str, Path]] = []
     personal = codex_home / "skills" / normalized / "SKILL.md"
     if personal.is_file():
@@ -542,7 +549,7 @@ def _installed_skill(skill_id: str) -> dict[str, Any]:
         "version": sorted((version for version, _ in discovered), reverse=True)[0] if discovered else None,
     }
     with _CACHE_LOCK:
-        _SKILL_INSTALL_CACHE[normalized] = copy.deepcopy(result)
+        _SKILL_INSTALL_CACHE[cache_key] = copy.deepcopy(result)
     return result
 
 

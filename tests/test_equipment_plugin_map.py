@@ -1,8 +1,11 @@
 import copy
 import json
 import importlib.util
+import os
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -135,29 +138,69 @@ class EquipmentPluginMapTests(unittest.TestCase):
                 self.assertNotEqual(action["automationMode"], "scheduled_read_only")
 
     def test_backend_loader_returns_trusted_copies_with_owner_and_contract_version(self) -> None:
-        profile = self.profile_module.equipment_action_profile(
-            "codex_mcp_portal", "discover_trading_systems"
-        )
-        self.assertEqual(profile["pluginSkillId"], "backend-readonly-system-scout")
-        self.assertEqual(profile["procedureKind"], "backend_procedure")
-        self.assertEqual(profile["referencePluginSkillId"], "metafx-online-system-scout")
-        self.assertTrue(profile["referenceSkillInstalled"])
-        self.assertEqual(profile["ownerAgentId"], "codex_mcp_operator")
-        self.assertEqual(profile["contractVersion"], "equipment-plugin-map-v1")
-        profile["inputPreset"]["market"] = "tampered"
-        fresh = self.profile_module.equipment_action_profile(
-            "codex_mcp_portal", "discover_trading_systems"
-        )
-        self.assertEqual(fresh["inputPreset"]["market"], "Multi-asset")
-        self.assertEqual(fresh["outputFields"], ["systems"])
-        self.assertEqual(fresh["entryContract"]["minimumItemsPerRun"], 3)
+        # Reference plugins are optional design inputs, not packaged runtime
+        # dependencies.  Keep this contract test independent of the developer's
+        # ~/.codex plugin cache and prove that the Backend-owned procedure still
+        # loads truthfully on a clean student/CI machine.
+        with mock.patch.object(
+            self.profile_module,
+            "_installed_skill",
+            return_value={"installed": False, "version": None},
+        ):
+            profile = self.profile_module.equipment_action_profile(
+                "codex_mcp_portal", "discover_trading_systems"
+            )
+            self.assertEqual(profile["pluginSkillId"], "backend-readonly-system-scout")
+            self.assertEqual(profile["procedureKind"], "backend_procedure")
+            self.assertEqual(profile["referencePluginSkillId"], "metafx-online-system-scout")
+            self.assertFalse(profile["referenceSkillInstalled"])
+            self.assertIsNone(profile["referenceInstalledVersion"])
+            self.assertFalse(profile["referenceVersionMatch"])
+            self.assertTrue(profile["versionMatch"])
+            self.assertEqual(profile["ownerAgentId"], "codex_mcp_operator")
+            self.assertEqual(profile["contractVersion"], "equipment-plugin-map-v1")
+            profile["inputPreset"]["market"] = "tampered"
+            fresh = self.profile_module.equipment_action_profile(
+                "codex_mcp_portal", "discover_trading_systems"
+            )
+            self.assertEqual(fresh["inputPreset"]["market"], "Multi-asset")
+            self.assertEqual(fresh["outputFields"], ["systems"])
+            self.assertEqual(fresh["entryContract"]["minimumItemsPerRun"], 3)
         self.assertNotIn(
             "discover_ea_updates",
             self.plugin_map["equipment"]["codex_mcp_portal"]["actions"],
         )
         self.assertIsNone(self.profile_module.equipment_action_profile("unknown", "unknown"))
 
+    def test_skill_discovery_honors_the_codex_home_installation_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / "isolated-codex-home"
+            skill_file = codex_home / "skills" / "ci-hermetic-reference" / "SKILL.md"
+            skill_file.parent.mkdir(parents=True)
+            skill_file.write_text("# Hermetic reference\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                installed = self.profile_module._installed_skill("ci-hermetic-reference")
+                missing = self.profile_module._installed_skill("developer-only-reference")
+
+        self.assertEqual(installed, {"installed": True, "version": "personal"})
+        self.assertEqual(missing, {"installed": False, "version": None})
+
     def test_platform_router_changes_backend_procedure_and_reference_plugin_together(self) -> None:
+        installed_reference_versions = {
+            "metafx-system6-ea-builder-mt4": "0.1.4",
+            "metafx-system6-ea-builder-mt5": "0.1.1+codex.20260616",
+            "metafx-ea-full-cycle": "0.1.7+codex.20260611184944",
+            "metafx-ea-full-cycle-mt5": "0.1.1+codex.20260616",
+            "metafx-optimization-lab-mt4": "0.1.4+codex.20260607131357",
+            "metafx-optimization-lab-mt5": "0.1.1+codex.20260616",
+            "metafx-ea-discovery-lab-mt4": "0.1.4+codex.20260607132750",
+            "metafx-ea-discovery-lab-mt5": "0.1.4+codex.20260616liveguard",
+        }
+
+        def installed_skill(skill_id: str) -> dict:
+            version = installed_reference_versions.get(skill_id)
+            return {"installed": version is not None, "version": version}
+
         cases = (
             ("right_server_racks", "build_strategy_code", {"platform": "mt5"}, "backend-mql5-source-builder", "metafx-system6-ea-builder-mt5", "0.1.1+codex.20260616"),
             ("right_tool_console", "prepare_backtest_plan", {"platform": "mt5"}, "backend-backtest-plan-mt5", "metafx-ea-full-cycle-mt5", "0.1.1+codex.20260616"),
@@ -165,22 +208,29 @@ class EquipmentPluginMapTests(unittest.TestCase):
             ("right_tool_console", "prepare_ea_discovery_plan", {"platform": "mt5"}, "backend-ea-discovery-plan-mt5", "metafx-ea-discovery-lab-mt5", "0.1.4+codex.20260616liveguard"),
             ("terminal_workstation", "develop_ea_source", {"platform": "mql5"}, "backend-mql5-source-developer", "metafx-ea-full-cycle-mt5", "0.1.1+codex.20260616"),
         )
-        for prop_id, action_id, selectors, procedure_id, reference_id, reference_version in cases:
-            with self.subTest(action=action_id):
-                profile = self.profile_module.equipment_action_profile(prop_id, action_id, selectors)
-                self.assertEqual(profile["pluginSkillId"], procedure_id)
-                self.assertEqual(profile["referencePluginSkillId"], reference_id)
-                self.assertEqual(profile["referencePluginVersion"], reference_version)
-                self.assertTrue(profile["referenceSkillInstalled"])
-                self.assertTrue(profile["referenceVersionMatch"])
+        # Supply a deterministic installation inventory so routing assertions
+        # do not depend on whichever plugins happen to exist on the test host.
+        with mock.patch.object(
+            self.profile_module,
+            "_installed_skill",
+            side_effect=installed_skill,
+        ):
+            for prop_id, action_id, selectors, procedure_id, reference_id, reference_version in cases:
+                with self.subTest(action=action_id):
+                    profile = self.profile_module.equipment_action_profile(prop_id, action_id, selectors)
+                    self.assertEqual(profile["pluginSkillId"], procedure_id)
+                    self.assertEqual(profile["referencePluginSkillId"], reference_id)
+                    self.assertEqual(profile["referencePluginVersion"], reference_version)
+                    self.assertTrue(profile["referenceSkillInstalled"])
+                    self.assertTrue(profile["referenceVersionMatch"])
 
-        tradingview = self.profile_module.equipment_action_profile(
-            "right_server_racks", "build_strategy_code", {"platform": "tradingview"}
-        )
-        self.assertEqual(tradingview["pluginSkillId"], "backend-tradingview-source-builder")
-        self.assertIsNone(tradingview["referencePluginSkillId"])
-        self.assertIsNone(tradingview["referencePluginVersion"])
-        self.assertNotIn("referenceSkillInstalled", tradingview)
+            tradingview = self.profile_module.equipment_action_profile(
+                "right_server_racks", "build_strategy_code", {"platform": "tradingview"}
+            )
+            self.assertEqual(tradingview["pluginSkillId"], "backend-tradingview-source-builder")
+            self.assertIsNone(tradingview["referencePluginSkillId"])
+            self.assertIsNone(tradingview["referencePluginVersion"])
+            self.assertNotIn("referenceSkillInstalled", tradingview)
 
     def test_contract_rejects_incomplete_action_reference_pair(self) -> None:
         cases = (

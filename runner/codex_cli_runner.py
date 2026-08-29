@@ -387,9 +387,23 @@ def utc_now() -> str:
 
 def project_relative(path: Path) -> str:
     try:
-        return path.resolve().relative_to(PROJECT_ROOT).as_posix()
+        return path.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
     except ValueError:
         return path.name
+
+
+def _canonical_path_key(path: Path, *, strict: bool = False) -> str:
+    """Return a comparison key that collapses equivalent Windows path aliases.
+
+    GitHub's Windows runners can expose the Temp root through an 8.3 alias such
+    as ``RUNNER~1`` while ``Path.resolve()`` returns the long ``runneradmin``
+    spelling.  Both names identify the same directory, so fixed-root checks
+    must compare their resolved identities rather than their raw strings.
+    Component link and boundary checks remain separate and fail closed.
+    """
+
+    resolved = Path(path).resolve(strict=strict)
+    return os.path.normcase(os.path.normpath(str(resolved)))
 
 
 def redact_text(value: str, limit: int = 20000) -> str:
@@ -5488,6 +5502,7 @@ def format_work_report(work: dict, output_limit: int) -> str:
 def _validated_approved_workspace_roots() -> tuple[Path, ...]:
     """Return exact non-link write roots for an approved implementation Mission."""
 
+    project_absolute = Path(os.path.abspath(str(PROJECT_ROOT)))
     project_root = PROJECT_ROOT.resolve(strict=False)
     fixed_labels = (
         "workspace",
@@ -5508,15 +5523,23 @@ def _validated_approved_workspace_roots() -> tuple[Path, ...]:
     validated: list[Path] = []
     for label, candidate in zip(fixed_labels, configured):
         candidate_path = Path(candidate)
-        expected = project_root / label
+        expected_absolute = project_absolute / label
+        expected = expected_absolute.resolve(strict=False)
         candidate_absolute = Path(os.path.abspath(str(candidate_path)))
-        if os.path.normcase(str(candidate_absolute)) != os.path.normcase(str(expected)):
+        if (
+            os.path.normcase(str(candidate_absolute))
+            != os.path.normcase(str(expected_absolute))
+        ):
             raise ValueError("approved workspace root is outside the fixed allowlist")
         is_junction = getattr(candidate_path, "is_junction", lambda: False)
         if candidate_path.is_symlink() or is_junction():
             raise ValueError("approved workspace root must not be a link or junction")
         resolved = candidate_path.resolve(strict=False)
-        if resolved != expected or not resolved.is_relative_to(project_root):
+        if (
+            _canonical_path_key(resolved)
+            != _canonical_path_key(expected)
+            or not resolved.is_relative_to(project_root)
+        ):
             raise ValueError("approved workspace root escapes the project boundary")
         validated.append(candidate_path)
     return tuple(validated)
@@ -5562,8 +5585,10 @@ def _validated_ea_factory_scoped_write_root(relative_root: object) -> tuple[Path
     resolved_workspace = workspace_root.resolve(strict=True)
     resolved_candidate = candidate.resolve(strict=True)
     if (
-        resolved_workspace != workspace_absolute
-        or resolved_candidate != candidate_absolute
+        _canonical_path_key(resolved_workspace, strict=True)
+        != _canonical_path_key(workspace_absolute, strict=True)
+        or _canonical_path_key(resolved_candidate, strict=True)
+        != _canonical_path_key(candidate_absolute, strict=True)
         or not resolved_candidate.is_relative_to(resolved_workspace)
     ):
         raise ValueError("EA Factory scoped write root changed during validation")
