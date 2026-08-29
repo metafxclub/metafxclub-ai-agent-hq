@@ -601,14 +601,25 @@ def _classified_oauth_http_error(
     *,
     refresh_grant: bool = False,
 ) -> GoogleSheetHubError:
-    provider_error = _allowlisted_provider_oauth_error(error)
-    if error.code == 429:
+    status_code = int(getattr(error, "code", 0) or 0)
+    try:
+        provider_error = _allowlisted_provider_oauth_error(error)
+    finally:
+        # HTTPError owns the provider response stream.  Python 3.14 warns when
+        # that stream is finalized implicitly, and the warning may include the
+        # untrusted provider reason.  Close it deterministically after the one
+        # bounded read so provider-controlled text cannot leak to stderr.
+        try:
+            error.close()
+        except (AttributeError, OSError, ValueError):
+            pass
+    if status_code == 429:
         return GoogleSheetHubError(
             "oauth_rate_limited",
             "Google OAuth is temporarily rate limiting requests. Wait briefly and reconnect.",
             429,
         )
-    if error.code >= 500:
+    if status_code >= 500:
         return GoogleSheetHubError(
             "oauth_unavailable",
             "Google OAuth is temporarily unavailable. Wait briefly and reconnect.",
@@ -623,7 +634,7 @@ def _classified_oauth_http_error(
     if provider_error:
         code, message, status = _OAUTH_PROVIDER_ERROR_MAP[provider_error]
         return GoogleSheetHubError(code, message, status)
-    if refresh_grant and error.code in {400, 401}:
+    if refresh_grant and status_code in {400, 401}:
         return GoogleSheetHubError(
             "auth_expired",
             "Google Sheets authorization is invalid or expired. Please reconnect Google Sheets.",

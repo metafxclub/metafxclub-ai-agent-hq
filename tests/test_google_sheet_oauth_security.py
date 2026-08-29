@@ -383,6 +383,7 @@ class GoogleOAuthModuleSecurityTests(unittest.TestCase):
                         description,
                     )
                 )
+                provider_response = opener.side_effect
                 with self.assertRaises(self.hub.GoogleSheetHubError) as rejected:
                     self.hub.complete_google_oauth(
                         callback,
@@ -392,6 +393,7 @@ class GoogleOAuthModuleSecurityTests(unittest.TestCase):
                     )
                 self.assertEqual(rejected.exception.code, expected_kind)
                 self.assertIn(rejected.exception.code, allowlisted)
+                self.assertTrue(provider_response.fp.closed)
                 safe_exception = f"{rejected.exception.code}\n{rejected.exception}"
                 for marker in provider_markers + (callback["code"][0],):
                     self.assertNotIn(marker, safe_exception)
@@ -464,14 +466,17 @@ class GoogleOAuthModuleSecurityTests(unittest.TestCase):
             {},
             body,
         )
-        self.assertEqual(
-            self.hub._allowlisted_provider_oauth_error(error),
-            "invalid_client",
-        )
-        self.assertEqual(
-            body.read_sizes,
-            [self.hub.MAX_OAUTH_ERROR_RESPONSE_BYTES + 1],
-        )
+        try:
+            self.assertEqual(
+                self.hub._allowlisted_provider_oauth_error(error),
+                "invalid_client",
+            )
+            self.assertEqual(
+                body.read_sizes,
+                [self.hub.MAX_OAUTH_ERROR_RESPONSE_BYTES + 1],
+            )
+        finally:
+            error.close()
 
     def test_missing_sheets_scope_never_persists_refresh_token_and_consumes_state(self) -> None:
         _result, query = self.start()
@@ -629,7 +634,10 @@ class GoogleOAuthBridgeSecurityTests(unittest.TestCase):
             with urlopen(self.base_url + path, timeout=3) as response:
                 return response.status, response.read()
         except HTTPError as error:
-            return error.code, error.read()
+            try:
+                return error.code, error.read()
+            finally:
+                error.close()
 
     def test_callback_query_and_provider_exception_are_not_logged_or_echoed(self) -> None:
         code = "CALLBACK_CODE_SECRET_MARKER"
@@ -825,7 +833,10 @@ class GoogleOAuthBridgeSecurityTests(unittest.TestCase):
                     with urlopen(request, timeout=3) as response:
                         status, body = response.status, response.read()
                 except HTTPError as error:
-                    status, body = error.code, error.read()
+                    try:
+                        status, body = error.code, error.read()
+                    finally:
+                        error.close()
                 self.assertEqual(status, 422)
                 self.assertNotIn(marker.encode("utf-8"), body)
         for path in (
