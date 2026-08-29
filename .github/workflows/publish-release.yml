@@ -19,7 +19,7 @@ jobs:
     env:
       # The release gate must pass from a clean student-like Codex profile,
       # never because optional reference plugins exist on a developer machine.
-      CODEX_HOME: ${{ runner.temp }}\codex-home
+      CODEX_HOME: ${{ github.workspace }}\.ci-codex-home
     steps:
       - name: Check out verified source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
