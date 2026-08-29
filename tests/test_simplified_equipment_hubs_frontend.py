@@ -128,7 +128,9 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
 
     def test_daily_news_uses_a_direct_backend_only_left_rail(self):
         rail_actions = self.function_block("workflowRailActions", "createWorkflowUseGuideCard")
-        self.assertIn("INDICATOR_SCOUT_RAIL_ACTION_IDS", rail_actions)
+        self.assertIn('["codex_mcp_portal", INDICATOR_SCOUT_PROP_ID].includes(subject?.id)', rail_actions)
+        self.assertIn("return [];", rail_actions)
+        self.assertNotIn("INDICATOR_SCOUT_RAIL_ACTION_IDS", rail_actions)
         self.assertIn("if (subject?.id === FX_NEWS_BIAS_PROP_ID) return [];", rail_actions)
         self.assertIn("return [...actions]", rail_actions)
         direct_rail = self.function_block("renderFxNewsSettingsRail", "renderWorkflowSettingsRail")
@@ -493,7 +495,9 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
         self.assertIn("เหตุการณ์ตลอดวัน", self.main)
 
         html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-        self.assertIn("20260814-radar-contract-v062", html)
+        self.assertIn("20260827-google-auth-v074", html)
+        self.assertNotIn("20260814-ai-meeting-preview-v063", html)
+        self.assertNotIn("20260814-radar-contract-v062", html)
         self.assertNotIn("20260814-daily-news-direct-v060", html)
         self.assertNotIn("20260814-pair-news-assessment-v055", html)
         self.assertNotIn("20260814-runtime-truth-v054", html)

@@ -40,56 +40,51 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
             "idempotentReplay": False,
         }
 
-    def test_disabling_schedule_after_pending_capture_cancels_dispatch(self) -> None:
-        """A stale pending snapshot must not run after the user disables its schedule."""
+    def test_backend_owned_daily_schedules_reject_mutation_and_stay_canonical(self) -> None:
+        """Portal and Radar remain enabled at the single Backend-owned Bangkok slot."""
 
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_path = Path(temp_dir) / "dashboard-workflow-settings.json"
-
-            def disable_during_gate(*, refresh_quota: bool, settings_key: str | None = None, **_kwargs) -> dict:
-                self.assertFalse(refresh_quota)
-                if settings_key != "discoverySchedule":
-                    return {"allowed": True, "reason": "ready"}
-                self.bridge.save_dashboard_discovery_schedule(
-                    {"enabled": False, "times": ["09:00"]}
-                )
-                return {"allowed": True, "reason": "ready"}
-
-            with (
-                mock.patch.object(self.bridge, "DASHBOARD_WORKFLOW_SETTINGS_PATH", settings_path),
-                mock.patch.object(self.bridge, "load_missions", return_value=[]),
-                mock.patch.object(self.bridge, "append_audit"),
-                mock.patch.object(
-                    self.bridge,
-                    "_dashboard_workflow_scheduler_gate",
-                    side_effect=disable_during_gate,
-                ),
-                mock.patch.object(
-                    self.bridge,
-                    "run_dashboard_workflow_action",
-                    return_value=self._queued_result(),
-                ) as runner,
+            with mock.patch.object(
+                self.bridge,
+                "DASHBOARD_WORKFLOW_SETTINGS_PATH",
+                settings_path,
             ):
-                self.bridge.save_direct_daily_fx_news_schedule(
-                    {"enabled": False, "times": ["00:00", "12:00"]}
-                )
-                self.bridge._save_dashboard_schedule_preference(
-                    "indicatorScoutSchedule",
-                    {"enabled": False, "times": ["09:00"]},
-                )
-                self.bridge.save_dashboard_discovery_schedule(
-                    {"enabled": True, "times": ["09:00"]}
-                )
-                result = self.bridge.dashboard_workflow_scheduler_tick(
-                    datetime(2026, 8, 9, 9, 0, tzinfo=self.bridge.THAILAND_TIMEZONE),
-                    refresh_quota=False,
-                )
+                for saver in (
+                    self.bridge.save_dashboard_discovery_schedule,
+                    lambda form: self.bridge._save_dashboard_schedule_preference(
+                        "indicatorScoutSchedule",
+                        form,
+                    ),
+                ):
+                    with self.subTest(saver=saver), self.assertRaises(
+                        self.bridge.RequestError
+                    ) as disabled:
+                        saver({"enabled": False, "times": ["09:00"]})
+                    self.assertEqual(disabled.exception.status, 409)
+                    self.assertEqual(
+                        str(disabled.exception),
+                        "backend_owned_schedule_must_remain_enabled",
+                    )
+
+                    with self.subTest(saver=saver), self.assertRaises(
+                        self.bridge.RequestError
+                    ) as moved:
+                        saver({"enabled": True, "times": ["07:00"]})
+                    self.assertEqual(moved.exception.status, 409)
+                    self.assertEqual(
+                        str(moved.exception),
+                        "backend_owned_schedule_time_must_be_09_00",
+                    )
+
                 stored = self.bridge.load_dashboard_workflow_settings()
 
-        self.assertFalse(result["dispatched"])
-        runner.assert_not_called()
-        self.assertFalse(stored["discoverySchedule"]["requestedEnabled"])
-        self.assertIsNone(stored["discoverySchedule"]["pendingSlotKey"])
+        for settings_key in ("discoverySchedule", "indicatorScoutSchedule"):
+            with self.subTest(settings_key=settings_key):
+                schedule = stored[settings_key]
+                self.assertTrue(schedule["requestedEnabled"])
+                self.assertEqual(schedule["times"], ["09:00"])
+                self.assertEqual(schedule["timezone"], "Asia/Bangkok")
 
     def test_frontend_cannot_use_reserved_dashboard_schedule_idempotency_prefix(self) -> None:
         """Predictable scheduler keys are an internal namespace, never frontend input."""
@@ -143,10 +138,15 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
             "codex_mcp_portal",
             "discover_trading_systems",
         )
+        effective_form = self.bridge._workflow_effective_form(
+            plugin_profile,
+            {},
+            action_id="discover_trading_systems",
+        )
         trusted_schedule_context = self.bridge._dashboard_workflow_lineage(
             "codex_mcp_portal",
             "discover_trading_systems",
-            {},
+            effective_form,
             None,
             trigger_source="schedule",
             plugin_profile=plugin_profile,
@@ -206,7 +206,12 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
                     "requester": "codex_mcp_operator",
                     "targetId": "codex_mcp_portal",
                     "reportType": "trading_system_discovery_report",
-                    "prompt": "Read-only public research",
+                    "prompt": self.bridge._workflow_prompt(
+                        "discover_trading_systems",
+                        effective_form,
+                        None,
+                        plugin_profile,
+                    ),
                     "idempotencyKey": "dashboard-schedule:test-completed-replay",
                 },
                 trusted_workflow_context=trusted_schedule_context,
@@ -217,8 +222,8 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
         self.assertEqual(result["mission"]["id"], completed["id"])
         self.assertEqual(result["mission"]["status"], "completed")
 
-    def test_scheduled_action_propagates_saved_model_and_budget_preferences(self) -> None:
-        """Backend-owned schedule controls must reach mission creation, not remain cosmetic."""
+    def test_scheduled_action_propagates_budget_and_uses_portal_quality_tier(self) -> None:
+        """Budgets propagate while Portal research keeps its action-owned quality tier."""
 
         captured: dict = {}
 
@@ -233,7 +238,7 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
             "tokenBudget": 5432,
             "timeoutSeconds": 321,
             "outputLimitChars": 4321,
-            "rateReservePercent": 35,
+            "rateReservePercent": 15,
         }
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_path = Path(temp_dir) / "dashboard-workflow-settings.json"
@@ -272,18 +277,18 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(saved["modelTier"], preferences["modelTier"])
-        self.assertEqual(captured["payload"].get("modelTier"), preferences["modelTier"])
+        self.assertEqual(captured["payload"].get("modelTier"), "manager_quality")
         self.assertEqual(
             captured["payload"].get("budget"),
             {
                 "tokenBudget": preferences["tokenBudget"],
                 "timeoutSeconds": preferences["timeoutSeconds"],
-                "outputLimitChars": preferences["outputLimitChars"],
+                "outputLimitChars": 20000,
             },
         )
 
-    def test_rate_reserve_is_clamped_to_same_10_80_range_everywhere(self) -> None:
-        """Stored/read and submitted reserve values must match the quota gate range."""
+    def test_rate_reserve_is_fixed_at_15_everywhere(self) -> None:
+        """Legacy storage normalizes to 15 and submitted overrides are rejected."""
 
         action = self.bridge.DASHBOARD_WORKFLOW_ACTIONS["save_agent_preferences"]
         low_model = self.bridge._dashboard_agent_preferences_read_model(
@@ -292,19 +297,22 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
         high_model = self.bridge._dashboard_agent_preferences_read_model(
             {"agentPreferences": {"rateReservePercent": 999}}
         )
-        low_form = self.bridge._sanitize_dashboard_workflow_form(
+        exact_form = self.bridge._sanitize_dashboard_workflow_form(
             action,
-            {"rateReservePercent": -999},
-        )
-        high_form = self.bridge._sanitize_dashboard_workflow_form(
-            action,
-            {"rateReservePercent": 999},
+            {"rateReservePercent": 15},
         )
 
-        self.assertEqual(low_model["rateReservePercent"], 10)
-        self.assertEqual(high_model["rateReservePercent"], 80)
-        self.assertEqual(low_form["rateReservePercent"], 10)
-        self.assertEqual(high_form["rateReservePercent"], 80)
+        self.assertEqual(low_model["rateReservePercent"], 15)
+        self.assertEqual(high_model["rateReservePercent"], 15)
+        self.assertEqual(exact_form["rateReservePercent"], 15)
+        for invalid in (-999, 16, 999):
+            with self.subTest(invalid=invalid), self.assertRaises(
+                self.bridge.RequestError
+            ):
+                self.bridge._sanitize_dashboard_workflow_form(
+                    action,
+                    {"rateReservePercent": invalid},
+                )
 
     def test_news_pending_slot_expires_at_midnight_without_researching_prior_date(self) -> None:
         """A prior Bangkok-day slot must expire, never run as today's news."""
@@ -348,6 +356,15 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
                     "run_dashboard_workflow_action",
                     side_effect=fake_action,
                 ),
+                mock.patch.object(
+                    self.bridge,
+                    "DASHBOARD_WORKFLOW_SCHEDULE_JOBS",
+                    tuple(
+                        job
+                        for job in self.bridge.DASHBOARD_WORKFLOW_SCHEDULE_JOBS
+                        if job.get("settingsKey") == "newsBiasSchedule"
+                    ),
+                ),
             ):
                 self.bridge._save_dashboard_schedule_preference(
                     "newsBiasSchedule",
@@ -356,10 +373,6 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
                         "times": ["23:59"],
                         "minimumImpact": "high",
                     },
-                )
-                self.bridge._save_dashboard_schedule_preference(
-                    "indicatorScoutSchedule",
-                    {"enabled": False, "times": ["09:00"]},
                 )
                 captured_slots = self.bridge._dashboard_workflow_capture_due_slots(slot_time)
                 result = self.bridge.dashboard_workflow_scheduler_tick(

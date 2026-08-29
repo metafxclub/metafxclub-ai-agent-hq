@@ -428,7 +428,12 @@ class AiTradeCouncilFailureInjectionTests(unittest.TestCase):
             mock.patch.object(
                 self.bridge,
                 "codex_rate_limits",
-                return_value={"ok": True, "stale": False, "limitReached": False},
+                return_value={
+                    "ok": True,
+                    "stale": False,
+                    "limitReached": False,
+                    "primary": {"usedPercent": 10, "remainingPercent": 90},
+                },
             ),
             mock.patch.object(self.bridge, "check_rate_limit", side_effect=fake_rate),
             mock.patch.object(
@@ -497,7 +502,12 @@ class AiTradeCouncilFailureInjectionTests(unittest.TestCase):
             mock.patch.object(
                 self.bridge,
                 "codex_rate_limits",
-                return_value={"ok": True, "stale": False, "limitReached": False},
+                return_value={
+                    "ok": True,
+                    "stale": False,
+                    "limitReached": False,
+                    "primary": {"usedPercent": 10, "remainingPercent": 90},
+                },
             ),
             mock.patch.object(self.bridge, "check_rate_limit", side_effect=fake_rate),
             mock.patch.object(self.bridge, "claim_auto_mission", return_value=claimed),
@@ -557,7 +567,12 @@ class AiTradeCouncilFailureInjectionTests(unittest.TestCase):
             mock.patch.object(
                 self.bridge,
                 "codex_rate_limits",
-                return_value={"ok": True, "stale": False, "limitReached": False},
+                return_value={
+                    "ok": True,
+                    "stale": False,
+                    "limitReached": False,
+                    "primary": {"usedPercent": 10, "remainingPercent": 90},
+                },
             ),
             mock.patch.object(self.bridge, "check_rate_limit", side_effect=fake_rate),
             mock.patch.object(self.bridge, "claim_auto_mission", return_value=claimed),

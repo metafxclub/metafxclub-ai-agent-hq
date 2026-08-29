@@ -227,7 +227,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         )
 
         self.assertEqual(orchestration["version"], "orchestration-contract-v010")
-        self.assertEqual(reports["version"], "report-contract-v011")
+        self.assertEqual(reports["version"], "report-contract-v012")
         policy = orchestration["aiTradeCouncilAutoAnalysis"]["consensusPolicy"]
         self.assertEqual(
             policy["protectivePlanSources"],
@@ -762,9 +762,11 @@ class RuntimeIntegrityTests(unittest.TestCase):
 
         dashboard_panel_start = html.index('id="modalDashboardPanel"')
         signal_workspace_start = html.index('id="modalSignalConsensusWorkspace"')
+        mission_chat_panel_start = html.index('id="modalMissionChatPanel"')
         kanban_panel_start = html.index('id="modalKanbanPanel"')
         self.assertLess(dashboard_panel_start, signal_workspace_start)
-        self.assertLess(signal_workspace_start, kanban_panel_start)
+        self.assertLess(signal_workspace_start, mission_chat_panel_start)
+        self.assertLess(mission_chat_panel_start, kanban_panel_start)
 
         def opening_tag(element_id: str) -> str:
             match = re.search(
@@ -1377,12 +1379,17 @@ class RuntimeIntegrityTests(unittest.TestCase):
                     self.assertTrue(profile["operation"]["scheduleBackendOwned"])
                     self.assertTrue(profile["operation"]["scheduleDefaultEnabled"])
                     self.assertEqual(profile["operation"]["scheduleDefaultTimes"], ["00:00", "12:00"])
-                elif prop_id == "left_audit_crystals":
+                elif prop_id in {"codex_mcp_portal", "left_audit_crystals"}:
                     self.assertEqual(profile["operation"]["defaultMode"], "once_daily")
                     self.assertTrue(profile["operation"]["scheduleBackendOwned"])
                     self.assertTrue(profile["operation"]["scheduleDefaultEnabled"])
                     self.assertEqual(profile["operation"]["scheduleDefaultTimes"], ["09:00"])
                     self.assertEqual(profile["operation"]["scheduleHardMaximumRunsPerDay"], 1)
+                elif prop_id == "right_server_racks":
+                    self.assertEqual(profile["operation"]["defaultMode"], "manual_stage_by_stage")
+                    self.assertFalse(profile["operation"]["scheduled"])
+                    self.assertFalse(profile["operation"]["automaticLoop"])
+                    self.assertTrue(profile["operation"]["oneUserActionAdvancesOneStage"])
                 else:
                     self.assertEqual(profile["operation"]["defaultMode"], "manual")
                     self.assertTrue(profile["operation"]["scheduleBackendOwned"])
@@ -1402,6 +1409,11 @@ class RuntimeIntegrityTests(unittest.TestCase):
                             "implemented_allowlist",
                             "implemented_atomic_local_store",
                             "implemented_direct_backend",
+                            "implemented_public_shared_read_only",
+                            "implemented_static_validation_only",
+                            "implemented_backend_google_sheets_api_fail_closed",
+                            "implemented_central_sheet_read_only_with_public_or_backend_auth_transport",
+                            "guarded_requires_selected_matching_terminal_and_proof",
                             "configuration_only_adapter_not_connected",
                             "source_ready_requires_ea_install",
                             "implemented_in_trade_gateway",
@@ -1417,13 +1429,26 @@ class RuntimeIntegrityTests(unittest.TestCase):
                         self.assertNotEqual(item["adapterStatus"], "implemented")
 
         self.assertTrue({"partial", "needs_attention"}.issubset(set(contract["statusVocabulary"])))
-        mt_any_of_dashboards = {"right_server_racks", "right_tool_console", "left_analytics_console"}
+        mt_any_of_dashboards = {"right_tool_console", "left_analytics_console"}
         for prop_id in mt_any_of_dashboards:
             profile = profiles[prop_id]
             connection_ids = {item["id"] for item in profile["connections"]}
             any_of = profile.get("connectionRequirements", {}).get("anyOf")
             self.assertEqual(any_of, ["mt4_terminal", "mt5_terminal"])
             self.assertTrue(set(any_of).issubset(connection_ids))
+
+        factory_requirements = profiles["right_server_racks"]["connectionRequirements"]
+        self.assertNotIn("anyOf", factory_requirements)
+        self.assertEqual(factory_requirements["requiredForSourceGeneration"], ["codex_workspace"])
+        self.assertEqual(
+            factory_requirements["requiredForMt4CompileAndBacktest"],
+            ["mt4_terminal", "metaeditor_compile_adapter", "strategy_tester_adapter"],
+        )
+        self.assertEqual(
+            factory_requirements["requiredForMt5CompileAndBacktest"],
+            ["mt5_terminal", "metaeditor_compile_adapter", "strategy_tester_adapter"],
+        )
+        self.assertTrue(factory_requirements["notRequiredForPineSourceGenerationOrValidation"])
 
     def test_specialist_home_targets_match_dashboard_report_routing(self) -> None:
         agents = json.loads((PROJECT_ROOT / "contracts" / "agents" / "agents.json").read_text(encoding="utf-8"))["agents"]
@@ -1897,9 +1922,15 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertEqual(items["mt5_terminal"]["status"], "detected")
         self.assertEqual(items["mt4_terminal"]["adapterStatus"], "runtime_detected")
         self.assertEqual(items["mt4_terminal"]["executionAdapterStatus"], "coming_soon")
-        self.assertEqual(items["metaeditor_compile_adapter"]["status"], "coming_soon")
-        self.assertEqual(checklist["connectionRequirements"]["anyOf"], ["mt4_terminal", "mt5_terminal"])
+        self.assertEqual(items["metaeditor_compile_adapter"]["status"], "not_connected")
+        self.assertEqual(items["strategy_tester_adapter"]["status"], "not_connected")
+        self.assertEqual(checklist["connectionRequirements"]["anyOf"], [])
         self.assertTrue(checklist["connectionRequirements"]["anyOfSatisfied"])
+        self.assertEqual(checklist["connectionRequirements"]["status"], "not_required")
+        self.assertEqual(
+            checklist["connectionRequirements"]["requiredForMt4CompileAndBacktest"],
+            ["mt4_terminal", "metaeditor_compile_adapter", "strategy_tester_adapter"],
+        )
         self.assertEqual(checklist["overallStatus"], "partial")
         self.assertEqual(checklist["operationMode"]["aiEveryTwoHours"]["status"], "not_required")
         self.assertFalse(checklist["operationMode"]["aiEveryTwoHours"]["enabled"])
@@ -1927,7 +1958,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             {"supported": True, "mt4": 0, "mt5": 0},
         )
         one_found = self.bridge.dashboard_connection_checklist(
-            "right_server_racks",
+            "right_tool_console",
             bridge=fake_bridge,
             terminals=mt4_only,
         )
@@ -1940,7 +1971,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             {"supported": True, "mt4": 0, "mt5": 0},
         )
         missing = self.bridge.dashboard_connection_checklist(
-            "right_server_racks",
+            "right_tool_console",
             bridge=fake_bridge,
             terminals=none_found,
         )
@@ -1948,7 +1979,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertEqual(missing["connectionRequirements"]["status"], "needs_attention")
         self.assertEqual(missing["overallStatus"], "needs_attention")
 
-    def test_optional_coming_soon_adapter_keeps_dashboard_truthfully_partial(self) -> None:
+    def test_optional_implemented_sheet_adapter_keeps_auth_required_dashboard_partial(self) -> None:
         fake_bridge = {
             "mode": "Codex Runner Ready",
             "status": "guarded",
@@ -1959,8 +1990,25 @@ class RuntimeIntegrityTests(unittest.TestCase):
         checklist = self.bridge.dashboard_connection_checklist(
             "left_server_racks",
             bridge=fake_bridge,
+            research_sheet={
+                "adapterStatus": "auth_required",
+                "lastVerifiedAt": None,
+                "consumers": [
+                    {
+                        "propId": "left_server_racks",
+                        "status": "auth_required",
+                        "readReady": False,
+                        "writeReady": False,
+                    }
+                ],
+            },
         )
-        self.assertTrue(any(not item["required"] and item["status"] == "coming_soon" for item in checklist["items"]))
+        sheet = next(item for item in checklist["items"] if item["id"] == "google_sheets_adapter")
+        self.assertEqual(sheet["adapterStatus"], "implemented_backend_google_sheets_api_fail_closed")
+        self.assertEqual(sheet["status"], "auth_required")
+        self.assertEqual(sheet["statusSource"], "research_sheet_hub")
+        self.assertFalse(sheet["readReady"])
+        self.assertFalse(sheet["writeReady"])
         self.assertEqual(checklist["overallStatus"], "partial")
 
     def test_checklist_overall_checked_at_is_null_until_every_relevant_probe_has_run(self) -> None:
@@ -1985,7 +2033,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             "cacheAgeSeconds": None,
         }
         checklist = self.bridge.dashboard_connection_checklist(
-            "right_server_racks",
+            "right_tool_console",
             bridge=fake_bridge,
             terminals=terminals_not_checked,
         )
@@ -2635,6 +2683,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             "gameModal",
             "modalChatPanel",
             "modalDashboardPanel",
+            "modalMissionChatPanel",
             "modalKanbanPanel",
             "taskDetailDialog",
             "dashboardResultDialog",
@@ -2642,7 +2691,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             self.assertIn(f'id="{preserved_id}"', html)
         self.assertIn('agent: ["chat", "tasks"]', main)
         self.assertIn('dashboard: ["results"]', main)
-        self.assertIn('kanban: ["kanban"]', main)
+        self.assertIn('kanban: ["mission-chat", "kanban"]', main)
         self.assertIn("postJson(AGENT_CHAT_ENDPOINT", main)
 
     def test_modal_layers_fill_the_usable_viewport_and_keep_actions_visible(self) -> None:
@@ -2743,10 +2792,10 @@ class RuntimeIntegrityTests(unittest.TestCase):
 
         kanban_block = function_block("renderMissionKanban")
         self.assertIn("columnMissions.forEach", kanban_block)
-        self.assertIn(
-            'createTaskCard(mission, { variant: "kanban-card", source: "kanban" })',
-            kanban_block,
-        )
+        self.assertIn("createTaskCard(mission, {", kanban_block)
+        self.assertIn('variant: "kanban-card"', kanban_block)
+        self.assertIn('source: "kanban"', kanban_block)
+        self.assertIn("statusOverride: column.id", kanban_block)
         self.assertIn("preserveScroll = true", kanban_block)
         self.assertIn("state.modal.kanbanScrollTop[status] = list.scrollTop", kanban_block)
         self.assertIn("list.scrollTop = Math.max", kanban_block)
@@ -3866,6 +3915,8 @@ class RuntimeIntegrityTests(unittest.TestCase):
         installer = INSTALLER_SCRIPT_PATH.read_text(encoding="utf-8-sig")
 
         self.assertIn("sys._base_executable", lifecycle)
+        self.assertIn("__PYVENV_LAUNCHER__", lifecycle)
+        self.assertIn("-VenvLauncherPath $projectVenvLauncher", lifecycle)
         self.assertIn("$candidates = @(Get-BridgeProcesses)", lifecycle)
         self.assertIn("$healthyProcessResult = Wait-ForBridgeHealth", lifecycle)
         self.assertIn("$healthyProcessId = [int]$healthyProcessResult.ProcessId", lifecycle)
@@ -3970,6 +4021,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         installer = INSTALLER_SCRIPT_PATH.read_text(encoding="utf-8-sig")
         uninstaller = UNINSTALL_SCRIPT_PATH.read_text(encoding="utf-8-sig")
         release_workflow = RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8-sig")
+        gitignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8-sig")
 
         self.assertIn('"integrations\\mt4-trade-gateway\\MetafxHQTradeGateway.mq4"', installer)
         self.assertIn('"artifacts\\mt4-ai-council-ea-v2.16-stream-transition-hardening\\MetafxHQTradeGateway.ex4"', installer)
@@ -3984,6 +4036,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn("Release ZIP installation smoke test failed", release_workflow)
         self.assertIn("Installed Runtime is missing required file", release_workflow)
         self.assertIn('node --check (Join-Path $installedRoot "frontend\\src\\app\\main.js")', release_workflow)
+        self.assertIn("**/client_secret*.json", gitignore)
+        self.assertIn("**/*secret*.json", gitignore)
+        self.assertIn("*.dpapi", gitignore)
 
     def test_student_installer_requires_confirmed_loopback_endpoint_and_checks_codex_quota(self) -> None:
         lifecycle = LIFECYCLE_SCRIPT_PATH.read_text(encoding="utf-8-sig")
@@ -4001,7 +4056,12 @@ class RuntimeIntegrityTests(unittest.TestCase):
             installer.index("$selectedBridgePort = Confirm-BridgeEndpoint", main_start),
             installer.index("Stop-ExistingBridge", main_start),
         )
-        self.assertIn("-Port $ConfirmedPort", installer)
+        self.assertIn('"-Port"', installer)
+        self.assertIn("[string]$ConfirmedPort", installer)
+        self.assertIn(
+            "Invoke-BridgeLifecycleProcess -Action Start -ConfirmedPort $ConfirmedPort",
+            installer,
+        )
         self.assertIn("api/codex/rate-limits?refresh=true", installer)
         self.assertIn("account_identity_stored = $false", installer)
         self.assertNotIn("& $codex login", installer)
@@ -4318,7 +4378,19 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 "action": {"type": "search", "query": "XAUUSD latest market news"},
             },
         })
-        script = f"import sys; sys.stdout.write('x' * 50000 + '\\n' + {event!r} + '\\n')"
+        opened_url = "https://example.com/public-system"
+        open_event = json.dumps({
+            "type": "item.completed",
+            "item": {
+                "id": "item-web-open-after-noise",
+                "type": "web_search",
+                "action": {"type": "open_page", "url": opened_url},
+            },
+        })
+        script = (
+            "import sys; sys.stdout.write('x' * 50000 + '\\n' + "
+            f"{event!r} + '\\n' + {open_event!r} + '\\n')"
+        )
         result = self.runner.run_chat_command(
             [sys.executable, "-c", script],
             timeout=10,
@@ -4331,6 +4403,8 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertTrue(result["nativeWebSearchUsed"])
         self.assertEqual(result["nativeWebSearchVerificationSource"], "codex_exec_jsonl")
         self.assertNotIn("item-web-after-noise", result["stdout"])
+        self.assertNotIn("item-web-open-after-noise", result["stdout"])
+        self.assertEqual(result["nativeWebSearchOpenedUrls"], [opened_url])
         self.assertTrue(self.runner.native_web_search_used(result))
 
     def test_native_web_search_jsonl_detector_rejects_unfinished_or_model_text(self) -> None:
@@ -5821,6 +5895,8 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.bridge.codex_rate_limits = lambda force=False: {
                     "ok": True,
                     "status": "ready",
+                    "primary": {"remainingPercent": 80},
+                    "secondary": {"remainingPercent": 70},
                     "limitReached": False,
                     "stale": False,
                 }
@@ -6296,7 +6372,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             "time": "2026-07-15T00:00:00+00:00",
         }
         registry = self.bridge.capability_registry(fake_status)
-        self.assertEqual(registry["contractVersion"], "tool-permission-contract-v013")
+        self.assertEqual(registry["contractVersion"], "tool-permission-contract-v015")
         self.assertFalse(registry["policy"]["frontendSecrets"])
         self.assertTrue(registry["policy"]["disabledToolsFailClosed"])
         telegram = next(item for item in registry["capabilities"] if item["id"] == "send_telegram")
@@ -6753,6 +6829,8 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.bridge.codex_rate_limits = lambda force=False: {
                     "ok": True,
                     "status": "ready",
+                    "primary": {"remainingPercent": 80},
+                    "secondary": {"remainingPercent": 70},
                     "limitReached": False,
                     "stale": False,
                 }
@@ -7262,7 +7340,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                     "intervalMinutes": 120,
                     "maxTurns": 3,
                     "maxDailyRuns": 2,
-                    "minRemainingPercent": 40,
+                    "minRemainingPercent": 15,
                 })
                 self.assertTrue(saved["ok"])
                 stored = self.bridge.load_collaboration_schedule_store()
@@ -7270,6 +7348,26 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.assertEqual(stored["config"]["participants"][-1], "manager")
                 self.assertFalse(stored["config"]["autoCreateFollowup"])
                 self.assertEqual(stored["config"]["timezone"], "Asia/Bangkok")
+                self.assertEqual(stored["config"]["minRemainingPercent"], 15)
+                higher_reserve = self.bridge.set_collaboration_schedule({
+                    "minRemainingPercent": 40,
+                })
+                self.assertFalse(higher_reserve["ok"])
+                self.assertEqual(
+                    higher_reserve["kind"],
+                    "invalid_minRemainingPercent",
+                )
+                raw_store = self.bridge.read_json(
+                    self.bridge.COLLABORATION_SCHEDULE_PATH,
+                    None,
+                )
+                raw_store["config"]["minRemainingPercent"] = 40
+                self.bridge.write_json(
+                    self.bridge.COLLABORATION_SCHEDULE_PATH,
+                    raw_store,
+                )
+                migrated = self.bridge.load_collaboration_schedule_store()
+                self.assertEqual(migrated["config"]["minRemainingPercent"], 15)
             finally:
                 for name, value in originals.items():
                     setattr(self.bridge, name, value)
@@ -7281,7 +7379,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         config = {
             "startTime": "22:00",
             "endTime": "06:00",
-            "minRemainingPercent": 30,
+            "minRemainingPercent": 15,
         }
         self.assertTrue(
             self.bridge._collaboration_inside_window(
@@ -7307,13 +7405,23 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 "ok": True,
                 "status": "ready",
                 "primary": {"remainingPercent": 70},
-                "secondary": {"remainingPercent": 25},
+                "secondary": {"remainingPercent": 15},
                 "limitReached": False,
                 "stale": False,
             }
             blocked = self.bridge._collaboration_quota_gate(config, refresh=False)
             self.assertFalse(blocked["allowed"])
             self.assertEqual(blocked["reason"], "quota_below_reserve")
+            self.bridge.peek_codex_rate_limits = lambda: {
+                "ok": True,
+                "status": "ready",
+                "primary": {"remainingPercent": 70},
+                "secondary": {"remainingPercent": 16},
+                "limitReached": False,
+                "stale": False,
+            }
+            above_reserve = self.bridge._collaboration_quota_gate(config, refresh=False)
+            self.assertTrue(above_reserve["allowed"])
             self.bridge.peek_codex_rate_limits = lambda: {
                 "ok": True,
                 "status": "ready",

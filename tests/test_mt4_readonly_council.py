@@ -1331,12 +1331,28 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
                 updated = self.bridge.set_ai_trade_council_automation({
                     "enabled": True,
                     "maxDailyRounds": 12,
-                    "minRemainingPercent": 40,
+                    "minRemainingPercent": 15,
                 })
                 config = updated["automation"]["config"]
                 self.assertTrue(config["enabled"])
                 self.assertEqual(config["maxDailyRounds"], 12)
-                self.assertEqual(config["minRemainingPercent"], 40)
+                self.assertEqual(config["minRemainingPercent"], 15)
+                higher_reserve = self.bridge.set_ai_trade_council_automation({
+                    "minRemainingPercent": 40,
+                })
+                self.assertFalse(higher_reserve["ok"])
+                self.assertEqual(
+                    higher_reserve["kind"],
+                    "invalid_minRemainingPercent",
+                )
+                legacy_store = self.bridge.load_ai_trade_council_automation_store()
+                legacy_store["config"]["minRemainingPercent"] = 40
+                self.bridge.write_json(
+                    self.bridge._ai_trade_council_automation_store_path(),
+                    legacy_store,
+                )
+                migrated = self.bridge.load_ai_trade_council_automation_store()
+                self.assertEqual(migrated["config"]["minRemainingPercent"], 15)
                 self.assertEqual(config["pollSeconds"], 5)
                 self.assertEqual(config["settleSeconds"], 10)
                 self.assertEqual(

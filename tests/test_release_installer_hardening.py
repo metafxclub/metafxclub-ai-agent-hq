@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import fnmatch
 import re
 import subprocess
 import unittest
@@ -141,7 +142,9 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn('"--require-hashes"', installer)
         staged = installer[installer.index("function New-StagedApplication"):installer.index("function Publish-StagedApplication")]
         self.assertIn("Resolve-SystemPython", staged)
-        self.assertNotIn("if (Test-Path -LiteralPath $candidatePython -PathType Leaf)", staged)
+        self.assertIn('"tests.test_release_candidate_preflight"', staged)
+        self.assertNotIn('"discover"', staged)
+        self.assertNotIn(r'runner\.venv\Scripts\python.exe', staged)
 
         requirements = (ROOT / "requirements-runner.txt").read_text(encoding="utf-8")
         self.assertGreaterEqual(requirements.count("--hash=sha256:"), 11)
@@ -156,10 +159,28 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         ]
         self.assertIn("Publish-StagedApplication", smoke)
         self.assertIn("Test-InstalledApplication", smoke)
+        self.assertIn("Test-IsolatedInstalledBridge", smoke)
         self.assertNotIn("Suspend-BridgeScheduledTask", smoke)
         self.assertNotIn("Stop-ExistingBridge", smoke)
         self.assertIn('$env:GITHUB_ACTIONS -cne "true"', smoke)
         self.assertIn("$localAppDataFull.StartsWith($runnerTempFull", smoke)
+        isolated_smoke = installer[
+            installer.index("function Test-IsolatedInstalledBridge"):
+            installer.index("function New-HqShortcut")
+        ]
+        self.assertIn("Start-And-TestBridge", isolated_smoke)
+        self.assertIn("Invoke-WebRequest", isolated_smoke)
+        self.assertIn("Invoke-BridgeLifecycleProcess -Action Stop", isolated_smoke)
+        lifecycle_process = installer[
+            installer.index("function Invoke-BridgeLifecycleProcess"):
+            installer.index("function Test-IsolatedInstalledBridge")
+        ]
+        self.assertIn("Start-Process", lifecycle_process)
+        self.assertIn("-WindowStyle Hidden", lifecycle_process)
+        self.assertIn("-PassThru", lifecycle_process)
+        self.assertIn("$process.WaitForExit(60000)", lifecycle_process)
+        self.assertNotIn("-Wait `", lifecycle_process)
+        self.assertNotIn("| Out-Host", lifecycle_process)
         self.assertIn("$script:rollbackIncomplete = $true", installer)
         finally_block = installer[installer.rindex("    finally {"):installer.index("    Write-Step \"ติดตั้งและตรวจสอบสำเร็จ")]
         self.assertIn("if ($script:rollbackIncomplete)", finally_block)
@@ -178,6 +199,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             "index.html",
             "Open Metafx Agent HQ.cmd",
             "1-INSTALL-HQ.bat",
+            "2-SETUP-GOOGLE-HQ.bat",
             "UPDATE-HQ.bat",
             "REPAIR-HQ.bat",
             "UNINSTALL-HQ.bat",
@@ -196,12 +218,55 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             installer.index("function Copy-ApplicationFiles"):
             installer.index("function Stop-CandidateBridgeAfterFailedStart")
         ]
+        sync_scope = installer[
+            installer.index("function Sync-Directory"):
+            installer.index("function Copy-ApplicationFiles")
+        ]
         publish_scope = installer[
             installer.index("function Publish-StagedApplication"):
             installer.index("function New-ApplicationRollbackSnapshot")
         ]
         self.assertIn('".github"', copy_scope)
         self.assertIn('".github"', publish_scope)
+        self.assertNotIn('"*secret*"', sync_scope)
+        self.assertIn('"*secret*.json"', sync_scope)
+        self.assertIn('"*.dpapi"', sync_scope)
+        self.assertIn('"2-SETUP-GOOGLE-HQ.bat"', copy_scope)
+        self.assertIn('"scripts\\setup-google-oauth.ps1"', installer)
+        self.assertIn('"tests\\release_secret_scan.py"', installer)
+        self.assertIn('"tests\\test_release_candidate_preflight.py"', installer)
+
+        exclude_match = re.search(r'"/XF",(?P<filters>.*?)\r?\n\s*"/XD"', sync_scope, re.DOTALL)
+        self.assertIsNotNone(exclude_match)
+        exclude_patterns = re.findall(r'"([^"]+)"', exclude_match.group("filters"))
+        for safe_source_name in (
+            "release_secret_scan.py",
+            "test_release_secret_hygiene.py",
+            "google_oauth_store.py",
+        ):
+            with self.subTest(safe_source_name=safe_source_name):
+                self.assertFalse(
+                    any(
+                        fnmatch.fnmatchcase(safe_source_name.lower(), pattern.lower())
+                        for pattern in exclude_patterns
+                    )
+                )
+        for credential_name in (
+            "client_secret_download.json",
+            "google-oauth-client.json",
+            "service_account.json",
+            "auth.json",
+            "refresh_token.json",
+            "private.pem",
+            "oauth-cache.dpapi",
+        ):
+            with self.subTest(credential_name=credential_name):
+                self.assertTrue(
+                    any(
+                        fnmatch.fnmatchcase(credential_name.lower(), pattern.lower())
+                        for pattern in exclude_patterns
+                    )
+                )
 
     def test_release_workflow_never_skips_current_archive_smoke(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "publish-release.yml").read_text(encoding="utf-8")
@@ -211,6 +276,9 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         ]
         self.assertIn("Python regression suite failed with exit code", verify_step)
         self.assertIn("Frontend syntax check failed with exit code", verify_step)
+        self.assertIn("python -m venv runner/.venv", verify_step)
+        self.assertIn("--require-hashes --requirement requirements-runner.txt", verify_step)
+        self.assertIn(r".\runner\.venv\Scripts\python.exe -m unittest", verify_step)
         self.assertGreaterEqual(verify_step.count("$LASTEXITCODE -ne 0"), 2)
         self.assertIn("Always build and smoke-test the exact current archive", workflow)
         self.assertIn("git archive --format=zip", workflow)
@@ -225,7 +293,17 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("remote assets do not match the verified local package", workflow)
         self.assertIn("Release $tag verified", workflow)
         self.assertIn("-PackageSmoke", workflow)
+        self.assertIn("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", workflow)
+        self.assertIn("actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065", workflow)
+        self.assertIn("Python 3.10-3.14", workflow)
         for filename in (
+            "requirements-runner.txt",
+            "scripts\\start-local-bridge.ps1",
+            "google_oauth_store.py",
+            "google_sheet_hub.py",
+            "ea-factory-contract.json",
+            "research-sheet-hub-setup-th.md",
+            "test_release_candidate_preflight.py",
             "scripts\\run-bridge-watchdog-hidden.vbs",
             "MetafxHQTradeGateway.mq4",
             "MetafxHQTradeGateway.ex4",
@@ -235,6 +313,10 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             "BUILD_LOG.txt",
         ):
             self.assertIn(filename, workflow)
+
+        verify_workflow = (ROOT / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8")
+        self.assertIn("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", verify_workflow)
+        self.assertIn("actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065", verify_workflow)
 
     def test_temporary_installer_paths_are_short_for_deep_windows_assets(self) -> None:
         installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")

@@ -18,17 +18,26 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out verified source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       - name: Verify safe runtime
         shell: pwsh
         run: |
-          python -m unittest discover -s tests -p "test_*.py" -v
+          python -m venv runner/.venv
+          .\runner\.venv\Scripts\python.exe -m pip install --disable-pip-version-check --require-hashes --requirement requirements-runner.txt
+          if ($LASTEXITCODE -ne 0) {
+            throw "Pinned runner dependency installation failed with exit code $LASTEXITCODE"
+          }
+          .\runner\.venv\Scripts\python.exe -m pip check
+          if ($LASTEXITCODE -ne 0) {
+            throw "Pinned runner dependency check failed with exit code $LASTEXITCODE"
+          }
+          .\runner\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v
           if ($LASTEXITCODE -ne 0) {
             throw "Python regression suite failed with exit code $LASTEXITCODE"
           }
@@ -101,7 +110,18 @@ jobs:
               ".gitattributes",
               ".gitignore",
               "VERSION",
+              "requirements-runner.txt",
               "installer\install.ps1",
+              "2-SETUP-GOOGLE-HQ.bat",
+              "docs\prompts\install-github-google-auto-th.md",
+              "scripts\setup-google-oauth.ps1",
+              "scripts\start-local-bridge.ps1",
+              "backend\local-runner\configure_google_oauth_client.py",
+              "backend\local-runner\google_oauth_store.py",
+              "backend\local-runner\google_sheet_hub.py",
+              "contracts\workflows\ea-factory-contract.json",
+              "docs\research-sheet-hub-setup-th.md",
+              "tests\test_release_candidate_preflight.py",
               "tests\test_runtime_integrity.py",
               "scripts\run-bridge-watchdog-hidden.vbs",
               "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\MetafxHQTradeGateway.mq4",
@@ -154,15 +174,18 @@ jobs:
           ชุดติดตั้ง Metafxclub AI Agent HQ สำหรับ Windows
 
           วิธีติดตั้งแบบ ZIP:
-          1. ดาวน์โหลดไฟล์ ZIP และแตกไฟล์
-          2. ดับเบิลคลิก 1-INSTALL-HQ.bat
-          3. ยืนยัน Local URL ที่ตัวติดตั้งตรวจว่าว่าง
-          4. เปิดโปรแกรมจาก Shortcut ที่ตัวติดตั้งสร้างให้
+          1. ติดตั้ง Python 3.10-3.14 จาก python.org และเลือก Add Python to PATH
+          2. ดาวน์โหลดไฟล์ ZIP และแตกไฟล์
+          3. ดับเบิลคลิก 1-INSTALL-HQ.bat
+          4. ยืนยัน Local URL ที่ตัวติดตั้งตรวจว่าว่าง
+          5. หากใช้ Google Sheet แบบ Private ให้เลือก Desktop OAuth JSON ใน First-run wizard หรือเปิด 2-SETUP-GOOGLE-HQ.bat ภายหลัง
+          6. เปิด Agent HQ แล้วกดเชื่อมบัญชี Google ครั้งเดียว จากนั้นกรอก Sheet ID
 
           วิธีติดตั้งด้วย Git สำหรับผู้เรียน:
-          1. Clone Repository นี้ลงเครื่อง
-          2. ดับเบิลคลิก 1-INSTALL-HQ.bat
-          3. เมื่อต้องการรับเวอร์ชันใหม่ ให้ปิดงานที่กำลังทำและดับเบิลคลิก UPDATE-HQ.bat
+          1. ติดตั้ง Python 3.10-3.14 จาก python.org และเลือก Add Python to PATH
+          2. Clone Repository นี้ลงเครื่อง
+          3. ดับเบิลคลิก 1-INSTALL-HQ.bat
+          4. เมื่อต้องการรับเวอร์ชันใหม่ ให้ปิดงานที่กำลังทำและดับเบิลคลิก UPDATE-HQ.bat
 
           หลังติดตั้ง ระบบตรวจ Health, Codex และ Rate Limit ของบัญชีที่ Login อยู่ในเครื่องนั้น
           ระบบเริ่มต้นในโหมด Demo/Read-only และไม่รวม Token, Password, Auth, Log, Memory หรือข้อมูลส่วนตัวจากเครื่องผู้พัฒนา

@@ -21,6 +21,13 @@ __pycache__/
 *.key
 *.pfx
 *.p12
+**/client_secret*.json
+**/*secret*.json
+**/*oauth*client*.json
+**/*google*oauth*.json
+**/service-account*.json
+**/service_account*.json
+*.dpapi
 
 # Runtime state, audit logs, imported reports, and user memory
 data/runtime/**

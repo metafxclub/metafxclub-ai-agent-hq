@@ -100,6 +100,10 @@ class EquipmentPluginMapTests(unittest.TestCase):
 
     def test_scheduled_jobs_are_read_only_and_explicit(self) -> None:
         equipment = self.plugin_map["equipment"]
+        self.assertEqual(
+            equipment["left_server_racks"]["schedule"]["reasonTh"],
+            "ต้องเลือกระบบหนึ่งรายการจากคลัง Portal ที่ Backend ตรวจสอบแล้วก่อน",
+        )
         for prop_id, profile in equipment.items():
             schedule = profile["schedule"]
             if not schedule.get("supported"):
@@ -144,7 +148,13 @@ class EquipmentPluginMapTests(unittest.TestCase):
         fresh = self.profile_module.equipment_action_profile(
             "codex_mcp_portal", "discover_trading_systems"
         )
-        self.assertEqual(fresh["inputPreset"]["market"], "Forex")
+        self.assertEqual(fresh["inputPreset"]["market"], "Multi-asset")
+        self.assertEqual(fresh["outputFields"], ["systems"])
+        self.assertEqual(fresh["entryContract"]["minimumItemsPerRun"], 3)
+        self.assertNotIn(
+            "discover_ea_updates",
+            self.plugin_map["equipment"]["codex_mcp_portal"]["actions"],
+        )
         self.assertIsNone(self.profile_module.equipment_action_profile("unknown", "unknown"))
 
     def test_platform_router_changes_backend_procedure_and_reference_plugin_together(self) -> None:
@@ -254,11 +264,11 @@ class EquipmentPluginMapTests(unittest.TestCase):
             self.profile_module._validated_payload(payload)
 
         payload = copy.deepcopy(self.plugin_map)
-        action = payload["equipment"]["codex_mcp_portal"]["actions"]["discover_ea_updates"]
-        action["outputFields"].remove("availability")
+        action = payload["equipment"]["codex_mcp_portal"]["actions"]["discover_trading_systems"]
+        action["entryContract"]["minimumItemsPerRun"] = 1
         with self.assertRaisesRegex(
             self.profile_module.EquipmentWorkflowContractError,
-            r"^missing_evidence_prerequisite:codex_mcp_portal:discover_ea_updates:public_availability_status$",
+            r"^invalid_trading_system_entry_contract:codex_mcp_portal:discover_trading_systems$",
         ):
             self.profile_module._validated_payload(payload)
 

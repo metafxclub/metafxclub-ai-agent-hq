@@ -16,6 +16,35 @@
     "liveTradingAllowed": false,
     "secretFields": []
   },
+  "researchSheetHub": {
+    "configurationPropId": "mission_strategy_table",
+    "inspectRequestFields": ["googleSheetUrlOrId"],
+    "activateRequestFields": ["verificationToken", "confirmActivate", "expectedConfigRevision", "idempotencyKey"],
+    "frontendCredentialFields": [],
+    "credentialsBackendOnly": true,
+    "lifecyclePhaseVocabulary": ["not_configured", "draft", "inspecting", "awaiting_confirmation", "activating", "active", "blocked"],
+    "runtimeStatuses": ["auth_required", "permission_denied", "schema_mismatch", "read_ready_write_unverified", "ready"],
+    "equipmentTabs": {
+      "codex_mcp_portal": {"tabName": "World_System", "mode": "read_write"},
+      "left_server_racks": {"tabName": "Deep_Research", "mode": "read_write"},
+      "left_audit_crystals": {"tabName": "Indicator_EA_Tool", "mode": "read_write"}
+    },
+    "linkedSystems": {
+      "codex_mcp_portal": {"consumerPropId": "codex_mcp_portal", "tabName": "World_System", "mode": "read_write"},
+      "left_server_racks": {"consumerPropId": "left_server_racks", "tabName": "Deep_Research", "mode": "read_write"},
+      "right_server_racks": {"consumerPropId": "left_server_racks", "tabName": "Deep_Research", "mode": "read", "fourthTab": false},
+      "left_audit_crystals": {"consumerPropId": "left_audit_crystals", "tabName": "Indicator_EA_Tool", "mode": "read_write"}
+    },
+    "activeRevisionRule": "Only an explicitly confirmed, successfully verified candidate becomes active; all linked-system status comes from current-revision primary consumer read evidence.",
+    "activeConsumerReadEvidenceFields": ["tabName", "configRevision", "configurationApplied", "status", "readReady", "writeReady", "rowCount", "cachedRowCount", "observedAt", "rowsObservedAt", "outbox"],
+    "excludedEquipmentIds": ["right_tool_console", "terminal_workstation"],
+    "automaticProjection": {
+      "eligibleReadyReportsOnly": true,
+      "durableOutbox": true,
+      "idempotentUpsert": true,
+      "writeReadBackRequired": true
+    }
+  },
   "automationModes": {
     "scheduled_read_only": "รันตามเวลาได้เฉพาะการอ่านข้อมูลสาธารณะ ไม่ Sign in ไม่เขียนข้อมูลภายนอก และไม่ควบคุม MetaTrader",
     "mission_on_demand": "เริ่มเมื่อผู้ใช้หรือ Agent ส่ง Mission และมีข้อมูลต้นทางครบ",
@@ -25,15 +54,27 @@
   },
   "equipment": {
     "codex_mcp_portal": {
-      "titleTh": "เรดาร์ระบบเทรดโลกและ EA",
+      "titleTh": "เรดาร์ระบบเทรดโลก",
       "referencePrimarySkillId": "metafx-online-system-scout",
       "ownerAgentId": "codex_mcp_operator",
+      "googleSheets": {"configurationPropId": "mission_strategy_table", "tabName": "World_System", "mode": "read_write", "adapterCapability": "implemented_backend_fail_closed", "runtimeStatusRequired": true},
       "schedule": {
         "supported": true,
+        "defaultEnabled": true,
         "timezone": "Asia/Bangkok",
         "defaultTimes": ["09:00"],
+        "backendOwned": true,
+        "userConfigurable": false,
+        "manualExecutionAllowed": false,
+        "maximumTimes": 1,
+        "maximumRunsPerDay": 1,
+        "hardRuntimeEnforced": true,
+        "counterPersistence": "backend_local_settings",
+        "countingPolicy": "post_gate_pre_dispatch_fail_closed_reservation",
+        "stalePendingPolicy": "expire_at_bangkok_day_boundary",
+        "catchUpPolicy": "latest_same_day_slot_only",
         "actions": ["discover_trading_systems"],
-        "manualOrAgentHandoffActions": ["discover_ea_updates"]
+        "manualOrAgentHandoffActions": []
       },
       "actions": {
         "discover_trading_systems": {
@@ -43,50 +84,43 @@
           "referencePluginSkillId": "metafx-online-system-scout",
           "referencePluginVersion": "0.1.2",
           "automationMode": "scheduled_read_only",
+          "frontendInvocationAllowed": false,
+          "schedulerOnly": true,
           "inputPreset": {
-            "query": "ค้นหาระบบเทรด Forex ใหม่ที่อธิบายกฎเข้า ออก การจัดการความเสี่ยง และตรวจสอบแหล่งที่มาได้",
-            "market": "Forex",
+            "query": "ค้นหาระบบเทรดจากทั่วโลกให้ได้ 3 แนวทางที่ต่างตระกูลกัน พร้อมชื่อผู้สร้างหรือนักเทรดที่แหล่งสาธารณะระบุ ขั้นตอนเข้า ออก จัดการออเดอร์ และความเสี่ยงแบบละเอียด",
+            "market": "Multi-asset",
             "timeframe": "any",
-            "maxItems": 5,
+            "maxItems": 3,
             "sourcePolicy": "public_read_only"
           },
-          "outputFields": ["systemName", "sourceUrl", "sourceTitle", "checkedAt", "market", "timeframe", "entryRules", "exitRules", "riskRules", "filters", "eaReadiness", "assumptions", "duplicateFingerprint"],
-          "evidenceRequired": ["source_url", "checked_at", "quoted_fact_summary"],
+          "outputFields": ["systems"],
+          "entryContract": {
+            "containerField": "systems",
+            "minimumItemsPerRun": 3,
+            "maximumItemsPerRun": 3,
+            "workerRequiredFields": ["recordType", "systemName", "strategyFamily", "creatorOrTrader", "publicUsers", "market", "symbols", "timeframes", "sessions", "indicatorSettings", "setupConditions", "entrySteps", "exitSteps", "riskManagement", "tradeManagementSteps", "sourceTitle", "sourceUrl", "corroboratingUrls", "checkedAt", "verificationStatus", "suitableFor", "risksAndLimitations", "unknowns"],
+            "backendComputedFields": ["recordId", "duplicateFingerprint", "duplicateStatus", "duplicateScope"],
+            "maximumContractValueCharacters": 16000,
+            "recommendedWorkerValueCharacters": 14000
+          },
+          "evidenceRequired": ["source_url", "at_least_two_source_urls", "checked_at", "source_title", "quoted_fact_summary", "limitations"],
           "screenshotPolicy": "optional_when_backend_adapter_available",
           "reportType": "trading_system_discovery_report",
           "failureHelpTh": "ตรวจ Bridge, Codex Login, Rate Limit และการเข้าถึงเว็บไซต์สาธารณะ แล้วสั่งใหม่จากอุปกรณ์นี้"
-        },
-        "discover_ea_updates": {
-          "pluginSkillId": "backend-readonly-ea-scout",
-          "pluginVersion": "backend-v1",
-          "procedureKind": "backend_procedure",
-          "referencePluginSkillId": "metafx-online-system-scout",
-          "referencePluginVersion": "0.1.2",
-          "automationMode": "mission_on_demand",
-          "inputPreset": {
-            "query": "ค้นหา EA งานวิจัย และแนวคิดระบบอัตโนมัติใหม่ที่มีรายละเอียดตรวจสอบได้",
-            "market": "Forex",
-            "platform": "any",
-            "maxItems": 5,
-            "sourcePolicy": "public_read_only"
-          },
-          "outputFields": ["itemName", "itemType", "platform", "sourceUrl", "checkedAt", "strategySummary", "availability", "limitations", "duplicateFingerprint"],
-          "evidenceRequired": ["source_url", "checked_at", "public_availability_status"],
-          "screenshotPolicy": "optional_when_backend_adapter_available",
-          "reportType": "ea_discovery_report",
-          "failureHelpTh": "ตรวจ Bridge, Codex Login, Rate Limit และ URL ต้นทาง ห้ามดาวน์โหลดไฟล์ Crack หรือไฟล์ที่ไม่ทราบแหล่ง"
         },
         "save_discovery_schedule": {
           "pluginSkillId": "backend-dashboard-scheduler",
           "pluginVersion": "backend-v1",
           "procedureKind": "backend_procedure",
           "automationMode": "settings_only",
-          "inputPreset": {"enabled": false, "times": ["09:00"], "timezone": "Asia/Bangkok"},
+          "frontendInvocationAllowed": false,
+          "compatibilityReadOnly": true,
+          "inputPreset": {"enabled": true, "times": ["09:00"], "timezone": "Asia/Bangkok"},
           "outputFields": ["requestedEnabled", "effectiveEnabled", "times", "timezone", "lastRunStatus", "savedAt"],
           "evidenceRequired": ["local_settings_record", "scheduler_state"],
           "screenshotPolicy": "not_required",
           "reportType": "trading_system_discovery_report",
-          "failureHelpTh": "ตรวจว่า Local Runner และ Scheduler ทำงานอยู่ แล้วบันทึกเวลาแบบ HH:MM ตามเวลาไทยใหม่อีกครั้ง"
+          "failureHelpTh": "ตารางนี้ถูกกำหนดโดย Backend ที่ 09:00 น. Asia/Bangkok และแก้ไขจาก Frontend ไม่ได้"
         }
       }
     },
@@ -94,7 +128,8 @@
       "titleTh": "คลังวิจัยระบบเทรดเชิงลึก",
       "referencePrimarySkillId": "metafx-online-system-scout",
       "ownerAgentId": "mission_archivist",
-      "schedule": {"supported": false, "reasonTh": "ต้องเลือกรายงานต้นทางที่ Agent ส่งมาก่อน"},
+      "googleSheets": {"configurationPropId": "mission_strategy_table", "tabName": "Deep_Research", "mode": "read_write", "adapterCapability": "implemented_backend_fail_closed", "runtimeStatusRequired": true, "alsoFeedsFactoryPropId": "right_server_racks"},
+        "schedule": {"supported": false, "reasonTh": "ต้องเลือกระบบหนึ่งรายการจากคลัง Portal ที่ Backend ตรวจสอบแล้วก่อน"},
       "actions": {
         "deep_research_system": {
           "pluginSkillId": "backend-readonly-deep-research",
@@ -103,13 +138,13 @@
           "referencePluginSkillId": "metafx-online-system-scout",
           "referencePluginVersion": "0.1.2",
           "automationMode": "mission_on_demand",
-          "requiredInputs": ["sourceReportId"],
-          "inputPreset": {"brief": "ตรวจหลายแหล่ง แยกข้อเท็จจริงจากสมมติฐาน และอธิบายวิธีประยุกต์โดยไม่อ้างผลกำไร"},
-          "outputFields": ["verifiedRules", "conflictingEvidence", "riskModel", "specialConditions", "suitableMarket", "suitableTimeframe", "implementationNotes", "sourceLinks", "checkedAt", "limitations"],
+          "requiredInputs": ["sourceReportId", "sourceRecordId"],
+          "inputPreset": {"brief": "ตรวจระบบที่เลือกแบบเจาะจงหลายแหล่ง แยกข้อเท็จจริงจากสมมติฐาน อธิบาย Entry, Exit, การจัดการออเดอร์, Money Management, การแก้ไม้ และวิธีประยุกต์โดยไม่อ้างผลกำไร"},
+          "outputFields": ["systemIdentity", "verifiedRules", "conflictingEvidence", "indicatorSettings", "entrySteps", "exitSteps", "tradeManagementSteps", "riskModel", "recoveryAndAveragingRules", "specialConditions", "suitableMarket", "suitableTimeframe", "ohlcBacktestReadiness", "implementationNotes", "sourceLinks", "checkedAt", "limitations"],
           "evidenceRequired": ["at_least_two_source_urls", "checked_at", "limitations"],
           "screenshotPolicy": "optional_when_backend_adapter_available",
           "reportType": "trading_system_research_report",
-          "failureHelpTh": "ให้ Agent ส่งรายงานจากเรดาร์ระบบเทรดมาที่ตู้นี้ก่อน แล้วเลือกรายงานต้นทางเพื่อเริ่มวิจัย"
+          "failureHelpTh": "เลือกระบบหนึ่งรายการจากแค็ตตาล็อกที่ Backend รับจากเรดาร์และตรวจหลักฐานแล้ว ก่อนเริ่มวิจัยเชิงลึก"
         }
       }
     },
@@ -118,6 +153,31 @@
       "referencePrimarySkillId": "metafx-system6-ea-builder-mt4",
       "ownerAgentId": "ea_developer",
       "schedule": {"supported": false, "reasonTh": "งานสร้างและตรวจจริงต้องเลือกแพลตฟอร์ม Source และ Terminal"},
+      "factoryFlow": {
+        "schemaVersion": "ea-factory-v1",
+        "mode": "manual_stage_by_stage",
+        "scheduled": false,
+        "automaticLoop": false,
+        "oneUserActionAdvancesOneStage": true,
+        "sourceColumnContract": {
+          "range": "A-W",
+          "core": "A-M",
+          "downstream": "N-W",
+          "columns": ["record_id", "system_name", "strategy_family", "symbols_market", "timeframe", "entry_rules", "exit_rules", "stop_loss", "take_profit", "recovery", "lot_risk", "indicators", "special_conditions", "source_urls", "verification_status", "backtest_status", "backtest_report", "optimization_status", "optimization_report", "issues", "next_action", "target_platform", "updated_at"]
+        },
+        "stages": [
+          {"id": "strategy_spec", "requires": ["source_record"], "ownerAgentId": "ea_developer"},
+          {"id": "generate_source", "requires": ["strategy_spec_confirmed"], "ownerAgentId": "ea_developer", "actionId": "build_strategy_code"},
+          {"id": "source_review", "requires": ["source_artifact_and_digest"], "ownerAgentId": "ea_developer", "actionId": "review_source_code"},
+          {"id": "compile_validate", "requires": ["source_review_passed"], "ownerAgentId": "ea_developer", "platformPolicy": {"mt4": "selected_mt4_and_visible_metaeditor_proof", "mt5": "selected_mt5_and_visible_metaeditor_proof", "tradingview": "static_pine_validation"}},
+          {"id": "backtest_recheck", "requires": ["compile_validate_passed"], "ownerAgentId": "backtest_analyst", "platformPolicy": {"mt4": "visible_strategy_tester_proof", "mt5": "visible_strategy_tester_proof", "tradingview": "not_applicable"}},
+          {"id": "final_report", "requires": ["all_applicable_prior_stages_passed"], "ownerAgentId": "mission_archivist"}
+        ],
+        "workspaceFolders": ["Source", "EA_Versions", "Reports", "Sets", "Screenshots", "Summaries"],
+        "immutableVersions": true,
+        "frontendMaySendCredentials": false,
+        "googleSheets": {"mode": "shared_deep_research_read_only_source", "configurationPropId": "mission_strategy_table", "tabName": "Deep_Research", "tabNameFixed": true, "sharedConsumerPropId": "left_server_racks", "externalWrites": false, "credentialsAcceptedFromFrontend": false, "credentialsBackendOnly": true, "runtimeStatusRequired": true, "internalMapping": "23 EA strategy fields (not a Sheet range)"}
+      },
       "actions": {
         "discover_metatrader": {
           "pluginSkillId": "backend-metatrader-discovery",
@@ -161,7 +221,7 @@
           "automationMode": "mission_on_demand",
           "requiredInputs": ["sourceReportId", "platform"],
           "inputPreset": {"brief": "สร้าง Source ที่อ่านง่าย มี Inputs และ Safety Guard พร้อมป้าย SOURCE-ONLY / UNCOMPILED"},
-          "outputFields": ["sourceFiles", "sourceDigest", "strategyProfile", "functionMap", "compileChecklist", "knownRisks", "nextValidationStep"],
+          "outputFields": ["sourceFiles", "sourceDigest", "sourceRecordDigest", "strategySpecDigest", "platform", "strategyProfile", "functionMap", "compileChecklist", "knownRisks", "nextValidationStep"],
           "evidenceRequired": ["project_relative_source_path", "source_digest", "uncompiled_status"],
           "screenshotPolicy": "required_only_when_visible_compile_adapter_runs",
           "reportType": "ea_build_report",
@@ -174,7 +234,7 @@
           "automationMode": "mission_on_demand",
           "requiredInputs": ["sourceReportId", "platform"],
           "inputPreset": {"brief": "ตรวจ Static Source เรื่อง trade logic, look-ahead, repaint, lifecycle, money management และ error handling"},
-          "outputFields": ["sourceDigest", "issues", "severity", "lineReferences", "riskNotes", "repairPlan", "compileStatus"],
+          "outputFields": ["sourceDigest", "sourceRecordDigest", "strategySpecDigest", "platform", "strategyCoverage", "issues", "severity", "lineReferences", "riskNotes", "repairPlan", "compileStatus"],
           "evidenceRequired": ["source_digest", "review_scope", "compile_status_truth"],
           "screenshotPolicy": "not_required_for_static_review",
           "reportType": "ea_build_report",
@@ -184,6 +244,7 @@
     },
     "right_tool_console": {
       "titleTh": "ห้องทดลอง EA อัตโนมัติ",
+      "researchSheetHub": {"included": false, "reason": "explicitly_excluded"},
       "referencePrimarySkillId": "metafx-ea-discovery-lab-mt4",
       "ownerAgentId": "backtest_analyst",
       "schedule": {"supported": false, "reasonTh": "ต้องเลือก Terminal, EA, ช่วงข้อมูล และเก็บหลักฐานจาก Strategy Tester จริง"},
@@ -227,6 +288,9 @@
             {"pluginSkillId": "backend-backtest-plan-mt5", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-ea-full-cycle-mt5", "referencePluginVersion": "0.1.1+codex.20260616", "values": ["mt5"]}
           ],
           "automationMode": "mission_interactive",
+          "executionMode": "plan_only",
+          "planPreparationAvailable": true,
+          "realExecutionAvailable": false,
           "requiredInputs": ["sourceReportId"],
           "inputPreset": {"platform": "mt4", "timeframe": "H1", "validationMethod": "train_test"},
           "outputFields": ["terminalSelection", "testModel", "symbol", "timeframe", "dateRange", "spread", "deposit", "acceptanceCriteria", "artifactPlan"],
@@ -249,11 +313,26 @@
             {"pluginSkillId": "backend-optimization-plan-mt5", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-optimization-lab-mt5", "referencePluginVersion": "0.1.1+codex.20260616", "values": ["mt5"]}
           ],
           "automationMode": "mission_interactive",
+          "executionMode": "plan_only",
+          "planPreparationAvailable": true,
+          "realExecutionAvailable": false,
           "requiredInputs": ["sourceReportId"],
           "inputPreset": {"platform": "mt4", "timeframe": "H1", "validationMethod": "walk_forward"},
           "outputFields": ["parameterRanges", "startStepStop", "selectionCriteria", "overfitGuards", "validationSplit", "candidateGroups", "nextRanges"],
+          "optionalResultFieldsV2": ["runId", "roundId", "platform", "terminalId", "testerSettings", "warnings", "executionEvidence", "passCount", "profitablePassCount", "returnedPassCount", "allPassRows", "allPassRowsTruncated", "currentBands", "nextParameterPlan", "candidateGroups"],
+          "outputAliases": {
+            "terminalCandidateId": "terminalId",
+            "totalPasses": "passCount",
+            "passes": "allPassRows",
+            "parameterBands": "currentBands",
+            "nextRanges": "nextParameterPlan",
+            "candidates": "candidateGroups"
+          },
+          "resultBounds": {"allPassRowsMaxItems": 5000, "overflow": "truncate_frontend_rows_preserve_full_hashed_artifact"},
+          "reportContractVersion": "ea-experiment-report-v2",
           "evidenceRequired": ["source_reference", "parameter_plan", "overfit_guard", "adapter_status_truth"],
           "completionEvidenceRequired": ["terminal_identity", "optimization_settings", "tester_log", "result_report", "set_files", "screenshots"],
+          "verifiedCompletionFields": ["runId", "roundId", "platform", "terminalId", "executionEvidence.visibleTester.verified", "executionEvidence.mtExecutionVerified", "executionEvidence.optimizationProofVerified", "executionEvidence.resultReport.sha256", "executionEvidence.artifactManifest.sha256", "passCount", "profitablePassCount", "testerSettings", "warnings"],
           "adapterStatus": "plan_ready_terminal_runner_not_connected",
           "reportType": "ea_experiment_report",
           "failureHelpTh": "ปัจจุบันสร้างแผนได้ก่อน งาน Optimization จริงต้องเลือก Terminal และเชื่อม Strategy Tester Adapter"
@@ -271,6 +350,9 @@
             {"pluginSkillId": "backend-ea-discovery-plan-mt5", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-ea-discovery-lab-mt5", "referencePluginVersion": "0.1.4+codex.20260616liveguard", "values": ["mt5"]}
           ],
           "automationMode": "mission_interactive",
+          "executionMode": "plan_only",
+          "planPreparationAvailable": true,
+          "realExecutionAvailable": false,
           "requiredInputs": ["sourceReportId"],
           "inputPreset": {"platform": "mt4", "symbol": "XAUUSD", "timeframe": "H1", "validationMethod": "walk_forward", "maxLoops": 5},
           "outputFields": ["blueprint", "versionPlan", "profitTarget", "drawdownLimit", "tradeTarget", "rejectionCriteria", "outputFolderPlan"],
@@ -286,7 +368,8 @@
       "titleTh": "Radar Website Tool",
       "referencePrimarySkillId": "metafx-online-system-scout",
       "ownerAgentId": "codex_mcp_operator",
-      "schedule": {"supported": true, "defaultEnabled": true, "timezone": "Asia/Bangkok", "defaultTimes": ["09:00"], "maximumTimes": 1, "maximumRunsPerDay": 1, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "post_gate_pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "actions": ["discover_new_indicators"]},
+      "googleSheets": {"configurationPropId": "mission_strategy_table", "tabName": "Indicator_EA_Tool", "mode": "read_write", "adapterCapability": "implemented_backend_fail_closed", "runtimeStatusRequired": true},
+      "schedule": {"supported": true, "defaultEnabled": true, "timezone": "Asia/Bangkok", "defaultTimes": ["09:00"], "backendOwned": true, "userConfigurable": false, "manualExecutionAllowed": false, "maximumTimes": 1, "maximumRunsPerDay": 1, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "post_gate_pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "actions": ["discover_new_indicators"], "manualOrAgentHandoffActions": []},
       "actions": {
         "discover_new_indicators": {
           "pluginSkillId": "backend-readonly-indicator-scout",
@@ -295,6 +378,8 @@
           "referencePluginSkillId": "metafx-online-system-scout",
           "referencePluginVersion": "0.1.2",
           "automationMode": "scheduled_read_only",
+          "frontendInvocationAllowed": false,
+          "schedulerOnly": true,
           "inputPreset": {"query": "ค้นหา Indicator, EA หรือ Tool ใหม่ที่มีแหล่งเผยแพร่สาธารณะ", "platform": "any", "category": "any", "maxItems": 6},
           "outputFields": ["entries"],
           "entryContract": {
@@ -314,19 +399,21 @@
           "evidenceRequired": ["source_url", "source_title", "checked_at", "ea_readiness", "public_availability_status"],
           "screenshotPolicy": "optional_when_backend_adapter_available",
           "reportType": "indicator_scout_report",
-          "failureHelpTh": "ตรวจ Bridge, Codex Login, Rate Limit และ URL ต้นทาง ระบบจะไม่อ้างว่ามีภาพหรือเขียน Google Sheet จนกว่า Backend Adapter จะยืนยันหลักฐานจริง"
+          "failureHelpTh": "ตรวจ Bridge, Codex Login, Rate Limit และ URL ต้นทาง ผลที่ผ่านสัญญาจะเข้าคิว Google Sheet กลาง และระบบจะไม่อ้างว่าเขียนสำเร็จจนกว่า Backend ตรวจ write/read-back จริง"
         },
         "save_indicator_scout_schedule": {
           "pluginSkillId": "backend-dashboard-scheduler",
           "pluginVersion": "backend-v1",
           "procedureKind": "backend_procedure",
           "automationMode": "settings_only",
-          "inputPreset": {"enabled": true, "times": ["09:00"], "timezone": "Asia/Bangkok", "maximumRunsPerDay": 1, "googleSheetUrlOrId": null, "googleSheetTabName": null},
-          "outputFields": ["requestedEnabled", "effectiveEnabled", "times", "maxConfiguredTimes", "timezone", "lastRunStatus", "savedAt", "googleSheet"],
+          "frontendInvocationAllowed": false,
+          "compatibilityReadOnly": true,
+          "inputPreset": {"enabled": true, "times": ["09:00"], "timezone": "Asia/Bangkok", "maximumRunsPerDay": 1},
+          "outputFields": ["requestedEnabled", "effectiveEnabled", "times", "maxConfiguredTimes", "timezone", "lastRunStatus", "savedAt"],
           "evidenceRequired": ["local_settings_record", "scheduler_state"],
           "screenshotPolicy": "not_required",
           "reportType": "indicator_scout_report",
-          "failureHelpTh": "ตรวจว่า Local Runner และ Scheduler ทำงานอยู่ แล้วบันทึกเวลาแบบ HH:MM ตามเวลาไทยใหม่อีกครั้ง"
+          "failureHelpTh": "ตารางนี้ถูกกำหนดโดย Backend ที่ 09:00 น. Asia/Bangkok และแก้ไขจาก Frontend ไม่ได้"
         }
       }
     },
@@ -389,6 +476,7 @@
     },
     "terminal_workstation": {
       "titleTh": "สตูดิโอพัฒนา EA",
+      "researchSheetHub": {"included": false, "reason": "explicitly_excluded"},
       "referencePrimarySkillId": "metafx-ea-full-cycle",
       "ownerAgentId": "ea_developer",
       "schedule": {"supported": false, "reasonTh": "ต้องเลือก Source ใน Workspace และระบุโจทย์พัฒนา"},
@@ -462,7 +550,7 @@
           "procedureKind": "backend_procedure",
           "ownerAgentId": "manager",
           "automationMode": "settings_only",
-          "inputPreset": {"language": "th", "modelTier": "specialist_balanced", "tokenBudget": 12000, "timeoutSeconds": 120, "outputLimitChars": 7000, "rateReservePercent": 30},
+          "inputPreset": {"language": "th", "modelTier": "specialist_balanced", "tokenBudget": 12000, "timeoutSeconds": 120, "outputLimitChars": 7000, "rateReservePercent": 15},
           "outputFields": ["language", "modelTier", "tokenBudget", "timeoutSeconds", "outputLimitChars", "rateReservePercent", "savedAt"],
           "evidenceRequired": ["local_settings_record"],
           "reportType": "ops_overview_report",

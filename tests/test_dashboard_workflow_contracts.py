@@ -18,9 +18,17 @@ FX_PAIR_UNIVERSE = [
 ]
 
 WORKFLOW_DEVICE_TAB_IDS = {
-    "codex_mcp_portal": ["systems", "ea_updates", "schedule", "catalog"],
-    "left_server_racks": ["research_queue", "verified_archive", "application", "evidence"],
-    "right_server_racks": ["builder", "code_review", "compile", "outputs"],
+    "codex_mcp_portal": ["systems", "schedule", "catalog"],
+    "left_server_racks": ["research", "chart", "backtest", "report"],
+    "right_server_racks": [
+        "source",
+        "strategy_spec",
+        "generate_source",
+        "source_review",
+        "compile_validate",
+        "backtest_recheck",
+        "final_report",
+    ],
     "right_tool_console": ["backtest", "optimization", "ea_discovery", "history"],
     "left_audit_crystals": ["discoveries", "evidence", "schedule", "archive"],
     "left_signal_cube": ["pair_bias", "today", "history"],
@@ -39,9 +47,9 @@ WORKFLOW_DEVICE_LEFT_RAIL_IDS = {
     "right_status_crystals": ["settings", "quota"],
 }
 
-WORKFLOW_DEVICE_SCHEDULE_ACTIONS = {
-    "codex_mcp_portal": "save_discovery_schedule",
-    "left_audit_crystals": "save_indicator_scout_schedule",
+BACKEND_OWNED_DAILY_SCHEDULE_PROPS = {
+    "codex_mcp_portal",
+    "left_audit_crystals",
 }
 
 NEW_DEVICE_ACTIONS = {
@@ -97,8 +105,20 @@ class DashboardWorkflowContractTests(unittest.TestCase):
             self.assertEqual([item["id"] for item in backend_tabs], tab_ids)
             self.assertEqual(role["defaultTab"], tab_ids[0])
             self.assertEqual(len(set(tab_ids)), len(tab_ids))
-            expected_count = 3 if prop_id == "left_signal_cube" else 1 if prop_id == "right_status_crystals" else 4
+            expected_count = (
+                7
+                if prop_id == "right_server_racks"
+                else 3
+                if prop_id in {"codex_mcp_portal", "left_signal_cube"}
+                else 1
+                if prop_id == "right_status_crystals"
+                else 4
+            )
             self.assertEqual(len(tab_ids), expected_count)
+            if prop_id in BACKEND_OWNED_DAILY_SCHEDULE_PROPS:
+                self.assertTrue(all(tab.get("actionIds") == [] for tab in role["localTabs"]))
+                self.assertTrue(all(tab.get("actionIds") == [] for tab in connection["localTabs"]))
+                self.assertTrue(all(tab.get("actionIds") == [] for tab in backend_tabs))
 
     def test_radar_room_metadata_matches_the_once_daily_schedule(self) -> None:
         radar = next(
@@ -114,7 +134,7 @@ class DashboardWorkflowContractTests(unittest.TestCase):
         self.assertEqual(scheduler, "Ready · 09:00 Bangkok · Max 1/Day")
 
     def test_workflow_devices_open_on_main_work_and_only_legacy_devices_end_with_history(self) -> None:
-        self.assertEqual(self.role_map["version"], "property-role-map-v002")
+        self.assertEqual(self.role_map["version"], "property-role-map-v003")
         for prop_id, tab_ids in WORKFLOW_DEVICE_TAB_IDS.items():
             role = self.role_map["properties"][prop_id]
             tabs = role["localTabs"]
@@ -128,11 +148,22 @@ class DashboardWorkflowContractTests(unittest.TestCase):
                 self.assertNotIn("ประวัติ", " ".join(item["labelTh"] for item in tabs))
             elif prop_id == "left_signal_cube":
                 self.assertEqual(tabs[-1]["labelTh"], "ประวัติข่าว")
+            elif prop_id == "left_server_racks":
+                self.assertEqual(ux["historyReportTabId"], "report")
+                self.assertEqual(ux["historyReportTabPosition"], "last")
+                self.assertEqual(tabs[-1]["labelTh"], "สรุป Report")
+            elif prop_id == "right_server_racks":
+                self.assertEqual(ux["historyReportTabId"], "final_report")
+                self.assertEqual(ux["historyReportTabPosition"], "last")
+                self.assertEqual(tabs[-1]["labelTh"], "7 ไฟล์และ Report")
             else:
                 self.assertEqual(ux["historyReportTabId"], tab_ids[-1])
                 self.assertEqual(ux["historyReportTabPosition"], "last")
                 self.assertEqual(tabs[-1]["labelTh"], "ประวัติและรายงาน")
-            if prop_id == "left_signal_cube":
+            if (
+                prop_id in {"left_signal_cube", "right_server_racks"}
+                or prop_id in BACKEND_OWNED_DAILY_SCHEDULE_PROPS
+            ):
                 self.assertEqual(tabs[0]["actionIds"], [])
             else:
                 self.assertTrue(tabs[0]["actionIds"], prop_id)
@@ -182,22 +213,25 @@ class DashboardWorkflowContractTests(unittest.TestCase):
                 self.assertNotIn("quota", by_id)
                 self.assertNotIn("agent_handoff", by_id)
                 continue
-            self.assertEqual(ux["crossDevicePolicy"], "agent_mission_report_only")
-            self.assertFalse(ux["directDashboardPipeline"])
+            if prop_id == "left_server_racks":
+                self.assertEqual(
+                    ux["crossDevicePolicy"],
+                    "backend_verified_catalog_then_agent_mission",
+                )
+                self.assertTrue(ux["directDashboardPipeline"])
+            else:
+                self.assertEqual(ux["crossDevicePolicy"], "agent_mission_report_only")
+                self.assertFalse(ux["directDashboardPipeline"])
             self.assertEqual(ux["missionStrategyTableRole"], "global_ledger_only")
 
             by_id = {item["id"]: item for item in sections}
             self.assertEqual(by_id["quota"]["mode"], "backend_read_only")
             self.assertLessEqual(len(by_id["quota"]["purpose"]), 80)
 
-            if prop_id in WORKFLOW_DEVICE_SCHEDULE_ACTIONS:
+            if prop_id in BACKEND_OWNED_DAILY_SCHEDULE_PROPS:
                 schedule = by_id["schedule"]
-                self.assertEqual(schedule["mode"], "backend_preference")
-                self.assertEqual(
-                    schedule["actionIds"],
-                    [WORKFLOW_DEVICE_SCHEDULE_ACTIONS[prop_id]],
-                )
-                self.assertIn(schedule["actionIds"][0], role["allowedDashboardActions"])
+                self.assertEqual(schedule["mode"], "backend_read_only")
+                self.assertEqual(schedule["actionIds"], [])
             else:
                 self.assertNotIn("schedule", by_id)
 
@@ -242,15 +276,40 @@ class DashboardWorkflowContractTests(unittest.TestCase):
                 self.assertFalse(workflow["transferPolicy"]["agentUsed"])
                 self.assertFalse(workflow["transferPolicy"]["aiUsed"])
                 continue
-            self.assertEqual(workflow["coordinationMode"], "agent_mission_only")
-            self.assertTrue(workflow["agentTransferOnly"])
-            self.assertFalse(workflow["directDashboardDependency"])
+            if prop_id == "left_server_racks":
+                self.assertEqual(
+                    workflow["coordinationMode"],
+                    "backend_verified_catalog_plus_agent_mission",
+                )
+                self.assertFalse(workflow["agentTransferOnly"])
+                self.assertTrue(workflow["directDashboardDependency"])
+                self.assertTrue(workflow["catalogProjection"]["requireReadyStatus"])
+                self.assertTrue(
+                    workflow["catalogProjection"]["requireCompletedNoApprovalMission"]
+                )
+                self.assertTrue(workflow["catalogProjection"]["requireValidWorkflowReceipt"])
+            elif prop_id == "right_server_racks":
+                self.assertEqual(workflow["coordinationMode"], "manual_stage_by_stage")
+                self.assertTrue(workflow["agentTransferOnly"])
+                self.assertFalse(workflow["directDashboardDependency"])
+                self.assertFalse(workflow["executionPolicy"]["scheduled"])
+                self.assertFalse(workflow["executionPolicy"]["automaticLoop"])
+                self.assertTrue(workflow["executionPolicy"]["oneUserActionAdvancesOneStage"])
+            else:
+                self.assertEqual(workflow["coordinationMode"], "agent_mission_only")
+                self.assertTrue(workflow["agentTransferOnly"])
+                self.assertFalse(workflow["directDashboardDependency"])
             self.assertNotIn("stage", workflow)
             self.assertNotIn("upstreamPropIds", workflow)
             self.assertNotIn("downstreamPropIds", workflow)
             policy = workflow["transferPolicy"]
             self.assertEqual(policy["mode"], "agent_mission_only")
-            self.assertEqual(policy["frontendMaySubmitFields"], ["sourceReportId"])
+            expected_frontend_fields = (
+                ["sourceReportId", "sourceRecordId"]
+                if prop_id == "left_server_racks"
+                else ["sourceReportId"]
+            )
+            self.assertEqual(policy["frontendMaySubmitFields"], expected_frontend_fields)
             self.assertTrue(policy["backendDerivesLineage"])
             self.assertEqual(policy["missionStrategyTableRole"], "global_ledger_only")
 
@@ -330,7 +389,6 @@ class DashboardWorkflowContractTests(unittest.TestCase):
             if isinstance(item, dict) and item.get("id")
         }
         for tool_id in (
-            "google_sheet_catalog_sync",
             "compile_strategy_code",
             "run_strategy_tester",
             "run_optimization",
@@ -338,6 +396,13 @@ class DashboardWorkflowContractTests(unittest.TestCase):
         ):
             self.assertEqual(tools[tool_id]["adapterStatus"], "coming_soon")
             self.assertFalse(tools[tool_id]["realExecutionAvailable"])
+        sheet_tool = tools["google_sheet_catalog_sync"]
+        self.assertEqual(
+            sheet_tool["adapterStatus"],
+            "implemented_backend_google_sheets_api_fail_closed",
+        )
+        self.assertTrue(sheet_tool["realExecutionAvailable"])
+        self.assertTrue(sheet_tool["credentialsBackendOnly"])
 
     def test_report_types_route_back_to_the_workflow_device(self) -> None:
         targets = self.reports["report_targets"]
@@ -446,13 +511,13 @@ class DashboardWorkflowContractTests(unittest.TestCase):
         self.assertTrue(all(not item["compileIncluded"] for item in terminal_tools.values()))
         self.assertFalse(terminal_tools["propose_ea_performance_improvements"]["backtestIncluded"])
 
-    def test_three_read_only_schedulers_are_ready_without_overclaiming_follow_up_work(self) -> None:
+    def test_backend_owned_daily_schedulers_are_immutable_and_read_only(self) -> None:
         expected = {
             "codex_mcp_portal": {
                 "toolId": "save_discovery_schedule",
                 "scheduled": ["discover_trading_systems"],
-                "manual": ["discover_ea_updates"],
-                "defaultEnabled": False,
+                "manual": [],
+                "defaultEnabled": True,
             },
             "left_audit_crystals": {
                 "toolId": "save_indicator_scout_schedule",
@@ -480,6 +545,13 @@ class DashboardWorkflowContractTests(unittest.TestCase):
                 role_workflow["schedule"]["defaultEnabled"],
                 spec["defaultEnabled"],
             )
+            self.assertTrue(role_workflow["schedule"]["backendOwned"])
+            self.assertFalse(role_workflow["schedule"]["userConfigurable"])
+            self.assertFalse(role_workflow["schedule"]["manualRunAllowed"])
+            self.assertFalse(role_workflow["schedule"]["configurationIntentReady"])
+            self.assertEqual(role_workflow["schedule"]["defaultTimes"], ["09:00"])
+            self.assertEqual(role_workflow["schedule"]["timezone"], "Asia/Bangkok")
+            self.assertEqual(role_workflow["schedule"]["maximumRunsPerDay"], 1)
             self.assertEqual(
                 role_workflow["schedule"]["recurringSchedulerAdapterStatus"],
                 "implemented_guarded_read_only",
@@ -496,6 +568,14 @@ class DashboardWorkflowContractTests(unittest.TestCase):
                 operation["scheduleExecutionAdapterStatus"],
                 "implemented_guarded_read_only",
             )
+            self.assertTrue(operation["scheduleBackendOwned"])
+            self.assertFalse(operation["scheduleUserConfigurable"])
+            self.assertFalse(operation["manualExecutionAllowed"])
+            self.assertEqual(operation["allowedModes"], ["once_daily"])
+            self.assertEqual(operation["scheduleDefaultTimes"], ["09:00"])
+            self.assertEqual(operation["scheduleTimezone"], "Asia/Bangkok")
+            self.assertIsNone(operation["scheduleConfigurationIntent"])
+            self.assertEqual(operation["scheduleHardMaximumRunsPerDay"], 1)
             self.assertEqual(operation["scheduledActionIds"], spec["scheduled"])
             self.assertEqual(
                 operation.get("manualOrAgentHandoffActionIds", []),
@@ -530,12 +610,12 @@ class DashboardWorkflowContractTests(unittest.TestCase):
         }
         self.assertEqual(
             portal_connections["google_sheets_adapter"]["adapterStatus"],
-            "coming_soon",
+            "implemented_backend_google_sheets_api_fail_closed",
         )
-        self.assertTrue(
-            portal_connections["google_sheets_adapter"]["externalWriteRequiresUserConfirmation"]
+        self.assertTrue(portal_connections["google_sheets_adapter"]["credentialsBackendOnly"])
+        self.assertFalse(
+            tools["google_sheet_catalog_sync"]["externalWriteRequiresPerReportConfirmation"]
         )
-        self.assertTrue(tools["google_sheet_catalog_sync"]["externalWriteRequiresUserConfirmation"])
 
     def test_agent_settings_accept_only_six_safe_fields(self) -> None:
         safe_fields = {
@@ -555,6 +635,9 @@ class DashboardWorkflowContractTests(unittest.TestCase):
         self.assertFalse(role["agentPreferenceContract"]["providerModelIdAccepted"])
         self.assertFalse(tool["providerModelIdAllowed"])
         self.assertFalse(tool["frontendSelectedCredentialsAllowed"])
+        reserve = role["agentPreferenceContract"]["fields"]["rateReservePercent"]
+        self.assertEqual(reserve["minimum"], 15)
+        self.assertEqual(reserve["maximum"], 15)
 
     def test_terminal_source_contract_uses_opaque_source_ids_not_paths(self) -> None:
         for action_id in NEW_DEVICE_ACTIONS["terminal_workstation"]:
@@ -643,10 +726,27 @@ class DashboardWorkflowContractTests(unittest.TestCase):
         self.assertEqual(connection["operation"]["scheduleHardMaximumRunsPerDay"], 1)
         self.assertEqual(role["workflow"]["readModel"]["historyWindowDays"], 7)
         self.assertEqual(report["readModel"]["primaryViews"], ["today", "history_7_days"])
-        self.assertFalse(report["googleSheet"]["privateSheetDefaultIncluded"])
-        self.assertFalse(report["googleSheet"]["externalWriteEnabled"])
-        self.assertEqual(report["runtimeReadiness"]["googleSheetsAdapter"], "not_connected")
-        self.assertEqual(report["runtimeReadiness"]["screenshotAdapter"], "not_connected")
+        self.assertEqual(report["googleSheet"]["configurationPropId"], "mission_strategy_table")
+        self.assertFalse(report["googleSheet"]["configurationMayBeSavedHere"])
+        self.assertEqual(report["googleSheet"]["tabName"], "Indicator_EA_Tool")
+        self.assertTrue(report["googleSheet"]["credentialsBackendOnly"])
+        self.assertEqual(
+            report["runtimeReadiness"]["googleSheetsAdapter"],
+            "implemented_backend_adapter_runtime_status_required",
+        )
+        self.assertEqual(report["runtimeReadiness"]["screenshotAdapter"], "ready_publisher_image")
+        self.assertEqual(
+            report["runtimeReadiness"]["screenshotCaptureKind"],
+            "publisher_open_graph",
+        )
+        self.assertFalse(report["runtimeReadiness"]["fullPageScreenshot"])
+        tool = next(
+            item for item in self.permissions["tools"]
+            if item.get("id") == "discover_new_indicators"
+        )
+        self.assertEqual(tool["screenshotAdapterStatus"], "ready_publisher_image")
+        self.assertEqual(tool["screenshotCaptureKind"], "publisher_open_graph")
+        self.assertFalse(tool["fullPageScreenshot"])
         fields = plugin["actions"]["discover_new_indicators"]["outputFields"]
         self.assertEqual(fields, ["entries"])
         entry_contract = plugin["actions"]["discover_new_indicators"]["entryContract"]

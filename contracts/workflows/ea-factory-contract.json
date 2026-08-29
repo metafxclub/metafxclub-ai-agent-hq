@@ -1,0 +1,117 @@
+{
+  "schemaVersion": "ea-factory-v1",
+  "propId": "right_server_racks",
+  "mode": "manual_stage_by_stage",
+  "scheduled": false,
+  "automaticLoop": false,
+  "oneUserActionAdvancesOneStage": true,
+  "sourceContract": {
+    "acceptedKinds": ["deep_research", "google_sheet"],
+    "googleSheets": {
+      "mode": "central_sheet_read_only_consumer",
+      "configurationPropId": "mission_strategy_table",
+      "tabName": "Deep_Research",
+      "tabNameFixed": true,
+      "sharedConsumerPropId": "left_server_racks",
+      "dedicatedCentralTab": false,
+      "fourthCentralTab": false,
+      "statusSource": "active_current_revision_left_server_racks_read_proof",
+      "requiredReadEvidenceFields": ["tabName", "configRevision", "status", "readReady", "rowCount", "cachedRowCount", "observedAt"],
+      "requiresActiveConfirmedRevision": true,
+      "credentialsAcceptedFromFrontend": false,
+      "credentialsBackendOnly": true,
+      "configuredSheetIdVisible": true,
+      "sheetIdIsCredential": false,
+      "oauthAndServiceAccountSecretsBackendOnly": true,
+      "externalWrites": false,
+      "syncIsUserInitiated": true,
+      "frontendIntentFields": ["configRevision", "idempotencyKey"],
+      "legacyCompatibilityFields": ["googleSheetUrlOrId", "tabName"],
+      "legacyFieldsMustMatchCentralContract": true,
+      "runtimeStatuses": ["auth_required", "permission_denied", "schema_mismatch", "read_ready_write_unverified", "ready"],
+      "templateReference": "contracts/research/deep-research-sheet-template.csv",
+      "sourceRangeRequired": "A-AW (49 required headers; extra columns allowed)",
+      "internalMapping": "23 EA strategy fields (not a Sheet range)"
+    },
+    "columnRange": "A-W",
+    "columnRangeSemantics": "internal_normalized_fields_not_google_sheet_range",
+    "coreColumns": "A-M",
+    "downstreamColumns": "N-W",
+    "columns": [
+      {"column": "A", "id": "record_id", "group": "core", "required": true},
+      {"column": "B", "id": "system_name", "group": "core", "required": true},
+      {"column": "C", "id": "strategy_family", "group": "core", "required": true},
+      {"column": "D", "id": "symbols_market", "group": "core", "required": true},
+      {"column": "E", "id": "timeframe", "group": "core", "required": true},
+      {"column": "F", "id": "entry_rules", "group": "core", "required": true},
+      {"column": "G", "id": "exit_rules", "group": "core", "required": true},
+      {"column": "H", "id": "stop_loss", "group": "core", "required": true},
+      {"column": "I", "id": "take_profit", "group": "core", "required": true},
+      {"column": "J", "id": "recovery", "group": "core", "required": true},
+      {"column": "K", "id": "lot_risk", "group": "core", "required": true},
+      {"column": "L", "id": "indicators", "group": "core", "required": true},
+      {"column": "M", "id": "special_conditions", "group": "core", "required": true},
+      {"column": "N", "id": "source_urls", "group": "downstream", "required": true},
+      {"column": "O", "id": "verification_status", "group": "downstream", "required": true},
+      {"column": "P", "id": "backtest_status", "group": "downstream", "required": false},
+      {"column": "Q", "id": "backtest_report", "group": "downstream", "required": false},
+      {"column": "R", "id": "optimization_status", "group": "downstream", "required": false},
+      {"column": "S", "id": "optimization_report", "group": "downstream", "required": false},
+      {"column": "T", "id": "issues", "group": "downstream", "required": false},
+      {"column": "U", "id": "next_action", "group": "downstream", "required": false},
+      {"column": "V", "id": "target_platform", "group": "downstream", "required": false},
+      {"column": "W", "id": "updated_at", "group": "downstream", "required": false}
+    ]
+  },
+  "platforms": {
+    "mt4": {"language": "mql4", "sourceExtension": ".mq4", "binaryExtension": ".ex4", "terminalRequired": true, "backtestRequired": true},
+    "mt5": {"language": "mql5", "sourceExtension": ".mq5", "binaryExtension": ".ex5", "terminalRequired": true, "backtestRequired": true},
+    "tradingview": {"language": "pine_script", "sourceExtension": ".pine", "terminalRequired": false, "backtestRequired": false}
+  },
+  "stages": [
+    {"id": "strategy_spec", "ordinal": 1, "requires": ["source_record_complete"], "successEvidence": ["confirmed_strategy_spec"]},
+    {"id": "generate_source", "ordinal": 2, "requires": ["strategy_spec_passed"], "successEvidence": ["project_relative_source_path", "source_digest", "immutable_version"]},
+    {"id": "source_review", "ordinal": 3, "requires": ["generate_source_passed"], "successEvidence": ["review_scope", "signal_guard", "source_digest_match"]},
+    {"id": "compile_validate", "ordinal": 4, "requires": ["source_review_passed"], "successEvidence": ["platform_specific_validation_receipt"]},
+    {"id": "backtest_recheck", "ordinal": 5, "requires": ["compile_validate_passed"], "successEvidence": ["visual_backtest", "logic_recheck"], "notApplicablePlatforms": ["tradingview"]},
+    {"id": "final_report", "ordinal": 6, "requires": ["all_applicable_prior_stages_passed"], "successEvidence": ["artifact_manifest", "audit_lineage", "final_summary"]}
+  ],
+  "workspace": {
+    "root": "workspace/ea-factory/<buildId>",
+    "folders": ["Source", "EA_Versions", "Reports", "Sets", "Screenshots", "Summaries"],
+    "immutableVersions": true,
+    "frontendReceivesAbsolutePaths": false,
+    "downloadMode": "same_origin_allowlisted_artifacts"
+  },
+  "artifactReadModel": {
+    "sourceOfTruth": "persisted_artifact_manifest_only",
+    "fields": ["fileId", "fileName", "folder", "relativePath", "extension", "byteSize", "sha256", "stageId", "reportId", "artifactKind", "immutable", "downloadUrl"],
+    "frontendSafeFields": ["fileId", "fileName", "folder", "extension", "byteSize", "sha256", "stageId", "reportId", "artifactKind", "immutable", "downloadUrl"],
+    "absoluteFilesystemPathExposed": false,
+    "downloadRequiresDigestAndLineageMatch": true
+  },
+  "api": {
+    "read": "GET /api/props/right_server_racks/ea-factory",
+    "syncGoogleSheet": "POST /api/props/right_server_racks/ea-factory/sources/google-sheet/sync",
+    "createBuild": "POST /api/props/right_server_racks/ea-factory/builds",
+    "advanceBuild": "POST /api/props/right_server_racks/ea-factory/builds/:buildId/advance",
+    "downloadArtifact": "GET /api/props/right_server_racks/ea-factory/builds/:buildId/files/:fileId"
+  },
+  "requestLimits": {
+    "createBuildBriefMaxCharacters": 900
+  },
+  "security": {
+    "loopbackOnly": true,
+    "frontendIntentOnly": true,
+    "credentialsAcceptedFromFrontend": false,
+    "googleSheetConfigurationOwnedBy": "mission_strategy_table",
+    "googleSheetWritesFromFactory": false,
+    "researchSheetHubExcludedPropIds": ["right_tool_console", "terminal_workstation"],
+    "liveTradingAllowed": false,
+    "externalWrites": false,
+    "missionAuditRequiredForRealToolAction": true,
+    "terminalPlatformMustMatch": true,
+    "compileCannotBeInferredFromStaticReview": true,
+    "backtestCannotBeInferredWithoutVisualProof": true
+  }
+}

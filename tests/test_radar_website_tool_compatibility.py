@@ -45,9 +45,14 @@ class RadarWebsiteToolCompatibilitySnapshotTests(unittest.TestCase):
             ["today", "seven_days"],
         )
         self.assertEqual(contract["presentation"]["historyIncludedInTabId"], "seven_days")
+        schedule_section = contract["presentation"]["leftRailSections"][0]
+        self.assertEqual(schedule_section["id"], "schedule_status")
+        self.assertEqual(schedule_section["actionIds"], [])
+        self.assertEqual(schedule_section["fieldIds"], [])
+        self.assertTrue(schedule_section["readOnly"])
         self.assertEqual(
-            contract["presentation"]["leftRailSections"][0]["fieldIds"],
-            ["googleSheetUrlOrId", "enabled", "times"],
+            contract["migrationCompatibility"]["frontendCallableActionIds"],
+            [],
         )
 
     def test_snapshot_requires_indicator_ea_and_tool_rows_with_plugin_readiness_truth(self) -> None:
@@ -105,6 +110,14 @@ class RadarWebsiteToolCompatibilitySnapshotTests(unittest.TestCase):
         self.assertEqual(schedule["maximumRunsPerDay"], 1)
         self.assertEqual(schedule["allowedRunsPerDayWhenEnabled"], [1])
         self.assertEqual(schedule["timezone"], "Asia/Bangkok")
+        self.assertTrue(schedule["backendOwned"])
+        self.assertFalse(schedule["userConfigurable"])
+        self.assertFalse(schedule["manualRunAllowed"])
+        self.assertTrue(schedule["defaultEnabled"])
+        self.assertEqual(schedule["defaultTimes"], ["09:00"])
+        self.assertIsNone(schedule["enabledFieldId"])
+        self.assertIsNone(schedule["timesFieldId"])
+        self.assertFalse(schedule["frontendInvocationAllowed"])
         self.assertEqual(sheet["fieldId"], "googleSheetUrlOrId")
         self.assertEqual(sheet["allowedHost"], "docs.google.com")
         self.assertEqual(sheet["requiredPathPrefix"], "/spreadsheets/d/")
@@ -134,8 +147,14 @@ class RadarWebsiteToolCompatibilitySnapshotTests(unittest.TestCase):
         )
         self.assertTrue(screenshot["entryIdentityRequired"])
         self.assertFalse(screenshot["firstReportImageFallbackAllowed"])
-        self.assertEqual(screenshot["workerAvailableTrueRequiresFields"], ["artifactRef"])
-        self.assertEqual(screenshot["backendReadModelAvailableTrueRequiresFields"], ["attachmentId"])
+        self.assertFalse(screenshot["workerMayClaimAvailable"])
+        self.assertTrue(screenshot["backendPostProcessorRequired"])
+        self.assertEqual(
+            screenshot["backendReadModelAvailableTrueRequiresFields"],
+            ["attachmentId", "captureKind"],
+        )
+        self.assertEqual(screenshot["captureKind"], "publisher_open_graph")
+        self.assertFalse(screenshot["fullPageScreenshot"])
 
     def test_snapshot_contains_no_secret_values_or_frontend_credential_fields(self) -> None:
         security = self.compatibility["security"]
@@ -164,12 +183,20 @@ class RadarWebsiteToolProductionCompatibilityTests(unittest.TestCase):
         self.assertEqual(role["functionName"], "Radar Website Tool")
         self.assertEqual(role["displayTitle"], "Radar Website Tool")
         self.assertTrue({"discover_new_indicators", "save_indicator_scout_schedule"}.issubset(role["allowedDashboardActions"]))
+        self.assertEqual(
+            self.compatibility["migrationCompatibility"]["frontendCallableActionIds"],
+            [],
+        )
+        self.assertTrue(all(tab.get("actionIds") == [] for tab in role["localTabs"]))
         self.assertTrue(self.compatibility["migrationCompatibility"]["backendTabIdsMayRemainCanonical"])
         fallback_start = self.frontend.index("  left_audit_crystals: {", self.frontend.index("const WORKFLOW_DASHBOARD_FALLBACKS"))
         fallback_end = self.frontend.index("  left_signal_cube: {", fallback_start)
         fallback = self.frontend[fallback_start:fallback_end]
         self.assertIn('titleTh: "Radar Website Tool"', fallback)
-        self.assertIn('id: "save_indicator_scout_schedule"', fallback)
+        self.assertIn("actions: []", fallback)
+        self.assertNotIn('id: "discover_new_indicators"', fallback)
+        self.assertNotIn('id: "save_indicator_scout_schedule"', fallback)
+        self.assertIn("ดูรอบค้นหาแบบอ่านอย่างเดียวเวลา 09:00 น. Asia/Bangkok", fallback)
         self.assertIn(
             f'const INDICATOR_SCOUT_PRESENTATION_TAB_IDS = Object.freeze({json.dumps(expected_backend_tabs)});',
             self.frontend,
@@ -265,7 +292,8 @@ class RadarWebsiteToolProductionCompatibilityTests(unittest.TestCase):
         sheet = self.bridge._dashboard_indicator_sheet_read_model(defaults)
         self.assertFalse(sheet["configured"])
         self.assertFalse(sheet["credentialsAcceptedByFrontend"])
-        self.assertFalse(sheet["rawSheetIdExposed"])
+        self.assertTrue(sheet["rawSheetIdExposed"])
+        self.assertFalse(sheet["sheetIdIsCredential"])
         self.assertFalse(sheet["externalWriteEnabled"])
 
     def test_disconnected_sheet_and_screenshot_adapters_are_not_reported_ready(self) -> None:
@@ -312,6 +340,16 @@ class RadarWebsiteToolProductionCompatibilityTests(unittest.TestCase):
                     "sourceUrl": f"https://example.com/{report_id}",
                     "checkedAt": checked_at,
                 }],
+                "workflowOutput": {
+                    "applicable": True,
+                    "valid": True,
+                    "procedureId": self.bridge.RADAR_WORKFLOW_PROCEDURE_ID,
+                    "providedFields": ["entries"],
+                    "missingFields": [],
+                    "missingEvidenceKinds": [],
+                    "entryErrors": [],
+                    "oversizedFields": [],
+                },
             }
             if checked_at is not None:
                 metrics["checkedAt"] = checked_at
@@ -319,6 +357,7 @@ class RadarWebsiteToolProductionCompatibilityTests(unittest.TestCase):
                 "id": report_id,
                 "type": "indicator_scout_report",
                 "linkedPropId": "left_audit_crystals",
+                "status": "ready",
                 "workflowContext": {
                     "propId": "left_audit_crystals",
                     "actionId": "discover_new_indicators",
@@ -351,6 +390,7 @@ class RadarWebsiteToolProductionCompatibilityTests(unittest.TestCase):
             "id": "mixed-entry-dates",
             "type": "indicator_scout_report",
             "linkedPropId": "left_audit_crystals",
+            "status": "ready",
             "workflowContext": {
                 "propId": "left_audit_crystals",
                 "actionId": "discover_new_indicators",
@@ -373,7 +413,17 @@ class RadarWebsiteToolProductionCompatibilityTests(unittest.TestCase):
                         ("Yesterday item", "yesterday-item", "2026-08-11T02:00:00Z"),
                         ("Future item", "future-item", "2026-08-13T02:00:00Z"),
                     )
-                ]
+                ],
+                "workflowOutput": {
+                    "applicable": True,
+                    "valid": True,
+                    "procedureId": self.bridge.RADAR_WORKFLOW_PROCEDURE_ID,
+                    "providedFields": ["entries"],
+                    "missingFields": [],
+                    "missingEvidenceKinds": [],
+                    "entryErrors": [],
+                    "oversizedFields": [],
+                },
             },
         }
         payload = self.bridge._radar_website_tool_read_model(
@@ -443,12 +493,26 @@ class RadarWebsiteToolProductionCompatibilityTests(unittest.TestCase):
                 "id": report_id,
                 "type": "indicator_scout_report",
                 "linkedPropId": "left_audit_crystals",
+                "status": "ready",
                 "workflowContext": {
                     "propId": "left_audit_crystals",
                     "actionId": "discover_new_indicators",
                 },
                 "updatedAt": updated_at,
-                "metrics": {"checkedAt": checked_at, "entries": [dict(shared_entry, checkedAt=checked_at)]},
+                "metrics": {
+                    "checkedAt": checked_at,
+                    "entries": [dict(shared_entry, checkedAt=checked_at)],
+                    "workflowOutput": {
+                        "applicable": True,
+                        "valid": True,
+                        "procedureId": self.bridge.RADAR_WORKFLOW_PROCEDURE_ID,
+                        "providedFields": ["entries"],
+                        "missingFields": [],
+                        "missingEvidenceKinds": [],
+                        "entryErrors": [],
+                        "oversizedFields": [],
+                    },
+                },
             }
             for report_id, checked_at, updated_at in (
                 ("radar-first", "2026-08-11T02:00:00Z", "2026-08-11T02:01:00Z"),

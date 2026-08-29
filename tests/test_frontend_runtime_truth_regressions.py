@@ -779,7 +779,13 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn('["HOLD", "NO_TRADE"].includes(round.finalDecision)', summary)
         self.assertNotIn('["HOLD", "NO_TRADE", "NO_DATA"]', summary)
 
-        responsive = self.styles[self.styles.rfind("@media (max-width: 900px)") :]
+        # Select the AI Trade history breakpoint itself.  Other components may
+        # legitimately append their own 900px breakpoint later in the bundle.
+        responsive_start = self.styles.find(
+            "@media (max-width: 900px) {\n  .signal-stream-checklist"
+        )
+        self.assertGreaterEqual(responsive_start, 0)
+        responsive = self.styles[responsive_start:]
         self.assertIn(".signal-analysis-round-head", responsive)
         self.assertIn("display: none;", responsive)
         self.assertIn("content: attr(data-label);", responsive)

@@ -18,6 +18,7 @@ if ($Port -ne 0 -and $Port -lt 1024) {
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $projectPython = Join-Path $projectRoot "runner\.venv\Scripts\python.exe"
+$projectVenvLauncher = ""
 $bundledPython = Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
 $serverPath = Join-Path $projectRoot "backend\local-runner\bridge_server.py"
 $runtimePath = Join-Path $projectRoot "data\runtime"
@@ -45,6 +46,86 @@ $confirmedEndpointRequired = $false
 
 function Get-UtcTimestamp {
     return [DateTime]::UtcNow.ToString("o")
+}
+
+function Start-BridgeChildProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [string]$VenvLauncherPath = ""
+    )
+
+    # Windows does not refresh an already-open terminal's Process environment
+    # after the installer stores these deployment values in the current User
+    # environment. A Restart launched from that terminal must still pass the
+    # one-time Google OAuth client configuration to the new bridge. Only this
+    # fixed allowlist is inherited from User scope; explicit Process values
+    # remain authoritative and no value is written to logs or runtime JSON.
+    $persistentNames = @(
+        "METAFX_GOOGLE_OAUTH_CLIENT_ID",
+        "METAFX_GOOGLE_OAUTH_CLIENT_SECRET"
+    )
+    $originalProcessValues = @{}
+    $venvLauncherName = "__PYVENV_LAUNCHER__"
+    $originalVenvLauncher = [Environment]::GetEnvironmentVariable(
+        $venvLauncherName,
+        [EnvironmentVariableTarget]::Process
+    )
+    try {
+        # The venv redirector can create a launcher PID plus a different
+        # listener PID on Windows. We deliberately execute the base interpreter
+        # so lifecycle identity remains exact, while this CPython-supported
+        # launcher hint preserves the venv prefix and its pinned site-packages.
+        $venvValue = if ($VenvLauncherPath) { $VenvLauncherPath } else { $null }
+        [Environment]::SetEnvironmentVariable(
+            $venvLauncherName,
+            $venvValue,
+            [EnvironmentVariableTarget]::Process
+        )
+        foreach ($name in $persistentNames) {
+            $processValue = [Environment]::GetEnvironmentVariable(
+                $name,
+                [EnvironmentVariableTarget]::Process
+            )
+            $originalProcessValues[$name] = $processValue
+            if ([string]::IsNullOrWhiteSpace($processValue)) {
+                $userValue = [Environment]::GetEnvironmentVariable(
+                    $name,
+                    [EnvironmentVariableTarget]::User
+                )
+                if (-not [string]::IsNullOrWhiteSpace($userValue)) {
+                    [Environment]::SetEnvironmentVariable(
+                        $name,
+                        $userValue,
+                        [EnvironmentVariableTarget]::Process
+                    )
+                }
+            }
+        }
+
+        return Start-Process `
+            -FilePath $PythonPath `
+            -ArgumentList $Arguments `
+            -WorkingDirectory $projectRoot `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -PassThru
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable(
+            $venvLauncherName,
+            $originalVenvLauncher,
+            [EnvironmentVariableTarget]::Process
+        )
+        foreach ($name in $persistentNames) {
+            [Environment]::SetEnvironmentVariable(
+                $name,
+                $originalProcessValues[$name],
+                [EnvironmentVariableTarget]::Process
+            )
+        }
+    }
 }
 
 function Get-ComparablePath {
@@ -553,6 +634,7 @@ function Write-LifecycleState {
 }
 
 function Resolve-PythonExecutable {
+    $script:projectVenvLauncher = ""
     if (Test-Path -LiteralPath $projectPython -PathType Leaf) {
         # The Windows venv executable is a redirector that can leave both a
         # launcher PID and a listener PID. Resolve its base interpreter once so
@@ -560,6 +642,7 @@ function Resolve-PythonExecutable {
         try {
             $basePython = (& $projectPython -c "import sys; print(sys._base_executable)" 2>$null | Select-Object -Last 1)
             if ($LASTEXITCODE -eq 0 -and $basePython -and (Test-Path -LiteralPath $basePython -PathType Leaf)) {
+                $script:projectVenvLauncher = (Get-Item -LiteralPath $projectPython).FullName
                 return (Get-Item -LiteralPath $basePython).FullName
             }
         }
@@ -856,14 +939,10 @@ function Start-Bridge {
             ([string]$bridgePort)
         )
 
-        $startedProcess = Start-Process `
-            -FilePath $pythonPath `
-            -ArgumentList $arguments `
-            -WorkingDirectory $projectRoot `
-            -WindowStyle Hidden `
-            -RedirectStandardOutput $stdoutPath `
-            -RedirectStandardError $stderrPath `
-            -PassThru
+        $startedProcess = Start-BridgeChildProcess `
+            -PythonPath $pythonPath `
+            -Arguments $arguments `
+            -VenvLauncherPath $projectVenvLauncher
 
         $startedId = [int]$startedProcess.Id
         Write-LifecycleState -Status "starting" -ProcessId $startedId -PythonPath $pythonPath -StartedAt $startedAt

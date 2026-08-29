@@ -1,5 +1,5 @@
 {
-  "version": "property-role-map-v002",
+  "version": "property-role-map-v003",
   "purpose": "Fixed duty map for every clickable property in the Metafxclub AI Agent HQ room. This file decides what a prop means, what it should show, which agents own it, and which task keywords route work to it.",
   "routingRules": [
     {
@@ -55,9 +55,9 @@
   ],
   "properties": {
     "codex_mcp_portal": {
-      "functionName": "Global Trading System & EA Radar",
-      "displayTitle": "เรดาร์ระบบเทรดโลกและ EA",
-      "purpose": "ค้นหาระบบเทรดและ EA ใหม่จากแหล่งข้อมูลสาธารณะทั่วโลกแบบอ่านอย่างเดียว สรุปข้อมูลสำคัญ ตรวจรายการซ้ำ และส่งรายการที่เลือกไปวิจัยเชิงลึก โดยทุกการค้นหาจริงต้องเป็น Mission ของ Backend พร้อม Audit และ Report",
+      "functionName": "Global Trading System Radar",
+      "displayTitle": "เรดาร์ระบบเทรดโลก",
+      "purpose": "ค้นหาระบบเทรดจากแหล่งข้อมูลสาธารณะทั่วโลกแบบอ่านอย่างเดียว โดยบังคับชื่อผู้สร้างหรือนักเทรดเมื่อแหล่งต้นทางระบุ ขั้นตอนเข้าออก การจัดการออเดอร์ ความเสี่ยง และหลักฐานอย่างละเอียด พร้อมตรวจรายการซ้ำผ่าน Backend",
       "interactionMode": "dashboard",
       "connectionProfileId": "codex_mcp_portal",
       "departmentId": "global_trading_intelligence",
@@ -66,12 +66,12 @@
       "contributorAgentIds": ["mission_archivist", "manager"],
       "reviewerAgentIds": ["backtest_analyst"],
       "approverAgentIds": [],
+      "researchSheetHub": {"configurationPropId": "mission_strategy_table", "tabName": "World_System", "mode": "read_write", "statusSource": "active_current_revision_consumer_read_proof", "evidenceFields": ["rowCount", "observedAt"], "runtimeStatuses": ["auth_required", "permission_denied", "schema_mismatch", "read_ready_write_unverified", "ready"]},
       "primaryReportType": "trading_system_discovery_report",
-      "acceptedReportTypes": ["trading_system_discovery_report", "ea_discovery_report", "dashboard_connection_report", "bridge_status_report"],
+      "acceptedReportTypes": ["trading_system_discovery_report", "dashboard_connection_report", "bridge_status_report"],
       "localTabs": [
-        {"id": "systems", "labelTh": "ค้นหาระบบเทรด", "purpose": "ค้นหาระบบใหม่พร้อมแหล่งอ้างอิงและตรวจรายการซ้ำ", "actionIds": ["discover_trading_systems"]},
-        {"id": "ea_updates", "labelTh": "ค้นหา EA ใหม่", "purpose": "ค้นหา EA, Indicator และแนวคิดอัตโนมัติจากข้อมูลสาธารณะ", "actionIds": ["discover_ea_updates"]},
-        {"id": "schedule", "labelTh": "ตั้งเวลาค้นหา", "purpose": "ตั้งเวลาค้นหาระบบเทรดแบบอ่านอย่างเดียวผ่าน Backend", "actionIds": ["save_discovery_schedule"]},
+        {"id": "systems", "labelTh": "ระบบเทรดที่ค้นพบ", "purpose": "ดูระบบใหม่พร้อมแหล่งอ้างอิงและผลตรวจรายการซ้ำ", "actionIds": [], "viewOnly": true},
+        {"id": "schedule", "labelTh": "ตารางค้นหารายวัน", "purpose": "ดูตาราง Backend เวลา 09:00 น. Asia/Bangkok แบบอ่านอย่างเดียว", "actionIds": [], "viewOnly": true},
         {"id": "catalog", "labelTh": "ประวัติและรายงาน", "purpose": "ดู Mission, Report, แหล่งอ้างอิง และสถานะคลังข้อมูล", "actionIds": [], "viewOnly": true}
       ],
       "workflow": {
@@ -84,18 +84,18 @@
         "transferPolicy": {"mode": "agent_mission_only", "requiredRecordFields": ["sourceReportId", "sourcePropId", "sourceMissionId", "transferAgentId"], "frontendMaySubmitFields": ["sourceReportId"], "backendDerivesLineage": true, "missionStrategyTableRole": "global_ledger_only"},
         "recordTemplate": "contracts/research/trading-system-sheet-template.csv",
         "deduplication": {"required": true, "matchKeys": ["source_url", "system_name", "market", "timeframe"], "owner": "backend"},
-        "schedule": {"configurationIntentReady": true, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": false, "timezone": "Asia/Bangkok", "scheduledActionIds": ["discover_trading_systems"], "manualOrAgentHandoffActionIds": ["discover_ea_updates"]},
+        "schedule": {"preferenceRunsPerDay": [1], "defaultTimes": ["09:00"], "maximumTimes": 1, "maximumRunsPerDay": 1, "hardRuntimeEnforced": true, "backendOwned": true, "userConfigurable": false, "manualRunAllowed": false, "counterPersistence": "backend_local_settings", "countingPolicy": "post_gate_pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "configurationIntentReady": false, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": true, "timezone": "Asia/Bangkok", "scheduledActionIds": ["discover_trading_systems"], "manualOrAgentHandoffActionIds": []},
         "readiness": {
           "publicCodexWebResearch": "ready_guarded_read_only",
           "missionReportAudit": "ready",
           "localCatalogTemplate": "ready",
-          "googleSheetsSync": "coming_soon",
+          "googleSheetsSync": "implemented_backend_adapter_runtime_status_required",
           "recurringScheduler": "ready_guarded_read_only"
         }
       },
-      "dashboardSections": ["discovery_summary", "systems", "ea_updates", "duplicate_check", "schedule", "catalog", "source_evidence", "recent_audit"],
-      "allowedDashboardActions": ["discover_trading_systems", "discover_ea_updates", "save_discovery_schedule"],
-      "plannedDashboardActions": ["sync_google_sheet_catalog"],
+      "dashboardSections": ["discovery_summary", "systems", "duplicate_check", "schedule", "catalog", "source_evidence", "recent_audit"],
+      "allowedDashboardActions": ["discover_trading_systems", "save_discovery_schedule"],
+      "plannedDashboardActions": [],
       "reportType": "trading_system_discovery_report",
       "ownerAgents": ["codex_mcp_operator", "mission_archivist", "manager", "backtest_analyst"],
       "defaultTab": "systems",
@@ -104,7 +104,7 @@
         "historyReportTabId": "catalog",
         "historyReportTabPosition": "last",
         "leftRailSections": [
-          {"id": "schedule", "labelTh": "ตั้งเวลา", "purpose": "ตั้งเวลาค้นหาระบบเทรดผ่าน Backend; ค้นหา EA ยังสั่งแยก", "mode": "backend_preference", "actionIds": ["save_discovery_schedule"]},
+          {"id": "schedule", "labelTh": "ตารางอัตโนมัติ", "purpose": "ดูรอบ Backend คงที่ 09:00 น. Asia/Bangkok", "mode": "backend_read_only", "actionIds": []},
           {"id": "quota", "labelTh": "โควตา Codex", "purpose": "ดูโควตาจาก Backend แบบอ่านอย่างเดียว", "mode": "backend_read_only"},
           {"id": "agent_handoff", "labelTh": "ส่งต่อผ่าน Agent", "purpose": "ส่ง Report ด้วย Mission ที่ Backend ตรวจ lineage แล้ว", "mode": "mission_report_only", "direction": "send_receive"}
         ],
@@ -112,17 +112,17 @@
         "directDashboardPipeline": false,
         "missionStrategyTableRole": "global_ledger_only"
       },
-      "shows": ["ระบบเทรดใหม่จากแหล่งสาธารณะ", "EA และงานวิจัยใหม่", "สถานะตรวจรายการซ้ำ", "หลักฐานและวันที่ตรวจล่าสุด", "ตารางค้นหารายวัน", "สถานะ Google Sheets"],
-      "accepts": ["ค้นหาระบบเทรดทั่วโลก", "ค้นหา EA หรือ Indicator ใหม่", "ตั้งเวลาค้นหารายวัน", "ส่งรายการไปวิจัยเชิงลึก"],
-      "actions": ["สร้าง Mission ค้นหาระบบเทรด", "สร้าง Mission ค้นหา EA ใหม่", "บันทึกเวลาที่ต้องการค้นหา", "ส่งรายการที่เลือกไปตู้วิจัยเชิงลึก"],
-      "dataSources": ["public web sources through guarded Codex web research", "data/runtime/reports/", "data/runtime/bridge-audit.jsonl", "contracts/research/trading-system-sheet-template.csv", "future Google Sheets adapter"],
+      "shows": ["ระบบเทรด 3 ตระกูลต่อรอบจากแหล่งสาธารณะ", "ชื่อผู้สร้างหรือนักเทรดที่ตรวจได้", "ขั้นตอนเข้าออกและการจัดการความเสี่ยง", "สถานะตรวจรายการซ้ำ", "หลักฐานและวันที่ตรวจล่าสุด", "ตารางค้นหารายวัน", "สถานะ Google Sheets"],
+      "accepts": ["ดูระบบเทรดที่ Backend ค้นพบ", "ดูตารางค้นหารายวัน", "ส่งรายการไปวิจัยเชิงลึก"],
+      "actions": ["ดูผลค้นหาระบบเทรดแบบอ่านอย่างเดียว", "ดูตาราง Backend คงที่", "ส่งรายการที่เลือกไปตู้วิจัยเชิงลึก"],
+      "dataSources": ["public web sources through guarded Codex web research", "data/runtime/reports/", "data/runtime/bridge-audit.jsonl", "contracts/research/trading-system-sheet-template.csv", "Research Sheet Hub World_System tab via Backend adapter"],
       "doNotShow": ["tokens", "cookies", "auth files", "API keys", "credentials"],
-      "openingMessage": "ศูนย์นี้ใช้ค้นหาระบบเทรดและ EA ใหม่จากข้อมูลสาธารณะทั่วโลกครับ ผลทุกชิ้นต้องมีแหล่งอ้างอิง ตรวจรายการซ้ำ และบันทึกเป็น Mission/Report/Audit ก่อนส่งต่อไปวิจัยเชิงลึก"
+      "openingMessage": "ศูนย์นี้ค้นหาเฉพาะระบบเทรดจากข้อมูลสาธารณะทั่วโลกแบบอ่านอย่างเดียวทุกวัน 09:00 น. เวลาไทยครับ แต่ละรอบต้องได้ 3 แนวทางต่างตระกูล พร้อมชื่อผู้สร้างหรือนักเทรดที่แหล่งต้นทางระบุ ขั้นตอนละเอียด ความเสี่ยง และหลักฐาน โดย Backend เก็บ Mission/Report/Audit ภายในอัตโนมัติ"
     },
     "left_server_racks": {
       "functionName": "Deep Research Archive",
       "displayTitle": "คลังวิจัยระบบเทรดเชิงลึก",
-      "purpose": "รับระบบเทรดหรือ EA ที่ผู้ใช้เลือกจากเรดาร์ มาตรวจสอบแหล่งข้อมูล ขยายกฎเข้าออก การจัดการความเสี่ยง เงื่อนไขพิเศษ ความเหมาะสม และแนวทางประยุกต์ ก่อนส่งต่อให้ตู้สร้าง EA/Indicator",
+      "purpose": "รับระบบเทรดที่ Backend ตรวจหลักฐานแล้วจากเรดาร์อัตโนมัติ ให้ผู้ใช้เลือกระบบเพื่อขยายกฎเข้าออก การจัดการออเดอร์ การแก้ไม้ Money Management กราฟอธิบาย Backtest OHLC และ Report ก่อนส่งต่อให้ตู้สร้าง EA/Indicator",
       "interactionMode": "dashboard",
       "connectionProfileId": "left_server_racks",
       "departmentId": "trading_system_research_archive",
@@ -131,53 +131,55 @@
       "contributorAgentIds": ["backtest_analyst", "codex_mcp_operator"],
       "reviewerAgentIds": ["risk_guard"],
       "approverAgentIds": [],
+      "researchSheetHub": {"configurationPropId": "mission_strategy_table", "tabName": "Deep_Research", "mode": "read_write", "statusSource": "active_current_revision_consumer_read_proof", "evidenceFields": ["rowCount", "observedAt"], "runtimeStatuses": ["auth_required", "permission_denied", "schema_mismatch", "read_ready_write_unverified", "ready"], "alsoFeedsFactoryPropId": "right_server_racks"},
       "primaryReportType": "trading_system_research_report",
       "acceptedReportTypes": ["trading_system_research_report", "trading_system_discovery_report", "archive_report", "memory_recall_packet", "dashboard_connection_report"],
       "localTabs": [
-        {"id": "research_queue", "labelTh": "วิจัยเชิงลึก", "purpose": "ขยายกฎระบบและตรวจหลักฐานของรายการที่เลือก", "actionIds": ["deep_research_system"]},
-        {"id": "verified_archive", "labelTh": "ผลตรวจสอบ", "purpose": "ดูความน่าเชื่อถือ ข้อจำกัด และผลตรวจหลายแหล่ง", "actionIds": [], "viewOnly": true},
-        {"id": "application", "labelTh": "แนวทางประยุกต์", "purpose": "สรุปกฎที่นำไปพัฒนา EA หรือ Indicator ได้", "actionIds": [], "viewOnly": true},
-        {"id": "evidence", "labelTh": "ประวัติและรายงาน", "purpose": "ดู Mission, Report, Source URL และประวัติการตรวจ", "actionIds": [], "viewOnly": true}
+        {"id": "research", "labelTh": "เลือกระบบและวิจัย", "purpose": "เลือกระบบที่ Backend รับจากเรดาร์ แล้วขยายกฎและตรวจหลักฐานของระบบนั้น", "actionIds": ["deep_research_system"]},
+        {"id": "chart", "labelTh": "กราฟและจุดเข้าออก", "purpose": "ดูกราฟจำลอง อินดิเคเตอร์ จุดเข้าออก และคำอธิบายกฎ ไม่ใช่ผลตลาดจริง", "actionIds": [], "viewOnly": true},
+        {"id": "backtest", "labelTh": "Backtest OHLC", "purpose": "นำเข้า CSV/XLSX OHLC ทดสอบเฉพาะกฎที่แปลงเป็นเครื่องจักรได้ สูงสุด 10 ปี", "actionIds": []},
+        {"id": "report", "labelTh": "สรุป Report", "purpose": "รวมกฎ หลักฐาน ข้อจำกัด ผล Backtest ในเครื่อง และประวัติ Mission", "actionIds": [], "viewOnly": true}
       ],
       "workflow": {
         "id": "trading_system_deep_research",
         "displayOrder": 2,
         "independent": true,
-        "coordinationMode": "agent_mission_only",
-        "agentTransferOnly": true,
-        "directDashboardDependency": false,
-        "transferPolicy": {"mode": "agent_mission_only", "requiredRecordFields": ["sourceReportId", "sourcePropId", "sourceMissionId", "transferAgentId"], "frontendMaySubmitFields": ["sourceReportId"], "backendDerivesLineage": true, "missionStrategyTableRole": "global_ledger_only"},
+        "coordinationMode": "backend_verified_catalog_plus_agent_mission",
+        "agentTransferOnly": false,
+        "directDashboardDependency": true,
+        "catalogProjection": {"sourcePropId": "codex_mcp_portal", "sourceReportType": "trading_system_discovery_report", "requireReadyStatus": true, "requireCompletedNoApprovalMission": true, "requireValidWorkflowReceipt": true, "frontendReadOnly": true},
+        "transferPolicy": {"mode": "agent_mission_only", "requiredRecordFields": ["sourceReportId", "sourceRecordId", "sourcePropId", "sourceMissionId", "transferAgentId"], "frontendMaySubmitFields": ["sourceReportId", "sourceRecordId"], "backendDerivesLineage": true, "missionStrategyTableRole": "global_ledger_only"},
         "researchChecklist": ["source_identity", "entry_rules", "exit_rules", "risk_and_position_sizing", "stop_loss_take_profit", "recovery_or_averaging", "market_and_timeframe", "special_conditions", "suitable_audience", "limitations", "application_notes"],
-        "readiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "durableReportArchive": "ready", "googleSheetsSync": "coming_soon"}
+        "readiness": {"publicCodexWebResearch": "ready_guarded_read_only", "verifiedRadarCatalog": "ready_backend_projected", "ohlcFileAnalysis": "ready_local_only", "missionReportAudit": "ready", "durableReportArchive": "ready", "googleSheetsSync": "implemented_backend_adapter_runtime_status_required"}
       },
-      "dashboardSections": ["research_queue", "verified_archive", "verification_status", "system_rules", "application", "evidence", "report_library", "artifact_links"],
+      "dashboardSections": ["research", "chart", "backtest", "report", "verification_status", "system_rules", "evidence_links"],
       "allowedDashboardActions": ["deep_research_system"],
       "reportType": "trading_system_research_report",
       "ownerAgents": ["mission_archivist", "backtest_analyst", "codex_mcp_operator", "risk_guard"],
-      "defaultTab": "research_queue",
+      "defaultTab": "research",
       "dashboardUx": {
-        "mainWorkTabId": "research_queue",
-        "historyReportTabId": "evidence",
+        "mainWorkTabId": "research",
+        "historyReportTabId": "report",
         "historyReportTabPosition": "last",
         "leftRailSections": [
           {"id": "quota", "labelTh": "โควตา Codex", "purpose": "ดูโควตาจาก Backend แบบอ่านอย่างเดียว", "mode": "backend_read_only"},
           {"id": "agent_handoff", "labelTh": "ส่งต่อผ่าน Agent", "purpose": "รับหรือส่ง Report ผ่าน Mission ที่ตรวจ lineage แล้ว", "mode": "mission_report_only", "direction": "send_receive"}
         ],
-        "crossDevicePolicy": "agent_mission_report_only",
-        "directDashboardPipeline": false,
+        "crossDevicePolicy": "backend_verified_catalog_then_agent_mission",
+        "directDashboardPipeline": true,
         "missionStrategyTableRole": "global_ledger_only"
       },
-      "shows": ["คิวระบบที่เลือกจากเรดาร์", "กฎเข้าออกและการจัดการไม้", "สถานะตรวจสอบหลักฐาน", "แนวทางประยุกต์", "รายงานย้อนหลัง"],
+      "shows": ["ระบบทั้งหมดที่ Backend ตรวจแล้วจากเรดาร์", "กฎเข้าออกและการจัดการไม้", "กราฟจำลองพร้อมอินดิเคเตอร์และจุดเข้าออก", "Backtest จากไฟล์ OHLC ของผู้ใช้", "สถานะตรวจสอบหลักฐาน", "Report สรุปและรายงานย้อนหลัง"],
       "accepts": ["วิจัยระบบที่เลือก", "ตรวจความถูกต้อง", "ขยายกฎระบบ", "เตรียมระบบส่งไปเขียน EA หรือ Indicator"],
       "actions": ["สร้าง Mission วิจัยเชิงลึก", "เปิดหลักฐานต้นทาง", "ส่งงานวิจัยที่พร้อมไปตู้สร้าง EA/Indicator"],
-      "dataSources": ["linked trading_system_discovery_report", "public web sources through guarded Codex web research", "data/memory/reports/", "data/memory/artifacts/", "data/memory/summaries/"],
+      "dataSources": ["backend-projected verified trading_system_discovery_report catalog", "public web sources through guarded Codex web research", "local user-selected OHLC CSV/XLSX for in-memory analysis only", "data/memory/reports/", "data/memory/artifacts/", "data/memory/summaries/"],
       "doNotShow": ["secret files", "account credentials", "private auth folders"],
-      "openingMessage": "ตู้นี้รับระบบที่เลือกจากเรดาร์มาวิจัยต่อครับ เราจะตรวจแหล่งข้อมูล ขยายกฎ และระบุข้อจำกัดให้ชัดก่อนนำไปสร้าง EA หรือ Indicator"
+      "openingMessage": "คลังนี้รับระบบที่ตรวจหลักฐานแล้วจากเรดาร์อัตโนมัติ เลือกระบบเพื่อดูวิจัยเชิงลึก กราฟอธิบาย Backtest OHLC และ Report ก่อนนำไปสร้าง EA หรือ Indicator"
     },
     "right_server_racks": {
       "functionName": "EA & Indicator Builder",
       "displayTitle": "โรงงานสร้าง EA และ Indicator",
-      "purpose": "สร้างและตรวจทาน Source Code จากระบบที่เลือก โดยรองรับ MT4/MQL4, MT5/MQL5 และ TradingView/Pine Script ภายใน Workspace ของ Backend พร้อมรายงานตำแหน่ง Artifact แบบปลอดภัย ส่วนการ Compile จริงยังเป็น Coming Soon จนกว่า Adapter จะพร้อม",
+      "purpose": "สร้าง EA แบบผู้ใช้กดทำทีละขั้นจากระบบที่เลือกในคลังวิจัยหรือ Google Sheets แบบ Read-only รองรับ MT4/MQL4, MT5/MQL5 และ TradingView/Pine Script พร้อม Strategy Spec, Source Review, Compile/Validate, Visual Backtest และไฟล์ Report ที่ผูกหลักฐานตามจริง",
       "interactionMode": "dashboard",
       "connectionProfileId": "right_server_racks",
       "departmentId": "ea_indicator_engineering",
@@ -186,38 +188,44 @@
       "contributorAgentIds": ["mission_archivist", "backtest_analyst", "codex_mcp_operator"],
       "reviewerAgentIds": ["risk_guard"],
       "approverAgentIds": [],
+      "researchSheetHub": {"configurationPropId": "mission_strategy_table", "tabName": "Deep_Research", "mode": "read", "sharedConsumerPropId": "left_server_racks", "dedicatedCentralTab": false, "fourthCentralTab": false, "writesFromFactory": false, "statusSource": "active_current_revision_left_server_racks_read_proof", "evidenceFields": ["rowCount", "observedAt"], "runtimeStatuses": ["auth_required", "permission_denied", "schema_mismatch", "read_ready_write_unverified", "ready"]},
       "primaryReportType": "ea_build_report",
       "acceptedReportTypes": ["ea_build_report", "ea_compile_report", "code_change_report", "trading_system_research_report", "trading_system_discovery_report", "dashboard_connection_report", "terminal_discovery_report", "terminal_selection_report"],
       "localTabs": [
-        {"id": "builder", "labelTh": "สร้าง EA / Indicator", "purpose": "เลือกต้นแบบและแพลตฟอร์มเพื่อสร้าง Source Code ใน Workspace", "actionIds": ["build_strategy_code"]},
-        {"id": "code_review", "labelTh": "ตรวจ Source Code", "purpose": "ตรวจโครงสร้าง ความครบถ้วน และความเสี่ยงของโค้ด", "actionIds": ["review_source_code"]},
-        {"id": "compile", "labelTh": "ผล Compile", "purpose": "ดูสถานะ Compile และ Error ตามหลักฐานจาก Adapter", "actionIds": [], "viewOnly": true},
-        {"id": "outputs", "labelTh": "ประวัติและรายงาน", "purpose": "ดู Mission, Report และ Artifact ที่ Backend อนุญาต", "actionIds": [], "viewOnly": true}
+        {"id": "source", "labelTh": "1 เลือกระบบ", "purpose": "เลือก Record จากคลังวิจัยหรือ Google Sheets และอ่านคอลัมน์ A-W", "actionIds": []},
+        {"id": "strategy_spec", "labelTh": "2 ตรวจ Strategy Spec", "purpose": "ยืนยัน Entry, Exit, SL/TP, การแก้ไม้, Lot/Risk, Symbol และ Timeframe", "actionIds": []},
+        {"id": "generate_source", "labelTh": "3 สร้างโค้ด", "purpose": "สร้าง Source version ใหม่ใน Workspace โดยไม่ทับเวอร์ชันเดิม", "actionIds": ["build_strategy_code"]},
+        {"id": "source_review", "labelTh": "4 ตรวจ Source Code", "purpose": "ตรวจโครงสร้าง Signal, Order lifecycle, Money Management และความเสี่ยง", "actionIds": ["review_source_code"]},
+        {"id": "compile_validate", "labelTh": "5 Compile / Validate", "purpose": "MT4/MT5 ใช้ Terminal ที่เลือกและหลักฐาน MetaEditor; Pine ใช้ Static Validation", "actionIds": []},
+        {"id": "backtest_recheck", "labelTh": "6 Backtest / Recheck", "purpose": "MT4/MT5 ต้องมี Visual Mode และ Logic Recheck; Pine เป็น Not applicable", "actionIds": []},
+        {"id": "final_report", "labelTh": "7 ไฟล์และ Report", "purpose": "ดู Version, Mission, Report, Screenshot, Set และ Artifact ที่ Backend อนุญาต", "actionIds": [], "viewOnly": true}
       ],
       "workflow": {
         "id": "ea_indicator_builder",
         "displayOrder": 3,
         "independent": true,
-        "coordinationMode": "agent_mission_only",
+        "coordinationMode": "manual_stage_by_stage",
         "agentTransferOnly": true,
         "directDashboardDependency": false,
         "transferPolicy": {"mode": "agent_mission_only", "requiredRecordFields": ["sourceReportId", "sourcePropId", "sourceMissionId", "transferAgentId"], "frontendMaySubmitFields": ["sourceReportId"], "backendDerivesLineage": true, "missionStrategyTableRole": "global_ledger_only"},
         "platforms": [
-          {"id": "mt4", "language": "MQL4", "sourceGeneration": "ready_guarded_workspace", "compileAdapter": "coming_soon"},
-          {"id": "mt5", "language": "MQL5", "sourceGeneration": "ready_guarded_workspace", "compileAdapter": "coming_soon"},
-          {"id": "tradingview", "language": "Pine Script", "sourceGeneration": "ready_guarded_workspace", "compileAdapter": "coming_soon"}
+          {"id": "mt4", "language": "MQL4", "sourceGeneration": "ready_guarded_workspace", "compileAndBacktest": "requires_selected_mt4_and_verified_front_office_proof"},
+          {"id": "mt5", "language": "MQL5", "sourceGeneration": "ready_guarded_workspace", "compileAndBacktest": "requires_selected_mt5_and_verified_front_office_proof"},
+          {"id": "tradingview", "language": "Pine Script", "sourceGeneration": "ready_guarded_workspace", "validation": "static_source_validation", "backtest": "not_applicable"}
         ],
-        "readiness": {"codexSourceGenerationWorkspace": "ready_guarded", "sourceCodeReview": "ready_guarded", "missionReportAudit": "ready", "metaEditorCompile": "coming_soon", "pineCompileValidation": "coming_soon"}
+        "sourceColumns": {"range": "A-W", "core": "A-M", "downstream": "N-W"},
+        "executionPolicy": {"scheduled": false, "automaticLoop": false, "oneUserActionAdvancesOneStage": true, "previousStageMustPass": true, "immutableVersions": true},
+        "readiness": {"researchCatalog": "ready", "publicGoogleSheetsReadOnly": "ready", "codexSourceGenerationWorkspace": "ready_guarded", "sourceCodeReview": "ready_guarded", "pineStaticValidation": "ready", "missionReportAudit": "ready", "metaEditorCompile": "requires_adapter_proof", "visualBacktest": "requires_adapter_proof"}
       },
-      "dashboardSections": ["builder", "platform_selection", "build_queue", "code_review", "compile", "error_list", "outputs", "recent_audit"],
+      "dashboardSections": ["source", "strategy_spec", "generate_source", "source_review", "compile_validate", "backtest_recheck", "final_report", "recent_audit"],
       "allowedDashboardActions": ["discover_metatrader", "select_metatrader_target", "build_strategy_code", "review_source_code"],
-      "plannedDashboardActions": ["compile_strategy_code"],
+      "plannedDashboardActions": ["compile_validate_source", "run_visual_backtest_recheck"],
       "reportType": "ea_build_report",
       "ownerAgents": ["ea_developer", "mission_archivist", "backtest_analyst", "codex_mcp_operator", "risk_guard"],
-      "defaultTab": "builder",
+      "defaultTab": "source",
       "dashboardUx": {
-        "mainWorkTabId": "builder",
-        "historyReportTabId": "outputs",
+        "mainWorkTabId": "source",
+        "historyReportTabId": "final_report",
         "historyReportTabPosition": "last",
         "leftRailSections": [
           {"id": "quota", "labelTh": "โควตา Codex", "purpose": "ดูโควตาจาก Backend แบบอ่านอย่างเดียว", "mode": "backend_read_only"},
@@ -227,12 +235,12 @@
         "directDashboardPipeline": false,
         "missionStrategyTableRole": "global_ledger_only"
       },
-      "shows": ["ระบบต้นฉบับที่เลือก", "แพลตฟอร์มและภาษา", "คิวสร้าง Source Code", "ผลตรวจโค้ด", "สถานะ Compile", "รายการ Error", "ไฟล์ผลลัพธ์"],
-      "accepts": ["สร้าง EA MT4", "สร้าง EA MT5", "สร้าง Indicator TradingView", "ตรวจ Source Code", "เตรียม Compile"],
-      "actions": ["สร้าง Mission เขียน Source Code", "สร้าง Mission ตรวจทานโค้ด", "เปิดรายงาน Build", "ส่ง Source Code ไป EA Experiment Lab"],
-      "dataSources": ["linked trading_system_discovery_report", "linked trading_system_research_report", "guarded Codex project workspace", "data/runtime/reports/", "future MetaEditor/Compiler adapters"],
+      "shows": ["ระบบต้นฉบับจากคลังวิจัยและ Google Sheets", "คอลัมน์ A-W", "Strategy Spec", "แพลตฟอร์มและ Terminal ที่เลือก", "เวอร์ชัน Source Code", "ผลตรวจโค้ด", "สถานะ Compile/Validate", "Visual Backtest/Logic Recheck", "ไฟล์ผลลัพธ์และ Audit"],
+      "accepts": ["สร้าง EA MT4", "สร้าง EA MT5", "สร้าง Strategy TradingView Pine Script", "ตรวจ Source Code", "Compile/Validate ตาม Adapter ที่พร้อม", "Backtest/Recheck MT4 หรือ MT5"],
+      "actions": ["เลือก Record และยืนยัน Strategy Spec", "กดสร้าง Source หนึ่งเวอร์ชัน", "กดตรวจ Source", "กด Compile/Validate", "กด Visual Backtest/Recheck", "เปิดไฟล์และ Report"],
+      "dataSources": ["verified trading_system_research_report", "public shared Google Sheets read-only rows A-W", "guarded Codex project workspace", "data/runtime/reports/", "verified MetaEditor and Strategy Tester evidence"],
       "doNotShow": ["terminal path", "account number", "broker password", "live credentials"],
-      "openingMessage": "โรงงานนี้ใช้สร้าง EA และ Indicator จากระบบที่เลือกครับ ตอนนี้ Codex สร้างและตรวจ Source Code ใน Workspace ได้จริง ส่วน Compile ด้วย MetaEditor หรือ TradingView ยังแสดง Coming Soon จนกว่า Adapter จะพร้อม"
+      "openingMessage": "เลือกหนึ่งระบบจากคลังวิจัยหรือ Google Sheets แล้วตรวจ Entry, Exit, การแก้ไม้ และ Money Management ให้ครบ จากนั้นกดทำทีละขั้น ระบบจะไม่วนเองและจะไม่ข้าม Gate หรืออ้างผล Compile/Backtest ที่ยังไม่มีหลักฐาน"
     },
     "left_analytics_console": {
       "functionName": "AI Trade Council",
@@ -343,6 +351,7 @@
       "displayTitle": "ห้องทดลอง EA อัตโนมัติ",
       "purpose": "เตรียมและติดตามงาน Auto Backtest, Auto Optimization และ EA Discovery จาก Source Code หรือระบบต้นฉบับที่เลือก โดยแยกผลกำไร Drawdown จำนวน Order และหลักฐานการทดสอบอย่างชัดเจน ปัจจุบันเตรียมแผนและ Mission ได้ แต่ Adapter ที่ควบคุม Strategy Tester และ Plugin จริงยังเป็น Coming Soon",
       "interactionMode": "dashboard",
+      "researchSheetHub": {"included": false, "reason": "explicitly_excluded"},
       "connectionProfileId": "right_tool_console",
       "departmentId": "ea_experimentation",
       "departmentName": "EA Backtest, Optimization & Discovery",
@@ -402,7 +411,7 @@
     "mission_strategy_table": {
       "functionName": "Mission Strategy Table",
       "displayTitle": "โต๊ะวางแผนภารกิจ",
-      "purpose": "ใช้รวมคำสั่งจาก CEO/User, แตกงาน, นัดประชุม, ดู mission queue, รวมผล specialist และสรุปกลับผู้ใช้",
+      "purpose": "ใช้รวมคำสั่งจาก CEO/User, แตกงาน, นัดประชุม, ดู mission queue, รวมผล specialist และเป็นจุดตั้งค่า Google Sheet กลาง 3 แท็บสำหรับ 4 ระบบที่เชื่อม โดยโรงงาน EA อ่านร่วมจาก Deep_Research และไม่สร้างแท็บที่ 4",
       "interactionMode": "kanban",
       "departmentId": "executive_mission_control",
       "departmentName": "Executive & Mission Control",
@@ -412,15 +421,34 @@
       "approverAgentIds": ["ceo"],
       "primaryReportType": "mission_plan",
       "acceptedReportTypes": ["mission_plan", "executive_summary", "risk_review", "telegram_report", "telegram_tool_report"],
-      "dashboardSections": ["mission_board", "queue_summary", "meeting_agenda", "specialist_assignments", "approval_lane", "executive_summary"],
-      "allowedDashboardActions": ["submit_manager_goal", "create_mission", "delegate_mission", "move_mission_card", "call_meeting", "archive_mission", "open_executive_summary"],
+      "dashboardSections": ["research_sheet_hub", "mission_board", "queue_summary", "meeting_agenda", "specialist_assignments", "approval_lane", "executive_summary"],
+      "allowedDashboardActions": ["inspect_research_sheet_candidate", "activate_research_sheet_candidate", "submit_manager_goal", "create_mission", "delegate_mission", "move_mission_card", "call_meeting", "archive_mission", "open_executive_summary"],
+      "researchSheetHub": {
+        "configurationOwner": true,
+        "inspectRequestFields": ["googleSheetUrlOrId"],
+        "activateRequestFields": ["verificationToken", "confirmActivate", "expectedConfigRevision", "idempotencyKey"],
+        "frontendCredentialFields": [],
+        "credentialsBackendOnly": true,
+        "lifecyclePhases": ["draft", "inspecting", "awaiting_confirmation", "activating", "active"],
+        "activeRevisionPersistsUntilConfirmedReplacement": true,
+        "failedDraftDoesNotReplaceActiveRevision": true,
+        "activeSheetDisplayFields": ["active", "sheetId", "canonicalUrl", "configRevision", "activeConfigRevision", "activationConfirmedAt"],
+        "activeConsumerReadEvidenceFields": ["tabName", "configRevision", "configurationApplied", "status", "readReady", "writeReady", "rowCount", "cachedRowCount", "observedAt", "rowsObservedAt", "outbox"],
+        "consumers": {
+          "codex_mcp_portal": "World_System",
+          "left_server_racks": "Deep_Research",
+          "left_audit_crystals": "Indicator_EA_Tool"
+        },
+        "excludedPropIds": ["right_tool_console", "terminal_workstation"],
+        "runtimeStatuses": ["auth_required", "permission_denied", "schema_mismatch", "read_ready_write_unverified", "ready"]
+      },
       "reportType": "mission_plan",
       "ownerAgents": ["manager", "ceo", "mission_archivist", "telegram_ops"],
       "defaultTab": "tasks",
-      "shows": ["mission queue", "meeting agenda", "task owner", "work status", "executive summary"],
-      "accepts": ["สั่งงานหัวหน้า", "แตกงาน", "เรียกประชุม", "สรุปงานรวม"],
-      "actions": ["Assign Task", "Call Meeting", "Create executive report"],
-      "dataSources": ["data/runtime/missions.json", "data/memory/meetings/meeting-transcripts.jsonl", "data/runtime/ui-session.json"],
+      "shows": ["central Research Sheet Hub status", "mission queue", "meeting agenda", "task owner", "work status", "executive summary"],
+      "accepts": ["ใส่ Google Sheet URL หรือ ID กลาง", "สั่งงานหัวหน้า", "แตกงาน", "เรียกประชุม", "สรุปงานรวม"],
+      "actions": ["Inspect Research Sheet candidate", "Show local-user confirmation bound to verificationToken", "Activate verified central Research Sheet revision", "Assign Task", "Call Meeting", "Create executive report"],
+      "dataSources": ["data/runtime/dashboard-workflow-settings.json", "data/runtime/research-sheet-outbox.json", "data/runtime/missions.json", "data/memory/meetings/meeting-transcripts.jsonl", "data/runtime/ui-session.json"],
       "doNotShow": ["unapproved secrets", "raw sensitive logs"],
       "openingMessage": "โต๊ะนี้คือหัวใจของ HQ ครับ ใช้รับคำสั่ง แตกงาน เรียกประชุม และรวมผลกลับมา"
     },
@@ -429,6 +457,7 @@
       "displayTitle": "สตูดิโอพัฒนา EA",
       "purpose": "เลือก Source MQL4/MQL5 จาก Workspace หรือรายงานต้นทางที่ Backend อนุญาต รับ Brief แบบข้อความหรือข้อความถอดเสียง กำหนดเป้าหมายกำไร Drawdown และจำนวน Order แล้วพัฒนา ตรวจทาน และส่ง Artifact กลับมาแบบตรวจสอบย้อนหลังได้ โดยไม่อ้างว่า Compile ผ่านจนกว่าจะมี Compiler Adapter จริง",
       "interactionMode": "dashboard",
+      "researchSheetHub": {"included": false, "reason": "explicitly_excluded"},
       "connectionProfileId": "terminal_workstation",
       "departmentId": "ea_development_studio",
       "departmentName": "EA Development Studio",
@@ -486,7 +515,7 @@
     "left_audit_crystals": {
       "functionName": "Radar Website Tool",
       "displayTitle": "Radar Website Tool",
-      "purpose": "ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะ เก็บ URL วันที่ตรวจ และสถานะซ้ำจากคลัง Report ในเครื่อง โดยทำงานอัตโนมัติสูงสุดวันละ 1 รอบ; Google Sheet และ Screenshot แสดงตามสถานะ Adapter จริงเท่านั้น",
+      "purpose": "ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะ เก็บ URL วันที่ตรวจ สถานะซ้ำ และภาพ Open Graph ที่ผูกกับรายการ โดยทำงานอัตโนมัติสูงสุดวันละ 1 รอบ และส่งรายการที่ตรวจผ่านไปยัง Indicator_EA_Tool ผ่าน Google Sheet กลาง",
       "interactionMode": "dashboard",
       "connectionProfileId": "left_audit_crystals",
       "departmentId": "indicator_market_intelligence",
@@ -495,12 +524,13 @@
       "contributorAgentIds": ["mission_archivist", "ea_developer"],
       "reviewerAgentIds": ["risk_guard"],
       "approverAgentIds": [],
+      "researchSheetHub": {"configurationPropId": "mission_strategy_table", "tabName": "Indicator_EA_Tool", "mode": "read_write", "statusSource": "active_current_revision_consumer_read_proof", "evidenceFields": ["rowCount", "observedAt"], "runtimeStatuses": ["auth_required", "permission_denied", "schema_mismatch", "read_ready_write_unverified", "ready"]},
       "primaryReportType": "indicator_scout_report",
       "acceptedReportTypes": ["indicator_scout_report", "dashboard_connection_report"],
       "localTabs": [
-        {"id": "discoveries", "labelTh": "รายการวันนี้", "purpose": "ดู Indicator, EA และ Tool ที่ค้นพบวันนี้พร้อม URL", "actionIds": ["discover_new_indicators"]},
+        {"id": "discoveries", "labelTh": "รายการวันนี้", "purpose": "ดู Indicator, EA และ Tool ที่ค้นพบวันนี้พร้อม URL", "actionIds": [], "viewOnly": true},
         {"id": "evidence", "labelTh": "หลักฐาน", "purpose": "ดู Source URL วันที่ตรวจ ความน่าเชื่อถือ และข้อจำกัด", "actionIds": [], "viewOnly": true},
-        {"id": "schedule", "labelTh": "ตั้งเวลาค้นหา", "purpose": "ตั้งเวลาค้นหาแบบอ่านอย่างเดียวผ่าน Backend", "actionIds": ["save_indicator_scout_schedule"]},
+        {"id": "schedule", "labelTh": "ตารางค้นหารายวัน", "purpose": "ดูตาราง Backend เวลา 09:00 น. Asia/Bangkok แบบอ่านอย่างเดียว", "actionIds": [], "viewOnly": true},
         {"id": "archive", "labelTh": "ประวัติและรายงาน", "purpose": "ดูรายการย้อนหลัง 7 วันและ Mission/Report ที่เกี่ยวข้อง", "actionIds": [], "viewOnly": true}
       ],
       "dashboardSections": ["today_entries", "seven_day_entries", "source_evidence", "deduplication", "archive"],
@@ -513,18 +543,18 @@
         "historyReportTabId": "archive",
         "historyReportTabPosition": "last",
         "leftRailSections": [
-          {"id": "schedule", "labelTh": "ค้นหาและตั้งค่า", "purpose": "ค้นหาอัตโนมัติวันละครั้งเวลา 09:00 น. และเก็บการตั้งค่า Google Sheet โดยไม่อ้างว่าเขียน Sheet จนกว่า Adapter จะยืนยัน", "mode": "backend_preference", "actionIds": ["save_indicator_scout_schedule"]},
+          {"id": "schedule", "labelTh": "ตารางอัตโนมัติ", "purpose": "ดูรอบ Backend คงที่ 09:00 น. Asia/Bangkok โดยไม่สร้าง Mission เอง", "mode": "backend_read_only", "actionIds": []},
           {"id": "quota", "labelTh": "โควตา Codex", "purpose": "ดูโควตาจาก Backend แบบอ่านอย่างเดียว", "mode": "backend_read_only"}
         ],
-        "leftRailControls": ["discover_new_indicators", "schedule_once_daily", "validated_google_sheet_reference"],
+        "leftRailControls": ["backend_schedule_read_only", "central_google_sheet_status_read_only"],
         "primaryViews": ["today", "history_7_days"],
         "crossDevicePolicy": "agent_mission_report_only",
         "directDashboardPipeline": false,
         "missionStrategyTableRole": "global_ledger_only"
       },
       "shows": ["Indicator, EA and Tool today", "7-day history", "public source links", "local dedup status", "truth-safe Sheet and screenshot status"],
-      "accepts": ["ค้นหา Indicator ใหม่", "ค้นหา EA ใหม่", "ค้นหา Tool ใหม่", "ตรวจรายการซ้ำ", "ตั้งเวลาค้นหา", "บันทึก Google Sheet URL หรือ ID"],
-      "actions": ["Discover public tools", "Save schedule preference", "Open evidence", "Open archive"],
+      "accepts": ["ค้นหา Indicator ใหม่", "ค้นหา EA ใหม่", "ค้นหา Tool ใหม่", "ตรวจรายการซ้ำ", "ดูสถานะ Google Sheet กลาง"],
+      "actions": ["Discover public tools", "Open central Sheet status", "Open evidence", "Open archive"],
       "dataSources": ["guarded public web research", "data/runtime/missions.json", "data/runtime/reports/", "data/runtime/dashboard-workflow-settings.json"],
       "workflow": {
         "id": "radar_website_tool",
@@ -535,14 +565,14 @@
         "directDashboardDependency": false,
         "transferPolicy": {"mode": "agent_mission_only", "requiredRecordFields": ["sourceReportId", "sourcePropId", "sourceMissionId", "transferAgentId"], "frontendMaySubmitFields": ["sourceReportId"], "backendDerivesLineage": true, "missionStrategyTableRole": "global_ledger_only"},
         "deduplication": {"required": true, "mode": "deterministic_local_report_catalog", "matchKeys": ["normalizedSourceUrl", "toolName", "platform", "version"], "googleSheetCompared": false, "owner": "backend"},
-        "schedule": {"preferenceRunsPerDay": [1], "defaultTimes": ["09:00"], "maximumTimes": 1, "maximumRunsPerDay": 1, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "post_gate_pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "configurationIntentReady": true, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": true, "timezone": "Asia/Bangkok", "scheduledActionIds": ["discover_new_indicators"]},
-        "googleSheet": {"configurationMayBeSaved": true, "privateDefaultIncluded": false, "adapterStatus": "not_connected", "externalWriteEnabled": false, "writeRequiresExplicitUserConfirmation": true},
+        "schedule": {"preferenceRunsPerDay": [1], "defaultTimes": ["09:00"], "maximumTimes": 1, "maximumRunsPerDay": 1, "hardRuntimeEnforced": true, "backendOwned": true, "userConfigurable": false, "manualRunAllowed": false, "counterPersistence": "backend_local_settings", "countingPolicy": "post_gate_pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "configurationIntentReady": false, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": true, "timezone": "Asia/Bangkok", "scheduledActionIds": ["discover_new_indicators"], "manualOrAgentHandoffActionIds": []},
+        "googleSheet": {"configurationPropId": "mission_strategy_table", "configurationMayBeSavedHere": false, "tabName": "Indicator_EA_Tool", "mode": "read_write", "adapterStatus": "implemented_backend_adapter_runtime_status_required", "credentialsBackendOnly": true},
         "readModel": {"schemaVersion": "radar-website-tool-v1", "todayEntries": true, "sevenDayEntries": true, "historyWindowDays": 7},
-        "readiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "localDedup": "implemented_deterministic_local_report_catalog", "googleSheetsAdapter": "not_connected", "screenshotAdapter": "not_connected", "recurringScheduler": "ready_guarded_read_only"}
+        "readiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "localDedup": "implemented_deterministic_local_report_catalog", "googleSheetsAdapter": "implemented_backend_adapter_runtime_status_required", "screenshotAdapter": "ready_publisher_image", "screenshotCaptureKind": "publisher_open_graph", "fullPageScreenshot": false, "recurringScheduler": "ready_guarded_read_only"}
       },
       "workflowTracking": {"required": true, "fields": ["missionId", "targetPropId", "ownerAgentId", "sourceLineage", "agentTransfer", "timestamps", "status", "reportRoute"]},
       "doNotShow": ["tokens", "cookies", "auth files", "passwords", "private repository credentials"],
-      "openingMessage": "Radar Website Tool ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะครับ หน้าแรกแสดงวันนี้และย้อนหลัง 7 วัน ส่วนการค้นหา เวลา และ Google Sheet อยู่ด้านซ้าย โดยจะไม่อ้างว่าเขียน Sheet หรือจับภาพแล้วจนกว่า Adapter จริงจะยืนยัน"
+      "openingMessage": "Radar Website Tool ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะครับ หน้าแรกแสดงวันนี้และย้อนหลัง 7 วัน และอ่านสถานะ Indicator_EA_Tool จาก Google Sheet กลางที่ตั้งค่าบนโต๊ะวางแผน Mission โดยจะไม่อ้างว่าเขียนสำเร็จจนกว่า Backend ตรวจ write/read-back จริง"
     },
     "left_signal_cube": {
       "functionName": "Daily Market News & FX Bias",
@@ -650,7 +680,7 @@
           "tokenBudget": {"type": "integer", "minimum": 256, "maximum": 100000},
           "timeoutSeconds": {"type": "integer", "minimum": 15, "maximum": 1800},
           "outputLimitChars": {"type": "integer", "minimum": 1000, "maximum": 100000},
-          "rateReservePercent": {"type": "integer", "minimum": 0, "maximum": 90}
+          "rateReservePercent": {"type": "integer", "minimum": 15, "maximum": 15}
         },
         "backendValidationRequired": true,
         "backendPersistenceOnly": true,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import http.client
 import importlib.util
 import json
@@ -38,15 +39,178 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
     def ready_bridge(self) -> dict:
         return {"codex": {"status": "ready_guarded"}}
 
+    def verified_portal_system_fixture(
+        self,
+        *,
+        report_id: str = "portal-verified-systems-1",
+        mission_id: str = "mission-portal-verified-systems-1",
+    ) -> tuple[dict, dict, dict]:
+        checked_at = self.bridge.utc_now()
+        evidence = []
+        raw_systems = []
+        families = ("trend_following", "mean_reversion", "breakout")
+        for index, family in enumerate(families, start=1):
+            source_url = f"https://source{index}.example/system"
+            corroborating_url = f"https://confirm{index}.example/system"
+            evidence.extend((
+                {"label": f"Primary {index}", "url": source_url, "note": "public rules"},
+                {"label": f"Confirm {index}", "url": corroborating_url, "note": "independent source"},
+            ))
+            raw_systems.append({
+                "recordType": "trading_system",
+                "systemName": f"Verified System {index}",
+                "strategyFamily": family,
+                "creatorOrTrader": {
+                    "name": f"Creator {index}",
+                    "role": "trader",
+                    "status": "publicly_stated",
+                    "sourceUrl": source_url,
+                },
+                "publicUsers": [],
+                "market": "Forex",
+                "symbols": ["EURUSD"],
+                "timeframes": ["H1"],
+                "sessions": ["London"],
+                "indicatorSettings": [],
+                "setupConditions": ["Use only a completed candle"],
+                "entrySteps": [
+                    {"stepNo": 1, "rule": "Wait for the setup", "sourceUrl": source_url, "truthStatus": "fact"},
+                    {"stepNo": 2, "rule": "Enter after confirmation", "sourceUrl": corroborating_url, "truthStatus": "fact"},
+                ],
+                "exitSteps": [
+                    {"stepNo": 1, "rule": "Place a protective stop", "sourceUrl": source_url, "truthStatus": "fact"},
+                    {"stepNo": 2, "rule": "Exit on the opposite condition", "sourceUrl": corroborating_url, "truthStatus": "fact"},
+                ],
+                "riskManagement": {
+                    "positionSizing": "Fixed fractional sizing",
+                    "stopLoss": "At the invalidation level",
+                    "takeProfit": "At the documented exit",
+                    "maxRiskPerTrade": "One percent",
+                    "maxOpenPositions": "One",
+                    "dailyOrEquityStop": "Three percent",
+                    "recoveryMethod": "none",
+                    "recoveryRules": [],
+                    "sourceUrl": source_url,
+                    "truthStatus": "fact",
+                },
+                "tradeManagementSteps": [],
+                "sourceTitle": f"System {index} rules",
+                "sourceUrl": source_url,
+                "corroboratingUrls": [corroborating_url],
+                "checkedAt": checked_at,
+                "verificationStatus": "verified",
+                "suitableFor": ["Rule-based research"],
+                "risksAndLimitations": ["Losses remain possible"],
+                "unknowns": [],
+            })
+        context = {
+            "schemaVersion": "dashboard-workflow-lineage-v1",
+            "propId": "codex_mcp_portal",
+            "actionId": "discover_trading_systems",
+            "coordinationMode": "agent_mission_only",
+            "source": None,
+            "agentTransfer": None,
+            "inputs": {"sourcePolicy": "public_read_only"},
+            "inputDigest": "a" * 64,
+            "submittedAt": checked_at,
+            "triggerSource": "schedule",
+            "pluginProcedure": {
+                "contractVersion": "equipment-plugin-map-v1",
+                "pluginSkillId": self.bridge.TRADING_SYSTEM_WORKFLOW_PROCEDURE_ID,
+                "pluginVersion": "backend-v1",
+                "procedureKind": "backend_procedure",
+                "pluginInvocationMode": "backend_owned_procedure",
+                "versionMatch": True,
+                "automationMode": "scheduled_read_only",
+                "outputFields": ["systems"],
+            },
+        }
+        mission = {
+            "id": mission_id,
+            "owner": "codex_mcp_operator",
+            "targetId": "codex_mcp_portal",
+            "toolId": "codex_web_research",
+            "status": "completed",
+            "phase": "auto_guarded_completed",
+            "workStatus": "completed",
+            "startedAt": checked_at,
+            "requiresHumanApproval": False,
+            "approval": {"required": False, "state": "not_required"},
+            "execution": {
+                "workingDirectory": "workspace",
+                "writeRoots": [],
+                "controlPlaneWritable": False,
+                "webSearchEnabled": True,
+                "webSearchUsed": True,
+                "webSearchEvidenceVerified": True,
+            },
+            "workflowContext": context,
+            "reportIds": [report_id],
+        }
+        normalized, errors = self.bridge._normalize_trading_system_contract_rows(
+            mission,
+            {},
+            evidence,
+            raw_systems,
+            existing_fingerprints_override=set(),
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(normalized or []), 3)
+        receipt = {
+            "applicable": True,
+            "valid": True,
+            "failureCode": None,
+            "procedureId": self.bridge.TRADING_SYSTEM_WORKFLOW_PROCEDURE_ID,
+            "providedFields": ["systems"],
+            "values": {
+                "systems": json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            },
+            "missingFields": [],
+            "missingEvidenceKinds": [],
+            "entryErrors": [],
+            "oversizedFields": [],
+            "sourceUrlCount": 6,
+        }
+        mission["workflowOutputContract"] = copy.deepcopy(receipt)
+        report = {
+            "id": report_id,
+            "type": "trading_system_discovery_report",
+            "title": "Verified Portal systems",
+            "summary": "Three independently sourced systems",
+            "ownerAgentId": "codex_mcp_operator",
+            "linkedMissionId": mission_id,
+            "linkedPropId": "codex_mcp_portal",
+            "status": "ready",
+            "metrics": {
+                "workflowOutput": copy.deepcopy(receipt),
+                "systems": copy.deepcopy(normalized),
+            },
+            "evidence": evidence,
+            "updatedAt": checked_at,
+        }
+        transfer = {
+            "mode": "agent_mission_report",
+            "sourceReportId": report_id,
+            "sourcePropId": "codex_mcp_portal",
+            "sourceMissionId": mission_id,
+            "transferAgentId": "mission_archivist",
+            "sourceOwnerAgentId": "codex_mcp_operator",
+            "targetPropId": "left_server_racks",
+            "handoffMissionId": "mission-handoff-verified-systems-1",
+            "status": "recorded",
+        }
+        return report, mission, transfer
+
     def disable_direct_news_schedule(self) -> None:
         self.bridge.save_direct_daily_fx_news_schedule(
             {"enabled": False, "times": ["00:00", "12:00"]}
         )
 
-    def disable_radar_schedule(self) -> None:
-        self.bridge._save_dashboard_schedule_preference(
-            "indicatorScoutSchedule",
-            {"enabled": False, "times": ["09:00"]},
+    def schedule_jobs(self, *settings_keys: str) -> tuple[dict, ...]:
+        return tuple(
+            job
+            for job in self.bridge.DASHBOARD_WORKFLOW_SCHEDULE_JOBS
+            if job.get("settingsKey") in settings_keys
         )
 
     def test_ready_guarded_codex_is_connected_in_dashboard_checklists(self) -> None:
@@ -75,7 +239,6 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         expected = {
             "codex_mcp_portal": {
                 "discover_trading_systems",
-                "discover_ea_updates",
                 "save_discovery_schedule",
             },
             "left_server_racks": {"deep_research_system"},
@@ -118,7 +281,15 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
 
     def test_tabs_reference_only_actions_owned_by_the_same_prop(self) -> None:
         for prop_id, tabs in self.bridge.DASHBOARD_WORKFLOW_TABS.items():
-            expected_count = 3 if prop_id == "left_signal_cube" else 1 if prop_id == "right_status_crystals" else 4
+            expected_count = (
+                7
+                if prop_id == "right_server_racks"
+                else 3
+                if prop_id in {"codex_mcp_portal", "left_signal_cube"}
+                else 1
+                if prop_id == "right_status_crystals"
+                else 4
+            )
             self.assertEqual(len(tabs), expected_count, prop_id)
             for tab in tabs:
                 for action_id in tab["actionIds"]:
@@ -134,7 +305,13 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             {"label": "Loopback", "url": "http://127.0.0.1/private"},
             {"label": "Private", "url": "http://10.0.0.8/report"},
             {"label": "IPv6 loopback", "url": "http://[::1]/report"},
+            {"label": "Short loopback", "url": "http://127.1/report"},
+            {"label": "Octal loopback", "url": "http://0177.0.0.1/report"},
+            {"label": "Hex loopback", "url": "http://0x7f.0.0.1/report"},
+            {"label": "Integer loopback", "url": "http://2130706433/report"},
             {"label": "Local domain", "url": "https://bridge.local/report"},
+            {"label": "LAN domain", "url": "https://bridge.lan/report"},
+            {"label": "Single label", "url": "https://intranet/report"},
             {"label": "Secret query", "url": "https://example.com/report?api_key=hidden"},
         ])
 
@@ -177,16 +354,16 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             "sourceReportId": "portal-report-1",
             "sourcePropId": "codex_mcp_portal",
             "sourceMissionId": "mission-source-1",
-            "transferAgentId": "ea_developer",
+            "transferAgentId": "mission_archivist",
             "sourceOwnerAgentId": "codex_mcp_operator",
-            "targetPropId": "right_server_racks",
+            "targetPropId": "left_server_racks",
             "handoffMissionId": "mission-handoff-1",
             "status": "recorded",
         }
         handoff_mission = {
             "id": "mission-handoff-1",
-            "owner": "ea_developer",
-            "targetId": "right_server_racks",
+            "owner": "mission_archivist",
+            "targetId": "left_server_racks",
             "toolId": "agent_report_transfer",
             "status": "completed",
             "agentTransfer": transfer,
@@ -196,7 +373,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             mock.patch.object(self.bridge, "load_missions", return_value=[source_mission]),
         ):
             model = self.bridge.workflow_dashboard_read_model(
-                "right_server_racks",
+                "left_server_racks",
                 reports=reports,
                 bridge=self.ready_bridge(),
             )
@@ -216,7 +393,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             mock.patch.object(self.bridge, "load_missions", return_value=[source_mission, handoff_mission]),
         ):
             delivered_model = self.bridge.workflow_dashboard_read_model(
-                "right_server_racks",
+                "left_server_racks",
                 reports=reports,
                 bridge=self.ready_bridge(),
             )
@@ -225,7 +402,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertNotIn("artifactPath", delivered[0])
         self.assertNotIn("sourcePath", delivered[0])
         self.assertEqual(
-            delivered[0]["agentTransfersByActionId"]["build_strategy_code"]["handoffMissionId"],
+            delivered[0]["agentTransfersByActionId"]["deep_research_system"]["handoffMissionId"],
             "mission-handoff-1",
         )
 
@@ -240,21 +417,338 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 bridge=self.ready_bridge(),
             )
         destinations = model["agentTransferDestinations"]
-        self.assertTrue(destinations)
-        self.assertIn(
-            {
-                "targetPropId": "left_server_racks",
-                "actionId": "deep_research_system",
-                "labelTh": self.bridge.DASHBOARD_WORKFLOW_ACTIONS["deep_research_system"]["labelTh"],
-                "transferAgentId": "mission_archivist",
-            },
-            destinations,
-        )
+        self.assertEqual(destinations, [{
+            "targetPropId": "left_server_racks",
+            "actionId": "deep_research_system",
+            "labelTh": self.bridge.DASHBOARD_WORKFLOW_ACTIONS["deep_research_system"]["labelTh"],
+            "transferAgentId": "mission_archivist",
+        }])
         self.assertTrue(all(set(row) == {
             "targetPropId", "actionId", "labelTh", "transferAgentId",
         } for row in destinations))
         self.assertNotIn("reports", model)
         self.assertEqual(model["agentDeliveredSources"], [])
+
+    def test_research_catalog_exposes_only_verified_ready_portal_systems(self) -> None:
+        report, source_mission, _transfer = self.verified_portal_system_fixture()
+        missions = [source_mission]
+        model = self.bridge.workflow_dashboard_read_model(
+            "left_server_racks",
+            reports=[report],
+            missions=missions,
+            bridge=self.ready_bridge(),
+        )
+        self.assertEqual(
+            [tab["id"] for tab in model["tabs"]],
+            ["research", "chart", "backtest", "report"],
+        )
+        self.assertTrue(model["transferPolicy"]["publicSourceCatalogExposed"])
+        self.assertEqual(
+            model["coordinationMode"],
+            "backend_verified_catalog_plus_agent_mission",
+        )
+        self.assertFalse(model["agentTransferOnly"])
+        self.assertTrue(model["directDashboardDependency"])
+        self.assertFalse(model["transferPolicy"]["agentTransferOnly"])
+        self.assertTrue(model["transferPolicy"]["directDashboardDependency"])
+        self.assertEqual(
+            model["transferPolicy"]["frontendMaySubmitFields"],
+            ["sourceReportId", "sourceRecordId"],
+        )
+        catalog = model["researchCatalog"]
+        self.assertTrue(catalog["failClosed"])
+        self.assertEqual(catalog["readyReportCount"], 1)
+        self.assertEqual(catalog["verifiedSystemCount"], 3)
+        self.assertFalse(catalog["externalWrites"])
+        self.assertFalse(catalog["metaTraderActions"])
+        first = catalog["systems"][0]
+        self.assertEqual(first["sourceReportId"], report["id"])
+        self.assertEqual(first["sourceRecordId"], first["system"]["recordId"])
+        self.assertEqual(first["creatorOrTrader"]["status"], "publicly_stated")
+        self.assertEqual(len(first["sourceUrls"]), 2)
+        self.assertIsNone(first["handoffMissionId"])
+        self.assertEqual(len(first["system"]["entrySteps"]), 2)
+        self.assertEqual(first["system"]["riskManagement"]["recoveryRules"], [])
+        self.assertEqual(model["ohlcImport"]["status"], "ready_local_runner")
+        self.assertEqual(
+            model["ohlcImport"]["endpoint"],
+            "/api/props/left_server_racks/ohlc/import",
+        )
+        self.assertEqual(model["ohlcImport"]["acceptedFormats"], ["csv", "xlsx"])
+        self.assertFalse(model["ohlcImport"]["writeFiles"])
+        self.assertFalse(model["ohlcImport"]["networkUpload"])
+        self.assertFalse(model["ohlcImport"]["metaTraderActions"])
+        self.assertEqual(model["ohlcImport"]["maximumHistoryYears"], 10)
+
+        blocked = copy.deepcopy(report)
+        blocked["status"] = "blocked"
+        tampered = copy.deepcopy(report)
+        tampered["metrics"]["systems"][0]["creatorOrTrader"]["sourceUrl"] = (
+            "http://127.0.0.1/private"
+        )
+        invalid_receipt_mission = copy.deepcopy(source_mission)
+        invalid_receipt_mission["workflowOutputContract"]["valid"] = False
+        for candidate_report, candidate_missions in (
+            (blocked, [source_mission]),
+            (tampered, [source_mission]),
+            (report, [invalid_receipt_mission]),
+        ):
+            with self.subTest(report_status=candidate_report["status"], mission_valid=candidate_missions[0]["workflowOutputContract"]["valid"]):
+                rejected = self.bridge._deep_research_catalog_read_model(
+                    reports=[candidate_report],
+                    missions=candidate_missions,
+                    delivered_sources=[],
+                )
+                self.assertEqual(rejected["verifiedSystemCount"], 0)
+                self.assertEqual(rejected["systems"], [])
+
+    def test_deep_research_selection_is_bound_to_one_verified_record(self) -> None:
+        report, source_mission, _transfer = self.verified_portal_system_fixture()
+        selected_record = report["metrics"]["systems"][1]["recordId"]
+        with (
+            mock.patch.object(self.bridge, "load_runtime_reports", return_value=[report]),
+            mock.patch.object(self.bridge, "load_missions", return_value=[source_mission]),
+        ):
+            source = self.bridge._workflow_selected_source(
+                "left_server_racks",
+                "deep_research_system",
+                {
+                    "sourceReportId": report["id"],
+                    "sourceRecordId": selected_record,
+                },
+            )
+            with self.assertRaises(self.bridge.RequestError):
+                self.bridge._workflow_selected_source(
+                    "left_server_racks",
+                    "deep_research_system",
+                    {
+                        "sourceReportId": report["id"],
+                        "sourceRecordId": "trading-system-not-in-report-1",
+                    },
+                )
+        self.assertEqual(source["recordId"], selected_record)
+        payload = source["structuredPayload"]
+        self.assertEqual(payload["recordId"], selected_record)
+        self.assertEqual(payload["system"]["systemName"], "Verified System 2")
+        self.assertEqual(payload["creatorOrTrader"]["name"], "Creator 2")
+        self.assertEqual(len(payload["sourceUrls"]), 2)
+        self.assertIsNone(source["agentTransfer"])
+        self.assertEqual(source["sourceKind"], "verified_catalog_record")
+        self.assertNotIn("metrics", payload)
+        self.assertNotIn("findings", payload)
+        form = {
+            "sourceReportId": report["id"],
+            "sourceRecordId": selected_record,
+            "brief": "Verify public rules",
+            "timezone": "Asia/Bangkok",
+        }
+        profile = self.bridge._trusted_workflow_plugin_profile(
+            "left_server_racks",
+            "deep_research_system",
+            form,
+        )
+        lineage = self.bridge._dashboard_workflow_lineage(
+            "left_server_racks",
+            "deep_research_system",
+            form,
+            source,
+            plugin_profile=profile,
+        )
+        guarded_mission = {
+            "workflowContext": lineage,
+            "toolId": "codex_web_research",
+            "owner": "mission_archivist",
+        }
+        self.assertIsNotNone(self.bridge._trusted_workflow_guard_intent(guarded_mission))
+        tampered_lineage = copy.deepcopy(lineage)
+        tampered_lineage["source"]["recordId"] = (
+            "trading-system-ffffffffffffffffffffffff-9"
+        )
+        guarded_mission["workflowContext"] = tampered_lineage
+        self.assertIsNone(self.bridge._trusted_workflow_guard_intent(guarded_mission))
+
+    def test_deep_research_output_contract_binds_public_source_links_and_offset_time(self) -> None:
+        report, source_mission, _transfer = self.verified_portal_system_fixture()
+        selected_record = report["metrics"]["systems"][0]["recordId"]
+        form = {
+            "sourceReportId": report["id"],
+            "sourceRecordId": selected_record,
+            "brief": "Verify public rules",
+            "timezone": "Asia/Bangkok",
+        }
+        with (
+            mock.patch.object(self.bridge, "load_runtime_reports", return_value=[report]),
+            mock.patch.object(self.bridge, "load_missions", return_value=[source_mission]),
+        ):
+            source = self.bridge._workflow_selected_source(
+                "left_server_racks",
+                "deep_research_system",
+                form,
+            )
+        profile = self.bridge._trusted_workflow_plugin_profile(
+            "left_server_racks",
+            "deep_research_system",
+            form,
+        )
+        lineage = self.bridge._dashboard_workflow_lineage(
+            "left_server_racks",
+            "deep_research_system",
+            form,
+            source,
+            plugin_profile=profile,
+        )
+        mission = {
+            "workflowContext": lineage,
+            "budget": {"outputLimitChars": 20000},
+        }
+        urls = [
+            "https://source1.example/system",
+            "https://confirm1.example/system",
+        ]
+        values = {field: "verified value" for field in profile["outputFields"]}
+        values.update({
+            "sourceLinks": json.dumps(urls, separators=(",", ":")),
+            "checkedAt": "2026-08-22T10:00:00+07:00",
+            "limitations": json.dumps(["No audited performance history"]),
+        })
+
+        def result(current_values: dict[str, str]) -> dict:
+            return {
+                "workStatus": "completed",
+                "structuredSummary": "Deep research completed",
+                "findings": [],
+                "nextSteps": [],
+                "blockedCapability": "",
+                "contractFields": [
+                    {"field": field, "value": current_values[field]}
+                    for field in profile["outputFields"]
+                ],
+                "evidence": [
+                    {"label": f"Source {index}", "url": url, "note": "opened"}
+                    for index, url in enumerate(urls, start=1)
+                ],
+                "evidenceKinds": [
+                    "at_least_two_source_urls",
+                    "checked_at",
+                    "limitations",
+                ],
+            }
+
+        valid = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            result(values),
+        )
+        self.assertTrue(valid["valid"], valid)
+        self.assertEqual(
+            valid["procedureId"],
+            self.bridge.TRADING_SYSTEM_RESEARCH_WORKFLOW_PROCEDURE_ID,
+        )
+
+        replacement = dict(values)
+        replacement["sourceLinks"] = json.dumps(
+            [urls[0], "https://replacement.example/other"],
+            separators=(",", ":"),
+        )
+        self.assertIn(
+            "at_least_two_source_urls",
+            self.bridge.validate_dashboard_workflow_output_contract(
+                mission,
+                result(replacement),
+            )["missingEvidenceKinds"],
+        )
+        naive_time = dict(values)
+        naive_time["checkedAt"] = "2026-08-22T10:00:00"
+        self.assertIn(
+            "checked_at",
+            self.bridge.validate_dashboard_workflow_output_contract(
+                mission,
+                result(naive_time),
+            )["missingEvidenceKinds"],
+        )
+        empty_limitations = dict(values)
+        empty_limitations["limitations"] = "[]"
+        self.assertIn(
+            "limitations",
+            self.bridge.validate_dashboard_workflow_output_contract(
+                mission,
+                result(empty_limitations),
+            )["missingEvidenceKinds"],
+        )
+
+    def test_deep_research_is_trusted_read_only_and_rejects_high_impact_before_mission(self) -> None:
+        captured: list[dict] = []
+
+        def fake_run(payload: dict, **kwargs) -> dict:
+            captured.append({
+                "payload": payload,
+                "context": kwargs.get("trusted_workflow_context"),
+            })
+            return {
+                "ok": True,
+                "kind": "mission_auto_queued",
+                "mission": {
+                    "id": "mission-deep-research-safe-1",
+                    "status": "queued",
+                    "requiresHumanApproval": False,
+                    "approval": {"required": False, "state": "not_required"},
+                },
+            }
+
+        selected_source = {
+            "reportId": "portal-verified-systems-1",
+            "recordId": "trading-system-aaaaaaaaaaaaaaaaaaaaaaaa-1",
+            "sourceKind": "report",
+            "sourcePropId": "codex_mcp_portal",
+            "sourceMissionId": "mission-portal-verified-systems-1",
+            "transferAgentId": "mission_archivist",
+            "type": "trading_system_discovery_report",
+            "status": "ready",
+            "structuredPayload": {"system": {"systemName": "Verified System"}},
+        }
+        with (
+            mock.patch.object(self.bridge, "find_room_prop", return_value={"id": "left_server_racks"}),
+            mock.patch.object(self.bridge, "_workflow_selected_source", return_value=selected_source) as selected,
+            mock.patch.object(self.bridge, "run_bridge_task", side_effect=fake_run),
+            mock.patch.object(self.bridge, "append_audit"),
+        ):
+            safe = self.bridge.run_dashboard_workflow_action(
+                "left_server_racks",
+                {
+                    "actionId": "deep_research_system",
+                    "form": {
+                        "sourceReportId": "portal-verified-systems-1",
+                        "sourceRecordId": "trading-system-aaaaaaaaaaaaaaaaaaaaaaaa-1",
+                        "brief": "Compare public rules and limitations",
+                    },
+                },
+            )
+            with self.assertRaises(self.bridge.RequestError) as rejected:
+                self.bridge.run_dashboard_workflow_action(
+                    "left_server_racks",
+                    {
+                        "actionId": "deep_research_system",
+                        "form": {
+                            "sourceReportId": "portal-verified-systems-1",
+                            "sourceRecordId": "trading-system-aaaaaaaaaaaaaaaaaaaaaaaa-1",
+                            "brief": "Deploy to MT5 and send a live order",
+                        },
+                    },
+                )
+        self.assertTrue(self.bridge._is_trusted_public_read_only_workflow(
+            "left_server_racks",
+            "deep_research_system",
+        ))
+        self.assertEqual(safe["mission"]["approval"]["state"], "not_required")
+        self.assertFalse(safe["mission"]["requiresHumanApproval"])
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(selected.call_count, 1)
+        self.assertEqual(rejected.exception.status, 422)
+        self.assertIn("no Mission was created", str(rejected.exception))
+        self.assertIn("ห้ามสลับไปเป็นระบบอื่น", captured[0]["payload"]["prompt"])
+        self.assertEqual(
+            captured[0]["context"]["inputs"]["sourceRecordId"],
+            "trading-system-aaaaaaaaaaaaaaaaaaaaaaaa-1",
+        )
 
     def test_report_transfer_endpoint_creates_one_completed_handoff_and_replays_idempotently(self) -> None:
         source_report = {
@@ -330,6 +824,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertEqual(first["mission"]["id"], second["mission"]["id"])
         self.assertEqual(first["mission"]["status"], "completed")
         self.assertEqual(first["mission"]["toolId"], "agent_report_transfer")
+        self.assertFalse(first["mission"]["requiresHumanApproval"])
         self.assertEqual(first["agentTransfer"]["sourceMissionId"], "mission-source-transfer-1")
         self.assertEqual(first["agentTransfer"]["transferAgentId"], "mission_archivist")
         self.assertEqual(first["agentTransfer"]["targetPropId"], "left_server_racks")
@@ -386,6 +881,14 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             "reportType": "trading_system_discovery_report",
             "status": "completed",
         }
+        legacy_ea_mission = {
+            "id": "mission-portal-legacy-ea",
+            "title": "Legacy EA discovery",
+            "owner": "codex_mcp_operator",
+            "targetId": "codex_mcp_portal",
+            "reportType": "ea_discovery_report",
+            "status": "completed",
+        }
         meetings = [
             {"id": "meeting-prop", "linkedPropId": "codex_mcp_portal"},
             {"id": "meeting-mission", "linkedMissionId": "mission-portal-local"},
@@ -408,7 +911,11 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             mock.patch.object(self.bridge, "find_room_prop", return_value={"id": "codex_mcp_portal", "label": "Portal"}),
             mock.patch.object(self.bridge, "find_property_role", return_value={}),
             mock.patch.object(self.bridge, "routing_keywords_for_prop", return_value=["codex", "portal"]),
-            mock.patch.object(self.bridge, "load_missions", return_value=[local_mission, keyword_only_mission]),
+            mock.patch.object(
+                self.bridge,
+                "load_missions",
+                return_value=[local_mission, legacy_ea_mission, keyword_only_mission],
+            ),
             mock.patch.object(self.bridge, "load_agent_events", return_value=[
                 {"id": "event-local", "missionId": "mission-portal-local"},
                 {"id": "event-target", "targetId": "codex_mcp_portal"},
@@ -448,13 +955,18 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertEqual(model["sheetTemplate"]["connectionStatus"], "not_connected")
         self.assertFalse(model["sheetTemplate"]["credentialsAcceptedByFrontend"])
         self.assertIn("source_url", model["sheetTemplate"]["columns"])
-        template_path = PROJECT_ROOT / "contracts" / "research" / "trading-system-sheet-template.csv"
+        template_path = PROJECT_ROOT / "contracts" / "research" / "world-system-sheet-template.csv"
         with template_path.open("r", encoding="utf-8", newline="") as handle:
-            bilingual_headers = next(csv.reader(handle))
-        template_field_ids = [header.split("/", 1)[0] for header in bilingual_headers]
-        self.assertEqual(len(template_field_ids), 42)
+            template_headers = next(csv.reader(handle))
+        template_field_ids = [header.split("/", 1)[0] for header in template_headers]
+        self.assertEqual(len(template_field_ids), 64)
         self.assertEqual(model["sheetTemplate"]["columns"], template_field_ids)
-        self.assertFalse(model["schedule"]["enabled"])
+        self.assertTrue(model["schedule"]["enabled"])
+        self.assertTrue(model["schedule"]["requestedEnabled"])
+        self.assertEqual(model["schedule"]["times"], ["09:00"])
+        self.assertEqual(model["schedule"]["maxConfiguredTimes"], 1)
+        self.assertEqual(model["schedule"]["maximumRunsPerDay"], 1)
+        self.assertTrue(model["schedule"]["hardDailyLimitEnforced"])
         self.assertTrue(model["schedule"]["automaticRunsImplemented"])
 
     def test_schedule_persists_user_request_and_reports_runtime_state_truthfully(self) -> None:
@@ -487,7 +999,9 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertFalse(result["schedule"]["effectiveEnabled"])
         self.assertTrue(result["schedule"]["automaticRunsImplemented"])
         self.assertFalse(result["schedule"]["automaticExternalActions"])
-        self.assertEqual(stored["discoverySchedule"]["times"], ["09:00", "18:30"])
+        self.assertEqual(result["schedule"]["times"], ["09:00"])
+        self.assertEqual(result["schedule"]["maximumRunsPerDay"], 1)
+        self.assertEqual(stored["discoverySchedule"]["times"], ["09:00"])
 
     def test_mission_store_retries_transient_access_denied_and_commits_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -740,7 +1254,11 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 try:
                     barrier.wait()
                     self.bridge.save_dashboard_discovery_schedule(
-                        {"enabled": True, "times": ["09:15"]}
+                        {
+                            "enabled": True,
+                            "times": ["09:00"],
+                            "timezone": "Asia/Bangkok",
+                        }
                     )
                 except Exception as error:  # pragma: no cover - asserted below
                     errors.append(error)
@@ -749,7 +1267,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 try:
                     barrier.wait()
                     self.bridge._save_dashboard_agent_preferences(
-                        {"language": "th", "rateReservePercent": 45}
+                        {"language": "th", "rateReservePercent": 15}
                     )
                 except Exception as error:  # pragma: no cover - asserted below
                     errors.append(error)
@@ -772,27 +1290,59 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
 
         self.assertEqual(errors, [])
         self.assertTrue(stored["discoverySchedule"]["requestedEnabled"])
-        self.assertEqual(stored["discoverySchedule"]["times"], ["09:15"])
-        self.assertEqual(stored["agentPreferences"]["rateReservePercent"], 45)
+        self.assertEqual(stored["discoverySchedule"]["times"], ["09:00"])
+        self.assertEqual(stored["discoverySchedule"]["timezone"], "Asia/Bangkok")
+        self.assertEqual(stored["agentPreferences"]["rateReservePercent"], 15)
 
-    def test_disabled_scheduler_never_dispatches(self) -> None:
+    def test_backend_owned_schedules_reject_disable_or_policy_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_path = Path(temp_dir) / "dashboard-workflow-settings.json"
-            with (
-                mock.patch.object(self.bridge, "DASHBOARD_WORKFLOW_SETTINGS_PATH", settings_path),
-                mock.patch.object(self.bridge, "load_missions", return_value=[]),
-                mock.patch.object(self.bridge, "append_audit"),
-                mock.patch.object(self.bridge, "run_dashboard_workflow_action") as runner,
+            with mock.patch.object(
+                self.bridge,
+                "DASHBOARD_WORKFLOW_SETTINGS_PATH",
+                settings_path,
             ):
-                self.disable_direct_news_schedule()
-                self.disable_radar_schedule()
-                result = self.bridge.dashboard_workflow_scheduler_tick(
-                    datetime(2026, 8, 9, 9, 0, tzinfo=self.bridge.THAILAND_TIMEZONE),
-                    refresh_quota=False,
+                savers = (
+                    self.bridge.save_dashboard_discovery_schedule,
+                    lambda form: self.bridge._save_dashboard_schedule_preference(
+                        "indicatorScoutSchedule",
+                        form,
+                    ),
                 )
-        self.assertEqual(result["kind"], "scheduler_idle")
-        self.assertFalse(result["dispatched"])
-        runner.assert_not_called()
+                invalid_forms = (
+                    (
+                        {"enabled": False, "times": ["09:00"]},
+                        "backend_owned_schedule_must_remain_enabled",
+                    ),
+                    (
+                        {"enabled": True, "times": ["07:00"]},
+                        "backend_owned_schedule_time_must_be_09_00",
+                    ),
+                    (
+                        {
+                            "enabled": True,
+                            "times": ["09:00"],
+                            "timezone": "UTC",
+                        },
+                        "backend_owned_schedule_timezone_must_be_asia_bangkok",
+                    ),
+                )
+                for saver in savers:
+                    for form, error_code in invalid_forms:
+                        with (
+                            self.subTest(saver=saver, form=form),
+                            self.assertRaises(self.bridge.RequestError) as rejected,
+                        ):
+                            saver(form)
+                        self.assertEqual(rejected.exception.status, 409)
+                        self.assertEqual(str(rejected.exception), error_code)
+                stored = self.bridge.load_dashboard_workflow_settings()
+
+        for settings_key in ("discoverySchedule", "indicatorScoutSchedule"):
+            with self.subTest(settings_key=settings_key):
+                self.assertTrue(stored[settings_key]["requestedEnabled"])
+                self.assertEqual(stored[settings_key]["times"], ["09:00"])
+                self.assertEqual(stored[settings_key]["timezone"], "Asia/Bangkok")
 
     def test_scheduler_catches_up_latest_missed_slot_after_afternoon_restart(self) -> None:
         captured: list[tuple[str, dict, str]] = []
@@ -888,9 +1438,13 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                     "run_dashboard_workflow_action",
                     side_effect=fake_action,
                 ),
+                mock.patch.object(
+                    self.bridge,
+                    "DASHBOARD_WORKFLOW_SCHEDULE_JOBS",
+                    self.schedule_jobs("discoverySchedule"),
+                ),
             ):
                 self.disable_direct_news_schedule()
-                self.disable_radar_schedule()
                 self.bridge.save_dashboard_discovery_schedule(
                     {"enabled": True, "times": ["09:00"]}
                 )
@@ -915,7 +1469,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         )
         self.assertIsNone(stored["discoverySchedule"]["pendingSlotKey"])
 
-    def test_scheduler_persists_pending_slot_and_reuses_key_after_dispatch_error(self) -> None:
+    def test_scheduler_keeps_ambiguous_dispatch_reservation_fail_closed(self) -> None:
         keys: list[str] = []
 
         def fail_action(_prop_id: str, payload: dict, *, trusted_trigger_source: str) -> dict:
@@ -944,10 +1498,20 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                     "_dashboard_workflow_scheduler_gate",
                     return_value={"allowed": True, "reason": "ready"},
                 ),
+                mock.patch.object(
+                    self.bridge,
+                    "DASHBOARD_WORKFLOW_SCHEDULE_JOBS",
+                    self.schedule_jobs("discoverySchedule"),
+                ),
             )
-            with common_patches[0], common_patches[1], common_patches[2], common_patches[3]:
+            with (
+                common_patches[0],
+                common_patches[1],
+                common_patches[2],
+                common_patches[3],
+                common_patches[4],
+            ):
                 self.disable_direct_news_schedule()
-                self.disable_radar_schedule()
                 self.bridge.save_dashboard_discovery_schedule(
                     {"enabled": True, "times": ["09:00"]}
                 )
@@ -989,11 +1553,16 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             "discoverySchedule:2026-08-09:0900",
         )
         self.assertIsNotNone(failure_model["lastErrorAt"])
-        self.assertTrue(recovered["dispatched"])
-        self.assertTrue(recovered["idempotentReplay"])
-        self.assertEqual(keys, [keys[0], keys[0]])
+        self.assertFalse(recovered["dispatched"])
+        self.assertEqual(recovered["kind"], "scheduler_idle")
+        self.assertEqual(keys, [keys[0]])
         self.assertIsNone(after_recovery["discoverySchedule"]["pendingSlotKey"])
-        self.assertEqual(after_recovery["discoverySchedule"]["lastMissionId"], "mission-replayed-1")
+        self.assertEqual(
+            after_recovery["discoverySchedule"]["lastResultKind"],
+            "pending_slot_already_reserved",
+        )
+        self.assertEqual(after_recovery["discoverySchedule"]["dailyExecutionCount"], 1)
+        self.assertIsNone(after_recovery["discoverySchedule"]["lastMissionId"])
 
     def test_scheduler_waits_for_active_scheduled_mission_without_overlapping(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1256,13 +1825,20 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 {
                     "actionId": "discover_trading_systems",
                     "form": {"query": "public trend following systems", "market": "Forex"},
+                    "idempotencyKey": (
+                        "dashboard-schedule:discoverySchedule:2026-08-09:0900"
+                    ),
                 },
+                trusted_trigger_source="schedule",
             )
         self.assertEqual(captured["toolId"], "codex_web_research")
         self.assertEqual(captured["agentId"], "codex_mcp_operator")
         self.assertIn("ห้าม Sign in", captured["prompt"])
         self.assertIn("ห้ามกรอกฟอร์ม", captured["prompt"])
-        self.assertIn("ยังไม่มี Adapter", captured["prompt"])
+        self.assertIn(
+            "Google Sheet เป็น downstream archive ที่ Backend จัดการภายหลัง",
+            captured["prompt"],
+        )
 
     def test_unknown_form_fields_and_secrets_are_rejected_before_dispatch(self) -> None:
         with (
@@ -1430,13 +2006,13 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertNotIn("inputs", model["workflowContext"])
         self.assertEqual(model["workflowContext"]["inputFields"], ["brief", "market"])
 
-    def test_validation_failures_are_audited_without_form_values(self) -> None:
+    def test_manual_backend_owned_action_rejection_is_audited_without_form_values(self) -> None:
         events = []
         with (
             mock.patch.object(self.bridge, "find_room_prop", return_value={"id": "codex_mcp_portal"}),
             mock.patch.object(self.bridge, "append_audit", side_effect=events.append),
         ):
-            with self.assertRaises(self.bridge.RequestError):
+            with self.assertRaises(self.bridge.RequestError) as rejected_error:
                 self.bridge.run_dashboard_workflow_action(
                     "codex_mcp_portal",
                     {
@@ -1444,24 +2020,40 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                         "form": {"query": "api_key=abcdefghijklmnop"},
                     },
                 )
+        self.assertEqual(rejected_error.exception.status, 403)
+        self.assertEqual(str(rejected_error.exception), "backend_owned_schedule_only")
         rejected = [event for event in events if event.get("type") == "dashboard.workflow_action_rejected"]
         self.assertEqual(len(rejected), 1)
-        self.assertEqual(rejected[0]["reason"], "invalid_form")
+        self.assertEqual(rejected[0]["reason"], "backend_owned_schedule_only")
         self.assertNotIn("api_key", str(rejected[0]))
 
-    def test_workflow_idempotency_replay_returns_the_existing_mission(self) -> None:
+    def test_scheduled_workflow_idempotency_replay_returns_the_existing_mission(self) -> None:
         events = []
-        existing = {"id": "mission-existing-1"}
-
-        def fake_run_bridge_task(payload: dict, **kwargs) -> dict:
-            self.assertEqual(payload["idempotencyKey"], "workflow-click-1")
-            self.assertEqual(kwargs["trusted_workflow_context"]["actionId"], "discover_trading_systems")
-            return {"ok": True, "kind": "mission_auto_queued", "mission": existing}
+        plugin_profile = self.bridge._trusted_workflow_plugin_profile(
+            "codex_mcp_portal",
+            "discover_trading_systems",
+        )
+        effective_form = self.bridge._workflow_effective_form(
+            plugin_profile,
+            {"query": "public trend systems"},
+            action_id="discover_trading_systems",
+        )
+        existing = {
+            "id": "mission-existing-1",
+            "workflowContext": self.bridge._dashboard_workflow_lineage(
+                "codex_mcp_portal",
+                "discover_trading_systems",
+                effective_form,
+                None,
+                trigger_source="schedule",
+                plugin_profile=plugin_profile,
+            ),
+        }
 
         with (
             mock.patch.object(self.bridge, "find_room_prop", return_value={"id": "codex_mcp_portal"}),
             mock.patch.object(self.bridge, "find_mission_by_idempotency", return_value=existing),
-            mock.patch.object(self.bridge, "run_bridge_task", side_effect=fake_run_bridge_task),
+            mock.patch.object(self.bridge, "run_bridge_task") as runner,
             mock.patch.object(self.bridge, "append_audit", side_effect=events.append),
         ):
             result = self.bridge.run_dashboard_workflow_action(
@@ -1469,9 +2061,13 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 {
                     "actionId": "discover_trading_systems",
                     "form": {"query": "public trend systems"},
-                    "idempotencyKey": "workflow-click-1",
+                    "idempotencyKey": (
+                        "dashboard-schedule:discoverySchedule:2026-08-09:0900"
+                    ),
                 },
+                trusted_trigger_source="schedule",
             )
+        runner.assert_not_called()
         self.assertTrue(result["idempotentReplay"])
         self.assertEqual(result["mission"]["id"], "mission-existing-1")
         self.assertTrue(any(event.get("type") == "dashboard.workflow_action_replayed" for event in events))
@@ -1531,14 +2127,33 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertEqual(preferences["tokenBudget"], 100000)
         self.assertEqual(preferences["timeoutSeconds"], 600)
         self.assertEqual(preferences["outputLimitChars"], 20000)
-        self.assertEqual(preferences["rateReservePercent"], 80)
+        self.assertEqual(preferences["rateReservePercent"], 15)
         self.assertNotIn("providerModelId", preferences)
         self.assertFalse(preferences["providerModelIdAccepted"])
+
+    def test_deep_research_receives_non_truncating_quality_budget(self) -> None:
+        preferences = self.bridge._dashboard_workflow_execution_preferences(
+            "deep_research_system",
+            {
+                "agentPreferences": {
+                    "language": "th",
+                    "modelTier": "specialist_fast",
+                    "tokenBudget": 12000,
+                    "timeoutSeconds": 120,
+                    "outputLimitChars": 7000,
+                    "rateReservePercent": 15,
+                },
+            },
+        )
+        self.assertEqual(preferences["modelTier"], "manager_quality")
+        self.assertEqual(preferences["timeoutSeconds"], 300)
+        self.assertEqual(preferences["outputLimitChars"], 20000)
+        self.assertEqual(preferences["rateReservePercent"], 15)
 
     def test_http_sanitization_preserves_nested_workflow_select_options(self) -> None:
         """The final send_json projection must not turn safe options into placeholders."""
         model = self.bridge.workflow_dashboard_read_model(
-            "left_audit_crystals",
+            "right_server_racks",
             reports=[],
             bridge={
                 "status": "guarded",
@@ -1554,10 +2169,10 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         action = next(
             item
             for item in projected["workflowDashboard"]["actions"]
-            if item["id"] == "discover_new_indicators"
+            if item["id"] == "build_strategy_code"
         )
         platform = next(field for field in action["formFields"] if field["id"] == "platform")
-        self.assertEqual(platform["options"], ["any", "mt4", "mt5", "tradingview"])
+        self.assertEqual(platform["options"], ["mt4", "mt5", "tradingview"])
         self.assertNotIn("[TRUNCATED]", json.dumps(action))
 
     def test_fx_bias_always_has_exactly_28_pairs_and_never_fabricates_missing_rows(self) -> None:
@@ -1998,7 +2613,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             model["connectionCenter"]["services"]["scheduler"],
         )
 
-    def test_indicator_news_and_terminal_actions_dispatch_only_the_canonical_guarded_tools(self) -> None:
+    def test_manual_radar_is_rejected_while_terminal_dispatches_canonical_tool(self) -> None:
         captured: list[dict] = []
 
         def fake_run(payload: dict, **kwargs) -> dict:
@@ -2055,9 +2670,18 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             }]),
             mock.patch.object(self.bridge, "_workspace_source_catalog", return_value=workspace_rows),
         ):
-            self.bridge.run_dashboard_workflow_action(
-                "left_audit_crystals",
-                {"actionId": "discover_new_indicators", "form": {"query": "public trend indicator"}},
+            with self.assertRaises(self.bridge.RequestError) as radar_rejected:
+                self.bridge.run_dashboard_workflow_action(
+                    "left_audit_crystals",
+                    {
+                        "actionId": "discover_new_indicators",
+                        "form": {"query": "public trend indicator"},
+                    },
+                )
+            self.assertEqual(radar_rejected.exception.status, 403)
+            self.assertEqual(
+                str(radar_rejected.exception),
+                "backend_owned_schedule_only",
             )
             with (
                 mock.patch.object(self.bridge, "_workflow_transfer_sources", return_value=source_rows),
@@ -2075,11 +2699,10 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                     "form": {"workspaceSourceId": "workspace-source-1", "platform": "mql4"},
                 },
             )
-        self.assertEqual([item["toolId"] for item in captured], ["codex_web_research", "codex_cli_task"])
-        self.assertEqual([item["targetId"] for item in captured], ["left_audit_crystals", "terminal_workstation"])
-        self.assertIn("ห้าม Sign in", captured[0]["prompt"])
-        self.assertIn("SOURCE-ONLY", captured[1]["prompt"])
-        self.assertEqual(captured[1]["workflowContext"]["source"]["artifactId"], "workspace-source-1")
+        self.assertEqual([item["toolId"] for item in captured], ["codex_cli_task"])
+        self.assertEqual([item["targetId"] for item in captured], ["terminal_workstation"])
+        self.assertIn("SOURCE-ONLY", captured[0]["prompt"])
+        self.assertEqual(captured[0]["workflowContext"]["source"]["artifactId"], "workspace-source-1")
 
     def test_terminal_source_selection_requires_exactly_one_backend_approved_source(self) -> None:
         workspace_rows = [{
@@ -2139,7 +2762,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             "tokenBudget": 8000,
             "timeoutSeconds": 90,
             "outputLimitChars": 6000,
-            "rateReservePercent": 25,
+            "rateReservePercent": 15,
         }
         existing = [None, mission]
         with (
@@ -2580,29 +3203,38 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertIn("right_server_racks", self.bridge.METATRADER_TARGET_PROP_IDS)
         self.assertIn("right_tool_console", self.bridge.METATRADER_TARGET_PROP_IDS)
 
-    def test_dashboard_read_model_exposes_backend_owned_plugin_procedure(self) -> None:
+    def test_dashboard_read_model_hides_manual_action_but_backend_keeps_plugin_procedure(self) -> None:
         model = self.bridge.workflow_dashboard_read_model(
             "codex_mcp_portal",
             reports=[],
             bridge=self.ready_bridge(),
         )
-        action = next(
-            item for item in model["actions"]
-            if item["id"] == "discover_trading_systems"
+        self.assertNotIn(
+            "discover_trading_systems",
+            {item["id"] for item in model["actions"]},
         )
-        profile = action["pluginProfile"]
+        self.assertNotIn(
+            "save_discovery_schedule",
+            {item["id"] for item in model["actions"]},
+        )
+        profile = self.bridge._trusted_workflow_plugin_profile(
+            "codex_mcp_portal",
+            "discover_trading_systems",
+        )
         self.assertEqual(profile["contractVersion"], "equipment-plugin-map-v1")
         self.assertEqual(profile["pluginSkillId"], "backend-readonly-system-scout")
         self.assertEqual(profile["procedureKind"], "backend_procedure")
         self.assertEqual(profile["referencePluginSkillId"], "metafx-online-system-scout")
         self.assertTrue(profile["referenceSkillInstalled"])
         self.assertEqual(profile["automationMode"], "scheduled_read_only")
-        self.assertIn("sourceUrl", profile["outputFields"])
+        self.assertEqual(profile["outputFields"], ["systems"])
+        self.assertEqual(profile["entryContract"]["minimumItemsPerRun"], 3)
         self.assertIn("source_url", profile["evidenceRequired"])
 
     def test_workflow_dispatch_persists_plugin_procedure_in_prompt_and_lineage(self) -> None:
         with (
             mock.patch.object(self.bridge, "append_audit"),
+            mock.patch.object(self.bridge, "find_mission_by_idempotency", return_value=None),
             mock.patch.object(self.bridge, "run_bridge_task") as run_bridge_task,
         ):
             run_bridge_task.return_value = {
@@ -2613,8 +3245,12 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 "codex_mcp_portal",
                 {
                     "actionId": "discover_trading_systems",
-                    "form": {"query": "ระบบ Breakout แบบตรวจแหล่งที่มา"},
+                    "form": {},
+                    "idempotencyKey": (
+                        "dashboard-schedule:discoverySchedule:2026-08-09:0900"
+                    ),
                 },
+                trusted_trigger_source="schedule",
             )
         self.assertTrue(result["ok"])
         request = run_bridge_task.call_args.args[0]
@@ -2688,19 +3324,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(self.bridge.RequestError):
                 self.bridge._normalize_google_sheet_reference(value)
 
-    def test_radar_schedule_is_hard_capped_at_one_and_sheet_id_is_masked(self) -> None:
-        sheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_987654321"
-        action = self.bridge.DASHBOARD_WORKFLOW_ACTIONS["save_indicator_scout_schedule"]
-        form = self.bridge._sanitize_dashboard_workflow_form(
-            action,
-            {
-                "enabled": False,
-                "times": ["07:00", "12:00", "18:00"],
-                "googleSheetUrlOrId": f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit?gid=0",
-                "googleSheetTabName": "Radar Daily",
-            },
-        )
-        self.assertEqual(form["times"], ["07:00"])
+    def test_radar_schedule_is_backend_owned_fixed_and_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
             self.bridge,
             "DASHBOARD_WORKFLOW_SETTINGS_PATH",
@@ -2708,16 +3332,59 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         ):
             saved = self.bridge._save_dashboard_schedule_preference(
                 "indicatorScoutSchedule",
-                form,
+                {
+                    "enabled": True,
+                    "times": ["09:00"],
+                    "timezone": "Asia/Bangkok",
+                },
             )
             stored = self.bridge.load_dashboard_workflow_settings()
-        self.assertEqual(saved["times"], ["07:00"])
+            for form, expected_error in (
+                (
+                    {"enabled": False, "times": ["09:00"]},
+                    "backend_owned_schedule_must_remain_enabled",
+                ),
+                (
+                    {"enabled": True, "times": ["07:00"]},
+                    "backend_owned_schedule_time_must_be_09_00",
+                ),
+                (
+                    {
+                        "enabled": True,
+                        "times": ["09:00"],
+                        "timezone": "UTC",
+                    },
+                    "backend_owned_schedule_timezone_must_be_asia_bangkok",
+                ),
+                (
+                    {
+                        "enabled": True,
+                        "times": ["09:00"],
+                        "googleSheetUrlOrId": "1AbCdEfGhIjKlMnOpQrStUvWxYz_987654321",
+                    },
+                    "backend_owned_schedule_read_only",
+                ),
+            ):
+                with (
+                    self.subTest(form=form),
+                    self.assertRaises(self.bridge.RequestError) as rejected,
+                ):
+                    self.bridge._save_dashboard_schedule_preference(
+                        "indicatorScoutSchedule",
+                        form,
+                    )
+                self.assertEqual(str(rejected.exception), expected_error)
+
+        self.assertTrue(saved["requestedEnabled"])
+        self.assertEqual(saved["times"], ["09:00"])
+        self.assertEqual(saved["timezone"], "Asia/Bangkok")
         self.assertEqual(saved["maxConfiguredTimes"], 1)
-        self.assertTrue(saved["googleSheet"]["configured"])
-        self.assertNotIn(sheet_id, json.dumps(saved, ensure_ascii=False))
-        self.assertEqual(stored["indicatorScoutSheet"]["sheetId"], sheet_id)
-        self.assertFalse(saved["googleSheet"]["connected"])
-        self.assertFalse(saved["googleSheet"]["externalWriteEnabled"])
+        self.assertEqual(saved["maximumRunsPerDay"], 1)
+        self.assertTrue(saved["backendOwned"])
+        self.assertFalse(saved["userConfigurable"])
+        self.assertFalse(saved["manualRunAllowed"])
+        self.assertTrue(stored["indicatorScoutSchedule"]["requestedEnabled"])
+        self.assertEqual(stored["indicatorScoutSchedule"]["times"], ["09:00"])
 
     def test_radar_read_model_exposes_today_and_seven_days_with_local_dedup_truth(self) -> None:
         workflow_context = {
@@ -2729,6 +3396,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             return {
                 "id": report_id,
                 "type": "indicator_scout_report",
+                "status": "ready",
                 "linkedPropId": "left_audit_crystals",
                 "workflowContext": workflow_context,
                 "createdAt": checked_at,
@@ -2745,14 +3413,46 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                     "availability": "public",
                     "eaReadiness": "not_applicable",
                     "sourceLimitations": "ไม่มีไฟล์ให้ดาวน์โหลด",
+                    "workflowOutput": {
+                        "applicable": True,
+                        "valid": True,
+                        "procedureId": self.bridge.RADAR_WORKFLOW_PROCEDURE_ID,
+                        "providedFields": ["entries"],
+                        "missingFields": [],
+                        "missingEvidenceKinds": [],
+                        "entryErrors": [],
+                        "oversizedFields": [],
+                    },
                 },
             }
+
+        blocked = report(
+            "today-blocked",
+            "2026-08-12T04:00:00Z",
+            "https://example.com/blocked-tool",
+        )
+        blocked["status"] = "blocked"
+        invalid = report(
+            "today-invalid-contract",
+            "2026-08-12T05:00:00Z",
+            "https://example.com/invalid-tool",
+        )
+        invalid["metrics"]["workflowOutput"]["valid"] = False
+        malformed = report(
+            "today-malformed-contract",
+            "2026-08-12T06:00:00Z",
+            "https://example.com/malformed-tool",
+        )
+        malformed["metrics"]["workflowOutput"]["providedFields"] = "entries"
 
         model = self.bridge._radar_website_tool_read_model(
             [
                 report("old-seed", "2026-08-01T01:00:00Z", "https://example.com/tool"),
                 report("today-duplicate", "2026-08-12T02:00:00Z", "https://example.com/tool"),
                 report("today-unique", "2026-08-12T03:00:00Z", "https://example.com/tool-v2"),
+                blocked,
+                invalid,
+                malformed,
             ],
             settings={},
             now_local=datetime(2026, 8, 12, 12, 0),
@@ -2763,6 +3463,9 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertEqual(len(model["sevenDayEntries"]), 2)
         self.assertEqual(model["today"]["duplicateCount"], 1)
         self.assertEqual(model["today"]["uniqueCount"], 1)
+        self.assertEqual(model["today"]["runCount"], 2)
+        self.assertEqual(model["verifiedReadyBatchCount"], 3)
+        self.assertEqual(model["sourceReportsObserved"], 6)
         duplicate = next(
             item for item in model["todayEntries"] if item["sourceUrl"].endswith("/tool")
         )

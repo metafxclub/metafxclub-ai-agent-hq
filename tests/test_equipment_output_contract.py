@@ -4,8 +4,9 @@ import importlib.util
 import json
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +36,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
         )
         mission = {
             "id": "mission-output-contract-1",
+            "startedAt": "2026-08-22T12:00:00+07:00",
             "workflowContext": {
                 "schemaVersion": "dashboard-workflow-lineage-v1",
                 "propId": "codex_mcp_portal",
@@ -80,6 +82,67 @@ class EquipmentOutputContractTests(unittest.TestCase):
                 },
             },
         }
+
+    @staticmethod
+    def _trading_system_rows() -> tuple[list[dict], list[dict]]:
+        families = ("trend_following", "breakout", "mean_reversion")
+        systems: list[dict] = []
+        evidence: list[dict] = []
+        for index, family in enumerate(families, start=1):
+            primary = f"https://source{index}.example.com/system-{index}"
+            corroborating = f"https://proof{index}.example.org/system-{index}"
+            evidence.extend([
+                {"label": f"Primary {index}", "url": primary, "note": "Public strategy rules"},
+                {"label": f"Proof {index}", "url": corroborating, "note": "Independent corroboration"},
+            ])
+            systems.append({
+                "recordType": "trading_system",
+                "systemName": f"Verified System {index}",
+                "strategyFamily": family,
+                "creatorOrTrader": {
+                    "name": f"Public Author {index}",
+                    "role": "author",
+                    "status": "publicly_stated",
+                    "sourceUrl": primary,
+                },
+                "publicUsers": [{"name": f"Public Trader {index}", "sourceUrl": corroborating}],
+                "market": "Forex",
+                "symbols": ["EURUSD"],
+                "timeframes": ["H1"],
+                "sessions": ["London"],
+                "indicatorSettings": [],
+                "setupConditions": ["Wait for the documented setup"],
+                "entrySteps": [
+                    {"stepNo": 1, "rule": "Confirm the setup", "sourceUrl": primary, "truthStatus": "fact"},
+                    {"stepNo": 2, "rule": "Enter after confirmation", "sourceUrl": primary, "truthStatus": "fact"},
+                ],
+                "exitSteps": [
+                    {"stepNo": 1, "rule": "Place the documented stop", "sourceUrl": primary, "truthStatus": "fact"},
+                    {"stepNo": 2, "rule": "Exit at the target or signal", "sourceUrl": corroborating, "truthStatus": "fact"},
+                ],
+                "riskManagement": {
+                    "positionSizing": "Fixed fractional sizing",
+                    "stopLoss": "Beyond the invalidation level",
+                    "takeProfit": "At the documented target",
+                    "maxRiskPerTrade": "1 percent",
+                    "maxOpenPositions": "1",
+                    "dailyOrEquityStop": "Stop after two losses",
+                    "recoveryMethod": "none",
+                    "recoveryRules": [],
+                    "sourceUrl": primary,
+                    "truthStatus": "fact",
+                },
+                "tradeManagementSteps": [],
+                "sourceTitle": f"System {index} rules",
+                "sourceUrl": primary,
+                "corroboratingUrls": [corroborating],
+                "checkedAt": "2026-08-22T12:00:00+07:00",
+                "verificationStatus": "verified",
+                "suitableFor": ["Rule-based traders"],
+                "risksAndLimitations": ["Market regimes can change"],
+                "unknowns": [],
+            })
+        return systems, evidence
 
     @staticmethod
     def _result(
@@ -145,6 +208,73 @@ class EquipmentOutputContractTests(unittest.TestCase):
         self.assertEqual(parsed["contractFields"][0]["field"], "systemName")
         self.assertEqual(parsed["evidenceKinds"], ["source_url"])
 
+    def test_deep_research_profile_requires_every_exact_field_and_evidence_kind(self) -> None:
+        required_fields = self.runner.TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS
+        schema = self.runner.build_work_output_schema(
+            7000,
+            "trading_system_research",
+        )
+        contract_schema = schema["properties"]["contractFields"]
+        self.assertEqual(contract_schema["minItems"], len(required_fields))
+        self.assertEqual(contract_schema["maxItems"], len(required_fields))
+        self.assertEqual(
+            set(contract_schema["items"]["properties"]["field"]["enum"]),
+            set(required_fields),
+        )
+        self.assertEqual(schema["properties"]["status"]["enum"], ["completed"])
+        self.assertEqual(schema["properties"]["evidence"]["minItems"], 2)
+
+        contract_fields = [
+            {
+                "field": field,
+                "value": (
+                    "2026-08-22T18:45:00+07:00"
+                    if field == "checkedAt"
+                    else '["https://one.example/rules","https://two.example/proof"]'
+                    if field == "sourceLinks"
+                    else "not_publicly_stated"
+                    if field == "conflictingEvidence"
+                    else f"verified {field}"
+                ),
+            }
+            for field in required_fields
+        ]
+        payload = {
+            "status": "completed",
+            "summary": "วิจัยระบบที่ Backend ผูกไว้ครบแล้ว",
+            "findings": ["แยก fact และ unknown แล้ว"],
+            "nextSteps": ["นำกฎที่ครบไปทดสอบกับ OHLC"],
+            "evidence": [
+                {"label": "Rules", "url": "https://one.example/rules", "note": "Primary public rules"},
+                {"label": "Proof", "url": "https://two.example/proof", "note": "Independent public proof"},
+            ],
+            "blockedCapability": "",
+            "contractFields": contract_fields,
+            "evidenceKinds": [
+                "at_least_two_source_urls",
+                "checked_at",
+                "limitations",
+            ],
+        }
+        parsed = self.runner.parse_work_result(
+            json.dumps(payload, ensure_ascii=False),
+            7000,
+            "trading_system_research",
+        )
+        self.assertEqual(len(parsed["contractFields"]), len(required_fields))
+        self.assertEqual(
+            set(parsed["evidenceKinds"]),
+            {"at_least_two_source_urls", "checked_at", "limitations"},
+        )
+
+        payload["contractFields"] = contract_fields[:-1]
+        with self.assertRaisesRegex(ValueError, "every exact contract field once"):
+            self.runner.parse_work_result(
+                json.dumps(payload, ensure_ascii=False),
+                7000,
+                "trading_system_research",
+            )
+
     def test_missing_declared_outputs_fail_closed(self) -> None:
         mission, procedure = self._mission()
         result = self.bridge.validate_dashboard_workflow_output_contract(
@@ -159,7 +289,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
         )
         self.assertTrue(result["applicable"])
         self.assertFalse(result["valid"])
-        self.assertIn("sourceUrl", result["missingFields"])
+        self.assertIn("systems", result["missingFields"])
         self.assertIn("source_url", result["missingEvidenceKinds"])
         self.assertEqual(result["expectedFields"], procedure["outputFields"])
 
@@ -307,37 +437,561 @@ class EquipmentOutputContractTests(unittest.TestCase):
 
     def test_complete_declared_outputs_and_real_public_url_pass(self) -> None:
         mission, procedure = self._mission()
-        fields = [
-            {
-                "field": field,
-                "value": (
-                    "2026-08-09T01:23:45Z"
-                    if field == "checkedAt"
-                    else "https://example.com/system"
-                    if field == "sourceUrl"
-                    else f"verified:{field}"
-                ),
-            }
-            for field in procedure["outputFields"]
-        ]
+        systems, evidence = self._trading_system_rows()
+        fields = [{"field": "systems", "value": json.dumps(systems, ensure_ascii=False)}]
         result = self.bridge.validate_dashboard_workflow_output_contract(
             mission,
             {
                 "contractFields": fields,
                 "evidenceKinds": list(procedure["evidenceRequired"]),
-                "evidence": [
-                    {
-                        "label": "Primary public source",
-                        "url": "https://example.com/system",
-                        "note": "Checked read-only",
-                    }
-                ],
+                "evidence": evidence,
             },
         )
         self.assertTrue(result["valid"])
         self.assertEqual(result["missingFields"], [])
         self.assertEqual(result["missingEvidenceKinds"], [])
-        self.assertEqual(result["sourceUrlCount"], 1)
+        self.assertEqual(result["sourceUrlCount"], 6)
+        normalized = json.loads(result["values"]["systems"])
+        self.assertEqual(len(normalized), 3)
+        self.assertEqual({item["strategyFamily"] for item in normalized}, set(("trend_following", "breakout", "mean_reversion")))
+        self.assertTrue(all(item["duplicateFingerprint"] for item in normalized))
+
+    def test_trading_system_profile_converts_direct_systems_then_backend_accepts(self) -> None:
+        mission, procedure = self._mission()
+        mission["budget"] = {"outputLimitChars": 20000}
+        systems, evidence = self._trading_system_rows()
+        compact_systems = json.dumps(
+            systems,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        payload = {
+            "status": "completed",
+            "summary": "ตรวจระบบเทรดสาธารณะครบสามระบบแล้ว",
+            "findings": [],
+            "nextSteps": [],
+            "evidence": evidence,
+            "blockedCapability": "",
+            "systems": systems,
+            "evidenceKinds": list(procedure["evidenceRequired"]),
+        }
+        parsed = self.runner.parse_work_result(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            20000,
+            "trading_system_discovery",
+        )
+        receipt = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            parsed,
+        )
+        self.assertTrue(receipt["valid"], receipt)
+        self.assertEqual(receipt["contractValueChars"], len(compact_systems))
+        self.assertEqual(receipt["contractFieldLimitChars"], 16000)
+        self.assertLess(len(receipt["values"]["systems"]), 12000)
+
+    def test_backend_keeps_13000_character_legacy_system_field_compatibility(self) -> None:
+        mission, procedure = self._mission()
+        mission["budget"] = {"outputLimitChars": 20000}
+        systems, evidence = self._trading_system_rows()
+        compact_systems = json.dumps(
+            systems,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        padded_systems = "[" + (" " * (13000 - len(compact_systems))) + compact_systems[1:]
+        receipt = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            {
+                "summary": "legacy compatibility",
+                "findings": [],
+                "nextSteps": [],
+                "evidence": evidence,
+                "contractFields": [{"field": "systems", "value": padded_systems}],
+                "evidenceKinds": list(procedure["evidenceRequired"]),
+            },
+        )
+
+        self.assertTrue(receipt["valid"], receipt)
+        self.assertEqual(receipt["contractValueChars"], 13000)
+        self.assertEqual(receipt["contractFieldLimitChars"], 16000)
+
+    def test_trading_system_receipt_over_8000_chars_keeps_full_value_and_projects_array(self) -> None:
+        mission, procedure = self._mission()
+        mission["budget"] = {"outputLimitChars": 20000}
+        systems, evidence = self._trading_system_rows()
+        for system_index, system in enumerate(systems, start=1):
+            system["setupConditions"] = [
+                f"Setup {system_index}.{index}: " + ("documented condition " * 8)
+                for index in range(1, 7)
+            ]
+            system["suitableFor"] = [
+                f"Trader profile {system_index}.{index}: " + ("rule based workflow " * 4)
+                for index in range(1, 6)
+            ]
+            system["risksAndLimitations"] = [
+                f"Risk {system_index}.{index}: " + ("market regime limitation " * 5)
+                for index in range(1, 7)
+            ]
+        result = self._result(
+            fields={"systems": systems},
+            evidence_kinds=list(procedure["evidenceRequired"]),
+            evidence=evidence,
+        )
+        receipt = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            result,
+        )
+
+        self.assertTrue(receipt["valid"], receipt)
+        self.assertGreater(len(receipt["values"]["systems"]), 8000)
+        self.assertLessEqual(len(receipt["values"]["systems"]), 16000)
+        projected = self.bridge.dashboard_workflow_output_metrics(receipt)
+        self.assertIsInstance(projected["systems"], list)
+        self.assertEqual(len(projected["systems"]), 3)
+
+    def test_legacy_trading_system_projection_is_bound_to_receipts_and_two_run_artifacts(self) -> None:
+        mission, _procedure = self._mission()
+        systems, evidence = self._trading_system_rows()
+        for system_index, system in enumerate(systems, start=1):
+            system["setupConditions"] = [
+                f"Setup {system_index}.{index}: " + ("documented condition " * 8)
+                for index in range(1, 7)
+            ]
+            system["suitableFor"] = [
+                f"Trader profile {system_index}.{index}: " + ("rule based workflow " * 4)
+                for index in range(1, 6)
+            ]
+            system["risksAndLimitations"] = [
+                f"Risk {system_index}.{index}: " + ("market regime limitation " * 5)
+                for index in range(1, 7)
+            ]
+        normalized, errors = self.bridge._normalize_trading_system_contract_rows(
+            mission,
+            {},
+            evidence,
+            systems,
+            existing_fingerprints_override=set(),
+        )
+        self.assertEqual(errors, [])
+        canonical = json.dumps(
+            normalized,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        raw_systems = json.dumps(
+            systems,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        self.assertGreater(len(canonical), 8000)
+        self.assertLessEqual(len(canonical), 16000)
+        self.assertLessEqual(len(raw_systems), 16000)
+        prefix = canonical[:8000]
+        urls = [row["url"] for row in evidence]
+        run_id = "run-legacy-recovery"
+        report_id = "report-legacy-recovery"
+        artifact_reference = f"data/runtime/codex-runs/{run_id}.final.md"
+        manifest_reference = (
+            f"data/runtime/codex-runs/{run_id}.url-open-verification.json"
+        )
+        receipt = {
+            "applicable": True,
+            "valid": True,
+            "procedureId": self.bridge.TRADING_SYSTEM_WORKFLOW_PROCEDURE_ID,
+            "providedFields": ["systems"],
+            "values": {"systems": prefix},
+            "missingFields": [],
+            "entryErrors": [],
+            "oversizedFields": [],
+            "contractValueChars": len(raw_systems),
+            "sourceUrlCount": 6,
+        }
+        mission.update({
+            "status": "completed",
+            "phase": "auto_guarded_completed",
+            "workStatus": "completed",
+            "targetId": "codex_mcp_portal",
+            "toolId": "codex_web_research",
+            "requiresHumanApproval": False,
+            "approval": {"required": False, "state": "not_required"},
+            "reportIds": [report_id],
+            "artifactPath": artifact_reference,
+            "workflowOutputContract": receipt,
+            "execution": {
+                "workingDirectory": "workspace",
+                "writeRoots": [],
+                "controlPlaneWritable": False,
+                "webSearchEnabled": True,
+                "webSearchUsed": True,
+                "webSearchEvidenceVerified": True,
+                "correctiveOpenVerificationReceipt": {
+                    "manifestArtifact": manifest_reference,
+                },
+            },
+        })
+        report = {
+            "id": report_id,
+            "type": "trading_system_discovery_report",
+            "status": "ready",
+            "linkedMissionId": mission["id"],
+            "linkedPropId": "codex_mcp_portal",
+            "metrics": {"systems": prefix, "workflowOutput": receipt},
+            "evidence": evidence,
+            "artifacts": [artifact_reference],
+        }
+
+        def stdout_event(payload_systems: list[dict]) -> str:
+            payload = {
+                "status": "completed",
+                "systems": payload_systems,
+                "evidence": evidence,
+            }
+            return json.dumps({
+                "type": "item.completed",
+                "item": {
+                    "id": "item-1",
+                    "type": "agent_message",
+                    "text": json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                },
+            }, ensure_ascii=False, separators=(",", ":"))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime = root / "data" / "runtime"
+            run_dir = runtime / "codex-runs"
+            run_dir.mkdir(parents=True)
+            final_path = run_dir / f"{run_id}.final.md"
+            stdout_path = run_dir / f"{run_id}.stdout.log"
+            final_path.write_text(
+                f"1. status\ncompleted\n\n- systems: {raw_systems}\n",
+                encoding="utf-8",
+            )
+            stdout_path.write_text(stdout_event(systems) + "\n", encoding="utf-8")
+            patches = (
+                mock.patch.object(self.bridge, "PROJECT_ROOT", root),
+                mock.patch.object(self.bridge, "RUNTIME_DIR", runtime),
+                mock.patch.object(self.bridge, "find_mission", return_value=mission),
+                mock.patch.object(
+                    self.bridge,
+                    "_trading_system_required_open_urls_for_mission",
+                    return_value=(urls, None),
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_stored_trading_system_open_receipt_valid",
+                    return_value=True,
+                ),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4]:
+                recovered = self.bridge._trading_system_report_recovered_systems(
+                    report
+                )
+                self.assertEqual(
+                    [item["systemName"] for item in recovered or []],
+                    ["Verified System 1", "Verified System 2", "Verified System 3"],
+                )
+                projected = self.bridge.report_read_model_item(report)
+                self.assertIsInstance(projected["metrics"]["systems"], list)
+                self.assertEqual(len(projected["metrics"]["systems"]), 3)
+
+                # A valid same-length suffix rewrite fails because the separate
+                # stdout payload still contains the original full value.
+                suffix_tamper = json.loads(raw_systems)
+                suffix_tamper[-1]["risksAndLimitations"][-1] = (
+                    suffix_tamper[-1]["risksAndLimitations"][-1][:-1] + "X"
+                )
+                tampered_raw = json.dumps(
+                    suffix_tamper,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                self.assertEqual(len(tampered_raw), len(raw_systems))
+                final_path.write_text(
+                    f"1. status\ncompleted\n\n- systems: {tampered_raw}\n",
+                    encoding="utf-8",
+                )
+                self.assertIsNone(
+                    self.bridge._trading_system_report_recovered_systems(report)
+                )
+
+                # Changing both run artifacts in the persisted prefix still
+                # fails against the three independent 8k receipt copies.
+                prefix_tamper = json.loads(raw_systems)
+                prefix_tamper[0]["systemName"] = "Verified Systen 1"
+                tampered_raw = json.dumps(
+                    prefix_tamper,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                self.assertEqual(len(tampered_raw), len(raw_systems))
+                final_path.write_text(
+                    f"1. status\ncompleted\n\n- systems: {tampered_raw}\n",
+                    encoding="utf-8",
+                )
+                stdout_path.write_text(
+                    stdout_event(prefix_tamper) + "\n",
+                    encoding="utf-8",
+                )
+                self.assertIsNone(
+                    self.bridge._trading_system_report_recovered_systems(report)
+                )
+
+                final_path.write_text(
+                    f"1. status\ncompleted\n\n- systems: {raw_systems}\n",
+                    encoding="utf-8",
+                )
+                stdout_path.write_text(stdout_event(systems) + "\n", encoding="utf-8")
+                mission["execution"]["correctiveOpenVerificationReceipt"][
+                    "manifestArtifact"
+                ] = "data/runtime/codex-runs/run-other.url-open-verification.json"
+                self.assertIsNone(
+                    self.bridge._trading_system_report_recovered_systems(report)
+                )
+
+    def test_trading_system_contract_rejects_ea_records_and_low_diversity(self) -> None:
+        mission, procedure = self._mission()
+        systems, evidence = self._trading_system_rows()
+        systems[0]["recordType"] = "ea"
+        invalid_kind = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            self._result(
+                fields={"systems": systems},
+                evidence_kinds=list(procedure["evidenceRequired"]),
+                evidence=evidence,
+            ),
+        )
+        self.assertFalse(invalid_kind["valid"])
+        self.assertIn("system_1_not_trading_system", invalid_kind["entryErrors"])
+
+        systems, evidence = self._trading_system_rows()
+        for system in systems:
+            system["strategyFamily"] = "breakout"
+        low_diversity = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            self._result(
+                fields={"systems": systems},
+                evidence_kinds=list(procedure["evidenceRequired"]),
+                evidence=evidence,
+            ),
+        )
+        self.assertFalse(low_diversity["valid"])
+        self.assertIn("strategy_family_diversity_too_low", low_diversity["entryErrors"])
+
+    def test_trading_system_contract_requires_real_public_creator_and_ordered_steps(self) -> None:
+        mission, procedure = self._mission()
+        systems, evidence = self._trading_system_rows()
+        systems[0]["creatorOrTrader"] = {
+            "name": None,
+            "role": "author",
+            "status": "publicly_stated",
+            "sourceUrl": systems[0]["sourceUrl"],
+        }
+        missing_identity = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            self._result(
+                fields={"systems": systems},
+                evidence_kinds=list(procedure["evidenceRequired"]),
+                evidence=evidence,
+            ),
+        )
+        self.assertFalse(missing_identity["valid"])
+        self.assertIn("system_1_invalid_creator_truth", missing_identity["entryErrors"])
+
+        systems, evidence = self._trading_system_rows()
+        systems[0]["creatorOrTrader"]["name"] = "unknown creator"
+        placeholder_identity = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            self._result(
+                fields={"systems": systems},
+                evidence_kinds=list(procedure["evidenceRequired"]),
+                evidence=evidence,
+            ),
+        )
+        self.assertFalse(placeholder_identity["valid"])
+        self.assertIn("system_1_invalid_creator_truth", placeholder_identity["entryErrors"])
+
+        systems, evidence = self._trading_system_rows()
+        systems[0]["creatorOrTrader"]["sourceUrl"] = systems[1]["sourceUrl"]
+        wrong_system_source = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            self._result(
+                fields={"systems": systems},
+                evidence_kinds=list(procedure["evidenceRequired"]),
+                evidence=evidence,
+            ),
+        )
+        self.assertFalse(wrong_system_source["valid"])
+        self.assertIn("system_1_invalid_creator_truth", wrong_system_source["entryErrors"])
+
+        systems, evidence = self._trading_system_rows()
+        systems[1]["entrySteps"][1]["stepNo"] = 3
+        unordered = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            self._result(
+                fields={"systems": systems},
+                evidence_kinds=list(procedure["evidenceRequired"]),
+                evidence=evidence,
+            ),
+        )
+        self.assertFalse(unordered["valid"])
+        self.assertIn("system_2_invalid_rules", unordered["entryErrors"])
+
+    def test_trading_system_contract_rejects_source_not_present_in_evidence(self) -> None:
+        mission, procedure = self._mission()
+        systems, evidence = self._trading_system_rows()
+        systems[2]["exitSteps"][0]["sourceUrl"] = "https://missing.example.net/rule"
+        result = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            self._result(
+                fields={"systems": systems},
+                evidence_kinds=list(procedure["evidenceRequired"]),
+                evidence=evidence,
+            ),
+        )
+        self.assertFalse(result["valid"])
+        self.assertIn("system_3_invalid_rules", result["entryErrors"])
+
+    def test_trading_system_contract_requires_exactly_six_unique_evidence_urls(self) -> None:
+        mission, procedure = self._mission()
+        systems, evidence = self._trading_system_rows()
+        evidence.append({
+            "label": "Unused seventh source",
+            "url": "https://unused.example.net/system",
+            "note": "This source is not mapped to a trading system",
+        })
+        result = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            self._result(
+                fields={"systems": systems},
+                evidence_kinds=list(procedure["evidenceRequired"]),
+                evidence=evidence,
+            ),
+        )
+        self.assertFalse(result["valid"])
+        self.assertIn(
+            "trading_system_evidence_urls_count_not_6",
+            result["entryErrors"],
+        )
+
+    def test_trading_system_contract_requires_one_distinct_corroborating_url(self) -> None:
+        mission, procedure = self._mission()
+        systems, evidence = self._trading_system_rows()
+        systems[0]["corroboratingUrls"] = []
+        missing = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            self._result(
+                fields={"systems": systems},
+                evidence_kinds=list(procedure["evidenceRequired"]),
+                evidence=evidence,
+            ),
+        )
+        self.assertFalse(missing["valid"])
+        self.assertIn(
+            "system_1_corroborating_url_count_not_1",
+            missing["entryErrors"],
+        )
+
+        systems, evidence = self._trading_system_rows()
+        systems[0]["corroboratingUrls"] = [systems[0]["sourceUrl"]]
+        repeated = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            self._result(
+                fields={"systems": systems},
+                evidence_kinds=list(procedure["evidenceRequired"]),
+                evidence=evidence,
+            ),
+        )
+        self.assertFalse(repeated["valid"])
+        self.assertIn("system_1_source_urls_not_distinct", repeated["entryErrors"])
+
+    def test_trading_system_contract_requires_independent_source_hostnames(self) -> None:
+        mission, procedure = self._mission()
+        systems, evidence = self._trading_system_rows()
+        old_url = systems[0]["corroboratingUrls"][0]
+        same_host_url = "https://source1.example.com/independent-copy"
+        systems[0]["corroboratingUrls"] = [same_host_url]
+        systems[0]["publicUsers"][0]["sourceUrl"] = same_host_url
+        systems[0]["exitSteps"][1]["sourceUrl"] = same_host_url
+        for row in evidence:
+            if row["url"] == old_url:
+                row["url"] = same_host_url
+        result = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            self._result(
+                fields={"systems": systems},
+                evidence_kinds=list(procedure["evidenceRequired"]),
+                evidence=evidence,
+            ),
+        )
+        self.assertFalse(result["valid"])
+        self.assertIn(
+            "system_1_source_hosts_not_independent",
+            result["entryErrors"],
+        )
+
+    def test_trading_system_contract_requires_exact_evidence_mapping(self) -> None:
+        mission, procedure = self._mission()
+        systems, evidence = self._trading_system_rows()
+        systems[2]["sourceUrl"] = systems[1]["sourceUrl"]
+        systems[2]["corroboratingUrls"] = list(systems[1]["corroboratingUrls"])
+        systems[2]["creatorOrTrader"]["sourceUrl"] = systems[1]["sourceUrl"]
+        result = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            self._result(
+                fields={"systems": systems},
+                evidence_kinds=list(procedure["evidenceRequired"]),
+                evidence=evidence,
+            ),
+        )
+        self.assertFalse(result["valid"])
+        self.assertIn(
+            "trading_system_evidence_url_mapping_mismatch",
+            result["entryErrors"],
+        )
+
+    def test_trading_system_contract_rejects_checked_at_before_mission_start(self) -> None:
+        mission, procedure = self._mission()
+        mission_started_at = datetime.now().astimezone() - timedelta(minutes=1)
+        stale_checked_at = mission_started_at - timedelta(minutes=6)
+        mission["startedAt"] = mission_started_at.isoformat()
+        systems, evidence = self._trading_system_rows()
+        for system in systems:
+            system["checkedAt"] = stale_checked_at.isoformat()
+        result = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            self._result(
+                fields={"systems": systems},
+                evidence_kinds=list(procedure["evidenceRequired"]),
+                evidence=evidence,
+            ),
+        )
+        self.assertFalse(result["valid"])
+        self.assertIn("system_1_checked_at_stale", result["entryErrors"])
+        self.assertIn("system_2_checked_at_stale", result["entryErrors"])
+        self.assertIn("system_3_checked_at_stale", result["entryErrors"])
+
+    def test_trading_system_contract_accepts_checked_at_within_mission_clock_skew(self) -> None:
+        mission, procedure = self._mission()
+        mission_started_at = datetime.now().astimezone() - timedelta(minutes=1)
+        fresh_checked_at = mission_started_at - timedelta(minutes=4)
+        mission["startedAt"] = mission_started_at.isoformat()
+        systems, evidence = self._trading_system_rows()
+        for system in systems:
+            system["checkedAt"] = fresh_checked_at.isoformat()
+        result = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            self._result(
+                fields={"systems": systems},
+                evidence_kinds=list(procedure["evidenceRequired"]),
+                evidence=evidence,
+            ),
+        )
+        self.assertTrue(result["valid"], result)
 
     def test_duplicate_public_url_does_not_satisfy_two_source_requirement(self) -> None:
         mission = self._mission_for_contract(
@@ -852,7 +1506,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
             "backend_observed_at": {"checkedAt", "backendObservedAt"},
             "backtest_plan": {"testModel", "dateRange", "artifactPlan"},
             "change_summary": {"changeSummary"},
-            "checked_at": {"checkedAt", "entries"},
+            "checked_at": {"checkedAt", "entries", "systems"},
             "compile_status_truth": {"compileStatus"},
             "discovery_blueprint": {"blueprint", "versionPlan"},
             "ea_readiness": {"eaReadiness", "entries"},
@@ -867,6 +1521,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
                 "knownRisks",
                 "riskNotes",
                 "conflictingEvidence",
+                "systems",
             },
             "local_health_snapshot": {
                 "bridgeStatus",
@@ -905,12 +1560,13 @@ class EquipmentOutputContractTests(unittest.TestCase):
                 "exitRules",
                 "strategySummary",
                 "featureSummary",
+                "systems",
             },
             "rejection_criteria": {"rejectionCriteria"},
             "review_scope": {"issues", "lineReferences", "reviewScope"},
             "scheduler_state": {"effectiveEnabled", "nextRunAt", "lastRunStatus"},
             "source_digest": {"sourceDigest"},
-            "source_title": {"sourceTitle", "entries"},
+            "source_title": {"sourceTitle", "entries", "systems"},
             "source_url_per_supported_bias": {"pairBias"},
             "uncompiled_status": {
                 "compileChecklist",

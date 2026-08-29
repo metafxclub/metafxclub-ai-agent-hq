@@ -12,6 +12,7 @@ from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "bridge_server.py"
+START_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "start-local-bridge.ps1"
 
 
 def load_bridge(name: str):
@@ -24,6 +25,35 @@ def load_bridge(name: str):
 
 
 class BridgeProcessLifecycleTests(unittest.TestCase):
+    def test_restart_loads_only_allowlisted_google_client_config_from_user_scope(self) -> None:
+        script = START_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        helper_start = script.index("function Start-BridgeChildProcess")
+        helper_end = script.index("function Get-ComparablePath", helper_start)
+        helper = script[helper_start:helper_end]
+
+        self.assertIn("METAFX_GOOGLE_OAUTH_CLIENT_ID", helper)
+        self.assertIn("METAFX_GOOGLE_OAUTH_CLIENT_SECRET", helper)
+        self.assertIn("[EnvironmentVariableTarget]::User", helper)
+        self.assertIn("[EnvironmentVariableTarget]::Process", helper)
+        self.assertIn("[string]::IsNullOrWhiteSpace($processValue)", helper)
+        self.assertIn("finally", helper)
+        self.assertNotIn("Write-Host", helper)
+        self.assertNotIn("Write-AuditEvent", helper)
+        self.assertIn("$startedProcess = Start-BridgeChildProcess", script)
+
+    def test_base_interpreter_preserves_the_pinned_project_venv(self) -> None:
+        script = START_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        helper_start = script.index("function Start-BridgeChildProcess")
+        helper_end = script.index("function Get-ComparablePath", helper_start)
+        helper = script[helper_start:helper_end]
+
+        self.assertIn("__PYVENV_LAUNCHER__", helper)
+        self.assertIn("$VenvLauncherPath", helper)
+        self.assertIn("$originalVenvLauncher", helper)
+        self.assertIn("[EnvironmentVariableTarget]::Process", helper)
+        self.assertIn("$script:projectVenvLauncher", script)
+        self.assertIn("-VenvLauncherPath $projectVenvLauncher", script)
+
     def test_os_guard_rejects_second_bridge_for_same_checkout(self) -> None:
         first = load_bridge("metafx_process_guard_first")
         second = load_bridge("metafx_process_guard_second")

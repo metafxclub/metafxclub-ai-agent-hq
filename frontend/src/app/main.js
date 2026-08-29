@@ -57,6 +57,8 @@ const AGENT_CHAT_ENDPOINT = "/api/agents/chat";
 const MEMORY_ENDPOINT = "/api/memory";
 const MEMORY_SEARCH_ENDPOINT = "/api/memory/search";
 const MEETINGS_ENDPOINT = "/api/meetings";
+const MEETING_SESSIONS_ENDPOINT = "/api/meetings/sessions";
+const MEETING_SESSION_POLL_MS = 5000;
 const CODEX_RATE_LIMIT_ENDPOINT = "/api/codex/rate-limits";
 const OPERATOR_MODE_ENDPOINT = "/api/operator-mode";
 const AI_TRADE_COUNCIL_HISTORY_ENDPOINT = "/api/ai-trade-council/history";
@@ -72,6 +74,7 @@ const AGENT_COLLABORATION_POLL_MS = 15000;
 const MISSION_POLL_MS = 30000;
 const MISSION_FETCH_TIMEOUT_MS = 25000;
 const OPEN_PROP_REPORT_POLL_TTL_MS = 30000;
+const EA_FACTORY_READ_MODEL_MAX_AGE_MS = 90000;
 const POLLING_LEADER_STORAGE_KEY = "metafx-hq-polling-leader-v1";
 const POLLING_LEADER_LEASE_MS = 45000;
 const POLLING_LEADER_RENEW_MS = 10000;
@@ -93,7 +96,7 @@ const PROP_REPORT_FETCH_TIMEOUT_MS = 20000;
 const NAVIGATION_MASK_LOAD_TIMEOUT_MS = 20000;
 
 const STATUS_LABELS = {
-  queued: "รอเริ่มงาน",
+  queued: "รับงานแล้ว",
   running: "กำลังทำงาน",
   waiting_approval: "ติดขัด",
   blocked: "ติดขัด",
@@ -378,7 +381,7 @@ const WORKFLOW_DASHBOARD_IDENTITIES = Object.freeze({
     id: "world-radar",
     mark: "R1",
     labelTh: "WORLD RADAR",
-    eyebrowTh: "ศูนย์ค้นหาระบบเทรดและ EA ใหม่ทั่วโลก",
+    eyebrowTh: "ศูนย์ค้นหาระบบเทรดจากทั่วโลกแบบละเอียด",
     handoffAgentId: "mission_archivist",
   },
   left_server_racks: {
@@ -399,7 +402,7 @@ const WORKFLOW_DASHBOARD_IDENTITIES = Object.freeze({
     id: "experiment-lab",
     mark: "LAB",
     labelTh: "EXPERIMENT LAB",
-    eyebrowTh: "ห้องทดลอง Backtest, Optimization และ Discovery",
+    eyebrowTh: "ห้องทดลอง Optimization EA สำหรับ MT4/MT5",
     handoffAgentId: "manager",
   },
   left_audit_crystals: {
@@ -440,10 +443,10 @@ const WORKFLOW_DASHBOARD_PRIMARY_TABS = Object.freeze({
     emptyMessageTh: "วันนี้ยังไม่มีระบบเทรดใหม่จาก Local Runner",
   },
   left_server_racks: {
-    labelTh: "งานวิจัยวันนี้",
-    descriptionTh: "ตรวจคิววิจัยหลักและผลตรวจแหล่งอ้างอิงล่าสุด",
-    overviewTitleTh: "งานวิจัยเชิงลึกล่าสุด",
-    emptyMessageTh: "ยังไม่มีระบบที่ส่งเข้ามาวิจัยเชิงลึก",
+    labelTh: "เลือกระบบ / วิจัยละเอียด",
+    descriptionTh: "เลือกระบบที่ Backend ตรวจแล้วเพื่ออ่านกฎ แหล่งอ้างอิง และข้อจำกัดแบบละเอียด",
+    overviewTitleTh: "คลังวิจัยระบบเทรดเชิงลึก",
+    emptyMessageTh: "ยังไม่มีระบบครบ 3 ระบบจาก Report ที่ Backend ตรวจแล้ว",
   },
   right_server_racks: {
     labelTh: "งานสร้างวันนี้",
@@ -452,10 +455,10 @@ const WORKFLOW_DASHBOARD_PRIMARY_TABS = Object.freeze({
     emptyMessageTh: "ยังไม่มีงานสร้าง EA หรือ Indicator ในวันนี้",
   },
   right_tool_console: {
-    labelTh: "งานทดลองวันนี้",
-    descriptionTh: "เริ่มแผน Backtest และดูสถานะการทดลองล่าสุด",
-    overviewTitleTh: "ผลทดลอง EA ล่าสุด",
-    emptyMessageTh: "ยังไม่มีผล Backtest หรือ Optimization ในวันนี้",
+    labelTh: "1 เลือก EA",
+    descriptionTh: "เลือก MT4 หรือ MT5 แล้วนำเข้า EA เพื่ออ่าน Inputs ก่อนกำหนดช่วง Optimization",
+    overviewTitleTh: "เตรียม EA สำหรับ Optimization",
+    emptyMessageTh: "เลือก EA และแพลตฟอร์มเพื่อเริ่มเตรียมแผน Optimization",
   },
   left_audit_crystals: {
     labelTh: "วันนี้",
@@ -491,11 +494,37 @@ const WORKFLOW_DASHBOARD_SETTING_ACTION_IDS = new Set([
 ]);
 
 const INDICATOR_SCOUT_PROP_ID = "left_audit_crystals";
+const EA_FACTORY_PROP_ID = "right_server_racks";
+const RESEARCH_SHEET_HUB_ENDPOINT = "/api/props/mission_strategy_table/research-sheet";
+const RESEARCH_SHEET_HUB_INSPECT_ENDPOINT = `${RESEARCH_SHEET_HUB_ENDPOINT}/inspect`;
+const RESEARCH_SHEET_HUB_ACTIVATE_ENDPOINT = `${RESEARCH_SHEET_HUB_ENDPOINT}/activate`;
+const RESEARCH_SHEET_GOOGLE_AUTH_ENDPOINT = `${RESEARCH_SHEET_HUB_ENDPOINT}/auth`;
+const RESEARCH_SHEET_GOOGLE_AUTH_START_ENDPOINT = `${RESEARCH_SHEET_GOOGLE_AUTH_ENDPOINT}/start`;
+const RESEARCH_SHEET_GOOGLE_AUTH_DISCONNECT_ENDPOINT = `${RESEARCH_SHEET_GOOGLE_AUTH_ENDPOINT}/disconnect`;
+const RESEARCH_SHEET_HUB_MAX_AGE_MS = 90_000;
+const RESEARCH_SHEET_GOOGLE_AUTH_MAX_AGE_MS = 30_000;
+const RESEARCH_SHEET_GOOGLE_AUTH_POLL_INTERVAL_MS = 1_500;
+const RESEARCH_SHEET_GOOGLE_AUTH_POLL_TIMEOUT_MS = 120_000;
+const RESEARCH_SHEET_CONSUMERS = Object.freeze([
+  { propId: "codex_mcp_portal", tabKey: "worldSystem", labelTh: "Radar ระบบโลก", requiresWrite: true },
+  { propId: "left_server_racks", tabKey: "deepResearch", labelTh: "คลังวิจัยเชิงลึก / แหล่งระบบโรงงาน EA", requiresWrite: true },
+  { propId: "left_audit_crystals", tabKey: "indicatorEaTool", labelTh: "Radar Website Tool", requiresWrite: true },
+]);
+const RESEARCH_SHEET_LINKED_SYSTEMS = Object.freeze([
+  { systemId: "worldRadar", propId: "codex_mcp_portal", sourcePropId: "codex_mcp_portal", labelTh: "Radar ระบบโลก" },
+  { systemId: "deepResearch", propId: "left_server_racks", sourcePropId: "left_server_racks", labelTh: "คลังวิจัยเชิงลึก" },
+  { systemId: "eaFactory", propId: EA_FACTORY_PROP_ID, sourcePropId: "left_server_racks", labelTh: "โรงงาน EA" },
+  { systemId: "radarWebsiteTool", propId: "left_audit_crystals", sourcePropId: "left_audit_crystals", labelTh: "Radar Website Tool" },
+]);
+const RESEARCH_SHEET_CONSUMER_PROP_IDS = new Set(RESEARCH_SHEET_CONSUMERS.map((item) => item.propId));
+const RESEARCH_SHEET_LINKED_PROP_IDS = new Set([...RESEARCH_SHEET_CONSUMER_PROP_IDS, EA_FACTORY_PROP_ID]);
 const INDICATOR_SCOUT_PRESENTATION_TAB_IDS = Object.freeze(["discoveries", "archive"]);
 const INDICATOR_SCOUT_DEFAULT_TIME = "09:00";
 const INDICATOR_SCOUT_TIMEZONE = "Asia/Bangkok";
-const INDICATOR_SCOUT_WORKFLOW_ENDPOINT = "/api/props/left_audit_crystals/workflow/actions";
-const INDICATOR_SCOUT_RAIL_ACTION_IDS = new Set([
+const INDICATOR_SCOUT_EXPECTED_BATCH_SIZE = 6;
+const BACKEND_OWNED_DAILY_ACTION_IDS = new Set([
+  "discover_trading_systems",
+  "save_discovery_schedule",
   "discover_new_indicators",
   "save_indicator_scout_schedule",
 ]);
@@ -506,36 +535,164 @@ const FX_NEWS_BIAS_TIMEZONE = "Asia/Bangkok";
 const HQ_CONNECTION_HUB_PROP_ID = "right_status_crystals";
 const HQ_CONNECTION_HUB_PRESENTATION_TAB_IDS = Object.freeze(["connections", "vps"]);
 const HQ_CONNECTION_HUB_FILTER_IDS = Object.freeze(["all", "ready", "attention", "checking", "coming_soon"]);
-
-const WORKFLOW_ACTION_COPY_OVERRIDES = Object.freeze({
-  save_discovery_schedule: {
-    labelTh: "ตั้งเวลาค้นหาระบบเทรดรายวัน",
-    descriptionTh: "ตั้งเวลาเฉพาะงานค้นหาระบบเทรดแบบอ่านอย่างเดียว งานค้นหา EA เป็น Mission แยกและจะไม่ถูกรันตามตารางเวลานี้",
+const TRADING_RESEARCH_LAB_PROP_ID = "left_server_racks";
+const EA_OPTIMIZATION_LAB_PROP_ID = "right_tool_console";
+const EA_OPTIMIZATION_LAB_STAGE_IDS = Object.freeze([
+  "backtest",
+  "optimization",
+  "ea_discovery",
+  "history",
+]);
+const EA_OPTIMIZATION_LAB_STAGE_COPY = Object.freeze({
+  backtest: {
+    labelTh: "1 เลือก EA",
+    descriptionTh: "เลือก MT4 หรือ MT5 แล้วลาก Source/Binary ของ EA และไฟล์ .set (ถ้ามี) เพื่อตรวจชื่อไฟล์และ Inputs ในเบราว์เซอร์",
+  },
+  optimization: {
+    labelTh: "2 Inputs / Ranges",
+    descriptionTh: "ตรวจ Input ที่อ่านจาก .mq4/.mq5 หรือ .set แล้วกำหนด Start, Step, Stop; Input แบบ Mode จะถูกคงเป็นค่าหมวดหมู่",
+  },
+  ea_discovery: {
+    labelTh: "3 แผนหลายรอบ",
+    descriptionTh: "วาง Round 1 สำรวจช่วงกว้าง, Round 2 ขยายผลคลัสเตอร์ และ Round 3 ตรวจ Out-of-sample แบบ Case-by-case",
+  },
+  history: {
+    labelTh: "4 วิเคราะห์ผล / Report",
+    descriptionTh: "อ่านผลจริงครบทุก Pass แยก Max Profit, Lowest Drawdown, Most Stable, Current Bands, Next Parameter Plan และหลักฐานจาก Backend",
   },
 });
+const EA_OPTIMIZATION_LAB_STAGE_PRESENTATION = Object.freeze(
+  EA_OPTIMIZATION_LAB_STAGE_IDS.map((id) => ({
+    id,
+    labelTh: EA_OPTIMIZATION_LAB_STAGE_COPY[id].labelTh,
+    descriptionTh: EA_OPTIMIZATION_LAB_STAGE_COPY[id].descriptionTh,
+  })),
+);
+const EA_OPTIMIZATION_LAB_MAX_FILE_BYTES = 2 * 1024 * 1024;
+const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 1_000_000;
+const EA_OPTIMIZATION_LAB_MAX_INPUTS = 80;
+const EA_OPTIMIZATION_LAB_MAX_REPORTS = 100;
+const EA_OPTIMIZATION_LAB_MAX_PASSES = 5000;
+const EA_OPTIMIZATION_LAB_SOURCE_EXTENSIONS = Object.freeze([".mq4", ".mq5", ".ex4", ".ex5", ".set"]);
+const EA_FACTORY_STAGE_IDS = Object.freeze([
+  "source",
+  "spec",
+  "generate",
+  "review",
+  "compile_validate",
+  "backtest_recheck",
+  "artifacts_report",
+]);
+const EA_FACTORY_STAGE_COPY = Object.freeze({
+  source: {
+    labelTh: "1 เลือกระบบ",
+    titleTh: "เลือกระบบจากคลังวิจัย / Google Sheets",
+    descriptionTh: "อ่าน Strategy Record ที่ Backend ประทับจากคลังวิจัยหรือ Google Sheets แล้วตรวจ Entry, Exit, การแก้ไม้ และ Money Management ก่อนเริ่มงาน",
+  },
+  spec: {
+    labelTh: "2 ยืนยัน Strategy Spec",
+    titleTh: "ตรวจและยืนยัน Strategy Spec",
+    descriptionTh: "ยืนยันกติกาที่จะเขียนและเลือกเป้าหมาย MT4, MT5 หรือ TradingView Pine Script โดยไม่เริ่มสร้างโค้ดจนกว่าจะกดยืนยัน",
+  },
+  generate: {
+    labelTh: "3 สร้างโค้ด",
+    titleTh: "สร้าง Source Code และ Version",
+    descriptionTh: "สั่ง EA Developer ผ่าน Local Runner ให้สร้าง Source ใน Workspace ทีละ Version พร้อมแสดงความคืบหน้าจริง",
+  },
+  review: {
+    labelTh: "4 ตรวจ Source",
+    titleTh: "ตรวจ Source Code, Security และ Signal Guard",
+    descriptionTh: "ตรวจ Syntax, โครงสร้างคำสั่งซื้อขาย, ความปลอดภัย และการป้องกันสัญญาณซ้ำจากหลักฐานที่ Backend ส่งกลับมา",
+  },
+  compile_validate: {
+    labelTh: "5 Compile / Validate",
+    titleTh: "Compile หรือ Validate",
+    descriptionTh: "MT4/MT5 ต้องเลือก Terminal ที่ Backend ตรวจพบและพร้อมใช้งาน ส่วน Pine Script ตรวจภาษาและ Contract เท่านั้นโดยไม่เรียก MetaEditor",
+  },
+  backtest_recheck: {
+    labelTh: "6 Backtest / Recheck",
+    titleTh: "Visual Backtest และ Logic Recheck",
+    descriptionTh: "ใช้เฉพาะ MT4/MT5 และหลักฐาน Backtest จริงจาก Terminal ที่เลือก; Pine Script จะข้ามขั้นนี้โดยมีสถานะจาก Backend",
+  },
+  artifacts_report: {
+    labelTh: "7 ไฟล์และ Report",
+    titleTh: "ไฟล์ Workspace, Final Report และประวัติ",
+    descriptionTh: "ดาวน์โหลดเฉพาะ Artifact ที่ Backend อนุญาต พร้อม Version, Audit และผลแต่ละขั้นโดยไม่เปิด Path ในเครื่องให้ Frontend",
+  },
+});
+const EA_FACTORY_BACKEND_STAGE_BY_UI = Object.freeze({
+  spec: "strategy_spec",
+  generate: "generate_source",
+  review: "source_review",
+  compile_validate: "compile_validate",
+  backtest_recheck: "backtest_recheck",
+  artifacts_report: "final_report",
+});
+const EA_FACTORY_UI_STAGE_BY_BACKEND = Object.freeze(Object.fromEntries(
+  Object.entries(EA_FACTORY_BACKEND_STAGE_BY_UI).map(([uiId, backendId]) => [backendId, uiId]),
+));
+const EA_FACTORY_SHEET_COLUMNS = Object.freeze([
+  ["A", "record_id"], ["B", "system_name"], ["C", "strategy_family"], ["D", "symbols_market"],
+  ["E", "timeframe"], ["F", "entry_rules"], ["G", "exit_rules"], ["H", "stop_loss"],
+  ["I", "take_profit"], ["J", "recovery"], ["K", "lot_risk"], ["L", "indicators"],
+  ["M", "special_conditions"], ["N", "source_urls"], ["O", "verification_status"],
+  ["P", "backtest_status"], ["Q", "backtest_report"], ["R", "optimization_status"],
+  ["S", "optimization_report"], ["T", "issues"], ["U", "next_action"],
+  ["V", "target_platform"], ["W", "updated_at"],
+]);
+const TRADING_RESEARCH_MAX_OHLC_ROWS = 50000;
+const TRADING_RESEARCH_MAX_FILE_BYTES = 5 * 1024 * 1024;
+const TRADING_RESEARCH_MAX_RANGE_MS = Math.round(10 * 365.2425 * 24 * 60 * 60 * 1000);
+const TRADING_RESEARCH_TIMEFRAME_MS = Object.freeze({
+  M1: 60 * 1000,
+  M5: 5 * 60 * 1000,
+  M15: 15 * 60 * 1000,
+  M30: 30 * 60 * 1000,
+  H1: 60 * 60 * 1000,
+  H4: 4 * 60 * 60 * 1000,
+  D1: 24 * 60 * 60 * 1000,
+  W1: 7 * 24 * 60 * 60 * 1000,
+  MN1: 30 * 24 * 60 * 60 * 1000,
+});
+const TRADING_RESEARCH_SIMULATION_REGIMES = Object.freeze([
+  { id: "trend_up", labelTh: "ขาขึ้น", drift: 0.42, volatility: 0.85, explanationTh: "ตัวอย่างแนวโน้มขึ้นต่อเนื่อง สลับพักตัวระยะสั้น" },
+  { id: "sideways", labelTh: "แกว่งออกข้าง", drift: 0, volatility: 0.72, explanationTh: "ตัวอย่างตลาดไร้ทิศทางที่เกิดสัญญาณหลอกได้บ่อย" },
+  { id: "volatility_shock", labelTh: "ผันผวนสูง", drift: 0.04, volatility: 2.35, explanationTh: "ตัวอย่างช่วงความผันผวนกระโดดและแท่งราคากว้าง" },
+  { id: "trend_down", labelTh: "ขาลง", drift: -0.38, volatility: 0.95, explanationTh: "ตัวอย่างแนวโน้มลงพร้อมการเด้งกลับระหว่างทาง" },
+]);
+
+const WORKFLOW_ACTION_COPY_OVERRIDES = Object.freeze({});
 
 const WORKFLOW_TAB_COPY_OVERRIDES = Object.freeze({
   codex_mcp_portal: {
     schedule: {
       labelTh: "เวลาค้นหาระบบเทรด",
-      descriptionTh: "ตารางเวลานี้ใช้กับการค้นหาระบบเทรดเท่านั้น งานค้นหา EA ต้องสั่งเป็น Mission แยก",
+      descriptionTh: "ตารางเวลานี้ใช้กับการค้นหาระบบเทรดจากแหล่งสาธารณะเท่านั้น",
     },
   },
+  right_tool_console: Object.freeze(Object.fromEntries(
+    EA_OPTIMIZATION_LAB_STAGE_IDS.map((id) => [id, {
+      labelTh: EA_OPTIMIZATION_LAB_STAGE_COPY[id].labelTh,
+      descriptionTh: EA_OPTIMIZATION_LAB_STAGE_COPY[id].descriptionTh,
+    }]),
+  )),
 });
 
 const WORKFLOW_DASHBOARD_SETTING_TAB_IDS = new Set(["schedule", "agent_settings"]);
 
 const WORKFLOW_DASHBOARD_HISTORY_TAB_IDS = new Set([
   "evidence",
+  "report",
   "outputs",
   "history",
   "archive",
   "schedule_history",
   "activity_history",
+  "artifacts_report",
 ]);
 
 const WORKFLOW_DASHBOARD_PRIMARY_REPORT_TYPES = Object.freeze({
-  codex_mcp_portal: ["trading_system_discovery_report", "ea_discovery_report"],
+  codex_mcp_portal: ["trading_system_discovery_report"],
   left_server_racks: ["trading_system_research_report"],
   right_server_racks: ["ea_build_report", "ea_compile_report", "ea_development_report", "code_change_report"],
   right_tool_console: ["ea_experiment_report", "backtest_report", "optimization_report", "ea_discovery_report"],
@@ -556,14 +713,14 @@ const WORKFLOW_REPORT_TRANSFER_ROUTES = Object.freeze([
     targetPropId: "left_server_racks",
     agentId: "mission_archivist",
     sourcePropIds: ["codex_mcp_portal"],
-    reportTypes: ["trading_system_discovery_report", "ea_discovery_report"],
+    reportTypes: ["trading_system_discovery_report"],
   },
   {
     actionId: "build_strategy_code",
     targetPropId: "right_server_racks",
     agentId: "ea_developer",
-    sourcePropIds: ["codex_mcp_portal", "left_server_racks"],
-    reportTypes: ["trading_system_discovery_report", "ea_discovery_report", "trading_system_research_report"],
+    sourcePropIds: ["left_server_racks"],
+    reportTypes: ["trading_system_research_report"],
   },
   {
     actionId: "review_source_code",
@@ -590,9 +747,8 @@ const WORKFLOW_REPORT_TRANSFER_ROUTES = Object.freeze([
     actionId: "prepare_ea_discovery_plan",
     targetPropId: "right_tool_console",
     agentId: "ea_developer",
-    sourcePropIds: ["codex_mcp_portal", "left_server_racks", "right_server_racks"],
+    sourcePropIds: ["left_server_racks", "right_server_racks"],
     reportTypes: [
-      "trading_system_discovery_report",
       "ea_discovery_report",
       "trading_system_research_report",
       "ea_build_report",
@@ -689,70 +845,33 @@ const WORKFLOW_DISCOVERY_DEDUPLICATION_FIELDS = Object.freeze([
 const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
   codex_mcp_portal: {
     titleTh: "เรดาร์ระบบเทรดโลก",
-    summaryTh: "ค้นหาระบบเทรดและ EA จากแหล่งข้อมูลสากล ตรวจรายการซ้ำ และเก็บเป็นรายการตั้งต้นสำหรับงานวิจัยต่อ",
+    summaryTh: "ค้นหาเฉพาะระบบเทรดจากทั่วโลก รอบละ 3 ตระกูล พร้อมชื่อผู้สร้าง ขั้นตอนเข้าออก ความเสี่ยง และหลักฐานที่ตรวจย้อนกลับได้",
     tabs: [
-      { id: "systems", labelTh: "ระบบเทรดใหม่", descriptionTh: "ค้นหาแนวคิด กลยุทธ์ และกติกาการเทรดใหม่แบบไม่ซ้ำกับข้อมูลเดิม", actionIds: ["discover_trading_systems"] },
-      { id: "ea_updates", labelTh: "EA และเครื่องมือใหม่", descriptionTh: "ติดตาม EA, Indicator และงานวิจัยระบบอัตโนมัติที่เพิ่งเผยแพร่", actionIds: ["discover_ea_updates"] },
-      { id: "schedule", labelTh: "เวลาอัปเดตรายวัน", descriptionTh: "เปิดหรือปิดรอบค้นหาแบบอ่านอย่างเดียวตามเวลาไทย พร้อมดูครั้งล่าสุด รอบถัดไป และสาเหตุเมื่อระบบพักงาน", actionIds: ["save_discovery_schedule"] },
+      { id: "systems", labelTh: "ระบบเทรดใหม่", descriptionTh: "ดู 3 ระบบต่างตระกูลที่ Backend ค้นตามรอบ พร้อมผู้สร้าง กติกาเทรด ความเสี่ยง และแหล่งอ้างอิง", actionIds: [] },
+      { id: "schedule", labelTh: "เวลาอัปเดตรายวัน", descriptionTh: "ดูรอบค้นหาแบบอ่านอย่างเดียวเวลา 09:00 น. Asia/Bangkok พร้อมครั้งล่าสุด รอบถัดไป และสาเหตุเมื่อระบบพักงาน", actionIds: [] },
       {
         id: "catalog",
         labelTh: "คลังและแบบฟอร์มข้อมูล",
-        descriptionTh: "ดูรูปแบบข้อมูลสำหรับจัดเก็บรายการที่ค้นพบ ส่วนการเชื่อม Google Sheets ยังเป็น Coming Soon",
-        emptyMessageTh: "แบบฟอร์มข้อมูล: ชื่อระบบ, แหล่งที่มา, ผู้เผยแพร่, ตลาด, Timeframe, Entry, Exit, SL/TP, การแก้ไม้, เงื่อนไขพิเศษ และผู้ที่เหมาะสม • Google Sheets Connector: Coming Soon",
+        descriptionTh: "ดูรูปแบบข้อมูลสำหรับจัดเก็บรายการที่ค้นพบ และสถานะ World_System จาก Google Sheet กลางที่ Backend ยืนยัน",
+        emptyMessageTh: "แบบฟอร์มข้อมูล: ชื่อระบบ, แหล่งที่มา, ผู้เผยแพร่, ตลาด, Timeframe, Entry, Exit, SL/TP, การแก้ไม้, เงื่อนไขพิเศษ และผู้ที่เหมาะสม • ตั้ง Sheet กลางครั้งเดียวจากแถบ Google Sheet ด้านบน",
         actionIds: [],
       },
     ],
-    actions: [
-      {
-        id: "discover_trading_systems",
-        tabId: "systems",
-        labelTh: "เริ่มค้นหาระบบเทรด",
-        descriptionTh: "สร้าง Mission ให้ Agent ค้นหา ตรวจแหล่งที่มา และคัดรายการที่ไม่ซ้ำ",
-        availability: { status: "configuration_required" },
-        formFields: [
-          { id: "query", labelTh: "หัวข้อที่ต้องการค้นหา", type: "textarea", required: true },
-          { id: "market", labelTh: "ตลาด", type: "select", required: true, options: ["Forex", "Gold", "Indices", "Crypto", "Multi-asset"] },
-          { id: "timeframe", labelTh: "กรอบเวลาที่สนใจ", type: "select", required: false, options: ["ไม่จำกัด", "M5-M30", "H1-H4", "D1 ขึ้นไป"] },
-        ],
-      },
-      {
-        id: "discover_ea_updates",
-        tabId: "ea_updates",
-        labelTh: "ค้นหา EA และเครื่องมือใหม่",
-        descriptionTh: "สร้าง Mission สำหรับติดตาม EA, Indicator และแนวคิดระบบอัตโนมัติจากแหล่งข้อมูลสากล",
-        availability: { status: "configuration_required" },
-        formFields: [
-          { id: "query", labelTh: "โจทย์หรือหัวข้อ", type: "textarea", required: true },
-          { id: "platform", labelTh: "แพลตฟอร์ม", type: "select", required: true, options: ["MT4", "MT5", "TradingView", "ไม่จำกัด"] },
-        ],
-      },
-      {
-        id: "save_discovery_schedule",
-        tabId: "schedule",
-        labelTh: "บันทึกเวลาค้นหาระบบเทรดรายวัน",
-        descriptionTh: "เปิดหรือปิด Local Scheduler สำหรับค้นหาระบบเทรดแบบอ่านอย่างเดียว งานค้นหา EA เป็น Mission แยกเพื่อไม่ใช้ Rate Limit เพิ่มโดยไม่ตั้งใจ",
-        availability: { status: "ready" },
-        formFields: [
-          { id: "enabled", labelTh: "เปิดรอบค้นหาอัตโนมัติ", type: "checkbox", required: false },
-          { id: "times", labelTh: "เวลาที่ต้องการ เช่น 08:00, 18:00", type: "list", required: true },
-          { id: "timezone", labelTh: "เขตเวลา", type: "select", required: true, options: ["Asia/Bangkok", "UTC"] },
-        ],
-      },
-    ],
+    actions: [],
   },
   left_server_racks: {
     titleTh: "คลังวิจัยระบบเทรด",
-    summaryTh: "รับระบบที่เลือกจากเรดาร์มาขยายกติกา ตรวจความน่าเชื่อถือ และสรุปแนวทางประยุกต์ใช้พร้อมหลักฐาน",
+    summaryTh: "อ่านกฎจาก Report จริง ทดลองดูพฤติกรรมเชิงการศึกษา และ Backtest เฉพาะข้อมูล OHLC ที่ผู้ใช้อัปโหลดในเบราว์เซอร์",
     tabs: [
-      { id: "research_queue", labelTh: "คิววิจัยเชิงลึก", descriptionTh: "เลือกรายงานตั้งต้นแล้วส่งให้ Agent ตรวจรายละเอียดและแหล่งอ้างอิง", actionIds: ["deep_research_system"] },
-      { id: "verified_archive", labelTh: "คลังที่ตรวจสอบแล้ว", descriptionTh: "เปิดรายงานฉบับเต็มของระบบที่วิจัยและตรวจหลักฐานแล้ว", actionIds: [] },
-      { id: "application", labelTh: "แนวทางประยุกต์ใช้", descriptionTh: "ดูข้อสรุปว่าระบบเหมาะกับตลาด กรอบเวลา และผู้ใช้งานแบบใด", actionIds: [] },
-      { id: "evidence", labelTh: "หลักฐานและแหล่งอ้างอิง", descriptionTh: "รวมแหล่งข้อมูลและหลักฐานที่ Agent ตรวจสอบแล้วเพื่อเปิดดูย้อนหลัง", actionIds: [] },
+      { id: "research", labelTh: "เลือกระบบ / วิจัยละเอียด", descriptionTh: "เลือกหนึ่งใน 3 ระบบจาก Report ที่ Backend ตรวจแล้ว และอ่านกฎ ผู้สร้าง ความเสี่ยง และแหล่งอ้างอิง", actionIds: ["deep_research_system"] },
+      { id: "chart", labelTh: "กราฟจำลองหลายสภาวะ", descriptionTh: "ดูแท่งเทียน Indicator และจุดเข้าออกตัวอย่างในข้อมูลจำลองเชิงการศึกษา ซึ่งไม่ใช่ผลตลาดจริง", actionIds: [] },
+      { id: "backtest", labelTh: "Backtest จาก OHLC", descriptionTh: "อัปโหลด CSV หรือ XLSX ในเบราว์เซอร์ เลือก Timeframe และช่วงไม่เกิน 10 ปี แล้วคำนวณเฉพาะกฎที่แปลงได้ครบ", actionIds: [] },
+      { id: "report", labelTh: "Report สรุป", descriptionTh: "สรุปข้อมูลจริงจาก Report, สถานะไฟล์ และผล Backtest ที่คำนวณได้ โดยไม่สร้างตัวเลขทดแทน", actionIds: [] },
     ],
     actions: [
       {
         id: "deep_research_system",
-        tabId: "research_queue",
+        tabId: "research",
         labelTh: "ส่งเข้าวิจัยเชิงลึก",
         descriptionTh: "Agent จะตรวจ Entry, Exit, SL/TP, การแก้ไม้ เงื่อนไขพิเศษ ตลาด กรอบเวลา และความเหมาะสม",
         sourceRequired: true,
@@ -766,55 +885,43 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
   },
   right_server_racks: {
     titleTh: "โรงงานสร้าง EA และ Indicator",
-    summaryTh: "นำงานค้นพบหรืองานวิจัยมาแปลงเป็น MQL4, MQL5 หรือ Pine Script พร้อมตรวจโค้ดและรายงานตำแหน่งไฟล์",
-    tabs: [
-      { id: "builder", labelTh: "สร้าง EA / Indicator", descriptionTh: "เลือกต้นแบบ แพลตฟอร์ม และข้อกำหนดก่อนสร้าง Mission", actionIds: ["build_strategy_code"] },
-      { id: "code_review", labelTh: "ตรวจ Source Code", descriptionTh: "ตรวจความครบถ้วนและข้อผิดพลาดเชิงโครงสร้างของ Source Code", actionIds: ["review_source_code"] },
-      {
-        id: "compile",
-        labelTh: "Compile (Coming Soon)",
-        descriptionTh: "ดูสถานะและหลักฐานจาก Local Runner เท่านั้น ขณะนี้ MetaEditor/Compiler Adapter ยังเป็น Coming Soon",
-        emptyMessageTh: "ยังไม่มีผล Compile ที่ยืนยันได้ • MetaEditor/Compiler Adapter: Coming Soon • ระบบจะไม่แสดงว่าผ่านจนกว่าจะมีหลักฐานจาก Local Runner",
-        actionIds: [],
-      },
-      { id: "outputs", labelTh: "ไฟล์ผลลัพธ์", descriptionTh: "ดูรายงานที่เสร็จแล้วและตำแหน่งไฟล์ที่ Local Runner ส่งกลับมา", actionIds: [] },
-    ],
-    actions: [
-      {
-        id: "build_strategy_code",
-        tabId: "builder",
-        labelTh: "สร้าง Mission เขียนระบบ",
-        descriptionTh: "ส่งข้อกำหนดให้ EA Developer สร้างไฟล์ใน Workspace โดยไม่ส่งข้อมูลลับมาที่หน้าเว็บ",
-        sourceRequired: true,
-        availability: { status: "configuration_required" },
-        formFields: [
-          { id: "sourceReportId", labelTh: "ระบบต้นทาง", type: "source", required: true },
-          { id: "platform", labelTh: "แพลตฟอร์ม", type: "select", required: true, options: ["MT4 / MQL4", "MT5 / MQL5", "TradingView / Pine Script"] },
-          { id: "brief", labelTh: "ข้อกำหนดเพิ่มเติม", type: "textarea", required: false },
-        ],
-      },
-      {
-        id: "review_source_code",
-        tabId: "code_review",
-        labelTh: "ตรวจ Source Code",
-        descriptionTh: "สร้าง Mission ตรวจโครงสร้างและความพร้อมของไฟล์ โดยไม่อ้างว่า Compile สำเร็จ; MetaEditor/Compiler Adapter ยังเป็น Coming Soon",
-        sourceRequired: true,
-        availability: { status: "configuration_required" },
-        formFields: [
-          { id: "sourceReportId", labelTh: "ไฟล์หรืองานสร้างที่ต้องการตรวจ", type: "source", required: true },
-          { id: "brief", labelTh: "สิ่งที่ต้องการตรวจเพิ่ม", type: "textarea", required: false },
-        ],
-      },
-    ],
+    summaryTh: "กระบวนการ Manual 7 ขั้นจาก Strategy Record ที่ Backend อนุญาต ไปสู่ MQL4, MQL5 หรือ Pine Script พร้อมตรวจ Source, Compile/Validate, Backtest และเก็บไฟล์ใน Workspace",
+    tabs: EA_FACTORY_STAGE_IDS.map((id) => ({
+      id,
+      labelTh: EA_FACTORY_STAGE_COPY[id].labelTh,
+      descriptionTh: EA_FACTORY_STAGE_COPY[id].descriptionTh,
+      actionIds: [],
+    })),
+    actions: [],
   },
   right_tool_console: {
-    titleTh: "ห้องทดลอง EA",
-    summaryTh: "เตรียมแผน Backtest, Optimization และ EA Discovery จากไฟล์หรืองานวิจัยที่เลือก พร้อมรายงานผลกลับมาเป็นขั้นตอน",
+    titleTh: "ห้องทดลอง EA อัตโนมัติ",
+    summaryTh: "นำเข้า EA สำหรับ MT4/MT5 อ่าน Inputs วาง Start-Step-Stop และเตรียม Optimization หลายรอบแบบ Case-by-case โดยไม่อ้างว่ารัน Terminal จนกว่า Adapter จะยืนยันพร้อม",
     tabs: [
-      { id: "backtest", labelTh: "Auto Backtest", descriptionTh: "กำหนดระบบ ตลาด และกรอบเวลาก่อนส่งแผนทดสอบ", actionIds: ["prepare_backtest_plan"] },
-      { id: "optimization", labelTh: "Auto Optimization", descriptionTh: "กำหนดเป้าหมายและข้อจำกัดเพื่อเตรียมแผนหาค่าที่เหมาะสม", actionIds: ["prepare_optimization_plan"] },
-      { id: "ea_discovery", labelTh: "EA Discovery", descriptionTh: "ใช้ระบบต้นแบบและเป้าหมายผลลัพธ์เป็นโจทย์สร้างแผนค้นหา EA", actionIds: ["prepare_ea_discovery_plan"] },
-      { id: "history", labelTh: "ประวัติการทดลอง", descriptionTh: "ดู Mission และรายงาน Backtest, Optimization และ EA Discovery ที่เคยส่งกลับมา", actionIds: [] },
+      {
+        id: "backtest",
+        labelTh: "1 เลือก EA",
+        descriptionTh: "เลือก MT4 หรือ MT5 แล้วลาก Source/Binary ของ EA และไฟล์ .set (ถ้ามี) เพื่อตรวจชื่อไฟล์และ Inputs ในเบราว์เซอร์",
+        actionIds: [],
+      },
+      {
+        id: "optimization",
+        labelTh: "2 Inputs / Ranges",
+        descriptionTh: "ตรวจ Input ที่อ่านจาก .mq4/.mq5 หรือ .set แล้วกำหนด Start, Step, Stop; Input แบบ Mode จะถูกคงเป็นค่าหมวดหมู่",
+        actionIds: [],
+      },
+      {
+        id: "ea_discovery",
+        labelTh: "3 แผนหลายรอบ",
+        descriptionTh: "วาง Round 1 สำรวจช่วงกว้าง, Round 2 ขยายผลคลัสเตอร์ และ Round 3 ตรวจ Out-of-sample แบบ Case-by-case",
+        actionIds: [],
+      },
+      {
+        id: "history",
+        labelTh: "4 วิเคราะห์ผล / Report",
+        descriptionTh: "อ่านผลจริงครบทุก Pass แยก Max Profit, Lowest Drawdown, Most Stable, Current Bands, Next Parameter Plan และหลักฐานจาก Backend",
+        actionIds: [],
+      },
     ],
     actions: [
       {
@@ -866,42 +973,18 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
     titleTh: "Radar Website Tool",
     summaryTh: "ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะ พร้อม URL เวลาไทย ผลตรวจรายการซ้ำ และภาพหลักฐานที่ Backend อนุญาตให้แสดง",
     tabs: [
-      { id: "discoveries", labelTh: "Indicator ที่ค้นพบ", descriptionTh: "ดูรายการใหม่ แหล่งต้นทาง วันที่ค้นพบ และสถานะตรวจซ้ำ", actionIds: ["discover_new_indicators"] },
+      { id: "discoveries", labelTh: "Indicator ที่ค้นพบ", descriptionTh: "ดูรายการใหม่ แหล่งต้นทาง วันที่ค้นพบ และสถานะตรวจซ้ำ", actionIds: [] },
       {
         id: "evidence",
         labelTh: "ภาพและหลักฐาน",
-        descriptionTh: "เปิด URL และหลักฐานที่ Backend ตรวจแล้ว ส่วน Screenshot Adapter ยังเป็น Coming Soon",
-        emptyMessageTh: "แสดงเฉพาะ URL และหลักฐานจาก Backend • Screenshot Adapter: Coming Soon • ไม่มีภาพจำลอง",
+        descriptionTh: "เปิด URL และภาพ Open Graph จากหน้าเว็บต้นทางที่ Backend ตรวจ hash และผูกกับรายการเดียวกันแล้ว",
+        emptyMessageTh: "แสดงเฉพาะ URL และภาพจาก Backend • ไม่ใช้ภาพจำลอง • เว็บที่ไม่มี Open Graph จะคงสถานะไม่มีภาพ",
         actionIds: [],
       },
-      { id: "schedule", labelTh: "รอบค้นหารายวัน", descriptionTh: "ตั้งรอบค้นหา Indicator แบบอ่านอย่างเดียว พร้อมดูครั้งล่าสุด รอบถัดไป และสาเหตุที่ระบบรอ", actionIds: ["save_indicator_scout_schedule"] },
+      { id: "schedule", labelTh: "รอบค้นหารายวัน", descriptionTh: "ดูรอบค้นหาแบบอ่านอย่างเดียวเวลา 09:00 น. Asia/Bangkok พร้อมครั้งล่าสุด รอบถัดไป และสาเหตุที่ระบบรอ", actionIds: [] },
       { id: "archive", labelTh: "คลังย้อนหลัง", descriptionTh: "ดูผลและรายงาน Indicator ที่ Backend บันทึกไว้ย้อนหลัง", actionIds: [] },
     ],
-    actions: [
-      {
-        id: "discover_new_indicators",
-        tabId: "discoveries",
-        labelTh: "ค้นหา Indicator, EA และ Tool ใหม่",
-        descriptionTh: "ให้ Radar ค้นเว็บไซต์สาธารณะแบบอ่านอย่างเดียว พร้อม URL เวลาไทย และการตรวจรายการซ้ำ",
-        availability: { status: "configuration_required" },
-        formFields: [
-          { id: "query", labelTh: "หัวข้อ Indicator, EA หรือ Tool ที่สนใจ", type: "textarea", required: true },
-          { id: "platform", labelTh: "แพลตฟอร์ม", type: "select", required: true, options: ["MT4", "MT5", "TradingView", "ไม่จำกัด"] },
-          { id: "categories", labelTh: "หมวดที่สนใจ", type: "list", required: false, placeholderTh: "Trend, Momentum, Volume, Price Action" },
-        ],
-      },
-      {
-        id: "save_indicator_scout_schedule",
-        tabId: "schedule",
-        labelTh: "ตั้งเวลาทำงานของ Radar",
-        descriptionTh: "เปิดหรือปิด Local Scheduler สำหรับค้นหา Indicator, EA และ Tool แบบอ่านอย่างเดียววันละหนึ่งครั้ง พร้อม Audit, URL และ Report",
-        availability: { status: "configuration_required" },
-        formFields: [
-          { id: "enabled", labelTh: "เปิดรอบค้นหาอัตโนมัติ", type: "checkbox", required: false },
-          { id: "times", labelTh: "เวลาไทยที่ต้องการ เช่น 09:00", type: "list", required: true },
-        ],
-      },
-    ],
+    actions: [],
   },
   left_signal_cube: {
     titleTh: "ศูนย์แนวโน้ม 28 คู่เงินและข่าว Forex",
@@ -997,7 +1080,7 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
           { id: "tokenBudget", labelTh: "งบ Token โดยประมาณต่อภารกิจ (Audit)", type: "integer", required: false },
           { id: "timeoutSeconds", labelTh: "เวลาสูงสุดต่อภารกิจ (วินาที)", type: "integer", required: false },
           { id: "outputLimitChars", labelTh: "ขนาดผลลัพธ์สูงสุด (ตัวอักษร)", type: "integer", required: false },
-          { id: "rateReservePercent", labelTh: "Rate Limit สำรอง (%)", type: "integer", required: false },
+          { id: "rateReservePercent", labelTh: "เกณฑ์โควตาคงที่: ทำงานเมื่อเหลือมากกว่า 15%", type: "integer", required: false },
         ],
       },
     ],
@@ -1010,8 +1093,17 @@ const WORKFLOW_NUMERIC_FIELD_BOUNDS = Object.freeze({
   tokenBudget: { min: 256, max: 100000, step: 1 },
   timeoutSeconds: { min: 15, max: 600, step: 1 },
   outputLimitChars: { min: 1000, max: 20000, step: 1 },
-  rateReservePercent: { min: 10, max: 80, step: 1 },
+  rateReservePercent: { min: 15, max: 15, step: 1 },
 });
+
+const WORKFLOW_EXECUTION_SCOPES = new Set([
+  "public_web_read_only",
+  "workspace_analysis_only",
+  "analysis_plan_only",
+  "workspace_source_only",
+  "local_read_only",
+  "settings_only",
+]);
 
 const LAYER_DISPLAY = {
   background: ["ฉากหลัง", "ฉากปราสาทและพื้นที่ด้านนอก"],
@@ -1121,6 +1213,51 @@ const state = {
   memoryStatus: "ยังไม่ได้ตรวจ Memory",
   taskDetailMissionId: null,
   taskDetailSource: null,
+  meetingRoom: {
+    sessions: [],
+    session: null,
+    activeSessionId: "",
+    draftsBySession: Object.create(null),
+    status: "idle",
+    message: "กำลังรอข้อมูล Session จาก Backend",
+    action: "",
+    inFlight: false,
+    pollInFlight: false,
+    pollTimer: null,
+    initialized: false,
+  },
+  researchSheetHub: {
+    status: "idle",
+    data: null,
+    message: "หน้าเว็บรับเฉพาะ URL หรือ Sheet ID และไม่รับ Token หรือ Credential",
+    tone: "neutral",
+    inFlight: false,
+    operation: "",
+    phase: "idle",
+    failurePhase: "",
+    showProgress: false,
+    preview: null,
+    activation: null,
+    draftReference: "",
+    submittedReference: "",
+    dirty: false,
+    panelOpen: false,
+    phaseTimers: [],
+    lastLoadedAt: 0,
+    googleAuth: {
+      status: "idle",
+      data: null,
+      message: "",
+      tone: "neutral",
+      inFlight: false,
+      operation: "",
+      lastLoadedAt: 0,
+      pollTimer: null,
+      pollStartedAt: 0,
+      pollInFlight: false,
+      popup: null,
+    },
+  },
   modal: {
     open: false,
     type: null,
@@ -1144,6 +1281,58 @@ const state = {
     signalHistoryOrderPage: 1,
     signalHistoryAnalysisPage: 1,
     workflowTabs: {},
+    tradingResearchLab: {
+      sourceReportId: "",
+      selectedSystemId: "",
+      simulationRegime: "trend_up",
+      dataset: null,
+      datasetStatus: "idle",
+      datasetMessage: "ยังไม่ได้เลือกไฟล์ OHLC",
+      timeframe: "H1",
+      startDate: "",
+      endDate: "",
+      backtest: null,
+      backtestMessage: "",
+    },
+    eaFactory: {
+      selectedSourceId: "",
+      selectedBuildId: "",
+      selectedPlatform: "",
+      selectedTerminalId: "",
+      inFlight: false,
+      stageId: "",
+      idempotencyKey: "",
+      formSignature: "",
+      message: "",
+      tone: "neutral",
+    },
+    eaOptimizationLab: {
+      platform: "",
+      sourceReportId: "",
+      selectedTerminalId: "",
+      eaFile: null,
+      setFile: null,
+      sourceText: "",
+      setText: "",
+      programKind: "unknown",
+      inputs: [],
+      symbol: "",
+      timeframe: "H1",
+      dateFrom: "",
+      dateTo: "",
+      validationMethod: "walk_forward",
+      targetProfitPercent: "",
+      maxDrawdownPercent: "20",
+      minimumTrades: "100",
+      roundCount: "3",
+      plan: null,
+      message: "",
+      tone: "neutral",
+      fileBusy: false,
+      terminalBusy: false,
+      fileRequestId: 0,
+      restoredDraft: false,
+    },
     connectionHubFilter: "all",
     fxNewsImpactFilter: "all",
     workflowAction: {
@@ -1233,7 +1422,7 @@ const state = {
     maxTurns: 3,
     maxDailyRuns: 3,
     dailyRunCount: 0,
-    minRemainingPercent: 30,
+    minRemainingPercent: 15,
     participants: [],
     nextRunAt: null,
     pausedReason: null,
@@ -1268,6 +1457,11 @@ const state = {
   },
   propReportLoadedAt: {},
   propReportLoadState: {},
+  eaFactoryReadModel: {
+    inFlight: false,
+    lastLoadedAt: 0,
+    payload: null,
+  },
   todayWorkView: {
     dateKey: "",
     runningLimit: 12,
@@ -1539,6 +1733,33 @@ const els = {
   modalSpeaker: document.getElementById("modalSpeaker"),
   modalDialogue: document.getElementById("modalDialogue"),
   modalTabs: document.getElementById("modalTabs"),
+  researchSheetHub: document.getElementById("researchSheetHub"),
+  researchSheetHubDetailsToggle: document.getElementById("researchSheetHubDetailsToggle"),
+  researchSheetHubPopover: document.getElementById("researchSheetHubPopover"),
+  researchSheetHubForm: document.getElementById("researchSheetHubForm"),
+  researchSheetHubReference: document.getElementById("researchSheetHubReference"),
+  researchSheetHubApply: document.getElementById("researchSheetHubApply"),
+  researchSheetHubActive: document.getElementById("researchSheetHubActive"),
+  researchSheetHubActiveReference: document.getElementById("researchSheetHubActiveReference"),
+  researchSheetGoogleAuth: document.getElementById("researchSheetGoogleAuth"),
+  researchSheetGoogleAuthStatus: document.getElementById("researchSheetGoogleAuthStatus"),
+  researchSheetGoogleAuthTitle: document.getElementById("researchSheetGoogleAuthTitle"),
+  researchSheetGoogleAuthDetail: document.getElementById("researchSheetGoogleAuthDetail"),
+  researchSheetGoogleConnect: document.getElementById("researchSheetGoogleConnect"),
+  researchSheetGoogleDisconnect: document.getElementById("researchSheetGoogleDisconnect"),
+  researchSheetHubLifecycle: document.getElementById("researchSheetHubLifecycle"),
+  researchSheetHubLinkedSystems: document.getElementById("researchSheetHubLinkedSystems"),
+  researchSheetHubInspection: document.getElementById("researchSheetHubInspection"),
+  researchSheetHubInspectionTitle: document.getElementById("researchSheetHubInspectionTitle"),
+  researchSheetHubInspectionReference: document.getElementById("researchSheetHubInspectionReference"),
+  researchSheetHubInspectionStatus: document.getElementById("researchSheetHubInspectionStatus"),
+  researchSheetHubInspectionTabs: document.getElementById("researchSheetHubInspectionTabs"),
+  researchSheetHubActivate: document.getElementById("researchSheetHubActivate"),
+  researchSheetHubCancel: document.getElementById("researchSheetHubCancel"),
+  researchSheetHubProgress: document.getElementById("researchSheetHubProgress"),
+  researchSheetHubStatus: document.getElementById("researchSheetHubStatus"),
+  researchSheetHubConsumers: document.getElementById("researchSheetHubConsumers"),
+  researchSheetHubMessage: document.getElementById("researchSheetHubMessage"),
   modalChatLog: document.getElementById("modalChatLog"),
   modalCommandInput: document.getElementById("modalCommandInput"),
   modalSendButton: document.getElementById("modalSendButton"),
@@ -1550,6 +1771,50 @@ const els = {
   modalChatStatus: document.getElementById("modalChatStatus"),
   modalChatUsageNote: document.getElementById("modalChatUsageNote"),
   modalTaskBoard: document.getElementById("modalTaskBoard"),
+  modalMissionChatParticipants: document.getElementById("missionChatParticipants"),
+  modalMissionChatParticipantCount: document.getElementById("missionChatParticipantCount"),
+  modalMissionChatMessages: document.getElementById("missionChatMessages"),
+  missionChatTabStatus: document.getElementById("missionChatTabStatus"),
+  missionMeetingStatus: document.getElementById("missionMeetingStatus"),
+  missionMeetingStartForm: document.getElementById("missionMeetingStartForm"),
+  missionMeetingAgenda: document.getElementById("missionMeetingAgenda"),
+  missionMeetingDevelopmentGoal: document.getElementById("missionMeetingDevelopmentGoal"),
+  missionMeetingAiTurnsPerRound: document.getElementById("missionMeetingAiTurnsPerRound"),
+  missionMeetingParticipantOptions: document.getElementById("missionMeetingParticipantOptions"),
+  missionMeetingStartButton: document.getElementById("missionMeetingStartButton"),
+  missionMeetingSessionSelect: document.getElementById("missionMeetingSessionSelect"),
+  missionMeetingRefreshButton: document.getElementById("missionMeetingRefreshButton"),
+  missionMeetingConversationHeading: document.getElementById("missionChatConversationHeading"),
+  missionMeetingConversationMeta: document.getElementById("missionMeetingConversationMeta"),
+  missionMeetingSessionStatus: document.getElementById("missionMeetingSessionStatus"),
+  missionMeetingProgress: document.getElementById("missionMeetingProgress"),
+  missionMeetingRoundProgress: document.getElementById("missionMeetingRoundProgress"),
+  missionMeetingTurnProgress: document.getElementById("missionMeetingTurnProgress"),
+  missionMeetingMessageForm: document.getElementById("missionMeetingMessageForm"),
+  missionMeetingMessage: document.getElementById("missionMeetingMessage"),
+  missionMeetingMessageHelp: document.getElementById("missionMeetingMessageHelp"),
+  missionMeetingSendButton: document.getElementById("missionMeetingSendButton"),
+  missionMeetingDecision: document.getElementById("missionMeetingDecision"),
+  missionMeetingDecisionText: document.getElementById("missionMeetingDecisionText"),
+  missionMeetingProposal: document.getElementById("missionMeetingProposal"),
+  missionMeetingProposalButton: document.getElementById("missionMeetingProposalButton"),
+  missionMeetingProposalSummary: document.getElementById("missionMeetingProposalSummary"),
+  missionMeetingStructuredProposal: document.getElementById("missionMeetingStructuredProposal"),
+  missionMeetingProposalRisks: document.getElementById("missionMeetingProposalRisks"),
+  missionMeetingProposalAcceptanceChecks: document.getElementById("missionMeetingProposalAcceptanceChecks"),
+  missionMeetingProposalManagerDecisionStatus: document.getElementById("missionMeetingProposalManagerDecisionStatus"),
+  missionMeetingProposalManagerDecisionSummary: document.getElementById("missionMeetingProposalManagerDecisionSummary"),
+  missionMeetingProposalMeetingId: document.getElementById("missionMeetingProposalMeetingId"),
+  missionMeetingProposalDigest: document.getElementById("missionMeetingProposalDigest"),
+  missionMeetingProposalDigestVersion: document.getElementById("missionMeetingProposalDigestVersion"),
+  missionMeetingProposalManagerTurnId: document.getElementById("missionMeetingProposalManagerTurnId"),
+  missionMeetingImplementationMissionId: document.getElementById("missionMeetingImplementationMissionId"),
+  missionMeetingApprovalNote: document.getElementById("missionMeetingApprovalNote"),
+  missionMeetingApprovalNoteHelp: document.getElementById("missionMeetingApprovalNoteHelp"),
+  missionMeetingApproveButton: document.getElementById("missionMeetingApproveButton"),
+  missionMeetingRejectButton: document.getElementById("missionMeetingRejectButton"),
+  missionMeetingOpenMissionButton: document.getElementById("missionMeetingOpenMissionButton"),
+  missionMeetingProposalStatus: document.getElementById("missionMeetingProposalStatus"),
   modalDashboardConnectionRail: document.getElementById("modalDashboardConnectionRail"),
   modalGenericDashboardWorkspace: document.getElementById("modalGenericDashboardWorkspace"),
   modalWorkflowDashboardWorkspace: document.getElementById("modalWorkflowDashboardWorkspace"),
@@ -1881,6 +2146,7 @@ async function init() {
   renderProps();
   renderAgent();
   renderOperationalSidebars();
+  renderResearchSheetHub();
   const renderedAgentCount = els.agentLayer.querySelectorAll(".agent-unit").length;
   if (officeAgentDefinitions.length !== EXPECTED_OFFICE_AGENT_COUNT) {
     reportBootResourceFailure(
@@ -2014,6 +2280,8 @@ function runAutomaticPollingBurst() {
     void runAutomaticPollingTask((signal) => refreshAgentCollaboration({ signal }));
   }
   void runAutomaticPollingTask((signal) => pollMissionReadModel({ signal }));
+  void runAutomaticPollingTask((signal) => loadResearchSheetHub({ signal }));
+  void runAutomaticPollingTask((signal) => loadResearchSheetGoogleAuth({ signal }));
 }
 
 function runInitialPollingRead() {
@@ -2028,6 +2296,8 @@ function runInitialPollingRead() {
   void refreshOperatorMode();
   if (!state.agentCollaboration.editing) void refreshAgentCollaboration();
   void pollMissionReadModel({ manual: true });
+  void loadResearchSheetHub();
+  void loadResearchSheetGoogleAuth();
 }
 
 function stopAutomaticPolling() {
@@ -2083,6 +2353,7 @@ function initializePollingLeadership() {
     }
   });
   window.addEventListener("pagehide", () => {
+    stopResearchSheetGoogleAuthPolling({ closePopup: true });
     stopAutomaticPolling();
     releasePollingLeadership();
   });
@@ -2442,6 +2713,1426 @@ async function postJson(path, payload = {}) {
   return body;
 }
 
+function normalizeResearchSheetReference(value) {
+  const raw = String(value || "").replace(/\u0000/g, "").trim();
+  if (!raw || raw.length > 500) return "";
+  if (/^[A-Za-z0-9_-]{20,160}$/.test(raw)) return raw;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "https:" || parsed.hostname.toLowerCase() !== "docs.google.com") return "";
+    const match = parsed.pathname.match(/^\/spreadsheets\/d\/([A-Za-z0-9_-]{20,160})(?:\/|$)/);
+    return match?.[1] || "";
+  } catch {
+    return "";
+  }
+}
+
+function boundedResearchSheetCount(value, maximum = 999_999) {
+  const count = Number(value);
+  return Number.isInteger(count) && count >= 0 ? Math.min(count, maximum) : 0;
+}
+
+function normalizeResearchSheetTimestamp(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+function normalizeResearchSheetHub(payload = {}) {
+  const root = payload?.researchSheet && typeof payload.researchSheet === "object" && !Array.isArray(payload.researchSheet)
+    ? payload.researchSheet
+    : {};
+  const rawSheetIdAllowed = root.rawSheetIdExposed === true;
+  const sheetId = rawSheetIdAllowed
+    ? normalizeResearchSheetReference(root.sheetId || root.sheetDisplayValue || root.canonicalUrl)
+    : "";
+  const rawTabs = root.tabs && typeof root.tabs === "object" && !Array.isArray(root.tabs) ? root.tabs : {};
+  const tabs = Object.fromEntries(RESEARCH_SHEET_CONSUMERS.map(({ tabKey }) => [
+    tabKey,
+    safeDashboardDisplayText(rawTabs[tabKey], ""),
+  ]));
+  const rawConsumers = Array.isArray(root.consumers) ? root.consumers : [];
+  const consumerMap = new Map();
+  rawConsumers.slice(0, 20).forEach((item) => {
+    const propId = String(item?.propId || "").trim();
+    if (!RESEARCH_SHEET_CONSUMER_PROP_IDS.has(propId) || consumerMap.has(propId)) return;
+    consumerMap.set(propId, {
+      propId,
+      tabName: safeDashboardDisplayText(item?.tabName, ""),
+      status: String(item?.status || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
+      readReady: item?.readReady === true,
+      writeReady: item?.writeReady === true,
+      configurationApplied: item?.configurationApplied === true,
+      rowCount: boundedResearchSheetCount(item?.rowCount),
+      cachedRowCount: boundedResearchSheetCount(item?.cachedRowCount),
+      observedAt: normalizeResearchSheetTimestamp(item?.observedAt || item?.rowsObservedAt),
+      configRevision: safeDashboardDisplayText(item?.configRevision, ""),
+    });
+  });
+  const consumers = RESEARCH_SHEET_CONSUMERS.map((definition) => {
+    const supplied = consumerMap.get(definition.propId) || {};
+    return {
+      ...definition,
+      propId: definition.propId,
+      tabName: supplied.tabName || tabs[definition.tabKey] || "",
+      status: supplied.status || "not_reported",
+      readReady: supplied.readReady === true,
+      writeReady: supplied.writeReady === true,
+      configurationApplied: supplied.configurationApplied === true,
+      rowCount: supplied.rowCount || 0,
+      cachedRowCount: supplied.cachedRowCount || 0,
+      observedAt: supplied.observedAt || null,
+      configRevision: supplied.configRevision || "",
+    };
+  });
+  const consumerByPropId = new Map(consumers.map((consumer) => [consumer.propId, consumer]));
+  const rawLinkedSystems = Array.isArray(root.linkedSystems) ? root.linkedSystems : [];
+  const suppliedLinkedSystems = new Map();
+  rawLinkedSystems.slice(0, 12).forEach((item) => {
+    const systemId = String(item?.systemId || item?.id || "").trim();
+    if (!RESEARCH_SHEET_LINKED_SYSTEMS.some((definition) => definition.systemId === systemId)) return;
+    suppliedLinkedSystems.set(systemId, item);
+  });
+  const linkedSystems = RESEARCH_SHEET_LINKED_SYSTEMS.map((definition) => {
+    const supplied = suppliedLinkedSystems.get(definition.systemId) || {};
+    const source = consumerByPropId.get(definition.sourcePropId) || {};
+    return {
+      ...definition,
+      tabName: safeDashboardDisplayText(supplied.tabName || supplied.sourceTabName, "") || source.tabName || "",
+      status: String(supplied.status || source.status || "not_reported").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
+      ready: supplied.ready === true || (!Object.keys(supplied).length && source.readReady === true),
+      rowCount: boundedResearchSheetCount(supplied.rowCount ?? source.rowCount),
+      cachedRowCount: boundedResearchSheetCount(supplied.cachedRowCount ?? source.cachedRowCount),
+      observedAt: normalizeResearchSheetTimestamp(
+        supplied.observedAt || supplied.rowsObservedAt || source.observedAt,
+      ),
+      configRevision: safeDashboardDisplayText(supplied.configRevision, "") || source.configRevision || "",
+    };
+  });
+  const rawOutbox = root.outbox && typeof root.outbox === "object" && !Array.isArray(root.outbox) ? root.outbox : {};
+  const configRevision = safeDashboardDisplayText(root.configRevision, "");
+  const activeConfigRevision = safeDashboardDisplayText(root.activeConfigRevision, "");
+  const outboxCount = (name) => {
+    const value = Number(rawOutbox[name]);
+    return Number.isInteger(value) && value >= 0 ? Math.min(value, 999_999) : 0;
+  };
+  return {
+    schemaVersion: safeDashboardDisplayText(root.schemaVersion, ""),
+    configured: root.configured === true,
+    active: root.active === true,
+    operational: root.operational === true,
+    sheetId,
+    canonicalUrl: sheetId ? `https://docs.google.com/spreadsheets/d/${sheetId}` : "",
+    sheetReferenceMasked: safeDashboardDisplayText(root.sheetReferenceMasked, ""),
+    sheetTitle: safeDashboardDisplayText(root.sheetTitle, ""),
+    applyPhase: String(root.applyPhase || "idle").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
+    applyStatus: String(root.applyStatus || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
+    verificationStatus: String(root.verificationStatus || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
+    totalConsumerCount: boundedResearchSheetCount(root.totalConsumerCount, consumers.length) || consumers.length,
+    appliedConsumerCount: boundedResearchSheetCount(root.appliedConsumerCount, consumers.length),
+    verifiedConsumerCount: boundedResearchSheetCount(root.verifiedConsumerCount, consumers.length),
+    allConsumersApplied: root.allConsumersApplied === true,
+    allConsumersVerified: root.allConsumersVerified === true,
+    connected: root.connected === true,
+    readReady: root.readReady === true,
+    writeReady: root.writeReady === true,
+    adapterStatus: String(root.adapterStatus || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
+    authStatus: String(root.authStatus || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
+    credentialMode: String(root.credentialMode || root.authMode || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
+    configRevision,
+    activeConfigRevision,
+    savedAt: normalizeResearchSheetTimestamp(root.savedAt),
+    activationConfirmedAt: normalizeResearchSheetTimestamp(root.activationConfirmedAt),
+    lastVerifiedAt: normalizeResearchSheetTimestamp(root.lastVerifiedAt),
+    lastErrorCode: /^[a-zA-Z0-9_.:-]{1,120}$/.test(String(root.lastErrorCode || ""))
+      ? String(root.lastErrorCode)
+      : "",
+    tabs,
+    consumers,
+    linkedSystems,
+    outbox: {
+      pending: outboxCount("pending"),
+      failed: outboxCount("failed"),
+      synced: outboxCount("synced"),
+    },
+    credentialsAcceptedByFrontend: false,
+    rawSheetIdExposed: Boolean(rawSheetIdAllowed && sheetId),
+  };
+}
+
+function normalizeResearchSheetGoogleAuth(payload = {}) {
+  const candidates = [
+    payload?.googleAuth,
+    payload?.researchSheetAuth,
+    payload?.auth,
+    payload?.researchSheet?.googleAuth,
+    payload?.researchSheet?.auth,
+    payload,
+  ];
+  const root = candidates.find((item) => item && typeof item === "object" && !Array.isArray(item)) || {};
+  const status = String(
+    root.status || root.authStatus || root.connectionStatus || payload?.authStatus || "unknown",
+  ).trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80);
+  const connectedStatuses = new Set(["connected", "authenticated", "authorized", "ready"]);
+  const adminSetupStatuses = new Set([
+    "admin_setup_required",
+    "backend_client_missing",
+    "client_not_configured",
+    "oauth_client_not_configured",
+    "not_configured",
+  ]);
+  const connected = root.connected === true
+    || root.authenticated === true
+    || root.authorized === true
+    || connectedStatuses.has(status);
+  const clientConfigured = connected
+    || root.clientConfigured === true
+    || root.oauthClientConfigured === true
+    || root.providerConfigured === true;
+  const requiresAdminSetup = root.requiresAdminSetup === true
+    || root.adminSetupRequired === true
+    || (!clientConfigured && adminSetupStatuses.has(status));
+  const explicitStartAvailable = root.startAvailable ?? root.canStartOAuth ?? root.authorizationAvailable;
+  const startAvailable = connected || (
+    explicitStartAvailable === true
+    || (explicitStartAvailable !== false && clientConfigured && !requiresAdminSetup)
+  );
+  return {
+    status,
+    connected,
+    clientConfigured,
+    requiresAdminSetup,
+    startAvailable,
+    accountHint: safeDashboardDisplayText(
+      root.accountHint || root.accountEmailMasked || root.emailMasked || root.accountLabel,
+      "",
+    ),
+    messageTh: safeDashboardDisplayText(root.messageTh || root.message, ""),
+    connectedAt: normalizeResearchSheetTimestamp(root.connectedAt || root.authorizedAt),
+    clientHint: safeDashboardDisplayText(
+      root.clientHint || root.oauthClientHint,
+      "",
+    ),
+    clientSource: String(root.clientSource || root.oauthClientSource || "not_configured")
+      .trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
+    credentialsAcceptedByFrontend: false,
+  };
+}
+
+function normalizeResearchSheetAuthorizationUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    if (parsed.protocol !== "https:" || parsed.hostname.toLowerCase() !== "accounts.google.com") return "";
+    if (parsed.username || parsed.password || (parsed.port && parsed.port !== "443")) return "";
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
+
+function researchSheetGoogleAuthFailureReason(error = null) {
+  const body = error?.body && typeof error.body === "object" && !Array.isArray(error.body)
+    ? error.body
+    : {};
+  const code = String(
+    body.code || body.errorCode || body.kind || body.error || error?.code || "auth_unavailable",
+  ).trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 120);
+  const reasons = {
+    access_denied: "คุณยกเลิกหรือไม่อนุญาตสิทธิ์ Google",
+    admin_setup_required: "ผู้ดูแลยังไม่ได้ตั้ง Google OAuth Client ที่ Local Bridge",
+    auth_expired: "สิทธิ์ Google หมดอายุ กรุณาเชื่อมบัญชีใหม่",
+    backend_client_missing: "ผู้ดูแลยังไม่ได้ตั้ง Google OAuth Client ที่ Local Bridge",
+    client_not_configured: "ผู้ดูแลยังไม่ได้ตั้ง Google OAuth Client ที่ Local Bridge",
+    oauth_client_not_configured: "ผู้ดูแลยังไม่ได้ตั้ง Google OAuth Client ที่ Local Bridge",
+    oauth_failed: "Google ไม่สามารถยืนยันการเชื่อมต่อครั้งนี้ได้",
+    oauth_error: "Google ไม่สามารถยืนยันการเชื่อมต่อครั้งนี้ได้",
+    popup_blocked: "Browser บล็อกหน้าต่าง Google กรุณาอนุญาต Pop-up แล้วลองใหม่",
+    popup_closed: "หน้าต่าง Google ถูกปิดก่อนยืนยันเสร็จ",
+    state_invalid: "คำขอเชื่อมต่อหมดอายุหรือไม่ตรงกับ Session นี้",
+    timeout: "รอการยืนยันจาก Google เกิน 2 นาที กรุณาลองใหม่",
+  };
+  return reasons[code]
+    || safeDashboardDisplayText(body.messageTh || body.message || error?.message, "")
+    || "ยังตรวจสถานะบัญชี Google จาก Backend ไม่ได้";
+}
+
+function researchSheetGoogleAuthIsTerminalStatus(status) {
+  return new Set([
+    "access_denied",
+    "admin_setup_required",
+    "backend_client_missing",
+    "callback_failed",
+    "client_not_configured",
+    "oauth_client_not_configured",
+    "oauth_error",
+    "oauth_failed",
+    "state_invalid",
+  ]).has(String(status || "").trim().toLowerCase());
+}
+
+function normalizeResearchSheetInspection(payload = {}) {
+  const root = payload?.verificationPreview && typeof payload.verificationPreview === "object" && !Array.isArray(payload.verificationPreview)
+    ? payload.verificationPreview
+    : {};
+  const sheetId = normalizeResearchSheetReference(root.sheetId || root.canonicalUrl);
+  const rawConsumers = Array.isArray(root.consumers) ? root.consumers : [];
+  const consumerMap = new Map();
+  rawConsumers.slice(0, 12).forEach((item) => {
+    const propId = String(item?.propId || "").trim();
+    if (!RESEARCH_SHEET_CONSUMER_PROP_IDS.has(propId) || consumerMap.has(propId)) return;
+    const evidence = item?.probeEvidence && typeof item.probeEvidence === "object" && !Array.isArray(item.probeEvidence)
+      ? item.probeEvidence
+      : {};
+    consumerMap.set(propId, {
+      propId,
+      tabName: safeDashboardDisplayText(item?.tabName, ""),
+      status: String(item?.status || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
+      readReady: item?.readReady === true,
+      rowCount: boundedResearchSheetCount(item?.rowCount),
+      cachedRowCount: boundedResearchSheetCount(item?.cachedRowCount),
+      observedAt: normalizeResearchSheetTimestamp(item?.observedAt || item?.rowsObservedAt),
+      probeEvidence: {
+        kind: safeDashboardDisplayText(evidence.kind, ""),
+        range: safeDashboardDisplayText(evidence.range, ""),
+        confirmed: evidence.confirmed === true,
+      },
+    });
+  });
+  const consumers = RESEARCH_SHEET_CONSUMERS.map((definition) => ({
+    ...definition,
+    ...(consumerMap.get(definition.propId) || {
+      tabName: "",
+      status: "not_reported",
+      readReady: false,
+      rowCount: 0,
+      cachedRowCount: 0,
+      observedAt: null,
+      probeEvidence: { kind: "", range: "", confirmed: false },
+    }),
+  }));
+  const verificationToken = typeof root.verificationToken === "string"
+    && /^[A-Za-z0-9_-]{32,128}$/.test(root.verificationToken)
+    ? root.verificationToken
+    : "";
+  const verifiedConsumerCount = boundedResearchSheetCount(root.verifiedConsumerCount, consumers.length);
+  const allConsumersReady = consumers.every((consumer) => (
+    consumer.readReady === true && consumer.probeEvidence.confirmed === true
+  ));
+  return {
+    sheetId,
+    canonicalUrl: sheetId ? `https://docs.google.com/spreadsheets/d/${sheetId}` : "",
+    sheetTitle: safeDashboardDisplayText(root.sheetTitle, ""),
+    baseConfigRevision: boundedResearchSheetCount(root.baseConfigRevision, 999_999),
+    status: String(root.status || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
+    expiresAt: normalizeResearchSheetTimestamp(root.expiresAt),
+    verificationToken,
+    totalConsumerCount: boundedResearchSheetCount(root.totalConsumerCount, consumers.length) || consumers.length,
+    verifiedConsumerCount,
+    consumers,
+    readyForConfirmation: root.readyForConfirmation === true
+      && Boolean(sheetId)
+      && Boolean(verificationToken)
+      && verifiedConsumerCount === consumers.length
+      && allConsumersReady,
+  };
+}
+
+function researchSheetHubConfiguredReference(data = state.researchSheetHub.data) {
+  if (!data?.configured) return "ยังไม่ได้ตั้ง Sheet กลางจากแถบ Google Sheet ด้านบน";
+  const reference = safeDashboardDisplayText(data.sheetId || data.sheetReferenceMasked, "Google Sheet กลาง");
+  const revision = safeDashboardDisplayText(data.configRevision, "");
+  return revision ? `${reference} • Config r${revision}` : reference;
+}
+
+function researchSheetHubFailureReason(data = null, error = null) {
+  const body = error?.body && typeof error.body === "object" && !Array.isArray(error.body)
+    ? error.body
+    : {};
+  const rawCode = String(
+    data?.lastErrorCode
+      || data?.adapterStatus
+      || data?.status
+      || body.code
+      || body.errorCode
+      || body.error
+      || "verification_failed",
+  ).trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 120);
+  const reasons = {
+    auth_required: "Backend ยังไม่มี Google OAuth สำหรับเปิด Sheet นี้",
+    auth_expired: "สิทธิ์ Google ของ Backend หมดอายุ กรุณาเชื่อมสิทธิ์ใหม่",
+    auth_unavailable: "Backend ยังเรียกใช้สิทธิ์ Google ไม่ได้",
+    permission_denied: "บัญชีของ Backend ไม่มีสิทธิ์อ่านหรือเขียน Google Sheet นี้",
+    schema_mismatch: "ชื่อแท็บหรือหัวคอลัมน์ของ 3 แท็บไม่ตรงกับ Schema ที่ระบบกำหนด",
+    spreadsheet_not_found: "Backend หา Google Sheet จาก ID นี้ไม่พบ",
+    google_api_unavailable: "บริการ Google Sheets API ยังไม่พร้อมตอบกลับ",
+    verification_required: "Backend บันทึก ID แล้ว แต่ยังไม่ได้ยืนยันการอ่านทั้ง 3 แท็บ",
+    verification_failed: "Backend ยังยืนยันการเชื่อมต่อ Google Sheet ไม่ครบ",
+    read_ready: "Backend อ่าน Sheet ได้แล้ว แต่ยัง Apply สิทธิ์เขียนให้อุปกรณ์ไม่ครบ",
+    read_ready_write_unverified: "Backend อ่าน Sheet ได้แล้ว แต่ยังยืนยันการเขียนไม่ครบ",
+  };
+  const backendMessage = safeDashboardDisplayText(body.message, "");
+  const reason = reasons[rawCode] || backendMessage || "Backend ยังยืนยันการเชื่อมต่อ Google Sheet ไม่ครบ";
+  return `${reason} (${rawCode || "verification_failed"})`;
+}
+
+function clearResearchSheetHubPhaseTimers() {
+  const hub = state.researchSheetHub;
+  (hub.phaseTimers || []).forEach((timerId) => window.clearTimeout(timerId));
+  hub.phaseTimers = [];
+}
+
+function scheduleResearchSheetHubPhases() {
+  const hub = state.researchSheetHub;
+  clearResearchSheetHubPhaseTimers();
+  const advance = (phase, delayMs) => {
+    const timerId = window.setTimeout(() => {
+      if (!hub.inFlight || hub.operation !== "inspect") return;
+      hub.phase = phase;
+      renderResearchSheetHub();
+    }, delayMs);
+    hub.phaseTimers.push(timerId);
+  };
+  advance("verifying", 320);
+}
+
+function renderResearchSheetHubProgress() {
+  const hub = state.researchSheetHub;
+  const progress = els.researchSheetHubProgress;
+  if (!progress) return;
+  progress.hidden = !hub.showProgress;
+  if (progress.hidden) return;
+  const phases = ["inspecting", "verifying", "activating"];
+  const activeIndex = phases.indexOf(hub.phase);
+  const failureIndex = phases.indexOf(hub.failurePhase);
+  progress.querySelectorAll("[data-phase]").forEach((step, index) => {
+    let stepState = "pending";
+    if (hub.phase === "success") stepState = "done";
+    else if (hub.phase === "awaiting_confirmation") {
+      stepState = index < 2 ? "done" : "pending";
+    }
+    else if (hub.phase === "error") {
+      if (index < failureIndex) stepState = "done";
+      else if (index === Math.max(0, failureIndex)) stepState = "error";
+    } else if (activeIndex >= 0) {
+      if (index < activeIndex) stepState = "done";
+      else if (index === activeIndex) stepState = "active";
+    }
+    step.dataset.state = stepState;
+    if (stepState === "active") step.setAttribute("aria-current", "step");
+    else step.removeAttribute("aria-current");
+    const stateLabel = step.querySelector(".research-sheet-progress-state");
+    if (stateLabel) {
+      stateLabel.textContent = {
+        pending: "รอดำเนินการ",
+        active: "กำลังตรวจสอบ…",
+        done: "สำเร็จ",
+        error: "ติดขัด",
+      }[stepState];
+    }
+  });
+}
+
+function researchSheetConsumer(propId) {
+  return state.researchSheetHub.data?.consumers?.find((item) => item.propId === propId) || null;
+}
+
+function researchSheetConsumerPresentation(propId, { requiresWrite = null } = {}) {
+  const hub = state.researchSheetHub;
+  const data = hub.data;
+  const consumer = researchSheetConsumer(propId);
+  if (hub.status === "loading") {
+    return { tone: "working", label: "กำลังตรวจ Sheet กลาง", detail: "กำลังรอสถานะจาก Backend", verifiedReady: false, consumer };
+  }
+  if (hub.status === "error") {
+    return { tone: "error", label: "ตรวจ Sheet กลางไม่สำเร็จ", detail: hub.message, verifiedReady: false, consumer };
+  }
+  if (!data?.configured) {
+    return { tone: "neutral", label: "ยังไม่ได้ตั้ง Sheet กลาง", detail: "กรอก URL หรือ Sheet ID ที่แถบ Google Sheet ด้านบน", verifiedReady: false, consumer };
+  }
+  if (!consumer) {
+    return { tone: "warning", label: "Backend ยังไม่ส่งสถานะ", detail: "พบการตั้งค่า Sheet กลาง แต่ยังไม่มีสถานะของอุปกรณ์นี้", verifiedReady: false, consumer };
+  }
+  const effectiveRequiresWrite = typeof requiresWrite === "boolean"
+    ? requiresWrite
+    : consumer.requiresWrite === true;
+  const statusIsReady = ["ready", "connected"].includes(consumer.status)
+    || (!effectiveRequiresWrite && consumer.readReady === true && consumer.status === "read_ready_write_unverified");
+  const writeRequirementMet = !effectiveRequiresWrite || consumer.writeReady === true;
+  const verifiedReady = statusIsReady
+    && consumer.readReady === true
+    && writeRequirementMet;
+  if (verifiedReady) {
+    return {
+      tone: "ready",
+      label: effectiveRequiresWrite ? "อ่านและเขียนพร้อม" : "อ่านพร้อม",
+      detail: `${consumer.tabName || "Backend ยังไม่ระบุ Tab"} • Backend ยืนยันพร้อมครบ`,
+      verifiedReady: true,
+      consumer,
+    };
+  }
+  if ([
+    "failed",
+    "error",
+    "blocked",
+    "auth_required",
+    "auth_expired",
+    "permission_denied",
+    "schema_mismatch",
+    "spreadsheet_not_found",
+  ].includes(consumer.status)) {
+    return {
+      tone: "error",
+      label: "Sheet กลางติดขัด",
+      detail: `${consumer.tabName || "ยังไม่ระบุ Tab"} • ${data.lastErrorCode || consumer.status}`,
+      verifiedReady: false,
+      consumer,
+    };
+  }
+  const readiness = [
+    consumer.readReady ? "อ่านพร้อม" : "ยังไม่ยืนยันอ่าน",
+    effectiveRequiresWrite
+      ? (consumer.writeReady ? "เขียนพร้อม" : "ยังไม่ยืนยันเขียน")
+      : "อ่านอย่างเดียวตามสัญญา",
+  ].join(" • ");
+  return {
+    tone: "warning",
+    label: readiness,
+    detail: `${consumer.tabName || "Backend ยังไม่ระบุ Tab"} • ${consumer.status || "รอตรวจ"}`,
+    verifiedReady: false,
+    consumer,
+  };
+}
+
+function researchSheetHardError(value) {
+  return [
+    "auth_required",
+    "auth_expired",
+    "auth_unavailable",
+    "permission_denied",
+    "schema_mismatch",
+    "spreadsheet_not_found",
+    "google_api_unavailable",
+    "failed",
+    "error",
+  ].includes(String(value || "").trim().toLowerCase());
+}
+
+function researchSheetActivePresentation(data = state.researchSheetHub.data) {
+  if (!data?.configured) {
+    return { visible: false, tone: "neutral", title: "ยังไม่ได้เลือก Google Sheet", detail: "" };
+  }
+  const total = RESEARCH_SHEET_CONSUMERS.length;
+  const applied = Math.min(Number(data.appliedConsumerCount) || 0, total);
+  const verified = Math.min(Number(data.verifiedConsumerCount) || 0, total);
+  const currentRevisionReady = Boolean(data.configRevision)
+    && data.activeConfigRevision === data.configRevision
+    && Array.isArray(data.consumers)
+    && data.consumers.length === total
+    && data.consumers.every((consumer) => consumer.configRevision === data.configRevision);
+  const currentRevisionVerified = data.connected === true
+    && data.readReady === true
+    && data.operational === true
+    && data.allConsumersApplied === true
+    && applied === total
+    && data.allConsumersVerified === true
+    && verified === total
+    && currentRevisionReady;
+  const hardError = researchSheetHardError(data.adapterStatus) || Boolean(data.lastErrorCode);
+  if (data.active !== true) {
+    return {
+      visible: true,
+      tone: hardError ? "error" : "warning",
+      title: "บันทึก ID แล้ว แต่ยังไม่เปิดใช้",
+      detail: hardError ? researchSheetHubFailureReason(data) : "ต้องตรวจผ่านและยืนยันก่อนจึงจะ Apply ให้ระบบ",
+    };
+  }
+  if (!currentRevisionVerified || hardError) {
+    return {
+      visible: true,
+      tone: "error",
+      title: "กำหนดให้ใช้ Sheet นี้ แต่การเชื่อมต่อขัดข้อง",
+      detail: researchSheetHubFailureReason(data),
+    };
+  }
+  return {
+    visible: true,
+    tone: "ready",
+    title: "กำลังใช้ Google Sheet นี้อยู่",
+    detail: `Backend ยืนยันการอ่าน Revision ปัจจุบันครบ ${verified}/${total} แท็บ`,
+  };
+}
+
+function researchSheetObservedLabel(value) {
+  return value ? `ตรวจจริง ${formatThaiDateTime(value)}` : "Backend ยังไม่ส่งเวลาตรวจ";
+}
+
+function renderResearchSheetHubLifecycle() {
+  const container = els.researchSheetHubLifecycle;
+  if (!container) return;
+  const data = state.researchSheetHub.data;
+  container.replaceChildren();
+  const total = RESEARCH_SHEET_CONSUMERS.length;
+  const applied = Math.min(Number(data?.appliedConsumerCount) || 0, total);
+  const verified = Math.min(Number(data?.verifiedConsumerCount) || 0, total);
+  const activePresentation = researchSheetActivePresentation(data);
+  [
+    ["บันทึก", data?.configured === true, data?.configured ? `Config r${data.configRevision || "?"}` : "ยังไม่บันทึก"],
+    ["Apply", data?.allConsumersApplied === true && applied === total, `${applied}/${total}`],
+    ["ตรวจสอบ", data?.allConsumersVerified === true && verified === total, `${verified}/${total}`],
+    ["Active", activePresentation.tone === "ready", activePresentation.title],
+  ].forEach(([label, ready, detail], index) => {
+    const item = document.createElement("span");
+    const name = document.createElement("strong");
+    const value = document.createElement("small");
+    item.dataset.tone = activePresentation.tone === "error"
+      ? "error"
+      : (ready ? "ready" : "warning");
+    name.textContent = label;
+    value.textContent = detail;
+    item.append(name, value);
+    container.appendChild(item);
+  });
+}
+
+function renderResearchSheetHubLinkedSystems() {
+  const container = els.researchSheetHubLinkedSystems;
+  if (!container) return;
+  const data = state.researchSheetHub.data;
+  const activePresentation = researchSheetActivePresentation(data);
+  container.replaceChildren();
+  (data?.linkedSystems || []).forEach((system) => {
+    const card = document.createElement("article");
+    const heading = document.createElement("div");
+    const name = document.createElement("strong");
+    const status = document.createElement("b");
+    const detail = document.createElement("small");
+    const trulyReady = activePresentation.tone === "ready" && system.ready === true;
+    const tone = trulyReady ? "ready" : (activePresentation.tone === "error" || researchSheetHardError(system.status) ? "error" : "warning");
+    card.dataset.tone = tone;
+    name.textContent = system.labelTh;
+    status.textContent = trulyReady ? "เชื่อมแล้ว" : (tone === "error" ? "เชื่อมติดขัด" : "รอยืนยัน");
+    detail.textContent = `${system.tabName || "ยังไม่ระบุ Tab"} • ${system.rowCount} แถว • ${researchSheetObservedLabel(system.observedAt)}`;
+    heading.append(name, status);
+    card.append(heading, detail);
+    container.appendChild(card);
+  });
+}
+
+function renderResearchSheetHubInspection() {
+  const hub = state.researchSheetHub;
+  const preview = hub.preview;
+  if (!els.researchSheetHubInspection) return;
+  els.researchSheetHubInspection.hidden = !preview;
+  if (!preview) return;
+  const ready = preview.readyForConfirmation === true;
+  const tone = ready ? "ready" : (researchSheetHardError(preview.status) ? "error" : "warning");
+  if (els.researchSheetHubInspectionTitle) {
+    els.researchSheetHubInspectionTitle.textContent = preview.sheetTitle || "Google Sheet ที่ Backend ตรวจพบ";
+  }
+  if (els.researchSheetHubInspectionReference) {
+    els.researchSheetHubInspectionReference.textContent = `Sheet ID: ${preview.sheetId || "ไม่พบ ID"} • ตรวจ ${preview.verifiedConsumerCount}/${preview.totalConsumerCount} แท็บ${preview.expiresAt ? ` • ผลตรวจหมดอายุ ${formatThaiDateTime(preview.expiresAt)}` : ""}`;
+  }
+  if (els.researchSheetHubInspectionStatus) {
+    els.researchSheetHubInspectionStatus.dataset.tone = tone;
+    els.researchSheetHubInspectionStatus.textContent = ready
+      ? "ตรวจผ่าน • พร้อมให้ยืนยัน"
+      : researchSheetHubFailureReason(preview);
+  }
+  if (els.researchSheetHubInspectionTabs) {
+    els.researchSheetHubInspectionTabs.replaceChildren();
+    preview.consumers.forEach((consumer) => {
+      const card = document.createElement("article");
+      const heading = document.createElement("div");
+      const tab = document.createElement("strong");
+      const status = document.createElement("b");
+      const rows = document.createElement("span");
+      const evidence = document.createElement("small");
+      const consumerTone = consumer.readReady && consumer.probeEvidence.confirmed
+        ? "ready"
+        : (researchSheetHardError(consumer.status) ? "error" : "warning");
+      card.dataset.tone = consumerTone;
+      tab.textContent = consumer.tabName || "Backend ยังไม่ระบุ Tab";
+      status.textContent = consumerTone === "ready" ? "อ่านได้จริง" : consumer.status;
+      rows.textContent = `${consumer.rowCount} แถว • ${researchSheetObservedLabel(consumer.observedAt)}`;
+      evidence.textContent = consumer.probeEvidence.confirmed
+        ? `หลักฐาน ${consumer.probeEvidence.kind || "read_probe"}${consumer.probeEvidence.range ? ` • ${consumer.probeEvidence.range}` : ""}`
+        : "Backend ยังไม่ยืนยันหลักฐานการอ่าน";
+      heading.append(tab, status);
+      card.append(heading, rows, evidence);
+      els.researchSheetHubInspectionTabs.appendChild(card);
+    });
+  }
+  if (els.researchSheetHubActivate) {
+    els.researchSheetHubActivate.hidden = !ready;
+    els.researchSheetHubActivate.disabled = hub.inFlight || !ready;
+  }
+}
+
+function researchSheetGoogleAuthIsBusy() {
+  const auth = state.researchSheetHub.googleAuth;
+  return Boolean(auth.inFlight || auth.pollInFlight || auth.pollTimer || auth.status === "connecting");
+}
+
+function researchSheetGoogleAuthPresentation() {
+  const hub = state.researchSheetHub;
+  const auth = hub.googleAuth;
+  const data = auth.data;
+  const hubAuthStatus = String(hub.data?.authStatus || "").toLowerCase();
+  const hubProvesConnected = hub.data?.connected === true
+    && ["configured", "connected", "authenticated", "authorized", "ready"].includes(hubAuthStatus);
+  const connected = data?.connected === true || hubProvesConnected;
+  const endpointReady = auth.status === "ready" && Boolean(data);
+  if (auth.inFlight && auth.operation === "disconnect") {
+    return {
+      tone: "working",
+      badge: "กำลังยกเลิก",
+      title: "กำลังยกเลิกการเชื่อมต่อ Google",
+      detail: "รอ Local Bridge ลบสิทธิ์ที่บันทึกไว้ โดย Sheet ID จะยังอยู่",
+      connected,
+      startAvailable: false,
+      endpointReady,
+    };
+  }
+  if (researchSheetGoogleAuthIsBusy()) {
+    return {
+      tone: "working",
+      badge: "รอ Google",
+      title: "กำลังเชื่อมบัญชี Google",
+      detail: auth.message || "ยืนยันสิทธิ์ในหน้าต่าง Google แล้วหน้านี้จะตรวจสถานะให้อัตโนมัติ",
+      connected: false,
+      startAvailable: false,
+      endpointReady,
+    };
+  }
+  if (auth.status === "error") {
+    return {
+      tone: "error",
+      badge: "ตรวจ Backend ไม่ได้",
+      title: "ยังตรวจสถานะบัญชี Google ไม่ได้",
+      detail: auth.message || "ตรวจว่า Local Bridge รุ่นนี้มี Google OAuth endpoint และตั้ง Client ไว้แล้ว",
+      connected: false,
+      startAvailable: false,
+      endpointReady: false,
+    };
+  }
+  if (connected) {
+    const account = data?.accountHint ? ` • ${data.accountHint}` : "";
+    const client = data?.clientHint ? ` • Client ${data.clientHint}` : "";
+    return {
+      tone: "ready",
+      badge: "เชื่อมแล้ว",
+      title: "เชื่อมบัญชี Google แล้ว",
+      detail: auth.message || data?.messageTh || `สิทธิ์ถูกเก็บที่ Local Bridge${account}${client} • ต่อไปใส่เฉพาะ Sheet ID เพื่อตรวจสอบและเปิดใช้`,
+      connected: true,
+      startAvailable: endpointReady && data?.startAvailable !== false,
+      endpointReady,
+    };
+  }
+  if (auth.status === "loading") {
+    return {
+      tone: "working",
+      badge: "กำลังตรวจ",
+      title: "กำลังตรวจสถานะบัญชี Google",
+      detail: "กำลังถาม Local Bridge ว่าตั้ง OAuth Client และเชื่อมบัญชีไว้แล้วหรือยัง",
+      connected: false,
+      startAvailable: false,
+      endpointReady,
+    };
+  }
+  if (data?.requiresAdminSetup) {
+    return {
+      tone: "error",
+      badge: "ผู้ดูแลต้องตั้งค่า",
+      title: "Backend ยังไม่ได้ตั้ง Google OAuth Client",
+      detail: data.messageTh || "เลือกไฟล์ Desktop OAuth Client JSON ผ่านตัวตั้งค่าของเครื่องหนึ่งครั้งก่อน • ไม่ต้องใส่ Token หรือ Client Secret ที่หน้านี้ และ Credential จะไม่ผ่าน Browser",
+      connected: false,
+      startAvailable: false,
+      endpointReady,
+    };
+  }
+  if (data?.clientConfigured) {
+    const client = data.clientHint ? ` • Client ${data.clientHint}` : "";
+    return {
+      tone: "warning",
+      badge: "ยังไม่เชื่อม",
+      title: "เชื่อมบัญชี Google ก่อนใช้งาน Sheet",
+      detail: data.messageTh || `ตั้งค่า Desktop OAuth ที่ Local Bridge แล้ว${client} • กดเชื่อมครั้งเดียว ยืนยันใน Google แล้วกลับมาใส่เฉพาะ Sheet ID`,
+      connected: false,
+      startAvailable: data.startAvailable === true,
+      endpointReady,
+    };
+  }
+  return {
+    tone: "neutral",
+    badge: "ยังไม่เชื่อม",
+    title: "ตรวจสถานะบัญชี Google",
+    detail: "ตั้งค่า Desktop OAuth JSON ที่เครื่องหนึ่งครั้ง แล้วหน้านี้จะเหลือเฉพาะปุ่มเชื่อม Google • Credential ไม่ผ่าน Browser",
+    connected: false,
+    startAvailable: false,
+    endpointReady,
+  };
+}
+
+function renderResearchSheetGoogleAuth() {
+  if (!els.researchSheetGoogleAuth) return;
+  const auth = state.researchSheetHub.googleAuth;
+  const presentation = researchSheetGoogleAuthPresentation();
+  const busy = researchSheetGoogleAuthIsBusy();
+  els.researchSheetGoogleAuth.dataset.tone = presentation.tone;
+  els.researchSheetGoogleAuth.setAttribute("aria-busy", String(busy || auth.status === "loading"));
+  if (els.researchSheetGoogleAuthStatus) {
+    els.researchSheetGoogleAuthStatus.dataset.tone = presentation.tone;
+    els.researchSheetGoogleAuthStatus.textContent = presentation.badge;
+  }
+  if (els.researchSheetGoogleAuthTitle) els.researchSheetGoogleAuthTitle.textContent = presentation.title;
+  if (els.researchSheetGoogleAuthDetail) els.researchSheetGoogleAuthDetail.textContent = presentation.detail;
+  if (els.researchSheetGoogleConnect) {
+    els.researchSheetGoogleConnect.textContent = busy
+      ? "กำลังรอการยืนยัน…"
+      : (presentation.connected ? "เชื่อมบัญชี Google ใหม่" : "เชื่อมบัญชี Google ครั้งเดียว");
+    els.researchSheetGoogleConnect.disabled = busy || !presentation.startAvailable;
+    els.researchSheetGoogleConnect.classList.toggle("is-loading", busy);
+    els.researchSheetGoogleConnect.setAttribute("aria-busy", String(busy));
+    els.researchSheetGoogleConnect.title = presentation.startAvailable
+      ? "เปิดหน้า Google เพื่อยืนยันสิทธิ์หนึ่งครั้ง"
+      : presentation.detail;
+  }
+  if (els.researchSheetGoogleDisconnect) {
+    els.researchSheetGoogleDisconnect.hidden = !presentation.connected;
+    els.researchSheetGoogleDisconnect.disabled = busy || !presentation.endpointReady;
+  }
+}
+
+function researchSheetHubSummaryPresentation() {
+  const hub = state.researchSheetHub;
+  const data = hub.data;
+  const auth = researchSheetGoogleAuthPresentation();
+  if (hub.inFlight && hub.operation === "inspect") return { tone: "working", label: "กำลังตรวจ Google Sheet", readyCount: 0, allReady: false };
+  if (hub.inFlight && hub.operation === "activate") return { tone: "working", label: "กำลังเปิดใช้ Google Sheet", readyCount: 0, allReady: false };
+  if (hub.preview?.readyForConfirmation) return { tone: "ready", label: "ตรวจผ่าน • รอยืนยันใช้ชีตนี้", readyCount: hub.preview.verifiedConsumerCount, allReady: false };
+  if (hub.preview) return { tone: researchSheetHardError(hub.preview.status) ? "error" : "warning", label: "ตรวจไม่ผ่าน • ยังเปิดใช้ไม่ได้", readyCount: hub.preview.verifiedConsumerCount, allReady: false };
+  if (hub.dirty) return { tone: "warning", label: "แก้ไข ID แล้ว • รอตรวจสอบ", readyCount: 0, allReady: false };
+  if (hub.status === "loading") return { tone: "working", label: "กำลังตรวจ Backend", readyCount: 0 };
+  if (hub.status === "error") return { tone: "error", label: "โหลดสถานะไม่สำเร็จ", readyCount: 0 };
+  if (!auth.connected) return {
+    tone: auth.tone,
+    label: auth.title,
+    readyCount: 0,
+    allReady: false,
+  };
+  if (!data?.configured) return { tone: "neutral", label: "ยังไม่ได้ตั้งค่า", readyCount: 0 };
+  // Connection success is proved by current-revision read verification for
+  // every fixed consumer. Write/read-back readiness remains a separate device
+  // status and must not make a readable Sheet look disconnected.
+  const readyCount = RESEARCH_SHEET_CONSUMERS.filter(({ propId }) => (
+    researchSheetConsumer(propId)?.readReady === true
+  )).length;
+  const totalTabs = RESEARCH_SHEET_CONSUMERS.length;
+  const appliedCount = Math.min(Number(data.appliedConsumerCount) || 0, totalTabs);
+  const verifiedCount = Math.min(Number(data.verifiedConsumerCount) || 0, totalTabs);
+  const allApplied = data.allConsumersApplied === true && appliedCount === totalTabs;
+  const allVerified = data.allConsumersVerified === true
+    && verifiedCount === totalTabs
+    && readyCount === totalTabs;
+  const allReady = data.active === true
+    && data.connected === true
+    && data.readReady === true
+    && allApplied
+    && allVerified;
+  const activePresentation = researchSheetActivePresentation(data);
+  return {
+    tone: activePresentation.tone,
+    label: activePresentation.title,
+    readyCount,
+    appliedCount,
+    verifiedCount,
+    allReady,
+    allApplied,
+    allVerified,
+    totalTabs,
+  };
+}
+
+function researchSheetHubPopoverIsOpen() {
+  return Boolean(els.researchSheetHubPopover && !els.researchSheetHubPopover.hidden);
+}
+
+function setResearchSheetHubPanelOpen(open, { discardPreview = false, focusToggle = false } = {}) {
+  const hub = state.researchSheetHub;
+  const wantsOpen = Boolean(open);
+  if (!wantsOpen && (hub.inFlight || researchSheetGoogleAuthIsBusy())) return false;
+  hub.panelOpen = wantsOpen;
+  if (!wantsOpen && discardPreview) {
+    hub.preview = null;
+    hub.phase = "idle";
+    hub.failurePhase = "";
+    hub.showProgress = false;
+  }
+  renderResearchSheetHub();
+  if (!wantsOpen && focusToggle) {
+    window.requestAnimationFrame(() => els.researchSheetHubDetailsToggle?.focus());
+  }
+  return true;
+}
+
+function closeResearchSheetHubPopover({ discardPreview = true, focusToggle = true } = {}) {
+  if (!researchSheetHubPopoverIsOpen()) return false;
+  // An inspection/activation must remain visible until its request settles.
+  // This also prevents Escape from accidentally closing the Mission modal
+  // behind the global Sheet panel while a write-like action is in flight.
+  if (state.researchSheetHub.inFlight || researchSheetGoogleAuthIsBusy()) return true;
+  setResearchSheetHubPanelOpen(false, { discardPreview, focusToggle });
+  return true;
+}
+
+function renderResearchSheetHub() {
+  if (!els.researchSheetHub) return;
+  const hub = state.researchSheetHub;
+  // Research Sheet is a global workspace dependency. Keep its compact control
+  // visible in the top bar instead of coupling it to the Mission-table modal.
+  els.researchSheetHub.hidden = false;
+  const popoverOpen = (hub.panelOpen || hub.inFlight || Boolean(hub.preview))
+    || researchSheetGoogleAuthIsBusy();
+  if (els.researchSheetHubPopover) {
+    els.researchSheetHubPopover.hidden = !popoverOpen;
+    els.researchSheetHubPopover.setAttribute("aria-hidden", String(!popoverOpen));
+  }
+  if (els.researchSheetHubDetailsToggle) {
+    els.researchSheetHubDetailsToggle.setAttribute("aria-expanded", String(popoverOpen));
+    els.researchSheetHubDetailsToggle.setAttribute("aria-controls", "researchSheetHubPopover");
+  }
+  const summary = researchSheetHubSummaryPresentation();
+  const activePresentation = researchSheetActivePresentation(hub.data);
+  els.researchSheetHub.setAttribute("aria-busy", String(
+    hub.inFlight || hub.status === "loading" || researchSheetGoogleAuthIsBusy(),
+  ));
+  if (els.researchSheetHubStatus) {
+    els.researchSheetHubStatus.dataset.tone = summary.tone;
+    els.researchSheetHubStatus.textContent = summary.label;
+  }
+  if (els.researchSheetHubReference) {
+    const configuredSheetId = hub.data?.rawSheetIdExposed === true
+      ? normalizeResearchSheetReference(hub.data.sheetId)
+      : "";
+    if (
+      configuredSheetId
+      && !hub.dirty
+      && !hub.preview
+      && !hub.inFlight
+      && els.researchSheetHubReference.value !== configuredSheetId
+    ) {
+      els.researchSheetHubReference.value = configuredSheetId;
+      hub.draftReference = configuredSheetId;
+      hub.submittedReference = configuredSheetId;
+    }
+    els.researchSheetHubReference.disabled = hub.inFlight;
+    els.researchSheetHubReference.placeholder = hub.data?.configured
+      ? `บันทึกแล้ว: ${researchSheetHubConfiguredReference()} • วาง URL/ID ใหม่เมื่อต้องการเปลี่ยน`
+      : "วาง URL หรือ Sheet ID แล้วใช้ร่วมกันทั้ง 3 แท็บ";
+  }
+  if (els.researchSheetHubApply) {
+    const googleAuth = researchSheetGoogleAuthPresentation();
+    els.researchSheetHubApply.disabled = hub.inFlight || researchSheetGoogleAuthIsBusy() || !googleAuth.connected;
+    const inFlightLabel = hub.operation === "loading"
+      ? "กำลังโหลดสถานะ…"
+      : (hub.operation === "activate"
+          ? "กำลังเปิดใช้ Google Sheet…"
+          : ({
+              inspecting: "กำลังส่งไปตรวจสอบ…",
+              verifying: "กำลังอ่านจริง 3 แท็บ…",
+            }[hub.phase] || "กำลังตรวจ Google Sheet…"));
+    els.researchSheetHubApply.textContent = hub.inFlight
+      ? inFlightLabel
+      : (hub.preview ? "ตรวจสอบ Google Sheet นี้อีกครั้ง" : "ตรวจสอบ Google Sheet");
+    els.researchSheetHubApply.classList.toggle("is-loading", hub.inFlight);
+    els.researchSheetHubApply.setAttribute("aria-busy", String(hub.inFlight));
+  }
+  if (els.researchSheetHubCancel) {
+    els.researchSheetHubCancel.disabled = hub.inFlight;
+  }
+  if (els.researchSheetHubActive) {
+    els.researchSheetHubActive.hidden = !activePresentation.visible;
+    els.researchSheetHubActive.dataset.tone = activePresentation.tone;
+    const title = els.researchSheetHubActive.querySelector("strong");
+    if (title) title.textContent = activePresentation.title;
+  }
+  if (els.researchSheetHubActiveReference) {
+    const title = hub.data?.sheetTitle ? `${hub.data.sheetTitle} • ` : "";
+    const activated = hub.data?.activationConfirmedAt
+      ? ` • เปิดใช้ ${formatThaiDateTime(hub.data.activationConfirmedAt)}`
+      : "";
+    els.researchSheetHubActiveReference.textContent = `${title}${researchSheetHubConfiguredReference()}${activated} • ${activePresentation.detail}`;
+  }
+  renderResearchSheetGoogleAuth();
+  renderResearchSheetHubLifecycle();
+  renderResearchSheetHubLinkedSystems();
+  renderResearchSheetHubInspection();
+  renderResearchSheetHubProgress();
+  if (els.researchSheetHubConsumers) {
+    els.researchSheetHubConsumers.replaceChildren();
+    RESEARCH_SHEET_CONSUMERS.forEach((definition) => {
+      const presentation = researchSheetConsumerPresentation(definition.propId);
+      const chip = document.createElement("span");
+      const name = document.createElement("strong");
+      const status = document.createElement("span");
+      chip.className = "research-sheet-consumer-chip";
+      chip.dataset.propId = definition.propId;
+      chip.dataset.tone = presentation.tone;
+      chip.title = presentation.detail;
+      name.textContent = definition.labelTh;
+      status.textContent = `${presentation.label} • ${presentation.consumer?.rowCount || 0} แถว`;
+      chip.append(name, status);
+      els.researchSheetHubConsumers.appendChild(chip);
+    });
+  }
+  if (els.researchSheetHubMessage) {
+    const outbox = hub.data?.outbox;
+    const backendStatus = hub.data?.configured
+      ? `${activePresentation.title} • ${researchSheetHubConfiguredReference()} • คิวซิงก์: รอ ${outbox?.pending || 0} • ไม่สำเร็จ ${outbox?.failed || 0} • สำเร็จ ${outbox?.synced || 0}`
+      : "หน้าเว็บรับเฉพาะ URL หรือ Sheet ID และไม่รับ Token หรือ Credential";
+    els.researchSheetHubMessage.dataset.tone = hub.tone;
+    els.researchSheetHubMessage.textContent = hub.message || backendStatus;
+  }
+}
+
+function refreshOpenResearchSheetConsumer() {
+  renderResearchSheetHub();
+  if (
+    state.modal.open
+    && state.modal.type === "prop"
+    && RESEARCH_SHEET_LINKED_PROP_IDS.has(state.modal.id)
+  ) {
+    const subject = getModalSubject();
+    if (subject) renderWorkflowDashboard(subject, getPropertyRole(subject), state.propReports[state.modal.id] || {});
+  }
+}
+
+async function loadResearchSheetHub({ force = false, signal = null } = {}) {
+  const hub = state.researchSheetHub;
+  const cacheFresh = hub.data
+    && Number.isFinite(hub.lastLoadedAt)
+    && Date.now() - hub.lastLoadedAt < RESEARCH_SHEET_HUB_MAX_AGE_MS;
+  if (hub.inFlight || (!force && cacheFresh)) {
+    renderResearchSheetHub();
+    return hub.data;
+  }
+  hub.inFlight = true;
+  hub.operation = "loading";
+  hub.status = "loading";
+  hub.message = "กำลังอ่านการตั้งค่า Google Sheet กลางจาก Backend";
+  hub.tone = "working";
+  refreshOpenResearchSheetConsumer();
+  try {
+    const payload = await fetchJson(RESEARCH_SHEET_HUB_ENDPOINT, {
+      timeoutMs: PROP_REPORT_FETCH_TIMEOUT_MS,
+      signal,
+    });
+    if (payload?.ok !== true || !payload?.researchSheet) throw new Error("Backend ยังไม่ยืนยัน Research Sheet Hub");
+    hub.data = normalizeResearchSheetHub(payload);
+    hub.status = "ready";
+    hub.lastLoadedAt = Date.now();
+    hub.message = "";
+    hub.tone = "neutral";
+    return hub.data;
+  } catch (error) {
+    if (signal?.aborted || error?.name === "AbortError") return hub.data;
+    hub.status = "error";
+    hub.message = safeDashboardDisplayText(error?.message, "โหลดสถานะ Google Sheet กลางไม่สำเร็จ");
+    hub.tone = "error";
+    return null;
+  } finally {
+    hub.inFlight = false;
+    hub.operation = "";
+    refreshOpenResearchSheetConsumer();
+  }
+}
+
+async function loadResearchSheetGoogleAuth({ force = false, signal = null } = {}) {
+  const hub = state.researchSheetHub;
+  const auth = hub.googleAuth;
+  const cacheFresh = auth.data
+    && Number.isFinite(auth.lastLoadedAt)
+    && Date.now() - auth.lastLoadedAt < RESEARCH_SHEET_GOOGLE_AUTH_MAX_AGE_MS;
+  if (auth.inFlight || (!force && cacheFresh)) {
+    renderResearchSheetHub();
+    return auth.data;
+  }
+  auth.inFlight = true;
+  auth.operation = "loading";
+  auth.status = "loading";
+  auth.message = "กำลังตรวจสถานะบัญชี Google จาก Local Bridge";
+  auth.tone = "working";
+  renderResearchSheetHub();
+  try {
+    const payload = await fetchJson(RESEARCH_SHEET_GOOGLE_AUTH_ENDPOINT, {
+      timeoutMs: PROP_REPORT_FETCH_TIMEOUT_MS,
+      signal,
+    });
+    if (payload?.ok !== true) throw new Error("Backend ยังไม่ยืนยันสถานะ Google OAuth");
+    auth.data = normalizeResearchSheetGoogleAuth(payload);
+    auth.status = "ready";
+    auth.lastLoadedAt = Date.now();
+    auth.message = "";
+    auth.tone = auth.data.connected ? "success" : (auth.data.requiresAdminSetup ? "error" : "warning");
+    return auth.data;
+  } catch (error) {
+    if (signal?.aborted || error?.name === "AbortError") return auth.data;
+    auth.status = "error";
+    auth.message = researchSheetGoogleAuthFailureReason(error);
+    auth.tone = "error";
+    return null;
+  } finally {
+    auth.inFlight = false;
+    auth.operation = "";
+    renderResearchSheetHub();
+  }
+}
+
+function stopResearchSheetGoogleAuthPolling({ closePopup = false } = {}) {
+  const auth = state.researchSheetHub.googleAuth;
+  if (auth.pollTimer) window.clearTimeout(auth.pollTimer);
+  auth.pollTimer = null;
+  auth.pollStartedAt = 0;
+  auth.pollInFlight = false;
+  if (closePopup && auth.popup) {
+    try {
+      if (!auth.popup.closed) auth.popup.close();
+    } catch {
+      // A cross-origin OAuth popup may reject inspection during navigation.
+    }
+    auth.popup = null;
+  }
+}
+
+function scheduleResearchSheetGoogleAuthPoll(delayMs = RESEARCH_SHEET_GOOGLE_AUTH_POLL_INTERVAL_MS) {
+  const auth = state.researchSheetHub.googleAuth;
+  if (!auth.pollStartedAt) return;
+  if (auth.pollTimer) window.clearTimeout(auth.pollTimer);
+  auth.pollTimer = window.setTimeout(() => {
+    auth.pollTimer = null;
+    void pollResearchSheetGoogleAuth();
+  }, delayMs);
+}
+
+async function pollResearchSheetGoogleAuth() {
+  const hub = state.researchSheetHub;
+  const auth = hub.googleAuth;
+  if (!auth.pollStartedAt || auth.pollInFlight) return;
+  const pollStartedAt = auth.pollStartedAt;
+  if (Date.now() - pollStartedAt >= RESEARCH_SHEET_GOOGLE_AUTH_POLL_TIMEOUT_MS) {
+    stopResearchSheetGoogleAuthPolling({ closePopup: true });
+    auth.status = "error";
+    auth.message = researchSheetGoogleAuthFailureReason({ code: "timeout" });
+    auth.tone = "error";
+    renderResearchSheetHub();
+    return;
+  }
+  let popupClosed = false;
+  try {
+    popupClosed = Boolean(auth.popup?.closed);
+  } catch {
+    popupClosed = false;
+  }
+  auth.pollInFlight = true;
+  const data = await loadResearchSheetGoogleAuth({ force: true });
+  if (auth.pollStartedAt !== pollStartedAt) return;
+  auth.pollInFlight = false;
+  if (data?.connected === true) {
+    stopResearchSheetGoogleAuthPolling({ closePopup: true });
+    auth.status = "ready";
+    auth.message = "เชื่อมบัญชี Google สำเร็จ • ใส่ Sheet ID แล้วกดตรวจสอบได้เลย";
+    auth.tone = "success";
+    await loadResearchSheetHub({ force: true });
+    renderResearchSheetHub();
+    return;
+  }
+  if (auth.status === "error" || researchSheetGoogleAuthIsTerminalStatus(data?.status)) {
+    stopResearchSheetGoogleAuthPolling({ closePopup: true });
+    if (auth.status !== "error") {
+      auth.status = "error";
+      auth.message = data?.messageTh || researchSheetGoogleAuthFailureReason({ code: data?.status });
+      auth.tone = "error";
+    }
+    renderResearchSheetHub();
+    return;
+  }
+  if (popupClosed) {
+    stopResearchSheetGoogleAuthPolling();
+    auth.popup = null;
+    auth.status = "error";
+    auth.message = researchSheetGoogleAuthFailureReason({ code: "popup_closed" });
+    auth.tone = "error";
+    renderResearchSheetHub();
+    return;
+  }
+  auth.status = "connecting";
+  auth.message = "รอคุณยืนยันสิทธิ์ในหน้าต่าง Google • ระบบจะตรวจให้อัตโนมัติ";
+  auth.tone = "working";
+  scheduleResearchSheetGoogleAuthPoll();
+  renderResearchSheetHub();
+}
+
+async function startResearchSheetGoogleAuth() {
+  const hub = state.researchSheetHub;
+  const auth = hub.googleAuth;
+  if (researchSheetGoogleAuthIsBusy()) return null;
+  // Open synchronously inside the click handler so browsers do not classify
+  // the OAuth window as an unsolicited popup while the POST is pending.
+  const popup = window.open(
+    "about:blank",
+    "metafxGoogleSheetsOAuth",
+    "popup=yes,width=560,height=760,resizable=yes,scrollbars=yes",
+  );
+  if (!popup) {
+    auth.status = "error";
+    auth.message = researchSheetGoogleAuthFailureReason({ code: "popup_blocked" });
+    auth.tone = "error";
+    hub.panelOpen = true;
+    renderResearchSheetHub();
+    return null;
+  }
+  auth.popup = popup;
+  try {
+    popup.document.title = "กำลังเชื่อมบัญชี Google";
+    popup.document.body.textContent = "กำลังเตรียมหน้าต่างยืนยันสิทธิ์ Google…";
+  } catch {
+    // about:blank is normally same-origin; failure does not block OAuth.
+  }
+  auth.inFlight = true;
+  auth.operation = "connect";
+  auth.status = "connecting";
+  auth.message = "กำลังขอลิงก์ยืนยันสิทธิ์จาก Local Bridge";
+  auth.tone = "working";
+  hub.panelOpen = true;
+  renderResearchSheetHub();
+  try {
+    const payload = await postJson(RESEARCH_SHEET_GOOGLE_AUTH_START_ENDPOINT, {});
+    const authorizationUrl = normalizeResearchSheetAuthorizationUrl(
+      payload?.authorizationUrl
+        || payload?.auth?.authorizationUrl
+        || payload?.googleAuth?.authorizationUrl
+        || payload?.researchSheetAuth?.authorizationUrl,
+    );
+    if (payload?.ok !== true || !authorizationUrl) {
+      const error = new Error("Backend ยังไม่ส่ง Google authorization URL ที่ปลอดภัย");
+      error.body = payload;
+      throw error;
+    }
+    popup.location.replace(authorizationUrl);
+    auth.inFlight = false;
+    auth.operation = "";
+    auth.status = "connecting";
+    auth.message = "ยืนยันสิทธิ์ในหน้าต่าง Google แล้วระบบจะกลับมาตรวจสถานะให้อัตโนมัติ";
+    auth.pollStartedAt = Date.now();
+    scheduleResearchSheetGoogleAuthPoll(250);
+    renderResearchSheetHub();
+    return authorizationUrl;
+  } catch (error) {
+    try {
+      if (!popup.closed) popup.close();
+    } catch {
+      // Ignore cross-origin popup cleanup errors.
+    }
+    auth.popup = null;
+    auth.inFlight = false;
+    auth.operation = "";
+    auth.status = "error";
+    auth.message = researchSheetGoogleAuthFailureReason(error);
+    auth.tone = "error";
+    renderResearchSheetHub();
+    return null;
+  }
+}
+
+async function disconnectResearchSheetGoogleAuth() {
+  const auth = state.researchSheetHub.googleAuth;
+  if (researchSheetGoogleAuthIsBusy()) return null;
+  if (!window.confirm("ยกเลิกการเชื่อมบัญชี Google จาก Local Bridge ใช่ไหม? Sheet ID จะยังอยู่")) return null;
+  stopResearchSheetGoogleAuthPolling({ closePopup: true });
+  auth.inFlight = true;
+  auth.operation = "disconnect";
+  auth.message = "กำลังยกเลิกสิทธิ์ Google ที่ Local Bridge • Sheet ID จะยังอยู่";
+  auth.tone = "working";
+  renderResearchSheetHub();
+  try {
+    const payload = await postJson(RESEARCH_SHEET_GOOGLE_AUTH_DISCONNECT_ENDPOINT, {});
+    if (payload?.ok !== true) throw new Error("Backend ยังไม่ยืนยันการยกเลิกสิทธิ์ Google");
+    auth.inFlight = false;
+    auth.operation = "";
+    auth.data = normalizeResearchSheetGoogleAuth(payload);
+    auth.status = "ready";
+    auth.lastLoadedAt = 0;
+    auth.message = safeDashboardDisplayText(
+      payload?.messageTh,
+      auth.data.connected
+        ? "ลบสิทธิ์ที่บันทึกแล้ว แต่ Local Bridge ยังใช้สิทธิ์ Google จาก Environment อยู่"
+        : "ยกเลิกการเชื่อมบัญชี Google แล้ว • Sheet ID เดิมยังอยู่และจะยังไม่ถูกตรวจจนกว่าจะเชื่อมใหม่",
+    );
+    auth.tone = auth.data.connected ? "success" : "warning";
+    await Promise.all([
+      loadResearchSheetGoogleAuth({ force: true }),
+      loadResearchSheetHub({ force: true }),
+    ]);
+    renderResearchSheetHub();
+    return auth.data;
+  } catch (error) {
+    auth.status = "error";
+    auth.message = `ยังยกเลิกการเชื่อมต่อไม่ได้ • ${researchSheetGoogleAuthFailureReason(error)}`;
+    auth.tone = "error";
+    renderResearchSheetHub();
+    return null;
+  } finally {
+    auth.inFlight = false;
+    auth.operation = "";
+    renderResearchSheetHub();
+  }
+}
+
+async function inspectResearchSheetHub() {
+  const hub = state.researchSheetHub;
+  const input = els.researchSheetHubReference;
+  if (!input || hub.inFlight) return null;
+  if (!researchSheetGoogleAuthPresentation().connected) {
+    hub.panelOpen = true;
+    hub.message = "เชื่อมบัญชี Google ครั้งเดียวก่อน แล้วจึงตรวจสอบ Sheet ID นี้";
+    hub.tone = "warning";
+    renderResearchSheetHub();
+    els.researchSheetGoogleConnect?.focus();
+    return null;
+  }
+  input.setCustomValidity("");
+  const sheetId = normalizeResearchSheetReference(input.value);
+  if (!sheetId) {
+    input.setCustomValidity("กรุณาใส่ URL ของ Google Sheets หรือ Sheet ID ที่ถูกต้อง");
+    input.reportValidity();
+    return null;
+  }
+  hub.inFlight = true;
+  hub.operation = "inspect";
+  hub.status = "inspecting";
+  hub.phase = "inspecting";
+  hub.failurePhase = "";
+  hub.showProgress = true;
+  hub.preview = null;
+  hub.panelOpen = true;
+  hub.message = "กำลังตรวจ Google Sheet แบบไม่เปลี่ยนค่าที่ใช้งานอยู่ • Backend จะอ่านจริงทั้ง 3 แท็บ";
+  hub.tone = "working";
+  renderResearchSheetHub();
+  scheduleResearchSheetHubPhases();
+  try {
+    const payload = await postJson(RESEARCH_SHEET_HUB_INSPECT_ENDPOINT, {
+      googleSheetUrlOrId: sheetId,
+    });
+    if (payload?.ok !== true || !payload?.verificationPreview) {
+      throw new Error("Backend ยังไม่ส่งผลตรวจสอบ Google Sheet");
+    }
+    if (payload?.researchSheet) hub.data = normalizeResearchSheetHub(payload);
+    hub.preview = normalizeResearchSheetInspection(payload);
+    hub.status = "ready";
+    hub.lastLoadedAt = Date.now();
+    hub.draftReference = input.value;
+    if (hub.preview.readyForConfirmation) {
+      hub.phase = "awaiting_confirmation";
+      hub.failurePhase = "";
+      hub.message = `ตรวจผ่าน ${hub.preview.verifiedConsumerCount}/${hub.preview.totalConsumerCount} แท็บ • ตรวจชื่อ จำนวนแถว และเวลาตรวจ แล้วกด “ใช้ Google Sheet นี้”`;
+      hub.tone = "success";
+    } else {
+      hub.phase = "error";
+      hub.failurePhase = "verifying";
+      hub.message = `ตรวจ Google Sheet ไม่ผ่าน • ${researchSheetHubFailureReason(hub.preview)} • Sheet ที่ใช้งานอยู่เดิมไม่ถูกเปลี่ยน`;
+      hub.tone = "error";
+    }
+    return hub.preview;
+  } catch (error) {
+    hub.status = hub.data ? "ready" : "error";
+    hub.phase = "error";
+    hub.failurePhase = "inspecting";
+    hub.draftReference = input.value;
+    hub.dirty = true;
+    hub.message = `ตรวจ Google Sheet ไม่สำเร็จ • ${researchSheetHubFailureReason(null, error)} • ค่าที่ใช้งานอยู่เดิมไม่ถูกเปลี่ยน`;
+    hub.tone = "error";
+    return null;
+  } finally {
+    clearResearchSheetHubPhaseTimers();
+    hub.inFlight = false;
+    hub.operation = "";
+    renderResearchSheetHub();
+  }
+}
+
+async function activateResearchSheetHub() {
+  const hub = state.researchSheetHub;
+  const preview = hub.preview;
+  if (hub.inFlight || !preview?.readyForConfirmation || !preview.verificationToken) return null;
+  hub.inFlight = true;
+  hub.operation = "activate";
+  hub.status = "activating";
+  hub.phase = "activating";
+  hub.failurePhase = "";
+  hub.showProgress = true;
+  hub.panelOpen = true;
+  hub.message = "กำลังยืนยัน Token กับ Backend และเปิดใช้ Google Sheet ให้ 4 ระบบ";
+  hub.tone = "working";
+  renderResearchSheetHub();
+  try {
+    const payload = await postJson(RESEARCH_SHEET_HUB_ACTIVATE_ENDPOINT, {
+      verificationToken: preview.verificationToken,
+      confirmActivate: true,
+      expectedConfigRevision: preview.baseConfigRevision,
+      idempotencyKey: createWorkflowIdempotencyKey(),
+    });
+    if (payload?.ok !== true || payload?.activation?.active !== true || !payload?.researchSheet) {
+      throw new Error("Backend ยังไม่ยืนยันการเปิดใช้ Google Sheet");
+    }
+    const activeData = normalizeResearchSheetHub(payload);
+    activeData.active = payload.activation.active === true && activeData.configured === true;
+    hub.data = activeData;
+    hub.activation = {
+      active: true,
+      status: safeDashboardDisplayText(payload.activation.status, "ready"),
+      configRevision: safeDashboardDisplayText(payload.activation.configRevision, activeData.configRevision),
+    };
+    hub.status = "ready";
+    hub.phase = "success";
+    hub.failurePhase = "";
+    hub.preview = null;
+    hub.lastLoadedAt = Date.now();
+    hub.submittedReference = activeData.sheetId || preview.sheetId;
+    hub.draftReference = hub.submittedReference;
+    hub.dirty = false;
+    if (els.researchSheetHubReference && hub.submittedReference) {
+      els.researchSheetHubReference.value = hub.submittedReference;
+    }
+    const summary = researchSheetHubSummaryPresentation();
+    if (summary.allReady) {
+      hub.message = `เปิดใช้ Google Sheet สำเร็จ • 3 แท็บ • 4 ระบบ • ${researchSheetHubConfiguredReference(activeData)}`;
+      hub.tone = "success";
+    } else {
+      hub.phase = "error";
+      hub.failurePhase = "activating";
+      hub.message = `Backend กำหนดให้ใช้ Sheet นี้แล้ว แต่การเชื่อมต่อ Revision ปัจจุบันยังขัดข้อง • ${researchSheetHubFailureReason(activeData)}`;
+      hub.tone = "error";
+    }
+    addBridgeEvent("เปิดใช้ Google Sheet กลางแล้ว", "Backend ตรวจจริง 3 แท็บและ Apply ให้ 4 ระบบ • โรงงาน EA อ่านร่วม Deep_Research");
+    updateDecisionLog("Google Sheet กลางผ่านการตรวจและถูกเปิดใช้จากแถบกลางด้านบนแล้ว");
+    return activeData;
+  } catch (error) {
+    hub.status = hub.data ? "ready" : "error";
+    hub.phase = "error";
+    hub.failurePhase = "activating";
+    hub.preview = null;
+    hub.dirty = true;
+    hub.message = `ยังเปิดใช้ Google Sheet ใหม่ไม่ได้ • ${researchSheetHubFailureReason(null, error)} • กรุณาตรวจสอบใหม่เพื่อรับ Token ชุดใหม่`;
+    hub.tone = "error";
+    return null;
+  } finally {
+    clearResearchSheetHubPhaseTimers();
+    hub.inFlight = false;
+    hub.operation = "";
+    renderResearchSheetHub();
+  }
+}
+
 function normalizeOperatorModePayload(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("invalid_operator_mode_response");
@@ -2635,7 +4326,7 @@ function normalizeAgentCollaborationPayload(payload) {
     maxTurns: boundedInteger(source.maxTurns, 3, 2, 4),
     maxDailyRuns: boundedInteger(source.maxDailyRuns, 3, 1, 6),
     dailyRunCount: boundedInteger(source.dailyRunCount, 0, 0, 1000),
-    minRemainingPercent: boundedInteger(source.minRemainingPercent, 30, 10, 80),
+    minRemainingPercent: 15,
     participants: Array.isArray(source.participants)
       ? source.participants.filter((item) => typeof item === "string" && /^[a-z0-9_]{2,80}$/.test(item)).slice(0, 4)
       : [],
@@ -2717,7 +4408,7 @@ function renderAgentCollaborationControl() {
     setCollaborationSelectValue(
       els.agentCollabMinRemaining,
       collaboration.minRemainingPercent,
-      `อย่างน้อย ${collaboration.minRemainingPercent}%`,
+      `ต้องมากกว่า ${collaboration.minRemainingPercent}%`,
     );
   }
   if (els.agentCollabUsage) {
@@ -2851,7 +4542,7 @@ function collaborationFormPayload() {
     intervalMinutes: Number(els.agentCollabInterval?.value || 120),
     maxTurns: Number(els.agentCollabMaxTurns?.value || 3),
     maxDailyRuns: Number(els.agentCollabMaxDailyRuns?.value || 3),
-    minRemainingPercent: Number(els.agentCollabMinRemaining?.value || 30),
+    minRemainingPercent: 15,
   };
 }
 
@@ -3091,6 +4782,80 @@ function migrateOfficeSessionLayout(snapshot) {
   };
 }
 
+function serializeEaOptimizationLabSession(session = {}) {
+  const sanitizeFile = (file) => {
+    if (!file || typeof file !== "object" || Array.isArray(file)) return null;
+    return {
+      name: String(file.name || "").slice(0, 180),
+      size: Math.max(0, Number(file.size) || 0),
+      extension: String(file.extension || "").slice(0, 10),
+      sha256: /^[a-f0-9]{64}$/i.test(String(file.sha256 || "")) ? String(file.sha256).toLowerCase() : "",
+      needsReattach: true,
+    };
+  };
+  const inputs = (Array.isArray(session.inputs) ? session.inputs : []).slice(0, 80).map((input, index) => ({
+    id: String(input?.id || `input_${index + 1}`).slice(0, 80),
+    name: String(input?.name || `Input ${index + 1}`).slice(0, 100),
+    type: String(input?.type || "unknown").slice(0, 60),
+    current: input?.current ?? null,
+    defaultRaw: String(input?.defaultRaw ?? "").slice(0, 240),
+    kind: ["numeric", "categorical", "fixed"].includes(input?.kind) ? input.kind : "fixed",
+    integer: input?.integer === true,
+    canOptimize: input?.canOptimize !== false,
+    options: (Array.isArray(input?.options) ? input.options : []).slice(0, 30).map((option) => ({
+      label: String(option?.label ?? option?.value ?? "").slice(0, 80),
+      value: option?.value ?? "",
+    })),
+    categoryValues: (Array.isArray(input?.categoryValues) ? input.categoryValues : []).slice(0, 30).map((value) => String(value).slice(0, 80)),
+    optimize: input?.optimize === true && input?.canOptimize !== false,
+    start: eaOptimizationLabNullableNumber(input?.start),
+    step: eaOptimizationLabNullableNumber(input?.step),
+    stop: eaOptimizationLabNullableNumber(input?.stop),
+    source: String(input?.source || "draft").slice(0, 80),
+  }));
+  return {
+    version: 1,
+    platform: ["MT4", "MT5"].includes(session.platform) ? session.platform : "",
+    sourceReportId: String(session.sourceReportId || "").slice(0, 220),
+    selectedTerminalId: String(session.selectedTerminalId || "").slice(0, 180),
+    eaFile: sanitizeFile(session.eaFile),
+    setFile: sanitizeFile(session.setFile),
+    programKind: ["expert_advisor", "indicator", "script", "unknown"].includes(session.programKind) ? session.programKind : "unknown",
+    inputs,
+    symbol: String(session.symbol || "").slice(0, 30),
+    timeframe: String(session.timeframe || "H1").slice(0, 10),
+    dateFrom: String(session.dateFrom || "").slice(0, 10),
+    dateTo: String(session.dateTo || "").slice(0, 10),
+    validationMethod: String(session.validationMethod || "walk_forward").slice(0, 40),
+    targetProfitPercent: String(session.targetProfitPercent ?? "").slice(0, 30),
+    maxDrawdownPercent: String(session.maxDrawdownPercent ?? "20").slice(0, 30),
+    minimumTrades: String(session.minimumTrades ?? "100").slice(0, 30),
+    roundCount: String(session.roundCount ?? "3").slice(0, 2),
+    draftSaved: session.plan?.ok === true,
+  };
+}
+
+function restoreEaOptimizationLabSession(value, fallback = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
+  const draftSaved = value.draftSaved === true;
+  const restored = serializeEaOptimizationLabSession(value);
+  return {
+    ...fallback,
+    ...restored,
+    sourceText: "",
+    setText: "",
+    plan: null,
+    fileBusy: false,
+    terminalBusy: false,
+    fileRequestId: 0,
+    restoredDraft: true,
+    message: draftSaved
+      ? "กู้ Draft จาก Session แล้ว • กรุณาตรวจค่าและแนบไฟล์เดิมอีกครั้งก่อนเชื่อมขั้นรันจริง"
+      : "กู้ค่าห้องทดลองจาก Session แล้ว • ไฟล์ต้นฉบับไม่ได้ถูกเก็บใน Browser storage",
+    tone: "warning",
+  };
+}
+
 function saveSessionSnapshot() {
   if (!state.data) return;
   try {
@@ -3137,6 +4902,7 @@ function saveSessionSnapshot() {
         signalHistoryOrderPage: state.modal.signalHistoryOrderPage,
         signalHistoryAnalysisPage: state.modal.signalHistoryAnalysisPage,
         workflowTabs: { ...state.modal.workflowTabs },
+        eaOptimizationLab: serializeEaOptimizationLabSession(state.modal.eaOptimizationLab),
         fxNewsImpactFilter: state.modal.fxNewsImpactFilter,
         selectedMissionId: state.modal.selectedMissionId,
         showArchived: state.modal.showArchived,
@@ -3285,6 +5051,10 @@ function applySessionSnapshot(snapshot) {
             && typeof tabId === "string"
             && /^[a-z0-9_-]{1,60}$/i.test(tabId)
           )),
+      ),
+      eaOptimizationLab: restoreEaOptimizationLabSession(
+        snapshot.modal.eaOptimizationLab,
+        state.modal.eaOptimizationLab,
       ),
       fxNewsImpactFilter: ["all", "high", "medium", "low", "other"].includes(snapshot.modal.fxNewsImpactFilter)
         ? snapshot.modal.fxNewsImpactFilter
@@ -3936,16 +5706,19 @@ function getSafeReportArtifactUrl(value) {
     const parsed = new URL(raw, window.location.href);
     if (parsed.origin !== window.location.origin || parsed.username || parsed.password) return "";
     if (parsed.search || parsed.hash) return "";
-    if (!/^\/api\/reports\/[a-zA-Z0-9._-]+\/(?:attachments|artifacts|downloads)\/[a-zA-Z0-9._-]+$/.test(parsed.pathname)) return "";
+    const reportArtifact = /^\/api\/reports\/[a-zA-Z0-9._-]+\/(?:attachments|artifacts|downloads)\/[a-zA-Z0-9._-]+$/.test(parsed.pathname);
+    const eaFactoryArtifact = /^\/api\/props\/right_server_racks\/ea-factory\/builds\/ea-build-[a-zA-Z0-9._-]+\/files\/ea-file-[a-zA-Z0-9._-]+$/.test(parsed.pathname);
+    if (!reportArtifact && !eaFactoryArtifact) return "";
     return parsed.href;
   } catch {
     return "";
   }
 }
 
-function appendDashboardArtifactLinks(container, artifacts) {
+function appendDashboardArtifactLinks(container, artifacts, { limit = 20 } = {}) {
+  const boundedLimit = Math.max(1, Math.min(Number(limit) || 20, 200));
   const safeArtifacts = (Array.isArray(artifacts) ? artifacts : [])
-    .slice(0, 20)
+    .slice(0, boundedLimit)
     .map((item) => {
       if (!item || typeof item !== "object" || item.available !== true) return null;
       const safeUrl = getSafeReportArtifactUrl(item.url);
@@ -4189,8 +5962,8 @@ function closeDashboardResultDetail({ restoreFocus = true } = {}) {
 }
 
 function createTaskCard(mission = {}, options = {}) {
-  const { variant = "board-card", source = "list" } = options;
-  const status = getMissionPresentationStatus(mission);
+  const { variant = "board-card", source = "list", statusOverride = null } = options;
+  const status = statusOverride || getMissionPresentationStatus(mission);
   const autoEligible = isBackendAutoEligibleMission(mission);
   const card = document.createElement("button");
   const topline = document.createElement("span");
@@ -4308,12 +6081,1355 @@ function renderChatLog(subject, type) {
 }
 
 const MISSION_KANBAN_COLUMNS = [
-  { id: "queued", label: "รอเริ่มงาน" },
   { id: "running", label: "กำลังทำงาน" },
   { id: "blocked", label: "ติดขัด" },
   { id: "completed", label: "เสร็จแล้ว" },
   { id: "failed", label: "ไม่สำเร็จ" },
 ];
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;",
+  })[character]);
+}
+
+function normalizeMeetingText(value, maxLength = 4000) {
+  if (value === null || value === undefined) return "";
+  return String(value).replace(/\u0000/g, "").trim().slice(0, maxLength);
+}
+
+function normalizeMeetingTextList(value, maximumItems, maximumChars) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, Math.max(0, Number(maximumItems) || 0))
+    .filter((item) => ["string", "number"].includes(typeof item))
+    .map((item) => normalizeMeetingText(item, maximumChars))
+    .filter(Boolean);
+}
+
+function normalizeMeetingParticipant(value) {
+  const raw = value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : { agentId: value };
+  const agentId = normalizeMeetingText(raw.agentId || raw.id || raw.participantAgentId, 160);
+  const agent = agentId ? getOfficeAgent(agentId) : null;
+  const name = normalizeMeetingText(raw.name || raw.displayName || raw.agentName, 160)
+    || normalizeMeetingText(agent?.name, 160)
+    || agentId
+    || "Backend ไม่ระบุชื่อ";
+  return {
+    agentId,
+    name,
+    role: normalizeMeetingText(raw.role || raw.agentRole, 160)
+      || normalizeMeetingText(agent?.role, 160)
+      || "Backend ไม่ระบุบทบาท",
+    status: normalizeMeetingText(raw.status || raw.participantStatus, 80),
+  };
+}
+
+function normalizeMeetingMessage(value, index = 0) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const text = normalizeMeetingText(value.message ?? value.text ?? value.content ?? value.body, 12000);
+  if (!text) return null;
+  const speakerAgentId = normalizeMeetingText(
+    value.speakerAgentId || value.agentId || value.fromAgentId || value.speakerId,
+    160,
+  );
+  const agent = speakerAgentId ? getOfficeAgent(speakerAgentId) : null;
+  const rawSpeakerKind = normalizeMeetingText(
+    value.speakerType || value.authorType || value.senderType || value.role,
+    80,
+  ).toLowerCase();
+  const isUser = value.isUser === true || ["user", "human", "operator"].includes(rawSpeakerKind);
+  return {
+    id: normalizeMeetingText(value.id || value.messageId || value.turnId, 200) || `message-${index}`,
+    speakerAgentId,
+    speakerName: normalizeMeetingText(value.speakerName || value.speakerLabel || value.authorName, 160)
+      || (isUser ? "คุณ" : normalizeMeetingText(agent?.name, 160))
+      || "Backend ไม่ระบุผู้พูด",
+    speakerRole: normalizeMeetingText(value.speakerRole || value.agentRole || value.authorRole, 160)
+      || (isUser ? "ผู้ใช้" : normalizeMeetingText(agent?.role, 160))
+      || "Backend ไม่ระบุบทบาท",
+    speakerStatus: normalizeMeetingText(value.status || value.turnStatus, 80),
+    createdAt: normalizeMeetingText(value.createdAt || value.timestamp || value.time, 80),
+    text,
+    isUser,
+  };
+}
+
+function normalizeMeetingProposal(rawSession = {}) {
+  const canonicalSessionProposal = rawSession.proposal
+    && typeof rawSession.proposal === "object"
+    && !Array.isArray(rawSession.proposal)
+    ? rawSession.proposal
+    : null;
+  const nested = canonicalSessionProposal
+    || (rawSession.implementationProposal
+      && typeof rawSession.implementationProposal === "object"
+      && !Array.isArray(rawSession.implementationProposal)
+      ? rawSession.implementationProposal
+      : {});
+  const implementationMission = nested.implementationMission && typeof nested.implementationMission === "object"
+    ? nested.implementationMission
+    : rawSession.implementationMission && typeof rawSession.implementationMission === "object"
+      ? rawSession.implementationMission
+      : {};
+  const approval = rawSession.approval && typeof rawSession.approval === "object"
+    ? rawSession.approval
+    : nested.approval && typeof nested.approval === "object"
+      ? nested.approval
+      : {};
+  const sessionManagerDecision = rawSession.managerDecision
+    && typeof rawSession.managerDecision === "object"
+    && !Array.isArray(rawSession.managerDecision)
+    ? rawSession.managerDecision
+    : {};
+  const nestedManagerDecision = nested.managerDecision
+    && typeof nested.managerDecision === "object"
+    && !Array.isArray(nested.managerDecision)
+    ? nested.managerDecision
+    : sessionManagerDecision.decision
+      && typeof sessionManagerDecision.decision === "object"
+      && !Array.isArray(sessionManagerDecision.decision)
+      ? sessionManagerDecision.decision
+      : {};
+  const structuredProposal = [
+    nested.proposal,
+    nested.structuredProposal,
+    rawSession.structuredProposal,
+    sessionManagerDecision.proposal,
+  ].find((candidate) => (
+    ["string", "number"].includes(typeof candidate)
+    && String(candidate).trim()
+  ));
+  const risks = Array.isArray(nested.risks) ? nested.risks : sessionManagerDecision.risks;
+  const acceptanceChecks = Array.isArray(nested.acceptanceChecks)
+    ? nested.acceptanceChecks
+    : sessionManagerDecision.acceptanceChecks;
+  const summary = normalizeMeetingText(
+    nested.text
+    || nested.summary
+    || nested.plan
+    || rawSession.proposalSummary
+    || (typeof rawSession.proposal === "string" ? rawSession.proposal : ""),
+    8000,
+  );
+  const normalizedStructuredProposal = normalizeMeetingText(structuredProposal, 700);
+  const normalizedRisks = normalizeMeetingTextList(risks, 3, 240);
+  const normalizedAcceptanceChecks = normalizeMeetingTextList(acceptanceChecks, 4, 240);
+  const managerDecisionStatus = normalizeMeetingText(nestedManagerDecision.status, 80).toLowerCase();
+  const managerDecisionSummary = normalizeMeetingText(nestedManagerDecision.summary, 360);
+  const digest = normalizeMeetingText(
+    nested.digest || nested.proposalDigest || rawSession.proposalDigest,
+    256,
+  );
+  const digestVersion = normalizeMeetingText(nested.digestVersion, 120);
+  const managerTurnId = normalizeMeetingText(
+    nested.managerTurnId || sessionManagerDecision.turnId,
+    200,
+  );
+  const risksAreComplete = Array.isArray(nested.risks)
+    && nested.risks.length <= 3
+    && normalizedRisks.length === nested.risks.length
+    && nested.risks.every((item, index) => (
+      typeof item === "string"
+      && normalizeMeetingText(item, 240) === item
+      && normalizedRisks[index] === item
+    ));
+  const checksAreComplete = Array.isArray(nested.acceptanceChecks)
+    && nested.acceptanceChecks.length <= 4
+    && normalizedAcceptanceChecks.length === nested.acceptanceChecks.length
+    && nested.acceptanceChecks.every((item, index) => (
+      typeof item === "string"
+      && normalizeMeetingText(item, 240) === item
+      && normalizedAcceptanceChecks[index] === item
+    ));
+  const managerDecisionIsComplete = nested.managerDecision
+    && typeof nested.managerDecision === "object"
+    && !Array.isArray(nested.managerDecision)
+    && Object.keys(nested.managerDecision).sort().join(",") === "status,summary"
+    && ["accepted", "revision_required", "rejected", "deferred"].includes(managerDecisionStatus)
+    && managerDecisionStatus === nested.managerDecision.status
+    && Boolean(managerDecisionSummary)
+    && managerDecisionSummary === nested.managerDecision.summary;
+  const optionalAliasesAreConsistent = (
+    (!Object.prototype.hasOwnProperty.call(nested, "structuredProposal")
+      || nested.structuredProposal === nested.proposal)
+    && (!Object.prototype.hasOwnProperty.call(nested, "summary")
+      || nested.summary === nested.text)
+    && (!Object.prototype.hasOwnProperty.call(nested, "plan")
+      || nested.plan === nested.text)
+    && (!Object.prototype.hasOwnProperty.call(nested, "proposalDigest")
+      || nested.proposalDigest === nested.digest)
+  );
+  const visibleConsentPacketComplete = Boolean(
+    canonicalSessionProposal
+    && typeof nested.text === "string"
+    && summary
+    && summary === nested.text
+    && typeof nested.proposal === "string"
+    && normalizedStructuredProposal
+    && normalizedStructuredProposal === nested.proposal
+    && risksAreComplete
+    && checksAreComplete
+    && managerDecisionIsComplete
+    && optionalAliasesAreConsistent
+    && typeof nested.digest === "string"
+    && /^[0-9a-f]{64}$/.test(digest)
+    && digest === nested.digest
+    && typeof nested.digestVersion === "string"
+    && digestVersion === "interactive-meeting-proposal-v2"
+    && digestVersion === nested.digestVersion
+    && typeof nested.managerTurnId === "string"
+    && managerTurnId
+    && managerTurnId === nested.managerTurnId
+  );
+  return {
+    summary,
+    structuredProposal: normalizedStructuredProposal,
+    risks: normalizedRisks,
+    acceptanceChecks: normalizedAcceptanceChecks,
+    managerDecision: {
+      status: managerDecisionStatus,
+      summary: managerDecisionSummary,
+    },
+    digest,
+    digestVersion,
+    managerTurnId,
+    visibleConsentPacketComplete,
+    implementationMissionId: normalizeMeetingText(
+      nested.implementationMissionId
+      || rawSession.implementationMissionId
+      || approval.implementationMissionId
+      || implementationMission.id
+      || implementationMission.missionId,
+      200,
+    ),
+    status: normalizeMeetingText(
+      nested.status
+      || rawSession.proposalStatus
+      || approval.status
+      || rawSession.approvalStatus
+      || rawSession.status,
+      80,
+    ).toLowerCase(),
+    readyToExecute: nested.readyToExecute === true
+      || rawSession.readyToExecute === true
+      || approval.readyToExecute === true
+      || implementationMission.readyToExecute === true,
+    frozenAt: normalizeMeetingText(nested.frozenAt || nested.createdAt || rawSession.proposalFrozenAt, 80),
+  };
+}
+
+function normalizeMeetingSession(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const id = normalizeMeetingText(value.id || value.sessionId, 200);
+  if (!id) return null;
+  const participantSource = Array.isArray(value.participants)
+    ? value.participants
+    : Array.isArray(value.participantAgentIds)
+      ? value.participantAgentIds
+      : [];
+  const messageSource = Array.isArray(value.messages)
+    ? value.messages
+    : Array.isArray(value.transcript)
+      ? value.transcript
+      : Array.isArray(value.turns)
+        ? value.turns
+        : [];
+  const progress = value.progress && typeof value.progress === "object" && !Array.isArray(value.progress)
+    ? value.progress
+    : {};
+  const latestManagerDecisionTurn = [...messageSource].reverse().find((item) => (
+    item
+    && typeof item === "object"
+    && !Array.isArray(item)
+    && item.role === "agent"
+    && item.speakerAgentId === "manager"
+    && item.intent === "decision"
+  ));
+  const decision = value.managerDecision
+    ?? value.decision
+    ?? value.decisionSummary
+    ?? latestManagerDecisionTurn?.message;
+  const nestedDecision = decision
+    && typeof decision === "object"
+    && !Array.isArray(decision)
+    && decision.decision
+    && typeof decision.decision === "object"
+    && !Array.isArray(decision.decision)
+    ? decision.decision
+    : {};
+  const decisionText = decision && typeof decision === "object" && !Array.isArray(decision)
+    ? [
+        decision.message,
+        decision.summary,
+        decision.text,
+        nestedDecision.summary,
+        nestedDecision.message,
+        typeof decision.decision === "string" ? decision.decision : "",
+        latestManagerDecisionTurn?.message,
+      ].find((candidate) => (
+        ["string", "number"].includes(typeof candidate)
+        && String(candidate).trim()
+      )) || ""
+    : decision;
+  const roundCount = Number.isFinite(Number(progress.currentRound ?? value.currentRound ?? value.roundCount))
+    ? Math.max(0, Math.floor(Number(progress.currentRound ?? value.currentRound ?? value.roundCount)))
+    : null;
+  const currentRoundTurns = roundCount === null
+    ? []
+    : messageSource.filter((item) => Number(item?.roundNumber) === roundCount);
+  const configuredAiTurns = Number(
+    value.aiTurnsPerRound
+    ?? value.ai_turns_per_round
+    ?? progress.aiTurnsPerRound
+    ?? value.maxTurnsPerRound,
+  );
+  const agenda = normalizeMeetingText(value.agenda || value.topic || value.title, 2400);
+  const developmentGoal = normalizeMeetingText(
+    value.developmentGoal || value.development_goal || value.goal || value.developmentObjective,
+    2400,
+  );
+  const visibleMeetingContextComplete = Boolean(
+    typeof value.agenda === "string"
+    && agenda
+    && agenda === value.agenda
+    && typeof value.developmentGoal === "string"
+    && developmentGoal
+    && developmentGoal === value.developmentGoal
+    && Number.isInteger(value.aiTurnsPerRound)
+    && value.aiTurnsPerRound >= 2
+    && value.aiTurnsPerRound <= 8
+    && configuredAiTurns === value.aiTurnsPerRound
+  );
+  return {
+    id,
+    agenda,
+    developmentGoal,
+    aiTurnsPerRound: Number.isInteger(configuredAiTurns) && configuredAiTurns >= 2 && configuredAiTurns <= 8
+      ? configuredAiTurns
+      : null,
+    status: normalizeMeetingText(value.status || value.sessionStatus, 80).toLowerCase() || "unknown",
+    participants: participantSource.map(normalizeMeetingParticipant),
+    messages: messageSource.map(normalizeMeetingMessage).filter(Boolean),
+    currentRound: roundCount,
+    totalRounds: Number.isFinite(Number(progress.totalRounds ?? value.totalRounds ?? value.maxRounds))
+      ? Math.max(0, Math.floor(Number(progress.totalRounds ?? value.totalRounds ?? value.maxRounds)))
+      : null,
+    currentTurn: Number.isFinite(Number(progress.currentTurn ?? value.currentTurn))
+      ? Math.max(0, Math.floor(Number(progress.currentTurn ?? value.currentTurn)))
+      : roundCount !== null
+        ? currentRoundTurns.length
+      : null,
+    totalTurns: Number.isFinite(Number(progress.totalTurns ?? value.totalTurns ?? value.maxTurnsPerRound))
+      ? Math.max(0, Math.floor(Number(progress.totalTurns ?? value.totalTurns ?? value.maxTurnsPerRound)))
+      : null,
+    managerDecision: normalizeMeetingText(decisionText, 8000),
+    managerDecisionAt: normalizeMeetingText(
+      (decision && typeof decision === "object" ? decision.createdAt || decision.decidedAt : "")
+      || latestManagerDecisionTurn?.createdAt
+      || value.decisionAt,
+      80,
+    ),
+    proposal: normalizeMeetingProposal(value),
+    visibleMeetingContextComplete,
+    approvalNote: normalizeMeetingText(value.approvalNote, 1200),
+    createdAt: normalizeMeetingText(value.createdAt || value.startedAt, 80),
+    updatedAt: normalizeMeetingText(value.updatedAt || value.completedAt || value.createdAt, 80),
+  };
+}
+
+function normalizeMeetingSessionPayload(payload) {
+  const value = payload?.session ?? payload?.data?.session ?? payload?.data ?? payload;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const envelope = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+  return normalizeMeetingSession({
+    ...value,
+    status: envelope.status ?? value.status,
+    implementationMissionId: envelope.implementationMissionId ?? value.implementationMissionId,
+    implementationMission: envelope.mission ?? value.implementationMission,
+    readyToExecute: envelope.readyToExecute ?? value.readyToExecute,
+  });
+}
+
+function normalizeMeetingSessionsPayload(payload) {
+  const values = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.sessions)
+      ? payload.sessions
+      : Array.isArray(payload?.items)
+        ? payload.items
+        : Array.isArray(payload?.data?.sessions)
+          ? payload.data.sessions
+          : [];
+  return values.map(normalizeMeetingSession).filter(Boolean);
+}
+
+function meetingSessionIsActive(session = state.meetingRoom.session) {
+  return meetingSessionIsPollingActive(session);
+}
+
+function meetingSessionIsPollingActive(session = state.meetingRoom.session) {
+  return String(session?.status || "").toLowerCase() === "running";
+}
+
+function meetingSessionCanInterject(session = state.meetingRoom.session) {
+  if (String(session?.status || "").toLowerCase() !== "awaiting_user") return false;
+  if (session?.currentRound === null || session?.totalRounds === null) return true;
+  return Number(session.currentRound) < Number(session.totalRounds);
+}
+
+function meetingSessionCanFreezeProposal(session = state.meetingRoom.session) {
+  return String(session?.status || "").toLowerCase() === "awaiting_user";
+}
+
+function meetingComposerHelpCopy(session = state.meetingRoom.session) {
+  const configuredTurns = Number.isInteger(session?.aiTurnsPerRound)
+    ? session.aiTurnsPerRound
+    : session?.totalTurns;
+  const turnCopy = Number.isFinite(Number(configuredTurns)) && Number(configuredTurns) > 0
+    ? `${Number(configuredTurns)} ข้อความ`
+    : "จำนวนข้อความที่กำหนด";
+  if (!session) return "เปิดห้องประชุมก่อน แล้ว AI จะคุยตามหัวข้อและเป้าหมายที่คุณกำหนด";
+  if (meetingSessionCanInterject(session)) {
+    return `AI คุยครบรอบละ ${turnCopy} แล้ว ตอนนี้คุณพิมพ์แทรก เปลี่ยนทิศทาง หรือขอให้สรุปได้`;
+  }
+  if (meetingSessionIsPollingActive(session)) {
+    return `AI กำลังคุยรอบละ ${turnCopy} ช่องนี้จะเปิดทันทีเมื่อจบรอบ`;
+  }
+  return "Session นี้ยังไม่เปิดรับข้อความจากคุณ โปรดดูสถานะหรือเริ่มการประชุมใหม่";
+}
+
+function meetingProposalDigestIsValid(proposal = state.meetingRoom.session?.proposal) {
+  return /^[0-9a-f]{64}$/.test(String(proposal?.digest || ""));
+}
+
+function meetingProposalVisibleConsentIsComplete(session = state.meetingRoom.session) {
+  return Boolean(
+    session?.id
+    && session.visibleMeetingContextComplete === true
+    && meetingProposalDigestIsValid(session.proposal)
+    && session.proposal?.visibleConsentPacketComplete === true
+  );
+}
+
+function meetingSessionStatusLabel(status) {
+  const labels = {
+    queued: "เข้าคิว",
+    starting: "กำลังเริ่ม",
+    active: "กำลังประชุม",
+    running: "กำลังประชุม",
+    in_progress: "กำลังประชุม",
+    processing: "กำลังประมวลผล",
+    awaiting_turn: "รอลำดับพูด",
+    awaiting_manager: "รอ Manager สรุป",
+    awaiting_user: "รอข้อความจากคุณ",
+    proposed: "รออนุมัติข้อเสนอ",
+    completed: "ประชุมเสร็จแล้ว",
+    approved: "อนุมัติแล้ว",
+    rejected: "ปฏิเสธแล้ว",
+    blocked: "ถูกบล็อก",
+    failed: "ไม่สำเร็จ",
+    cancelled: "ยกเลิกแล้ว",
+    unknown: "Backend ไม่ระบุสถานะ",
+  };
+  return labels[String(status || "unknown").toLowerCase()] || normalizeMeetingText(status, 80) || labels.unknown;
+}
+
+function meetingRoomFailureState(error) {
+  const status = Number(error?.status)
+    || Number(String(error?.message || "").match(/HTTP\s+(\d{3})/i)?.[1])
+    || 0;
+  if (status === 429) return "rate_limited";
+  if ([401, 403, 409, 423].includes(status)) return "blocked";
+  if ([0, 502, 503, 504].includes(status) || error?.name === "AbortError") return "offline";
+  return "error";
+}
+
+function setMeetingRoomFeedback(status, message) {
+  state.meetingRoom.status = status;
+  state.meetingRoom.message = normalizeMeetingText(message, 600);
+  renderMissionMeetingRoom();
+}
+
+function createMeetingIdempotencyKey() {
+  return createWorkflowIdempotencyKey().replace(/^wf-/, "meeting-");
+}
+
+function meetingSessionApprovalNoteIsImmutable(session = state.meetingRoom.session) {
+  const status = normalizeMeetingText(session?.status || session?.proposal?.status, 80).toLowerCase();
+  return ["approved", "ready_to_execute"].includes(status);
+}
+
+function meetingSessionDraftKey(sessionId = state.meetingRoom.activeSessionId) {
+  return normalizeMeetingText(sessionId, 200);
+}
+
+function saveMeetingSessionDrafts(sessionId = state.meetingRoom.activeSessionId) {
+  const key = meetingSessionDraftKey(sessionId);
+  if (!key) return;
+  const existing = state.meetingRoom.draftsBySession[key] || {};
+  const session = state.meetingRoom.session?.id === key ? state.meetingRoom.session : null;
+  state.meetingRoom.draftsBySession[key] = {
+    message: els.missionMeetingMessage
+      ? String(els.missionMeetingMessage.value || "").replace(/\u0000/g, "").slice(0, 1600)
+      : String(existing.message || ""),
+    approvalNote: meetingSessionApprovalNoteIsImmutable(session)
+      ? ""
+      : els.missionMeetingApprovalNote
+        ? String(els.missionMeetingApprovalNote.value || "").replace(/\u0000/g, "").slice(0, 1000)
+        : String(existing.approvalNote || ""),
+  };
+}
+
+function restoreMeetingSessionDrafts(session = state.meetingRoom.session) {
+  const activeSession = session?.id && session.id === state.meetingRoom.activeSessionId ? session : null;
+  const key = meetingSessionDraftKey(activeSession?.id);
+  const draft = key ? state.meetingRoom.draftsBySession[key] || {} : {};
+  const approvalImmutable = meetingSessionApprovalNoteIsImmutable(activeSession);
+  if (els.missionMeetingMessage) {
+    els.missionMeetingMessage.value = activeSession ? String(draft.message || "") : "";
+  }
+  if (els.missionMeetingApprovalNote) {
+    els.missionMeetingApprovalNote.value = approvalImmutable
+      ? normalizeMeetingText(activeSession?.approvalNote, 1200)
+      : activeSession
+        ? String(draft.approvalNote || "")
+        : "";
+    els.missionMeetingApprovalNote.readOnly = approvalImmutable;
+    els.missionMeetingApprovalNote.setAttribute("aria-readonly", String(approvalImmutable));
+  }
+  if (els.missionMeetingApprovalNoteHelp) {
+    els.missionMeetingApprovalNoteHelp.textContent = approvalImmutable
+      ? "Backend บันทึกหมายเหตุการอนุมัติของ Session นี้แล้ว จึงแสดงแบบอ่านอย่างเดียว"
+      : "ฉบับร่างแยกตาม Session ระบบไม่เติมข้อความต่อท้าย และหากเว้นว่าง Backend จะใช้ขอบเขต Mission โค้ดในเครื่อง";
+  }
+}
+
+function upsertMeetingSession(session, { activate = true } = {}) {
+  if (!session?.id) return;
+  const next = state.meetingRoom.sessions.filter((item) => item.id !== session.id);
+  next.unshift(session);
+  state.meetingRoom.sessions = next;
+  if (!activate) return;
+  if (state.meetingRoom.activeSessionId && state.meetingRoom.activeSessionId !== session.id) {
+    saveMeetingSessionDrafts(state.meetingRoom.activeSessionId);
+  }
+  state.meetingRoom.session = session;
+  state.meetingRoom.activeSessionId = session.id;
+}
+
+function meetingRoomIsVisible() {
+  return Boolean(
+    state.modal.open
+    && getModalSurface() === "kanban"
+    && state.modal.activeTab === "mission-chat"
+    && document.visibilityState === "visible",
+  );
+}
+
+function stopMeetingRoomPolling() {
+  if (state.meetingRoom.pollTimer) window.clearInterval(state.meetingRoom.pollTimer);
+  state.meetingRoom.pollTimer = null;
+}
+
+function syncMeetingRoomPolling() {
+  if (state.meetingRoom.inFlight || !meetingRoomIsVisible() || !meetingSessionIsPollingActive()) {
+    stopMeetingRoomPolling();
+    return;
+  }
+  if (state.meetingRoom.pollTimer) return;
+  state.meetingRoom.pollTimer = window.setInterval(() => {
+    if (!meetingRoomIsVisible() || !meetingSessionIsPollingActive()) {
+      stopMeetingRoomPolling();
+      return;
+    }
+    void pollMeetingSession();
+  }, MEETING_SESSION_POLL_MS);
+}
+
+function renderMeetingParticipantOptions() {
+  const container = els.missionMeetingParticipantOptions;
+  if (!container) return;
+  const signature = state.officeAgents.map((agent) => `${agent.id}:${agent.name}:${agent.role}`).join("|");
+  if (container.dataset.signature === signature && container.children.length) return;
+  const selected = new Set(
+    [...container.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value),
+  );
+  const defaultSpecialistIds = new Set(
+    state.officeAgents.filter((agent) => agent.id !== "manager").slice(0, 2).map((agent) => agent.id),
+  );
+  container.innerHTML = "";
+  state.officeAgents.forEach((agent, index) => {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    const copy = document.createElement("span");
+    const name = document.createElement("strong");
+    const role = document.createElement("small");
+    input.type = "checkbox";
+    input.name = "meetingParticipantAgentId";
+    input.value = agent.id;
+    input.id = `missionMeetingParticipant-${index}`;
+    const managerRequired = agent.id === "manager";
+    input.checked = managerRequired || (selected.size
+      ? selected.has(agent.id)
+      : defaultSpecialistIds.has(agent.id));
+    input.disabled = managerRequired;
+    input.dataset.requiredParticipant = managerRequired ? "true" : "false";
+    name.textContent = agent.name;
+    role.textContent = managerRequired ? `${agent.role} • เข้าร่วมและสรุปทุกครั้ง` : agent.role;
+    label.classList.toggle("required-participant", managerRequired);
+    copy.append(name, role);
+    label.append(input, copy);
+    container.appendChild(label);
+  });
+  container.dataset.signature = signature;
+}
+
+function renderMeetingRuntimeStatus() {
+  if (!els.missionMeetingStatus) return;
+  const statusCopy = {
+    idle: ["ยังไม่ได้เปิดห้องประชุม", state.meetingRoom.message || "กำลังรอข้อมูล Session จาก Backend"],
+    loading: ["กำลังโหลดข้อมูล", state.meetingRoom.message || "กำลังเชื่อมต่อ Backend"],
+    ready: ["เชื่อมต่อ Backend แล้ว", state.meetingRoom.message || "เลือก Session หรือเริ่มประชุมใหม่ได้"],
+    empty: ["ยังไม่มี Session", state.meetingRoom.message || "กรอกหัวข้อและเลือก Agent เพื่อเริ่มประชุม"],
+    working: ["กำลังส่งคำขอ", state.meetingRoom.message || "กรุณารอการตอบกลับจาก Backend"],
+    offline: ["Backend ออฟไลน์", state.meetingRoom.message || "ยังเชื่อมระบบประชุมไม่ได้ กรุณาลองรีเฟรช"],
+    rate_limited: ["ติด Rate Limit", state.meetingRoom.message || "Backend จำกัดจำนวนคำขอ กรุณารอแล้วลองใหม่"],
+    blocked: ["คำขอถูกบล็อก", state.meetingRoom.message || "Backend ไม่อนุญาตคำขอนี้"],
+    error: ["โหลดข้อมูลไม่สำเร็จ", state.meetingRoom.message || "เกิดข้อผิดพลาดจาก Backend"],
+  };
+  const [title, detail] = statusCopy[state.meetingRoom.status] || statusCopy.error;
+  els.missionMeetingStatus.dataset.state = state.meetingRoom.status;
+  els.missionMeetingStatus.querySelector("strong").textContent = title;
+  els.missionMeetingStatus.querySelector("span").textContent = detail;
+  if (els.missionChatTabStatus) {
+    els.missionChatTabStatus.textContent = state.meetingRoom.status === "ready"
+      ? "Backend พร้อม"
+      : title;
+  }
+}
+
+function renderMeetingSessionSelect() {
+  const select = els.missionMeetingSessionSelect;
+  if (!select) return;
+  const currentValue = state.meetingRoom.activeSessionId;
+  select.innerHTML = "";
+  if (!state.meetingRoom.sessions.length) {
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = state.meetingRoom.status === "loading" ? "กำลังโหลด Session..." : "ยังไม่มี Session";
+    select.appendChild(empty);
+  } else {
+    state.meetingRoom.sessions.forEach((session) => {
+      const option = document.createElement("option");
+      option.value = session.id;
+      option.textContent = `${session.agenda || session.id} — ${meetingSessionStatusLabel(session.status)}`;
+      select.appendChild(option);
+    });
+  }
+  select.value = state.meetingRoom.sessions.some((session) => session.id === currentValue) ? currentValue : "";
+  select.disabled = state.meetingRoom.inFlight || !state.meetingRoom.sessions.length;
+}
+
+function appendMeetingAvatar(container, agent, fallbackName) {
+  container.className = "mission-chat-avatar";
+  if (agent) {
+    const image = document.createElement("img");
+    image.src = getSubjectImage(agent, "agent");
+    image.alt = "";
+    image.loading = "lazy";
+    container.appendChild(image);
+    return;
+  }
+  container.textContent = normalizeMeetingText(fallbackName, 2) || "?";
+  container.setAttribute("aria-hidden", "true");
+}
+
+function renderMeetingParticipants() {
+  if (!els.modalMissionChatParticipants) return;
+  const participants = state.meetingRoom.session?.participants || [];
+  els.modalMissionChatParticipants.innerHTML = "";
+  participants.forEach((participant) => {
+    const row = document.createElement("div");
+    const avatar = document.createElement("span");
+    const copy = document.createElement("span");
+    const name = document.createElement("strong");
+    const role = document.createElement("small");
+    const status = document.createElement("b");
+    const agent = participant.agentId ? getOfficeAgent(participant.agentId) : null;
+    row.className = "mission-chat-participant";
+    row.setAttribute("role", "listitem");
+    appendMeetingAvatar(avatar, agent, participant.name);
+    copy.className = "mission-chat-participant-copy";
+    name.innerHTML = escapeHtml(participant.name);
+    role.innerHTML = escapeHtml(participant.role);
+    status.textContent = participant.status || "Backend ไม่ระบุสถานะ";
+    copy.append(name, role);
+    row.append(avatar, copy, status);
+    els.modalMissionChatParticipants.appendChild(row);
+  });
+  if (!participants.length) {
+    const empty = document.createElement("p");
+    empty.className = "mission-meeting-empty";
+    empty.textContent = state.meetingRoom.session
+      ? "Backend ยังไม่ส่งรายชื่อผู้เข้าร่วม Session นี้"
+      : "ยังไม่ได้เลือก Session";
+    els.modalMissionChatParticipants.appendChild(empty);
+  }
+  if (els.modalMissionChatParticipantCount) {
+    els.modalMissionChatParticipantCount.textContent = String(participants.length);
+  }
+}
+
+function renderMeetingTranscript() {
+  if (!els.modalMissionChatMessages) return;
+  const session = state.meetingRoom.session;
+  const messages = session?.messages || [];
+  els.modalMissionChatMessages.innerHTML = "";
+  messages.forEach((message) => {
+    const item = document.createElement("article");
+    const avatar = document.createElement("span");
+    const content = document.createElement("div");
+    const heading = document.createElement("header");
+    const identity = document.createElement("span");
+    const speaker = document.createElement("strong");
+    const role = document.createElement("small");
+    const time = document.createElement("time");
+    const text = document.createElement("p");
+    const agent = message.speakerAgentId ? getOfficeAgent(message.speakerAgentId) : null;
+    item.className = `mission-chat-message ${message.isUser ? "user" : "agent"}`;
+    item.setAttribute("role", "article");
+    appendMeetingAvatar(avatar, agent, message.speakerName);
+    identity.className = "mission-chat-message-identity";
+    speaker.innerHTML = escapeHtml(message.speakerName);
+    role.innerHTML = escapeHtml(
+      message.speakerStatus
+        ? `${message.speakerRole} • ${message.speakerStatus}`
+        : message.speakerRole,
+    );
+    time.textContent = formatThaiDateTime(message.createdAt, "Backend ไม่ระบุเวลา");
+    if (message.createdAt) time.dateTime = message.createdAt;
+    text.innerHTML = escapeHtml(message.text).replace(/\r?\n/g, "<br>");
+    identity.append(speaker, role);
+    heading.append(identity, time);
+    content.append(heading, text);
+    item.append(avatar, content);
+    els.modalMissionChatMessages.appendChild(item);
+  });
+  if (!messages.length) {
+    const empty = document.createElement("p");
+    empty.className = "mission-meeting-empty transcript";
+    const emptyCopy = {
+      loading: "กำลังโหลดบทสนทนาจาก Backend...",
+      offline: "Backend ออฟไลน์ จึงยังอ่านบทสนทนาไม่ได้",
+      rate_limited: "ติด Rate Limit จึงยังอัปเดตบทสนทนาไม่ได้",
+      blocked: "Backend บล็อกการเข้าถึง Session นี้",
+      error: "โหลดบทสนทนาไม่สำเร็จ กรุณากดรีเฟรช",
+    };
+    empty.textContent = emptyCopy[state.meetingRoom.status]
+      || (session ? "Backend ยังไม่ส่งข้อความสำหรับ Session นี้" : "ยังไม่มี Session ให้แสดงบทสนทนา");
+    els.modalMissionChatMessages.appendChild(empty);
+  }
+  els.modalMissionChatMessages.scrollTop = els.modalMissionChatMessages.scrollHeight;
+}
+
+function meetingProposalStatusCopy(session) {
+  const proposal = session?.proposal || {};
+  const status = String(proposal.status || "").toLowerCase();
+  if (!proposal.digest) return "ยังไม่มี Proposal digest จาก Backend";
+  if (!meetingProposalDigestIsValid(proposal)) {
+    return "Proposal digest จาก Backend ไม่ใช่ lowercase SHA-256 จึงปิดการอนุมัติแบบ fail-closed";
+  }
+  if (!meetingProposalVisibleConsentIsComplete(session)) {
+    return "Backend ส่งข้อมูลที่ผูกกับ Proposal digest มาไม่ครบ จึงปิดการอนุมัติแบบ fail-closed";
+  }
+  if (["rejected", "declined"].includes(status)) return "ข้อเสนอถูกปฏิเสธ — ไม่มี Mission ถูกสั่งรัน";
+  if (["approved", "ready_to_execute"].includes(status)) {
+    if (proposal.readyToExecute && proposal.implementationMissionId) {
+      return "อนุมัติแล้ว — รอยืนยันรัน Mission";
+    }
+    if (proposal.implementationMissionId) {
+      return "Backend สร้าง Mission แล้ว — กำลังรอสถานะพร้อมยืนยันรัน";
+    }
+    return "Backend บันทึกการอนุมัติแล้ว แต่ยังไม่ส่ง Implementation Mission ID";
+  }
+  if (["waiting_approval", "pending_approval"].includes(status)) {
+    return proposal.implementationMissionId
+      ? "Backend สร้าง Mission แล้ว — กำลังรอขั้นตอนอนุมัติของ Mission"
+      : "ข้อเสนอรอการอนุมัติ — Backend ยังไม่ได้ส่ง Mission ID";
+  }
+  if (status === "blocked" && proposal.implementationMissionId) {
+    return "Backend สร้าง Mission แล้ว แต่ approval pipeline ยังไม่ยืนยันว่า Mission พร้อมรัน";
+  }
+  return proposal.frozenAt
+    ? `ข้อเสนอถูกแช่แข็งเมื่อ ${formatThaiDateTime(proposal.frozenAt)}`
+    : "ข้อเสนอถูกแช่แข็งแล้วและยังไม่ได้อนุมัติ";
+}
+
+function renderMeetingDecisionAndProposal() {
+  const session = state.meetingRoom.session;
+  const proposal = session?.proposal || {};
+  restoreMeetingSessionDrafts(session);
+  if (els.missionMeetingDecision) {
+    els.missionMeetingDecision.hidden = !session?.managerDecision;
+    if (els.missionMeetingDecisionText) {
+      els.missionMeetingDecisionText.textContent = session?.managerDecision || "";
+    }
+  }
+  if (els.missionMeetingProposalSummary) {
+    els.missionMeetingProposalSummary.textContent = proposal.summary || "ยังไม่มีข้อเสนอที่ Backend แช่แข็งไว้";
+  }
+  if (els.missionMeetingStructuredProposal) {
+    els.missionMeetingStructuredProposal.textContent = proposal.structuredProposal || "—";
+  }
+  if (els.missionMeetingProposalRisks) {
+    els.missionMeetingProposalRisks.textContent = proposal.risks?.length
+      ? proposal.risks.map((item, index) => `${index + 1}. ${item}`).join(" • ")
+      : "—";
+  }
+  if (els.missionMeetingProposalAcceptanceChecks) {
+    els.missionMeetingProposalAcceptanceChecks.textContent = proposal.acceptanceChecks?.length
+      ? proposal.acceptanceChecks.map((item, index) => `${index + 1}. ${item}`).join(" • ")
+      : "—";
+  }
+  if (els.missionMeetingProposalManagerDecisionStatus) {
+    els.missionMeetingProposalManagerDecisionStatus.textContent = proposal.managerDecision?.status || "—";
+  }
+  if (els.missionMeetingProposalManagerDecisionSummary) {
+    els.missionMeetingProposalManagerDecisionSummary.textContent = proposal.managerDecision?.summary || "—";
+  }
+  if (els.missionMeetingProposalMeetingId) {
+    els.missionMeetingProposalMeetingId.textContent = session?.id || "—";
+  }
+  if (els.missionMeetingProposalDigest) {
+    els.missionMeetingProposalDigest.textContent = proposal.digest || "—";
+    els.missionMeetingProposalDigest.title = proposal.digest || "";
+  }
+  if (els.missionMeetingProposalDigestVersion) {
+    els.missionMeetingProposalDigestVersion.textContent = proposal.digestVersion || "Backend ไม่ระบุ (legacy)";
+  }
+  if (els.missionMeetingProposalManagerTurnId) {
+    els.missionMeetingProposalManagerTurnId.textContent = proposal.managerTurnId || "—";
+  }
+  if (els.missionMeetingImplementationMissionId) {
+    els.missionMeetingImplementationMissionId.textContent = proposal.implementationMissionId
+      || (proposal.digest
+        ? "ยังไม่สร้าง — Backend จะสร้าง Mission แยกหลังอนุมัติ"
+        : "ยังไม่มีข้อเสนอสำหรับสร้าง Mission");
+  }
+  if (els.missionMeetingProposalStatus) {
+    els.missionMeetingProposalStatus.textContent = meetingProposalStatusCopy(session);
+  }
+  const digestValid = meetingProposalDigestIsValid(proposal);
+  const consentPacketComplete = meetingProposalVisibleConsentIsComplete(session);
+  const finalProposalState = ["approved", "ready_to_execute", "blocked", "rejected", "declined"].includes(proposal.status);
+  const busy = state.meetingRoom.inFlight;
+  const approvalImmutable = meetingSessionApprovalNoteIsImmutable(session);
+  const canFreezeProposal = meetingSessionCanFreezeProposal(session);
+  if (els.missionMeetingApprovalNote) {
+    els.missionMeetingApprovalNote.disabled = !session || (busy && !approvalImmutable);
+  }
+  if (els.missionMeetingProposalButton) {
+    els.missionMeetingProposalButton.disabled = busy || !session || !canFreezeProposal || Boolean(proposal.digest);
+    els.missionMeetingProposalButton.textContent = state.meetingRoom.action === "proposal"
+      ? "กำลังสร้างข้อเสนอ..."
+      : proposal.digest ? "ข้อเสนอถูกแช่แข็งแล้ว" : "สร้างข้อเสนอ";
+  }
+  if (els.missionMeetingApproveButton) {
+    els.missionMeetingApproveButton.disabled = busy || !consentPacketComplete || finalProposalState;
+    els.missionMeetingApproveButton.textContent = state.meetingRoom.action === "approve"
+      ? "กำลังอนุมัติ..."
+      : proposal.status === "approved" || proposal.status === "ready_to_execute"
+        ? "อนุมัติแล้ว — รอยืนยันรัน Mission"
+        : "อนุมัติแผนโค้ด";
+  }
+  if (els.missionMeetingRejectButton) {
+    els.missionMeetingRejectButton.disabled = busy || !digestValid || finalProposalState;
+    els.missionMeetingRejectButton.textContent = state.meetingRoom.action === "reject"
+      ? "กำลังปฏิเสธ..."
+      : "ปฏิเสธข้อเสนอ";
+  }
+  if (els.missionMeetingOpenMissionButton) {
+    const canOpenMission = Boolean(proposal.readyToExecute && proposal.implementationMissionId);
+    els.missionMeetingOpenMissionButton.hidden = !canOpenMission;
+    els.missionMeetingOpenMissionButton.disabled = busy || !canOpenMission;
+    els.missionMeetingOpenMissionButton.dataset.missionId = canOpenMission
+      ? proposal.implementationMissionId
+      : "";
+  }
+}
+
+function renderMissionMeetingRoom() {
+  if (!els.modalMissionChatMessages) return;
+  const session = state.meetingRoom.session;
+  renderMeetingParticipantOptions();
+  renderMeetingRuntimeStatus();
+  renderMeetingSessionSelect();
+  renderMeetingParticipants();
+  renderMeetingTranscript();
+  renderMeetingDecisionAndProposal();
+  if (els.missionMeetingConversationHeading) {
+    els.missionMeetingConversationHeading.textContent = session?.agenda || "ยังไม่ได้เลือก Session";
+  }
+  if (els.missionMeetingConversationMeta) {
+    const goal = session?.developmentGoal || (session ? "Backend ไม่ระบุสิ่งที่ต้องการพัฒนา" : "กรอกหัวข้อและเป้าหมายทางซ้ายเพื่อเปิดห้อง");
+    const batch = Number.isInteger(session?.aiTurnsPerRound)
+      ? `AI ${session.aiTurnsPerRound} ข้อความต่อรอบ`
+      : "จำนวนข้อความตามค่า Backend";
+    els.missionMeetingConversationMeta.textContent = session ? `${goal} • ${batch}` : goal;
+  }
+  if (els.missionMeetingSessionStatus) {
+    els.missionMeetingSessionStatus.textContent = session
+      ? meetingSessionStatusLabel(session.status)
+      : "ยังไม่มีข้อมูล";
+    els.missionMeetingSessionStatus.dataset.status = session?.status || "empty";
+  }
+  const hasProgress = Boolean(
+    session
+    && [session.currentRound, session.totalRounds, session.currentTurn, session.totalTurns]
+      .some((value) => value !== null),
+  );
+  if (els.missionMeetingProgress) els.missionMeetingProgress.hidden = !hasProgress;
+  if (els.missionMeetingRoundProgress) {
+    els.missionMeetingRoundProgress.textContent = hasProgress
+      ? `รอบ ${session.currentRound ?? "—"}${session.totalRounds !== null ? `/${session.totalRounds}` : ""}`
+      : "รอบ —";
+  }
+  if (els.missionMeetingTurnProgress) {
+    els.missionMeetingTurnProgress.textContent = hasProgress
+      ? `ลำดับพูด ${session.currentTurn ?? "—"}${session.totalTurns !== null ? `/${session.totalTurns}` : ""}`
+      : "ลำดับพูด —";
+  }
+  const busy = state.meetingRoom.inFlight;
+  const active = meetingSessionIsActive(session);
+  const canInterject = meetingSessionCanInterject(session);
+  if (els.missionMeetingStartButton) {
+    els.missionMeetingStartButton.disabled = busy || active;
+    els.missionMeetingStartButton.textContent = state.meetingRoom.action === "start"
+      ? "กำลังเริ่มประชุม..."
+      : active ? "มี Session กำลังทำงาน" : "เปิดห้องและให้ AI เริ่มคุย";
+  }
+  els.missionMeetingAgenda?.toggleAttribute("disabled", busy || active);
+  els.missionMeetingDevelopmentGoal?.toggleAttribute("disabled", busy || active);
+  els.missionMeetingAiTurnsPerRound?.toggleAttribute("disabled", busy || active);
+  els.missionMeetingParticipantOptions?.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+    input.disabled = input.dataset.requiredParticipant === "true" || busy || active;
+  });
+  if (els.missionMeetingRefreshButton) {
+    els.missionMeetingRefreshButton.disabled = busy;
+    els.missionMeetingRefreshButton.textContent = state.meetingRoom.action === "load"
+      ? "กำลังโหลด..."
+      : "รีเฟรช";
+  }
+  if (els.missionMeetingMessage) els.missionMeetingMessage.disabled = busy || !canInterject;
+  if (els.missionMeetingMessageHelp) {
+    els.missionMeetingMessageHelp.textContent = meetingComposerHelpCopy(session);
+  }
+  if (els.missionMeetingSendButton) {
+    els.missionMeetingSendButton.disabled = busy || !canInterject;
+    els.missionMeetingSendButton.textContent = state.meetingRoom.action === "message"
+      ? "กำลังส่ง..."
+      : canInterject ? "ส่งเข้าห้องประชุม" : "Session ยังไม่รอข้อความจากคุณ";
+  }
+  syncMeetingRoomPolling();
+}
+
+async function fetchMeetingSessionDetail(sessionId, { activate = true } = {}) {
+  const id = normalizeMeetingText(sessionId, 200);
+  if (!id) throw new Error("ยังไม่ได้เลือก Session");
+  const payload = await fetchJson(`${MEETING_SESSIONS_ENDPOINT}/${encodeURIComponent(id)}`);
+  const session = normalizeMeetingSessionPayload(payload);
+  if (!session || session.id !== id) throw new Error("Backend ส่งรายละเอียด Session ไม่ครบหรือ Session ID ไม่ตรงกัน");
+  upsertMeetingSession(session, { activate });
+  return session;
+}
+
+async function loadMeetingSessions({ manual = false } = {}) {
+  if (state.meetingRoom.inFlight) return null;
+  state.meetingRoom.inFlight = true;
+  state.meetingRoom.action = "load";
+  state.meetingRoom.status = "loading";
+  state.meetingRoom.message = manual ? "กำลังรีเฟรช Session จาก Backend" : "กำลังเชื่อมต่อระบบประชุม";
+  renderMissionMeetingRoom();
+  try {
+    const payload = await fetchJson(MEETING_SESSIONS_ENDPOINT);
+    const sessions = normalizeMeetingSessionsPayload(payload);
+    state.meetingRoom.sessions = sessions;
+    const selectedId = sessions.some((session) => session.id === state.meetingRoom.activeSessionId)
+      ? state.meetingRoom.activeSessionId
+      : sessions[0]?.id || "";
+    if (selectedId !== state.meetingRoom.activeSessionId) {
+      saveMeetingSessionDrafts(state.meetingRoom.activeSessionId);
+    }
+    state.meetingRoom.activeSessionId = selectedId;
+    state.meetingRoom.session = selectedId
+      ? await fetchMeetingSessionDetail(selectedId)
+      : null;
+    state.meetingRoom.status = sessions.length ? "ready" : "empty";
+    state.meetingRoom.message = sessions.length
+      ? `โหลด ${sessions.length} Session จาก Backend แล้ว`
+      : "ยังไม่มี Session คุณสามารถกำหนดหัวข้อและเริ่มประชุมใหม่ได้";
+    return state.meetingRoom.session;
+  } catch (error) {
+    state.meetingRoom.status = meetingRoomFailureState(error);
+    state.meetingRoom.message = normalizeMeetingText(error?.body?.message || error?.message, 600)
+      || "เชื่อมระบบประชุมไม่สำเร็จ";
+    return null;
+  } finally {
+    state.meetingRoom.inFlight = false;
+    state.meetingRoom.action = "";
+    state.meetingRoom.initialized = true;
+    renderMissionMeetingRoom();
+  }
+}
+
+async function loadMeetingSession(sessionId, { manual = true } = {}) {
+  if (state.meetingRoom.inFlight) return null;
+  state.meetingRoom.inFlight = true;
+  state.meetingRoom.action = "load_detail";
+  if (manual) {
+    state.meetingRoom.status = "loading";
+    state.meetingRoom.message = "กำลังโหลดรายละเอียด Session จาก Backend";
+  }
+  renderMissionMeetingRoom();
+  try {
+    const session = await fetchMeetingSessionDetail(sessionId);
+    state.meetingRoom.status = "ready";
+    state.meetingRoom.message = `เปิด Session ${session.id} แล้ว`;
+    return session;
+  } catch (error) {
+    state.meetingRoom.status = meetingRoomFailureState(error);
+    state.meetingRoom.message = normalizeMeetingText(error?.body?.message || error?.message, 600)
+      || "โหลดรายละเอียด Session ไม่สำเร็จ";
+    return null;
+  } finally {
+    state.meetingRoom.inFlight = false;
+    state.meetingRoom.action = "";
+    renderMissionMeetingRoom();
+  }
+}
+
+async function pollMeetingSession() {
+  if (state.meetingRoom.pollInFlight || !meetingRoomIsVisible() || !meetingSessionIsPollingActive()) return null;
+  const requestedSessionId = state.meetingRoom.activeSessionId;
+  state.meetingRoom.pollInFlight = true;
+  try {
+    const session = await fetchMeetingSessionDetail(requestedSessionId, { activate: false });
+    if (state.meetingRoom.activeSessionId !== requestedSessionId) return null;
+    state.meetingRoom.session = session;
+    state.meetingRoom.status = "ready";
+    state.meetingRoom.message = meetingSessionIsPollingActive(session)
+      ? "กำลังรับข้อความใหม่จาก Backend"
+      : "Session สิ้นสุดแล้ว ระบบหยุดดึงข้อความอัตโนมัติ";
+    return session;
+  } catch (error) {
+    if (state.meetingRoom.activeSessionId !== requestedSessionId) return null;
+    state.meetingRoom.status = meetingRoomFailureState(error);
+    state.meetingRoom.message = normalizeMeetingText(error?.body?.message || error?.message, 600)
+      || "อัปเดต Session ไม่สำเร็จ";
+    return null;
+  } finally {
+    state.meetingRoom.pollInFlight = false;
+    renderMissionMeetingRoom();
+  }
+}
+
+function ensureMeetingRoomLoaded() {
+  if (state.meetingRoom.initialized || state.meetingRoom.inFlight) return;
+  state.meetingRoom.initialized = true;
+  void loadMeetingSessions();
+}
+
+async function applyMeetingActionResponse(response, sessionId) {
+  const session = normalizeMeetingSessionPayload(response);
+  if (session && (!sessionId || session.id === sessionId)) {
+    upsertMeetingSession(session);
+    return session;
+  }
+  return fetchMeetingSessionDetail(sessionId);
+}
+
+function selectedMeetingParticipantIds() {
+  if (!els.missionMeetingParticipantOptions) return [];
+  return [...els.missionMeetingParticipantOptions.querySelectorAll('input[type="checkbox"]:checked')]
+    .map((input) => normalizeMeetingText(input.value, 160))
+    .filter(Boolean);
+}
+
+async function startMeetingSession() {
+  if (state.meetingRoom.inFlight || meetingSessionIsActive()) return null;
+  const agenda = normalizeMeetingText(els.missionMeetingAgenda?.value, 2400);
+  const developmentGoal = normalizeMeetingText(els.missionMeetingDevelopmentGoal?.value, 2400);
+  const aiTurnsPerRound = Number(els.missionMeetingAiTurnsPerRound?.value);
+  const participantAgentIds = selectedMeetingParticipantIds();
+  const specialistAgentIds = participantAgentIds.filter((agentId) => agentId !== "manager");
+  if (!agenda) {
+    els.missionMeetingAgenda?.setCustomValidity("กรุณาระบุหัวข้อประชุม");
+    els.missionMeetingAgenda?.reportValidity();
+    els.missionMeetingAgenda?.focus();
+    return null;
+  }
+  els.missionMeetingAgenda?.setCustomValidity("");
+  if (!developmentGoal) {
+    els.missionMeetingDevelopmentGoal?.setCustomValidity("กรุณาระบุสิ่งที่ต้องการพัฒนา");
+    els.missionMeetingDevelopmentGoal?.reportValidity();
+    els.missionMeetingDevelopmentGoal?.focus();
+    return null;
+  }
+  els.missionMeetingDevelopmentGoal?.setCustomValidity("");
+  if (!Number.isInteger(aiTurnsPerRound) || aiTurnsPerRound < 2 || aiTurnsPerRound > 8) {
+    els.missionMeetingAiTurnsPerRound?.setCustomValidity("เลือกจำนวนข้อความ AI ตั้งแต่ 2 ถึง 8 ข้อความ");
+    els.missionMeetingAiTurnsPerRound?.reportValidity();
+    els.missionMeetingAiTurnsPerRound?.focus();
+    return null;
+  }
+  els.missionMeetingAiTurnsPerRound?.setCustomValidity("");
+  if (!specialistAgentIds.length) {
+    setMeetingRoomFeedback("blocked", "กรุณาเลือก Specialist Agent อย่างน้อย 1 ตัว โดย Manager จะเข้าร่วมสรุปทุกครั้ง");
+    els.missionMeetingParticipantOptions?.querySelector('input[type="checkbox"]')?.focus();
+    return null;
+  }
+  if (specialistAgentIds.length > 3) {
+    setMeetingRoomFeedback("blocked", "เลือก Specialist Agent ได้สูงสุด 3 ตัวต่อรอบ ตามขีดจำกัดของ Backend");
+    els.missionMeetingParticipantOptions?.querySelector('input[type="checkbox"]:checked')?.focus();
+    return null;
+  }
+  const distinctParticipantCount = new Set([...specialistAgentIds, "manager"]).size;
+  if (aiTurnsPerRound < distinctParticipantCount) {
+    setMeetingRoomFeedback(
+      "blocked",
+      `เลือก Agent ${distinctParticipantCount} ตัว จึงต้องกำหนดอย่างน้อย ${distinctParticipantCount} ข้อความ เพื่อให้ทุก Agent ได้พูดในรอบนี้`,
+    );
+    els.missionMeetingAiTurnsPerRound?.focus();
+    return null;
+  }
+  if (containsPotentialSecret(`${agenda}\n${developmentGoal}`)) {
+    setMeetingRoomFeedback("blocked", "ตรวจพบข้อความที่อาจมี Token หรือข้อมูลลับ จึงยังไม่ส่งหัวข้อหรือเป้าหมายไป Backend");
+    return null;
+  }
+  state.meetingRoom.inFlight = true;
+  state.meetingRoom.action = "start";
+  state.meetingRoom.status = "working";
+  state.meetingRoom.message = "กำลังขอ Backend เปิด Session ใหม่";
+  renderMissionMeetingRoom();
+  try {
+    const response = await postJson(MEETING_SESSIONS_ENDPOINT, {
+      agenda,
+      developmentGoal,
+      aiTurnsPerRound,
+      participantAgentIds,
+      idempotencyKey: createMeetingIdempotencyKey(),
+    });
+    let session = normalizeMeetingSessionPayload(response);
+    if (session) upsertMeetingSession(session);
+    else {
+      const listPayload = await fetchJson(MEETING_SESSIONS_ENDPOINT);
+      const sessions = normalizeMeetingSessionsPayload(listPayload);
+      state.meetingRoom.sessions = sessions;
+      session = sessions[0] ? await fetchMeetingSessionDetail(sessions[0].id) : null;
+    }
+    if (!session) throw new Error("Backend รับคำขอแล้วแต่ยังไม่ส่ง Session ID กลับมา");
+    state.meetingRoom.status = "ready";
+    state.meetingRoom.message = `Backend เปิด Session ${session.id} แล้ว`;
+    if (els.missionMeetingAgenda) els.missionMeetingAgenda.value = "";
+    if (els.missionMeetingDevelopmentGoal) els.missionMeetingDevelopmentGoal.value = "";
+    return session;
+  } catch (error) {
+    state.meetingRoom.status = meetingRoomFailureState(error);
+    state.meetingRoom.message = normalizeMeetingText(error?.body?.message || error?.message, 600)
+      || "เริ่มประชุมไม่สำเร็จ";
+    return null;
+  } finally {
+    state.meetingRoom.inFlight = false;
+    state.meetingRoom.action = "";
+    renderMissionMeetingRoom();
+  }
+}
+
+async function sendMeetingMessage() {
+  const session = state.meetingRoom.session;
+  if (state.meetingRoom.inFlight || !meetingSessionCanInterject(session)) return null;
+  const message = normalizeMeetingText(els.missionMeetingMessage?.value, 1600);
+  if (!message) {
+    els.missionMeetingMessage?.setCustomValidity("กรุณาพิมพ์ข้อความก่อนส่ง");
+    els.missionMeetingMessage?.reportValidity();
+    return null;
+  }
+  els.missionMeetingMessage?.setCustomValidity("");
+  if (containsPotentialSecret(message)) {
+    setMeetingRoomFeedback("blocked", "ตรวจพบข้อความที่อาจมี Token หรือข้อมูลลับ จึงยังไม่ส่งเข้าห้องประชุม");
+    return null;
+  }
+  state.meetingRoom.inFlight = true;
+  state.meetingRoom.action = "message";
+  state.meetingRoom.status = "working";
+  state.meetingRoom.message = "กำลังส่งข้อความของคุณไปยัง Session";
+  renderMissionMeetingRoom();
+  try {
+    const response = await postJson(
+      `${MEETING_SESSIONS_ENDPOINT}/${encodeURIComponent(session.id)}/messages`,
+      { message, idempotencyKey: createMeetingIdempotencyKey() },
+    );
+    await applyMeetingActionResponse(response, session.id);
+    if (els.missionMeetingMessage) els.missionMeetingMessage.value = "";
+    saveMeetingSessionDrafts(session.id);
+    state.meetingRoom.status = "ready";
+    state.meetingRoom.message = "Backend รับข้อความของคุณเข้าห้องประชุมแล้ว";
+    return state.meetingRoom.session;
+  } catch (error) {
+    state.meetingRoom.status = meetingRoomFailureState(error);
+    state.meetingRoom.message = normalizeMeetingText(error?.body?.message || error?.message, 600)
+      || "ส่งข้อความไม่สำเร็จ";
+    return null;
+  } finally {
+    state.meetingRoom.inFlight = false;
+    state.meetingRoom.action = "";
+    renderMissionMeetingRoom();
+  }
+}
+
+async function requestMeetingProposal() {
+  const session = state.meetingRoom.session;
+  if (state.meetingRoom.inFlight || !session || !meetingSessionCanFreezeProposal(session) || session.proposal?.digest) return null;
+  state.meetingRoom.inFlight = true;
+  state.meetingRoom.action = "proposal";
+  state.meetingRoom.status = "working";
+  state.meetingRoom.message = "กำลังขอ Backend แช่แข็งข้อเสนอและ Proposal digest";
+  renderMissionMeetingRoom();
+  try {
+    const response = await postJson(
+      `${MEETING_SESSIONS_ENDPOINT}/${encodeURIComponent(session.id)}/proposal`,
+      { idempotencyKey: createMeetingIdempotencyKey() },
+    );
+    const updated = await applyMeetingActionResponse(response, session.id);
+    if (!meetingProposalVisibleConsentIsComplete(updated)) {
+      throw new Error("Backend ยังส่งข้อมูลที่ผูกกับ Proposal digest กลับมาไม่ครบ จึงยังอนุมัติไม่ได้");
+    }
+    state.meetingRoom.status = "ready";
+    state.meetingRoom.message = "Backend แช่แข็งข้อเสนอแล้ว โดยยังไม่ได้สร้างหรือรัน Mission";
+    return updated;
+  } catch (error) {
+    state.meetingRoom.status = meetingRoomFailureState(error);
+    state.meetingRoom.message = normalizeMeetingText(error?.body?.message || error?.message, 600)
+      || "สร้างข้อเสนอไม่สำเร็จ";
+    return null;
+  } finally {
+    state.meetingRoom.inFlight = false;
+    state.meetingRoom.action = "";
+    renderMissionMeetingRoom();
+  }
+}
+
+async function approveMeetingProposal() {
+  const session = state.meetingRoom.session;
+  const proposal = session?.proposal || {};
+  if (state.meetingRoom.inFlight || !meetingProposalVisibleConsentIsComplete(session)) {
+    if (!state.meetingRoom.inFlight) {
+      setMeetingRoomFeedback("blocked", "ข้อมูลข้อเสนอที่ผูกกับ Digest ยังแสดงไม่ครบ จึงยังส่งการอนุมัติไม่ได้");
+    }
+    return null;
+  }
+  const userNote = normalizeMeetingText(els.missionMeetingApprovalNote?.value, 1000);
+  const payload = {
+    confirmMeetingId: session.id,
+    confirmProposalDigest: proposal.digest,
+    note: userNote,
+    idempotencyKey: createMeetingIdempotencyKey(),
+  };
+  if (proposal.implementationMissionId) {
+    payload.confirmMissionId = proposal.implementationMissionId;
+  }
+  state.meetingRoom.inFlight = true;
+  state.meetingRoom.action = "approve";
+  state.meetingRoom.status = "working";
+  state.meetingRoom.message = "กำลังส่ง Proposal digest เพื่อให้ Backend ตรวจและสร้าง Mission แยก";
+  renderMissionMeetingRoom();
+  try {
+    const response = await postJson(
+      `${MEETING_SESSIONS_ENDPOINT}/${encodeURIComponent(session.id)}/approve`,
+      payload,
+    );
+    const updated = await applyMeetingActionResponse(response, session.id);
+    state.meetingRoom.status = "ready";
+    state.meetingRoom.message = updated?.proposal?.implementationMissionId
+      ? `Backend ส่ง Implementation Mission ${updated.proposal.implementationMissionId} กลับมาแล้ว`
+      : "Backend บันทึกผลอนุมัติแล้ว แต่ยังไม่ส่ง Implementation Mission ID";
+    return updated;
+  } catch (error) {
+    const returnedSession = normalizeMeetingSessionPayload(error?.body);
+    if (returnedSession?.id === session.id) upsertMeetingSession(returnedSession);
+    state.meetingRoom.status = meetingRoomFailureState(error);
+    state.meetingRoom.message = normalizeMeetingText(error?.body?.message || error?.message, 600)
+      || "อนุมัติข้อเสนอไม่สำเร็จ";
+    return null;
+  } finally {
+    state.meetingRoom.inFlight = false;
+    state.meetingRoom.action = "";
+    renderMissionMeetingRoom();
+  }
+}
+
+async function rejectMeetingProposal() {
+  const session = state.meetingRoom.session;
+  const proposal = session?.proposal || {};
+  if (state.meetingRoom.inFlight || !session || !meetingProposalDigestIsValid(proposal)) return null;
+  const userNote = normalizeMeetingText(els.missionMeetingApprovalNote?.value, 1000);
+  state.meetingRoom.inFlight = true;
+  state.meetingRoom.action = "reject";
+  state.meetingRoom.status = "working";
+  state.meetingRoom.message = "กำลังส่งผลปฏิเสธไปยัง Backend";
+  renderMissionMeetingRoom();
+  try {
+    const response = await postJson(
+      `${MEETING_SESSIONS_ENDPOINT}/${encodeURIComponent(session.id)}/reject`,
+      {
+        confirmMeetingId: session.id,
+        confirmProposalDigest: proposal.digest,
+        note: userNote || "ผู้ใช้ปฏิเสธข้อเสนอและไม่อนุญาตให้สร้างหรือรัน Mission จากข้อเสนอนี้",
+        idempotencyKey: createMeetingIdempotencyKey(),
+      },
+    );
+    const updated = await applyMeetingActionResponse(response, session.id);
+    state.meetingRoom.status = "ready";
+    state.meetingRoom.message = "Backend บันทึกการปฏิเสธข้อเสนอแล้ว";
+    return updated;
+  } catch (error) {
+    state.meetingRoom.status = meetingRoomFailureState(error);
+    state.meetingRoom.message = normalizeMeetingText(error?.body?.message || error?.message, 600)
+      || "ปฏิเสธข้อเสนอไม่สำเร็จ";
+    return null;
+  } finally {
+    state.meetingRoom.inFlight = false;
+    state.meetingRoom.action = "";
+    renderMissionMeetingRoom();
+  }
+}
+
+async function openMeetingImplementationMission() {
+  const missionId = normalizeMeetingText(
+    state.meetingRoom.session?.proposal?.implementationMissionId,
+    200,
+  );
+  if (!missionId || !state.meetingRoom.session?.proposal?.readyToExecute) return;
+  stopMeetingRoomPolling();
+  state.modal.searchText = missionId;
+  setModalTab("kanban");
+  await loadBridgeMissions({ replaceEvents: false });
+  renderMissionKanban({ preserveScroll: false });
+  const mission = state.missions.find((item) => item.id === missionId);
+  if (mission) openTaskDetail(missionId, els.missionMeetingOpenMissionButton, { source: "kanban" });
+}
+
+function getMissionCenterColumnStatus(mission = {}) {
+  const status = getMissionPresentationStatus(mission);
+  return status === "queued" ? "running" : status;
+}
 
 function getModalSurface(type = state.modal.type, id = state.modal.id) {
   if (type === "agent") return "agent";
@@ -6376,7 +9492,7 @@ function signalCouncilAutomationModel(report = {}) {
       ? (effectiveMaxDailyRounds ?? legacyMaxDailyRounds)
       : null,
     maxDailyRounds: legacyMaxDailyRounds,
-    minRemainingPercent: Number(config.minRemainingPercent || supplied.minRemainingPercent || 30),
+    minRemainingPercent: 15,
     analysisBarCount: normalizeSignalAnalysisBars(
       config.analysisBarCount || supplied.analysisBarCount,
     ),
@@ -8754,12 +11870,12 @@ function signalRoundHealthModel(report = {}, automation = signalCouncilAutomatio
         label: "Codex คงเหลือ",
         state: remainingPercent === null
           ? "unavailable"
-          : reserveAvailable && remainingPercent < automation.minRemainingPercent
+          : reserveAvailable && remainingPercent <= automation.minRemainingPercent
             ? "blocked"
             : "complete",
         value: remainingPercent === null ? "ยังอ่าน Rate Limit ไม่ได้" : `${remainingPercent.toFixed(0)}%`,
         detail: reserveAvailable
-          ? (automation.reasonMessage || `เกณฑ์สำรอง ${automation.minRemainingPercent}%`)
+          ? (automation.reasonMessage || `ต้องเหลือมากกว่า ${automation.minRemainingPercent}%`)
           : "แสดงยอดคงเหลือเท่านั้น เพราะ Backend ยังไม่ส่งเกณฑ์สำรอง",
       },
     ],
@@ -13480,10 +16596,11 @@ function isWorkflowDashboardPropId(propId) {
 function normalizeWorkflowField(field = {}) {
   const id = String(field?.id || "").trim();
   if (!/^[a-zA-Z0-9_-]{1,60}$/.test(id) || WORKFLOW_FIELD_DENY_PATTERN.test(id)) return null;
-  const allowedTypes = ["text", "textarea", "number", "select", "checkbox", "source", "time", "date", "list"];
+  const allowedTypes = ["text", "textarea", "number", "select", "checkbox", "source", "source_record", "time", "date", "list"];
   const typeAliases = {
     source_report: "source",
     source_catalog: "source",
+    source_record: "source_record",
     workspace_source: "source",
     boolean: "checkbox",
     time_list: "list",
@@ -13607,6 +16724,11 @@ function normalizeWorkflowAction(rawAction = {}, fallbackAction = {}) {
     ),
     sourceRequired: rawAction?.sourceRequired === true || fallbackAction?.sourceRequired === true,
     analysisOnly: rawAction?.analysisOnly === true,
+    executionScope: WORKFLOW_EXECUTION_SCOPES.has(String(rawAction?.executionScope || ""))
+      ? String(rawAction.executionScope)
+      : (WORKFLOW_EXECUTION_SCOPES.has(String(fallbackAction?.executionScope || ""))
+        ? String(fallbackAction.executionScope)
+        : ""),
     availability: {
       status,
       realToolAvailable: rawAvailability?.realToolAvailable === true,
@@ -13726,7 +16848,7 @@ function normalizeWorkflowSheetTemplate(rawTemplate = {}) {
         .map((column) => String(column || "").trim())
         .filter((column) => /^[a-z][a-z0-9_]{0,63}$/.test(column)))]
     : [];
-  const columns = suppliedColumns.length === WORKFLOW_DISCOVERY_SHEET_COLUMNS.length
+  const columns = suppliedColumns.length
     ? suppliedColumns
     : [...WORKFLOW_DISCOVERY_SHEET_COLUMNS];
   const suppliedDeduplicationFields = Array.isArray(template.deduplicationFields)
@@ -13735,14 +16857,14 @@ function normalizeWorkflowSheetTemplate(rawTemplate = {}) {
         .filter((field) => columns.includes(field))
     : [];
   return {
-    schemaVersion: safeDashboardDisplayText(template.schemaVersion, "global-trading-system-sheet-v1"),
+    schemaVersion: safeDashboardDisplayText(template.schemaVersion, "research-sheet-world-system-v1"),
     columns,
     deduplicationFields: suppliedDeduplicationFields.length
       ? [...new Set(suppliedDeduplicationFields)]
       : [...WORKFLOW_DISCOVERY_DEDUPLICATION_FIELDS],
     templateReference: safeDashboardDisplayText(
       template.templateReference,
-      "contracts/research/trading-system-sheet-template.csv",
+      "contracts/research/world-system-sheet-template.csv",
     ),
     connectionStatus: String(template.connectionStatus || "not_connected").trim().toLowerCase(),
     connectionLabelTh: safeDashboardDisplayText(template.connectionLabelTh, "ยังไม่ได้เชื่อม Google Sheet"),
@@ -13804,7 +16926,7 @@ function normalizeWorkflowDashboard(subject, propertyRole, report = {}) {
     : (Array.isArray(roleWorkflow.actions) ? roleWorkflow.actions : fallback.actions || []);
   const actions = rawActions
     .map((action) => normalizeWorkflowAction(action, fallbackActionMap.get(action?.id) || {}))
-    .filter(Boolean);
+    .filter((action) => action && !BACKEND_OWNED_DAILY_ACTION_IDS.has(action.id));
   const actionMap = new Map(actions.map((action) => [action.id, action]));
   const suppliedTabs = Array.isArray(backend.tabs)
     ? backend.tabs
@@ -13852,18 +16974,34 @@ function normalizeWorkflowDashboard(subject, propertyRole, report = {}) {
     const isPrimary = index === 0;
     const isHistory = index === list.length - 1;
     const isPortalCatalog = subject?.id === "codex_mcp_portal" && tab.id === "catalog";
+    const isTradingResearchReport = subject?.id === TRADING_RESEARCH_LAB_PROP_ID && tab.id === "report";
+    const isEaFactoryFinal = subject?.id === EA_FACTORY_PROP_ID && tab.id === "artifacts_report";
+    const historyLabelTh = isHistory ? "ประวัติและรายงาน" : tab.labelTh;
+    const historyDescriptionTh = isHistory
+      ? "ดู Mission, Report และหลักฐานย้อนหลังของอุปกรณ์นี้"
+      : tab.descriptionTh;
     return {
       ...tab,
       labelTh: isPrimary
         ? safeDashboardDisplayText(primaryTabCopy.labelTh, tab.labelTh)
-        : (isHistory ? "ประวัติและรายงาน" : (isPortalCatalog ? "คลังและแบบฟอร์มข้อมูล" : tab.labelTh)),
+        : (isTradingResearchReport
+            ? "Report สรุป"
+            : (isEaFactoryFinal
+                ? tab.labelTh
+                : (isHistory
+                    ? historyLabelTh
+                    : (isPortalCatalog ? "คลังและแบบฟอร์มข้อมูล" : tab.labelTh)))),
       descriptionTh: isPrimary
         ? safeDashboardDisplayText(primaryTabCopy.descriptionTh, tab.descriptionTh)
-        : (isHistory
-            ? "ดู Mission, Report และหลักฐานย้อนหลังของอุปกรณ์นี้"
+        : (isTradingResearchReport
+            ? "สรุปข้อมูลจาก Backend Report และผล Backtest จากไฟล์ OHLC จริง โดยไม่ใช้ตัวเลขจากกราฟจำลอง"
+            : (isEaFactoryFinal
+                ? tab.descriptionTh
+                : (isHistory
+            ? historyDescriptionTh
             : (isPortalCatalog
                 ? "ดูแม่แบบคลังข้อมูลและสถานะการเชื่อมต่อที่ Backend ยืนยัน"
-                : tab.descriptionTh)),
+                : tab.descriptionTh)))),
       actionIds: tab.actionIds.filter((actionId) => !WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(actionId)),
     };
   });
@@ -13915,6 +17053,13 @@ function normalizeWorkflowDashboard(subject, propertyRole, report = {}) {
       },
       vpsTab ? { ...vpsTab, actionIds: [], labelTh: "สถานะ VPS" } : null,
     ].filter(Boolean);
+  } else if (subject?.id === EA_OPTIMIZATION_LAB_PROP_ID) {
+    presentationTabs = tabs.map((tab) => ({
+      ...tab,
+      labelTh: EA_OPTIMIZATION_LAB_STAGE_PRESENTATION.find((item) => item.id === tab.id)?.labelTh || tab.labelTh,
+      descriptionTh: EA_OPTIMIZATION_LAB_STAGE_PRESENTATION.find((item) => item.id === tab.id)?.descriptionTh || tab.descriptionTh,
+      actionIds: [],
+    }));
   }
   const deliveredSourceRows = Array.isArray(backend.agentDeliveredSources)
     ? backend.agentDeliveredSources
@@ -13964,15 +17109,35 @@ function renderWorkflowTabs(propId, dashboard, selectedTab) {
   dashboard.tabs.forEach((tab) => {
     const button = document.createElement("button");
     const active = tab.id === selectedTab?.id;
+    const factoryStage = propId === EA_FACTORY_PROP_ID
+      ? dashboard?.domainData?.eaFactory?.stages?.find((stage) => stage.id === tab.id)
+      : null;
+    const factoryReadOnlyHistory = propId === EA_FACTORY_PROP_ID
+      && tab.id === "artifacts_report"
+      && (dashboard?.domainData?.eaFactory?.builds?.length || 0) > 0;
+    const factoryLocked = factoryStage
+      && ["locked", "unknown"].includes(factoryStage.status)
+      && !factoryReadOnlyHistory;
     button.type = "button";
     button.className = "workflow-tab";
     button.dataset.workflowTab = tab.id;
+    if (factoryStage) button.dataset.workflowStageStatus = factoryStage.status;
     button.setAttribute("role", "tab");
     button.setAttribute("aria-selected", active ? "true" : "false");
     button.setAttribute("aria-controls", "workflowDashboardContent");
     button.tabIndex = active ? 0 : -1;
+    button.disabled = Boolean(factoryLocked);
     button.classList.toggle("active", active);
-    button.textContent = tab.labelTh;
+    if (factoryStage) {
+      const label = document.createElement("span");
+      const status = document.createElement("small");
+      label.textContent = tab.labelTh;
+      status.textContent = eaFactoryStageStatusLabel(factoryStage.status);
+      button.setAttribute("aria-label", `${tab.labelTh} • ${status.textContent}`);
+      button.append(label, status);
+    } else {
+      button.textContent = tab.labelTh;
+    }
     els.workflowDashboardTabs.appendChild(button);
   });
   if (els.workflowDashboardContent && selectedTab) {
@@ -13980,7 +17145,7 @@ function renderWorkflowTabs(propId, dashboard, selectedTab) {
   }
 }
 
-function workflowAvailabilityCopy(action, hasSources, schedule = null, workflowReadModel = {}) {
+function workflowAvailabilityCopy(action, hasSources, schedule = null, workflowReadModel = {}, catalogStatus = "") {
   if (workflowReadModel.authoritative !== true) {
     return workflowReadModel.status === "error"
       ? {
@@ -13999,7 +17164,7 @@ function workflowAvailabilityCopy(action, hasSources, schedule = null, workflowR
       ? {
           tone: "ready",
           label: "บันทึกการตั้งค่าได้",
-          detail: "Local Runner จะเก็บเฉพาะค่าการทำงานที่ปลอดภัย งบ Token ใช้ประมาณการและบันทึก Audit เท่านั้น ไม่ใช่ Hard Limit และระบบไม่รับ Token, Cookie หรือ Secret",
+          detail: "Local Runner จะเก็บเฉพาะค่าการทำงานที่ปลอดภัย เกณฑ์โควตาคงที่ 15%: หยุดที่ 15% และทำงานเมื่อเหลือมากกว่า 15% งบ Token ใช้ประมาณการและบันทึก Audit เท่านั้น ไม่ใช่ Hard Limit",
         }
       : {
           tone: "ready",
@@ -14009,16 +17174,46 @@ function workflowAvailabilityCopy(action, hasSources, schedule = null, workflowR
             : "บันทึกเวลาที่ต้องการไว้ใน Local Runner; ระบบตั้งเวลาอัตโนมัติจะทำงานเมื่อ Scheduler พร้อม",
         };
   }
+  if (action.id === "deep_research_system" && hasSources) {
+    return {
+      tone: "ready",
+      label: "พร้อมวิจัยโดยไม่รออนุมัติ",
+      detail: "เลือกระบบจากคลังที่ Backend ตรวจหลักฐานแล้ว จากนั้น Local Runner จะสร้าง Mission งานอ่านเว็บสาธารณะและเริ่มทำงานทันทีโดยไม่ต้องส่งต่อหรืออนุมัติซ้ำ",
+    };
+  }
+  if (action.id === "deep_research_system" && catalogStatus === "loading") {
+    return {
+      tone: "neutral",
+      label: "กำลังโหลดระบบจาก Backend...",
+      detail: "กำลังรอคลังระบบที่ Backend ตรวจหลักฐานครบ ปุ่มวิจัยจะเปิดเมื่อได้รับ Report ที่ยืนยันแล้ว",
+    };
+  }
+  if (action.id === "deep_research_system" && catalogStatus === "error") {
+    return {
+      tone: "warning",
+      label: "โหลดคลังระบบไม่สำเร็จ",
+      detail: "Local Runner ยังส่งคลังระบบที่ตรวจหลักฐานแล้วมาไม่สำเร็จ ปุ่มวิจัยจึงปิดแบบ Fail-closed",
+    };
+  }
   if (action.sourceRequired && !hasSources) {
-    return { tone: "warning", label: "ยังไม่มี Report ที่ส่งต่อมา", detail: "เลือก Report ที่อุปกรณ์ต้นทาง แล้วมอบหมาย Agent ให้ส่งต่อผ่าน Mission ก่อน" };
+    return action.id === "deep_research_system"
+      ? { tone: "warning", label: "ยังไม่มีระบบที่ตรวจหลักฐานครบ", detail: "รอผลจากเรดาร์ระบบเทรดโลกที่ Backend ตรวจครบ 3 ระบบก่อนเริ่มวิจัย" }
+      : { tone: "warning", label: "ยังไม่มี Report ที่ส่งต่อมา", detail: "เลือก Report ที่อุปกรณ์ต้นทาง แล้วมอบหมาย Agent ให้ส่งต่อผ่าน Mission ก่อน" };
   }
   if (action.id === "refresh_vps_hq_status") {
     return { tone: "ready", label: "พร้อมตรวจสถานะ", detail: "อ่านสถานะ Local Runner, HQ และ Mission Worker จาก Backend โดยไม่เรียก Codex" };
   }
   if (action.id === "save_agent_preferences") {
-    return { tone: "ready", label: "บันทึกค่า Agent แบบปลอดภัยได้", detail: "เก็บภาษา ระดับการประมวลผล งบ Token โดยประมาณ เวลา ขนาดรายงาน และ Rate Limit สำรองใน Local Runner โดยไม่อ้างว่า Token เป็น Hard Limit" };
+    return { tone: "ready", label: "บันทึกค่า Agent แบบปลอดภัยได้", detail: "เก็บภาษา ระดับการประมวลผล งบ Token โดยประมาณ เวลา และขนาดรายงาน ส่วนเกณฑ์โควตาคงที่ 15%: หยุดที่ 15% และทำงานเมื่อเหลือมากกว่า 15%" };
   }
   if (action.availability.status === "ready") {
+    if (action.analysisOnly && action.executionScope === "public_web_read_only") {
+      return {
+        tone: "ready",
+        label: "พร้อมค้นหาโดยไม่รออนุมัติ",
+        detail: "Local Runner จะค้นข้อมูลสาธารณะแบบอ่านอย่างเดียวทันที และส่งผลกลับมาพร้อม Audit",
+      };
+    }
     return action.analysisOnly || !action.availability.realToolAvailable
       ? { tone: "ready", label: "พร้อมสร้าง Mission", detail: "Local Runner จะรับคำขอและรายงานสถานะจริงกลับมา" }
       : { tone: "ready", label: "พร้อมส่งงานหลังบ้าน", detail: "ผลลัพธ์จริงจะกลับมาพร้อม Audit Log" };
@@ -14036,17 +17231,27 @@ function workflowAvailabilityCopy(action, hasSources, schedule = null, workflowR
   };
 }
 
-function createWorkflowSourceSelect(field, sources) {
+function createWorkflowSourceSelect(field, sources, { directVerifiedCatalog = false, catalogStatus = "" } = {}) {
   const select = document.createElement("select");
   const empty = document.createElement("option");
   select.dataset.workflowField = field.id;
   select.required = field.required;
   empty.value = "";
   const isWorkspaceSource = field.sourceKind === "workspace_source";
-  select.dataset.workflowSourceKind = isWorkspaceSource ? "workspace_source" : "source_report";
+  select.dataset.workflowSourceKind = isWorkspaceSource
+    ? "workspace_source"
+    : (directVerifiedCatalog ? "verified_catalog_report" : "source_report");
   empty.textContent = sources.length
-    ? (isWorkspaceSource ? "เลือก Source ที่ Backend อนุญาต" : "เลือก Report ที่ Agent ส่งเข้ามา")
-    : (isWorkspaceSource ? "ยังไม่มี Source ใน Approved Workspace Catalog" : "ยังไม่มี Report ที่ Agent ส่งเข้ามาผ่าน Mission");
+    ? (isWorkspaceSource
+        ? "เลือก Source ที่ Backend อนุญาต"
+        : (directVerifiedCatalog ? "เลือกรายงานเรดาร์ที่ Backend ตรวจแล้ว" : "เลือก Report ที่ Agent ส่งเข้ามา"))
+    : (isWorkspaceSource
+        ? "ยังไม่มี Source ใน Approved Workspace Catalog"
+        : (directVerifiedCatalog
+            ? (catalogStatus === "loading"
+                ? "กำลังโหลดระบบจาก Backend..."
+                : (catalogStatus === "error" ? "โหลดคลังระบบไม่สำเร็จ" : "ยังไม่มีรายงานเรดาร์ที่ตรวจหลักฐานครบ"))
+            : "ยังไม่มี Report ที่ Agent ส่งเข้ามาผ่าน Mission"));
   select.appendChild(empty);
   sources.forEach((source) => {
     const option = document.createElement("option");
@@ -14054,11 +17259,29 @@ function createWorkflowSourceSelect(field, sources) {
     if (isWorkspaceSource) option.dataset.platform = String(source.platform || "");
     option.textContent = isWorkspaceSource
       ? `${source.title} • ${source.platform} • ${displayStatus(source.status)}`
-      : `${source.title} • ${displayPropName(source.sourcePropId, "แหล่งข้อมูลเดิม")}`;
+      : (directVerifiedCatalog
+          ? `${source.title} • ตรวจหลักฐานแล้วโดย Backend`
+          : `${source.title} • ${displayPropName(source.sourcePropId, "แหล่งข้อมูลเดิม")}`);
+    if (directVerifiedCatalog && sources.length === 1) option.selected = true;
     select.appendChild(option);
   });
   select.disabled = !sources.length;
   return select;
+}
+
+function workflowDeepResearchCatalogSources(dashboard) {
+  const domain = dashboard?.domainData?.tradingResearchLab;
+  const reportId = String(domain?.sourceReportId || "").trim();
+  if (domain?.backendReady !== true || !reportId) return [];
+  return [{
+    reportId,
+    sourcePropId: "codex_mcp_portal",
+    title: safeDashboardDisplayText(domain.sourceReportTitle, "รายงานระบบเทรดล่าสุด"),
+    summary: "Backend ตรวจ schema, Mission ต้นทาง และหลักฐานของระบบแล้ว",
+    type: "trading_system_discovery_report",
+    status: "verified",
+    updatedAt: domain.sourceReportUpdatedAt || null,
+  }];
 }
 
 function getWorkflowSpeechRecognitionConstructor() {
@@ -14204,11 +17427,41 @@ function createWorkflowField(field, dashboard, action) {
   const label = document.createElement("label");
   let control;
   wrapper.className = `workflow-field workflow-field-${field.type}`;
-  const isAgentDeliveredReport = field.type === "source" && field.sourceKind !== "workspace_source";
+  const isDirectVerifiedCatalog = action.id === "deep_research_system"
+    && field.type === "source"
+    && field.id === "sourceReportId";
+  const isAgentDeliveredReport = field.type === "source"
+    && field.sourceKind !== "workspace_source"
+    && !isDirectVerifiedCatalog;
   label.textContent = `${field.labelTh}${isAgentDeliveredReport ? " • Agent ส่งผ่าน Mission" : ""}${field.required ? " *" : ""}`;
   if (field.type === "source") {
-    const sources = field.sourceKind === "workspace_source" ? dashboard.workspaceSources : dashboard.agentDeliveredSources;
-    control = createWorkflowSourceSelect(field, sources);
+    const sources = isDirectVerifiedCatalog
+      ? workflowDeepResearchCatalogSources(dashboard)
+      : (field.sourceKind === "workspace_source" ? dashboard.workspaceSources : dashboard.agentDeliveredSources);
+    control = createWorkflowSourceSelect(field, sources, {
+      directVerifiedCatalog: isDirectVerifiedCatalog,
+      catalogStatus: dashboard?.domainData?.tradingResearchLab?.catalogStatus || "",
+    });
+  } else if (field.type === "source_record") {
+    control = document.createElement("select");
+    control.dataset.workflowField = field.id;
+    control.required = field.required;
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = "เลือกระบบเทรด";
+    control.appendChild(empty);
+    const systems = Array.isArray(dashboard?.domainData?.tradingResearchLab?.systems)
+      ? dashboard.domainData.tradingResearchLab.systems
+      : [];
+    const selectedSystemId = state.modal.tradingResearchLab.selectedSystemId || systems[0]?.id || "";
+    systems.forEach((system) => {
+      const option = document.createElement("option");
+      option.value = String(system.id || "");
+      option.textContent = safeDashboardDisplayText(system.systemName, "ระบบเทรด")
+        + " • " + tradingSystemFamilyLabel(system.strategyFamily);
+      option.selected = option.value === selectedSystemId;
+      if (option.value) control.appendChild(option);
+    });
   } else if (field.type === "textarea" || field.type === "list") {
     control = document.createElement("textarea");
     control.rows = field.type === "list" ? 2 : 4;
@@ -14246,14 +17499,6 @@ function createWorkflowField(field, dashboard, action) {
   control.id = controlId;
   label.htmlFor = controlId;
   if (field.placeholderTh && "placeholder" in control) control.placeholder = field.placeholderTh;
-  const radarSheet = dashboard?.domainData?.indicatorScout?.googleSheet;
-  if (
-    field.id === "googleSheetUrlOrId"
-    && radarSheet?.configured === true
-    && "placeholder" in control
-  ) {
-    control.placeholder = `บันทึกแล้ว: ${safeDashboardDisplayText(radarSheet.sheetReferenceMasked, "Google Sheet")} • วาง URL/ID ใหม่เมื่อต้องการเปลี่ยน`;
-  }
   const preferenceValue = dashboard.domainData?.vpsHqStatus?.agentPreferences?.[field.id];
   if (preferenceValue !== undefined && preferenceValue !== null) {
     if (control instanceof HTMLSelectElement) {
@@ -14270,7 +17515,6 @@ function createWorkflowField(field, dashboard, action) {
           times: schedule.times,
           timezone: schedule.timezone,
           minimumImpact: schedule.minimumImpact,
-          googleSheetTabName: radarSheet?.tabName,
         }[field.id])
       : undefined;
     const presetValue = scheduleValue ?? action.pluginProfile?.inputPreset?.[field.id];
@@ -14284,6 +17528,11 @@ function createWorkflowField(field, dashboard, action) {
         control.value = Array.isArray(presetValue) ? presetValue.join(", ") : String(presetValue);
       }
     }
+  }
+  if (field.id === "rateReservePercent" && control instanceof HTMLInputElement) {
+    control.value = "15";
+    control.disabled = true;
+    control.title = "เกณฑ์กลางของระบบ: ต้องเหลือมากกว่า 15%";
   }
   wrapper.append(label, control);
   if (field.voiceDictation && control instanceof HTMLTextAreaElement) {
@@ -14326,16 +17575,20 @@ function createWorkflowActionCard(action, dashboard) {
   const truth = document.createElement("p");
   const submit = document.createElement("button");
   const sourceFields = action.formFields.filter((field) => field.type === "source");
-  const hasSources = sourceFields.length
+  const directResearchSources = action.id === "deep_research_system"
+    ? workflowDeepResearchCatalogSources(dashboard)
+    : [];
+  const hasSources = directResearchSources.length > 0 || (sourceFields.length
     ? sourceFields.some((field) => (
         field.sourceKind === "workspace_source" ? dashboard.workspaceSources.length > 0 : dashboard.agentDeliveredSources.length > 0
       ))
-    : dashboard.agentDeliveredSources.length > 0;
+    : dashboard.agentDeliveredSources.length > 0);
   const availabilityCopy = workflowAvailabilityCopy(
     action,
     hasSources,
     dashboard.schedule,
     dashboard.workflowReadModel,
+    dashboard?.domainData?.tradingResearchLab?.catalogStatus || "",
   );
   const inFlight = state.modal.workflowAction.inFlight
     && state.modal.workflowAction.propId === state.modal.id
@@ -14434,9 +17687,12 @@ function createWorkflowActionCard(action, dashboard) {
   submit.className = "modal-action primary workflow-submit";
   submit.disabled = !canSubmit || inFlight;
   const isSettingsAction = WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(action.id);
+  const isReadOnlySearch = action.analysisOnly && action.executionScope === "public_web_read_only";
   const idleSubmitLabel = isSettingsAction
     ? (action.id === "save_agent_preferences" ? "บันทึกการตั้งค่า" : "บันทึกเวลา")
-    : (action.id === "refresh_vps_hq_status" ? "ตรวจสถานะ" : "สร้าง Mission");
+    : (action.id === "refresh_vps_hq_status"
+      ? "ตรวจสถานะ"
+      : (isReadOnlySearch ? "เริ่มค้นตอนนี้" : "สร้าง Mission"));
   submit.textContent = inFlight
     ? (isSettingsAction ? "กำลังบันทึก..." : "กำลังส่งคำขอ...")
     : idleSubmitLabel;
@@ -14783,28 +18039,16 @@ function indicatorScoutToolKindLabel(value) {
 
 function indicatorScoutSafeScreenshotUrl(item = {}) {
   const screenshot = workflowDomainObject(item.screenshot);
-  const directCandidates = [screenshot.url, screenshot.imageUrl, item.imageUrl, item.screenshotUrl];
-  for (const candidate of directCandidates) {
-    const safeUrl = getSafeReportImageUrl(candidate);
-    if (safeUrl) return safeUrl;
-  }
   const reportId = String(item.reportId || "").trim();
   const attachmentId = String(screenshot.attachmentId || item.screenshotAttachmentId || "").trim();
   if (
     screenshot.available === true
+    && screenshot.status === "verified_publisher_image"
+    && screenshot.captureKind === "publisher_open_graph"
     && /^[a-zA-Z0-9._-]+$/.test(reportId)
     && /^[a-zA-Z0-9._-]+$/.test(attachmentId)
   ) {
     const safeUrl = getSafeReportImageUrl(`/api/reports/${reportId}/attachments/${attachmentId}`);
-    if (safeUrl) return safeUrl;
-  }
-  const visualRows = indicatorScoutObjectRows(
-    item.visualEvidence,
-    item.attachments,
-    item.reportVisualEvidence,
-  );
-  for (const row of visualRows) {
-    const safeUrl = getSafeReportImageUrl(row.url || row.imageUrl);
     if (safeUrl) return safeUrl;
   }
   return "";
@@ -14861,14 +18105,10 @@ function normalizeRadarSchedule(rawSchedule = {}) {
     if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return "";
     return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
   };
-  const requestedEnabled = typeof schedule.requestedEnabled === "boolean"
-    ? schedule.requestedEnabled
-    : schedule.enabled === true;
+  const requestedEnabled = true;
   const backendEffective = schedule.effectiveEnabled === true;
-  const effectiveEnabled = requestedEnabled && backendEffective === true;
-  const configuredTime = workflowDomainArray(schedule.times, schedule.runTimes, schedule.scheduleTimes)
-    .map(normalizeTime)
-    .find(Boolean) || INDICATOR_SCOUT_DEFAULT_TIME;
+  const effectiveEnabled = backendEffective === true;
+  const configuredTime = INDICATOR_SCOUT_DEFAULT_TIME;
   const boundedDailyCount = (value) => {
     if (value === null || value === undefined || value === "") return null;
     const numeric = Number(value);
@@ -14894,13 +18134,12 @@ function normalizeRadarSchedule(rawSchedule = {}) {
     lastError: safeDashboardDisplayText(schedule.lastError, ""),
     lastErrorAt: schedule.lastErrorAt || null,
     nextRunAt: schedule.nextRunAt || null,
+    lastAttemptAt: schedule.lastAttemptAt || null,
+    pendingScheduledAt: schedule.pendingScheduledAt || null,
+    pendingSlotKey: safeDashboardDisplayText(schedule.pendingSlotKey, ""),
+    status: safeDashboardDisplayText(schedule.status, "unknown").toLowerCase().replace(/[\s-]+/g, "_"),
+    statusLabelTh: safeDashboardDisplayText(schedule.statusLabelTh, ""),
   };
-}
-
-function radarRetryQuotaAvailable(schedule = {}) {
-  return Number.isFinite(schedule?.remainingRunsToday)
-    && Number.isInteger(schedule.remainingRunsToday)
-    && schedule.remainingRunsToday > 0;
 }
 
 function normalizeRadarServiceHealth(rawService = {}) {
@@ -14920,20 +18159,254 @@ function normalizeRadarServiceHealth(rawService = {}) {
       lastSuccessAt: source?.lastSuccessAt || null,
       errorCode: safeDashboardDisplayText(source?.errorCode, ""),
     }));
-  const retryEndpoint = String(service.retryEndpoint || "").trim();
-  const retryActionId = String(service.retryActionId || "").trim();
-  const retryContractValid = retryEndpoint === INDICATOR_SCOUT_WORKFLOW_ENDPOINT
-    && retryActionId === "discover_new_indicators";
+  const suppliedRepair = (
+    service.automaticCorrectiveRetry
+    && typeof service.automaticCorrectiveRetry === "object"
+    && !Array.isArray(service.automaticCorrectiveRetry)
+  )
+    ? service.automaticCorrectiveRetry
+    : (
+        service.radarBatchRepair
+        && typeof service.radarBatchRepair === "object"
+        && !Array.isArray(service.radarBatchRepair)
+          ? service.radarBatchRepair
+          : {}
+      );
+  const boundedRepairCount = (value) => {
+    const numeric = Number(value);
+    return Number.isInteger(numeric) && numeric >= 0 && numeric <= 1000 ? numeric : null;
+  };
+  const automaticCorrectiveRetry = {
+    supported: suppliedRepair.supported === true,
+    status: normalizeStatus(suppliedRepair.status, "not_needed"),
+    attempted: boundedRepairCount(suppliedRepair.attempted),
+    remaining: boundedRepairCount(suppliedRepair.remaining),
+    totalAttemptsQueued: boundedRepairCount(suppliedRepair.totalAttemptsQueued),
+    nextAttemptAt: suppliedRepair.nextAttemptAt || null,
+    sameMission: suppliedRepair.sameMission === true,
+    sameDailyReservation: suppliedRepair.sameDailyReservation === true,
+    newDailyReservation: suppliedRepair.newDailyReservation === false ? false : null,
+  };
   return {
     status: normalizeStatus(service.status),
     adapterStatus: normalizeStatus(service.adapterStatus),
     sourceStatus: normalizeStatus(service.sourceStatus),
     lastRunStatus: normalizeStatus(service.lastRunStatus, "not_run"),
+    lastResultKind: normalizeStatus(service.lastResultKind, ""),
+    lastAttemptAt: service.lastAttemptAt || null,
+    lastRunAt: service.lastRunAt || null,
+    lastSuccessAt: service.lastSuccessAt || null,
+    activeMissionId: safeDashboardDisplayText(service.activeMissionId, ""),
     lastError: safeDashboardDisplayText(service.lastError, ""),
-    retryAvailable: service.retryAvailable === true && retryContractValid,
-    retryEndpoint: retryContractValid ? retryEndpoint : "",
-    retryActionId: retryContractValid ? retryActionId : "",
+    retryAvailable: false,
+    retryEndpoint: "",
+    retryActionId: "",
+    automaticCorrectiveRetry,
     sourceHealth,
+  };
+}
+
+function normalizeRadarRunStatus(value, fallback = "") {
+  return String(value || fallback).trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
+
+function radarBangkokMinuteOfDay(value = Date.now()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: INDICATOR_SCOUT_TIMEZONE,
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    const hour = Number(values.hour);
+    const minute = Number(values.minute);
+    return Number.isInteger(hour) && Number.isInteger(minute) ? (hour * 60) + minute : null;
+  } catch {
+    return null;
+  }
+}
+
+function getRadarTodayRunState(domain = {}, now = Date.now()) {
+  const todayEntries = Array.isArray(domain?.todayEntries) ? domain.todayEntries : [];
+  const expectedBatchSize = Number.isInteger(domain?.expectedBatchSize)
+    ? domain.expectedBatchSize
+    : INDICATOR_SCOUT_EXPECTED_BATCH_SIZE;
+  if (todayEntries.length) {
+    const complete = todayEntries.length >= expectedBatchSize;
+    return {
+      state: complete ? "verified_results" : "partial_results",
+      tone: complete ? "ready" : "warning",
+      title: complete
+        ? `รายงานวันนี้ผ่านการตรวจครบ ${todayEntries.length}/${expectedBatchSize}`
+        : `Backend ส่งผลมาแล้ว ${todayEntries.length}/${expectedBatchSize} แต่รอบยังไม่ครบ`,
+      detail: complete
+        ? "แสดงเฉพาะรายการที่ Backend ยืนยันหลักฐานและผูกเข้ากับรอบวันนี้แล้ว"
+        : "รายการที่เห็นเป็นข้อมูลจริงจาก Backend แต่หน้านี้ยังไม่ถือว่ารอบวันนี้สำเร็จครบจนกว่าจะได้รับครบตามเป้าหมาย",
+      lastRunAt: domain?.schedule?.lastRunAt || domain?.serviceHealth?.lastRunAt || null,
+      nextRunAt: domain?.schedule?.nextRunAt || null,
+      error: "",
+    };
+  }
+  const schedule = normalizeRadarSchedule(domain?.schedule);
+  const service = normalizeRadarServiceHealth(domain?.serviceHealth);
+  const repair = service.automaticCorrectiveRetry || {};
+  const repairStateTrusted = repair.supported === true
+    && repair.sameMission === true
+    && repair.sameDailyReservation === true
+    && repair.newDailyReservation === false;
+  const repairInProgress = repairStateTrusted && [
+    "queued",
+    "deferred",
+    "running",
+    "pending",
+    "retrying",
+  ].includes(repair.status);
+  const nowValue = now instanceof Date
+    ? now.getTime()
+    : (typeof now === "number" ? now : new Date(now).getTime());
+  const todayKey = indicatorScoutBangkokDateKey(nowValue);
+  const lastRunAt = schedule.lastRunAt || service.lastRunAt || schedule.lastAttemptAt || service.lastAttemptAt || null;
+  const lastRunToday = Boolean(
+    todayKey && lastRunAt && indicatorScoutBangkokDateKey(lastRunAt) === todayKey,
+  );
+  const statusValues = [
+    schedule.lastRunStatus,
+    schedule.lastResultKind,
+    schedule.status,
+    service.lastRunStatus,
+    service.lastResultKind,
+    service.status,
+  ].map((value) => normalizeRadarRunStatus(value)).filter(Boolean);
+  const hasStatus = (...values) => statusValues.some((status) => values.includes(status));
+  const correctiveInProgress = statusValues.some((status) => (
+    (status.includes("correct") || status.includes("recover") || status.includes("repair") || status.includes("retry"))
+    && (status.includes("running") || status.includes("queued") || status.includes("pending") || status.includes("progress"))
+  ));
+  const running = hasStatus(
+    "running",
+    "queued",
+    "pending",
+    "in_progress",
+    "corrective_running",
+    "correction_running",
+    "recovering",
+    "recovery_running",
+    "repairing",
+    "retrying",
+  ) || correctiveInProgress || repairInProgress || Boolean(service.activeMissionId) || Boolean(schedule.pendingSlotKey);
+  const correctiveRunning = statusValues.some((status) => (
+    status.includes("correct") || status.includes("recover") || status.includes("repair") || status.includes("retry")
+  )) || repairInProgress;
+  if (running) {
+    const correctiveNextAttemptAt = repairInProgress ? repair.nextAttemptAt : null;
+    return {
+      state: correctiveRunning ? "corrective_running" : "running",
+      tone: "running",
+      title: correctiveRunning
+        ? `กำลังหาให้ครบ ${expectedBatchSize} รายการ`
+        : "Backend กำลังค้นหาและตรวจหลักฐาน",
+      detail: repairInProgress && repair.status === "deferred"
+        ? "รอบเดิมยังไม่ถูกปิด ระบบพักตามขีดจำกัดชั่วคราวและจะค้นหาต่ออัตโนมัติ โดยไม่ใช้ผลที่ยังไม่ครบแทนรายงาน"
+        : "ระบบจะเผยแพร่รายการพร้อมกันเมื่อจบรอบและหลักฐานผ่านครบ ระหว่างทำงานจำนวนรายการอาจยังแสดงเป็น 0",
+      lastRunAt,
+      nextRunAt: correctiveNextAttemptAt || schedule.nextRunAt,
+      nextAttemptAt: correctiveNextAttemptAt,
+      error: "",
+    };
+  }
+  const failed = hasStatus(
+    "failed",
+    "error",
+    "invalid_output",
+    "blocked",
+    "corrective_failed",
+    "correction_failed",
+    "recovery_failed",
+    "repair_failed",
+    "retry_failed",
+  );
+  if (failed && (lastRunToday || schedule.runsReservedToday === 1)) {
+    const error = safeDashboardDisplayText(
+      schedule.lastResultKind || schedule.lastError || service.lastResultKind || service.lastError,
+      "Backend ไม่รับผลรอบล่าสุด",
+    );
+    return {
+      state: "corrective_failed",
+      tone: "error",
+      title: "รอบวันนี้ยังไม่ผ่านการตรวจ จึงยังไม่มีรายงาน",
+      detail: "Backend ปฏิเสธผลที่รูปแบบหรือหลักฐานยังไม่ครบ ระบบต้องทำขั้นตรวจแก้ให้สำเร็จก่อนจึงจะแสดงรายการ โดยไม่ใช้ผลที่ตรวจไม่ผ่านแทน",
+      lastRunAt,
+      nextRunAt: schedule.nextRunAt,
+      error,
+    };
+  }
+  const degraded = hasStatus("degraded", "partial", "partial_success", "incomplete");
+  if (degraded && (lastRunToday || schedule.runsReservedToday === 1)) {
+    return {
+      state: "degraded",
+      tone: "warning",
+      title: "รอบวันนี้ยังได้หลักฐานไม่ครบ จึงยังไม่ถือว่าสำเร็จ",
+      detail: "Backend แจ้งผลแบบไม่สมบูรณ์ หน้านี้จะแสดงจำนวนตามจริงและรอให้ขั้นตรวจแก้จบรอบก่อน โดยไม่แปลงผลบางส่วนเป็นรายงานสำเร็จ",
+      lastRunAt,
+      nextRunAt: schedule.nextRunAt,
+      error: service.lastError || schedule.lastError,
+    };
+  }
+  const completed = hasStatus(
+    "completed",
+    "complete",
+    "success",
+    "succeeded",
+    "verified_empty",
+    "no_results",
+    "no_new_results",
+  );
+  if (completed && lastRunToday) {
+    return {
+      state: "verified_empty",
+      tone: "ready",
+      title: "รอบวันนี้สำเร็จ แต่ไม่พบรายการใหม่ที่ผ่านการตรวจ",
+      detail: "Backend ทำรอบวันนี้เสร็จแล้ว และยืนยันว่าไม่มีรายการใหม่สำหรับเผยแพร่ ผลย้อนหลังยังดูได้จากแท็บ ย้อนหลัง 7 วัน",
+      lastRunAt,
+      nextRunAt: schedule.nextRunAt,
+      error: "",
+    };
+  }
+  const nowMinute = radarBangkokMinuteOfDay(nowValue);
+  const scheduleMinute = 9 * 60;
+  if (!lastRunToday && nowMinute !== null && nowMinute < scheduleMinute) {
+    return {
+      state: "awaiting_schedule",
+      tone: "waiting",
+      title: "รอรอบอัตโนมัติ 09:00 น. วันนี้",
+      detail: "Backend ยังไม่ถึงเวลาค้นหาประจำวันตามเวลา Asia/Bangkok จึงยังไม่มีรายงานของวันนี้",
+      lastRunAt,
+      nextRunAt: schedule.nextRunAt,
+      error: "",
+    };
+  }
+  if (!lastRunToday) {
+    return {
+      state: "delayed",
+      tone: "warning",
+      title: "เลยเวลา 09:00 น. แต่ Backend ยังไม่ส่งผลรอบวันนี้",
+      detail: "ยังไม่มีหลักฐานว่ารอบวันนี้เริ่มหรือสำเร็จ หน้านี้จึงไม่ตีความ 0 รายการว่าเป็นผลค้นหาที่สำเร็จ",
+      lastRunAt,
+      nextRunAt: schedule.nextRunAt,
+      error: service.lastError || schedule.lastError,
+    };
+  }
+  return {
+    state: "awaiting_result",
+    tone: "waiting",
+    title: "รอ Backend ยืนยันผลรอบวันนี้",
+    detail: "พบเวลาทำงานของวันนี้แล้ว แต่ยังไม่มีสถานะสำเร็จหรือรายการที่ผ่านการตรวจ หน้านี้จะรอข้อมูลจริงโดยไม่สร้างผลลัพธ์แทน",
+    lastRunAt,
+    nextRunAt: schedule.nextRunAt,
+    error: service.lastError || schedule.lastError,
   };
 }
 
@@ -14957,6 +18430,19 @@ function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
   const canonicalSevenDayRows = Array.isArray(canonical.sevenDayEntries)
     ? canonical.sevenDayEntries
     : (Array.isArray(backend.sevenDayEntries) ? backend.sevenDayEntries : null);
+  const todaySummary = workflowDomainObject(canonical.today, root.today, backend.today);
+  const requestedBatchSize = Number(
+    canonical.expectedBatchSize
+    || canonical.targetItemCount
+    || todaySummary.expectedBatchSize
+    || todaySummary.targetItemCount
+    || INDICATOR_SCOUT_EXPECTED_BATCH_SIZE,
+  );
+  const expectedBatchSize = Number.isInteger(requestedBatchSize)
+    && requestedBatchSize >= 1
+    && requestedBatchSize <= 20
+    ? requestedBatchSize
+    : INDICATOR_SCOUT_EXPECTED_BATCH_SIZE;
   const hasCanonicalTruth = canonicalTodayRows !== null && canonicalSevenDayRows !== null;
   const candidates = hasCanonicalTruth
     ? [...canonicalSevenDayRows]
@@ -15039,7 +18525,7 @@ function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
     const checkedAt = item?.checkedAt || item?.discoveredAt || item?.reportUpdatedAt || item?.updatedAt || item?.createdAt || null;
     const imageUrl = indicatorScoutSafeScreenshotUrl({ ...item, reportId });
     const visualEvidence = imageUrl
-      ? [{ url: imageUrl, label: `ภาพหลักฐาน ${title}` }]
+      ? [{ url: imageUrl, label: `ภาพ Open Graph จากหน้าเว็บต้นทาง • ${title}` }]
       : [];
     const evidence = rawEvidence.length
       ? rawEvidence
@@ -15126,9 +18612,9 @@ function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
     ? discoveries
     : filterIndicatorScoutRollingSevenDays(discoveries);
   const fallbackAdapter = {
-    status: "coming_soon",
-    labelTh: "Screenshot Adapter: Coming Soon",
-    detailTh: "ยังไม่มี Adapter จับภาพจริง จึงไม่แสดงภาพจำลองหรืออ้างว่ามี Screenshot แล้ว",
+    status: "ready",
+    labelTh: "Publisher Image Adapter พร้อมใช้งาน",
+    detailTh: "ระบบดึงเฉพาะภาพ Open Graph ที่เว็บต้นทางประกาศ ตรวจ hash และให้บริการผ่าน Report attachment แบบ same-origin; ไม่ใช่ภาพแคปเต็มหน้าเว็บ",
   };
   const adapter = workflowDomainObject(root.screenshotAdapter, backend.screenshotAdapter);
   const hasScreenshot = discoveries.some((item) => Boolean(item.imageUrl));
@@ -15145,12 +18631,13 @@ function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
     reports,
     schedule,
     serviceHealth,
+    expectedBatchSize,
     googleSheet: workflowDomainObject(root.googleSheet, backend.googleSheet),
     screenshotAdapter: hasScreenshot
       ? {
           status: "ready",
-          labelTh: "มีภาพหลักฐานจาก Backend",
-          detailTh: "แสดงเฉพาะไฟล์ภาพจาก Report attachment แบบ same-origin ที่ผ่านตัวกรองแล้ว",
+          labelTh: "มีภาพ Open Graph ที่ตรวจแล้วจาก Backend",
+          detailTh: "แสดงเฉพาะไฟล์ภาพที่ผูก exact recordId, URL, เวลา และ SHA-256 ก่อนให้บริการแบบ same-origin",
         }
       : {
           ...fallbackAdapter,
@@ -15159,6 +18646,704 @@ function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
           detailTh: safeDashboardDisplayText(adapter.detailTh, fallbackAdapter.detailTh),
         },
   };
+}
+
+function normalizeTradingSystemPortalDomain(backend = {}, report = {}) {
+  const root = workflowDomainObject(
+    backend.tradingSystemPortal,
+    backend.domainData?.tradingSystemPortal,
+    report.tradingSystemPortal,
+  );
+  const reportRows = workflowReportRows(report, "trading_system_discovery_report")
+    .filter((item) => String(item?.status || "").toLowerCase() === "ready")
+    .sort((left, right) => (
+      (Date.parse(right?.updatedAt || right?.createdAt || "") || 0)
+      - (Date.parse(left?.updatedAt || left?.createdAt || "") || 0)
+    ));
+  const latestReport = reportRows.find((item) => (
+    Array.isArray(item?.metrics?.systems) && item.metrics.systems.length === 3
+  )) || null;
+  const safeList = (value, maximum = 8) => (Array.isArray(value) ? value : [])
+    .slice(0, maximum)
+    .map((item) => safeDashboardDisplayText(item, ""))
+    .filter(Boolean);
+  const safeSteps = (value, maximum = 6) => (Array.isArray(value) ? value : [])
+    .slice(0, maximum)
+    .map((item, index) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+      const rule = safeDashboardDisplayText(item.rule, "");
+      const sourceUrl = getSafeExternalHttpUrl(item.sourceUrl);
+      if (!rule || !sourceUrl) return null;
+      return {
+        stepNo: Number.isInteger(Number(item.stepNo)) ? Number(item.stepNo) : index + 1,
+        rule,
+        sourceUrl,
+        truthStatus: safeDashboardDisplayText(item.truthStatus, "fact"),
+      };
+    })
+    .filter(Boolean);
+  const systems = latestReport
+    ? latestReport.metrics.systems.map((item, index) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+        const creator = workflowDomainObject(item.creatorOrTrader);
+        const creatorSourceUrl = getSafeExternalHttpUrl(creator.sourceUrl);
+        const sourceUrl = getSafeExternalHttpUrl(item.sourceUrl);
+        const corroboratingUrls = safeList(item.corroboratingUrls, 2)
+          .map(getSafeExternalHttpUrl)
+          .filter(Boolean);
+        const sources = [...new Set([sourceUrl, ...corroboratingUrls].filter(Boolean))];
+        const risk = workflowDomainObject(item.riskManagement);
+        const creatorName = safeDashboardDisplayText(creator.name, "");
+        const strategyFamily = safeDashboardDisplayText(item.strategyFamily, "").toLowerCase();
+        if (
+          String(item.recordType || "") !== "trading_system"
+          || !safeDashboardDisplayText(item.systemName, "")
+          || !strategyFamily
+          || !creatorName
+          || !["trader", "author", "developer"].includes(String(creator.role || "").toLowerCase())
+          || String(creator.status || "").toLowerCase() !== "publicly_stated"
+          || !creatorSourceUrl
+          || sources.length !== 2
+          || !sources.includes(creatorSourceUrl)
+        ) return null;
+        return {
+          id: safeDashboardDisplayText(item.recordId, `trading-system-${index + 1}`),
+          systemName: safeDashboardDisplayText(item.systemName, `ระบบเทรด ${index + 1}`),
+          strategyFamily,
+          creator: {
+            name: creatorName,
+            role: safeDashboardDisplayText(creator.role, "trader").toLowerCase(),
+            sourceUrl: creatorSourceUrl,
+          },
+          publicUsers: (Array.isArray(item.publicUsers) ? item.publicUsers : [])
+            .slice(0, 3)
+            .map((user) => ({
+              name: safeDashboardDisplayText(user?.name, ""),
+              sourceUrl: getSafeExternalHttpUrl(user?.sourceUrl),
+            }))
+            .filter((user) => user.name && user.sourceUrl),
+          market: safeDashboardDisplayText(item.market, "ยังไม่ระบุตลาด"),
+          symbols: safeList(item.symbols, 12),
+          timeframes: safeList(item.timeframes, 8),
+          sessions: safeList(item.sessions, 6),
+          indicatorSettings: (Array.isArray(item.indicatorSettings) ? item.indicatorSettings : [])
+            .slice(0, 6)
+            .map((indicator) => ({
+              name: safeDashboardDisplayText(indicator?.name, ""),
+              settings: safeDashboardDisplayText(indicator?.settings, ""),
+              role: safeDashboardDisplayText(indicator?.role, ""),
+              sourceUrl: getSafeExternalHttpUrl(indicator?.sourceUrl),
+            }))
+            .filter((indicator) => indicator.name && indicator.settings && indicator.sourceUrl),
+          setupConditions: safeList(item.setupConditions, 6),
+          entrySteps: safeSteps(item.entrySteps),
+          exitSteps: safeSteps(item.exitSteps),
+          tradeManagementSteps: safeSteps(item.tradeManagementSteps, 5),
+          riskManagement: {
+            positionSizing: safeDashboardDisplayText(risk.positionSizing, "ไม่พบข้อมูลสาธารณะ"),
+            stopLoss: safeDashboardDisplayText(risk.stopLoss, "ไม่พบข้อมูลสาธารณะ"),
+            takeProfit: safeDashboardDisplayText(risk.takeProfit, "ไม่พบข้อมูลสาธารณะ"),
+            maxRiskPerTrade: safeDashboardDisplayText(risk.maxRiskPerTrade, "ไม่พบข้อมูลสาธารณะ"),
+            maxOpenPositions: safeDashboardDisplayText(risk.maxOpenPositions, "ไม่พบข้อมูลสาธารณะ"),
+            dailyOrEquityStop: safeDashboardDisplayText(risk.dailyOrEquityStop, "ไม่พบข้อมูลสาธารณะ"),
+            recoveryMethod: safeDashboardDisplayText(risk.recoveryMethod, "not_publicly_stated"),
+            recoveryRules: safeList(risk.recoveryRules, 4),
+          },
+          suitableFor: safeList(item.suitableFor, 5),
+          risksAndLimitations: safeList(item.risksAndLimitations, 6),
+          unknowns: safeList(item.unknowns, 6),
+          sourceTitle: safeDashboardDisplayText(item.sourceTitle, "แหล่งข้อมูลหลัก"),
+          sources,
+          checkedAt: item.checkedAt || null,
+          verificationStatus: safeDashboardDisplayText(item.verificationStatus, "verified"),
+          duplicateStatus: safeDashboardDisplayText(item.duplicateStatus, "unique"),
+        };
+      }).filter(Boolean)
+    : [];
+  const diverseSystems = systems.length === 3
+    && new Set(systems.map((item) => item.strategyFamily)).size === 3
+    ? systems
+    : [];
+  return {
+    systems: diverseSystems,
+    reportId: latestReport?.id || "",
+    reportTitle: safeDashboardDisplayText(latestReport?.title, "รายงานระบบเทรดล่าสุด"),
+    reportUpdatedAt: latestReport?.updatedAt || latestReport?.createdAt || null,
+    evidence: indicatorScoutSourceRows(latestReport?.evidence),
+    schedule: normalizeRadarSchedule(workflowDomainObject(root.schedule, backend.schedule)),
+  };
+}
+
+function normalizeTradingSystemResearchLabDomain(backend = {}, report = {}, portalReport = {}, portalLoadState = {}) {
+  const portalBackend = portalReport?.workflowDashboard
+    && typeof portalReport.workflowDashboard === "object"
+    && !Array.isArray(portalReport.workflowDashboard)
+    ? portalReport.workflowDashboard
+    : {};
+  const portal = normalizeTradingSystemPortalDomain(portalBackend, portalReport);
+  const researchReports = workflowReportRows(report, "trading_system_research_report")
+    .filter((item) => ["ready", "completed", "verified"].includes(String(item?.status || "").toLowerCase()))
+    .sort((left, right) => (
+      (Date.parse(right?.updatedAt || right?.createdAt || "") || 0)
+      - (Date.parse(left?.updatedAt || left?.createdAt || "") || 0)
+    ))
+    .slice(0, 20);
+  const hasVerifiedCatalog = Array.isArray(portal.systems) && portal.systems.length === 3;
+  const rawCatalogStatus = String(portalLoadState?.status || "").trim().toLowerCase();
+  const catalogStatus = hasVerifiedCatalog
+    ? "ready"
+    : (["loading", "error"].includes(rawCatalogStatus) ? rawCatalogStatus : "idle");
+  return {
+    systems: hasVerifiedCatalog ? portal.systems : [],
+    sourceReportId: portal.reportId || "",
+    sourceReportTitle: portal.reportTitle || "รายงานระบบเทรดล่าสุด",
+    sourceReportUpdatedAt: portal.reportUpdatedAt || null,
+    researchReports,
+    backendReady: hasVerifiedCatalog,
+    catalogStatus,
+    catalogLoading: catalogStatus === "loading",
+    catalogError: catalogStatus === "error"
+      ? safeDashboardDisplayText(portalLoadState?.errorMessage, "โหลดคลังระบบจาก Local Runner ไม่สำเร็จ")
+      : "",
+    localOnly: true,
+  };
+}
+
+function getTradingResearchLabSession(domain = {}) {
+  const session = state.modal.tradingResearchLab;
+  const systems = Array.isArray(domain.systems) ? domain.systems : [];
+  const sourceReportId = String(domain.sourceReportId || "");
+  if (session.sourceReportId !== sourceReportId) {
+    session.sourceReportId = sourceReportId;
+    session.selectedSystemId = systems[0]?.id || "";
+    session.backtest = null;
+    session.backtestMessage = "";
+  }
+  if (!systems.some((system) => system.id === session.selectedSystemId)) {
+    session.selectedSystemId = systems[0]?.id || "";
+    session.backtest = null;
+    session.backtestMessage = "";
+  }
+  if (!TRADING_RESEARCH_SIMULATION_REGIMES.some((regime) => regime.id === session.simulationRegime)) {
+    session.simulationRegime = TRADING_RESEARCH_SIMULATION_REGIMES[0].id;
+  }
+  if (!Object.prototype.hasOwnProperty.call(TRADING_RESEARCH_TIMEFRAME_MS, session.timeframe)) session.timeframe = "H1";
+  return session;
+}
+
+function tradingResearchNormalizeHeader(value) {
+  return String(value ?? "")
+    .replace(/^\uFEFF/, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s./\\-]+/g, "_")
+    .replace(/[^a-z0-9_]/g, "");
+}
+
+function tradingResearchDetectDelimiter(line) {
+  const candidates = [",", "\t", ";"];
+  let best = ",";
+  let bestCount = -1;
+  candidates.forEach((delimiter) => {
+    let count = 0;
+    let quoted = false;
+    for (const character of String(line || "")) {
+      if (character === "\"") quoted = !quoted;
+      else if (!quoted && character === delimiter) count += 1;
+    }
+    if (count > bestCount) {
+      best = delimiter;
+      bestCount = count;
+    }
+  });
+  return best;
+}
+
+function tradingResearchParseDelimitedRows(text, delimiter) {
+  const rows = [];
+  let row = [];
+  let value = "";
+  let quoted = false;
+  const source = String(text || "").replace(/\r\n?/g, "\n");
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === "\"") {
+      if (quoted && source[index + 1] === "\"") {
+        value += "\"";
+        index += 1;
+      } else quoted = !quoted;
+    } else if (character === delimiter && !quoted) {
+      row.push(value);
+      value = "";
+    } else if (character === "\n" && !quoted) {
+      row.push(value);
+      if (row.some((cell) => String(cell).trim())) rows.push(row);
+      row = [];
+      value = "";
+    } else value += character;
+  }
+  if (quoted) return { ok: false, error: "ไฟล์ CSV มีเครื่องหมายคำพูดที่ปิดไม่ครบ" };
+  row.push(value);
+  if (row.some((cell) => String(cell).trim())) rows.push(row);
+  return { ok: true, rows };
+}
+
+function tradingResearchTimestamp(value) {
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value.getTime();
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (value > 100000000000) return value;
+    if (value > 1000000000) return value * 1000;
+    return Number.NaN;
+  }
+  const raw = String(value || "").trim();
+  if (!raw) return Number.NaN;
+  if (/^\d{10,13}$/.test(raw)) {
+    const numeric = Number(raw);
+    return raw.length === 10 ? numeric * 1000 : numeric;
+  }
+  const normalized = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(raw)
+    ? raw.replace(" ", "T") + "Z"
+    : raw;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function normalizeTradingResearchOhlcRows(rawRows) {
+  if (!Array.isArray(rawRows) || rawRows.length < 3) {
+    return { ok: false, error: "ต้องมีหัวตารางและข้อมูล OHLC อย่างน้อย 2 แถว" };
+  }
+  if (rawRows.length - 1 > TRADING_RESEARCH_MAX_OHLC_ROWS) {
+    return { ok: false, error: "ไฟล์มีข้อมูลเกิน 200,000 แถว จึงหยุดเพื่อป้องกันเบราว์เซอร์ค้าง" };
+  }
+  const headers = rawRows[0].map(tradingResearchNormalizeHeader);
+  const aliases = {
+    timestamp: ["timestamp", "time", "datetime", "date", "open_time", "opentime"],
+    open: ["open", "o"],
+    high: ["high", "h"],
+    low: ["low", "l"],
+    close: ["close", "c", "last"],
+    volume: ["volume", "vol", "tick_volume", "tickvolume"],
+  };
+  const columns = {};
+  Object.entries(aliases).forEach(([name, names]) => {
+    columns[name] = headers.findIndex((header) => names.includes(header));
+  });
+  const missing = ["timestamp", "open", "high", "low", "close"].filter((name) => columns[name] < 0);
+  if (missing.length) {
+    return { ok: false, error: "ไม่พบคอลัมน์บังคับ: " + missing.join(", ") };
+  }
+  const rows = [];
+  for (let index = 1; index < rawRows.length; index += 1) {
+    const raw = rawRows[index];
+    if (!Array.isArray(raw) || !raw.some((cell) => String(cell ?? "").trim())) continue;
+    const timestamp = tradingResearchTimestamp(raw[columns.timestamp]);
+    const open = Number(raw[columns.open]);
+    const high = Number(raw[columns.high]);
+    const low = Number(raw[columns.low]);
+    const close = Number(raw[columns.close]);
+    const volume = columns.volume >= 0 && raw[columns.volume] !== ""
+      ? Number(raw[columns.volume])
+      : null;
+    if (![timestamp, open, high, low, close].every(Number.isFinite)) {
+      return { ok: false, error: "ข้อมูลวันที่หรือ OHLC ไม่ใช่ตัวเลขที่แถว " + (index + 1) };
+    }
+    if (open <= 0 || high <= 0 || low <= 0 || close <= 0) {
+      return { ok: false, error: "ราคา OHLC ต้องมากกว่า 0 ที่แถว " + (index + 1) };
+    }
+    if (high < Math.max(open, close) || low > Math.min(open, close) || high < low) {
+      return { ok: false, error: "โครงสร้าง High/Low ไม่ครอบ Open/Close ที่แถว " + (index + 1) };
+    }
+    if (volume !== null && (!Number.isFinite(volume) || volume < 0)) {
+      return { ok: false, error: "Volume ไม่ถูกต้องที่แถว " + (index + 1) };
+    }
+    rows.push({ timestamp, open, high, low, close, volume });
+  }
+  if (rows.length < 2) return { ok: false, error: "ไม่มีข้อมูล OHLC ที่ใช้คำนวณได้" };
+  rows.sort((left, right) => left.timestamp - right.timestamp);
+  for (let index = 1; index < rows.length; index += 1) {
+    if (rows[index].timestamp === rows[index - 1].timestamp) {
+      return { ok: false, error: "พบ Timestamp ซ้ำ จึงไม่สามารถจัดลำดับแท่งราคาได้" };
+    }
+  }
+  return { ok: true, rows };
+}
+
+function parseTradingResearchCsv(text) {
+  const source = String(text || "");
+  if (!source.trim()) return { ok: false, error: "ไฟล์ CSV ว่าง" };
+  if (source.length > TRADING_RESEARCH_MAX_FILE_BYTES) {
+    return { ok: false, error: "ไฟล์ CSV ใหญ่เกิน 25 MB" };
+  }
+  const firstLine = source.replace(/\r\n?/g, "\n").split("\n").find((line) => line.trim()) || "";
+  const parsed = tradingResearchParseDelimitedRows(source, tradingResearchDetectDelimiter(firstLine));
+  return parsed.ok ? normalizeTradingResearchOhlcRows(parsed.rows) : parsed;
+}
+
+function tradingResearchExcelRows(workbook) {
+  const sheetName = Array.isArray(workbook?.SheetNames) ? workbook.SheetNames[0] : "";
+  const sheet = sheetName && workbook?.Sheets ? workbook.Sheets[sheetName] : null;
+  if (!sheet || typeof globalThis.XLSX?.utils?.sheet_to_json !== "function") {
+    return { ok: false, error: "ไม่พบ Worksheet ที่อ่านได้ในไฟล์ XLSX" };
+  }
+  const rawRows = globalThis.XLSX.utils.sheet_to_json(sheet, {
+    header: 1,
+    raw: true,
+    defval: "",
+    blankrows: false,
+  });
+  return normalizeTradingResearchOhlcRows(rawRows);
+}
+
+function tradingResearchArrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const chunks = [];
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + 0x8000)));
+  }
+  return window.btoa(chunks.join(""));
+}
+
+async function readTradingResearchOhlcFile(file, timeframe = "H1") {
+  if (!file || typeof file !== "object") return { ok: false, error: "ยังไม่ได้เลือกไฟล์" };
+  if (Number(file.size || 0) > TRADING_RESEARCH_MAX_FILE_BYTES) {
+    return { ok: false, error: "ไฟล์ใหญ่เกิน 5 MB" };
+  }
+  const extension = String(file.name || "").toLowerCase().split(".").pop();
+  if (!["csv", "xlsx"].includes(extension)) {
+    return { ok: false, error: "รองรับเฉพาะไฟล์ .csv และ .xlsx" };
+  }
+  if (typeof file.arrayBuffer !== "function") {
+    return { ok: false, error: "เบราว์เซอร์นี้ไม่รองรับการอ่านไฟล์แบบ local" };
+  }
+  try {
+    const contentBase64 = tradingResearchArrayBufferToBase64(await file.arrayBuffer());
+    const response = await postJson("/api/props/left_server_racks/ohlc/import", {
+      fileName: String(file.name || `ohlc.${extension}`),
+      contentBase64,
+      timeframe: String(timeframe || "H1"),
+    });
+    const privacy = response?.privacy && typeof response.privacy === "object" ? response.privacy : {};
+    const rawBars = Array.isArray(response?.bars) ? response.bars : [];
+    if (
+      response?.ok !== true
+      || response?.kind !== "ohlc_import_ready"
+      || response?.timeframe !== String(timeframe || "H1")
+      || response?.rowCount !== rawBars.length
+      || privacy.localOnly !== true
+      || privacy.networkUpload !== false
+      || privacy.filePersisted !== false
+      || privacy.metaTraderActions !== false
+    ) {
+      return { ok: false, error: "Local Runner ส่งผลตรวจ OHLC ที่ไม่ครบ จึงไม่เริ่ม Backtest" };
+    }
+    const normalized = normalizeTradingResearchOhlcRows([
+      ["timestamp", "open", "high", "low", "close"],
+      ...rawBars.map((bar) => [bar?.time, bar?.open, bar?.high, bar?.low, bar?.close]),
+    ]);
+    if (!normalized.ok) return normalized;
+    return {
+      ...normalized,
+      format: extension.toUpperCase(),
+      fileSha256: safeDashboardDisplayText(response?.file?.sha256, ""),
+      localRunnerVerified: true,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: safeDashboardDisplayText(error?.message, "Local Runner อ่านไฟล์ OHLC ไม่สำเร็จ จึงไม่เริ่ม Backtest"),
+    };
+  }
+}
+
+function tradingResearchDateKey(timestamp) {
+  const parsed = new Date(Number(timestamp));
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString().slice(0, 10) : "";
+}
+
+function validateTradingResearchDateRange(rows, startDate, endDate) {
+  const source = Array.isArray(rows) ? rows : [];
+  if (!source.length) return { ok: false, error: "ยังไม่มีข้อมูล OHLC" };
+  const start = tradingResearchTimestamp(String(startDate || "") + "T00:00:00Z");
+  const end = tradingResearchTimestamp(String(endDate || "") + "T23:59:59.999Z");
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) {
+    return { ok: false, error: "ช่วงวันที่ไม่ถูกต้อง" };
+  }
+  if (end - start > TRADING_RESEARCH_MAX_RANGE_MS) {
+    return { ok: false, error: "ช่วง Backtest ต้องไม่เกิน 10 ปี" };
+  }
+  const selectedRows = source.filter((row) => row.timestamp >= start && row.timestamp <= end);
+  if (selectedRows.length < 30) {
+    return { ok: false, error: "ช่วงที่เลือกต้องมีข้อมูลอย่างน้อย 30 แท่ง" };
+  }
+  return { ok: true, rows: selectedRows, start, end };
+}
+
+function validateTradingResearchTimeframe(rows, timeframe) {
+  const expected = TRADING_RESEARCH_TIMEFRAME_MS[String(timeframe || "")];
+  if (!expected) return { ok: false, error: "Timeframe ไม่อยู่ในรายการที่รองรับ" };
+  const deltas = [];
+  for (let index = 1; index < Math.min(rows.length, 2001); index += 1) {
+    const delta = rows[index].timestamp - rows[index - 1].timestamp;
+    if (delta > 0 && delta <= expected * 3) deltas.push(delta);
+  }
+  if (!deltas.length) return { ok: false, error: "ตรวจช่วงเวลาระหว่างแท่งไม่ได้" };
+  deltas.sort((left, right) => left - right);
+  const median = deltas[Math.floor(deltas.length / 2)];
+  const tolerance = ["D1", "W1", "MN1"].includes(timeframe) ? 0.2 : 0.08;
+  if (Math.abs(median - expected) / expected > tolerance) {
+    return {
+      ok: false,
+      error: "ระยะห่างแท่งไม่ตรงกับ " + timeframe + " ที่เลือก จึงหยุดก่อนคำนวณ",
+    };
+  }
+  return { ok: true, medianIntervalMs: median };
+}
+
+function tradingResearchRuleText(system, field) {
+  return (Array.isArray(system?.[field]) ? system[field] : [])
+    .map((item) => typeof item === "object" ? item?.rule : item)
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+}
+
+function tradingResearchFirstRuleNumber(text, patterns) {
+  return tradingResearchRuleNumbers(text, patterns)[0] ?? null;
+}
+
+function tradingResearchRuleNumbers(text, patterns) {
+  const values = [];
+  for (const pattern of patterns) {
+    const flags = pattern.flags.includes("g") ? pattern.flags : pattern.flags + "g";
+    for (const match of String(text || "").matchAll(new RegExp(pattern.source, flags))) {
+      const numeric = Number(match?.[1]);
+      if (Number.isFinite(numeric) && !values.includes(numeric)) values.push(numeric);
+    }
+  }
+  return values;
+}
+
+function compileTradingResearchStrategy(system = {}) {
+  const name = String(system.systemName || "");
+  const family = String(system.strategyFamily || "").toLowerCase();
+  const setupRows = tradingResearchRuleText(system, "setupConditions");
+  const entryRows = tradingResearchRuleText(system, "entrySteps");
+  const exitRows = tradingResearchRuleText(system, "exitSteps");
+  const managementRows = tradingResearchRuleText(system, "tradeManagementSteps");
+  const indicatorText = (Array.isArray(system.indicatorSettings) ? system.indicatorSettings : [])
+    .map((item) => [item?.name, item?.settings, item?.role].join(" "))
+    .join(" ");
+  const setupText = setupRows.join(" ");
+  const entryText = entryRows.join(" ");
+  const exitText = exitRows.join(" ");
+  const allText = [name, family, indicatorText, setupText, entryText, exitText, managementRows.join(" ")].join(" ");
+  const looksLikeRsi2 = family === "mean_reversion"
+    && /\brsi\b/i.test(allText)
+    && (/\brsi\s*[-_(]?\s*2\b/i.test(allText) || /\bperiod\s*[:=]?\s*2\b/i.test(allText));
+  if (!looksLikeRsi2) {
+    return {
+      ok: false,
+      code: "unsupported_rule_family",
+      error: "กฎระบบนี้ยังแปลงเป็น Backtest OHLC แบบ deterministic ได้ไม่ครบ จึงไม่คำนวณผล",
+    };
+  }
+  const entryThresholdPatterns = [
+    /\brsi(?:\s*\(\s*2\s*\))?[^0-9]{0,24}(?:below|under|less than|<)\s*(\d+(?:\.\d+)?)/i,
+    /(?:below|under|less than|<)\s*(\d+(?:\.\d+)?)[^a-z0-9]{0,12}\brsi/i,
+  ];
+  const trendPeriodPatterns = [
+    /(?:above|over|greater than|>)\s*(?:the\s*)?(\d{2,3})[\s-]*(?:day|bar|period)?\s*(?:sma|simple moving average|moving average)/i,
+    /(?:sma|simple moving average|moving average)[^0-9]{0,12}(\d{2,3})[^.]{0,30}(?:above|trend)/i,
+  ];
+  const exitSmaPeriodPatterns = [
+    /(?:above|over|cross(?:es)? above)\s*(?:the\s*)?(\d{1,3})[\s-]*(?:day|bar|period)?\s*(?:sma|simple moving average|moving average)/i,
+    /(?:sma|simple moving average|moving average)[^0-9]{0,12}(\d{1,3})/i,
+  ];
+  const exitRsiThresholdPatterns = [
+    /\brsi(?:\s*\(\s*2\s*\))?[^0-9]{0,24}(?:above|over|greater than|>)\s*(\d+(?:\.\d+)?)/i,
+  ];
+  const entryThresholds = tradingResearchRuleNumbers(entryText, entryThresholdPatterns);
+  const trendPeriods = tradingResearchRuleNumbers(setupText + " " + entryText, trendPeriodPatterns);
+  const exitSmaPeriods = tradingResearchRuleNumbers(exitText, exitSmaPeriodPatterns);
+  const exitRsiThresholds = tradingResearchRuleNumbers(exitText, exitRsiThresholdPatterns);
+  const ambiguousRuleTranslation = [entryThresholds, trendPeriods, exitSmaPeriods, exitRsiThresholds]
+    .some((values) => values.length > 1);
+  if (ambiguousRuleTranslation) {
+    return {
+      ok: false,
+      code: "ambiguous_rule_translation",
+      error: "แหล่งข้อมูลระบุค่า Indicator หรือ Threshold ขัดกัน จึงไม่เลือกค่าหนึ่งแทนผู้ใช้และไม่สร้างตัวเลข Backtest",
+    };
+  }
+  const entryThreshold = entryThresholds[0] ?? null;
+  const trendPeriod = trendPeriods[0] ?? null;
+  const exitSmaPeriod = exitSmaPeriods[0] ?? null;
+  const exitRsiThreshold = exitRsiThresholds[0] ?? null;
+  const hasCompleteEntry = entryThreshold !== null && trendPeriod !== null;
+  const hasCompleteExit = exitSmaPeriod !== null || exitRsiThreshold !== null;
+  const unsupportedManagement = managementRows.some((rule) => (
+    !/(?:no\s+additional|none|not\s+publicly\s+stated|ไม่พบข้อมูล|ไม่มี)/i.test(rule)
+  ));
+  if (
+    !hasCompleteEntry
+    || !hasCompleteExit
+    || unsupportedManagement
+    || entryThreshold <= 0
+    || entryThreshold >= 50
+    || trendPeriod < 20
+    || (exitSmaPeriod !== null && exitSmaPeriod < 2)
+    || (exitRsiThreshold !== null && exitRsiThreshold <= 50)
+  ) {
+    return {
+      ok: false,
+      code: "incomplete_rule_translation",
+      error: "พบกฎ RSI แต่แปลง Entry, Filter, Exit หรือการจัดการออเดอร์ได้ไม่ครบ จึงไม่สร้างตัวเลข Backtest",
+    };
+  }
+  return {
+    ok: true,
+    kind: "rsi2_long_mean_reversion",
+    label: "RSI(2) Long Mean Reversion",
+    rsiPeriod: 2,
+    entryThreshold,
+    trendPeriod,
+    exitSmaPeriod,
+    exitRsiThreshold,
+    sourceRuleCount: setupRows.length + entryRows.length + exitRows.length + managementRows.length,
+  };
+}
+
+function tradingResearchSma(rows, index, period) {
+  if (!Number.isInteger(period) || period < 1 || index + 1 < period) return null;
+  let total = 0;
+  for (let cursor = index - period + 1; cursor <= index; cursor += 1) total += rows[cursor].close;
+  return total / period;
+}
+
+function tradingResearchRsi(rows, index, period) {
+  if (!Number.isInteger(period) || period < 1 || index < period) return null;
+  let gains = 0;
+  let losses = 0;
+  for (let cursor = index - period + 1; cursor <= index; cursor += 1) {
+    const change = rows[cursor].close - rows[cursor - 1].close;
+    if (change >= 0) gains += change;
+    else losses -= change;
+  }
+  if (losses === 0) return gains === 0 ? 50 : 100;
+  const relativeStrength = (gains / period) / (losses / period);
+  return 100 - (100 / (1 + relativeStrength));
+}
+
+function runTradingResearchBacktest(rows, strategy) {
+  if (!Array.isArray(rows) || !strategy?.ok || strategy.kind !== "rsi2_long_mean_reversion") {
+    return { ok: false, error: "กฎหรือข้อมูลไม่พร้อมสำหรับ Backtest" };
+  }
+  const warmup = Math.max(strategy.trendPeriod, strategy.exitSmaPeriod || 0, strategy.rsiPeriod);
+  if (rows.length <= warmup + 1) return { ok: false, error: "ข้อมูลไม่พอสำหรับช่วง Warm-up ของ Indicator" };
+  const trades = [];
+  let entry = null;
+  for (let index = warmup; index < rows.length; index += 1) {
+    const bar = rows[index];
+    const rsi = tradingResearchRsi(rows, index, strategy.rsiPeriod);
+    const trendSma = tradingResearchSma(rows, index, strategy.trendPeriod);
+    const exitSma = strategy.exitSmaPeriod
+      ? tradingResearchSma(rows, index, strategy.exitSmaPeriod)
+      : null;
+    if (!entry && rsi !== null && trendSma !== null && bar.close > trendSma && rsi < strategy.entryThreshold) {
+      entry = { timestamp: bar.timestamp, price: bar.close, index };
+      continue;
+    }
+    const shouldExit = entry && (
+      (exitSma !== null && bar.close > exitSma)
+      || (strategy.exitRsiThreshold !== null && rsi !== null && rsi > strategy.exitRsiThreshold)
+    );
+    if (shouldExit) {
+      trades.push({
+        entryTimestamp: entry.timestamp,
+        exitTimestamp: bar.timestamp,
+        entryPrice: entry.price,
+        exitPrice: bar.close,
+        returnPct: ((bar.close / entry.price) - 1) * 100,
+      });
+      entry = null;
+    }
+  }
+  if (entry) {
+    const bar = rows.at(-1);
+    trades.push({
+      entryTimestamp: entry.timestamp,
+      exitTimestamp: bar.timestamp,
+      entryPrice: entry.price,
+      exitPrice: bar.close,
+      returnPct: ((bar.close / entry.price) - 1) * 100,
+      forcedCloseAtRangeEnd: true,
+    });
+  }
+  let equity = 1;
+  let peak = 1;
+  let maxDrawdown = 0;
+  trades.forEach((trade) => {
+    equity *= Math.max(0, 1 + (trade.returnPct / 100));
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.max(maxDrawdown, peak > 0 ? ((peak - equity) / peak) * 100 : 0);
+  });
+  const wins = trades.filter((trade) => trade.returnPct > 0).length;
+  const totalReturnPct = (equity - 1) * 100;
+  return {
+    ok: true,
+    trades,
+    metrics: {
+      tradeCount: trades.length,
+      winRatePct: trades.length ? (wins / trades.length) * 100 : 0,
+      totalReturnPct,
+      maxDrawdownPct: maxDrawdown,
+      averageTradePct: trades.length
+        ? trades.reduce((sum, trade) => sum + trade.returnPct, 0) / trades.length
+        : 0,
+    },
+    assumptions: [
+      "ใช้ราคา Close ของแท่งเป็นราคาเข้าและออก",
+      "คำนวณผลตอบแทนต่อเนื่องแบบเงินทุน 1 หน่วย",
+      "ยังไม่รวม Spread, Commission, Slippage, Swap หรือ Position sizing",
+    ],
+  };
+}
+
+function tradingResearchSimulationSeed(value) {
+  let hash = 2166136261;
+  for (const character of String(value || "simulation")) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function generateTradingResearchSimulationBars(systemId, regimeId, count = 84) {
+  const regime = TRADING_RESEARCH_SIMULATION_REGIMES.find((item) => item.id === regimeId)
+    || TRADING_RESEARCH_SIMULATION_REGIMES[0];
+  let seed = tradingResearchSimulationSeed(String(systemId || "") + ":" + regime.id);
+  const random = () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  const bars = [];
+  let close = 100;
+  for (let index = 0; index < Math.max(40, Math.min(160, Number(count) || 84)); index += 1) {
+    const cycle = Math.sin(index / 5.3) * (regime.id === "sideways" ? 0.55 : 0.22);
+    const shock = regime.id === "volatility_shock" && index > 35 && index < 48 ? 1.7 : 1;
+    const change = regime.drift + cycle + ((random() - 0.5) * regime.volatility * shock);
+    const open = close;
+    close = Math.max(8, open + change);
+    const wick = (0.25 + random() * 0.75) * regime.volatility * shock;
+    bars.push({
+      timestamp: Date.UTC(2024, 0, 1, index),
+      open,
+      high: Math.max(open, close) + wick,
+      low: Math.min(open, close) - wick,
+      close,
+      volume: null,
+    });
+  }
+  return bars;
 }
 
 function normalizeFxBiasValue(value) {
@@ -16186,9 +20371,1347 @@ function normalizeVpsHqDomain(backend = {}, report = {}) {
   };
 }
 
+const EA_FACTORY_STRUCTURED_LABELS = Object.freeze({
+  facts: "ข้อเท็จจริง",
+  fact: "ข้อเท็จจริง",
+  inference: "ข้อสรุปจากข้อมูล",
+  unknowns: "ยังไม่ยืนยัน",
+  limitations: "ข้อจำกัด",
+  sources: "แหล่งข้อมูล",
+  specialConditions: "เงื่อนไขพิเศษ",
+  tradeManagement: "การจัดการออเดอร์",
+  implementationNotes: "แนวทางพัฒนา",
+});
+
+function eaFactoryParseStructuredValue(value) {
+  if (typeof value !== "string") return value;
+  const text = value.trim();
+  if (!text || !["{", "["].includes(text[0])) return value;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" ? parsed : value;
+  } catch (_error) {
+    return value;
+  }
+}
+
+function eaFactoryStructuredTextRows(value, prefix = "", depth = 0) {
+  const parsed = eaFactoryParseStructuredValue(value);
+  if (parsed === null || parsed === undefined || depth > 5) return [];
+  if (Array.isArray(parsed)) {
+    return parsed.flatMap((item) => eaFactoryStructuredTextRows(item, prefix, depth + 1));
+  }
+  if (typeof parsed !== "object") {
+    const text = safeAgentChatReplyText(parsed, "");
+    if (!text) return [];
+    return text.split(/\r?\n|\s*;\s*/).map((row) => row.trim()).filter(Boolean)
+      .map((row) => prefix ? `${prefix}: ${row}` : row);
+  }
+  const direct = parsed.rule || parsed.text || parsed.label || parsed.value || parsed.fact;
+  const rows = [];
+  if (direct !== undefined && direct !== null && direct !== "") {
+    const stepPrefix = parsed.step ? `ขั้น ${parsed.step}` : prefix;
+    rows.push(...eaFactoryStructuredTextRows(direct, stepPrefix, depth + 1));
+  }
+  Object.entries(parsed).forEach(([key, child]) => {
+    if (["rule", "text", "label", "value", "fact", "step"].includes(key)) return;
+    const label = EA_FACTORY_STRUCTURED_LABELS[key] || key.replace(/([a-z])([A-Z])/g, "$1 $2");
+    rows.push(...eaFactoryStructuredTextRows(child, label, depth + 1));
+  });
+  return rows;
+}
+
+function normalizeEaFactoryTextList(value, limit = 80) {
+  return eaFactoryStructuredTextRows(value)
+    .flatMap((row) => safeAgentChatReplyText(row, "").split(/\r?\n|\s*;\s*/))
+    .map((row) => row.trim())
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function eaFactoryReadableValue(value, fallback = "ยังไม่มีข้อมูลจาก Backend", limit = 12) {
+  const rows = eaFactoryStructuredTextRows(value).slice(0, limit);
+  return rows.length ? rows.join(" • ") : fallback;
+}
+
+function eaFactoryCompactValue(value, fallback) {
+  const readable = eaFactoryReadableValue(value, fallback, 2);
+  return readable.length > 120 ? `${readable.slice(0, 117).trim()}…` : readable;
+}
+
+function eaFactoryFirstArray(...values) {
+  return values.find((value) => Array.isArray(value) && value.length)
+    || values.find((value) => Array.isArray(value))
+    || [];
+}
+
+function normalizeEaFactoryPlatform(value) {
+  const normalized = String(value || "").trim().toLowerCase().replaceAll("_", "-");
+  if (["mt4", "mql4", "metatrader4", "metatrader-4"].includes(normalized)) return "mt4";
+  if (["mt5", "mql5", "metatrader5", "metatrader-5"].includes(normalized)) return "mt5";
+  if (["pine", "pine-script", "pinescript", "tradingview"].includes(normalized)) return "tradingview";
+  return "";
+}
+
+function normalizeEaFactorySourceRecord(item = {}, index = 0) {
+  const columns = {
+    ...workflowDomainObject(item?.columns, item?.values, item?.record),
+    ...workflowDomainObject(item?.columnValues),
+    ...workflowDomainObject(item?.core),
+    ...workflowDomainObject(item?.downstream),
+  };
+  const sourceRecordId = String(item?.sourceRecordId || item?.source_record_id || item?.id || "").trim();
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(sourceRecordId)) return null;
+  const recordId = safeDashboardDisplayText(
+    item?.recordId || item?.record_id || columns.recordId || columns.record_id,
+    "ยังไม่มี Record ID",
+  );
+  const sourceUrls = eaFactoryFirstArray(
+    item?.sourceUrls,
+    item?.source_urls,
+    columns.sourceUrls,
+    columns.source_urls,
+  );
+  if (!sourceUrls.length) {
+    const singleSource = item?.sourceUrl || item?.source_url || columns.sourceUrl || columns.source_url;
+    if (singleSource) sourceUrls.push(...String(singleSource).split(/\r?\n|\s*[;,]\s*/).filter(Boolean));
+  }
+  return {
+    sourceRecordId,
+    recordId,
+    systemName: safeDashboardDisplayText(
+      item?.systemName || item?.system_name || columns.systemName || columns.system_name,
+      `ระบบเทรด ${index + 1}`,
+    ),
+    strategyFamily: safeDashboardDisplayText(
+      item?.strategyFamily || item?.strategy_family || columns.strategyFamily || columns.strategy_family,
+      "ยังไม่ระบุตระกูล",
+    ),
+    symbolsMarket: safeDashboardDisplayText(
+      item?.symbolsMarket || item?.symbols_market || item?.symbols || columns.symbolsMarket || columns.symbols_market || columns.symbols,
+      "ยังไม่ระบุ Symbol / Market",
+    ),
+    timeframe: safeDashboardDisplayText(item?.timeframe || columns.timeframe, "ยังไม่ระบุ Timeframe"),
+    entryRules: normalizeEaFactoryTextList(item?.entryRules || item?.entry_rules || columns.entryRules || columns.entry_rules),
+    exitRules: normalizeEaFactoryTextList(item?.exitRules || item?.exit_rules || columns.exitRules || columns.exit_rules),
+    stopLoss: safeDashboardDisplayText(item?.stopLoss || item?.stop_loss || columns.stopLoss || columns.stop_loss, "ยังไม่ระบุ"),
+    takeProfit: safeDashboardDisplayText(item?.takeProfit || item?.take_profit || columns.takeProfit || columns.take_profit, "ยังไม่ระบุ"),
+    recovery: normalizeEaFactoryTextList(
+      item?.recovery || item?.recoveryRules || item?.recovery_rules || columns.recovery || columns.recoveryRules || columns.recovery_rules,
+    ),
+    lotRisk: normalizeEaFactoryTextList(
+      item?.lotRisk || item?.lot_risk || item?.positionSizing || columns.lotRisk || columns.lot_risk || columns.positionSizing,
+    ),
+    indicators: normalizeEaFactoryTextList(item?.indicators || columns.indicators),
+    specialConditions: normalizeEaFactoryTextList(
+      item?.specialConditions || item?.special_conditions || columns.specialConditions || columns.special_conditions,
+    ),
+    sourceUrls: sourceUrls.slice(0, 10).map((value) => String(value || "").trim()).filter(Boolean),
+    verificationStatus: safeDashboardDisplayText(
+      item?.verificationStatus || item?.verification_status || columns.verificationStatus || columns.verification_status,
+      "รอ Backend ยืนยัน",
+    ),
+    backtestStatus: safeDashboardDisplayText(
+      item?.backtestStatus || item?.backtest_status || columns.backtestStatus || columns.backtest_status,
+      "ยังไม่มีผล",
+    ),
+    backtestReport: safeDashboardDisplayText(
+      item?.backtestReport || item?.backtest_report || columns.backtestReport || columns.backtest_report,
+      "ยังไม่มีรายงาน Backtest",
+    ),
+    optimizationStatus: safeDashboardDisplayText(
+      item?.optimizationStatus || item?.optimization_status || columns.optimizationStatus || columns.optimization_status,
+      "ยังไม่มีผล",
+    ),
+    optimizationReport: safeDashboardDisplayText(
+      item?.optimizationReport || item?.optimization_report || columns.optimizationReport || columns.optimization_report,
+      "ยังไม่มีรายงาน Optimization",
+    ),
+    issues: normalizeEaFactoryTextList(item?.issues || columns.issues),
+    nextAction: safeDashboardDisplayText(item?.nextAction || item?.next_action || columns.nextAction || columns.next_action, ""),
+    targetPlatform: normalizeEaFactoryPlatform(
+      item?.targetPlatform || item?.target_platform || columns.targetPlatform || columns.target_platform,
+    ),
+    buildReady: item?.buildReady === true,
+    missingCoreFields: normalizeEaFactoryTextList(item?.missingCoreFields || item?.missing_core_fields, 20),
+    updatedAt: item?.updatedAt || item?.updated_at || columns.updatedAt || columns.updated_at || null,
+  };
+}
+
+function normalizeEaFactoryStageStatus(value) {
+  const status = String(value || "").trim().toLowerCase();
+  if (status === "completed") return "completed";
+  if (["running", "queued"].includes(status)) return "running";
+  if (status === "failed") return "failed";
+  if (["blocked", "waiting_approval"].includes(status)) return "blocked";
+  if (status === "not_applicable") return "not_applicable";
+  if (status === "pending") return "locked";
+  return "unknown";
+}
+
+function normalizeEaFactoryStage(raw = {}, backendId = "") {
+  const id = String(raw?.id || raw?.stageId || backendId || "").trim();
+  const uiId = EA_FACTORY_UI_STAGE_BY_BACKEND[id] || (EA_FACTORY_STAGE_IDS.includes(id) ? id : "");
+  if (!uiId || uiId === "source") return null;
+  const canRun = raw?.canAdvance === true;
+  const normalizedStatus = normalizeEaFactoryStageStatus(raw?.status || raw?.state);
+  const status = canRun && normalizedStatus === "locked" ? "ready" : normalizedStatus;
+  return {
+    id: uiId,
+    backendId: EA_FACTORY_BACKEND_STAGE_BY_UI[uiId] || id,
+    status,
+    canRun,
+    labelTh: safeDashboardDisplayText(raw?.labelTh || raw?.label, EA_FACTORY_STAGE_COPY[uiId]?.titleTh),
+    detail: safeDashboardDisplayText(
+      raw?.detailTh || raw?.detail || raw?.messageTh || raw?.message || raw?.blockedReasonCode,
+      "",
+    ),
+    startedAt: raw?.startedAt || (status === "running" ? raw?.updatedAt : null) || null,
+    completedAt: raw?.completedAt || (status === "completed" ? raw?.updatedAt : null) || null,
+    missionId: String(raw?.missionId || "").trim(),
+    reportId: String(raw?.reportId || "").trim(),
+    evidence: eaFactoryFirstArray(raw?.evidence, raw?.checks, raw?.findings).slice(0, 30),
+  };
+}
+
+function normalizeEaFactoryTerminal(item = {}) {
+  const id = String(item?.id || item?.terminalId || item?.candidateId || "").trim();
+  const platform = normalizeEaFactoryPlatform(item?.platform);
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(id) || !["mt4", "mt5"].includes(platform)) return null;
+  return {
+    id,
+    platform,
+    label: safeDashboardDisplayText(item?.labelTh || item?.label || item?.displayName, platform === "mt4" ? "MT4 Terminal" : "MT5 Terminal"),
+    status: safeDashboardDisplayText(item?.status || item?.runningState, "รอสถานะ"),
+    ready: item?.ready === true || item?.adapterReady === true,
+    selected: item?.selected === true,
+    proofStatus: safeDashboardDisplayText(
+      item?.proofStatus || item?.proof || (item?.detected === true ? "Backend ตรวจพบ Terminal" : ""),
+      "รอหลักฐานความพร้อม",
+    ),
+  };
+}
+
+function normalizeEaFactoryArtifact(item = {}) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const fileId = String(item.fileId || item.id || "").trim();
+  const downloadUrl = String(item.downloadUrl || item.url || "").trim();
+  const isFactoryFile = /^ea-file-[a-zA-Z0-9._-]+$/.test(fileId) && Boolean(downloadUrl);
+  return {
+    ...item,
+    available: item.available === true || isFactoryFile,
+    url: downloadUrl,
+    kind: item.kind || item.folder || "workspace_file",
+    fileName: item.fileName || item.label || "ไฟล์จาก EA Factory",
+    contentType: item.contentType || item.mimeType || item.mediaType || item.extension || "ไม่ระบุชนิดไฟล์",
+  };
+}
+
+function normalizeEaFactoryAudit(build = {}, root = {}) {
+  const explicit = [build?.audit, build?.history, root?.audit, root?.history]
+    .filter(Array.isArray).flatMap((items) => items).slice(0, 80);
+  if (explicit.length) return explicit;
+  const stageRows = eaFactoryFirstArray(build?.stages).map((stage) => ({
+    stageId: String(stage?.id || ""),
+    labelTh: safeDashboardDisplayText(
+      stage?.labelTh || EA_FACTORY_STAGE_COPY[EA_FACTORY_UI_STAGE_BY_BACKEND[String(stage?.id || "")]]?.titleTh,
+      "ขั้นตอน EA Factory",
+    ),
+    status: safeDashboardDisplayText(stage?.status, "รอสถานะ"),
+    createdAt: stage?.updatedAt || null,
+    missionId: String(stage?.missionId || ""),
+    reportId: String(stage?.reportId || ""),
+  }));
+  const versionRows = eaFactoryFirstArray(build?.versions).map((version) => ({
+    title: `Source Version ${safeDashboardDisplayText(version?.version, "-")}`,
+    status: version?.immutable === true ? "immutable" : "บันทึกแล้ว",
+    createdAt: version?.createdAt || null,
+  }));
+  return [...stageRows, ...versionRows].slice(0, 80);
+}
+
+function normalizeEaFactoryDomain(backend = {}) {
+  const root = workflowDomainObject(
+    backend.eaFactory,
+    backend,
+  );
+  const sourceCatalog = workflowDomainObject(root.sourceCatalog);
+  const records = eaFactoryFirstArray(
+    sourceCatalog.records,
+    root.sourceRecords,
+    root.strategyRecords,
+  ).slice(0, 200).map(normalizeEaFactorySourceRecord).filter(Boolean);
+  const builds = eaFactoryFirstArray(root.builds).slice(0, 100);
+  const requestedBuildId = String(state.modal.eaFactory.selectedBuildId || "").trim();
+  const requestedBuild = builds.find((item) => String(item?.id || item?.buildId || "").trim() === requestedBuildId);
+  const activeBuildRaw = workflowDomainObject(
+    requestedBuild,
+    root.activeBuild,
+    builds.find((item) => ["running", "in_progress", "ready", "blocked", "awaiting_user"].includes(String(item?.status || "").toLowerCase())),
+    builds[0],
+  );
+  const buildId = String(activeBuildRaw?.id || activeBuildRaw?.buildId || "").trim();
+  const buildVersions = eaFactoryFirstArray(activeBuildRaw?.versions);
+  const latestBuildVersion = buildVersions.reduce((latest, item) => {
+    const value = Number(item?.version);
+    return Number.isFinite(value) && value > latest ? value : latest;
+  }, 0);
+  const activeBuild = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(buildId) ? {
+    id: buildId,
+    status: safeDashboardDisplayText(activeBuildRaw?.status, "รอสถานะ"),
+    sourceRecordId: String(activeBuildRaw?.sourceRecordId || activeBuildRaw?.source_record_id || "").trim(),
+    platform: normalizeEaFactoryPlatform(activeBuildRaw?.platform || activeBuildRaw?.targetPlatform),
+    version: safeDashboardDisplayText(
+      activeBuildRaw?.version || activeBuildRaw?.versionLabel || (latestBuildVersion ? `v${latestBuildVersion}` : ""),
+      "",
+    ),
+    missionId: String(activeBuildRaw?.missionId || "").trim(),
+    reportId: String(activeBuildRaw?.reportId || "").trim(),
+    workspace: {
+      workspaceId: String(activeBuildRaw?.workspace?.workspaceId || "").trim(),
+      folderNames: normalizeEaFactoryTextList(activeBuildRaw?.workspace?.folderNames, 12),
+      strategySpecFile: safeDashboardDisplayText(activeBuildRaw?.workspace?.strategySpecFile, ""),
+    },
+    artifactLineage: workflowDomainObject(activeBuildRaw?.artifactLineage),
+    terminalGate: workflowDomainObject(activeBuildRaw?.terminalGate),
+    sourceRefs: eaFactoryFirstArray(
+      activeBuildRaw?.sourceRefs,
+      activeBuildRaw?.workspaceFiles,
+      activeBuildRaw?.versions,
+      activeBuildRaw?.files,
+    )
+      .slice(0, 20).map((item) => safeDashboardDisplayText(
+        typeof item === "object" ? (item?.label || item?.fileName || item?.ref) : item,
+        "",
+      )).filter(Boolean),
+    artifacts: eaFactoryFirstArray(activeBuildRaw?.files).slice(0, 200)
+      .map(normalizeEaFactoryArtifact).filter(Boolean),
+    audit: normalizeEaFactoryAudit(activeBuildRaw, root),
+    raw: activeBuildRaw,
+  } : null;
+  const activeBuildStatus = String(activeBuildRaw?.status || "").trim().toLowerCase();
+  const canStartNewBuild = !activeBuild || [
+    "completed",
+    "attention_required",
+    "blocked",
+    "failed",
+    "cancelled",
+    "canceled",
+  ].includes(activeBuildStatus);
+  const rawStages = eaFactoryFirstArray(activeBuildRaw?.stages, root.stages);
+  if (!rawStages.length) {
+    const stageMap = workflowDomainObject(activeBuildRaw?.stageStates, root.stageStates);
+    Object.entries(stageMap).forEach(([id, value]) => rawStages.push(
+      value && typeof value === "object" ? { id, ...value } : { id, status: value },
+    ));
+  }
+  const normalizedStageMap = new Map(rawStages.map((item) => {
+    const normalized = normalizeEaFactoryStage(item);
+    return normalized ? [normalized.id, normalized] : null;
+  }).filter(Boolean));
+  const selectedSourceId = activeBuild?.sourceRecordId
+    || String(root?.selection?.sourceRecordId || root?.selectedSourceRecordId || "").trim();
+  const buildReadyRecordCount = records.filter((record) => record.buildReady).length;
+  const dedicatedLoadedAt = Number(state.eaFactoryReadModel.lastLoadedAt || 0);
+  const dedicatedReadModelFresh = Number.isFinite(dedicatedLoadedAt)
+    && dedicatedLoadedAt > 0
+    && Date.now() - dedicatedLoadedAt <= EA_FACTORY_READ_MODEL_MAX_AGE_MS;
+  const authoritative = dedicatedReadModelFresh
+    && root.schemaVersion === "ea-factory-v1"
+    && root.mode === "manual_stage_by_stage"
+    && root.scheduled === false;
+  const stages = EA_FACTORY_STAGE_IDS.map((id) => {
+    if (id === "source") {
+      return {
+        id,
+        backendId: "",
+        status: activeBuild && !canStartNewBuild ? "completed" : (buildReadyRecordCount ? "ready" : "blocked"),
+        canRun: authoritative && buildReadyRecordCount > 0 && canStartNewBuild,
+        labelTh: EA_FACTORY_STAGE_COPY[id].titleTh,
+        detail: records.length
+          ? `${records.length} Strategy Record จาก Backend • พร้อมสร้าง ${buildReadyRecordCount}`
+          : "ยังไม่มี Strategy Record จาก Backend",
+        evidence: [],
+      };
+    }
+    const stage = normalizedStageMap.get(id);
+    if (stage) return stage;
+    if (id === "spec" && canStartNewBuild && buildReadyRecordCount) {
+      return {
+        id,
+        backendId: EA_FACTORY_BACKEND_STAGE_BY_UI[id],
+        status: "ready",
+        canRun: authoritative,
+        labelTh: EA_FACTORY_STAGE_COPY[id].titleTh,
+        detail: "พร้อมเลือก Target Platform และสร้าง Build จาก Strategy Record ที่เลือก",
+        evidence: [],
+      };
+    }
+    return {
+      id,
+      backendId: EA_FACTORY_BACKEND_STAGE_BY_UI[id],
+      status: "locked",
+      canRun: false,
+      labelTh: EA_FACTORY_STAGE_COPY[id].titleTh,
+      detail: authoritative ? "รอขั้นก่อนหน้าผ่าน Gate" : "รอ Read Model จาก Backend",
+      evidence: [],
+    };
+  });
+  const terminalSelection = workflowDomainObject(root.terminalSelection);
+  const selectedTerminal = workflowDomainObject(terminalSelection.selectedCandidate);
+  const terminals = eaFactoryFirstArray(
+    terminalSelection.candidates,
+    terminalSelection.terminals,
+    root.terminalCandidates,
+  ).slice(0, 30).map(normalizeEaFactoryTerminal).filter(Boolean);
+  const googleSheets = workflowDomainObject(sourceCatalog.googleSheets);
+  const sheetSchema = workflowDomainObject(sourceCatalog.sheetSchema);
+  const selectedTerminalId = String(
+    terminalSelection.selectedTerminalId || selectedTerminal.candidateId || selectedTerminal.id || "",
+  ).trim();
+  const selectedTerminalMatch = terminals.find((terminal) => (
+    terminal.id === selectedTerminalId
+    && terminal.platform === activeBuild?.platform
+  )) || null;
+  const buildTerminalGate = workflowDomainObject(activeBuild?.terminalGate);
+  return {
+    authoritative,
+    schemaVersion: safeDashboardDisplayText(root.schemaVersion, "ยังไม่มี schema จาก Backend"),
+    mode: safeDashboardDisplayText(root.mode, "รอสถานะ"),
+    scheduled: root.scheduled === true,
+    sourceCatalog: {
+      records,
+      sheetSchema,
+      googleSheets: {
+        status: safeDashboardDisplayText(googleSheets.status, "ยังไม่เชื่อม"),
+        lastSyncAt: googleSheets.lastSyncAt || null,
+        lastErrorCode: safeDashboardDisplayText(googleSheets.lastErrorCode, ""),
+        canSync: authoritative && googleSheets.canSync !== false,
+      },
+    },
+    builds,
+    activeBuild,
+    canStartNewBuild,
+    stages,
+    selectedSourceId,
+    currentStageId: EA_FACTORY_UI_STAGE_BY_BACKEND[String(
+      activeBuildRaw?.currentStageId || (requestedBuild ? "" : root.currentStageId) || "",
+    ).trim()]
+      || stages.find((stage) => ["ready", "running", "blocked", "failed"].includes(stage.status))?.id
+      || (activeBuild ? "artifacts_report" : "source"),
+    terminals,
+    selectedTerminalId,
+    adapterReady: terminalSelection.adapterReady === true,
+    selectedTerminalReady: Boolean(
+      terminalSelection.adapterReady === true
+      && selectedTerminalMatch
+      && buildTerminalGate.ready === true
+      && buildTerminalGate.adapterReady === true
+      && buildTerminalGate.platform === activeBuild?.platform
+      && buildTerminalGate.candidateId === selectedTerminalId
+    ),
+    safety: workflowDomainObject(root.safety),
+  };
+}
+
+function eaOptimizationLabFirstArray(...values) {
+  return values.find((value) => Array.isArray(value) && value.length)
+    || values.find((value) => Array.isArray(value))
+    || [];
+}
+
+function eaOptimizationLabNullableNumber(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || (typeof value === "string" && !value.trim())) continue;
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+  }
+  return null;
+}
+
+function normalizeEaOptimizationCandidate(item = {}, index = 0) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const metrics = workflowDomainObject(item.metrics, item.performance, item.result);
+  const profit = eaOptimizationLabNullableNumber(item.netProfit, item.profit, metrics.netProfit, metrics.profit);
+  const drawdown = eaOptimizationLabNullableNumber(
+    item.drawdownPercent,
+    item.maxDrawdownPercent,
+    item.drawdown,
+    metrics.drawdownPercent,
+    metrics.maxDrawdownPercent,
+    metrics.drawdown,
+  );
+  const trades = eaOptimizationLabNullableNumber(item.trades, item.tradeCount, metrics.trades, metrics.tradeCount);
+  const profitFactor = eaOptimizationLabNullableNumber(item.profitFactor, metrics.profitFactor);
+  const stability = eaOptimizationLabNullableNumber(item.stabilityScore, item.stability, metrics.stabilityScore, metrics.stability);
+  if ([profit, drawdown, trades, profitFactor, stability].every((value) => value === null)) return null;
+  return {
+    id: safeDashboardDisplayText(item.id || item.passId || item.pass || item.name, `pass-${index + 1}`),
+    label: safeDashboardDisplayText(item.labelTh || item.label || item.name, `Pass ${index + 1}`),
+    profit,
+    drawdown,
+    trades,
+    profitFactor,
+    stability,
+    parameters: workflowDomainObject(item.parameters, item.inputs, item.params),
+  };
+}
+
+function normalizeEaOptimizationReport(item = {}, index = 0) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const plan = workflowDomainObject(item.plan);
+  const execution = workflowDomainObject(item.execution);
+  const results = workflowDomainObject(item.results, item.resultMetrics);
+  const metrics = workflowDomainObject(item.metrics, item.optimization, results);
+  const candidateGroups = workflowDomainObject(item.candidateGroups, results.candidateGroups, metrics.candidateGroups);
+  const groupedCandidates = [
+    ...(Array.isArray(candidateGroups.maxProfit) ? candidateGroups.maxProfit : []),
+    ...(Array.isArray(candidateGroups.lowestDrawdown) ? candidateGroups.lowestDrawdown : []),
+    ...(Array.isArray(candidateGroups.mostStable) ? candidateGroups.mostStable : []),
+  ];
+  const rawPasses = eaOptimizationLabFirstArray(
+    item.passes,
+    item.allPassRows,
+    results.passes,
+    results.allPassRows,
+    metrics.passes,
+    metrics.allPassRows,
+  );
+  const rawCandidateSummaries = eaOptimizationLabFirstArray(
+    item.candidates,
+    item.topPasses,
+    results.candidates,
+    results.topPasses,
+    metrics.candidates,
+    metrics.topPasses,
+    groupedCandidates,
+  );
+  const candidateSource = rawPasses.length ? rawPasses : rawCandidateSummaries;
+  const candidates = candidateSource.slice(0, 5000)
+    .map(normalizeEaOptimizationCandidate)
+    .filter(Boolean);
+  const rawBands = eaOptimizationLabFirstArray(
+    item.currentBands,
+    item.parameterBands,
+    results.currentBands,
+    results.parameterBands,
+    metrics.currentBands,
+    metrics.parameterBands,
+  );
+  const currentBands = rawBands.slice(0, 80).map((band) => ({
+    name: safeDashboardDisplayText(band?.name || band?.input || band?.parameter, "Input"),
+    kind: Array.isArray(band?.values) ? "categorical" : "numeric",
+    start: eaOptimizationLabNullableNumber(band?.start),
+    step: eaOptimizationLabNullableNumber(band?.step),
+    stop: eaOptimizationLabNullableNumber(band?.stop),
+    values: (Array.isArray(band?.values) ? band.values : [])
+      .slice(0, 30)
+      .map((value) => safeDashboardDisplayText(value, ""))
+      .filter(Boolean),
+    profitablePercent: eaOptimizationLabNullableNumber(band?.profitablePercent),
+  })).filter((band) => band.name);
+  const rawNextPlan = eaOptimizationLabFirstArray(
+    item.nextParameterPlan,
+    results.nextParameterPlan,
+    metrics.nextParameterPlan,
+    item.nextRanges,
+    results.nextRanges,
+  );
+  const nextParameterPlan = rawNextPlan.slice(0, 80).map((band) => ({
+    name: safeDashboardDisplayText(band?.name || band?.input || band?.parameter, "Input"),
+    kind: Array.isArray(band?.values) ? "categorical" : "numeric",
+    start: eaOptimizationLabNullableNumber(band?.start),
+    step: eaOptimizationLabNullableNumber(band?.step),
+    stop: eaOptimizationLabNullableNumber(band?.stop),
+    values: (Array.isArray(band?.values) ? band.values : [])
+      .slice(0, 30)
+      .map((value) => safeDashboardDisplayText(value, ""))
+      .filter(Boolean),
+    reason: safeDashboardDisplayText(band?.reason || band?.clusterReason, "ช่วงที่ Backend แนะนำจากผลรอบก่อนหน้า"),
+  })).filter((band) => band.name);
+  const passCount = eaOptimizationLabNullableNumber(
+    item.passCount,
+    item.totalPasses,
+    results.passCount,
+    results.totalPasses,
+    metrics.passCount,
+    metrics.totalPasses,
+  );
+  const profitablePassCount = eaOptimizationLabNullableNumber(
+    item.profitablePassCount,
+    results.profitablePassCount,
+    metrics.profitablePassCount,
+  );
+  const explicitProfitablePercent = eaOptimizationLabNullableNumber(
+    item.profitablePercent,
+    results.profitablePercent,
+    metrics.profitablePercent,
+  );
+  const profitablePercent = explicitProfitablePercent !== null
+    ? explicitProfitablePercent
+    : (
+      passCount !== null
+      && passCount > 0
+      && profitablePassCount !== null
+      && profitablePassCount >= 0
+        ? Number(((profitablePassCount / passCount) * 100).toFixed(2))
+        : null
+    );
+  const resultMetricAvailable = [
+    results.netProfit,
+    results.drawdown,
+    results.profitFactor,
+    results.winRate,
+    results.tradeCount,
+    metrics.netProfit,
+    metrics.drawdown,
+  ].some((value) => eaOptimizationLabNullableNumber(value) !== null);
+  const executionEvidence = workflowDomainObject(
+    item.executionEvidence,
+    execution.executionEvidence,
+    results.executionEvidence,
+    metrics.executionEvidence,
+  );
+  const backendVerificationId = safeDashboardDisplayText(
+    executionEvidence.backendVerificationId
+      || executionEvidence.verificationId
+      || executionEvidence.receiptId
+      || execution.backendVerificationId,
+    "",
+  );
+  const executionVerified = executionEvidence.mtExecutionVerified === true
+    && executionEvidence.optimizationProofVerified === true
+    && Boolean(backendVerificationId);
+  const resultPayloadAvailable = results.available === true
+    || currentBands.length > 0
+    || candidates.length > 0
+    || resultMetricAvailable;
+  const actualResultsAvailable = executionVerified && resultPayloadAvailable;
+  const resultReportEvidence = workflowDomainObject(executionEvidence.resultReport, item.resultReport);
+  const artifactManifestEvidence = workflowDomainObject(executionEvidence.artifactManifest, item.artifactManifest);
+  const warnings = [
+    ...(Array.isArray(item.warnings) ? item.warnings : []),
+    ...(Array.isArray(results.warnings) ? results.warnings : []),
+    ...(Array.isArray(results.overfitWarnings) ? results.overfitWarnings : []),
+  ].slice(0, 30).map((warning) => safeDashboardDisplayText(
+    typeof warning === "object" && warning !== null ? (warning.detailTh || warning.message || warning.code) : warning,
+    "",
+  )).filter(Boolean);
+  const sourceReference = workflowDomainObject(item.sourceReference);
+  return {
+    id: String(item.id || `optimization-report-${index + 1}`),
+    title: safeDashboardDisplayText(item.title, "รายงาน Optimization"),
+    summary: safeDashboardDisplayText(item.summary || results.summary || item.result, "Backend ส่งรายงานแล้ว แต่ยังไม่มีข้อความสรุป"),
+    status: safeDashboardDisplayText(item.status, "reported"),
+    updatedAt: item.updatedAt || item.createdAt || null,
+    eaName: safeDashboardDisplayText(item.eaName || item.sourceName || plan.eaName, "EA จาก Backend Report"),
+    platform: safeDashboardDisplayText(item.platform || plan.platform, "ยังไม่ระบุแพลตฟอร์ม"),
+    sourceReferenceId: safeDashboardDisplayText(
+      sourceReference.artifactId || sourceReference.reportId || sourceReference.recordId,
+      "",
+    ),
+    executionStatus: safeDashboardDisplayText(execution.status, "ยังไม่เริ่มรัน"),
+    executionEvidence: {
+      sourceKind: safeDashboardDisplayText(executionEvidence.sourceKind, "unknown"),
+      backendVerificationId,
+      mtExecutionVerified: executionEvidence.mtExecutionVerified === true,
+      compileProofVerified: executionEvidence.compileProofVerified === true,
+      visualBacktestProofVerified: executionEvidence.visualBacktestProofVerified === true,
+      optimizationProofVerified: executionEvidence.optimizationProofVerified === true,
+      resultReportArtifactId: safeDashboardDisplayText(resultReportEvidence.artifactId, ""),
+      resultReportSha256: /^[a-f0-9]{64}$/i.test(String(resultReportEvidence.sha256 || ""))
+        ? String(resultReportEvidence.sha256).toLowerCase()
+        : "",
+      artifactManifestId: safeDashboardDisplayText(artifactManifestEvidence.artifactId, ""),
+      artifactManifestSha256: /^[a-f0-9]{64}$/i.test(String(artifactManifestEvidence.sha256 || ""))
+        ? String(artifactManifestEvidence.sha256).toLowerCase()
+        : "",
+    },
+    runId: safeDashboardDisplayText(item.runId || executionEvidence.runId, ""),
+    roundId: safeDashboardDisplayText(item.roundId || executionEvidence.roundId, ""),
+    terminalId: safeDashboardDisplayText(item.terminalId || executionEvidence.terminalId || executionEvidence.terminalCandidateId, ""),
+    executionVerified,
+    actualResultsAvailable,
+    passCount: passCount === null ? (rawPasses.length || null) : passCount,
+    profitablePassCount,
+    profitablePercent,
+    passesTruncated: item.passesTruncated === true
+      || results.passesTruncated === true
+      || item.allPassRowsTruncated === true
+      || results.allPassRowsTruncated === true
+      || rawPasses.length > 5000,
+    warnings,
+    candidates,
+    currentBands,
+    nextParameterPlan,
+  };
+}
+
+function normalizeEaOptimizationLabDomain(backend = {}, report = {}) {
+  const checklist = workflowDomainObject(report.connectionChecklist);
+  const terminalSelection = getMetatraderSelectionModel(checklist);
+  const optimizationAdapter = (Array.isArray(checklist.items) ? checklist.items : [])
+    .find((item) => String(item?.id || "") === "optimization_adapter") || null;
+  const reports = (Array.isArray(report.reports) ? report.reports : [])
+    .filter((item) => ["ea_experiment_report", "optimization_report", "backtest_optimization_report"].includes(String(item?.type || item?.reportType || "")))
+    .map(normalizeEaOptimizationReport)
+    .filter(Boolean)
+    .sort((left, right) => Date.parse(right.updatedAt || 0) - Date.parse(left.updatedAt || 0))
+    .slice(0, 100);
+  return {
+    terminals: terminalSelection.candidates,
+    selectedTerminal: terminalSelection.selectedCandidate,
+    adapterReady: terminalSelection.adapterReady === true
+      && normalizeConnectionStatus(optimizationAdapter?.status) === "connected",
+    adapterStatus: safeDashboardDisplayText(
+      optimizationAdapter?.status || terminalSelection.adapterConnection,
+      "coming_soon",
+    ),
+    adapterDetail: safeDashboardDisplayText(
+      optimizationAdapter?.detailTh || terminalSelection.detailTh,
+      "Optimization Adapter ยังไม่พร้อม จึงเตรียมแผนได้แต่ยังไม่สั่ง Strategy Tester",
+    ),
+    reports,
+    latestPlanReport: reports.find((item) => !item.actualResultsAvailable) || reports[0] || null,
+    latestReport: reports.find((item) => item.actualResultsAvailable) || null,
+    backendMode: safeDashboardDisplayText(backend.stage || backend.mode, "plan_only"),
+  };
+}
+
+function eaOptimizationLabFileExtension(fileName) {
+  const match = String(fileName || "").trim().toLowerCase().match(/(\.[a-z0-9]+)$/);
+  return match ? match[1] : "";
+}
+
+function eaOptimizationLabPlatformForExtension(extension) {
+  if ([".mq4", ".ex4"].includes(extension)) return "MT4";
+  if ([".mq5", ".ex5"].includes(extension)) return "MT5";
+  return "";
+}
+
+function eaOptimizationLabRoundNumber(value, precision = 8) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  return Number(numeric.toFixed(precision));
+}
+
+function eaOptimizationLabDefaultNumericRange(value, integer = false) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return { start: null, step: null, stop: null };
+  if (integer) {
+    const span = Math.max(2, Math.round(Math.abs(numeric) * 0.5));
+    return {
+      start: Math.round(numeric - span),
+      step: Math.max(1, Math.round(span / 5)),
+      stop: Math.round(numeric + span),
+    };
+  }
+  const magnitude = Math.max(Math.abs(numeric), 0.1);
+  return {
+    start: eaOptimizationLabRoundNumber(numeric - (magnitude * 0.5)),
+    step: eaOptimizationLabRoundNumber(Math.max(magnitude / 10, 0.00001)),
+    stop: eaOptimizationLabRoundNumber(numeric + (magnitude * 0.5)),
+  };
+}
+
+function eaOptimizationLabParseLiteral(rawValue) {
+  const raw = String(rawValue ?? "").trim();
+  if (/^(true|false)$/i.test(raw)) return raw.toLowerCase() === "true";
+  if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(raw)) return Number(raw);
+  const quoted = raw.match(/^["']([\s\S]*)["']$/);
+  return quoted ? quoted[1] : raw;
+}
+
+function eaOptimizationLabStripComments(sourceText) {
+  const source = String(sourceText || "");
+  let output = "";
+  let quote = "";
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1] || "";
+    if (lineComment) {
+      if (character === "\n") {
+        lineComment = false;
+        output += character;
+      }
+      continue;
+    }
+    if (blockComment) {
+      if (character === "*" && next === "/") {
+        blockComment = false;
+        index += 1;
+      } else if (character === "\n") output += character;
+      continue;
+    }
+    if (quote) {
+      output += character;
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = "";
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      output += character;
+      continue;
+    }
+    if (character === "/" && next === "/") {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+    output += character;
+  }
+  return output;
+}
+
+function eaOptimizationLabEnumMap(sourceText) {
+  const result = new Map();
+  const cleaned = eaOptimizationLabStripComments(sourceText);
+  const enumPattern = /\benum\s+([A-Za-z_]\w*)\s*\{([\s\S]*?)\}\s*;/g;
+  let match;
+  while ((match = enumPattern.exec(cleaned))) {
+    let nextValue = 0;
+    const options = [];
+    match[2].split(",").forEach((entry) => {
+      const token = entry.replace(/\/\/.*$/g, "").trim();
+      if (!token) return;
+      const option = token.match(/^([A-Za-z_]\w*)(?:\s*=\s*([+-]?\d+))?$/);
+      if (!option) return;
+      if (option[2] !== undefined) nextValue = Number(option[2]);
+      options.push({ label: option[1], value: nextValue });
+      nextValue += 1;
+    });
+    if (options.length) result.set(match[1], options);
+  }
+  return result;
+}
+
+function eaOptimizationLabInputModel({ name, type, defaultRaw, enumOptions = [], setRange = null, source = "source" }) {
+  const current = eaOptimizationLabParseLiteral(defaultRaw);
+  const lowerType = String(type || "").trim().toLowerCase();
+  const integer = /^(?:int|uint|long|ulong|short|ushort|char|uchar)$/.test(lowerType);
+  const numeric = integer || /^(?:double|float)$/.test(lowerType);
+  const bool = lowerType === "bool" || typeof current === "boolean";
+  const builtinEnum = /^enum_/.test(lowerType);
+  const modeLike = /mode|direction|method|strategy|signaltype|entrytype/i.test(String(name || ""));
+  const categorical = bool || builtinEnum || enumOptions.length > 0 || modeLike;
+  const options = enumOptions.length
+    ? enumOptions.map((option) => ({ label: String(option.label), value: option.value }))
+    : (bool ? [{ label: "false", value: false }, { label: "true", value: true }] : []);
+  const hasExplicitNumericRange = numeric
+    && !categorical
+    && setRange
+    && [setRange.start, setRange.step, setRange.stop].every((value) => eaOptimizationLabNullableNumber(value) !== null);
+  const start = hasExplicitNumericRange ? Number(setRange.start) : null;
+  const step = hasExplicitNumericRange ? Number(setRange.step) : null;
+  const stop = hasExplicitNumericRange ? Number(setRange.stop) : null;
+  let categoryValues = setRange?.categoryValues?.length
+    ? setRange.categoryValues
+    : options.map((option) => option.value);
+  if (
+    categorical
+    && setRange?.optimize === true
+    && [setRange.start, setRange.step, setRange.stop].every((value) => eaOptimizationLabNullableNumber(value) !== null)
+  ) {
+    const startValue = Number(setRange.start);
+    const stepValue = Number(setRange.step);
+    const stopValue = Number(setRange.stop);
+    if (stepValue > 0 && stopValue >= startValue) {
+      const allowed = options.length ? new Set(options.map((option) => String(option.value))) : null;
+      categoryValues = [];
+      for (let value = startValue; value <= stopValue && categoryValues.length < 30; value += stepValue) {
+        const categoryValue = bool && (value === 0 || value === 1) ? Boolean(value) : value;
+        if (!allowed || allowed.has(String(categoryValue))) categoryValues.push(categoryValue);
+      }
+    }
+  }
+  return {
+    id: String(name || "input").replace(/[^A-Za-z0-9_]/g, "_").slice(0, 80),
+    name: String(name || "Input").slice(0, 100),
+    type: String(type || "unknown").slice(0, 60),
+    current,
+    defaultRaw: String(defaultRaw ?? "").slice(0, 240),
+    kind: categorical ? "categorical" : (numeric ? "numeric" : "fixed"),
+    canOptimize: true,
+    integer,
+    options,
+    categoryValues: categoryValues.map((value) => String(value)).slice(0, 30),
+    optimize: setRange?.optimize === true && (hasExplicitNumericRange || categorical),
+    start,
+    step,
+    stop,
+    source,
+  };
+}
+
+function eaOptimizationLabParseSetFile(sourceText) {
+  const ranges = new Map();
+  String(sourceText || "").replace(/^\uFEFF/, "").split(/\r?\n/).forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith(";") || trimmed.startsWith("#") || !trimmed.includes("=")) return;
+    const separator = trimmed.indexOf("=");
+    const name = trimmed.slice(0, separator).trim();
+    if (!/^[A-Za-z_]\w{0,99}$/.test(name)) return;
+    const parts = trimmed.slice(separator + 1).split("||").map((part) => part.trim());
+    const current = parts[0] ?? "";
+    const start = parts.length >= 4 ? eaOptimizationLabParseLiteral(parts[1]) : null;
+    const step = parts.length >= 4 ? eaOptimizationLabParseLiteral(parts[2]) : null;
+    const stop = parts.length >= 4 ? eaOptimizationLabParseLiteral(parts[3]) : null;
+    const optimize = parts.length >= 5 && /^(?:y|yes|true|1)$/i.test(parts[4]);
+    ranges.set(name, { current, start, step, stop, optimize });
+  });
+  return ranges;
+}
+
+function eaOptimizationLabParseSourceInputs(sourceText, setRanges = new Map()) {
+  const enumMap = eaOptimizationLabEnumMap(sourceText);
+  const cleaned = eaOptimizationLabStripComments(sourceText);
+  const inputPattern = /^\s*(input|extern|sinput)\s+(?!group\b)([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*=\s*([^;]+);/gm;
+  const inputLimit = typeof EA_OPTIMIZATION_LAB_MAX_INPUTS === "number" ? EA_OPTIMIZATION_LAB_MAX_INPUTS : 80;
+  const inputs = [];
+  const seen = new Set();
+  let match;
+  while ((match = inputPattern.exec(cleaned)) && inputs.length < inputLimit) {
+    const [, qualifier, type, name, defaultRaw] = match;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const setRange = setRanges.get(name) || null;
+    const input = eaOptimizationLabInputModel({
+      name,
+      type,
+      defaultRaw: setRange?.current ?? defaultRaw,
+      enumOptions: enumMap.get(type) || [],
+      setRange,
+      source: qualifier === "sinput" ? "source • static input" : (setRange ? "source + set" : "source"),
+    });
+    if (qualifier === "sinput") {
+      input.optimize = false;
+      input.canOptimize = false;
+    }
+    inputs.push(input);
+  }
+  setRanges.forEach((range, name) => {
+    if (seen.has(name) || inputs.length >= inputLimit) return;
+    const current = eaOptimizationLabParseLiteral(range.current);
+    const inferredType = typeof current === "boolean" ? "bool" : (Number.isFinite(Number(current)) ? "double" : "string");
+    inputs.push(eaOptimizationLabInputModel({
+      name,
+      type: inferredType,
+      defaultRaw: range.current,
+      setRange: range,
+      source: "set",
+    }));
+  });
+  return inputs;
+}
+
+function eaOptimizationLabDetectProgramKind(sourceText) {
+  const cleaned = eaOptimizationLabStripComments(sourceText);
+  if (/\bOnCalculate\s*\(|#property\s+indicator_/i.test(cleaned)) return "indicator";
+  if (/\bOnStart\s*\(/i.test(cleaned)) return "script";
+  if (/\bOnTick\s*\(/i.test(cleaned)) return "expert_advisor";
+  if (/\bstart\s*\([^)]*\)[\s\S]*\b(?:OrderSend|trade\.(?:Buy|Sell))\s*\(/i.test(cleaned)) return "expert_advisor";
+  return "unknown";
+}
+
+function eaOptimizationLabRangeCount(input) {
+  if (!input?.optimize) return 1;
+  if (input.kind === "categorical") return Math.max(0, Array.isArray(input.categoryValues) ? input.categoryValues.length : 0);
+  if (input.kind !== "numeric") return 0;
+  if ([input.start, input.step, input.stop].some((value) => (
+    value === null
+    || value === undefined
+    || (typeof value === "string" && !value.trim())
+  ))) return 0;
+  const start = Number(input.start);
+  const step = Number(input.step);
+  const stop = Number(input.stop);
+  if (![start, step, stop].every(Number.isFinite) || step <= 0 || stop < start) return 0;
+  const rawCount = ((stop - start) / step) + 1;
+  if (!Number.isFinite(rawCount) || rawCount > EA_OPTIMIZATION_LAB_MAX_COMBINATIONS) {
+    return EA_OPTIMIZATION_LAB_MAX_COMBINATIONS + 1;
+  }
+  return Math.max(0, Math.floor(rawCount + 1e-9));
+}
+
+function eaOptimizationLabPlanValidation(session = state.modal.eaOptimizationLab) {
+  const issues = [];
+  if (!session.platform) issues.push("เลือกแพลตฟอร์ม MT4 หรือ MT5");
+  if (!session.eaFile && !session.sourceReportId) issues.push("เลือก EA จาก Backend หรือแนบไฟล์ EA");
+  if (session.eaFile) {
+    const filePlatform = eaOptimizationLabPlatformForExtension(session.eaFile.extension);
+    if (filePlatform && filePlatform !== session.platform) issues.push(`ไฟล์ ${session.eaFile.name} ไม่ตรงกับ ${session.platform}`);
+  }
+  const sourceExtensionMatch = String(session.eaFile?.extension || session.eaFile?.name || "")
+    .trim()
+    .toLowerCase()
+    .match(/(\.[a-z0-9]+)$/);
+  const sourceExtension = sourceExtensionMatch ? sourceExtensionMatch[1] : "";
+  if ([".mq4", ".mq5"].includes(sourceExtension) && session.programKind !== "expert_advisor") {
+    issues.push("Source ต้องยืนยันว่าเป็น Expert Advisor ก่อนบันทึกแผน ห้องนี้ไม่รับ Indicator, Script หรือชนิดที่ยังตรวจไม่ได้");
+  } else if (["indicator", "script"].includes(session.programKind)) {
+    issues.push("ห้องนี้รับเฉพาะ Expert Advisor ไม่รับ Indicator หรือ Script");
+  }
+  const requestedOptimization = (Array.isArray(session.inputs) ? session.inputs : []).filter((input) => input.optimize);
+  requestedOptimization
+    .filter((input) => input.canOptimize === false)
+    .forEach((input) => issues.push(`${input.name}: เป็น static input (sinput) จึงห้ามใช้ Optimization`));
+  const optimized = requestedOptimization.filter((input) => input.canOptimize !== false);
+  if (!optimized.length) issues.push("เลือก Input สำหรับ Optimization อย่างน้อย 1 ค่า");
+  optimized.forEach((input) => {
+    const count = eaOptimizationLabRangeCount(input);
+    if (count < 1) issues.push(`${input.name}: ช่วงค่าหรือรายการ Mode ยังไม่ถูกต้อง`);
+    if (count > EA_OPTIMIZATION_LAB_MAX_COMBINATIONS) {
+      issues.push(`${input.name}: มีค่ามากกว่า 1,000,000 ค่า กรุณาลดช่วงหรือเพิ่ม Step`);
+    }
+    if (
+      input.kind === "numeric"
+      && input.integer
+      && ![input.start, input.step, input.stop].every((value) => (
+        value !== null
+        && value !== undefined
+        && !(typeof value === "string" && !value.trim())
+        && Number.isInteger(Number(value))
+      ))
+    ) {
+      issues.push(`${input.name}: Input จำนวนเต็มต้องใช้ Start / Step / Stop เป็นจำนวนเต็ม`);
+    }
+    if (input.kind === "categorical" && input.options.length) {
+      const allowed = new Set(input.options.map((option) => String(option.value)));
+      const illegal = input.categoryValues.filter((value) => !allowed.has(String(value)));
+      if (illegal.length) issues.push(`${input.name}: มีค่าหมวดหมู่ที่ Source ไม่อนุญาต (${illegal.slice(0, 3).join(", ")})`);
+    }
+  });
+  if (!String(session.symbol || "").trim()) issues.push("ระบุ Symbol ที่จะทดสอบ");
+  if (!String(session.timeframe || "").trim()) issues.push("เลือก Timeframe");
+  if (!String(session.dateFrom || "").trim() || !String(session.dateTo || "").trim()) issues.push("ระบุช่วงวันที่ทดสอบ");
+  if (session.dateFrom && session.dateTo && session.dateFrom > session.dateTo) issues.push("วันเริ่มต้องไม่เกินวันสิ้นสุด");
+  const targetProfitPercent = session.targetProfitPercent === "" ? null : eaOptimizationLabNullableNumber(session.targetProfitPercent);
+  const maxDrawdownPercent = session.maxDrawdownPercent === "" ? null : eaOptimizationLabNullableNumber(session.maxDrawdownPercent);
+  if (session.targetProfitPercent !== "" && (targetProfitPercent === null || targetProfitPercent < 0)) issues.push("เป้าหมายกำไรต้องเป็นตัวเลขตั้งแต่ 0 ขึ้นไป");
+  if (session.maxDrawdownPercent !== "" && (maxDrawdownPercent === null || maxDrawdownPercent < 0 || maxDrawdownPercent > 100)) issues.push("Drawdown สูงสุดต้องอยู่ระหว่าง 0–100%");
+  if (session.minimumTrades !== "" && (!Number.isInteger(Number(session.minimumTrades)) || Number(session.minimumTrades) < 1)) issues.push("จำนวน Trade ขั้นต่ำต้องเป็นจำนวนเต็มบวก");
+  let combinations = 1n;
+  optimized.forEach((input) => {
+    combinations *= BigInt(Math.max(1, eaOptimizationLabRangeCount(input)));
+  });
+  if (combinations > BigInt(EA_OPTIMIZATION_LAB_MAX_COMBINATIONS)) {
+    issues.push("จำนวน Combination เกิน 1,000,000 ค่า กรุณาลดช่วงหรือแยกเป็นหลายรอบ");
+  }
+  return { issues, optimized, combinations };
+}
+
+function eaOptimizationLabBuildPlan(session = state.modal.eaOptimizationLab, domain = {}) {
+  const validation = eaOptimizationLabPlanValidation(session);
+  if (validation.issues.length) return { ok: false, ...validation };
+  const terminalGate = typeof getEaOptimizationLabTerminalGate === "function"
+    ? getEaOptimizationLabTerminalGate(domain, session)
+    : { effectiveTerminalId: String(session.selectedTerminalId || "") };
+  const roundCount = Math.max(1, Math.min(5, Number.parseInt(session.roundCount, 10) || 3));
+  const sourceReferenceParts = String(session.sourceReportId || "").split(":");
+  const sourceReferenceKind = sourceReferenceParts.length > 1 ? sourceReferenceParts.shift() : "";
+  const sourceReferenceId = sourceReferenceParts.join(":");
+  const ranges = validation.optimized.map((input) => ({
+    name: input.name,
+    kind: input.kind,
+    current: input.current,
+    start: input.kind === "numeric" ? Number(input.start) : null,
+    step: input.kind === "numeric" ? Number(input.step) : null,
+    stop: input.kind === "numeric" ? Number(input.stop) : null,
+    values: input.kind === "categorical" ? [...input.categoryValues] : [],
+    valueCount: eaOptimizationLabRangeCount(input),
+  }));
+  const rounds = [
+    {
+      index: 1,
+      title: "Broad Scan",
+      detail: "ทดสอบ Current Bands ที่ผู้ใช้กำหนด และเก็บผลครบทุก Pass เพื่อหาเกาะค่าที่ต่อเนื่อง",
+      gate: "ต้องมี Tester Report จริงครบทุก Pass ก่อนสร้างรอบถัดไป",
+    },
+  ];
+  if (roundCount >= 2) rounds.push({
+    index: 2,
+    title: "Stable Cluster Zoom / Split",
+    detail: "ลด Step รอบคลัสเตอร์กำไรที่ต่อเนื่อง หรือแยกหลายช่วงเมื่อพบหลายเกาะ; ตั้งเป้าประมาณ 10 ค่าหรือน้อยกว่าต่อ Input",
+    gate: "สร้าง Next Parameter Plan จากผลรอบ 1 เท่านั้น ไม่คัดจาก Top Profit จุดเดียว",
+  });
+  if (roundCount >= 3) rounds.push({
+    index: 3,
+    title: "Out-of-sample Confirmation",
+    detail: "ทดสอบ Candidate กับช่วงข้อมูลที่ไม่ใช้สร้างพารามิเตอร์ และตรวจ Drawdown, จำนวน Trade และความคงเส้นคงวา",
+    gate: "ยังไม่ถือว่าพร้อม Live จนกว่า Backtest/Forward Test และหลักฐาน Terminal จะผ่าน",
+  });
+  for (let index = 4; index <= roundCount; index += 1) rounds.push({
+    index,
+    title: `Validation Round ${index}`,
+    detail: "รอบเสริมแบบ Case-by-case ใช้เมื่อผลก่อนหน้ามีหลายคลัสเตอร์หรือยังไม่ผ่านเกณฑ์เสถียรภาพ",
+    gate: "ต้องมีเหตุผลจาก Report รอบก่อนหน้าและผู้ใช้กดเริ่มเอง",
+  });
+  return {
+    ok: true,
+    createdAt: new Date().toISOString(),
+    platform: session.platform,
+    eaName: session.eaFile?.name || session.sourceReportId,
+    programKind: session.programKind,
+    sourceReference: {
+      kind: sourceReferenceKind,
+      id: sourceReferenceId,
+      eaFileName: session.eaFile?.name || "",
+      eaSha256: session.eaFile?.sha256 || "",
+      setFileName: session.setFile?.name || "",
+      inputRangesSha256: session.setFile?.sha256 || "",
+      browserPreviewOnly: true,
+    },
+    terminalId: terminalGate.effectiveTerminalId,
+    terminalBackendBound: terminalGate.backendBound === true,
+    symbol: String(session.symbol).trim(),
+    timeframe: session.timeframe,
+    dateFrom: session.dateFrom,
+    dateTo: session.dateTo,
+    validationMethod: session.validationMethod,
+    targetProfitPercent: session.targetProfitPercent === "" ? null : Number(session.targetProfitPercent),
+    maxDrawdownPercent: session.maxDrawdownPercent === "" ? null : Number(session.maxDrawdownPercent),
+    minimumTrades: session.minimumTrades === "" ? null : Number(session.minimumTrades),
+    combinations: validation.combinations.toString(),
+    ranges,
+    rounds,
+  };
+}
+
+function rerenderEaOptimizationLab() {
+  if (!state.modal.open || state.modal.id !== EA_OPTIMIZATION_LAB_PROP_ID) return;
+  const activeElement = document.activeElement;
+  const focusKey = activeElement?.dataset?.eaLabFocusKey || "";
+  const selectionStart = Number.isInteger(activeElement?.selectionStart) ? activeElement.selectionStart : null;
+  const selectionEnd = Number.isInteger(activeElement?.selectionEnd) ? activeElement.selectionEnd : null;
+  const subject = getModalSubject();
+  renderWorkflowDashboard(subject, getPropertyRole(subject), state.propReports[EA_OPTIMIZATION_LAB_PROP_ID] || {});
+  if (focusKey) {
+    const nextFocus = [...document.querySelectorAll("[data-ea-lab-focus-key]")]
+      .find((element) => element.dataset.eaLabFocusKey === focusKey);
+    nextFocus?.focus({ preventScroll: true });
+    if (nextFocus && selectionStart !== null && typeof nextFocus.setSelectionRange === "function") {
+      try {
+        nextFocus.setSelectionRange(selectionStart, selectionEnd ?? selectionStart);
+      } catch {
+        // Number/date inputs do not expose a text selection in every browser.
+      }
+    }
+  }
+}
+
+async function eaOptimizationLabReadTextFile(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let encoding = "utf-8";
+  let offset = 0;
+  if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
+    offset = 3;
+  } else if (bytes[0] === 0xFF && bytes[1] === 0xFE) {
+    encoding = "utf-16le";
+    offset = 2;
+  } else if (bytes[0] === 0xFE && bytes[1] === 0xFF) {
+    encoding = "utf-16be";
+    offset = 2;
+  } else {
+    const sample = bytes.slice(0, Math.min(bytes.length, 256));
+    let evenZeros = 0;
+    let oddZeros = 0;
+    sample.forEach((value, index) => {
+      if (value !== 0) return;
+      if (index % 2) oddZeros += 1;
+      else evenZeros += 1;
+    });
+    if (oddZeros > Math.max(3, evenZeros * 2)) encoding = "utf-16le";
+    else if (evenZeros > Math.max(3, oddZeros * 2)) encoding = "utf-16be";
+  }
+  return new TextDecoder(encoding, { fatal: false }).decode(bytes.slice(offset)).replace(/^\uFEFF/, "");
+}
+
+async function eaOptimizationLabFileSha256(file) {
+  if (!file || !globalThis.crypto?.subtle) return "";
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+async function processEaOptimizationLabFiles(fileList) {
+  const session = state.modal.eaOptimizationLab;
+  if (session.fileBusy) return;
+  const files = [...(fileList || [])];
+  const supported = files.filter((file) => EA_OPTIMIZATION_LAB_SOURCE_EXTENSIONS.includes(eaOptimizationLabFileExtension(file?.name)));
+  if (!supported.length) {
+    session.message = "รองรับเฉพาะ .mq4, .mq5, .ex4, .ex5 และ .set";
+    session.tone = "error";
+    rerenderEaOptimizationLab();
+    return;
+  }
+  if (supported.length > 4) {
+    session.message = "เลือกได้สูงสุด 4 ไฟล์ต่อครั้ง และใช้ EA 1 ไฟล์กับ Parameter Set 1 ไฟล์";
+    session.tone = "error";
+    rerenderEaOptimizationLab();
+    return;
+  }
+  if (supported.some((file) => Number(file.size) > EA_OPTIMIZATION_LAB_MAX_FILE_BYTES)) {
+    session.message = "ไฟล์ต้องมีขนาดไม่เกิน 2 MB ต่อไฟล์";
+    session.tone = "error";
+    rerenderEaOptimizationLab();
+    return;
+  }
+  const eaFiles = supported.filter((file) => [".mq4", ".mq5", ".ex4", ".ex5"].includes(eaOptimizationLabFileExtension(file.name)));
+  const setFiles = supported.filter((file) => eaOptimizationLabFileExtension(file.name) === ".set");
+  if (eaFiles.length > 1 || setFiles.length > 1) {
+    session.message = "กรุณาเลือก EA เพียง 1 ไฟล์ และ .set เพียง 1 ไฟล์ต่อครั้ง เพื่อไม่ให้ Source ปะปนกัน";
+    session.tone = "error";
+    rerenderEaOptimizationLab();
+    return;
+  }
+  const eaFile = eaFiles[0] || null;
+  const setFile = setFiles[0] || null;
+  if (!eaFile && !setFile) return;
+  const requestId = Number(session.fileRequestId || 0) + 1;
+  session.fileRequestId = requestId;
+  session.fileBusy = true;
+  session.message = "กำลังอ่านไฟล์ในเบราว์เซอร์ • ยังไม่อัปโหลดไป Backend";
+  session.tone = "working";
+  rerenderEaOptimizationLab();
+  try {
+    const setText = setFile
+      ? await eaOptimizationLabReadTextFile(setFile)
+      : (eaFile ? "" : session.setText);
+    const setRanges = eaOptimizationLabParseSetFile(setText);
+    const extension = eaFile ? eaOptimizationLabFileExtension(eaFile.name) : "";
+    const sourceText = eaFile && [".mq4", ".mq5"].includes(extension)
+      ? await eaOptimizationLabReadTextFile(eaFile)
+      : (eaFile ? "" : session.sourceText);
+    const [eaSha256, setSha256] = await Promise.all([
+      eaFile ? eaOptimizationLabFileSha256(eaFile) : Promise.resolve(""),
+      setFile ? eaOptimizationLabFileSha256(setFile) : Promise.resolve(""),
+    ]);
+    if (session.fileRequestId !== requestId) return;
+    const inputs = eaOptimizationLabParseSourceInputs(sourceText, setRanges);
+    const programKind = sourceText ? eaOptimizationLabDetectProgramKind(sourceText) : (eaFile ? "unknown" : session.programKind);
+    if (eaFile) {
+      session.eaFile = { name: eaFile.name.slice(0, 180), size: eaFile.size, extension, sha256: eaSha256 };
+      const detectedPlatform = eaOptimizationLabPlatformForExtension(extension);
+      if (detectedPlatform) session.platform = detectedPlatform;
+    }
+    if (setFile) session.setFile = { name: setFile.name.slice(0, 180), size: setFile.size, extension: ".set", sha256: setSha256 };
+    else if (eaFile) session.setFile = null;
+    session.sourceText = sourceText;
+    session.setText = setText;
+    session.programKind = programKind;
+    session.inputs = inputs;
+    session.plan = null;
+    session.restoredDraft = false;
+    if (["indicator", "script"].includes(programKind)) {
+      session.message = "ไฟล์นี้ถูกตรวจพบว่าเป็น Indicator หรือ Script • ห้องทดลองนี้รับเฉพาะ Expert Advisor";
+      session.tone = "error";
+    } else if ([".ex4", ".ex5"].includes(extension) && !setRanges.size) {
+      session.message = "ไฟล์ Binary อ่าน Inputs โดยตรงไม่ได้ • กรุณาแนบ .set หรือ Source .mq4/.mq5 เพิ่ม";
+      session.tone = "warning";
+    } else if (!inputs.length) {
+      session.message = "ยังไม่พบ input/extern ที่อ่านได้ • ตรวจ Source หรือแนบไฟล์ .set";
+      session.tone = "warning";
+    } else {
+      session.message = `อ่าน Inputs ได้ ${inputs.length} ค่า • ข้อมูลยังอยู่เฉพาะในเบราว์เซอร์`;
+      session.tone = "success";
+    }
+  } catch (error) {
+    session.message = `อ่านไฟล์ไม่สำเร็จ • ${safeDashboardDisplayText(error?.message, "รูปแบบไฟล์ไม่รองรับ")}`;
+    session.tone = "error";
+  } finally {
+    if (session.fileRequestId === requestId) {
+      session.fileBusy = false;
+      saveSessionSnapshot();
+      rerenderEaOptimizationLab();
+    }
+  }
+}
+
+async function selectEaOptimizationLabTerminal(candidateId) {
+  const session = state.modal.eaOptimizationLab;
+  if (session.terminalBusy) return null;
+  const dashboard = normalizeWorkflowDashboard(
+    getModalSubject(),
+    getPropertyRole(getModalSubject()),
+    state.propReports[EA_OPTIMIZATION_LAB_PROP_ID] || {},
+  );
+  const domain = dashboard.domainData.eaOptimizationLab;
+  const candidate = (Array.isArray(domain.terminals) ? domain.terminals : []).find((item) => (
+    item.candidateId === candidateId
+    && item.detected === true
+    && (!session.platform || item.platform === session.platform)
+  ));
+  if (!candidate) {
+    session.selectedTerminalId = "";
+    session.plan = null;
+    session.message = "Terminal ที่เลือกไม่อยู่ในผลตรวจล่าสุดหรือไม่ตรงกับแพลตฟอร์ม";
+    session.tone = "error";
+    rerenderEaOptimizationLab();
+    return null;
+  }
+  session.terminalBusy = true;
+  session.selectedTerminalId = candidate.candidateId;
+  session.plan = null;
+  session.message = `กำลังยืนยัน ${candidate.labelTh} กับ Local Runner`;
+  session.tone = "working";
+  rerenderEaOptimizationLab();
+  try {
+    await postJson("/api/integrations/metatrader/select", {
+      propId: EA_OPTIMIZATION_LAB_PROP_ID,
+      candidateId: candidate.candidateId,
+    });
+    const refreshedReport = await loadPropReport(EA_OPTIMIZATION_LAB_PROP_ID);
+    if (!refreshedReport) throw new Error("report_reload_failed");
+    const refreshedSelection = getMetatraderSelectionModel(refreshedReport.connectionChecklist);
+    if (refreshedSelection.selectedCandidate?.candidateId !== candidate.candidateId) {
+      throw new Error("selection_not_confirmed");
+    }
+    session.selectedTerminalId = candidate.candidateId;
+    session.message = `Backend ยืนยัน ${candidate.labelTh} เป็น Terminal เป้าหมายแล้ว • ยังไม่ได้เปิดหรือสั่ง Strategy Tester`;
+    session.tone = "success";
+    saveSessionSnapshot();
+    return refreshedReport;
+  } catch (error) {
+    session.selectedTerminalId = "";
+    session.plan = null;
+    session.message = `ยืนยัน Terminal ไม่สำเร็จ • ${safeDashboardDisplayText(error?.message, "Backend ไม่ยืนยันรายการที่เลือก")}`;
+    session.tone = "error";
+    return null;
+  } finally {
+    session.terminalBusy = false;
+    rerenderEaOptimizationLab();
+  }
+}
+
 function normalizeWorkflowDomainData(propId, backend = {}, report = {}) {
+  if (propId === "codex_mcp_portal") return { tradingSystemPortal: normalizeTradingSystemPortalDomain(backend, report) };
+  if (propId === TRADING_RESEARCH_LAB_PROP_ID) {
+    return {
+      tradingResearchLab: normalizeTradingSystemResearchLabDomain(
+        backend,
+        report,
+        state.propReports.codex_mcp_portal || {},
+        state.propReportLoadState.codex_mcp_portal || {},
+      ),
+    };
+  }
   if (propId === "left_audit_crystals") return { indicatorScout: normalizeIndicatorScoutDomain(backend, report) };
   if (propId === "left_signal_cube") return { fxNewsBias: normalizeFxNewsBiasDomain(backend, report) };
+  if (propId === EA_FACTORY_PROP_ID) {
+    return { eaFactory: normalizeEaFactoryDomain(state.eaFactoryReadModel.payload || {}) };
+  }
+  if (propId === EA_OPTIMIZATION_LAB_PROP_ID) {
+    return { eaOptimizationLab: normalizeEaOptimizationLabDomain(backend, report) };
+  }
   if (propId === "right_status_crystals") return { vpsHqStatus: normalizeVpsHqDomain(backend, report) };
   return {};
 }
@@ -16210,6 +21733,47 @@ function createWorkflowTruthEmpty(message = "ยังไม่มีข้อ�
   note.className = "workflow-empty-message workflow-truth-empty";
   note.textContent = message;
   return note;
+}
+
+function createRadarTodayRunNotice(domain = {}) {
+  const runState = getRadarTodayRunState(domain);
+  const notice = document.createElement("aside");
+  const heading = document.createElement("div");
+  const title = document.createElement("strong");
+  const progress = document.createElement("span");
+  const detail = document.createElement("p");
+  const facts = document.createElement("dl");
+  const expectedBatchSize = Number.isInteger(domain?.expectedBatchSize)
+    ? domain.expectedBatchSize
+    : INDICATOR_SCOUT_EXPECTED_BATCH_SIZE;
+  const todayCount = Array.isArray(domain?.todayEntries) ? domain.todayEntries.length : 0;
+  notice.className = "workflow-radar-run-state";
+  notice.dataset.state = runState.state;
+  notice.dataset.tone = runState.tone;
+  notice.setAttribute("role", runState.tone === "error" ? "alert" : "status");
+  heading.className = "workflow-radar-run-state-heading";
+  title.textContent = runState.title;
+  progress.textContent = `${todayCount}/${expectedBatchSize}`;
+  heading.append(title, progress);
+  detail.textContent = runState.detail;
+  [
+    ["รันล่าสุด", runState.lastRunAt ? formatThaiDateTime(runState.lastRunAt) : "วันนี้ยังไม่เริ่ม"],
+    [
+      runState.nextAttemptAt ? "ลองหาให้ครบอีกครั้ง" : "รอบถัดไป",
+      runState.nextRunAt ? formatThaiDateTime(runState.nextRunAt) : "รอเวลา Backend",
+    ],
+    ...(runState.error ? [["สาเหตุจาก Backend", runState.error]] : []),
+  ].forEach(([labelText, valueText]) => {
+    const row = document.createElement("div");
+    const label = document.createElement("dt");
+    const value = document.createElement("dd");
+    label.textContent = labelText;
+    value.textContent = valueText;
+    row.append(label, value);
+    facts.appendChild(row);
+  });
+  notice.append(heading, detail, facts);
+  return notice;
 }
 
 function workflowBiasLabel(value) {
@@ -16267,9 +21831,9 @@ function createIndicatorScoutCard(item, screenshotAdapter = {}) {
     const image = document.createElement("img");
     const caption = document.createElement("figcaption");
     image.src = safeImageUrl;
-    image.alt = `ภาพหลักฐาน ${item.title}`;
+    image.alt = `ภาพ Open Graph จากหน้าเว็บต้นทาง ${item.title}`;
     image.loading = "lazy";
-    caption.textContent = "ภาพหลักฐานจาก Report attachment";
+    caption.textContent = "ภาพ Open Graph จากหน้าเว็บต้นทาง • ตรวจและผูกกับรายการนี้แล้ว";
     image.addEventListener("error", () => {
       media.dataset.state = "error";
       image.remove();
@@ -16284,8 +21848,8 @@ function createIndicatorScoutCard(item, screenshotAdapter = {}) {
     emptyIcon.textContent = "◇";
     emptyTitle.textContent = "ยังไม่มีภาพหลักฐาน";
     emptyCopy.textContent = screenshotAdapter.status === "ready"
-      ? "รายการนี้ยังไม่มี Screenshot attachment จาก Backend"
-      : "Screenshot Adapter ยังไม่พร้อม และระบบจะไม่สร้างภาพจำลอง";
+      ? "หน้าเว็บนี้ไม่มีภาพ Open Graph ที่ Adapter ตรวจผ่าน • ระบบไม่สร้างภาพจำลอง"
+      : "Publisher Image Adapter ยังไม่พร้อม และระบบจะไม่สร้างภาพจำลอง";
     media.append(emptyIcon, emptyTitle, emptyCopy);
   }
   [
@@ -16350,16 +21914,24 @@ function renderIndicatorScoutPanel(container, tabId, domain) {
   description.textContent = isToday
     ? "แสดงเฉพาะรายการที่ Backend ตรวจพบในวันปัจจุบันตามเวลา Asia/Bangkok"
     : "รวม Indicator, EA และ Tool ในช่วง 7 วันล่าสุด โดยไม่แสดงรายการเก่าหรือข้อมูลจำลอง";
-  count.textContent = `${entries.length} รายการ`;
+  const expectedBatchSize = Number.isInteger(domain?.expectedBatchSize)
+    ? domain.expectedBatchSize
+    : INDICATOR_SCOUT_EXPECTED_BATCH_SIZE;
+  count.textContent = isToday ? `${entries.length}/${expectedBatchSize} รายการ` : `${entries.length} รายการ`;
   headingCopy.append(kicker, title, description);
   heading.append(headingCopy, count);
-  section.appendChild(heading);
+  const executionTruth = document.createElement("aside");
+  const executionTruthTitle = document.createElement("strong");
+  const executionTruthCopy = document.createElement("p");
+  executionTruth.className = "workflow-radar-execution-truth";
+  executionTruth.setAttribute("role", "note");
+  executionTruthTitle.textContent = "อ่านหลักฐานจากเว็บสาธารณะเท่านั้น";
+  executionTruthCopy.textContent = "Radar เปิดเฉพาะหน้าเว็บเพื่ออ่านข้อความและหลักฐาน • ไม่ดาวน์โหลด ไม่ติดตั้ง และไม่รัน Indicator, EA หรือ Tool • ไม่เปิดหรือสั่ง MT4/MT5";
+  executionTruth.append(executionTruthTitle, executionTruthCopy);
+  section.append(heading, executionTruth);
+  if (isToday) section.appendChild(createRadarTodayRunNotice(domain));
   if (!entries.length) {
-    section.appendChild(createWorkflowTruthEmpty(
-      isToday
-        ? "วันนี้ยังไม่มีรายการใหม่จาก Backend หากมีรายการเก่าให้เปิดแท็บ ย้อนหลัง 7 วัน"
-        : "ยังไม่มีรายการที่มีเวลาตรวจสอบจริงภายใน 7 วันล่าสุด",
-    ));
+    if (!isToday) section.appendChild(createWorkflowTruthEmpty("ยังไม่มีรายการที่มีเวลาตรวจสอบจริงภายใน 7 วันล่าสุด"));
     container.appendChild(section);
     return;
   }
@@ -16368,8 +21940,8 @@ function renderIndicatorScoutPanel(container, tabId, domain) {
   screenshotTruth.className = "workflow-radar-screenshot-truth";
   screenshotTruth.dataset.tone = screenshotCount ? "ready" : "waiting";
   screenshotTruth.textContent = screenshotCount
-    ? `มีภาพหลักฐานที่ Backend อนุญาต ${screenshotCount} จาก ${entries.length} รายการ • คลิกภาพในรายละเอียดเพื่อดูขนาดเต็ม`
-    : `${domain.screenshotAdapter.labelTh} • ไม่มีภาพจำลอง และจะแสดงภาพเมื่อมี same-origin Report attachment เท่านั้น`;
+    ? `มีภาพ Open Graph ที่ Backend ตรวจและผูกกับรายการแล้ว ${screenshotCount} จาก ${entries.length} รายการ • ไม่ใช่ภาพแคปเต็มหน้าเว็บ`
+    : `${domain.screenshotAdapter.labelTh} • รายการเหล่านี้ยังไม่มีภาพ Open Graph ที่ตรวจผ่าน และระบบไม่สร้างภาพจำลอง`;
   section.appendChild(screenshotTruth);
   if (isToday) {
     const grid = document.createElement("div");
@@ -17299,6 +22871,829 @@ function renderTerminalSourceCatalogPanel(container, dashboard) {
   container.appendChild(section);
 }
 
+function eaFactoryStageStatusLabel(status) {
+  return {
+    completed: "ผ่าน Gate แล้ว",
+    running: "กำลังทำงาน",
+    ready: "พร้อมให้กดทำขั้นนี้",
+    failed: "ไม่สำเร็จ",
+    blocked: "ติดขัด",
+    not_applicable: "ไม่ใช้กับเป้าหมายนี้",
+    locked: "รอขั้นก่อนหน้า",
+    unknown: "รอสถานะ Backend",
+  }[status] || "รอสถานะ Backend";
+}
+
+function eaFactoryPlatformLabel(platform) {
+  return {
+    mt4: "MT4 / MQL4",
+    mt5: "MT5 / MQL5",
+    tradingview: "TradingView / Pine Script",
+  }[platform] || "ยังไม่เลือกเป้าหมาย";
+}
+
+function eaFactorySelectedSource(domain = {}) {
+  const records = domain?.sourceCatalog?.records || [];
+  const requested = (!domain.canStartNewBuild && domain.activeBuild?.sourceRecordId)
+    || state.modal.eaFactory.selectedSourceId
+    || domain.activeBuild?.sourceRecordId
+    || domain.selectedSourceId;
+  return records.find((record) => record.sourceRecordId === requested)
+    || records.find((record) => record.buildReady)
+    || records[0]
+    || null;
+}
+
+function createEaFactoryNotice(tone, titleText, detailText) {
+  const notice = document.createElement("aside");
+  const title = document.createElement("strong");
+  const detail = document.createElement("p");
+  notice.className = "ea-factory-notice";
+  notice.dataset.tone = tone;
+  title.textContent = titleText;
+  detail.textContent = detailText;
+  notice.append(title, detail);
+  return notice;
+}
+
+function appendEaFactoryFact(container, labelText, valueText, { wide = false } = {}) {
+  const row = document.createElement("div");
+  const label = document.createElement("dt");
+  const value = document.createElement("dd");
+  row.className = wide ? "wide" : "";
+  label.textContent = labelText;
+  value.textContent = eaFactoryReadableValue(valueText);
+  row.append(label, value);
+  container.appendChild(row);
+}
+
+function appendEaFactoryRuleList(container, titleText, rules, emptyText) {
+  const block = document.createElement("section");
+  const title = document.createElement("h6");
+  const list = document.createElement("ol");
+  block.className = "ea-factory-rule-block";
+  title.textContent = titleText;
+  const rows = Array.isArray(rules) ? rules : [];
+  if (rows.length) {
+    rows.forEach((rule) => {
+      const item = document.createElement("li");
+      item.textContent = safeAgentChatReplyText(rule, "");
+      list.appendChild(item);
+    });
+  } else {
+    const item = document.createElement("li");
+    item.className = "empty";
+    item.textContent = emptyText;
+    list.appendChild(item);
+  }
+  block.append(title, list);
+  container.appendChild(block);
+}
+
+function createEaFactoryStageHeader(stageId, stage) {
+  const header = document.createElement("header");
+  const copy = document.createElement("div");
+  const eyebrow = document.createElement("span");
+  const title = document.createElement("h4");
+  const description = document.createElement("p");
+  const badge = document.createElement("strong");
+  const index = EA_FACTORY_STAGE_IDS.indexOf(stageId) + 1;
+  header.className = "ea-factory-stage-heading";
+  eyebrow.textContent = `ขั้นที่ ${index} / ${EA_FACTORY_STAGE_IDS.length} • MANUAL`;
+  title.textContent = EA_FACTORY_STAGE_COPY[stageId]?.titleTh || "โรงงานสร้าง EA";
+  description.textContent = EA_FACTORY_STAGE_COPY[stageId]?.descriptionTh || "";
+  badge.dataset.status = stage?.status || "unknown";
+  badge.textContent = eaFactoryStageStatusLabel(stage?.status || "unknown");
+  copy.append(eyebrow, title, description);
+  header.append(copy, badge);
+  return header;
+}
+
+function appendEaFactoryStageEvidence(container, stage = {}) {
+  const evidence = Array.isArray(stage.evidence) ? stage.evidence : [];
+  const facts = document.createElement("dl");
+  facts.className = "ea-factory-stage-facts";
+  appendEaFactoryFact(facts, "สถานะ", eaFactoryStageStatusLabel(stage.status));
+  if (stage.detail) appendEaFactoryFact(facts, "รายละเอียด", stage.detail, { wide: true });
+  if (stage.missionId) appendEaFactoryFact(facts, "Mission", stage.missionId);
+  if (stage.reportId) appendEaFactoryFact(facts, "Report", stage.reportId);
+  if (stage.startedAt) appendEaFactoryFact(facts, "เริ่ม", formatThaiDateTime(stage.startedAt));
+  if (stage.completedAt) appendEaFactoryFact(facts, "เสร็จ", formatThaiDateTime(stage.completedAt));
+  container.appendChild(facts);
+  if (evidence.length) {
+    const list = document.createElement("ul");
+    list.className = "ea-factory-evidence-list";
+    evidence.forEach((item) => {
+      const row = document.createElement("li");
+      row.textContent = safeDashboardDisplayText(
+        typeof item === "object"
+          ? (item?.labelTh || item?.label || item?.detailTh || item?.detail || item?.message || item?.status)
+          : item,
+        "หลักฐานจาก Backend",
+      );
+      list.appendChild(row);
+    });
+    container.appendChild(list);
+  }
+}
+
+function appendEaFactoryBoundReport(container, report = {}, stage = {}) {
+  if (!stage.reportId) return;
+  const bound = (Array.isArray(report?.reports) ? report.reports : [])
+    .find((item) => String(item?.id || "") === stage.reportId);
+  if (!bound) return;
+  const panel = document.createElement("section");
+  const title = document.createElement("h5");
+  const summary = document.createElement("p");
+  panel.className = "ea-factory-bound-report";
+  title.textContent = safeDashboardDisplayText(bound.title, `Report ${stage.reportId}`);
+  summary.textContent = safeDashboardDisplayText(
+    bound.summary || bound.result,
+    "Backend ผูก Report แล้ว แต่ยังไม่มีข้อความสรุปที่เปิดเผย",
+  );
+  panel.append(title, summary);
+  const evidenceRows = [bound.evidence, bound.executionEvidence]
+    .filter(Array.isArray).flatMap((items) => items).slice(0, 20);
+  if (evidenceRows.length) {
+    const list = document.createElement("ul");
+    list.className = "ea-factory-evidence-list";
+    evidenceRows.forEach((item) => {
+      const row = document.createElement("li");
+      row.textContent = safeDashboardDisplayText(
+        typeof item === "object"
+          ? (item?.labelTh || item?.label || item?.detailTh || item?.detail || item?.message || item?.kind)
+          : item,
+        "หลักฐานจาก Report",
+      );
+      list.appendChild(row);
+    });
+    panel.appendChild(list);
+  }
+  container.appendChild(panel);
+}
+
+function createEaFactoryActionButton(stageId, label, handler, { disabled = false } = {}) {
+  const button = document.createElement("button");
+  const busy = state.modal.eaFactory.inFlight;
+  button.type = "button";
+  button.className = "modal-action primary ea-factory-stage-action";
+  button.dataset.eaFactoryStageAction = stageId;
+  button.disabled = disabled || busy;
+  button.textContent = busy && state.modal.eaFactory.stageId === stageId ? "กำลังส่งให้ Local Runner..." : label;
+  button.addEventListener("click", handler);
+  return button;
+}
+
+function renderEaFactoryStatusStrip(section, domain = {}) {
+  const strip = document.createElement("div");
+  const mode = document.createElement("strong");
+  const build = document.createElement("span");
+  const platform = document.createElement("span");
+  strip.className = "ea-factory-status-strip";
+  mode.textContent = domain.authoritative
+    ? "Manual Stage-by-Stage • ไม่มี Scheduler / Loop"
+    : "กำลังรอ Read Model ea-factory-v1 จาก Backend";
+  mode.dataset.ready = String(domain.authoritative);
+  build.textContent = domain.activeBuild ? `Build ${domain.activeBuild.id} • ${domain.activeBuild.status}` : "ยังไม่มี Build ที่เลือก";
+  platform.textContent = eaFactoryPlatformLabel(domain.activeBuild?.platform);
+  strip.append(mode, build, platform);
+  section.appendChild(strip);
+}
+
+function renderEaFactorySheetSchema(container, domain = {}) {
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  const groups = document.createElement("div");
+  summary.textContent = "ดู Schema Google Sheets A-W ที่โรงงานอ่าน";
+  groups.className = "ea-factory-sheet-schema";
+  [
+    ["A-M • Strategy Core", EA_FACTORY_SHEET_COLUMNS.slice(0, 13)],
+    ["N-W • Research / Build Tracking", EA_FACTORY_SHEET_COLUMNS.slice(13)],
+  ].forEach(([titleText, columns]) => {
+    const group = document.createElement("section");
+    const title = document.createElement("strong");
+    const list = document.createElement("div");
+    title.textContent = titleText;
+    columns.forEach(([letter, name]) => {
+      const item = document.createElement("code");
+      item.textContent = `${letter} ${name}`;
+      list.appendChild(item);
+    });
+    group.append(title, list);
+    groups.appendChild(group);
+  });
+  details.className = "ea-factory-schema-details";
+  details.append(summary, groups);
+  container.appendChild(details);
+}
+
+function renderEaFactoryGoogleSheetSync(container, domain = {}) {
+  const sheet = domain.sourceCatalog.googleSheets;
+  const centralSheet = researchSheetConsumerPresentation(TRADING_RESEARCH_LAB_PROP_ID, { requiresWrite: false });
+  const hub = state.researchSheetHub.data;
+  const card = document.createElement("form");
+  const heading = document.createElement("div");
+  const title = document.createElement("strong");
+  const status = document.createElement("span");
+  const central = document.createElement("div");
+  const centralReference = document.createElement("strong");
+  const centralTab = document.createElement("span");
+  const submit = document.createElement("button");
+  const note = document.createElement("p");
+  card.className = "ea-factory-sheet-sync";
+  heading.className = "ea-factory-sheet-sync-heading";
+  title.textContent = "อัปเดตจาก Google Sheet กลาง";
+  status.textContent = centralSheet.label;
+  status.dataset.status = centralSheet.tone;
+  heading.append(title, status);
+  central.className = "ea-factory-sheet-central";
+  centralReference.textContent = hub?.configured
+    ? researchSheetHubConfiguredReference(hub)
+    : "ยังไม่ได้ตั้ง Sheet กลางจากแถบ Google Sheet ด้านบน";
+  centralTab.textContent = centralSheet.consumer?.tabName
+    ? `Tab: ${centralSheet.consumer.tabName}`
+    : "Backend ยังไม่ยืนยัน Tab ของโรงงาน";
+  central.append(centralReference, centralTab);
+  submit.type = "submit";
+  submit.className = "modal-action ea-factory-sync-button";
+  submit.disabled = !hub?.configured || !sheet.canSync || state.modal.eaFactory.inFlight;
+  submit.textContent = state.modal.eaFactory.inFlight && state.modal.eaFactory.stageId === "sheet_sync"
+    ? "กำลังอ่าน Sheet..."
+    : "อ่านข้อมูลล่าสุดจาก Sheet กลาง";
+  note.textContent = `${centralSheet.detail} • Frontend ไม่รับ Credential หรือ Token • ${sheet.lastSyncAt ? `ซิงก์ล่าสุด ${formatThaiDateTime(sheet.lastSyncAt)}` : "ยังไม่มีเวลาซิงก์ที่ Backend ยืนยัน"}${sheet.lastErrorCode ? ` • ปัญหา ${sheet.lastErrorCode}` : ""}`;
+  card.append(heading, central, submit, note);
+  card.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void syncEaFactoryGoogleSheet();
+  });
+  container.appendChild(card);
+}
+
+function renderEaFactorySourceStage(section, domain) {
+  const stage = domain.stages.find((item) => item.id === "source");
+  section.appendChild(createEaFactoryStageHeader("source", stage));
+  renderEaFactoryGoogleSheetSync(section, domain);
+  renderEaFactorySheetSchema(section, domain);
+  const records = domain.sourceCatalog.records;
+  if (!records.length) {
+    section.appendChild(createWorkflowTruthEmpty(
+      "Backend ยังไม่มี Strategy Record จากคลังวิจัยหรือ Google Sheets จึงยังเลือก Entry, Exit หรือสร้าง Build ไม่ได้",
+    ));
+    return;
+  }
+  const selector = document.createElement("label");
+  const select = document.createElement("select");
+  selector.className = "ea-factory-source-selector";
+  selector.textContent = "เลือกระบบที่จะสร้าง";
+  select.dataset.eaFactorySourceSelect = "true";
+  select.disabled = !domain.canStartNewBuild;
+  const selected = eaFactorySelectedSource(domain);
+  records.forEach((record) => {
+    const option = document.createElement("option");
+    option.value = record.sourceRecordId;
+    option.textContent = `${eaFactoryCompactValue(record.systemName, "ระบบเทรด")}`
+      + ` • ${eaFactoryCompactValue(record.symbolsMarket, "ยังไม่ระบุตลาด")}`
+      + ` • ${eaFactoryCompactValue(record.timeframe, "ยังไม่ระบุ Timeframe")}`;
+    option.selected = record.sourceRecordId === selected?.sourceRecordId;
+    select.appendChild(option);
+  });
+  select.addEventListener("change", () => {
+    state.modal.eaFactory.selectedSourceId = select.value;
+    renderWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()), state.propReports[EA_FACTORY_PROP_ID] || {});
+  });
+  selector.appendChild(select);
+  section.appendChild(selector);
+  if (!selected) return;
+  state.modal.eaFactory.selectedSourceId = selected.sourceRecordId;
+  const summary = document.createElement("article");
+  const heading = document.createElement("header");
+  const title = document.createElement("h5");
+  const verified = document.createElement("span");
+  const facts = document.createElement("dl");
+  const rules = document.createElement("div");
+  summary.className = "ea-factory-source-detail";
+  title.textContent = selected.systemName;
+  verified.textContent = selected.verificationStatus;
+  verified.dataset.status = String(selected.verificationStatus || "").toLowerCase();
+  heading.append(title, verified);
+  facts.className = "ea-factory-source-facts";
+  appendEaFactoryFact(facts, "Record ID", selected.recordId);
+  appendEaFactoryFact(facts, "Strategy Family", selected.strategyFamily);
+  appendEaFactoryFact(facts, "Symbol / Market", selected.symbolsMarket);
+  appendEaFactoryFact(facts, "Timeframe", selected.timeframe);
+  appendEaFactoryFact(facts, "Stop Loss", selected.stopLoss);
+  appendEaFactoryFact(facts, "Take Profit", selected.takeProfit);
+  appendEaFactoryFact(facts, "O • Verification", selected.verificationStatus);
+  appendEaFactoryFact(facts, "P • Backtest Status", selected.backtestStatus);
+  appendEaFactoryFact(facts, "Q • Backtest Report", selected.backtestReport, { wide: true });
+  appendEaFactoryFact(facts, "R • Optimization Status", selected.optimizationStatus);
+  appendEaFactoryFact(facts, "S • Optimization Report", selected.optimizationReport, { wide: true });
+  appendEaFactoryFact(facts, "U • Next Action", selected.nextAction || "ยังไม่ระบุขั้นตอนถัดไป", { wide: true });
+  appendEaFactoryFact(facts, "V • Target Platform", eaFactoryPlatformLabel(selected.targetPlatform));
+  appendEaFactoryFact(facts, "W • Updated At", selected.updatedAt ? formatThaiDateTime(selected.updatedAt) : "ยังไม่มีเวลาจากต้นทาง");
+  appendEaFactoryFact(
+    facts,
+    "ความพร้อม A-M",
+    selected.buildReady
+      ? "ข้อมูลแกนหลักครบ พร้อมสร้าง Build"
+      : `ยังขาด ${selected.missingCoreFields.join(", ") || "ข้อมูลแกนหลักที่ Backend กำหนด"}`,
+    { wide: true },
+  );
+  rules.className = "ea-factory-source-rules";
+  appendEaFactoryRuleList(rules, "Entry Rules", selected.entryRules, "Sheet ยังไม่ระบุ Entry Rule");
+  appendEaFactoryRuleList(rules, "Exit Rules", selected.exitRules, "Sheet ยังไม่ระบุ Exit Rule");
+  appendEaFactoryRuleList(rules, "Recovery / แก้ไม้", selected.recovery, "ไม่มีการแก้ไม้ที่ระบุ");
+  appendEaFactoryRuleList(rules, "Lot / Risk / Money Management", selected.lotRisk, "Sheet ยังไม่ระบุ Lot หรือ Risk");
+  appendEaFactoryRuleList(rules, "Indicators", selected.indicators, "ยังไม่ระบุ Indicator");
+  appendEaFactoryRuleList(rules, "เงื่อนไขพิเศษ", selected.specialConditions, "ไม่มีเงื่อนไขพิเศษที่ระบุ");
+  appendEaFactoryRuleList(rules, "T • Issues / ปัญหา", selected.issues, "ต้นทางยังไม่ระบุปัญหา");
+  summary.append(heading, facts, rules);
+  if (selected.sourceUrls.length) {
+    const links = document.createElement("div");
+    const linksTitle = document.createElement("strong");
+    links.className = "ea-factory-source-links";
+    linksTitle.textContent = "N • Source URLs / ลิงก์หลักฐาน";
+    links.appendChild(linksTitle);
+    selected.sourceUrls.forEach((url, index) => {
+      const link = createWorkflowExternalSource(url, `เปิดแหล่งอ้างอิง ${index + 1}`);
+      if (link) links.appendChild(link);
+    });
+    if (links.childElementCount) summary.appendChild(links);
+  }
+  section.appendChild(summary);
+  if (domain.canStartNewBuild) {
+    section.appendChild(createEaFactoryActionButton(
+      "source",
+      "ใช้ระบบนี้และไปตรวจ Strategy Spec",
+      () => setWorkflowDashboardTab(EA_FACTORY_PROP_ID, "spec", { focus: true }),
+      { disabled: !domain.authoritative || !selected.buildReady },
+    ));
+  } else {
+    section.appendChild(createEaFactoryNotice(
+      "ready",
+      `Build ${domain.activeBuild.id} ใช้ Record นี้แล้ว`,
+      "Build นี้กำลังเดินขั้นตอนอยู่ ให้ทำขั้นปัจจุบันเสร็จก่อนเพื่อไม่ให้ Version และ Audit ปะปนกัน",
+    ));
+  }
+}
+
+function renderEaFactorySpecStage(section, domain) {
+  const stage = domain.stages.find((item) => item.id === "spec");
+  const source = eaFactorySelectedSource(domain);
+  section.appendChild(createEaFactoryStageHeader("spec", stage));
+  if (!source) {
+    section.appendChild(createWorkflowTruthEmpty("กลับไปขั้น 1 และเลือก Strategy Record ก่อน"));
+    return;
+  }
+  const facts = document.createElement("dl");
+  const rules = document.createElement("div");
+  facts.className = "ea-factory-stage-facts";
+  appendEaFactoryFact(facts, "A • Record ID", source.recordId);
+  appendEaFactoryFact(facts, "B • System", source.systemName);
+  appendEaFactoryFact(facts, "C • Strategy Family", source.strategyFamily);
+  appendEaFactoryFact(facts, "D • Symbol / Market", source.symbolsMarket);
+  appendEaFactoryFact(facts, "E • Timeframe", source.timeframe);
+  appendEaFactoryFact(facts, "H • Stop Loss", source.stopLoss);
+  appendEaFactoryFact(facts, "I • Take Profit", source.takeProfit);
+  rules.className = "ea-factory-source-rules";
+  appendEaFactoryRuleList(rules, "F • Entry Rules", source.entryRules, "ยังไม่ระบุ Entry Rule");
+  appendEaFactoryRuleList(rules, "G • Exit Rules", source.exitRules, "ยังไม่ระบุ Exit Rule");
+  appendEaFactoryRuleList(rules, "J • Recovery / แก้ไม้", source.recovery, "ไม่มีการแก้ไม้ที่ระบุ");
+  appendEaFactoryRuleList(rules, "K • Lot / Risk / Money Management", source.lotRisk, "ยังไม่ระบุ Lot หรือ Risk");
+  appendEaFactoryRuleList(rules, "L • Indicators", source.indicators, "ยังไม่ระบุ Indicator");
+  appendEaFactoryRuleList(rules, "M • Special Conditions", source.specialConditions, "ไม่มีเงื่อนไขพิเศษที่ระบุ");
+  section.append(facts, rules);
+  if (domain.canStartNewBuild) {
+    if (domain.activeBuild) {
+      section.appendChild(createEaFactoryNotice(
+        "neutral",
+        `Build ก่อนหน้า ${domain.activeBuild.id} อยู่ในสถานะ ${domain.activeBuild.status}`,
+        "สร้าง Build ใหม่ได้โดยเก็บไฟล์และ Audit ของ Build ก่อนหน้าไว้ในประวัติ ไม่เขียนทับ Version เดิม",
+      ));
+    }
+    const form = document.createElement("form");
+    const platformLabel = document.createElement("label");
+    const platform = document.createElement("select");
+    const briefLabel = document.createElement("label");
+    const brief = document.createElement("textarea");
+    const submit = document.createElement("button");
+    form.className = "ea-factory-spec-form";
+    platformLabel.textContent = "Target Platform *";
+    platform.required = true;
+    platform.dataset.eaFactoryPlatform = "true";
+    [["", "เลือกแพลตฟอร์ม"], ["mt4", "MT4 / MQL4"], ["mt5", "MT5 / MQL5"], ["tradingview", "TradingView / Pine Script"]]
+      .forEach(([value, labelText]) => {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = labelText;
+        if (value && value === (state.modal.eaFactory.selectedPlatform || source.targetPlatform)) option.selected = true;
+        platform.appendChild(option);
+      });
+    briefLabel.textContent = "ข้อกำหนดเพิ่มเติม (ไม่บังคับ)";
+    brief.rows = 4;
+    brief.maxLength = 900;
+    brief.placeholder = "ระบุชื่อไฟล์, Input ที่ต้องเปิดให้ปรับ หรือข้อจำกัดเพิ่มเติม โดยไม่ใส่ Credential/Secret";
+    submit.type = "submit";
+    submit.className = "modal-action primary ea-factory-stage-action";
+    submit.disabled = !domain.authoritative || !source.buildReady || state.modal.eaFactory.inFlight;
+    submit.textContent = state.modal.eaFactory.inFlight && state.modal.eaFactory.stageId === "create_build"
+      ? "กำลังสร้าง Build..."
+      : "สร้าง Build และบันทึก Strategy Spec";
+    platform.addEventListener("change", () => { state.modal.eaFactory.selectedPlatform = platform.value; });
+    platformLabel.appendChild(platform);
+    briefLabel.appendChild(brief);
+    form.append(platformLabel, briefLabel, submit);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (!form.reportValidity()) return;
+      void createEaFactoryBuild(source.sourceRecordId, platform.value, brief.value);
+    });
+    section.appendChild(form);
+    return;
+  }
+  appendEaFactoryStageEvidence(section, stage);
+  const canAdvance = stage?.canRun === true && domain.currentStageId === "spec";
+  if (canAdvance) {
+    section.appendChild(createEaFactoryActionButton(
+      "spec",
+      "ยืนยัน Strategy Spec และไปสร้างโค้ด",
+      () => void advanceEaFactoryStage("spec"),
+    ));
+  }
+}
+
+function renderEaFactoryTerminalPicker(container, domain) {
+  const platform = domain.activeBuild?.platform;
+  const wrapper = document.createElement("section");
+  const title = document.createElement("h5");
+  wrapper.className = "ea-factory-terminal-picker";
+  if (!platform) {
+    title.textContent = "การเชื่อม MT4 / MT5";
+    wrapper.appendChild(title);
+    wrapper.appendChild(createEaFactoryNotice(
+      "neutral",
+      "เลือก Target Platform ในขั้น Strategy Spec ก่อน",
+      "เมื่อสร้าง Build เป็น MT4 หรือ MT5 แล้ว Backend จะแสดงเฉพาะ Terminal Candidate ที่แพลตฟอร์มตรงกันในช่องนี้",
+    ));
+    container.appendChild(wrapper);
+    return;
+  }
+  if (platform === "tradingview") {
+    title.textContent = "TradingView / Pine Script";
+    wrapper.appendChild(title);
+    wrapper.appendChild(createEaFactoryNotice(
+      "ready",
+      "Pine Script ใช้ Code Validation เท่านั้น",
+      "ขั้นนี้จะไม่ค้นหรือเปิด MT4/MT5 และขั้น Backtest จะเป็น Not Applicable ตามผลจาก Backend",
+    ));
+    container.appendChild(wrapper);
+    return;
+  }
+  const terminals = (Array.isArray(domain.terminals) ? domain.terminals : [])
+    .filter((terminal) => terminal.platform === platform);
+  title.textContent = `Terminal สำหรับ ${eaFactoryPlatformLabel(platform)}`;
+  wrapper.appendChild(title);
+  if (!terminals.length) {
+    wrapper.appendChild(createWorkflowTruthEmpty("Backend ยังไม่ส่ง Terminal Candidate ที่ตรงแพลตฟอร์ม จึง Compile/Backtest ไม่ได้"));
+    container.appendChild(wrapper);
+    return;
+  }
+  const select = document.createElement("select");
+  terminals.forEach((terminal) => {
+    const option = document.createElement("option");
+    option.value = terminal.id;
+    option.textContent = `${terminal.label} • ${terminal.status} • ${terminal.proofStatus}`;
+    option.selected = terminal.id === (state.modal.eaFactory.selectedTerminalId || domain.selectedTerminalId || terminals.find((row) => row.selected)?.id);
+    select.appendChild(option);
+  });
+  state.modal.eaFactory.selectedTerminalId = select.value;
+  select.addEventListener("change", () => { state.modal.eaFactory.selectedTerminalId = select.value; });
+  const confirm = document.createElement("button");
+  confirm.type = "button";
+  confirm.className = "modal-action ea-factory-terminal-confirm";
+  confirm.disabled = state.modal.eaFactory.inFlight;
+  confirm.textContent = domain.selectedTerminalId === select.value ? "Terminal นี้ถูกยืนยันแล้ว" : "ยืนยัน Terminal เป้าหมาย";
+  confirm.addEventListener("click", () => void selectEaFactoryTerminal(select.value));
+  wrapper.append(select, confirm);
+  if (domain.selectedTerminalId && !domain.adapterReady) {
+    wrapper.appendChild(createEaFactoryNotice(
+      "warning",
+      "เลือก Terminal แล้ว แต่ Execution Adapter ยังไม่พร้อม",
+      "ปุ่ม Compile และ Backtest จะยังปิดจนกว่า Backend จะยืนยัน adapterReady=true และแพลตฟอร์มตรงกับ Build",
+    ));
+  }
+  container.appendChild(wrapper);
+}
+
+function renderEaFactoryOperationalStage(section, stageId, domain, report) {
+  const stage = domain.stages.find((item) => item.id === stageId);
+  section.appendChild(createEaFactoryStageHeader(stageId, stage));
+  if (!domain.activeBuild) {
+    section.appendChild(createWorkflowTruthEmpty("ยังไม่มี Build ให้ดำเนินการ กลับไปเลือก Strategy Record และยืนยัน Spec ก่อน"));
+    return;
+  }
+  const buildFacts = document.createElement("dl");
+  buildFacts.className = "ea-factory-stage-facts";
+  appendEaFactoryFact(buildFacts, "Build", domain.activeBuild.id);
+  appendEaFactoryFact(buildFacts, "Target", eaFactoryPlatformLabel(domain.activeBuild.platform));
+  appendEaFactoryFact(buildFacts, "Version", domain.activeBuild.version || "รอสร้าง Version");
+  if (domain.activeBuild.workspace.workspaceId) appendEaFactoryFact(buildFacts, "Workspace", domain.activeBuild.workspace.workspaceId);
+  if (domain.activeBuild.workspace.strategySpecFile) {
+    appendEaFactoryFact(buildFacts, "Strategy Spec", domain.activeBuild.workspace.strategySpecFile, { wide: true });
+  }
+  if (domain.activeBuild.sourceRefs.length) appendEaFactoryFact(buildFacts, "Workspace Files", domain.activeBuild.sourceRefs.join(" • "), { wide: true });
+  section.appendChild(buildFacts);
+  appendEaFactoryStageEvidence(section, stage);
+  appendEaFactoryBoundReport(section, report, stage);
+  if (stageId === "compile_validate") renderEaFactoryTerminalPicker(section, domain);
+  if (stageId === "backtest_recheck" && domain.activeBuild.platform === "tradingview") {
+    section.appendChild(createEaFactoryNotice(
+      "neutral",
+      "Not Applicable สำหรับ Pine Script",
+      "ระบบไม่สร้างผล Backtest ทดแทน และจะไป Final Report หลัง Backend ยืนยัน Source Review และ Code Validation แล้ว",
+    ));
+  }
+  if (stageId === "backtest_recheck" && domain.activeBuild.platform !== "tradingview") {
+    section.appendChild(createEaFactoryNotice(
+      stage?.status === "completed" && stage?.reportId ? "ready" : "neutral",
+      stage?.status === "completed" && stage?.reportId
+        ? "ผล Backtest ผูกกับ Report จาก Backend แล้ว"
+        : "ยังไม่มีผล Visual Backtest จริง",
+      "ค่าผลทดสอบจะแสดงผ่าน Report และ Evidence ที่ผูก Mission, Terminal และ Stage นี้เท่านั้น ระบบไม่อ่าน metric นอกสัญญา และระบบจะไม่แสดง Win Rate, Profit Factor หรือ Drawdown จากข้อมูลจำลอง",
+    ));
+  }
+  if (stageId === "artifacts_report") {
+    if (["locked", "unknown"].includes(stage?.status)) {
+      section.appendChild(createEaFactoryNotice(
+        "neutral",
+        "กำลังดูไฟล์และประวัติแบบ Read-only",
+        "เปิดดูหรือดาวน์โหลด Artifact ของ Build ที่บันทึกแล้วได้ แต่ปุ่มจัดทำ Final Report จะยังล็อกจนกว่าขั้นก่อนหน้าผ่าน Gate",
+      ));
+    }
+    if (!appendDashboardArtifactLinks(section, domain.activeBuild.artifacts, { limit: 200 })) {
+      section.appendChild(createWorkflowTruthEmpty("ยังไม่มีไฟล์ที่ Backend อนุญาตให้ดาวน์โหลด"));
+    }
+    const lineage = domain.activeBuild.artifactLineage;
+    if (Object.keys(lineage).length) {
+      const lineageFacts = document.createElement("dl");
+      lineageFacts.className = "ea-factory-stage-facts";
+      appendEaFactoryFact(lineageFacts, "Source Record", lineage.sourceRecordId || domain.activeBuild.sourceRecordId);
+      appendEaFactoryFact(lineageFacts, "Strategy Spec", lineage.strategySpecFile || domain.activeBuild.workspace.strategySpecFile);
+      appendEaFactoryFact(
+        lineageFacts,
+        "Mission / Report Lineage",
+        `${eaFactoryFirstArray(lineage.stageMissionReportPairs).length} คู่`,
+      );
+      appendEaFactoryFact(lineageFacts, "File Digests", `${eaFactoryFirstArray(lineage.fileDigests).length} ไฟล์`);
+      section.appendChild(lineageFacts);
+    }
+    const audit = domain.activeBuild.audit;
+    const auditTitle = document.createElement("h5");
+    auditTitle.textContent = "Audit และประวัติ Version";
+    section.appendChild(auditTitle);
+    if (!audit.length) section.appendChild(createWorkflowTruthEmpty("Backend ยังไม่ส่ง Audit ของ Build นี้"));
+    else {
+      const timeline = document.createElement("ol");
+      timeline.className = "ea-factory-audit-timeline";
+      audit.forEach((item) => {
+        const row = document.createElement("li");
+        const title = document.createElement("strong");
+        const meta = document.createElement("span");
+        title.textContent = safeDashboardDisplayText(
+          typeof item === "object" ? (item?.labelTh || item?.title || item?.action || item?.stageId) : item,
+          "เหตุการณ์จาก Backend",
+        );
+        meta.textContent = typeof item === "object"
+          ? `${safeDashboardDisplayText(item?.status, "บันทึกแล้ว")}${item?.createdAt || item?.at ? ` • ${formatThaiDateTime(item.createdAt || item.at)}` : ""}`
+          : "บันทึกจาก Backend";
+        row.append(title, meta);
+        timeline.appendChild(row);
+      });
+      section.appendChild(timeline);
+    }
+    const historyTitle = document.createElement("h5");
+    historyTitle.textContent = "ประวัติ Build ในโรงงาน";
+    section.appendChild(historyTitle);
+    if (!domain.builds.length) section.appendChild(createWorkflowTruthEmpty("Backend ยังไม่มีประวัติ Build"));
+    else {
+      const buildHistory = document.createElement("ol");
+      buildHistory.className = "ea-factory-build-history";
+      domain.builds.slice(0, 100).forEach((item) => {
+        const row = document.createElement("li");
+        const title = document.createElement("strong");
+        const meta = document.createElement("span");
+        const historyBuildId = String(item?.id || item?.buildId || "").trim();
+        const selected = historyBuildId === domain.activeBuild.id;
+        title.textContent = `${safeDashboardDisplayText(item?.sourceDisplayName, "Strategy Build")} • ${safeDashboardDisplayText(item?.id, "ไม่พบ Build ID")}`;
+        meta.textContent = `${selected ? "กำลังดู • " : ""}${eaFactoryPlatformLabel(normalizeEaFactoryPlatform(item?.platform))} • ${safeDashboardDisplayText(item?.status, "รอสถานะ")}${item?.updatedAt ? ` • ${formatThaiDateTime(item.updatedAt)}` : ""}`;
+        row.dataset.selected = selected ? "true" : "false";
+        row.tabIndex = 0;
+        row.setAttribute("role", "button");
+        row.setAttribute("aria-pressed", selected ? "true" : "false");
+        const openBuild = () => {
+          state.modal.eaFactory.selectedBuildId = historyBuildId;
+          renderWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()), state.propReports[EA_FACTORY_PROP_ID] || {});
+        };
+        row.addEventListener("click", openBuild);
+        row.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          openBuild();
+        });
+        row.append(title, meta);
+        buildHistory.appendChild(row);
+      });
+      section.appendChild(buildHistory);
+    }
+  }
+  const isPineBacktestSkip = stageId === "backtest_recheck" && domain.activeBuild.platform === "tradingview";
+  const terminalRequiredStage = ["compile_validate", "backtest_recheck"].includes(stageId)
+    && domain.activeBuild.platform !== "tradingview";
+  const terminalGate = terminalRequiredStage
+    ? domain.selectedTerminalReady === true
+    : true;
+  const canAdvance = stage?.canRun === true
+    && domain.currentStageId === stageId
+    && terminalGate
+    && !isPineBacktestSkip;
+  if (canAdvance) {
+    const labels = {
+      generate: "เริ่มสร้าง Source Code Version นี้",
+      review: "เริ่มตรวจ Source Code และ Signal Guard",
+      compile_validate: domain.activeBuild.platform === "tradingview" ? "เริ่ม Validate Pine Script" : "เริ่ม Compile บน Terminal ที่ยืนยัน",
+      backtest_recheck: "เริ่ม Visual Backtest และ Logic Recheck",
+      artifacts_report: "จัดทำ Final Report และปิด Build",
+    };
+    section.appendChild(createEaFactoryActionButton(
+      stageId,
+      labels[stageId] || "ทำขั้นนี้",
+      () => void advanceEaFactoryStage(stageId),
+    ));
+  }
+}
+
+function renderEaFactoryPanel(container, tabId, domain = {}, report = {}) {
+  const section = document.createElement("section");
+  section.className = "workflow-domain-panel ea-factory-panel";
+  renderEaFactoryStatusStrip(section, domain);
+  if (!domain.authoritative) {
+    section.appendChild(createEaFactoryNotice(
+      "warning",
+      "ยังไม่ได้รับ EA Factory Read Model ที่ยืนยัน",
+      "ต้องได้รับ schemaVersion ea-factory-v1, mode manual_stage_by_stage และ scheduled=false จาก Backend ก่อน ปุ่มทุกขั้นจึงเปิดได้",
+    ));
+  }
+  if (tabId === "source") renderEaFactorySourceStage(section, domain);
+  else if (tabId === "spec") renderEaFactorySpecStage(section, domain);
+  else if (["generate", "review", "compile_validate", "backtest_recheck", "artifacts_report"].includes(tabId)) {
+    renderEaFactoryOperationalStage(section, tabId, domain, report);
+  } else section.appendChild(createWorkflowTruthEmpty("ไม่พบขั้นตอนโรงงานที่รองรับ"));
+  if (state.modal.eaFactory.message) {
+    section.appendChild(createEaFactoryNotice(
+      state.modal.eaFactory.tone,
+      state.modal.eaFactory.tone === "error" ? "คำขอยังไม่สำเร็จ" : "สถานะคำขอ",
+      state.modal.eaFactory.message,
+    ));
+  }
+  container.appendChild(section);
+}
+
+function mergeEaFactoryReadModel(payload = {}) {
+  const model = workflowDomainObject(payload?.eaFactory, payload?.workflowDashboard?.eaFactory, payload);
+  if (model.schemaVersion !== "ea-factory-v1") return false;
+  state.eaFactoryReadModel.payload = model;
+  const current = state.propReports[EA_FACTORY_PROP_ID] || {};
+  const workflowDashboard = workflowDomainObject(current.workflowDashboard);
+  state.propReports[EA_FACTORY_PROP_ID] = {
+    ...current,
+    workflowDashboard: {
+      ...workflowDashboard,
+      eaFactory: model,
+    },
+  };
+  return true;
+}
+
+async function loadEaFactoryReadModel({ signal = null } = {}) {
+  if (state.eaFactoryReadModel.inFlight || signal?.aborted) return null;
+  state.eaFactoryReadModel.inFlight = true;
+  try {
+    const payload = await fetchJson("/api/props/right_server_racks/ea-factory", {
+      timeoutMs: PROP_REPORT_FETCH_TIMEOUT_MS,
+      signal,
+    });
+    const merged = mergeEaFactoryReadModel(payload);
+    if (!merged) throw new Error("Backend response ไม่ตรง schema ea-factory-v1");
+    state.eaFactoryReadModel.lastLoadedAt = Date.now();
+    return payload;
+  } catch (error) {
+    state.eaFactoryReadModel.payload = null;
+    state.eaFactoryReadModel.lastLoadedAt = 0;
+    if (!signal?.aborted && state.modal.open && state.modal.id === EA_FACTORY_PROP_ID) {
+      setEaFactoryActionState({
+        inFlight: false,
+        stageId: "read_model",
+        message: `โหลด EA Factory Read Model ไม่สำเร็จ • ${safeDashboardDisplayText(error?.message, "Backend ยังไม่เปิด endpoint นี้")}`,
+        tone: "error",
+      });
+    }
+    return null;
+  } finally {
+    state.eaFactoryReadModel.inFlight = false;
+  }
+}
+
+function setEaFactoryActionState({ inFlight = false, stageId = "", message = "", tone = "neutral" } = {}) {
+  state.modal.eaFactory.inFlight = Boolean(inFlight);
+  state.modal.eaFactory.stageId = stageId;
+  state.modal.eaFactory.message = safeDashboardDisplayText(message, "");
+  state.modal.eaFactory.tone = ["neutral", "working", "success", "error", "ready", "warning"].includes(tone) ? tone : "neutral";
+  if (state.modal.open && state.modal.id === EA_FACTORY_PROP_ID) {
+    renderWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()), state.propReports[EA_FACTORY_PROP_ID] || {});
+  }
+}
+
+async function runEaFactoryRequest(stageId, request, successMessage) {
+  if (state.modal.eaFactory.inFlight) return null;
+  setEaFactoryActionState({ inFlight: true, stageId, message: "กำลังส่งคำขอไปยัง Local Runner", tone: "working" });
+  try {
+    const response = await request();
+    if (response?.mission) mergeBackendMission(response.mission);
+    mergeEaFactoryReadModel(response);
+    await loadPropReport(EA_FACTORY_PROP_ID);
+    await loadEaFactoryReadModel();
+    setEaFactoryActionState({ inFlight: false, stageId, message: safeDashboardDisplayText(response?.messageTh, successMessage), tone: "success" });
+    return response;
+  } catch (error) {
+    setEaFactoryActionState({
+      inFlight: false,
+      stageId,
+      message: safeDashboardDisplayText(error?.message, "Local Runner ยังไม่รับคำขอนี้ กรุณาตรวจ Gate และลองใหม่"),
+      tone: "error",
+    });
+    return null;
+  }
+}
+
+async function syncEaFactoryGoogleSheet() {
+  const idempotencyKey = createWorkflowIdempotencyKey();
+  const response = await runEaFactoryRequest("sheet_sync", () => postJson(
+    "/api/props/right_server_racks/ea-factory/sources/google-sheet/sync",
+    { idempotencyKey },
+  ), "Backend อ่าน Google Sheets และอัปเดต Strategy Record แล้ว");
+  if (response) await loadResearchSheetHub({ force: true });
+  return response;
+}
+
+async function createEaFactoryBuild(sourceRecordId, platform, brief) {
+  const normalizedPlatform = normalizeEaFactoryPlatform(platform);
+  if (!sourceRecordId || !normalizedPlatform) return null;
+  state.modal.eaFactory.selectedBuildId = "";
+  state.modal.eaFactory.selectedPlatform = normalizedPlatform;
+  const idempotencyKey = createWorkflowIdempotencyKey();
+  const response = await runEaFactoryRequest("create_build", () => postJson(
+    "/api/props/right_server_racks/ea-factory/builds",
+    {
+      sourceRecordId,
+      platform: normalizedPlatform,
+      brief: String(brief || "").trim().slice(0, 900),
+      idempotencyKey,
+    },
+  ), "สร้าง Build แล้ว ตรวจ Strategy Spec ก่อนกดทำขั้นถัดไป");
+  const buildId = String(response?.build?.id || response?.build?.buildId || "").trim();
+  if (buildId) state.modal.eaFactory.selectedBuildId = buildId;
+  return response;
+}
+
+async function advanceEaFactoryStage(uiStageId) {
+  const report = state.propReports[EA_FACTORY_PROP_ID] || {};
+  const dashboard = normalizeWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()), report);
+  const domain = dashboard.domainData.eaFactory;
+  const stage = domain.stages.find((item) => item.id === uiStageId);
+  const buildId = domain.activeBuild?.id;
+  if (!buildId || !stage?.backendId || !stage.canRun || domain.currentStageId !== uiStageId) return null;
+  const idempotencyKey = createWorkflowIdempotencyKey();
+  return runEaFactoryRequest(uiStageId, () => postJson(
+    `/api/props/right_server_racks/ea-factory/builds/${encodeURIComponent(buildId)}/advance`,
+    { stageId: stage.backendId, idempotencyKey },
+  ), `Local Runner รับขั้น ${EA_FACTORY_STAGE_COPY[uiStageId]?.titleTh || uiStageId} แล้ว`);
+}
+
+async function selectEaFactoryTerminal(candidateId) {
+  const domain = normalizeWorkflowDashboard(
+    getModalSubject(),
+    getPropertyRole(getModalSubject()),
+    state.propReports[EA_FACTORY_PROP_ID] || {},
+  ).domainData.eaFactory;
+  const candidate = domain.terminals.find((item) => item.id === candidateId && item.platform === domain.activeBuild?.platform);
+  if (!candidate) return null;
+  state.modal.eaFactory.selectedTerminalId = candidate.id;
+  return runEaFactoryRequest("terminal_select", () => postJson(
+    "/api/integrations/metatrader/select",
+    { propId: EA_FACTORY_PROP_ID, candidateId: candidate.id },
+  ), `Backend ยืนยัน ${candidate.label} เป็น Terminal เป้าหมายแล้ว`);
+}
+
 function connectionHubStatusGroup(status) {
   const normalized = normalizeConnectionStatus(status);
   if (normalized === "connected") return "ready";
@@ -17535,8 +23930,1752 @@ function renderVpsHqPanel(container, tabId, domain) {
   container.appendChild(section);
 }
 
+function tradingSystemFamilyLabel(value) {
+  return ({
+    trend_following: "Trend Following",
+    breakout: "Breakout",
+    mean_reversion: "Mean Reversion",
+    momentum: "Momentum",
+    scalping: "Scalping",
+    swing: "Swing",
+    grid: "Grid",
+    martingale: "Martingale",
+    hedging: "Hedging",
+    price_action: "Price Action",
+    arbitrage: "Arbitrage",
+    news: "News",
+    hybrid: "Hybrid",
+    other: "Other",
+  }[String(value || "").toLowerCase()] || safeDashboardDisplayText(value, "ไม่ระบุตระกูล"));
+}
+
+function appendTradingSystemList(container, titleText, values, { ordered = false } = {}) {
+  const rows = Array.isArray(values) ? values : [];
+  const section = document.createElement("section");
+  const title = document.createElement("h6");
+  const list = document.createElement(ordered ? "ol" : "ul");
+  section.className = "workflow-trading-system-section";
+  title.textContent = titleText;
+  rows.forEach((row) => {
+    const item = document.createElement("li");
+    item.textContent = typeof row === "object" ? safeDashboardDisplayText(row?.rule, "") : safeDashboardDisplayText(row, "");
+    if (item.textContent) list.appendChild(item);
+  });
+  if (!list.childElementCount) {
+    const item = document.createElement("li");
+    item.textContent = "แหล่งสาธารณะยังไม่ระบุ";
+    list.appendChild(item);
+  }
+  section.append(title, list);
+  container.appendChild(section);
+}
+
+function createTradingSystemCard(system, index) {
+  const card = document.createElement("article");
+  const heading = document.createElement("header");
+  const headingCopy = document.createElement("div");
+  const number = document.createElement("span");
+  const title = document.createElement("h5");
+  const badges = document.createElement("div");
+  const family = document.createElement("strong");
+  const verified = document.createElement("strong");
+  card.className = "workflow-trading-system-card";
+  heading.className = "workflow-trading-system-heading";
+  number.textContent = `ระบบที่ ${index + 1}`;
+  title.textContent = system.systemName;
+  family.textContent = tradingSystemFamilyLabel(system.strategyFamily);
+  family.dataset.kind = "family";
+  verified.textContent = system.verificationStatus === "verified" ? "ตรวจหลักฐานแล้ว" : "ตรวจได้บางส่วน";
+  verified.dataset.kind = "verification";
+  badges.append(family, verified);
+  headingCopy.append(number, title);
+  heading.append(headingCopy, badges);
+
+  const identity = document.createElement("div");
+  const creator = document.createElement("p");
+  const creatorLink = createWorkflowExternalSource(system.creator.sourceUrl, "เปิดหลักฐานชื่อผู้สร้าง");
+  identity.className = "workflow-trading-system-identity";
+  creator.textContent = `ผู้สร้าง/ผู้เผยแพร่: ${system.creator.name} • ${system.creator.role}`;
+  identity.appendChild(creator);
+  if (creatorLink) identity.appendChild(creatorLink);
+
+  const facts = document.createElement("dl");
+  facts.className = "workflow-trading-system-facts";
+  [
+    ["ตลาด", system.market],
+    ["สัญลักษณ์", system.symbols.join(" • ") || "ไม่ระบุ"],
+    ["Timeframe", system.timeframes.join(" • ") || "ไม่ระบุ"],
+    ["Session", system.sessions.join(" • ") || "ไม่ระบุ"],
+    ["ตรวจข้อมูล", system.checkedAt ? formatThaiDateTime(system.checkedAt) : "Backend ไม่ส่งเวลา"],
+  ].forEach(([labelText, valueText]) => {
+    const row = document.createElement("div");
+    const dt = document.createElement("dt");
+    const dd = document.createElement("dd");
+    dt.textContent = labelText;
+    dd.textContent = valueText;
+    row.append(dt, dd);
+    facts.appendChild(row);
+  });
+
+  const rules = document.createElement("div");
+  rules.className = "workflow-trading-system-rules";
+  appendTradingSystemList(rules, "เงื่อนไขเตรียมระบบ", system.setupConditions);
+  appendTradingSystemList(rules, "ขั้นตอนเข้า", system.entrySteps, { ordered: true });
+  appendTradingSystemList(rules, "ขั้นตอนออก", system.exitSteps, { ordered: true });
+  appendTradingSystemList(rules, "การจัดการออเดอร์", system.tradeManagementSteps, { ordered: true });
+
+  const risk = document.createElement("section");
+  const riskTitle = document.createElement("h6");
+  const riskFacts = document.createElement("dl");
+  risk.className = "workflow-trading-system-risk";
+  riskTitle.textContent = "Money & Risk Management";
+  [
+    ["Position sizing", system.riskManagement.positionSizing],
+    ["Stop loss", system.riskManagement.stopLoss],
+    ["Take profit", system.riskManagement.takeProfit],
+    ["ความเสี่ยง/ครั้ง", system.riskManagement.maxRiskPerTrade],
+    ["จำนวนสถานะ", system.riskManagement.maxOpenPositions],
+    ["Daily/Equity stop", system.riskManagement.dailyOrEquityStop],
+    ["Recovery", system.riskManagement.recoveryMethod],
+  ].forEach(([labelText, valueText]) => {
+    const row = document.createElement("div");
+    const dt = document.createElement("dt");
+    const dd = document.createElement("dd");
+    dt.textContent = labelText;
+    dd.textContent = valueText;
+    row.append(dt, dd);
+    riskFacts.appendChild(row);
+  });
+  risk.append(riskTitle, riskFacts);
+
+  const notes = document.createElement("div");
+  notes.className = "workflow-trading-system-notes";
+  appendTradingSystemList(notes, "เหมาะกับ", system.suitableFor);
+  appendTradingSystemList(notes, "ความเสี่ยงและข้อจำกัด", system.risksAndLimitations);
+  appendTradingSystemList(notes, "ข้อมูลที่ยังไม่พบ", system.unknowns);
+
+  const sources = document.createElement("footer");
+  const sourceTitle = document.createElement("strong");
+  const sourceLinks = document.createElement("div");
+  sources.className = "workflow-trading-system-sources";
+  sourceTitle.textContent = "แหล่งข้อมูลสาธารณะ 2 แห่ง";
+  sourceLinks.className = "workflow-trading-system-source-links";
+  system.sources.forEach((url, sourceIndex) => {
+    const link = createWorkflowExternalSource(
+      url,
+      sourceIndex === 0 ? system.sourceTitle : `หลักฐานยืนยันแหล่งที่ ${sourceIndex + 1}`,
+    );
+    if (link) sourceLinks.appendChild(link);
+  });
+  sources.append(sourceTitle, sourceLinks);
+  card.append(heading, identity, facts, rules, risk, notes, sources);
+  return card;
+}
+
+function renderTradingSystemPortalPanel(container, tabId, domain) {
+  const section = document.createElement("section");
+  section.className = "workflow-domain-panel workflow-trading-system-portal";
+  if (tabId === "schedule") {
+    const schedule = domain?.schedule || normalizeRadarSchedule();
+    const facts = document.createElement("dl");
+    facts.className = "workflow-trading-system-schedule";
+    [
+      ["สถานะนโยบาย", "เปิดถาวรโดย Backend"],
+      ["เวลา", "09:00 น."],
+      ["เขตเวลา", "Asia/Bangkok"],
+      ["เพดาน", "สูงสุด 1 รอบต่อวัน"],
+      ["รันล่าสุด", schedule.lastRunAt ? formatThaiDateTime(schedule.lastRunAt) : "ยังไม่เคยรัน"],
+      ["รอบถัดไป", schedule.nextRunAt ? formatThaiDateTime(schedule.nextRunAt) : "Backend ยังไม่ส่งเวลา"],
+      ["ผลล่าสุด", safeDashboardDisplayText(schedule.lastRunStatus, "รอสถานะจาก Backend")],
+    ].forEach(([labelText, valueText]) => {
+      const row = document.createElement("div");
+      const dt = document.createElement("dt");
+      const dd = document.createElement("dd");
+      dt.textContent = labelText;
+      dd.textContent = valueText;
+      row.append(dt, dd);
+      facts.appendChild(row);
+    });
+    section.appendChild(facts);
+    container.appendChild(section);
+    return;
+  }
+  const heading = document.createElement("header");
+  const copy = document.createElement("div");
+  const kicker = document.createElement("span");
+  const title = document.createElement("h4");
+  const detail = document.createElement("p");
+  const count = document.createElement("strong");
+  heading.className = "workflow-trading-system-portal-heading";
+  kicker.textContent = "GLOBAL TRADING SYSTEM RADAR";
+  title.textContent = "ระบบเทรดจากโลกออนไลน์รอบล่าสุด";
+  detail.textContent = domain?.reportUpdatedAt
+    ? `อัปเดต ${formatThaiDateTime(domain.reportUpdatedAt)} • 3 ระบบต้องต่างตระกูลและมีหลักฐาน 2 แห่งต่อระบบ`
+    : "แสดงเฉพาะผลที่ Backend ตรวจ schema และหลักฐานแล้ว";
+  count.textContent = `${domain?.systems?.length || 0}/3 ระบบ`;
+  copy.append(kicker, title, detail);
+  heading.append(copy, count);
+  section.appendChild(heading);
+  if (!Array.isArray(domain?.systems) || domain.systems.length !== 3) {
+    section.appendChild(createWorkflowTruthEmpty("ยังไม่มีผลระบบเทรดครบ 3 ระบบที่ผ่านการตรวจหลักฐานจาก Backend"));
+  } else {
+    const grid = document.createElement("div");
+    grid.className = "workflow-trading-system-grid";
+    domain.systems.forEach((system, index) => grid.appendChild(createTradingSystemCard(system, index)));
+    section.appendChild(grid);
+  }
+  container.appendChild(section);
+}
+
+function rerenderTradingResearchLab() {
+  const subject = getModalSubject();
+  if (!subject || subject.id !== TRADING_RESEARCH_LAB_PROP_ID) return;
+  renderWorkflowDashboard(subject, getPropertyRole(subject), state.propReports[subject.id] || {});
+}
+
+function createTradingResearchLabHeader(domain, session) {
+  const header = document.createElement("header");
+  const copy = document.createElement("div");
+  const eyebrow = document.createElement("span");
+  const title = document.createElement("h4");
+  const detail = document.createElement("p");
+  const status = document.createElement("strong");
+  const selectorLabel = document.createElement("label");
+  const selectorTitle = document.createElement("span");
+  const selector = document.createElement("select");
+  header.className = "workflow-research-lab-heading";
+  eyebrow.textContent = "DEEP TRADING SYSTEM RESEARCH";
+  title.textContent = "คลังวิจัยระบบเทรดเชิงลึก";
+  detail.textContent = domain.catalogLoading
+    ? "กำลังโหลดคลังระบบที่ Backend ตรวจหลักฐานแล้ว"
+    : (domain.catalogError
+        ? "ยังโหลดคลังระบบจาก Local Runner ไม่สำเร็จ"
+        : (domain.sourceReportUpdatedAt
+            ? "ข้อมูลจาก Backend Report • อัปเดต " + formatThaiDateTime(domain.sourceReportUpdatedAt)
+            : "แสดงเฉพาะระบบจาก Report ที่ Backend ตรวจสัญญาแล้ว"));
+  status.textContent = domain.catalogLoading ? "กำลังโหลด" : String(domain.systems.length) + "/3 ระบบ";
+  status.dataset.tone = domain.backendReady ? "ready" : (domain.catalogLoading ? "loading" : "waiting");
+  copy.append(eyebrow, title, detail);
+  header.append(copy, status);
+  selectorLabel.className = "workflow-research-system-selector";
+  selectorTitle.textContent = "ระบบที่กำลังศึกษา";
+  selector.setAttribute("aria-label", "เลือกระบบเทรดสำหรับวิจัย");
+  selector.disabled = !domain.backendReady;
+  domain.systems.forEach((system) => {
+    const option = document.createElement("option");
+    option.value = system.id;
+    option.textContent = system.systemName + " • " + tradingSystemFamilyLabel(system.strategyFamily);
+    option.selected = system.id === session.selectedSystemId;
+    selector.appendChild(option);
+  });
+  if (!selector.childElementCount) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = domain.catalogLoading
+      ? "กำลังโหลดระบบจาก Backend..."
+      : (domain.catalogError ? "โหลดคลังระบบไม่สำเร็จ" : "รอระบบที่ Backend ตรวจแล้วครบ 3 ระบบ");
+    selector.appendChild(option);
+  }
+  selector.addEventListener("change", () => {
+    session.selectedSystemId = String(selector.value || "");
+    session.backtest = null;
+    session.backtestMessage = "";
+    rerenderTradingResearchLab();
+  });
+  selectorLabel.append(selectorTitle, selector);
+  const wrapper = document.createElement("div");
+  wrapper.className = "workflow-research-lab-header";
+  wrapper.append(header, selectorLabel);
+  return wrapper;
+}
+
+function createTradingResearchNotice(titleText, detailText, tone = "neutral") {
+  const notice = document.createElement("aside");
+  const title = document.createElement("strong");
+  const detail = document.createElement("p");
+  notice.className = "workflow-research-notice";
+  notice.dataset.tone = tone;
+  if (tone === "loading") {
+    notice.setAttribute("role", "status");
+    notice.setAttribute("aria-live", "polite");
+  } else if (tone === "error") {
+    notice.setAttribute("role", "alert");
+  }
+  title.textContent = titleText;
+  detail.textContent = detailText;
+  notice.append(title, detail);
+  return notice;
+}
+
+function tradingResearchReportsForSystem(domain = {}, system = {}) {
+  const sourceReportId = String(domain.sourceReportId || "").trim();
+  const sourceRecordId = String(system.id || "").trim();
+  if (!sourceReportId || !sourceRecordId) return [];
+  return (Array.isArray(domain.researchReports) ? domain.researchReports : []).filter((report) => {
+    const source = report?.workflowContext?.source;
+    return String(source?.reportId || "").trim() === sourceReportId
+      && String(source?.recordId || "").trim() === sourceRecordId;
+  });
+}
+
+function renderTradingResearchDetail(section, system, domain) {
+  const source = document.createElement("div");
+  const sourceTitle = document.createElement("strong");
+  const sourceCopy = document.createElement("span");
+  source.className = "workflow-research-source-lineage";
+  sourceTitle.textContent = "สายข้อมูล";
+  sourceCopy.textContent = domain.sourceReportId
+    ? domain.sourceReportTitle + " • Report " + domain.sourceReportId
+    : "Backend ยังไม่ส่ง Report ระบบเทรดที่ใช้เป็นต้นทาง";
+  source.append(sourceTitle, sourceCopy);
+  section.append(
+    createTradingResearchNotice(
+      "ข้อมูลวิจัยจาก Backend เท่านั้น",
+      "Frontend ไม่ถอด JSON string ที่ถูกตัด ไม่เติมกฎเอง และไม่เปลี่ยนคำกล่าวอ้างจากแหล่งข้อมูลเป็นผลทดสอบ",
+      "truth",
+    ),
+    source,
+  );
+  if (!system) {
+    section.appendChild(createWorkflowTruthEmpty("ยังไม่มีระบบครบ 3 ระบบที่ผ่าน contract จึงไม่เปิดเครื่องมือวิจัย"));
+    return;
+  }
+  const selectedIndex = Math.max(0, domain.systems.findIndex((item) => item.id === system.id));
+  section.appendChild(createTradingSystemCard(system, selectedIndex));
+  if (system.indicatorSettings.length || system.publicUsers.length) {
+    const supporting = document.createElement("div");
+    supporting.className = "workflow-research-supporting-grid";
+    if (system.indicatorSettings.length) {
+      const card = document.createElement("article");
+      const title = document.createElement("h5");
+      const list = document.createElement("ul");
+      title.textContent = "Indicator และค่าที่แหล่งข้อมูลระบุ";
+      system.indicatorSettings.forEach((indicator) => {
+        const item = document.createElement("li");
+        item.textContent = indicator.name + ": " + indicator.settings + (indicator.role ? " • " + indicator.role : "");
+        list.appendChild(item);
+      });
+      card.append(title, list);
+      supporting.appendChild(card);
+    }
+    if (system.publicUsers.length) {
+      const card = document.createElement("article");
+      const title = document.createElement("h5");
+      const links = document.createElement("div");
+      title.textContent = "ผู้ใช้งานสาธารณะที่ Backend อ้างอิง";
+      links.className = "workflow-research-public-users";
+      system.publicUsers.forEach((user) => {
+        const link = createWorkflowExternalSource(user.sourceUrl, user.name);
+        if (link) links.appendChild(link);
+      });
+      card.append(title, links);
+      supporting.appendChild(card);
+    }
+    section.appendChild(supporting);
+  }
+  const matchingResearch = tradingResearchReportsForSystem(domain, system)[0] || null;
+  if (matchingResearch) {
+    const result = document.createElement("article");
+    const title = document.createElement("h5");
+    const summary = document.createElement("p");
+    const provenance = document.createElement("p");
+    const findings = document.createElement("ul");
+    const sources = document.createElement("div");
+    result.className = "workflow-research-deep-result";
+    title.textContent = "ผลวิจัยเชิงลึกจาก Agent • "
+      + (matchingResearch.updatedAt ? formatThaiDateTime(matchingResearch.updatedAt) : "รอบล่าสุด");
+    summary.textContent = safeDashboardDisplayText(
+      matchingResearch.summary,
+      "Agent ส่ง Report กลับมาแล้ว แต่ยังไม่มีบทสรุปที่แสดงได้",
+    );
+    provenance.className = "workflow-research-result-provenance";
+    provenance.textContent = [
+      matchingResearch.id ? "Report " + matchingResearch.id : "",
+      matchingResearch.linkedMissionId ? "Mission " + matchingResearch.linkedMissionId : "",
+      domain.sourceReportId ? "ต้นทาง " + domain.sourceReportId : "",
+    ].filter(Boolean).join(" • ") || "Backend ยังไม่ส่งรหัสสายข้อมูล";
+    (Array.isArray(matchingResearch.findings) ? matchingResearch.findings : [])
+      .slice(0, 12)
+      .forEach((finding) => {
+        const item = document.createElement("li");
+        item.textContent = safeDashboardDisplayText(
+          typeof finding === "object" ? finding?.detail || finding?.summary || finding?.title : finding,
+          "",
+        );
+        if (item.textContent) findings.appendChild(item);
+      });
+    sources.className = "workflow-trading-system-source-links";
+    indicatorScoutSourceRows(matchingResearch.evidence).forEach((evidence) => {
+      const link = createWorkflowExternalSource(evidence.url, evidence.label);
+      if (link) sources.appendChild(link);
+    });
+    result.append(title, provenance, summary);
+    if (findings.childElementCount) result.appendChild(findings);
+    if (sources.childElementCount) result.appendChild(sources);
+    section.appendChild(result);
+  } else {
+    section.appendChild(createTradingResearchNotice(
+      "ยังไม่มี Report วิจัยเชิงลึกของระบบนี้",
+      "ตรวจชื่อระบบที่เลือกในแผงคำสั่งด้านซ้ายแล้วกด “วิจัยระบบที่เลือกต่อ” งานอ่านเว็บสาธารณะจะสร้าง Mission และเริ่มอัตโนมัติโดยไม่รอการส่งต่อหรืออนุมัติซ้ำ จากนั้นผลจะกลับมาที่ส่วนนี้",
+      "neutral",
+    ));
+  }
+}
+
+function tradingResearchMovingAverage(bars, period) {
+  return bars.map((bar, index) => {
+    const value = tradingResearchSma(bars, index, period);
+    return { timestamp: bar.timestamp, value };
+  });
+}
+
+function drawTradingResearchSimulationChart(canvas, bars, regime) {
+  if (!(canvas instanceof HTMLCanvasElement) || !Array.isArray(bars) || !bars.length) return;
+  const width = Math.max(640, Math.floor(canvas.clientWidth || 920));
+  const height = 390;
+  const ratio = Math.max(1, Math.min(2, Number(window.devicePixelRatio) || 1));
+  canvas.width = Math.floor(width * ratio);
+  canvas.height = Math.floor(height * ratio);
+  canvas.style.height = height + "px";
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  context.scale(ratio, ratio);
+  const margin = { top: 26, right: 24, bottom: 38, left: 54 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const values = bars.flatMap((bar) => [bar.high, bar.low]);
+  const low = Math.min(...values);
+  const high = Math.max(...values);
+  const range = Math.max(0.0001, high - low);
+  const x = (index) => margin.left + ((index + 0.5) / bars.length) * plotWidth;
+  const y = (value) => margin.top + ((high - value) / range) * plotHeight;
+  context.fillStyle = "#020c13";
+  context.fillRect(0, 0, width, height);
+  context.strokeStyle = "rgba(87, 133, 158, 0.2)";
+  context.lineWidth = 1;
+  context.font = "11px sans-serif";
+  context.fillStyle = "#7897a8";
+  for (let grid = 0; grid <= 4; grid += 1) {
+    const gridY = margin.top + (plotHeight * grid / 4);
+    const price = high - (range * grid / 4);
+    context.beginPath();
+    context.moveTo(margin.left, gridY);
+    context.lineTo(width - margin.right, gridY);
+    context.stroke();
+    context.fillText(price.toFixed(2), 8, gridY + 4);
+  }
+  const candleWidth = Math.max(2, Math.min(7, (plotWidth / bars.length) * 0.58));
+  bars.forEach((bar, index) => {
+    const candleX = x(index);
+    const rising = bar.close >= bar.open;
+    context.strokeStyle = rising ? "#25d77a" : "#ff5c74";
+    context.fillStyle = rising ? "#169c5a" : "#bf3f54";
+    context.beginPath();
+    context.moveTo(candleX, y(bar.high));
+    context.lineTo(candleX, y(bar.low));
+    context.stroke();
+    const bodyTop = y(Math.max(bar.open, bar.close));
+    const bodyHeight = Math.max(1.5, Math.abs(y(bar.open) - y(bar.close)));
+    context.fillRect(candleX - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+  });
+  const drawAverage = (period, color) => {
+    const average = tradingResearchMovingAverage(bars, period);
+    context.strokeStyle = color;
+    context.lineWidth = 1.5;
+    context.beginPath();
+    let started = false;
+    average.forEach((point, index) => {
+      if (point.value === null) return;
+      if (!started) {
+        context.moveTo(x(index), y(point.value));
+        started = true;
+      } else context.lineTo(x(index), y(point.value));
+    });
+    context.stroke();
+    return average;
+  };
+  const fast = drawAverage(10, "#f5c84c");
+  const slow = drawAverage(24, "#48a8ff");
+  const signals = [];
+  for (let index = 25; index < bars.length; index += 1) {
+    const previousFast = fast[index - 1]?.value;
+    const previousSlow = slow[index - 1]?.value;
+    const currentFast = fast[index]?.value;
+    const currentSlow = slow[index]?.value;
+    if ([previousFast, previousSlow, currentFast, currentSlow].some((value) => value === null)) continue;
+    if (previousFast <= previousSlow && currentFast > currentSlow) signals.push({ index, side: "ENTRY" });
+    else if (previousFast >= previousSlow && currentFast < currentSlow) signals.push({ index, side: "EXIT" });
+  }
+  context.font = "bold 9px sans-serif";
+  signals.slice(0, 8).forEach((signal) => {
+    const bar = bars[signal.index];
+    const isEntry = signal.side === "ENTRY";
+    const markerY = isEntry ? y(bar.low) + 17 : y(bar.high) - 10;
+    context.fillStyle = isEntry ? "#25d77a" : "#ffb64c";
+    context.textAlign = "center";
+    context.fillText(signal.side, x(signal.index), markerY);
+  });
+  context.textAlign = "left";
+  context.fillStyle = "#d7edf7";
+  context.font = "bold 12px sans-serif";
+  context.fillText("Educational Simulation • " + regime.labelTh, margin.left, 17);
+  context.fillStyle = "#7897a8";
+  context.font = "10px sans-serif";
+  context.fillText("SMA 10", width - 132, 17);
+  context.fillStyle = "#48a8ff";
+  context.fillText("SMA 24", width - 78, 17);
+  context.fillStyle = "#7897a8";
+  context.fillText("แท่งจำลองลำดับ 1–" + bars.length, margin.left, height - 12);
+}
+
+function renderTradingResearchSimulation(section, system, session) {
+  const regime = TRADING_RESEARCH_SIMULATION_REGIMES.find((item) => item.id === session.simulationRegime)
+    || TRADING_RESEARCH_SIMULATION_REGIMES[0];
+  section.appendChild(createTradingResearchNotice(
+    "EDUCATIONAL SIMULATION • ไม่ใช่ผลตลาดจริง",
+    "แท่งราคา จุด ENTRY/EXIT และเส้น SMA ในแท็บนี้สร้างจากสูตร deterministic เพื่ออธิบายสภาวะตลาดเท่านั้น ไม่ใช่ Backtest, Forecast หรือผลของระบบที่เลือก",
+    "simulation",
+  ));
+  const controls = document.createElement("div");
+  controls.className = "workflow-research-regime-controls";
+  controls.setAttribute("role", "group");
+  controls.setAttribute("aria-label", "เลือกสภาวะตลาดสำหรับกราฟจำลองเชิงการศึกษา");
+  TRADING_RESEARCH_SIMULATION_REGIMES.forEach((item) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.researchRegime = item.id;
+    button.className = "workflow-research-regime-button";
+    button.classList.toggle("active", item.id === regime.id);
+    button.setAttribute("aria-pressed", item.id === regime.id ? "true" : "false");
+    button.textContent = item.labelTh;
+    button.addEventListener("click", () => {
+      session.simulationRegime = item.id;
+      rerenderTradingResearchLab();
+    });
+    controls.appendChild(button);
+  });
+  const chartCard = document.createElement("article");
+  const canvas = document.createElement("canvas");
+  const explanation = document.createElement("div");
+  const explanationTitle = document.createElement("h5");
+  const explanationCopy = document.createElement("p");
+  const explanationList = document.createElement("ul");
+  chartCard.className = "workflow-research-chart-card";
+  canvas.className = "workflow-research-candlestick-chart";
+  canvas.setAttribute("role", "img");
+  canvas.setAttribute("aria-label", "กราฟแท่งเทียนจำลองเชิงการศึกษาในสภาวะ " + regime.labelTh);
+  explanation.className = "workflow-research-chart-explanation";
+  explanationTitle.textContent = "วิธีอ่านตัวอย่าง";
+  explanationCopy.textContent = regime.explanationTh;
+  [
+    "SMA 10 และ SMA 24 เป็น Indicator ตัวอย่างของกราฟจำลอง ไม่ใช่ค่าที่อ้างว่าเป็นของระบบนี้",
+    "ENTRY/EXIT บนกราฟเป็น Marker สาธิตจากเส้นตัวอย่าง; กฎจริงของระบบที่เลือกแสดงแยกด้านล่าง",
+    "ไม่มีการคำนวณกำไร, Win rate หรือ Drawdown จากข้อมูลจำลองนี้",
+  ].forEach((copy) => {
+    const item = document.createElement("li");
+    item.textContent = copy;
+    explanationList.appendChild(item);
+  });
+  explanation.append(explanationTitle, explanationCopy, explanationList);
+  chartCard.append(canvas, explanation);
+  section.append(controls, chartCard);
+  if (system) {
+    const ruleGuide = document.createElement("article");
+    const guideTitle = document.createElement("h5");
+    const indicatorList = document.createElement("ul");
+    const guideGrid = document.createElement("div");
+    ruleGuide.className = "workflow-research-chart-rule-guide";
+    guideTitle.textContent = "กฎที่แหล่งข้อมูลระบุสำหรับ " + system.systemName;
+    const indicators = Array.isArray(system.indicatorSettings) ? system.indicatorSettings : [];
+    if (indicators.length) {
+      indicators.forEach((indicator) => {
+        const item = document.createElement("li");
+        item.textContent = indicator.name + " • " + indicator.settings
+          + (indicator.role ? " • หน้าที่ " + indicator.role : "");
+        indicatorList.appendChild(item);
+      });
+    } else {
+      const item = document.createElement("li");
+      item.textContent = "แหล่งสาธารณะยังไม่ระบุ Indicator ที่วาดซ้ำได้";
+      indicatorList.appendChild(item);
+    }
+    guideGrid.className = "workflow-trading-system-rules";
+    appendTradingSystemList(guideGrid, "จุดเข้า Order ตามแหล่งข้อมูล", system.entrySteps, { ordered: true });
+    appendTradingSystemList(guideGrid, "จุดออก Order ตามแหล่งข้อมูล", system.exitSteps, { ordered: true });
+    appendTradingSystemList(guideGrid, "การแก้ไม้ / เพิ่มไม้ / จัดการ Order", system.tradeManagementSteps, { ordered: true });
+    ruleGuide.append(guideTitle, indicatorList, guideGrid);
+    section.appendChild(ruleGuide);
+  }
+  const bars = generateTradingResearchSimulationBars(system?.id || "no-system", regime.id);
+  const draw = () => drawTradingResearchSimulationChart(canvas, bars, regime);
+  if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(draw);
+  else draw();
+}
+
+function createTradingResearchDatasetSummary(session) {
+  const summary = document.createElement("dl");
+  summary.className = "workflow-research-dataset-summary";
+  summary.setAttribute("role", "status");
+  summary.setAttribute("aria-live", "polite");
+  const dataset = session.dataset;
+  const rows = dataset ? [
+    ["ไฟล์", dataset.fileName],
+    ["รูปแบบ", dataset.format],
+    ["จำนวนแท่ง", Number(dataset.rows.length).toLocaleString("th-TH")],
+    ["ช่วงข้อมูล", tradingResearchDateKey(dataset.firstTimestamp) + " ถึง " + tradingResearchDateKey(dataset.lastTimestamp)],
+  ] : [
+    ["สถานะ", session.datasetMessage || "ยังไม่ได้เลือกไฟล์ OHLC"],
+  ];
+  rows.forEach(([labelText, valueText]) => {
+    const row = document.createElement("div");
+    const dt = document.createElement("dt");
+    const dd = document.createElement("dd");
+    dt.textContent = labelText;
+    dd.textContent = valueText;
+    row.append(dt, dd);
+    summary.appendChild(row);
+  });
+  return summary;
+}
+
+function tradingResearchResultMetric(labelText, valueText) {
+  const card = document.createElement("div");
+  const label = document.createElement("span");
+  const value = document.createElement("strong");
+  label.textContent = labelText;
+  value.textContent = valueText;
+  card.append(label, value);
+  return card;
+}
+
+function renderTradingResearchBacktestResult(container, result) {
+  if (!result?.ok) return;
+  const panel = document.createElement("section");
+  const heading = document.createElement("header");
+  const title = document.createElement("h5");
+  const provenance = document.createElement("p");
+  const metrics = document.createElement("div");
+  const assumptions = document.createElement("ul");
+  panel.className = "workflow-research-backtest-result";
+  panel.setAttribute("role", "region");
+  panel.setAttribute("aria-label", "ผล Backtest จากไฟล์ OHLC ที่ผ่านการตรวจ");
+  title.textContent = "ผลจากไฟล์ OHLC ที่อัปโหลด";
+  provenance.textContent = result.fileName + " • " + result.timeframe + " • "
+    + result.startDate + " ถึง " + result.endDate + " • " + result.strategyLabel
+    + (result.fileSha256 ? " • SHA-256 " + result.fileSha256.slice(0, 12) : "");
+  heading.append(title, provenance);
+  metrics.className = "workflow-research-backtest-metrics";
+  metrics.append(
+    tradingResearchResultMetric("จำนวน Trade", String(result.metrics.tradeCount)),
+    tradingResearchResultMetric("Win rate", result.metrics.winRatePct.toFixed(2) + "%"),
+    tradingResearchResultMetric("ผลตอบแทนรวม", result.metrics.totalReturnPct.toFixed(2) + "%"),
+    tradingResearchResultMetric("Max drawdown", result.metrics.maxDrawdownPct.toFixed(2) + "%"),
+    tradingResearchResultMetric("เฉลี่ยต่อ Trade", result.metrics.averageTradePct.toFixed(2) + "%"),
+  );
+  result.assumptions.forEach((copy) => {
+    const item = document.createElement("li");
+    item.textContent = copy;
+    assumptions.appendChild(item);
+  });
+  panel.append(heading, metrics, assumptions);
+  container.appendChild(panel);
+}
+
+function renderTradingResearchBacktest(section, system, session) {
+  const strategy = compileTradingResearchStrategy(system || {});
+  section.appendChild(createTradingResearchNotice(
+    "อ่านไฟล์ด้วย Local Runner ในเครื่องนี้เท่านั้น",
+    "CSV/XLSX ถูกส่งจากหน้าจอนี้ไปยัง 127.0.0.1 เพื่ออ่านในหน่วยความจำ ไม่ส่งอินเทอร์เน็ต ไม่บันทึกไฟล์ และไม่สั่ง MT4/MT5; ปิดหน้าหรือรีเฟรชแล้วข้อมูลจะหาย",
+    "privacy",
+  ));
+  section.appendChild(createTradingResearchNotice(
+    strategy.ok ? "กฎพร้อมคำนวณแบบ Fail-closed" : "ยังไม่เปิดคำนวณระบบนี้",
+    strategy.ok
+      ? "แปลงกฎได้ครบเป็น " + strategy.label + " • หากไฟล์, Timeframe หรือช่วงวันที่ไม่ผ่าน การคำนวณจะหยุดทันที"
+      : strategy.error,
+    strategy.ok ? "ready" : "blocked",
+  ));
+  const form = document.createElement("form");
+  const uploadLabel = document.createElement("label");
+  const uploadTitle = document.createElement("span");
+  const upload = document.createElement("input");
+  const dependency = document.createElement("small");
+  const timeframeLabel = document.createElement("label");
+  const timeframeTitle = document.createElement("span");
+  const timeframe = document.createElement("select");
+  const startLabel = document.createElement("label");
+  const startTitle = document.createElement("span");
+  const start = document.createElement("input");
+  const endLabel = document.createElement("label");
+  const endTitle = document.createElement("span");
+  const end = document.createElement("input");
+  const submit = document.createElement("button");
+  form.className = "workflow-research-backtest-form";
+  form.noValidate = true;
+  uploadLabel.className = "workflow-research-file-control";
+  uploadTitle.textContent = "อัปโหลด OHLC";
+  upload.type = "file";
+  upload.accept = ".csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  upload.dataset.researchOhlcFile = "true";
+  dependency.textContent = "CSV และ XLSX พร้อมใช้งานผ่าน Local Runner • สูงสุด 5 MB • ต้องมี Date/DateTime/Timestamp, Open, High, Low, Close";
+  uploadLabel.append(uploadTitle, upload, dependency);
+  timeframeLabel.className = "workflow-research-field";
+  timeframeTitle.textContent = "Timeframe ของไฟล์";
+  Object.keys(TRADING_RESEARCH_TIMEFRAME_MS).forEach((value) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    option.selected = value === session.timeframe;
+    timeframe.appendChild(option);
+  });
+  timeframeLabel.append(timeframeTitle, timeframe);
+  startLabel.className = "workflow-research-field";
+  startTitle.textContent = "เริ่มวันที่";
+  start.type = "date";
+  start.value = session.startDate;
+  start.disabled = !session.dataset;
+  startLabel.append(startTitle, start);
+  endLabel.className = "workflow-research-field";
+  endTitle.textContent = "ถึงวันที่";
+  end.type = "date";
+  end.value = session.endDate;
+  end.disabled = !session.dataset;
+  endLabel.append(endTitle, end);
+  submit.type = "submit";
+  submit.className = "workflow-research-run-button";
+  submit.disabled = !session.dataset || !strategy.ok || session.datasetStatus === "loading";
+  submit.textContent = session.datasetStatus === "loading" ? "กำลังตรวจไฟล์..." : "เริ่ม Backtest จากข้อมูลจริง";
+  form.append(uploadLabel, timeframeLabel, startLabel, endLabel, submit);
+  upload.addEventListener("change", async () => {
+    const file = upload.files?.[0] || null;
+    session.datasetStatus = "loading";
+    session.datasetMessage = "กำลังอ่านและตรวจโครงสร้าง OHLC";
+    session.dataset = null;
+    session.backtest = null;
+    rerenderTradingResearchLab();
+    const parsed = await readTradingResearchOhlcFile(file, timeframe.value);
+    if (!parsed.ok) {
+      session.datasetStatus = "error";
+      session.datasetMessage = parsed.error;
+      rerenderTradingResearchLab();
+      return;
+    }
+    const firstTimestamp = parsed.rows[0].timestamp;
+    const lastTimestamp = parsed.rows.at(-1).timestamp;
+    const earliestAllowed = lastTimestamp - TRADING_RESEARCH_MAX_RANGE_MS + (24 * 60 * 60 * 1000);
+    session.dataset = {
+      fileName: String(file.name || "OHLC"),
+      format: parsed.format,
+      rows: parsed.rows,
+      fileSha256: parsed.fileSha256 || "",
+      firstTimestamp,
+      lastTimestamp,
+    };
+    session.datasetStatus = "ready";
+    session.datasetMessage = "ตรวจไฟล์ผ่านแล้ว";
+    session.startDate = tradingResearchDateKey(Math.max(firstTimestamp, earliestAllowed));
+    session.endDate = tradingResearchDateKey(lastTimestamp);
+    rerenderTradingResearchLab();
+  });
+  const invalidateResult = () => {
+    session.timeframe = timeframe.value;
+    session.startDate = start.value;
+    session.endDate = end.value;
+    session.backtest = null;
+    session.backtestMessage = "";
+  };
+  timeframe.addEventListener("change", invalidateResult);
+  start.addEventListener("change", invalidateResult);
+  end.addEventListener("change", invalidateResult);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    invalidateResult();
+    const range = validateTradingResearchDateRange(session.dataset?.rows, session.startDate, session.endDate);
+    if (!range.ok) {
+      session.backtestMessage = range.error;
+      rerenderTradingResearchLab();
+      return;
+    }
+    const timeframeCheck = validateTradingResearchTimeframe(range.rows, session.timeframe);
+    if (!timeframeCheck.ok) {
+      session.backtestMessage = timeframeCheck.error;
+      rerenderTradingResearchLab();
+      return;
+    }
+    const compiled = compileTradingResearchStrategy(system || {});
+    if (!compiled.ok) {
+      session.backtestMessage = compiled.error;
+      rerenderTradingResearchLab();
+      return;
+    }
+    const calculated = runTradingResearchBacktest(range.rows, compiled);
+    if (!calculated.ok) {
+      session.backtestMessage = calculated.error;
+      rerenderTradingResearchLab();
+      return;
+    }
+    session.backtest = {
+      ...calculated,
+      systemId: system.id,
+      systemName: system.systemName,
+      fileName: session.dataset.fileName,
+      timeframe: session.timeframe,
+      startDate: session.startDate,
+      endDate: session.endDate,
+      strategyLabel: compiled.label,
+      fileSha256: session.dataset.fileSha256,
+      calculatedAt: new Date().toISOString(),
+    };
+    session.backtestMessage = "";
+    rerenderTradingResearchLab();
+  });
+  section.append(form, createTradingResearchDatasetSummary(session));
+  if (session.datasetStatus === "error" || session.backtestMessage) {
+    section.appendChild(createTradingResearchNotice(
+      "ยังไม่คำนวณผล",
+      session.backtestMessage || session.datasetMessage,
+      "blocked",
+    ));
+  }
+  renderTradingResearchBacktestResult(section, session.backtest);
+}
+
+function renderTradingResearchSummary(section, system, domain, session) {
+  section.appendChild(createTradingResearchNotice(
+    "REPORT ที่ไม่สร้างตัวเลขทดแทน",
+    "แท็บนี้แสดงข้อมูลจาก Backend Report และผลที่คำนวณจากไฟล์ OHLC ที่ผ่านการตรวจเท่านั้น กราฟ Educational Simulation จะไม่ถูกนับเป็นผลทดสอบ",
+    "truth",
+  ));
+  if (!system) {
+    section.appendChild(createWorkflowTruthEmpty("ยังไม่มีระบบจาก Backend Report สำหรับสร้างสรุป"));
+    return;
+  }
+  const overview = document.createElement("article");
+  const title = document.createElement("h5");
+  const facts = document.createElement("dl");
+  overview.className = "workflow-research-report-overview";
+  title.textContent = system.systemName;
+  const selectedResearchReports = tradingResearchReportsForSystem(domain, system);
+  [
+    ["แหล่งระบบ", domain.sourceReportTitle],
+    ["Report ID", domain.sourceReportId || "Backend ยังไม่ส่ง"],
+    ["ผู้สร้าง/ผู้เผยแพร่", system.creator.name + " • " + system.creator.role],
+    ["ตระกูล", tradingSystemFamilyLabel(system.strategyFamily)],
+    ["ตลาด", system.market],
+    ["หลักฐานสาธารณะ", String(system.sources.length) + " แห่ง"],
+    ["ระบบวิจัยที่ Backend ส่งกลับ", String(selectedResearchReports.length) + " Report"],
+  ].forEach(([labelText, valueText]) => {
+    const row = document.createElement("div");
+    const dt = document.createElement("dt");
+    const dd = document.createElement("dd");
+    dt.textContent = labelText;
+    dd.textContent = valueText;
+    row.append(dt, dd);
+    facts.appendChild(row);
+  });
+  overview.append(title, facts);
+  section.append(overview, createTradingResearchDatasetSummary(session));
+  if (session.backtest?.ok && session.backtest.systemId === system.id) {
+    renderTradingResearchBacktestResult(section, session.backtest);
+  } else {
+    section.appendChild(createTradingResearchNotice(
+      "ยังไม่มีผล Backtest สำหรับระบบนี้",
+      session.backtestMessage || "อัปโหลด OHLC และผ่านการแปลงกฎครบก่อน จึงจะแสดง Trade, Win rate, Return และ Drawdown",
+      "blocked",
+    ));
+  }
+}
+
+function eaOptimizationLabReadableBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "ไม่ทราบขนาด";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function createEaOptimizationLabNotice(tone, titleText, detailText) {
+  const notice = document.createElement("aside");
+  const title = document.createElement("strong");
+  const detail = document.createElement("p");
+  notice.className = "ea-optimization-lab-notice";
+  notice.dataset.tone = tone;
+  notice.setAttribute("role", ["error", "warning"].includes(tone) ? "alert" : "status");
+  notice.setAttribute("aria-live", tone === "error" ? "assertive" : "polite");
+  notice.setAttribute("aria-atomic", "true");
+  title.textContent = titleText;
+  detail.textContent = detailText;
+  notice.append(title, detail);
+  return notice;
+}
+
+function createEaOptimizationLabStageHeader(tabId, domain = {}) {
+  const header = document.createElement("header");
+  const copy = document.createElement("div");
+  const eyebrow = document.createElement("span");
+  const title = document.createElement("h4");
+  const description = document.createElement("p");
+  const badge = document.createElement("strong");
+  const index = Math.max(0, EA_OPTIMIZATION_LAB_STAGE_IDS.indexOf(tabId));
+  const stageCopy = EA_OPTIMIZATION_LAB_STAGE_COPY[tabId] || EA_OPTIMIZATION_LAB_STAGE_COPY.backtest;
+  const terminalGate = getEaOptimizationLabTerminalGate(domain);
+  header.className = "ea-optimization-lab-heading";
+  eyebrow.textContent = `ขั้นที่ ${index + 1} / ${EA_OPTIMIZATION_LAB_STAGE_IDS.length} • MANUAL CASE-BY-CASE`;
+  title.textContent = stageCopy.labelTh.replace(/^\d+\s*/, "");
+  description.textContent = stageCopy.descriptionTh;
+  badge.dataset.ready = String(terminalGate.ready);
+  badge.textContent = terminalGate.ready ? "ADAPTER + TERMINAL พร้อม" : "PLAN ONLY";
+  copy.append(eyebrow, title, description);
+  header.append(copy, badge);
+  return header;
+}
+
+function getEaOptimizationLabTerminalGate(domain = {}, session = state.modal.eaOptimizationLab) {
+  const effectiveTerminalId = String(session.selectedTerminalId || domain.selectedTerminal?.candidateId || "");
+  const candidate = (Array.isArray(domain.terminals) ? domain.terminals : []).find((item) => (
+    item.candidateId === effectiveTerminalId
+    && item.detected === true
+    && (!session.platform || item.platform === session.platform)
+  )) || null;
+  const backendSelected = domain.selectedTerminal;
+  const backendBound = Boolean(
+    candidate
+    && backendSelected?.candidateId === candidate.candidateId
+    && backendSelected?.detected === true
+    && backendSelected?.platform === candidate.platform
+  );
+  return {
+    candidate,
+    effectiveTerminalId,
+    backendBound,
+    ready: domain.adapterReady === true && backendBound,
+  };
+}
+
+function renderEaOptimizationLabStatusStrip(section, domain = {}) {
+  const session = state.modal.eaOptimizationLab;
+  const strip = document.createElement("div");
+  const terminalGate = getEaOptimizationLabTerminalGate(domain, session);
+  const selectedTerminal = terminalGate.candidate;
+  const activeInputs = session.inputs.filter((input) => input.optimize);
+  const facts = [
+    ["Platform", session.platform || "ยังไม่เลือก"],
+    ["EA", session.eaFile?.name || (session.sourceReportId ? "เลือกจาก Backend แล้ว" : "ยังไม่เลือก")],
+    ["Inputs", session.inputs.length ? `${session.inputs.length} ค่า • Optimize ${activeInputs.length}` : "ยังไม่อ่าน Inputs"],
+    ["Terminal", selectedTerminal?.labelTh || "ยังไม่เลือก Terminal"],
+  ];
+  strip.className = "ea-optimization-lab-status-strip";
+  facts.forEach(([labelText, valueText]) => {
+    const card = document.createElement("div");
+    const label = document.createElement("span");
+    const value = document.createElement("strong");
+    label.textContent = labelText;
+    value.textContent = valueText;
+    card.append(label, value);
+    strip.appendChild(card);
+  });
+  section.appendChild(strip);
+}
+
+function createEaOptimizationLabButton(label, handler, { primary = false, disabled = false } = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = primary ? "modal-action primary ea-optimization-lab-button" : "modal-action ea-optimization-lab-button";
+  button.textContent = label;
+  button.disabled = disabled;
+  button.addEventListener("click", handler);
+  return button;
+}
+
+function renderEaOptimizationLabSourceStage(section, domain, dashboard) {
+  const session = state.modal.eaOptimizationLab;
+  const layout = document.createElement("div");
+  const sourceCard = document.createElement("section");
+  const setupCard = document.createElement("section");
+  const sourceTitle = document.createElement("h5");
+  const sourceCopy = document.createElement("p");
+  const dropzone = document.createElement("button");
+  const fileInput = document.createElement("input");
+  const dropTitle = document.createElement("strong");
+  const dropCopy = document.createElement("span");
+  const fileFacts = document.createElement("dl");
+  layout.className = "ea-optimization-lab-source-layout";
+  sourceCard.className = "ea-optimization-lab-card";
+  setupCard.className = "ea-optimization-lab-card ea-optimization-lab-setup";
+  sourceTitle.textContent = "นำเข้า EA เพื่ออ่าน Inputs";
+  sourceCopy.textContent = "ไฟล์ฝั่งเบราว์เซอร์ใช้ Preview เท่านั้น ไม่ส่ง Path และไม่ถือเป็น Source ที่ Backend ลงทะเบียนสำหรับ Run จริง";
+  dropzone.className = "ea-optimization-lab-dropzone";
+  dropzone.type = "button";
+  dropzone.dataset.busy = String(session.fileBusy);
+  dropzone.disabled = session.fileBusy;
+  dropzone.dataset.eaLabFocusKey = "source-files";
+  fileInput.type = "file";
+  fileInput.className = "ea-optimization-lab-file-input";
+  fileInput.multiple = true;
+  fileInput.accept = EA_OPTIMIZATION_LAB_SOURCE_EXTENSIONS.join(",");
+  fileInput.disabled = session.fileBusy;
+  fileInput.hidden = true;
+  fileInput.tabIndex = -1;
+  fileInput.setAttribute("aria-hidden", "true");
+  dropTitle.textContent = session.fileBusy ? "กำลังอ่านไฟล์..." : "ลากไฟล์ EA มาวาง หรือกดเลือกไฟล์";
+  dropCopy.textContent = ".mq4 / .mq5 อ่าน Inputs ได้ • .ex4 / .ex5 เป็น Binary ต้องแนบ .set หรือ Source • สูงสุด 2 MB ต่อไฟล์";
+  dropzone.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => void processEaOptimizationLabFiles(fileInput.files));
+  ["dragenter", "dragover"].forEach((eventName) => dropzone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    dropzone.dataset.dragging = "true";
+  }));
+  ["dragleave", "drop"].forEach((eventName) => dropzone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    dropzone.dataset.dragging = "false";
+  }));
+  dropzone.addEventListener("drop", (event) => {
+    if (!session.fileBusy) void processEaOptimizationLabFiles(event.dataTransfer?.files);
+  });
+  dropzone.append(dropTitle, dropCopy);
+  sourceCard.append(sourceTitle, sourceCopy, dropzone, fileInput);
+  const selectedFiles = [session.eaFile, session.setFile].filter(Boolean);
+  if (selectedFiles.length) {
+    fileFacts.className = "ea-optimization-lab-file-facts";
+    selectedFiles.forEach((file) => {
+      const row = document.createElement("div");
+      const term = document.createElement("dt");
+      const value = document.createElement("dd");
+      term.textContent = file.extension === ".set" ? "Parameter Set" : "EA File";
+      value.textContent = `${file.name} • ${eaOptimizationLabReadableBytes(file.size)}${file.sha256 ? ` • SHA-256 ${file.sha256.slice(0, 12)}…` : ""}${file.needsReattach ? " • ต้องแนบซ้ำก่อนรันจริง" : ""}`;
+      row.append(term, value);
+      fileFacts.appendChild(row);
+    });
+    if (session.eaFile) {
+      const row = document.createElement("div");
+      const term = document.createElement("dt");
+      const value = document.createElement("dd");
+      term.textContent = "Program Type";
+      value.textContent = {
+        expert_advisor: "Expert Advisor",
+        indicator: "Indicator • ไม่รองรับในห้องนี้",
+        script: "Script • ไม่รองรับในห้องนี้",
+        unknown: "ยังยืนยันไม่ได้จากไฟล์",
+      }[session.programKind] || "ยังยืนยันไม่ได้จากไฟล์";
+      row.append(term, value);
+      fileFacts.appendChild(row);
+    }
+    sourceCard.appendChild(fileFacts);
+  }
+
+  const setupTitle = document.createElement("h5");
+  const setupGrid = document.createElement("div");
+  setupTitle.textContent = "ตั้งค่าเป้าหมาย";
+  setupGrid.className = "ea-optimization-lab-form-grid";
+  const addSelect = (labelText, value, options, onChange) => {
+    const label = document.createElement("label");
+    const caption = document.createElement("span");
+    const select = document.createElement("select");
+    caption.textContent = labelText;
+    options.forEach(([optionValue, optionLabel]) => {
+      const option = document.createElement("option");
+      option.value = optionValue;
+      option.textContent = optionLabel;
+      select.appendChild(option);
+    });
+    select.value = value;
+    select.dataset.eaLabFocusKey = `setup-${String(labelText).replace(/\s+/g, "-").slice(0, 60)}`;
+    select.addEventListener("change", () => onChange(select.value));
+    label.append(caption, select);
+    setupGrid.appendChild(label);
+    return select;
+  };
+  const backendSources = [
+    ...(Array.isArray(dashboard.workspaceSources) ? dashboard.workspaceSources.map((item) => ({
+      value: `workspace:${item.sourceId}`,
+      label: `${item.title} • Workspace`,
+    })) : []),
+    ...(Array.isArray(dashboard.agentDeliveredSources) ? dashboard.agentDeliveredSources.map((item) => ({
+      value: `report:${item.reportId}`,
+      label: `${item.title} • Report`,
+    })) : []),
+  ].slice(0, 100);
+  addSelect(
+    "EA ที่ Backend ลงทะเบียน (อ้างอิง Source)",
+    session.sourceReportId,
+    [["", "ยังไม่เลือก Source จาก Backend"], ...backendSources.map((item) => [item.value, item.label])],
+    (value) => {
+      session.sourceReportId = value;
+      session.plan = null;
+      rerenderEaOptimizationLab();
+    },
+  );
+  addSelect(
+    "แพลตฟอร์ม",
+    session.platform,
+    [["", "เลือก MT4 หรือ MT5"], ["MT4", "MT4 / MQL4"], ["MT5", "MT5 / MQL5"]],
+    (value) => {
+      session.platform = value;
+      session.selectedTerminalId = "";
+      session.plan = null;
+      rerenderEaOptimizationLab();
+    },
+  );
+  const filteredTerminals = domain.terminals.filter((item) => (
+    item.detected === true
+    && (!session.platform || item.platform === session.platform)
+  ));
+  const backendSelectedTerminalId = domain.selectedTerminal?.detected === true
+    && (!session.platform || domain.selectedTerminal.platform === session.platform)
+    ? domain.selectedTerminal.candidateId
+    : "";
+  const terminalSelect = addSelect(
+    "Terminal ที่ตรวจพบ",
+    session.selectedTerminalId || backendSelectedTerminalId,
+    [["", filteredTerminals.length ? "เลือก Terminal" : "ยังไม่พบ Terminal ที่ตรงแพลตฟอร์ม"], ...filteredTerminals.map((item) => [item.candidateId, `${item.labelTh}${item.detected ? " • ตรวจพบ" : ""}`])],
+    (value) => {
+      if (!value) {
+        session.selectedTerminalId = "";
+        session.plan = null;
+        saveSessionSnapshot();
+        rerenderEaOptimizationLab();
+        return;
+      }
+      void selectEaOptimizationLabTerminal(value);
+    },
+  );
+  terminalSelect.disabled = session.terminalBusy || !filteredTerminals.length;
+  addSelect(
+    "Timeframe",
+    session.timeframe,
+    ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"].map((value) => [value, value]),
+    (value) => {
+      session.timeframe = value;
+      session.plan = null;
+    },
+  );
+  const symbolLabel = document.createElement("label");
+  const symbolCaption = document.createElement("span");
+  const symbolInput = document.createElement("input");
+  symbolCaption.textContent = "Symbol / คู่เงิน";
+  symbolInput.type = "text";
+  symbolInput.maxLength = 30;
+  symbolInput.placeholder = "เช่น EURUSD หรือ XAUUSD";
+  symbolInput.value = session.symbol;
+  symbolInput.dataset.eaLabFocusKey = "setup-symbol";
+  symbolInput.addEventListener("input", () => {
+    session.symbol = symbolInput.value.trim().toUpperCase();
+    session.plan = null;
+  });
+  symbolLabel.append(symbolCaption, symbolInput);
+  setupGrid.appendChild(symbolLabel);
+  setupCard.append(setupTitle, setupGrid);
+  const backendSourceHelp = document.createElement("p");
+  backendSourceHelp.textContent = "Source จาก Backend ใช้ผูก lineage เท่านั้นในเวอร์ชันนี้ • หากต้องการเห็น Inputs ต้องแนบ .mq4/.mq5 หรือ .set สำหรับ Preview เพิ่ม";
+  setupCard.appendChild(backendSourceHelp);
+  const next = createEaOptimizationLabButton(
+    "ไปตั้งค่า Inputs / Ranges",
+    () => setWorkflowDashboardTab(EA_OPTIMIZATION_LAB_PROP_ID, "optimization", { focus: true }),
+    {
+      primary: true,
+      disabled: !session.inputs.length
+        || ["indicator", "script"].includes(session.programKind)
+        || ([".mq4", ".mq5"].includes(eaOptimizationLabFileExtension(session.eaFile?.name || "")) && session.programKind !== "expert_advisor"),
+    },
+  );
+  setupCard.appendChild(next);
+  layout.append(sourceCard, setupCard);
+  section.appendChild(layout);
+
+  const gate = document.createElement("div");
+  const filePlatform = eaOptimizationLabPlatformForExtension(session.eaFile?.extension || "");
+  const terminalGate = getEaOptimizationLabTerminalGate(domain, session);
+  const checks = [
+    [Boolean(session.eaFile || session.sourceReportId), "เลือก EA แล้ว", "ยังไม่ได้เลือก EA"],
+    [Boolean(session.platform), "เลือกแพลตฟอร์มแล้ว", "ยังไม่ได้เลือก MT4/MT5"],
+    [Boolean(!filePlatform || filePlatform === session.platform), "Platform ตรงกับไฟล์", "Platform ไม่ตรงกับนามสกุลไฟล์"],
+    [
+      !["indicator", "script"].includes(session.programKind)
+        && (!([".mq4", ".mq5"].includes(eaOptimizationLabFileExtension(session.eaFile?.name || ""))) || session.programKind === "expert_advisor"),
+      "ยืนยันชนิดไฟล์เป็น EA แล้ว",
+      "Source ยังไม่ยืนยันว่าเป็น Expert Advisor • ห้องนี้ไม่รับ Indicator หรือ Script",
+    ],
+    [session.inputs.length > 0, `อ่าน Inputs ได้ ${session.inputs.length} ค่า`, "ยังไม่มี Inputs ที่อ่านได้"],
+    [Boolean(terminalGate.candidate), "เลือก Terminal ที่ตรวจพบแล้ว", "ยังไม่ได้เลือก Terminal ที่ตรวจพบและตรงแพลตฟอร์ม"],
+    [terminalGate.ready, "Terminal และ Optimization Adapter ผูกกันแล้ว", "Adapter ยังไม่ผูกกับ Terminal ที่เลือก • ทำได้เฉพาะวางแผน"],
+  ];
+  gate.className = "ea-optimization-lab-gate";
+  checks.forEach(([ready, readyText, pendingText]) => {
+    const item = document.createElement("span");
+    item.dataset.ready = String(ready);
+    item.textContent = `${ready ? "ผ่าน" : "รอ"} • ${ready ? readyText : pendingText}`;
+    gate.appendChild(item);
+  });
+  section.appendChild(gate);
+}
+
+function renderEaOptimizationLabInputsStage(section) {
+  const session = state.modal.eaOptimizationLab;
+  if (!session.inputs.length) {
+    section.appendChild(createEaOptimizationLabNotice(
+      "warning",
+      "ยังไม่มี Inputs ให้ตั้งค่า",
+      "กลับไปเลือก Source .mq4/.mq5 หรือแนบไฟล์ .set; Binary .ex4/.ex5 เพียงอย่างเดียวไม่สามารถเปิดดู Inputs ได้",
+    ));
+    section.appendChild(createEaOptimizationLabButton(
+      "กลับไปเลือก EA",
+      () => setWorkflowDashboardTab(EA_OPTIMIZATION_LAB_PROP_ID, "backtest", { focus: true }),
+      { primary: true },
+    ));
+    return;
+  }
+  const validation = eaOptimizationLabPlanValidation(session);
+  const summary = document.createElement("div");
+  const optimized = session.inputs.filter((input) => input.optimize && input.canOptimize !== false);
+  summary.className = "ea-optimization-lab-input-summary";
+  [
+    ["Inputs ทั้งหมด", session.inputs.length],
+    ["เลือก Optimize", optimized.length],
+    ["Combination รอบแรก", validation.combinations.toString()],
+    ["หลักการ Mode", "Categorical เท่านั้น"],
+  ].forEach(([labelText, valueText]) => {
+    const card = document.createElement("div");
+    const label = document.createElement("span");
+    const value = document.createElement("strong");
+    label.textContent = labelText;
+    value.textContent = String(valueText);
+    card.append(label, value);
+    summary.appendChild(card);
+  });
+  section.appendChild(summary);
+  const tableWrap = document.createElement("div");
+  const table = document.createElement("table");
+  const caption = document.createElement("caption");
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  ["Optimize", "Input", "Current / Type", "Start", "Step", "Stop / Values", "จำนวนค่า"].forEach((textValue) => {
+    const cell = document.createElement("th");
+    cell.scope = "col";
+    cell.textContent = textValue;
+    headRow.appendChild(cell);
+  });
+  caption.className = "ea-optimization-lab-table-caption";
+  caption.textContent = "Inputs และช่วงค่าที่จะใช้ใน Current Bands รอบแรก";
+  head.appendChild(headRow);
+  table.appendChild(caption);
+  table.appendChild(head);
+  const body = document.createElement("tbody");
+  session.inputs.forEach((input, index) => {
+    const row = document.createElement("tr");
+    row.dataset.kind = input.kind;
+    const toggleCell = document.createElement("td");
+    const toggle = document.createElement("input");
+    toggle.type = "checkbox";
+    toggle.checked = input.optimize;
+    toggle.disabled = input.kind === "fixed" || input.canOptimize === false;
+    toggle.dataset.eaLabFocusKey = `input-${input.id}-optimize`;
+    toggle.setAttribute("aria-label", `เลือก ${input.name} สำหรับ Optimization`);
+    toggle.addEventListener("change", () => {
+      session.inputs[index].optimize = input.canOptimize === false ? false : toggle.checked;
+      session.plan = null;
+      rerenderEaOptimizationLab();
+    });
+    toggleCell.appendChild(toggle);
+    const nameCell = document.createElement("td");
+    nameCell.setAttribute("role", "rowheader");
+    const name = document.createElement("strong");
+    const source = document.createElement("small");
+    name.textContent = input.name;
+    source.textContent = input.source;
+    nameCell.append(name, source);
+    const currentCell = document.createElement("td");
+    const current = document.createElement("strong");
+    const type = document.createElement("small");
+    current.textContent = String(input.current);
+    type.textContent = input.kind === "categorical" ? `${input.type} • Categorical` : input.type;
+    currentCell.append(current, type);
+    const makeNumberCell = (field) => {
+      const cell = document.createElement("td");
+      if (input.kind !== "numeric") {
+        cell.textContent = "—";
+        return cell;
+      }
+      const control = document.createElement("input");
+      control.type = "number";
+      control.step = "any";
+      control.value = input[field] ?? "";
+      control.disabled = !input.optimize;
+      control.dataset.eaLabFocusKey = `input-${input.id}-${field}`;
+      control.setAttribute("aria-label", `${field} ของ ${input.name}`);
+      control.setAttribute("aria-invalid", String(input.optimize && eaOptimizationLabRangeCount(input) < 1));
+      control.addEventListener("input", () => {
+        session.inputs[index][field] = control.value === "" ? null : Number(control.value);
+        session.plan = null;
+      });
+      control.addEventListener("change", () => {
+        session.inputs[index][field] = control.value === "" ? null : Number(control.value);
+        session.plan = null;
+        rerenderEaOptimizationLab();
+      });
+      cell.appendChild(control);
+      return cell;
+    };
+    const startCell = makeNumberCell("start");
+    const stepCell = makeNumberCell("step");
+    const stopCell = document.createElement("td");
+    if (input.kind === "categorical") {
+      const values = document.createElement("input");
+      values.type = "text";
+      values.value = input.categoryValues.join(", ");
+      values.placeholder = "ระบุค่าที่ถูกกฎหมาย เช่น 0, 1, 2";
+      values.disabled = !input.optimize;
+      values.dataset.eaLabFocusKey = `input-${input.id}-values`;
+      values.setAttribute("aria-label", `ค่าหมวดหมู่ของ ${input.name}`);
+      values.setAttribute("aria-invalid", String(input.optimize && eaOptimizationLabRangeCount(input) < 1));
+      values.addEventListener("input", () => {
+        session.inputs[index].categoryValues = [...new Set(values.value.split(/[,\n]+/).map((value) => value.trim()).filter(Boolean))].slice(0, 30);
+        session.plan = null;
+      });
+      values.addEventListener("change", () => {
+        session.inputs[index].categoryValues = [...new Set(values.value.split(/[,\n]+/).map((value) => value.trim()).filter(Boolean))].slice(0, 30);
+        session.plan = null;
+        rerenderEaOptimizationLab();
+      });
+      stopCell.appendChild(values);
+    } else if (input.kind === "numeric") {
+      const control = document.createElement("input");
+      control.type = "number";
+      control.step = "any";
+      control.value = input.stop ?? "";
+      control.disabled = !input.optimize;
+      control.dataset.eaLabFocusKey = `input-${input.id}-stop`;
+      control.setAttribute("aria-label", `stop ของ ${input.name}`);
+      control.setAttribute("aria-invalid", String(input.optimize && eaOptimizationLabRangeCount(input) < 1));
+      control.addEventListener("input", () => {
+        session.inputs[index].stop = control.value === "" ? null : Number(control.value);
+        session.plan = null;
+      });
+      control.addEventListener("change", () => {
+        session.inputs[index].stop = control.value === "" ? null : Number(control.value);
+        session.plan = null;
+        rerenderEaOptimizationLab();
+      });
+      stopCell.appendChild(control);
+    } else stopCell.textContent = "คงที่";
+    const countCell = document.createElement("td");
+    const count = eaOptimizationLabRangeCount(input);
+    countCell.textContent = input.optimize ? String(count || "ผิดรูปแบบ") : "1";
+    countCell.dataset.warning = String(input.optimize && count > 10);
+    row.append(toggleCell, nameCell, currentCell, startCell, stepCell, stopCell, countCell);
+    body.appendChild(row);
+  });
+  table.appendChild(body);
+  tableWrap.className = "ea-optimization-lab-table-wrap";
+  table.className = "ea-optimization-lab-input-table";
+  tableWrap.appendChild(table);
+  section.appendChild(tableWrap);
+  section.appendChild(createEaOptimizationLabNotice(
+    validation.combinations > BigInt(EA_OPTIMIZATION_LAB_MAX_COMBINATIONS) ? "error" : "neutral",
+    "Current Bands = ช่วงที่จะทดสอบรอบแรก",
+    "ระบบไม่เดาช่วงจากค่า Default ใน Source • คุณต้องเลือก Optimize และกำหนด Start / Step / Stop เอง หรือใช้ช่วงจริงจาก .set; Mode, bool และ flag เป็นค่าหมวดหมู่เท่านั้น",
+  ));
+  const actions = document.createElement("div");
+  actions.className = "ea-optimization-lab-actions";
+  actions.appendChild(createEaOptimizationLabButton(
+    "กลับไปเลือก EA",
+    () => setWorkflowDashboardTab(EA_OPTIMIZATION_LAB_PROP_ID, "backtest", { focus: true }),
+  ));
+  actions.appendChild(createEaOptimizationLabButton(
+    "ไปวางแผนหลายรอบ",
+    () => setWorkflowDashboardTab(EA_OPTIMIZATION_LAB_PROP_ID, "ea_discovery", { focus: true }),
+    { primary: true, disabled: !optimized.length },
+  ));
+  section.appendChild(actions);
+}
+
+function appendEaOptimizationLabPlanField(grid, labelText, type, value, onChange, options = []) {
+  const label = document.createElement("label");
+  const caption = document.createElement("span");
+  const control = type === "select" ? document.createElement("select") : document.createElement("input");
+  caption.textContent = labelText;
+  if (type === "select") {
+    options.forEach(([optionValue, optionLabel]) => {
+      const option = document.createElement("option");
+      option.value = optionValue;
+      option.textContent = optionLabel;
+      control.appendChild(option);
+    });
+  } else {
+    control.type = type;
+    if (type === "number") {
+      control.step = "any";
+      if (labelText === "เป้าหมายกำไร (%)") control.min = "0";
+      if (labelText === "Drawdown สูงสุด (%)") {
+        control.min = "0";
+        control.max = "100";
+      }
+      if (labelText === "จำนวน Trade ขั้นต่ำ") {
+        control.min = "1";
+        control.step = "1";
+      }
+    }
+  }
+  control.value = value;
+  if (control.dataset) control.dataset.eaLabFocusKey = `plan-${String(labelText).replace(/\s+/g, "-").slice(0, 60)}`;
+  if (type !== "select") control.addEventListener("input", () => onChange(control.value));
+  control.addEventListener("change", () => {
+    onChange(control.value);
+    rerenderEaOptimizationLab();
+  });
+  label.append(caption, control);
+  grid.appendChild(label);
+}
+
+function createEaOptimizationRoundCard(round, ready) {
+  const card = document.createElement("article");
+  const badge = document.createElement("span");
+  const title = document.createElement("h5");
+  const detail = document.createElement("p");
+  const gate = document.createElement("small");
+  card.className = "ea-optimization-lab-round-card";
+  card.dataset.ready = String(ready);
+  badge.textContent = `ROUND ${round.index}`;
+  title.textContent = round.title;
+  detail.textContent = round.detail;
+  gate.textContent = `Gate: ${round.gate}`;
+  card.append(badge, title, detail, gate);
+  return card;
+}
+
+function renderEaOptimizationLabRoundsStage(section, domain) {
+  const session = state.modal.eaOptimizationLab;
+  const terminalGate = getEaOptimizationLabTerminalGate(domain, session);
+  const settings = document.createElement("section");
+  const title = document.createElement("h5");
+  const grid = document.createElement("div");
+  settings.className = "ea-optimization-lab-card";
+  title.textContent = "เงื่อนไขการทดลอง";
+  grid.className = "ea-optimization-lab-plan-grid";
+  appendEaOptimizationLabPlanField(grid, "วันเริ่มทดสอบ", "date", session.dateFrom, (value) => { session.dateFrom = value; session.plan = null; });
+  appendEaOptimizationLabPlanField(grid, "วันสิ้นสุดทดสอบ", "date", session.dateTo, (value) => { session.dateTo = value; session.plan = null; });
+  appendEaOptimizationLabPlanField(grid, "Validation", "select", session.validationMethod, (value) => { session.validationMethod = value; session.plan = null; }, [
+    ["train_test", "Train / Test Split"],
+    ["walk_forward", "Walk-forward"],
+    ["out_of_sample", "Out-of-sample"],
+    ["monte_carlo", "Monte Carlo"],
+  ]);
+  appendEaOptimizationLabPlanField(grid, "จำนวนรอบสูงสุด", "select", session.roundCount, (value) => { session.roundCount = value; session.plan = null; }, [1, 2, 3, 4, 5].map((value) => [String(value), `${value} รอบ`]));
+  appendEaOptimizationLabPlanField(grid, "เป้าหมายกำไร (%)", "number", session.targetProfitPercent, (value) => { session.targetProfitPercent = value; session.plan = null; });
+  appendEaOptimizationLabPlanField(grid, "Drawdown สูงสุด (%)", "number", session.maxDrawdownPercent, (value) => { session.maxDrawdownPercent = value; session.plan = null; });
+  appendEaOptimizationLabPlanField(grid, "จำนวน Trade ขั้นต่ำ", "number", session.minimumTrades, (value) => { session.minimumTrades = value; session.plan = null; });
+  settings.append(title, grid);
+  section.appendChild(settings);
+  const draft = session.plan?.ok ? session.plan : eaOptimizationLabBuildPlan(session, domain);
+  const rounds = draft.ok ? draft.rounds : [
+    { index: 1, title: "Broad Scan", detail: "รอข้อมูล EA, Inputs และช่วงทดสอบให้ครบ", gate: "กรอกข้อมูลที่ยังขาดก่อนบันทึกแผน" },
+    { index: 2, title: "Stable Cluster Zoom / Split", detail: "สร้างหลังมี Report รอบแรกเท่านั้น", gate: "ห้ามสร้างช่วงจาก Top Profit จุดเดียว" },
+    { index: 3, title: "Out-of-sample Confirmation", detail: "ยืนยัน Candidate บนข้อมูลที่ไม่ใช้ Optimize", gate: "ต้องมีหลักฐาน Tester จริง" },
+  ].slice(0, Math.max(1, Number.parseInt(session.roundCount, 10) || 3));
+  const timeline = document.createElement("div");
+  timeline.className = "ea-optimization-lab-rounds";
+  rounds.forEach((round, index) => timeline.appendChild(createEaOptimizationRoundCard(round, draft.ok && index === 0)));
+  section.appendChild(timeline);
+  if (!draft.ok) {
+    section.appendChild(createEaOptimizationLabNotice(
+      "warning",
+      "แผนยังบันทึกไม่ได้",
+      draft.issues.slice(0, 8).join(" • ") || "ตรวจข้อมูล EA และ Input ให้ครบ",
+    ));
+  } else {
+    section.appendChild(createEaOptimizationLabNotice(
+      session.plan?.ok ? "success" : "ready",
+      session.plan?.ok ? "บันทึก Draft Plan แล้ว" : "พร้อมบันทึก Draft Plan",
+      `${draft.ranges.length} Inputs • ${draft.combinations} combinations ใน Current Bands • รอบถัดไปจะสร้างหลังได้รับ Report จริงของรอบก่อนหน้า`,
+    ));
+  }
+  const runGate = document.createElement("div");
+  const runTitle = document.createElement("strong");
+  const runCopy = document.createElement("p");
+  const buttons = document.createElement("div");
+  runGate.className = "ea-optimization-lab-run-gate";
+  runGate.dataset.ready = String(terminalGate.ready);
+  runTitle.textContent = terminalGate.ready ? "Terminal และ Adapter พร้อมตรวจขั้นรัน" : "ยังไม่เปิด Strategy Tester จริง";
+  runCopy.textContent = terminalGate.ready
+    ? "ก่อนรันจริงยังต้องยืนยัน Source ที่ Backend ลงทะเบียน, Terminal, Output workspace, idempotency และหลักฐาน Report"
+    : `${domain.adapterDetail} • ห้องนี้จะไม่สร้างผลจำลองหรืออ้างว่ารัน MT4/MT5 แล้ว`;
+  buttons.className = "ea-optimization-lab-actions";
+  buttons.appendChild(createEaOptimizationLabButton("บันทึก Draft Plan", () => {
+    const nextPlan = eaOptimizationLabBuildPlan(session, domain);
+    if (!nextPlan.ok) {
+      session.message = nextPlan.issues.join(" • ");
+      session.tone = "error";
+    } else {
+      session.plan = nextPlan;
+      session.message = "บันทึก Draft Plan ใน Session นี้แล้ว • ยังไม่ได้สร้าง Mission หรือสั่ง Terminal";
+      session.tone = "success";
+    }
+    saveSessionSnapshot();
+    rerenderEaOptimizationLab();
+  }, { primary: true, disabled: !draft.ok }));
+  buttons.appendChild(createEaOptimizationLabButton(
+    "เริ่ม Optimization จริง",
+    () => {},
+    { disabled: true },
+  ));
+  runGate.append(runTitle, runCopy, buttons);
+  section.appendChild(runGate);
+}
+
+function eaOptimizationLabCandidateBy(candidates, selector, direction = "max") {
+  const eligible = candidates.filter((item) => Number.isFinite(selector(item)));
+  if (!eligible.length) return null;
+  return eligible.reduce((best, item) => {
+    const value = selector(item);
+    const bestValue = selector(best);
+    return direction === "min" ? (value < bestValue ? item : best) : (value > bestValue ? item : best);
+  });
+}
+
+function createEaOptimizationCandidateCard(titleText, candidate, tone) {
+  const card = document.createElement("article");
+  const title = document.createElement("h5");
+  const pass = document.createElement("strong");
+  const metrics = document.createElement("dl");
+  card.className = "ea-optimization-lab-candidate";
+  card.dataset.tone = tone;
+  title.textContent = titleText;
+  pass.textContent = candidate?.label || "รอ Report";
+  [
+    ["Net Profit", candidate?.profit],
+    ["Drawdown", candidate?.drawdown],
+    ["Profit Factor", candidate?.profitFactor],
+    ["Trades", candidate?.trades],
+    ["Stability", candidate?.stability],
+  ].forEach(([labelText, value]) => {
+    const row = document.createElement("div");
+    const term = document.createElement("dt");
+    const detail = document.createElement("dd");
+    term.textContent = labelText;
+    detail.textContent = Number.isFinite(value) ? String(value) : "—";
+    row.append(term, detail);
+    metrics.appendChild(row);
+  });
+  card.append(title, pass, metrics);
+  const parameterEntries = candidate?.parameters && typeof candidate.parameters === "object"
+    ? Object.entries(candidate.parameters).slice(0, 8)
+    : [];
+  if (parameterEntries.length) {
+    const parameterTitle = document.createElement("small");
+    const parameterList = document.createElement("ul");
+    parameterTitle.textContent = "ค่าพารามิเตอร์ Candidate";
+    parameterList.className = "ea-optimization-lab-candidate-parameters";
+    parameterEntries.forEach(([name, value]) => {
+      const item = document.createElement("li");
+      item.textContent = `${safeDashboardDisplayText(name, "Input")}: ${safeDashboardDisplayText(value, "—")}`;
+      parameterList.appendChild(item);
+    });
+    card.append(parameterTitle, parameterList);
+  }
+  return card;
+}
+
+function renderEaOptimizationLabAnalysisStage(section, domain, dashboard) {
+  const session = state.modal.eaOptimizationLab;
+  const report = domain.latestReport;
+  const candidates = report?.candidates || [];
+  const profitablePercent = report?.profitablePercent ?? null;
+  const passCount = report?.passCount ?? null;
+  const minimumTrades = eaOptimizationLabNullableNumber(session.minimumTrades);
+  const maxDrawdownPercent = eaOptimizationLabNullableNumber(session.maxDrawdownPercent);
+  const eligibleCandidates = candidates.filter((item) => (
+    (minimumTrades === null || (item.trades !== null && item.trades >= minimumTrades))
+    && (maxDrawdownPercent === null || (item.drawdown !== null && item.drawdown <= maxDrawdownPercent))
+    && (item.profitFactor === null || item.profitFactor > 1)
+  ));
+  const resultState = profitablePercent === null
+    ? "รอข้อมูล Pass ครบ"
+    : `${profitablePercent}% Pass มีกำไร • ยังต้องตรวจคลัสเตอร์ต่อเนื่องและเกณฑ์ความเสี่ยง`;
+  const profile = document.createElement("div");
+  profile.className = "ea-optimization-lab-profile";
+  [
+    ["EA / Platform", report ? `${report.eaName} • ${report.platform}` : `${session.eaFile?.name || "รอ EA"} • ${session.platform || "—"}`],
+    ["Pass ที่ Backend ยืนยัน", passCount === null ? "รอ Report" : passCount],
+    ["Pass กำไร", profitablePercent === null ? "รอ Report" : `${profitablePercent}%`],
+    ["สถานะรอบ", resultState],
+    ["Run / Round", report ? `${report.runId || "—"} / ${report.roundId || "—"}` : "รอ Report"],
+    ["Terminal / Verify", report ? `${report.terminalId || "—"} • ${report.executionEvidence.backendVerificationId || "—"}` : "รอ Report"],
+  ].forEach(([labelText, valueText]) => {
+    const card = document.createElement("div");
+    const label = document.createElement("span");
+    const value = document.createElement("strong");
+    label.textContent = labelText;
+    value.textContent = String(valueText);
+    card.append(label, value);
+    profile.appendChild(card);
+  });
+  section.appendChild(profile);
+  if (report?.executionVerified) {
+    const reportDigest = report.executionEvidence.resultReportSha256;
+    const manifestDigest = report.executionEvidence.artifactManifestSha256;
+    section.appendChild(createEaOptimizationLabNotice(
+      "success",
+      "Backend ยืนยันผล Optimization แล้ว",
+      `Verification ${report.executionEvidence.backendVerificationId}${reportDigest ? ` • Report SHA-256 ${reportDigest.slice(0, 16)}…` : ""}${manifestDigest ? ` • Manifest SHA-256 ${manifestDigest.slice(0, 16)}…` : ""}`,
+    ));
+  }
+  if (!report) {
+    section.appendChild(createEaOptimizationLabNotice(
+      "warning",
+      domain.latestPlanReport ? "มี Draft/Plan Report แต่ยังไม่มีผลรันจริง" : "ยังไม่มี Optimization Report จริง",
+      "Dashboard จะไม่สร้างกำไร Drawdown หรือ Candidate จำลอง เมื่อ Backend ยืนยันผลจาก Terminal แล้วจึงวิเคราะห์ Pass และแสดงผลในหน้านี้",
+    ));
+  }
+  if (report?.passesTruncated) {
+    section.appendChild(createEaOptimizationLabNotice(
+      "warning",
+      "Backend ส่ง Pass มากกว่าขีดจำกัดการแสดงผล",
+      "Candidate ด้านล่างคำนวณเฉพาะชุดที่ Dashboard โหลดมา จึงไม่อ้างว่าเป็นค่าสูงสุดหรือต่ำสุดของผลทั้งหมด",
+    ));
+  }
+  if (report?.warnings?.length) {
+    section.appendChild(createEaOptimizationLabNotice(
+      "warning",
+      `Tester / Overfit Warnings ${report.warnings.length} รายการ`,
+      report.warnings.slice(0, 8).join(" • "),
+    ));
+  }
+  const candidateGrid = document.createElement("div");
+  candidateGrid.className = "ea-optimization-lab-candidates";
+  const candidateScope = `${report?.passesTruncated ? " (ในชุดที่โหลด)" : ""} • ผ่านเกณฑ์ Risk`;
+  candidateGrid.append(
+    createEaOptimizationCandidateCard(`Highest Profit${candidateScope}`, eaOptimizationLabCandidateBy(eligibleCandidates, (item) => item.profit), "profit"),
+    createEaOptimizationCandidateCard(`Lowest Drawdown${candidateScope}`, eaOptimizationLabCandidateBy(eligibleCandidates, (item) => item.drawdown, "min"), "drawdown"),
+    createEaOptimizationCandidateCard(`Most Stable${candidateScope}`, eaOptimizationLabCandidateBy(eligibleCandidates, (item) => item.stability), "stable"),
+  );
+  section.appendChild(candidateGrid);
+  const bandsGrid = document.createElement("div");
+  const currentBands = document.createElement("section");
+  const nextPlan = document.createElement("section");
+  const currentTitle = document.createElement("h5");
+  const nextTitle = document.createElement("h5");
+  bandsGrid.className = "ea-optimization-lab-bands-grid";
+  currentBands.className = "ea-optimization-lab-bands";
+  nextPlan.className = "ea-optimization-lab-bands ea-optimization-lab-next-plan";
+  currentTitle.textContent = "Current Bands • ช่วงที่ทดสอบจริง";
+  nextTitle.textContent = "Next Parameter Plan • รอบถัดไป";
+  currentBands.appendChild(currentTitle);
+  nextPlan.appendChild(nextTitle);
+  if (report?.currentBands?.length) {
+    const list = document.createElement("ul");
+    report.currentBands.forEach((band) => {
+      const item = document.createElement("li");
+      item.textContent = band.kind === "categorical"
+        ? `${band.name}: ${band.values.join(", ") || "—"}${band.profitablePercent === null ? "" : ` • กำไร ${band.profitablePercent}%`}`
+        : `${band.name}: ${band.start ?? "—"} / ${band.step ?? "—"} / ${band.stop ?? "—"}${band.profitablePercent === null ? "" : ` • กำไร ${band.profitablePercent}%`}`;
+      list.appendChild(item);
+    });
+    currentBands.appendChild(list);
+  } else {
+    currentBands.appendChild(createWorkflowTruthEmpty("ยังไม่มี Tested Bands จาก Report • Draft Plan ไม่ถูกนับเป็นผลทดสอบ"));
+  }
+  if (report?.nextParameterPlan?.length) {
+    const list = document.createElement("ul");
+    report.nextParameterPlan.forEach((band) => {
+      const item = document.createElement("li");
+      item.textContent = band.kind === "categorical"
+        ? `${band.name}: ${band.values.join(", ") || "—"} • ${band.reason}`
+        : `${band.name}: ${band.start ?? "—"} / ${band.step ?? "—"} / ${band.stop ?? "—"} • ${band.reason}`;
+      list.appendChild(item);
+    });
+    nextPlan.appendChild(list);
+  } else {
+    nextPlan.appendChild(createWorkflowTruthEmpty(
+      report
+        ? "รอ Backend วิเคราะห์คลัสเตอร์ต่อเนื่องจาก Pass ทั้งหมดก่อนเสนอ Start / Step / Stop รอบถัดไป"
+        : "ต้องมี Current Bands และผล Pass ก่อน จึงจะสร้างคำแนะนำรอบถัดไปได้",
+    ));
+  }
+  bandsGrid.append(currentBands, nextPlan);
+  section.appendChild(bandsGrid);
+  if (Array.isArray(dashboard.agentDeliveredSources) && dashboard.agentDeliveredSources.length) {
+    renderWorkflowSourceCards(section, dashboard.agentDeliveredSources);
+  }
+}
+
+function renderEaOptimizationLabPanel(container, tabId, domain = {}, report = {}, dashboard = {}) {
+  const section = document.createElement("section");
+  section.className = "workflow-domain-panel ea-optimization-lab-panel";
+  section.appendChild(createEaOptimizationLabStageHeader(tabId, domain));
+  renderEaOptimizationLabStatusStrip(section, domain);
+  if (tabId === "backtest") renderEaOptimizationLabSourceStage(section, domain, dashboard);
+  else if (tabId === "optimization") renderEaOptimizationLabInputsStage(section);
+  else if (tabId === "ea_discovery") renderEaOptimizationLabRoundsStage(section, domain);
+  else if (tabId === "history") renderEaOptimizationLabAnalysisStage(section, domain, dashboard);
+  else section.appendChild(createWorkflowTruthEmpty("ไม่พบขั้นตอนห้องทดลอง EA ที่รองรับ"));
+  const session = state.modal.eaOptimizationLab;
+  if (session.message) {
+    section.appendChild(createEaOptimizationLabNotice(
+      session.tone,
+      session.tone === "error" ? "ต้องตรวจสอบ" : "สถานะห้องทดลอง",
+      session.message,
+    ));
+  }
+  container.appendChild(section);
+}
+
+function renderTradingResearchLabPanel(container, tabId, domain) {
+  const section = document.createElement("section");
+  const session = getTradingResearchLabSession(domain);
+  const system = domain.systems.find((item) => item.id === session.selectedSystemId) || null;
+  section.className = "workflow-domain-panel workflow-trading-research-lab";
+  section.appendChild(createTradingResearchLabHeader(domain, session));
+  if (domain.catalogLoading && !domain.backendReady) {
+    section.appendChild(createTradingResearchNotice(
+      "กำลังโหลดข้อมูลจาก Backend",
+      "กำลังรอ Report ระบบเทรดครบ 3 ระบบที่ผ่านการตรวจหลักฐาน ระหว่างนี้ระบบจะไม่แสดงข้อมูลว่างหรือเปิดปุ่มวิจัยก่อนเวลา",
+      "loading",
+    ));
+    container.appendChild(section);
+    return;
+  }
+  if (domain.catalogError && !domain.backendReady) {
+    section.appendChild(createTradingResearchNotice(
+      "โหลดคลังระบบไม่สำเร็จ",
+      domain.catalogError + " • ระบบปิดการวิจัยและไม่สร้างข้อมูลแทน",
+      "error",
+    ));
+    container.appendChild(section);
+    return;
+  }
+  if (!domain.backendReady) {
+    section.appendChild(createWorkflowTruthEmpty(
+      "ยังไม่มี metrics.systems แบบ array ครบ 3 ระบบจาก Backend Report จึงไม่ถอด string หรือสร้างข้อมูลตัวอย่างแทน",
+    ));
+    container.appendChild(section);
+    return;
+  }
+  if (tabId === "research") renderTradingResearchDetail(section, system, domain);
+  else if (tabId === "chart") renderTradingResearchSimulation(section, system, session);
+  else if (tabId === "backtest") renderTradingResearchBacktest(section, system, session);
+  else if (tabId === "report") renderTradingResearchSummary(section, system, domain, session);
+  else section.appendChild(createWorkflowTruthEmpty("ไม่พบแท็บวิจัยที่รองรับ"));
+  container.appendChild(section);
+}
+
 function renderWorkflowDomainPanel(container, subject, selectedTab, dashboard, report) {
   if (!container || !subject || !selectedTab) return false;
+  if (subject.id === "codex_mcp_portal") {
+    if (selectedTab.id === "catalog") return false;
+    renderTradingSystemPortalPanel(
+      container,
+      selectedTab.id,
+      dashboard.domainData.tradingSystemPortal,
+    );
+    return true;
+  }
+  if (subject.id === TRADING_RESEARCH_LAB_PROP_ID) {
+    renderTradingResearchLabPanel(
+      container,
+      selectedTab.id,
+      dashboard.domainData.tradingResearchLab,
+    );
+    return true;
+  }
   if (subject.id === "left_audit_crystals") {
     renderIndicatorScoutPanel(container, selectedTab.id, dashboard.domainData.indicatorScout);
     return true;
@@ -17545,7 +25684,21 @@ function renderWorkflowDomainPanel(container, subject, selectedTab, dashboard, r
     renderFxNewsBiasPanel(container, selectedTab.id, dashboard.domainData.fxNewsBias);
     return true;
   }
-  if (["terminal_workstation", "right_server_racks"].includes(subject.id)) {
+  if (subject.id === EA_FACTORY_PROP_ID) {
+    renderEaFactoryPanel(container, selectedTab.id, dashboard.domainData.eaFactory, report);
+    return true;
+  }
+  if (subject.id === EA_OPTIMIZATION_LAB_PROP_ID) {
+    renderEaOptimizationLabPanel(
+      container,
+      selectedTab.id,
+      dashboard.domainData.eaOptimizationLab,
+      report,
+      dashboard,
+    );
+    return true;
+  }
+  if (subject.id === "terminal_workstation") {
     if (selectedTab.id === "source") {
       renderTerminalSourceCatalogPanel(container, dashboard);
       return true;
@@ -17565,6 +25718,7 @@ function renderWorkflowDomainPanel(container, subject, selectedTab, dashboard, r
 function renderWorkflowCatalog(container, dashboard) {
   const template = dashboard.sheetTemplate || normalizeWorkflowSheetTemplate();
   const deduplication = dashboard.deduplication || normalizeWorkflowDeduplication();
+  const centralSheet = researchSheetConsumerPresentation("codex_mcp_portal");
   const section = document.createElement("section");
   const statusGrid = document.createElement("div");
   const templateCard = document.createElement("article");
@@ -17581,7 +25735,7 @@ function renderWorkflowCatalog(container, dashboard) {
   const dedupCopy = document.createElement("p");
   const dedupFields = document.createElement("div");
   const privacyCopy = document.createElement("p");
-  const sheetsConnected = template.connectionStatus === "connected";
+  const sheetsConnected = centralSheet.verifiedReady === true;
 
   section.className = "workflow-catalog";
   statusGrid.className = "workflow-catalog-grid";
@@ -17605,11 +25759,9 @@ function renderWorkflowCatalog(container, dashboard) {
   templateCard.append(templateHeading, templateReference, columns);
 
   connectionTitle.textContent = "การเชื่อม Google Sheets";
-  connectionBadge.dataset.tone = sheetsConnected ? "ready" : "coming-soon";
-  connectionBadge.textContent = sheetsConnected ? "Google Sheets เชื่อมแล้ว" : "Google Sheets: Coming Soon";
-  connectionCopy.textContent = sheetsConnected
-    ? template.connectionLabelTh
-    : `${template.connectionLabelTh} • ระบบยังไม่อ่านหรือเขียนแถวใน Google Sheets`;
+  connectionBadge.dataset.tone = sheetsConnected ? "ready" : centralSheet.tone;
+  connectionBadge.textContent = centralSheet.label;
+  connectionCopy.textContent = `${researchSheetHubConfiguredReference()} • ${centralSheet.detail}`;
   dedupTitle.textContent = "การตรวจรายการซ้ำ";
   dedupCopy.textContent = deduplication.scopeLabelTh;
   dedupFields.className = "workflow-catalog-dedup-fields";
@@ -17623,9 +25775,9 @@ function renderWorkflowCatalog(container, dashboard) {
     deduplication.localReportCatalogAvailable
       ? "พร้อมตรวจรายการซ้ำกับ Report ในเครื่อง"
       : "ยังไม่ได้ยืนยัน Local Report Catalog",
-    deduplication.googleSheetRowsAvailable
+    deduplication.googleSheetRowsAvailable && centralSheet.consumer?.readReady === true
       ? "รวมข้อมูลจาก Google Sheets แล้ว"
-      : "ยังไม่รวมข้อมูลจาก Google Sheets",
+      : "Backend ยังไม่ยืนยันว่ารวมแถวจาก Google Sheet กลางแล้ว",
     "Frontend ไม่รับ Token, Credential หรือ Secret",
   ].join(" • ");
   connectionCard.append(
@@ -17710,6 +25862,19 @@ function renderWorkflowActionStatus(propId) {
       : "Radar ทำงานอัตโนมัติวันละครั้ง และแสดงผลพร้อมสุขภาพแหล่งข้อมูลจาก Backend";
     return;
   }
+  if (propId === EA_FACTORY_PROP_ID) {
+    els.workflowActionStatus.textContent = state.modal.eaFactory.message
+      || "โรงงานทำงานแบบ Manual ทีละขั้น • ไม่มี Scheduler หรือ Loop • โค้ด, Compile, Backtest, ไฟล์ และ Audit ต้องมาจาก Local Runner จริง";
+    els.workflowActionStatus.dataset.tone = state.modal.eaFactory.message ? state.modal.eaFactory.tone : "neutral";
+    return;
+  }
+  if (propId === EA_OPTIMIZATION_LAB_PROP_ID) {
+    const labStatus = state.modal.eaOptimizationLab;
+    els.workflowActionStatus.textContent = labStatus.message
+      || "เตรียม Draft Plan แบบ Case-by-case ได้ใน Browser • การ Optimization จริงยังปิดไว้จนกว่า Backend จะยืนยัน Source, Terminal, Adapter และหลักฐานครบ";
+    els.workflowActionStatus.dataset.tone = labStatus.message ? labStatus.tone : "neutral";
+    return;
+  }
   els.workflowActionStatus.textContent = current
     ? status.message
     : "หน้าเว็บส่งเฉพาะคำขอ งานจริงและ Audit Log อยู่หลัง Local Runner";
@@ -17732,9 +25897,11 @@ function createRadarRailTruthCard(dashboard = {}) {
   const badge = document.createElement("span");
   const facts = document.createElement("dl");
   const domain = dashboard?.domainData?.indicatorScout || {};
-  const sheet = domain.googleSheet && typeof domain.googleSheet === "object"
-    ? domain.googleSheet
-    : {};
+  const centralSheet = researchSheetConsumerPresentation(INDICATOR_SCOUT_PROP_ID);
+  const sheetReference = researchSheetHubConfiguredReference();
+  const centralSheetSyncTruth = centralSheet.verifiedReady
+    ? centralSheet.detail
+    : `ยังไม่เชื่อม Adapter ครบตามที่ Backend ยืนยัน • ${centralSheet.detail}`;
   const schedule = normalizeRadarSchedule(domain.schedule || dashboard?.schedule);
   const service = normalizeRadarServiceHealth(domain.serviceHealth);
   const statusLabel = (value) => ({
@@ -17749,7 +25916,7 @@ function createRadarRailTruthCard(dashboard = {}) {
     degraded: "มีแหล่งข้อมูลติดขัด",
     configuration_required: "ต้องตั้งค่า",
     configured_not_connected: "บันทึกการตั้งค่าแล้ว • ยังไม่เชื่อมต่อ",
-    not_connected_optional: "ยังไม่เชื่อม • ตัวเลือก",
+    not_connected_optional: "Backend ยังไม่ยืนยันการเชื่อมต่อ",
     failed: "ทำงานไม่สำเร็จ",
     error: "เกิดข้อผิดพลาด",
     unavailable: "ยังไม่พร้อม",
@@ -17769,9 +25936,11 @@ function createRadarRailTruthCard(dashboard = {}) {
     ["แหล่งข้อมูลรวม", statusLabel(service.sourceStatus)],
     ["รันล่าสุด", schedule.lastRunAt ? formatThaiDateTime(schedule.lastRunAt) : "ยังไม่เคยรัน"],
     ["ผลรอบล่าสุด", `${statusLabel(schedule.lastRunStatus)}${schedule.lastResultKind ? ` • ${safeDashboardDisplayText(schedule.lastResultKind, "")}` : ""}`],
-    ["รอบถัดไป", schedule.effectiveEnabled
-      ? (schedule.nextRunAt ? formatThaiDateTime(schedule.nextRunAt) : "Backend ยังไม่ส่งเวลา")
-      : (schedule.requestedEnabled ? "เปิดไว้ แต่ Scheduler ยังไม่พร้อม" : "ปิดการทำงานอัตโนมัติ")],
+    ["รอบถัดไป", schedule.nextRunAt
+      ? formatThaiDateTime(schedule.nextRunAt)
+      : (schedule.effectiveEnabled
+          ? "Backend ยังไม่ส่งเวลา"
+          : "เปิดถาวรโดย Backend • ยังไม่มีเวลารอบถัดไป")],
     [
       "รอบวันนี้",
       dailyUsageKnown
@@ -17781,16 +25950,14 @@ function createRadarRailTruthCard(dashboard = {}) {
     ["ผลวันนี้", `${domain.todayEntries?.length || 0} รายการ`],
     ["ผลย้อนหลัง 7 วัน", `${domain.sevenDayEntries?.length || 0} รายการ`],
     [
-      "Google Sheet (ตัวเลือก)",
-      sheet.configured === true
-        ? `${safeDashboardDisplayText(sheet.sheetReferenceMasked, "บันทึกแล้ว")}${sheet.tabName ? ` • ${safeDashboardDisplayText(sheet.tabName, "")}` : ""}`
-        : "ยังไม่ได้บันทึก Sheet",
+      "Google Sheet กลาง",
+      centralSheet.consumer
+        ? `${sheetReference} • ${centralSheet.consumer.tabName || "Backend ยังไม่ระบุ Tab"} • ${centralSheet.label}`
+        : centralSheet.label,
     ],
     [
       "การซิงก์ Sheet",
-      sheet.connected === true
-        ? "เชื่อมต่อแล้ว"
-        : "ยังไม่เชื่อม Adapter • เป็นแหล่งตัวเลือกและไม่ทำให้ Radar ล้มเหลว",
+      centralSheetSyncTruth,
     ],
   ];
   card.className = "workflow-radar-rail-truth";
@@ -17828,91 +25995,54 @@ function createRadarRailTruthCard(dashboard = {}) {
     const label = document.createElement("strong");
     const sourceBadge = document.createElement("span");
     const detail = document.createElement("small");
-    const optional = source.sourceId === "google_sheet";
-    row.dataset.status = source.status;
-    label.textContent = `${source.label}${optional ? " (ตัวเลือก)" : ""}`;
-    sourceBadge.textContent = statusLabel(source.status);
+    const isCentralSheet = source.sourceId === "google_sheet";
+    row.dataset.status = isCentralSheet ? centralSheet.tone : source.status;
+    label.textContent = `${source.label}${isCentralSheet ? " (ส่วนกลาง)" : ""}`;
+    sourceBadge.textContent = isCentralSheet ? centralSheet.label : statusLabel(source.status);
     top.append(label, sourceBadge);
-    detail.textContent = source.errorCode
-      ? `รหัสปัญหา ${source.errorCode}`
-      : `ตรวจล่าสุด ${source.lastCheckedAt ? formatThaiDateTime(source.lastCheckedAt) : "ยังไม่มีเวลา"}${source.lastSuccessAt ? ` • สำเร็จ ${formatThaiDateTime(source.lastSuccessAt)}` : ""}`;
+    detail.textContent = isCentralSheet
+      ? centralSheetSyncTruth
+      : (source.errorCode
+          ? `รหัสปัญหา ${source.errorCode}`
+          : `ตรวจล่าสุด ${source.lastCheckedAt ? formatThaiDateTime(source.lastCheckedAt) : "ยังไม่มีเวลา"}${source.lastSuccessAt ? ` • สำเร็จ ${formatThaiDateTime(source.lastSuccessAt)}` : ""}`);
     row.append(top, detail);
     sourceList.appendChild(row);
   });
   if (!sourceList.childElementCount) sourceList.appendChild(createWorkflowTruthEmpty("Backend ยังไม่ส่งสุขภาพแหล่งข้อมูล"));
   card.append(sourceTitle, sourceList);
-  if (service.retryAvailable === true && radarRetryQuotaAvailable(schedule)) {
-    const retry = document.createElement("button");
-    const inFlight = state.modal.workflowAction.inFlight
-      && state.modal.workflowAction.propId === INDICATOR_SCOUT_PROP_ID;
-    retry.type = "button";
-    retry.className = "workflow-radar-retry";
-    retry.disabled = inFlight;
-    retry.textContent = inFlight ? "กำลังลองใหม่..." : "ลองค้นหาใหม่";
-    retry.addEventListener("click", () => void retryRadarDiscovery());
-    card.appendChild(retry);
-  }
   return card;
 }
 
-function createRadarScheduleCard(dashboard = {}) {
+function createBackendOwnedDailyScheduleCard(dashboard = {}, titleText = "รอบค้นหารายวัน") {
   const domain = dashboard?.domainData?.indicatorScout || {};
   const schedule = normalizeRadarSchedule(domain.schedule || dashboard?.schedule);
-  const action = (dashboard.actions || []).find((item) => item.id === "save_indicator_scout_schedule");
-  const authoritative = dashboard.workflowReadModel?.authoritative === true;
-  const canSave = authoritative && action && ["ready", "settings_only"].includes(action.availability.status);
-  const inFlight = state.modal.workflowAction.inFlight
-    && state.modal.workflowAction.propId === INDICATOR_SCOUT_PROP_ID;
-  const form = document.createElement("form");
+  const card = document.createElement("section");
   const title = document.createElement("h4");
-  const toggle = document.createElement("label");
-  const checkbox = document.createElement("input");
-  const toggleText = document.createElement("span");
-  const timeLabel = document.createElement("label");
-  const timeCaption = document.createElement("span");
-  const time = document.createElement("input");
+  const facts = document.createElement("dl");
   const meta = document.createElement("p");
-  const save = document.createElement("button");
-  form.className = "workflow-radar-schedule";
-  form.dataset.radarScheduleForm = "true";
-  title.textContent = "ค้นหาอัตโนมัติวันละครั้ง";
-  toggle.className = "workflow-radar-schedule-toggle";
-  checkbox.type = "checkbox";
-  checkbox.checked = schedule.requestedEnabled;
-  checkbox.dataset.radarScheduleEnabled = "true";
-  checkbox.disabled = inFlight || !canSave;
-  toggleText.textContent = "เปิดรอบค้นหารายวัน";
-  toggle.append(checkbox, toggleText);
-  timeLabel.className = "workflow-radar-schedule-time";
-  timeCaption.textContent = "เวลาไทย";
-  time.type = "time";
-  time.step = 60;
-  time.required = true;
-  time.value = schedule.times[0] || INDICATOR_SCOUT_DEFAULT_TIME;
-  time.dataset.radarScheduleTime = "true";
-  time.disabled = inFlight || !canSave;
-  timeLabel.append(timeCaption, time);
-  meta.textContent = `${INDICATOR_SCOUT_TIMEZONE} • สูงสุด 1 รอบต่อวัน • ${schedule.effectiveEnabled ? "Scheduler ทำงานอยู่" : (schedule.requestedEnabled ? "เปิดไว้ แต่ Scheduler ยังไม่พร้อม" : "ปิดอยู่")}`;
-  save.type = "submit";
-  save.className = "workflow-radar-schedule-save";
-  save.disabled = inFlight || !canSave;
-  save.textContent = inFlight && state.modal.workflowAction.actionId === "save_indicator_scout_schedule"
-    ? "กำลังบันทึก..."
-    : "บันทึกเวลา";
-  form.append(title, toggle, timeLabel, meta, save);
-  if (!canSave) {
-    const unavailable = document.createElement("small");
-    unavailable.className = "workflow-radar-schedule-unavailable";
-    unavailable.textContent = authoritative
-      ? "Backend ยังไม่เปิดให้บันทึกตารางเวลา"
-      : "กำลังรอ Read Model จาก Backend";
-    form.appendChild(unavailable);
-  }
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void saveRadarSchedule(form);
+  card.className = "workflow-radar-schedule workflow-backend-owned-schedule";
+  card.dataset.backendOwnedSchedule = "true";
+  title.textContent = titleText;
+  facts.className = "workflow-radar-rail-facts";
+  [
+    ["สถานะนโยบาย", "เปิดถาวรโดย Backend"],
+    ["เวลา", `${INDICATOR_SCOUT_DEFAULT_TIME} น.`],
+    ["เขตเวลา", INDICATOR_SCOUT_TIMEZONE],
+    ["เพดาน", "สูงสุด 1 รอบต่อวัน"],
+    ["รันล่าสุด", schedule.lastRunAt ? formatThaiDateTime(schedule.lastRunAt) : "ยังไม่เคยรัน"],
+    ["รอบถัดไป", schedule.nextRunAt ? formatThaiDateTime(schedule.nextRunAt) : "Backend ยังไม่ส่งเวลา"],
+  ].forEach(([labelText, valueText]) => {
+    const row = document.createElement("div");
+    const label = document.createElement("dt");
+    const value = document.createElement("dd");
+    label.textContent = labelText;
+    value.textContent = valueText;
+    row.append(label, value);
+    facts.appendChild(row);
   });
-  return form;
+  meta.textContent = "ตารางนี้เป็น Read-only ผู้ใช้เปลี่ยนเวลา ปิดระบบ หรือสั่งรันทันทีไม่ได้";
+  card.append(title, facts, meta);
+  return card;
 }
 
 function renderRadarSettingsRail(dashboard, identity) {
@@ -17923,7 +26053,7 @@ function renderRadarSettingsRail(dashboard, identity) {
   els.workflowSettingsRailContent.innerHTML = "";
   els.workflowSettingsRailContent.append(
     createWorkflowUseGuideCard({ id: INDICATOR_SCOUT_PROP_ID }),
-    createRadarScheduleCard(dashboard),
+    createBackendOwnedDailyScheduleCard(dashboard, "Radar ทำงานอัตโนมัติวันละครั้ง"),
     createRadarRailTruthCard(dashboard),
   );
   if (actionState.propId === INDICATOR_SCOUT_PROP_ID && actionState.message) {
@@ -17936,144 +26066,10 @@ function renderRadarSettingsRail(dashboard, identity) {
   }
 }
 
-async function saveRadarSchedule(form) {
-  if (state.modal.workflowAction.inFlight || state.modal.id !== INDICATOR_SCOUT_PROP_ID) return;
-  const timeControl = form?.querySelector("[data-radar-schedule-time]");
-  const enabledControl = form?.querySelector("[data-radar-schedule-enabled]");
-  if (!(timeControl instanceof HTMLInputElement) || !(enabledControl instanceof HTMLInputElement)) return;
-  timeControl.setCustomValidity("");
-  const rawTime = String(timeControl.value || "").trim();
-  const match = rawTime.match(/^(\d{2}):(\d{2})$/);
-  const validTime = Boolean(match)
-    && Number(match[1]) >= 0
-    && Number(match[1]) <= 23
-    && Number(match[2]) >= 0
-    && Number(match[2]) <= 59;
-  if (!validTime) {
-    timeControl.setCustomValidity("กรุณาระบุเวลาไทยหนึ่งเวลาในรูปแบบ HH:MM");
-    form.reportValidity();
-    return;
-  }
-  const subject = getModalSubject();
-  const propertyRole = getPropertyRole(subject);
-  const report = state.propReports[INDICATOR_SCOUT_PROP_ID] || {};
-  const dashboard = normalizeWorkflowDashboard(subject, propertyRole, report);
-  const action = dashboard.actions.find((item) => item.id === "save_indicator_scout_schedule");
-  if (
-    dashboard.workflowReadModel?.authoritative !== true
-    || !action
-    || !["ready", "settings_only"].includes(action.availability.status)
-  ) return;
-  const idempotencyKey = createWorkflowIdempotencyKey();
-  state.modal.workflowAction = {
-    inFlight: true,
-    propId: INDICATOR_SCOUT_PROP_ID,
-    actionId: "save_indicator_scout_schedule",
-    idempotencyKey,
-    formSignature: "",
-    message: "กำลังบันทึกรอบค้นหา Radar วันละครั้ง",
-    tone: "working",
-  };
-  renderGameModal();
-  try {
-    const response = await postJson(INDICATOR_SCOUT_WORKFLOW_ENDPOINT, {
-      actionId: "save_indicator_scout_schedule",
-      form: { enabled: enabledControl.checked === true, times: [rawTime] },
-      idempotencyKey,
-    });
-    if (response?.ok !== true) throw new Error("Backend ไม่ยืนยันการบันทึกตารางเวลา Radar");
-    if (response?.mission) mergeBackendMission(response.mission);
-    state.modal.workflowAction = {
-      inFlight: false,
-      propId: INDICATOR_SCOUT_PROP_ID,
-      actionId: "save_indicator_scout_schedule",
-      idempotencyKey: "",
-      formSignature: "",
-      message: "บันทึกเวลา Radar แล้ว • สูงสุด 1 รอบต่อวัน • Asia/Bangkok",
-      tone: "success",
-    };
-    await loadPropReport(INDICATOR_SCOUT_PROP_ID);
-  } catch (error) {
-    state.modal.workflowAction = {
-      inFlight: false,
-      propId: INDICATOR_SCOUT_PROP_ID,
-      actionId: "save_indicator_scout_schedule",
-      idempotencyKey: "",
-      formSignature: "",
-      message: safeDashboardDisplayText(error?.message, "บันทึกเวลา Radar ไม่สำเร็จ"),
-      tone: "error",
-    };
-  } finally {
-    if (state.modal.open && state.modal.id === INDICATOR_SCOUT_PROP_ID) renderGameModal();
-  }
-}
-
-async function retryRadarDiscovery() {
-  if (state.modal.workflowAction.inFlight || state.modal.id !== INDICATOR_SCOUT_PROP_ID) return;
-  const subject = getModalSubject();
-  const propertyRole = getPropertyRole(subject);
-  const report = state.propReports[INDICATOR_SCOUT_PROP_ID] || {};
-  const dashboard = normalizeWorkflowDashboard(subject, propertyRole, report);
-  const schedule = normalizeRadarSchedule(
-    dashboard.domainData?.indicatorScout?.schedule || dashboard.schedule,
-  );
-  const service = normalizeRadarServiceHealth(dashboard.domainData?.indicatorScout?.serviceHealth);
-  if (
-    service.retryAvailable !== true
-    || service.retryEndpoint !== INDICATOR_SCOUT_WORKFLOW_ENDPOINT
-    || service.retryActionId !== "discover_new_indicators"
-    || !radarRetryQuotaAvailable(schedule)
-  ) return;
-  const idempotencyKey = createWorkflowIdempotencyKey();
-  state.modal.workflowAction = {
-    inFlight: true,
-    propId: INDICATOR_SCOUT_PROP_ID,
-    actionId: service.retryActionId,
-    idempotencyKey,
-    formSignature: "",
-    message: "กำลังให้ Backend ลองค้นหาใหม่",
-    tone: "working",
-  };
-  renderGameModal();
-  try {
-    const response = await postJson(INDICATOR_SCOUT_WORKFLOW_ENDPOINT, {
-      actionId: service.retryActionId,
-      form: {},
-      idempotencyKey,
-    });
-    if (response?.ok !== true) throw new Error("Backend ยังไม่ยืนยันคำขอลองใหม่");
-    if (response?.mission) mergeBackendMission(response.mission);
-    state.modal.workflowAction = {
-      inFlight: false,
-      propId: INDICATOR_SCOUT_PROP_ID,
-      actionId: service.retryActionId,
-      idempotencyKey: "",
-      formSignature: "",
-      message: safeDashboardDisplayText(response?.messageTh, "Backend รับคำขอลองใหม่แล้ว ระบบจะอัปเดตผลและสุขภาพแหล่งข้อมูลที่หน้านี้"),
-      tone: "success",
-    };
-    await loadPropReport(INDICATOR_SCOUT_PROP_ID);
-  } catch (error) {
-    state.modal.workflowAction = {
-      inFlight: false,
-      propId: INDICATOR_SCOUT_PROP_ID,
-      actionId: "discover_new_indicators",
-      idempotencyKey: "",
-      formSignature: "",
-      message: safeDashboardDisplayText(error?.message, "ลองค้นหาใหม่ไม่สำเร็จ"),
-      tone: "error",
-    };
-    await loadPropReport(INDICATOR_SCOUT_PROP_ID);
-  } finally {
-    if (state.modal.open && state.modal.id === INDICATOR_SCOUT_PROP_ID) renderGameModal();
-  }
-}
-
 function workflowRailActions(subject, dashboard) {
   const actions = dashboard?.actions || [];
-  if (subject?.id === INDICATOR_SCOUT_PROP_ID) {
-    return actions.filter((action) => INDICATOR_SCOUT_RAIL_ACTION_IDS.has(action.id));
-  }
+  if (["codex_mcp_portal", INDICATOR_SCOUT_PROP_ID].includes(subject?.id)) return [];
+  if ([EA_FACTORY_PROP_ID, EA_OPTIMIZATION_LAB_PROP_ID].includes(subject?.id)) return [];
   if (subject?.id === FX_NEWS_BIAS_PROP_ID) return [];
   return [...actions].sort((left, right) => (
     Number(WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(left.id))
@@ -18081,17 +26077,53 @@ function workflowRailActions(subject, dashboard) {
   ));
 }
 
+function createResearchSheetConsumerCard(propId, titleText = "Google Sheet กลาง") {
+  const presentation = researchSheetConsumerPresentation(
+    propId,
+    { requiresWrite: propId === TRADING_RESEARCH_LAB_PROP_ID && state.modal.id === EA_FACTORY_PROP_ID ? false : null },
+  );
+  const hub = state.researchSheetHub.data;
+  const card = document.createElement("section");
+  const heading = document.createElement("div");
+  const title = document.createElement("strong");
+  const status = document.createElement("span");
+  const detail = document.createElement("p");
+  card.className = "workflow-research-sheet-consumer";
+  card.dataset.tone = presentation.tone;
+  title.textContent = titleText;
+  status.textContent = presentation.label;
+  heading.append(title, status);
+  detail.textContent = `${researchSheetHubConfiguredReference(hub)} • ${presentation.detail}`;
+  card.append(heading, detail);
+  return card;
+}
+
 function createWorkflowUseGuideCard(subject) {
   const guides = {
+    codex_mcp_portal: [
+      "ดูระบบเทรด 3 ตระกูลที่ Backend ค้นและตรวจหลักฐานล่าสุด",
+      "Backend ค้นอัตโนมัติวันละครั้งเวลา 09:00 น. ตามเวลา Asia/Bangkok",
+      "ดูผลเดิม รอบถัดไป และสถานะ Scheduler แบบ Read-only",
+    ],
     [INDICATOR_SCOUT_PROP_ID]: [
       "ดูรายการ Indicator, EA และ Tool ที่ Radar พบในหน้าหลัก",
-      "เปิดค้นหาอัตโนมัติวันละครั้งและกำหนดเวลาไทยได้หนึ่งเวลา",
-      "ตรวจสุขภาพ Adapter และแหล่งข้อมูล หาก Backend เปิดให้ลองใหม่จึงค่อยกดปุ่ม",
+      "Backend ค้นอัตโนมัติวันละครั้งเวลา 09:00 น. ตามเวลา Asia/Bangkok",
+      "ตรวจสุขภาพ Adapter แหล่งข้อมูล ผลล่าสุด และรอบถัดไปแบบ Read-only",
     ],
     [HQ_CONNECTION_HUB_PROP_ID]: [
       "กรองอุปกรณ์ตามสถานะ พร้อม ต้องแก้ หรือรอตรวจ",
       "อ่านจุดติดขัดและคำแนะนำบนการ์ด",
       "กดเปิดอุปกรณ์เพื่อดูรายละเอียดหรือขอผลตรวจใหม่",
+    ],
+    [EA_FACTORY_PROP_ID]: [
+      "เลือก Strategy Record จากคลังวิจัยหรือ Google Sheets แล้วตรวจ A-W ให้ครบ",
+      "ยืนยัน Target และกดทำทีละขั้น โดยปุ่มถัดไปเปิดเมื่อ Backend ผ่าน Gate เท่านั้น",
+      "MT4/MT5 ต้องยืนยัน Terminal ก่อน Compile/Backtest • Pine Script ใช้ Code Validation และข้าม Backtest",
+    ],
+    [EA_OPTIMIZATION_LAB_PROP_ID]: [
+      "เลือก EA สำหรับ MT4 หรือ MT5 แล้วอ่าน Inputs จาก Source หรือไฟล์ .set",
+      "เลือกเฉพาะ Input ที่ต้อง Optimize และกำหนด Start / Step / Stop เอง ระบบจะไม่เดาช่วงให้",
+      "วางแผนหลายรอบแบบ Case-by-case และอ่านผลจริงจาก Backend โดยแยก Tested Bands กับ Next Parameter Plan",
     ],
   };
   const steps = guides[subject?.id] || [
@@ -18395,9 +26427,31 @@ function renderWorkflowSettingsRail(subject, dashboard, identity = getWorkflowDa
   const actions = workflowRailActions(subject, dashboard);
   els.workflowSettingsRail.hidden = false;
   els.workflowSettingsRail.dataset.dashboardIdentity = identity.id;
-  if (els.workflowSettingsRailTitle) els.workflowSettingsRailTitle.textContent = "วิธีใช้และคำสั่ง";
+  if (els.workflowSettingsRailTitle) {
+    els.workflowSettingsRailTitle.textContent = subject?.id === EA_FACTORY_PROP_ID
+      ? "โรงงาน Manual 7 ขั้น"
+      : "วิธีใช้และคำสั่ง";
+  }
   els.workflowSettingsRailContent.innerHTML = "";
   els.workflowSettingsRailContent.appendChild(createWorkflowUseGuideCard(subject));
+  if (RESEARCH_SHEET_CONSUMER_PROP_IDS.has(subject?.id)) {
+    els.workflowSettingsRailContent.appendChild(createResearchSheetConsumerCard(subject.id));
+  } else if (subject?.id === EA_FACTORY_PROP_ID) {
+    els.workflowSettingsRailContent.appendChild(
+      createResearchSheetConsumerCard(TRADING_RESEARCH_LAB_PROP_ID, "Google Sheet กลาง • Deep_Research"),
+    );
+  }
+  if (subject?.id === EA_FACTORY_PROP_ID) {
+    const terminalRail = document.createElement("div");
+    terminalRail.className = "ea-factory-rail-terminal";
+    renderEaFactoryTerminalPicker(terminalRail, dashboard?.domainData?.eaFactory || {});
+    els.workflowSettingsRailContent.appendChild(terminalRail);
+  }
+  if (subject?.id === "codex_mcp_portal") {
+    els.workflowSettingsRailContent.appendChild(
+      createBackendOwnedDailyScheduleCard(dashboard, "เรดาร์ระบบเทรดทำงานอัตโนมัติวันละครั้ง"),
+    );
+  }
   actions.forEach((action) => {
     const card = createWorkflowActionCard(action, dashboard);
     card.classList.add("workflow-rail-action-card");
@@ -18702,7 +26756,13 @@ function renderWorkflowDashboard(subject, propertyRole, report = {}) {
   if (els.modalPortraitPanel) els.modalPortraitPanel.dataset.dashboardIdentity = identity.id;
   renderWorkflowSettingsRail(subject, dashboard, identity);
   const isFxNewsDashboard = subject.id === FX_NEWS_BIAS_PROP_ID;
+  const isDirectResearchDashboard = subject.id === TRADING_RESEARCH_LAB_PROP_ID;
+  const isEaFactoryDashboard = subject.id === EA_FACTORY_PROP_ID;
+  const isEaOptimizationLabDashboard = subject.id === EA_OPTIMIZATION_LAB_PROP_ID;
+  const suppressAgentHandoff = isFxNewsDashboard || isDirectResearchDashboard || isEaFactoryDashboard || isEaOptimizationLabDashboard;
   if (isFxNewsDashboard) {
+    if (els.workflowAgentHandoffRail) els.workflowAgentHandoffRail.hidden = true;
+  } else if (suppressAgentHandoff) {
     if (els.workflowAgentHandoffRail) els.workflowAgentHandoffRail.hidden = true;
   } else {
     renderWorkflowAgentHandoff(subject, report, identity);
@@ -18710,8 +26770,11 @@ function renderWorkflowDashboard(subject, propertyRole, report = {}) {
   renderWorkflowTabs(subject.id, dashboard, selectedTab);
   if (els.workflowResultsPanel) {
     const usesDomainHistory = isHistoryTab
-      && [INDICATOR_SCOUT_PROP_ID, FX_NEWS_BIAS_PROP_ID].includes(subject.id);
-    els.workflowResultsPanel.hidden = isFxNewsDashboard || !isHistoryTab || usesDomainHistory;
+      && (
+        [INDICATOR_SCOUT_PROP_ID, FX_NEWS_BIAS_PROP_ID].includes(subject.id)
+        || [TRADING_RESEARCH_LAB_PROP_ID, EA_FACTORY_PROP_ID, EA_OPTIMIZATION_LAB_PROP_ID].includes(subject.id)
+      );
+    els.workflowResultsPanel.hidden = isFxNewsDashboard || isEaFactoryDashboard || isEaOptimizationLabDashboard || !isHistoryTab || usesDomainHistory;
     els.workflowResultsPanel.dataset.mode = "history";
   }
   if (els.workflowResultsEyebrow) els.workflowResultsEyebrow.textContent = isFxNewsDashboard ? "ข้อมูลจาก Backend" : "ข้อมูลย้อนหลัง";
@@ -18725,14 +26788,16 @@ function renderWorkflowDashboard(subject, propertyRole, report = {}) {
     els.workflowDashboardContent.innerHTML = "";
     els.workflowDashboardContent.hidden = false;
     if (!isPrimaryTab && !isHistoryTab) {
-      const intro = document.createElement("header");
-      const title = document.createElement("h4");
-      const description = document.createElement("p");
-      intro.className = "workflow-tab-heading";
-      title.textContent = selectedTab?.labelTh || dashboard.titleTh;
-      description.textContent = selectedTab?.descriptionTh || dashboard.summaryTh;
-      intro.append(title, description);
-      els.workflowDashboardContent.appendChild(intro);
+      if (!isEaOptimizationLabDashboard) {
+        const intro = document.createElement("header");
+        const title = document.createElement("h4");
+        const description = document.createElement("p");
+        intro.className = "workflow-tab-heading";
+        title.textContent = selectedTab?.labelTh || dashboard.titleTh;
+        description.textContent = selectedTab?.descriptionTh || dashboard.summaryTh;
+        intro.append(title, description);
+        els.workflowDashboardContent.appendChild(intro);
+      }
     }
     const centralActionIds = new Set(workflowRailActions(subject, dashboard).map((action) => action.id));
     const actions = (selectedTab?.actionIds || [])
@@ -18768,7 +26833,11 @@ function renderWorkflowDashboard(subject, propertyRole, report = {}) {
       note.textContent = selectedTab?.emptyMessageTh || "ยังไม่มีข้อมูลในส่วนนี้ เมื่อ Local Runner ส่งผลกลับมาระบบจะแสดงที่นี่";
       els.workflowDashboardContent.appendChild(note);
     }
-    if (isHistoryTab && ["left_server_racks", "right_server_racks", "right_tool_console", "terminal_workstation"].includes(subject.id)) {
+    if (
+      isHistoryTab
+      && ["right_server_racks", "right_tool_console", "terminal_workstation"].includes(subject.id)
+      && !isEaOptimizationLabDashboard
+    ) {
       renderWorkflowSourceCards(els.workflowDashboardContent, dashboard.agentDeliveredSources);
     }
     if (isHistoryTab && !els.workflowDashboardContent.childElementCount) els.workflowDashboardContent.hidden = true;
@@ -18786,8 +26855,18 @@ function setWorkflowDashboardTab(propId, tabId, { focus = false } = {}) {
   const dashboard = normalizeWorkflowDashboard(subject, propertyRole, report);
   const selected = dashboard.tabs.find((tab) => tab.id === tabId) || dashboard.tabs[0];
   if (!selected) return;
+  if (propId === EA_FACTORY_PROP_ID) {
+    const stage = dashboard.domainData.eaFactory?.stages?.find((item) => item.id === selected.id);
+    const readOnlyHistory = selected.id === "artifacts_report"
+      && (dashboard.domainData.eaFactory?.builds?.length || 0) > 0;
+    if (stage && ["locked", "unknown"].includes(stage.status) && !readOnlyHistory) return;
+  }
   state.modal.workflowTabs[propId] = selected.id;
   renderWorkflowDashboard(subject, propertyRole, report);
+  if (propId === EA_OPTIMIZATION_LAB_PROP_ID) {
+    const scrollArea = els.workflowDashboardContent?.closest(".workflow-dashboard-scroll");
+    if (scrollArea) scrollArea.scrollTop = 0;
+  }
   if (focus) els.workflowDashboardTabs?.querySelector(`[data-workflow-tab="${selected.id}"]`)?.focus();
   saveSessionSnapshot();
 }
@@ -18863,6 +26942,7 @@ async function submitWorkflowDashboardAction(form) {
   const report = state.propReports[propId] || {};
   const dashboard = normalizeWorkflowDashboard(subject, propertyRole, report);
   const actionId = String(form?.dataset.workflowActionForm || "");
+  if (BACKEND_OWNED_DAILY_ACTION_IDS.has(actionId)) return;
   const action = dashboard.actions.find((item) => item.id === actionId);
   if (!action || !["ready", "settings_only"].includes(action.availability.status)) return;
   if (!validateWorkflowSourceChoice(form, action)) {
@@ -19442,7 +27522,7 @@ function renderMissionKanban({ preserveScroll = true } = {}) {
     : MISSION_KANBAN_COLUMNS;
   const visibleStatuses = new Set(columns.map((column) => column.id));
   const missions = state.missions.filter((mission) => (
-    visibleStatuses.has(getMissionPresentationStatus(mission))
+    visibleStatuses.has(getMissionCenterColumnStatus(mission))
     && missionMatchesSearch(mission, query)
   ));
 
@@ -19457,7 +27537,7 @@ function renderMissionKanban({ preserveScroll = true } = {}) {
 
   els.modalKanbanBoard.innerHTML = "";
   columns.forEach((column) => {
-    const columnMissions = missions.filter((mission) => getMissionPresentationStatus(mission) === column.id);
+    const columnMissions = missions.filter((mission) => getMissionCenterColumnStatus(mission) === column.id);
     const section = document.createElement("section");
     const heading = document.createElement("div");
     const label = document.createElement("strong");
@@ -19476,7 +27556,11 @@ function renderMissionKanban({ preserveScroll = true } = {}) {
       empty.textContent = query ? "ไม่พบ Mission ที่ตรงกับคำค้น" : "ยังไม่มี Mission";
       list.appendChild(empty);
     } else {
-      columnMissions.forEach((mission) => list.appendChild(createTaskCard(mission, { variant: "kanban-card", source: "kanban" })));
+      columnMissions.forEach((mission) => list.appendChild(createTaskCard(mission, {
+        variant: "kanban-card",
+        source: "kanban",
+        statusOverride: column.id,
+      })));
     }
     section.append(heading, list);
     els.modalKanbanBoard.appendChild(section);
@@ -19601,25 +27685,50 @@ async function executeApprovedKanbanMission() {
   }
 }
 
+function updateMissionCenterTabCopy() {
+  if (getModalSurface() !== "kanban") return;
+  const isMeetingRoom = state.modal.activeTab === "mission-chat";
+  if (els.modalSpeaker) {
+    els.modalSpeaker.textContent = isMeetingRoom ? "ห้องแชท AI รวม" : "Mission ทั้งหมด";
+  }
+  if (els.modalDialogue) {
+    els.modalDialogue.textContent = isMeetingRoom
+      ? "ห้องประชุมกลางเชื่อม Session จริงจาก Backend แสดงผู้พูด บทบาท เวลา สถานะ ข้อสรุป และข้อเสนอโดยไม่สร้าง Mission จนกว่าคุณจะอนุมัติ"
+      : "รวม Mission ของทุก Agent เป็น 4 สถานะ โดยงานที่ Backend รับแล้วจะแสดงรวมอยู่ในกำลังทำงาน";
+  }
+}
+
 function setModalTab(tabName) {
   const surface = getModalSurface();
   const allowedTabs = {
     agent: ["chat", "tasks"],
     dashboard: ["results"],
-    kanban: ["kanban"],
+    kanban: ["mission-chat", "kanban"],
   }[surface];
   state.modal.activeTab = allowedTabs.includes(tabName) ? tabName : allowedTabs[0];
   const tabs = els.modalTabs ? [...els.modalTabs.querySelectorAll(".modal-tab")] : [];
   tabs.forEach((tab) => {
     const surfaces = String(tab.dataset.surfaces || "").split(/\s+/).filter(Boolean);
-    tab.hidden = !surfaces.includes(surface);
-    tab.classList.toggle("active", tab.dataset.tab === state.modal.activeTab);
+    const visible = surfaces.includes(surface);
+    const selected = visible && tab.dataset.tab === state.modal.activeTab;
+    tab.hidden = !visible;
+    tab.classList.toggle("active", selected);
+    tab.setAttribute("aria-selected", String(selected));
+    tab.tabIndex = selected ? 0 : -1;
   });
   [...els.gameModal.querySelectorAll(".modal-tab-panel")].forEach((panel) => {
     const surfaces = String(panel.dataset.surfaces || "").split(/\s+/).filter(Boolean);
     panel.hidden = !surfaces.includes(surface);
     panel.classList.toggle("active", panel.dataset.panel === state.modal.activeTab);
   });
+  updateMissionCenterTabCopy();
+  renderResearchSheetHub();
+  if (surface === "kanban" && state.modal.activeTab === "mission-chat") {
+    renderMissionMeetingRoom();
+    ensureMeetingRoomLoaded();
+  } else {
+    stopMeetingRoomPolling();
+  }
   saveSessionSnapshot();
 }
 
@@ -19671,14 +27780,18 @@ function renderGameModal() {
     ? subject.name
     : safeDashboardDisplayText(dashboardProfile?.moduleNameTh || propertyRole?.displayTitle || displayPropName(subject.id, subject.label));
   const role = isAgent ? subject.role : (propertyRole?.displayTitle || displayPropName(subject.id, subject.layer));
-  const summary = isAgent ? (subject.summary || "") : (propertyRole?.purpose || subject.summary || "");
+  const summary = isAgent
+    ? (subject.summary || "")
+    : isKanban
+      ? "ห้องประชุม AI ที่เชื่อม Backend พร้อมคิว Mission ของ Agent ทุกตัว"
+      : (propertyRole?.purpose || subject.summary || "");
   const speech = isAgent
     ? getAgentSpeech(subject.id, "idle", subject.status)
     : isKanban
-      ? "ศูนย์รวม Mission ของทุก Agent แยกตามสถานะ งานจริงจะยังไม่เริ่มจนกว่าจะผ่านระบบป้องกันของ Backend"
+      ? "เริ่มหรือเปิด Session ประชุมจริงจาก Backend หรือดู Mission ทั้งหมดที่แยกตามสถานะ"
       : (propertyRole?.openingMessage || `Dashboard ของ ${title} แสดงข้อมูลในเครื่องแบบดูอย่างเดียว`);
 
-  els.modalKind.textContent = isAgent ? "พื้นที่ทำงานของ Agent" : isKanban ? "ศูนย์ควบคุม Mission" : "Dashboard ของอุปกรณ์";
+  els.modalKind.textContent = isAgent ? "พื้นที่ทำงานของ Agent" : isKanban ? "ห้องประชุมและ Mission" : "Dashboard ของอุปกรณ์";
   els.modalTitle.textContent = title;
   els.modalSubtitle.textContent = isAgent ? `${role} | ${summary}` : summary;
   els.modalSpeaker.textContent = isAgent ? title : isKanban ? "คิว Mission ทั้งหมด" : `Dashboard: ${title}`;
@@ -19719,17 +27832,17 @@ function renderGameModal() {
   if (isKanban) {
     const counts = Object.fromEntries(MISSION_KANBAN_COLUMNS.map((column) => [
       column.id,
-      state.missions.filter((mission) => getMissionPresentationStatus(mission) === column.id).length,
+      state.missions.filter((mission) => getMissionCenterColumnStatus(mission) === column.id).length,
     ]));
     renderStatusGrid([
       ["Task ทั้งหมด", String(state.missions.length)],
-      ["รอเริ่มงาน", String(counts.queued || 0)],
       ["กำลังทำงาน", String(counts.running || 0)],
       ["ติดขัด", String(counts.blocked || 0)],
       ["เสร็จแล้ว", String(counts.completed || 0)],
       ["ไม่สำเร็จ", String(counts.failed || 0)],
       ["Bridge", `${displayBridgeValue(state.bridge.mode)} / ${displayBridgeValue(state.bridge.status)}`],
     ]);
+    renderMissionMeetingRoom();
     renderMissionKanban();
   } else {
     renderPropDashboard(subject, propertyRole);
@@ -19757,6 +27870,11 @@ function trapGameModalFocus(event) {
   if (els.taskDetailDialog?.open || els.dashboardResultDialog?.open || els.newsEventDialog?.open) return;
   if (event.key === "Escape") {
     event.preventDefault();
+    if (researchSheetHubPopoverIsOpen()) {
+      event.stopPropagation();
+      closeResearchSheetHubPopover();
+      return;
+    }
     closeGameModal();
     return;
   }
@@ -19793,7 +27911,11 @@ function openGameModal(type, id, tab = "chat") {
   if (surface === "dashboard" && isWorkflowDashboardPropId(id)) {
     delete state.modal.workflowTabs[id];
   }
-  state.modal.activeTab = surface === "agent" ? tab : surface === "dashboard" ? "results" : "kanban";
+  state.modal.activeTab = surface === "agent"
+    ? tab
+    : surface === "dashboard"
+      ? "results"
+      : (tab || "mission-chat");
   document.body.classList.add("modal-open");
   const subject = getModalSubject();
   if (subject && type === "agent") {
@@ -19818,6 +27940,7 @@ function closeGameModal() {
   if (els.dashboardResultDialog?.open) closeDashboardResultDetail({ restoreFocus: false });
   if (els.newsEventDialog?.open) closeFxNewsEventDetail({ restoreFocus: false });
   if (state.modal.workflowVoice.recognition) stopWorkflowVoiceDictation();
+  stopMeetingRoomPolling();
   state.modal.open = false;
   document.body.classList.remove("modal-open");
   els.gameModal?.classList.remove("open");
@@ -19863,8 +27986,23 @@ function openAgentDialog(agentId, tab = "chat") {
 async function openPropDialog(propId, tab = null) {
   selectObject(propId, { loadBackendReport: false });
   const reportRequest = loadPropReport(propId);
-  openGameModal("prop", propId, tab || (propId === "mission_strategy_table" ? "kanban" : "dashboard"));
+  const researchSheetRequest = (
+    propId === "mission_strategy_table"
+    || RESEARCH_SHEET_LINKED_PROP_IDS.has(propId)
+  )
+    ? loadResearchSheetHub()
+    : Promise.resolve(null);
+  const eaFactoryRequest = propId === EA_FACTORY_PROP_ID
+    ? reportRequest.then(() => loadEaFactoryReadModel())
+    : Promise.resolve(null);
+  const portalReportRequest = propId === TRADING_RESEARCH_LAB_PROP_ID
+    ? loadPropReport("codex_mcp_portal")
+    : Promise.resolve(null);
+  openGameModal("prop", propId, tab || (propId === "mission_strategy_table" ? "mission-chat" : "dashboard"));
   await reportRequest;
+  await eaFactoryRequest;
+  await portalReportRequest;
+  await researchSheetRequest;
   if (state.modal.open && state.modal.type === "prop" && state.modal.id === propId) renderGameModal();
 }
 
@@ -20963,7 +29101,20 @@ function moveAgentToPoint(point, status = "กำลังเคลื่อน�
 
 function moveAgentAlongPath(path, status = "Moving") {
   const steps = path.filter((point) => getVisualDistance({ x: state.agent.x, y: state.agent.y }, point) > 0.18);
-  if (!steps.length) return null;
+  if (!steps.length) {
+    const point = path[path.length - 1] || {
+      x: state.agent.x,
+      y: state.agent.y,
+      label: "จุดหมายที่กำหนด",
+    };
+    finishAgentWalk(state.agent.direction, status, point.label, true);
+    return {
+      agentId: state.agent.id,
+      target: point.label || "จุดหมายที่กำหนด",
+      pathLength: 0,
+      durationMs: 0,
+    };
+  }
 
   const finalPoint = steps[steps.length - 1];
   showWalkTarget(finalPoint.x, finalPoint.y, false);
@@ -21224,7 +29375,15 @@ function moveSupportAgentToPoint(agent, point, status = "Moving", options = {}) 
     return null;
   }
 
-  const start = { x: agent.x, y: agent.y, label: agent.name };
+  const renderedStart = { x: agent.x, y: agent.y, label: agent.name };
+  const start = validateNavigationPoint(renderedStart).ok
+    ? renderedStart
+    : (getNearestWalkablePoint(renderedStart) || renderedStart);
+  if (start.x !== renderedStart.x || start.y !== renderedStart.y) {
+    agent.x = start.x;
+    agent.y = start.y;
+    updateAgentNodeState(agent);
+  }
   const path = planAgentPath(start, safePoint);
   if (!path || path.length === 0) {
     updateDecisionLog(`เดินไม่ได้: ${agent.name} ไม่พบเส้นทางไปยัง ${safePoint.label || "จุดหมาย"}`, { persist: agent.persistMotion });
@@ -21238,7 +29397,15 @@ function moveSupportAgentToPoint(agent, point, status = "Moving", options = {}) 
   }
 
   const steps = path.filter((step) => getVisualDistance({ x: agent.x, y: agent.y }, step) > 0.18);
-  if (!steps.length) return null;
+  if (!steps.length) {
+    finishSupportAgentWalk(agent, agent.direction, status, safePoint.label, true);
+    return {
+      agentId: agent.id,
+      target: safePoint.label || point.label || "target",
+      direction: agent.direction || "down",
+      speedMs: 0,
+    };
+  }
   const finalPoint = steps[steps.length - 1];
   finalPoint.label = safePoint.label || point.label || "target";
   const timeline = buildAgentMoveTimeline([
@@ -21410,6 +29577,31 @@ function routeAgentToTargetId(agentId, targetId, status = "กำลังเด
 
 function getAgentMeetingSeatTargetId(agentId) {
   return meetingSeats[agentId] ? agentId : "mission_strategy_table";
+}
+
+function routeAgentToMeetingSeat(agentId) {
+  const seat = getAgentMeetingSeatTargetId(agentId);
+  const routeOptions = { persist: false, select: false };
+
+  // The portal workstation and Mission Table are separated by the upper console
+  // collision mask. Route the News Consultant through its reachable analysis
+  // station so the visual meeting flow never leaves the agent stranded upstairs.
+  if (agentId === "codex_mcp_operator") {
+    const stagingRoute = routeAgentToTargetId(
+      agentId,
+      "left_analytics_console",
+      "กำลังเดินเข้าประชุม",
+      routeOptions,
+    );
+    if (stagingRoute) {
+      window.setTimeout(() => {
+        routeAgentToTargetId(agentId, seat, "กำลังเดินเข้าประชุม", routeOptions);
+      }, Math.max(0, Number(stagingRoute.speedMs || stagingRoute.durationMs || 0)) + AGENT_WALK_SETTLE_MS + 40);
+      return stagingRoute;
+    }
+  }
+
+  return routeAgentToTargetId(agentId, seat, "กำลังเดินเข้าประชุม", routeOptions);
 }
 
 function getAgentTargetPoint(targetId, agentId) {
@@ -21645,7 +29837,13 @@ function planAgentPath(start, target) {
   const gridPath = findGridPath(start, target);
   if (!gridPath) return null;
 
-  const stepped = densifyNavigationPath(gridPath, target.label);
+  const anchors = [start, ...gridPath, target].filter((point, index, points) => (
+    index === 0 || getVisualDistance(points[index - 1], point) > 0.02
+  ));
+  const smoothed = anchors.length > 1
+    ? [anchors[0], ...smoothNavigationPath(anchors)]
+    : anchors;
+  const stepped = densifyNavigationPath(smoothed, target.label);
   if (!stepped.length) return null;
   const final = stepped[stepped.length - 1];
   final.label = target.label;
@@ -22124,7 +30322,7 @@ function selectObject(id, options = {}) {
     {
       title: id === "mission_strategy_table" ? "Kanban รวม Task ทั้งหมด" : "Dashboard สำหรับดูผลลัพธ์",
       detail: id === "mission_strategy_table"
-        ? "กดโต๊ะเพื่อดูงานที่รอเริ่ม กำลังทำ ติดขัด เสร็จแล้ว ไม่สำเร็จ และเก็บเข้าคลัง • งานเสี่ยงสูงที่ต้องยืนยันจะแสดงในคอลัมน์ติดขัด"
+        ? "กดโต๊ะเพื่อเปิดห้องแชท AI รวมที่เชื่อม Session จาก Backend หรือดู Mission ใน 4 สถานะ: กำลังทำงาน ติดขัด เสร็จแล้ว และไม่สำเร็จ • งานเสี่ยงสูงที่ต้องยืนยันจะแสดงในคอลัมน์ติดขัด"
         : "กดอุปกรณ์เพื่อดู KPI สถานะ Task ปัจจุบัน และรายงาน หากต้องการสร้างงานให้เปิด Agent",
       owner: id === "mission_strategy_table" ? "manager" : listText(propertyRole?.ownerAgents, "manager"),
       status: id === "mission_strategy_table" ? "kanban" : "read_only",
@@ -22182,6 +30380,13 @@ async function assignTask(agentId, task) {
     && !["manager", "ceo"].includes(selectedAgent.id),
   );
   const inferredTargetId = pickTargetForTask(taskText);
+  if (["codex_mcp_portal", INDICATOR_SCOUT_PROP_ID].includes(inferredTargetId)) {
+    return {
+      backendAccepted: false,
+      status: "blocked",
+      detail: "งานค้นคว้านี้รันอัตโนมัติจาก Backend เวลา 09:00 น. Asia/Bangkok เท่านั้น จึงไม่สร้าง Mission แบบสั่งเอง",
+    };
+  }
   const targetId = inferredTargetId !== "mission_strategy_table" || assignee.id === "manager" || assignee.id === "ceo"
     ? inferredTargetId
     : (assignee.defaultTarget || "mission_strategy_table");
@@ -22281,7 +30486,7 @@ const taskKeywords = {
   eaDevelopment: ["ea development", "develop ea", "develop source", "modify ea", "ea source", "source ea", "แก้ source ea", "พัฒนา ea", "แก้ไข ea", "แก้ ea", "ปรับ source ea", "โจทย์พัฒนา ea"],
   vpsAgentSettings: ["hq bridge", "hq status", "agent settings", "agent preference", "vps status", "ตั้งค่า agent", "ตั้งค่าเอเจนต์", "สถานะ hq", "สถานะ bridge", "สถานะ vps"],
   archive: ["archive", "history", "memory", "old mission", "transcript", "report archive", "คลัง", "ความจำ", "งานเก่า", "ประวัติ"],
-  globalDiscovery: ["global trading system", "system scout", "trading system radar", "ระบบเทรดทั่วโลก", "ค้นหาระบบเทรด", "หาระบบเทรด", "ระบบเทรดใหม่", "ea ใหม่", "อัปเดต ea"],
+  globalDiscovery: ["global trading system", "system scout", "trading system radar", "ระบบเทรดทั่วโลก", "ค้นหาระบบเทรด", "หาระบบเทรด", "ระบบเทรดใหม่"],
   deepResearch: ["deep research", "verify strategy", "research archive", "วิจัยเชิงลึก", "ตรวจสอบระบบ", "ขยายงานวิจัย", "ตรวจแหล่งอ้างอิง"],
   eaDiscovery: ["ea discovery", "discovery ea", "สร้าง ea จากเป้าหมาย", "ค้นหา ea จากเป้าหมาย", "หา ea ตามกำไร", "หา ea ตาม drawdown"],
   backtest: ["backtest", "back test", "drawdown", "profit factor", "equity", "แบคเทส", "แบคเทรด"],
@@ -22311,7 +30516,7 @@ function pickTargetForTask(text) {
   if (hasTaskKeyword(lower, taskKeywords.globalDiscovery)) return "codex_mcp_portal";
   if (hasTaskKeyword(lower, taskKeywords.risk)) return "mission_strategy_table";
   if (hasTaskKeyword(lower, taskKeywords.eaBuild)) return "right_server_racks";
-  if (hasTaskKeyword(lower, taskKeywords.codex)) return "codex_mcp_portal";
+  if (hasTaskKeyword(lower, taskKeywords.codex)) return "right_status_crystals";
   if (hasTaskKeyword(lower, taskKeywords.telegram)) return "mission_strategy_table";
   if (hasTaskKeyword(lower, taskKeywords.vps)) return "right_status_crystals";
   return "mission_strategy_table";
@@ -22362,16 +30567,9 @@ function callMeeting({ hostAgentId = state.agent.id, participantAgentIds = [], a
     persist: false,
     bridgeEvent: false,
   });
-  routeAgentToTargetId(host.id, getAgentMeetingSeatTargetId(host.id), "กำลังแสดงภาพการรวมทีม", {
-    persist: false,
-    select: false,
-  });
+  routeAgentToMeetingSeat(host.id);
   participantIds.forEach((participantId) => {
-    const seat = getAgentMeetingSeatTargetId(participantId);
-    routeAgentToTargetId(participantId, seat, "กำลังแสดงภาพการรวมทีม", {
-      persist: false,
-      select: false,
-    });
+    routeAgentToMeetingSeat(participantId);
   });
   return {
     id: meetingId,
@@ -22701,16 +30899,16 @@ function getActiveMissionForAgent(agentId) {
     failed: 1,
     queued: 3,
   };
-  return state.missions
-    .filter((mission) => (
-      getAgentIdFromOwner(mission.owner) === agentId
-      && Object.prototype.hasOwnProperty.call(priority, getMissionPresentationStatus(mission))
-    ))
-    .sort((left, right) => {
-      const statusDifference = priority[getMissionPresentationStatus(left)]
-        - priority[getMissionPresentationStatus(right)];
-      return statusDifference || (getMissionActivityTime(right) - getMissionActivityTime(left));
-    })[0] || null;
+  const latestMission = state.missions
+    .filter((mission) => getAgentIdFromOwner(mission.owner) === agentId)
+    .sort((left, right) => (
+      getMissionActivityTime(right) - getMissionActivityTime(left)
+      || String(right?.id || "").localeCompare(String(left?.id || ""))
+    ))[0] || null;
+  return latestMission
+    && Object.prototype.hasOwnProperty.call(priority, getMissionPresentationStatus(latestMission))
+    ? latestMission
+    : null;
 }
 
 function getAgentSidebarState(agent) {
@@ -22747,7 +30945,7 @@ function getAgentSidebarState(agent) {
     const missionStatus = getMissionPresentationStatus(mission);
     const statusLabels = {
       running: "กำลังทำงาน",
-      queued: "รอเริ่มงาน",
+      queued: "รับงานแล้ว",
       blocked: "รอแก้ปัญหา",
       failed: "รอแก้ปัญหา",
     };
@@ -22847,9 +31045,10 @@ function renderAgentStatusPanel() {
 }
 
 function getMissionActivityTime(mission) {
-  const value = mission.completedAt || mission.updatedAt || mission.createdAt || "";
-  const parsed = value ? new Date(value).getTime() : Number.NaN;
-  return Number.isFinite(parsed) ? parsed : 0;
+  return [mission?.completedAt, mission?.updatedAt, mission?.startedAt, mission?.createdAt]
+    .map((value) => value ? new Date(value).getTime() : Number.NaN)
+    .filter(Number.isFinite)
+    .reduce((latest, value) => Math.max(latest, value), 0);
 }
 
 function isMissionCompletedToday(mission, now = new Date()) {
@@ -23039,11 +31238,40 @@ async function pollOpenPropReport({ force = false, signal = null } = {}) {
   if (typeof document.hasFocus === "function" && !document.hasFocus()) return null;
   if (!state.modal.open || state.modal.type !== "prop" || state.modal.id === "mission_strategy_table") return null;
   const propId = state.modal.id;
-  const lastLoadedAt = Number(state.propReportLoadedAt[propId] || 0);
-  const reportTtlExpired = !Number.isFinite(lastLoadedAt)
-    || Date.now() - lastLoadedAt >= OPEN_PROP_REPORT_POLL_TTL_MS;
-  if (!force && !reportTtlExpired) return state.propReports[propId] || null;
-  const report = await loadPropReport(propId, { signal });
+  const dependencyPropIds = propId === "left_server_racks"
+    ? [propId, "codex_mcp_portal"]
+    : [propId];
+  const reportTtlExpired = dependencyPropIds.some((dependencyPropId) => {
+    const lastLoadedAt = Number(state.propReportLoadedAt[dependencyPropId] || 0);
+    return !Number.isFinite(lastLoadedAt)
+      || Date.now() - lastLoadedAt >= OPEN_PROP_REPORT_POLL_TTL_MS;
+  });
+  const factoryDomain = propId === "right_server_racks"
+    ? normalizeWorkflowDashboard(
+      getModalSubject(),
+      getPropertyRole(getModalSubject()),
+      state.propReports[EA_FACTORY_PROP_ID] || {},
+    ).domainData.eaFactory
+    : null;
+  const factoryStageActive = factoryDomain?.stages?.some((stage) => ["running"].includes(stage.status)) === true;
+  const factoryTtlExpired = propId === "right_server_racks" && (
+    !Number.isFinite(Number(state.eaFactoryReadModel.lastLoadedAt))
+    || Date.now() - Number(state.eaFactoryReadModel.lastLoadedAt || 0) >= OPEN_PROP_REPORT_POLL_TTL_MS
+  );
+  const shouldRefreshReport = force || reportTtlExpired;
+  const shouldRefreshFactory = propId === "right_server_racks" && (force || factoryStageActive || factoryTtlExpired);
+  if (!shouldRefreshReport && !shouldRefreshFactory) return state.propReports[propId] || null;
+  const reports = shouldRefreshReport
+    ? await Promise.all(
+      dependencyPropIds.map(async (dependencyPropId) => (
+        dependencyPropId === propId
+          ? await loadPropReport(propId, { signal })
+          : await loadPropReport(dependencyPropId, { signal })
+      )),
+    )
+    : [state.propReports[propId] || null];
+  if (shouldRefreshFactory && !signal?.aborted) await loadEaFactoryReadModel({ signal });
+  const report = state.propReports[propId] || reports[0];
   if (signal?.aborted || !report) return report;
   const userIsEditing = document.activeElement?.matches?.("textarea, input, select, [contenteditable='true']");
   if (
@@ -23062,6 +31290,8 @@ function startMissionPolling() {
       // mission read-model poll remains leader-only.
       void pollOpenPropReport();
       void runAutomaticPollingTask((signal) => pollMissionReadModel({ signal }));
+      void runAutomaticPollingTask((signal) => loadResearchSheetHub({ signal }));
+      void runAutomaticPollingTask((signal) => loadResearchSheetGoogleAuth({ signal }));
     }, MISSION_POLL_MS);
   }
 }
@@ -23337,6 +31567,159 @@ els.modalTabs?.addEventListener("click", (event) => {
   setModalTab(tab.dataset.tab || "chat");
 });
 
+els.modalTabs?.addEventListener("keydown", (event) => {
+  const current = event.target.closest(".modal-tab:not([hidden])");
+  if (!current) return;
+  const tabs = [...els.modalTabs.querySelectorAll(".modal-tab:not([hidden])")];
+  const currentIndex = tabs.indexOf(current);
+  if (currentIndex < 0) return;
+  let nextIndex = currentIndex;
+  if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % tabs.length;
+  else if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+  else if (event.key === "Home") nextIndex = 0;
+  else if (event.key === "End") nextIndex = tabs.length - 1;
+  else return;
+  event.preventDefault();
+  const next = tabs[nextIndex];
+  setModalTab(next.dataset.tab || "chat");
+  next.focus();
+});
+
+els.researchSheetHubForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void inspectResearchSheetHub();
+});
+
+els.researchSheetHubDetailsToggle?.addEventListener("click", () => {
+  const opening = !researchSheetHubPopoverIsOpen();
+  if (!opening && (
+    state.researchSheetHub.inFlight
+    || researchSheetGoogleAuthIsBusy()
+    || state.researchSheetHub.preview
+  )) return;
+  setResearchSheetHubPanelOpen(opening);
+  if (opening) {
+    void loadResearchSheetHub();
+    void loadResearchSheetGoogleAuth({ force: true });
+  }
+});
+
+document.addEventListener("click", (event) => {
+  const hub = state.researchSheetHub;
+  if (
+    !researchSheetHubPopoverIsOpen()
+    || els.researchSheetHub?.contains(event.target)
+    || hub.inFlight
+    || researchSheetGoogleAuthIsBusy()
+    || hub.preview
+  ) return;
+  setResearchSheetHubPanelOpen(false);
+});
+
+els.researchSheetHubReference?.addEventListener("input", () => {
+  const hub = state.researchSheetHub;
+  const value = els.researchSheetHubReference.value;
+  els.researchSheetHubReference.setCustomValidity("");
+  hub.draftReference = value;
+  hub.preview = null;
+  hub.phase = "idle";
+  hub.failurePhase = "";
+  hub.showProgress = false;
+  const normalized = normalizeResearchSheetReference(value);
+  const configuredReference = hub.submittedReference
+    || normalizeResearchSheetReference(hub.data?.sheetId)
+    || "";
+  hub.dirty = configuredReference
+    ? normalized !== configuredReference
+    : Boolean(value.trim());
+  hub.message = value.trim()
+    ? "Sheet ID ถูกแก้ไขแล้ว • กดตรวจสอบก่อน ค่าที่กำลังใช้งานอยู่จะยังไม่เปลี่ยน"
+    : (hub.data?.configured
+        ? `${researchSheetHubConfiguredReference()} ยังเป็นค่าที่ Backend ใช้งานอยู่`
+        : "หน้าเว็บรับเฉพาะ URL หรือ Sheet ID และไม่รับ Token หรือ Credential");
+  hub.tone = hub.dirty ? "warning" : "neutral";
+  renderResearchSheetHub();
+});
+
+els.researchSheetHubCancel?.addEventListener("click", () => {
+  const hub = state.researchSheetHub;
+  hub.message = "แก้ไข Sheet ID แล้วกดตรวจสอบอีกครั้งเมื่อพร้อม • Sheet ที่ใช้งานอยู่เดิมไม่เปลี่ยน";
+  hub.tone = "neutral";
+  setResearchSheetHubPanelOpen(false, { discardPreview: true, focusToggle: true });
+});
+
+els.researchSheetHubActivate?.addEventListener("click", () => {
+  void activateResearchSheetHub();
+});
+
+els.researchSheetGoogleConnect?.addEventListener("click", () => {
+  void startResearchSheetGoogleAuth();
+});
+
+els.researchSheetGoogleDisconnect?.addEventListener("click", () => {
+  void disconnectResearchSheetGoogleAuth();
+});
+
+els.missionMeetingStartForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void startMeetingSession();
+});
+
+els.missionMeetingRefreshButton?.addEventListener("click", () => {
+  void loadMeetingSessions({ manual: true });
+});
+
+els.missionMeetingSessionSelect?.addEventListener("change", () => {
+  const sessionId = normalizeMeetingText(els.missionMeetingSessionSelect.value, 200);
+  if (!sessionId || sessionId === state.meetingRoom.activeSessionId) return;
+  saveMeetingSessionDrafts(state.meetingRoom.activeSessionId);
+  stopMeetingRoomPolling();
+  state.meetingRoom.activeSessionId = sessionId;
+  state.meetingRoom.session = state.meetingRoom.sessions.find((session) => session.id === sessionId) || null;
+  restoreMeetingSessionDrafts(state.meetingRoom.session);
+  void loadMeetingSession(sessionId);
+});
+
+els.missionMeetingMessageForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void sendMeetingMessage();
+});
+
+els.missionMeetingMessage?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
+  event.preventDefault();
+  els.missionMeetingMessageForm?.requestSubmit();
+});
+
+els.missionMeetingMessage?.addEventListener("input", () => {
+  saveMeetingSessionDrafts();
+});
+
+els.missionMeetingApprovalNote?.addEventListener("input", () => {
+  saveMeetingSessionDrafts();
+});
+
+els.missionMeetingProposalButton?.addEventListener("click", () => {
+  void requestMeetingProposal();
+});
+
+els.missionMeetingApproveButton?.addEventListener("click", () => {
+  void approveMeetingProposal();
+});
+
+els.missionMeetingRejectButton?.addEventListener("click", () => {
+  void rejectMeetingProposal();
+});
+
+els.missionMeetingOpenMissionButton?.addEventListener("click", () => {
+  void openMeetingImplementationMission();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") syncMeetingRoomPolling();
+  else stopMeetingRoomPolling();
+});
+
 els.signalConsensusTabs?.addEventListener("click", (event) => {
   const tab = event.target.closest("[data-signal-tab]");
   if (!tab) return;
@@ -23366,7 +31749,7 @@ els.workflowDashboardTabs?.addEventListener("click", (event) => {
 els.workflowDashboardTabs?.addEventListener("keydown", (event) => {
   const current = event.target.closest("[data-workflow-tab]");
   if (!current || !els.workflowDashboardTabs.contains(current)) return;
-  const tabs = [...els.workflowDashboardTabs.querySelectorAll("[data-workflow-tab]")];
+  const tabs = [...els.workflowDashboardTabs.querySelectorAll("[data-workflow-tab]:not(:disabled)")];
   const currentIndex = tabs.indexOf(current);
   if (currentIndex < 0) return;
   let nextIndex = currentIndex;
@@ -23689,6 +32072,12 @@ els.modalKanbanOpenTargetProp?.addEventListener("click", () => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  if (researchSheetHubPopoverIsOpen()) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeResearchSheetHubPopover();
+    return;
+  }
   if (els.newsEventDialog?.open) {
     event.preventDefault();
     event.stopPropagation();
@@ -23785,6 +32174,7 @@ init().catch((error) => {
     initializeOfficeAgents(state.restoredSession);
     renderAgentSelector();
     renderAgent();
+    renderResearchSheetHub();
     const renderedAgentCount = els.agentLayer.querySelectorAll(".agent-unit").length;
     window.MetafxHqBoot?.markReady({ agentCount: renderedAgentCount });
     initializePollingLeadership();
@@ -23792,6 +32182,8 @@ init().catch((error) => {
     window.setTimeout(startOperatorModePolling, 0);
     window.setTimeout(startAgentCollaborationPolling, 0);
     window.setTimeout(startMissionPolling, 0);
+    window.setTimeout(() => loadResearchSheetHub(), 0);
+    window.setTimeout(() => loadResearchSheetGoogleAuth(), 0);
   } catch (fallbackError) {
     reportBootResourceFailure("ระบบแสดง Agent สำรอง", fallbackError, { blocking: true });
   }

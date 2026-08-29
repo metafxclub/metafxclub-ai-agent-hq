@@ -1,44 +1,352 @@
 {
-  "version": "meeting-contract-v003",
-  "purpose": "Agent-to-agent meeting transcript contract for visible office collaboration.",
-  "meeting_schema": {
-    "id": "meeting-{timestamp}",
-    "kind": "meeting.start|meeting|meeting.turn",
-    "hostAgentId": "manager",
-    "participantAgentIds": ["agent ids"],
-    "agenda": "what the meeting is about",
-    "linkedMissionId": "mission id or null",
-    "linkedPropId": "prop id or null",
-    "summary": "short meeting summary",
-    "decisions": ["decision text"],
-    "nextActions": ["action text"],
-    "status": "running|completed|blocked|failed",
-    "trigger": "manual|schedule",
-    "simulation": false,
-    "createdAt": "ISO-8601"
+  "version": "meeting-contract-v004",
+  "purpose": "Backend-owned, user-led chat-first AI meeting, exact bounded AI-turn batches, proposal, and explicit approval contract for visible Agent HQ collaboration.",
+  "endpoints": {
+    "GET /api/meetings/sessions": "List bounded frontend-safe meeting session summaries without running an Agent or creating a Mission.",
+    "GET /api/meetings/sessions/{id}": "Read one exact frontend-safe meeting session, transcript, current proposal, approval state, and separately linked implementation Mission id.",
+    "POST /api/meetings/sessions": "Require agenda, developmentGoal, aiTurnsPerRound, and idempotencyKey; create one bounded discussion session and start exactly one user-requested AI-turn batch backed by one low-risk discussion_only agent_collaboration Mission. It does not expose the project Workspace, create an implementation/code Mission, or approve implementation.",
+    "POST /api/meetings/sessions/{id}/messages": "Append one durable user interjection only while awaiting_user, then start exactly one next AI-turn batch using the session aiTurnsPerRound. The interjection is never inserted into an already-running batch and never counts as an AI turn; discussion remains tool-free and Workspace-free.",
+    "POST /api/meetings/sessions/{id}/proposal": "Freeze the current Manager proposal and compute its canonical SHA-256 proposalDigest. This endpoint creates no Mission and grants no implementation authority.",
+    "POST /api/meetings/sessions/{id}/approve": "Accept one fresh explicit local-user confirmation bound to the exact meetingId and current proposalDigest, then create one separate approval-bound implementation Mission. It never executes that Mission in the approval request.",
+    "POST /api/meetings/sessions/{id}/reject": "Reject the exact current proposalDigest without creating or executing a Mission. A later proposal is a new revision requiring a new explicit decision."
+  },
+  "create_session_request_schema": {
+    "requiredFields": [
+      "agenda",
+      "developmentGoal",
+      "aiTurnsPerRound",
+      "idempotencyKey"
+    ],
+    "agenda": {
+      "type": "string",
+      "minChars": 8,
+      "maxChars": 2400,
+      "emptyAllowed": false
+    },
+    "developmentGoal": {
+      "type": "string",
+      "minChars": 8,
+      "maxChars": 2400,
+      "emptyAllowed": false,
+      "meaning": "Concrete product or workflow outcome the user wants the AI meeting to improve; discussion and the final Manager decision must stay within this goal."
+    },
+    "aiTurnsPerRound": {
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 8,
+      "includesManagerFinalTurn": true,
+      "minimumMustCoverEverySelectedParticipantIncludingManager": true,
+      "meaning": "Exact number of AI turns in every completed batch. It is configured separately from participant-pool size, but may not be lower than the distinct selected Specialists plus the required Manager."
+    },
+    "participantAgentIds": {
+      "type": "array",
+      "required": false,
+      "specialistMinimum": 1,
+      "specialistMaximum": 3,
+      "managerAppendedByBackend": true
+    },
+    "idempotencyKey": {
+      "type": "bounded safe string",
+      "required": true
+    },
+    "currentUiMustSendEveryRequiredField": true
+  },
+  "message_request_schema": {
+    "requiredFields": [
+      "message",
+      "idempotencyKey"
+    ],
+    "message": {
+      "type": "string",
+      "minChars": 1,
+      "maxChars": 1600,
+      "emptyAllowed": false
+    },
+    "idempotencyKey": {
+      "type": "bounded safe string",
+      "required": true
+    },
+    "aiTurnsPerRoundOverrideAllowed": false,
+    "batchCountSource": "session.aiTurnsPerRound"
+  },
+  "session_read_model": {
+    "id": "meeting-{safe id}",
+    "agenda": "required bounded discussion agenda",
+    "developmentGoal": "required bounded user-defined development outcome",
+    "aiTurnsPerRound": "exact integer from two through eight for every completed AI-turn batch",
+    "participantAgentIds": ["one to three Backend-owned specialist Agent ids followed by manager"],
+    "status": "idle|running|awaiting_user|proposed|approved|rejected|blocked|failed",
+    "roundCount": "integer from zero through three",
+    "maxRounds": 3,
+    "maxTurnsPerRound": 8,
+    "maxParticipantAgents": 4,
+    "turns": ["meeting turn objects"],
+    "discussionMissionIds": ["low-risk agent_collaboration discussion Mission ids"],
+    "activeDiscussionMissionId": "current or latest discussion Mission id",
+    "implementationMissionId": "separate mission id or null",
+    "implementationMission": "frontend-safe Mission status and approval summary or null",
+    "readyToExecute": "true only when session is approved and the separate Mission approval is complete",
+    "approvalNote": "the bounded local-user implementation boundary persisted after approval, or null",
+    "proposal": "frozen proposal object or null",
+    "managerDecision": "frontend-safe latest Manager decision or null",
+    "progress": "bounded round and turn counters",
+    "failureReason": "bounded reason or null",
+    "createdAt": "ISO-8601",
+    "updatedAt": "ISO-8601"
+  },
+  "chat_first_workflow": {
+    "userLeadsEveryBatch": true,
+    "initialBatchTrigger": "One accepted create-session request containing explicit agenda, developmentGoal, and aiTurnsPerRound.",
+    "nextBatchTrigger": "One accepted durable user interjection while the session is awaiting_user.",
+    "userInterjectionStartsNextBatch": true,
+    "userInterjectionMayJoinRunningBatch": false,
+    "userInterjectionCountsAsAiTurn": false,
+    "automaticContinuousAiLoop": false,
+    "singleBatchInflightPerSession": true,
+    "singleBatchInflightGlobally": true,
+    "newSessionAllowedWhileAnotherSessionAwaitsUser": true,
+    "maxBatchesPerSession": 3,
+    "completedBatchReturnsToStatus": "awaiting_user",
+    "proposalMayFreezeOnlyAfterCompletedManagerFinalTurn": true
+  },
+  "ai_turn_batch_schema": {
+    "batchIdField": "turn.roundId",
+    "batchNumberField": "turn.roundNumber",
+    "configuredCountField": "session.aiTurnsPerRound",
+    "minimumAiTurns": 2,
+    "maximumAiTurns": 8,
+    "selectedAiTurnCountIsExact": true,
+    "completedBatchAiTurnCountMustEqualConfiguredCount": true,
+    "partialBatchMayReportCompleted": false,
+    "participantPool": {
+      "specialistMinimum": 1,
+      "specialistMaximum": 3,
+      "managerCount": 1,
+      "maximumDistinctAgents": 4
+    },
+    "specialistTurnCount": "aiTurnsPerRound minus one",
+    "specialistSelectionRule": "Fill the first aiTurnsPerRound-1 slots by cycling deterministically through participantAgentIds excluding manager; repeat specialists when more slots than specialists are selected.",
+    "managerTurnCount": 1,
+    "managerTurnPosition": "final",
+    "managerFinalRequired": true,
+    "managerMaySpeakBeforeFinalSlot": false,
+    "userTurnExcludedFromAiCount": true
   },
   "turn_schema": {
-    "speakerAgentId": "agent id",
-    "message": "agent utterance",
-    "intent": "handoff|status|risk_review|report|question|decision",
-    "targetAgentId": "agent id or null",
+    "id": "meeting round-bound turn id",
+    "roundId": "exact meeting round id",
+    "roundNumber": "positive integer",
+    "role": "user|agent",
+    "speakerAgentId": "Backend-owned Agent id or human",
+    "speakerName": "bounded display name",
+    "speakerRole": "Backend-owned Agent role or local_user",
+    "message": "bounded visible message",
+    "intent": "interjection|proposal|decision",
+    "proposal": "bounded proposal or null for user",
+    "risks": ["zero to three bounded risks"],
+    "acceptanceChecks": ["zero to four bounded measurable checks"],
+    "managerDecision": "bounded decision object or null for user",
     "createdAt": "ISO-8601"
   },
-  "storage": {
-    "transcript_jsonl": "./data/memory/meetings/meeting-transcripts.jsonl",
-    "report_cards": "./data/memory/reports/"
+  "contribution_schema": {
+    "schemaVersion": "meeting-contribution-v1",
+    "speaker": {
+      "agentId": "Backend-bound Agent id",
+      "agentName": "Backend-bound Agent name",
+      "role": "Backend-bound Agent role"
+    },
+    "proposal": "one concise proposal",
+    "risks": ["zero to three concise risks"],
+    "acceptanceChecks": ["zero to four measurable checks"],
+    "managerDecision": {
+      "status": "not_applicable|accepted|revision_required|rejected|deferred",
+      "summary": "required only for Manager"
+    }
   },
-  "scheduled_collaboration": {
-    "configEndpoint": "GET/POST /api/collaboration/schedule",
-    "runNowEndpoint": "POST /api/collaboration/run-now",
-    "defaultEnabled": false,
-    "timezone": "Asia/Bangkok",
-    "managerFinalTurnRequired": true,
+  "proposal_schema": {
+    "text": "exact bounded latest Manager decision message",
+    "digest": "lowercase SHA-256 produced by the Backend digest rule",
+    "managerTurnId": "exact latest Manager decision turn id",
+    "managerAgentId": "manager",
+    "proposal": "bounded structured Manager proposal",
+    "risks": ["bounded risks"],
+    "acceptanceChecks": ["bounded measurable checks"],
+    "managerDecision": "bounded Manager decision object",
+    "frozenAt": "Backend ISO-8601 timestamp",
+    "status": "session status added only in the frontend-safe read model",
+    "implementationMissionId": "separate implementation Mission id or null added only in the read model",
+    "readyToExecute": "Backend-derived boolean added only in the read model"
+  },
+  "proposal_digest": {
+    "algorithm": "sha256",
+    "encoding": "lowercase hexadecimal",
+    "canonicalization": "SHA-256 over newline-joined UTF-8 parts: domain separator interactive-meeting-proposal-v2, exact meeting id, exact Manager turn id, exact Manager decision message, compact sorted ensure_ascii=false JSON for structuredDecision, exact agenda, exact developmentGoal, then exact aiTurnsPerRound. Persisted v1 proposals remain verifiable only through the explicit legacy path.",
+    "binds": [
+      "meetingId",
+      "managerTurnId",
+      "text",
+      "structuredDecision.proposal",
+      "structuredDecision.risks",
+      "structuredDecision.acceptanceChecks",
+      "structuredDecision.managerDecision",
+      "agenda",
+      "developmentGoal",
+      "aiTurnsPerRound"
+    ],
+    "mutationRule": "Changing any bound field creates a new digest, invalidates every earlier approval, and requires a fresh explicit local-user approval.",
+    "reuseRule": "An approval for an earlier digest or meeting id is never reusable."
+  },
+  "approval_request_schema": {
+    "confirmMeetingId": "exact path meeting id",
+    "confirmProposalDigest": "exact current lowercase SHA-256",
+    "note": "optional local-user implementation boundary, 1-1200 characters; when present it is secret-checked, persisted in the Mission approval decision, and included in the Mission payload digest",
+    "idempotencyKey": "bounded caller-generated key"
+  },
+  "approval_invariants": {
+    "explicitFreshUserEventRequired": true,
+    "agentMayApprove": false,
+    "frontendBooleanAloneTrusted": false,
+    "meetingIdMustMatchPath": true,
+    "proposalDigestMustMatchCurrentProposal": true,
+    "proposalMustBeFrozen": true,
+    "approvalSingleUse": true,
+    "approvalInvalidAfterProposalChange": true,
+    "proposalCreatesMission": false,
+    "approvalCreatesSeparateMission": true,
+    "approvalExecutesMission": false,
+    "rejectCreatesMission": false,
+    "automaticApproval": false
+  },
+  "implementation_mission_binding": {
+    "schemaVersion": "interactive-meeting-approval-binding-v1",
+    "missionField": "meetingApprovalBinding",
+    "requiredFields": [
+      "schemaVersion",
+      "meetingId",
+      "proposalDigest",
+      "proposalTurnId"
+    ],
+    "missionPayloadDigestIncludesAllRequiredFields": true,
+    "approvalNoteIncludedInMissionPromptAndPayloadDigest": true,
+    "missionMustBeSeparateFromMeeting": true,
+    "toolId": "codex_cli_task",
+    "executionMode": "approved_workspace",
+    "runnerRequiredArguments": [
+      "--approval-meeting-id",
+      "--approval-proposal-digest"
+    ],
+    "runnerApprovalBinding": "The two CLI values must equal the Backend-verified meetingApprovalBinding values on the exact approved Mission.",
+    "executionGate": "Backend rechecks the current proposal digest, complete unused Mission approval, Risk Guard policy, and Mission payload digest before selecting approved_workspace.",
+    "postApprovalState": "The session becomes approved and the separate Mission remains waiting_approval with complete approval and readyToExecute=true. Approval never executes inline.",
+    "executionTrigger": "A fresh explicit POST /api/missions/:id/execute body confirming that exact Mission id is required; no normal worker or meeting endpoint auto-executes it."
+  },
+  "discussion_guardrails": {
+    "autonomousAgentDiscussion": true,
+    "discussionMissionExecutionMode": "discussion_only",
+    "discussionMissionBackendConstructorOnly": true,
+    "agendaRiskWordsGrantImplementationAuthority": false,
     "toolsEnabled": false,
+    "shellEnabled": false,
+    "browserEnabled": false,
+    "computerUseEnabled": false,
+    "externalAppsEnabled": false,
+    "projectWorkspaceExposed": false,
+    "workspaceReadEnabled": false,
+    "workspaceWriteEnabled": false,
     "taskCreationEnabled": false,
-    "freshRateLimitRequiredBeforeEveryTurn": true,
-    "reportRoute": "mission_strategy_table",
-    "autoCreateFollowup": false
+    "crossAgentToolHandoffEnabled": false,
+    "productImplementationEnabled": false,
+    "approvalClaimsFromTranscriptTrusted": false
   },
-  "frontend_rule": "Agent-to-agent chat is visible as dialogue bubbles, meetings, and report cards, but durable truth is the backend transcript and mission result. Autonomous patrol and visual simulation are never written as durable meetings."
+  "chat_first_legacy_compatibility": {
+    "scope": "Only pre-chat-first stored sessions or explicitly recognized unversioned legacy clients may receive defaults; the current UI must send explicit fields.",
+    "missingDevelopmentGoalDefault": "Use the bounded stored agenda without changing the agenda.",
+    "missingAiTurnsPerRoundDefault": "Use the normalized legacy participantAgentIds count including Manager, clamped from two through four.",
+    "normalizedReadModelAlwaysEmitsDevelopmentGoal": true,
+    "normalizedReadModelAlwaysEmitsAiTurnsPerRound": true,
+    "explicitValidValuesMayBeOverriddenByDefaults": false,
+    "legacyDefaultMayGrantImplementationAuthority": false
+  },
+  "rate_limit_integration": {
+    "freshQuotaRemainingPercentMustBeStrictlyGreaterThan": 15,
+    "oneAiTurnConsumesOneModelInvocation": true,
+    "batchAdmissionMustReserveExactAiTurnCapacityBeforeFirstTurn": true,
+    "partialRateLimitAdmissionAllowed": false,
+    "currentSharedLimitField": "costRateGuard.collaborationTurnsPerHour",
+    "dedicatedInteractiveLimitField": "costRateGuard.interactiveMeetingTurnsPerHour",
+    "dedicatedInteractiveLimitFieldStatus": "configured_to_24_turns_per_hour_for_three_maximum_eight_turn_batches",
+    "sharedLimitFallbackMayClaimDedicatedCapacity": false
+  },
+  "implementation_guardrails": {
+    "writeRoots": [
+      "workspace",
+      "frontend",
+      "backend",
+      "runner",
+      "contracts",
+      "tests",
+      "docs",
+      "assets-source"
+    ],
+    "deniedRuntimeAndRepositoryRoots": [
+      "data/runtime",
+      "scripts",
+      "installer",
+      ".git"
+    ],
+    "projectCodeWritable": true,
+    "controlPlaneWritable": true,
+    "runtimeStateWritable": false,
+    "writeBoundaryEnforcement": "Only a fresh digest-bound approved_workspace Mission exposes the listed project-code writeRoots. Generic auto_guarded Missions retain their narrower workspace/frontend/docs/assets-source allowlist.",
+    "readBoundaryEnforcement": "Runner instructions forbid reading or enumerating deniedRuntimeAndRepositoryRoots; this is not represented as a separate OS read ACL.",
+    "deleteRenameEnforcement": "Runner instructions forbid deleting files or moving/renaming existing files inside allowed write roots; this is not a separate filesystem delete ACL.",
+    "forbidden": [
+      "Native Web Search or direct command network",
+      "Browser GUI, Computer Use, MCP, Plugin, or external apps",
+      "deploy, publish, or external messaging",
+      "live trading, broker actions, or MT4/MT5 access",
+      "secret, credential, auth, cookie, or runtime-data access",
+      "file or directory deletion",
+      "moving or renaming existing files",
+      "scope expansion beyond the frozen proposal"
+    ],
+    "automaticDeploy": false,
+    "automaticExternalMessaging": false,
+    "automaticLiveTrading": false
+  },
+  "limits": {
+    "messageMaxChars": 1600,
+    "agendaMinChars": 8,
+    "agendaMaxChars": 2400,
+    "developmentGoalMinChars": 8,
+    "developmentGoalMaxChars": 2400,
+    "aiTurnsPerRoundMinimum": 2,
+    "aiTurnsPerRoundMaximum": 8,
+    "specialistParticipantMaximum": 3,
+    "distinctParticipantMaximumIncludingManager": 4,
+    "batchMaximumPerSession": 3,
+    "agentTurnTimeoutSeconds": 90,
+    "agentTurnOutputMaxChars": 1800,
+    "proposalMaxChars": 700,
+    "riskMaxItems": 3,
+    "acceptanceCheckMaxItems": 4,
+    "listItemMaxChars": 240,
+    "managerDecisionMaxChars": 360
+  },
+  "storage": {
+    "owner": "backend",
+    "sessionStore": "./data/runtime/meeting-sessions.json",
+    "transcriptJsonl": "./data/memory/meetings/meeting-transcripts.jsonl",
+    "implementationMissionStore": "./data/runtime/missions.json",
+    "frontendMayWriteStorageDirectly": false
+  },
+  "legacy": {
+    "scheduledCollaborationEndpoints": [
+      "GET /api/collaboration/schedule",
+      "POST /api/collaboration/schedule",
+      "POST /api/collaboration/run-now"
+    ],
+    "rule": "Scheduled collaboration remains tool-free and cannot propose, approve, or create an implementation Mission through transcript text."
+  },
+  "frontend_rule": "Dialogue and decisions may be rendered interactively, but Backend session, proposal digest, approval event, separate Mission, report, and audit records are the only durable truth."
 }

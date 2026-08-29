@@ -25,15 +25,16 @@
 
 - อุปกรณ์แต่ละจุดมีคิวเชิงตรรกะ, Mission lineage, Report, Slot Key และประวัติของตัวเอง จึงไม่ดึงงานข้ามอุปกรณ์โดยตรง Scheduler จะทยอยปล่อยงานตามเวลา **ครั้งละหนึ่ง Mission ต่อการตรวจหนึ่งรอบ** เพื่อไม่ให้ Codex และ Local Runner แย่งทรัพยากร คำว่า “คิวอิสระ” จึงไม่ได้หมายถึงรันทุกอุปกรณ์พร้อมกัน
 - Mission ตามเวลาที่กำลัง `queued`, `running` หรือ `waiting_approval` จะล็อกเฉพาะคิวของอุปกรณ์/งานชนิดเดียวกัน งานของอุปกรณ์ A ที่ยังไม่จบจึงไม่ขวางอุปกรณ์ B ที่ถึงเวลา ส่วนอุปกรณ์เดิมจะไม่ถูกปล่อยงานซ้อนจนกว่า Mission เดิมพ้นสถานะทำงาน
-- ตารางเวลาของเรดาร์ระบบเทรด, เรดาร์ Indicator และข่าวตลาดเป็น `OFF` โดยค่าเริ่มต้น ผู้ใช้ต้องเปิดเองก่อน ระบบจึงจะพิจารณารอบทำงาน
+- เรดาร์ระบบเทรดและ Radar Website Tool เปิดอัตโนมัติวันละหนึ่งรอบเวลา 09:00 น. Asia/Bangkok แบบ Backend-owned คงที่ ผู้ใช้ปิด เปลี่ยนเวลา สั่งรันทันที หรือสร้าง Mission ทดแทนไม่ได้ ส่วนข่าวตลาดเปิดเวลา 00:00 และ 12:00 น. ตามเวลาไทย โดย Backend เป็นผู้สร้าง Mission ภายในเอง ผู้ใช้ไม่ต้องสร้างหรืออนุมัติ Mission อ่านเว็บ
 - ก่อน Bridge เปิดรับคำขอ Backend จะตรวจสัญญาอุปกรณ์ทั้งหมดตั้งแต่เริ่มระบบ ทั้ง Action, ฟิลด์รับเข้า, เวลา, Timezone, งานที่อนุญาตให้ตั้งเวลา และชนิดหลักฐาน หากรายการใดผิดหรือสะกดไม่ตรง Bridge จะไม่เริ่มทำงานแทนการปล่อย Workflow ที่ไม่ครบเข้า Runtime
 - การเปิดตารางเวลาไม่ได้แปลว่างานจะเริ่มทันที Backend ใช้หลัก Fail-closed: ต้องพบ Scheduler thread และ Mission Worker thread, heartbeat ของทั้งคู่ต้องยังสด, Timeout Watchdog ของ Worker ต้องทำงาน, สถานะ runtime ต้องพร้อม, Full Access แบบมีระบบป้องกัน, Codex Runner ต้องพร้อม และ Rate Limit ต้องสูงกว่าค่าสำรอง จึงตั้ง `effectiveEnabled=true`; ถ้าข้อใดไม่ผ่านจะพักงานพร้อมบอกสาเหตุ
+- เกณฑ์กลางของงานอัตโนมัติคือ Codex ต้องเหลือ **มากกว่า 15%**; ที่ 15% พอดีหรือต่ำกว่าจะพักงานโดยไม่เปิด Runner และกลับมาทำต่อเมื่อยอดสูงกว่า 15%
 - `/api/health` จะรายงาน `degraded` แม้ไฟล์และ Dashboard Scheduler ปกติ หาก Mission Worker หยุด, อยู่สถานะ `degraded`/`blocked`, heartbeat เก่า หรือ Timeout Watchdog ตาย เพราะ Scheduler ที่สร้าง Mission ได้แต่ไม่มี Worker ปลอดภัยมารับงานยังไม่ถือว่าระบบพร้อมใช้งาน
 - เมื่อ Bridge หรือเครื่องกลับมาทำงาน ระบบชดเชยได้เฉพาะ **รอบล่าสุดที่ถึงเวลาแล้วในวันเดียวกัน** และทำได้สูงสุดหนึ่งรอบต่ออุปกรณ์ต่อการตรวจหนึ่งครั้ง (`latest_due_slot_wins`) เพื่อป้องกันงานถาโถม การเพิ่งเปิดหรือแก้ตารางเวลาระหว่างวันจะไม่ย้อนรันรอบที่อยู่ก่อนเวลาบันทึก
 - Namespace ของ Idempotency Key ที่ขึ้นต้นด้วย `dashboard-schedule:` สงวนให้ Backend Scheduler เท่านั้น Frontend หรือคำขอทั่วไปใช้ชื่อนี้ไม่ได้
 - งานที่ Runner ตอบว่าเสร็จแล้วจะผ่านได้ต่อเมื่อส่ง `outputFields` และ `evidenceRequired` ตามสัญญา หากขาด ระบบเปลี่ยน Mission เป็น `blocked` ด้วยรหัส `workflow_output_contract_incomplete` แทนการแสดงว่าสำเร็จ
 - การใส่ชื่อชนิดหลักฐานใน `evidenceKinds` อย่างเดียวไม่ถือว่าผ่าน Backend ตรวจความหมายของหลักฐานด้วย เช่น URL สาธารณะต้องมีตามจำนวน, เวลาต้องเป็น ISO timestamp ที่อ่านได้, Digest ต้องเป็น SHA-256 64 ตัว, Path ต้องเป็น Project-relative และมีไฟล์จริง, รายงาน Bias ต้องตรงกับรายชื่อมาตรฐาน 28 คู่ทุกคู่พอดีและมีแหล่งอ้างอิงสำหรับแถวที่ยืนยัน ส่วนชนิดหลักฐานที่ Backend ยังไม่มีตัวตรวจจะ Fail-closed
-- ค่าผลลัพธ์แบบ Structured ใช้งบ Output ของ Mission เป็นเพดาน สูงสุด 12,000 ตัวอักษรต่อฟิลด์และสูงสุด 20,000 ตัวอักษรรวม หากเกิน Backend จะปฏิเสธผลลัพธ์และแจ้งว่าสัญญาไม่ครบโดยไม่ตัดข้อความกลาง JSON
+- ค่าผลลัพธ์แบบ Structured ใช้งบ Output ของ Mission เป็นเพดาน ปกติสูงสุด 12,000 ตัวอักษรต่อฟิลด์; งานค้นหาระบบเทรดใช้ `systems` array ตรงตาม Nested Schema ก่อนที่ Runner จะแปลงเป็น Backend contract โดยเล็งไม่เกิน 14,000 และมีเพดาน 16,000 ตัวอักษร ทุก Profile สูงสุด 20,000 ตัวอักษรรวม และ Strict Profile ส่ง `finalMessage` แบบสรุปเพื่อไม่ทำสำเนา payload ซ้ำระหว่าง Runner กับ Bridge หากเกินระบบจะปฏิเสธผลลัพธ์โดยไม่บันทึก JSON ที่ถูกตัด
 - Report, เนื้อหาเว็บไซต์, หลักฐาน และไฟล์ที่ Agent ส่งต่อไป Mission ถัดไปถูกครอบเป็นข้อมูลอ้างอิงที่ไม่น่าเชื่อถือเสมอ Runner ห้ามทำตาม Prompt, คำสั่ง Tool หรือโค้ดที่ฝังอยู่ภายใน แม้เนื้อหาจะอ้างว่าเป็น System, ผู้ใช้ หรือ Backend
 - หลักฐานจาก Adapter จริงใน `completionEvidenceRequired` เป็นข้อกำหนดคนละชั้นกับหลักฐานรายงาน ต้องรอ Adapter นั้นทำงานจริงและห้ามสร้างภาพ, ผล Compile, Backtest, Optimization หรือสถานะระบบจำลองขึ้นมาแทน
 - งานอัตโนมัติทั้งสามรายการเป็นการค้นคว้าแบบ Read-only เท่านั้น Scheduler ไม่เขียนข้อมูลภายนอกและไม่ส่งคำสั่ง MT4/MT5
@@ -42,29 +43,30 @@
 
 - เมื่อเปิดอุปกรณ์ ระบบเข้าหน้า **งานหลักของอุปกรณ์นั้นทันที** เช่น เรดาร์จะแสดงงานค้นหาระบบเทรด ไม่เปิดด้วยหัวข้อแนะนำหรือรายงานรวม
 - ชื่อ รูป และคำอธิบายอุปกรณ์แสดงที่แถบซ้ายเพียงจุดเดียว หน้าเนื้อหาหลักไม่แสดงตราและชื่อซ้ำ
-- การตั้งเวลา ตั้งค่า Agent และค่าควบคุมที่จำเป็นอยู่ในแถบซ้าย ไม่ปะปนกับแท็บงานหลัก
+- ตารางของเรดาร์ระบบเทรดและ Radar Website Tool แสดงในแถบซ้ายแบบอ่านอย่างเดียว ส่วนการตั้งค่า Agent และค่าควบคุมของอุปกรณ์อื่นอยู่ในแถบซ้าย ไม่ปะปนกับแท็บงานหลัก
 - ช่องส่งต่อ Report ผ่าน Agent อยู่ในแถบซ้าย และจะแสดงเฉพาะเมื่อมี Report ที่ Backend ยืนยันแล้วและมีเส้นทางปลายทางที่อนุญาต หากยังส่งไม่ได้ระบบจะซ่อนช่องนี้ ไม่สร้างข้อมูลทดแทน
 - แท็บสุดท้ายของอุปกรณ์ทุกจุดใช้ชื่อ **ประวัติและรายงาน** สำหรับ Mission, Report, หลักฐาน และ Artifact ย้อนหลัง
 - แผงรายงานรวมจะแสดงเฉพาะแท็บประวัติและรายงาน หน้าแรกจึงเหลือเฉพาะงานสำคัญ ผลวันนี้ และปุ่มเริ่มงานที่เกี่ยวข้อง
 - หากยังไม่มีข้อมูล หน้าเว็บแสดงข้อความสั้น ๆ ว่ากำลังรอ Local Runner พร้อมทางเลือกที่ทำต่อได้ โดยไม่แสดงข้อความทางเทคนิคยาวในหน้าแรก
 
-## 1. เรดาร์ระบบเทรดโลกและ EA — ห้องค้นคว้าอิสระ
+## 1. เรดาร์ระบบเทรดโลก — ห้องค้นคว้าเฉพาะระบบเทรด
 
 แท็บ:
 
 - ค้นหาระบบเทรด
-- ค้นหา EA ใหม่
 - คลังและแบบฟอร์มข้อมูล
 - ประวัติและรายงาน
 
-แถบซ้าย: ตั้งเวลา, โควตา Codex และส่งต่อผ่าน Agent เมื่อมี Report ที่ใช้ได้
+แถบซ้าย: ดูตาราง Backend คงที่ 09:00 น. Asia/Bangkok แบบอ่านอย่างเดียว, โควตา Codex และส่งต่อผ่าน Agent เมื่อมี Report ที่ใช้ได้
 
 ทำได้แล้ว:
 
-- ส่ง Mission ค้นคว้าเว็บสาธารณะแบบอ่านอย่างเดียวผ่าน Codex runner
-- บันทึก Report พร้อม URL หลักฐาน วันที่ และ Agent ผู้รับผิดชอบ
+- ค้นคว้าเว็บสาธารณะแบบอ่านอย่างเดียวผ่าน Codex runner โดย Backend สร้าง Mission ภายในให้เองและรับเฉพาะระบบเทรด ไม่รับรายการ EA, Indicator หรือ Tool เดี่ยว
+- บังคับผลลัพธ์ 3 ระบบจาก 3 ตระกูลกลยุทธ์ต่อรอบ พร้อมชื่อผู้สร้าง/นักเทรดเมื่อแหล่งสาธารณะระบุ ขั้นตอนเข้าออกแบบเรียงลำดับ การจัดการออเดอร์ ความเสี่ยง และสิ่งที่ยังไม่ทราบ
+- บันทึก Report พร้อม URL หลักฐานที่ผูกกับกฎ วันที่ และ Agent ผู้รับผิดชอบ
+- ให้ Backend คำนวณ Fingerprint และตรวจรายการซ้ำกับ Report ในเครื่อง
 - แสดงโครงสร้างข้อมูลมาตรฐาน 42 ช่องสำหรับนำไปใช้กับ Google Sheet
-- ตั้งเวลาค้นหาแบบอ่านอย่างเดียวได้ เวลาเริ่มต้น 09:00 น. เวลาไทย แต่สวิตช์เป็น `OFF` โดยค่าเริ่มต้น เมื่อเปิดและ Gate พร้อม Scheduler จึงสร้าง Mission, Audit และ Report จริง
+- เปิดค้นหาอัตโนมัติเวลา 09:00 น. Asia/Bangkok วันละหนึ่งรอบแบบคงที่ เมื่อ Gate พร้อม Scheduler จะสร้าง Mission ภายใน, Audit และ Report จริงโดยไม่รออนุมัติ คำขอ Manual ถูกปฏิเสธก่อนสร้าง Mission และไม่ใช้โควตารอบรายวัน
 - ป้องกันงานซ้ำด้วย Slot Key และ Idempotency Key; หลัง Bridge กลับมาระบบชดเชยเฉพาะรอบล่าสุดที่พลาดในวันเดียวกัน และไม่ย้อนรอบที่อยู่ก่อนเวลาที่เพิ่งเปิดหรือแก้ตาราง
 
 ยังไม่ทำงานจริง:
@@ -93,26 +95,32 @@
 
 แท็บ:
 
-- สร้าง EA / Indicator
-- ตรวจ Source Code
-- ผล Compile
-- ประวัติและรายงาน
+- 1 เลือกระบบจากคลังวิจัยหรือ Google Sheets
+- 2 ตรวจและยืนยัน Strategy Spec
+- 3 สร้างโค้ด
+- 4 ตรวจ Source Code
+- 5 Compile / Validate
+- 6 Visual Backtest / Logic Recheck
+- 7 ไฟล์และ Report
 
 ทำได้แล้ว:
 
-- เลือก Report ที่ Agent นำส่งเข้าห้องผลิตและผ่านการตรวจสิทธิ์ของ Backend
-- เลือก MT4/MQL4, MT5/MQL5 หรือ TradingView/Pine Script
-- ส่ง Mission ให้ EA Developer สร้าง Source Code ภายใน Workspace
-- ตรวจ Source Code แบบ Static และรายงานไฟล์อ้างอิงแบบ Project-relative
-- ดาวน์โหลด Source ที่ Backend สร้างจริงได้จาก Report `ea_build_report` เมื่อ Output Contract และหลักฐาน Project-relative ผ่านเท่านั้น โดยระบบไม่เชื่อถือ Artifact ทั่วไปและไม่เปิดเผย Path ในเครื่อง
+- เลือก Record ที่ Backend ยืนยันจากคลังวิจัยเชิงลึก หรือ Sync แถวที่ผ่านเกณฑ์จากแท็บ `Deep_Research` ของ Google Sheet กลางโดยไม่รับ Credential แล้วแปลงเป็น 23 ฟิลด์ Strategy Spec ภายใน
+- แสดง A-M เป็นข้อมูลแกนกลางสำหรับเขียนระบบ ได้แก่ชื่อ/ตระกูล/ตลาด/Timeframe/Entry/Exit/SL/TP/การแก้ไม้/Lot-Risk/Indicator/เงื่อนไขพิเศษ และแสดง N-W เป็นสถานะ downstream
+- เลือก MT4/MQL4, MT5/MQL5 หรือ TradingView/Pine Script และยืนยัน Strategy Spec ก่อนเริ่มสร้างไฟล์
+- ทำงานแบบ Manual stage-by-stage เท่านั้น หนึ่งปุ่มเลื่อนได้ไม่เกินหนึ่งขั้น ไม่มี Scheduler และไม่มี Loop สร้าง-แก้อัตโนมัติ
+- สร้าง Source แต่ละเวอร์ชันใน `workspace/ea-factory/<build-id>` โดยไม่ทับเวอร์ชันเดิม พร้อมโฟลเดอร์ Source, EA_Versions, Reports, Sets, Screenshots และ Summaries
+- ตรวจ Source Code แบบ Static พร้อม Signal Guard, order lifecycle, look-ahead/repaint, Money Management, error handling และ source digest
+- Pine Script จบสาย execution หลัง Source validation แล้วเข้าสรุป Report โดยไม่อ้างว่าเผยแพร่หรือ Backtest บน TradingView
+- MT4/MT5 ต้องเลือก Terminal ให้ตรงแพลตฟอร์มก่อน และจะถือว่า Compile/Backtest ผ่านได้เฉพาะเมื่อมีหลักฐานหน้าบ้านจาก MetaEditor/Strategy Tester ที่ผูกกับ Source digest และ Audit ของ Build เดียวกัน
+- ดาวน์โหลด Source และไฟล์ผลลัพธ์ได้ผ่าน URL same-origin ที่ Backend อนุญาต โดยไม่เปิดเผย Path จริง
 
-ยังไม่ทำงานจริง:
+กติกาหยุดแบบ Fail-closed:
 
-- MetaEditor/Compiler Adapter
-- การ Compile ผ่าน MT4/MT5 หรือ TradingView อัตโนมัติ
-- การติดตั้งไฟล์ลง Terminal
-
-หน้า Compile ต้องแสดง `Coming Soon` จนกว่าจะมีหลักฐานจาก Adapter จริง
+- หาก Google Sheet เป็น Private, คอลัมน์ไม่ครบ, Record ID ซ้ำ หรือข้อมูล A-M สำคัญขาด ระบบต้องหยุดก่อนสร้าง Build
+- หากยังไม่ได้เลือก MT4/MT5 ที่ตรงแพลตฟอร์ม หรือยังไม่มีหลักฐาน MetaEditor/Visual Mode ระบบต้องแสดง `blocked` และห้ามแสดง Passed
+- Process exit code, Static review, ไฟล์ `.set` หรือ `.ini` อย่างเดียวไม่ใช่หลักฐาน Compile/Backtest
+- หาก Build ขั้นใดไม่ผ่าน ผู้ใช้เป็นผู้กดสร้างเวอร์ชันถัดไป ไม่มีการเปิด Loop แก้ซ้ำเอง
 
 ## 4. ห้องทดลอง EA — ห้องทดสอบอิสระ
 
@@ -140,9 +148,9 @@
 
 ## Google Sheet Template
 
-ไฟล์ต้นแบบอยู่ที่ `contracts/research/trading-system-sheet-template.csv` มี 42 ช่องสองภาษา ครอบคลุมแหล่งที่มา กฎเข้าออก ความเสี่ยง เงื่อนไขพิเศษ สถานะตรวจหลักฐาน การตรวจรายการซ้ำ Mission/Report lineage และหมายเหตุ
+ไฟล์ `contracts/research/trading-system-sheet-template.csv` มี 42 ช่องสองภาษาและเป็น legacy template ของหน้าจอ Discovery เดิมเท่านั้น ส่วน Google Sheet กลางมีเพียง 3 แท็บและต้องใช้ schema จาก `contracts/research/world-system-sheet-template.csv`, `deep-research-sheet-template.csv` และ `indicator-ea-tool-sheet-template.csv` ตาม `docs/research-sheet-hub-setup-th.md`
 
-เมื่อต่อ Google Sheets ในอนาคต Credential ต้องอยู่หลัง Local Runner เท่านั้น Frontend รับได้เฉพาะ Sheet ID หรือ Alias ที่ Backend อนุญาต และต้องไม่แสดง Secret กลับมาที่หน้าเว็บ
+Google Sheets Adapter ทำงานหลัง Local Runner เท่านั้น Credential ต้องอยู่ใน Environment ของ Backend; Frontend รับเฉพาะ Sheet URL/ID ที่โต๊ะวางแผน Mission โดย Sheet ID แสดงได้เพราะเป็นรหัสเอกสาร ไม่ใช่ Secret แต่ Token และ OAuth secret ต้องไม่แสดงกลับมาที่หน้าเว็บ Candidate ใหม่ต้องผ่าน `draft → inspect → confirmation ใน UX → activate` โดยใช้เฉพาะ `/research-sheet/inspect` และ `/research-sheet/activate` ก่อนเปลี่ยน Active revision และทั้ง 4 ระบบที่เชื่อมต้องอ้างหลักฐานอ่านของ Consumer หลัก 3 แท็บเท่านั้น: Radar ระบบโลกใช้ `World_System`, คลังวิจัยใช้ `Deep_Research`, โรงงาน EA อ่านร่วมจาก `Deep_Research`, และ Radar Website Tool ใช้ `Indicator_EA_Tool` ดูขั้นตอน, credential mode ที่รองรับจริง และ schema ที่ `docs/research-sheet-hub-setup-th.md`
 
 ## กติกาป้องกันงานซ้ำ
 
@@ -163,14 +171,14 @@
 - หลักฐาน
 - ประวัติและรายงาน
 
-แถบซ้าย: ตั้งเวลาและโควตา Codex
+แถบซ้าย: ดูตาราง Backend คงที่ 09:00 น. Asia/Bangkok แบบอ่านอย่างเดียวและดูโควตา Codex
 
 ทำได้แล้ว:
 
-- สร้าง Mission ให้ Codex MCP Operator ค้นเว็บไซต์สาธารณะแบบอ่านอย่างเดียว
+- Backend สร้าง Mission ภายในให้ Codex MCP Operator ค้นเว็บไซต์สาธารณะแบบอ่านอย่างเดียวโดยไม่รออนุมัติ
 - เก็บ URL วันที่ตรวจสอบ สถานะหลักฐาน และผลตรวจรายการซ้ำใน Report
 - กรองแพลตฟอร์ม MT4, MT5, TradingView และหมวด Indicator
-- ตั้งเวลาค้นหาแบบอ่านอย่างเดียวได้ เวลาเริ่มต้น 09:00 น. เวลาไทย โดยสวิตช์เป็น `OFF` จนกว่าผู้ใช้จะเปิด พร้อม Mission, Audit, Report และการกันงานซ้ำ
+- เปิดค้นหาแบบอ่านอย่างเดียวเวลา 09:00 น. Asia/Bangkok วันละหนึ่งรอบแบบคงที่ พร้อม Mission ภายใน, Audit, Report และการกันงานซ้ำ โดยคำขอ Manual ถูกปฏิเสธก่อนสร้าง Mission
 
 ยังเป็น `Coming Soon`:
 
@@ -239,8 +247,8 @@
 - อ่านสถานะ Local Bridge, Codex Runner, MCP และ Mission Worker จาก Backend แบบ Read-only
 - แสดง Mission Worker แบบ Fail-closed โดยตรวจสถานะ Worker thread, อายุ Heartbeat และ Timeout Watchdog แยกจาก Dashboard Scheduler; หากส่วนใดไม่พร้อม Health ของ Bridge จะเป็น `degraded`
 - รีเฟรชสถานะโดยไม่เรียก Codex และบันทึก Mission/Report/Audit
-- ตั้งค่าที่ปลอดภัย 6 รายการ: ภาษา, Model Tier, งบ Token โดยประมาณ, Timeout, Output Limit และ Rate Limit สำรอง
-- Backend บังคับ Timeout ที่ 15-600 วินาทีและ Output Limit ที่ 1,000-20,000 ตัวอักษรจริง ส่วน Rate Limit สำรอง 10-80% ใช้เป็น Gate พักงานตามเวลาเมื่อโควตาต่ำกว่าค่าที่กำหนด
+- ตั้งค่าที่ปลอดภัย 5 รายการ: ภาษา, Model Tier, งบ Token โดยประมาณ, Timeout และ Output Limit; เกณฑ์โควตาเป็นนโยบายกลางที่ผู้ใช้แก้ไม่ได้
+- Backend บังคับ Timeout ที่ 15-600 วินาทีและ Output Limit ที่ 1,000-20,000 ตัวอักษรจริง ส่วนเกณฑ์โควตาคงที่ 15%: หยุดที่ 15% และเริ่มงานอัตโนมัติเมื่อค่าคงเหลือมากกว่า 15%
 - งบ Token เป็นค่าแนะนำสำหรับประมาณการและ Audit (`advisory`) เท่านั้น Codex CLI ยังไม่มี Hard Token Ceiling จึงห้ามสื่อว่าค่านี้ตัดหรือหยุด Token ได้แน่นอน
 - ปฏิเสธ Token, API Key, Password, Cookie, Credential, Provider Model ID และการเปลี่ยนสิทธิ์ Tool จาก Frontend
 
@@ -250,9 +258,9 @@
 
 ## Adapter ที่ยังเป็น `Coming Soon`
 
-- `codex_mcp_portal`: Google Sheets Sync และ Screenshot จากเว็บไซต์จริง งานค้นคว้าเว็บแบบ Read-only ใช้ได้แล้ว แต่ยังไม่เขียน Sheet และไม่สร้างภาพแทน
+- `codex_mcp_portal`: Google Sheets Sync ใช้ Adapter กลางได้แล้วและต้องแสดงสถานะ OAuth/schema/write-readback ตาม Backend จริง; ส่วน Screenshot เต็มหน้าจากเว็บไซต์ยังไม่เชื่อมและห้ามสร้างภาพแทน
 - `left_server_racks`: Screenshot/Browser evidence สำหรับงานวิจัยเชิงลึก เมื่อยังไม่มี Adapter ให้ใช้ URL และหลักฐานข้อความที่ Backend ตรวจได้
-- `right_server_racks`: MetaEditor/Compiler, Compile อัตโนมัติ และการติดตั้งไฟล์ลง MT4/MT5
+- `right_server_racks`: การควบคุม MetaEditor/Strategy Tester อัตโนมัติจะพร้อมเฉพาะเครื่องที่มี Adapter หน้าบ้านและหลักฐานตรงกับ Terminal ที่ผู้ใช้เลือก; หาก Adapter ไม่พร้อม Stage จะหยุดแบบ `blocked` ไม่สร้างผลจำลอง
 - `right_tool_console`: Strategy Tester, Optimization และ Discovery runner; ปัจจุบันสร้างแผนได้ แต่สถานะสัญญายังเป็น `plan_ready_terminal_runner_not_connected` หรือ `plan_ready_discovery_runner_not_connected`
 - `left_audit_crystals`: Screenshot หน้าเว็บไซต์จริงสำหรับรายการ Indicator
 - `left_signal_cube`: Economic Calendar Feed โดยตรง และการต่อข่าวไปสร้าง FX Bias อัตโนมัติ
@@ -261,7 +269,7 @@
 
 รายการข้างต้นต้องแสดงสถานะตาม Backend จริง หาก Adapter ยังไม่เชื่อม ระบบต้องคง `Coming Soon` หรือ `ยังไม่มีข้อมูล` และห้ามสร้างภาพ, ผล Compile, Backtest, Optimization หรือค่าระบบจำลองขึ้นมาแทน
 
-การที่ Codex Runner สร้างคำอธิบาย, Source Code หรือแผนการทดสอบได้ ไม่ได้แปลว่า Adapter ภายนอกเชื่อมแล้ว สถานะ `completed` ของ Mission จะยืนยันได้เฉพาะผลลัพธ์และหลักฐานที่ Backend ตรวจได้ในขอบเขตปัจจุบัน ส่วน Google Sheets Sync, Screenshot, MetaEditor/Compiler, Strategy Tester, Optimization/Discovery runner, Economic Calendar Feed และ VPS Telemetry ยังต้องคงสถานะตามรายการ `Coming Soon` ข้างต้น
+การที่ Codex Runner สร้างคำอธิบาย, Source Code หรือแผนการทดสอบได้ ไม่ได้แปลว่า Adapter ภายนอกเชื่อมแล้ว สถานะ `completed` ของ Mission จะยืนยันได้เฉพาะผลลัพธ์และหลักฐานที่ Backend ตรวจได้ในขอบเขตปัจจุบัน Google Sheets Adapter กลางถือว่าพร้อมเฉพาะแท็บที่ Backend ตรวจ OAuth, schema และ write/read-back ผ่าน ส่วน Screenshot, MetaEditor/Compiler, Strategy Tester, Optimization/Discovery runner, Economic Calendar Feed และ VPS Telemetry ยังต้องคงสถานะตามรายการ `Coming Soon` ข้างต้น
 
 ### โต๊ะวางแผน Mission (`mission_strategy_table`)
 

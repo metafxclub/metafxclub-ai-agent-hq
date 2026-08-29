@@ -4,25 +4,23 @@ AI Agent Visual Office แบบ Local สำหรับจัดการ Miss
 
 โปรแกรมเริ่มต้นในโหมด **Demo/Read-only** จึงไม่ส่ง Telegram จริง ไม่ Deploy และไม่ส่งคำสั่ง Live Trading ระหว่างติดตั้ง
 
+## สิ่งที่ต้องมีก่อนติดตั้งบน Windows
+
+- Windows 10 หรือ 11 และอินเทอร์เน็ตสำหรับติดตั้ง Dependency ที่ล็อกเวอร์ชันไว้
+- Python **3.10-3.14** จาก [python.org](https://www.python.org/downloads/windows/) โดยเลือก `Add Python to PATH` ระหว่างติดตั้ง
+- บัญชี Codex ของผู้เรียนเอง (Login ภายหลังได้; HQ และ Health ยังเปิดตรวจได้แม้ Codex ยังไม่ Login)
+
+ตัวติดตั้งไม่ดาวน์โหลด Python และไม่ขอสิทธิ์ Administrator เพื่อติดตั้ง Python แทนผู้เรียน หากหา Python รุ่นที่รองรับไม่พบ ระบบจะหยุดพร้อมข้อความแก้ไขและไม่ทิ้ง Runtime ที่ติดตั้งครึ่งเดียว การใช้ Google Sheet แบบ Private เป็นการตั้งค่าเสริมหลัง HQ พร้อมใช้งาน โดยทำตาม [docs/research-sheet-hub-setup-th.md](docs/research-sheet-hub-setup-th.md) และห้ามส่งไฟล์ OAuth Client Secret ให้ผู้อื่น
+
+เมื่อต้องใช้ Google Sheet แบบ Private ให้ผู้เรียนดาวน์โหลด OAuth Client JSON ประเภท **Desktop app** จาก Google Auth Platform ของตนเอง แล้วเลือกไฟล์ใน First-run wizard ของตัวติดตั้ง หรือดับเบิลคลิก/ลากไฟล์ไปวางบน `2-SETUP-GOOGLE-HQ.bat` ภายหลัง ระบบส่งเฉพาะ Path ให้ Backend CLI อ่านและบันทึกด้วย Windows current-user DPAPI; JSON และ Client Secret ไม่ผ่าน Browser ไม่ถูกคัดลอกเข้า Project และไม่ถูกส่งให้ผู้สอน หลังนำเข้าแล้วเปิด Agent HQ กด **เชื่อมบัญชี Google ครั้งเดียว** จากนั้นจึงกรอก Sheet ID ไฟล์ JSON ต้นฉบับจะไม่ถูกลบอัตโนมัติ ผู้เรียนต้องเก็บเป็นความลับและลบเองเมื่อไม่ต้องใช้แล้ว
+
+หาก OAuth consent screen ยังเป็น `Testing` ต้องเพิ่มบัญชีผู้เรียนใน Test users และสิทธิ์/Refresh token อาจหมดอายุหลัง 7 วันตามนโยบาย Google หากต้องการประสบการณ์เชื่อมครั้งเดียวระยะยาว ต้องจัด Publishing status และ Verification ของ OAuth app ให้เหมาะสมก่อนแจก ดู [Google Auth Platform — Audience](https://support.google.com/cloud/answer/15549945)
+
 ## ติดตั้งด้วยลิงก์เดียวและ Prompt เดียว
 
-อาจารย์ส่งลิงก์ GitHub Release ให้ผู้เรียน จากนั้นผู้เรียนวางข้อความนี้ใน Codex:
+อาจารย์ส่งลิงก์ GitHub Release, Client ID และให้ผู้เรียนคัดลอก Path ของ Desktop OAuth JSON ลงใน [Prompt ติดตั้งอัตโนมัติ](docs/prompts/install-github-google-auto-th.md) จากนั้นวาง Prompt ใน Codex เพียงครั้งเดียว Codex จะดาวน์โหลดและตรวจ Checksum, เลือก Local endpoint ที่ว่าง, เรียก Installer โดยตรง, นำเข้า JSON ผ่าน Backend DPAPI, ตรวจ Bridge/Health และเปิด HQ โดยผู้เรียนไม่ต้องกด BAT
 
-```text
-ช่วยติดตั้ง Metafxclub AI Agent HQ จาก GitHub Release ลิงก์นี้บนเครื่อง Windows ของผมให้พร้อมใช้งาน และเปิดโปรแกรมให้ด้วยครับ:
-
-[วางลิงก์ GitHub Release ที่นี่]
-
-ให้อ่าน AGENTS.md, README.md, STUDENT-QUICKSTART-TH.md และ docs/prompts/install-local-endpoint-th.md ก่อนติดตั้ง จากนั้นให้ตัวติดตั้งตรวจพอร์ตว่างและเสนอ Local URL 3 ตัวเลือก อธิบายว่า IP 127.0.0.1 ถูกล็อกไว้เพื่อใช้เฉพาะเครื่องนี้ แล้วหยุดรอให้ผมเลือก URL ก่อนเริ่มติดตั้ง
-
-เมื่อผมเลือกแล้ว ให้ใช้ตัวติดตั้งที่โปรเจกต์จัดเตรียมไว้กับ Port ที่ผมยืนยัน ห้ามสลับ URL เอง จากนั้นตรวจ Health, ตรวจการเชื่อม Codex และ Rate Limit ของบัญชีที่ Login อยู่ใน Windows User เครื่องนี้ แล้วเปิด URL ที่ผ่าน Health check ให้ผม
-
-เมื่อ Health ผ่านแล้ว ให้ถามผมว่าจะเปิด Bridge อัตโนมัติหลังเข้าสู่ Windows หรือไม่ ถ้าผมตอบตกลง ให้รัน scripts/register-bridge-autostart.cmd และยืนยันว่า Scheduled Task ถูกสร้างสำเร็จ
-
-ให้เริ่มในโหมด Demo/Read-only ห้ามเปิด Live Trading ห้ามส่ง Telegram จริง และห้ามแสดงหรือคัดลอก Token, Cookie, API key, Codex Auth หรือรหัสผ่านใด ๆ
-```
-
-Codex จะดำเนินการตามลำดับ `ดาวน์โหลด Release → ตรวจชุดติดตั้ง → เสนอ URL ว่าง → รอผู้ใช้ยืนยันหนึ่งครั้ง → ติดตั้ง → ตรวจ Bridge/Health → ตรวจ Codex/Rate Limit → เปิดโปรแกรม` ผู้เรียนอาจต้องกดยืนยันสิทธิ์ดาวน์โหลดหรือเรียกตัวติดตั้งตามระบบความปลอดภัยของ Windows แต่ไม่ต้องพิมพ์คำสั่งติดตั้งเอง
+ขั้นตอนที่ระบบไม่ทำแทนคือการ Login/เลือกบัญชี/กดอนุญาตในหน้าทางการของ Google ผู้เรียนเหลือเพียงกด **เชื่อมบัญชี Google ครั้งเดียว** ใน HQ เท่านั้น
 
 ควรใช้ลิงก์ Release ที่ล็อกเวอร์ชัน เช่น `.../releases/tag/v1.0.0` ไม่ควรใช้ไฟล์ ZIP จาก Branch `main` ในห้องเรียน เพราะนักเรียนแต่ละคนอาจได้รับไฟล์คนละช่วงเวลา
 
@@ -30,13 +28,15 @@ Codex จะดำเนินการตามลำดับ `ดาวน์
 
 หากไม่ได้ใช้ Codex ช่วยติดตั้ง:
 
-1. ดาวน์โหลด Asset สำหรับ Windows จาก GitHub Release ที่อาจารย์ส่งให้
-2. แตก ZIP ให้เรียบร้อย ห้ามเปิดตัวติดตั้งจากใน ZIP
-3. ดับเบิลคลิก `1-INSTALL-HQ.bat`
-4. ตัวติดตั้งจะแสดง URL ที่ว่าง เช่น `http://127.0.0.1:4186/` ให้พิมพ์ `Y` เพื่อยืนยัน หรือ `N` เพื่อดูตัวเลือกถัดไป
-5. รอจนตัวติดตั้งแจ้งว่าสำเร็จ พร้อมแสดง Health, Codex และ Rate Limit ของบัญชีเครื่องนี้
-6. ดับเบิลคลิก `Open Metafx Agent HQ.cmd`
-7. เปิด URL ที่ตัวติดตั้งบันทึกหลัง Health ผ่าน
+1. ตรวจว่ามี Python 3.10-3.14 และเลือก `Add Python to PATH` แล้ว
+2. ดาวน์โหลด Asset สำหรับ Windows จาก GitHub Release ที่อาจารย์ส่งให้
+3. แตก ZIP ให้เรียบร้อย ห้ามเปิดตัวติดตั้งจากใน ZIP
+4. ดับเบิลคลิก `1-INSTALL-HQ.bat`
+5. ตัวติดตั้งจะแสดง URL ที่ว่าง เช่น `http://127.0.0.1:4186/` ให้พิมพ์ `Y` เพื่อยืนยัน หรือ `N` เพื่อดูตัวเลือกถัดไป
+6. รอจนตัวติดตั้งแจ้งว่าสำเร็จ พร้อมแสดง Health, Codex และ Rate Limit ของบัญชีเครื่องนี้
+7. ดับเบิลคลิก `Open Metafx Agent HQ.cmd`
+8. หากตั้งค่า Google ใน First-run wizard แล้ว ให้กด **เชื่อมบัญชี Google ครั้งเดียว** ใน Agent HQ จากนั้นกรอก Sheet ID
+9. เปิด URL ที่ตัวติดตั้งบันทึกหลัง Health ผ่าน
 
 คู่มือฉบับย่อสำหรับส่งให้นักเรียนอยู่ที่ [STUDENT-QUICKSTART-TH.md](STUDENT-QUICKSTART-TH.md)
 
@@ -113,6 +113,8 @@ Agent Chat ไม่มีสิทธิ์เรียก Tool เอง โ�
 - งานเสี่ยงยังคงแยกการอนุมัติออกจากการ Execute และต้องผ่าน Risk Guard/Approval Gate
 - Live Trading ปิดโดยค่าเริ่มต้น และเปิดได้เฉพาะใน MT4 EA เมื่อผ่าน Shadow/Demo, Risk limit, Kill Switch, Signed Envelope, Key pin/match และตั้ง `GatewayMode=GATEWAY_LIVE` กับ `LiveArmed=true`; ไม่ต้องอนุมัติทีละ Order และ AI/Frontend เปลี่ยนค่านี้ไม่ได้
 - ห้ามนำ `.env`, `.venv`, `data/runtime`, Log, Memory หรือ `%USERPROFILE%\.codex` ของบุคคลอื่นมาใส่ในชุดติดตั้ง
+
+การถอนด้วย `UNINSTALL-HQ.bat` แบบปกติจะเก็บ Mission/Report/Memory/Log และ Google credential ที่เข้ารหัสไว้ เพื่อให้ติดตั้งใหม่แล้วใช้ต่อได้ การลบข้อมูลทั้งหมดต้องเรียก `scripts\uninstall-hq.ps1 -RemoveUserData -ConfirmUserDataRemoval DELETE-METAFX-DATA` โดยตรง จึงจะลบ Google OAuth Client และ durable grant ผ่าน Backend CLI ด้วย ส่วน Environment variable ที่ผู้ดูแลตั้งเองและ OAuth JSON ต้นฉบับจะไม่ถูกลบอัตโนมัติ
 
 ## โครงสร้างระบบสำหรับผู้พัฒนา
 

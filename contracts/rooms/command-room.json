@@ -184,9 +184,9 @@
     {
       "id": "codex_mcp_portal",
       "layer": "server_bridge",
-      "label": "เรดาร์ระบบเทรดโลกและ EA",
+      "label": "เรดาร์ระบบเทรดโลก",
       "status": "online",
-      "summary": "ศูนย์ค้นหาระบบเทรดและ EA ใหม่จากแหล่งสาธารณะทั่วโลก ตรวจรายการซ้ำ และส่งรายการที่เลือกไปวิจัยเชิงลึกผ่าน Mission/Report/Audit ของ Backend",
+      "summary": "ศูนย์ค้นหาเฉพาะระบบเทรดจากแหล่งสาธารณะทั่วโลก รอบละ 3 ตระกูล พร้อมชื่อผู้สร้าง ขั้นตอนเทรด ความเสี่ยง หลักฐาน และการตรวจรายการซ้ำของ Backend",
       "metrics": {
         "Web Research": "พร้อมใช้งาน",
         "Mission/Report/Audit": "พร้อมใช้งาน",
@@ -195,8 +195,8 @@
       },
       "missions": [
         {
-          "title": "ค้นหาระบบเทรดและ EA ใหม่",
-          "detail": "เปิดเรดาร์เพื่อสร้าง Mission ค้นหาข้อมูลสาธารณะ ดูแหล่งอ้างอิง และส่งรายการที่เลือกไปวิจัยต่อ"
+          "title": "ค้นหาระบบเทรดทั่วโลกแบบละเอียด",
+          "detail": "เปิดเรดาร์เพื่อสร้าง Mission ค้นหา 3 ระบบต่างตระกูล พร้อมผู้สร้าง กฎเข้าออก การจัดการความเสี่ยง และแหล่งอ้างอิง"
         }
       ],
       "asset_id": "registered_codex_mcp_portal_v011",
@@ -252,17 +252,17 @@
       "layer": "server_bridge",
       "label": "โรงงานสร้าง EA และ Indicator",
       "status": "stable",
-      "summary": "สร้างและตรวจ Source Code สำหรับ MT4/MQL4, MT5/MQL5 และ TradingView/Pine Script จากระบบที่เลือก โดย Compile จริงยังรอ Adapter",
+      "summary": "โรงงานแบบกดทำทีละขั้นจากคลังวิจัยหรือ Google Sheets: ตรวจ Strategy Spec สร้างและตรวจ Source จากนั้น Compile/Validate และ Visual Backtest ตามหลักฐานของแพลตฟอร์ม",
       "metrics": {
-        "Source Code": "พร้อมผ่าน Codex",
-        "MT4 / MT5 / Pine": "เลือกได้",
-        "Compile จริง": "Coming Soon",
-        "ขั้นตอน": "3/4"
+        "โหมด": "Manual ทีละขั้น",
+        "ข้อมูลต้นทาง": "คลังวิจัย + Sheet A-W",
+        "MT4 / MT5 / Pine": "รองรับ",
+        "ขั้นตอน": "6 Stage + Source"
       },
       "missions": [
         {
           "title": "สร้างหรือแก้ EA และ Indicator",
-          "detail": "เลือกต้นฉบับและแพลตฟอร์ม สร้าง Source Code ตรวจทาน และเปิดรายงานไฟล์ผลลัพธ์จาก Backend"
+          "detail": "เลือก Record และแพลตฟอร์ม ยืนยันกฎเข้าออก การแก้ไม้และ Money Management แล้วกดสร้าง ตรวจ Compile/Validate Backtest และ Report ทีละขั้นโดยไม่รันวนเอง"
         }
       ],
       "asset_id": "registered_right_server_racks_v011",

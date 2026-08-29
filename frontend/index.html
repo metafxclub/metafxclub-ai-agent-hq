@@ -7,15 +7,136 @@
     <title>Metafxclub AI Pixel HQ - ห้องทำงาน Agent Codex/MCP</title>
   <link rel="icon" href="data:," />
   <base href="../" />
-  <link rel="stylesheet" href="./frontend/src/app/styles.css?v=20260814-radar-contract-v062" />
+  <link rel="stylesheet" href="./frontend/src/app/styles.css?v=20260827-google-auth-v074" />
   </head>
   <body>
     <main class="app-shell">
       <header class="topbar">
-        <div>
+        <div class="topbar-brand">
           <p class="eyebrow">Metafxclub AI Pixel HQ</p>
           <h1>ห้องทำงาน Agent Codex/MCP</h1>
         </div>
+        <section
+          class="research-sheet-hub topbar-research-sheet-hub"
+          id="researchSheetHub"
+          aria-labelledby="researchSheetHubTitle"
+          aria-busy="false"
+        >
+          <form class="research-sheet-hub-form" id="researchSheetHubForm">
+            <div class="research-sheet-hub-toolbar">
+              <div class="research-sheet-hub-heading">
+                <div>
+                  <span>GOOGLE SHEET กลาง</span>
+                  <strong id="researchSheetHubTitle">Research Sheet Hub</strong>
+                </div>
+                <b id="researchSheetHubStatus" data-tone="neutral">ยังไม่ได้ตรวจ Backend</b>
+              </div>
+              <label class="research-sheet-hub-input" for="researchSheetHubReference">
+                <span>Google Sheet URL หรือ ID</span>
+                <input
+                  id="researchSheetHubReference"
+                  type="text"
+                  name="googleSheetUrlOrId"
+                  maxlength="500"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="วาง URL หรือ Sheet ID แล้วใช้ร่วมกันทั้ง 3 แท็บ"
+                  required
+                >
+              </label>
+              <button class="modal-action primary research-sheet-hub-apply" id="researchSheetHubApply" type="submit">
+                ตรวจสอบ Google Sheet
+              </button>
+              <button
+                class="research-sheet-hub-details-toggle"
+                id="researchSheetHubDetailsToggle"
+                type="button"
+                aria-expanded="false"
+                aria-controls="researchSheetHubPopover"
+              >
+                <span>ตั้งค่า</span>
+                <i aria-hidden="true">▾</i>
+              </button>
+            </div>
+            <div class="research-sheet-hub-popover" id="researchSheetHubPopover" hidden>
+              <section
+                class="research-sheet-google-auth"
+                id="researchSheetGoogleAuth"
+                data-tone="neutral"
+                aria-labelledby="researchSheetGoogleAuthTitle"
+              >
+                <div class="research-sheet-google-auth-copy">
+                  <div class="research-sheet-google-auth-heading">
+                    <span>GOOGLE ACCOUNT • เชื่อมครั้งเดียว</span>
+                    <b id="researchSheetGoogleAuthStatus" data-tone="neutral" role="status" aria-live="polite">กำลังตรวจ Backend</b>
+                  </div>
+                  <strong id="researchSheetGoogleAuthTitle">ตรวจสถานะบัญชี Google</strong>
+                  <small id="researchSheetGoogleAuthDetail">
+                    สิทธิ์จะถูกเก็บอย่างปลอดภัยที่ Local Bridge • หน้านี้ไม่รับ Token, Client Secret หรือ Credential
+                  </small>
+                </div>
+                <div class="research-sheet-google-auth-actions">
+                  <button class="modal-action primary" id="researchSheetGoogleConnect" type="button">
+                    เชื่อมบัญชี Google ครั้งเดียว
+                  </button>
+                  <button class="research-sheet-google-disconnect" id="researchSheetGoogleDisconnect" type="button" hidden>
+                    ยกเลิกการเชื่อมต่อ
+                  </button>
+                </div>
+              </section>
+              <div class="research-sheet-hub-active" id="researchSheetHubActive" hidden>
+                <div class="research-sheet-hub-active-copy">
+                  <span>GOOGLE SHEET STATUS</span>
+                  <strong>กำลังใช้ Google Sheet นี้อยู่</strong>
+                  <small id="researchSheetHubActiveReference">Backend ยังไม่ส่งรายละเอียด Sheet ที่ใช้งาน</small>
+                </div>
+                <div class="research-sheet-hub-lifecycle" id="researchSheetHubLifecycle" aria-label="สถานะการเชื่อมต่อ Sheet ที่ใช้งาน"></div>
+                <div class="research-sheet-hub-linked-systems" id="researchSheetHubLinkedSystems" aria-label="สถานะ 4 ระบบที่ใช้ Google Sheet กลาง"></div>
+              </div>
+              <section class="research-sheet-hub-inspection" id="researchSheetHubInspection" aria-labelledby="researchSheetHubInspectionTitle" hidden>
+                <header>
+                  <div>
+                    <span>ผลตรวจสอบจาก BACKEND</span>
+                    <strong id="researchSheetHubInspectionTitle">Google Sheet ที่รอยืนยัน</strong>
+                    <small id="researchSheetHubInspectionReference">ยังไม่มีผลตรวจสอบ</small>
+                  </div>
+                  <b id="researchSheetHubInspectionStatus" data-tone="neutral">รอผลตรวจ</b>
+                </header>
+                <div class="research-sheet-hub-inspection-tabs" id="researchSheetHubInspectionTabs" aria-label="ผลตรวจสอบ 3 แท็บ"></div>
+                <div class="research-sheet-hub-inspection-actions">
+                  <button class="modal-action primary" id="researchSheetHubActivate" type="button">ใช้ Google Sheet นี้</button>
+                  <button class="research-sheet-hub-cancel" id="researchSheetHubCancel" type="button">แก้ไขหรือยกเลิก</button>
+                </div>
+              </section>
+              <ol
+                class="research-sheet-hub-progress"
+                id="researchSheetHubProgress"
+                aria-label="ขั้นตอน Apply Google Sheet ให้ทุกระบบ"
+                hidden
+              >
+                <li data-phase="inspecting" data-state="pending">
+                  <span class="research-sheet-progress-marker" aria-hidden="true">1</span>
+                  <span><strong>ส่งไปตรวจสอบ</strong><small>ยังไม่เปลี่ยน Sheet ที่ใช้งานอยู่</small></span>
+                  <b class="research-sheet-progress-state">รอดำเนินการ</b>
+                </li>
+                <li data-phase="verifying" data-state="pending">
+                  <span class="research-sheet-progress-marker" aria-hidden="true">2</span>
+                  <span><strong>อ่านจริง 3 แท็บ</strong><small>ตรวจ Schema, สิทธิ์ และจำนวนแถว</small></span>
+                  <b class="research-sheet-progress-state">รอดำเนินการ</b>
+                </li>
+                <li data-phase="activating" data-state="pending">
+                  <span class="research-sheet-progress-marker" aria-hidden="true">3</span>
+                  <span><strong>ยืนยันใช้งาน</strong><small>Activate ให้ 4 ระบบหลังคุณยืนยัน</small></span>
+                  <b class="research-sheet-progress-state">รอดำเนินการ</b>
+                </li>
+              </ol>
+              <div class="research-sheet-hub-consumers" id="researchSheetHubConsumers" aria-label="สถานะ 3 แท็บที่ใช้ Google Sheet กลาง"></div>
+              <p class="research-sheet-hub-message" id="researchSheetHubMessage" data-tone="neutral" aria-live="polite">
+                หน้าเว็บรับเฉพาะ URL หรือ Sheet ID และไม่รับ Token หรือ Credential
+              </p>
+            </div>
+          </form>
+        </section>
         <div class="topbar-actions">
           <div class="agent-collab-control" id="agentCollabControl" data-state="loading">
             <button
@@ -82,11 +203,8 @@
                 </label>
                 <label class="agent-collab-field">
                   <span>เก็บโควตาไว้</span>
-                  <select id="agentCollabMinRemaining">
-                    <option value="20">อย่างน้อย 20%</option>
-                    <option value="30">อย่างน้อย 30%</option>
-                    <option value="40">อย่างน้อย 40%</option>
-                    <option value="50">อย่างน้อย 50%</option>
+                  <select id="agentCollabMinRemaining" disabled aria-label="เกณฑ์โควตาอัตโนมัติคงที่">
+                    <option value="15">ต้องเหลือมากกว่า 15%</option>
                   </select>
                 </label>
               </div>
@@ -365,10 +483,34 @@
               <p class="speaker-name" id="modalSpeaker">Agent ผู้จัดการ HQ</p>
               <p id="modalDialogue">สวัสดีครับ บอกเป้าหมายมาได้เลยครับ</p>
             </div>
-            <div class="modal-tabs" id="modalTabs" role="tablist" aria-label="ส่วนต่าง ๆ ของพื้นที่ทำงาน">
+            <div class="modal-controls-stack">
+              <div class="modal-tabs" id="modalTabs" role="tablist" aria-label="ส่วนต่าง ๆ ของพื้นที่ทำงาน">
               <button type="button" class="modal-tab active" data-tab="chat" data-surfaces="agent">คุยกับ Agent</button>
               <button type="button" class="modal-tab" data-tab="tasks" data-surfaces="agent">Task ของ Agent</button>
-              <button type="button" class="modal-tab" data-tab="kanban" data-surfaces="kanban">Mission ทั้งหมด</button>
+              <button
+                type="button"
+                class="modal-tab"
+                id="missionGroupChatTab"
+                role="tab"
+                data-tab="mission-chat"
+                data-surfaces="kanban"
+                aria-controls="modalMissionChatPanel"
+                aria-selected="false"
+              >
+                ห้องแชท AI รวม
+                <span class="mission-chat-tab-badge" id="missionChatTabStatus">เชื่อม Backend</span>
+              </button>
+              <button
+                type="button"
+                class="modal-tab"
+                id="missionAllTab"
+                role="tab"
+                data-tab="kanban"
+                data-surfaces="kanban"
+                aria-controls="modalKanbanPanel"
+                aria-selected="false"
+              >Mission ทั้งหมด</button>
+              </div>
             </div>
             <div class="modal-tab-panel active" id="modalChatPanel" data-panel="chat" data-surfaces="agent">
               <div class="chat-log" id="modalChatLog"></div>
@@ -399,7 +541,7 @@
                     <div class="dashboard-work-column-heading">
                       <span class="dashboard-state-dot" aria-hidden="true"></span>
                       <strong>กำลังทำ</strong>
-                      <small>รวมงานรอเริ่มและงานที่ Agent กำลังดำเนินการ</small>
+                      <small>รวมงานที่ Backend รับแล้วและงานที่ Agent กำลังดำเนินการ</small>
                     </div>
                     <div class="dashboard-list" id="modalDashboardRunning"></div>
                   </section>
@@ -680,7 +822,173 @@
                 </div>
               </section>
             </div>
-            <div class="modal-tab-panel" id="modalKanbanPanel" data-panel="kanban" data-surfaces="kanban">
+            <div
+              class="modal-tab-panel mission-group-chat-panel"
+              id="modalMissionChatPanel"
+              role="tabpanel"
+              data-panel="mission-chat"
+              data-surfaces="kanban"
+              aria-labelledby="missionGroupChatTab"
+              tabindex="0"
+            >
+              <section class="mission-chat-shell" aria-labelledby="missionGroupChatTab">
+                <div class="mission-meeting-status-live" id="missionMeetingStatus" data-state="idle" role="status" aria-live="polite" aria-atomic="true">
+                  <strong>ยังไม่ได้เปิดห้องประชุม</strong>
+                  <span>กำลังรอข้อมูล Session จาก Backend</span>
+                </div>
+                <div class="mission-chat-layout">
+                  <aside class="mission-chat-sidebar" aria-label="ตั้งค่าและผู้เข้าร่วมประชุม">
+                    <form class="mission-meeting-start-form" id="missionMeetingStartForm">
+                      <div class="mission-chat-section-heading">
+                        <span>เปิด Session ใหม่</span>
+                        <strong>กำหนดการประชุมของคุณ</strong>
+                      </div>
+                      <label class="mission-meeting-field" for="missionMeetingAgenda">
+                        <span>หัวข้อที่ให้ AI ประชุม</span>
+                        <textarea id="missionMeetingAgenda" rows="2" minlength="8" maxlength="2400" required placeholder="เช่น ปรับห้องแชต AI รวมให้ใช้งานง่ายขึ้น"></textarea>
+                      </label>
+                      <label class="mission-meeting-field" for="missionMeetingDevelopmentGoal">
+                        <span>สิ่งที่ต้องการพัฒนา</span>
+                        <textarea id="missionMeetingDevelopmentGoal" rows="2" minlength="8" maxlength="2400" required placeholder="อธิบายผลลัพธ์ที่ต้องการให้ Agent ร่วมกันออกแบบหรือพัฒนา"></textarea>
+                      </label>
+                      <label class="mission-meeting-field mission-meeting-turn-field" for="missionMeetingAiTurnsPerRound">
+                        <span>จำนวนข้อความ AI ก่อนรอคุณ</span>
+                        <select id="missionMeetingAiTurnsPerRound" required>
+                          <option value="2">2 ข้อความ</option>
+                          <option value="3">3 ข้อความ</option>
+                          <option value="4" selected>4 ข้อความ</option>
+                          <option value="5">5 ข้อความ</option>
+                          <option value="6">6 ข้อความ</option>
+                          <option value="7">7 ข้อความ</option>
+                          <option value="8">8 ข้อความ</option>
+                        </select>
+                        <small>เมื่อ AI คุยครบจำนวนนี้ ห้องจะหยุดรอให้คุณพิมพ์แทรกหรือสั่งให้สรุปต่อ</small>
+                      </label>
+                      <fieldset class="mission-meeting-participant-fieldset">
+                        <legend>เลือก Agent ที่เข้าร่วม</legend>
+                        <div class="mission-meeting-participant-options" id="missionMeetingParticipantOptions" role="group" aria-label="รายชื่อ Agent ที่เลือกเข้าประชุม"></div>
+                      </fieldset>
+                      <button class="modal-action primary mission-meeting-primary-action" id="missionMeetingStartButton" type="submit">เปิดห้องและให้ AI เริ่มคุย</button>
+                    </form>
+
+                    <section class="mission-meeting-session-picker" aria-labelledby="missionMeetingSessionsHeading">
+                      <div class="mission-chat-section-heading with-action">
+                        <div>
+                          <span>Session จาก Backend</span>
+                          <strong id="missionMeetingSessionsHeading">การประชุมล่าสุด</strong>
+                        </div>
+                        <button class="modal-action" id="missionMeetingRefreshButton" type="button">รีเฟรช</button>
+                      </div>
+                      <label class="mission-meeting-field" for="missionMeetingSessionSelect">
+                        <span>เลือกการประชุม</span>
+                        <select id="missionMeetingSessionSelect" aria-describedby="missionMeetingSessionHelp">
+                          <option value="">ยังไม่มี Session</option>
+                        </select>
+                      </label>
+                      <p id="missionMeetingSessionHelp">ระบบจะดึงข้อความเพิ่มเฉพาะระหว่างที่ Session ยังทำงาน</p>
+                    </section>
+
+                    <section class="mission-chat-participants" aria-labelledby="missionChatParticipantsHeading">
+                      <header>
+                        <div>
+                          <span>Session ที่เลือก</span>
+                          <strong id="missionChatParticipantsHeading">Agent ในห้อง</strong>
+                        </div>
+                        <b id="missionChatParticipantCount">0</b>
+                      </header>
+                      <div class="mission-chat-participant-list" id="missionChatParticipants" role="list"></div>
+                      <p class="mission-chat-participant-note">แสดงเฉพาะผู้เข้าร่วมที่ Backend ยืนยันใน Session นี้</p>
+                    </section>
+                  </aside>
+                  <section class="mission-chat-conversation" aria-labelledby="missionChatConversationHeading">
+                    <header class="mission-chat-conversation-heading">
+                      <div>
+                        <span>แชตสดจาก Backend</span>
+                        <strong id="missionChatConversationHeading">ยังไม่ได้เลือก Session</strong>
+                        <small id="missionMeetingConversationMeta">กรอกหัวข้อและเป้าหมายทางซ้ายเพื่อเปิดห้อง</small>
+                      </div>
+                      <span class="mission-chat-status-chip" id="missionMeetingSessionStatus">ยังไม่มีข้อมูล</span>
+                    </header>
+                    <div class="mission-meeting-progress" id="missionMeetingProgress" aria-label="ความคืบหน้าการประชุม" hidden>
+                      <span id="missionMeetingRoundProgress">รอบ —</span>
+                      <span id="missionMeetingTurnProgress">ลำดับพูด —</span>
+                    </div>
+                    <div class="mission-chat-message-list" id="missionChatMessages" role="log" aria-live="polite" aria-relevant="additions text" aria-label="บทสนทนาจริงของห้องประชุม"></div>
+                    <form class="mission-meeting-message-form" id="missionMeetingMessageForm">
+                      <label class="mission-meeting-field" for="missionMeetingMessage">
+                        <span>ข้อความของคุณถึง Agent ทุกตัว</span>
+                        <textarea id="missionMeetingMessage" rows="2" maxlength="1600" required aria-describedby="missionMeetingMessageHelp" placeholder="พิมพ์คำถาม เปลี่ยนทิศทาง หรือสั่งให้ Agent ลงรายละเอียด (Ctrl/⌘ + Enter เพื่อส่ง)"></textarea>
+                        <small id="missionMeetingMessageHelp">ช่องนี้จะเปิดเมื่อ AI คุยครบจำนวนข้อความที่คุณกำหนดในรอบปัจจุบัน</small>
+                      </label>
+                      <button class="modal-action primary" id="missionMeetingSendButton" type="submit">ส่งเข้าห้องประชุม</button>
+                    </form>
+
+                    <section class="mission-meeting-decision" id="missionMeetingDecision" aria-labelledby="missionMeetingDecisionHeading" hidden>
+                      <div class="mission-chat-section-heading">
+                        <span>Manager decision</span>
+                        <strong id="missionMeetingDecisionHeading">ข้อสรุปของผู้จัดการประชุม</strong>
+                      </div>
+                      <p id="missionMeetingDecisionText"></p>
+                    </section>
+
+                    <details class="mission-meeting-proposal" id="missionMeetingProposal">
+                      <summary>
+                        <span>
+                          <small>ขั้นตอนถัดไปหลังคุยลงตัว</small>
+                          <strong id="missionMeetingProposalHeading">ข้อเสนอพัฒนาและการอนุมัติโค้ด</strong>
+                        </span>
+                        <b><span class="proposal-open-copy">เปิดรายละเอียด</span><span class="proposal-close-copy">ปิดรายละเอียด</span></b>
+                      </summary>
+                      <div class="mission-meeting-proposal-body" aria-labelledby="missionMeetingProposalHeading">
+                        <div class="mission-chat-section-heading with-action">
+                          <div>
+                            <span>Implementation proposal</span>
+                            <strong>แผนพัฒนาแยกจากบทสนทนา</strong>
+                          </div>
+                          <button class="modal-action" id="missionMeetingProposalButton" type="button">สร้างข้อเสนอ</button>
+                        </div>
+                        <p id="missionMeetingProposalSummary">ยังไม่มีข้อเสนอที่ Backend แช่แข็งไว้</p>
+                        <dl class="mission-meeting-proposal-binding">
+                          <div><dt>Structured proposal</dt><dd id="missionMeetingStructuredProposal">—</dd></div>
+                          <div><dt>Risks</dt><dd id="missionMeetingProposalRisks">—</dd></div>
+                          <div><dt>Acceptance checks</dt><dd id="missionMeetingProposalAcceptanceChecks">—</dd></div>
+                          <div><dt>Manager decision status</dt><dd id="missionMeetingProposalManagerDecisionStatus">—</dd></div>
+                          <div><dt>Manager decision summary</dt><dd id="missionMeetingProposalManagerDecisionSummary">—</dd></div>
+                        </dl>
+                        <dl class="mission-meeting-proposal-binding">
+                          <div><dt>Meeting Session ID</dt><dd id="missionMeetingProposalMeetingId">—</dd></div>
+                          <div><dt>Proposal digest</dt><dd id="missionMeetingProposalDigest">—</dd></div>
+                          <div><dt>Digest version</dt><dd id="missionMeetingProposalDigestVersion">—</dd></div>
+                          <div><dt>Manager turn ID</dt><dd id="missionMeetingProposalManagerTurnId">—</dd></div>
+                          <div><dt>Implementation Mission</dt><dd id="missionMeetingImplementationMissionId">ยังไม่สร้าง — Backend จะสร้าง Mission แยกหลังอนุมัติ</dd></div>
+                        </dl>
+                        <label class="mission-meeting-field" for="missionMeetingApprovalNote">
+                          <span>หมายเหตุการตัดสินใจ</span>
+                          <textarea id="missionMeetingApprovalNote" rows="2" maxlength="1000" placeholder="ระบุขอบเขตหรือเหตุผลประกอบการอนุมัติ/ปฏิเสธ"></textarea>
+                          <small id="missionMeetingApprovalNoteHelp">ระบบส่งหมายเหตุตามที่คุณพิมพ์โดยไม่เติมข้อความต่อท้าย หากเว้นว่าง Backend จะใช้ขอบเขตเริ่มต้นของ Mission โค้ดในเครื่อง</small>
+                        </label>
+                        <div class="mission-meeting-proposal-actions">
+                          <button class="modal-action primary" id="missionMeetingApproveButton" type="button">อนุมัติแผนโค้ด</button>
+                          <button class="modal-action danger" id="missionMeetingRejectButton" type="button">ปฏิเสธข้อเสนอ</button>
+                          <button class="modal-action" id="missionMeetingOpenMissionButton" type="button" hidden>เปิด Mission เพื่อยืนยันรันหนึ่งครั้ง</button>
+                        </div>
+                        <p class="mission-meeting-proposal-status" id="missionMeetingProposalStatus" role="status" aria-live="polite"></p>
+                        <p class="mission-meeting-safety-note">การอนุมัติสร้าง Mission พัฒนาแยกต่างหากเท่านั้น ระบบจะไม่รันโค้ด ไม่ Deploy และไม่ส่งคำสั่ง Live Trade อัตโนมัติ การรัน Mission ยังต้องใช้ขั้นตอนยืนยันแบบใช้ครั้งเดียวในแท็บ Mission ทั้งหมด</p>
+                      </div>
+                    </details>
+                  </section>
+                </div>
+              </section>
+            </div>
+            <div
+              class="modal-tab-panel"
+              id="modalKanbanPanel"
+              role="tabpanel"
+              data-panel="kanban"
+              data-surfaces="kanban"
+              aria-labelledby="missionAllTab"
+              tabindex="0"
+            >
               <div class="kanban-toolbar">
                 <label class="kanban-search">
                   <span>ค้นหา Mission ทั้งหมด</span>
@@ -795,7 +1103,7 @@
     (() => {
       "use strict";
 
-      const RUNTIME_BUILD_VERSION = "20260814-radar-contract-v062";
+      const RUNTIME_BUILD_VERSION = "20260827-google-auth-v074";
       const EXPECTED_AGENT_COUNT = 10;
       const RUNTIME_PATH = "./frontend/src/app/main.js";
       const diagnostic = document.getElementById("bootDiagnostic");

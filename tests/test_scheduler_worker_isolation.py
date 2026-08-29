@@ -100,6 +100,13 @@ class SchedulerWorkerIsolationTests(unittest.TestCase):
             "workflowContext": self._scheduled_context(prop_id, action_id),
         }
 
+    def _schedule_jobs(self, *settings_keys: str) -> tuple[dict, ...]:
+        return tuple(
+            job
+            for job in self.bridge.DASHBOARD_WORKFLOW_SCHEDULE_JOBS
+            if job.get("settingsKey") in settings_keys
+        )
+
     def test_runtime_health_fails_closed_when_mission_worker_is_not_operational(self) -> None:
         """A healthy scheduler cannot mask a dead or unsafe execution worker."""
 
@@ -269,22 +276,15 @@ class SchedulerWorkerIsolationTests(unittest.TestCase):
                     "run_dashboard_workflow_action",
                     side_effect=fake_action,
                 ),
+                mock.patch.object(
+                    self.bridge,
+                    "DASHBOARD_WORKFLOW_SCHEDULE_JOBS",
+                    self._schedule_jobs(
+                        "discoverySchedule",
+                        "indicatorScoutSchedule",
+                    ),
+                ),
             ):
-                self.bridge._save_dashboard_schedule_preference(
-                    "newsBiasSchedule",
-                    {"enabled": False, "times": ["00:00", "12:00"]},
-                )
-                self.bridge._save_dashboard_schedule_preference(
-                    "indicatorScoutSchedule",
-                    {"enabled": False, "times": ["09:00"]},
-                )
-                self.bridge.save_dashboard_discovery_schedule(
-                    {"enabled": True, "times": ["09:00"]}
-                )
-                self.bridge._save_dashboard_schedule_preference(
-                    "indicatorScoutSchedule",
-                    {"enabled": True, "times": ["09:00"]},
-                )
                 result = self.bridge.dashboard_workflow_scheduler_tick(
                     due_at,
                     refresh_quota=False,
@@ -298,6 +298,10 @@ class SchedulerWorkerIsolationTests(unittest.TestCase):
         self.assertEqual(dispatched[0][2], "schedule")
         self.assertIsNotNone(stored["discoverySchedule"]["pendingSlotKey"])
         self.assertIsNone(stored["indicatorScoutSchedule"]["pendingSlotKey"])
+        for settings_key in ("discoverySchedule", "indicatorScoutSchedule"):
+            self.assertTrue(stored[settings_key]["requestedEnabled"])
+            self.assertEqual(stored[settings_key]["times"], ["09:00"])
+            self.assertEqual(stored[settings_key]["timezone"], "Asia/Bangkok")
 
     def test_active_schedule_still_serializes_the_same_prop(self) -> None:
         """A second scheduled mission must not overlap work on the same device."""
@@ -333,18 +337,12 @@ class SchedulerWorkerIsolationTests(unittest.TestCase):
                     self.bridge,
                     "run_dashboard_workflow_action",
                 ) as runner,
+                mock.patch.object(
+                    self.bridge,
+                    "DASHBOARD_WORKFLOW_SCHEDULE_JOBS",
+                    self._schedule_jobs("discoverySchedule"),
+                ),
             ):
-                self.bridge._save_dashboard_schedule_preference(
-                    "newsBiasSchedule",
-                    {"enabled": False, "times": ["00:00", "12:00"]},
-                )
-                self.bridge._save_dashboard_schedule_preference(
-                    "indicatorScoutSchedule",
-                    {"enabled": False, "times": ["09:00"]},
-                )
-                self.bridge.save_dashboard_discovery_schedule(
-                    {"enabled": True, "times": ["09:00"]}
-                )
                 result = self.bridge.dashboard_workflow_scheduler_tick(
                     due_at,
                     refresh_quota=False,
@@ -354,6 +352,9 @@ class SchedulerWorkerIsolationTests(unittest.TestCase):
         self.assertFalse(result["dispatched"])
         runner.assert_not_called()
         self.assertIsNotNone(stored["discoverySchedule"]["pendingSlotKey"])
+        self.assertTrue(stored["discoverySchedule"]["requestedEnabled"])
+        self.assertEqual(stored["discoverySchedule"]["times"], ["09:00"])
+        self.assertEqual(stored["discoverySchedule"]["timezone"], "Asia/Bangkok")
 
 
 if __name__ == "__main__":

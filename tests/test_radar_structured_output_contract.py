@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import binascii
 import json
+import struct
 import tempfile
 import unittest
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -146,13 +149,17 @@ class RadarStructuredOutputContractTests(unittest.TestCase):
             [{
                 "id": "report-radar-same-batch",
                 "type": "indicator_scout_report",
+                "status": "ready",
                 "linkedPropId": "left_audit_crystals",
                 "workflowContext": {
                     "propId": "left_audit_crystals",
                     "actionId": "discover_new_indicators",
                 },
                 "createdAt": "2026-08-12T01:00:00Z",
-                "metrics": {"entries": entries},
+                "metrics": {
+                    "entries": entries,
+                    "workflowOutput": contract,
+                },
             }],
             settings={},
             now_local=self.bridge.datetime(2026, 8, 12, 12, 0),
@@ -330,8 +337,60 @@ class RadarStructuredOutputContractTests(unittest.TestCase):
 
     def test_report_screenshot_requires_explicit_matching_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            image_path = Path(temp_dir) / "radar.png"
-            image_path.write_bytes(b"image-test")
+            source_url = "https://example.com/tools/trend"
+            image_url = "https://example.com/card.png"
+            html = b'<meta property="og:image" content="/card.png">'
+            def png_chunk(kind: bytes, payload: bytes) -> bytes:
+                return (
+                    struct.pack(">I", len(payload))
+                    + kind
+                    + payload
+                    + struct.pack(">I", binascii.crc32(kind + payload) & 0xFFFFFFFF)
+                )
+
+            ihdr = struct.pack(">IIBBBBB", 1200, 630, 8, 2, 0, 0, 0)
+            image_bytes = (
+                b"\x89PNG\r\n\x1a\n"
+                + png_chunk(b"IHDR", ihdr)
+                + png_chunk(b"IDAT", zlib.compress(b"\x00"))
+                + png_chunk(b"IEND", b"")
+            )
+            response_type = self.bridge.capture_publisher_og_image.__globals__["HttpResponse"]
+
+            def request_once(target, _headers, _max_bytes, _timeout):
+                if target.normalized_url == source_url:
+                    return response_type(
+                        status=200,
+                        headers={"Content-Type": "text/html", "Content-Length": str(len(html))},
+                        body=html,
+                    )
+                if target.normalized_url == image_url:
+                    return response_type(
+                        status=200,
+                        headers={"Content-Type": "image/png", "Content-Length": str(len(image_bytes))},
+                        body=image_bytes,
+                    )
+                raise AssertionError(target.normalized_url)
+
+            entry = self.entry(source_url=source_url)
+            fingerprint = self.bridge._radar_entry_fingerprint(
+                source_url,
+                entry["toolName"],
+                entry["platform"],
+                entry["version"],
+            )
+            entry["recordId"] = f"radar-{fingerprint}"
+            captured = self.bridge.capture_publisher_og_image(
+                source_url,
+                checked_at=entry["checkedAt"],
+                source_record_id=entry["recordId"],
+                output_dir=Path(temp_dir),
+                resolver=lambda _hostname, _port: ("93.184.216.34",),
+                request_once=request_once,
+            )
+            self.assertTrue(captured.ok, captured.reason_code)
+            descriptor = captured.descriptor or {}
+            image_path = Path(temp_dir) / Path(str(descriptor["storageRef"])).name
             report = {
                 "id": "report-radar-image",
                 "type": "indicator_scout_report",
@@ -341,8 +400,8 @@ class RadarStructuredOutputContractTests(unittest.TestCase):
                     "actionId": "discover_new_indicators",
                 },
                 "createdAt": "2026-08-12T01:00:00Z",
-                "artifacts": ["data/runtime/codex-runs/radar.png"],
-                "metrics": {"entries": [self.entry()]},
+                "artifacts": [descriptor],
+                "metrics": {"entries": [entry]},
             }
             with mock.patch.object(
                 self.bridge,
@@ -352,9 +411,10 @@ class RadarStructuredOutputContractTests(unittest.TestCase):
                 unmatched = self.bridge._radar_report_entries(report)[0]
                 report["metrics"]["entries"][0]["screenshot"] = {
                     "available": True,
-                    "status": "verified_result_artifact",
+                    "status": "verified_publisher_image",
                     "attachmentId": None,
-                    "artifactRef": "data/runtime/codex-runs/radar.png",
+                    "artifactRef": descriptor["storageRef"],
+                    "captureKind": "publisher_open_graph",
                 }
                 matched = self.bridge._radar_report_entries(report)[0]
         self.assertFalse(unmatched["screenshot"]["available"])
@@ -362,7 +422,8 @@ class RadarStructuredOutputContractTests(unittest.TestCase):
         self.assertEqual(unmatched["screenshotStatus"], "not_available")
         self.assertTrue(matched["screenshot"]["available"])
         self.assertRegex(matched["screenshot"]["attachmentId"], r"^image-[0-9a-f]{20}$")
-        self.assertEqual(matched["screenshotStatus"], "verified_report_attachment")
+        self.assertEqual(matched["screenshotStatus"], "verified_publisher_image")
+        self.assertEqual(matched["screenshot"]["captureKind"], "publisher_open_graph")
 
     def test_prompt_and_input_contract_require_entries_and_cap_max_items_at_six(self) -> None:
         action = self.bridge.DASHBOARD_WORKFLOW_ACTIONS["discover_new_indicators"]

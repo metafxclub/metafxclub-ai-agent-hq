@@ -1,5 +1,5 @@
 {
-  "version": "dashboard-connection-contract-v006",
+  "version": "dashboard-connection-contract-v007",
   "purpose": "กำหนด Checklist การเชื่อมต่อ ความพร้อม โหมดทำงาน และเส้นทางรายงานของ Dashboard ทั้ง 9 จุด โดยให้ Backend เป็นผู้ตรวจสถานะจริง",
   "statusVocabulary": [
     "connected",
@@ -15,7 +15,10 @@
     "disabled",
     "not_required",
     "partial",
-    "needs_attention"
+    "needs_attention",
+    "auth_required",
+    "schema_mismatch",
+    "read_ready_write_unverified"
   ],
   "safety": {
     "host": "127.0.0.1",
@@ -37,6 +40,55 @@
       "terminal_path",
       "process_id"
     ]
+  },
+  "researchSheetHub": {
+    "schemaVersion": "research-sheet-hub-v1",
+    "configurationPropId": "mission_strategy_table",
+    "statusEndpoint": "GET /api/props/mission_strategy_table/research-sheet",
+    "inspectEndpoint": "POST /api/props/mission_strategy_table/research-sheet/inspect",
+    "activateEndpoint": "POST /api/props/mission_strategy_table/research-sheet/activate",
+    "inspectRequestFields": ["googleSheetUrlOrId"],
+    "activateRequestFields": ["verificationToken", "confirmActivate", "expectedConfigRevision", "idempotencyKey"],
+    "frontendCredentialFields": [],
+    "credentialsBackendOnly": true,
+    "rawSheetIdExposed": true,
+    "sheetIdIsCredential": false,
+    "frontendRetainsConfiguredSheetId": true,
+    "applyRequiresTwoStepConfirmation": true,
+    "confirmationOccursAfterSuccessfulVerification": true,
+    "lifecyclePhaseVocabulary": ["not_configured", "draft", "inspecting", "awaiting_confirmation", "activating", "active", "blocked"],
+    "lifecycleRules": {
+      "orderedPhases": ["draft", "inspecting", "awaiting_confirmation", "activating", "active"],
+      "candidateCannotReplaceActiveBeforeConfirmation": true,
+      "activeConfigRevisionChangesOnlyDuringActivation": true,
+      "failedCandidateKeepsPreviousActiveVisible": true,
+      "activationRequiresCurrentVerificationToken": true,
+      "verificationTokenIsShortLivedAndOneTime": true,
+      "activationRequiresExpectedConfigRevision": true,
+      "confirmActivateMustBeTrue": true
+    },
+    "activeSheetDisplay": {
+      "persistent": true,
+      "fields": ["active", "sheetId", "canonicalUrl", "configRevision", "activeConfigRevision", "activationConfirmedAt"],
+      "remainsVisibleDuringDraftAndFailure": true
+    },
+    "statusVocabulary": ["auth_required", "permission_denied", "schema_mismatch", "read_ready_write_unverified", "ready"],
+    "consumers": {
+      "codex_mcp_portal": {"tabName": "World_System", "mode": "read_write"},
+      "left_server_racks": {"tabName": "Deep_Research", "mode": "read_write"},
+      "left_audit_crystals": {"tabName": "Indicator_EA_Tool", "mode": "read_write"}
+    },
+    "linkedSystems": {
+      "codex_mcp_portal": {"consumerPropId": "codex_mcp_portal", "tabName": "World_System", "mode": "read_write", "purpose": "world_trading_system_radar"},
+      "left_server_racks": {"consumerPropId": "left_server_racks", "tabName": "Deep_Research", "mode": "read_write", "purpose": "deep_trading_system_research"},
+      "right_server_racks": {"consumerPropId": "left_server_racks", "tabName": "Deep_Research", "mode": "read", "purpose": "ea_factory_verified_read_only_source"},
+      "left_audit_crystals": {"consumerPropId": "left_audit_crystals", "tabName": "Indicator_EA_Tool", "mode": "read_write", "purpose": "radar_website_indicator_ea_tool"}
+    },
+    "linkedSystemStatusRule": "Every linked system derives status from the active current-revision primary consumer read proof; EA Factory derives from the Deep_Research consumer and is not a fourth tab or primary consumer.",
+    "inspectionConsumerEvidenceFields": ["propId", "consumerId", "tabName", "mode", "status", "readReady", "rowCount", "cachedRowCount", "observedAt", "rowsObservedAt", "probeEvidence", "missingHeaders", "duplicateHeaders"],
+    "activeConsumerEvidenceFields": ["propId", "consumerId", "tabName", "mode", "configRevision", "configurationApplied", "status", "readReady", "writeReady", "rowCount", "cachedRowCount", "observedAt", "rowsObservedAt", "outbox"],
+    "excludedDashboardIds": ["right_tool_console", "terminal_workstation"],
+    "truthRule": "The configured Sheet id remains visible and is copied to every included consumer, but each dashboard must display the Backend runtime status and may not infer connected success from a saved or applied id. Success requires current-revision read verification for all three fixed consumers; OAuth and service-account secrets remain Backend-only."
   },
   "dashboardUi": {
     "dashboardCount": 9,
@@ -117,12 +169,11 @@
   },
   "profiles": {
     "codex_mcp_portal": {
-      "moduleNameTh": "เรดาร์ระบบเทรดโลกและ EA",
-      "availability": {"ui": "ready", "data": "public_research_ready", "execution": "guarded_read_only_research", "googleSheets": "coming_soon"},
+      "moduleNameTh": "เรดาร์ระบบเทรดโลก",
+      "availability": {"ui": "ready", "data": "public_research_ready", "execution": "guarded_read_only_research", "googleSheets": "implemented_backend_adapter_runtime_status_required"},
       "localTabs": [
-        {"id": "systems", "labelTh": "ระบบเทรดใหม่", "actionIds": ["discover_trading_systems"]},
-        {"id": "ea_updates", "labelTh": "EA และงานวิจัยใหม่", "actionIds": ["discover_ea_updates"]},
-        {"id": "schedule", "labelTh": "ตารางค้นหารายวัน", "actionIds": ["save_discovery_schedule"]},
+        {"id": "systems", "labelTh": "ระบบเทรดใหม่", "actionIds": [], "viewOnly": true},
+        {"id": "schedule", "labelTh": "ตารางค้นหารายวัน", "actionIds": [], "viewOnly": true},
         {"id": "catalog", "labelTh": "คลังรายการและ Google Sheet", "actionIds": [], "viewOnly": true}
       ],
       "connections": [
@@ -132,63 +183,68 @@
         {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
         {"id": "dedup_catalog", "labelTh": "ช่วยเทียบรายการกับคลัง Local", "required": false, "adapterStatus": "prompt_assisted_unverified", "mode": "local_report_catalog_only"},
         {"id": "codex_quota", "labelTh": "Rate Limit ของ Codex", "required": false, "adapterStatus": "runtime_detected"},
-        {"id": "google_sheets_adapter", "labelTh": "เชื่อม Google Sheets", "required": false, "adapterStatus": "coming_soon", "externalWriteRequiresUserConfirmation": true},
+        {"id": "google_sheets_adapter", "labelTh": "Google Sheet กลาง · World_System", "required": false, "adapterStatus": "implemented_backend_google_sheets_api_fail_closed", "configurationPropId": "mission_strategy_table", "tabName": "World_System", "mode": "read_write", "runtimeStatusSource": "researchSheetConsumer", "configurationConfirmationAtMissionTableRequired": true, "perReportApprovalRequired": false, "credentialsBackendOnly": true},
         {"id": "backend_scheduler", "labelTh": "ตัวรันค้นหาระบบเทรดรายวันตามเวลา", "required": false, "adapterStatus": "implemented_guarded_read_only"},
         {"id": "report_routing", "labelTh": "ส่งผลกลับเรดาร์และ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "manual", "allowedModes": ["manual", "daily_schedule"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false, "scheduleConfigurationIntent": "save_discovery_schedule", "scheduleExecutionAdapterStatus": "implemented_guarded_read_only", "scheduledActionIds": ["discover_trading_systems"], "manualOrAgentHandoffActionIds": ["discover_ea_updates"]},
-      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "googleSheetsSync": "coming_soon", "recurringScheduler": "ready_guarded_read_only"},
+      "operation": {"defaultMode": "once_daily", "allowedModes": ["once_daily"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleUserConfigurable": false, "manualExecutionAllowed": false, "scheduleDefaultEnabled": true, "scheduleDefaultTimes": ["09:00"], "scheduleTimezone": "Asia/Bangkok", "schedulePreferenceMaxRunsPerDay": 1, "scheduleHardMaximumRunsPerDay": 1, "scheduleHardMaximumRuntimeEnforced": true, "scheduleDailyCounterPersistence": "backend_local_settings", "scheduleCountingPolicy": "post_gate_pre_dispatch_fail_closed_reservation", "scheduleStalePendingPolicy": "expire_at_bangkok_day_boundary", "scheduleCatchUpPolicy": "latest_same_day_slot_only", "scheduleConfigurationIntent": null, "scheduleExecutionAdapterStatus": "implemented_guarded_read_only", "scheduledActionIds": ["discover_trading_systems"], "manualOrAgentHandoffActionIds": []},
+      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "googleSheetsSync": "implemented_backend_adapter_runtime_status_required", "recurringScheduler": "ready_guarded_read_only"},
       "reportRoute": {"targetPropId": "codex_mcp_portal", "primaryReportType": "trading_system_discovery_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "left_server_racks": {
       "moduleNameTh": "คลังวิจัยระบบเทรดเชิงลึก",
-      "availability": {"ui": "ready", "data": "local_archive_ready", "execution": "guarded_read_only_research", "googleSheets": "coming_soon"},
+      "availability": {"ui": "ready", "data": "verified_radar_catalog_ready", "execution": "guarded_read_only_research", "googleSheets": "implemented_backend_adapter_runtime_status_required", "ohlcBacktest": "local_file_analysis"},
       "localTabs": [
-        {"id": "research_queue", "labelTh": "คิววิจัย", "actionIds": ["deep_research_system"]},
-        {"id": "verified_archive", "labelTh": "คลังที่ตรวจสอบแล้ว", "actionIds": [], "viewOnly": true},
-        {"id": "application", "labelTh": "แนวทางประยุกต์", "actionIds": [], "viewOnly": true},
-        {"id": "evidence", "labelTh": "หลักฐานย้อนหลัง", "actionIds": [], "viewOnly": true}
+        {"id": "research", "labelTh": "เลือกระบบและวิจัย", "actionIds": ["deep_research_system"]},
+        {"id": "chart", "labelTh": "กราฟและจุดเข้าออก", "actionIds": [], "viewOnly": true},
+        {"id": "backtest", "labelTh": "Backtest OHLC", "actionIds": []},
+        {"id": "report", "labelTh": "สรุป Report", "actionIds": [], "viewOnly": true}
       ],
       "connections": [
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
         {"id": "memory_store", "labelTh": "คลังความจำและงานย้อนหลัง", "required": true, "adapterStatus": "implemented"},
         {"id": "report_store", "labelTh": "คลังรายงาน", "required": true, "adapterStatus": "implemented"},
-        {"id": "radar_report_link", "labelTh": "รับรายการจากเรดาร์ระบบเทรดโลก", "required": true, "adapterStatus": "implemented", "mode": "backend_contract"},
+        {"id": "radar_report_link", "labelTh": "รับรายการที่ตรวจแล้วจากเรดาร์ระบบเทรดโลกอัตโนมัติ", "required": true, "adapterStatus": "implemented", "mode": "backend_verified_catalog_projection"},
         {"id": "codex_public_web_research", "labelTh": "วิจัยแหล่งสาธารณะแบบอ่านอย่างเดียว", "required": true, "adapterStatus": "implemented", "mode": "guarded_read_only"},
         {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
-        {"id": "google_sheets_adapter", "labelTh": "ซิงก์งานวิจัยไป Google Sheets", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "google_sheets_adapter", "labelTh": "Google Sheet กลาง · Deep_Research", "required": false, "adapterStatus": "implemented_backend_google_sheets_api_fail_closed", "configurationPropId": "mission_strategy_table", "tabName": "Deep_Research", "mode": "read_write", "runtimeStatusSource": "researchSheetConsumer", "credentialsBackendOnly": true},
         {"id": "report_routing", "labelTh": "ส่งผลกลับคลังวิจัยและ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
       "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
-      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "durableArchive": "ready", "googleSheetsSync": "coming_soon"},
+      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "verifiedRadarCatalog": "ready_backend_projected", "ohlcFileAnalysis": "ready_local_only", "missionReportAudit": "ready", "durableArchive": "ready", "googleSheetsSync": "implemented_backend_adapter_runtime_status_required"},
       "reportRoute": {"targetPropId": "left_server_racks", "primaryReportType": "trading_system_research_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "right_server_racks": {
       "moduleNameTh": "โรงงานสร้าง EA และ Indicator",
-      "availability": {"ui": "ready", "data": "source_inputs_ready", "execution": "codex_workspace_ready", "compile": "coming_soon"},
+      "availability": {"ui": "ready", "data": "research_and_public_sheet_catalog_ready", "execution": "manual_stage_by_stage", "compile": "guarded_requires_verified_front_office_adapter", "backtest": "guarded_requires_verified_front_office_adapter"},
       "localTabs": [
-        {"id": "builder", "labelTh": "สร้าง EA / Indicator", "actionIds": ["build_strategy_code"]},
-        {"id": "code_review", "labelTh": "ตรวจ Source Code", "actionIds": ["review_source_code"]},
-        {"id": "compile", "labelTh": "สถานะ Compile", "actionIds": [], "viewOnly": true},
-        {"id": "outputs", "labelTh": "ไฟล์ผลลัพธ์", "actionIds": [], "viewOnly": true}
+        {"id": "source", "labelTh": "1 เลือกระบบ", "actionIds": [], "viewOnly": false},
+        {"id": "strategy_spec", "labelTh": "2 ตรวจ Strategy Spec", "actionIds": []},
+        {"id": "generate_source", "labelTh": "3 สร้างโค้ด", "actionIds": ["build_strategy_code"]},
+        {"id": "source_review", "labelTh": "4 ตรวจ Source Code", "actionIds": ["review_source_code"]},
+        {"id": "compile_validate", "labelTh": "5 Compile / Validate", "actionIds": []},
+        {"id": "backtest_recheck", "labelTh": "6 Backtest / Recheck", "actionIds": []},
+        {"id": "final_report", "labelTh": "7 ไฟล์และ Report", "actionIds": [], "viewOnly": true}
       ],
       "connections": [
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
-        {"id": "source_catalog", "labelTh": "ระบบต้นฉบับจากเรดาร์และคลังวิจัย", "required": true, "adapterStatus": "implemented", "mode": "backend_contract"},
+        {"id": "source_catalog", "labelTh": "ระบบต้นฉบับจากคลังวิจัยเชิงลึก", "required": true, "adapterStatus": "implemented", "mode": "backend_verified_projection"},
+        {"id": "google_sheets_adapter", "labelTh": "Google Sheet กลาง · ใช้ Deep_Research ร่วมแบบ Read-only", "required": false, "adapterStatus": "implemented_central_sheet_read_only_with_public_or_backend_auth_transport", "configurationPropId": "mission_strategy_table", "tabName": "Deep_Research", "mode": "read", "sharedConsumerPropId": "left_server_racks", "runtimeStatusSource": "researchSheetConsumer", "credentialsAcceptedFromFrontend": false, "credentialsBackendOnly": true, "externalWriteEnabled": false},
         {"id": "codex_workspace", "labelTh": "พื้นที่สร้าง Source Code ผ่าน Codex", "required": true, "adapterStatus": "implemented", "mode": "guarded_workspace"},
         {"id": "mt4_terminal", "labelTh": "โปรแกรม MT4 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
         {"id": "mt5_terminal", "labelTh": "โปรแกรม MT5 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
-        {"id": "metaeditor_compile_adapter", "labelTh": "Compile MQL4/MQL5 ผ่าน MetaEditor", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "pine_compile_adapter", "labelTh": "ตรวจ Compile Pine Script บน TradingView", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "metaeditor_compile_adapter", "labelTh": "Compile MQL4/MQL5 ผ่าน MetaEditor ที่มองเห็นจริง", "required": false, "adapterStatus": "guarded_requires_selected_matching_terminal_and_proof"},
+        {"id": "strategy_tester_adapter", "labelTh": "Visual Backtest ผ่าน Strategy Tester", "required": false, "adapterStatus": "guarded_requires_selected_matching_terminal_and_proof"},
+        {"id": "pine_validation_adapter", "labelTh": "ตรวจโครงสร้าง Pine Script", "required": false, "adapterStatus": "implemented_static_validation_only"},
         {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
         {"id": "report_routing", "labelTh": "ส่งผล Build กลับโรงงานและ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
-      "connectionRequirements": {"anyOf": ["mt4_terminal", "mt5_terminal"], "requiredForSourceGeneration": ["codex_workspace"], "anyOfForFutureMqlCompile": ["mt4_terminal", "mt5_terminal"], "notRequiredForPineSourceGeneration": true},
+      "connectionRequirements": {"requiredForSourceGeneration": ["codex_workspace"], "requiredForGoogleSheetSource": ["google_sheets_adapter"], "requiredForMt4CompileAndBacktest": ["mt4_terminal", "metaeditor_compile_adapter", "strategy_tester_adapter"], "requiredForMt5CompileAndBacktest": ["mt5_terminal", "metaeditor_compile_adapter", "strategy_tester_adapter"], "notRequiredForPineSourceGenerationOrValidation": true},
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
-      "workflowReadiness": {"codexSourceGenerationWorkspace": "ready_guarded", "sourceCodeReview": "ready_guarded", "missionReportAudit": "ready", "metaEditorCompile": "coming_soon", "pineCompileValidation": "coming_soon"},
+      "operation": {"defaultMode": "manual_stage_by_stage", "allowedModes": ["manual_stage_by_stage"], "plannedModes": [], "intervalMinutes": null, "scheduled": false, "automaticLoop": false, "oneUserActionAdvancesOneStage": true},
+      "workflowReadiness": {"researchCatalog": "ready_backend_verified", "googleSheetsReadOnly": "implemented_central_adapter_runtime_status_required", "codexSourceGenerationWorkspace": "ready_guarded", "sourceCodeReview": "ready_guarded", "pineStaticValidation": "ready", "missionReportAudit": "ready", "metaEditorCompile": "requires_selected_terminal_and_verified_front_office_proof", "visualBacktest": "requires_selected_terminal_and_verified_front_office_proof"},
       "reportRoute": {"targetPropId": "right_server_racks", "primaryReportType": "ea_build_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "left_analytics_console": {
@@ -284,7 +340,25 @@
     },
     "right_tool_console": {
       "moduleNameTh": "ห้องทดลอง EA อัตโนมัติ",
+      "researchSheetHub": {"included": false, "reason": "explicitly_excluded_from_google_sheet_pipeline"},
       "availability": {"ui": "ready", "data": "plan_inputs_ready", "execution": "plan_only", "strategyTester": "coming_soon", "optimization": "coming_soon", "eaDiscovery": "coming_soon"},
+      "executionPolicy": {
+        "mode": "plan_only",
+        "planPreparationAvailable": true,
+        "realExecutionAvailable": false,
+        "frontendMayClaimExecution": false,
+        "completedOptimizationRequiresVerifiedEvidence": true
+      },
+      "reportContract": {
+        "schemaVersion": "ea-experiment-report-v2",
+        "acceptsLegacySchemaVersions": ["ea-experiment-report-v1"],
+        "identityFields": ["runId", "roundId", "platform", "terminalId"],
+        "testerFields": ["testerSettings", "warnings"],
+        "resultFields": ["passCount", "profitablePassCount", "allPassRows", "currentBands", "nextParameterPlan", "candidateGroups"],
+        "executionEvidenceFields": ["visibleTester", "mtExecutionVerified", "optimizationProofVerified", "resultReport.sha256", "artifactManifest.sha256"],
+        "allPassRowsMaxItems": 5000,
+        "outputAliases": {"terminalCandidateId": "terminalId", "totalPasses": "passCount", "passes": "allPassRows", "parameterBands": "currentBands", "nextRanges": "nextParameterPlan", "candidates": "candidateGroups"}
+      },
       "localTabs": [
         {"id": "backtest", "labelTh": "Auto Backtest", "actionIds": ["prepare_backtest_plan"]},
         {"id": "optimization", "labelTh": "Auto Optimization", "actionIds": ["prepare_optimization_plan"]},
@@ -305,11 +379,12 @@
       "connectionRequirements": {"anyOf": ["mt4_terminal", "mt5_terminal"], "anyOfForFutureMetatraderRun": ["mt4_terminal", "mt5_terminal"], "notRequiredForPlanPreparation": true},
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
       "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
-      "workflowReadiness": {"missionPlanReportAudit": "ready", "strategyTesterBacktest": "coming_soon", "metatraderOptimization": "coming_soon", "eaDiscoveryPlugin": "coming_soon"},
+      "workflowReadiness": {"missionPlanReportAudit": "ready", "strategyTesterBacktest": "coming_soon", "metatraderOptimization": "coming_soon", "eaDiscoveryPlugin": "coming_soon", "executionMode": "plan_only", "verifiedOptimizationReportV2": "contract_ready_adapter_missing"},
       "reportRoute": {"targetPropId": "right_tool_console", "primaryReportType": "ea_experiment_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "terminal_workstation": {
       "moduleNameTh": "สตูดิโอพัฒนา EA",
+      "researchSheetHub": {"included": false, "reason": "explicitly_excluded_from_google_sheet_pipeline"},
       "availability": {"ui": "ready", "data": "source_lineage_ready", "execution": "guarded_workspace_ready", "compile": "coming_soon", "artifactDownload": "coming_soon"},
       "localTabs": [
         {"id": "source", "labelTh": "Source EA ต้นทาง", "actionIds": ["inspect_ea_source"]},
@@ -337,11 +412,11 @@
     },
     "left_audit_crystals": {
       "moduleNameTh": "Radar Website Tool",
-      "availability": {"ui": "ready", "data": "public_research_ready", "execution": "guarded_read_only_research", "googleSheets": "configuration_only_adapter_not_connected", "screenshot": "not_connected", "scheduler": "implemented_guarded_read_only"},
+      "availability": {"ui": "ready", "data": "public_research_ready", "execution": "guarded_read_only_research", "googleSheets": "implemented_backend_adapter_runtime_status_required", "screenshot": "not_connected", "scheduler": "implemented_guarded_read_only"},
       "localTabs": [
-        {"id": "discoveries", "labelTh": "รายการวันนี้", "actionIds": ["discover_new_indicators"]},
+        {"id": "discoveries", "labelTh": "รายการวันนี้", "actionIds": [], "viewOnly": true},
         {"id": "evidence", "labelTh": "หลักฐานและแหล่งข้อมูล", "actionIds": [], "viewOnly": true},
-        {"id": "schedule", "labelTh": "เวลาที่ต้องการให้ค้นหา", "actionIds": ["save_indicator_scout_schedule"]},
+        {"id": "schedule", "labelTh": "ตารางค้นหารายวัน", "actionIds": [], "viewOnly": true},
         {"id": "archive", "labelTh": "ประวัติการค้นหา", "actionIds": [], "viewOnly": true}
       ],
       "connections": [
@@ -349,16 +424,16 @@
         {"id": "codex_runner", "labelTh": "Codex CLI และบัญชีที่ Login", "required": true, "adapterStatus": "runtime_detected"},
         {"id": "codex_public_web_research", "labelTh": "ค้นเว็บไซต์สาธารณะแบบอ่านอย่างเดียว", "required": true, "adapterStatus": "implemented", "mode": "guarded_read_only"},
         {"id": "dedup_store", "labelTh": "ตรวจซ้ำกับคลัง Report ในเครื่อง", "required": false, "adapterStatus": "implemented_deterministic", "mode": "local_report_catalog_only", "googleSheetCompared": false},
-        {"id": "google_sheets_config", "labelTh": "บันทึก Google Sheet URL หรือ ID", "required": false, "adapterStatus": "configuration_only_adapter_not_connected", "externalWriteEnabled": false, "writeRequiresExplicitUserConfirmation": true, "privateDefaultIncluded": false},
+        {"id": "google_sheets_adapter", "labelTh": "Google Sheet กลาง · Indicator_EA_Tool", "required": false, "adapterStatus": "implemented_backend_google_sheets_api_fail_closed", "configurationPropId": "mission_strategy_table", "tabName": "Indicator_EA_Tool", "mode": "read_write", "runtimeStatusSource": "researchSheetConsumer", "credentialsBackendOnly": true, "perReportApprovalRequired": false},
         {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
         {"id": "screenshot_adapter", "labelTh": "จับภาพเว็บไซต์เป็นหลักฐาน", "required": false, "adapterStatus": "not_connected"},
         {"id": "backend_scheduler", "labelTh": "รันค้นหาอัตโนมัติวันละครั้ง เวลา 09:00 น.", "required": false, "adapterStatus": "implemented_guarded_read_only"},
         {"id": "report_routing", "labelTh": "ส่งผลกลับเรดาร์และ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
-      "operation": {"defaultMode": "once_daily", "allowedModes": ["manual", "once_daily"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": true, "scheduleDefaultTimes": ["09:00"], "scheduleConfigurationIntent": "save_indicator_scout_schedule", "schedulePreferenceMaxRunsPerDay": 1, "scheduleHardMaximumRunsPerDay": 1, "scheduleHardMaximumRuntimeEnforced": true, "scheduleDailyCounterPersistence": "backend_local_settings", "scheduleCountingPolicy": "post_gate_pre_dispatch_fail_closed_reservation", "scheduleStalePendingPolicy": "expire_at_bangkok_day_boundary", "scheduleCatchUpPolicy": "latest_same_day_slot_only", "scheduleExecutionAdapterStatus": "implemented_guarded_read_only", "scheduledActionIds": ["discover_new_indicators"]},
-      "readModel": {"schemaVersion": "radar-website-tool-v1", "primaryViews": ["today", "history_7_days"], "todayEntries": true, "sevenDayEntries": true, "searchScheduleAndSheetLocation": "left_rail"},
-      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "dedup": "implemented_deterministic_local_report_catalog", "googleSheetsAdapter": "not_connected", "missionReportAudit": "ready", "screenshotAdapter": "not_connected", "recurringScheduler": "ready_guarded_read_only"},
+      "operation": {"defaultMode": "once_daily", "allowedModes": ["once_daily"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleUserConfigurable": false, "manualExecutionAllowed": false, "scheduleDefaultEnabled": true, "scheduleDefaultTimes": ["09:00"], "scheduleTimezone": "Asia/Bangkok", "scheduleConfigurationIntent": null, "schedulePreferenceMaxRunsPerDay": 1, "scheduleHardMaximumRunsPerDay": 1, "scheduleHardMaximumRuntimeEnforced": true, "scheduleDailyCounterPersistence": "backend_local_settings", "scheduleCountingPolicy": "post_gate_pre_dispatch_fail_closed_reservation", "scheduleStalePendingPolicy": "expire_at_bangkok_day_boundary", "scheduleCatchUpPolicy": "latest_same_day_slot_only", "scheduleExecutionAdapterStatus": "implemented_guarded_read_only", "scheduledActionIds": ["discover_new_indicators"], "manualOrAgentHandoffActionIds": []},
+      "readModel": {"schemaVersion": "radar-website-tool-v1", "primaryViews": ["today", "history_7_days"], "todayEntries": true, "sevenDayEntries": true, "searchScheduleAndSheetLocation": "mission_strategy_table_central_hub"},
+      "workflowReadiness": {"publicWebResearch": "ready_guarded_read_only", "dedup": "implemented_deterministic_local_report_catalog", "googleSheetsAdapter": "implemented_backend_adapter_runtime_status_required", "missionReportAudit": "ready", "screenshotAdapter": "ready_publisher_image", "screenshotCaptureKind": "publisher_open_graph", "fullPageScreenshot": false, "recurringScheduler": "ready_guarded_read_only"},
       "reportRoute": {"targetPropId": "left_audit_crystals", "primaryReportType": "indicator_scout_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "left_signal_cube": {

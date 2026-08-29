@@ -56,8 +56,6 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
 
     def test_canonical_action_ids_are_wired(self):
         for action_id in (
-            "discover_new_indicators",
-            "save_indicator_scout_schedule",
             "inspect_ea_source",
             "develop_ea_source",
             "propose_ea_performance_improvements",
@@ -70,6 +68,16 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
         self.assertNotIn("build_fx_pair_bias", news)
         self.assertIn("/news/refresh", self.main)
         self.assertIn("/news/schedule", self.main)
+
+        radar = self.fallback_prop_block("left_audit_crystals", "left_signal_cube")
+        self.assertIn("actions: []", radar)
+        self.assertNotIn('id: "discover_new_indicators"', radar)
+        self.assertNotIn('id: "save_indicator_scout_schedule"', radar)
+        denylist_start = self.main.index("const BACKEND_OWNED_DAILY_ACTION_IDS")
+        denylist_end = self.main.index("\n]);", denylist_start)
+        denylist = self.main[denylist_start:denylist_end]
+        self.assertIn('"discover_new_indicators"', denylist)
+        self.assertIn('"save_indicator_scout_schedule"', denylist)
 
     def test_fx_bias_uses_exact_28_pair_universe_without_mock_values(self):
         start = self.main.index("const FX_BIAS_PAIR_UNIVERSE")
@@ -154,19 +162,30 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
         self.assertIn('"verified"', block)
         self.assertIn('return "completed"', block)
 
-    def test_portal_schedule_copy_excludes_ea_discovery(self):
-        self.assertIn('labelTh: "ตั้งเวลาค้นหาระบบเทรดรายวัน"', self.main)
-        self.assertIn("งานค้นหา EA เป็น Mission แยก", self.main)
+    def test_portal_schedule_copy_is_backend_owned_and_read_only(self):
+        portal = self.fallback_prop_block("codex_mcp_portal", "left_server_racks")
+        self.assertNotIn('labelTh: "ตั้งเวลาค้นหาระบบเทรดรายวัน"', self.main)
+        self.assertNotIn("งานค้นหา EA เป็น Mission แยก", self.main)
         self.assertIn('labelTh: "เวลาค้นหาระบบเทรด"', self.main)
-        self.assertIn("ตารางเวลานี้ใช้กับการค้นหาระบบเทรดเท่านั้น", self.main)
+        self.assertIn("ตารางเวลานี้ใช้กับการค้นหาระบบเทรดจากแหล่งสาธารณะเท่านั้น", self.main)
+        self.assertIn("ดูรอบค้นหาแบบอ่านอย่างเดียวเวลา 09:00 น. Asia/Bangkok", portal)
+        self.assertIn("actions: []", portal)
+        schedule_card = self.main[
+            self.main.index("function createBackendOwnedDailyScheduleCard"):
+            self.main.index("function renderRadarSettingsRail")
+        ]
+        self.assertIn('card.dataset.backendOwnedSchedule = "true"', schedule_card)
+        self.assertIn('["สถานะนโยบาย", "เปิดถาวรโดย Backend"]', schedule_card)
+        self.assertIn('meta.textContent = "ตารางนี้เป็น Read-only ผู้ใช้เปลี่ยนเวลา ปิดระบบ หรือสั่งรันทันทีไม่ได้"', schedule_card)
 
     def test_indicator_scout_shows_source_date_dedup_and_truthful_adapter(self):
         self.assertIn("sourceUrl", self.main)
         self.assertIn("discoveredAt", self.main)
         self.assertIn("dedupStatus", self.main)
-        self.assertIn('status: "coming_soon"', self.main)
-        self.assertIn('labelTh: "Screenshot Adapter: Coming Soon"', self.main)
-        self.assertIn("ไม่มีภาพจำลอง", self.main)
+        self.assertIn('status: "ready"', self.main)
+        self.assertIn('labelTh: "Publisher Image Adapter พร้อมใช้งาน"', self.main)
+        self.assertIn("ไม่ใช่ภาพแคปเต็มหน้าเว็บ", self.main)
+        self.assertIn("ระบบไม่สร้างภาพจำลอง", self.main)
 
     def test_radar_website_tool_keeps_canonical_tabs_but_presents_only_today_and_seven_days(self):
         fallback = self.fallback_prop_block("left_audit_crystals", "left_signal_cube")
@@ -184,34 +203,40 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
         self.assertIn("INDICATOR_SCOUT_PRESENTATION_TAB_IDS", normalization)
         self.assertIn('tab.id === "discoveries" ? "วันนี้" : "ย้อนหลัง 7 วัน"', normalization)
 
-    def test_radar_actions_live_only_in_left_settings_rail(self):
+    def test_radar_manual_and_schedule_actions_are_filtered_from_every_ui_surface(self):
         rail = self.main[
             self.main.index("function workflowRailActions"):
-            self.main.index("function getWorkflowHandoffReports", self.main.index("function workflowRailActions"))
+            self.main.index("function createWorkflowUseGuideCard", self.main.index("function workflowRailActions"))
         ]
-        dashboard = self.main[
-            self.main.index("function renderWorkflowDashboard("):
-            self.main.index("function setWorkflowDashboardTab", self.main.index("function renderWorkflowDashboard("))
+        normalize = self.main[
+            self.main.index("function normalizeWorkflowDashboard"):
+            self.main.index("function getWorkflowSelectedTab", self.main.index("function normalizeWorkflowDashboard"))
         ]
-        self.assertIn("INDICATOR_SCOUT_RAIL_ACTION_IDS", rail)
-        self.assertIn('"discover_new_indicators"', self.main)
-        self.assertIn('"save_indicator_scout_schedule"', self.main)
-        self.assertIn("centralActionIds", dashboard)
-        self.assertIn("!centralActionIds.has(action.id)", dashboard)
-        self.assertIn("usesDomainHistory", dashboard)
+        submit = self.main[
+            self.main.index("async function submitWorkflowDashboardAction"):
+            self.main.index("function renderPropDashboard", self.main.index("async function submitWorkflowDashboardAction"))
+        ]
+        self.assertIn('["codex_mcp_portal", INDICATOR_SCOUT_PROP_ID].includes(subject?.id)', rail)
+        self.assertIn("return [];", rail)
+        self.assertIn("!BACKEND_OWNED_DAILY_ACTION_IDS.has(action.id)", normalize)
+        self.assertIn("if (BACKEND_OWNED_DAILY_ACTION_IDS.has(actionId)) return;", submit)
+        self.assertNotIn("INDICATOR_SCOUT_RAIL_ACTION_IDS", self.main)
 
-    def test_radar_left_rail_shows_masked_sheet_and_hard_daily_cap_truth(self):
+    def test_radar_left_rail_shows_central_sheet_id_and_hard_daily_cap_truth(self):
         rail = self.main[
             self.main.index("function createRadarRailTruthCard"):
-            self.main.index("function getWorkflowHandoffReports", self.main.index("function createRadarRailTruthCard"))
+            self.main.index("function workflowRailActions", self.main.index("function createRadarRailTruthCard"))
         ]
-        self.assertIn("sheetReferenceMasked", rail)
+        self.assertIn("researchSheetHubConfiguredReference", rail)
         self.assertIn("runsReservedToday", rail)
         self.assertIn("remainingRunsToday", rail)
         self.assertIn("ยังไม่เชื่อม Adapter", rail)
-        self.assertNotIn("sheetId", rail)
-        self.assertIn('field.id === "googleSheetUrlOrId"', self.main)
-        self.assertIn("googleSheetTabName: radarSheet?.tabName", self.main)
+        self.assertIn("createBackendOwnedDailyScheduleCard", rail)
+        self.assertIn("createRadarRailTruthCard(dashboard)", rail)
+        self.assertNotIn("createWorkflowActionCard", rail)
+        self.assertNotIn("createRadarScheduleCard", rail)
+        self.assertNotIn("saveRadarSchedule", rail)
+        self.assertNotIn("retryRadarDiscovery", rail)
         self.assertIn(".workflow-radar-rail-truth", self.styles)
 
     def test_radar_normalizes_contract_entries_categories_and_safe_report_images(self):
@@ -263,7 +288,7 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
         self.assertIn("filterIndicatorScoutRollingSevenDays", renderer)
         self.assertIn("domain?.todayEntries", renderer)
         self.assertIn("domain?.sevenDayEntries", renderer)
-        self.assertIn("same-origin Report attachment", renderer)
+        self.assertIn("ภาพ Open Graph ที่ Backend ตรวจและผูกกับรายการแล้ว", renderer)
 
         normalizer = self.main[
             self.main.index("function normalizeIndicatorScoutDomain"):
@@ -294,6 +319,17 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
         self.assertIn("grid-template-columns: minmax(0, 1fr)", self.styles)
         self.assertIn("ยังไม่มี URL ที่ผ่านการตรวจ", self.main)
         self.assertIn("ดูรายละเอียด", self.main)
+
+    def test_radar_truth_banner_limits_execution_to_public_evidence_pages(self):
+        start = self.main.index("function renderIndicatorScoutPanel")
+        end = self.main.index("function renderFxBiasTable", start)
+        renderer = self.main[start:end]
+        self.assertIn('className = "workflow-radar-execution-truth"', renderer)
+        self.assertIn('setAttribute("role", "note")', renderer)
+        self.assertIn("อ่านหลักฐานจากเว็บสาธารณะเท่านั้น", renderer)
+        self.assertIn("ไม่ดาวน์โหลด ไม่ติดตั้ง และไม่รัน Indicator, EA หรือ Tool", renderer)
+        self.assertIn("ไม่เปิดหรือสั่ง MT4/MT5", renderer)
+        self.assertIn(".workflow-radar-execution-truth", self.styles)
 
     def test_web_speech_dictation_handles_unsupported_and_permission_states(self):
         self.assertIn("window.SpeechRecognition || window.webkitSpeechRecognition", self.main)
@@ -347,20 +383,23 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
             self.assertIn("getSafeExternalHttpUrl", block)
             self.assertNotIn('link.href = parsed.href', block)
 
-    def test_ea_factory_outputs_tab_renders_verified_backend_downloads(self):
-        output_start = self.main.index("function renderTerminalOutputPanel")
-        output_end = self.main.index("function renderTerminalSourceCatalogPanel", output_start)
+    def test_ea_factory_final_report_renders_verified_backend_downloads(self):
+        output_start = self.main.index("function renderEaFactoryOperationalStage")
+        output_end = self.main.index("function renderEaFactoryPanel", output_start)
         output_block = self.main[output_start:output_end]
-        self.assertIn('"ea_build_report"', output_block)
-        self.assertIn("item.downloads", output_block)
-        self.assertIn("appendDashboardArtifactLinks(section, artifacts)", output_block)
+        self.assertIn('stageId === "artifacts_report"', output_block)
+        self.assertIn("appendDashboardArtifactLinks(section, domain.activeBuild.artifacts, { limit: 200 })", output_block)
+        self.assertNotIn("reports.flatMap", output_block)
+        self.assertIn("Audit และประวัติ Version", output_block)
 
         router_start = self.main.index("function renderWorkflowDomainPanel")
         router_end = self.main.index("function renderWorkflowCatalog", router_start)
         router_block = self.main[router_start:router_end]
-        self.assertIn('["terminal_workstation", "right_server_racks"].includes(subject.id)', router_block)
-        self.assertIn('selectedTab.id === "outputs"', router_block)
-        self.assertIn("renderTerminalOutputPanel(container, report)", router_block)
+        factory_route = 'if (subject.id === EA_FACTORY_PROP_ID)'
+        legacy_route = 'if (subject.id === "terminal_workstation")'
+        self.assertIn(factory_route, router_block)
+        self.assertIn("renderEaFactoryPanel(container, selectedTab.id, dashboard.domainData.eaFactory, report)", router_block)
+        self.assertLess(router_block.index(factory_route), router_block.index(legacy_route))
 
     def test_ea_source_uses_only_backend_catalog_without_file_or_path_input(self):
         self.assertIn("function normalizeWorkflowSourceCatalog", self.main)
@@ -410,8 +449,30 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
         self.assertIn("tokenBudget: { min: 256, max: 100000, step: 1 }", self.main)
         self.assertIn("timeoutSeconds: { min: 15, max: 600, step: 1 }", self.main)
         self.assertIn("outputLimitChars: { min: 1000, max: 20000, step: 1 }", self.main)
-        self.assertIn("rateReservePercent: { min: 10, max: 80, step: 1 }", self.main)
+        self.assertIn("rateReservePercent: { min: 15, max: 15, step: 1 }", self.main)
+        self.assertIn('field.id === "rateReservePercent"', self.main)
+        self.assertIn('control.disabled = true', self.main)
         self.assertIn('field.integer ? Math.trunc(numeric) : numeric', self.main)
+
+    def test_public_read_only_scope_survives_normalization_and_drives_the_cta(self):
+        normalize_start = self.main.index("function normalizeWorkflowAction")
+        normalize_end = self.main.index("\nfunction normalizeWorkflowDashboard", normalize_start)
+        normalize = self.main[normalize_start:normalize_end]
+        self.assertIn('executionScope: WORKFLOW_EXECUTION_SCOPES.has(String(rawAction?.executionScope || ""))', normalize)
+        self.assertIn('? String(rawAction.executionScope)', normalize)
+        self.assertIn('? String(fallbackAction.executionScope)', normalize)
+
+        status_start = self.main.index("function workflowAvailabilityCopy")
+        status_end = self.main.index("\nfunction createWorkflowSourceSelect", status_start)
+        status = self.main[status_start:status_end]
+        self.assertIn('action.analysisOnly && action.executionScope === "public_web_read_only"', status)
+        self.assertIn('label: "พร้อมค้นหาโดยไม่รออนุมัติ"', status)
+
+        form_start = self.main.index("function createWorkflowActionCard")
+        form_end = self.main.index("\nfunction renderWorkflowAutomationSummary", form_start)
+        form = self.main[form_start:form_end]
+        self.assertIn('const isReadOnlySearch = action.analysisOnly && action.executionScope === "public_web_read_only";', form)
+        self.assertIn('isReadOnlySearch ? "เริ่มค้นตอนนี้" : "สร้าง Mission"', form)
 
     def test_field_guard_allows_canonical_budget_and_tier_but_denies_privileged_ids(self):
         guard_line = next(line for line in self.main.splitlines() if line.startswith("const WORKFLOW_FIELD_DENY_PATTERN"))

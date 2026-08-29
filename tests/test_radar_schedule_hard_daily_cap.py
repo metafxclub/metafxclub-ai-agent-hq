@@ -53,16 +53,18 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
                 return_value={"allowed": True, "reason": "ready"},
             ),
             mock.patch.object(bridge, "run_dashboard_workflow_action", side_effect=runner),
-            mock.patch.object(bridge, "utc_now", return_value="2026-08-12T01:00:00Z"),
+            mock.patch.object(
+                bridge,
+                "DASHBOARD_WORKFLOW_SCHEDULE_JOBS",
+                tuple(
+                    job
+                    for job in bridge.DASHBOARD_WORKFLOW_SCHEDULE_JOBS
+                    if job.get("settingsKey") == "indicatorScoutSchedule"
+                ),
+            ),
         )
 
-    @staticmethod
-    def _disable_direct_news_schedule(bridge) -> None:
-        bridge.save_direct_daily_fx_news_schedule(
-            {"enabled": False, "times": ["00:00", "12:00"]}
-        )
-
-    def test_schedule_edits_cannot_create_a_second_execution_same_bangkok_day(self) -> None:
+    def test_schedule_mutation_is_rejected_and_cannot_create_a_second_daily_run(self) -> None:
         calls: list[dict] = []
 
         def runner(_prop_id: str, payload: dict, *, trusted_trigger_source: str) -> dict:
@@ -74,22 +76,41 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
             settings_path = Path(temp_dir) / "settings.json"
             patches = self._runtime_patches(self.bridge, settings_path, runner)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                self._disable_direct_news_schedule(self.bridge)
                 self.bridge._save_dashboard_schedule_preference(
                     "indicatorScoutSchedule",
-                    {"enabled": True, "times": ["09:00", "10:00"]},
+                    {
+                        "enabled": True,
+                        "times": ["09:00"],
+                        "timezone": "Asia/Bangkok",
+                    },
                 )
                 first = self.bridge.dashboard_workflow_scheduler_tick(
                     datetime(2026, 8, 12, 9, 0, tzinfo=self.bridge.THAILAND_TIMEZONE),
                     refresh_quota=False,
                 )
+                with self.assertRaises(self.bridge.RequestError) as moved:
+                    self.bridge._save_dashboard_schedule_preference(
+                        "indicatorScoutSchedule",
+                        {"enabled": True, "times": ["10:00"]},
+                    )
+                self.assertEqual(moved.exception.status, 409)
+                self.assertEqual(
+                    str(moved.exception),
+                    "backend_owned_schedule_time_must_be_09_00",
+                )
+                with self.assertRaises(self.bridge.RequestError) as disabled:
+                    self.bridge._save_dashboard_schedule_preference(
+                        "indicatorScoutSchedule",
+                        {"enabled": False, "times": ["09:00"]},
+                    )
+                self.assertEqual(disabled.exception.status, 409)
+                self.assertEqual(
+                    str(disabled.exception),
+                    "backend_owned_schedule_must_remain_enabled",
+                )
                 second = self.bridge.dashboard_workflow_scheduler_tick(
                     datetime(2026, 8, 12, 10, 0, tzinfo=self.bridge.THAILAND_TIMEZONE),
                     refresh_quota=False,
-                )
-                self.bridge._save_dashboard_schedule_preference(
-                    "indicatorScoutSchedule",
-                    {"enabled": True, "times": ["11:00", "12:00"]},
                 )
                 third = self.bridge.dashboard_workflow_scheduler_tick(
                     datetime(2026, 8, 12, 12, 0, tzinfo=self.bridge.THAILAND_TIMEZONE),
@@ -104,6 +125,9 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
         self.assertEqual(stored["dailyExecutionDate"], "2026-08-12")
         self.assertEqual(stored["dailyExecutionCount"], 1)
         self.assertEqual(len(stored["dailyExecutionSlotKeys"]), 1)
+        self.assertTrue(stored["requestedEnabled"])
+        self.assertEqual(stored["times"], ["09:00"])
+        self.assertEqual(stored["timezone"], "Asia/Bangkok")
 
     def test_execution_ledger_survives_bridge_restart(self) -> None:
         calls: list[dict] = []
@@ -116,10 +140,9 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
             settings_path = Path(temp_dir) / "settings.json"
             patches = self._runtime_patches(self.bridge, settings_path, runner)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                self._disable_direct_news_schedule(self.bridge)
                 self.bridge._save_dashboard_schedule_preference(
                     "indicatorScoutSchedule",
-                    {"enabled": True, "times": ["09:00", "10:00"]},
+                    {"enabled": True, "times": ["09:00"]},
                 )
                 self.bridge.dashboard_workflow_scheduler_tick(
                     datetime(2026, 8, 12, 9, 0, tzinfo=self.bridge.THAILAND_TIMEZONE),
@@ -133,10 +156,6 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
                 second = restarted.dashboard_workflow_scheduler_tick(
                     datetime(2026, 8, 12, 10, 0, tzinfo=restarted.THAILAND_TIMEZONE),
                     refresh_quota=False,
-                )
-                restarted._save_dashboard_schedule_preference(
-                    "indicatorScoutSchedule",
-                    {"enabled": True, "times": ["11:00", "12:00"]},
                 )
                 third = restarted.dashboard_workflow_scheduler_tick(
                     datetime(2026, 8, 12, 12, 0, tzinfo=restarted.THAILAND_TIMEZONE),
@@ -153,10 +172,9 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
             settings_path = Path(temp_dir) / "settings.json"
             patches = self._runtime_patches(self.bridge, settings_path, runner)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                self._disable_direct_news_schedule(self.bridge)
                 self.bridge._save_dashboard_schedule_preference(
                     "indicatorScoutSchedule",
-                    {"enabled": True, "times": ["23:59"]},
+                    {"enabled": True, "times": ["09:00"]},
                 )
                 captured = self.bridge._dashboard_workflow_capture_due_slots(
                     datetime(2026, 8, 12, 23, 59, tzinfo=self.bridge.THAILAND_TIMEZONE)
@@ -189,10 +207,9 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
             settings_path = Path(temp_dir) / "settings.json"
             patches = self._runtime_patches(self.bridge, settings_path, runner)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                self._disable_direct_news_schedule(self.bridge)
                 self.bridge._save_dashboard_schedule_preference(
                     "indicatorScoutSchedule",
-                    {"enabled": True, "times": ["09:00", "10:00"]},
+                    {"enabled": True, "times": ["09:00"]},
                 )
                 self.bridge.dashboard_workflow_scheduler_tick(
                     datetime(2026, 8, 12, 9, 0, tzinfo=self.bridge.THAILAND_TIMEZONE),
@@ -220,10 +237,9 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
             settings_path = Path(temp_dir) / "settings.json"
             patches = self._runtime_patches(self.bridge, settings_path, runner)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                self._disable_direct_news_schedule(self.bridge)
                 self.bridge._save_dashboard_schedule_preference(
                     "indicatorScoutSchedule",
-                    {"enabled": True, "times": ["09:00", "10:00"]},
+                    {"enabled": True, "times": ["09:00"]},
                 )
                 first = self.bridge.dashboard_workflow_scheduler_tick(
                     datetime(2026, 8, 12, 10, 30, tzinfo=self.bridge.THAILAND_TIMEZONE),
@@ -245,7 +261,6 @@ class RadarScheduleHardDailyCapTests(unittest.TestCase):
             settings_path = Path(temp_dir) / "settings.json"
             patches = self._runtime_patches(self.bridge, settings_path, runner)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                self._disable_direct_news_schedule(self.bridge)
                 self.bridge._save_dashboard_schedule_preference(
                     "indicatorScoutSchedule",
                     {"enabled": True, "times": ["09:00"]},

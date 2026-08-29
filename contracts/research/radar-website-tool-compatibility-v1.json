@@ -9,6 +9,23 @@
     "version": "0.1.2",
     "integrationMode": "backend_guarded_read_only_subset"
   },
+  "researchSheetHub": {
+    "configurationPropId": "mission_strategy_table",
+    "tabName": "Indicator_EA_Tool",
+    "mode": "read_write",
+    "configurationAvailableHere": false,
+    "requiresActiveConfirmedRevision": true,
+    "statusSource": "active_current_revision_consumer_read_proof",
+    "requiredReadEvidenceFields": ["tabName", "configRevision", "status", "readReady", "rowCount", "cachedRowCount", "observedAt"],
+    "frontendCredentialFields": [],
+    "credentialsBackendOnly": true,
+    "configuredSheetIdVisible": true,
+    "sheetIdIsCredential": false,
+    "oauthAndServiceAccountSecretsBackendOnly": true,
+    "runtimeStatuses": ["auth_required", "permission_denied", "schema_mismatch", "read_ready_write_unverified", "ready"],
+    "reportProjection": "eligible_ready_indicator_scout_report_via_backend_outbox",
+    "excludedPropIds": ["right_tool_console", "terminal_workstation"]
+  },
   "presentation": {
     "mainTabId": "today",
     "historyIncludedInTabId": "seven_days",
@@ -26,16 +43,11 @@
     ],
     "leftRailSections": [
       {
-        "id": "settings",
-        "labelTh": "ตั้งค่า",
-        "actionIds": [
-          "save_indicator_scout_schedule"
-        ],
-        "fieldIds": [
-          "googleSheetUrlOrId",
-          "enabled",
-          "times"
-        ]
+        "id": "schedule_status",
+        "labelTh": "ตาราง Backend",
+        "actionIds": [],
+        "fieldIds": [],
+        "readOnly": true
       }
     ]
   },
@@ -192,17 +204,27 @@
     "googleSheetUrl": {
       "fieldId": "googleSheetUrlOrId",
       "required": false,
+      "userConfigurableHere": false,
+      "configurationPropId": "mission_strategy_table",
+      "fieldLocationPropId": "mission_strategy_table",
       "allowedScheme": "https",
       "allowedHost": "docs.google.com",
       "requiredPathPrefix": "/spreadsheets/d/",
-      "storedBy": "backend_local_settings",
+      "tabName": "Indicator_EA_Tool",
+      "storedBy": "backend_central_research_sheet_hub",
       "frontendCredentialsAccepted": false,
-      "sheetWriteAdapterStatus": "coming_soon",
-      "externalWriteDefault": false
+      "credentialsBackendOnly": true,
+      "sheetWriteAdapterStatus": "implemented_backend_adapter_runtime_status_required",
+      "runtimeStatuses": ["auth_required", "permission_denied", "schema_mismatch", "read_ready_write_unverified", "ready"],
+      "externalWriteDefault": false,
+      "eligibleReadyReportsQueueAutomaticallyAfterCentralApply": true
     },
     "schedule": {
-      "enabledFieldId": "enabled",
-      "timesFieldId": "times",
+      "enabledFieldId": null,
+      "timesFieldId": null,
+      "backendOwned": true,
+      "userConfigurable": false,
+      "manualRunAllowed": false,
       "timezone": "Asia/Bangkok",
       "allowedRunsPerDayWhenEnabled": [1],
       "maximumRunsPerDay": 1,
@@ -215,11 +237,15 @@
       "timeFormat": "HH:MM",
       "defaultEnabled": true,
       "defaultTimes": ["09:00"],
-      "executionMode": "scheduled_read_only"
+      "executionMode": "scheduled_read_only",
+      "frontendInvocationAllowed": false
     }
   },
   "screenshotEvidence": {
     "optional": true,
+    "adapterStatus": "ready_publisher_image",
+    "captureKind": "publisher_open_graph",
+    "fullPageScreenshot": false,
     "backendAttachmentOnly": true,
     "sameOriginOnly": true,
     "externalImageUrlsAllowed": false,
@@ -230,11 +256,11 @@
       "artifactRef"
     ],
     "firstReportImageFallbackAllowed": false,
-    "workerAvailableTrueRequiresFields": [
-      "artifactRef"
-    ],
+    "workerMayClaimAvailable": false,
+    "backendPostProcessorRequired": true,
     "backendReadModelAvailableTrueRequiresFields": [
-      "attachmentId"
+      "attachmentId",
+      "captureKind"
     ],
     "allowedMimeTypes": [
       "image/png",
@@ -264,6 +290,8 @@
     "downloadOrInstallDiscoveredSoftware": false,
     "liveTradingAllowed": false,
     "externalWritesDefault": false,
+    "externalWritesRequireCentralSheetApply": true,
+    "perReportWriteApprovalRequired": false,
     "missionAuditAndReportRequired": true
   },
   "migrationCompatibility": {
@@ -271,6 +299,7 @@
       "discover_new_indicators",
       "save_indicator_scout_schedule"
     ],
+    "frontendCallableActionIds": [],
     "normalizedFrontendFields": [
       "entries",
       "todayEntries",

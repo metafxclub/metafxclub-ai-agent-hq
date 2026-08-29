@@ -1,5 +1,5 @@
 {
-  "version": "report-contract-v011",
+  "version": "report-contract-v012",
   "purpose": "Standard output shapes for every agent, prop popup, mission, bridge check, and memory card.",
   "base_report_schema": {
     "id": "report-{timestamp}",
@@ -54,9 +54,29 @@
     "executionEvidence": {
       "sourceKind": "analysis_only|existing_report|mt4_visible_run|mt5_visible_run",
       "toolId": "backend tool id or null",
+      "runId": "opaque backend run id or null",
+      "roundId": "opaque backend round id or null",
       "platform": "mt4|mt5|null",
+      "terminalId": "opaque backend terminal id or null; canonical v2 field",
       "terminalCandidateId": "opaque backend candidate id or null",
       "backendVerificationId": "opaque id of a matching backend-owned execution audit event or null",
+      "visibleTester": {
+        "verified": false,
+        "settingsScreenshotAttachmentId": null,
+        "resultsScreenshotAttachmentId": null,
+        "testerLogArtifactId": null
+      },
+      "resultReport": {
+        "artifactId": null,
+        "sha256": null,
+        "byteSize": null,
+        "mediaType": null
+      },
+      "artifactManifest": {
+        "artifactId": null,
+        "sha256": null,
+        "items": []
+      },
       "compileProofVerified": false,
       "visualBacktestProofVerified": false,
       "optimizationProofVerified": false,
@@ -233,50 +253,74 @@
       ]
     },
     "trading_system_discovery_report": {
-      "schemaVersion": "trading-system-discovery-report-v1",
-      "purpose": "รายงานค้นหาระบบเทรดหรือ EA จากแหล่งข้อมูลสาธารณะสำหรับ codex_mcp_portal พร้อมหลักฐานและสถานะตรวจรายการซ้ำ",
-      "discoveryKind": "trading_system|ea_update",
+      "schemaVersion": "trading-system-discovery-report-v2",
+      "purpose": "รายงานค้นหาเฉพาะระบบเทรดจากแหล่งข้อมูลสาธารณะสำหรับ codex_mcp_portal รอบละ 3 ตระกูล พร้อมผู้สร้าง ขั้นตอนเทรด ความเสี่ยง หลักฐาน และสถานะตรวจรายการซ้ำ",
+      "discoveryKind": "trading_system",
       "searchWindow": {"startedAt": null, "completedAt": null, "queries": []},
       "catalogTemplate": "contracts/research/trading-system-sheet-template.csv",
       "deduplication": {
-        "performed": false,
-        "basis": ["source_url", "system_name", "market", "timeframe"],
+        "performed": true,
+        "owner": "backend",
+        "basis": ["system_name", "strategy_family", "market", "symbols", "timeframes", "entry_steps", "exit_steps"],
         "duplicateCount": null
       },
-      "entries": [
+      "systems": [
         {
           "recordId": "opaque record id",
-          "recordType": "trading_system|ea_update",
+          "recordType": "trading_system",
           "systemName": "ชื่อระบบ",
-          "authorOrTrader": null,
+          "strategyFamily": "trend_following|breakout|mean_reversion|momentum|scalping|swing|grid|martingale|hedging|price_action|arbitrage|news|hybrid|other",
+          "creatorOrTrader": {"name": null, "role": "unknown", "status": "unknown", "sourceUrl": null},
+          "publicUsers": [],
           "market": null,
           "symbols": [],
           "timeframes": [],
-          "entryRulesSummary": null,
-          "exitRulesSummary": null,
-          "stopLossSummary": null,
-          "takeProfitSummary": null,
-          "recoveryOrAveragingSummary": null,
-          "specialConditions": [],
+          "sessions": [],
+          "indicatorSettings": [],
+          "setupConditions": [],
+          "entrySteps": [{"stepNo": 1, "rule": "กฎเข้า", "sourceUrl": "https://example.com/source", "truthStatus": "fact"}],
+          "exitSteps": [{"stepNo": 1, "rule": "กฎออก", "sourceUrl": "https://example.com/source", "truthStatus": "fact"}],
+          "riskManagement": {
+            "positionSizing": "not_publicly_stated",
+            "stopLoss": "not_publicly_stated",
+            "takeProfit": "not_publicly_stated",
+            "maxRiskPerTrade": "not_publicly_stated",
+            "maxOpenPositions": "not_publicly_stated",
+            "dailyOrEquityStop": "not_publicly_stated",
+            "recoveryMethod": "not_publicly_stated",
+            "recoveryRules": [],
+            "sourceUrl": "https://example.com/source",
+            "truthStatus": "unknown"
+          },
+          "tradeManagementSteps": [],
+          "sourceTitle": "ชื่อแหล่งข้อมูล",
+          "sourceUrl": "https://example.com/source",
+          "corroboratingUrls": [],
+          "checkedAt": "ISO 8601 with UTC offset",
+          "verificationStatus": "insufficient_evidence|partially_verified|verified",
           "suitableFor": [],
-          "sourceEvidence": [],
-          "verificationStatus": "unverified|partially_verified|verified",
-          "duplicateStatus": "not_checked|unique|duplicate|possible_duplicate",
-          "deepResearchReady": false
+          "risksAndLimitations": [],
+          "unknowns": [],
+          "duplicateFingerprint": "backend computed",
+          "duplicateStatus": "unique|duplicate",
+          "duplicateScope": "none|local_report_catalog"
         }
       ],
       "runtimeReadiness": {
         "publicCodexWebResearch": "ready_guarded_read_only",
         "missionReportAudit": "ready",
         "localCatalogTemplate": "ready",
-        "googleSheetsSync": "coming_soon",
-        "recurringScheduler": "coming_soon"
+        "googleSheetsSync": "implemented_backend_adapter_runtime_status_required",
+        "recurringScheduler": "ready_guarded_read_only"
       },
       "truthRules": [
-        "Every discovered item must include at least one public source URL; two independent sources are preferred before verified status.",
+        "The report contains exactly three trading systems from three distinct strategy families; standalone EA, indicator, tool, or research records are rejected.",
+        "Every source URL used by identity, rules, indicators, or risk fields must be present in the result evidence.",
+        "A creator or public user is named only when a public source states that identity; unknown identity remains null and is never inferred.",
+        "Verified status requires at least two independent public source hosts for that system.",
+        "Duplicate identifiers and statuses are computed by Backend and cannot be supplied by the worker.",
         "Claims about performance remain unverified unless the report contains reproducible evidence.",
-        "A saved schedule is configuration intent only until the Backend recurring scheduler adapter is implemented.",
-        "Google Sheets sync remains unavailable until a Backend-owned adapter is implemented; Frontend never receives Google credentials."
+        "A ready, contract-valid report may be projected to World_System only by the Backend-owned outbox; the report does not claim Sheet success until exact write/read-back is verified, and Frontend never receives Google credentials."
       ]
     },
     "trading_system_research_report": {
@@ -299,7 +343,7 @@
       },
       "application": {"suitableFor": [], "limitations": [], "implementationNotes": [], "candidatePlatforms": []},
       "sourceEvidence": [],
-      "runtimeReadiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "durableArchive": "ready", "googleSheetsSync": "coming_soon"},
+      "runtimeReadiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "durableArchive": "ready", "googleSheetsSync": "implemented_backend_adapter_runtime_status_required"},
       "truthRules": [
         "Research expands and verifies source material; it does not invent missing rules or performance.",
         "Conflicting sources must remain visible and must lower verificationStatus.",
@@ -307,17 +351,25 @@
       ]
     },
     "ea_build_report": {
-      "schemaVersion": "ea-build-report-v1",
-      "purpose": "รายงานสร้างหรือตรวจ Source Code สำหรับ right_server_racks โดยแยกความพร้อมของ Source Generation ออกจาก Compile จริง",
-      "sourceReference": {"propId": null, "reportId": null, "recordId": null, "freeformBrief": null},
+      "schemaVersion": "ea-build-report-v2",
+      "purpose": "รายงานของโรงงาน EA แบบผู้ใช้กดทีละขั้น โดยผูกระบบต้นทาง Strategy Spec เวอร์ชัน Source ผลตรวจ Compile/Validate Backtest/Recheck และไฟล์ทั้งหมดเข้ากับ Build เดียว",
+      "factory": {"buildId": null, "mode": "manual_stage_by_stage", "scheduled": false, "automaticLoop": false, "currentStageId": "strategy_spec|generate_source|source_review|compile_validate|backtest_recheck|final_report"},
+      "sourceReference": {"sourceKind": "deep_research|google_sheet", "propId": null, "reportId": null, "recordId": null, "sheetRowId": null, "freeformBrief": null, "columnRange": "A-W", "coreColumns": "A-M", "downstreamColumns": "N-W"},
+      "strategySpec": {"systemName": null, "strategyFamily": null, "symbols": [], "timeframes": [], "entryRules": [], "exitRules": [], "stopLossRules": [], "takeProfitRules": [], "recoveryRules": [], "lotRiskRules": [], "indicators": [], "specialConditions": [], "confirmedAt": null},
       "target": {"platform": "mt4|mt5|tradingview", "language": "mql4|mql5|pine_script", "artifactKind": "ea|indicator|strategy"},
-      "sourceGeneration": {"available": true, "status": "queued|running|completed|failed", "workspaceScope": "PROJECT_ROOT/workspace", "artifactIds": []},
+      "sourceGeneration": {"available": true, "status": "not_started|queued|running|completed|failed", "workspaceScope": "PROJECT_ROOT/workspace/ea-factory/<buildId>", "version": null, "artifactIds": []},
       "sourceReview": {"available": true, "status": "not_started|running|completed|failed", "findings": []},
-      "compile": {"available": false, "status": "coming_soon", "compiler": null, "errors": null, "warnings": null, "proofId": null},
-      "runtimeReadiness": {"codexSourceGenerationWorkspace": "ready_guarded", "sourceCodeReview": "ready_guarded", "missionReportAudit": "ready", "metaEditorCompile": "coming_soon", "pineCompileValidation": "coming_soon"},
+      "compile": {"available": false, "status": "not_started|blocked|queued|running|passed|failed|not_applicable", "compiler": null, "selectedTerminalCandidateId": null, "errors": null, "warnings": null, "proofId": null},
+      "backtestRecheck": {"available": false, "status": "not_started|blocked|queued|running|passed|failed|not_applicable", "visualModeProofId": null, "buySignalCount": null, "sellSignalCount": null, "buyOrderCount": null, "sellOrderCount": null, "logicRecheck": null},
+      "workspaceFolders": ["Source", "EA_Versions", "Reports", "Sets", "Screenshots", "Summaries"],
+      "runtimeReadiness": {"researchCatalog": "ready", "centralGoogleSheetReadOnly": "implemented_runtime_status_required", "centralGoogleSheetTab": "Deep_Research", "centralGoogleSheetSharedConsumerPropId": "left_server_racks", "codexSourceGenerationWorkspace": "ready_guarded", "sourceCodeReview": "ready_guarded", "pineStaticValidation": "ready", "missionReportAudit": "ready", "metaEditorCompile": "requires_matching_selected_terminal_and_verified_front_office_proof", "visualBacktest": "requires_matching_selected_terminal_and_verified_front_office_proof"},
       "truthRules": [
+        "One user action advances at most one stage; no scheduler or automatic build loop may advance a build.",
+        "A-M are the core strategy and backtest inputs; N-W are downstream status, report, issue, next-action, platform, and update fields.",
         "Source generated in the guarded Workspace is not compiled proof.",
-        "Compile status remains unavailable until a Backend-owned MetaEditor or TradingView validation adapter returns matching audit evidence.",
+        "MT4/MT5 Compile passed requires the exact selected terminal, visible MetaEditor evidence, matching source digest, and a Backend audit receipt.",
+        "MT4/MT5 Backtest passed requires visible Strategy Tester Visual Mode evidence and a logic recheck; Pine Script never enters the MetaTrader backtest stage.",
+        "Pine Script may finish only after source generation and static validation; it must not claim TradingView publication or market backtest execution.",
         "Frontend receives only opaque artifact ids or allowlisted download URLs, never unrestricted filesystem paths."
       ]
     },
@@ -334,14 +386,21 @@
       "backendVerificationId": null,
       "truthRules": [
         "passed requires a matching Backend compile audit event and artifact SHA-256.",
+        "MQL4/MQL5 passed also requires the selected terminal platform to match the build target and visible MetaEditor proof.",
+        "Pine Script validation is static source validation and must not be relabeled as TradingView compile or publication.",
         "Static code review cannot be labeled Compile passed.",
-        "Missing compiler evidence remains null and Coming Soon."
+        "Missing compiler evidence remains blocked or not_started and cannot be inferred from process exit code alone."
       ]
     },
     "ea_experiment_report": {
-      "schemaVersion": "ea-experiment-report-v1",
-      "purpose": "รายงานแผนและผลการทดลองสำหรับ right_tool_console โดยแยก Auto Backtest, Auto Optimization และ EA Discovery",
+      "schemaVersion": "ea-experiment-report-v2",
+      "backwardCompatibleSchemaVersions": ["ea-experiment-report-v1"],
+      "purpose": "รายงานแผนและผลการทดลองสำหรับ right_tool_console โดยแยก Auto Backtest, Auto Optimization และ EA Discovery พร้อมตัวตนรอบ หลักฐาน Strategy Tester และผล Pass แบบจำกัดขนาด",
       "experimentMode": "auto_backtest|auto_optimization|ea_discovery",
+      "runId": null,
+      "roundId": null,
+      "platform": "mt4|mt5|null",
+      "terminalId": null,
       "sourceReference": {"propId": null, "reportId": null, "artifactId": null, "recordId": null},
       "plan": {
         "available": true,
@@ -355,12 +414,106 @@
         "parameterRanges": [],
         "validationMethod": null
       },
-      "execution": {"available": false, "status": "coming_soon", "adapterId": null, "backendVerificationId": null},
-      "results": {"available": false, "netProfit": null, "drawdown": null, "profitFactor": null, "winRate": null, "tradeCount": null, "overfitWarnings": []},
+      "testerSettings": {
+        "eaName": null,
+        "eaVersion": null,
+        "eaArtifactId": null,
+        "eaSha256": null,
+        "symbol": null,
+        "timeframe": null,
+        "testModel": null,
+        "spread": null,
+        "useDate": true,
+        "dateRange": null,
+        "deposit": null,
+        "currency": null,
+        "optimizationEnabled": false,
+        "inputRangesSha256": null,
+        "testShutdownTerminal": false
+      },
+      "execution": {
+        "available": false,
+        "status": "plan_only|coming_soon|queued|running|completed|failed|incomplete",
+        "mode": "plan_only",
+        "realExecutionAvailable": false,
+        "adapterId": null,
+        "backendVerificationId": null
+      },
+      "executionEvidence": {
+        "runId": null,
+        "roundId": null,
+        "platform": "mt4|mt5|null",
+        "terminalId": null,
+        "terminalCandidateId": null,
+        "visibleTester": {
+          "verified": false,
+          "settingsScreenshotAttachmentId": null,
+          "resultsScreenshotAttachmentId": null,
+          "testerLogArtifactId": null
+        },
+        "mtExecutionVerified": false,
+        "optimizationProofVerified": false,
+        "resultReport": {"artifactId": null, "sha256": null, "byteSize": null, "mediaType": null},
+        "artifactManifest": {"artifactId": null, "sha256": null, "items": []}
+      },
+      "results": {
+        "available": false,
+        "netProfit": null,
+        "drawdown": null,
+        "profitFactor": null,
+        "winRate": null,
+        "tradeCount": null,
+        "passCount": null,
+        "profitablePassCount": null,
+        "returnedPassCount": 0,
+        "allPassRows": [],
+        "allPassRowsTruncated": false,
+        "allPassRowsPolicy": {
+          "maxItems": 5000,
+          "overflow": "truncate_frontend_rows_preserve_full_hashed_artifact",
+          "completenessRule": "complete only when allPassRowsTruncated is false and returnedPassCount equals passCount"
+        },
+        "allPassRowSchema": {
+          "pass": null,
+          "netProfit": null,
+          "drawdown": null,
+          "trades": null,
+          "profitFactor": null,
+          "recoveryFactor": null,
+          "expectedPayoff": null,
+          "stability": null,
+          "parameters": {}
+        },
+        "currentBands": [],
+        "nextParameterPlan": [],
+        "candidateGroups": {
+          "maxProfit": [],
+          "lowestDrawdown": [],
+          "mostStable": []
+        },
+        "warnings": [],
+        "overfitWarnings": []
+      },
+      "fieldAliases": {
+        "terminalCandidateId": "terminalId",
+        "totalPasses": "passCount",
+        "passes": "allPassRows",
+        "parameterBands": "currentBands",
+        "nextRanges": "nextParameterPlan",
+        "candidates": "candidateGroups"
+      },
       "runtimeReadiness": {"missionPlanReportAudit": "ready", "strategyTesterBacktest": "coming_soon", "metatraderOptimization": "coming_soon", "eaDiscoveryPlugin": "coming_soon"},
       "truthRules": [
         "A prepared plan is not a completed Backtest, Optimization, or Discovery run.",
         "Results remain unavailable and null until a matching Backend execution audit and evidence artifact exist.",
+        "The default and currently available execution mode is plan_only; real MT4/MT5 execution remains disabled until a verified front-office adapter is connected.",
+        "A completed MT4/MT5 Optimization requires matching runId, roundId, platform, terminalId, visible Tester evidence, mtExecutionVerified, optimizationProofVerified, a SHA-256 result report, and a SHA-256 artifact manifest.",
+        "passCount and profitablePassCount must come from the same verified Tester report or log; a displayed subset must never be used as the denominator for all passes.",
+        "allPassRows is bounded to 5000 frontend rows; truncation must be explicit and the complete result must remain available only as a hashed Backend artifact.",
+        "currentBands describe the ranges actually tested; nextParameterPlan is a recommendation for a later round and is never proof that those ranges were tested.",
+        "candidateGroups must preserve Max Profit, Lowest Drawdown with sufficient trades, and Most Stable as separate analytical groups.",
+        "Tester warnings, including unmatched-data, generating, modeling-quality, zero-trade, and incomplete-report warnings, must be preserved.",
+        "testShutdownTerminal must remain false; a run that closes the selected terminal is incomplete.",
         "Profit targets are experiment objectives, not promises or fabricated results."
       ]
     },
@@ -431,7 +584,7 @@
           "duplicateFingerprint": "backend-normalized SHA-256 prefix",
           "duplicateStatus": "unique|duplicate",
           "duplicateScope": "none|local_report_catalog|current_result_batch",
-          "screenshot": {"available": false, "status": "not_available|verified_report_attachment", "attachmentId": null, "artifactRef": null}
+          "screenshot": {"available": false, "status": "not_available|verified_publisher_image", "attachmentId": null, "artifactRef": null, "captureKind": "publisher_open_graph|null"}
         }
       ],
       "schedulePreference": {
@@ -450,12 +603,14 @@
         "recurringSchedulerAvailable": true
       },
       "googleSheet": {
-        "configurationMayBeSaved": true,
-        "privateSheetDefaultIncluded": false,
-        "adapterStatus": "not_connected",
-        "externalWriteEnabled": false,
-        "writeRequiresExplicitUserConfirmation": true,
-        "credentialsAcceptedByFrontend": false
+        "configurationPropId": "mission_strategy_table",
+        "configurationMayBeSavedHere": false,
+        "tabName": "Indicator_EA_Tool",
+        "mode": "read_write",
+        "adapterStatus": "implemented_backend_adapter_runtime_status_required",
+        "eligibleReadyReportsQueueAutomatically": true,
+        "credentialsAcceptedByFrontend": false,
+        "credentialsBackendOnly": true
       },
       "readModel": {
         "schemaVersion": "radar-website-tool-v1",
@@ -463,21 +618,23 @@
         "todayEntries": [],
         "sevenDayEntries": [],
         "historyWindowDays": 7,
-        "searchScheduleAndSheetLocation": "left_rail"
+        "searchScheduleAndSheetLocation": "mission_strategy_table_central_hub"
       },
       "runtimeReadiness": {
         "publicCodexWebResearch": "ready_guarded_read_only",
         "missionReportAudit": "ready",
         "localDedup": "implemented_deterministic_local_report_catalog",
-        "googleSheetsAdapter": "not_connected",
-        "screenshotAdapter": "not_connected",
+        "googleSheetsAdapter": "implemented_backend_adapter_runtime_status_required",
+        "screenshotAdapter": "ready_publisher_image",
+        "screenshotCaptureKind": "publisher_open_graph",
+        "fullPageScreenshot": false,
         "recurringScheduler": "ready_guarded_read_only"
       },
       "truthRules": [
         "Every discovered entry must contain a public source URL and checkedAt timestamp.",
         "The Backend scheduler reserves and persists at most one actual Radar dispatch attempt per Bangkok calendar day after readiness and quota gates pass; schedule edits and restarts cannot reset the counter, stale pending work expires at the day boundary, synchronous no-mission rejections release the reservation, and ambiguous dispatch failures consume capacity fail closed.",
-        "A Google Sheet reference may be saved only after safe URL or ID validation; no Sheet rows are read or written until a Backend-owned adapter is connected and an external write is explicitly confirmed.",
-        "Screenshot evidence remains unavailable unless a Backend-owned adapter returns a verified report attachment.",
+        "The Google Sheet reference is configured only at mission_strategy_table; an eligible ready report is queued automatically, but Sheet success is not claimed until the Backend verifies the exact write by read-back.",
+        "Publisher image evidence remains unavailable unless the Backend adapter verifies exact recordId, sourceUrl, checkedAt, content SHA-256, MIME and dimensions before returning a same-origin report attachment.",
         "Each screenshot must explicitly match that entry by attachmentId or artifactRef; the first report image is never broadcast to unmatched entries.",
         "recordId, duplicateFingerprint, duplicateStatus, and duplicateScope are computed by Backend and worker-supplied values have no authority.",
         "No discovered performance claim is treated as verified without reproducible evidence."
@@ -755,7 +912,7 @@
               "dailyRoundLimitEnabled": false,
               "maxDailyRounds": 24,
               "effectiveMaxDailyRounds": null,
-              "minRemainingPercent": 30,
+              "minRemainingPercent": 15,
               "analysisBarCount": 120,
               "allowedAnalysisBarCounts": [120, 180, 240, 300, 500, 1000],
               "requiredVotes": 3,
@@ -1048,6 +1205,35 @@
       }
     }
   },
+  "research_sheet_hub_projection": {
+    "schemaVersion": "research-sheet-report-projection-v1",
+    "configurationPropId": "mission_strategy_table",
+    "statusVocabulary": ["auth_required", "permission_denied", "schema_mismatch", "read_ready_write_unverified", "ready"],
+    "activeRevisionRequired": true,
+    "candidateDraftReportsNeverProject": true,
+    "consumerReadEvidenceFields": ["tabName", "configRevision", "configurationApplied", "status", "readReady", "writeReady", "rowCount", "cachedRowCount", "observedAt", "rowsObservedAt", "outbox"],
+    "credentialsBackendOnly": true,
+    "frontendMaySubmitCredentials": false,
+    "eligibility": {
+      "reportStatus": "ready",
+      "workflowReceiptMustBeValid": true,
+      "sourceMissionAndPropLineageRequired": true,
+      "unsupportedOrIncompleteReportsAreNotQueued": true
+    },
+    "mappings": [
+      {"reportType": "trading_system_discovery_report", "producerPropId": "codex_mcp_portal", "tabName": "World_System", "keyHeader": "discovery_id", "mode": "upsert"},
+      {"reportType": "trading_system_research_report", "producerPropId": "left_server_racks", "tabName": "Deep_Research", "keyHeader": "research_id", "mode": "upsert"},
+      {"reportType": "indicator_scout_report", "producerPropId": "left_audit_crystals", "tabName": "Indicator_EA_Tool", "keyHeader": "radar_record_id", "mode": "upsert"}
+    ],
+    "excludedPropIds": ["right_tool_console", "terminal_workstation"],
+    "delivery": {
+      "durableOutbox": true,
+      "idempotentByReportTabAndRecordKey": true,
+      "exactReadBackRequired": true,
+      "writeUnknownIsQuarantined": true,
+      "perReportHumanApprovalRequired": false
+    }
+  },
   "report_targets": {
     "executive_summary": ["ceo", "mission_strategy_table"],
     "mission_plan": ["manager", "mission_strategy_table"],
@@ -1063,14 +1249,14 @@
     "memory_recall_packet": ["mission_archivist", "left_server_racks"],
     "archive_report": ["mission_archivist", "left_server_racks"],
     "trading_system_discovery_report": ["codex_mcp_operator", "mission_archivist", "codex_mcp_portal"],
-    "trading_system_research_report": ["mission_archivist", "backtest_analyst", "left_server_racks"],
+    "trading_system_research_report": ["mission_archivist", "backtest_analyst", "left_server_racks", "right_server_racks"],
     "indicator_scout_report": ["codex_mcp_operator", "mission_archivist", "left_audit_crystals"],
     "fx_news_bias_report": ["codex_mcp_operator", "manager", "left_signal_cube"],
     "ea_development_report": ["ea_developer", "terminal_workstation"],
     "ea_build_report": ["ea_developer", "right_server_racks"],
     "ea_compile_report": ["ea_developer", "right_server_racks"],
     "ea_experiment_report": ["backtest_analyst", "optimization_agent", "right_tool_console"],
-    "ea_discovery_report": ["ea_developer", "backtest_analyst", "codex_mcp_portal", "right_tool_console"],
+    "ea_discovery_report": ["ea_developer", "backtest_analyst", "right_tool_console"],
     "backtest_optimization_report": ["backtest_analyst", "optimization_agent", "left_analytics_console"],
     "ai_trade_council_report": ["manager", "optimization_agent", "backtest_analyst", "codex_mcp_operator", "ea_developer", "risk_guard", "left_analytics_console"],
     "auto_trading_status_report": ["vps_watch", "risk_guard", "left_analytics_console"],

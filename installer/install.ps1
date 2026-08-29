@@ -3,6 +3,7 @@ param(
     [switch]$RepairOnly,
     [switch]$SkipLaunch,
     [switch]$SkipShortcuts,
+    [switch]$SkipGoogleSetup,
     [switch]$ListAvailableEndpoints,
     [switch]$PackageSmoke,
     [ValidateRange(0, 65535)]
@@ -333,6 +334,7 @@ function Assert-SafeSource {
         ".gitignore",
         "VERSION",
         "backend\local-runner\bridge_server.py",
+        "backend\local-runner\configure_google_oauth_client.py",
         "frontend\index.html",
         "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4",
         "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\MetafxHQTradeGateway.mq4",
@@ -344,7 +346,12 @@ function Assert-SafeSource {
         "runner\codex_cli_runner.py",
         "scripts\register-bridge-autostart.ps1",
         "scripts\run-bridge-watchdog-hidden.vbs",
+        "scripts\setup-google-oauth.ps1",
         "scripts\start-local-bridge.ps1",
+        "2-SETUP-GOOGLE-HQ.bat",
+        "docs\prompts\install-github-google-auto-th.md",
+        "tests\release_secret_scan.py",
+        "tests\test_release_candidate_preflight.py",
         "tests\test_runtime_integrity.py",
         $requirementsName
     )
@@ -388,11 +395,28 @@ function Assert-SafeSource {
                     # ไฟล์เหล่านี้ถูกตัดออกโดย Robocopy อยู่แล้ว จึงไม่เป็นส่วนหนึ่งของชุดติดตั้ง
                     continue
                 }
+                $fileNameLower = $item.Name.ToLowerInvariant()
+                $fileExtensionLower = $item.Extension.ToLowerInvariant()
+                # Source-code filenames may legitimately describe the security
+                # boundary (for example tests/release_secret_scan.py). Treat a
+                # sensitive word as a credential filename only for JSON data;
+                # executable/source text remains subject to the content scan.
+                $isSensitiveJsonName = $fileExtensionLower -ceq ".json" -and (
+                    $fileNameLower -match "(?i)(token|credential|cookie|secret)" -or
+                    $fileNameLower -match "(?i)oauth.*client" -or
+                    $fileNameLower -match "(?i)google.*oauth" -or
+                    $fileNameLower -match "(?i)service[._-]?account" -or
+                    $fileNameLower -match "(?i)^(auth|secret)s?.*\.json$"
+                )
+                $isSensitiveEnvironmentName = (
+                    $fileNameLower -cne ".env.example" -and
+                    $fileNameLower -match "(?i)^\.env(?:\..+)?$"
+                )
                 if (
-                    $blockedNames -contains $item.Name.ToLowerInvariant() -or
-                    $item.Name -match "(?i)(token|credential|cookie)" -or
-                    $item.Name -match "(?i)^(auth|secret)s?.*\.json$" -or
-                    $item.Extension.ToLowerInvariant() -in @(".pem", ".key", ".pfx", ".p12")
+                    $blockedNames -contains $fileNameLower -or
+                    $isSensitiveJsonName -or
+                    $isSensitiveEnvironmentName -or
+                    $fileExtensionLower -in @(".pem", ".key", ".pfx", ".p12", ".dpapi")
                 ) {
                     throw "หยุดติดตั้งเพื่อความปลอดภัย: พบไฟล์ที่อาจเป็นข้อมูลลับในชุดแจก ($($item.Name))"
                 }
@@ -490,7 +514,7 @@ function Assert-NoEmbeddedHighConfidenceSecrets {
 
     $additionalTextFiles = @(
         "index.html", "Open Metafx Agent HQ.cmd", "README.md", $requirementsName,
-        "1-INSTALL-HQ.bat", "UPDATE-HQ.bat", "REPAIR-HQ.bat", "UNINSTALL-HQ.bat",
+        "1-INSTALL-HQ.bat", "UPDATE-HQ.bat", "REPAIR-HQ.bat", "UNINSTALL-HQ.bat", "2-SETUP-GOOGLE-HQ.bat",
         "STUDENT-QUICKSTART-TH.md", "AGENTS.md", "SECURITY.md", "LICENSE", "LICENSE.md",
         "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\README_TH.md",
         "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\AUDIT_TH.md",
@@ -710,7 +734,9 @@ function Sync-Directory {
     $arguments = @(
         $sourceDirectory, $destinationDirectory, "/MIR", "/XJ", "/R:2", "/W:1",
         "/NFL", "/NDL", "/NJH", "/NJS", "/NP",
-        "/XF", ".env", ".env.*", "config.toml", "*token*", "*credential*", "*cookie*", "*.pem", "*.key", "*.pfx", "*.p12", "*.log", "*.jsonl", "*.bak", "*.tmp", "auth*.json", "secret*.json",
+        "/XF", ".env", ".env.*", "config.toml",
+        "*token*.json", "*credential*.json", "*cookie*.json", "*secret*.json", "*oauth*client*.json", "*google*oauth*.json", "service-account*.json", "service_account*.json", "auth*.json",
+        "*.pem", "*.key", "*.pfx", "*.p12", "*.dpapi", "*.log", "*.jsonl", "*.bak", "*.tmp",
         "/XD", ".git", ".codex", ".venv", "__pycache__", "node_modules", ".pytest_cache", "dist", "build",
         (Join-Path $sourceDirectory ".git"), (Join-Path $sourceDirectory ".codex"), (Join-Path $sourceDirectory ".venv"), (Join-Path $sourceDirectory "__pycache__"),
         (Join-Path $sourceDirectory "node_modules"), (Join-Path $sourceDirectory ".pytest_cache"), (Join-Path $sourceDirectory "dist"), (Join-Path $sourceDirectory "build"),
@@ -743,7 +769,7 @@ function Copy-ApplicationFiles {
 
     $rootFiles = @(
         "index.html", "Open Metafx Agent HQ.cmd", "README.md", $requirementsName,
-        "1-INSTALL-HQ.bat", "UPDATE-HQ.bat", "REPAIR-HQ.bat", "UNINSTALL-HQ.bat",
+        "1-INSTALL-HQ.bat", "UPDATE-HQ.bat", "REPAIR-HQ.bat", "UNINSTALL-HQ.bat", "2-SETUP-GOOGLE-HQ.bat",
         "AGENTS.md", ".gitattributes", ".gitignore", "LICENSE", "LICENSE.md", "SECURITY.md", "VERSION", "STUDENT-QUICKSTART-TH.md"
     )
     foreach ($fileName in $rootFiles) {
@@ -859,21 +885,20 @@ function New-StagedApplication {
         }
         Assert-EaArtifactIntegrity -CandidateRoot $stagingRoot
         Assert-NoEmbeddedHighConfidenceSecrets -CandidateRoot $stagingRoot
-        $candidatePython = Join-Path $sourceRoot "runner\.venv\Scripts\python.exe"
-        if (-not (Test-Path -LiteralPath $candidatePython -PathType Leaf)) {
-            $resolved = Resolve-SystemPython
-            $candidatePython = [string]$resolved.FilePath
-            $candidatePrefix = @($resolved.PrefixArguments)
-        }
-        else {
-            $candidatePrefix = @()
-        }
+        # The staged copy deliberately excludes runner/.venv and all user
+        # state. Run only the dependency-free candidate preflight here. The
+        # complete regression suite runs after the pinned venv is installed,
+        # before Health is accepted, and normal updates retain a rollback
+        # snapshot until that full suite succeeds.
+        $resolved = Resolve-SystemPython
+        $candidatePython = [string]$resolved.FilePath
+        $candidatePrefix = @($resolved.PrefixArguments)
         Push-Location $stagingRoot
         try {
             $arguments = @($candidatePrefix) + @(
-                "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py", "-v"
+                "-m", "unittest", "-v", "tests.test_release_candidate_preflight"
             )
-            Invoke-CheckedNative -FilePath $candidatePython -Arguments $arguments -FailureMessage "ชุดทดสอบของ Staged application ไม่ผ่าน"
+            Invoke-CheckedNative -FilePath $candidatePython -Arguments $arguments -FailureMessage "การตรวจ Release candidate ก่อนติดตั้งไม่ผ่าน"
         }
         finally {
             Pop-Location
@@ -1045,6 +1070,135 @@ function Test-InstalledApplication {
     }
 }
 
+function Test-GoogleOAuthDeploymentConfigured {
+    param([Parameter(Mandatory = $true)][string]$CandidateRoot)
+
+    $configureCli = Join-Path $CandidateRoot "backend\local-runner\configure_google_oauth_client.py"
+    if (-not (Test-Path -LiteralPath $configureCli -PathType Leaf)) {
+        return $false
+    }
+    try {
+        $python = Resolve-SystemPython
+        $arguments = @($python.PrefixArguments) + @($configureCli, "--status")
+        $output = @(& $python.FilePath @arguments 2>$null)
+        if ($LASTEXITCODE -ne 0) {
+            return $false
+        }
+        $jsonLine = @($output | ForEach-Object { [string]$_ } | Where-Object { $_.TrimStart().StartsWith("{") }) | Select-Object -Last 1
+        if (-not $jsonLine) {
+            return $false
+        }
+        $status = $jsonLine | ConvertFrom-Json
+        return $status.ok -eq $true -and $status.configured -eq $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Invoke-GoogleOAuthFirstRunSetup {
+    param([Parameter(Mandatory = $true)][string]$CandidateRoot)
+
+    $alreadyConfigured = Test-GoogleOAuthDeploymentConfigured -CandidateRoot $CandidateRoot
+    if ($SkipGoogleSetup -or $SkipLaunch -or $alreadyConfigured) {
+        if ($alreadyConfigured) {
+            Write-Host "Google OAuth Client ของ Windows User นี้ตั้งค่าไว้แล้ว" -ForegroundColor Green
+        }
+        return
+    }
+
+    Write-Host ""
+    Write-Host "ตั้งค่า Google Sheets แบบ Private ครั้งเดียว (ไม่บังคับ)" -ForegroundColor Cyan
+    Write-Host "ใช้ OAuth Client JSON ประเภท Desktop app ของผู้เรียนเอง ระบบจะตรวจไฟล์และเก็บด้วย Windows DPAPI" -ForegroundColor DarkGray
+    $answer = Read-Host "ต้องการเลือก OAuth Client JSON ตอนนี้หรือไม่? [Y/N]"
+    if ($answer -notmatch '^(?i)y(?:es)?$') {
+        Write-Host "ข้ามขั้นตอน Google ตอนนี้ เปิด 2-SETUP-GOOGLE-HQ.bat ภายหลังได้" -ForegroundColor Yellow
+        return
+    }
+
+    $setupScript = Join-Path $CandidateRoot "scripts\setup-google-oauth.ps1"
+    if (-not (Test-Path -LiteralPath $setupScript -PathType Leaf)) {
+        Write-Warning "ไม่พบ Google first-run wizard ในชุดติดตั้ง ระบบหลักจะติดตั้งต่อโดยยังไม่เปิด Google Sheet"
+        return
+    }
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+        -File $setupScript -SkipBridgeEnsure -SkipOpen
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "ยังตั้งค่า Google ไม่สำเร็จ ระบบหลักจะติดตั้งต่อ และสามารถเปิด 2-SETUP-GOOGLE-HQ.bat เพื่อลองใหม่"
+    }
+}
+
+function Invoke-BridgeLifecycleProcess {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet("Start", "Stop")][string]$Action,
+        [Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$ConfirmedPort
+    )
+
+    $lifecycle = Join-Path $installRoot "scripts\start-local-bridge.ps1"
+    $arguments = @(
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        ('"{0}"' -f $lifecycle),
+        "-Action",
+        $Action,
+        "-Port",
+        [string]$ConfirmedPort
+    )
+    if ($Action -ceq "Start") {
+        $arguments += @("-HealthTimeoutSeconds", "45")
+    }
+
+    # A native PowerShell pipeline can retain a descendant's inherited pipe
+    # handle and make the installer wait until the long-running Bridge exits.
+    # Launch the bounded lifecycle command without a pipeline and wait only for
+    # that command process; the Bridge itself owns redirected runtime logs.
+    $process = Start-Process `
+        -FilePath "powershell.exe" `
+        -ArgumentList $arguments `
+        -WindowStyle Hidden `
+        -PassThru
+    # Start-Process -Wait follows the whole descendant tree on Windows and
+    # would therefore wait for the intentionally long-running Bridge. The
+    # .NET Process wait below is bounded to the exact lifecycle command PID.
+    if (-not $process.WaitForExit(60000)) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        throw "คำสั่งจัดการ Local Bridge ไม่จบภายใน 60 วินาที"
+    }
+    return [int]$process.ExitCode
+}
+
+function Test-IsolatedInstalledBridge {
+    param([Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$ConfirmedPort)
+
+    Write-Step "กำลังเปิดและปิด Local Bridge ภายในพื้นที่ Package Smoke เพื่อตรวจ Runtime จริง"
+    $primaryError = $null
+    try {
+        $endpoint = Start-And-TestBridge -ConfirmedPort $ConfirmedPort
+        $frontend = Invoke-WebRequest -Uri $endpoint.Url -Method Get -UseBasicParsing -TimeoutSec 10
+        if ([int]$frontend.StatusCode -ne 200 -or [int]$frontend.RawContentLength -le 0) {
+            throw "Frontend จากแพ็กเกจติดตั้งจริงไม่ตอบกลับอย่างสมบูรณ์"
+        }
+    }
+    catch {
+        $primaryError = $_.Exception
+        throw
+    }
+    finally {
+        $stopExitCode = Invoke-BridgeLifecycleProcess -Action Stop -ConfirmedPort $ConfirmedPort
+        if ($stopExitCode -ne 0) {
+            if ($primaryError) {
+                Write-Warning "Package Smoke พบข้อผิดพลาดหลักและหยุด Bridge ทดสอบไม่สำเร็จ กรุณาตรวจ process ใน RUNNER_TEMP"
+            }
+            else {
+                throw "Package Smoke เปิด Runtime ได้ แต่หยุด Bridge ทดสอบไม่สำเร็จ"
+            }
+        }
+    }
+}
+
 function New-HqShortcut {
     param(
         [Parameter(Mandatory = $true)][string]$ShortcutPath,
@@ -1079,14 +1233,12 @@ function Install-Shortcuts {
 function Start-And-TestBridge {
     param([Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$ConfirmedPort)
 
-    $lifecycle = Join-Path $installRoot "scripts\start-local-bridge.ps1"
     if (-not (Test-LoopbackPortAvailable -CandidatePort $ConfirmedPort)) {
         throw "พอร์ตที่ยืนยัน ($ConfirmedPort) ถูกใช้งานก่อนเริ่ม Bridge ระบบหยุดโดยไม่เปลี่ยน URL อัตโนมัติ"
     }
 
     Write-Step "กำลังเปิด Local Bridge ที่ URL ซึ่งผู้ใช้ยืนยันและตรวจสุขภาพระบบ"
-    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $lifecycle -Action Start -HealthTimeoutSeconds 45 -Port $ConfirmedPort | Out-Host
-    $lifecycleExitCode = $LASTEXITCODE
+    $lifecycleExitCode = Invoke-BridgeLifecycleProcess -Action Start -ConfirmedPort $ConfirmedPort
     if ($lifecycleExitCode -ne 0) {
         throw "Local Bridge เปิดด้วยพอร์ตที่ยืนยันไม่สำเร็จ กรุณาเลือก Local endpoint ใหม่ โดยระบบจะไม่ปิดโปรแกรมอื่นหรือเปลี่ยน URL เอง"
     }
@@ -1324,7 +1476,8 @@ try {
         Initialize-UserDataDirectories
         $venvPython = Initialize-PythonEnvironment
         Test-InstalledApplication -PythonPath $venvPython
-        Write-Step "Package Smoke ผ่านโดยไม่แก้ Bridge, Watchdog, Shortcut หรือ Browser"
+        Test-IsolatedInstalledBridge -ConfirmedPort $selectedBridgePort
+        Write-Step "Package Smoke ผ่านทั้งชุดทดสอบและ Runtime จริง โดยไม่แตะ Bridge, Watchdog, Shortcut หรือ Browser ของผู้ใช้"
         exit 0
     }
     $previousHealthyEndpoint = Get-HealthySavedEndpoint
@@ -1387,6 +1540,16 @@ try {
             Remove-ApplicationRollbackSnapshot -RollbackState $script:applicationRollbackState
             $script:applicationRollbackState = $null
             $script:applicationMutationStarted = $false
+        }
+        # Google setup is optional onboarding, not part of the transactional
+        # application publish. Offer it only after the installed Runtime passed
+        # its full tests and Health check and the rollback snapshot was released.
+        # A cancelled/invalid OAuth JSON must never roll back a healthy HQ.
+        try {
+            Invoke-GoogleOAuthFirstRunSetup -CandidateRoot $installRoot
+        }
+        catch {
+            Write-Warning "ติดตั้ง Agent HQ สำเร็จ แต่ยังเปิดขั้นตอน Google ไม่ได้ ให้เปิด 2-SETUP-GOOGLE-HQ.bat ภายหลัง"
         }
         if (-not $SkipShortcuts) {
             try {

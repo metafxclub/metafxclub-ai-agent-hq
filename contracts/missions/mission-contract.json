@@ -1,5 +1,5 @@
 {
-  "version": "mission-contract-v009",
+  "version": "mission-contract-v010",
   "purpose": "Shared mission shape for visual work, backend queueing, prop reports, and memory summaries.",
   "schema": {
     "id": "mission-{timestamp}",
@@ -57,6 +57,29 @@
       "consumedAt": null,
       "payloadDigest": null
     },
+    "executionMode": "manual_guarded|auto_guarded|discussion_only|approved_workspace",
+    "autoEligible": "boolean; discussion_only and approved_workspace must be false",
+    "discussionOnly": "true only for a Backend-created interactive-meeting discussion Mission; never accepted as frontend authority",
+    "discussionGuardrails": "Backend-owned tool/workspace/task/implementation denial record for discussion_only Missions",
+    "meetingApprovalBinding": {
+      "schemaVersion": "interactive-meeting-approval-binding-v1",
+      "meetingId": "exact approved meeting session id",
+      "proposalDigest": "lowercase SHA-256 digest of the current frozen Manager proposal",
+      "proposalTurnId": "exact Manager proposal turn id"
+    },
+    "meetingImplementationProposal": {
+      "schemaVersion": "interactive-meeting-implementation-proposal-v1",
+      "meetingId": "same exact approved meeting session id as meetingApprovalBinding.meetingId",
+      "proposalDigest": "same visible lowercase SHA-256 digest as meetingApprovalBinding.proposalDigest",
+      "proposalTurnId": "same exact Manager proposal turn id as meetingApprovalBinding.proposalTurnId",
+      "agenda": "complete bounded operator agenda without silent truncation",
+      "developmentGoal": "complete bounded operator development goal without silent truncation",
+      "proposal": "exact frozen structured Manager proposal",
+      "risks": ["complete bounded frozen risk item"],
+      "acceptanceChecks": ["complete bounded frozen acceptance check"],
+      "managerDecision": "exact frozen structured Manager decision object",
+      "approvalNote": "complete bounded local-user approval note or empty string"
+    },
     "riskGuardReview": {
       "decision": "approved|rejected or omitted",
       "reason": "backend policy reason code",
@@ -101,6 +124,15 @@
     "completePacketDigest": "Approval binds owner, toolId, targetId, detail, modelTier, budget, risk, and reportType; mutation invalidates approval.",
     "backendRiskGuard": "High-risk review is backend-owned and digest-bound; the frontend may submit only the human decision.",
     "singleUse": "The approval becomes consumed before the guarded runner starts.",
+    "meetingProposalGate": "A meeting approval creates one separate high-risk codex_cli_task Mission in approved_workspace mode, bound to meetingId, proposalDigest, and proposalTurnId. It does not execute inline.",
+    "meetingDiscussionMode": "A Backend-only constructor may create a low-risk agent_collaboration Mission in discussion_only mode for transcript audit and round accounting. Risky words in the agenda do not grant execution authority; tools, Workspace, task creation, and implementation remain disabled.",
+    "meetingFullInstructionPreservation": "The Runner accepts at most 12,000 collaboration message characters inside a separate 16,000-character trusted envelope; generic Agent Chat remains 4,000 characters. Oversize input fails before model invocation and is never silently truncated.",
+    "missionPromptPreservation": "Ordinary Mission prompts accept at most 8,000 characters and approved_workspace prompts accept at most 12,000 characters. Oversize prompts fail before process start and are never silently truncated.",
+    "visibleMeetingProposalBinding": "Before approval, the user-visible proposal exposes its meetingId, proposalDigest, and proposalTurnId. The approved implementation Mission carries those exact values in both meetingApprovalBinding and meetingImplementationProposal; the private Mission payloadDigest remains hidden.",
+    "structuredMeetingImplementation": "An approved_workspace Mission must carry meetingImplementationProposal with the complete bounded agenda, developmentGoal, frozen proposal, risks, acceptanceChecks, managerDecision, and approvalNote. These structured fields and meetingApprovalBinding are included in the Mission payload digest; prompt text alone is not sufficient authority.",
+    "sessionScopedDrafts": "Meeting interjection and approval-note drafts are keyed by meeting session id (with a separate new-session key), restored only for that session, and never reused across sessions.",
+    "approvedWorkspaceTrigger": "Only a fresh explicit POST /api/missions/:id/execute may start the exact bound Mission after Backend revalidates the current proposal, human and Risk Guard decisions, and payload digest.",
+    "approvedWorkspaceBoundary": "The separate approved implementation profile may write workspace, frontend, backend, runner, contracts, tests, docs, and assets-source only for the exact frozen proposal. Runtime data, scripts, installer, Git, secrets/auth, network or Web Search, Browser/Computer/MCP/Plugin/external apps, deployment, external messaging, MT4/MT5 or live trading, deletion, moving/renaming existing files, and scope expansion remain forbidden. Generic auto_guarded keeps its narrower workspace/frontend/docs/assets-source profile.",
     "restartRecovery": "A consumed running mission found during Bridge startup becomes failed/interrupted without automatic retry.",
     "archiveOutcome": "Archive preserves archivedFromStatus; only a mission archived from completed counts as successful Manager aggregation.",
     "workflowEnvelope": "Every dashboard action must persist missionId, targetPropId, ownerAgentId, sourceLineage, agentTransfer when a report crosses dashboards, timestamps, status, and reportRoute before the result is exposed to a prop or Mission Strategy Table.",

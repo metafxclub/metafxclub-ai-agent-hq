@@ -85,13 +85,13 @@ EVIDENCE_OUTPUT_ANY = {
     "backend_observed_at": {"checkedAt", "backendObservedAt"},
     "backtest_plan": {"testModel", "dateRange", "artifactPlan"},
     "change_summary": {"changeSummary"},
-    "checked_at": {"checkedAt", "entries"},
+    "checked_at": {"checkedAt", "entries", "systems"},
     "compile_status_truth": {"compileStatus"},
     "discovery_blueprint": {"blueprint", "versionPlan"},
     "ea_readiness": {"eaReadiness", "entries"},
     "frontend_safe_candidate_registry": {"candidates", "candidateCount", "privacy"},
     "inspection_scope": {"strategySummary", "codeRisks", "tradeLifecycle", "moneyManagement"},
-    "limitations": {"limitations", "knownRisks", "riskNotes", "conflictingEvidence"},
+    "limitations": {"limitations", "knownRisks", "riskNotes", "conflictingEvidence", "systems"},
     "local_health_snapshot": {"bridgeStatus", "missionWorkerStatus", "schedulerStatus", "codexStatus"},
     "local_settings_record": {"savedAt", "times", "language", "requestedEnabled"},
     "local_terminal_selection_record": {"selectedCandidate", "selectedAt"},
@@ -101,12 +101,12 @@ EVIDENCE_OUTPUT_ANY = {
     "project_relative_source_path": {"sourceFiles", "changedFiles", "sourcePath", "downloadArtifacts"},
     "public_availability_status": {"availability", "entries"},
     "published_or_event_time": {"publishedAt", "eventAt", "events", "sourceLinks"},
-    "quoted_fact_summary": {"entryRules", "exitRules", "strategySummary", "featureSummary"},
+    "quoted_fact_summary": {"entryRules", "exitRules", "strategySummary", "featureSummary", "systems"},
     "rejection_criteria": {"rejectionCriteria"},
     "review_scope": {"issues", "lineReferences", "reviewScope"},
     "scheduler_state": {"effectiveEnabled", "nextRunAt", "lastRunStatus"},
     "source_digest": {"sourceDigest"},
-    "source_title": {"sourceTitle", "entries"},
+    "source_title": {"sourceTitle", "entries", "systems"},
     "source_url_per_supported_bias": {"pairBias"},
     "uncompiled_status": {"compileChecklist", "compileStatus", "nextValidationStep"},
     "unknown_when_unverified": {"pairBias"},
@@ -124,6 +124,7 @@ EVIDENCE_OUTPUT_ALL = {
 }
 
 RADAR_ACTION_ID = "discover_new_indicators"
+TRADING_SYSTEM_DISCOVERY_ACTION_ID = "discover_trading_systems"
 RADAR_ENTRY_WORKER_REQUIRED_FIELDS = {
     "toolName",
     "toolKind",
@@ -143,6 +144,37 @@ RADAR_ENTRY_WORKER_REQUIRED_FIELDS = {
     "screenshot",
 }
 RADAR_ENTRY_BACKEND_COMPUTED_FIELDS = {
+    "recordId",
+    "duplicateFingerprint",
+    "duplicateStatus",
+    "duplicateScope",
+}
+TRADING_SYSTEM_WORKER_REQUIRED_FIELDS = {
+    "recordType",
+    "systemName",
+    "strategyFamily",
+    "creatorOrTrader",
+    "publicUsers",
+    "market",
+    "symbols",
+    "timeframes",
+    "sessions",
+    "indicatorSettings",
+    "setupConditions",
+    "entrySteps",
+    "exitSteps",
+    "riskManagement",
+    "tradeManagementSteps",
+    "sourceTitle",
+    "sourceUrl",
+    "corroboratingUrls",
+    "checkedAt",
+    "verificationStatus",
+    "suitableFor",
+    "risksAndLimitations",
+    "unknowns",
+}
+TRADING_SYSTEM_BACKEND_COMPUTED_FIELDS = {
     "recordId",
     "duplicateFingerprint",
     "duplicateStatus",
@@ -311,6 +343,24 @@ def _validated_payload(raw: Any) -> dict[str, Any]:
                 ):
                     raise EquipmentWorkflowContractError(
                         f"invalid_radar_entry_contract:{prop_id}:{action_id}"
+                    )
+            if action_id == TRADING_SYSTEM_DISCOVERY_ACTION_ID:
+                entry_contract = action_profile.get("entryContract")
+                if output_fields != ["systems"] or not isinstance(entry_contract, dict):
+                    raise EquipmentWorkflowContractError(
+                        f"invalid_trading_system_container:{prop_id}:{action_id}"
+                    )
+                if (
+                    entry_contract.get("containerField") != "systems"
+                    or entry_contract.get("minimumItemsPerRun") != 3
+                    or entry_contract.get("maximumItemsPerRun") != 3
+                    or set(entry_contract.get("workerRequiredFields") or [])
+                    != TRADING_SYSTEM_WORKER_REQUIRED_FIELDS
+                    or set(entry_contract.get("backendComputedFields") or [])
+                    != TRADING_SYSTEM_BACKEND_COMPUTED_FIELDS
+                ):
+                    raise EquipmentWorkflowContractError(
+                        f"invalid_trading_system_entry_contract:{prop_id}:{action_id}"
                     )
             for evidence_kind in evidence_kinds:
                 required_any = EVIDENCE_OUTPUT_ANY.get(evidence_kind)
