@@ -614,7 +614,15 @@ class GoogleOAuthBridgeSecurityTests(unittest.TestCase):
                 self.temp_path / "dashboard-workflow-settings.json",
             )
         )
-        self.server = self.bridge.BridgeHTTPServer(
+        class JoinableBridgeHTTPServer(self.bridge.BridgeHTTPServer):
+            # Production request threads are intentionally daemonized so a
+            # broken browser tab cannot keep HQ alive during shutdown. Tests
+            # must instead join every handler before deleting their temporary
+            # audit/settings directory on Windows.
+            daemon_threads = False
+            block_on_close = True
+
+        self.server = JoinableBridgeHTTPServer(
             ("127.0.0.1", 0),
             self.bridge.BridgeHandler,
         )
@@ -623,11 +631,21 @@ class GoogleOAuthBridgeSecurityTests(unittest.TestCase):
         self.base_url = f"http://127.0.0.1:{self.server.server_port}"
 
     def tearDown(self) -> None:
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=2)
-        self.stack.close()
-        self.temp.cleanup()
+        thread_stopped = False
+        try:
+            self.server.shutdown()
+            self.thread.join(timeout=5)
+            thread_stopped = not self.thread.is_alive()
+        finally:
+            try:
+                # ThreadingMixIn.server_close waits for non-daemon request
+                # handlers when block_on_close is true, so no request can
+                # recreate a file while TemporaryDirectory is being removed.
+                self.server.server_close()
+            finally:
+                self.stack.close()
+                self.temp.cleanup()
+        self.assertTrue(thread_stopped, "OAuth test server did not stop")
 
     def read_url(self, path: str) -> tuple[int, bytes]:
         try:

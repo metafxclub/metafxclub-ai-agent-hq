@@ -875,12 +875,67 @@ function Assert-InstallerTemporaryDirectory {
 }
 
 function Remove-StagedApplication {
-    param([Parameter(Mandatory = $true)][string]$StagingRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$StagingRoot,
+        [switch]$BestEffort
+    )
 
     $resolved = Assert-InstallerTemporaryDirectory -Path $StagingRoot -Kind stage
-    if (Test-Path -LiteralPath $resolved) {
-        Remove-Item -LiteralPath $resolved -Recurse -Force
+    Remove-InstallerTemporaryDirectoryWithRetry `
+        -ResolvedPath $resolved `
+        -Kind stage `
+        -BestEffort:$BestEffort
+}
+
+function Remove-InstallerTemporaryDirectoryWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$ResolvedPath,
+        [Parameter(Mandatory = $true)][ValidateSet("stage", "rollback")][string]$Kind,
+        [switch]$BestEffort
+    )
+
+    # Windows Defender, Search Indexer and a just-finished child process can
+    # briefly retain a directory entry even after all application handles are
+    # closed (ERROR_DIR_NOT_EMPTY/145 or sharing violations). Cleanup is never
+    # allowed outside the exact short TEMP roots validated above, and it gets a
+    # small bounded retry window instead of turning a healthy installation into
+    # a false rollback.
+    $resolved = Assert-InstallerTemporaryDirectory -Path $ResolvedPath -Kind $Kind
+    $delaysMilliseconds = @(0, 100, 250, 500, 1000, 2000)
+    $lastError = ""
+    foreach ($delay in $delaysMilliseconds) {
+        if ($delay -gt 0) {
+            Start-Sleep -Milliseconds $delay
+        }
+        if (-not (Test-Path -LiteralPath $resolved)) {
+            return
+        }
+        try {
+            Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop
+            if (-not (Test-Path -LiteralPath $resolved)) {
+                return
+            }
+            $lastError = "Temporary directory ยังปรากฏอยู่หลังคำสั่งลบ"
+        }
+        catch {
+            $lastError = [string]$_.Exception.Message
+        }
     }
+
+    $message = "ลบ Temporary directory ของ Installer ไม่สำเร็จหลัง retry แบบจำกัด: $lastError"
+    if ($BestEffort) {
+        Write-Warning $message
+        try {
+            Write-InstallLog -Message $message
+        }
+        catch {
+            # Best-effort cleanup must stay non-fatal even when antivirus or a
+            # log viewer briefly locks the installer log itself.
+            Write-Warning "ไม่สามารถบันทึกคำเตือน Cleanup ลง Install log ได้"
+        }
+        return
+    }
+    throw $message
 }
 
 function Stop-CandidateBridgeAfterFailedStart {
@@ -972,7 +1027,9 @@ function New-StagedApplication {
         return $stagingRoot
     }
     catch {
-        Remove-StagedApplication -StagingRoot $stagingRoot
+        # Preserve the real candidate validation error. A transient Windows
+        # TEMP cleanup race must not replace it with an unrelated exception.
+        Remove-StagedApplication -StagingRoot $stagingRoot -BestEffort
         throw
     }
 }
@@ -1065,12 +1122,16 @@ function Restore-ApplicationRollbackSnapshot {
 }
 
 function Remove-ApplicationRollbackSnapshot {
-    param([Parameter(Mandatory = $true)]$RollbackState)
+    param(
+        [Parameter(Mandatory = $true)]$RollbackState,
+        [switch]$BestEffort
+    )
 
     $snapshotRoot = Assert-InstallerTemporaryDirectory -Path ([string]$RollbackState.SnapshotRoot) -Kind rollback
-    if (Test-Path -LiteralPath $snapshotRoot) {
-        Remove-Item -LiteralPath $snapshotRoot -Recurse -Force
-    }
+    Remove-InstallerTemporaryDirectoryWithRetry `
+        -ResolvedPath $snapshotRoot `
+        -Kind rollback `
+        -BestEffort:$BestEffort
 }
 
 function Initialize-UserDataDirectories {
@@ -1126,10 +1187,29 @@ function Initialize-PythonEnvironment {
 function Test-InstalledApplication {
     param([Parameter(Mandatory = $true)][string]$PythonPath)
 
-    Write-Step "กำลังรันชุดทดสอบความพร้อมของระบบ"
+    Write-Step "กำลังรันชุดตรวจติดตั้งแบบคงที่สำหรับเครื่องผู้ใช้"
     Push-Location $installRoot
     try {
-        Invoke-CheckedNative -FilePath $PythonPath -Arguments @("-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py", "-v") -FailureMessage "ชุดทดสอบของ HQ ไม่ผ่าน"
+        # The complete developer regression suite is release-gated in GitHub
+        # Actions on Python 3.10-3.14. Running all of those stateful/concurrent
+        # tests against a student's real TEMP, Google state and antivirus made
+        # otherwise valid installs fail nondeterministically. Keep an actual
+        # deployment gate here: verify the exact release tree again with the
+        # installed venv, import every Bridge dependency through --help, import
+        # the guarded Codex runner, then let Start-And-TestBridge prove the real
+        # HTTP runtime and /api/health immediately afterwards.
+        Invoke-CheckedNative `
+            -FilePath $PythonPath `
+            -Arguments @("-m", "unittest", "-v", "tests.test_release_candidate_preflight") `
+            -FailureMessage "ชุดตรวจ Release ที่ติดตั้งแล้วไม่ผ่าน"
+        Invoke-CheckedNative `
+            -FilePath $PythonPath `
+            -Arguments @("backend\local-runner\bridge_server.py", "--help") `
+            -FailureMessage "โหลด Dependency ของ Local Bridge ไม่สำเร็จ"
+        Invoke-CheckedNative `
+            -FilePath $PythonPath `
+            -Arguments @("runner\codex_cli_runner.py", "--help") `
+            -FailureMessage "โหลด Codex Runner ไม่สำเร็จ"
     }
     finally {
         Pop-Location
@@ -1561,7 +1641,7 @@ try {
         # CI/package validation owns an isolated LOCALAPPDATA tree and must not
         # inspect, stop, or reconfigure a real user Bridge or Scheduled Task.
         Publish-StagedApplication -StagingRoot $stagingRoot
-        Remove-StagedApplication -StagingRoot $stagingRoot
+        Remove-StagedApplication -StagingRoot $stagingRoot -BestEffort
         $stagingRoot = $null
         Initialize-UserDataDirectories
         $venvPython = Initialize-PythonEnvironment
@@ -1597,7 +1677,7 @@ try {
             $script:applicationRollbackState = New-ApplicationRollbackSnapshot
             $script:applicationMutationStarted = $true
             Publish-StagedApplication -StagingRoot $stagingRoot
-            Remove-StagedApplication -StagingRoot $stagingRoot
+            Remove-StagedApplication -StagingRoot $stagingRoot -BestEffort
             $stagingRoot = $null
         }
         elseif (-not $script:applicationRollbackState) {
@@ -1619,7 +1699,9 @@ try {
             Write-InstallResult -Endpoint $bridgeEndpoint -Readiness $codexReadiness
         }
         if ($script:applicationRollbackState) {
-            Remove-ApplicationRollbackSnapshot -RollbackState $script:applicationRollbackState
+            # Application tests and live Health have already passed. Failure to
+            # remove a TEMP snapshot must be logged, not roll back a healthy HQ.
+            Remove-ApplicationRollbackSnapshot -RollbackState $script:applicationRollbackState -BestEffort
             $script:applicationRollbackState = $null
             $script:applicationMutationStarted = $false
         }
@@ -1677,7 +1759,7 @@ try {
     catch {
         $installError = [string]$_.Exception.Message
         if ($stagingRoot) {
-            Remove-StagedApplication -StagingRoot $stagingRoot
+            Remove-StagedApplication -StagingRoot $stagingRoot -BestEffort
             $stagingRoot = $null
         }
         if ($script:applicationMutationStarted -and $script:applicationRollbackState) {
@@ -1701,7 +1783,7 @@ try {
             }
             finally {
                 if ($rollbackRestored) {
-                    Remove-ApplicationRollbackSnapshot -RollbackState $script:applicationRollbackState
+                    Remove-ApplicationRollbackSnapshot -RollbackState $script:applicationRollbackState -BestEffort
                     $script:applicationRollbackState = $null
                     $script:applicationMutationStarted = $false
                 }

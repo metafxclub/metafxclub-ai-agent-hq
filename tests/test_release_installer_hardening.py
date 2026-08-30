@@ -140,6 +140,14 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("Enable-ScheduledTask -TaskName $bridgeTaskName", suspend)
         self.assertIn("Test-InstalledApplication -PythonPath", installer)
         self.assertIn('"--require-hashes"', installer)
+        installed_check = installer[
+            installer.index("function Test-InstalledApplication"):
+            installer.index("function Test-GoogleOAuthDeploymentConfigured")
+        ]
+        self.assertIn('"tests.test_release_candidate_preflight"', installed_check)
+        self.assertIn('"backend\\local-runner\\bridge_server.py", "--help"', installed_check)
+        self.assertIn('"runner\\codex_cli_runner.py", "--help"', installed_check)
+        self.assertNotIn('"discover"', installed_check)
         staged = installer[installer.index("function New-StagedApplication"):installer.index("function Publish-StagedApplication")]
         self.assertIn("Resolve-SystemPython", staged)
         self.assertIn('"tests.test_release_candidate_preflight"', staged)
@@ -339,6 +347,9 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertLess(staged.index("Copy-ApplicationFiles"), staged.index("Assert-NoEmbeddedHighConfidenceSecrets"))
         self.assertIn('("mfxhq-rollback-{0}"', installer)
         self.assertIn("Assert-InstallerTemporaryDirectory", installer)
+        self.assertIn("Remove-InstallerTemporaryDirectoryWithRetry", installer)
+        self.assertIn("$delaysMilliseconds = @(0, 100, 250, 500, 1000, 2000)", installer)
+        self.assertIn("-BestEffort", installer)
         self.assertIn("Remove-StagedApplication -StagingRoot $stagingRoot", installer)
         self.assertNotIn('.AI-Agent-HQ.staging.', installer)
         self.assertNotIn('.AI-Agent-HQ.rollback.', installer)
