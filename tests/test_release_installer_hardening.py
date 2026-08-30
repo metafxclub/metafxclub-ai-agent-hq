@@ -98,10 +98,53 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             )
         self.assertIn("Assert-EaArtifactIntegrity", installer)
         self.assertIn("Assert-NoEmbeddedHighConfidenceSecrets", installer)
+        self.assertIn("function Get-Sha256Hex", installer)
+        self.assertIsNone(re.search(r"(?m)^[^#\r\n]*\bGet-FileHash\b", installer))
         self.assertIn("Source EA ใน Integration ไม่ตรงกับ Source", installer)
         self.assertIn("หลักฐาน Compile ของ EA ไม่ตรงกับ Source/Binary", installer)
         self.assertIn('install_root = "%LOCALAPPDATA%\\Metafxclub\\AI-Agent-HQ"', installer)
         self.assertIn("install_scope = \"current_windows_user\"", installer)
+
+    def test_prompt_clone_mode_is_enforced_again_by_installer(self) -> None:
+        installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
+        for parameter in (
+            "ExpectedGitRepository",
+            "ExpectedGitTag",
+            "ExpectedSourceVersion",
+        ):
+            self.assertIn(f"[string]${parameter}", installer)
+        self.assertIn("[switch]$RequireVerifiedGitSource", installer)
+        self.assertIn("function Assert-ExpectedGitSource", installer)
+        self.assertIn("https://github.com/metafxclub/metafxclub-ai-agent-hq.git", installer)
+        provenance = installer[
+            installer.index("function Assert-ExpectedGitSource"):
+            installer.index("function Assert-SafeSource")
+        ]
+        self.assertIn('Test-Path -LiteralPath $gitDirectory', provenance)
+        self.assertIn('@("remote", "get-url", "origin")', provenance)
+        self.assertIn('"refs/tags/$($ExpectedGitTag.Trim())^{commit}"', provenance)
+        self.assertIn('@("rev-parse", "--verify", "HEAD^{commit}")', provenance)
+        self.assertIn('@("branch", "--show-current")', provenance)
+        self.assertIn('@("status", "--porcelain", "--untracked-files=all")', provenance)
+        self.assertIn('"ls-remote", "--exit-code", "--tags", $officialRepository', provenance)
+        self.assertIn("Git HEAD ไม่ตรงกับ Tag ที่เผยแพร่บน GitHub ทางการ", provenance)
+        self.assertIn('@("ls-files", "-v")', provenance)
+        self.assertIn("--absolute-git-dir", provenance)
+        self.assertIn("--no-replace-objects", installer)
+        self.assertIn("Source ต้อง Checkout จาก Tag แบบ detached", provenance)
+        self.assertIn("Source มีไฟล์แก้ไขหรือไฟล์ใหม่ที่ไม่อยู่ใน Tag", provenance)
+        self.assertIn("VERSION ใน Source ไม่ตรงกับ Version ที่ล็อกไว้", provenance)
+        self.assertIn("$script:validatedSourceCommit", provenance)
+        safe_source = installer[
+            installer.index("function Assert-SafeSource"):
+            installer.index("function Assert-EaArtifactIntegrity")
+        ]
+        self.assertIn("Assert-ExpectedGitSource", safe_source)
+        self.assertIn("function Export-VerifiedGitSource", installer)
+        self.assertIn('"archive", "--format=zip"', installer)
+        self.assertIn("Export-VerifiedGitSource -DestinationRoot $stagingRoot", installer)
+        self.assertIn('provenance = $(if ($validatedSourceCommit) { "verified_remote_git_tag" }', installer)
+        self.assertIn('"unverified_archive_or_local_source"', installer)
 
     def test_installer_stages_before_mutation_and_restores_last_good_on_failure(self) -> None:
         installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
@@ -122,6 +165,18 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("$script:previousBridgeWasStopped -and $previousBridgeWasRunning", installer)
         self.assertIn("$previousHealthyEndpoint = Get-HealthySavedEndpoint", installer)
         self.assertIn("Stop-CandidateBridgeAfterFailedStart", installer)
+        self.assertIn('$health.server -ceq "Metafx Local Bridge"', installer)
+        self.assertIn("$health.version -ceq $installedVersion", installer)
+        self.assertIn("<title>Metafxclub AI Agent HQ", installer)
+        self.assertIn("frontend/index\\.html", installer)
+        self.assertIn('$frontendAppUrl = "{0}frontend/index.html"', installer)
+        self.assertIn("<title>Metafxclub AI Pixel HQ", installer)
+        self.assertIn("frontend/src/app/main\\.js", installer)
+        self.assertIn('$mainJsUrl = "{0}frontend/src/app/main.js"', installer)
+        self.assertIn("window\\.MetafxHqBoot", installer)
+        self.assertIn("init\\(\\)\\.catch", installer)
+        self.assertIn("struct.calcsize('P')*8", installer)
+        self.assertIn("[int]$details.bits -ne 64", installer)
         candidate_stop = installer[
             installer.index("function Stop-CandidateBridgeAfterFailedStart"):
             installer.index("function Start-PreviousBridgeAfterRollback")
@@ -160,6 +215,9 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertEqual(8, len(requirement_blocks))
         self.assertTrue(all("--hash=sha256:" in block for block in requirement_blocks))
         self.assertIn("[int]$details.minor -gt 14", installer)
+        for selector in ("-3.14", "-3.13", "-3.12", "-3.11", "-3.10"):
+            self.assertIn(f'"{selector}"', installer)
+        self.assertLess(installer.index('"-3.14"'), installer.index('"-3.10"'))
         self.assertIn("[switch]$PackageSmoke", installer)
         smoke = installer[
             installer.index("if ($PackageSmoke) {"):
@@ -301,6 +359,15 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("remote assets do not match the verified local package", workflow)
         self.assertIn("Release $tag verified", workflow)
         self.assertIn("-PackageSmoke", workflow)
+        self.assertIn("https://github.com/metafxclub/metafxclub-ai-agent-hq.git", workflow)
+        self.assertIn("git clone --depth 1 --single-branch --branch $tag", workflow)
+        self.assertIn("-RequireVerifiedGitSource", workflow)
+        self.assertIn("-ExpectedGitRepository $officialRepository", workflow)
+        self.assertIn("-ExpectedGitTag $tag", workflow)
+        self.assertIn("-ExpectedSourceVersion $version", workflow)
+        self.assertIn("ci-ignored-source-sentinel.txt", workflow)
+        self.assertIn("Verified public Git-tag installation smoke failed", workflow)
+        self.assertIn("node --check (Join-Path $verifiedInstalledRoot", workflow)
         self.assertIn("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", workflow)
         self.assertIn("actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065", workflow)
         self.assertIn("Python 3.10-3.14", workflow)

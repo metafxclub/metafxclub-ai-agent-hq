@@ -7,7 +7,8 @@ AI Agent Visual Office แบบ Local สำหรับจัดการ Miss
 ## สิ่งที่ต้องมีก่อนติดตั้งบน Windows
 
 - Windows 10 หรือ 11 และอินเทอร์เน็ตสำหรับติดตั้ง Dependency ที่ล็อกเวอร์ชันไว้
-- Python **3.10-3.14** จาก [python.org](https://www.python.org/downloads/windows/) โดยเลือก `Add Python to PATH` ระหว่างติดตั้ง
+- Git for Windows ใน PATH สำหรับเส้นทางติดตั้งด้วย Prompt/Codex
+- Python **3.10-3.14 แบบ 64-bit** จาก [python.org](https://www.python.org/downloads/windows/) โดยเลือก `Add Python to PATH` ระหว่างติดตั้ง
 - บัญชี Codex ของผู้เรียนเอง (Login ภายหลังได้; HQ และ Health ยังเปิดตรวจได้แม้ Codex ยังไม่ Login)
 
 ตัวติดตั้งไม่ดาวน์โหลด Python และไม่ขอสิทธิ์ Administrator เพื่อติดตั้ง Python แทนผู้เรียน หากหา Python รุ่นที่รองรับไม่พบ ระบบจะหยุดพร้อมข้อความแก้ไขและไม่ทิ้ง Runtime ที่ติดตั้งครึ่งเดียว การใช้ Google Sheet แบบ Private เป็นการตั้งค่าเสริมหลัง HQ พร้อมใช้งาน โดยทำตาม [docs/research-sheet-hub-setup-th.md](docs/research-sheet-hub-setup-th.md) และห้ามส่งไฟล์ OAuth Client Secret ให้ผู้อื่น
@@ -16,33 +17,34 @@ AI Agent Visual Office แบบ Local สำหรับจัดการ Miss
 
 หาก OAuth consent screen ยังเป็น `Testing` ต้องเพิ่มบัญชีผู้เรียนใน Test users และสิทธิ์/Refresh token อาจหมดอายุหลัง 7 วันตามนโยบาย Google หากต้องการประสบการณ์เชื่อมครั้งเดียวระยะยาว ต้องจัด Publishing status และ Verification ของ OAuth app ให้เหมาะสมก่อนแจก ดู [Google Auth Platform — Audience](https://support.google.com/cloud/answer/15549945)
 
-## ติดตั้งด้วยลิงก์เดียวและ Prompt เดียว
+## ติดตั้งด้วย Prompt เดียวผ่าน Codex
 
-อาจารย์ส่งลิงก์ GitHub Release, Client ID และให้ผู้เรียนคัดลอก Path ของ Desktop OAuth JSON ลงใน [Prompt ติดตั้งอัตโนมัติ](docs/prompts/install-github-google-auto-th.md) จากนั้นวาง Prompt ใน Codex เพียงครั้งเดียว Codex จะดาวน์โหลดและตรวจ Checksum, เรียก Installer ครั้งเดียวพร้อมนำเข้า JSON ผ่าน Backend DPAPI, ตรวจ Bridge/Health/หน้าเว็บ, เปิด Watchdog หลัง Login และเปิด HQ ที่ `http://127.0.0.1:4186/` โดยผู้เรียนไม่ต้องกด BAT
+เส้นทางหลักสำหรับห้องเรียนคือ [Prompt ติดตั้งอัตโนมัติ](docs/prompts/install-github-google-auto-th.md) ซึ่งล็อก Repository, Git Tag และ Version ไว้แล้ว ผู้เรียนแก้เพียง Client ID กับ Path ของ Desktop OAuth JSON จากนั้นวาง Prompt ทั้งชุดใน Codex หนึ่งครั้ง Codex จะ Clone Tag ที่กำหนดจาก GitHub ลงพื้นที่ชั่วคราว, ตรวจ Source, เรียก Installer พร้อมนำเข้า JSON ผ่าน Backend DPAPI, ตรวจ Bridge/Health/หน้าเว็บ, เปิด Watchdog หลัง Login และเปิด HQ ที่ `http://127.0.0.1:4186/` โดยผู้เรียนไม่ต้องดาวน์โหลด ZIP และไม่ต้องกด BAT
 
 ขั้นตอนที่ระบบไม่ทำแทนคือการ Login/เลือกบัญชี/กดอนุญาตในหน้าทางการของ Google ผู้เรียนเหลือเพียงกด **เชื่อมบัญชี Google ครั้งเดียว** ใน HQ เท่านั้น
 
-ควรใช้ลิงก์ Release ที่ล็อกเวอร์ชัน เช่น `.../releases/tag/v1.0.0` ไม่ควรใช้ไฟล์ ZIP จาก Branch `main` ในห้องเรียน เพราะนักเรียนแต่ละคนอาจได้รับไฟล์คนละช่วงเวลา
+Prompt ต้องล็อก Git Tag และ `EXPECTED_VERSION` ให้ตรงกัน ห้ามเปลี่ยนเป็น Branch `main` หรือ URL `latest` ระหว่างคาบ เพราะนักเรียนแต่ละคนอาจได้รับ Source คนละช่วงเวลา เมื่อออกเวอร์ชันใหม่ให้อาจารย์ส่ง Prompt ฉบับที่อัปเดต Tag/Version แล้วแทนการให้ผู้เรียน Pull เอง
 
 ## ติดตั้งด้วยตนเอง
 
 หากไม่ได้ใช้ Codex ช่วยติดตั้ง:
 
-1. ตรวจว่ามี Python 3.10-3.14 และเลือก `Add Python to PATH` แล้ว
-2. ดาวน์โหลด Asset สำหรับ Windows จาก GitHub Release ที่อาจารย์ส่งให้
-3. แตก ZIP ให้เรียบร้อย ห้ามเปิดตัวติดตั้งจากใน ZIP
-4. ดับเบิลคลิก `1-INSTALL-HQ.bat`
-5. ตัวติดตั้งใช้ `http://127.0.0.1:4186/`, รันชุดตรวจ, เปิด Bridge และตรวจทั้ง Health กับหน้าเว็บให้เอง หากพอร์ต 4186 ถูกโปรแกรมอื่นใช้อยู่ ระบบจะหยุดโดยไม่ปิดโปรแกรมนั้น
-6. รอจน Browser เปิดหน้า Agent HQ และตัวติดตั้งแจ้งว่าสำเร็จ พร้อมแสดง Health, Codex และ Rate Limit ของบัญชีเครื่องนี้
-7. หากตั้งค่า Google ใน First-run wizard แล้ว ให้กด **เชื่อมบัญชี Google ครั้งเดียว** ใน Agent HQ จากนั้นกรอก Sheet ID
+1. ตรวจว่ามี Python 3.10-3.14 แบบ 64-bit และเลือก `Add Python to PATH` แล้ว
+2. ดาวน์โหลดทั้ง Asset `.zip` และไฟล์ `.zip.sha256` ชื่อเดียวกันจาก GitHub Release ที่อาจารย์ส่งให้
+3. เปิด PowerShell ในโฟลเดอร์ดาวน์โหลด รัน `Get-FileHash -Algorithm SHA256 .\ชื่อไฟล์.zip` แล้วเทียบค่ากับข้อความตัวแรกในไฟล์ `.zip.sha256` ให้ตรงกันทุกตัวอักษร หากไม่ตรงให้ลบไฟล์และหยุดติดตั้ง
+4. แตก ZIP ให้เรียบร้อย ห้ามเปิดตัวติดตั้งจากใน ZIP
+5. ดับเบิลคลิก `1-INSTALL-HQ.bat`
+6. ตัวติดตั้งใช้ `http://127.0.0.1:4186/`, รัน Deployment Preflight, เปิด Bridge และตรวจทั้ง Health กับหน้าเว็บให้เอง หากพอร์ต 4186 ถูกโปรแกรมอื่นใช้อยู่ ระบบจะหยุดโดยไม่ปิดโปรแกรมนั้น
+7. รอจน Browser เปิดหน้า Agent HQ และตัวติดตั้งแจ้งว่าสำเร็จ พร้อมแสดง Health, Codex และ Rate Limit ของบัญชีเครื่องนี้
+8. หากตั้งค่า Google ใน First-run wizard แล้ว ให้กด **เชื่อมบัญชี Google ครั้งเดียว** ใน Agent HQ จากนั้นกรอก Sheet ID
 
 คู่มือฉบับย่อสำหรับส่งให้นักเรียนอยู่ที่ [STUDENT-QUICKSTART-TH.md](STUDENT-QUICKSTART-TH.md)
 
-## ดาวน์โหลดและอัปเดตจาก GitHub
+## Clone Source เพื่อเรียนและพัฒนา
 
 Repository หลัก: `https://github.com/metafxclub/metafxclub-ai-agent-hq`
 
-สำหรับนักเรียนที่เรียน GitHub ให้ Clone เก็บเป็น Source และปล่อยให้ตัวติดตั้งวาง Runtime ที่ใช้งานจริงไว้ใน `%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ` แยกกัน:
+ส่วนนี้เป็นทางเลือกสำหรับนักเรียนที่ต้องการเก็บ Source เพื่อเรียน GitHub หรือพัฒนาโค้ด ไม่ใช่ขั้นตอนห้องเรียนและไม่ได้รับสถานะ `verified_remote_git_tag` แบบ Prompt อัตโนมัติ ตัวติดตั้งจะวาง Runtime ที่ใช้งานจริงไว้ใน `%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ` แยกจาก Source:
 
 ```powershell
 git clone https://github.com/metafxclub/metafxclub-ai-agent-hq.git

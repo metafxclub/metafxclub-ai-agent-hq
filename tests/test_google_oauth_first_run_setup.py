@@ -190,19 +190,38 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
 
     def test_automatic_install_prompt_uses_verified_noninteractive_contract(self) -> None:
         prompt = AUTO_INSTALL_PROMPT.read_text(encoding="utf-8-sig")
+        version = (ROOT / "VERSION").read_text(encoding="utf-8-sig").strip()
         for placeholder in (
-            "GITHUB_RELEASE_URL",
+            "GITHUB_REPOSITORY",
+            "GITHUB_TAG",
+            "EXPECTED_VERSION",
             "EXPECTED_GOOGLE_CLIENT_ID",
             "GOOGLE_DESKTOP_OAUTH_JSON",
         ):
             self.assertIn(placeholder, prompt)
+        self.assertIn('GITHUB_REPOSITORY = "https://github.com/metafxclub/metafxclub-ai-agent-hq.git"', prompt)
+        self.assertIn(f'GITHUB_TAG = "v{version}"', prompt)
+        self.assertIn(f'EXPECTED_VERSION = "{version}"', prompt)
+        self.assertIn("git ls-remote --exit-code --tags", prompt)
+        self.assertIn('"refs/tags/<GITHUB_TAG>^{}"', prompt)
+        self.assertIn("REMOTE_TAG_COMMIT", prompt)
+        self.assertIn("git clone --depth 1 --single-branch --branch", prompt)
+        self.assertIn("git status --porcelain", prompt)
+        self.assertIn("refs/tags/GITHUB_TAG^{commit}", prompt)
+        self.assertNotIn("GITHUB_RELEASE_URL", prompt)
+        self.assertIn("URL `latest`", prompt)
+        self.assertIn("ห้ามให้ Codex เปิด อ่าน Parse หรือพิมพ์เนื้อหา JSON เอง", prompt)
         self.assertIn("-ListAvailableEndpoints", prompt)
         self.assertIn("available=true", prompt)
         self.assertIn("-Port 4186 -EndpointConfirmed", prompt)
+        self.assertIn("-ExpectedGitRepository", prompt)
+        self.assertIn("-ExpectedGitTag", prompt)
+        self.assertIn("-ExpectedSourceVersion", prompt)
+        self.assertGreaterEqual(prompt.count("-RequireVerifiedGitSource"), 2)
         self.assertIn("-GoogleClientJsonPath", prompt)
         self.assertIn("-ExpectedGoogleClientId", prompt)
         self.assertNotIn("-EndpointConfirmed -SkipGoogleSetup", prompt)
-        self.assertIn("ห้ามใช้ -SkipLaunch", prompt)
+        self.assertIn("ห้ามใช้ `-SkipLaunch`", prompt)
         self.assertNotIn("-SkipGoogleSetup -SkipLaunch", prompt)
         self.assertIn(
             "$env:LOCALAPPDATA\\Metafxclub\\AI-Agent-HQ\\scripts\\setup-google-oauth.ps1",
@@ -211,6 +230,7 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertIn("-ClientJsonPath", prompt)
         self.assertIn("-SkipOpen", prompt)
         self.assertIn("authorization_required", prompt)
+        self.assertIn('source.provenance="verified_remote_git_tag"', prompt)
         self.assertIn("Exit code 2", prompt)
         self.assertIn("partial success", prompt)
         self.assertIn("ห้ามกดปุ่มเชื่อม Google", prompt)

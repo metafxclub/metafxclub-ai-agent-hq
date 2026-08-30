@@ -1,6 +1,6 @@
 # AGENTS.md — คู่มือสำหรับผู้ช่วยติดตั้ง Metafxclub AI Agent HQ
 
-ไฟล์นี้เป็นข้อกำหนดสำหรับ Codex หรือ AI Agent ที่ได้รับมอบหมายให้ติดตั้ง Repository นี้บน Windows ให้นักเรียนใช้งานได้จริง เป้าหมายคือให้ผู้ใช้ส่งลิงก์ GitHub Release เพียงครั้งเดียว แล้วผู้ช่วยดำเนินการติดตั้ง ตรวจสอบ และเปิดโปรแกรมให้ครบถ้วน
+ไฟล์นี้เป็นข้อกำหนดสำหรับ Codex หรือ AI Agent ที่ได้รับมอบหมายให้ติดตั้ง Repository นี้บน Windows ให้นักเรียนใช้งานได้จริง เส้นทางหลักคือให้นักเรียนวาง Prompt เต็มเพียงครั้งเดียว แล้วผู้ช่วย Clone Tag ที่ล็อกไว้จาก GitHub, ดำเนินการติดตั้ง ตรวจสอบ และเปิดโปรแกรมให้ครบถ้วน โดยนักเรียนไม่ต้องดาวน์โหลด ZIP หรือกด BAT เอง
 
 ## ขอบเขตของโปรเจกต์
 
@@ -8,28 +8,33 @@ Metafxclub AI Agent HQ เป็น Visual Office แบบ Local-first:
 
 - Frontend แสดงห้อง ตัวละคร Agent, Mission และ Dashboard เท่านั้น
 - งานจริงทั้งหมดต้องผ่าน `backend/local-runner/`
-- Bridge ต้องรับการเชื่อมต่อเฉพาะ `127.0.0.1`; ตัวติดตั้งต้องเสนอ Port ว่างให้ผู้ใช้ยืนยัน และบันทึก Port หลัง Health check ผ่านเท่านั้น
+- Bridge ต้องรับการเชื่อมต่อเฉพาะ `127.0.0.1`; ตัวติดตั้งต้องใช้ Port ที่ผู้ใช้ยืนยันโดยตรง หรือ Port 4186 ที่ยืนยันล่วงหน้าไว้ชัดเจนใน Prompt อัตโนมัติ และบันทึก Port หลัง Health check ผ่านเท่านั้น
 - ค่าเริ่มต้นสำหรับนักเรียนคือ Demo/Read-only
 - Telegram จริง การ Deploy การลบไฟล์ การแก้ระบบ MT4/MT5 และ Live Trading ต้องไม่ถูกเปิดใช้งานระหว่างติดตั้ง
 
 ## ขั้นตอนมาตรฐานเมื่อผู้ใช้ขอให้ติดตั้ง
 
-เมื่อผู้ใช้ส่งลิงก์ GitHub และขอให้ติดตั้ง ให้ทำตามลำดับนี้โดยไม่ข้ามขั้น:
+### โหมดหลัก: Prompt เดียว + Git Clone
 
-1. ยืนยันว่ากำลังทำงานบน Windows และลิงก์มาจาก Repository/Release ของ Metafxclub ที่ผู้ใช้ระบุ
-2. หากได้รับลิงก์ Repository ให้เลือก GitHub Release ที่เผยแพร่แล้วและล็อกเวอร์ชัน หากไม่มี Release ห้ามเดาไฟล์ติดตั้งจาก Source snapshot ให้แจ้งผู้ใช้
-3. ดาวน์โหลด Asset สำหรับ Windows จาก Release และตรวจสอบค่า SHA-256 หาก Release มีไฟล์ Checksum
-4. แตกไฟล์ไปยังโฟลเดอร์ชั่วคราวที่ผู้ใช้เขียนได้ ห้ามรันโดยตรงจากใน ZIP
-5. อ่าน `README.md` และ `STUDENT-QUICKSTART-TH.md`
-6. ตรวจว่ามี `1-INSTALL-HQ.bat` และ `installer/install.ps1` อยู่จริง หากขาดไฟล์ใด ให้ถือว่า Release ไม่สมบูรณ์และหยุดอย่างปลอดภัย
-7. ก่อนหยุด Bridge เดิม คัดลอกไฟล์ หรือสร้าง Runtime ให้เรียก `installer/install.ps1 -ListAvailableEndpoints` ซึ่งเป็นการตรวจแบบอ่านอย่างเดียว
-8. แสดง URL ที่ `available: true` ให้ผู้ใช้ 3 ตัวเลือก อธิบายว่า IP `127.0.0.1` ถูกล็อกไว้เพื่อใช้เฉพาะเครื่องนี้ และหยุดรอให้ผู้ใช้เลือกก่อน
-9. เมื่อผู้ใช้เลือกแล้ว ให้เรียก `1-INSTALL-HQ.bat -Port PORT_ที่เลือก -EndpointConfirmed` จากโฟลเดอร์ราก ห้ามสร้างขั้นตอน `pip install` หรือคัดลอก `.venv` เอง
-10. หาก Port ถูกแย่งก่อน Bridge เริ่ม ให้หยุดและกลับไปเสนอ URL ใหม่ ห้ามเปลี่ยน Port หรือ URL แบบเงียบ
-11. ตรวจสถานะด้วย `scripts/status-local-bridge.cmd`
-12. อ่าน `health_url` จาก `data/runtime/bridge-endpoint.json` และตรวจว่า Health ส่ง `ok: true`, `status: "ready"`, Host/Port ตรงกับไฟล์
-13. เรียก `scripts/check-codex-readiness.cmd` เพื่อตรวจ Codex login และ Rate Limit ของบัญชีที่ Login อยู่ใน Windows User นี้
-14. เมื่อ Health พร้อมแล้ว ให้เปิดด้วย `Open Metafx Agent HQ.cmd` และยืนยัน URL ที่บันทึกไว้ ห้ามเดา Port
+เมื่อผู้ใช้วาง `docs/prompts/install-github-google-auto-th.md` และระบุ Repository, Tag, Version, Google Client ID และ Path ของ OAuth JSON ให้ทำตามลำดับนี้โดยไม่ข้ามขั้น:
+
+1. ยืนยันว่ากำลังทำงานบน Windows, Repository เป็น URL ทางการที่ Prompt กำหนด และมี Git กับ Python รุ่นที่รองรับ
+2. ตรวจ Tag ด้วย `git ls-remote --tags` แล้ว Clone Tag ที่ล็อกไว้ลงโฟลเดอร์ใหม่ใต้ `%TEMP%` ห้ามใช้ Pull/Merge/Stash/Reset หรือลบ Repository เดิมของผู้เรียน
+3. ตรวจ `origin`, Commit ของ Tag, worktree ที่สะอาด และไฟล์ `VERSION` ให้ตรงกับ Prompt หากไม่ตรงให้หยุด
+4. อ่าน `README.md`, `STUDENT-QUICKSTART-TH.md` และ `docs/research-sheet-hub-setup-th.md` จาก Source ที่ตรวจแล้ว
+5. ตรวจว่ามี `1-INSTALL-HQ.bat` และ `installer/install.ps1` อยู่จริง หากขาดไฟล์ใด ให้ถือว่า Source ไม่สมบูรณ์และหยุดอย่างปลอดภัย
+6. ก่อนหยุด Bridge เดิม คัดลอกไฟล์ หรือสร้าง Runtime ให้เรียก `installer/install.ps1 -ListAvailableEndpoints` ซึ่งเป็นการตรวจแบบอ่านอย่างเดียว
+7. ถ้า Prompt ยืนยัน `127.0.0.1:4186` ล่วงหน้าแล้ว ให้ตรวจว่า candidate นี้มี `available: true` และส่ง `-Port 4186 -EndpointConfirmed` ได้โดยไม่ถามซ้ำ หากไม่ว่างให้หยุด ห้ามสลับ Port หรือปิด Process อื่นเอง
+8. เรียก `installer/install.ps1` โดยตรงเพียงรอบเดียว พร้อม Google JSON Path และ Expected Client ID ตาม Prompt ห้ามสร้างขั้นตอน `pip install`, คัดลอก `.venv` หรือนำเข้า Credential เอง
+9. ตรวจสถานะด้วย `scripts/status-local-bridge.cmd` จาก Runtime ที่ติดตั้งจริง
+10. อ่าน `health_url` จาก `data/runtime/bridge-endpoint.json` และตรวจว่า Health ส่ง `ok: true`, `status: "ready"`, Host/Port ตรงกับไฟล์
+11. ตรวจหน้าเว็บ, Google Client status, Scheduled Task, Codex login และ Rate Limit ตามเกณฑ์ใน Prompt
+12. เมื่อ Health พร้อมแล้ว ให้เปิด URL ที่บันทึกไว้ ห้ามกด Login/เลือกบัญชี/อนุญาต Google แทนผู้ใช้
+13. การล้าง Source ชั่วคราวทำได้เฉพาะโฟลเดอร์ที่ผู้ช่วยสร้างและตรวจ Absolute path แล้วเท่านั้น เป็น Best-effort และห้ามทำให้ Runtime ที่ Health ผ่านแล้วถูก Rollback
+
+### โหมดสำรอง: ผู้ใช้เลือกติดตั้ง ZIP เอง
+
+ใช้เฉพาะเมื่อผู้ใช้ขอวิธี Manual หรือส่ง GitHub Release Asset มาโดยตรง: ตรวจ Release ที่ล็อกเวอร์ชันและ SHA-256, แตก ZIP แล้วเรียก `1-INSTALL-HQ.bat` หากยังไม่มีการยืนยัน Endpoint ล่วงหน้า ให้แสดง URL ที่ `available: true` จำนวน 3 ตัวเลือกและรอให้ผู้ใช้เลือก ห้ามใช้ Branch `main`, URL `latest` หรือ Source snapshot แทน Release แบบเงียบ ๆ
 
 คำสั่งอ้างอิงเมื่ออยู่ในโฟลเดอร์ที่ติดตั้งแล้ว:
 
@@ -42,13 +47,13 @@ $health | Select-Object ok, status, agentCount, agentRosterComplete, version
 & ".\Open Metafx Agent HQ.cmd"
 ```
 
-หากการติดตั้งหรือ Health check ไม่ผ่าน ให้ใช้ `scripts/repair-hq.cmd` หนึ่งครั้ง แล้วตรวจสถานะและ Health ใหม่ ห้ามฆ่า Process ที่ไม่สามารถยืนยันได้ว่าเป็น HQ Bridge เพียงเพราะ Process นั้นใช้ Port เดียวกัน
+ในโหมด Manual หาก Runtime เดิมติดตั้งอยู่แล้วแต่ Health ไม่ผ่าน จึงใช้ `scripts/repair-hq.cmd` ได้หนึ่งครั้งแล้วตรวจสถานะใหม่ สำหรับ Prompt อัตโนมัติ ให้หยุดและรายงานสาเหตุก่อน ห้ามซ่อม/ติดตั้งซ้ำแบบเงียบ ๆ และห้ามฆ่า Process ที่ไม่สามารถยืนยันได้ว่าเป็น HQ Bridge เพียงเพราะ Process นั้นใช้ Port เดียวกัน
 
 ## เกณฑ์ว่าติดตั้งสำเร็จ
 
 ห้ามรายงานว่า “พร้อมใช้งาน” จนกว่าจะมีหลักฐานครบทุกข้อ:
 
-- `1-INSTALL-HQ.bat` จบโดยไม่มีข้อผิดพลาด
+- `installer/install.ps1` หรือ `1-INSTALL-HQ.bat` ตามโหมดที่ผู้ใช้เลือกจบโดยไม่มีข้อผิดพลาด
 - `scripts/status-local-bridge.cmd` ยืนยันว่า HQ Bridge ทำงาน
 - `/api/health` ตอบกลับโดยมี `ok: true` และ `status: "ready"`
 - `agentRosterComplete: true` และจำนวน Agent ตรงตาม Contract

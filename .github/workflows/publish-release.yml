@@ -209,23 +209,118 @@ jobs:
               $env:LOCALAPPDATA = $originalLocalAppData
             }
 
+          # The classroom path clones the exact public tag and asks the
+          # installer to re-check that tag against GitHub. Exercise that real
+          # path before creating the Release; ZIP smoke alone cannot cover it.
+          $officialRepository = "https://github.com/metafxclub/metafxclub-ai-agent-hq.git"
+          $remoteTagReference = "refs/tags/$tag"
+          $remoteTagLines = @(git ls-remote --tags $officialRepository $remoteTagReference "$remoteTagReference^{}")
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to inspect public Git tag $tag before verified-source smoke."
+          }
+          $remoteDirectCommit = ""
+          $remotePeeledCommit = ""
+          foreach ($line in $remoteTagLines) {
+            if ([string]$line -notmatch '^([A-Fa-f0-9]{40,64})\s+(.+)$') {
+              continue
+            }
+            if ([string]$Matches[2] -ceq $remoteTagReference) {
+              $remoteDirectCommit = [string]$Matches[1]
+            }
+            elseif ([string]$Matches[2] -ceq "$remoteTagReference^{}") {
+              $remotePeeledCommit = [string]$Matches[1]
+            }
+          }
+          $remoteTagCommit = if ($remotePeeledCommit) { $remotePeeledCommit } else { $remoteDirectCommit }
+          $tagCreatedByThisRun = $false
+          if (-not $remoteTagCommit) {
+            if ($existingRelease) {
+              throw "Release $tag exists but its public Git tag is missing."
+            }
+            git tag $tag $env:GITHUB_SHA
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to create local Git tag $tag for verified-source smoke."
+            }
+            git push origin "refs/tags/$tag`:refs/tags/$tag"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to publish Git tag $tag for verified-source smoke."
+            }
+            $tagCreatedByThisRun = $true
+            $remoteTagCommit = $env:GITHUB_SHA
+          }
+          elseif ($remoteTagCommit -cne $env:GITHUB_SHA) {
+            throw "Public Git tag $tag points to '$remoteTagCommit', not current SHA '$env:GITHUB_SHA'."
+          }
+
+          $verifiedRoot = Join-Path $env:RUNNER_TEMP "metafxclub-verified-git-smoke-$tag"
+          $verifiedClone = Join-Path $verifiedRoot "source"
+          $verifiedLocalAppData = Join-Path $verifiedRoot "LocalAppData"
+          $verifiedOriginalLocalAppData = $env:LOCALAPPDATA
+          try {
+            git clone --depth 1 --single-branch --branch $tag $officialRepository $verifiedClone
+            if ($LASTEXITCODE -ne 0) {
+              throw "Public exact-tag clone failed for $tag."
+            }
+
+            # This ignored sentinel proves verified staging comes from the
+            # commit archive, not from ignored files in the worktree.
+            $ignoredSentinel = Join-Path $verifiedClone "data\runtime\ci-ignored-source-sentinel.txt"
+            New-Item -ItemType Directory -Path (Split-Path -Parent $ignoredSentinel) -Force | Out-Null
+            Set-Content -LiteralPath $ignoredSentinel -Value "must-not-enter-runtime" -Encoding ascii
+            git -C $verifiedClone check-ignore --quiet -- "data/runtime/ci-ignored-source-sentinel.txt"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Verified-source sentinel is not ignored as required by the staging test."
+            }
+
+            $verifiedListener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+            $verifiedListener.Start()
+            $verifiedPort = ([Net.IPEndPoint]$verifiedListener.LocalEndpoint).Port
+            $verifiedListener.Stop()
+            $env:LOCALAPPDATA = $verifiedLocalAppData
+            & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+              -File (Join-Path $verifiedClone "installer\install.ps1") `
+              -Port $verifiedPort -EndpointConfirmed -SkipLaunch -SkipShortcuts -SkipAutostart -PackageSmoke `
+              -RequireVerifiedGitSource `
+              -ExpectedGitRepository $officialRepository `
+              -ExpectedGitTag $tag `
+              -ExpectedSourceVersion $version
+            if ($LASTEXITCODE -ne 0) {
+              throw "Verified public Git-tag installation smoke failed with exit code $LASTEXITCODE."
+            }
+
+            $verifiedInstalledRoot = Join-Path $verifiedLocalAppData "Metafxclub\AI-Agent-HQ"
+            if (Test-Path -LiteralPath (Join-Path $verifiedInstalledRoot "data\runtime\ci-ignored-source-sentinel.txt")) {
+              throw "Verified Git staging copied an ignored worktree file into Runtime."
+            }
+            node --check (Join-Path $verifiedInstalledRoot "frontend\src\app\main.js")
+            if ($LASTEXITCODE -ne 0) {
+              throw "Verified Git Runtime frontend syntax check failed with exit code $LASTEXITCODE."
+            }
+          }
+          catch {
+            if ($tagCreatedByThisRun) {
+              git push origin ":refs/tags/$tag" | Out-Host
+            }
+            throw
+          }
+          finally {
+            $env:LOCALAPPDATA = $verifiedOriginalLocalAppData
+          }
+
           if (-not $existingRelease) {
             $notes = @'
           ชุดติดตั้ง Metafxclub AI Agent HQ สำหรับ Windows
 
-          วิธีติดตั้งแบบ ZIP:
-          1. ติดตั้ง Python 3.10-3.14 จาก python.org และเลือก Add Python to PATH
-          2. ดาวน์โหลดไฟล์ ZIP และแตกไฟล์
-          3. ดับเบิลคลิก 1-INSTALL-HQ.bat เพียงครั้งเดียว
-          4. รอให้ระบบติดตั้งที่ %LOCALAPPDATA% เปิด Bridge และตรวจหน้า http://127.0.0.1:4186/
-          5. ระบบเปิด Bridge หลัง Login และตรวจ Health ทุก 15 นาทีให้อัตโนมัติ
-          6. หากใช้ Google Sheet แบบ Private ให้เลือก Desktop OAuth JSON ใน First-run wizard จากนั้นกดเชื่อมบัญชี Google ครั้งเดียวและกรอก Sheet ID
+          วิธีหลักสำหรับห้องเรียน — Prompt เดียวผ่าน Codex:
+          1. ติดตั้ง Git for Windows และ Python 3.10-3.14 แบบ 64-bit จาก python.org พร้อม Add Python to PATH
+          2. เปิด docs/prompts/install-github-google-auto-th.md ของ Tag รุ่นนี้
+          3. เปลี่ยนเฉพาะ Google Client ID และ Path ของ Desktop OAuth JSON แล้ววาง Prompt ทั้งชุดใน Codex
+          4. Codex จะ Clone exact Tag, ตรวจ Commit กับ GitHub, ติดตั้ง ตรวจ Health/หน้าเว็บ และเปิด http://127.0.0.1:4186/
+          5. ผู้เรียนกดเชื่อมบัญชี Google และอนุญาตบัญชีของตนเองหนึ่งครั้งใน HQ
 
-          วิธีติดตั้งด้วย Git สำหรับผู้เรียน:
-          1. ติดตั้ง Python 3.10-3.14 จาก python.org และเลือก Add Python to PATH
-          2. Clone Repository นี้ลงเครื่อง
-          3. ดับเบิลคลิก 1-INSTALL-HQ.bat ครั้งเดียว แล้วใช้ http://127.0.0.1:4186/
-          4. เมื่อต้องการรับเวอร์ชันใหม่ ให้ปิดงานที่กำลังทำและดับเบิลคลิก UPDATE-HQ.bat
+          วิธี ZIP เป็นทางเลือก Manual เท่านั้น:
+          ดาวน์โหลด ZIP พร้อม .sha256, ตรวจ Hash, แตกไฟล์ แล้วใช้ 1-INSTALL-HQ.bat ตาม STUDENT-QUICKSTART-TH.md
+          ห้ามใช้ Clone main + BAT เป็นขั้นตอนห้องเรียน เพราะไม่ได้ล็อก Tag/Commit แบบ Prompt อัตโนมัติ
 
           หลังติดตั้ง ระบบตรวจ Health, Codex และ Rate Limit ของบัญชีที่ Login อยู่ในเครื่องนั้น
           ระบบเริ่มต้นในโหมด Demo/Read-only และไม่รวม Token, Password, Auth, Log, Memory หรือข้อมูลส่วนตัวจากเครื่องผู้พัฒนา

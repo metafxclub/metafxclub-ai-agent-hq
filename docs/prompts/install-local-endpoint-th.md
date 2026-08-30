@@ -1,6 +1,6 @@
 # Prompt ให้ Codex ติดตั้งและยืนยัน Local Endpoint
 
-หากต้องการให้ Codex เลือก Port ว่างและนำเข้า Google OAuth JSON ให้อัตโนมัติโดยผู้เรียนไม่ต้องกด BAT ให้ใช้ [Prompt ติดตั้งจาก GitHub พร้อม Google OAuth แบบอัตโนมัติ](install-github-google-auto-th.md) แทน เอกสารหน้านี้คงไว้สำหรับกรณีที่ต้องการให้ผู้ใช้เลือก Endpoint เอง
+หากต้องการให้ Codex Clone Git Tag ที่ล็อกไว้ ใช้พอร์ตมาตรฐาน `127.0.0.1:4186` ที่ยืนยันล่วงหน้า และนำเข้า Google OAuth JSON ให้อัตโนมัติโดยผู้เรียนไม่ต้องดาวน์โหลด ZIP หรือกด BAT ให้ใช้ [Prompt ติดตั้งจาก GitHub พร้อม Google OAuth แบบอัตโนมัติ](install-github-google-auto-th.md) แทน เอกสารหน้านี้คงไว้สำหรับกรณีที่ต้องการให้ผู้ใช้เลือก Endpoint เอง
 
 คัดลอกข้อความด้านล่างไปสั่ง Codex พร้อมแนบลิงก์ GitHub Release ของ Metafxclub AI Agent HQ ผู้ใช้ส่งคำขอครั้งเดียว และตอบยืนยัน URL อีกหนึ่งครั้งก่อนเริ่มติดตั้ง
 
@@ -12,7 +12,7 @@
 ให้ทำตามขั้นตอนนี้อย่างเคร่งครัด
 
 1. อ่าน AGENTS.md, README.md และ STUDENT-QUICKSTART-TH.md จาก Release ก่อน
-2. ตรวจว่ามี Python 3.10-3.14 จาก python.org และอยู่ใน PATH; หากไม่มีให้หยุดและแจ้งผู้ใช้ติดตั้งโดยเลือก Add Python to PATH ห้ามดาวน์โหลดหรือติดตั้ง Python แทนโดยไม่ได้รับอนุญาต
+2. ตรวจว่ามี Python 3.10-3.14 แบบ 64-bit จาก python.org และอยู่ใน PATH; หากไม่มีให้หยุดและแจ้งผู้ใช้ติดตั้ง Python x64 โดยเลือก Add Python to PATH ห้ามดาวน์โหลดหรือติดตั้ง Python แทนโดยไม่ได้รับอนุญาต
 3. ตรวจ SHA-256 ถ้ามีไฟล์ Checksum แล้วแตก ZIP ไปยังโฟลเดอร์ชั่วคราว ห้ามรันจากใน ZIP
 4. ก่อนติดตั้ง หยุด Bridge คัดลอกไฟล์ หรือสร้าง Python environment ให้เรียก:
    powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\installer\install.ps1 -ListAvailableEndpoints

@@ -7,6 +7,10 @@ param(
     [switch]$SkipAutostart,
     [string]$GoogleClientJsonPath = "",
     [string]$ExpectedGoogleClientId = "",
+    [string]$ExpectedGitRepository = "",
+    [string]$ExpectedGitTag = "",
+    [string]$ExpectedSourceVersion = "",
+    [switch]$RequireVerifiedGitSource,
     [switch]$ListAvailableEndpoints,
     [switch]$PackageSmoke,
     [ValidateRange(0, 65535)]
@@ -35,6 +39,31 @@ $previousBridgeWasStopped = $false
 $candidateBridgeMayBeRunning = $false
 $rollbackIncomplete = $false
 $postInstallFailure = ""
+$validatedSourceCommit = ""
+
+$gitProvenanceValues = @($ExpectedGitRepository, $ExpectedGitTag, $ExpectedSourceVersion)
+$gitProvenanceValueCount = @($gitProvenanceValues | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
+if ($gitProvenanceValueCount -ne 0 -and $gitProvenanceValueCount -ne 3) {
+    throw "โหมดตรวจ Git ต้องระบุ ExpectedGitRepository, ExpectedGitTag และ ExpectedSourceVersion ให้ครบ"
+}
+if ($RequireVerifiedGitSource -and $gitProvenanceValueCount -ne 3) {
+    throw "โหมดติดตั้งด้วย Prompt ต้องเปิดการตรวจ Git และระบุ Repository, Tag และ Version ให้ครบ"
+}
+if ($gitProvenanceValueCount -eq 3) {
+    $officialRepository = "https://github.com/metafxclub/metafxclub-ai-agent-hq.git"
+    if (-not [string]::Equals($ExpectedGitRepository.Trim(), $officialRepository, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "ExpectedGitRepository ต้องเป็น Repository ทางการของ Metafxclub AI Agent HQ"
+    }
+    if ($ExpectedGitTag.Trim() -notmatch '^v\d+\.\d+\.\d+$') {
+        throw "ExpectedGitTag ต้องเป็น Tag แบบ vMAJOR.MINOR.PATCH"
+    }
+    if ($ExpectedSourceVersion.Trim() -notmatch '^\d+\.\d+\.\d+$') {
+        throw "ExpectedSourceVersion ต้องเป็น Version แบบ MAJOR.MINOR.PATCH"
+    }
+    if ($ExpectedGitTag.Trim().Substring(1) -cne $ExpectedSourceVersion.Trim()) {
+        throw "ExpectedGitTag และ ExpectedSourceVersion ไม่ตรงกัน"
+    }
+}
 
 if (
     [string]::IsNullOrWhiteSpace($GoogleClientJsonPath) -xor
@@ -95,6 +124,11 @@ function Get-HealthySavedEndpoint {
     }
 
     try {
+        $installedVersionPath = Join-Path $installRoot "VERSION"
+        if (-not (Test-Path -LiteralPath $installedVersionPath -PathType Leaf)) {
+            return $null
+        }
+        $installedVersion = (Get-Content -LiteralPath $installedVersionPath -Raw -Encoding UTF8).Trim()
         $saved = Get-Content -LiteralPath $bridgeEndpointPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $savedPort = [int]$saved.port
         if ([string]$saved.host -cne "127.0.0.1" -or $savedPort -lt 1024 -or $savedPort -gt 65535) {
@@ -105,6 +139,8 @@ function Get-HealthySavedEndpoint {
         if (
             $health.ok -ne $true -or
             [string]$health.status -cne "ready" -or
+            [string]$health.server -cne "Metafx Local Bridge" -or
+            [string]$health.version -cne $installedVersion -or
             -not $health.endpoint -or
             [string]$health.endpoint.host -cne "127.0.0.1" -or
             [int]$health.endpoint.port -ne $savedPort
@@ -279,7 +315,7 @@ function Test-PythonCommand {
     try {
         $arguments = @($PrefixArguments) + @(
             "-c",
-            "import json,sys; print(json.dumps({'major':sys.version_info[0],'minor':sys.version_info[1],'micro':sys.version_info[2],'executable':sys.executable}))"
+            "import json,platform,struct,sys; print(json.dumps({'major':sys.version_info[0],'minor':sys.version_info[1],'micro':sys.version_info[2],'executable':sys.executable,'bits':struct.calcsize('P')*8,'machine':platform.machine()}))"
         )
         $raw = & $FilePath @arguments 2>$null
         if ($LASTEXITCODE -ne 0 -or -not $raw) {
@@ -289,7 +325,8 @@ function Test-PythonCommand {
         if (
             [int]$details.major -ne 3 -or
             [int]$details.minor -lt 10 -or
-            [int]$details.minor -gt 14
+            [int]$details.minor -gt 14 -or
+            [int]$details.bits -ne 64
         ) {
             return $null
         }
@@ -298,6 +335,7 @@ function Test-PythonCommand {
             PrefixArguments = @($PrefixArguments)
             Version = "{0}.{1}.{2}" -f $details.major, $details.minor, $details.micro
             Executable = [string]$details.executable
+            Architecture = "{0}-bit {1}" -f $details.bits, $details.machine
         }
     }
     catch {
@@ -308,9 +346,14 @@ function Test-PythonCommand {
 function Resolve-SystemPython {
     $launcher = Get-Command py.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($launcher) {
-        $candidate = Test-PythonCommand -FilePath $launcher.Source -PrefixArguments @("-3")
-        if ($candidate) {
-            return $candidate
+        # Try every supported minor explicitly before the launcher's default.
+        # A machine can have Python 3.11 installed while `py -3` points to a
+        # newer unsupported interpreter, which must not become a false failure.
+        foreach ($selector in @("-3.14", "-3.13", "-3.12", "-3.11", "-3.10", "-3")) {
+            $candidate = Test-PythonCommand -FilePath $launcher.Source -PrefixArguments @($selector)
+            if ($candidate) {
+                return $candidate
+            }
         }
     }
 
@@ -325,7 +368,7 @@ function Resolve-SystemPython {
         }
     }
 
-    throw "ไม่พบ Python 3.10-3.14 กรุณาติดตั้ง Python จาก python.org และเลือก Add Python to PATH แล้วเปิด Installer อีกครั้ง ระบบจะไม่ดาวน์โหลด Python หรือขอสิทธิ์ Administrator ให้อัตโนมัติ"
+    throw "ไม่พบ Python 3.10-3.14 แบบ 64-bit กรุณาติดตั้ง Python x64 จาก python.org และเลือก Add Python to PATH แล้วเปิด Installer อีกครั้ง ระบบจะไม่ดาวน์โหลด Python หรือขอสิทธิ์ Administrator ให้อัตโนมัติ"
 }
 
 function Invoke-CheckedNative {
@@ -345,7 +388,182 @@ function Invoke-CheckedNative {
     }
 }
 
+function Get-Sha256Hex {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    # Use .NET directly instead of Get-FileHash. Codex can launch Windows
+    # PowerShell from a PowerShell 7 parent whose inherited PSModulePath points
+    # at incompatible modules, causing cmdlet auto-loading to fail on an
+    # otherwise valid student machine.
+    $stream = [IO.File]::OpenRead($LiteralPath)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha256.ComputeHash($stream)
+        return ([BitConverter]::ToString($hashBytes)).Replace("-", "").ToUpperInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Invoke-GitSourceCapture {
+    param(
+        [Parameter(Mandatory = $true)][string]$GitPath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$FailureMessage
+    )
+
+    $gitDirectory = Join-Path $sourceRoot ".git"
+    $savedGitEnvironment = @{}
+    foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like "GIT_*" })) {
+        $savedGitEnvironment[[string]$entry.Name] = [string]$entry.Value
+        [Environment]::SetEnvironmentVariable([string]$entry.Name, $null, "Process")
+    }
+    [Environment]::SetEnvironmentVariable("GIT_TERMINAL_PROMPT", "0", "Process")
+    try {
+        $gitArguments = @(
+            "--no-replace-objects",
+            "--git-dir=$gitDirectory",
+            "--work-tree=$sourceRoot",
+            "-c", "core.fsmonitor=false"
+        ) + @($Arguments)
+        $output = @(& $GitPath @gitArguments 2>$null)
+        $nativeExitCode = $LASTEXITCODE
+        if ($nativeExitCode -ne 0) {
+            throw "$FailureMessage (Git รหัส $nativeExitCode)"
+        }
+        return (($output | ForEach-Object { [string]$_ }) -join "`n").Trim()
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable("GIT_TERMINAL_PROMPT", $null, "Process")
+        foreach ($name in $savedGitEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable([string]$name, [string]$savedGitEnvironment[$name], "Process")
+        }
+    }
+}
+
+function Invoke-GitRemoteCapture {
+    param(
+        [Parameter(Mandatory = $true)][string]$GitPath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$FailureMessage
+    )
+
+    $savedGitEnvironment = @{}
+    foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like "GIT_*" })) {
+        $savedGitEnvironment[[string]$entry.Name] = [string]$entry.Value
+        [Environment]::SetEnvironmentVariable([string]$entry.Name, $null, "Process")
+    }
+    [Environment]::SetEnvironmentVariable("GIT_TERMINAL_PROMPT", "0", "Process")
+    try {
+        $output = @(& $GitPath --no-replace-objects @Arguments 2>$null)
+        $nativeExitCode = $LASTEXITCODE
+        if ($nativeExitCode -ne 0) {
+            throw "$FailureMessage (Git รหัส $nativeExitCode)"
+        }
+        return (($output | ForEach-Object { [string]$_ }) -join "`n").Trim()
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable("GIT_TERMINAL_PROMPT", $null, "Process")
+        foreach ($name in $savedGitEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable([string]$name, [string]$savedGitEnvironment[$name], "Process")
+        }
+    }
+}
+
+function Assert-ExpectedGitSource {
+    if ([string]::IsNullOrWhiteSpace($ExpectedGitRepository)) {
+        return
+    }
+
+    $gitDirectory = Join-Path $sourceRoot ".git"
+    if (-not (Test-Path -LiteralPath $gitDirectory -PathType Container)) {
+        throw "โหมด Git Clone ต้องเรียก Installer จาก Git Repository ที่ตรวจสอบได้"
+    }
+    $gitCommand = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $gitCommand) {
+        throw "ไม่พบ Git for Windows สำหรับตรวจ Source"
+    }
+
+    $topLevel = Invoke-GitSourceCapture -GitPath $gitCommand.Source -Arguments @("rev-parse", "--show-toplevel") -FailureMessage "ตรวจ Git worktree root ไม่สำเร็จ"
+    $resolvedGitDirectory = Invoke-GitSourceCapture -GitPath $gitCommand.Source -Arguments @("rev-parse", "--absolute-git-dir") -FailureMessage "ตรวจ Git directory ไม่สำเร็จ"
+    if (
+        -not (Get-ComparablePath -Path $topLevel).Equals((Get-ComparablePath -Path $sourceRoot), [StringComparison]::OrdinalIgnoreCase) -or
+        -not (Get-ComparablePath -Path $resolvedGitDirectory).Equals((Get-ComparablePath -Path $gitDirectory), [StringComparison]::OrdinalIgnoreCase)
+    ) {
+        throw "หยุดติดตั้ง: Git worktree หรือ Git directory ไม่ตรงกับ Source ของ Installer"
+    }
+
+    $origin = Invoke-GitSourceCapture -GitPath $gitCommand.Source -Arguments @("remote", "get-url", "origin") -FailureMessage "อ่าน Git origin ไม่สำเร็จ"
+    if (-not [string]::Equals($origin, $ExpectedGitRepository.Trim(), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "หยุดติดตั้ง: Git origin ไม่ตรงกับ Repository ที่ล็อกไว้"
+    }
+
+    $headCommit = Invoke-GitSourceCapture -GitPath $gitCommand.Source -Arguments @("rev-parse", "--verify", "HEAD^{commit}") -FailureMessage "อ่าน Git HEAD ไม่สำเร็จ"
+    $tagCommitReference = "refs/tags/$($ExpectedGitTag.Trim())^{commit}"
+    $tagCommit = Invoke-GitSourceCapture -GitPath $gitCommand.Source -Arguments @("rev-parse", "--verify", $tagCommitReference) -FailureMessage "ไม่พบ Git Tag ที่ล็อกไว้ใน Source"
+    if (
+        $headCommit -notmatch '^[A-Fa-f0-9]{40,64}$' -or
+        $tagCommit -notmatch '^[A-Fa-f0-9]{40,64}$' -or
+        -not [string]::Equals($headCommit, $tagCommit, [StringComparison]::OrdinalIgnoreCase)
+    ) {
+        throw "หยุดติดตั้ง: Git HEAD ไม่ตรงกับ Tag ที่ล็อกไว้"
+    }
+
+    $remoteTagReference = "refs/tags/$($ExpectedGitTag.Trim())"
+    $remoteTagOutput = Invoke-GitRemoteCapture `
+        -GitPath $gitCommand.Source `
+        -Arguments @(
+            "ls-remote", "--exit-code", "--tags", $officialRepository,
+            $remoteTagReference, "$remoteTagReference^{}"
+        ) `
+        -FailureMessage "ตรวจ Git Tag จาก GitHub ทางการไม่สำเร็จ"
+    $remoteDirectCommit = ""
+    $remotePeeledCommit = ""
+    foreach ($line in @($remoteTagOutput -split "`r?`n")) {
+        if ($line -notmatch '^([A-Fa-f0-9]{40,64})\s+(.+)$') {
+            continue
+        }
+        if ([string]$Matches[2] -ceq $remoteTagReference) {
+            $remoteDirectCommit = [string]$Matches[1]
+        }
+        elseif ([string]$Matches[2] -ceq "$remoteTagReference^{}") {
+            $remotePeeledCommit = [string]$Matches[1]
+        }
+    }
+    $remoteCommit = if ($remotePeeledCommit) { $remotePeeledCommit } else { $remoteDirectCommit }
+    if (
+        $remoteCommit -notmatch '^[A-Fa-f0-9]{40,64}$' -or
+        -not [string]::Equals($headCommit, $remoteCommit, [StringComparison]::OrdinalIgnoreCase)
+    ) {
+        throw "หยุดติดตั้ง: Git HEAD ไม่ตรงกับ Tag ที่เผยแพร่บน GitHub ทางการ"
+    }
+
+    $branch = Invoke-GitSourceCapture -GitPath $gitCommand.Source -Arguments @("branch", "--show-current") -FailureMessage "ตรวจ Git Branch ไม่สำเร็จ"
+    if (-not [string]::IsNullOrWhiteSpace($branch)) {
+        throw "หยุดติดตั้ง: Source ต้อง Checkout จาก Tag แบบ detached ไม่ใช่ Branch ที่เปลี่ยนแปลงได้"
+    }
+    $worktreeStatus = Invoke-GitSourceCapture -GitPath $gitCommand.Source -Arguments @("status", "--porcelain", "--untracked-files=all") -FailureMessage "ตรวจ Git worktree ไม่สำเร็จ"
+    if (-not [string]::IsNullOrWhiteSpace($worktreeStatus)) {
+        throw "หยุดติดตั้ง: Source มีไฟล์แก้ไขหรือไฟล์ใหม่ที่ไม่อยู่ใน Tag"
+    }
+    $indexFlags = Invoke-GitSourceCapture -GitPath $gitCommand.Source -Arguments @("ls-files", "-v") -FailureMessage "ตรวจ Git index flags ไม่สำเร็จ"
+    if (@($indexFlags -split "`r?`n" | Where-Object { $_ -cmatch '^(?:[a-z]|S)\s' }).Count -gt 0) {
+        throw "หยุดติดตั้ง: Git index มี assume-unchanged หรือ skip-worktree ซึ่งอาจซ่อนไฟล์ที่แก้ไข"
+    }
+
+    $sourceVersion = Invoke-GitSourceCapture -GitPath $gitCommand.Source -Arguments @("show", "$headCommit`:VERSION") -FailureMessage "อ่าน VERSION จาก Git Tag ไม่สำเร็จ"
+    if ($sourceVersion -cne $ExpectedSourceVersion.Trim()) {
+        throw "หยุดติดตั้ง: VERSION ใน Source ไม่ตรงกับ Version ที่ล็อกไว้"
+    }
+
+    $script:validatedSourceCommit = $headCommit.ToLowerInvariant()
+}
+
 function Assert-SafeSource {
+    Assert-ExpectedGitSource
+
     $requiredFiles = @(
         ".gitattributes",
         ".gitignore",
@@ -466,7 +684,7 @@ function Assert-EaArtifactIntegrity {
             throw "Manifest SHA-256 ของ EA ไม่มีรายการ $fileName"
         }
         $artifactPath = Join-Path $artifactDirectory $fileName
-        $actualHash = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToUpperInvariant()
+        $actualHash = Get-Sha256Hex -LiteralPath $artifactPath
         if ($actualHash -cne [string]$expectedHashes[$fileName]) {
             throw "หยุดติดตั้ง: SHA-256 ของ $fileName ไม่ตรงกับ Manifest"
         }
@@ -474,8 +692,8 @@ function Assert-EaArtifactIntegrity {
 
     $integrationSource = Join-Path $CandidateRoot "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4"
     $artifactSource = Join-Path $artifactDirectory "MetafxHQTradeGateway.mq4"
-    $integrationHash = (Get-FileHash -LiteralPath $integrationSource -Algorithm SHA256).Hash.ToUpperInvariant()
-    $artifactSourceHash = (Get-FileHash -LiteralPath $artifactSource -Algorithm SHA256).Hash.ToUpperInvariant()
+    $integrationHash = Get-Sha256Hex -LiteralPath $integrationSource
+    $artifactSourceHash = Get-Sha256Hex -LiteralPath $artifactSource
     if ($integrationHash -cne $artifactSourceHash) {
         throw "หยุดติดตั้ง: Source EA ใน Integration ไม่ตรงกับ Source ที่ใช้สร้าง Artifact"
     }
@@ -846,6 +1064,45 @@ function Copy-ApplicationFiles {
     }
 }
 
+function Export-VerifiedGitSource {
+    param([Parameter(Mandatory = $true)][string]$DestinationRoot)
+
+    if ([string]::IsNullOrWhiteSpace($validatedSourceCommit)) {
+        throw "ยังไม่มี Git commit ที่ตรวจยืนยันจาก GitHub สำหรับสร้าง Staging"
+    }
+    $gitCommand = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $gitCommand) {
+        throw "ไม่พบ Git for Windows สำหรับสร้าง Staging ที่ตรวจสอบได้"
+    }
+
+    $temporaryParent = Get-InstallerTemporaryParent
+    $archivePath = Join-Path $temporaryParent ("mfxhq-source-{0}.zip" -f [Guid]::NewGuid().ToString("N"))
+    $releasePaths = @(
+        ".github", "backend", "contracts", "docs", "frontend", "installer", "integrations", "runner", "scripts", "tests",
+        "artifacts/mt4-ai-council-ea-v2.16-stream-transition-hardening",
+        "index.html", "Open Metafx Agent HQ.cmd", "README.md", $requirementsName,
+        "1-INSTALL-HQ.bat", "UPDATE-HQ.bat", "REPAIR-HQ.bat", "UNINSTALL-HQ.bat", "2-SETUP-GOOGLE-HQ.bat",
+        "AGENTS.md", ".gitattributes", ".gitignore", "SECURITY.md", "VERSION", "STUDENT-QUICKSTART-TH.md"
+    )
+    try {
+        $null = Invoke-GitSourceCapture `
+            -GitPath $gitCommand.Source `
+            -Arguments (@("archive", "--format=zip", "--output=$archivePath", $validatedSourceCommit, "--") + $releasePaths) `
+            -FailureMessage "สร้าง Archive จาก Git Tag ที่ตรวจสอบแล้วไม่สำเร็จ"
+        if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
+            throw "Git ไม่ได้สร้าง Archive สำหรับ Staging"
+        }
+        New-Item -ItemType Directory -Path $DestinationRoot -Force | Out-Null
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [IO.Compression.ZipFile]::ExtractToDirectory($archivePath, $DestinationRoot)
+    }
+    finally {
+        if (Test-Path -LiteralPath $archivePath -PathType Leaf) {
+            Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Get-InstallerTemporaryParent {
     return [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd("\")
 }
@@ -993,7 +1250,13 @@ function New-StagedApplication {
     New-Item -ItemType Directory -Path $stagingParent -Force | Out-Null
     $stagingRoot = Join-Path $stagingParent ("mfxhq-stage-{0}" -f [Guid]::NewGuid().ToString("N"))
     try {
-        Copy-ApplicationFiles -DestinationRoot $stagingRoot
+        if ($validatedSourceCommit) {
+            Write-Step "กำลังสร้าง Staging จากไฟล์ที่ติดตามใน Git Tag ซึ่งยืนยันกับ GitHub แล้ว"
+            Export-VerifiedGitSource -DestinationRoot $stagingRoot
+        }
+        else {
+            Copy-ApplicationFiles -DestinationRoot $stagingRoot
+        }
         foreach ($file in Get-ChildItem -LiteralPath $stagingRoot -Recurse -File -Force) {
             if ($file.FullName.Length -ge 260) {
                 throw "Staged path ยาวเกินขอบเขต Win32 ที่รองรับ ($($file.Name))"
@@ -1008,9 +1271,9 @@ function New-StagedApplication {
         Assert-NoEmbeddedHighConfidenceSecrets -CandidateRoot $stagingRoot
         # The staged copy deliberately excludes runner/.venv and all user
         # state. Run only the dependency-free candidate preflight here. The
-        # complete regression suite runs after the pinned venv is installed,
-        # before Health is accepted, and normal updates retain a rollback
-        # snapshot until that full suite succeeds.
+        # installed-runtime deployment checks run again after the pinned venv
+        # is installed; the complete regression matrix is gated in GitHub
+        # Actions, where it cannot collide with a student's real machine state.
         $resolved = Resolve-SystemPython
         $candidatePython = [string]$resolved.FilePath
         $candidatePrefix = @($resolved.PrefixArguments)
@@ -1165,7 +1428,7 @@ function Initialize-PythonEnvironment {
         }
 
         $python = Resolve-SystemPython
-        Write-Step ("พบ Python {0} และกำลังสร้าง Virtual Environment แยกสำหรับ HQ" -f $python.Version)
+        Write-Step ("พบ Python {0} ({1}) ที่ {2} และกำลังสร้าง Virtual Environment แยกสำหรับ HQ" -f $python.Version, $python.Architecture, $python.Executable)
         $arguments = @($python.PrefixArguments) + @("-m", "venv", $venvRoot)
         Invoke-CheckedNative -FilePath $python.FilePath -Arguments $arguments -FailureMessage "สร้าง Virtual Environment ไม่สำเร็จ"
     }
@@ -1428,16 +1691,49 @@ function Start-And-TestBridge {
         [string]$healthEndpoint.host -ceq $endpoint.Host -and
         [int]$healthEndpoint.port -eq $endpoint.Port
     )
+    $installedVersion = (Get-Content -LiteralPath (Join-Path $installRoot "VERSION") -Raw -Encoding UTF8).Trim()
+    $healthIdentityMatches = (
+        $healthProperties -contains "server" -and
+        $healthProperties -contains "version" -and
+        [string]$health.server -ceq "Metafx Local Bridge" -and
+        [string]$health.version -ceq $installedVersion
+    )
     if (
         -not $healthOk -or
         -not $healthReady -or
-        -not $healthEndpointMatches
+        -not $healthEndpointMatches -or
+        -not $healthIdentityMatches
     ) {
-        throw "Local Bridge ตอบกลับแต่ endpoint จาก Health check ไม่ตรงกับค่าที่บันทึกไว้"
+        throw "Local Bridge ตอบกลับแต่ชื่อระบบ Version หรือ endpoint จาก Health check ไม่ตรงกับ Runtime ที่ติดตั้ง"
     }
     $frontend = Invoke-WebRequest -Uri $endpoint.Url -Method Get -UseBasicParsing -TimeoutSec 10
-    if ([int]$frontend.StatusCode -ne 200 -or [int]$frontend.RawContentLength -le 0) {
+    if (
+        [int]$frontend.StatusCode -ne 200 -or
+        [int]$frontend.RawContentLength -le 0 -or
+        [string]$frontend.Content -notmatch '<title>Metafxclub AI Agent HQ' -or
+        [string]$frontend.Content -notmatch 'frontend/index\.html'
+    ) {
         throw "Local Bridge ผ่าน Health แต่หน้า Agent HQ ที่ $($endpoint.Url) ยังเปิดใช้งานไม่ได้"
+    }
+    $frontendAppUrl = "{0}frontend/index.html" -f $endpoint.Url
+    $frontendApp = Invoke-WebRequest -Uri $frontendAppUrl -Method Get -UseBasicParsing -TimeoutSec 10
+    if (
+        [int]$frontendApp.StatusCode -ne 200 -or
+        [int]$frontendApp.RawContentLength -le 0 -or
+        [string]$frontendApp.Content -notmatch '<title>Metafxclub AI Pixel HQ' -or
+        [string]$frontendApp.Content -notmatch 'frontend/src/app/main\.js'
+    ) {
+        throw "หน้าเปิดระบบตอบกลับ แต่หน้า Visual Office ที่ $frontendAppUrl ยังโหลดโครงสร้างหลักไม่ได้"
+    }
+    $mainJsUrl = "{0}frontend/src/app/main.js" -f $endpoint.Url
+    $mainJs = Invoke-WebRequest -Uri $mainJsUrl -Method Get -UseBasicParsing -TimeoutSec 10
+    if (
+        [int]$mainJs.StatusCode -ne 200 -or
+        [int]$mainJs.RawContentLength -le 0 -or
+        [string]$mainJs.Content -notmatch 'window\.MetafxHqBoot' -or
+        [string]$mainJs.Content -notmatch 'init\(\)\.catch'
+    ) {
+        throw "หน้า Agent HQ ตอบกลับ แต่ไฟล์เริ่มระบบ main.js ยังโหลดหรือยืนยันโครงสร้างไม่ได้"
     }
     return $endpoint
 }
@@ -1563,6 +1859,12 @@ function Write-InstallResult {
         application_version = $version
         install_root = "%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ"
         install_scope = "current_windows_user"
+        source = [ordered]@{
+            provenance = $(if ($validatedSourceCommit) { "verified_remote_git_tag" } else { "unverified_archive_or_local_source" })
+            repository = $(if ($validatedSourceCommit) { "https://github.com/metafxclub/metafxclub-ai-agent-hq.git" } else { $null })
+            tag = $(if ($validatedSourceCommit) { $ExpectedGitTag.Trim() } else { $null })
+            commit = $(if ($validatedSourceCommit) { $validatedSourceCommit } else { $null })
+        }
         endpoint = [ordered]@{
             host = "127.0.0.1"
             port = [int]$Endpoint.Port
