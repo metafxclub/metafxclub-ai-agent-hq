@@ -467,9 +467,34 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("git archive --format=zip", workflow)
         self.assertIn("legacy-listener upgrade smoke failed", workflow)
         self.assertIn('runner\\.venv\\Scripts\\python.exe', workflow)
-        self.assertIn("-PythonPath $runnerPythonPath", workflow)
+        self.assertIn("print(sys._base_executable)", workflow)
+        self.assertIn("$fixturePythonProbe.Count -ne 1", workflow)
+        self.assertIn("-PythonPath $fixturePythonPath", workflow)
         self.assertIn("-FilePath $PythonPath", workflow)
         self.assertNotIn("Get-Command python.exe -CommandType Application", workflow)
+        self.assertNotIn("function Test-ProcessDescendsFrom", workflow)
+        self.assertIn("[int]$listenerIds[0] -eq [int]$process.Id", workflow)
+        self.assertIn("function Stop-DegradedFixture", workflow)
+        self.assertIn("$FixtureProcess.Kill()", workflow)
+        self.assertIn("if (-not $FixtureProcess.WaitForExit(10000))", workflow)
+        self.assertIn("FIXTURE_CLEANUP_UNCONFIRMED", workflow)
+        self.assertGreaterEqual(
+            workflow.count(
+                '$_.Exception.Message -ceq "FIXTURE_CLEANUP_UNCONFIRMED"'
+            ),
+            2,
+        )
+        self.assertGreaterEqual(
+            workflow.count("Stop-DegradedFixture -FixtureProcess $foreignProcess"), 2
+        )
+        self.assertIn("$foreignAttempt -le 5", workflow)
+        self.assertIn("$legacyAttempt -le 5", workflow)
+        self.assertIn("$legacyProcess = $null", workflow)
+        self.assertIn("Stop-DegradedFixture -FixtureProcess $legacyProcess", workflow)
+        self.assertIn("$cleanupFailures.Add(\"foreign-fixture\")", workflow)
+        self.assertIn("$cleanupFailures.Add(\"legacy-fixture\")", workflow)
+        self.assertIn("$env:LOCALAPPDATA = $originalLocalAppData", workflow)
+        self.assertIn("Release fixture cleanup was not confirmed", workflow)
         self.assertIn("Bump VERSION instead of reusing the tag", workflow)
         self.assertIn("gh release upload $tag $archive $checksum", workflow)
         self.assertIn("--clobber", workflow)
