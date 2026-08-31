@@ -43,6 +43,11 @@ class AiTradeCouncilMt4QuickSetupTests(unittest.TestCase):
         self.assertIn("ตรวจ MT4 และสร้าง Channel ID", self.html)
         self.assertIn(".ai-trade-mt4-quick-card", self.styles)
 
+    def test_left_connection_rail_is_visible_only_for_ai_trade_council(self) -> None:
+        modal = function_block(self.main, "function renderGameModal()")
+        self.assertIn('surface === "dashboard" && subject.id === AI_TRADE_COUNCIL_PROP_ID', modal)
+        self.assertNotIn("els.modalDashboardConnectionRail.hidden = true", modal)
+
     def test_quick_flow_filters_mt5_and_never_randomly_selects_mt4(self) -> None:
         model = function_block(self.main, "function getAiTradeMt4SelectionModel(checklist)")
         choose = function_block(self.main, "function deterministicAiTradeMt4Candidate(selection)")

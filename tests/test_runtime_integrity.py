@@ -2876,7 +2876,8 @@ class RuntimeIntegrityTests(unittest.TestCase):
             self.assertIn(f"renderDashboardWorkColumn(\n    {destination}", prop_dashboard_block)
         self.assertIn("renderDashboardConnectionPanel(subject, propertyRole)", prop_dashboard_block)
         self.assertNotIn("renderStatusGrid(", prop_dashboard_block)
-        self.assertIn("els.modalDashboardConnectionRail.hidden = true", modal_block)
+        self.assertIn('surface === "dashboard" && subject.id === AI_TRADE_COUNCIL_PROP_ID', modal_block)
+        self.assertNotIn("els.modalDashboardConnectionRail.hidden = true", modal_block)
         self.assertIn("els.modalStatusGrid.hidden = surface === \"dashboard\"", modal_block)
 
         report_card_block = function_block("createDashboardReportCard")
@@ -2953,7 +2954,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertNotIn("submitManagerCommand", block)
 
     def test_agent_chat_runtime_version_and_executive_tiers(self) -> None:
-        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.7")
+        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.8")
         self.assertEqual(self.bridge.role_default_model_tier("ceo"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("manager"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("risk_guard"), "risk_quality")
@@ -4162,7 +4163,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         )
         registry_text = registry_path.read_text(encoding="utf-8-sig")
         attributes = (PROJECT_ROOT / ".gitattributes").read_text(encoding="utf-8-sig")
-        self.assertEqual(version, "0.9.7")
+        self.assertEqual(version, "0.9.8")
         self.assertNotRegex(registry_text, r"(?i)[a-z]:\\\\users\\\\")
         self.assertIn("*.mq4 text eol=lf", attributes)
         self.assertIn("*.mq5 text eol=lf", attributes)

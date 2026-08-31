@@ -120,10 +120,10 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
         self.assertIn("data", panel)
         self.assertNotIn("loadPropReport(", panel)
 
-    def test_generic_connection_rail_is_hidden_for_all_dashboards(self):
+    def test_generic_connection_rail_is_hidden_except_for_ai_trade_mt4_quick_setup(self):
         modal = self.function_block("renderGameModal", "openGameModal")
-        self.assertIn("els.modalDashboardConnectionRail.hidden = true", modal)
-        self.assertNotIn('modalDashboardConnectionRail.hidden = surface !== "dashboard"', modal)
+        self.assertIn('surface === "dashboard" && subject.id === AI_TRADE_COUNCIL_PROP_ID', modal)
+        self.assertNotIn("els.modalDashboardConnectionRail.hidden = true", modal)
         self.assertIn('signal-consensus-modal", surface === "dashboard" && subject.id === AI_TRADE_COUNCIL_PROP_ID', modal)
 
     def test_daily_news_uses_a_direct_backend_only_left_rail(self):

@@ -28560,7 +28560,11 @@ function renderGameModal() {
       : `ถาม ${subject.name} เกี่ยวกับหน้าที่ ${role} เป็นภาษาไทย...`;
   }
   if (els.modalAgentComposer) els.modalAgentComposer.hidden = !isAgent;
-  if (els.modalDashboardConnectionRail) els.modalDashboardConnectionRail.hidden = true;
+  if (els.modalDashboardConnectionRail) {
+    els.modalDashboardConnectionRail.hidden = !(
+      surface === "dashboard" && subject.id === AI_TRADE_COUNCIL_PROP_ID
+    );
+  }
   if (els.workflowSettingsRail) els.workflowSettingsRail.hidden = !isWorkflowDashboard;
   if (els.workflowAgentHandoffRail) els.workflowAgentHandoffRail.hidden = true;
   if (els.modalPortraitPanel && !isWorkflowDashboard) delete els.modalPortraitPanel.dataset.dashboardIdentity;

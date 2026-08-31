@@ -10,8 +10,8 @@ Prompt นี้ใช้สำหรับให้นักเรียนว�
 ช่วยติดตั้ง Metafxclub AI Agent HQ บน Windows User ปัจจุบันให้เสร็จอัตโนมัติ โดยให้คุณ Clone จาก GitHub และเรียก Installer เอง ฉันจะไม่ดาวน์โหลด ZIP และไม่กดไฟล์ BAT
 
 GITHUB_REPOSITORY = "https://github.com/metafxclub/metafxclub-ai-agent-hq.git"
-GITHUB_TAG = "v0.9.7"
-EXPECTED_VERSION = "0.9.7"
+GITHUB_TAG = "v0.9.8"
+EXPECTED_VERSION = "0.9.8"
 EXPECTED_GOOGLE_CLIENT_ID = "[Client ID ที่ลงท้ายด้วย .apps.googleusercontent.com]"
 GOOGLE_DESKTOP_OAUTH_JSON = "[Path เต็มของ Desktop OAuth JSON เช่น C:\Users\ชื่อผู้ใช้\Downloads\client_secret_xxx.json]"
 
