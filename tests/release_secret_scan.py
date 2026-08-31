@@ -14,6 +14,7 @@ from pathlib import Path
 
 DISTRIBUTED_ROOTS = (
     ".github",
+    "artifacts",
     "backend",
     "contracts",
     "docs",

@@ -4,12 +4,14 @@ Prompt นี้ใช้สำหรับให้นักเรียนว�
 
 ก่อนส่งให้นักเรียน อาจารย์ล็อกค่า `GITHUB_REPOSITORY`, `GITHUB_TAG` และ `EXPECTED_VERSION` ไว้แล้ว นักเรียนแก้เฉพาะ 2 บรรทัดสุดท้ายคือ Client ID และ Path ของ Desktop OAuth JSON ของตนเอง:
 
+ก่อนใช้ Prompt หาก OAuth app ยังมี Publishing status เป็น `Testing` ให้เพิ่ม Gmail ที่นักเรียนจะใช้เชื่อมไว้ที่ Google Auth Platform → `Audience` → `Test users` ก่อน มิฉะนั้น Google จะตอบ `403 access_denied` แม้ติดตั้งโปรแกรมและนำเข้า JSON ถูกต้องแล้ว
+
 ```text
 ช่วยติดตั้ง Metafxclub AI Agent HQ บน Windows User ปัจจุบันให้เสร็จอัตโนมัติ โดยให้คุณ Clone จาก GitHub และเรียก Installer เอง ฉันจะไม่ดาวน์โหลด ZIP และไม่กดไฟล์ BAT
 
 GITHUB_REPOSITORY = "https://github.com/metafxclub/metafxclub-ai-agent-hq.git"
-GITHUB_TAG = "v0.9.6"
-EXPECTED_VERSION = "0.9.6"
+GITHUB_TAG = "v0.9.7"
+EXPECTED_VERSION = "0.9.7"
 EXPECTED_GOOGLE_CLIENT_ID = "[Client ID ที่ลงท้ายด้วย .apps.googleusercontent.com]"
 GOOGLE_DESKTOP_OAUTH_JSON = "[Path เต็มของ Desktop OAuth JSON เช่น C:\Users\ชื่อผู้ใช้\Downloads\client_secret_xxx.json]"
 
@@ -19,7 +21,12 @@ GOOGLE_DESKTOP_OAUTH_JSON = "[Path เต็มของ Desktop OAuth JSON เ�
 
 1. ตรวจว่าเป็น Windows 10/11 และมี `git.exe` ใช้งานได้ หากไม่มี Git ให้หยุดและแจ้งวิธีติดตั้ง Git for Windows ห้ามติดตั้ง Git, เปลี่ยน Global Git config หรือขอสิทธิ์ Administrator เอง
 
-2. ใช้เฉพาะ `GITHUB_REPOSITORY` ที่กำหนดไว้ และรันคำสั่งที่เทียบเท่า `git ls-remote --exit-code --tags "<GITHUB_REPOSITORY>" "refs/tags/<GITHUB_TAG>" "refs/tags/<GITHUB_TAG>^{}"` ต้องพบ Tag จริง จากนั้นเก็บ Commit ของบรรทัด peeled (`^{}`) ถ้ามี หรือ Commit ของ Tag โดยตรงถ้าเป็น lightweight tag ไว้เป็น `REMOTE_TAG_COMMIT` ห้ามเปลี่ยนไปใช้ Fork, Branch `main`, URL `latest`, Source snapshot, Release ZIP หรือ Direct ZIP Asset แม้จะติดตั้งง่ายกว่า
+2. ใช้เฉพาะ `GITHUB_REPOSITORY` ที่กำหนดไว้ และตรวจ Release gate ก่อน Clone ดังนี้:
+   - เรียก GitHub REST API ของ Repository ทางการที่ `/releases/tags/<GITHUB_TAG>` ต้องได้ Release ที่ `tag_name` ตรง, `draft=false`, มี `published_at` และมี Asset ขนาดมากกว่า 0 ครบทั้ง `Metafxclub-AI-Agent-HQ-<GITHUB_TAG>-Windows.zip` กับไฟล์ชื่อเดียวกันต่อท้าย `.sha256`
+   - ดาวน์โหลดเฉพาะไฟล์ `.sha256` ไปยัง TEMP แล้วตรวจว่าเป็นบรรทัดรูปแบบ `<SHA-256 64 ตัว>  <ชื่อ ZIP ที่กำหนด>` เท่านั้น จากนั้นลบไฟล์ TEMP นี้เมื่อจบ ห้ามใช้ ZIP Asset แทน Git Clone
+   - รันคำสั่งที่เทียบเท่า `git ls-remote --exit-code --tags "<GITHUB_REPOSITORY>" "refs/tags/<GITHUB_TAG>" "refs/tags/<GITHUB_TAG>^{}"` ต้องพบ Tag จริง จากนั้นเก็บ Commit ของบรรทัด peeled (`^{}`) ถ้ามี หรือ Commit ของ Tag โดยตรงถ้าเป็น lightweight tag ไว้เป็น `REMOTE_TAG_COMMIT`
+   - เรียก GitHub REST API `/commits/<REMOTE_TAG_COMMIT>/status` และต้องพบสถานะล่าสุดที่ `context=metafxclub/release` กับ `state=success` หาก Release, Asset, checksum, Tag หรือ status gate ข้อใดไม่ครบให้หยุดทันทีและแจ้งว่าเวอร์ชันยังไม่พร้อมเผยแพร่
+   ห้ามเชื่อเพียงว่า Tag มีอยู่ และห้ามเปลี่ยนไปใช้ Fork, Branch `main`, URL `latest`, Source snapshot, Release ZIP หรือ Direct ZIP Asset แม้จะติดตั้งง่ายกว่า
 
 3. สร้างโฟลเดอร์ใหม่ชื่อสุ่มใต้ `%TEMP%` ที่ขึ้นต้นด้วย `Metafxclub-HQ-Install-` แล้ว Clone โดยเทียบเท่าคำสั่ง:
    `git clone --depth 1 --single-branch --branch "<GITHUB_TAG>" "<GITHUB_REPOSITORY>" "<SOURCE_DIR>"`
@@ -39,17 +46,21 @@ GOOGLE_DESKTOP_OAUTH_JSON = "[Path เต็มของ Desktop OAuth JSON เ�
 
 9. เรียก Installer เพียงรอบเดียวจาก SOURCE_DIR พร้อมพอร์ตและ OAuth JSON ที่ตรวจแล้ว ห้ามใช้ `-SkipLaunch`, `-SkipAutostart` หรือ BAT:
    `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File ".\installer\install.ps1" -Port 4186 -EndpointConfirmed -RequireVerifiedGitSource -ExpectedGitRepository "<GITHUB_REPOSITORY>" -ExpectedGitTag "<GITHUB_TAG>" -ExpectedSourceVersion "<EXPECTED_VERSION>" -GoogleClientJsonPath "<Path เต็มจาก GOOGLE_DESKTOP_OAUTH_JSON>" -ExpectedGoogleClientId "<EXPECTED_GOOGLE_CLIENT_ID>"`
-   รอให้ตัวติดตั้งรัน Preflight, สร้าง pinned venv, รันชุดตรวจติดตั้ง, เปิด Bridge, ตรวจ Health/หน้าเว็บ, นำเข้า OAuth Client ผ่าน DPAPI และลงทะเบียน Watchdog หลัง Login จบ ห้ามรายงานว่าสำเร็จถ้าตัวติดตั้งคืน Exit code ที่ไม่ใช่ 0 โดย Exit code 2 หมายถึงตัว HQ ติดตั้งและเปิดได้แล้ว แต่ Google OAuth ยังตั้งค่าไม่ครบ ให้รายงานเป็น partial success พร้อมสาเหตุและซ่อมเฉพาะ Google หลังแก้ JSON/Client ID ห้ามรันติดตั้งเต็มซ้ำโดยไม่จำเป็น
+   รอให้ตัวติดตั้งรัน Preflight, สร้าง pinned venv, รันชุดตรวจติดตั้ง, เปิด Bridge, ตรวจ Health/หน้าเว็บ, นำเข้า OAuth Client ผ่าน DPAPI และลงทะเบียน Watchdog หลัง Login จบ ห้ามรายงานว่าสำเร็จถ้าตัวติดตั้งคืน Exit code ที่ไม่ใช่ 0 โดยรหัส partial คือ `2=Google OAuth`, `3=Watchdog` และ `4=ทั้ง Google OAuth กับ Watchdog`; Runtime ที่ Health ผ่านจะไม่ถูก Rollback ให้ซ่อมเฉพาะส่วนที่แจ้งและห้ามรันติดตั้ง Source เต็มซ้ำโดยไม่จำเป็น
 
 10. ห้ามเรียกคำสั่งนำเข้า OAuth ซ้ำเมื่อ Installer สำเร็จ หากต้องซ่อมเฉพาะ Google หลังผู้ใช้แก้ Path/JSON แล้วเท่านั้น จึงใช้ Runtime ที่ติดตั้งจริง:
     `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Metafxclub\AI-Agent-HQ\scripts\setup-google-oauth.ps1" -ClientJsonPath "<Path เต็มจาก GOOGLE_DESKTOP_OAUTH_JSON>" -ExpectedClientId "<EXPECTED_GOOGLE_CLIENT_ID>" -SkipOpen`
     ห้ามเรียก Python/DPAPI แบบที่สร้างขึ้นเอง และห้ามแสดง Client ID เต็มหรือ Client Secret ในผลลัพธ์
 
+    หาก Installer คืนรหัส `3` หรือ `4` ให้ซ่อมเฉพาะ Watchdog ด้วยคำสั่ง `repair_command` ที่บันทึกใน `install-result.json` หรือคำสั่งต่อไปนี้ โดยแทน `<PORT>` ด้วยพอร์ตใน `bridge-endpoint.json` (สำหรับห้องเรียนนี้ต้องเป็น 4186):
+    `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Metafxclub\AI-Agent-HQ\installer\install.ps1" -RepairOnly -Port <PORT> -EndpointConfirmed -SkipGoogleSetup -SkipShortcuts`
+    คำสั่งนี้ตรวจ Runtime/Health และผูก Watchdog ใหม่จากโฟลเดอร์ติดตั้งจริง ไม่ Clone หรือคัดลอก Source ซ้ำ
+
 11. อ่าน `url`, `health_url` และ `port` จาก `%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ\data\runtime\bridge-endpoint.json` แล้วตรวจ `health_url` ต้องได้ `ok=true`, `status=ready`, `server="Metafx Local Bridge"`, `version=EXPECTED_VERSION`, `endpoint.host=127.0.0.1` และ `endpoint.port=4186` จากนั้น GET `url` ต้องได้ HTTP 200 และพบชื่อ `Metafxclub AI Agent HQ` กับปลายทาง `frontend/index.html`; GET `{url}frontend/index.html` ต้องได้ HTTP 200 และพบทั้งชื่อ `Metafxclub AI Pixel HQ` กับไฟล์เริ่มระบบ `frontend/src/app/main.js`; GET `{url}frontend/src/app/main.js` ต้องได้ HTTP 200 และเนื้อหาไม่ว่าง
 
 12. ตรวจ GET `{url}api/props/mission_strategy_table/research-sheet/auth` ต้องได้ `clientConfigured=true` สถานะปกติของเครื่องใหม่คือ `connected=false` และ `status=authorization_required` หากเครื่องนี้เคยเชื่อม Client เดิมอย่างถูกต้องแล้วจึงยอมรับ `connected=true/status=connected` ได้ ห้ามอ้างว่า Google เชื่อมแล้วจากการบันทึก JSON เพียงอย่างเดียว
 
-13. อ่าน `%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ\data\runtime\install-result.json` และยืนยันว่า `application_version=EXPECTED_VERSION`, `source.provenance="verified_remote_git_tag"`, `source.repository=GITHUB_REPOSITORY`, `source.tag=GITHUB_TAG` และ `source.commit=REMOTE_TAG_COMMIT` ห้ามรายงานว่าสำเร็จหาก Provenance ถูกลดระดับ จากนั้นตรวจ Scheduled Task ชื่อ `Metafxclub AI Agent HQ Bridge` ว่ามี Trigger ตอน Login และ Action ผูกกับ `/Port:4186`, เรียก `scripts/check-codex-readiness.cmd` จากโฟลเดอร์ติดตั้งจริง แล้วเปิด `url` ที่อ่านจาก `bridge-endpoint.json`
+13. อ่าน `%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ\data\runtime\install-result.json` และยืนยันว่า `application_version=EXPECTED_VERSION`, `source.provenance="verified_remote_git_tag"`, `source.repository=GITHUB_REPOSITORY`, `source.tag=GITHUB_TAG`, `source.commit=REMOTE_TAG_COMMIT`, `post_install.complete=true`, `post_install.exit_code=0` และ `post_install.watchdog.status="ready"` ห้ามรายงานว่าสำเร็จหาก Provenance ถูกลดระดับหรือ Post-install ยังเป็น partial จากนั้นตรวจ Scheduled Task ชื่อ `Metafxclub AI Agent HQ Bridge` ว่ามีทั้ง Trigger ตอน Login และ Trigger ตรวจซ้ำ, Action ต้องเป็น `wscript.exe` ที่ผูกกับ Script ในโฟลเดอร์ติดตั้งจริงและ `/Port:4186` แบบตรงตัว, เรียก `scripts/check-codex-readiness.cmd` จากโฟลเดอร์ติดตั้งจริง แล้วเปิด `url` ที่อ่านจาก `bridge-endpoint.json`
 
 14. หลังตรวจทุกอย่างผ่าน อนุญาตให้ลบได้เฉพาะ SOURCE_DIR ชั่วคราวที่ Codex สร้างเองเท่านั้น ก่อนลบต้อง Resolve absolute path ใหม่, ยืนยันว่าเป็น Directory จริง, Parent ตรงกับ canonical `%TEMP%` พอดี, ชื่อตรง `^Metafxclub-HQ-Install-[A-Za-z0-9-]+$` และ Directory ไม่มี Attribute `ReparsePoint`; หากข้อใดไม่ตรงให้ไม่ลบ ใช้การล้างแบบ Best-effort หาก Windows ยังล็อกไฟล์ให้แจ้งเป็นคำเตือน แต่ห้าม Rollback Runtime ที่ Health ผ่านแล้ว ห้ามลบ Repository อื่นหรือ OAuth JSON
 

@@ -47,6 +47,8 @@ class FrontendGatewayInitStatusTests(unittest.TestCase):
         self.assertIn("EA เริ่มทำงานไม่สำเร็จ", helper)
         self.assertIn("EA เริ่มทำงานแล้ว แต่มีคำเตือน", helper)
         self.assertIn("ข้อมูลนี้เก่าและใช้เพื่อช่วยวินิจฉัยเท่านั้น", helper)
+        self.assertIn("SIGNING_KEY_FILE_MISSING", helper)
+        self.assertIn("SIGNING_KEY_LENGTH_INVALID", helper)
 
     def test_daily_connection_panel_renders_diagnostic_with_text_content(self) -> None:
         start = self.main.index("function renderSignalDailyPanel")

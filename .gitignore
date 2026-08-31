@@ -60,6 +60,9 @@ artifacts/mt4-ai-council-ea-v2.15-execution-provenance/*.log
 !artifacts/mt4-ai-council-ea-v2.16-stream-transition-hardening/
 !artifacts/mt4-ai-council-ea-v2.16-stream-transition-hardening/**
 artifacts/mt4-ai-council-ea-v2.16-stream-transition-hardening/*.log
+!artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/
+!artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/**
+artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/*.log
 integrations/mt4-trade-gateway/*.ex4
 dist/
 release/

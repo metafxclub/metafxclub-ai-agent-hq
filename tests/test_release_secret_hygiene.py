@@ -44,6 +44,21 @@ class ReleaseSecretHygieneTests(unittest.TestCase):
         self.assertEqual(findings, [("backend/example.py", "google_oauth_client_secret")])
         self.assertNotIn(synthetic_secret, repr(findings))
 
+    def test_scanner_includes_curated_release_artifacts(self) -> None:
+        synthetic_secret = "GOC" + "SPX-" + ("B" * 24)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            target = root / "artifacts" / "example-release" / "BUILD_LOG.txt"
+            target.parent.mkdir(parents=True)
+            target.write_text("credential=" + synthetic_secret, encoding="utf-8")
+            findings = scan_embedded_secrets(root)
+
+        self.assertEqual(
+            findings,
+            [("artifacts/example-release/BUILD_LOG.txt", "google_oauth_client_secret")],
+        )
+        self.assertNotIn(synthetic_secret, repr(findings))
+
     def test_scanner_rejects_oauth_json_filename_without_reading_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

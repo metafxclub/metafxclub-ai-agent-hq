@@ -20,6 +20,9 @@
 # are bound to their checked-in SHA256SUMS and BUILD_LOG records.
 artifacts/mt4-ai-council-ea-v2.15-execution-provenance/MetafxHQTradeGateway.mq4 -text -diff
 artifacts/mt4-ai-council-ea-v2.16-stream-transition-hardening/MetafxHQTradeGateway.mq4 -text -diff
+artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/MetafxHQTradeGateway.mq4 -text -diff
+artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/BUILD_LOG.txt text eol=lf
+artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/SHA256SUMS.txt text eol=lf
 integrations/mt4-trade-gateway/MetafxHQTradeGateway.mq4 -text -diff
 
 *.png binary

@@ -24,11 +24,11 @@ import google_sheet_hub as hub  # noqa: E402
 
 
 CLIENT_ID = (
-    "149991890071-p57qibgugqvfa3k3p0cm94q74b9umajd"
+    "123456789012-metafxhqtestdesktopclient000000000000"
     ".apps.googleusercontent.com"
 )
 OTHER_CLIENT_ID = (
-    "149991890071-anotherdesktopclientidentifier1234567"
+    "123456789012-anotherdesktopclientidentifier1234567"
     ".apps.googleusercontent.com"
 )
 CLIENT_SECRET = "TEST_ONLY_DESKTOP_CLIENT_SECRET_MARKER"

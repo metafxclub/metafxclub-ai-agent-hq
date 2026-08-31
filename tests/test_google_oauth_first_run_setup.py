@@ -70,7 +70,7 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI integration")
     def test_powershell_import_round_trips_through_canonical_backend_store(self) -> None:
-        client_id = "149991890071-testdesktopclient.apps.googleusercontent.com"
+        client_id = "123456789012-testdesktopclient.apps.googleusercontent.com"
         client_secret = "TEST_CLIENT_SECRET_MUST_NOT_BE_PRINTED"
         document = {
             "installed": {
@@ -174,9 +174,10 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
             post_commit.index("Invoke-GoogleOAuthFirstRunSetup"),
         )
         self.assertIn("ติดตั้ง Agent HQ สำเร็จ แต่ยังตั้งค่า Google ไม่ได้", post_commit)
-        self.assertIn('$postInstallFailure = "Agent HQ ติดตั้งและเปิดใช้งานแล้ว', post_commit)
-        self.assertIn("exit 2", post_commit)
-        self.assertIn("ตัวโปรแกรมไม่ถูก Rollback", post_commit)
+        self.assertIn('$googleMessage = "Agent HQ ติดตั้งและเปิดใช้งานแล้ว', post_commit)
+        self.assertIn("$googleSetupFailure = $true", post_commit)
+        self.assertIn("exit $postInstallExitCode", post_commit)
+        self.assertIn("Runtime ยังเปิดใช้ได้และไม่ถูก Rollback", post_commit)
 
     def test_student_docs_keep_json_out_of_browser_and_project(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -220,7 +221,8 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertGreaterEqual(prompt.count("-RequireVerifiedGitSource"), 2)
         self.assertIn("-GoogleClientJsonPath", prompt)
         self.assertIn("-ExpectedGoogleClientId", prompt)
-        self.assertNotIn("-EndpointConfirmed -SkipGoogleSetup", prompt)
+        primary_install = prompt[prompt.index("9. เรียก Installer"):prompt.index("10. ห้ามเรียกคำสั่งนำเข้า OAuth ซ้ำ")]
+        self.assertNotIn("-EndpointConfirmed -SkipGoogleSetup", primary_install)
         self.assertIn("ห้ามใช้ `-SkipLaunch`", prompt)
         self.assertNotIn("-SkipGoogleSetup -SkipLaunch", prompt)
         self.assertIn(
@@ -231,8 +233,9 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertIn("-SkipOpen", prompt)
         self.assertIn("authorization_required", prompt)
         self.assertIn('source.provenance="verified_remote_git_tag"', prompt)
-        self.assertIn("Exit code 2", prompt)
-        self.assertIn("partial success", prompt)
+        self.assertIn("2=Google OAuth", prompt)
+        self.assertIn("3=Watchdog", prompt)
+        self.assertIn("partial", prompt)
         self.assertIn("ห้ามกดปุ่มเชื่อม Google", prompt)
         self.assertIn("Client Secret", prompt)
 

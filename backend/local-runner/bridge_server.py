@@ -61,7 +61,7 @@ from radar_image_adapter import (  # noqa: E402 - public HTTPS publisher-image e
     verify_radar_entry_artifact,
 )
 
-BRIDGE_RUNTIME_VERSION = "0.9.6"
+BRIDGE_RUNTIME_VERSION = "0.9.7"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_STARTED_MONOTONIC = time.monotonic()
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
@@ -1623,7 +1623,7 @@ DASHBOARD_DISCOVERY_SHEET_COLUMNS = (
 )
 
 RESEARCH_SHEET_HUB_SCHEMA_VERSION = "research-sheet-hub-v1"
-RESEARCH_SHEET_OUTBOX_SCHEMA_VERSION = "research-sheet-outbox-v2"
+RESEARCH_SHEET_OUTBOX_SCHEMA_VERSION = "research-sheet-outbox-v4"
 RESEARCH_SHEET_WORLD_WRITE_HEADERS = (
     "discovery_id", "record_type", "discovered_at", "last_verified_at",
     "system_name", "trader_or_author", "source_title", "source_url",
@@ -1710,12 +1710,44 @@ RESEARCH_SHEET_SYNC_REPORT_TYPES = frozenset({
     "trading_system_research_report",
     "indicator_scout_report",
 })
+RESEARCH_SHEET_SYNC_REPORT_CONSUMERS = {
+    "trading_system_discovery_report": "worldSystem",
+    "trading_system_research_report": "deepResearch",
+    "indicator_scout_report": "indicatorEaTool",
+}
 RESEARCH_SHEET_OUTBOX_LIMIT = 600
 RESEARCH_SHEET_SYNC_LEDGER_LIMIT = 5000
+RESEARCH_SHEET_FAILED_LEDGER_LIMIT = 5000
+# A report rejected only because the row outbox is full is retained by opaque
+# report id. Runtime report files remain the source of truth, so this compact
+# queue can cover history older than the bounded 240-report discovery window.
+RESEARCH_SHEET_DEFERRED_REPORT_LIMIT = 5000
+RESEARCH_SHEET_DEFERRED_REPORT_DRAIN_BATCH_LIMIT = 50
+RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT = 500
 RESEARCH_SHEET_CACHE_ROW_LIMIT = 250
 RESEARCH_SHEET_CACHE_SCAN_MAX_ROW = 10000
 RESEARCH_SHEET_CACHE_MAX_AGE_SECONDS = 26 * 60 * 60
 RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS = 5
+RESEARCH_SHEET_OUTBOX_MAX_REQUEUES = 3
+RESEARCH_SHEET_OUTBOX_REQUEUE_BATCH_LIMIT = 50
+# A fresh live probe proves that the current OAuth/session and Sheet access are
+# usable again. Only failures whose cause is directly disproved by that probe
+# may bypass the manual retry ceiling; payload/schema failures remain terminal.
+RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS = frozenset({
+    "auth_required",
+    "auth_expired",
+    "auth_unavailable",
+    "permission_denied",
+    "oauth_unavailable",
+    "oauth_rate_limited",
+})
+# A retry may scan past poison/legacy ledger markers to find recoverable rows,
+# but one request must never traverse the entire durable history without a cap.
+RESEARCH_SHEET_OUTBOX_REQUEUE_SCAN_LIMIT = 500
+# Failed rows remain visible for diagnosis, but they are not delivery slots.
+# Keeping a bounded tail prevents hundreds of terminal failures from evicting
+# new reports forever; every dropped failure still has a durable audit event.
+RESEARCH_SHEET_OUTBOX_FAILED_RETENTION_LIMIT = 100
 # The scheduler is already a durable always-on Backend loop.  Use it to wake
 # the Sheet outbox as well so a temporary Google/API outage cannot leave a
 # daily report stranded until somebody opens the UI or another report happens
@@ -2053,6 +2085,17 @@ def mission_payload_digest(mission: dict) -> str:
             else None
         ),
     }
+    scheduled_completion_retry = mission.get("scheduledCompletionRetry")
+    if (
+        isinstance(scheduled_completion_retry, dict)
+        and isinstance(scheduled_completion_retry.get("originalSlotKey"), str)
+        and scheduled_completion_retry.get("originalSlotKey")
+    ):
+        # This new Radar retry packet is executable carry-forward state. Bind
+        # it only when the new original-slot marker is present: adding a null
+        # key for every Mission would invalidate durable authorizations issued
+        # by an older Bridge release during an in-place upgrade.
+        packet["scheduledCompletionRetry"] = scheduled_completion_retry
     meeting_binding = (
         mission.get("meetingApprovalBinding")
         if isinstance(mission.get("meetingApprovalBinding"), dict)
@@ -2415,6 +2458,36 @@ def load_operator_mode_record() -> dict:
 def ensure_operator_mode_store() -> dict:
     record = load_operator_mode_record()
     if OPERATOR_MODE_PATH.exists():
+        stored = read_json(OPERATOR_MODE_PATH, {})
+        if (
+            _operator_mode_default() == "auto_guarded"
+            and isinstance(stored, dict)
+            and stored.get("version") == "operator-mode-store-v1"
+            and stored.get("mode") == "manual_guarded"
+            and stored.get("source") == "contract_default"
+        ):
+            migrated_at = utc_now()
+            migrated = {
+                "version": "operator-mode-store-v1",
+                "mode": "auto_guarded",
+                "updatedAt": migrated_at,
+                "source": "contract_default_migration",
+                "migration": {
+                    "fromMode": "manual_guarded",
+                    "fromSource": "contract_default",
+                    "reason": "operator_contract_default_changed",
+                },
+            }
+            write_json(OPERATOR_MODE_PATH, migrated, keep_backup=True)
+            append_audit({
+                "type": "operator_mode.migrated",
+                "previousMode": "manual_guarded",
+                "mode": "auto_guarded",
+                "previousSource": "contract_default",
+                "source": "contract_default_migration",
+                "reason": "operator_contract_default_changed",
+            })
+            return migrated
         return record
     persisted = {
         "version": "operator-mode-store-v1",
@@ -7308,6 +7381,26 @@ RADAR_EVIDENCE_CORRECTIVE_RETRY_KIND = "radar_open_exact_evidence_urls"
 RADAR_CORRECTIVE_CLASSIFICATION_REPAIR_VERSION = 2
 RADAR_BATCH_COMPLETION_REPAIR_VERSION = 1
 RADAR_BATCH_COMPLETION_REPAIR_KIND = "radar_complete_verified_daily_batch"
+SCHEDULED_RADAR_COMPLETION_RETRY_SCHEMA = (
+    "scheduled-public-research-completion-retry-v1"
+)
+SCHEDULED_RADAR_COMPLETION_RETRY_FAILURE_CODES = frozenset({
+    "auto_worker_interrupted",
+    "bridge_shutdown_cancelled",
+    "internal_worker_error",
+    "invalid_output",
+    "invalid_runner_output",
+    "mission_prompt_too_large",
+    "public_web_evidence_unverified",
+    "radar_corrective_open_verification_invalid",
+    "radar_evidence_open_verification_failed",
+    "radar_output_contract_invalid",
+    "radar_output_too_large",
+    "report_persist_failed",
+    "runner_failed",
+    "timeout",
+    "workflow_output_contract_incomplete",
+})
 RADAR_BATCH_REPORT_COMMIT_SCHEMA = "radar-batch-report-commit-v1"
 RADAR_BATCH_REPORT_MAX_BYTES = 256_000
 RADAR_BATCH_REPORT_COMMIT_PENDING_PHASE = (
@@ -8037,6 +8130,111 @@ def _radar_batch_completion_repair_state(
         copy.deepcopy(state),
         None,
     ) if valid else (None, "radar_batch_completion_repair_invalid")
+
+
+def _scheduled_radar_completion_retry_state(
+    mission: object,
+    *,
+    require_authorization: bool = True,
+) -> tuple[dict | None, str | None]:
+    """Validate the durable no-artifact Radar retry packet fail-closed."""
+
+    row = mission if isinstance(mission, dict) else {}
+    if "scheduledCompletionRetry" not in row:
+        return None, None
+    state = (
+        row.get("scheduledCompletionRetry")
+        if isinstance(row.get("scheduledCompletionRetry"), dict)
+        else None
+    )
+    if not isinstance(state, dict):
+        return None, "scheduled_radar_completion_retry_invalid"
+    context = _workflow_context_storage(row.get("workflowContext")) or {}
+    reservation = (
+        context.get("executionReservation")
+        if isinstance(context.get("executionReservation"), dict)
+        else {}
+    )
+    execution = (
+        row.get("execution") if isinstance(row.get("execution"), dict) else {}
+    )
+    attempt_count = state.get("attemptCount")
+    last_failed_at = parse_iso(state.get("lastFailedAt"))
+    next_attempt_at = parse_iso(state.get("nextAttemptAt"))
+    execution_next_attempt_at = parse_iso(execution.get("nextAttemptAt"))
+    overdue = state.get("overdueCarryForward", False)
+    overdue_since = state.get("overdueSinceBangkokDate")
+    slot_date = str(reservation.get("bangkokDate") or "")
+    queued_state = bool(
+        row.get("status") == "queued"
+        and execution.get("dispatchState") == "deferred"
+        and execution_next_attempt_at is not None
+        and next_attempt_at is not None
+        and execution_next_attempt_at == next_attempt_at
+        and execution.get("processStarted") is False
+    )
+    running_state = bool(
+        row.get("status") == "running"
+        and execution.get("dispatchState") == "running"
+        and safe_reference(execution.get("leaseId"))
+    )
+    authorization_valid = True
+    if require_authorization:
+        authorization_valid = bool(
+            queued_state
+            and auto_execution_authorization_error(
+                row,
+                require_operator_mode=False,
+            )
+            is None
+        )
+    valid = bool(
+        _radar_complete_daily_batch_required(row)
+        and context.get("triggerSource") == "schedule"
+        and _is_trusted_public_read_only_workflow(
+            context.get("propId"),
+            context.get("actionId"),
+            tool_id=row.get("toolId"),
+            owner_agent_id=row.get("owner") or row.get("agentId"),
+        )
+        and _trusted_workflow_guard_intent(row) is not None
+        and not isinstance(row.get("radarBatchRepair"), dict)
+        and state.get("schemaVersion")
+        == SCHEDULED_RADAR_COMPLETION_RETRY_SCHEMA
+        and isinstance(attempt_count, int)
+        and not isinstance(attempt_count, bool)
+        and 1 <= attempt_count <= 9999
+        and state.get("lastFailureCode")
+        in SCHEDULED_RADAR_COMPLETION_RETRY_FAILURE_CODES
+        and isinstance(state.get("lastFailureSummary"), str)
+        and 0 < len(state.get("lastFailureSummary")) <= 1200
+        and last_failed_at is not None
+        and next_attempt_at is not None
+        and next_attempt_at > last_failed_at
+        and state.get("sameMission") is True
+        and state.get("sameDailyReservation") is True
+        and state.get("newDailyReservation") is False
+        and state.get("automaticRetry") is True
+        and state.get("originalSlotKey") == reservation.get("slotKey")
+        and isinstance(overdue, bool)
+        and (
+            (overdue is False and overdue_since in (None, ""))
+            or (
+                overdue is True
+                and isinstance(overdue_since, str)
+                and re.fullmatch(r"\d{4}-\d{2}-\d{2}", overdue_since)
+                is not None
+                and overdue_since > slot_date
+            )
+        )
+        and (queued_state or (not require_authorization and running_state))
+        and authorization_valid
+        and row.get("reportIds") == []
+    )
+    return (
+        copy.deepcopy(state),
+        None,
+    ) if valid else (None, "scheduled_radar_completion_retry_invalid")
 
 
 def _radar_batch_report_commit_payload_digest(value: object) -> str:
@@ -13682,6 +13880,8 @@ def _research_sheet_outbox_default() -> dict:
         "schemaVersion": RESEARCH_SHEET_OUTBOX_SCHEMA_VERSION,
         "items": [],
         "syncedLedger": [],
+        "failedLedger": [],
+        "deferredReports": [],
         "updatedAt": None,
     }
 
@@ -14101,6 +14301,46 @@ def query_research_sheet_hub(payload: object) -> dict:
     })
 
 
+def _research_sheet_deferred_report_marker(value: object) -> dict | None:
+    source = value if isinstance(value, dict) else {}
+    report_id = safe_reference(source.get("reportId"))
+    report_type = str(source.get("reportType") or "").strip()
+    consumer_id = safe_reference(source.get("consumerId"))
+    config_revision = clamp_int(
+        source.get("configRevision"),
+        -1,
+        -1,
+        999999,
+    )
+    if (
+        not report_id
+        or report_type not in RESEARCH_SHEET_SYNC_REPORT_TYPES
+        or RESEARCH_SHEET_SYNC_REPORT_CONSUMERS.get(report_type) != consumer_id
+        or config_revision < 0
+    ):
+        return None
+    deferred_at = str(source.get("deferredAt") or "").strip()
+    updated_at = str(source.get("updatedAt") or "").strip()
+    return {
+        "reportId": report_id,
+        "reportType": report_type,
+        "consumerId": consumer_id,
+        "configRevision": config_revision,
+        "deferredAt": deferred_at if parse_iso(deferred_at) is not None else utc_now(),
+        "updatedAt": updated_at if parse_iso(updated_at) is not None else None,
+        "recoveryAttemptCount": clamp_int(
+            source.get("recoveryAttemptCount"),
+            0,
+            0,
+            9999,
+        ),
+        "lastErrorCode": redact_text(
+            str(source.get("lastErrorCode") or "").strip(),
+            120,
+        ) or None,
+    }
+
+
 def _load_research_sheet_outbox_unlocked() -> dict:
     payload = read_json(RESEARCH_SHEET_OUTBOX_PATH, _research_sheet_outbox_default())
     source = payload if isinstance(payload, dict) else {}
@@ -14139,20 +14379,76 @@ def _load_research_sheet_outbox_unlocked() -> dict:
             "configRevision": config_revision,
             "syncedAt": entry.get("syncedAt"),
         })
+    failed_ledger = []
+    for entry in (
+        source.get("failedLedger")
+        if isinstance(source.get("failedLedger"), list)
+        else []
+    )[-RESEARCH_SHEET_FAILED_LEDGER_LIMIT:]:
+        if not isinstance(entry, dict):
+            continue
+        item_id = safe_reference(entry.get("id"))
+        payload_digest_value = redact_text(
+            str(entry.get("payloadDigest") or "").strip(),
+            160,
+        )
+        config_revision = clamp_int(
+            entry.get("configRevision"),
+            -1,
+            -1,
+            999999,
+        )
+        if not item_id or not payload_digest_value or config_revision < 0:
+            continue
+        failed_ledger.append({
+            "id": item_id,
+            "payloadDigest": payload_digest_value,
+            "configRevision": config_revision,
+            "consumerId": safe_reference(entry.get("consumerId")),
+            "reportId": safe_reference(entry.get("reportId")),
+            "requeueCount": clamp_int(entry.get("requeueCount"), 0, 0, 9999),
+            "failedAt": entry.get("failedAt"),
+            "lastErrorCode": redact_text(
+                str(entry.get("lastErrorCode") or "").strip(),
+                120,
+            ) or None,
+        })
+    deferred_reports = []
+    deferred_keys: set[tuple[str, int]] = set()
+    for entry in (
+        source.get("deferredReports")
+        if isinstance(source.get("deferredReports"), list)
+        else []
+    ):
+        marker = _research_sheet_deferred_report_marker(entry)
+        if marker is None:
+            continue
+        marker_key = (marker["reportId"], marker["configRevision"])
+        if marker_key in deferred_keys:
+            continue
+        deferred_keys.add(marker_key)
+        deferred_reports.append(marker)
+        if len(deferred_reports) >= RESEARCH_SHEET_DEFERRED_REPORT_LIMIT:
+            break
     return {
         "schemaVersion": RESEARCH_SHEET_OUTBOX_SCHEMA_VERSION,
         "items": items,
         "syncedLedger": synced_ledger,
+        "failedLedger": failed_ledger,
+        "deferredReports": deferred_reports,
         "updatedAt": source.get("updatedAt"),
     }
 
 
 def _save_research_sheet_outbox_unlocked(store: dict) -> None:
     source_items = [item for item in (store.get("items") or []) if isinstance(item, dict)]
-    active = [
+    delivery_items = [
         item for item in source_items
-        if item.get("status") in {"pending", "retry_pending", "write_unknown", "failed"}
+        if item.get("status") in {"pending", "retry_pending", "write_unknown"}
     ]
+    failed_tail = [
+        item for item in source_items if item.get("status") == "failed"
+    ][-RESEARCH_SHEET_OUTBOX_FAILED_RETENTION_LIMIT:]
     # Keep a compact durable acknowledgement ledger separate from delivery
     # slots.  Without it, a restart/backfill would forget successful rows older
     # than the diagnostic tail and upsert the same reports again, wasting the
@@ -14188,15 +14484,95 @@ def _save_research_sheet_outbox_unlocked(store: dict) -> None:
                 ) or item.get("updatedAt") or utc_now(),
             }
     synced_ledger = list(ledger_by_id.values())[-RESEARCH_SHEET_SYNC_LEDGER_LIMIT:]
-    # Keep only a bounded diagnostic tail of successful rows so completed work
-    # can never consume all 600 delivery slots. Failed rows remain durable and
-    # visible until the same report is re-queued after a schema/auth fix.
+    failed_ledger_by_id = {
+        safe_reference(entry.get("id")): copy.deepcopy(entry)
+        for entry in (
+            store.get("failedLedger")
+            if isinstance(store.get("failedLedger"), list)
+            else []
+        )
+        if isinstance(entry, dict) and safe_reference(entry.get("id"))
+    }
+    for item in source_items:
+        item_id = safe_reference(item.get("id"))
+        if not item_id:
+            continue
+        if item.get("status") == "failed":
+            failed_ledger_by_id[item_id] = {
+                "id": item_id,
+                "payloadDigest": redact_text(
+                    str(item.get("payloadDigest") or "").strip(),
+                    160,
+                ),
+                "configRevision": clamp_int(
+                    item.get("configRevision"),
+                    0,
+                    0,
+                    999999,
+                ),
+                "consumerId": safe_reference(item.get("consumerId")),
+                # The report id is an opaque backend-owned reference, not a
+                # filesystem path. It lets an explicit bounded retry rebuild a
+                # pruned row without retaining the full Sheet payload here.
+                "reportId": safe_reference(item.get("reportId")),
+                "requeueCount": clamp_int(item.get("requeueCount"), 0, 0, 9999),
+                "failedAt": item.get("updatedAt") or item.get("lastAttemptAt") or utc_now(),
+                "lastErrorCode": redact_text(
+                    str(item.get("lastErrorCode") or "").strip(),
+                    120,
+                ) or None,
+            }
+        elif item.get("status") in {"pending", "retry_pending", "write_unknown", "synced"}:
+            # A corrected payload or an explicitly reopened row supersedes the
+            # terminal marker with the same deterministic identity.
+            failed_ledger_by_id.pop(item_id, None)
+    failed_ledger = list(failed_ledger_by_id.values())[-RESEARCH_SHEET_FAILED_LEDGER_LIMIT:]
+    deferred_by_key: dict[tuple[str, int], dict] = {}
+    for entry in (
+        store.get("deferredReports")
+        if isinstance(store.get("deferredReports"), list)
+        else []
+    ):
+        marker = _research_sheet_deferred_report_marker(entry)
+        if marker is None:
+            continue
+        marker_key = (marker["reportId"], marker["configRevision"])
+        existing_marker = deferred_by_key.get(marker_key)
+        if existing_marker is None:
+            deferred_by_key[marker_key] = marker
+            continue
+        # Preserve the first capacity rejection for oldest-first draining while
+        # retaining the newest bounded recovery diagnostics.
+        if str(marker.get("deferredAt") or "") < str(existing_marker.get("deferredAt") or ""):
+            marker["updatedAt"] = existing_marker.get("updatedAt")
+            marker["recoveryAttemptCount"] = existing_marker.get("recoveryAttemptCount", 0)
+            marker["lastErrorCode"] = existing_marker.get("lastErrorCode")
+            deferred_by_key[marker_key] = marker
+        else:
+            existing_marker["updatedAt"] = marker.get("updatedAt") or existing_marker.get("updatedAt")
+            existing_marker["recoveryAttemptCount"] = max(
+                clamp_int(existing_marker.get("recoveryAttemptCount"), 0, 0, 9999),
+                clamp_int(marker.get("recoveryAttemptCount"), 0, 0, 9999),
+            )
+            existing_marker["lastErrorCode"] = marker.get("lastErrorCode") or existing_marker.get("lastErrorCode")
+    deferred_reports = sorted(
+        deferred_by_key.values(),
+        key=lambda marker: (
+            str(marker.get("deferredAt") or ""),
+            str(marker.get("reportId") or ""),
+        ),
+    )[:RESEARCH_SHEET_DEFERRED_REPORT_LIMIT]
+    # Delivery work is ordered first, followed by bounded diagnostic tails.
+    # This guarantees terminal failures and acknowledgements cannot consume
+    # all 600 delivery slots. The audit log retains the durable history.
     synced_tail = [item for item in source_items if item.get("status") == "synced"][-25:]
-    compacted = [*active, *synced_tail]
+    compacted = [*delivery_items, *failed_tail, *synced_tail]
     payload = {
         "schemaVersion": RESEARCH_SHEET_OUTBOX_SCHEMA_VERSION,
         "items": compacted[:RESEARCH_SHEET_OUTBOX_LIMIT],
         "syncedLedger": synced_ledger,
+        "failedLedger": failed_ledger,
+        "deferredReports": deferred_reports,
         "updatedAt": utc_now(),
     }
     write_json(
@@ -14223,12 +14599,35 @@ def _research_sheet_reset_outbox_for_revision(config_revision: int) -> int:
             and clamp_int(entry.get("configRevision"), -1, -1, 999999)
             == config_revision
         ]
-        if len(current) != len(original) or len(current_ledger) != len(original_ledger):
+        original_failed_ledger = list(store.get("failedLedger") or [])
+        current_failed_ledger = [
+            entry for entry in original_failed_ledger
+            if isinstance(entry, dict)
+            and clamp_int(entry.get("configRevision"), -1, -1, 999999)
+            == config_revision
+        ]
+        original_deferred_reports = list(store.get("deferredReports") or [])
+        current_deferred_reports = [
+            entry for entry in original_deferred_reports
+            if isinstance(entry, dict)
+            and clamp_int(entry.get("configRevision"), -1, -1, 999999)
+            == config_revision
+        ]
+        if (
+            len(current) != len(original)
+            or len(current_ledger) != len(original_ledger)
+            or len(current_failed_ledger) != len(original_failed_ledger)
+            or len(current_deferred_reports) != len(original_deferred_reports)
+        ):
             store["items"] = current
             store["syncedLedger"] = current_ledger
+            store["failedLedger"] = current_failed_ledger
+            store["deferredReports"] = current_deferred_reports
             _save_research_sheet_outbox_unlocked(store)
         return (len(original) - len(current)) + (
             len(original_ledger) - len(current_ledger)
+        ) + (len(original_failed_ledger) - len(current_failed_ledger)) + (
+            len(original_deferred_reports) - len(current_deferred_reports)
         )
 
 
@@ -14236,10 +14635,33 @@ def _research_sheet_outbox_summary(config_revision: object | None = None) -> dic
     with RESEARCH_SHEET_OUTBOX_LOCK:
         store = _load_research_sheet_outbox_unlocked()
     all_items = list(store.get("items") or [])
+    failed_by_id = {
+        safe_reference(entry.get("id")): entry
+        for entry in (store.get("failedLedger") or [])
+        if isinstance(entry, dict) and safe_reference(entry.get("id"))
+    }
+    for item in all_items:
+        item_id = safe_reference(item.get("id")) if isinstance(item, dict) else ""
+        if item_id and item.get("status") == "failed":
+            failed_by_id.setdefault(item_id, item)
     revision = clamp_int(config_revision, -1, -1, 999999)
     items = [
         item for item in all_items
         if revision < 0 or clamp_int(item.get("configRevision"), -2, -2, 999999) == revision
+    ]
+    failed_items = [
+        item for item in failed_by_id.values()
+        if revision < 0
+        or clamp_int(item.get("configRevision"), -2, -2, 999999) == revision
+    ]
+    all_deferred_reports = [
+        marker for marker in (store.get("deferredReports") or [])
+        if isinstance(marker, dict)
+    ]
+    deferred_reports = [
+        marker for marker in all_deferred_reports
+        if revision < 0
+        or clamp_int(marker.get("configRevision"), -2, -2, 999999) == revision
     ]
     by_consumer: dict[str, dict[str, int]] = {}
     for item in items:
@@ -14248,21 +14670,368 @@ def _research_sheet_outbox_summary(config_revision: object | None = None) -> dic
             continue
         counts = by_consumer.setdefault(
             consumer_id,
-            {"pending": 0, "failed": 0, "synced": 0},
+            {"pending": 0, "failed": 0, "synced": 0, "deferred": 0},
         )
         status = str(item.get("status") or "")
         if status in {"pending", "retry_pending", "write_unknown"}:
             counts["pending"] += 1
-        elif status in counts:
-            counts[status] += 1
+        elif status == "synced":
+            counts["synced"] += 1
+    for item in failed_items:
+        consumer_id = str(item.get("consumerId") or "").strip()
+        if not consumer_id:
+            continue
+        counts = by_consumer.setdefault(
+            consumer_id,
+            {"pending": 0, "failed": 0, "synced": 0, "deferred": 0},
+        )
+        counts["failed"] += 1
+    for marker in deferred_reports:
+        consumer_id = str(marker.get("consumerId") or "").strip()
+        if not consumer_id:
+            continue
+        counts = by_consumer.setdefault(
+            consumer_id,
+            {"pending": 0, "failed": 0, "synced": 0, "deferred": 0},
+        )
+        counts["deferred"] += 1
+    all_identities = {
+        (
+            safe_reference(item.get("id")),
+            clamp_int(item.get("configRevision"), -2, -2, 999999),
+        )
+        for item in [*all_items, *failed_by_id.values()]
+        if isinstance(item, dict) and safe_reference(item.get("id"))
+    }
+    current_identities = {
+        identity
+        for identity in all_identities
+        if revision < 0 or identity[1] == revision
+    }
     return {
         "pending": sum(1 for item in items if item.get("status") in {"pending", "retry_pending", "write_unknown"}),
-        "failed": sum(1 for item in items if item.get("status") == "failed"),
+        "failed": len(failed_items),
         "synced": sum(1 for item in items if item.get("status") == "synced"),
+        "deferred": len(deferred_reports),
         "byConsumer": by_consumer,
-        "priorConfigItems": max(0, len(all_items) - len(items)),
+        "priorConfigItems": max(0, len(all_identities) - len(current_identities)),
+        "priorConfigDeferredReports": max(
+            0,
+            len(all_deferred_reports) - len(deferred_reports),
+        ),
         "updatedAt": store.get("updatedAt"),
     }
+
+
+def _research_sheet_requeue_failed_current_revision(
+    *,
+    reason: str,
+    max_items: int = RESEARCH_SHEET_OUTBOX_REQUEUE_BATCH_LIMIT,
+) -> dict:
+    """Requeue only bounded terminal failures for the active Sheet revision.
+
+    This is deliberately separate from normal report backfill. Re-reading the
+    same durable report must never reset its retry budget. An explicit operator
+    retry may reopen a failed item at most three times. A successful live probe
+    may reopen only auth/permission failures after that ceiling, while keeping
+    their counter at the ceiling so it does not reset retry history.
+    """
+
+    allowed_reasons = {"verification_succeeded", "activation_verified", "explicit_retry"}
+    if reason not in allowed_reasons:
+        raise ValueError("Unsupported Google Sheet outbox requeue reason.")
+    internal = _research_sheet_hub_internal()
+    revision = clamp_int(internal.get("configRevision"), -1, -1, 999999)
+    active = bool(
+        revision >= 0
+        and internal.get("active") is True
+        and clamp_int(internal.get("activeConfigRevision"), -2, -2, 999999)
+        == revision
+    )
+    if not active:
+        return {
+            "requeued": 0,
+            "exhausted": 0,
+            "staleIgnored": 0,
+            "eligibleDeferred": 0,
+            "liveVerificationReopenedExhausted": 0,
+            "liveVerificationIneligible": 0,
+            "reason": "activation_required",
+        }
+    limit = clamp_int(
+        max_items,
+        RESEARCH_SHEET_OUTBOX_REQUEUE_BATCH_LIMIT,
+        1,
+        RESEARCH_SHEET_OUTBOX_REQUEUE_BATCH_LIMIT,
+    )
+    requeued = 0
+    exhausted = 0
+    stale_ignored = 0
+    eligible_deferred = 0
+    capacity_deferred = 0
+    reconstruction_missing = 0
+    reconstruction_digest_mismatch = 0
+    live_verification_reopened_exhausted = 0
+    live_verification_ineligible = 0
+    live_verification_reason = reason in {
+        "verification_succeeded",
+        "activation_verified",
+    }
+    with RESEARCH_SHEET_OUTBOX_LOCK:
+        store = _load_research_sheet_outbox_unlocked()
+        stored_items = [
+            item for item in (store.get("items") or []) if isinstance(item, dict)
+        ]
+        item_by_id = {
+            safe_reference(item.get("id")): item
+            for item in stored_items
+            if safe_reference(item.get("id"))
+        }
+        eligible: list[tuple[str, dict, bool]] = []
+        for item in stored_items:
+            if not isinstance(item, dict) or item.get("status") != "failed":
+                continue
+            item_revision = clamp_int(
+                item.get("configRevision"),
+                -2,
+                -2,
+                999999,
+            )
+            if item_revision != revision:
+                stale_ignored += 1
+                continue
+            requeue_count = clamp_int(item.get("requeueCount"), 0, 0, 9999)
+            error_code = str(item.get("lastErrorCode") or "").strip().lower()
+            live_reopen_exhausted = bool(
+                live_verification_reason
+                and error_code in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
+                and requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+            )
+            if (
+                live_verification_reason
+                and error_code not in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
+            ):
+                live_verification_ineligible += 1
+                if requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES:
+                    exhausted += 1
+                continue
+            if (
+                requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+                and not live_reopen_exhausted
+            ):
+                exhausted += 1
+                continue
+            eligible.append(("item", item, live_reopen_exhausted))
+        for entry in store.get("failedLedger") or []:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = safe_reference(entry.get("id"))
+            # Every retained failed item also has a ledger marker. Process the
+            # full payload once and use the ledger only for pruned failures.
+            if not entry_id or entry_id in item_by_id:
+                continue
+            entry_revision = clamp_int(
+                entry.get("configRevision"),
+                -2,
+                -2,
+                999999,
+            )
+            if entry_revision != revision:
+                stale_ignored += 1
+                continue
+            requeue_count = clamp_int(entry.get("requeueCount"), 0, 0, 9999)
+            error_code = str(entry.get("lastErrorCode") or "").strip().lower()
+            live_reopen_exhausted = bool(
+                live_verification_reason
+                and error_code in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
+                and requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+            )
+            if (
+                live_verification_reason
+                and error_code not in RESEARCH_SHEET_LIVE_VERIFICATION_REOPENABLE_ERRORS
+            ):
+                live_verification_ineligible += 1
+                if requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES:
+                    exhausted += 1
+                continue
+            if (
+                requeue_count >= RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+                and not live_reopen_exhausted
+            ):
+                exhausted += 1
+                continue
+            eligible.append(("ledger", entry, live_reopen_exhausted))
+        eligible.sort(key=lambda candidate: (
+            clamp_int(candidate[1].get("requeueCount"), 0, 0, 9999),
+            str(
+                candidate[1].get("updatedAt")
+                or candidate[1].get("createdAt")
+                or candidate[1].get("failedAt")
+                or ""
+            ),
+            safe_reference(candidate[1].get("id")) or "",
+        ))
+        delivery_statuses = {"pending", "retry_pending", "write_unknown"}
+        delivery_count = sum(
+            1 for item in stored_items if item.get("status") in delivery_statuses
+        )
+        available_delivery_slots = max(
+            0,
+            RESEARCH_SHEET_OUTBOX_LIMIT - delivery_count,
+        )
+        selected_limit = min(limit, available_delivery_slots)
+        capacity_deferred = max(
+            0,
+            min(len(eligible), limit) - selected_limit,
+        )
+        requeued_at = utc_now()
+        scan_limit = min(
+            len(eligible),
+            RESEARCH_SHEET_OUTBOX_REQUEUE_SCAN_LIMIT,
+        )
+        scanned = 0
+        store_changed = False
+        deep_version_index: dict[str, dict] | None = None
+        deep_version_index_unavailable = False
+        for source_kind, candidate, live_reopen_exhausted in eligible[:scan_limit]:
+            if requeued >= selected_limit:
+                break
+            scanned += 1
+            item = candidate
+            if source_kind == "ledger":
+                report_id = safe_reference(candidate.get("reportId"))
+                report = None
+                if report_id:
+                    report_path = (
+                        RUNTIME_REPORTS_DIR / f"{report_id}.json"
+                    ).resolve(strict=False)
+                    try:
+                        report_path.relative_to(
+                            RUNTIME_REPORTS_DIR.resolve(strict=False)
+                        )
+                        report = read_json(report_path, None)
+                    except (ValueError, DataIntegrityError):
+                        report = None
+                if not isinstance(report, dict):
+                    reconstruction_missing += 1
+                    candidate["requeueCount"] = (
+                        clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
+                    )
+                    candidate["lastErrorCode"] = "requeue_reconstruction_missing"
+                    store_changed = True
+                    continue
+                try:
+                    if report.get("type") == "trading_system_research_report":
+                        if deep_version_index_unavailable:
+                            raise DataIntegrityError(
+                                "Deep Research version index is unavailable."
+                            )
+                        if deep_version_index is None:
+                            try:
+                                deep_version_index = (
+                                    _research_sheet_runtime_deep_version_index(report)
+                                )
+                            except (OSError, ValueError, TypeError, DataIntegrityError):
+                                deep_version_index_unavailable = True
+                                raise
+                    projected = _research_sheet_report_items(
+                        report,
+                        revision,
+                        deep_version_index=deep_version_index,
+                    )
+                except (OSError, ValueError, TypeError, DataIntegrityError):
+                    reconstruction_missing += 1
+                    candidate["requeueCount"] = (
+                        clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
+                    )
+                    candidate["lastErrorCode"] = "requeue_reconstruction_missing"
+                    store_changed = True
+                    continue
+                matching = [
+                    projected_item
+                    for projected_item in projected
+                    if safe_reference(projected_item.get("id"))
+                    == safe_reference(candidate.get("id"))
+                ]
+                if len(matching) != 1:
+                    reconstruction_missing += 1
+                    candidate["requeueCount"] = (
+                        clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
+                    )
+                    candidate["lastErrorCode"] = "requeue_reconstruction_missing"
+                    store_changed = True
+                    continue
+                item = matching[0]
+                if item.get("payloadDigest") != candidate.get("payloadDigest"):
+                    reconstruction_digest_mismatch += 1
+                    candidate["requeueCount"] = (
+                        clamp_int(candidate.get("requeueCount"), 0, 0, 9999) + 1
+                    )
+                    candidate["lastErrorCode"] = "requeue_payload_digest_mismatch"
+                    store_changed = True
+                    continue
+                item["requeueCount"] = clamp_int(
+                    candidate.get("requeueCount"),
+                    0,
+                    0,
+                    9999,
+                )
+                stored_items.append(item)
+                store_changed = True
+            if live_reopen_exhausted:
+                # Preserve the exhausted retry history. The successful live
+                # verification is the bounded authorization to make one more
+                # delivery attempt, not a reset of the manual retry budget.
+                item["requeueCount"] = RESEARCH_SHEET_OUTBOX_MAX_REQUEUES - 1
+            item["status"] = "pending"
+            item["attemptCount"] = 0
+            item["nextAttemptAt"] = None
+            item["lastErrorCode"] = None
+            item["receipt"] = None
+            item["requeueCount"] = (
+                clamp_int(item.get("requeueCount"), 0, 0, 9999) + 1
+            )
+            item["lastRequeuedAt"] = requeued_at
+            item["lastRequeueReason"] = reason
+            item["updatedAt"] = requeued_at
+            requeued += 1
+            if live_reopen_exhausted:
+                live_verification_reopened_exhausted += 1
+            store_changed = True
+        eligible_deferred = max(0, len(eligible) - scanned)
+        if store_changed:
+            store["items"] = stored_items
+            _save_research_sheet_outbox_unlocked(store)
+    result = {
+        "requeued": requeued,
+        "exhausted": exhausted,
+        "staleIgnored": stale_ignored,
+        "eligibleDeferred": eligible_deferred,
+        "capacityDeferred": capacity_deferred,
+        "reconstructionMissing": reconstruction_missing,
+        "reconstructionDigestMismatch": reconstruction_digest_mismatch,
+        "liveVerificationReopenedExhausted": live_verification_reopened_exhausted,
+        "liveVerificationIneligible": live_verification_ineligible,
+        "reason": reason,
+        "configRevision": revision,
+    }
+    append_audit({
+        "type": "research_sheet_hub.failed_rows_requeue_checked",
+        "reason": reason,
+        "configRevision": revision,
+        "requeuedCount": requeued,
+        "exhaustedCount": exhausted,
+        "staleIgnoredCount": stale_ignored,
+        "eligibleDeferredCount": eligible_deferred,
+        "capacityDeferredCount": capacity_deferred,
+        "reconstructionMissingCount": reconstruction_missing,
+        "reconstructionDigestMismatchCount": reconstruction_digest_mismatch,
+        "liveVerificationReopenedExhaustedCount": live_verification_reopened_exhausted,
+        "liveVerificationIneligibleCount": live_verification_ineligible,
+        "maxRequeuesPerItem": RESEARCH_SHEET_OUTBOX_MAX_REQUEUES,
+        "credentialsIncluded": False,
+    })
+    return result
 
 
 def _research_sheet_apply_read_state(
@@ -14384,7 +15153,7 @@ def research_sheet_hub_read_model(settings: object | None = None) -> dict:
         consumer_outbox = (
             outbox_by_consumer.get(consumer_id)
             if isinstance(outbox_by_consumer.get(consumer_id), dict)
-            else {"pending": 0, "failed": 0, "synced": 0}
+            else {"pending": 0, "failed": 0, "synced": 0, "deferred": 0}
         )
         consumer_write_ready = bool(
             consumer_read_ready
@@ -14393,6 +15162,12 @@ def research_sheet_hub_read_model(settings: object | None = None) -> dict:
             and write_check.get("verifiedAt")
             and clamp_int(consumer_outbox.get("pending"), 0, 0, RESEARCH_SHEET_OUTBOX_LIMIT) == 0
             and clamp_int(consumer_outbox.get("failed"), 0, 0, RESEARCH_SHEET_OUTBOX_LIMIT) == 0
+            and clamp_int(
+                consumer_outbox.get("deferred"),
+                0,
+                0,
+                RESEARCH_SHEET_DEFERRED_REPORT_LIMIT,
+            ) == 0
         )
         cached_consumer = (
             cached_consumers.get(consumer_id)
@@ -14526,6 +15301,11 @@ def research_sheet_hub_read_model(settings: object | None = None) -> dict:
             "rowCount": source_consumer.get("rowCount") or 0,
             "cachedRowCount": source_consumer.get("cachedRowCount") or 0,
             "observedAt": source_consumer.get("rowsObservedAt"),
+            "outbox": copy.deepcopy(
+                source_consumer.get("outbox")
+                if isinstance(source_consumer.get("outbox"), dict)
+                else {"pending": 0, "failed": 0, "synced": 0, "deferred": 0}
+            ),
         })
     return sanitize_json_value({
         "schemaVersion": RESEARCH_SHEET_HUB_SCHEMA_VERSION,
@@ -14781,6 +15561,10 @@ def _verify_research_sheet_hub_locked() -> dict:
         "errorCode": error_code if verification_applied else "stale_config_discarded",
         "credentialsIncluded": False,
     })
+    if verification_applied and error_code is None:
+        _research_sheet_requeue_failed_current_revision(
+            reason="verification_succeeded",
+        )
     return research_sheet_hub_read_model(settings)
 
 
@@ -15296,6 +16080,9 @@ def _activate_research_sheet_hub_locked(payload: object) -> dict:
         "credentialsIncluded": False,
         "verificationTokenIncluded": False,
     })
+    requeue = _research_sheet_requeue_failed_current_revision(
+        reason="activation_verified",
+    )
     model = research_sheet_hub_read_model(settings)
     ready_consumer_ids = {
         str(consumer.get("consumerId") or "")
@@ -15320,6 +16107,7 @@ def _activate_research_sheet_hub_locked(payload: object) -> dict:
         },
         "researchSheet": model,
         "backfill": backfill,
+        "requeue": requeue,
     }
 
 
@@ -25036,7 +25824,10 @@ def _deep_research_catalog_read_model(
         "googleSheetResearchHistory": sheet_research_history,
         "systems": catalog_rows,
         "failClosed": True,
-        "externalWrites": sheet_consumer.get("writeReady") is True,
+        # This read model only consumes the verified Sheet cache.  A writable
+        # Sheet connection is capability/readiness metadata, not evidence that
+        # assembling the research catalog performs an external write.
+        "externalWrites": False,
         "metaTraderActions": False,
     }, collection_limit=1000, string_limit=2000)
 
@@ -26099,6 +26890,7 @@ def _research_sheet_report_items(
                 "reportId": report_id,
                 "missionId": safe_reference(report.get("linkedMissionId")),
                 "attemptCount": 0,
+                "requeueCount": 0,
                 "lastAttemptAt": None,
                 "nextAttemptAt": None,
                 "lastErrorCode": None,
@@ -26107,6 +26899,78 @@ def _research_sheet_report_items(
                 "updatedAt": utc_now(),
             })
     return items
+
+
+def _research_sheet_defer_report_unlocked(
+    store: dict,
+    report: dict,
+    config_revision: int,
+) -> tuple[bool, bool]:
+    """Persist one compact capacity marker without evicting older work."""
+
+    report_id = safe_reference(report.get("id"))
+    report_type = str(report.get("type") or "").strip()
+    consumer_id = RESEARCH_SHEET_SYNC_REPORT_CONSUMERS.get(report_type)
+    if not report_id or not consumer_id:
+        return False, False
+    markers = [
+        marker for marker in (store.get("deferredReports") or [])
+        if isinstance(marker, dict)
+    ]
+    marker_key = (report_id, config_revision)
+    now = utc_now()
+    for marker in markers:
+        if (
+            safe_reference(marker.get("reportId")),
+            clamp_int(marker.get("configRevision"), -1, -1, 999999),
+        ) != marker_key:
+            continue
+        marker.update({
+            "reportType": report_type,
+            "consumerId": consumer_id,
+            "updatedAt": now,
+            "lastErrorCode": "outbox_capacity_reached",
+        })
+        store["deferredReports"] = markers
+        return True, False
+    if len(markers) >= RESEARCH_SHEET_DEFERRED_REPORT_LIMIT:
+        return False, True
+    markers.append({
+        "reportId": report_id,
+        "reportType": report_type,
+        "consumerId": consumer_id,
+        "configRevision": config_revision,
+        "deferredAt": now,
+        "updatedAt": now,
+        "recoveryAttemptCount": 0,
+        "lastErrorCode": "outbox_capacity_reached",
+    })
+    store["deferredReports"] = markers
+    return True, False
+
+
+def _research_sheet_remove_deferred_report_unlocked(
+    store: dict,
+    report_id: object,
+    config_revision: int,
+) -> bool:
+    safe_report_id = safe_reference(report_id)
+    markers = [
+        marker for marker in (store.get("deferredReports") or [])
+        if isinstance(marker, dict)
+    ]
+    retained = [
+        marker for marker in markers
+        if not (
+            safe_reference(marker.get("reportId")) == safe_report_id
+            and clamp_int(marker.get("configRevision"), -1, -1, 999999)
+            == config_revision
+        )
+    ]
+    if len(retained) == len(markers):
+        return False
+    store["deferredReports"] = retained
+    return True
 
 
 def _research_sheet_queue_report(
@@ -26137,6 +27001,10 @@ def _research_sheet_queue_report(
         return {"queued": 0, "reason": "report_not_eligible"}
     queued = 0
     rejected = 0
+    deferred_stored = False
+    deferred_store_full = False
+    deferred_count = 0
+    config_revision = int(internal.get("configRevision") or 0)
     with RESEARCH_SHEET_OUTBOX_LOCK:
         store = _load_research_sheet_outbox_unlocked()
         stored_items = list(store.get("items") or [])
@@ -26146,11 +27014,28 @@ def _research_sheet_queue_report(
                 if item.get("status") in {"pending", "retry_pending", "write_unknown", "failed"}
             ]
         by_id = {safe_reference(item.get("id")): index for index, item in enumerate(stored_items) if isinstance(item, dict)}
+        delivery_statuses = {"pending", "retry_pending", "write_unknown"}
+        delivery_ids = {
+            safe_reference(item.get("id"))
+            for item in stored_items
+            if isinstance(item, dict)
+            and item.get("status") in delivery_statuses
+            and safe_reference(item.get("id"))
+        }
         ledger_by_id = {
             safe_reference(entry.get("id")): entry
             for entry in (
                 store.get("syncedLedger")
                 if isinstance(store.get("syncedLedger"), list)
+                else []
+            )
+            if isinstance(entry, dict) and safe_reference(entry.get("id"))
+        }
+        failed_ledger_by_id = {
+            safe_reference(entry.get("id")): entry
+            for entry in (
+                store.get("failedLedger")
+                if isinstance(store.get("failedLedger"), list)
                 else []
             )
             if isinstance(entry, dict) and safe_reference(entry.get("id"))
@@ -26165,39 +27050,67 @@ def _research_sheet_queue_report(
                 == clamp_int(item.get("configRevision"), -2, -2, 999999)
             )
 
-        required_new_slots = sum(
+        def terminal_failed(item: dict) -> bool:
+            failure = failed_ledger_by_id.get(item.get("id"))
+            return bool(
+                isinstance(failure, dict)
+                and failure.get("payloadDigest") == item.get("payloadDigest")
+                and clamp_int(failure.get("configRevision"), -1, -1, 999999)
+                == clamp_int(item.get("configRevision"), -2, -2, 999999)
+            )
+
+        required_delivery_slots = sum(
             1
             for item in items
-            if item["id"] not in by_id and not already_synced(item)
+            if not already_synced(item)
+            and not terminal_failed(item)
+            and item["id"] not in delivery_ids
+            and not (
+                item["id"] in by_id
+                and stored_items[by_id[item["id"]]].get("payloadDigest")
+                == item.get("payloadDigest")
+                and stored_items[by_id[item["id"]]].get("status")
+                in {"failed", "synced"}
+            )
         )
-        if len(stored_items) + required_new_slots > RESEARCH_SHEET_OUTBOX_LIMIT:
+        if len(delivery_ids) + required_delivery_slots > RESEARCH_SHEET_OUTBOX_LIMIT:
             # One report is one archive transaction. In particular, a six-row
             # Radar result must never be persisted as a misleading 1/6 batch.
-            return {
-                "queued": 0,
-                "reason": "outbox_capacity_reached",
-                "rejected": len(items),
-            }
-        for item in items:
-            if already_synced(item):
-                continue
-            existing_index = by_id.get(item["id"])
-            if existing_index is None:
-                if len(stored_items) >= RESEARCH_SHEET_OUTBOX_LIMIT:
-                    rejected += 1
+            rejected = len(items)
+            deferred_stored, deferred_store_full = (
+                _research_sheet_defer_report_unlocked(
+                    store,
+                    report,
+                    config_revision,
+                )
+            )
+        else:
+            for item in items:
+                if already_synced(item) or terminal_failed(item):
                     continue
-                stored_items.append(item)
-                by_id[item["id"]] = len(stored_items) - 1
+                existing_index = by_id.get(item["id"])
+                if existing_index is None:
+                    stored_items.append(item)
+                    by_id[item["id"]] = len(stored_items) - 1
+                    queued += 1
+                    continue
+                existing = stored_items[existing_index]
+                if existing.get("payloadDigest") == item.get("payloadDigest"):
+                    # Backfill runs periodically. It must not reset attemptCount,
+                    # nextAttemptAt, or terminal failure state for an unchanged
+                    # payload. Only verified/explicit bounded requeue may do that.
+                    continue
+                item["createdAt"] = existing.get("createdAt") or item["createdAt"]
+                stored_items[existing_index] = item
                 queued += 1
-                continue
-            existing = stored_items[existing_index]
-            if existing.get("payloadDigest") == item.get("payloadDigest") and existing.get("status") == "synced":
-                continue
-            item["createdAt"] = existing.get("createdAt") or item["createdAt"]
-            stored_items[existing_index] = item
-            queued += 1
+            _research_sheet_remove_deferred_report_unlocked(
+                store,
+                report.get("id"),
+                config_revision,
+            )
         store["items"] = stored_items
         _save_research_sheet_outbox_unlocked(store)
+        deferred_count = len(store.get("deferredReports") or [])
     if queued:
         append_audit({
             "type": "research_sheet_hub.rows_queued",
@@ -26208,13 +27121,240 @@ def _research_sheet_queue_report(
             "configRevision": internal.get("configRevision"),
             "credentialsIncluded": False,
         })
+    if rejected:
+        append_audit({
+            "type": "research_sheet_hub.report_deferred",
+            "reportId": safe_reference(report.get("id")),
+            "consumerId": RESEARCH_SHEET_SYNC_REPORT_CONSUMERS.get(
+                str(report.get("type") or "")
+            ),
+            "configRevision": config_revision,
+            "rejectedRowCount": rejected,
+            "deferredMarkerStored": deferred_stored,
+            "deferredStoreFull": deferred_store_full,
+            "deferredReportCount": deferred_count,
+            "credentialsIncluded": False,
+        })
     if flush and queued:
         _flush_research_sheet_outbox(max_items=20)
     return {
         "queued": queued,
         "reason": "outbox_capacity_reached" if rejected else None,
         "rejected": rejected,
+        "deferredStored": deferred_stored,
+        "deferredStoreFull": deferred_store_full,
+        "deferredReportCount": deferred_count,
     }
+
+
+def _research_sheet_mark_deferred_recovery(
+    report_id: object,
+    config_revision: int,
+    error_code: str,
+) -> None:
+    safe_report_id = safe_reference(report_id)
+    if not safe_report_id:
+        return
+    with RESEARCH_SHEET_OUTBOX_LOCK:
+        store = _load_research_sheet_outbox_unlocked()
+        changed = False
+        for marker in store.get("deferredReports") or []:
+            if not isinstance(marker, dict) or (
+                safe_reference(marker.get("reportId")) != safe_report_id
+                or clamp_int(marker.get("configRevision"), -1, -1, 999999)
+                != config_revision
+            ):
+                continue
+            marker["recoveryAttemptCount"] = min(
+                9999,
+                clamp_int(marker.get("recoveryAttemptCount"), 0, 0, 9999) + 1,
+            )
+            marker["lastErrorCode"] = redact_text(error_code, 120)
+            marker["updatedAt"] = utc_now()
+            changed = True
+            break
+        if changed:
+            _save_research_sheet_outbox_unlocked(store)
+
+
+def _research_sheet_drain_deferred_reports(
+    *,
+    max_reports: int = RESEARCH_SHEET_DEFERRED_REPORT_DRAIN_BATCH_LIMIT,
+    allowed_consumer_ids: set[str] | None = None,
+) -> dict:
+    """Materialize a bounded oldest durable capacity backlog into row work."""
+
+    internal = _research_sheet_hub_internal()
+    revision = clamp_int(internal.get("configRevision"), -1, -1, 999999)
+    if (
+        revision < 0
+        or internal.get("active") is not True
+        or clamp_int(internal.get("activeConfigRevision"), -2, -2, 999999)
+        != revision
+    ):
+        return {
+            "scanned": 0,
+            "drained": 0,
+            "queued": 0,
+            "eligibleDeferred": 0,
+            "capacityDeferred": 0,
+            "recoveryDeferred": 0,
+            "reason": "activation_required",
+        }
+    allowed = (
+        None
+        if allowed_consumer_ids is None
+        else {str(value) for value in allowed_consumer_ids if str(value)}
+    )
+    limit = clamp_int(
+        max_reports,
+        RESEARCH_SHEET_DEFERRED_REPORT_DRAIN_BATCH_LIMIT,
+        1,
+        RESEARCH_SHEET_DEFERRED_REPORT_DRAIN_BATCH_LIMIT,
+    )
+    with RESEARCH_SHEET_OUTBOX_LOCK:
+        store = _load_research_sheet_outbox_unlocked()
+        eligible = [
+            copy.deepcopy(marker)
+            for marker in (store.get("deferredReports") or [])
+            if isinstance(marker, dict)
+            and clamp_int(marker.get("configRevision"), -2, -2, 999999)
+            == revision
+            and (
+                allowed is None
+                or str(marker.get("consumerId") or "") in allowed
+            )
+        ]
+    # A missing/corrupt legacy marker is audited and rotated behind untouched
+    # work, so at most 500 failures are inspected per pass without permanently
+    # blocking valid reports that follow them.
+    eligible.sort(key=lambda marker: (
+        clamp_int(marker.get("recoveryAttemptCount"), 0, 0, 9999),
+        str(marker.get("deferredAt") or ""),
+        str(marker.get("reportId") or ""),
+    ))
+    scan_limit = min(
+        len(eligible),
+        RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT,
+    )
+    scanned = 0
+    drained = 0
+    queued = 0
+    capacity_deferred = 0
+    recovery_deferred = 0
+    deep_version_index: dict[str, dict] | None = None
+    deep_version_index_unavailable = False
+    for marker in eligible[:scan_limit]:
+        if drained >= limit:
+            break
+        scanned += 1
+        report_id = safe_reference(marker.get("reportId"))
+        report_type = str(marker.get("reportType") or "")
+        consumer_id = str(marker.get("consumerId") or "")
+        report = None
+        if report_id:
+            report_path = (RUNTIME_REPORTS_DIR / f"{report_id}.json").resolve(
+                strict=False
+            )
+            try:
+                report_path.relative_to(RUNTIME_REPORTS_DIR.resolve(strict=False))
+                report = read_json(report_path, None)
+            except (ValueError, DataIntegrityError):
+                report = None
+        error_code = None
+        if not isinstance(report, dict):
+            error_code = "deferred_report_missing"
+        elif safe_reference(report.get("id")) != report_id:
+            error_code = "deferred_report_id_mismatch"
+        elif (
+            str(report.get("type") or "") != report_type
+            or RESEARCH_SHEET_SYNC_REPORT_CONSUMERS.get(report_type)
+            != consumer_id
+        ):
+            error_code = "deferred_report_contract_mismatch"
+        if error_code is not None:
+            recovery_deferred += 1
+            _research_sheet_mark_deferred_recovery(
+                report_id,
+                revision,
+                error_code,
+            )
+            continue
+        if report_type == "trading_system_research_report":
+            if deep_version_index_unavailable:
+                error_code = "deferred_deep_version_index_unavailable"
+            elif deep_version_index is None:
+                try:
+                    deep_version_index = _research_sheet_runtime_deep_version_index(
+                        report
+                    )
+                except (OSError, ValueError, TypeError, DataIntegrityError):
+                    deep_version_index_unavailable = True
+                    error_code = "deferred_deep_version_index_unavailable"
+        if error_code is not None:
+            recovery_deferred += 1
+            _research_sheet_mark_deferred_recovery(
+                report_id,
+                revision,
+                error_code,
+            )
+            continue
+        result = _research_sheet_queue_report(
+            report,
+            flush=False,
+            allowed_consumer_ids={consumer_id},
+            deep_version_index=deep_version_index,
+        )
+        if result.get("reason") == "outbox_capacity_reached":
+            capacity_deferred += 1
+            continue
+        if result.get("reason") not in {None}:
+            recovery_deferred += 1
+            _research_sheet_mark_deferred_recovery(
+                report_id,
+                revision,
+                f"deferred_{result.get('reason')}",
+            )
+            continue
+        drained += 1
+        queued += clamp_int(result.get("queued"), 0, 0, RESEARCH_SHEET_OUTBOX_LIMIT)
+    with RESEARCH_SHEET_OUTBOX_LOCK:
+        remaining_store = _load_research_sheet_outbox_unlocked()
+        eligible_deferred = sum(
+            1
+            for marker in (remaining_store.get("deferredReports") or [])
+            if isinstance(marker, dict)
+            and clamp_int(marker.get("configRevision"), -2, -2, 999999)
+            == revision
+            and (
+                allowed is None
+                or str(marker.get("consumerId") or "") in allowed
+            )
+        )
+    result = {
+        "scanned": scanned,
+        "drained": drained,
+        "queued": queued,
+        "eligibleDeferred": eligible_deferred,
+        "capacityDeferred": capacity_deferred,
+        "recoveryDeferred": recovery_deferred,
+        "reason": None,
+        "configRevision": revision,
+    }
+    append_audit({
+        "type": "research_sheet_hub.deferred_reports_drain_checked",
+        "configRevision": revision,
+        "scannedCount": scanned,
+        "drainedCount": drained,
+        "queuedRowCount": queued,
+        "eligibleDeferredCount": eligible_deferred,
+        "capacityDeferredCount": capacity_deferred,
+        "recoveryDeferredCount": recovery_deferred,
+        "scanLimit": RESEARCH_SHEET_DEFERRED_REPORT_SCAN_LIMIT,
+        "batchLimit": limit,
+        "credentialsIncluded": False,
+    })
+    return result
 
 
 def _research_sheet_mark_write_verified(config_revision: int, consumer_id: str) -> None:
@@ -26253,6 +27393,32 @@ def _flush_research_sheet_outbox(*, max_items: int = 20) -> dict:
         return {"processed": 0, "synced": 0, "reason": "flush_in_progress"}
     try:
         return _flush_research_sheet_outbox_locked(max_items=max_items)
+    finally:
+        RESEARCH_SHEET_FLUSH_LOCK.release()
+
+
+def _retry_failed_research_sheet_outbox(*, max_items: int = 50) -> dict:
+    """Atomically reopen a bounded failed batch and attempt delivery once."""
+
+    if not RESEARCH_SHEET_FLUSH_LOCK.acquire(blocking=False):
+        return {
+            "retry": {
+                "requeued": 0,
+                "reason": "flush_in_progress",
+            },
+            "flush": {
+                "processed": 0,
+                "synced": 0,
+                "reason": "flush_in_progress",
+            },
+        }
+    try:
+        retry = _research_sheet_requeue_failed_current_revision(
+            reason="explicit_retry",
+            max_items=max_items,
+        )
+        flush = _flush_research_sheet_outbox_locked(max_items=max_items)
+        return {"retry": retry, "flush": flush}
     finally:
         RESEARCH_SHEET_FLUSH_LOCK.release()
 
@@ -26313,9 +27479,12 @@ def _flush_research_sheet_outbox_locked(*, max_items: int = 20) -> dict:
             error_code = error.code
             if error.write_unknown:
                 status = "write_unknown"
-            elif error.code in {"auth_expired", "auth_required", "permission_denied", "rate_limited", "google_api_unavailable"}:
+            elif error.code in {"rate_limited", "google_api_unavailable"}:
                 status = "retry_pending"
             else:
+                # Auth/permission failures require an operator correction and
+                # successful verification before bounded requeue. Schema and
+                # other deterministic failures are terminal for this payload.
                 status = "failed"
         applied_to_current_payload = False
         with RESEARCH_SHEET_OUTBOX_LOCK:
@@ -26331,17 +27500,20 @@ def _flush_research_sheet_outbox_locked(*, max_items: int = 20) -> dict:
                     or int(item.get("configRevision") or -1) != revision
                 ):
                     break
+                next_attempt_count = min(
+                    9999,
+                    clamp_int(item.get("attemptCount"), 0, 0, 9999) + 1,
+                )
                 item["status"] = status
-                item["attemptCount"] = clamp_int(item.get("attemptCount"), 0, 0, 9999) + 1
+                item["attemptCount"] = next_attempt_count
                 item["lastAttemptAt"] = utc_now()
                 if status in {"retry_pending", "write_unknown"}:
-                    # Retry forever with a bounded exponential delay.  The
-                    # upsert key and read-back receipt make every retry
-                    # idempotent, while a one-hour ceiling means a recovered
-                    # Google connection is picked up without waiting for the
-                    # next daily report or for a human to open the dashboard.
+                    # Rate limits, temporary API outages and ambiguous writes
+                    # remain durable delivery work. Retry forever without a
+                    # hot loop: exponential delay is capped at one hour, and
+                    # fresh rows retain priority through attempt-count sorting.
                     retry_exponent = min(
-                        RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+                        6,
                         max(0, item["attemptCount"] - 1),
                     )
                     retry_seconds = min(
@@ -26410,11 +27582,6 @@ def _research_sheet_backfill_recent_reports(
         if allowed_consumer_ids is None
         else {str(value) for value in allowed_consumer_ids if str(value)}
     )
-    report_consumers = {
-        "trading_system_discovery_report": "worldSystem",
-        "trading_system_research_report": "deepResearch",
-        "indicator_scout_report": "indicatorEaTool",
-    }
     deep_research_allowed = allowed is None or "deepResearch" in allowed
     deep_version_index = None
     if deep_research_allowed and any(
@@ -26433,7 +27600,8 @@ def _research_sheet_backfill_recent_reports(
             continue
         if (
             allowed is not None
-            and report_consumers.get(report.get("type")) not in allowed
+            and RESEARCH_SHEET_SYNC_REPORT_CONSUMERS.get(report.get("type"))
+            not in allowed
         ):
             continue
         queued += int(
@@ -26446,7 +27614,28 @@ def _research_sheet_backfill_recent_reports(
             or 0
         )
     flush_result = _flush_research_sheet_outbox(max_items=50)
-    return {"queued": queued, "flush": flush_result}
+    deferred_drain = _research_sheet_drain_deferred_reports(
+        max_reports=RESEARCH_SHEET_DEFERRED_REPORT_DRAIN_BATCH_LIMIT,
+        allowed_consumer_ids=allowed_consumer_ids,
+    )
+    deferred_queued = clamp_int(
+        deferred_drain.get("queued"),
+        0,
+        0,
+        RESEARCH_SHEET_OUTBOX_LIMIT,
+    )
+    return {
+        "queued": queued + deferred_queued,
+        "recentQueued": queued,
+        "flush": flush_result,
+        "deferredDrain": deferred_drain,
+        "deferredReports": clamp_int(
+            deferred_drain.get("eligibleDeferred"),
+            0,
+            0,
+            RESEARCH_SHEET_DEFERRED_REPORT_LIMIT,
+        ),
+    }
 
 
 def _radar_website_tool_read_model(
@@ -26511,23 +27700,26 @@ def _radar_website_tool_read_model(
         entries = _radar_report_entries(report)
         verified_batch = _radar_verified_ready_batch(report, entries)
         complete_daily_batch = _radar_complete_daily_batch_required(report)
-        progress_only_batch = bool(
-            complete_daily_batch
-            and not verified_batch
-            and _radar_contract_ready_batch(report, entries)
-        )
-        if not verified_batch and not progress_only_batch:
+        if not verified_batch:
+            # The raw Report remains available for audit and repair, but the
+            # user-facing read model must never turn a structurally valid yet
+            # unverified 1..5/6 batch into a visible result.
             continue
         report_bucket = buckets.get(report_day_key)
-        if report_bucket is not None:
-            report_bucket["runCount"] += 1
+        candidate_seen_fingerprints = set(seen_fingerprints)
+        candidate_seen_source_keys = set(seen_source_keys)
+        staged_entries: list[tuple[dict, dict, bool]] = []
         strict_duplicate_found = False
-        for entry in entries:
+        strict_invalid_found = False
+        for raw_entry in entries:
+            entry = copy.deepcopy(raw_entry)
             entry_checked_at = parse_iso(str(entry.get("checkedAt") or ""))
             if entry_checked_at is None:
+                strict_invalid_found = strict_invalid_found or complete_daily_batch
                 continue
             entry_observed_at = entry_checked_at.astimezone(THAILAND_TIMEZONE)
             if entry_observed_at > local_now + timedelta(minutes=5):
+                strict_invalid_found = strict_invalid_found or complete_daily_batch
                 continue
             fingerprint = str(entry.get("duplicateFingerprint") or "")
             source_key = _radar_source_key(entry.get("sourceUrl"))
@@ -26553,17 +27745,18 @@ def _radar_website_tool_read_model(
                 )
             )
             catalog_duplicate = bool(
-                (fingerprint and fingerprint in seen_fingerprints)
-                or (source_key and source_key in seen_source_keys)
+                (fingerprint and fingerprint in candidate_seen_fingerprints)
+                or (source_key and source_key in candidate_seen_source_keys)
                 or sheet_duplicate
             )
             duplicate = stored_duplicate or catalog_duplicate
             if fingerprint:
-                seen_fingerprints.add(fingerprint)
+                candidate_seen_fingerprints.add(fingerprint)
             if source_key:
-                seen_source_keys.add(source_key)
+                candidate_seen_source_keys.add(source_key)
             bucket = buckets.get(entry_observed_at.date().isoformat())
             if bucket is None:
+                strict_invalid_found = strict_invalid_found or complete_daily_batch
                 continue
             entry["duplicateStatus"] = "duplicate" if duplicate else "unique"
             entry["duplicateScope"] = (
@@ -26574,18 +27767,30 @@ def _radar_website_tool_read_model(
                 else "none"
             )
             if complete_daily_batch and duplicate:
-                # Preserve the raw Report for audit, but the user-facing daily
-                # progress represents actually-new items only.  A persisted
-                # six-row batch with one historical duplicate therefore reads
-                # as 5/6, not a false completion.
                 strict_duplicate_found = True
-                bucket["duplicateCount"] += 1
-                continue
+            if complete_daily_batch and entry_observed_at.date().isoformat() != report_day_key:
+                strict_invalid_found = True
+            staged_entries.append((bucket, entry, duplicate))
+        if complete_daily_batch and (
+            strict_duplicate_found
+            or strict_invalid_found
+            or report_bucket is None
+            or len(staged_entries) != RADAR_DAILY_BATCH_REQUIRED_ITEMS
+        ):
+            # Revalidate the entire persisted batch atomically against the
+            # current local/Sheet catalog.  If even one row is now duplicate,
+            # out of window, or otherwise unusable, expose zero rows and let
+            # the same reserved Mission continue its durable repair loop.
+            continue
+        seen_fingerprints = candidate_seen_fingerprints
+        seen_source_keys = candidate_seen_source_keys
+        if report_bucket is not None:
+            report_bucket["runCount"] += 1
+        for bucket, entry, duplicate in staged_entries:
             bucket["entries"].append(entry)
             bucket["itemCount"] += 1
             bucket["duplicateCount" if duplicate else "uniqueCount"] += 1
-        if verified_batch and not strict_duplicate_found:
-            verified_source_reports.append(report)
+        verified_source_reports.append(report)
     history = [buckets[date_text] for date_text in dates]
     seven_day_entries = [
         entry
@@ -29240,6 +30445,7 @@ def _dashboard_workflow_capture_due_slots(now_local: datetime | None = None) -> 
     captured: list[dict] = []
     guarded: list[dict] = []
     active_radar_carry_forward_id = None
+    active_radar_carry_forward_kind = None
     radar_carry_forward_lookup_failed = False
     try:
         for mission in load_missions():
@@ -29249,16 +30455,29 @@ def _dashboard_workflow_capture_due_slots(now_local: datetime | None = None) -> 
             ):
                 continue
             repair, repair_error = _radar_batch_completion_repair_state(mission)
+            completion_retry, completion_retry_error = (
+                _scheduled_radar_completion_retry_state(
+                    mission,
+                    require_authorization=mission.get("status") == "queued",
+                )
+            )
             context = _workflow_context_storage(mission.get("workflowContext")) or {}
             reservation = (
                 context.get("executionReservation")
                 if isinstance(context.get("executionReservation"), dict)
                 else {}
             )
-            if (
+            active_batch_repair = bool(
                 repair
                 and repair_error is None
                 and repair.get("status") in {"queued", "deferred"}
+            )
+            active_completion_retry = bool(
+                completion_retry
+                and completion_retry_error is None
+            )
+            if (
+                (active_batch_repair or active_completion_retry)
                 and reservation.get("settingsKey") == "indicatorScoutSchedule"
                 and re.fullmatch(
                     r"\d{4}-\d{2}-\d{2}",
@@ -29267,6 +30486,11 @@ def _dashboard_workflow_capture_due_slots(now_local: datetime | None = None) -> 
                 and str(reservation.get("bangkokDate")) < local_day
             ):
                 active_radar_carry_forward_id = safe_reference(mission.get("id"))
+                active_radar_carry_forward_kind = (
+                    "radar_batch_completion_overdue_carry_forward"
+                    if active_batch_repair
+                    else "scheduled_radar_completion_overdue_carry_forward"
+                )
                 break
     except (DataIntegrityError, OSError, RuntimeError, ValueError):
         # If Mission state cannot be inspected, fail closed only for Radar's
@@ -29315,7 +30539,8 @@ def _dashboard_workflow_capture_due_slots(now_local: datetime | None = None) -> 
                         schedule["pendingScheduledAt"] = None
                         schedule["lastRunStatus"] = "deferred"
                         schedule["lastResultKind"] = (
-                            "radar_batch_completion_overdue_carry_forward"
+                            active_radar_carry_forward_kind
+                            or "radar_batch_completion_overdue_carry_forward"
                         )
                         schedule["lastError"] = None
                         schedule["lastErrorAt"] = None
@@ -34575,7 +35800,12 @@ def _metatrader_origin_install_path(data_dir: Path, platform: str) -> str | None
 
 def _metatrader_process_locations() -> dict:
     """Return backend-only install roots for running terminals without PID/title."""
-    empty = {"supported": False, "mt4": [], "mt5": []}
+    empty = {
+        "supported": False,
+        "mt4": [],
+        "mt5": [],
+        "pathAccessLimited": {"mt4": 0, "mt5": 0},
+    }
     if os.name != "nt":
         return empty
     command = [
@@ -34586,8 +35816,8 @@ def _metatrader_process_locations() -> dict:
         (
             "$ErrorActionPreference='SilentlyContinue';"
             "@(Get-Process -Name terminal,terminal64 -ErrorAction SilentlyContinue | "
-            "Where-Object { -not [string]::IsNullOrWhiteSpace($_.Path) } | "
-            "ForEach-Object { [pscustomobject]@{name=$_.ProcessName;path=$_.Path} }) | "
+            "ForEach-Object { $processPath=$null; try { $processPath=$_.Path } catch {}; "
+            "[pscustomobject]@{name=$_.ProcessName;path=$processPath} }) | "
             "ConvertTo-Json -Compress"
         ),
     ]
@@ -34608,20 +35838,33 @@ def _metatrader_process_locations() -> dict:
         return empty
     raw_output = (probe.stdout or "").strip()
     if not raw_output:
-        return {"supported": True, "mt4": [], "mt5": []}
+        return {
+            "supported": True,
+            "mt4": [],
+            "mt5": [],
+            "pathAccessLimited": {"mt4": 0, "mt5": 0},
+        }
     try:
         decoded = json.loads(raw_output)
     except json.JSONDecodeError:
         return empty
     rows = decoded if isinstance(decoded, list) else [decoded]
-    result = {"supported": True, "mt4": [], "mt5": []}
+    result = {
+        "supported": True,
+        "mt4": [],
+        "mt5": [],
+        "pathAccessLimited": {"mt4": 0, "mt5": 0},
+    }
     for row in rows[:128]:
         if not isinstance(row, dict):
             continue
         process_name = str(row.get("name") or "").strip().lower()
         executable_path = str(row.get("path") or "").strip()
         platform = "mt4" if process_name == "terminal" else ("mt5" if process_name == "terminal64" else None)
-        if not platform or not executable_path:
+        if not platform:
+            continue
+        if not executable_path:
+            result["pathAccessLimited"][platform] += 1
             continue
         expected_leaf = "terminal.exe" if platform == "mt4" else "terminal64.exe"
         executable = Path(executable_path)
@@ -34651,11 +35894,12 @@ def _metatrader_running_state(
             if str(item).strip()
         }
         if install_path:
-            return (
-                "platform_running_detected"
-                if os.path.normcase(str(install_path)) in exact_locations
-                else "not_running_detected"
-            )
+            if os.path.normcase(str(install_path)) in exact_locations:
+                return "platform_running_detected"
+            inaccessible = running.get("_pathAccessLimitedCounts")
+            if isinstance(inaccessible, dict) and max(0, int(inaccessible.get(platform) or 0)):
+                return "unknown"
+            return "not_running_detected"
         return "unknown"
     return "platform_running_detected" if max(0, int(running.get(platform) or 0)) else "not_running_detected"
 
@@ -34921,13 +36165,18 @@ def discover_running_metatrader(
     if process_locations is None and process_rows is None:
         exact = _metatrader_process_locations()
         if exact.get("supported"):
+            limited = exact.get("pathAccessLimited") if isinstance(exact.get("pathAccessLimited"), dict) else {}
             return {
                 "supported": True,
-                "mt4": len(exact.get("mt4") or []),
-                "mt5": len(exact.get("mt5") or []),
+                "mt4": len(exact.get("mt4") or []) + max(0, int(limited.get("mt4") or 0)),
+                "mt5": len(exact.get("mt5") or []) + max(0, int(limited.get("mt5") or 0)),
                 "_processInstallPaths": {
                     "mt4": list(exact.get("mt4") or []),
                     "mt5": list(exact.get("mt5") or []),
+                },
+                "_pathAccessLimitedCounts": {
+                    "mt4": max(0, int(limited.get("mt4") or 0)),
+                    "mt5": max(0, int(limited.get("mt5") or 0)),
                 },
             }
     if isinstance(process_locations, dict):
@@ -34973,7 +36222,20 @@ def metatrader_status_read_model(installed: dict, running: dict, candidates: lis
     for key, label in (("mt4", "MT4"), ("mt5", "MT5")):
         installed_count = max(0, int(installed.get(key) or 0))
         running_count = max(0, int(running.get(key) or 0))
-        if running_count:
+        inaccessible = running.get("_pathAccessLimitedCounts")
+        path_access_limited_count = (
+            max(0, int(inaccessible.get(key) or 0))
+            if isinstance(inaccessible, dict)
+            else 0
+        )
+        if path_access_limited_count:
+            status_name = "detected"
+            detail = (
+                f"ตรวจพบ {label} กำลังทำงาน {running_count} รายการ แต่มี "
+                f"{path_access_limited_count} รายการที่ Local Runner อ่านตำแหน่งไม่ได้ "
+                "อาจเปิดด้วยสิทธิ์ Administrator กรุณาเปิด HQ ด้วยสิทธิ์ระดับเดียวกัน"
+            )
+        elif running_count:
             status_name = "detected"
             detail = f"ตรวจพบ {label} กำลังทำงาน {running_count} รายการ แต่ยังไม่ได้เชื่อม Adapter สำหรับสั่งงาน"
         elif installed_count:
@@ -34987,6 +36249,8 @@ def metatrader_status_read_model(installed: dict, running: dict, candidates: lis
             "status": status_name,
             "installedCount": installed_count,
             "runningCount": running_count,
+            "pathAccessLimited": path_access_limited_count > 0,
+            "pathAccessLimitedCount": path_access_limited_count,
             "detailTh": detail,
         }
     safe_candidates = []
@@ -35018,8 +36282,50 @@ def metatrader_status_read_model(installed: dict, running: dict, candidates: lis
         "candidates": safe_candidates,
         "platforms": platforms,
         "checkedAt": utc_now(),
-        "privacy": "ไม่อ่านตำแหน่งโปรแกรม หมายเลข Process ข้อมูลบัญชี ชื่อโบรกเกอร์ รหัสผ่าน หรือข้อมูลการเทรด",
+        "privacy": "ไม่ส่งตำแหน่งโปรแกรมหรือหมายเลข Process ออกหน้าเว็บ และไม่อ่านข้อมูลบัญชี ชื่อโบรกเกอร์ รหัสผ่าน หรือข้อมูลการเทรด",
     }
+
+
+def _include_verified_running_mt4_candidate_locations(
+    discovered: list[dict],
+    running: dict,
+) -> list[dict]:
+    """Union verified running MT4 roots into discovery without making paths public."""
+    combined = [dict(item) for item in discovered if isinstance(item, dict)]
+    process_locations = running.get("_processInstallPaths")
+    if not isinstance(process_locations, dict):
+        return combined
+
+    known_install_paths = {
+        os.path.normcase(str(item.get("installPath") or ""))
+        for item in combined
+        if str(item.get("platform") or "").lower() == "mt4"
+        and str(item.get("installPath") or "").strip()
+    }
+    for raw_location in list(process_locations.get("mt4") or [])[:128]:
+        value = str(raw_location or "").strip()
+        if not value:
+            continue
+        install_dir = Path(value)
+        try:
+            if not install_dir.is_absolute() or not install_dir.is_dir():
+                continue
+            if not (install_dir / "terminal.exe").is_file():
+                continue
+            canonical = _canonical_metatrader_location(install_dir)
+        except (OSError, PermissionError, RuntimeError):
+            continue
+        identity = os.path.normcase(canonical)
+        if identity in known_install_paths:
+            continue
+        known_install_paths.add(identity)
+        combined.append({
+            "platform": "mt4",
+            "localPath": canonical,
+            "installPath": canonical,
+            "dataPath": None,
+        })
+    return combined
 
 
 def metatrader_status(force: bool = False, roots: list[Path] | None = None, process_rows: list[str] | None = None) -> dict:
@@ -35033,6 +36339,7 @@ def metatrader_status(force: bool = False, roots: list[Path] | None = None, proc
         installed = discover_metatrader_installations(roots=roots, include_candidates=True)
         running = discover_running_metatrader(process_rows=process_rows)
         discovered = installed.get("_candidateLocations") if isinstance(installed.get("_candidateLocations"), list) else []
+        discovered = _include_verified_running_mt4_candidate_locations(discovered, running)
         isolated_runtime = os.path.normcase(str(RUNTIME_DIR.resolve(strict=False))) != os.path.normcase(
             str(PROJECT_RUNTIME_DIR.resolve(strict=False))
         )
@@ -35063,8 +36370,8 @@ def peek_metatrader_status() -> dict:
                 "candidateCount": len(candidates),
                 "candidates": candidates,
                 "platforms": {
-                    "mt4": {"label": "MT4", "status": "not_checked", "installedCount": 0, "runningCount": 0, "detailTh": "ยังกดค้นหา MT4 / MT5 ในรอบนี้"},
-                    "mt5": {"label": "MT5", "status": "not_checked", "installedCount": 0, "runningCount": 0, "detailTh": "ยังกดค้นหา MT4 / MT5 ในรอบนี้"},
+                    "mt4": {"label": "MT4", "status": "not_checked", "installedCount": 0, "runningCount": 0, "pathAccessLimited": False, "pathAccessLimitedCount": 0, "detailTh": "ยังกดค้นหา MT4 / MT5 ในรอบนี้"},
+                    "mt5": {"label": "MT5", "status": "not_checked", "installedCount": 0, "runningCount": 0, "pathAccessLimited": False, "pathAccessLimitedCount": 0, "detailTh": "ยังกดค้นหา MT4 / MT5 ในรอบนี้"},
                 },
                 "checkedAt": None,
             }
@@ -35085,6 +36392,8 @@ def _metatrader_allowed_platforms_for_prop(prop_id: str) -> set[str]:
             allowed.add("mt4")
         elif item_id == "mt5_terminal":
             allowed.add("mt5")
+    if prop_id == AI_TRADE_COUNCIL_PROP_ID:
+        return {"mt4"} if "mt4" in allowed else set()
     return allowed
 
 
@@ -36061,6 +37370,18 @@ def _mt4_trade_gateway_init_status_message_th(init_status: dict) -> str:
     reason_labels = {
         "SNAPSHOT_CHANNEL_INVALID": "Channel ID ไม่ถูกต้อง",
         "LIVE_SIGNING_KEY_PIN_INVALID": "Key ID สำหรับโหมด Live มีรูปแบบไม่ถูกต้อง",
+        "LIVE_SIGNING_KEY_PIN_REQUIRED": "โหมด Live ยังไม่ได้ปักหมุด Key ID จาก Local Runner",
+        "LIVE_SIGNING_KEY_PIN_MISMATCH": "Key ID ของ EA ไม่ตรงกับ Active Key ของ Local Runner",
+        "ACTIVE_SIGNING_KEY_POINTER_MISSING": "Local Runner ยังไม่ได้สร้าง Active Signing Key ให้ Channel นี้",
+        "ACTIVE_SIGNING_KEY_ID_INVALID": "Active Signing Key ID ของ Local Runner ไม่ถูกต้อง",
+        "SIGNING_KEY_FILE_MISSING": "EA เปิดไฟล์ Signing Key ของ Local Runner ไม่ได้",
+        "SIGNING_KEY_LENGTH_INVALID": "ไฟล์ Signing Key มีขนาดไม่ถูกต้อง",
+        "SIGNING_KEY_OPEN_FAILED": "EA เปิดไฟล์ Signing Key ของ Local Runner ไม่ได้",
+        "SIGNING_KEY_SIZE_INVALID": "ไฟล์ Signing Key มีขนาดไม่ถูกต้อง",
+        "SIGNING_KEY_READ_FAILED": "EA อ่าน Signing Key ไม่สำเร็จ",
+        "SIGNING_KEY_HASH_FAILED": "EA คำนวณรหัสยืนยัน Signing Key ไม่สำเร็จ",
+        "SIGNING_KEY_ID_HASH_MISMATCH": "Signing Key ไม่ตรงกับ Key ID ที่ประกาศไว้",
+        "NON_EXECUTING_SIGNING_KEY_PIN_INVALID_IGNORED": "Key ID ไม่ถูกต้อง แต่ EA ยังไม่ Arm จึงคงทำงานแบบไม่ส่งคำสั่งเทรด",
         "OPTIONAL_SIGNING_KEY_PIN_INVALID_IGNORED": "Key ID ที่ใส่ใน Demo หรือ Shadow ไม่ถูกต้อง ระบบจึงไม่ใช้ค่านี้",
         "OPTIONAL_SIGNING_KEY_PIN_MISMATCH_IGNORED": "Key ID ที่ใส่ใน Demo หรือ Shadow ไม่ตรงกับ Backend ระบบจึงใช้ค่าจาก Backend",
         "CRYPTO_SELF_TEST_FAILED": "การตรวจระบบลายเซ็น HMAC-SHA256 ไม่ผ่าน",
@@ -36091,10 +37412,22 @@ def _mt4_trade_gateway_init_status_message_th(init_status: dict) -> str:
         "capabilities": "การเขียนข้อมูลความสามารถของ EA",
         "status": "การเขียนสถานะของ EA",
     }
-    detail = reason_labels.get(effective_code) or stage_labels.get(
-        str(init_status.get("stage") or ""),
-        "การเริ่มทำงานของ EA",
-    )
+    live_disarmed_prefix = "LIVE_DISARMED_SIGNING_NOT_READY_"
+    if effective_code.startswith(live_disarmed_prefix):
+        signing_code = effective_code[len(live_disarmed_prefix):]
+        signing_detail = reason_labels.get(
+            signing_code,
+            "ระบบลายเซ็นจาก Local Runner ยังไม่พร้อม",
+        )
+        detail = (
+            "เลือกโหมด Live แล้วแต่ LiveArmed ยังปิดอยู่; "
+            f"{signing_detail} และ EA ยังคงติดกราฟโดยไม่ส่งคำสั่งเทรด"
+        )
+    else:
+        detail = reason_labels.get(effective_code) or stage_labels.get(
+            str(init_status.get("stage") or ""),
+            "การเริ่มทำงานของ EA",
+        )
     age_note = " ข้อมูลนี้เก่าและใช้เพื่อช่วยวินิจฉัยเท่านั้น" if stale else ""
     if severity == "error":
         return f"EA เริ่มทำงานไม่สำเร็จ: {detail}.{age_note}".strip()
@@ -42906,15 +44239,22 @@ def dashboard_connection_checklist(
         for item_id in any_of_ids
     )
     any_of_statuses = [str(item_map[item_id].get("status") or "not_checked") for item_id in any_of_ids]
+    any_of_platform_label = (
+        "MT4"
+        if any_of_ids == ["mt4_terminal"]
+        else "MT5"
+        if any_of_ids == ["mt5_terminal"]
+        else "MT4 / MT5"
+    )
     if any_of_satisfied:
         any_of_status = "ready" if any_of_ids else "not_required"
-        any_of_detail = "ตรวจพบการเชื่อมต่ออย่างน้อยหนึ่งรายการตามเงื่อนไข" if any_of_ids else "Dashboard นี้ไม่มีเงื่อนไขแบบเลือกอย่างน้อยหนึ่งรายการ"
+        any_of_detail = f"ตรวจพบ {any_of_platform_label} ตามเงื่อนไข" if any_of_ids else "Dashboard นี้ไม่มีเงื่อนไขแบบเลือกอย่างน้อยหนึ่งรายการ"
     elif any(status == "not_checked" for status in any_of_statuses):
         any_of_status = "not_checked"
-        any_of_detail = "ยังต้องตรวจ MT4 / MT5 และยืนยันว่าพบอย่างน้อยหนึ่งโปรแกรม"
+        any_of_detail = f"ยังต้องตรวจ {any_of_platform_label} และยืนยันว่าพบโปรแกรม"
     else:
         any_of_status = "needs_attention"
-        any_of_detail = "ยังไม่พบ MT4 หรือ MT5 อย่างน้อยหนึ่งโปรแกรมตามที่ Dashboard นี้ต้องใช้"
+        any_of_detail = f"ยังไม่พบ {any_of_platform_label} ตามที่ Dashboard นี้ต้องใช้"
     connection_requirements = {
         "anyOf": any_of_ids,
         "anyOfSatisfied": any_of_satisfied,
@@ -49411,8 +50751,15 @@ def reconcile_current_day_public_research_output_repairs() -> int:
 
 
 def recover_interrupted_missions() -> int:
-    """Fail closed on real jobs whose single-use approval was consumed before a restart."""
+    """Recover interrupted jobs without replaying unsafe or user-approved work.
+
+    A trusted scheduled Radar batch is the narrow exception: it is read-only,
+    already owns the day's single reservation, and is not complete until all
+    six verified entries are committed.  Requeue that same Mission with durable
+    backoff; every other interrupted job remains terminal fail-closed.
+    """
     recovered: list[dict] = []
+    requeued: list[dict] = []
     parent_ids: set[str] = set()
     with MISSIONS_LOCK:
         missions = load_missions()
@@ -49432,6 +50779,41 @@ def recover_interrupted_missions() -> int:
                 approval.get("state") != "consumed" and not auto_run_interrupted
             ):
                 continue
+            workflow_context = _workflow_context_storage(
+                mission.get("workflowContext")
+            )
+            scheduled_radar_restart_retry = bool(
+                auto_run_interrupted
+                and _radar_complete_daily_batch_required(mission)
+                and workflow_context
+                and workflow_context.get("triggerSource") == "schedule"
+                and _is_trusted_public_read_only_workflow(
+                    workflow_context.get("propId"),
+                    workflow_context.get("actionId"),
+                    tool_id=mission.get("toolId"),
+                    owner_agent_id=mission.get("owner") or mission.get("agentId"),
+                )
+                and _trusted_workflow_guard_intent(mission) is not None
+            )
+            if scheduled_radar_restart_retry:
+                process_started = bool(execution.get("processStarted"))
+                if _apply_scheduled_public_research_completion_retry(
+                    mission,
+                    failure_code="auto_worker_interrupted",
+                    failure_summary=(
+                        "Bridge restarted while the scheduled Radar batch was "
+                        "running. The same daily Mission was queued again with "
+                        "backoff; no partial report was published."
+                    ),
+                ):
+                    requeued.append({
+                        "mission": mission,
+                        "processStarted": process_started,
+                    })
+                    parent_id = safe_reference(mission.get("parentMissionId"))
+                    if parent_id:
+                        parent_ids.add(parent_id)
+                    continue
             mission["status"] = "failed"
             mission["phase"] = "auto_worker_interrupted" if auto_run_interrupted else "interrupted"
             mission["errorCode"] = "auto_worker_interrupted" if auto_run_interrupted else "bridge_restart_interrupted"
@@ -49451,9 +50833,42 @@ def recover_interrupted_missions() -> int:
             parent_id = safe_reference(mission.get("parentMissionId"))
             if parent_id:
                 parent_ids.add(parent_id)
-        if recovered:
+        if recovered or requeued:
             save_missions(missions)
 
+    for item in requeued:
+        mission = item["mission"]
+        retry = (
+            mission.get("scheduledCompletionRetry")
+            if isinstance(mission.get("scheduledCompletionRetry"), dict)
+            else {}
+        )
+        _dashboard_workflow_update_schedule_state(
+            "indicatorScoutSchedule",
+            {
+                "lastRunStatus": "deferred",
+                "lastResultKind": "scheduled_completion_retry_deferred",
+                "lastError": None,
+                "lastErrorAt": None,
+            },
+        )
+        append_audit({
+            "type": "mission.scheduled_radar_restart_requeued",
+            "missionId": mission.get("id"),
+            "ownerAgentId": mission.get("owner"),
+            "toolId": mission.get("toolId"),
+            "failureCode": retry.get("lastFailureCode"),
+            "retryAttemptCount": retry.get("attemptCount"),
+            "nextAttemptAt": retry.get("nextAttemptAt"),
+            "sameMission": True,
+            "sameDailyReservation": True,
+            "newDailyReservation": False,
+            "dailyReservationCountIncremented": False,
+            "automaticRetry": True,
+            "realToolExecuted": item["processStarted"],
+            "externalWrites": False,
+            "metaTraderActions": False,
+        })
     for mission in recovered:
         append_audit({
             "type": "mission.interrupted_recovered",
@@ -49465,7 +50880,9 @@ def recover_interrupted_missions() -> int:
         })
     for parent_id in parent_ids:
         refresh_parent_mission(parent_id)
-    return len(recovered)
+    if requeued:
+        MISSION_WORKER_WAKE.set()
+    return len(recovered) + len(requeued)
 
 
 def recover_interrupted_local_workflow_missions() -> int:
@@ -55168,6 +56585,11 @@ def _apply_scheduled_public_research_completion_retry(
     context = _workflow_context_storage(mission.get("workflowContext"))
     if not context or context.get("triggerSource") != "schedule":
         return False
+    reservation = (
+        context.get("executionReservation")
+        if isinstance(context.get("executionReservation"), dict)
+        else {}
+    )
     action_id = str(context.get("actionId") or "")
     settings_key = {
         "discover_trading_systems": "discoverySchedule",
@@ -55194,8 +56616,16 @@ def _apply_scheduled_public_research_completion_retry(
     next_attempt_at = (
         datetime.now(timezone.utc) + timedelta(seconds=retry_seconds)
     ).isoformat()
+    overdue_carry_forward = retry.get("overdueCarryForward") is True
+    overdue_since = str(retry.get("overdueSinceBangkokDate") or "")
+    if not (
+        overdue_carry_forward
+        and re.fullmatch(r"\d{4}-\d{2}-\d{2}", overdue_since)
+    ):
+        overdue_carry_forward = False
+        overdue_since = ""
     retry.update({
-        "schemaVersion": "scheduled-public-research-completion-retry-v1",
+        "schemaVersion": SCHEDULED_RADAR_COMPLETION_RETRY_SCHEMA,
         "attemptCount": retry_count,
         "lastFailureCode": redact_text(str(failure_code or "runner_failed"), 120),
         "lastFailureSummary": redact_text(str(failure_summary or ""), 1200),
@@ -55205,6 +56635,9 @@ def _apply_scheduled_public_research_completion_retry(
         "sameDailyReservation": True,
         "newDailyReservation": False,
         "automaticRetry": True,
+        "originalSlotKey": reservation.get("slotKey"),
+        "overdueCarryForward": overdue_carry_forward,
+        "overdueSinceBangkokDate": overdue_since or None,
     })
     mission["scheduledCompletionRetry"] = retry
     mission["status"] = "queued"
@@ -56011,6 +57444,12 @@ def finish_auto_mission(mission_id: str, lease_id: str, runner: dict, result: di
             or (
                 trading_system_workflow
                 and terminal_failure_code == "invalid_output"
+            )
+            or (
+                radar_workflow
+                and _radar_complete_daily_batch_required(current)
+                and terminal_failure_code
+                in SCHEDULED_RADAR_COMPLETION_RETRY_FAILURE_CODES
             )
         )
     )
@@ -56941,14 +58380,14 @@ def _radar_execution_reservation_bangkok_date(mission: object) -> str | None:
 
 
 def _expire_prior_day_radar_mission(mission: object) -> bool:
-    """Retire stale Radar work, except a verified batch-repair carry-forward.
+    """Retire stale Radar work, except a verified completion carry-forward.
 
     A prior-day queued Mission must not wake on the next day and combine with
     that day's 09:00 slot.  The historical Mission remains visible, terminal,
-    and non-retryable.  The one exception is a fail-closed batch-completion
-    repair: it keeps the original slot and is marked overdue rather than
-    pretending that an incomplete daily report succeeded or reserving a new
-    daily counter.
+    and non-retryable.  The exceptions are fail-closed batch-completion repair
+    and a digest-bound generic scheduled-completion retry.  Both keep the
+    original slot and are marked overdue rather than pretending that an
+    incomplete daily report succeeded or reserving a new daily counter.
     """
 
     row = mission if isinstance(mission, dict) else {}
@@ -57021,6 +58460,91 @@ def _expire_prior_day_radar_mission(mission: object) -> bool:
             "missionId": mission_id,
             "slotBangkokDate": slot_date,
             "currentBangkokDate": current_date,
+            "sameMission": True,
+            "sameDailyReservation": True,
+            "newDailyReservation": False,
+            "dailyReservationCountIncremented": False,
+            "automaticRetry": True,
+            "processStarted": False,
+            "externalWrites": False,
+            "metaTraderActions": False,
+        })
+        MISSION_WORKER_WAKE.set()
+        return True
+    completion_retry, completion_retry_error = (
+        _scheduled_radar_completion_retry_state(row)
+    )
+    if completion_retry and completion_retry_error is None:
+        if completion_retry.get("overdueCarryForward") is True:
+            return False
+        carried = None
+        with MISSIONS_LOCK:
+            missions = load_missions()
+            for stored in missions:
+                if (
+                    stored.get("id") != mission_id
+                    or stored.get("status") != "queued"
+                    or _radar_execution_reservation_bangkok_date(stored)
+                    != slot_date
+                ):
+                    continue
+                live_retry, live_error = (
+                    _scheduled_radar_completion_retry_state(stored)
+                )
+                if live_error or not live_retry:
+                    break
+                now_text = utc_now()
+                live_retry["overdueCarryForward"] = True
+                live_retry["overdueSinceBangkokDate"] = current_date
+                stored["scheduledCompletionRetry"] = live_retry
+                stored["phase"] = (
+                    "auto_guarded_scheduled_completion_retry_overdue"
+                )
+                stored["runnerStatus"] = (
+                    "scheduled_radar_completion_overdue_carry_forward"
+                )
+                stored["updatedAt"] = now_text
+                stored["heartbeatAt"] = now_text
+                execution = (
+                    stored.get("execution")
+                    if isinstance(stored.get("execution"), dict)
+                    else {}
+                )
+                execution["automaticRetry"] = True
+                execution["overdueCarryForward"] = True
+                execution["originalDailyReservationDate"] = slot_date
+                stored["execution"] = execution
+                _issue_backend_auto_safe_authorization(
+                    stored,
+                    issued_at=now_text,
+                )
+                carried = stored
+                break
+            if carried:
+                save_missions(missions)
+        if not carried:
+            return False
+        _dashboard_workflow_update_schedule_state(
+            "indicatorScoutSchedule",
+            {
+                "lastRunStatus": "deferred",
+                "lastResultKind": (
+                    "scheduled_radar_completion_overdue_carry_forward"
+                ),
+                "lastError": None,
+                "lastErrorAt": None,
+                "carryForwardBlockDate": current_date,
+                "carryForwardMissionId": mission_id,
+            },
+        )
+        append_audit({
+            "type": "mission.scheduled_radar_completion_overdue",
+            "missionId": mission_id,
+            "slotBangkokDate": slot_date,
+            "currentBangkokDate": current_date,
+            "failureCode": completion_retry.get("lastFailureCode"),
+            "retryAttemptCount": completion_retry.get("attemptCount"),
+            "nextAttemptAt": completion_retry.get("nextAttemptAt"),
             "sameMission": True,
             "sameDailyReservation": True,
             "newDailyReservation": False,
@@ -61377,10 +62901,25 @@ class BridgeHandler(SimpleHTTPRequestHandler):
                 self.send_result(activate_research_sheet_hub(payload))
                 return
             if path == "/api/props/mission_strategy_table/research-sheet/flush":
-                if payload:
-                    raise RequestError("Google Sheet outbox flush accepts an empty JSON body.", 422)
-                flush_result = _flush_research_sheet_outbox(max_items=50)
-                self.send_result({"ok": True, "kind": "research_sheet_hub_outbox_flushed", "flush": flush_result, "researchSheet": research_sheet_hub_read_model()})
+                unexpected = sorted(set(payload) - {"retryFailed"})
+                if unexpected:
+                    raise RequestError("Google Sheet outbox retry contains unsupported fields.", 422)
+                if "retryFailed" in payload and payload.get("retryFailed") is not True:
+                    raise RequestError("retryFailed must be true when supplied.", 422)
+                if payload.get("retryFailed") is True:
+                    operation = _retry_failed_research_sheet_outbox(max_items=50)
+                    flush_result = operation["flush"]
+                    retry_result = operation["retry"]
+                else:
+                    flush_result = _flush_research_sheet_outbox(max_items=50)
+                    retry_result = None
+                self.send_result({
+                    "ok": True,
+                    "kind": "research_sheet_hub_outbox_flushed",
+                    "flush": flush_result,
+                    "retry": retry_result,
+                    "researchSheet": research_sheet_hub_read_model(),
+                })
                 return
             if path == "/api/props/mission_strategy_table/research-sheet/query":
                 self.send_result(query_research_sheet_hub(payload))

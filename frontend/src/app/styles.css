@@ -2708,6 +2708,162 @@ h1 {
   flex: 1 1 130px;
 }
 
+.ai-trade-mt4-quick-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(37, 215, 122, 0.52);
+  background:
+    linear-gradient(145deg, rgba(5, 42, 34, 0.88), rgba(2, 15, 23, 0.9));
+  box-shadow: inset 0 0 0 1px rgba(37, 215, 122, 0.08);
+}
+
+.ai-trade-mt4-quick-card[hidden] {
+  display: none !important;
+}
+
+.ai-trade-mt4-quick-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ai-trade-mt4-quick-heading > div {
+  min-width: 0;
+}
+
+.ai-trade-mt4-quick-heading span:not(.connection-badge),
+.ai-trade-mt4-quick-channel > span {
+  display: block;
+  color: #7cf4b5;
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+}
+
+.ai-trade-mt4-quick-heading strong {
+  display: block;
+  margin-top: 2px;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ai-trade-mt4-quick-card > .modal-action {
+  width: 100%;
+  min-height: 34px;
+}
+
+.ai-trade-mt4-quick-candidates {
+  display: grid;
+  gap: 6px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.ai-trade-mt4-quick-candidates[hidden] {
+  display: none !important;
+}
+
+.ai-trade-mt4-quick-candidate {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 7px;
+  border: 1px solid rgba(84, 119, 142, 0.38);
+  background: rgba(2, 11, 18, 0.72);
+  cursor: pointer;
+}
+
+.ai-trade-mt4-quick-candidate.selected {
+  border-color: rgba(37, 215, 122, 0.72);
+  background: rgba(10, 49, 38, 0.54);
+}
+
+.ai-trade-mt4-quick-candidate > input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--green);
+}
+
+.ai-trade-mt4-quick-candidate-copy {
+  min-width: 0;
+}
+
+.ai-trade-mt4-quick-candidate-copy strong,
+.ai-trade-mt4-quick-candidate-copy small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.ai-trade-mt4-quick-candidate-copy strong {
+  color: var(--text);
+  font-size: 9px;
+}
+
+.ai-trade-mt4-quick-candidate-copy small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.35;
+}
+
+.ai-trade-mt4-quick-channel {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid rgba(39, 212, 255, 0.25);
+  background: rgba(2, 11, 18, 0.65);
+}
+
+.ai-trade-mt4-quick-channel code {
+  color: #d8f8ff;
+  font-size: 9px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.ai-trade-mt4-quick-channel button {
+  justify-self: start;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid rgba(39, 212, 255, 0.44);
+  background: rgba(12, 54, 72, 0.54);
+  color: #a9efff;
+  font: inherit;
+  font-size: 8px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.ai-trade-mt4-quick-channel button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.ai-trade-mt4-quick-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.ai-trade-mt4-quick-status[data-tone="working"] {
+  color: var(--cyan);
+}
+
+.ai-trade-mt4-quick-status[data-tone="success"] {
+  color: var(--green);
+}
+
+.ai-trade-mt4-quick-status[data-tone="error"] {
+  color: #ff9ca0;
+}
+
 .workflow-settings-rail {
   display: grid;
   flex: 0 0 auto;

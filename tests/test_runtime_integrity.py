@@ -1123,11 +1123,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
         items = {item["id"]: item for item in checklist["items"]}
 
         self.assertEqual(items["mt4_terminal"]["status"], "detected")
-        self.assertEqual(items["mt5_terminal"]["status"], "detected")
+        self.assertNotIn("mt5_terminal", items)
         self.assertFalse(items["mt4_terminal"]["adapterReady"])
-        self.assertFalse(items["mt5_terminal"]["adapterReady"])
         self.assertEqual(items["mt4_terminal"]["executionAdapterStatus"], "coming_soon")
-        self.assertEqual(items["mt5_terminal"]["executionAdapterStatus"], "coming_soon")
         self.assertEqual(items["trading_state_adapter"]["status"], "not_selected")
         self.assertEqual(items["ai_trader_ensemble"]["status"], "waiting_snapshot")
         self.assertEqual(items["mt4_trade_gateway"]["status"], "not_selected")
@@ -1429,13 +1427,18 @@ class RuntimeIntegrityTests(unittest.TestCase):
                         self.assertNotEqual(item["adapterStatus"], "implemented")
 
         self.assertTrue({"partial", "needs_attention"}.issubset(set(contract["statusVocabulary"])))
-        mt_any_of_dashboards = {"right_tool_console", "left_analytics_console"}
-        for prop_id in mt_any_of_dashboards:
-            profile = profiles[prop_id]
-            connection_ids = {item["id"] for item in profile["connections"]}
-            any_of = profile.get("connectionRequirements", {}).get("anyOf")
-            self.assertEqual(any_of, ["mt4_terminal", "mt5_terminal"])
-            self.assertTrue(set(any_of).issubset(connection_ids))
+        council_profile = profiles["left_analytics_console"]
+        council_connection_ids = {item["id"] for item in council_profile["connections"]}
+        council_any_of = council_profile.get("connectionRequirements", {}).get("anyOf")
+        self.assertEqual(council_any_of, ["mt4_terminal"])
+        self.assertIn("mt4_terminal", council_connection_ids)
+        self.assertNotIn("mt5_terminal", council_connection_ids)
+
+        lab_profile = profiles["right_tool_console"]
+        lab_connection_ids = {item["id"] for item in lab_profile["connections"]}
+        lab_any_of = lab_profile.get("connectionRequirements", {}).get("anyOf")
+        self.assertEqual(lab_any_of, ["mt4_terminal", "mt5_terminal"])
+        self.assertTrue(set(lab_any_of).issubset(lab_connection_ids))
 
         factory_requirements = profiles["right_server_racks"]["connectionRequirements"]
         self.assertNotIn("anyOf", factory_requirements)
@@ -1978,6 +1981,32 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertFalse(missing["connectionRequirements"]["anyOfSatisfied"])
         self.assertEqual(missing["connectionRequirements"]["status"], "needs_attention")
         self.assertEqual(missing["overallStatus"], "needs_attention")
+
+    def test_ai_trade_council_mt5_only_does_not_satisfy_mt4_requirement(self) -> None:
+        fake_bridge = {
+            "mode": "Codex Runner Ready",
+            "status": "guarded",
+            "codex": {"status": "ready"},
+            "mcp": {"status": "config_present", "configPresent": True},
+            "time": "2026-08-31T00:00:00+00:00",
+        }
+        mt5_only = self.bridge.metatrader_status_read_model(
+            {"mt4": 0, "mt5": 1},
+            {"supported": True, "mt4": 0, "mt5": 1},
+        )
+        checklist = self.bridge.dashboard_connection_checklist(
+            "left_analytics_console",
+            bridge=fake_bridge,
+            quota={"ok": True, "status": "ready"},
+            terminals=mt5_only,
+        )
+        item_ids = {item["id"] for item in checklist["items"]}
+        self.assertIn("mt4_terminal", item_ids)
+        self.assertNotIn("mt5_terminal", item_ids)
+        self.assertEqual(checklist["connectionRequirements"]["anyOf"], ["mt4_terminal"])
+        self.assertFalse(checklist["connectionRequirements"]["anyOfSatisfied"])
+        self.assertEqual(checklist["connectionRequirements"]["status"], "needs_attention")
+        self.assertIn("MT4", checklist["connectionRequirements"]["detailTh"])
 
     def test_optional_implemented_sheet_adapter_keeps_auth_required_dashboard_partial(self) -> None:
         fake_bridge = {
@@ -2924,7 +2953,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertNotIn("submitManagerCommand", block)
 
     def test_agent_chat_runtime_version_and_executive_tiers(self) -> None:
-        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.6")
+        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.7")
         self.assertEqual(self.bridge.role_default_model_tier("ceo"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("manager"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("risk_guard"), "risk_quality")
@@ -3988,12 +4017,17 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn('$bridgeTaskWasEnabled = Suspend-BridgeScheduledTask', installer)
         self.assertIn('$script:bridgeTaskExisted = $true', installer)
         self.assertIn('if ($bridgeTaskExisted) {', installer)
-        self.assertIn('-EnableAfterRebind $bridgeTaskWasEnabled', installer)
+        self.assertIn('$enableReboundTask = -not $SkipAutostart', installer)
+        self.assertIn('-EnableAfterRebind $enableReboundTask', installer)
         self.assertIn('Disable-ScheduledTask -TaskName $bridgeTaskName', installer)
         self.assertIn('$bridgeTaskWatchdogMinutes = 15', installer)
         self.assertIn('"scripts\\run-bridge-watchdog-hidden.vbs"', installer)
-        self.assertIn('$expectedArgument = "/Port:$ConfirmedPort"', installer)
-        self.assertIn('[IO.Path]::GetFileName([string]$taskActions[0].Execute) -ine "wscript.exe"', installer)
+        self.assertIn('function Assert-BridgeScheduledTaskReady', installer)
+        self.assertIn('$expectedArguments = \'//B //NoLogo "{0}" /Port:{1}\'', installer)
+        self.assertIn('$expectedWscript = Join-Path $systemRoot "System32\\wscript.exe"', installer)
+        self.assertIn('MSFT_TaskLogonTrigger', installer)
+        self.assertIn('MSFT_TaskTimeTrigger', installer)
+        self.assertIn('$state.confirmed_port -ne $ConfirmedPort', installer)
         self.assertIn('$savedStateVersion -lt 3 -and $savedWatchdogMinutes -eq 5', installer)
         self.assertIn('ผูก Watchdog ใหม่ไม่สำเร็จและคืน Task เดิมแล้ว', installer)
         self.assertIn('การติดตั้งแบบ SkipLaunch ต้องใช้พอร์ตเดิม', installer)
@@ -4024,21 +4058,60 @@ class RuntimeIntegrityTests(unittest.TestCase):
         gitignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8-sig")
 
         self.assertIn('"integrations\\mt4-trade-gateway\\MetafxHQTradeGateway.mq4"', installer)
-        self.assertIn('"artifacts\\mt4-ai-council-ea-v2.16-stream-transition-hardening\\MetafxHQTradeGateway.ex4"', installer)
+        self.assertIn('"artifacts\\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\\MetafxHQTradeGateway.ex4"', installer)
         self.assertIn('"integrations", "runner", "scripts", "tests"', installer)
-        self.assertIn('Sync-Directory -DirectoryName "artifacts\\mt4-ai-council-ea-v2.16-stream-transition-hardening"', installer)
+        self.assertIn('Sync-Directory -DirectoryName "artifacts\\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness"', installer)
         self.assertIn('"1-INSTALL-HQ.bat", "UPDATE-HQ.bat"', installer)
         self.assertIn('"AGENTS.md", ".gitattributes", ".gitignore"', installer)
         self.assertIn('"AGENTS.md", ".gitattributes", ".gitignore"', uninstaller)
         self.assertIn('"tests\\test_runtime_integrity.py",', installer)
         self.assertIn('".gitattributes",\n        ".gitignore",\n        "VERSION",', installer)
         self.assertIn('".gitattributes",', release_workflow)
-        self.assertIn("Release ZIP installation smoke test failed", release_workflow)
+        self.assertIn("legacy-listener upgrade smoke failed", release_workflow)
         self.assertIn("Installed Runtime is missing required file", release_workflow)
         self.assertIn('node --check (Join-Path $installedRoot "frontend\\src\\app\\main.js")', release_workflow)
         self.assertIn("**/client_secret*.json", gitignore)
         self.assertIn("**/*secret*.json", gitignore)
         self.assertIn("*.dpapi", gitignore)
+
+    def test_release_package_smoke_exercises_legacy_operator_mode_upgrade(self) -> None:
+        workflow = RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8-sig")
+        smoke_start = workflow.index("function Initialize-LegacyInstall")
+        smoke_end = workflow.index(
+            "# Verify the exact official commit before exposing",
+            smoke_start,
+        )
+        smoke = workflow[smoke_start:smoke_end]
+
+        required_fragments = (
+            'version = "operator-mode-store-v1"',
+            'mode = "manual_guarded"',
+            'source = "contract_default"',
+            '"installer\\install.ps1"',
+            '"http://127.0.0.1:$smokePort/api/health"',
+            '[string]$health.status -cne "ready"',
+            '[string]$persistedOperatorMode.mode -cne "auto_guarded"',
+            '[string]$persistedOperatorMode.source -cne "contract_default_migration"',
+            '[string]$_.type -ceq "operator_mode.migrated"',
+            "$migrationEvents.Count -ne 1",
+            "Installer accepted a foreign HTTP 503 listener",
+            "PackageSmokeFailAfterPublish",
+            "Last-good VERSION was not restored",
+        )
+        for fragment in required_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, smoke)
+        mode_index = smoke.index('mode = "manual_guarded"')
+        upgrade_index = smoke.index("-PackageUpgradeSmoke", mode_index)
+        self.assertLess(mode_index, upgrade_index)
+        self.assertLess(
+            upgrade_index,
+            smoke.index('"http://127.0.0.1:$smokePort/api/health"'),
+        )
+        self.assertLess(
+            smoke.index('"http://127.0.0.1:$smokePort/api/health"'),
+            smoke.index('$migrationEvents.Count -ne 1'),
+        )
 
     def test_student_installer_requires_confirmed_loopback_endpoint_and_checks_codex_quota(self) -> None:
         lifecycle = LIFECYCLE_SCRIPT_PATH.read_text(encoding="utf-8-sig")
@@ -4089,7 +4162,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         )
         registry_text = registry_path.read_text(encoding="utf-8-sig")
         attributes = (PROJECT_ROOT / ".gitattributes").read_text(encoding="utf-8-sig")
-        self.assertEqual(version, "0.9.6")
+        self.assertEqual(version, "0.9.7")
         self.assertNotRegex(registry_text, r"(?i)[a-z]:\\\\users\\\\")
         self.assertIn("*.mq4 text eol=lf", attributes)
         self.assertIn("*.mq5 text eol=lf", attributes)
@@ -6688,6 +6761,97 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.bridge.OPERATOR_MODE_PATH = original_operator_mode
                 self.bridge.AUDIT_PATH = original_audit
                 self.bridge.MISSION_WORKER_WAKE.clear()
+
+    def test_operator_mode_migrates_only_proven_legacy_contract_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            original_operator_mode = self.bridge.OPERATOR_MODE_PATH
+            original_audit = self.bridge.AUDIT_PATH
+            try:
+                self.bridge.OPERATOR_MODE_PATH = runtime / "operator-mode.json"
+                self.bridge.AUDIT_PATH = runtime / "bridge-audit.jsonl"
+                self.bridge.write_json(
+                    self.bridge.OPERATOR_MODE_PATH,
+                    {
+                        "version": "operator-mode-store-v1",
+                        "mode": "manual_guarded",
+                        "updatedAt": "2026-08-01T00:00:00+00:00",
+                        "source": "contract_default",
+                    },
+                )
+
+                migrated = self.bridge.ensure_operator_mode_store()
+
+                self.assertEqual(migrated["mode"], "auto_guarded")
+                self.assertEqual(migrated["source"], "contract_default_migration")
+                self.assertEqual(
+                    migrated["migration"],
+                    {
+                        "fromMode": "manual_guarded",
+                        "fromSource": "contract_default",
+                        "reason": "operator_contract_default_changed",
+                    },
+                )
+                persisted = json.loads(
+                    self.bridge.OPERATOR_MODE_PATH.read_text(encoding="utf-8")
+                )
+                self.assertEqual(persisted, migrated)
+                events = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH)
+                migrations = [
+                    item for item in events
+                    if item.get("type") == "operator_mode.migrated"
+                ]
+                self.assertEqual(len(migrations), 1)
+                self.assertEqual(migrations[0]["previousMode"], "manual_guarded")
+                self.assertEqual(migrations[0]["mode"], "auto_guarded")
+
+                second = self.bridge.ensure_operator_mode_store()
+                self.assertEqual(second["mode"], "auto_guarded")
+                self.assertEqual(
+                    len([
+                        item for item in self.bridge.tail_jsonl(self.bridge.AUDIT_PATH)
+                        if item.get("type") == "operator_mode.migrated"
+                    ]),
+                    1,
+                )
+            finally:
+                self.bridge.OPERATOR_MODE_PATH = original_operator_mode
+                self.bridge.AUDIT_PATH = original_audit
+
+    def test_operator_mode_preserves_user_selected_and_unproven_manual_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            original_operator_mode = self.bridge.OPERATOR_MODE_PATH
+            original_audit = self.bridge.AUDIT_PATH
+            try:
+                self.bridge.AUDIT_PATH = runtime / "bridge-audit.jsonl"
+                cases = (
+                    ("local_operator_api", "operator-mode-user.json"),
+                    ("legacy_unknown", "operator-mode-unknown.json"),
+                )
+                for source, filename in cases:
+                    self.bridge.OPERATOR_MODE_PATH = runtime / filename
+                    stored = {
+                        "version": "operator-mode-store-v1",
+                        "mode": "manual_guarded",
+                        "updatedAt": "2026-08-01T00:00:00+00:00",
+                        "source": source,
+                    }
+                    self.bridge.write_json(self.bridge.OPERATOR_MODE_PATH, stored)
+
+                    preserved = self.bridge.ensure_operator_mode_store()
+
+                    self.assertEqual(preserved["mode"], "manual_guarded")
+                    self.assertEqual(
+                        json.loads(
+                            self.bridge.OPERATOR_MODE_PATH.read_text(encoding="utf-8")
+                        ),
+                        stored,
+                    )
+                self.assertFalse(self.bridge.AUDIT_PATH.exists())
+            finally:
+                self.bridge.OPERATOR_MODE_PATH = original_operator_mode
+                self.bridge.AUDIT_PATH = original_audit
 
     def test_auto_guarded_safe_codex_keeps_backend_gate_and_hard_risk_cannot_bypass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import fnmatch
+import json
 import re
 import subprocess
 import unittest
@@ -9,11 +10,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ARTIFACT = ROOT / "artifacts" / "mt4-ai-council-ea-v2.16-stream-transition-hardening"
+ARTIFACT = ROOT / "artifacts" / "mt4-ai-council-ea-v2.18-enum-fail-closed-readiness"
 
 
 class ReleaseInstallerHardeningTests(unittest.TestCase):
-    def test_v216_curated_artifact_is_complete_and_not_ignored(self) -> None:
+    def test_v218_curated_artifact_is_complete_and_not_ignored(self) -> None:
         required = {
             "MetafxHQTradeGateway.mq4",
             "MetafxHQTradeGateway.ex4",
@@ -21,13 +22,15 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             "AUDIT_TH.md",
             "SHA256SUMS.txt",
             "BUILD_LOG.txt",
+            "MANIFEST.json",
+            "COMPILE_PROOF.png",
         }
         self.assertEqual(required, {path.name for path in ARTIFACT.iterdir() if path.is_file()})
 
         for relative_path in (
             "scripts/run-bridge-watchdog-hidden.vbs",
             *(
-                f"artifacts/mt4-ai-council-ea-v2.16-stream-transition-hardening/{filename}"
+                f"artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/{filename}"
                 for filename in required
             ),
         ):
@@ -51,12 +54,12 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             self.assertNotEqual(0, completed.returncode, f"release file remains ignored: {relative_path}")
 
         ignore_text = (ROOT / ".gitignore").read_text(encoding="utf-8")
-        self.assertIn("!artifacts/mt4-ai-council-ea-v2.16-stream-transition-hardening/", ignore_text)
-        self.assertIn("!artifacts/mt4-ai-council-ea-v2.16-stream-transition-hardening/**", ignore_text)
-        self.assertIn("artifacts/mt4-ai-council-ea-v2.16-stream-transition-hardening/*.log", ignore_text)
+        self.assertIn("!artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/", ignore_text)
+        self.assertIn("!artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/**", ignore_text)
+        self.assertIn("artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/*.log", ignore_text)
         self.assertIn("integrations/mt4-trade-gateway/*.ex4", ignore_text)
 
-    def test_v216_manifest_and_build_evidence_match_curated_files(self) -> None:
+    def test_v218_manifest_and_build_evidence_match_curated_files(self) -> None:
         manifest_text = (ARTIFACT / "SHA256SUMS.txt").read_text(encoding="utf-8")
         manifest: dict[str, str] = {}
         for line in manifest_text.splitlines():
@@ -67,7 +70,17 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             assert match is not None
             manifest[match.group(2)] = match.group(1).upper()
 
-        for filename in ("MetafxHQTradeGateway.mq4", "MetafxHQTradeGateway.ex4"):
+        hashed_files = {
+            "AUDIT_TH.md",
+            "BUILD_LOG.txt",
+            "COMPILE_PROOF.png",
+            "MANIFEST.json",
+            "MetafxHQTradeGateway.ex4",
+            "MetafxHQTradeGateway.mq4",
+            "README_TH.md",
+        }
+        self.assertEqual(hashed_files, set(manifest))
+        for filename in hashed_files:
             digest = hashlib.sha256((ARTIFACT / filename).read_bytes()).hexdigest().upper()
             self.assertEqual(digest, manifest[filename])
 
@@ -76,13 +89,46 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         ).hexdigest().upper()
         self.assertEqual(integration_digest, manifest["MetafxHQTradeGateway.mq4"])
 
+        artifact_manifest = json.loads((ARTIFACT / "MANIFEST.json").read_text(encoding="utf-8"))
+        self.assertEqual("metafx-hq-mt4-ea-artifact-v1", artifact_manifest["schemaVersion"])
+        self.assertEqual("2.18", artifact_manifest["packageVersion"])
+        self.assertEqual("ready_visible_metaeditor_compiled", artifact_manifest["candidateStatus"])
+        self.assertEqual(integration_digest, artifact_manifest["sourceSha256"])
+        self.assertEqual(manifest["MetafxHQTradeGateway.ex4"], artifact_manifest["binarySha256"])
+        self.assertEqual(
+            (ARTIFACT / "MetafxHQTradeGateway.ex4").stat().st_size,
+            artifact_manifest["binaryBytes"],
+        )
+        self.assertTrue(artifact_manifest["ex4Included"])
+        compile_evidence = artifact_manifest["compileEvidence"]
+        self.assertEqual("passed", compile_evidence["status"])
+        self.assertEqual("visible_metaeditor_front_office", compile_evidence["mode"])
+        self.assertEqual(0, compile_evidence["errors"])
+        self.assertEqual(0, compile_evidence["warnings"])
+        self.assertEqual("COMPILE_PROOF.png", compile_evidence["screenshot"])
+        self.assertEqual(manifest["COMPILE_PROOF.png"], compile_evidence["screenshotSha256"])
+        release_compile = compile_evidence["releaseCompile"]
+        self.assertEqual("visible_metaeditor_exact_source", release_compile["mode"])
+        self.assertEqual(0, release_compile["errors"])
+        self.assertEqual(0, release_compile["warnings"])
+        self.assertEqual(manifest["MetafxHQTradeGateway.mq4"], release_compile["sourceSha256"])
+        self.assertEqual(manifest["MetafxHQTradeGateway.ex4"], release_compile["binarySha256"])
+        self.assertEqual(b"\x89PNG\r\n\x1a\n", (ARTIFACT / "COMPILE_PROOF.png").read_bytes()[:8])
+
         build_log = (ARTIFACT / "BUILD_LOG.txt").read_text(encoding="utf-8")
-        self.assertIn("Result: 0 errors, 0 warnings,", build_log)
+        self.assertIn("PackageVersion: 2.18", build_log)
+        self.assertIn("CompileResult: PASS", build_log)
+        self.assertIn("CompileErrors: 0", build_log)
+        self.assertIn("CompileWarnings: 0", build_log)
+        self.assertIn("ReleaseCompileResult: PASS", build_log)
+        self.assertIn("ReleaseCompileErrors: 0", build_log)
+        self.assertIn("ReleaseCompileWarnings: 0", build_log)
         self.assertIn(f"SourceSHA256: {manifest['MetafxHQTradeGateway.mq4']}", build_log)
         self.assertIn(f"BinarySHA256: {manifest['MetafxHQTradeGateway.ex4']}", build_log)
+        self.assertIn(f"CompileProofSHA256: {manifest['COMPILE_PROOF.png']}", build_log)
         self.assertIsNone(re.search(r"(?i)(?:[A-Z]:\\|/Users/|/home/)", build_log))
 
-    def test_installer_requires_and_verifies_all_v216_release_evidence(self) -> None:
+    def test_installer_requires_and_verifies_all_v218_release_evidence(self) -> None:
         installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
         for filename in (
             "MetafxHQTradeGateway.mq4",
@@ -91,9 +137,11 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             "AUDIT_TH.md",
             "SHA256SUMS.txt",
             "BUILD_LOG.txt",
+            "MANIFEST.json",
+            "COMPILE_PROOF.png",
         ):
             self.assertIn(
-                f"artifacts\\mt4-ai-council-ea-v2.16-stream-transition-hardening\\{filename}",
+                f"artifacts\\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\\{filename}",
                 installer,
             )
         self.assertIn("Assert-EaArtifactIntegrity", installer)
@@ -102,6 +150,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIsNone(re.search(r"(?m)^[^#\r\n]*\bGet-FileHash\b", installer))
         self.assertIn("Source EA ใน Integration ไม่ตรงกับ Source", installer)
         self.assertIn("หลักฐาน Compile ของ EA ไม่ตรงกับ Source/Binary", installer)
+        self.assertIn("MANIFEST/Compile proof ของ EA v2.18", installer)
         self.assertIn('install_root = "%LOCALAPPDATA%\\Metafxclub\\AI-Agent-HQ"', installer)
         self.assertIn("install_scope = \"current_windows_user\"", installer)
 
@@ -111,6 +160,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             "ExpectedGitRepository",
             "ExpectedGitTag",
             "ExpectedSourceVersion",
+            "ExpectedGitCommit",
         ):
             self.assertIn(f"[string]${parameter}", installer)
         self.assertIn("[switch]$RequireVerifiedGitSource", installer)
@@ -135,6 +185,8 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("Source มีไฟล์แก้ไขหรือไฟล์ใหม่ที่ไม่อยู่ใน Tag", provenance)
         self.assertIn("VERSION ใน Source ไม่ตรงกับ Version ที่ล็อกไว้", provenance)
         self.assertIn("$script:validatedSourceCommit", provenance)
+        self.assertIn("if ($PrePublishVerification)", provenance)
+        self.assertIn("Git HEAD ไม่ตรงกับ Commit ของ Workflow", provenance)
         safe_source = installer[
             installer.index("function Assert-SafeSource"):
             installer.index("function Assert-EaArtifactIntegrity")
@@ -143,14 +195,15 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("function Export-VerifiedGitSource", installer)
         self.assertIn('"archive", "--format=zip"', installer)
         self.assertIn("Export-VerifiedGitSource -DestinationRoot $stagingRoot", installer)
-        self.assertIn('provenance = $(if ($validatedSourceCommit) { "verified_remote_git_tag" }', installer)
+        self.assertIn('"verified_official_commit_pre_release"', installer)
+        self.assertIn('"verified_remote_git_tag"', installer)
         self.assertIn('"unverified_archive_or_local_source"', installer)
 
     def test_installer_stages_before_mutation_and_restores_last_good_on_failure(self) -> None:
         installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
         self.assertLess(installer.index("$stagingRoot = New-StagedApplication"), installer.index("$script:applicationMutationStarted = $true"))
         self.assertLess(installer.index("$stagingRoot = New-StagedApplication"), installer.index("$bridgeTaskWasEnabled = Suspend-BridgeScheduledTask"))
-        normal_flow_start = installer.index("$previousHealthyEndpoint = Get-HealthySavedEndpoint")
+        normal_flow_start = installer.index("$previousBridgeEndpointState = Get-SavedBridgeEndpointState")
         self.assertLess(
             installer.index("$script:applicationRollbackState = New-ApplicationRollbackSnapshot", normal_flow_start),
             installer.index("Publish-StagedApplication -StagingRoot $stagingRoot", normal_flow_start),
@@ -163,7 +216,10 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("if ($bridgeEndpoint)", installer)
         self.assertIn("$rollbackRestored -and $previousBridgeWasRunning", installer)
         self.assertIn("$script:previousBridgeWasStopped -and $previousBridgeWasRunning", installer)
-        self.assertIn("$previousHealthyEndpoint = Get-HealthySavedEndpoint", installer)
+        self.assertIn("$previousBridgeEndpointState = Get-SavedBridgeEndpointState", installer)
+        self.assertIn("$previousBridgeWasHealthy = [bool]$previousBridgeEndpointState.Healthy", installer)
+        self.assertIn("Start-PreviousDegradedBridgeAfterRollback", installer)
+        self.assertIn("Get-InstalledBridgeListenerIdentity", installer)
         self.assertIn("Stop-CandidateBridgeAfterFailedStart", installer)
         self.assertIn('$health.server -ceq "Metafx Local Bridge"', installer)
         self.assertIn("$health.version -ceq $installedVersion", installer)
@@ -221,7 +277,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("[switch]$PackageSmoke", installer)
         smoke = installer[
             installer.index("if ($PackageSmoke) {"):
-            installer.index("$previousHealthyEndpoint = Get-HealthySavedEndpoint")
+            installer.index("$previousBridgeEndpointState = Get-SavedBridgeEndpointState")
         ]
         self.assertIn("Publish-StagedApplication", smoke)
         self.assertIn("Test-InstalledApplication", smoke)
@@ -248,7 +304,10 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertNotIn("-Wait `", lifecycle_process)
         self.assertNotIn("| Out-Host", lifecycle_process)
         self.assertIn("$script:rollbackIncomplete = $true", installer)
-        finally_block = installer[installer.rindex("    finally {"):installer.index("    Write-Step \"ติดตั้งและตรวจสอบสำเร็จ")]
+        finally_block = installer[
+            installer.rindex("    finally {"):
+            installer.index("    Write-Step \"ติดตั้ง Runtime และตรวจ Health สำเร็จ")
+        ]
         self.assertIn("if ($script:rollbackIncomplete)", finally_block)
         self.assertIn("คง Watchdog ไว้ในสถานะปิด", finally_block)
 
@@ -334,6 +393,64 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
                     )
                 )
 
+    def test_watchdog_is_verified_and_reports_partial_without_runtime_rollback(self) -> None:
+        installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
+        verifier = installer[
+            installer.index("function Assert-BridgeScheduledTaskReady"):
+            installer.index("function Rebind-BridgeScheduledTask")
+        ]
+        self.assertIn('MSFT_TaskLogonTrigger', verifier)
+        self.assertIn('MSFT_TaskTimeTrigger', verifier)
+        self.assertIn('Repetition.Interval', verifier)
+        self.assertIn('System32\\wscript.exe', verifier)
+        self.assertIn('run-bridge-watchdog-hidden.vbs', verifier)
+        self.assertIn("$expectedArguments", verifier)
+        self.assertIn("WorkingDirectory", verifier)
+        self.assertIn("bridge-autostart.json", verifier)
+        self.assertIn("$state.confirmed_port -ne $ConfirmedPort", verifier)
+
+        onboarding = installer[
+            installer.index("# Watchdog and Google setup are non-transactional onboarding"):
+            installer.index("if (-not $SkipShortcuts)", installer.index("# Watchdog and Google setup are non-transactional onboarding"))
+        ]
+        self.assertIn('$watchdogStatus = "repair_required"', onboarding)
+        self.assertIn('$watchdogFailure = $true', onboarding)
+        self.assertIn("$postInstallFailures.Add", onboarding)
+        self.assertIn("Assert-BridgeScheduledTaskReady", installer)
+        self.assertLess(
+            installer.index("$script:applicationRollbackState = $null"),
+            installer.index('$watchdogStatus = "repair_required"'),
+        )
+
+        result_writer = installer[
+            installer.index("function Write-InstallResult"):
+            installer.index("try {", installer.index("function Write-InstallResult"))
+        ]
+        self.assertIn("post_install", result_writer)
+        self.assertIn("repair_command", result_writer)
+        self.assertIn("PostInstallExitCode", result_writer)
+        self.assertIn('status = $WatchdogStatus', result_writer)
+        self.assertIn('2=Google, 3=Watchdog, 4=ทั้งสองส่วน', installer)
+        self.assertIn('exit $postInstallExitCode', installer)
+        restore_finally = installer[
+            installer.rindex("    finally {"):
+            installer.index('$postInstallExitCode = if ($watchdogFailure', installer.rindex("    finally {"))
+        ]
+        self.assertIn("Restore-BridgeScheduledTask", restore_finally)
+        self.assertIn("if ($bridgeEndpoint -and -not $script:applicationMutationStarted)", restore_finally)
+        self.assertIn('$watchdogStatus = "repair_required"', restore_finally)
+        self.assertLess(
+            installer.rindex("    finally {"),
+            installer.index("Write-InstallResult", installer.rindex("    finally {")),
+        )
+
+        prompt = (ROOT / "docs" / "prompts" / "install-github-google-auto-th.md").read_text(encoding="utf-8")
+        self.assertIn("2=Google OAuth", prompt)
+        self.assertIn("3=Watchdog", prompt)
+        self.assertIn("4=ทั้ง Google OAuth กับ Watchdog", prompt)
+        self.assertIn("-RepairOnly -Port <PORT> -EndpointConfirmed -SkipGoogleSetup -SkipShortcuts", prompt)
+        self.assertIn('post_install.watchdog.status="ready"', prompt)
+
     def test_release_workflow_never_skips_current_archive_smoke(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "publish-release.yml").read_text(encoding="utf-8")
         verify_step = workflow[
@@ -348,7 +465,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertGreaterEqual(verify_step.count("$LASTEXITCODE -ne 0"), 2)
         self.assertIn("Always build and smoke-test the exact current archive", workflow)
         self.assertIn("git archive --format=zip", workflow)
-        self.assertIn("Release ZIP installation smoke test failed", workflow)
+        self.assertIn("legacy-listener upgrade smoke failed", workflow)
         self.assertIn("Bump VERSION instead of reusing the tag", workflow)
         self.assertIn("gh release upload $tag $archive $checksum", workflow)
         self.assertIn("--clobber", workflow)
@@ -360,13 +477,41 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("Release $tag verified", workflow)
         self.assertIn("-PackageSmoke", workflow)
         self.assertIn("https://github.com/metafxclub/metafxclub-ai-agent-hq.git", workflow)
-        self.assertIn("git clone --depth 1 --single-branch --branch $tag", workflow)
+        self.assertIn("git -C $verifiedClone fetch --depth 1 origin $env:GITHUB_SHA", workflow)
+        self.assertIn("git -C $verifiedClone checkout --detach $env:GITHUB_SHA", workflow)
+        self.assertIn("-PrePublishVerification", workflow)
+        self.assertIn("-ExpectedGitCommit $env:GITHUB_SHA", workflow)
+        self.assertLess(
+            workflow.index("Verified official-commit installation smoke failed"),
+            workflow.index('git push origin "refs/tags/$tag`:refs/tags/$tag"'),
+        )
         self.assertIn("-RequireVerifiedGitSource", workflow)
         self.assertIn("-ExpectedGitRepository $officialRepository", workflow)
         self.assertIn("-ExpectedGitTag $tag", workflow)
         self.assertIn("-ExpectedSourceVersion $version", workflow)
         self.assertIn("ci-ignored-source-sentinel.txt", workflow)
-        self.assertIn("Verified public Git-tag installation smoke failed", workflow)
+        self.assertIn("Verified official-commit installation smoke failed", workflow)
+        self.assertIn("Installer accepted a foreign HTTP 503 listener", workflow)
+        self.assertIn("PackageSmokeFailAfterPublish", workflow)
+        self.assertIn("Last-good VERSION was not restored", workflow)
+        self.assertIn("Assert-DegradedFixture -Port $smokePort", workflow)
+        self.assertIn("gh release delete $tag", workflow)
+        self.assertIn("context=metafxclub/release", workflow)
+        trigger = workflow[: workflow.index("permissions:")]
+        self.assertNotIn("paths:", trigger)
+        self.assertIn("$existingReleaseNeedsPublish", workflow)
+        self.assertIn("$releasePayload.draft -eq $true", workflow)
+        self.assertIn("$releasePayload.published_at", workflow)
+        self.assertIn("gh release edit $tag", workflow)
+        self.assertIn("--draft=false", workflow)
+        self.assertIn("$publishedRelease.draft -ne $false", workflow)
+        self.assertIn("$publishedRelease.published_at", workflow)
+        self.assertIn("$publishedArchiveAssets.Count -ne 1", workflow)
+        self.assertIn("$publishedChecksumAssets.Count -ne 1", workflow)
+        self.assertLess(
+            workflow.index("Release $tag is not a published, non-draft Release"),
+            workflow.index("context=metafxclub/release"),
+        )
         self.assertIn("node --check (Join-Path $verifiedInstalledRoot", workflow)
         self.assertIn("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", workflow)
         self.assertIn("actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065", workflow)
@@ -379,6 +524,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             "ea-factory-contract.json",
             "research-sheet-hub-setup-th.md",
             "test_release_candidate_preflight.py",
+            "legacy_degraded_bridge.py",
             "scripts\\run-bridge-watchdog-hidden.vbs",
             "MetafxHQTradeGateway.mq4",
             "MetafxHQTradeGateway.ex4",
@@ -398,6 +544,60 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("needs: compatibility", workflow)
         self.assertIn('python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]', workflow)
         self.assertIn("Regression suite failed on Python ${{ matrix.python-version }}", workflow)
+
+    def test_degraded_endpoint_upgrade_is_exact_owned_and_foreign_fail_closed(self) -> None:
+        installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
+        identity = installer[
+            installer.index("function Get-InstalledBridgeListenerIdentity"):
+            installer.index("function Get-SavedBridgeEndpointState")
+        ]
+        self.assertIn("Get-NetTCPConnection -LocalPort $CandidatePort -State Listen", identity)
+        self.assertIn("$listenerIds.Count -ne 1", identity)
+        self.assertIn("Get-CimInstance Win32_Process", identity)
+        self.assertIn('Join-Path $installRoot "backend\\local-runner\\bridge_server.py"', identity)
+        self.assertIn('$tokens[3] -cne "127.0.0.1"', identity)
+        self.assertIn("$parsedPort -ne $CandidatePort", identity)
+
+        endpoint_state = installer[
+            installer.index("function Get-SavedBridgeEndpointState"):
+            installer.index("function Get-HealthySavedEndpoint")
+        ]
+        self.assertLess(
+            endpoint_state.index("Get-InstalledBridgeListenerIdentity"),
+            endpoint_state.index("Invoke-RestMethod"),
+        )
+        self.assertIn("A 503 response is not sufficient proof of ownership", endpoint_state)
+        self.assertIn("Health ยัง degraded", endpoint_state)
+        self.assertIn("Running = $true", endpoint_state)
+
+        requested = installer[
+            installer.index("function Test-RequestedEndpointUsable"):
+            installer.index("function Confirm-BridgeEndpoint")
+        ]
+        self.assertIn("Get-SavedBridgeEndpointState", requested)
+        self.assertIn("Test-LoopbackPortAvailable", requested)
+
+        rollback = installer[
+            installer.index("function Start-PreviousDegradedBridgeAfterRollback"):
+            installer.index("function New-StagedApplication")
+        ]
+        self.assertIn("Get-InstalledBridgeListenerIdentity", rollback)
+        self.assertIn("$previousBridgeWasHealthy", rollback)
+        self.assertIn("Start-Process", rollback)
+        self.assertIn("คงสถานะ degraded เดิม", rollback)
+
+    def test_student_prompt_requires_release_assets_checksum_and_success_gate(self) -> None:
+        prompt = (ROOT / "docs" / "prompts" / "install-github-google-auto-th.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("/releases/tags/<GITHUB_TAG>", prompt)
+        self.assertIn("draft=false", prompt)
+        self.assertIn(".sha256", prompt)
+        self.assertIn("SHA-256 64", prompt)
+        self.assertIn("/commits/<REMOTE_TAG_COMMIT>/status", prompt)
+        self.assertIn("context=metafxclub/release", prompt)
+        self.assertIn("state=success", prompt)
+        self.assertIn("ห้ามเชื่อเพียงว่า Tag มีอยู่", prompt)
 
     def test_temporary_installer_paths_are_short_for_deep_windows_assets(self) -> None:
         installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")

@@ -1,0 +1,26 @@
+PackageVersion: 2.18
+Source: MetafxHQTradeGateway.mq4
+SourceSHA256: E053CD85E0F252E8DCC42C334D17EB9A7F0C26DE4C42A38ABB4B6D45C9C204DA
+MetaEditorVisible: true
+MetaEditorVersion: 5.0.0.2418
+CompileMode: VISIBLE_FRONT_OFFICE_F7
+CompileAttempted: true
+CompileResult: PASS
+CompileErrors: 0
+CompileWarnings: 0
+CompileElapsedMilliseconds: 126
+CompiledAtUTC: 2026-08-31T09:54:50Z
+ReleaseCompileMode: VISIBLE_METAEDITOR_EXACT_SOURCE
+ReleaseCompileResult: PASS
+ReleaseCompileErrors: 0
+ReleaseCompileWarnings: 0
+ReleaseCompileElapsedMilliseconds: 126
+ReleaseCompiledAtUTC: 2026-08-31T09:54:50Z
+BinaryIncluded: true
+BinaryBytes: 381010
+BinarySHA256: 8961E60D128D8755DE9999AFFF00FD03FA91359AF48E33ADED41516AE936A181
+CompileProof: COMPILE_PROOF.png
+CompileProofSHA256: A224542552ABA5A68C2176002B42DDF27E3436B8CFAD98FFF03792CA8F836C3B
+StaticTestCommand: python -m unittest tests.test_mt4_unified_ea
+StaticTestResult: PASS (53 tests)
+Safety: Source was compiled from the isolated Experts/MetafxHQReleaseBuild/v2.18-final-account-lock folder. The existing v2.17 EA and EX4 were not overwritten. MT4 remained open. No chart input, account, gateway mode, LiveArmed value, order, or trade command was changed.

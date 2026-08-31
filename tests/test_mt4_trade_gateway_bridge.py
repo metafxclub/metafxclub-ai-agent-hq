@@ -620,6 +620,61 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             self.bridge._mt4_trade_gateway_init_status_message_th(status["initStatus"]),
         )
 
+    def test_live_disarmed_signing_warning_is_actionable_and_non_blocking(self) -> None:
+        self.write_ea_init_status(
+            eaVersion="2.16",
+            gatewayMode="live",
+            accountMode="live",
+            liveArmed=False,
+            severity="info",
+            stage="ready",
+            reasonCode="INIT_SUCCEEDED",
+            warningCode=(
+                "LIVE_DISARMED_SIGNING_NOT_READY_"
+                "ACTIVE_SIGNING_KEY_POINTER_MISSING"
+            ),
+            returnCode=0,
+        )
+        self.write_ea_status(
+            eaVersion="2.16",
+            mode="live",
+            demoAccount=False,
+            accountMode="live",
+            liveArmed=False,
+            executionGuardReady=False,
+            executionGuardReason="LIVE_NOT_ARMED",
+        )
+        with self.selected_candidate():
+            status = self.bridge.mt4_trade_gateway_status_read_model()
+
+        message = self.bridge._mt4_trade_gateway_init_status_message_th(
+            status["initStatus"]
+        )
+        self.assertTrue(status["connected"])
+        self.assertFalse(status["liveArmed"])
+        self.assertIn("LiveArmed ยังปิดอยู่", message)
+        self.assertIn("EA ยังคงติดกราฟโดยไม่ส่งคำสั่งเทรด", message)
+        self.assertNotIn("เริ่มทำงานไม่สำเร็จ", message)
+
+    def test_live_disarmed_warning_maps_exact_ea_signing_file_reason_codes(self) -> None:
+        cases = (
+            ("SIGNING_KEY_FILE_MISSING", "EA เปิดไฟล์ Signing Key ของ Local Runner ไม่ได้"),
+            ("SIGNING_KEY_LENGTH_INVALID", "ไฟล์ Signing Key มีขนาดไม่ถูกต้อง"),
+        )
+        for reason_code, expected in cases:
+            with self.subTest(reason_code=reason_code):
+                message = self.bridge._mt4_trade_gateway_init_status_message_th({
+                    "available": True,
+                    "severity": "info",
+                    "stage": "ready",
+                    "reasonCode": "INIT_SUCCEEDED",
+                    "warningCode": f"LIVE_DISARMED_SIGNING_NOT_READY_{reason_code}",
+                    "stale": False,
+                    "supersededByLiveStatus": False,
+                })
+                self.assertIn(expected, message)
+                self.assertIn("EA ยังคงติดกราฟโดยไม่ส่งคำสั่งเทรด", message)
+
     def test_gateway_status_exposes_v5_portfolio_policy_and_execution_state(self) -> None:
         self.write_ea_status(
             eaVersion="2.12",

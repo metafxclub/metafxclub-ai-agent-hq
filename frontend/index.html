@@ -188,6 +188,9 @@
                 </li>
               </ol>
               <div class="research-sheet-hub-consumers" id="researchSheetHubConsumers" aria-label="สถานะ 3 แท็บที่ใช้ Google Sheet กลาง"></div>
+              <button class="modal-action" id="researchSheetHubRetryFailed" type="button" hidden>
+                ลองซิงก์รายการที่ไม่สำเร็จใหม่
+              </button>
               <p class="research-sheet-hub-message" id="researchSheetHubMessage" data-tone="neutral" aria-live="polite">
                 หน้าเว็บรับเฉพาะ URL หรือ Sheet ID และไม่รับ Token หรือ Credential
               </p>
@@ -473,6 +476,24 @@
                 </div>
                 <span class="connection-badge" id="modalDashboardModuleAvailability" data-status="checking">กำลังตรวจสอบ</span>
               </div>
+              <section class="ai-trade-mt4-quick-card" id="modalAiTradeMt4QuickSetup" aria-labelledby="modalAiTradeMt4QuickHeading" hidden>
+                <div class="ai-trade-mt4-quick-heading">
+                  <div>
+                    <span>MT4 + CHANNEL ID</span>
+                    <strong id="modalAiTradeMt4QuickHeading">ตั้งค่า EA ของสภา AI Trade</strong>
+                  </div>
+                  <span class="connection-badge" id="modalAiTradeMt4QuickBadge" data-status="not_connected">ยังไม่พร้อม</span>
+                </div>
+                <button class="modal-action primary" id="modalAiTradeMt4QuickAction" type="button">ตรวจ MT4 และสร้าง Channel ID</button>
+                <div class="ai-trade-mt4-quick-candidates" id="modalAiTradeMt4QuickCandidates" role="radiogroup" aria-label="รายการ MT4 ที่ตรวจพบ" hidden></div>
+                <button class="modal-action" id="modalAiTradeMt4QuickConfirm" type="button" hidden disabled>ใช้ MT4 ที่เลือกและสร้าง Channel ID</button>
+                <div class="ai-trade-mt4-quick-channel">
+                  <span>Channel ID สำหรับช่อง SnapshotChannel ของ EA</span>
+                  <code id="modalAiTradeMt4QuickChannel" tabindex="0">ยังไม่มี Channel ID</code>
+                  <button id="modalAiTradeMt4QuickCopy" type="button" disabled>คัดลอก Channel ID</button>
+                </div>
+                <p class="ai-trade-mt4-quick-status" id="modalAiTradeMt4QuickStatus" role="status" aria-live="polite">กดครั้งเดียวเพื่อค้นหา MT4 และสร้างรหัสแบบปกปิดข้อมูลเครื่อง</p>
+              </section>
               <div class="connection-mode-grid">
                 <div>
                   <span>รูปแบบการทำงาน</span>

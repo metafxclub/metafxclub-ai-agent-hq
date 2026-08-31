@@ -17,7 +17,7 @@ from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_PATH = ROOT / "backend" / "local-runner" / "bridge_server.py"
-SHEET_ID = "193dlWvLqVzsstF5qStjBOT4h-8wiQMhnXXKkydPRp5A"
+SHEET_ID = "1MfxHQSyntheticSheetId0123456789ABCDEabcde"
 OTHER_SHEET_ID = "1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 
@@ -116,7 +116,12 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         )
         self.write_settings(settings)
 
-    def ready_probe(self, *, title: str = "Metafxclub System Research Hub") -> dict:
+    def ready_probe(
+        self,
+        *,
+        title: str = "Metafxclub System Research Hub",
+        row_count: int = 1,
+    ) -> dict:
         consumers = {}
         for consumer_id, contract in self.bridge._research_sheet_tab_contracts().items():
             consumers[consumer_id] = {
@@ -127,13 +132,13 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
                 "columnCount": len(contract["requiredHeaders"]),
                 "missingHeaders": [],
                 "duplicateHeaders": [],
-                "rowCount": 1,
+                "rowCount": row_count,
                 "probeEvidence": {
                     "kind": "key_column_read",
                     "range": "A2:A10000",
                     "confirmed": True,
-                    "rowsScanned": 1,
-                    "nonEmptyKeys": 1,
+                    "rowsScanned": row_count,
+                    "nonEmptyKeys": row_count,
                     "duplicateKeyCount": 0,
                 },
             }
@@ -145,7 +150,13 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "probeReady": True,
         }
 
-    def candidate_cache(self, sheet_id: str, revision: int) -> dict:
+    def candidate_cache(
+        self,
+        sheet_id: str,
+        revision: int,
+        *,
+        row_count: int = 1,
+    ) -> dict:
         # Keep cache fixtures fresh relative to the test run.  A fixed calendar
         # date eventually crosses RESEARCH_SHEET_CACHE_MAX_AGE_SECONDS and makes
         # otherwise valid re-verification tests fail only because time passed.
@@ -159,8 +170,8 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "consumers": {
                 consumer_id: {
                     "tabName": contract["tabName"],
-                    "rowCount": 1,
-                    "cachedRowCount": 1,
+                    "rowCount": row_count,
+                    "cachedRowCount": row_count,
                     "rows": [],
                     "observedAt": observed_at,
                 }
@@ -293,7 +304,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             settings["indicatorScoutSheet"]["tabName"],
             "Indicator_EA_Tool",
         )
-        self.assertEqual(model["sheetReferenceMasked"], "193dlW…Rp5A")
+        self.assertEqual(model["sheetReferenceMasked"], "1MfxHQ…bcde")
         self.assertEqual(model["sheetId"], SHEET_ID)
         self.assertEqual(
             model["canonicalUrl"],
@@ -505,6 +516,68 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         self.assertTrue(applied["allConsumersVerified"])
         self.assertIsNotNone(applied["verificationStartedAt"])
         self.assertIsNotNone(applied["verificationCompletedAt"])
+
+    def test_header_only_sheet_activates_without_history_or_write_receipts(self) -> None:
+        inspection = self.ready_probe(title="Empty Research Hub", row_count=0)
+        credential = {"configured": True, "mode": "access_token"}
+        with (
+            patch.object(self.hub, "credential_status", return_value=credential),
+            patch.object(self.hub, "probe_tabs", return_value=inspection),
+            patch.object(
+                self.bridge,
+                "_refresh_research_sheet_cache",
+                side_effect=lambda sheet_id, revision, _checks, **_kwargs: self.candidate_cache(
+                    sheet_id,
+                    revision,
+                    row_count=0,
+                ),
+            ),
+            patch.object(
+                self.bridge,
+                "_research_sheet_backfill_recent_reports",
+                return_value={
+                    "queued": 0,
+                    "flush": {"processed": 0, "synced": 0, "reason": None},
+                },
+            ),
+        ):
+            preview, result = self.inspect_and_activate(
+                SHEET_ID,
+                idempotency_key="header-only-activation-001",
+            )
+
+        verification = preview["verificationPreview"]
+        self.assertTrue(verification["readyForConfirmation"])
+        self.assertEqual(verification["verifiedConsumerCount"], 3)
+        self.assertTrue(all(
+            consumer["readReady"] is True
+            and consumer["rowCount"] == 0
+            and consumer["probeEvidence"]["confirmed"] is True
+            for consumer in verification["consumers"]
+        ))
+        activated = result["researchSheet"]
+        self.assertTrue(result["activation"]["active"])
+        self.assertEqual(result["activation"]["status"], "ready")
+        self.assertTrue(activated["active"])
+        self.assertTrue(activated["connected"])
+        self.assertTrue(activated["operational"])
+        self.assertTrue(activated["readReady"])
+        self.assertFalse(activated["writeReady"])
+        self.assertEqual(activated["adapterStatus"], "read_ready_write_unverified")
+        self.assertEqual(activated["applyPhase"], "completed")
+        self.assertEqual(activated["applyStatus"], "ready")
+        self.assertTrue(activated["allConsumersApplied"])
+        self.assertTrue(activated["allConsumersVerified"])
+        self.assertTrue(all(consumer["rowCount"] == 0 for consumer in activated["consumers"]))
+        self.assertEqual(activated["outbox"]["pending"], 0)
+        self.assertEqual(activated["outbox"]["failed"], 0)
+        self.assertEqual(activated["outbox"]["deferred"], 0)
+        self.assertTrue(all(
+            consumer["outbox"]
+            == {"pending": 0, "failed": 0, "synced": 0, "deferred": 0}
+            for consumer in activated["consumers"]
+        ))
+        self.assertTrue(all(system["ready"] is True for system in activated["linkedSystems"]))
 
     def test_failed_inspect_reports_auth_or_schema_without_touching_active_sheet(self) -> None:
         self.configure_hub(revision=4)
@@ -986,16 +1059,565 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         result = self.bridge._research_sheet_queue_report(radar, flush=False)
         stored = self.bridge._load_research_sheet_outbox_unlocked()["items"]
 
-        self.assertEqual(
-            result,
-            {
-                "queued": 0,
-                "reason": "outbox_capacity_reached",
-                "rejected": 6,
-            },
-        )
+        self.assertEqual(result["queued"], 0)
+        self.assertEqual(result["reason"], "outbox_capacity_reached")
+        self.assertEqual(result["rejected"], 6)
+        self.assertTrue(result["deferredStored"])
+        self.assertFalse(result["deferredStoreFull"])
+        self.assertEqual(result["deferredReportCount"], 1)
         self.assertEqual(len(stored), 599)
         self.assertTrue(expected_new_ids.isdisjoint({item["id"] for item in stored}))
+        deferred = self.bridge._load_research_sheet_outbox_unlocked()[
+            "deferredReports"
+        ]
+        self.assertEqual(len(deferred), 1)
+        self.assertEqual(deferred[0]["reportId"], radar["id"])
+        self.assertEqual(deferred[0]["consumerId"], "indicatorEaTool")
+        summary = self.bridge._research_sheet_outbox_summary(11)
+        self.assertEqual(summary["deferred"], 1)
+        self.assertEqual(
+            summary["byConsumer"]["indicatorEaTool"]["deferred"],
+            1,
+        )
+        self.assertEqual(
+            summary["byConsumer"]["worldSystem"]["deferred"],
+            0,
+        )
+
+    def test_capacity_deferred_report_drains_after_it_ages_out_of_recent_window(self) -> None:
+        self.configure_hub(revision=11)
+        existing = [
+            self._outbox_item(
+                item_id=f"sheet-sync-capacity-{index:03d}",
+                record_key=f"capacity-{index:03d}",
+                revision=11,
+            )
+            for index in range(self.bridge.RESEARCH_SHEET_OUTBOX_LIMIT)
+        ]
+        self.bridge._save_research_sheet_outbox_unlocked({"items": existing})
+        old_report = self._world_report()
+        self.bridge.write_json(
+            self.reports / f"{old_report['id']}.json",
+            old_report,
+        )
+        capacity_result = self.bridge._research_sheet_queue_report(
+            old_report,
+            flush=False,
+        )
+        self.assertEqual(capacity_result["reason"], "outbox_capacity_reached")
+        self.assertTrue(capacity_result["deferredStored"])
+
+        # Simulate three completed rows and a recent 240-report window that no
+        # longer contains this older report. The durable marker, not a global
+        # directory rescan, must recover it.
+        store = self.bridge._load_research_sheet_outbox_unlocked()
+        for item in store["items"][:3]:
+            item["status"] = "synced"
+            item["receipt"] = {
+                "rowNumber": 2,
+                "operation": "updated",
+                "readBackVerified": True,
+            }
+        self.bridge._save_research_sheet_outbox_unlocked(store)
+        recent_without_old = [
+            {"id": f"recent-non-sheet-{index:03d}", "type": "prop_report"}
+            for index in range(240)
+        ]
+        flush_result = {"processed": 0, "synced": 0, "reason": None}
+        with (
+            patch.object(
+                self.bridge,
+                "load_runtime_reports",
+                return_value=recent_without_old,
+            ) as load_recent,
+            patch.object(
+                self.bridge,
+                "_flush_research_sheet_outbox",
+                return_value=flush_result,
+            ),
+        ):
+            result = self.bridge._research_sheet_backfill_recent_reports()
+
+        load_recent.assert_called_once_with(limit=240)
+        self.assertEqual(result["recentQueued"], 0)
+        self.assertEqual(result["deferredDrain"]["drained"], 1)
+        self.assertEqual(result["deferredDrain"]["queued"], 3)
+        self.assertEqual(result["deferredReports"], 0)
+        after = self.bridge._load_research_sheet_outbox_unlocked()
+        self.assertEqual(after["deferredReports"], [])
+        projected_ids = {
+            item["id"]
+            for item in self.bridge._research_sheet_report_items(old_report, 11)
+        }
+        self.assertTrue(projected_ids.issubset({
+            item["id"] for item in after["items"]
+        }))
+
+    def test_deferred_report_store_is_bounded_without_evicting_oldest_markers(self) -> None:
+        self.configure_hub(revision=11)
+        existing = [
+            self._outbox_item(
+                item_id=f"sheet-sync-full-{index:03d}",
+                record_key=f"full-{index:03d}",
+                revision=11,
+            )
+            for index in range(self.bridge.RESEARCH_SHEET_OUTBOX_LIMIT)
+        ]
+        self.bridge._save_research_sheet_outbox_unlocked({"items": existing})
+        reports = []
+        for index in range(3):
+            report = self._world_report()
+            report["id"] = f"report-deferred-cap-{index}"
+            reports.append(report)
+
+        with patch.object(
+            self.bridge,
+            "RESEARCH_SHEET_DEFERRED_REPORT_LIMIT",
+            2,
+        ):
+            results = [
+                self.bridge._research_sheet_queue_report(report, flush=False)
+                for report in reports
+            ]
+            stored = self.bridge._load_research_sheet_outbox_unlocked()
+
+        self.assertTrue(results[0]["deferredStored"])
+        self.assertTrue(results[1]["deferredStored"])
+        self.assertFalse(results[2]["deferredStored"])
+        self.assertTrue(results[2]["deferredStoreFull"])
+        self.assertEqual(
+            [marker["reportId"] for marker in stored["deferredReports"]],
+            [reports[0]["id"], reports[1]["id"]],
+        )
+
+    def test_terminal_failure_retention_cannot_consume_delivery_capacity(self) -> None:
+        self.configure_hub(revision=11)
+        failed = [
+            self._outbox_item(
+                item_id=f"sheet-sync-failed-{index:03d}",
+                record_key=f"failed-{index:03d}",
+                revision=11,
+                status="failed",
+                attempt_count=self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+                error_code="permission_denied",
+            )
+            for index in range(self.bridge.RESEARCH_SHEET_OUTBOX_LIMIT)
+        ]
+        self.bridge._save_research_sheet_outbox_unlocked({"items": failed})
+        retained_store = self.bridge._load_research_sheet_outbox_unlocked()
+        retained = retained_store["items"]
+        self.assertEqual(
+            len(retained),
+            self.bridge.RESEARCH_SHEET_OUTBOX_FAILED_RETENTION_LIMIT,
+        )
+        self.assertEqual(len(retained_store["failedLedger"]), 600)
+        summary = self.bridge._research_sheet_outbox_summary(11)
+        self.assertEqual(summary["failed"], 600)
+        self.assertEqual(summary["byConsumer"]["worldSystem"]["failed"], 600)
+
+        result = self.bridge._research_sheet_queue_report(
+            self._radar_report(),
+            flush=False,
+        )
+        stored = self.bridge._load_research_sheet_outbox_unlocked()["items"]
+
+        self.assertEqual(result["queued"], 6)
+        self.assertIsNone(result["reason"])
+        self.assertEqual(
+            sum(item["status"] == "pending" for item in stored),
+            6,
+        )
+        self.assertLessEqual(
+            sum(item["status"] == "failed" for item in stored),
+            self.bridge.RESEARCH_SHEET_OUTBOX_FAILED_RETENTION_LIMIT,
+        )
+
+    def test_pruned_terminal_failure_requeues_from_its_durable_report(self) -> None:
+        self.configure_hub(revision=11)
+        report = self._world_report()
+        self.bridge.write_json(self.reports / f"{report['id']}.json", report)
+        report_items = self.bridge._research_sheet_report_items(report, 11)
+        for item in report_items:
+            item.update({
+                "status": "failed",
+                "attemptCount": self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+                "lastErrorCode": "permission_denied",
+            })
+        filler = [
+            self._outbox_item(
+                item_id=f"sheet-sync-later-failed-{index:03d}",
+                record_key=f"later-failed-{index:03d}",
+                revision=11,
+                status="failed",
+                attempt_count=self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+                error_code="permission_denied",
+            )
+            for index in range(self.bridge.RESEARCH_SHEET_OUTBOX_FAILED_RETENTION_LIMIT)
+        ]
+        for item in filler:
+            item["requeueCount"] = self.bridge.RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+        self.bridge._save_research_sheet_outbox_unlocked(
+            {"items": [*report_items, *filler]}
+        )
+        compacted = self.bridge._load_research_sheet_outbox_unlocked()
+        report_ids = {item["id"] for item in report_items}
+        self.assertTrue(report_ids.isdisjoint({item["id"] for item in compacted["items"]}))
+        self.assertTrue(report_ids.issubset({
+            entry["id"] for entry in compacted["failedLedger"]
+        }))
+        self.assertTrue(all(
+            entry.get("reportId") == report["id"]
+            for entry in compacted["failedLedger"]
+            if entry["id"] in report_ids
+        ))
+
+        replay = self.bridge._research_sheet_requeue_failed_current_revision(
+            reason="explicit_retry",
+            max_items=len(report_ids),
+        )
+        after = self.bridge._load_research_sheet_outbox_unlocked()
+        rebuilt = {
+            item["id"]: item
+            for item in after["items"]
+            if item["id"] in report_ids
+        }
+
+        self.assertEqual(replay["requeued"], len(report_ids))
+        self.assertEqual(replay["reconstructionMissing"], 0)
+        self.assertEqual(replay["reconstructionDigestMismatch"], 0)
+        self.assertEqual(set(rebuilt), report_ids)
+        self.assertTrue(all(
+            item["status"] == "pending"
+            and item["attemptCount"] == 0
+            and item["requeueCount"] == 1
+            for item in rebuilt.values()
+        ))
+        self.assertTrue(report_ids.isdisjoint({
+            entry["id"] for entry in after["failedLedger"]
+        }))
+
+    def test_pruned_terminal_failure_missing_report_stays_failed_and_is_audited(self) -> None:
+        self.configure_hub(revision=11)
+        missing = self._outbox_item(
+            item_id="sheet-sync-pruned-missing-report",
+            record_key="pruned-missing-report",
+            revision=11,
+            status="failed",
+            attempt_count=self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+            error_code="permission_denied",
+        )
+        filler = [
+            self._outbox_item(
+                item_id=f"sheet-sync-missing-filler-{index:03d}",
+                record_key=f"missing-filler-{index:03d}",
+                revision=11,
+                status="failed",
+                attempt_count=self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+                error_code="permission_denied",
+            )
+            for index in range(self.bridge.RESEARCH_SHEET_OUTBOX_FAILED_RETENTION_LIMIT)
+        ]
+        for item in filler:
+            item["requeueCount"] = self.bridge.RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+        self.bridge._save_research_sheet_outbox_unlocked(
+            {"items": [missing, *filler]}
+        )
+
+        result = self.bridge._research_sheet_requeue_failed_current_revision(
+            reason="explicit_retry",
+            max_items=1,
+        )
+        after = self.bridge._load_research_sheet_outbox_unlocked()
+
+        self.assertEqual(result["requeued"], 0)
+        self.assertEqual(result["reconstructionMissing"], 1)
+        self.assertEqual(result["reconstructionDigestMismatch"], 0)
+        self.assertIn(
+            missing["id"],
+            {entry["id"] for entry in after["failedLedger"]},
+        )
+        self.assertNotIn(missing["id"], {item["id"] for item in after["items"]})
+        audit = self.bridge.AUDIT_PATH.read_text(encoding="utf-8")
+        self.assertIn('"reconstructionMissingCount": 1', audit)
+        self.assertNotIn(missing["reportId"], audit)
+
+    def test_pruned_terminal_failure_digest_mismatch_stays_failed(self) -> None:
+        self.configure_hub(revision=11)
+        report = self._world_report()
+        self.bridge.write_json(self.reports / f"{report['id']}.json", report)
+        target = self.bridge._research_sheet_report_items(report, 11)[0]
+        target.update({
+            "status": "failed",
+            "attemptCount": self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+            "lastErrorCode": "permission_denied",
+        })
+        filler = [
+            self._outbox_item(
+                item_id=f"sheet-sync-mismatch-filler-{index:03d}",
+                record_key=f"mismatch-filler-{index:03d}",
+                revision=11,
+                status="failed",
+                attempt_count=self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+                error_code="permission_denied",
+            )
+            for index in range(self.bridge.RESEARCH_SHEET_OUTBOX_FAILED_RETENTION_LIMIT)
+        ]
+        for item in filler:
+            item["requeueCount"] = self.bridge.RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+        self.bridge._save_research_sheet_outbox_unlocked(
+            {"items": [target, *filler]}
+        )
+        compacted = self.bridge._load_research_sheet_outbox_unlocked()
+        ledger_target = next(
+            entry for entry in compacted["failedLedger"]
+            if entry["id"] == target["id"]
+        )
+        ledger_target["payloadDigest"] = "tampered-digest"
+        self.bridge._save_research_sheet_outbox_unlocked(compacted)
+
+        result = self.bridge._research_sheet_requeue_failed_current_revision(
+            reason="explicit_retry",
+            max_items=1,
+        )
+        after = self.bridge._load_research_sheet_outbox_unlocked()
+
+        self.assertEqual(result["requeued"], 0)
+        self.assertEqual(result["reconstructionMissing"], 0)
+        self.assertEqual(result["reconstructionDigestMismatch"], 1)
+        self.assertIn(
+            target["id"],
+            {entry["id"] for entry in after["failedLedger"]},
+        )
+        self.assertNotIn(target["id"], {item["id"] for item in after["items"]})
+
+    def test_pruned_terminal_failure_requeue_respects_delivery_capacity(self) -> None:
+        self.configure_hub(revision=11)
+        report = self._world_report()
+        self.bridge.write_json(self.reports / f"{report['id']}.json", report)
+        failed = self.bridge._research_sheet_report_items(report, 11)[0]
+        failed.update({
+            "status": "failed",
+            "attemptCount": self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+            "lastErrorCode": "rate_limited",
+        })
+        pending = [
+            self._outbox_item(
+                item_id=f"sheet-sync-capacity-{index:03d}",
+                record_key=f"capacity-{index:03d}",
+                revision=11,
+            )
+            for index in range(self.bridge.RESEARCH_SHEET_OUTBOX_LIMIT)
+        ]
+        self.bridge._save_research_sheet_outbox_unlocked(
+            {"items": [failed, *pending]}
+        )
+
+        result = self.bridge._research_sheet_requeue_failed_current_revision(
+            reason="explicit_retry",
+            max_items=1,
+        )
+        after = self.bridge._load_research_sheet_outbox_unlocked()
+
+        self.assertEqual(result["requeued"], 0)
+        self.assertEqual(result["capacityDeferred"], 1)
+        self.assertEqual(result["eligibleDeferred"], 1)
+        self.assertEqual(len(after["items"]), self.bridge.RESEARCH_SHEET_OUTBOX_LIMIT)
+        self.assertIn(
+            failed["id"],
+            {entry["id"] for entry in after["failedLedger"]},
+        )
+
+    def test_legacy_missing_ledger_markers_do_not_starve_later_valid_requeue(self) -> None:
+        self.configure_hub(revision=11)
+        report = self._world_report()
+        self.bridge.write_json(self.reports / f"{report['id']}.json", report)
+        valid = self.bridge._research_sheet_report_items(report, 11)[0]
+        valid.update({
+            "status": "failed",
+            "attemptCount": self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+            "lastErrorCode": "permission_denied",
+        })
+        legacy = [
+            self._outbox_item(
+                item_id=f"sheet-sync-legacy-no-report-{index:03d}",
+                record_key=f"legacy-no-report-{index:03d}",
+                revision=11,
+                status="failed",
+                attempt_count=self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+                error_code="permission_denied",
+            )
+            for index in range(50)
+        ]
+        filler = [
+            self._outbox_item(
+                item_id=f"sheet-sync-starvation-filler-{index:03d}",
+                record_key=f"starvation-filler-{index:03d}",
+                revision=11,
+                status="failed",
+                attempt_count=self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+                error_code="permission_denied",
+            )
+            for index in range(self.bridge.RESEARCH_SHEET_OUTBOX_FAILED_RETENTION_LIMIT)
+        ]
+        for item in filler:
+            item["requeueCount"] = self.bridge.RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+        self.bridge._save_research_sheet_outbox_unlocked(
+            {"items": [*legacy, valid, *filler]}
+        )
+        compacted = self.bridge._load_research_sheet_outbox_unlocked()
+        legacy_ids = {item["id"] for item in legacy}
+        for entry in compacted["failedLedger"]:
+            if entry["id"] in legacy_ids:
+                entry["reportId"] = None
+        self.bridge._save_research_sheet_outbox_unlocked(compacted)
+
+        result = self.bridge._research_sheet_requeue_failed_current_revision(
+            reason="explicit_retry",
+            max_items=1,
+        )
+        after = self.bridge._load_research_sheet_outbox_unlocked()
+        rebuilt = next(item for item in after["items"] if item["id"] == valid["id"])
+        legacy_ledger = {
+            entry["id"]: entry
+            for entry in after["failedLedger"]
+            if entry["id"] in legacy_ids
+        }
+
+        self.assertEqual(result["requeued"], 1)
+        self.assertEqual(result["reconstructionMissing"], 50)
+        self.assertEqual(result["reconstructionDigestMismatch"], 0)
+        self.assertEqual(rebuilt["status"], "pending")
+        self.assertEqual(rebuilt["requeueCount"], 1)
+        self.assertEqual(len(legacy_ledger), 50)
+        self.assertTrue(all(
+            entry["requeueCount"] == 1 for entry in legacy_ledger.values()
+        ))
+
+    def test_failed_requeue_is_current_revision_bounded_and_audited(self) -> None:
+        self.configure_hub(revision=12)
+        current = self._outbox_item(
+            item_id="sheet-sync-current-failed",
+            record_key="current-failed",
+            revision=12,
+            status="failed",
+            attempt_count=self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+            error_code="rate_limited",
+        )
+        current["requeueCount"] = self.bridge.RESEARCH_SHEET_OUTBOX_MAX_REQUEUES - 1
+        exhausted = self._outbox_item(
+            item_id="sheet-sync-current-exhausted",
+            record_key="current-exhausted",
+            revision=12,
+            status="failed",
+            attempt_count=self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+            error_code="permission_denied",
+        )
+        exhausted["requeueCount"] = self.bridge.RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+        stale = self._outbox_item(
+            item_id="sheet-sync-stale-failed",
+            record_key="stale-failed",
+            revision=11,
+            status="failed",
+            attempt_count=self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+            error_code="rate_limited",
+        )
+        self.bridge._save_research_sheet_outbox_unlocked(
+            {"items": [current, exhausted, stale]}
+        )
+
+        result = self.bridge._research_sheet_requeue_failed_current_revision(
+            reason="explicit_retry",
+        )
+        stored = {
+            item["id"]: item
+            for item in self.bridge._load_research_sheet_outbox_unlocked()["items"]
+        }
+
+        self.assertEqual(result["requeued"], 1)
+        self.assertEqual(result["exhausted"], 1)
+        self.assertEqual(result["staleIgnored"], 1)
+        self.assertEqual(stored[current["id"]]["status"], "pending")
+        self.assertEqual(stored[current["id"]]["attemptCount"], 0)
+        self.assertEqual(
+            stored[current["id"]]["requeueCount"],
+            self.bridge.RESEARCH_SHEET_OUTBOX_MAX_REQUEUES,
+        )
+        self.assertEqual(stored[exhausted["id"]]["status"], "failed")
+        self.assertEqual(stored[stale["id"]]["status"], "failed")
+        audit = self.bridge.AUDIT_PATH.read_text(encoding="utf-8")
+        self.assertIn("research_sheet_hub.failed_rows_requeue_checked", audit)
+        self.assertIn('"requeuedCount": 1', audit)
+        self.assertIn('"staleIgnoredCount": 1', audit)
+
+    def test_explicit_retry_reopens_and_flushes_one_failed_current_row(self) -> None:
+        self.configure_hub(revision=12)
+        failed = self._outbox_item(
+            item_id="sheet-sync-explicit-retry",
+            record_key="explicit-retry",
+            revision=12,
+            status="failed",
+            attempt_count=self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+            error_code="rate_limited",
+        )
+        self.bridge._save_research_sheet_outbox_unlocked({"items": [failed]})
+        credential = {"configured": True, "mode": "access_token"}
+        receipt = {
+            "rowNumber": 2,
+            "operation": "updated",
+            "readBackVerified": True,
+        }
+        with (
+            patch.object(self.hub, "credential_status", return_value=credential),
+            patch.object(self.hub, "upsert_row", return_value=receipt),
+            patch.object(self.bridge, "_refresh_research_sheet_cache"),
+        ):
+            operation = self.bridge._retry_failed_research_sheet_outbox(
+                max_items=1,
+            )
+
+        stored = self.bridge._load_research_sheet_outbox_unlocked()["items"]
+        self.assertEqual(operation["retry"]["requeued"], 1)
+        self.assertEqual(operation["flush"]["processed"], 1)
+        self.assertEqual(operation["flush"]["synced"], 1)
+        self.assertEqual(stored[0]["status"], "synced")
+        self.assertEqual(stored[0]["requeueCount"], 1)
+
+    def test_periodic_backfill_does_not_reset_unchanged_retry_budget(self) -> None:
+        self.configure_hub(revision=12)
+        report = self._world_report()
+        first = self.bridge._research_sheet_queue_report(report, flush=False)
+        self.assertEqual(first["queued"], 3)
+        store = self.bridge._load_research_sheet_outbox_unlocked()
+        store["items"][0].update({
+            "status": "failed",
+            "attemptCount": self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+            "requeueCount": self.bridge.RESEARCH_SHEET_OUTBOX_MAX_REQUEUES,
+            "lastErrorCode": "permission_denied",
+        })
+        store["items"][1].update({
+            "status": "retry_pending",
+            "attemptCount": 2,
+            "nextAttemptAt": "2099-01-01T00:00:00+00:00",
+            "lastErrorCode": "rate_limited",
+        })
+        self.bridge._save_research_sheet_outbox_unlocked(store)
+
+        replay = self.bridge._research_sheet_queue_report(report, flush=False)
+        persisted = self.bridge._load_research_sheet_outbox_unlocked()["items"]
+        by_id = {item["id"]: item for item in persisted}
+
+        self.assertEqual(replay["queued"], 0)
+        self.assertEqual(by_id[store["items"][0]["id"]]["status"], "failed")
+        self.assertEqual(
+            by_id[store["items"][0]["id"]]["requeueCount"],
+            self.bridge.RESEARCH_SHEET_OUTBOX_MAX_REQUEUES,
+        )
+        self.assertEqual(by_id[store["items"][1]["id"]]["status"], "retry_pending")
+        self.assertEqual(by_id[store["items"][1]["id"]]["attemptCount"], 2)
+        self.assertEqual(
+            by_id[store["items"][1]["id"]]["nextAttemptAt"],
+            "2099-01-01T00:00:00+00:00",
+        )
 
     def test_flush_does_not_mark_a_replaced_payload_synced_with_stale_receipt(self) -> None:
         """A write receipt may acknowledge only the payload snapshot it wrote."""
@@ -1062,17 +1684,17 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             settings["researchSheetHub"].get("consumerWriteChecks") or {},
         )
 
-    def test_retrying_poison_item_keeps_backoff_and_does_not_starve_fresh_work(self) -> None:
-        """A retry-forever item must back off while fresh work keeps flowing."""
+    def test_rate_limit_past_attempt_ceiling_keeps_hourly_retry_without_starving_fresh_work(self) -> None:
+        """A temporary Google outage stays durable while fresh work flows."""
 
         self.configure_hub(revision=13)
-        attempt_ceiling = 5
+        attempt_ceiling = self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS
         poison = self._outbox_item(
             item_id="sheet-sync-poison-item",
             record_key="poison-record",
             revision=13,
             status="retry_pending",
-            attempt_count=attempt_ceiling,
+            attempt_count=attempt_ceiling - 1,
             error_code="rate_limited",
         )
         self.bridge._save_research_sheet_outbox_unlocked(
@@ -1103,8 +1725,8 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             patch.object(self.hub, "upsert_row", side_effect=upsert),
             patch.object(self.bridge, "_refresh_research_sheet_cache"),
         ):
-            # First failure schedules a bounded future retry instead of
-            # converting the durable row to terminal `failed`.
+            # The historical ceiling no longer makes temporary Google errors
+            # terminal. The due time prevents a hot loop.
             self.bridge._flush_research_sheet_outbox(max_items=1)
             after_failure = self.bridge._load_research_sheet_outbox_unlocked()
             healthy = self._outbox_item(
@@ -1114,8 +1736,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             )
             after_failure["items"].append(healthy)
             self.bridge._save_research_sheet_outbox_unlocked(after_failure)
-            # The poison row is not due yet, so a brand-new row cannot starve
-            # behind it even though the poison attempt count is already high.
+            # The delayed high-attempt row cannot starve a brand-new row.
             self.bridge._flush_research_sheet_outbox(max_items=1)
 
         stored = {
@@ -1124,21 +1745,129 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         }
         self.assertEqual(written_keys, ["poison-record", "healthy-record"])
         self.assertEqual(stored["sheet-sync-healthy-item"]["status"], "synced")
-        self.assertEqual(stored["sheet-sync-poison-item"]["status"], "retry_pending")
+        self.assertEqual(
+            stored["sheet-sync-poison-item"]["status"],
+            "retry_pending",
+        )
         self.assertEqual(
             stored["sheet-sync-poison-item"]["lastErrorCode"],
             "rate_limited",
         )
         self.assertEqual(
             stored["sheet-sync-poison-item"]["attemptCount"],
-            attempt_ceiling + 1,
+            attempt_ceiling,
         )
-        self.assertIsNotNone(
-            self.bridge.parse_iso(
-                stored["sheet-sync-poison-item"]["nextAttemptAt"]
-            )
+        retry_at = self.bridge.parse_iso(
+            stored["sheet-sync-poison-item"]["nextAttemptAt"]
+        )
+        attempted_at = self.bridge.parse_iso(
+            stored["sheet-sync-poison-item"]["lastAttemptAt"]
+        )
+        self.assertIsNotNone(retry_at)
+        self.assertIsNotNone(attempted_at)
+        self.assertGreater((retry_at - attempted_at).total_seconds(), 0)
+        self.assertLessEqual(
+            (retry_at - attempted_at).total_seconds(),
+            self.bridge.RESEARCH_SHEET_OUTBOX_RETRY_MAX_SECONDS + 1,
         )
         self.assertIsNone(stored["sheet-sync-healthy-item"]["nextAttemptAt"])
+
+    def test_all_transient_google_failures_remain_retryable_past_five_attempts(self) -> None:
+        self.configure_hub(revision=13)
+        cases = (
+            ("rate_limited", False, "retry_pending"),
+            ("google_api_unavailable", False, "retry_pending"),
+            ("timeout_after_write", True, "write_unknown"),
+        )
+        for index, (error_code, write_unknown, expected_status) in enumerate(cases):
+            with self.subTest(error_code=error_code):
+                item = self._outbox_item(
+                    item_id=f"sheet-sync-transient-{index}",
+                    record_key=f"transient-{index}",
+                    revision=13,
+                    status=expected_status,
+                    attempt_count=8,
+                    error_code=error_code,
+                )
+                item["nextAttemptAt"] = None
+                self.bridge._save_research_sheet_outbox_unlocked({"items": [item]})
+                failure = self.hub.GoogleSheetHubError(
+                    error_code,
+                    "synthetic temporary Google failure",
+                    503,
+                    write_unknown=write_unknown,
+                )
+                with (
+                    patch.object(
+                        self.hub,
+                        "credential_status",
+                        return_value={"configured": True, "mode": "access_token"},
+                    ),
+                    patch.object(self.hub, "upsert_row", side_effect=failure),
+                ):
+                    result = self.bridge._flush_research_sheet_outbox(max_items=1)
+
+                stored = self.bridge._load_research_sheet_outbox_unlocked()
+                persisted = stored["items"][0]
+                self.assertEqual(result["processed"], 1)
+                self.assertEqual(persisted["status"], expected_status)
+                self.assertEqual(persisted["attemptCount"], 9)
+                retry_at = self.bridge.parse_iso(persisted["nextAttemptAt"])
+                attempted_at = self.bridge.parse_iso(persisted["lastAttemptAt"])
+                self.assertIsNotNone(retry_at)
+                self.assertIsNotNone(attempted_at)
+                self.assertLessEqual(
+                    (retry_at - attempted_at).total_seconds(),
+                    self.bridge.RESEARCH_SHEET_OUTBOX_RETRY_MAX_SECONDS + 1,
+                )
+                self.assertEqual(stored["failedLedger"], [])
+
+    def test_permission_failure_is_terminal_only_for_its_consumer_until_verify(self) -> None:
+        self.configure_hub(revision=14)
+        deep = self._outbox_item(
+            item_id="sheet-sync-deep-permission",
+            record_key="deep-permission",
+            revision=14,
+        )
+        deep.update({
+            "consumerId": "deepResearch",
+            "producerPropId": "left_server_racks",
+            "tabName": "Deep_Research",
+            "keyHeader": "research_id",
+        })
+        self.bridge._save_research_sheet_outbox_unlocked({"items": [deep]})
+        permission_error = self.hub.GoogleSheetHubError(
+            "permission_denied",
+            "synthetic Google permission failure",
+            403,
+        )
+        credential = {"configured": True, "mode": "access_token"}
+        with (
+            patch.object(self.hub, "credential_status", return_value=credential),
+            patch.object(self.hub, "upsert_row", side_effect=permission_error),
+        ):
+            result = self.bridge._flush_research_sheet_outbox(max_items=1)
+            model = self.bridge.research_sheet_hub_read_model()
+
+        stored = self.bridge._load_research_sheet_outbox_unlocked()["items"]
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(stored[0]["status"], "failed")
+        self.assertEqual(model["outbox"]["pending"], 0)
+        self.assertEqual(model["outbox"]["failed"], 1)
+        by_consumer = {
+            item["consumerId"]: item for item in model["consumers"]
+        }
+        self.assertEqual(by_consumer["deepResearch"]["outbox"]["pending"], 0)
+        self.assertEqual(by_consumer["deepResearch"]["outbox"]["failed"], 1)
+        self.assertEqual(by_consumer["worldSystem"]["outbox"]["pending"], 0)
+        self.assertEqual(by_consumer["worldSystem"]["outbox"]["failed"], 0)
+        self.assertEqual(by_consumer["indicatorEaTool"]["outbox"]["pending"], 0)
+        self.assertEqual(by_consumer["indicatorEaTool"]["outbox"]["failed"], 0)
+        linked = {item["systemId"]: item for item in model["linkedSystems"]}
+        self.assertEqual(linked["deepResearch"]["outbox"]["pending"], 0)
+        self.assertEqual(linked["deepResearch"]["outbox"]["failed"], 1)
+        self.assertEqual(linked["worldRadar"]["outbox"]["pending"], 0)
+        self.assertEqual(linked["worldRadar"]["outbox"]["failed"], 0)
 
     def test_synced_ledger_prevents_restart_backfill_from_rewriting_old_reports(self) -> None:
         """Compacting the diagnostic tail must not forget durable successes."""
@@ -1421,7 +2150,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "sourceSchemaVersion": "deep-research-sheet-v1",
             "sourceKind": "verified_deep_research_sheet",
             "sourceKey": "sheet-deep-research-test",
-            "sheetReferenceMasked": "193dlW…Rp5A",
+            "sheetReferenceMasked": "1MfxHQ…bcde",
             "tabName": "Deep_Research",
             "status": "ready",
             "recordCount": 1,
@@ -2277,6 +3006,138 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             self.assertEqual(check["rowCount"], 1)
             self.assertTrue(check["probeEvidence"]["confirmed"])
 
+    def test_successful_reverify_requeues_only_current_revision_failures(self) -> None:
+        self.configure_hub(revision=24)
+        current = self._outbox_item(
+            item_id="sheet-sync-reverify-current",
+            record_key="reverify-current",
+            revision=24,
+            status="failed",
+            attempt_count=self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+            error_code="permission_denied",
+        )
+        stale = self._outbox_item(
+            item_id="sheet-sync-reverify-stale",
+            record_key="reverify-stale",
+            revision=23,
+            status="failed",
+            attempt_count=self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+            error_code="permission_denied",
+        )
+        self.bridge._save_research_sheet_outbox_unlocked(
+            {"items": [current, stale]}
+        )
+        inspection = self.ready_probe(title="Reverified With Retry")
+        credential = {"configured": True, "mode": "access_token"}
+        with (
+            patch.object(self.hub, "credential_status", return_value=credential),
+            patch.object(self.hub, "probe_tabs", return_value=inspection),
+            patch.object(
+                self.bridge,
+                "_refresh_research_sheet_cache",
+                side_effect=lambda sheet_id, revision, _checks, **_kwargs: self.candidate_cache(
+                    sheet_id, revision
+                ),
+            ),
+        ):
+            model = self.bridge._verify_research_sheet_hub()
+
+        stored = {
+            item["id"]: item
+            for item in self.bridge._load_research_sheet_outbox_unlocked()["items"]
+        }
+        self.assertEqual(stored[current["id"]]["status"], "pending")
+        self.assertEqual(stored[current["id"]]["requeueCount"], 1)
+        self.assertEqual(stored[stale["id"]]["status"], "failed")
+        self.assertEqual(model["outbox"]["pending"], 1)
+        self.assertEqual(model["outbox"]["priorConfigItems"], 1)
+
+    def test_live_reverify_reopens_exhausted_permission_failure_and_flushes_it(self) -> None:
+        self.configure_hub(revision=25)
+        failed = self._outbox_item(
+            item_id="sheet-sync-reverify-exhausted-permission",
+            record_key="reverify-exhausted-permission",
+            revision=25,
+            status="failed",
+            attempt_count=self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+            error_code="permission_denied",
+        )
+        failed["requeueCount"] = self.bridge.RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+        self.bridge._save_research_sheet_outbox_unlocked({"items": [failed]})
+        inspection = self.ready_probe(title="Permission Recovered")
+        credential = {"configured": True, "mode": "access_token"}
+        receipt = {
+            "rowNumber": 2,
+            "operation": "updated",
+            "readBackVerified": True,
+        }
+        with (
+            patch.object(self.hub, "credential_status", return_value=credential),
+            patch.object(self.hub, "probe_tabs", return_value=inspection),
+            patch.object(
+                self.bridge,
+                "_refresh_research_sheet_cache",
+                side_effect=lambda sheet_id, revision, _checks=None, **_kwargs: self.candidate_cache(
+                    sheet_id, revision
+                ),
+            ),
+            patch.object(self.hub, "upsert_row", return_value=receipt),
+        ):
+            verified = self.bridge._verify_research_sheet_hub()
+            pending = self.bridge._load_research_sheet_outbox_unlocked()["items"][0]
+            flushed = self.bridge._flush_research_sheet_outbox(max_items=1)
+
+        after = self.bridge._load_research_sheet_outbox_unlocked()
+        self.assertEqual(verified["outbox"]["pending"], 1)
+        self.assertEqual(pending["status"], "pending")
+        self.assertEqual(
+            pending["requeueCount"],
+            self.bridge.RESEARCH_SHEET_OUTBOX_MAX_REQUEUES,
+        )
+        self.assertEqual(flushed["processed"], 1)
+        self.assertEqual(flushed["synced"], 1)
+        self.assertEqual(after["failedLedger"], [])
+        audit = self.bridge.AUDIT_PATH.read_text(encoding="utf-8")
+        self.assertIn('"liveVerificationReopenedExhaustedCount": 1', audit)
+
+    def test_live_reverify_keeps_exhausted_schema_failure_terminal(self) -> None:
+        self.configure_hub(revision=26)
+        failed = self._outbox_item(
+            item_id="sheet-sync-reverify-exhausted-schema",
+            record_key="reverify-exhausted-schema",
+            revision=26,
+            status="failed",
+            attempt_count=self.bridge.RESEARCH_SHEET_OUTBOX_MAX_ATTEMPTS,
+            error_code="schema_mismatch",
+        )
+        failed["requeueCount"] = self.bridge.RESEARCH_SHEET_OUTBOX_MAX_REQUEUES
+        self.bridge._save_research_sheet_outbox_unlocked({"items": [failed]})
+        inspection = self.ready_probe(title="Schema Still Terminal")
+        credential = {"configured": True, "mode": "access_token"}
+        with (
+            patch.object(self.hub, "credential_status", return_value=credential),
+            patch.object(self.hub, "probe_tabs", return_value=inspection),
+            patch.object(
+                self.bridge,
+                "_refresh_research_sheet_cache",
+                side_effect=lambda sheet_id, revision, _checks, **_kwargs: self.candidate_cache(
+                    sheet_id, revision
+                ),
+            ),
+        ):
+            verified = self.bridge._verify_research_sheet_hub()
+
+        after = self.bridge._load_research_sheet_outbox_unlocked()["items"][0]
+        self.assertEqual(after["status"], "failed")
+        self.assertEqual(
+            after["requeueCount"],
+            self.bridge.RESEARCH_SHEET_OUTBOX_MAX_REQUEUES,
+        )
+        self.assertEqual(verified["outbox"]["pending"], 0)
+        self.assertEqual(verified["outbox"]["failed"], 1)
+        audit = self.bridge.AUDIT_PATH.read_text(encoding="utf-8")
+        self.assertIn('"liveVerificationIneligibleCount": 1', audit)
+
     def test_probe_tabs_reports_real_row_counts_without_returning_cell_values(self) -> None:
         contracts = self.bridge._research_sheet_tab_contracts()
         headers_by_tab = {
@@ -2331,6 +3192,51 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             check["probeEvidence"]["confirmed"]
             for check in result["consumers"].values()
         ))
+
+    def test_probe_tabs_accepts_header_only_tabs_as_valid_empty_datasets(self) -> None:
+        contracts = self.bridge._research_sheet_tab_contracts()
+        headers_by_tab = {
+            contract["tabName"]: contract["requiredHeaders"]
+            for contract in contracts.values()
+        }
+
+        def open_url(request, timeout=0):
+            self.assertGreater(timeout, 0)
+            decoded = unquote(request.full_url)
+            if "fields=spreadsheetId" in decoded:
+                return FakeJsonResponse({
+                    "spreadsheetId": SHEET_ID,
+                    "properties": {"title": "Header-only Research Hub"},
+                    "sheets": [
+                        {"properties": {"title": tab_name}}
+                        for tab_name in headers_by_tab
+                    ],
+                })
+            for tab_name, headers in headers_by_tab.items():
+                if f"'{tab_name}'!1:1" in decoded:
+                    return FakeJsonResponse({"values": [headers]})
+                if f"'{tab_name}'!" in decoded and "2:" in decoded:
+                    return FakeJsonResponse({})
+            raise AssertionError(f"Unexpected Google API request: {decoded}")
+
+        result = self.hub.probe_tabs(
+            SHEET_ID,
+            contracts,
+            environ={"METAFX_GOOGLE_SHEETS_ACCESS_TOKEN": "backend-only-token"},
+            open_url=open_url,
+        )
+
+        self.assertTrue(result["readReady"])
+        self.assertTrue(result["probeReady"])
+        self.assertEqual(len(result["consumers"]), 3)
+        for check in result["consumers"].values():
+            self.assertTrue(check["readReady"])
+            self.assertTrue(check["probeReady"])
+            self.assertEqual(check["rowCount"], 0)
+            self.assertEqual(check["probeEvidence"]["rowsScanned"], 0)
+            self.assertEqual(check["probeEvidence"]["nonEmptyKeys"], 0)
+            self.assertEqual(check["probeEvidence"]["duplicateKeyCount"], 0)
+            self.assertTrue(check["probeEvidence"]["confirmed"])
 
     @staticmethod
     def _outbox_item(

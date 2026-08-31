@@ -481,10 +481,171 @@ class MT4UnifiedEATests(unittest.TestCase):
             r"input\s+bool\s+EnableRolloverEntryBlock\s*=\s*false\s*;",
         )
         lifecycle = named_block(self.code, r"\bvoid\s+ApplyOptionalPositionLifecycle\s*\([^)]*\)")
-        self.assertIn("LIFECYCLE_SLTP_ONLY", lifecycle)
+        close_guard = named_block(
+            self.code,
+            r"\bbool\s+LifecycleCloseGuard\s*\([^)]*\)",
+        )
+        self.assertIn("LIFECYCLE_SLTP_ONLY", close_guard)
         self.assertIn("LifecycleAttemptPath", lifecycle)
         self.assertIn("automaticRetry", lifecycle)
-        self.assertIn("LiveArmed", lifecycle)
+        self.assertIn("LiveArmed", close_guard)
+        self.assertIn("GatewayMode == GATEWAY_DEMO && !IsDemo()", close_guard)
+        self.assertRegex(
+            close_guard,
+            r"GatewayMode\s*==\s*GATEWAY_LIVE[\s\S]*?IsDemo\s*\(\s*\)[\s\S]*?!LiveArmed",
+        )
+        self.assertIn("LifecycleCloseGuard", lifecycle)
+
+    def test_position_lifecycle_rechecks_signed_close_guard_at_boundary(self) -> None:
+        close_guard = named_block(
+            self.code,
+            r"\bbool\s+LifecycleCloseGuard\s*\([^)]*\)",
+        )
+        lifecycle = named_block(
+            self.code,
+            r"\bvoid\s+ApplyOptionalPositionLifecycle\s*\([^)]*\)",
+        )
+
+        for token in (
+            "ValidateConfiguredModes",
+            "GATEWAY_SHADOW",
+            "IsTesting()",
+            "IsOptimization()",
+            "GatewayMode == GATEWAY_DEMO && !IsDemo()",
+            "GatewayMode == GATEWAY_LIVE",
+            "IsDemo()",
+            "LiveArmed",
+            "SignedCommandVerificationAvailable",
+        ):
+            self.assertIn(token, close_guard)
+        self.assertRegex(
+            close_guard,
+            r"}\s*if\(!SignedCommandVerificationAvailable\(\)\)",
+        )
+        self.assertGreaterEqual(lifecycle.count("LifecycleCloseGuard"), 2)
+        order_close = lifecycle.find("OrderClose")
+        boundary_guard = lifecycle.rfind("LifecycleCloseGuard", 0, order_close)
+        lifecycle_marker = lifecycle.find("WriteCommonTextAtomic", boundary_guard)
+        self.assertGreaterEqual(boundary_guard, 0)
+        self.assertLess(boundary_guard, lifecycle_marker)
+        self.assertLess(lifecycle_marker, order_close)
+
+    def test_position_lifecycle_serializes_close_with_account_lock(self) -> None:
+        lifecycle = named_block(
+            self.code,
+            r"\bvoid\s+ApplyOptionalPositionLifecycle\s*\([^)]*\)",
+        )
+
+        candidate_probe = lifecycle.find("LifecycleCloseCandidateExists")
+        acquire = lifecycle.find("AcquireAccountExecutionLock")
+        locked_scope = lifecycle.find("do", acquire)
+        locked_guard = lifecycle.find("LifecycleCloseGuard", locked_scope)
+        locked_loop = lifecycle.find("for(", locked_guard)
+        order_close = lifecycle.find("OrderClose", locked_loop)
+        release = lifecycle.find("ReleaseAccountExecutionLock", order_close)
+
+        self.assertGreaterEqual(candidate_probe, 0)
+        self.assertLess(candidate_probe, acquire)
+        self.assertLess(acquire, locked_scope)
+        self.assertLess(locked_scope, locked_guard)
+        self.assertLess(locked_guard, locked_loop)
+        self.assertLess(locked_loop, order_close)
+        self.assertLess(order_close, release)
+        self.assertEqual(lifecycle.count("AcquireAccountExecutionLock"), 1)
+        self.assertEqual(lifecycle.count("ReleaseAccountExecutionLock"), 1)
+        self.assertNotRegex(lifecycle[locked_scope:release], r"\breturn\b")
+
+        boundary_guard = lifecycle.rfind("LifecycleCloseGuard", 0, order_close)
+        marker = lifecycle.find("WriteCommonTextAtomic", boundary_guard)
+        self.assertGreater(boundary_guard, acquire)
+        self.assertLess(boundary_guard, marker)
+        self.assertLess(marker, order_close)
+
+    def test_invalid_enum_modes_stop_before_ordersend_and_orderclose(self) -> None:
+        gateway_mode = named_block(
+            self.code,
+            r"\bbool\s+GatewayModeIsValid\s*\([^)]*\)",
+        )
+        lifecycle_mode = named_block(
+            self.code,
+            r"\bbool\s+PositionLifecycleModeIsValid\s*\([^)]*\)",
+        )
+        configured_modes = named_block(
+            self.code,
+            r"\bbool\s+ValidateConfiguredModes\s*\([^)]*\)",
+        )
+        mode_name = named_block(self.code, r"\bstring\s+ModeName\s*\([^)]*\)")
+        lifecycle_name = named_block(
+            self.code,
+            r"\bstring\s+LifecycleModeName\s*\([^)]*\)",
+        )
+        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        execution_guard = named_block(
+            self.code,
+            r"\bbool\s+EvaluateExecutionGuard\s*\([^)]*\)",
+        )
+        runtime_guard = named_block(
+            self.code,
+            r"\bbool\s+ValidateRuntime\s*\([^)]*\)",
+        )
+        execute = named_block(self.code, r"\bvoid\s+ExecuteCommand\s*\([^)]*\)")
+        lifecycle = named_block(
+            self.code,
+            r"\bvoid\s+ApplyOptionalPositionLifecycle\s*\([^)]*\)",
+        )
+
+        for token in ("GATEWAY_SHADOW", "GATEWAY_DEMO", "GATEWAY_LIVE"):
+            self.assertIn(token, gateway_mode)
+        for token in (
+            "LIFECYCLE_SLTP_ONLY",
+            "LIFECYCLE_MAX_HOLDING",
+            "LIFECYCLE_SESSION_CLOSE",
+            "LIFECYCLE_MAX_HOLDING_AND_SESSION_CLOSE",
+        ):
+            self.assertIn(token, lifecycle_mode)
+        self.assertIn('reason = "GATEWAY_MODE_INVALID"', configured_modes)
+        self.assertIn(
+            'reason = "POSITION_LIFECYCLE_MODE_INVALID"',
+            configured_modes,
+        )
+        self.assertRegex(mode_name, r'return\s+"invalid"\s*;\s*$')
+        self.assertRegex(lifecycle_name, r'return\s+"INVALID"\s*;\s*$')
+
+        for block in (on_init, execution_guard, runtime_guard):
+            self.assertIn("ValidateConfiguredModes", block)
+        self.assertLess(
+            on_init.find("ValidateConfiguredModes"),
+            on_init.find("CryptoSelfTest"),
+        )
+        self.assertLess(
+            execution_guard.find("ValidateConfiguredModes"),
+            execution_guard.find("FileIsExist"),
+        )
+        self.assertLess(
+            runtime_guard.find("ValidateConfiguredModes"),
+            runtime_guard.find("command.schema_version"),
+        )
+
+        order_send = execute.find("OrderSend")
+        self.assertGreaterEqual(order_send, 0)
+        send_boundary = execute.rfind("ValidateConfiguredModes", 0, order_send)
+        self.assertGreaterEqual(send_boundary, 0)
+        self.assertRegex(
+            execute[send_boundary:order_send],
+            r"ValidateConfiguredModes\s*\([^)]*\)[\s\S]*?FinalizeCommand[\s\S]*?break\s*;",
+        )
+
+        order_close = lifecycle.find("OrderClose")
+        self.assertGreaterEqual(order_close, 0)
+        close_boundary = lifecycle.rfind("ValidateConfiguredModes", 0, order_close)
+        lifecycle_marker = lifecycle.find("WriteCommonTextAtomic", close_boundary)
+        self.assertGreaterEqual(close_boundary, 0)
+        self.assertRegex(
+            lifecycle[close_boundary:lifecycle_marker],
+            r"ValidateConfiguredModes\s*\([^)]*\)[\s\S]*?break\s*;",
+        )
+        self.assertLess(close_boundary, lifecycle_marker)
+        self.assertLess(lifecycle_marker, order_close)
 
     def test_order_send_is_verified_and_outcomes_are_refreshed(self) -> None:
         execute = named_block(self.code, r"\bvoid\s+ExecuteCommand\s*\([^)]*\)")
@@ -756,7 +917,7 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("GatewayMode == GATEWAY_LIVE", capabilities)
         self.assertIn("!demo_account && signed_ready && explicit_live_pin && LiveArmed", capabilities)
 
-    def test_optional_demo_pin_is_normalized_but_live_remains_fail_closed(self) -> None:
+    def test_optional_pin_is_normalized_and_only_armed_live_fails_closed(self) -> None:
         lowercase = named_block(self.code, r"\bstring\s+Lowercase\s*\([^)]*\)")
         self.assertIn("StringToLower", lowercase)
         normalize = named_block(
@@ -776,12 +937,51 @@ class MT4UnifiedEATests(unittest.TestCase):
             r"!IsSigningKeyId\(g_trusted_signing_key_id\)\s*\)",
         )
         self.assertIn("GatewayMode == GATEWAY_LIVE", malformed_pin)
+        self.assertIn("LiveArmed", malformed_pin)
         self.assertEqual(malformed_pin.count("InitFailure"), 1)
         self.assertIn("LIVE_SIGNING_KEY_PIN_INVALID", malformed_pin)
         self.assertIn('g_trusted_signing_key_id = ""', malformed_pin)
+        self.assertIn("NON_EXECUTING_SIGNING_KEY_PIN_INVALID_IGNORED", malformed_pin)
         self.assertIn("OPTIONAL_SIGNING_KEY_PIN_INVALID_IGNORED", malformed_pin)
+        self.assertIn("if(GatewayMode == GATEWAY_LIVE)", malformed_pin)
         self.assertIn("OPTIONAL_SIGNING_KEY_PIN_MISMATCH_IGNORED", on_init)
         self.assertIn("GatewayMode != GATEWAY_LIVE", on_init)
+        self.assertIn(
+            "GatewayMode == GATEWAY_LIVE && LiveArmed && !signing_ready",
+            on_init,
+        )
+        self.assertIn("LIVE_DISARMED_SIGNING_NOT_READY_", on_init)
+        self.assertIn("StringLen(g_init_warning_code) == 0", on_init)
+
+    def test_live_disarmed_stays_attached_and_execution_guards_remain_closed(self) -> None:
+        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        execution_guard = named_block(
+            self.code,
+            r"\bbool\s+EvaluateExecutionGuard\s*\([^)]*\)",
+        )
+        command_guard = named_block(
+            self.code,
+            r"\bbool\s+ValidateRuntime\s*\([^)]*\)",
+        )
+
+        self.assertNotIn(
+            "GatewayMode == GATEWAY_LIVE && !signing_ready",
+            on_init,
+        )
+        self.assertIn(
+            "GatewayMode == GATEWAY_LIVE && LiveArmed && !signing_ready",
+            on_init,
+        )
+        self.assertIn('"LIVE_NOT_ARMED"', execution_guard)
+        self.assertIn('"LIVE_NOT_ARMED"', command_guard)
+        self.assertLess(
+            execution_guard.find('reason = "LIVE_NOT_ARMED"'),
+            execution_guard.find("SignedCommandVerificationAvailable"),
+        )
+        self.assertLess(
+            command_guard.find('reason = "LIVE_NOT_ARMED"'),
+            command_guard.find("SignedCommandVerificationAvailable"),
+        )
 
     def test_init_failures_write_structured_status_and_append_audit(self) -> None:
         path = named_block(self.code, r"\bstring\s+InitStatusPath\s*\([^)]*\)")
@@ -891,8 +1091,8 @@ class MT4UnifiedEATests(unittest.TestCase):
         ack = named_block(self.code, r"\bstring\s+BuildAckJson\s*\([^)]*\)")
         self.assertIn("signatureVerificationStatus", ack)
         self.assertIn("metafx-hq-mt4-ack-v3", self.code)
-        self.assertIn('version   "2.16"', self.code)
-        self.assertIn('EA_VERSION = "2.16"', self.code)
+        self.assertIn('version   "2.18"', self.code)
+        self.assertIn('EA_VERSION = "2.18"', self.code)
         self.assertIn("JsonNumber(command.reference_price, 8)", ack)
 
     def test_risk_estimate_normalizes_broker_tick_size_without_point_double_count(self) -> None:

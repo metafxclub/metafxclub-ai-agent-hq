@@ -486,13 +486,13 @@ class EaFactoryBackendTests(unittest.TestCase):
 
     def test_read_model_has_exact_manual_frontend_safe_shape(self) -> None:
         empty_state = self.bridge._empty_ea_factory_state()
-        sheet_id = "193dlWvLqVzsstF5qStjBOT4h-8wiQMhnXXKkydPRp5A"
+        sheet_id = "1MfxHQSyntheticSheetId0123456789ABCDEabcde"
         hub_model = {
             "configured": True,
             "sheetId": sheet_id,
             "canonicalUrl": f"https://docs.google.com/spreadsheets/d/{sheet_id}",
             "sheetDisplayValue": sheet_id,
-            "sheetReferenceMasked": "193dlW…Rp5A",
+            "sheetReferenceMasked": "1MfxHQ…bcde",
             "configRevision": 7,
             "applyPhase": "completed",
             "applyStatus": "ready",

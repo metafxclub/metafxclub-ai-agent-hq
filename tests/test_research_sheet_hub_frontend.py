@@ -32,6 +32,7 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
             "researchSheetHubCancel",
             "researchSheetHubProgress",
             "researchSheetHubConsumers",
+            "researchSheetHubRetryFailed",
         ):
             self.assertIn(f'id="{element_id}"', self.html)
         self.assertIn("ตรวจสอบ Google Sheet", self.html)
@@ -107,6 +108,14 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
         self.assertIn("!presentation.startAvailable", render)
         self.assertIn("!googleAuth.connected", self.block("function renderResearchSheetHub()", "function refreshOpenResearchSheetConsumer"))
         self.assertNotIn('"configured", "ready"', normalize)
+
+    def test_google_oauth_access_denied_explains_testing_audience(self):
+        reason = self.block(
+            "function researchSheetGoogleAuthFailureReason",
+            "function researchSheetGoogleAuthIsTerminalStatus",
+        )
+        self.assertIn("Audience > Test users", reason)
+        self.assertIn("กรณีแอปยังเป็น Testing", reason)
 
     def test_google_disconnect_keeps_sheet_id_and_normal_sheet_flow_stays_confirmed(self):
         disconnect = self.block("async function disconnectResearchSheetGoogleAuth", "async function inspectResearchSheetHub")
@@ -192,6 +201,7 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
         self.assertIn('const RESEARCH_SHEET_HUB_ENDPOINT = "/api/props/mission_strategy_table/research-sheet";', constants)
         self.assertIn('${RESEARCH_SHEET_HUB_ENDPOINT}/inspect', constants)
         self.assertIn('${RESEARCH_SHEET_HUB_ENDPOINT}/activate', constants)
+        self.assertIn('${RESEARCH_SHEET_HUB_ENDPOINT}/flush', constants)
         self.assertIn("fetchJson(RESEARCH_SHEET_HUB_ENDPOINT", load)
         self.assertIn("postJson(RESEARCH_SHEET_HUB_INSPECT_ENDPOINT", inspect)
         self.assertIn("googleSheetUrlOrId: sheetId", inspect)
@@ -234,6 +244,7 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
         self.assertIn("root.readyForConfirmation === true", normalize)
         self.assertIn("els.researchSheetHubActivate.hidden = !ready", render)
         self.assertIn("consumer.rowCount", render)
+        self.assertIn("แท็บว่างใช้งานได้และพร้อมรับข้อมูลแรก", render)
         self.assertIn("researchSheetObservedLabel(consumer.observedAt)", render)
         self.assertIn("researchSheetHeaderIssueSummary(consumer)", render)
         self.assertIn('summarize("ขาด", consumer.missingHeaders)', header_summary)
@@ -303,12 +314,138 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
         self.assertIn("!preview.verificationToken", activate)
         self.assertIn("payload?.activation?.active !== true", activate)
         self.assertIn("activeData.active = payload.activation.active === true", activate)
-        self.assertIn("const summary = researchSheetHubSummaryPresentation()", activate)
-        self.assertIn("if (summary.allReady)", activate)
+        self.assertNotIn("const summary = researchSheetHubSummaryPresentation()", activate)
+        self.assertIn("const activePresentation = researchSheetActivePresentation(activeData)", activate)
+        self.assertIn('if (activePresentation.tone === "ready")', activate)
+        self.assertIn('else if (activePresentation.tone === "warning")', activate)
+        self.assertIn("เปิดใช้ Google Sheet สำเร็จ", activate)
+        self.assertIn("activeData.consumers.every", activate)
+        self.assertIn("ชีตยังไม่มีข้อมูลและพร้อมรับข้อมูลแรก", activate)
         self.assertIn("การเชื่อมต่อ Revision ปัจจุบันยังขัดข้อง", activate)
         self.assertIn("els.researchSheetHubReference.value = hub.submittedReference", activate)
         self.assertIn("hub.preview = null", activate)
         self.assertNotIn('els.researchSheetHubReference.value = ""', activate)
+
+    def test_empty_active_sheet_is_presented_as_connected_without_claiming_write_proof(self):
+        consumer = self.block(
+            "function researchSheetConsumerPresentation",
+            "function researchSheetHardError",
+        )
+        linked = self.block(
+            "function renderResearchSheetHubLinkedSystems",
+            "function resetResearchSheetHubQuery",
+        )
+        self.assertIn("activeReadConnection", consumer)
+        self.assertIn("consumer.configurationApplied === true", consumer)
+        self.assertIn("consumer.writeReady !== true", consumer)
+        self.assertIn('label: empty ? "เชื่อมแล้ว • พร้อมรับข้อมูลแรก"', consumer)
+        self.assertIn("ยังไม่มีหลักฐานเขียนและอ่านกลับ", consumer)
+        self.assertIn("writeVerified: false", consumer)
+        self.assertIn("verifiedReady: true", consumer)
+        self.assertIn("ยังไม่มีข้อมูลและพร้อมรับข้อมูลแรก", linked)
+
+    def test_outbox_pending_and_failure_presentations_are_truthful_and_isolated(self):
+        normalize = self.block(
+            "function normalizeResearchSheetOutbox",
+            "function normalizeResearchSheetInspection",
+        )
+        counter = self.block(
+            "function researchSheetOutboxCount",
+            "function researchSheetConsumerPresentation",
+        )
+        consumer = self.block(
+            "function researchSheetConsumerPresentation",
+            "function researchSheetHardError",
+        )
+        active = self.block(
+            "function researchSheetActivePresentation",
+            "function researchSheetObservedLabel",
+        )
+        linked = self.block(
+            "function renderResearchSheetHubLinkedSystems",
+            "function resetResearchSheetHubQuery",
+        )
+        self.assertIn("outbox: normalizeResearchSheetOutbox(item?.outbox)", normalize)
+        self.assertIn("outbox: normalizeResearchSheetOutbox(supplied.outbox)", normalize)
+        self.assertIn("outbox: normalizeResearchSheetOutbox(supplied.outbox || source.outbox)", normalize)
+        self.assertIn("deferred: boundedResearchSheetCount(source.deferred)", normalize)
+        self.assertIn("Number(value?.outbox?.[name])", counter)
+        self.assertIn("Number.isInteger(count) && count > 0", counter)
+
+        consumer_failure_start = consumer.index("if (failedOutboxCount > 0)")
+        consumer_failure_end = consumer.index("if (waitingOutboxCount > 0 && activeReadConnection)", consumer_failure_start)
+        consumer_failure = consumer[consumer_failure_start:consumer_failure_end]
+        self.assertIn('tone: "error"', consumer_failure)
+        self.assertIn("ซิงก์ Sheet ไม่สำเร็จ", consumer_failure)
+        self.assertIn("verifiedReady: false", consumer_failure)
+        self.assertIn('researchSheetOutboxCount(consumer, "failed")', consumer)
+        self.assertIn('researchSheetOutboxCount(consumer, "pending")', consumer)
+        self.assertIn('researchSheetOutboxCount(consumer, "deferred")', consumer)
+        self.assertIn("effectiveRequiresWrite", consumer)
+        self.assertIn('["read_ready", "read_ready_write_unverified"].includes(consumer.status)', consumer)
+        self.assertLess(consumer_failure_start, consumer.index("if (verifiedReady)"))
+        consumer_pending_start = consumer.index("if (waitingOutboxCount > 0 && activeReadConnection)")
+        consumer_pending_end = consumer.index("const statusIsReady", consumer_pending_start)
+        consumer_pending = consumer[consumer_pending_start:consumer_pending_end]
+        self.assertIn('tone: "warning"', consumer_pending)
+        self.assertIn("เชื่อมอ่านแล้ว • รอซิงก์", consumer_pending)
+        self.assertIn("verifiedReady: false", consumer_pending)
+
+        active_failure_start = active.index("if (failedOutboxCount > 0)")
+        active_failure_end = active.index("if (!currentRevisionVerified", active_failure_start)
+        active_failure = active[active_failure_start:active_failure_end]
+        self.assertIn('tone: "error"', active_failure)
+        self.assertIn("Google Sheet มีรายการซิงก์ไม่สำเร็จ", active_failure)
+        self.assertIn("verifiedReady: false", active_failure)
+        self.assertLess(active_failure_start, active.index('tone: "ready"'))
+        self.assertIn("deferredOutboxCount", active)
+        self.assertIn("if (waitingOutboxCount > 0)", active)
+        self.assertIn('tone: "warning"', active)
+        self.assertIn("เชื่อมอ่านแล้ว • รอซิงก์", active)
+        active_waiting_start = active.index("if (waitingOutboxCount > 0)")
+        active_waiting_end = active.index("return {", active_waiting_start + 10)
+        active_waiting_end = active.index("};", active_waiting_end) + 2
+        self.assertIn(
+            "verifiedReady: false",
+            active[active_waiting_start:active_waiting_end],
+        )
+        self.assertIn('const requiresWrite = system.mode !== "read"', linked)
+        self.assertIn('researchSheetOutboxCount(system, "pending")', linked)
+        self.assertIn('researchSheetOutboxCount(system, "deferred")', linked)
+        self.assertIn('researchSheetOutboxCount(system, "failed")', linked)
+        self.assertNotIn("researchSheetActivePresentation(data)", linked)
+
+    def test_failed_outbox_has_real_bounded_retry_action(self):
+        self.assertEqual(
+            self.html.count('id="researchSheetHubRetryFailed"'),
+            1,
+        )
+        self.assertEqual(
+            self.main.count(
+                'document.getElementById("researchSheetHubRetryFailed")'
+            ),
+            1,
+        )
+        retry = self.block(
+            "async function retryFailedResearchSheetOutbox",
+            "async function queryResearchSheetHub",
+        )
+        self.assertIn("RESEARCH_SHEET_HUB_FLUSH_ENDPOINT", retry)
+        self.assertIn("retryFailed: true", retry)
+        self.assertIn("boundedResearchSheetCount(payload?.retry?.requeued, 50)", retry)
+        self.assertIn("researchSheetFailedOutboxCount(hub.data)", retry)
+        self.assertIn("กดซ้ำได้หลังตรวจสิทธิ์ Google แล้ว", retry)
+        render = self.block(
+            "function renderResearchSheetHub()",
+            "function refreshOpenResearchSheetConsumer",
+        )
+        self.assertIn("els.researchSheetHubRetryFailed.hidden = failedCount === 0", render)
+        self.assertIn('hub.operation === "retry_failed"', render)
+        listeners = self.main[
+            self.main.index('els.researchSheetHubRetryFailed?.addEventListener("click"'):
+            self.main.index('els.researchSheetHubQuerySubmit?.addEventListener("click"')
+        ]
+        self.assertIn("retryFailedResearchSheetOutbox()", listeners)
 
     def test_active_banner_is_green_only_for_active_current_verified_revision(self):
         presentation = self.block("function researchSheetActivePresentation", "function researchSheetObservedLabel")
@@ -329,6 +466,7 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
         self.assertIn("data.allConsumersApplied === true", summary)
         self.assertIn("data.allConsumersVerified === true", summary)
         self.assertIn("readyCount === totalTabs", summary)
+        self.assertIn("activePresentation.verifiedReady === true", summary)
 
     def test_auth_and_schema_errors_are_honest_and_do_not_claim_service_account(self):
         failure = self.block("function researchSheetHubFailureReason", "function clearResearchSheetHubPhaseTimers")

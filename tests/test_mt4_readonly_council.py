@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -87,6 +88,200 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
     def setUp(self) -> None:
         self.bridge = load_bridge()
         self.runner = load_runner()
+
+    def test_running_mt4_outside_standard_roots_becomes_opaque_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install = root / "Student Broker" / "MT4"
+            install.mkdir(parents=True)
+            (install / "terminal.exe").write_bytes(b"MZ")
+            missing = root / "Not MT4"
+            missing.mkdir()
+            self.bridge.RUNTIME_DIR = root / "runtime"
+
+            running = self.bridge.discover_running_metatrader(
+                process_locations={"mt4": [str(install), str(missing)], "mt5": []},
+            )
+            combined = self.bridge._include_verified_running_mt4_candidate_locations([], running)
+
+            self.assertEqual(len(combined), 1)
+            self.assertEqual(combined[0]["platform"], "mt4")
+            self.assertEqual(combined[0]["installPath"], combined[0]["localPath"])
+            candidates = self.bridge._sync_metatrader_candidate_registry(combined, running)
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0]["runningState"], "platform_running_detected")
+            serialized = json.dumps(
+                self.bridge.metatrader_status_read_model(
+                    {"mt4": 0, "mt5": 0},
+                    running,
+                    candidates,
+                ),
+                ensure_ascii=False,
+            )
+            self.assertNotIn(str(install), serialized)
+            self.assertNotIn(str(missing), serialized)
+            self.assertNotIn("processId", serialized)
+            self.assertRegex(candidates[0]["candidateId"], r"^mtc-[a-z]+$")
+
+    def test_elevated_mt4_process_is_reported_without_exposing_path_or_pid(self) -> None:
+        exact = {
+            "supported": True,
+            "mt4": [],
+            "mt5": [],
+            "pathAccessLimited": {"mt4": 1, "mt5": 0},
+        }
+        with mock.patch.object(self.bridge, "_metatrader_process_locations", return_value=exact):
+            running = self.bridge.discover_running_metatrader()
+
+        self.assertEqual(running["mt4"], 1)
+        self.assertEqual(running["_pathAccessLimitedCounts"]["mt4"], 1)
+        model = self.bridge.metatrader_status_read_model(
+            {"mt4": 0, "mt5": 0},
+            running,
+            [],
+        )
+        self.assertEqual(model["platforms"]["mt4"]["status"], "detected")
+        self.assertTrue(model["platforms"]["mt4"]["pathAccessLimited"])
+        self.assertIn("Administrator", model["platforms"]["mt4"]["detailTh"])
+        serialized = json.dumps(model, ensure_ascii=False)
+        self.assertNotIn("processId", serialized)
+        self.assertNotIn("installPath", serialized)
+
+    def test_process_probe_keeps_processes_whose_path_cannot_be_read(self) -> None:
+        probe = mock.Mock(
+            returncode=0,
+            stdout=json.dumps([
+                {"name": "terminal", "path": None},
+                {"name": "terminal64", "path": ""},
+            ]),
+        )
+        with mock.patch.object(self.bridge.subprocess, "run", return_value=probe) as run:
+            result = self.bridge._metatrader_process_locations()
+
+        self.assertTrue(result["supported"])
+        self.assertEqual(result["pathAccessLimited"], {"mt4": 1, "mt5": 1})
+        command = run.call_args.args[0]
+        self.assertNotIn("Where-Object", command[-1])
+        self.assertIn("$processPath=$null", command[-1])
+
+    def test_unknown_elevated_process_does_not_claim_a_specific_candidate_is_running(self) -> None:
+        running = {
+            "supported": True,
+            "mt4": 1,
+            "mt5": 0,
+            "_processInstallPaths": {"mt4": [], "mt5": []},
+            "_pathAccessLimitedCounts": {"mt4": 1, "mt5": 0},
+        }
+        self.assertEqual(
+            self.bridge._metatrader_running_state(running, "mt4", "C:\\Broker\\MT4"),
+            "unknown",
+        )
+
+    def test_ai_trade_council_contract_requires_mt4_not_mt5(self) -> None:
+        profile = self.bridge.find_dashboard_connection_profile(
+            self.bridge.AI_TRADE_COUNCIL_PROP_ID,
+        )
+        connection_ids = {item["id"] for item in profile["connections"]}
+        self.assertEqual(profile["connectionRequirements"]["anyOf"], ["mt4_terminal"])
+        self.assertIn("mt4_terminal", connection_ids)
+        self.assertNotIn("mt5_terminal", connection_ids)
+
+    def test_status_unions_verified_running_mt4_before_candidate_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install = root / "Portable MT4"
+            install.mkdir()
+            (install / "terminal.exe").write_bytes(b"MZ")
+            self.bridge.RUNTIME_DIR = root / "runtime"
+            self.bridge.METATRADER_CACHE.update({"payload": None, "fetchedMonotonic": 0.0})
+            running = self.bridge.discover_running_metatrader(
+                process_locations={"mt4": [str(install)], "mt5": []},
+            )
+            installed = {
+                "mt4": 0,
+                "mt5": 0,
+                "_candidateLocations": [],
+            }
+
+            with (
+                mock.patch.object(
+                    self.bridge,
+                    "discover_metatrader_installations",
+                    return_value=installed,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "discover_running_metatrader",
+                    return_value=running,
+                ),
+            ):
+                status = self.bridge.metatrader_status(force=True)
+
+            self.assertEqual(status["candidateCount"], 1)
+            self.assertEqual(status["candidates"][0]["platform"], "mt4")
+            self.assertEqual(
+                status["candidates"][0]["runningState"],
+                "platform_running_detected",
+            )
+            self.assertNotIn(str(install), json.dumps(status, ensure_ascii=False))
+
+    def test_ai_trade_council_selection_is_mt4_only(self) -> None:
+        self.assertEqual(
+            self.bridge._metatrader_allowed_platforms_for_prop(
+                self.bridge.AI_TRADE_COUNCIL_PROP_ID,
+            ),
+            {"mt4"},
+        )
+        model = self.bridge._metatrader_selection_read_model(
+            self.bridge.AI_TRADE_COUNCIL_PROP_ID,
+            {
+                "candidates": [
+                    {
+                        "candidateId": "mtc-councilmtfour",
+                        "platform": "mt4",
+                        "labelTh": "MT4 ที่ตรวจพบ #1",
+                        "detected": True,
+                        "runningState": "platform_running_detected",
+                    },
+                    {
+                        "candidateId": "mtc-councilmtfive",
+                        "platform": "mt5",
+                        "labelTh": "MT5 ที่ตรวจพบ #1",
+                        "detected": True,
+                        "runningState": "platform_running_detected",
+                    },
+                ],
+            },
+            target_store=self.bridge._empty_metatrader_target_store(),
+        )
+        self.assertEqual([item["platform"] for item in model["candidates"]], ["mt4"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mt5_install = root / "MT5"
+            mt5_install.mkdir()
+            (mt5_install / "terminal64.exe").write_bytes(b"MZ")
+            self.bridge.RUNTIME_DIR = root / "runtime"
+            running = self.bridge.discover_running_metatrader(
+                process_locations={"mt4": [], "mt5": [str(mt5_install)]},
+            )
+            candidates = self.bridge._sync_metatrader_candidate_registry(
+                [
+                    {
+                        "platform": "mt5",
+                        "localPath": str(mt5_install),
+                        "installPath": str(mt5_install),
+                        "dataPath": None,
+                    },
+                ],
+                running,
+            )
+            with self.assertRaises(self.bridge.RequestError) as rejected:
+                self.bridge.select_metatrader_target(
+                    self.bridge.AI_TRADE_COUNCIL_PROP_ID,
+                    candidates[0]["candidateId"],
+                )
+            self.assertEqual(rejected.exception.status, 422)
 
     def test_decision_horizon_preserves_broker_clock_identity_across_offsets(self) -> None:
         observed = datetime(2026, 8, 13, 3, 0, 2, tzinfo=timezone.utc)

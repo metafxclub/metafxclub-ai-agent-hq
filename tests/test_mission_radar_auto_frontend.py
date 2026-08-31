@@ -272,8 +272,8 @@ class MissionRadarAutoFrontendTests(unittest.TestCase):
         self.assertEqual(payload["delayed"]["state"], "delayed")
         self.assertEqual(payload["complete"]["state"], "verified_results")
         self.assertIn("6/6", payload["complete"]["title"])
-        self.assertEqual(payload["partial"]["state"], "partial_results")
-        self.assertIn("2/6", payload["partial"]["title"])
+        self.assertEqual(payload["partial"]["state"], "delayed")
+        self.assertNotIn("2/6", payload["partial"]["title"])
 
     def test_radar_today_panel_shows_backend_run_truth_and_six_item_progress_without_controls(self) -> None:
         normalizer = self.block("function normalizeIndicatorScoutDomain", "function normalizeTradingSystemPortalDomain")
@@ -281,6 +281,10 @@ class MissionRadarAutoFrontendTests(unittest.TestCase):
         notice = self.block("function createRadarTodayRunNotice", "function workflowBiasLabel")
         self.assertIn("expectedBatchSize", normalizer)
         self.assertIn("INDICATOR_SCOUT_EXPECTED_BATCH_SIZE", normalizer)
+        self.assertIn(
+            "projectedTodayEntries.length === expectedBatchSize",
+            normalizer,
+        )
         self.assertIn("createRadarTodayRunNotice(domain)", renderer)
         self.assertIn("`${entries.length}/${expectedBatchSize} รายการ`", renderer)
         self.assertNotIn("วันนี้ยังไม่มีรายการใหม่จาก Backend", renderer)

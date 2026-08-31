@@ -266,7 +266,6 @@
       "connections": [
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
         {"id": "mt4_terminal", "labelTh": "โปรแกรม MT4 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
-        {"id": "mt5_terminal", "labelTh": "โปรแกรม MT5 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
         {"id": "trading_state_adapter", "labelTh": "ข้อมูลกราฟและสถานะจาก MetafxHQ AI Council EA", "required": true, "adapterStatus": "implemented_unified_ea_snapshot", "action": "refresh_mt4_snapshot"},
         {"id": "ai_trader_ensemble", "labelTh": "ผู้เชี่ยวชาญ 3 ตัวลงคะแนนบน Snapshot และ Horizon เดียวกัน", "required": true, "adapterStatus": "implemented_guarded_closed_bar", "action": "run_ai_trade_council_analysis"},
         {"id": "risk_policy", "labelTh": "Council Quality Gate + Risk Guard + EA Gate", "required": true, "adapterStatus": "implemented"},
@@ -277,7 +276,7 @@
         {"id": "codex_quota", "labelTh": "Rate Limit เมื่อใช้ AI วิเคราะห์", "required": false, "adapterStatus": "runtime_detected"},
         {"id": "report_routing", "labelTh": "ส่งผล Council กลับจอ Analysis", "required": true, "adapterStatus": "implemented"}
       ],
-      "connectionRequirements": {"anyOf": ["mt4_terminal", "mt5_terminal"]},
+      "connectionRequirements": {"anyOf": ["mt4_terminal"]},
       "chartWindowPolicy": {
         "displayBars": {"owner": "frontend_client_only", "allowedValues": [40, 60, 120, 240, 500, 1000], "affectsAnalysis": false},
         "analysisBarCount": {"owner": "backend_audited_setting", "allowedValues": [120, 180, 240, 300, 500, 1000], "default": 120, "requestedAndUsedMustMatch": true},

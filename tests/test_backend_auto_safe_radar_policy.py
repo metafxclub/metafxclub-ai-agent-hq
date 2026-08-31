@@ -4242,24 +4242,32 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
             missions=[],
             schedule=self.service_schedule(),
         )["serviceHealth"]
-        failed_with_capacity = self.bridge._radar_website_tool_read_model(
-            [],
-            settings={
-                "indicatorScoutSchedule": {
-                    "lastError": "worker_failed",
-                    "lastAttemptAt": "2020-01-01T00:00:00Z",
+        # Credential state is machine-local. Pin this scenario to the intended
+        # unauthenticated condition so a developer's real Google login cannot
+        # make the unit test environment-dependent.
+        with mock.patch.object(
+            self.bridge.google_sheet_hub,
+            "credential_status",
+            return_value={"configured": False},
+        ):
+            failed_with_capacity = self.bridge._radar_website_tool_read_model(
+                [],
+                settings={
+                    "indicatorScoutSchedule": {
+                        "lastError": "worker_failed",
+                        "lastAttemptAt": "2020-01-01T00:00:00Z",
+                    },
+                    "indicatorScoutSheet": {
+                        "sheetId": "configured-sheet-id-1234",
+                        "canonicalUrl": "https://docs.google.com/spreadsheets/d/configured-sheet-id-1234",
+                        "savedAt": "2026-08-13T01:00:00Z",
+                    },
                 },
-                "indicatorScoutSheet": {
-                    "sheetId": "configured-sheet-id-1234",
-                    "canonicalUrl": "https://docs.google.com/spreadsheets/d/configured-sheet-id-1234",
-                    "savedAt": "2026-08-13T01:00:00Z",
-                },
-            },
-            now_local=now_local,
-            bridge=ready_bridge,
-            missions=[],
-            schedule=self.service_schedule(error="worker_failed"),
-        )["serviceHealth"]
+                now_local=now_local,
+                bridge=ready_bridge,
+                missions=[],
+                schedule=self.service_schedule(error="worker_failed"),
+            )["serviceHealth"]
         failed_without_capacity = self.bridge._radar_website_tool_read_model(
             [],
             settings={

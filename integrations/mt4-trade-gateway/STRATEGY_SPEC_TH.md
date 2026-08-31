@@ -1,6 +1,8 @@
-# Strategy Spec — MetafxHQ Unified MT4 Gateway v2.16
+# Strategy Spec — MetafxHQ Unified MT4 Gateway v2.18
 
 ## โปรไฟล์และขอบเขต
+
+ค่า `GatewayMode` ต้องอยู่ใน `{GATEWAY_SHADOW, GATEWAY_DEMO, GATEWAY_LIVE}` และ `PositionLifecycleMode` ต้องอยู่ใน `{LIFECYCLE_SLTP_ONLY, LIFECYCLE_MAX_HOLDING, LIFECYCLE_SESSION_CLOSE, LIFECYCLE_MAX_HOLDING_AND_SESSION_CLOSE}` เท่านั้น ค่า Enum อื่นจากไฟล์ SET ที่ถูกแก้ไขต้องหยุดแบบ fail-closed ทั้งตอน `OnInit()` และก่อนขอบ `OrderSend()`/`OrderClose()` สำหรับ Optional Position Lifecycle ต้องตรวจ Account/Mode/Signing ซ้ำทั้ง Demo และ Live รวมถึง `LiveArmed` เมื่อเป็น Live ก่อน `OrderClose()` ทุกครั้ง ส่วน Shadow/Tester/Optimizer ห้ามปิด Order อัตโนมัติ
 
 - โปรไฟล์ EA: `special`
 - หน้าที่เดียวกันสองส่วน: ส่ง Snapshot แบบ Read-only และรับคำสั่ง Market Order ผ่าน `FILE_COMMON`
@@ -35,7 +37,7 @@
 | `ExecuteCommand` | ถือ Account Execution Lock, ตรวจซ้ำที่ขอบ OrderSend, จองสิทธิ์แท่ง และส่งเพียงครั้งเดียวโดยไม่ Retry |
 | `CaptureSelectedOrderEvidence` | ตรวจ Ticket, ราคาเปิด, SL/TP, Magic และ Comment หลัง OrderSend โดยแยก Slippage เป็นคำเตือนคุณภาพ ไม่ใช้เป็นตัวตนของ Order |
 | `RefreshManagedOutcomeFiles` | อัปเดต Outcome และใช้ Ticket Map กู้ Command ID เมื่อ Broker เติม `[tp]`/`[sl]` ใน Comment |
-| `ApplyOptionalPositionLifecycle` | ปิดตาม Max Holding/Session เฉพาะเมื่อผู้ใช้เปิดโหมด; ค่าเริ่มต้นไม่ทำงาน |
+| `LifecycleCloseGuard` / `ApplyOptionalPositionLifecycle` | ปิดตาม Max Holding/Session เฉพาะเมื่อผู้ใช้เปิดโหมด โดยถือ Account Execution Lock เดียวกับ `OrderSend()` และตรวจ Enum, Account, Signing ทั้ง Demo/Live, LiveArmed สำหรับ Live และ Safety Guard ซ้ำภายใต้ Lock ที่ขอบก่อน `OrderClose()`; Shadow/Tester/Optimizer ไม่ปิดอัตโนมัติ |
 | `BuildStatusJson` | ส่งสถานะ Guard แบบอ่านอย่างเดียวให้ Dashboard |
 | `FinalizeCommand` | เขียน ACK, Processed Ledger และ Audit Log |
 
@@ -67,7 +69,7 @@ Daily/Weekly Loss ใช้สถานะ Latch ตามวัน/สัปด
 
 เวลา `OrderOpenTime`, `OrderCloseTime`, วัน/สัปดาห์, Consecutive-loss Cooldown และ Max Holding อยู่ใน clock domain ของ Broker เดียวกันทั้งหมด EA จึงเปรียบเทียบเวลาเหล่านี้กับ `TimeCurrent()` เท่านั้น ไม่เปรียบเทียบกับ UTC เพื่อให้ผลเหมือนกันทั้ง Broker UTC+3, UTC-5 และ timezone อื่น ส่วน `observedAt`, `issuedAt`, `expiresAt` และอายุ Snapshot/Command ยังคงเป็น Unix UTC ตาม Wire Contract; `cooldownUntil` ใน Snapshot เป็นเวลา Broker และต้องแสดงพร้อมป้าย Broker โดยไม่แปลงซ้ำเป็น UTC
 
-สำหรับหลาย Channel แนะนำให้ใช้ Magic ไม่ซ้ำต่อ Channel และให้ทุก EA ใส่ Magic ทั้งหมดใน `ManagedMagicNumbers` ชุดเดียวกัน หากแชร์ Magic ต้องให้ทุก Instance ใช้รายการ Managed Magic และเพดาน Risk ชุดเดียวกัน Account Execution Lock ผูกกับ Account Number + Broker Server โดยไม่รวม Channel จึง Serialize Guard + Bar Claim + `OrderSend()` ข้ามทุก Channel/Terminal ที่ใช้ Windows `FILE_COMMON` เดียวกัน และ OS จะคืน Handle เมื่อ Process ล้มโดยไม่เกิด stale-lock deadlock
+สำหรับหลาย Channel แนะนำให้ใช้ Magic ไม่ซ้ำต่อ Channel และให้ทุก EA ใส่ Magic ทั้งหมดใน `ManagedMagicNumbers` ชุดเดียวกัน หากแชร์ Magic ต้องให้ทุก Instance ใช้รายการ Managed Magic และเพดาน Risk ชุดเดียวกัน Account Execution Lock ผูกกับ Account Number + Broker Server โดยไม่รวม Channel จึง Serialize Guard + Bar Claim + `OrderSend()` รวมถึง Optional Lifecycle `OrderClose()` ข้ามทุก Channel/Terminal ที่ใช้ Windows `FILE_COMMON` เดียวกัน และ OS จะคืน Handle เมื่อ Process ล้มโดยไม่เกิด stale-lock deadlock
 
 Account Portfolio Policy Lease ใช้ Digest ของรายการ Magic หลัง Sort รวมกับ `MaxManagedOpenPositions`, `MaxManagedTotalLots`, `MaxTradesPerBrokerDay`, Daily/Weekly Loss, Consecutive Loss/Cooldown และ Account Drawdown หากมี EA ของบัญชีเดียวกันที่ถือ Lease ด้วย Digest อื่น `OnInit` ต้องจบด้วย `PORTFOLIO_POLICY_MISMATCH`; ถ้าไม่มี Active Lease ระบบจึงอนุญาตเขียน Policy ใหม่ ทำให้เปลี่ยนค่าอย่างตั้งใจได้หลังหยุด EA เดิมครบแล้ว ชื่อไฟล์ Lease เป็นช่องแบบสั้นและจำกัดพาธขยายไว้ไม่เกิน 259 ตัวอักษร แต่ Payload ต้องเก็บ Account/Policy/Channel SHA-256 เต็มพร้อม Snapshot Channel ที่ไม่ใช่ Secret และคำนวณ Channel digest ซ้ำให้ตรงครบ 64 hex จึงห้ามใช้ prefix ในชื่อไฟล์เป็นหลักฐานอนุญาต และต้องตรวจทั้ง Lease แบบสั้นกับชื่อ Legacy `policy-<64>-channel-<64>.lease` รวมถึงความผิดพลาดระหว่างสแกนแบบ fail-closed
 
@@ -94,7 +96,7 @@ Policy enforcement ต้องใช้ v2.16 ขึ้นไปทุก Insta
 2. เริ่ม `GATEWAY_SHADOW` และ `LiveArmed=false`
 3. ทดสอบ Snapshot, Status v5, Signature Verification, SHADOWED ACK v3, stale bar, price drift, spread, margin, risk และ Kill Switch
 4. ทดสอบบัญชี Demo ด้วย Lot ต่ำ โดยใช้ Signed Envelope เส้นทางเดียวกับ Live
-5. ก่อน Live ให้ปักหมุด Active Key ID ใน `TrustedSigningKeyId`, ตรวจ Key match, เปิด `GATEWAY_LIVE` และ `LiveArmed=true` จากหน้า Inputs ของ EA เท่านั้น
+5. ก่อน Live สามารถเลือก `GATEWAY_LIVE` โดยยังคง `LiveArmed=false` เพื่อดู Readiness ได้ โดย EA ต้องไม่หลุดจากกราฟและห้ามส่ง Order จากนั้นปักหมุด Active Key ID ใน `TrustedSigningKeyId`, ตรวจ Key match แล้วจึงตั้ง `LiveArmed=true` จากหน้า Inputs ของ EA เท่านั้น; เมื่อ Arm แล้ว Pin/Key ที่ไม่พร้อมต้องทำให้ `OnInit()` ล้มเหลวแบบ fail-closed
 6. Live จะส่ง Order ได้เมื่อคะแนนถึงเกณฑ์ 1/3, 2/3 หรือ 3/3 ที่ผู้ใช้เลือก ไม่มีเสียง BUY/SELL ขัดกัน, News ไม่ VETO, Price Action มี SL/TP, Signed Envelope และ Guard ทุกชั้นผ่านครบ; ค่าเริ่มต้นยังคง Shadow และไม่เปิด Live อัตโนมัติ
 7. Status v5 ส่งประเภทบัญชีจาก EA ให้ Backend ตรวจซ้ำ: `GATEWAY_DEMO` ใช้ได้กับบัญชี Demo และ `GATEWAY_LIVE` ใช้ได้กับบัญชีจริงเท่านั้น
 8. `roundDeadlineAt` แบบ UTC เป็นขอบเขตสุดท้ายของการ Publish คำสั่งใหม่ เพื่อไม่ให้ Bridge ส่ง Order จากผลวิเคราะห์เก่าหลัง Restart หรือจากเวลาแท่งโบรกเกอร์ที่มี timezone ต่างกัน; Command ที่ส่งไปแล้วจะยังติดตาม ACK ต่อจนจบ

@@ -4,14 +4,15 @@ on:
   push:
     branches:
       - main
-    paths:
-      - VERSION
-      - .github/workflows/publish-release.yml
   workflow_dispatch:
 
 permissions:
   contents: write
   statuses: write
+
+concurrency:
+  group: publish-student-release
+  cancel-in-progress: false
 
 jobs:
   compatibility:
@@ -100,6 +101,7 @@ jobs:
           $checksum = "$archive.sha256"
 
           $existingRelease = $false
+          $existingReleaseNeedsPublish = $false
           $existingTarget = $null
           $releaseView = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>&1
           $releaseViewExit = $LASTEXITCODE
@@ -110,6 +112,10 @@ jobs:
               if ([string]$releasePayload.tag_name -cne $tag) {
                 throw "tag_name mismatch"
               }
+              $existingReleaseNeedsPublish = (
+                $releasePayload.draft -eq $true -or
+                [string]::IsNullOrWhiteSpace([string]$releasePayload.published_at)
+              )
             }
             catch {
               throw "Release $tag exists but its GitHub API response is invalid."
@@ -163,34 +169,195 @@ jobs:
               "docs\research-sheet-hub-setup-th.md",
               "tests\test_release_candidate_preflight.py",
               "tests\test_runtime_integrity.py",
+              "tests\fixtures\legacy_degraded_bridge.py",
               "scripts\run-bridge-watchdog-hidden.vbs",
-              "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\MetafxHQTradeGateway.mq4",
-              "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\MetafxHQTradeGateway.ex4",
-              "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\README_TH.md",
-              "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\AUDIT_TH.md",
-              "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\SHA256SUMS.txt",
-              "artifacts\mt4-ai-council-ea-v2.16-stream-transition-hardening\BUILD_LOG.txt"
+              "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MetafxHQTradeGateway.mq4",
+              "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MetafxHQTradeGateway.ex4",
+              "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\README_TH.md",
+              "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\AUDIT_TH.md",
+              "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\SHA256SUMS.txt",
+              "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\BUILD_LOG.txt",
+              "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MANIFEST.json",
+              "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\COMPILE_PROOF.png"
           )) {
             if (-not (Test-Path -LiteralPath (Join-Path $packageRoot $requiredFile) -PathType Leaf)) {
               throw "Release package is missing required file: $requiredFile"
             }
           }
 
-            $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
-            $listener.Start()
-            $smokePort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
-            $listener.Stop()
+            function Get-SmokePort {
+              $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+              try {
+                $listener.Start()
+                return ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+              }
+              finally {
+                $listener.Stop()
+              }
+            }
+            function Start-DegradedFixture {
+              param(
+                [Parameter(Mandatory = $true)][string]$ScriptPath,
+                [Parameter(Mandatory = $true)][int]$Port,
+                [Parameter(Mandatory = $true)][string]$LogRoot
+              )
+              New-Item -ItemType Directory -Path $LogRoot -Force | Out-Null
+              $pythonPath = (Get-Command python.exe -CommandType Application).Source
+              $arguments = @(
+                ('"{0}"' -f $ScriptPath), "--host", "127.0.0.1", "--port", ([string]$Port)
+              )
+              $process = Start-Process `
+                -FilePath $pythonPath `
+                -ArgumentList $arguments `
+                -WorkingDirectory (Split-Path -Parent $ScriptPath) `
+                -WindowStyle Hidden `
+                -RedirectStandardOutput (Join-Path $LogRoot "fixture-stdout.log") `
+                -RedirectStandardError (Join-Path $LogRoot "fixture-stderr.log") `
+                -PassThru
+              $deadline = [DateTime]::UtcNow.AddSeconds(20)
+              do {
+                $listenerIds = @(
+                  Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty OwningProcess -Unique
+                )
+                if ($listenerIds.Count -eq 1 -and [int]$listenerIds[0] -eq [int]$process.Id) {
+                  return $process
+                }
+                if ($process.HasExited) {
+                  break
+                }
+                Start-Sleep -Milliseconds 250
+              } while ([DateTime]::UtcNow -lt $deadline)
+              throw "Degraded Bridge fixture did not own its requested listener."
+            }
+            function Assert-DegradedFixture {
+              param([Parameter(Mandatory = $true)][int]$Port)
+              $response = Invoke-WebRequest `
+                -Uri "http://127.0.0.1:$Port/api/health" `
+                -Method Get `
+                -SkipHttpErrorCheck `
+                -TimeoutSec 3
+              if ([int]$response.StatusCode -ne 503) {
+                throw "Expected the legacy fixture to return HTTP 503/degraded."
+              }
+              $payload = $response.Content | ConvertFrom-Json
+              if ([string]$payload.status -cne "degraded") {
+                throw "Legacy fixture did not report degraded Health."
+              }
+            }
+            function Initialize-LegacyInstall {
+              param(
+                [Parameter(Mandatory = $true)][string]$LocalAppData,
+                [Parameter(Mandatory = $true)][int]$Port
+              )
+              $installed = Join-Path $LocalAppData "Metafxclub\AI-Agent-HQ"
+              $installedServer = Join-Path $installed "backend\local-runner\bridge_server.py"
+              $runtime = Join-Path $installed "data\runtime"
+              New-Item -ItemType Directory -Path (Split-Path -Parent $installedServer) -Force | Out-Null
+              New-Item -ItemType Directory -Path (Join-Path $installed "scripts") -Force | Out-Null
+              New-Item -ItemType Directory -Path $runtime -Force | Out-Null
+              Copy-Item `
+                -LiteralPath (Join-Path $packageRoot "tests\fixtures\legacy_degraded_bridge.py") `
+                -Destination $installedServer `
+                -Force
+              Copy-Item `
+                -LiteralPath (Join-Path $packageRoot "scripts\start-local-bridge.ps1") `
+                -Destination (Join-Path $installed "scripts\start-local-bridge.ps1") `
+                -Force
+              [IO.File]::WriteAllText((Join-Path $installed "VERSION"), "0.9.2`n", $utf8NoBom)
+              $endpoint = [ordered]@{
+                version = 1
+                host = "127.0.0.1"
+                port = $Port
+                url = "http://127.0.0.1:$Port/"
+                health_url = "http://127.0.0.1:$Port/api/health"
+                confirmed_at = "2026-08-01T00:00:00+00:00"
+              }
+              [IO.File]::WriteAllText(
+                (Join-Path $runtime "bridge-endpoint.json"),
+                ($endpoint | ConvertTo-Json -Depth 4) + [Environment]::NewLine,
+                $utf8NoBom
+              )
+              $operatorMode = [ordered]@{
+                version = "operator-mode-store-v1"
+                mode = "manual_guarded"
+                updatedAt = "2026-08-01T00:00:00+00:00"
+                source = "contract_default"
+              }
+              [IO.File]::WriteAllText(
+                (Join-Path $runtime "operator-mode.json"),
+                ($operatorMode | ConvertTo-Json -Depth 4) + [Environment]::NewLine,
+                $utf8NoBom
+              )
+              return $installed
+            }
+
             $originalLocalAppData = $env:LOCALAPPDATA
+            $utf8NoBom = New-Object Text.UTF8Encoding($false)
+            $foreignProcess = $null
+            $installedLifecycle = $null
             try {
-              $env:LOCALAPPDATA = Join-Path $smokeRoot "LocalAppData"
+              # Negative case: an arbitrary 503 listener is never accepted as an
+              # owned HQ process and must remain alive after installer rejection.
+              $foreignPort = Get-SmokePort
+              $env:LOCALAPPDATA = Join-Path $smokeRoot "ForeignLocalAppData"
+              $foreignScript = Join-Path $packageRoot "tests\fixtures\legacy_degraded_bridge.py"
+              $foreignProcess = Start-DegradedFixture `
+                -ScriptPath $foreignScript `
+                -Port $foreignPort `
+                -LogRoot (Join-Path $smokeRoot "foreign-logs")
               & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
                 -File (Join-Path $packageRoot "installer\install.ps1") `
-                -Port $smokePort -EndpointConfirmed -SkipLaunch -SkipShortcuts -PackageSmoke
+                -Port $foreignPort -EndpointConfirmed -SkipLaunch -SkipShortcuts -PackageSmoke
+              if ($LASTEXITCODE -eq 0) {
+                throw "Installer accepted a foreign HTTP 503 listener."
+              }
+              if ($foreignProcess.HasExited) {
+                throw "Installer stopped a foreign listener during endpoint rejection."
+              }
+              Assert-DegradedFixture -Port $foreignPort
+              Stop-Process -Id $foreignProcess.Id -Force
+              $foreignProcess.WaitForExit(10000) | Out-Null
+              $foreignProcess = $null
+
+              # Positive case: reproduce a preserved v0.9.2 install whose exact
+              # owned Bridge is listening but Health is degraded.
+              $smokePort = Get-SmokePort
+              $env:LOCALAPPDATA = Join-Path $smokeRoot "LocalAppData"
+              $installedRoot = Initialize-LegacyInstall `
+                -LocalAppData $env:LOCALAPPDATA `
+                -Port $smokePort
+              $legacyServer = Join-Path $installedRoot "backend\local-runner\bridge_server.py"
+              $legacyProcess = Start-DegradedFixture `
+                -ScriptPath $legacyServer `
+                -Port $smokePort `
+                -LogRoot (Join-Path $installedRoot "data\runtime\logs")
+              Assert-DegradedFixture -Port $smokePort
+
+              # Force one failure after publish. Last-good must be restored and
+              # its previously degraded exact listener must be running again.
+              & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+                -File (Join-Path $packageRoot "installer\install.ps1") `
+                -Port $smokePort -EndpointConfirmed -PackageSmoke -PackageUpgradeSmoke `
+                -PackageSmokeFailAfterPublish -SkipShortcuts -SkipAutostart -SkipGoogleSetup
+              if ($LASTEXITCODE -eq 0) {
+                throw "Forced rollback smoke unexpectedly succeeded."
+              }
+              if ((Get-Content -LiteralPath (Join-Path $installedRoot "VERSION") -Raw).Trim() -cne "0.9.2") {
+                throw "Last-good VERSION was not restored after the forced failure."
+              }
+              Assert-DegradedFixture -Port $smokePort
+
+              # Run the real in-place upgrade. It must stop only the exact old
+              # Bridge, publish the candidate, migrate state, and reach ready.
+              & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+                -File (Join-Path $packageRoot "installer\install.ps1") `
+                -Port $smokePort -EndpointConfirmed -PackageSmoke -PackageUpgradeSmoke `
+                -SkipShortcuts -SkipAutostart -SkipGoogleSetup
               if ($LASTEXITCODE -ne 0) {
-                throw "Release ZIP installation smoke test failed with exit code $LASTEXITCODE"
+                throw "Release ZIP legacy-listener upgrade smoke failed with exit code $LASTEXITCODE"
               }
 
-              $installedRoot = Join-Path $env:LOCALAPPDATA "Metafxclub\AI-Agent-HQ"
               foreach ($requiredInstalledFile in @(".gitattributes", ".gitignore", "VERSION")) {
                 if (-not (Test-Path -LiteralPath (Join-Path $installedRoot $requiredInstalledFile) -PathType Leaf)) {
                   throw "Installed Runtime is missing required file: $requiredInstalledFile"
@@ -200,18 +367,68 @@ jobs:
               if ($installedVersion -cne $version) {
                 throw "Installed Runtime version '$installedVersion' does not match Release '$version'"
               }
+
+              $lifecyclePath = Join-Path $installedRoot "scripts\start-local-bridge.ps1"
+              $installedLifecycle = $lifecyclePath
+              $healthProbeStarted = $true
+              try {
+                $health = Invoke-RestMethod `
+                  -Uri "http://127.0.0.1:$smokePort/api/health" `
+                  -Method Get `
+                  -TimeoutSec 5
+                if ($health.ok -ne $true -or [string]$health.status -cne "ready") {
+                  throw "Legacy operator-mode upgrade smoke did not reach ready Health."
+                }
+              }
+              finally {
+                if ($healthProbeStarted) {
+                  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+                    -File $lifecyclePath -Action Stop -Port $smokePort
+                  if ($LASTEXITCODE -ne 0) {
+                    throw "Legacy operator-mode upgrade smoke could not stop its verified Bridge."
+                  }
+                }
+              }
+
+              $persistedOperatorMode = Get-Content `
+                -LiteralPath (Join-Path $installedRoot "data\runtime\operator-mode.json") `
+                -Raw `
+                -Encoding UTF8 | ConvertFrom-Json
+              if (
+                [string]$persistedOperatorMode.mode -cne "auto_guarded" -or
+                [string]$persistedOperatorMode.source -cne "contract_default_migration"
+              ) {
+                throw "Legacy contract-default operator mode was not migrated to auto_guarded."
+              }
+              $migrationEvents = @(
+                Get-Content `
+                  -LiteralPath (Join-Path $installedRoot "data\runtime\bridge-audit.jsonl") `
+                  -Encoding UTF8 |
+                  ForEach-Object { $_ | ConvertFrom-Json } |
+                  Where-Object { [string]$_.type -ceq "operator_mode.migrated" }
+              )
+              if ($migrationEvents.Count -ne 1) {
+                throw "Legacy operator-mode migration audit count was $($migrationEvents.Count), expected exactly 1."
+              }
               node --check (Join-Path $installedRoot "frontend\src\app\main.js")
               if ($LASTEXITCODE -ne 0) {
                 throw "Installed Runtime frontend syntax check failed with exit code $LASTEXITCODE"
               }
             }
             finally {
+              if ($foreignProcess -and -not $foreignProcess.HasExited) {
+                Stop-Process -Id $foreignProcess.Id -Force -ErrorAction SilentlyContinue
+              }
+              if ($installedLifecycle -and (Test-Path -LiteralPath $installedLifecycle -PathType Leaf)) {
+                & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+                  -File $installedLifecycle -Action Stop -Port $smokePort | Out-Null
+              }
               $env:LOCALAPPDATA = $originalLocalAppData
             }
 
-          # The classroom path clones the exact public tag and asks the
-          # installer to re-check that tag against GitHub. Exercise that real
-          # path before creating the Release; ZIP smoke alone cannot cover it.
+          # Verify the exact official commit before exposing the final public
+          # semver tag. Students additionally require a published Release,
+          # verified checksum assets, and the successful release status gate.
           $officialRepository = "https://github.com/metafxclub/metafxclub-ai-agent-hq.git"
           $remoteTagReference = "refs/tags/$tag"
           $remoteTagLines = @(git ls-remote --tags $officialRepository $remoteTagReference "$remoteTagReference^{}")
@@ -232,24 +449,11 @@ jobs:
             }
           }
           $remoteTagCommit = if ($remotePeeledCommit) { $remotePeeledCommit } else { $remoteDirectCommit }
-          $tagCreatedByThisRun = $false
-          if (-not $remoteTagCommit) {
-            if ($existingRelease) {
-              throw "Release $tag exists but its public Git tag is missing."
-            }
-            git tag $tag $env:GITHUB_SHA
-            if ($LASTEXITCODE -ne 0) {
-              throw "Unable to create local Git tag $tag for verified-source smoke."
-            }
-            git push origin "refs/tags/$tag`:refs/tags/$tag"
-            if ($LASTEXITCODE -ne 0) {
-              throw "Unable to publish Git tag $tag for verified-source smoke."
-            }
-            $tagCreatedByThisRun = $true
-            $remoteTagCommit = $env:GITHUB_SHA
-          }
-          elseif ($remoteTagCommit -cne $env:GITHUB_SHA) {
+          if ($remoteTagCommit -and $remoteTagCommit -cne $env:GITHUB_SHA) {
             throw "Public Git tag $tag points to '$remoteTagCommit', not current SHA '$env:GITHUB_SHA'."
+          }
+          if ($existingRelease -and -not $remoteTagCommit) {
+            throw "Release $tag exists but its public Git tag is missing."
           }
 
           $verifiedRoot = Join-Path $env:RUNNER_TEMP "metafxclub-verified-git-smoke-$tag"
@@ -257,9 +461,20 @@ jobs:
           $verifiedLocalAppData = Join-Path $verifiedRoot "LocalAppData"
           $verifiedOriginalLocalAppData = $env:LOCALAPPDATA
           try {
-            git clone --depth 1 --single-branch --branch $tag $officialRepository $verifiedClone
+            New-Item -ItemType Directory -Path $verifiedClone -Force | Out-Null
+            git -C $verifiedClone init
             if ($LASTEXITCODE -ne 0) {
-              throw "Public exact-tag clone failed for $tag."
+              throw "Unable to initialize the pre-publish verification clone."
+            }
+            git -C $verifiedClone remote add origin $officialRepository
+            git -C $verifiedClone fetch --depth 1 origin $env:GITHUB_SHA
+            if ($LASTEXITCODE -ne 0) {
+              throw "Official commit fetch failed before publishing $tag."
+            }
+            git -C $verifiedClone checkout --detach $env:GITHUB_SHA
+            git -C $verifiedClone tag $tag $env:GITHUB_SHA
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to prepare the local candidate tag for pre-publish verification."
             }
 
             # This ignored sentinel proves verified staging comes from the
@@ -280,12 +495,13 @@ jobs:
             & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
               -File (Join-Path $verifiedClone "installer\install.ps1") `
               -Port $verifiedPort -EndpointConfirmed -SkipLaunch -SkipShortcuts -SkipAutostart -PackageSmoke `
-              -RequireVerifiedGitSource `
+              -RequireVerifiedGitSource -PrePublishVerification `
               -ExpectedGitRepository $officialRepository `
               -ExpectedGitTag $tag `
-              -ExpectedSourceVersion $version
+              -ExpectedSourceVersion $version `
+              -ExpectedGitCommit $env:GITHUB_SHA
             if ($LASTEXITCODE -ne 0) {
-              throw "Verified public Git-tag installation smoke failed with exit code $LASTEXITCODE."
+              throw "Verified official-commit installation smoke failed with exit code $LASTEXITCODE."
             }
 
             $verifiedInstalledRoot = Join-Path $verifiedLocalAppData "Metafxclub\AI-Agent-HQ"
@@ -297,18 +513,28 @@ jobs:
               throw "Verified Git Runtime frontend syntax check failed with exit code $LASTEXITCODE."
             }
           }
-          catch {
-            if ($tagCreatedByThisRun) {
-              git push origin ":refs/tags/$tag" | Out-Host
-            }
-            throw
-          }
           finally {
             $env:LOCALAPPDATA = $verifiedOriginalLocalAppData
           }
 
-          if (-not $existingRelease) {
-            $notes = @'
+          $tagCreatedByThisRun = $false
+          $releaseCreatedByThisRun = $false
+          try {
+            if (-not $remoteTagCommit) {
+              git tag --force $tag $env:GITHUB_SHA
+              if ($LASTEXITCODE -ne 0) {
+                throw "Unable to create local Git tag $tag after pre-publish verification."
+              }
+              git push origin "refs/tags/$tag`:refs/tags/$tag"
+              if ($LASTEXITCODE -ne 0) {
+                throw "Unable to publish Git tag $tag after pre-publish verification."
+              }
+              $tagCreatedByThisRun = $true
+              $remoteTagCommit = $env:GITHUB_SHA
+            }
+
+            if (-not $existingRelease) {
+              $notes = @'
           ชุดติดตั้ง Metafxclub AI Agent HQ สำหรับ Windows
 
           วิธีหลักสำหรับห้องเรียน — Prompt เดียวผ่าน Codex:
@@ -326,23 +552,26 @@ jobs:
           ระบบเริ่มต้นในโหมด Demo/Read-only และไม่รวม Token, Password, Auth, Log, Memory หรือข้อมูลส่วนตัวจากเครื่องผู้พัฒนา
           '@
 
-            gh release create $tag $archive $checksum `
-              --repo $env:GITHUB_REPOSITORY `
-              --target $env:GITHUB_SHA `
-              --title "Metafxclub AI Agent HQ $tag" `
-              --notes $notes
-            if ($LASTEXITCODE -ne 0) {
-              throw "Release $tag could not be created."
+              gh release create $tag $archive $checksum `
+                --repo $env:GITHUB_REPOSITORY `
+                --target $env:GITHUB_SHA `
+                --title "Metafxclub AI Agent HQ $tag" `
+                --notes $notes
+              if ($LASTEXITCODE -ne 0) {
+                throw "Release $tag could not be created."
+              }
+              $releaseCreatedByThisRun = $true
+            } else {
+              # Same-SHA reruns repair partial/corrupt assets rather than merely
+              # reporting success for an incomplete existing Release.
+              gh release upload $tag $archive $checksum `
+                --repo $env:GITHUB_REPOSITORY `
+                --clobber
+              if ($LASTEXITCODE -ne 0) {
+                throw "Release $tag exists at this SHA, but its assets could not be repaired."
+              }
             }
-          } else {
-            # Same-SHA reruns repair partial/corrupt assets rather than merely
-            # reporting success for an incomplete existing Release.
-            gh release upload $tag $archive $checksum `
-              --repo $env:GITHUB_REPOSITORY `
-              --clobber
-            if ($LASTEXITCODE -ne 0) {
-              throw "Release $tag exists at this SHA, but its assets could not be repaired."
-            }
+
             $verifyRoot = Join-Path $env:RUNNER_TEMP "metafxclub-release-verify-$tag"
             New-Item -ItemType Directory -Path $verifyRoot -Force | Out-Null
             gh release download $tag `
@@ -361,14 +590,64 @@ jobs:
             if ($remoteHash -cne $hash -or $remoteChecksumLine -cne "$hash  $archive") {
               throw "Release $tag remote assets do not match the verified local package."
             }
-            Write-Host "Release $tag already exists at the current SHA. Verified assets were uploaded with clobber; no duplicate release was created."
-          }
+            if ($existingReleaseNeedsPublish) {
+              # A draft left by an interrupted/manual run is repairable, but it
+              # must never receive the public success status while students
+              # still cannot read it through /releases/tags/<tag>.
+              gh release edit $tag `
+                --repo $env:GITHUB_REPOSITORY `
+                --draft=false
+              if ($LASTEXITCODE -ne 0) {
+                throw "Release $tag assets are valid, but its draft could not be published."
+              }
+            }
 
-          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-          gh api --method POST "repos/$env:GITHUB_REPOSITORY/statuses/$env:GITHUB_SHA" `
-            -f state=success `
-            -f context=metafxclub/release `
-            -f "description=Release $tag verified" `
-            -f "target_url=$runUrl"
+            $publishedReleaseView = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              throw "Release $tag could not be read back after upload/publish."
+            }
+            try {
+              $publishedRelease = ($publishedReleaseView -join "`n") | ConvertFrom-Json
+            }
+            catch {
+              throw "Release $tag returned invalid JSON after upload/publish."
+            }
+            $publishedAssets = @($publishedRelease.assets)
+            $publishedArchiveAssets = @($publishedAssets | Where-Object { [string]$_.name -ceq $archive -and [long]$_.size -gt 0 })
+            $publishedChecksumAssets = @($publishedAssets | Where-Object { [string]$_.name -ceq $checksum -and [long]$_.size -gt 0 })
+            if (
+              [string]$publishedRelease.tag_name -cne $tag -or
+              $publishedRelease.draft -ne $false -or
+              [string]::IsNullOrWhiteSpace([string]$publishedRelease.published_at) -or
+              $publishedArchiveAssets.Count -ne 1 -or
+              $publishedChecksumAssets.Count -ne 1
+            ) {
+              throw "Release $tag is not a published, non-draft Release with both non-empty verified assets."
+            }
+            if ($existingRelease) {
+              Write-Host "Release $tag already exists at the current SHA. Verified assets were uploaded with clobber; no duplicate release was created."
+            }
+
+            $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            gh api --method POST "repos/$env:GITHUB_REPOSITORY/statuses/$env:GITHUB_SHA" `
+              -f state=success `
+              -f context=metafxclub/release `
+              -f "description=Release $tag verified" `
+              -f "target_url=$runUrl"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Release status gate could not be published."
+            }
+          }
+          catch {
+            if (-not $existingRelease) {
+              if ($releaseCreatedByThisRun) {
+                gh release delete $tag --repo $env:GITHUB_REPOSITORY --yes --cleanup-tag | Out-Host
+              }
+              elseif ($tagCreatedByThisRun) {
+                git push origin ":refs/tags/$tag" | Out-Host
+              }
+            }
+            throw
+          }
         env:
           GH_TOKEN: ${{ github.token }}

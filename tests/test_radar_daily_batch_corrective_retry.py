@@ -7,7 +7,7 @@ import json
 import tempfile
 import unittest
 from contextlib import ExitStack
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -67,6 +67,50 @@ class RadarDailyBatchCorrectiveRetryTests(unittest.TestCase):
             trusted_trigger_source="schedule",
         )
         return response["mission"], slot_key
+
+    def prior_day_scheduled_radar_completion_retry(
+        self,
+    ) -> tuple[dict, str, str]:
+        current_day = datetime.now(self.bridge.THAILAND_TIMEZONE).date()
+        prior_day = (current_day - timedelta(days=1)).isoformat()
+        slot_key = f"indicatorScoutSchedule:{prior_day}:0900"
+        response = self.bridge.run_dashboard_workflow_action(
+            "left_audit_crystals",
+            {
+                "actionId": "discover_new_indicators",
+                "form": {},
+                "idempotencyKey": f"dashboard-schedule:{slot_key}",
+            },
+            trusted_trigger_source="schedule",
+        )
+        mission = response["mission"]
+        self.bridge._dashboard_workflow_update_schedule_state(
+            "indicatorScoutSchedule",
+            {
+                "lastMissionId": mission["id"],
+                "lastSlotKey": slot_key,
+                "lastAttemptSlotKey": slot_key,
+                "dailyExecutionDate": prior_day,
+                "dailyExecutionCount": 1,
+                "dailyExecutionSlotKeys": [slot_key],
+            },
+        )
+        applied = self.bridge._apply_scheduled_public_research_completion_retry(
+            mission,
+            failure_code="invalid_output",
+            failure_summary="Scheduled Radar has no verified final artifact yet.",
+        )
+        self.assertTrue(applied)
+        retry = mission["scheduledCompletionRetry"]
+        retry["lastFailedAt"] = "2000-01-01T00:00:00+00:00"
+        retry["nextAttemptAt"] = "2000-01-01T00:01:00+00:00"
+        mission["execution"]["nextAttemptAt"] = retry["nextAttemptAt"]
+        self.bridge._issue_backend_auto_safe_authorization(
+            mission,
+            issued_at=self.bridge.utc_now(),
+        )
+        self.bridge.replace_mission(mission)
+        return mission, slot_key, current_day.isoformat()
 
     @staticmethod
     def urls() -> list[str]:
@@ -424,7 +468,7 @@ class RadarDailyBatchCorrectiveRetryTests(unittest.TestCase):
             ["daily_batch_history_catalog_unavailable"],
         )
 
-    def test_persisted_strict_batch_duplicate_reads_as_five_of_six_progress(self) -> None:
+    def test_persisted_unverified_duplicate_batch_remains_hidden_until_full_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
             mission, _ = self.scheduled_radar()
             with mock.patch.object(
@@ -469,12 +513,70 @@ class RadarDailyBatchCorrectiveRetryTests(unittest.TestCase):
                     schedule={"lastRunStatus": "completed"},
                 )
 
-        self.assertEqual(model["today"]["itemCount"], 5)
-        self.assertEqual(model["today"]["uniqueCount"], 5)
-        self.assertEqual(model["today"]["duplicateCount"], 1)
-        self.assertEqual(len(model["todayEntries"]), 5)
+        self.assertEqual(model["today"]["runCount"], 0)
+        self.assertEqual(model["today"]["itemCount"], 0)
+        self.assertEqual(model["today"]["uniqueCount"], 0)
+        self.assertEqual(model["today"]["duplicateCount"], 0)
+        self.assertEqual(model["todayEntries"], [])
         self.assertEqual(model["verifiedReadyBatchCount"], 0)
         self.assertEqual(len(report["metrics"]["entries"]), 6)
+
+    def test_verified_batch_with_late_catalog_duplicate_is_hidden_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
+            mission, _ = self.scheduled_radar()
+            with mock.patch.object(
+                self.bridge,
+                "_radar_existing_catalog_identities",
+                return_value=(set(), set()),
+            ):
+                contract = self.bridge.validate_dashboard_workflow_output_contract(
+                    mission,
+                    self.runner_result(self.entries(), self.urls()),
+                )
+            self.assertTrue(contract["valid"], contract)
+            entries = self.bridge.dashboard_workflow_output_metrics(contract)["entries"]
+            report = {
+                "id": "report-radar-late-sheet-duplicate",
+                "type": "indicator_scout_report",
+                "status": "ready",
+                "linkedMissionId": mission["id"],
+                "linkedPropId": "left_audit_crystals",
+                "workflowContext": copy.deepcopy(mission["workflowContext"]),
+                "createdAt": self.bridge.utc_now(),
+                "updatedAt": self.bridge.utc_now(),
+                "evidence": self.runner_result(self.entries(), self.urls())["evidence"],
+                "metrics": {
+                    "entries": entries,
+                    "workflowOutput": contract,
+                },
+            }
+            late_duplicate_row = {
+                "duplicate_fingerprint": entries[-1]["duplicateFingerprint"],
+                "normalized_source_url": entries[-1]["sourceUrl"],
+                "first_report_id": "different-report",
+                "latest_report_id": "different-report",
+            }
+            with mock.patch.object(
+                self.bridge,
+                "_research_sheet_cached_rows",
+                return_value=[late_duplicate_row],
+            ):
+                model = self.bridge._radar_website_tool_read_model(
+                    [report],
+                    settings={},
+                    now_local=datetime.now(self.bridge.THAILAND_TIMEZONE),
+                    bridge={"codex": {"status": "ready"}, "time": self.bridge.utc_now()},
+                    missions=[mission],
+                    schedule={"lastRunStatus": "completed"},
+                )
+
+        self.assertEqual(model["today"]["runCount"], 0)
+        self.assertEqual(model["today"]["itemCount"], 0)
+        self.assertEqual(model["todayEntries"], [])
+        self.assertEqual(model["verifiedReadyBatchCount"], 0)
+        self.assertTrue(
+            all(entry["duplicateStatus"] == "unique" for entry in report["metrics"]["entries"])
+        )
 
     def test_restart_recovers_same_current_day_mission_without_new_reservation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
@@ -905,6 +1007,356 @@ class RadarDailyBatchCorrectiveRetryTests(unittest.TestCase):
         self.assertEqual(requeued["modelTier"], "specialist_balanced")
         self.assertEqual(schedule["dailyExecutionCount"], 1)
         self.assertEqual(schedule["dailyExecutionSlotKeys"], [slot_key])
+
+    def test_missing_artifact_invalid_output_retries_same_daily_mission_across_backoff_rounds_without_report(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
+            mission, slot_key = self.scheduled_radar()
+            today = datetime.now(self.bridge.THAILAND_TIMEZONE).date().isoformat()
+            self.bridge._dashboard_workflow_update_schedule_state(
+                "indicatorScoutSchedule",
+                {
+                    "requestedEnabled": True,
+                    "lastMissionId": mission["id"],
+                    "lastSlotKey": slot_key,
+                    "lastAttemptSlotKey": slot_key,
+                    "dailyExecutionDate": today,
+                    "dailyExecutionCount": 1,
+                    "dailyExecutionSlotKeys": [slot_key],
+                },
+            )
+            runner_result = {
+                "ok": False,
+                "status": "invalid_output",
+                "workStatus": "invalid_output",
+                "finalMessage": "ผลลัพธ์ยังไม่มี final artifact ที่ตรวจสอบได้",
+                "structuredOutputError": "entries missing",
+                "contractFields": [],
+                "evidence": [],
+                "evidenceKinds": [],
+                "artifacts": {},
+                "processStarted": True,
+                "workingDirectory": "workspace",
+                "writeRoots": [],
+                "controlPlaneWritable": False,
+                "webSearchEnabled": True,
+                "webSearchUsed": True,
+                "webSearchEvidenceVerified": False,
+            }
+
+            def mark_running(row: dict, lease_id: str) -> dict:
+                running = copy.deepcopy(row)
+                running.update(
+                    {
+                        "status": "running",
+                        "phase": "auto_guarded_running",
+                        "workStatus": None,
+                        "errorCode": None,
+                        "attemptCount": int(running.get("attemptCount") or 0) + 1,
+                    }
+                )
+                running["execution"].update(
+                    {
+                        "dispatchState": "running",
+                        "workerId": "worker-radar-missing-artifact",
+                        "leaseId": lease_id,
+                        "processStarted": True,
+                    }
+                )
+                self.bridge.replace_mission(running)
+                return running
+
+            first_running = mark_running(mission, "lease-radar-missing-artifact-1")
+            with mock.patch.object(self.bridge, "create_report") as create_report:
+                first = self.bridge.finish_auto_mission(
+                    mission["id"],
+                    first_running["execution"]["leaseId"],
+                    {"processStarted": True},
+                    runner_result,
+                )
+                second_running = mark_running(
+                    first,
+                    "lease-radar-missing-artifact-2",
+                )
+                second = self.bridge.finish_auto_mission(
+                    mission["id"],
+                    second_running["execution"]["leaseId"],
+                    {"processStarted": True},
+                    runner_result,
+                )
+            schedule = self.bridge.load_dashboard_workflow_settings()[
+                "indicatorScoutSchedule"
+            ]
+
+        create_report.assert_not_called()
+        self.assertEqual(first["id"], mission["id"])
+        self.assertEqual(first["idempotencyKey"], mission["idempotencyKey"])
+        self.assertEqual(first["status"], "queued")
+        self.assertEqual(
+            first["phase"],
+            "auto_guarded_scheduled_completion_retry_deferred",
+        )
+        self.assertEqual(first["reportIds"], [])
+        self.assertEqual(first["scheduledCompletionRetry"]["attemptCount"], 1)
+        self.assertEqual(
+            first["scheduledCompletionRetry"]["lastFailureCode"],
+            "invalid_output",
+        )
+        self.assertTrue(first["scheduledCompletionRetry"]["sameMission"])
+        self.assertTrue(first["scheduledCompletionRetry"]["sameDailyReservation"])
+        self.assertFalse(first["scheduledCompletionRetry"]["newDailyReservation"])
+        self.assertEqual(first["execution"]["dispatchState"], "deferred")
+        self.assertTrue(first["execution"]["automaticRetry"])
+        self.assertEqual(second["id"], mission["id"])
+        self.assertEqual(second["status"], "queued")
+        self.assertEqual(second["reportIds"], [])
+        self.assertEqual(second["scheduledCompletionRetry"]["attemptCount"], 2)
+        self.assertGreater(
+            self.bridge.parse_iso(
+                second["scheduledCompletionRetry"]["nextAttemptAt"]
+            ),
+            self.bridge.parse_iso(first["scheduledCompletionRetry"]["nextAttemptAt"]),
+        )
+        self.assertEqual(schedule["lastRunStatus"], "deferred")
+        self.assertEqual(
+            schedule["lastResultKind"],
+            "scheduled_completion_retry_deferred",
+        )
+        self.assertEqual(schedule["dailyExecutionCount"], 1)
+        self.assertEqual(schedule["dailyExecutionSlotKeys"], [slot_key])
+
+    def test_new_retry_packet_is_digest_bound_without_invalidating_legacy_mission_digest(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
+            mission, slot_key = self.scheduled_radar()
+            baseline_digest = self.bridge.mission_payload_digest(mission)
+            legacy = copy.deepcopy(mission)
+            legacy["scheduledCompletionRetry"] = {
+                "schemaVersion": "scheduled-public-research-completion-retry-v1",
+                "attemptCount": 1,
+            }
+            modern = copy.deepcopy(legacy)
+            modern["scheduledCompletionRetry"]["originalSlotKey"] = slot_key
+
+        self.assertEqual(
+            self.bridge.mission_payload_digest(legacy),
+            baseline_digest,
+        )
+        self.assertNotEqual(
+            self.bridge.mission_payload_digest(modern),
+            baseline_digest,
+        )
+
+    def test_interrupted_running_scheduled_radar_requeues_after_restart_without_new_slot(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
+            mission, slot_key = self.scheduled_radar()
+            today = datetime.now(self.bridge.THAILAND_TIMEZONE).date().isoformat()
+            self.bridge._dashboard_workflow_update_schedule_state(
+                "indicatorScoutSchedule",
+                {
+                    "requestedEnabled": True,
+                    "lastMissionId": mission["id"],
+                    "lastSlotKey": slot_key,
+                    "lastAttemptSlotKey": slot_key,
+                    "dailyExecutionDate": today,
+                    "dailyExecutionCount": 1,
+                    "dailyExecutionSlotKeys": [slot_key],
+                },
+            )
+            running = copy.deepcopy(mission)
+            running.update(
+                {
+                    "status": "running",
+                    "phase": "auto_guarded_running",
+                    "workStatus": None,
+                    "errorCode": None,
+                    "attemptCount": 1,
+                }
+            )
+            running["execution"].update(
+                {
+                    "dispatchState": "running",
+                    "workerId": "worker-radar-before-restart",
+                    "leaseId": "lease-radar-before-restart",
+                    "processStarted": True,
+                }
+            )
+            self.bridge.replace_mission(running)
+            self.bridge.MISSION_WORKER_WAKE.clear()
+
+            first_count = self.bridge.recover_interrupted_missions()
+            recovered = self.bridge.find_mission(mission["id"])
+            second_count = self.bridge.recover_interrupted_missions()
+            schedule = self.bridge.load_dashboard_workflow_settings()[
+                "indicatorScoutSchedule"
+            ]
+            audit = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH)
+
+        self.assertEqual(first_count, 1)
+        self.assertEqual(second_count, 0)
+        self.assertEqual(recovered["id"], mission["id"])
+        self.assertEqual(recovered["idempotencyKey"], mission["idempotencyKey"])
+        self.assertEqual(recovered["status"], "queued")
+        self.assertEqual(
+            recovered["phase"],
+            "auto_guarded_scheduled_completion_retry_deferred",
+        )
+        self.assertEqual(recovered["reportIds"], [])
+        self.assertEqual(recovered["execution"]["dispatchState"], "deferred")
+        self.assertFalse(recovered["execution"]["processStarted"])
+        self.assertTrue(recovered["execution"]["automaticRetry"])
+        self.assertEqual(
+            recovered["scheduledCompletionRetry"]["lastFailureCode"],
+            "auto_worker_interrupted",
+        )
+        self.assertEqual(recovered["scheduledCompletionRetry"]["attemptCount"], 1)
+        self.assertTrue(recovered["scheduledCompletionRetry"]["sameMission"])
+        self.assertTrue(
+            recovered["scheduledCompletionRetry"]["sameDailyReservation"]
+        )
+        self.assertFalse(
+            recovered["scheduledCompletionRetry"]["newDailyReservation"]
+        )
+        self.assertEqual(schedule["dailyExecutionCount"], 1)
+        self.assertEqual(schedule["dailyExecutionSlotKeys"], [slot_key])
+        self.assertEqual(schedule["lastMissionId"], mission["id"])
+        self.assertEqual(schedule["lastRunStatus"], "deferred")
+        self.assertTrue(self.bridge.MISSION_WORKER_WAKE.is_set())
+        restart_audit = [
+            row
+            for row in audit
+            if row.get("type") == "mission.scheduled_radar_restart_requeued"
+        ]
+        self.assertEqual(len(restart_audit), 1)
+        self.assertTrue(restart_audit[0]["automaticRetry"])
+        self.assertTrue(restart_audit[0]["sameDailyReservation"])
+        self.assertTrue(restart_audit[0]["realToolExecuted"])
+
+    def test_prior_day_valid_scheduled_completion_retry_carries_forward_same_slot(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
+            mission, slot_key, current_day = (
+                self.prior_day_scheduled_radar_completion_retry()
+            )
+            original_idempotency_key = mission["idempotencyKey"]
+            self.bridge.MISSION_WORKER_WAKE.clear()
+
+            carried = self.bridge._expire_prior_day_radar_mission(mission)
+            stored = self.bridge.find_mission(mission["id"])
+            duplicate_expiry = self.bridge._expire_prior_day_radar_mission(stored)
+            due = self.bridge._find_next_auto_mission_unlocked(council_only=False)
+            indicator_job = tuple(
+                job
+                for job in self.bridge.DASHBOARD_WORKFLOW_SCHEDULE_JOBS
+                if job.get("settingsKey") == "indicatorScoutSchedule"
+            )
+            current_local = datetime.combine(
+                datetime.strptime(current_day, "%Y-%m-%d").date(),
+                datetime.min.time(),
+                tzinfo=self.bridge.THAILAND_TIMEZONE,
+            ).replace(hour=9, minute=1)
+            with mock.patch.object(
+                self.bridge,
+                "DASHBOARD_WORKFLOW_SCHEDULE_JOBS",
+                indicator_job,
+            ):
+                captured = self.bridge._dashboard_workflow_capture_due_slots(
+                    current_local
+                )
+            schedule = self.bridge.load_dashboard_workflow_settings()[
+                "indicatorScoutSchedule"
+            ]
+            audit = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH)
+
+        self.assertTrue(carried)
+        self.assertFalse(duplicate_expiry)
+        self.assertIsNotNone(due)
+        self.assertEqual(due["id"], mission["id"])
+        self.assertEqual(stored["id"], mission["id"])
+        self.assertEqual(stored["idempotencyKey"], original_idempotency_key)
+        self.assertEqual(stored["status"], "queued")
+        self.assertIsNone(stored["errorCode"])
+        self.assertEqual(stored["reportIds"], [])
+        self.assertEqual(
+            stored["phase"],
+            "auto_guarded_scheduled_completion_retry_overdue",
+        )
+        retry = stored["scheduledCompletionRetry"]
+        self.assertEqual(retry["attemptCount"], 1)
+        self.assertTrue(retry["overdueCarryForward"])
+        self.assertEqual(retry["overdueSinceBangkokDate"], current_day)
+        self.assertEqual(retry["originalSlotKey"], slot_key)
+        reservation = stored["workflowContext"]["executionReservation"]
+        self.assertEqual(reservation["slotKey"], slot_key)
+        self.assertEqual(reservation["bangkokDate"], slot_key.split(":")[1])
+        self.assertEqual(stored["execution"]["dispatchState"], "deferred")
+        self.assertTrue(stored["execution"]["automaticRetry"])
+        self.assertFalse(stored["execution"]["processStarted"])
+        self.assertEqual(captured, [])
+        self.assertEqual(schedule["dailyExecutionDate"], current_day)
+        self.assertEqual(schedule["dailyExecutionCount"], 0)
+        self.assertEqual(schedule["dailyExecutionSlotKeys"], [])
+        self.assertEqual(schedule["carryForwardBlockDate"], current_day)
+        self.assertEqual(schedule["carryForwardMissionId"], mission["id"])
+        overdue_audit = [
+            row
+            for row in audit
+            if row.get("type") == "mission.scheduled_radar_completion_overdue"
+        ]
+        self.assertEqual(len(overdue_audit), 1)
+        self.assertTrue(overdue_audit[0]["sameDailyReservation"])
+        self.assertFalse(overdue_audit[0]["newDailyReservation"])
+        self.assertFalse(overdue_audit[0]["dailyReservationCountIncremented"])
+        self.assertTrue(self.bridge.MISSION_WORKER_WAKE.is_set())
+
+    def test_prior_day_invalid_scheduled_completion_retry_expires_fail_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
+            mission, _slot_key, _current_day = (
+                self.prior_day_scheduled_radar_completion_retry()
+            )
+            mission["scheduledCompletionRetry"]["sameDailyReservation"] = False
+            self.bridge._issue_backend_auto_safe_authorization(
+                mission,
+                issued_at=self.bridge.utc_now(),
+            )
+            self.bridge.replace_mission(mission)
+
+            expired = self.bridge._expire_prior_day_radar_mission(mission)
+            stored = self.bridge.find_mission(mission["id"])
+            audit = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH)
+
+        self.assertTrue(expired)
+        self.assertEqual(stored["status"], "blocked")
+        self.assertEqual(stored["phase"], "scheduled_radar_slot_expired")
+        self.assertEqual(stored["errorCode"], "scheduled_radar_slot_expired")
+        self.assertEqual(stored["execution"]["dispatchState"], "blocked")
+        self.assertFalse(stored["execution"]["automaticRetry"])
+        self.assertFalse(stored["execution"]["processStarted"])
+        self.assertIsNone(stored["execution"]["nextAttemptAt"])
+        self.assertIsNone(
+            self.bridge._find_next_auto_mission_unlocked(council_only=False)
+        )
+        self.assertFalse(
+            any(
+                row.get("type")
+                == "mission.scheduled_radar_completion_overdue"
+                for row in audit
+            )
+        )
+        self.assertTrue(
+            any(
+                row.get("type")
+                == "dashboard.radar_daily_reservation_expired"
+                for row in audit
+            )
+        )
 
     def test_historical_duplicate_finish_requeues_same_mission_at_five_of_six(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):

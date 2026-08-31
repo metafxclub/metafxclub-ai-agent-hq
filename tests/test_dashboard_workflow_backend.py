@@ -2775,6 +2775,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             mock.patch.object(self.bridge, "load_dashboard_workflow_settings", return_value=settings),
             mock.patch.object(self.bridge, "mission_worker_read_model", return_value=worker) as worker_probe,
             mock.patch.object(self.bridge, "dashboard_workflow_scheduler_read_model", return_value=scheduler) as scheduler_probe,
+            mock.patch.object(self.bridge, "_mission_store_signature", return_value=("stable-test-signature",)),
             mock.patch.object(self.bridge, "_load_metatrader_target_store_unlocked", return_value={"candidates": {}, "selections": {}}),
         ):
             model = self.bridge.workflow_dashboard_read_model(

@@ -499,6 +499,7 @@ const RESEARCH_SHEET_HUB_ENDPOINT = "/api/props/mission_strategy_table/research-
 const RESEARCH_SHEET_HUB_INSPECT_ENDPOINT = `${RESEARCH_SHEET_HUB_ENDPOINT}/inspect`;
 const RESEARCH_SHEET_HUB_ACTIVATE_ENDPOINT = `${RESEARCH_SHEET_HUB_ENDPOINT}/activate`;
 const RESEARCH_SHEET_HUB_QUERY_ENDPOINT = `${RESEARCH_SHEET_HUB_ENDPOINT}/query`;
+const RESEARCH_SHEET_HUB_FLUSH_ENDPOINT = `${RESEARCH_SHEET_HUB_ENDPOINT}/flush`;
 const RESEARCH_SHEET_GOOGLE_AUTH_ENDPOINT = `${RESEARCH_SHEET_HUB_ENDPOINT}/auth`;
 const RESEARCH_SHEET_GOOGLE_AUTH_START_ENDPOINT = `${RESEARCH_SHEET_GOOGLE_AUTH_ENDPOINT}/start`;
 const RESEARCH_SHEET_GOOGLE_AUTH_DISCONNECT_ENDPOINT = `${RESEARCH_SHEET_GOOGLE_AUTH_ENDPOINT}/disconnect`;
@@ -515,10 +516,10 @@ const RESEARCH_SHEET_CONSUMERS = Object.freeze([
   { propId: "left_audit_crystals", tabKey: "indicatorEaTool", labelTh: "Radar Website Tool", requiresWrite: true },
 ]);
 const RESEARCH_SHEET_LINKED_SYSTEMS = Object.freeze([
-  { systemId: "worldRadar", propId: "codex_mcp_portal", sourcePropId: "codex_mcp_portal", labelTh: "Radar ระบบโลก" },
-  { systemId: "deepResearch", propId: "left_server_racks", sourcePropId: "left_server_racks", labelTh: "คลังวิจัยเชิงลึก" },
-  { systemId: "eaFactory", propId: EA_FACTORY_PROP_ID, sourcePropId: "left_server_racks", labelTh: "โรงงาน EA" },
-  { systemId: "radarWebsiteTool", propId: "left_audit_crystals", sourcePropId: "left_audit_crystals", labelTh: "Radar Website Tool" },
+  { systemId: "worldRadar", propId: "codex_mcp_portal", sourcePropId: "codex_mcp_portal", labelTh: "Radar ระบบโลก", mode: "read_write" },
+  { systemId: "deepResearch", propId: "left_server_racks", sourcePropId: "left_server_racks", labelTh: "คลังวิจัยเชิงลึก", mode: "read_write" },
+  { systemId: "eaFactory", propId: EA_FACTORY_PROP_ID, sourcePropId: "left_server_racks", labelTh: "โรงงาน EA", mode: "read" },
+  { systemId: "radarWebsiteTool", propId: "left_audit_crystals", sourcePropId: "left_audit_crystals", labelTh: "Radar Website Tool", mode: "read_write" },
 ]);
 const RESEARCH_SHEET_CONSUMER_PROP_IDS = new Set(RESEARCH_SHEET_CONSUMERS.map((item) => item.propId));
 const RESEARCH_SHEET_LINKED_PROP_IDS = new Set([...RESEARCH_SHEET_CONSUMER_PROP_IDS, EA_FACTORY_PROP_ID]);
@@ -1560,6 +1561,11 @@ const state = {
     message: "เปิดแท็บเพื่อโหลดข้อมูลวิเคราะห์เชิงลึกจาก Local Runner",
     tone: "neutral",
   },
+  aiTradeMt4QuickSetup: {
+    inFlight: false,
+    message: "",
+    tone: "neutral",
+  },
   metatraderCandidateChoice: {},
   supportMoveTimers: new Map(),
   supportMoveFrames: new Map(),
@@ -1779,6 +1785,7 @@ const els = {
   researchSheetHubProgress: document.getElementById("researchSheetHubProgress"),
   researchSheetHubStatus: document.getElementById("researchSheetHubStatus"),
   researchSheetHubConsumers: document.getElementById("researchSheetHubConsumers"),
+  researchSheetHubRetryFailed: document.getElementById("researchSheetHubRetryFailed"),
   researchSheetHubMessage: document.getElementById("researchSheetHubMessage"),
   modalChatLog: document.getElementById("modalChatLog"),
   modalCommandInput: document.getElementById("modalCommandInput"),
@@ -1894,6 +1901,14 @@ const els = {
   modalDashboardMetatraderSummary: document.getElementById("modalDashboardMetatraderSummary"),
   modalDashboardMetatraderCandidates: document.getElementById("modalDashboardMetatraderCandidates"),
   modalDashboardConfirmMetatrader: document.getElementById("modalDashboardConfirmMetatrader"),
+  modalAiTradeMt4QuickSetup: document.getElementById("modalAiTradeMt4QuickSetup"),
+  modalAiTradeMt4QuickBadge: document.getElementById("modalAiTradeMt4QuickBadge"),
+  modalAiTradeMt4QuickAction: document.getElementById("modalAiTradeMt4QuickAction"),
+  modalAiTradeMt4QuickCandidates: document.getElementById("modalAiTradeMt4QuickCandidates"),
+  modalAiTradeMt4QuickConfirm: document.getElementById("modalAiTradeMt4QuickConfirm"),
+  modalAiTradeMt4QuickChannel: document.getElementById("modalAiTradeMt4QuickChannel"),
+  modalAiTradeMt4QuickCopy: document.getElementById("modalAiTradeMt4QuickCopy"),
+  modalAiTradeMt4QuickStatus: document.getElementById("modalAiTradeMt4QuickStatus"),
   modalKanbanSearch: document.getElementById("modalKanbanSearch"),
   modalKanbanArchiveToggle: document.getElementById("modalKanbanArchiveToggle"),
   modalKanbanRefresh: document.getElementById("modalKanbanRefresh"),
@@ -2752,6 +2767,16 @@ function boundedResearchSheetCount(value, maximum = 999_999) {
   return Number.isInteger(count) && count >= 0 ? Math.min(count, maximum) : 0;
 }
 
+function normalizeResearchSheetOutbox(value = {}) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return {
+    pending: boundedResearchSheetCount(source.pending),
+    failed: boundedResearchSheetCount(source.failed),
+    synced: boundedResearchSheetCount(source.synced),
+    deferred: boundedResearchSheetCount(source.deferred),
+  };
+}
+
 function normalizeResearchSheetTimestamp(value) {
   if (typeof value !== "string" || !value.trim()) return null;
   const parsed = new Date(value);
@@ -2851,6 +2876,7 @@ function normalizeResearchSheetHub(payload = {}) {
       cachedRowCount: boundedResearchSheetCount(item?.cachedRowCount),
       observedAt: normalizeResearchSheetTimestamp(item?.observedAt || item?.rowsObservedAt),
       configRevision: safeDashboardDisplayText(item?.configRevision, ""),
+      outbox: normalizeResearchSheetOutbox(item?.outbox),
     });
   });
   const consumers = RESEARCH_SHEET_CONSUMERS.map((definition) => {
@@ -2867,6 +2893,7 @@ function normalizeResearchSheetHub(payload = {}) {
       cachedRowCount: supplied.cachedRowCount || 0,
       observedAt: supplied.observedAt || null,
       configRevision: supplied.configRevision || "",
+      outbox: normalizeResearchSheetOutbox(supplied.outbox),
     };
   });
   const consumerByPropId = new Map(consumers.map((consumer) => [consumer.propId, consumer]));
@@ -2891,15 +2918,12 @@ function normalizeResearchSheetHub(payload = {}) {
         supplied.observedAt || supplied.rowsObservedAt || source.observedAt,
       ),
       configRevision: safeDashboardDisplayText(supplied.configRevision, "") || source.configRevision || "",
+      outbox: normalizeResearchSheetOutbox(supplied.outbox || source.outbox),
     };
   });
   const rawOutbox = root.outbox && typeof root.outbox === "object" && !Array.isArray(root.outbox) ? root.outbox : {};
   const configRevision = safeDashboardDisplayText(root.configRevision, "");
   const activeConfigRevision = safeDashboardDisplayText(root.activeConfigRevision, "");
-  const outboxCount = (name) => {
-    const value = Number(rawOutbox[name]);
-    return Number.isInteger(value) && value >= 0 ? Math.min(value, 999_999) : 0;
-  };
   return {
     schemaVersion: safeDashboardDisplayText(root.schemaVersion, ""),
     configured: root.configured === true,
@@ -2934,11 +2958,7 @@ function normalizeResearchSheetHub(payload = {}) {
     tabs,
     consumers,
     linkedSystems,
-    outbox: {
-      pending: outboxCount("pending"),
-      failed: outboxCount("failed"),
-      synced: outboxCount("synced"),
-    },
+    outbox: normalizeResearchSheetOutbox(rawOutbox),
     credentialsAcceptedByFrontend: false,
     rawSheetIdExposed: Boolean(rawSheetIdAllowed && sheetId),
   };
@@ -3022,7 +3042,7 @@ function researchSheetGoogleAuthFailureReason(error = null) {
     body.code || body.errorCode || body.kind || body.error || error?.code || "auth_unavailable",
   ).trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 120);
   const reasons = {
-    access_denied: "คุณยกเลิกหรือไม่อนุญาตสิทธิ์ Google",
+    access_denied: "คุณยกเลิกสิทธิ์ หรือบัญชีนี้ยังไม่ได้อยู่ใน Audience > Test users ของ Google Auth Platform (กรณีแอปยังเป็น Testing)",
     admin_setup_required: "ผู้ดูแลยังไม่ได้ตั้ง Google OAuth Client ที่ Local Bridge",
     auth_expired: "สิทธิ์ Google หมดอายุ กรุณาเชื่อมบัญชีใหม่",
     backend_client_missing: "ผู้ดูแลยังไม่ได้ตั้ง Google OAuth Client ที่ Local Bridge",
@@ -3224,6 +3244,23 @@ function researchSheetConsumer(propId) {
   return state.researchSheetHub.data?.consumers?.find((item) => item.propId === propId) || null;
 }
 
+function researchSheetOutboxCount(value, name) {
+  const count = Number(value?.outbox?.[name]);
+  return Number.isInteger(count) && count > 0 ? Math.min(count, 999_999) : 0;
+}
+
+function researchSheetFailedOutboxCount(data = state.researchSheetHub.data) {
+  return researchSheetOutboxCount(data, "failed");
+}
+
+function researchSheetPendingOutboxCount(data = state.researchSheetHub.data) {
+  return researchSheetOutboxCount(data, "pending");
+}
+
+function researchSheetDeferredOutboxCount(data = state.researchSheetHub.data) {
+  return researchSheetOutboxCount(data, "deferred");
+}
+
 function researchSheetConsumerPresentation(propId, { requiresWrite = null } = {}) {
   const hub = state.researchSheetHub;
   const data = hub.data;
@@ -3243,8 +3280,48 @@ function researchSheetConsumerPresentation(propId, { requiresWrite = null } = {}
   const effectiveRequiresWrite = typeof requiresWrite === "boolean"
     ? requiresWrite
     : consumer.requiresWrite === true;
+  const activeReadConnection = data.active === true
+    && Boolean(data.configRevision)
+    && data.activeConfigRevision === data.configRevision
+    && data.readReady === true
+    && consumer.configurationApplied === true
+    && consumer.readReady === true;
+  const failedOutboxCount = effectiveRequiresWrite
+    ? researchSheetOutboxCount(consumer, "failed")
+    : 0;
+  const pendingOutboxCount = effectiveRequiresWrite
+    ? researchSheetOutboxCount(consumer, "pending")
+    : 0;
+  const deferredOutboxCount = effectiveRequiresWrite
+    ? researchSheetOutboxCount(consumer, "deferred")
+    : 0;
+  const waitingOutboxCount = pendingOutboxCount + deferredOutboxCount;
+  if (failedOutboxCount > 0) {
+    return {
+      tone: "error",
+      label: "ซิงก์ Sheet ไม่สำเร็จ",
+      detail: `${consumer.tabName || "Backend ยังไม่ระบุ Tab"} • มี ${failedOutboxCount} รายการที่เขียนไม่สำเร็จ • กรุณาตรวจสิทธิ์ Google และลองซิงก์ใหม่`,
+      verifiedReady: false,
+      writeVerified: false,
+      consumer,
+    };
+  }
+  if (waitingOutboxCount > 0 && activeReadConnection) {
+    return {
+      tone: "warning",
+      label: `เชื่อมอ่านแล้ว • รอซิงก์ ${waitingOutboxCount} รายการ`,
+      detail: `${consumer.tabName || "Backend ยังไม่ระบุ Tab"} • Backend เก็บคิวแบบถาวรและจะทยอยซิงก์ให้อัตโนมัติ`,
+      verifiedReady: false,
+      writeVerified: false,
+      consumer,
+    };
+  }
   const statusIsReady = ["ready", "connected"].includes(consumer.status)
-    || (!effectiveRequiresWrite && consumer.readReady === true && consumer.status === "read_ready_write_unverified");
+    || (
+      !effectiveRequiresWrite
+      && consumer.readReady === true
+      && ["read_ready", "read_ready_write_unverified"].includes(consumer.status)
+    );
   const writeRequirementMet = !effectiveRequiresWrite || consumer.writeReady === true;
   const verifiedReady = statusIsReady
     && consumer.readReady === true
@@ -3255,6 +3332,19 @@ function researchSheetConsumerPresentation(propId, { requiresWrite = null } = {}
       label: effectiveRequiresWrite ? "อ่านและเขียนพร้อม" : "อ่านพร้อม",
       detail: `${consumer.tabName || "Backend ยังไม่ระบุ Tab"} • Backend ยืนยันพร้อมครบ`,
       verifiedReady: true,
+      consumer,
+    };
+  }
+  if (activeReadConnection && effectiveRequiresWrite && consumer.writeReady !== true) {
+    const empty = Number(consumer.rowCount || 0) === 0;
+    return {
+      tone: "ready",
+      label: empty ? "เชื่อมแล้ว • พร้อมรับข้อมูลแรก" : "เชื่อมแล้ว • รอยืนยันการเขียน",
+      detail: empty
+        ? `${consumer.tabName || "Backend ยังไม่ระบุ Tab"} • Schema และสิทธิ์อ่านผ่านแล้ว • ยังไม่มีข้อมูล จึงยังไม่มีหลักฐานเขียนและอ่านกลับ`
+        : `${consumer.tabName || "Backend ยังไม่ระบุ Tab"} • Schema และสิทธิ์อ่านผ่านแล้ว • การเขียนจะยืนยันเมื่อมีรายการใหม่`,
+      verifiedReady: true,
+      writeVerified: false,
       consumer,
     };
   }
@@ -3307,11 +3397,15 @@ function researchSheetHardError(value) {
 
 function researchSheetActivePresentation(data = state.researchSheetHub.data) {
   if (!data?.configured) {
-    return { visible: false, tone: "neutral", title: "ยังไม่ได้เลือก Google Sheet", detail: "" };
+    return { visible: false, tone: "neutral", title: "ยังไม่ได้เลือก Google Sheet", detail: "", verifiedReady: false };
   }
   const total = RESEARCH_SHEET_CONSUMERS.length;
   const applied = Math.min(Number(data.appliedConsumerCount) || 0, total);
   const verified = Math.min(Number(data.verifiedConsumerCount) || 0, total);
+  const failedOutboxCount = researchSheetFailedOutboxCount(data);
+  const pendingOutboxCount = researchSheetPendingOutboxCount(data);
+  const deferredOutboxCount = researchSheetDeferredOutboxCount(data);
+  const waitingOutboxCount = pendingOutboxCount + deferredOutboxCount;
   const currentRevisionReady = Boolean(data.configRevision)
     && data.activeConfigRevision === data.configRevision
     && Array.isArray(data.consumers)
@@ -3325,13 +3419,26 @@ function researchSheetActivePresentation(data = state.researchSheetHub.data) {
     && data.allConsumersVerified === true
     && verified === total
     && currentRevisionReady;
-  const hardError = researchSheetHardError(data.adapterStatus) || Boolean(data.lastErrorCode);
+  const hardError = researchSheetHardError(data.adapterStatus)
+    || Boolean(data.lastErrorCode);
   if (data.active !== true) {
     return {
       visible: true,
       tone: hardError ? "error" : "warning",
       title: "บันทึก ID แล้ว แต่ยังไม่เปิดใช้",
-      detail: hardError ? researchSheetHubFailureReason(data) : "ต้องตรวจผ่านและยืนยันก่อนจึงจะ Apply ให้ระบบ",
+      detail: failedOutboxCount > 0
+        ? `มี ${failedOutboxCount} รายการที่เขียนไป Google Sheet ไม่สำเร็จ • กรุณาตรวจสิทธิ์และการเชื่อมต่อ`
+        : (hardError ? researchSheetHubFailureReason(data) : "ต้องตรวจผ่านและยืนยันก่อนจึงจะ Apply ให้ระบบ"),
+      verifiedReady: false,
+    };
+  }
+  if (failedOutboxCount > 0) {
+    return {
+      visible: true,
+      tone: "error",
+      title: "Google Sheet มีรายการซิงก์ไม่สำเร็จ",
+      detail: `มี ${failedOutboxCount} รายการที่เขียนไป Google Sheet ไม่สำเร็จ • กรุณาตรวจสิทธิ์ Google และการเชื่อมต่อก่อนซิงก์ใหม่`,
+      verifiedReady: false,
     };
   }
   if (!currentRevisionVerified || hardError) {
@@ -3340,6 +3447,16 @@ function researchSheetActivePresentation(data = state.researchSheetHub.data) {
       tone: "error",
       title: "กำหนดให้ใช้ Sheet นี้ แต่การเชื่อมต่อขัดข้อง",
       detail: researchSheetHubFailureReason(data),
+      verifiedReady: false,
+    };
+  }
+  if (waitingOutboxCount > 0) {
+    return {
+      visible: true,
+      tone: "warning",
+      title: `เชื่อมอ่านแล้ว • รอซิงก์ ${waitingOutboxCount} รายการ`,
+      detail: "Google Sheet Revision ปัจจุบันอ่านได้ครบแล้ว • Backend จะทยอยส่งทั้งคิวแถวและรายงานที่รอพื้นที่ให้อัตโนมัติ",
+      verifiedReady: false,
     };
   }
   return {
@@ -3347,6 +3464,7 @@ function researchSheetActivePresentation(data = state.researchSheetHub.data) {
     tone: "ready",
     title: "กำลังใช้ Google Sheet นี้อยู่",
     detail: `Backend ยืนยันการอ่าน Revision ปัจจุบันครบ ${verified}/${total} แท็บ`,
+    verifiedReady: true,
   };
 }
 
@@ -3386,7 +3504,6 @@ function renderResearchSheetHubLinkedSystems() {
   const container = els.researchSheetHubLinkedSystems;
   if (!container) return;
   const data = state.researchSheetHub.data;
-  const activePresentation = researchSheetActivePresentation(data);
   container.replaceChildren();
   (data?.linkedSystems || []).forEach((system) => {
     const card = document.createElement("article");
@@ -3394,12 +3511,30 @@ function renderResearchSheetHubLinkedSystems() {
     const name = document.createElement("strong");
     const status = document.createElement("b");
     const detail = document.createElement("small");
-    const trulyReady = activePresentation.tone === "ready" && system.ready === true;
-    const tone = trulyReady ? "ready" : (activePresentation.tone === "error" || researchSheetHardError(system.status) ? "error" : "warning");
+    const requiresWrite = system.mode !== "read";
+    const pendingOutboxCount = requiresWrite ? researchSheetOutboxCount(system, "pending") : 0;
+    const failedOutboxCount = requiresWrite ? researchSheetOutboxCount(system, "failed") : 0;
+    const deferredOutboxCount = requiresWrite ? researchSheetOutboxCount(system, "deferred") : 0;
+    const waitingOutboxCount = pendingOutboxCount + deferredOutboxCount;
+    const systemError = researchSheetHardError(system.status) || failedOutboxCount > 0;
+    const trulyReady = system.ready === true
+      && !systemError
+      && waitingOutboxCount === 0;
+    const tone = trulyReady ? "ready" : (systemError ? "error" : "warning");
     card.dataset.tone = tone;
     name.textContent = system.labelTh;
-    status.textContent = trulyReady ? "เชื่อมแล้ว" : (tone === "error" ? "เชื่อมติดขัด" : "รอยืนยัน");
-    detail.textContent = `${system.tabName || "ยังไม่ระบุ Tab"} • ${system.rowCount} แถว • ${researchSheetObservedLabel(system.observedAt)}`;
+    status.textContent = trulyReady
+      ? "เชื่อมแล้ว"
+      : failedOutboxCount > 0
+        ? `ซิงก์ไม่สำเร็จ ${failedOutboxCount} รายการ`
+        : waitingOutboxCount > 0
+          ? `รอซิงก์ ${waitingOutboxCount} รายการ`
+          : tone === "error" ? "เชื่อมติดขัด" : "รอยืนยัน";
+    detail.textContent = waitingOutboxCount > 0
+      ? `${system.tabName || "ยังไม่ระบุ Tab"} • เชื่อมอ่านแล้ว • รอซิงก์ ${waitingOutboxCount} รายการ`
+      : Number(system.rowCount || 0) === 0 && trulyReady
+        ? `${system.tabName || "ยังไม่ระบุ Tab"} • เชื่อมแล้ว • ยังไม่มีข้อมูลและพร้อมรับข้อมูลแรก • ${researchSheetObservedLabel(system.observedAt)}`
+        : `${system.tabName || "ยังไม่ระบุ Tab"} • ${system.rowCount} แถว • ${researchSheetObservedLabel(system.observedAt)}`;
     heading.append(name, status);
     card.append(heading, detail);
     container.appendChild(card);
@@ -3600,7 +3735,9 @@ function renderResearchSheetHubInspection() {
       card.dataset.tone = consumerTone;
       tab.textContent = consumer.tabName || "Backend ยังไม่ระบุ Tab";
       status.textContent = consumerTone === "ready" ? "อ่านได้จริง" : consumer.status;
-      rows.textContent = `${consumer.rowCount} แถว • ${researchSheetObservedLabel(consumer.observedAt)}`;
+      rows.textContent = Number(consumer.rowCount || 0) === 0 && consumerTone === "ready"
+        ? `0 แถว • แท็บว่างใช้งานได้และพร้อมรับข้อมูลแรก • ${researchSheetObservedLabel(consumer.observedAt)}`
+        : `${consumer.rowCount} แถว • ${researchSheetObservedLabel(consumer.observedAt)}`;
       evidence.textContent = consumer.probeEvidence.confirmed
         ? `หลักฐาน ${consumer.probeEvidence.kind || "read_probe"}${consumer.probeEvidence.range ? ` • ${consumer.probeEvidence.range}` : ""}`
         : "Backend ยังไม่ยืนยันหลักฐานการอ่าน";
@@ -3758,6 +3895,7 @@ function researchSheetHubSummaryPresentation() {
   const auth = researchSheetGoogleAuthPresentation();
   if (hub.inFlight && hub.operation === "inspect") return { tone: "working", label: "กำลังตรวจ Google Sheet", readyCount: 0, allReady: false };
   if (hub.inFlight && hub.operation === "activate") return { tone: "working", label: "กำลังเปิดใช้ Google Sheet", readyCount: 0, allReady: false };
+  if (hub.inFlight && hub.operation === "retry_failed") return { tone: "working", label: "กำลังลองซิงก์ใหม่", readyCount: 0, allReady: false };
   if (hub.preview?.readyForConfirmation) return { tone: "ready", label: "ตรวจผ่าน • รอยืนยันใช้ชีตนี้", readyCount: hub.preview.verifiedConsumerCount, allReady: false };
   if (hub.preview) return { tone: researchSheetHardError(hub.preview.status) ? "error" : "warning", label: "ตรวจไม่ผ่าน • ยังเปิดใช้ไม่ได้", readyCount: hub.preview.verifiedConsumerCount, allReady: false };
   if (hub.dirty) return { tone: "warning", label: "แก้ไข ID แล้ว • รอตรวจสอบ", readyCount: 0, allReady: false };
@@ -3783,12 +3921,13 @@ function researchSheetHubSummaryPresentation() {
   const allVerified = data.allConsumersVerified === true
     && verifiedCount === totalTabs
     && readyCount === totalTabs;
+  const activePresentation = researchSheetActivePresentation(data);
   const allReady = data.active === true
     && data.connected === true
     && data.readReady === true
     && allApplied
-    && allVerified;
-  const activePresentation = researchSheetActivePresentation(data);
+    && allVerified
+    && activePresentation.verifiedReady === true;
   return {
     tone: activePresentation.tone,
     label: activePresentation.title,
@@ -3890,6 +4029,7 @@ function renderResearchSheetHub() {
           : ({
               inspecting: "กำลังส่งไปตรวจสอบ…",
               verifying: "กำลังอ่านจริง 3 แท็บ…",
+              retry_failed: "กำลังลองซิงก์ใหม่…",
             }[hub.phase] || "กำลังตรวจ Google Sheet…"));
     els.researchSheetHubApply.textContent = hub.inFlight
       ? inFlightLabel
@@ -3899,6 +4039,18 @@ function renderResearchSheetHub() {
   }
   if (els.researchSheetHubCancel) {
     els.researchSheetHubCancel.disabled = hub.inFlight;
+  }
+  if (els.researchSheetHubRetryFailed) {
+    const failedCount = researchSheetFailedOutboxCount(hub.data);
+    els.researchSheetHubRetryFailed.hidden = failedCount === 0;
+    els.researchSheetHubRetryFailed.disabled = hub.inFlight || researchSheetGoogleAuthIsBusy();
+    els.researchSheetHubRetryFailed.textContent = hub.operation === "retry_failed"
+      ? "กำลังลองซิงก์ใหม่…"
+      : `ลองซิงก์รายการที่ไม่สำเร็จใหม่ (${failedCount})`;
+    els.researchSheetHubRetryFailed.setAttribute(
+      "aria-busy",
+      String(hub.operation === "retry_failed"),
+    );
   }
   if (els.researchSheetHubActive) {
     els.researchSheetHubActive.hidden = !activePresentation.visible;
@@ -3939,7 +4091,7 @@ function renderResearchSheetHub() {
   if (els.researchSheetHubMessage) {
     const outbox = hub.data?.outbox;
     const backendStatus = hub.data?.configured
-      ? `${activePresentation.title} • ${researchSheetHubConfiguredReference()} • คิวซิงก์: รอ ${outbox?.pending || 0} • ไม่สำเร็จ ${outbox?.failed || 0} • สำเร็จ ${outbox?.synced || 0}`
+      ? `${activePresentation.title} • ${researchSheetHubConfiguredReference()} • คิวซิงก์: รอ ${outbox?.pending || 0} • รอพื้นที่ ${outbox?.deferred || 0} • ไม่สำเร็จ ${outbox?.failed || 0} • สำเร็จ ${outbox?.synced || 0}`
       : "หน้าเว็บรับเฉพาะ URL หรือ Sheet ID และไม่รับ Token หรือ Credential";
     els.researchSheetHubMessage.dataset.tone = hub.tone;
     els.researchSheetHubMessage.textContent = hub.message || backendStatus;
@@ -4003,6 +4155,59 @@ async function loadResearchSheetHub({ force = false, signal = null } = {}) {
     hub.inFlight = false;
     hub.operation = "";
     refreshOpenResearchSheetConsumer();
+  }
+}
+
+async function retryFailedResearchSheetOutbox() {
+  const hub = state.researchSheetHub;
+  if (
+    hub.inFlight
+    || researchSheetGoogleAuthIsBusy()
+    || researchSheetFailedOutboxCount(hub.data) === 0
+  ) return null;
+  hub.inFlight = true;
+  hub.operation = "retry_failed";
+  hub.phase = "retry_failed";
+  hub.panelOpen = true;
+  hub.message = "กำลังเปิดคิวที่ไม่สำเร็จแบบจำกัดรอบ และส่งไป Google Sheet อีกครั้ง";
+  hub.tone = "working";
+  renderResearchSheetHub();
+  try {
+    const payload = await postJson(RESEARCH_SHEET_HUB_FLUSH_ENDPOINT, {
+      retryFailed: true,
+    });
+    if (payload?.ok !== true || !payload?.researchSheet) {
+      throw new Error("Backend ยังไม่ยืนยันผลการลองซิงก์ Google Sheet ใหม่");
+    }
+    hub.data = normalizeResearchSheetHub(payload);
+    hub.status = "ready";
+    hub.lastLoadedAt = Date.now();
+    const requeued = boundedResearchSheetCount(payload?.retry?.requeued, 50);
+    const synced = boundedResearchSheetCount(payload?.flush?.synced, 50);
+    const failed = researchSheetFailedOutboxCount(hub.data);
+    const waiting = researchSheetPendingOutboxCount(hub.data)
+      + researchSheetDeferredOutboxCount(hub.data);
+    if (failed > 0) {
+      hub.message = `ลองซิงก์ใหม่แล้ว ${requeued} รายการ • สำเร็จรอบนี้ ${synced} • ยังไม่สำเร็จ ${failed} รายการ • กดซ้ำได้หลังตรวจสิทธิ์ Google แล้ว`;
+      hub.tone = "error";
+    } else if (waiting > 0) {
+      hub.message = `ลองซิงก์ใหม่แล้ว ${requeued} รายการ • สำเร็จรอบนี้ ${synced} • Backend จะทยอยซิงก์อีก ${waiting} รายการอัตโนมัติ`;
+      hub.tone = "warning";
+    } else {
+      hub.message = `ลองซิงก์ใหม่สำเร็จ • ส่งขึ้น Google Sheet รอบนี้ ${synced} รายการ`;
+      hub.tone = "success";
+    }
+    return hub.data;
+  } catch (error) {
+    hub.status = hub.data ? "ready" : "error";
+    hub.message = `ลองซิงก์ Google Sheet ใหม่ไม่สำเร็จ • ${researchSheetHubFailureReason(null, error)}`;
+    hub.tone = "error";
+    return null;
+  } finally {
+    hub.inFlight = false;
+    hub.operation = "";
+    hub.phase = "idle";
+    renderResearchSheetHub();
   }
 }
 
@@ -4444,10 +4649,20 @@ async function activateResearchSheetHub() {
     if (els.researchSheetHubReference && hub.submittedReference) {
       els.researchSheetHubReference.value = hub.submittedReference;
     }
-    const summary = researchSheetHubSummaryPresentation();
-    if (summary.allReady) {
-      hub.message = `เปิดใช้ Google Sheet สำเร็จ • 3 แท็บ • 4 ระบบ • ${researchSheetHubConfiguredReference(activeData)}`;
+    // Do not call researchSheetHubSummaryPresentation() while this request is
+    // still marked in-flight: its busy branch deliberately reports allReady
+    // false and used to repaint every successful activation as an error.
+    const activePresentation = researchSheetActivePresentation(activeData);
+    if (activePresentation.tone === "ready") {
+      const headerOnly = activeData.consumers.length > 0
+        && activeData.consumers.every((consumer) => Number(consumer.rowCount || 0) === 0);
+      hub.message = headerOnly
+        ? `เปิดใช้ Google Sheet สำเร็จ • 3 แท็บ • 4 ระบบ • ชีตยังไม่มีข้อมูลและพร้อมรับข้อมูลแรก • ${researchSheetHubConfiguredReference(activeData)}`
+        : `เปิดใช้ Google Sheet สำเร็จ • 3 แท็บ • 4 ระบบ • ${researchSheetHubConfiguredReference(activeData)}`;
       hub.tone = "success";
+    } else if (activePresentation.tone === "warning") {
+      hub.message = `เปิดใช้ Google Sheet สำเร็จ • ${activePresentation.title} • ${researchSheetHubConfiguredReference(activeData)}`;
+      hub.tone = "warning";
     } else {
       hub.phase = "error";
       hub.failurePhase = "activating";
@@ -8160,10 +8375,156 @@ function getMetatraderSelectionModel(checklist) {
   };
 }
 
+function getAiTradeMt4SelectionModel(checklist) {
+  const selection = getMetatraderSelectionModel(checklist);
+  const candidates = selection.candidates.filter((candidate) => (
+    candidate.platform === "MT4" && candidate.detected
+  ));
+  const selectedCandidate = selection.selectedCandidate?.platform === "MT4"
+    && selection.selectedCandidate.detected
+    ? candidates.find((candidate) => (
+      candidate.candidateId === selection.selectedCandidate.candidateId
+    )) || null
+    : null;
+  return {
+    ...selection,
+    candidates,
+    selectedCandidate,
+    candidateCount: candidates.length,
+    canSelect: selection.canSelect && candidates.length > 0,
+  };
+}
+
+function deterministicAiTradeMt4Candidate(selection) {
+  const selectedId = selection?.selectedCandidate?.candidateId || "";
+  const selected = selection?.candidates?.find((candidate) => (
+    candidate.candidateId === selectedId && candidate.detected
+  ));
+  if (selected) return selected;
+  const runningCandidates = (selection?.candidates || []).filter((candidate) => (
+    candidate.detected && candidate.runningState === "platform_running_detected"
+  ));
+  if (runningCandidates.length === 1) return runningCandidates[0];
+  const detectedCandidates = (selection?.candidates || []).filter((candidate) => candidate.detected);
+  return detectedCandidates.length === 1 ? detectedCandidates[0] : null;
+}
+
+function renderAiTradeMt4QuickSetup(subject, checklist, canDiscoverMetatrader, report = null) {
+  if (!els.modalAiTradeMt4QuickSetup) return;
+  const applicable = subject?.id === AI_TRADE_COUNCIL_PROP_ID && canDiscoverMetatrader;
+  els.modalAiTradeMt4QuickSetup.hidden = !applicable;
+  if (!applicable) {
+    if (els.modalAiTradeMt4QuickCandidates) els.modalAiTradeMt4QuickCandidates.innerHTML = "";
+    return;
+  }
+
+  const selection = getAiTradeMt4SelectionModel(checklist);
+  const selectedId = selection.selectedCandidate?.candidateId || "";
+  const suggested = deterministicAiTradeMt4Candidate(selection);
+  let chosenId = String(state.metatraderCandidateChoice[AI_TRADE_COUNCIL_PROP_ID] || "");
+  if (!selection.candidates.some((candidate) => candidate.candidateId === chosenId)) {
+    chosenId = suggested?.candidateId || selectedId;
+    if (chosenId) state.metatraderCandidateChoice[AI_TRADE_COUNCIL_PROP_ID] = chosenId;
+    else delete state.metatraderCandidateChoice[AI_TRADE_COUNCIL_PROP_ID];
+  }
+  const chosenCandidate = selection.candidates.find((candidate) => candidate.candidateId === chosenId) || null;
+  const channelId = signalSnapshotChannel(report || {});
+  const busy = state.aiTradeMt4QuickSetup?.inFlight || state.connectionAction?.inFlight;
+
+  setConnectionBadge(
+    els.modalAiTradeMt4QuickBadge,
+    channelId ? "connected" : selectedId ? "configured" : selection.candidateCount ? "detected" : "not_found",
+    channelId ? "พร้อมใช้" : selectedId ? "เลือก MT4 แล้ว" : selection.candidateCount ? "พบ MT4" : "ยังไม่พบ",
+  );
+  if (els.modalAiTradeMt4QuickAction) {
+    els.modalAiTradeMt4QuickAction.disabled = busy;
+    els.modalAiTradeMt4QuickAction.textContent = busy
+      ? "กำลังตรวจ MT4 และสร้าง Channel ID..."
+      : channelId
+        ? "ตรวจ MT4 และ Channel ID อีกครั้ง"
+        : "ตรวจ MT4 และสร้าง Channel ID";
+  }
+
+  if (els.modalAiTradeMt4QuickCandidates) {
+    els.modalAiTradeMt4QuickCandidates.innerHTML = "";
+    els.modalAiTradeMt4QuickCandidates.hidden = selection.candidateCount <= 1;
+    selection.candidates.forEach((candidate) => {
+      const card = document.createElement("label");
+      const input = document.createElement("input");
+      const copy = document.createElement("span");
+      const title = document.createElement("strong");
+      const detail = document.createElement("small");
+      const status = document.createElement("span");
+      card.className = "ai-trade-mt4-quick-candidate";
+      card.classList.toggle("selected", candidate.candidateId === chosenId);
+      input.type = "radio";
+      input.name = "ai-trade-mt4-quick-candidate";
+      input.value = candidate.candidateId;
+      input.checked = candidate.candidateId === chosenId;
+      input.disabled = busy;
+      input.setAttribute("aria-label", candidate.labelTh);
+      input.addEventListener("change", () => {
+        state.metatraderCandidateChoice[AI_TRADE_COUNCIL_PROP_ID] = candidate.candidateId;
+        state.aiTradeMt4QuickSetup.message = `เลือก ${candidate.labelTh} แล้ว • กดยืนยันเพื่อสร้าง Channel ID`;
+        state.aiTradeMt4QuickSetup.tone = "neutral";
+        renderAiTradeMt4QuickSetup(subject, checklist, canDiscoverMetatrader, report);
+      });
+      copy.className = "ai-trade-mt4-quick-candidate-copy";
+      title.textContent = candidate.labelTh;
+      detail.textContent = candidate.runningState === "platform_running_detected"
+        ? "MT4 กำลังทำงาน • แนะนำรายการนี้"
+        : "พบ MT4 ในเครื่อง • ยังไม่พบว่ากำลังทำงาน";
+      copy.append(title, detail);
+      status.className = "connection-badge";
+      setConnectionBadge(
+        status,
+        candidate.candidateId === selectedId ? "configured" : "detected",
+        candidate.candidateId === selectedId ? "ใช้อยู่" : "เลือกได้",
+      );
+      card.append(input, copy, status);
+      els.modalAiTradeMt4QuickCandidates.appendChild(card);
+    });
+  }
+
+  if (els.modalAiTradeMt4QuickConfirm) {
+    els.modalAiTradeMt4QuickConfirm.hidden = selection.candidateCount <= 1;
+    els.modalAiTradeMt4QuickConfirm.disabled = busy
+      || !chosenCandidate
+      || chosenCandidate.candidateId === selectedId;
+  }
+  if (els.modalAiTradeMt4QuickChannel) {
+    els.modalAiTradeMt4QuickChannel.textContent = channelId || "ยังไม่มี Channel ID";
+  }
+  if (els.modalAiTradeMt4QuickCopy) {
+    els.modalAiTradeMt4QuickCopy.disabled = busy || !channelId;
+  }
+  if (els.modalAiTradeMt4QuickStatus) {
+    const ownMessage = state.aiTradeMt4QuickSetup?.message || "";
+    const connectionMessage = state.connectionAction?.propId === AI_TRADE_COUNCIL_PROP_ID
+      ? state.connectionAction.message
+      : "";
+    els.modalAiTradeMt4QuickStatus.dataset.tone = ownMessage
+      ? state.aiTradeMt4QuickSetup?.tone || "neutral"
+      : connectionMessage
+        ? state.connectionAction.tone
+        : channelId
+          ? "success"
+          : "neutral";
+    els.modalAiTradeMt4QuickStatus.textContent = ownMessage
+      || connectionMessage
+      || (channelId
+        ? "Channel ID นี้เป็นรหัสแบบปกปิดข้อมูลเครื่อง พร้อมคัดลอกไปใส่ใน EA"
+        : selection.candidateCount > 1
+          ? `พบ MT4 ${selection.candidateCount} รายการ • เลือกรายการด้านบนแล้วกดยืนยัน`
+          : "กดครั้งเดียวเพื่อค้นหา MT4 และสร้างรหัสแบบปกปิดข้อมูลเครื่อง");
+  }
+}
+
 function renderMetatraderSelection(subject, checklist, canDiscoverMetatrader, report = null) {
   if (!els.modalDashboardMetatraderSelection || !els.modalDashboardMetatraderCandidates) return;
-  els.modalDashboardMetatraderSelection.hidden = !canDiscoverMetatrader;
-  if (!canDiscoverMetatrader) {
+  const usesAiTradeQuickSetup = subject.id === AI_TRADE_COUNCIL_PROP_ID;
+  els.modalDashboardMetatraderSelection.hidden = !canDiscoverMetatrader || usesAiTradeQuickSetup;
+  if (!canDiscoverMetatrader || usesAiTradeQuickSetup) {
     els.modalDashboardMetatraderCandidates.innerHTML = "";
     if (els.modalDashboardConfirmMetatrader) els.modalDashboardConfirmMetatrader.disabled = true;
     return;
@@ -8375,13 +8736,15 @@ function renderDashboardConnectionPanel(subject, propertyRole = null) {
   }
 
   const canDiscoverMetatrader = backendItems.some((item) => item?.action === "discover_metatrader");
+  renderAiTradeMt4QuickSetup(subject, checklist, canDiscoverMetatrader, report);
   renderMetatraderSelection(subject, checklist, canDiscoverMetatrader, report);
   const actionMatches = state.connectionAction.propId === subject.id;
   if (els.modalDashboardRefreshConnections) {
     els.modalDashboardRefreshConnections.disabled = state.connectionAction.inFlight;
   }
   if (els.modalDashboardDiscoverMetatrader) {
-    els.modalDashboardDiscoverMetatrader.hidden = !canDiscoverMetatrader;
+    els.modalDashboardDiscoverMetatrader.hidden = !canDiscoverMetatrader
+      || subject.id === AI_TRADE_COUNCIL_PROP_ID;
     els.modalDashboardDiscoverMetatrader.disabled = state.connectionAction.inFlight;
   }
   if (els.modalDashboardConnectionActionStatus) {
@@ -9215,6 +9578,18 @@ function signalGatewayInitStatusMessage(initStatus = {}) {
   const labels = {
     SNAPSHOT_CHANNEL_INVALID: "Channel ID ไม่ถูกต้อง",
     LIVE_SIGNING_KEY_PIN_INVALID: "Key ID สำหรับโหมด Live มีรูปแบบไม่ถูกต้อง",
+    LIVE_SIGNING_KEY_PIN_REQUIRED: "โหมด Live ยังไม่ได้ปักหมุด Key ID จาก Local Runner",
+    LIVE_SIGNING_KEY_PIN_MISMATCH: "Key ID ของ EA ไม่ตรงกับ Active Key ของ Local Runner",
+    ACTIVE_SIGNING_KEY_POINTER_MISSING: "Local Runner ยังไม่ได้สร้าง Active Signing Key ให้ Channel นี้",
+    ACTIVE_SIGNING_KEY_ID_INVALID: "Active Signing Key ID ของ Local Runner ไม่ถูกต้อง",
+    SIGNING_KEY_FILE_MISSING: "EA เปิดไฟล์ Signing Key ของ Local Runner ไม่ได้",
+    SIGNING_KEY_LENGTH_INVALID: "ไฟล์ Signing Key มีขนาดไม่ถูกต้อง",
+    SIGNING_KEY_OPEN_FAILED: "EA เปิดไฟล์ Signing Key ของ Local Runner ไม่ได้",
+    SIGNING_KEY_SIZE_INVALID: "ไฟล์ Signing Key มีขนาดไม่ถูกต้อง",
+    SIGNING_KEY_READ_FAILED: "EA อ่าน Signing Key ไม่สำเร็จ",
+    SIGNING_KEY_HASH_FAILED: "EA คำนวณรหัสยืนยัน Signing Key ไม่สำเร็จ",
+    SIGNING_KEY_ID_HASH_MISMATCH: "Signing Key ไม่ตรงกับ Key ID ที่ประกาศไว้",
+    NON_EXECUTING_SIGNING_KEY_PIN_INVALID_IGNORED: "Key ID ไม่ถูกต้อง แต่ EA ยังไม่ Arm จึงคงทำงานแบบไม่ส่งคำสั่งเทรด",
     OPTIONAL_SIGNING_KEY_PIN_INVALID_IGNORED: "Key ID ที่ใส่ใน Demo หรือ Shadow ไม่ถูกต้อง ระบบจึงไม่ใช้ค่านี้",
     OPTIONAL_SIGNING_KEY_PIN_MISMATCH_IGNORED: "Key ID ที่ใส่ใน Demo หรือ Shadow ไม่ตรงกับ Backend ระบบจึงใช้ค่าจาก Backend",
     CRYPTO_SELF_TEST_FAILED: "การตรวจระบบลายเซ็น HMAC-SHA256 ไม่ผ่าน",
@@ -9226,7 +9601,13 @@ function signalGatewayInitStatusMessage(initStatus = {}) {
     INITIAL_CAPABILITIES_WRITE_FAILED: "EA เขียนข้อมูลความสามารถเริ่มต้นไม่สำเร็จ",
     INITIAL_STATUS_WRITE_FAILED: "EA เขียนสถานะเริ่มต้นไม่สำเร็จ",
   };
-  const detail = labels[code] || "การเริ่มทำงานของ EA มีรายการที่ต้องตรวจสอบ";
+  const liveDisarmedPrefix = "LIVE_DISARMED_SIGNING_NOT_READY_";
+  const signingCode = code.startsWith(liveDisarmedPrefix)
+    ? code.slice(liveDisarmedPrefix.length)
+    : "";
+  const detail = signingCode
+    ? `เลือกโหมด Live แล้วแต่ LiveArmed ยังปิดอยู่; ${labels[signingCode] || "ระบบลายเซ็นจาก Local Runner ยังไม่พร้อม"} และ EA ยังคงติดกราฟโดยไม่ส่งคำสั่งเทรด`
+    : (labels[code] || "การเริ่มทำงานของ EA มีรายการที่ต้องตรวจสอบ");
   const oldData = stale ? " ข้อมูลนี้เก่าและใช้เพื่อช่วยวินิจฉัยเท่านั้น" : "";
   return {
     tone: severity === "error" ? "error" : "warning",
@@ -10151,6 +10532,7 @@ function renderSignalDailyPanel(report = {}) {
   const automationBusy = state.aiTradeCouncilAutomation.inFlight
     || state.aiTradeCouncilConsensusPolicy.inFlight
     || state.aiTradeCouncilOrderLimit.inFlight;
+  const mt4QuickSetupBusy = state.aiTradeMt4QuickSetup?.inFlight || state.connectionAction?.inFlight;
   const automationTone = automation.enabled
     ? (automation.blocked || !automation.timeframeSupported ? "warning" : "ready")
     : "muted";
@@ -10281,8 +10663,8 @@ function renderSignalDailyPanel(report = {}) {
               : "ไม่มีเพดานรายวัน"} • ประมวลผลคิวแท่งปิดตามลำดับ FIFO • รอบย้อนหลังใช้ตรวจสอบเท่านั้นและห้ามส่ง Order เก่า • รองรับ ${automation.supported.join(", ")}
           </small>
         </section>
-        <button type="button" class="signal-secondary-action" data-signal-refresh>
-          ตรวจข้อมูล MT4 ใหม่
+        <button type="button" class="signal-secondary-action" data-signal-refresh ${mt4QuickSetupBusy ? "disabled" : ""}>
+          ${mt4QuickSetupBusy ? "กำลังตรวจ MT4 และสร้าง Channel ID..." : "ตรวจ MT4 และสร้าง Channel ID"}
         </button>
         <button type="button" class="signal-primary-action" data-signal-run-analysis ${daily.analysisReady && !analysisBusy ? "" : "disabled"}>
           ${activeCouncilRound ? "Specialist กำลังวิเคราะห์รอบปัจจุบัน" : analysisBusy ? "กำลังส่งงานให้ Specialist..." : "ให้ Specialist 3 ตัวลงคะแนนรอบนี้"}
@@ -10394,8 +10776,8 @@ function renderSignalDailyPanel(report = {}) {
     }
   });
   container.querySelector("[data-signal-refresh]")?.addEventListener("click", async () => {
-    await refreshDashboardConnections(AI_TRADE_COUNCIL_PROP_ID);
-    const latest = await loadPropReport(AI_TRADE_COUNCIL_PROP_ID);
+    await prepareAiTradeMt4Channel();
+    const latest = state.propReports[AI_TRADE_COUNCIL_PROP_ID] || null;
     if (latest && state.modal.open && state.modal.id === AI_TRADE_COUNCIL_PROP_ID) {
       renderSignalConsensusDashboard(getModalSubject(), getPropertyRole(getModalSubject()), latest);
     }
@@ -18571,21 +18953,19 @@ function radarBangkokMinuteOfDay(value = Date.now()) {
 }
 
 function getRadarTodayRunState(domain = {}, now = Date.now()) {
-  const todayEntries = Array.isArray(domain?.todayEntries) ? domain.todayEntries : [];
   const expectedBatchSize = Number.isInteger(domain?.expectedBatchSize)
     ? domain.expectedBatchSize
     : INDICATOR_SCOUT_EXPECTED_BATCH_SIZE;
+  const suppliedTodayEntries = Array.isArray(domain?.todayEntries) ? domain.todayEntries : [];
+  const todayEntries = suppliedTodayEntries.length === expectedBatchSize
+    ? suppliedTodayEntries
+    : [];
   if (todayEntries.length) {
-    const complete = todayEntries.length >= expectedBatchSize;
     return {
-      state: complete ? "verified_results" : "partial_results",
-      tone: complete ? "ready" : "warning",
-      title: complete
-        ? `รายงานวันนี้ผ่านการตรวจครบ ${todayEntries.length}/${expectedBatchSize}`
-        : `Backend ส่งผลมาแล้ว ${todayEntries.length}/${expectedBatchSize} แต่รอบยังไม่ครบ`,
-      detail: complete
-        ? "แสดงเฉพาะรายการที่ Backend ยืนยันหลักฐานและผูกเข้ากับรอบวันนี้แล้ว"
-        : "รายการที่เห็นเป็นข้อมูลจริงจาก Backend แต่หน้านี้ยังไม่ถือว่ารอบวันนี้สำเร็จครบจนกว่าจะได้รับครบตามเป้าหมาย",
+      state: "verified_results",
+      tone: "ready",
+      title: `รายงานวันนี้ผ่านการตรวจครบ ${todayEntries.length}/${expectedBatchSize}`,
+      detail: "แสดงเฉพาะรายการที่ Backend ยืนยันหลักฐานและผูกเข้ากับรอบวันนี้แล้ว",
       lastRunAt: domain?.schedule?.lastRunAt || domain?.serviceHealth?.lastRunAt || null,
       nextRunAt: domain?.schedule?.nextRunAt || null,
       error: "",
@@ -18946,9 +19326,12 @@ function normalizeIndicatorScoutDomain(backend = {}, report = {}) {
   const discoveries = hasCanonicalTruth
     ? projectCanonicalRows(canonicalSevenDayRows)
     : fallbackDiscoveries;
-  const todayEntries = hasCanonicalTruth
+  const projectedTodayEntries = hasCanonicalTruth
     ? projectCanonicalRows(canonicalTodayRows)
     : filterIndicatorScoutToday(discoveries);
+  const todayEntries = projectedTodayEntries.length === expectedBatchSize
+    ? projectedTodayEntries
+    : [];
   const sevenDayEntries = hasCanonicalTruth
     ? discoveries
     : filterIndicatorScoutRollingSevenDays(discoveries);
@@ -28446,27 +28829,28 @@ async function discoverMetatraderConnections(propId) {
   const canDiscover = Array.isArray(report?.connectionChecklist?.items)
     && report.connectionChecklist.items.some((item) => item?.action === "discover_metatrader");
   if (!canDiscover) return null;
+  const platformLabel = propId === AI_TRADE_COUNCIL_PROP_ID ? "MT4" : "MT4 / MT5";
 
   setConnectionActionState(propId, {
     inFlight: true,
-    message: "กำลังส่งคำขอให้ Local Runner ค้นหา MT4 / MT5 แบบอ่านอย่างเดียว",
+    message: `กำลังส่งคำขอให้ Local Runner ค้นหา ${platformLabel} แบบอ่านอย่างเดียว`,
     tone: "working",
   });
-  updateDecisionLog(`กำลังค้นหา MT4 / MT5 สำหรับ ${displayPropName(propId)}`);
+  updateDecisionLog(`กำลังค้นหา ${platformLabel} สำหรับ ${displayPropName(propId)}`);
   try {
     const response = await postJson("/api/integrations/metatrader/discover", { propId });
     await updatePropReportFromDashboardAction(propId, response);
-    const message = safeDashboardDisplayText(response?.messageTh || response?.message, "ค้นหา MT4 / MT5 เสร็จแล้ว และอัปเดตเฉพาะสถานะที่ปลอดภัย");
+    const message = safeDashboardDisplayText(response?.messageTh || response?.message, `ค้นหา ${platformLabel} เสร็จแล้ว และอัปเดตเฉพาะสถานะที่ปลอดภัย`);
     setConnectionActionState(propId, { message, tone: "success" });
-    updateDecisionLog(`ค้นหา MT4 / MT5 สำหรับ ${displayPropName(propId)} เสร็จแล้ว`);
-    addBridgeEvent("ค้นหา MT4 / MT5 แล้ว", `${displayPropName(propId)} ได้รับสถานะที่ปกปิดข้อมูลเครื่องแล้ว`);
+    updateDecisionLog(`ค้นหา ${platformLabel} สำหรับ ${displayPropName(propId)} เสร็จแล้ว`);
+    addBridgeEvent(`ค้นหา ${platformLabel} แล้ว`, `${displayPropName(propId)} ได้รับสถานะที่ปกปิดข้อมูลเครื่องแล้ว`);
     return response;
   } catch {
     setConnectionActionState(propId, {
-      message: "ค้นหา MT4 / MT5 ไม่สำเร็จ ระบบไม่ได้แก้ไขไฟล์และไม่ได้เปิด Terminal",
+      message: `ค้นหา ${platformLabel} ไม่สำเร็จ ระบบไม่ได้แก้ไขไฟล์และไม่ได้เปิด Terminal`,
       tone: "error",
     });
-    updateDecisionLog(`ยังค้นหา MT4 / MT5 สำหรับ ${displayPropName(propId)} ไม่สำเร็จ`);
+    updateDecisionLog(`ยังค้นหา ${platformLabel} สำหรับ ${displayPropName(propId)} ไม่สำเร็จ`);
     return null;
   } finally {
     state.connectionAction.inFlight = false;
@@ -28498,7 +28882,9 @@ async function confirmMetatraderSelection(propId) {
     if (refreshedSelection.selectedCandidate?.candidateId !== candidateId) throw new Error("selection_not_confirmed");
     state.metatraderCandidateChoice[propId] = refreshedSelection.selectedCandidate.candidateId;
     setConnectionActionState(propId, {
-      message: `เลือก ${candidate.labelTh} แล้ว • Adapter สั่งงานจริงยังไม่พร้อม`,
+      message: propId === AI_TRADE_COUNCIL_PROP_ID
+        ? `เลือก ${candidate.labelTh} และสร้าง Channel ID แล้ว`
+        : `เลือก ${candidate.labelTh} แล้ว • Adapter สั่งงานจริงยังไม่พร้อม`,
       tone: "success",
     });
     updateDecisionLog(`เลือก Terminal เป้าหมายของ ${displayPropName(propId)} แล้ว โดยยังไม่เชื่อม Adapter สั่งงานจริง`);
@@ -28514,6 +28900,140 @@ async function confirmMetatraderSelection(propId) {
   } finally {
     state.connectionAction.inFlight = false;
     if (state.modal.open && state.modal.type === "prop" && state.modal.id === propId) renderGameModal();
+  }
+}
+
+function setAiTradeMt4QuickSetupState({ inFlight, message, tone } = {}) {
+  state.aiTradeMt4QuickSetup = {
+    inFlight: inFlight === undefined
+      ? state.aiTradeMt4QuickSetup.inFlight
+      : Boolean(inFlight),
+    message: message === undefined
+      ? state.aiTradeMt4QuickSetup.message
+      : safeDashboardDisplayText(message, ""),
+    tone: tone === undefined
+      ? state.aiTradeMt4QuickSetup.tone
+      : (["neutral", "working", "success", "error"].includes(tone) ? tone : "neutral"),
+  };
+  if (
+    state.modal.open
+    && state.modal.type === "prop"
+    && state.modal.id === AI_TRADE_COUNCIL_PROP_ID
+  ) {
+    renderDashboardConnectionPanel(getModalSubject(), getPropertyRole(getModalSubject()));
+  }
+}
+
+async function confirmAiTradeMt4QuickSelection() {
+  if (state.aiTradeMt4QuickSetup.inFlight || state.connectionAction.inFlight) return null;
+  const report = state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {};
+  const selection = getAiTradeMt4SelectionModel(report.connectionChecklist);
+  const candidateId = String(state.metatraderCandidateChoice[AI_TRADE_COUNCIL_PROP_ID] || "");
+  const candidate = selection.candidates.find((item) => item.candidateId === candidateId) || null;
+  if (!candidate) {
+    setAiTradeMt4QuickSetupState({
+      message: "กรุณาเลือก MT4 ที่ต้องการใช้ก่อนกดยืนยัน",
+      tone: "error",
+    });
+    return null;
+  }
+
+  setAiTradeMt4QuickSetupState({
+    inFlight: true,
+    message: `กำลังใช้ ${candidate.labelTh} และสร้าง Channel ID`,
+    tone: "working",
+  });
+  try {
+    const confirmedReport = await confirmMetatraderSelection(AI_TRADE_COUNCIL_PROP_ID);
+    const channelId = signalSnapshotChannel(confirmedReport || {});
+    if (!confirmedReport || !channelId) {
+      setAiTradeMt4QuickSetupState({
+        message: "ยืนยัน MT4 ไม่สำเร็จ จึงยังไม่สร้าง Channel ID • กรุณากดตรวจใหม่",
+        tone: "error",
+      });
+      return null;
+    }
+    setAiTradeMt4QuickSetupState({
+      message: `พร้อมใช้ Channel ID ${channelId} • คัดลอกไปใส่ใน SnapshotChannel ของ EA`,
+      tone: "success",
+    });
+    return confirmedReport;
+  } finally {
+    setAiTradeMt4QuickSetupState({ inFlight: false });
+  }
+}
+
+async function prepareAiTradeMt4Channel() {
+  if (state.aiTradeMt4QuickSetup.inFlight || state.connectionAction.inFlight) return null;
+  setAiTradeMt4QuickSetupState({
+    inFlight: true,
+    message: "กำลังตรวจ MT4 แบบอ่านอย่างเดียว และเตรียม Channel ID",
+    tone: "working",
+  });
+  try {
+    const discovery = await discoverMetatraderConnections(AI_TRADE_COUNCIL_PROP_ID);
+    if (!discovery) {
+      setAiTradeMt4QuickSetupState({
+        message: "ตรวจ MT4 ไม่สำเร็จ • ตรวจว่า Local Runner เปิดอยู่ แล้วลองอีกครั้ง",
+        tone: "error",
+      });
+      return null;
+    }
+
+    const report = state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {};
+    const selection = getAiTradeMt4SelectionModel(report.connectionChecklist);
+    if (!selection.candidates.length) {
+      delete state.metatraderCandidateChoice[AI_TRADE_COUNCIL_PROP_ID];
+      setAiTradeMt4QuickSetupState({
+        message: "ยังไม่พบ MT4 ที่ยืนยันได้ • เปิด MT4 ให้ทำงาน แล้วกดตรวจอีกครั้ง (MT5 จะไม่ถูกเลือกในสภา AI Trade)",
+        tone: "error",
+      });
+      return discovery;
+    }
+
+    const candidate = deterministicAiTradeMt4Candidate(selection);
+    if (!candidate) {
+      setAiTradeMt4QuickSetupState({
+        message: `พบ MT4 ${selection.candidateCount} รายการ • เลือกรายการในแถบซ้ายแล้วกดยืนยัน`,
+        tone: "neutral",
+      });
+      return discovery;
+    }
+
+    state.metatraderCandidateChoice[AI_TRADE_COUNCIL_PROP_ID] = candidate.candidateId;
+    if (selection.selectedCandidate?.candidateId === candidate.candidateId) {
+      const channelId = signalSnapshotChannel(report);
+      setAiTradeMt4QuickSetupState({
+        message: channelId
+          ? `ตรวจแล้ว • กำลังใช้ Channel ID ${channelId}`
+          : `พบ ${candidate.labelTh} แล้ว แต่ Backend ยังไม่ส่ง Channel ID • กรุณากดตรวจอีกครั้ง`,
+        tone: channelId ? "success" : "error",
+      });
+      return report;
+    }
+
+    const confirmedReport = await confirmMetatraderSelection(AI_TRADE_COUNCIL_PROP_ID);
+    const channelId = signalSnapshotChannel(confirmedReport || {});
+    if (!confirmedReport || !channelId) {
+      setAiTradeMt4QuickSetupState({
+        message: "พบ MT4 แต่ยืนยันการใช้งานไม่สำเร็จ จึงยังไม่สร้าง Channel ID",
+        tone: "error",
+      });
+      return null;
+    }
+    setAiTradeMt4QuickSetupState({
+      message: `ตรวจและเลือก ${candidate.labelTh} แล้ว • พร้อมใช้ Channel ID ${channelId}`,
+      tone: "success",
+    });
+    return confirmedReport;
+  } catch {
+    setAiTradeMt4QuickSetupState({
+      message: "เกิดข้อผิดพลาดระหว่างตรวจ MT4 • ระบบไม่ได้เปิด Terminal และไม่เปิดเผย Path หรือ PID",
+      tone: "error",
+    });
+    return null;
+  } finally {
+    setAiTradeMt4QuickSetupState({ inFlight: false });
   }
 }
 
@@ -32026,6 +32546,10 @@ els.researchSheetHubActivate?.addEventListener("click", () => {
   void activateResearchSheetHub();
 });
 
+els.researchSheetHubRetryFailed?.addEventListener("click", () => {
+  void retryFailedResearchSheetOutbox();
+});
+
 els.researchSheetHubQuerySubmit?.addEventListener("click", () => {
   void queryResearchSheetHub();
 });
@@ -32337,6 +32861,47 @@ els.modalDelegateButton?.addEventListener("click", async () => {
 els.modalDashboardRefreshConnections?.addEventListener("click", () => {
   if (state.modal.type !== "prop" || getModalSurface() !== "dashboard") return;
   void refreshDashboardConnections(state.modal.id);
+});
+
+els.modalAiTradeMt4QuickAction?.addEventListener("click", () => {
+  if (
+    state.modal.type !== "prop"
+    || state.modal.id !== AI_TRADE_COUNCIL_PROP_ID
+    || getModalSurface() !== "dashboard"
+  ) return;
+  void prepareAiTradeMt4Channel();
+});
+
+els.modalAiTradeMt4QuickConfirm?.addEventListener("click", () => {
+  if (
+    state.modal.type !== "prop"
+    || state.modal.id !== AI_TRADE_COUNCIL_PROP_ID
+    || getModalSurface() !== "dashboard"
+  ) return;
+  void confirmAiTradeMt4QuickSelection();
+});
+
+els.modalAiTradeMt4QuickCopy?.addEventListener("click", async () => {
+  const channelId = signalSnapshotChannel(state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {});
+  if (!channelId || state.aiTradeMt4QuickSetup?.inFlight) return;
+  try {
+    await navigator.clipboard.writeText(channelId);
+    setAiTradeMt4QuickSetupState({
+      message: "คัดลอก Channel ID แล้ว • วางในช่อง SnapshotChannel ของ EA ได้เลย",
+      tone: "success",
+    });
+  } catch {
+    const range = document.createRange();
+    const selection = window.getSelection();
+    range.selectNodeContents(els.modalAiTradeMt4QuickChannel);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    els.modalAiTradeMt4QuickChannel.focus();
+    setAiTradeMt4QuickSetupState({
+      message: "เลือก Channel ID ให้แล้ว • กด Ctrl+C เพื่อคัดลอก",
+      tone: "neutral",
+    });
+  }
 });
 
 els.modalDashboardDiscoverMetatrader?.addEventListener("click", () => {
