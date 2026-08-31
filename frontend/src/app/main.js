@@ -8411,7 +8411,7 @@ function deterministicAiTradeMt4Candidate(selection) {
 
 function renderAiTradeMt4QuickSetup(subject, checklist, canDiscoverMetatrader, report = null) {
   if (!els.modalAiTradeMt4QuickSetup) return;
-  const applicable = subject?.id === AI_TRADE_COUNCIL_PROP_ID && canDiscoverMetatrader;
+  const applicable = subject?.id === AI_TRADE_COUNCIL_PROP_ID;
   els.modalAiTradeMt4QuickSetup.hidden = !applicable;
   if (!applicable) {
     if (els.modalAiTradeMt4QuickCandidates) els.modalAiTradeMt4QuickCandidates.innerHTML = "";
@@ -8433,8 +8433,24 @@ function renderAiTradeMt4QuickSetup(subject, checklist, canDiscoverMetatrader, r
 
   setConnectionBadge(
     els.modalAiTradeMt4QuickBadge,
-    channelId ? "connected" : selectedId ? "configured" : selection.candidateCount ? "detected" : "not_found",
-    channelId ? "พร้อมใช้" : selectedId ? "เลือก MT4 แล้ว" : selection.candidateCount ? "พบ MT4" : "ยังไม่พบ",
+    channelId
+      ? "connected"
+      : selectedId
+        ? "configured"
+        : selection.candidateCount
+          ? "detected"
+          : canDiscoverMetatrader
+            ? "not_found"
+            : "checking",
+    channelId
+      ? "พร้อมใช้"
+      : selectedId
+        ? "เลือก MT4 แล้ว"
+        : selection.candidateCount
+          ? "พบ MT4"
+          : canDiscoverMetatrader
+            ? "ยังไม่พบ"
+            : "รอตรวจระบบ",
   );
   if (els.modalAiTradeMt4QuickAction) {
     els.modalAiTradeMt4QuickAction.disabled = busy;
@@ -8516,7 +8532,9 @@ function renderAiTradeMt4QuickSetup(subject, checklist, canDiscoverMetatrader, r
         ? "Channel ID นี้เป็นรหัสแบบปกปิดข้อมูลเครื่อง พร้อมคัดลอกไปใส่ใน EA"
         : selection.candidateCount > 1
           ? `พบ MT4 ${selection.candidateCount} รายการ • เลือกรายการด้านบนแล้วกดยืนยัน`
-          : "กดครั้งเดียวเพื่อค้นหา MT4 และสร้างรหัสแบบปกปิดข้อมูลเครื่อง");
+          : canDiscoverMetatrader
+            ? "กดครั้งเดียวเพื่อค้นหา MT4 และสร้างรหัสแบบปกปิดข้อมูลเครื่อง"
+            : "กดเพื่อตรวจ Local Runner แล้วค้นหา MT4 ต่ออัตโนมัติ");
   }
 }
 
@@ -28975,6 +28993,11 @@ async function prepareAiTradeMt4Channel() {
     tone: "working",
   });
   try {
+    let report = state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {};
+    if (!reportSupportsMetatraderDiscovery(report)) {
+      await refreshDashboardConnections(AI_TRADE_COUNCIL_PROP_ID);
+      report = state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {};
+    }
     const discovery = await discoverMetatraderConnections(AI_TRADE_COUNCIL_PROP_ID);
     if (!discovery) {
       setAiTradeMt4QuickSetupState({
@@ -28984,7 +29007,7 @@ async function prepareAiTradeMt4Channel() {
       return null;
     }
 
-    const report = state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {};
+    report = state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {};
     const selection = getAiTradeMt4SelectionModel(report.connectionChecklist);
     if (!selection.candidates.length) {
       delete state.metatraderCandidateChoice[AI_TRADE_COUNCIL_PROP_ID];

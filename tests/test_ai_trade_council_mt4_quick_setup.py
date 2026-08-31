@@ -67,6 +67,33 @@ class AiTradeCouncilMt4QuickSetupTests(unittest.TestCase):
         self.assertIn('propId === AI_TRADE_COUNCIL_PROP_ID ? "MT4" : "MT4 / MT5"', discover)
         self.assertIn("ค้นหา ${platformLabel}", discover)
 
+    def test_quick_setup_stays_visible_and_refreshes_capability_before_discovery(self) -> None:
+        render = function_block(
+            self.main,
+            "function renderAiTradeMt4QuickSetup(subject, checklist, canDiscoverMetatrader, report = null)",
+        )
+        prepare = function_block(self.main, "async function prepareAiTradeMt4Channel()")
+        self.assertIn("const applicable = subject?.id === AI_TRADE_COUNCIL_PROP_ID;", render)
+        self.assertNotIn("&& canDiscoverMetatrader", render)
+        self.assertIn("กดเพื่อตรวจ Local Runner แล้วค้นหา MT4 ต่ออัตโนมัติ", render)
+        refresh = "await refreshDashboardConnections(AI_TRADE_COUNCIL_PROP_ID)"
+        discover = "await discoverMetatraderConnections(AI_TRADE_COUNCIL_PROP_ID)"
+        self.assertIn("if (!reportSupportsMetatraderDiscovery(report))", prepare)
+        self.assertLess(prepare.index(refresh), prepare.index(discover))
+
+    def test_quick_action_is_guarded_and_failure_reenables_retry(self) -> None:
+        listener_start = self.main.index('els.modalAiTradeMt4QuickAction?.addEventListener("click"')
+        listener_end = self.main.index("\n});", listener_start) + len("\n});")
+        listener = self.main[listener_start:listener_end]
+        prepare = function_block(self.main, "async function prepareAiTradeMt4Channel()")
+        self.assertIn('state.modal.type !== "prop"', listener)
+        self.assertIn("state.modal.id !== AI_TRADE_COUNCIL_PROP_ID", listener)
+        self.assertIn('getModalSurface() !== "dashboard"', listener)
+        self.assertIn("void prepareAiTradeMt4Channel()", listener)
+        self.assertIn("finally", prepare)
+        self.assertIn("setAiTradeMt4QuickSetupState({ inFlight: false })", prepare)
+        self.assertIn("ตรวจ MT4 ไม่สำเร็จ", prepare)
+
     def test_daily_button_routes_to_same_guarded_setup_helper(self) -> None:
         daily = function_block(self.main, "function renderSignalDailyPanel(report = {})")
         self.assertIn("prepareAiTradeMt4Channel()", daily)
