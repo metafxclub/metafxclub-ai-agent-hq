@@ -519,6 +519,7 @@ jobs:
 
           $tagCreatedByThisRun = $false
           $releaseCreatedByThisRun = $false
+          $releaseCreationAmbiguous = $false
           try {
             if (-not $remoteTagCommit) {
               git tag --force $tag $env:GITHUB_SHA
@@ -558,9 +559,48 @@ jobs:
                 --title "Metafxclub AI Agent HQ $tag" `
                 --notes $notes
               if ($LASTEXITCODE -ne 0) {
-                throw "Release $tag could not be created."
+                # The API may have accepted the Release and assets even when
+                # the CLI lost its final response. Probe before cleanup so a
+                # transient network error cannot leave an orphan Release by
+                # deleting only the already-published tag.
+                $releaseCreationAmbiguous = $true
+                $createdReleaseFound = $false
+                for ($createdReleaseProbeAttempt = 1; $createdReleaseProbeAttempt -le 5; $createdReleaseProbeAttempt++) {
+                  $createdReleaseView = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>&1
+                  if ($LASTEXITCODE -eq 0) {
+                    try {
+                      $createdReleasePayload = ($createdReleaseView -join "`n") | ConvertFrom-Json
+                      $createdReleaseFound = [string]$createdReleasePayload.tag_name -ceq $tag
+                    }
+                    catch {
+                      $createdReleaseFound = $false
+                    }
+                    if ($createdReleaseFound) {
+                      break
+                    }
+                  }
+                  if ($createdReleaseProbeAttempt -lt 5) {
+                    Start-Sleep -Seconds 3
+                  }
+                }
+                if (-not $createdReleaseFound) {
+                  # A failed probe is not proof that GitHub rejected the
+                  # create request. Keep both the published tag and the
+                  # ambiguous state so a delayed Release can never become an
+                  # orphan whose tag was removed by cleanup. A later rerun
+                  # will discover and repair the same-SHA Release.
+                  throw "Release $tag could not be created or confirmed through the GitHub API; preserving its tag for a safe rerun."
+                }
+                gh release upload $tag $archive $checksum `
+                  --repo $env:GITHUB_REPOSITORY `
+                  --clobber
+                if ($LASTEXITCODE -ne 0) {
+                  throw "Release $tag was created after an ambiguous CLI response, but its assets could not be repaired."
+                }
               }
-              $releaseCreatedByThisRun = $true
+              else {
+                $releaseCreatedByThisRun = $true
+              }
             } else {
               # Same-SHA reruns repair partial/corrupt assets rather than merely
               # reporting success for an incomplete existing Release.
@@ -574,21 +614,43 @@ jobs:
 
             $verifyRoot = Join-Path $env:RUNNER_TEMP "metafxclub-release-verify-$tag"
             New-Item -ItemType Directory -Path $verifyRoot -Force | Out-Null
-            gh release download $tag `
-              --repo $env:GITHUB_REPOSITORY `
-              --dir $verifyRoot `
-              --pattern $archive `
-              --pattern $checksum `
-              --clobber
-            if ($LASTEXITCODE -ne 0) {
-              throw "Release $tag assets were uploaded but could not be downloaded for verification."
-            }
             $remoteArchive = Join-Path $verifyRoot $archive
             $remoteChecksum = Join-Path $verifyRoot $checksum
-            $remoteHash = (Get-FileHash -LiteralPath $remoteArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-            $remoteChecksumLine = (Get-Content -LiteralPath $remoteChecksum -Raw).Trim()
-            if ($remoteHash -cne $hash -or $remoteChecksumLine -cne "$hash  $archive") {
-              throw "Release $tag remote assets do not match the verified local package."
+            $releaseDownloadReady = $false
+            for ($releaseDownloadAttempt = 1; $releaseDownloadAttempt -le 8; $releaseDownloadAttempt++) {
+              Remove-Item -LiteralPath $remoteArchive -Force -ErrorAction SilentlyContinue
+              Remove-Item -LiteralPath $remoteChecksum -Force -ErrorAction SilentlyContinue
+              gh release download $tag `
+                --repo $env:GITHUB_REPOSITORY `
+                --dir $verifyRoot `
+                --pattern $archive `
+                --pattern $checksum `
+                --clobber
+              $releaseDownloadExitCode = $LASTEXITCODE
+              if (
+                $releaseDownloadExitCode -eq 0 -and
+                (Test-Path -LiteralPath $remoteArchive -PathType Leaf) -and
+                (Test-Path -LiteralPath $remoteChecksum -PathType Leaf)
+              ) {
+                try {
+                  $remoteHash = (Get-FileHash -LiteralPath $remoteArchive -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                  $remoteChecksumLine = (Get-Content -LiteralPath $remoteChecksum -Raw -ErrorAction Stop).Trim()
+                  if ($remoteHash -ceq $hash -and $remoteChecksumLine -ceq "$hash  $archive") {
+                    $releaseDownloadReady = $true
+                    break
+                  }
+                }
+                catch {
+                  Write-Warning "Release asset read failed during verification attempt $releaseDownloadAttempt/8: $($_.Exception.Message)"
+                }
+              }
+              if ($releaseDownloadAttempt -lt 8) {
+                Write-Warning "Release assets are not readable with the expected checksum yet; retrying verification download ($releaseDownloadAttempt/8)."
+                Start-Sleep -Seconds 5
+              }
+            }
+            if (-not $releaseDownloadReady) {
+              throw "Release $tag assets could not be downloaded with the verified local package checksum."
             }
             if ($existingReleaseNeedsPublish) {
               # A draft left by an interrupted/manual run is repairable, but it
@@ -639,11 +701,18 @@ jobs:
             }
           }
           catch {
-            if (-not $existingRelease) {
+            if (-not $existingRelease -and -not $releaseCreationAmbiguous) {
+              $releaseRemovedOrNeverCreated = -not $releaseCreatedByThisRun
               if ($releaseCreatedByThisRun) {
-                gh release delete $tag --repo $env:GITHUB_REPOSITORY --yes --cleanup-tag | Out-Host
+                gh release delete $tag --repo $env:GITHUB_REPOSITORY --yes | Out-Host
+                if ($LASTEXITCODE -eq 0) {
+                  $releaseRemovedOrNeverCreated = $true
+                }
+                else {
+                  Write-Warning "Release $tag cleanup failed; preserving its Git tag to prevent an orphan Release."
+                }
               }
-              elseif ($tagCreatedByThisRun) {
+              if ($tagCreatedByThisRun -and $releaseRemovedOrNeverCreated) {
                 git push origin ":refs/tags/$tag" | Out-Host
               }
             }

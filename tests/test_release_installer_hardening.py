@@ -471,9 +471,36 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("--clobber", workflow)
         self.assertIn("gh api \"repos/$env:GITHUB_REPOSITORY/releases/tags/$tag\"", workflow)
         self.assertIn("Unable to determine whether Release $tag already exists", workflow)
-        self.assertIn("Release $tag could not be created", workflow)
+        self.assertIn("$releaseCreationAmbiguous = $true", workflow)
+        self.assertIn("$createdReleaseProbeAttempt -le 5", workflow)
+        self.assertIn("$createdReleasePayload.tag_name -ceq $tag", workflow)
+        self.assertIn("could not be created or confirmed through the GitHub API; preserving its tag", workflow)
+        ambiguous_failure = workflow[
+            workflow.index("if (-not $createdReleaseFound)"):
+            workflow.index("gh release upload $tag $archive $checksum", workflow.index("if (-not $createdReleaseFound)"))
+        ]
+        self.assertNotIn("$releaseCreationAmbiguous = $false", ambiguous_failure)
+        self.assertIn("was created after an ambiguous CLI response", workflow)
         self.assertIn("gh release download $tag", workflow)
-        self.assertIn("remote assets do not match the verified local package", workflow)
+        self.assertIn("$releaseDownloadAttempt -le 8", workflow)
+        self.assertIn("Release assets are not readable with the expected checksum yet", workflow)
+        self.assertIn("Start-Sleep -Seconds 5", workflow)
+        self.assertIn("if (-not $releaseDownloadReady)", workflow)
+        download_loop = workflow[
+            workflow.index("for ($releaseDownloadAttempt = 1;"):
+            workflow.index("if (-not $releaseDownloadReady)")
+        ]
+        self.assertIn("Remove-Item -LiteralPath $remoteArchive", download_loop)
+        self.assertIn("Remove-Item -LiteralPath $remoteChecksum", download_loop)
+        self.assertIn("$releaseDownloadExitCode = $LASTEXITCODE", download_loop)
+        self.assertIn("$releaseDownloadExitCode -eq 0", download_loop)
+        self.assertIn("Get-FileHash -LiteralPath $remoteArchive", download_loop)
+        self.assertIn("Get-Content -LiteralPath $remoteChecksum", download_loop)
+        self.assertIn("-ErrorAction Stop", download_loop)
+        self.assertIn("Release asset read failed during verification attempt", download_loop)
+        self.assertIn("$remoteHash -ceq $hash", download_loop)
+        self.assertIn('$remoteChecksumLine -ceq "$hash  $archive"', download_loop)
+        self.assertIn("could not be downloaded with the verified local package checksum", workflow)
         self.assertIn("Release $tag verified", workflow)
         self.assertIn("-PackageSmoke", workflow)
         self.assertIn("https://github.com/metafxclub/metafxclub-ai-agent-hq.git", workflow)
@@ -496,6 +523,18 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("Last-good VERSION was not restored", workflow)
         self.assertIn("Assert-DegradedFixture -Port $smokePort", workflow)
         self.assertIn("gh release delete $tag", workflow)
+        cleanup = workflow[workflow.index("          catch {") :]
+        self.assertNotIn("--cleanup-tag", cleanup)
+        self.assertIn("if ($releaseCreatedByThisRun)", cleanup)
+        self.assertIn("$releaseRemovedOrNeverCreated = -not $releaseCreatedByThisRun", cleanup)
+        self.assertIn("if ($LASTEXITCODE -eq 0)", cleanup)
+        self.assertIn("cleanup failed; preserving its Git tag", cleanup)
+        self.assertIn("if ($tagCreatedByThisRun -and $releaseRemovedOrNeverCreated)", cleanup)
+        self.assertIn("-not $releaseCreationAmbiguous", cleanup)
+        self.assertLess(
+            cleanup.index("gh release delete $tag"),
+            cleanup.index('git push origin ":refs/tags/$tag"'),
+        )
         self.assertIn("context=metafxclub/release", workflow)
         trigger = workflow[: workflow.index("permissions:")]
         self.assertNotIn("paths:", trigger)
