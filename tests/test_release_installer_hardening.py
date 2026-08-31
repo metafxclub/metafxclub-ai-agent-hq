@@ -471,6 +471,15 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("--clobber", workflow)
         self.assertIn("gh api \"repos/$env:GITHUB_REPOSITORY/releases/tags/$tag\"", workflow)
         self.assertIn("Unable to determine whether Release $tag already exists", workflow)
+        self.assertIn("function Get-GitHubApiHttpStatus", workflow)
+        self.assertIn("(?im)^HTTP/\\S+\\s+(\\d{3})\\b", workflow)
+        self.assertIn("(?i)\\(HTTP\\s+(\\d{3})\\)", workflow)
+        self.assertIn("Get-GitHubApiHttpStatus -OutputLines @($releaseView)", workflow)
+        self.assertIn("Get-GitHubApiHttpStatus -OutputLines @($statusProbe)", workflow)
+        self.assertLess(
+            workflow.index("Get-GitHubApiHttpStatus -OutputLines @($releaseView)"),
+            workflow.index('gh api --include "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"'),
+        )
         self.assertIn("$releaseCreationAmbiguous = $true", workflow)
         self.assertIn("$createdReleaseProbeAttempt -le 5", workflow)
         self.assertIn("$createdReleasePayload.tag_name -ceq $tag", workflow)
@@ -583,6 +592,55 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("needs: compatibility", workflow)
         self.assertIn('python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]', workflow)
         self.assertIn("Regression suite failed on Python ${{ matrix.python-version }}", workflow)
+
+    def test_release_workflow_http_status_parser_behavior(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "publish-release.yml").read_text(
+            encoding="utf-8"
+        )
+        start = workflow.index("          function Get-GitHubApiHttpStatus {")
+        end = workflow.index("          $existingRelease =", start)
+        function_source = "\n".join(
+            line[10:] if line.startswith("          ") else line
+            for line in workflow[start:end].splitlines()
+        )
+        behavior_probe = function_source + r'''
+$cases = @(
+  @{ Lines = @('gh: Not Found (HTTP 404)'); Expected = '404' },
+  @{ Lines = @('HTTP/2.0 404 Not Found'); Expected = '404' },
+  @{ Lines = @('gh: Forbidden (HTTP 403)'); Expected = '403' },
+  @{ Lines = @('HTTP/2.0 500 Internal Server Error'); Expected = '500' },
+  @{ Lines = @('network timeout'); Expected = '<null>' },
+  @{ Lines = @('HTTP/2.0 500 Internal Server Error', 'gh: Not Found (HTTP 404)'); Expected = '500' }
+)
+$results = @()
+foreach ($case in $cases) {
+  $actual = Get-GitHubApiHttpStatus -OutputLines $case.Lines
+  $rendered = if ($null -eq $actual) { '<null>' } else { [string]$actual }
+  if ($rendered -cne $case.Expected) {
+    throw "HTTP parser mismatch: actual=$rendered expected=$($case.Expected)"
+  }
+  $results += $rendered
+}
+[Console]::Out.Write(($results -join ','))
+'''
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                behavior_probe,
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        self.assertEqual("404,404,403,500,<null>,500", completed.stdout.strip())
 
     def test_degraded_endpoint_upgrade_is_exact_owned_and_foreign_fail_closed(self) -> None:
         installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")

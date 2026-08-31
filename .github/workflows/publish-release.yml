@@ -100,6 +100,20 @@ jobs:
           $archive = "Metafxclub-AI-Agent-HQ-$tag-Windows.zip"
           $checksum = "$archive.sha256"
 
+          function Get-GitHubApiHttpStatus {
+            param([object[]]$OutputLines)
+            $outputText = @($OutputLines) -join "`n"
+            if ($outputText -match '(?im)^HTTP/\S+\s+(\d{3})\b') {
+              return [int]$Matches[1]
+            }
+            # gh writes API failures such as `gh: Not Found (HTTP 404)` to
+            # stderr without an HTTP status-line on some runner versions.
+            if ($outputText -match '(?i)\(HTTP\s+(\d{3})\)') {
+              return [int]$Matches[1]
+            }
+            return $null
+          }
+
           $existingRelease = $false
           $existingReleaseNeedsPublish = $false
           $existingTarget = $null
@@ -130,10 +144,10 @@ jobs:
             }
           }
           else {
-            $httpStatus = $null
-            $statusProbe = gh api --include "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>&1
-            if (($statusProbe -join "`n") -match '(?im)^HTTP/\S+\s+(\d{3})\b') {
-              $httpStatus = [int]$Matches[1]
+            $httpStatus = Get-GitHubApiHttpStatus -OutputLines @($releaseView)
+            if ($null -eq $httpStatus) {
+              $statusProbe = gh api --include "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>&1
+              $httpStatus = Get-GitHubApiHttpStatus -OutputLines @($statusProbe)
             }
             if ($httpStatus -ne 404) {
               throw "Unable to determine whether Release $tag already exists (HTTP $httpStatus): $releaseView"
