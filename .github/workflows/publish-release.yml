@@ -91,6 +91,18 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          trap {
+            $failureMessage = [string]$_.Exception.Message
+            if ($failureMessage -match '(?i)(authorization|cookie|password|secret|token)') {
+              $failureMessage = 'A sensitive release gate failed; inspect the signed-in Actions log.'
+            }
+            $failureMessage = $failureMessage.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            if ($failureMessage.Length -gt 800) {
+              $failureMessage = $failureMessage.Substring(0, 800)
+            }
+            Write-Host "::error title=Build release package failed::$failureMessage"
+            exit 1
+          }
           $version = (Get-Content -LiteralPath 'VERSION' -Raw).Trim()
           if ($version -notmatch '^\d+\.\d+\.\d+$') {
             throw "VERSION must use semantic version format, for example 0.1.0"
@@ -100,26 +112,31 @@ jobs:
           $archive = "Metafxclub-AI-Agent-HQ-$tag-Windows.zip"
           $checksum = "$archive.sha256"
 
-          function Get-GitHubApiHttpStatus {
-            param([object[]]$OutputLines)
-            $outputText = @($OutputLines) -join "`n"
-            if ($outputText -match '(?im)^HTTP/\S+\s+(\d{3})\b') {
-              return [int]$Matches[1]
-            }
-            # gh writes API failures such as `gh: Not Found (HTTP 404)` to
-            # stderr without an HTTP status-line on some runner versions.
-            if ($outputText -match '(?i)\(HTTP\s+(\d{3})\)') {
-              return [int]$Matches[1]
-            }
-            return $null
-          }
-
           $existingRelease = $false
           $existingReleaseNeedsPublish = $false
           $existingTarget = $null
-          $releaseView = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>&1
-          $releaseViewExit = $LASTEXITCODE
-          if ($releaseViewExit -eq 0) {
+          # A successful exhaustive list proves absence without depending on
+          # the CLI's version-specific rendering of a 404 error response.
+          $releaseTags = @(
+            gh api --paginate `
+              "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" `
+              --jq '.[].tag_name' 2>&1
+          )
+          $releaseListExit = $LASTEXITCODE
+          if ($releaseListExit -ne 0) {
+            throw "Unable to list existing GitHub Releases for fail-closed tag verification."
+          }
+          $matchingReleaseTags = @(
+            $releaseTags | Where-Object { [string]$_ -ceq $tag }
+          )
+          if ($matchingReleaseTags.Count -gt 1) {
+            throw "GitHub returned duplicate Release records for exact tag $tag."
+          }
+          if ($matchingReleaseTags.Count -eq 1) {
+            $releaseView = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              throw "Release $tag was listed but its exact API record could not be read."
+            }
             $existingRelease = $true
             try {
               $releasePayload = ($releaseView -join "`n") | ConvertFrom-Json
@@ -141,16 +158,6 @@ jobs:
             $existingTarget = (git rev-list -n 1 $tag).Trim()
             if ($existingTarget -and $existingTarget -cne $env:GITHUB_SHA) {
               throw "Release $tag already exists for '$existingTarget', not current SHA '$env:GITHUB_SHA'. Bump VERSION instead of reusing the tag."
-            }
-          }
-          else {
-            $httpStatus = Get-GitHubApiHttpStatus -OutputLines @($releaseView)
-            if ($null -eq $httpStatus) {
-              $statusProbe = gh api --include "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>&1
-              $httpStatus = Get-GitHubApiHttpStatus -OutputLines @($statusProbe)
-            }
-            if ($httpStatus -ne 404) {
-              throw "Unable to determine whether Release $tag already exists (HTTP $httpStatus): $releaseView"
             }
           }
 
