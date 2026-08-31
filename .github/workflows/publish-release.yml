@@ -172,6 +172,12 @@ jobs:
           # root file that the installer forgot to copy.
           $smokeRoot = Join-Path $env:RUNNER_TEMP "metafxclub-release-smoke-$tag"
           $packageRoot = Join-Path $smokeRoot "Metafxclub-AI-Agent-HQ-$tag"
+          $runnerPythonPath = [IO.Path]::GetFullPath(
+            (Join-Path $env:GITHUB_WORKSPACE "runner\.venv\Scripts\python.exe")
+          )
+          if (-not (Test-Path -LiteralPath $runnerPythonPath -PathType Leaf)) {
+            throw "The verified runner virtual-environment Python executable is missing."
+          }
           Expand-Archive -LiteralPath $archive -DestinationPath $smokeRoot -Force
           foreach ($requiredFile in @(
               ".gitattributes",
@@ -218,17 +224,17 @@ jobs:
             }
             function Start-DegradedFixture {
               param(
+                [Parameter(Mandatory = $true)][string]$PythonPath,
                 [Parameter(Mandatory = $true)][string]$ScriptPath,
                 [Parameter(Mandatory = $true)][int]$Port,
                 [Parameter(Mandatory = $true)][string]$LogRoot
               )
               New-Item -ItemType Directory -Path $LogRoot -Force | Out-Null
-              $pythonPath = (Get-Command python.exe -CommandType Application).Source
               $arguments = @(
                 ('"{0}"' -f $ScriptPath), "--host", "127.0.0.1", "--port", ([string]$Port)
               )
               $process = Start-Process `
-                -FilePath $pythonPath `
+                -FilePath $PythonPath `
                 -ArgumentList $arguments `
                 -WorkingDirectory (Split-Path -Parent $ScriptPath) `
                 -WindowStyle Hidden `
@@ -324,6 +330,7 @@ jobs:
               $env:LOCALAPPDATA = Join-Path $smokeRoot "ForeignLocalAppData"
               $foreignScript = Join-Path $packageRoot "tests\fixtures\legacy_degraded_bridge.py"
               $foreignProcess = Start-DegradedFixture `
+                -PythonPath $runnerPythonPath `
                 -ScriptPath $foreignScript `
                 -Port $foreignPort `
                 -LogRoot (Join-Path $smokeRoot "foreign-logs")
@@ -350,6 +357,7 @@ jobs:
                 -Port $smokePort
               $legacyServer = Join-Path $installedRoot "backend\local-runner\bridge_server.py"
               $legacyProcess = Start-DegradedFixture `
+                -PythonPath $runnerPythonPath `
                 -ScriptPath $legacyServer `
                 -Port $smokePort `
                 -LogRoot (Join-Path $installedRoot "data\runtime\logs")
