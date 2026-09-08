@@ -179,6 +179,14 @@ Google Sheets Adapter ทำงานหลัง Local Runner เท่าน�
 - เก็บ URL วันที่ตรวจสอบ สถานะหลักฐาน และผลตรวจรายการซ้ำใน Report
 - กรองแพลตฟอร์ม MT4, MT5, TradingView และหมวด Indicator
 - เปิดค้นหาแบบอ่านอย่างเดียวเวลา 09:00 น. Asia/Bangkok วันละหนึ่งรอบแบบคงที่ พร้อม Mission ภายใน, Audit, Report และการกันงานซ้ำ โดยคำขอ Manual ถูกปฏิเสธก่อนสร้าง Mission
+- ใช้นโยบาย `FREE-FIRST`: หมุนลำดับ TradingFinder, Forex Station, IndicatorSpot, Soehoe และ ForexCracked ตามวัน Asia/Bangkok แล้วจึงเสริมจาก GitHub, TradingView หรือเว็บสาธารณะอื่น
+- MQL5 เป็นแหล่งสำรองสุดท้ายและมีได้ไม่เกิน 1 รายการต่อรอบ 6 รายการ; รอบตามตารางไม่รับผล `commercial` หรือ `unknown`
+- Soehoe และ ForexCracked ใช้เฉพาะ metadata/กฎที่อ่านได้บนหน้าสาธารณะและต้องระบุข้อจำกัด ห้ามดาวน์โหลดไฟล์แนบ ข้ามสิทธิ์ใช้งาน หรืออ้างว่าพร้อมเป็น EA
+- ลำดับการลองค้นหาเป็นคำสั่งบังคับใน Worker prompt; Backend บันทึกวันที่หมุนและโดเมนของผลที่เลือก แต่ไม่อ้างว่าได้พิสูจน์ลำดับทุก Web Search event
+- Backend ปฏิเสธ URL ที่นำหลายเว็บไซต์มาต่อกัน, direct-download/attachment, cracked/unlocked/unlicensed รวมถึงรายการที่ประกาศเป็น `public` แต่ชื่อหรือข้อจำกัดระบุว่า paid/commercial/premium/subscription/invite-only ก่อนสร้าง Report พร้อมใช้หรือเข้าคิว Google Sheet; ถ้าพบรายการไม่ผ่าน ระบบค้นหาชุดทดแทนแบบจำกัดรอบภายใต้ Mission และ daily reservation เดิม
+- ใบรับรอง Backend ผูก SHA-256 ของฟิลด์ที่มีผลต่อนโยบายกับทั้ง Structured Output และแถวใน Report; ถ้าข้อมูลถูกแก้ภายหลัง Report จะไม่พร้อมแสดงหรือส่งเข้า Google Sheet
+- การส่ง Radar เข้า Google Sheet ต้องยังมี daily reservation และ lineage ของรอบ 09:00 น. ที่ Backend ตรวจได้ครบ; การลบหรือทำให้ lineage เสียจะไม่ลดระดับเป็น Report แบบเก่าเพื่อข้ามตัวตรวจ
+- Backend ตรวจรูปแบบ URL, จำนวน MQL5 และค่าหมวดหมู่ที่ Worker ส่งแบบ Fail-closed แต่ไม่ได้พิสูจน์สถานะฟรี/ลิขสิทธิ์จากผู้เผยแพร่โดยอิสระ; รายการจากแหล่ง metadata-only จึงยังต้องตรวจสิทธิ์ด้วยคนก่อนดาวน์โหลดหรือนำไปใช้จริง
 
 ยังเป็น `Coming Soon`:
 

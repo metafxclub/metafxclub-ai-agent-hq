@@ -10,8 +10,8 @@ Prompt นี้ใช้สำหรับให้นักเรียนว�
 ช่วยติดตั้ง Metafxclub AI Agent HQ บน Windows User ปัจจุบันให้เสร็จอัตโนมัติ โดยให้คุณ Clone จาก GitHub และเรียก Installer เอง ฉันจะไม่ดาวน์โหลด ZIP และไม่กดไฟล์ BAT
 
 GITHUB_REPOSITORY = "https://github.com/metafxclub/metafxclub-ai-agent-hq.git"
-GITHUB_TAG = "v0.9.9"
-EXPECTED_VERSION = "0.9.9"
+GITHUB_TAG = "v0.9.10"
+EXPECTED_VERSION = "0.9.10"
 EXPECTED_GOOGLE_CLIENT_ID = "[Client ID ที่ลงท้ายด้วย .apps.googleusercontent.com]"
 GOOGLE_DESKTOP_OAUTH_JSON = "[Path เต็มของ Desktop OAuth JSON เช่น C:\Users\ชื่อผู้ใช้\Downloads\client_secret_xxx.json]"
 
@@ -60,7 +60,7 @@ GOOGLE_DESKTOP_OAUTH_JSON = "[Path เต็มของ Desktop OAuth JSON เ�
 
 12. ตรวจ GET `{url}api/props/mission_strategy_table/research-sheet/auth` ต้องได้ `clientConfigured=true` สถานะปกติของเครื่องใหม่คือ `connected=false` และ `status=authorization_required` หากเครื่องนี้เคยเชื่อม Client เดิมอย่างถูกต้องแล้วจึงยอมรับ `connected=true/status=connected` ได้ ห้ามอ้างว่า Google เชื่อมแล้วจากการบันทึก JSON เพียงอย่างเดียว
 
-13. อ่าน `%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ\data\runtime\install-result.json` และยืนยันว่า `application_version=EXPECTED_VERSION`, `source.provenance="verified_remote_git_tag"`, `source.repository=GITHUB_REPOSITORY`, `source.tag=GITHUB_TAG`, `source.commit=REMOTE_TAG_COMMIT`, `post_install.complete=true`, `post_install.exit_code=0` และ `post_install.watchdog.status="ready"` ห้ามรายงานว่าสำเร็จหาก Provenance ถูกลดระดับหรือ Post-install ยังเป็น partial จากนั้นตรวจ Scheduled Task ชื่อ `Metafxclub AI Agent HQ Bridge` ว่ามีทั้ง Trigger ตอน Login และ Trigger ตรวจซ้ำ, Action ต้องเป็น `wscript.exe` ที่ผูกกับ Script ในโฟลเดอร์ติดตั้งจริงและ `/Port:4186` แบบตรงตัว, เรียก `scripts/check-codex-readiness.cmd` จากโฟลเดอร์ติดตั้งจริง แล้วเปิด `url` ที่อ่านจาก `bridge-endpoint.json`
+13. อ่าน `%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ\data\runtime\install-result.json` และยืนยันว่า `application_version=EXPECTED_VERSION`, `source.provenance="verified_remote_git_tag"`, `source.repository=GITHUB_REPOSITORY`, `source.tag=GITHUB_TAG`, `source.commit=REMOTE_TAG_COMMIT`, `post_install.complete=true`, `post_install.exit_code=0`, `post_install.watchdog.status="ready"`, `post_install.google_oauth_client.requested=true` และ `post_install.google_oauth_client.status="ready_imported"` ห้ามรายงานว่าสำเร็จหาก Provenance ถูกลดระดับ, OAuth Client ไม่ได้ถูกนำเข้าจากไฟล์ที่ผู้เรียนระบุ หรือ Post-install ยังเป็น partial จากนั้นตรวจ Scheduled Task ชื่อ `Metafxclub AI Agent HQ Bridge` ว่ามีทั้ง Trigger ตอน Login และ Trigger ตรวจซ้ำ, Action ต้องเป็น `wscript.exe` ที่ผูกกับ Script ในโฟลเดอร์ติดตั้งจริงและ `/Port:4186` แบบตรงตัว, เรียก `scripts/check-codex-readiness.cmd` จากโฟลเดอร์ติดตั้งจริง แล้วเปิด `url` ที่อ่านจาก `bridge-endpoint.json`
 
 14. หลังตรวจทุกอย่างผ่าน อนุญาตให้ลบได้เฉพาะ SOURCE_DIR ชั่วคราวที่ Codex สร้างเองเท่านั้น ก่อนลบต้อง Resolve absolute path ใหม่, ยืนยันว่าเป็น Directory จริง, Parent ตรงกับ canonical `%TEMP%` พอดี, ชื่อตรง `^Metafxclub-HQ-Install-[A-Za-z0-9-]+$` และ Directory ไม่มี Attribute `ReparsePoint`; หากข้อใดไม่ตรงให้ไม่ลบ ใช้การล้างแบบ Best-effort หาก Windows ยังล็อกไฟล์ให้แจ้งเป็นคำเตือน แต่ห้าม Rollback Runtime ที่ Health ผ่านแล้ว ห้ามลบ Repository อื่นหรือ OAuth JSON
 

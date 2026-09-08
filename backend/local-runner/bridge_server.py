@@ -18,8 +18,9 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import (
     Decimal,
     InvalidOperation,
@@ -56,12 +57,13 @@ from ohlc_import import (  # noqa: E402 - bounded local-only CSV/XLSX parser
 from radar_image_adapter import (  # noqa: E402 - public HTTPS publisher-image evidence
     CAPTURE_KIND as RADAR_PUBLISHER_IMAGE_KIND,
     SCHEMA_VERSION as RADAR_PUBLISHER_IMAGE_SCHEMA,
+    CaptureOutcome as RadarImageCaptureOutcome,
     capture_publisher_og_image,
     enrich_radar_report_with_publisher_images,
     verify_radar_entry_artifact,
 )
 
-BRIDGE_RUNTIME_VERSION = "0.9.9"
+BRIDGE_RUNTIME_VERSION = "0.9.10"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_STARTED_MONOTONIC = time.monotonic()
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
@@ -335,6 +337,8 @@ CODEX_RATE_LIMIT_OWNER_AGENT_ID = "codex_mcp_operator"
 METATRADER_CACHE_TTL_SECONDS = 45
 METATRADER_TARGET_STORE_FILENAME = "metatrader-targets.json"
 METATRADER_TARGET_STORE_SCHEMA_VERSION = 2
+METATRADER_PERSISTED_RECOVERY_RECENT_LIMIT = 1024
+METATRADER_STALE_CANDIDATE_RETENTION_LIMIT = 1024
 AI_TRADE_COUNCIL_AUTOMATION_STORE_FILENAME = "ai-trade-council-automation.json"
 AI_TRADE_COUNCIL_AUTOMATION_SUPPORTED_TIMEFRAMES = (
     "M5",
@@ -602,6 +606,24 @@ METATRADER_TARGET_PROP_IDS = frozenset({
     "left_analytics_console",
     "terminal_workstation",
 })
+GLOBAL_METATRADER_HUB_SCHEMA_VERSION = "metafx-hq-global-metatrader-hub-v1"
+GLOBAL_METATRADER_SELECTION_TARGETS = {
+    "mt4": (
+        "left_analytics_console",
+        "right_server_racks",
+        "right_tool_console",
+    ),
+    "mt5": (
+        "right_server_racks",
+        "right_tool_console",
+    ),
+}
+# The EA Factory profile still supplies the existing read-only discovery
+# capability/permission contract.  Missions and reports created by the global
+# header control belong to the central Mission table instead of masquerading as
+# an EA Factory action.
+GLOBAL_METATRADER_DISCOVERY_PROFILE_PROP_ID = "right_server_racks"
+GLOBAL_METATRADER_DISCOVERY_PROP_ID = "mission_strategy_table"
 CODEX_RUNNER_PYTHON = PROJECT_ROOT / "runner" / ".venv" / "Scripts" / "python.exe"
 CODEX_RUNNER_SCRIPT = PROJECT_ROOT / "runner" / "codex_cli_runner.py"
 
@@ -2678,6 +2700,10 @@ COLLABORATION_DEFAULT_PARTICIPANTS = (
     "optimization_agent",
     "manager",
 )
+# The former Agent-collaboration control was deliberately replaced by the
+# central MT4/MT5 selector.  A persisted legacy schedule must therefore never
+# keep consuming Codex quota without a visible control surface.
+COLLABORATION_SCHEDULE_SURFACE_AVAILABLE = False
 
 
 def _collaboration_default_store() -> dict:
@@ -2789,6 +2815,30 @@ def ensure_collaboration_schedule_store() -> dict:
         if not COLLABORATION_SCHEDULE_PATH.exists():
             write_json(COLLABORATION_SCHEDULE_PATH, store)
         return store
+
+
+def retire_hidden_collaboration_schedule() -> dict:
+    """Disable a legacy automatic schedule whose UI no longer exists."""
+    with COLLABORATION_SCHEDULE_LOCK:
+        store = load_collaboration_schedule_store()
+        changed = bool(store["config"].get("enabled"))
+        if changed:
+            store["config"]["enabled"] = False
+            store["state"]["lastStatus"] = "disabled"
+            store["state"]["lastReason"] = "schedule_surface_retired"
+            store = _save_collaboration_schedule_store(store)
+    update_collaboration_runtime_state(
+        status="disabled",
+        heartbeatAt=utc_now(),
+        lastError=None,
+    )
+    if changed:
+        append_audit({
+            "type": "collaboration.schedule_retired",
+            "reason": "schedule_surface_retired",
+            "toolsExecuted": False,
+        })
+    return store
 
 
 def _save_collaboration_schedule_store(store: dict) -> dict:
@@ -3013,7 +3063,14 @@ def collaboration_schedule_read_model() -> dict:
     store, _ = _rollover_collaboration_daily_state(store, now_local)
     config = store["config"]
     state = store["state"]
-    _, gate = _collaboration_gate("schedule", refresh_quota=False, now_local=now_local)
+    if COLLABORATION_SCHEDULE_SURFACE_AVAILABLE:
+        _, gate = _collaboration_gate("schedule", refresh_quota=False, now_local=now_local)
+    else:
+        gate = {
+            "allowed": False,
+            "reason": "schedule_surface_retired",
+            "messageTh": "ปิดการประชุม Agent อัตโนมัติแล้ว เพราะแท็บนี้เปลี่ยนเป็นศูนย์เชื่อม MT4/MT5",
+        }
     with COLLABORATION_STATE_LOCK:
         runtime_state = dict(COLLABORATION_STATE)
     runtime_status = str(runtime_state.get("status") or "")
@@ -3059,6 +3116,7 @@ def collaboration_schedule_read_model() -> dict:
             "freshRateLimitRequired": True,
             "fullAccessRequired": True,
             "externalActionsAllowed": False,
+            "scheduledAutomationRetired": not COLLABORATION_SCHEDULE_SURFACE_AVAILABLE,
         },
     }
 
@@ -3084,6 +3142,13 @@ def set_collaboration_schedule(payload: dict) -> dict:
     if "enabled" in payload:
         if not isinstance(payload.get("enabled"), bool):
             return {"ok": False, "kind": "invalid_enabled", "messageTh": "สถานะเปิดใช้งานต้องเป็น true หรือ false", "_httpStatus": 422}
+        if payload.get("enabled") and not COLLABORATION_SCHEDULE_SURFACE_AVAILABLE:
+            return {
+                "ok": False,
+                "kind": "collaboration_schedule_surface_retired",
+                "messageTh": "ไม่เปิดงานประชุม Agent อัตโนมัติ เพราะไม่มีหน้าควบคุมแล้ว; แท็บเดิมถูกเปลี่ยนเป็นศูนย์เชื่อม MT4/MT5",
+                "_httpStatus": 409,
+            }
         validated["enabled"] = payload["enabled"]
     if "topic" in payload:
         if not isinstance(payload.get("topic"), str):
@@ -7370,6 +7435,7 @@ TRADING_SYSTEM_BACKEND_DERIVED_FIELDS = frozenset({
 RADAR_ENTRY_MIN_ITEMS = 1
 RADAR_ENTRY_MAX_ITEMS = 6
 RADAR_DAILY_BATCH_REQUIRED_ITEMS = 6
+RADAR_CHECKED_AT_CLOCK_SKEW_SECONDS = 300
 RADAR_EVIDENCE_OPEN_ERROR = (
     "completed Radar result requires every unique evidence URL individually "
     "opened by Native Web Search"
@@ -7401,16 +7467,22 @@ SCHEDULED_RADAR_COMPLETION_RETRY_FAILURE_CODES = frozenset({
     "timeout",
     "workflow_output_contract_incomplete",
 })
+# A permanent upstream/schema failure must not keep the single Radar daily
+# reservation alive forever.  The initial run is separate from these six
+# automatic retries; the hourly burst limit below still prevents hot loops.
+SCHEDULED_RADAR_COMPLETION_RETRY_MAX_ATTEMPTS = 6
+RADAR_RETRY_MAX_CARRY_FORWARD_DAYS = 1
 RADAR_BATCH_REPORT_COMMIT_SCHEMA = "radar-batch-report-commit-v1"
 RADAR_BATCH_REPORT_MAX_BYTES = 256_000
 RADAR_BATCH_REPORT_COMMIT_PENDING_PHASE = (
     "auto_guarded_radar_batch_report_commit_pending"
 )
 RADAR_BATCH_REPORT_COMMIT_PENDING_STATUS = "report_commit_pending"
-# This is a frequency bound, not a terminal daily-round limit.  A still
-# incomplete round is deferred to the next UTC hour and keeps its original
-# Mission/daily reservation until an exact verified six-item batch exists.
+# This frequency bound works together with the total/age ceilings above.  A
+# still-incomplete round is deferred to the next UTC hour until one of those
+# fail-closed quarantine boundaries is reached.
 RADAR_BATCH_COMPLETION_MAX_ATTEMPTS_PER_BURST = 2
+RADAR_BATCH_COMPLETION_MAX_TOTAL_ATTEMPTS = 6
 RADAR_BATCH_COMPLETION_REPAIR_BLOCK_START = (
     "[BACKEND_RADAR_COMPLETE_VERIFIED_BATCH_REPAIR_V1]"
 )
@@ -7487,6 +7559,59 @@ RADAR_ALLOWED_PLATFORMS = frozenset(RADAR_PLATFORM_VALUES)
 RADAR_ALLOWED_VERIFICATION_STATUSES = frozenset(RADAR_VERIFICATION_STATUS_VALUES)
 RADAR_ALLOWED_AVAILABILITY_STATUSES = frozenset(RADAR_AVAILABILITY_STATUS_VALUES)
 RADAR_ALLOWED_EA_READINESS_STATUSES = frozenset(RADAR_EA_READINESS_STATUS_VALUES)
+RADAR_FREE_SOURCE_POLICY_VERSION = 1
+RADAR_FREE_SOURCE_ROTATION_EPOCH = "2026-01-01"
+RADAR_FREE_SOURCE_ROTATION = (
+    ("tradingfinder", "https://tradingfinder.com/products/indicators/"),
+    ("forex_station", "https://forex-station.com/mt4-indicators-f579496.html"),
+    ("indicator_spot", "https://indicatorspot.com/indicators/"),
+    ("soehoe", "https://soehoe.id/forums/indicators-dan-tools.31/"),
+    ("forexcracked", "https://www.forexcracked.com/forex-indicator/"),
+)
+RADAR_SUPPLEMENTAL_SOURCE_URLS = (
+    "https://github.com/topics/metatrader",
+    "https://www.tradingview.com/scripts/",
+)
+RADAR_MQL5_HOSTS = frozenset({"mql5.com"})
+RADAR_METADATA_ONLY_HOSTS = frozenset({"soehoe.id", "forexcracked.com"})
+RADAR_SCHEDULED_ALLOWED_AVAILABILITY = frozenset({"public", "open_source"})
+RADAR_SCHEDULED_ALLOWED_VERIFICATION = frozenset({"verified", "partially_verified"})
+RADAR_DIRECT_ARTIFACT_SUFFIXES = (
+    ".7z",
+    ".bz2",
+    ".cab",
+    ".dll",
+    ".dmg",
+    ".ex4",
+    ".ex5",
+    ".exe",
+    ".gz",
+    ".iso",
+    ".mq4",
+    ".mq5",
+    ".mqh",
+    ".msi",
+    ".pkg",
+    ".rar",
+    ".set",
+    ".so",
+    ".tar",
+    ".tar.bz2",
+    ".tar.gz",
+    ".tar.xz",
+    ".tbz",
+    ".tbz2",
+    ".tgz",
+    ".txz",
+    ".xz",
+    ".zip",
+)
+RADAR_DIRECT_ARTIFACT_PATH_MARKERS = (
+    "/attachment/",
+    "/attachments/",
+    "/download/",
+    "/downloads/",
+)
 # Keep compatibility deliberately narrow.  These are exact labels observed in
 # a durable, source-backed Radar result.  Unknown prose still fails closed; the
 # Backend only translates aliases whose canonical meaning is unambiguous.
@@ -7506,6 +7631,420 @@ RADAR_AVAILABILITY_STATUS_ALIASES = {
     # A public repository does not by itself prove an open-source licence.
     "public_repository": "public",
 }
+
+
+def _radar_source_hostname(value: object) -> str:
+    try:
+        hostname = str(urlparse(str(value or "")).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
+    return hostname[4:] if hostname.startswith("www.") else hostname
+
+
+def _radar_hostname_matches(value: object, roots: object) -> bool:
+    hostname = _radar_source_hostname(value)
+    candidates = roots if isinstance(roots, (set, frozenset, tuple, list)) else []
+    return bool(
+        hostname
+        and any(
+            hostname == str(root).lower().rstrip(".")
+            or hostname.endswith("." + str(root).lower().rstrip("."))
+            for root in candidates
+            if str(root).strip()
+        )
+    )
+
+
+def _radar_rotation_bangkok_date(value: object = None) -> date:
+    if isinstance(value, datetime):
+        local_now = value
+        if local_now.tzinfo is None:
+            local_now = local_now.replace(tzinfo=timezone(timedelta(hours=7)))
+        else:
+            local_now = local_now.astimezone(timezone(timedelta(hours=7)))
+        return local_now.date()
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            pass
+    return datetime.now(timezone(timedelta(hours=7))).date()
+
+
+def _radar_rotated_free_sources(rotation_date: object = None) -> list[tuple[str, str]]:
+    """Rotate the five free-first source families by Bangkok calendar day."""
+
+    local_date = _radar_rotation_bangkok_date(rotation_date)
+    epoch = date.fromisoformat(RADAR_FREE_SOURCE_ROTATION_EPOCH)
+    offset = (local_date - epoch).days % len(RADAR_FREE_SOURCE_ROTATION)
+    return list(RADAR_FREE_SOURCE_ROTATION[offset:] + RADAR_FREE_SOURCE_ROTATION[:offset])
+
+
+def _radar_free_source_policy_prompt(rotation_date: object = None) -> str:
+    ordered = _radar_rotated_free_sources(rotation_date)
+    primary = ", ".join(
+        f"{index}.{source_id}={url}"
+        for index, (source_id, url) in enumerate(ordered, start=1)
+    )
+    supplemental = ", ".join(RADAR_SUPPLEMENTAL_SOURCE_URLS)
+    return (
+        f"นโยบายแหล่งข้อมูล FREE-FIRST v{RADAR_FREE_SOURCE_POLICY_VERSION}: "
+        f"ลองแหล่งหลักทั้ง 5 ตามลำดับหมุนของวัน Asia/Bangkok ก่อน: {primary}. "
+        f"ถ้ารายการใหม่ไม่พอให้เสริมจาก GitHub/TradingView สาธารณะ ({supplemental}) หรือเว็บ public อื่น. "
+        "MQL5 เป็น fallback สุดท้ายและผลลัพธ์หนึ่งรอบมีได้ไม่เกิน 1 รายการ; รอบตามตารางรับเฉพาะ availability=public/open_source "
+        "และ verificationStatus=verified/partially_verified ห้าม commercial/unknown; ถ้าชื่อ URL บทสรุปหรือข้อจำกัดระบุ "
+        "paid/commercial/premium/subscription/protected/invite-only/license-required ห้ามประกาศเป็น public/open_source. "
+        "Soehoe/ForexCracked อ่านเฉพาะ metadata และกฎบนหน้าสาธารณะ ต้องมี sourceLimitations และห้ามอ้าง eaReadiness=ready; "
+        "ข้าม cracked/unlocked/unlicensed/download-only. GitHub ใช้ open_source ได้เมื่อหน้าแหล่งข้อมูลแสดง licence ชัดเจนเท่านั้น; "
+        "TradingView ข้าม paid/protected/invite-only. sourceUrl ต้องเป็นหน้า landing/article/repository เดียว "
+        "ห้าม URL ต่อกัน ไฟล์ตรง attachment และ download endpoint. "
+    )
+
+
+def _radar_source_url_is_direct_artifact(value: object) -> bool:
+    try:
+        parsed = urlparse(str(value or ""))
+    except ValueError:
+        return True
+    path = unquote(parsed.path or "").lower()
+    artifact_path = path.rstrip("/")
+    query = unquote(parsed.query or "").lower()
+    path_segments = {segment for segment in path.split("/") if segment}
+    endpoint_name = artifact_path.rsplit("/", 1)[-1]
+    endpoint_stem = endpoint_name.split(".", 1)[0].replace("-", "_")
+    try:
+        query_items = parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+            max_num_fields=100,
+        )
+    except ValueError:
+        return True
+    action_values = {
+        str(raw_value or "").strip().lower().replace("-", "_")
+        for raw_key, raw_value in query_items
+        if str(raw_key or "").strip().lower().replace("-", "_")
+        in {"action", "do", "endpoint", "mode", "route", "task"}
+    }
+    query_keys = {
+        str(raw_key or "").strip().lower().replace("-", "_")
+        for raw_key, _raw_value in query_items
+    }
+    query_controls = {
+        (
+            str(raw_key or "").strip().lower().replace("-", "_"),
+            str(raw_value or "").strip().lower().replace("-", "_"),
+        )
+        for raw_key, raw_value in query_items
+    }
+    direct_content_query = any(
+        key in {"raw", "dl"}
+        or (key == "export" and value in {"attachment", "download"})
+        or (key == "response_content_disposition" and "attachment" in value)
+        or (key == "alt" and value == "media")
+        for key, value in query_controls
+    )
+    if (
+        any(marker in path for marker in RADAR_DIRECT_ARTIFACT_PATH_MARKERS)
+        or path_segments.intersection({"attachment", "attachments", "download", "downloads"})
+        or query_keys.intersection({
+            "attachment",
+            "attachments",
+            "download",
+            "downloads",
+            "download_file",
+            "file_download",
+            "get_file",
+            "getfile",
+        })
+        or direct_content_query
+        or endpoint_stem
+        in {
+            "attachment",
+            "attachments",
+            "download",
+            "downloads",
+            "download_file",
+            "file_download",
+            "get_file",
+            "getfile",
+        }
+        or action_values.intersection(
+            {"attachment", "download", "download_file", "file_download", "get_file", "getfile"}
+        )
+        or re.search(r"(?:^|&)(?:download|attachment)=[^&]*", query) is not None
+    ):
+        return True
+    return any(
+        artifact_path.endswith(suffix)
+        or re.search(re.escape(suffix) + r"(?:$|[?&#;/])", query) is not None
+        for suffix in RADAR_DIRECT_ARTIFACT_SUFFIXES
+    )
+
+
+def _radar_entry_has_prohibited_distribution_claim(*values: object) -> bool:
+    text = " ".join(" ".join(str(value or "").split()) for value in values).casefold()
+    text = re.sub(r"[_-]+", " ", text)
+    return any(
+        re.search(pattern, text) is not None
+        for pattern in (
+            r"\b(?:crack(?:ed)?|crak(?:ed)?)\b",
+            r"\b(?:unlocked|unloked)\b",
+            r"\bunlicensed\b",
+            r"\bnulled\b",
+            r"\bdecompil(?:e|ed|er|ing)\b",
+            r"\blicen[cs]e[ -]?bypass\b",
+            r"\bdownload[ -]?only\b",
+        )
+    )
+
+
+def _radar_entry_has_restricted_access_claim(*values: object) -> bool:
+    """Detect an obvious conflict with a Worker-declared free/public result."""
+
+    text = " ".join(" ".join(str(value or "").split()) for value in values).casefold()
+    text = re.sub(r"[_-]+", " ", text)
+    return bool(
+        any(
+            re.search(pattern, text) is not None
+            for pattern in (
+                r"\bpaid\b",
+                r"\bcommercial\b",
+                r"\bpremium\b",
+                r"\bsubscription\b",
+                r"\bpurchase(?:d)?\b",
+                r"\binvite[ -]?only\b",
+                r"\bmembers?[ -]?only\b",
+                r"\b(?:buy|order)\s+(?:now|access|a[ -]?licen[cs]e|"
+                r"licen[cs]e|membership|subscription|the[ -]?full[ -]?version|"
+                r"full[ -]?version|premium[ -]?access|download)\b",
+                r"\b(?:click|tap)\s+(?:here[ -])?(?:to[ -])?(?:buy|order)\b",
+                r"\b(?:must|need(?:s)?|require(?:s|d)?)\s+(?:to[ -])?buy\b",
+                r"\b(?:available|offered)\s+(?:only[ -])?(?:for[ -])?"
+                r"(?:purchase|sale)\b",
+                r"\b(?:password|login|account|member|access|copy|licen[cs]e)"
+                r"[ -]?protected\b",
+                r"\bprotected[ -]?(?:access|area|content|download|file|page|"
+                r"repo(?:sitory)?|script|source)\b",
+                r"\b(?:licen[cs]e|membership|subscription)[ -]?(?:is[ -]?)?required\b",
+                r"\brequires?[ -](?:a[ -])?(?:paid[ -])?(?:licen[cs]e|membership|subscription)\b",
+                r"(?:\$|€|£)\s*\d",
+                r"\b(?:usd|eur|gbp)\s*\d",
+            )
+        )
+        or any(
+            marker in text
+            for marker in (
+                "ต้องเสียเงิน",
+                "มีค่าใช้จ่าย",
+                "ต้องชำระเงิน",
+                "ต้องซื้อ",
+                "สมาชิกเท่านั้น",
+                "เชิญเท่านั้น",
+            )
+        )
+    )
+
+
+def _radar_urls_follow_source_policy(urls: object) -> bool:
+    candidates = urls if isinstance(urls, (list, tuple)) else []
+    if not candidates:
+        return False
+    return bool(
+        all(
+            isinstance(item, str)
+            and item
+            and not _radar_source_url_is_direct_artifact(item)
+            for item in candidates
+        )
+        and sum(
+            _radar_hostname_matches(item, RADAR_MQL5_HOSTS)
+            for item in candidates
+        ) <= 1
+    )
+
+
+RADAR_SOURCE_POLICY_BINDING_SCALAR_FIELDS = (
+    "recordId",
+    "toolName",
+    "toolKind",
+    "platform",
+    "category",
+    "version",
+    "summaryTh",
+    "sourceTitle",
+    "sourceUrl",
+    "publishedAt",
+    "checkedAt",
+    "verificationStatus",
+    "availability",
+    "eaReadiness",
+    "duplicateFingerprint",
+    "duplicateStatus",
+    "duplicateScope",
+)
+
+
+def _radar_source_policy_entries_digest(entries: object) -> str | None:
+    """Bind policy-relevant Report rows while allowing screenshot enrichment."""
+
+    rows = entries if isinstance(entries, list) else []
+    if not rows:
+        return None
+    bound_rows: list[dict] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            return None
+        source_url = _normalized_contract_public_url(item.get("sourceUrl"))
+        missing_rules = item.get("missingRules")
+        source_limitations = item.get("sourceLimitations")
+        if (
+            not source_url
+            or not isinstance(missing_rules, list)
+            or not isinstance(source_limitations, list)
+            or any(not isinstance(value, str) for value in missing_rules)
+            or any(not isinstance(value, str) for value in source_limitations)
+        ):
+            return None
+        bound_row: dict[str, object] = {}
+        for field in RADAR_SOURCE_POLICY_BINDING_SCALAR_FIELDS:
+            value = source_url if field == "sourceUrl" else item.get(field)
+            if field in {"publishedAt", "checkedAt"} and value not in (None, ""):
+                value = _radar_iso_value(value, optional=True) or str(value)
+            if value is not None and not isinstance(value, (str, int, float, bool)):
+                return None
+            bound_row[field] = value
+        bound_row["missingRules"] = list(missing_rules)
+        bound_row["sourceLimitations"] = list(source_limitations)
+        bound_rows.append(bound_row)
+    encoded = json.dumps(
+        bound_rows,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _radar_entry_follows_source_policy(entry: object) -> bool:
+    row = entry if isinstance(entry, dict) else {}
+    source_url = _normalized_contract_public_url(row.get("sourceUrl"))
+    missing_rules = row.get("missingRules")
+    source_limitations = row.get("sourceLimitations")
+    if (
+        not source_url
+        or _radar_source_url_is_direct_artifact(source_url)
+        or not isinstance(missing_rules, list)
+        or not isinstance(source_limitations, list)
+        or any(not isinstance(value, str) for value in missing_rules)
+        or any(not isinstance(value, str) for value in source_limitations)
+    ):
+        return False
+    try:
+        parsed_source_url = urlparse(source_url)
+        source_path_and_query = " ".join(
+            (
+                unquote(parsed_source_url.path or ""),
+                unquote(parsed_source_url.query or ""),
+            )
+        )
+    except ValueError:
+        return False
+    claim_values = (
+        row.get("toolName"),
+        row.get("category"),
+        row.get("version"),
+        row.get("sourceTitle"),
+        row.get("summaryTh"),
+        source_path_and_query,
+        *missing_rules,
+        *source_limitations,
+    )
+    if _radar_entry_has_prohibited_distribution_claim(*claim_values):
+        return False
+    availability = str(row.get("availability") or "").strip().lower()
+    if (
+        availability in RADAR_SCHEDULED_ALLOWED_AVAILABILITY
+        and _radar_entry_has_restricted_access_claim(*claim_values)
+    ):
+        return False
+    if _radar_hostname_matches(source_url, RADAR_METADATA_ONLY_HOSTS) and (
+        availability != "public"
+        or row.get("eaReadiness") == "ready"
+        or not source_limitations
+    ):
+        return False
+    return True
+
+
+def _radar_source_policy_receipt(mission: object, entries: object) -> dict | None:
+    rows = entries if isinstance(entries, list) else []
+    if not rows or any(not isinstance(item, dict) for item in rows):
+        return None
+    mission_row = mission if isinstance(mission, dict) else {}
+    raw_context = (
+        mission_row.get("workflowContext")
+        if isinstance(mission_row.get("workflowContext"), dict)
+        else {}
+    )
+    context = _workflow_context_storage(raw_context) or raw_context
+    reservation = (
+        context.get("executionReservation")
+        if isinstance(context.get("executionReservation"), dict)
+        else {}
+    )
+    rotation_basis: object = reservation.get("bangkokDate")
+    if not rotation_basis:
+        rotation_basis = parse_iso(str(context.get("submittedAt") or ""))
+    rotation_date = _radar_rotation_bangkok_date(rotation_basis).isoformat()
+    ordered = _radar_rotated_free_sources(rotation_date)
+    selected_hosts: list[str] = []
+    for item in rows:
+        hostname = _radar_source_hostname(item.get("sourceUrl"))
+        if hostname and hostname not in selected_hosts:
+            selected_hosts.append(hostname)
+    mql5_count = sum(
+        _radar_hostname_matches(item.get("sourceUrl"), RADAR_MQL5_HOSTS)
+        for item in rows
+    )
+    return {
+        "schemaVersion": "radar-source-policy-receipt-v1",
+        "policyVersion": RADAR_FREE_SOURCE_POLICY_VERSION,
+        "policyRef": "contracts/research/radar-website-source-policy-v1.json",
+        "rotationDate": rotation_date,
+        "orderedPrimarySources": [source_id for source_id, _url in ordered],
+        "selectedHosts": selected_hosts,
+        "primaryEntryCount": sum(
+            any(
+                _radar_hostname_matches(item.get("sourceUrl"), {_radar_source_hostname(url)})
+                for _source_id, url in RADAR_FREE_SOURCE_ROTATION
+            )
+            for item in rows
+        ),
+        "supplementalEntryCount": sum(
+            any(
+                _radar_hostname_matches(item.get("sourceUrl"), {_radar_source_hostname(url)})
+                for url in RADAR_SUPPLEMENTAL_SOURCE_URLS
+            )
+            for item in rows
+        ),
+        "metadataOnlyEntryCount": sum(
+            _radar_hostname_matches(item.get("sourceUrl"), RADAR_METADATA_ONLY_HOSTS)
+            for item in rows
+        ),
+        "mql5EntryCount": mql5_count,
+        "mql5FallbackUsed": bool(mql5_count),
+        "directArtifactCount": sum(
+            _radar_source_url_is_direct_artifact(item.get("sourceUrl"))
+            for item in rows
+        ),
+        "policyEntriesDigestSha256": _radar_source_policy_entries_digest(rows),
+        "attemptOrderVerified": False,
+        "attemptOrderEnforcement": "prompt_bound",
+        "resultGuardsBackendEnforced": True,
+        "sourceClassificationVerifiedByBackend": False,
+        "backendComputed": True,
+    }
 
 
 def _radar_canonical_enum(value: object, aliases: dict[str, str]) -> str:
@@ -7558,6 +8097,12 @@ def _normalized_contract_public_url(value: object) -> str | None:
         or hostname.endswith((".localhost", ".local", ".internal", ".lan"))
         or any(is_sensitive_field_name(key) for key in parse_qs(parsed.query))
     ):
+        return None
+    decoded_path = unquote(parsed.path or "").lower()
+    if "http://" in decoded_path or "https://" in decoded_path:
+        # urlparse otherwise treats a pasted second absolute URL as an
+        # ordinary path on the first host. Query values may legitimately
+        # contain a canonical URL and are not rejected by this path-only rule.
         return None
     try:
         address = ipaddress.ip_address(hostname)
@@ -7751,7 +8296,11 @@ def _radar_evidence_candidate_block(urls: object) -> str | None:
     normalized_urls = [
         _normalized_trading_system_retry_url(item) for item in candidates
     ]
-    if any(not item for item in normalized_urls) or len(set(normalized_urls)) != 6:
+    if (
+        any(not item for item in normalized_urls)
+        or len(set(normalized_urls)) != 6
+        or not _radar_urls_follow_source_policy(normalized_urls)
+    ):
         return None
     lines = [
         RADAR_EVIDENCE_CANDIDATE_BLOCK_START,
@@ -7804,9 +8353,30 @@ def _radar_evidence_urls_from_candidate_block(detail: object) -> list[str] | Non
     urls = [
         _normalized_trading_system_retry_url(url) for _index, url in numbered
     ]
-    if any(not url for url in urls) or len(set(urls)) != 6:
+    if (
+        any(not url for url in urls)
+        or len(set(urls)) != 6
+        or not _radar_urls_follow_source_policy(urls)
+    ):
         return None
     return [str(url) for url in urls]
+
+
+def _radar_detail_without_terminal_candidate_block(detail: object) -> str | None:
+    """Remove exactly one terminal Radar candidate block for fresh repair."""
+
+    text = str(detail or "").rstrip()
+    if (
+        text.count(RADAR_EVIDENCE_CANDIDATE_BLOCK_START) != 1
+        or text.count(RADAR_EVIDENCE_CANDIDATE_BLOCK_END) != 1
+    ):
+        return None
+    terminal_block = re.compile(
+        rf"(?:\r?\n){{0,2}}{re.escape(RADAR_EVIDENCE_CANDIDATE_BLOCK_START)}"
+        rf"[\s\S]*?{re.escape(RADAR_EVIDENCE_CANDIDATE_BLOCK_END)}\s*$"
+    )
+    match = terminal_block.search(text)
+    return text[: match.start()].rstrip() if match else None
 
 
 def _radar_batch_completion_repair_prompt_block() -> str:
@@ -7821,6 +8391,11 @@ def _radar_batch_completion_repair_prompt_block() -> str:
         (
             "Open each of the 6 matching evidence URLs individually with Native "
             "Web Search. Never invent an item, URL, verification, image, or report."
+        ),
+        (
+            "Preserve the original FREE-FIRST source rotation: MQL5 is last "
+            "fallback (maximum 1 of 6), use only free public pages, and never "
+            "use direct downloads, attachments, cracked, or unlicensed files."
         ),
         (
             "If 6 real entries cannot be verified, return truthful invalid output; "
@@ -8043,7 +8618,12 @@ def _radar_batch_completion_repair_state(
         and state.get("kind") == RADAR_BATCH_COMPLETION_REPAIR_KIND
         and isinstance(total_attempts, int)
         and not isinstance(total_attempts, bool)
-        and total_attempts >= 1
+        and 1 <= total_attempts
+        <= RADAR_BATCH_COMPLETION_MAX_TOTAL_ATTEMPTS
+        and state.get("maximumTotalAttempts") in (
+            None,
+            RADAR_BATCH_COMPLETION_MAX_TOTAL_ATTEMPTS,
+        )
         and isinstance(burst_attempts, int)
         and not isinstance(burst_attempts, bool)
         and 1 <= burst_attempts
@@ -8203,7 +8783,12 @@ def _scheduled_radar_completion_retry_state(
         == SCHEDULED_RADAR_COMPLETION_RETRY_SCHEMA
         and isinstance(attempt_count, int)
         and not isinstance(attempt_count, bool)
-        and 1 <= attempt_count <= 9999
+        and 1 <= attempt_count
+        <= SCHEDULED_RADAR_COMPLETION_RETRY_MAX_ATTEMPTS
+        and state.get("maximumAttempts") in (
+            None,
+            SCHEDULED_RADAR_COMPLETION_RETRY_MAX_ATTEMPTS,
+        )
         and state.get("lastFailureCode")
         in SCHEDULED_RADAR_COMPLETION_RETRY_FAILURE_CODES
         and isinstance(state.get("lastFailureSummary"), str)
@@ -8547,7 +9132,7 @@ def _radar_batch_completion_repair_schedule(
     existing_state: object,
     requeued_at: str,
 ) -> dict:
-    """Bound retries to two per UTC hour, then defer instead of terminating."""
+    """Bound retries to two per UTC hour; lifecycle applies the total ceiling."""
 
     previous = existing_state if isinstance(existing_state, dict) else {}
     now = parse_iso(requeued_at) or datetime.now(timezone.utc)
@@ -9512,19 +10097,109 @@ def _bounded_radar_corrective_open_verification_receipt(
     }
 
 
+RADAR_PRODUCT_IDENTITY_UNKNOWN_VERSIONS = frozenset({
+    "",
+    "family",
+    "n a",
+    "na",
+    "none",
+    "not specified",
+    "unknown",
+    "unspecified",
+    "ไม่ทราบ",
+})
+
+
+def _radar_product_identity_text(value: object) -> str:
+    """Normalize human labels without depending on a publisher URL.
+
+    NFKC folds full-width characters while ``isalnum`` preserves non-Latin
+    product names.  Punctuation, trademark marks and spacing are presentation
+    differences and must not let one mirrored product become several "new"
+    Radar discoveries.
+    """
+
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return " ".join(
+        "".join(character if character.isalnum() else " " for character in normalized)
+        .split()
+    )
+
+
+def _radar_product_platform_identity(value: object) -> str:
+    normalized = _radar_product_identity_text(value)
+    compact = normalized.replace(" ", "")
+    return {
+        "metatrader4": "mt4",
+        "mql4": "mt4",
+        "mt4": "mt4",
+        "metatrader5": "mt5",
+        "mql5": "mt5",
+        "mt5": "mt5",
+        "pine": "tradingview",
+        "pinescript": "tradingview",
+        "tradingview": "tradingview",
+        "metatrader45": "multi_platform",
+        "mt4mt5": "multi_platform",
+        "multiplatform": "multi_platform",
+    }.get(compact, normalized)
+
+
+def _radar_product_version_identity(value: object) -> str:
+    normalized = _radar_product_identity_text(value)
+    if normalized in RADAR_PRODUCT_IDENTITY_UNKNOWN_VERSIONS:
+        return "family"
+    normalized = re.sub(
+        r"^(?:(?:version|ver|release|build)\s*|v\s*(?=\d))",
+        "",
+        normalized,
+    ).strip()
+    return normalized or "family"
+
+
+def _radar_product_identity_key(
+    tool_name: object,
+    platform: object,
+    version: object,
+) -> str | None:
+    """Return the URL-independent product/version-family deduplication key."""
+
+    version_identity = _radar_product_version_identity(version)
+    family_identity = _radar_product_identity_text(tool_name)
+    platform_identity = _radar_product_platform_identity(platform)
+    if version_identity != "family":
+        # A publisher may repeat the supplied version in the product title.
+        # Strip that purely presentational suffix before hashing.
+        escaped_version = re.escape(version_identity)
+        family_identity = re.sub(
+            rf"\s+(?:(?:version|ver|release|build|v)\s*)?{escaped_version}$",
+            "",
+            family_identity,
+        ).strip()
+    if not family_identity or not platform_identity:
+        return None
+    basis = "\x1f".join((family_identity, platform_identity, version_identity))
+    return hashlib.sha256(basis.encode("utf-8", errors="replace")).hexdigest()[:24]
+
+
 def _radar_entry_fingerprint(
     source_url: str,
     tool_name: str,
     platform: str,
     version: str,
 ) -> str:
-    basis = "\x1f".join((
-        source_url.rstrip("/").lower(),
-        tool_name.casefold(),
-        platform.casefold(),
-        version.casefold(),
-    ))
-    return hashlib.sha256(basis.encode("utf-8", errors="replace")).hexdigest()[:24]
+    """Return the stable product fingerprint used by Radar deduplication.
+
+    ``source_url`` remains in the signature for compatibility with stored-call
+    sites, but is deliberately excluded from the identity.  Mirror pages are
+    separately tracked by :func:`_radar_source_key` and cannot make one product
+    pass as six unique discoveries.
+    """
+
+    del source_url
+    return _radar_product_identity_key(tool_name, platform, version) or hashlib.sha256(
+        b"radar-product-identity-invalid"
+    ).hexdigest()[:24]
 
 
 RADAR_SOURCE_KEY_IGNORED_QUERY_FIELDS = frozenset({
@@ -9646,6 +10321,46 @@ def _radar_complete_daily_batch_required(mission_row: object) -> bool:
         )
         == RADAR_DAILY_BATCH_REQUIRED_ITEMS
     )
+
+
+def _radar_mission_checked_at_floor(mission_row: object) -> datetime | None:
+    """Return the earliest evidence time accepted for one Radar mission."""
+
+    row = mission_row if isinstance(mission_row, dict) else {}
+    execution = row.get("execution") if isinstance(row.get("execution"), dict) else {}
+    raw_context = (
+        row.get("workflowContext")
+        if isinstance(row.get("workflowContext"), dict)
+        else {}
+    )
+    context = _workflow_context_storage(raw_context) or raw_context
+    mission_started_at = parse_iso(str(
+        row.get("startedAt")
+        or execution.get("startedAt")
+        or context.get("submittedAt")
+        or ""
+    ))
+    if mission_started_at is None:
+        return None
+    return mission_started_at.astimezone(timezone.utc) - timedelta(
+        seconds=RADAR_CHECKED_AT_CLOCK_SKEW_SECONDS
+    )
+
+
+def _radar_checked_at_is_fresh_for_mission(
+    mission_row: object,
+    checked_at: object,
+) -> bool:
+    floor = _radar_mission_checked_at_floor(mission_row)
+    observed = parse_iso(str(checked_at or ""))
+    return bool(
+        floor is not None
+        and observed is not None
+        and floor <= observed.astimezone(timezone.utc)
+        <= datetime.now(timezone.utc) + timedelta(minutes=5)
+    )
+
+
 def _radar_existing_catalog_fingerprints() -> set[str]:
     fingerprints: set[str] = set()
     if RESEARCH_SHEET_AUTO_SYNC_ENABLED:
@@ -9653,6 +10368,15 @@ def _radar_existing_catalog_fingerprints() -> set[str]:
             fingerprint = str(row.get("duplicate_fingerprint") or "").strip().lower()
             if re.fullmatch(r"[0-9a-f]{24}", fingerprint):
                 fingerprints.add(fingerprint)
+            product_fingerprint = _radar_product_identity_key(
+                row.get("tool_name") or row.get("toolName") or row.get("name"),
+                row.get("platform"),
+                row.get("version"),
+            )
+            if product_fingerprint:
+                # Sheet rows written before the URL-independent fingerprint
+                # migration remain valid historical product evidence.
+                fingerprints.add(product_fingerprint)
     for report in load_runtime_reports(limit=2000):
         if (
             not isinstance(report, dict)
@@ -9698,6 +10422,13 @@ def _radar_existing_catalog_identities(
             fingerprint = str(row.get("duplicate_fingerprint") or "").strip().lower()
             if re.fullmatch(r"[0-9a-f]{24}", fingerprint):
                 fingerprints.add(fingerprint)
+            product_fingerprint = _radar_product_identity_key(
+                row.get("tool_name") or row.get("toolName") or row.get("name"),
+                row.get("platform"),
+                row.get("version"),
+            )
+            if product_fingerprint:
+                fingerprints.add(product_fingerprint)
             source_key = _radar_source_key(
                 row.get("normalized_source_url")
                 or row.get("primary_source_url")
@@ -9814,6 +10545,13 @@ def _normalize_radar_contract_entries(
         return None, ["entries_not_array"], []
     max_items = _radar_contract_max_items(mission_row)
     complete_daily_batch = _radar_complete_daily_batch_required(mission_row)
+    checked_at_floor = (
+        _radar_mission_checked_at_floor(mission_row)
+        if complete_daily_batch
+        else None
+    )
+    if complete_daily_batch and checked_at_floor is None:
+        return None, ["daily_batch_mission_time_invalid"], []
     if complete_daily_batch and len(value) != RADAR_DAILY_BATCH_REQUIRED_ITEMS:
         return None, ["daily_batch_requires_exactly_6_entries"], []
     if not RADAR_ENTRY_MIN_ITEMS <= len(value) <= max_items:
@@ -9931,6 +10669,18 @@ def _normalize_radar_contract_entries(
         ):
             errors.append(f"{prefix}_source_evidence_mismatch")
             continue
+        if _radar_source_url_is_direct_artifact(source_url):
+            errors.append(f"{prefix}_direct_artifact_source_rejected")
+            continue
+        if _radar_entry_has_prohibited_distribution_claim(
+            tool_name,
+            category,
+            version,
+            source_title,
+            summary_th,
+        ):
+            errors.append(f"{prefix}_prohibited_distribution_claim")
+            continue
         checked_at = _radar_iso_value(raw_entry.get("checkedAt"))
         published_at = _radar_iso_value(raw_entry.get("publishedAt"), optional=True)
         raw_published_at = raw_entry.get("publishedAt")
@@ -9954,6 +10704,12 @@ def _normalize_radar_contract_entries(
         ):
             errors.append(f"{prefix}_invalid_timestamp")
             continue
+        if (
+            complete_daily_batch
+            and parsed_checked_at.astimezone(timezone.utc) < checked_at_floor
+        ):
+            errors.append(f"{prefix}_checked_at_stale")
+            continue
         missing_rules = _radar_text_list(
             raw_entry.get("missingRules"),
             item_limit=RADAR_MISSING_RULE_MAX_ITEMS,
@@ -9968,15 +10724,57 @@ def _normalize_radar_contract_entries(
         if missing_rules is None or source_limitations is None or screenshot is None:
             errors.append(f"{prefix}_invalid_structured_field")
             continue
+        try:
+            parsed_source_url = urlparse(source_url)
+            source_path_and_query = " ".join(
+                (
+                    unquote(parsed_source_url.path or ""),
+                    unquote(parsed_source_url.query or ""),
+                )
+            )
+        except ValueError:
+            source_path_and_query = ""
+        if _radar_entry_has_prohibited_distribution_claim(
+            source_path_and_query,
+            *missing_rules,
+            *source_limitations,
+        ):
+            errors.append(f"{prefix}_prohibited_distribution_claim")
+            continue
+        if (
+            availability in RADAR_SCHEDULED_ALLOWED_AVAILABILITY
+            and _radar_entry_has_restricted_access_claim(
+                tool_name,
+                category,
+                version,
+                source_title,
+                summary_th,
+                source_path_and_query,
+                *missing_rules,
+                *source_limitations,
+            )
+        ):
+            errors.append(f"{prefix}_restricted_access_claim")
+            continue
+        if _radar_hostname_matches(source_url, RADAR_METADATA_ONLY_HOSTS) and (
+            availability != "public"
+            or ea_readiness == "ready"
+            or not source_limitations
+        ):
+            errors.append(f"{prefix}_metadata_only_source_claim_invalid")
         fingerprint = _radar_entry_fingerprint(source_url, tool_name, platform, version)
         source_key = _radar_source_key(source_url) if complete_daily_batch else None
+        historical_product_duplicate = fingerprint in existing_fingerprints
+        historical_source_duplicate = bool(
+            source_key and source_key in existing_source_keys
+        )
+        current_product_duplicate = fingerprint in batch_fingerprints
+        current_source_duplicate = bool(source_key and source_key in batch_source_keys)
         historical_duplicate = bool(
-            fingerprint in existing_fingerprints
-            or (source_key and source_key in existing_source_keys)
+            historical_product_duplicate or historical_source_duplicate
         )
         current_batch_duplicate = bool(
-            fingerprint in batch_fingerprints
-            or (source_key and source_key in batch_source_keys)
+            current_product_duplicate or current_source_duplicate
         )
         duplicate_scope = (
             "local_report_catalog"
@@ -9993,9 +10791,13 @@ def _normalize_radar_contract_entries(
         if complete_daily_batch:
             if not source_key:
                 errors.append(f"{prefix}_source_identity_invalid")
-            elif historical_duplicate:
+            elif historical_product_duplicate:
+                errors.append(f"{prefix}_historical_product_duplicate")
+            elif historical_source_duplicate:
                 errors.append(f"{prefix}_historical_source_duplicate")
-            elif current_batch_duplicate:
+            elif current_product_duplicate:
+                errors.append(f"{prefix}_duplicate_product_in_batch")
+            elif current_source_duplicate:
                 errors.append(f"{prefix}_duplicate_source_in_batch")
         batch_fingerprints.add(fingerprint)
         if source_key:
@@ -10024,7 +10826,23 @@ def _normalize_radar_contract_entries(
         })
     if errors or len(normalized_entries) != len(value):
         return None, errors or ["entries_invalid"], enum_normalizations
+    mql5_entries = sum(
+        _radar_hostname_matches(item.get("sourceUrl"), RADAR_MQL5_HOSTS)
+        for item in normalized_entries
+    )
+    if mql5_entries > 1:
+        return None, ["mql5_fallback_limit_exceeded"], enum_normalizations
     if complete_daily_batch:
+        if any(
+            item.get("availability") not in RADAR_SCHEDULED_ALLOWED_AVAILABILITY
+            for item in normalized_entries
+        ):
+            return None, ["daily_batch_requires_free_public_entries"], enum_normalizations
+        if any(
+            item.get("verificationStatus") not in RADAR_SCHEDULED_ALLOWED_VERIFICATION
+            for item in normalized_entries
+        ):
+            return None, ["daily_batch_requires_verified_public_entries"], enum_normalizations
         entry_urls = {
             str(item.get("sourceUrl") or "") for item in normalized_entries
         }
@@ -11542,6 +12360,7 @@ def validate_dashboard_workflow_output_contract(mission: object, result: object)
     evidence_rows = _unique_public_evidence_rows(result_row.get("evidence"))
     entry_errors: list[str] = []
     enum_normalizations: list[dict] = []
+    radar_source_policy = None
     if procedure.get("pluginSkillId") == RADAR_WORKFLOW_PROCEDURE_ID:
         normalized_entries, entry_errors, enum_normalizations = _normalize_radar_contract_entries(
             mission_row,
@@ -11552,6 +12371,10 @@ def validate_dashboard_workflow_output_contract(mission: object, result: object)
         if normalized_entries is None:
             provided_fields.pop("entries", None)
         else:
+            radar_source_policy = _radar_source_policy_receipt(
+                mission_row,
+                normalized_entries,
+            )
             normalized_entries_json = json.dumps(
                 normalized_entries,
                 ensure_ascii=False,
@@ -11674,6 +12497,7 @@ def validate_dashboard_workflow_output_contract(mission: object, result: object)
         "missingEvidenceKinds": missing_evidence,
         "entryErrors": entry_errors,
         "enumNormalizations": enum_normalizations,
+        "radarSourcePolicy": radar_source_policy,
         "oversizedFields": oversized_fields,
         "contractValueChars": contract_value_chars,
         "contractValueLimitChars": aggregate_contract_limit,
@@ -11968,6 +12792,12 @@ def _run_radar_publisher_image_enrichment(report_id: str) -> None:
         ]
 
         def capture_entry(entry: dict):
+            if _radar_hostname_matches(entry.get("sourceUrl"), RADAR_METADATA_ONLY_HOSTS):
+                return RadarImageCaptureOutcome(
+                    ok=False,
+                    reason_code="source_policy_metadata_only",
+                    descriptor=None,
+                )
             return capture_publisher_og_image(
                 entry.get("sourceUrl"),
                 checked_at=entry.get("checkedAt"),
@@ -15852,6 +16682,60 @@ def activate_research_sheet_hub(payload: object) -> dict:
         return _activate_research_sheet_hub_locked(payload)
 
 
+def _finalize_research_sheet_activation_locked(config_revision: int) -> dict:
+    """Finish idempotent post-commit work for one active Sheet revision.
+
+    The durable settings mutation is the activation transaction boundary.  A
+    process or disk failure can happen immediately after that commit, so every
+    same-key replay must be able to resume these independently idempotent steps
+    without needing the already-consumed verification capability.
+    """
+
+    current = _research_sheet_hub_internal(
+        _load_dashboard_workflow_settings_read_only()
+    )
+    revision = clamp_int(config_revision, -1, -1, 999999)
+    if not (
+        revision >= 1
+        and clamp_int(current.get("configRevision"), -2, -2, 999999) == revision
+        and current.get("active") is True
+        and clamp_int(current.get("activeConfigRevision"), -2, -2, 999999)
+        == revision
+    ):
+        raise DataIntegrityError(
+            "Google Sheet activation finalization no longer matches the active revision."
+        )
+
+    removed = _research_sheet_reset_outbox_for_revision(revision)
+    requeue = _research_sheet_requeue_failed_current_revision(
+        reason="activation_verified",
+    )
+    model = research_sheet_hub_read_model()
+    ready_consumer_ids = {
+        str(consumer.get("consumerId") or "")
+        for consumer in (model.get("consumers") or [])
+        if isinstance(consumer, dict) and consumer.get("readReady") is True
+    }
+    backfill = (
+        _research_sheet_backfill_recent_reports(ready_consumer_ids)
+        if ready_consumer_ids
+        else {
+            "queued": 0,
+            "flush": {
+                "processed": 0,
+                "synced": 0,
+                "reason": "no_ready_consumer",
+            },
+        }
+    )
+    return {
+        "removedPriorConfigOutboxItems": removed,
+        "requeue": requeue,
+        "backfill": backfill,
+        "researchSheet": research_sheet_hub_read_model(),
+    }
+
+
 def _activate_research_sheet_hub_locked(payload: object) -> dict:
     request = payload if isinstance(payload, dict) else {}
     allowed = {
@@ -15894,7 +16778,10 @@ def _activate_research_sheet_hub_locked(payload: object) -> dict:
                 "Idempotency key was already used for another Sheet activation.",
                 409,
             )
-        model = research_sheet_hub_read_model()
+        finalization = _finalize_research_sheet_activation_locked(
+            clamp_int(current.get("configRevision"), -1, -1, 999999)
+        )
+        model = finalization["researchSheet"]
         return {
             "ok": True,
             "kind": "research_sheet_hub_activation_replayed",
@@ -15906,6 +16793,8 @@ def _activate_research_sheet_hub_locked(payload: object) -> dict:
                 "activationConfirmedAt": model.get("activationConfirmedAt"),
             },
             "researchSheet": model,
+            "backfill": finalization["backfill"],
+            "requeue": finalization["requeue"],
         }
     with RESEARCH_SHEET_PREVIEW_LOCK:
         _research_sheet_prune_previews_unlocked()
@@ -16065,11 +16954,8 @@ def _activate_research_sheet_hub_locked(payload: object) -> dict:
         with RESEARCH_SHEET_CACHE_LOCK:
             write_json(RESEARCH_SHEET_CACHE_PATH, previous_cache)
         raise RequestError("Google Sheet configuration changed; inspect again.", 409)
-    removed = (
-        _research_sheet_reset_outbox_for_revision(proposed_revision)
-        if configuration_changed
-        else 0
-    )
+    finalization = _finalize_research_sheet_activation_locked(proposed_revision)
+    removed = finalization["removedPriorConfigOutboxItems"]
     append_audit({
         "type": "research_sheet_hub.activated",
         "propId": MISSION_STRATEGY_TABLE_PROP_ID,
@@ -16080,21 +16966,9 @@ def _activate_research_sheet_hub_locked(payload: object) -> dict:
         "credentialsIncluded": False,
         "verificationTokenIncluded": False,
     })
-    requeue = _research_sheet_requeue_failed_current_revision(
-        reason="activation_verified",
-    )
-    model = research_sheet_hub_read_model(settings)
-    ready_consumer_ids = {
-        str(consumer.get("consumerId") or "")
-        for consumer in (model.get("consumers") or [])
-        if isinstance(consumer, dict) and consumer.get("readReady") is True
-    }
-    backfill = (
-        _research_sheet_backfill_recent_reports(ready_consumer_ids)
-        if ready_consumer_ids
-        else {"queued": 0, "flush": {"processed": 0, "synced": 0, "reason": "no_ready_consumer"}}
-    )
-    model = research_sheet_hub_read_model()
+    requeue = finalization["requeue"]
+    backfill = finalization["backfill"]
+    model = finalization["researchSheet"]
     return {
         "ok": True,
         "kind": "research_sheet_hub_activated",
@@ -23624,8 +24498,9 @@ def _ea_factory_terminal_gate(platform: str) -> dict:
             "adapterReady": False,
             "reasonCode": None,
         }
-    record = _selected_metatrader_candidate_record("right_server_racks")
-    token = _metatrader_selection_token("right_server_racks")
+    context = _selected_metatrader_candidate_context("right_server_racks")
+    record = context.get("record") if isinstance(context, dict) else None
+    token = context.get("token") if isinstance(context, dict) else None
     if not isinstance(record, dict) or not isinstance(token, dict):
         return {
             "required": True,
@@ -26366,9 +27241,85 @@ def _radar_verified_ready_batch(report: object, entries: object) -> bool:
 
     if not _radar_contract_ready_batch(report, entries):
         return False
-    if not _radar_complete_daily_batch_required(report):
-        return True
+    complete_daily_batch = _radar_complete_daily_batch_required(report)
     rows = entries if isinstance(entries, list) else []
+    report_row = report if isinstance(report, dict) else {}
+    metrics = (
+        report_row.get("metrics")
+        if isinstance(report_row.get("metrics"), dict)
+        else {}
+    )
+    workflow_output = (
+        metrics.get("workflowOutput")
+        if isinstance(metrics.get("workflowOutput"), dict)
+        else {}
+    )
+    workflow_values = (
+        workflow_output.get("values")
+        if isinstance(workflow_output.get("values"), dict)
+        else {}
+    )
+    contract_entries = _contract_decoded_value(workflow_values.get("entries", ""))
+    stored_policy_receipt = workflow_output.get("radarSourcePolicy")
+    product_fingerprints = [
+        product_fingerprint
+        for entry in rows
+        if isinstance(entry, dict)
+        and (
+            product_fingerprint := _radar_product_identity_key(
+                entry.get("toolName") or entry.get("name"),
+                entry.get("platform"),
+                entry.get("version"),
+            )
+        )
+    ]
+    if (
+        not rows
+        or len(product_fingerprints) != len(rows)
+        or any(
+            str(entry.get("duplicateFingerprint") or "").strip().lower()
+            != product_fingerprint
+            for entry, product_fingerprint in zip(rows, product_fingerprints)
+        )
+        or sum(
+            _radar_hostname_matches(entry.get("sourceUrl"), RADAR_MQL5_HOSTS)
+            for entry in rows
+            if isinstance(entry, dict)
+        )
+        > 1
+        or not all(_radar_entry_follows_source_policy(entry) for entry in rows)
+    ):
+        return False
+    # Historical/manual read models may predate the source-policy receipt.
+    # They remain visible when their rows are semantically safe, but the Sheet
+    # projection separately requires a valid Backend daily reservation.
+    if not complete_daily_batch and not isinstance(stored_policy_receipt, dict):
+        return True
+    expected_policy_receipt = _radar_source_policy_receipt(report_row, rows)
+    report_policy_digest = _radar_source_policy_entries_digest(rows)
+    contract_policy_digest = _radar_source_policy_entries_digest(contract_entries)
+    if not (
+        isinstance(stored_policy_receipt, dict)
+        and stored_policy_receipt == expected_policy_receipt
+        and stored_policy_receipt.get("schemaVersion")
+        == "radar-source-policy-receipt-v1"
+        and stored_policy_receipt.get("backendComputed") is True
+        and stored_policy_receipt.get("resultGuardsBackendEnforced") is True
+        and stored_policy_receipt.get("sourceClassificationVerifiedByBackend")
+        is False
+        and stored_policy_receipt.get("directArtifactCount") == 0
+        and re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(stored_policy_receipt.get("policyEntriesDigestSha256") or ""),
+        )
+        is not None
+        and report_policy_digest
+        == stored_policy_receipt.get("policyEntriesDigestSha256")
+        and contract_policy_digest == report_policy_digest
+    ):
+        return False
+    if not complete_daily_batch:
+        return True
     source_keys = [
         source_key
         for entry in rows
@@ -26378,13 +27329,61 @@ def _radar_verified_ready_batch(report: object, entries: object) -> bool:
     return bool(
         len(source_keys) == RADAR_DAILY_BATCH_REQUIRED_ITEMS
         and len(set(source_keys)) == RADAR_DAILY_BATCH_REQUIRED_ITEMS
+        and len(product_fingerprints) == RADAR_DAILY_BATCH_REQUIRED_ITEMS
+        and len(set(product_fingerprints)) == RADAR_DAILY_BATCH_REQUIRED_ITEMS
+        and sum(
+            _radar_hostname_matches(entry.get("sourceUrl"), RADAR_MQL5_HOSTS)
+            for entry in rows
+            if isinstance(entry, dict)
+        ) <= 1
         and all(
             isinstance(entry, dict)
             and entry.get("duplicateStatus") == "unique"
             and entry.get("duplicateScope") == "none"
+            and entry.get("availability") in RADAR_SCHEDULED_ALLOWED_AVAILABILITY
+            and entry.get("verificationStatus") in RADAR_SCHEDULED_ALLOWED_VERIFICATION
+            and _radar_checked_at_is_fresh_for_mission(
+                report_row,
+                entry.get("checkedAt"),
+            )
+            and _radar_entry_follows_source_policy(entry)
             for entry in rows
         )
     )
+
+
+def _radar_batch_is_new_against_catalog(report: object, entries: object) -> bool:
+    """Fail closed before Sheet projection when history cannot prove novelty."""
+
+    report_row = report if isinstance(report, dict) else {}
+    rows = entries if isinstance(entries, list) else []
+    try:
+        existing_fingerprints, existing_source_keys = (
+            _radar_existing_catalog_identities(
+                exclude_mission_id=(
+                    report_row.get("linkedMissionId") or report_row.get("id")
+                ),
+            )
+        )
+    except Exception:
+        return False
+    for entry in rows:
+        if not isinstance(entry, dict):
+            return False
+        product_fingerprint = _radar_product_identity_key(
+            entry.get("toolName") or entry.get("name"),
+            entry.get("platform"),
+            entry.get("version"),
+        )
+        source_key = _radar_source_key(entry.get("sourceUrl"))
+        if (
+            not product_fingerprint
+            or not source_key
+            or product_fingerprint in existing_fingerprints
+            or source_key in existing_source_keys
+        ):
+            return False
+    return True
 
 
 def _research_sheet_cell(value: object) -> str:
@@ -26778,10 +27777,14 @@ def _research_sheet_radar_rows(report: dict) -> list[dict]:
     if not (
         report.get("type") == "indicator_scout_report"
         and safe_reference(report.get("linkedPropId")) == "left_audit_crystals"
+        and _radar_complete_daily_batch_required(report)
     ):
         return []
     entries = _radar_report_entries(report)
-    if not _radar_verified_ready_batch(report, entries):
+    if not (
+        _radar_verified_ready_batch(report, entries)
+        and _radar_batch_is_new_against_catalog(report, entries)
+    ):
         return []
     report_id = safe_reference(report.get("id"))
     mission_id = safe_reference(report.get("linkedMissionId"))
@@ -27007,6 +28010,33 @@ def _research_sheet_queue_report(
     config_revision = int(internal.get("configRevision") or 0)
     with RESEARCH_SHEET_OUTBOX_LOCK:
         store = _load_research_sheet_outbox_unlocked()
+        # A crash immediately after an activation settings commit can leave
+        # durable work from the previous Sheet revision behind.  Stale rows
+        # are never deliverable to the active Sheet and therefore must not
+        # consume its bounded delivery/deferred capacity.  Keep this invariant
+        # at the enqueue boundary as well as in activation finalization so the
+        # system self-heals even if the operator never replays the request.
+        for collection_name in (
+            "items",
+            "syncedLedger",
+            "failedLedger",
+            "deferredReports",
+        ):
+            collection = store.get(collection_name)
+            if not isinstance(collection, list):
+                continue
+            store[collection_name] = [
+                entry
+                for entry in collection
+                if isinstance(entry, dict)
+                and clamp_int(
+                    entry.get("configRevision"),
+                    -1,
+                    -1,
+                    999999,
+                )
+                == config_revision
+            ]
         stored_items = list(store.get("items") or [])
         if len(stored_items) + len(items) > RESEARCH_SHEET_OUTBOX_LIMIT:
             stored_items = [
@@ -27671,6 +28701,16 @@ def _radar_website_tool_read_model(
         fingerprint = str(row.get("duplicate_fingerprint") or "").strip().lower()
         if re.fullmatch(r"[0-9a-f]{24}", fingerprint):
             sheet_fingerprint_reports.setdefault(fingerprint, set()).update(report_ids)
+        product_fingerprint = _radar_product_identity_key(
+            row.get("tool_name") or row.get("toolName") or row.get("name"),
+            row.get("platform"),
+            row.get("version"),
+        )
+        if product_fingerprint:
+            sheet_fingerprint_reports.setdefault(
+                product_fingerprint,
+                set(),
+            ).update(report_ids)
         source_key = _radar_source_key(
             row.get("normalized_source_url")
             or row.get("primary_source_url")
@@ -28037,7 +29077,8 @@ def _radar_website_tool_read_model(
             "localCatalogCompared": True,
             "googleSheetCompared": sheet_model.get("connected") is True,
             "googleSheetFingerprintCount": len(sheet_fingerprint_reports),
-            "fingerprintFields": ["normalizedSourceUrl", "name", "platform", "version"],
+            "fingerprintFields": ["normalizedToolName", "platform", "versionFamily"],
+            "sourceIdentityField": "normalizedSourceUrl",
         },
         "googleSheet": sheet_model,
         "serviceHealth": service_health,
@@ -28849,6 +29890,8 @@ def _workflow_prompt(
     form: dict,
     source: dict | None,
     plugin_profile: dict | None = None,
+    *,
+    radar_rotation_date: object = None,
 ) -> str:
     source_context = ""
     if source:
@@ -29072,7 +30115,8 @@ def _workflow_prompt(
             "ห้ามอ้างผลกำไรหรือ Drawdown ที่ยังไม่ได้ทดสอบจริง."
         ),
         "discover_new_indicators": (
-            "ทำงานเป็น Radar Website Tool: ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะแบบอ่านอย่างเดียวด้วย Web Search จริง "
+            _radar_free_source_policy_prompt(radar_rotation_date)
+            + "ทำงานเป็น Radar Website Tool: ค้นหา Indicator, EA และ Tool ใหม่จากเว็บไซต์สาธารณะแบบอ่านอย่างเดียวด้วย Web Search จริง "
             "โดยใช้หลักการคัดกรองแหล่งข้อมูลและตรวจรายการซ้ำของ metafx-online-system-scout. "
             "contractFields ต้องมีเพียงหนึ่งรายการชื่อ entries และ value ต้องเป็น JSON array จำนวน 1 ถึง maxItems รายการ; "
             "แต่ละรายการต้องมีเฉพาะ toolName, toolKind, platform, category, version, summaryTh, sourceTitle, sourceUrl, "
@@ -30186,7 +31230,6 @@ def run_dashboard_workflow_action(
                 lineage,
                 raw_idempotency_key,
             )
-        prompt = _workflow_prompt(action_id, form, source, plugin_profile)
         existing = find_mission_by_idempotency(raw_idempotency_key) if raw_idempotency_key else None
         radar_reservation = None
         if (
@@ -30242,6 +31285,21 @@ def run_dashboard_workflow_action(
             )
             if existing_reservation is not None:
                 lineage["executionReservation"] = existing_reservation
+        radar_rotation_date = None
+        if prop_id == "left_audit_crystals" and action_id == "discover_new_indicators":
+            execution_reservation = (
+                lineage.get("executionReservation")
+                if isinstance(lineage.get("executionReservation"), dict)
+                else {}
+            )
+            radar_rotation_date = execution_reservation.get("bangkokDate")
+        prompt = _workflow_prompt(
+            action_id,
+            form,
+            source,
+            plugin_profile,
+            radar_rotation_date=radar_rotation_date,
+        )
         stage = "bridge_dispatch"
         existing_context = (
             _workflow_context_storage(existing.get("workflowContext"))
@@ -31713,7 +32771,18 @@ def dashboard_workflow_scheduler_loop() -> None:
             "type": "dashboard.workflow_scheduler_started",
             "timezone": "Asia/Bangkok",
             "pollSeconds": DASHBOARD_WORKFLOW_SCHEDULER_POLL_SECONDS,
-            "externalWrites": False,
+            # This worker may flush the durable outbox to the one active,
+            # operator-confirmed Google Sheet.  Declare that capability
+            # honestly even when no row happens to be due during this run.
+            "externalWrites": bool(RESEARCH_SHEET_AUTO_SYNC_ENABLED),
+            "externalWriteScopes": (
+                ["google_sheets"] if RESEARCH_SHEET_AUTO_SYNC_ENABLED else []
+            ),
+            "googleSheetExternalWritesEnabled": bool(
+                RESEARCH_SHEET_AUTO_SYNC_ENABLED
+            ),
+            "googleSheetExternalWritesRequireActiveConfiguration": True,
+            "otherExternalWrites": False,
             "metaTraderActions": False,
         })
     except Exception as error:
@@ -31800,7 +32869,15 @@ def dashboard_workflow_scheduler_loop() -> None:
     try:
         append_audit({
             "type": "dashboard.workflow_scheduler_stopped",
-            "externalWrites": False,
+            "externalWrites": bool(RESEARCH_SHEET_AUTO_SYNC_ENABLED),
+            "externalWriteScopes": (
+                ["google_sheets"] if RESEARCH_SHEET_AUTO_SYNC_ENABLED else []
+            ),
+            "googleSheetExternalWritesEnabled": bool(
+                RESEARCH_SHEET_AUTO_SYNC_ENABLED
+            ),
+            "googleSheetExternalWritesRequireActiveConfiguration": True,
+            "otherExternalWrites": False,
             "metaTraderActions": False,
         })
     except Exception:
@@ -35700,8 +36777,16 @@ def peek_codex_rate_limits() -> dict:
 
 
 def _bounded_children(path: Path, limit: int = 256) -> list[Path]:
+    bounded_limit = max(0, int(limit))
+    if bounded_limit == 0:
+        return []
     try:
-        return [item for index, item in enumerate(path.iterdir()) if index < limit]
+        items = []
+        for item in path.iterdir():
+            items.append(item)
+            if len(items) >= bounded_limit:
+                break
+        return items
     except (OSError, PermissionError):
         return []
 
@@ -35761,6 +36846,48 @@ def _metatrader_identity_key(platform: str, local_path: str) -> str:
     """Backend-only lookup key; the public candidate id is independently random."""
     source = f"{platform}\0{os.path.normcase(local_path)}"
     return hashlib.sha256(source.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _metatrader_candidate_recency_key(
+    candidate_id: str,
+    record: dict,
+) -> tuple[float, float, str]:
+    """Sort persisted candidates by trusted Backend timestamps, newest first."""
+    timestamps = []
+    for field in ("lastSeenAt", "firstSeenAt"):
+        parsed = parse_iso(str(record.get(field) or ""))
+        timestamps.append(parsed.timestamp() if parsed else 0.0)
+    return (timestamps[0], timestamps[1], candidate_id)
+
+
+def _prune_stale_metatrader_candidates_unlocked(store: dict) -> None:
+    """Bound stale discovery history without ever removing an active binding."""
+    candidates = store.get("candidates")
+    selections = store.get("selections")
+    if not isinstance(candidates, dict) or not isinstance(selections, dict):
+        return
+    selected_candidate_ids = {
+        candidate_id
+        for selection in selections.values()
+        if isinstance(selection, dict)
+        for candidate_id in [safe_reference(selection.get("candidateId"))]
+        if candidate_id
+    }
+    stale_unselected = [
+        (str(candidate_id), record)
+        for candidate_id, record in candidates.items()
+        if isinstance(record, dict)
+        and candidate_id not in selected_candidate_ids
+        and not bool(record.get("available", False))
+    ]
+    stale_unselected.sort(
+        key=lambda item: _metatrader_candidate_recency_key(item[0], item[1]),
+        reverse=True,
+    )
+    for candidate_id, _record in stale_unselected[
+        METATRADER_STALE_CANDIDATE_RETENTION_LIMIT:
+    ]:
+        candidates.pop(candidate_id, None)
 
 
 def _new_metatrader_candidate_id() -> str:
@@ -35944,6 +37071,20 @@ def _sync_metatrader_candidate_registry(discovered: list[dict], running: dict) -
     with METATRADER_TARGETS_LOCK:
         store = _load_metatrader_target_store_unlocked()
         candidates = store["candidates"]
+        selected_candidate_ids = {
+            candidate_id
+            for selection in store["selections"].values()
+            if isinstance(selection, dict)
+            for candidate_id in [safe_reference(selection.get("candidateId"))]
+            if candidate_id
+        }
+        selected_identity_keys = {
+            str(record.get("identityKey") or "")
+            for candidate_id, record in candidates.items()
+            if candidate_id in selected_candidate_ids
+            and isinstance(record, dict)
+            and str(record.get("identityKey") or "")
+        }
         for record in candidates.values():
             if isinstance(record, dict):
                 record["available"] = False
@@ -35968,9 +37109,18 @@ def _sync_metatrader_candidate_registry(discovered: list[dict], running: dict) -
         seen_identity_keys: set[str] = set()
         ordered = sorted(
             (item for item in discovered if isinstance(item, dict)),
-            key=lambda item: (str(item.get("platform") or ""), str(item.get("localPath") or "")),
+            key=lambda item: (
+                0
+                if _metatrader_identity_key(
+                    str(item.get("platform") or "").lower(),
+                    str(item.get("localPath") or ""),
+                ) in selected_identity_keys
+                else 1,
+                str(item.get("platform") or ""),
+                str(item.get("localPath") or ""),
+            ),
         )
-        for item in ordered[:1024]:
+        for item in ordered[:max(1024, len(selected_identity_keys))]:
             platform = str(item.get("platform") or "").lower()
             local_path = str(item.get("localPath") or "")
             install_path = str(item.get("installPath") or "")
@@ -36009,6 +37159,7 @@ def _sync_metatrader_candidate_registry(discovered: list[dict], running: dict) -
                 ),
             })
 
+        _prune_stale_metatrader_candidates_unlocked(store)
         _write_metatrader_target_store_unlocked(store)
         public_candidates = [
             public
@@ -36286,46 +37437,165 @@ def metatrader_status_read_model(installed: dict, running: dict, candidates: lis
     }
 
 
-def _include_verified_running_mt4_candidate_locations(
+def _include_verified_running_metatrader_candidate_locations(
     discovered: list[dict],
     running: dict,
+    platforms: tuple[str, ...] = ("mt4", "mt5"),
 ) -> list[dict]:
-    """Union verified running MT4 roots into discovery without making paths public."""
+    """Union verified running terminal roots without making local paths public."""
     combined = [dict(item) for item in discovered if isinstance(item, dict)]
     process_locations = running.get("_processInstallPaths")
     if not isinstance(process_locations, dict):
         return combined
 
-    known_install_paths = {
-        os.path.normcase(str(item.get("installPath") or ""))
+    executable_names = {"mt4": "terminal.exe", "mt5": "terminal64.exe"}
+    for platform in platforms:
+        if platform not in executable_names:
+            continue
+        known_install_paths = {
+            os.path.normcase(str(item.get("installPath") or ""))
+            for item in combined
+            if str(item.get("platform") or "").lower() == platform
+            and str(item.get("installPath") or "").strip()
+        }
+        for raw_location in list(process_locations.get(platform) or [])[:128]:
+            value = str(raw_location or "").strip()
+            if not value:
+                continue
+            install_dir = Path(value)
+            try:
+                if not install_dir.is_absolute() or not install_dir.is_dir():
+                    continue
+                if not (install_dir / executable_names[platform]).is_file():
+                    continue
+                canonical = _canonical_metatrader_location(install_dir)
+            except (OSError, PermissionError, RuntimeError):
+                continue
+            identity = os.path.normcase(canonical)
+            if identity in known_install_paths:
+                continue
+            known_install_paths.add(identity)
+            combined.append({
+                "platform": platform,
+                "localPath": canonical,
+                "installPath": canonical,
+                "dataPath": None,
+            })
+    return combined
+
+
+def _include_verified_persisted_metatrader_install_roots(
+    discovered: list[dict],
+) -> list[dict]:
+    """Revalidate prior process-proven install roots after a reboot/close.
+
+    A Terminal outside MetaQuotes' standard data roots is initially learned
+    only from a running process.  Keep that opaque candidate stable on later
+    scans solely while its exact, previously verified install root still holds
+    the correct executable.  Backend paths stay internal and an MQL directory
+    alone is deliberately insufficient provenance for this recovery path.
+    """
+    combined = [dict(item) for item in discovered if isinstance(item, dict)]
+    known_locations = {
+        (
+            str(item.get("platform") or "").lower(),
+            os.path.normcase(str(item.get("localPath") or "")),
+        )
         for item in combined
-        if str(item.get("platform") or "").lower() == "mt4"
-        and str(item.get("installPath") or "").strip()
+        if str(item.get("platform") or "").lower() in {"mt4", "mt5"}
+        and str(item.get("localPath") or "").strip()
     }
-    for raw_location in list(process_locations.get("mt4") or [])[:128]:
-        value = str(raw_location or "").strip()
-        if not value:
+    executable_names = {"mt4": "terminal.exe", "mt5": "terminal64.exe"}
+    with METATRADER_TARGETS_LOCK:
+        store = _load_metatrader_target_store_unlocked()
+        candidates = store["candidates"]
+        selected_candidate_ids = []
+        for selection in store["selections"].values():
+            if not isinstance(selection, dict):
+                continue
+            candidate_id = safe_reference(selection.get("candidateId"))
+            if candidate_id and candidate_id not in selected_candidate_ids:
+                selected_candidate_ids.append(candidate_id)
+        selected_records = [
+            dict(candidates[candidate_id])
+            for candidate_id in selected_candidate_ids
+            if isinstance(candidates.get(candidate_id), dict)
+        ]
+        recent_unselected = [
+            (str(candidate_id), record)
+            for candidate_id, record in candidates.items()
+            if isinstance(record, dict) and candidate_id not in selected_candidate_ids
+        ]
+        recent_unselected.sort(
+            key=lambda item: _metatrader_candidate_recency_key(item[0], item[1]),
+            reverse=True,
+        )
+        # Every durable selection is revalidated, even if a long-lived machine
+        # has accumulated more discovery history than the bounded fallback set.
+        prior_records = selected_records + [
+            dict(record)
+            for _candidate_id, record in recent_unselected[
+                :METATRADER_PERSISTED_RECOVERY_RECENT_LIMIT
+            ]
+        ]
+
+    for record in prior_records:
+        candidate_id = safe_reference(record.get("candidateId"))
+        platform = str(record.get("platform") or "").strip().lower()
+        local_path = str(record.get("localPath") or "").strip()
+        install_path = str(record.get("installPath") or "").strip()
+        identity_key = str(record.get("identityKey") or "")
+        if (
+            not candidate_id
+            or not candidate_id.startswith("mtc-")
+            or platform not in executable_names
+            or not local_path
+            or not install_path
+        ):
             continue
-        install_dir = Path(value)
+        local_dir = Path(local_path)
+        install_dir = Path(install_path)
         try:
-            if not install_dir.is_absolute() or not install_dir.is_dir():
+            if not local_dir.is_absolute() or not install_dir.is_absolute():
                 continue
-            if not (install_dir / "terminal.exe").is_file():
+            canonical_local = _canonical_metatrader_location(local_dir)
+            canonical_install = _canonical_metatrader_location(install_dir)
+            if os.path.normcase(canonical_local) != os.path.normcase(canonical_install):
                 continue
-            canonical = _canonical_metatrader_location(install_dir)
-        except (OSError, PermissionError, RuntimeError):
+            if not secrets.compare_digest(
+                identity_key,
+                _metatrader_identity_key(platform, canonical_local),
+            ):
+                continue
+            if not install_dir.is_dir():
+                continue
+            if not (install_dir / executable_names[platform]).is_file():
+                continue
+        except (OSError, PermissionError, RuntimeError, TypeError):
             continue
-        identity = os.path.normcase(canonical)
-        if identity in known_install_paths:
+        location_key = (platform, os.path.normcase(canonical_local))
+        if location_key in known_locations:
             continue
-        known_install_paths.add(identity)
+        known_locations.add(location_key)
         combined.append({
-            "platform": "mt4",
-            "localPath": canonical,
-            "installPath": canonical,
+            "platform": platform,
+            "localPath": canonical_local,
+            "installPath": canonical_install,
             "dataPath": None,
         })
     return combined
+
+
+def _include_verified_running_mt4_candidate_locations(
+    discovered: list[dict],
+    running: dict,
+) -> list[dict]:
+    """Compatibility helper for MT4-only Council tests and callers."""
+    return _include_verified_running_metatrader_candidate_locations(
+        discovered,
+        running,
+        platforms=("mt4",),
+    )
 
 
 def metatrader_status(force: bool = False, roots: list[Path] | None = None, process_rows: list[str] | None = None) -> dict:
@@ -36339,11 +37609,13 @@ def metatrader_status(force: bool = False, roots: list[Path] | None = None, proc
         installed = discover_metatrader_installations(roots=roots, include_candidates=True)
         running = discover_running_metatrader(process_rows=process_rows)
         discovered = installed.get("_candidateLocations") if isinstance(installed.get("_candidateLocations"), list) else []
-        discovered = _include_verified_running_mt4_candidate_locations(discovered, running)
+        discovered = _include_verified_running_metatrader_candidate_locations(discovered, running)
         isolated_runtime = os.path.normcase(str(RUNTIME_DIR.resolve(strict=False))) != os.path.normcase(
             str(PROJECT_RUNTIME_DIR.resolve(strict=False))
         )
         persist_candidates = (roots is None and process_rows is None) or isolated_runtime
+        if persist_candidates:
+            discovered = _include_verified_persisted_metatrader_install_roots(discovered)
         candidates = (
             _sync_metatrader_candidate_registry(discovered, running)
             if persist_candidates
@@ -36535,6 +37807,46 @@ def _selected_metatrader_candidate_record(prop_id: str) -> dict | None:
         return dict(record)
 
 
+def _selected_metatrader_candidate_context(prop_id: str) -> dict | None:
+    """Read one valid candidate and its generation from one store snapshot."""
+    if prop_id not in METATRADER_TARGET_PROP_IDS:
+        return None
+    with METATRADER_TARGETS_LOCK:
+        store = _load_metatrader_target_store_unlocked()
+        selection = store["selections"].get(prop_id)
+        if not isinstance(selection, dict):
+            return None
+        candidate_id = safe_reference(selection.get("candidateId"))
+        record = store["candidates"].get(candidate_id or "")
+        if (
+            not candidate_id
+            or not isinstance(record, dict)
+            or safe_reference(record.get("candidateId")) != candidate_id
+            or not _metatrader_candidate_record_is_current(record)
+        ):
+            return None
+        selection_revision = selection.get("selectionRevision")
+        if selection_revision is None:
+            # Migrate a valid legacy binding while still holding the exact same
+            # lock/store snapshot used for candidate validation.
+            selection_revision = 1
+            selection["selectionRevision"] = selection_revision
+            _write_metatrader_target_store_unlocked(store)
+        if (
+            isinstance(selection_revision, bool)
+            or not isinstance(selection_revision, int)
+            or selection_revision < 1
+        ):
+            return None
+        return {
+            "record": dict(record),
+            "token": {
+                "candidateId": candidate_id,
+                "selectionRevision": selection_revision,
+            },
+        }
+
+
 def _metatrader_selection_token(prop_id: str) -> dict | None:
     """Return the exact durable selection generation for TOCTOU guards."""
     if prop_id not in METATRADER_TARGET_PROP_IDS:
@@ -36573,6 +37885,243 @@ def _metatrader_next_selection_revision(selection: object) -> int:
     if current is None:
         current = 1
     return clamp_int(current, 1, 1, 2_147_483_646) + 1
+
+
+def global_metatrader_hub_read_model(terminals: dict | None = None) -> dict:
+    """Project the authoritative central selector without changing Terminal state."""
+    terminal_model = terminals if isinstance(terminals, dict) else peek_metatrader_status()
+    with METATRADER_TARGETS_LOCK:
+        store = _load_metatrader_target_store_unlocked()
+
+    safe_candidates = []
+    for item in terminal_model.get("candidates") or []:
+        if not isinstance(item, dict):
+            continue
+        candidate_id = safe_reference(item.get("candidateId"))
+        platform = str(item.get("platform") or "").lower()
+        if (
+            not candidate_id
+            or not candidate_id.startswith("mtc-")
+            or platform not in {"mt4", "mt5"}
+        ):
+            continue
+        running_state = str(item.get("runningState") or "unknown")
+        if running_state not in {
+            "unknown",
+            "platform_running_detected",
+            "not_running_detected",
+        }:
+            running_state = "unknown"
+        safe_candidates.append({
+            "candidateId": candidate_id,
+            "platform": platform,
+            "labelTh": redact_text(
+                str(item.get("labelTh") or ("MT4" if platform == "mt4" else "MT5")),
+                120,
+            ),
+            "detected": True,
+            "runningState": running_state,
+        })
+    safe_candidates.sort(
+        key=lambda item: (item["platform"], item["labelTh"], item["candidateId"])
+    )
+    raw_platforms = (
+        terminal_model.get("platforms")
+        if isinstance(terminal_model.get("platforms"), dict)
+        else {}
+    )
+    safe_terminal_platforms = {}
+    for platform, label in (("mt4", "MT4"), ("mt5", "MT5")):
+        raw_platform = (
+            raw_platforms.get(platform)
+            if isinstance(raw_platforms.get(platform), dict)
+            else {}
+        )
+        safe_terminal_platforms[platform] = {
+            "label": label,
+            "status": redact_text(
+                str(raw_platform.get("status") or "not_checked"),
+                80,
+            ),
+            "installedCount": clamp_int(
+                raw_platform.get("installedCount"),
+                0,
+                0,
+                10_000,
+            ),
+            "runningCount": clamp_int(
+                raw_platform.get("runningCount"),
+                0,
+                0,
+                10_000,
+            ),
+            "pathAccessLimited": bool(raw_platform.get("pathAccessLimited", False)),
+            "pathAccessLimitedCount": clamp_int(
+                raw_platform.get("pathAccessLimitedCount"),
+                0,
+                0,
+                10_000,
+            ),
+            "detailTh": redact_text(str(raw_platform.get("detailTh") or ""), 300),
+        }
+    checked_at = terminal_model.get("checkedAt")
+    safe_terminal_status = {
+        "status": redact_text(str(terminal_model.get("status") or "not_checked"), 80),
+        "mode": "read_only",
+        "sideEffects": False,
+        "processProbeSupported": bool(
+            terminal_model.get("processProbeSupported", False)
+        ),
+        "adapterConnection": redact_text(
+            str(terminal_model.get("adapterConnection") or "coming_soon"),
+            80,
+        ),
+        "adapterReady": terminal_model.get("adapterReady") is True,
+        "candidateCount": len(safe_candidates),
+        "candidates": safe_candidates,
+        "platforms": safe_terminal_platforms,
+        "checkedAt": checked_at if parse_iso(str(checked_at or "")) else None,
+        "privacy": (
+            "ไม่ส่งตำแหน่งโปรแกรมหรือหมายเลข Process ออกหน้าเว็บ และไม่อ่านข้อมูลบัญชี "
+            "ชื่อโบรกเกอร์ รหัสผ่าน หรือข้อมูลการเทรด"
+        ),
+    }
+    if isinstance(terminal_model.get("cacheHit"), bool):
+        safe_terminal_status["cacheHit"] = terminal_model["cacheHit"]
+    cache_age = terminal_model.get("cacheAgeSeconds")
+    if isinstance(cache_age, (int, float)) and not isinstance(cache_age, bool):
+        safe_terminal_status["cacheAgeSeconds"] = max(0, float(cache_age))
+    candidate_map = {
+        str(item["candidateId"]): item
+        for item in safe_candidates
+    }
+    platforms: dict[str, dict] = {}
+    for platform, target_prop_ids in GLOBAL_METATRADER_SELECTION_TARGETS.items():
+        platform_candidates = [
+            item for item in safe_candidates
+            if str(item.get("platform") or "").lower() == platform
+        ]
+        targets = []
+        exact_candidate_ids = []
+        for prop_id in target_prop_ids:
+            selection = _metatrader_selection_read_model(
+                prop_id,
+                safe_terminal_status,
+                target_store=store,
+            )
+            selected = (
+                selection.get("selectedCandidate")
+                if isinstance(selection.get("selectedCandidate"), dict)
+                else None
+            )
+            selected_platform = str((selected or {}).get("platform") or "").lower()
+            selected_id = safe_reference((selected or {}).get("candidateId"))
+            raw_selection = store["selections"].get(prop_id)
+            raw_revision = (
+                raw_selection.get("selectionRevision")
+                if isinstance(raw_selection, dict)
+                else None
+            )
+            selection_revision = (
+                raw_revision
+                if isinstance(raw_revision, int)
+                and not isinstance(raw_revision, bool)
+                and raw_revision >= 1
+                else None
+            )
+            if selected_id and selected_platform == platform:
+                target_status = "configured"
+                exact_candidate_ids.append(selected_id)
+            elif selected_id:
+                target_status = "configured_other_platform"
+            elif selection.get("staleSelection") is True:
+                target_status = "stale"
+            else:
+                target_status = "not_configured"
+            targets.append({
+                "propId": prop_id,
+                "status": target_status,
+                "selectedCandidate": selected,
+                "selectedAt": selection.get("selectedAt"),
+                "selectionRevision": selection_revision,
+                "adapterReady": selection.get("adapterReady") is True,
+            })
+
+        unique_exact_ids = sorted(set(exact_candidate_ids))
+        if len(exact_candidate_ids) == len(target_prop_ids) and len(unique_exact_ids) == 1:
+            configuration_status = "configured"
+            selected_candidate = candidate_map.get(unique_exact_ids[0])
+        elif exact_candidate_ids:
+            configuration_status = "partial"
+            selected_candidate = None
+        else:
+            configuration_status = "not_configured"
+            selected_candidate = None
+        platforms[platform] = {
+            "platform": platform,
+            "configurationStatus": configuration_status,
+            "targetCount": len(target_prop_ids),
+            "configuredTargetCount": len(exact_candidate_ids),
+            "targetPropIds": list(target_prop_ids),
+            "candidateCount": len(platform_candidates),
+            "candidates": platform_candidates,
+            "selectedCandidate": selected_candidate,
+            "targets": targets,
+            "canSelect": bool(platform_candidates),
+        }
+
+    configured_platforms = [
+        platform
+        for platform, item in platforms.items()
+        if item.get("configurationStatus") == "configured"
+    ]
+    platform_statuses = {
+        str(item.get("configurationStatus") or "not_configured")
+        for item in platforms.values()
+    }
+    if configured_platforms:
+        overall_status = "configured"
+    elif "partial" in platform_statuses:
+        overall_status = "partial"
+    elif safe_terminal_status["status"] == "not_checked":
+        overall_status = "not_checked"
+    else:
+        overall_status = "not_configured"
+    selected_platform = configured_platforms[0] if len(configured_platforms) == 1 else None
+    selected_candidate = (
+        platforms[selected_platform].get("selectedCandidate")
+        if selected_platform
+        else None
+    )
+    return sanitize_json_value({
+        "schemaVersion": GLOBAL_METATRADER_HUB_SCHEMA_VERSION,
+        "status": overall_status,
+        "selectedPlatform": selected_platform,
+        "selectedCandidate": selected_candidate,
+        "mode": "backend_atomic_target_configuration",
+        "sideEffects": False,
+        "terminalStatus": safe_terminal_status,
+        "candidateCount": len(safe_candidates),
+        "candidates": safe_candidates,
+        "platforms": platforms,
+        "endpoints": {
+            "status": "/api/integrations/metatrader/global",
+            "discover": "/api/integrations/metatrader/global/discover",
+            "select": "/api/integrations/metatrader/global/select",
+        },
+        "safety": {
+            "readOnlyDiscovery": True,
+            "selectionIsConfigurationOnly": True,
+            "atomicFanOut": True,
+            "launchesTerminal": False,
+            "tradingDataAccessed": False,
+            "enablesAdapter": False,
+            "enablesLiveTrading": False,
+            "terminalPathsExposed": False,
+            "processIdsExposed": False,
+        },
+        "updatedAt": utc_now(),
+    }, collection_limit=1000, string_limit=2000)
 
 
 def _ai_trade_council_utc_epoch_now() -> int:
@@ -38453,7 +40002,14 @@ def _mt4_trade_gateway_ack_event_read_model(item: dict) -> dict:
 
 def mt4_trade_gateway_status_read_model() -> dict:
     """Reconcile the backend ledger and expose a sanitized EA status model."""
-    record = _selected_metatrader_candidate_record(AI_TRADE_COUNCIL_PROP_ID)
+    selection_context = _selected_metatrader_candidate_context(
+        AI_TRADE_COUNCIL_PROP_ID
+    )
+    record = (
+        selection_context.get("record")
+        if isinstance(selection_context, dict)
+        else None
+    )
     public_candidate = _public_metatrader_candidate(record) if record else None
     if not public_candidate:
         return _empty_mt4_trade_gateway_status(
@@ -38466,13 +40022,38 @@ def mt4_trade_gateway_status_read_model() -> dict:
             status="unsupported_platform",
             reason_code="mt4_trade_gateway_required",
         )
-    selection_token = _metatrader_selection_token(AI_TRADE_COUNCIL_PROP_ID)
-    selection_revision = (
-        selection_token.get("selectionRevision")
-        if isinstance(selection_token, dict)
-        and selection_token.get("candidateId") == public_candidate.get("candidateId")
+    selection_token = (
+        selection_context.get("token")
+        if isinstance(selection_context, dict)
         else None
     )
+    selection_revision = selection_token.get("selectionRevision")
+    observability_warnings: list[str] = []
+
+    def stable_gateway_result(result: dict) -> dict:
+        current_context = _selected_metatrader_candidate_context(
+            AI_TRADE_COUNCIL_PROP_ID
+        )
+        current_token = (
+            current_context.get("token")
+            if isinstance(current_context, dict)
+            else None
+        )
+        if current_token != selection_token:
+            result = _empty_mt4_trade_gateway_status(
+                status="selection_changed",
+                reason_code="terminal_selection_changed_during_status_read",
+            )
+        result["observabilityStatus"] = (
+            "degraded" if observability_warnings else "complete"
+        )
+        result["observabilityWarnings"] = list(observability_warnings)
+        return result
+
+    def note_observability_failure(code: str) -> None:
+        if code not in observability_warnings:
+            observability_warnings.append(code)
+
     init_status = _read_mt4_trade_gateway_init_status(public_candidate)
     ack_events: list[dict] = []
     active_command = None
@@ -38489,6 +40070,21 @@ def mt4_trade_gateway_status_read_model() -> dict:
     }
     try:
         with MT4_TRADE_GATEWAY_LOCK:
+            current_context = _selected_metatrader_candidate_context(
+                AI_TRADE_COUNCIL_PROP_ID
+            )
+            current_token = (
+                current_context.get("token")
+                if isinstance(current_context, dict)
+                else None
+            )
+            if current_token != selection_token:
+                return _empty_mt4_trade_gateway_status(
+                    selected_candidate=public_candidate,
+                    status="selection_changed",
+                    reason_code="terminal_selection_changed_during_status_read",
+                    init_status=init_status,
+                )
             gateway = _mt4_trade_gateway_instance()
             # Key provisioning is backend-owned and returns only public
             # metadata.  The key material and filesystem path never enter this
@@ -38539,35 +40135,45 @@ def mt4_trade_gateway_status_read_model() -> dict:
             and event.get("ok") is True
             and event.get("idempotentReplay") is not True
         ):
-            append_audit({
-                "type": "mt4_trade_gateway.ack_ingested",
-                "commandId": event.get("commandId"),
-                "status": event.get("status"),
-                "outstandingReleased": event.get("outstandingReleased"),
-                "eaSizingStatus": event.get("eaSizingStatus"),
-                "referencePriceBinding": event.get("referencePriceBinding"),
-            })
+            try:
+                append_audit({
+                    "type": "mt4_trade_gateway.ack_ingested",
+                    "commandId": event.get("commandId"),
+                    "status": event.get("status"),
+                    "outstandingReleased": event.get("outstandingReleased"),
+                    "eaSizingStatus": event.get("eaSizingStatus"),
+                    "referencePriceBinding": event.get("referencePriceBinding"),
+                })
+            except Exception:
+                note_observability_failure("ack_ingested_audit_failed")
         elif isinstance(event, dict) and event.get("ok") is False:
             rejection_key = payload_digest(
                 str(event.get("code") or ""),
                 str(event.get("fileName") or ""),
             )
             if rejection_key not in MT4_TRADE_GATEWAY_REJECTED_ACK_EVENTS:
-                MT4_TRADE_GATEWAY_REJECTED_ACK_EVENTS.add(rejection_key)
-                if len(MT4_TRADE_GATEWAY_REJECTED_ACK_EVENTS) > 256:
-                    MT4_TRADE_GATEWAY_REJECTED_ACK_EVENTS.clear()
+                try:
+                    append_audit({
+                        "type": "mt4_trade_gateway.ack_rejected",
+                        "code": event.get("code"),
+                        "fileName": event.get("fileName"),
+                    })
+                except Exception:
+                    note_observability_failure("ack_rejected_audit_failed")
+                else:
                     MT4_TRADE_GATEWAY_REJECTED_ACK_EVENTS.add(rejection_key)
-                append_audit({
-                    "type": "mt4_trade_gateway.ack_rejected",
-                    "code": event.get("code"),
-                    "fileName": event.get("fileName"),
-                })
+                    if len(MT4_TRADE_GATEWAY_REJECTED_ACK_EVENTS) > 256:
+                        MT4_TRADE_GATEWAY_REJECTED_ACK_EVENTS.clear()
+                        MT4_TRADE_GATEWAY_REJECTED_ACK_EVENTS.add(rejection_key)
     if expired.get("expiredCount"):
-        append_audit({
-            "type": "mt4_trade_gateway.command_expired",
-            "commandIds": expired.get("commandIds"),
-            "slotReleased": False,
-        })
+        try:
+            append_audit({
+                "type": "mt4_trade_gateway.command_expired",
+                "commandIds": expired.get("commandIds"),
+                "slotReleased": False,
+            })
+        except Exception:
+            note_observability_failure("command_expired_audit_failed")
     ea_status, reason_code = _read_mt4_trade_gateway_ea_status(public_candidate)
     init_status = _reconcile_mt4_trade_gateway_init_status(init_status, ea_status)
     backend_signing_key_id = str(signing_key_metadata.get("keyId") or "")
@@ -38652,14 +40258,14 @@ def mt4_trade_gateway_status_read_model() -> dict:
         ),
     }
     if ea_status is None:
-        return _empty_mt4_trade_gateway_status(
+        return stable_gateway_result(_empty_mt4_trade_gateway_status(
             selected_candidate=public_candidate,
             status="awaiting_ea",
             reason_code=reason_code,
             backend_status=backend_public,
             init_status=init_status,
             order_history=order_history,
-        )
+        ))
     mode = str(ea_status["mode"])
     demo_account = ea_status.get("demoAccount")
     account_identity_available = isinstance(demo_account, bool)
@@ -38783,7 +40389,7 @@ def mt4_trade_gateway_status_read_model() -> dict:
             "barClaimWillBeRetained": True,
             "automaticRetry": False,
         }
-    return {
+    result = {
         **_empty_mt4_trade_gateway_status(
             selected_candidate=public_candidate,
             backend_status=backend_public,
@@ -38846,6 +40452,7 @@ def mt4_trade_gateway_status_read_model() -> dict:
         ],
         "updatedAt": utc_now(),
     }
+    return stable_gateway_result(result)
 
 
 def _mt4_trade_gateway_command_read_model(command_id: object) -> dict | None:
@@ -40523,36 +42130,62 @@ def _metatrader_snapshot_source_files(
 
 
 def metatrader_snapshot_read_model(prop_id: str) -> dict:
-    record = _selected_metatrader_candidate_record(prop_id)
-    if not record:
+    selection_context = _selected_metatrader_candidate_context(prop_id)
+    record = (
+        selection_context.get("record")
+        if isinstance(selection_context, dict)
+        else None
+    )
+    selection_token = (
+        selection_context.get("token")
+        if isinstance(selection_context, dict)
+        else None
+    )
+    if not isinstance(record, dict) or not isinstance(selection_token, dict):
         return _empty_metatrader_snapshot_read_model(
             prop_id,
             "not_selected",
             "selected_terminal_missing",
         )
+
+    def stable_snapshot_result(result: dict) -> dict:
+        current_context = _selected_metatrader_candidate_context(prop_id)
+        current_token = (
+            current_context.get("token")
+            if isinstance(current_context, dict)
+            else None
+        )
+        if current_token != selection_token:
+            return _empty_metatrader_snapshot_read_model(
+                prop_id,
+                "selection_changed",
+                "terminal_selection_changed_during_snapshot_read",
+            )
+        return result
+
     candidate_public = _public_metatrader_candidate(record)
     if not candidate_public:
-        return _empty_metatrader_snapshot_read_model(
+        return stable_snapshot_result(_empty_metatrader_snapshot_read_model(
             prop_id,
             "not_selected",
             "selected_terminal_missing",
-        )
+        ))
     if candidate_public.get("platform") != "mt4":
-        return _empty_metatrader_snapshot_read_model(
+        return stable_snapshot_result(_empty_metatrader_snapshot_read_model(
             prop_id,
             "unsupported_platform",
             "mt4_snapshot_adapter_required",
             selected_candidate=candidate_public,
-        )
+        ))
     candidate_id = str(candidate_public["candidateId"])
     snapshot_sources = _metatrader_snapshot_source_files(record, candidate_id)
     if not snapshot_sources:
-        return _empty_metatrader_snapshot_read_model(
+        return stable_snapshot_result(_empty_metatrader_snapshot_read_model(
             prop_id,
             "invalid_channel",
             "snapshot_channel_invalid",
             selected_candidate=candidate_public,
-        )
+        ))
     observed_sources = []
     unreadable_source = False
     for source_name, source_path in snapshot_sources:
@@ -40577,38 +42210,38 @@ def metatrader_snapshot_read_model(prop_id: str) -> dict:
                 source_stat,
             ))
     if not observed_sources and not unreadable_source:
-        return _empty_metatrader_snapshot_read_model(
+        return stable_snapshot_result(_empty_metatrader_snapshot_read_model(
             prop_id,
             "awaiting_snapshot",
             "snapshot_not_observed",
             selected_candidate=candidate_public,
-        )
+        ))
     if not observed_sources:
-        return _empty_metatrader_snapshot_read_model(
+        return stable_snapshot_result(_empty_metatrader_snapshot_read_model(
             prop_id,
             "unavailable",
             "snapshot_unreadable",
             selected_candidate=candidate_public,
-        )
+        ))
     _, _, snapshot_source, snapshot_path, snapshot_stat = max(observed_sources)
     size = snapshot_stat.st_size
     if size <= 0 or size > METATRADER_SNAPSHOT_MAX_BYTES:
-        return _empty_metatrader_snapshot_read_model(
+        return stable_snapshot_result(_empty_metatrader_snapshot_read_model(
             prop_id,
             "invalid_snapshot",
             "snapshot_size_invalid",
             selected_candidate=candidate_public,
-        )
+        ))
     try:
         raw = snapshot_path.read_bytes()
         payload = json.loads(raw.decode("utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError):
-        return _empty_metatrader_snapshot_read_model(
+        return stable_snapshot_result(_empty_metatrader_snapshot_read_model(
             prop_id,
             "invalid_snapshot",
             "snapshot_json_invalid",
             selected_candidate=candidate_public,
-        )
+        ))
     if (
         not isinstance(payload, dict)
         or payload.get("schemaVersion") != METATRADER_SNAPSHOT_SCHEMA_VERSION
@@ -40616,21 +42249,21 @@ def metatrader_snapshot_read_model(prop_id: str) -> dict:
         or payload.get("mode") != "read_only"
         or _snapshot_has_forbidden_keys(payload)
     ):
-        return _empty_metatrader_snapshot_read_model(
+        return stable_snapshot_result(_empty_metatrader_snapshot_read_model(
             prop_id,
             "invalid_snapshot",
             "snapshot_schema_invalid",
             selected_candidate=candidate_public,
-        )
+        ))
     try:
         modified_at = datetime.fromtimestamp(snapshot_stat.st_mtime, tz=timezone.utc)
     except (OSError, OverflowError, ValueError):
-        return _empty_metatrader_snapshot_read_model(
+        return stable_snapshot_result(_empty_metatrader_snapshot_read_model(
             prop_id,
             "invalid_snapshot",
             "snapshot_timestamp_invalid",
             selected_candidate=candidate_public,
-        )
+        ))
     age_seconds = max(0.0, (datetime.now(timezone.utc) - modified_at).total_seconds())
     snapshot_id = hashlib.sha256(raw).hexdigest()
     chart = payload.get("chart") if isinstance(payload.get("chart"), dict) else {}
@@ -40685,12 +42318,12 @@ def metatrader_snapshot_read_model(prop_id: str) -> dict:
     chart_valid = bool(symbol and timeframe and bid is not None and ask is not None and bars)
     snapshot_fresh = age_seconds <= METATRADER_SNAPSHOT_FRESH_SECONDS
     if not chart_valid or not daily_valid:
-        return _empty_metatrader_snapshot_read_model(
+        return stable_snapshot_result(_empty_metatrader_snapshot_read_model(
             prop_id,
             "invalid_snapshot",
             "snapshot_payload_invalid",
             selected_candidate=candidate_public,
-        )
+        ))
     status = "ready" if snapshot_fresh else "stale"
     reason_code = "ready" if snapshot_fresh else "snapshot_stale"
     result = _empty_metatrader_snapshot_read_model(
@@ -40775,7 +42408,7 @@ def metatrader_snapshot_read_model(prop_id: str) -> dict:
         "analysisWindow": analysis_window,
         "indicatorFormulaVersion": AI_TRADE_COUNCIL_INDICATOR_FORMULA_VERSION,
     })
-    return result
+    return stable_snapshot_result(result)
 
 
 AI_TRADE_COUNCIL_AGENT_ROLES = {
@@ -44489,7 +46122,19 @@ def refresh_dashboard_connections(prop_id: str) -> dict:
         raise
 
 
-def run_metatrader_discovery(prop_id: str) -> dict:
+def run_metatrader_discovery(
+    prop_id: str,
+    *,
+    activity_prop_id: str | None = None,
+) -> dict:
+    activity_target_id = str(activity_prop_id or prop_id).strip()
+    if (
+        not SAFE_ID_PATTERN.fullmatch(activity_target_id)
+        or not find_room_prop(activity_target_id)
+    ):
+        raise DataIntegrityError(
+            "MetaTrader discovery activity target is not a known room prop."
+        )
     profile = find_dashboard_connection_profile(prop_id)
     actions = {
         str(item.get("action") or "")
@@ -44506,47 +46151,123 @@ def run_metatrader_discovery(prop_id: str) -> dict:
     permission = evaluate_tool_permission(owner, "terminal_discovery")
     if not permission.get("allowed"):
         raise RequestError("Agent เจ้าของ Dashboard ไม่มีสิทธิ์ตรวจ Terminal", 403)
-    mission = create_mission({
-        "title": "ค้นหา MT4 / MT5 ในเครื่องแบบ Read-only",
-        "prompt": "ตรวจเฉพาะว่ามีโปรแกรม MT4 / MT5 และกำลังทำงานหรือไม่ ห้ามเปิด ปิด เชื่อมบัญชี หรืออ่านข้อมูลการเทรด",
-        "agentId": owner,
-        "requester": "human",
-        "toolId": "terminal_discovery",
-        "targetId": prop_id,
-        "risk": "low",
-        "reportType": "terminal_discovery_report",
-    }, status="running")
+    observability_warnings = []
+    mission = None
+    mission_id = None
+    try:
+        created_mission = create_mission({
+            "title": "ค้นหา MT4 / MT5 ในเครื่องแบบ Read-only",
+            "prompt": "ตรวจเฉพาะว่ามีโปรแกรม MT4 / MT5 และกำลังทำงานหรือไม่ ห้ามเปิด ปิด เชื่อมบัญชี หรืออ่านข้อมูลการเทรด",
+            "agentId": owner,
+            "requester": "human",
+            "toolId": "terminal_discovery",
+            "targetId": activity_target_id,
+            "risk": "low",
+            "reportType": "terminal_discovery_report",
+        }, status="running")
+        mission_id = (
+            safe_reference(created_mission.get("id"))
+            if isinstance(created_mission, dict)
+            else None
+        )
+        if mission_id:
+            mission = created_mission
+        else:
+            observability_warnings.append("mission_write_failed")
+    except Exception:
+        observability_warnings.append("mission_write_failed")
     try:
         terminal_state = metatrader_status(force=True)
         mt4 = terminal_state["platforms"]["mt4"]
         mt5 = terminal_state["platforms"]["mt5"]
+    except Exception:
+        if mission is not None:
+            try:
+                _fail_diagnostic_mission(
+                    mission,
+                    "terminal.discovery_failed",
+                    "terminal_discovery_failed",
+                )
+            except Exception:
+                pass
+        raise
+
+    # The bounded read-only terminal scan is the authoritative result. Checklist
+    # projection and persistence are observability only: once the registry was
+    # refreshed, their failure must not invite an automatic duplicate scan.
+    checklist = None
+    try:
+        checklist = dashboard_connection_checklist(prop_id, terminals=terminal_state)
+    except Exception:
+        observability_warnings.append("checklist_projection_failed")
+    report = None
+    try:
         report = create_report({
-        "type": "terminal_discovery_report",
-        "title": "ผลค้นหา MT4 / MT5 แบบ Read-only",
-        "summary": "ตรวจเฉพาะการติดตั้งและชื่อ Process มาตรฐาน ไม่ได้เชื่อม Terminal และไม่ได้อ่านบัญชีหรือข้อมูลเทรด",
-        "ownerAgentId": owner,
-        "linkedMissionId": mission["id"],
-        "linkedPropId": prop_id,
-        "status": "ready",
-        "findings": [mt4["detailTh"], mt5["detailTh"], "Terminal Adapter สำหรับสั่งงานจริง: Coming Soon"],
-        "metrics": {
-            "diagnosticStatus": terminal_state["status"],
-            "mt4InstalledCount": mt4["installedCount"],
-            "mt4RunningCount": mt4["runningCount"],
-            "mt5InstalledCount": mt5["installedCount"],
-            "mt5RunningCount": mt5["runningCount"],
-            "candidateCount": terminal_state.get("candidateCount", 0),
-        },
-        "risks": ["การตรวจพบโปรแกรมไม่เท่ากับเชื่อมต่อเพื่อสั่ง Backtest, Optimization หรือ Trading"],
-        "nextActions": ["เชื่อม Adapter แบบ Read-only ก่อน", "ทดสอบ Demo ก่อนเปิดงาน Semi-auto", "Live Trading ยังปิด"],
-        "safety": {"approvalRequired": False, "publicShareable": False},
+            "type": "terminal_discovery_report",
+            "title": "ผลค้นหา MT4 / MT5 แบบ Read-only",
+            "summary": "ตรวจเฉพาะการติดตั้งและชื่อ Process มาตรฐาน ไม่ได้เชื่อม Terminal และไม่ได้อ่านบัญชีหรือข้อมูลเทรด",
+            "ownerAgentId": owner,
+            "linkedMissionId": mission_id,
+            "linkedPropId": activity_target_id,
+            "status": "ready",
+            "findings": [mt4["detailTh"], mt5["detailTh"], "Terminal Adapter สำหรับสั่งงานจริง: Coming Soon"],
+            "metrics": {
+                "diagnosticStatus": terminal_state["status"],
+                "mt4InstalledCount": mt4["installedCount"],
+                "mt4RunningCount": mt4["runningCount"],
+                "mt5InstalledCount": mt5["installedCount"],
+                "mt5RunningCount": mt5["runningCount"],
+                "candidateCount": terminal_state.get("candidateCount", 0),
+            },
+            "risks": ["การตรวจพบโปรแกรมไม่เท่ากับเชื่อมต่อเพื่อสั่ง Backtest, Optimization หรือ Trading"],
+            "nextActions": ["เชื่อม Adapter แบบ Read-only ก่อน", "ทดสอบ Demo ก่อนเปิดงาน Semi-auto", "Live Trading ยังปิด"],
+            "safety": {"approvalRequired": False, "publicShareable": False},
         })
-        _complete_diagnostic_mission(mission, report, "ค้นหา MT4 / MT5 แบบ Read-only เสร็จแล้ว")
+    except Exception:
+        observability_warnings.append("report_write_failed")
+
+    mission_completed = False
+    report_valid = isinstance(report, dict) and bool(safe_reference(report.get("id")))
+    if not report_valid and "report_write_failed" not in observability_warnings:
+        observability_warnings.append("report_write_invalid")
+    if mission is not None and report_valid:
+        try:
+            _complete_diagnostic_mission(
+                mission,
+                report,
+                "ค้นหา MT4 / MT5 แบบ Read-only เสร็จแล้ว",
+            )
+            mission_completed = True
+        except Exception:
+            observability_warnings.append("mission_completion_failed")
+
+    if mission is not None and not mission_completed:
+        try:
+            completed_at = utc_now()
+            report_id = (
+                safe_reference(report.get("id"))
+                if isinstance(report, dict)
+                else None
+            )
+            mission["status"] = "completed"
+            mission["phase"] = "terminal_discovery_completed"
+            mission["workStatus"] = "completed"
+            mission["result"] = "ค้นหา MT4 / MT5 แบบ Read-only เสร็จแล้ว"
+            mission["reportIds"] = [report_id] if report_id else []
+            mission["completedAt"] = completed_at
+            mission["updatedAt"] = completed_at
+            mission.pop("errorCode", None)
+            replace_mission(mission)
+        except Exception:
+            observability_warnings.append("mission_persistence_failed")
+
+    try:
         append_audit({
             "type": "terminal.discovery",
-            "missionId": mission["id"],
+            "missionId": mission_id,
             "ownerAgentId": owner,
-            "dashboardId": prop_id,
+            "dashboardId": activity_target_id,
+            "capabilityProfilePropId": prop_id,
             "status": terminal_state["status"],
             "mode": "read_only",
             "sideEffects": False,
@@ -44555,18 +46276,587 @@ def run_metatrader_discovery(prop_id: str) -> dict:
             "mt5Installed": mt5["installedCount"],
             "mt5Running": mt5["runningCount"],
         })
+    except Exception:
+        observability_warnings.append("audit_write_failed")
+
+    report_model = None
+    if isinstance(report, dict):
+        try:
+            report_model = report_read_model_item(report)
+        except Exception:
+            observability_warnings.append("report_projection_failed")
+    return {
+        "ok": True,
+        "missionId": mission_id,
+        "ownerAgentId": owner,
+        "status": "completed",
+        "terminalStatus": terminal_state,
+        "connectionChecklist": checklist,
+        "report": report_model,
+        "observabilityStatus": (
+            "degraded" if observability_warnings else "complete"
+        ),
+        "observabilityWarnings": observability_warnings,
+    }
+
+
+def run_global_metatrader_discovery() -> dict:
+    """Run one safe scan and return the central selector projection."""
+    result = run_metatrader_discovery(
+        GLOBAL_METATRADER_DISCOVERY_PROFILE_PROP_ID,
+        activity_prop_id=GLOBAL_METATRADER_DISCOVERY_PROP_ID,
+    )
+    terminal_state = (
+        result.get("terminalStatus")
+        if isinstance(result.get("terminalStatus"), dict)
+        else None
+    )
+    return {
+        **result,
+        "globalMetatraderHub": global_metatrader_hub_read_model(terminal_state),
+    }
+
+
+def _assert_global_metatrader_selection_contract(
+    platform: str,
+    target_prop_ids: tuple[str, ...],
+) -> None:
+    """Fail closed when the fixed fan-out and installed contracts diverge."""
+    for prop_id in target_prop_ids:
+        if platform not in _metatrader_allowed_platforms_for_prop(prop_id):
+            raise DataIntegrityError(
+                f"Global MetaTrader target {prop_id} does not support {platform}."
+            )
+        role = find_property_role(prop_id)
+        actions = {
+            str(item)
+            for item in (role.get("allowedDashboardActions") or [])
+            if isinstance(item, str)
+        }
+        if "select_metatrader_target" not in actions:
+            raise DataIntegrityError(
+                f"Global MetaTrader target {prop_id} does not allow selection."
+            )
+        owner = str(role.get("primaryOwnerAgentId") or "vps_watch")
+        permission = evaluate_tool_permission(owner, "terminal_target_select")
+        policy = (
+            permission.get("policy")
+            if isinstance(permission.get("policy"), dict)
+            else {}
+        )
+        linked_props = {
+            str(item)
+            for item in (policy.get("linkedPropIds") or [])
+            if isinstance(item, str)
+        }
+        if not permission.get("allowed") or prop_id not in linked_props:
+            raise DataIntegrityError(
+                f"Global MetaTrader target {prop_id} is not authorized by tool policy."
+            )
+
+
+def _assert_unambiguous_metatrader_candidate_unlocked(
+    store: dict,
+    platform: str,
+    candidate_id: str,
+    fresh_process_locations: dict | None = None,
+) -> None:
+    """Require fresh process identity before binding among multiple installs."""
+    candidates = [
+        record
+        for record in store.get("candidates", {}).values()
+        if isinstance(record, dict)
+        and str(record.get("platform") or "").lower() == platform
+        and _metatrader_candidate_record_is_current(record)
+    ]
+    if len(candidates) <= 1 and fresh_process_locations is None:
+        return
+    probe = fresh_process_locations if isinstance(fresh_process_locations, dict) else {}
+    limited = probe.get("pathAccessLimited")
+    try:
+        path_access_limited = (
+            max(0, int(limited.get(platform) or 0))
+            if isinstance(limited, dict)
+            else 0
+        )
+    except (TypeError, ValueError, OverflowError):
+        path_access_limited = 1
+    raw_running_roots = probe.get(platform)
+    if not isinstance(raw_running_roots, list):
+        raw_running_roots = []
+    running_roots = {
+        os.path.normcase(os.path.normpath(str(value)))
+        for value in raw_running_roots[:128]
+        if str(value or "").strip()
+    }
+    running_candidate_ids = {
+        safe_reference(record.get("candidateId"))
+        for record in candidates
+        if os.path.normcase(
+            os.path.normpath(
+                str(record.get("installPath") or record.get("localPath") or "")
+            )
+        ) in running_roots
+    }
+    running_candidate_ids.discard(None)
+    running_id = (
+        next(iter(running_candidate_ids))
+        if len(running_roots) == 1
+        and len(running_candidate_ids) == 1
+        and len(raw_running_roots) <= 128
+        and probe.get("supported") is True
+        and path_access_limited == 0
+        else None
+    )
+    if running_id != candidate_id:
+        raise RequestError(
+            f"พบ {platform.upper()} หลายโปรแกรม แต่ยืนยันโปรแกรมที่กำลังรันจริงไม่ได้ "
+            f"กรุณาปิด {platform.upper()} อื่น เปิดเฉพาะ {platform.upper()} ที่ต้องการ "
+            "กดสแกนใหม่ แล้วกดยืนยันอีกครั้ง",
+            409,
+        )
+
+
+def _metatrader_target_store_snapshot_token(store: dict) -> str:
+    """Fingerprint one registry generation across a probe performed outside its lock."""
+    canonical = json.dumps(
+        {
+            "schemaVersion": store.get("schemaVersion"),
+            "candidates": store.get("candidates"),
+            "selections": store.get("selections"),
+            "updatedAt": store.get("updatedAt"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def select_global_metatrader_target(platform: str, candidate_id: str) -> dict:
+    """Atomically bind one detected candidate to every compatible consumer."""
+    normalized_platform = str(platform or "").strip().lower()
+    if normalized_platform not in GLOBAL_METATRADER_SELECTION_TARGETS:
+        raise RequestError("Platform must be mt4 or mt5.", 422)
+    if not SAFE_ID_PATTERN.fullmatch(candidate_id) or not candidate_id.startswith("mtc-"):
+        raise RequestError("รหัสเป้าหมาย MT4 / MT5 ไม่ถูกต้อง", 422)
+    target_prop_ids = GLOBAL_METATRADER_SELECTION_TARGETS[normalized_platform]
+    _assert_global_metatrader_selection_contract(
+        normalized_platform,
+        target_prop_ids,
+    )
+
+    # Validate before consuming the action cooldown or creating audit records.
+    with METATRADER_TARGETS_LOCK:
+        store = _load_metatrader_target_store_unlocked()
+        record = store["candidates"].get(candidate_id)
+        if not isinstance(record, dict):
+            raise RequestError("ไม่พบเป้าหมายนี้ กรุณากดสแกน MT4 / MT5 ใหม่", 404)
+        if str(record.get("platform") or "").lower() != normalized_platform:
+            raise RequestError("เป้าหมายนี้ไม่ตรงกับ Platform ที่เลือก", 422)
+        if not _metatrader_candidate_record_is_current(record):
+            raise RequestError("เป้าหมายนี้ไม่พร้อมใช้งานแล้ว กรุณากดสแกนใหม่", 409)
+        current_candidate_count = sum(
+            1
+            for stored_record in store["candidates"].values()
+            if isinstance(stored_record, dict)
+            and str(stored_record.get("platform") or "").lower() == normalized_platform
+            and _metatrader_candidate_record_is_current(stored_record)
+        )
+        fresh_process_probe_required = (
+            current_candidate_count > 1
+            or record.get("runningState") == "platform_running_detected"
+        )
+        preprobe_store_token = _metatrader_target_store_snapshot_token(store)
+
+    allowed, retry_after = check_rate_limit(
+        f"terminal-target-select-global:{normalized_platform}",
+        120,
+        cooldown_seconds=1,
+    )
+    if not allowed:
+        raise RequestError(
+            f"กรุณารอ {retry_after} วินาทีก่อนเลือกเป้าหมายอีกครั้ง",
+            429,
+        )
+
+    observability_warnings = []
+    mission = None
+    mission_id = None
+    try:
+        # Lock order is CACHE -> TARGETS throughout discovery. Capture the
+        # cached, read-only terminal summary before entering the target-store
+        # transaction so a concurrent scan cannot deadlock with Apply.
+        terminal_snapshot = peek_metatrader_status()
+        # This bounded read-only Windows process probe is intentionally the
+        # final operation before the target-store transaction. It never runs
+        # under METATRADER_TARGETS_LOCK and never launches a Terminal or reads
+        # account data.
+        fresh_process_locations = (
+            _metatrader_process_locations()
+            if fresh_process_probe_required
+            else None
+        )
+        selected_at = utc_now()
+        changed_target_ids = []
+        unchanged_target_ids = []
+        selection_revisions = {}
+        with METATRADER_TARGETS_LOCK:
+            store = _load_metatrader_target_store_unlocked()
+            if (
+                fresh_process_probe_required
+                and _metatrader_target_store_snapshot_token(store)
+                != preprobe_store_token
+            ):
+                raise RequestError(
+                    "รายการ MT4 / MT5 เปลี่ยนระหว่างตรวจโปรแกรม กรุณากดสแกนและเลือกใหม่",
+                    409,
+                )
+            record = store["candidates"].get(candidate_id)
+            if (
+                not isinstance(record, dict)
+                or str(record.get("platform") or "").lower() != normalized_platform
+                or not _metatrader_candidate_record_is_current(record)
+            ):
+                raise RequestError(
+                    "เป้าหมายเปลี่ยนแปลงระหว่างดำเนินการ กรุณาสแกนและเลือกใหม่",
+                    409,
+                )
+            _assert_unambiguous_metatrader_candidate_unlocked(
+                store,
+                normalized_platform,
+                candidate_id,
+                fresh_process_locations,
+            )
+            selected_candidate = _public_metatrader_candidate(record)
+            if not selected_candidate:
+                raise RequestError("เป้าหมายนี้ไม่พร้อมให้เลือก", 409)
+            previous_store = copy.deepcopy(store)
+
+            for prop_id in target_prop_ids:
+                previous = store["selections"].get(prop_id)
+                previous_candidate_id = (
+                    safe_reference(previous.get("candidateId"))
+                    if isinstance(previous, dict)
+                    else None
+                )
+                previous_revision = (
+                    previous.get("selectionRevision")
+                    if isinstance(previous, dict)
+                    else None
+                )
+                if (
+                    previous_candidate_id == candidate_id
+                    and isinstance(previous_revision, int)
+                    and not isinstance(previous_revision, bool)
+                    and previous_revision >= 1
+                ):
+                    unchanged_target_ids.append(prop_id)
+                    selection_revisions[prop_id] = previous_revision
+                    continue
+                next_revision = _metatrader_next_selection_revision(previous)
+                store["selections"][prop_id] = {
+                    "candidateId": candidate_id,
+                    "selectedAt": selected_at,
+                    "selectionRevision": next_revision,
+                }
+                changed_target_ids.append(prop_id)
+                selection_revisions[prop_id] = next_revision
+
+            if changed_target_ids:
+                # One durable write under one lock is the transaction boundary.
+                _write_metatrader_target_store_unlocked(store)
+
+            # Verify the exact committed generation before another global
+            # selection can acquire the same re-entrant lock and replace it.
+            try:
+                available_candidates = [
+                    public
+                    for stored_record in store["candidates"].values()
+                    if isinstance(stored_record, dict)
+                    for public in [_public_metatrader_candidate(stored_record)]
+                    if public
+                ]
+                available_candidates.sort(
+                    key=lambda item: (
+                        item["platform"],
+                        item["labelTh"],
+                        item["candidateId"],
+                    )
+                )
+                terminal_state = {
+                    **terminal_snapshot,
+                    "candidateCount": len(available_candidates),
+                    "candidates": available_candidates,
+                }
+                global_model = global_metatrader_hub_read_model(terminal_state)
+                platform_model = (
+                    global_model.get("platforms", {}).get(normalized_platform, {})
+                    if isinstance(global_model.get("platforms"), dict)
+                    else {}
+                )
+                verified_candidate = (
+                    platform_model.get("selectedCandidate")
+                    if isinstance(platform_model.get("selectedCandidate"), dict)
+                    else {}
+                )
+                if (
+                    platform_model.get("configurationStatus") != "configured"
+                    or safe_reference(verified_candidate.get("candidateId")) != candidate_id
+                ):
+                    raise DataIntegrityError(
+                        "Global MetaTrader selection did not read back as one complete binding."
+                    )
+            except Exception:
+                if changed_target_ids:
+                    _write_metatrader_target_store_unlocked(previous_store)
+                raise
+            if changed_target_ids:
+                AI_TRADE_COUNCIL_AUTOMATION_WAKE.set()
+
+        # Mission/report/audit persistence is post-commit observability. A
+        # failure here must not block or reverse the atomic target selection.
+        try:
+            created_mission = create_mission({
+                "title": f"เลือก {normalized_platform.upper()} กลางสำหรับระบบที่รองรับ",
+                "prompt": (
+                    "บันทึก Terminal เป้าหมายกลางที่ผู้ใช้เลือกให้ทุก Dashboard ที่รองรับแบบ atomic "
+                    "ห้ามเปิดโปรแกรม รัน Terminal เชื่อมบัญชี เปิด Adapter หรือส่งคำสั่งเทรด"
+                ),
+                "agentId": "manager",
+                "requester": "human",
+                "toolId": "terminal_target_select",
+                "targetId": GLOBAL_METATRADER_DISCOVERY_PROP_ID,
+                "risk": "low",
+                "reportType": "terminal_selection_report",
+            }, status="running")
+            mission_id = (
+                safe_reference(created_mission.get("id"))
+                if isinstance(created_mission, dict)
+                else None
+            )
+            if mission_id:
+                mission = created_mission
+            else:
+                observability_warnings.append("mission_write_failed")
+        except Exception:
+            observability_warnings.append("mission_write_failed")
+
+        if normalized_platform == "mt4":
+            next_actions = [
+                "ใช้ Channel ID เดียวกันใน SnapshotChannel ของ MetafxHQ AI Council EA",
+                "โรงงาน EA และห้องทดลองยังต้องรอ Adapter/หลักฐาน Compile หรือ Strategy Tester จริง",
+            ]
+        else:
+            next_actions = [
+                "โรงงาน EA และห้องทดลองรับ MT5 เป้าหมายกลางแล้ว",
+                "ยังต้องรอ Adapter/หลักฐาน Compile หรือ Strategy Tester จริงก่อนอ้างว่ารันสำเร็จ",
+            ]
+        # The selection and its authoritative read-back above are the committed
+        # operation. Reports, mission bookkeeping, and audit logs are useful
+        # observability, but a later disk/logging failure must never turn a
+        # successful configuration into a false HTTP 500 (which could prompt a
+        # user to submit the same mutation again).
+        mission_result = (
+            f"บันทึก {normalized_platform.upper()} เป้าหมายกลางให้ทุกระบบที่รองรับแล้ว"
+        )
+        report = None
+        try:
+            report = create_report({
+                "type": "terminal_selection_report",
+                "title": f"ตั้งค่า {selected_candidate['labelTh']} ให้ระบบที่รองรับแล้ว",
+                "summary": (
+                    "Backend บันทึก Candidate เดียวให้ทุกระบบที่รองรับในการเขียนครั้งเดียว "
+                    "การตั้งค่านี้ไม่ได้เปิดหรือควบคุม Terminal และไม่ได้เปิด Demo/Live Trading"
+                ),
+                "ownerAgentId": "manager",
+                "linkedMissionId": mission_id,
+                "linkedPropId": GLOBAL_METATRADER_DISCOVERY_PROP_ID,
+                "status": "ready",
+                "findings": [
+                    f"เป้าหมาย: {selected_candidate['labelTh']}",
+                    f"Platform: {normalized_platform.upper()}",
+                    f"ผูกครบ {len(target_prop_ids)}/{len(target_prop_ids)} ระบบแบบ atomic",
+                ],
+                "metrics": {
+                    "candidateId": candidate_id,
+                    "platform": normalized_platform,
+                    "targetCount": len(target_prop_ids),
+                    "configuredTargetCount": len(target_prop_ids),
+                    "changedTargetCount": len(changed_target_ids),
+                    "atomicFanOut": True,
+                    "adapterEnabled": False,
+                    "liveTradingEnabled": False,
+                },
+                "risks": [
+                    "การเลือก Terminal เป้าหมายไม่ใช่หลักฐานว่า Compile, Backtest, Optimization หรือ Trading สำเร็จ"
+                ],
+                "nextActions": next_actions,
+                "safety": {"approvalRequired": False, "publicShareable": False},
+            })
+        except Exception:
+            observability_warnings.append("report_write_failed")
+
+        mission_completed = False
+        report_valid = isinstance(report, dict) and bool(safe_reference(report.get("id")))
+        if not report_valid and "report_write_failed" not in observability_warnings:
+            observability_warnings.append("report_write_invalid")
+        if mission is not None and report_valid:
+            try:
+                _complete_diagnostic_mission(mission, report, mission_result)
+                mission_completed = True
+            except Exception:
+                observability_warnings.append("mission_completion_failed")
+
+        if mission is not None and not mission_completed:
+            try:
+                completed_at = utc_now()
+                report_id = (
+                    safe_reference(report.get("id"))
+                    if isinstance(report, dict)
+                    else None
+                )
+                mission["status"] = "completed"
+                mission["phase"] = "terminal_global_target_configured"
+                mission["workStatus"] = "completed"
+                mission["result"] = redact_text(mission_result, 1200)
+                mission["reportIds"] = [report_id] if report_id else []
+                mission["completedAt"] = completed_at
+                mission["updatedAt"] = completed_at
+                mission.pop("errorCode", None)
+                replace_mission(mission)
+                mission_completed = True
+            except Exception:
+                observability_warnings.append("mission_persistence_failed")
+
+        try:
+            append_audit({
+                "type": "terminal.global_target_selected",
+                "missionId": mission_id,
+                "ownerAgentId": "manager",
+                "candidateId": candidate_id,
+                "platform": normalized_platform,
+                "targetPropIds": list(target_prop_ids),
+                "changedTargetIds": changed_target_ids,
+                "unchangedTargetIds": unchanged_target_ids,
+                "selectionRevisions": selection_revisions,
+                "status": "configured",
+                "mode": "backend_atomic_target_configuration",
+                "sideEffects": False,
+                "localStateChanged": bool(changed_target_ids),
+                "terminalLaunched": False,
+                "adapterEnabled": False,
+                "liveTradingEnabled": False,
+            })
+        except Exception:
+            observability_warnings.append("audit_write_failed")
+
+        report_model = None
+        if isinstance(report, dict):
+            try:
+                report_model = report_read_model_item(report)
+            except Exception:
+                observability_warnings.append("report_projection_failed")
         return {
             "ok": True,
-            "missionId": mission["id"],
-            "ownerAgentId": owner,
+            "schemaVersion": GLOBAL_METATRADER_HUB_SCHEMA_VERSION,
             "status": "completed",
-            "terminalStatus": terminal_state,
-            "connectionChecklist": dashboard_connection_checklist(prop_id, terminals=terminal_state),
-            "report": report_read_model_item(report),
+            "platform": normalized_platform,
+            "selectedCandidate": selected_candidate,
+            "targetPropIds": list(target_prop_ids),
+            "targetCount": len(target_prop_ids),
+            "configuredTargetCount": len(target_prop_ids),
+            "changedTargetIds": changed_target_ids,
+            "unchangedTargetIds": unchanged_target_ids,
+            "selectionRevisions": selection_revisions,
+            "atomic": True,
+            "missionId": mission_id,
+            "report": report_model,
+            "globalMetatraderHub": global_model,
+            "observabilityStatus": (
+                "degraded" if observability_warnings else "complete"
+            ),
+            "observabilityWarnings": observability_warnings,
+            "safety": {
+                "selectionIsConfigurationOnly": True,
+                "terminalLaunched": False,
+                "adapterEnabled": False,
+                "liveTradingEnabled": False,
+            },
         }
     except Exception:
-        _fail_diagnostic_mission(mission, "terminal.discovery_failed", "terminal_discovery_failed")
+        if mission is not None:
+            try:
+                _fail_diagnostic_mission(
+                    mission,
+                    "terminal.global_target_selection_failed",
+                    "terminal_global_target_selection_failed",
+                )
+            except Exception:
+                pass
         raise
+
+
+def select_metatrader_target_compatibility_alias(
+    prop_id: str,
+    candidate_id: str,
+) -> dict:
+    """Keep the old HTTP shape without permitting per-dashboard drift.
+
+    The central header is now the only interactive owner of Terminal selection,
+    but older clients may still call the per-dashboard endpoint.  Resolve the
+    candidate's platform from Backend state, verify that the requested dashboard
+    is a consumer of that platform, then delegate to the same atomic fan-out
+    transaction used by the central control.
+    """
+    if not SAFE_ID_PATTERN.fullmatch(prop_id) or not find_room_prop(prop_id):
+        raise RequestError("Unknown dashboard id.", 404)
+    if not SAFE_ID_PATTERN.fullmatch(candidate_id) or not candidate_id.startswith("mtc-"):
+        raise RequestError("รหัสเป้าหมาย MT4 / MT5 ไม่ถูกต้อง", 422)
+
+    with METATRADER_TARGETS_LOCK:
+        store = _load_metatrader_target_store_unlocked()
+        record = store["candidates"].get(candidate_id)
+        if not isinstance(record, dict):
+            raise RequestError("ไม่พบเป้าหมายนี้ กรุณากดสแกน MT4 / MT5 ใหม่", 404)
+        if not _metatrader_candidate_record_is_current(record):
+            raise RequestError("เป้าหมายนี้ไม่พร้อมใช้งานแล้ว กรุณากดสแกนใหม่", 409)
+        platform = str(record.get("platform") or "").strip().lower()
+
+    target_prop_ids = GLOBAL_METATRADER_SELECTION_TARGETS.get(platform, ())
+    if prop_id not in target_prop_ids:
+        raise RequestError("เป้าหมายนี้ไม่ตรงกับ Terminal ที่ Dashboard รองรับ", 422)
+
+    result = select_global_metatrader_target(platform, candidate_id)
+    global_model = (
+        result.get("globalMetatraderHub")
+        if isinstance(result.get("globalMetatraderHub"), dict)
+        else {}
+    )
+    platform_model = (
+        global_model.get("platforms", {}).get(platform, {})
+        if isinstance(global_model.get("platforms"), dict)
+        else {}
+    )
+    targets = platform_model.get("targets") if isinstance(platform_model, dict) else []
+    selection = next(
+        (
+            item
+            for item in (targets if isinstance(targets, list) else [])
+            if isinstance(item, dict) and item.get("propId") == prop_id
+        ),
+        None,
+    )
+    if not isinstance(selection, dict) or selection.get("status") != "configured":
+        raise DataIntegrityError(
+            "Legacy MetaTrader compatibility projection was not configured after atomic selection."
+        )
+    return {
+        **result,
+        "legacyRequestPropId": prop_id,
+        "compatibilityMode": "central_atomic_alias",
+        "selection": selection,
+    }
 
 
 def select_metatrader_target(prop_id: str, candidate_id: str) -> dict:
@@ -47200,7 +49490,7 @@ def _radar_evidence_urls_from_artifact(
         if not normalized or normalized in urls:
             return None
         urls.append(normalized)
-    return urls
+    return urls if _radar_urls_follow_source_policy(urls) else None
 
 
 def _radar_incomplete_batch_manifest_for_artifact(
@@ -47551,11 +49841,63 @@ def _radar_retryable_dedup_output_progress(
     if errors == ["daily_batch_history_catalog_unavailable"]:
         return 0
     duplicate_pattern = re.compile(
-        r"entry_[1-6]_(?:historical_source_duplicate|duplicate_source_in_batch)"
+        r"entry_[1-6]_(?:historical_(?:product|source)_duplicate|"
+        r"duplicate_(?:product|source)_in_batch)"
     )
     if not all(duplicate_pattern.fullmatch(error) for error in errors):
         return None
     return max(0, RADAR_DAILY_BATCH_REQUIRED_ITEMS - len(set(errors)))
+
+
+def _radar_retryable_source_policy_output_failure(
+    output_receipt: object,
+    evidence_urls: object,
+) -> bool:
+    """Admit only bounded source-policy failures into fresh batch repair."""
+
+    receipt = output_receipt if isinstance(output_receipt, dict) else {}
+    urls = evidence_urls if isinstance(evidence_urls, list) else []
+    errors = receipt.get("entryErrors")
+    if not (
+        len(urls) == RADAR_DAILY_BATCH_REQUIRED_ITEMS
+        and len(set(urls)) == RADAR_DAILY_BATCH_REQUIRED_ITEMS
+        and receipt.get("applicable") is True
+        and receipt.get("valid") is False
+        and receipt.get("failureCode") == "radar_output_contract_invalid"
+        and receipt.get("procedureId") == RADAR_WORKFLOW_PROCEDURE_ID
+        and receipt.get("sourceUrlCount") == RADAR_DAILY_BATCH_REQUIRED_ITEMS
+        and isinstance(errors, list)
+        and errors
+        and all(isinstance(error, str) for error in errors)
+    ):
+        return False
+    terminal_errors = {
+        "daily_batch_requires_free_public_entries",
+        "daily_batch_requires_verified_public_entries",
+        "mql5_fallback_limit_exceeded",
+    }
+    entry_error = re.compile(
+        r"entry_[1-6]_(?:direct_artifact_source_rejected|"
+        r"metadata_only_source_claim_invalid|prohibited_distribution_claim|"
+        r"restricted_access_claim|checked_at_stale)"
+    )
+    duplicate_error = re.compile(
+        r"entry_[1-6]_(?:historical_(?:product|source)_duplicate|"
+        r"duplicate_(?:product|source)_in_batch)"
+    )
+    has_source_policy_error = any(
+        error in terminal_errors or entry_error.fullmatch(error)
+        for error in errors
+    )
+    return bool(
+        has_source_policy_error
+        and all(
+            error in terminal_errors
+            or entry_error.fullmatch(error)
+            or duplicate_error.fullmatch(error)
+            for error in errors
+        )
+    )
 
 
 def _scheduled_radar_batch_completion_repair_candidate(
@@ -47678,20 +50020,31 @@ def _scheduled_radar_batch_completion_repair_candidate(
             output_receipt,
             evidence_urls,
         )
+        source_policy_failure = _radar_retryable_source_policy_output_failure(
+            output_receipt,
+            evidence_urls,
+        )
         observed_count = (
-            dedup_progress
+            0
+            if source_policy_failure
+            else dedup_progress
             if dedup_progress is not None
             else len(evidence_urls)
             if len(evidence_urls) <= RADAR_DAILY_BATCH_REQUIRED_ITEMS
             and len(set(evidence_urls)) == len(evidence_urls)
             else 0
         )
-        return {
+        candidate = {
             "artifactPath": artifact_reference,
             "artifactDigest": artifact_digest,
             "observedItemCount": observed_count,
             "failureReasonCode": "radar_batch_attempt_incomplete",
         }
+        if source_policy_failure:
+            # A repair Mission can inherit an earlier exact-URL retry block.
+            # Never let a later policy rejection replay those URLs again.
+            candidate["replaceRejectedSources"] = True
+        return candidate
     artifact_digest = _radar_bounded_artifact_digest(artifact_reference)
     if not artifact_reference or not artifact_digest:
         return None
@@ -47760,10 +50113,15 @@ def _scheduled_radar_batch_completion_repair_candidate(
             or bounded_evidence_failure
         )
     )
+    source_policy_failure = _radar_retryable_source_policy_output_failure(
+        output_receipt,
+        evidence_urls,
+    )
     if (
         not zero_evidence_failure
         and not bounded_evidence_failure
         and not dedup_evidence_verified
+        and not source_policy_failure
     ):
         return None
     report_binding = None
@@ -47776,6 +50134,19 @@ def _scheduled_radar_batch_completion_repair_candidate(
         )
         if report_binding is None:
             return None
+    if source_policy_failure:
+        # Do not replay rejected URLs exactly. Start the existing bounded,
+        # same-reservation fresh-batch repair under the original rotation.
+        candidate = {
+            "artifactPath": artifact_reference,
+            "artifactDigest": artifact_digest,
+            "observedItemCount": 0,
+            "failureReasonCode": "radar_batch_attempt_incomplete",
+            "replaceRejectedSources": True,
+        }
+        if report_binding:
+            candidate["failedReport"] = report_binding
+        return candidate
     if zero_evidence_failure:
         candidate = {
             "artifactPath": artifact_reference,
@@ -47868,6 +50239,7 @@ def _apply_scheduled_radar_batch_completion_repair(
     current_artifact_digest = _radar_bounded_artifact_digest(artifact_reference)
     observed_count = candidate.get("observedItemCount")
     failure_reason = str(candidate.get("failureReasonCode") or "")
+    replace_rejected_sources = candidate.get("replaceRejectedSources", False)
     failed_report = (
         candidate.get("failedReport")
         if isinstance(candidate.get("failedReport"), dict)
@@ -47915,11 +50287,24 @@ def _apply_scheduled_radar_batch_completion_repair(
             "radar_open_verification_incomplete",
             "radar_batch_attempt_incomplete",
         )
+        or not isinstance(replace_rejected_sources, bool)
     ):
         return False
     detail = str(mission.get("detail") or "").rstrip()
     exact_url_prompt = _radar_evidence_urls_from_candidate_block(detail)
     prompt_block = _radar_batch_completion_repair_prompt_block()
+    exact_marker_present = bool(
+        RADAR_EVIDENCE_CANDIDATE_BLOCK_START in detail
+        or RADAR_EVIDENCE_CANDIDATE_BLOCK_END in detail
+    )
+    if replace_rejected_sources:
+        if exact_marker_present:
+            stripped_detail = _radar_detail_without_terminal_candidate_block(detail)
+            if stripped_detail is None:
+                return False
+            detail = stripped_detail
+        exact_url_prompt = None
+        mission.pop("correctiveRetry", None)
     prompt_start_count = detail.count(RADAR_BATCH_COMPLETION_REPAIR_BLOCK_START)
     prompt_end_count = detail.count(RADAR_BATCH_COMPLETION_REPAIR_BLOCK_END)
     if exact_url_prompt:
@@ -47973,6 +50358,7 @@ def _apply_scheduled_radar_batch_completion_repair(
             240,
         ),
         "correctiveOpenHourlyReservation": hourly_reservation,
+        "replacedRejectedSourceCandidates": replace_rejected_sources,
     }
     schedule = _radar_batch_completion_repair_schedule(
         existing_state,
@@ -48063,6 +50449,7 @@ def _apply_scheduled_radar_batch_completion_repair(
         "version": RADAR_BATCH_COMPLETION_REPAIR_VERSION,
         "kind": RADAR_BATCH_COMPLETION_REPAIR_KIND,
         "totalAttemptCount": schedule["totalAttemptCount"],
+        "maximumTotalAttempts": RADAR_BATCH_COMPLETION_MAX_TOTAL_ATTEMPTS,
         "burstAttemptCount": schedule["burstAttemptCount"],
         "maximumAttemptsPerBurst": (
             RADAR_BATCH_COMPLETION_MAX_ATTEMPTS_PER_BURST
@@ -56574,12 +58961,13 @@ def _apply_scheduled_public_research_completion_retry(
     failure_code: str,
     failure_summary: str,
 ) -> bool:
-    """Requeue incomplete scheduled public research until it really completes.
+    """Requeue incomplete scheduled public research within a fixed ceiling.
 
     This is the final recovery rail after the more specific six-URL/schema
     repairs.  It keeps the same Mission, idempotency key and daily reservation,
-    and uses exponential delay capped at one hour so a permanent upstream
-    outage cannot create a hot loop or consume a second daily slot.
+    and uses exponential delay capped at one hour.  Radar's dispatch lifecycle
+    quarantines a permanent failure at the attempt/age boundary so it cannot
+    consume later daily slots forever.
     """
 
     context = _workflow_context_storage(mission.get("workflowContext"))
@@ -56627,6 +59015,7 @@ def _apply_scheduled_public_research_completion_retry(
     retry.update({
         "schemaVersion": SCHEDULED_RADAR_COMPLETION_RETRY_SCHEMA,
         "attemptCount": retry_count,
+        "maximumAttempts": SCHEDULED_RADAR_COMPLETION_RETRY_MAX_ATTEMPTS,
         "lastFailureCode": redact_text(str(failure_code or "runner_failed"), 120),
         "lastFailureSummary": redact_text(str(failure_summary or ""), 1200),
         "lastFailedAt": requeued_at,
@@ -58379,6 +60768,246 @@ def _radar_execution_reservation_bangkok_date(mission: object) -> str | None:
     return match.group(1) if match else None
 
 
+def _radar_retry_quarantine_candidate(
+    mission: object,
+    slot_date: str,
+    current_date: str,
+) -> dict | None:
+    """Return a bounded-retry terminalization packet for trusted Radar work."""
+
+    row = mission if isinstance(mission, dict) else {}
+    context = _workflow_context_storage(row.get("workflowContext")) or {}
+    reservation = (
+        context.get("executionReservation")
+        if isinstance(context.get("executionReservation"), dict)
+        else {}
+    )
+    try:
+        age_days = (
+            datetime.strptime(current_date, "%Y-%m-%d").date()
+            - datetime.strptime(slot_date, "%Y-%m-%d").date()
+        ).days
+    except ValueError:
+        return None
+
+    batch = (
+        row.get("radarBatchRepair")
+        if isinstance(row.get("radarBatchRepair"), dict)
+        else None
+    )
+    if (
+        isinstance(batch, dict)
+        and batch.get("schemaVersion")
+        == "scheduled-radar-batch-completion-repair-v1"
+        and batch.get("kind") == RADAR_BATCH_COMPLETION_REPAIR_KIND
+        and batch.get("status") in {"queued", "deferred"}
+    ):
+        attempts = clamp_int(batch.get("totalAttemptCount"), 0, 0, 100000)
+        reason = None
+        if attempts >= RADAR_BATCH_COMPLETION_MAX_TOTAL_ATTEMPTS:
+            reason = "maximum_attempts_exhausted"
+        elif age_days > RADAR_RETRY_MAX_CARRY_FORWARD_DAYS:
+            reason = "maximum_carry_forward_age_exhausted"
+        if reason:
+            return {
+                "stateKey": "radarBatchRepair",
+                "kind": RADAR_BATCH_COMPLETION_REPAIR_KIND,
+                "attemptCount": attempts,
+                "maximumAttempts": RADAR_BATCH_COMPLETION_MAX_TOTAL_ATTEMPTS,
+                "reason": reason,
+                "failureCode": str(
+                    batch.get("failureReasonCode")
+                    or "radar_batch_attempt_incomplete"
+                ),
+            }
+
+    completion = (
+        row.get("scheduledCompletionRetry")
+        if isinstance(row.get("scheduledCompletionRetry"), dict)
+        else None
+    )
+    if (
+        isinstance(completion, dict)
+        and completion.get("schemaVersion")
+        == SCHEDULED_RADAR_COMPLETION_RETRY_SCHEMA
+        and completion.get("sameMission") is True
+        and completion.get("sameDailyReservation") is True
+        and completion.get("newDailyReservation") is False
+        and completion.get("originalSlotKey") == reservation.get("slotKey")
+    ):
+        attempts = clamp_int(completion.get("attemptCount"), 0, 0, 100000)
+        reason = None
+        if attempts >= SCHEDULED_RADAR_COMPLETION_RETRY_MAX_ATTEMPTS:
+            reason = "maximum_attempts_exhausted"
+        elif age_days > RADAR_RETRY_MAX_CARRY_FORWARD_DAYS:
+            reason = "maximum_carry_forward_age_exhausted"
+        if reason:
+            return {
+                "stateKey": "scheduledCompletionRetry",
+                "kind": "scheduled_public_research_completion_retry",
+                "attemptCount": attempts,
+                "maximumAttempts": (
+                    SCHEDULED_RADAR_COMPLETION_RETRY_MAX_ATTEMPTS
+                ),
+                "reason": reason,
+                "failureCode": str(
+                    completion.get("lastFailureCode") or "runner_failed"
+                ),
+            }
+    return None
+
+
+def _quarantine_exhausted_radar_retry(
+    mission: object,
+    *,
+    slot_date: str,
+    current_date: str,
+) -> bool:
+    """Terminalize one poison Radar retry and release future daily slots.
+
+    The last failure packet and its digest-bound artifact references stay on
+    the Mission for forensic inspection.  Only retry/authorization state is
+    retired; no web, Sheet, MetaTrader, or other external action is performed.
+    """
+
+    row = mission if isinstance(mission, dict) else {}
+    mission_id = safe_reference(row.get("id"))
+    candidate = _radar_retry_quarantine_candidate(
+        row,
+        slot_date,
+        current_date,
+    )
+    if not mission_id or not candidate:
+        return False
+
+    quarantined = None
+    now_text = utc_now()
+    with MISSIONS_LOCK:
+        missions = load_missions()
+        for stored in missions:
+            if (
+                stored.get("id") != mission_id
+                or stored.get("status") != "queued"
+                or _radar_execution_reservation_bangkok_date(stored)
+                != slot_date
+            ):
+                continue
+            live_candidate = _radar_retry_quarantine_candidate(
+                stored,
+                slot_date,
+                current_date,
+            )
+            if not live_candidate or live_candidate != candidate:
+                break
+            state_key = str(candidate["stateKey"])
+            retry_state = copy.deepcopy(stored.get(state_key) or {})
+            previous_failure = (
+                copy.deepcopy(retry_state.get("previousFailure"))
+                if isinstance(retry_state.get("previousFailure"), dict)
+                else {
+                    "failureCode": retry_state.get("lastFailureCode"),
+                    "failureSummary": retry_state.get("lastFailureSummary"),
+                    "lastFailedAt": retry_state.get("lastFailedAt"),
+                }
+            )
+            retry_state.update({
+                "status": "quarantined",
+                "quarantinedAt": now_text,
+                "quarantineReason": candidate["reason"],
+                "maximumAttempts": candidate["maximumAttempts"],
+                "remainingAttempts": 0,
+                "nextAttemptAt": None,
+                "automaticRetry": False,
+                "forensicFailure": previous_failure,
+            })
+            stored[state_key] = retry_state
+            execution = (
+                copy.deepcopy(stored.get("execution"))
+                if isinstance(stored.get("execution"), dict)
+                else {}
+            )
+            execution.update({
+                "dispatchState": "blocked",
+                "heartbeatAt": now_text,
+                "completedAt": now_text,
+                "nextAttemptAt": None,
+                "processStarted": False,
+                "automaticRetry": False,
+                "authorizationRetiredAt": now_text,
+                "authorizationRetiredReason": "radar_retry_quarantined",
+            })
+            stored["status"] = "blocked"
+            stored["phase"] = "auto_guarded_radar_retry_quarantined"
+            stored["workStatus"] = "blocked"
+            stored["errorCode"] = "radar_retry_quarantined"
+            stored["runnerStatus"] = "radar_retry_quarantined"
+            stored["result"] = (
+                "Radar retry ถูกหยุดอย่างปลอดภัยหลังเกินขอบเขตการลองอัตโนมัติ "
+                f"({candidate['failureCode']}). ระบบเก็บรายละเอียดความล้มเหลวเดิมไว้ "
+                "และปล่อยรอบรายวันถัดไปให้ทำงานได้"
+            )
+            stored["updatedAt"] = now_text
+            stored["heartbeatAt"] = now_text
+            stored["completedAt"] = now_text
+            stored["execution"] = execution
+            quarantined = copy.deepcopy(stored)
+            break
+        if quarantined:
+            save_missions(missions)
+    if not quarantined:
+        return False
+
+    carry_forward_released = False
+
+    def release(settings: dict) -> dict:
+        nonlocal carry_forward_released
+        schedule = (
+            settings.get("indicatorScoutSchedule")
+            if isinstance(settings.get("indicatorScoutSchedule"), dict)
+            else {}
+        )
+        carry_mission_id = safe_reference(schedule.get("carryForwardMissionId"))
+        last_mission_id = safe_reference(schedule.get("lastMissionId"))
+        if carry_mission_id == mission_id or (
+            carry_mission_id is None and last_mission_id == mission_id
+        ):
+            carry_forward_released = bool(
+                schedule.get("carryForwardBlockDate")
+                or schedule.get("carryForwardMissionId")
+            )
+            schedule["carryForwardBlockDate"] = None
+            schedule["carryForwardMissionId"] = None
+        schedule["lastRunStatus"] = "failed"
+        schedule["lastResultKind"] = "radar_retry_quarantined"
+        schedule["lastError"] = candidate["failureCode"]
+        schedule["lastErrorAt"] = now_text
+        settings["indicatorScoutSchedule"] = schedule
+        return settings
+
+    _mutate_dashboard_workflow_settings(release)
+    append_audit({
+        "type": "mission.radar_retry_quarantined",
+        "missionId": mission_id,
+        "retryKind": candidate["kind"],
+        "failureCode": candidate["failureCode"],
+        "quarantineReason": candidate["reason"],
+        "retryAttemptCount": candidate["attemptCount"],
+        "maximumRetryAttempts": candidate["maximumAttempts"],
+        "slotBangkokDate": slot_date,
+        "currentBangkokDate": current_date,
+        "carryForwardReleased": carry_forward_released,
+        "forensicFailureRetained": True,
+        "automaticRetry": False,
+        "processStarted": False,
+        "externalWrites": False,
+        "metaTraderActions": False,
+    })
+    parent_id = safe_reference(quarantined.get("parentMissionId"))
+    if parent_id:
+        refresh_parent_mission(parent_id)
+    return True
+
+
 def _expire_prior_day_radar_mission(mission: object) -> bool:
     """Retire stale Radar work, except a verified completion carry-forward.
 
@@ -58386,8 +61015,8 @@ def _expire_prior_day_radar_mission(mission: object) -> bool:
     that day's 09:00 slot.  The historical Mission remains visible, terminal,
     and non-retryable.  The exceptions are fail-closed batch-completion repair
     and a digest-bound generic scheduled-completion retry.  Both keep the
-    original slot and are marked overdue rather than pretending that an
-    incomplete daily report succeeded or reserving a new daily counter.
+    original slot for one carry-forward day, then are quarantined with their
+    forensic failure intact rather than starving later daily rounds.
     """
 
     row = mission if isinstance(mission, dict) else {}
@@ -58395,6 +61024,12 @@ def _expire_prior_day_radar_mission(mission: object) -> bool:
     if not slot_date:
         return False
     current_date = _dashboard_scheduler_local_now().strftime("%Y-%m-%d")
+    if _radar_retry_quarantine_candidate(row, slot_date, current_date):
+        return _quarantine_exhausted_radar_retry(
+            row,
+            slot_date=slot_date,
+            current_date=current_date,
+        )
     if slot_date >= current_date:
         return False
     mission_id = str(row.get("id") or "")
@@ -61768,8 +64403,15 @@ def collaboration_scheduler_loop() -> None:
     update_collaboration_runtime_state(status="stopped", heartbeatAt=utc_now())
 
 
-def start_collaboration_scheduler() -> threading.Thread:
+def start_collaboration_scheduler() -> threading.Thread | None:
     global COLLABORATION_SCHEDULER_THREAD
+    if not COLLABORATION_SCHEDULE_SURFACE_AVAILABLE:
+        update_collaboration_runtime_state(
+            status="disabled",
+            heartbeatAt=utc_now(),
+            lastError=None,
+        )
+        return None
     with COLLABORATION_STATE_LOCK:
         if COLLABORATION_SCHEDULER_THREAD and COLLABORATION_SCHEDULER_THREAD.is_alive():
             return COLLABORATION_SCHEDULER_THREAD
@@ -61921,18 +64563,32 @@ class BridgeHandler(SimpleHTTPRequestHandler):
         # query values, codes, states, tokens, or exception text into HTML.
         title = "เชื่อมต่อ Google Sheets สำเร็จ" if connected else "เชื่อมต่อ Google Sheets ไม่สำเร็จ"
         accent = "#20d982" if connected else "#ff6b6b"
+        result_marker = "success" if connected else "failure"
         body = (
-            "<!doctype html><html lang=\"th\"><head><meta charset=\"utf-8\">"
+            f"<!doctype html><html lang=\"th\" data-metafx-oauth-result=\"{result_marker}\">"
+            "<head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
             f"<title>{title}</title></head>"
             "<body style=\"margin:0;background:#06121a;color:#e9f8ff;font-family:system-ui,sans-serif;"
             "display:grid;min-height:100vh;place-items:center\">"
             f"<main style=\"max-width:620px;border:1px solid {accent};padding:32px;background:#091b25\">"
             f"<h1 style=\"color:{accent}\">{title}</h1><p>{message_th}</p>"
-            "<p>ปิดแท็บนี้แล้วกลับไปยัง Agent HQ ได้</p></main></body></html>"
+            "<p>กำลังส่งผลกลับไปยัง Agent HQ และปิดหน้าต่างนี้อัตโนมัติ</p></main>"
+            "<script>(()=>{const result=document.documentElement.dataset.metafxOauthResult;"
+            "try{if(window.opener&&!window.opener.closed){window.opener.postMessage("
+            "{type:'metafx-google-oauth-result-v1',result},window.location.origin);}}catch{}"
+            "window.setTimeout(()=>window.close(),350);})();</script></body></html>"
         ).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+            "base-uri 'none'; frame-ancestors 'none'",
+        )
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -62532,6 +65188,13 @@ class BridgeHandler(SimpleHTTPRequestHandler):
         if path == "/api/collaboration/schedule":
             self.send_json(collaboration_schedule_read_model())
             return
+        if path == "/api/integrations/metatrader/global":
+            self.send_json({
+                "ok": True,
+                "globalMetatraderHub": global_metatrader_hub_read_model(),
+                "updatedAt": utc_now(),
+            })
+            return
         if path == "/api/integrations/metatrader/snapshot":
             prop_id = str(query.get("propId", [AI_TRADE_COUNCIL_PROP_ID])[0]).strip()
             if not SAFE_ID_PATTERN.fullmatch(prop_id) or prop_id not in METATRADER_TARGET_PROP_IDS:
@@ -62900,6 +65563,11 @@ class BridgeHandler(SimpleHTTPRequestHandler):
             if path == "/api/props/mission_strategy_table/research-sheet/activate":
                 self.send_result(activate_research_sheet_hub(payload))
                 return
+            if path == "/api/props/mission_strategy_table/research-sheet/verify":
+                if payload:
+                    raise RequestError("Google Sheet verification accepts an empty JSON object.", 422)
+                self.send_result(verify_and_backfill_research_sheet_hub())
+                return
             if path == "/api/props/mission_strategy_table/research-sheet/flush":
                 unexpected = sorted(set(payload) - {"retryFailed"})
                 if unexpected:
@@ -63006,10 +65674,42 @@ class BridgeHandler(SimpleHTTPRequestHandler):
                     raise RequestError("Unknown dashboard id.", 404)
                 self.send_result(run_metatrader_discovery(prop_id))
                 return
+            if path == "/api/integrations/metatrader/global/discover":
+                if payload:
+                    raise RequestError(
+                        "Global MetaTrader discovery does not accept request fields.",
+                        422,
+                    )
+                self.send_result(run_global_metatrader_discovery())
+                return
+            if path == "/api/integrations/metatrader/global/select":
+                unexpected = sorted(set(payload) - {"platform", "candidateId"})
+                if unexpected:
+                    raise RequestError(
+                        "Global MetaTrader selection contains unsupported fields.",
+                        422,
+                    )
+                platform = str(payload.get("platform") or "").strip()
+                candidate_id = str(payload.get("candidateId") or "").strip()
+                self.send_result(
+                    select_global_metatrader_target(platform, candidate_id)
+                )
+                return
             if path == "/api/integrations/metatrader/select":
+                unexpected = sorted(set(payload) - {"propId", "candidateId"})
+                if unexpected:
+                    raise RequestError(
+                        "MetaTrader selection contains unsupported fields.",
+                        422,
+                    )
                 prop_id = str(payload.get("propId") or "").strip()
                 candidate_id = str(payload.get("candidateId") or "").strip()
-                self.send_result(select_metatrader_target(prop_id, candidate_id))
+                self.send_result(
+                    select_metatrader_target_compatibility_alias(
+                        prop_id,
+                        candidate_id,
+                    )
+                )
                 return
             if path == "/api/ai-trade-council/automation":
                 self.send_result(set_ai_trade_council_automation(payload))
@@ -63108,6 +65808,7 @@ def main() -> int:
         ensure_memory_dir()
         ensure_operator_mode_store()
         ensure_collaboration_schedule_store()
+        retire_hidden_collaboration_schedule()
         ensure_interactive_meeting_sessions_store()
         ensure_ai_trade_council_automation_store()
         reconciled_approval_count = reconcile_stale_approval_missions()
@@ -63134,7 +65835,6 @@ def main() -> int:
         write_bridge_control_file(args.host, actual_port)
         start_mission_worker()
         start_dashboard_workflow_scheduler()
-        start_collaboration_scheduler()
         start_ai_trade_council_automation_scheduler()
         RADAR_IMAGE_ADAPTER_RUNTIME_ENABLED = True
         queued_radar_publisher_images = queue_latest_radar_publisher_image_enrichment()
@@ -63165,6 +65865,7 @@ def main() -> int:
             "missionWorker": mission_worker_read_model(),
             "dashboardWorkflowScheduler": dashboard_workflow_scheduler_read_model(),
             "collaboration": collaboration_schedule_read_model(),
+            "collaborationScheduledAutomationStarted": False,
             "aiTradeCouncilAutomation": ai_trade_council_automation_read_model(),
             "radarPublisherImageEnrichmentQueued": queued_radar_publisher_images,
         })

@@ -48,7 +48,9 @@ $postInstallFailures = New-Object 'System.Collections.Generic.List[string]'
 $watchdogStatus = "pending"
 $watchdogFailure = $false
 $googleSetupFailure = $false
+$googleSetupStatus = "not_requested"
 $validatedSourceCommit = ""
+$validatedGoogleClientJsonPath = ""
 
 $gitProvenanceValues = @($ExpectedGitRepository, $ExpectedGitTag, $ExpectedSourceVersion)
 $gitProvenanceValueCount = @($gitProvenanceValues | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
@@ -99,7 +101,7 @@ if (
 }
 if (
     -not [string]::IsNullOrWhiteSpace($ExpectedGoogleClientId) -and
-    $ExpectedGoogleClientId.Trim() -notmatch '^[A-Za-z0-9._-]+\.apps\.googleusercontent\.com$'
+    $ExpectedGoogleClientId.Trim() -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{8,240}\.apps\.googleusercontent\.com$'
 ) {
     throw "ExpectedGoogleClientId ไม่ใช่ Google OAuth Client ID ที่รองรับ"
 }
@@ -402,6 +404,104 @@ function Get-ComparablePath {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     return [IO.Path]::GetFullPath($Path).TrimEnd("\")
+}
+
+function Assert-GoogleOAuthOneRunInputs {
+    if ([string]::IsNullOrWhiteSpace($GoogleClientJsonPath)) {
+        return
+    }
+
+    try {
+        $candidatePath = $GoogleClientJsonPath.Trim().Trim('"')
+        $fullPath = [IO.Path]::GetFullPath($candidatePath)
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            throw "missing"
+        }
+        $file = Get-Item -LiteralPath $fullPath -Force
+    }
+    catch {
+        throw "ไม่พบไฟล์ Google OAuth Client JSON ที่ระบุ จึงหยุดก่อนติดตั้ง"
+    }
+    if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "ไม่รับ Google OAuth Client JSON ที่เป็น Link/Junction"
+    }
+    if ($file.Extension -ine ".json" -or $file.Length -lt 16 -or $file.Length -gt 64KB) {
+        throw "Google OAuth Client ต้องเป็นไฟล์ JSON ขนาดไม่เกิน 64 KiB"
+    }
+
+    try {
+        $bytes = [IO.File]::ReadAllBytes($fullPath)
+        if ($bytes.Length -gt 64KB) {
+            throw "too-large"
+        }
+        $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+        $document = $strictUtf8.GetString($bytes) | ConvertFrom-Json
+        $installedProperty = $document.PSObject.Properties["installed"]
+        if (-not $installedProperty -or -not $installedProperty.Value) {
+            throw "not-desktop"
+        }
+        $installed = $installedProperty.Value
+        $clientIdProperty = $installed.PSObject.Properties["client_id"]
+        $clientSecretProperty = $installed.PSObject.Properties["client_secret"]
+        $authUriProperty = $installed.PSObject.Properties["auth_uri"]
+        $tokenUriProperty = $installed.PSObject.Properties["token_uri"]
+        $redirectUrisProperty = $installed.PSObject.Properties["redirect_uris"]
+        if (
+            -not $clientIdProperty -or $clientIdProperty.Value -isnot [string] -or
+            ($clientSecretProperty -and $clientSecretProperty.Value -isnot [string]) -or
+            -not $authUriProperty -or $authUriProperty.Value -isnot [string] -or
+            -not $tokenUriProperty -or $tokenUriProperty.Value -isnot [string] -or
+            -not $redirectUrisProperty -or $redirectUrisProperty.Value -isnot [System.Array]
+        ) {
+            throw "invalid-shape"
+        }
+        $clientId = ([string]$clientIdProperty.Value).Trim()
+        $clientSecret = $(if ($clientSecretProperty) { ([string]$clientSecretProperty.Value).Trim() } else { "" })
+        if (
+            $clientId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{8,240}\.apps\.googleusercontent\.com$' -or
+            $clientSecret.Length -gt 2048 -or
+            @($clientSecret.ToCharArray() | Where-Object { [int]$_ -lt 32 }).Count -gt 0 -or
+            [string]$authUriProperty.Value -cne "https://accounts.google.com/o/oauth2/auth" -or
+            [string]$tokenUriProperty.Value -cne "https://oauth2.googleapis.com/token" -or
+            -not [string]::Equals($clientId, $ExpectedGoogleClientId.Trim(), [StringComparison]::Ordinal)
+        ) {
+            throw "invalid-client"
+        }
+
+        $loopbackReady = $false
+        foreach ($redirectValue in @($redirectUrisProperty.Value)) {
+            if ($redirectValue -isnot [string]) {
+                continue
+            }
+            try {
+                $redirectUri = [Uri]([string]$redirectValue)
+                if (
+                    $redirectUri.IsAbsoluteUri -and
+                    [string]$redirectUri.Scheme -ceq "http" -and
+                    ([string]$redirectUri.Host).ToLowerInvariant() -in @("localhost", "127.0.0.1") -and
+                    [string]::IsNullOrWhiteSpace([string]$redirectUri.UserInfo) -and
+                    [string]::IsNullOrWhiteSpace([string]$redirectUri.Query) -and
+                    [string]::IsNullOrWhiteSpace([string]$redirectUri.Fragment)
+                ) {
+                    $loopbackReady = $true
+                    break
+                }
+            }
+            catch { }
+        }
+        if (-not $loopbackReady) {
+            throw "no-loopback"
+        }
+    }
+    catch {
+        throw "Google OAuth JSON ไม่ใช่ Desktop app, Client ID ไม่ตรง หรือ endpoint ไม่ถูกต้อง จึงหยุดก่อนติดตั้ง"
+    }
+
+    # Keep only the canonical path. The setup script parses and validates the
+    # file again immediately before its DPAPI write, so a changed file still
+    # fails closed after this preflight.
+    $script:validatedGoogleClientJsonPath = $fullPath
+    Write-Step "ตรวจ Google OAuth Desktop JSON และ Client ID ก่อนติดตั้งแล้ว"
 }
 
 function Get-ConfirmedBridgeEndpoint {
@@ -973,6 +1073,25 @@ function Suspend-BridgeScheduledTask {
     if (-not $task) {
         return $false
     }
+
+    if ($PackageSmoke) {
+        # Task Scheduler is not scoped by LOCALAPPDATA. A package smoke may run
+        # beside a developer's real HQ, so only suspend a fixture task whose
+        # action explicitly targets this isolated install root.
+        $taskTargetsIsolatedInstall = $false
+        foreach ($action in @($task.Actions)) {
+            $actionIdentity = "{0}`n{1}`n{2}" -f `
+                [string]$action.Execute, [string]$action.Arguments, [string]$action.WorkingDirectory
+            if ($actionIdentity.IndexOf($installRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $taskTargetsIsolatedInstall = $true
+                break
+            }
+        }
+        if (-not $taskTargetsIsolatedInstall) {
+            Write-Step "Package Smoke ข้าม Scheduled Task ของ HQ ที่อยู่นอกพื้นที่ทดสอบ"
+            return $false
+        }
+    }
     $script:bridgeTaskExisted = $true
 
     $autostartStatePath = Join-Path $installRoot "data\runtime\bridge-autostart.json"
@@ -1376,10 +1495,10 @@ function Assert-InstallerTemporaryDirectory {
     $expectedParent = Get-InstallerTemporaryParent
     $actualParent = [IO.Path]::GetDirectoryName($resolved).TrimEnd("\")
     $expectedName = if ($Kind -ceq "stage") {
-        '^mfxhq-stage-[a-f0-9]{32}$'
+        '^(?:mhs|mfxhq-stage)-[a-f0-9]{32}$'
     }
     else {
-        '^mfxhq-rollback-[a-f0-9]{32}$'
+        '^(?:mhr|mfxhq-rollback)-[a-f0-9]{32}$'
     }
     if (
         -not $actualParent.Equals($expectedParent, [StringComparison]::OrdinalIgnoreCase) -or
@@ -1435,6 +1554,26 @@ function Remove-InstallerTemporaryDirectoryWithRetry {
         }
         catch {
             $lastError = [string]$_.Exception.Message
+            # Windows PowerShell's provider can still apply legacy MAX_PATH
+            # semantics during recursive cleanup. The exact path has already
+            # passed the canonical parent/name boundary above; retry the same
+            # directory through the Win32 extended-length namespace without
+            # invoking cmd.exe or following junctions.
+            try {
+                $extendedPath = if ($resolved.StartsWith("\\")) {
+                    "\\?\UNC\{0}" -f $resolved.TrimStart("\")
+                }
+                else {
+                    "\\?\$resolved"
+                }
+                [IO.Directory]::Delete($extendedPath, $true)
+                if (-not (Test-Path -LiteralPath $resolved)) {
+                    return
+                }
+            }
+            catch {
+                $lastError = [string]$_.Exception.Message
+            }
         }
     }
 
@@ -1590,7 +1729,7 @@ function New-StagedApplication {
     # validate every staged and projected installed file before mutation.
     $stagingParent = Get-InstallerTemporaryParent
     New-Item -ItemType Directory -Path $stagingParent -Force | Out-Null
-    $stagingRoot = Join-Path $stagingParent ("mfxhq-stage-{0}" -f [Guid]::NewGuid().ToString("N"))
+    $stagingRoot = Join-Path $stagingParent ("mhs-{0}" -f [Guid]::NewGuid().ToString("N"))
     try {
         if ($validatedSourceCommit) {
             Write-Step "กำลังสร้าง Staging จากไฟล์ที่ติดตามใน Git Tag ซึ่งยืนยันกับ GitHub แล้ว"
@@ -1670,7 +1809,7 @@ function Publish-StagedApplication {
 function New-ApplicationRollbackSnapshot {
     $rollbackParent = Get-InstallerTemporaryParent
     New-Item -ItemType Directory -Path $rollbackParent -Force | Out-Null
-    $snapshotRoot = Join-Path $rollbackParent ("mfxhq-rollback-{0}" -f [Guid]::NewGuid().ToString("N"))
+    $snapshotRoot = Join-Path $rollbackParent ("mhr-{0}" -f [Guid]::NewGuid().ToString("N"))
     $installExisted = Test-Path -LiteralPath $installRoot -PathType Container
     New-Item -ItemType Directory -Path $snapshotRoot -Force | Out-Null
 
@@ -1856,7 +1995,14 @@ function Invoke-GoogleOAuthFirstRunSetup {
     # unless an explicit, fully validated one-shot JSON setup was requested.
     if (($SkipGoogleSetup -and -not $explicitClientSetup) -or $SkipLaunch -or ($alreadyConfigured -and -not $explicitClientSetup)) {
         if ($alreadyConfigured) {
+            $script:googleSetupStatus = "ready_existing"
             Write-Host "Google OAuth Client ของ Windows User นี้ตั้งค่าไว้แล้ว" -ForegroundColor Green
+        }
+        elseif ($SkipLaunch) {
+            $script:googleSetupStatus = "skipped_no_launch"
+        }
+        elseif ($SkipGoogleSetup) {
+            $script:googleSetupStatus = "skipped_by_request"
         }
         return
     }
@@ -1872,6 +2018,7 @@ function Invoke-GoogleOAuthFirstRunSetup {
         Write-Host "ใช้ OAuth Client JSON ประเภท Desktop app ของผู้เรียนเอง ระบบจะตรวจไฟล์และเก็บด้วย Windows DPAPI" -ForegroundColor DarkGray
         $answer = Read-Host "ต้องการเลือก OAuth Client JSON ตอนนี้หรือไม่? [Y/N]"
         if ($answer -notmatch '^(?i)y(?:es)?$') {
+            $script:googleSetupStatus = "skipped_by_user"
             Write-Host "ข้ามขั้นตอน Google ตอนนี้ เปิด 2-SETUP-GOOGLE-HQ.bat ภายหลังได้" -ForegroundColor Yellow
             return
         }
@@ -1880,13 +2027,22 @@ function Invoke-GoogleOAuthFirstRunSetup {
     # Interactive and explicit paths both use -SkipBridgeEnsure -SkipOpen;
     # the already-verified Bridge stays online while only the DPAPI client is updated.
     $setupArguments = @(
-        "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-NoLogo", "-NoProfile"
+    )
+    if ($explicitClientSetup) {
+        $setupArguments += "-NonInteractive"
+    }
+    $setupArguments += @(
+        "-ExecutionPolicy", "Bypass",
         "-File", $setupScript,
         "-SkipBridgeEnsure", "-SkipOpen"
     )
     if ($explicitClientSetup) {
+        if ([string]::IsNullOrWhiteSpace($validatedGoogleClientJsonPath)) {
+            throw "ยังไม่ได้ตรวจ Google OAuth Desktop JSON ก่อนเริ่มตั้งค่า"
+        }
         $setupArguments += @(
-            "-ClientJsonPath", $GoogleClientJsonPath,
+            "-ClientJsonPath", $validatedGoogleClientJsonPath,
             "-ExpectedClientId", $ExpectedGoogleClientId
         )
     }
@@ -1896,6 +2052,15 @@ function Invoke-GoogleOAuthFirstRunSetup {
             throw "ติดตั้ง HQ สำเร็จ แต่การตั้งค่า Google OAuth ที่ระบุไม่ผ่าน กรุณาตรวจ Path และ Client ID แล้วรันติดตั้งซ้ำ"
         }
         Write-Warning "ยังตั้งค่า Google ไม่สำเร็จ ระบบหลักจะติดตั้งต่อ และสามารถเปิด 2-SETUP-GOOGLE-HQ.bat เพื่อลองใหม่"
+    }
+    elseif (Test-GoogleOAuthDeploymentConfigured -CandidateRoot $CandidateRoot) {
+        $script:googleSetupStatus = "ready_imported"
+    }
+    elseif ($explicitClientSetup) {
+        throw "ตัวตั้งค่า Google OAuth จบโดยไม่ยืนยัน Client ที่นำเข้า"
+    }
+    else {
+        $script:googleSetupStatus = "skipped_by_user"
     }
 }
 
@@ -2247,7 +2412,8 @@ function Write-InstallResult {
                 })
             }
             google_oauth_client = [ordered]@{
-                status = $(if ($googleSetupFailure) { "repair_required" } else { "complete_or_not_requested" })
+                requested = -not [string]::IsNullOrWhiteSpace($GoogleClientJsonPath)
+                status = $(if ($googleSetupFailure) { "repair_required" } else { $googleSetupStatus })
             }
         }
         safety = [ordered]@{
@@ -2264,6 +2430,9 @@ function Write-InstallResult {
 }
 
 try {
+    # Validate explicit classroom onboarding inputs before endpoint selection,
+    # staging, stopping an existing Bridge, or mutating the installation.
+    Assert-GoogleOAuthOneRunInputs
     Assert-SafeSource
     if ($ListAvailableEndpoints) {
         $candidates = @(Get-AvailableBridgeEndpointCandidates -Count 3)

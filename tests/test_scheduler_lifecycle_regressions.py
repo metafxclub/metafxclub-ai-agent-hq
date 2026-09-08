@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from datetime import datetime
@@ -34,6 +35,60 @@ class SchedulerLifecycleRegressionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.bridge.DASHBOARD_WORKFLOW_SCHEDULER_STOP.clear()
         self.bridge.DASHBOARD_WORKFLOW_SCHEDULER_WAKE.clear()
+
+    def test_scheduler_audit_declares_google_sheet_external_write_scope(self) -> None:
+        stop = mock.Mock()
+        stop.is_set.return_value = True
+        audit_events: list[dict] = []
+        with (
+            mock.patch.object(self.bridge, "DASHBOARD_WORKFLOW_SCHEDULER_STOP", stop),
+            mock.patch.object(self.bridge, "RESEARCH_SHEET_AUTO_SYNC_ENABLED", True),
+            mock.patch.object(
+                self.bridge,
+                "_dashboard_workflow_scheduler_runtime_update",
+            ),
+            mock.patch.object(
+                self.bridge,
+                "append_audit",
+                side_effect=lambda event: audit_events.append(dict(event)),
+            ),
+        ):
+            self.bridge.dashboard_workflow_scheduler_loop()
+
+        lifecycle = {
+            event["type"]: event
+            for event in audit_events
+            if event.get("type") in {
+                "dashboard.workflow_scheduler_started",
+                "dashboard.workflow_scheduler_stopped",
+            }
+        }
+        self.assertEqual(
+            set(lifecycle),
+            {
+                "dashboard.workflow_scheduler_started",
+                "dashboard.workflow_scheduler_stopped",
+            },
+        )
+        for event in lifecycle.values():
+            self.assertTrue(event["externalWrites"])
+            self.assertEqual(event["externalWriteScopes"], ["google_sheets"])
+            self.assertTrue(event["googleSheetExternalWritesEnabled"])
+            self.assertTrue(
+                event["googleSheetExternalWritesRequireActiveConfiguration"]
+            )
+            self.assertFalse(event["otherExternalWrites"])
+            self.assertFalse(event["metaTraderActions"])
+
+        contract = json.loads(
+            (PROJECT_ROOT / "contracts" / "bridge" / "bridge-contract.json").read_text(
+                encoding="utf-8"
+            )
+        )["background_scheduler"]["dashboardWorkflowScheduler"]
+        self.assertTrue(contract["googleSheetExternalWritesEnabledByDefault"])
+        self.assertEqual(contract["externalWriteScopes"], ["google_sheets"])
+        self.assertFalse(contract["otherExternalWrites"])
+        self.assertFalse(contract["metaTraderActions"])
 
     def _scheduler_model(
         self,

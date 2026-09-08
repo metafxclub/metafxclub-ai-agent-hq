@@ -816,61 +816,22 @@ const file = (name) => ({name,size:100,arrayBuffer:async () => new Uint8Array([1
         self.assertFalse(payload["fileBusy"])
         self.assertGreaterEqual(payload["saves"], 1)
 
-    def test_terminal_selection_posts_to_backend_and_commits_only_after_verification(self) -> None:
-        source = self.function_source("selectEaOptimizationLabTerminal")
-        script = "\n".join([
-            'const EA_OPTIMIZATION_LAB_PROP_ID = "right_tool_console";',
-            "const candidate = {candidateId:'terminal-robo-mt4',platform:'MT4',detected:true,labelTh:'RoboForex MT4'};",
-            "const state = {modal:{eaOptimizationLab:{platform:'MT4',terminalBusy:false,selectedTerminalId:'',plan:{ok:true},message:'',tone:''}},propReports:{right_tool_console:{}}};",
-            "let posted = null; let saved = 0; let rerenders = 0; let verificationMatches = true;",
-            "function getModalSubject() { return {id:EA_OPTIMIZATION_LAB_PROP_ID}; }",
-            "function getPropertyRole() { return {}; }",
-            "function normalizeWorkflowDashboard() { return {domainData:{eaOptimizationLab:{terminals:[candidate]}}}; }",
-            "async function postJson(url, body) { posted = {url,body}; return {ok:true}; }",
-            "async function loadPropReport() { return {connectionChecklist:{}}; }",
-            "function getMetatraderSelectionModel() { return {selectedCandidate:verificationMatches ? candidate : {candidateId:'different-terminal'}}; }",
-            "function saveSessionSnapshot() { saved += 1; }",
-            "function rerenderEaOptimizationLab() { rerenders += 1; }",
-            "function safeDashboardDisplayText(value, fallback = '') { const text = String(value ?? '').trim(); return text || fallback; }",
-            source,
-            r'''
-(async () => {
-  const confirmed = await selectEaOptimizationLabTerminal(candidate.candidateId);
-  const success = {
-    returned: Boolean(confirmed),
-    selectedTerminalId: state.modal.eaOptimizationLab.selectedTerminalId,
-    tone: state.modal.eaOptimizationLab.tone,
-    posted,
-    saved,
-  };
-  verificationMatches = false;
-  state.modal.eaOptimizationLab.selectedTerminalId = "";
-  state.modal.eaOptimizationLab.plan = {ok:true};
-  const rejected = await selectEaOptimizationLabTerminal(candidate.candidateId);
-  const failure = {
-    returned: rejected,
-    selectedTerminalId: state.modal.eaOptimizationLab.selectedTerminalId,
-    plan: state.modal.eaOptimizationLab.plan,
-    tone: state.modal.eaOptimizationLab.tone,
-  };
-  process.stdout.write(JSON.stringify({success,failure,rerenders}));
-})().catch((error) => { console.error(error); process.exit(1); });
-''',
-        ])
-        payload = self.run_node(script)
-        self.assertTrue(payload["success"]["returned"])
-        self.assertEqual(payload["success"]["posted"]["url"], "/api/integrations/metatrader/select")
-        self.assertEqual(
-            payload["success"]["posted"]["body"],
-            {"propId": "right_tool_console", "candidateId": "terminal-robo-mt4"},
+    def test_terminal_choice_is_central_and_lab_gate_uses_backend_truth_only(self) -> None:
+        self.assertNotRegex(
+            self.main,
+            r"(?:async\s+)?function\s+selectEaOptimizationLabTerminal\s*\(",
         )
-        self.assertEqual(payload["success"]["selectedTerminalId"], "terminal-robo-mt4")
-        self.assertEqual(payload["success"]["tone"], "success")
-        self.assertGreaterEqual(payload["success"]["saved"], 1)
-        self.assertIsNone(payload["failure"]["returned"])
-        self.assertEqual(payload["failure"]["selectedTerminalId"], "")
-        self.assertIsNone(payload["failure"]["plan"])
-        self.assertEqual(payload["failure"]["tone"], "error")
+        self.assertNotIn('postJson("/api/integrations/metatrader/select"', self.main)
+        source = self.function_source("renderEaOptimizationLabSourceStage")
+        gate = self.function_source("getEaOptimizationLabTerminalGate")
+        self.assertIn("domain.selectedTerminal?.detected === true", source)
+        self.assertIn("ไปที่แถบเชื่อม MT4 / MT5", source)
+        self.assertIn("openGlobalMetatraderHubFromDevice", source)
+        self.assertNotIn('"Terminal ที่ตรวจพบ"', source)
+        self.assertNotIn("terminalSelect", source)
+        self.assertIn("domain.selectedTerminal?.candidateId", gate)
+        self.assertIn("backendSelected?.candidateId === candidate.candidateId", gate)
+        self.assertNotIn("session.selectedTerminalId", gate)
 
     def test_dropzone_is_a_real_button_and_notices_are_live_regions(self) -> None:
         notice_source = self.function_source("createEaOptimizationLabNotice")
@@ -1210,7 +1171,7 @@ process.stdout.write(JSON.stringify({
         self.assertIsNotNone(stylesheet_match)
         self.assertIsNotNone(runtime_match)
         self.assertEqual(stylesheet_match.group(1), runtime_match.group(1))
-        self.assertEqual(runtime_match.group(1), "20260827-google-auth-v074")
+        self.assertEqual(runtime_match.group(1), "20260907-global-metatrader-v079")
 
 
 if __name__ == "__main__":

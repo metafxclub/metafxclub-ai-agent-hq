@@ -430,6 +430,83 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
                 )
             self.assertEqual(rejected.exception.status, 422)
 
+    def test_activation_replay_resumes_post_commit_finalization_after_failure(self) -> None:
+        inspection = self.ready_probe()
+        credential = {"configured": True, "mode": "access_token"}
+        stale = self._outbox_item(
+            item_id="sheet-sync-stale-before-activation",
+            record_key="stale-before-activation",
+            revision=0,
+        )
+        self.bridge._save_research_sheet_outbox_unlocked({"items": [stale]})
+        real_reset = self.bridge._research_sheet_reset_outbox_for_revision
+        reset_attempts = 0
+
+        def fail_first_reset(revision: int) -> int:
+            nonlocal reset_attempts
+            reset_attempts += 1
+            if reset_attempts == 1:
+                raise OSError("synthetic post-commit outbox failure")
+            return real_reset(revision)
+
+        backfill_result = {
+            "queued": 0,
+            "flush": {"processed": 0, "synced": 0, "reason": None},
+        }
+        with (
+            patch.object(self.hub, "credential_status", return_value=credential),
+            patch.object(self.hub, "probe_tabs", return_value=inspection),
+            patch.object(
+                self.bridge,
+                "_refresh_research_sheet_cache",
+                side_effect=lambda sheet_id, revision, _checks, **_kwargs: self.candidate_cache(
+                    sheet_id, revision
+                ),
+            ),
+            patch.object(
+                self.bridge,
+                "_research_sheet_reset_outbox_for_revision",
+                side_effect=fail_first_reset,
+            ),
+            patch.object(
+                self.bridge,
+                "_research_sheet_backfill_recent_reports",
+                return_value=backfill_result,
+            ) as backfill,
+        ):
+            preview = self.bridge.inspect_research_sheet_hub_candidate(
+                {"googleSheetUrlOrId": SHEET_ID}
+            )["verificationPreview"]
+            payload = {
+                "verificationToken": preview["verificationToken"],
+                "confirmActivate": True,
+                "expectedConfigRevision": preview["baseConfigRevision"],
+                "idempotencyKey": "activation-resume-finalization-001",
+            }
+            with self.assertRaisesRegex(
+                OSError,
+                "synthetic post-commit outbox failure",
+            ):
+                self.bridge.activate_research_sheet_hub(payload)
+
+            committed = self.bridge.research_sheet_hub_read_model()
+            self.assertTrue(committed["active"])
+            self.assertEqual(committed["configRevision"], 1)
+
+            replay = self.bridge.activate_research_sheet_hub(payload)
+
+        self.assertEqual(reset_attempts, 2)
+        backfill.assert_called_once_with(
+            {"worldSystem", "deepResearch", "indicatorEaTool"}
+        )
+        self.assertTrue(replay["idempotentReplay"])
+        self.assertEqual(replay["kind"], "research_sheet_hub_activation_replayed")
+        self.assertEqual(replay["backfill"], backfill_result)
+        self.assertEqual(
+            self.bridge._load_research_sheet_outbox_unlocked()["items"],
+            [],
+        )
+
     def test_auth_required_stops_before_any_network_write(self) -> None:
         network = Mock()
         with self.assertRaises(self.hub.GoogleSheetHubError) as caught:
@@ -1014,13 +1091,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         self.assertEqual(len({item["id"] for item in retried}), 10)
 
     def test_radar_sheet_rows_include_schedule_and_trigger_provenance(self) -> None:
-        radar = self._radar_report()
-        radar["workflowContext"] = {
-            "triggerSource": "schedule",
-            "executionReservation": {
-                "slotKey": "indicatorScoutSchedule:2026-08-30:09:00",
-            },
-        }
+        radar = self._radar_report("2026-08-30")
 
         rows = self.bridge._research_sheet_radar_rows(radar)
 
@@ -1031,7 +1102,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         ))
         self.assertTrue(all(
             row["latest_schedule_slot_key"]
-            == "indicatorScoutSchedule:2026-08-30:09:00"
+            == "indicatorScoutSchedule:2026-08-30:0900"
             and row["latest_trigger_source"] == "schedule"
             for row in rows
         ))
@@ -1083,6 +1154,35 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             summary["byConsumer"]["worldSystem"]["deferred"],
             0,
         )
+
+    def test_stale_revision_items_never_consume_active_outbox_capacity(self) -> None:
+        self.configure_hub(revision=12)
+        stale = [
+            self._outbox_item(
+                item_id=f"sheet-sync-stale-revision-{index:03d}",
+                record_key=f"stale-revision-{index:03d}",
+                revision=11,
+            )
+            for index in range(self.bridge.RESEARCH_SHEET_OUTBOX_LIMIT)
+        ]
+        self.bridge._save_research_sheet_outbox_unlocked({"items": stale})
+
+        result = self.bridge._research_sheet_queue_report(
+            self._world_report(),
+            flush=False,
+        )
+        stored = self.bridge._load_research_sheet_outbox_unlocked()
+
+        self.assertEqual(result["queued"], 3)
+        self.assertIsNone(result["reason"])
+        self.assertEqual(len(stored["items"]), 3)
+        self.assertTrue(all(
+            item["configRevision"] == 12 for item in stored["items"]
+        ))
+        self.assertFalse(any(
+            item["id"].startswith("sheet-sync-stale-revision-")
+            for item in stored["items"]
+        ))
 
     def test_capacity_deferred_report_drains_after_it_ages_out_of_recent_window(self) -> None:
         self.configure_hub(revision=11)
@@ -3345,38 +3445,71 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             },
         }
 
-    def _radar_report(self) -> dict:
+    def _radar_report(self, bangkok_date: str = "2026-08-27") -> dict:
         entries = []
         for index in range(1, 7):
-            entries.append(
-                {
-                    "recordId": f"radar-{index}",
-                    "toolName": f"Radar Tool {index}",
-                    "toolKind": ("indicator", "ea", "tool")[(index - 1) % 3],
-                    "category": "analysis",
-                    "platform": "tradingview" if index % 2 else "mt5",
-                    "version": "1.0",
-                    "sourceTitle": f"Publisher {index}",
-                    "sourceUrl": f"https://example.org/tool-{index}",
-                    "checkedAt": "2026-08-27T04:00:00Z",
-                    "verificationStatus": "verified",
-                    "availability": "public",
-                    "eaReadiness": "ready" if index % 3 == 2 else "not_ea_ready",
-                    "missingRules": [],
-                    "sourceLimitations": [],
-                    "duplicateStatus": "unique",
-                    "duplicateScope": "none",
-                }
+            tool_name = f"Radar Tool {index}"
+            platform = "tradingview" if index % 2 else "mt5"
+            version = "1.0"
+            source_url = f"https://example.org/tool-{index}"
+            fingerprint = self.bridge._radar_entry_fingerprint(
+                source_url,
+                tool_name,
+                platform,
+                version,
             )
-        return {
+            entries.append({
+                "recordId": f"radar-{index}",
+                "toolName": tool_name,
+                "toolKind": ("indicator", "ea", "tool")[(index - 1) % 3],
+                "category": "analysis",
+                "platform": platform,
+                "version": version,
+                "summaryTh": f"Public research item {index}",
+                "sourceTitle": f"Publisher {index}",
+                "sourceUrl": source_url,
+                "publishedAt": None,
+                "checkedAt": f"{bangkok_date}T04:00:00Z",
+                "verificationStatus": "verified",
+                "availability": "public",
+                "eaReadiness": "ready" if index % 3 == 2 else "not_ea_ready",
+                "missingRules": [],
+                "sourceLimitations": [],
+                "duplicateFingerprint": fingerprint,
+                "duplicateStatus": "unique",
+                "duplicateScope": "none",
+                "screenshot": {
+                    "available": False,
+                    "status": "not_available",
+                    "attachmentId": None,
+                    "artifactRef": None,
+                },
+            })
+        report = {
             "id": "report-radar-sheet-001",
             "type": "indicator_scout_report",
             "status": "ready",
             "linkedPropId": "left_audit_crystals",
             "linkedMissionId": "mission-radar-sheet-001",
             "ownerAgentId": "news_consultant",
-            "createdAt": "2026-08-27T04:00:00Z",
-            "updatedAt": "2026-08-27T04:05:00Z",
+            "createdAt": f"{bangkok_date}T04:00:00Z",
+            "updatedAt": f"{bangkok_date}T04:05:00Z",
+            "workflowContext": {
+                "schemaVersion": "dashboard-workflow-lineage-v1",
+                "propId": "left_audit_crystals",
+                "actionId": "discover_new_indicators",
+                "inputs": {"maxItems": 6},
+                "inputDigest": "a" * 64,
+                "submittedAt": f"{bangkok_date}T09:00:00+07:00",
+                "triggerSource": "schedule",
+                "executionReservation": {
+                    "settingsKey": "indicatorScoutSchedule",
+                    "bangkokDate": bangkok_date,
+                    "slotKey": f"indicatorScoutSchedule:{bangkok_date}:0900",
+                    "maximumRunsPerDay": 1,
+                    "source": "schedule",
+                },
+            },
             "metrics": {
                 "workflowOutput": {
                     "applicable": True,
@@ -3388,14 +3521,25 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
                     "missingEvidenceKinds": [],
                     "entryErrors": [],
                     "oversizedFields": [],
+                    "values": {
+                        "entries": json.dumps(entries, ensure_ascii=False),
+                    },
                 },
                 "entries": entries,
             },
             "evidence": [
-                {"kind": "public_web", "url": entry["sourceUrl"]}
-                for entry in entries
+                {
+                    "label": f"Radar source {index}",
+                    "url": entry["sourceUrl"],
+                    "note": "opened public page",
+                }
+                for index, entry in enumerate(entries, start=1)
             ],
         }
+        report["metrics"]["workflowOutput"]["radarSourcePolicy"] = (
+            self.bridge._radar_source_policy_receipt(report, entries)
+        )
+        return report
 
 
 if __name__ == "__main__":

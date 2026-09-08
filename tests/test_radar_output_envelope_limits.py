@@ -2002,9 +2002,9 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
 
     def test_sanitized_live_jsonl_alias_result_passes_runner_then_backend(self) -> None:
         observed = [
-            ("Indicator to Ea Robot Converter", "ea", "MetaTrader 4", "EA converter", "3.2", "public_page_free_download", "needs_clarification", "https://www.mql5.com/en/market/product/119696"),
+            ("TradingFinder MT4 Indicators", "indicator", "MetaTrader 4", "Indicator catalog", "unknown", "public_page_free_download", "needs_clarification", "https://tradingfinder.com/products/indicators/mt4/"),
             ("Strategy Compare", "tool", "MetaTrader 4/5", "EA analytics", "1.9", "public_page_paid", "not_ea_ready", "https://www.mql5.com/en/market/product/190477"),
-            ("Universal Indicator EA for Your Indicator", "ea", "MetaTrader 4", "EA converter", "12.6", "public_page_paid", "needs_clarification", "https://www.mql5.com/en/market/product/48476"),
+            ("Forex Station MT4 Indicators", "indicator", "MetaTrader 4", "Indicator catalog", "unknown", "public_page_free_download", "needs_clarification", "https://forex-station.com/mt4-indicators-f579496.html"),
             ("Trading System v2.1", "indicator", "TradingView", "Confluence indicator", "unknown", "public_page_open_source", "not_ea_ready", "https://www.tradingview.com/script/A0nMXq82-Trading-System-v2-1/"),
             ("Vibe-Trading", "tool", "Python/GitHub", "Research backtesting", "unknown", "public_repository", "not_ea_ready", "https://github.com/HKUDS/Vibe-Trading"),
             ("Freqtrade", "tool", "Python/GitHub", "Crypto trading bot", "unknown", "public_repository", "not_ea_ready", "https://github.com/freqtrade/freqtrade"),
@@ -2095,7 +2095,7 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
         )
         self.assertEqual(
             [entry["availability"] for entry in normalized],
-            ["public", "commercial", "commercial", "open_source", "public", "public"],
+            ["public", "commercial", "public", "open_source", "public", "public"],
         )
         self.assertEqual(len(receipt["enumNormalizations"]), 17)
 

@@ -486,6 +486,79 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
             self.assertFalse(stale["adapter"]["ready"])
             self.assertEqual(stale["adapter"]["status"], "stale")
 
+    def test_snapshot_reader_fails_closed_when_selection_changes_during_file_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate_id = self._configure_selected_mt4(root)
+            snapshot_file = self.bridge._metatrader_snapshot_file(candidate_id)
+            self.assertIsNotNone(snapshot_file)
+            snapshot_file.parent.mkdir(parents=True)
+            snapshot_file.write_text(
+                json.dumps(snapshot_payload(candidate_id), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            replacement_id = "mtc-" + ("z" * 26)
+            replacement_path = root / "replacement-mt4-data"
+            (replacement_path / "MQL4").mkdir(parents=True)
+            canonical_replacement = self.bridge._canonical_metatrader_location(
+                replacement_path
+            )
+            original_read_bytes = Path.read_bytes
+            switched = False
+
+            def switch_selection_during_read(path: Path) -> bytes:
+                nonlocal switched
+                if path == snapshot_file and not switched:
+                    switched = True
+                    with self.bridge.METATRADER_TARGETS_LOCK:
+                        store = self.bridge._load_metatrader_target_store_unlocked()
+                        store["candidates"][replacement_id] = {
+                            "candidateId": replacement_id,
+                            "identityKey": self.bridge._metatrader_identity_key(
+                                "mt4",
+                                canonical_replacement,
+                            ),
+                            "platform": "mt4",
+                            "ordinal": 2,
+                            "localPath": canonical_replacement,
+                            "installPath": None,
+                            "dataPath": canonical_replacement,
+                            "firstSeenAt": self.bridge.utc_now(),
+                            "lastSeenAt": self.bridge.utc_now(),
+                            "available": True,
+                            "runningState": "not_running_detected",
+                        }
+                        store["selections"][
+                            self.bridge.AI_TRADE_COUNCIL_PROP_ID
+                        ] = {
+                            "candidateId": replacement_id,
+                            "selectedAt": self.bridge.utc_now(),
+                            "selectionRevision": 2,
+                        }
+                        self.bridge._write_metatrader_target_store_unlocked(store)
+                return original_read_bytes(path)
+
+            with mock.patch.object(
+                Path,
+                "read_bytes",
+                autospec=True,
+                side_effect=switch_selection_during_read,
+            ):
+                model = self.bridge.metatrader_snapshot_read_model(
+                    self.bridge.AI_TRADE_COUNCIL_PROP_ID
+                )
+
+            self.assertTrue(switched)
+            self.assertFalse(model["adapter"]["ready"])
+            self.assertEqual(model["adapter"]["status"], "selection_changed")
+            self.assertEqual(
+                model["adapter"]["reasonCode"],
+                "terminal_selection_changed_during_snapshot_read",
+            )
+            self.assertFalse(model["dailySummary"]["available"])
+            self.assertFalse(model["chartSnapshot"]["available"])
+            self.assertNotEqual(model["selectedCandidateId"], candidate_id)
+
     def test_deterministic_indicator_series_uses_closed_bar_formula_contract(self) -> None:
         bars = snapshot_payload("mtc-indicator-series")["chart"]["bars"]
         technical = self.bridge._technical_indicator_snapshot(bars)

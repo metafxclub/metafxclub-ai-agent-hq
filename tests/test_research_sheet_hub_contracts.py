@@ -168,12 +168,12 @@ class ResearchSheetHubContractTests(unittest.TestCase):
             "GET /api/props/mission_strategy_table/research-sheet",
             "POST /api/props/mission_strategy_table/research-sheet/inspect",
             "POST /api/props/mission_strategy_table/research-sheet/activate",
+            "POST /api/props/mission_strategy_table/research-sheet/verify",
             "POST /api/props/mission_strategy_table/research-sheet/flush",
         ):
             self.assertIn(endpoint, endpoints)
         for obsolete_endpoint in (
             "POST /api/props/mission_strategy_table/research-sheet",
-            "POST /api/props/mission_strategy_table/research-sheet/verify",
             "POST /api/props/mission_strategy_table/research-sheet/confirm",
         ):
             self.assertNotIn(obsolete_endpoint, endpoints)
@@ -191,8 +191,11 @@ class ResearchSheetHubContractTests(unittest.TestCase):
         self.assertTrue(hub["lifecycleRules"]["confirmActivateMustBeTrue"])
         self.assertEqual(hub["inspectEndpoint"].rsplit("/", 1)[-1], "inspect")
         self.assertEqual(hub["activateEndpoint"].rsplit("/", 1)[-1], "activate")
+        self.assertEqual(hub["verifyEndpoint"].rsplit("/", 1)[-1], "verify")
         self.assertEqual(hub["inspectRequestFields"], ["googleSheetUrlOrId"])
         self.assertEqual(set(hub["activateRequestFields"]), ACTIVATE_REQUEST_FIELDS)
+        self.assertEqual(hub["verifyRequestFields"], [])
+        self.assertTrue(hub["successfulOauthReconnectReverifiesActiveSheetAndRecoversEligibleQueue"])
         self.assertEqual(hub["lifecycleRules"]["orderedPhases"], LIFECYCLE_PHASES)
         self.assertTrue(hub["activeSheetDisplay"]["persistent"])
         self.assertTrue(hub["activeSheetDisplay"]["remainsVisibleDuringDraftAndFailure"])

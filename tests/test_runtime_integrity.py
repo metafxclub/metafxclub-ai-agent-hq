@@ -1616,7 +1616,23 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertEqual(tools["live_trading"]["adapterStatus"], "disabled")
         self.assertFalse(tools["live_trading"]["realExecutionAvailable"])
 
-        self.assertEqual(set(report_contract["report_targets"]["terminal_selection_report"]), expected_props)
+        expected_report_props = expected_props | {"mission_strategy_table"}
+        self.assertEqual(
+            set(report_contract["report_targets"]["terminal_selection_report"]),
+            expected_report_props,
+        )
+        self.assertEqual(
+            set(report_contract["report_targets"]["terminal_discovery_report"]),
+            expected_report_props,
+        )
+        self.assertIn(
+            "terminal_selection_report",
+            role_map["mission_strategy_table"]["acceptedReportTypes"],
+        )
+        self.assertIn(
+            "terminal_discovery_report",
+            role_map["mission_strategy_table"]["acceptedReportTypes"],
+        )
         for prop_id in expected_props:
             with self.subTest(prop=prop_id):
                 self.assertIn("terminal_selection_report", role_map[prop_id]["acceptedReportTypes"])
@@ -2121,6 +2137,55 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 for name, value in originals.items():
                     setattr(self.bridge, name, value)
 
+    def test_metatrader_discovery_keeps_success_when_checklist_projection_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "runtime"
+            originals = {
+                "RUNTIME_DIR": self.bridge.RUNTIME_DIR,
+                "MISSIONS_PATH": self.bridge.MISSIONS_PATH,
+                "AUDIT_PATH": self.bridge.AUDIT_PATH,
+                "AGENT_EVENTS_PATH": self.bridge.AGENT_EVENTS_PATH,
+                "RUNTIME_REPORTS_DIR": self.bridge.RUNTIME_REPORTS_DIR,
+                "metatrader_status": self.bridge.metatrader_status,
+                "dashboard_connection_checklist": self.bridge.dashboard_connection_checklist,
+                "check_rate_limit": self.bridge.check_rate_limit,
+            }
+            terminal_state = self.bridge.metatrader_status_read_model(
+                {"mt4": 1, "mt5": 0},
+                {"supported": True, "mt4": 1, "mt5": 0},
+            )
+            try:
+                self.bridge.RUNTIME_DIR = runtime
+                self.bridge.MISSIONS_PATH = runtime / "missions.json"
+                self.bridge.AUDIT_PATH = runtime / "bridge-audit.jsonl"
+                self.bridge.AGENT_EVENTS_PATH = runtime / "agent-events.jsonl"
+                self.bridge.RUNTIME_REPORTS_DIR = runtime / "reports"
+                self.bridge.check_rate_limit = lambda *args, **kwargs: (True, 0)
+                self.bridge.metatrader_status = lambda force=False: terminal_state
+
+                def fail_projection(*_args, **_kwargs):
+                    raise RuntimeError("synthetic checklist projection failure")
+
+                self.bridge.dashboard_connection_checklist = fail_projection
+                result = self.bridge.run_metatrader_discovery("right_server_racks")
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["status"], "completed")
+                self.assertIsNone(result["connectionChecklist"])
+                self.assertEqual(result["observabilityStatus"], "degraded")
+                self.assertIn(
+                    "checklist_projection_failed",
+                    result["observabilityWarnings"],
+                )
+                self.assertEqual(
+                    result["terminalStatus"]["platforms"]["mt4"]["installedCount"],
+                    1,
+                )
+                mission = self.bridge.find_mission(result["missionId"])
+                self.assertEqual(mission["status"], "completed")
+            finally:
+                for name, value in originals.items():
+                    setattr(self.bridge, name, value)
+
     def test_diagnostic_exceptions_fail_the_created_mission_and_write_audit(self) -> None:
         scenarios = (
             (
@@ -2428,14 +2493,16 @@ class RuntimeIntegrityTests(unittest.TestCase):
         for element_id in (
             "modalDashboardConnectionList",
             "modalDashboardRefreshConnections",
-            "modalDashboardDiscoverMetatrader",
             "modalDashboardOperationMode",
             "modalDashboardScheduleStatus",
+            "globalMetatraderScan",
         ):
             self.assertIn(f'id="{element_id}"', html)
+        self.assertNotIn('id="modalDashboardDiscoverMetatrader"', html)
         self.assertIn("/connections/refresh`, { propId })", main)
         self.assertNotIn("/connections?refresh=1", main)
-        self.assertIn('postJson("/api/integrations/metatrader/discover", { propId })', main)
+        self.assertIn('postJson("/api/integrations/metatrader/global/discover", {})', main)
+        self.assertNotIn('postJson("/api/integrations/metatrader/discover"', main)
         self.assertIn('item?.action === "discover_metatrader"', main)
         update_start = main.index("async function updatePropReportFromDashboardAction")
         update_end = main.index("\nasync function refreshDashboardConnections", update_start)
@@ -2446,19 +2513,26 @@ class RuntimeIntegrityTests(unittest.TestCase):
         for forbidden in ("terminal.exe", "terminal64.exe", "tasklist", "Get-Process"):
             self.assertNotIn(forbidden, main)
 
-    def test_frontend_terminal_selection_posts_only_opaque_intent_and_uses_thai_controls(self) -> None:
+    def test_frontend_central_terminal_selection_posts_one_opaque_atomic_intent(self) -> None:
         html = FRONTEND_INDEX_PATH.read_text(encoding="utf-8")
         main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
         for element_id in (
+            "globalMetatraderControl",
+            "globalMetatraderScan",
+            "globalMetatraderMt4Select",
+            "globalMetatraderMt4Apply",
+            "globalMetatraderMt5Select",
+            "globalMetatraderMt5Apply",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        for retired_id in (
             "modalDashboardMetatraderSelection",
-            "modalDashboardMetatraderSummary",
             "modalDashboardMetatraderCandidates",
             "modalDashboardConfirmMetatrader",
         ):
-            self.assertIn(f'id="{element_id}"', html)
-        for thai_copy in ("เลือก Terminal เป้าหมาย", "Adapter ยังไม่พร้อม", "ยืนยัน Terminal ที่เลือก"):
+            self.assertNotIn(f'id="{retired_id}"', html)
+        for thai_copy in ("เชื่อม MT4 / MT5", "เลือกโปรแกรม MT4", "เลือกโปรแกรม MT5"):
             self.assertIn(thai_copy, html)
-        self.assertIn('id="modalDashboardConfirmMetatrader" type="button" disabled', html)
 
         normalize_start = main.index("function normalizeMetatraderCandidate(candidate)")
         normalize_end = main.index("\nfunction getMetatraderSelectionModel", normalize_start)
@@ -2468,23 +2542,21 @@ class RuntimeIntegrityTests(unittest.TestCase):
         for forbidden in ("candidate.path", "candidate.pid", "candidate.processId", "candidate.account", "candidate.broker", "candidate.status"):
             self.assertNotIn(forbidden, normalize_block)
 
-        render_start = main.index("function renderMetatraderSelection(subject, checklist, canDiscoverMetatrader, report = null)")
-        render_end = main.index("\nfunction renderDashboardConnectionPanel", render_start)
-        render_block = main[render_start:render_end]
-        self.assertIn("hidden = !canDiscoverMetatrader", render_block)
-        self.assertIn("modalDashboardConfirmMetatrader.disabled", render_block)
-        self.assertIn("gatewayConnected && snapshotConnected", render_block)
-        self.assertIn("EA Gateway และข้อมูล Snapshot ของ Terminal นี้เชื่อมกับ Local Runner แล้ว", render_block)
-
-        confirm_start = main.index("async function confirmMetatraderSelection(propId)")
-        confirm_end = main.index("\nfunction isMetatraderDiscoveryIntent", confirm_start)
-        confirm_block = main[confirm_start:confirm_end]
-        exact_post = 'postJson("/api/integrations/metatrader/select", { propId, candidateId })'
-        self.assertEqual(confirm_block.count(exact_post), 1)
-        self.assertIn("await loadPropReport(propId)", confirm_block)
-        self.assertNotIn("...response", confirm_block)
+        apply_start = main.index("async function applyGlobalMetatraderTarget(platform)")
+        apply_end = main.index("\nfunction renderAiTradeMt4QuickSetup", apply_start)
+        apply_block = main[apply_start:apply_end]
+        self.assertEqual(
+            apply_block.count('postJson("/api/integrations/metatrader/global/select"'),
+            1,
+        )
+        self.assertIn("platform: platform.toLowerCase()", apply_block)
+        self.assertIn("candidateId,", apply_block)
+        self.assertNotIn("propId:", apply_block)
+        self.assertIn("response?.atomic === true", apply_block)
+        self.assertIn('configurationStatus === "configured"', apply_block)
+        self.assertNotIn("function confirmMetatraderSelection(", main)
         for forbidden in ("terminalPath", "processId", "accountNumber", "brokerServer", "password"):
-            self.assertNotIn(forbidden, confirm_block)
+            self.assertNotIn(forbidden, apply_block)
 
     def test_visual_office_polls_missions_preserves_active_workers_and_renders_report_truth(self) -> None:
         main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
@@ -2954,7 +3026,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertNotIn("submitManagerCommand", block)
 
     def test_agent_chat_runtime_version_and_executive_tiers(self) -> None:
-        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.9")
+        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.10")
         self.assertEqual(self.bridge.role_default_model_tier("ceo"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("manager"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("risk_guard"), "risk_quality")
@@ -4163,7 +4235,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         )
         registry_text = registry_path.read_text(encoding="utf-8-sig")
         attributes = (PROJECT_ROOT / ".gitattributes").read_text(encoding="utf-8-sig")
-        self.assertEqual(version, "0.9.9")
+        self.assertEqual(version, "0.9.10")
         self.assertNotRegex(registry_text, r"(?i)[a-z]:\\\\users\\\\")
         self.assertIn("*.mq4 text eol=lf", attributes)
         self.assertIn("*.mq5 text eol=lf", attributes)
@@ -7441,12 +7513,14 @@ class RuntimeIntegrityTests(unittest.TestCase):
 
         html = FRONTEND_INDEX_PATH.read_text(encoding="utf-8")
         main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("Agent คุยกันเอง", html)
         for element_id in (
-            "agentCollabControl",
-            "agentCollabPanel",
-            "agentCollabTopic",
-            "agentCollabRunNow",
-            "agentCollabToggle",
+            "globalMetatraderControl",
+            "globalMetatraderPanel",
+            "globalMetatraderScan",
+            "globalMetatraderMt4Apply",
+            "globalMetatraderMt5Apply",
+            "modalMeetingButton",
         ):
             self.assertIn(f'id="{element_id}"', html)
         self.assertIn('const AGENT_COLLABORATION_ENDPOINT = "/api/collaboration/schedule";', main)
@@ -7497,8 +7571,16 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.assertEqual(rejected["kind"], "invalid_collaboration_schedule_request")
                 secret = self.bridge.set_collaboration_schedule({"topic": "api_key=abcdefghijklmnop"})
                 self.assertFalse(secret["ok"])
-                saved = self.bridge.set_collaboration_schedule({
+                retired = self.bridge.set_collaboration_schedule({
                     "enabled": True,
+                })
+                self.assertFalse(retired["ok"])
+                self.assertEqual(
+                    retired["kind"],
+                    "collaboration_schedule_surface_retired",
+                )
+                saved = self.bridge.set_collaboration_schedule({
+                    "enabled": False,
                     "topic": "ช่วยกันตรวจ UX รายงาน Backtest ให้คนทั่วไปอ่านเข้าใจได้ง่ายขึ้น",
                     "startTime": "22:00",
                     "endTime": "06:00",
@@ -7509,7 +7591,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 })
                 self.assertTrue(saved["ok"])
                 stored = self.bridge.load_collaboration_schedule_store()
-                self.assertTrue(stored["config"]["enabled"])
+                self.assertFalse(stored["config"]["enabled"])
                 self.assertEqual(stored["config"]["participants"][-1], "manager")
                 self.assertFalse(stored["config"]["autoCreateFollowup"])
                 self.assertEqual(stored["config"]["timezone"], "Asia/Bangkok")
@@ -7533,6 +7615,22 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 )
                 migrated = self.bridge.load_collaboration_schedule_store()
                 self.assertEqual(migrated["config"]["minRemainingPercent"], 15)
+                raw_store["config"]["enabled"] = True
+                self.bridge.write_json(
+                    self.bridge.COLLABORATION_SCHEDULE_PATH,
+                    raw_store,
+                )
+                retired_store = self.bridge.retire_hidden_collaboration_schedule()
+                self.assertFalse(retired_store["config"]["enabled"])
+                self.assertEqual(
+                    retired_store["state"]["lastReason"],
+                    "schedule_surface_retired",
+                )
+                audit = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH)
+                self.assertTrue(any(
+                    item.get("type") == "collaboration.schedule_retired"
+                    for item in audit
+                ))
             finally:
                 for name, value in originals.items():
                     setattr(self.bridge, name, value)

@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import fnmatch
 import json
+import os
 import re
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -275,8 +277,9 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             self.assertIn(f'"{selector}"', installer)
         self.assertLess(installer.index('"-3.14"'), installer.index('"-3.10"'))
         self.assertIn("[switch]$PackageSmoke", installer)
+        main_entry = installer.index("try {\n    # Validate explicit classroom onboarding inputs")
         smoke = installer[
-            installer.index("if ($PackageSmoke) {"):
+            installer.index("if ($PackageSmoke) {", main_entry):
             installer.index("$previousBridgeEndpointState = Get-SavedBridgeEndpointState")
         ]
         self.assertIn("Publish-StagedApplication", smoke)
@@ -660,6 +663,18 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("Get-SavedBridgeEndpointState", requested)
         self.assertIn("Test-LoopbackPortAvailable", requested)
 
+        task_suspend = installer[
+            installer.index("function Suspend-BridgeScheduledTask") :
+            installer.index("function Restore-BridgeScheduledTask")
+        ]
+        self.assertIn("if ($PackageSmoke)", task_suspend)
+        self.assertIn("$taskTargetsIsolatedInstall", task_suspend)
+        self.assertIn("$actionIdentity.IndexOf($installRoot", task_suspend)
+        self.assertLess(
+            task_suspend.index("if (-not $taskTargetsIsolatedInstall)"),
+            task_suspend.index("$script:bridgeTaskExisted = $true"),
+        )
+
         rollback = installer[
             installer.index("function Start-PreviousDegradedBridgeAfterRollback"):
             installer.index("function New-StagedApplication")
@@ -682,6 +697,170 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("state=success", prompt)
         self.assertIn("ห้ามเชื่อเพียงว่า Tag มีอยู่", prompt)
 
+    def test_one_run_inputs_fail_before_install_mutation_and_batches_do_not_prompt_automation(self) -> None:
+        installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
+        validator = installer[
+            installer.index("function Assert-GoogleOAuthOneRunInputs") :
+            installer.index("function Test-PythonCommand")
+        ]
+        for required_fragment in (
+            'Test-Path -LiteralPath $fullPath -PathType Leaf',
+            "[IO.FileAttributes]::ReparsePoint",
+            '$file.Extension -ine ".json"',
+            "$file.Length -gt 64KB",
+            "New-Object Text.UTF8Encoding($false, $true)",
+            '$document.PSObject.Properties["installed"]',
+            '$installed.PSObject.Properties["client_id"]',
+            '$installed.PSObject.Properties["client_secret"]',
+            '"https://accounts.google.com/o/oauth2/auth"',
+            '"https://oauth2.googleapis.com/token"',
+            '@("localhost", "127.0.0.1")',
+            "$ExpectedGoogleClientId.Trim()",
+            "$script:validatedGoogleClientJsonPath = $fullPath",
+        ):
+            self.assertIn(required_fragment, validator)
+
+        normal_main = installer[
+            installer.index("try {\n    # Validate explicit classroom onboarding inputs") :
+        ]
+        self.assertLess(
+            normal_main.index("Assert-GoogleOAuthOneRunInputs"),
+            normal_main.index("Assert-SafeSource"),
+        )
+        self.assertLess(
+            normal_main.index("Assert-GoogleOAuthOneRunInputs"),
+            normal_main.index("$selectedBridgePort = Confirm-BridgeEndpoint"),
+        )
+        self.assertLess(
+            normal_main.index("$selectedBridgePort = Confirm-BridgeEndpoint"),
+            normal_main.index("$stagingRoot = New-StagedApplication"),
+        )
+
+        first_run = installer[
+            installer.index("function Invoke-GoogleOAuthFirstRunSetup") :
+            installer.index("function Invoke-BridgeLifecycleProcess")
+        ]
+        self.assertIn("if (-not $explicitClientSetup)", first_run)
+        self.assertIn("Read-Host", first_run)
+        self.assertIn('$setupArguments += "-NonInteractive"', first_run)
+        self.assertIn('"-ClientJsonPath", $validatedGoogleClientJsonPath', first_run)
+        self.assertIn('"-ExpectedClientId", $ExpectedGoogleClientId', first_run)
+        self.assertIn('$script:googleSetupStatus = "ready_imported"', first_run)
+        self.assertIn("Test-GoogleOAuthDeploymentConfigured -CandidateRoot", first_run)
+
+        completion = installer[
+            installer.index("$postInstallExitCode = if ($watchdogFailure") :
+            installer.rindex("catch {")
+        ]
+        self.assertLess(completion.index("Write-InstallResult"), completion.index("exit 0"))
+        self.assertLess(completion.index("if ($postInstallFailures.Count -gt 0)"), completion.index("exit 0"))
+        self.assertIn("exit $postInstallExitCode", completion)
+        result_writer = installer[
+            installer.index("function Write-InstallResult") :
+            installer.index("try {\n    # Validate explicit classroom onboarding inputs")
+        ]
+        self.assertIn("google_oauth_client", result_writer)
+        self.assertIn("requested = -not [string]::IsNullOrWhiteSpace($GoogleClientJsonPath)", result_writer)
+        self.assertIn('status = $(if ($googleSetupFailure) { "repair_required" } else { $googleSetupStatus })', result_writer)
+
+        for batch_name in ("1-INSTALL-HQ.bat", "UPDATE-HQ.bat"):
+            batch = (ROOT / batch_name).read_text(encoding="utf-8-sig")
+            self.assertIn("-NonInteractive", batch)
+            self.assertIn('if "%~1"=="" pause', batch)
+        install_batch = (ROOT / "1-INSTALL-HQ.bat").read_text(encoding="utf-8-sig")
+        default_install_branch = install_batch[
+            install_batch.index('if "%~1"=="" (') : install_batch.index(") else (")
+        ]
+        argument_install_branch = install_batch[
+            install_batch.index(") else (") : install_batch.index("set \"INSTALL_EXIT")
+        ]
+        self.assertNotIn("-NonInteractive", default_install_branch)
+        self.assertIn("-NonInteractive", argument_install_branch)
+
+    def test_watchdog_registration_is_current_user_and_never_requests_admin(self) -> None:
+        registration = (ROOT / "scripts" / "register-bridge-autostart.ps1").read_text(
+            encoding="utf-8-sig"
+        )
+        self.assertIn("[Security.Principal.WindowsIdentity]::GetCurrent().Name", registration)
+        self.assertIn("New-ScheduledTaskPrincipal", registration)
+        self.assertIn("-LogonType Interactive", registration)
+        self.assertIn("-RunLevel Limited", registration)
+        self.assertNotIn("RunLevel Highest", registration)
+        self.assertNotIn("Start-Process -Verb RunAs", registration)
+        self.assertIn("Register-ScheduledTask", registration)
+        self.assertIn("Unregister-ScheduledTask", registration)
+
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell installer preflight")
+    def test_explicit_google_inputs_validate_noninteractively_before_endpoint_listing(self) -> None:
+        client_id = "123456789012-installer-preflight.apps.googleusercontent.com"
+        client_secret = "UNIT_TEST_ONLY_VALUE"
+        document = {
+            "installed": {
+                "client_id": client_id,
+                "project_id": "installer-preflight",
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                "client_secret": client_secret,
+                "redirect_uris": ["http://localhost"],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            temporary_root = Path(directory)
+            oauth_path = temporary_root / "desktop-client.json"
+            oauth_path.write_text(json.dumps(document), encoding="utf-8")
+            isolated_local_app_data = temporary_root / "localappdata"
+            isolated_temp = temporary_root / "temp"
+            isolated_local_app_data.mkdir()
+            isolated_temp.mkdir()
+            environment = os.environ.copy()
+            environment["LOCALAPPDATA"] = str(isolated_local_app_data)
+            environment["TEMP"] = str(isolated_temp)
+            environment["TMP"] = str(isolated_temp)
+            base_command = [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(ROOT / "installer" / "install.ps1"),
+                "-ListAvailableEndpoints",
+                "-GoogleClientJsonPath",
+                str(oauth_path),
+                "-ExpectedGoogleClientId",
+            ]
+            valid = subprocess.run(
+                [*base_command, client_id],
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+            self.assertEqual(0, valid.returncode, valid.stderr)
+            self.assertRegex(valid.stdout, r'"ok"\s*:\s*true')
+            self.assertNotIn(client_secret, valid.stdout + valid.stderr)
+            self.assertFalse((isolated_local_app_data / "Metafxclub" / "AI-Agent-HQ").exists())
+
+            mismatch = subprocess.run(
+                [*base_command, "999999999999-wrong-client.apps.googleusercontent.com"],
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+            self.assertEqual(1, mismatch.returncode)
+            self.assertIn("Client ID", mismatch.stderr)
+            self.assertNotIn(client_secret, mismatch.stdout + mismatch.stderr)
+            self.assertFalse((isolated_local_app_data / "Metafxclub" / "AI-Agent-HQ").exists())
+
     def test_temporary_installer_paths_are_short_for_deep_windows_assets(self) -> None:
         installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
         staged = installer[
@@ -690,19 +869,37 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         ]
         self.assertIn("Get-InstallerTemporaryParent", staged)
         self.assertNotIn("Split-Path -Parent $installRoot", staged)
-        self.assertIn('("mfxhq-stage-{0}"', staged)
+        self.assertIn('("mhs-{0}"', staged)
         self.assertIn("$file.FullName.Length -ge 260", staged)
         self.assertIn("$installedPath.Length -ge 260", staged)
         self.assertIn("Copy-ApplicationFiles -DestinationRoot $stagingRoot", staged)
         self.assertLess(staged.index("Copy-ApplicationFiles"), staged.index("Assert-NoEmbeddedHighConfidenceSecrets"))
-        self.assertIn('("mfxhq-rollback-{0}"', installer)
+        self.assertIn('("mhr-{0}"', installer)
+        self.assertIn("mfxhq-stage", installer)
+        self.assertIn("mfxhq-rollback", installer)
         self.assertIn("Assert-InstallerTemporaryDirectory", installer)
         self.assertIn("Remove-InstallerTemporaryDirectoryWithRetry", installer)
+        self.assertIn("[IO.Directory]::Delete($extendedPath, $true)", installer)
         self.assertIn("$delaysMilliseconds = @(0, 100, 250, 500, 1000, 2000)", installer)
         self.assertIn("-BestEffort", installer)
         self.assertIn("Remove-StagedApplication -StagingRoot $stagingRoot", installer)
         self.assertNotIn('.AI-Agent-HQ.staging.', installer)
         self.assertNotIn('.AI-Agent-HQ.rollback.', installer)
+
+        # Regression for a real classroom/CI TEMP parent whose canonical path
+        # is 85 characters: the old 128-bit directory name placed this exact
+        # shipped asset at Win32 length 260, while the shortened 128-bit name
+        # keeps it below the installer's fail-closed boundary.
+        deepest_release_asset = (
+            "frontend\\public\\assets\\agents\\"
+            "male-roster-set-a-core-command-operators-v001\\characters\\"
+            "05-optimization-agent-male-static-v001.png"
+        )
+        parent_length = 85
+        old_full_length = parent_length + 1 + len("mfxhq-stage-" + ("a" * 32)) + 1 + len(deepest_release_asset)
+        new_full_length = parent_length + 1 + len("mhs-" + ("a" * 32)) + 1 + len(deepest_release_asset)
+        self.assertEqual(260, old_full_length)
+        self.assertLess(new_full_length, 260)
 
 
 if __name__ == "__main__":

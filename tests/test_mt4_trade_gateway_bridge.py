@@ -405,6 +405,13 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             return_value=dict(self.candidate),
         ), mock.patch.object(
             self.bridge,
+            "_selected_metatrader_candidate_context",
+            return_value={
+                "record": dict(self.candidate),
+                "token": dict(selection_token),
+            },
+        ), mock.patch.object(
+            self.bridge,
             "_metatrader_selection_token",
             return_value=selection_token,
         ), mock.patch.object(
@@ -435,6 +442,105 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.assertTrue(status["shadowValidationAvailable"])
         self.assertFalse(status["demoOrderExecutionAvailable"])
         self.assertFalse(status["liveOrderExecutionAvailable"])
+
+    def test_gateway_status_fails_closed_if_selection_changes_during_ea_status_read(self) -> None:
+        self.write_ea_status()
+        first_context = {
+            "record": dict(self.candidate),
+            "token": {
+                "candidateId": self.candidate["candidateId"],
+                "selectionRevision": 1,
+            },
+        }
+        replacement_id = "mtc-replacement-channel"
+        replacement_context = {
+            "record": {
+                **self.candidate,
+                "candidateId": replacement_id,
+                "ordinal": 2,
+            },
+            "token": {
+                "candidateId": replacement_id,
+                "selectionRevision": 2,
+            },
+        }
+        with mock.patch.object(
+            self.bridge,
+            "_selected_metatrader_candidate_context",
+            side_effect=[first_context, first_context, replacement_context],
+        ):
+            status = self.bridge.mt4_trade_gateway_status_read_model()
+
+        self.assertFalse(status["connected"])
+        self.assertEqual(status["status"], "selection_changed")
+        self.assertEqual(
+            status["reasonCode"],
+            "terminal_selection_changed_during_status_read",
+        )
+        self.assertIsNone(status["selectedCandidateId"])
+        self.assertFalse(status["shadowValidationAvailable"])
+        self.assertFalse(status["demoOrderExecutionAvailable"])
+        self.assertFalse(status["liveOrderExecutionAvailable"])
+
+    def test_gateway_status_degrades_observability_when_post_reconcile_audit_fails(self) -> None:
+        gateway = self.bridge._mt4_trade_gateway_instance()
+        rejected_event = {
+            "ok": False,
+            "code": "ack_schema_invalid",
+            "fileName": "ack-invalid.json",
+        }
+        rejection_key = self.bridge.payload_digest(
+            rejected_event["code"],
+            rejected_event["fileName"],
+        )
+        ack_events = [
+            {
+                "ok": True,
+                "kind": "mt4_trade_ack_ingested",
+                "commandId": "cmd-audit-failure",
+                "status": "ack_EXECUTED",
+                "idempotentReplay": False,
+            },
+            rejected_event,
+        ]
+        with self.selected_candidate(), mock.patch.object(
+            self.bridge,
+            "_mt4_trade_gateway_instance",
+            return_value=gateway,
+        ), mock.patch.object(
+            gateway,
+            "ingest_pending_acks",
+            return_value=ack_events,
+        ), mock.patch.object(
+            gateway,
+            "expire_pending",
+            return_value={
+                "expiredCount": 1,
+                "commandIds": ["cmd-expired-audit-failure"],
+            },
+        ), mock.patch.object(
+            self.bridge,
+            "append_audit",
+            side_effect=OSError("audit unavailable"),
+        ) as append_audit:
+            status = self.bridge.mt4_trade_gateway_status_read_model()
+
+        self.assertFalse(status["connected"])
+        self.assertEqual(status["status"], "awaiting_ea")
+        self.assertEqual(status["observabilityStatus"], "degraded")
+        self.assertEqual(
+            set(status["observabilityWarnings"]),
+            {
+                "ack_ingested_audit_failed",
+                "ack_rejected_audit_failed",
+                "command_expired_audit_failed",
+            },
+        )
+        self.assertEqual(append_audit.call_count, 3)
+        self.assertNotIn(
+            rejection_key,
+            self.bridge.MT4_TRADE_GATEWAY_REJECTED_ACK_EVENTS,
+        )
 
     def test_ack_event_projection_exposes_nested_terminal_rejection_reason(self) -> None:
         projected = self.bridge._mt4_trade_gateway_ack_event_read_model({

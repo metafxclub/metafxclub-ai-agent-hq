@@ -545,9 +545,25 @@
       "deduplication": {
         "performed": true,
         "mode": "deterministic_local_report_catalog",
-        "basis": ["normalizedSourceUrl", "toolName", "platform", "version"],
+        "basis": ["normalizedToolName", "platform", "versionFamily"],
+        "independentSourceIdentity": "normalizedSourceUrl",
+        "mirrorUrlsAreOneProduct": true,
         "googleSheetCompared": false,
         "duplicateCount": null
+      },
+      "sourcePolicy": {
+        "policyRef": "contracts/research/radar-website-source-policy-v1.json",
+        "mode": "free_first_daily_rotation",
+        "rotationTimezone": "Asia/Bangkok",
+        "attemptOrderEnforcement": "prompt_bound",
+        "resultGuardsBackendEnforced": true,
+        "sourceClassificationVerifiedByBackend": false,
+        "policyRelevantEntryDigestRequired": true,
+        "researchSheetRequiresValidDailyReservation": true,
+        "mql5FallbackMaximumPerSixItemBatch": 1,
+        "scheduledAllowedAvailability": ["public", "open_source"],
+        "receiptField": "workflowOutput.radarSourcePolicy",
+        "receiptAuthority": "backend_only"
       },
       "workerOutputEnvelope": {
         "contractFields": [
@@ -637,6 +653,7 @@
         "Publisher image evidence remains unavailable unless the Backend adapter verifies exact recordId, sourceUrl, checkedAt, content SHA-256, MIME and dimensions before returning a same-origin report attachment.",
         "Each screenshot must explicitly match that entry by attachmentId or artifactRef; the first report image is never broadcast to unmatched entries.",
         "recordId, duplicateFingerprint, duplicateStatus, and duplicateScope are computed by Backend and worker-supplied values have no authority.",
+        "The Backend computes the source-policy receipt; MQL5 is last fallback with at most one entry per six-item batch, while scheduled commercial or unknown rows are rejected before report and Sheet eligibility.",
         "No discovered performance claim is treated as verified without reproducible evidence."
       ]
     },
@@ -1262,8 +1279,8 @@
     "auto_trading_status_report": ["vps_watch", "risk_guard", "left_analytics_console"],
     "ops_overview_report": ["vps_watch", "manager", "right_status_crystals"],
     "dashboard_connection_report": ["mission_strategy_table", "codex_mcp_portal", "left_server_racks", "right_server_racks", "left_analytics_console", "right_tool_console", "terminal_workstation", "left_audit_crystals", "left_signal_cube", "right_status_crystals"],
-    "terminal_discovery_report": ["right_server_racks", "right_tool_console", "left_analytics_console"],
-    "terminal_selection_report": ["right_server_racks", "right_tool_console", "left_analytics_console"]
+    "terminal_discovery_report": ["mission_strategy_table", "right_server_racks", "right_tool_console", "left_analytics_console"],
+    "terminal_selection_report": ["mission_strategy_table", "right_server_racks", "right_tool_console", "left_analytics_console"]
   },
   "storage": {
     "runtime_reports": "./data/runtime/reports/",

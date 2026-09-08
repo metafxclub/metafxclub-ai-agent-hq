@@ -378,6 +378,197 @@ class RadarBatchRepairLifecycleTests(unittest.TestCase):
             slot_key,
         )
 
+    def test_source_policy_failure_retries_fresh_batch_in_same_reservation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
+            mission, slot_key = self.scheduled_radar()
+            self.prime_daily_schedule(mission, slot_key)
+            result = self.valid_six_result(
+                temp_dir,
+                final_name="source-policy-paid.final.md",
+                run_id="run-source-policy-paid",
+            )
+            entries = json.loads(result["contractFields"][0]["value"])
+            entries[0]["availability"] = "commercial"
+            result["contractFields"][0]["value"] = json.dumps(
+                entries,
+                ensure_ascii=False,
+            )
+            lease_id = "lease-source-policy-paid"
+            self.make_running(mission, lease_id)
+            with mock.patch.object(self.bridge, "create_report") as create_report:
+                requeued = self.bridge.finish_auto_mission(
+                    mission["id"],
+                    lease_id,
+                    {"processStarted": True},
+                    result,
+                )
+            stored = self.bridge.find_mission(mission["id"])
+
+        create_report.assert_not_called()
+        self.assertIsNotNone(requeued)
+        self.assertEqual(stored["status"], "queued")
+        self.assertEqual(stored["id"], mission["id"])
+        self.assertEqual(
+            stored["radarBatchRepair"]["originalSlotKey"],
+            slot_key,
+        )
+        self.assertEqual(
+            stored["radarBatchRepair"]["failureReasonCode"],
+            "radar_batch_attempt_incomplete",
+        )
+        self.assertEqual(stored["radarBatchRepair"]["lastObservedItemCount"], 0)
+        self.assertNotIn(
+            self.bridge.RADAR_EVIDENCE_CANDIDATE_BLOCK_START,
+            stored["detail"],
+        )
+        self.assertIn(
+            self.bridge.RADAR_BATCH_COMPLETION_REPAIR_BLOCK_START,
+            stored["detail"],
+        )
+
+    def test_source_policy_failure_replaces_exhausted_exact_url_retry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
+            mission, slot_key = self.scheduled_radar()
+            self.prime_daily_schedule(mission, slot_key)
+            source_reference = self.write_artifact(
+                temp_dir,
+                "source-policy-exact-source.final.md",
+                {
+                    "status": "completed",
+                    "evidence": [{"url": url} for url in self.urls()],
+                },
+            )
+            mission = self.apply_v2_retry(mission, source_reference)
+            self.bridge.replace_mission(mission)
+            result = self.valid_six_result(
+                temp_dir,
+                final_name="source-policy-exact-paid.final.md",
+                run_id="run-source-policy-exact-paid",
+            )
+            entries = json.loads(result["contractFields"][0]["value"])
+            entries[0]["availability"] = "commercial"
+            result["contractFields"][0]["value"] = json.dumps(
+                entries,
+                ensure_ascii=False,
+            )
+            lease_id = "lease-source-policy-exact-paid"
+            self.make_running(mission, lease_id)
+            with mock.patch.object(self.bridge, "create_report") as create_report:
+                requeued = self.bridge.finish_auto_mission(
+                    mission["id"],
+                    lease_id,
+                    {"processStarted": True},
+                    result,
+                )
+            stored = self.bridge.find_mission(mission["id"])
+
+        create_report.assert_not_called()
+        self.assertIsNotNone(requeued)
+        self.assertEqual(stored["status"], "queued")
+        self.assertEqual(stored["idempotencyKey"], mission["idempotencyKey"])
+        self.assertEqual(
+            stored["radarBatchRepair"]["originalSlotKey"],
+            slot_key,
+        )
+        self.assertNotIn("correctiveRetry", stored)
+        self.assertNotIn(
+            self.bridge.RADAR_EVIDENCE_CANDIDATE_BLOCK_START,
+            stored["detail"],
+        )
+        self.assertIn(
+            self.bridge.RADAR_BATCH_COMPLETION_REPAIR_BLOCK_START,
+            stored["detail"],
+        )
+        self.assertTrue(
+            stored["radarBatchRepair"]["previousFailure"][
+                "replacedRejectedSourceCandidates"
+            ]
+        )
+
+    def test_nested_batch_repair_discards_exact_urls_after_policy_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
+            mission, slot_key = self.scheduled_radar()
+            self.prime_daily_schedule(mission, slot_key)
+            source_reference = self.write_artifact(
+                temp_dir,
+                "nested-policy-source.final.md",
+                {
+                    "status": "completed",
+                    "evidence": [{"url": url} for url in self.urls()],
+                },
+            )
+            mission = self.apply_v2_retry(mission, source_reference)
+            self.bridge.replace_mission(mission)
+
+            zero_reference = self.write_artifact(
+                temp_dir,
+                "nested-policy-zero.final.md",
+                {"status": "invalid_output", "evidence": []},
+            )
+            first_lease = "lease-nested-policy-zero"
+            self.make_running(mission, first_lease)
+            with mock.patch.object(self.bridge, "create_report") as create_report:
+                first_requeued = self.bridge.finish_auto_mission(
+                    mission["id"],
+                    first_lease,
+                    {"processStarted": True},
+                    self.invalid_zero_result(zero_reference),
+                )
+            after_zero = self.bridge.find_mission(mission["id"])
+            self.assertIsNotNone(first_requeued)
+            self.assertIn("correctiveRetry", after_zero)
+            self.assertIn(
+                self.bridge.RADAR_EVIDENCE_CANDIDATE_BLOCK_START,
+                after_zero["detail"],
+            )
+
+            paid_result = self.valid_six_result(
+                temp_dir,
+                final_name="nested-policy-paid.final.md",
+                run_id="run-nested-policy-paid",
+            )
+            entries = json.loads(paid_result["contractFields"][0]["value"])
+            entries[0]["availability"] = "commercial"
+            paid_result["contractFields"][0]["value"] = json.dumps(
+                entries,
+                ensure_ascii=False,
+            )
+            second_lease = "lease-nested-policy-paid"
+            self.make_running(after_zero, second_lease)
+            with mock.patch.object(self.bridge, "create_report") as create_report:
+                second_requeued = self.bridge.finish_auto_mission(
+                    mission["id"],
+                    second_lease,
+                    {"processStarted": True},
+                    paid_result,
+                )
+            stored = self.bridge.find_mission(mission["id"])
+
+        create_report.assert_not_called()
+        self.assertIsNotNone(second_requeued)
+        self.assertEqual(stored["status"], "queued")
+        self.assertNotIn("correctiveRetry", stored)
+        self.assertNotIn(
+            self.bridge.RADAR_EVIDENCE_CANDIDATE_BLOCK_START,
+            stored["detail"],
+        )
+        self.assertIn(
+            self.bridge.RADAR_BATCH_COMPLETION_REPAIR_BLOCK_START,
+            stored["detail"],
+        )
+        self.assertEqual(stored["radarBatchRepair"]["lastObservedItemCount"], 0)
+        self.assertTrue(
+            stored["radarBatchRepair"]["previousFailure"][
+                "replacedRejectedSourceCandidates"
+            ]
+        )
+
     def test_exhausted_v2_zero_evidence_transitions_to_batch_repair(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
             mission, slot_key = self.scheduled_radar()

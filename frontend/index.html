@@ -7,7 +7,7 @@
     <title>Metafxclub AI Pixel HQ - ห้องทำงาน Agent Codex/MCP</title>
   <link rel="icon" href="data:," />
   <base href="../" />
-  <link rel="stylesheet" href="./frontend/src/app/styles.css?v=20260827-google-auth-v074" />
+  <link rel="stylesheet" href="./frontend/src/app/styles.css?v=20260907-global-metatrader-v079" />
   </head>
   <body>
     <main class="app-shell">
@@ -198,86 +198,70 @@
           </form>
         </section>
         <div class="topbar-actions">
-          <div class="agent-collab-control" id="agentCollabControl" data-state="loading">
+          <div class="agent-collab-control metatrader-hub-control" id="globalMetatraderControl" data-state="loading">
             <button
-              class="agent-collab-button"
-              id="agentCollabButton"
+              class="agent-collab-button metatrader-hub-button"
+              id="globalMetatraderButton"
               type="button"
+              aria-label="เชื่อม MT4 / MT5"
               aria-expanded="false"
-              aria-controls="agentCollabPanel"
+              aria-controls="globalMetatraderPanel"
+              title="เชื่อม MT4 / MT5"
             >
               <span class="agent-collab-dot" aria-hidden="true"></span>
               <span>
-                <small>Agent คุยกันเอง</small>
-                <strong id="agentCollabLabel">กำลังตรวจสอบ...</strong>
+                <small>เชื่อม MT4 / MT5</small>
+                <strong id="globalMetatraderLabel">กำลังตรวจสอบ...</strong>
               </span>
+              <span class="metatrader-hub-compact-mark" aria-hidden="true">MT</span>
               <span class="agent-collab-chevron" aria-hidden="true">▾</span>
             </button>
-            <section class="agent-collab-panel" id="agentCollabPanel" aria-label="ตั้งเวลาประชุมของ Agent" hidden>
+            <section class="agent-collab-panel metatrader-hub-panel" id="globalMetatraderPanel" aria-label="เลือก MT4 หรือ MT5 กลางสำหรับอุปกรณ์ HQ" hidden>
               <div class="agent-collab-panel-heading">
                 <div>
-                  <p class="eyebrow">ประชุมผ่าน Codex แบบปิด Tool</p>
-                  <strong id="agentCollabPanelTitle">กำลังอ่านตารางจาก Backend</strong>
+                  <p class="eyebrow">TERMINAL กลาง • LOCAL RUNNER</p>
+                  <strong id="globalMetatraderPanelTitle">เลือก Terminal ครั้งเดียวแล้วใช้กับระบบที่รองรับ</strong>
                 </div>
-                <span class="agent-collab-state-badge" id="agentCollabStateBadge">กำลังตรวจสอบ</span>
+                <span class="agent-collab-state-badge" id="globalMetatraderStateBadge">กำลังตรวจสอบ</span>
               </div>
-              <p class="agent-collab-message" id="agentCollabMessage">ระบบจะเริ่มเฉพาะเมื่อ Full Access เปิดและ Rate Limit เหลือเหนือเกณฑ์</p>
-              <label class="agent-collab-field wide">
-                <span>หัวข้อที่ให้ Agent ช่วยกันพัฒนา</span>
-                <textarea id="agentCollabTopic" rows="3" maxlength="600" placeholder="เช่น ช่วยกันทบทวน UX และความถูกต้องของรายงาน Backtest"></textarea>
-              </label>
-              <div class="agent-collab-grid">
-                <label class="agent-collab-field">
-                  <span>เริ่มเวลา</span>
-                  <input id="agentCollabStartTime" type="time" step="60" />
-                </label>
-                <label class="agent-collab-field">
-                  <span>หยุดเวลา</span>
-                  <input id="agentCollabEndTime" type="time" step="60" />
-                </label>
-                <label class="agent-collab-field">
-                  <span>เว้นระยะ</span>
-                  <select id="agentCollabInterval">
-                    <option value="60">ทุก 1 ชั่วโมง</option>
-                    <option value="120">ทุก 2 ชั่วโมง</option>
-                    <option value="240">ทุก 4 ชั่วโมง</option>
-                    <option value="480">ทุก 8 ชั่วโมง</option>
-                  </select>
-                </label>
-                <label class="agent-collab-field">
-                  <span>จำนวนคำตอบ</span>
-                  <select id="agentCollabMaxTurns">
-                    <option value="2">2 รอบ</option>
-                    <option value="3">3 รอบ</option>
-                    <option value="4">4 รอบ</option>
-                  </select>
-                </label>
-                <label class="agent-collab-field">
-                  <span>สูงสุดต่อวัน</span>
-                  <select id="agentCollabMaxDailyRuns">
-                    <option value="1">1 ครั้ง</option>
-                    <option value="2">2 ครั้ง</option>
-                    <option value="3">3 ครั้ง</option>
-                    <option value="4">4 ครั้ง</option>
-                  </select>
-                </label>
-                <label class="agent-collab-field">
-                  <span>เก็บโควตาไว้</span>
-                  <select id="agentCollabMinRemaining" disabled aria-label="เกณฑ์โควตาอัตโนมัติคงที่">
-                    <option value="15">ต้องเหลือมากกว่า 15%</option>
-                  </select>
-                </label>
+              <p class="agent-collab-message metatrader-hub-message" id="globalMetatraderMessage" data-tone="neutral" aria-live="polite">
+                กดสแกนเพื่อค้นหาโปรแกรมในเครื่องแบบอ่านอย่างเดียว แล้วเลือก Terminal ที่ต้องการใช้
+              </p>
+              <button class="metatrader-hub-scan" id="globalMetatraderScan" type="button">
+                สแกนหา MT4 / MT5 ในเครื่อง
+              </button>
+              <div class="metatrader-hub-platforms">
+                <section class="metatrader-hub-platform" data-platform="MT4">
+                  <header>
+                    <span>MT4</span>
+                    <small>ใช้กับ 3 ระบบ</small>
+                  </header>
+                  <label>
+                    <span>เลือกโปรแกรม MT4</span>
+                    <select id="globalMetatraderMt4Select" aria-label="เลือกโปรแกรม MT4">
+                      <option value="">ยังไม่พบ MT4</option>
+                    </select>
+                  </label>
+                  <button id="globalMetatraderMt4Apply" type="button" disabled>ใช้ MT4 นี้กับทุกระบบ</button>
+                </section>
+                <section class="metatrader-hub-platform" data-platform="MT5">
+                  <header>
+                    <span>MT5</span>
+                    <small>ใช้กับ 2 ระบบที่รองรับ</small>
+                  </header>
+                  <label>
+                    <span>เลือกโปรแกรม MT5</span>
+                    <select id="globalMetatraderMt5Select" aria-label="เลือกโปรแกรม MT5">
+                      <option value="">ยังไม่พบ MT5</option>
+                    </select>
+                  </label>
+                  <button id="globalMetatraderMt5Apply" type="button" disabled>ใช้ MT5 นี้กับระบบที่รองรับ</button>
+                </section>
               </div>
-              <div class="agent-collab-summary">
-                <span id="agentCollabUsage">วันนี้ 0/3 ครั้ง</span>
-                <span id="agentCollabNextRun">ยังไม่เปิดตาราง</span>
-              </div>
-              <p class="agent-collab-safety">Agent จะคุยและสรุปเท่านั้น ไม่เปิดโปรแกรม ไม่เรียก Plugin/MCP ไม่สร้าง Task ต่อเอง และผลจะกลับไปที่โต๊ะ Mission</p>
-              <div class="agent-collab-actions">
-                <button id="agentCollabSave" type="button">บันทึกเวลา</button>
-                <button id="agentCollabRunNow" type="button">ประชุมตอนนี้</button>
-                <button id="agentCollabToggle" type="button" class="primary">เปิดอัตโนมัติ</button>
-              </div>
+              <div class="metatrader-hub-systems" id="globalMetatraderSystems" aria-label="ระบบที่รับค่า Terminal กลาง"></div>
+              <p class="agent-collab-safety metatrader-hub-safety">
+                การตั้งค่านี้บันทึกเฉพาะ Terminal เป้าหมายใน Local Runner ไม่เปิด Terminal ไม่อ่านเลขบัญชีหรือข้อมูลโบรกเกอร์ และไม่เปิด Demo / Live Trading
+              </p>
             </section>
           </div>
           <div class="operator-mode-control" id="operatorModeControl" data-mode="unknown">
@@ -479,20 +463,19 @@
               <section class="ai-trade-mt4-quick-card" id="modalAiTradeMt4QuickSetup" aria-labelledby="modalAiTradeMt4QuickHeading" hidden>
                 <div class="ai-trade-mt4-quick-heading">
                   <div>
-                    <span>MT4 + CHANNEL ID</span>
-                    <strong id="modalAiTradeMt4QuickHeading">ตั้งค่า EA ของสภา AI Trade</strong>
+                    <span>TERMINAL กลาง + CHANNEL ID</span>
+                    <strong id="modalAiTradeMt4QuickHeading">สถานะ MT4 ของสภา AI Trade</strong>
                   </div>
                   <span class="connection-badge" id="modalAiTradeMt4QuickBadge" data-status="not_connected">ยังไม่พร้อม</span>
                 </div>
-                <button class="modal-action primary" id="modalAiTradeMt4QuickAction" type="button">ตรวจ MT4 และสร้าง Channel ID</button>
-                <div class="ai-trade-mt4-quick-candidates" id="modalAiTradeMt4QuickCandidates" role="radiogroup" aria-label="รายการ MT4 ที่ตรวจพบ" hidden></div>
-                <button class="modal-action" id="modalAiTradeMt4QuickConfirm" type="button" hidden disabled>ใช้ MT4 ที่เลือกและสร้าง Channel ID</button>
+                <p class="ai-trade-mt4-quick-terminal" id="modalAiTradeMt4QuickTerminal">ยังไม่ได้เลือก MT4 จากแถบเชื่อม MT4 / MT5 ด้านบน</p>
+                <button class="modal-action primary" id="modalAiTradeMt4OpenGlobal" type="button">ไปที่แถบเชื่อม MT4 / MT5</button>
                 <div class="ai-trade-mt4-quick-channel">
                   <span>Channel ID สำหรับช่อง SnapshotChannel ของ EA</span>
                   <code id="modalAiTradeMt4QuickChannel" tabindex="0">ยังไม่มี Channel ID</code>
                   <button id="modalAiTradeMt4QuickCopy" type="button" disabled>คัดลอก Channel ID</button>
                 </div>
-                <p class="ai-trade-mt4-quick-status" id="modalAiTradeMt4QuickStatus" role="status" aria-live="polite">กดครั้งเดียวเพื่อค้นหา MT4 และสร้างรหัสแบบปกปิดข้อมูลเครื่อง</p>
+                <p class="ai-trade-mt4-quick-status" id="modalAiTradeMt4QuickStatus" role="status" aria-live="polite">อุปกรณ์นี้อ่าน Terminal ที่ยืนยันจากแถบกลางเท่านั้น</p>
               </section>
               <div class="connection-mode-grid">
                 <div>
@@ -507,21 +490,8 @@
               <div class="connection-checklist" id="modalDashboardConnectionList" aria-live="polite"></div>
               <div class="connection-actions">
                 <button class="modal-action" id="modalDashboardRefreshConnections" type="button">ตรวจการเชื่อมต่อใหม่</button>
-                <button class="modal-action primary" id="modalDashboardDiscoverMetatrader" type="button" hidden>ค้นหา MT4 / MT5</button>
               </div>
               <p class="connection-action-status" id="modalDashboardConnectionActionStatus" role="status">ส่งคำขอแบบอ่านอย่างเดียวไปยัง Local Runner โดยไม่เปิดเผยข้อมูลลับ</p>
-              <div class="metatrader-selection" id="modalDashboardMetatraderSelection" hidden>
-                <div class="metatrader-selection-heading">
-                  <div>
-                    <span>เลือก Terminal เป้าหมาย</span>
-                    <strong id="modalDashboardMetatraderSummary">ยังไม่พบ Terminal ที่เลือกได้</strong>
-                  </div>
-                  <span class="connection-badge" data-status="coming_soon">Adapter ยังไม่พร้อม</span>
-                </div>
-                <div class="metatrader-candidates" id="modalDashboardMetatraderCandidates" role="radiogroup" aria-label="รายการ MT4 และ MT5 ที่ตรวจพบ"></div>
-                <p class="metatrader-adapter-note">การเลือกนี้กำหนดเป้าหมายให้ Backend เท่านั้น ยังไม่เปิด Terminal หรือเชื่อมบัญชีจากหน้าเว็บ</p>
-                <button class="modal-action primary" id="modalDashboardConfirmMetatrader" type="button" disabled>ยืนยัน Terminal ที่เลือก</button>
-              </div>
             </section>
             <section class="workflow-settings-rail" id="workflowSettingsRail" aria-labelledby="workflowSettingsRailTitle" hidden>
               <header>
@@ -1181,7 +1151,7 @@
     (() => {
       "use strict";
 
-      const RUNTIME_BUILD_VERSION = "20260827-google-auth-v074";
+      const RUNTIME_BUILD_VERSION = "20260907-global-metatrader-v079";
       const EXPECTED_AGENT_COUNT = 10;
       const RUNTIME_PATH = "./frontend/src/app/main.js";
       const diagnostic = document.getElementById("bootDiagnostic");

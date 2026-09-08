@@ -774,6 +774,255 @@ h1 {
   opacity: 0.48;
 }
 
+.metatrader-hub-control {
+  width: 252px;
+}
+
+.metatrader-hub-compact-mark {
+  display: none;
+  color: var(--text);
+  font-size: 9px;
+  font-weight: 1000;
+  letter-spacing: 0.04em;
+}
+
+.metatrader-hub-control[data-state="ready"] .metatrader-hub-button {
+  border-color: rgba(37, 215, 122, 0.72);
+  background: linear-gradient(135deg, rgba(8, 52, 41, 0.96), rgba(7, 25, 31, 0.94));
+}
+
+.metatrader-hub-control[data-state="ready"] .agent-collab-dot {
+  background: var(--green);
+  box-shadow: 0 0 13px rgba(37, 215, 122, 0.88);
+}
+
+.metatrader-hub-control[data-state="partial"] .metatrader-hub-button,
+.metatrader-hub-control[data-state="detected"] .metatrader-hub-button {
+  border-color: rgba(255, 178, 63, 0.66);
+}
+
+.metatrader-hub-control[data-state="partial"] .agent-collab-dot,
+.metatrader-hub-control[data-state="detected"] .agent-collab-dot {
+  background: var(--amber);
+  box-shadow: 0 0 12px rgba(255, 178, 63, 0.78);
+}
+
+.metatrader-hub-control[data-state="error"] .metatrader-hub-button {
+  border-color: rgba(229, 72, 77, 0.72);
+}
+
+.metatrader-hub-control[data-state="error"] .agent-collab-dot {
+  background: var(--red);
+  box-shadow: 0 0 12px rgba(229, 72, 77, 0.78);
+}
+
+.metatrader-hub-control[data-state="working"] .agent-collab-dot {
+  background: var(--cyan);
+  box-shadow: 0 0 13px rgba(39, 212, 255, 0.78);
+  animation: agent-collab-pulse 1.15s ease-in-out infinite;
+}
+
+.metatrader-hub-panel {
+  width: min(660px, calc(100vw - 32px));
+}
+
+.agent-collab-state-badge[data-state="ready"] {
+  border-color: rgba(37, 215, 122, 0.58);
+  color: var(--green);
+}
+
+.agent-collab-state-badge[data-state="partial"],
+.agent-collab-state-badge[data-state="detected"] {
+  border-color: rgba(255, 178, 63, 0.58);
+  color: var(--amber);
+}
+
+.agent-collab-state-badge[data-state="error"] {
+  border-color: rgba(229, 72, 77, 0.58);
+  color: #ff8d91;
+}
+
+.agent-collab-state-badge[data-state="working"] {
+  border-color: rgba(39, 212, 255, 0.58);
+  color: var(--cyan);
+}
+
+.metatrader-hub-message[data-tone="working"] {
+  color: var(--cyan);
+}
+
+.metatrader-hub-message[data-tone="success"] {
+  color: var(--green);
+}
+
+.metatrader-hub-message[data-tone="warning"] {
+  color: var(--amber);
+}
+
+.metatrader-hub-message[data-tone="error"] {
+  color: #ff8d91;
+}
+
+.metatrader-hub-scan {
+  width: 100%;
+  min-height: 38px;
+  margin-top: 10px;
+  border: 1px solid rgba(39, 212, 255, 0.56);
+  background: rgba(10, 44, 61, 0.9);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.metatrader-hub-scan:hover,
+.metatrader-hub-scan:focus-visible,
+.metatrader-hub-platform button:hover,
+.metatrader-hub-platform button:focus-visible,
+.metatrader-hub-platform select:focus-visible {
+  border-color: var(--cyan);
+  outline: none;
+  box-shadow: 0 0 14px rgba(39, 212, 255, 0.12);
+}
+
+.metatrader-hub-scan:disabled,
+.metatrader-hub-platform button:disabled,
+.metatrader-hub-platform select:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.metatrader-hub-platforms {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 10px;
+}
+
+.metatrader-hub-platform {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(84, 119, 142, 0.42);
+  background: rgba(4, 17, 27, 0.82);
+}
+
+.metatrader-hub-platform > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.metatrader-hub-platform > header span {
+  color: var(--cyan);
+  font-size: 13px;
+  font-weight: 1000;
+}
+
+.metatrader-hub-platform > header small,
+.metatrader-hub-platform label > span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.metatrader-hub-platform label {
+  display: grid;
+  gap: 5px;
+}
+
+.metatrader-hub-platform select,
+.metatrader-hub-platform button {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid rgba(84, 119, 142, 0.52);
+  color: var(--text);
+  font: inherit;
+  font-size: 10px;
+}
+
+.metatrader-hub-platform select {
+  height: 36px;
+  padding: 0 8px;
+  background: rgba(2, 12, 20, 0.96);
+}
+
+.metatrader-hub-platform button {
+  min-height: 38px;
+  margin-top: 8px;
+  padding: 7px 9px;
+  border-color: rgba(37, 215, 122, 0.58);
+  background: rgba(8, 58, 43, 0.82);
+  cursor: pointer;
+  font-weight: 900;
+}
+
+.metatrader-hub-systems {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.metatrader-hub-system {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid rgba(84, 119, 142, 0.34);
+  background: rgba(8, 25, 36, 0.58);
+}
+
+.metatrader-hub-system > span,
+.metatrader-hub-system strong,
+.metatrader-hub-system small {
+  display: block;
+  min-width: 0;
+}
+
+.metatrader-hub-system strong {
+  color: var(--text);
+  font-size: 10px;
+}
+
+.metatrader-hub-system small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.metatrader-hub-system b {
+  color: #ff9da0;
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 1.4;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.metatrader-hub-system[data-state="configured"] {
+  border-color: rgba(37, 215, 122, 0.4);
+}
+
+.metatrader-hub-system[data-state="configured"] b {
+  color: var(--green);
+}
+
+.metatrader-hub-system[data-state="unknown"] {
+  border-color: rgba(255, 178, 63, 0.42);
+}
+
+.metatrader-hub-system[data-state="unknown"] b {
+  color: var(--amber);
+}
+
+.metatrader-hub-safety {
+  margin-bottom: 0;
+}
+
 .operator-mode-control {
   position: relative;
   width: 292px;
@@ -2755,6 +3004,17 @@ h1 {
   min-height: 34px;
 }
 
+.ai-trade-mt4-quick-terminal {
+  margin: 0;
+  padding: 8px 9px;
+  border: 1px solid rgba(39, 212, 255, 0.28);
+  background: rgba(2, 11, 18, 0.65);
+  color: #ccecf4;
+  font-size: 9px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .ai-trade-mt4-quick-candidates {
   display: grid;
   gap: 6px;
@@ -2862,6 +3122,10 @@ h1 {
 
 .ai-trade-mt4-quick-status[data-tone="error"] {
   color: #ff9ca0;
+}
+
+.ai-trade-mt4-quick-status[data-tone="warning"] {
+  color: var(--amber);
 }
 
 .workflow-settings-rail {
@@ -9072,6 +9336,43 @@ button:disabled {
   color: #9eb1bc;
   font-size: 11px;
   font-weight: 800;
+}
+
+.ea-optimization-lab-central-terminal {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(255, 178, 63, 0.48);
+  background: rgba(29, 20, 5, 0.68);
+}
+
+.ea-optimization-lab-central-terminal[data-tone="ready"] {
+  border-color: rgba(37, 215, 122, 0.52);
+  background: rgba(4, 35, 28, 0.62);
+}
+
+.ea-optimization-lab-central-terminal strong,
+.ea-optimization-lab-central-terminal p {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.ea-optimization-lab-central-terminal strong {
+  color: #eadcff;
+  font-size: 11px;
+}
+
+.ea-optimization-lab-central-terminal p {
+  color: #9eb1bc;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.ea-optimization-lab-central-terminal .modal-action {
+  justify-self: start;
 }
 
 .ea-optimization-lab-form-grid input,
@@ -16528,6 +16829,10 @@ button:disabled {
     width: 204px;
   }
 
+  .metatrader-hub-control {
+    width: 224px;
+  }
+
   .agent-collab-panel {
     max-height: calc(100dvh - 112px);
   }
@@ -16902,6 +17207,10 @@ button:disabled {
     width: 116px;
   }
 
+  .metatrader-hub-control {
+    width: min(142px, calc(100vw - 206px));
+  }
+
   .agent-collab-button {
     height: 42px;
     gap: 5px;
@@ -16932,6 +17241,15 @@ button:disabled {
 
   .agent-collab-actions {
     grid-template-columns: 1fr;
+  }
+
+  .metatrader-hub-platforms,
+  .metatrader-hub-system {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .metatrader-hub-system b {
+    text-align: left;
   }
 
   .signal-daily-hero {
@@ -17586,6 +17904,20 @@ button:disabled {
   .mission-chat-message-list {
     flex-basis: 320px;
     min-height: 320px;
+  }
+}
+
+@media (min-width: 641px) and (max-width: 900px) {
+  .topbar-actions .metatrader-hub-control {
+    width: 60px;
+  }
+
+  .topbar-actions .metatrader-hub-button {
+    grid-template-columns: auto auto auto;
+  }
+
+  .metatrader-hub-compact-mark {
+    display: inline;
   }
 }
 
@@ -19146,12 +19478,20 @@ button:disabled {
     width: 46px;
   }
 
+  .topbar-actions .metatrader-hub-control {
+    width: 60px;
+  }
+
   .topbar-actions .agent-collab-button,
   .topbar-actions .operator-mode-button {
     grid-template-columns: auto auto;
     justify-content: center;
     gap: 5px;
     padding: 5px;
+  }
+
+  .topbar-actions .metatrader-hub-button {
+    grid-template-columns: auto auto auto;
   }
 
   .topbar-actions .agent-collab-button > span:nth-child(2),
@@ -19209,6 +19549,13 @@ button:disabled {
     gap: 3px;
     min-height: 46px;
     padding: 4px;
+  }
+
+  .topbar-research-sheet-hub .research-sheet-hub-heading,
+  .topbar-research-sheet-hub .research-sheet-hub-input,
+  .topbar-research-sheet-hub .research-sheet-hub-apply,
+  .topbar-research-sheet-hub .research-sheet-hub-details-toggle {
+    grid-column: auto;
   }
 
   .topbar-research-sheet-hub .research-sheet-hub-heading {
@@ -19290,6 +19637,7 @@ button:disabled {
   .agent-collab-panel,
   .operator-mode-panel {
     top: 136px;
+    max-height: calc(100dvh - 158px);
   }
 
   .codex-rate-tab,

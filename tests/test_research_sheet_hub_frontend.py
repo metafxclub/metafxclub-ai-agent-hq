@@ -73,6 +73,8 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
         self.assertIn('${RESEARCH_SHEET_HUB_ENDPOINT}/auth', constants)
         self.assertIn('${RESEARCH_SHEET_GOOGLE_AUTH_ENDPOINT}/start', constants)
         self.assertIn('${RESEARCH_SHEET_GOOGLE_AUTH_ENDPOINT}/disconnect', constants)
+        self.assertIn('${RESEARCH_SHEET_GOOGLE_AUTH_ENDPOINT}/callback', constants)
+        self.assertIn('${RESEARCH_SHEET_HUB_ENDPOINT}/verify', constants)
         self.assertIn('window.open(\n    "about:blank"', start)
         self.assertLess(start.index("window.open("), start.index("await postJson("))
         self.assertIn("normalizeResearchSheetAuthorizationUrl", start)
@@ -87,14 +89,44 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
         polling = self.block("function stopResearchSheetGoogleAuthPolling", "async function startResearchSheetGoogleAuth")
         self.assertIn("RESEARCH_SHEET_GOOGLE_AUTH_POLL_TIMEOUT_MS = 120_000", self.main)
         self.assertIn("window.setTimeout", polling)
-        self.assertIn("data?.connected === true", polling)
-        self.assertIn('auth.status === "error"', polling)
+        self.assertIn('callbackResult === "success" && data?.connected === true', polling)
+        self.assertIn('callbackResult === "failure"', polling)
         self.assertIn("researchSheetGoogleAuthIsTerminalStatus", polling)
+        self.assertIn("popup.location?.origin !== window.location.origin", polling)
+        self.assertIn("popup.location?.pathname !== RESEARCH_SHEET_GOOGLE_AUTH_CALLBACK_PATH", polling)
+        self.assertIn("metafxOauthResult", polling)
+        self.assertIn("auth.callbackResult", polling)
+        self.assertNotIn('if (data?.connected === true)', polling)
+        self.assertIn("await verifyActiveResearchSheetAfterGoogleAuth()", polling)
         self.assertIn("stopResearchSheetGoogleAuthPolling({ closePopup: true })", polling)
         self.assertIn('window.addEventListener("pagehide"', self.main)
         pagehide_start = self.main.index('window.addEventListener("pagehide"')
         pagehide = self.main[pagehide_start:self.main.index("});", pagehide_start) + 3]
         self.assertIn("stopResearchSheetGoogleAuthPolling({ closePopup: true })", pagehide)
+
+        message_handler = self.block(
+            "function handleResearchSheetGoogleAuthPopupMessage",
+            "async function pollResearchSheetGoogleAuth",
+        )
+        self.assertIn("event?.origin !== window.location.origin", message_handler)
+        self.assertIn("event?.source !== auth.popup", message_handler)
+        self.assertIn('message.type !== "metafx-google-oauth-result-v1"', message_handler)
+        self.assertIn("auth.callbackResult = result", message_handler)
+        self.assertIn(
+            'window.addEventListener("message", handleResearchSheetGoogleAuthPopupMessage)',
+            self.main,
+        )
+
+    def test_google_oauth_success_reverifies_active_sheet_and_recovers_queue(self):
+        recovery = self.block(
+            "async function verifyActiveResearchSheetAfterGoogleAuth",
+            "async function retryFailedResearchSheetOutbox",
+        )
+        self.assertIn("RESEARCH_SHEET_HUB_VERIFY_ENDPOINT", recovery)
+        self.assertIn("postJson(RESEARCH_SHEET_HUB_VERIFY_ENDPOINT, {})", recovery)
+        self.assertIn("researchSheetFailedOutboxCount", recovery)
+        self.assertIn("normalizeResearchSheetHub(payload)", recovery)
+        self.assertIn("if (!hub.data?.active || hub.inFlight) return hub.data", recovery)
 
     def test_google_oauth_missing_backend_client_is_explicit_and_fail_closed(self):
         normalize = self.block("function normalizeResearchSheetGoogleAuth", "function normalizeResearchSheetAuthorizationUrl")

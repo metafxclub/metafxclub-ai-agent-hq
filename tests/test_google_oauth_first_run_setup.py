@@ -147,6 +147,115 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
             )
             self.assertEqual(list(isolated_local_app_data.rglob("*.json")), [])
 
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI integration")
+    def test_client_and_refresh_grant_survive_fresh_runtime_processes(self) -> None:
+        """Model a Bridge restart without ever printing the stored credentials."""
+
+        client_id = "123456789012-restartdesktopclient.apps.googleusercontent.com"
+        client_secret = "TEST_RESTART_CLIENT_SECRET_MUST_NOT_BE_PRINTED"
+        refresh_token = "TEST_RESTART_REFRESH_TOKEN_MUST_NOT_BE_PRINTED"
+        document = {
+            "installed": {
+                "client_id": client_id,
+                "project_id": "metafxclub-agent-hq-restart-test",
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_secret": client_secret,
+                "redirect_uris": ["http://localhost"],
+            }
+        }
+        runner = ROOT / "backend" / "local-runner"
+        with tempfile.TemporaryDirectory(prefix="mfxhq-google-restart-") as temporary:
+            temporary_root = Path(temporary)
+            source_json = temporary_root / "desktop-client.json"
+            source_json.write_text(json.dumps(document), encoding="utf-8")
+            environment = os.environ.copy()
+            environment["LOCALAPPDATA"] = str(temporary_root / "LocalAppData")
+            environment["METAFX_TEST_REFRESH"] = refresh_token
+
+            imported = subprocess.run(
+                [
+                    sys.executable,
+                    str(runner / "configure_google_oauth_client.py"),
+                    "--file",
+                    str(source_json),
+                    "--expected-client-id",
+                    client_id,
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                check=False,
+                env=environment,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+
+            saved = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os,sys;"
+                        f"sys.path.insert(0,{str(runner)!r});"
+                        "import google_oauth_store as s;"
+                        "s.save_refresh_token(os.environ['METAFX_TEST_REFRESH'])"
+                    ),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                check=False,
+                env=environment,
+            )
+            self.assertEqual(saved.returncode, 0, saved.stderr)
+
+            # A third process represents the newly started Bridge after a
+            # logout/reboot. It returns only the public auth read model.
+            restarted = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import json,sys;"
+                        f"sys.path.insert(0,{str(runner)!r});"
+                        "import google_sheet_hub as h;"
+                        "print(json.dumps(h.google_oauth_status(),sort_keys=True))"
+                    ),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                check=False,
+                env=environment,
+            )
+            self.assertEqual(restarted.returncode, 0, restarted.stderr)
+            public_status = json.loads(restarted.stdout)
+            self.assertTrue(public_status["connected"])
+            self.assertEqual(public_status["mode"], "oauth_refresh_stored")
+            self.assertTrue(public_status["clientConfigured"])
+            visible_output = "\n".join(
+                (
+                    imported.stdout,
+                    imported.stderr,
+                    saved.stdout,
+                    saved.stderr,
+                    restarted.stdout,
+                    restarted.stderr,
+                )
+            )
+            self.assertNotIn(client_id, visible_output)
+            self.assertNotIn(client_secret, visible_output)
+            self.assertNotIn(refresh_token, visible_output)
+
     def test_installer_offers_optional_setup_without_ci_dialog(self) -> None:
         installer = INSTALLER.read_text(encoding="utf-8-sig")
         self.assertIn("[switch]$SkipGoogleSetup", installer)
@@ -233,6 +342,8 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertIn("-SkipOpen", prompt)
         self.assertIn("authorization_required", prompt)
         self.assertIn('source.provenance="verified_remote_git_tag"', prompt)
+        self.assertIn("post_install.google_oauth_client.requested=true", prompt)
+        self.assertIn('post_install.google_oauth_client.status="ready_imported"', prompt)
         self.assertIn("2=Google OAuth", prompt)
         self.assertIn("3=Watchdog", prompt)
         self.assertIn("partial", prompt)

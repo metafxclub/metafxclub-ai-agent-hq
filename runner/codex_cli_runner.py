@@ -16,7 +16,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 
 if hasattr(sys.stdin, "reconfigure"):
@@ -167,6 +167,16 @@ TRADING_SYSTEM_CORRECTIVE_OPEN_VERIFY_MAX_CHILDREN = 5
 # so no accepted Radar run can need more than five isolated corrective opens.
 RADAR_CORRECTIVE_OPEN_VERIFY_MAX_CHILDREN = 5
 RADAR_DAILY_BATCH_REQUIRED_ITEMS = 6
+RADAR_MQL5_HOSTS = frozenset({"mql5.com"})
+RADAR_DIRECT_ARTIFACT_SUFFIXES = (
+    ".7z", ".bz2", ".cab", ".dll", ".dmg", ".ex4", ".ex5", ".exe",
+    ".gz", ".iso", ".mq4", ".mq5", ".mqh", ".msi", ".pkg", ".rar",
+    ".set", ".so", ".tar", ".tar.bz2", ".tar.gz", ".tar.xz", ".tbz",
+    ".tbz2", ".tgz", ".txz", ".xz", ".zip",
+)
+RADAR_DIRECT_ARTIFACT_PATH_MARKERS = (
+    "/attachment/", "/attachments/", "/download/", "/downloads/",
+)
 TRADING_SYSTEM_CORRECTIVE_FINALIZE_MARGIN_SECONDS = 18
 TRADING_SYSTEM_CORRECTIVE_RATE_LIMIT_TIMEOUT_SECONDS = 5
 TRADING_SYSTEM_CORRECTIVE_MIN_REMAINING_PERCENT = 15
@@ -487,6 +497,9 @@ def normalize_web_evidence_url(value: object) -> str:
         or parsed.password
     ):
         return ""
+    decoded_path = unquote(parsed.path or "").lower()
+    if "http://" in decoded_path or "https://" in decoded_path:
+        return ""
     if (
         hostname == "localhost"
         or hostname.endswith((".localhost", ".local", ".internal", ".lan"))
@@ -526,6 +539,123 @@ def normalize_web_evidence_url(value: object) -> str:
         fragment="",
     ).geturl()
     return normalized if len(normalized) <= 2000 else ""
+
+
+def radar_source_hostname(value: object) -> str:
+    try:
+        hostname = str(urlparse(str(value or "")).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
+    return hostname[4:] if hostname.startswith("www.") else hostname
+
+
+def radar_hostname_matches(value: object, roots: object) -> bool:
+    hostname = radar_source_hostname(value)
+    candidates = roots if isinstance(roots, (set, frozenset, tuple, list)) else []
+    return bool(
+        hostname
+        and any(
+            hostname == str(root).lower().rstrip(".")
+            or hostname.endswith("." + str(root).lower().rstrip("."))
+            for root in candidates
+            if str(root).strip()
+        )
+    )
+
+
+def radar_source_url_is_direct_artifact(value: object) -> bool:
+    try:
+        parsed = urlparse(str(value or ""))
+    except ValueError:
+        return True
+    path = unquote(parsed.path or "").lower()
+    artifact_path = path.rstrip("/")
+    query = unquote(parsed.query or "").lower()
+    path_segments = {segment for segment in path.split("/") if segment}
+    endpoint_name = artifact_path.rsplit("/", 1)[-1]
+    endpoint_stem = endpoint_name.split(".", 1)[0].replace("-", "_")
+    try:
+        query_items = parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+            max_num_fields=100,
+        )
+    except ValueError:
+        return True
+    action_values = {
+        str(raw_value or "").strip().lower().replace("-", "_")
+        for raw_key, raw_value in query_items
+        if str(raw_key or "").strip().lower().replace("-", "_")
+        in {"action", "do", "endpoint", "mode", "route", "task"}
+    }
+    query_keys = {
+        str(raw_key or "").strip().lower().replace("-", "_")
+        for raw_key, _raw_value in query_items
+    }
+    query_controls = {
+        (
+            str(raw_key or "").strip().lower().replace("-", "_"),
+            str(raw_value or "").strip().lower().replace("-", "_"),
+        )
+        for raw_key, raw_value in query_items
+    }
+    direct_content_query = any(
+        key in {"raw", "dl"}
+        or (key == "export" and value in {"attachment", "download"})
+        or (key == "response_content_disposition" and "attachment" in value)
+        or (key == "alt" and value == "media")
+        for key, value in query_controls
+    )
+    if (
+        any(marker in path for marker in RADAR_DIRECT_ARTIFACT_PATH_MARKERS)
+        or path_segments.intersection({"attachment", "attachments", "download", "downloads"})
+        or query_keys.intersection({
+            "attachment",
+            "attachments",
+            "download",
+            "downloads",
+            "download_file",
+            "file_download",
+            "get_file",
+            "getfile",
+        })
+        or direct_content_query
+        or endpoint_stem
+        in {
+            "attachment",
+            "attachments",
+            "download",
+            "downloads",
+            "download_file",
+            "file_download",
+            "get_file",
+            "getfile",
+        }
+        or action_values.intersection(
+            {"attachment", "download", "download_file", "file_download", "get_file", "getfile"}
+        )
+        or re.search(r"(?:^|&)(?:download|attachment)=[^&]*", query) is not None
+    ):
+        return True
+    return any(
+        artifact_path.endswith(suffix)
+        or re.search(re.escape(suffix) + r"(?:$|[?&#;/])", query) is not None
+        for suffix in RADAR_DIRECT_ARTIFACT_SUFFIXES
+    )
+
+
+def radar_urls_follow_source_policy(value: object) -> bool:
+    urls = value if isinstance(value, (list, tuple)) else []
+    return bool(
+        urls
+        and all(
+            isinstance(item, str)
+            and item
+            and not radar_source_url_is_direct_artifact(item)
+            for item in urls
+        )
+        and sum(radar_hostname_matches(item, RADAR_MQL5_HOSTS) for item in urls) <= 1
+    )
 
 
 def normalize_trading_system_corrective_candidate_url(value: object) -> str:
@@ -715,6 +845,8 @@ def validate_radar_required_open_urls(value: object) -> list[str]:
         raise ValueError("Radar retry contains a non-public or unsafe URL")
     if len(set(normalized)) != 6:
         raise ValueError("Radar retry URLs must be six unique public URLs")
+    if not radar_urls_follow_source_policy(normalized):
+        raise ValueError("Radar retry URLs violate the free-first source policy")
     return normalized
 
 
@@ -1001,6 +1133,10 @@ def require_radar_contract_evidence_alignment(
         raise ValueError(
             "completed Radar entries sourceUrl values must match its ordered "
             "unique public evidence URLs"
+        )
+    if not radar_urls_follow_source_policy(entry_urls):
+        raise ValueError(
+            "completed Radar result violates the free-first source policy"
         )
     required_kinds = list(
         PROFILE_CONTRACT_REQUIREMENTS["radar_website_tool"]["evidenceKinds"]
@@ -6188,6 +6324,8 @@ Structured Radar result rule:
 {radar_candidate_rule}
 - Search for public candidates, then open every selected source page individually with Native Web Search before drafting entries. A search-results listing is not an opened source.
 - Use only those directly opened page URLs in evidence and entries[].sourceUrl; self-check that every evidence URL has a completed individual open-page event.
+- Enforce the Backend FREE-FIRST policy: try its five rotated primary sources before supplemental sites; MQL5 is last fallback and may contribute at most one entry. A scheduled six-item batch must not contain commercial, unknown, paid, protected, invite-only, direct-download, attachment, cracked, unlocked, or unlicensed candidates.
+- Treat Soehoe and ForexCracked as metadata-only/manual-review sources: do not claim eaReadiness=ready and always state their limitation. A public GitHub repository is open_source only when its source page proves an explicit licence.
 - {"This admitted daily round is complete only with exactly six entries and six ordered evidence URLs; keep searching within the bounded main process until all six are ready." if strict_radar_completion else "This ordinary/manual Radar report retains the bounded one-to-six item contract requested by the Mission."}
 - Keep the compact entries JSON string within 12,000 characters; never truncate nested JSON."""
         if radar_corrective_urls:
@@ -6987,15 +7125,16 @@ def run_codex(
                 and structured_result.get("workStatus") == "completed"
             ):
                 radar_evidence = structured_result.get("evidence")
-                radar_required_open_urls = require_radar_contract_evidence_alignment(
-                    structured_result,
-                    radar_required_count,
-                )
                 if validated_radar_required_open_urls:
                     require_radar_required_evidence_urls(
                         radar_evidence,
                         validated_radar_required_open_urls,
                     )
+                radar_required_open_urls = require_radar_contract_evidence_alignment(
+                    structured_result,
+                    radar_required_count,
+                )
+                if validated_radar_required_open_urls:
                     radar_required_open_urls = list(
                         validated_radar_required_open_urls
                     )

@@ -73,7 +73,6 @@ class FrontendPollingStabilityTests(unittest.TestCase):
         for name in (
             "startCodexRateLimitPolling",
             "startOperatorModePolling",
-            "startAgentCollaborationPolling",
             "startMissionPolling",
         ):
             self.assertIn("runAutomaticPollingTask", function_block(self.main, name), name)
@@ -95,7 +94,7 @@ class FrontendPollingStabilityTests(unittest.TestCase):
         self.assertIn("state.pollingLeadership.initialReadStarted", initial_read)
         self.assertIn("void refreshCodexRateLimits();", initial_read)
         self.assertIn("void refreshOperatorMode();", initial_read)
-        self.assertIn("void refreshAgentCollaboration();", initial_read)
+        self.assertNotIn("refreshAgentCollaboration", initial_read)
         self.assertIn("void pollMissionReadModel({ manual: true });", initial_read)
         self.assertNotIn("claimPollingLeadership", initial_read)
         self.assertNotIn("runAutomaticPollingTask", initial_read)
@@ -104,6 +103,14 @@ class FrontendPollingStabilityTests(unittest.TestCase):
         self.assertIn("runInitialPollingRead();", start)
         self.assertIn("claimPollingLeadership();", start)
         self.assertLess(start.index("runInitialPollingRead();"), start.index("claimPollingLeadership();"))
+        self.assertNotIn("startAgentCollaborationPolling", start)
+        self.assertIn("startGlobalMetatraderPolling();", start)
+        metatrader_poll = function_block(self.main, "startGlobalMetatraderPolling")
+        self.assertIn('document.visibilityState !== "visible"', metatrader_poll)
+        self.assertIn("loadGlobalMetatraderHub({ preserveMessage: true })", metatrader_poll)
+        self.assertNotIn("runAutomaticPollingTask", metatrader_poll)
+        burst = function_block(self.main, "runAutomaticPollingBurst")
+        self.assertNotIn("refreshAgentCollaboration", burst)
 
     def test_open_prop_report_reload_is_change_or_ttl_driven(self) -> None:
         self.assertIn("const OPEN_PROP_REPORT_POLL_TTL_MS = 30000;", self.main)
@@ -165,6 +172,7 @@ class FrontendPollingStabilityTests(unittest.TestCase):
             "state.operatorMode.timer",
             "state.agentCollaboration.timer",
             "state.missionSync.timer",
+            "state.globalMetatraderHub.pollTimer",
             "state.pollingLeadership.renewalTimer",
         ):
             self.assertIn(f"window.clearInterval({timer})", stop)

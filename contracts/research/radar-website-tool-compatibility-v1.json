@@ -9,6 +9,18 @@
     "version": "0.1.2",
     "integrationMode": "backend_guarded_read_only_subset"
   },
+  "sourceSelection": {
+    "policyRef": "contracts/research/radar-website-source-policy-v1.json",
+    "mode": "free_first_daily_rotation",
+    "mql5Role": "last_fallback",
+    "maximumMql5EntriesPerSixItemBatch": 1,
+    "scheduledPaidEntriesAllowed": false,
+    "attemptOrderEnforcement": "prompt_bound",
+    "resultGuardsBackendEnforced": true,
+    "sourceClassificationVerifiedByBackend": false,
+    "policyRelevantEntryDigestRequired": true,
+    "researchSheetRequiresValidDailyReservation": true
+  },
   "researchSheetHub": {
     "configurationPropId": "mission_strategy_table",
     "tabName": "Indicator_EA_Tool",
@@ -173,11 +185,12 @@
       "duplicate"
     ],
     "fingerprintFields": [
-      "sourceUrl",
-      "toolName",
+      "normalizedToolName",
       "platform",
-      "version"
+      "versionFamily"
     ],
+    "independentSourceIdentity": "normalizedSourceUrl",
+    "mirrorUrlsAreOneProduct": true,
     "positiveStatusRequiresBackendFingerprint": true,
     "frontendMayNotUpgradeStatus": true
   },

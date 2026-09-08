@@ -474,6 +474,33 @@ class ResearchSheetGoogleOAuthRouteTests(unittest.TestCase):
         handler.send_google_oauth_callback_page = mock.Mock()
         return handler
 
+    def test_callback_page_exposes_only_safe_same_origin_completion_marker(self) -> None:
+        for connected, expected_marker in ((True, "success"), (False, "failure")):
+            with self.subTest(connected=connected):
+                handler = object.__new__(self.bridge.BridgeHandler)
+                handler.send_response = mock.Mock()
+                handler.send_header = mock.Mock()
+                handler.end_headers = mock.Mock()
+                handler.wfile = io.BytesIO()
+                handler.send_google_oauth_callback_page(
+                    connected=connected,
+                    message_th="ผลการเชื่อมต่อที่ปลอดภัย",
+                )
+                html = handler.wfile.getvalue().decode("utf-8")
+                self.assertIn(
+                    f'data-metafx-oauth-result="{expected_marker}"',
+                    html,
+                )
+                self.assertNotIn("state=", html)
+                self.assertNotIn("code=", html)
+                self.assertNotIn("access_token", html)
+                self.assertIn("metafx-google-oauth-result-v1", html)
+                self.assertIn("window.opener.postMessage", html)
+                self.assertIn("window.setTimeout(()=>window.close(),350)", html)
+                handler.send_header.assert_any_call("Cache-Control", "no-store")
+                handler.send_header.assert_any_call("X-Content-Type-Options", "nosniff")
+                handler.send_header.assert_any_call("Referrer-Policy", "no-referrer")
+
     def test_exact_cross_site_top_level_callback_is_allowed(self) -> None:
         path = f"{hub.GOOGLE_OAUTH_CALLBACK_PATH}?state=safe-state&code=secret-code"
         handler = self.handler(path)
@@ -566,6 +593,27 @@ class ResearchSheetGoogleOAuthRouteTests(unittest.TestCase):
         ):
             handler._do_GET_guarded()
         handler.send_json.assert_called_once_with({"ok": True, "auth": expected})
+
+    def test_verify_route_accepts_only_empty_payload_and_delegates_recovery(self) -> None:
+        handler = self.handler(
+            "/api/props/mission_strategy_table/research-sheet/verify"
+        )
+        handler.headers = {"Host": "127.0.0.1:4191"}
+        handler.read_payload = mock.Mock(return_value={})
+        handler.send_result = mock.Mock()
+        expected = {
+            "ok": True,
+            "kind": "research_sheet_hub_verified",
+            "researchSheet": {"active": True, "readReady": True},
+        }
+        with mock.patch.object(
+            self.bridge,
+            "verify_and_backfill_research_sheet_hub",
+            return_value=expected,
+        ) as verify:
+            handler.do_POST()
+        verify.assert_called_once_with()
+        handler.send_result.assert_called_once_with(expected)
 
     def test_start_route_reports_missing_client_id_without_accepting_credentials(self) -> None:
         handler = self.handler(

@@ -353,15 +353,14 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn("Ticket ที่ต้องตรวจ 33", result["unknown"]["detail"])
         self.assertNotIn("เปิด BUY", result["unknown"]["label"])
 
-    def test_terminal_selection_uses_connected_gateway_as_authoritative_truth(self) -> None:
-        render = function_block(self.main, "function renderMetatraderSelection(")
+    def test_terminal_runtime_uses_connected_gateway_as_authoritative_truth(self) -> None:
         runtime = function_block(self.main, "function getSignalRuntimeTruth(report = {})")
-
-        self.assertIn("connectedGatewayCandidateId", render)
-        self.assertIn("authoritativeSelectedId", render)
-        self.assertIn("selectionConflict", render)
         self.assertIn("gatewaySelectedCandidateId || checklistSelectedCandidateId", runtime)
         self.assertIn("selectedCandidateId: gatewaySelectedCandidateId || checklistSelectedCandidateId", runtime)
+        self.assertNotIn("function renderMetatraderSelection(", self.main)
+        central = function_block(self.main, "function renderGlobalMetatraderHubControl()")
+        self.assertIn("Snapshot พร้อม (อ่านอย่างเดียว)", central)
+        self.assertNotIn('"Adapter พร้อม"', central)
 
     def test_max_managed_orders_control_is_an_ai_dispatch_cap_not_an_ea_ack(self) -> None:
         automation = function_block(

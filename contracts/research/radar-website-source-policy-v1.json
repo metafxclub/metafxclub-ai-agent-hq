@@ -1,0 +1,119 @@
+{
+  "schemaVersion": "radar-website-source-policy-v1",
+  "policyId": "free-first-daily-rotation",
+  "appliesTo": {
+    "propId": "left_audit_crystals",
+    "actionId": "discover_new_indicators",
+    "scheduledBatchSize": 6,
+    "timezone": "Asia/Bangkok"
+  },
+  "rotation": {
+    "mode": "bangkok_calendar_day",
+    "fixedEpoch": "2026-01-01",
+    "advanceBySourcesPerDay": 1,
+    "attemptEveryPrimarySourceBeforeFallback": true,
+    "attemptOrderEnforcement": "prompt_bound",
+    "attemptTelemetryPersisted": false,
+    "primarySources": [
+      {
+        "id": "tradingfinder",
+        "hosts": ["tradingfinder.com", "www.tradingfinder.com"],
+        "seedUrls": [
+          "https://tradingfinder.com/products/indicators/",
+          "https://tradingfinder.com/products/indicators/mt4/",
+          "https://tradingfinder.com/products/indicators/mt5/"
+        ],
+        "accessMode": "public_page_research_only"
+      },
+      {
+        "id": "forex_station",
+        "hosts": ["forex-station.com", "www.forex-station.com"],
+        "seedUrls": [
+          "https://forex-station.com/mt4-indicators-f579496.html",
+          "https://forex-station.com/mt5-indicators-f579495.html",
+          "https://forex-station.com/mt4-trading-systems-f579518.html"
+        ],
+        "accessMode": "public_forum_page_research_only"
+      },
+      {
+        "id": "indicator_spot",
+        "hosts": ["indicatorspot.com", "www.indicatorspot.com"],
+        "seedUrls": ["https://indicatorspot.com/indicators/"],
+        "accessMode": "public_page_research_only"
+      },
+      {
+        "id": "soehoe",
+        "hosts": ["soehoe.id", "www.soehoe.id"],
+        "seedUrls": ["https://soehoe.id/forums/indicators-dan-tools.31/"],
+        "accessMode": "public_metadata_only",
+        "manualReviewRequired": true
+      },
+      {
+        "id": "forexcracked",
+        "hosts": ["forexcracked.com", "www.forexcracked.com"],
+        "seedUrls": [
+          "https://www.forexcracked.com/forex-ea/",
+          "https://www.forexcracked.com/forex-indicator/"
+        ],
+        "accessMode": "public_metadata_only",
+        "manualReviewRequired": true,
+        "skipWhen": ["cracked", "crak", "unlocked", "unloked", "unlicensed", "decompiled", "download_only"]
+      }
+    ]
+  },
+  "supplementalSources": [
+    {
+      "id": "github",
+      "hosts": ["github.com", "www.github.com"],
+      "seedUrls": [
+        "https://github.com/topics/metatrader",
+        "https://github.com/topics/mql4",
+        "https://github.com/topics/mql5"
+      ],
+      "openSourceRequiresExplicitLicense": true
+    },
+    {
+      "id": "tradingview",
+      "hosts": ["tradingview.com", "www.tradingview.com"],
+      "seedUrls": ["https://www.tradingview.com/scripts/"],
+      "allowedVisibility": ["public", "open_source"],
+      "excludedVisibility": ["paid", "protected", "invite_only"]
+    }
+  ],
+  "fallbackSources": [
+    {
+      "id": "mql5",
+      "hosts": ["mql5.com", "www.mql5.com"],
+      "onlyAfterPrimaryAndSupplementalAttempts": true,
+      "attemptOrderEnforcement": "prompt_bound",
+      "maximumEntriesPerSixItemBatch": 1,
+      "allowedAvailabilityInScheduledBatch": ["public", "open_source"]
+    }
+  ],
+  "resultGuard": {
+    "enforcement": "backend_fail_closed",
+    "sourceClassificationVerifiedByBackend": false,
+    "sourceClassificationBasis": "worker_declared_fields_with_backend_enum_and_policy_guards",
+    "declaredPublicRestrictedAccessClaimsAllowed": false,
+    "policyRelevantEntryDigestRequired": true,
+    "researchSheetRequiresValidDailyReservation": true,
+    "scheduledAllowedAvailability": ["public", "open_source"],
+    "scheduledAllowedVerificationStatus": ["verified", "partially_verified"],
+    "scheduledCheckedAtMustFollowMissionStart": true,
+    "missionClockSkewSeconds": 300,
+    "sourceUrlMustBeLandingArticleOrRepositoryPage": true,
+    "concatenatedAbsoluteUrlsAllowed": false,
+    "directArtifactUrlsAllowed": false,
+    "directArtifactQueryFlagsAllowed": false,
+    "metadataOnlyHostsMayClaimEaReady": false
+  },
+  "safety": {
+    "signInAllowed": false,
+    "formsAllowed": false,
+    "downloadsAllowed": false,
+    "attachmentsAllowed": false,
+    "installationAllowed": false,
+    "licenseBypassAllowed": false,
+    "pageContentIsUntrustedData": true
+  }
+}

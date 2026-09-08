@@ -77,8 +77,9 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn('"/api/props/right_server_racks/ea-factory/sources/google-sheet/sync"', actions)
         self.assertIn('"/api/props/right_server_racks/ea-factory/builds"', actions)
         self.assertIn("/ea-factory/builds/${encodeURIComponent(buildId)}/advance", actions)
-        self.assertIn('"/api/integrations/metatrader/select"', actions)
-        self.assertIn("{ propId: EA_FACTORY_PROP_ID, candidateId: candidate.id }", actions)
+        self.assertNotIn("/api/integrations/metatrader/", actions)
+        self.assertIn('postJson("/api/integrations/metatrader/global/select"', self.main)
+        self.assertNotIn('postJson("/api/integrations/metatrader/select"', self.main)
         self.assertIn('["tradingview", "TradingView / Pine Script"]', self.main)
         self.assertNotIn('["pine", "TradingView / Pine Script"]', self.main)
         self.assertIn('return "tradingview";', self.block("function normalizeEaFactoryPlatform", "function normalizeEaFactorySourceRecord"))
@@ -165,7 +166,7 @@ class EaFactoryFrontendTests(unittest.TestCase):
         ):
             self.assertIn(label, source)
 
-    def test_build_history_is_selectable_and_terminal_picker_is_in_left_rail(self):
+    def test_build_history_is_selectable_and_terminal_status_is_read_only_in_left_rail(self):
         self.assertIn('selectedBuildId: ""', self.main)
         normalizer = self.block("function normalizeEaFactoryDomain", "function normalizeWorkflowDomainData")
         self.assertIn("state.modal.eaFactory.selectedBuildId", normalizer)
@@ -190,10 +191,14 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn("subject?.id === EA_FACTORY_PROP_ID", rail)
         self.assertIn("renderEaFactoryTerminalPicker(terminalRail", rail)
         picker = self.block("function renderEaFactoryTerminalPicker", "function renderEaFactoryOperationalStage")
-        self.assertIn("เลือก Target Platform ในขั้น Strategy Spec ก่อน", picker)
+        self.assertIn("เลือกชนิดโค้ดในขั้น Strategy Spec ก่อน", picker)
         self.assertIn("Array.isArray(domain.terminals)", picker)
+        self.assertIn("domain.selectedTerminalId", picker)
+        self.assertIn("ไปที่แถบเชื่อม MT4 / MT5", picker)
+        self.assertIn("openGlobalMetatraderHubFromDevice", picker)
+        self.assertNotIn('document.createElement("select")', picker)
+        self.assertNotIn("selectEaFactoryTerminal", picker)
         self.assertIn(".ea-factory-rail-terminal", self.styles)
-        self.assertIn('li[data-selected="true"]', self.styles)
 
     def test_factory_authority_and_downloads_only_use_dedicated_read_model(self):
         domain_router = self.block("function normalizeWorkflowDomainData", "function createWorkflowExternalSource")

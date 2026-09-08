@@ -1,5 +1,5 @@
 {
-  "version": "bridge-contract-v019",
+  "version": "bridge-contract-v020",
   "purpose": "Local backend boundary for Codex CLI, MCP, filesystem, VPS, MT4/MT5, Telegram, and other real tools.",
   "base_url": "http://127.0.0.1:4186",
   "base_url_semantics": "Preferred first-run URL only; the confirmed runtime URL comes from runtime_endpoint.source.",
@@ -27,8 +27,8 @@
     "GET /api/bridge/status": "Detect local runner, Codex auth state, MCP config, and approval policy.",
     "GET /api/operator-mode": "Read manual_guarded or auto_guarded mode, Thai label, auto-execution policy, worker state, and updated time.",
     "POST /api/operator-mode": "Accept exactly one mode field, persist the local operator mode, and write an audit record. The installation default is auto_guarded; a legacy v1 manual_guarded record is migrated only when its persisted source proves it came from contract_default, while local_operator_api choices are preserved.",
-    "GET /api/collaboration/schedule": "Read the backend-owned Agent collaboration schedule, daily usage, next eligible time, active meeting, and Rate Guard pause reason.",
-    "POST /api/collaboration/schedule": "Persist only allowlisted schedule fields. The default is disabled; every automatic meeting requires Full Access and a fresh Codex quota reserve.",
+    "GET /api/collaboration/schedule": "Legacy read-only status. Scheduled Agent collaboration is retired because its visible tab was replaced by the central MT4/MT5 hub.",
+    "POST /api/collaboration/schedule": "Legacy compatibility endpoint. It accepts safe edits or disabling, but rejects enabled=true while the schedule control surface is retired.",
     "POST /api/collaboration/run-now": "Queue one explicit tool-free Agent meeting. It still enforces Full Access, daily cap, cooldown, fresh Rate Limit, single-run lock, Mission, transcript, report, and audit.",
     "GET /api/capabilities": "Read the sanitized, contract-owned capability registry and distinguish ready, approval-gated, unimplemented, and disabled adapters.",
     "GET /api/codex/rate-limits": "Read a cached, frontend-safe Codex account quota snapshot from the authenticated local Codex app-server. No auth, account, plan, credit, path, or raw error data is exposed.",
@@ -48,7 +48,10 @@
     "GET /api/props/:id/connections": "Read the cached/backend-computed Connection Checklist for one Dashboard without durable writes or frontend readiness inference.",
     "POST /api/props/:id/connections/refresh": "Accept an explicit frontend intent, then run a cooldown-guarded read-only connection diagnostic with mission id, owner, status, audit, and a report routed back to that Dashboard.",
     "POST /api/integrations/metatrader/discover": "Search bounded standard locations and process image names for MT4/MT5 in read-only mode. It never launches, closes, attaches, trades, or returns paths, PIDs, account, broker, or credentials.",
-    "POST /api/integrations/metatrader/select": "Accept only propId plus an opaque candidateId from a detected safe candidate, persist that dashboard's local target selection behind the Bridge, and create mission/report/audit records. Selection never attaches to a terminal, enables an adapter, or enables live trading.",
+    "POST /api/integrations/metatrader/select": "Compatibility alias for older clients. Accept only propId plus an opaque candidateId, resolve the candidate platform in Backend state, and delegate to the same atomic all-compatible-consumer transaction as the central selector. It can never write only one dashboard, attach to a Terminal, enable an adapter, or enable live trading.",
+    "GET /api/integrations/metatrader/global": "Read the sanitized central MT4/MT5 candidate registry and authoritative selection state for AI Trade Council, EA Factory, and EA Optimization Lab. It performs no discovery, launch, attachment, account access, adapter enablement, or trading action.",
+    "POST /api/integrations/metatrader/global/discover": "Accept exactly an empty JSON object, run one bounded read-only MT4/MT5 discovery, and return the refreshed central read model without exposing paths, process ids, account data, broker data, or credentials. Checklist projection plus Report, Mission, and Audit persistence after the registry refresh are best-effort observability; response loss is reconciled by one global GET and never causes an automatic duplicate scan.",
+    "POST /api/integrations/metatrader/global/select": "Accept exactly platform plus one opaque candidateId, then persist that candidate to every compatible consumer in one Backend-locked durable write with read-back verification. When a platform has multiple opaque installations, Backend accepts only the uniquely running candidate; zero or multiple running candidates fail closed until the user leaves one desired Terminal open and scans again. Report, Mission, and Audit persistence after the verified commit are best-effort observability and cannot reverse or falsely fail the selection; the response exposes observabilityStatus and bounded warning codes. The Frontend never fans out per device and reconciles an indeterminate response with the global GET before allowing a retry. Selection does not launch a Terminal, enable an adapter, or enable Demo/Live trading.",
     "GET /api/ai-trade-council/status": "Read the sanitized Council state, current MT4 snapshot readiness, latest consensus, and backend-owned new-closed-bar automation status without running Codex. liveAnalysis.consensus exposes identityValid plus candidateId/channelId, canonical streamKey, exact display symbol, timeframe, snapshotId, closedBarIdentity, and streamIdentity only when the immutable parent context and decision provenance agree exactly; a mismatch nulls the identity fields so the Frontend can fail closed.",
     "GET /api/ai-trade-council/history": "Read a bounded cursor page with kind=analysis or kind=orders. scope=all is the default and Order history scans every durable Gateway channel page even when no MT4 target is currently selected; scope=active resolves the Backend-owned current candidateId, uppercase-canonical streamKey, exact display symbol and timeframe before filtering, summary calculation, and pagination and still requires the exact selected MT4 channel. Optional candidateId, streamKey, symbol and timeframe are validated optimistic-concurrency guards and never select an arbitrary historical stream. Analysis identity is attemptId first and closed-bar identity second; Order linkage uses exact mission id, with Snapshot fallback only for legacy ACK records that have no mission id. Response scope is authoritative and Order historyWindow truthfully declares scan completeness, ledger command count, and whether older rows remain.",
     "GET /api/ai-trade-council/automation": "Read whether automatic analysis is enabled, its supported timeframes, Backend-audited analysisBarCount, durable FIFO/coverage cursor, pending count, daily count, quota reserve, and pause reason. This endpoint never creates a Mission.",
@@ -70,10 +73,11 @@
     "GET /api/props/mission_strategy_table/research-sheet": "Read the frontend-safe central Research Sheet Hub state, fixed consumer-to-tab mappings, persisted Sheet id and canonical URL, Apply/verification progress, fail-closed adapter status, and outbox summary. A Google Sheet id is displayable configuration rather than a credential; OAuth tokens, service-account material, cookies, and other credentials are never exposed.",
     "GET /api/props/mission_strategy_table/research-sheet/auth": "Read only the frontend-safe Google authorization state. The response may identify whether a durable local OAuth grant or environment fallback is usable, but never returns an access token, refresh token, authorization code, PKCE verifier, OAuth state, client secret, secure-store payload, or callback query.",
     "POST /api/props/mission_strategy_table/research-sheet/auth/start": "Accept exactly an empty JSON object and create one short-lived, one-use OAuth authorization attempt for the current local bridge. Return an HTTPS Google authorizationUrl containing PKCE S256, an opaque state parameter, access_type=offline, and prompt=consent. State is never returned as a standalone response field; the PKCE verifier remains Backend-only.",
-    "GET /api/props/mission_strategy_table/research-sheet/auth/callback?code={code}&state={state}": "Receive the exact Google redirect on the current 127.0.0.1 bridge port, consume and validate the short-lived state once, exchange the one-time code with the bound PKCE verifier, persist only the refresh token through Windows current-user DPAPI storage outside the project, and return a generic completion page. The raw query, code, state, verifier, token response, and refresh token are never logged, audited, persisted in runtime settings, or returned to the Agent HQ frontend.",
+    "GET /api/props/mission_strategy_table/research-sheet/auth/callback?code={code}&state={state}": "Receive the exact Google redirect on the current 127.0.0.1 bridge port, consume and validate the short-lived state once, exchange the one-time code with the bound PKCE verifier, persist only the refresh token through Windows current-user DPAPI storage outside the project, and return a no-store generic completion page carrying only a success/failure DOM marker. The page also sends that same non-secret result to its exact opener with a same-origin postMessage before auto-closing; the frontend requires the bound popup source plus origin, or the exact same-origin callback path marker, before treating a connected status as completion. The raw query, code, state, verifier, token response, and refresh token are never logged, audited, persisted in runtime settings, or returned to the Agent HQ frontend.",
     "POST /api/props/mission_strategy_table/research-sheet/auth/disconnect": "Accept exactly an empty JSON object and delete the durable local OAuth grant plus every pending authorization attempt. Environment credentials, when separately configured by the operator, are not deleted and remain an explicit fallback reported by the safe auth read model.",
     "POST /api/props/mission_strategy_table/research-sheet/inspect": "Accept exactly googleSheetUrlOrId. Inspect the candidate with Backend-only credentials, verify the three fixed tabs and key-column read probes, and return verificationPreview plus the unchanged active researchSheet. A short-lived one-time verificationToken is returned only when all three probes are ready. Inspection never replaces the active Sheet revision.",
     "POST /api/props/mission_strategy_table/research-sheet/activate": "Accept exactly verificationToken, confirmActivate=true, expectedConfigRevision, and idempotencyKey. Re-check the three fixed tabs, reject an expired, stale, reused, schema-mismatched, or wrong-revision token, then atomically activate the candidate. The active revision and Sheet remain unchanged on failure.",
+    "POST /api/props/mission_strategy_table/research-sheet/verify": "Accept exactly an empty JSON object after a successful Google reconnect, re-probe the already-active fixed Sheet and all three tab contracts, refresh its bounded cache, reopen only eligible current-revision auth or permission failures after live verification, backfill bounded recent reports, and return the frontend-safe Hub state. It never changes the active Sheet id and never accepts credentials.",
     "POST /api/props/mission_strategy_table/research-sheet/flush": "Accept an empty JSON object to flush pending Backend-owned report projections, or {retryFailed:true} to requeue a bounded batch from the active configuration revision before flushing. Failed-row requeue is audited, capped per item, never revives stale revisions, and every write remains idempotent by tab key, read back, and fail-closed when auth, schema, or write verification is unavailable.",
     "GET /api/props/right_server_racks/ea-factory": "Read the frontend-safe EA Factory read model only. The request has no body and performs no external read or tool action. It may display the central Sheet id and config revision already owned by the Mission Strategy Table; it never exposes OAuth/service-account credentials, terminal paths, account data, broker data, process ids, or absolute filesystem paths.",
     "POST /api/props/right_server_racks/ea-factory/sources/google-sheet/sync": "Read verified strategy rows from the fixed Deep_Research tab in the central Sheet configured at the Mission Strategy Table, then map them to the factory's 23 internal strategy fields. Current clients send optional configRevision and idempotencyKey only; legacy googleSheetUrlOrId or tabName values are accepted solely when they match the central contract. Backend may use public CSV or Backend-only auth, creates Mission/report/audit lineage, never writes from the factory, and never advances an EA build.",
@@ -86,6 +90,16 @@
     "GET /api/reports": "Read structured runtime report cards with frontend-safe metadata and opaque image attachment URLs.",
     "GET /api/reports/{reportId}": "Read one complete frontend-safe report by exact id. Mission Table summary rows use this endpoint lazily.",
     "GET /api/reports/{reportId}/attachments/{attachmentId}": "Stream one allowlisted PNG, JPEG, or WebP report image through a same-origin opaque attachment id. Local paths and unsupported files are never returned."
+  },
+  "background_scheduler": {
+    "dashboardWorkflowScheduler": {
+      "googleSheetExternalWritesEnabledByDefault": true,
+      "externalWriteScopes": ["google_sheets"],
+      "googleSheetWritePreconditions": ["auto sync enabled", "one active operator-confirmed Sheet revision", "Backend-only Google authorization configured", "eligible durable outbox work"],
+      "otherExternalWrites": false,
+      "metaTraderActions": false,
+      "auditRule": "Scheduler start and stop events declare Google Sheets as a possible external-write scope whenever automatic Sheet sync is enabled; they must never claim externalWrites=false while that capability is active."
+    }
   },
   "research_sheet_hub": {
     "schemaVersion": "research-sheet-hub-v1",
@@ -125,6 +139,12 @@
       "startResponseFields": ["ok", "kind", "authorizationUrl", "expiresInSeconds", "auth"],
       "disconnectResponseFields": ["ok", "kind", "storedCredentialRemoved", "auth", "messageTh"],
       "callbackResponseContentType": "text/html; charset=utf-8",
+      "callbackResponseCachePolicy": "no-store",
+      "callbackCompletionMarker": "html[data-metafx-oauth-result=success|failure]",
+      "callbackCompletionMessage": "same-origin postMessage from the exact popup Window with type metafx-google-oauth-result-v1 and success or failure only",
+      "callbackAutoCloseAfterCompletionMessage": true,
+      "frontendCompletionRule": "flow-bound popup source plus same-origin completion result, or exact same-origin callback path DOM marker, then connected backend status",
+      "previousConnectedStatusAloneMayCompleteNewFlow": false,
       "authorizationUrlAllowedOrigin": "https://accounts.google.com",
       "httpErrorClassification": {
         "maximumProviderBodyBytes": 16384,
@@ -427,9 +447,13 @@
       "transcript": "./data/runtime/agent-chat-transcripts.jsonl"
     },
     "agent_collaboration": {
-      "mode": "scheduled_tool_free_conversation",
+      "mode": "manual_tool_free_conversation_with_retired_schedule",
       "schedule": "./data/runtime/collaboration-schedule.json",
       "defaultEnabled": false,
+      "scheduledAutomationEnabled": false,
+      "scheduledControlSurface": "retired_replaced_by_central_metatrader_hub",
+      "legacyEnabledStoreMigration": "force_disabled_on_bridge_start",
+      "manualRunEndpointRetained": true,
       "timezone": "Asia/Bangkok",
       "consumesCodexQuota": true,
       "freshRateLimitRequiredBeforeEveryTurn": true,

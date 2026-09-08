@@ -12,7 +12,7 @@ echo.
 if "%~1"=="" (
   powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0installer\install.ps1" -Port 4186 -EndpointConfirmed
 ) else (
-  powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0installer\install.ps1" %*
+  powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0installer\install.ps1" %*
 )
 set "INSTALL_EXIT=%ERRORLEVEL%"
 
@@ -21,7 +21,7 @@ if not "%INSTALL_EXIT%"=="0" (
   echo การติดตั้งไม่สำเร็จ กรุณาอ่านข้อความด้านบนหรือส่งไฟล์ Log ให้ผู้สอน
   echo Log: %LOCALAPPDATA%\Metafxclub\AI-Agent-HQ-Install.log
   echo.
-  pause
+  if "%~1"=="" pause
   exit /b %INSTALL_EXIT%
 )
 

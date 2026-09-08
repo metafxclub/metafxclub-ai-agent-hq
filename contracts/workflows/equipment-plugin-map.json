@@ -370,6 +370,7 @@
       "ownerAgentId": "codex_mcp_operator",
       "googleSheets": {"configurationPropId": "mission_strategy_table", "tabName": "Indicator_EA_Tool", "mode": "read_write", "adapterCapability": "implemented_backend_fail_closed", "runtimeStatusRequired": true},
       "schedule": {"supported": true, "defaultEnabled": true, "timezone": "Asia/Bangkok", "defaultTimes": ["09:00"], "backendOwned": true, "userConfigurable": false, "manualExecutionAllowed": false, "maximumTimes": 1, "maximumRunsPerDay": 1, "hardRuntimeEnforced": true, "counterPersistence": "backend_local_settings", "countingPolicy": "post_gate_pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "actions": ["discover_new_indicators"], "manualOrAgentHandoffActions": []},
+      "sourcePolicy": {"policyRef": "contracts/research/radar-website-source-policy-v1.json", "mode": "free_first_daily_rotation", "rotationTimezone": "Asia/Bangkok", "mql5FallbackMaximumPerSixItemBatch": 1, "scheduledPaidEntriesAllowed": false, "attemptOrderEnforcement": "prompt_bound", "resultGuardsBackendEnforced": true, "sourceClassificationVerifiedByBackend": false, "policyRelevantEntryDigestRequired": true, "researchSheetRequiresValidDailyReservation": true},
       "actions": {
         "discover_new_indicators": {
           "pluginSkillId": "backend-readonly-indicator-scout",

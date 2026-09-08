@@ -98,8 +98,13 @@ class RadarWebsiteToolCompatibilitySnapshotTests(unittest.TestCase):
         self.assertEqual(dedupe["statuses"], ["unique", "duplicate"])
         self.assertEqual(
             dedupe["fingerprintFields"],
-            ["sourceUrl", "toolName", "platform", "version"],
+            ["normalizedToolName", "platform", "versionFamily"],
         )
+        self.assertEqual(
+            dedupe["independentSourceIdentity"],
+            "normalizedSourceUrl",
+        )
+        self.assertTrue(dedupe["mirrorUrlsAreOneProduct"])
         self.assertTrue(dedupe["positiveStatusRequiresBackendFingerprint"])
         self.assertTrue(dedupe["frontendMayNotUpgradeStatus"])
 

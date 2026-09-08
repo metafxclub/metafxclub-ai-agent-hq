@@ -151,10 +151,11 @@ class RadarStructuredOutputContractTests(unittest.TestCase):
                 "type": "indicator_scout_report",
                 "status": "ready",
                 "linkedPropId": "left_audit_crystals",
-                "workflowContext": {
-                    "propId": "left_audit_crystals",
-                    "actionId": "discover_new_indicators",
-                },
+                # Persist the same lineage that produced the Backend policy
+                # receipt.  A partial synthetic context makes the receipt's
+                # Bangkok rotation date look tampered even though this test is
+                # only exercising duplicate presentation in the read model.
+                "workflowContext": self.mission()["workflowContext"],
                 "createdAt": "2026-08-12T01:00:00Z",
                 "metrics": {
                     "entries": entries,

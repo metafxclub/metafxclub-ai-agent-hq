@@ -411,7 +411,7 @@
     "mission_strategy_table": {
       "functionName": "Mission Strategy Table",
       "displayTitle": "โต๊ะวางแผนภารกิจ",
-      "purpose": "ใช้รวมคำสั่งจาก CEO/User, แตกงาน, นัดประชุม, ดู mission queue, รวมผล specialist และเป็นจุดตั้งค่า Google Sheet กลาง 3 แท็บสำหรับ 4 ระบบที่เชื่อม โดยโรงงาน EA อ่านร่วมจาก Deep_Research และไม่สร้างแท็บที่ 4",
+      "purpose": "ใช้รวมคำสั่งจาก CEO/User, แตกงาน, นัดประชุม, ดู mission queue, รวมผล specialist และเป็นจุดตั้งค่ากลางสำหรับ Google Sheet กับการเลือก MT4/MT5 โดยโรงงาน EA อ่านร่วมจาก Deep_Research และไม่สร้างแท็บที่ 4",
       "interactionMode": "kanban",
       "departmentId": "executive_mission_control",
       "departmentName": "Executive & Mission Control",
@@ -420,8 +420,8 @@
       "reviewerAgentIds": ["risk_guard"],
       "approverAgentIds": ["ceo"],
       "primaryReportType": "mission_plan",
-      "acceptedReportTypes": ["mission_plan", "executive_summary", "risk_review", "telegram_report", "telegram_tool_report"],
-      "dashboardSections": ["research_sheet_hub", "mission_board", "queue_summary", "meeting_agenda", "specialist_assignments", "approval_lane", "executive_summary"],
+      "acceptedReportTypes": ["mission_plan", "executive_summary", "risk_review", "telegram_report", "telegram_tool_report", "terminal_discovery_report", "terminal_selection_report"],
+      "dashboardSections": ["research_sheet_hub", "global_metatrader_hub", "mission_board", "queue_summary", "meeting_agenda", "specialist_assignments", "approval_lane", "executive_summary"],
       "allowedDashboardActions": ["inspect_research_sheet_candidate", "activate_research_sheet_candidate", "submit_manager_goal", "create_mission", "delegate_mission", "move_mission_card", "call_meeting", "archive_mission", "open_executive_summary"],
       "researchSheetHub": {
         "configurationOwner": true,
@@ -564,7 +564,7 @@
         "agentTransferOnly": true,
         "directDashboardDependency": false,
         "transferPolicy": {"mode": "agent_mission_only", "requiredRecordFields": ["sourceReportId", "sourcePropId", "sourceMissionId", "transferAgentId"], "frontendMaySubmitFields": ["sourceReportId"], "backendDerivesLineage": true, "missionStrategyTableRole": "global_ledger_only"},
-        "deduplication": {"required": true, "mode": "deterministic_local_report_catalog", "matchKeys": ["normalizedSourceUrl", "toolName", "platform", "version"], "googleSheetCompared": false, "owner": "backend"},
+        "deduplication": {"required": true, "mode": "deterministic_local_report_catalog", "matchKeys": ["normalizedToolName", "platform", "versionFamily"], "independentSourceIdentity": "normalizedSourceUrl", "mirrorUrlsAreOneProduct": true, "googleSheetCompared": false, "owner": "backend"},
         "schedule": {"preferenceRunsPerDay": [1], "defaultTimes": ["09:00"], "maximumTimes": 1, "maximumRunsPerDay": 1, "hardRuntimeEnforced": true, "backendOwned": true, "userConfigurable": false, "manualRunAllowed": false, "counterPersistence": "backend_local_settings", "countingPolicy": "post_gate_pre_dispatch_fail_closed_reservation", "stalePendingPolicy": "expire_at_bangkok_day_boundary", "catchUpPolicy": "latest_same_day_slot_only", "configurationIntentReady": false, "recurringSchedulerAdapterStatus": "implemented_guarded_read_only", "readiness": "ready_guarded_read_only", "defaultEnabled": true, "timezone": "Asia/Bangkok", "scheduledActionIds": ["discover_new_indicators"], "manualOrAgentHandoffActionIds": []},
         "googleSheet": {"configurationPropId": "mission_strategy_table", "configurationMayBeSavedHere": false, "tabName": "Indicator_EA_Tool", "mode": "read_write", "adapterStatus": "implemented_backend_adapter_runtime_status_required", "credentialsBackendOnly": true},
         "readModel": {"schemaVersion": "radar-website-tool-v1", "todayEntries": true, "sevenDayEntries": true, "historyWindowDays": 7},

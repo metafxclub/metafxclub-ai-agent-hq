@@ -3657,8 +3657,10 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertEqual(len(model["history7Days"]), 7)
         self.assertEqual(len(model["todayEntries"]), 2)
         self.assertEqual(len(model["sevenDayEntries"]), 2)
-        self.assertEqual(model["today"]["duplicateCount"], 1)
-        self.assertEqual(model["today"]["uniqueCount"], 1)
+        # A different mirror URL is still the same product identity when
+        # toolName + platform + versionFamily are unchanged.
+        self.assertEqual(model["today"]["duplicateCount"], 2)
+        self.assertEqual(model["today"]["uniqueCount"], 0)
         self.assertEqual(model["today"]["runCount"], 2)
         self.assertEqual(model["verifiedReadyBatchCount"], 3)
         self.assertEqual(model["sourceReportsObserved"], 6)
@@ -3672,6 +3674,11 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertIsInstance(duplicate["sourceLimitations"], list)
         self.assertEqual(duplicate["screenshotStatus"], "not_available")
         self.assertFalse(duplicate["screenshotClaimAllowed"])
+        mirror_duplicate = next(
+            item for item in model["todayEntries"] if item["sourceUrl"].endswith("/tool-v2")
+        )
+        self.assertEqual(mirror_duplicate["duplicateStatus"], "duplicate")
+        self.assertEqual(mirror_duplicate["duplicateScope"], "local_report_catalog")
         self.assertFalse(model["deduplication"]["googleSheetCompared"])
 
 
