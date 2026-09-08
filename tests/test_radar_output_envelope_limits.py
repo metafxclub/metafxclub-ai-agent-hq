@@ -14,6 +14,7 @@ from unittest import mock
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "bridge_server.py"
 RUNNER_PATH = PROJECT_ROOT / "runner" / "codex_cli_runner.py"
+EA_RESEARCH_BLUEPRINT_TEST_PATH = PROJECT_ROOT / "tests" / "test_ea_research_blueprint_v2.py"
 
 
 def load_module(name: str, path: Path):
@@ -763,23 +764,28 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
 
     def test_deep_research_contract_requires_public_matching_opened_sources(self) -> None:
         urls = [
-            "https://public-one.example/rules",
-            "https://public-two.example/interview",
+            "https://example.com/ema-cross",
+            "https://www.investopedia.com/terms/m/movingaverage.asp",
         ]
 
         def payload(source_links: list[str] | None = None) -> dict:
-            values = {
-                field: "verified value"
-                for field in self.runner.TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS
-            }
-            values.update({
-                "sourceLinks": json.dumps(
-                    source_links if source_links is not None else urls,
-                    separators=(",", ":"),
-                ),
-                "checkedAt": "2026-08-22T03:00:00+00:00",
-                "limitations": json.dumps(["No audited performance record"]),
-            })
+            blueprint_support = load_module(
+                "metafx_radar_output_blueprint_support",
+                EA_RESEARCH_BLUEPRINT_TEST_PATH,
+            )
+            blueprint = blueprint_support.ready_blueprint()
+            selected_urls = source_links if source_links is not None else urls
+            blueprint["evidenceMap"] = [
+                {
+                    "sourceRef": f"S{index}",
+                    "url": url,
+                    "title": f"Public source {index}",
+                    "checkedAt": blueprint["checkedAt"],
+                }
+                for index, url in enumerate(selected_urls, start=1)
+            ]
+            # Existing rules cite S1 and remain valid when the second source is
+            # corroborating evidence for the overall research.
             return {
                 "status": "completed",
                 "summary": "Verified deep research",
@@ -790,20 +796,19 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
                     for index, url in enumerate(urls, start=1)
                 ],
                 "blockedCapability": "",
-                "contractFields": [
-                    {"field": field, "value": values[field]}
-                    for field in self.runner.TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS
-                ],
+                "research": blueprint,
                 "evidenceKinds": [
                     "at_least_two_source_urls",
                     "checked_at",
                     "limitations",
+                    "ea_readiness",
+                    "source_digest",
                 ],
             }
 
         parsed = self.runner.parse_work_result(
             self.compact(payload()),
-            20000,
+            64000,
             "trading_system_research",
         )
         self.runner.require_trading_system_research_evidence_urls_opened(
@@ -816,7 +821,7 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "sourceLinks must match"):
             self.runner.parse_work_result(
                 self.compact(mismatched),
-                20000,
+                64000,
                 "trading_system_research",
             )
 
@@ -825,7 +830,7 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unique public evidence URLs"):
             self.runner.parse_work_result(
                 self.compact(unsafe),
-                20000,
+                64000,
                 "trading_system_research",
             )
 

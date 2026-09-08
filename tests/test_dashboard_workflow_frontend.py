@@ -265,7 +265,7 @@ const TRADING_RESEARCH_SIMULATION_REGIMES = Object.freeze([
         ):
             self.assertIn(selector, self.styles)
 
-    def test_research_vault_has_four_contract_aligned_tabs_and_verified_catalog_projection(self):
+    def test_research_vault_has_four_contract_aligned_tabs_and_authoritative_catalog_projection(self):
         fallback_start = self.main.index(
             "left_server_racks: {",
             self.main.index("const WORKFLOW_DASHBOARD_FALLBACKS"),
@@ -286,6 +286,9 @@ const TRADING_RESEARCH_SIMULATION_REGIMES = Object.freeze([
         normalize_end = self.main.index("function tradingResearchNormalizeHeader", normalize_start)
         normalize = self.main[normalize_start:normalize_end]
         self.assertIn("normalizeTradingSystemPortalDomain(portalBackend, portalReport)", normalize)
+        self.assertIn("backend.researchCatalog", normalize)
+        self.assertIn("hasAuthoritativeCatalog", normalize)
+        self.assertIn("authoritativeSystems", normalize)
         self.assertIn("portal.systems.length === 3", normalize)
         self.assertNotIn("JSON.parse", normalize)
 
@@ -308,12 +311,77 @@ const TRADING_RESEARCH_SIMULATION_REGIMES = Object.freeze([
         self.assertIn('type: "trading_system_discovery_report"', direct_source)
         self.assertIn('status: "verified"', direct_source)
         self.assertIn("directVerifiedCatalog && sources.length === 1", self.main)
-        self.assertIn('state.modal.tradingResearchLab.selectedSystemId || systems[0]?.id || ""', self.main)
+        self.assertIn("function populateWorkflowDeepResearchRecordSelect", self.main)
+        self.assertIn("systems.filter((system) => system.sourceReportId === reportId)", self.main)
+        self.assertIn("session.selectedSystemId = paired?.id", self.main)
+        self.assertIn("option.dataset.sourceReportId", self.main)
         self.assertIn('label: "พร้อมวิจัยโดยไม่รออนุมัติ"', self.main)
         self.assertNotIn(
             'เลือกชื่อระบบในฟอร์มด้านล่างแล้วกด “วิจัยระบบที่เลือกต่อ”',
             self.main,
         )
+
+    def test_research_source_pair_is_atomic_and_blueprint_v2_uses_safe_dom(self):
+        sources_start = self.main.index("function workflowDeepResearchCatalogSources")
+        sources_end = self.main.index("function getWorkflowSpeechRecognitionConstructor", sources_start)
+        sources = self.main[sources_start:sources_end]
+        self.assertIn("const reports = new Map()", sources)
+        self.assertIn("system?.sourceReportId", sources)
+
+        validator_start = self.main.index("function validateWorkflowDeepResearchSourcePair")
+        validator_end = self.main.index("function createWorkflowIdempotencyKey", validator_start)
+        validator = self.main[validator_start:validator_end]
+        self.assertIn('action.id !== "deep_research_system"', validator)
+        self.assertIn("system.sourceReportId === sourceReportId", validator)
+        self.assertIn("system.sourceRecordId === sourceRecordId", validator)
+        self.assertIn("รายงานต้นทางและระบบเทรดไม่ใช่คู่ข้อมูลเดียวกัน", validator)
+
+        reader_start = self.main.index("function tradingResearchEaBlueprintFromReport")
+        reader_end = self.main.index("function tradingResearchBlueprintHasValue", reader_start)
+        reader = self.main[reader_start:reader_end]
+        self.assertIn("report.eaResearch", reader)
+        self.assertIn("readModel.validated === true", reader)
+        self.assertIn("readModel.digestMatched === true", reader)
+        self.assertIn('readModel.validationStatus === "canonical_validated"', reader)
+        self.assertIn("TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION", reader)
+        self.assertIn("/^[0-9a-f]{64}$/", reader)
+        self.assertNotIn("eaImplementationBlueprint", reader)
+        self.assertNotIn("eaBlueprint", reader)
+        self.assertIn("blueprint_digest_mismatch", reader)
+        self.assertIn("legacy_ea_blueprint_missing", reader)
+        self.assertIn("ไม่ใช้ alias หรือค่า ready ดิบแทน", reader)
+
+        blueprint_start = self.main.index("const TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION")
+        blueprint_end = self.main.index("function renderTradingResearchDetail", blueprint_start)
+        blueprint = self.main[blueprint_start:blueprint_end]
+        self.assertIn('"ea-ready-strategy-research/2.0.0"', blueprint)
+        for key in (
+            "barSemantics",
+            "entry.buy",
+            "entry.sell",
+            "exit.buy",
+            "exit.sell",
+            "orderManagement.breakEven",
+            "orderManagement.trailingStop",
+            "orderManagement.partialClose",
+            "orderManagement.scaleIn",
+            "orderManagement.scaleOut",
+            "orderManagement.modifyStopLoss",
+            "orderManagement.modifyTakeProfit",
+            "orderManagement.pendingOrders",
+            "riskAndSizing",
+            "stateMachine",
+            "precedence",
+            "pseudocode",
+            "testCases",
+            "completeness",
+        ):
+            self.assertIn(key, blueprint)
+        self.assertIn("MA10[2] <= MA60[2] && MA10[1] > MA60[1]", blueprint)
+        self.assertIn("MA10[2] >= MA60[2] && MA10[1] < MA60[1]", blueprint)
+        self.assertIn('document.createElement("details")', blueprint)
+        self.assertIn("textContent", blueprint)
+        self.assertNotIn("innerHTML", blueprint)
 
     def test_research_simulation_is_deterministic_educational_only_and_never_reports_metrics(self):
         generate_start = self.main.index("function generateTradingResearchSimulationBars")

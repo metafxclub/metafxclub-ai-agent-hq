@@ -12,6 +12,7 @@ from unittest import mock
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "bridge_server.py"
 RUNNER_PATH = PROJECT_ROOT / "runner" / "codex_cli_runner.py"
+EA_RESEARCH_BLUEPRINT_TEST_PATH = PROJECT_ROOT / "tests" / "test_ea_research_blueprint_v2.py"
 
 
 def load_module(name: str, path: Path):
@@ -209,69 +210,70 @@ class EquipmentOutputContractTests(unittest.TestCase):
         self.assertEqual(parsed["evidenceKinds"], ["source_url"])
 
     def test_deep_research_profile_requires_every_exact_field_and_evidence_kind(self) -> None:
-        required_fields = self.runner.TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS
+        blueprint_support = load_module(
+            "metafx_equipment_output_blueprint_support",
+            EA_RESEARCH_BLUEPRINT_TEST_PATH,
+        )
+        blueprint = blueprint_support.ready_blueprint()
+        blueprint["evidenceMap"][1] = {
+            "sourceRef": "S2",
+            "url": "https://www.investopedia.com/terms/m/movingaverage.asp",
+            "title": "Moving average reference",
+            "checkedAt": blueprint["checkedAt"],
+        }
         schema = self.runner.build_work_output_schema(
-            7000,
+            64000,
             "trading_system_research",
         )
-        contract_schema = schema["properties"]["contractFields"]
-        self.assertEqual(contract_schema["minItems"], len(required_fields))
-        self.assertEqual(contract_schema["maxItems"], len(required_fields))
-        self.assertEqual(
-            set(contract_schema["items"]["properties"]["field"]["enum"]),
-            set(required_fields),
-        )
+        self.assertNotIn("contractFields", schema["properties"])
+        self.assertIn("research", schema["properties"])
+        self.assertIn("research", schema["required"])
         self.assertEqual(schema["properties"]["status"]["enum"], ["completed"])
         self.assertEqual(schema["properties"]["evidence"]["minItems"], 2)
-
-        contract_fields = [
-            {
-                "field": field,
-                "value": (
-                    "2026-08-22T18:45:00+07:00"
-                    if field == "checkedAt"
-                    else '["https://one.example/rules","https://two.example/proof"]'
-                    if field == "sourceLinks"
-                    else "not_publicly_stated"
-                    if field == "conflictingEvidence"
-                    else f"verified {field}"
-                ),
-            }
-            for field in required_fields
-        ]
         payload = {
             "status": "completed",
             "summary": "วิจัยระบบที่ Backend ผูกไว้ครบแล้ว",
             "findings": ["แยก fact และ unknown แล้ว"],
             "nextSteps": ["นำกฎที่ครบไปทดสอบกับ OHLC"],
             "evidence": [
-                {"label": "Rules", "url": "https://one.example/rules", "note": "Primary public rules"},
-                {"label": "Proof", "url": "https://two.example/proof", "note": "Independent public proof"},
+                {"label": "Rules", "url": "https://example.com/ema-cross", "note": "Primary public rules"},
+                {"label": "Proof", "url": "https://www.investopedia.com/terms/m/movingaverage.asp", "note": "Independent public proof"},
             ],
             "blockedCapability": "",
-            "contractFields": contract_fields,
+            "research": blueprint,
             "evidenceKinds": [
                 "at_least_two_source_urls",
                 "checked_at",
                 "limitations",
+                "ea_readiness",
+                "source_digest",
             ],
         }
         parsed = self.runner.parse_work_result(
             json.dumps(payload, ensure_ascii=False),
-            7000,
+            64000,
             "trading_system_research",
         )
-        self.assertEqual(len(parsed["contractFields"]), len(required_fields))
+        self.assertEqual(
+            {item["field"] for item in parsed["contractFields"]},
+            set(self.runner.TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS),
+        )
         self.assertEqual(
             set(parsed["evidenceKinds"]),
-            {"at_least_two_source_urls", "checked_at", "limitations"},
+            {
+                "at_least_two_source_urls",
+                "checked_at",
+                "limitations",
+                "ea_readiness",
+                "source_digest",
+            },
         )
-
-        payload["contractFields"] = contract_fields[:-1]
-        with self.assertRaisesRegex(ValueError, "every exact contract field once"):
+        payload.pop("research")
+        payload["contractFields"] = parsed["contractFields"]
+        with self.assertRaisesRegex(ValueError, "direct research only"):
             self.runner.parse_work_result(
                 json.dumps(payload, ensure_ascii=False),
-                7000,
+                64000,
                 "trading_system_research",
             )
 

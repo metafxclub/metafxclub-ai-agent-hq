@@ -133,15 +133,15 @@
       "actions": {
         "deep_research_system": {
           "pluginSkillId": "backend-readonly-deep-research",
-          "pluginVersion": "backend-v1",
+          "pluginVersion": "backend-v2",
           "procedureKind": "backend_procedure",
           "referencePluginSkillId": "metafx-online-system-scout",
           "referencePluginVersion": "0.1.2",
           "automationMode": "mission_on_demand",
           "requiredInputs": ["sourceReportId", "sourceRecordId"],
-          "inputPreset": {"brief": "ตรวจระบบที่เลือกแบบเจาะจงหลายแหล่ง แยกข้อเท็จจริงจากสมมติฐาน อธิบาย Entry, Exit, การจัดการออเดอร์, Money Management, การแก้ไม้ และวิธีประยุกต์โดยไม่อ้างผลกำไร"},
-          "outputFields": ["systemIdentity", "verifiedRules", "conflictingEvidence", "indicatorSettings", "entrySteps", "exitSteps", "tradeManagementSteps", "riskModel", "recoveryAndAveragingRules", "specialConditions", "suitableMarket", "suitableTimeframe", "ohlcBacktestReadiness", "implementationNotes", "sourceLinks", "checkedAt", "limitations"],
-          "evidenceRequired": ["at_least_two_source_urls", "checked_at", "limitations"],
+          "inputPreset": {"brief": "แตกกฎระบบที่เลือกเป็น EA-ready Blueprint v2 แบบ deterministic: กำหนด bar[0]/bar[1]/bar[2], Indicator และ Input ทุกค่า, Buy/Sell Entry, Buy/Sell Exit, SL/TP, Break-even, Trailing, Partial close, Pending order, Risk/Lot, การแก้ไม้ Grid/Martingale/Averaging/Hedge, ลำดับ precedence, state machine, pseudocode และ positive/negative/boundary tests; แยก fact, derived expansion, assumption, conflict และ unknown โดยห้ามเดาค่าที่แหล่งข้อมูลไม่ระบุ"},
+          "outputFields": ["eaBlueprint", "sourceDigest", "eaReadiness", "sourceLinks", "checkedAt", "limitations"],
+          "evidenceRequired": ["at_least_two_source_urls", "checked_at", "limitations", "ea_readiness", "source_digest"],
           "screenshotPolicy": "optional_when_backend_adapter_available",
           "reportType": "trading_system_research_report",
           "failureHelpTh": "เลือกระบบหนึ่งรายการจากแค็ตตาล็อกที่ Backend รับจากเรดาร์และตรวจหลักฐานแล้ว ก่อนเริ่มวิจัยเชิงลึก"
@@ -221,7 +221,7 @@
           "automationMode": "mission_on_demand",
           "requiredInputs": ["sourceReportId", "platform"],
           "inputPreset": {"brief": "สร้าง Source ที่อ่านง่าย มี Inputs และ Safety Guard พร้อมป้าย SOURCE-ONLY / UNCOMPILED"},
-          "outputFields": ["sourceFiles", "sourceDigest", "sourceRecordDigest", "strategySpecDigest", "platform", "strategyProfile", "functionMap", "compileChecklist", "knownRisks", "nextValidationStep"],
+          "outputFields": ["sourceFiles", "sourceDigest", "sourceRecordDigest", "strategySpecDigest", "blueprintCoverageManifest", "platform", "strategyProfile", "functionMap", "compileChecklist", "knownRisks", "nextValidationStep"],
           "evidenceRequired": ["project_relative_source_path", "source_digest", "uncompiled_status"],
           "screenshotPolicy": "required_only_when_visible_compile_adapter_runs",
           "reportType": "ea_build_report",

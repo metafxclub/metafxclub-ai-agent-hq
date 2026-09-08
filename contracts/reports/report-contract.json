@@ -324,8 +324,8 @@
       ]
     },
     "trading_system_research_report": {
-      "schemaVersion": "trading-system-research-report-v1",
-      "purpose": "รายงานวิจัยเชิงลึกสำหรับ left_server_racks ซึ่งขยายและตรวจสอบระบบที่เลือกจากเรดาร์ก่อนส่งต่อไปสร้าง EA/Indicator",
+      "schemaVersion": "trading-system-research-report-v2",
+      "purpose": "รายงานวิจัยเชิงลึกสำหรับ left_server_racks ซึ่งแตกระบบที่เลือกเป็น EA-ready Blueprint แบบ deterministic ก่อนส่งต่อไปสร้าง EA/Indicator",
       "sourceDiscoveryReportId": null,
       "sourceRecordId": null,
       "verificationStatus": "not_started|in_progress|partially_verified|verified|insufficient_evidence",
@@ -342,11 +342,19 @@
         "specialConditions": []
       },
       "application": {"suitableFor": [], "limitations": [], "implementationNotes": [], "candidatePlatforms": []},
+      "eaBlueprint": {
+        "schemaVersion": "ea-ready-strategy-research/2.0.0",
+        "barSemantics": {"bar0": "forming", "signalBar": 1, "previousBar": 2, "evaluateOn": "new_closed_bar", "lookaheadForbidden": true},
+        "sections": ["scope", "inputs", "indicators", "setup", "entry.buy", "entry.sell", "exit.buy", "exit.sell", "orderManagement", "tpSl", "riskAndSizing", "recovery", "execution", "stateMachine", "precedence", "pseudocode", "testCases", "assumptions", "unknowns", "completeness"],
+        "readiness": "ready|needs_clarification|not_ea_ready"
+      },
       "sourceEvidence": [],
       "runtimeReadiness": {"publicCodexWebResearch": "ready_guarded_read_only", "missionReportAudit": "ready", "durableArchive": "ready", "googleSheetsSync": "implemented_backend_adapter_runtime_status_required"},
       "truthRules": [
         "Research expands and verifies source material; it does not invent missing rules or performance.",
         "Conflicting sources must remain visible and must lower verificationStatus.",
+        "A verified source is distinct from an EA-ready deterministic rule set; eaHandoffAllowed remains false while executable unknowns or conflicts exist.",
+        "Closed-bar crossover expands explicitly: cross above is fast[2] <= slow[2] AND fast[1] > slow[1], and cross below is fast[2] >= slow[2] AND fast[1] < slow[1].",
         "A verified research report is design input, not proof that an EA compiles, backtests, or is profitable."
       ]
     },

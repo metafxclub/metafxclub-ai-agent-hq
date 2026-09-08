@@ -8707,6 +8707,7 @@ button:disabled {
 
 .ea-factory-sheet-sync,
 .ea-factory-source-detail,
+.ea-factory-research-gate,
 .ea-factory-spec-form,
 .ea-factory-terminal-picker {
   display: grid;
@@ -8718,7 +8719,8 @@ button:disabled {
 }
 
 .ea-factory-sheet-sync-heading,
-.ea-factory-source-detail > header {
+.ea-factory-source-detail > header,
+.ea-factory-research-gate > header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -8727,6 +8729,7 @@ button:disabled {
 
 .ea-factory-sheet-sync-heading strong,
 .ea-factory-source-detail h5,
+.ea-factory-research-gate h5,
 .ea-factory-terminal-picker h5 {
   margin: 0;
   color: #edf8fc;
@@ -8734,10 +8737,49 @@ button:disabled {
 }
 
 .ea-factory-sheet-sync-heading span,
-.ea-factory-source-detail > header span {
+.ea-factory-source-detail > header span,
+.ea-factory-research-gate > header span {
   color: var(--ea-factory-accent);
   font-size: 11px;
   font-weight: 900;
+}
+
+.ea-factory-research-gate {
+  border-left: 4px solid #e5484d;
+}
+
+.ea-factory-research-gate[data-tone="ready"] {
+  border-color: rgba(37, 215, 122, 0.5);
+  border-left-color: var(--green);
+  background: rgba(3, 31, 23, 0.58);
+}
+
+.ea-factory-research-gate[data-tone="warning"] {
+  border-color: rgba(255, 178, 63, 0.48);
+  border-left-color: var(--amber);
+}
+
+.ea-factory-readiness-issues {
+  display: grid;
+  gap: 7px;
+  padding: 9px 10px;
+  border: 1px solid rgba(229, 72, 77, 0.4);
+  background: rgba(55, 10, 15, 0.34);
+}
+
+.ea-factory-readiness-issues > strong {
+  color: #ffb0b3;
+  font-size: 11px;
+}
+
+.ea-factory-readiness-issues ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 20px;
+  color: #e5c4c6;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .ea-factory-sheet-sync-fields {
@@ -10623,6 +10665,319 @@ button:disabled {
   padding-left: 18px;
 }
 
+.workflow-research-ea-blueprint {
+  display: grid;
+  gap: 11px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(70, 234, 208, 0.48);
+  border-top: 4px solid #46ead0;
+  background:
+    linear-gradient(125deg, rgba(7, 58, 57, 0.26), transparent 42%),
+    rgba(2, 13, 20, 0.94);
+}
+
+.workflow-research-ea-blueprint > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.workflow-research-ea-blueprint > header > div {
+  min-width: 0;
+}
+
+.workflow-research-ea-blueprint > header span,
+.workflow-research-ea-blueprint > header h5,
+.workflow-research-ea-blueprint > header p {
+  margin: 0;
+}
+
+.workflow-research-ea-blueprint > header span {
+  color: #46ead0;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.workflow-research-ea-blueprint > header h5 {
+  margin-top: 4px;
+  color: #ecfffb;
+  font-size: 16px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.workflow-research-ea-blueprint > header p {
+  margin-top: 5px;
+  color: #8fb6b1;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.workflow-research-blueprint-readiness {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(236, 175, 65, 0.48);
+  border-left: 4px solid var(--amber);
+  background: rgba(54, 35, 7, 0.42);
+}
+
+.workflow-research-blueprint-readiness[data-tone="ready"] {
+  border-color: rgba(37, 215, 122, 0.5);
+  border-left-color: var(--green);
+  background: rgba(3, 31, 23, 0.66);
+}
+
+.workflow-research-blueprint-readiness[data-tone="blocked"] {
+  border-color: rgba(229, 72, 77, 0.56);
+  border-left-color: #e5484d;
+  background: rgba(66, 12, 17, 0.44);
+}
+
+.workflow-research-blueprint-readiness > strong {
+  color: #effcf8;
+  font-size: 12px;
+}
+
+.workflow-research-blueprint-readiness dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 7px;
+  min-width: 0;
+  margin: 0;
+}
+
+.workflow-research-blueprint-readiness dl > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid rgba(84, 119, 142, 0.3);
+  background: rgba(1, 10, 16, 0.48);
+}
+
+.workflow-research-blueprint-readiness dt,
+.workflow-research-blueprint-readiness dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.workflow-research-blueprint-readiness dt {
+  color: #82aaa4;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.workflow-research-blueprint-readiness dd {
+  color: #e3f6f1;
+  font-size: 11px;
+}
+
+.workflow-research-blueprint-sections {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.workflow-research-blueprint-section {
+  min-width: 0;
+  border: 1px solid rgba(84, 119, 142, 0.38);
+  background: rgba(2, 14, 21, 0.84);
+}
+
+.workflow-research-blueprint-section[open] {
+  border-color: rgba(70, 234, 208, 0.42);
+}
+
+.workflow-research-blueprint-section > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  padding: 9px 11px;
+  color: #dff9f4;
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.workflow-research-blueprint-section > summary:hover {
+  background: rgba(13, 55, 58, 0.42);
+}
+
+.workflow-research-blueprint-section > summary:focus-visible {
+  outline: 2px solid #46ead0;
+  outline-offset: -2px;
+}
+
+.workflow-research-blueprint-section > summary strong {
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.workflow-research-blueprint-section > summary span {
+  flex: 0 0 auto;
+  color: #82aaa4;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.workflow-research-blueprint-section-body {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  padding: 0 11px 11px;
+  border-top: 1px solid rgba(84, 119, 142, 0.24);
+}
+
+.workflow-research-blueprint-group {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding-top: 10px;
+}
+
+.workflow-research-blueprint-group h6 {
+  margin: 0;
+  color: #9ee8d9;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.workflow-research-blueprint-value {
+  min-width: 0;
+  color: #c4d8d5;
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.workflow-research-blueprint-value code,
+.workflow-research-cross-guide code {
+  display: inline-block;
+  max-width: 100%;
+  padding: 3px 6px;
+  border: 1px solid rgba(72, 168, 255, 0.32);
+  background: rgba(1, 10, 18, 0.92);
+  color: #cfeeff;
+  font: 700 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.workflow-research-blueprint-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding-left: 21px;
+}
+
+.workflow-research-blueprint-list > li {
+  min-width: 0;
+  padding-left: 2px;
+}
+
+.workflow-research-blueprint-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 7px;
+  min-width: 0;
+  margin: 0;
+}
+
+.workflow-research-blueprint-facts > div {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(84, 119, 142, 0.28);
+  background: rgba(1, 11, 17, 0.62);
+}
+
+.workflow-research-blueprint-facts dt,
+.workflow-research-blueprint-facts dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.workflow-research-blueprint-facts dt {
+  color: #7fb8ad;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.workflow-research-blueprint-facts dd {
+  color: #d7e9e6;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.workflow-research-blueprint-missing {
+  margin: 0;
+  padding: 8px;
+  border: 1px dashed rgba(236, 175, 65, 0.36);
+  color: #d8bd82;
+  background: rgba(44, 31, 8, 0.3);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.workflow-research-cross-guide {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid rgba(245, 200, 76, 0.4);
+  background: rgba(42, 33, 7, 0.42);
+}
+
+.workflow-research-cross-guide strong,
+.workflow-research-cross-guide p {
+  margin: 0;
+}
+
+.workflow-research-cross-guide strong {
+  color: #ffe69a;
+  font-size: 12px;
+}
+
+.workflow-research-cross-guide p {
+  color: #c8bf9c;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.workflow-research-cross-guide > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.workflow-research-cross-guide > div > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(245, 200, 76, 0.24);
+  background: rgba(2, 12, 18, 0.58);
+}
+
+.workflow-research-cross-guide span {
+  color: #e7d9a2;
+  font-size: 11px;
+  font-weight: 900;
+}
+
 .workflow-research-regime-controls {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -10913,6 +11268,14 @@ button:disabled {
   .workflow-research-backtest-metrics {
     grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   }
+
+  .workflow-research-ea-blueprint > header {
+    flex-direction: column;
+  }
+
+  .workflow-research-blueprint-readiness dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 700px) {
@@ -10924,7 +11287,10 @@ button:disabled {
 
   .workflow-research-supporting-grid,
   .workflow-research-regime-controls,
-  .workflow-research-backtest-form {
+  .workflow-research-backtest-form,
+  .workflow-research-blueprint-readiness dl,
+  .workflow-research-cross-guide > div,
+  .workflow-research-blueprint-facts {
     grid-template-columns: 1fr;
   }
 

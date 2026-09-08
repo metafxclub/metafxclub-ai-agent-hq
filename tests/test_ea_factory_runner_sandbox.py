@@ -174,7 +174,7 @@ class EaFactoryRunnerSandboxTests(unittest.TestCase):
         self.assertEqual(source_bytes, self.SOURCE_CONTENT.encode("utf-8"))
         self.assertEqual(
             result["eaFactorySourceWriterVersion"],
-            "ea-factory-structured-source-v1",
+            "ea-factory-structured-source-v2",
         )
         serialized_result = json.dumps(result, ensure_ascii=False)
         self.assertNotIn(self.SOURCE_CONTENT, serialized_result)

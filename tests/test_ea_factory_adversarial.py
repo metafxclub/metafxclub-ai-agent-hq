@@ -212,6 +212,7 @@ class EaFactoryAdversarialTests(unittest.TestCase):
                         "sourceDigest",
                         "sourceRecordDigest",
                         "strategySpecDigest",
+                        "blueprintCoverageManifest",
                         "platform",
                     ],
                     "providedFields": [
@@ -219,6 +220,7 @@ class EaFactoryAdversarialTests(unittest.TestCase):
                         "sourceDigest",
                         "sourceRecordDigest",
                         "strategySpecDigest",
+                        "blueprintCoverageManifest",
                         "platform",
                     ],
                     "missingFields": [],
@@ -230,6 +232,14 @@ class EaFactoryAdversarialTests(unittest.TestCase):
                         "sourceDigest": source_digest,
                         "sourceRecordDigest": source_record_digest,
                         "strategySpecDigest": spec_digest,
+                        "blueprintCoverageManifest": json.dumps(
+                            self.bridge.ea_factory_legacy_coverage_manifest(
+                                strategy_spec_digest=spec_digest,
+                                source_digest=source_digest,
+                            ),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
                         "platform": platform,
                     },
                 }

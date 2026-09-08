@@ -17,6 +17,7 @@ from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_PATH = ROOT / "backend" / "local-runner" / "bridge_server.py"
+BLUEPRINT_FIXTURE_PATH = ROOT / "tests" / "test_ea_research_blueprint_v2.py"
 SHEET_ID = "1MfxHQSyntheticSheetId0123456789ABCDEabcde"
 OTHER_SHEET_ID = "1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
@@ -31,6 +32,20 @@ def load_bridge():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def ready_ea_research_blueprint() -> dict:
+    """Load the canonical v2 fixture without coupling test package imports."""
+
+    spec = importlib.util.spec_from_file_location(
+        "research_sheet_hub_ready_blueprint_fixture",
+        BLUEPRINT_FIXTURE_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to import {BLUEPRINT_FIXTURE_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.ready_blueprint()
 
 
 class FakeJsonResponse:
@@ -2236,10 +2251,21 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         record = records[0]
         self.assertEqual(record["sourceKind"], "verified_deep_research_sheet")
         self.assertEqual(record["displayName"], "Verified System 1")
-        self.assertEqual(record["core"]["entry_rules"], '["Enter on candle close"]')
-        self.assertEqual(record["core"]["stop_loss"], "1 ATR")
-        self.assertEqual(record["sourceUrls"], ["https://example.com/system-1"])
+        self.assertIn('"op":"cross_above"', record["core"]["entry_rules"])
+        self.assertIn('"type":"fixed_pips"', record["core"]["stop_loss"])
+        self.assertEqual(
+            record["sourceUrls"],
+            [
+                "https://example.com/system-1",
+                "https://independent.example.org/system-1-review",
+            ],
+        )
         self.assertTrue(record["buildReady"])
+        self.assertEqual(
+            record["eaImplementationBlueprint"]["schemaVersion"],
+            self.bridge.EA_RESEARCH_SCHEMA_VERSION,
+        )
+        self.assertEqual(record["readinessIssues"], [])
         schema = self.bridge._ea_factory_sheet_schema_read_model()
         self.assertEqual(schema["sheetTabDefault"], "Deep_Research")
         self.assertEqual(schema["sourceRequiredHeaders"], list(self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS))
@@ -2293,7 +2319,16 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
                 "updatedAt": "2026-08-28T03:05:00Z",
             }
         )
-        second["metrics"]["entrySteps"] = ["Enter after the confirmed close"]
+        second_blueprint = copy.deepcopy(second["metrics"]["eaBlueprint"])
+        second_blueprint["researchRevision"] = 2
+        second_blueprint["entry"]["buy"]["rules"][0]["humanTextTh"] = (
+            "Enter after the confirmed close"
+        )
+        second["metrics"] = {
+            "workflowOutput": copy.deepcopy(first["metrics"]["workflowOutput"]),
+            "eaBlueprint": second_blueprint,
+            **self.bridge.ea_research_report_projection(second_blueprint),
+        }
         self.bridge.write_json(self.reports / f"{second['id']}.json", second)
 
         version_rows = self.bridge._research_sheet_deep_rows(second)[0]
@@ -2330,6 +2365,10 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["recordId"], "world-1")
         self.assertIn("confirmed close", records[0]["core"]["entry_rules"])
+        self.assertEqual(
+            records[0]["eaImplementationBlueprint"]["researchRevision"],
+            2,
+        )
 
     def test_verified_deep_research_cache_feeds_factory_automatically(self) -> None:
         self.configure_hub(revision=14)
@@ -3407,8 +3446,38 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             },
         }
 
-    @staticmethod
-    def _deep_report() -> dict:
+    def _deep_report(self) -> dict:
+        blueprint = ready_ea_research_blueprint()
+        blueprint.update(
+            {
+                "strategyId": "verified-system-1-v2",
+                "checkedAt": "2026-08-27T03:00:00Z",
+            }
+        )
+        blueprint["scope"].update(
+            {
+                "systemName": "Verified System 1",
+                "strategyFamily": "trend_following",
+                "symbols": ["EURUSD"],
+                "signalTimeframe": "H1",
+                "executionTimeframe": "H1",
+            }
+        )
+        blueprint["evidenceMap"] = [
+            {
+                "sourceRef": "S1",
+                "url": "https://example.com/system-1",
+                "title": "Verified System 1 rules",
+                "checkedAt": blueprint["checkedAt"],
+            },
+            {
+                "sourceRef": "S2",
+                "url": "https://independent.example.org/system-1-review",
+                "title": "Independent review of Verified System 1",
+                "checkedAt": blueprint["checkedAt"],
+            },
+        ]
+        projected_metrics = self.bridge.ea_research_report_projection(blueprint)
         return {
             "id": "report-deep-sheet-001",
             "type": "trading_system_research_report",
@@ -3429,19 +3498,8 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             },
             "metrics": {
                 "workflowOutput": {"applicable": True, "valid": True},
-                "systemIdentity": {
-                    "systemName": "Verified System 1",
-                    "strategyFamily": "trend_following",
-                },
-                "verifiedRules": ["EMA 20 crosses EMA 50"],
-                "entrySteps": ["Enter on candle close"],
-                "exitSteps": ["Exit at two ATR"],
-                "riskModel": {"stopLoss": "1 ATR", "takeProfit": "2 ATR"},
-                "indicatorSettings": {"EMA": [20, 50]},
-                "suitableMarket": ["EURUSD"],
-                "suitableTimeframe": ["H1"],
-                "sourceLinks": ["https://example.com/system-1"],
-                "targetPlatforms": ["MT4", "MT5"],
+                "eaBlueprint": blueprint,
+                **projected_metrics,
             },
         }
 

@@ -15,6 +15,8 @@ from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "bridge_server.py"
+RUNNER_PATH = PROJECT_ROOT / "runner" / "codex_cli_runner.py"
+BLUEPRINT_FIXTURE_PATH = PROJECT_ROOT / "tests" / "test_ea_research_blueprint_v2.py"
 
 
 def load_module(name: str, path: Path):
@@ -26,10 +28,21 @@ def load_module(name: str, path: Path):
     return module
 
 
+def ready_ea_research_blueprint() -> dict:
+    """Load the canonical v2 fixture without relying on test package imports."""
+
+    fixture = load_module(
+        "dashboard_workflow_ready_blueprint_fixture",
+        BLUEPRINT_FIXTURE_PATH,
+    )
+    return fixture.ready_blueprint()
+
+
 class DashboardWorkflowBackendTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.bridge = load_module("metafx_dashboard_workflow_bridge", BRIDGE_PATH)
+        cls.runner = load_module("metafx_dashboard_workflow_runner", RUNNER_PATH)
 
     def setUp(self) -> None:
         # A lifecycle test intentionally stops the process-wide scheduler. Each
@@ -599,79 +612,124 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         )
         mission = {
             "workflowContext": lineage,
-            "budget": {"outputLimitChars": 20000},
+            "budget": {"outputLimitChars": 64000},
         }
         urls = [
             "https://source1.example/system",
             "https://confirm1.example/system",
         ]
-        values = {field: "verified value" for field in profile["outputFields"]}
-        values.update({
-            "sourceLinks": json.dumps(urls, separators=(",", ":")),
-            "checkedAt": "2026-08-22T10:00:00+07:00",
-            "limitations": json.dumps(["No audited performance history"]),
-        })
+        blueprint = ready_ea_research_blueprint()
+        blueprint["checkedAt"] = "2026-08-22T10:00:00+07:00"
+        blueprint["evidenceMap"] = [
+            {
+                "sourceRef": "S1",
+                "url": urls[0],
+                "title": "Primary public rules",
+                "checkedAt": blueprint["checkedAt"],
+            },
+            {
+                "sourceRef": "S2",
+                "url": urls[1],
+                "title": "Independent public confirmation",
+                "checkedAt": blueprint["checkedAt"],
+            },
+        ]
 
-        def result(current_values: dict[str, str]) -> dict:
-            return {
-                "workStatus": "completed",
-                "structuredSummary": "Deep research completed",
-                "findings": [],
-                "nextSteps": [],
+        def result(current_blueprint: dict) -> dict:
+            direct_result = {
+                "status": "completed",
+                "summary": "Deep research completed",
+                "findings": ["Closed-bar rules were expanded deterministically"],
+                "nextSteps": ["Archive the canonical blueprint"],
                 "blockedCapability": "",
-                "contractFields": [
-                    {"field": field, "value": current_values[field]}
-                    for field in profile["outputFields"]
-                ],
                 "evidence": [
                     {"label": f"Source {index}", "url": url, "note": "opened"}
                     for index, url in enumerate(urls, start=1)
                 ],
+                "research": current_blueprint,
                 "evidenceKinds": [
                     "at_least_two_source_urls",
                     "checked_at",
                     "limitations",
+                    "ea_readiness",
+                    "source_digest",
                 ],
             }
+            return self.runner.parse_work_result(
+                json.dumps(direct_result, ensure_ascii=False),
+                64000,
+                "trading_system_research",
+            )
 
+        def replace_contract_value(payload: dict, field: str, value: str) -> dict:
+            changed = copy.deepcopy(payload)
+            item = next(
+                row
+                for row in changed["contractFields"]
+                if row["field"] == field
+            )
+            item["value"] = value
+            return changed
+
+        parsed = result(blueprint)
         valid = self.bridge.validate_dashboard_workflow_output_contract(
             mission,
-            result(values),
+            parsed,
         )
         self.assertTrue(valid["valid"], valid)
         self.assertEqual(
             valid["procedureId"],
             self.bridge.TRADING_SYSTEM_RESEARCH_WORKFLOW_PROCEDURE_ID,
         )
+        self.assertEqual(valid["contractValueLimitChars"], 64000)
+        self.assertEqual(
+            parsed["evidenceKinds"],
+            [
+                "at_least_two_source_urls",
+                "checked_at",
+                "limitations",
+                "ea_readiness",
+                "source_digest",
+            ],
+        )
 
-        replacement = dict(values)
-        replacement["sourceLinks"] = json.dumps(
-            [urls[0], "https://replacement.example/other"],
-            separators=(",", ":"),
+        replacement = replace_contract_value(
+            parsed,
+            "sourceLinks",
+            json.dumps(
+                [urls[0], "https://replacement.example/other"],
+                separators=(",", ":"),
+            ),
         )
         self.assertIn(
             "at_least_two_source_urls",
             self.bridge.validate_dashboard_workflow_output_contract(
                 mission,
-                result(replacement),
+                replacement,
             )["missingEvidenceKinds"],
         )
-        naive_time = dict(values)
-        naive_time["checkedAt"] = "2026-08-22T10:00:00"
+        naive_time = replace_contract_value(
+            parsed,
+            "checkedAt",
+            "2026-08-22T10:00:00",
+        )
         self.assertIn(
             "checked_at",
             self.bridge.validate_dashboard_workflow_output_contract(
                 mission,
-                result(naive_time),
+                naive_time,
             )["missingEvidenceKinds"],
         )
-        empty_limitations = dict(values)
-        empty_limitations["limitations"] = "[]"
+        empty_limitations = replace_contract_value(
+            parsed,
+            "limitations",
+            "[]",
+        )
         self.assertIn(
             "limitations",
             self.bridge.validate_dashboard_workflow_output_contract(
                 mission,
-                result(empty_limitations),
+                empty_limitations,
             )["missingEvidenceKinds"],
         )
 
@@ -1944,9 +2002,12 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         runner.assert_not_called()
 
     def test_dashboard_identity_is_independent_and_has_no_pipeline_fields(self) -> None:
-        with mock.patch.object(self.bridge, "find_property_role", return_value={
-            "workflowDashboard": {"id": "ea_indicator_builder", "displayOrder": 3},
-        }):
+        with (
+            mock.patch.object(self.bridge, "find_property_role", return_value={
+                "workflowDashboard": {"id": "ea_indicator_builder", "displayOrder": 3},
+            }),
+            mock.patch.object(self.bridge, "ea_factory_read_model", return_value={}),
+        ):
             model = self.bridge.workflow_dashboard_read_model(
                 "right_server_racks",
                 reports=[],
@@ -2067,6 +2128,47 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertEqual(model["agentTransfer"]["handoffMissionId"], "mission-handoff-backtest-1")
         self.assertNotIn("inputs", model["workflowContext"])
         self.assertEqual(model["workflowContext"]["inputFields"], ["brief", "market"])
+
+    def test_research_report_read_model_requires_canonical_blueprint_and_matching_digest(self) -> None:
+        blueprint = ready_ea_research_blueprint()
+        metrics = self.bridge.ea_research_report_projection(blueprint)
+        report = {
+            "id": "research-report-canonical-v2",
+            "type": "trading_system_research_report",
+            "status": "ready",
+            "metrics": metrics,
+        }
+
+        read_model = self.bridge.report_read_model_item(report)["eaResearch"]
+
+        self.assertTrue(read_model["validated"])
+        self.assertTrue(read_model["digestMatched"])
+        self.assertTrue(read_model["ready"])
+        self.assertEqual(read_model["validationStatus"], "canonical_validated")
+        self.assertEqual(
+            read_model["schemaVersion"],
+            "ea-ready-strategy-research/2.0.0",
+        )
+        self.assertEqual(read_model["blueprintDigest"], metrics["blueprintDigest"])
+        self.assertEqual(read_model["blueprint"], self.bridge.normalize_ea_research_blueprint(blueprint))
+
+        tampered_metrics = copy.deepcopy(metrics)
+        tampered_metrics["eaImplementationBlueprint"]["scope"]["systemName"] = "Tampered"
+        tampered = self.bridge.report_read_model_item({**report, "metrics": tampered_metrics})["eaResearch"]
+        self.assertFalse(tampered["validated"])
+        self.assertFalse(tampered["digestMatched"])
+        self.assertFalse(tampered["ready"])
+        self.assertEqual(tampered["validationStatus"], "blueprint_digest_mismatch")
+        self.assertIsNone(tampered["blueprint"])
+
+        legacy = self.bridge.report_read_model_item({
+            **report,
+            "metrics": {"eaBlueprint": blueprint, "ready": True},
+        })["eaResearch"]
+        self.assertFalse(legacy["validated"])
+        self.assertFalse(legacy["ready"])
+        self.assertEqual(legacy["validationStatus"], "blueprint_digest_missing")
+        self.assertIsNone(legacy["blueprint"])
 
     def test_manual_backend_owned_action_rejection_is_audited_without_form_values(self) -> None:
         events = []
@@ -2209,7 +2311,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         )
         self.assertEqual(preferences["modelTier"], "manager_quality")
         self.assertEqual(preferences["timeoutSeconds"], 300)
-        self.assertEqual(preferences["outputLimitChars"], 20000)
+        self.assertEqual(preferences["outputLimitChars"], 64000)
         self.assertEqual(preferences["rateReservePercent"], 15)
 
     def test_public_discovery_workflows_enforce_600_second_timeout_floor(self) -> None:
@@ -2335,15 +2437,16 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
 
     def test_http_sanitization_preserves_nested_workflow_select_options(self) -> None:
         """The final send_json projection must not turn safe options into placeholders."""
-        model = self.bridge.workflow_dashboard_read_model(
-            "right_server_racks",
-            reports=[],
-            bridge={
-                "status": "guarded",
-                "codex": {"status": "ready_guarded"},
-                "actionPolicy": {"ready": True},
-            },
-        )
+        with mock.patch.object(self.bridge, "ea_factory_read_model", return_value={}):
+            model = self.bridge.workflow_dashboard_read_model(
+                "right_server_racks",
+                reports=[],
+                bridge={
+                    "status": "guarded",
+                    "codex": {"status": "ready_guarded"},
+                    "actionPolicy": {"ready": True},
+                },
+            )
         projected = self.bridge.sanitize_json_value(
             {"workflowDashboard": model},
             collection_limit=1000,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -26,6 +27,8 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
             "2-SETUP-GOOGLE-HQ.bat",
             "docs/prompts/install-github-google-auto-th.md",
             "backend/local-runner/bridge_server.py",
+            "backend/local-runner/ea_factory_blueprint_coverage.py",
+            "backend/local-runner/ea_research_blueprint.py",
             "backend/local-runner/configure_google_oauth_client.py",
             "backend/local-runner/google_oauth_store.py",
             "backend/local-runner/google_sheet_hub.py",
@@ -35,6 +38,7 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
             "scripts/start-local-bridge.ps1",
             "scripts/setup-google-oauth.ps1",
             "docs/research-sheet-hub-setup-th.md",
+            "contracts/research/ea-implementation-blueprint-v2.schema.json",
             "contracts/workflows/ea-factory-contract.json",
         )
         missing = [path for path in required if not (PROJECT_ROOT / path).is_file()]
@@ -65,6 +69,65 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
         for path in paths:
             with self.subTest(path=path.relative_to(PROJECT_ROOT)):
                 json.loads(path.read_text(encoding="utf-8-sig"))
+
+    def test_codex_sdk_and_cli_use_the_verified_matching_release(self) -> None:
+        requirements = (PROJECT_ROOT / "requirements-runner.txt").read_text(
+            encoding="utf-8-sig"
+        )
+
+        def pinned_version(package: str) -> str:
+            match = re.search(
+                rf"(?m)^{re.escape(package)}==([^\s\\]+)\s*\\$",
+                requirements,
+            )
+            self.assertIsNotNone(match, f"missing exact {package} pin")
+            return match.group(1)
+
+        sdk_version = pinned_version("openai-codex")
+        cli_version = pinned_version("openai-codex-cli-bin")
+        self.assertEqual(
+            sdk_version,
+            cli_version,
+            "Codex Python SDK and bundled CLI must use the same app-server protocol release",
+        )
+        numeric = tuple(int(part) for part in sdk_version.split("."))
+        self.assertGreaterEqual(
+            numeric,
+            (0, 147, 0),
+            "older Codex runtimes cannot parse the current model catalog",
+        )
+
+    def test_ea_research_schema_local_references_resolve(self) -> None:
+        path = (
+            PROJECT_ROOT
+            / "contracts"
+            / "research"
+            / "ea-implementation-blueprint-v2.schema.json"
+        )
+        schema = json.loads(path.read_text(encoding="utf-8-sig"))
+        references: list[str] = []
+
+        def collect(value: object) -> None:
+            if isinstance(value, dict):
+                reference = value.get("$ref")
+                if isinstance(reference, str):
+                    references.append(reference)
+                for item in value.values():
+                    collect(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+
+        collect(schema)
+        self.assertGreater(len(references), 100)
+        for reference in references:
+            with self.subTest(reference=reference):
+                self.assertTrue(reference.startswith("#/"))
+                current: object = schema
+                for raw_token in reference[2:].split("/"):
+                    token = raw_token.replace("~1", "/").replace("~0", "~")
+                    self.assertIsInstance(current, dict)
+                    current = current[token]
 
     def test_all_distributed_powershell_scripts_parse(self) -> None:
         scripts = sorted(

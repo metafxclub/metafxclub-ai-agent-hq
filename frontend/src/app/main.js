@@ -18463,17 +18463,61 @@ function createWorkflowSourceSelect(field, sources, { directVerifiedCatalog = fa
 
 function workflowDeepResearchCatalogSources(dashboard) {
   const domain = dashboard?.domainData?.tradingResearchLab;
-  const reportId = String(domain?.sourceReportId || "").trim();
-  if (domain?.backendReady !== true || !reportId) return [];
-  return [{
-    reportId,
-    sourcePropId: "codex_mcp_portal",
-    title: safeDashboardDisplayText(domain.sourceReportTitle, "รายงานระบบเทรดล่าสุด"),
-    summary: "Backend ตรวจ schema, Mission ต้นทาง และหลักฐานของระบบแล้ว",
-    type: "trading_system_discovery_report",
-    status: "verified",
-    updatedAt: domain.sourceReportUpdatedAt || null,
-  }];
+  const systems = Array.isArray(domain?.systems) ? domain.systems : [];
+  if (domain?.backendReady !== true || !systems.length) return [];
+  const reports = new Map();
+  systems.forEach((system) => {
+    const reportId = String(system?.sourceReportId || "").trim();
+    if (!reportId || reports.has(reportId)) return;
+    reports.set(reportId, {
+      reportId,
+      sourcePropId: "codex_mcp_portal",
+      title: safeDashboardDisplayText(
+        system.sourceReportTitle || domain.sourceReportTitle,
+        "รายงานระบบเทรดจาก Backend",
+      ),
+      summary: `Backend ตรวจแล้ว ${systems.filter((item) => item.sourceReportId === reportId).length} ระบบ`,
+      type: "trading_system_discovery_report",
+      status: "verified",
+      updatedAt: system.reportUpdatedAt || domain.sourceReportUpdatedAt || null,
+    });
+  });
+  return [...reports.values()];
+}
+
+function populateWorkflowDeepResearchRecordSelect(
+  control,
+  dashboard,
+  sourceReportId = "",
+  selectedSystemId = "",
+) {
+  if (!(control instanceof HTMLSelectElement)) return null;
+  const systems = Array.isArray(dashboard?.domainData?.tradingResearchLab?.systems)
+    ? dashboard.domainData.tradingResearchLab.systems
+    : [];
+  const reportId = String(sourceReportId || "").trim();
+  const reportSystems = reportId
+    ? systems.filter((system) => system.sourceReportId === reportId)
+    : systems;
+  const selected = reportSystems.find((system) => system.id === selectedSystemId)
+    || reportSystems[0]
+    || null;
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = reportSystems.length ? "เลือกระบบเทรด" : "ไม่มีระบบในรายงานนี้";
+  control.replaceChildren(empty);
+  reportSystems.forEach((system) => {
+    const option = document.createElement("option");
+    option.value = String(system.id || "");
+    option.dataset.sourceReportId = String(system.sourceReportId || "");
+    option.textContent = safeDashboardDisplayText(system.systemName, "ระบบเทรด")
+      + " • " + tradingSystemFamilyLabel(system.strategyFamily);
+    option.selected = option.value === selected?.id;
+    if (option.value) control.appendChild(option);
+  });
+  control.disabled = !reportSystems.length;
+  if (selected) control.value = selected.id;
+  return selected;
 }
 
 function getWorkflowSpeechRecognitionConstructor() {
@@ -18634,25 +18678,55 @@ function createWorkflowField(field, dashboard, action) {
       directVerifiedCatalog: isDirectVerifiedCatalog,
       catalogStatus: dashboard?.domainData?.tradingResearchLab?.catalogStatus || "",
     });
+    if (isDirectVerifiedCatalog && control instanceof HTMLSelectElement) {
+      const session = state.modal.tradingResearchLab;
+      if ([...control.options].some((option) => option.value === session.sourceReportId)) {
+        control.value = session.sourceReportId;
+      }
+      control.addEventListener("change", () => {
+        const sourceReportId = String(control.value || "");
+        const systems = Array.isArray(dashboard?.domainData?.tradingResearchLab?.systems)
+          ? dashboard.domainData.tradingResearchLab.systems
+          : [];
+        const selected = systems.find((system) => system.sourceReportId === sourceReportId) || null;
+        session.sourceReportId = selected?.sourceReportId || sourceReportId;
+        session.selectedSystemId = selected?.id || "";
+        session.backtest = null;
+        session.backtestMessage = "";
+        const form = control.closest("[data-workflow-action-form]");
+        const recordControl = form?.querySelector('[data-workflow-field="sourceRecordId"]');
+        const paired = populateWorkflowDeepResearchRecordSelect(
+          recordControl,
+          dashboard,
+          session.sourceReportId,
+          session.selectedSystemId,
+        );
+        session.selectedSystemId = paired?.id || "";
+      });
+    }
   } else if (field.type === "source_record") {
     control = document.createElement("select");
     control.dataset.workflowField = field.id;
     control.required = field.required;
-    const empty = document.createElement("option");
-    empty.value = "";
-    empty.textContent = "เลือกระบบเทรด";
-    control.appendChild(empty);
     const systems = Array.isArray(dashboard?.domainData?.tradingResearchLab?.systems)
       ? dashboard.domainData.tradingResearchLab.systems
       : [];
-    const selectedSystemId = state.modal.tradingResearchLab.selectedSystemId || systems[0]?.id || "";
-    systems.forEach((system) => {
-      const option = document.createElement("option");
-      option.value = String(system.id || "");
-      option.textContent = safeDashboardDisplayText(system.systemName, "ระบบเทรด")
-        + " • " + tradingSystemFamilyLabel(system.strategyFamily);
-      option.selected = option.value === selectedSystemId;
-      if (option.value) control.appendChild(option);
+    const session = state.modal.tradingResearchLab;
+    const activeReportId = session.sourceReportId || systems[0]?.sourceReportId || "";
+    const selected = populateWorkflowDeepResearchRecordSelect(
+      control,
+      dashboard,
+      activeReportId,
+      session.selectedSystemId,
+    );
+    session.sourceReportId = selected?.sourceReportId || activeReportId;
+    session.selectedSystemId = selected?.id || "";
+    control.addEventListener("change", () => {
+      const selectedOption = control.selectedOptions[0] || null;
+      session.sourceReportId = String(selectedOption?.dataset.sourceReportId || activeReportId);
+      session.selectedSystemId = String(control.value || "");
+      session.backtest = null;
+      session.backtestMessage = "";
     });
   } else if (field.type === "textarea" || field.type === "list") {
     control = document.createElement("textarea");
@@ -19967,6 +20041,151 @@ function normalizeTradingSystemPortalDomain(backend = {}, report = {}) {
   };
 }
 
+function tradingResearchCatalogPairKey(sourceReportId, sourceRecordId) {
+  return `${encodeURIComponent(String(sourceReportId || ""))}::${encodeURIComponent(String(sourceRecordId || ""))}`;
+}
+
+function tradingResearchCatalogTextList(value, maximum = 120) {
+  const rows = Array.isArray(value) ? value : (value === undefined || value === null || value === "" ? [] : [value]);
+  return rows.slice(0, maximum)
+    .map((item) => safeDashboardDisplayText(
+      item && typeof item === "object" && !Array.isArray(item)
+        ? (item.label || item.name || item.rule || item.text || item.value || "")
+        : item,
+      "",
+    ))
+    .filter(Boolean);
+}
+
+function tradingResearchCatalogSteps(value, maximum = 120) {
+  return (Array.isArray(value) ? value : []).slice(0, maximum)
+    .map((item, index) => {
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        const rule = safeDashboardDisplayText(
+          item.rule || item.text || item.description || item.expression || item.condition,
+          "",
+        );
+        if (!rule) return null;
+        return {
+          stepNo: Number.isInteger(Number(item.stepNo)) ? Number(item.stepNo) : index + 1,
+          rule,
+          sourceUrl: getSafeExternalHttpUrl(item.sourceUrl || item.url),
+          truthStatus: safeDashboardDisplayText(item.truthStatus || item.status, "fact"),
+        };
+      }
+      const rule = safeDashboardDisplayText(item, "");
+      return rule ? { stepNo: index + 1, rule, sourceUrl: null, truthStatus: "fact" } : null;
+    })
+    .filter(Boolean);
+}
+
+function tradingResearchCatalogDisplayValue(value, fallback) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return safeDashboardDisplayText(value, fallback);
+  }
+  const preferred = value.label || value.name || value.market || value.assetClass || value.symbol;
+  if (preferred) return safeDashboardDisplayText(preferred, fallback);
+  const values = Object.values(value)
+    .filter((item) => ["string", "number", "boolean"].includes(typeof item))
+    .map((item) => safeDashboardDisplayText(item, ""))
+    .filter(Boolean);
+  return values.length ? values.join(" • ") : fallback;
+}
+
+function normalizeTradingResearchCatalogSystem(item = {}, index = 0) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const system = item.system && typeof item.system === "object" && !Array.isArray(item.system)
+    ? item.system
+    : item;
+  const sourceReportId = String(item.sourceReportId || system.sourceReportId || "").trim();
+  const sourceRecordId = String(item.sourceRecordId || system.recordId || system.id || "").trim();
+  if (!sourceReportId || !sourceRecordId) return null;
+  const creator = workflowDomainObject(system.creatorOrTrader, item.creatorOrTrader, system.creator);
+  const risk = workflowDomainObject(system.riskManagement, system.riskModel);
+  const rawSourceUrls = Array.isArray(item.sourceUrls)
+    ? item.sourceUrls
+    : [system.sourceUrl, ...(Array.isArray(system.corroboratingUrls) ? system.corroboratingUrls : [])];
+  const sources = [...new Set(rawSourceUrls.map(getSafeExternalHttpUrl).filter(Boolean))].slice(0, 20);
+  const indicatorSettings = (Array.isArray(system.indicatorSettings) ? system.indicatorSettings : [])
+    .slice(0, 120)
+    .map((indicator) => {
+      if (!indicator || typeof indicator !== "object" || Array.isArray(indicator)) {
+        const name = safeDashboardDisplayText(indicator, "");
+        return name ? { name, settings: "ยังไม่ระบุ", role: "", sourceUrl: null } : null;
+      }
+      const name = safeDashboardDisplayText(indicator.name || indicator.id || indicator.type, "");
+      if (!name) return null;
+      return {
+        name,
+        settings: tradingResearchCatalogDisplayValue(
+          indicator.settings || indicator.parameters || indicator.inputs,
+          "ยังไม่ระบุ",
+        ),
+        role: safeDashboardDisplayText(indicator.role || indicator.purpose, ""),
+        sourceUrl: getSafeExternalHttpUrl(indicator.sourceUrl || indicator.url),
+      };
+    })
+    .filter(Boolean);
+  return {
+    id: sourceRecordId,
+    sourceRecordId,
+    sourceReportId,
+    catalogKey: tradingResearchCatalogPairKey(sourceReportId, sourceRecordId),
+    sourceKind: safeDashboardDisplayText(item.sourceKind, "verified_catalog_record"),
+    sourceReportTitle: safeDashboardDisplayText(
+      item.sourceReportTitle || item.reportTitle,
+      "รายงานระบบเทรดจาก Backend",
+    ),
+    reportUpdatedAt: item.reportUpdatedAt || system.updatedAt || system.checkedAt || null,
+    systemName: safeDashboardDisplayText(system.systemName || item.systemName, `ระบบเทรด ${index + 1}`),
+    strategyFamily: safeDashboardDisplayText(system.strategyFamily || item.strategyFamily, "other").toLowerCase(),
+    creator: {
+      name: safeDashboardDisplayText(creator.name, "แหล่งสาธารณะยังไม่ระบุชื่อ"),
+      role: safeDashboardDisplayText(creator.role, "author").toLowerCase(),
+      sourceUrl: getSafeExternalHttpUrl(creator.sourceUrl || sources[0]),
+    },
+    publicUsers: (Array.isArray(system.publicUsers) ? system.publicUsers : [])
+      .slice(0, 40)
+      .map((user) => ({
+        name: safeDashboardDisplayText(user?.name || user?.label, ""),
+        sourceUrl: getSafeExternalHttpUrl(user?.sourceUrl || user?.url),
+      }))
+      .filter((user) => user.name && user.sourceUrl),
+    market: tradingResearchCatalogDisplayValue(system.market, "ยังไม่ระบุตลาด"),
+    symbols: tradingResearchCatalogTextList(system.symbols || system.symbolsMarket, 80),
+    timeframes: tradingResearchCatalogTextList(system.timeframes || system.timeframe, 40),
+    sessions: tradingResearchCatalogTextList(system.sessions, 40),
+    indicatorSettings,
+    setupConditions: tradingResearchCatalogTextList(system.setupConditions, 120),
+    entrySteps: tradingResearchCatalogSteps(system.entrySteps || system.entryRules, 160),
+    exitSteps: tradingResearchCatalogSteps(system.exitSteps || system.exitRules, 160),
+    tradeManagementSteps: tradingResearchCatalogSteps(system.tradeManagementSteps || system.tradeManagement, 160),
+    riskManagement: {
+      positionSizing: tradingResearchCatalogDisplayValue(risk.positionSizing || risk.lotRisk, "ไม่พบข้อมูลสาธารณะ"),
+      stopLoss: tradingResearchCatalogDisplayValue(risk.stopLoss, "ไม่พบข้อมูลสาธารณะ"),
+      takeProfit: tradingResearchCatalogDisplayValue(risk.takeProfit, "ไม่พบข้อมูลสาธารณะ"),
+      maxRiskPerTrade: tradingResearchCatalogDisplayValue(risk.maxRiskPerTrade || risk.riskPerTrade, "ไม่พบข้อมูลสาธารณะ"),
+      maxOpenPositions: tradingResearchCatalogDisplayValue(risk.maxOpenPositions, "ไม่พบข้อมูลสาธารณะ"),
+      dailyOrEquityStop: tradingResearchCatalogDisplayValue(
+        risk.dailyOrEquityStop || risk.dailyLossLimit,
+        "ไม่พบข้อมูลสาธารณะ",
+      ),
+      recoveryMethod: tradingResearchCatalogDisplayValue(risk.recoveryMethod, "not_publicly_stated"),
+      recoveryRules: tradingResearchCatalogTextList(risk.recoveryRules, 120),
+    },
+    suitableFor: tradingResearchCatalogTextList(system.suitableFor, 80),
+    risksAndLimitations: tradingResearchCatalogTextList(system.risksAndLimitations || system.limitations, 120),
+    unknowns: tradingResearchCatalogTextList(system.unknowns, 120),
+    sourceTitle: safeDashboardDisplayText(system.sourceTitle, "แหล่งข้อมูลหลัก"),
+    sources,
+    checkedAt: system.checkedAt || item.reportUpdatedAt || null,
+    verificationStatus: safeDashboardDisplayText(
+      item.verificationStatus || system.verificationStatus,
+      "verified",
+    ).toLowerCase(),
+  };
+}
+
 function normalizeTradingSystemResearchLabDomain(backend = {}, report = {}, portalReport = {}, portalLoadState = {}) {
   const portalBackend = portalReport?.workflowDashboard
     && typeof portalReport.workflowDashboard === "object"
@@ -19974,6 +20193,15 @@ function normalizeTradingSystemResearchLabDomain(backend = {}, report = {}, port
     ? portalReport.workflowDashboard
     : {};
   const portal = normalizeTradingSystemPortalDomain(portalBackend, portalReport);
+  const researchCatalog = workflowDomainObject(
+    backend.researchCatalog,
+    backend.domainData?.researchCatalog,
+    report.researchCatalog,
+  );
+  const hasAuthoritativeCatalog = Array.isArray(researchCatalog.systems);
+  const authoritativeSystems = hasAuthoritativeCatalog
+    ? researchCatalog.systems.map(normalizeTradingResearchCatalogSystem).filter(Boolean)
+    : [];
   const researchReports = workflowReportRows(report, "trading_system_research_report")
     .filter((item) => ["ready", "completed", "verified"].includes(String(item?.status || "").toLowerCase()))
     .sort((left, right) => (
@@ -19982,17 +20210,36 @@ function normalizeTradingSystemResearchLabDomain(backend = {}, report = {}, port
     ))
     .slice(0, 20);
   const hasVerifiedCatalog = Array.isArray(portal.systems) && portal.systems.length === 3;
+  const legacySystems = hasVerifiedCatalog
+    ? portal.systems.map((system) => ({
+        ...system,
+        sourceRecordId: system.id,
+        sourceReportId: portal.reportId || "",
+        catalogKey: tradingResearchCatalogPairKey(portal.reportId, system.id),
+        sourceKind: "legacy_portal_report",
+        sourceReportTitle: portal.reportTitle || "รายงานระบบเทรดล่าสุด",
+        reportUpdatedAt: portal.reportUpdatedAt || null,
+      }))
+    : [];
+  const systems = hasAuthoritativeCatalog ? authoritativeSystems : legacySystems;
   const rawCatalogStatus = String(portalLoadState?.status || "").trim().toLowerCase();
-  const catalogStatus = hasVerifiedCatalog
+  let catalogStatus = hasVerifiedCatalog
     ? "ready"
     : (["loading", "error"].includes(rawCatalogStatus) ? rawCatalogStatus : "idle");
+  if (hasAuthoritativeCatalog) catalogStatus = systems.length ? "ready" : "idle";
+  const firstSystem = systems[0] || null;
   return {
-    systems: hasVerifiedCatalog ? portal.systems : [],
-    sourceReportId: portal.reportId || "",
-    sourceReportTitle: portal.reportTitle || "รายงานระบบเทรดล่าสุด",
-    sourceReportUpdatedAt: portal.reportUpdatedAt || null,
+    systems,
+    sourceReportId: firstSystem?.sourceReportId || portal.reportId || "",
+    sourceReportTitle: firstSystem?.sourceReportTitle || portal.reportTitle || "รายงานระบบเทรดล่าสุด",
+    sourceReportUpdatedAt: firstSystem?.reportUpdatedAt || portal.reportUpdatedAt || null,
     researchReports,
-    backendReady: hasVerifiedCatalog,
+    researchHistory: Array.isArray(researchCatalog.googleSheetResearchHistory)
+      ? researchCatalog.googleSheetResearchHistory.slice(0, 120)
+      : [],
+    backendReady: systems.length > 0,
+    catalogAuthoritative: hasAuthoritativeCatalog,
+    catalogSchemaVersion: safeDashboardDisplayText(researchCatalog.schemaVersion, "legacy-portal-report"),
     catalogStatus,
     catalogLoading: catalogStatus === "loading",
     catalogError: catalogStatus === "error"
@@ -20005,23 +20252,34 @@ function normalizeTradingSystemResearchLabDomain(backend = {}, report = {}, port
 function getTradingResearchLabSession(domain = {}) {
   const session = state.modal.tradingResearchLab;
   const systems = Array.isArray(domain.systems) ? domain.systems : [];
-  const sourceReportId = String(domain.sourceReportId || "");
-  if (session.sourceReportId !== sourceReportId) {
-    session.sourceReportId = sourceReportId;
+  const selected = systems.find((system) => (
+    system.id === session.selectedSystemId
+    && system.sourceReportId === session.sourceReportId
+  )) || (!session.sourceReportId
+    ? systems.find((system) => system.id === session.selectedSystemId)
+    : null);
+  if (!selected) {
+    session.sourceReportId = systems[0]?.sourceReportId || "";
     session.selectedSystemId = systems[0]?.id || "";
     session.backtest = null;
     session.backtestMessage = "";
-  }
-  if (!systems.some((system) => system.id === session.selectedSystemId)) {
-    session.selectedSystemId = systems[0]?.id || "";
-    session.backtest = null;
-    session.backtestMessage = "";
+  } else {
+    session.sourceReportId = selected.sourceReportId;
+    session.selectedSystemId = selected.id;
   }
   if (!TRADING_RESEARCH_SIMULATION_REGIMES.some((regime) => regime.id === session.simulationRegime)) {
     session.simulationRegime = TRADING_RESEARCH_SIMULATION_REGIMES[0].id;
   }
   if (!Object.prototype.hasOwnProperty.call(TRADING_RESEARCH_TIMEFRAME_MS, session.timeframe)) session.timeframe = "H1";
   return session;
+}
+
+function getTradingResearchSelectedSystem(domain = {}, session = state.modal.tradingResearchLab) {
+  const systems = Array.isArray(domain.systems) ? domain.systems : [];
+  return systems.find((system) => (
+    system.id === session.selectedSystemId
+    && system.sourceReportId === session.sourceReportId
+  )) || systems.find((system) => system.id === session.selectedSystemId) || null;
 }
 
 function tradingResearchNormalizeHeader(value) {
@@ -21646,6 +21904,86 @@ function normalizeEaFactoryPlatform(value) {
   return "";
 }
 
+const EA_FACTORY_READINESS_ISSUE_LABELS = Object.freeze({
+  legacy_ea_blueprint_missing: "ต้นทางเป็นข้อมูลรุ่นเดิมและยังไม่มี EA Blueprint v2 ที่ Backend ตรวจแล้ว",
+  legacy_or_invalid_ea_blueprint: "ต้นทางไม่มี EA Blueprint v2 ที่ผ่านการตรวจ",
+  ea_blueprint_invalid: "โครงสร้าง EA Blueprint v2 ไม่ผ่าน Contract",
+  blueprint_digest_missing: "EA Blueprint ไม่มี SHA-256 สำหรับตรวจความครบถ้วน",
+  blueprint_digest_mismatch: "SHA-256 ของ EA Blueprint ไม่ตรงกับข้อมูลที่ Backend ตรวจ",
+  ea_blueprint_needs_clarification: "EA Blueprint ยังมีเงื่อนไขที่ต้องวิจัยหรือยืนยันเพิ่ม",
+  ea_blueprint_unknown_paths: "EA Blueprint ยังมีตำแหน่งข้อมูลที่ไม่ทราบ",
+  ea_blueprint_conflict_paths: "EA Blueprint ยังมีหลักฐานหรือกฎที่ขัดกัน",
+});
+
+function normalizeEaFactoryReadinessIssue(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const message = safeDashboardDisplayText(
+      value.messageTh || value.message || value.detail || value.summary,
+      "",
+    );
+    const code = safeDashboardDisplayText(value.code, "");
+    const path = safeDashboardDisplayText(value.path, "");
+    if (message) return [code, path, message].filter(Boolean).join(" • ");
+    if (code || path) return [code, path].filter(Boolean).join(" • ");
+  }
+  const text = safeDashboardDisplayText(value, "");
+  if (!text) return "";
+  const code = text.split(":", 1)[0];
+  return EA_FACTORY_READINESS_ISSUE_LABELS[code]
+    ? `${EA_FACTORY_READINESS_ISSUE_LABELS[code]} • ${text}`
+    : text;
+}
+
+function normalizeEaFactoryResearchReadModel(item = {}) {
+  const raw = workflowDomainObject(item?.eaResearch);
+  const blueprint = raw.blueprint && typeof raw.blueprint === "object" && !Array.isArray(raw.blueprint)
+    ? raw.blueprint
+    : null;
+  const blueprintDigest = /^[0-9a-f]{64}$/.test(String(raw.blueprintDigest || ""))
+    ? String(raw.blueprintDigest)
+    : "";
+  const validated = raw.validated === true
+    && raw.digestMatched === true
+    && raw.validationStatus === "canonical_validated"
+    && raw.schemaVersion === TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION
+    && blueprint?.schemaVersion === TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION
+    && Boolean(blueprintDigest);
+  const completeness = validated && blueprint.completeness
+    && typeof blueprint.completeness === "object" && !Array.isArray(blueprint.completeness)
+    ? blueprint.completeness
+    : {};
+  const ready = validated
+    && raw.ready === true
+    && raw.eaHandoffAllowed === true
+    && raw.deterministicBacktestAllowed === true
+    && completeness.status === "ready"
+    && completeness.eaHandoffAllowed === true
+    && completeness.deterministicBacktestAllowed === true;
+  const issueValues = [
+    ...(Array.isArray(item?.readinessIssues) ? item.readinessIssues : []),
+    ...(Array.isArray(raw.readinessIssues) ? raw.readinessIssues : []),
+    ...(Array.isArray(raw.blockingIssues) ? raw.blockingIssues : []),
+  ];
+  if (!validated && raw.validationStatus) issueValues.unshift(raw.validationStatus);
+  const readinessIssues = [...new Set(
+    issueValues.map(normalizeEaFactoryReadinessIssue).filter(Boolean),
+  )].slice(0, 80);
+  return {
+    schemaVersion: validated ? raw.schemaVersion : "",
+    validationStatus: safeDashboardDisplayText(raw.validationStatus, "legacy_ea_blueprint_missing"),
+    validated,
+    digestMatched: validated,
+    ready,
+    status: safeDashboardDisplayText(raw.status, "not_ea_ready"),
+    score: Number.isFinite(Number(raw.score)) ? Number(raw.score) : null,
+    eaHandoffAllowed: ready,
+    deterministicBacktestAllowed: ready,
+    blueprintDigest,
+    blueprint: validated ? blueprint : null,
+    readinessIssues,
+  };
+}
+
 function normalizeEaFactorySourceRecord(item = {}, index = 0) {
   const columns = {
     ...workflowDomainObject(item?.columns, item?.values, item?.record),
@@ -21669,8 +22007,11 @@ function normalizeEaFactorySourceRecord(item = {}, index = 0) {
     const singleSource = item?.sourceUrl || item?.source_url || columns.sourceUrl || columns.source_url;
     if (singleSource) sourceUrls.push(...String(singleSource).split(/\r?\n|\s*[;,]\s*/).filter(Boolean));
   }
+  const eaResearch = normalizeEaFactoryResearchReadModel(item);
   return {
     sourceRecordId,
+    sourceKind: safeDashboardDisplayText(item?.sourceKind || item?.source_kind, "unknown"),
+    sourceReportId: String(item?.sourceReportId || item?.source_report_id || "").trim(),
     recordId,
     systemName: safeDashboardDisplayText(
       item?.systemName || item?.system_name || columns.systemName || columns.system_name,
@@ -21725,8 +22066,11 @@ function normalizeEaFactorySourceRecord(item = {}, index = 0) {
     targetPlatform: normalizeEaFactoryPlatform(
       item?.targetPlatform || item?.target_platform || columns.targetPlatform || columns.target_platform,
     ),
-    buildReady: item?.buildReady === true,
+    buildReady: item?.buildReady === true && eaResearch.ready,
     missingCoreFields: normalizeEaFactoryTextList(item?.missingCoreFields || item?.missing_core_fields, 20),
+    readinessIssues: eaResearch.readinessIssues,
+    blueprintDigest: eaResearch.blueprintDigest,
+    eaResearch,
     updatedAt: item?.updatedAt || item?.updated_at || columns.updatedAt || columns.updated_at || null,
   };
 }
@@ -24297,6 +24641,62 @@ function renderEaFactoryGoogleSheetSync(container, domain = {}) {
   container.appendChild(card);
 }
 
+function renderEaFactoryResearchGate(container, source, { showBlueprint = false } = {}) {
+  const research = source?.eaResearch || {};
+  const card = document.createElement("article");
+  const heading = document.createElement("header");
+  const title = document.createElement("h5");
+  const status = document.createElement("span");
+  const facts = document.createElement("dl");
+  card.className = "ea-factory-research-gate";
+  card.dataset.tone = research.ready ? "ready" : (research.validated ? "warning" : "blocked");
+  title.textContent = "EA Research Blueprint v2";
+  status.textContent = research.ready
+    ? "Backend ตรวจแล้ว • พร้อมส่งต่อ"
+    : (research.validated ? "ผ่าน Contract • ยังมีรายการบล็อก" : "Legacy / Corrupt • ไม่พร้อมสร้าง");
+  heading.append(title, status);
+  facts.className = "ea-factory-stage-facts";
+  appendEaFactoryFact(facts, "Validation", research.validationStatus || "ยังไม่มี canonical read model");
+  appendEaFactoryFact(facts, "Schema", research.schemaVersion || "ยังไม่มี Blueprint v2 ที่ตรวจแล้ว");
+  appendEaFactoryFact(facts, "Readiness", research.status || "not_ea_ready");
+  appendEaFactoryFact(facts, "Score", research.score ?? "ยังไม่มีคะแนนจาก Backend");
+  appendEaFactoryFact(
+    facts,
+    "Blueprint SHA-256",
+    research.blueprintDigest || "ไม่มี digest ที่ Backend ยืนยัน",
+    { wide: true },
+  );
+  card.append(heading, facts);
+  const issues = Array.isArray(source?.readinessIssues) ? source.readinessIssues : [];
+  if (issues.length) {
+    const block = document.createElement("section");
+    const blockTitle = document.createElement("strong");
+    const list = document.createElement("ul");
+    block.className = "ea-factory-readiness-issues";
+    blockTitle.textContent = "สาเหตุที่ยังไม่พร้อม";
+    issues.forEach((issue) => {
+      const item = document.createElement("li");
+      item.textContent = safeAgentChatReplyText(issue, "Backend ยังไม่ระบุรายละเอียด");
+      list.appendChild(item);
+    });
+    block.append(blockTitle, list);
+    card.appendChild(block);
+  }
+  container.appendChild(card);
+  if (showBlueprint && research.validated && research.digestMatched && research.blueprint) {
+    container.appendChild(createTradingResearchEaBlueprint(
+      research.blueprint,
+      { id: source.sourceReportId || source.sourceRecordId },
+    ));
+  } else if (showBlueprint) {
+    container.appendChild(createEaFactoryNotice(
+      "error",
+      "ยังยืนยัน Strategy Spec ไม่ได้",
+      "ต้องกลับไปวิจัยใหม่จน Backend ส่ง canonical EA Blueprint v2 ที่ผ่าน Contract และ SHA-256 ตรงกัน ระบบจะไม่ใช้ข้อความ A-M รุ่นเดิมแทนกฎ EA",
+    ));
+  }
+}
+
 function renderEaFactorySourceStage(section, domain) {
   const stage = domain.stages.find((item) => item.id === "source");
   section.appendChild(createEaFactoryStageHeader("source", stage));
@@ -24338,7 +24738,6 @@ function renderEaFactorySourceStage(section, domain) {
   const title = document.createElement("h5");
   const verified = document.createElement("span");
   const facts = document.createElement("dl");
-  const rules = document.createElement("div");
   summary.className = "ea-factory-source-detail";
   title.textContent = selected.systemName;
   verified.textContent = selected.verificationStatus;
@@ -24359,23 +24758,8 @@ function renderEaFactorySourceStage(section, domain) {
   appendEaFactoryFact(facts, "U • Next Action", selected.nextAction || "ยังไม่ระบุขั้นตอนถัดไป", { wide: true });
   appendEaFactoryFact(facts, "V • Target Platform", eaFactoryPlatformLabel(selected.targetPlatform));
   appendEaFactoryFact(facts, "W • Updated At", selected.updatedAt ? formatThaiDateTime(selected.updatedAt) : "ยังไม่มีเวลาจากต้นทาง");
-  appendEaFactoryFact(
-    facts,
-    "ความพร้อม A-M",
-    selected.buildReady
-      ? "ข้อมูลแกนหลักครบ พร้อมสร้าง Build"
-      : `ยังขาด ${selected.missingCoreFields.join(", ") || "ข้อมูลแกนหลักที่ Backend กำหนด"}`,
-    { wide: true },
-  );
-  rules.className = "ea-factory-source-rules";
-  appendEaFactoryRuleList(rules, "Entry Rules", selected.entryRules, "Sheet ยังไม่ระบุ Entry Rule");
-  appendEaFactoryRuleList(rules, "Exit Rules", selected.exitRules, "Sheet ยังไม่ระบุ Exit Rule");
-  appendEaFactoryRuleList(rules, "Recovery / แก้ไม้", selected.recovery, "ไม่มีการแก้ไม้ที่ระบุ");
-  appendEaFactoryRuleList(rules, "Lot / Risk / Money Management", selected.lotRisk, "Sheet ยังไม่ระบุ Lot หรือ Risk");
-  appendEaFactoryRuleList(rules, "Indicators", selected.indicators, "ยังไม่ระบุ Indicator");
-  appendEaFactoryRuleList(rules, "เงื่อนไขพิเศษ", selected.specialConditions, "ไม่มีเงื่อนไขพิเศษที่ระบุ");
-  appendEaFactoryRuleList(rules, "T • Issues / ปัญหา", selected.issues, "ต้นทางยังไม่ระบุปัญหา");
-  summary.append(heading, facts, rules);
+  appendEaFactoryFact(facts, "EA Blueprint", selected.eaResearch.ready ? "พร้อมสร้าง Build" : "ยังไม่ผ่าน Readiness Gate", { wide: true });
+  summary.append(heading, facts);
   if (selected.sourceUrls.length) {
     const links = document.createElement("div");
     const linksTitle = document.createElement("strong");
@@ -24389,6 +24773,7 @@ function renderEaFactorySourceStage(section, domain) {
     if (links.childElementCount) summary.appendChild(links);
   }
   section.appendChild(summary);
+  renderEaFactoryResearchGate(section, selected);
   if (domain.canStartNewBuild) {
     section.appendChild(createEaFactoryActionButton(
       "source",
@@ -24414,24 +24799,16 @@ function renderEaFactorySpecStage(section, domain) {
     return;
   }
   const facts = document.createElement("dl");
-  const rules = document.createElement("div");
   facts.className = "ea-factory-stage-facts";
-  appendEaFactoryFact(facts, "A • Record ID", source.recordId);
-  appendEaFactoryFact(facts, "B • System", source.systemName);
-  appendEaFactoryFact(facts, "C • Strategy Family", source.strategyFamily);
-  appendEaFactoryFact(facts, "D • Symbol / Market", source.symbolsMarket);
-  appendEaFactoryFact(facts, "E • Timeframe", source.timeframe);
-  appendEaFactoryFact(facts, "H • Stop Loss", source.stopLoss);
-  appendEaFactoryFact(facts, "I • Take Profit", source.takeProfit);
-  rules.className = "ea-factory-source-rules";
-  appendEaFactoryRuleList(rules, "F • Entry Rules", source.entryRules, "ยังไม่ระบุ Entry Rule");
-  appendEaFactoryRuleList(rules, "G • Exit Rules", source.exitRules, "ยังไม่ระบุ Exit Rule");
-  appendEaFactoryRuleList(rules, "J • Recovery / แก้ไม้", source.recovery, "ไม่มีการแก้ไม้ที่ระบุ");
-  appendEaFactoryRuleList(rules, "K • Lot / Risk / Money Management", source.lotRisk, "ยังไม่ระบุ Lot หรือ Risk");
-  appendEaFactoryRuleList(rules, "L • Indicators", source.indicators, "ยังไม่ระบุ Indicator");
-  appendEaFactoryRuleList(rules, "M • Special Conditions", source.specialConditions, "ไม่มีเงื่อนไขพิเศษที่ระบุ");
-  section.append(facts, rules);
+  appendEaFactoryFact(facts, "Source Record", source.sourceRecordId);
+  appendEaFactoryFact(facts, "Research Record", source.recordId);
+  appendEaFactoryFact(facts, "System", source.systemName);
+  appendEaFactoryFact(facts, "Source Kind", source.sourceKind);
+  appendEaFactoryFact(facts, "Blueprint SHA-256", source.blueprintDigest || "ยังไม่มี digest", { wide: true });
+  section.appendChild(facts);
+  renderEaFactoryResearchGate(section, source, { showBlueprint: true });
   if (domain.canStartNewBuild) {
+    if (!source.buildReady || !source.eaResearch.ready) return;
     if (domain.activeBuild) {
       section.appendChild(createEaFactoryNotice(
         "neutral",
@@ -25311,7 +25688,7 @@ function createTradingResearchLabHeader(domain, session) {
         : (domain.sourceReportUpdatedAt
             ? "ข้อมูลจาก Backend Report • อัปเดต " + formatThaiDateTime(domain.sourceReportUpdatedAt)
             : "แสดงเฉพาะระบบจาก Report ที่ Backend ตรวจสัญญาแล้ว"));
-  status.textContent = domain.catalogLoading ? "กำลังโหลด" : String(domain.systems.length) + "/3 ระบบ";
+  status.textContent = domain.catalogLoading ? "กำลังโหลด" : String(domain.systems.length) + " ระบบ";
   status.dataset.tone = domain.backendReady ? "ready" : (domain.catalogLoading ? "loading" : "waiting");
   copy.append(eyebrow, title, detail);
   header.append(copy, status);
@@ -25321,9 +25698,10 @@ function createTradingResearchLabHeader(domain, session) {
   selector.disabled = !domain.backendReady;
   domain.systems.forEach((system) => {
     const option = document.createElement("option");
-    option.value = system.id;
+    option.value = system.catalogKey || tradingResearchCatalogPairKey(system.sourceReportId, system.id);
     option.textContent = system.systemName + " • " + tradingSystemFamilyLabel(system.strategyFamily);
-    option.selected = system.id === session.selectedSystemId;
+    option.selected = system.id === session.selectedSystemId
+      && system.sourceReportId === session.sourceReportId;
     selector.appendChild(option);
   });
   if (!selector.childElementCount) {
@@ -25331,11 +25709,19 @@ function createTradingResearchLabHeader(domain, session) {
     option.value = "";
     option.textContent = domain.catalogLoading
       ? "กำลังโหลดระบบจาก Backend..."
-      : (domain.catalogError ? "โหลดคลังระบบไม่สำเร็จ" : "รอระบบที่ Backend ตรวจแล้วครบ 3 ระบบ");
+      : (domain.catalogError
+          ? "โหลดคลังระบบไม่สำเร็จ"
+          : (domain.catalogAuthoritative
+              ? "Backend ยังไม่มีระบบที่ผ่านการตรวจ"
+              : "รอระบบที่ Backend ตรวจแล้วครบ 3 ระบบ"));
     selector.appendChild(option);
   }
   selector.addEventListener("change", () => {
-    session.selectedSystemId = String(selector.value || "");
+    const selected = domain.systems.find((system) => (
+      (system.catalogKey || tradingResearchCatalogPairKey(system.sourceReportId, system.id)) === selector.value
+    )) || null;
+    session.sourceReportId = selected?.sourceReportId || "";
+    session.selectedSystemId = selected?.id || "";
     session.backtest = null;
     session.backtestMessage = "";
     rerenderTradingResearchLab();
@@ -25366,8 +25752,8 @@ function createTradingResearchNotice(titleText, detailText, tone = "neutral") {
 }
 
 function tradingResearchReportsForSystem(domain = {}, system = {}) {
-  const sourceReportId = String(domain.sourceReportId || "").trim();
-  const sourceRecordId = String(system.id || "").trim();
+  const sourceReportId = String(system.sourceReportId || domain.sourceReportId || "").trim();
+  const sourceRecordId = String(system.sourceRecordId || system.id || "").trim();
   if (!sourceReportId || !sourceRecordId) return [];
   return (Array.isArray(domain.researchReports) ? domain.researchReports : []).filter((report) => {
     const source = report?.workflowContext?.source;
@@ -25376,14 +25762,462 @@ function tradingResearchReportsForSystem(domain = {}, system = {}) {
   });
 }
 
+const TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION = "ea-ready-strategy-research/2.0.0";
+const TRADING_RESEARCH_BLUEPRINT_FIELD_LABELS = Object.freeze({
+  schemaVersion: "Schema Version",
+  strategyId: "Strategy ID",
+  researchRevision: "Research Revision",
+  checkedAt: "เวลาตรวจสอบ",
+  systemName: "ชื่อระบบ",
+  strategyFamily: "ตระกูลกลยุทธ์",
+  barSemantics: "ความหมายของแท่งราคา",
+  barConventions: "ความหมายของแท่งราคา",
+  scope: "ขอบเขตระบบ",
+  inputs: "Inputs ที่ต้องเปิดให้ปรับ",
+  indicators: "Indicators และ Parameters",
+  setup: "เงื่อนไขเตรียมระบบ",
+  entry: "กฎเปิดสถานะ",
+  exit: "กฎปิดสถานะ",
+  buy: "BUY / Long",
+  sell: "SELL / Short",
+  long: "BUY / Long",
+  short: "SELL / Short",
+  tpSl: "Take Profit / Stop Loss",
+  stopLoss: "Stop Loss",
+  takeProfit: "Take Profit",
+  orderManagement: "การแก้ไขและจัดการสถานะ",
+  breakEven: "Break-even",
+  trailingStop: "Trailing Stop",
+  partialClose: "Partial Close",
+  pendingOrders: "Pending Orders",
+  riskAndSizing: "Money Management และ Position Sizing",
+  recovery: "Recovery / Grid / Martingale / Hedge",
+  execution: "กฎการส่งคำสั่งและข้อจำกัด Broker",
+  stateMachine: "State Machine",
+  conflicts: "หลักฐานหรือกฎที่ขัดกัน",
+  precedence: "ลำดับความสำคัญของกฎ",
+  pseudocode: "Pseudocode",
+  testCases: "กรณีทดสอบ",
+  evidenceMap: "แผนที่หลักฐาน",
+  assumptions: "ข้อสันนิษฐาน",
+  unknowns: "ข้อมูลที่ยังไม่ทราบ",
+  completeness: "ความพร้อมส่งโรงงาน EA",
+  status: "สถานะ",
+  score: "คะแนนความครบถ้วน",
+  eaHandoffAllowed: "อนุญาตส่งโรงงาน EA",
+  deterministicBacktestAllowed: "อนุญาต Backtest deterministic",
+  blockingIssues: "รายการที่บล็อก",
+  warnings: "คำเตือน",
+  unknownPaths: "ตำแหน่งข้อมูลที่ยังไม่ทราบ",
+  conflictPaths: "ตำแหน่งข้อมูลที่ขัดกัน",
+  ruleId: "Rule ID",
+  side: "ฝั่งคำสั่ง",
+  group: "กลุ่มตรรกะ",
+  lhs: "ค่าฝั่งซ้าย",
+  operator: "Operator",
+  rhs: "ค่าฝั่งขวา",
+  expression: "นิพจน์ deterministic",
+  timeframe: "Timeframe",
+  barIndex: "Bar Index",
+  evaluationEvent: "จังหวะประเมิน",
+  priority: "ลำดับก่อนหลัง",
+  sourceUrl: "URL หลักฐาน",
+  truthStatus: "สถานะข้อเท็จจริง",
+  readiness: "ความพร้อม",
+});
+
+function tradingResearchBlueprintObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function tradingResearchEaBlueprintFromReport(report = {}) {
+  const readModel = tradingResearchBlueprintObject(report.eaResearch);
+  const blueprint = tradingResearchBlueprintObject(readModel.blueprint);
+  const digest = String(readModel.blueprintDigest || "");
+  const canonical = readModel.validated === true
+    && readModel.digestMatched === true
+    && readModel.validationStatus === "canonical_validated"
+    && readModel.schemaVersion === TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION
+    && blueprint.schemaVersion === TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION
+    && /^[0-9a-f]{64}$/.test(digest);
+  return canonical ? blueprint : null;
+}
+
+function tradingResearchEaReadModelWarning(report = {}) {
+  const readModel = tradingResearchBlueprintObject(report.eaResearch);
+  const validationStatus = safeDashboardDisplayText(
+    readModel.validationStatus,
+    "legacy_ea_blueprint_missing",
+  );
+  const corrupt = [
+    "blueprint_digest_mismatch",
+    "blueprint_digest_missing",
+    "ea_blueprint_invalid",
+  ].includes(validationStatus);
+  return {
+    tone: corrupt ? "error" : "warning",
+    title: corrupt ? "EA Blueprint ไม่ผ่านการตรวจความครบถ้วน" : "Report นี้ยังไม่มี canonical EA Blueprint v2",
+    detail: corrupt
+      ? `Backend ปิด Readiness Gate (${validationStatus}) และไม่ใช้ alias หรือค่า ready ดิบแทน กรุณาวิจัยระบบนี้ใหม่`
+      : `Backend ระบุ ${validationStatus} จึงแสดงผลวิจัยเดิมแบบ read-only และไม่อนุมานกฎสำหรับเขียน EA เพิ่มเอง`,
+  };
+}
+
+function tradingResearchBlueprintHasValue(value) {
+  if (value === null || value === undefined || value === "") return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value).length > 0;
+  return true;
+}
+
+function tradingResearchBlueprintAt(root, path) {
+  return String(path || "").split(".").filter(Boolean).reduce((value, key) => (
+    value && typeof value === "object" ? value[key] : undefined
+  ), root);
+}
+
+function tradingResearchBlueprintFirst(root, paths) {
+  for (const path of paths) {
+    const value = tradingResearchBlueprintAt(root, path);
+    if (tradingResearchBlueprintHasValue(value)) return value;
+  }
+  return null;
+}
+
+function tradingResearchBlueprintFieldLabel(key) {
+  return TRADING_RESEARCH_BLUEPRINT_FIELD_LABELS[key]
+    || safeDashboardDisplayText(String(key || "").replace(/([a-z])([A-Z])/g, "$1 $2"), "ข้อมูล");
+}
+
+function createTradingResearchBlueprintScalar(value, key = "") {
+  const raw = typeof value === "boolean" ? (value ? "true" : "false") : String(value ?? "");
+  const safeText = safeAgentChatReplyText(raw, "ยังไม่ระบุ");
+  const safeUrl = getSafeExternalHttpUrl(raw);
+  if (safeUrl) {
+    return createWorkflowExternalSource(safeUrl, safeText) || document.createTextNode(safeText);
+  }
+  const codeLike = /(?:expression|formula|predicate|pseudocode|condition|logic|operator|lhs|rhs)/i.test(key)
+    || /(?:&&|\|\||\[[012]\]|\b(?:if|else|return)\b)/i.test(raw);
+  const node = document.createElement(codeLike ? "code" : "span");
+  node.textContent = safeText;
+  return node;
+}
+
+function createTradingResearchBlueprintValue(value, key = "", depth = 0) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "workflow-research-blueprint-value";
+  wrapper.dataset.blueprintField = String(key || "value").slice(0, 80);
+  if (depth >= 10) {
+    wrapper.appendChild(createTradingResearchBlueprintScalar("ข้อมูลมีโครงสร้างลึกเกินขอบเขตการแสดงผล", key));
+    return wrapper;
+  }
+  if (Array.isArray(value)) {
+    if (!value.length) {
+      wrapper.appendChild(createTradingResearchBlueprintScalar("ไม่มีรายการ", key));
+      return wrapper;
+    }
+    const list = document.createElement("ol");
+    list.className = "workflow-research-blueprint-list";
+    value.forEach((item, index) => {
+      const row = document.createElement("li");
+      if (item && typeof item === "object") {
+        row.appendChild(createTradingResearchBlueprintValue(item, `${key}.${index + 1}`, depth + 1));
+      } else {
+        row.appendChild(createTradingResearchBlueprintScalar(item, key));
+      }
+      list.appendChild(row);
+    });
+    wrapper.appendChild(list);
+    return wrapper;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value);
+    if (!entries.length) {
+      wrapper.appendChild(createTradingResearchBlueprintScalar("ยังไม่มีข้อมูลจาก Backend", key));
+      return wrapper;
+    }
+    const facts = document.createElement("dl");
+    facts.className = "workflow-research-blueprint-facts";
+    entries.forEach(([childKey, childValue]) => {
+      const row = document.createElement("div");
+      const term = document.createElement("dt");
+      const detail = document.createElement("dd");
+      term.textContent = tradingResearchBlueprintFieldLabel(childKey);
+      if (childValue && typeof childValue === "object") {
+        detail.appendChild(createTradingResearchBlueprintValue(childValue, childKey, depth + 1));
+      } else {
+        detail.appendChild(createTradingResearchBlueprintScalar(childValue, childKey));
+      }
+      row.append(term, detail);
+      facts.appendChild(row);
+    });
+    wrapper.appendChild(facts);
+    return wrapper;
+  }
+  wrapper.appendChild(createTradingResearchBlueprintScalar(value, key));
+  return wrapper;
+}
+
+function createTradingResearchCrossFormulaGuide() {
+  const guide = document.createElement("aside");
+  const title = document.createElement("strong");
+  const detail = document.createElement("p");
+  const formulas = document.createElement("div");
+  guide.className = "workflow-research-cross-guide";
+  title.textContent = "มาตรฐาน Cross บนแท่งปิด (ตัวอย่าง MA10 / MA60)";
+  detail.textContent = "bar 0 = แท่งกำลังก่อตัว, bar 1 = แท่งปิดล่าสุด, bar 2 = แท่งปิดก่อนหน้า";
+  [
+    ["Cross ขึ้น / BUY", "MA10[2] <= MA60[2] && MA10[1] > MA60[1]"],
+    ["Cross ลง / SELL", "MA10[2] >= MA60[2] && MA10[1] < MA60[1]"],
+  ].forEach(([labelText, formulaText]) => {
+    const row = document.createElement("div");
+    const label = document.createElement("span");
+    const formula = document.createElement("code");
+    label.textContent = labelText;
+    formula.textContent = formulaText;
+    row.append(label, formula);
+    formulas.appendChild(row);
+  });
+  guide.append(title, detail, formulas);
+  return guide;
+}
+
+function createTradingResearchBlueprintSection(id, titleText, groups, { open = false, supplement = null } = {}) {
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  const title = document.createElement("strong");
+  const count = document.createElement("span");
+  const body = document.createElement("div");
+  const available = groups.filter((group) => tradingResearchBlueprintHasValue(group.value));
+  details.className = "workflow-research-blueprint-section";
+  details.dataset.eaBlueprintSection = id;
+  details.open = open;
+  title.textContent = titleText;
+  count.textContent = available.length ? `${available.length}/${groups.length} กลุ่ม` : "ยังไม่มีข้อมูล";
+  summary.append(title, count);
+  body.className = "workflow-research-blueprint-section-body";
+  if (supplement) body.appendChild(supplement);
+  groups.forEach((group) => {
+    const groupNode = document.createElement("section");
+    const heading = document.createElement("h6");
+    heading.textContent = group.label;
+    groupNode.className = "workflow-research-blueprint-group";
+    groupNode.appendChild(heading);
+    if (tradingResearchBlueprintHasValue(group.value)) {
+      groupNode.appendChild(createTradingResearchBlueprintValue(group.value, group.key || id));
+    } else {
+      const missing = document.createElement("p");
+      missing.className = "workflow-research-blueprint-missing";
+      missing.textContent = "Backend ยังไม่ระบุข้อมูลหมวดนี้";
+      groupNode.appendChild(missing);
+    }
+    body.appendChild(groupNode);
+  });
+  details.append(summary, body);
+  return details;
+}
+
+function createTradingResearchBlueprintReadiness(blueprint) {
+  const completeness = tradingResearchBlueprintObject(
+    tradingResearchBlueprintFirst(blueprint, ["completeness", "readiness"]),
+  );
+  const strip = document.createElement("aside");
+  const title = document.createElement("strong");
+  const facts = document.createElement("dl");
+  const handoff = completeness.eaHandoffAllowed;
+  strip.className = "workflow-research-blueprint-readiness";
+  strip.dataset.tone = handoff === true ? "ready" : (handoff === false ? "blocked" : "warning");
+  strip.setAttribute("role", "status");
+  strip.setAttribute("aria-live", "polite");
+  title.textContent = handoff === true
+    ? "EA Blueprint พร้อมส่งโรงงาน EA"
+    : (handoff === false ? "EA Blueprint ยังมีรายการบล็อก" : "รอ Backend ประเมินความพร้อม");
+  [
+    ["Schema", blueprint.schemaVersion || "ยังไม่ระบุ"],
+    ["Revision", blueprint.researchRevision || "ยังไม่ระบุ"],
+    ["Completeness", completeness.score ?? completeness.status ?? "ยังไม่ระบุ"],
+    ["EA Handoff", handoff === true ? "อนุญาต" : (handoff === false ? "ยังไม่อนุญาต" : "ยังไม่ระบุ")],
+  ].forEach(([labelText, value]) => {
+    const row = document.createElement("div");
+    const term = document.createElement("dt");
+    const detail = document.createElement("dd");
+    term.textContent = labelText;
+    detail.textContent = safeDashboardDisplayText(value, "ยังไม่ระบุ");
+    row.append(term, detail);
+    facts.appendChild(row);
+  });
+  strip.append(title, facts);
+  return strip;
+}
+
+function createTradingResearchEaBlueprint(blueprint, report = {}) {
+  const root = document.createElement("section");
+  const header = document.createElement("header");
+  const headerCopy = document.createElement("div");
+  const eyebrow = document.createElement("span");
+  const title = document.createElement("h5");
+  const detail = document.createElement("p");
+  const sections = document.createElement("div");
+  root.className = "workflow-research-ea-blueprint";
+  root.dataset.schemaVersion = safeDashboardDisplayText(blueprint.schemaVersion, "unknown");
+  eyebrow.textContent = "EA BLUEPRINT V2 • BACKEND REPORT";
+  title.textContent = safeDashboardDisplayText(
+    tradingResearchBlueprintAt(blueprint, "scope.systemName") || blueprint.systemName,
+    "ข้อกำหนดพร้อมพัฒนา EA",
+  );
+  detail.textContent = blueprint.schemaVersion === TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION
+    ? `Schema ${TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION} • Report ${safeDashboardDisplayText(report.id, "ไม่ระบุ")}`
+    : `Schema ${safeDashboardDisplayText(blueprint.schemaVersion, "ยังไม่ระบุ")} • แสดงแบบ read-only ตามข้อมูลที่ Backend ส่งมา`;
+  headerCopy.append(eyebrow, title, detail);
+  header.appendChild(headerCopy);
+  root.append(header, createTradingResearchBlueprintReadiness(blueprint));
+  sections.className = "workflow-research-blueprint-sections";
+  const specs = [
+    {
+      id: "scope",
+      title: "1. ขอบเขต ระบบ และ Revision",
+      open: true,
+      groups: [
+        { label: "ขอบเขตและตลาด", key: "scope", value: tradingResearchBlueprintFirst(blueprint, ["scope"]) },
+        { label: "เวลาตรวจสอบ", key: "checkedAt", value: blueprint.checkedAt },
+      ],
+    },
+    {
+      id: "bar-conventions",
+      title: "2. Bar Conventions และกฎ Cross",
+      open: true,
+      supplement: createTradingResearchCrossFormulaGuide(),
+      groups: [{
+        label: "หลักการอ้างอิงแท่งราคา",
+        key: "barSemantics",
+        value: tradingResearchBlueprintFirst(blueprint, ["barSemantics", "barConventions"]),
+      }],
+    },
+    {
+      id: "inputs-indicators",
+      title: "3. Inputs และ Indicators",
+      open: true,
+      groups: [
+        { label: "Inputs ที่ผู้ใช้ปรับได้", key: "inputs", value: blueprint.inputs },
+        { label: "Indicators / Parameters / Buffer", key: "indicators", value: blueprint.indicators },
+        { label: "Setup / Filters", key: "setup", value: blueprint.setup },
+      ],
+    },
+    {
+      id: "buy-entry",
+      title: "4. กฎเปิด BUY / Long",
+      groups: [{ label: "ลำดับเงื่อนไข BUY", key: "buyEntry", value: tradingResearchBlueprintFirst(blueprint, ["entry.buy", "entry.long", "buyEntry", "entries.buy"]) }],
+    },
+    {
+      id: "sell-entry",
+      title: "5. กฎเปิด SELL / Short",
+      groups: [{ label: "ลำดับเงื่อนไข SELL", key: "sellEntry", value: tradingResearchBlueprintFirst(blueprint, ["entry.sell", "entry.short", "sellEntry", "entries.sell"]) }],
+    },
+    {
+      id: "buy-exit",
+      title: "6. กฎปิด BUY / Long",
+      groups: [{ label: "ลำดับเงื่อนไขปิด BUY", key: "buyExit", value: tradingResearchBlueprintFirst(blueprint, ["exit.buy", "exit.long", "buyExit", "exits.buy"]) }],
+    },
+    {
+      id: "sell-exit",
+      title: "7. กฎปิด SELL / Short",
+      groups: [{ label: "ลำดับเงื่อนไขปิด SELL", key: "sellExit", value: tradingResearchBlueprintFirst(blueprint, ["exit.sell", "exit.short", "sellExit", "exits.sell"]) }],
+    },
+    {
+      id: "tp-sl",
+      title: "8. Take Profit และ Stop Loss",
+      groups: [{ label: "ราคาอ้างอิง สูตร และลำดับทำงาน", key: "tpSl", value: tradingResearchBlueprintFirst(blueprint, ["tpSl", "riskModel.tpSl"]) }],
+    },
+    {
+      id: "order-modify",
+      title: "9. Order Modify: BE / Trailing / Partial / Pending",
+      groups: [
+        { label: "Break-even", key: "breakEven", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.breakEven", "breakEven"]) },
+        { label: "Trailing Stop", key: "trailingStop", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.trailingStop", "trailingStop"]) },
+        { label: "Partial Close", key: "partialClose", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.partialClose", "partialClose"]) },
+        { label: "Scale In / เพิ่มไม้", key: "scaleIn", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.scaleIn", "scaleIn"]) },
+        { label: "Scale Out / ลดไม้", key: "scaleOut", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.scaleOut", "scaleOut"]) },
+        { label: "แก้ไข Stop Loss", key: "modifyStopLoss", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.modifyStopLoss", "modifyStopLoss"]) },
+        { label: "แก้ไข Take Profit", key: "modifyTakeProfit", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.modifyTakeProfit", "modifyTakeProfit"]) },
+        { label: "Pending Orders", key: "pendingOrders", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.pendingOrders", "pendingOrders"]) },
+      ],
+    },
+    {
+      id: "recovery",
+      title: "10. Recovery / Grid / Martingale / Averaging / Hedge",
+      groups: [{ label: "ข้อห้าม เงื่อนไขเริ่ม ระยะห่าง Lot และจุดหยุด", key: "recovery", value: tradingResearchBlueprintFirst(blueprint, ["recovery", "recoveryAndAveragingRules"]) }],
+    },
+    {
+      id: "risk-sizing",
+      title: "11. Risk และ Position Sizing",
+      groups: [{ label: "Lot, Exposure, Daily/Equity Guard", key: "riskAndSizing", value: tradingResearchBlueprintFirst(blueprint, ["riskAndSizing", "riskModel"]) }],
+    },
+    {
+      id: "execution",
+      title: "12. Execution และข้อจำกัด Broker",
+      groups: [{ label: "Spread, Slippage, Stop Level, Magic, Retry", key: "execution", value: blueprint.execution }],
+    },
+    {
+      id: "state-machine",
+      title: "13. State Machine และ Order Lifecycle",
+      groups: [{ label: "State / Transition / Reset", key: "stateMachine", value: blueprint.stateMachine }],
+    },
+    {
+      id: "precedence",
+      title: "14. ลำดับความสำคัญและกฎที่ชนกัน",
+      groups: [{ label: "Exit > Protection > Entry และลำดับอื่น", key: "precedence", value: blueprint.precedence }],
+    },
+    {
+      id: "pseudocode",
+      title: "15. Pseudocode สำหรับเขียน EA",
+      groups: [{ label: "ลำดับ OnInit / OnTick / New Bar / Manage", key: "pseudocode", value: blueprint.pseudocode }],
+    },
+    {
+      id: "test-cases",
+      title: "16. Test Cases และ Expected Result",
+      groups: [{ label: "Positive / Negative / Boundary / Conflict", key: "testCases", value: blueprint.testCases }],
+    },
+    {
+      id: "ambiguities",
+      title: "17. Conflicts, Assumptions และ Unknowns",
+      groups: [
+        { label: "หลักฐานหรือกฎที่ขัดกัน", key: "conflicts", value: blueprint.conflicts },
+        { label: "ข้อสันนิษฐาน", key: "assumptions", value: blueprint.assumptions },
+        { label: "ข้อมูลที่ยังไม่ทราบ", key: "unknowns", value: blueprint.unknowns },
+        { label: "แผนที่หลักฐาน", key: "evidenceMap", value: blueprint.evidenceMap },
+      ],
+    },
+    {
+      id: "readiness",
+      title: "18. Readiness Gate ก่อนส่งโรงงาน EA",
+      groups: [{ label: "คะแนน รายการบล็อก คำเตือน และเส้นทางข้อมูลที่ขาด", key: "completeness", value: tradingResearchBlueprintFirst(blueprint, ["completeness", "readiness"]) }],
+    },
+  ];
+  specs.forEach((spec) => {
+    sections.appendChild(createTradingResearchBlueprintSection(
+      spec.id,
+      spec.title,
+      spec.groups,
+      { open: spec.open === true, supplement: spec.supplement || null },
+    ));
+  });
+  root.appendChild(sections);
+  return root;
+}
+
 function renderTradingResearchDetail(section, system, domain) {
   const source = document.createElement("div");
   const sourceTitle = document.createElement("strong");
   const sourceCopy = document.createElement("span");
   source.className = "workflow-research-source-lineage";
   sourceTitle.textContent = "สายข้อมูล";
-  sourceCopy.textContent = domain.sourceReportId
-    ? domain.sourceReportTitle + " • Report " + domain.sourceReportId
+  const selectedReportId = String(system?.sourceReportId || domain.sourceReportId || "");
+  const selectedReportTitle = safeDashboardDisplayText(
+    system?.sourceReportTitle || domain.sourceReportTitle,
+    "รายงานระบบเทรดจาก Backend",
+  );
+  sourceCopy.textContent = selectedReportId
+    ? selectedReportTitle + " • Report " + selectedReportId
     : "Backend ยังไม่ส่ง Report ระบบเทรดที่ใช้เป็นต้นทาง";
   source.append(sourceTitle, sourceCopy);
   section.append(
@@ -25395,7 +26229,11 @@ function renderTradingResearchDetail(section, system, domain) {
     source,
   );
   if (!system) {
-    section.appendChild(createWorkflowTruthEmpty("ยังไม่มีระบบครบ 3 ระบบที่ผ่าน contract จึงไม่เปิดเครื่องมือวิจัย"));
+    section.appendChild(createWorkflowTruthEmpty(
+      domain.catalogAuthoritative
+        ? "Backend ส่ง researchCatalog แล้ว แต่ยังไม่มีระบบที่ผ่าน contract จึงไม่เปิดเครื่องมือวิจัย"
+        : "ยังไม่มีระบบครบ 3 ระบบที่ผ่าน contract จึงไม่เปิดเครื่องมือวิจัย",
+    ));
     return;
   }
   const selectedIndex = Math.max(0, domain.systems.findIndex((item) => item.id === system.id));
@@ -25450,7 +26288,7 @@ function renderTradingResearchDetail(section, system, domain) {
     provenance.textContent = [
       matchingResearch.id ? "Report " + matchingResearch.id : "",
       matchingResearch.linkedMissionId ? "Mission " + matchingResearch.linkedMissionId : "",
-      domain.sourceReportId ? "ต้นทาง " + domain.sourceReportId : "",
+      selectedReportId ? "ต้นทาง " + selectedReportId : "",
     ].filter(Boolean).join(" • ") || "Backend ยังไม่ส่งรหัสสายข้อมูล";
     (Array.isArray(matchingResearch.findings) ? matchingResearch.findings : [])
       .slice(0, 12)
@@ -25471,6 +26309,17 @@ function renderTradingResearchDetail(section, system, domain) {
     if (findings.childElementCount) result.appendChild(findings);
     if (sources.childElementCount) result.appendChild(sources);
     section.appendChild(result);
+    const eaBlueprint = tradingResearchEaBlueprintFromReport(matchingResearch);
+    if (eaBlueprint) {
+      section.appendChild(createTradingResearchEaBlueprint(eaBlueprint, matchingResearch));
+    } else {
+      const warning = tradingResearchEaReadModelWarning(matchingResearch);
+      section.appendChild(createTradingResearchNotice(
+        warning.title,
+        warning.detail,
+        warning.tone,
+      ));
+    }
   } else {
     section.appendChild(createTradingResearchNotice(
       "ยังไม่มี Report วิจัยเชิงลึกของระบบนี้",
@@ -25915,8 +26764,8 @@ function renderTradingResearchSummary(section, system, domain, session) {
   title.textContent = system.systemName;
   const selectedResearchReports = tradingResearchReportsForSystem(domain, system);
   [
-    ["แหล่งระบบ", domain.sourceReportTitle],
-    ["Report ID", domain.sourceReportId || "Backend ยังไม่ส่ง"],
+    ["แหล่งระบบ", system.sourceReportTitle || domain.sourceReportTitle],
+    ["Report ID", system.sourceReportId || domain.sourceReportId || "Backend ยังไม่ส่ง"],
     ["ผู้สร้าง/ผู้เผยแพร่", system.creator.name + " • " + system.creator.role],
     ["ตระกูล", tradingSystemFamilyLabel(system.strategyFamily)],
     ["ตลาด", system.market],
@@ -26782,13 +27631,15 @@ function renderEaOptimizationLabPanel(container, tabId, domain = {}, report = {}
 function renderTradingResearchLabPanel(container, tabId, domain) {
   const section = document.createElement("section");
   const session = getTradingResearchLabSession(domain);
-  const system = domain.systems.find((item) => item.id === session.selectedSystemId) || null;
+  const system = getTradingResearchSelectedSystem(domain, session);
   section.className = "workflow-domain-panel workflow-trading-research-lab";
   section.appendChild(createTradingResearchLabHeader(domain, session));
   if (domain.catalogLoading && !domain.backendReady) {
     section.appendChild(createTradingResearchNotice(
       "กำลังโหลดข้อมูลจาก Backend",
-      "กำลังรอ Report ระบบเทรดครบ 3 ระบบที่ผ่านการตรวจหลักฐาน ระหว่างนี้ระบบจะไม่แสดงข้อมูลว่างหรือเปิดปุ่มวิจัยก่อนเวลา",
+      domain.catalogAuthoritative
+        ? "กำลังรอรายการระบบที่ผ่านการตรวจจาก researchCatalog ระหว่างนี้ระบบจะไม่สร้างข้อมูลตัวอย่างหรือเปิดปุ่มวิจัยก่อนเวลา"
+        : "กำลังรอ Report ระบบเทรดครบ 3 ระบบที่ผ่านการตรวจหลักฐาน ระหว่างนี้ระบบจะไม่แสดงข้อมูลว่างหรือเปิดปุ่มวิจัยก่อนเวลา",
       "loading",
     ));
     container.appendChild(section);
@@ -26805,7 +27656,9 @@ function renderTradingResearchLabPanel(container, tabId, domain) {
   }
   if (!domain.backendReady) {
     section.appendChild(createWorkflowTruthEmpty(
-      "ยังไม่มี metrics.systems แบบ array ครบ 3 ระบบจาก Backend Report จึงไม่ถอด string หรือสร้างข้อมูลตัวอย่างแทน",
+      domain.catalogAuthoritative
+        ? "Backend ส่ง researchCatalog แล้ว แต่ยังไม่มีระบบที่ผ่านการตรวจ จึงไม่สร้างข้อมูลตัวอย่างแทน"
+        : "ยังไม่มี metrics.systems แบบ array ครบ 3 ระบบจาก Backend Report จึงไม่ถอด string หรือสร้างข้อมูลตัวอย่างแทน",
     ));
     container.appendChild(section);
     return;
@@ -28083,6 +28936,32 @@ function validateWorkflowSourceChoice(form, action) {
   return true;
 }
 
+function validateWorkflowDeepResearchSourcePair(form, action, dashboard) {
+  if (action.id !== "deep_research_system") return true;
+  const reportControl = form.querySelector('[data-workflow-field="sourceReportId"]');
+  const recordControl = form.querySelector('[data-workflow-field="sourceRecordId"]');
+  if (!(reportControl instanceof HTMLSelectElement) || !(recordControl instanceof HTMLSelectElement)) return false;
+  reportControl.setCustomValidity("");
+  recordControl.setCustomValidity("");
+  const sourceReportId = String(reportControl.value || "").trim();
+  const sourceRecordId = String(recordControl.value || "").trim();
+  const systems = Array.isArray(dashboard?.domainData?.tradingResearchLab?.systems)
+    ? dashboard.domainData.tradingResearchLab.systems
+    : [];
+  const exactSource = systems.find((system) => (
+    system.sourceReportId === sourceReportId
+    && system.sourceRecordId === sourceRecordId
+  ));
+  if (!exactSource) {
+    recordControl.setCustomValidity("รายงานต้นทางและระบบเทรดไม่ใช่คู่ข้อมูลเดียวกัน กรุณาเลือกใหม่");
+    return false;
+  }
+  const session = state.modal.tradingResearchLab;
+  session.sourceReportId = exactSource.sourceReportId;
+  session.selectedSystemId = exactSource.id;
+  return true;
+}
+
 function createWorkflowIdempotencyKey() {
   const uuid = globalThis.crypto?.randomUUID?.();
   if (uuid) return `wf-${uuid}`;
@@ -28107,6 +28986,10 @@ async function submitWorkflowDashboardAction(form) {
   const action = dashboard.actions.find((item) => item.id === actionId);
   if (!action || !["ready", "settings_only"].includes(action.availability.status)) return;
   if (!validateWorkflowSourceChoice(form, action)) {
+    form.reportValidity();
+    return;
+  }
+  if (!validateWorkflowDeepResearchSourcePair(form, action, dashboard)) {
     form.reportValidity();
     return;
   }

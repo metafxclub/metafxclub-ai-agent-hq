@@ -11,6 +11,8 @@ AI Agent Visual Office แบบ Local สำหรับจัดการ Miss
 - Python **3.10-3.14 แบบ 64-bit** จาก [python.org](https://www.python.org/downloads/windows/) โดยเลือก `Add Python to PATH` ระหว่างติดตั้ง
 - บัญชี Codex ของผู้เรียนเอง (Login ภายหลังได้; HQ และ Health ยังเปิดตรวจได้แม้ Codex ยังไม่ Login)
 
+ตัวติดตั้งจะลง Codex Python SDK และ Codex CLI จาก `requirements-runner.txt` เป็นรุ่นเดียวกัน พร้อมตรวจ SHA-256 และ `pip check` ห้ามเปลี่ยนเฉพาะไฟล์ `codex.exe` แยกจาก SDK เพราะการอ่าน Rate Limit ผ่าน app-server และการรันงานจริงต้องใช้ protocol รุ่นเดียวกัน
+
 ตัวติดตั้งไม่ดาวน์โหลด Python และไม่ขอสิทธิ์ Administrator เพื่อติดตั้ง Python แทนผู้เรียน หากหา Python รุ่นที่รองรับไม่พบ ระบบจะหยุดพร้อมข้อความแก้ไขและไม่ทิ้ง Runtime ที่ติดตั้งครึ่งเดียว การใช้ Google Sheet แบบ Private เป็นการตั้งค่าเสริมหลัง HQ พร้อมใช้งาน โดยทำตาม [docs/research-sheet-hub-setup-th.md](docs/research-sheet-hub-setup-th.md) และห้ามส่งไฟล์ OAuth Client Secret ให้ผู้อื่น
 
 เมื่อต้องใช้ Google Sheet แบบ Private ให้ผู้เรียนดาวน์โหลด OAuth Client JSON ประเภท **Desktop app** จาก Google Auth Platform ของตนเอง แล้วเลือกไฟล์ใน First-run wizard ของตัวติดตั้ง หรือดับเบิลคลิก/ลากไฟล์ไปวางบน `2-SETUP-GOOGLE-HQ.bat` ภายหลัง ระบบส่งเฉพาะ Path ให้ Backend CLI อ่านและบันทึกด้วย Windows current-user DPAPI; JSON และ Client Secret ไม่ผ่าน Browser ไม่ถูกคัดลอกเข้า Project และไม่ถูกส่งให้ผู้สอน หลังนำเข้าแล้วเปิด Agent HQ กด **เชื่อมบัญชี Google ครั้งเดียว** จากนั้นจึงกรอก Sheet ID ไฟล์ JSON ต้นฉบับจะไม่ถูกลบอัตโนมัติ ผู้เรียนต้องเก็บเป็นความลับและลบเองเมื่อไม่ต้องใช้แล้ว

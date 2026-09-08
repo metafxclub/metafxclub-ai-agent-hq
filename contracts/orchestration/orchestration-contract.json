@@ -440,7 +440,7 @@
     "maxPromptChars": 8000,
     "maxRequestBytes": 65536,
     "hardTimeoutSeconds": { "min": 15, "max": 600 },
-    "hardOutputChars": 20000,
+    "hardOutputChars": 64000,
     "maxConcurrentRealRuns": 1,
     "managerDelegationsPerHour": 30,
     "managerDelegationCooldownSeconds": 2,

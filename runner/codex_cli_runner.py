@@ -32,6 +32,25 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BACKEND_LOCAL_RUNNER_DIR = PROJECT_ROOT / "backend" / "local-runner"
+if str(BACKEND_LOCAL_RUNNER_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_LOCAL_RUNNER_DIR))
+
+from ea_research_blueprint import (  # noqa: E402 - shared trusted research contract
+    SCHEMA_PATH as EA_RESEARCH_SCHEMA_PATH,
+    BlueprintValidationError,
+    canonical_blueprint_json,
+    compute_blueprint_digest,
+    normalize_blueprint,
+    project_blueprint_to_legacy_report_metrics,
+    render_ea_ready_text,
+)
+from ea_factory_blueprint_coverage import (  # noqa: E402 - trusted Factory source coverage
+    build_coverage_manifest as ea_factory_coverage_manifest,
+    build_legacy_coverage_manifest as ea_factory_legacy_coverage_manifest,
+    coverage_requirements_valid as ea_factory_coverage_requirements_valid,
+)
+
 AUTO_WORKSPACE_ROOT = PROJECT_ROOT / "workspace"
 AUTO_ADDITIONAL_WRITE_ROOTS = (
     PROJECT_ROOT / "frontend",
@@ -43,7 +62,7 @@ EA_FACTORY_SCOPED_WRITE_ROOT_PATTERN = re.compile(
     r"ea-factory/ea-build-[A-Za-z0-9_-]{1,96}/Source"
 )
 EA_FACTORY_SOURCE_RESULT_PROFILE = "ea_factory_source_generation"
-EA_FACTORY_SOURCE_WRITER_VERSION = "ea-factory-structured-source-v1"
+EA_FACTORY_SOURCE_WRITER_VERSION = "ea-factory-structured-source-v2"
 EA_FACTORY_SOURCE_MAX_CHARS = 192 * 1024
 EA_FACTORY_SOURCE_MAX_BYTES = 256 * 1024
 EA_FACTORY_SOURCE_FILE_NAME_PATTERN = re.compile(
@@ -143,6 +162,8 @@ WORK_CONTRACT_FIELD_MAX_CHARS = 12000
 # validation. This avoids both nested-JSON truncation and double escaping while
 # retaining the Backend's 16k compatibility ceiling.
 TRADING_SYSTEM_CONTRACT_FIELD_MAX_CHARS = 16000
+TRADING_SYSTEM_RESEARCH_CONTRACT_FIELD_MAX_CHARS = 48000
+TRADING_SYSTEM_RESEARCH_MAX_OUTPUT_CHARS = 64000
 MISSION_PROMPT_MAX_CHARS = 8000
 APPROVED_MISSION_PROMPT_MAX_CHARS = 12000
 TRADING_SYSTEM_CORRECTIVE_CANDIDATE_BLOCK_START = (
@@ -199,6 +220,14 @@ STRICT_CONTRACT_RESULT_PROFILES = frozenset({
     "trading_system_research",
 })
 TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS = (
+    "eaBlueprint",
+    "sourceDigest",
+    "eaReadiness",
+    "sourceLinks",
+    "checkedAt",
+    "limitations",
+)
+TRADING_SYSTEM_RESEARCH_LEGACY_CONTRACT_FIELDS = (
     "systemIdentity",
     "verifiedRules",
     "conflictingEvidence",
@@ -245,6 +274,8 @@ PROFILE_CONTRACT_REQUIREMENTS = {
             "at_least_two_source_urls",
             "checked_at",
             "limitations",
+            "ea_readiness",
+            "source_digest",
         ),
     },
 }
@@ -2482,6 +2513,7 @@ def status() -> dict:
                 "sourceDigest",
                 "sourceRecordDigest",
                 "strategySpecDigest",
+                "blueprintCoverageManifest",
                 "platform",
                 "strategyProfile",
                 "functionMap",
@@ -3701,8 +3733,14 @@ def _work_result_limits(output_limit: int, result_profile: str) -> dict:
             "evidenceLabelChars": 140,
             "evidenceUrlChars": 500,
             "evidenceNoteChars": 300,
-            "contractFieldItems": len(TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS),
-            "evidenceKindItems": 3,
+            # Keep enough room to read historical v1 fixtures/artifacts.  New
+            # work is always emitted as the direct v2 ``research`` object and
+            # projected to the compact six-field Backend envelope below.
+            "contractFieldItems": max(
+                len(TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS),
+                len(TRADING_SYSTEM_RESEARCH_LEGACY_CONTRACT_FIELDS),
+            ),
+            "evidenceKindItems": 5,
         }
     return {
         "summaryChars": max(500, min(3000, output_limit)),
@@ -3720,7 +3758,9 @@ def _work_result_limits(output_limit: int, result_profile: str) -> dict:
 
 def _work_contract_field_limit(output_limit: int, result_profile: str) -> int:
     profile_limit = (
-        TRADING_SYSTEM_CONTRACT_FIELD_MAX_CHARS
+        TRADING_SYSTEM_RESEARCH_CONTRACT_FIELD_MAX_CHARS
+        if result_profile == "trading_system_research"
+        else TRADING_SYSTEM_CONTRACT_FIELD_MAX_CHARS
         if result_profile == "trading_system_discovery"
         else WORK_CONTRACT_FIELD_MAX_CHARS
     )
@@ -3734,6 +3774,338 @@ def _closed_output_object(properties: dict) -> dict:
         "properties": properties,
         "required": list(properties),
     }
+
+
+def _load_ea_research_canonical_schema() -> dict:
+    """Load the authoritative schema used after model output is returned."""
+
+    try:
+        source = json.loads(EA_RESEARCH_SCHEMA_PATH.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("EA research blueprint schema is unavailable") from exc
+    if not isinstance(source, dict):
+        raise ValueError("EA research blueprint schema must be an object")
+    return source
+
+
+def _structured_output_scalar_type(value: object) -> str | None:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if value is None:
+        return "null"
+    return None
+
+
+def _structured_output_json_value_schema() -> dict:
+    """Represent canonical free-form JSON without an open object schema.
+
+    Structured Outputs requires every object to be closed.  The canonical
+    blueprint deliberately has a few extensible values (indicator parameters
+    and test vectors), so transport those fields as tagged JSON text and
+    restore them before canonical semantic validation.
+    """
+
+    return {
+        "type": "string",
+        "pattern": r"^JSON:[\s\S]+$",
+        "description": (
+            "Canonical JSON value encoded as compact JSON text with the exact "
+            "prefix JSON:. Example: JSON:{\"period\":14}"
+        ),
+    }
+
+
+def _structured_output_json_object_schema() -> dict:
+    """Transport an open canonical object without permitting scalar/null JSON."""
+
+    return {
+        "type": "string",
+        "pattern": r"^JSON:\{[\s\S]*\}$",
+        "description": (
+            "Canonical JSON object encoded as compact JSON text with the exact "
+            "prefix JSON:. Use JSON:{} for an intentionally empty object."
+        ),
+    }
+
+
+def _structured_output_schema_allows_null(schema: dict) -> bool:
+    schema_type = schema.get("type")
+    if schema_type == "null" or (
+        isinstance(schema_type, list) and "null" in schema_type
+    ):
+        return True
+    if schema.get("const", object()) is None:
+        return True
+    if isinstance(schema.get("enum"), list) and None in schema["enum"]:
+        return True
+    choices = schema.get("anyOf")
+    return bool(
+        isinstance(choices, list)
+        and any(
+            isinstance(option, dict)
+            and _structured_output_schema_allows_null(option)
+            for option in choices
+        )
+    )
+
+
+def _structured_output_nullable(schema: dict) -> dict:
+    if _structured_output_schema_allows_null(schema):
+        return schema
+    return {"anyOf": [schema, {"type": "null"}]}
+
+
+def _to_structured_output_schema(
+    schema: object,
+    *,
+    ref_prefix: str,
+) -> dict:
+    """Convert canonical JSON Schema to OpenAI's strict supported subset.
+
+    This is intentionally a transport-only conversion.  Constraints that
+    cannot be expressed by Structured Outputs (uniqueness, conditionals and
+    exact ``oneOf`` semantics) remain authoritative in the canonical Python
+    validator that runs after the response is returned.
+    """
+
+    if not isinstance(schema, dict) or not schema:
+        return _structured_output_json_value_schema()
+
+    schema_type = schema.get("type")
+    properties = schema.get("properties")
+    is_object = schema_type == "object" or isinstance(properties, dict)
+    if is_object and not isinstance(properties, dict):
+        # Open/free-form dictionaries cannot satisfy the mandatory
+        # additionalProperties:false rule without losing their values.
+        return _structured_output_json_object_schema()
+
+    if is_object:
+        canonical_required = {
+            str(item)
+            for item in schema.get("required", [])
+            if isinstance(item, str)
+        }
+        transport_properties: dict[str, dict] = {}
+        for key, child in properties.items():
+            child_schema = _to_structured_output_schema(
+                child,
+                ref_prefix=ref_prefix,
+            )
+            if key not in canonical_required:
+                child_schema = _structured_output_nullable(child_schema)
+            transport_properties[str(key)] = child_schema
+        result: dict[str, object] = {
+            "type": "object",
+            "properties": transport_properties,
+            "required": list(transport_properties),
+            "additionalProperties": False,
+        }
+        if isinstance(schema.get("description"), str):
+            result["description"] = schema["description"]
+        if isinstance(schema.get("$defs"), dict):
+            result["$defs"] = {
+                str(key): _to_structured_output_schema(
+                    child,
+                    ref_prefix=ref_prefix,
+                )
+                for key, child in schema["$defs"].items()
+            }
+        return result
+
+    result: dict[str, object] = {}
+    if isinstance(schema.get("description"), str):
+        result["description"] = schema["description"]
+
+    reference = schema.get("$ref")
+    if isinstance(reference, str):
+        if reference.startswith("#/$defs/"):
+            reference = ref_prefix + reference[len("#/$defs/") :]
+        result["$ref"] = reference
+
+    if "oneOf" in schema and isinstance(schema.get("oneOf"), list):
+        result["anyOf"] = [
+            _to_structured_output_schema(option, ref_prefix=ref_prefix)
+            for option in schema["oneOf"]
+        ]
+    elif isinstance(schema.get("anyOf"), list):
+        result["anyOf"] = [
+            _to_structured_output_schema(option, ref_prefix=ref_prefix)
+            for option in schema["anyOf"]
+        ]
+
+    if isinstance(schema_type, (str, list)):
+        result["type"] = schema_type
+    if "const" in schema:
+        constant = schema["const"]
+        result["enum"] = [constant]
+        inferred_type = _structured_output_scalar_type(constant)
+        if inferred_type is not None:
+            result.setdefault("type", inferred_type)
+    elif isinstance(schema.get("enum"), list):
+        enum_values = list(schema["enum"])
+        result["enum"] = enum_values
+        inferred_types = {_structured_output_scalar_type(item) for item in enum_values}
+        if len(inferred_types) == 1 and None not in inferred_types:
+            result.setdefault("type", next(iter(inferred_types)))
+
+    if schema_type == "array":
+        result["items"] = _to_structured_output_schema(
+            schema.get("items"),
+            ref_prefix=ref_prefix,
+        )
+
+    # Keep constraints currently supported by ordinary OpenAI models.  Format
+    # is omitted because the canonical contract includes ``uri``, which is not
+    # in the Structured Outputs format allowlist.  The semantic validator still
+    # enforces timestamps and public http(s) URLs after transport restoration.
+    for key in (
+        "minLength",
+        "maxLength",
+        "pattern",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "minItems",
+        "maxItems",
+    ):
+        if key in schema:
+            result[key] = schema[key]
+    return result
+
+
+def _ea_research_direct_output_schema() -> dict:
+    """Embed a strict Structured Outputs transport schema below ``research``."""
+
+    source = _load_ea_research_canonical_schema()
+    return _to_structured_output_schema(
+        source,
+        # OpenAI permits references only to definitions at the output-schema
+        # root.  ``build_work_output_schema`` hoists this returned $defs map.
+        ref_prefix="#/$defs/",
+    )
+
+
+def _resolve_ea_research_schema_ref(schema: dict, root_schema: dict) -> dict:
+    reference = schema.get("$ref")
+    if not isinstance(reference, str) or not reference.startswith("#/$defs/"):
+        return schema
+    current: object = root_schema
+    for part in reference[2:].split("/"):
+        if not isinstance(current, dict) or part not in current:
+            return schema
+        current = current[part]
+    return current if isinstance(current, dict) else schema
+
+
+def _ea_research_schema_matches_value(
+    schema: dict,
+    value: object,
+    root_schema: dict,
+) -> bool:
+    resolved = _resolve_ea_research_schema_ref(schema, root_schema)
+    schema_type = resolved.get("type")
+    if schema_type == "object" or isinstance(resolved.get("properties"), dict):
+        return isinstance(value, dict)
+    if schema_type == "array":
+        return isinstance(value, list)
+    if schema_type == "string":
+        return isinstance(value, str)
+    if schema_type == "boolean":
+        return isinstance(value, bool)
+    if schema_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if schema_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if schema_type == "null":
+        return value is None
+    return True
+
+
+def _decode_ea_research_json_transport(value: object) -> object:
+    if not isinstance(value, str) or not value.startswith("JSON:"):
+        return value
+    try:
+        return json.loads(value[len("JSON:") :])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        # Preserve the invalid tagged value so canonical validation fails
+        # closed instead of silently replacing model output.
+        return value
+
+
+def _restore_ea_research_transport_value(
+    value: object,
+    schema: dict,
+    root_schema: dict,
+) -> object:
+    schema = _resolve_ea_research_schema_ref(schema, root_schema)
+    if not schema:
+        return _decode_ea_research_json_transport(value)
+
+    choices = schema.get("oneOf") or schema.get("anyOf")
+    if isinstance(choices, list):
+        for option in choices:
+            if isinstance(option, dict) and _ea_research_schema_matches_value(
+                option,
+                value,
+                root_schema,
+            ):
+                return _restore_ea_research_transport_value(
+                    value,
+                    option,
+                    root_schema,
+                )
+
+    properties = schema.get("properties")
+    is_object = schema.get("type") == "object" or isinstance(properties, dict)
+    if is_object and not isinstance(properties, dict):
+        return _decode_ea_research_json_transport(value)
+    if is_object and isinstance(value, dict):
+        required = {
+            str(item)
+            for item in schema.get("required", [])
+            if isinstance(item, str)
+        }
+        restored: dict[str, object] = {}
+        for key, child_value in value.items():
+            child_schema = properties.get(key)
+            if child_schema is None:
+                restored[str(key)] = child_value
+                continue
+            if child_value is None and key not in required:
+                # Structured Outputs emits every optional canonical field as
+                # nullable.  Omission is the canonical representation.
+                continue
+            restored[str(key)] = _restore_ea_research_transport_value(
+                child_value,
+                child_schema if isinstance(child_schema, dict) else {},
+                root_schema,
+            )
+        return restored
+    if schema.get("type") == "array" and isinstance(value, list):
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            return [
+                _restore_ea_research_transport_value(item, item_schema, root_schema)
+                for item in value
+            ]
+    return value
+
+
+def _restore_ea_research_transport(blueprint: object) -> object:
+    canonical_schema = _load_ea_research_canonical_schema()
+    return _restore_ea_research_transport_value(
+        blueprint,
+        canonical_schema,
+        canonical_schema,
+    )
 
 
 def _trading_system_direct_output_schema() -> dict:
@@ -4168,17 +4540,25 @@ def build_work_output_schema(
             for item in schema["required"]
         ]
     elif result_profile == "trading_system_research":
-        expected_count = len(TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS)
         schema["properties"]["status"]["enum"] = ["completed"]
-        schema["properties"]["contractFields"]["minItems"] = expected_count
-        schema["properties"]["contractFields"]["maxItems"] = expected_count
+        schema["properties"].pop("contractFields", None)
+        research_schema = _ea_research_direct_output_schema()
+        research_definitions = research_schema.pop("$defs", {})
+        if not isinstance(research_definitions, dict) or not research_definitions:
+            raise ValueError("EA research transport definitions are unavailable")
+        schema["$defs"] = research_definitions
+        schema["properties"]["research"] = research_schema
+        schema["required"] = [
+            "research" if item == "contractFields" else item
+            for item in schema["required"]
+        ]
         schema["properties"]["evidence"]["minItems"] = 2
         schema["properties"]["evidence"]["items"]["properties"]["url"].update({
             "minLength": 1,
             "pattern": r"^https?://",
         })
-        schema["properties"]["evidenceKinds"]["minItems"] = 3
-        schema["properties"]["evidenceKinds"]["maxItems"] = 3
+        schema["properties"]["evidenceKinds"]["minItems"] = 5
+        schema["properties"]["evidenceKinds"]["maxItems"] = 5
     return schema
 
 
@@ -5346,6 +5726,35 @@ def runtime_header_value(result: dict, key: str, allowed: set[str], fallback: st
     return value if value in allowed else fallback
 
 
+def _ea_research_contract_fields(blueprint: object) -> list[dict[str, str]]:
+    """Validate direct research and project only the minimal Backend envelope."""
+
+    normalized = normalize_blueprint(_restore_ea_research_transport(blueprint))
+    projection = project_blueprint_to_legacy_report_metrics(normalized)
+    values: dict[str, object] = {
+        "eaBlueprint": normalized,
+        # ``sourceDigest`` is the reviewed dashboard evidence field name.  The
+        # report projection also exposes the domain-friendly blueprintDigest.
+        "sourceDigest": compute_blueprint_digest(normalized),
+        "eaReadiness": (normalized.get("completeness") or {}).get("status"),
+        "sourceLinks": projection.get("sourceLinks"),
+        "checkedAt": normalized.get("checkedAt"),
+        "limitations": projection.get("limitations"),
+    }
+    fields = []
+    for field in TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS:
+        value = values.get(field)
+        encoded = (
+            value.strip()
+            if isinstance(value, str)
+            else json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        )
+        if not encoded:
+            raise ValueError(f"EA research projection {field} is empty")
+        fields.append({"field": field, "value": encoded})
+    return fields
+
+
 def parse_work_result(
     raw: str,
     output_limit: int,
@@ -5361,7 +5770,15 @@ def parse_work_result(
     # This check intentionally happens before any per-field normalization;
     # otherwise an over-budget model response could be made to look valid by
     # silently dropping or truncating its surrounding prose.
-    result_envelope_limit = max(1000, min(20000, output_limit))
+    result_envelope_limit = max(
+        1000,
+        min(
+            TRADING_SYSTEM_RESEARCH_MAX_OUTPUT_CHARS
+            if result_profile == "trading_system_research"
+            else 20000,
+            output_limit,
+        ),
+    )
     result_envelope_chars = len(
         json.dumps(
             payload,
@@ -5443,6 +5860,7 @@ def parse_work_result(
     contract_fields = []
     seen_contract_fields: set[str] = set()
     contract_value_limit = _work_contract_field_limit(output_limit, result_profile)
+    research_legacy_contract = False
     if result_profile == "trading_system_discovery":
         if "systems" not in payload or "contractFields" in payload:
             raise ValueError("trading-system result requires direct systems only")
@@ -5462,6 +5880,39 @@ def parse_work_result(
                 separators=(",", ":"),
             ),
         }]
+    elif result_profile == "trading_system_research":
+        if "research" in payload and "contractFields" not in payload:
+            try:
+                raw_contract_fields = _ea_research_contract_fields(payload.get("research"))
+            except BlueprintValidationError as exc:
+                issue_codes = ", ".join(
+                    str(item.get("code") or "BLUEPRINT_INVALID")
+                    for item in exc.issues[:8]
+                    if isinstance(item, dict)
+                )
+                raise ValueError(
+                    "trading-system research blueprint is invalid"
+                    + (f": {issue_codes}" if issue_codes else "")
+                ) from exc
+        elif "contractFields" in payload and "research" not in payload:
+            # Read-only compatibility for v1 saved results and test fixtures.
+            # The v2 output schema never permits this branch, and the current
+            # Backend contract will not promote it to EA-ready.
+            raw_contract_fields = payload.get("contractFields", [])
+            legacy_names = {
+                str(item.get("field") or "").strip()
+                for item in raw_contract_fields
+                if isinstance(item, dict)
+            } if isinstance(raw_contract_fields, list) else set()
+            if legacy_names != set(TRADING_SYSTEM_RESEARCH_LEGACY_CONTRACT_FIELDS):
+                raise ValueError(
+                    "trading-system research result requires direct research only"
+                )
+            research_legacy_contract = True
+        else:
+            raise ValueError(
+                "trading-system research result requires direct research only"
+            )
     else:
         # Keep parsing legacy/string fixtures and old artifacts, while every
         # newly generated trading-system schema uses the direct array above.
@@ -5469,14 +5920,19 @@ def parse_work_result(
     if not isinstance(raw_contract_fields, list):
         raise ValueError("work contractFields must be a list")
     if result_profile == "trading_system_research" and status_name == "completed":
-        required_fields = set(TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS)
+        expected_research_fields = (
+            TRADING_SYSTEM_RESEARCH_LEGACY_CONTRACT_FIELDS
+            if research_legacy_contract
+            else TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS
+        )
+        required_fields = set(expected_research_fields)
         raw_field_names = [
             str(item.get("field") or "").strip()
             for item in raw_contract_fields
             if isinstance(item, dict)
         ]
         if (
-            len(raw_contract_fields) != len(TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS)
+            len(raw_contract_fields) != len(expected_research_fields)
             or len(raw_field_names) != len(set(raw_field_names))
             or set(raw_field_names) != required_fields
             or any(
@@ -5518,7 +5974,12 @@ def parse_work_result(
     )
     if raw_contract_value_chars > max(
         1000,
-        min(20000, output_limit),
+        min(
+            TRADING_SYSTEM_RESEARCH_MAX_OUTPUT_CHARS
+            if result_profile == "trading_system_research"
+            else 20000,
+            output_limit,
+        ),
     ):
         raise ValueError("work contractFields exceed output limit")
     for item in raw_contract_fields[:limits["contractFieldItems"]]:
@@ -5569,10 +6030,17 @@ def parse_work_result(
                 "completed trading-system result requires exact evidence kinds"
             )
     if result_profile == "trading_system_research" and status_name == "completed":
-        required_kinds = list(
-            PROFILE_CONTRACT_REQUIREMENTS["trading_system_research"]["evidenceKinds"]
+        required_kinds = (
+            ["at_least_two_source_urls", "checked_at", "limitations"]
+            if research_legacy_contract
+            else list(
+                PROFILE_CONTRACT_REQUIREMENTS["trading_system_research"]["evidenceKinds"]
+            )
         )
-        if len(raw_evidence_kinds) != 3 or set(evidence_kinds) != set(required_kinds):
+        if (
+            len(raw_evidence_kinds) != len(required_kinds)
+            or set(evidence_kinds) != set(required_kinds)
+        ):
             raise ValueError(
                 "completed trading-system research requires exact evidence kinds"
             )
@@ -5835,12 +6303,40 @@ def _ea_factory_source_generation_binding(
         or strategy_spec.get("immutable") is not True
     ):
         raise ValueError("EA Factory strategy spec lineage does not match the prompt")
+    spec_schema_version = str(strategy_spec.get("schemaVersion") or "")
+    coverage_requirements = None
+    if spec_schema_version == "ea-factory-strategy-spec-v2":
+        try:
+            blueprint = normalize_blueprint(
+                strategy_spec.get("eaImplementationBlueprint"),
+                require_ready=True,
+            )
+        except BlueprintValidationError as error:
+            raise ValueError("EA Factory v2 strategy spec Blueprint is invalid") from error
+        blueprint_digest = compute_blueprint_digest(blueprint)
+        coverage_requirements = strategy_spec.get("blueprintCoverageRequirements")
+        if (
+            strategy_spec.get("eaBlueprintDigest") != blueprint_digest
+            or not ea_factory_coverage_requirements_valid(
+                coverage_requirements,
+                blueprint,
+                blueprint_digest,
+            )
+        ):
+            raise ValueError("EA Factory v2 coverage requirements are invalid")
+    elif spec_schema_version == "ea-factory-strategy-spec-v1":
+        if "blueprintCoverageRequirements" in strategy_spec:
+            raise ValueError("EA Factory legacy strategy spec has unexpected coverage data")
+    else:
+        raise ValueError("EA Factory strategy spec schema is unsupported")
     return {
         "buildId": build_id,
         "platform": platform,
         "extension": EA_FACTORY_PLATFORM_EXTENSIONS[platform],
         "sourceRecordDigest": source_record_digest,
         "strategySpecDigest": strategy_spec_digest,
+        "strategySpecSchemaVersion": spec_schema_version,
+        "coverageRequirements": coverage_requirements,
     }
 
 
@@ -5982,13 +6478,31 @@ def materialize_ea_factory_source_result(
         payload.get("content"),
         binding["extension"],
     )
+    source_digest = hashlib.sha256(source_bytes).hexdigest()
+    if binding["strategySpecSchemaVersion"] == "ea-factory-strategy-spec-v2":
+        coverage_manifest = ea_factory_coverage_manifest(
+            binding["coverageRequirements"],
+            content,
+            strategy_spec_digest=binding["strategySpecDigest"],
+            source_digest=source_digest,
+            target_platform=binding["platform"],
+        )
+        if coverage_manifest.get("complete") is not True:
+            raise ValueError(
+                "EA Factory source does not cover every immutable Blueprint v2 ID "
+                "with reachable trading evidence"
+            )
+    else:
+        coverage_manifest = ea_factory_legacy_coverage_manifest(
+            strategy_spec_digest=binding["strategySpecDigest"],
+            source_digest=source_digest,
+        )
     source_path = _atomic_write_ea_factory_source(
         source_root,
         relative_root,
         file_name,
         source_bytes,
     )
-    source_digest = hashlib.sha256(source_bytes).hexdigest()
     source_reference = f"{source_root_label}/{file_name}"
     declared_functions = list(dict.fromkeys(
         match.group(1)
@@ -6014,6 +6528,10 @@ def materialize_ea_factory_source_result(
         {
             "field": "strategySpecDigest",
             "value": binding["strategySpecDigest"],
+        },
+        {
+            "field": "blueprintCoverageManifest",
+            "value": compact(coverage_manifest),
         },
         {"field": "platform", "value": binding["platform"]},
         {
@@ -6305,6 +6823,8 @@ def build_prompt(
         profile_result_rules = """
 Structured EA Factory source rule:
 - Read and implement every applicable A-M core field from strategy-spec-v01.json. N-W fields are provenance/status only.
+- For Strategy Spec v2, implement every Blueprint rule/input/indicator/state/test case. Declare and use each exact requiredMarkers identifier inside reachable matching logic: rules in comparison/decision functions, indicators with indicator access, states in transition/position branches, inputs where consumed, and tests in a self-check called by a lifecycle root. Comments, strings, global-only declarations, unused helper functions, and dummy marker sinks are rejected.
+- Include reachable platform trading calls for entry and every Blueprint-required exit, stop-loss, and take-profit path. Marker completeness without executable order behavior is rejected.
 - For MQL4/MQL5 define SIGNAL_NONE=-1; never use 0 as no-signal because 0 is BUY.
 - Return SOURCE-ONLY / UNCOMPILED code. Never claim Compile, Backtest, Optimize, terminal, broker, or live-trading evidence.
 - Before returning, self-check that there is exactly one safe fileName/content pair, the platform extension matches the Backend marker, the content has a platform entry point, and there is no Markdown wrapper."""
@@ -6377,14 +6897,20 @@ Trusted Runner corrective-mode rule:
 Runner-validated exact URL list:
 {exact_url_lines}"""
     elif result_mode == "work_report" and result_profile == "trading_system_research":
-        required_fields = ", ".join(TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS)
         profile_result_rules = f"""
 Structured deep trading-system research result rule:
-- This profile requires status completed and exactly these contractFields, each present once with a non-empty truthful string value: {required_fields}.
-- Use compact JSON strings for lists/objects and plain strings for prose. checkedAt must be an ISO 8601 timestamp with UTC offset. sourceLinks must be a compact JSON array containing the public URLs actually opened and cited.
+- This profile requires status completed and one direct `research` object that exactly satisfies the supplied EA Implementation Blueprint v2 JSON schema. Never return contractFields for this profile.
+- Where the supplied output schema describes a value as tagged JSON text, encode the canonical value as compact JSON after the exact `JSON:` prefix. The trusted Runner restores it before semantic validation.
+- Use schemaVersion `ea-ready-strategy-research/2.0.0`. checkedAt must be an ISO 8601 timestamp with UTC offset. Every source reference must resolve to an evidenceMap record backed by a public URL actually opened and cited.
 - Return at least two independent, unique public evidence rows. Open every final evidence URL individually with Native Web Search before drafting; a search-results listing alone is not an opened source. sourceLinks must contain exactly the same URL set as evidence.
-- evidenceKinds must contain exactly these three values and no aliases: at_least_two_source_urls, checked_at, limitations.
-- Separate verified facts, conflicts/inferences, and unknowns. Never fabricate a missing rule, performance number, backtest result, or profit claim.
+- evidenceKinds must contain exactly these five values and no aliases: at_least_two_source_urls, checked_at, limitations, ea_readiness, source_digest.
+- Encode crossover rules with closed bars explicitly: bullish fast[2] <= slow[2] AND fast[1] > slow[1]; bearish fast[2] >= slow[2] AND fast[1] < slow[1]. Bar 0 is forming and must never be used for a deterministic close-bar signal.
+- In a crossover's top-level left/right operands omit `shift`; previousShift=2/currentShift=1 and the two expanded comparisons carry shifts 2 and 1. For an unknown condition use exactly `{{"op":"unknown"}}`, never a typed comparison with a null constant.
+- Fully specify symbols/timeframes/sessions, typed inputs, indicator method/price/timeframe/shift/buffer, Buy/Sell setup/entry/exit, and every order-management slot: breakEven, trailingStop, partialClose, scaleIn, scaleOut, modifyStopLoss, modifyTakeProfit, and pendingOrders. Disabled managed functions must still use enabled=false, parameters=`JSON:{{}}`, and rules=[]; never encode their required object as `JSON:null`.
+- Every input usedByRuleIds value must name an actual ruleId in this blueprint; use an empty list when it is not yet linked. An honestly unknown input may use tagged JSON null only with sourceStatus unknown and must block handoff; verified/derived inputs require a concrete default matching their declared type. execution.evaluationOrder may contain only safety, recovery, manage, exit, entry, without duplicates and with exit before entry.
+- Use tpSl.stopLoss/takeProfit for defaults and tpSl.sideOverrides.buy/sell for side differences. Fixed protection uses exactly one value/input; ATR adds an ATR indicator plus multiplier; RR take-profit binds to initial stop distance; swing/indicator/basket protection declares its typed source. Any final-price formula must use the schema's numeric priceFormula AST, never a boolean rule expression. Include placement timing, broker stop/freeze policy, and a never-worsen guard. For recovery/averaging/grid/martingale/hedging include trigger, spacing, direction, level/lot caps, basket TP/SL, equity hard stop, reset/abort and hedge lifecycle where applicable.
+- Specify sizing/risk limits, execution filters, state transitions, precedence, deterministic pseudocode, evidence mapping, positive/negative/boundary cases for setup/entry/exit (boundary is mandatory for crosses), and lifecycle cases for every enabled management/recovery rule.
+- Separate verified facts, assumptions, conflicts, and unknowns. Never fabricate a missing rule, parameter, performance number, backtest result, or profit claim. If a material rule is unknown, keep the research truthful and mark completeness as needs_clarification with EA handoff disabled.
 - Keep the complete result inside the stated output limit. Do not omit a required field or emit a partial/progress object."""
     snapshot_packet = (
         "\nBackend-supplied Council snapshot JSON:\n"
@@ -6721,7 +7247,15 @@ def run_codex(
         15,
         timeout - corrective_verifier_reserve_seconds,
     )
-    output_limit = max(1000, min(20000, int(output_limit)))
+    output_limit = max(
+        1000,
+        min(
+            TRADING_SYSTEM_RESEARCH_MAX_OUTPUT_CHARS
+            if result_profile == "trading_system_research"
+            else 20000,
+            int(output_limit),
+        ),
+    )
     model_tier, tier = resolve_model_tier(model_tier)
     approved_write_roots: tuple[Path, ...] = ()
     if approved_workspace_execution:

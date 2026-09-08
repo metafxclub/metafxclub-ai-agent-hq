@@ -1,11 +1,12 @@
-# Runtime dependencies verified in the instructor build on 2026-07-22.
-# Keep every version pinned so each student receives the same Codex runner.
+# Runtime dependencies verified on Windows against the current Codex model
+# catalog on 2026-09-08. Keep the Python SDK and bundled CLI on the same exact
+# release so app-server rate-limit reads and guarded exec share one protocol.
 annotated-types==0.7.0 \
     --hash=sha256:1f02e8b43a8fbbc3f3e0d4f0f4bfc8131bcb4eebe8849b8e5c773f3a1c582a53
-openai-codex==0.1.0b3 \
-    --hash=sha256:8d1f9d346667aeecb435c6a45d0edb3f016187276ec452cf8094d813896276c4
-openai-codex-cli-bin==0.137.0a4 \
-    --hash=sha256:9e13bf68e18e36bd3a0efd51213281c83e9f6ec22bdb7a45bd2e0211822733a9
+openai-codex==0.147.0 \
+    --hash=sha256:ab2e0b3a41dba5a62be8561397cf3e7913afb53b5372ad881002a6f0b77e6a0a
+openai-codex-cli-bin==0.147.0 \
+    --hash=sha256:1a403ff803ae27e078189a0fd24687f32d43c46f152e50cdbe3eddc9e302f697
 pydantic==2.13.4 \
     --hash=sha256:45a282cde31d808236fd7ea9d919b128653c8b38b393d1c4ab335c62924d9aba
 pydantic-core==2.46.4 \

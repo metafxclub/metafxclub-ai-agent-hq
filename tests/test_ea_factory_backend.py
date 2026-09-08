@@ -15,6 +15,7 @@ from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "bridge_server.py"
+BLUEPRINT_FIXTURE_PATH = PROJECT_ROOT / "tests" / "test_ea_research_blueprint_v2.py"
 
 
 def load_bridge():
@@ -24,6 +25,18 @@ def load_bridge():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def ready_ea_research_blueprint() -> dict:
+    spec = importlib.util.spec_from_file_location(
+        "ea_factory_ready_blueprint_fixture",
+        BLUEPRINT_FIXTURE_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to import {BLUEPRINT_FIXTURE_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.ready_blueprint()
 
 
 class DummyCsvResponse:
@@ -155,6 +168,53 @@ class EaFactoryBackendTests(unittest.TestCase):
         self.assertIn("stop_loss", incomplete["missingCoreFields"])
         self.assertIn("source_urls", incomplete["missingCoreFields"])
 
+    def test_source_read_model_fails_closed_unless_blueprint_digest_revalidates(self) -> None:
+        values = self.valid_values()
+        values["eaImplementationBlueprint"] = ready_ea_research_blueprint()
+        record = self.bridge._ea_factory_normalize_record(
+            values,
+            source_kind="verified_deep_research",
+            source_key="research-report-canonical-v2",
+            source_report_id="research-report-canonical-v2",
+        )
+        self.assertIsNotNone(record)
+        self.assertTrue(record["buildReady"])
+
+        read_model = self.bridge._ea_factory_source_record_read_model(record)
+        research = read_model["eaResearch"]
+        self.assertTrue(read_model["buildReady"])
+        self.assertEqual(read_model["sourceReportId"], "research-report-canonical-v2")
+        self.assertTrue(research["validated"])
+        self.assertTrue(research["digestMatched"])
+        self.assertTrue(research["ready"])
+        self.assertEqual(research["validationStatus"], "canonical_validated")
+        self.assertEqual(research["blueprintDigest"], record["eaBlueprintDigest"])
+        self.assertEqual(research["blueprint"], record["eaImplementationBlueprint"])
+
+        tampered_record = dict(record)
+        tampered_record["eaBlueprintDigest"] = "0" * 64
+        tampered = self.bridge._ea_factory_source_record_read_model(tampered_record)
+        self.assertFalse(tampered["buildReady"])
+        self.assertFalse(tampered["eaResearch"]["validated"])
+        self.assertFalse(tampered["eaResearch"]["digestMatched"])
+        self.assertFalse(tampered["eaResearch"]["ready"])
+        self.assertEqual(
+            tampered["eaResearch"]["validationStatus"],
+            "blueprint_digest_mismatch",
+        )
+        self.assertIsNone(tampered["eaResearch"]["blueprint"])
+        self.assertIn("blueprint_digest_mismatch", tampered["readinessIssues"])
+
+        legacy = dict(record)
+        legacy["eaImplementationBlueprint"] = None
+        legacy["eaBlueprintDigest"] = None
+        legacy_model = self.bridge._ea_factory_source_record_read_model(legacy)
+        self.assertFalse(legacy_model["buildReady"])
+        self.assertEqual(
+            legacy_model["eaResearch"]["validationStatus"],
+            "legacy_ea_blueprint_missing",
+        )
+
     def test_deep_research_nested_facts_project_to_clear_a_w_fields(self) -> None:
         report_id = "auto-report-deep-research-nested"
         mission_id = "mission-deep-research-nested"
@@ -216,7 +276,13 @@ class EaFactoryBackendTests(unittest.TestCase):
         self.assertEqual(record["core"]["stop_loss"], "7-8% below entry")
         self.assertEqual(record["core"]["take_profit"], "partial at 20-25%")
         self.assertEqual(record["core"]["lot_risk"], "fixed fractional")
-        self.assertTrue(record["buildReady"])
+        self.assertFalse(record["buildReady"])
+        self.assertIsNone(record["eaImplementationBlueprint"])
+        self.assertIsNone(record["eaBlueprintDigest"])
+        self.assertIn(
+            "legacy_or_invalid_ea_blueprint",
+            record["readinessIssues"],
+        )
 
     def test_source_catalog_prefers_current_sheet_record_over_legacy_report_duplicate(self) -> None:
         values = self.valid_values()

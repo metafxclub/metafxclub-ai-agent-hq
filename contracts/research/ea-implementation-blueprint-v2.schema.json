@@ -1,0 +1,1890 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://metafxclub.local/contracts/ea-implementation-blueprint-v2.schema.json",
+  "title": "Metafxclub EA-ready Strategy Research Blueprint v2",
+  "description": "Canonical, closed-bar strategy research contract. Verification of sources and readiness for EA handoff are independent states. Cross-series operand equality is additionally verified by the Python contract validator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "strategyId",
+    "researchRevision",
+    "checkedAt",
+    "barSemantics",
+    "scope",
+    "inputs",
+    "indicators",
+    "setup",
+    "entry",
+    "exit",
+    "orderManagement",
+    "tpSl",
+    "riskAndSizing",
+    "recovery",
+    "execution",
+    "stateMachine",
+    "conflicts",
+    "precedence",
+    "pseudocode",
+    "testCases",
+    "evidenceMap",
+    "assumptions",
+    "unknowns",
+    "completeness"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "ea-ready-strategy-research/2.0.0"
+    },
+    "strategyId": {
+      "$ref": "#/$defs/id"
+    },
+    "researchRevision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "checkedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "barSemantics": {
+      "$ref": "#/$defs/barSemantics"
+    },
+    "scope": {
+      "$ref": "#/$defs/scope"
+    },
+    "inputs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/input"
+      }
+    },
+    "indicators": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/indicator"
+      }
+    },
+    "setup": {
+      "$ref": "#/$defs/ruleCollection"
+    },
+    "entry": {
+      "$ref": "#/$defs/sidedRules"
+    },
+    "exit": {
+      "$ref": "#/$defs/sidedRules"
+    },
+    "orderManagement": {
+      "$ref": "#/$defs/orderManagement"
+    },
+    "tpSl": {
+      "$ref": "#/$defs/tpSl"
+    },
+    "riskAndSizing": {
+      "$ref": "#/$defs/riskAndSizing"
+    },
+    "recovery": {
+      "$ref": "#/$defs/recovery"
+    },
+    "execution": {
+      "$ref": "#/$defs/execution"
+    },
+    "stateMachine": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/state"
+      }
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/conflict"
+      }
+    },
+    "precedence": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "pseudocode": {
+      "$ref": "#/$defs/pseudocode"
+    },
+    "testCases": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/testCase"
+      }
+    },
+    "evidenceMap": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/assumption"
+      }
+    },
+    "unknowns": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/unknown"
+      }
+    },
+    "completeness": {
+      "$ref": "#/$defs/completeness"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "completeness": {
+            "properties": {
+              "eaHandoffAllowed": {
+                "const": true
+              }
+            },
+            "required": ["eaHandoffAllowed"]
+          }
+        },
+        "required": ["completeness"]
+      },
+      "then": {
+        "properties": {
+          "evidenceMap": {
+            "minItems": 2
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "ruleId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Z][A-Z0-9_:-]{0,127}$"
+    },
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sourceStatus": {
+      "enum": [
+        "verified_fact",
+        "derived_expansion",
+        "operator_assumption",
+        "unknown"
+      ]
+    },
+    "sourceRefs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/id"
+      }
+    },
+    "barSemantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bar0",
+        "signalBar",
+        "previousBar",
+        "evaluateOn",
+        "lookaheadForbidden",
+        "equalityPolicy"
+      ],
+      "properties": {
+        "bar0": {
+          "const": "forming"
+        },
+        "signalBar": {
+          "const": 1
+        },
+        "previousBar": {
+          "const": 2
+        },
+        "evaluateOn": {
+          "const": "new_closed_bar"
+        },
+        "lookaheadForbidden": {
+          "const": true
+        },
+        "equalityPolicy": {
+          "const": "touch_then_break"
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "systemName",
+        "strategyFamily",
+        "platforms",
+        "market",
+        "symbols",
+        "signalTimeframe",
+        "executionTimeframe",
+        "timezone",
+        "sessions",
+        "enabledSides",
+        "suitableFor",
+        "onePositionPerSymbol"
+      ],
+      "properties": {
+        "systemName": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "strategyFamily": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "platforms": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["MT4", "MT5"]
+          }
+        },
+        "market": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "symbols": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "signalTimeframe": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "executionTimeframe": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "timezone": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "sessions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "enabledSides": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["buy", "sell"]
+          }
+        },
+        "suitableFor": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "onePositionPerSymbol": {
+          "type": "boolean"
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "inputId",
+        "label",
+        "type",
+        "unit",
+        "default",
+        "optimizable",
+        "sourceStatus",
+        "sourceRefs",
+        "usedByRuleIds"
+      ],
+      "properties": {
+        "inputId": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "type": {
+          "enum": ["int", "double", "bool", "enum", "string", "timeframe"]
+        },
+        "unit": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "default": {},
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "step": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "allowedValues": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "optimizable": {
+          "type": "boolean"
+        },
+        "sourceStatus": {
+          "$ref": "#/$defs/sourceStatus"
+        },
+        "sourceRefs": {
+          "$ref": "#/$defs/sourceRefs"
+        },
+        "usedByRuleIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ruleId"
+          }
+        }
+      }
+    },
+    "indicator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "indicatorId",
+        "kind",
+        "timeframe",
+        "parameters",
+        "appliedPrice",
+        "outputLine",
+        "sourceStatus",
+        "sourceRefs"
+      ],
+      "properties": {
+        "indicatorId": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "timeframe": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {},
+              {
+                "type": "object",
+                "required": ["inputRef"],
+                "additionalProperties": false,
+                "properties": {
+                  "inputRef": {
+                    "$ref": "#/$defs/id"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "appliedPrice": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "outputLine": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "sourceStatus": {
+          "$ref": "#/$defs/sourceStatus"
+        },
+        "sourceRefs": {
+          "$ref": "#/$defs/sourceRefs"
+        }
+      }
+    },
+    "operand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "indicator",
+            "input",
+            "constant",
+            "price",
+            "account",
+            "position",
+            "basket",
+            "session",
+            "spread",
+            "time",
+            "symbol_property"
+          ]
+        },
+        "ref": {
+          "$ref": "#/$defs/id"
+        },
+        "indicatorId": {
+          "$ref": "#/$defs/id"
+        },
+        "inputId": {
+          "$ref": "#/$defs/id"
+        },
+        "field": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "value": {},
+        "shift": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "unit": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "timeframe": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "left", "right"],
+      "properties": {
+        "op": {
+          "enum": ["<", "<=", ">", ">=", "==", "!="]
+        },
+        "left": {
+          "$ref": "#/$defs/operand"
+        },
+        "right": {
+          "$ref": "#/$defs/operand"
+        }
+      }
+    },
+    "expression": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op"],
+      "properties": {
+        "op": {
+          "enum": [
+            "and",
+            "or",
+            "not",
+            "<",
+            "<=",
+            ">",
+            ">=",
+            "==",
+            "!=",
+            "cross_above",
+            "cross_below",
+            "break_above",
+            "break_below",
+            "close_above",
+            "close_below",
+            "touch",
+            "within",
+            "rising",
+            "falling",
+            "once_per_bar",
+            "unknown"
+          ]
+        },
+        "left": {
+          "$ref": "#/$defs/operand"
+        },
+        "right": {
+          "$ref": "#/$defs/operand"
+        },
+        "value": {
+          "$ref": "#/$defs/operand"
+        },
+        "lower": {
+          "$ref": "#/$defs/operand"
+        },
+        "upper": {
+          "$ref": "#/$defs/operand"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/expression"
+          }
+        },
+        "item": {
+          "$ref": "#/$defs/expression"
+        },
+        "bars": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "barShift": {
+          "const": 1
+        },
+        "previousShift": {
+          "const": 2
+        },
+        "currentShift": {
+          "const": 1
+        },
+        "expanded": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["all"],
+          "properties": {
+            "all": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": {
+                "$ref": "#/$defs/comparison"
+              }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "const": "cross_above"
+              }
+            },
+            "required": ["op"]
+          },
+          "then": {
+            "required": ["left", "right", "previousShift", "currentShift", "expanded"],
+            "properties": {
+              "expanded": {
+                "properties": {
+                  "all": {
+                    "prefixItems": [
+                      {
+                        "properties": {
+                          "op": {
+                            "const": "<="
+                          }
+                        }
+                      },
+                      {
+                        "properties": {
+                          "op": {
+                            "const": ">"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "const": "cross_below"
+              }
+            },
+            "required": ["op"]
+          },
+          "then": {
+            "required": ["left", "right", "previousShift", "currentShift", "expanded"],
+            "properties": {
+              "expanded": {
+                "properties": {
+                  "all": {
+                    "prefixItems": [
+                      {
+                        "properties": {
+                          "op": {
+                            "const": ">="
+                          }
+                        }
+                      },
+                      {
+                        "properties": {
+                          "op": {
+                            "const": "<"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ruleId",
+        "phase",
+        "enabled",
+        "sourceStatus",
+        "sourceRefs",
+        "expression"
+      ],
+      "properties": {
+        "ruleId": {
+          "$ref": "#/$defs/ruleId"
+        },
+        "phase": {
+          "enum": ["setup", "entry", "exit", "modify", "risk", "recovery", "safety"]
+        },
+        "side": {
+          "enum": ["buy", "sell", "both", "none"]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "sourceStatus": {
+          "$ref": "#/$defs/sourceStatus"
+        },
+        "sourceRefs": {
+          "$ref": "#/$defs/sourceRefs"
+        },
+        "expression": {
+          "$ref": "#/$defs/expression"
+        },
+        "humanTextTh": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "invalidationRuleIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ruleId"
+          }
+        }
+      }
+    },
+    "ruleCollection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rules"],
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rule"
+          }
+        }
+      }
+    },
+    "sideRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "disabledReason", "rules"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "disabledReason": {
+          "type": "string"
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rule"
+          }
+        },
+        "orderType": {
+          "enum": ["market", "limit", "stop"]
+        },
+        "expiry": {
+          "type": ["string", "null"]
+        },
+        "cooldownBars": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "sidedRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["buy", "sell"],
+      "properties": {
+        "buy": {
+          "$ref": "#/$defs/sideRules"
+        },
+        "sell": {
+          "$ref": "#/$defs/sideRules"
+        }
+      }
+    },
+    "managementAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "move_stop_loss",
+            "move_take_profit",
+            "close_partial",
+            "close_position",
+            "scale_in",
+            "scale_out",
+            "place_pending",
+            "cancel_pending",
+            "replace_pending",
+            "modify_pending"
+          ]
+        }
+      }
+    },
+    "managedFeature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "sourceStatus", "sourceRefs", "parameters", "rules"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "sourceStatus": {
+          "$ref": "#/$defs/sourceStatus"
+        },
+        "sourceRefs": {
+          "$ref": "#/$defs/sourceRefs"
+        },
+        "parameters": {
+          "type": "object"
+        },
+        "sideApplicability": {
+          "type": "array",
+          "items": {
+            "enum": ["buy", "sell"]
+          },
+          "uniqueItems": true
+        },
+        "trigger": {
+          "$ref": "#/$defs/expression"
+        },
+        "action": {
+          "$ref": "#/$defs/managementAction"
+        },
+        "cadence": {
+          "enum": ["every_tick", "new_closed_bar", "on_price_change", "once_per_position", "once_per_level"]
+        },
+        "onceOnly": {
+          "type": "boolean"
+        },
+        "idempotent": {
+          "type": "boolean"
+        },
+        "precedence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "neverWorsenStop": {
+          "type": "boolean"
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rule"
+          }
+        }
+      }
+    },
+    "partialClose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "sourceStatus", "sourceRefs", "steps", "rules"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "sourceStatus": {
+          "$ref": "#/$defs/sourceStatus"
+        },
+        "sourceRefs": {
+          "$ref": "#/$defs/sourceRefs"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["stepId", "trigger", "closePercent", "onceOnly"],
+            "properties": {
+              "stepId": {
+                "$ref": "#/$defs/id"
+              },
+              "trigger": {
+                "$ref": "#/$defs/expression"
+              },
+              "closePercent": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 100
+              },
+              "onceOnly": {
+                "const": true
+              },
+              "afterCloseAction": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rule"
+          }
+        }
+      }
+    },
+    "orderManagement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "breakEven",
+        "trailingStop",
+        "partialClose",
+        "scaleIn",
+        "scaleOut",
+        "modifyStopLoss",
+        "modifyTakeProfit",
+        "pendingOrders",
+        "rules"
+      ],
+      "properties": {
+        "breakEven": {
+          "$ref": "#/$defs/managedFeature"
+        },
+        "trailingStop": {
+          "$ref": "#/$defs/managedFeature"
+        },
+        "partialClose": {
+          "$ref": "#/$defs/partialClose"
+        },
+        "scaleIn": {
+          "$ref": "#/$defs/managedFeature"
+        },
+        "scaleOut": {
+          "$ref": "#/$defs/managedFeature"
+        },
+        "modifyStopLoss": {
+          "$ref": "#/$defs/managedFeature"
+        },
+        "modifyTakeProfit": {
+          "$ref": "#/$defs/managedFeature"
+        },
+        "pendingOrders": {
+          "$ref": "#/$defs/managedFeature"
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rule"
+          }
+        }
+      }
+    },
+    "priceFormulaOperand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "unit"],
+      "properties": {
+        "kind": {
+          "enum": ["reference", "constant", "input", "indicator"]
+        },
+        "unit": {
+          "enum": ["price", "price_distance", "scalar"]
+        },
+        "reference": {
+          "enum": ["entry_price", "bid", "ask", "close", "swing_high", "swing_low", "basket_price", "initial_stop_distance", "current_stop_distance"]
+        },
+        "value": {
+          "type": "number"
+        },
+        "inputRef": {
+          "$ref": "#/$defs/id"
+        },
+        "indicatorRef": {
+          "$ref": "#/$defs/id"
+        },
+        "shift": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "priceFormula": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op"],
+      "properties": {
+        "op": {
+          "enum": ["operand", "add", "subtract", "multiply", "divide", "min", "max", "negate"]
+        },
+        "operand": {
+          "$ref": "#/$defs/priceFormulaOperand"
+        },
+        "left": {
+          "$ref": "#/$defs/priceFormula"
+        },
+        "right": {
+          "$ref": "#/$defs/priceFormula"
+        }
+      }
+    },
+    "protectionRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "type", "sourceStatus", "sourceRefs"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "type": {
+          "enum": ["none", "fixed_points", "fixed_pips", "atr", "swing", "percent", "rr", "indicator", "basket"]
+        },
+        "value": {
+          "type": "number"
+        },
+        "valueInputRef": {
+          "$ref": "#/$defs/id"
+        },
+        "unit": {
+          "enum": ["point", "pip", "percent", "atr_multiple", "risk_multiple", "price"]
+        },
+        "reference": {
+          "enum": ["entry_price", "bid", "ask", "close", "swing_high", "swing_low", "indicator_value", "basket_price"]
+        },
+        "atrIndicatorRef": {
+          "$ref": "#/$defs/id"
+        },
+        "rrMultiple": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "rrMultipleInputRef": {
+          "$ref": "#/$defs/id"
+        },
+        "rrRiskReference": {
+          "enum": ["initial_stop_loss_distance"]
+        },
+        "lookbackBars": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lookbackInputRef": {
+          "$ref": "#/$defs/id"
+        },
+        "swingShift": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "indicatorRef": {
+          "$ref": "#/$defs/id"
+        },
+        "indicatorShift": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "basketPriceField": {
+          "enum": ["average_entry_price", "break_even_price", "weighted_average_entry_price"]
+        },
+        "basketScope": {
+          "enum": ["symbol_magic_side"]
+        },
+        "bufferValue": {
+          "type": "number",
+          "minimum": 0
+        },
+        "bufferInputRef": {
+          "$ref": "#/$defs/id"
+        },
+        "formula": {
+          "$ref": "#/$defs/priceFormula"
+        },
+        "placementTiming": {
+          "enum": ["with_entry", "after_fill", "next_tick", "on_trigger"]
+        },
+        "minimumStopDistancePolicy": {
+          "enum": ["reject_entry", "adjust_outward", "defer_modify"]
+        },
+        "freezeLevelPolicy": {
+          "enum": ["reject_entry", "defer_modify", "retry_bounded"]
+        },
+        "freezeRetryLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "freezeRetryDelayMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60000
+        },
+        "neverWorsen": {
+          "type": "boolean"
+        },
+        "activationRuleIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ruleId"
+          },
+          "uniqueItems": true
+        },
+        "invalidationRuleIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ruleId"
+          },
+          "uniqueItems": true
+        },
+        "sourceStatus": {
+          "$ref": "#/$defs/sourceStatus"
+        },
+        "sourceRefs": {
+          "$ref": "#/$defs/sourceRefs"
+        }
+      }
+    },
+    "tpSl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stopLoss", "takeProfit", "sideOverrides"],
+      "properties": {
+        "stopLoss": {
+          "$ref": "#/$defs/protectionRule"
+        },
+        "takeProfit": {
+          "$ref": "#/$defs/protectionRule"
+        },
+        "sideOverrides": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["buy", "sell"],
+          "properties": {
+            "buy": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "stopLoss": {
+                  "$ref": "#/$defs/protectionRule"
+                },
+                "takeProfit": {
+                  "$ref": "#/$defs/protectionRule"
+                }
+              }
+            },
+            "sell": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "stopLoss": {
+                  "$ref": "#/$defs/protectionRule"
+                },
+                "takeProfit": {
+                  "$ref": "#/$defs/protectionRule"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "riskAndSizing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lotMode", "maxOpenPositions"],
+      "properties": {
+        "lotMode": {
+          "enum": ["fixed_lot", "fixed_fractional_balance", "fixed_fractional_equity", "free_margin_fraction", "sequence"]
+        },
+        "fixedLotInputRef": {
+          "$ref": "#/$defs/id"
+        },
+        "riskPercentInputRef": {
+          "$ref": "#/$defs/id"
+        },
+        "lotSequence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        "maxOpenPositions": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxTotalLots": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maxRiskPerTradePercent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "dailyLossStopPercent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "weeklyLossStopPercent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "equityStopPercent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "consecutiveLossLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cooldownBars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "includeSpreadCommissionSlippage": {
+          "type": "boolean"
+        },
+        "normalizeToBrokerLotStep": {
+          "type": "boolean"
+        },
+        "riskBase": {
+          "enum": ["fixed_lot", "balance", "equity", "free_margin", "basket_equity"]
+        },
+        "lotRoundingPolicy": {
+          "enum": ["floor_to_step", "reject_if_below_minimum"]
+        },
+        "minimumLotPolicy": {
+          "enum": ["reject_trade", "allow_only_if_within_risk"]
+        },
+        "insufficientMarginPolicy": {
+          "enum": ["reject_trade", "reduce_lot_within_risk"]
+        },
+        "currencyConversionPolicy": {
+          "type": "string"
+        },
+        "dailyResetTimezone": {
+          "type": "string"
+        }
+      }
+    },
+    "recoverySpacing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "reference",
+        "unit",
+        "adverseMoveOnly",
+        "sourceStatus",
+        "sourceRefs"
+      ],
+      "properties": {
+        "method": {
+          "enum": ["fixed_points", "fixed_pips", "atr", "percent", "indicator", "formula"]
+        },
+        "reference": {
+          "enum": ["previous_recovery_entry", "initial_entry", "basket_average_price", "market_price"]
+        },
+        "unit": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "value": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "valueInputRef": {
+          "$ref": "#/$defs/id"
+        },
+        "indicatorRef": {
+          "$ref": "#/$defs/id"
+        },
+        "multiplier": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "formula": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "adverseMoveOnly": {
+          "type": "boolean"
+        },
+        "sourceStatus": {
+          "$ref": "#/$defs/sourceStatus"
+        },
+        "sourceRefs": {
+          "$ref": "#/$defs/sourceRefs"
+        }
+      }
+    },
+    "recoveryLotFormula": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "levelVariable",
+        "normalizeToBrokerLotStep",
+        "sourceStatus",
+        "sourceRefs"
+      ],
+      "properties": {
+        "mode": {
+          "enum": ["fixed", "multiplier", "sequence", "risk_percent", "formula"]
+        },
+        "baseLot": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "baseLotInputRef": {
+          "$ref": "#/$defs/id"
+        },
+        "multiplier": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "multiplierInputRef": {
+          "$ref": "#/$defs/id"
+        },
+        "sequence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        "riskPercentInputRef": {
+          "$ref": "#/$defs/id"
+        },
+        "formula": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "levelVariable": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "normalizeToBrokerLotStep": {
+          "const": true
+        },
+        "sourceStatus": {
+          "$ref": "#/$defs/sourceStatus"
+        },
+        "sourceRefs": {
+          "$ref": "#/$defs/sourceRefs"
+        }
+      }
+    },
+    "basketThreshold": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "method", "reference", "sourceStatus", "sourceRefs"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "method": {
+          "enum": ["none", "fixed_currency", "fixed_points", "fixed_pips", "percent", "price", "formula"]
+        },
+        "reference": {
+          "enum": ["basket_profit", "basket_loss", "basket_average_price", "account_equity", "account_balance"]
+        },
+        "unit": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "value": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "valueInputRef": {
+          "$ref": "#/$defs/id"
+        },
+        "formula": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "sourceStatus": {
+          "$ref": "#/$defs/sourceStatus"
+        },
+        "sourceRefs": {
+          "$ref": "#/$defs/sourceRefs"
+        }
+      }
+    },
+    "hedgeLifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "openTrigger",
+        "closeTrigger",
+        "maxConcurrentHedges",
+        "closeOrder",
+        "lotFormula",
+        "sourceStatus",
+        "sourceRefs"
+      ],
+      "properties": {
+        "openTrigger": {
+          "$ref": "#/$defs/expression"
+        },
+        "closeTrigger": {
+          "$ref": "#/$defs/expression"
+        },
+        "maxConcurrentHedges": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "closeOrder": {
+          "enum": ["hedge_first", "original_first", "oldest_first", "newest_first", "all_together"]
+        },
+        "lotFormula": {
+          "$ref": "#/$defs/recoveryLotFormula"
+        },
+        "sourceStatus": {
+          "$ref": "#/$defs/sourceStatus"
+        },
+        "sourceRefs": {
+          "$ref": "#/$defs/sourceRefs"
+        }
+      }
+    },
+    "reentryPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "allowedAfter",
+        "cooldownBars",
+        "maxReentries",
+        "sameSignalRequired",
+        "sourceStatus",
+        "sourceRefs"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "allowedAfter": {
+          "enum": ["reset", "basket_close", "stop_loss", "abort", "opposite_signal", "never"]
+        },
+        "trigger": {
+          "$ref": "#/$defs/expression"
+        },
+        "cooldownBars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxReentries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sameSignalRequired": {
+          "type": "boolean"
+        },
+        "sourceStatus": {
+          "$ref": "#/$defs/sourceStatus"
+        },
+        "sourceRefs": {
+          "$ref": "#/$defs/sourceRefs"
+        }
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "mode", "sourceStatus", "sourceRefs"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": ["none", "grid", "martingale", "averaging", "hedging"]
+        },
+        "trigger": {
+          "$ref": "#/$defs/expression"
+        },
+        "spacing": {
+          "$ref": "#/$defs/recoverySpacing"
+        },
+        "direction": {
+          "enum": ["same", "opposite", "both"]
+        },
+        "maxLevels": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lotFormula": {
+          "$ref": "#/$defs/recoveryLotFormula"
+        },
+        "lotCap": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "basketTakeProfit": {
+          "$ref": "#/$defs/basketThreshold"
+        },
+        "basketStopLoss": {
+          "$ref": "#/$defs/basketThreshold"
+        },
+        "equityStopPercent": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "resetCondition": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/expression"
+            },
+            {
+              "$ref": "#/$defs/nonEmptyString"
+            }
+          ]
+        },
+        "abortCondition": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/expression"
+            },
+            {
+              "$ref": "#/$defs/nonEmptyString"
+            }
+          ]
+        },
+        "hedgeLifecycle": {
+          "$ref": "#/$defs/hedgeLifecycle"
+        },
+        "reentryPolicy": {
+          "$ref": "#/$defs/reentryPolicy"
+        },
+        "maxBasketLots": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maxDrawdownPercent": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "levelRules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rule"
+          }
+        },
+        "sourceStatus": {
+          "$ref": "#/$defs/sourceStatus"
+        },
+        "sourceRefs": {
+          "$ref": "#/$defs/sourceRefs"
+        }
+      }
+    },
+    "priceNormalizationPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["useBrokerDigits", "useBrokerTickSize", "invalidPricePolicy"],
+      "properties": {
+        "useBrokerDigits": {
+          "type": "boolean"
+        },
+        "useBrokerTickSize": {
+          "type": "boolean"
+        },
+        "invalidPricePolicy": {
+          "enum": ["reject_order", "normalize_nearest_tick"]
+        }
+      }
+    },
+    "retryPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxRetries", "retryableErrors", "backoffMilliseconds", "exhaustedAction"],
+      "properties": {
+        "maxRetries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "retryableErrors": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "backoffMilliseconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "exhaustedAction": {
+          "enum": ["abort_signal", "halt_new_entries"]
+        }
+      }
+    },
+    "restartPersistencePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "restoreManagedTickets",
+        "restoreStateMachine",
+        "stateKey",
+        "missingStatePolicy"
+      ],
+      "properties": {
+        "restoreManagedTickets": {
+          "type": "boolean"
+        },
+        "restoreStateMachine": {
+          "type": "boolean"
+        },
+        "stateKey": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "missingStatePolicy": {
+          "enum": ["reconstruct_from_broker", "halt_new_entries"]
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evaluateOn",
+        "evaluationOrder",
+        "entryOrderType",
+        "duplicateSignalPolicy",
+        "priceNormalization",
+        "retryPolicy",
+        "restartPersistence"
+      ],
+      "properties": {
+        "evaluateOn": {
+          "const": "new_closed_bar"
+        },
+        "evaluationOrder": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["safety", "recovery", "manage", "exit", "entry"]
+          }
+        },
+        "entryOrderType": {
+          "enum": ["market", "limit", "stop"]
+        },
+        "duplicateSignalPolicy": {
+          "enum": ["one_decision_per_symbol_bar", "ignore_while_pending", "replace_pending_same_signal"]
+        },
+        "priceNormalization": {
+          "$ref": "#/$defs/priceNormalizationPolicy"
+        },
+        "retryPolicy": {
+          "$ref": "#/$defs/retryPolicy"
+        },
+        "restartPersistence": {
+          "$ref": "#/$defs/restartPersistencePolicy"
+        },
+        "maxSpreadInputRef": {
+          "$ref": "#/$defs/id"
+        },
+        "slippageInputRef": {
+          "$ref": "#/$defs/id"
+        },
+        "magicNumberInputRef": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "transitions"],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/id"
+        },
+        "transitions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["to", "whenRuleIds"],
+            "properties": {
+              "to": {
+                "$ref": "#/$defs/id"
+              },
+              "whenRuleIds": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ruleId"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "conflict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conflictId", "paths", "description", "resolutionStatus", "sourceRefs"],
+      "properties": {
+        "conflictId": {
+          "$ref": "#/$defs/id"
+        },
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "description": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "resolutionStatus": {
+          "enum": ["resolved", "unresolved"]
+        },
+        "resolution": {
+          "type": "string"
+        },
+        "sourceRefs": {
+          "$ref": "#/$defs/sourceRefs"
+        }
+      }
+    },
+    "pseudocode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["language", "lines"],
+      "properties": {
+        "language": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "lines": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        }
+      }
+    },
+    "testCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["caseId", "kind", "ruleIds", "given", "when", "expected"],
+      "properties": {
+        "caseId": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "enum": ["positive", "negative", "boundary", "lifecycle"]
+        },
+        "ruleIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ruleId"
+          }
+        },
+        "given": {},
+        "when": {},
+        "expected": {}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceRef", "url", "title"],
+      "properties": {
+        "sourceRef": {
+          "$ref": "#/$defs/id"
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "checkedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "quoteOrFinding": {
+          "type": "string"
+        }
+      }
+    },
+    "assumption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assumptionId", "description", "confirmed", "affectsExecution", "affectsPaths"],
+      "properties": {
+        "assumptionId": {
+          "$ref": "#/$defs/id"
+        },
+        "description": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "confirmed": {
+          "type": "boolean"
+        },
+        "affectsExecution": {
+          "type": "boolean"
+        },
+        "affectsPaths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        }
+      }
+    },
+    "unknown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unknownId", "path", "description", "blocksExecution"],
+      "properties": {
+        "unknownId": {
+          "$ref": "#/$defs/id"
+        },
+        "path": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "description": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "blocksExecution": {
+          "type": "boolean"
+        }
+      }
+    },
+    "blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "path", "messageTh", "questionTh"],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/id"
+        },
+        "path": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "messageTh": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "questionTh": {
+          "type": "string"
+        }
+      }
+    },
+    "completeness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "score",
+        "eaHandoffAllowed",
+        "deterministicBacktestAllowed",
+        "blockingIssues",
+        "warnings",
+        "unknownPaths",
+        "conflictPaths"
+      ],
+      "properties": {
+        "status": {
+          "enum": ["ready", "needs_clarification", "not_ea_ready"]
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "eaHandoffAllowed": {
+          "type": "boolean"
+        },
+        "deterministicBacktestAllowed": {
+          "type": "boolean"
+        },
+        "blockingIssues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/blocker"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/nonEmptyString"
+              },
+              {
+                "$ref": "#/$defs/blocker"
+              }
+            ]
+          }
+        },
+        "unknownPaths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "conflictPaths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        }
+      }
+    }
+  }
+}

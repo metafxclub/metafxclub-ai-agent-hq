@@ -57,7 +57,12 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn("item?.columnValues", normalizer)
         self.assertIn("item?.core", normalizer)
         self.assertIn("item?.downstream", normalizer)
-        self.assertIn("buildReady: item?.buildReady === true", normalizer)
+        self.assertIn("const eaResearch = normalizeEaFactoryResearchReadModel(item)", normalizer)
+        self.assertIn("buildReady: item?.buildReady === true && eaResearch.ready", normalizer)
+        self.assertIn("sourceReportId:", normalizer)
+        self.assertIn("blueprintDigest: eaResearch.blueprintDigest", normalizer)
+        self.assertIn("readinessIssues: eaResearch.readinessIssues", normalizer)
+        self.assertIn("eaResearch,", normalizer)
         self.assertIn("backtestReport:", normalizer)
         self.assertIn("optimizationReport:", normalizer)
         self.assertIn("sourceUrls.slice(0, 10)", normalizer)
@@ -139,12 +144,26 @@ class EaFactoryFrontendTests(unittest.TestCase):
         source = self.block("function renderEaFactorySourceStage", "function renderEaFactorySpecStage")
         self.assertIn("select.disabled = !domain.canStartNewBuild", source)
 
-    def test_strategy_spec_confirmation_shows_all_a_m_rules(self):
+    def test_strategy_spec_confirmation_uses_canonical_blueprint_v2_not_a_m_fallback(self):
         spec = self.block("function renderEaFactorySpecStage", "function renderEaFactoryTerminalPicker")
+        self.assertIn("renderEaFactoryResearchGate(section, source, { showBlueprint: true })", spec)
+        self.assertIn("if (!source.buildReady || !source.eaResearch.ready) return", spec)
+        self.assertIn('"Blueprint SHA-256"', spec)
+        self.assertNotIn("appendEaFactoryRuleList", spec)
         for column in "ABCDEFGHIJKLM":
-            self.assertIn(f'"{column} •', spec)
-        rule_renderer = self.block("function appendEaFactoryRuleList", "function createEaFactoryStageHeader")
-        self.assertIn("safeAgentChatReplyText(rule", rule_renderer)
+            self.assertNotIn(f'"{column} •', spec)
+
+        normalizer = self.block("function normalizeEaFactoryResearchReadModel", "function normalizeEaFactorySourceRecord")
+        self.assertIn("item?.eaResearch", normalizer)
+        self.assertIn("raw.validated === true", normalizer)
+        self.assertIn("raw.digestMatched === true", normalizer)
+        self.assertIn('raw.validationStatus === "canonical_validated"', normalizer)
+        self.assertIn("TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION", normalizer)
+        self.assertIn("/^[0-9a-f]{64}$/", normalizer)
+        self.assertIn("raw.readinessIssues", normalizer)
+        self.assertIn("raw.blockingIssues", normalizer)
+        self.assertNotIn("eaImplementationBlueprint", normalizer)
+        self.assertNotIn("eaBlueprint", normalizer)
 
     def test_all_downstream_sheet_fields_and_full_bounded_catalog_are_visible(self):
         normalizer = self.block("function normalizeEaFactoryDomain", "function normalizeWorkflowDomainData")
@@ -159,12 +178,16 @@ class EaFactoryFrontendTests(unittest.TestCase):
             "Q • Backtest Report",
             "R • Optimization Status",
             "S • Optimization Report",
-            "T • Issues",
             "U • Next Action",
             "V • Target Platform",
             "W • Updated At",
         ):
             self.assertIn(label, source)
+        gate = self.block("function renderEaFactoryResearchGate", "function renderEaFactorySourceStage")
+        self.assertIn("source?.readinessIssues", gate)
+        self.assertIn("createTradingResearchEaBlueprint", gate)
+        self.assertIn("canonical EA Blueprint v2", gate)
+        self.assertNotIn("innerHTML", gate)
 
     def test_build_history_is_selectable_and_terminal_status_is_read_only_in_left_rail(self):
         self.assertIn('selectedBuildId: ""', self.main)
