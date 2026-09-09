@@ -53,7 +53,14 @@ class EaFactoryMetaEditorCompileTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        # Canonicalize the temporary root before deriving any expected paths.
+        # On Windows, tempfile may expose the same directory through a short
+        # (8.3) or long spelling depending on the Python/runtime combination,
+        # while the production adapter deliberately resolves every managed
+        # path before use.  Keeping the fixture canonical makes failure-
+        # injection path comparisons address the same file on every supported
+        # Python version instead of silently missing the injected branch.
+        self.root = Path(self.temp.name).resolve(strict=True)
         self.install = self.root / "terminal"
         self.install.mkdir()
         self.versions = self.root / "workspace" / "EA_Versions"
@@ -565,7 +572,9 @@ class EaFactoryMetaEditorCompileIntegrationTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        # Match the canonical managed paths returned by the production bridge;
+        # see the adapter fixture above for the Windows short/long-path reason.
+        self.root = Path(self.temp.name).resolve(strict=True)
         self.build_id = "ea-build-compile-integration"
         self.build_dir = self.root / "workspace" / "ea-factory" / self.build_id
         for folder in self.bridge.EA_FACTORY_BUILD_FOLDER_NAMES:
