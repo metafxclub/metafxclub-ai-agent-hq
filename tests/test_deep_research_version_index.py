@@ -29,7 +29,13 @@ class DeepResearchVersionIndexTests(unittest.TestCase):
         cls.bridge = load_bridge()
 
     @staticmethod
-    def report(report_id: str, source_record_id: str, ordinal: int) -> dict:
+    def report(
+        report_id: str,
+        source_record_id: str,
+        ordinal: int,
+        *,
+        source_report_id: str | None = "world-source-default",
+    ) -> dict:
         created_at = (
             datetime(2026, 1, 1, tzinfo=timezone.utc)
             + timedelta(seconds=ordinal)
@@ -47,6 +53,11 @@ class DeepResearchVersionIndexTests(unittest.TestCase):
                 "source": {
                     "recordId": source_record_id,
                     "systemId": f"system-{source_record_id}",
+                    **(
+                        {"reportId": source_report_id}
+                        if source_report_id is not None
+                        else {}
+                    ),
                 }
             },
             "metrics": {
@@ -91,7 +102,7 @@ class DeepResearchVersionIndexTests(unittest.TestCase):
 
         runtime_reports_dir.glob.assert_called_once_with("*.json")
         self.assertEqual(read_report.call_count, 2103)
-        target_index = version_index[target_source]
+        target_index = version_index[("world-source-default", target_source)]
         self.assertEqual(len(reports), 2103)
         self.assertEqual(
             [item["reportId"] for item in target_index["ordered"]],
@@ -130,6 +141,48 @@ class DeepResearchVersionIndexTests(unittest.TestCase):
         ]
         self.assertEqual(len(current_rows), 1)
         self.assertEqual(current_rows[0]["research_version"], "2")
+
+    def test_version_identity_uses_source_report_and_record_pair(self) -> None:
+        same_pair_v1 = self.report(
+            "pair-a-v1", "system-1", 1, source_report_id="world-report-a"
+        )
+        same_pair_v2 = self.report(
+            "pair-a-v2", "system-1", 2, source_report_id="world-report-a"
+        )
+        different_report = self.report(
+            "pair-b-v1", "system-1", 3, source_report_id="world-report-b"
+        )
+        legacy_one = self.report(
+            "legacy-one", "system-1", 4, source_report_id=None
+        )
+        legacy_two = self.report(
+            "legacy-two", "system-1", 5, source_report_id=None
+        )
+
+        index = self.bridge._research_sheet_build_deep_version_index([
+            same_pair_v1,
+            same_pair_v2,
+            different_report,
+            legacy_one,
+            legacy_two,
+        ])
+
+        self.assertEqual(
+            [item["reportId"] for item in index[("world-report-a", "system-1")]["ordered"]],
+            ["pair-a-v1", "pair-a-v2"],
+        )
+        self.assertEqual(
+            [item["researchVersion"] for item in index[("world-report-a", "system-1")]["ordered"]],
+            [1, 2],
+        )
+        self.assertEqual(
+            index[("world-report-b", "system-1")]["ordered"][0]["researchVersion"],
+            1,
+        )
+        self.assertIn(("legacy:legacy-one", "system-1"), index)
+        self.assertIn(("legacy:legacy-two", "system-1"), index)
+        self.assertEqual(index[("legacy:legacy-one", "system-1")]["currentReportId"], "legacy-one")
+        self.assertEqual(index[("legacy:legacy-two", "system-1")]["currentReportId"], "legacy-two")
 
     def test_backfill_builds_complete_index_once_and_reuses_it(self) -> None:
         reports = [

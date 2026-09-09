@@ -82,6 +82,17 @@ SOURCE_STATUSES = {
 }
 READINESS_STATUSES = {"ready", "needs_clarification", "not_ea_ready"}
 SIDES = {"buy", "sell"}
+RULE_SIDES = {"buy", "sell", "both", "none"}
+RULE_PHASES = {"setup", "entry", "exit", "modify", "risk", "recovery", "safety"}
+RULE_EVALUATION_EVENTS = {
+    "new_closed_bar",
+    "every_tick",
+    "on_price_change",
+    "on_trade_event",
+    "on_timer",
+    "once_per_position",
+    "once_per_level",
+}
 ENTRY_ORDER_TYPES = {"market", "limit", "stop"}
 LOT_MODES = {
     "fixed_lot",
@@ -293,6 +304,52 @@ OPERAND_KINDS = {
     "time",
     "symbol_property",
 }
+SERIES_OPERAND_KINDS = {"indicator", "price", "spread"}
+FIELD_OPERAND_KINDS = {
+    "account",
+    "position",
+    "basket",
+    "session",
+    "spread",
+    "time",
+    "symbol_property",
+}
+MOVING_AVERAGE_KINDS = {"ema", "sma", "smma", "lwma", "ma", "movingaverage"}
+EXPLICIT_MOVING_AVERAGE_KINDS = {"ma", "movingaverage"}
+MOVING_AVERAGE_METHODS = {"ema", "sma", "smma", "lwma"}
+MOVING_AVERAGE_APPLIED_PRICES = {
+    "close",
+    "open",
+    "high",
+    "low",
+    "median",
+    "typical",
+    "weighted",
+}
+SUPPORTED_INDICATOR_KINDS = {
+    *MOVING_AVERAGE_KINDS,
+    "atr",
+    "averagetruerange",
+}
+SUPPORTED_INDICATOR_OUTPUT_LINES = {
+    "ema": {"main"},
+    "sma": {"main"},
+    "smma": {"main"},
+    "lwma": {"main"},
+    "ma": {"main"},
+    "movingaverage": {"main"},
+    "atr": {"main"},
+    "averagetruerange": {"main"},
+}
+MAX_EXPRESSION_DEPTH = 12
+MAX_EXPRESSION_NODES = 256
+MAX_BLUEPRINT_CONTAINER_DEPTH = 48
+MAX_BLUEPRINT_CONTAINER_NODES = 50_000
+MAX_TEST_PAYLOAD_BYTES = 16_384
+MAX_CANONICAL_BLUEPRINT_UTF8_BYTES = 45_000
+MAX_CANONICAL_BLUEPRINT_UTF16_CODE_UNITS = 45_000
+_RESERVED_EVIDENCE_HOSTS = {"example.com", "example.org", "example.net"}
+_RESERVED_EVIDENCE_SUFFIXES = (".example", ".invalid", ".test", ".localhost")
 
 _ID_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 _RULE_ID_PATTERN = re.compile(r"^[A-Z][A-Z0-9_:-]{0,127}$")
@@ -487,8 +544,6 @@ def _normalize_expression(value: object) -> object:
         result["expanded"] = expanded
 
     if result.get("op") in {"cross_above", "cross_below"}:
-        result.setdefault("currentShift", 1)
-        result.setdefault("previousShift", 2)
         if "expanded" not in result and isinstance(result.get("left"), Mapping) and isinstance(
             result.get("right"), Mapping
         ):
@@ -583,6 +638,9 @@ def _normalize_rules(node: object) -> object:
     }
     if "sourceStatus" in result:
         result["sourceStatus"] = _enum(result["sourceStatus"])
+    for key in ("phase", "side", "evaluationEvent"):
+        if key in result:
+            result[key] = _enum(result[key])
     if "sourceRefs" in result:
         result["sourceRefs"] = _dedupe_sorted_strings(result["sourceRefs"])
     if "expression" in result:
@@ -627,6 +685,26 @@ def _normalize_candidate(value: object) -> dict[str, Any]:
                 if isinstance(record, dict):
                     if key == "inputs" and "type" in record:
                         record["type"] = _enum(record["type"])
+                    if key == "indicators" and isinstance(record.get("timeframe"), str):
+                        timeframe = record["timeframe"].strip()
+                        record["timeframe"] = (
+                            timeframe.lower()
+                            if timeframe.lower() in {"signal", "execution"}
+                            else timeframe.upper()
+                        )
+                    if key == "indicators":
+                        for enum_key in ("appliedPrice", "outputLine"):
+                            if enum_key in record:
+                                record[enum_key] = _enum(record[enum_key])
+                        if isinstance(record.get("appliedPrice"), str) and record[
+                            "appliedPrice"
+                        ].startswith("price_"):
+                            record["appliedPrice"] = record["appliedPrice"][6:]
+                        if record.get("outputLine") == "mode_main":
+                            record["outputLine"] = "main"
+                        parameters = record.get("parameters")
+                        if isinstance(parameters, dict) and "method" in parameters:
+                            parameters["method"] = _enum(parameters["method"])
                     if "sourceStatus" in record:
                         record["sourceStatus"] = _enum(record["sourceStatus"])
                     if "sourceRefs" in record:
@@ -990,6 +1068,145 @@ def _schema_path_child(path: str, key: object) -> str:
         return f"{path}.{text}"
     escaped = text.replace("\\", "\\\\").replace("'", "\\'")
     return f"{path}['{escaped}']"
+
+
+_EXPRESSION_ROOT_KEYS = {
+    "expression",
+    "trigger",
+    "resetCondition",
+    "abortCondition",
+    "openTrigger",
+    "closeTrigger",
+    "formula",
+}
+
+
+def _expression_complexity_issues(root: Mapping[str, Any], path: str) -> list[BlueprintIssue]:
+    """Bound executable expression graphs before recursive normalization.
+
+    The frontend renders these trees recursively and Python normalization does
+    the same.  A deliberately deep or very broad tree must therefore fail with
+    a stable contract issue instead of leaking ``RecursionError`` or creating
+    an oversized UI payload.
+    """
+
+    issues: list[BlueprintIssue] = []
+    stack: list[tuple[object, str, int]] = [(root, path, 0)]
+    seen: set[int] = set()
+    expression_nodes = 0
+    while stack:
+        value, current_path, parent_expression_depth = stack.pop()
+        if isinstance(value, Mapping):
+            identity = id(value)
+            if identity in seen:
+                _issue(
+                    issues,
+                    "EXPRESSION_GRAPH_INVALID",
+                    current_path,
+                    "Expression must be a JSON tree without cyclic or shared containers",
+                )
+                return issues
+            seen.add(identity)
+            is_expression = "op" in value
+            expression_depth = parent_expression_depth + (1 if is_expression else 0)
+            if is_expression:
+                expression_nodes += 1
+                if expression_depth > MAX_EXPRESSION_DEPTH:
+                    _issue(
+                        issues,
+                        "EXPRESSION_DEPTH_EXCEEDED",
+                        current_path,
+                        f"Expression depth cannot exceed {MAX_EXPRESSION_DEPTH}",
+                    )
+                    return issues
+                if expression_nodes > MAX_EXPRESSION_NODES:
+                    _issue(
+                        issues,
+                        "EXPRESSION_NODE_LIMIT_EXCEEDED",
+                        path,
+                        f"Expression tree cannot exceed {MAX_EXPRESSION_NODES} operator nodes",
+                    )
+                    return issues
+            for key, child in value.items():
+                if isinstance(child, (Mapping, list)):
+                    stack.append(
+                        (child, _schema_path_child(current_path, key), expression_depth)
+                    )
+        elif isinstance(value, list):
+            identity = id(value)
+            if identity in seen:
+                _issue(
+                    issues,
+                    "EXPRESSION_GRAPH_INVALID",
+                    current_path,
+                    "Expression must be a JSON tree without cyclic or shared containers",
+                )
+                return issues
+            seen.add(identity)
+            for index, child in enumerate(value):
+                if isinstance(child, (Mapping, list)):
+                    stack.append((child, f"{current_path}[{index}]", parent_expression_depth))
+    return issues
+
+
+def _preflight_blueprint_limits(value: object) -> list[BlueprintIssue]:
+    """Iteratively reject graphs that are unsafe to normalize or render."""
+
+    issues: list[BlueprintIssue] = []
+    stack: list[tuple[object, str, int]] = [(value, "$", 0)]
+    seen: set[int] = set()
+    expression_roots: set[int] = set()
+    container_nodes = 0
+    while stack:
+        current, path, depth = stack.pop()
+        if not isinstance(current, (Mapping, list)):
+            continue
+        identity = id(current)
+        if identity in seen:
+            _issue(
+                issues,
+                "BLUEPRINT_GRAPH_INVALID",
+                path,
+                "Blueprint must be a JSON tree without cyclic or shared containers",
+            )
+            return issues
+        seen.add(identity)
+        container_nodes += 1
+        if container_nodes > MAX_BLUEPRINT_CONTAINER_NODES:
+            _issue(
+                issues,
+                "BLUEPRINT_NODE_LIMIT_EXCEEDED",
+                "$",
+                f"Blueprint cannot exceed {MAX_BLUEPRINT_CONTAINER_NODES} container nodes",
+            )
+            return issues
+        if depth > MAX_BLUEPRINT_CONTAINER_DEPTH:
+            _issue(
+                issues,
+                "BLUEPRINT_DEPTH_EXCEEDED",
+                path,
+                f"Blueprint container depth cannot exceed {MAX_BLUEPRINT_CONTAINER_DEPTH}",
+            )
+            return issues
+        if isinstance(current, Mapping):
+            for key, child in current.items():
+                child_path = _schema_path_child(path, key)
+                if (
+                    str(key) in _EXPRESSION_ROOT_KEYS
+                    and isinstance(child, Mapping)
+                    and id(child) not in expression_roots
+                ):
+                    expression_roots.add(id(child))
+                    expression_issues = _expression_complexity_issues(child, child_path)
+                    if expression_issues:
+                        return expression_issues
+                if isinstance(child, (Mapping, list)):
+                    stack.append((child, child_path, depth + 1))
+        else:
+            for index, child in enumerate(current):
+                if isinstance(child, (Mapping, list)):
+                    stack.append((child, f"{path}[{index}]", depth + 1))
+    return issues
 
 
 def _validate_schema_unknown_fields(
@@ -1374,6 +1591,7 @@ def _validate_operand(
     input_ids: set[str],
     indicator_ids: set[str],
     closed_bar: bool,
+    require_series_shift: bool = True,
 ) -> None:
     if not isinstance(value, Mapping):
         _issue(issues, "OPERAND_OBJECT_REQUIRED", path, "Expression operand must be an object")
@@ -1398,6 +1616,24 @@ def _validate_operand(
         field = value.get("field")
         if field not in {"open", "high", "low", "close", "bid", "ask", "mid"}:
             _issue(issues, "PRICE_FIELD_INVALID", f"{path}.field", "Price field must name OHLC, bid, ask, or mid")
+    elif kind == "account":
+        field = value.get("field")
+        if not isinstance(field, str) or not field.strip():
+            _issue(
+                issues,
+                "ACCOUNT_FIELD_REQUIRED",
+                f"{path}.field",
+                "Account operand requires an explicit account field",
+            )
+    elif kind in FIELD_OPERAND_KINDS:
+        field = value.get("field")
+        if not isinstance(field, str) or not field.strip():
+            _issue(
+                issues,
+                "OPERAND_FIELD_REQUIRED",
+                f"{path}.field",
+                f"{kind} operand requires an explicit field",
+            )
 
     if "shift" in value:
         shift = value.get("shift")
@@ -1410,10 +1646,51 @@ def _validate_operand(
                 f"{path}.shift",
                 "Closed-bar rules cannot read forming bar 0",
             )
+    elif closed_bar and require_series_shift and kind in SERIES_OPERAND_KINDS:
+        _issue(
+            issues,
+            "CLOSED_BAR_SHIFT_REQUIRED",
+            f"{path}.shift",
+            "Closed-bar series operands require an explicit shift >= 1",
+        )
 
 
 def _canonical_fragment(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"))
+
+
+def _test_payload_is_meaningful(value: object) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if not isinstance(value, (Mapping, list)) or not value:
+        return False
+    stack: list[object] = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, Mapping):
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+        elif isinstance(current, str):
+            if current.strip():
+                return True
+        elif current is not None:
+            return True
+    return False
+
+
+def _test_payload_size_bytes(value: object) -> int | None:
+    try:
+        return len(_canonical_fragment(value).encode("utf-8"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _test_payload_fingerprint(value: object) -> str:
+    try:
+        return _canonical_fragment(value)
+    except (TypeError, ValueError):
+        return "<invalid-test-payload>"
 
 
 def _validate_expression(
@@ -1465,8 +1742,24 @@ def _validate_expression(
 
     if op in {"cross_above", "cross_below"}:
         left, right = expression.get("left"), expression.get("right")
-        _validate_operand(left, f"{path}.left", issues, input_ids=input_ids, indicator_ids=indicator_ids, closed_bar=closed_bar)
-        _validate_operand(right, f"{path}.right", issues, input_ids=input_ids, indicator_ids=indicator_ids, closed_bar=closed_bar)
+        _validate_operand(
+            left,
+            f"{path}.left",
+            issues,
+            input_ids=input_ids,
+            indicator_ids=indicator_ids,
+            closed_bar=closed_bar,
+            require_series_shift=False,
+        )
+        _validate_operand(
+            right,
+            f"{path}.right",
+            issues,
+            input_ids=input_ids,
+            indicator_ids=indicator_ids,
+            closed_bar=closed_bar,
+            require_series_shift=False,
+        )
         for key, expected in (("previousShift", 2), ("currentShift", 1)):
             if expression.get(key) != expected:
                 _issue(
@@ -1513,6 +1806,22 @@ def _validate_expression(
     if op == "once_per_bar":
         if expression.get("barShift") != 1:
             _issue(issues, "ONCE_PER_BAR_SHIFT_INVALID", f"{path}.barShift", "Closed-bar once_per_bar requires barShift=1")
+        if "item" not in expression:
+            _issue(
+                issues,
+                "ONCE_PER_BAR_ITEM_REQUIRED",
+                f"{path}.item",
+                "once_per_bar is a cadence gate and requires a nested trading condition",
+            )
+        else:
+            _validate_expression(
+                expression.get("item"),
+                f"{path}.item",
+                issues,
+                input_ids=input_ids,
+                indicator_ids=indicator_ids,
+                closed_bar=closed_bar,
+            )
         return
 
     if op in {"rising", "falling"}:
@@ -1862,7 +2171,239 @@ def _validate_input_default(record: Mapping[str, Any], path: str, issues: list[B
             _issue(issues, "INPUT_ENUM_DEFAULT", f"{path}.default", "Enum default must appear in allowedValues")
 
 
-def _public_evidence_independence_key(value: object) -> str | None:
+def _normalized_indicator_token(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _validate_moving_average_period(
+    value: object,
+    path: str,
+    *,
+    input_records: Mapping[str, Mapping[str, Any]],
+    issues: list[BlueprintIssue],
+    unresolved_reasons: list[tuple[str, str]],
+    indicator_label: str = "Moving-average",
+) -> None:
+    if isinstance(value, Mapping):
+        if set(value) != {"inputRef"}:
+            _issue(
+                issues,
+                "INDICATOR_PERIOD_BINDING_INVALID",
+                path,
+                f"{indicator_label} period binding must contain only inputRef",
+            )
+            return
+        ref = value.get("inputRef")
+        input_record = input_records.get(str(ref)) if isinstance(ref, str) else None
+        if input_record is None:
+            return
+        if input_record.get("type") != "int":
+            _issue(
+                issues,
+                "INDICATOR_PERIOD_INPUT_TYPE_INVALID",
+                f"{path}.inputRef",
+                f"{indicator_label} period must reference an integer input",
+            )
+            return
+        default = input_record.get("default")
+        if default is None and input_record.get("sourceStatus") in {
+            "unknown",
+            "operator_assumption",
+        }:
+            unresolved_reasons.append((path, f"{indicator_label} period input is unresolved"))
+        elif not isinstance(default, int) or isinstance(default, bool) or default < 1:
+            _issue(
+                issues,
+                "INDICATOR_PERIOD_INVALID",
+                path,
+                f"{indicator_label} period input default must be an integer >= 1",
+            )
+        for range_key in ("min", "max"):
+            bound = input_record.get(range_key)
+            if bound is not None and (
+                not isinstance(bound, int)
+                or isinstance(bound, bool)
+                or bound < 1
+            ):
+                _issue(
+                    issues,
+                    "INDICATOR_PERIOD_RANGE_INVALID",
+                    f"{path}.inputRef",
+                    f"{indicator_label} period optimization bounds must be integers >= 1",
+                )
+                break
+        return
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        _issue(
+            issues,
+            "INDICATOR_PERIOD_INVALID",
+            path,
+            f"{indicator_label} period must be an integer >= 1 or an inputRef binding",
+        )
+
+
+def _validate_moving_average_indicator(
+    record: Mapping[str, Any],
+    path: str,
+    *,
+    input_records: Mapping[str, Mapping[str, Any]],
+    issues: list[BlueprintIssue],
+    unresolved_reasons: list[tuple[str, str]],
+) -> None:
+    normalized_kind = _normalized_indicator_token(record.get("kind"))
+    if normalized_kind not in MOVING_AVERAGE_KINDS:
+        return
+
+    parameters = record.get("parameters")
+    if not isinstance(parameters, Mapping):
+        return
+    if "period" not in parameters or parameters.get("period") in (None, "", [], {}):
+        _issue(
+            issues,
+            "INDICATOR_PERIOD_REQUIRED",
+            f"{path}.parameters.period",
+            "Moving-average indicator requires an explicit positive period",
+        )
+    else:
+        _validate_moving_average_period(
+            parameters.get("period"),
+            f"{path}.parameters.period",
+            input_records=input_records,
+            issues=issues,
+            unresolved_reasons=unresolved_reasons,
+        )
+
+    method = parameters.get("method")
+    normalized_method = _normalized_indicator_token(method)
+    if normalized_kind in EXPLICIT_MOVING_AVERAGE_KINDS:
+        if normalized_method not in MOVING_AVERAGE_METHODS:
+            _issue(
+                issues,
+                "INDICATOR_MA_METHOD_INVALID",
+                f"{path}.parameters.method",
+                f"Generic MA requires method in {sorted(MOVING_AVERAGE_METHODS)}",
+            )
+    elif method is not None and normalized_method != normalized_kind:
+        _issue(
+            issues,
+            "INDICATOR_MA_METHOD_MISMATCH",
+            f"{path}.parameters.method",
+            f"Method must match indicator kind {record.get('kind')!r}",
+        )
+
+    for shift_key in ("shift", "maShift"):
+        if shift_key not in parameters:
+            continue
+        shift = parameters.get(shift_key)
+        if not isinstance(shift, int) or isinstance(shift, bool) or shift < 0:
+            _issue(
+                issues,
+                "INDICATOR_MA_SHIFT_INVALID",
+                f"{path}.parameters.{shift_key}",
+                "Moving-average display shift must be an integer >= 0",
+            )
+
+    if record.get("appliedPrice") not in MOVING_AVERAGE_APPLIED_PRICES:
+        _issue(
+            issues,
+            "INDICATOR_APPLIED_PRICE_INVALID",
+            f"{path}.appliedPrice",
+            f"Moving average requires one of {sorted(MOVING_AVERAGE_APPLIED_PRICES)}",
+        )
+    if record.get("outputLine") != "main":
+        _issue(
+            issues,
+            "INDICATOR_OUTPUT_LINE_INVALID",
+            f"{path}.outputLine",
+            "Moving average exposes the canonical output line 'main'",
+        )
+
+
+def _validate_supported_indicator_contract(
+    record: Mapping[str, Any],
+    path: str,
+    *,
+    input_records: Mapping[str, Mapping[str, Any]],
+    issues: list[BlueprintIssue],
+    unresolved_reasons: list[tuple[str, str]],
+) -> None:
+    """Fail closed when an indicator cannot be mapped to a built-in EA API.
+
+    The v2 contract deliberately has no custom-indicator implementation or
+    buffer-binding object.  Consequently an arbitrary name cannot be marked
+    EA-ready: the writer would have no deterministic API call or buffer index.
+    """
+
+    normalized_kind = _normalized_indicator_token(record.get("kind"))
+    if normalized_kind not in SUPPORTED_INDICATOR_KINDS:
+        _issue(
+            issues,
+            "INDICATOR_KIND_UNSUPPORTED",
+            f"{path}.kind",
+            "Indicator kind is not in the built-in EA indicator registry; custom indicators require a future explicit implementation and buffer contract",
+        )
+        return
+
+    if normalized_kind in MOVING_AVERAGE_KINDS:
+        return
+
+    parameters = record.get("parameters")
+    if isinstance(parameters, Mapping):
+        if "period" not in parameters or parameters.get("period") in (None, "", [], {}):
+            _issue(
+                issues,
+                "INDICATOR_PERIOD_REQUIRED",
+                f"{path}.parameters.period",
+                "ATR indicator requires an explicit positive period",
+            )
+        else:
+            _validate_moving_average_period(
+                parameters.get("period"),
+                f"{path}.parameters.period",
+                input_records=input_records,
+                issues=issues,
+                unresolved_reasons=unresolved_reasons,
+                indicator_label="ATR",
+            )
+
+    applied_price = record.get("appliedPrice")
+    if applied_price != "close":
+        _issue(
+            issues,
+            "INDICATOR_APPLIED_PRICE_INVALID",
+            f"{path}.appliedPrice",
+            "ATR uses the canonical appliedPrice value 'close' in this cross-platform contract",
+        )
+
+    output_line = _normalized_indicator_token(record.get("outputLine"))
+    allowed_lines = SUPPORTED_INDICATOR_OUTPUT_LINES[normalized_kind]
+    if output_line not in allowed_lines:
+        _issue(
+            issues,
+            "INDICATOR_OUTPUT_LINE_INVALID",
+            f"{path}.outputLine",
+            f"{record.get('kind')} outputLine must resolve to one of {sorted(allowed_lines)}",
+        )
+
+
+def _reserved_documentation_evidence_host(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = urlsplit(value.strip())
+    except ValueError:
+        return None
+    host = str(parsed.hostname or "").rstrip(".").lower()
+    if (
+        host in _RESERVED_EVIDENCE_HOSTS
+        or any(host.endswith("." + reserved) for reserved in _RESERVED_EVIDENCE_HOSTS)
+        or host.endswith(_RESERVED_EVIDENCE_SUFFIXES)
+    ):
+        return host
+    return None
+
+
+def public_evidence_independence_key(value: object) -> str | None:
     """Return a conservative host key for a structurally public HTTP(S) URL.
 
     This is deliberately an offline check: it rejects loopback/private/local
@@ -1879,6 +2420,8 @@ def _public_evidence_independence_key(value: object) -> str | None:
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         return None
     host = parsed.hostname.rstrip(".").lower()
+    if _reserved_documentation_evidence_host(value) is not None:
+        return None
     if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
         return None
     try:
@@ -2039,6 +2582,35 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
     pre_unresolved_reasons: list[tuple[str, str]] = []
     _validate_json_values(candidate, "$", issues)
     try:
+        transport_json = _canonical_fragment(candidate)
+    except (TypeError, ValueError):
+        transport_json = ""
+    if transport_json:
+        try:
+            utf8_bytes = len(transport_json.encode("utf-8"))
+            utf16_code_units = len(transport_json.encode("utf-16-le")) // 2
+        except UnicodeEncodeError:
+            _issue(
+                issues,
+                "BLUEPRINT_STRING_ENCODING_INVALID",
+                "$",
+                "Blueprint strings must be valid Unicode for Sheet transport",
+            )
+            utf8_bytes = 0
+            utf16_code_units = 0
+        if (
+            utf8_bytes > MAX_CANONICAL_BLUEPRINT_UTF8_BYTES
+            or utf16_code_units > MAX_CANONICAL_BLUEPRINT_UTF16_CODE_UNITS
+        ):
+            _issue(
+                issues,
+                "BLUEPRINT_TRANSPORT_SIZE_EXCEEDED",
+                "$",
+                "Canonical blueprint exceeds the safe Google Sheet transport budget "
+                f"(utf8={utf8_bytes}/{MAX_CANONICAL_BLUEPRINT_UTF8_BYTES}, "
+                f"utf16={utf16_code_units}/{MAX_CANONICAL_BLUEPRINT_UTF16_CODE_UNITS})",
+            )
+    try:
         schema_contract = _canonical_schema_contract()
     except BlueprintValidationError as exc:
         issues.extend(
@@ -2082,8 +2654,15 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
             url = record.get("url")
             if not isinstance(url, str) or not _HTTP_URL_PATTERN.match(url):
                 _issue(issues, "SOURCE_URL_INVALID", f"{path}.url", "Evidence URL must use http or https")
+            elif _reserved_documentation_evidence_host(url) is not None:
+                _issue(
+                    issues,
+                    "SOURCE_URL_RESERVED_DOCUMENTATION_DOMAIN",
+                    f"{path}.url",
+                    "RFC documentation and test domains cannot be used as trading research evidence",
+                )
             else:
-                independence_key = _public_evidence_independence_key(url)
+                independence_key = public_evidence_independence_key(url)
                 if independence_key is None:
                     _issue(
                         issues,
@@ -2130,6 +2709,7 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
         issues,
     )
     enabled_sides: set[str] = set()
+    scope_timeframes: set[str] = set()
     if scope is not None:
         _validate_nonempty_string(scope.get("systemName"), "$.scope.systemName", issues)
         _validate_nonempty_string(scope.get("strategyFamily"), "$.scope.strategyFamily", issues)
@@ -2138,6 +2718,14 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
         _validate_string_list(scope.get("symbols"), "$.scope.symbols", issues, min_items=1)
         _validate_nonempty_string(scope.get("signalTimeframe"), "$.scope.signalTimeframe", issues)
         _validate_nonempty_string(scope.get("executionTimeframe"), "$.scope.executionTimeframe", issues)
+        scope_timeframes = {
+            str(value)
+            for value in (
+                scope.get("signalTimeframe"),
+                scope.get("executionTimeframe"),
+            )
+            if isinstance(value, str) and value
+        }
         _validate_nonempty_string(scope.get("timezone"), "$.scope.timezone", issues)
         _validate_string_list(scope.get("sessions"), "$.scope.sessions", issues)
         enabled_sides = set(_validate_string_list(scope.get("enabledSides"), "$.scope.enabledSides", issues, min_items=1, enum=SIDES))
@@ -2146,6 +2734,7 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
             _issue(issues, "BOOLEAN_REQUIRED", "$.scope.onePositionPerSymbol", "Expected a boolean")
 
     input_ids: set[str] = set()
+    input_records_by_id: dict[str, Mapping[str, Any]] = {}
     inputs = candidate.get("inputs")
     if not isinstance(inputs, list):
         _issue(issues, "ARRAY_REQUIRED", "$.inputs", "inputs must be an array")
@@ -2164,6 +2753,8 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
             if _validate_nonempty_string(input_id, f"{path}.inputId", issues, pattern=_ID_PATTERN):
                 if input_id in input_ids:
                     _issue(issues, "INPUT_ID_DUPLICATE", f"{path}.inputId", "inputId must be unique")
+                else:
+                    input_records_by_id[str(input_id)] = record
                 input_ids.add(str(input_id))
             _validate_nonempty_string(record.get("label"), f"{path}.label", issues)
             if record.get("type") not in INPUT_TYPES:
@@ -2203,14 +2794,74 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
                 indicator_ids.add(str(indicator_id))
             for key in ("kind", "timeframe", "appliedPrice", "outputLine"):
                 _validate_nonempty_string(record.get(key), f"{path}.{key}", issues)
-            if not isinstance(record.get("parameters"), Mapping):
+            timeframe = record.get("timeframe")
+            if (
+                isinstance(timeframe, str)
+                and timeframe
+                and timeframe not in {"signal", "execution", *scope_timeframes}
+            ):
+                _issue(
+                    issues,
+                    "INDICATOR_TIMEFRAME_UNBOUND",
+                    f"{path}.timeframe",
+                    "Indicator timeframe must be signal, execution, or one of the scoped timeframes",
+                )
+            parameters = record.get("parameters")
+            if not isinstance(parameters, Mapping):
                 _issue(issues, "OBJECT_REQUIRED", f"{path}.parameters", "Indicator parameters must be an object")
             else:
-                for parameter, parameter_value in record["parameters"].items():
+                normalized_kind = re.sub(
+                    r"[^a-z0-9]+",
+                    "",
+                    str(record.get("kind") or "").lower(),
+                )
+                parameterized_kinds = {
+                    "ema",
+                    "sma",
+                    "smma",
+                    "lwma",
+                    "ma",
+                    "movingaverage",
+                    "rsi",
+                    "atr",
+                    "adx",
+                    "cci",
+                    "momentum",
+                    "macd",
+                    "bollingerbands",
+                    "stochastic",
+                    "ichimoku",
+                }
+                if normalized_kind in parameterized_kinds and not parameters:
+                    pre_unresolved_reasons.append(
+                        (path, f"{record.get('kind')} indicator parameters are missing")
+                    )
+                for parameter, parameter_value in parameters.items():
+                    if parameter_value in (None, "", [], {}):
+                        pre_unresolved_reasons.append(
+                            (
+                                f"{path}.parameters.{parameter}",
+                                "indicator parameter value is unresolved",
+                            )
+                        )
                     if isinstance(parameter_value, Mapping) and "inputRef" in parameter_value:
                         ref = parameter_value.get("inputRef")
                         if ref not in input_ids:
                             _issue(issues, "INPUT_REF_UNDEFINED", f"{path}.parameters.{parameter}.inputRef", f"Unknown input reference {ref!r}")
+            _validate_moving_average_indicator(
+                record,
+                path,
+                input_records=input_records_by_id,
+                issues=issues,
+                unresolved_reasons=pre_unresolved_reasons,
+            )
+            _validate_supported_indicator_contract(
+                record,
+                path,
+                input_records=input_records_by_id,
+                issues=issues,
+                unresolved_reasons=pre_unresolved_reasons,
+            )
             if record.get("sourceStatus") not in SOURCE_STATUSES:
                 _issue(issues, "SOURCE_STATUS_INVALID", f"{path}.sourceStatus", f"Expected one of {sorted(SOURCE_STATUSES)}")
             elif record.get("sourceStatus") == "unknown":
@@ -2234,13 +2885,39 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
             side_record = _validate_required_mapping(section.get(side), side_path, ("enabled", "disabledReason", "rules"), issues)
             if side_record is None:
                 continue
-            if not isinstance(side_record.get("enabled"), bool):
+            side_enabled = side_record.get("enabled")
+            side_rules = side_record.get("rules")
+            if not isinstance(side_enabled, bool):
                 _issue(issues, "BOOLEAN_REQUIRED", f"{side_path}.enabled", "Expected a boolean")
-            if side_record.get("enabled") is False and not isinstance(side_record.get("disabledReason"), str):
-                _issue(issues, "DISABLED_REASON_REQUIRED", f"{side_path}.disabledReason", "Disabled side requires a reason string")
-            if lifecycle_section == "entry" and ((side in enabled_sides) != (side_record.get("enabled") is True)):
-                _issue(issues, "SIDE_ENABLEMENT_MISMATCH", f"{side_path}.enabled", "entry side must match scope.enabledSides")
-            if lifecycle_section == "entry" and side_record.get("enabled") is True:
+            if side_enabled is False:
+                disabled_reason = side_record.get("disabledReason")
+                if not isinstance(disabled_reason, str) or not disabled_reason.strip():
+                    _issue(issues, "DISABLED_REASON_REQUIRED", f"{side_path}.disabledReason", "Disabled side requires a non-empty reason")
+                if isinstance(side_rules, list) and side_rules:
+                    _issue(
+                        issues,
+                        "DISABLED_SIDE_RULES_NOT_EMPTY",
+                        f"{side_path}.rules",
+                        "Disabled entry/exit containers must not retain executable rule records",
+                    )
+            if isinstance(side_rules, list) and side_enabled is not True and any(
+                isinstance(rule, Mapping) and rule.get("enabled") is True
+                for rule in side_rules
+            ):
+                _issue(
+                    issues,
+                    "CHILD_RULE_ENABLEMENT_MISMATCH",
+                    f"{side_path}.rules",
+                    "An enabled child rule requires its entry/exit container to be enabled",
+                )
+            if (side in enabled_sides) != (side_enabled is True):
+                _issue(
+                    issues,
+                    "SIDE_ENABLEMENT_MISMATCH",
+                    f"{side_path}.enabled",
+                    f"{lifecycle_section} side must match scope.enabledSides",
+                )
+            if lifecycle_section == "entry" and side_enabled is True:
                 if side_record.get("orderType") not in ENTRY_ORDER_TYPES:
                     _issue(issues, "ORDER_TYPE_INVALID", f"{side_path}.orderType", f"Expected one of {sorted(ENTRY_ORDER_TYPES)}")
 
@@ -2271,6 +2948,83 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
         _validate_source_refs(rule.get("sourceRefs"), f"{path}.sourceRefs", evidence_ids, issues, required=source_status == "verified_fact")
         if not isinstance(rule.get("enabled"), bool):
             _issue(issues, "BOOLEAN_REQUIRED", f"{path}.enabled", "Typed rule requires enabled boolean")
+        phase = rule.get("phase")
+        side = rule.get("side")
+        evaluation_event = rule.get("evaluationEvent")
+        if phase not in RULE_PHASES:
+            _issue(
+                issues,
+                "RULE_PHASE_INVALID",
+                f"{path}.phase",
+                f"Expected one of {sorted(RULE_PHASES)}",
+            )
+        if side not in RULE_SIDES:
+            _issue(
+                issues,
+                "RULE_SIDE_REQUIRED",
+                f"{path}.side",
+                f"Expected one of {sorted(RULE_SIDES)}",
+            )
+        if evaluation_event not in RULE_EVALUATION_EVENTS:
+            _issue(
+                issues,
+                "RULE_EVALUATION_EVENT_REQUIRED",
+                f"{path}.evaluationEvent",
+                f"Expected one of {sorted(RULE_EVALUATION_EVENTS)}",
+            )
+        _validate_nonempty_string(
+            rule.get("humanTextTh"),
+            f"{path}.humanTextTh",
+            issues,
+        )
+
+        expected_phase: str | None = None
+        expected_side: str | None = None
+        if path.startswith("$.setup.rules["):
+            expected_phase = "setup"
+            if rule.get("enabled") is True and side not in {"buy", "sell", "both"}:
+                _issue(
+                    issues,
+                    "SETUP_RULE_SIDE_INVALID",
+                    f"{path}.side",
+                    "Enabled setup rules must explicitly target buy, sell, or both",
+                )
+        else:
+            lifecycle_match = re.match(
+                r"^\$\.(entry|exit)\.(buy|sell)\.rules\[\d+\]$",
+                path,
+            )
+            if lifecycle_match:
+                expected_phase, expected_side = lifecycle_match.groups()
+            elif path.startswith("$.recovery.levelRules["):
+                expected_phase = "recovery"
+            elif path.startswith("$.orderManagement."):
+                expected_phase = "modify"
+        if expected_phase and phase != expected_phase:
+            _issue(
+                issues,
+                "RULE_CONTAINER_PHASE_MISMATCH",
+                f"{path}.phase",
+                f"Rule in this container must use phase {expected_phase}",
+            )
+        if expected_side and side != expected_side:
+            _issue(
+                issues,
+                "RULE_CONTAINER_SIDE_MISMATCH",
+                f"{path}.side",
+                f"Rule in this container must use side {expected_side}",
+            )
+        if (
+            closed_bar
+            and phase in {"setup", "entry", "exit", "safety"}
+            and evaluation_event != "new_closed_bar"
+        ):
+            _issue(
+                issues,
+                "CLOSED_BAR_EVALUATION_EVENT_INVALID",
+                f"{path}.evaluationEvent",
+                "Closed-bar setup, entry, exit, and safety rules must evaluate on new_closed_bar",
+            )
         if source_status == "unknown" or (isinstance(rule.get("expression"), Mapping) and rule["expression"].get("op") == "unknown"):
             unresolved_reasons.append((path, "rule is unresolved"))
         _validate_expression(
@@ -2319,6 +3073,9 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
 
     tests = candidate.get("testCases")
     test_kinds: dict[str, set[str]] = {rule_id: set() for rule_id in rule_ids}
+    test_records: dict[str, dict[str, list[Mapping[str, Any]]]] = {
+        rule_id: {} for rule_id in rule_ids
+    }
     if not isinstance(tests, list):
         _issue(issues, "ARRAY_REQUIRED", "$.testCases", "testCases must be an array")
     else:
@@ -2342,9 +3099,28 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
                     _issue(issues, "RULE_REF_UNDEFINED", f"{path}.ruleIds[{ref_index}]", f"Unknown rule reference {ref!r}")
                 else:
                     test_kinds.setdefault(ref, set()).add(str(kind))
+                    test_records.setdefault(ref, {}).setdefault(str(kind), []).append(record)
             for key in ("given", "when", "expected"):
-                if not isinstance(record.get(key), (Mapping, list, str)):
+                payload = record.get(key)
+                if not isinstance(payload, (Mapping, list, str)):
                     _issue(issues, "TEST_PAYLOAD_INVALID", f"{path}.{key}", "Test payload must be an object, array, or string")
+                    continue
+                if not _test_payload_is_meaningful(payload):
+                    _issue(
+                        issues,
+                        "TEST_PAYLOAD_EMPTY",
+                        f"{path}.{key}",
+                        "Test payload must contain at least one meaningful value",
+                    )
+                    continue
+                payload_size = _test_payload_size_bytes(payload)
+                if payload_size is None or payload_size > MAX_TEST_PAYLOAD_BYTES:
+                    _issue(
+                        issues,
+                        "TEST_PAYLOAD_TOO_LARGE",
+                        f"{path}.{key}",
+                        f"Test payload cannot exceed {MAX_TEST_PAYLOAD_BYTES} UTF-8 bytes",
+                    )
 
     for rule_path, rule in rule_records:
         rule_id = rule.get("ruleId")
@@ -2360,6 +3136,47 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
         expression = rule.get("expression")
         if isinstance(expression, Mapping) and expression.get("op") in {"cross_above", "cross_below"}:
             required_kinds.add("boundary")
+            cases_by_kind = test_records.get(rule_id, {})
+            positive_cases = cases_by_kind.get("positive", [])
+            negative_cases = cases_by_kind.get("negative", [])
+            boundary_cases = cases_by_kind.get("boundary", [])
+            positive_expected = {
+                _test_payload_fingerprint(case.get("expected")) for case in positive_cases
+            }
+            negative_expected = {
+                _test_payload_fingerprint(case.get("expected")) for case in negative_cases
+            }
+            if positive_cases and negative_cases and positive_expected.intersection(negative_expected):
+                _issue(
+                    issues,
+                    "TEST_CROSS_OUTCOMES_INDISTINGUISHABLE",
+                    "$.testCases",
+                    f"Cross rule {rule_id} positive and negative tests must assert different outcomes",
+                )
+            positive_given = {
+                _test_payload_fingerprint(case.get("given")) for case in positive_cases
+            }
+            negative_given = {
+                _test_payload_fingerprint(case.get("given")) for case in negative_cases
+            }
+            if positive_cases and negative_cases and positive_given.intersection(negative_given):
+                _issue(
+                    issues,
+                    "TEST_CROSS_INPUTS_INDISTINGUISHABLE",
+                    "$.testCases",
+                    f"Cross rule {rule_id} positive and negative tests must use different inputs",
+                )
+            non_boundary_given = positive_given | negative_given
+            if boundary_cases and not any(
+                _test_payload_fingerprint(case.get("given")) not in non_boundary_given
+                for case in boundary_cases
+            ):
+                _issue(
+                    issues,
+                    "TEST_CROSS_BOUNDARY_NOT_MEANINGFUL",
+                    "$.testCases",
+                    f"Cross rule {rule_id} boundary test must use a distinct equality/boundary input",
+                )
         missing = required_kinds - observed
         if missing:
             unresolved_reasons.append(
@@ -3754,10 +4571,24 @@ def normalize_and_validate_blueprint(
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """Return a canonical candidate and stable validation issue records."""
 
+    preflight_issues = _preflight_blueprint_limits(blueprint)
+    if preflight_issues:
+        return {}, [issue.as_dict() for issue in preflight_issues]
     try:
         candidate = _normalize_candidate(blueprint)
+    except RecursionError:
+        return {}, [
+            BlueprintIssue(
+                "BLUEPRINT_DEPTH_EXCEEDED",
+                "$",
+                "Blueprint nesting exceeded the safe normalization boundary",
+            ).as_dict()
+        ]
     except BlueprintValidationError as exc:
         return {}, [dict(issue) for issue in exc.issues]
+    normalized_preflight_issues = _preflight_blueprint_limits(candidate)
+    if normalized_preflight_issues:
+        return {}, [issue.as_dict() for issue in normalized_preflight_issues]
     issues = _validate_blueprint_candidate(candidate, require_ready=require_ready)
     return candidate, [issue.as_dict() for issue in issues]
 
@@ -4149,7 +4980,9 @@ def render_ea_ready_text(blueprint: object) -> str:
             human = rule.get("humanTextTh")
             expression = _expression_text(rule.get("expression"))
             lines.append(
-                f"- {rule.get('ruleId')} ({rule.get('phase')}, source={rule.get('sourceStatus')}): "
+                f"- {rule.get('ruleId')} (phase={rule.get('phase')}, "
+                f"side={rule.get('side')}, evaluate={rule.get('evaluationEvent')}, "
+                f"source={rule.get('sourceStatus')}): "
                 f"{human + ' | ' if isinstance(human, str) and human else ''}{expression}"
             )
         if not found:

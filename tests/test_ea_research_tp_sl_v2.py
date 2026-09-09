@@ -51,13 +51,19 @@ def add_input(blueprint: dict, input_id: str, default: int | float) -> None:
     blueprint["inputs"].append(input_record(input_id, default, []))
 
 
-def add_indicator(blueprint: dict, indicator_id: str, kind: str) -> None:
+def add_indicator(
+    blueprint: dict,
+    indicator_id: str,
+    kind: str,
+    *,
+    parameters: dict | None = None,
+) -> None:
     blueprint["indicators"].append(
         {
             "indicatorId": indicator_id,
             "kind": kind,
             "timeframe": "signal",
-            "parameters": {},
+            "parameters": dict(parameters or {}),
             "appliedPrice": "close",
             "outputLine": "main",
             "sourceStatus": "verified_fact",
@@ -86,7 +92,7 @@ class EAResearchTpSlV2Tests(unittest.TestCase):
 
         atr = ready_blueprint()
         add_input(atr, "atr_multiplier", 2.0)
-        add_indicator(atr, "atr_14", "ATR")
+        add_indicator(atr, "atr_14", "ATR", parameters={"period": 14})
         configure(
             atr["tpSl"]["stopLoss"],
             "atr",

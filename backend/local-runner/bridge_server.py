@@ -51,6 +51,7 @@ from ea_research_blueprint import (  # noqa: E402 - trusted EA-ready research co
     BlueprintValidationError as EAResearchBlueprintValidationError,
     compute_blueprint_digest as ea_research_blueprint_digest,
     normalize_blueprint as normalize_ea_research_blueprint,
+    public_evidence_independence_key,
     project_blueprint_to_legacy_report_metrics as ea_research_report_projection,
     reconstruct_blueprint_from_deep_sheet_row as reconstruct_ea_research_from_sheet,
     reconstruct_blueprint_from_research_metrics as reconstruct_ea_research_from_metrics,
@@ -79,7 +80,7 @@ from radar_image_adapter import (  # noqa: E402 - public HTTPS publisher-image e
     verify_radar_entry_artifact,
 )
 
-BRIDGE_RUNTIME_VERSION = "0.9.11"
+BRIDGE_RUNTIME_VERSION = "0.9.12"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_STARTED_MONOTONIC = time.monotonic()
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
@@ -650,6 +651,14 @@ MAX_OHLC_REQUEST_BYTES = ((MAX_OHLC_FILE_BYTES + 2) // 3 * 4) + (32 * 1024)
 MAX_OHLC_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_REPORT_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_REPORT_DOWNLOAD_BYTES = 10 * 1024 * 1024
+# Deep Research already gives the runner a bounded 64 KiB structured-output
+# envelope.  Keep that same ceiling when the digest-bound canonical blueprint
+# is projected back to the dashboard.  A validated object must either survive
+# the generic response sanitizer byte-for-byte or be returned fail-closed; a
+# response must never advertise digestMatched=True for altered JSON.
+EA_RESEARCH_CANONICAL_RESPONSE_MAX_BYTES = 64 * 1024
+JSON_RESPONSE_MAX_DEPTH = 32
+EA_RESEARCH_RESPONSE_WRAPPER_DEPTH = 6
 EA_FACTORY_SCHEMA_VERSION = "ea-factory-v1"
 EA_FACTORY_STATE_SCHEMA_VERSION = "ea-factory-state-v1"
 EA_FACTORY_SOURCE_SNAPSHOT_LIMIT = 8
@@ -1673,7 +1682,7 @@ DASHBOARD_DISCOVERY_SHEET_COLUMNS = (
 )
 
 RESEARCH_SHEET_HUB_SCHEMA_VERSION = "research-sheet-hub-v1"
-RESEARCH_SHEET_OUTBOX_SCHEMA_VERSION = "research-sheet-outbox-v4"
+RESEARCH_SHEET_OUTBOX_SCHEMA_VERSION = "research-sheet-outbox-v5"
 RESEARCH_SHEET_WORLD_WRITE_HEADERS = (
     "discovery_id", "record_type", "discovered_at", "last_verified_at",
     "system_name", "trader_or_author", "source_title", "source_url",
@@ -1768,6 +1777,7 @@ RESEARCH_SHEET_SYNC_REPORT_CONSUMERS = {
 RESEARCH_SHEET_OUTBOX_LIMIT = 600
 RESEARCH_SHEET_SYNC_LEDGER_LIMIT = 5000
 RESEARCH_SHEET_FAILED_LEDGER_LIMIT = 5000
+RESEARCH_SHEET_QUARANTINE_LEDGER_LIMIT = 5000
 # A report rejected only because the row outbox is full is retained by opaque
 # report id. Runtime report files remain the source of truth, so this compact
 # queue can cover history older than the bounded 240-report discovery window.
@@ -2037,7 +2047,7 @@ def sanitize_json_value(value, depth: int = 0, collection_limit: int = 100, stri
     # final HTTP projection and also clipped deeper report evidence.  Keep a
     # finite ceiling for hostile or accidental nesting, but allow the public
     # read model to survive the second sanitization performed by send_json().
-    if depth > 12:
+    if depth > JSON_RESPONSE_MAX_DEPTH:
         return "[TRUNCATED]"
     if isinstance(value, str):
         return redact_text(value, string_limit)
@@ -8171,6 +8181,32 @@ def _normalized_contract_public_url(value: object) -> str | None:
     ).geturl()
 
 
+def _normalized_external_research_evidence_url(value: object) -> str | None:
+    """Normalize real external research evidence and reject RFC test hosts.
+
+    Documentation-only namespaces are useful in unit tests and examples but
+    can never prove a verified World System discovery.  Keep this boundary
+    scoped to external trading research so generic URL handling elsewhere is
+    unchanged.
+    """
+
+    normalized = _normalized_contract_public_url(value)
+    if not normalized:
+        return None
+    try:
+        hostname = str(urlparse(normalized).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    reserved_hosts = {"example.com", "example.org", "example.net"}
+    if (
+        hostname in reserved_hosts
+        or any(hostname.endswith("." + item) for item in reserved_hosts)
+        or hostname.endswith((".example", ".invalid", ".test", ".localhost"))
+    ):
+        return None
+    return normalized
+
+
 def _unique_public_evidence_rows(value: object) -> list[dict]:
     unique: list[dict] = []
     seen: set[str] = set()
@@ -10997,7 +11033,11 @@ def _normalize_trading_system_contract_rows(
     evidence_urls = {
         normalized
         for row in evidence_rows
-        if (normalized := _normalized_contract_public_url(row.get("url")))
+        if (
+            normalized := _normalized_external_research_evidence_url(
+                row.get("url")
+            )
+        )
     }
     existing_fingerprints = (
         set(existing_fingerprints_override)
@@ -11024,7 +11064,7 @@ def _normalize_trading_system_contract_rows(
     def public_evidence_url(raw: object, *, optional: bool = False) -> str | None:
         if (raw is None or raw == "") and optional:
             return None
-        normalized = _normalized_contract_public_url(raw)
+        normalized = _normalized_external_research_evidence_url(raw)
         if not normalized or normalized not in evidence_urls:
             return None
         return normalized
@@ -11168,12 +11208,14 @@ def _normalize_trading_system_contract_rows(
         if corroborating_url == source_url:
             errors.append(f"{prefix}_source_urls_not_distinct")
             continue
-        source_hostname = str(urlparse(source_url).hostname or "").lower()
-        corroborating_hostname = str(urlparse(corroborating_url).hostname or "").lower()
+        source_evidence_key = public_evidence_independence_key(source_url)
+        corroborating_evidence_key = public_evidence_independence_key(
+            corroborating_url
+        )
         if (
-            not source_hostname
-            or not corroborating_hostname
-            or source_hostname == corroborating_hostname
+            not source_evidence_key
+            or not corroborating_evidence_key
+            or source_evidence_key == corroborating_evidence_key
         ):
             errors.append(f"{prefix}_source_hosts_not_independent")
             continue
@@ -14124,6 +14166,8 @@ def _ea_research_unavailable_read_model(
         "score": None,
         "eaHandoffAllowed": False,
         "deterministicBacktestAllowed": False,
+        "requiresResearchRerun": True,
+        "requiresResearchRevision": True,
         "blueprintDigest": digest if re.fullmatch(r"[0-9a-f]{64}", digest) else None,
         "blueprint": None,
         "blockingIssues": [],
@@ -14187,7 +14231,7 @@ def _ea_research_canonical_read_model(
         readiness_issues.append("ea_blueprint_conflict_paths")
     if not ready and not readiness_issues:
         readiness_issues.append("ea_blueprint_needs_clarification")
-    return sanitize_json_value({
+    read_model = {
         "schemaVersion": EA_RESEARCH_SCHEMA_VERSION,
         "validationStatus": "canonical_validated",
         "validated": True,
@@ -14199,6 +14243,8 @@ def _ea_research_canonical_read_model(
         "deterministicBacktestAllowed": (
             completeness.get("deterministicBacktestAllowed") is True
         ),
+        "requiresResearchRerun": False,
+        "requiresResearchRevision": not ready,
         "blueprintDigest": actual_digest,
         "blueprint": normalized,
         "blockingIssues": completeness.get("blockingIssues") or [],
@@ -14206,7 +14252,33 @@ def _ea_research_canonical_read_model(
         "unknownPaths": completeness.get("unknownPaths") or [],
         "conflictPaths": completeness.get("conflictPaths") or [],
         "readinessIssues": readiness_issues,
-    }, collection_limit=1000, string_limit=20000)
+    }
+    # The digest above binds ``normalized`` exactly.  Do not then run the
+    # object through a lossy presentation sanitizer and keep claiming that the
+    # digest matched.  Prove that the complete read model survives the same
+    # collection/string/depth policy used by the HTTP response, allowing for
+    # the deepest dashboard/catalog wrapper.  Oversized, over-deep, secret-like
+    # or otherwise lossy payloads remain visible only as a fail-closed status.
+    encoded = json.dumps(
+        read_model,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    response_safe = sanitize_json_value(
+        read_model,
+        depth=EA_RESEARCH_RESPONSE_WRAPPER_DEPTH,
+        collection_limit=1000,
+        string_limit=20000,
+    )
+    if (
+        len(encoded) > EA_RESEARCH_CANONICAL_RESPONSE_MAX_BYTES
+        or response_safe != read_model
+    ):
+        return _ea_research_unavailable_read_model(
+            "ea_blueprint_response_bounds_exceeded",
+            blueprint_digest=actual_digest,
+        )
+    return read_model
 
 
 def _ea_research_report_read_model(report: dict, metrics: dict) -> dict:
@@ -15047,6 +15119,7 @@ def _research_sheet_outbox_default() -> dict:
         "items": [],
         "syncedLedger": [],
         "failedLedger": [],
+        "quarantinedReports": [],
         "deferredReports": [],
         "updatedAt": None,
     }
@@ -15585,6 +15658,36 @@ def _load_research_sheet_outbox_unlocked() -> dict:
                 120,
             ) or None,
         })
+    quarantined_reports = []
+    for entry in (
+        source.get("quarantinedReports")
+        if isinstance(source.get("quarantinedReports"), list)
+        else []
+    )[-RESEARCH_SHEET_QUARANTINE_LEDGER_LIMIT:]:
+        if not isinstance(entry, dict):
+            continue
+        quarantine_id = safe_reference(entry.get("id"))
+        report_id = safe_reference(entry.get("reportId"))
+        consumer_id = safe_reference(entry.get("consumerId"))
+        config_revision = clamp_int(
+            entry.get("configRevision"),
+            -1,
+            -1,
+            999999,
+        )
+        if not quarantine_id or not report_id or not consumer_id or config_revision < 0:
+            continue
+        quarantined_reports.append({
+            "id": quarantine_id,
+            "configRevision": config_revision,
+            "consumerId": consumer_id,
+            "reportId": report_id,
+            "quarantinedAt": entry.get("quarantinedAt"),
+            "lastErrorCode": redact_text(
+                str(entry.get("lastErrorCode") or "").strip(),
+                120,
+            ) or None,
+        })
     deferred_reports = []
     deferred_keys: set[tuple[str, int]] = set()
     for entry in (
@@ -15607,6 +15710,7 @@ def _load_research_sheet_outbox_unlocked() -> dict:
         "items": items,
         "syncedLedger": synced_ledger,
         "failedLedger": failed_ledger,
+        "quarantinedReports": quarantined_reports,
         "deferredReports": deferred_reports,
         "updatedAt": source.get("updatedAt"),
     }
@@ -15699,6 +15803,18 @@ def _save_research_sheet_outbox_unlocked(store: dict) -> None:
             # terminal marker with the same deterministic identity.
             failed_ledger_by_id.pop(item_id, None)
     failed_ledger = list(failed_ledger_by_id.values())[-RESEARCH_SHEET_FAILED_LEDGER_LIMIT:]
+    quarantine_by_id = {
+        safe_reference(entry.get("id")): copy.deepcopy(entry)
+        for entry in (
+            store.get("quarantinedReports")
+            if isinstance(store.get("quarantinedReports"), list)
+            else []
+        )
+        if isinstance(entry, dict) and safe_reference(entry.get("id"))
+    }
+    quarantined_reports = list(quarantine_by_id.values())[
+        -RESEARCH_SHEET_QUARANTINE_LEDGER_LIMIT:
+    ]
     deferred_by_key: dict[tuple[str, int], dict] = {}
     for entry in (
         store.get("deferredReports")
@@ -15744,6 +15860,7 @@ def _save_research_sheet_outbox_unlocked(store: dict) -> None:
         "items": compacted[:RESEARCH_SHEET_OUTBOX_LIMIT],
         "syncedLedger": synced_ledger,
         "failedLedger": failed_ledger,
+        "quarantinedReports": quarantined_reports,
         "deferredReports": deferred_reports,
         "updatedAt": utc_now(),
     }
@@ -15778,6 +15895,13 @@ def _research_sheet_reset_outbox_for_revision(config_revision: int) -> int:
             and clamp_int(entry.get("configRevision"), -1, -1, 999999)
             == config_revision
         ]
+        original_quarantined_reports = list(store.get("quarantinedReports") or [])
+        current_quarantined_reports = [
+            entry for entry in original_quarantined_reports
+            if isinstance(entry, dict)
+            and clamp_int(entry.get("configRevision"), -1, -1, 999999)
+            == config_revision
+        ]
         original_deferred_reports = list(store.get("deferredReports") or [])
         current_deferred_reports = [
             entry for entry in original_deferred_reports
@@ -15789,16 +15913,21 @@ def _research_sheet_reset_outbox_for_revision(config_revision: int) -> int:
             len(current) != len(original)
             or len(current_ledger) != len(original_ledger)
             or len(current_failed_ledger) != len(original_failed_ledger)
+            or len(current_quarantined_reports)
+            != len(original_quarantined_reports)
             or len(current_deferred_reports) != len(original_deferred_reports)
         ):
             store["items"] = current
             store["syncedLedger"] = current_ledger
             store["failedLedger"] = current_failed_ledger
+            store["quarantinedReports"] = current_quarantined_reports
             store["deferredReports"] = current_deferred_reports
             _save_research_sheet_outbox_unlocked(store)
         return (len(original) - len(current)) + (
             len(original_ledger) - len(current_ledger)
         ) + (len(original_failed_ledger) - len(current_failed_ledger)) + (
+            len(original_quarantined_reports) - len(current_quarantined_reports)
+        ) + (
             len(original_deferred_reports) - len(current_deferred_reports)
         )
 
@@ -15826,6 +15955,15 @@ def _research_sheet_outbox_summary(config_revision: object | None = None) -> dic
         if revision < 0
         or clamp_int(item.get("configRevision"), -2, -2, 999999) == revision
     ]
+    all_quarantined_reports = [
+        item for item in (store.get("quarantinedReports") or [])
+        if isinstance(item, dict)
+    ]
+    quarantined_reports = [
+        item for item in all_quarantined_reports
+        if revision < 0
+        or clamp_int(item.get("configRevision"), -2, -2, 999999) == revision
+    ]
     all_deferred_reports = [
         marker for marker in (store.get("deferredReports") or [])
         if isinstance(marker, dict)
@@ -15842,7 +15980,7 @@ def _research_sheet_outbox_summary(config_revision: object | None = None) -> dic
             continue
         counts = by_consumer.setdefault(
             consumer_id,
-            {"pending": 0, "failed": 0, "synced": 0, "deferred": 0},
+            {"pending": 0, "failed": 0, "synced": 0, "deferred": 0, "quarantined": 0},
         )
         status = str(item.get("status") or "")
         if status in {"pending", "retry_pending", "write_unknown"}:
@@ -15855,16 +15993,25 @@ def _research_sheet_outbox_summary(config_revision: object | None = None) -> dic
             continue
         counts = by_consumer.setdefault(
             consumer_id,
-            {"pending": 0, "failed": 0, "synced": 0, "deferred": 0},
+            {"pending": 0, "failed": 0, "synced": 0, "deferred": 0, "quarantined": 0},
         )
         counts["failed"] += 1
+    for item in quarantined_reports:
+        consumer_id = str(item.get("consumerId") or "").strip()
+        if not consumer_id:
+            continue
+        counts = by_consumer.setdefault(
+            consumer_id,
+            {"pending": 0, "failed": 0, "synced": 0, "deferred": 0, "quarantined": 0},
+        )
+        counts["quarantined"] += 1
     for marker in deferred_reports:
         consumer_id = str(marker.get("consumerId") or "").strip()
         if not consumer_id:
             continue
         counts = by_consumer.setdefault(
             consumer_id,
-            {"pending": 0, "failed": 0, "synced": 0, "deferred": 0},
+            {"pending": 0, "failed": 0, "synced": 0, "deferred": 0, "quarantined": 0},
         )
         counts["deferred"] += 1
     all_identities = {
@@ -15883,6 +16030,7 @@ def _research_sheet_outbox_summary(config_revision: object | None = None) -> dic
     return {
         "pending": sum(1 for item in items if item.get("status") in {"pending", "retry_pending", "write_unknown"}),
         "failed": len(failed_items),
+        "quarantined": len(quarantined_reports),
         "synced": sum(1 for item in items if item.get("status") == "synced"),
         "deferred": len(deferred_reports),
         "byConsumer": by_consumer,
@@ -15890,6 +16038,10 @@ def _research_sheet_outbox_summary(config_revision: object | None = None) -> dic
         "priorConfigDeferredReports": max(
             0,
             len(all_deferred_reports) - len(deferred_reports),
+        ),
+        "priorConfigQuarantinedReports": max(
+            0,
+            len(all_quarantined_reports) - len(quarantined_reports),
         ),
         "updatedAt": store.get("updatedAt"),
     }
@@ -16063,7 +16215,7 @@ def _research_sheet_requeue_failed_current_revision(
         )
         scanned = 0
         store_changed = False
-        deep_version_index: dict[str, dict] | None = None
+        deep_version_index: dict[tuple[str, str], dict] | None = None
         deep_version_index_unavailable = False
         for source_kind, candidate, live_reopen_exhausted in eligible[:scan_limit]:
             if requeued >= selected_limit:
@@ -21724,16 +21876,40 @@ def _ea_factory_deep_research_values(row: dict) -> dict:
     risk_model = _research_sheet_json_cell(
         row.get("risk_model_json"), expected=dict, fallback={}
     )
-    implementation_notes = _research_sheet_json_cell(
-        row.get("implementation_notes_json"), expected=dict, fallback={}
+    implementation_notes = _research_sheet_lossless_json_cell_decode(
+        row.get("implementation_notes_json"),
+        expected=dict,
+        fallback={},
+        max_chars=TRADING_SYSTEM_RESEARCH_SHEET_BLUEPRINT_CELL_MAX_CHARS,
+        field_name="implementation_notes_json",
     )
     try:
-        research_blueprint = reconstruct_ea_research_from_sheet(row)
+        research_blueprint = reconstruct_ea_research_from_sheet({
+            **row,
+            "implementation_notes_json": implementation_notes,
+        })
     except EAResearchBlueprintValidationError:
         research_blueprint = None
+    lineage_record_id = (
+        safe_reference(row.get("source_record_id"))
+        or safe_reference(row.get("source_discovery_id"))
+    )
+    lineage_report_id = safe_reference(row.get("source_report_id"))
+    research_report_id = (
+        safe_reference(row.get("research_report_id"))
+        or safe_reference(row.get("research_id"))
+        or "legacy-deep-sheet-row"
+    )
     source_record_id = (
-        safe_reference(row.get("ea_factory_record_id"))
-        or safe_reference(row.get("source_record_id"))
+        _research_sheet_deep_source_identity(
+            research_report_id,
+            {
+                "recordId": lineage_record_id,
+                "reportId": lineage_report_id,
+            },
+        )["eaFactoryRecordId"]
+        if lineage_record_id
+        else safe_reference(row.get("ea_factory_record_id"))
         or safe_reference(row.get("research_id"))
     )
     return {
@@ -27197,7 +27373,89 @@ def _research_sheet_json_cell(value: object, *, expected: type, fallback: object
     return sanitize_json_value(candidate, collection_limit=200, string_limit=2000)
 
 
-def _world_sheet_catalog_rows() -> list[dict]:
+def _research_sheet_lossless_json_cell_decode(
+    value: object,
+    *,
+    expected: type,
+    fallback: object,
+    max_chars: int,
+    field_name: str,
+) -> object:
+    """Decode an exact bounded Sheet JSON cell or return a fail-closed value.
+
+    This is intentionally separate from ``_research_sheet_json_cell``.  The
+    generic helper is a presentation projection and may truncate collections,
+    deep expressions, or strings.  Digest-bound blueprints must be decoded
+    losslessly first and then validated against their stored digest.
+    """
+
+    candidate = value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return copy.deepcopy(fallback)
+        try:
+            utf16_chars = len(text.encode("utf-16-le")) // 2
+        except UnicodeEncodeError:
+            return copy.deepcopy(fallback)
+        if max(len(text), utf16_chars) > max_chars:
+            return copy.deepcopy(fallback)
+        try:
+            candidate = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
+            return copy.deepcopy(fallback)
+    if not isinstance(candidate, expected):
+        return copy.deepcopy(fallback)
+    try:
+        encoded = _research_sheet_lossless_json_cell(
+            candidate,
+            max_chars=max_chars,
+            field_name=field_name,
+        )
+        decoded = json.loads(encoded)
+    except (DataIntegrityError, TypeError, ValueError, json.JSONDecodeError, RecursionError):
+        return copy.deepcopy(fallback)
+    return decoded if isinstance(decoded, expected) else copy.deepcopy(fallback)
+
+
+def _world_sheet_row_identity(row: dict) -> tuple[str, str, str] | None:
+    """Validate one World_System row key without weakening ``safe_reference``.
+
+    Current Sheet rows use ``report_id|record_id`` as ``discovery_id`` so an
+    upsert remains unique across reports.  ``safe_reference`` deliberately
+    rejects ``|`` and must stay strict for all other API identifiers.  Validate
+    the two components independently here, and reject conflicting duplicate
+    identity columns rather than silently selecting one of them.
+    """
+
+    raw_discovery_id = str(row.get("discovery_id") or "").strip()
+    explicit_record_id = safe_reference(row.get("source_record_id"))
+    linked_report_id = safe_reference(row.get("linked_report_id"))
+    if "|" in raw_discovery_id:
+        parts = raw_discovery_id.split("|")
+        if len(parts) != 2:
+            return None
+        report_id = safe_reference(parts[0])
+        record_id = safe_reference(parts[1])
+        if not report_id or not record_id:
+            return None
+        if explicit_record_id and explicit_record_id != record_id:
+            return None
+        if linked_report_id and linked_report_id != report_id:
+            return None
+        return report_id, record_id, f"{report_id}|{record_id}"
+
+    discovery_id = safe_reference(raw_discovery_id)
+    if not discovery_id or not explicit_record_id:
+        return None
+    report_id = linked_report_id or (
+        "sheet-world-"
+        + payload_digest("world-system-sheet-row-v1", discovery_id)[:24]
+    )
+    return report_id, explicit_record_id, discovery_id
+
+
+def _world_sheet_catalog_projection() -> tuple[list[dict], dict[str, object]]:
     """Project verified World_System cache rows into safe Deep Research sources.
 
     The cache is populated only after the Backend has authenticated, verified
@@ -27206,21 +27464,37 @@ def _world_sheet_catalog_rows() -> list[dict]:
     and verified rows are exposed to the workflow.
     """
 
+    cached_rows = _research_sheet_cached_rows("worldSystem")
     result: list[dict] = []
     seen: set[tuple[str, str]] = set()
-    for position, row in enumerate(_research_sheet_cached_rows("worldSystem"), start=1):
+    reason_counts = {
+        "reserved_documentation_domain": 0,
+        "invalid_identity": 0,
+        "insufficient_evidence": 0,
+        "not_verified": 0,
+        "invalid_required_fields": 0,
+    }
+
+    def reject(reason: str) -> None:
+        reason_counts[reason] += 1
+
+    for position, row in enumerate(cached_rows, start=1):
         verification_status = str(row.get("verification_status") or "").strip().lower()
         evidence_status = str(row.get("evidence_status") or "").strip().lower()
         if verification_status != "verified" or evidence_status not in {"verified", ""}:
+            reject("not_verified")
             continue
-        discovery_id = safe_reference(row.get("discovery_id"))
-        record_id = safe_reference(row.get("source_record_id"))
-        if not record_id and discovery_id and "|" in discovery_id:
-            record_id = safe_reference(discovery_id.rsplit("|", 1)[-1])
-        if not discovery_id or not record_id:
+        identity = _world_sheet_row_identity(row)
+        if identity is None:
+            reject("invalid_identity")
             continue
-        source_url = _normalized_contract_public_url(row.get("source_url"))
-        corroborating_url = _normalized_contract_public_url(row.get("corroborating_url"))
+        report_id, record_id, discovery_id = identity
+        raw_source_url = row.get("source_url")
+        raw_corroborating_url = row.get("corroborating_url")
+        source_url = _normalized_external_research_evidence_url(raw_source_url)
+        corroborating_url = _normalized_external_research_evidence_url(
+            raw_corroborating_url
+        )
         evidence_urls = _research_sheet_json_cell(
             row.get("evidence_urls_json"),
             expected=list,
@@ -27228,25 +27502,56 @@ def _world_sheet_catalog_rows() -> list[dict]:
         )
         validated_evidence = []
         for raw_url in [source_url, corroborating_url, *evidence_urls]:
-            normalized = _normalized_contract_public_url(raw_url)
+            normalized = _normalized_external_research_evidence_url(raw_url)
             if normalized and normalized not in validated_evidence:
                 validated_evidence.append(normalized)
+        validated_evidence_keys = {
+            key
+            for url in validated_evidence
+            if (key := public_evidence_independence_key(url))
+        }
+        source_evidence_key = public_evidence_independence_key(source_url)
+        corroborating_evidence_key = public_evidence_independence_key(
+            corroborating_url
+        )
         # Deep Research requires at least the primary page plus one independent
         # corroborating public source. Never weaken that boundary for Sheet rows.
-        if not source_url or len(validated_evidence) < 2:
+        if (
+            not source_url
+            or not corroborating_url
+            or not source_evidence_key
+            or not corroborating_evidence_key
+            or source_evidence_key == corroborating_evidence_key
+            or len(validated_evidence) < 2
+            or len(validated_evidence_keys) < 2
+        ):
+            raw_evidence_urls = [
+                raw_source_url,
+                raw_corroborating_url,
+                *evidence_urls,
+            ]
+            has_reserved_documentation_url = any(
+                _normalized_contract_public_url(raw_url)
+                and not _normalized_external_research_evidence_url(raw_url)
+                for raw_url in raw_evidence_urls
+            )
+            reject(
+                "reserved_documentation_domain"
+                if has_reserved_documentation_url
+                else "insufficient_evidence"
+            )
             continue
-        report_id = safe_reference(row.get("linked_report_id")) or (
-            "sheet-world-" + payload_digest("world-system-sheet-row-v1", discovery_id)[:24]
-        )
         key = (report_id, record_id)
         if key in seen:
+            reject("invalid_required_fields")
             continue
-        seen.add(key)
         creator = {
             "name": redact_text(str(row.get("trader_or_author") or ""), 300),
             "role": redact_text(str(row.get("creator_role") or ""), 120),
             "status": redact_text(str(row.get("creator_status") or ""), 80),
-            "sourceUrl": _normalized_contract_public_url(row.get("creator_source_url")),
+            "sourceUrl": _normalized_external_research_evidence_url(
+                row.get("creator_source_url")
+            ),
         }
         creator = {key_name: value for key_name, value in creator.items() if value}
         recovery_rules = _research_sheet_json_cell(
@@ -27298,8 +27603,10 @@ def _world_sheet_catalog_rows() -> list[dict]:
             "duplicateScope": redact_text(str(row.get("duplicate_scope") or "none"), 80),
         }
         if not system["systemName"] or not system["strategyFamily"]:
+            reject("invalid_required_fields")
             continue
-        result.append(sanitize_json_value({
+        seen.add(key)
+        projected = sanitize_json_value({
             "sourceReportId": report_id,
             "sourceMissionId": safe_reference(row.get("linked_mission_id")),
             "sourceRecordId": record_id,
@@ -27314,10 +27621,21 @@ def _world_sheet_catalog_rows() -> list[dict]:
             "sourceUrls": validated_evidence,
             "system": system,
             "sheetRowPosition": position,
-        }, collection_limit=240, string_limit=2000))
-        if len(result) >= 80:
-            break
-    return result
+        }, collection_limit=240, string_limit=2000)
+        if len(result) < 80:
+            result.append(projected)
+
+    return result, {
+        "cachedRowCount": len(cached_rows),
+        "acceptedRowCount": len(result),
+        "rejectedRowCount": sum(reason_counts.values()),
+        "reasonCounts": reason_counts,
+    }
+
+
+def _world_sheet_catalog_rows() -> list[dict]:
+    rows, _diagnostics = _world_sheet_catalog_projection()
+    return rows
 
 
 def _world_sheet_catalog_source(report_id: str, record_id: str) -> dict | None:
@@ -27332,6 +27650,55 @@ def _world_sheet_catalog_source(report_id: str, record_id: str) -> dict | None:
     )
 
 
+def _deep_sheet_ea_research_read_model(row: dict) -> dict:
+    """Reconstruct one digest-bound canonical blueprint from Sheet history.
+
+    Legacy summary-only rows remain visible as history, but never acquire
+    fabricated executable rules.  They are explicitly marked for a new Deep
+    Research run instead.
+    """
+
+    implementation_notes = _research_sheet_lossless_json_cell_decode(
+        row.get("implementation_notes_json"),
+        expected=dict,
+        fallback={},
+        max_chars=TRADING_SYSTEM_RESEARCH_SHEET_BLUEPRINT_CELL_MAX_CHARS,
+        field_name="implementation_notes_json",
+    )
+    expected_digest = (
+        implementation_notes.get("blueprintDigest")
+        if isinstance(implementation_notes, dict)
+        else None
+    )
+    try:
+        blueprint = reconstruct_ea_research_from_sheet({
+            **row,
+            "implementation_notes_json": implementation_notes,
+        })
+    except EAResearchBlueprintValidationError as exc:
+        issue_codes = {
+            str(item.get("code") or "")
+            for item in exc.issues
+            if isinstance(item, dict)
+        }
+        reason = (
+            "blueprint_digest_mismatch"
+            if "BLUEPRINT_DIGEST_MISMATCH" in issue_codes
+            else "legacy_ea_blueprint_missing"
+            if "BLUEPRINT_NOT_FOUND" in issue_codes
+            else "ea_blueprint_invalid"
+        )
+        return _ea_research_unavailable_read_model(
+            reason,
+            blueprint_digest=expected_digest,
+        )
+    return _ea_research_canonical_read_model(
+        blueprint,
+        expected_digest,
+        missing_reason="legacy_ea_blueprint_missing",
+    )
+
+
 def _deep_sheet_research_history_rows() -> list[dict]:
     """Return a bounded, safe history projection from Deep_Research cache."""
 
@@ -27340,14 +27707,55 @@ def _deep_sheet_research_history_rows() -> list[dict]:
     for row in reversed(_research_sheet_cached_rows("deepResearch")):
         research_id = safe_reference(row.get("research_id"))
         status = str(row.get("verification_status") or "").strip().lower()
-        if (
-            not research_id
-            or research_id in seen
-            or status not in {"verified", "verified_deep_research"}
-        ):
+        if not research_id or research_id in seen:
             continue
         system_name = redact_text(str(row.get("system_name") or ""), 300)
         if not system_name:
+            continue
+        ea_research = _deep_sheet_ea_research_read_model(row)
+        canonical_status_matches = bool(
+            (
+                status == "verified_deep_research"
+                and ea_research.get("status") == "ready"
+            )
+            or (
+                status in {"ready", "needs_clarification", "not_ea_ready"}
+                and status == ea_research.get("status")
+            )
+            or status == "verified"
+        )
+        canonical_verified = bool(
+            ea_research.get("validated") is True
+            and ea_research.get("digestMatched") is True
+            and ea_research.get("validationStatus") == "canonical_validated"
+            and canonical_status_matches
+        )
+        canonical_response_fail_closed = bool(
+            status in {
+                "verified",
+                "verified_deep_research",
+                "ready",
+                "needs_clarification",
+                "not_ea_ready",
+            }
+            and ea_research.get("validationStatus")
+            == "ea_blueprint_response_bounds_exceeded"
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(ea_research.get("blueprintDigest") or ""),
+            )
+        )
+        # Historical summary-only rows used the verified labels before the v2
+        # blueprint existed.  Keep those rows visible with an explicit rerun
+        # requirement.  Current writers persist completeness.status for valid
+        # non-ready research, so those canonical/digest-bound rows must not
+        # disappear merely because EA handoff is correctly blocked.
+        legacy_verified = status in {"verified", "verified_deep_research"}
+        if (
+            not canonical_verified
+            and not canonical_response_fail_closed
+            and not legacy_verified
+        ):
             continue
         source_links = [
             normalized
@@ -27376,9 +27784,12 @@ def _deep_sheet_research_history_rows() -> list[dict]:
                 row.get("candidate_platforms_json"), expected=list, fallback=[]
             ),
             "sourceLinks": source_links,
+            "eaResearch": ea_research,
+            "requiresResearchRerun": ea_research.get("requiresResearchRerun")
+            is True,
             "updatedAt": row.get("updated_at") or row.get("checked_at"),
             "sourceKind": "verified_deep_research_sheet_record",
-        }, collection_limit=120, string_limit=1000))
+        }, collection_limit=1000, string_limit=20000))
         if len(result) >= 80:
             break
     return result
@@ -27472,7 +27883,7 @@ def _deep_research_catalog_read_model(
                 break
         if len(catalog_rows) >= 80:
             break
-    sheet_rows = _world_sheet_catalog_rows()
+    sheet_rows, sheet_diagnostics = _world_sheet_catalog_projection()
     sheet_research_history = _deep_sheet_research_history_rows()
     for row in sheet_rows:
         key = (
@@ -27509,7 +27920,14 @@ def _deep_research_catalog_read_model(
         "readyReportCount": report_count,
         "verifiedSystemCount": len(catalog_rows),
         "googleSheetCompared": sheet_consumer.get("readReady") is True,
+        "googleSheetCachedSystemCount": sheet_diagnostics.get("cachedRowCount", 0),
         "googleSheetVerifiedSystemCount": len(sheet_rows),
+        "googleSheetRejectedSystemCount": sheet_diagnostics.get(
+            "rejectedRowCount", 0
+        ),
+        "googleSheetRejectionReasonCounts": sheet_diagnostics.get(
+            "reasonCounts", {}
+        ),
         "googleSheetTabName": sheet_consumer.get("tabName"),
         "googleSheetResearchHistoryCompared": deep_sheet_consumer.get("readReady") is True,
         "googleSheetResearchHistoryCount": len(sheet_research_history),
@@ -27522,7 +27940,7 @@ def _deep_research_catalog_read_model(
         # assembling the research catalog performs an external write.
         "externalWrites": False,
         "metaTraderActions": False,
-    }, collection_limit=1000, string_limit=2000)
+    }, collection_limit=1000, string_limit=20000)
 
 
 def _workflow_agent_transfer_destinations(source_prop_id: str) -> list[dict]:
@@ -28375,8 +28793,34 @@ def _research_sheet_world_rows(report: dict) -> list[dict]:
         if not isinstance(system, dict) or str(system.get("verificationStatus") or "") != "verified":
             return []
         record_id = safe_reference(system.get("recordId"))
-        source_url = _normalized_contract_public_url(system.get("sourceUrl"))
-        if not report_id or not record_id or not source_url:
+        source_url = _normalized_external_research_evidence_url(
+            system.get("sourceUrl")
+        )
+        raw_corroborating_urls = system.get("corroboratingUrls")
+        corroborating_urls = [
+            normalized
+            for raw_url in (
+                raw_corroborating_urls
+                if isinstance(raw_corroborating_urls, list)
+                else []
+            )
+            if (
+                normalized := _normalized_external_research_evidence_url(
+                    raw_url
+                )
+            )
+        ]
+        if (
+            not report_id
+            or not record_id
+            or not source_url
+            or not isinstance(raw_corroborating_urls, list)
+            or len(raw_corroborating_urls) != 1
+            or len(corroborating_urls) != 1
+            or corroborating_urls[0] == source_url
+            or public_evidence_independence_key(corroborating_urls[0])
+            == public_evidence_independence_key(source_url)
+        ):
             return []
         creator = system.get("creatorOrTrader")
         risk = system.get("riskManagement") if isinstance(system.get("riskManagement"), dict) else {}
@@ -28434,9 +28878,9 @@ def _research_sheet_world_rows(report: dict) -> list[dict]:
             "recovery_method": _research_sheet_mapping_value(risk, "recoveryMethod"),
             "recovery_rules_json": _research_sheet_mapping_value(risk, "recoveryRules"),
             "risk_truth_status": "verified" if risk else "not_publicly_stated",
-            "corroborating_url": (system.get("corroboratingUrls") or [None])[0] if isinstance(system.get("corroboratingUrls"), list) else None,
-            "evidence_urls_json": [source_url, *(system.get("corroboratingUrls") or [])] if isinstance(system.get("corroboratingUrls"), list) else [source_url],
-            "evidence_count": 1 + len(system.get("corroboratingUrls") or []) if isinstance(system.get("corroboratingUrls"), list) else 1,
+            "corroborating_url": corroborating_urls[0],
+            "evidence_urls_json": [source_url, *corroborating_urls],
+            "evidence_count": 1 + len(corroborating_urls),
             "duplicate_fingerprint": system.get("duplicateFingerprint"),
             "duplicate_scope": system.get("duplicateScope"),
             "unknowns_json": system.get("unknowns"),
@@ -28448,6 +28892,40 @@ def _research_sheet_world_rows(report: dict) -> list[dict]:
         }
         rows.append({key: _research_sheet_cell(value) for key, value in row.items()})
     return rows
+
+
+def _research_sheet_deep_source_identity(
+    report_id: str,
+    source: object,
+) -> dict:
+    """Return collision-safe lineage keys for one Deep Research source.
+
+    World System record IDs are report-local, not globally unique.  Versioning
+    and EA Factory identity therefore bind the source report and record as a
+    pair.  Historical reports without source.reportId are isolated under their
+    own Deep Research report namespace instead of being merged accidentally.
+    """
+
+    source_mapping = source if isinstance(source, dict) else {}
+    source_record_id = (
+        safe_reference(source_mapping.get("recordId"))
+        or f"research-{report_id}"
+    )
+    source_report_id = safe_reference(source_mapping.get("reportId"))
+    source_namespace = source_report_id or f"legacy:{report_id}"
+    return {
+        "sourceRecordId": source_record_id,
+        "sourceReportId": source_report_id,
+        "versionKey": (source_namespace, source_record_id),
+        "eaFactoryRecordId": (
+            "deep-"
+            + payload_digest(
+                "deep-research-source-pair-v1",
+                source_namespace,
+                source_record_id,
+            )[:24]
+        ),
+    }
 
 
 def _research_sheet_deep_version_candidate(report: object) -> dict | None:
@@ -28471,8 +28949,10 @@ def _research_sheet_deep_version_candidate(report: object) -> dict | None:
         return None
     context = report.get("workflowContext") if isinstance(report.get("workflowContext"), dict) else {}
     source = context.get("source") if isinstance(context.get("source"), dict) else {}
-    source_record_id = safe_reference(source.get("recordId")) or f"research-{report_id}"
+    identity = _research_sheet_deep_source_identity(report_id, source)
+    source_record_id = str(identity["sourceRecordId"])
     return {
+        **identity,
         "sourceRecordId": source_record_id,
         "reportId": report_id,
         "createdAt": str(report.get("createdAt") or report.get("updatedAt") or ""),
@@ -28480,20 +28960,28 @@ def _research_sheet_deep_version_candidate(report: object) -> dict | None:
     }
 
 
-def _research_sheet_build_deep_version_index(reports: object) -> dict[str, dict]:
+def _research_sheet_build_deep_version_index(
+    reports: object,
+) -> dict[tuple[str, str], dict]:
     """Build one horizon-free version index shared by an entire backfill."""
 
-    grouped: dict[str, dict[str, dict]] = {}
+    grouped: dict[tuple[str, str], dict[str, dict]] = {}
     candidates = reports if hasattr(reports, "__iter__") else []
     for report in candidates:
         candidate = _research_sheet_deep_version_candidate(report)
         if not candidate:
             continue
-        source_record_id = str(candidate["sourceRecordId"])
-        grouped.setdefault(source_record_id, {})[str(candidate["reportId"])] = candidate
+        version_key = candidate.get("versionKey")
+        if not (
+            isinstance(version_key, tuple)
+            and len(version_key) == 2
+            and all(isinstance(item, str) and item for item in version_key)
+        ):
+            continue
+        grouped.setdefault(version_key, {})[str(candidate["reportId"])] = candidate
 
-    index: dict[str, dict] = {}
-    for source_record_id, by_report_id in grouped.items():
+    index: dict[tuple[str, str], dict] = {}
+    for version_key, by_report_id in grouped.items():
         ordered = sorted(
             by_report_id.values(),
             key=lambda item: (str(item.get("createdAt") or ""), str(item.get("reportId") or "")),
@@ -28504,7 +28992,7 @@ def _research_sheet_build_deep_version_index(reports: object) -> dict[str, dict]
             versioned = {**item, "researchVersion": version}
             ordered_versions.append(versioned)
             lookup[str(versioned["reportId"])] = versioned
-        index[source_record_id] = {
+        index[version_key] = {
             "ordered": ordered_versions,
             "byReportId": lookup,
             "currentReportId": str(ordered_versions[-1]["reportId"]) if ordered_versions else "",
@@ -28514,7 +29002,7 @@ def _research_sheet_build_deep_version_index(reports: object) -> dict[str, dict]
 
 def _research_sheet_runtime_deep_version_index(
     include_report: dict | None = None,
-) -> dict[str, dict]:
+) -> dict[tuple[str, str], dict]:
     """Read every durable report once and build the Deep Research index."""
 
     ensure_runtime_dir()
@@ -28535,7 +29023,7 @@ def _research_sheet_runtime_deep_version_index(
 def _research_sheet_deep_rows(
     report: dict,
     *,
-    version_index: dict[str, dict] | None = None,
+    version_index: dict[tuple[str, str], dict] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     if not (
         report.get("type") == "trading_system_research_report"
@@ -28589,7 +29077,8 @@ def _research_sheet_deep_rows(
     mission_id = safe_reference(report.get("linkedMissionId"))
     context = report.get("workflowContext") if isinstance(report.get("workflowContext"), dict) else {}
     source = context.get("source") if isinstance(context.get("source"), dict) else {}
-    source_record_id = safe_reference(source.get("recordId")) or f"research-{report_id}"
+    source_identity = _research_sheet_deep_source_identity(report_id, source)
+    source_record_id = str(source_identity["sourceRecordId"])
     identity = metrics.get("systemIdentity")
     risk = metrics.get("riskModel")
     system_name = _research_sheet_mapping_value(identity, "systemName", "name", "title") or report.get("title")
@@ -28602,9 +29091,10 @@ def _research_sheet_deep_rows(
         if isinstance(version_index, dict)
         else _research_sheet_runtime_deep_version_index(report)
     )
+    version_key = source_identity["versionKey"]
     source_versions = (
-        resolved_version_index.get(source_record_id)
-        if isinstance(resolved_version_index.get(source_record_id), dict)
+        resolved_version_index.get(version_key)
+        if isinstance(resolved_version_index.get(version_key), dict)
         else {}
     )
     version_lookup = (
@@ -28644,7 +29134,7 @@ def _research_sheet_deep_rows(
         "is_current": is_current_version,
         "system_id": safe_reference(source.get("systemId")),
         "source_discovery_id": source_record_id,
-        "source_report_id": safe_reference(source.get("reportId")),
+        "source_report_id": source_identity.get("sourceReportId"),
         "source_record_id": source_record_id,
         "source_mission_id": safe_reference(source.get("missionId")),
         "research_mission_id": mission_id,
@@ -28696,7 +29186,7 @@ def _research_sheet_deep_rows(
         "checked_at": metrics.get("checkedAt") or report.get("updatedAt") or report.get("createdAt"),
         "backtest_status": "not_run",
         "optimization_status": "not_run",
-        "ea_factory_record_id": source_record_id,
+        "ea_factory_record_id": source_identity["eaFactoryRecordId"],
         "ea_build_status": "not_started",
         "issues": metrics.get("limitations") or metrics.get("conflictingEvidence"),
         "next_action": next_action,
@@ -28704,7 +29194,7 @@ def _research_sheet_deep_rows(
         "updated_at": report.get("updatedAt") or report.get("createdAt"),
     }
     factory_row = {
-        "record_id": source_record_id,
+        "record_id": source_identity["eaFactoryRecordId"],
         "system_name": system_name,
         "strategy_family": family,
         "symbols_market": metrics.get("suitableMarket"),
@@ -28844,7 +29334,7 @@ def _research_sheet_report_items(
     report: dict,
     config_revision: int,
     *,
-    deep_version_index: dict[str, dict] | None = None,
+    deep_version_index: dict[tuple[str, str], dict] | None = None,
 ) -> list[dict]:
     report_id = safe_reference(report.get("id"))
     items: list[dict] = []
@@ -28971,12 +29461,38 @@ def _research_sheet_remove_deferred_report_unlocked(
     return True
 
 
+def _research_sheet_remove_quarantined_report_unlocked(
+    store: dict,
+    report_id: object,
+    config_revision: int,
+) -> bool:
+    """Clear a stale projection quarantine after that report projects again."""
+
+    safe_report_id = safe_reference(report_id)
+    entries = [
+        entry for entry in (store.get("quarantinedReports") or [])
+        if isinstance(entry, dict)
+    ]
+    retained = [
+        entry for entry in entries
+        if not (
+            safe_reference(entry.get("reportId")) == safe_report_id
+            and clamp_int(entry.get("configRevision"), -1, -1, 999999)
+            == config_revision
+        )
+    ]
+    if len(retained) == len(entries):
+        return False
+    store["quarantinedReports"] = retained
+    return True
+
+
 def _research_sheet_queue_report(
     report: dict,
     *,
     flush: bool = True,
     allowed_consumer_ids: set[str] | None = None,
-    deep_version_index: dict[str, dict] | None = None,
+    deep_version_index: dict[tuple[str, str], dict] | None = None,
 ) -> dict:
     internal = _research_sheet_hub_internal()
     sheet_id = str(internal.get("sheetId") or "")
@@ -29015,6 +29531,7 @@ def _research_sheet_queue_report(
             "items",
             "syncedLedger",
             "failedLedger",
+            "quarantinedReports",
             "deferredReports",
         ):
             collection = store.get(collection_name)
@@ -29129,6 +29646,11 @@ def _research_sheet_queue_report(
                 stored_items[existing_index] = item
                 queued += 1
             _research_sheet_remove_deferred_report_unlocked(
+                store,
+                report.get("id"),
+                config_revision,
+            )
+            _research_sheet_remove_quarantined_report_unlocked(
                 store,
                 report.get("id"),
                 config_revision,
@@ -29267,7 +29789,7 @@ def _research_sheet_drain_deferred_reports(
     queued = 0
     capacity_deferred = 0
     recovery_deferred = 0
-    deep_version_index: dict[str, dict] | None = None
+    deep_version_index: dict[tuple[str, str], dict] | None = None
     deep_version_index_unavailable = False
     for marker in eligible[:scan_limit]:
         if drained >= limit:
@@ -29601,6 +30123,7 @@ def _research_sheet_backfill_recent_reports(
     allowed_consumer_ids: set[str] | None = None,
 ) -> dict:
     queued = 0
+    quarantined = 0
     recent_reports = list(reversed(load_runtime_reports(limit=240)))
     allowed = (
         None
@@ -29629,15 +30152,69 @@ def _research_sheet_backfill_recent_reports(
             not in allowed
         ):
             continue
-        queued += int(
-            _research_sheet_queue_report(
+        try:
+            queue_result = _research_sheet_queue_report(
                 report,
                 flush=False,
                 allowed_consumer_ids=allowed_consumer_ids,
                 deep_version_index=deep_version_index,
-            ).get("queued")
-            or 0
-        )
+            )
+        except DataIntegrityError:
+            # One malformed/oversized historical report must not abort Sheet
+            # activation or starve later valid reports.  Keep no partial row;
+            # record only opaque bounded diagnostics in a quarantine ledger.
+            # Quarantine is deliberately separate from delivery failures: an
+            # unprojectable historical report must not keep an otherwise
+            # verified Sheet consumer permanently red/write-blocked.
+            report_id = safe_reference(report.get("id"))
+            consumer_id = safe_reference(
+                RESEARCH_SHEET_SYNC_REPORT_CONSUMERS.get(report.get("type"))
+            )
+            internal = _research_sheet_hub_internal()
+            config_revision = clamp_int(
+                internal.get("configRevision"),
+                0,
+                0,
+                999999,
+            )
+            if report_id and consumer_id:
+                failure_id = "sheet-backfill-quarantine-" + payload_digest(
+                    "research-sheet-backfill-projection-failure-v1",
+                    consumer_id,
+                    report_id,
+                    config_revision,
+                )[:24]
+                with RESEARCH_SHEET_OUTBOX_LOCK:
+                    store = _load_research_sheet_outbox_unlocked()
+                    quarantined_reports = [
+                        item
+                        for item in (store.get("quarantinedReports") or [])
+                        if isinstance(item, dict)
+                        and safe_reference(item.get("id")) != failure_id
+                    ]
+                    quarantined_reports.append({
+                        "id": failure_id,
+                        "configRevision": config_revision,
+                        "consumerId": consumer_id,
+                        "reportId": report_id,
+                        "quarantinedAt": utc_now(),
+                        "lastErrorCode": "backfill_projection_integrity_failed",
+                    })
+                    store["quarantinedReports"] = quarantined_reports[
+                        -RESEARCH_SHEET_QUARANTINE_LEDGER_LIMIT:
+                    ]
+                    _save_research_sheet_outbox_unlocked(store)
+                append_audit({
+                    "type": "research_sheet_hub.backfill_report_quarantined",
+                    "reportId": report_id,
+                    "consumerId": consumer_id,
+                    "configRevision": config_revision,
+                    "errorCode": "backfill_projection_integrity_failed",
+                    "credentialsIncluded": False,
+                })
+                quarantined += 1
+            continue
+        queued += int(queue_result.get("queued") or 0)
     flush_result = _flush_research_sheet_outbox(max_items=50)
     deferred_drain = _research_sheet_drain_deferred_reports(
         max_reports=RESEARCH_SHEET_DEFERRED_REPORT_DRAIN_BATCH_LIMIT,
@@ -29652,6 +30229,7 @@ def _research_sheet_backfill_recent_reports(
     return {
         "queued": queued + deferred_queued,
         "recentQueued": queued,
+        "quarantinedReports": quarantined,
         "flush": flush_result,
         "deferredDrain": deferred_drain,
         "deferredReports": clamp_int(
@@ -31250,6 +31828,8 @@ def _workflow_prompt(
             "checkedAt ต้องเป็นเวลาตรวจจริงของรอบนี้ในรูป ISO 8601 พร้อม UTC offset ห้ามใช้เวลา 00:00 แทนเวลาตรวจ. "
             "verificationStatus ใช้ verified/partially_verified/insufficient_evidence; "
             "จะใช้ verified ได้ต่อเมื่อมีอย่างน้อย 2 แหล่งคนละโดเมนสำหรับระบบนั้น. ระบุความเสี่ยง ข้อจำกัด และสิ่งที่ยังไม่ทราบอย่างตรงไปตรงมา. "
+            "ห้ามใช้ example.com/example.org/example.net, subdomain ของโดเมนเหล่านี้ หรือ TLD .example/.invalid/.test/.localhost เป็นหลักฐานจริง; "
+            "Backend จะปฏิเสธแถวดังกล่าวแม้ URL จะมีรูปแบบถูกต้อง. "
             "เมื่อ status=completed ต้องส่ง evidenceKinds ให้ครบและตรงตัว 6 ค่าเท่านั้น: source_url, at_least_two_source_urls, "
             "checked_at, source_title, quoted_fact_summary, limitations. "
             "ห้ามให้ Backend-computed fields ได้แก่ recordId, duplicateFingerprint, duplicateStatus, duplicateScope; Backend จะสร้างเอง. "
@@ -31265,10 +31845,9 @@ def _workflow_prompt(
             "Cross ขึ้นต้องขยายเป็น fast[2] <= slow[2] AND fast[1] > slow[1]; Cross ลงต้องขยายเป็น "
             "fast[2] >= slow[2] AND fast[1] < slow[1]. ถ้าแหล่งบอกเพียง cross แต่ไม่บอกทิศ หรือสมการขัดกับคำอธิบาย "
             "ให้สร้าง blockingIssue และ eaHandoffAllowed=false ห้ามเดา. "
-            "ระบุ scope/platform/symbol/market/timeframe/timezone/session/side/order/magic/position/entry timing; inputs ต้องครบ "
-            "id/type/unit/default/range/step/enum/optimizable/sourceStatus และ indicators ต้องครบ id/type/parameter/price/timeframe/shift/buffer/sourceRefs. "
-            "แยก entry.buy, entry.sell, exit.buy และ exit.sell; ทุก executable rule ต้องเป็น typed expression/atomic conditions "
-            "พร้อม ALL/ANY/NOT, ruleId, evaluationEvent, sourceStatus, sourceRefs และ humanTextTh. ห้ามใช้ free text เป็นกฎ executable หลัก. "
+            "ระบุ scope และ inputs ตาม schema; indicators ต้อง bind timeframe/outputLine และมี period/method/shift/buffer หรือ inputRef จริง ห้าม parameters={}. "
+            "setup/entry/exit แยก Buy/Sell; ทุกกฎต้องเป็น typed expression และระบุ ruleId/phase/side/evaluationEvent/sourceRefs/humanTextTh ตรงกล่อง. "
+            "closed-bar ใช้ new_closed_bar และ shift อยู่ใน operand; ห้าม free text หรือ mirror กฎข้ามฝั่ง. "
             "ถ้าแหล่งระบุเพียงฝั่งเดียว ห้าม mirror อีกฝั่งเอง ให้ disabled พร้อมเหตุผลและ blocker ตามผลกระทบ. "
             "TP/SL ต้องมี default+sideOverrides และ method/reference/unit/distance/formula/buffer/placement/min-stop/freeze/neverWorsen. "
             "orderManagement ต้องมี Break-even, Trailing stop, Partial close, scaleIn, scaleOut, modifyStopLoss, modifyTakeProfit "
@@ -31288,9 +31867,10 @@ def _workflow_prompt(
             "emergency/equity stop > daily stop > hard SL > basket exit > normal exit > partial > BE/trailing > recovery > new entry. "
             "transition/pseudocode ต้องอ้าง enabled ruleId; tests ต้องมี positive/negative (+boundary เมื่อ Cross) สำหรับ setup/entry/exit "
             "และ lifecycle สำหรับ management/recovery. "
-            "ค่าที่มีผลต่อโค้ดต้องมี sourceStatus/sourceRefs/confidence; derived ต้องมีหลักฐาน, assumption ต้องมี evidence+confirmed affectsPaths; "
+            "ค่าที่มีผลต่อโค้ดต้องมี sourceStatus/sourceRefs ตาม schema; derived ต้องมีหลักฐาน, assumption ต้องมี evidence+confirmed affectsPaths; "
             "กฎหลัก assumption ล้วนห้าม ready—ถ้าไม่รองรับให้ unknown/blocker. "
             "ห้ามสร้างตัวเลขที่ไม่ปรากฏในแหล่ง; assumptions, unknowns และ conflicts ต้องมี path กับคำถามภาษาไทยที่ใช้สร้าง revision ถัดไป. "
+            "ประวัติเก่าที่ไม่มี blueprint/digest หรือ rule metadata ต้องวิจัย revision ใหม่ ห้ามเดาอัปเกรดจากสรุปเก่า. "
             "completeness ต้องรายงาน status ready/needs_clarification/not_ea_ready, score, eaHandoffAllowed, deterministicBacktestAllowed, "
             "blockingIssues, warnings, unknownPaths และ conflictPaths ตามความจริง; verified source ไม่ได้แปลว่า EA-ready. "
             "ตรวจอย่างน้อยสอง public URL คนละโดเมน เปิดจริงและให้ sourceLinks ตรง evidence; local/private/โดเมนเดียวไม่นับสองแหล่ง. "

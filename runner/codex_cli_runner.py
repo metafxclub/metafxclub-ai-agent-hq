@@ -4049,7 +4049,28 @@ def _restore_ea_research_transport_value(
     if not schema:
         return _decode_ea_research_json_transport(value)
 
+    # ``_to_structured_output_schema`` represents canonical free-form objects
+    # as strings whose contract explicitly requires the ``JSON:`` prefix.
+    # Decode only those tagged transport branches.  A normal canonical string
+    # is left untouched, including a literal string that happens to start with
+    # ``JSON:`` when its schema does not declare the tagged transport pattern.
+    tagged_pattern = schema.get("pattern")
+    if (
+        schema.get("type") == "string"
+        and isinstance(tagged_pattern, str)
+        and tagged_pattern.startswith("^JSON:")
+    ):
+        return _decode_ea_research_json_transport(value)
+
     choices = schema.get("oneOf") or schema.get("anyOf")
+    if isinstance(choices, list) and isinstance(value, str) and value.startswith("JSON:"):
+        decoded = _decode_ea_research_json_transport(value)
+        if decoded is not value and any(
+            isinstance(option, dict)
+            and _ea_research_schema_matches_value(option, decoded, root_schema)
+            for option in choices
+        ):
+            value = decoded
     if isinstance(choices, list):
         for option in choices:
             if isinstance(option, dict) and _ea_research_schema_matches_value(

@@ -49,7 +49,7 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
         blueprint["evidenceMap"].append(
             {
                 "sourceRef": "S3",
-                "url": "https://www.investopedia.com/terms/m/movingaverage.asp",
+                "url": "https://www.babypips.com/learn/forex/moving-averages",
                 "title": "Moving average reference",
                 "checkedAt": blueprint["checkedAt"],
             }
@@ -73,8 +73,8 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
                 "sourceMissionId": "world-mission-one",
                 "verificationStatus": "verified",
                 "sourceUrls": [
-                    "https://example.com/ema-cross",
-                    "https://example.org/ema-confirmation",
+                    "https://tradingfinder.com/education/ema-cross",
+                    "https://forex-station.com/ema-cross-confirmation",
                 ],
                 "system": {
                     "systemName": "EMA 10/60 Cross " + ("source detail " * 100),
@@ -369,25 +369,11 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
     def test_sheet_blueprint_cell_rejects_oversize_before_outbox_item_exists(self) -> None:
         blueprint = self.ready_blueprint()
         blueprint["pseudocode"]["lines"].append("X" * 45_000)
-        normalized = self.bridge.normalize_ea_research_blueprint(blueprint)
-        metrics = {
-            **self.bridge.ea_research_report_projection(normalized),
-            "workflowOutput": {"applicable": True, "valid": True},
-        }
-        report = self.report_from_metrics(metrics, suffix="oversize-cell")
-        version_index = self.bridge._research_sheet_build_deep_version_index(
-            [report]
-        )
-
         with self.assertRaisesRegex(
-            self.bridge.DataIntegrityError,
-            "character cell limit",
+            self.bridge.EAResearchBlueprintValidationError,
+            "BLUEPRINT_TRANSPORT_SIZE_EXCEEDED",
         ):
-            self.bridge._research_sheet_report_items(
-                report,
-                1,
-                deep_version_index=version_index,
-            )
+            self.bridge.normalize_ea_research_blueprint(blueprint)
 
     def test_catalog_falls_back_from_corrupt_sheet_duplicate_to_ready_runtime(self) -> None:
         valid_sheet, _row, _metrics = self.ready_factory_record()

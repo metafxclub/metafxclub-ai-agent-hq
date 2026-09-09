@@ -736,7 +736,7 @@ h1 {
   border-left: 2px solid var(--cyan);
   background: rgba(7, 31, 44, 0.52);
   color: var(--text);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.5;
 }
 
@@ -754,7 +754,7 @@ h1 {
   background: rgba(10, 39, 55, 0.86);
   color: var(--text);
   cursor: pointer;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 900;
 }
 
@@ -781,7 +781,7 @@ h1 {
 .metatrader-hub-compact-mark {
   display: none;
   color: var(--text);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 1000;
   letter-spacing: 0.04em;
 }
@@ -924,7 +924,7 @@ h1 {
 .metatrader-hub-platform > header small,
 .metatrader-hub-platform label > span {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 800;
 }
 
@@ -940,7 +940,7 @@ h1 {
   border: 1px solid rgba(84, 119, 142, 0.52);
   color: var(--text);
   font: inherit;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .metatrader-hub-platform select {
@@ -10568,6 +10568,31 @@ button:disabled {
   background: rgba(50, 12, 22, 0.58);
 }
 
+.workflow-research-revision-cta {
+  justify-self: start;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid rgba(245, 200, 76, 0.62);
+  background: rgba(61, 43, 5, 0.78);
+  color: #ffe69a;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.workflow-research-revision-cta:hover,
+.workflow-research-revision-cta:focus-visible {
+  border-color: #f5c84c;
+  background: rgba(91, 64, 7, 0.88);
+  outline: none;
+}
+
+.workflow-research-revision-cta:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .workflow-research-source-lineage {
   display: flex;
   align-items: center;
@@ -10978,6 +11003,336 @@ button:disabled {
   font-weight: 900;
 }
 
+.workflow-research-blueprint-controls {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.workflow-research-blueprint-controls button {
+  min-height: 32px;
+  padding: 6px 9px;
+  border: 1px solid rgba(70, 234, 208, 0.46);
+  background: rgba(4, 35, 40, 0.78);
+  color: #bffcf0;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.workflow-research-blueprint-controls button:hover,
+.workflow-research-blueprint-controls button:focus-visible {
+  border-color: #46ead0;
+  background: rgba(11, 76, 77, 0.78);
+  outline: none;
+}
+
+.workflow-research-blueprint-status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 3px 7px;
+  border: 1px solid rgba(84, 119, 142, 0.42);
+  color: #b7c9cf;
+  background: rgba(3, 16, 24, 0.78);
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1.3;
+  text-align: center;
+}
+
+.workflow-research-blueprint-status-badge[data-tone="verified"] {
+  border-color: rgba(37, 215, 122, 0.5);
+  color: #9effc6;
+  background: rgba(3, 44, 29, 0.62);
+}
+
+.workflow-research-blueprint-status-badge[data-tone="derived"] {
+  border-color: rgba(72, 168, 255, 0.48);
+  color: #b9dcff;
+  background: rgba(4, 31, 57, 0.62);
+}
+
+.workflow-research-blueprint-status-badge[data-tone="warning"] {
+  border-color: rgba(245, 200, 76, 0.5);
+  color: #ffe79b;
+  background: rgba(57, 42, 5, 0.62);
+}
+
+.workflow-research-blueprint-status-badge[data-tone="blocked"] {
+  border-color: rgba(229, 72, 77, 0.55);
+  color: #ffb2ba;
+  background: rgba(62, 10, 16, 0.62);
+}
+
+.workflow-research-blueprint-confirmation {
+  color: #ffd56a !important;
+  font-weight: 900;
+}
+
+.workflow-research-blueprint-card-grid,
+.workflow-research-blueprint-protection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.workflow-research-blueprint-definition-card,
+.workflow-research-blueprint-protection-card,
+.workflow-research-blueprint-management-card,
+.workflow-research-ea-rule-card,
+.workflow-research-blueprint-recovery-part,
+.workflow-research-blueprint-side-overrides {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid rgba(84, 119, 142, 0.32);
+  background: rgba(1, 10, 16, 0.74);
+}
+
+.workflow-research-blueprint-definition-card > header,
+.workflow-research-blueprint-protection-card > header,
+.workflow-research-blueprint-management-card > header,
+.workflow-research-ea-rule-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.workflow-research-blueprint-definition-card > header > strong,
+.workflow-research-blueprint-protection-card > header > strong,
+.workflow-research-blueprint-management-card > header > strong,
+.workflow-research-ea-rule-card > header > strong {
+  min-width: 0;
+  color: #e5fbf6;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.workflow-research-blueprint-compact-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+}
+
+.workflow-research-blueprint-compact-facts > div {
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid rgba(84, 119, 142, 0.22);
+  background: rgba(3, 18, 27, 0.52);
+}
+
+.workflow-research-blueprint-compact-facts dt,
+.workflow-research-blueprint-compact-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.workflow-research-blueprint-compact-facts dt {
+  color: #789f9a;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.workflow-research-blueprint-compact-facts dd {
+  margin-top: 3px;
+  color: #d7ebe7;
+  font-size: 11px;
+}
+
+.workflow-research-blueprint-compact-facts code,
+.workflow-research-blueprint-protection-card > code,
+.workflow-research-ea-rule-card > code,
+.workflow-research-ea-cross-timeline code {
+  display: block;
+  max-width: 100%;
+  color: #cfeeff;
+  font: 700 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.workflow-research-blueprint-parameters {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(84, 119, 142, 0.28);
+}
+
+.workflow-research-blueprint-parameters > span,
+.workflow-research-blueprint-parameters > strong,
+.workflow-research-blueprint-recovery-part > strong,
+.workflow-research-blueprint-side-overrides > strong {
+  color: #86cbbb;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.workflow-research-blueprint-parameters p {
+  margin: 0;
+  color: #c9dfda;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.workflow-research-blueprint-setup-groups,
+.workflow-research-ea-rule-list,
+.workflow-research-blueprint-recovery {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.workflow-research-blueprint-setup-groups > section {
+  display: grid;
+  gap: 7px;
+}
+
+.workflow-research-ea-rule-card {
+  border-left: 3px solid #48a8ff;
+}
+
+.workflow-research-ea-rule-card[data-enabled="false"] {
+  border-left-color: #607b89;
+  background: rgba(13, 20, 25, 0.72);
+}
+
+.workflow-research-ea-rule-card[data-enabled="false"] > code {
+  opacity: 0.68;
+}
+
+.workflow-research-ea-rule-card[data-enabled="unknown"] {
+  border-left-color: #f5c84c;
+}
+
+.workflow-research-ea-rule-card > p {
+  margin: 0;
+  color: #c2d7d3;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.workflow-research-ea-formula-label {
+  color: #8faeb8;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.workflow-research-ea-rule-card > code {
+  padding: 8px;
+  border: 1px solid rgba(72, 168, 255, 0.4);
+  background: rgba(2, 17, 31, 0.88);
+  color: #d6efff;
+}
+
+.workflow-research-ea-cross-timeline {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workflow-research-ea-cross-timeline li {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid rgba(245, 200, 76, 0.3);
+  background: rgba(43, 33, 5, 0.34);
+}
+
+.workflow-research-ea-cross-timeline strong {
+  color: #ffe69a;
+  font-size: 11px;
+}
+
+.workflow-research-blueprint-feature-state {
+  margin: 0;
+  padding: 7px;
+  border-left: 3px solid #607b89;
+  background: rgba(25, 36, 42, 0.52);
+  color: #b7c7cc;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.workflow-research-blueprint-feature-state[data-tone="ready"] {
+  border-left-color: #25d77a;
+  color: #a6f4c9;
+  background: rgba(3, 40, 27, 0.46);
+}
+
+.workflow-research-blueprint-feature-state[data-tone="warning"] {
+  border-left-color: #f5c84c;
+  color: #f8dea0;
+  background: rgba(48, 35, 4, 0.46);
+}
+
+.workflow-research-blueprint-management-card[data-enabled="true"] {
+  border-left: 3px solid #25d77a;
+}
+
+.workflow-research-blueprint-protection-card > code {
+  padding: 7px;
+  border: 1px solid rgba(72, 168, 255, 0.3);
+  background: rgba(2, 17, 31, 0.72);
+}
+
+.workflow-research-blueprint-side-overrides {
+  grid-column: 1 / -1;
+}
+
+.workflow-research-blueprint-recovery-part {
+  border-left: 3px solid rgba(245, 200, 76, 0.65);
+}
+
+.workflow-research-blueprint-readiness-list {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(245, 200, 76, 0.3);
+  background: rgba(34, 25, 4, 0.35);
+}
+
+.workflow-research-blueprint-readiness-list[data-tone="blocked"] {
+  border-color: rgba(229, 72, 77, 0.4);
+  background: rgba(50, 8, 13, 0.4);
+}
+
+.workflow-research-blueprint-readiness-list > strong {
+  color: #f5dbc0;
+  font-size: 11px;
+}
+
+.workflow-research-blueprint-readiness-list ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: #dfc8c4;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .workflow-research-regime-controls {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -11290,8 +11645,16 @@ button:disabled {
   .workflow-research-backtest-form,
   .workflow-research-blueprint-readiness dl,
   .workflow-research-cross-guide > div,
-  .workflow-research-blueprint-facts {
+  .workflow-research-blueprint-facts,
+  .workflow-research-blueprint-card-grid,
+  .workflow-research-blueprint-protection-grid,
+  .workflow-research-blueprint-compact-facts,
+  .workflow-research-ea-cross-timeline {
     grid-template-columns: 1fr;
+  }
+
+  .workflow-research-blueprint-controls {
+    justify-content: flex-start;
   }
 
   .workflow-research-file-control,

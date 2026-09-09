@@ -764,7 +764,7 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
 
     def test_deep_research_contract_requires_public_matching_opened_sources(self) -> None:
         urls = [
-            "https://example.com/ema-cross",
+            "https://www.tradingview.com/support/solutions/43000592270-moving-average/",
             "https://www.investopedia.com/terms/m/movingaverage.asp",
         ]
 
@@ -817,7 +817,7 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
         )
         self.assertEqual(len(parsed["evidence"]), 2)
 
-        mismatched = payload([urls[0], "https://replacement.example/rules"])
+        mismatched = payload([urls[0], "https://www.mql5.com/en/docs/indicators/ima"])
         with self.assertRaisesRegex(ValueError, "sourceLinks must match"):
             self.runner.parse_work_result(
                 self.compact(mismatched),

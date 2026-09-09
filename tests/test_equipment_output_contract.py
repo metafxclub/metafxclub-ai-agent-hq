@@ -90,8 +90,8 @@ class EquipmentOutputContractTests(unittest.TestCase):
         systems: list[dict] = []
         evidence: list[dict] = []
         for index, family in enumerate(families, start=1):
-            primary = f"https://source{index}.example.com/system-{index}"
-            corroborating = f"https://proof{index}.example.org/system-{index}"
+            primary = f"https://www.tradingview.com/scripts/system-{index}"
+            corroborating = f"https://github.com/metafxclub/system-{index}"
             evidence.extend([
                 {"label": f"Primary {index}", "url": primary, "note": "Public strategy rules"},
                 {"label": f"Proof {index}", "url": corroborating, "note": "Independent corroboration"},
@@ -217,7 +217,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
         blueprint = blueprint_support.ready_blueprint()
         blueprint["evidenceMap"][1] = {
             "sourceRef": "S2",
-            "url": "https://www.investopedia.com/terms/m/movingaverage.asp",
+            "url": "https://www.tradingview.com/support/solutions/43000592270-moving-average/",
             "title": "Moving average reference",
             "checkedAt": blueprint["checkedAt"],
         }
@@ -236,7 +236,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
             "findings": ["แยก fact และ unknown แล้ว"],
             "nextSteps": ["นำกฎที่ครบไปทดสอบกับ OHLC"],
             "evidence": [
-                {"label": "Rules", "url": "https://example.com/ema-cross", "note": "Primary public rules"},
+                {"label": "Rules", "url": "https://www.tradingview.com/support/solutions/43000592270-moving-average/", "note": "Primary public rules"},
                 {"label": "Proof", "url": "https://www.investopedia.com/terms/m/movingaverage.asp", "note": "Independent public proof"},
             ],
             "blockedCapability": "",
@@ -784,6 +784,37 @@ class EquipmentOutputContractTests(unittest.TestCase):
         self.assertFalse(low_diversity["valid"])
         self.assertIn("strategy_family_diversity_too_low", low_diversity["entryErrors"])
 
+    def test_trading_system_verification_rejects_rfc_documentation_hosts(self) -> None:
+        systems, evidence = self._trading_system_rows()
+        original = systems[0]["sourceUrl"]
+        reserved = "https://research.example.com/system-fixture"
+        systems[0]["sourceUrl"] = reserved
+        systems[0]["creatorOrTrader"]["sourceUrl"] = reserved
+        systems[0]["riskManagement"]["sourceUrl"] = reserved
+        for step in systems[0]["entrySteps"] + systems[0]["exitSteps"]:
+            if step["sourceUrl"] == original:
+                step["sourceUrl"] = reserved
+        evidence[0]["url"] = reserved
+        mission, _procedure = self._mission()
+
+        normalized, errors = self.bridge._normalize_trading_system_contract_rows(
+            mission,
+            {},
+            evidence,
+            systems,
+            existing_fingerprints_override=set(),
+        )
+
+        self.assertIsNone(normalized)
+        self.assertIn("trading_system_evidence_urls_count_not_6", errors)
+        self.assertIn("system_1_invalid_identity_or_source", errors)
+        self.assertIsNotNone(
+            self.bridge._normalized_contract_public_url(reserved)
+        )
+        self.assertIsNone(
+            self.bridge._normalized_external_research_evidence_url(reserved)
+        )
+
     def test_trading_system_contract_requires_real_public_creator_and_ordered_steps(self) -> None:
         mission, procedure = self._mission()
         systems, evidence = self._trading_system_rows()
@@ -846,7 +877,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
     def test_trading_system_contract_rejects_source_not_present_in_evidence(self) -> None:
         mission, procedure = self._mission()
         systems, evidence = self._trading_system_rows()
-        systems[2]["exitSteps"][0]["sourceUrl"] = "https://missing.example.net/rule"
+        systems[2]["exitSteps"][0]["sourceUrl"] = "https://www.investopedia.com/terms/m/movingaverage.asp"
         result = self.bridge.validate_dashboard_workflow_output_contract(
             mission,
             self._result(
@@ -863,7 +894,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
         systems, evidence = self._trading_system_rows()
         evidence.append({
             "label": "Unused seventh source",
-            "url": "https://unused.example.net/system",
+            "url": "https://www.investopedia.com/terms/t/tradingsystem.asp",
             "note": "This source is not mapped to a trading system",
         })
         result = self.bridge.validate_dashboard_workflow_output_contract(
@@ -915,7 +946,7 @@ class EquipmentOutputContractTests(unittest.TestCase):
         mission, procedure = self._mission()
         systems, evidence = self._trading_system_rows()
         old_url = systems[0]["corroboratingUrls"][0]
-        same_host_url = "https://source1.example.com/independent-copy"
+        same_host_url = "https://www.tradingview.com/scripts/independent-copy"
         systems[0]["corroboratingUrls"] = [same_host_url]
         systems[0]["publicUsers"][0]["sourceUrl"] = same_host_url
         systems[0]["exitSteps"][1]["sourceUrl"] = same_host_url
@@ -934,6 +965,57 @@ class EquipmentOutputContractTests(unittest.TestCase):
         self.assertIn(
             "system_1_source_hosts_not_independent",
             result["entryErrors"],
+        )
+
+    def test_trading_system_contract_treats_same_base_domain_subdomains_as_one_source(self) -> None:
+        mission, procedure = self._mission()
+        systems, evidence = self._trading_system_rows()
+        old_url = systems[0]["corroboratingUrls"][0]
+        same_domain_subdomain_url = (
+            "https://research.tradingview.com/scripts/corroborating-copy"
+        )
+        systems[0]["corroboratingUrls"] = [same_domain_subdomain_url]
+        systems[0]["publicUsers"][0]["sourceUrl"] = same_domain_subdomain_url
+        systems[0]["exitSteps"][1]["sourceUrl"] = same_domain_subdomain_url
+        for row in evidence:
+            if row["url"] == old_url:
+                row["url"] = same_domain_subdomain_url
+
+        result = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            self._result(
+                fields={"systems": systems},
+                evidence_kinds=list(procedure["evidenceRequired"]),
+                evidence=evidence,
+            ),
+        )
+
+        self.assertFalse(result["valid"])
+        self.assertIn(
+            "system_1_source_hosts_not_independent",
+            result["entryErrors"],
+        )
+
+    def test_public_evidence_independence_key_handles_known_multilevel_suffixes(self) -> None:
+        self.assertEqual(
+            self.bridge.public_evidence_independence_key(
+                "https://docs.broker.co.uk/research"
+            ),
+            "broker.co.uk",
+        )
+        self.assertEqual(
+            self.bridge.public_evidence_independence_key(
+                "https://community.broker.co.uk/review"
+            ),
+            "broker.co.uk",
+        )
+        self.assertNotEqual(
+            self.bridge.public_evidence_independence_key(
+                "https://docs.broker.co.uk/research"
+            ),
+            self.bridge.public_evidence_independence_key(
+                "https://docs.other.co.uk/research"
+            ),
         )
 
     def test_trading_system_contract_requires_exact_evidence_mapping(self) -> None:

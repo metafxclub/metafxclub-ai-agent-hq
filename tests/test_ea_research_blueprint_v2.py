@@ -43,12 +43,15 @@ def cross_rule(
         "phase": phase,
         "side": side,
         "enabled": True,
+        "evaluationEvent": "new_closed_bar",
         "sourceStatus": source_status,
         "sourceRefs": ["S1"],
         "expression": {
             "op": op,
             "left": source_operand("ema_fast"),
             "right": source_operand("ema_slow"),
+            "previousShift": 2,
+            "currentShift": 1,
         },
         "humanTextTh": "ทดสอบการตัดกันของ EMA จากแท่งปิด",
     }
@@ -80,6 +83,18 @@ def disabled_managed_feature() -> dict:
         "sourceRefs": ["S1"],
         "parameters": {},
         "rules": [],
+    }
+
+
+def once_per_bar_with_position() -> dict:
+    return {
+        "op": "once_per_bar",
+        "barShift": 1,
+        "item": {
+            "op": ">",
+            "left": {"kind": "position", "field": "managed_count"},
+            "right": {"kind": "constant", "value": 0},
+        },
     }
 
 
@@ -338,13 +353,13 @@ def ready_blueprint() -> dict:
         "evidenceMap": [
             {
                 "sourceRef": "S1",
-                "url": "https://example.com/ema-cross",
+                "url": "https://www.investopedia.com/terms/m/movingaverage.asp",
                 "title": "EMA crossover specification",
                 "checkedAt": "2026-09-08T09:30:00+07:00",
             },
             {
                 "sourceRef": "S2",
-                "url": "https://example.org/closed-bar-cross",
+                "url": "https://www.tradingview.com/support/solutions/43000592270-moving-average/",
                 "title": "Independent closed-bar crossover reference",
                 "checkedAt": "2026-09-08T09:31:00+07:00",
             },
@@ -441,6 +456,7 @@ def activate_martingale_recovery(blueprint: dict) -> dict:
                 "phase": "recovery",
                 "side": "both",
                 "enabled": True,
+                "evaluationEvent": "once_per_level",
                 "sourceStatus": "verified_fact",
                 "sourceRefs": ["S1"],
                 "expression": copy.deepcopy(recovery_trigger),
@@ -500,6 +516,276 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
             set(schema["$defs"]["execution"]["properties"]["evaluationOrder"]["items"]["enum"]),
             {"safety", "recovery", "manage", "exit", "entry"},
         )
+        self.assertTrue(
+            {"side", "evaluationEvent", "humanTextTh"}.issubset(
+                schema["$defs"]["rule"]["required"]
+            )
+        )
+        self.assertIn("EMA", schema["$defs"]["indicator"]["properties"]["kind"]["enum"])
+        self.assertNotIn(
+            "QuantumMoonFilter",
+            schema["$defs"]["indicator"]["properties"]["kind"]["enum"],
+        )
+        self.assertNotIn(
+            "RSI",
+            schema["$defs"]["indicator"]["properties"]["kind"]["enum"],
+        )
+        self.assertTrue(
+            any(
+                {"barShift", "item"}.issubset(fragment.get("then", {}).get("required", []))
+                for fragment in schema["$defs"]["expression"]["allOf"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "field" in fragment.get("then", {}).get("required", [])
+                for fragment in schema["$defs"]["operand"]["allOf"]
+            )
+        )
+
+    def test_executable_rules_require_side_event_human_text_and_container_alignment(self) -> None:
+        missing = ready_blueprint()
+        rule = missing["entry"]["buy"]["rules"][0]
+        rule.pop("side")
+        rule.pop("evaluationEvent")
+        rule.pop("humanTextTh")
+        codes = issue_codes(missing)
+        self.assertIn("RULE_SIDE_REQUIRED", codes)
+        self.assertIn("RULE_EVALUATION_EVENT_REQUIRED", codes)
+        self.assertIn("STRING_REQUIRED", codes)
+
+        mismatched = ready_blueprint()
+        mismatched_rule = mismatched["entry"]["buy"]["rules"][0]
+        mismatched_rule.update(
+            phase="exit",
+            side="sell",
+            evaluationEvent="every_tick",
+        )
+        mismatch_codes = issue_codes(mismatched)
+        self.assertIn("RULE_CONTAINER_PHASE_MISMATCH", mismatch_codes)
+        self.assertIn("RULE_CONTAINER_SIDE_MISMATCH", mismatch_codes)
+        self.assertIn("CLOSED_BAR_EVALUATION_EVENT_INVALID", mismatch_codes)
+
+    def test_parameterized_indicator_requires_bound_settings_and_timeframe(self) -> None:
+        blueprint = ready_blueprint()
+        blueprint["indicators"][0]["parameters"] = {}
+        self.assertIn("INDICATOR_PERIOD_REQUIRED", issue_codes(blueprint))
+        self.assertIn("READINESS_UNRESOLVED", issue_codes(blueprint))
+
+        unbound_timeframe = ready_blueprint()
+        unbound_timeframe["indicators"][0]["timeframe"] = "M15"
+        self.assertIn(
+            "INDICATOR_TIMEFRAME_UNBOUND",
+            issue_codes(unbound_timeframe),
+        )
+
+    def test_moving_average_contract_rejects_nonsensical_code_parameters(self) -> None:
+        cases = [
+            (
+                "zero period",
+                lambda value: value["indicators"][0]["parameters"].update(period=0),
+                "INDICATOR_PERIOD_INVALID",
+            ),
+            (
+                "fractional period",
+                lambda value: value["indicators"][0]["parameters"].update(period=10.5),
+                "INDICATOR_PERIOD_INVALID",
+            ),
+            (
+                "wrong input type",
+                lambda value: value["indicators"][0]["parameters"].update(
+                    period={"inputRef": "fixed_lot"}
+                ),
+                "INDICATOR_PERIOD_INPUT_TYPE_INVALID",
+            ),
+            (
+                "invalid applied price",
+                lambda value: value["indicators"][0].update(appliedPrice="banana"),
+                "INDICATOR_APPLIED_PRICE_INVALID",
+            ),
+            (
+                "invalid output line",
+                lambda value: value["indicators"][0].update(outputLine="signal_7"),
+                "INDICATOR_OUTPUT_LINE_INVALID",
+            ),
+            (
+                "negative display shift",
+                lambda value: value["indicators"][0]["parameters"].update(shift=-1),
+                "INDICATOR_MA_SHIFT_INVALID",
+            ),
+        ]
+        for label, mutate, expected_code in cases:
+            with self.subTest(label=label):
+                blueprint = ready_blueprint()
+                mutate(blueprint)
+                self.assertIn(expected_code, issue_codes(blueprint))
+
+        generic = ready_blueprint()
+        generic["indicators"][0]["kind"] = "MA"
+        self.assertIn("INDICATOR_MA_METHOD_INVALID", issue_codes(generic))
+        generic["indicators"][0]["parameters"]["method"] = "EMA"
+        self.assertEqual(CONTRACT.validate_blueprint(generic), [])
+
+    def test_reserved_documentation_domains_never_count_as_blueprint_evidence(self) -> None:
+        for url in (
+            "https://example.com/ema-cross",
+            "https://docs.example.org/rules",
+            "https://research.vendor.test/rules",
+            "https://system.invalid/rules",
+        ):
+            with self.subTest(url=url):
+                blueprint = ready_blueprint()
+                blueprint["evidenceMap"][0]["url"] = url
+                self.assertIn(
+                    "SOURCE_URL_RESERVED_DOCUMENTATION_DOMAIN",
+                    issue_codes(blueprint),
+                )
+
+    def test_account_operand_requires_explicit_field(self) -> None:
+        blueprint = ready_blueprint()
+        blueprint["entry"]["buy"]["rules"][0]["expression"] = {
+            "op": ">=",
+            "left": {"kind": "account"},
+            "right": {"kind": "constant", "value": 10.0},
+        }
+        issues = CONTRACT.validate_blueprint(blueprint, require_ready=True)
+        self.assertIn(
+            ("ACCOUNT_FIELD_REQUIRED", "$.entry.buy.rules[0].expression.left.field"),
+            {(item["code"], item["path"]) for item in issues},
+        )
+
+    def test_all_semantic_operands_require_explicit_fields(self) -> None:
+        for kind in (
+            "position",
+            "basket",
+            "session",
+            "spread",
+            "time",
+            "symbol_property",
+        ):
+            with self.subTest(kind=kind):
+                blueprint = ready_blueprint()
+                blueprint["entry"]["buy"]["rules"][0]["expression"] = {
+                    "op": ">",
+                    "left": {"kind": kind},
+                    "right": {"kind": "constant", "value": 0},
+                }
+                issues = CONTRACT.validate_blueprint(blueprint, require_ready=True)
+                self.assertIn(
+                    (
+                        "OPERAND_FIELD_REQUIRED",
+                        "$.entry.buy.rules[0].expression.left.field",
+                    ),
+                    {(item["code"], item["path"]) for item in issues},
+                )
+
+    def test_once_per_bar_requires_and_validates_nested_condition(self) -> None:
+        missing = ready_blueprint()
+        missing["entry"]["buy"]["rules"][0]["expression"] = {
+            "op": "once_per_bar",
+            "barShift": 1,
+        }
+        missing_issues = CONTRACT.validate_blueprint(missing, require_ready=True)
+        self.assertIn(
+            (
+                "ONCE_PER_BAR_ITEM_REQUIRED",
+                "$.entry.buy.rules[0].expression.item",
+            ),
+            {(item["code"], item["path"]) for item in missing_issues},
+        )
+
+        malformed = ready_blueprint()
+        malformed["entry"]["buy"]["rules"][0]["expression"] = {
+            "op": "once_per_bar",
+            "barShift": 1,
+            "item": {"left": {"kind": "constant", "value": 1}},
+        }
+        malformed_issues = CONTRACT.validate_blueprint(
+            malformed,
+            require_ready=True,
+        )
+        self.assertIn(
+            (
+                "EXPRESSION_OPERATOR_INVALID",
+                "$.entry.buy.rules[0].expression.item.op",
+            ),
+            {(item["code"], item["path"]) for item in malformed_issues},
+        )
+
+    def test_unknown_indicator_kind_and_unmapped_buffers_fail_closed(self) -> None:
+        unknown = ready_blueprint()
+        unknown["indicators"][0].update(
+            kind="QuantumMoonFilter",
+            parameters={"bogus": 123},
+            appliedPrice="bananas",
+            outputLine="not-a-buffer",
+        )
+        self.assertIn("INDICATOR_KIND_UNSUPPORTED", issue_codes(unknown))
+
+        unsupported_builtin = ready_blueprint()
+        unsupported_builtin["indicators"][0].update(
+            kind="RSI",
+            parameters={"period": 14},
+        )
+        self.assertIn(
+            "INDICATOR_KIND_UNSUPPORTED",
+            issue_codes(unsupported_builtin),
+        )
+
+        atr_without_period = ready_blueprint()
+        atr_without_period["indicators"][0].update(
+            kind="ATR",
+            parameters={"bogus": 123},
+        )
+        self.assertIn("INDICATOR_PERIOD_REQUIRED", issue_codes(atr_without_period))
+
+        wrong_line = ready_blueprint()
+        wrong_line["indicators"][0].update(outputLine="signal")
+        self.assertIn("INDICATOR_OUTPUT_LINE_INVALID", issue_codes(wrong_line))
+
+    def test_entry_and_exit_parent_enablement_cannot_hide_child_rules(self) -> None:
+        for section in ("entry", "exit"):
+            with self.subTest(section=section):
+                blueprint = ready_blueprint()
+                child = copy.deepcopy(blueprint[section]["buy"]["rules"][0])
+                child["ruleId"] = f"HIDDEN_{section.upper()}_SELL"
+                child["side"] = "sell"
+                blueprint[section]["sell"]["rules"] = [child]
+                codes = issue_codes(blueprint)
+                self.assertIn("DISABLED_SIDE_RULES_NOT_EMPTY", codes)
+                self.assertIn("CHILD_RULE_ENABLEMENT_MISMATCH", codes)
+
+        mismatched_exit = ready_blueprint()
+        mismatched_exit["exit"]["buy"].update(
+            enabled=False,
+            disabledReason="Exit intentionally disabled",
+            rules=[],
+        )
+        self.assertIn("SIDE_ENABLEMENT_MISMATCH", issue_codes(mismatched_exit))
+
+    def test_enabled_exit_can_use_protection_without_signal_rules(self) -> None:
+        blueprint = ready_blueprint()
+        blueprint["exit"]["buy"]["rules"] = []
+        for input_row in blueprint["inputs"]:
+            input_row["usedByRuleIds"] = [
+                rule_id
+                for rule_id in input_row["usedByRuleIds"]
+                if rule_id != "EXIT_BUY_001"
+            ]
+        blueprint["testCases"] = [
+            case
+            for case in blueprint["testCases"]
+            if "EXIT_BUY_001" not in case["ruleIds"]
+        ]
+        blueprint["pseudocode"]["lines"] = [
+            line
+            for line in blueprint["pseudocode"]["lines"]
+            if "EXIT_BUY_001" not in line
+        ]
+        next(
+            state for state in blueprint["stateMachine"] if state["state"] == "LONG"
+        )["transitions"] = []
+        self.assertEqual(CONTRACT.validate_blueprint(blueprint), [])
 
     def test_unknown_input_can_preserve_null_without_inventing_a_default(self) -> None:
         blueprint = ready_blueprint()
@@ -543,7 +829,7 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
         blueprint = ready_blueprint()
         blueprint["orderManagement"]["modifyStopLoss"].update(
             enabled=True,
-            trigger={"op": "once_per_bar", "barShift": 1},
+            trigger=once_per_bar_with_position(),
             action={"kind": "move_stop"},
         )
         codes = issue_codes(blueprint)
@@ -555,7 +841,7 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
         self.assertIn("READINESS_UNRESOLVED", issue_codes(one_source))
 
         same_domain = ready_blueprint()
-        same_domain["evidenceMap"][1]["url"] = "https://docs.example.com/another-page"
+        same_domain["evidenceMap"][1]["url"] = "https://academy.investopedia.com/another-page"
         self.assertIn("READINESS_UNRESOLVED", issue_codes(same_domain))
 
         local_source = ready_blueprint()
@@ -584,7 +870,7 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
         incomplete = ready_blueprint()
         incomplete["orderManagement"]["modifyStopLoss"].update(
             enabled=True,
-            trigger={"op": "once_per_bar", "barShift": 1},
+            trigger=once_per_bar_with_position(),
             action={"kind": "move_stop_loss"},
             cadence="new_closed_bar",
             idempotent=True,
@@ -599,9 +885,10 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
             "phase": "modify",
             "side": "buy",
             "enabled": True,
+            "evaluationEvent": "new_closed_bar",
             "sourceStatus": "verified_fact",
             "sourceRefs": ["S1"],
-            "expression": {"op": "once_per_bar", "barShift": 1},
+            "expression": once_per_bar_with_position(),
             "humanTextTh": "เลื่อน Stop Loss หนึ่งครั้งต่อแท่งปิดตามพารามิเตอร์",
         }
         complete["orderManagement"]["modifyStopLoss"].update(
@@ -759,6 +1046,54 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
         self.assertEqual(normalized["scope"]["platforms"], ["MT4", "MT5"])
         self.assertEqual(normalized["scope"]["symbols"], ["EURUSD", "GBPUSD"])
 
+    def test_cross_requires_explicit_closed_bar_shift_contract(self) -> None:
+        blueprint = ready_blueprint()
+        expression = blueprint["entry"]["buy"]["rules"][0]["expression"]
+        expression.pop("previousShift")
+        expression.pop("currentShift")
+        issues = CONTRACT.validate_blueprint(blueprint, require_ready=True)
+        issue_pairs = {(item["code"], item["path"]) for item in issues}
+        self.assertIn(
+            (
+                "CROSS_BAR_SEMANTICS_INVALID",
+                "$.entry.buy.rules[0].expression.previousShift",
+            ),
+            issue_pairs,
+        )
+        self.assertIn(
+            (
+                "CROSS_BAR_SEMANTICS_INVALID",
+                "$.entry.buy.rules[0].expression.currentShift",
+            ),
+            issue_pairs,
+        )
+        with self.assertRaises(CONTRACT.BlueprintValidationError):
+            CONTRACT.normalize_blueprint(blueprint, require_ready=True)
+
+    def test_break_series_operands_require_explicit_closed_bar_shift(self) -> None:
+        blueprint = ready_blueprint()
+        blueprint["entry"]["buy"]["rules"][0]["expression"] = {
+            "op": "break_above",
+            "left": {"kind": "price", "field": "close"},
+            "right": {"kind": "indicator", "ref": "ema_slow"},
+        }
+        issues = CONTRACT.validate_blueprint(blueprint, require_ready=True)
+        issue_pairs = {(item["code"], item["path"]) for item in issues}
+        self.assertIn(
+            (
+                "CLOSED_BAR_SHIFT_REQUIRED",
+                "$.entry.buy.rules[0].expression.left.shift",
+            ),
+            issue_pairs,
+        )
+        self.assertIn(
+            (
+                "CLOSED_BAR_SHIFT_REQUIRED",
+                "$.entry.buy.rules[0].expression.right.shift",
+            ),
+            issue_pairs,
+        )
+
     def test_wrong_cross_expansion_is_rejected_with_stable_path_and_code(self) -> None:
         blueprint = ready_blueprint()
         expression = blueprint["entry"]["buy"]["rules"][0]["expression"]
@@ -790,6 +1125,163 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
             "right": {"kind": "indicator", "ref": "ema_slow", "shift": 1},
         }
         self.assertIn("CLOSED_BAR_SHIFT_ZERO", issue_codes(blueprint))
+
+    def test_expression_depth_limit_has_exact_safe_boundary(self) -> None:
+        def nested_not(depth: int) -> dict:
+            expression = {
+                "op": ">",
+                "left": {"kind": "constant", "value": 1},
+                "right": {"kind": "constant", "value": 0},
+            }
+            for _index in range(depth - 1):
+                expression = {"op": "not", "item": expression}
+            return expression
+
+        boundary = ready_blueprint()
+        boundary["entry"]["buy"]["rules"][0]["expression"] = nested_not(
+            CONTRACT.MAX_EXPRESSION_DEPTH
+        )
+        self.assertEqual(CONTRACT.validate_blueprint(boundary, require_ready=True), [])
+
+        over_limit = ready_blueprint()
+        over_limit["entry"]["buy"]["rules"][0]["expression"] = nested_not(
+            CONTRACT.MAX_EXPRESSION_DEPTH + 1
+        )
+        issues = CONTRACT.validate_blueprint(over_limit, require_ready=True)
+        self.assertIn("EXPRESSION_DEPTH_EXCEEDED", {item["code"] for item in issues})
+        with self.assertRaises(CONTRACT.BlueprintValidationError) as raised:
+            CONTRACT.normalize_blueprint(over_limit, require_ready=True)
+        self.assertIn(
+            "EXPRESSION_DEPTH_EXCEEDED",
+            {item["code"] for item in raised.exception.issues},
+        )
+
+        normalized_growth = ready_blueprint()
+        cross = copy.deepcopy(
+            normalized_growth["entry"]["buy"]["rules"][0]["expression"]
+        )
+        for _index in range(CONTRACT.MAX_EXPRESSION_DEPTH - 1):
+            cross = {"op": "not", "item": cross}
+        normalized_growth["entry"]["buy"]["rules"][0]["expression"] = cross
+        self.assertIn(
+            "EXPRESSION_DEPTH_EXCEEDED",
+            issue_codes(normalized_growth),
+            "Auto-expanded cross nodes must be included in the frontend-safe depth budget",
+        )
+
+    def test_expression_node_limit_has_exact_safe_boundary(self) -> None:
+        def wide_and(node_count: int) -> dict:
+            return {
+                "op": "and",
+                "items": [
+                    {
+                        "op": ">",
+                        "left": {"kind": "constant", "value": 1},
+                        "right": {"kind": "constant", "value": 0},
+                    }
+                    for _index in range(node_count - 1)
+                ],
+            }
+
+        boundary = ready_blueprint()
+        boundary["entry"]["buy"]["rules"][0]["expression"] = wide_and(
+            CONTRACT.MAX_EXPRESSION_NODES
+        )
+        self.assertEqual(CONTRACT.validate_blueprint(boundary, require_ready=True), [])
+
+        over_limit = ready_blueprint()
+        over_limit["entry"]["buy"]["rules"][0]["expression"] = wide_and(
+            CONTRACT.MAX_EXPRESSION_NODES + 1
+        )
+        self.assertIn(
+            "EXPRESSION_NODE_LIMIT_EXCEEDED",
+            issue_codes(over_limit),
+        )
+
+    def test_test_case_payloads_are_nonempty_and_bounded(self) -> None:
+        for key, empty_value in (("given", {}), ("when", "  "), ("expected", [])):
+            with self.subTest(key=key):
+                blueprint = ready_blueprint()
+                blueprint["testCases"][0][key] = empty_value
+                self.assertIn("TEST_PAYLOAD_EMPTY", issue_codes(blueprint))
+
+        oversized = ready_blueprint()
+        oversized["testCases"][0]["when"] = "x" * (
+            CONTRACT.MAX_TEST_PAYLOAD_BYTES + 1
+        )
+        self.assertIn("TEST_PAYLOAD_TOO_LARGE", issue_codes(oversized))
+
+    def test_canonical_blueprint_transport_budget_has_exact_boundary(self) -> None:
+        boundary = ready_blueprint()
+        boundary["pseudocode"]["lines"].append("")
+        normalized_probe = CONTRACT._normalize_candidate(boundary)
+        probe_size = len(CONTRACT._canonical_fragment(normalized_probe).encode("utf-8"))
+        padding = CONTRACT.MAX_CANONICAL_BLUEPRINT_UTF8_BYTES - probe_size
+        self.assertGreater(padding, 0)
+        boundary["pseudocode"]["lines"][-1] = "X" * padding
+
+        normalized_boundary = CONTRACT._normalize_candidate(boundary)
+        boundary_json = CONTRACT._canonical_fragment(normalized_boundary)
+        self.assertEqual(
+            len(boundary_json.encode("utf-8")),
+            CONTRACT.MAX_CANONICAL_BLUEPRINT_UTF8_BYTES,
+        )
+        self.assertLessEqual(
+            len(boundary_json.encode("utf-16-le")) // 2,
+            CONTRACT.MAX_CANONICAL_BLUEPRINT_UTF16_CODE_UNITS,
+        )
+        self.assertEqual(CONTRACT.validate_blueprint(boundary, require_ready=True), [])
+
+        wrapper_json = json.dumps(
+            {
+                "schemaVersion": CONTRACT.SCHEMA_VERSION,
+                "blueprintDigest": "0" * 64,
+                "eaImplementationBlueprint": normalized_boundary,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.assertLessEqual(len(wrapper_json.encode("utf-16-le")) // 2, 49_000)
+
+        over_limit = copy.deepcopy(boundary)
+        over_limit["pseudocode"]["lines"][-1] += "X"
+        self.assertIn("BLUEPRINT_TRANSPORT_SIZE_EXCEEDED", issue_codes(over_limit))
+
+    def test_cross_test_outcomes_and_boundary_inputs_must_be_distinguishable(self) -> None:
+        indistinguishable_outcome = ready_blueprint()
+        positive = next(
+            case
+            for case in indistinguishable_outcome["testCases"]
+            if case["kind"] == "positive" and "ENTRY_BUY_001" in case["ruleIds"]
+        )
+        negative = next(
+            case
+            for case in indistinguishable_outcome["testCases"]
+            if case["kind"] == "negative" and "ENTRY_BUY_001" in case["ruleIds"]
+        )
+        negative["expected"] = copy.deepcopy(positive["expected"])
+        self.assertIn(
+            "TEST_CROSS_OUTCOMES_INDISTINGUISHABLE",
+            issue_codes(indistinguishable_outcome),
+        )
+
+        fake_boundary = ready_blueprint()
+        positive = next(
+            case
+            for case in fake_boundary["testCases"]
+            if case["kind"] == "positive" and "ENTRY_BUY_001" in case["ruleIds"]
+        )
+        boundary = next(
+            case
+            for case in fake_boundary["testCases"]
+            if case["kind"] == "boundary" and "ENTRY_BUY_001" in case["ruleIds"]
+        )
+        boundary["given"] = copy.deepcopy(positive["given"])
+        self.assertIn(
+            "TEST_CROSS_BOUNDARY_NOT_MEANINGFUL",
+            issue_codes(fake_boundary),
+        )
 
     def test_reference_integrity_covers_sources_indicators_inputs_and_rules(self) -> None:
         cases: list[tuple[str, callable]] = [

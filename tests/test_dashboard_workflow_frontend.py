@@ -383,6 +383,156 @@ const TRADING_RESEARCH_SIMULATION_REGIMES = Object.freeze([
         self.assertIn("textContent", blueprint)
         self.assertNotIn("innerHTML", blueprint)
 
+    def test_research_room_expands_canonical_rules_into_ea_writer_view(self):
+        blueprint_start = self.main.index("function tradingResearchBlueprintSourceStatusMeta")
+        blueprint_end = self.main.index("function renderTradingResearchDetail", blueprint_start)
+        blueprint = self.main[blueprint_start:blueprint_end]
+        for function_name in (
+            "tradingResearchBlueprintExpressionText",
+            "createTradingResearchBlueprintRuleList",
+            "createTradingResearchBlueprintSetupRules",
+            "createTradingResearchBlueprintInputs",
+            "createTradingResearchBlueprintIndicators",
+            "createTradingResearchBlueprintTpSl",
+            "createTradingResearchBlueprintManagedFeature",
+            "createTradingResearchBlueprintRecovery",
+        ):
+            self.assertIn(f"function {function_name}", blueprint)
+        for copy in (
+            "แท่ง 2 • สถานะก่อน Cross",
+            "แท่ง 1 • แท่งปิดล่าสุดที่ยืนยัน Cross",
+            "เงื่อนไขที่ EA ต้องคำนวณ",
+            "ปิดแบบ Fail-closed ชั่วคราว — ต้องยืนยัน",
+            "Recovery Mode:",
+            "เปิดรายละเอียดทั้งหมด",
+            "Setup / Filters แยกตามฝั่ง",
+            "derived_expansion",
+            "EA ต้องข้ามกฎนี้",
+            "จังหวะประเมิน",
+            "ตำแหน่งกฎหรือหลักฐานที่ขัดกัน",
+            "ตัวอย่างนี้ไม่ใช่ค่าของระบบที่เลือก",
+        ):
+            self.assertIn(copy, blueprint)
+        self.assertIn('group.render === "function"', blueprint)
+        self.assertIn('details.open = true', blueprint)
+        self.assertNotIn("innerHTML", blueprint)
+
+    def test_research_cross_formatter_uses_exact_closed_bar_comparisons(self):
+        start = self.main.index("function tradingResearchBlueprintSourceStatusMeta")
+        end = self.main.index("function appendTradingResearchBlueprintFact", start)
+        functions = self.main[start:end]
+        source = """
+function tradingResearchBlueprintObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+""" + functions + """
+const above = tradingResearchBlueprintExpressionText({
+  op: "cross_above",
+  left: { kind: "indicator", ref: "ema_fast" },
+  right: { kind: "indicator", ref: "ema_slow" },
+  previousShift: 2,
+  currentShift: 1,
+});
+const below = tradingResearchBlueprintExpressionText({
+  op: "cross_below",
+  left: { kind: "indicator", ref: "ema_fast" },
+  right: { kind: "indicator", ref: "ema_slow" },
+  previousShift: 2,
+  currentShift: 1,
+});
+const unknown = tradingResearchBlueprintExpressionText({ op: "unknown" });
+console.log(JSON.stringify({ above, below, unknown }));
+"""
+        result = self.run_node_json(source)
+        self.assertEqual(
+            result["above"],
+            "ema_fast[2] <= ema_slow[2] AND ema_fast[1] > ema_slow[1]",
+        )
+        self.assertEqual(
+            result["below"],
+            "ema_fast[2] >= ema_slow[2] AND ema_fast[1] < ema_slow[1]",
+        )
+        self.assertEqual(result["unknown"], "ต้องยืนยันเงื่อนไขจากแหล่งข้อมูล")
+
+    def test_research_history_matches_source_pair_before_safe_name_fallback(self):
+        start = self.main.index("function tradingResearchReportsForSystem")
+        end = self.main.index("const TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION", start)
+        matcher = self.main[start:end]
+        self.assertIn("domain.researchHistory", matcher)
+        self.assertIn("historyReportId === sourceReportId && historyRecordId === sourceRecordId", matcher)
+        self.assertIn("matchingNameSystems.length === 1", matcher)
+        self.assertIn("eaResearch: tradingResearchBlueprintObject(row.eaResearch)", matcher)
+        self.assertNotIn("eaImplementationBlueprint", matcher)
+        self.assertNotIn("eaBlueprint", matcher)
+
+        source = r"""
+function safeDashboardDisplayText(value, fallback = "") {
+  const text = String(value ?? "").trim();
+  return text || fallback;
+}
+function tradingResearchBlueprintObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+""" + matcher + r"""
+const system = { id: "row-1", sourceReportId: "report-1", sourceRecordId: "row-1", systemName: "Alpha" };
+const base = {
+  sourceReportId: "report-1",
+  systems: [system],
+  researchReports: [],
+  researchHistory: [
+    { researchReportId: "exact", sourceReportId: "report-1", sourceRecordId: "row-1", systemName: "Wrong name", eaResearch: { validated: true }, updatedAt: "2026-09-09T03:00:00Z" },
+    { researchReportId: "fallback", systemName: "Alpha", updatedAt: "2026-09-09T02:00:00Z" },
+    { researchReportId: "partial-must-not-bind", sourceReportId: "report-1", systemName: "Alpha", updatedAt: "2026-09-09T04:00:00Z" },
+    { researchReportId: "wrong-pair", sourceReportId: "report-2", sourceRecordId: "row-1", systemName: "Alpha", updatedAt: "2026-09-09T05:00:00Z" },
+  ],
+};
+const matched = tradingResearchReportsForSystem(base, system);
+const ambiguous = tradingResearchReportsForSystem({
+  ...base,
+  systems: [system, { ...system, id: "row-2", sourceRecordId: "row-2" }],
+  researchHistory: [{ researchReportId: "name-only", systemName: "Alpha" }],
+}, system);
+const noPairFallback = tradingResearchReportsForSystem({
+  systems: [{ systemName: "Alpha" }],
+  researchHistory: [{ researchReportId: "name-only-no-pair", systemName: "Alpha" }],
+}, { systemName: "Alpha" });
+console.log(JSON.stringify({
+  ids: matched.map((row) => row.id),
+  fallbackStatus: matched.find((row) => row.id === "fallback")?.status,
+  exactCanonicalProjection: matched.find((row) => row.id === "exact")?.eaResearch?.validated,
+  ambiguousCount: ambiguous.length,
+  noPairFallbackIds: noPairFallback.map((row) => row.id),
+}));
+"""
+        result = self.run_node_json(source)
+        self.assertEqual(result["ids"], ["exact", "fallback"])
+        self.assertEqual(result["fallbackStatus"], "unknown")
+        self.assertTrue(result["exactCanonicalProjection"])
+        self.assertEqual(result["ambiguousCount"], 0)
+        self.assertEqual(result["noPairFallbackIds"], ["name-only-no-pair"])
+
+        render_start = self.main.index("function createTradingResearchRevisionCta")
+        render_end = self.main.index("function renderTradingResearchDetail", render_start)
+        rerun = self.main[render_start:render_end]
+        self.assertIn("เลือกระบบต้นทางเพื่อวิจัย Revision ใหม่", rerun)
+        self.assertIn('data-workflow-action-form="deep_research_system"', rerun)
+        self.assertIn('data-workflow-field="sourceReportId"', rerun)
+        self.assertIn('data-workflow-field="sourceRecordId"', rerun)
+        self.assertIn("รายงานเก่า ต้องวิจัยเป็น Revision ใหม่", self.main)
+
+    def test_research_room_reports_sheet_rows_rejected_by_backend_without_urls(self):
+        normalizer_start = self.main.index("function normalizeTradingSystemResearchLabDomain")
+        normalizer_end = self.main.index("function getTradingResearchLabSession", normalizer_start)
+        normalizer = self.main[normalizer_start:normalizer_end]
+        self.assertIn("googleSheetRejectedSystemCount", normalizer)
+        self.assertIn("googleSheetRejectionReasonCounts", normalizer)
+        notice_start = self.main.index("function createTradingResearchCatalogRejectionNotice")
+        notice_end = self.main.index("function renderTradingResearchDetail", notice_start)
+        notice = self.main[notice_start:notice_end]
+        self.assertIn("หลักฐานอิสระไม่ครบ", notice)
+        self.assertIn("ระบบที่ผ่านการตรวจแล้วยังเลือกและวิจัยต่อได้ตามปกติ", notice)
+        self.assertNotIn("sourceUrl", notice)
+
     def test_research_simulation_is_deterministic_educational_only_and_never_reports_metrics(self):
         generate_start = self.main.index("function generateTradingResearchSimulationBars")
         generate_end = self.main.index("function normalizeFxBiasValue", generate_start)
@@ -651,7 +801,7 @@ console.log(JSON.stringify({
 
     def test_research_reports_bind_to_exact_source_report_and_selected_system(self):
         helper_start = self.main.index("function tradingResearchReportsForSystem")
-        helper_end = self.main.index("function renderTradingResearchDetail", helper_start)
+        helper_end = self.main.index("const TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION", helper_start)
         helper = self.main[helper_start:helper_end]
         source = helper + r"""
 const domain = {

@@ -63,8 +63,8 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         raw_systems = []
         families = ("trend_following", "mean_reversion", "breakout")
         for index, family in enumerate(families, start=1):
-            source_url = f"https://source{index}.example/system"
-            corroborating_url = f"https://confirm{index}.example/system"
+            source_url = f"https://www.tradingview.com/scripts/system-{index}"
+            corroborating_url = f"https://github.com/metafxclub/system-{index}"
             evidence.extend((
                 {"label": f"Primary {index}", "url": source_url, "note": "public rules"},
                 {"label": f"Confirm {index}", "url": corroborating_url, "note": "independent source"},
@@ -615,8 +615,8 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             "budget": {"outputLimitChars": 64000},
         }
         urls = [
-            "https://source1.example/system",
-            "https://confirm1.example/system",
+            "https://tradingfinder.com/education/system",
+            "https://forex-station.com/system-review",
         ]
         blueprint = ready_ea_research_blueprint()
         blueprint["checkedAt"] = "2026-08-22T10:00:00+07:00"

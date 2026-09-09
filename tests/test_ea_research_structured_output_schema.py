@@ -48,7 +48,7 @@ class EAResearchStructuredOutputSchemaTests(unittest.TestCase):
         blueprint["evidenceMap"].append(
             {
                 "sourceRef": "S3",
-                "url": "https://example.org/ema-cross-proof",
+                "url": "https://www.metatrader4.com/en/trading-platform/help/analytics/tech_indicators/moving_average",
                 "title": "Independent EMA reference",
                 "checkedAt": blueprint["checkedAt"],
             }

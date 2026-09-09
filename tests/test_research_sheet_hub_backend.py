@@ -1268,6 +1268,96 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             item["id"] for item in after["items"]
         }))
 
+    def test_backfill_quarantines_one_oversized_report_and_continues_valid_reports(self) -> None:
+        self.configure_hub(revision=19)
+
+        def variant(report_id: str, source_report_id: str, source_record_id: str) -> dict:
+            report = copy.deepcopy(self._deep_report())
+            report.update({
+                "id": report_id,
+                "linkedMissionId": f"mission-{report_id}",
+            })
+            report["workflowContext"]["source"].update({
+                "reportId": source_report_id,
+                "recordId": source_record_id,
+            })
+            return report
+
+        valid_a = variant("report-backfill-valid-a", "world-report-a", "system-a")
+        oversized = variant(
+            "report-backfill-oversized",
+            "world-report-oversized",
+            "system-oversized",
+        )
+        # The canonical blueprint itself remains valid and bounded; optional
+        # presentation metadata makes only the Sheet cell envelope too large.
+        oversized["metrics"]["chartAnnotations"] = "X" * 49_000
+        valid_b = variant("report-backfill-valid-b", "world-report-b", "system-b")
+        reports = [valid_a, oversized, valid_b]
+        version_index = self.bridge._research_sheet_build_deep_version_index(reports)
+        empty_flush = {"processed": 0, "synced": 0, "deferred": 0, "reason": None}
+        empty_drain = {
+            "drained": 0,
+            "queued": 0,
+            "eligibleDeferred": 0,
+        }
+
+        with (
+            patch.object(self.bridge, "load_runtime_reports", return_value=reports),
+            patch.object(
+                self.bridge,
+                "_research_sheet_runtime_deep_version_index",
+                return_value=version_index,
+            ),
+            patch.object(
+                self.bridge,
+                "_flush_research_sheet_outbox",
+                return_value=empty_flush,
+            ),
+            patch.object(
+                self.bridge,
+                "_research_sheet_drain_deferred_reports",
+                return_value=empty_drain,
+            ),
+        ):
+            result = self.bridge._research_sheet_backfill_recent_reports(
+                {"deepResearch"}
+            )
+
+        self.assertEqual(result["recentQueued"], 2)
+        self.assertEqual(result["quarantinedReports"], 1)
+        stored = self.bridge._load_research_sheet_outbox_unlocked()
+        self.assertEqual(
+            {item["reportId"] for item in stored["items"]},
+            {valid_a["id"], valid_b["id"]},
+        )
+        quarantined = [
+            item for item in stored["quarantinedReports"]
+            if item.get("lastErrorCode") == "backfill_projection_integrity_failed"
+        ]
+        self.assertEqual(len(quarantined), 1)
+        self.assertEqual(quarantined[0]["reportId"], oversized["id"])
+        self.assertEqual(stored["failedLedger"], [])
+        summary = self.bridge._research_sheet_outbox_summary(19)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(summary["quarantined"], 1)
+        self.assertEqual(
+            summary["byConsumer"]["deepResearch"]["quarantined"],
+            1,
+        )
+        self.assertFalse(any(
+            item.get("reportId") == oversized["id"]
+            for item in stored["items"]
+        ))
+        audit = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH, limit=20)
+        quarantine_events = [
+            item for item in audit
+            if item.get("type")
+            == "research_sheet_hub.backfill_report_quarantined"
+        ]
+        self.assertEqual(len(quarantine_events), 1)
+        self.assertEqual(quarantine_events[0]["reportId"], oversized["id"])
+
     def test_deferred_report_store_is_bounded_without_evicting_oldest_markers(self) -> None:
         self.configure_hub(revision=11)
         existing = [
@@ -2256,8 +2346,8 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         self.assertEqual(
             record["sourceUrls"],
             [
-                "https://example.com/system-1",
-                "https://independent.example.org/system-1-review",
+                "https://forex-station.com/system-1-review",
+                "https://tradingfinder.com/education/system-1",
             ],
         )
         self.assertTrue(record["buildReady"])
@@ -2363,11 +2453,62 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "sheet-deep-version-test",
         )
         self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["recordId"], "world-1")
+        self.assertEqual(
+            records[0]["recordId"],
+            by_research_id[second_id]["ea_factory_record_id"],
+        )
         self.assertIn("confirmed close", records[0]["core"]["entry_rules"])
         self.assertEqual(
             records[0]["eaImplementationBlueprint"]["researchRevision"],
             2,
+        )
+
+    def test_same_record_id_from_different_source_reports_remains_two_factory_records(self) -> None:
+        first = self._deep_report()
+        second = copy.deepcopy(first)
+        second.update({
+            "id": "report-deep-collision-b",
+            "linkedMissionId": "mission-deep-collision-b",
+            "createdAt": "2026-08-28T04:00:00Z",
+            "updatedAt": "2026-08-28T04:05:00Z",
+        })
+        second["workflowContext"]["source"]["reportId"] = "report-world-sheet-B"
+        # The record ID is deliberately report-local and therefore identical.
+        self.assertEqual(
+            first["workflowContext"]["source"]["recordId"],
+            second["workflowContext"]["source"]["recordId"],
+        )
+        index = self.bridge._research_sheet_build_deep_version_index([first, second])
+
+        first_rows = self.bridge._research_sheet_deep_rows(
+            first, version_index=index
+        )[0]
+        second_rows = self.bridge._research_sheet_deep_rows(
+            second, version_index=index
+        )[0]
+
+        self.assertEqual(len(first_rows), 1)
+        self.assertEqual(len(second_rows), 1)
+        self.assertEqual(first_rows[0]["research_version"], "1")
+        self.assertEqual(second_rows[0]["research_version"], "1")
+        self.assertEqual(first_rows[0]["is_current"], "TRUE")
+        self.assertEqual(second_rows[0]["is_current"], "TRUE")
+        self.assertNotEqual(
+            first_rows[0]["ea_factory_record_id"],
+            second_rows[0]["ea_factory_record_id"],
+        )
+        records = self.bridge._ea_factory_deep_research_records(
+            [*first_rows, *second_rows],
+            source_key="sheet-deep-collision-test",
+            strict=True,
+        )
+        self.assertEqual(len(records), 2)
+        self.assertEqual(
+            {record["recordId"] for record in records},
+            {
+                first_rows[0]["ea_factory_record_id"],
+                second_rows[0]["ea_factory_record_id"],
+            },
         )
 
     def test_verified_deep_research_cache_feeds_factory_automatically(self) -> None:
@@ -2440,12 +2581,12 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "record_type": "trading_system",
             "trader_or_author": "Public Author",
             "source_title": "Primary rules",
-            "source_url": "https://example.com/primary-rules",
-            "corroborating_url": "https://example.org/corroborating-rules",
+            "source_url": "https://www.tradingview.com/scripts/primary-rules",
+            "corroborating_url": "https://github.com/metafxclub/corroborating-rules",
             "evidence_urls_json": json.dumps(
                 [
-                    "https://example.com/primary-rules",
-                    "https://example.org/corroborating-rules",
+                    "https://www.tradingview.com/scripts/primary-rules",
+                    "https://github.com/metafxclub/corroborating-rules",
                 ]
             ),
             "last_verified_at": "2026-08-27T06:00:00Z",
@@ -2506,11 +2647,134 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
 
         self.assertTrue(catalog["googleSheetCompared"])
         self.assertEqual(catalog["googleSheetVerifiedSystemCount"], 1)
+        self.assertEqual(catalog["googleSheetRejectedSystemCount"], 0)
         self.assertEqual(catalog["verifiedSystemCount"], 1)
         self.assertEqual(catalog["systems"][0]["sourceKind"], "verified_sheet_record")
         self.assertEqual(selected["sourceKind"], "verified_sheet_record")
         self.assertEqual(selected["structuredPayload"]["system"]["systemName"], "Verified Sheet Trend")
         self.assertFalse(selected["structuredPayload"]["embeddedInstructionsAllowed"])
+
+    def test_world_sheet_composite_identity_is_scoped_and_rejections_are_counted(self) -> None:
+        self.configure_hub(revision=51)
+        composite_id = "auto-report-20260909|trading-system-a1b2c3-1"
+        valid = {
+            "discovery_id": composite_id,
+            "system_name": "Composite Sheet Trend",
+            "strategy_family": "trend_following",
+            "source_title": "TradingView strategy",
+            "source_url": "https://www.tradingview.com/scripts/composite-trend",
+            "corroborating_url": "https://github.com/metafxclub/composite-trend",
+            "evidence_urls_json": json.dumps(
+                [
+                    "https://www.tradingview.com/scripts/composite-trend",
+                    "https://github.com/metafxclub/composite-trend",
+                ]
+            ),
+            "verification_status": "verified",
+            "evidence_status": "verified",
+        }
+        reserved = {
+            **valid,
+            "discovery_id": "report-reserved|record-reserved",
+            "source_url": "https://example.com/system-fixture",
+            "corroborating_url": "https://example.org/system-fixture-review",
+            "evidence_urls_json": json.dumps(
+                [
+                    "https://example.com/system-fixture",
+                    "https://example.org/system-fixture-review",
+                ]
+            ),
+        }
+        invalid_identity = {
+            **valid,
+            "discovery_id": "report-one|record-one|unexpected",
+        }
+        same_host_evidence = {
+            **valid,
+            "discovery_id": "report-same-host|record-same-host",
+            "source_url": "https://www.tradingview.com/scripts/same-host-primary",
+            "corroborating_url": "https://research.tradingview.com/scripts/same-host-review",
+            "evidence_urls_json": json.dumps(
+                [
+                    "https://www.tradingview.com/scripts/same-host-primary",
+                    "https://research.tradingview.com/scripts/same-host-review",
+                    "https://github.com/metafxclub/unrelated-third-source",
+                ]
+            ),
+        }
+        now = self.bridge.utc_now()
+        self.bridge.write_json(
+            self.bridge.RESEARCH_SHEET_CACHE_PATH,
+            {
+                "schemaVersion": "research-sheet-cache-v1",
+                "sheetDigest": self.bridge.payload_digest(
+                    "research-sheet-id-v1", SHEET_ID
+                ),
+                "configRevision": 51,
+                "consumers": {
+                    "worldSystem": {
+                        "tabName": "World_System",
+                        "rowCount": 4,
+                        "cachedRowCount": 4,
+                        "rows": [
+                            valid,
+                            reserved,
+                            invalid_identity,
+                            same_host_evidence,
+                        ],
+                        "observedAt": now,
+                    }
+                },
+                "updatedAt": now,
+            },
+        )
+
+        self.assertIsNone(self.bridge.safe_reference(composite_id))
+        rows, diagnostics = self.bridge._world_sheet_catalog_projection()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["sourceReportId"], "auto-report-20260909")
+        self.assertEqual(rows[0]["sourceRecordId"], "trading-system-a1b2c3-1")
+        self.assertEqual(rows[0]["sourceRowKey"], composite_id)
+        self.assertEqual(diagnostics["rejectedRowCount"], 3)
+        self.assertEqual(
+            diagnostics["reasonCounts"]["reserved_documentation_domain"],
+            1,
+        )
+        self.assertEqual(diagnostics["reasonCounts"]["invalid_identity"], 1)
+        self.assertEqual(
+            diagnostics["reasonCounts"]["insufficient_evidence"], 1
+        )
+
+        with patch.object(
+            self.hub,
+            "credential_status",
+            return_value={"configured": True, "mode": "access_token"},
+        ):
+            catalog = self.bridge._deep_research_catalog_read_model(
+                reports=[], missions=[], delivered_sources=[]
+            )
+        self.assertEqual(catalog["googleSheetCachedSystemCount"], 4)
+        self.assertEqual(catalog["googleSheetVerifiedSystemCount"], 1)
+        self.assertEqual(catalog["googleSheetRejectedSystemCount"], 3)
+
+    def test_world_sheet_writer_rejects_legacy_verified_fixture_domains(self) -> None:
+        report = self._world_report()
+        report["metrics"]["systems"][0]["sourceUrl"] = (
+            "https://example.com/system-fixture"
+        )
+        report["metrics"]["systems"][0]["corroboratingUrls"] = [
+            "https://example.org/system-fixture-review"
+        ]
+
+        self.assertEqual(self.bridge._research_sheet_world_rows(report), [])
+
+    def test_world_sheet_writer_rejects_corroboration_from_same_base_domain(self) -> None:
+        report = self._world_report()
+        report["metrics"]["systems"][0]["corroboratingUrls"] = [
+            "https://research.tradingview.com/scripts/system-1-review"
+        ]
+
+        self.assertEqual(self.bridge._research_sheet_world_rows(report), [])
 
     def test_cache_refresh_scans_keys_and_keeps_latest_250_rows(self) -> None:
         checks = {
@@ -2868,6 +3132,337 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         history = catalog["googleSheetResearchHistory"][0]
         self.assertEqual(history["researchId"], "DR-sheet-history-001")
         self.assertEqual(history["sourceKind"], "verified_deep_research_sheet_record")
+        self.assertTrue(history["requiresResearchRerun"])
+        self.assertEqual(
+            history["eaResearch"]["validationStatus"],
+            "legacy_ea_blueprint_missing",
+        )
+        self.assertIsNone(history["eaResearch"]["blueprint"])
+
+    def test_deep_research_sheet_history_projects_digest_bound_canonical_blueprint(self) -> None:
+        self.configure_hub(revision=16)
+        blueprint = ready_ea_research_blueprint()
+        projection = self.bridge.ea_research_report_projection(blueprint)
+        now = self.bridge.utc_now()
+        row = {
+            "research_id": "DR-sheet-history-v2-001",
+            "research_report_id": "report-deep-history-v2-001",
+            "source_report_id": "report-world-history-v2-001",
+            "source_record_id": "world-history-v2-001",
+            "system_name": "Canonical Sheet Trend",
+            "strategy_family": "trend_following",
+            "verification_status": "verified_deep_research",
+            "feasibility_status": "ready",
+            "backtest_status": "not_run",
+            "ea_build_status": "not_started",
+            "implementation_notes_json": json.dumps(
+                projection["implementationNotes"],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "updated_at": now,
+        }
+        self.bridge.write_json(
+            self.bridge.RESEARCH_SHEET_CACHE_PATH,
+            {
+                "schemaVersion": "research-sheet-cache-v1",
+                "sheetDigest": self.bridge.payload_digest(
+                    "research-sheet-id-v1", SHEET_ID
+                ),
+                "configRevision": 16,
+                "consumers": {
+                    "deepResearch": {
+                        "tabName": "Deep_Research",
+                        "rowCount": 1,
+                        "cachedRowCount": 1,
+                        "rows": [row],
+                        "observedAt": now,
+                    }
+                },
+                "updatedAt": now,
+            },
+        )
+
+        history = self.bridge._deep_sheet_research_history_rows()[0]
+        self.assertFalse(history["requiresResearchRerun"])
+        self.assertTrue(history["eaResearch"]["validated"])
+        self.assertTrue(history["eaResearch"]["digestMatched"])
+        self.assertTrue(history["eaResearch"]["eaHandoffAllowed"])
+        self.assertEqual(
+            history["eaResearch"]["blueprintDigest"],
+            projection["blueprintDigest"],
+        )
+        self.assertEqual(
+            history["eaResearch"]["blueprint"],
+            self.bridge.normalize_ea_research_blueprint(blueprint),
+        )
+
+        tampered_row = copy.deepcopy(row)
+        tampered_notes = json.loads(tampered_row["implementation_notes_json"])
+        tampered_notes["eaImplementationBlueprint"]["scope"][
+            "systemName"
+        ] = "Tampered without digest update"
+        tampered_row["implementation_notes_json"] = json.dumps(
+            tampered_notes,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        tampered = self.bridge._deep_sheet_ea_research_read_model(tampered_row)
+        self.assertEqual(tampered["validationStatus"], "blueprint_digest_mismatch")
+        self.assertTrue(tampered["requiresResearchRerun"])
+        self.assertIsNone(tampered["blueprint"])
+
+    def test_deep_research_sheet_history_retains_all_canonical_completeness_statuses(self) -> None:
+        self.configure_hub(revision=17)
+        now = self.bridge.utc_now()
+        rows = []
+        expected = {
+            "verified_deep_research": "ready",
+            "needs_clarification": "needs_clarification",
+            "not_ea_ready": "not_ea_ready",
+        }
+        for index, (verification_status, completeness_status) in enumerate(
+            expected.items(),
+            start=1,
+        ):
+            blueprint = ready_ea_research_blueprint()
+            blueprint["strategyId"] = f"sheet-status-{index}"
+            blueprint["scope"]["systemName"] = f"Sheet Status {index}"
+            blueprint["completeness"]["status"] = completeness_status
+            if completeness_status != "ready":
+                blueprint["completeness"]["eaHandoffAllowed"] = False
+                blueprint["completeness"]["deterministicBacktestAllowed"] = False
+            projection = self.bridge.ea_research_report_projection(blueprint)
+            rows.append({
+                "research_id": f"DR-sheet-status-{index}",
+                "research_report_id": f"report-sheet-status-{index}",
+                "source_report_id": f"report-world-status-{index}",
+                "source_record_id": f"world-status-{index}",
+                "system_name": f"Sheet Status {index}",
+                "strategy_family": "trend_following",
+                "verification_status": verification_status,
+                "implementation_notes_json": json.dumps(
+                    projection["implementationNotes"],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                "updated_at": now,
+            })
+        self.bridge.write_json(
+            self.bridge.RESEARCH_SHEET_CACHE_PATH,
+            {
+                "schemaVersion": "research-sheet-cache-v1",
+                "sheetDigest": self.bridge.payload_digest(
+                    "research-sheet-id-v1", SHEET_ID
+                ),
+                "configRevision": 17,
+                "consumers": {
+                    "deepResearch": {
+                        "tabName": "Deep_Research",
+                        "rowCount": len(rows),
+                        "cachedRowCount": len(rows),
+                        "rows": rows,
+                        "observedAt": now,
+                    }
+                },
+                "updatedAt": now,
+            },
+        )
+
+        history = self.bridge._deep_sheet_research_history_rows()
+
+        self.assertEqual(len(history), 3)
+        by_verification = {item["verificationStatus"]: item for item in history}
+        self.assertEqual(set(by_verification), set(expected))
+        for verification_status, completeness_status in expected.items():
+            with self.subTest(verification_status=verification_status):
+                ea_research = by_verification[verification_status]["eaResearch"]
+                self.assertTrue(ea_research["validated"])
+                self.assertTrue(ea_research["digestMatched"])
+                self.assertEqual(ea_research["status"], completeness_status)
+                self.assertFalse(ea_research["requiresResearchRerun"])
+
+    def test_canonical_sheet_blueprint_survives_catalog_and_http_sanitizer_exactly(self) -> None:
+        self.configure_hub(revision=18)
+        blueprint = ready_ea_research_blueprint()
+        # This valid, digest-bound cross rule deliberately exceeds the old
+        # catalog's 2,000-character presentation limit.  Its generated
+        # closed-bar expansion is also nested deeply enough to exercise the
+        # catalog wrapper plus the final send_json sanitizer.
+        blueprint["entry"]["buy"]["rules"][0]["humanTextTh"] = (
+            "EMA เร็วแท่ง 2 น้อยกว่าหรือเท่ากับ EMA ช้าแท่ง 2 และ EMA เร็วแท่ง 1 "
+            "มากกว่า EMA ช้าแท่ง 1 จึงยืนยัน cross ขึ้นจากแท่งปิดเท่านั้น; " * 32
+        )
+        projection = self.bridge.ea_research_report_projection(blueprint)
+        normalized = self.bridge.normalize_ea_research_blueprint(blueprint)
+        now = self.bridge.utc_now()
+        row = {
+            "research_id": "DR-sheet-wire-exact-001",
+            "research_report_id": "report-sheet-wire-exact-001",
+            "source_report_id": "report-world-wire-exact-001",
+            "source_record_id": "world-wire-exact-001",
+            "system_name": "Canonical Wire Exact",
+            "strategy_family": "trend_following",
+            "verification_status": "verified_deep_research",
+            "implementation_notes_json": json.dumps(
+                projection["implementationNotes"],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "updated_at": now,
+        }
+        self.bridge.write_json(
+            self.bridge.RESEARCH_SHEET_CACHE_PATH,
+            {
+                "schemaVersion": "research-sheet-cache-v1",
+                "sheetDigest": self.bridge.payload_digest(
+                    "research-sheet-id-v1", SHEET_ID
+                ),
+                "configRevision": 18,
+                "consumers": {
+                    "deepResearch": {
+                        "tabName": "Deep_Research",
+                        "rowCount": 1,
+                        "cachedRowCount": 1,
+                        "rows": [row],
+                        "observedAt": now,
+                    }
+                },
+                "updatedAt": now,
+            },
+        )
+
+        with patch.object(
+            self.hub,
+            "credential_status",
+            return_value={"configured": True, "mode": "access_token"},
+        ):
+            workflow_dashboard = self.bridge.workflow_dashboard_read_model(
+                "left_server_racks",
+                reports=[],
+                missions=[],
+                bridge={
+                    "status": "guarded",
+                    "codex": {"status": "ready_guarded"},
+                    "actionPolicy": {"ready": True},
+                },
+            )
+        # The production endpoint wraps the catalog in the workflow dashboard;
+        # send_json then performs this second generic sanitizer pass.
+        wire_payload = self.bridge.sanitize_json_value(
+            {"ok": True, "workflowDashboard": workflow_dashboard},
+            collection_limit=1000,
+            string_limit=20000,
+        )
+        wire_payload = json.loads(json.dumps(wire_payload, ensure_ascii=False))
+        serialized = json.dumps(wire_payload, ensure_ascii=False)
+        self.assertNotIn("[TRUNCATED]", serialized)
+        ea_research = wire_payload["workflowDashboard"]["researchCatalog"][
+            "googleSheetResearchHistory"
+        ][0]["eaResearch"]
+        self.assertTrue(ea_research["validated"])
+        self.assertTrue(ea_research["digestMatched"])
+        self.assertEqual(ea_research["blueprint"], normalized)
+        self.assertEqual(
+            self.bridge.ea_research_blueprint_digest(ea_research["blueprint"]),
+            ea_research["blueprintDigest"],
+        )
+
+    def test_oversized_canonical_read_model_fails_closed_without_partial_blueprint(self) -> None:
+        blueprint = ready_ea_research_blueprint()
+        blueprint["completeness"].update({
+            "status": "needs_clarification",
+            "eaHandoffAllowed": False,
+            "deterministicBacktestAllowed": False,
+            "blockingIssues": [{
+                "code": "PUBLIC_RULE_UNRESOLVED",
+                "path": "$.entry.buy",
+                "messageTh": "M" * 15_000,
+                "questionTh": "Q" * 15_000,
+            }],
+        })
+        digest = self.bridge.ea_research_blueprint_digest(blueprint)
+
+        read_model = self.bridge._ea_research_canonical_read_model(
+            blueprint,
+            digest,
+            missing_reason="legacy_ea_blueprint_missing",
+        )
+
+        self.assertFalse(read_model["validated"])
+        self.assertFalse(read_model["digestMatched"])
+        self.assertEqual(
+            read_model["validationStatus"],
+            "ea_blueprint_response_bounds_exceeded",
+        )
+        self.assertEqual(read_model["blueprintDigest"], digest)
+        self.assertIsNone(read_model["blueprint"])
+
+        # A response-bound canonical row can still be valid inside the stricter
+        # Sheet-cell envelope.  Keep its history metadata visible while the
+        # exact blueprint itself remains fail-closed on the wire.
+        history_blueprint = ready_ea_research_blueprint()
+        history_blueprint["entry"]["buy"]["rules"][0]["humanTextTh"] = (
+            "H" * 25_000
+        )
+        history_blueprint["completeness"].update({
+            "status": "needs_clarification",
+            "eaHandoffAllowed": False,
+            "deterministicBacktestAllowed": False,
+        })
+        projection = self.bridge.ea_research_report_projection(history_blueprint)
+        row = {
+            "research_id": "DR-response-bounds-retained",
+            "research_report_id": "report-response-bounds-retained",
+            "source_report_id": "report-world-response-bounds",
+            "source_record_id": "world-response-bounds",
+            "system_name": "Response Bounds Retained",
+            "verification_status": "needs_clarification",
+            "implementation_notes_json": json.dumps(
+                projection["implementationNotes"],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        }
+        with patch.object(
+            self.bridge,
+            "_research_sheet_cached_rows",
+            return_value=[row],
+        ):
+            history = self.bridge._deep_sheet_research_history_rows()
+        self.assertEqual(len(history), 1)
+        self.assertEqual(
+            history[0]["eaResearch"]["validationStatus"],
+            "ea_blueprint_response_bounds_exceeded",
+        )
+        self.assertIsNone(history[0]["eaResearch"]["blueprint"])
+
+    def test_ea_factory_decodes_canonical_sheet_blueprint_without_lossy_projection(self) -> None:
+        blueprint = ready_ea_research_blueprint()
+        blueprint["entry"]["buy"]["rules"][0]["humanTextTh"] = (
+            "ตรวจ cross จากแท่งปิด 2 ไปแท่งปิด 1 พร้อมคงสมการทุก operand; " * 48
+        )
+        projection = self.bridge.ea_research_report_projection(blueprint)
+        normalized = self.bridge.normalize_ea_research_blueprint(blueprint)
+        deep_row = self.bridge._research_sheet_deep_rows(self._deep_report())[0][0]
+        deep_row["implementation_notes_json"] = json.dumps(
+            projection["implementationNotes"],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        values = self.bridge._ea_factory_deep_research_values(deep_row)
+
+        self.assertEqual(values["eaImplementationBlueprint"], normalized)
+        self.assertEqual(
+            values["eaBlueprintDigest"],
+            projection["blueprintDigest"],
+        )
+        self.assertEqual(
+            values["special_conditions"]["implementationNotes"],
+            projection["implementationNotes"],
+        )
+        self.assertNotIn("[TRUNCATED]", json.dumps(values, ensure_ascii=False))
 
     def test_radar_read_model_compares_verified_sheet_cache_and_revoked_auth_fails_closed(self) -> None:
         self.configure_hub(revision=6)
@@ -3418,7 +4013,10 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
                     "recordId": f"world-{index}",
                     "systemName": f"Verified System {index}",
                     "sourceTitle": f"Source {index}",
-                    "sourceUrl": f"https://example.com/system-{index}",
+                    "sourceUrl": f"https://www.tradingview.com/scripts/system-{index}",
+                    "corroboratingUrls": [
+                        f"https://github.com/metafxclub/system-{index}"
+                    ],
                     "checkedAt": "2026-08-27T02:00:00Z",
                     "verificationStatus": "verified",
                     "duplicateStatus": "unique",
@@ -3466,13 +4064,13 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         blueprint["evidenceMap"] = [
             {
                 "sourceRef": "S1",
-                "url": "https://example.com/system-1",
+                "url": "https://tradingfinder.com/education/system-1",
                 "title": "Verified System 1 rules",
                 "checkedAt": blueprint["checkedAt"],
             },
             {
                 "sourceRef": "S2",
-                "url": "https://independent.example.org/system-1-review",
+                "url": "https://forex-station.com/system-1-review",
                 "title": "Independent review of Verified System 1",
                 "checkedAt": blueprint["checkedAt"],
             },

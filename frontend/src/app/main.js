@@ -2816,6 +2816,19 @@ function normalizeResearchSheetReference(value) {
   }
 }
 
+function researchSheetAuthoritativeLifecycleMatches(hub = {}, nextData = {}) {
+  if (hub.dirty !== true) return true;
+  const authoritativeSheetId = normalizeResearchSheetReference(nextData.sheetId);
+  const attemptedSheetId = normalizeResearchSheetReference(
+    hub.draftReference || hub.submittedReference,
+  );
+  return Boolean(
+    authoritativeSheetId
+    && attemptedSheetId
+    && authoritativeSheetId === attemptedSheetId
+  );
+}
+
 function boundedResearchSheetCount(value, maximum = 999_999) {
   const count = Number(value);
   return Number.isInteger(count) && count >= 0 ? Math.min(count, maximum) : 0;
@@ -4194,6 +4207,36 @@ async function loadResearchSheetHub({ force = false, signal = null } = {}) {
       resetResearchSheetHubQuery("Google Sheet ที่เปิดใช้มี Revision ใหม่ • กรุณาค้นข้อมูลอีกครั้ง");
     }
     hub.data = nextData;
+    const staleLifecyclePresentation = Boolean(
+      hub.failurePhase
+      || hub.showProgress
+      || (hub.phase && hub.phase !== "idle"),
+    );
+    const authoritativeLifecycleMatches = researchSheetAuthoritativeLifecycleMatches(
+      hub,
+      nextData,
+    );
+    if (
+      nextData.active === true
+      && nextData.operational === true
+      && staleLifecyclePresentation
+      && authoritativeLifecycleMatches
+    ) {
+      // A fresh authoritative GET is stronger than a stale client-side failure
+      // left behind by an earlier 409/expired activation attempt.  Clear only
+      // presentation state; the Backend read model remains the source of truth.
+      clearResearchSheetHubPhaseTimers();
+      hub.phase = "idle";
+      hub.failurePhase = "";
+      hub.showProgress = false;
+      hub.preview = null;
+      hub.dirty = false;
+      const authoritativeSheetId = normalizeResearchSheetReference(nextData.sheetId);
+      if (authoritativeSheetId) {
+        hub.submittedReference = authoritativeSheetId;
+        hub.draftReference = authoritativeSheetId;
+      }
+    }
     hub.status = "ready";
     hub.lastLoadedAt = Date.now();
     hub.message = "";
@@ -20228,6 +20271,17 @@ function normalizeTradingSystemResearchLabDomain(backend = {}, report = {}, port
     : (["loading", "error"].includes(rawCatalogStatus) ? rawCatalogStatus : "idle");
   if (hasAuthoritativeCatalog) catalogStatus = systems.length ? "ready" : "idle";
   const firstSystem = systems[0] || null;
+  const rawRejectionReasons = researchCatalog.googleSheetRejectionReasonCounts
+    && typeof researchCatalog.googleSheetRejectionReasonCounts === "object"
+    && !Array.isArray(researchCatalog.googleSheetRejectionReasonCounts)
+    ? researchCatalog.googleSheetRejectionReasonCounts
+    : {};
+  const googleSheetRejectionReasonCounts = Object.fromEntries(
+    Object.entries(rawRejectionReasons)
+      .filter(([key]) => /^[a-z0-9_.:-]{1,80}$/i.test(String(key)))
+      .slice(0, 20)
+      .map(([key, value]) => [String(key), boundedResearchSheetCount(value, 100000)]),
+  );
   return {
     systems,
     sourceReportId: firstSystem?.sourceReportId || portal.reportId || "",
@@ -20237,6 +20291,11 @@ function normalizeTradingSystemResearchLabDomain(backend = {}, report = {}, port
     researchHistory: Array.isArray(researchCatalog.googleSheetResearchHistory)
       ? researchCatalog.googleSheetResearchHistory.slice(0, 120)
       : [],
+    googleSheetRejectedSystemCount: boundedResearchSheetCount(
+      researchCatalog.googleSheetRejectedSystemCount,
+      100000,
+    ),
+    googleSheetRejectionReasonCounts,
     backendReady: systems.length > 0,
     catalogAuthoritative: hasAuthoritativeCatalog,
     catalogSchemaVersion: safeDashboardDisplayText(researchCatalog.schemaVersion, "legacy-portal-report"),
@@ -25754,12 +25813,64 @@ function createTradingResearchNotice(titleText, detailText, tone = "neutral") {
 function tradingResearchReportsForSystem(domain = {}, system = {}) {
   const sourceReportId = String(system.sourceReportId || domain.sourceReportId || "").trim();
   const sourceRecordId = String(system.sourceRecordId || system.id || "").trim();
-  if (!sourceReportId || !sourceRecordId) return [];
-  return (Array.isArray(domain.researchReports) ? domain.researchReports : []).filter((report) => {
-    const source = report?.workflowContext?.source;
-    return String(source?.reportId || "").trim() === sourceReportId
-      && String(source?.recordId || "").trim() === sourceRecordId;
-  });
+  const hasSourcePair = Boolean(sourceReportId && sourceRecordId);
+  const reportRows = hasSourcePair
+    ? (Array.isArray(domain.researchReports) ? domain.researchReports : []).filter((report) => {
+        const source = report?.workflowContext?.source;
+        return String(source?.reportId || "").trim() === sourceReportId
+          && String(source?.recordId || "").trim() === sourceRecordId;
+      })
+    : [];
+  const normalizedName = String(system.systemName || "").trim().toLocaleLowerCase("th");
+  const matchingNameSystems = (Array.isArray(domain.systems) ? domain.systems : []).filter((candidate) => (
+    String(candidate?.systemName || "").trim().toLocaleLowerCase("th") === normalizedName
+  ));
+  const safeNameFallback = Boolean(normalizedName) && matchingNameSystems.length === 1;
+  if (!hasSourcePair && !safeNameFallback) return [];
+  const historyRows = (Array.isArray(domain.researchHistory) ? domain.researchHistory : [])
+    .filter((row) => {
+      const historyReportId = String(row?.sourceReportId || "").trim();
+      const historyRecordId = String(row?.sourceRecordId || "").trim();
+      if (historyReportId && historyRecordId) {
+        return hasSourcePair && historyReportId === sourceReportId && historyRecordId === sourceRecordId;
+      }
+      if (historyReportId || historyRecordId) return false;
+      return safeNameFallback
+        && String(row?.systemName || "").trim().toLocaleLowerCase("th") === normalizedName;
+    })
+    .map((row) => ({
+      id: safeDashboardDisplayText(row.researchReportId || row.researchId, "ประวัติวิจัยจาก Google Sheet"),
+      type: "trading_system_research_report",
+      status: safeDashboardDisplayText(row.verificationStatus, "unknown"),
+      updatedAt: row.updatedAt || null,
+      summary: safeDashboardDisplayText(
+        row.summary,
+        "พบประวัติวิจัยจาก Google Sheet แต่รายงานรุ่นนี้อาจยังไม่มี EA Blueprint v2",
+      ),
+      findings: Array.isArray(row.findings) ? row.findings : [],
+      evidence: Array.isArray(row.evidence) ? row.evidence : [],
+      eaResearch: tradingResearchBlueprintObject(row.eaResearch),
+      workflowContext: {
+        source: {
+          reportId: String(row.sourceReportId || sourceReportId),
+          recordId: String(row.sourceRecordId || sourceRecordId),
+        },
+      },
+      fromResearchHistory: true,
+      researchId: safeDashboardDisplayText(row.researchId, ""),
+    }));
+  const seen = new Set();
+  return [...reportRows, ...historyRows]
+    .filter((report) => {
+      const key = String(report?.id || "").trim();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((left, right) => (
+      (Date.parse(right?.updatedAt || right?.createdAt || "") || 0)
+      - (Date.parse(left?.updatedAt || left?.createdAt || "") || 0)
+    ));
 }
 
 const TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION = "ea-ready-strategy-research/2.0.0";
@@ -25819,11 +25930,101 @@ const TRADING_RESEARCH_BLUEPRINT_FIELD_LABELS = Object.freeze({
   expression: "นิพจน์ deterministic",
   timeframe: "Timeframe",
   barIndex: "Bar Index",
+  bar0: "แท่ง 0 (กำลังก่อตัว)",
+  signalBar: "แท่งสัญญาณ",
+  previousBar: "แท่งก่อนหน้า",
+  lookaheadForbidden: "ห้ามใช้ข้อมูลอนาคต",
+  equalityPolicy: "นโยบายกรณีค่าเท่ากัน",
   evaluationEvent: "จังหวะประเมิน",
   priority: "ลำดับก่อนหลัง",
   sourceUrl: "URL หลักฐาน",
   truthStatus: "สถานะข้อเท็จจริง",
   readiness: "ความพร้อม",
+  inputId: "Input ID",
+  label: "ชื่อที่แสดง",
+  type: "ชนิดข้อมูล",
+  unit: "หน่วย",
+  default: "ค่าเริ่มต้น",
+  min: "ค่าต่ำสุด",
+  max: "ค่าสูงสุด",
+  step: "Step",
+  optimizable: "นำไป Optimize ได้",
+  usedByRuleIds: "กฎที่ใช้ Input นี้",
+  indicatorId: "Indicator ID",
+  kind: "ชนิด",
+  parameters: "พารามิเตอร์",
+  appliedPrice: "ราคาที่ใช้คำนวณ",
+  outputLine: "เส้นหรือ Buffer ที่อ่าน",
+  sourceStatus: "สถานะหลักฐาน",
+  sourceRefs: "รหัสแหล่งข้อมูล",
+  humanTextTh: "คำอธิบายภาษาไทย",
+  enabled: "เปิดใช้งาน",
+  disabledReason: "เหตุผลที่ปิด",
+  orderType: "ประเภทคำสั่ง",
+  cooldownBars: "จำนวนแท่งพัก",
+  currentShift: "แท่งปิดล่าสุด",
+  previousShift: "แท่งปิดก่อนหน้า",
+  expanded: "เงื่อนไขที่ขยายแล้ว",
+  trigger: "เงื่อนไขเริ่มทำงาน",
+  action: "การกระทำ",
+  cadence: "ความถี่ประเมิน",
+  onceOnly: "ทำครั้งเดียว",
+  idempotent: "เรียกซ้ำแล้วไม่ทำซ้ำ",
+  neverWorsenStop: "ห้ามเลื่อน Stop ให้เสี่ยงขึ้น",
+  steps: "ลำดับการปิดบางส่วน",
+  closePercent: "เปอร์เซ็นต์ที่ปิด",
+  afterCloseAction: "สิ่งที่ทำหลังปิด",
+  mode: "รูปแบบ",
+  spacing: "ระยะห่างแต่ละไม้",
+  direction: "ทิศทางไม้ถัดไป",
+  maxLevels: "จำนวนระดับสูงสุด",
+  lotFormula: "สูตรคำนวณ Lot",
+  lotCap: "เพดาน Lot ต่อไม้",
+  basketTakeProfit: "กำไรเป้าหมายทั้งตะกร้า",
+  basketStopLoss: "ขาดทุนสูงสุดทั้งตะกร้า",
+  equityStopPercent: "หยุดเมื่อ Equity ลดลง (%)",
+  maxBasketLots: "Lot รวมสูงสุดของตะกร้า",
+  maxDrawdownPercent: "Drawdown สูงสุด (%)",
+  hedgeLifecycle: "วงจร Hedge",
+  reentryPolicy: "กฎเข้าใหม่",
+  resetCondition: "เงื่อนไข Reset",
+  abortCondition: "เงื่อนไขยุติ",
+  levelRules: "กฎแต่ละระดับ",
+  valueInputRef: "Input ที่กำหนดค่า",
+  reference: "ราคาอ้างอิง",
+  placementTiming: "จังหวะวางคำสั่ง",
+  minimumStopDistancePolicy: "เมื่อ Stop ใกล้เกิน Stop Level",
+  freezeLevelPolicy: "เมื่อราคาอยู่ใน Freeze Level",
+  neverWorsen: "ห้ามแก้ Stop ให้เสี่ยงขึ้น",
+  formula: "สูตรคำนวณ",
+  lotMode: "วิธีคำนวณ Lot",
+  maxOpenPositions: "จำนวน Position สูงสุด",
+  maxTotalLots: "Lot รวมสูงสุด",
+  includeSpreadCommissionSlippage: "รวม Spread / Commission / Slippage",
+  normalizeToBrokerLotStep: "ปรับ Lot ตาม Lot Step ของ Broker",
+  evaluateOn: "จังหวะประเมิน",
+  evaluationOrder: "ลำดับประมวลผล",
+  entryOrderType: "ประเภทคำสั่งเข้า",
+  duplicateSignalPolicy: "กฎป้องกันสัญญาณซ้ำ",
+  priceNormalization: "การปรับราคาตาม Broker",
+  retryPolicy: "กฎ Retry",
+  restartPersistence: "การกู้สถานะหลัง Restart",
+  transitions: "การเปลี่ยน State",
+  to: "State ปลายทาง",
+  whenRuleIds: "เปลี่ยนเมื่อกฎเหล่านี้เป็นจริง",
+  language: "ภาษาของ Pseudocode",
+  lines: "ลำดับคำสั่ง",
+  caseId: "Test Case ID",
+  given: "ข้อมูลตั้งต้น",
+  when: "เหตุการณ์ทดสอบ",
+  expected: "ผลที่ต้องได้",
+  unknownId: "Unknown ID",
+  path: "ตำแหน่งข้อมูล",
+  description: "รายละเอียด",
+  blocksExecution: "บล็อกการสร้างหรือรัน EA",
+  code: "รหัสปัญหา",
+  messageTh: "สาเหตุ",
+  questionTh: "คำถามที่ต้องยืนยัน",
 });
 
 function tradingResearchBlueprintObject(value) {
@@ -25856,10 +26057,10 @@ function tradingResearchEaReadModelWarning(report = {}) {
   ].includes(validationStatus);
   return {
     tone: corrupt ? "error" : "warning",
-    title: corrupt ? "EA Blueprint ไม่ผ่านการตรวจความครบถ้วน" : "Report นี้ยังไม่มี canonical EA Blueprint v2",
+    title: corrupt ? "EA Blueprint ไม่ผ่านการตรวจความครบถ้วน" : "รายงานเก่า ต้องวิจัยเป็น Revision ใหม่",
     detail: corrupt
       ? `Backend ปิด Readiness Gate (${validationStatus}) และไม่ใช้ alias หรือค่า ready ดิบแทน กรุณาวิจัยระบบนี้ใหม่`
-      : `Backend ระบุ ${validationStatus} จึงแสดงผลวิจัยเดิมแบบ read-only และไม่อนุมานกฎสำหรับเขียน EA เพิ่มเอง`,
+      : `Backend ระบุ ${validationStatus} จึงแสดงรายงานเดิมแบบ read-only กรุณาเลือกระบบต้นทางแล้ววิจัยใหม่เพื่อสร้าง canonical EA Blueprint v2; Frontend จะไม่สร้างหรือเดากฎ EA จากข้อความรุ่นเก่า`,
   };
 }
 
@@ -25889,9 +26090,603 @@ function tradingResearchBlueprintFieldLabel(key) {
     || safeDashboardDisplayText(String(key || "").replace(/([a-z])([A-Z])/g, "$1 $2"), "ข้อมูล");
 }
 
+function tradingResearchBlueprintSourceStatusMeta(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "verified_fact") {
+    return { label: "ยืนยันจากแหล่งข้อมูล", tone: "verified", requiresConfirmation: false };
+  }
+  if (["derived_expansion", "derived_fact"].includes(normalized)) {
+    return { label: "สรุปจากหลักฐาน", tone: "derived", requiresConfirmation: false };
+  }
+  if (normalized === "operator_assumption") {
+    return { label: "ข้อสมมติ — ต้องยืนยัน", tone: "warning", requiresConfirmation: true };
+  }
+  if (normalized === "unknown") {
+    return { label: "ไม่ทราบ — ต้องยืนยัน", tone: "blocked", requiresConfirmation: true };
+  }
+  return { label: "ยังไม่มีสถานะหลักฐาน — ต้องยืนยัน", tone: "blocked", requiresConfirmation: true };
+}
+
+function createTradingResearchBlueprintStatusBadge(status) {
+  const meta = tradingResearchBlueprintSourceStatusMeta(status);
+  const badge = document.createElement("span");
+  badge.className = "workflow-research-blueprint-status-badge";
+  badge.dataset.tone = meta.tone;
+  badge.textContent = meta.label;
+  return badge;
+}
+
+function tradingResearchBlueprintOperandText(value, forcedShift = null) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "ต้องยืนยัน Operand";
+  const kind = String(value.kind || "").trim().toLowerCase();
+  const ref = value.indicatorId || value.inputId || value.ref || value.field || "";
+  const shift = Number.isInteger(forcedShift)
+    ? forcedShift
+    : (Number.isInteger(value.shift) ? value.shift : null);
+  const timeframe = value.timeframe ? `@${String(value.timeframe)}` : "";
+  const shifted = (text) => `${text}${shift === null ? "" : `[${shift}]`}${timeframe}`;
+  if (kind === "constant") {
+    return value.value === null || value.value === undefined || value.value === ""
+      ? "ต้องยืนยันค่าคงที่"
+      : String(value.value);
+  }
+  if (kind === "indicator") return shifted(ref ? String(ref) : "ต้องยืนยัน Indicator");
+  if (kind === "price") return shifted(ref ? `PRICE.${String(ref)}` : "ต้องยืนยันราคา");
+  if (kind === "input") return ref ? `INPUT(${String(ref)})` : "ต้องยืนยัน Input";
+  if (["account", "position", "basket", "session", "time", "symbol_property"].includes(kind)) {
+    return shifted(`${kind.toUpperCase()}.${ref || "ต้องยืนยัน Field"}`);
+  }
+  if (kind === "spread") return shifted(ref ? `SPREAD.${String(ref)}` : "SPREAD");
+  return ref ? shifted(`${kind ? kind.toUpperCase() : "VALUE"}.${String(ref)}`) : "ต้องยืนยัน Operand";
+}
+
+function tradingResearchBlueprintComparisonText(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "ต้องยืนยันเงื่อนไขเปรียบเทียบ";
+  const operator = ["<", "<=", ">", ">=", "==", "!="].includes(value.op)
+    ? value.op
+    : "ต้องยืนยัน Operator";
+  return `${tradingResearchBlueprintOperandText(value.left)} ${operator} ${tradingResearchBlueprintOperandText(value.right)}`;
+}
+
+function tradingResearchBlueprintExpressionText(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "ต้องยืนยันเงื่อนไข";
+  const op = String(value.op || "").trim().toLowerCase();
+  if (["cross_above", "cross_below"].includes(op)) {
+    const expanded = Array.isArray(value.expanded?.all) ? value.expanded.all : [];
+    if (expanded.length === 2) {
+      return expanded.map((item) => tradingResearchBlueprintComparisonText(item)).join(" AND ");
+    }
+    if (!value.left || !value.right || !Number.isInteger(value.previousShift) || !Number.isInteger(value.currentShift)) {
+      return "ต้องยืนยันการ Cross และ Bar Index";
+    }
+    const previousOperator = op === "cross_above" ? "<=" : ">=";
+    const currentOperator = op === "cross_above" ? ">" : "<";
+    return [
+      `${tradingResearchBlueprintOperandText(value.left, value.previousShift)} ${previousOperator} ${tradingResearchBlueprintOperandText(value.right, value.previousShift)}`,
+      `${tradingResearchBlueprintOperandText(value.left, value.currentShift)} ${currentOperator} ${tradingResearchBlueprintOperandText(value.right, value.currentShift)}`,
+    ].join(" AND ");
+  }
+  if (["and", "or"].includes(op)) {
+    const items = Array.isArray(value.items) ? value.items : [];
+    return items.length
+      ? items.map((item) => `(${tradingResearchBlueprintExpressionText(item)})`).join(` ${op.toUpperCase()} `)
+      : "ต้องยืนยันรายการเงื่อนไข";
+  }
+  if (op === "not") {
+    return value.item ? `NOT (${tradingResearchBlueprintExpressionText(value.item)})` : "ต้องยืนยันเงื่อนไข NOT";
+  }
+  if (["<", "<=", ">", ">=", "==", "!="].includes(op)) {
+    return tradingResearchBlueprintComparisonText(value);
+  }
+  if (op === "within") {
+    return `${tradingResearchBlueprintOperandText(value.value)} BETWEEN ${tradingResearchBlueprintOperandText(value.lower)} AND ${tradingResearchBlueprintOperandText(value.upper)}`;
+  }
+  if (["rising", "falling"].includes(op)) {
+    const bars = Number.isInteger(value.bars) ? value.bars : "ต้องยืนยัน";
+    return `${op.toUpperCase()}(${tradingResearchBlueprintOperandText(value.value)}, bars=${bars})`;
+  }
+  if (op === "once_per_bar") {
+    return value.item ? `ONCE_PER_BAR(${tradingResearchBlueprintExpressionText(value.item)})` : "ต้องยืนยันเงื่อนไขต่อแท่ง";
+  }
+  if (["break_above", "break_below", "close_above", "close_below", "touch"].includes(op)) {
+    const shift = Number.isInteger(value.barShift) ? value.barShift : null;
+    const left = tradingResearchBlueprintOperandText(value.left || value.value, shift);
+    const right = tradingResearchBlueprintOperandText(value.right, shift);
+    return `${op.toUpperCase()}(${left}, ${right}, bar=${shift === null ? "ต้องยืนยัน" : shift})`;
+  }
+  if (op === "unknown") return "ต้องยืนยันเงื่อนไขจากแหล่งข้อมูล";
+  return op ? `${op.toUpperCase()} — ต้องยืนยันรายละเอียด Operand` : "ต้องยืนยันเงื่อนไข";
+}
+
+function tradingResearchBlueprintPriceFormulaText(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "ต้องยืนยันสูตรราคา";
+  const op = String(value.op || "").trim().toLowerCase();
+  if (op === "operand") {
+    const operand = tradingResearchBlueprintObject(value.operand);
+    if (operand.kind === "constant") return operand.value === undefined ? "ต้องยืนยันค่าคงที่" : String(operand.value);
+    if (operand.kind === "input") return operand.inputRef ? `INPUT(${operand.inputRef})` : "ต้องยืนยัน Input";
+    if (operand.kind === "indicator") {
+      return operand.indicatorRef
+        ? `${operand.indicatorRef}${Number.isInteger(operand.shift) ? `[${operand.shift}]` : ""}`
+        : "ต้องยืนยัน Indicator";
+    }
+    if (operand.kind === "reference") return operand.reference ? String(operand.reference) : "ต้องยืนยันราคาอ้างอิง";
+    return "ต้องยืนยัน Operand ของสูตรราคา";
+  }
+  if (op === "negate") return `-(${tradingResearchBlueprintPriceFormulaText(value.left || value.right)})`;
+  const symbols = { add: "+", subtract: "-", multiply: "*", divide: "/", min: "MIN", max: "MAX" };
+  if (["min", "max"].includes(op)) {
+    return `${symbols[op]}(${tradingResearchBlueprintPriceFormulaText(value.left)}, ${tradingResearchBlueprintPriceFormulaText(value.right)})`;
+  }
+  if (symbols[op]) {
+    return `(${tradingResearchBlueprintPriceFormulaText(value.left)} ${symbols[op]} ${tradingResearchBlueprintPriceFormulaText(value.right)})`;
+  }
+  return "ต้องยืนยันสูตรราคา";
+}
+
+function appendTradingResearchBlueprintFact(container, labelText, value, { code = false } = {}) {
+  const row = document.createElement("div");
+  const term = document.createElement("dt");
+  const detail = document.createElement("dd");
+  const missing = value === null || value === undefined || value === "";
+  term.textContent = labelText;
+  const content = document.createElement(code ? "code" : "span");
+  content.textContent = missing ? "ต้องยืนยัน" : String(value);
+  if (missing) content.className = "workflow-research-blueprint-confirmation";
+  detail.appendChild(content);
+  row.append(term, detail);
+  container.appendChild(row);
+}
+
+function createTradingResearchBlueprintRuleList(value, contextLabel = "กฎ") {
+  const config = tradingResearchBlueprintObject(value);
+  const rules = Array.isArray(value) ? value : (Array.isArray(config.rules) ? config.rules : []);
+  const root = document.createElement("div");
+  root.className = "workflow-research-ea-rule-list";
+  if (!Array.isArray(value) && Object.prototype.hasOwnProperty.call(config, "enabled")) {
+    const state = document.createElement("p");
+    state.className = "workflow-research-blueprint-feature-state";
+    state.dataset.tone = config.enabled === true ? "ready" : "off";
+    state.textContent = config.enabled === true
+      ? `${contextLabel}: เปิดใช้งาน • ${config.orderType ? `Order ${config.orderType}` : "ประเภทคำสั่งต้องยืนยัน"}${Number.isInteger(config.cooldownBars) ? ` • พัก ${config.cooldownBars} แท่ง` : ""}`
+      : `${contextLabel}: ปิดใช้งาน • ${config.disabledReason || "ต้องยืนยันเหตุผลที่ปิด"}`;
+    root.appendChild(state);
+  }
+  if (!rules.length) {
+    const missing = document.createElement("p");
+    missing.className = "workflow-research-blueprint-missing";
+    missing.textContent = config.enabled === false
+      ? "ไม่มี Rule เพราะฝั่งนี้ถูกปิดใน Blueprint"
+      : "ต้องยืนยัน: Backend ยังไม่ส่ง Rule ที่เขียนเป็นเงื่อนไข EA ได้";
+    root.appendChild(missing);
+    return root;
+  }
+  rules.forEach((rule, index) => {
+    const record = tradingResearchBlueprintObject(rule);
+    const card = document.createElement("article");
+    const header = document.createElement("header");
+    const title = document.createElement("strong");
+    const status = createTradingResearchBlueprintStatusBadge(record.sourceStatus);
+    const description = document.createElement("p");
+    const formulaLabel = document.createElement("span");
+    const formula = document.createElement("code");
+    const lifecycleFacts = document.createElement("dl");
+    card.className = "workflow-research-ea-rule-card";
+    card.dataset.ruleId = String(record.ruleId || `rule-${index + 1}`).slice(0, 96);
+    card.dataset.enabled = record.enabled === true ? "true" : (record.enabled === false ? "false" : "unknown");
+    title.textContent = `${record.ruleId || `RULE-${index + 1}`} • ${record.side || "ไม่ระบุฝั่ง"} • ${record.phase || "ไม่ระบุ Phase"}`;
+    header.append(title, status);
+    description.textContent = record.humanTextTh || "ต้องยืนยันคำอธิบายกฎภาษาไทย";
+    formulaLabel.className = "workflow-research-ea-formula-label";
+    formulaLabel.textContent = "เงื่อนไขที่ EA ต้องคำนวณ";
+    formula.textContent = tradingResearchBlueprintExpressionText(record.expression);
+    lifecycleFacts.className = "workflow-research-blueprint-compact-facts";
+    appendTradingResearchBlueprintFact(
+      lifecycleFacts,
+      "สถานะกฎ",
+      record.enabled === true ? "เปิด — EA ต้องประเมินกฎนี้" : (record.enabled === false ? "ปิด — EA ต้องข้ามกฎนี้" : null),
+    );
+    appendTradingResearchBlueprintFact(lifecycleFacts, "จังหวะประเมิน", record.evaluationEvent);
+    appendTradingResearchBlueprintFact(
+      lifecycleFacts,
+      "กฎยกเลิกสัญญาณ",
+      Array.isArray(record.invalidationRuleIds)
+        ? (record.invalidationRuleIds.length ? record.invalidationRuleIds.join(", ") : "ไม่มี")
+        : null,
+    );
+    appendTradingResearchBlueprintFact(
+      lifecycleFacts,
+      "หลักฐาน",
+      Array.isArray(record.sourceRefs)
+        ? (record.sourceRefs.length ? record.sourceRefs.join(", ") : "ต้องยืนยัน")
+        : null,
+    );
+    card.append(header, description, formulaLabel, formula);
+    const expression = tradingResearchBlueprintObject(record.expression);
+    const expanded = Array.isArray(expression.expanded?.all) ? expression.expanded.all : [];
+    if (["cross_above", "cross_below"].includes(expression.op) && expanded.length === 2) {
+      const timeline = document.createElement("ol");
+      timeline.className = "workflow-research-ea-cross-timeline";
+      expanded.forEach((comparison, comparisonIndex) => {
+        const item = document.createElement("li");
+        const label = document.createElement("strong");
+        const line = document.createElement("code");
+        label.textContent = comparisonIndex === 0 ? "แท่ง 2 • สถานะก่อน Cross" : "แท่ง 1 • แท่งปิดล่าสุดที่ยืนยัน Cross";
+        line.textContent = tradingResearchBlueprintComparisonText(comparison);
+        item.append(label, line);
+        timeline.appendChild(item);
+      });
+      card.appendChild(timeline);
+    }
+    card.appendChild(lifecycleFacts);
+    root.appendChild(card);
+  });
+  return root;
+}
+
+function createTradingResearchBlueprintSetupRules(value) {
+  const record = tradingResearchBlueprintObject(value);
+  const rules = Array.isArray(record.rules) ? record.rules : [];
+  const root = document.createElement("div");
+  root.className = "workflow-research-blueprint-setup-groups";
+  if (!rules.length) {
+    const note = document.createElement("p");
+    note.className = "workflow-research-blueprint-feature-state";
+    note.dataset.tone = "off";
+    note.textContent = "ไม่มี Setup / Filter เพิ่มเติมใน Blueprint — ใช้เฉพาะกฎ Entry ที่ผ่าน Readiness Gate";
+    root.appendChild(note);
+    return root;
+  }
+  [
+    ["buy", "Setup สำหรับ BUY"],
+    ["sell", "Setup สำหรับ SELL"],
+    ["both", "Setup ร่วม BUY และ SELL"],
+    ["none", "Setup ระดับระบบ"],
+  ].forEach(([side, label]) => {
+    const matching = rules.filter((rule) => String(rule?.side || "none").toLowerCase() === side);
+    if (!matching.length) return;
+    const section = document.createElement("section");
+    const heading = document.createElement("h6");
+    heading.textContent = label;
+    section.append(heading, createTradingResearchBlueprintRuleList(matching, label));
+    root.appendChild(section);
+  });
+  return root;
+}
+
+function createTradingResearchBlueprintInputs(value) {
+  const root = document.createElement("div");
+  const inputs = Array.isArray(value) ? value : [];
+  root.className = "workflow-research-blueprint-card-grid";
+  if (!inputs.length) {
+    root.appendChild(createTradingResearchNotice("ต้องยืนยัน Inputs", "Backend ยังไม่ส่ง Input ที่มี type, default, range และ step สำหรับเขียน EA", "warning"));
+    return root;
+  }
+  inputs.forEach((input, index) => {
+    const record = tradingResearchBlueprintObject(input);
+    const card = document.createElement("article");
+    const header = document.createElement("header");
+    const title = document.createElement("strong");
+    const facts = document.createElement("dl");
+    card.className = "workflow-research-blueprint-definition-card";
+    title.textContent = `${record.label || record.inputId || `Input ${index + 1}`} • ${record.inputId || "ต้องยืนยัน Input ID"}`;
+    header.append(title, createTradingResearchBlueprintStatusBadge(record.sourceStatus));
+    facts.className = "workflow-research-blueprint-compact-facts";
+    appendTradingResearchBlueprintFact(facts, "ชนิด / หน่วย", [record.type, record.unit].filter(Boolean).join(" / ") || null);
+    appendTradingResearchBlueprintFact(facts, "ค่าเริ่มต้น", record.default, { code: true });
+    appendTradingResearchBlueprintFact(facts, "ช่วง Optimize", record.min === undefined || record.max === undefined ? null : `${record.min} → ${record.max}`);
+    appendTradingResearchBlueprintFact(facts, "Step", record.step, { code: true });
+    appendTradingResearchBlueprintFact(
+      facts,
+      "ค่าที่อนุญาต",
+      Array.isArray(record.allowedValues)
+        ? (record.allowedValues.length ? record.allowedValues.join(", ") : "ไม่มี")
+        : null,
+    );
+    appendTradingResearchBlueprintFact(facts, "Optimize", record.optimizable === true ? "ได้" : (record.optimizable === false ? "ไม่ได้" : null));
+    appendTradingResearchBlueprintFact(facts, "ใช้โดย Rule", Array.isArray(record.usedByRuleIds) && record.usedByRuleIds.length ? record.usedByRuleIds.join(", ") : "ยังไม่มี Rule อ้างอิง");
+    appendTradingResearchBlueprintFact(
+      facts,
+      "หลักฐาน",
+      Array.isArray(record.sourceRefs)
+        ? (record.sourceRefs.length ? record.sourceRefs.join(", ") : "ต้องยืนยัน")
+        : null,
+    );
+    card.append(header, facts);
+    root.appendChild(card);
+  });
+  return root;
+}
+
+function createTradingResearchBlueprintIndicators(value) {
+  const root = document.createElement("div");
+  const indicators = Array.isArray(value) ? value : [];
+  root.className = "workflow-research-blueprint-card-grid";
+  if (!indicators.length) {
+    root.appendChild(createTradingResearchNotice("ต้องยืนยัน Indicators", "Backend ยังไม่ส่งชนิด Indicator, Parameters, Applied Price, Timeframe และ Buffer", "warning"));
+    return root;
+  }
+  indicators.forEach((indicator, index) => {
+    const record = tradingResearchBlueprintObject(indicator);
+    const card = document.createElement("article");
+    const header = document.createElement("header");
+    const title = document.createElement("strong");
+    const facts = document.createElement("dl");
+    const parameters = document.createElement("section");
+    const parametersTitle = document.createElement("span");
+    card.className = "workflow-research-blueprint-definition-card";
+    title.textContent = `${record.kind || "ต้องยืนยันชนิด Indicator"} • ${record.indicatorId || `Indicator ${index + 1}`}`;
+    header.append(title, createTradingResearchBlueprintStatusBadge(record.sourceStatus));
+    facts.className = "workflow-research-blueprint-compact-facts";
+    appendTradingResearchBlueprintFact(facts, "Timeframe", record.timeframe);
+    appendTradingResearchBlueprintFact(facts, "Applied Price", record.appliedPrice);
+    appendTradingResearchBlueprintFact(facts, "Buffer / Output Line", record.outputLine);
+    appendTradingResearchBlueprintFact(facts, "หลักฐาน", Array.isArray(record.sourceRefs) && record.sourceRefs.length ? record.sourceRefs.join(", ") : null);
+    parameters.className = "workflow-research-blueprint-parameters";
+    parametersTitle.textContent = "Parameters ที่ EA ต้องสร้าง";
+    parameters.append(parametersTitle, createTradingResearchBlueprintValue(record.parameters, "parameters", 1));
+    card.append(header, facts, parameters);
+    root.appendChild(card);
+  });
+  return root;
+}
+
+function tradingResearchBlueprintProtectionSummary(value) {
+  const record = tradingResearchBlueprintObject(value);
+  if (record.enabled === false) return record.sourceStatus === "unknown" ? "ปิดแบบ Fail-closed — ต้องยืนยัน" : "ปิดใช้งานตาม Blueprint";
+  if (record.enabled !== true) return "ต้องยืนยันว่าเปิดใช้งานหรือไม่";
+  const amount = record.valueInputRef
+    ? `INPUT(${record.valueInputRef})`
+    : (record.value !== undefined
+        ? String(record.value)
+        : (record.rrMultipleInputRef
+            ? `RR INPUT(${record.rrMultipleInputRef})`
+            : (record.rrMultiple !== undefined ? `RR ${record.rrMultiple}` : "ค่าหรือสูตรต้องยืนยัน")));
+  const formula = record.formula ? tradingResearchBlueprintPriceFormulaText(record.formula) : "";
+  return [record.type || "ต้องยืนยัน Type", amount, record.unit, record.reference, formula].filter(Boolean).join(" • ");
+}
+
+function createTradingResearchBlueprintProtection(value, labelText) {
+  const record = tradingResearchBlueprintObject(value);
+  const card = document.createElement("article");
+  const header = document.createElement("header");
+  const title = document.createElement("strong");
+  const summary = document.createElement("code");
+  const facts = document.createElement("dl");
+  card.className = "workflow-research-blueprint-protection-card";
+  title.textContent = labelText;
+  header.append(title, createTradingResearchBlueprintStatusBadge(record.sourceStatus));
+  summary.textContent = tradingResearchBlueprintProtectionSummary(record);
+  facts.className = "workflow-research-blueprint-compact-facts";
+  appendTradingResearchBlueprintFact(facts, "จังหวะวาง", record.placementTiming);
+  appendTradingResearchBlueprintFact(facts, "ค่า", record.value);
+  appendTradingResearchBlueprintFact(facts, "Input กำหนดค่า", record.valueInputRef);
+  appendTradingResearchBlueprintFact(facts, "ATR Indicator", record.atrIndicatorRef);
+  appendTradingResearchBlueprintFact(
+    facts,
+    "Risk/Reward",
+    record.rrMultipleInputRef
+      ? `INPUT(${record.rrMultipleInputRef})`
+      : (record.rrMultiple === undefined ? null : record.rrMultiple),
+  );
+  appendTradingResearchBlueprintFact(facts, "ฐาน Risk/Reward", record.rrRiskReference);
+  appendTradingResearchBlueprintFact(
+    facts,
+    "Lookback",
+    record.lookbackInputRef
+      ? `INPUT(${record.lookbackInputRef})`
+      : (record.lookbackBars === undefined ? null : `${record.lookbackBars} แท่ง`),
+  );
+  appendTradingResearchBlueprintFact(facts, "Swing Shift", record.swingShift);
+  appendTradingResearchBlueprintFact(
+    facts,
+    "Indicator / Shift",
+    record.indicatorRef
+      ? `${record.indicatorRef}${Number.isInteger(record.indicatorShift) ? `[${record.indicatorShift}]` : ""}`
+      : null,
+  );
+  appendTradingResearchBlueprintFact(
+    facts,
+    "Buffer",
+    record.bufferInputRef
+      ? `INPUT(${record.bufferInputRef})`
+      : (record.bufferValue === undefined ? null : record.bufferValue),
+  );
+  appendTradingResearchBlueprintFact(facts, "Stop Level", record.minimumStopDistancePolicy);
+  appendTradingResearchBlueprintFact(facts, "Freeze Level", record.freezeLevelPolicy);
+  appendTradingResearchBlueprintFact(
+    facts,
+    "Freeze Retry",
+    record.freezeRetryLimit === undefined && record.freezeRetryDelayMs === undefined
+      ? null
+      : `${record.freezeRetryLimit ?? "ต้องยืนยัน"} ครั้ง / ${record.freezeRetryDelayMs ?? "ต้องยืนยัน"} ms`,
+  );
+  appendTradingResearchBlueprintFact(facts, "ห้ามเพิ่มความเสี่ยง", record.neverWorsen === true ? "ใช่" : (record.neverWorsen === false ? "ไม่" : null));
+  appendTradingResearchBlueprintFact(
+    facts,
+    "กฎเปิดใช้งาน",
+    Array.isArray(record.activationRuleIds)
+      ? (record.activationRuleIds.length ? record.activationRuleIds.join(", ") : "ไม่มี")
+      : null,
+  );
+  appendTradingResearchBlueprintFact(
+    facts,
+    "กฎยกเลิก",
+    Array.isArray(record.invalidationRuleIds)
+      ? (record.invalidationRuleIds.length ? record.invalidationRuleIds.join(", ") : "ไม่มี")
+      : null,
+  );
+  appendTradingResearchBlueprintFact(
+    facts,
+    "หลักฐาน",
+    Array.isArray(record.sourceRefs)
+      ? (record.sourceRefs.length ? record.sourceRefs.join(", ") : "ต้องยืนยัน")
+      : null,
+  );
+  card.append(header, summary, facts);
+  return card;
+}
+
+function createTradingResearchBlueprintTpSl(value) {
+  const record = tradingResearchBlueprintObject(value);
+  const root = document.createElement("div");
+  root.className = "workflow-research-blueprint-protection-grid";
+  root.append(
+    createTradingResearchBlueprintProtection(record.stopLoss, "Stop Loss"),
+    createTradingResearchBlueprintProtection(record.takeProfit, "Take Profit"),
+  );
+  if (tradingResearchBlueprintHasValue(record.sideOverrides)) {
+    const overrides = document.createElement("section");
+    const title = document.createElement("strong");
+    title.textContent = "ค่าที่ Override แยก BUY / SELL";
+    overrides.className = "workflow-research-blueprint-side-overrides";
+    overrides.append(title, createTradingResearchBlueprintValue(record.sideOverrides, "sideOverrides", 1));
+    root.appendChild(overrides);
+  }
+  return root;
+}
+
+function createTradingResearchBlueprintManagedFeature(value, labelText, { partialClose = false } = {}) {
+  const record = tradingResearchBlueprintObject(value);
+  const root = document.createElement("article");
+  const header = document.createElement("header");
+  const title = document.createElement("strong");
+  const status = createTradingResearchBlueprintStatusBadge(record.sourceStatus);
+  const state = document.createElement("p");
+  root.className = "workflow-research-blueprint-management-card";
+  root.dataset.enabled = record.enabled === true ? "true" : "false";
+  title.textContent = labelText;
+  header.append(title, status);
+  const sourceMeta = tradingResearchBlueprintSourceStatusMeta(record.sourceStatus);
+  state.className = "workflow-research-blueprint-feature-state";
+  state.dataset.tone = record.enabled === true ? "ready" : (sourceMeta.requiresConfirmation ? "warning" : "off");
+  state.textContent = record.enabled === true
+    ? "เปิดใช้งาน — ต้องปฏิบัติตาม Trigger, Action และลำดับด้านล่าง"
+    : (sourceMeta.requiresConfirmation
+        ? "ปิดแบบ Fail-closed ชั่วคราว — ต้องยืนยันว่าระบบต้นทางใช้ฟังก์ชันนี้หรือไม่"
+        : "ปิดใช้งานตามข้อมูลที่ตรวจแล้ว");
+  root.append(header, state);
+  if (record.enabled === true) {
+    if (partialClose) {
+      const steps = Array.isArray(record.steps) ? record.steps : [];
+      const stepSection = document.createElement("section");
+      const stepTitle = document.createElement("strong");
+      stepTitle.textContent = "ขั้นปิดบางส่วน";
+      stepSection.className = "workflow-research-blueprint-parameters";
+      stepSection.appendChild(stepTitle);
+      if (steps.length) {
+        steps.forEach((step, index) => {
+          const line = document.createElement("p");
+          line.textContent = `${step.stepId || `STEP-${index + 1}`}: เมื่อ ${tradingResearchBlueprintExpressionText(step.trigger)} → ปิด ${step.closePercent ?? "ต้องยืนยัน"}% • ${step.onceOnly === true ? "ทำครั้งเดียว" : "ต้องยืนยันการทำซ้ำ"}${step.afterCloseAction ? ` • ${step.afterCloseAction}` : ""}`;
+          stepSection.appendChild(line);
+        });
+      } else {
+        const missing = document.createElement("p");
+        missing.className = "workflow-research-blueprint-confirmation";
+        missing.textContent = "ต้องยืนยันลำดับและเปอร์เซ็นต์ที่ปิด";
+        stepSection.appendChild(missing);
+      }
+      root.appendChild(stepSection);
+    } else {
+      const facts = document.createElement("dl");
+      facts.className = "workflow-research-blueprint-compact-facts";
+      appendTradingResearchBlueprintFact(facts, "Trigger", record.trigger ? tradingResearchBlueprintExpressionText(record.trigger) : null, { code: true });
+      appendTradingResearchBlueprintFact(facts, "Action", record.action?.kind);
+      appendTradingResearchBlueprintFact(facts, "Cadence", record.cadence);
+      appendTradingResearchBlueprintFact(facts, "ทำครั้งเดียว", record.onceOnly === true ? "ใช่" : (record.onceOnly === false ? "ไม่" : null));
+      appendTradingResearchBlueprintFact(facts, "Idempotent", record.idempotent === true ? "ใช่" : (record.idempotent === false ? "ไม่" : null));
+      appendTradingResearchBlueprintFact(facts, "ลำดับ", record.precedence);
+      appendTradingResearchBlueprintFact(facts, "ห้ามเลื่อน Stop แย่ลง", record.neverWorsenStop === true ? "ใช่" : (record.neverWorsenStop === false ? "ไม่" : null));
+      root.appendChild(facts);
+      const parameters = document.createElement("section");
+      const parametersTitle = document.createElement("strong");
+      parametersTitle.textContent = "Parameters / สูตร";
+      parameters.className = "workflow-research-blueprint-parameters";
+      parameters.append(parametersTitle, createTradingResearchBlueprintValue(record.parameters, "parameters", 1));
+      root.appendChild(parameters);
+    }
+    if (Array.isArray(record.rules) && record.rules.length) {
+      root.appendChild(createTradingResearchBlueprintRuleList(record.rules, labelText));
+    }
+  }
+  return root;
+}
+
+function createTradingResearchBlueprintRecovery(value) {
+  const record = tradingResearchBlueprintObject(value);
+  const root = document.createElement("div");
+  const header = document.createElement("article");
+  const headerRow = document.createElement("header");
+  const title = document.createElement("strong");
+  const state = document.createElement("p");
+  const sourceMeta = tradingResearchBlueprintSourceStatusMeta(record.sourceStatus);
+  root.className = "workflow-research-blueprint-recovery";
+  header.className = "workflow-research-blueprint-management-card";
+  title.textContent = `Recovery Mode: ${record.mode || "ต้องยืนยัน"}`;
+  headerRow.append(title, createTradingResearchBlueprintStatusBadge(record.sourceStatus));
+  state.className = "workflow-research-blueprint-feature-state";
+  state.dataset.tone = record.enabled === true ? "ready" : (sourceMeta.requiresConfirmation ? "warning" : "off");
+  state.textContent = record.enabled === true
+    ? "เปิดใช้งาน — EA ต้องมี Trigger, ระยะไม้, สูตร Lot, Basket Exit และ Safety Cap ครบ"
+    : (sourceMeta.requiresConfirmation
+        ? "ปิดแบบ Fail-closed — ต้องยืนยันว่าใช้ Grid / Martingale / Averaging / Hedge หรือไม่"
+        : "ไม่ใช้ Recovery ตามข้อมูลที่ตรวจแล้ว");
+  header.append(headerRow, state);
+  root.appendChild(header);
+  if (record.enabled !== true) return root;
+  const facts = document.createElement("dl");
+  facts.className = "workflow-research-blueprint-facts";
+  appendTradingResearchBlueprintFact(facts, "Trigger เปิดไม้แก้", record.trigger ? tradingResearchBlueprintExpressionText(record.trigger) : null, { code: true });
+  appendTradingResearchBlueprintFact(facts, "ทิศทาง", record.direction);
+  appendTradingResearchBlueprintFact(facts, "จำนวนระดับสูงสุด", record.maxLevels);
+  appendTradingResearchBlueprintFact(facts, "Lot ต่อไม้สูงสุด", record.lotCap);
+  appendTradingResearchBlueprintFact(facts, "Lot รวมสูงสุด", record.maxBasketLots);
+  appendTradingResearchBlueprintFact(facts, "Drawdown สูงสุด (%)", record.maxDrawdownPercent);
+  appendTradingResearchBlueprintFact(facts, "Equity Stop (%)", record.equityStopPercent);
+  appendTradingResearchBlueprintFact(facts, "Reset", typeof record.resetCondition === "object" ? tradingResearchBlueprintExpressionText(record.resetCondition) : record.resetCondition, { code: true });
+  appendTradingResearchBlueprintFact(facts, "Abort", typeof record.abortCondition === "object" ? tradingResearchBlueprintExpressionText(record.abortCondition) : record.abortCondition, { code: true });
+  root.appendChild(facts);
+  [
+    ["ระยะห่างแต่ละไม้", "spacing"],
+    ["สูตรคำนวณ Lot", "lotFormula"],
+    ["Take Profit ทั้งตะกร้า", "basketTakeProfit"],
+    ["Stop Loss ทั้งตะกร้า", "basketStopLoss"],
+    ["วงจร Hedge", "hedgeLifecycle"],
+    ["กฎเข้าใหม่", "reentryPolicy"],
+  ].forEach(([label, key]) => {
+    const section = document.createElement("section");
+    const heading = document.createElement("strong");
+    heading.textContent = label;
+    section.className = "workflow-research-blueprint-recovery-part";
+    if (tradingResearchBlueprintHasValue(record[key])) {
+      section.append(heading, createTradingResearchBlueprintValue(record[key], key, 1));
+    } else {
+      const missing = document.createElement("p");
+      missing.className = "workflow-research-blueprint-confirmation";
+      missing.textContent = `ต้องยืนยัน ${label}`;
+      section.append(heading, missing);
+    }
+    root.appendChild(section);
+  });
+  if (Array.isArray(record.levelRules) && record.levelRules.length) {
+    const rules = document.createElement("section");
+    const title = document.createElement("strong");
+    title.textContent = "กฎของแต่ละ Recovery Level";
+    rules.className = "workflow-research-blueprint-recovery-part";
+    rules.append(title, createTradingResearchBlueprintRuleList(record.levelRules, "Recovery Level"));
+    root.appendChild(rules);
+  } else {
+    const missing = document.createElement("p");
+    missing.className = "workflow-research-blueprint-missing";
+    missing.textContent = "ต้องยืนยันกฎของแต่ละ Recovery Level";
+    root.appendChild(missing);
+  }
+  return root;
+}
+
 function createTradingResearchBlueprintScalar(value, key = "") {
   const raw = typeof value === "boolean" ? (value ? "true" : "false") : String(value ?? "");
-  const safeText = safeAgentChatReplyText(raw, "ยังไม่ระบุ");
+  const safeText = safeAgentChatReplyText(raw, "ต้องยืนยัน");
   const safeUrl = getSafeExternalHttpUrl(raw);
   if (safeUrl) {
     return createWorkflowExternalSource(safeUrl, safeText) || document.createTextNode(safeText);
@@ -25964,8 +26759,8 @@ function createTradingResearchCrossFormulaGuide() {
   const detail = document.createElement("p");
   const formulas = document.createElement("div");
   guide.className = "workflow-research-cross-guide";
-  title.textContent = "มาตรฐาน Cross บนแท่งปิด (ตัวอย่าง MA10 / MA60)";
-  detail.textContent = "bar 0 = แท่งกำลังก่อตัว, bar 1 = แท่งปิดล่าสุด, bar 2 = แท่งปิดก่อนหน้า";
+  title.textContent = "วิธีอ่าน Cross บนแท่งปิด (ตัวอย่างรูปแบบ MA10 / MA60 เท่านั้น)";
+  detail.textContent = "ตัวอย่างนี้ไม่ใช่ค่าของระบบที่เลือก • bar 0 = แท่งกำลังก่อตัว, bar 1 = แท่งปิดล่าสุด, bar 2 = แท่งปิดก่อนหน้า • กฎจริงอยู่ในการ์ด BUY/SELL ด้านล่าง";
   [
     ["Cross ขึ้น / BUY", "MA10[2] <= MA60[2] && MA10[1] > MA60[1]"],
     ["Cross ลง / SELL", "MA10[2] >= MA60[2] && MA10[1] < MA60[1]"],
@@ -26003,12 +26798,14 @@ function createTradingResearchBlueprintSection(id, titleText, groups, { open = f
     heading.textContent = group.label;
     groupNode.className = "workflow-research-blueprint-group";
     groupNode.appendChild(heading);
-    if (tradingResearchBlueprintHasValue(group.value)) {
-      groupNode.appendChild(createTradingResearchBlueprintValue(group.value, group.key || id));
+    if (tradingResearchBlueprintHasValue(group.value) || group.renderEmpty === true) {
+      groupNode.appendChild(typeof group.render === "function"
+        ? group.render(group.value)
+        : createTradingResearchBlueprintValue(group.value, group.key || id));
     } else {
       const missing = document.createElement("p");
       missing.className = "workflow-research-blueprint-missing";
-      missing.textContent = "Backend ยังไม่ระบุข้อมูลหมวดนี้";
+      missing.textContent = "ต้องยืนยัน: Backend ยังไม่ระบุข้อมูลหมวดนี้ จึงยังส่งเขียน EA ไม่ได้";
       groupNode.appendChild(missing);
     }
     body.appendChild(groupNode);
@@ -26047,6 +26844,34 @@ function createTradingResearchBlueprintReadiness(blueprint) {
     facts.appendChild(row);
   });
   strip.append(title, facts);
+  const blockingIssues = Array.isArray(completeness.blockingIssues) ? completeness.blockingIssues : [];
+  const warnings = Array.isArray(completeness.warnings) ? completeness.warnings : [];
+  const unknownPaths = Array.isArray(completeness.unknownPaths) ? completeness.unknownPaths : [];
+  const conflictPaths = Array.isArray(completeness.conflictPaths) ? completeness.conflictPaths : [];
+  const appendReadinessList = (labelText, values, tone) => {
+    if (!values.length) return;
+    const section = document.createElement("section");
+    const heading = document.createElement("strong");
+    const list = document.createElement("ul");
+    section.className = "workflow-research-blueprint-readiness-list";
+    section.dataset.tone = tone;
+    heading.textContent = labelText;
+    values.forEach((value) => {
+      const record = tradingResearchBlueprintObject(value);
+      const item = document.createElement("li");
+      const message = record.messageTh || record.description || (typeof value === "string" ? value : "ต้องยืนยันรายละเอียด");
+      const path = record.path ? ` [${record.path}]` : "";
+      const question = record.questionTh ? ` • คำถาม: ${record.questionTh}` : "";
+      item.textContent = `${message}${path}${question}`;
+      list.appendChild(item);
+    });
+    section.append(heading, list);
+    strip.appendChild(section);
+  };
+  appendReadinessList("รายการที่ต้องแก้ก่อนส่งโรงงาน EA", blockingIssues, "blocked");
+  appendReadinessList("คำเตือน", warnings, "warning");
+  appendReadinessList("ตำแหน่งข้อมูลที่ต้องยืนยัน", unknownPaths, "warning");
+  appendReadinessList("ตำแหน่งกฎหรือหลักฐานที่ขัดกัน", conflictPaths, "blocked");
   return strip;
 }
 
@@ -26054,9 +26879,12 @@ function createTradingResearchEaBlueprint(blueprint, report = {}) {
   const root = document.createElement("section");
   const header = document.createElement("header");
   const headerCopy = document.createElement("div");
+  const headerControls = document.createElement("div");
   const eyebrow = document.createElement("span");
   const title = document.createElement("h5");
   const detail = document.createElement("p");
+  const expandButton = document.createElement("button");
+  const collapseButton = document.createElement("button");
   const sections = document.createElement("div");
   root.className = "workflow-research-ea-blueprint";
   root.dataset.schemaVersion = safeDashboardDisplayText(blueprint.schemaVersion, "unknown");
@@ -26066,10 +26894,22 @@ function createTradingResearchEaBlueprint(blueprint, report = {}) {
     "ข้อกำหนดพร้อมพัฒนา EA",
   );
   detail.textContent = blueprint.schemaVersion === TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION
-    ? `Schema ${TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION} • Report ${safeDashboardDisplayText(report.id, "ไม่ระบุ")}`
+    ? `Schema ${TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION} • Report ${safeDashboardDisplayText(report.id, "ไม่ระบุ")} • แสดงกฎที่ EA ต้องคำนวณแบบ Bar Index โดยไม่เติมค่าที่หลักฐานไม่ได้ระบุ`
     : `Schema ${safeDashboardDisplayText(blueprint.schemaVersion, "ยังไม่ระบุ")} • แสดงแบบ read-only ตามข้อมูลที่ Backend ส่งมา`;
   headerCopy.append(eyebrow, title, detail);
-  header.appendChild(headerCopy);
+  headerControls.className = "workflow-research-blueprint-controls";
+  expandButton.type = "button";
+  collapseButton.type = "button";
+  expandButton.textContent = "เปิดรายละเอียดทั้งหมด";
+  collapseButton.textContent = "ย่อทั้งหมด";
+  expandButton.addEventListener("click", () => {
+    sections.querySelectorAll("details").forEach((details) => { details.open = true; });
+  });
+  collapseButton.addEventListener("click", () => {
+    sections.querySelectorAll("details").forEach((details) => { details.open = false; });
+  });
+  headerControls.append(expandButton, collapseButton);
+  header.append(headerCopy, headerControls);
   root.append(header, createTradingResearchBlueprintReadiness(blueprint));
   sections.className = "workflow-research-blueprint-sections";
   const specs = [
@@ -26098,54 +26938,61 @@ function createTradingResearchEaBlueprint(blueprint, report = {}) {
       title: "3. Inputs และ Indicators",
       open: true,
       groups: [
-        { label: "Inputs ที่ผู้ใช้ปรับได้", key: "inputs", value: blueprint.inputs },
-        { label: "Indicators / Parameters / Buffer", key: "indicators", value: blueprint.indicators },
-        { label: "Setup / Filters", key: "setup", value: blueprint.setup },
+        { label: "Inputs ที่ผู้ใช้ปรับได้", key: "inputs", value: blueprint.inputs, render: createTradingResearchBlueprintInputs, renderEmpty: true },
+        { label: "Indicators / Parameters / Buffer", key: "indicators", value: blueprint.indicators, render: createTradingResearchBlueprintIndicators, renderEmpty: true },
+        { label: "Setup / Filters แยกตามฝั่ง", key: "setup", value: blueprint.setup, render: createTradingResearchBlueprintSetupRules },
       ],
     },
     {
       id: "buy-entry",
       title: "4. กฎเปิด BUY / Long",
-      groups: [{ label: "ลำดับเงื่อนไข BUY", key: "buyEntry", value: tradingResearchBlueprintFirst(blueprint, ["entry.buy", "entry.long", "buyEntry", "entries.buy"]) }],
+      open: true,
+      groups: [{ label: "ลำดับเงื่อนไข BUY แบบ Exact Formula", key: "buyEntry", value: tradingResearchBlueprintFirst(blueprint, ["entry.buy", "entry.long", "buyEntry", "entries.buy"]), render: (value) => createTradingResearchBlueprintRuleList(value, "BUY Entry") }],
     },
     {
       id: "sell-entry",
       title: "5. กฎเปิด SELL / Short",
-      groups: [{ label: "ลำดับเงื่อนไข SELL", key: "sellEntry", value: tradingResearchBlueprintFirst(blueprint, ["entry.sell", "entry.short", "sellEntry", "entries.sell"]) }],
+      open: true,
+      groups: [{ label: "ลำดับเงื่อนไข SELL แบบ Exact Formula", key: "sellEntry", value: tradingResearchBlueprintFirst(blueprint, ["entry.sell", "entry.short", "sellEntry", "entries.sell"]), render: (value) => createTradingResearchBlueprintRuleList(value, "SELL Entry") }],
     },
     {
       id: "buy-exit",
       title: "6. กฎปิด BUY / Long",
-      groups: [{ label: "ลำดับเงื่อนไขปิด BUY", key: "buyExit", value: tradingResearchBlueprintFirst(blueprint, ["exit.buy", "exit.long", "buyExit", "exits.buy"]) }],
+      open: true,
+      groups: [{ label: "ลำดับเงื่อนไขปิด BUY แบบ Exact Formula", key: "buyExit", value: tradingResearchBlueprintFirst(blueprint, ["exit.buy", "exit.long", "buyExit", "exits.buy"]), render: (value) => createTradingResearchBlueprintRuleList(value, "BUY Exit") }],
     },
     {
       id: "sell-exit",
       title: "7. กฎปิด SELL / Short",
-      groups: [{ label: "ลำดับเงื่อนไขปิด SELL", key: "sellExit", value: tradingResearchBlueprintFirst(blueprint, ["exit.sell", "exit.short", "sellExit", "exits.sell"]) }],
+      open: true,
+      groups: [{ label: "ลำดับเงื่อนไขปิด SELL แบบ Exact Formula", key: "sellExit", value: tradingResearchBlueprintFirst(blueprint, ["exit.sell", "exit.short", "sellExit", "exits.sell"]), render: (value) => createTradingResearchBlueprintRuleList(value, "SELL Exit") }],
     },
     {
       id: "tp-sl",
       title: "8. Take Profit และ Stop Loss",
-      groups: [{ label: "ราคาอ้างอิง สูตร และลำดับทำงาน", key: "tpSl", value: tradingResearchBlueprintFirst(blueprint, ["tpSl", "riskModel.tpSl"]) }],
+      open: true,
+      groups: [{ label: "ราคาอ้างอิง สูตร และลำดับทำงาน", key: "tpSl", value: tradingResearchBlueprintFirst(blueprint, ["tpSl", "riskModel.tpSl"]), render: createTradingResearchBlueprintTpSl }],
     },
     {
       id: "order-modify",
       title: "9. Order Modify: BE / Trailing / Partial / Pending",
+      open: true,
       groups: [
-        { label: "Break-even", key: "breakEven", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.breakEven", "breakEven"]) },
-        { label: "Trailing Stop", key: "trailingStop", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.trailingStop", "trailingStop"]) },
-        { label: "Partial Close", key: "partialClose", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.partialClose", "partialClose"]) },
-        { label: "Scale In / เพิ่มไม้", key: "scaleIn", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.scaleIn", "scaleIn"]) },
-        { label: "Scale Out / ลดไม้", key: "scaleOut", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.scaleOut", "scaleOut"]) },
-        { label: "แก้ไข Stop Loss", key: "modifyStopLoss", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.modifyStopLoss", "modifyStopLoss"]) },
-        { label: "แก้ไข Take Profit", key: "modifyTakeProfit", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.modifyTakeProfit", "modifyTakeProfit"]) },
-        { label: "Pending Orders", key: "pendingOrders", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.pendingOrders", "pendingOrders"]) },
+        { label: "Break-even", key: "breakEven", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.breakEven", "breakEven"]), render: (value) => createTradingResearchBlueprintManagedFeature(value, "Break-even") },
+        { label: "Trailing Stop", key: "trailingStop", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.trailingStop", "trailingStop"]), render: (value) => createTradingResearchBlueprintManagedFeature(value, "Trailing Stop") },
+        { label: "Partial Close", key: "partialClose", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.partialClose", "partialClose"]), render: (value) => createTradingResearchBlueprintManagedFeature(value, "Partial Close", { partialClose: true }) },
+        { label: "Scale In / เพิ่มไม้", key: "scaleIn", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.scaleIn", "scaleIn"]), render: (value) => createTradingResearchBlueprintManagedFeature(value, "Scale In / เพิ่มไม้") },
+        { label: "Scale Out / ลดไม้", key: "scaleOut", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.scaleOut", "scaleOut"]), render: (value) => createTradingResearchBlueprintManagedFeature(value, "Scale Out / ลดไม้") },
+        { label: "แก้ไข Stop Loss", key: "modifyStopLoss", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.modifyStopLoss", "modifyStopLoss"]), render: (value) => createTradingResearchBlueprintManagedFeature(value, "แก้ไข Stop Loss") },
+        { label: "แก้ไข Take Profit", key: "modifyTakeProfit", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.modifyTakeProfit", "modifyTakeProfit"]), render: (value) => createTradingResearchBlueprintManagedFeature(value, "แก้ไข Take Profit") },
+        { label: "Pending Orders", key: "pendingOrders", value: tradingResearchBlueprintFirst(blueprint, ["orderManagement.pendingOrders", "pendingOrders"]), render: (value) => createTradingResearchBlueprintManagedFeature(value, "Pending Orders") },
       ],
     },
     {
       id: "recovery",
       title: "10. Recovery / Grid / Martingale / Averaging / Hedge",
-      groups: [{ label: "ข้อห้าม เงื่อนไขเริ่ม ระยะห่าง Lot และจุดหยุด", key: "recovery", value: tradingResearchBlueprintFirst(blueprint, ["recovery", "recoveryAndAveragingRules"]) }],
+      open: true,
+      groups: [{ label: "Trigger, ระยะห่าง, สูตร Lot, Basket Exit, Hedge และ Safety Cap", key: "recovery", value: tradingResearchBlueprintFirst(blueprint, ["recovery", "recoveryAndAveragingRules"]), render: createTradingResearchBlueprintRecovery }],
     },
     {
       id: "risk-sizing",
@@ -26190,6 +27037,7 @@ function createTradingResearchEaBlueprint(blueprint, report = {}) {
     {
       id: "readiness",
       title: "18. Readiness Gate ก่อนส่งโรงงาน EA",
+      open: true,
       groups: [{ label: "คะแนน รายการบล็อก คำเตือน และเส้นทางข้อมูลที่ขาด", key: "completeness", value: tradingResearchBlueprintFirst(blueprint, ["completeness", "readiness"]) }],
     },
   ];
@@ -26203,6 +27051,66 @@ function createTradingResearchEaBlueprint(blueprint, report = {}) {
   });
   root.appendChild(sections);
   return root;
+}
+
+function createTradingResearchRevisionCta(system) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "workflow-research-revision-cta";
+  button.textContent = "เลือกระบบต้นทางเพื่อวิจัย Revision ใหม่";
+  button.disabled = !system?.sourceReportId || !(system?.sourceRecordId || system?.id);
+  button.addEventListener("click", () => {
+    const sourceReportId = String(system?.sourceReportId || "");
+    const sourceRecordId = String(system?.sourceRecordId || system?.id || "");
+    const session = state.modal.tradingResearchLab;
+    session.sourceReportId = sourceReportId;
+    session.selectedSystemId = sourceRecordId;
+    session.backtest = null;
+    session.backtestMessage = "";
+    const form = document.querySelector('[data-workflow-action-form="deep_research_system"]');
+    const reportControl = form?.querySelector('[data-workflow-field="sourceReportId"]');
+    const recordControl = form?.querySelector('[data-workflow-field="sourceRecordId"]');
+    if (reportControl instanceof HTMLSelectElement
+        && [...reportControl.options].some((option) => option.value === sourceReportId)) {
+      reportControl.value = sourceReportId;
+      reportControl.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    if (recordControl instanceof HTMLSelectElement
+        && [...recordControl.options].some((option) => option.value === sourceRecordId)) {
+      recordControl.value = sourceRecordId;
+      recordControl.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    form?.scrollIntoView({ behavior: "smooth", block: "center" });
+    reportControl?.focus({ preventScroll: true });
+  });
+  return button;
+}
+
+function createTradingResearchCatalogRejectionNotice(domain = {}) {
+  const rejectedCount = Math.max(0, Number(domain.googleSheetRejectedSystemCount) || 0);
+  if (!rejectedCount) return null;
+  const labels = {
+    reserved_documentation_domain: "โดเมนตัวอย่างหรือเอกสาร",
+    invalid_identity: "ไม่มีรหัสแถวที่ตรวจสอบได้",
+    insufficient_evidence: "หลักฐานอิสระไม่ครบ",
+    not_verified: "ยังไม่ผ่านการยืนยัน",
+    invalid_required_fields: "ข้อมูลบังคับไม่ครบ",
+  };
+  const reasons = tradingResearchBlueprintObject(domain.googleSheetRejectionReasonCounts);
+  const summaries = [];
+  let otherCount = 0;
+  Object.entries(reasons).forEach(([key, value]) => {
+    const count = Math.max(0, Number(value) || 0);
+    if (!count) return;
+    if (labels[key]) summaries.push(`${labels[key]} ${count}`);
+    else otherCount += count;
+  });
+  if (otherCount) summaries.push(`เหตุผลอื่น ${otherCount}`);
+  return createTradingResearchNotice(
+    `Backend กรองแถว Google Sheet ที่ยังใช้วิจัยไม่ได้ ${rejectedCount} แถว`,
+    `${summaries.length ? summaries.join(" • ") : "Backend ไม่ได้ระบุหมวดเหตุผล"} • ระบบที่ผ่านการตรวจแล้วยังเลือกและวิจัยต่อได้ตามปกติ`,
+    "warning",
+  );
 }
 
 function renderTradingResearchDetail(section, system, domain) {
@@ -26228,6 +27136,8 @@ function renderTradingResearchDetail(section, system, domain) {
     ),
     source,
   );
+  const rejectionNotice = createTradingResearchCatalogRejectionNotice(domain);
+  if (rejectionNotice) section.appendChild(rejectionNotice);
   if (!system) {
     section.appendChild(createWorkflowTruthEmpty(
       domain.catalogAuthoritative
@@ -26314,11 +27224,13 @@ function renderTradingResearchDetail(section, system, domain) {
       section.appendChild(createTradingResearchEaBlueprint(eaBlueprint, matchingResearch));
     } else {
       const warning = tradingResearchEaReadModelWarning(matchingResearch);
-      section.appendChild(createTradingResearchNotice(
+      const notice = createTradingResearchNotice(
         warning.title,
         warning.detail,
         warning.tone,
-      ));
+      );
+      notice.appendChild(createTradingResearchRevisionCta(system));
+      section.appendChild(notice);
     }
   } else {
     section.appendChild(createTradingResearchNotice(

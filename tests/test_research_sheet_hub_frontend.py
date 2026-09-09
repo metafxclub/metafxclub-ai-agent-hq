@@ -1,4 +1,7 @@
+import json
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -16,6 +19,34 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
     def block(self, start, end):
         start_index = self.main.index(start)
         return self.main[start_index:self.main.index(end, start_index)]
+
+    def run_node_json(self, source: str) -> dict:
+        bundled_node = (
+            Path.home()
+            / ".cache"
+            / "codex-runtimes"
+            / "codex-primary-runtime"
+            / "dependencies"
+            / "node"
+            / "bin"
+            / "node.exe"
+        )
+        node = shutil.which("node") or (
+            str(bundled_node) if bundled_node.exists() else None
+        )
+        if not node:
+            self.skipTest("Node.js is unavailable")
+        process = subprocess.run(
+            [node, "-e", source],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=20,
+            check=False,
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        return json.loads(process.stdout)
 
     def test_global_topbar_has_inspect_then_activate_controls(self):
         self.assertEqual(self.html.count('id="researchSheetHub"'), 1)
@@ -244,6 +275,73 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
         self.assertIn("expectedConfigRevision: preview.baseConfigRevision", activate)
         self.assertIn("idempotencyKey: createWorkflowIdempotencyKey()", activate)
         self.assertNotIn("googleSheetUrlOrId", activate)
+
+    def test_authoritative_active_get_clears_stale_activation_failure_presentation(self):
+        load = self.block("async function loadResearchSheetHub", "async function verifyActiveResearchSheetAfterGoogleAuth")
+        ready = "const authoritativeLifecycleMatches = researchSheetAuthoritativeLifecycleMatches"
+        self.assertIn(ready, load)
+        ready_index = load.index(ready)
+        assignment_index = load.index("hub.data = nextData")
+        self.assertGreater(ready_index, assignment_index)
+        self.assertIn("hub.failurePhase", load[assignment_index:ready_index])
+        self.assertIn("hub.showProgress", load[assignment_index:ready_index])
+        self.assertIn('hub.phase !== "idle"', load[assignment_index:ready_index])
+        authoritative_branch = load[ready_index:load.index('hub.status = "ready"', ready_index)]
+        for reset in (
+            'hub.phase = "idle"',
+            'hub.failurePhase = ""',
+            "hub.showProgress = false",
+            "hub.preview = null",
+            "hub.dirty = false",
+            "clearResearchSheetHubPhaseTimers()",
+        ):
+            self.assertIn(reset, authoritative_branch)
+        self.assertIn("&& authoritativeLifecycleMatches", authoritative_branch)
+        self.assertIn("hub.submittedReference = authoritativeSheetId", authoritative_branch)
+        self.assertIn("hub.draftReference = authoritativeSheetId", authoritative_branch)
+        self.assertNotIn("hub.data.active = true", authoritative_branch)
+
+    def test_authoritative_get_preserves_failed_new_sheet_draft_until_identity_matches(self):
+        helpers = self.block(
+            "function normalizeResearchSheetReference",
+            "function boundedResearchSheetCount",
+        )
+        sheet_a = "1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        sheet_b = "1BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+        result = self.run_node_json(
+            helpers
+            + f"""
+const sheetA = {json.dumps(sheet_a)};
+const sheetB = {json.dumps(sheet_b)};
+console.log(JSON.stringify({{
+  failedNewDraftPreserved: !researchSheetAuthoritativeLifecycleMatches(
+    {{ dirty: true, submittedReference: sheetA, draftReference: sheetB }},
+    {{ sheetId: sheetA }}
+  ),
+  committedNewSheetRecognized: researchSheetAuthoritativeLifecycleMatches(
+    {{ dirty: true, submittedReference: sheetA, draftReference: sheetB }},
+    {{ sheetId: sheetB }}
+  ),
+  cleanStaleLifecycleClears: researchSheetAuthoritativeLifecycleMatches(
+    {{ dirty: false, submittedReference: sheetA, draftReference: sheetA }},
+    {{ sheetId: sheetA }}
+  ),
+  invalidDirtyDraftPreserved: !researchSheetAuthoritativeLifecycleMatches(
+    {{ dirty: true, submittedReference: sheetA, draftReference: "not-a-sheet" }},
+    {{ sheetId: sheetA }}
+  )
+}}));
+"""
+        )
+        self.assertEqual(
+            result,
+            {
+                "failedNewDraftPreserved": True,
+                "committedNewSheetRecognized": True,
+                "cleanStaleLifecycleClears": True,
+                "invalidDirtyDraftPreserved": True,
+            },
+        )
 
     def test_inspection_is_non_mutating_and_preserves_active_sheet_on_failure(self):
         inspect = self.block("async function inspectResearchSheetHub", "async function activateResearchSheetHub")
