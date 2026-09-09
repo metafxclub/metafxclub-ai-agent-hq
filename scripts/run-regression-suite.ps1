@@ -29,9 +29,20 @@ if (-not (Test-Path -LiteralPath $logDirectory -PathType Container)) {
   New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 }
 
-& $resolvedPython -m unittest discover -s tests -p "test_*.py" -v 2>&1 |
-  Tee-Object -FilePath $resolvedLog
-$testExitCode = $LASTEXITCODE
+# Windows PowerShell 5.1 wraps native stderr records as non-terminating
+# NativeCommandError objects. unittest -v writes ordinary progress to stderr,
+# so the script-level Stop preference would otherwise abort on the first
+# passing test before $LASTEXITCODE can be inspected.
+$previousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+  & $resolvedPython -m unittest discover -s tests -p "test_*.py" -v 2>&1 |
+    Tee-Object -FilePath $resolvedLog
+  $testExitCode = $LASTEXITCODE
+}
+finally {
+  $ErrorActionPreference = $previousErrorActionPreference
+}
 
 if ($testExitCode -eq 0) {
   return

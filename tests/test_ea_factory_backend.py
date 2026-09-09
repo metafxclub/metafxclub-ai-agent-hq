@@ -215,6 +215,44 @@ class EaFactoryBackendTests(unittest.TestCase):
             "legacy_ea_blueprint_missing",
         )
 
+    def test_create_build_explains_non_ready_blueprint_without_missing_core_fields(self) -> None:
+        source_record_id = "ea-source-needs-clarification"
+        blocked_source = {
+            "sourceRecordId": source_record_id,
+            "recordDigest": "a" * 64,
+            "buildReady": False,
+            "missingCoreFields": [],
+            "readinessIssues": [
+                "ea_blueprint_needs_clarification",
+                "ENTRY_UNKNOWN:$.entry.buy.rules[0]",
+            ],
+        }
+        with (
+            mock.patch.object(self.bridge, "load_missions", return_value=[]),
+            mock.patch.object(self.bridge, "load_runtime_reports", return_value=[]),
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=self.bridge._empty_ea_factory_state(),
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_source_catalog",
+                return_value=[blocked_source],
+            ),
+        ):
+            with self.assertRaises(self.bridge.RequestError) as raised:
+                self.bridge.create_ea_factory_build({
+                    "sourceRecordId": source_record_id,
+                    "platform": "mt4",
+                })
+
+        self.assertEqual(raised.exception.status, 422)
+        message = str(raised.exception)
+        self.assertIn("ea_blueprint_needs_clarification", message)
+        self.assertIn("ENTRY_UNKNOWN:$.entry.buy.rules[0]", message)
+        self.assertFalse(message.endswith(": "))
+
     def test_deep_research_nested_facts_project_to_clear_a_w_fields(self) -> None:
         report_id = "auto-report-deep-research-nested"
         mission_id = "mission-deep-research-nested"

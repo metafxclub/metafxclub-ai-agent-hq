@@ -2525,6 +2525,200 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
                 second_rows[0]["ea_factory_record_id"],
             },
         )
+        missions = []
+        for report in (first, second):
+            report["ownerAgentId"] = "mission_archivist"
+            report["workflowContext"].update({
+                "propId": "left_server_racks",
+                "actionId": "deep_research_system",
+            })
+            missions.append({
+                "id": report["linkedMissionId"],
+                "status": "completed",
+                "reportIds": [report["id"]],
+                "targetId": "left_server_racks",
+                "owner": "mission_archivist",
+            })
+        runtime_records = self.bridge._ea_factory_research_source_records(
+            [first, second],
+            missions,
+        )
+        self.assertEqual(len(runtime_records), 2)
+        self.assertEqual(
+            {record["recordId"] for record in runtime_records},
+            {
+                first_rows[0]["ea_factory_record_id"],
+                second_rows[0]["ea_factory_record_id"],
+            },
+        )
+
+    def test_sheet_and_runtime_research_copies_share_one_authoritative_identity(self) -> None:
+        report = self._deep_report()
+        report["ownerAgentId"] = "mission_archivist"
+        report["workflowContext"].update({
+            "propId": "left_server_racks",
+            "actionId": "deep_research_system",
+        })
+        mission = {
+            "id": report["linkedMissionId"],
+            "status": "completed",
+            "reportIds": [report["id"]],
+            "targetId": "left_server_racks",
+            "owner": "mission_archivist",
+        }
+        version_index = self.bridge._research_sheet_build_deep_version_index(
+            [report]
+        )
+        row = self.bridge._research_sheet_deep_rows(
+            report,
+            version_index=version_index,
+        )[0][0]
+        sheet_record = self.bridge._ea_factory_deep_research_records(
+            [row],
+            source_key="sheet-authoritative-identity",
+            strict=True,
+        )[0]
+        runtime_record = self.bridge._ea_factory_research_source_records(
+            [report],
+            [mission],
+        )[0]
+
+        self.assertEqual(sheet_record["recordId"], runtime_record["recordId"])
+        self.assertEqual(sheet_record["recordId"], row["ea_factory_record_id"])
+        with (
+            patch.object(
+                self.bridge,
+                "_research_sheet_hub_internal",
+                return_value={"sheetId": SHEET_ID},
+            ),
+            patch.object(
+                self.bridge,
+                "_research_sheet_cached_rows",
+                return_value=[row],
+            ),
+            patch.object(
+                self.bridge,
+                "_ea_factory_google_sheet_records",
+                return_value=[],
+            ),
+        ):
+            catalog = self.bridge._ea_factory_source_catalog(
+                state=self.bridge._empty_ea_factory_state(),
+                reports=[report],
+                missions=[mission],
+            )
+        self.assertEqual(len(catalog), 1)
+        self.assertEqual(catalog[0]["sourceKind"], "verified_deep_research_sheet")
+
+    def test_newest_non_ready_revision_blocks_older_ready_factory_fallback(self) -> None:
+        old_report = self._deep_report()
+        old_report.update({
+            "id": "report-deep-revision-old-ready",
+            "linkedMissionId": "mission-deep-revision-old-ready",
+            "ownerAgentId": "mission_archivist",
+            "createdAt": "2026-08-27T03:00:00Z",
+            "updatedAt": "2026-08-27T03:05:00Z",
+        })
+        old_report["workflowContext"].update({
+            "propId": "left_server_racks",
+            "actionId": "deep_research_system",
+        })
+
+        new_report = copy.deepcopy(old_report)
+        new_report.update({
+            "id": "report-deep-revision-new-blocked",
+            "linkedMissionId": "mission-deep-revision-new-blocked",
+            "createdAt": "2026-08-28T03:00:00Z",
+            "updatedAt": "2026-08-28T03:05:00Z",
+        })
+        blueprint = copy.deepcopy(new_report["metrics"]["eaBlueprint"])
+        blueprint["researchRevision"] = 2
+        rule = blueprint["entry"]["buy"]["rules"][0]
+        rule.update({
+            "sourceStatus": "unknown",
+            "sourceRefs": [],
+            "expression": {"op": "unknown"},
+        })
+        blueprint["completeness"].update({
+            "status": "needs_clarification",
+            "score": 65,
+            "eaHandoffAllowed": False,
+            "deterministicBacktestAllowed": False,
+            "blockingIssues": [{
+                "code": "ENTRY_UNKNOWN",
+                "path": "$.entry.buy.rules[0]",
+                "messageTh": "ยังไม่ทราบเงื่อนไขเข้า Buy",
+                "questionTh": "โปรดยืนยันเงื่อนไขเข้า Buy",
+            }],
+            "warnings": [],
+            "unknownPaths": ["$.entry.buy.rules[0]"],
+            "conflictPaths": [],
+        })
+        new_report["metrics"] = {
+            "workflowOutput": {"applicable": True, "valid": True},
+            "eaBlueprint": blueprint,
+            **self.bridge.ea_research_report_projection(blueprint),
+        }
+        missions = [
+            {
+                "id": report["linkedMissionId"],
+                "status": "completed",
+                "reportIds": [report["id"]],
+                "targetId": "left_server_racks",
+                "owner": "mission_archivist",
+            }
+            for report in (new_report, old_report)
+        ]
+        version_index = self.bridge._research_sheet_build_deep_version_index(
+            [new_report, old_report]
+        )
+        current_rows = [
+            row
+            for row in self.bridge._research_sheet_deep_rows(
+                new_report,
+                version_index=version_index,
+            )[0]
+            if row.get("is_current") == "TRUE"
+        ]
+        self.assertEqual(len(current_rows), 1)
+        self.assertEqual(
+            current_rows[0]["verification_status"],
+            "needs_clarification",
+        )
+
+        with (
+            patch.object(
+                self.bridge,
+                "_research_sheet_hub_internal",
+                return_value={"sheetId": SHEET_ID},
+            ),
+            patch.object(
+                self.bridge,
+                "_research_sheet_cached_rows",
+                return_value=current_rows,
+            ),
+            patch.object(
+                self.bridge,
+                "_ea_factory_google_sheet_records",
+                return_value=[],
+            ),
+        ):
+            catalog = self.bridge._ea_factory_source_catalog(
+                state=self.bridge._empty_ea_factory_state(),
+                reports=[new_report, old_report],
+                missions=missions,
+            )
+
+        self.assertEqual(len(catalog), 1)
+        self.assertFalse(catalog[0]["buildReady"])
+        self.assertEqual(
+            catalog[0]["eaReadiness"]["status"],
+            "needs_clarification",
+        )
+        self.assertIn(
+            "ea_blueprint_needs_clarification",
+            catalog[0]["readinessIssues"],
+        )
 
     def test_verified_deep_research_cache_feeds_factory_automatically(self) -> None:
         self.configure_hub(revision=14)
@@ -3464,6 +3658,67 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "legacy_ea_blueprint_missing",
         )
         self.assertIsNone(history["eaResearch"]["blueprint"])
+
+    def test_research_report_preserves_241_warnings_through_sheet_reconstruction(self) -> None:
+        blueprint = ready_ea_research_blueprint()
+        warnings = [f"bounded-warning-{index:03d}" for index in range(241)]
+        blueprint["completeness"]["warnings"] = warnings
+        normalized = self.bridge.normalize_ea_research_blueprint(blueprint)
+        digest = self.bridge.ea_research_blueprint_digest(normalized)
+        projection = self.bridge.ea_research_report_projection(normalized)
+        report_payload = self._deep_report()
+        report_payload.update({
+            "id": "report-deep-241-warnings",
+            "linkedMissionId": "mission-deep-241-warnings",
+        })
+        report_payload["metrics"] = {
+            "workflowOutput": {"applicable": True, "valid": True},
+            "eaBlueprint": normalized,
+            **projection,
+        }
+
+        with patch.object(self.bridge, "RESEARCH_SHEET_AUTO_SYNC_ENABLED", False):
+            stored = self.bridge.create_report(report_payload)
+
+        for candidate in (
+            stored["metrics"]["eaBlueprint"],
+            stored["metrics"]["eaImplementationBlueprint"],
+            stored["metrics"]["implementationNotes"]["eaImplementationBlueprint"],
+        ):
+            self.assertEqual(candidate["completeness"]["warnings"], warnings)
+            self.assertEqual(
+                self.bridge.ea_research_blueprint_digest(candidate),
+                digest,
+            )
+
+        report_read_model = self.bridge.report_read_model_item(stored)
+        self.assertEqual(
+            report_read_model["metrics"]["eaBlueprint"]["completeness"]["warnings"],
+            warnings,
+        )
+        read_model = report_read_model["eaResearch"]
+        self.assertTrue(read_model["validated"])
+        self.assertTrue(read_model["digestMatched"])
+        self.assertEqual(read_model["blueprintDigest"], digest)
+        self.assertEqual(read_model["warnings"], warnings)
+
+        version_index = self.bridge._research_sheet_build_deep_version_index([stored])
+        rows, _factory_rows = self.bridge._research_sheet_deep_rows(
+            stored,
+            version_index=version_index,
+        )
+        self.assertEqual(len(rows), 1)
+        reconstructed = self.bridge.reconstruct_ea_research_from_sheet(rows[0])
+        self.assertEqual(reconstructed["completeness"]["warnings"], warnings)
+        self.assertEqual(
+            self.bridge.ea_research_blueprint_digest(reconstructed),
+            digest,
+        )
+
+        oversized = ready_ea_research_blueprint()
+        oversized["completeness"]["warnings"] = ["x" * 46_000]
+        with self.assertRaises(self.bridge.EAResearchBlueprintValidationError):
+            self.bridge.ea_research_report_projection(oversized)
 
     def test_deep_research_sheet_history_projects_digest_bound_canonical_blueprint(self) -> None:
         self.configure_hub(revision=16)

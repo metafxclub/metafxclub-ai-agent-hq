@@ -511,6 +511,27 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
         self.assertEqual(metrics["eaReadiness"]["status"], "ready")
         self.assertIn("cross_above", metrics["eaReadyText"])
 
+    def test_backend_projection_does_not_truncate_241_canonical_warnings(self) -> None:
+        blueprint = self.ready_blueprint()
+        warnings = [f"bounded-warning-{index:03d}" for index in range(241)]
+        blueprint["completeness"]["warnings"] = warnings
+
+        _parsed, receipt, metrics = self.parse_and_project(blueprint)
+
+        self.assertTrue(receipt["valid"], receipt)
+        self.assertEqual(
+            metrics["eaBlueprint"]["completeness"]["warnings"],
+            warnings,
+        )
+        self.assertEqual(
+            metrics["eaImplementationBlueprint"]["completeness"]["warnings"],
+            warnings,
+        )
+        self.assertEqual(
+            self.bridge.ea_research_blueprint_digest(metrics["eaBlueprint"]),
+            metrics["blueprintDigest"],
+        )
+
     def test_runner_rejects_plain_prose_and_wrong_cross_expansion(self) -> None:
         cases: list[tuple[str, dict, str]] = []
 
@@ -809,7 +830,7 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
             records[0]["readinessIssues"],
         )
 
-    def test_non_ready_blueprint_archives_but_does_not_enter_ea_handoff(self) -> None:
+    def test_non_ready_blueprint_archives_as_authoritative_factory_tombstone(self) -> None:
         _parsed, receipt, metrics = self.parse_and_project(
             self.non_ready_blueprint()
         )
@@ -834,7 +855,16 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
             source_key="sheet-ea-research-non-ready-v2",
             strict=True,
         )
-        self.assertEqual(handoff_records, [])
+        self.assertEqual(len(handoff_records), 1)
+        self.assertFalse(handoff_records[0]["buildReady"])
+        self.assertEqual(
+            handoff_records[0]["eaReadiness"]["status"],
+            "needs_clarification",
+        )
+        self.assertIn(
+            "ea_blueprint_needs_clarification",
+            handoff_records[0]["readinessIssues"],
+        )
 
 
 if __name__ == "__main__":

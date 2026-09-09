@@ -815,7 +815,117 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
             parsed["evidence"],
             urls,
         )
+        self.assertEqual(
+            self.runner.validate_trading_system_research_required_open_urls(
+                urls
+            ),
+            urls,
+        )
+        self.runner.require_trading_system_research_bound_sources(
+            parsed,
+            urls,
+            urls,
+            False,
+        )
         self.assertEqual(len(parsed["evidence"]), 2)
+
+        with self.assertRaisesRegex(ValueError, "exactly two"):
+            self.runner.validate_trading_system_research_required_open_urls(
+                urls[:1]
+            )
+        with self.assertRaisesRegex(ValueError, "independent domains"):
+            self.runner.validate_trading_system_research_required_open_urls([
+                urls[0],
+                "https://www.tradingview.com/chart/another-system/",
+            ])
+        direct_artifact_urls = (
+            "https://forex-station.com/files/strategy.zip",
+            "https://forex-station.com/download/strategy",
+            "https://forex-station.com/article?id=1&download=1",
+        )
+        for direct_artifact_url in direct_artifact_urls:
+            with self.subTest(direct_artifact_url=direct_artifact_url), \
+                    self.assertRaisesRegex(
+                        ValueError,
+                        "direct artifact or download",
+                    ):
+                self.runner.validate_trading_system_research_required_open_urls([
+                    urls[0],
+                    direct_artifact_url,
+                ])
+        with self.assertRaisesRegex(ValueError, "match exactly"):
+            self.runner.require_trading_system_research_bound_sources(
+                parsed,
+                [urls[0], "https://www.mql5.com/en/docs/indicators/ima"],
+                urls,
+                False,
+            )
+        with self.assertRaisesRegex(ValueError, "forbids broad"):
+            self.runner.require_trading_system_research_bound_sources(
+                parsed,
+                urls,
+                urls,
+                True,
+            )
+        with self.assertRaisesRegex(ValueError, "and no others"):
+            self.runner.require_trading_system_research_bound_sources(
+                parsed,
+                urls,
+                [*urls, "https://www.mql5.com/en/docs/indicators/ima"],
+                False,
+            )
+        broad_search_event = json.dumps({
+            "type": "item.completed",
+            "item": {
+                "id": "search-1",
+                "type": "web_search",
+                "query": "find another moving average source",
+                "action": {"type": "search"},
+            },
+        })
+        self.assertTrue(
+            self.runner.completed_web_search_broad_search_used(
+                broad_search_event
+            )
+        )
+        started_broad_search_event = json.dumps({
+            "type": "item.started",
+            "item": {
+                "id": "search-started-1",
+                "type": "web_search",
+                "query": "find another moving average source",
+                "action": {"type": "search"},
+            },
+        })
+        self.assertTrue(
+            self.runner.completed_web_search_broad_search_used(
+                started_broad_search_event
+            )
+        )
+        started_broad_search_without_action = json.dumps({
+            "type": "item.started",
+            "item": {
+                "id": "search-started-2",
+                "type": "web_search",
+                "query": "find a replacement strategy page",
+            },
+        })
+        self.assertTrue(
+            self.runner.completed_web_search_broad_search_used(
+                started_broad_search_without_action
+            )
+        )
+        self.assertFalse(
+            self.runner.completed_web_search_broad_search_used(
+                "\n".join(
+                    self.pure_direct_open_jsonl(
+                        url,
+                        event_id=f"bound-source-{index}",
+                    )
+                    for index, url in enumerate(urls, start=1)
+                )
+            )
+        )
 
         mismatched = payload([urls[0], "https://www.mql5.com/en/docs/indicators/ima"])
         with self.assertRaisesRegex(ValueError, "sourceLinks must match"):
@@ -839,6 +949,257 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
                 parsed["evidence"],
                 [urls[0]],
             )
+
+        def fake_started_broad_search(command, **_kwargs):
+            raw_path = Path(command[command.index("-o") + 1])
+            raw_path.write_text(
+                self.compact(payload()),
+                encoding="utf-8",
+            )
+            direct_open_events = "\n".join(
+                self.pure_direct_open_jsonl(
+                    url,
+                    event_id=f"research-direct-{index}",
+                )
+                for index, url in enumerate(urls, start=1)
+            )
+            return {
+                "ok": True,
+                "exitCode": 0,
+                "durationMs": 1,
+                "processStarted": True,
+                "processTreeTerminated": False,
+                "stdout": "\n".join((
+                    started_broad_search_event,
+                    direct_open_events,
+                )),
+                "stderr": "",
+                "nativeWebSearchUsed": True,
+                "nativeWebSearchOpenedUrls": urls,
+                # Deliberately omit nativeWebSearchBroadSearchUsed so the
+                # production fallback must inspect the item.started event.
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            self.runner,
+            "CODEX_RUNS_DIR",
+            Path(temp_dir),
+        ), mock.patch.object(
+            self.runner,
+            "chat_status",
+            return_value={"ok": True, "status": "ready"},
+        ), mock.patch.object(
+            self.runner,
+            "run_chat_command",
+            side_effect=fake_started_broad_search,
+        ):
+            started_broad_result = self.runner.run_codex(
+                "Research only the two Backend-bound public pages.",
+                "mission_archivist",
+                "mission-reject-started-broad-search",
+                output_limit=64000,
+                execution_mode="auto_guarded",
+                web_search=True,
+                read_only_work=True,
+                result_profile="trading_system_research",
+                required_open_urls=urls,
+            )
+
+        self.assertFalse(started_broad_result["ok"], started_broad_result)
+        self.assertEqual(started_broad_result["status"], "invalid_output")
+        self.assertIn(
+            "forbids broad Web Search queries",
+            started_broad_result["structuredOutputError"],
+        )
+
+    def test_deep_research_completes_only_missing_bound_url_in_one_isolated_child(self) -> None:
+        urls = [
+            "https://www.chrisperruna.com/2007/09/24/donchians-5-and-20-day-moving-averages/",
+            "https://en.wikipedia.org/wiki/Richard_Donchian",
+        ]
+        blueprint_support = load_module(
+            "metafx_deep_research_open_blueprint_support",
+            EA_RESEARCH_BLUEPRINT_TEST_PATH,
+        )
+        blueprint = blueprint_support.ready_blueprint()
+        blueprint["evidenceMap"] = [
+            {
+                "sourceRef": f"S{index}",
+                "url": url,
+                "title": f"Bound public source {index}",
+                "checkedAt": blueprint["checkedAt"],
+            }
+            for index, url in enumerate(urls, start=1)
+        ]
+        payload = {
+            "status": "completed",
+            "summary": "Verified exact two-source Deep Research",
+            "findings": ["The selected system was expanded deterministically"],
+            "nextSteps": [],
+            "evidence": [
+                {
+                    "label": f"Source {index}",
+                    "url": url,
+                    "note": "Backend-bound public source",
+                }
+                for index, url in enumerate(urls, start=1)
+            ],
+            "blockedCapability": "",
+            "research": blueprint,
+            "evidenceKinds": [
+                "at_least_two_source_urls",
+                "checked_at",
+                "limitations",
+                "ea_readiness",
+                "source_digest",
+            ],
+        }
+        calls: list[tuple[list[str], dict]] = []
+
+        def fake_chat(command, **kwargs):
+            command_values = [str(item) for item in command]
+            calls.append((command_values, dict(kwargs)))
+            raw_path = Path(command_values[command_values.index("-o") + 1])
+            if len(calls) == 1:
+                raw_path.write_text(self.compact(payload), encoding="utf-8")
+                stdout = self.pure_direct_open_jsonl(
+                    urls[0],
+                    event_id="main-bound-open",
+                )
+            else:
+                self.assertIn(json.dumps(urls[1]), str(kwargs.get("stdin") or ""))
+                raw_path.write_text(
+                    self.compact({"status": "completed"}),
+                    encoding="utf-8",
+                )
+                stdout = self.pure_direct_open_jsonl(
+                    urls[1],
+                    event_id="isolated-bound-open",
+                )
+            return {
+                "ok": True,
+                "exitCode": 0,
+                "durationMs": 1,
+                "processStarted": True,
+                "processTreeTerminated": False,
+                "stdout": stdout,
+                "stderr": "",
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            self.runner,
+            "CODEX_RUNS_DIR",
+            Path(temp_dir),
+        ), mock.patch.object(
+            self.runner,
+            "chat_status",
+            return_value={"ok": True, "status": "ready"},
+        ), mock.patch.object(
+            self.runner,
+            "read_rate_limits",
+            return_value=self.fresh_quota_snapshot(84),
+        ) as quota_probe, mock.patch.object(
+            self.runner,
+            "run_chat_command",
+            side_effect=fake_chat,
+        ):
+            result = self.runner.run_codex(
+                "Research only the two Backend-bound public pages.",
+                "mission_archivist",
+                "mission-complete-second-bound-open",
+                timeout=120,
+                output_limit=64000,
+                execution_mode="auto_guarded",
+                web_search=True,
+                read_only_work=True,
+                result_profile="trading_system_research",
+                required_open_urls=urls,
+            )
+            manifest_path = Path(temp_dir) / result[
+                "correctiveOpenVerificationArtifact"
+            ]
+            manifest_bytes = manifest_path.read_bytes()
+            manifest = json.loads(manifest_bytes)
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["webSearchEvidenceVerified"])
+        self.assertEqual(result["correctiveOpenVerificationCount"], 1)
+        self.assertEqual(
+            [row["url"] for row in result["correctiveOpenVerifications"]],
+            [urls[1]],
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][1]["timeout"], 79)
+        quota_probe.assert_called_once_with(timeout=5)
+        self.assertEqual(
+            result["webSearchVerificationSource"],
+            "codex_exec_jsonl+isolated_direct_url_verifier",
+        )
+        self.assertEqual(
+            result["correctiveOpenVerificationDigest"],
+            hashlib.sha256(manifest_bytes).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["schemaVersion"],
+            "metafx-deep-research-url-open-verification-v1",
+        )
+        self.assertEqual(manifest["resultProfile"], "trading_system_research")
+        self.assertEqual(manifest["requiredUrlCount"], 2)
+        self.assertEqual(manifest["mainRequiredOpenIndexes"], [0])
+        self.assertEqual(manifest["posthocVerificationCount"], 1)
+        self.assertEqual([row["url"] for row in manifest["rows"]], [urls[1]])
+        child_command, child_kwargs = calls[1]
+        disabled = {
+            child_command[index + 1]
+            for index, value in enumerate(child_command[:-1])
+            if value == "--disable"
+        }
+        self.assertEqual(
+            child_command[child_command.index("--sandbox") + 1],
+            "read-only",
+        )
+        self.assertIn("--search", child_command)
+        self.assertNotIn("--add-dir", child_command)
+        self.assertIn("shell_tool", disabled)
+        self.assertIn("shell_snapshot", disabled)
+        self.assertNotIn("standalone_web_search", disabled)
+        self.assertLessEqual(
+            child_kwargs["timeout"],
+            self.runner.TRADING_SYSTEM_CORRECTIVE_OPEN_VERIFY_TIMEOUT_SECONDS,
+        )
+        self.assertIn("Do not run a broad search", child_kwargs["stdin"])
+
+    def test_deep_research_corrective_open_requires_one_exact_main_open(self) -> None:
+        urls = [
+            "https://www.chrisperruna.com/system/",
+            "https://en.wikipedia.org/wiki/Richard_Donchian",
+        ]
+        with mock.patch.object(
+            self.runner,
+            "read_rate_limits",
+        ) as quota_probe, mock.patch.object(
+            self.runner,
+            "run_chat_command",
+        ) as process_probe:
+            with self.assertRaisesRegex(ValueError, "main process must directly open"):
+                self.runner.complete_trading_system_research_required_open_urls(
+                    urls,
+                    [],
+                    model_name=None,
+                    working_directory=PROJECT_ROOT,
+                    deadline_monotonic=10**12,
+                )
+            with self.assertRaisesRegex(ValueError, "outside the exact required pair"):
+                self.runner.complete_trading_system_research_required_open_urls(
+                    urls,
+                    [urls[0], "https://example.com/unbound-source"],
+                    model_name=None,
+                    working_directory=PROJECT_ROOT,
+                    deadline_monotonic=10**12,
+                )
+
+        quota_probe.assert_not_called()
+        process_probe.assert_not_called()
 
     def test_radar_runner_requires_each_evidence_url_directly_opened(self) -> None:
         source_url = "https://public-radar.example/tool"
@@ -1093,6 +1454,49 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
                     web_search=True,
                     read_only_work=True,
                     result_profile="trading_system_discovery",
+                    required_open_urls=required_urls,
+                )
+
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["status"], "invalid_required_open_urls")
+            self.assertFalse(result["processStarted"])
+            status_probe.assert_not_called()
+            process_probe.assert_not_called()
+
+    def test_deep_research_requires_two_independent_bound_urls_before_start(self) -> None:
+        invalid_lists = (
+            [],
+            ["https://tradingfinder.com/education/system"],
+            [
+                "https://tradingfinder.com/education/system",
+                "https://forex-station.com/system-review",
+                "https://indicatorspot.com/third-source",
+            ],
+            [
+                "https://tradingfinder.com/education/system",
+                "https://www.tradingfinder.com/education/duplicate-domain",
+            ],
+            [
+                "https://tradingfinder.com/education/system",
+                "http://127.1/private",
+            ],
+        )
+        for index, required_urls in enumerate(invalid_lists, start=1):
+            with self.subTest(index=index), mock.patch.object(
+                self.runner,
+                "chat_status",
+            ) as status_probe, mock.patch.object(
+                self.runner,
+                "run_chat_command",
+            ) as process_probe:
+                result = self.runner.run_codex(
+                    "Research the Backend-selected trading system.",
+                    "mission_archivist",
+                    f"mission-invalid-research-source-{index}",
+                    execution_mode="auto_guarded",
+                    web_search=True,
+                    read_only_work=True,
+                    result_profile="trading_system_research",
                     required_open_urls=required_urls,
                 )
 
@@ -2107,6 +2511,10 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
     def test_runner_command_disables_shell_but_keeps_native_search_for_public_research(self) -> None:
         commands: list[list[str]] = []
         prompts: list[str] = []
+        research_urls = [
+            "https://tradingfinder.com/education/system",
+            "https://forex-station.com/system-review",
+        ]
 
         def fake_chat(command, **_kwargs):
             commands.append([str(item) for item in command])
@@ -2185,6 +2593,7 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
                     web_search=True,
                     read_only_work=True,
                     result_profile="trading_system_research",
+                    required_open_urls=research_urls,
                 )
                 ordinary = self.runner.run_codex(
                     "Review workspace files.",
@@ -2237,6 +2646,68 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
         )
         for url in self.corrective_candidate_urls():
             self.assertNotIn(url, user_mission)
+        deep_research_prompt = prompts[2]
+        self.assertIn(
+            "Trusted Runner Deep Research source-binding rule:",
+            deep_research_prompt,
+        )
+        self.assertLess(
+            deep_research_prompt.index(
+                "Trusted Runner Deep Research source-binding rule:"
+            ),
+            deep_research_prompt.index("User mission:"),
+        )
+        trusted_deep_rule = deep_research_prompt.split(
+            "Trusted Runner Deep Research source-binding rule:",
+            1,
+        )[1].split("User mission:", 1)[0]
+        for url in research_urls:
+            self.assertIn(url, trusted_deep_rule)
+        self.assertIn("Do not perform a broad search", trusted_deep_rule)
+        final_preflight = deep_research_prompt.split(
+            "MANDATORY final Deep Research preflight", 1
+        )[1]
+        self.assertGreater(
+            deep_research_prompt.index("MANDATORY final Deep Research preflight"),
+            deep_research_prompt.index("User mission:"),
+        )
+        for url in research_urls:
+            self.assertIn(url, final_preflight)
+        self.assertIn("separate call for each missing URL", final_preflight)
+        self.assertIn(
+            '`["safety","exit","manage","entry"]`',
+            final_preflight,
+        )
+        self.assertIn("entry.buy", deep_research_prompt)
+        self.assertIn("side=both", deep_research_prompt)
+        self.assertIn("matching lowercase enum", deep_research_prompt)
+        self.assertIn(
+            "each exact top-level left/right operand `ref` or `field` string",
+            deep_research_prompt,
+        )
+        self.assertIn(
+            'JSON string keys `"2"` and `"1"`',
+            deep_research_prompt,
+        )
+        self.assertIn("ind_ma20_close_d1", deep_research_prompt)
+        self.assertIn("Never abbreviate", deep_research_prompt)
+        self.assertIn("ma20_2", deep_research_prompt)
+        self.assertIn('`{"kind":"time","field":"timeframe"}`', deep_research_prompt)
+        self.assertIn("Never encode it as `session.name`", deep_research_prompt)
+        self.assertIn(
+            "Every boundary case must set `expected.signal` explicitly",
+            deep_research_prompt,
+        )
+        self.assertIn("exact `buy`/`sell` signal", deep_research_prompt)
+        self.assertIn("or to `none`", deep_research_prompt)
+        self.assertIn(
+            "exact safe order safety, exit, manage, recovery",
+            deep_research_prompt,
+        )
+        self.assertNotIn(
+            "exact safe order safety, recovery",
+            deep_research_prompt,
+        )
         self.assertEqual(
             ordinary_command[ordinary_command.index("--sandbox") + 1],
             "workspace-write",

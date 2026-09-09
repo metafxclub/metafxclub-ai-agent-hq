@@ -245,7 +245,7 @@ def ready_blueprint() -> dict:
         },
         "execution": {
             "evaluateOn": "new_closed_bar",
-            "evaluationOrder": ["safety", "manage", "exit", "entry"],
+            "evaluationOrder": ["safety", "exit", "manage", "entry"],
             "entryOrderType": "market",
             "duplicateSignalPolicy": "one_decision_per_symbol_bar",
             "priceNormalization": {
@@ -279,7 +279,6 @@ def ready_blueprint() -> dict:
         "conflicts": [],
         "precedence": [
             "emergency_stop",
-            "hard_stop",
             "normal_exit",
             "position_management",
             "new_entry",
@@ -476,6 +475,31 @@ def activate_martingale_recovery(blueprint: dict) -> dict:
             "expected": {"recoveryLevel": 1, "lot": 0.2},
         }
     )
+    blueprint["execution"]["evaluationOrder"] = [
+        "safety",
+        "exit",
+        "manage",
+        "recovery",
+        "entry",
+    ]
+    blueprint["precedence"].insert(3, "recovery_phase")
+    long_state = next(
+        state for state in blueprint["stateMachine"] if state["state"] == "LONG"
+    )
+    long_state["transitions"].append(
+        {"to": "RECOVERY", "whenRuleIds": ["RECOVERY_LEVEL_001"]}
+    )
+    blueprint["stateMachine"].append(
+        {
+            "state": "RECOVERY",
+            "transitions": [
+                {"to": "LONG", "whenRuleIds": ["RECOVERY_LEVEL_001"]},
+            ],
+        }
+    )
+    blueprint["pseudocode"]["lines"].append(
+        "When RECOVERY_LEVEL_001 is true in LONG, enter RECOVERY, add one capped level, then return to LONG after the rule-bound lifecycle step."
+    )
     return blueprint
 
 
@@ -566,6 +590,30 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
         self.assertIn("RULE_CONTAINER_SIDE_MISMATCH", mismatch_codes)
         self.assertIn("CLOSED_BAR_EVALUATION_EVENT_INVALID", mismatch_codes)
 
+        for lifecycle in ("entry", "exit"):
+            with self.subTest(lifecycle=lifecycle, side="both"):
+                shared_label = ready_blueprint()
+                shared_label[lifecycle]["buy"]["rules"][0]["side"] = "both"
+                normalized, shared_issues = (
+                    CONTRACT.normalize_and_validate_blueprint(shared_label)
+                )
+                self.assertEqual(
+                    normalized[lifecycle]["buy"]["rules"][0]["side"],
+                    "both",
+                )
+                self.assertIn(
+                    "RULE_CONTAINER_SIDE_MISMATCH",
+                    {item["code"] for item in shared_issues},
+                )
+
+        setup_both = ready_blueprint()
+        setup_rule = copy.deepcopy(setup_both["entry"]["buy"]["rules"][0])
+        setup_rule.update(ruleId="SETUP_BOTH_001", phase="setup", side="both")
+        setup_both["setup"]["rules"] = [setup_rule]
+        setup_codes = issue_codes(setup_both)
+        self.assertNotIn("SETUP_RULE_SIDE_INVALID", setup_codes)
+        self.assertNotIn("RULE_CONTAINER_SIDE_MISMATCH", setup_codes)
+
     def test_parameterized_indicator_requires_bound_settings_and_timeframe(self) -> None:
         blueprint = ready_blueprint()
         blueprint["indicators"][0]["parameters"] = {}
@@ -625,6 +673,110 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
         self.assertIn("INDICATOR_MA_METHOD_INVALID", issue_codes(generic))
         generic["indicators"][0]["parameters"]["method"] = "EMA"
         self.assertEqual(CONTRACT.validate_blueprint(generic), [])
+
+        unknown_generic = ready_blueprint()
+        unknown_generic["indicators"][0].update(
+            kind="MA",
+            sourceStatus="unknown",
+            sourceRefs=[],
+        )
+        unknown_generic["indicators"][0]["parameters"]["method"] = "unknown"
+        unknown_codes = issue_codes(unknown_generic)
+        self.assertNotIn("INDICATOR_MA_METHOD_INVALID", unknown_codes)
+        self.assertIn("READINESS_UNRESOLVED", unknown_codes)
+
+        aliased_unknown_generic = ready_blueprint()
+        aliased_unknown_generic["indicators"][0].update(
+            kind="MA",
+            sourceStatus="unknown",
+            sourceRefs=[],
+        )
+        aliased_unknown_generic["indicators"][0]["parameters"] = {
+            "periodInputRef": "fast_period",
+            "method": "unknown_generic_moving_average",
+            "shift": 0,
+        }
+        normalized, aliased_issues = CONTRACT.normalize_and_validate_blueprint(
+            aliased_unknown_generic
+        )
+        aliased_codes = {item["code"] for item in aliased_issues}
+        self.assertEqual(
+            normalized["indicators"][0]["parameters"]["period"],
+            {"inputRef": "fast_period"},
+        )
+        self.assertNotIn(
+            "periodInputRef", normalized["indicators"][0]["parameters"]
+        )
+        self.assertEqual(
+            normalized["indicators"][0]["parameters"]["method"], "unknown"
+        )
+        self.assertNotIn("INDICATOR_PERIOD_REQUIRED", aliased_codes)
+        self.assertNotIn("INDICATOR_MA_METHOD_INVALID", aliased_codes)
+        self.assertIn("READINESS_UNRESOLVED", aliased_codes)
+
+        same_period_alias = ready_blueprint()
+        same_period_alias["indicators"][0]["parameters"]["periodInputRef"] = (
+            " fast_period "
+        )
+        normalized_same, same_issues = CONTRACT.normalize_and_validate_blueprint(
+            same_period_alias
+        )
+        self.assertEqual(
+            normalized_same["indicators"][0]["parameters"]["period"],
+            {"inputRef": "fast_period"},
+        )
+        self.assertNotIn(
+            "periodInputRef",
+            normalized_same["indicators"][0]["parameters"],
+        )
+        self.assertNotIn(
+            "INDICATOR_PERIOD_ALIAS_CONFLICT",
+            {item["code"] for item in same_issues},
+        )
+
+        conflicting_period_alias = ready_blueprint()
+        conflicting_period_alias["indicators"][0]["parameters"][
+            "periodInputRef"
+        ] = "slow_period"
+        normalized_conflict, conflict_issues = (
+            CONTRACT.normalize_and_validate_blueprint(conflicting_period_alias)
+        )
+        self.assertEqual(
+            normalized_conflict["indicators"][0]["parameters"]["period"],
+            {"inputRef": "fast_period"},
+        )
+        self.assertEqual(
+            normalized_conflict["indicators"][0]["parameters"]["periodInputRef"],
+            "slow_period",
+        )
+        self.assertIn(
+            "INDICATOR_PERIOD_ALIAS_CONFLICT",
+            {item["code"] for item in conflict_issues},
+        )
+
+        verified_record_with_unknown_method = ready_blueprint()
+        verified_record_with_unknown_method["indicators"][0]["kind"] = "MA"
+        verified_record_with_unknown_method["indicators"][0]["parameters"][
+            "method"
+        ] = "unknown"
+        original_source_refs = copy.deepcopy(
+            verified_record_with_unknown_method["indicators"][0]["sourceRefs"]
+        )
+        normalized_unknown, unknown_method_issues = (
+            CONTRACT.normalize_and_validate_blueprint(
+                verified_record_with_unknown_method
+            )
+        )
+        unknown_method_codes = {item["code"] for item in unknown_method_issues}
+        self.assertEqual(
+            normalized_unknown["indicators"][0]["sourceStatus"], "unknown"
+        )
+        self.assertEqual(
+            normalized_unknown["indicators"][0]["sourceRefs"],
+            original_source_refs,
+        )
+        self.assertNotIn("INDICATOR_MA_METHOD_INVALID", unknown_method_codes)
+        self.assertIn("READINESS_UNRESOLVED", unknown_method_codes)
 
     def test_reserved_documentation_domains_never_count_as_blueprint_evidence(self) -> None:
         for url in (
@@ -710,6 +862,107 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
                 "$.entry.buy.rules[0].expression.item.op",
             ),
             {(item["code"], item["path"]) for item in malformed_issues},
+        )
+
+    def test_research_timeframe_and_signal_age_operands_are_explicitly_supported(self) -> None:
+        blueprint = ready_blueprint()
+        blueprint["setup"]["rules"] = [
+            {
+                "ruleId": "SETUP_TIMEFRAME_001",
+                "phase": "setup",
+                "side": "both",
+                "enabled": True,
+                "evaluationEvent": "new_closed_bar",
+                "sourceStatus": "derived",
+                "sourceRefs": ["S1"],
+                "expression": {
+                    "op": "==",
+                    "left": {"kind": "time", "field": "timeframe"},
+                    "right": {"kind": "constant", "value": "D1"},
+                },
+                "humanTextTh": "ประเมินกฎนี้บนกรอบเวลา D1",
+            }
+        ]
+        blueprint["entry"]["buy"]["rules"].append(
+            {
+                "ruleId": "ENTRY_BUY_RULE_C",
+                "phase": "entry",
+                "side": "buy",
+                "enabled": True,
+                "evaluationEvent": "new_closed_bar",
+                "sourceStatus": "derived",
+                "sourceRefs": ["S1"],
+                "expression": {
+                    "op": ">=",
+                    "left": {
+                        "kind": "position",
+                        "field": "bars_since_initial_action_signal",
+                    },
+                    "right": {"kind": "constant", "value": 20},
+                },
+                "humanTextTh": "ครบ 20 แท่งหลังสัญญาณตั้งต้น",
+            }
+        )
+        normalized, issues = CONTRACT.normalize_and_validate_blueprint(blueprint)
+        codes = {item["code"] for item in issues}
+        self.assertNotIn("OPERAND_FIELD_INVALID", codes)
+        self.assertEqual(
+            normalized["entry"]["buy"]["rules"][1]["expression"]["left"]["field"],
+            "bars_since_initial_action_signal",
+        )
+
+        aliased = ready_blueprint()
+        aliased["entry"]["buy"]["rules"][0]["expression"] = {
+            "op": ">=",
+            "left": {
+                "kind": "position",
+                "field": "bars_since_action_signal",
+            },
+            "right": {"kind": "constant", "value": 20},
+        }
+        aliased_normalized, aliased_issues = (
+            CONTRACT.normalize_and_validate_blueprint(aliased)
+        )
+        self.assertNotIn(
+            "OPERAND_FIELD_INVALID", {item["code"] for item in aliased_issues}
+        )
+        self.assertEqual(
+            aliased_normalized["entry"]["buy"]["rules"][0]["expression"]["left"]["field"],
+            "bars_since_initial_action_signal",
+        )
+
+    def test_daily_close_session_name_alias_fails_closed(self) -> None:
+        blueprint = ready_blueprint()
+        blueprint["setup"]["rules"] = [
+            {
+                "ruleId": "SET_DAILY_CLOSE",
+                "phase": "setup",
+                "side": "both",
+                "enabled": True,
+                "evaluationEvent": "new_closed_bar",
+                "sourceStatus": "verified_fact",
+                "sourceRefs": ["S1"],
+                "expression": {
+                    "op": "==",
+                    "left": {
+                        "kind": "session",
+                        "ref": "session_type",
+                        "field": "name",
+                        "timeframe": "D1",
+                    },
+                    "right": {"kind": "constant", "value": "daily close"},
+                    "barShift": 1,
+                },
+                "humanTextTh": "ประเมินเมื่อแท่ง D1 ปิดแล้ว",
+            }
+        ]
+
+        normalized, issues = CONTRACT.normalize_and_validate_blueprint(blueprint)
+
+        self.assertIn("OPERAND_FIELD_INVALID", {item["code"] for item in issues})
+        self.assertEqual(
+            normalized["setup"]["rules"][0]["expression"]["left"]["field"],
+            "name",
         )
 
     def test_unknown_indicator_kind_and_unmapped_buffers_fail_closed(self) -> None:
@@ -936,6 +1189,116 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
         unbounded_retry["execution"]["retryPolicy"]["maxRetries"] = 99
         self.assertIn("RETRY_LIMIT_INVALID", issue_codes(unbounded_retry))
 
+    def test_risk_limits_reject_unsafe_ranges_and_inverted_lot_caps(self) -> None:
+        mutations = (
+            ("maxTotalLots", -2, "RISK_LOT_CAP_INVALID"),
+            ("maxRiskPerTradePercent", 500, "RISK_PERCENT_INVALID"),
+            ("dailyLossStopPercent", -10, "RISK_PERCENT_INVALID"),
+            ("weeklyLossStopPercent", 101, "RISK_PERCENT_INVALID"),
+            ("equityStopPercent", 250, "RISK_PERCENT_INVALID"),
+            ("consecutiveLossLimit", -1, "RISK_LIMIT_INVALID"),
+            ("cooldownBars", -1, "RISK_LIMIT_INVALID"),
+        )
+        for field, value, expected_code in mutations:
+            with self.subTest(field=field, value=value):
+                blueprint = ready_blueprint()
+                blueprint["riskAndSizing"][field] = value
+                self.assertIn(expected_code, issue_codes(blueprint))
+
+        smaller_than_fixed_lot = ready_blueprint()
+        smaller_than_fixed_lot["riskAndSizing"]["maxTotalLots"] = 0.05
+        self.assertIn(
+            "RISK_LOT_CAP_ORDER_INVALID",
+            issue_codes(smaller_than_fixed_lot),
+        )
+
+        invalid_boolean = ready_blueprint()
+        invalid_boolean["riskAndSizing"]["normalizeToBrokerLotStep"] = "yes"
+        self.assertIn("BOOLEAN_REQUIRED", issue_codes(invalid_boolean))
+
+    def test_precedence_and_execution_order_are_safety_first(self) -> None:
+        explicit_prefixes = ready_blueprint()
+        explicit_prefixes["precedence"] = [
+            "safety: enforce account hard stops",
+            "exit: evaluate normal close rules",
+            "manage: update managed positions",
+            "entry: evaluate entry rules",
+        ]
+        explicit_codes = issue_codes(explicit_prefixes)
+        self.assertNotIn("PRECEDENCE_PHASE_MISSING", explicit_codes)
+        self.assertNotIn("PRECEDENCE_ORDER_UNSAFE", explicit_codes)
+
+        explanatory_cross_references = ready_blueprint()
+        explanatory_cross_references["precedence"] = [
+            "safety: reject unsafe orders before any later phase",
+            "exit: evaluate close rules before entry",
+            "manage: manage open positions without worsening stops",
+            "entry: evaluate entry only after exit and management",
+        ]
+        explanatory_codes = issue_codes(explanatory_cross_references)
+        self.assertNotIn("PRECEDENCE_STEP_INVALID", explanatory_codes)
+        self.assertNotIn("PRECEDENCE_PHASE_MISSING", explanatory_codes)
+        self.assertNotIn("PRECEDENCE_ORDER_UNSAFE", explanatory_codes)
+
+        precedence = ready_blueprint()
+        precedence["precedence"] = [
+            "emergency_stop",
+            "position_management",
+            "normal_exit",
+            "new_entry",
+        ]
+        self.assertIn("PRECEDENCE_ORDER_UNSAFE", issue_codes(precedence))
+
+        missing_management = ready_blueprint()
+        missing_management["precedence"] = [
+            "emergency_stop",
+            "normal_exit",
+            "new_entry",
+        ]
+        self.assertIn("PRECEDENCE_PHASE_MISSING", issue_codes(missing_management))
+
+        execution = ready_blueprint()
+        execution["execution"]["evaluationOrder"] = [
+            "safety",
+            "manage",
+            "exit",
+            "entry",
+        ]
+        self.assertIn("EXECUTION_ORDER_UNSAFE", issue_codes(execution))
+
+        disabled_recovery = ready_blueprint()
+        disabled_recovery["execution"]["evaluationOrder"].insert(3, "recovery")
+        disabled_recovery["precedence"].insert(3, "recovery_phase")
+        disabled_recovery_codes = issue_codes(disabled_recovery)
+        self.assertIn(
+            "EXECUTION_ORDER_PHASE_UNEXPECTED", disabled_recovery_codes
+        )
+        self.assertIn("PRECEDENCE_PHASE_UNEXPECTED", disabled_recovery_codes)
+
+        mixed_phase = ready_blueprint()
+        mixed_phase["precedence"][0] = "safety and entry are processed together"
+        self.assertIn("PRECEDENCE_STEP_INVALID", issue_codes(mixed_phase))
+
+        semantic_duplicate = ready_blueprint()
+        semantic_duplicate["precedence"].insert(1, "hard_stop")
+        self.assertIn(
+            "PRECEDENCE_PHASE_DUPLICATE", issue_codes(semantic_duplicate)
+        )
+
+        valid_recovery = activate_martingale_recovery(ready_blueprint())
+        valid_recovery_codes = issue_codes(valid_recovery)
+        self.assertNotIn("EXECUTION_ORDER_UNSAFE", valid_recovery_codes)
+        self.assertNotIn("PRECEDENCE_ORDER_UNSAFE", valid_recovery_codes)
+        self.assertNotIn("EXECUTION_ORDER_PHASE_UNEXPECTED", valid_recovery_codes)
+        self.assertNotIn("PRECEDENCE_PHASE_UNEXPECTED", valid_recovery_codes)
+
+        recovery = activate_martingale_recovery(ready_blueprint())
+        recovery["execution"]["evaluationOrder"].remove("recovery")
+        recovery["precedence"].remove("recovery_phase")
+        codes = issue_codes(recovery)
+        self.assertIn("EXECUTION_ORDER_PHASE_MISSING", codes)
+        self.assertIn("PRECEDENCE_PHASE_MISSING", codes)
+
     def test_limit_entry_requires_deterministic_pending_lifecycle(self) -> None:
         incomplete = ready_blueprint()
         incomplete["entry"]["buy"]["orderType"] = "limit"
@@ -972,7 +1335,12 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
         )
         complete["stateMachine"][0]["transitions"][0]["to"] = "PENDING"
         complete["stateMachine"].append(
-            {"state": "PENDING", "transitions": [{"to": "LONG", "whenRuleIds": []}]}
+            {
+                "state": "PENDING",
+                "transitions": [
+                    {"to": "LONG", "whenRuleIds": ["PENDING_PLACE_001"]}
+                ],
+            }
         )
         complete["testCases"].extend(
             [
@@ -982,7 +1350,7 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
                     "ruleIds": ["PENDING_PLACE_001"],
                     "given": {"fast2": 1.0, "slow2": 1.0, "fast1": 1.0, "slow1": 1.0},
                     "when": "new closed bar",
-                    "expected": {"pendingOrder": "none"},
+                    "expected": {"signal": "none", "pendingOrder": "none"},
                 },
                 {
                     "caseId": "pending-place-lifecycle",
@@ -1007,6 +1375,216 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
         missing_pseudocode = ready_blueprint()
         missing_pseudocode["pseudocode"]["lines"] = ["Evaluate a generic strategy on each closed bar."]
         self.assertIn("READINESS_UNRESOLVED", issue_codes(missing_pseudocode))
+
+    def test_state_transitions_and_active_recovery_are_rule_bound(self) -> None:
+        empty_transition = ready_blueprint()
+        empty_transition["stateMachine"][0]["transitions"][0]["whenRuleIds"] = []
+        self.assertIn("ARRAY_TOO_SHORT", issue_codes(empty_transition))
+
+        missing_recovery_state = activate_martingale_recovery(ready_blueprint())
+        missing_recovery_state["stateMachine"] = [
+            state
+            for state in missing_recovery_state["stateMachine"]
+            if state["state"] != "RECOVERY"
+        ]
+        self.assertIn("READINESS_UNRESOLVED", issue_codes(missing_recovery_state))
+
+        unbound_recovery = activate_martingale_recovery(ready_blueprint())
+        long_state = next(
+            state for state in unbound_recovery["stateMachine"] if state["state"] == "LONG"
+        )
+        long_state["transitions"] = [
+            transition
+            for transition in long_state["transitions"]
+            if transition["to"] != "RECOVERY"
+        ]
+        self.assertIn("READINESS_UNRESOLVED", issue_codes(unbound_recovery))
+
+        missing_recovery_pseudocode = activate_martingale_recovery(ready_blueprint())
+        missing_recovery_pseudocode["pseudocode"]["lines"] = [
+            line
+            for line in missing_recovery_pseudocode["pseudocode"]["lines"]
+            if "RECOVERY_LEVEL_001" not in line
+        ]
+        self.assertIn("READINESS_UNRESOLVED", issue_codes(missing_recovery_pseudocode))
+
+    def test_cross_test_cases_are_semantic_oracles_not_labels_only(self) -> None:
+        previous_equality_then_strict_cross = ready_blueprint()
+        boundary_true = next(
+            case
+            for case in previous_equality_then_strict_cross["testCases"]
+            if case["caseId"] == "entry-buy-boundary"
+        )
+        boundary_true["given"] = {
+            "fast2": 1.0,
+            "slow2": 1.0,
+            "fast1": 1.1,
+            "slow1": 1.0,
+        }
+        boundary_true["expected"] = {"signal": "buy"}
+        boundary_true_codes = issue_codes(previous_equality_then_strict_cross)
+        self.assertNotIn("TEST_CROSS_FIXTURE_MISMATCH", boundary_true_codes)
+        self.assertNotIn("TEST_CROSS_EXPECTED_INVALID", boundary_true_codes)
+
+        current_equality_no_cross = ready_blueprint()
+        boundary_false = next(
+            case
+            for case in current_equality_no_cross["testCases"]
+            if case["caseId"] == "entry-buy-boundary"
+        )
+        boundary_false["given"] = {
+            "fast2": 0.9,
+            "slow2": 1.0,
+            "fast1": 1.0,
+            "slow1": 1.0,
+        }
+        boundary_false["expected"] = {"signal": "none"}
+        boundary_false_codes = issue_codes(current_equality_no_cross)
+        self.assertNotIn("TEST_CROSS_FIXTURE_MISMATCH", boundary_false_codes)
+        self.assertNotIn("TEST_CROSS_EXPECTED_INVALID", boundary_false_codes)
+
+        missing_boundary_signal = ready_blueprint()
+        next(
+            case
+            for case in missing_boundary_signal["testCases"]
+            if case["caseId"] == "entry-buy-boundary"
+        )["expected"] = {"result": "boundary"}
+        self.assertIn(
+            "TEST_CROSS_EXPECTED_INVALID",
+            issue_codes(missing_boundary_signal),
+        )
+
+        inverted_expected = ready_blueprint()
+        inverted_expected["testCases"][0]["expected"] = {"signal": "none"}
+        inverted_expected["testCases"][1]["expected"] = {"signal": "buy"}
+        self.assertIn(
+            "TEST_CROSS_EXPECTED_INVALID",
+            issue_codes(inverted_expected),
+        )
+
+        false_positive_fixture = ready_blueprint()
+        false_positive_fixture["testCases"][0]["given"] = {
+            "fast2": 1.1,
+            "slow2": 1.0,
+            "fast1": 1.2,
+            "slow1": 1.0,
+        }
+        self.assertIn(
+            "TEST_CROSS_FIXTURE_MISMATCH",
+            issue_codes(false_positive_fixture),
+        )
+
+        prose_only_fixture = ready_blueprint()
+        prose_only_fixture["testCases"][0]["given"] = {
+            "description": "fast EMA crosses slow EMA"
+        }
+        self.assertIn(
+            "TEST_CROSS_FIXTURE_UNRESOLVED",
+            issue_codes(prose_only_fixture),
+        )
+
+    def test_unknowns_and_conflicts_require_complete_traceable_records(self) -> None:
+        malformed_unknown = ready_blueprint()
+        malformed_unknown["unknowns"] = [{}]
+        self.assertIn("FIELD_REQUIRED", issue_codes(malformed_unknown))
+
+        nonblocking_unknown = ready_blueprint()
+        nonblocking_unknown["unknowns"] = [
+            {
+                "unknownId": "U1",
+                "path": "$.scope.suitableFor",
+                "description": "Marketing suitability is not execution-critical",
+                "blocksExecution": False,
+            }
+        ]
+        self.assertEqual(CONTRACT.validate_blueprint(nonblocking_unknown), [])
+
+        malformed_conflict = ready_blueprint()
+        malformed_conflict["conflicts"] = [
+            {"resolutionStatus": "resolved", "sourceRefs": []}
+        ]
+        self.assertIn("FIELD_REQUIRED", issue_codes(malformed_conflict))
+
+        resolved_conflict = ready_blueprint()
+        resolved_conflict["conflicts"] = [
+            {
+                "conflictId": "C1",
+                "paths": ["$.scope.signalTimeframe"],
+                "description": "Sources disagreed on the example timeframe",
+                "resolutionStatus": "resolved",
+                "resolution": "Use H1 because the primary specification names H1",
+                "sourceRefs": ["S1", "S2"],
+            }
+        ]
+        self.assertEqual(CONTRACT.validate_blueprint(resolved_conflict), [])
+
+    def test_operands_use_a_deterministic_field_registry(self) -> None:
+        for kind in ("account", "position", "basket", "session", "spread", "time", "symbol_property"):
+            with self.subTest(kind=kind):
+                blueprint = ready_blueprint()
+                blueprint["entry"]["buy"]["rules"][0]["expression"] = {
+                    "op": ">",
+                    "left": {"kind": kind, "field": "banana_metric"},
+                    "right": {"kind": "constant", "value": 0},
+                }
+                self.assertIn("OPERAND_FIELD_INVALID", issue_codes(blueprint))
+
+    def test_management_parameters_must_match_the_typed_action(self) -> None:
+        blueprint = ready_blueprint()
+        rule = {
+            "ruleId": "MODIFY_SL_001",
+            "phase": "modify",
+            "side": "buy",
+            "enabled": True,
+            "evaluationEvent": "new_closed_bar",
+            "sourceStatus": "verified_fact",
+            "sourceRefs": ["S1"],
+            "expression": once_per_bar_with_position(),
+            "humanTextTh": "เลื่อน Stop Loss ตามเป้าหมายที่กำหนด",
+        }
+        feature = blueprint["orderManagement"]["modifyStopLoss"]
+        feature.update(
+            enabled=True,
+            trigger=copy.deepcopy(rule["expression"]),
+            action={"kind": "move_stop_loss"},
+            parameters={"garbage": "not executable"},
+            rules=[rule],
+            cadence="new_closed_bar",
+            idempotent=True,
+            precedence=40,
+            neverWorsenStop=True,
+        )
+        blueprint["testCases"].append(
+            {
+                "caseId": "modify-sl-semantic-lifecycle",
+                "kind": "lifecycle",
+                "ruleIds": ["MODIFY_SL_001"],
+                "given": {"position": "long"},
+                "when": "a new closed bar is processed",
+                "expected": {"stop": "unchanged"},
+            }
+        )
+        blueprint["pseudocode"]["lines"].append(
+            "When MODIFY_SL_001 is true, evaluate the typed stop target."
+        )
+        codes = issue_codes(blueprint)
+        self.assertIn("MANAGEMENT_PARAMETER_UNKNOWN", codes)
+        self.assertIn("READINESS_UNRESOLVED", codes)
+
+        feature["parameters"] = {"target": "entry_price", "bufferPoints": -1}
+        codes = issue_codes(blueprint)
+        self.assertNotIn("MANAGEMENT_PARAMETER_UNKNOWN", codes)
+        self.assertIn("MANAGEMENT_VALUE_INVALID", codes)
+
+        feature["parameters"] = {
+            "targetPrice": "entry_price",
+            "target_price": "entry_price",
+        }
+        collision_codes = issue_codes(blueprint)
+        self.assertIn(
+            "MANAGEMENT_PARAMETER_ALIAS_CONFLICT",
+            collision_codes,
+        )
 
     def test_side_specific_stop_override_cannot_worsen_risk(self) -> None:
         blueprint = ready_blueprint()

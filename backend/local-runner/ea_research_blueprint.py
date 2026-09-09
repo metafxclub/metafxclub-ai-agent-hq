@@ -314,6 +314,143 @@ FIELD_OPERAND_KINDS = {
     "time",
     "symbol_property",
 }
+OPERAND_FIELDS_BY_KIND = {
+    "account": {
+        "balance",
+        "equity",
+        "freemargin",
+        "margin",
+        "marginlevel",
+        "profit",
+        "floatingprofit",
+        "floatingloss",
+        "drawdownpercent",
+        "dailylosspercent",
+        "weeklylosspercent",
+        "consecutivelosses",
+        "leverage",
+        "stopoutlevel",
+    },
+    "position": {
+        "managedcount",
+        "totalcount",
+        "direction",
+        "volume",
+        "lots",
+        "entryprice",
+        "openprice",
+        "currentprice",
+        "stoploss",
+        "takeprofit",
+        "profit",
+        "profitcurrency",
+        "profitpoints",
+        "profitpips",
+        "agebars",
+        "ageseconds",
+        "magicnumber",
+        "ticket",
+        "symbol",
+        "highestpricesinceentry",
+        "lowestpricesinceentry",
+        "riskdistance",
+        "initialstopdistance",
+        "barssinceinitialactionsignal",
+        "dayssinceinitialactionsignal",
+        "barssinceentry",
+        "dayssinceentry",
+    },
+    "basket": {
+        "managedcount",
+        "totallots",
+        "averageentryprice",
+        "weightedaverageentryprice",
+        "breakevenprice",
+        "floatingprofitcurrency",
+        "floatinglosscurrency",
+        "profitpoints",
+        "losspoints",
+        "profitpercent",
+        "drawdownpercent",
+        "recoverylevel",
+        "direction",
+    },
+    "session": {
+        "active",
+        "isopen",
+        "london",
+        "newyork",
+        "tokyo",
+        "sydney",
+        "minutessinceopen",
+        "minutesuntilclose",
+    },
+    "spread": {"points", "pips", "price", "percent", "averagepoints"},
+    "time": {
+        "hour",
+        "minute",
+        "dayofweek",
+        "dayofmonth",
+        "month",
+        "date",
+        "time",
+        "serverhour",
+        "serverminute",
+        "timeframe",
+    },
+    "symbol_property": {
+        "digits",
+        "point",
+        "ticksize",
+        "tickvalue",
+        "lotstep",
+        "minlot",
+        "maxlot",
+        "stoplevel",
+        "freezelevel",
+        "contractsize",
+        "tradeallowed",
+        "spreadpoints",
+    },
+}
+PRECEDENCE_PHASE_ORDER = ("safety", "exit", "manage", "recovery", "entry")
+MANAGEMENT_PARAMETER_KEYS_BY_FEATURE = {
+    "breakEven": {
+        "target", "targetPrice", "targetFormula", "reference", "activationDistance",
+        "activationPoints", "activationPips", "activationR", "offsetPoints",
+        "offsetPips", "bufferPoints", "bufferPips", "profitThreshold",
+        "profitInputRef", "indicatorRef", "applyTo",
+    },
+    "trailingStop": {
+        "method", "target", "targetPrice", "targetFormula", "reference", "distance",
+        "distancePoints", "distancePips", "distanceInputRef", "atrIndicatorRef",
+        "atrMultiplier", "step", "stepPoints", "stepPips", "bufferPoints",
+        "bufferPips", "indicatorRef", "applyTo",
+    },
+    "scaleIn": {
+        "lot", "lots", "volume", "lotInputRef", "volumeInputRef", "lotMultiplier",
+        "maxAdds", "maxPositions", "maxTotalLots", "orderType", "spacingPoints",
+        "spacingPips", "spacingInputRef", "applyTo",
+    },
+    "scaleOut": {
+        "closePercent", "closeLots", "closeVolume", "percentInputRef", "lotInputRef",
+        "volumeInputRef", "maxSteps", "remainderPolicy", "mode", "reason", "applyTo",
+    },
+    "modifyStopLoss": {
+        "target", "targetPrice", "targetFormula", "reference", "distance",
+        "distancePoints", "distancePips", "distanceInputRef", "offsetPoints",
+        "offsetPips", "bufferPoints", "bufferPips", "indicatorRef", "applyTo",
+    },
+    "modifyTakeProfit": {
+        "target", "targetPrice", "targetFormula", "reference", "distance",
+        "distancePoints", "distancePips", "distanceInputRef", "offsetPoints",
+        "offsetPips", "bufferPoints", "bufferPips", "indicatorRef", "applyTo",
+    },
+    "pendingOrders": {
+        "orderType", "entryPrice", "expiry", "selector", "replacePolicy",
+        "cancelPolicy", "applyTo",
+    },
+}
 MOVING_AVERAGE_KINDS = {"ema", "sma", "smma", "lwma", "ma", "movingaverage"}
 EXPLICIT_MOVING_AVERAGE_KINDS = {"ma", "movingaverage"}
 MOVING_AVERAGE_METHODS = {"ema", "sma", "smma", "lwma"}
@@ -495,6 +632,12 @@ def _normalize_operand(value: object) -> object:
     result = {str(key): _normalize_json(item) for key, item in value.items()}
     if "kind" in result:
         result["kind"] = _enum(result["kind"])
+    if (
+        result.get("kind") == "position"
+        and _normalized_indicator_token(result.get("field"))
+        == "barssinceactionsignal"
+    ):
+        result["field"] = "bars_since_initial_action_signal"
     if "source" in result and isinstance(result["source"], str):
         result["source"] = result["source"].strip().lower()
     return result
@@ -703,8 +846,66 @@ def _normalize_candidate(value: object) -> dict[str, Any]:
                         if record.get("outputLine") == "mode_main":
                             record["outputLine"] = "main"
                         parameters = record.get("parameters")
-                        if isinstance(parameters, dict) and "method" in parameters:
-                            parameters["method"] = _enum(parameters["method"])
+                        if isinstance(parameters, dict):
+                            period_input_ref = parameters.get("periodInputRef")
+                            if (
+                                "period" not in parameters
+                                and isinstance(period_input_ref, str)
+                                and period_input_ref.strip()
+                            ):
+                                # Accept the model's common syntactic alias, but
+                                # preserve the canonical contract as an inputRef
+                                # binding rather than inventing a numeric period.
+                                parameters["period"] = {
+                                    "inputRef": period_input_ref.strip()
+                                }
+                                parameters.pop("periodInputRef", None)
+                            elif (
+                                isinstance(period_input_ref, str)
+                                and period_input_ref.strip()
+                                and isinstance(parameters.get("period"), Mapping)
+                                and set(parameters["period"]) == {"inputRef"}
+                                and isinstance(parameters["period"].get("inputRef"), str)
+                                and parameters["period"]["inputRef"].strip()
+                                == period_input_ref.strip()
+                            ):
+                                # Collapse the alias only when it is provably the
+                                # same canonical binding.  Conflicting dual
+                                # declarations remain intact for fail-closed
+                                # validation below.
+                                parameters["period"] = {
+                                    "inputRef": period_input_ref.strip()
+                                }
+                                parameters.pop("periodInputRef", None)
+                            if "method" in parameters:
+                                parameters["method"] = _enum(parameters["method"])
+                                generic_moving_average = (
+                                    _normalized_indicator_token(record.get("kind"))
+                                    in EXPLICIT_MOVING_AVERAGE_KINDS
+                                )
+                                if (
+                                    generic_moving_average
+                                    and parameters["method"] == "unknown"
+                                ):
+                                    # An explicitly unknown generic-MA method
+                                    # cannot remain verified_fact.  Preserve its
+                                    # evidence links but downgrade provenance so
+                                    # readiness stays blocked without inventing
+                                    # SMA/EMA/SMMA/LWMA.
+                                    record["sourceStatus"] = "unknown"
+                                if (
+                                    generic_moving_average
+                                    and _enum(record.get("sourceStatus")) == "unknown"
+                                    and _normalized_indicator_token(parameters["method"])
+                                    in {
+                                        "unknowngenericmovingaverage",
+                                        "unknownmovingaverage",
+                                        "genericmovingaverageunknown",
+                                    }
+                                ):
+                                    # This is only a lossless enum canonicalization:
+                                    # the source still remains explicitly unresolved.
+                                    parameters["method"] = "unknown"
                     if "sourceStatus" in record:
                         record["sourceStatus"] = _enum(record["sourceStatus"])
                     if "sourceRefs" in record:
@@ -723,7 +924,9 @@ def _normalize_candidate(value: object) -> dict[str, Any]:
         if isinstance(lifecycle, dict):
             for side in SIDES:
                 side_record = lifecycle.get(side)
-                if isinstance(side_record, dict) and "orderType" in side_record:
+                if not isinstance(side_record, dict):
+                    continue
+                if "orderType" in side_record:
                     side_record["orderType"] = _enum(side_record["orderType"])
 
     management = result.get("orderManagement")
@@ -1396,6 +1599,15 @@ def _is_positive_finite(value: object) -> bool:
     )
 
 
+def _is_nonnegative_finite(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and float(value) >= 0
+    )
+
+
 def _validate_recovery_provenance(
     record: Mapping[str, Any],
     path: str,
@@ -1625,6 +1837,13 @@ def _validate_operand(
                 f"{path}.field",
                 "Account operand requires an explicit account field",
             )
+        elif _normalized_indicator_token(field) not in OPERAND_FIELDS_BY_KIND["account"]:
+            _issue(
+                issues,
+                "OPERAND_FIELD_INVALID",
+                f"{path}.field",
+                "Account operand field is not in the deterministic EA field registry",
+            )
     elif kind in FIELD_OPERAND_KINDS:
         field = value.get("field")
         if not isinstance(field, str) or not field.strip():
@@ -1633,6 +1852,13 @@ def _validate_operand(
                 "OPERAND_FIELD_REQUIRED",
                 f"{path}.field",
                 f"{kind} operand requires an explicit field",
+            )
+        elif _normalized_indicator_token(field) not in OPERAND_FIELDS_BY_KIND[kind]:
+            _issue(
+                issues,
+                "OPERAND_FIELD_INVALID",
+                f"{path}.field",
+                f"{kind} operand field is not in the deterministic EA field registry",
             )
 
     if "shift" in value:
@@ -2257,6 +2483,13 @@ def _validate_moving_average_indicator(
     parameters = record.get("parameters")
     if not isinstance(parameters, Mapping):
         return
+    if "period" in parameters and "periodInputRef" in parameters:
+        _issue(
+            issues,
+            "INDICATOR_PERIOD_ALIAS_CONFLICT",
+            f"{path}.parameters.periodInputRef",
+            "period and periodInputRef declare conflicting period bindings",
+        )
     if "period" not in parameters or parameters.get("period") in (None, "", [], {}):
         _issue(
             issues,
@@ -2276,7 +2509,17 @@ def _validate_moving_average_indicator(
     method = parameters.get("method")
     normalized_method = _normalized_indicator_token(method)
     if normalized_kind in EXPLICIT_MOVING_AVERAGE_KINDS:
-        if normalized_method not in MOVING_AVERAGE_METHODS:
+        # A source may say only "moving average" without identifying SMA,
+        # EMA, SMMA or LWMA.  Encoding that absence as ``unknown`` is more
+        # truthful than inventing a method.  It remains an unresolved input
+        # and therefore cannot pass EA handoff/readiness, but the research
+        # document itself is still a valid canonical blueprint that the UI can
+        # show and the operator can revise.
+        if normalized_method == "unknown" and record.get("sourceStatus") == "unknown":
+            unresolved_reasons.append(
+                (f"{path}.parameters.method", "moving-average method is unknown")
+            )
+        elif normalized_method not in MOVING_AVERAGE_METHODS:
             _issue(
                 issues,
                 "INDICATOR_MA_METHOD_INVALID",
@@ -2509,6 +2752,246 @@ def _expression_contains_unknown(value: object) -> bool:
     if isinstance(value, list):
         return any(_expression_contains_unknown(item) for item in value)
     return False
+
+
+def _precedence_phase(value: object) -> str | None:
+    # A precedence entry may deliberately explain how its phase relates to a
+    # later phase, for example ``exit: ... before entry`` or ``entry: ... after
+    # exit``.  When the producer supplies the canonical phase as an explicit
+    # leading label, that label defines this list slot; scanning the explanatory
+    # suffix as if every mentioned phase were a competing label rejects valid
+    # safety-first plans.  Keep this narrow and fail closed: only an exact,
+    # colon-delimited canonical label is authoritative.
+    explicit_label = re.match(
+        r"^\s*(safety|exit|manage|management|recovery|entry)\s*:\s*\S",
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+    if explicit_label:
+        label = explicit_label.group(1).lower()
+        return "manage" if label == "management" else label
+
+    token = _normalized_indicator_token(value)
+    phase_keywords = {
+        "safety": (
+            "safety",
+            "emergency",
+            "hardstop",
+            "equitystop",
+            "dailystop",
+            "riskstop",
+        ),
+        "exit": ("exit", "close"),
+        "manage": (
+            "manage",
+            "management",
+            "trailing",
+            "breakeven",
+            "partial",
+            "scale",
+            "modify",
+            "pending",
+        ),
+        "recovery": ("recovery", "martingale", "averaging", "grid", "hedge"),
+        "entry": ("entry", "open", "signal"),
+    }
+    matching_phases = {
+        phase
+        for phase, keywords in phase_keywords.items()
+        if any(keyword in token for keyword in keywords)
+    }
+    if len(matching_phases) == 1:
+        return next(iter(matching_phases))
+    # No recognizable phase and mixed/contradictory phase descriptions both
+    # fail closed.  A precedence item must describe exactly one phase.
+    return None
+
+
+def _validate_management_parameters(
+    feature_name: str,
+    parameters: object,
+    action_kind: object,
+    path: str,
+    *,
+    input_ids: set[str],
+    indicator_ids: set[str],
+    issues: list[BlueprintIssue],
+    unresolved_reasons: list[tuple[str, str]],
+) -> None:
+    if not isinstance(parameters, Mapping):
+        return
+    allowed = MANAGEMENT_PARAMETER_KEYS_BY_FEATURE[feature_name]
+    allowed_tokens = {_normalized_indicator_token(key) for key in allowed}
+    raw_keys_by_token: dict[str, list[str]] = {}
+    for key in parameters:
+        key_text = str(key)
+        raw_keys_by_token.setdefault(
+            _normalized_indicator_token(key_text), []
+        ).append(key_text)
+    for token, raw_keys in sorted(raw_keys_by_token.items()):
+        distinct_keys = sorted(set(raw_keys))
+        if token and len(distinct_keys) > 1:
+            _issue(
+                issues,
+                "MANAGEMENT_PARAMETER_ALIAS_CONFLICT",
+                path,
+                "Multiple management parameter keys resolve to the same semantic key: "
+                + ", ".join(distinct_keys),
+            )
+    unknown_keys = sorted(
+        str(key)
+        for key in parameters
+        if _normalized_indicator_token(key) not in allowed_tokens
+    )
+    for key in unknown_keys:
+        _issue(
+            issues,
+            "MANAGEMENT_PARAMETER_UNKNOWN",
+            f"{path}.{key}",
+            f"Parameter is not supported for {feature_name}",
+        )
+
+    for key, value in parameters.items():
+        key_text = str(key)
+        token = _normalized_indicator_token(key_text)
+        if token.endswith("inputref"):
+            if not isinstance(value, str) or value not in input_ids:
+                _issue(issues, "INPUT_REF_UNDEFINED", f"{path}.{key_text}", f"Unknown reference {value!r}")
+        elif token.endswith("indicatorref"):
+            if not isinstance(value, str) or value not in indicator_ids:
+                _issue(issues, "INDICATOR_REF_UNDEFINED", f"{path}.{key_text}", f"Unknown indicator reference {value!r}")
+
+        if token in {"closepercent"}:
+            if not _is_positive_finite(value) or float(value) > 100:
+                _issue(issues, "MANAGEMENT_PERCENT_INVALID", f"{path}.{key_text}", "closePercent must be greater than 0 and at most 100")
+        elif token in {"maxadds", "maxpositions", "maxsteps"}:
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                _issue(issues, "MANAGEMENT_LIMIT_INVALID", f"{path}.{key_text}", f"{key_text} must be an integer >= 1")
+        elif token in {
+            "lot", "lots", "volume", "closelots", "closevolume", "lotmultiplier",
+            "maxtotallots", "atrmultiplier",
+        }:
+            if not _is_positive_finite(value):
+                _issue(issues, "MANAGEMENT_VALUE_INVALID", f"{path}.{key_text}", f"{key_text} must be finite and greater than zero")
+        elif token in {
+            "activationdistance", "activationpoints", "activationpips", "activationr",
+            "offsetpoints", "offsetpips", "bufferpoints", "bufferpips", "profitthreshold",
+            "distance", "distancepoints", "distancepips", "step", "steppoints", "steppips",
+            "spacingpoints", "spacingpips",
+        }:
+            if not _is_nonnegative_finite(value):
+                _issue(issues, "MANAGEMENT_VALUE_INVALID", f"{path}.{key_text}", f"{key_text} must be finite and non-negative")
+
+    present = {
+        _normalized_indicator_token(key)
+        for key, value in parameters.items()
+        if value not in (None, "", [], {})
+    }
+    target_keys = {
+        "target", "targetprice", "targetformula", "reference", "indicatorref",
+        "distance", "distancepoints", "distancepips", "distanceinputref",
+    }
+    amount_keys = {
+        "closepercent", "closelots", "closevolume", "percentinputref",
+        "lotinputref", "volumeinputref",
+    }
+    if feature_name in {"breakEven", "modifyStopLoss", "modifyTakeProfit"} and not present.intersection(target_keys):
+        unresolved_reasons.append((path, f"{feature_name} requires an explicit target or distance parameter"))
+    if feature_name == "trailingStop" and not present.intersection(target_keys | {"method", "atrindicatorref", "atrmultiplier", "step", "steppoints", "steppips"}):
+        unresolved_reasons.append((path, "trailingStop requires an explicit method, target, distance, ATR, or step parameter"))
+    if feature_name == "scaleIn":
+        if not present.intersection({"lot", "lots", "volume", "lotinputref", "volumeinputref", "lotmultiplier"}):
+            unresolved_reasons.append((path, "scaleIn requires explicit lot or volume sizing"))
+        if not present.intersection({"maxadds", "maxpositions", "maxtotallots"}):
+            unresolved_reasons.append((path, "scaleIn requires a hard add/position/lot cap"))
+    if feature_name == "scaleOut" and action_kind != "close_position" and not present.intersection(amount_keys):
+        unresolved_reasons.append((path, "scaleOut requires an explicit close amount"))
+    if action_kind == "close_partial" and not present.intersection(amount_keys):
+        unresolved_reasons.append((path, "close_partial requires an explicit close amount"))
+
+
+def _test_payload_operand_value(given: object, operand: object, shift: int) -> object | None:
+    if not isinstance(operand, Mapping):
+        return None
+    if operand.get("kind") == "constant":
+        return operand.get("value")
+    if not isinstance(given, Mapping):
+        return None
+    reference = operand.get("ref") or operand.get("indicatorId") or operand.get("inputId") or operand.get("field")
+    if not isinstance(reference, str) or not reference.strip():
+        return None
+    direct = given.get(reference)
+    if isinstance(direct, Mapping):
+        for nested_key in (shift, str(shift), f"bar{shift}", f"shift{shift}"):
+            if nested_key in direct:
+                return direct[nested_key]
+    pieces = [piece for piece in re.split(r"[^A-Za-z0-9]+", reference) if piece]
+    bases = {_normalized_indicator_token(reference)}
+    if len(pieces) > 1:
+        bases.add(_normalized_indicator_token("".join(pieces[1:])))
+        bases.add(_normalized_indicator_token(pieces[-1]))
+    lookup = {_normalized_indicator_token(key): value for key, value in given.items()}
+    for base in bases:
+        for candidate in (f"{base}{shift}", f"{base}bar{shift}", f"{base}shift{shift}"):
+            if candidate in lookup:
+                return lookup[candidate]
+    return None
+
+
+def _evaluate_cross_test_fixture(expression: object, given: object) -> bool | None:
+    if not isinstance(expression, Mapping) or expression.get("op") not in {"cross_above", "cross_below"}:
+        return None
+    previous_shift = expression.get("previousShift", 2)
+    current_shift = expression.get("currentShift", 1)
+    if previous_shift != 2 or current_shift != 1:
+        return None
+    left_previous = _test_payload_operand_value(given, expression.get("left"), 2)
+    right_previous = _test_payload_operand_value(given, expression.get("right"), 2)
+    left_current = _test_payload_operand_value(given, expression.get("left"), 1)
+    right_current = _test_payload_operand_value(given, expression.get("right"), 1)
+    values = (left_previous, right_previous, left_current, right_current)
+    if any(not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) for value in values):
+        return None
+    if expression.get("op") == "cross_above":
+        return bool(left_previous <= right_previous and left_current > right_current)
+    return bool(left_previous >= right_previous and left_current < right_current)
+
+
+def _cross_expected_signal_truth(expected: object) -> bool | None:
+    if not isinstance(expected, Mapping) or "signal" not in expected:
+        return None
+    signal = expected.get("signal")
+    token = _normalized_indicator_token(signal)
+    if signal is False or token in {"none", "nosignal", "false", "hold", "skip"}:
+        return False
+    if signal is True or token in {
+        "buy",
+        "sell",
+        "entrybuy",
+        "entrysell",
+        "exitbuy",
+        "exitsell",
+        "closebuy",
+        "closesell",
+    }:
+        return True
+    return None
+
+
+def _cross_expected_signal_is_consistent(kind: object, expected: object) -> bool | None:
+    signal_truth = _cross_expected_signal_truth(expected)
+    if signal_truth is None:
+        return None
+    if kind == "positive":
+        return signal_truth
+    if kind == "negative":
+        return not signal_truth
+    if kind == "boundary":
+        # A boundary fixture identifies equality at one of the two bars; it
+        # may still produce a valid strict cross on the other bar.  Its exact
+        # expected.signal, not the broad test kind, determines truth.
+        return True
+    return None
 
 
 def _validate_pending_order_parameters(
@@ -3036,6 +3519,12 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
             closed_bar=closed_bar,
         )
 
+    rule_records_by_id = {
+        str(rule.get("ruleId")): rule
+        for _path, rule in rule_records
+        if isinstance(rule.get("ruleId"), str)
+    }
+
     for path, rule in rule_records:
         invalidation_refs = rule.get("invalidationRuleIds")
         if invalidation_refs is None:
@@ -3121,6 +3610,59 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
                         f"{path}.{key}",
                         f"Test payload cannot exceed {MAX_TEST_PAYLOAD_BYTES} UTF-8 bytes",
                     )
+            for ref in refs:
+                referenced_rule = rule_records_by_id.get(ref)
+                expression = referenced_rule.get("expression") if isinstance(referenced_rule, Mapping) else None
+                evaluated = _evaluate_cross_test_fixture(expression, record.get("given"))
+                expected_signal_truth = _cross_expected_signal_truth(
+                    record.get("expected")
+                )
+                if isinstance(expression, Mapping) and expression.get("op") in {"cross_above", "cross_below"} and kind in {"positive", "negative", "boundary"}:
+                    if evaluated is None:
+                        _issue(
+                            issues,
+                            "TEST_CROSS_FIXTURE_UNRESOLVED",
+                            f"{path}.given",
+                            f"Cross fixture must expose numeric left/right values for bar[2] and bar[1] for {ref}",
+                        )
+                    else:
+                        expected_fixture_truth = (
+                            True
+                            if kind == "positive"
+                            else False
+                            if kind == "negative"
+                            else expected_signal_truth
+                        )
+                        if (
+                            expected_fixture_truth is not None
+                            and evaluated is not expected_fixture_truth
+                        ):
+                            _issue(
+                                issues,
+                                "TEST_CROSS_FIXTURE_MISMATCH",
+                                f"{path}.given",
+                                f"{kind} fixture does not evaluate to expected.signal for {ref}",
+                            )
+                expected_consistent = _cross_expected_signal_is_consistent(kind, record.get("expected"))
+                if (
+                    isinstance(expression, Mapping)
+                    and expression.get("op") in {"cross_above", "cross_below"}
+                    and kind in {"positive", "negative", "boundary"}
+                    and expected_signal_truth is None
+                ):
+                    _issue(
+                        issues,
+                        "TEST_CROSS_EXPECTED_INVALID",
+                        f"{path}.expected",
+                        f"Cross test must declare an exact buy/sell/exit or none signal for {ref}",
+                    )
+                elif expected_consistent is False and isinstance(expression, Mapping) and expression.get("op") in {"cross_above", "cross_below"}:
+                        _issue(
+                            issues,
+                            "TEST_CROSS_EXPECTED_INVALID",
+                            f"{path}.expected",
+                            f"{kind} cross test expected.signal contradicts its test kind for {ref}",
+                        )
 
     for rule_path, rule in rule_records:
         rule_id = rule.get("ruleId")
@@ -3311,6 +3853,17 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
                 if not isinstance(parameters, Mapping) or not parameters:
                     unresolved_reasons.append(
                         (f"{feature_path}.parameters", f"enabled {feature_name} requires explicit non-empty parameters")
+                    )
+                else:
+                    _validate_management_parameters(
+                        feature_name,
+                        parameters,
+                        action.get("kind") if isinstance(action, Mapping) else None,
+                        f"{feature_path}.parameters",
+                        input_ids=input_ids,
+                        indicator_ids=indicator_ids,
+                        issues=issues,
+                        unresolved_reasons=unresolved_reasons,
                     )
                 enabled_feature_rules = [
                     rule
@@ -3935,6 +4488,39 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
             _issue(issues, "LOT_MODE_INVALID", "$.riskAndSizing.lotMode", f"Expected one of {sorted(LOT_MODES)}")
         if not isinstance(risk.get("maxOpenPositions"), int) or isinstance(risk.get("maxOpenPositions"), bool) or risk.get("maxOpenPositions", 0) < 1:
             _issue(issues, "MAX_OPEN_POSITIONS_INVALID", "$.riskAndSizing.maxOpenPositions", "maxOpenPositions must be an integer >= 1")
+        max_total_lots = risk.get("maxTotalLots")
+        if max_total_lots is not None and not _is_positive_finite(max_total_lots):
+            _issue(issues, "RISK_LOT_CAP_INVALID", "$.riskAndSizing.maxTotalLots", "maxTotalLots must be finite and greater than zero")
+        for field in (
+            "maxRiskPerTradePercent",
+            "dailyLossStopPercent",
+            "weeklyLossStopPercent",
+            "equityStopPercent",
+        ):
+            value = risk.get(field)
+            if value is not None and (
+                not _is_nonnegative_finite(value) or float(value) > 100
+            ):
+                _issue(
+                    issues,
+                    "RISK_PERCENT_INVALID",
+                    f"$.riskAndSizing.{field}",
+                    f"{field} must be finite and between 0 and 100 percent",
+                )
+        for field in ("consecutiveLossLimit", "cooldownBars"):
+            value = risk.get(field)
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+            ):
+                _issue(
+                    issues,
+                    "RISK_LIMIT_INVALID",
+                    f"$.riskAndSizing.{field}",
+                    f"{field} must be an integer >= 0",
+                )
+        for field in ("includeSpreadCommissionSlippage", "normalizeToBrokerLotStep"):
+            if field in risk and not isinstance(risk.get(field), bool):
+                _issue(issues, "BOOLEAN_REQUIRED", f"$.riskAndSizing.{field}", "Expected a boolean")
         _validate_defined_ref(
             risk,
             "fixedLotInputRef",
@@ -3951,6 +4537,20 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
             issues,
             required=lot_mode in {"fixed_fractional_balance", "fixed_fractional_equity", "free_margin_fraction"},
         )
+        fixed_lot_ref = risk.get("fixedLotInputRef")
+        if lot_mode == "fixed_lot" and isinstance(fixed_lot_ref, str):
+            fixed_lot_input = input_records_by_id.get(fixed_lot_ref)
+            fixed_lot_default = fixed_lot_input.get("default") if isinstance(fixed_lot_input, Mapping) else None
+            if not _is_positive_finite(fixed_lot_default):
+                unresolved_reasons.append(("$.riskAndSizing.fixedLotInputRef", "fixed-lot sizing requires a positive numeric input default"))
+            elif _is_positive_finite(max_total_lots) and float(fixed_lot_default) > float(max_total_lots):
+                _issue(issues, "RISK_LOT_CAP_ORDER_INVALID", "$.riskAndSizing.maxTotalLots", "maxTotalLots cannot be smaller than the fixed lot default")
+        risk_percent_ref = risk.get("riskPercentInputRef")
+        if lot_mode in {"fixed_fractional_balance", "fixed_fractional_equity", "free_margin_fraction"} and isinstance(risk_percent_ref, str):
+            risk_percent_input = input_records_by_id.get(risk_percent_ref)
+            risk_percent_default = risk_percent_input.get("default") if isinstance(risk_percent_input, Mapping) else None
+            if not _is_positive_finite(risk_percent_default) or float(risk_percent_default) > 100:
+                unresolved_reasons.append(("$.riskAndSizing.riskPercentInputRef", "risk-percent sizing requires an input default greater than 0 and at most 100"))
         if lot_mode in {"fixed_fractional_balance", "fixed_fractional_equity", "free_margin_fraction"}:
             for side in sorted(enabled_sides):
                 default_stop = tp_sl.get("stopLoss") if isinstance(tp_sl, Mapping) else None
@@ -3968,6 +4568,8 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
                 unresolved_reasons.append(("$.riskAndSizing.lotSequence", "sequence lotMode requires a non-empty lotSequence"))
             elif any(not _is_positive_finite(value) for value in lot_sequence):
                 _issue(issues, "LOT_SEQUENCE_INVALID", "$.riskAndSizing.lotSequence", "Every lotSequence value must be finite and greater than zero")
+            elif _is_positive_finite(max_total_lots) and max(float(value) for value in lot_sequence) > float(max_total_lots):
+                _issue(issues, "RISK_LOT_CAP_ORDER_INVALID", "$.riskAndSizing.maxTotalLots", "maxTotalLots cannot be smaller than a lotSequence value")
 
     recovery = candidate.get("recovery")
     if isinstance(recovery, Mapping):
@@ -4196,10 +4798,44 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
         for index, phase in enumerate(evaluation_order):
             if phase not in EXECUTION_EVALUATION_STEPS:
                 _issue(issues, "EXECUTION_ORDER_STEP_INVALID", f"$.execution.evaluationOrder[{index}]", f"Expected one of {sorted(EXECUTION_EVALUATION_STEPS)}")
-        if "exit" not in evaluation_order or "entry" not in evaluation_order:
-            unresolved_reasons.append(("$.execution.evaluationOrder", "execution order must include exit and entry"))
-        elif evaluation_order.index("exit") > evaluation_order.index("entry"):
-            _issue(issues, "EXECUTION_ORDER_UNSAFE", "$.execution.evaluationOrder", "exit must be evaluated before entry")
+        recovery_enabled = (
+            isinstance(recovery, Mapping) and recovery.get("enabled") is True
+        )
+        expected_execution_order = [
+            phase
+            for phase in PRECEDENCE_PHASE_ORDER
+            if phase != "recovery" or recovery_enabled
+        ]
+        expected_execution_phases = set(expected_execution_order)
+        observed_execution_phases = set(evaluation_order)
+        missing_execution_phases = sorted(
+            expected_execution_phases - observed_execution_phases
+        )
+        if missing_execution_phases:
+            _issue(
+                issues,
+                "EXECUTION_ORDER_PHASE_MISSING",
+                "$.execution.evaluationOrder",
+                f"Execution order is missing required phase(s): {', '.join(missing_execution_phases)}",
+            )
+        unexpected_execution_phases = sorted(
+            observed_execution_phases - expected_execution_phases
+        )
+        if unexpected_execution_phases:
+            _issue(
+                issues,
+                "EXECUTION_ORDER_PHASE_UNEXPECTED",
+                "$.execution.evaluationOrder",
+                "Execution order contains disabled or unsupported phase(s): "
+                + ", ".join(unexpected_execution_phases),
+            )
+        if evaluation_order != expected_execution_order:
+            _issue(
+                issues,
+                "EXECUTION_ORDER_UNSAFE",
+                "$.execution.evaluationOrder",
+                "Execution order must be safety, exit, manage, recovery when enabled, then entry",
+            )
 
         duplicate_policy = execution.get("duplicateSignalPolicy")
         if duplicate_policy not in DUPLICATE_SIGNAL_POLICIES:
@@ -4330,33 +4966,126 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
     if not isinstance(unknowns, list):
         _issue(issues, "ARRAY_REQUIRED", "$.unknowns", "unknowns must be an array")
     else:
+        seen_unknown_ids: set[str] = set()
         for index, item in enumerate(unknowns):
-            if not isinstance(item, Mapping):
-                _issue(issues, "OBJECT_REQUIRED", f"$.unknowns[{index}]", "Unknown must be an object")
-            elif item.get("blocksExecution") is True:
-                unresolved_reasons.append((f"$.unknowns[{index}]", "unknown blocks execution"))
+            unknown_path = f"$.unknowns[{index}]"
+            record = _validate_required_mapping(
+                item,
+                unknown_path,
+                ("unknownId", "path", "description", "blocksExecution"),
+                issues,
+            )
+            if record is None:
+                continue
+            unknown_id = record.get("unknownId")
+            if _validate_nonempty_string(unknown_id, f"{unknown_path}.unknownId", issues, pattern=_ID_PATTERN):
+                if str(unknown_id) in seen_unknown_ids:
+                    _issue(issues, "UNKNOWN_ID_DUPLICATE", f"{unknown_path}.unknownId", "unknownId must be unique")
+                seen_unknown_ids.add(str(unknown_id))
+            _validate_nonempty_string(record.get("path"), f"{unknown_path}.path", issues)
+            _validate_nonempty_string(record.get("description"), f"{unknown_path}.description", issues)
+            if not isinstance(record.get("blocksExecution"), bool):
+                _issue(issues, "BOOLEAN_REQUIRED", f"{unknown_path}.blocksExecution", "Expected a boolean")
+            elif record.get("blocksExecution") is True:
+                unresolved_reasons.append((unknown_path, "unknown blocks execution"))
 
     conflicts = candidate.get("conflicts")
     if not isinstance(conflicts, list):
         _issue(issues, "ARRAY_REQUIRED", "$.conflicts", "conflicts must be an array")
     else:
+        seen_conflict_ids: set[str] = set()
         for index, item in enumerate(conflicts):
-            if not isinstance(item, Mapping):
-                _issue(issues, "OBJECT_REQUIRED", f"$.conflicts[{index}]", "Conflict must be an object")
+            conflict_path = f"$.conflicts[{index}]"
+            record = _validate_required_mapping(
+                item,
+                conflict_path,
+                ("conflictId", "paths", "description", "resolutionStatus", "sourceRefs"),
+                issues,
+            )
+            if record is None:
+                continue
+            conflict_id = record.get("conflictId")
+            if _validate_nonempty_string(conflict_id, f"{conflict_path}.conflictId", issues, pattern=_ID_PATTERN):
+                if str(conflict_id) in seen_conflict_ids:
+                    _issue(issues, "CONFLICT_ID_DUPLICATE", f"{conflict_path}.conflictId", "conflictId must be unique")
+                seen_conflict_ids.add(str(conflict_id))
+            _validate_string_list(record.get("paths"), f"{conflict_path}.paths", issues, min_items=1)
+            _validate_nonempty_string(record.get("description"), f"{conflict_path}.description", issues)
+            resolution_status = record.get("resolutionStatus")
+            if resolution_status not in {"resolved", "unresolved"}:
+                _issue(issues, "CONFLICT_STATUS_INVALID", f"{conflict_path}.resolutionStatus", "Expected resolved or unresolved")
+            _validate_source_refs(
+                record.get("sourceRefs"),
+                f"{conflict_path}.sourceRefs",
+                evidence_ids,
+                issues,
+                required=True,
+            )
+            if resolution_status == "resolved":
+                _validate_nonempty_string(record.get("resolution"), f"{conflict_path}.resolution", issues)
             else:
-                _validate_source_refs(
-                    item.get("sourceRefs"),
-                    f"$.conflicts[{index}].sourceRefs",
-                    evidence_ids,
-                    issues,
-                    required=False,
-                )
-                if item.get("resolutionStatus") != "resolved":
-                    unresolved_reasons.append((f"$.conflicts[{index}]", "conflict is unresolved"))
+                unresolved_reasons.append((conflict_path, "conflict is unresolved"))
 
     precedence = _validate_string_list(candidate.get("precedence"), "$.precedence", issues, min_items=1)
     if len(precedence) != len(set(precedence)):
         _issue(issues, "PRECEDENCE_DUPLICATE", "$.precedence", "Precedence entries must be unique")
+    precedence_phases: list[str] = []
+    for index, item in enumerate(precedence):
+        phase = _precedence_phase(item)
+        if phase is None:
+            _issue(
+                issues,
+                "PRECEDENCE_STEP_INVALID",
+                f"$.precedence[{index}]",
+                "Precedence step must identify safety, recovery, management, exit, or entry",
+            )
+            continue
+        precedence_phases.append(phase)
+    if len(precedence_phases) != len(set(precedence_phases)):
+        _issue(
+            issues,
+            "PRECEDENCE_PHASE_DUPLICATE",
+            "$.precedence",
+            "Precedence must contain exactly one item for each enabled phase",
+        )
+    recovery_enabled = (
+        isinstance(recovery, Mapping) and recovery.get("enabled") is True
+    )
+    expected_precedence_order = [
+        phase
+        for phase in PRECEDENCE_PHASE_ORDER
+        if phase != "recovery" or recovery_enabled
+    ]
+    expected_precedence_phases = set(expected_precedence_order)
+    observed_precedence_phases = set(precedence_phases)
+    missing_precedence_phases = sorted(
+        expected_precedence_phases - observed_precedence_phases
+    )
+    if missing_precedence_phases:
+        _issue(
+            issues,
+            "PRECEDENCE_PHASE_MISSING",
+            "$.precedence",
+            f"Precedence is missing required phase(s): {', '.join(missing_precedence_phases)}",
+        )
+    unexpected_precedence_phases = sorted(
+        observed_precedence_phases - expected_precedence_phases
+    )
+    if unexpected_precedence_phases:
+        _issue(
+            issues,
+            "PRECEDENCE_PHASE_UNEXPECTED",
+            "$.precedence",
+            "Precedence contains disabled phase(s): "
+            + ", ".join(unexpected_precedence_phases),
+        )
+    if precedence_phases != expected_precedence_order:
+        _issue(
+            issues,
+            "PRECEDENCE_ORDER_UNSAFE",
+            "$.precedence",
+            "Precedence must be safety, exit, management, recovery when enabled, then entry",
+        )
 
     state_machine = candidate.get("stateMachine")
     state_ids: set[str] = set()
@@ -4395,7 +5124,12 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
                     continue
                 if record.get("to") not in state_ids:
                     _issue(issues, "STATE_REF_UNDEFINED", f"{transition_path}.to", f"Unknown state {record.get('to')!r}")
-                refs = _validate_string_list(record.get("whenRuleIds"), f"{transition_path}.whenRuleIds", issues)
+                refs = _validate_string_list(
+                    record.get("whenRuleIds"),
+                    f"{transition_path}.whenRuleIds",
+                    issues,
+                    min_items=1,
+                )
                 for ref_index, ref in enumerate(refs):
                     if ref not in rule_ids:
                         _issue(issues, "RULE_REF_UNDEFINED", f"{transition_path}.whenRuleIds[{ref_index}]", f"Unknown rule reference {ref!r}")
@@ -4455,6 +5189,72 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
                 if not has_exit_transition:
                     unresolved_reasons.append(("$.stateMachine", f"{position_state} -> FLAT must reference an enabled {side} exit rule"))
 
+        if isinstance(recovery, Mapping) and recovery.get("enabled") is True:
+            recovery_rule_ids = {
+                str(rule.get("ruleId"))
+                for rule in (
+                    recovery.get("levelRules")
+                    if isinstance(recovery.get("levelRules"), list)
+                    else []
+                )
+                if isinstance(rule, Mapping)
+                and rule.get("enabled") is True
+                and rule.get("phase") == "recovery"
+                and isinstance(rule.get("ruleId"), str)
+            }
+            recovery_state = state_records.get("RECOVERY")
+            if not isinstance(recovery_state, Mapping):
+                unresolved_reasons.append(("$.stateMachine", "enabled recovery requires a RECOVERY state"))
+            else:
+                position_states = {
+                    "LONG" if side == "buy" else "SHORT" for side in enabled_sides
+                }
+                enters_recovery = False
+                observed_recovery_rule_ids: set[str] = set()
+                for state_name, state_record in state_records.items():
+                    transitions = state_record.get("transitions") if isinstance(state_record, Mapping) else None
+                    if not isinstance(transitions, list):
+                        continue
+                    for transition in transitions:
+                        if not isinstance(transition, Mapping):
+                            continue
+                        target = str(transition.get("to") or "").upper()
+                        refs = {
+                            str(ref)
+                            for ref in transition.get("whenRuleIds", [])
+                            if isinstance(ref, str)
+                        }
+                        if state_name == "RECOVERY" or target == "RECOVERY":
+                            observed_recovery_rule_ids.update(refs.intersection(recovery_rule_ids))
+                        if state_name in position_states and target == "RECOVERY" and refs.intersection(recovery_rule_ids):
+                            enters_recovery = True
+                if not enters_recovery:
+                    unresolved_reasons.append(("$.stateMachine", "an enabled position state must enter RECOVERY using a recovery rule"))
+                recovery_transitions = recovery_state.get("transitions")
+                exits_recovery = any(
+                    isinstance(transition, Mapping)
+                    and str(transition.get("to") or "").upper() in ({"FLAT"} | position_states)
+                    and bool(transition.get("whenRuleIds"))
+                    for transition in (
+                        recovery_transitions if isinstance(recovery_transitions, list) else []
+                    )
+                )
+                if not exits_recovery:
+                    unresolved_reasons.append(("$.stateMachine", "RECOVERY requires a rule-bound transition back to FLAT or an enabled position state"))
+                missing_state_rule_refs = sorted(recovery_rule_ids - observed_recovery_rule_ids)
+                if missing_state_rule_refs:
+                    unresolved_reasons.append(("$.stateMachine", f"recovery rules are not linked to RECOVERY transitions: {', '.join(missing_state_rule_refs)}"))
+
+            reentry_policy = recovery.get("reentryPolicy")
+            if (
+                isinstance(reentry_policy, Mapping)
+                and reentry_policy.get("enabled") is True
+                and isinstance(reentry_policy.get("cooldownBars"), int)
+                and reentry_policy.get("cooldownBars", 0) > 0
+                and "COOLDOWN" not in state_records
+            ):
+                unresolved_reasons.append(("$.stateMachine", "recovery re-entry with cooldownBars > 0 requires a COOLDOWN state"))
+
         if isinstance(execution, Mapping) and execution.get("entryOrderType") in {"limit", "stop"}:
             if "PENDING" not in state_records:
                 unresolved_reasons.append(("$.stateMachine", "pending entry requires a PENDING state"))
@@ -4492,7 +5292,7 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
             if rule.get("enabled") is True
             and isinstance(rule.get("ruleId"), str)
             and (
-                rule.get("phase") in {"setup", "entry", "exit", "safety"}
+                rule.get("phase") in {"setup", "entry", "exit", "recovery", "safety"}
                 or path.startswith("$.orderManagement")
             )
         }

@@ -15,7 +15,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release_ref_guard:
+    runs-on: windows-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require the main branch release ref
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -cne "refs/heads/main") {
+            throw "Release publishing is allowed only from refs/heads/main; refusing $env:GITHUB_REF."
+          }
+
   compatibility:
+    needs: release_ref_guard
     runs-on: windows-latest
     timeout-minutes: 10
     strategy:

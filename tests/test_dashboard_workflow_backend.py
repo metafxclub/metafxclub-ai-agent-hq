@@ -571,7 +571,26 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             "workflowContext": lineage,
             "toolId": "codex_web_research",
             "owner": "mission_archivist",
+            "reportType": "trading_system_research_report",
         }
+        binding = lineage["deepResearchSourceBinding"]
+        self.assertEqual(binding["reportId"], report["id"])
+        self.assertEqual(binding["recordId"], selected_record)
+        self.assertEqual(binding["sourceUrls"], payload["sourceUrls"])
+        self.assertEqual(
+            binding["sourceUrlDigest"],
+            self.bridge._deep_research_source_binding_digest(binding),
+        )
+        with (
+            mock.patch.object(self.bridge, "load_runtime_reports", return_value=[report]),
+            mock.patch.object(self.bridge, "load_missions", return_value=[source_mission]),
+        ):
+            self.assertEqual(
+                self.bridge._deep_research_required_open_urls_for_mission(
+                    guarded_mission
+                ),
+                (payload["sourceUrls"], None),
+            )
         self.assertIsNotNone(self.bridge._trusted_workflow_guard_intent(guarded_mission))
         tampered_lineage = copy.deepcopy(lineage)
         tampered_lineage["source"]["recordId"] = (
@@ -579,6 +598,51 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         )
         guarded_mission["workflowContext"] = tampered_lineage
         self.assertIsNone(self.bridge._trusted_workflow_guard_intent(guarded_mission))
+        tampered_binding = copy.deepcopy(lineage)
+        tampered_binding["deepResearchSourceBinding"]["sourceUrls"][1] = (
+            "https://indicatorspot.com/replacement"
+        )
+        guarded_mission["workflowContext"] = tampered_binding
+        self.assertEqual(
+            self.bridge._deep_research_required_open_urls_for_mission(
+                guarded_mission
+            ),
+            ([], "trading_system_research_required_open_urls_invalid"),
+        )
+        detached_lineage = copy.deepcopy(lineage)
+        detached_binding = detached_lineage["deepResearchSourceBinding"]
+        detached_binding["sourceUrls"][1] = (
+            "https://indicatorspot.com/replacement"
+        )
+        detached_binding["sourceUrlDigest"] = (
+            self.bridge._deep_research_source_binding_digest(detached_binding)
+        )
+        self.assertIsNotNone(
+            self.bridge._workflow_context_storage(detached_lineage)
+        )
+        guarded_mission["workflowContext"] = detached_lineage
+        with (
+            mock.patch.object(self.bridge, "load_runtime_reports", return_value=[report]),
+            mock.patch.object(self.bridge, "load_missions", return_value=[source_mission]),
+        ):
+            self.assertEqual(
+                self.bridge._deep_research_required_open_urls_for_mission(
+                    guarded_mission
+                ),
+                ([], "trading_system_research_source_binding_detached"),
+            )
+
+        for direct_artifact_url in (
+            "https://tradingfinder.com/files/strategy.zip",
+            "https://tradingfinder.com/download/strategy",
+            "https://tradingfinder.com/article?id=1&download=1",
+        ):
+            with self.subTest(direct_artifact_url=direct_artifact_url):
+                self.assertIsNone(
+                    self.bridge._canonical_deep_research_public_url(
+                        direct_artifact_url
+                    )
+                )
 
     def test_deep_research_output_contract_binds_public_source_links_and_offset_time(self) -> None:
         report, source_mission, _transfer = self.verified_portal_system_fixture()
@@ -761,7 +825,13 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             "transferAgentId": "mission_archivist",
             "type": "trading_system_discovery_report",
             "status": "ready",
-            "structuredPayload": {"system": {"systemName": "Verified System"}},
+            "structuredPayload": {
+                "sourceUrls": [
+                    "https://tradingfinder.com/education/system",
+                    "https://forex-station.com/system-review",
+                ],
+                "system": {"systemName": "Verified System"},
+            },
         }
         with (
             mock.patch.object(self.bridge, "find_room_prop", return_value={"id": "left_server_racks"}),
@@ -2501,8 +2571,8 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 },
             },
         )
-        self.assertEqual(preferences["modelTier"], "manager_quality")
-        self.assertEqual(preferences["timeoutSeconds"], 300)
+        self.assertEqual(preferences["modelTier"], "specialist_balanced")
+        self.assertEqual(preferences["timeoutSeconds"], 600)
         self.assertEqual(preferences["outputLimitChars"], 64000)
         self.assertEqual(preferences["rateReservePercent"], 15)
 

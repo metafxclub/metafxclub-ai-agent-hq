@@ -417,6 +417,52 @@ const TRADING_RESEARCH_SIMULATION_REGIMES = Object.freeze([
         self.assertIn('details.open = true', blueprint)
         self.assertNotIn("innerHTML", blueprint)
 
+    def test_long_research_scalar_has_an_explicit_truncation_marker(self):
+        start = self.main.index("function safeDashboardDisplayText")
+        end = self.main.index("function normalizeConnectionStatus", start)
+        sanitizer = self.main[start:end]
+        self.assertIn("safeText.length > limit", sanitizer)
+        self.assertIn("แสดงบางส่วน: ข้อความยาวเกินขอบเขตหน้าจอ", sanitizer)
+        self.assertIn("options?.markTruncated === true", sanitizer)
+        self.assertNotIn(".slice(0, 600)", sanitizer)
+
+        detail_start = self.main.index("function renderTradingResearchDetail")
+        detail_end = self.main.index("function renderTradingResearchSimulation", detail_start)
+        detail = self.main[detail_start:detail_end]
+        self.assertIn("{ limit: 5000, markTruncated: true }", detail)
+        self.assertIn("allFindings.slice(0, 50)", detail)
+        self.assertIn("ยังมีข้อค้นพบอีก", detail)
+
+    def test_research_management_cards_show_scope_and_provenance_even_when_disabled(self):
+        start = self.main.index("function createTradingResearchBlueprintManagedFeature")
+        end = self.main.index("function createTradingResearchBlueprintRecovery", start)
+        managed = self.main[start:end]
+        self.assertIn('"ใช้กับฝั่ง"', managed)
+        self.assertIn('"Source refs"', managed)
+        self.assertLess(managed.index("root.appendChild(provenance)"), managed.index("if (record.enabled === true)"))
+
+        recovery_start = end
+        recovery_end = self.main.index("function createTradingResearchEaBlueprint", recovery_start)
+        recovery = self.main[recovery_start:recovery_end]
+        self.assertIn('"Source refs"', recovery)
+        self.assertLess(recovery.index("header.appendChild(provenance)"), recovery.index("if (record.enabled !== true) return root"))
+
+    def test_research_long_text_sanitizer_marks_truncation_without_leaking_paths(self):
+        start = self.main.index("function safeDashboardDisplayText")
+        end = self.main.index("function safeAgentChatReplyText", start)
+        sanitizer = self.main[start:end]
+        source = sanitizer + """
+const marked = safeDashboardDisplayText("C:\\\\Users\\\\Student\\\\secret.txt; " + "x".repeat(7000), "", { limit: 5000, markTruncated: true });
+const compact = safeDashboardDisplayText("y".repeat(7000));
+console.log(JSON.stringify({ marked, compact }));
+"""
+        result = self.run_node_json(source)
+        self.assertIn("[ปกปิดตำแหน่งไฟล์]", result["marked"])
+        self.assertIn("แสดงบางส่วน: ข้อความยาวเกินขอบเขตหน้าจอ", result["marked"])
+        self.assertLessEqual(len(result["marked"]), 5000)
+        self.assertEqual(len(result["compact"]), 600)
+        self.assertNotIn("แสดงบางส่วน", result["compact"])
+
     def test_research_cross_formatter_uses_exact_closed_bar_comparisons(self):
         start = self.main.index("function tradingResearchBlueprintSourceStatusMeta")
         end = self.main.index("function appendTradingResearchBlueprintFact", start)

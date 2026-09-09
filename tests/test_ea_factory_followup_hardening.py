@@ -1097,6 +1097,37 @@ void OnTick()
         self.assertEqual(raised.exception.status, 404)
         self.assertNotIn("reserved Backend marker", str(raised.exception))
 
+    def test_create_non_ready_blueprint_reports_readiness_issue_instead_of_blank_suffix(self) -> None:
+        record = self.normalized_record(source_key="research-needs-clarification")
+        record["buildReady"] = False
+        record["missingCoreFields"] = []
+        record["readinessIssues"] = ["ea_blueprint_needs_clarification"]
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=self.empty_state(),
+            ),
+            mock.patch.object(self.bridge, "load_missions", return_value=[]),
+            mock.patch.object(self.bridge, "load_runtime_reports", return_value=[]),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_source_catalog",
+                return_value=[record],
+            ),
+            self.assertRaises(self.bridge.RequestError) as raised,
+        ):
+            self.bridge.create_ea_factory_build({
+                "sourceRecordId": record["sourceRecordId"],
+                "platform": "mt4",
+                "brief": "must remain blocked until the research is complete",
+                "idempotencyKey": "create-needs-clarification-message",
+            })
+
+        self.assertEqual(raised.exception.status, 422)
+        self.assertIn("ea_blueprint_needs_clarification", str(raised.exception))
+        self.assertNotEqual(str(raised.exception).rstrip()[-1:], ":")
+
     def test_factory_worker_sandbox_requires_exact_mission_bound_lineage(self) -> None:
         build, _stage, _brief, generation_lineage = (
             self.factory_generation_fixture("ea-build-worker-generate")

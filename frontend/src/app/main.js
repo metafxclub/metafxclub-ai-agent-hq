@@ -8339,16 +8339,25 @@ function formatDashboardValue(value, depth = 0) {
   return safeDashboardDisplayText(String(value), "-");
 }
 
-function safeDashboardDisplayText(value, fallback = "-") {
+function safeDashboardDisplayText(value, fallback = "-", options = {}) {
   const text = String(value ?? fallback).replace(/\s+/g, " ").trim() || fallback;
-  return text
+  const safeText = text
     .replace(/\b(?:pid|process[_ -]?id)\b\s*["']?\s*[:=#-]?\s*\d+\b/gi, "PID [ปกปิด]")
     .replace(/\bbearer\s+[^\s,;|]+/gi, "Bearer [ปกปิด]")
     .replace(/\b((?:api[_ .-]?key|token|password|passwd|secret|authorization|cookie|bot[_ .-]?token|broker[_ .-]?password|account(?:[_ .-]?(?:number|id|login))?|broker[_ .-]?server|terminal[_ .-]?path|process[_ .-]?id|pid))\b\s*["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^,;|•]+)/gi, "$1: [ปกปิด]")
     .replace(/\b[A-Za-z]:\\[^,\n;|]+/g, "[ปกปิดตำแหน่งไฟล์]")
     .replace(/\\\\[^,\n;|]+/g, "[ปกปิดตำแหน่งไฟล์]")
-    .replace(/(^|\s)\/(?:Users|home|root|var|etc|tmp|opt|srv)\/[^,\n;|]+/gi, "$1[ปกปิดตำแหน่งไฟล์]")
-    .slice(0, 600);
+    .replace(/(^|\s)\/(?:Users|home|root|var|etc|tmp|opt|srv)\/[^,\n;|]+/gi, "$1[ปกปิดตำแหน่งไฟล์]");
+  const requestedLimit = Number(options?.limit);
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(80, Math.min(12000, Math.trunc(requestedLimit)))
+    : 600;
+  if (safeText.length <= limit) return safeText;
+  if (options?.markTruncated === true) {
+    const marker = " … [แสดงบางส่วน: ข้อความยาวเกินขอบเขตหน้าจอ]";
+    return `${safeText.slice(0, Math.max(0, limit - marker.length))}${marker}`;
+  }
+  return safeText.slice(0, limit);
 }
 
 function safeAgentChatReplyText(value, fallback = "Agent ยังไม่ส่งคำตอบกลับมา") {
@@ -8356,14 +8365,18 @@ function safeAgentChatReplyText(value, fallback = "Agent ยังไม่ส�
     .replace(/\u0000/g, "")
     .replace(/\r\n?/g, "\n")
     .trim() || fallback;
-  return text
+  const safeText = text
     .replace(/\b(?:pid|process[_ -]?id)\b\s*["']?\s*[:=#-]?\s*\d+\b/gi, "PID [ปกปิด]")
     .replace(/\bbearer\s+[^\s,;|]+/gi, "Bearer [ปกปิด]")
     .replace(/\b((?:api[_ .-]?key|token|password|passwd|secret|authorization|cookie|bot[_ .-]?token|broker[_ .-]?password|account(?:[_ .-]?(?:number|id|login))?|broker[_ .-]?server|terminal[_ .-]?path|process[_ .-]?id|pid))\b\s*["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^,;|•\n]+)/gi, "$1: [ปกปิด]")
     .replace(/\b[A-Za-z]:\\[^,\n;|]+/g, "[ปกปิดตำแหน่งไฟล์]")
     .replace(/\\\\[^,\n;|]+/g, "[ปกปิดตำแหน่งไฟล์]")
-    .replace(/(^|\s)\/(?:Users|home|root|var|etc|tmp|opt|srv)\/[^,\n;|]+/gi, "$1[ปกปิดตำแหน่งไฟล์]")
-    .slice(0, 5000);
+    .replace(/(^|\s)\/(?:Users|home|root|var|etc|tmp|opt|srv)\/[^,\n;|]+/gi, "$1[ปกปิดตำแหน่งไฟล์]");
+  const limit = 5000;
+  const marker = "\n… [แสดงบางส่วน: ข้อความยาวเกินขอบเขตหน้าจอ]";
+  return safeText.length > limit
+    ? `${safeText.slice(0, Math.max(0, limit - marker.length))}${marker}`
+    : safeText;
 }
 
 function normalizeConnectionStatus(value = "not_connected") {
@@ -25846,6 +25859,7 @@ function tradingResearchReportsForSystem(domain = {}, system = {}) {
       summary: safeDashboardDisplayText(
         row.summary,
         "พบประวัติวิจัยจาก Google Sheet แต่รายงานรุ่นนี้อาจยังไม่มี EA Blueprint v2",
+        { limit: 5000, markTruncated: true },
       ),
       findings: Array.isArray(row.findings) ? row.findings : [],
       evidence: Array.isArray(row.evidence) ? row.evidence : [],
@@ -26566,6 +26580,22 @@ function createTradingResearchBlueprintManagedFeature(value, labelText, { partia
         ? "ปิดแบบ Fail-closed ชั่วคราว — ต้องยืนยันว่าระบบต้นทางใช้ฟังก์ชันนี้หรือไม่"
         : "ปิดใช้งานตามข้อมูลที่ตรวจแล้ว");
   root.append(header, state);
+  const provenance = document.createElement("dl");
+  provenance.className = "workflow-research-blueprint-compact-facts";
+  appendTradingResearchBlueprintFact(
+    provenance,
+    "ใช้กับฝั่ง",
+    Array.isArray(record.sideApplicability)
+      ? record.sideApplicability.join(", ")
+      : record.sideApplicability,
+  );
+  appendTradingResearchBlueprintFact(
+    provenance,
+    "Source refs",
+    Array.isArray(record.sourceRefs) ? record.sourceRefs.join(", ") : null,
+    { code: true },
+  );
+  if (provenance.childElementCount) root.appendChild(provenance);
   if (record.enabled === true) {
     if (partialClose) {
       const steps = Array.isArray(record.steps) ? record.steps : [];
@@ -26632,6 +26662,15 @@ function createTradingResearchBlueprintRecovery(value) {
         ? "ปิดแบบ Fail-closed — ต้องยืนยันว่าใช้ Grid / Martingale / Averaging / Hedge หรือไม่"
         : "ไม่ใช้ Recovery ตามข้อมูลที่ตรวจแล้ว");
   header.append(headerRow, state);
+  const provenance = document.createElement("dl");
+  provenance.className = "workflow-research-blueprint-compact-facts";
+  appendTradingResearchBlueprintFact(
+    provenance,
+    "Source refs",
+    Array.isArray(record.sourceRefs) ? record.sourceRefs.join(", ") : null,
+    { code: true },
+  );
+  if (provenance.childElementCount) header.appendChild(provenance);
   root.appendChild(header);
   if (record.enabled !== true) return root;
   const facts = document.createElement("dl");
@@ -27012,7 +27051,7 @@ function createTradingResearchEaBlueprint(blueprint, report = {}) {
     {
       id: "precedence",
       title: "14. ลำดับความสำคัญและกฎที่ชนกัน",
-      groups: [{ label: "Exit > Protection > Entry และลำดับอื่น", key: "precedence", value: blueprint.precedence }],
+      groups: [{ label: "Safety > Exit > Manage > Recovery > Entry (ข้าม Recovery เมื่อปิด)", key: "precedence", value: blueprint.precedence }],
     },
     {
       id: "pseudocode",
@@ -27193,6 +27232,7 @@ function renderTradingResearchDetail(section, system, domain) {
     summary.textContent = safeDashboardDisplayText(
       matchingResearch.summary,
       "Agent ส่ง Report กลับมาแล้ว แต่ยังไม่มีบทสรุปที่แสดงได้",
+      { limit: 5000, markTruncated: true },
     );
     provenance.className = "workflow-research-result-provenance";
     provenance.textContent = [
@@ -27200,16 +27240,23 @@ function renderTradingResearchDetail(section, system, domain) {
       matchingResearch.linkedMissionId ? "Mission " + matchingResearch.linkedMissionId : "",
       selectedReportId ? "ต้นทาง " + selectedReportId : "",
     ].filter(Boolean).join(" • ") || "Backend ยังไม่ส่งรหัสสายข้อมูล";
-    (Array.isArray(matchingResearch.findings) ? matchingResearch.findings : [])
-      .slice(0, 12)
+    const allFindings = Array.isArray(matchingResearch.findings) ? matchingResearch.findings : [];
+    const visibleFindings = allFindings.slice(0, 50);
+    visibleFindings
       .forEach((finding) => {
         const item = document.createElement("li");
         item.textContent = safeDashboardDisplayText(
           typeof finding === "object" ? finding?.detail || finding?.summary || finding?.title : finding,
           "",
+          { limit: 5000, markTruncated: true },
         );
         if (item.textContent) findings.appendChild(item);
       });
+    if (allFindings.length > visibleFindings.length) {
+      const remaining = document.createElement("li");
+      remaining.textContent = `… [แสดงบางส่วน: ยังมีข้อค้นพบอีก ${allFindings.length - visibleFindings.length} รายการในรายงาน Backend]`;
+      findings.appendChild(remaining);
+    }
     sources.className = "workflow-trading-system-source-links";
     indicatorScoutSourceRows(matchingResearch.evidence).forEach((evidence) => {
       const link = createWorkflowExternalSource(evidence.url, evidence.label);

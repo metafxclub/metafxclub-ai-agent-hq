@@ -172,6 +172,11 @@ class EAResearchStructuredOutputSchemaTests(unittest.TestCase):
         )
 
         definitions = transport["$defs"]
+        operand_field = definitions["operand"]["properties"]["field"]
+        field_enum = operand_field["anyOf"][0]["enum"]
+        self.assertIn("timeframe", field_enum)
+        self.assertIn("bars_since_initial_action_signal", field_enum)
+        self.assertNotIn("name", field_enum)
         input_schema = definitions["input"]
         self.assertEqual(
             input_schema["properties"]["min"],
@@ -218,6 +223,8 @@ class EAResearchStructuredOutputSchemaTests(unittest.TestCase):
         expected_definitions = expected_research.pop("$defs")
         self.assertEqual(embedded["properties"]["research"], expected_research)
         self.assertEqual(embedded["$defs"], expected_definitions)
+        self.assertEqual(embedded["properties"]["evidence"]["minItems"], 2)
+        self.assertEqual(embedded["properties"]["evidence"]["maxItems"], 2)
         self.assertNotIn("$defs", embedded["properties"]["research"])
         self.assertEqual(
             embedded["properties"]["research"]["properties"]["strategyId"]["$ref"],

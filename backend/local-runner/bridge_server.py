@@ -80,7 +80,7 @@ from radar_image_adapter import (  # noqa: E402 - public HTTPS publisher-image e
     verify_radar_entry_artifact,
 )
 
-BRIDGE_RUNTIME_VERSION = "0.9.13"
+BRIDGE_RUNTIME_VERSION = "0.9.14"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_STARTED_MONOTONIC = time.monotonic()
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
@@ -746,6 +746,14 @@ EA_FACTORY_REQUIRED_CORE_FIELDS = frozenset(
     if group == "core"
 ) | frozenset({"source_urls", "verification_status"})
 EA_FACTORY_VERIFIED_STATUSES = frozenset({"verified", "verified_deep_research"})
+# A current canonical research revision remains authoritative even when it
+# deliberately revokes EA handoff.  Keep those rows in the internal catalog as
+# non-build-ready tombstones so an older ready snapshot/report cannot silently
+# take their place.
+EA_FACTORY_CANONICAL_RESEARCH_STATUSES = (
+    EA_FACTORY_VERIFIED_STATUSES
+    | frozenset({"ready", "needs_clarification", "not_ea_ready"})
+)
 EA_FACTORY_SOURCE_KINDS = frozenset({
     "google_sheet_public_csv",
     "verified_deep_research",
@@ -7463,6 +7471,17 @@ def _workflow_context_storage(value: object) -> dict | None:
             or safe_source.get("recordId") != selected_record_id
         ):
             return None
+    deep_research_source_binding = None
+    if value.get("deepResearchSourceBinding") is not None:
+        deep_research_source_binding = _deep_research_source_binding_storage(
+            value.get("deepResearchSourceBinding"),
+            prop_id=prop_id,
+            action_id=action_id,
+            source=safe_source,
+            inputs=inputs,
+        )
+        if deep_research_source_binding is None:
+            return None
     trigger_source = str(value.get("triggerSource") or "frontend").strip().lower()
     if trigger_source not in {"frontend", "schedule", "backend"}:
         trigger_source = "backend"
@@ -7529,7 +7548,7 @@ def _workflow_context_storage(value: object) -> dict | None:
             "maximumRunsPerDay": 1,
             "source": reservation_source,
         }
-    return {
+    safe_context = {
         "schemaVersion": "dashboard-workflow-lineage-v1",
         "propId": prop_id,
         "actionId": action_id,
@@ -7543,6 +7562,11 @@ def _workflow_context_storage(value: object) -> dict | None:
         "executionReservation": execution_reservation,
         "pluginProcedure": plugin_procedure,
     }
+    # Keep historical/non-research mission digests stable: this authorization
+    # material exists only on newly dispatched, source-bound Deep Research.
+    if deep_research_source_binding is not None:
+        safe_context["deepResearchSourceBinding"] = deep_research_source_binding
+    return safe_context
 
 
 def workflow_context_read_model(value: object) -> dict | None:
@@ -7570,6 +7594,7 @@ DASHBOARD_WORKFLOW_MAX_CONTRACT_FIELD_CHARS = 12000
 RADAR_WORKFLOW_PROCEDURE_ID = "backend-readonly-indicator-scout"
 TRADING_SYSTEM_WORKFLOW_PROCEDURE_ID = "backend-readonly-system-scout"
 TRADING_SYSTEM_RESEARCH_WORKFLOW_PROCEDURE_ID = "backend-readonly-deep-research"
+TRADING_SYSTEM_RESEARCH_SOURCE_BINDING_VERSION = "deep-research-source-binding-v1"
 TRADING_SYSTEM_WORKFLOW_MAX_CONTRACT_FIELD_CHARS = 16000
 TRADING_SYSTEM_RESEARCH_MAX_CONTRACT_FIELD_CHARS = 48000
 TRADING_SYSTEM_RESEARCH_MAX_OUTPUT_CHARS = 64000
@@ -8393,6 +8418,174 @@ def _normalized_contract_public_url(value: object) -> str | None:
         netloc=parsed.netloc.lower(),
         fragment="",
     ).geturl()
+
+
+def _canonical_deep_research_public_url(value: object) -> str | None:
+    """Use the same unambiguous URL identity that the CLI Runner audits."""
+
+    raw_url = str(value or "").strip()
+    if any(character.isspace() for character in raw_url):
+        return None
+    normalized = _normalized_contract_public_url(raw_url)
+    if not normalized or _radar_source_url_is_direct_artifact(normalized):
+        return None
+    try:
+        parsed = urlparse(normalized)
+        port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    hostname = str(parsed.hostname or "").lower().rstrip(".")
+    rendered_host = f"[{hostname}]" if ":" in hostname else hostname
+    if port is not None and not (
+        (scheme == "http" and port == 80)
+        or (scheme == "https" and port == 443)
+    ):
+        rendered_host = f"{rendered_host}:{port}"
+    canonical = parsed._replace(
+        scheme=scheme,
+        netloc=rendered_host,
+        path=parsed.path or "/",
+        fragment="",
+    ).geturl()
+    return canonical if len(canonical) <= 2000 else None
+
+
+def _deep_research_source_binding_digest(binding: object) -> str:
+    row = binding if isinstance(binding, dict) else {}
+    packet = {
+        "reportId": str(row.get("reportId") or ""),
+        "recordId": str(row.get("recordId") or ""),
+        "sourceKind": str(row.get("sourceKind") or ""),
+        "sourceUrls": list(row.get("sourceUrls") or ()),
+    }
+    return payload_digest(
+        TRADING_SYSTEM_RESEARCH_SOURCE_BINDING_VERSION,
+        json.dumps(
+            packet,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+
+
+def _deep_research_source_binding_from_source(source: object) -> dict | None:
+    """Select two independent URLs from one Backend-resolved report record."""
+
+    row = source if isinstance(source, dict) else {}
+    structured = (
+        row.get("structuredPayload")
+        if isinstance(row.get("structuredPayload"), dict)
+        else {}
+    )
+    raw_urls = structured.get("sourceUrls")
+    report_id = safe_reference(row.get("reportId"))
+    record_id = safe_reference(row.get("recordId"))
+    source_kind = str(row.get("sourceKind") or "").strip()
+    if (
+        not report_id
+        or not record_id
+        or source_kind not in {
+            "report",
+            "verified_catalog_record",
+            "verified_sheet_record",
+        }
+        or not isinstance(raw_urls, list)
+    ):
+        return None
+    source_urls: list[str] = []
+    independence_keys: set[str] = set()
+    for raw_url in raw_urls:
+        normalized = _canonical_deep_research_public_url(raw_url)
+        independence_key = public_evidence_independence_key(normalized)
+        if (
+            not normalized
+            or not independence_key
+            or normalized in source_urls
+            or independence_key in independence_keys
+        ):
+            continue
+        source_urls.append(normalized)
+        independence_keys.add(independence_key)
+        if len(source_urls) == 2:
+            break
+    if len(source_urls) != 2:
+        return None
+    binding = {
+        "schemaVersion": TRADING_SYSTEM_RESEARCH_SOURCE_BINDING_VERSION,
+        "reportId": report_id,
+        "recordId": record_id,
+        "sourceKind": source_kind,
+        "sourceUrls": source_urls,
+    }
+    binding["sourceUrlDigest"] = _deep_research_source_binding_digest(binding)
+    return binding
+
+
+def _deep_research_source_binding_storage(
+    value: object,
+    *,
+    prop_id: str,
+    action_id: str,
+    source: dict | None,
+    inputs: dict,
+) -> dict | None:
+    """Validate the persisted two-URL binding without trusting Mission prose."""
+
+    if not isinstance(value, dict):
+        return None
+    if prop_id != "left_server_racks" or action_id != "deep_research_system":
+        return None
+    raw_urls = value.get("sourceUrls")
+    if not isinstance(raw_urls, list) or len(raw_urls) != 2:
+        return None
+    source_urls = [_canonical_deep_research_public_url(item) for item in raw_urls]
+    independence_keys = [
+        public_evidence_independence_key(item)
+        for item in source_urls
+    ]
+    if (
+        any(not item for item in source_urls)
+        or len(set(source_urls)) != 2
+        or any(not item for item in independence_keys)
+        or len(set(independence_keys)) != 2
+    ):
+        return None
+    report_id = safe_reference(value.get("reportId"))
+    record_id = safe_reference(value.get("recordId"))
+    source_kind = str(value.get("sourceKind") or "").strip()
+    safe_source = source if isinstance(source, dict) else {}
+    if (
+        value.get("schemaVersion")
+        != TRADING_SYSTEM_RESEARCH_SOURCE_BINDING_VERSION
+        or not report_id
+        or not record_id
+        or source_kind
+        not in {"report", "verified_catalog_record", "verified_sheet_record"}
+        or report_id != safe_source.get("reportId")
+        or record_id != safe_source.get("recordId")
+        or source_kind != safe_source.get("kind")
+        or report_id != safe_reference(inputs.get("sourceReportId"))
+        or record_id != safe_reference(inputs.get("sourceRecordId"))
+    ):
+        return None
+    binding = {
+        "schemaVersion": TRADING_SYSTEM_RESEARCH_SOURCE_BINDING_VERSION,
+        "reportId": report_id,
+        "recordId": record_id,
+        "sourceKind": source_kind,
+        "sourceUrls": source_urls,
+    }
+    expected_digest = _deep_research_source_binding_digest(binding)
+    stored_digest = str(value.get("sourceUrlDigest") or "").strip().lower()
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", stored_digest) is None
+        or not secrets.compare_digest(stored_digest, expected_digest)
+    ):
+        return None
+    binding["sourceUrlDigest"] = stored_digest
+    return binding
 
 
 def _normalized_external_research_evidence_url(value: object) -> str | None:
@@ -9903,6 +10096,64 @@ def _trading_system_required_open_urls_for_mission(
         ):
             return [], "trading_system_required_open_urls_invalid"
     return urls, None
+
+
+def _deep_research_required_open_urls_for_mission(
+    mission: object,
+) -> tuple[list[str], str | None]:
+    """Read the exact two sources only from digest-bound Backend lineage."""
+
+    row = mission if isinstance(mission, dict) else {}
+    raw_context = (
+        row.get("workflowContext")
+        if isinstance(row.get("workflowContext"), dict)
+        else {}
+    )
+    is_deep_research_candidate = bool(
+        raw_context.get("propId") == "left_server_racks"
+        and raw_context.get("actionId") == "deep_research_system"
+    )
+    if not is_deep_research_candidate:
+        return [], None
+    context = _workflow_context_storage(raw_context)
+    binding = (
+        context.get("deepResearchSourceBinding")
+        if isinstance(context, dict)
+        and isinstance(context.get("deepResearchSourceBinding"), dict)
+        else None
+    )
+    if (
+        not context
+        or binding is None
+        or _trusted_workflow_guard_intent(row) is None
+        or row.get("toolId") != "codex_web_research"
+        or row.get("reportType") != "trading_system_research_report"
+    ):
+        return [], "trading_system_research_required_open_urls_invalid"
+    source_urls = list(binding.get("sourceUrls") or ())
+    if len(source_urls) != 2:
+        return [], "trading_system_research_required_open_urls_invalid"
+    try:
+        authoritative_source = _workflow_selected_source(
+            "left_server_racks",
+            "deep_research_system",
+            {
+                "sourceReportId": binding.get("reportId"),
+                "sourceRecordId": binding.get("recordId"),
+            },
+        )
+    except (DataIntegrityError, OSError, RequestError, TypeError, ValueError):
+        authoritative_source = None
+    authoritative_binding = _deep_research_source_binding_from_source(
+        authoritative_source
+    )
+    # A digest over attacker-controlled URLs proves integrity only relative to
+    # those same supplied values.  Re-resolve the Backend's current record and
+    # require the complete canonical binding to match before handing any URL to
+    # the Runner.  The worker repeats this check after claiming the Mission.
+    if authoritative_binding != binding:
+        return [], "trading_system_research_source_binding_detached"
+    return source_urls, None
 
 
 def _bounded_corrective_open_verification_receipt(
@@ -12970,11 +13221,89 @@ def dashboard_workflow_output_metrics(output_contract: object) -> dict:
             # A valid receipt cannot normally reach this branch.  Fail closed
             # on corrupted historical data instead of projecting partial prose.
             return sanitize_json_value({"workflowOutput": contract})
+        return _trading_system_research_metrics_storage(metrics)
     return sanitize_json_value(
         metrics,
         collection_limit=240,
         string_limit=TRADING_SYSTEM_RESEARCH_MAX_CONTRACT_FIELD_CHARS,
     )
+
+
+EA_RESEARCH_REPORT_BLUEPRINT_ALIASES = (
+    "eaImplementationBlueprint",
+    "eaBlueprint",
+    "eaReadyBlueprint",
+    "strategyBlueprint",
+    "blueprint",
+)
+
+
+def _trading_system_research_metrics_storage(value: object) -> dict:
+    """Store a validated Blueprint without generic collection truncation.
+
+    Ordinary report metrics remain bounded by the existing presentation
+    sanitizer.  Once a canonical Blueprint is present, however, its own
+    validator has already imposed the stricter 45 KB transport budget and
+    schema/depth constraints.  Re-project it locally and require an exact
+    sanitizer round-trip with a transport-derived collection bound so a valid
+    241+ item list cannot be silently shortened while retaining the old
+    digest.  Secret-like or otherwise lossy content is rejected fail-closed.
+    """
+
+    metrics = value if isinstance(value, dict) else {}
+    implementation_notes = (
+        metrics.get("implementationNotes")
+        if isinstance(metrics.get("implementationNotes"), dict)
+        else {}
+    )
+    has_blueprint = any(
+        alias in metrics for alias in EA_RESEARCH_REPORT_BLUEPRINT_ALIASES
+    ) or any(
+        alias in implementation_notes
+        for alias in EA_RESEARCH_REPORT_BLUEPRINT_ALIASES
+    )
+    if not has_blueprint:
+        return sanitize_json_value(
+            metrics,
+            collection_limit=240,
+            string_limit=TRADING_SYSTEM_RESEARCH_MAX_CONTRACT_FIELD_CHARS,
+        )
+
+    try:
+        normalized = reconstruct_ea_research_from_metrics(metrics)
+        canonical_projection = ea_research_report_projection(normalized)
+    except EAResearchBlueprintValidationError as exc:
+        raise RequestError(
+            "Canonical EA research Blueprint is invalid and was not stored.",
+            422,
+        ) from exc
+
+    # The canonical JSON is capped below this value by its validator.  Using
+    # the same finite transport bound for every collection preserves all valid
+    # schema members without giving unrelated report metrics an unbounded path.
+    exact_projection = sanitize_json_value(
+        canonical_projection,
+        collection_limit=TRADING_SYSTEM_RESEARCH_MAX_CONTRACT_FIELD_CHARS,
+        string_limit=TRADING_SYSTEM_RESEARCH_MAX_CONTRACT_FIELD_CHARS,
+    )
+    if exact_projection != canonical_projection:
+        raise RequestError(
+            "Canonical EA research Blueprint contains unsafe or lossy content and was not stored.",
+            422,
+        )
+
+    stored = sanitize_json_value(
+        metrics,
+        collection_limit=240,
+        string_limit=TRADING_SYSTEM_RESEARCH_MAX_CONTRACT_FIELD_CHARS,
+    )
+    stored.update(exact_projection)
+    # Preserve every canonical alias supplied by the trusted projection.  The
+    # aliases are compatibility entry points used by older local reports.
+    for alias in EA_RESEARCH_REPORT_BLUEPRINT_ALIASES:
+        if alias in metrics:
+            stored[alias] = copy.deepcopy(normalized)
+    return stored
 
 
 def create_report(payload: dict) -> dict:
@@ -12990,6 +13319,12 @@ def create_report(payload: dict) -> dict:
         or ((safe_workflow_context or {}).get("agentTransfer"))
     )
     report_type = str(payload.get("type") or "prop_report")
+    raw_metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+    stored_metrics = (
+        _trading_system_research_metrics_storage(raw_metrics)
+        if report_type == "trading_system_research_report"
+        else sanitize_json_value(raw_metrics)
+    )
     report = {
         "id": report_id,
         "type": report_type,
@@ -13000,17 +13335,7 @@ def create_report(payload: dict) -> dict:
         "linkedPropId": payload.get("linkedPropId"),
         "status": str(payload.get("status") or "ready"),
         "findings": sanitize_json_value(payload.get("findings") if isinstance(payload.get("findings"), list) else []),
-        "metrics": sanitize_json_value(
-            payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {},
-            collection_limit=(
-                240 if report_type == "trading_system_research_report" else 100
-            ),
-            string_limit=(
-                TRADING_SYSTEM_RESEARCH_MAX_CONTRACT_FIELD_CHARS
-                if report_type == "trading_system_research_report"
-                else 8000
-            ),
-        ),
+        "metrics": stored_metrics,
         "risks": sanitize_json_value(payload.get("risks") if isinstance(payload.get("risks"), list) else []),
         "nextActions": sanitize_json_value(payload.get("nextActions") if isinstance(payload.get("nextActions"), list) else []),
         "evidence": evidence_read_model(payload.get("evidence")),
@@ -14567,6 +14892,15 @@ def report_read_model_item(report: dict) -> dict:
         recovered_systems = _trading_system_report_recovered_systems(report)
         if recovered_systems:
             metrics["systems"] = recovered_systems
+    metrics_read_model = sanitize_json_value(metrics)
+    if report.get("type") == "trading_system_research_report":
+        try:
+            metrics_read_model = _trading_system_research_metrics_storage(metrics)
+        except RequestError:
+            # Corrupt historical research remains inspectable only through the
+            # fail-closed eaResearch status below; never turn a read into a
+            # partial canonical success.
+            pass
     return {
         "id": safe_reference(report.get("id")),
         "type": redact_text(str(report.get("type") or "prop_report"), 120),
@@ -14577,7 +14911,7 @@ def report_read_model_item(report: dict) -> dict:
         "linkedPropId": safe_reference(report.get("linkedPropId")),
         "status": redact_text(str(report.get("status") or "ready"), 40),
         "findings": sanitize_json_value(report.get("findings") if isinstance(report.get("findings"), list) else []),
-        "metrics": sanitize_json_value(metrics),
+        "metrics": metrics_read_model,
         "eaResearch": (
             _ea_research_report_read_model(report, metrics)
             if report.get("type") == "trading_system_research_report"
@@ -18140,7 +18474,13 @@ def _dashboard_workflow_forced_model_tier(action_id: object) -> str | None:
     return {
         "discover_trading_systems": "manager_quality",
         "discover_new_indicators": "specialist_balanced",
-        "deep_research_system": "manager_quality",
+        # The strict v2 schema and trusted post-run validator enforce quality.
+        # ``manager_quality`` uses high reasoning and can spend the full hard
+        # timeout on this very large structured envelope before emitting its
+        # final object.  The specialist tier is the contract-owned tier for
+        # analytical EA work and completes the same validated schema with a
+        # bounded medium reasoning pass.
+        "deep_research_system": "specialist_balanced",
     }.get(str(action_id or "").strip())
 
 
@@ -18154,11 +18494,11 @@ def _dashboard_workflow_execution_preferences(
     even when their contract is larger than the generic presentation budget.
     Radar receives 20k and Deep Research receives a dedicated 64k envelope so
     the runner never truncates a complete EA-ready blueprint after web research.
-    The trading-system Portal and deep research also require the
-    manager-quality/high-reasoning tier, while the
-    Radar Website Tool remains on the balanced specialist tier, independent of
-    the general Agent preference. Per-field validation remains bounded and the
-    complete canonical Deep Research envelope is capped at 64k.
+    The trading-system Portal requires the manager-quality/high-reasoning tier.
+    Deep Research and Radar Website Tool use the balanced specialist tier,
+    independent of the general Agent preference; their strict schemas and
+    trusted post-run validators remain authoritative. Per-field validation is
+    bounded and the complete canonical Deep Research envelope is capped at 64k.
     """
 
     preferences = _dashboard_agent_preferences_read_model(settings)
@@ -18230,7 +18570,16 @@ def _dashboard_workflow_execution_preferences(
     elif action_id == "deep_research_system":
         effective["rateReservePercent"] = AUTOMATION_MIN_REMAINING_PERCENT
         effective["timeoutSeconds"] = max(
-            300,
+            # EA-ready Strategy Research v2 is intentionally much denser than
+            # the legacy prose report: it performs live source verification and
+            # must return a complete typed blueprint, lifecycle rules, state
+            # machine, pseudocode, and tests.  Five minutes can terminate the
+            # Codex process while it is still producing otherwise valid JSON,
+            # which leaves a blocked diagnostic report and no Sheet row.  Give
+            # this read-only workflow the same audited hard ceiling as the two
+            # public-web discovery workflows so the structured envelope can
+            # finish atomically.
+            600,
             clamp_int(preferences.get("timeoutSeconds"), 120, 15, 600),
         )
     if action_id == "analyze_daily_market_news":
@@ -22230,7 +22579,7 @@ def _ea_factory_deep_research_records(
         ).strip("_")
         if is_current not in {"1", "true", "yes", "current"}:
             continue
-        if verification_status not in EA_FACTORY_VERIFIED_STATUSES:
+        if verification_status not in EA_FACTORY_CANONICAL_RESEARCH_STATUSES:
             continue
         values = _ea_factory_deep_research_values(row)
         record = _ea_factory_normalize_record(
@@ -22378,6 +22727,11 @@ def _ea_factory_research_source_records(
         for row in mission_rows
         if isinstance(row, dict) and safe_reference(row.get("id"))
     }
+    # Version identity is the authoritative World_System report+record pair,
+    # not the local Deep Research report id.  Resolve the current revision once
+    # across the complete bounded input so an older ready revision can never
+    # replace a newer canonical needs_clarification/not_ea_ready decision.
+    version_index = _research_sheet_build_deep_version_index(report_rows)
     records: list[dict] = []
     for report in report_rows:
         if not isinstance(report, dict):
@@ -22412,6 +22766,15 @@ def _ea_factory_research_source_records(
         ):
             continue
         source = context.get("source") if isinstance(context.get("source"), dict) else {}
+        source_identity = _research_sheet_deep_source_identity(report_id, source)
+        source_versions = (
+            version_index.get(source_identity["versionKey"])
+            if isinstance(version_index.get(source_identity["versionKey"]), dict)
+            else {}
+        )
+        current_report_id = safe_reference(source_versions.get("currentReportId"))
+        if current_report_id and current_report_id != report_id:
+            continue
         try:
             research_blueprint = reconstruct_ea_research_from_metrics(metrics)
         except EAResearchBlueprintValidationError:
@@ -22448,10 +22811,11 @@ def _ea_factory_research_source_records(
                 if isinstance(research_blueprint, dict)
                 else None
             ),
-            "record_id": (
-                safe_reference(source.get("recordId"))
-                or f"research-{report_id}"
-            ),
+            # Use the exact same collision-safe identity as the Deep_Research
+            # Sheet projection.  This makes the live runtime fallback and its
+            # archived Sheet copy one logical record while still preserving two
+            # source reports that happen to reuse the same recordId.
+            "record_id": source_identity["eaFactoryRecordId"],
             "system_name": identity_name or report.get("title"),
             "strategy_family": identity_family or system_identity,
             "symbols_market": metrics.get("suitableMarket"),
@@ -22576,9 +22940,19 @@ def _ea_factory_source_catalog(
             # Sheet projection is first in ``combined``.  A corrupt/legacy or
             # otherwise non-build-ready Sheet copy must not hide the verified
             # runtime report from which that same row can be repaired.
+            existing_has_canonical_research_decision = bool(
+                existing.get("sourceKind")
+                in {"verified_deep_research", "verified_deep_research_sheet"}
+                and isinstance(existing.get("eaImplementationBlueprint"), dict)
+                and re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(existing.get("eaBlueprintDigest") or ""),
+                )
+            )
             if (
                 existing.get("buildReady") is not True
                 and record.get("buildReady") is True
+                and not existing_has_canonical_research_decision
                 and (
                     source_record_id not in seen_source_ids
                     or source_record_id
@@ -26353,8 +26727,23 @@ def create_ea_factory_build(payload: object) -> dict:
                 )
             raise RequestError("EA Factory source record was not found.", 404)
         if source_record.get("buildReady") is not True:
-            missing = ", ".join(source_record.get("missingCoreFields") or [])
-            raise RequestError(f"EA Factory source is incomplete or unverified: {missing}", 422)
+            reasons: list[str] = []
+            for raw_reason in [
+                *(source_record.get("missingCoreFields") or []),
+                *(source_record.get("readinessIssues") or []),
+            ]:
+                reason = redact_text(str(raw_reason or ""), 160).strip()
+                if reason and reason not in reasons:
+                    reasons.append(reason)
+                if len(reasons) >= 12:
+                    break
+            if not reasons:
+                reasons.append("source_not_build_ready")
+            raise RequestError(
+                "EA Factory source is incomplete or unverified: "
+                + ", ".join(reasons),
+                422,
+            )
         if isinstance(reservation, dict):
             if reservation.get("sourceRecordDigest") != source_record.get("recordDigest"):
                 raise RequestError("EA Factory source changed after the create request was reserved.", 409)
@@ -32699,6 +33088,7 @@ def _workflow_prompt(
         ),
         "deep_research_system": (
             "วิจัยเฉพาะ system record ที่ Backend เลือกและ bind ไว้ใน Source เท่านั้น ห้ามสลับไปเป็นระบบอื่น. "
+            "Runner จะ bind URL ต้นทาง 2 รายการแยกจาก Mission: เปิดตรงทั้งคู่ ห้ามค้นกว้าง เปลี่ยน หรือเพิ่ม URL; evidence/sourceLinks ต้องตรงชุดนั้น. "
             "แตกหลักฐานเป็น EA-ready Strategy Research v2 ที่ใช้ ruleId/operand/operator/timeframe/bar shift ได้ตรง ๆ; "
             "ส่ง object research ตาม Output Schema เท่านั้น แล้ว Runner จะตรวจ blueprint/digest/projection. "
             "กำหนด barSemantics ให้ชัด: bar 0 คือแท่งกำลังก่อตัว, bar 1 คือแท่งปิดล่าสุด, bar 2 คือแท่งปิดก่อนหน้า, "
@@ -32708,6 +33098,8 @@ def _workflow_prompt(
             "ให้สร้าง blockingIssue และ eaHandoffAllowed=false ห้ามเดา. "
             "ระบุ scope และ inputs ตาม schema; indicators ต้อง bind timeframe/outputLine และมี period/method/shift/buffer หรือ inputRef จริง ห้าม parameters={}. "
             "setup/entry/exit แยก Buy/Sell; ทุกกฎต้องเป็น typed expression และระบุ ruleId/phase/side/evaluationEvent/sourceRefs/humanTextTh ตรงกล่อง. "
+            "กฎใน entry.buy และ exit.buy ต้อง side=buy เท่านั้น; entry.sell และ exit.sell ต้อง side=sell เท่านั้น ห้าม side=both ในกล่องเฉพาะฝั่ง. "
+            "delay หรือ policy ที่ใช้ร่วมกันต้องอยู่ใน execution หรือ unknowns ห้ามคัดลอกเป็นกฎซ้ำใน entry ของแต่ละฝั่ง. "
             "closed-bar ใช้ new_closed_bar และ shift อยู่ใน operand; ห้าม free text หรือ mirror กฎข้ามฝั่ง. "
             "ถ้าแหล่งระบุเพียงฝั่งเดียว ห้าม mirror อีกฝั่งเอง ให้ disabled พร้อมเหตุผลและ blocker ตามผลกระทบ. "
             "TP/SL ต้องมี default+sideOverrides และ method/reference/unit/distance/formula/buffer/placement/min-stop/freeze/neverWorsen. "
@@ -32724,10 +33116,12 @@ def _workflow_prompt(
             "closeOrder และ lotFormula ของ hedge ครบ ห้ามใช้ object เปล่าหรือข้อความกว้าง ๆ แทนสมการ. "
             "lotMode ใช้ enum ใน schema (sequence ต้องมี lotSequence บวก); execution ต้องมี duplicate/price-normalize/bounded-retry/restart policy; "
             "limit/stop ต้องเปิด pendingOrders พร้อม typed orderType/entryPrice/expiry/cancel-replace. "
-            "กำหนด execution order และ stateMachine อย่างน้อย FLAT กับ LONG/SHORT ตามฝั่งที่เปิดใช้; เพิ่ม PENDING/RECOVERY/COOLDOWN/HALTED เมื่อ lifecycle นั้นถูกใช้ พร้อม precedence "
-            "emergency/equity stop > daily stop > hard SL > basket exit > normal exit > partial > BE/trailing > recovery > new entry. "
+            "กำหนด stateMachine อย่างน้อย FLAT กับ LONG/SHORT; เพิ่ม PENDING/RECOVERY/COOLDOWN/HALTED เมื่อใช้ lifecycle นั้น. "
+            "execution.evaluationOrder/precedence ต้องเป็น safety > exit > manage > recovery (เฉพาะ enabled) > entry; "
+            "exit มาก่อนแก้ไข/เพิ่ม exposure, management ห้ามทำให้ stop แย่ลง และ recovery ตรวจ abort/basket exit/cap ก่อนเพิ่มระดับ. "
             "transition/pseudocode ต้องอ้าง enabled ruleId; tests ต้องมี positive/negative (+boundary เมื่อ Cross) สำหรับ setup/entry/exit "
             "และ lifecycle สำหรับ management/recovery. "
+            "เมื่อแหล่งระบุ EMA/SMA/SMMA/LWMA ให้ method ใช้ enum ema/sma/smma/lwma ตรงชนิดนั้น; ใช้ unknown เฉพาะเมื่อแหล่งบอกเพียง MA โดยไม่ระบุวิธีจริง. "
             "ค่าที่มีผลต่อโค้ดต้องมี sourceStatus/sourceRefs ตาม schema; derived ต้องมีหลักฐาน, assumption ต้องมี evidence+confirmed affectsPaths; "
             "กฎหลัก assumption ล้วนห้าม ready—ถ้าไม่รองรับให้ unknown/blocker. "
             "ห้ามสร้างตัวเลขที่ไม่ปรากฏในแหล่ง; assumptions, unknowns และ conflicts ต้องมี path กับคำถามภาษาไทยที่ใช้สร้าง revision ถัดไป. "
@@ -33569,11 +33963,17 @@ def _dashboard_workflow_lineage(
             "type": redact_text(str(source.get("type") or ""), 120),
             "status": redact_text(str(source.get("status") or ""), 40),
         }
+    deep_research_source_binding = (
+        _deep_research_source_binding_from_source(source)
+        if prop_id == "left_server_racks"
+        and action_id == "deep_research_system"
+        else None
+    )
     normalized_trigger = str(trigger_source or "frontend").strip().lower()
     if normalized_trigger not in {"frontend", "schedule", "backend"}:
         normalized_trigger = "backend"
     trusted_plugin = plugin_profile if isinstance(plugin_profile, dict) else {}
-    return sanitize_json_value({
+    lineage = {
         "schemaVersion": "dashboard-workflow-lineage-v1",
         "propId": safe_reference(prop_id),
         "actionId": safe_reference(action_id),
@@ -33613,7 +34013,10 @@ def _dashboard_workflow_lineage(
             "screenshotPolicy": trusted_plugin.get("screenshotPolicy"),
             "adapterStatus": trusted_plugin.get("adapterStatus"),
         },
-    })
+    }
+    if deep_research_source_binding is not None:
+        lineage["deepResearchSourceBinding"] = deep_research_source_binding
+    return sanitize_json_value(lineage)
 
 
 def deliver_dashboard_report(prop_id: str, payload: object) -> dict:
@@ -33917,6 +34320,16 @@ def run_dashboard_workflow_action(
             trigger_source=trigger_source,
             plugin_profile=plugin_profile,
         )
+        if (
+            prop_id == "left_server_racks"
+            and action_id == "deep_research_system"
+            and not isinstance(lineage.get("deepResearchSourceBinding"), dict)
+        ):
+            stage = "deep_research_source_binding_invalid"
+            raise RequestError(
+                "ระบบที่เลือกต้องมี URL สาธารณะที่ Backend ตรวจสอบแล้วสองแหล่งจากคนละโดเมน",
+                422,
+            )
         if action.get("localHandler"):
             stage = "local_handler"
             return _complete_local_dashboard_workflow_action(
@@ -64113,8 +64526,23 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
     tier = (load_orchestration_contract().get("modelTiers") or {}).get(tier_id) or {}
     max_runs = clamp_int(tier.get("maxRunsPerHour"), 12, 1, 200)
     rate_key = f"real:{agent_id}:{tool_id}:{tier_id}"
-    queued_required_open_urls, queued_required_open_urls_error = (
+    (
+        queued_corrective_required_open_urls,
+        queued_corrective_required_open_urls_error,
+    ) = (
         _trading_system_required_open_urls_for_mission(mission)
+    )
+    (
+        queued_research_required_open_urls,
+        queued_research_required_open_urls_error,
+    ) = _deep_research_required_open_urls_for_mission(mission)
+    queued_required_open_urls = (
+        queued_research_required_open_urls
+        or queued_corrective_required_open_urls
+    )
+    queued_required_open_urls_error = (
+        queued_research_required_open_urls_error
+        or queued_corrective_required_open_urls_error
     )
     queued_radar_candidate_urls, queued_radar_candidate_urls_error = (
         _radar_corrective_candidate_urls_for_mission(mission)
@@ -64128,13 +64556,13 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
         queued_radar_dynamic_reservation,
     ) = _radar_dynamic_open_reservation_digest(mission)
     queued_reservation_digest = (
-        payload_digest(queued_required_open_urls)
-        if queued_required_open_urls
+        payload_digest(queued_corrective_required_open_urls)
+        if queued_corrective_required_open_urls
         else queued_radar_reservation_digest
     )
     corrective_open_hourly_reservation_required = bool(
         queued_reservation_digest
-        and queued_required_open_urls_error is None
+        and queued_corrective_required_open_urls_error is None
         and queued_radar_candidate_urls_error is None
         and queued_radar_batch_repair_error is None
         and queued_radar_reservation_error is None
@@ -64368,8 +64796,23 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
             if read_only_worker
             else ["workspace", "frontend", "docs", "assets-source"]
         )
-        required_open_urls, required_open_urls_error = (
+        (
+            corrective_required_open_urls,
+            corrective_required_open_urls_error,
+        ) = (
             _trading_system_required_open_urls_for_mission(claimed)
+        )
+        (
+            research_required_open_urls,
+            research_required_open_urls_error,
+        ) = _deep_research_required_open_urls_for_mission(claimed)
+        required_open_urls = (
+            research_required_open_urls
+            or corrective_required_open_urls
+        )
+        required_open_urls_error = (
+            research_required_open_urls_error
+            or corrective_required_open_urls_error
         )
         radar_candidate_urls, radar_candidate_urls_error = (
             _radar_corrective_candidate_urls_for_mission(claimed)
@@ -64383,13 +64826,13 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
             radar_dynamic_reservation,
         ) = _radar_dynamic_open_reservation_digest(claimed)
         reservation_digest = (
-            payload_digest(required_open_urls)
-            if required_open_urls
+            payload_digest(corrective_required_open_urls)
+            if corrective_required_open_urls
             else radar_reservation_digest
         )
         claimed_requires_hourly_reservation = bool(
             reservation_digest
-            and required_open_urls_error is None
+            and corrective_required_open_urls_error is None
             and radar_candidate_urls_error is None
             and radar_batch_repair_error is None
             and radar_reservation_error is None
@@ -64440,8 +64883,8 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                     "workStatus": "blocked",
                     "status": required_open_failure,
                     "message": (
-                        "ข้อมูล URL สำหรับ corrective research ไม่ตรงกับ "
-                        "Backend metadata/digest หรือไม่มี hourly reservation "
+                        "ข้อมูล URL สำหรับ public research ไม่ตรงกับ "
+                        "Backend metadata/digest หรือ policy reservation "
                         "ระบบจึงหยุดก่อนเปิด Codex"
                     ),
                     "blockedCapability": required_open_failure,

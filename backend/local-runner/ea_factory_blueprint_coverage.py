@@ -6,9 +6,11 @@ import re
 from collections.abc import Mapping
 
 
-REQUIREMENTS_SCHEMA_VERSION = "ea-factory-blueprint-coverage-requirements-v2"
-MANIFEST_SCHEMA_VERSION = "ea-factory-blueprint-coverage-manifest-v2"
+REQUIREMENTS_SCHEMA_VERSION = "ea-factory-blueprint-coverage-requirements-v3"
+MANIFEST_SCHEMA_VERSION = "ea-factory-blueprint-coverage-manifest-v3"
 COVERAGE_KEYS = (
+    "blueprintDigests",
+    "semanticDigests",
     "ruleIds",
     "inputIds",
     "indicatorIds",
@@ -22,6 +24,8 @@ _ID_FIELD_BY_KEY = {
     "testCaseIds": ("testCases", "caseId"),
 }
 _MARKER_PREFIX_BY_KEY = {
+    "blueprintDigests": "BLUEPRINT",
+    "semanticDigests": "SEMANTIC",
     "ruleIds": "RULE",
     "inputIds": "INPUT",
     "indicatorIds": "INDICATOR",
@@ -30,6 +34,38 @@ _MARKER_PREFIX_BY_KEY = {
 }
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _SUPPORTED_PLATFORMS = {"mt4", "mt5", "tradingview"}
+_SEMANTIC_BINDING_KINDS = {
+    "bar_semantics",
+    "execution_contract",
+    "indicator",
+    "management_feature",
+    "protection",
+    "pseudocode",
+    "recovery_safety",
+    "risk_sizing",
+    "state_transition",
+    "test_vector",
+}
+_SEMANTIC_BINDING_ACTIONS = {
+    "cancel_pending",
+    "close_partial",
+    "close_position",
+    "entry",
+    "exit",
+    "indicator",
+    "initialization",
+    "management",
+    "modify_pending",
+    "move_stop_loss",
+    "move_take_profit",
+    "pending",
+    "place_pending",
+    "replace_pending",
+    "scale_in",
+    "scale_out",
+    "state_decision",
+    "verification",
+}
 _MQL_LIFECYCLE_ROOTS = {
     "OnInit",
     "OnTick",
@@ -39,6 +75,7 @@ _MQL_LIFECYCLE_ROOTS = {
     "init",
 }
 _MQL_TRADING_ROOTS = {"OnTick", "OnTimer", "start"}
+_MQL_INITIALIZATION_ROOTS = {"OnInit", "init"}
 _CONTROL_NAMES = {"if", "for", "while", "switch", "catch"}
 _COMPARISON_PATTERN = re.compile(r"(?:<=|>=|==|!=|<|>)")
 _INDICATOR_PATTERN = re.compile(
@@ -66,8 +103,20 @@ _MQL_CTRADE_EXIT_PATTERN = re.compile(
 _MQL_CTRADE_MANAGEMENT_PATTERN = re.compile(
     r"\.\s*(?:PositionModify|PositionClosePartial)\s*\(", re.IGNORECASE
 )
+_MQL_PENDING_PATTERN = re.compile(
+    r"\bOrderSend\s*\([^;{}]*(?:OP_BUYLIMIT|OP_BUYSTOP|OP_SELLLIMIT|OP_SELLSTOP)",
+    re.IGNORECASE,
+)
+_MQL_CTRADE_PENDING_PATTERN = re.compile(
+    r"\.\s*(?:BuyLimit|SellLimit|BuyStop|SellStop|BuyStopLimit|SellStopLimit|OrderOpen)\s*\(",
+    re.IGNORECASE,
+)
 _PINE_ENTRY_PATTERN = re.compile(r"\bstrategy\.(?:entry|order)\s*\(")
 _PINE_EXIT_PATTERN = re.compile(r"\bstrategy\.(?:close|close_all|exit)\s*\(")
+_PINE_PENDING_PATTERN = re.compile(
+    r"\bstrategy\.(?:entry|order)\s*\([^\n]*(?:\bstop\s*=|\blimit\s*=)",
+    re.IGNORECASE,
+)
 _STOP_LOSS_PATTERN = re.compile(
     r"\b(?:stoploss|stop_loss|sl_pips|sl_points|stopPrice|stop_price|sl)\b|"
     r"\bstop\s*=",
@@ -107,14 +156,40 @@ def _rule_ids(node: object) -> set[str]:
     return result
 
 
+def _canonical_rule_phase(value: object) -> str:
+    phase = str(value or "").strip().lower()
+    # `modify` is the only management phase in the canonical Blueprint v2
+    # schema.  Keep the legacy spellings fail-safe for an already persisted
+    # document, but never depend on them when deriving the coverage contract.
+    if phase in {"management", "order_management"}:
+        return "modify"
+    return phase
+
+
+def _rule_action(phase: str, structural_action: str = "") -> str:
+    if structural_action in {"pending", "recovery"}:
+        return structural_action
+    return {
+        "entry": "entry",
+        "exit": "exit",
+        "modify": "management",
+        "recovery": "recovery",
+    }.get(phase, "other")
+
+
 def _rule_roles(node: object) -> list[dict[str, str]]:
     """Collect the stable phase/side role for every canonical rule ID."""
 
     result: dict[str, dict[str, str]] = {}
 
-    def visit(value: object, inherited_phase: str = "", inherited_side: str = "") -> None:
+    def visit(
+        value: object,
+        inherited_phase: str = "",
+        inherited_side: str = "",
+        inherited_action: str = "",
+    ) -> None:
         if isinstance(value, Mapping):
-            phase = str(value.get("phase") or inherited_phase).strip().lower()
+            phase = _canonical_rule_phase(value.get("phase") or inherited_phase)
             side = str(value.get("side") or inherited_side).strip().lower()
             rule_id = value.get("ruleId")
             if isinstance(rule_id, str) and rule_id.strip():
@@ -122,19 +197,26 @@ def _rule_roles(node: object) -> list[dict[str, str]]:
                     "id": rule_id.strip(),
                     "phase": phase or "other",
                     "side": side or "both",
+                    "action": _rule_action(phase, inherited_action),
                 }
             for key, child in value.items():
                 child_phase = phase
                 child_side = side
+                child_action = inherited_action
                 lexical_key = str(key).strip().lower()
                 if lexical_key in {"setup", "entry", "exit", "management", "order_management"}:
-                    child_phase = lexical_key.replace("order_", "")
+                    child_phase = _canonical_rule_phase(lexical_key)
+                if lexical_key == "recovery":
+                    child_phase = "recovery"
+                    child_action = "recovery"
+                if lexical_key in {"pendingorders", "pending_orders"}:
+                    child_action = "pending"
                 if lexical_key in {"buy", "sell", "both"}:
                     child_side = lexical_key
-                visit(child, child_phase, child_side)
+                visit(child, child_phase, child_side, child_action)
         elif isinstance(value, (list, tuple)):
             for child in value:
-                visit(child, inherited_phase, inherited_side)
+                visit(child, inherited_phase, inherited_side, inherited_action)
 
     visit(node)
     return [result[key] for key in sorted(result)]
@@ -150,17 +232,296 @@ def _semantic_profile(blueprint: Mapping[str, object]) -> dict:
     tp_sl = blueprint.get("tpSl") if isinstance(blueprint.get("tpSl"), Mapping) else {}
     stop_loss = tp_sl.get("stopLoss") if isinstance(tp_sl.get("stopLoss"), Mapping) else {}
     take_profit = tp_sl.get("takeProfit") if isinstance(tp_sl.get("takeProfit"), Mapping) else {}
-    return {
+    management = (
+        blueprint.get("orderManagement")
+        if isinstance(blueprint.get("orderManagement"), Mapping)
+        else {}
+    )
+    pending = (
+        management.get("pendingOrders")
+        if isinstance(management.get("pendingOrders"), Mapping)
+        else {}
+    )
+    recovery = (
+        blueprint.get("recovery")
+        if isinstance(blueprint.get("recovery"), Mapping)
+        else {}
+    )
+    enabled_management_features = sorted(
+        key
+        for key, value in management.items()
+        if key != "rules"
+        and isinstance(value, Mapping)
+        and value.get("enabled") is True
+    )
+    state_machine = blueprint.get("stateMachine")
+    pending_state_ids: set[str] = set()
+    if isinstance(state_machine, list):
+        for state in state_machine:
+            if not isinstance(state, Mapping):
+                continue
+            state_id = str(state.get("state") or "").strip()
+            transitions = state.get("transitions")
+            transition_targets = {
+                str(transition.get("to") or "").strip()
+                for transition in transitions
+                if isinstance(transitions, list) and isinstance(transition, Mapping)
+            } if isinstance(transitions, list) else set()
+            if state_id.upper() == "PENDING":
+                pending_state_ids.add(state_id)
+            if any(target.upper() == "PENDING" for target in transition_targets):
+                pending_state_ids.add(state_id)
+                pending_state_ids.update(
+                    target for target in transition_targets if target.upper() == "PENDING"
+                )
+    entry = blueprint.get("entry") if isinstance(blueprint.get("entry"), Mapping) else {}
+    pending_entry_rule_ids: set[str] = set()
+    pending_entry_type = False
+    for side in entry.values():
+        if not isinstance(side, Mapping) or side.get("enabled") is not True:
+            continue
+        if str(side.get("orderType") or "market").strip().lower() == "market":
+            continue
+        pending_entry_type = True
+        pending_entry_rule_ids.update(_rule_ids(side.get("rules")))
+    if pending_entry_rule_ids:
+        roles = [
+            {**row, "action": "pending"}
+            if row["id"] in pending_entry_rule_ids and row.get("action") == "entry"
+            else row
+            for row in roles
+        ]
+    def role_ids(action: str) -> list[str]:
+        return sorted(row["id"] for row in roles if row.get("action") == action)
+
+    profile = {
         "ruleRoles": roles,
-        "requiresEntry": any(row["phase"] == "entry" for row in roles),
-        "requiresExit": any(row["phase"] == "exit" for row in roles),
-        "requiresManagement": any(row["phase"] == "management" for row in roles),
+        "managementRuleIds": role_ids("management"),
+        "pendingRuleIds": role_ids("pending"),
+        "recoveryRuleIds": role_ids("recovery"),
+        "pendingStateIds": sorted(pending_state_ids),
+        "enabledManagementFeatures": enabled_management_features,
+        "requiresEntry": any(row["action"] in {"entry", "pending"} for row in roles),
+        "requiresExit": any(row["action"] == "exit" for row in roles),
+        "requiresManagement": bool(
+            enabled_management_features or role_ids("management")
+        ),
+        "requiresPendingOrder": bool(
+            pending.get("enabled") is True
+            or role_ids("pending")
+            or pending_state_ids
+            or pending_entry_type
+        ),
+        "requiresRecovery": bool(
+            recovery.get("enabled") is True or role_ids("recovery")
+        ),
         "requiresStopLoss": stop_loss.get("enabled") is True,
         "requiresTakeProfit": take_profit.get("enabled") is True,
         "requiresClosedBar": (
             str(bar_semantics.get("evaluateOn") or "").lower() == "new_closed_bar"
         ),
     }
+    profile["semanticBindings"] = _semantic_bindings(blueprint, profile)
+    return profile
+
+
+def _semantic_binding(
+    kind: str,
+    identity: str,
+    value: object,
+    *,
+    actions: tuple[str, ...] = (),
+) -> dict[str, object]:
+    digest = _sha256(value)
+    identifier = f"{kind}:{identity}:{digest}"
+    return {
+        "id": identifier,
+        "kind": kind,
+        "identity": identity,
+        "digest": digest,
+        "actions": sorted(set(actions)),
+    }
+
+
+def _semantic_bindings(
+    blueprint: Mapping[str, object],
+    profile: Mapping[str, object],
+) -> list[dict[str, object]]:
+    """Bind exact executable subtrees, not only their stable record IDs.
+
+    The whole-blueprint marker remains useful as an immutable provenance seal,
+    but it is intentionally insufficient on its own.  These independently
+    salted markers force generated source to acknowledge the exact canonical
+    semantics at the action that consumes them.  Therefore replacing only the
+    top-level digest marker cannot make stale code pass after an executable
+    Blueprint mutation.
+    """
+
+    bindings: list[dict[str, object]] = []
+    indicators = blueprint.get("indicators")
+    if isinstance(indicators, list):
+        for record in indicators:
+            if not isinstance(record, Mapping):
+                continue
+            indicator_id = str(record.get("indicatorId") or "").strip()
+            if indicator_id:
+                bindings.append(
+                    _semantic_binding(
+                        "indicator",
+                        indicator_id,
+                        record,
+                        actions=("indicator",),
+                    )
+                )
+
+    risk = blueprint.get("riskAndSizing")
+    if isinstance(risk, Mapping):
+        bindings.append(
+            _semantic_binding("risk_sizing", "root", risk, actions=("entry",))
+        )
+
+    protection = blueprint.get("tpSl")
+    if isinstance(protection, Mapping):
+        bindings.append(
+            _semantic_binding("protection", "root", protection, actions=("entry",))
+        )
+
+    management = blueprint.get("orderManagement")
+    enabled_features = set(profile.get("enabledManagementFeatures") or [])
+    if isinstance(management, Mapping):
+        for feature_name in sorted(enabled_features):
+            if feature_name == "partialClose":
+                continue
+            feature = management.get(feature_name)
+            if not isinstance(feature, Mapping):
+                continue
+            action_record = feature.get("action")
+            action_kind = (
+                str(action_record.get("kind") or "").strip()
+                if isinstance(action_record, Mapping)
+                else ""
+            )
+            bindings.append(
+                _semantic_binding(
+                    "management_feature",
+                    feature_name,
+                    feature,
+                    actions=(action_kind or "management",),
+                )
+            )
+        partial = management.get("partialClose")
+        if isinstance(partial, Mapping) and partial.get("enabled") is True:
+            bindings.append(
+                _semantic_binding(
+                    "management_feature",
+                    "partialClose",
+                    partial,
+                    actions=("close_partial",),
+                )
+            )
+
+    recovery = blueprint.get("recovery")
+    if isinstance(recovery, Mapping) and recovery.get("enabled") is True:
+        # Active recovery always has bounded entry and basket abort/reset/exit
+        # semantics under Blueprint v2.  The same exact digest must therefore
+        # participate in both reachable action families.
+        bindings.append(
+            _semantic_binding(
+                "recovery_safety",
+                str(recovery.get("mode") or "active"),
+                recovery,
+                actions=("entry", "exit"),
+            )
+        )
+
+    roles = {
+        str(row.get("id")): str(row.get("action") or "other")
+        for row in profile.get("ruleRoles", [])
+        if isinstance(row, Mapping) and isinstance(row.get("id"), str)
+    }
+    state_machine = blueprint.get("stateMachine")
+    if isinstance(state_machine, list):
+        for state in state_machine:
+            if not isinstance(state, Mapping):
+                continue
+            state_id = str(state.get("state") or "").strip()
+            if not state_id:
+                continue
+            actions: set[str] = set()
+            transitions = state.get("transitions")
+            if isinstance(transitions, list):
+                for transition in transitions:
+                    if not isinstance(transition, Mapping):
+                        continue
+                    target = str(transition.get("to") or "").upper()
+                    if state_id.upper() == "PENDING" or target == "PENDING":
+                        actions.add("pending")
+                    refs = transition.get("whenRuleIds")
+                    if isinstance(refs, list):
+                        for rule_id in refs:
+                            action = roles.get(str(rule_id), "other")
+                            actions.add("entry" if action == "recovery" else action)
+            actions.discard("other")
+            if not actions:
+                actions.add("state_decision")
+            bindings.append(
+                _semantic_binding(
+                    "state_transition",
+                    state_id,
+                    state,
+                    actions=tuple(actions),
+                )
+            )
+
+    test_cases = blueprint.get("testCases")
+    if isinstance(test_cases, list):
+        for record in test_cases:
+            if not isinstance(record, Mapping):
+                continue
+            case_id = str(record.get("caseId") or "").strip()
+            if case_id:
+                bindings.append(
+                    _semantic_binding(
+                        "test_vector",
+                        case_id,
+                        record,
+                        actions=("verification",),
+                    )
+                )
+
+    pseudocode = blueprint.get("pseudocode")
+    if isinstance(pseudocode, Mapping):
+        bindings.append(
+            _semantic_binding(
+                "pseudocode",
+                "root",
+                pseudocode,
+                actions=("initialization",),
+            )
+        )
+
+    execution = blueprint.get("execution")
+    precedence = blueprint.get("precedence")
+    if isinstance(execution, Mapping) and isinstance(precedence, list):
+        bindings.append(
+            _semantic_binding(
+                "execution_contract",
+                "root",
+                {"execution": execution, "precedence": precedence},
+                actions=("initialization",),
+            )
+        )
+
+    if isinstance(bar_semantics := blueprint.get("barSemantics"), Mapping):
+        bindings.append(
+            _semantic_binding(
+                "bar_semantics",
+                "root",
+                bar_semantics,
+                actions=("initialization",),
+            )
+        )
+    return sorted(bindings, key=lambda row: str(row["id"]))
 
 
 def _record_ids(blueprint: Mapping[str, object], array_key: str, id_key: str) -> list[str]:
@@ -191,11 +552,20 @@ def build_coverage_requirements(
     blueprint: Mapping[str, object],
     blueprint_digest: str,
 ) -> dict:
-    if not isinstance(blueprint, Mapping) or not _SHA256_PATTERN.fullmatch(
-        str(blueprint_digest or "").lower()
+    claimed_blueprint_digest = str(blueprint_digest or "").lower()
+    if (
+        not isinstance(blueprint, Mapping)
+        or not _SHA256_PATTERN.fullmatch(claimed_blueprint_digest)
+        or _sha256(blueprint) != claimed_blueprint_digest
     ):
         raise ValueError("EA Factory Blueprint coverage binding is invalid")
+    semantic_profile = _semantic_profile(blueprint)
     required_ids = {
+        "blueprintDigests": [claimed_blueprint_digest],
+        "semanticDigests": [
+            str(row["id"])
+            for row in semantic_profile["semanticBindings"]
+        ],
         "ruleIds": sorted(_rule_ids(blueprint)),
         **{
             key: _record_ids(blueprint, array_key, id_key)
@@ -211,10 +581,10 @@ def build_coverage_requirements(
     }
     result = {
         "schemaVersion": REQUIREMENTS_SCHEMA_VERSION,
-        "eaBlueprintDigest": str(blueprint_digest).lower(),
+        "eaBlueprintDigest": claimed_blueprint_digest,
         "requiredIds": required_ids,
         "requiredMarkers": required_markers,
-        "semanticProfile": _semantic_profile(blueprint),
+        "semanticProfile": semantic_profile,
     }
     result["requirementsDigest"] = _sha256(result)
     return result
@@ -512,6 +882,19 @@ def _mql_action_in_text(
                 and re.search(r"\bTRADE_ACTION_DEAL\b", source)
             )
         )
+    if action == "pending":
+        return bool(
+            _MQL_PENDING_PATTERN.search(source)
+            or (has_ctrade and _MQL_CTRADE_PENDING_PATTERN.search(source))
+            or (
+                has_order_send
+                and re.search(r"\bTRADE_ACTION_PENDING\b", source)
+                and re.search(
+                    r"\bORDER_TYPE_(?:BUY|SELL)_(?:LIMIT|STOP|STOP_LIMIT)\b",
+                    source,
+                )
+            )
+        )
     if action == "exit":
         return bool(
             _MQL_EXIT_PATTERN.search(source)
@@ -529,6 +912,70 @@ def _mql_action_in_text(
                 and re.search(r"\bTRADE_ACTION_SLTP\b", source)
             )
         )
+    if action in {"move_stop_loss", "move_take_profit"}:
+        return bool(
+            re.search(r"\bOrderModify\s*\(", source)
+            or (
+                has_ctrade
+                and re.search(r"\.\s*PositionModify\s*\(", source, re.IGNORECASE)
+            )
+            or (
+                has_order_send
+                and re.search(r"\bTRADE_ACTION_SLTP\b", source)
+            )
+        )
+    if action == "close_partial":
+        return bool(
+            re.search(r"\bOrderClose\s*\(", source)
+            or (
+                has_ctrade
+                and re.search(r"\.\s*PositionClosePartial\s*\(", source, re.IGNORECASE)
+            )
+            or (has_order_send and has_position_binding)
+        )
+    if action == "scale_out":
+        return bool(
+            _mql_action_in_text(source, "close_partial", has_ctrade=has_ctrade)
+            or (
+                has_ctrade
+                and re.search(r"\.\s*PositionClose\s*\(", source, re.IGNORECASE)
+            )
+        )
+    if action == "close_position":
+        return _mql_action_in_text(source, "exit", has_ctrade=has_ctrade)
+    if action == "scale_in":
+        return _mql_action_in_text(source, "entry", has_ctrade=has_ctrade)
+    if action == "place_pending":
+        return _mql_action_in_text(source, "pending", has_ctrade=has_ctrade)
+    if action == "cancel_pending":
+        return bool(
+            re.search(r"\bOrderDelete\s*\(", source)
+            or (
+                has_ctrade
+                and re.search(r"\.\s*OrderDelete\s*\(", source, re.IGNORECASE)
+            )
+            or (
+                has_order_send
+                and re.search(r"\bTRADE_ACTION_REMOVE\b", source)
+            )
+        )
+    if action == "modify_pending":
+        return bool(
+            re.search(r"\bOrderModify\s*\(", source)
+            or (
+                has_ctrade
+                and re.search(r"\.\s*OrderModify\s*\(", source, re.IGNORECASE)
+            )
+            or (
+                has_order_send
+                and re.search(r"\bTRADE_ACTION_MODIFY\b", source)
+            )
+        )
+    if action == "replace_pending":
+        return bool(
+            _mql_action_in_text(source, "cancel_pending", has_ctrade=has_ctrade)
+            and _mql_action_in_text(source, "pending", has_ctrade=has_ctrade)
+        )
     return False
 
 
@@ -540,7 +987,24 @@ def _action_in_text(
     has_ctrade: bool,
 ) -> bool:
     if target_platform == "tradingview":
-        pattern = _PINE_ENTRY_PATTERN if action == "entry" else _PINE_EXIT_PATTERN
+        pattern = {
+            "entry": _PINE_ENTRY_PATTERN,
+            "exit": _PINE_EXIT_PATTERN,
+            "management": _PINE_EXIT_PATTERN,
+            "pending": _PINE_PENDING_PATTERN,
+            "move_stop_loss": _PINE_EXIT_PATTERN,
+            "move_take_profit": _PINE_EXIT_PATTERN,
+            "close_partial": _PINE_EXIT_PATTERN,
+            "scale_out": _PINE_EXIT_PATTERN,
+            "close_position": _PINE_EXIT_PATTERN,
+            "scale_in": _PINE_ENTRY_PATTERN,
+            "place_pending": _PINE_PENDING_PATTERN,
+            "modify_pending": _PINE_PENDING_PATTERN,
+            "replace_pending": _PINE_PENDING_PATTERN,
+            "cancel_pending": re.compile(r"\bstrategy\.(?:cancel|cancel_all)\s*\("),
+        }.get(action)
+        if pattern is None:
+            return False
         return bool(pattern.search(source))
     return _mql_action_in_text(source, action, has_ctrade=has_ctrade)
 
@@ -651,6 +1115,7 @@ def _source_capabilities(
             "tradeEntry": bool(_PINE_ENTRY_PATTERN.search(executable)),
             "tradeExit": bool(_PINE_EXIT_PATTERN.search(executable)),
             "tradeManagement": bool(_PINE_EXIT_PATTERN.search(executable)),
+            "pendingOrder": bool(_PINE_PENDING_PATTERN.search(executable)),
             "stopLoss": bool(
                 _PINE_EXIT_PATTERN.search(executable)
                 and _STOP_LOSS_PATTERN.search(executable)
@@ -690,6 +1155,10 @@ def _source_capabilities(
         _mql_action_in_text(body, "exit", has_ctrade=has_ctrade)
         for body in action_sources
     )
+    pending_detected = any(
+        _mql_action_in_text(body, "pending", has_ctrade=has_ctrade)
+        for body in action_sources
+    )
     return {
         "entryPoint": bool(trading_reachable),
         "tradeEntry": entry_detected,
@@ -698,6 +1167,7 @@ def _source_capabilities(
             _mql_action_in_text(body, "management", has_ctrade=has_ctrade)
             for body in action_sources
         ),
+        "pendingOrder": pending_detected,
         "stopLoss": bool(entry_detected and _STOP_LOSS_PATTERN.search(trading_source)),
         "takeProfit": bool(entry_detected and _TAKE_PROFIT_PATTERN.search(trading_source)),
         "closedBar": bool(
@@ -718,8 +1188,11 @@ def _semantic_marker_supported(
     target_platform: str,
     capabilities: Mapping[str, bool],
     rule_roles: Mapping[str, Mapping[str, str]],
+    semantic_bindings: Mapping[str, Mapping[str, object]],
+    pending_state_ids: set[str],
     source: str,
     functions: list[dict[str, object]],
+    initialization_reachable: set[str],
     trading_reachable: set[str],
     has_ctrade: bool,
 ) -> bool:
@@ -730,23 +1203,173 @@ def _semantic_marker_supported(
         scope_name = str(row.get("name") or "")
         if not _marker_participates_in_expression(scope, marker):
             continue
+        if key == "semanticDigests":
+            binding = semantic_bindings.get(identifier, {})
+            kind = str(binding.get("kind") or "")
+            actions = [
+                str(action)
+                for action in binding.get("actions", [])
+                if isinstance(action, str)
+            ] if isinstance(binding.get("actions"), list) else []
+            if kind in {
+                "bar_semantics",
+                "execution_contract",
+                "pseudocode",
+                "test_vector",
+            }:
+                if kind == "test_vector" and not _scope_has_controlled_comparison(scope):
+                    continue
+                if target_platform == "tradingview":
+                    if _marker_action_bound(
+                        marker,
+                        scopes,
+                        "entry",
+                        source=source,
+                        target_platform=target_platform,
+                        functions=functions,
+                        trading_reachable=trading_reachable,
+                        has_ctrade=has_ctrade,
+                    ):
+                        return True
+                    continue
+                if (
+                    scope_name in initialization_reachable
+                    and re.search(r"(?:check|verify)", scope_name, re.IGNORECASE)
+                    and _marker_controls_returned_predicate(scope, marker)
+                ):
+                    return True
+                continue
+            if kind == "indicator":
+                if _INDICATOR_PATTERN.search(scope):
+                    return True
+                continue
+            if kind in {"risk_sizing", "protection"}:
+                if (
+                    row.get("tradingReachable") is True
+                    and _scope_has_controlled_comparison(scope)
+                    and _marker_action_bound(
+                        marker,
+                        scopes,
+                        "entry",
+                        source=source,
+                        target_platform=target_platform,
+                        functions=functions,
+                        trading_reachable=trading_reachable,
+                        has_ctrade=has_ctrade,
+                    )
+                ):
+                    return True
+                continue
+            if kind == "management_feature":
+                if (
+                    row.get("tradingReachable") is True
+                    and _scope_has_controlled_comparison(scope)
+                    and actions
+                    and all(
+                        _marker_action_bound(
+                            marker,
+                            scopes,
+                            action,
+                            source=source,
+                            target_platform=target_platform,
+                            functions=functions,
+                            trading_reachable=trading_reachable,
+                            has_ctrade=has_ctrade,
+                        )
+                        for action in actions
+                    )
+                ):
+                    return True
+                continue
+            if kind == "recovery_safety":
+                if (
+                    row.get("tradingReachable") is True
+                    and _scope_has_controlled_comparison(scope)
+                    and actions
+                    and all(
+                        _marker_action_bound(
+                            marker,
+                            scopes,
+                            action,
+                            source=source,
+                            target_platform=target_platform,
+                            functions=functions,
+                            trading_reachable=trading_reachable,
+                            has_ctrade=has_ctrade,
+                        )
+                        for action in actions
+                    )
+                ):
+                    return True
+                continue
+            if kind == "state_transition":
+                action_bindings = [
+                    action for action in actions if action != "state_decision"
+                ]
+                if (
+                    row.get("tradingReachable") is True
+                    and _STATE_PATTERN.search(scope)
+                    and re.search(r"\b(?:if|switch|return)\b|=", scope)
+                    and actions
+                    and all(
+                        _marker_action_bound(
+                            marker,
+                            scopes,
+                            action,
+                            source=source,
+                            target_platform=target_platform,
+                            functions=functions,
+                            trading_reachable=trading_reachable,
+                            has_ctrade=has_ctrade,
+                        )
+                        for action in action_bindings
+                    )
+                ):
+                    return True
+                continue
+            continue
+        if key == "blueprintDigests":
+            if target_platform == "tradingview":
+                if _marker_action_bound(
+                    marker,
+                    scopes,
+                    "entry",
+                    source=source,
+                    target_platform=target_platform,
+                    functions=functions,
+                    trading_reachable=trading_reachable,
+                    has_ctrade=has_ctrade,
+                ):
+                    return True
+                continue
+            if (
+                str(row.get("name") or "") in initialization_reachable
+                and re.search(r"(?:check|verify)", scope_name, re.IGNORECASE)
+                and _marker_controls_returned_predicate(scope, marker)
+            ):
+                return True
+            continue
         if key == "ruleIds":
             if row.get("tradingReachable") is not True:
                 continue
             role = rule_roles.get(identifier, {})
             phase = str(role.get("phase") or "other")
+            action = str(role.get("action") or _rule_action(phase))
             if not _scope_has_controlled_comparison(scope):
                 continue
-            if phase == "entry" and not capabilities.get("tradeEntry"):
+            if action in {"entry", "recovery"} and not capabilities.get("tradeEntry"):
                 continue
-            if phase == "exit" and not capabilities.get("tradeExit"):
+            if action == "exit" and not capabilities.get("tradeExit"):
                 continue
-            if phase == "management" and not capabilities.get("tradeManagement"):
+            if action == "management" and not capabilities.get("tradeManagement"):
                 continue
-            if phase in {"entry", "exit", "management"} and not _marker_action_bound(
+            if action == "pending" and not capabilities.get("pendingOrder"):
+                continue
+            bound_action = "entry" if action == "recovery" else action
+            if bound_action in {"entry", "exit", "management", "pending"} and not _marker_action_bound(
                 marker,
                 scopes,
-                phase,
+                bound_action,
                 source=source,
                 target_platform=target_platform,
                 functions=functions,
@@ -760,6 +1383,11 @@ def _semantic_marker_supported(
                 return True
             continue
         if key == "stateIds":
+            required_actions = (
+                ("pending",)
+                if identifier in pending_state_ids
+                else ("entry", "exit", "management", "pending")
+            )
             if (
                 row.get("tradingReachable") is True
                 and _STATE_PATTERN.search(scope)
@@ -775,7 +1403,7 @@ def _semantic_marker_supported(
                         trading_reachable=trading_reachable,
                         has_ctrade=has_ctrade,
                     )
-                    for action in ("entry", "exit", "management")
+                    for action in required_actions
                 )
             ):
                 return True
@@ -851,6 +1479,11 @@ def build_coverage_manifest(
         if functions
         else set()
     )
+    initialization_reachable = (
+        _reachable_function_names(functions, _MQL_INITIALIZATION_ROOTS)
+        if functions
+        else set()
+    )
     trading_reachable = (
         _reachable_function_names(functions, _MQL_TRADING_ROOTS)
         if functions
@@ -872,14 +1505,43 @@ def build_coverage_manifest(
         for row in semantic_profile.get("ruleRoles", [])
         if isinstance(row, Mapping) and isinstance(row.get("id"), str)
     }
+    semantic_binding_rows = semantic_profile.get("semanticBindings")
+    semantic_bindings = {
+        str(row.get("id")): row
+        for row in semantic_binding_rows
+        if isinstance(semantic_binding_rows, list)
+        and isinstance(row, Mapping)
+        and isinstance(row.get("id"), str)
+    } if isinstance(semantic_binding_rows, list) else {}
     if (
-        set(rule_roles) != set(required_ids.get("ruleIds") or [])
+        required_ids.get("blueprintDigests")
+        != [str(requirements.get("eaBlueprintDigest") or "").lower()]
+        or set(rule_roles) != set(required_ids.get("ruleIds") or [])
+        or any(
+            str(role.get("phase") or "") == "management"
+            or str(role.get("action") or "")
+            not in {"entry", "exit", "management", "pending", "recovery", "other"}
+            for role in rule_roles.values()
+        )
+        or any(
+            not isinstance(semantic_profile.get(key), list)
+            for key in (
+                "managementRuleIds",
+                "pendingRuleIds",
+                "recoveryRuleIds",
+                "pendingStateIds",
+                "enabledManagementFeatures",
+                "semanticBindings",
+            )
+        )
         or any(
             type(semantic_profile.get(key)) is not bool
             for key in (
                 "requiresEntry",
                 "requiresExit",
                 "requiresManagement",
+                "requiresPendingOrder",
+                "requiresRecovery",
                 "requiresStopLoss",
                 "requiresTakeProfit",
                 "requiresClosedBar",
@@ -887,6 +1549,79 @@ def build_coverage_manifest(
         )
     ):
         raise ValueError("EA Factory coverage semantic profile is malformed")
+    semantic_ids = required_ids.get("semanticDigests")
+    if (
+        not isinstance(semantic_ids, list)
+        or semantic_ids != sorted(semantic_bindings)
+        or len(semantic_bindings) != len(semantic_binding_rows)
+        or any(
+            set(binding) != {"id", "kind", "identity", "digest", "actions"}
+            or str(binding.get("kind") or "") not in _SEMANTIC_BINDING_KINDS
+            or not isinstance(binding.get("identity"), str)
+            or not str(binding.get("identity") or "").strip()
+            or not _SHA256_PATTERN.fullmatch(str(binding.get("digest") or ""))
+            or binding.get("id")
+            != (
+                f"{binding.get('kind')}:{binding.get('identity')}:"
+                f"{binding.get('digest')}"
+            )
+            or not isinstance(binding.get("actions"), list)
+            or not binding.get("actions")
+            or binding.get("actions") != sorted(set(binding.get("actions") or []))
+            or any(
+                not isinstance(action, str)
+                or action not in _SEMANTIC_BINDING_ACTIONS
+                for action in binding.get("actions", [])
+            )
+            for binding in semantic_bindings.values()
+        )
+    ):
+        raise ValueError("EA Factory coverage semantic bindings are malformed")
+    binding_identities: dict[str, set[str]] = {}
+    for binding in semantic_bindings.values():
+        binding_identities.setdefault(str(binding["kind"]), set()).add(
+            str(binding["identity"])
+        )
+    if (
+        binding_identities.get("indicator", set())
+        != set(required_ids.get("indicatorIds") or [])
+        or binding_identities.get("state_transition", set())
+        != set(required_ids.get("stateIds") or [])
+        or binding_identities.get("test_vector", set())
+        != set(required_ids.get("testCaseIds") or [])
+        or binding_identities.get("management_feature", set())
+        != set(semantic_profile.get("enabledManagementFeatures") or [])
+        or len(binding_identities.get("risk_sizing", set())) != 1
+        or len(binding_identities.get("protection", set())) != 1
+        or len(binding_identities.get("pseudocode", set())) != 1
+        or len(binding_identities.get("execution_contract", set())) != 1
+        or len(binding_identities.get("bar_semantics", set())) != 1
+        or (
+            (semantic_profile.get("requiresRecovery") is True)
+            != (len(binding_identities.get("recovery_safety", set())) == 1)
+        )
+    ):
+        raise ValueError("EA Factory coverage semantic binding identities are malformed")
+    expected_role_ids = {
+        action: sorted(
+            identifier
+            for identifier, role in rule_roles.items()
+            if str(role.get("action") or "") == action
+        )
+        for action in ("management", "pending", "recovery")
+    }
+    if any(
+        semantic_profile.get(key) != expected_role_ids[action]
+        for key, action in (
+            ("managementRuleIds", "management"),
+            ("pendingRuleIds", "pending"),
+            ("recoveryRuleIds", "recovery"),
+        )
+    ):
+        raise ValueError("EA Factory coverage semantic rule roles are malformed")
+    pending_state_ids = set(semantic_profile.get("pendingStateIds") or [])
+    if not pending_state_ids.issubset(set(required_ids.get("stateIds") or [])):
+        raise ValueError("EA Factory coverage pending states are malformed")
     expected: dict[str, list[str]] = {}
     observed: dict[str, list[str]] = {}
     missing: dict[str, list[str]] = {}
@@ -949,8 +1684,11 @@ def build_coverage_manifest(
                 target_platform=platform,
                 capabilities=capabilities,
                 rule_roles=rule_roles,
+                semantic_bindings=semantic_bindings,
+                pending_state_ids=pending_state_ids,
                 source=lexical_source,
                 functions=functions,
+                initialization_reachable=initialization_reachable,
                 trading_reachable=trading_reachable,
                 has_ctrade=has_ctrade,
             )
@@ -962,6 +1700,15 @@ def build_coverage_manifest(
         ]
 
     capability_missing: list[str] = []
+    management_semantic_ids = [
+        identifier
+        for identifier, binding in semantic_bindings.items()
+        if binding.get("kind") == "management_feature"
+    ]
+    management_semantics_complete = bool(management_semantic_ids) and all(
+        identifier in semantic_observed.get("semanticDigests", [])
+        for identifier in management_semantic_ids
+    )
     if not capabilities["entryPoint"]:
         capability_missing.append("REACHABLE_PROGRAM_ENTRY_MISSING")
     # A v2 EA source is not meaningful source code if it never submits an entry,
@@ -975,8 +1722,24 @@ def build_coverage_manifest(
     if (
         semantic_profile.get("requiresManagement") is True
         and not capabilities["tradeManagement"]
+        and not management_semantics_complete
     ):
         capability_missing.append("REACHABLE_TRADE_MANAGEMENT_MISSING")
+    if (
+        semantic_profile.get("requiresPendingOrder") is True
+        and not capabilities["pendingOrder"]
+    ):
+        capability_missing.append("REACHABLE_PENDING_ORDER_MISSING")
+    if (
+        semantic_profile.get("requiresRecovery") is True
+        and not semantic_profile.get("recoveryRuleIds")
+    ):
+        capability_missing.append("BLUEPRINT_RECOVERY_RULE_MISSING")
+    if (
+        semantic_profile.get("requiresRecovery") is True
+        and not capabilities["tradeEntry"]
+    ):
+        capability_missing.append("REACHABLE_RECOVERY_ENTRY_MISSING")
     if semantic_profile.get("requiresStopLoss") is True and not capabilities["stopLoss"]:
         capability_missing.append("STOP_LOSS_PATH_MISSING")
     if semantic_profile.get("requiresTakeProfit") is True and not capabilities["takeProfit"]:
@@ -992,7 +1755,7 @@ def build_coverage_manifest(
 
     result = {
         "schemaVersion": MANIFEST_SCHEMA_VERSION,
-        "coverageMode": "blueprint_v2_static_semantic_evidence",
+        "coverageMode": "blueprint_v3_digest_bound_static_semantic_evidence",
         "targetPlatform": platform,
         "eaBlueprintDigest": requirements.get("eaBlueprintDigest"),
         "requirementsDigest": requirements.get("requirementsDigest"),

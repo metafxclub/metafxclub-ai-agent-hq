@@ -1400,6 +1400,104 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
         self.assertNotIn("--read-only-work", ordinary_command)
         self.assertNotIn("--result-profile", ordinary_command)
 
+    def test_deep_research_worker_passes_exact_bound_pair_without_corrective_reservation(self) -> None:
+        source_urls = [
+            "https://tradingfinder.com/education/system",
+            "https://forex-station.com/system-review",
+        ]
+        selected_source = {
+            "reportId": "portal-deep-source-1",
+            "recordId": "trading-system-deep-source-1",
+            "sourceKind": "verified_catalog_record",
+            "sourcePropId": "codex_mcp_portal",
+            "sourceMissionId": "mission-portal-deep-source-1",
+            "transferAgentId": None,
+            "type": "trading_system_discovery_report",
+            "status": "ready",
+            "agentTransfer": None,
+            "structuredPayload": {
+                "reportId": "portal-deep-source-1",
+                "recordId": "trading-system-deep-source-1",
+                "sourceUrls": source_urls,
+                "system": {"systemName": "Backend-selected system"},
+            },
+        }
+        captured_command: list[str] = []
+        audit_rows: list[dict] = []
+
+        def fake_runner(command, **_kwargs):
+            captured_command.extend(str(item) for item in command)
+            return {
+                "ok": False,
+                "exitCode": 1,
+                "processStarted": True,
+                "output": json.dumps({"ok": False, "status": "failed"}),
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):
+            with mock.patch.object(
+                self.bridge,
+                "_workflow_selected_source",
+                return_value=selected_source,
+            ):
+                deep = self.bridge.run_dashboard_workflow_action(
+                    "left_server_racks",
+                    {
+                        "actionId": "deep_research_system",
+                        "form": {
+                            "sourceReportId": selected_source["reportId"],
+                            "sourceRecordId": selected_source["recordId"],
+                            "brief": "Expand the selected system into EA-ready rules.",
+                        },
+                        "idempotencyKey": "deep-research-bound-pair-1",
+                    },
+                )["mission"]
+            reserve_slots = mock.Mock(return_value=(True, 0, []))
+            patches = (
+                mock.patch.object(self.bridge, "bridge_status", return_value={"codex": {"status": "ready"}}),
+                mock.patch.object(self.bridge, "codex_rate_limits", return_value=self.quota(80)),
+                mock.patch.object(self.bridge, "_collaboration_quota_gate", return_value={"allowed": True, "reason": "ready"}),
+                mock.patch.object(self.bridge, "check_rate_limit", return_value=(True, 0)),
+                mock.patch.object(self.bridge, "reserve_rate_limit_slots", reserve_slots),
+                mock.patch.object(self.bridge, "run_safe_command", side_effect=fake_runner),
+                mock.patch.object(self.bridge, "finish_auto_mission"),
+                mock.patch.object(self.bridge, "heartbeat_auto_mission"),
+                mock.patch.object(self.bridge, "update_mission_worker_state"),
+                mock.patch.object(self.bridge, "invalidate_codex_rate_limit_cache"),
+                mock.patch.object(self.bridge, "append_audit", side_effect=audit_rows.append),
+                mock.patch.object(
+                    self.bridge,
+                    "_workflow_selected_source",
+                    return_value=selected_source,
+                ),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10], patches[11]:
+                self.bridge.process_auto_mission("worker-deep-bound-pair", deep)
+
+        required_indexes = [
+            index
+            for index, value in enumerate(captured_command)
+            if value == "--required-open-url"
+        ]
+        self.assertEqual(len(required_indexes), 2)
+        self.assertEqual(
+            [captured_command[index + 1] for index in required_indexes],
+            source_urls,
+        )
+        self.assertEqual(
+            captured_command[captured_command.index("--result-profile") + 1],
+            "trading_system_research",
+        )
+        reserve_slots.assert_not_called()
+        start_audit = next(
+            row
+            for row in audit_rows
+            if row.get("type") == "mission.auto_run_start"
+        )
+        self.assertEqual(start_audit["requiredOpenUrlCount"], 2)
+        self.assertEqual(start_audit["hourlyReservedRunCount"], 1)
+        self.assertEqual(start_audit["hourlyReservedChildRunCount"], 0)
+
     def test_current_day_exact_output_contract_bugs_requeue_once_without_new_reservation(self) -> None:
         today = datetime.now(self.bridge.THAILAND_TIMEZONE).date().isoformat()
         cases = (

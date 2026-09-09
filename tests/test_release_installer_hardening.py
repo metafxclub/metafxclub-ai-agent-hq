@@ -472,6 +472,9 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             '& $resolvedPython -m unittest discover -s tests -p "test_*.py" -v',
             regression_runner,
         )
+        self.assertIn('$previousErrorActionPreference = $ErrorActionPreference', regression_runner)
+        self.assertIn('$ErrorActionPreference = "Continue"', regression_runner)
+        self.assertIn('$ErrorActionPreference = $previousErrorActionPreference', regression_runner)
         self.assertIn("Regression suite failed::", regression_runner)
         self.assertIn("FAIL|ERROR", regression_runner)
         self.assertGreaterEqual(verify_step.count("$LASTEXITCODE -ne 0"), 2)
@@ -594,6 +597,25 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("context=metafxclub/release", workflow)
         trigger = workflow[: workflow.index("permissions:")]
         self.assertNotIn("paths:", trigger)
+        ref_guard = workflow[
+            workflow.index("  release_ref_guard:"):
+            workflow.index("  compatibility:")
+        ]
+        self.assertIn('if ($env:GITHUB_REF -cne "refs/heads/main")', ref_guard)
+        self.assertIn("Release publishing is allowed only from refs/heads/main", ref_guard)
+        compatibility_header = workflow[
+            workflow.index("  compatibility:"):
+            workflow.index("    strategy:", workflow.index("  compatibility:"))
+        ]
+        self.assertIn("needs: release_ref_guard", compatibility_header)
+        self.assertLess(
+            workflow.index("  release_ref_guard:"),
+            workflow.index("  compatibility:"),
+        )
+        self.assertLess(
+            workflow.index("  compatibility:"),
+            workflow.index("  publish:"),
+        )
         self.assertIn("$existingReleaseNeedsPublish", workflow)
         self.assertIn("$releasePayload.draft -eq $true", workflow)
         self.assertIn("$releasePayload.published_at", workflow)
