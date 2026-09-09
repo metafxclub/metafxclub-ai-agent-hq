@@ -80,7 +80,7 @@ from radar_image_adapter import (  # noqa: E402 - public HTTPS publisher-image e
     verify_radar_entry_artifact,
 )
 
-BRIDGE_RUNTIME_VERSION = "0.9.12"
+BRIDGE_RUNTIME_VERSION = "0.9.13"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_STARTED_MONOTONIC = time.monotonic()
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
@@ -924,6 +924,88 @@ PUBLIC_READ_ONLY_OUT_OF_SCOPE_INTENT_PATTERNS = (
         r")"
     )),
 )
+DEEP_RESEARCH_PARTIAL_CLOSE_PATTERN = re.compile(
+    r"(?i)\bpartial[\s_-]+clos(?:e|ing)\b"
+)
+DEEP_RESEARCH_EXPLICIT_PARTIAL_CLOSE_PATTERN = re.compile(
+    r"(?i)\bpartial[\s_-]+clos(?:e|ing)\b.{0,40}"
+    r"\b(?:now|immediately|live|real)\b"
+)
+DEEP_RESEARCH_EA_SPEC_VOCABULARY_PATTERNS = (
+    re.compile(
+        r"(?i)\b(?:buy|sell)\s*(?:/\s*(?:buy|sell))?\s+"
+        r"(?:entry|exit|signal|condition|rule)s?\b"
+    ),
+    re.compile(r"(?i)\b(?:buy\s*/\s*sell|sell\s*/\s*buy)\b"),
+    re.compile(r"(?i)\b(?:buy|sell)\s+(?:limit|stop|stop[- ]limit|market)\b"),
+    DEEP_RESEARCH_PARTIAL_CLOSE_PATTERN,
+    re.compile(r"(?i)\bpending[\s_-]+orders?\b"),
+)
+DEEP_RESEARCH_EXPLICIT_EXECUTION_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"\b(?:place|open|close|execute|send|set|submit|cancel|modify|amend|replace|"
+    r"activate|trigger|create|delete|change)\b.{0,30}"
+    r"\b(?:pending\s+)?(?:orders?|positions?|trades?)\b|"
+    r"\b(?:place|open|execute|send|set|submit|cancel|modify|amend|replace|"
+    r"activate|trigger|create|delete|change)\b.{0,30}\b(?:buy|sell)\s+"
+    r"(?:limit|stop(?:[- ]limit)?|market)\b|"
+    r"\b(?:buy|sell|long|short)\s+"
+    r"(?!(?:entry|exit|signal|condition|rules?)\b)[A-Z0-9][A-Z0-9._-]{2,19}\b|"
+    r"\b(?:buy|sell|long|short)\s+(?:now|immediately|at\s+market)\b|"
+    r"\bmarket\s+(?:buy|sell)\b(?:\s+[A-Z0-9][A-Z0-9._-]{2,19})?|"
+    r"\b(?:buy|sell)\b.{0,20}\bat\s+market\b|"
+    r"\b(?:go|enter)\s+(?:long|short)\b|"
+    r"\b(?:enter|exit)\b.{0,20}\b(?:the\s+)?trade\b|"
+    r"\b(?:exit|close|liquidate|flatten)\b.{0,30}"
+    r"\b(?:all\s+)?(?:trades?|positions?)\b|"
+    r"\b(?:reverse|hedge|add\s+to|reduce)\b.{0,20}\b(?:the\s+)?position\b|"
+    r"\b(?:move|adjust|modify|set)\b.{0,20}\b(?:stop[- ]loss|take[- ]profit|sl|tp)\b|"
+    r"\benable\b.{0,15}\bauto\s*trading\b|"
+    r"\b(?:activate|start)\b.{0,15}\b(?:the\s+)?ea\b|"
+    r"\b(?:live|real)\s+(?:account|trade|trading|order|position)\b|"
+    r"(?:ซื้อ|ขาย)\s*(?:[A-Za-z0-9._-]{3,20}|ทอง(?:คำ)?|ยูโร|ดอลลาร์|บิตคอยน์)|"
+    r"(?:buy|sell|long|short)\s*(?:ทอง(?:คำ)?|ยูโร|ดอลลาร์|บิตคอยน์)|"
+    r"(?:เข้า|เปิด)\s*(?:buy|sell|long|short)(?:\s*(?:[A-Za-z0-9._-]{3,20}|ทอง(?:คำ)?|ยูโร|ดอลลาร์|บิตคอยน์))?|"
+    r"เทรด\s*(?:[A-Za-z0-9._-]{3,20}|ทอง(?:คำ)?|ยูโร|ดอลลาร์|บิตคอยน์)?\s*(?:จริง|ตอนนี้|ทันที|เดี๋ยวนี้)|"
+    r"(?:เปิด|ปิด|ยิง|ส่ง)\s*(?:ไม้|ออเดอร์|position|ทั้งหมด)|"
+    r"(?:เลื่อน|ปรับ|แก้)\s*(?:stop\s*loss|take\s*profit|sl|tp)|"
+    r"(?:เปิด|เริ่ม|เปิดใช้)\s*(?:auto\s*trading|ea)"
+    r")"
+)
+DEEP_RESEARCH_SPECIFICATION_LEAD_PATTERN = re.compile(
+    r"(?i)^\s*(?:(?:define|specify|document|explain|research|analy[sz]e|"
+    r"describe|detail|outline|model)\b|"
+    r"(?:อธิบาย|กำหนด|ระบุ|วิจัย|วิเคราะห์|แจกแจง|เขียนรายละเอียด)"
+    r"(?=\s|กฎ|เงื่อนไข|ตรรกะ|ขั้นตอน|วิธี|การ|$))"
+)
+DEEP_RESEARCH_SPECIFICATION_TERM_PATTERN = re.compile(
+    r"(?i)(?:\b(?:entry\s+rules?|exit\s+rules?|rules?|logic|conditions?|"
+    r"spec(?:ification)?|pseudocode|lifecycle|management|steps?|procedure)\b|"
+    r"กฎ|เงื่อนไข|ตรรกะ|สเปก|วงจรชีวิต|ขั้นตอน|วิธี)"
+)
+DEEP_RESEARCH_CLAUSE_SEPARATOR_PATTERN = re.compile(
+    r"(?i)(?:[.;\r\n]|\b(?:then|and\s+then)\b|(?:แล้ว|จากนั้น|ต่อไป))"
+)
+DEEP_RESEARCH_SPEC_PREFIX_CONNECTOR_PATTERN = re.compile(
+    r"(?i)^\s*(?:(?:for|of|to|about)\s+|(?:สำหรับ|ของ|ในการ|ที่จะ|การ)\s*)?"
+    r"[:：-]?\s*$"
+)
+DEEP_RESEARCH_IMMEDIATE_EXECUTION_CONTEXT_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"\b(?:now|immediately|right\s+away|live|real)\b|"
+    r"(?:ตอนนี้|ทันที|เดี๋ยวนี้|บัญชีจริง|เทรดจริง|เงินจริง)"
+    r")"
+)
+DEEP_RESEARCH_PRONOUN_EXECUTION_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"(?:^|[;,]|\b(?:then|and|and\s+then)\b)\s*"
+    r"(?:(?:do|execute|place|send|submit|activate|trigger)\s+"
+    r"(?:it|them|this|that)(?:\s+(?:now|immediately))?|"
+    r"carry\s+(?:it|them|this|that)\s+out)|"
+    r"(?:^|[\s,;]|แล้ว|จากนั้น)(?:ทำเลย|ทำทันที|ส่งเลย|เปิดเลย|ปิดเลย|"
+    r"จัดเลย|ดำเนินการ(?:เลย|ทันที)?)"
+    r")"
+)
 SENSITIVE_FIELD_SUFFIXES = (
     "token",
     "password",
@@ -1702,8 +1784,9 @@ RESEARCH_SHEET_WORLD_WRITE_HEADERS = (
     "corroborating_url", "evidence_urls_json", "evidence_count",
     "duplicate_fingerprint", "duplicate_scope", "unknowns_json",
     "ea_readiness", "research_candidate", "row_updated_at", "row_updated_by",
-    "row_version",
+    "row_version", "risk_source_url",
 )
+RESEARCH_SHEET_WORLD_OPTIONAL_WRITE_HEADERS = ("risk_source_url",)
 RESEARCH_SHEET_DEEP_WRITE_HEADERS = (
     "research_id", "research_version", "is_current", "system_id",
     "source_discovery_id", "source_report_id", "source_record_id",
@@ -1742,7 +1825,16 @@ RESEARCH_SHEET_HUB_PROP_TABS = {
         "consumerId": "worldSystem",
         "tabName": "World_System",
         "keyHeader": "discovery_id",
-        "requiredHeaders": list(RESEARCH_SHEET_WORLD_WRITE_HEADERS),
+        # ``risk_source_url`` was added in v0.9.13.  Existing classroom Sheets
+        # stay readable/writable; their rows conservatively downgrade the
+        # field-level risk citation to ``unknown`` until the optional trailing
+        # column is added.  New templates include it by default.
+        "requiredHeaders": [
+            header
+            for header in RESEARCH_SHEET_WORLD_WRITE_HEADERS
+            if header not in RESEARCH_SHEET_WORLD_OPTIONAL_WRITE_HEADERS
+        ],
+        "optionalWriteHeaders": list(RESEARCH_SHEET_WORLD_OPTIONAL_WRITE_HEADERS),
         "mode": "read_write",
     },
     "left_server_racks": {
@@ -3317,12 +3409,127 @@ def _is_trusted_public_read_only_workflow(
     return True
 
 
-def _public_read_only_intent_reasons(tool_id: object, detail: object) -> list[str]:
-    text = str(detail or "")
+def _public_read_only_intent_reasons(
+    tool_id: object,
+    detail: object,
+    *,
+    prop_id: object | None = None,
+    action_id: object | None = None,
+) -> list[str]:
+    explicit_trade_execution = False
+    text = (
+        json.dumps(detail, ensure_ascii=False, sort_keys=True)
+        if isinstance(detail, (dict, list))
+        else str(detail or "")
+    )
+    if (
+        str(prop_id or "") == "left_server_racks"
+        and str(action_id or "") == "deep_research_system"
+    ):
+        parsed = detail if isinstance(detail, dict) else None
+        if parsed is None and isinstance(detail, str):
+            try:
+                candidate = json.loads(detail)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                candidate = None
+            parsed = candidate if isinstance(candidate, dict) else None
+        if isinstance(parsed, dict) and isinstance(parsed.get("brief"), str):
+            original_brief = parsed["brief"]
+            # Terms such as BUY/SELL Entry, Partial Close and Pending Order are
+            # nouns in an EA research specification, not execution requests.
+            # Mask only those bounded phrases; explicit order/position verbs,
+            # live-account wording, deploy/file mutations and secrets remain
+            # visible to the normal fail-closed scanners.
+            execution_probe = DEEP_RESEARCH_PARTIAL_CLOSE_PATTERN.sub(
+                lambda match: " " * len(match.group(0)),
+                original_brief,
+            )
+            execution_matches = tuple(
+                DEEP_RESEARCH_EXPLICIT_EXECUTION_PATTERN.finditer(execution_probe)
+            )
+            execution_phrase = bool(execution_matches)
+            immediate_context = bool(
+                DEEP_RESEARCH_IMMEDIATE_EXECUTION_CONTEXT_PATTERN.search(
+                    original_brief
+                )
+            )
+            specification_lead = DEEP_RESEARCH_SPECIFICATION_LEAD_PATTERN.search(
+                original_brief
+            )
+            every_execution_is_specification = bool(execution_matches)
+            for execution_match in execution_matches:
+                match_is_specification = False
+                if specification_lead is not None:
+                    # Ambiguous verbs such as "set/cancel/modify" are
+                    # specification vocabulary only when a leading research
+                    # verb governs the same uninterrupted clause and that
+                    # individual occurrence has an explicit rule/specification
+                    # noun after it. Checking every occurrence prevents one safe
+                    # prefix from laundering a second imperative order.
+                    governed_prefix = original_brief[
+                        specification_lead.end() : execution_match.start()
+                    ]
+                    clause_tail = original_brief[execution_match.end() :]
+                    separator = DEEP_RESEARCH_CLAUSE_SEPARATOR_PATTERN.search(
+                        clause_tail
+                    )
+                    if separator is not None:
+                        clause_tail = clause_tail[: separator.start()]
+                    prefix_term = None
+                    for candidate in DEEP_RESEARCH_SPECIFICATION_TERM_PATTERN.finditer(
+                        governed_prefix
+                    ):
+                        prefix_term = candidate
+                    prefix_connector_is_bounded = bool(
+                        prefix_term is not None
+                        and DEEP_RESEARCH_SPEC_PREFIX_CONNECTOR_PATTERN.fullmatch(
+                            governed_prefix[prefix_term.end() :]
+                        )
+                    )
+                    match_is_specification = bool(
+                        not DEEP_RESEARCH_CLAUSE_SEPARATOR_PATTERN.search(
+                            governed_prefix
+                        )
+                        and (
+                            DEEP_RESEARCH_SPECIFICATION_TERM_PATTERN.search(
+                                clause_tail
+                            )
+                            or prefix_connector_is_bounded
+                        )
+                    )
+                if not match_is_specification:
+                    every_execution_is_specification = False
+                    break
+            explicit_trade_execution = bool(
+                DEEP_RESEARCH_EXPLICIT_PARTIAL_CLOSE_PATTERN.search(original_brief)
+                or DEEP_RESEARCH_PRONOUN_EXECUTION_PATTERN.search(original_brief)
+                or (
+                    execution_phrase
+                    and (
+                        immediate_context
+                        or not every_execution_is_specification
+                    )
+                )
+            )
+            if not explicit_trade_execution:
+                masked_brief = original_brief
+                if every_execution_is_specification:
+                    masked_chars = list(masked_brief)
+                    for execution_match in execution_matches:
+                        masked_chars[
+                            execution_match.start() : execution_match.end()
+                        ] = " " * (execution_match.end() - execution_match.start())
+                    masked_brief = "".join(masked_chars)
+                for pattern in DEEP_RESEARCH_EA_SPEC_VOCABULARY_PATTERNS:
+                    masked_brief = pattern.sub(" EA_SPEC_TERM ", masked_brief)
+                parsed = {**parsed, "brief": masked_brief}
+                text = json.dumps(parsed, ensure_ascii=False, sort_keys=True)
     reasons = _high_impact_reasons(str(tool_id or ""), text, "low")
     for label, pattern in PUBLIC_READ_ONLY_OUT_OF_SCOPE_INTENT_PATTERNS:
         if pattern.search(text):
             reasons.append(f"public_read_only_scope:{label}")
+    if explicit_trade_execution:
+        reasons.append("public_read_only_scope:explicit_trade_execution")
     return list(dict.fromkeys(reasons))
 
 
@@ -7411,6 +7618,13 @@ TRADING_SYSTEM_EVIDENCE_ARTIFACT_MAX_CHARS = 20000
 TRADING_SYSTEM_EVIDENCE_ARTIFACT_MAX_BYTES = 80000
 TRADING_SYSTEM_EVIDENCE_CANDIDATE_BLOCK_MAX_CHARS = 3000
 TRADING_SYSTEM_RUNNER_PROMPT_MAX_CHARS = 8000
+# A verified Deep Research source carries executable strategy facts that must
+# reach the worker without clipping.  Keep the larger envelope exclusive to
+# the exact Backend-owned Deep Research lineage; every ordinary Mission and
+# trading-system discovery Mission remains on the 8k boundary above.
+TRADING_SYSTEM_RESEARCH_RUNNER_PROMPT_MAX_CHARS = 12000
+TRADING_SYSTEM_RESEARCH_BUILDER_PROMPT_MAX_CHARS = 11900
+TRADING_SYSTEM_RESEARCH_SOURCE_PROMPT_MAX_CHARS = 6000
 TRADING_SYSTEM_ENTRY_MIN_ITEMS = 3
 TRADING_SYSTEM_ENTRY_MAX_ITEMS = 3
 TRADING_SYSTEM_STRATEGY_FAMILIES = frozenset({
@@ -13779,6 +13993,26 @@ def mission_read_model_item(mission: dict) -> dict:
     subtask_ids = mission.get("subtaskIds") if isinstance(mission.get("subtaskIds"), list) else []
     report_ids = mission.get("reportIds") if isinstance(mission.get("reportIds"), list) else []
     required_actors = approval.get("requiredActors") if isinstance(approval.get("requiredActors"), list) else []
+    raw_detail = str(mission.get("detail") or "")
+    workflow_context = (
+        mission.get("workflowContext")
+        if isinstance(mission.get("workflowContext"), dict)
+        else {}
+    )
+    deep_research_detail = bool(
+        workflow_context.get("propId") == "left_server_racks"
+        and workflow_context.get("actionId") == "deep_research_system"
+        and mission.get("owner") == "mission_archivist"
+        and mission.get("toolId") == "codex_web_research"
+        and mission.get("targetId") == "left_server_racks"
+        and mission.get("reportType") == "trading_system_research_report"
+    )
+    detail_limit = (
+        TRADING_SYSTEM_RESEARCH_RUNNER_PROMPT_MAX_CHARS
+        if deep_research_detail
+        else 8000
+    )
+    public_detail = redact_text(raw_detail, detail_limit)
     # Either durable Backend flag must keep the UI fail-closed.  An explicit
     # false value may never mask a still-required approval record.
     requires_human_approval = bool(
@@ -13811,7 +14045,9 @@ def mission_read_model_item(mission: dict) -> dict:
     return {
         "id": redact_text(str(mission.get("id") or ""), 120),
         "title": redact_text(str(mission.get("title") or "Untitled mission"), 160),
-        "detail": redact_text(str(mission.get("detail") or ""), 8000),
+        "detail": public_detail,
+        "detailTruncated": len(raw_detail) > detail_limit,
+        "detailLimitChars": detail_limit,
         "owner": redact_text(str(mission.get("owner") or "manager"), 120),
         "requester": redact_text(str(mission.get("requester") or "human"), 120),
         "parentMissionId": safe_reference(mission.get("parentMissionId")),
@@ -15076,6 +15312,9 @@ def _research_sheet_tab_contracts() -> dict[str, dict]:
             "keyHeader": str(contract["keyHeader"]),
             "requiredHeaders": list(contract["requiredHeaders"]),
             "exactHeaders": list(contract.get("exactHeaders") or []),
+            "optionalWriteHeaders": list(
+                contract.get("optionalWriteHeaders") or []
+            ),
             "mode": str(contract["mode"]),
             "propId": prop_id,
         }
@@ -21943,13 +22182,11 @@ def _ea_factory_deep_research_values(row: dict) -> dict:
             row.get("position_sizing_rules_json")
             or _ea_factory_mapping_value(
                 risk_model,
+                "riskAndSizing",
                 "positionSizingRules",
                 "positionSizing",
                 "lotRisk",
-                "maxRiskPerTrade",
-                "riskPerTrade",
             )
-            or risk_model
         ),
         "indicators": row.get("indicator_settings_json"),
         "special_conditions": {
@@ -22236,11 +22473,11 @@ def _ea_factory_research_source_records(
             "recovery": metrics.get("recoveryAndAveragingRules"),
             "lot_risk": _ea_factory_mapping_value(
                 risk_model,
+                "riskAndSizing",
+                "positionSizingRules",
                 "positionSizing",
                 "lotRisk",
-                "maxRiskPerTrade",
-                "riskPerTrade",
-            ) or risk_model,
+            ),
             "indicators": metrics.get("indicatorSettings"),
             "special_conditions": {
                 "specialConditions": metrics.get("specialConditions"),
@@ -27373,6 +27610,165 @@ def _research_sheet_json_cell(value: object, *, expected: type, fallback: object
     return sanitize_json_value(candidate, collection_limit=200, string_limit=2000)
 
 
+WORLD_SHEET_ESSENTIAL_STRING_MAX_CHARS = 2000
+WORLD_SHEET_ESSENTIAL_JSON_CELL_MAX_CHARS = 49000
+WORLD_SHEET_ESSENTIAL_COLLECTION_LIMIT = 240
+
+
+def _research_sheet_cell_is_present(value: object) -> bool:
+    """Treat an explicit empty JSON container as present, not as missing."""
+
+    return value is not None and not (
+        isinstance(value, str) and not value.strip()
+    )
+
+
+def _world_sheet_lossless_json_cell_decode(
+    value: object,
+    *,
+    expected: type,
+    field_name: str,
+) -> object:
+    """Decode one untrusted World_System JSON cell without changing content.
+
+    World_System rows are presented as executable research inputs.  The normal
+    read-model sanitizer deliberately clips long strings and collections, so a
+    caller must never use its clipped output as if it were the complete rule.
+    Validate the exact decoded value against the same presentation policy and
+    reject the whole row when redaction or truncation would be necessary.
+    """
+
+    candidate = value
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            utf16_chars = len(text.encode("utf-16-le")) // 2
+        except UnicodeEncodeError as error:
+            raise DataIntegrityError(
+                f"World_System {field_name} contains invalid Unicode."
+            ) from error
+        if max(len(text), utf16_chars) > WORLD_SHEET_ESSENTIAL_JSON_CELL_MAX_CHARS:
+            raise DataIntegrityError(
+                f"World_System {field_name} exceeds the bounded JSON cell envelope."
+            )
+        try:
+            candidate = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError, RecursionError) as error:
+            raise DataIntegrityError(
+                f"World_System {field_name} is not valid JSON."
+            ) from error
+    if not isinstance(candidate, expected):
+        raise DataIntegrityError(
+            f"World_System {field_name} has the wrong JSON type."
+        )
+    try:
+        encoded = json.dumps(
+            candidate,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        decoded = json.loads(encoded)
+    except (TypeError, ValueError, OverflowError, RecursionError) as error:
+        raise DataIntegrityError(
+            f"World_System {field_name} is not lossless JSON."
+        ) from error
+    if decoded != candidate:
+        raise DataIntegrityError(
+            f"World_System {field_name} changed during JSON round-trip."
+        )
+    cleaned = sanitize_json_value(
+        candidate,
+        collection_limit=WORLD_SHEET_ESSENTIAL_COLLECTION_LIMIT,
+        string_limit=WORLD_SHEET_ESSENTIAL_STRING_MAX_CHARS,
+    )
+    if cleaned != candidate:
+        raise DataIntegrityError(
+            f"World_System {field_name} requires redaction or truncation."
+        )
+    return copy.deepcopy(candidate)
+
+
+def _world_sheet_lossless_json_row_value(
+    row: dict,
+    canonical_key: str,
+    *,
+    expected: type,
+    fallback: object,
+    legacy_keys: tuple[str, ...] = (),
+) -> tuple[object, bool]:
+    """Return the first present canonical/legacy JSON cell and its presence."""
+
+    for key in (canonical_key, *legacy_keys):
+        value = row.get(key)
+        if not _research_sheet_cell_is_present(value):
+            continue
+        return (
+            _world_sheet_lossless_json_cell_decode(
+                value,
+                expected=expected,
+                field_name=key,
+            ),
+            True,
+        )
+    return copy.deepcopy(fallback), False
+
+
+def _world_sheet_lossless_scalar_cell(
+    value: object,
+    *,
+    field_name: str,
+) -> object:
+    """Return one exact safe scalar, decoding structured cells when emitted."""
+
+    if isinstance(value, (dict, list)):
+        return _world_sheet_lossless_json_cell_decode(
+            value,
+            expected=type(value),
+            field_name=field_name,
+        )
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text[:1] in {"{", "["}:
+        expected = dict if text.startswith("{") else list
+        return _world_sheet_lossless_json_cell_decode(
+            text,
+            expected=expected,
+            field_name=field_name,
+        )
+    if (
+        len(text) > WORLD_SHEET_ESSENTIAL_STRING_MAX_CHARS
+        or redact_text(text, WORLD_SHEET_ESSENTIAL_STRING_MAX_CHARS) != text
+    ):
+        raise DataIntegrityError(
+            f"World_System {field_name} requires redaction or truncation."
+        )
+    return text
+
+
+def _world_sheet_lossless_scalar_row_value(
+    row: dict,
+    canonical_key: str,
+    *,
+    legacy_keys: tuple[str, ...] = (),
+) -> tuple[object, bool]:
+    """Return one present scalar/structured cell without truthy fallbacks."""
+
+    for key in (canonical_key, *legacy_keys):
+        value = row.get(key)
+        if not _research_sheet_cell_is_present(value):
+            continue
+        return (
+            _world_sheet_lossless_scalar_cell(value, field_name=key),
+            True,
+        )
+    return None, False
+
+
 def _research_sheet_lossless_json_cell_decode(
     value: object,
     *,
@@ -27473,6 +27869,7 @@ def _world_sheet_catalog_projection() -> tuple[list[dict], dict[str, object]]:
         "insufficient_evidence": 0,
         "not_verified": 0,
         "invalid_required_fields": 0,
+        "unsafe_or_truncated_essential": 0,
     }
 
     def reject(reason: str) -> None:
@@ -27495,11 +27892,18 @@ def _world_sheet_catalog_projection() -> tuple[list[dict], dict[str, object]]:
         corroborating_url = _normalized_external_research_evidence_url(
             raw_corroborating_url
         )
-        evidence_urls = _research_sheet_json_cell(
-            row.get("evidence_urls_json"),
-            expected=list,
-            fallback=[],
-        )
+        try:
+            evidence_urls, _evidence_urls_present = (
+                _world_sheet_lossless_json_row_value(
+                    row,
+                    "evidence_urls_json",
+                    expected=list,
+                    fallback=[],
+                )
+            )
+        except DataIntegrityError:
+            reject("unsafe_or_truncated_essential")
+            continue
         validated_evidence = []
         for raw_url in [source_url, corroborating_url, *evidence_urls]:
             normalized = _normalized_external_research_evidence_url(raw_url)
@@ -27541,6 +27945,22 @@ def _world_sheet_catalog_projection() -> tuple[list[dict], dict[str, object]]:
                 else "insufficient_evidence"
             )
             continue
+        raw_risk_source_url = row.get("risk_source_url")
+        risk_source_url = _normalized_external_research_evidence_url(
+            raw_risk_source_url
+        )
+        if _research_sheet_cell_is_present(raw_risk_source_url):
+            if not risk_source_url or risk_source_url not in validated_evidence:
+                reject("unsafe_or_truncated_essential")
+                continue
+            legacy_risk_source_fallback = False
+        else:
+            # Rows written before v0.9.13 did not preserve which verified page
+            # supported riskManagement. Keep them usable for a new research
+            # pass, but downgrade fact status because the exact field-level
+            # citation cannot be reconstructed truthfully.
+            risk_source_url = source_url
+            legacy_risk_source_fallback = True
         key = (report_id, record_id)
         if key in seen:
             reject("invalid_required_fields")
@@ -27554,49 +27974,222 @@ def _world_sheet_catalog_projection() -> tuple[list[dict], dict[str, object]]:
             ),
         }
         creator = {key_name: value for key_name, value in creator.items() if value}
-        recovery_rules = _research_sheet_json_cell(
-            row.get("recovery_rules_json"),
-            expected=list,
-            fallback=[],
-        )
+        try:
+            system_name, _ = _world_sheet_lossless_scalar_row_value(
+                row,
+                "system_name",
+            )
+            strategy_family, _ = _world_sheet_lossless_scalar_row_value(
+                row,
+                "strategy_family",
+            )
+            market, _ = _world_sheet_lossless_scalar_row_value(row, "market")
+            public_users, _ = _world_sheet_lossless_json_row_value(
+                row,
+                "public_users_json",
+                expected=list,
+                fallback=[],
+            )
+            symbols, _ = _world_sheet_lossless_json_row_value(
+                row,
+                "symbols",
+                expected=list,
+                fallback=[],
+            )
+            timeframes, _ = _world_sheet_lossless_json_row_value(
+                row,
+                "timeframes_json",
+                expected=list,
+                fallback=[],
+                legacy_keys=("timeframe",),
+            )
+            sessions, _ = _world_sheet_lossless_json_row_value(
+                row,
+                "sessions_json",
+                expected=list,
+                fallback=[],
+            )
+            indicator_settings, _ = _world_sheet_lossless_json_row_value(
+                row,
+                "indicator_settings_json",
+                expected=list,
+                fallback=[],
+                legacy_keys=("indicators",),
+            )
+            setup_conditions, _ = _world_sheet_lossless_json_row_value(
+                row,
+                "setup_conditions_json",
+                expected=list,
+                fallback=[],
+                legacy_keys=("special_conditions",),
+            )
+            entry_steps, _ = _world_sheet_lossless_json_row_value(
+                row,
+                "entry_steps_json",
+                expected=list,
+                fallback=[],
+                legacy_keys=("entry_rules",),
+            )
+            exit_steps, _ = _world_sheet_lossless_json_row_value(
+                row,
+                "exit_steps_json",
+                expected=list,
+                fallback=[],
+                legacy_keys=("exit_rules",),
+            )
+            trade_management_steps, _ = _world_sheet_lossless_json_row_value(
+                row,
+                "trade_management_steps_json",
+                expected=list,
+                fallback=[],
+            )
+            suitable_for, _ = _world_sheet_lossless_json_row_value(
+                row,
+                "suitable_for",
+                expected=list,
+                fallback=[],
+            )
+            risks_and_limitations, _ = _world_sheet_lossless_json_row_value(
+                row,
+                "risks_and_limitations",
+                expected=list,
+                fallback=[],
+            )
+            unknowns, _ = _world_sheet_lossless_json_row_value(
+                row,
+                "unknowns_json",
+                expected=list,
+                fallback=[],
+            )
+            recovery_rules, recovery_rules_present = (
+                _world_sheet_lossless_json_row_value(
+                    row,
+                    "recovery_rules_json",
+                    expected=list,
+                    fallback=[],
+                )
+            )
+            position_sizing, _ = _world_sheet_lossless_scalar_row_value(
+                row,
+                "position_sizing",
+                legacy_keys=("position_sizing_rules",),
+            )
+            max_risk_per_trade, _ = _world_sheet_lossless_scalar_row_value(
+                row,
+                "max_risk_per_trade",
+                legacy_keys=("risk_per_trade",),
+            )
+            max_open_positions, _ = _world_sheet_lossless_scalar_row_value(
+                row,
+                "max_open_positions",
+                legacy_keys=("maximum_open_positions",),
+            )
+            daily_or_equity_stop, _ = _world_sheet_lossless_scalar_row_value(
+                row,
+                "daily_or_equity_stop",
+                legacy_keys=("daily_loss_limit", "equity_stop"),
+            )
+            recovery_method, _ = _world_sheet_lossless_scalar_row_value(
+                row,
+                "recovery_method",
+                legacy_keys=("recovery",),
+            )
+            stop_loss, _ = _world_sheet_lossless_scalar_row_value(
+                row,
+                "stop_loss",
+            )
+            take_profit, _ = _world_sheet_lossless_scalar_row_value(
+                row,
+                "take_profit",
+            )
+            risk_truth_status_raw, _ = _world_sheet_lossless_scalar_row_value(
+                row,
+                "risk_truth_status",
+            )
+            if not recovery_rules_present:
+                legacy_recovery = row.get("recovery_or_averaging_rules")
+                if _research_sheet_cell_is_present(legacy_recovery):
+                    try:
+                        recovery_rules = _world_sheet_lossless_json_cell_decode(
+                            legacy_recovery,
+                            expected=list,
+                            field_name="recovery_or_averaging_rules",
+                        )
+                    except DataIntegrityError:
+                        legacy_rule = _world_sheet_lossless_scalar_cell(
+                            legacy_recovery,
+                            field_name="recovery_or_averaging_rules",
+                        )
+                        # Older writers copied recoveryMethod into this legacy
+                        # column.  Do not manufacture ["none"] as a rule.
+                        recovery_rules = (
+                            []
+                            if str(legacy_rule or "").casefold()
+                            == str(recovery_method or "").casefold()
+                            else [legacy_rule]
+                        )
+            risk_truth_status = str(risk_truth_status_raw or "unknown").lower()
+            if risk_truth_status not in {"fact", "partial", "unknown"}:
+                # v0.9.12 and earlier derived "verified" from the mere
+                # presence of a risk object.  It cannot prove fact status;
+                # retain the row conservatively as unknown during migration.
+                if risk_truth_status in {"verified", "not_publicly_stated"}:
+                    risk_truth_status = "unknown"
+                else:
+                    raise DataIntegrityError(
+                        "World_System risk_truth_status is invalid."
+                    )
+            if legacy_risk_source_fallback:
+                risk_truth_status = "unknown"
+        except DataIntegrityError:
+            reject("unsafe_or_truncated_essential")
+            continue
+
         risk_management = {
-            "maxRiskPerTrade": row.get("max_risk_per_trade") or row.get("position_sizing"),
-            "maxOpenPositions": row.get("max_open_positions"),
-            "dailyLossLimit": row.get("daily_or_equity_stop"),
-            "recoveryMethod": row.get("recovery_method"),
+            # These fields are different controls.  In particular, a textual
+            # lot-sizing formula must never be promoted to a risk-per-trade
+            # cap merely because an older Sheet left max_risk_per_trade empty.
+            "positionSizing": position_sizing,
+            "maxRiskPerTrade": max_risk_per_trade,
+            "maxOpenPositions": max_open_positions,
+            "dailyOrEquityStop": daily_or_equity_stop,
+            "recoveryMethod": recovery_method,
             "recoveryRules": recovery_rules,
-            "stopLoss": row.get("stop_loss"),
-            "takeProfit": row.get("take_profit"),
+            "stopLoss": stop_loss,
+            "takeProfit": take_profit,
+            "sourceUrl": risk_source_url,
+            "truthStatus": risk_truth_status,
         }
         risk_management = {
             key_name: value
             for key_name, value in risk_management.items()
-            if value is not None and value != "" and value != () and value != []
+            if key_name in {"recoveryRules", "truthStatus"}
+            or (value is not None and value != "" and value != () and value != [])
         }
         system = {
             "recordId": record_id,
             "recordType": str(row.get("record_type") or "trading_system"),
-            "systemName": redact_text(str(row.get("system_name") or ""), 300),
-            "strategyFamily": redact_text(str(row.get("strategy_family") or ""), 160),
+            "systemName": system_name,
+            "strategyFamily": strategy_family,
             "creatorOrTrader": creator,
-            "publicUsers": _research_sheet_json_cell(row.get("public_users_json"), expected=list, fallback=[]),
+            "publicUsers": public_users,
             "sourceTitle": redact_text(str(row.get("source_title") or ""), 500),
             "sourceUrl": source_url,
             "corroboratingUrls": validated_evidence[1:],
             "checkedAt": row.get("last_verified_at") or row.get("row_updated_at"),
-            "market": _research_sheet_json_cell(row.get("market"), expected=dict, fallback={}) or redact_text(str(row.get("market") or ""), 300),
-            "symbols": _research_sheet_json_cell(row.get("symbols"), expected=list, fallback=[]),
-            "timeframes": _research_sheet_json_cell(row.get("timeframes_json") or row.get("timeframe"), expected=list, fallback=[]),
-            "sessions": _research_sheet_json_cell(row.get("sessions_json"), expected=list, fallback=[]),
-            "indicatorSettings": _research_sheet_json_cell(row.get("indicator_settings_json") or row.get("indicators"), expected=list, fallback=[]),
-            "setupConditions": _research_sheet_json_cell(row.get("setup_conditions_json") or row.get("special_conditions"), expected=list, fallback=[]),
-            "entrySteps": _research_sheet_json_cell(row.get("entry_steps_json") or row.get("entry_rules"), expected=list, fallback=[]),
-            "exitSteps": _research_sheet_json_cell(row.get("exit_steps_json") or row.get("exit_rules"), expected=list, fallback=[]),
-            "tradeManagementSteps": _research_sheet_json_cell(row.get("trade_management_steps_json"), expected=list, fallback=[]),
+            "market": market,
+            "symbols": symbols,
+            "timeframes": timeframes,
+            "sessions": sessions,
+            "indicatorSettings": indicator_settings,
+            "setupConditions": setup_conditions,
+            "entrySteps": entry_steps,
+            "exitSteps": exit_steps,
+            "tradeManagementSteps": trade_management_steps,
             "riskManagement": risk_management,
-            "suitableFor": _research_sheet_json_cell(row.get("suitable_for"), expected=list, fallback=[]),
-            "risksAndLimitations": _research_sheet_json_cell(row.get("risks_and_limitations"), expected=list, fallback=[]),
-            "unknowns": _research_sheet_json_cell(row.get("unknowns_json"), expected=list, fallback=[]),
+            "suitableFor": suitable_for,
+            "risksAndLimitations": risks_and_limitations,
+            "unknowns": unknowns,
             "verificationStatus": "verified",
             "duplicateFingerprint": redact_text(str(row.get("duplicate_fingerprint") or row.get("deduplication_key") or ""), 80),
             "duplicateStatus": redact_text(str(row.get("duplicate_status") or "unique"), 40),
@@ -27605,8 +28198,7 @@ def _world_sheet_catalog_projection() -> tuple[list[dict], dict[str, object]]:
         if not system["systemName"] or not system["strategyFamily"]:
             reject("invalid_required_fields")
             continue
-        seen.add(key)
-        projected = sanitize_json_value({
+        raw_projection = {
             "sourceReportId": report_id,
             "sourceMissionId": safe_reference(row.get("linked_mission_id")),
             "sourceRecordId": record_id,
@@ -27621,7 +28213,39 @@ def _world_sheet_catalog_projection() -> tuple[list[dict], dict[str, object]]:
             "sourceUrls": validated_evidence,
             "system": system,
             "sheetRowPosition": position,
-        }, collection_limit=240, string_limit=2000)
+        }
+        projected = sanitize_json_value(
+            raw_projection,
+            collection_limit=WORLD_SHEET_ESSENTIAL_COLLECTION_LIMIT,
+            string_limit=WORLD_SHEET_ESSENTIAL_STRING_MAX_CHARS,
+        )
+        essential_fields = (
+            "systemName",
+            "strategyFamily",
+            "market",
+            "symbols",
+            "timeframes",
+            "sessions",
+            "setupConditions",
+            "indicatorSettings",
+            "entrySteps",
+            "exitSteps",
+            "tradeManagementSteps",
+            "riskManagement",
+        )
+        projected_system = (
+            projected.get("system")
+            if isinstance(projected, dict)
+            and isinstance(projected.get("system"), dict)
+            else {}
+        )
+        if any(
+            projected_system.get(field_name) != system.get(field_name)
+            for field_name in essential_fields
+        ):
+            reject("unsafe_or_truncated_essential")
+            continue
+        seen.add(key)
         if len(result) < 80:
             result.append(projected)
 
@@ -28824,6 +29448,26 @@ def _research_sheet_world_rows(report: dict) -> list[dict]:
             return []
         creator = system.get("creatorOrTrader")
         risk = system.get("riskManagement") if isinstance(system.get("riskManagement"), dict) else {}
+        risk_source_url = _normalized_external_research_evidence_url(
+            _research_sheet_mapping_value(risk, "sourceUrl")
+        )
+        if risk_source_url not in {source_url, corroborating_urls[0]}:
+            return []
+        risk_containers = [risk]
+        if isinstance(risk.get("facts"), dict):
+            risk_containers.append(risk["facts"])
+        recovery_rules_value: object = None
+        recovery_rules_present = False
+        for risk_container in risk_containers:
+            if "recoveryRules" in risk_container:
+                recovery_rules_value = risk_container.get("recoveryRules")
+                recovery_rules_present = True
+                break
+        risk_truth_status = str(
+            _research_sheet_mapping_value(risk, "truthStatus") or "unknown"
+        ).strip().lower()
+        if risk_truth_status not in {"fact", "partial", "unknown"}:
+            risk_truth_status = "unknown"
         row = {
             "discovery_id": f"{report_id}|{record_id}",
             "record_type": system.get("recordType") or "trading_system",
@@ -28838,7 +29482,11 @@ def _research_sheet_world_rows(report: dict) -> list[dict]:
             "timeframe": system.get("timeframes"),
             "entry_rules": system.get("entrySteps"),
             "exit_rules": system.get("exitSteps"),
-            "recovery_or_averaging_rules": _research_sheet_mapping_value(risk, "recoveryRules", "recoveryMethod"),
+            "recovery_or_averaging_rules": (
+                recovery_rules_value
+                if recovery_rules_present
+                else _research_sheet_mapping_value(risk, "recoveryMethod")
+            ),
             "stop_loss": _research_sheet_mapping_value(risk, "stopLoss", "stop_loss"),
             "take_profit": _research_sheet_mapping_value(risk, "takeProfit", "take_profit"),
             "special_conditions": system.get("setupConditions"),
@@ -28846,7 +29494,12 @@ def _research_sheet_world_rows(report: dict) -> list[dict]:
             "evidence_status": "verified",
             "deduplication_key": system.get("duplicateFingerprint"),
             "research_status": "not_started",
-            "position_sizing": _research_sheet_mapping_value(risk, "positionSizing", "maxRiskPerTrade"),
+            "position_sizing": _research_sheet_mapping_value(
+                risk,
+                "positionSizing",
+                "positionSizingRules",
+                "lotRisk",
+            ),
             "indicators": system.get("indicatorSettings"),
             "verification_status": system.get("verificationStatus"),
             "normalized_source_url": source_url,
@@ -28874,10 +29527,17 @@ def _research_sheet_world_rows(report: dict) -> list[dict]:
             "trade_management_steps_json": system.get("tradeManagementSteps"),
             "max_risk_per_trade": _research_sheet_mapping_value(risk, "maxRiskPerTrade", "riskPerTrade"),
             "max_open_positions": _research_sheet_mapping_value(risk, "maxOpenPositions"),
-            "daily_or_equity_stop": _research_sheet_mapping_value(risk, "dailyLossLimit", "equityStop"),
+            "daily_or_equity_stop": _research_sheet_mapping_value(
+                risk,
+                "dailyOrEquityStop",
+                "dailyLossLimit",
+                "equityStop",
+            ),
             "recovery_method": _research_sheet_mapping_value(risk, "recoveryMethod"),
-            "recovery_rules_json": _research_sheet_mapping_value(risk, "recoveryRules"),
-            "risk_truth_status": "verified" if risk else "not_publicly_stated",
+            "recovery_rules_json": (
+                recovery_rules_value if recovery_rules_present else None
+            ),
+            "risk_truth_status": risk_truth_status,
             "corroborating_url": corroborating_urls[0],
             "evidence_urls_json": [source_url, *corroborating_urls],
             "evidence_count": 1 + len(corroborating_urls),
@@ -28889,6 +29549,10 @@ def _research_sheet_world_rows(report: dict) -> list[dict]:
             "row_updated_at": report.get("updatedAt") or report.get("createdAt"),
             "row_updated_by": report.get("ownerAgentId"),
             "row_version": 1,
+            # Optional trailing v0.9.13 column. Legacy Sheets omit this single
+            # field during upsert and are read conservatively as truthStatus
+            # unknown; the evidence URL array remains a pure URL array.
+            "risk_source_url": risk_source_url,
         }
         rows.append({key: _research_sheet_cell(value) for key, value in row.items()})
     return rows
@@ -29157,9 +29821,12 @@ def _research_sheet_deep_rows(
             risk, "takeProfitRules", "takeProfit", "take_profit", "profitTarget"
         ),
         "position_sizing_rules_json": _research_sheet_mapping_value(
-            risk, "positionSizingRules", "positionSizing", "lotRisk",
-            "maxRiskPerTrade", "riskPerTrade"
-        ) or risk,
+            risk,
+            "riskAndSizing",
+            "positionSizingRules",
+            "positionSizing",
+            "lotRisk",
+        ),
         "recovery_averaging_rules_json": metrics.get("recoveryAndAveragingRules"),
         "special_conditions_json": metrics.get("specialConditions"),
         "suitable_market": metrics.get("suitableMarket"),
@@ -29204,7 +29871,13 @@ def _research_sheet_deep_rows(
         "stop_loss": _research_sheet_mapping_value(risk, "stopLoss", "stop_loss", "invalidation"),
         "take_profit": _research_sheet_mapping_value(risk, "takeProfit", "take_profit", "profitTarget"),
         "recovery": metrics.get("recoveryAndAveragingRules"),
-        "lot_risk": _research_sheet_mapping_value(risk, "positionSizing", "lotRisk", "maxRiskPerTrade", "riskPerTrade") or risk,
+        "lot_risk": _research_sheet_mapping_value(
+            risk,
+            "riskAndSizing",
+            "positionSizingRules",
+            "positionSizing",
+            "lotRisk",
+        ),
         "indicators": metrics.get("indicatorSettings"),
         "special_conditions": {
             "specialConditions": metrics.get("specialConditions"),
@@ -30014,12 +30687,19 @@ def _flush_research_sheet_outbox_locked(*, max_items: int = 20) -> dict:
         error_code = None
         receipt = None
         try:
+            candidate_contract = _research_sheet_tab_contracts().get(
+                str(candidate.get("consumerId") or ""),
+                {},
+            )
             receipt = google_sheet_hub.upsert_row(
                 sheet_id,
                 str(candidate.get("tabName") or ""),
                 str(candidate.get("keyHeader") or ""),
                 str(candidate.get("recordKey") or ""),
                 candidate.get("row") if isinstance(candidate.get("row"), dict) else {},
+                optional_headers=tuple(
+                    candidate_contract.get("optionalWriteHeaders") or []
+                ),
             )
             status = "synced"
         except google_sheet_hub.GoogleSheetHubError as error:
@@ -31254,9 +31934,28 @@ def _workflow_selected_source(prop_id: str, action_id: str, form: dict) -> dict 
             ),
             None,
         )
+        selected_portal_system = None
+        if record_id and isinstance(raw_report, dict):
+            verified_systems = _verified_trading_systems_for_deep_research(
+                raw_report,
+                load_missions(shared_snapshot=True),
+            )
+            selected_portal_system = next(
+                (
+                    row
+                    for row in verified_systems
+                    if safe_reference(row.get("recordId")) == record_id
+                ),
+                None,
+            )
         sheet_catalog_source = (
             _world_sheet_catalog_source(report_id, record_id or "")
-            if record_id and not isinstance(raw_report, dict)
+            # A verified World_System row keeps the original Portal report ID.
+            # The Runtime may therefore still contain that report even when the
+            # selected record exists only in the Sheet-backed catalog.  Resolve
+            # the authoritative source by the exact report+record pair, using
+            # the same Portal-first precedence as the GET catalog projection.
+            if record_id and not isinstance(selected_portal_system, dict)
             else None
         )
         if isinstance(sheet_catalog_source, dict):
@@ -31310,18 +32009,7 @@ def _workflow_selected_source(prop_id: str, action_id: str, form: dict) -> dict 
             return source
         if not record_id or not isinstance(raw_report, dict):
             raise RequestError("กรุณาเลือกระบบเทรดที่ตรวจสอบแล้วจากรายงานต้นทาง", 422)
-        verified_systems = _verified_trading_systems_for_deep_research(
-            raw_report,
-            load_missions(shared_snapshot=True),
-        )
-        selected_system = next(
-            (
-                row
-                for row in verified_systems
-                if safe_reference(row.get("recordId")) == record_id
-            ),
-            None,
-        )
+        selected_system = selected_portal_system
         if not isinstance(selected_system, dict):
             raise RequestError(
                 "ระบบที่เลือกไม่อยู่ในรายงาน Portal ที่ตรวจสอบครบหรือหลักฐานไม่พร้อม",
@@ -31472,12 +32160,21 @@ def _workflow_deep_research_source_projection(value: object) -> dict:
             if mapping.get(key) not in (None, "", [])
         }
 
-    def selected_rows(raw: object, keys: tuple[str, ...], maximum: int) -> list:
+    def selected_rows(
+        raw: object,
+        keys: tuple[str, ...] | None,
+        maximum: int | None,
+    ) -> list:
         rows = raw if isinstance(raw, list) else []
         projected: list = []
-        for row in rows[:maximum]:
+        bounded_rows = rows[:maximum] if isinstance(maximum, int) else rows
+        for row in bounded_rows:
             if isinstance(row, dict):
-                item = selected_mapping(row, keys)
+                item = (
+                    selected_mapping(row, keys)
+                    if isinstance(keys, tuple)
+                    else copy.deepcopy(row)
+                )
                 if item:
                     projected.append(item)
             elif row not in (None, ""):
@@ -31518,21 +32215,24 @@ def _workflow_deep_research_source_projection(value: object) -> dict:
         system["publicUsers"] = public_users
     indicator_settings = selected_rows(
         raw_system.get("indicatorSettings"),
-        ("name", "settings", "role", "truthStatus"),
-        8,
+        None,
+        None,
     )
-    if indicator_settings:
-        system["indicatorSettings"] = indicator_settings
+    system["indicatorSettings"] = indicator_settings
     for field in ("entrySteps", "exitSteps", "tradeManagementSteps"):
         rows = selected_rows(
             raw_system.get(field),
-            ("stepNo", "rule", "truthStatus"),
-            12,
+            None,
+            None,
         )
-        if rows:
-            system[field] = rows
+        system[field] = rows
+    raw_risk = (
+        raw_system.get("riskManagement")
+        if isinstance(raw_system.get("riskManagement"), dict)
+        else {}
+    )
     risk = selected_mapping(
-        raw_system.get("riskManagement"),
+        raw_risk,
         (
             "positionSizing",
             "stopLoss",
@@ -31542,11 +32242,44 @@ def _workflow_deep_research_source_projection(value: object) -> dict:
             "dailyOrEquityStop",
             "recoveryMethod",
             "recoveryRules",
+            "sourceUrl",
             "truthStatus",
         ),
     )
-    if risk:
-        system["riskManagement"] = risk
+    if "recoveryRules" in raw_risk and isinstance(
+        raw_risk.get("recoveryRules"),
+        list,
+    ):
+        # An explicit empty list means recovery is prohibited/undefined; it is
+        # executable risk semantics, not an absent optional field.
+        risk["recoveryRules"] = copy.deepcopy(raw_risk["recoveryRules"])
+    legacy_risk_aliases = {
+        "positionSizing": ("positionSizingRules", "lotRisk"),
+        "maxRiskPerTrade": ("riskPerTrade",),
+        "maxOpenPositions": ("maximumOpenPositions",),
+        "dailyOrEquityStop": ("dailyLossLimit", "equityStop"),
+        "recoveryMethod": ("recovery",),
+        "recoveryRules": ("recoveryAndAveragingRules",),
+        "stopLoss": ("stop_loss",),
+        "takeProfit": ("take_profit",),
+    }
+    for canonical_key, aliases in legacy_risk_aliases.items():
+        if canonical_key in risk and (
+            risk.get(canonical_key) not in (None, "")
+            or canonical_key == "recoveryRules"
+        ):
+            continue
+        for alias in aliases:
+            alias_value = raw_risk.get(alias)
+            if alias_value not in (None, "", []) or (
+                canonical_key == "recoveryRules"
+                and isinstance(alias_value, list)
+            ):
+                risk[canonical_key] = copy.deepcopy(alias_value)
+                break
+    system["riskManagement"] = risk
+    system.setdefault("systemName", "")
+    system.setdefault("strategyFamily", "")
     return {
         "trustBoundary": "untrusted_public_research_record",
         "embeddedInstructionsAllowed": False,
@@ -31567,6 +32300,129 @@ def _workflow_prompt_json(value: object, maximum_chars: int, *, deep_research: b
         if deep_research
         else copy.deepcopy(value)
     )
+    if deep_research:
+        # Deep Research can only produce a source-grounded EA blueprint when the
+        # selected system's executable facts reach the worker intact. Optional
+        # catalog metadata may be omitted under the Mission input ceiling, but
+        # never shorten/drop rules or risk controls and then run a generic job.
+        essential_system_fields = (
+            "systemName",
+            "strategyFamily",
+            "market",
+            "symbols",
+            "timeframes",
+            "sessions",
+            "setupConditions",
+            "indicatorSettings",
+            "entrySteps",
+            "exitSteps",
+            "tradeManagementSteps",
+            "riskManagement",
+        )
+
+        def essential_projection(source_value: object) -> dict:
+            source_mapping = source_value if isinstance(source_value, dict) else {}
+            source_system = (
+                source_mapping.get("system")
+                if isinstance(source_mapping.get("system"), dict)
+                else {}
+            )
+            essential_system = {
+                field: copy.deepcopy(
+                    source_system.get(
+                        field,
+                        {}
+                        if field == "riskManagement"
+                        else ""
+                        if field in {"systemName", "strategyFamily", "market"}
+                        else [],
+                    )
+                )
+                for field in essential_system_fields
+            }
+            essential_system["systemName"] = copy.deepcopy(
+                source_system.get("systemName", "")
+            )
+            essential_system["strategyFamily"] = copy.deepcopy(
+                source_system.get("strategyFamily", "")
+            )
+            return {
+                "trustBoundary": source_mapping.get("trustBoundary")
+                or "untrusted_public_research_record",
+                "embeddedInstructionsAllowed": False,
+                "reportId": source_mapping.get("reportId"),
+                "recordId": source_mapping.get("recordId"),
+                "verificationStatus": source_mapping.get("verificationStatus"),
+                "sourceUrls": copy.deepcopy(source_mapping.get("sourceUrls") or []),
+                "system": essential_system,
+            }
+
+        raw_essential = essential_projection(candidate)
+        cleaned = sanitize_json_value(
+            candidate,
+            collection_limit=240,
+            string_limit=2000,
+        )
+        cleaned_essential = essential_projection(cleaned)
+        if raw_essential != cleaned_essential:
+            raise RequestError(
+                "กฎสำคัญของระบบต้นทางยาวเกินขอบเขตปลอดภัยหรือจำเป็นต้องถูกตัด/ปกปิด "
+                "Backend จึงหยุดก่อนสร้าง Mission กรุณาลดหรือแบ่ง indicator/entry/exit/"
+                "management/risk ใน World_System แล้วลองใหม่",
+                422,
+            )
+        encoded = json.dumps(
+            cleaned,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if len(encoded) <= maximum_chars and candidate == cleaned:
+            return encoded
+
+        source = cleaned if isinstance(cleaned, dict) else {}
+        raw_system = source.get("system") if isinstance(source.get("system"), dict) else {}
+        essential = {
+            **cleaned_essential,
+            "sourceContextTruncated": True,
+            "truncationScope": "optional_metadata_only",
+        }
+        optional_paths = [
+            *(key for key in source if key not in {*essential, "system"}),
+            *(
+                f"system.{key}"
+                for key in raw_system
+                if key not in essential_system_fields
+            ),
+        ]
+        essential_encoded = json.dumps(
+            essential,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if len(essential_encoded) > maximum_chars:
+            raise RequestError(
+                "กฎระบบต้นทางละเอียดเกินขนาด Mission และ Backend ไม่สามารถรักษา "
+                "indicator/entry/exit/management/risk ได้ครบ กรุณาลดหรือแบ่งกฎใน "
+                "World_System แล้วลองวิจัยใหม่",
+                422,
+            )
+        if optional_paths:
+            with_paths = {
+                **essential,
+                "truncatedOptionalFields": optional_paths,
+            }
+            with_paths_encoded = json.dumps(
+                with_paths,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if len(with_paths_encoded) <= maximum_chars:
+                return with_paths_encoded
+        return essential_encoded
+
     for string_limit in (2000, 1200, 800, 500, 320, 200, 120, 80):
         cleaned = sanitize_json_value(
             candidate,
@@ -31613,6 +32469,11 @@ def _workflow_prompt(
     *,
     radar_rotation_date: object = None,
 ) -> str:
+    builder_prompt_max_chars = (
+        TRADING_SYSTEM_RESEARCH_BUILDER_PROMPT_MAX_CHARS
+        if action_id == "deep_research_system"
+        else 7900
+    )
     source_context = ""
     structured_source: object = None
     if source:
@@ -31620,7 +32481,7 @@ def _workflow_prompt(
         source_limit = (
             3200
             if action_id in {"build_strategy_code", "review_source_code"}
-            else 3000
+            else TRADING_SYSTEM_RESEARCH_SOURCE_PROMPT_MAX_CHARS
             if action_id == "deep_research_system"
             else 6000
         )
@@ -32006,7 +32867,7 @@ def _workflow_prompt(
             + common
         )
         available_source_chars = (
-            7900
+            builder_prompt_max_chars
             - len(prompt_without_source)
             - len(source_prefix)
             - len(source_suffix)
@@ -32020,7 +32881,10 @@ def _workflow_prompt(
             source_prefix
             + _workflow_prompt_json(
                 structured_source,
-                min(3000, available_source_chars),
+                min(
+                    TRADING_SYSTEM_RESEARCH_SOURCE_PROMPT_MAX_CHARS,
+                    available_source_chars,
+                ),
                 deep_research=True,
             )
             + source_suffix
@@ -32032,7 +32896,9 @@ def _workflow_prompt(
         + plugin_context
         + common
     )
-    # The mission guard accepts at most 8k characters. Historical dedup hints
+    # The normal Mission guard accepts at most 8k characters; only the exact
+    # Deep Research path has a 12k Runner envelope and an 11.9k builder bound.
+    # Historical dedup hints
     # are useful but non-authoritative; Backend fingerprint validation remains
     # the final duplicate gate. Keep the identity fields as one complete JSON
     # document. Never apply a character slicer to serialized JSON because that
@@ -32090,7 +32956,7 @@ def _workflow_prompt(
                 )
                 + footer
             )
-            if len(fixed_prompt) + len(candidate) > 7900:
+            if len(fixed_prompt) + len(candidate) > builder_prompt_max_chars:
                 break
             selected = candidate_rows
             bounded_catalog_context = candidate
@@ -32111,7 +32977,7 @@ def _workflow_prompt(
                 )
                 + footer
             )
-            if len(fixed_prompt) + len(candidate) <= 7900:
+            if len(fixed_prompt) + len(candidate) <= builder_prompt_max_chars:
                 bounded_catalog_context = candidate
     complete_prompt = (
         prompts[action_id]
@@ -32124,11 +32990,17 @@ def _workflow_prompt(
     # Catalog workflows are constructed so this branch is unreachable, but
     # retain the general guard for source-bound workflows without ever slicing
     # a catalog document in half.
-    if len(complete_prompt) <= 7900:
+    if len(complete_prompt) <= builder_prompt_max_chars:
         return complete_prompt
+    if action_id == "deep_research_system":
+        raise RequestError(
+            "Deep research Mission exceeds its exact 11900-character builder envelope; "
+            "Backend refused to truncate the selected system rules.",
+            422,
+        )
     if bounded_catalog_context:
-        return redact_text(fixed_prompt, 7900)
-    return redact_text(complete_prompt, 7900)
+        return redact_text(fixed_prompt, builder_prompt_max_chars)
+    return redact_text(complete_prompt, builder_prompt_max_chars)
 
 
 def _dashboard_schedule_entry(
@@ -33025,11 +33897,9 @@ def run_dashboard_workflow_action(
             }
             intent_reasons = _public_read_only_intent_reasons(
                 action.get("toolId"),
-                json.dumps(
-                    submitted_intent,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
+                submitted_intent,
+                prop_id=prop_id,
+                action_id=action_id,
             )
             if intent_reasons:
                 stage = "public_read_only_intent_out_of_scope"
@@ -58468,15 +59338,43 @@ def create_mission(
     *,
     _trusted_discussion_only: bool = False,
     _trusted_meeting_implementation_prompt: str | None = None,
+    _trusted_deep_research_prompt: str | None = None,
 ) -> dict:
     raw_prompt = str(payload.get("prompt") or payload.get("detail") or payload.get("title") or "Review mission packet.").strip()
     if contains_potential_secret(raw_prompt):
         raise RequestError("Potential secret detected. Submit intent without credentials.", 422)
+    safe_workflow_context = _workflow_context_storage(workflow_context)
     trusted_meeting_implementation = (
         _trusted_meeting_implementation_prompt is not None
     )
+    trusted_deep_research = _trusted_deep_research_prompt is not None
+    if trusted_meeting_implementation and trusted_deep_research:
+        raise DataIntegrityError(
+            "Trusted Mission prompt capabilities cannot be combined."
+        )
     trusted_meeting_implementation_proposal: dict | None = None
-    if trusted_meeting_implementation:
+    if trusted_deep_research:
+        if (
+            not isinstance(_trusted_deep_research_prompt, str)
+            or raw_prompt != _trusted_deep_research_prompt
+            or not raw_prompt
+            or not safe_workflow_context
+            or safe_workflow_context.get("propId") != "left_server_racks"
+            or safe_workflow_context.get("actionId") != "deep_research_system"
+        ):
+            raise DataIntegrityError(
+                "Trusted Deep Research prompt does not exactly match its bounded workflow lineage."
+            )
+        prompt = _redact_text_fail_closed(
+            raw_prompt,
+            TRADING_SYSTEM_RESEARCH_RUNNER_PROMPT_MAX_CHARS,
+            "Trusted Deep Research prompt",
+        )
+        if prompt != raw_prompt:
+            raise DataIntegrityError(
+                "Trusted Deep Research prompt must already be sanitized exactly."
+            )
+    elif trusted_meeting_implementation:
         if (
             not isinstance(_trusted_meeting_implementation_prompt, str)
             or raw_prompt != _trusted_meeting_implementation_prompt
@@ -58599,6 +59497,33 @@ def create_mission(
             raise DataIntegrityError(
                 "Trusted meeting implementation prompt capability escaped its exact Mission invariant."
             )
+    if trusted_deep_research:
+        if (
+            _trusted_discussion_only
+            or status != "queued"
+            or agent_id != "mission_archivist"
+            or tool_id != "codex_web_research"
+            or target_id != "left_server_racks"
+            or report_type != "trading_system_research_report"
+            or trusted_workflow_intent is None
+            or bool(
+                _public_read_only_intent_reasons(
+                    tool_id,
+                    trusted_workflow_intent,
+                    prop_id=safe_workflow_context.get("propId"),
+                    action_id=safe_workflow_context.get("actionId"),
+                )
+            )
+            or not _is_trusted_public_read_only_workflow(
+                safe_workflow_context.get("propId"),
+                safe_workflow_context.get("actionId"),
+                tool_id=tool_id,
+                owner_agent_id=agent_id,
+            )
+        ):
+            raise DataIntegrityError(
+                "Trusted Deep Research prompt capability escaped its exact Mission invariant."
+            )
     if _trusted_discussion_only:
         # This capability is a private Python argument, never a request-payload
         # flag.  It is intentionally valid only for the tool-free interactive
@@ -58698,7 +59623,6 @@ def create_mission(
         "updatedAt": now,
         "completedAt": None,
     }
-    safe_workflow_context = _workflow_context_storage(workflow_context)
     if safe_workflow_context:
         mission["workflowContext"] = safe_workflow_context
         if safe_workflow_context.get("agentTransfer"):
@@ -64083,8 +65007,29 @@ def run_bridge_task(
     if contains_potential_secret(prompt):
         append_audit({"type": "guard.secret_blocked", "agentId": agent_id, "toolId": tool_id, "surface": "bridge_run"})
         return {"ok": False, "kind": "secret_blocked", "message": "Potential secret detected. Frontend may submit intent only.", "_httpStatus": 422}
+    trusted_context = _workflow_context_storage(trusted_workflow_context)
+    trusted_deep_research_prompt = bool(
+        trusted_context
+        and trusted_context.get("propId") == "left_server_racks"
+        and trusted_context.get("actionId") == "deep_research_system"
+        and tool_id == "codex_web_research"
+        and agent_id == "mission_archivist"
+        and str(payload.get("targetId") or "") == "left_server_racks"
+        and _trusted_workflow_guard_intent({
+            "workflowContext": trusted_context,
+            "toolId": tool_id,
+            "owner": agent_id,
+            "detail": prompt,
+            "risk": "low",
+        })
+        is not None
+    )
     guard = load_orchestration_contract().get("costRateGuard") or {}
-    max_prompt_chars = clamp_int(guard.get("maxPromptChars"), 8000, 100, 50000)
+    max_prompt_chars = (
+        TRADING_SYSTEM_RESEARCH_RUNNER_PROMPT_MAX_CHARS
+        if trusted_deep_research_prompt
+        else clamp_int(guard.get("maxPromptChars"), 8000, 100, 50000)
+    )
     if len(prompt) > max_prompt_chars:
         return {"ok": False, "kind": "prompt_too_large", "message": f"Prompt exceeds {max_prompt_chars} characters.", "_httpStatus": 413}
     if "approved" in payload:
@@ -64132,7 +65077,6 @@ def run_bridge_task(
     target_id = requested_target or pick_target_for_task(prompt)
     if not find_room_prop(target_id):
         return {"ok": False, "kind": "unknown_target", "message": "Unknown target prop id.", "_httpStatus": 422}
-    trusted_context = _workflow_context_storage(trusted_workflow_context)
     protected_manual_match = _backend_owned_daily_manual_policy(
         prompt,
         target_id=target_id,
@@ -64225,7 +65169,12 @@ def run_bridge_task(
                 "message": "Trusted public research context failed Backend lineage validation; no Mission was created.",
                 "_httpStatus": 403,
             }
-        intent_reasons = _public_read_only_intent_reasons(tool_id, trusted_intent)
+        intent_reasons = _public_read_only_intent_reasons(
+            tool_id,
+            trusted_intent,
+            prop_id=trusted_context.get("propId"),
+            action_id=trusted_context.get("actionId"),
+        )
         approval_forced = bool(
             tool_policy.get("approvalRequired", False)
             or tool_id in APPROVAL_REQUIRED
@@ -64313,8 +65262,7 @@ def run_bridge_task(
         trusted_model_tier = role_default_model_tier(owner_agent_id)
     trusted_output_hard_limit = (
         TRADING_SYSTEM_RESEARCH_MAX_OUTPUT_CHARS
-        if trusted_context.get("actionId") == "deep_research_system"
-        and trusted_context.get("propId") == "left_server_racks"
+        if trusted_deep_research_prompt
         else 20000
     )
     trusted_budget = {
@@ -64328,18 +65276,27 @@ def run_bridge_task(
         ),
         "rateReservePercent": AUTOMATION_MIN_REMAINING_PERCENT,
     }
-    mission = create_mission({
-        "prompt": prompt,
-        "agentId": owner_agent_id,
-        "requester": requester,
-        "toolId": tool_id,
-        "targetId": target_id,
-        "risk": tool_policy.get("risk") or "low",
-        "modelTier": trusted_model_tier,
-        "reportType": report_type,
-        "budget": trusted_budget,
-        "idempotencyKey": idempotency_key,
-    }, status="queued", allow_model_override=True, allow_budget_override=True, workflow_context=trusted_workflow_context)
+    mission = create_mission(
+        {
+            "prompt": prompt,
+            "agentId": owner_agent_id,
+            "requester": requester,
+            "toolId": tool_id,
+            "targetId": target_id,
+            "risk": tool_policy.get("risk") or "low",
+            "modelTier": trusted_model_tier,
+            "reportType": report_type,
+            "budget": trusted_budget,
+            "idempotencyKey": idempotency_key,
+        },
+        status="queued",
+        allow_model_override=True,
+        allow_budget_override=True,
+        workflow_context=trusted_workflow_context,
+        _trusted_deep_research_prompt=(
+            prompt if trusted_deep_research_prompt else None
+        ),
+    )
     status = bridge_status()
     terminal_replay = mission.get("status") in {"completed", "failed", "blocked", "archived"}
     if terminal_replay or (existing_before and mission.get("id") == existing_before.get("id")):

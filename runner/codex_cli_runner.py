@@ -166,6 +166,7 @@ TRADING_SYSTEM_RESEARCH_CONTRACT_FIELD_MAX_CHARS = 48000
 TRADING_SYSTEM_RESEARCH_MAX_OUTPUT_CHARS = 64000
 MISSION_PROMPT_MAX_CHARS = 8000
 APPROVED_MISSION_PROMPT_MAX_CHARS = 12000
+TRADING_SYSTEM_RESEARCH_MISSION_PROMPT_MAX_CHARS = 12000
 TRADING_SYSTEM_CORRECTIVE_CANDIDATE_BLOCK_START = (
     "[BACKEND_UNTRUSTED_EVIDENCE_URL_CANDIDATES_V1]"
 )
@@ -929,7 +930,9 @@ def bound_mission_prompt(
 
     raw_prompt = str(prompt or "")
     maximum_chars = (
-        APPROVED_MISSION_PROMPT_MAX_CHARS
+        TRADING_SYSTEM_RESEARCH_MISSION_PROMPT_MAX_CHARS
+        if result_profile == "trading_system_research"
+        else APPROVED_MISSION_PROMPT_MAX_CHARS
         if execution_mode == APPROVED_WORKSPACE_EXECUTION_MODE
         else MISSION_PROMPT_MAX_CHARS
     )
@@ -7218,7 +7221,9 @@ def run_codex(
         )
     except ValueError:
         prompt_limit = (
-            APPROVED_MISSION_PROMPT_MAX_CHARS
+            TRADING_SYSTEM_RESEARCH_MISSION_PROMPT_MAX_CHARS
+            if result_profile == "trading_system_research"
+            else APPROVED_MISSION_PROMPT_MAX_CHARS
             if approved_workspace_execution
             else MISSION_PROMPT_MAX_CHARS
         )

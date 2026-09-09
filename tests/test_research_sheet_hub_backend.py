@@ -907,7 +907,12 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "Test_Tab",
             "record_id",
             "REC-1",
-            {"record_id": "REC-1", "system_name": "First"},
+            {
+                "record_id": "REC-1",
+                "system_name": "First",
+                "risk_source_url": "https://example.org/risk",
+            },
+            optional_headers={"risk_source_url"},
             environ=env,
             open_url=open_url,
         )
@@ -918,7 +923,12 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "Test_Tab",
             "record_id",
             "REC-1",
-            {"record_id": "REC-1", "system_name": "Updated"},
+            {
+                "record_id": "REC-1",
+                "system_name": "Updated",
+                "risk_source_url": "https://example.org/risk-v2",
+            },
+            optional_headers={"risk_source_url"},
             environ=env,
             open_url=open_url,
         )
@@ -1085,7 +1095,8 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             self.assertTrue(item["recordKey"])
             self.assertLessEqual(
                 set(item["row"]),
-                set(contracts[item["consumerId"]]["requiredHeaders"]),
+                set(contracts[item["consumerId"]]["requiredHeaders"])
+                | set(contracts[item["consumerId"]].get("optionalWriteHeaders") or []),
             )
         self.assertEqual(
             counts,
@@ -1907,7 +1918,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         )
         written_keys = []
 
-        def upsert(_sheet_id, _tab, _key_header, record_key, _row):
+        def upsert(_sheet_id, _tab, _key_header, record_key, _row, **_kwargs):
             written_keys.append(record_key)
             if record_key == "poison-record":
                 raise self.hub.GoogleSheetHubError(
@@ -2083,7 +2094,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         self.assertGreater(queued["queued"], 0)
         writes = []
 
-        def upsert(_sheet_id, _tab, _key_header, record_key, _row):
+        def upsert(_sheet_id, _tab, _key_header, record_key, _row, **_kwargs):
             writes.append(record_key)
             return {
                 "rowNumber": len(writes) + 1,
@@ -2319,7 +2330,11 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
                 "recovery_averaging_rules_json": json.dumps(["never average down"]),
                 "special_conditions_json": json.dumps(["one position at a time"]),
                 "position_sizing_rules_json": json.dumps(
-                    {"maxRiskPerTrade": "1 percent fixed fractional"}
+                    {
+                        "lotMode": "fixed_risk_percent",
+                        "riskPercent": 1.0,
+                        "maxOpenPositions": 1,
+                    }
                 ),
             }
         )
@@ -2518,7 +2533,13 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             {
                 "recovery_averaging_rules_json": json.dumps(["none"]),
                 "special_conditions_json": json.dumps(["confirmed bar only"]),
-                "position_sizing_rules_json": json.dumps({"maxRiskPerTrade": "1%"}),
+                "position_sizing_rules_json": json.dumps(
+                    {
+                        "lotMode": "fixed_risk_percent",
+                        "riskPercent": 1.0,
+                        "maxOpenPositions": 1,
+                    }
+                ),
             }
         )
         self.bridge.write_json(
@@ -2599,8 +2620,18 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "entry_steps_json": json.dumps(["enter on close"]),
             "exit_steps_json": json.dumps(["exit at two ATR"]),
             "trade_management_steps_json": json.dumps(["trail after one ATR"]),
+            "position_sizing": json.dumps(
+                {"mode": "fixed_fractional", "riskPercentInput": "RiskPercent"}
+            ),
             "max_risk_per_trade": "1%",
-            "recovery_rules_json": json.dumps([]),
+            "max_open_positions": "2",
+            "daily_or_equity_stop": "stop at 3% daily loss",
+            "recovery_method": "none",
+            "recovery_rules_json": json.dumps(["never average a losing trade"]),
+            "risk_truth_status": "fact",
+            "risk_source_url": "https://www.tradingview.com/scripts/primary-rules",
+            "stop_loss": "one ATR",
+            "take_profit": "two ATR",
             "verification_status": "verified",
             "evidence_status": "verified",
             "duplicate_fingerprint": "a" * 24,
@@ -2652,6 +2683,296 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         self.assertEqual(catalog["systems"][0]["sourceKind"], "verified_sheet_record")
         self.assertEqual(selected["sourceKind"], "verified_sheet_record")
         self.assertEqual(selected["structuredPayload"]["system"]["systemName"], "Verified Sheet Trend")
+        self.assertFalse(selected["structuredPayload"]["embeddedInstructionsAllowed"])
+        selected_risk = selected["structuredPayload"]["system"]["riskManagement"]
+        self.assertEqual(
+            selected_risk["positionSizing"],
+            {"mode": "fixed_fractional", "riskPercentInput": "RiskPercent"},
+        )
+        self.assertEqual(selected_risk["maxRiskPerTrade"], "1%")
+        self.assertEqual(selected_risk["maxOpenPositions"], "2")
+        self.assertEqual(
+            selected_risk["dailyOrEquityStop"],
+            "stop at 3% daily loss",
+        )
+        self.assertEqual(selected_risk["recoveryMethod"], "none")
+        self.assertEqual(
+            selected_risk["recoveryRules"],
+            ["never average a losing trade"],
+        )
+        self.assertEqual(selected_risk["stopLoss"], "one ATR")
+        self.assertEqual(selected_risk["takeProfit"], "two ATR")
+        self.assertEqual(selected_risk["truthStatus"], "fact")
+
+    def test_deep_research_source_projection_normalizes_legacy_risk_aliases(self) -> None:
+        projected = self.bridge._workflow_deep_research_source_projection(
+            {
+                "reportId": "legacy-report",
+                "recordId": "legacy-record",
+                "sourceUrls": [
+                    "https://www.tradingview.com/scripts/legacy-risk",
+                    "https://github.com/metafxclub/legacy-risk",
+                ],
+                "system": {
+                    "systemName": "Legacy Risk Source",
+                    "strategyFamily": "trend_following",
+                    "riskManagement": {
+                        "positionSizingRules": "normalize fixed lot to broker step",
+                        "riskPerTrade": "0.5%",
+                        "maximumOpenPositions": 1,
+                        "dailyLossLimit": "2%",
+                        "recovery": "none",
+                        "recoveryAndAveragingRules": ["no recovery"],
+                        "stop_loss": "one ATR",
+                        "take_profit": "two ATR",
+                    },
+                },
+            }
+        )
+
+        risk = projected["system"]["riskManagement"]
+        self.assertEqual(risk["positionSizing"], "normalize fixed lot to broker step")
+        self.assertEqual(risk["maxRiskPerTrade"], "0.5%")
+        self.assertEqual(risk["maxOpenPositions"], 1)
+        self.assertEqual(risk["dailyOrEquityStop"], "2%")
+        self.assertEqual(risk["recoveryMethod"], "none")
+        self.assertEqual(risk["recoveryRules"], ["no recovery"])
+        self.assertEqual(risk["stopLoss"], "one ATR")
+        self.assertEqual(risk["takeProfit"], "two ATR")
+        self.assertNotIn("dailyLossLimit", risk)
+
+    def test_world_sheet_risk_fields_round_trip_without_conflation(self) -> None:
+        report = self._world_report()
+        report["metrics"]["systems"][0]["riskManagement"] = {
+            "positionSizing": "fixed fractional using RiskPercent",
+            "maxRiskPerTrade": "0.75%",
+            "maxOpenPositions": "2",
+            "dailyOrEquityStop": "halt at 3% daily loss",
+            "recoveryMethod": "none",
+            "recoveryRules": [],
+            "stopLoss": "one ATR",
+            "takeProfit": "two ATR",
+            "sourceUrl": "https://github.com/metafxclub/system-1",
+            "truthStatus": "partial",
+        }
+
+        rows = self.bridge._research_sheet_world_rows(report)
+        self.assertEqual(len(rows), 3)
+        first = rows[0]
+        self.assertEqual(first["position_sizing"], "fixed fractional using RiskPercent")
+        self.assertEqual(first["max_risk_per_trade"], "0.75%")
+        self.assertEqual(first["max_open_positions"], "2")
+        self.assertEqual(first["daily_or_equity_stop"], "halt at 3% daily loss")
+        self.assertEqual(first["recovery_method"], "none")
+        self.assertEqual(
+            json.loads(first["recovery_rules_json"]),
+            [],
+        )
+        self.assertEqual(json.loads(first["recovery_or_averaging_rules"]), [])
+        self.assertEqual(first["risk_truth_status"], "partial")
+        self.assertEqual(
+            json.loads(first["evidence_urls_json"]),
+            [
+                "https://www.tradingview.com/scripts/system-1",
+                "https://github.com/metafxclub/system-1",
+            ],
+        )
+        self.assertEqual(
+            first["risk_source_url"],
+            "https://github.com/metafxclub/system-1",
+        )
+
+        with patch.object(
+            self.bridge,
+            "_research_sheet_cached_rows",
+            return_value=rows,
+        ):
+            projected, diagnostics = self.bridge._world_sheet_catalog_projection()
+
+        self.assertEqual(diagnostics["acceptedRowCount"], 3)
+        selected = next(
+            item
+            for item in projected
+            if item["sourceRecordId"] == "world-1"
+        )
+        risk = selected["system"]["riskManagement"]
+        self.assertEqual(risk["positionSizing"], "fixed fractional using RiskPercent")
+        self.assertEqual(risk["maxRiskPerTrade"], "0.75%")
+        self.assertEqual(risk["maxOpenPositions"], "2")
+        self.assertEqual(risk["dailyOrEquityStop"], "halt at 3% daily loss")
+        self.assertEqual(risk["recoveryMethod"], "none")
+        self.assertEqual(risk["recoveryRules"], [])
+        self.assertEqual(risk["stopLoss"], "one ATR")
+        self.assertEqual(risk["takeProfit"], "two ATR")
+        self.assertEqual(risk["sourceUrl"], "https://github.com/metafxclub/system-1")
+        self.assertEqual(risk["truthStatus"], "partial")
+
+        legacy = copy.deepcopy(first)
+        legacy.pop("risk_source_url")
+        with patch.object(
+            self.bridge,
+            "_research_sheet_cached_rows",
+            return_value=[legacy],
+        ):
+            legacy_projected, legacy_diagnostics = (
+                self.bridge._world_sheet_catalog_projection()
+            )
+        self.assertEqual(legacy_diagnostics["acceptedRowCount"], 1)
+        legacy_risk = legacy_projected[0]["system"]["riskManagement"]
+        self.assertEqual(
+            legacy_risk["sourceUrl"],
+            "https://www.tradingview.com/scripts/system-1",
+        )
+        self.assertEqual(legacy_risk["truthStatus"], "unknown")
+
+    def test_world_sheet_rejects_essential_cells_that_would_be_truncated(self) -> None:
+        rows = self.bridge._research_sheet_world_rows(self._world_report())
+        self.assertEqual(len(rows), 3)
+
+        cases = {
+            "entry_steps_json": json.dumps(
+                [{"stepNo": 1, "rule": "X" * 2001}],
+                ensure_ascii=False,
+            ),
+            "max_risk_per_trade": "R" * 2001,
+        }
+        for field_name, unsafe_value in cases.items():
+            with self.subTest(field_name=field_name):
+                row = copy.deepcopy(rows[0])
+                row[field_name] = unsafe_value
+                with patch.object(
+                    self.bridge,
+                    "_research_sheet_cached_rows",
+                    return_value=[row],
+                ):
+                    projected, diagnostics = (
+                        self.bridge._world_sheet_catalog_projection()
+                    )
+
+                self.assertEqual(projected, [])
+                self.assertEqual(diagnostics["acceptedRowCount"], 0)
+                self.assertEqual(
+                    diagnostics["reasonCounts"][
+                        "unsafe_or_truncated_essential"
+                    ],
+                    1,
+                )
+
+    def test_world_sheet_selection_uses_exact_pair_when_portal_report_still_exists(self) -> None:
+        self.configure_hub(revision=6)
+        observed_at = self.bridge.utc_now()
+        report_id = "portal-report-still-present"
+        record_id = "sheet-record-after-portal"
+        world_row = {
+            "discovery_id": f"{report_id}|{record_id}",
+            "source_record_id": record_id,
+            "linked_report_id": report_id,
+            "system_name": "Verified Sheet Continuation",
+            "strategy_family": "trend_following",
+            "record_type": "trading_system",
+            "trader_or_author": "Public Author",
+            "source_title": "Primary rules",
+            "source_url": "https://www.tradingview.com/scripts/sheet-continuation",
+            "corroborating_url": "https://github.com/metafxclub/sheet-continuation",
+            "evidence_urls_json": json.dumps(
+                [
+                    "https://www.tradingview.com/scripts/sheet-continuation",
+                    "https://github.com/metafxclub/sheet-continuation",
+                ]
+            ),
+            "last_verified_at": "2026-08-27T06:00:00Z",
+            "market": "forex",
+            "symbols": json.dumps(["EURUSD"]),
+            "timeframes_json": json.dumps(["H1"]),
+            "sessions_json": json.dumps(["London"]),
+            "indicator_settings_json": json.dumps([{"name": "EMA", "period": 20}]),
+            "setup_conditions_json": json.dumps(["confirmed bar only"]),
+            "entry_steps_json": json.dumps(["enter on close"]),
+            "exit_steps_json": json.dumps(["exit at two ATR"]),
+            "trade_management_steps_json": json.dumps(["trail after one ATR"]),
+            "max_risk_per_trade": "1%",
+            "recovery_rules_json": json.dumps([]),
+            "verification_status": "verified",
+            "evidence_status": "verified",
+            "duplicate_fingerprint": "b" * 24,
+            "duplicate_status": "unique",
+            "duplicate_scope": "none",
+            "row_updated_at": "2026-08-27T06:05:00Z",
+        }
+        self.bridge.write_json(
+            self.bridge.RESEARCH_SHEET_CACHE_PATH,
+            {
+                "schemaVersion": "research-sheet-cache-v1",
+                "sheetDigest": self.bridge.payload_digest(
+                    "research-sheet-id-v1", SHEET_ID
+                ),
+                "configRevision": 6,
+                "consumers": {
+                    "worldSystem": {
+                        "tabName": "World_System",
+                        "rowCount": 1,
+                        "headerCount": len(world_row),
+                        "rows": [world_row],
+                        "observedAt": observed_at,
+                    }
+                },
+                "updatedAt": observed_at,
+            },
+        )
+        # The original report can legitimately remain on disk after its record
+        # has been projected to World_System.  It is deliberately not a valid
+        # Portal source here; only the exact verified Sheet pair is selectable.
+        stale_runtime_report = {
+            "id": report_id,
+            "type": "trading_system_discovery_report",
+            "status": "ready",
+            "linkedPropId": "codex_mcp_portal",
+        }
+        credential = {"configured": True, "mode": "access_token"}
+        with (
+            patch.object(self.hub, "credential_status", return_value=credential),
+            patch.object(
+                self.bridge,
+                "load_runtime_reports",
+                return_value=[stale_runtime_report],
+            ),
+            patch.object(self.bridge, "load_missions", return_value=[]),
+        ):
+            catalog = self.bridge._deep_research_catalog_read_model(
+                reports=[stale_runtime_report],
+                missions=[],
+                delivered_sources=[],
+            )
+            selected = self.bridge._workflow_selected_source(
+                "left_server_racks",
+                "deep_research_system",
+                {
+                    "sourceReportId": report_id,
+                    "sourceRecordId": record_id,
+                },
+            )
+            with self.assertRaises(self.bridge.RequestError):
+                self.bridge._workflow_selected_source(
+                    "left_server_racks",
+                    "deep_research_system",
+                    {
+                        "sourceReportId": report_id,
+                        "sourceRecordId": "sheet-record-not-in-cache",
+                    },
+                )
+
+        self.assertEqual(catalog["verifiedSystemCount"], 1)
+        self.assertEqual(catalog["systems"][0]["sourceKind"], "verified_sheet_record")
+        self.assertEqual(catalog["systems"][0]["sourceReportId"], report_id)
+        self.assertEqual(catalog["systems"][0]["sourceRecordId"], record_id)
+        self.assertEqual(selected["sourceKind"], "verified_sheet_record")
+        self.assertEqual(selected["reportId"], report_id)
+        self.assertEqual(selected["recordId"], record_id)
+        self.assertEqual(
+            selected["structuredPayload"]["system"]["systemName"],
+            "Verified Sheet Continuation",
+        )
+        self.assertEqual(len(selected["structuredPayload"]["sourceUrls"]), 2)
         self.assertFalse(selected["structuredPayload"]["embeddedInstructionsAllowed"])
 
     def test_world_sheet_composite_identity_is_scoped_and_rejections_are_counted(self) -> None:
@@ -4041,7 +4362,10 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
                     "timeframes": ["H1"],
                     "entrySteps": ["EMA cross"],
                     "exitSteps": ["ATR target"],
-                    "riskManagement": {"maxRiskPerTrade": "1%"},
+                    "riskManagement": {
+                        "maxRiskPerTrade": "1%",
+                        "sourceUrl": f"https://www.tradingview.com/scripts/system-{index}",
+                    },
                 }
             )
         return {

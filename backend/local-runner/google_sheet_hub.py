@@ -1130,6 +1130,7 @@ def upsert_row(
     key_value: str,
     row_by_header: dict[str, object],
     *,
+    optional_headers: set[str] | frozenset[str] | tuple[str, ...] = (),
     environ: dict[str, str] | None = None,
     open_url: Callable = urlopen,
     max_rows: int = 10000,
@@ -1150,9 +1151,22 @@ def upsert_row(
         raise GoogleSheetHubError("schema_mismatch", "Google Sheet has duplicate canonical column names.", 409)
     if key_header not in headers:
         raise GoogleSheetHubError("schema_mismatch", "Google Sheet key column is missing.", 409)
-    unknown = sorted(set(row_by_header) - set(headers))
+    optional = {
+        canonical_header(value)
+        for value in optional_headers
+        if canonical_header(value)
+    }
+    unknown = sorted(set(row_by_header) - set(headers) - optional)
     if unknown:
         raise GoogleSheetHubError("schema_mismatch", "Google Sheet columns do not match the configured schema.", 409)
+    # Optional, version-added columns are written when a Sheet has them and
+    # omitted for a legacy Sheet.  All other unknown fields remain a hard
+    # schema error, so this compatibility path cannot hide a typo or drift.
+    effective_row = {
+        header: value
+        for header, value in row_by_header.items()
+        if header in headers
+    }
     key_index = headers.index(key_header)
     key_column = _column_letter(key_index + 1)
     key_rows = read_values(
@@ -1173,7 +1187,7 @@ def upsert_row(
         raise GoogleSheetHubError("sheet_capacity_reached", "Google Sheet reached the configured row safety limit.", 409)
     end_column = _column_letter(len(headers))
 
-    supplied_key = row_by_header.get(key_header)
+    supplied_key = effective_row.get(key_header)
     if supplied_key is not None and str(supplied_key) != str(key_value):
         raise GoogleSheetHubError("key_mismatch", "Google Sheet row key does not match the upsert key.", 409)
 
@@ -1183,7 +1197,7 @@ def upsert_row(
     # with their displayed values and blank user-managed columns.
     owned_by_index = {
         headers.index(header): str(value if value is not None else "")
-        for header, value in row_by_header.items()
+        for header, value in effective_row.items()
     }
     owned_by_index[key_index] = str(key_value)
     owned_indexes = sorted(owned_by_index)

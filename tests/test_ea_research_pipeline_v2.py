@@ -56,7 +56,7 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
         )
         return blueprint
 
-    def test_deep_research_prompt_keeps_complete_bounded_source_json(self) -> None:
+    def test_deep_research_prompt_preserves_rules_when_optional_metadata_exceeds_cap(self) -> None:
         action = self.bridge.DASHBOARD_WORKFLOW_ACTIONS["deep_research_system"]
         form = self.bridge._sanitize_dashboard_workflow_form(
             action,
@@ -77,14 +77,23 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
                     "https://forex-station.com/ema-cross-confirmation",
                 ],
                 "system": {
-                    "systemName": "EMA 10/60 Cross " + ("source detail " * 100),
+                    "systemName": "EMA 10/60 Cross",
                     "strategyFamily": "trend_following",
+                    "market": "Forex",
                     "symbols": ["EURUSD"],
                     "timeframes": ["H1"],
+                    "sessions": ["London"],
+                    "setupConditions": [
+                        "Evaluate only after a new H1 bar closes",
+                        "Spread must be below the documented maximum",
+                    ],
+                    "sourceTitle": "Optional catalog detail " + ("source detail " * 150),
+                    "risksAndLimitations": ["optional risk note " * 100],
+                    "unknowns": ["optional unknown note " * 100],
                     "indicatorSettings": [
                         {
                             "name": "EMA",
-                            "settings": "10 and 60 " + ("parameter detail " * 100),
+                            "settings": "10 and 60, exponential, close price",
                             "role": "entry",
                             "truthStatus": "fact",
                         }
@@ -92,21 +101,33 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
                     "entrySteps": [
                         {
                             "stepNo": 1,
-                            "rule": "EMA 10 crosses above EMA 60 " + ("entry detail " * 100),
+                            "rule": "EMA10[2] <= EMA60[2] and EMA10[1] > EMA60[1]",
                             "truthStatus": "fact",
                         }
                     ],
                     "exitSteps": [
                         {
                             "stepNo": 1,
-                            "rule": "EMA 10 crosses below EMA 60 " + ("exit detail " * 100),
+                            "rule": "EMA10[2] >= EMA60[2] and EMA10[1] < EMA60[1]",
+                            "truthStatus": "fact",
+                        }
+                    ],
+                    "tradeManagementSteps": [
+                        {
+                            "stepNo": 1,
+                            "rule": "Move stop only after one ATR profit",
                             "truthStatus": "fact",
                         }
                     ],
                     "riskManagement": {
+                        "positionSizing": "fixed fractional",
+                        "maxRiskPerTrade": "1%",
+                        "maxOpenPositions": 1,
+                        "dailyOrEquityStop": "3% daily loss",
                         "stopLoss": "documented swing low",
                         "takeProfit": "opposite cross",
                         "recoveryMethod": "none",
+                        "recoveryRules": [],
                     },
                 },
             }
@@ -128,11 +149,218 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
         )[0]
         source_json = block[block.index("{") :].strip()
         decoded = json.loads(source_json)
-        self.assertLess(len(prompt), self.bridge.TRADING_SYSTEM_RUNNER_PROMPT_MAX_CHARS)
+        self.assertLessEqual(
+            len(prompt),
+            self.bridge.TRADING_SYSTEM_RESEARCH_BUILDER_PROMPT_MAX_CHARS,
+        )
         self.assertEqual(decoded["recordId"], "world-system-one")
         self.assertEqual(len(decoded["sourceUrls"]), 2)
-        self.assertIn("entrySteps", decoded["system"])
+        self.assertTrue(decoded["sourceContextTruncated"])
+        self.assertEqual(decoded["truncationScope"], "optional_metadata_only")
+        for field in (
+            "systemName",
+            "strategyFamily",
+            "market",
+            "symbols",
+            "timeframes",
+            "sessions",
+            "setupConditions",
+            "indicatorSettings",
+            "entrySteps",
+            "exitSteps",
+            "tradeManagementSteps",
+            "riskManagement",
+        ):
+            self.assertIn(field, decoded["system"])
+        self.assertEqual(
+            decoded["system"]["entrySteps"][0]["rule"],
+            "EMA10[2] <= EMA60[2] and EMA10[1] > EMA60[1]",
+        )
+        self.assertEqual(
+            decoded["system"]["riskManagement"]["dailyOrEquityStop"],
+            "3% daily loss",
+        )
+        self.assertEqual(
+            decoded["system"]["riskManagement"]["recoveryRules"],
+            [],
+        )
+        self.assertEqual(decoded["system"]["timeframes"], ["H1"])
+        self.assertEqual(decoded["system"]["sessions"], ["London"])
+        self.assertEqual(
+            decoded["system"]["setupConditions"][0],
+            "Evaluate only after a new H1 bar closes",
+        )
+        self.assertNotIn("sourceTitle", decoded["system"])
         self.assertNotIn("[TRUNCATED]", source_json)
+
+    def test_deep_research_prompt_keeps_five_thousand_character_source_exact(self) -> None:
+        entry_rule = "ENTRY:" + ("E" * 1450)
+        exit_rule = "EXIT:" + ("X" * 1350)
+        management_rule = "MANAGE:" + ("M" * 900)
+        setup_rule = "SETUP:" + ("S" * 650)
+        stop_rule = "STOP:" + ("R" * 450)
+        form = self.bridge._sanitize_dashboard_workflow_form(
+            self.bridge.DASHBOARD_WORKFLOW_ACTIONS["deep_research_system"],
+            {
+                "sourceReportId": "large-real-sheet-report",
+                "sourceRecordId": "large-real-sheet-record",
+            },
+        )
+        source = {
+            "structuredPayload": {
+                "reportId": "large-real-sheet-report",
+                "recordId": "large-real-sheet-record",
+                "verificationStatus": "verified",
+                "sourceUrls": [
+                    "https://tradingfinder.com/education/large-system",
+                    "https://forex-station.com/large-system",
+                ],
+                "system": {
+                    "systemName": "Large verified Sheet system",
+                    "strategyFamily": "trend_following",
+                    "market": "Forex",
+                    "symbols": ["EURUSD"],
+                    "timeframes": ["H1"],
+                    "sessions": ["London"],
+                    "setupConditions": [setup_rule],
+                    "indicatorSettings": [
+                        {"name": "EMA", "settings": "10/60", "role": "entry"}
+                    ],
+                    "entrySteps": [{"stepNo": 1, "rule": entry_rule}],
+                    "exitSteps": [{"stepNo": 1, "rule": exit_rule}],
+                    "tradeManagementSteps": [
+                        {"stepNo": 1, "rule": management_rule}
+                    ],
+                    "riskManagement": {
+                        "positionSizing": "fixed fractional",
+                        "maxRiskPerTrade": "1%",
+                        "stopLoss": stop_rule,
+                        "recoveryMethod": "none",
+                        "recoveryRules": [],
+                        "truthStatus": "partial",
+                    },
+                },
+            }
+        }
+        profile = self.bridge._trusted_workflow_plugin_profile(
+            "left_server_racks",
+            "deep_research_system",
+            form,
+        )
+
+        prompt = self.bridge._workflow_prompt(
+            "deep_research_system",
+            form,
+            source,
+            profile,
+        )
+        block = prompt.split("[UNTRUSTED_SOURCE_REPORT_BEGIN]", 1)[1].split(
+            "[UNTRUSTED_SOURCE_REPORT_END]",
+            1,
+        )[0]
+        decoded = json.loads(block[block.index("{") :].strip())
+        encoded = json.dumps(
+            decoded,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+        self.assertGreaterEqual(len(encoded), 5015)
+        self.assertLessEqual(
+            len(encoded),
+            self.bridge.TRADING_SYSTEM_RESEARCH_SOURCE_PROMPT_MAX_CHARS,
+        )
+        self.assertLessEqual(
+            len(prompt),
+            self.bridge.TRADING_SYSTEM_RESEARCH_BUILDER_PROMPT_MAX_CHARS,
+        )
+        self.assertEqual(decoded["system"]["entrySteps"][0]["rule"], entry_rule)
+        self.assertEqual(decoded["system"]["exitSteps"][0]["rule"], exit_rule)
+        self.assertEqual(
+            decoded["system"]["tradeManagementSteps"][0]["rule"],
+            management_rule,
+        )
+        self.assertEqual(decoded["system"]["setupConditions"], [setup_rule])
+        self.assertEqual(decoded["system"]["riskManagement"]["stopLoss"], stop_rule)
+        self.assertEqual(
+            decoded["system"]["riskManagement"]["recoveryRules"],
+            [],
+        )
+
+    def test_runner_prompt_limit_is_larger_only_for_trading_system_research(self) -> None:
+        research_prompt = "R" * 12000
+        self.assertEqual(
+            self.runner.bound_mission_prompt(
+                research_prompt,
+                "trading_system_research",
+            ),
+            research_prompt,
+        )
+        with self.assertRaises(ValueError):
+            self.runner.bound_mission_prompt(
+                research_prompt + "R",
+                "trading_system_research",
+            )
+        with self.assertRaises(ValueError):
+            self.runner.bound_mission_prompt("G" * 8001, "general")
+
+    def test_deep_research_prompt_fails_closed_when_essential_rules_exceed_cap(self) -> None:
+        action = self.bridge.DASHBOARD_WORKFLOW_ACTIONS["deep_research_system"]
+        form = self.bridge._sanitize_dashboard_workflow_form(
+            action,
+            {
+                "sourceReportId": "oversize-report",
+                "sourceRecordId": "oversize-record",
+            },
+        )
+        source = {
+            "structuredPayload": {
+                "reportId": "oversize-report",
+                "recordId": "oversize-record",
+                "verificationStatus": "verified",
+                "sourceUrls": [
+                    "https://tradingfinder.com/education/oversize-rules",
+                    "https://forex-station.com/oversize-rules",
+                ],
+                "system": {
+                    "systemName": "Oversize deterministic system",
+                    "strategyFamily": "trend_following",
+                    "indicatorSettings": [
+                        {"name": "EMA", "settings": "10 and 60", "role": "entry"}
+                    ],
+                    "entrySteps": [
+                        {
+                            "stepNo": 1,
+                            "rule": "x" * 2100,
+                            "truthStatus": "fact",
+                        }
+                    ],
+                    "exitSteps": [{"stepNo": 1, "rule": "opposite cross"}],
+                    "tradeManagementSteps": [],
+                    "riskManagement": {
+                        "positionSizing": "fixed fractional",
+                        "maxRiskPerTrade": "1%",
+                    },
+                },
+            }
+        }
+        profile = self.bridge._trusted_workflow_plugin_profile(
+            "left_server_racks",
+            "deep_research_system",
+            form,
+        )
+
+        with self.assertRaises(self.bridge.RequestError) as raised:
+            self.bridge._workflow_prompt(
+                "deep_research_system",
+                form,
+                source,
+                profile,
+            )
+
+        self.assertEqual(raised.exception.status, 422)
+        self.assertIn("indicator/entry/exit/management/risk", str(raised.exception))
 
     def non_ready_blueprint(self) -> dict:
         blueprint = self.ready_blueprint()
@@ -337,6 +565,21 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
         self.assertEqual(
             self.bridge.reconstruct_ea_research_from_sheet(row),
             normalized,
+        )
+        risk_model = json.loads(row["risk_model_json"])
+        sizing_rules = json.loads(row["position_sizing_rules_json"])
+        self.assertEqual(risk_model, metrics["riskModel"])
+        self.assertEqual(sizing_rules, normalized["riskAndSizing"])
+        self.assertNotIn("stopLoss", sizing_rules)
+        self.assertNotEqual(sizing_rules, risk_model)
+        self.assertEqual(
+            json.loads(factory_rows[0]["lot_risk"]),
+            normalized["riskAndSizing"],
+        )
+        sheet_factory_values = self.bridge._ea_factory_deep_research_values(row)
+        self.assertEqual(
+            json.loads(sheet_factory_values["lot_risk"]),
+            normalized["riskAndSizing"],
         )
 
     def test_sheet_blueprint_cell_preserves_long_pseudocode_and_digest(self) -> None:

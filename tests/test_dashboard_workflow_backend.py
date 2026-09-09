@@ -780,6 +780,20 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                     },
                 },
             )
+            ea_spec_vocabulary = self.bridge.run_dashboard_workflow_action(
+                "left_server_racks",
+                {
+                    "actionId": "deep_research_system",
+                    "form": {
+                        "sourceReportId": "portal-verified-systems-1",
+                        "sourceRecordId": "trading-system-aaaaaaaaaaaaaaaaaaaaaaaa-1",
+                        "brief": (
+                            "Specify BUY/SELL Entry, BUY/SELL Exit, Partial Close, "
+                            "Pending Order and Buy Stop rules as research evidence"
+                        ),
+                    },
+                },
+            )
             with self.assertRaises(self.bridge.RequestError) as rejected:
                 self.bridge.run_dashboard_workflow_action(
                     "left_server_racks",
@@ -792,16 +806,194 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                         },
                     },
                 )
+            with self.assertRaises(self.bridge.RequestError) as execute_rejected:
+                self.bridge.run_dashboard_workflow_action(
+                    "left_server_racks",
+                    {
+                        "actionId": "deep_research_system",
+                        "form": {
+                            "sourceReportId": "portal-verified-systems-1",
+                            "sourceRecordId": "trading-system-aaaaaaaaaaaaaaaaaaaaaaaa-1",
+                            "brief": "Execute a pending order now",
+                        },
+                    },
+                )
+            with self.assertRaises(self.bridge.RequestError) as typed_order_rejected:
+                self.bridge.run_dashboard_workflow_action(
+                    "left_server_racks",
+                    {
+                        "actionId": "deep_research_system",
+                        "form": {
+                            "sourceReportId": "portal-verified-systems-1",
+                            "sourceRecordId": "trading-system-aaaaaaaaaaaaaaaaaaaaaaaa-1",
+                            "brief": "Place a Buy Stop now",
+                        },
+                    },
+                )
         self.assertTrue(self.bridge._is_trusted_public_read_only_workflow(
             "left_server_racks",
             "deep_research_system",
         ))
         self.assertEqual(safe["mission"]["approval"]["state"], "not_required")
         self.assertFalse(safe["mission"]["requiresHumanApproval"])
-        self.assertEqual(len(captured), 1)
-        self.assertEqual(selected.call_count, 1)
+        self.assertEqual(ea_spec_vocabulary["mission"]["approval"]["state"], "not_required")
+        self.assertFalse(ea_spec_vocabulary["mission"]["requiresHumanApproval"])
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(selected.call_count, 2)
         self.assertEqual(rejected.exception.status, 422)
         self.assertIn("no Mission was created", str(rejected.exception))
+        self.assertEqual(execute_rejected.exception.status, 422)
+        self.assertIn("no Mission was created", str(execute_rejected.exception))
+        self.assertEqual(typed_order_rejected.exception.status, 422)
+        self.assertIn("no Mission was created", str(typed_order_rejected.exception))
+        worker_guard_kwargs = {
+            "prop_id": "left_server_racks",
+            "action_id": "deep_research_system",
+        }
+        self.assertEqual(
+            self.bridge._public_read_only_intent_reasons(
+                "codex_web_research",
+                json.dumps({
+                    "brief": "BUY/SELL Entry, Partial Close and Pending Order rules",
+                }),
+                **worker_guard_kwargs,
+            ),
+            [],
+        )
+        self.assertTrue(
+            self.bridge._public_read_only_intent_reasons(
+                "codex_web_research",
+                json.dumps({"brief": "Execute a pending order now"}),
+                **worker_guard_kwargs,
+            )
+        )
+        self.assertTrue(
+            self.bridge._public_read_only_intent_reasons(
+                "codex_web_research",
+                json.dumps({"brief": "Place a Buy Stop now"}),
+                **worker_guard_kwargs,
+            )
+        )
+        for explicit_execution in (
+            "Place Buy Stop now",
+            "Open Sell Limit now",
+            "Execute Buy Market now",
+            "Set Buy Stop now",
+            "Submit Sell Limit now",
+            "Cancel Pending Order now",
+            "Modify Pending Order now",
+            "Activate Buy Stop now",
+            "Create Buy Stop now",
+            "Partial Close 50 percent now",
+            "Research EMA rules and place a pending order",
+            "Define the strategy then place Buy Stop",
+            "Analyze the setup and cancel pending order",
+            "Specify rules, then execute Sell Limit",
+            "Cancel pending order and then document lifecycle rules",
+            "Activate Buy Stop then define entry rules",
+            "Set pending order and explain lifecycle rules",
+            "Create pending order with lifecycle rules",
+            "Cancel the pending order; document lifecycle rules",
+            "Please cancel pending order lifecycle rules",
+            "Define cancel pending order lifecycle rules and cancel pending order",
+            "Define set pending order entry rules and activate Buy Stop",
+            "Define modify pending order lifecycle rules and create a pending order",
+            "Define modify pending order rules, and cancel pending order",
+            "Define amend pending order rules and trigger Buy Stop",
+            "Sell EURUSD immediately",
+            "sell eurusd immediately",
+            "SELL eurusd now",
+            "Go long XAUUSD now",
+            "Enter long now",
+            "Exit the trade now",
+            "Liquidate all positions now",
+            "Close all trades now",
+            "Open a trade now",
+            "Short EURUSD now",
+            "short xauusd now",
+            "Long XAUUSD now",
+            "long btcusd now",
+            "Market sell XAUUSD now",
+            "Sell XAUUSD at market",
+            "Flatten all positions",
+            "Reverse the position now",
+            "Hedge the position now",
+            "Add to the position now",
+            "Reduce the position now",
+            "Move stop loss now",
+            "Adjust take profit now",
+            "Modify SL now",
+            "Set TP now",
+            "Delete pending order now",
+            "Change pending order now",
+            "Enable AutoTrading now",
+            "Activate EA live",
+            "Start the EA now",
+            "Define rules: Sell EURUSD; then do it",
+            "Define rules: Sell EURUSD and do it",
+            "Document rules to close all trades; execute them",
+            "Define Sell EURUSD rules and send it",
+            "Define Sell EURUSD rules and carry it out",
+            "Explain the rules for closing positions, then carry them out",
+            "ขาย EURUSD ตอนนี้",
+            "ซื้อ XAUUSD ตอนนี้",
+            "ขายทอง",
+            "ซื้อทองตอนนี้",
+            "เปิด Sell ทอง",
+            "Sell ทองเดี๋ยวนี้",
+            "เปิด Buy ทอง",
+            "Buy ทองตอนนี้",
+            "เทรดทองจริง",
+            "เข้า Sell ตอนนี้",
+            "เปิดไม้ตอนนี้",
+            "ปิดไม้ตอนนี้",
+            "ปิดทั้งหมดตอนนี้",
+            "เลื่อน stop loss ตอนนี้",
+            "อธิบายกฎเปิดออเดอร์ แล้วทำเลย",
+            "อธิบายกฎขายทอง ทำเลย",
+            "กำหนดกฎขายทองแล้วดำเนินการ",
+            "อธิบายกฎเปิดไม้ แล้วจัดเลย",
+        ):
+            with self.subTest(explicit_execution=explicit_execution):
+                self.assertIn(
+                    "public_read_only_scope:explicit_trade_execution",
+                    self.bridge._public_read_only_intent_reasons(
+                        "codex_web_research",
+                        {"brief": explicit_execution},
+                        **worker_guard_kwargs,
+                    ),
+                )
+        self.assertEqual(
+            self.bridge._public_read_only_intent_reasons(
+                "codex_web_research",
+                {"brief": "Specify Buy Stop entry rules and Partial Close rules"},
+                **worker_guard_kwargs,
+            ),
+            [],
+        )
+        self.assertEqual(
+            self.bridge._public_read_only_intent_reasons(
+                "codex_web_research",
+                {"brief": "Define cancel and modify pending order lifecycle rules"},
+                **worker_guard_kwargs,
+            ),
+            [],
+        )
+        for safe_specification in (
+            "Explain EURUSD sell-entry rules",
+            "อธิบายกฎเปิดออเดอร์ของระบบนี้โดยละเอียด",
+            "ระบุเงื่อนไขปิดออเดอร์และ trailing stop",
+            "อธิบายกฎซื้อทองและกฎขายทองของระบบนี้",
+        ):
+            with self.subTest(safe_specification=safe_specification):
+                self.assertEqual(
+                    self.bridge._public_read_only_intent_reasons(
+                        "codex_web_research",
+                        {"brief": safe_specification},
+                        **worker_guard_kwargs,
+                    ),
+                    [],
+                )
         self.assertIn("ห้ามสลับไปเป็นระบบอื่น", captured[0]["payload"]["prompt"])
         self.assertEqual(
             captured[0]["context"]["inputs"]["sourceRecordId"],
@@ -1017,7 +1209,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         with template_path.open("r", encoding="utf-8", newline="") as handle:
             template_headers = next(csv.reader(handle))
         template_field_ids = [header.split("/", 1)[0] for header in template_headers]
-        self.assertEqual(len(template_field_ids), 64)
+        self.assertEqual(len(template_field_ids), 65)
         self.assertEqual(model["sheetTemplate"]["columns"], template_field_ids)
         self.assertTrue(model["schedule"]["enabled"])
         self.assertTrue(model["schedule"]["requestedEnabled"])
@@ -2434,6 +2626,200 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                         len(prompt),
                         self.bridge.TRADING_SYSTEM_RUNNER_PROMPT_MAX_CHARS,
                     )
+
+    def test_bridge_passes_12k_only_to_exact_deep_research_mission(self) -> None:
+        form = {
+            "sourceReportId": "sheet-report-large",
+            "sourceRecordId": "sheet-record-large",
+        }
+        source = {
+            "reportId": "sheet-report-large",
+            "recordId": "sheet-record-large",
+            "sourceKind": "verified_sheet_record",
+            "sourcePropId": "codex_mcp_portal",
+            "sourceMissionId": None,
+            "type": "trading_system_discovery_report",
+            "status": "ready",
+            "agentTransfer": None,
+        }
+        profile = self.bridge._trusted_workflow_plugin_profile(
+            "left_server_racks",
+            "deep_research_system",
+            form,
+        )
+        lineage = self.bridge._dashboard_workflow_lineage(
+            "left_server_racks",
+            "deep_research_system",
+            form,
+            source,
+            plugin_profile=profile,
+        )
+        prompt = "R" * 12000
+        created = {
+            "id": "mission-deep-prompt-limit",
+            "targetId": "left_server_racks",
+            "status": "queued",
+            "autoEligible": False,
+            "executionMode": "manual_guarded",
+            "requiresHumanApproval": False,
+            "approval": {"required": False, "state": "not_required"},
+        }
+        with (
+            mock.patch.object(
+                self.bridge,
+                "create_mission",
+                return_value=created,
+            ) as create_mission,
+            mock.patch.object(
+                self.bridge,
+                "bridge_status",
+                return_value={"codex": {"status": "ready_guarded"}},
+            ),
+            mock.patch.object(self.bridge, "append_audit"),
+        ):
+            result = self.bridge.run_bridge_task(
+                {
+                    "prompt": prompt,
+                    "agentId": "mission_archivist",
+                    "requester": "mission_archivist",
+                    "toolId": "codex_web_research",
+                    "targetId": "left_server_racks",
+                    "reportType": "trading_system_research_report",
+                },
+                trusted_workflow_context=lineage,
+            )
+            ordinary_result = self.bridge.run_bridge_task(
+                {
+                    "prompt": "R" * 8000,
+                    "agentId": "manager",
+                    "requester": "manager",
+                    "toolId": "manager_mission",
+                    "targetId": "left_server_racks",
+                }
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(ordinary_result["ok"], ordinary_result)
+        self.assertEqual(
+            create_mission.call_args_list[0].kwargs[
+                "_trusted_deep_research_prompt"
+            ],
+            prompt,
+        )
+        self.assertIsNone(
+            create_mission.call_args_list[1].kwargs[
+                "_trusted_deep_research_prompt"
+            ]
+        )
+        self.assertEqual(
+            create_mission.call_args_list[1].args[0]["budget"]["outputLimitChars"],
+            7000,
+        )
+
+    def test_create_mission_keeps_default_8k_and_exact_deep_research_12k(self) -> None:
+        form = {
+            "sourceReportId": "sheet-report-bound",
+            "sourceRecordId": "sheet-record-bound",
+        }
+        source = {
+            "reportId": "sheet-report-bound",
+            "recordId": "sheet-record-bound",
+            "sourceKind": "verified_sheet_record",
+            "sourcePropId": "codex_mcp_portal",
+            "sourceMissionId": None,
+            "type": "trading_system_discovery_report",
+            "status": "ready",
+            "agentTransfer": None,
+        }
+        profile = self.bridge._trusted_workflow_plugin_profile(
+            "left_server_racks",
+            "deep_research_system",
+            form,
+        )
+        lineage = self.bridge._dashboard_workflow_lineage(
+            "left_server_racks",
+            "deep_research_system",
+            form,
+            source,
+            plugin_profile=profile,
+        )
+        prompt = "D" * 12000
+        with (
+            mock.patch.object(
+                self.bridge,
+                "get_tool_policy",
+                return_value={"risk": "low", "approvalRequired": False},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "resolve_budget",
+                return_value=("manager_quality", {}),
+            ),
+            mock.patch.object(
+                self.bridge,
+                "find_mission_by_idempotency",
+                return_value=None,
+            ),
+            mock.patch.object(self.bridge, "load_missions", return_value=[]),
+            mock.patch.object(self.bridge, "save_missions"),
+            mock.patch.object(self.bridge, "append_audit"),
+            mock.patch.object(
+                self.bridge,
+                "auto_guarded_eligibility",
+                return_value={"eligible": False, "reasons": []},
+            ),
+        ):
+            mission = self.bridge.create_mission(
+                {
+                    "prompt": prompt,
+                    "agentId": "mission_archivist",
+                    "requester": "mission_archivist",
+                    "toolId": "codex_web_research",
+                    "targetId": "left_server_racks",
+                    "risk": "low",
+                    "modelTier": "manager_quality",
+                    "reportType": "trading_system_research_report",
+                },
+                workflow_context=lineage,
+                allow_model_override=True,
+                allow_budget_override=True,
+                _trusted_deep_research_prompt=prompt,
+            )
+
+        self.assertEqual(mission["detail"], prompt)
+        self.assertEqual(len(mission["detail"]), 12000)
+        with self.assertRaises(self.bridge.RequestError) as raised:
+            self.bridge.create_mission({"prompt": "G" * 8001})
+        self.assertEqual(raised.exception.status, 422)
+
+    def test_mission_read_model_preserves_exact_deep_research_prompt_only(self) -> None:
+        detail = "D" * 11000
+        base = {
+            "id": "mission-deep-read-model",
+            "detail": detail,
+            "owner": "mission_archivist",
+            "toolId": "codex_web_research",
+            "targetId": "left_server_racks",
+            "reportType": "trading_system_research_report",
+            "workflowContext": {
+                "propId": "left_server_racks",
+                "actionId": "deep_research_system",
+            },
+        }
+        exact = self.bridge.mission_read_model_item(base)
+        self.assertEqual(exact["detail"], detail)
+        self.assertFalse(exact["detailTruncated"])
+        self.assertEqual(
+            exact["detailLimitChars"],
+            self.bridge.TRADING_SYSTEM_RESEARCH_RUNNER_PROMPT_MAX_CHARS,
+        )
+
+        ordinary = self.bridge.mission_read_model_item(
+            {**base, "toolId": "manager_mission"}
+        )
+        self.assertEqual(len(ordinary["detail"]), 8000)
+        self.assertTrue(ordinary["detailTruncated"])
+        self.assertEqual(ordinary["detailLimitChars"], 8000)
 
     def test_http_sanitization_preserves_nested_workflow_select_options(self) -> None:
         """The final send_json projection must not turn safe options into placeholders."""
