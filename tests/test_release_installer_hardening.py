@@ -456,6 +456,9 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
 
     def test_release_workflow_never_skips_current_archive_smoke(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "publish-release.yml").read_text(encoding="utf-8")
+        regression_runner = (ROOT / "scripts" / "run-regression-suite.ps1").read_text(
+            encoding="utf-8"
+        )
         verify_step = workflow[
             workflow.index("- name: Verify safe runtime"):
             workflow.index("- name: Build release package")
@@ -464,7 +467,13 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("Frontend syntax check failed with exit code", verify_step)
         self.assertIn("python -m venv runner/.venv", verify_step)
         self.assertIn("--require-hashes --requirement requirements-runner.txt", verify_step)
-        self.assertIn(r".\runner\.venv\Scripts\python.exe -m unittest", verify_step)
+        self.assertIn(r".\scripts\run-regression-suite.ps1", verify_step)
+        self.assertIn(
+            '& $resolvedPython -m unittest discover -s tests -p "test_*.py" -v',
+            regression_runner,
+        )
+        self.assertIn("Regression suite failed::", regression_runner)
+        self.assertIn("FAIL|ERROR", regression_runner)
         self.assertGreaterEqual(verify_step.count("$LASTEXITCODE -ne 0"), 2)
         self.assertIn("Always build and smoke-test the exact current archive", workflow)
         self.assertIn("git archive --format=zip", workflow)
@@ -599,8 +608,8 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             workflow.index("context=metafxclub/release"),
         )
         self.assertIn("node --check (Join-Path $verifiedInstalledRoot", workflow)
-        self.assertIn("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", workflow)
-        self.assertIn("actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065", workflow)
+        self.assertIn("actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd", workflow)
+        self.assertIn("actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405", workflow)
         self.assertIn("Python 3.10-3.14", workflow)
         for filename in (
             "requirements-runner.txt",
@@ -622,8 +631,8 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             self.assertIn(filename, workflow)
 
         verify_workflow = (ROOT / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8")
-        self.assertIn("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", verify_workflow)
-        self.assertIn("actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065", verify_workflow)
+        self.assertIn("actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd", verify_workflow)
+        self.assertIn("actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405", verify_workflow)
         self.assertIn('python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]', verify_workflow)
         self.assertIn('python-version: ${{ matrix.python-version }}', verify_workflow)
         self.assertIn('python-version: "3.11"', workflow)

@@ -2730,7 +2730,12 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         )
 
         self.assertIsNone(self.bridge.safe_reference(composite_id))
-        rows, diagnostics = self.bridge._world_sheet_catalog_projection()
+        with patch.object(
+            self.hub,
+            "credential_status",
+            return_value={"configured": True, "mode": "access_token"},
+        ):
+            rows, diagnostics = self.bridge._world_sheet_catalog_projection()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["sourceReportId"], "auto-report-20260909")
         self.assertEqual(rows[0]["sourceRecordId"], "trading-system-a1b2c3-1")
@@ -3183,7 +3188,12 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             },
         )
 
-        history = self.bridge._deep_sheet_research_history_rows()[0]
+        with patch.object(
+            self.hub,
+            "credential_status",
+            return_value={"configured": True, "mode": "access_token"},
+        ):
+            history = self.bridge._deep_sheet_research_history_rows()[0]
         self.assertFalse(history["requiresResearchRerun"])
         self.assertTrue(history["eaResearch"]["validated"])
         self.assertTrue(history["eaResearch"]["digestMatched"])
@@ -3269,7 +3279,12 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             },
         )
 
-        history = self.bridge._deep_sheet_research_history_rows()
+        with patch.object(
+            self.hub,
+            "credential_status",
+            return_value={"configured": True, "mode": "access_token"},
+        ):
+            history = self.bridge._deep_sheet_research_history_rows()
 
         self.assertEqual(len(history), 3)
         by_verification = {item["verificationStatus"]: item for item in history}
