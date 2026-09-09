@@ -367,15 +367,16 @@
       "target": {"platform": "mt4|mt5|tradingview", "language": "mql4|mql5|pine_script", "artifactKind": "ea|indicator|strategy"},
       "sourceGeneration": {"available": true, "status": "not_started|queued|running|completed|failed", "workspaceScope": "PROJECT_ROOT/workspace/ea-factory/<buildId>", "version": null, "artifactIds": []},
       "sourceReview": {"available": true, "status": "not_started|running|completed|failed", "findings": []},
-      "compile": {"available": false, "status": "not_started|blocked|queued|running|passed|failed|not_applicable", "compiler": null, "selectedTerminalCandidateId": null, "errors": null, "warnings": null, "proofId": null},
+      "compile": {"available": true, "status": "not_started|blocked|queued|running|passed|failed|not_applicable", "mode": "backend_selected_metaeditor_compile_only|static_pine_validation", "compilerPathExposed": false, "selectedTerminalCandidateId": null, "selectionRevision": null, "errors": null, "warnings": null, "compiledArtifactSha256": null, "receiptDigest": null, "proofId": null},
       "backtestRecheck": {"available": false, "status": "not_started|blocked|queued|running|passed|failed|not_applicable", "visualModeProofId": null, "buySignalCount": null, "sellSignalCount": null, "buyOrderCount": null, "sellOrderCount": null, "logicRecheck": null},
       "workspaceFolders": ["Source", "EA_Versions", "Reports", "Sets", "Screenshots", "Summaries"],
-      "runtimeReadiness": {"researchCatalog": "ready", "centralGoogleSheetReadOnly": "implemented_runtime_status_required", "centralGoogleSheetTab": "Deep_Research", "centralGoogleSheetSharedConsumerPropId": "left_server_racks", "codexSourceGenerationWorkspace": "ready_guarded", "sourceCodeReview": "ready_guarded", "pineStaticValidation": "ready", "missionReportAudit": "ready", "metaEditorCompile": "requires_matching_selected_terminal_and_verified_front_office_proof", "visualBacktest": "requires_matching_selected_terminal_and_verified_front_office_proof"},
+      "runtimeReadiness": {"researchCatalog": "ready", "centralGoogleSheetReadOnly": "implemented_runtime_status_required", "centralGoogleSheetTab": "Deep_Research", "centralGoogleSheetSharedConsumerPropId": "left_server_racks", "codexSourceGenerationWorkspace": "ready_guarded", "sourceCodeReview": "ready_guarded", "pineStaticValidation": "ready", "missionReportAudit": "ready", "metaEditorCompile": "implemented_backend_selected_compile_only_fail_closed", "visualBacktest": "coming_soon_hard_blocked"},
       "truthRules": [
         "One user action advances at most one stage; no scheduler or automatic build loop may advance a build.",
         "A-M are the core strategy and backtest inputs; N-W are downstream status, report, issue, next-action, platform, and update fields.",
         "Source generated in the guarded Workspace is not compiled proof.",
-        "MT4/MT5 Compile passed requires the exact selected terminal, visible MetaEditor evidence, matching source digest, and a Backend audit receipt.",
+        "MT4/MT5 Compile passed requires the exact Backend-selected terminal revision, a fresh real Unicode MetaEditor log with exactly 0 errors and 0 warnings, stable source/compiler/binary digests, and an immutable Backend receipt.",
+        "The compile adapter runs MetaEditor hidden with shell disabled and never opens the Terminal, attaches a chart, runs Strategy Tester, deploys, trades, or accepts frontend paths or arguments.",
         "MT4/MT5 Backtest passed requires visible Strategy Tester Visual Mode evidence and a logic recheck; Pine Script never enters the MetaTrader backtest stage.",
         "Pine Script may finish only after source generation and static validation; it must not claim TradingView publication or market backtest execution.",
         "Frontend receives only opaque artifact ids or allowlisted download URLs, never unrestricted filesystem paths."
@@ -383,10 +384,10 @@
     },
     "ea_compile_report": {
       "schemaVersion": "ea-compile-report-v1",
-      "purpose": "ผล Compile แบบแยกจากรายงานสร้าง Source Code; ค่าเริ่มต้นต้องเป็น Coming Soon จนมีหลักฐานจาก Adapter จริง",
+      "purpose": "ผล Compile แบบแยกจากรายงานสร้าง Source Code; MT4/MT5 ผ่านได้เฉพาะ Backend-selected MetaEditor compile-only Receipt ที่ตรวจครบ ส่วน Pine เป็น Static Validation",
       "buildReportId": null,
       "platform": "mt4|mt5|tradingview|null",
-      "compilerAdapterAvailable": false,
+      "compilerAdapterAvailable": true,
       "status": "coming_soon|queued|running|passed|failed",
       "errors": null,
       "warnings": null,
@@ -394,7 +395,9 @@
       "backendVerificationId": null,
       "truthRules": [
         "passed requires a matching Backend compile audit event and artifact SHA-256.",
-        "MQL4/MQL5 passed also requires the selected terminal platform to match the build target and visible MetaEditor proof.",
+        "MQL4/MQL5 passed also requires the selected terminal platform and revision to match the build target plus exact zero-error/zero-warning MetaEditor log and stable binary evidence.",
+        "MetaEditor exit code 0 or 1 is only supporting evidence and never passes without the exact log, source/compiler/selection rechecks, and compiled binary digest.",
+        "Compile-only never launches the Terminal or performs Backtest, chart attachment, deployment, network work, or trading.",
         "Pine Script validation is static source validation and must not be relabeled as TradingView compile or publication.",
         "Static code review cannot be labeled Compile passed.",
         "Missing compiler evidence remains blocked or not_started and cannot be inferred from process exit code alone."

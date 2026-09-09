@@ -806,6 +806,8 @@ function Assert-SafeSource {
         "backend\local-runner\bridge_server.py",
         "backend\local-runner\configure_google_oauth_client.py",
         "backend\local-runner\ea_factory_blueprint_coverage.py",
+        "backend\local-runner\ea_factory_indicator_coverage.py",
+        "backend\local-runner\ea_factory_metaeditor_compile.py",
         "backend\local-runner\ea_research_blueprint.py",
         "contracts\research\ea-implementation-blueprint-v2.schema.json",
         "frontend\index.html",
@@ -1596,6 +1598,98 @@ function Remove-InstallerTemporaryDirectoryWithRetry {
     throw $message
 }
 
+function Assert-InstallerManagedDirectoryRemoval {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][ValidateSet("installation", "venv")][string]$Kind
+    )
+
+    if ([string]::IsNullOrWhiteSpace([string]$env:LOCALAPPDATA)) {
+        throw "ไม่พบ LOCALAPPDATA สำหรับตรวจขอบเขตการลบของ Installer"
+    }
+    $expectedInstallRoot = [IO.Path]::GetFullPath(
+        (Join-Path $env:LOCALAPPDATA "Metafxclub\AI-Agent-HQ")
+    ).TrimEnd("\")
+    $expectedPath = if ($Kind -ceq "installation") {
+        $expectedInstallRoot
+    }
+    else {
+        [IO.Path]::GetFullPath((Join-Path $expectedInstallRoot "runner\.venv")).TrimEnd("\")
+    }
+    $resolved = [IO.Path]::GetFullPath($Path).TrimEnd("\")
+    if (-not $resolved.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "ปฏิเสธการลบ $Kind เพราะ Path ไม่ตรงกับพื้นที่ติดตั้งที่กำหนด"
+    }
+
+    if (Test-Path -LiteralPath $resolved) {
+        $rootItem = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+        if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "ปฏิเสธการลบ $Kind เพราะ Root เป็น Reparse Point"
+        }
+        $nestedReparsePoint = Get-ChildItem `
+            -LiteralPath $resolved `
+            -Recurse `
+            -Force `
+            -Attributes ReparsePoint `
+            -ErrorAction Stop | Select-Object -First 1
+        if ($nestedReparsePoint) {
+            throw "ปฏิเสธการลบ $Kind เพราะพบ Reparse Point ภายในพื้นที่ที่จัดการ"
+        }
+    }
+    return $resolved
+}
+
+function Remove-InstallerManagedDirectoryWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][ValidateSet("installation", "venv")][string]$Kind
+    )
+
+    # A stale antivirus/indexer handle can make a safe fresh-install rollback
+    # or invalid-venv replacement fail with ERROR_DIR_NOT_EMPTY (WinError 145).
+    # Keep the retry bounded and revalidate the exact managed path before every
+    # provider/extended-path deletion so cleanup cannot escape LOCALAPPDATA.
+    $resolved = Assert-InstallerManagedDirectoryRemoval -Path $Path -Kind $Kind
+    $delaysMilliseconds = @(0, 100, 250, 500, 1000, 2000)
+    $lastError = ""
+    foreach ($delay in $delaysMilliseconds) {
+        if ($delay -gt 0) {
+            Start-Sleep -Milliseconds $delay
+        }
+        if (-not (Test-Path -LiteralPath $resolved)) {
+            return
+        }
+        $resolved = Assert-InstallerManagedDirectoryRemoval -Path $resolved -Kind $Kind
+        try {
+            Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop
+            if (-not (Test-Path -LiteralPath $resolved)) {
+                return
+            }
+            $lastError = "$Kind directory ยังปรากฏอยู่หลังคำสั่งลบ"
+        }
+        catch {
+            $lastError = [string]$_.Exception.Message
+            try {
+                $resolved = Assert-InstallerManagedDirectoryRemoval -Path $resolved -Kind $Kind
+                $extendedPath = if ($resolved.StartsWith("\\")) {
+                    "\\?\UNC\{0}" -f $resolved.TrimStart("\")
+                }
+                else {
+                    "\\?\$resolved"
+                }
+                [IO.Directory]::Delete($extendedPath, $true)
+                if (-not (Test-Path -LiteralPath $resolved)) {
+                    return
+                }
+            }
+            catch {
+                $lastError = [string]$_.Exception.Message
+            }
+        }
+    }
+    throw "ลบ $Kind directory ของ Installer ไม่สำเร็จหลัง retry แบบจำกัด: $lastError"
+}
+
 function Stop-CandidateBridgeAfterFailedStart {
     param([ValidateRange(1024, 65535)][int]$CandidatePort)
 
@@ -1827,7 +1921,10 @@ function New-ApplicationRollbackSnapshot {
         )
         & robocopy.exe @arguments | Out-Null
         if ($LASTEXITCODE -gt 7) {
-            Remove-Item -LiteralPath $snapshotRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-InstallerTemporaryDirectoryWithRetry `
+                -ResolvedPath $snapshotRoot `
+                -Kind rollback `
+                -BestEffort
             throw "เก็บ Last-good application ไม่สำเร็จ (Robocopy รหัส $LASTEXITCODE)"
         }
     }
@@ -1859,12 +1956,7 @@ function Restore-ApplicationRollbackSnapshot {
         }
     }
     elseif (Test-Path -LiteralPath $installRoot) {
-        $resolvedInstall = [IO.Path]::GetFullPath($installRoot).TrimEnd("\")
-        $expectedInstall = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "Metafxclub\AI-Agent-HQ")).TrimEnd("\")
-        if (-not $resolvedInstall.Equals($expectedInstall, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "ปฏิเสธการลบ Installation ที่ไม่สมบูรณ์เพราะ Path ไม่ตรงกับพื้นที่ที่กำหนด"
-        }
-        Remove-Item -LiteralPath $installRoot -Recurse -Force
+        Remove-InstallerManagedDirectoryWithRetry -Path $installRoot -Kind installation
     }
 }
 
@@ -1904,11 +1996,7 @@ function Initialize-PythonEnvironment {
     }
     if (-not $venvDetails) {
         if (Test-Path -LiteralPath $venvRoot) {
-            $expectedVenvRoot = Get-ComparablePath -Path (Join-Path $installRoot "runner\.venv")
-            if (-not (Get-ComparablePath -Path $venvRoot).Equals($expectedVenvRoot, [StringComparison]::OrdinalIgnoreCase)) {
-                throw "ปฏิเสธการลบ Virtual Environment เพราะ Path ไม่ตรงกับพื้นที่ติดตั้ง"
-            }
-            Remove-Item -LiteralPath $venvRoot -Recurse -Force
+            Remove-InstallerManagedDirectoryWithRetry -Path $venvRoot -Kind venv
         }
 
         $python = Resolve-SystemPython
@@ -1992,21 +2080,23 @@ function Test-GoogleOAuthDeploymentConfigured {
 function Invoke-GoogleOAuthFirstRunSetup {
     param([Parameter(Mandatory = $true)][string]$CandidateRoot)
 
-    $alreadyConfigured = Test-GoogleOAuthDeploymentConfigured -CandidateRoot $CandidateRoot
     $explicitClientSetup = -not [string]::IsNullOrWhiteSpace($GoogleClientJsonPath)
-    # Preserve the original optional gate semantics ($SkipGoogleSetup -or $SkipLaunch)
-    # unless an explicit, fully validated one-shot JSON setup was requested.
-    if (($SkipGoogleSetup -and -not $explicitClientSetup) -or $SkipLaunch -or ($alreadyConfigured -and -not $explicitClientSetup)) {
-        if ($alreadyConfigured) {
-            $script:googleSetupStatus = "ready_existing"
-            Write-Host "Google OAuth Client ของ Windows User นี้ตั้งค่าไว้แล้ว" -ForegroundColor Green
-        }
-        elseif ($SkipLaunch) {
-            $script:googleSetupStatus = "skipped_no_launch"
-        }
-        elseif ($SkipGoogleSetup) {
-            $script:googleSetupStatus = "skipped_by_request"
-        }
+    # A package smoke or explicit skip must not even inspect the current
+    # Windows user's OAuth store. The one-shot JSON path remains authoritative
+    # and is allowed to proceed because it was validated before any mutation.
+    if ($SkipLaunch -and -not $explicitClientSetup) {
+        $script:googleSetupStatus = "skipped_no_launch"
+        return
+    }
+    if ($SkipGoogleSetup -and -not $explicitClientSetup) {
+        $script:googleSetupStatus = "skipped_by_request"
+        return
+    }
+
+    $alreadyConfigured = Test-GoogleOAuthDeploymentConfigured -CandidateRoot $CandidateRoot
+    if ($alreadyConfigured -and -not $explicitClientSetup) {
+        $script:googleSetupStatus = "ready_existing"
+        Write-Host "Google OAuth Client ของ Windows User นี้ตั้งค่าไว้แล้ว" -ForegroundColor Green
         return
     }
 

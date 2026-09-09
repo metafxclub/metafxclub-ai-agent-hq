@@ -216,6 +216,8 @@ jobs:
               "scripts\setup-google-oauth.ps1",
               "scripts\start-local-bridge.ps1",
               "backend\local-runner\ea_factory_blueprint_coverage.py",
+              "backend\local-runner\ea_factory_indicator_coverage.py",
+              "backend\local-runner\ea_factory_metaeditor_compile.py",
               "backend\local-runner\ea_research_blueprint.py",
               "backend\local-runner\configure_google_oauth_client.py",
               "backend\local-runner\google_oauth_store.py",

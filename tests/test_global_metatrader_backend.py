@@ -989,6 +989,83 @@ class GlobalMetatraderBackendTests(unittest.TestCase):
             "processId",
         }.isdisjoint(observed_keys))
 
+    def test_five_candidates_legacy_partial_becomes_one_atomic_global_selection(self) -> None:
+        store_path = self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME
+        store = json.loads(store_path.read_text(encoding="utf-8"))
+        extra_records = []
+        for ordinal, letter in enumerate(("q", "r", "s"), start=2):
+            path = self.root / f"terminal-mt4-{letter}"
+            (path / "MQL4").mkdir(parents=True)
+            candidate_id = "mtc-" + (letter * 26)
+            record = self._candidate_record("mt4", candidate_id, path, ordinal)
+            store["candidates"][candidate_id] = record
+            extra_records.append(record)
+        store["candidates"][self.mt4_id]["runningState"] = "platform_running_detected"
+        store["selections"] = {
+            "left_analytics_console": {
+                "candidateId": self.mt4_id,
+                "selectedAt": "2026-09-07T00:00:00Z",
+                "selectionRevision": 2,
+            }
+        }
+        self.bridge.write_json(store_path, store)
+        public_candidates = [
+            self.bridge._public_metatrader_candidate(record)
+            for record in store["candidates"].values()
+        ]
+        terminal_model = self.bridge.metatrader_status_read_model(
+            {"mt4": 4, "mt5": 1},
+            {"supported": True, "mt4": 1, "mt5": 0},
+            public_candidates,
+        )
+        self.bridge.METATRADER_CACHE["payload"] = terminal_model
+        before = self.bridge.global_metatrader_hub_read_model()
+        self.assertEqual(len(before["candidates"]), 5)
+        self.assertEqual(before["status"], "partial")
+        self.assertEqual(
+            before["platforms"]["mt4"]["configuredTargetCount"],
+            1,
+        )
+        self.assertIsNone(before["platforms"]["mt4"]["selectedCandidate"])
+
+        original_write = self.bridge._write_metatrader_target_store_unlocked
+        with self._action_patches(), mock.patch.object(
+            self.bridge,
+            "_metatrader_process_locations",
+            return_value={
+                "supported": True,
+                "mt4": [self.bridge._canonical_metatrader_location(self.mt4_path)],
+                "mt5": [],
+                "pathAccessLimited": {"mt4": 0, "mt5": 0},
+            },
+        ), mock.patch.object(
+            self.bridge,
+            "_write_metatrader_target_store_unlocked",
+            wraps=original_write,
+        ) as write_store:
+            result = self.bridge.select_global_metatrader_target("mt4", self.mt4_id)
+
+        self.assertEqual(write_store.call_count, 1)
+        self.assertTrue(result["atomic"])
+        self.assertEqual(result["configuredTargetCount"], 3)
+        after = result["globalMetatraderHub"]
+        self.assertEqual(after["status"], "configured")
+        self.assertEqual(
+            after["platforms"]["mt4"]["configurationStatus"],
+            "configured",
+        )
+        self.assertEqual(
+            after["platforms"]["mt4"]["selectedCandidate"]["candidateId"],
+            self.mt4_id,
+        )
+        self.assertEqual(
+            {
+                row["selectedCandidate"]["candidateId"]
+                for row in after["platforms"]["mt4"]["targets"]
+            },
+            {self.mt4_id},
+        )
+
     def test_platform_mismatch_is_rejected_before_any_state_change(self) -> None:
         store_path = self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME
         before = store_path.read_bytes()

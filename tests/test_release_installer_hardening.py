@@ -194,6 +194,14 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             installer.index("function Assert-EaArtifactIntegrity")
         ]
         self.assertIn("Assert-ExpectedGitSource", safe_source)
+        self.assertIn(
+            '"backend\\local-runner\\ea_factory_indicator_coverage.py"',
+            safe_source,
+        )
+        self.assertIn(
+            '"backend\\local-runner\\ea_factory_metaeditor_compile.py"',
+            safe_source,
+        )
         self.assertIn("function Export-VerifiedGitSource", installer)
         self.assertIn('"archive", "--format=zip"', installer)
         self.assertIn("Export-VerifiedGitSource -DestinationRoot $stagingRoot", installer)
@@ -511,6 +519,14 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("$env:LOCALAPPDATA = $originalLocalAppData", workflow)
         self.assertIn("Release fixture cleanup was not confirmed", workflow)
         self.assertIn("Bump VERSION instead of reusing the tag", workflow)
+        self.assertIn(
+            '"backend\\local-runner\\ea_factory_indicator_coverage.py"',
+            workflow,
+        )
+        self.assertIn(
+            '"backend\\local-runner\\ea_factory_metaeditor_compile.py"',
+            workflow,
+        )
         self.assertIn("gh release upload $tag $archive $checksum", workflow)
         self.assertIn("--clobber", workflow)
         self.assertIn("gh api \"repos/$env:GITHUB_REPOSITORY/releases/tags/$tag\"", workflow)
@@ -778,6 +794,10 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn('"-ExpectedClientId", $ExpectedGoogleClientId', first_run)
         self.assertIn('$script:googleSetupStatus = "ready_imported"', first_run)
         self.assertIn("Test-GoogleOAuthDeploymentConfigured -CandidateRoot", first_run)
+        self.assertLess(
+            first_run.index("if ($SkipGoogleSetup -and -not $explicitClientSetup)"),
+            first_run.index("Test-GoogleOAuthDeploymentConfigured -CandidateRoot"),
+        )
 
         completion = installer[
             installer.index("$postInstallExitCode = if ($watchdogFailure") :
@@ -931,6 +951,202 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         new_full_length = parent_length + 1 + len("mhs-" + ("a" * 32)) + 1 + len(deepest_release_asset)
         self.assertEqual(260, old_full_length)
         self.assertLess(new_full_length, 260)
+
+    def test_install_and_venv_cleanup_are_exact_path_bounded_retries(self) -> None:
+        installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
+        managed_cleanup = installer[
+            installer.index("function Assert-InstallerManagedDirectoryRemoval") :
+            installer.index("function Stop-CandidateBridgeAfterFailedStart")
+        ]
+        self.assertIn('ValidateSet("installation", "venv")', managed_cleanup)
+        self.assertIn('Join-Path $env:LOCALAPPDATA "Metafxclub\\AI-Agent-HQ"', managed_cleanup)
+        self.assertIn("[IO.FileAttributes]::ReparsePoint", managed_cleanup)
+        self.assertIn("-Attributes ReparsePoint", managed_cleanup)
+        self.assertIn("$delaysMilliseconds = @(0, 100, 250, 500, 1000, 2000)", managed_cleanup)
+        self.assertIn("[IO.Directory]::Delete($extendedPath, $true)", managed_cleanup)
+
+        rollback = installer[
+            installer.index("function Restore-ApplicationRollbackSnapshot") :
+            installer.index("function Remove-ApplicationRollbackSnapshot")
+        ]
+        self.assertIn(
+            "Remove-InstallerManagedDirectoryWithRetry -Path $installRoot -Kind installation",
+            rollback,
+        )
+        self.assertNotIn("Remove-Item -LiteralPath $installRoot -Recurse", rollback)
+
+        venv = installer[
+            installer.index("function Initialize-PythonEnvironment") :
+            installer.index("function Test-InstalledApplication")
+        ]
+        self.assertIn(
+            "Remove-InstallerManagedDirectoryWithRetry -Path $venvRoot -Kind venv",
+            venv,
+        )
+        self.assertNotIn("Remove-Item -LiteralPath $venvRoot -Recurse", venv)
+
+    @unittest.skipUnless(os.name == "nt", "Windows directory-lock retry semantics")
+    def test_managed_cleanup_survives_transient_lock_and_rejects_sibling(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            local_app_data = Path(directory) / "LocalAppData"
+            local_app_data.mkdir()
+            installer_path = str(ROOT / "installer" / "install.ps1").replace("'", "''")
+            local_app_data_path = str(local_app_data).replace("'", "''")
+            script = rf"""
+$ErrorActionPreference = 'Stop'
+$installerPath = '{installer_path}'
+$tokens = $null
+$parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    $installerPath,
+    [ref]$tokens,
+    [ref]$parseErrors
+)
+if ($parseErrors.Count -ne 0) {{ throw 'Installer parse failed' }}
+foreach ($name in @(
+    'Assert-InstallerManagedDirectoryRemoval',
+    'Remove-InstallerManagedDirectoryWithRetry'
+)) {{
+    $node = $ast.Find({{
+        param($candidate)
+        $candidate -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $candidate.Name -ceq $name
+    }}, $true)
+    if (-not $node) {{ throw "Function missing: $name" }}
+    Invoke-Expression $node.Extent.Text
+}}
+$env:LOCALAPPDATA = '{local_app_data_path}'
+$installRoot = Join-Path $env:LOCALAPPDATA 'Metafxclub\AI-Agent-HQ'
+$venvRoot = Join-Path $installRoot 'runner\.venv'
+New-Item -ItemType Directory -Path $venvRoot -Force | Out-Null
+$lockedFile = Join-Path $venvRoot 'transient-lock.bin'
+[IO.File]::WriteAllBytes($lockedFile, [byte[]](1, 2, 3))
+$job = Start-Job -ScriptBlock {{
+    param($path)
+    $stream = [IO.File]::Open(
+        $path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::ReadWrite,
+        [IO.FileShare]::None
+    )
+    try {{
+        Write-Output 'LOCKED'
+        Start-Sleep -Milliseconds 700
+    }}
+    finally {{
+        $stream.Dispose()
+    }}
+}} -ArgumentList $lockedFile
+try {{
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {{
+        $jobOutput = @(Receive-Job -Job $job -Keep)
+        if ($jobOutput -contains 'LOCKED') {{ break }}
+        Start-Sleep -Milliseconds 50
+    }} while ([DateTime]::UtcNow -lt $deadline)
+    if ($jobOutput -notcontains 'LOCKED') {{ throw 'Lock fixture did not start' }}
+    Remove-InstallerManagedDirectoryWithRetry -Path $venvRoot -Kind venv
+    if (Test-Path -LiteralPath $venvRoot) {{ throw 'Venv remained after bounded retry' }}
+}}
+finally {{
+    Stop-Job -Job $job -ErrorAction SilentlyContinue
+    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+}}
+$outside = Join-Path $env:LOCALAPPDATA 'outside'
+New-Item -ItemType Directory -Path $outside -Force | Out-Null
+$rejected = $false
+try {{
+    Remove-InstallerManagedDirectoryWithRetry -Path $outside -Kind installation
+}}
+catch {{
+    $rejected = $true
+}}
+if (-not $rejected) {{ throw 'Sibling deletion was not rejected' }}
+if (-not (Test-Path -LiteralPath $outside -PathType Container)) {{
+    throw 'Rejected sibling was mutated'
+}}
+Write-Output 'MANAGED_CLEANUP_OK'
+"""
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    script,
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=45,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn("MANAGED_CLEANUP_OK", completed.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell installer behavior")
+    def test_skip_google_setup_does_not_probe_current_user_oauth_store(self) -> None:
+        installer_path = str(ROOT / "installer" / "install.ps1").replace("'", "''")
+        script = rf"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    '{installer_path}',
+    [ref]$tokens,
+    [ref]$parseErrors
+)
+if ($parseErrors.Count -ne 0) {{ throw 'Installer parse failed' }}
+$name = 'Invoke-GoogleOAuthFirstRunSetup'
+$node = $ast.Find({{
+    param($candidate)
+    $candidate -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $candidate.Name -ceq $name
+}}, $true)
+if (-not $node) {{ throw 'First-run function missing' }}
+Invoke-Expression $node.Extent.Text
+function Test-GoogleOAuthDeploymentConfigured {{ throw 'OAUTH_STORE_PROBED' }}
+$GoogleClientJsonPath = ''
+$SkipGoogleSetup = $true
+$SkipLaunch = $false
+$script:googleSetupStatus = ''
+Invoke-GoogleOAuthFirstRunSetup -CandidateRoot 'unused'
+if ($script:googleSetupStatus -cne 'skipped_by_request') {{
+    throw "Unexpected skip status: $($script:googleSetupStatus)"
+}}
+$SkipGoogleSetup = $false
+$SkipLaunch = $true
+$script:googleSetupStatus = ''
+Invoke-GoogleOAuthFirstRunSetup -CandidateRoot 'unused'
+if ($script:googleSetupStatus -cne 'skipped_no_launch') {{
+    throw "Unexpected no-launch status: $($script:googleSetupStatus)"
+}}
+Write-Output 'OAUTH_SKIP_ISOLATED_OK'
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("OAUTH_SKIP_ISOLATED_OK", completed.stdout)
 
 
 if __name__ == "__main__":

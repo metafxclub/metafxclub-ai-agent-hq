@@ -1411,6 +1411,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                             "implemented_static_validation_only",
                             "implemented_backend_google_sheets_api_fail_closed",
                             "implemented_central_sheet_read_only_with_public_or_backend_auth_transport",
+                            "implemented_fail_closed_requires_selected_matching_terminal",
                             "guarded_requires_selected_matching_terminal_and_proof",
                             "configuration_only_adapter_not_connected",
                             "source_ready_requires_ea_install",
@@ -1420,6 +1421,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                             "prompt_assisted_unverified",
                             "not_connected",
                             "coming_soon",
+                            "coming_soon_hard_blocked",
                             "disabled",
                         },
                     )
@@ -1444,12 +1446,16 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertNotIn("anyOf", factory_requirements)
         self.assertEqual(factory_requirements["requiredForSourceGeneration"], ["codex_workspace"])
         self.assertEqual(
-            factory_requirements["requiredForMt4CompileAndBacktest"],
-            ["mt4_terminal", "metaeditor_compile_adapter", "strategy_tester_adapter"],
+            factory_requirements["requiredForMt4Compile"],
+            ["mt4_terminal", "metaeditor_compile_adapter"],
         )
         self.assertEqual(
-            factory_requirements["requiredForMt5CompileAndBacktest"],
-            ["mt5_terminal", "metaeditor_compile_adapter", "strategy_tester_adapter"],
+            factory_requirements["requiredForMt5Compile"],
+            ["mt5_terminal", "metaeditor_compile_adapter"],
+        )
+        self.assertEqual(
+            factory_requirements["requiredForMt4OrMt5Backtest"],
+            ["strategy_tester_adapter"],
         )
         self.assertTrue(factory_requirements["notRequiredForPineSourceGenerationOrValidation"])
 
@@ -1942,13 +1948,13 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertEqual(items["mt4_terminal"]["adapterStatus"], "runtime_detected")
         self.assertEqual(items["mt4_terminal"]["executionAdapterStatus"], "coming_soon")
         self.assertEqual(items["metaeditor_compile_adapter"]["status"], "not_connected")
-        self.assertEqual(items["strategy_tester_adapter"]["status"], "not_connected")
+        self.assertEqual(items["strategy_tester_adapter"]["status"], "coming_soon")
         self.assertEqual(checklist["connectionRequirements"]["anyOf"], [])
         self.assertTrue(checklist["connectionRequirements"]["anyOfSatisfied"])
         self.assertEqual(checklist["connectionRequirements"]["status"], "not_required")
         self.assertEqual(
-            checklist["connectionRequirements"]["requiredForMt4CompileAndBacktest"],
-            ["mt4_terminal", "metaeditor_compile_adapter", "strategy_tester_adapter"],
+            checklist["connectionRequirements"]["requiredForMt4Compile"],
+            ["mt4_terminal", "metaeditor_compile_adapter"],
         )
         self.assertEqual(checklist["overallStatus"], "partial")
         self.assertEqual(checklist["operationMode"]["aiEveryTwoHours"]["status"], "not_required")
@@ -3026,10 +3032,28 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertNotIn("submitManagerCommand", block)
 
     def test_agent_chat_runtime_version_and_executive_tiers(self) -> None:
-        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.14")
+        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.15")
         self.assertEqual(self.bridge.role_default_model_tier("ceo"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("manager"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("risk_guard"), "risk_quality")
+
+    def test_ea_factory_structured_source_has_dedicated_runner_transport_budget(self) -> None:
+        self.assertGreaterEqual(
+            self.bridge.EA_FACTORY_SOURCE_RUNNER_TRANSPORT_MAX_CHARS,
+            100_000,
+        )
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        start = source.index("def process_auto_mission(")
+        end = source.index("\ndef mission_worker_loop(", start)
+        block = source[start:end]
+        self.assertIn(
+            "if worker_result_profile == EA_FACTORY_SOURCE_RESULT_PROFILE",
+            block,
+        )
+        self.assertIn(
+            "output_limit=runner_transport_limit",
+            block,
+        )
 
     def test_agent_chat_runner_is_ephemeral_tool_free_and_keeps_eight_exchanges(self) -> None:
         original_status = self.runner.chat_status
@@ -4235,7 +4259,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         )
         registry_text = registry_path.read_text(encoding="utf-8-sig")
         attributes = (PROJECT_ROOT / ".gitattributes").read_text(encoding="utf-8-sig")
-        self.assertEqual(version, "0.9.14")
+        self.assertEqual(version, "0.9.15")
         self.assertNotRegex(registry_text, r"(?i)[a-z]:\\\\users\\\\")
         self.assertIn("*.mq4 text eol=lf", attributes)
         self.assertIn("*.mq5 text eol=lf", attributes)

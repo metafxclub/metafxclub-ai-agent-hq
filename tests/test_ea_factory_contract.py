@@ -38,6 +38,34 @@ class EaFactoryContractTests(unittest.TestCase):
         self.assertTrue(self.contract["oneUserActionAdvancesOneStage"])
         self.assertEqual(self.contract["requestLimits"]["createBuildBriefMaxCharacters"], 900)
 
+    def test_artifact_kind_contract_defaults_to_ea_and_bounds_custom_indicator(self):
+        kinds = self.contract["artifactKinds"]
+        self.assertEqual(kinds["default"], "expert_advisor")
+        self.assertEqual(
+            kinds["allowed"],
+            ["expert_advisor", "custom_indicator"],
+        )
+        indicator = kinds["custom_indicator"]
+        self.assertEqual(indicator["platforms"], ["mt4", "mt5"])
+        self.assertEqual(indicator["requiredEntryPoint"], "OnCalculate")
+        self.assertTrue(indicator["indicatorBufferRequired"])
+        self.assertFalse(indicator["tradingFunctionsAllowed"])
+        self.assertTrue(indicator["compileStageRequired"])
+        self.assertFalse(indicator["backtestApplicable"])
+        self.assertFalse(indicator["chartAttachmentAllowed"])
+        self.assertEqual(
+            self.contract["api"]["createBuildArtifactKindDefault"],
+            "expert_advisor",
+        )
+        self.assertIn(
+            "artifactKind",
+            self.contract["api"]["createBuildFields"],
+        )
+        self.assertEqual(
+            self.contract["stages"][4]["notApplicableArtifactKinds"],
+            ["custom_indicator"],
+        )
+
     def test_deep_research_source_maps_to_exact_internal_twenty_three_fields(self):
         source = self.contract["sourceContract"]
         columns = source["columns"]

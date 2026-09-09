@@ -634,7 +634,7 @@ const EA_FACTORY_STAGE_COPY = Object.freeze({
   compile_validate: {
     labelTh: "5 Compile / Validate",
     titleTh: "Compile หรือ Validate",
-    descriptionTh: "MT4/MT5 ต้องเลือก Terminal ที่ Backend ตรวจพบและพร้อมใช้งาน ส่วน Pine Script ตรวจภาษาและ Contract เท่านั้นโดยไม่เรียก MetaEditor",
+    descriptionTh: "MT4/MT5 ใช้ MetaEditor แบบ compile-only จาก Terminal ที่ Backend เลือก โดยไม่เปิด Terminal/กราฟ/Backtest ส่วน Pine Script ตรวจภาษาและ Contract แบบ Static",
   },
   backtest_recheck: {
     labelTh: "6 Backtest / Recheck",
@@ -1349,6 +1349,7 @@ const state = {
       selectedSourceId: "",
       selectedBuildId: "",
       selectedPlatform: "",
+      selectedArtifactKind: "expert_advisor",
       selectedTerminalId: "",
       inFlight: false,
       stageId: "",
@@ -21976,6 +21977,18 @@ function normalizeEaFactoryPlatform(value) {
   return "";
 }
 
+function normalizeEaFactoryArtifactKind(value) {
+  const normalized = String(value || "").trim().toLowerCase().replaceAll("-", "_");
+  if (["custom_indicator", "indicator", "customindicator"].includes(normalized)) return "custom_indicator";
+  return "expert_advisor";
+}
+
+function eaFactoryArtifactKindLabel(value) {
+  return normalizeEaFactoryArtifactKind(value) === "custom_indicator"
+    ? "Custom Indicator"
+    : "Expert Advisor (EA)";
+}
+
 const EA_FACTORY_READINESS_ISSUE_LABELS = Object.freeze({
   legacy_ea_blueprint_missing: "ต้นทางเป็นข้อมูลรุ่นเดิมและยังไม่มี EA Blueprint v2 ที่ Backend ตรวจแล้ว",
   legacy_or_invalid_ea_blueprint: "ต้นทางไม่มี EA Blueprint v2 ที่ผ่านการตรวจ",
@@ -22269,6 +22282,7 @@ function normalizeEaFactoryDomain(backend = {}) {
     id: buildId,
     status: safeDashboardDisplayText(activeBuildRaw?.status, "รอสถานะ"),
     sourceRecordId: String(activeBuildRaw?.sourceRecordId || activeBuildRaw?.source_record_id || "").trim(),
+    artifactKind: normalizeEaFactoryArtifactKind(activeBuildRaw?.artifactKind),
     platform: normalizeEaFactoryPlatform(activeBuildRaw?.platform || activeBuildRaw?.targetPlatform),
     version: safeDashboardDisplayText(
       activeBuildRaw?.version || activeBuildRaw?.versionLabel || (latestBuildVersion ? `v${latestBuildVersion}` : ""),
@@ -24601,6 +24615,7 @@ function renderEaFactoryStatusStrip(section, domain = {}) {
   const strip = document.createElement("div");
   const mode = document.createElement("strong");
   const build = document.createElement("span");
+  const artifactKind = document.createElement("span");
   const platform = document.createElement("span");
   strip.className = "ea-factory-status-strip";
   mode.textContent = domain.authoritative
@@ -24608,8 +24623,11 @@ function renderEaFactoryStatusStrip(section, domain = {}) {
     : "กำลังรอ Read Model ea-factory-v1 จาก Backend";
   mode.dataset.ready = String(domain.authoritative);
   build.textContent = domain.activeBuild ? `Build ${domain.activeBuild.id} • ${domain.activeBuild.status}` : "ยังไม่มี Build ที่เลือก";
+  artifactKind.textContent = domain.activeBuild
+    ? eaFactoryArtifactKindLabel(domain.activeBuild.artifactKind)
+    : "ยังไม่ได้เลือกประเภทผลงาน";
   platform.textContent = eaFactoryPlatformLabel(domain.activeBuild?.platform);
-  strip.append(mode, build, platform);
+  strip.append(mode, build, artifactKind, platform);
   section.appendChild(strip);
 }
 
@@ -24889,12 +24907,27 @@ function renderEaFactorySpecStage(section, domain) {
       ));
     }
     const form = document.createElement("form");
+    const artifactKindLabel = document.createElement("label");
+    const artifactKind = document.createElement("select");
     const platformLabel = document.createElement("label");
     const platform = document.createElement("select");
     const briefLabel = document.createElement("label");
     const brief = document.createElement("textarea");
     const submit = document.createElement("button");
     form.className = "ea-factory-spec-form";
+    artifactKindLabel.textContent = "ประเภทผลงาน *";
+    artifactKind.required = true;
+    artifactKind.dataset.eaFactoryArtifactKind = "true";
+    [["expert_advisor", "Expert Advisor (EA)"], ["custom_indicator", "Custom Indicator"]]
+      .forEach(([value, labelText]) => {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = labelText;
+        option.selected = value === normalizeEaFactoryArtifactKind(
+          state.modal.eaFactory.selectedArtifactKind,
+        );
+        artifactKind.appendChild(option);
+      });
     platformLabel.textContent = "Target Platform *";
     platform.required = true;
     platform.dataset.eaFactoryPlatform = "true";
@@ -24915,15 +24948,35 @@ function renderEaFactorySpecStage(section, domain) {
     submit.disabled = !domain.authoritative || !source.buildReady || state.modal.eaFactory.inFlight;
     submit.textContent = state.modal.eaFactory.inFlight && state.modal.eaFactory.stageId === "create_build"
       ? "กำลังสร้าง Build..."
-      : "สร้าง Build และบันทึก Strategy Spec";
+      : "สร้าง Build และบันทึก Spec";
+    const syncArtifactPlatform = () => {
+      const indicatorSelected = artifactKind.value === "custom_indicator";
+      const tradingViewOption = [...platform.options].find((option) => option.value === "tradingview");
+      if (tradingViewOption) tradingViewOption.disabled = indicatorSelected;
+      if (indicatorSelected && platform.value === "tradingview") {
+        platform.value = "";
+        state.modal.eaFactory.selectedPlatform = "";
+      }
+    };
+    artifactKind.addEventListener("change", () => {
+      state.modal.eaFactory.selectedArtifactKind = artifactKind.value;
+      syncArtifactPlatform();
+    });
     platform.addEventListener("change", () => { state.modal.eaFactory.selectedPlatform = platform.value; });
+    syncArtifactPlatform();
+    artifactKindLabel.appendChild(artifactKind);
     platformLabel.appendChild(platform);
     briefLabel.appendChild(brief);
-    form.append(platformLabel, briefLabel, submit);
+    form.append(artifactKindLabel, platformLabel, briefLabel, submit);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       if (!form.reportValidity()) return;
-      void createEaFactoryBuild(source.sourceRecordId, platform.value, brief.value);
+      void createEaFactoryBuild(
+        source.sourceRecordId,
+        artifactKind.value,
+        platform.value,
+        brief.value,
+      );
     });
     section.appendChild(form);
     return;
@@ -24946,7 +24999,7 @@ function renderEaFactoryTerminalPicker(container, domain) {
   const openGlobal = document.createElement("button");
   wrapper.className = "ea-factory-terminal-picker";
   title.textContent = platform && platform !== "tradingview"
-    ? `Terminal กลางสำหรับ ${eaFactoryPlatformLabel(platform)}`
+    ? `MetaEditor compile-only สำหรับ ${eaFactoryPlatformLabel(platform)}`
     : "การเชื่อม MT4 / MT5";
   wrapper.appendChild(title);
 
@@ -24971,14 +25024,17 @@ function renderEaFactoryTerminalPicker(container, domain) {
       selected ? "ready" : "warning",
       selected ? `กำลังใช้ ${selected.label}` : `ยังไม่ได้เลือก ${eaFactoryPlatformLabel(platform)} จากแถบกลาง`,
       selected
-        ? `สถานะ ${selected.status} • หลักฐาน ${selected.proofStatus} • อุปกรณ์นี้อ่านค่า Backend เท่านั้น`
+        ? `สถานะ ${selected.status} • หลักฐาน ${selected.proofStatus} • Backend ใช้เฉพาะ MetaEditor แบบซ่อนเพื่อ Compile และจะไม่เปิด Terminal หรือรัน Backtest`
         : "เปิดแถบเชื่อม MT4 / MT5 ด้านบนเพื่อสแกน เลือก และยืนยัน Terminal เพียงจุดเดียว",
     ));
     if (selectedId && !domain.adapterReady) {
+      const indicatorBuild = domain.activeBuild?.artifactKind === "custom_indicator";
       wrapper.appendChild(createEaFactoryNotice(
         "warning",
         "เลือก Terminal กลางแล้ว แต่ Execution Adapter ยังไม่พร้อม",
-        "ปุ่ม Compile และ Backtest จะยังปิดจนกว่า Backend จะยืนยัน adapterReady=true และแพลตฟอร์มตรงกับ Build",
+        indicatorBuild
+          ? "ขั้น Compile จะยังปิดจนกว่า Backend จะยืนยัน adapterReady=true; Backtest เป็น Not Applicable และไม่มีการ attach หรือเทรด"
+          : "ปุ่ม Compile จะยังปิดจนกว่า Backend จะยืนยัน adapterReady=true และแพลตฟอร์มตรงกับ Build; Backtest ยังบล็อกจนกว่าจะมี Visual Strategy Tester Adapter",
       ));
     }
   }
@@ -25002,6 +25058,7 @@ function renderEaFactoryOperationalStage(section, stageId, domain, report) {
   const buildFacts = document.createElement("dl");
   buildFacts.className = "ea-factory-stage-facts";
   appendEaFactoryFact(buildFacts, "Build", domain.activeBuild.id);
+  appendEaFactoryFact(buildFacts, "ประเภทผลงาน", eaFactoryArtifactKindLabel(domain.activeBuild.artifactKind));
   appendEaFactoryFact(buildFacts, "Target", eaFactoryPlatformLabel(domain.activeBuild.platform));
   appendEaFactoryFact(buildFacts, "Version", domain.activeBuild.version || "รอสร้าง Version");
   if (domain.activeBuild.workspace.workspaceId) appendEaFactoryFact(buildFacts, "Workspace", domain.activeBuild.workspace.workspaceId);
@@ -25013,14 +25070,17 @@ function renderEaFactoryOperationalStage(section, stageId, domain, report) {
   appendEaFactoryStageEvidence(section, stage);
   appendEaFactoryBoundReport(section, report, stage);
   if (stageId === "compile_validate") renderEaFactoryTerminalPicker(section, domain);
-  if (stageId === "backtest_recheck" && domain.activeBuild.platform === "tradingview") {
+  const indicatorBuild = domain.activeBuild.artifactKind === "custom_indicator";
+  if (stageId === "backtest_recheck" && (domain.activeBuild.platform === "tradingview" || indicatorBuild)) {
     section.appendChild(createEaFactoryNotice(
       "neutral",
-      "Not Applicable สำหรับ Pine Script",
-      "ระบบไม่สร้างผล Backtest ทดแทน และจะไป Final Report หลัง Backend ยืนยัน Source Review และ Code Validation แล้ว",
+      indicatorBuild ? "Not Applicable สำหรับ Custom Indicator" : "Not Applicable สำหรับ Pine Script",
+      indicatorBuild
+        ? "Indicator ไม่มีคำสั่งเทรด ระบบจึงไม่อ้างผล Strategy Tester และไม่แสดงผลกำไรจำลอง"
+        : "ระบบไม่สร้างผล Backtest ทดแทน และจะไป Final Report หลัง Backend ยืนยัน Source Review และ Code Validation แล้ว",
     ));
   }
-  if (stageId === "backtest_recheck" && domain.activeBuild.platform !== "tradingview") {
+  if (stageId === "backtest_recheck" && domain.activeBuild.platform !== "tradingview" && !indicatorBuild) {
     section.appendChild(createEaFactoryNotice(
       stage?.status === "completed" && stage?.reportId ? "ready" : "neutral",
       stage?.status === "completed" && stage?.reportId
@@ -25092,7 +25152,7 @@ function renderEaFactoryOperationalStage(section, stageId, domain, report) {
         const historyBuildId = String(item?.id || item?.buildId || "").trim();
         const selected = historyBuildId === domain.activeBuild.id;
         title.textContent = `${safeDashboardDisplayText(item?.sourceDisplayName, "Strategy Build")} • ${safeDashboardDisplayText(item?.id, "ไม่พบ Build ID")}`;
-        meta.textContent = `${selected ? "กำลังดู • " : ""}${eaFactoryPlatformLabel(normalizeEaFactoryPlatform(item?.platform))} • ${safeDashboardDisplayText(item?.status, "รอสถานะ")}${item?.updatedAt ? ` • ${formatThaiDateTime(item.updatedAt)}` : ""}`;
+        meta.textContent = `${selected ? "กำลังดู • " : ""}${eaFactoryArtifactKindLabel(item?.artifactKind)} • ${eaFactoryPlatformLabel(normalizeEaFactoryPlatform(item?.platform))} • ${safeDashboardDisplayText(item?.status, "รอสถานะ")}${item?.updatedAt ? ` • ${formatThaiDateTime(item.updatedAt)}` : ""}`;
         row.dataset.selected = selected ? "true" : "false";
         row.tabIndex = 0;
         row.setAttribute("role", "button");
@@ -25113,9 +25173,11 @@ function renderEaFactoryOperationalStage(section, stageId, domain, report) {
       section.appendChild(buildHistory);
     }
   }
-  const isPineBacktestSkip = stageId === "backtest_recheck" && domain.activeBuild.platform === "tradingview";
+  const isPineBacktestSkip = stageId === "backtest_recheck"
+    && (domain.activeBuild.platform === "tradingview" || indicatorBuild);
   const terminalRequiredStage = ["compile_validate", "backtest_recheck"].includes(stageId)
-    && domain.activeBuild.platform !== "tradingview";
+    && domain.activeBuild.platform !== "tradingview"
+    && !(stageId === "backtest_recheck" && indicatorBuild);
   const terminalGate = terminalRequiredStage
     ? domain.selectedTerminalReady === true
     : true;
@@ -25125,9 +25187,9 @@ function renderEaFactoryOperationalStage(section, stageId, domain, report) {
     && !isPineBacktestSkip;
   if (canAdvance) {
     const labels = {
-      generate: "เริ่มสร้าง Source Code Version นี้",
-      review: "เริ่มตรวจ Source Code และ Signal Guard",
-      compile_validate: domain.activeBuild.platform === "tradingview" ? "เริ่ม Validate Pine Script" : "เริ่ม Compile บน Terminal ที่ยืนยัน",
+      generate: indicatorBuild ? "เริ่มสร้าง Custom Indicator Version นี้" : "เริ่มสร้าง Source Code Version นี้",
+      review: indicatorBuild ? "เริ่มตรวจ Indicator และ No-Trade Guard" : "เริ่มตรวจ Source Code และ Signal Guard",
+      compile_validate: domain.activeBuild.platform === "tradingview" ? "เริ่ม Validate Pine Script" : "เริ่ม Compile-only ด้วย MetaEditor ที่ยืนยัน",
       backtest_recheck: "เริ่ม Visual Backtest และ Logic Recheck",
       artifacts_report: "จัดทำ Final Report และปิด Build",
     };
@@ -25267,16 +25329,23 @@ async function syncEaFactoryGoogleSheet() {
   return response;
 }
 
-async function createEaFactoryBuild(sourceRecordId, platform, brief) {
+async function createEaFactoryBuild(sourceRecordId, artifactKind, platform, brief) {
+  const normalizedArtifactKind = normalizeEaFactoryArtifactKind(artifactKind);
   const normalizedPlatform = normalizeEaFactoryPlatform(platform);
-  if (!sourceRecordId || !normalizedPlatform) return null;
+  if (
+    !sourceRecordId
+    || !normalizedPlatform
+    || (normalizedArtifactKind === "custom_indicator" && normalizedPlatform === "tradingview")
+  ) return null;
   state.modal.eaFactory.selectedBuildId = "";
+  state.modal.eaFactory.selectedArtifactKind = normalizedArtifactKind;
   state.modal.eaFactory.selectedPlatform = normalizedPlatform;
   const idempotencyKey = createWorkflowIdempotencyKey();
   const response = await runEaFactoryRequest("create_build", () => postJson(
     "/api/props/right_server_racks/ea-factory/builds",
     {
       sourceRecordId,
+      artifactKind: normalizedArtifactKind,
       platform: normalizedPlatform,
       brief: String(brief || "").trim().slice(0, 900),
       idempotencyKey,

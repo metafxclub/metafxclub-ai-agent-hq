@@ -51,6 +51,11 @@ from ea_factory_blueprint_coverage import (  # noqa: E402 - trusted Factory sour
     build_legacy_coverage_manifest as ea_factory_legacy_coverage_manifest,
     coverage_requirements_valid as ea_factory_coverage_requirements_valid,
 )
+from ea_factory_indicator_coverage import (  # noqa: E402 - no-trade Indicator coverage
+    build_indicator_coverage_manifest as ea_factory_indicator_coverage_manifest,
+    build_indicator_coverage_requirements as ea_factory_indicator_coverage_requirements,
+    indicator_coverage_requirements_valid as ea_factory_indicator_coverage_requirements_valid,
+)
 
 AUTO_WORKSPACE_ROOT = PROJECT_ROOT / "workspace"
 AUTO_ADDITIONAL_WRITE_ROOTS = (
@@ -6663,6 +6668,21 @@ def _ea_factory_source_generation_binding(
         strategy_spec_bytes.decode("utf-8", errors="strict"),
         "EA Factory strategy spec",
     )
+    artifact_kind = str(
+        strategy_spec.get("artifactKind") or "expert_advisor"
+    ).strip().lower()
+    if artifact_kind not in {"expert_advisor", "custom_indicator"}:
+        raise ValueError("EA Factory strategy spec artifact kind is unsupported")
+    if artifact_kind == "custom_indicator":
+        prompt_artifact_kind = _ea_factory_single_prompt_marker(
+            prompt,
+            "EA_FACTORY_ARTIFACT_KIND",
+            r"custom_indicator",
+        )
+        if prompt_artifact_kind != artifact_kind or platform not in {"mt4", "mt5"}:
+            raise ValueError("EA Factory Indicator prompt binding is invalid")
+    elif "[EA_FACTORY_ARTIFACT_KIND:" in str(prompt or ""):
+        raise ValueError("EA Factory Expert Advisor prompt has an unexpected artifact marker")
     if (
         strategy_spec.get("buildId") != build_id
         or strategy_spec.get("recordDigest") != source_record_digest
@@ -6681,18 +6701,35 @@ def _ea_factory_source_generation_binding(
         except BlueprintValidationError as error:
             raise ValueError("EA Factory v2 strategy spec Blueprint is invalid") from error
         blueprint_digest = compute_blueprint_digest(blueprint)
-        coverage_requirements = strategy_spec.get("blueprintCoverageRequirements")
-        if (
-            strategy_spec.get("eaBlueprintDigest") != blueprint_digest
-            or not ea_factory_coverage_requirements_valid(
+        coverage_requirements = strategy_spec.get(
+            "indicatorCoverageRequirements"
+            if artifact_kind == "custom_indicator"
+            else "blueprintCoverageRequirements"
+        )
+        requirements_valid = (
+            ea_factory_indicator_coverage_requirements_valid(
                 coverage_requirements,
                 blueprint,
                 blueprint_digest,
             )
+            if artifact_kind == "custom_indicator"
+            else ea_factory_coverage_requirements_valid(
+                coverage_requirements,
+                blueprint,
+                blueprint_digest,
+            )
+        )
+        if (
+            strategy_spec.get("eaBlueprintDigest") != blueprint_digest
+            or not requirements_valid
         ):
             raise ValueError("EA Factory v2 coverage requirements are invalid")
     elif spec_schema_version == "ea-factory-strategy-spec-v1":
-        if "blueprintCoverageRequirements" in strategy_spec:
+        if (
+            artifact_kind != "expert_advisor"
+            or "blueprintCoverageRequirements" in strategy_spec
+            or "indicatorCoverageRequirements" in strategy_spec
+        ):
             raise ValueError("EA Factory legacy strategy spec has unexpected coverage data")
     else:
         raise ValueError("EA Factory strategy spec schema is unsupported")
@@ -6703,6 +6740,7 @@ def _ea_factory_source_generation_binding(
         "sourceRecordDigest": source_record_digest,
         "strategySpecDigest": strategy_spec_digest,
         "strategySpecSchemaVersion": spec_schema_version,
+        "artifactKind": artifact_kind,
         "coverageRequirements": coverage_requirements,
     }
 
@@ -6711,6 +6749,7 @@ def _validate_ea_factory_generated_source(
     file_name: object,
     content: object,
     expected_extension: str,
+    artifact_kind: str = "expert_advisor",
 ) -> tuple[str, str, bytes]:
     """Validate the sole untrusted file returned by the read-only Codex run."""
 
@@ -6740,6 +6779,18 @@ def _validate_ea_factory_generated_source(
         raise ValueError("EA Factory source content exceeds the guarded byte limit")
 
     if expected_extension in {".mq4", ".mq5"}:
+        if artifact_kind == "custom_indicator":
+            if (
+                re.search(r"(?m)\bint\s+OnCalculate\s*\(", content) is None
+                or re.search(
+                    r"(?mi)^\s*#property\s+indicator_(?:chart_window|separate_window)\b",
+                    content,
+                ) is None
+            ):
+                raise ValueError(
+                    "EA Factory MQL Indicator source is missing its declaration or OnCalculate"
+                )
+            return file_name, content, source_bytes
         has_program_entry = re.search(
             r"(?m)\b(?:void\s+OnTick|int\s+start|int\s+OnCalculate)\s*\(",
             content,
@@ -6844,20 +6895,36 @@ def materialize_ea_factory_source_result(
         payload.get("fileName"),
         payload.get("content"),
         binding["extension"],
+        binding["artifactKind"],
     )
     source_digest = hashlib.sha256(source_bytes).hexdigest()
     if binding["strategySpecSchemaVersion"] == "ea-factory-strategy-spec-v2":
-        coverage_manifest = ea_factory_coverage_manifest(
-            binding["coverageRequirements"],
-            content,
-            strategy_spec_digest=binding["strategySpecDigest"],
-            source_digest=source_digest,
-            target_platform=binding["platform"],
+        coverage_manifest = (
+            ea_factory_indicator_coverage_manifest(
+                binding["coverageRequirements"],
+                content,
+                strategy_spec_digest=binding["strategySpecDigest"],
+                source_digest=source_digest,
+                target_platform=binding["platform"],
+            )
+            if binding["artifactKind"] == "custom_indicator"
+            else ea_factory_coverage_manifest(
+                binding["coverageRequirements"],
+                content,
+                strategy_spec_digest=binding["strategySpecDigest"],
+                source_digest=source_digest,
+                target_platform=binding["platform"],
+            )
         )
         if coverage_manifest.get("complete") is not True:
             raise ValueError(
-                "EA Factory source does not cover every immutable Blueprint v2 ID "
-                "with reachable trading evidence"
+                (
+                    "EA Factory Indicator source does not bind every immutable rule "
+                    "predicate to an Indicator buffer-output branch"
+                    if binding["artifactKind"] == "custom_indicator"
+                    else "EA Factory source does not cover every immutable Blueprint v2 ID "
+                    "with reachable trading evidence"
+                )
             )
     else:
         coverage_manifest = ea_factory_legacy_coverage_manifest(
@@ -6905,8 +6972,10 @@ def materialize_ea_factory_source_result(
             "field": "strategyProfile",
             "value": compact({
                 "targetPlatform": binding["platform"],
+                "artifactKind": binding["artifactKind"],
                 "sourceOnly": True,
                 "uncompiled": True,
+                "backtestApplicable": binding["artifactKind"] != "custom_indicator",
             }),
         },
         {
@@ -6918,19 +6987,38 @@ def materialize_ea_factory_source_result(
         },
         {
             "field": "compileChecklist",
-            "value": compact([
-                "static_source_review",
-                "compile_with_exact_platform_adapter",
-                "verify_zero_errors_and_binary_artifact",
-            ]),
+            "value": compact(
+                [
+                    "static_indicator_source_review",
+                    "compile_indicator_with_exact_platform_adapter",
+                    "verify_zero_errors_and_binary_artifact",
+                    "do_not_attach_or_trade",
+                ]
+                if binding["artifactKind"] == "custom_indicator"
+                else [
+                    "static_source_review",
+                    "compile_with_exact_platform_adapter",
+                    "verify_zero_errors_and_binary_artifact",
+                ]
+            ),
         },
         {
             "field": "knownRisks",
-            "value": compact([
-                "source_only_uncompiled",
-                "static_review_pending",
-                "terminal_adapter_not_invoked",
-            ]),
+            "value": compact(
+                [
+                    "source_only_uncompiled",
+                    "static_review_pending",
+                    "terminal_compile_adapter_not_invoked",
+                    "indicator_not_attached_or_executed",
+                    "backtest_not_applicable",
+                ]
+                if binding["artifactKind"] == "custom_indicator"
+                else [
+                    "source_only_uncompiled",
+                    "static_review_pending",
+                    "terminal_adapter_not_invoked",
+                ]
+            ),
         },
         {"field": "nextValidationStep", "value": "source_review"},
     ]

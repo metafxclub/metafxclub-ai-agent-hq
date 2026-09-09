@@ -37,9 +37,11 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_OAUTH_ERROR_RESPONSE_BYTES = 16 * 1024
 MAX_OAUTH_CLIENT_JSON_BYTES = 64 * 1024
 DEFAULT_TIMEOUT_SECONDS = 20
+OAUTH_STORE_REQUEST_LEASE_TIMEOUT_SECONDS = DEFAULT_TIMEOUT_SECONDS + 5
 SAFE_SHEET_ID = re.compile(r"^[A-Za-z0-9_-]{20,128}$")
 _OAUTH_FLOW_LOCK = threading.RLock()
 _PENDING_OAUTH_FLOWS: dict[str, dict] = {}
+_OAUTH_FLOW_EPOCH = 0
 _OAUTH_PROVIDER_ERROR_MAP = {
     "client_secret_required": (
         "oauth_client_secret_required",
@@ -110,12 +112,36 @@ class GoogleSheetHubError(RuntimeError):
         return self.message
 
 
+@dataclass(frozen=True)
+class _AccessTokenContext:
+    """Private bearer token plus the durable grant snapshot that produced it."""
+
+    token: str
+    stored_refresh: bool = False
+    client_source: str = ""
+    client_generation: str = ""
+    refresh_digest: str = ""
+
+
 def _environment_oauth_client(env: dict[str, str]) -> dict[str, str]:
     client_id = str(env.get("METAFX_GOOGLE_OAUTH_CLIENT_ID") or "").strip()
     client_secret = str(env.get("METAFX_GOOGLE_OAUTH_CLIENT_SECRET") or "").strip()
+    generation = (
+        hashlib.sha256(
+            (
+                "google-oauth-environment-client-v1\x00"
+                + client_id
+                + "\x00"
+                + client_secret
+            ).encode("utf-8")
+        ).hexdigest()
+        if client_id
+        else ""
+    )
     return {
         "clientId": client_id,
         "clientSecret": client_secret,
+        "clientGeneration": generation,
         "source": "environment" if client_id else "not_configured",
     }
 
@@ -132,13 +158,14 @@ def oauth_client_configuration(environ: dict[str, str] | None = None) -> dict[st
     env = environ if isinstance(environ, dict) else os.environ
     if environ is None:
         try:
-            stored = google_oauth_store.load_client_configuration()
+            stored = google_oauth_store.load_client_configuration_record()
         except google_oauth_store.SecureStoreError as error:
             raise GoogleSheetHubError(error.code, error.message, 503) from error
         if isinstance(stored, dict) and str(stored.get("clientId") or "").strip():
             return {
                 "clientId": str(stored.get("clientId") or "").strip(),
                 "clientSecret": str(stored.get("clientSecret") or "").strip(),
+                "clientGeneration": str(stored.get("clientGeneration") or "").strip(),
                 "source": "secure_store",
             }
     return _environment_oauth_client(env)
@@ -262,37 +289,48 @@ def configure_google_oauth_client_json(
             422,
         )
     try:
-        previous = oauth_client_configuration()
-    except GoogleSheetHubError:
-        previous = {"clientId": "", "clientSecret": "", "source": "not_configured"}
-    same_configuration = (
-        secrets.compare_digest(
-            str(previous.get("clientId") or ""),
-            configuration["clientId"],
-        )
-        and secrets.compare_digest(
-            str(previous.get("clientSecret") or ""),
-            configuration.get("clientSecret", ""),
-        )
-    )
-    try:
-        # Delete the old refresh token before publishing a changed client.  If
-        # secure deletion fails the old pair remains untouched; if the later
-        # atomic client write fails, the safe outcome is merely reconnecting
-        # the previous client instead of exposing a mismatched pair as ready.
-        authorization_reset = (
-            google_oauth_store.delete_refresh_token()
-            if not same_configuration
-            else False
-        )
-        google_oauth_store.save_client_configuration(
-            configuration["clientId"],
-            configuration.get("clientSecret", ""),
-        )
+        with google_oauth_store.oauth_store_transaction(
+            timeout_seconds=OAUTH_STORE_REQUEST_LEASE_TIMEOUT_SECONDS,
+        ):
+            try:
+                previous = oauth_client_configuration()
+            except GoogleSheetHubError:
+                previous = {
+                    "clientId": "",
+                    "clientSecret": "",
+                    "clientGeneration": "",
+                    "source": "not_configured",
+                }
+            same_configuration = (
+                secrets.compare_digest(
+                    str(previous.get("clientId") or ""),
+                    configuration["clientId"],
+                )
+                and secrets.compare_digest(
+                    str(previous.get("clientSecret") or ""),
+                    configuration.get("clientSecret", ""),
+                )
+            )
+            # The Bridge callback uses this same cross-process transaction.
+            # Deleting the old token and publishing the new generation can
+            # therefore never interleave with a late authorization save.
+            authorization_reset = (
+                google_oauth_store.delete_refresh_token()
+                if not same_configuration
+                else False
+            )
+            google_oauth_store.save_client_configuration(
+                configuration["clientId"],
+                configuration.get("clientSecret", ""),
+                client_generation=(
+                    str(previous.get("clientGeneration") or "")
+                    if same_configuration
+                    else ""
+                ),
+            )
     except google_oauth_store.SecureStoreError as error:
         raise GoogleSheetHubError(error.code, error.message, 503) from error
-    with _OAUTH_FLOW_LOCK:
-        _PENDING_OAUTH_FLOWS.clear()
+    _invalidate_pending_oauth_flows()
     return {
         "ok": True,
         "kind": "google_oauth_client_configured",
@@ -312,11 +350,13 @@ def remove_google_oauth_client_configuration(
     env = environ if isinstance(environ, dict) else os.environ
     # Consume every in-flight callback before deleting either durable value so
     # a late browser redirect cannot recreate a refresh grant after removal.
-    with _OAUTH_FLOW_LOCK:
-        _PENDING_OAUTH_FLOWS.clear()
+    _invalidate_pending_oauth_flows()
     try:
-        refresh_removed = google_oauth_store.delete_refresh_token()
-        client_removed = google_oauth_store.delete_client_configuration()
+        with google_oauth_store.oauth_store_transaction(
+            timeout_seconds=OAUTH_STORE_REQUEST_LEASE_TIMEOUT_SECONDS,
+        ):
+            refresh_removed = google_oauth_store.delete_refresh_token()
+            client_removed = google_oauth_store.delete_client_configuration()
     except google_oauth_store.SecureStoreError as error:
         raise GoogleSheetHubError(error.code, error.message, 503) from error
     environment_fallback = bool(
@@ -353,7 +393,9 @@ def credential_status(environ: dict[str, str] | None = None) -> dict:
         str(env.get("METAFX_GOOGLE_OAUTH_REFRESH_TOKEN") or "").strip()
     )
     environment_refresh = environment_client_id and environment_refresh_token
-    store = google_oauth_store.status()
+    store = google_oauth_store.status(
+        expected_client_generation=str(client.get("clientGeneration") or ""),
+    )
     stored_refresh = client_id and store.get("stored") is True
     partial_refresh = (
         any((client_id, environment_client_secret, environment_refresh_token))
@@ -474,6 +516,15 @@ def _purge_pending_oauth_flows(now_monotonic: float) -> None:
         _PENDING_OAUTH_FLOWS.pop(state, None)
 
 
+def _invalidate_pending_oauth_flows() -> None:
+    """Invalidate even callbacks already popped by another request thread."""
+
+    global _OAUTH_FLOW_EPOCH
+    with _OAUTH_FLOW_LOCK:
+        _OAUTH_FLOW_EPOCH += 1
+        _PENDING_OAUTH_FLOWS.clear()
+
+
 def start_google_oauth(
     redirect_uri: str,
     environ: dict[str, str] | None = None,
@@ -483,6 +534,7 @@ def start_google_oauth(
     client = oauth_client_configuration(environ)
     client_id = str(client.get("clientId") or "").strip()
     client_secret = str(client.get("clientSecret") or "").strip()
+    client_generation = str(client.get("clientGeneration") or "").strip()
     if not client_id:
         raise GoogleSheetHubError(
             "oauth_client_not_configured",
@@ -515,6 +567,8 @@ def start_google_oauth(
             "redirectUri": callback,
             "clientId": client_id,
             "clientSecret": client_secret,
+            "clientGeneration": client_generation,
+            "flowEpoch": _OAUTH_FLOW_EPOCH,
             "createdAtMonotonic": now,
             "expiresAtMonotonic": now + GOOGLE_OAUTH_FLOW_TTL_SECONDS,
         }
@@ -647,6 +701,37 @@ def _classified_oauth_http_error(
     )
 
 
+def _require_current_oauth_flow_client(
+    flow: dict,
+    environ: dict[str, str] | None,
+) -> dict[str, str]:
+    """Fail closed when setup/disconnect superseded an in-flight callback."""
+
+    with _OAUTH_FLOW_LOCK:
+        flow_epoch_current = flow.get("flowEpoch") == _OAUTH_FLOW_EPOCH
+    current = oauth_client_configuration(environ)
+    expected = (
+        ("clientId", str(flow.get("clientId") or "").strip()),
+        ("clientSecret", str(flow.get("clientSecret") or "").strip()),
+        ("clientGeneration", str(flow.get("clientGeneration") or "").strip()),
+    )
+    if not flow_epoch_current or any(
+        not value
+        or not secrets.compare_digest(str(current.get(name) or "").strip(), value)
+        for name, value in expected
+        if name != "clientSecret"
+    ) or not secrets.compare_digest(
+        str(current.get("clientSecret") or "").strip(),
+        str(flow.get("clientSecret") or "").strip(),
+    ):
+        raise GoogleSheetHubError(
+            "oauth_client_changed",
+            "The Google OAuth client changed or was removed while authorization was in progress. Start a new connection.",
+            409,
+        )
+    return current
+
+
 def complete_google_oauth(
     query: dict[str, list[str]],
     environ: dict[str, str] | None = None,
@@ -700,6 +785,7 @@ def complete_google_oauth(
             "Google OAuth Client ID is not configured in the Local Runner.",
             503,
         )
+    _require_current_oauth_flow_client(flow, environ)
     form = {
         "client_id": client_id,
         "code": code,
@@ -745,7 +831,16 @@ def complete_google_oauth(
             403,
         )
     try:
-        google_oauth_store.save_refresh_token(refresh_token)
+        # Serialize only the final local compare-and-save operation.  The
+        # provider network request above never holds this cross-process lock.
+        with google_oauth_store.oauth_store_transaction(
+            timeout_seconds=OAUTH_STORE_REQUEST_LEASE_TIMEOUT_SECONDS,
+        ):
+            current_client = _require_current_oauth_flow_client(flow, environ)
+            google_oauth_store.save_refresh_token(
+                refresh_token,
+                client_generation=str(current_client.get("clientGeneration") or ""),
+            )
     except google_oauth_store.SecureStoreError as error:
         raise GoogleSheetHubError(error.code, error.message, 503) from error
     return {
@@ -757,10 +852,12 @@ def complete_google_oauth(
 
 
 def disconnect_google_oauth(environ: dict[str, str] | None = None) -> dict:
-    with _OAUTH_FLOW_LOCK:
-        _PENDING_OAUTH_FLOWS.clear()
+    _invalidate_pending_oauth_flows()
     try:
-        removed = google_oauth_store.delete_refresh_token()
+        with google_oauth_store.oauth_store_transaction(
+            timeout_seconds=OAUTH_STORE_REQUEST_LEASE_TIMEOUT_SECONDS,
+        ):
+            removed = google_oauth_store.delete_refresh_token()
     except google_oauth_store.SecureStoreError as error:
         raise GoogleSheetHubError(error.code, error.message, 503) from error
     auth = google_oauth_status(environ)
@@ -811,16 +908,26 @@ def _safe_http_error(error: HTTPError, *, write_started: bool = False) -> Google
     return GoogleSheetHubError("google_api_error", "Google Sheets API request failed.", 502, False)
 
 
-def access_token(
+def _refresh_token_snapshot_digest(refresh_token: str) -> str:
+    """One-way comparison value; never return or log refresh-token material."""
+
+    return hashlib.sha256(
+        b"metafx-google-refresh-snapshot-v1\x00"
+        + str(refresh_token).encode("utf-8")
+    ).hexdigest()
+
+
+def _resolve_access_token_context(
     environ: dict[str, str] | None = None,
     *,
     open_url: Callable = urlopen,
-) -> str:
+) -> _AccessTokenContext:
     env = environ if isinstance(environ, dict) else os.environ
     direct = str(env.get("METAFX_GOOGLE_SHEETS_ACCESS_TOKEN") or "").strip()
     if direct:
-        return direct
+        return _AccessTokenContext(token=direct)
     refresh_token = str(env.get("METAFX_GOOGLE_OAUTH_REFRESH_TOKEN") or "").strip()
+    stored_refresh = not bool(refresh_token)
     if refresh_token:
         # An explicit environment refresh token remains paired with its
         # explicit environment client for backwards compatibility.
@@ -828,7 +935,14 @@ def access_token(
     else:
         client = oauth_client_configuration(environ)
         try:
-            refresh_token = str(google_oauth_store.load_refresh_token() or "").strip()
+            refresh_token = str(
+                google_oauth_store.load_refresh_token(
+                    expected_client_generation=str(
+                        client.get("clientGeneration") or ""
+                    ),
+                )
+                or ""
+            ).strip()
         except google_oauth_store.SecureStoreError as error:
             raise GoogleSheetHubError(error.code, error.message, 503) from error
     client_id = str(client.get("clientId") or "").strip()
@@ -865,7 +979,104 @@ def access_token(
     token = str(result.get("access_token") or "").strip()
     if not token:
         raise GoogleSheetHubError("auth_invalid_response", "Google OAuth did not return an access token.", 502)
-    return token
+    return _AccessTokenContext(
+        token=token,
+        stored_refresh=stored_refresh,
+        client_source=(str(client.get("source") or "").strip() if stored_refresh else ""),
+        client_generation=(
+            str(client.get("clientGeneration") or "").strip()
+            if stored_refresh
+            else ""
+        ),
+        refresh_digest=(
+            _refresh_token_snapshot_digest(refresh_token)
+            if stored_refresh
+            else ""
+        ),
+    )
+
+
+def _require_current_stored_oauth_snapshot(
+    context: _AccessTokenContext,
+    environ: dict[str, str] | None,
+) -> None:
+    """Verify that disconnect/client setup did not supersede this grant.
+
+    The caller must hold ``oauth_store_transaction``.  Comparing only digests
+    keeps refresh-token material out of diagnostics while binding the bearer
+    token to the exact durable client/grant pair that minted it.
+    """
+
+    if not context.stored_refresh:
+        return
+    current_client = oauth_client_configuration(environ)
+    current_generation = str(current_client.get("clientGeneration") or "").strip()
+    try:
+        current_refresh = str(
+            google_oauth_store.load_refresh_token(
+                expected_client_generation=current_generation,
+            )
+            or ""
+        ).strip()
+    except google_oauth_store.SecureStoreError as error:
+        if error.code == "secure_store_client_mismatch":
+            current_refresh = ""
+        else:
+            raise GoogleSheetHubError(error.code, error.message, 503) from error
+    current_source = str(current_client.get("source") or "").strip()
+    current_digest = (
+        _refresh_token_snapshot_digest(current_refresh)
+        if current_refresh
+        else ""
+    )
+    current_matches = (
+        bool(current_refresh)
+        and bool(context.client_generation)
+        and secrets.compare_digest(current_source, context.client_source)
+        and secrets.compare_digest(current_generation, context.client_generation)
+        and secrets.compare_digest(current_digest, context.refresh_digest)
+    )
+    if not current_matches:
+        raise GoogleSheetHubError(
+            "oauth_credential_changed",
+            "The saved Google authorization changed or was removed while the request was in progress. Retry after reconnecting Google Sheets.",
+            409,
+        )
+
+
+def access_token(
+    environ: dict[str, str] | None = None,
+    *,
+    open_url: Callable = urlopen,
+) -> str:
+    context = _resolve_access_token_context(environ, open_url=open_url)
+    if context.stored_refresh:
+        try:
+            with google_oauth_store.oauth_store_transaction():
+                _require_current_stored_oauth_snapshot(context, environ)
+        except google_oauth_store.SecureStoreError as error:
+            raise GoogleSheetHubError(error.code, error.message, 503) from error
+    return context.token
+
+
+def _perform_google_sheets_request(
+    request: Request,
+    *,
+    write_started: bool,
+    open_url: Callable,
+) -> dict:
+    try:
+        with open_url(request, timeout=DEFAULT_TIMEOUT_SECONDS) as response:
+            return _read_json_response(response)
+    except HTTPError as error:
+        raise _safe_http_error(error, write_started=write_started) from error
+    except (URLError, TimeoutError, OSError) as error:
+        raise GoogleSheetHubError(
+            "write_unknown" if write_started else "google_api_unavailable",
+            "Google Sheets request could not be completed.",
+            502,
+            write_started,
+        ) from error
 
 
 def api_request(
@@ -880,29 +1091,41 @@ def api_request(
 ) -> dict:
     if not SAFE_SHEET_ID.fullmatch(str(sheet_id or "")):
         raise GoogleSheetHubError("invalid_sheet_id", "Google Sheet ID is invalid.", 422)
-    token = access_token(environ, open_url=open_url)
+    token_context = _resolve_access_token_context(environ, open_url=open_url)
     url = f"{GOOGLE_API_ROOT}/{quote(sheet_id, safe='')}" + str(suffix or "")
     if query:
         url += "?" + urlencode({key: value for key, value in query.items() if value is not None})
     payload = None
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token_context.token}",
+    }
     if body is not None:
         payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         headers["Content-Type"] = "application/json"
     request = Request(url, data=payload, headers=headers, method=method)
     write_started = method.upper() not in {"GET", "HEAD"}
-    try:
-        with open_url(request, timeout=DEFAULT_TIMEOUT_SECONDS) as response:
-            return _read_json_response(response)
-    except HTTPError as error:
-        raise _safe_http_error(error, write_started=write_started) from error
-    except (URLError, TimeoutError, OSError) as error:
-        raise GoogleSheetHubError(
-            "write_unknown" if write_started else "google_api_unavailable",
-            "Google Sheets request could not be completed.",
-            502,
-            write_started,
-        ) from error
+    if token_context.stored_refresh:
+        try:
+            # A durable credential mutation must wait for this request to
+            # finish.  Conversely, if it won the transaction during refresh,
+            # the recheck below prevents any Sheets request with the old grant.
+            with google_oauth_store.oauth_store_transaction(
+                timeout_seconds=OAUTH_STORE_REQUEST_LEASE_TIMEOUT_SECONDS,
+            ):
+                _require_current_stored_oauth_snapshot(token_context, environ)
+                return _perform_google_sheets_request(
+                    request,
+                    write_started=write_started,
+                    open_url=open_url,
+                )
+        except google_oauth_store.SecureStoreError as error:
+            raise GoogleSheetHubError(error.code, error.message, 503) from error
+    return _perform_google_sheets_request(
+        request,
+        write_started=write_started,
+        open_url=open_url,
+    )
 
 
 def canonical_header(value: object) -> str:

@@ -75,6 +75,8 @@ class FakeSecureStore:
         self.refresh_token: str | None = None
         self.saved: list[str] = []
         self.delete_calls = 0
+        self.client_configuration: dict[str, str] | None = None
+        self.client_save_count = 0
 
     def save_refresh_token(self, refresh_token: str, **_kwargs) -> None:
         self.refresh_token = refresh_token
@@ -95,6 +97,35 @@ class FakeSecureStore:
             "stored": self.refresh_token is not None,
             "status": "ready" if self.refresh_token is not None else "empty",
         }
+
+    def load_client_configuration_record(self, **_kwargs) -> dict[str, str] | None:
+        return dict(self.client_configuration) if self.client_configuration else None
+
+    def save_client_configuration(
+        self,
+        client_id: str,
+        client_secret: str = "",
+        *,
+        client_generation: str = "",
+        **_kwargs,
+    ) -> str:
+        self.client_save_count += 1
+        generation = client_generation or hashlib.sha256(
+            f"fake-client-generation:{self.client_save_count}:{client_id}:{client_secret}".encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        self.client_configuration = {
+            "clientId": client_id,
+            "clientSecret": client_secret,
+            "clientGeneration": generation,
+        }
+        return generation
+
+    def delete_client_configuration(self, **_kwargs) -> bool:
+        removed = self.client_configuration is not None
+        self.client_configuration = None
+        return removed
 
 
 def authorization_query(result: dict) -> dict[str, list[str]]:
@@ -168,6 +199,26 @@ class GoogleOAuthModuleSecurityTests(unittest.TestCase):
             self.stack.enter_context(
                 patch.object(self.hub.google_oauth_store, name, getattr(self.store, name))
             )
+        for name in (
+            "load_client_configuration_record",
+            "save_client_configuration",
+            "delete_client_configuration",
+        ):
+            self.stack.enter_context(
+                patch.object(self.hub.google_oauth_store, name, getattr(self.store, name))
+            )
+        self.transaction_lock = threading.RLock()
+
+        def in_memory_transaction(**_kwargs):
+            return self.transaction_lock
+
+        self.transaction_mock = self.stack.enter_context(
+            patch.object(
+                self.hub.google_oauth_store,
+                "oauth_store_transaction",
+                side_effect=in_memory_transaction,
+            )
+        )
         self.redirect_uri = f"http://127.0.0.1:43191{CALLBACK_PATH}"
 
     def tearDown(self) -> None:
@@ -182,6 +233,14 @@ class GoogleOAuthModuleSecurityTests(unittest.TestCase):
             now_monotonic=now,
         )
         return result, authorization_query(result)
+
+    def seed_stored_client(self) -> None:
+        self.store.client_configuration = {
+            "clientId": "111-initial-client.apps.googleusercontent.com",
+            "clientSecret": "",
+            "clientGeneration": "a" * 64,
+        }
+        self.store.refresh_token = "STORED_REFRESH_RACE_MARKER"
 
     def test_start_uses_exact_loopback_pkce_s256_and_offline_consent(self) -> None:
         result, query = self.start()
@@ -568,6 +627,203 @@ class GoogleOAuthModuleSecurityTests(unittest.TestCase):
 
         self.hub.access_token(refresh_env, open_url=open_refresh)
         self.assertEqual(captured["form"]["refresh_token"], ["ENV_REFRESH_MARKER"])
+
+    def test_disconnect_during_stored_refresh_prevents_sheets_request(self) -> None:
+        self.seed_stored_client()
+        refresh_started = threading.Event()
+        allow_refresh = threading.Event()
+        sheets_requests: list[str] = []
+        outcome: dict[str, object] = {}
+
+        def open_url(request: Request, timeout: int):
+            if request.full_url == self.hub.GOOGLE_TOKEN_URL:
+                refresh_started.set()
+                if not allow_refresh.wait(2.0):
+                    raise TimeoutError("test refresh gate timed out")
+                return FakeJsonResponse({"access_token": "STALE_ACCESS_MARKER"})
+            sheets_requests.append(request.full_url)
+            return FakeJsonResponse({"spreadsheetId": "unexpected"})
+
+        def run_request() -> None:
+            try:
+                outcome["result"] = self.hub.api_request(
+                    "A" * 24,
+                    environ=None,
+                    open_url=open_url,
+                )
+            except BaseException as error:  # captured for deterministic thread assertion
+                outcome["error"] = error
+
+        worker = threading.Thread(target=run_request, daemon=True)
+        worker.start()
+        started = refresh_started.wait(2.0)
+        try:
+            disconnected = self.hub.disconnect_google_oauth()
+        finally:
+            allow_refresh.set()
+        worker.join(2.0)
+
+        self.assertTrue(started)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(disconnected["ok"])
+        self.assertIsInstance(outcome.get("error"), self.hub.GoogleSheetHubError)
+        self.assertEqual(outcome["error"].code, "oauth_credential_changed")
+        self.assertEqual(sheets_requests, [])
+        self.assertNotIn("STALE_ACCESS_MARKER", str(outcome["error"]))
+
+    def test_client_replacement_during_stored_refresh_prevents_sheets_request(self) -> None:
+        self.seed_stored_client()
+        refresh_started = threading.Event()
+        allow_refresh = threading.Event()
+        sheets_requests: list[str] = []
+        outcome: dict[str, object] = {}
+
+        def open_url(request: Request, timeout: int):
+            if request.full_url == self.hub.GOOGLE_TOKEN_URL:
+                refresh_started.set()
+                if not allow_refresh.wait(2.0):
+                    raise TimeoutError("test refresh gate timed out")
+                return FakeJsonResponse({"access_token": "STALE_CLIENT_ACCESS_MARKER"})
+            sheets_requests.append(request.full_url)
+            return FakeJsonResponse({"spreadsheetId": "unexpected"})
+
+        def run_request() -> None:
+            try:
+                outcome["result"] = self.hub.api_request(
+                    "B" * 24,
+                    environ=None,
+                    open_url=open_url,
+                )
+            except BaseException as error:  # captured for deterministic thread assertion
+                outcome["error"] = error
+
+        replacement_json = json.dumps(
+            {
+                "installed": {
+                    "client_id": "222-replacement-client.apps.googleusercontent.com",
+                    "client_secret": "",
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": self.hub.GOOGLE_TOKEN_URL,
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        )
+        worker = threading.Thread(target=run_request, daemon=True)
+        worker.start()
+        started = refresh_started.wait(2.0)
+        try:
+            configured = self.hub.configure_google_oauth_client_json(replacement_json)
+        finally:
+            allow_refresh.set()
+        worker.join(2.0)
+
+        self.assertTrue(started)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(configured["ok"])
+        self.assertTrue(configured["authorizationReset"])
+        self.assertIsInstance(outcome.get("error"), self.hub.GoogleSheetHubError)
+        self.assertEqual(outcome["error"].code, "oauth_credential_changed")
+        self.assertEqual(sheets_requests, [])
+        self.assertNotIn("STALE_CLIENT_ACCESS_MARKER", str(outcome["error"]))
+
+    def test_disconnect_waits_for_inflight_stored_sheets_request(self) -> None:
+        self.seed_stored_client()
+        sheets_started = threading.Event()
+        allow_sheets = threading.Event()
+        disconnect_done = threading.Event()
+        order: list[str] = []
+        outcome: dict[str, object] = {}
+
+        def open_url(request: Request, timeout: int):
+            if request.full_url == self.hub.GOOGLE_TOKEN_URL:
+                return FakeJsonResponse({"access_token": "INFLIGHT_ACCESS_MARKER"})
+            sheets_started.set()
+            if not allow_sheets.wait(2.0):
+                raise TimeoutError("test Sheets gate timed out")
+            order.append("sheets_finished")
+            return FakeJsonResponse({"spreadsheetId": "C" * 24})
+
+        def run_request() -> None:
+            try:
+                outcome["result"] = self.hub.api_request(
+                    "C" * 24,
+                    environ=None,
+                    open_url=open_url,
+                )
+            except BaseException as error:
+                outcome["request_error"] = error
+
+        def run_disconnect() -> None:
+            try:
+                outcome["disconnect"] = self.hub.disconnect_google_oauth()
+                order.append("disconnect_finished")
+            except BaseException as error:
+                outcome["disconnect_error"] = error
+            finally:
+                disconnect_done.set()
+
+        request_thread = threading.Thread(target=run_request, daemon=True)
+        request_thread.start()
+        started = sheets_started.wait(2.0)
+        disconnect_thread = threading.Thread(target=run_disconnect, daemon=True)
+        disconnect_thread.start()
+        completed_early = disconnect_done.wait(0.15)
+        allow_sheets.set()
+        request_thread.join(2.0)
+        disconnect_thread.join(2.0)
+
+        self.assertTrue(started)
+        self.assertFalse(completed_early)
+        self.assertFalse(request_thread.is_alive())
+        self.assertFalse(disconnect_thread.is_alive())
+        self.assertNotIn("request_error", outcome)
+        self.assertNotIn("disconnect_error", outcome)
+        self.assertEqual(outcome["result"]["spreadsheetId"], "C" * 24)
+        self.assertTrue(outcome["disconnect"]["ok"])
+        self.assertEqual(order, ["sheets_finished", "disconnect_finished"])
+
+    def test_direct_and_environment_refresh_api_requests_do_not_take_store_lease(self) -> None:
+        sheet_id = "D" * 24
+        direct_env = {
+            **CLIENT_ENV,
+            "METAFX_GOOGLE_SHEETS_ACCESS_TOKEN": "DIRECT_ENV_ACCESS_MARKER",
+        }
+        direct_calls: list[str] = []
+
+        def open_direct(request: Request, timeout: int):
+            direct_calls.append(request.full_url)
+            return FakeJsonResponse({"spreadsheetId": sheet_id})
+
+        self.transaction_mock.reset_mock()
+        direct_result = self.hub.api_request(
+            sheet_id,
+            environ=direct_env,
+            open_url=open_direct,
+        )
+        self.assertEqual(direct_result["spreadsheetId"], sheet_id)
+        self.assertEqual(len(direct_calls), 1)
+        self.transaction_mock.assert_not_called()
+
+        refresh_env = {
+            **CLIENT_ENV,
+            "METAFX_GOOGLE_OAUTH_REFRESH_TOKEN": "ENV_REFRESH_MARKER",
+        }
+        refresh_calls: list[str] = []
+
+        def open_refresh(request: Request, timeout: int):
+            refresh_calls.append(request.full_url)
+            if request.full_url == self.hub.GOOGLE_TOKEN_URL:
+                return FakeJsonResponse({"access_token": "ENV_REFRESH_ACCESS_MARKER"})
+            return FakeJsonResponse({"spreadsheetId": sheet_id})
+
+        refresh_result = self.hub.api_request(
+            sheet_id,
+            environ=refresh_env,
+            open_url=open_refresh,
+        )
+        self.assertEqual(refresh_result["spreadsheetId"], sheet_id)
+        self.assertEqual(len(refresh_calls), 2)
+        self.transaction_mock.assert_not_called()
 
 
 class GoogleOAuthSecureStoreTests(unittest.TestCase):

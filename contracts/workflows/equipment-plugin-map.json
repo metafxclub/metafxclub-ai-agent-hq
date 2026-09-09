@@ -159,6 +159,11 @@
         "scheduled": false,
         "automaticLoop": false,
         "oneUserActionAdvancesOneStage": true,
+        "artifactKinds": {
+          "default": "expert_advisor",
+          "expert_advisor": {"platforms": ["mt4", "mt5", "tradingview"], "backtestApplicable": true},
+          "custom_indicator": {"platforms": ["mt4", "mt5"], "requiredEntryPoint": "OnCalculate", "indicatorBufferRequired": true, "tradingFunctionsAllowed": false, "backtestApplicable": false, "chartAttachmentAllowed": false}
+        },
         "sourceColumnContract": {
           "range": "A-W",
           "core": "A-M",
@@ -169,8 +174,8 @@
           {"id": "strategy_spec", "requires": ["source_record"], "ownerAgentId": "ea_developer"},
           {"id": "generate_source", "requires": ["strategy_spec_confirmed"], "ownerAgentId": "ea_developer", "actionId": "build_strategy_code"},
           {"id": "source_review", "requires": ["source_artifact_and_digest"], "ownerAgentId": "ea_developer", "actionId": "review_source_code"},
-          {"id": "compile_validate", "requires": ["source_review_passed"], "ownerAgentId": "ea_developer", "platformPolicy": {"mt4": "selected_mt4_and_visible_metaeditor_proof", "mt5": "selected_mt5_and_visible_metaeditor_proof", "tradingview": "static_pine_validation"}},
-          {"id": "backtest_recheck", "requires": ["compile_validate_passed"], "ownerAgentId": "backtest_analyst", "platformPolicy": {"mt4": "visible_strategy_tester_proof", "mt5": "visible_strategy_tester_proof", "tradingview": "not_applicable"}},
+          {"id": "compile_validate", "requires": ["source_review_passed"], "ownerAgentId": "ea_developer", "platformPolicy": {"mt4": "backend_selected_mt4_metaeditor_compile_only_receipt", "mt5": "backend_selected_mt5_metaeditor_compile_only_receipt", "tradingview": "static_pine_validation"}, "terminalLaunchAllowed": false, "backtestAllowed": false, "frontendPathOrArgsAllowed": false},
+          {"id": "backtest_recheck", "requires": ["compile_validate_passed"], "ownerAgentId": "backtest_analyst", "platformPolicy": {"mt4": "visible_strategy_tester_proof_for_expert_advisor", "mt5": "visible_strategy_tester_proof_for_expert_advisor", "tradingview": "not_applicable"}, "artifactKindPolicy": {"custom_indicator": "not_applicable_no_trade_execution"}},
           {"id": "final_report", "requires": ["all_applicable_prior_stages_passed"], "ownerAgentId": "mission_archivist"}
         ],
         "workspaceFolders": ["Source", "EA_Versions", "Reports", "Sets", "Screenshots", "Summaries"],
@@ -223,9 +228,9 @@
           "inputPreset": {"brief": "สร้าง Source ที่อ่านง่าย มี Inputs และ Safety Guard พร้อมป้าย SOURCE-ONLY / UNCOMPILED"},
           "outputFields": ["sourceFiles", "sourceDigest", "sourceRecordDigest", "strategySpecDigest", "blueprintCoverageManifest", "platform", "strategyProfile", "functionMap", "compileChecklist", "knownRisks", "nextValidationStep"],
           "evidenceRequired": ["project_relative_source_path", "source_digest", "uncompiled_status"],
-          "screenshotPolicy": "required_only_when_visible_compile_adapter_runs",
+          "screenshotPolicy": "not_required_for_hidden_compile_only_adapter",
           "reportType": "ea_build_report",
-          "failureHelpTh": "เลือกข้อมูลต้นทางและแพลตฟอร์มก่อน หากต้องการ Compile/Backtest ให้เชื่อม MetaEditor/Terminal ที่ถูกต้องและรันขั้นตรวจจริง"
+          "failureHelpTh": "เลือกข้อมูลต้นทางและแพลตฟอร์มก่อน ขั้น Compile ใช้ MetaEditor ของ MT4/MT5 ที่ Backend เลือกเท่านั้น ส่วน Backtest ยังบล็อกจนกว่าจะมี Visual Strategy Tester Adapter"
         },
         "review_source_code": {
           "pluginSkillId": "backend-static-source-review",

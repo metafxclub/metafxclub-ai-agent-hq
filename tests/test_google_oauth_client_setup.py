@@ -32,6 +32,7 @@ OTHER_CLIENT_ID = (
     ".apps.googleusercontent.com"
 )
 CLIENT_SECRET = "TEST_ONLY_DESKTOP_CLIENT_SECRET_MARKER"
+CLIENT_GENERATION = "g" * 64
 
 
 def desktop_client_json(
@@ -92,6 +93,105 @@ class GoogleOAuthClientStoreTests(unittest.TestCase):
                 store.load_client_configuration(path=path)
             self.assertEqual(caught.exception.code, "secure_store_invalid")
 
+    def test_v1_client_store_remains_readable_without_exposing_private_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "credentials" / "client.dpapi"
+            cleartext = json.dumps(
+                {
+                    "schemaVersion": "google-oauth-desktop-client-v1",
+                    "clientId": CLIENT_ID,
+                    "clientSecret": CLIENT_SECRET,
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            with (
+                mock.patch.object(
+                    store,
+                    "_protect_client_configuration",
+                    side_effect=lambda value: b"cipher:" + value[::-1],
+                ),
+                mock.patch.object(
+                    store,
+                    "_unprotect_client_configuration",
+                    side_effect=lambda value: value.removeprefix(b"cipher:")[::-1],
+                ),
+            ):
+                protected = store._protect_client_configuration(cleartext)
+                store._write_protected_payload(
+                    path,
+                    store._CLIENT_STORE_MAGIC + protected,
+                )
+                private_record = store.load_client_configuration_record(path=path)
+                public_record = store.load_client_configuration(path=path)
+
+            self.assertRegex(private_record["clientGeneration"], r"^[0-9a-f]{64}$")
+            self.assertEqual(
+                public_record,
+                {"clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET},
+            )
+            self.assertNotIn("clientGeneration", public_record)
+
+    def test_refresh_v2_is_client_bound_while_v1_remains_upgrade_compatible(self) -> None:
+        refresh = "SYNTHETIC_REFRESH_TOKEN_MARKER"
+        generation_a = "a" * 64
+        generation_b = "b" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "credentials" / "refresh.dpapi"
+            with (
+                mock.patch.object(
+                    store,
+                    "_protect",
+                    side_effect=lambda value: b"cipher:" + value[::-1],
+                ),
+                mock.patch.object(
+                    store,
+                    "_unprotect",
+                    side_effect=lambda value: value.removeprefix(b"cipher:")[::-1],
+                ),
+            ):
+                store.save_refresh_token(
+                    refresh,
+                    client_generation=generation_a,
+                    path=path,
+                )
+                self.assertEqual(
+                    store.load_refresh_token(
+                        expected_client_generation=generation_a,
+                        path=path,
+                    ),
+                    refresh,
+                )
+                with self.assertRaises(store.SecureStoreError) as mismatch:
+                    store.load_refresh_token(
+                        expected_client_generation=generation_b,
+                        path=path,
+                    )
+                self.assertEqual(mismatch.exception.code, "secure_store_client_mismatch")
+                mismatch_status = store.status(
+                    expected_client_generation=generation_b,
+                    path=path,
+                )
+                self.assertFalse(mismatch_status["stored"])
+                self.assertEqual(
+                    mismatch_status["status"],
+                    "secure_store_client_mismatch",
+                )
+                self.assertNotIn(refresh, json.dumps(mismatch_status))
+
+                # Older releases stored only the protected token.  Accept it
+                # once during an in-place upgrade even when the new runtime has
+                # an expected client generation; the next callback writes v2.
+                store.save_refresh_token(refresh, path=path)
+                self.assertEqual(
+                    store.load_refresh_token(
+                        expected_client_generation=generation_b,
+                        path=path,
+                    ),
+                    refresh,
+                )
+
 
 class GoogleOAuthClientParserTests(unittest.TestCase):
     def test_parser_accepts_only_installed_desktop_loopback_contract(self) -> None:
@@ -137,6 +237,7 @@ class GoogleOAuthClientConfigurationTests(unittest.TestCase):
         previous = {
             "clientId": CLIENT_ID,
             "clientSecret": CLIENT_SECRET,
+            "clientGeneration": CLIENT_GENERATION,
             "source": "secure_store",
         }
         with (
@@ -145,7 +246,11 @@ class GoogleOAuthClientConfigurationTests(unittest.TestCase):
             mock.patch.object(store, "delete_refresh_token") as delete,
         ):
             result = hub.configure_google_oauth_client_json(desktop_client_json())
-        save.assert_called_once_with(CLIENT_ID, CLIENT_SECRET)
+        save.assert_called_once_with(
+            CLIENT_ID,
+            CLIENT_SECRET,
+            client_generation=CLIENT_GENERATION,
+        )
         delete.assert_not_called()
         self.assertFalse(result["authorizationReset"])
         serialized = json.dumps(result)
@@ -175,6 +280,7 @@ class GoogleOAuthClientConfigurationTests(unittest.TestCase):
         previous = {
             "clientId": CLIENT_ID,
             "clientSecret": CLIENT_SECRET,
+            "clientGeneration": CLIENT_GENERATION,
             "source": "secure_store",
         }
         with (
@@ -182,7 +288,7 @@ class GoogleOAuthClientConfigurationTests(unittest.TestCase):
             mock.patch.object(
                 store,
                 "save_client_configuration",
-                side_effect=lambda *_args: calls.append("save"),
+                side_effect=lambda *_args, **_kwargs: calls.append("save"),
             ) as save,
             mock.patch.object(
                 store,
@@ -193,7 +299,11 @@ class GoogleOAuthClientConfigurationTests(unittest.TestCase):
             result = hub.configure_google_oauth_client_json(
                 desktop_client_json(client_id=OTHER_CLIENT_ID)
             )
-        save.assert_called_once_with(OTHER_CLIENT_ID, CLIENT_SECRET)
+        save.assert_called_once_with(
+            OTHER_CLIENT_ID,
+            CLIENT_SECRET,
+            client_generation="",
+        )
         delete.assert_called_once_with()
         self.assertEqual(calls, ["delete", "save"])
         self.assertTrue(result["authorizationReset"])
@@ -204,6 +314,7 @@ class GoogleOAuthClientConfigurationTests(unittest.TestCase):
         previous = {
             "clientId": CLIENT_ID,
             "clientSecret": CLIENT_SECRET,
+            "clientGeneration": CLIENT_GENERATION,
             "source": "secure_store",
         }
         failure = store.SecureStoreError(
@@ -260,7 +371,11 @@ class GoogleOAuthClientConfigurationTests(unittest.TestCase):
         delete_client.assert_not_called()
 
     def test_stored_client_drives_status_oauth_start_and_refresh_grant(self) -> None:
-        stored_client = {"clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET}
+        stored_client = {
+            "clientId": CLIENT_ID,
+            "clientSecret": CLIENT_SECRET,
+            "clientGeneration": CLIENT_GENERATION,
+        }
         captured = []
 
         class Response:
@@ -278,7 +393,11 @@ class GoogleOAuthClientConfigurationTests(unittest.TestCase):
             return Response()
 
         with (
-            mock.patch.object(store, "load_client_configuration", return_value=stored_client),
+            mock.patch.object(
+                store,
+                "load_client_configuration_record",
+                return_value=stored_client,
+            ),
             mock.patch.object(
                 store,
                 "status",
@@ -312,7 +431,11 @@ class GoogleOAuthClientConfigurationTests(unittest.TestCase):
             "PRIVATE_CORRUPT_STORE_DETAIL_MUST_NOT_RETURN",
         )
         with (
-            mock.patch.object(store, "load_client_configuration", side_effect=failure),
+            mock.patch.object(
+                store,
+                "load_client_configuration_record",
+                side_effect=failure,
+            ),
             mock.patch.object(
                 store,
                 "status",

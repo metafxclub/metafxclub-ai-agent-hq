@@ -231,28 +231,50 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
         self.assertFalse(read_tool["scheduled"])
         self.assertFalse(read_tool["automaticLoop"])
 
-    def test_compile_and_strategy_tester_remain_truthfully_unavailable(self):
+    def test_compile_only_adapter_is_guarded_and_strategy_tester_remains_unavailable(self):
         compile_tool = self.tools["compile_strategy_code"]
         tester_tool = self.tools["run_strategy_tester"]
         self.assertEqual(compile_tool["label"], "Compile MQL4 / MQL5")
         self.assertNotIn("Pine", compile_tool["label"])
-        for tool in (compile_tool, tester_tool):
-            self.assertIn("right_server_racks", tool["linkedPropIds"])
-            self.assertEqual(tool["adapterStatus"], "coming_soon")
-            self.assertFalse(tool["realExecutionAvailable"])
-            self.assertFalse(tool["autoRunnable"])
-            self.assertTrue(tool["requiresExactSelectedTerminalPlatform"])
-            self.assertTrue(tool["requiresVerifiedFrontOfficeAdapter"])
-            self.assertFalse(tool["terminalSelectionIsExecutionProof"])
-            self.assertFalse(tool["syntheticSuccessAllowed"])
-            self.assertFalse(tool["frontendMayClaimSuccess"])
-            self.assertFalse(tool["liveTradingAllowed"])
-
+        self.assertIn("right_server_racks", compile_tool["linkedPropIds"])
+        self.assertEqual(
+            compile_tool["adapterStatus"],
+            "implemented_fail_closed_for_ea_factory",
+        )
+        self.assertTrue(compile_tool["realExecutionAvailable"])
+        self.assertFalse(compile_tool["autoRunnable"])
+        self.assertTrue(compile_tool["requiresExactSelectedTerminalPlatform"])
+        self.assertFalse(compile_tool["requiresVerifiedFrontOfficeAdapter"])
+        self.assertFalse(compile_tool["requiresVisibleMetaEditorEvidence"])
+        self.assertTrue(compile_tool["requiresBackendSelectedCompilerPath"])
+        self.assertFalse(compile_tool["frontendPathOrArgumentsAllowed"])
+        self.assertFalse(compile_tool["shellAllowed"])
+        self.assertTrue(compile_tool["hiddenProcessRequired"])
+        self.assertTrue(compile_tool["processTreeKillOnTimeoutRequired"])
+        self.assertFalse(compile_tool["terminalLaunchAllowed"])
+        self.assertFalse(compile_tool["chartAttachmentAllowed"])
+        self.assertFalse(compile_tool["backtestAllowed"])
+        self.assertFalse(compile_tool["networkAllowed"])
+        self.assertFalse(compile_tool["terminalSelectionIsExecutionProof"])
         self.assertFalse(compile_tool["processExitIsCompileProof"])
+        self.assertFalse(compile_tool["syntheticSuccessAllowed"])
+        self.assertFalse(compile_tool["frontendMayClaimSuccess"])
+        self.assertFalse(compile_tool["liveTradingAllowed"])
         self.assertEqual(
             compile_tool["pineScriptHandling"],
             "static_source_validation_only_compile_not_applicable",
         )
+
+        self.assertIn("right_server_racks", tester_tool["linkedPropIds"])
+        self.assertEqual(tester_tool["adapterStatus"], "coming_soon")
+        self.assertFalse(tester_tool["realExecutionAvailable"])
+        self.assertFalse(tester_tool["autoRunnable"])
+        self.assertTrue(tester_tool["requiresExactSelectedTerminalPlatform"])
+        self.assertTrue(tester_tool["requiresVerifiedFrontOfficeAdapter"])
+        self.assertFalse(tester_tool["terminalSelectionIsExecutionProof"])
+        self.assertFalse(tester_tool["syntheticSuccessAllowed"])
+        self.assertFalse(tester_tool["frontendMayClaimSuccess"])
+        self.assertFalse(tester_tool["liveTradingAllowed"])
         self.assertFalse(tester_tool["processExitIsBacktestProof"])
         self.assertTrue(tester_tool["requiresVisibleStrategyTesterEvidence"])
         self.assertTrue(tester_tool["requiresVisualBacktestProof"])

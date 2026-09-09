@@ -5,6 +5,24 @@
   "scheduled": false,
   "automaticLoop": false,
   "oneUserActionAdvancesOneStage": true,
+  "artifactKinds": {
+    "default": "expert_advisor",
+    "allowed": ["expert_advisor", "custom_indicator"],
+    "expert_advisor": {
+      "platforms": ["mt4", "mt5", "tradingview"],
+      "tradingFunctionsAllowed": true,
+      "backtestApplicable": true
+    },
+    "custom_indicator": {
+      "platforms": ["mt4", "mt5"],
+      "requiredEntryPoint": "OnCalculate",
+      "indicatorBufferRequired": true,
+      "tradingFunctionsAllowed": false,
+      "compileStageRequired": true,
+      "backtestApplicable": false,
+      "chartAttachmentAllowed": false
+    }
+  },
   "sourceContract": {
     "acceptedKinds": ["deep_research", "google_sheet"],
     "googleSheets": {
@@ -64,16 +82,16 @@
     ]
   },
   "platforms": {
-    "mt4": {"language": "mql4", "sourceExtension": ".mq4", "binaryExtension": ".ex4", "terminalRequired": true, "backtestRequired": true},
-    "mt5": {"language": "mql5", "sourceExtension": ".mq5", "binaryExtension": ".ex5", "terminalRequired": true, "backtestRequired": true},
-    "tradingview": {"language": "pine_script", "sourceExtension": ".pine", "terminalRequired": false, "backtestRequired": false}
+    "mt4": {"language": "mql4", "sourceExtension": ".mq4", "binaryExtension": ".ex4", "terminalRequired": true, "selectedTerminalInstallRequired": true, "terminalProcessLaunchRequired": false, "compileMode": "backend_selected_metaeditor_compile_only", "backtestRequired": true, "artifactKinds": ["expert_advisor", "custom_indicator"]},
+    "mt5": {"language": "mql5", "sourceExtension": ".mq5", "binaryExtension": ".ex5", "terminalRequired": true, "selectedTerminalInstallRequired": true, "terminalProcessLaunchRequired": false, "compileMode": "backend_selected_metaeditor_compile_only", "backtestRequired": true, "artifactKinds": ["expert_advisor", "custom_indicator"]},
+    "tradingview": {"language": "pine_script", "sourceExtension": ".pine", "terminalRequired": false, "backtestRequired": false, "artifactKinds": ["expert_advisor"]}
   },
   "stages": [
     {"id": "strategy_spec", "ordinal": 1, "requires": ["source_record_complete"], "successEvidence": ["confirmed_strategy_spec"]},
     {"id": "generate_source", "ordinal": 2, "requires": ["strategy_spec_passed"], "successEvidence": ["project_relative_source_path", "source_digest", "immutable_version"]},
     {"id": "source_review", "ordinal": 3, "requires": ["generate_source_passed"], "successEvidence": ["review_scope", "signal_guard", "source_digest_match"]},
-    {"id": "compile_validate", "ordinal": 4, "requires": ["source_review_passed"], "successEvidence": ["platform_specific_validation_receipt"]},
-    {"id": "backtest_recheck", "ordinal": 5, "requires": ["compile_validate_passed"], "successEvidence": ["visual_backtest", "logic_recheck"], "notApplicablePlatforms": ["tradingview"]},
+    {"id": "compile_validate", "ordinal": 4, "requires": ["source_review_passed"], "successEvidence": ["backend_selected_metaeditor_compile_receipt", "source_compiler_selection_digest_binding", "exact_zero_errors_zero_warnings", "compiled_binary_sha256"]},
+    {"id": "backtest_recheck", "ordinal": 5, "requires": ["compile_validate_passed"], "successEvidence": ["visual_backtest", "logic_recheck"], "notApplicablePlatforms": ["tradingview"], "notApplicableArtifactKinds": ["custom_indicator"]},
     {"id": "final_report", "ordinal": 6, "requires": ["all_applicable_prior_stages_passed"], "successEvidence": ["artifact_manifest", "audit_lineage", "final_summary"]}
   ],
   "workspace": {
@@ -94,6 +112,8 @@
     "read": "GET /api/props/right_server_racks/ea-factory",
     "syncGoogleSheet": "POST /api/props/right_server_racks/ea-factory/sources/google-sheet/sync",
     "createBuild": "POST /api/props/right_server_racks/ea-factory/builds",
+    "createBuildFields": ["sourceRecordId", "artifactKind", "platform", "brief", "idempotencyKey"],
+    "createBuildArtifactKindDefault": "expert_advisor",
     "advanceBuild": "POST /api/props/right_server_racks/ea-factory/builds/:buildId/advance",
     "downloadArtifact": "GET /api/props/right_server_racks/ea-factory/builds/:buildId/files/:fileId"
   },
@@ -111,7 +131,16 @@
     "externalWrites": false,
     "missionAuditRequiredForRealToolAction": true,
     "terminalPlatformMustMatch": true,
+    "metaEditorCompileMode": "hidden_shell_false_compile_only",
+    "compilerPathOwnedByBackend": true,
+    "frontendCompilerPathOrArgumentsAllowed": false,
+    "sourceAndCompilerDigestRecheckRequired": true,
+    "terminalSelectionRevisionRecheckRequired": true,
+    "compileReceiptImmutable": true,
+    "compileMayLaunchTerminal": false,
+    "compileMayRunBacktestOrAttachChart": false,
     "compileCannotBeInferredFromStaticReview": true,
-    "backtestCannotBeInferredWithoutVisualProof": true
+    "backtestCannotBeInferredWithoutVisualProof": true,
+    "strategyTesterAdapterStatus": "coming_soon_hard_blocked"
   }
 }

@@ -805,6 +805,158 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
 
         self.assertEqual(validated["id"], build_id)
         self.assertEqual(validated["sourceRecordId"], record["sourceRecordId"])
+        self.assertFalse(validated["coverageUpgradeRequired"])
+        self.assertEqual(validated["coverageStatus"], "current")
+
+    def test_persisted_v3_coverage_loads_read_only_and_requires_v4_rebuild(self) -> None:
+        record, _row, _metrics = self.ready_factory_record()
+        build_id = "ea-build-research-persisted-v3"
+        platform = "mt4"
+        brief = ""
+        mission = {"id": "mission-ea-spec-persisted-v3"}
+        report = {"id": "report-ea-spec-persisted-v3"}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            project_root = Path(temporary)
+            runtime_dir = project_root / "runtime"
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            with (
+                mock.patch.object(self.bridge, "PROJECT_ROOT", project_root),
+                mock.patch.object(self.bridge, "RUNTIME_DIR", runtime_dir),
+            ):
+                workspace = self.bridge._ea_factory_create_build_workspace(
+                    build_id,
+                    record,
+                    platform,
+                )
+                spec_path = (
+                    project_root
+                    / "workspace"
+                    / "ea-factory"
+                    / build_id
+                    / workspace["strategySpecFile"]
+                )
+                spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                legacy_requirements = (
+                    self.bridge._ea_factory_legacy_v3_coverage_requirements(
+                        spec["eaImplementationBlueprint"],
+                        spec["eaBlueprintDigest"],
+                    )
+                )
+                self.assertEqual(
+                    legacy_requirements["schemaVersion"],
+                    "ea-factory-blueprint-coverage-requirements-v3",
+                )
+                self.assertFalse(
+                    self.bridge.ea_factory_coverage_requirements_valid(
+                        legacy_requirements,
+                        spec["eaImplementationBlueprint"],
+                        spec["eaBlueprintDigest"],
+                    )
+                )
+                forged_requirements = copy.deepcopy(legacy_requirements)
+                forged_requirements["semanticProfile"]["requiresClosedBar"] = not bool(
+                    forged_requirements["semanticProfile"]["requiresClosedBar"]
+                )
+                forged_requirements.pop("requirementsDigest")
+                forged_requirements["requirementsDigest"] = (
+                    self.bridge._ea_factory_canonical_json_sha256(
+                        forged_requirements
+                    )
+                )
+                self.assertFalse(
+                    self.bridge._ea_factory_legacy_v3_coverage_requirements_valid(
+                        forged_requirements,
+                        spec["eaImplementationBlueprint"],
+                        spec["eaBlueprintDigest"],
+                    )
+                )
+                spec["blueprintCoverageRequirements"] = legacy_requirements
+                spec_path.write_text(
+                    json.dumps(spec, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                workspace["strategySpecDigest"] = (
+                    self.bridge._ea_factory_file_sha256(spec_path)
+                )
+                build = {
+                    "schemaVersion": "ea-factory-build-v1",
+                    "id": build_id,
+                    "sourceRecordId": record["sourceRecordId"],
+                    "sourceDisplayName": record["displayName"],
+                    "sourceRecordDigest": record["recordDigest"],
+                    "sourceReportId": report["id"],
+                    "sourceMissionId": mission["id"],
+                    "platform": platform,
+                    "brief": brief,
+                    "status": "ready",
+                    "workspace": workspace,
+                    "stages": self.bridge._ea_factory_initial_stages(
+                        platform,
+                        mission,
+                        report,
+                    ),
+                    "versions": [],
+                    "createIdempotencyKey": None,
+                    "createIdempotencyKeys": [],
+                    "createRequestDigest": self.bridge._ea_factory_create_request_digest(
+                        record["sourceRecordId"],
+                        platform,
+                        brief,
+                    ),
+                    "createdAt": "2026-09-08T09:40:00+07:00",
+                    "updatedAt": "2026-09-08T09:40:00+07:00",
+                }
+                artifacts = self.bridge._ea_factory_register_artifacts(
+                    build,
+                    [
+                        {
+                            "relativePath": workspace["strategySpecFile"],
+                            "stageId": "strategy_spec",
+                            "reportId": report["id"],
+                            "artifactKind": "strategy_spec",
+                        }
+                    ],
+                )
+                self.bridge._ea_factory_stage_row(build, "strategy_spec")[
+                    "artifacts"
+                ] = [item["fileId"] for item in artifacts]
+                persisted = self.bridge._empty_ea_factory_state()
+                persisted["builds"] = [build]
+                state_path = self.bridge._ea_factory_state_path()
+                state_path.write_text(
+                    json.dumps(persisted, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+
+                loaded = self.bridge._load_ea_factory_state_unlocked()
+                loaded_build = loaded["builds"][0]
+                model = self.bridge._ea_factory_build_read_model(loaded_build)
+
+                self.assertTrue(loaded_build["coverageUpgradeRequired"])
+                self.assertEqual(
+                    loaded_build["coverageRequirementsSchemaVersion"],
+                    "ea-factory-blueprint-coverage-requirements-v3",
+                )
+                self.assertEqual(model["status"], "coverage_upgrade_required")
+                self.assertEqual(model["coverageStatus"], "coverage_upgrade_required")
+                self.assertTrue(model["rebuildRequired"])
+                self.assertTrue(
+                    all(stage["canAdvance"] is False for stage in model["stages"])
+                )
+                raw_persisted = json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertNotIn(
+                    "coverageUpgradeRequired",
+                    raw_persisted["builds"][0],
+                )
+
+                with self.assertRaises(self.bridge.RequestError) as raised:
+                    self.bridge.advance_ea_factory_build(
+                        build_id,
+                        {"stageId": "generate_source"},
+                    )
+                self.assertEqual(raised.exception.status, 409)
+                self.assertIn("coverage contract is outdated", str(raised.exception))
 
     def test_legacy_v1_deep_row_is_visible_but_not_build_ready(self) -> None:
         _record, row, _metrics = self.ready_factory_record()

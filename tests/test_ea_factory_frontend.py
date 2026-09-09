@@ -72,10 +72,31 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn(r"split(/\r?\n|\s*;\s*/)", list_normalizer)
         create = self.block("async function createEaFactoryBuild", "async function advanceEaFactoryStage")
         self.assertIn("sourceRecordId,", create)
+        self.assertIn("artifactKind: normalizedArtifactKind", create)
         self.assertIn("platform: normalizedPlatform", create)
         self.assertIn(".slice(0, 900)", create)
         spec = self.block("function renderEaFactorySpecStage", "function renderEaFactoryTerminalPicker")
         self.assertIn("brief.maxLength = 900", spec)
+
+    def test_custom_indicator_picker_and_truthful_no_backtest_ui(self):
+        normalizer = self.block(
+            "function normalizeEaFactoryArtifactKind",
+            "const EA_FACTORY_READINESS_ISSUE_LABELS",
+        )
+        self.assertIn('return "custom_indicator"', normalizer)
+        self.assertIn('return "expert_advisor"', normalizer)
+        domain = self.block("function normalizeEaFactoryDomain", "function normalizeWorkflowDomainData")
+        self.assertIn("artifactKind: normalizeEaFactoryArtifactKind", domain)
+        spec = self.block("function renderEaFactorySpecStage", "function renderEaFactoryTerminalPicker")
+        self.assertIn('artifactKind.dataset.eaFactoryArtifactKind = "true"', spec)
+        self.assertIn('["custom_indicator", "Custom Indicator"]', spec)
+        self.assertIn("tradingViewOption.disabled = indicatorSelected", spec)
+        self.assertIn('platform.value === "tradingview"', spec)
+        operational = self.block("function renderEaFactoryOperationalStage", "function renderEaFactoryPanel")
+        self.assertIn('domain.activeBuild.artifactKind === "custom_indicator"', operational)
+        self.assertIn("Not Applicable สำหรับ Custom Indicator", operational)
+        self.assertIn("ไม่มีการ attach หรือเทรด", self.main)
+        self.assertIn("เริ่มตรวจ Indicator และ No-Trade Guard", operational)
 
     def test_requests_use_dedicated_endpoints_and_tradingview_is_canonical(self):
         actions = self.block("async function syncEaFactoryGoogleSheet", "function connectionHubStatusGroup")

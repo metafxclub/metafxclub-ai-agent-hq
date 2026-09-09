@@ -61,7 +61,7 @@ class ResearchSheetGoogleOAuthTests(unittest.TestCase):
             mock.patch.object(
                 store,
                 "status",
-                side_effect=lambda: {
+                side_effect=lambda **_kwargs: {
                     "available": True,
                     "stored": bool(self.saved.get("refresh")),
                     "status": "ready" if self.saved.get("refresh") else "empty",
@@ -70,17 +70,22 @@ class ResearchSheetGoogleOAuthTests(unittest.TestCase):
             mock.patch.object(
                 store,
                 "save_refresh_token",
-                side_effect=lambda value: self.saved.__setitem__("refresh", value),
+                side_effect=lambda value, **kwargs: self.saved.update(
+                    {
+                        "refresh": value,
+                        "clientGeneration": str(kwargs.get("client_generation") or ""),
+                    }
+                ),
             ),
             mock.patch.object(
                 store,
                 "load_refresh_token",
-                side_effect=lambda: self.saved.get("refresh"),
+                side_effect=lambda **_kwargs: self.saved.get("refresh"),
             ),
             mock.patch.object(
                 store,
                 "delete_refresh_token",
-                side_effect=lambda: self.saved.pop("refresh", None) is not None,
+                side_effect=lambda **_kwargs: self.saved.pop("refresh", None) is not None,
             ),
         )
         for patcher in self.store_patches:
@@ -153,6 +158,8 @@ class ResearchSheetGoogleOAuthTests(unittest.TestCase):
             now_monotonic=11,
         )
         self.assertEqual(self.saved["refresh"], "refresh-must-not-return")
+        with hub._OAUTH_FLOW_LOCK:
+            self.assertTrue(self.saved["clientGeneration"])
         self.assertEqual(len(requests), 1)
         form = parse_qs(requests[0][0].data.decode("utf-8"))
         self.assertEqual(form["grant_type"], ["authorization_code"])
@@ -172,6 +179,119 @@ class ResearchSheetGoogleOAuthTests(unittest.TestCase):
             )
         self.assertEqual(replay.exception.code, "oauth_state_invalid")
         self.assertEqual(len(requests), 1)
+
+    def test_callback_rejects_client_change_before_and_after_exchange(self) -> None:
+        callback = f"http://127.0.0.1:4191{hub.GOOGLE_OAUTH_CALLBACK_PATH}"
+        base_environment = {
+            "METAFX_GOOGLE_OAUTH_CLIENT_ID": "desktop-client-a.apps.googleusercontent.com"
+        }
+
+        started = hub.start_google_oauth(callback, base_environment, now_monotonic=10)
+        state = parse_qs(urlsplit(started["authorizationUrl"]).query)["state"][0]
+        changed_before = dict(base_environment)
+        changed_before["METAFX_GOOGLE_OAUTH_CLIENT_ID"] = (
+            "desktop-client-b.apps.googleusercontent.com"
+        )
+        calls = []
+        with self.assertRaises(hub.GoogleSheetHubError) as before:
+            hub.complete_google_oauth(
+                {"state": [state], "code": ["one-time-code"]},
+                changed_before,
+                open_url=lambda *_args, **_kwargs: calls.append(True),
+                now_monotonic=11,
+            )
+        self.assertEqual(before.exception.code, "oauth_client_changed")
+        self.assertEqual(calls, [])
+        self.assertNotIn("refresh", self.saved)
+
+        mutable_environment = dict(base_environment)
+        started = hub.start_google_oauth(
+            callback,
+            mutable_environment,
+            now_monotonic=20,
+        )
+        state = parse_qs(urlsplit(started["authorizationUrl"]).query)["state"][0]
+
+        def change_client_during_exchange(*_args, **_kwargs):
+            mutable_environment["METAFX_GOOGLE_OAUTH_CLIENT_ID"] = (
+                "desktop-client-b.apps.googleusercontent.com"
+            )
+            return FakeJsonResponse(
+                {
+                    "access_token": "short-lived-access",
+                    "refresh_token": "late-refresh-must-not-persist",
+                    "scope": hub.SHEETS_SCOPE,
+                }
+            )
+
+        with self.assertRaises(hub.GoogleSheetHubError) as after:
+            hub.complete_google_oauth(
+                {"state": [state], "code": ["one-time-code"]},
+                mutable_environment,
+                open_url=change_client_during_exchange,
+                now_monotonic=21,
+            )
+        self.assertEqual(after.exception.code, "oauth_client_changed")
+        self.assertNotIn("refresh", self.saved)
+
+    def test_disconnect_during_exchange_cannot_resurrect_refresh(self) -> None:
+        environment = {
+            "METAFX_GOOGLE_OAUTH_CLIENT_ID": "desktop-client.apps.googleusercontent.com"
+        }
+        callback = f"http://127.0.0.1:4191{hub.GOOGLE_OAUTH_CALLBACK_PATH}"
+        started = hub.start_google_oauth(callback, environment, now_monotonic=30)
+        state = parse_qs(urlsplit(started["authorizationUrl"]).query)["state"][0]
+
+        def disconnect_during_exchange(*_args, **_kwargs):
+            hub.disconnect_google_oauth(environment)
+            return FakeJsonResponse(
+                {
+                    "access_token": "short-lived-access",
+                    "refresh_token": "late-refresh-must-not-persist",
+                    "scope": hub.SHEETS_SCOPE,
+                }
+            )
+
+        with self.assertRaises(hub.GoogleSheetHubError) as caught:
+            hub.complete_google_oauth(
+                {"state": [state], "code": ["one-time-code"]},
+                environment,
+                open_url=disconnect_during_exchange,
+                now_monotonic=31,
+            )
+        self.assertEqual(caught.exception.code, "oauth_client_changed")
+        self.assertNotIn("refresh", self.saved)
+
+    def test_client_bound_mismatch_is_visible_and_refresh_fails_before_network(self) -> None:
+        environment = {
+            "METAFX_GOOGLE_OAUTH_CLIENT_ID": "desktop-client.apps.googleusercontent.com"
+        }
+        mismatch = store.SecureStoreError(
+            "secure_store_client_mismatch",
+            "safe reconnect guidance",
+        )
+        with mock.patch.object(
+            store,
+            "status",
+            return_value={
+                "available": True,
+                "stored": False,
+                "status": "secure_store_client_mismatch",
+            },
+        ):
+            status = hub.google_oauth_status(environment)
+        self.assertFalse(status["connected"])
+        self.assertEqual(status["status"], "secure_store_client_mismatch")
+
+        network_calls = []
+        with mock.patch.object(store, "load_refresh_token", side_effect=mismatch):
+            with self.assertRaises(hub.GoogleSheetHubError) as caught:
+                hub.access_token(
+                    environment,
+                    open_url=lambda *_args, **_kwargs: network_calls.append(True),
+                )
+        self.assertEqual(caught.exception.code, "secure_store_client_mismatch")
+        self.assertEqual(network_calls, [])
 
     def test_callback_rejects_missing_sheets_scope_before_secure_store_write(self) -> None:
         environment = {"METAFX_GOOGLE_OAUTH_CLIENT_ID": "desktop-client"}

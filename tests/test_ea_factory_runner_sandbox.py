@@ -12,6 +12,7 @@ from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_PATH = PROJECT_ROOT / "runner" / "codex_cli_runner.py"
+BLUEPRINT_FIXTURE_PATH = PROJECT_ROOT / "tests" / "test_ea_research_blueprint_v2.py"
 
 
 def load_runner():
@@ -22,6 +23,17 @@ def load_runner():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def load_ready_blueprint() -> dict:
+    spec = importlib.util.spec_from_file_location(
+        "ea_factory_runner_ready_blueprint_fixture",
+        BLUEPRINT_FIXTURE_PATH,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.ready_blueprint()
 
 
 class EaFactoryRunnerSandboxTests(unittest.TestCase):
@@ -108,6 +120,104 @@ class EaFactoryRunnerSandboxTests(unittest.TestCase):
                 self.runner, "AUTO_WORKSPACE_ROOT", root / "workspace"
             ),
         )
+
+    def _indicator_factory_fixture(
+        self,
+        root: Path,
+        *,
+        build_id: str,
+    ) -> tuple[str, Path, str, dict]:
+        relative = f"ea-factory/{build_id}/Source"
+        source = root / "workspace" / Path(relative)
+        source.mkdir(parents=True)
+        source_record_digest = "a" * 64
+        blueprint = self.runner.normalize_blueprint(
+            load_ready_blueprint(),
+            require_ready=True,
+        )
+        blueprint_digest = self.runner.compute_blueprint_digest(blueprint)
+        requirements = self.runner.ea_factory_indicator_coverage_requirements(
+            blueprint,
+            blueprint_digest,
+        )
+        strategy_spec = {
+            "schemaVersion": "ea-factory-strategy-spec-v2",
+            "buildId": build_id,
+            "recordDigest": source_record_digest,
+            "artifactKind": "custom_indicator",
+            "targetPlatform": "mt4",
+            "immutable": True,
+            "eaImplementationBlueprint": blueprint,
+            "eaBlueprintDigest": blueprint_digest,
+            "indicatorCoverageRequirements": requirements,
+        }
+        spec_bytes = json.dumps(
+            strategy_spec,
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8")
+        (source / "strategy-spec-v01.json").write_bytes(spec_bytes)
+        spec_digest = hashlib.sha256(spec_bytes).hexdigest()
+        prompt = (
+            f"[EA_FACTORY_BUILD_ID:{build_id}]"
+            f"[EA_FACTORY_SOURCE_RECORD_DIGEST:{source_record_digest}]"
+            f"[EA_FACTORY_STRATEGY_SPEC_DIGEST:{spec_digest}]"
+            "[EA_FACTORY_PLATFORM:mt4]"
+            "[EA_FACTORY_ARTIFACT_KIND:custom_indicator] "
+            f"Read ea-factory/{build_id}/Source/strategy-spec-v01.json and generate source."
+        )
+        return relative, source, prompt, requirements
+
+    @staticmethod
+    def _exact_indicator_source(requirements: dict) -> str:
+        semantic_markers = {
+            row["id"]: row["marker"]
+            for row in requirements["requiredIndicatorSemanticMarkers"]
+        }
+        indicator_bindings = {
+            row["identity"]: row["id"]
+            for row in requirements["indicatorSemanticProfile"]["semanticBindings"]
+        }
+        rule_markers = {
+            row["id"]: row["marker"]
+            for row in requirements["requiredRuleMarkers"]
+        }
+        fast_marker = semantic_markers[indicator_bindings["ema_fast"]]
+        slow_marker = semantic_markers[indicator_bindings["ema_slow"]]
+        entry_marker = rule_markers["ENTRY_BUY_001"]
+        exit_marker = rule_markers["EXIT_BUY_001"]
+        return f"""
+#property strict
+#property indicator_chart_window
+#property indicator_buffers 1
+double SignalBuffer[];
+const bool {fast_marker} = true;
+const bool {slow_marker} = true;
+double FastValue(int shift) {{
+  if(!{fast_marker}) return 0.0;
+  return iMA(Symbol(), Period(), 10, 0, MODE_EMA, PRICE_CLOSE, shift);
+}}
+double SlowValue(int shift) {{
+  if(!{slow_marker}) return 0.0;
+  return iMA(Symbol(), Period(), 60, 0, MODE_EMA, PRICE_CLOSE, shift);
+}}
+int OnInit() {{ SetIndexBuffer(0, SignalBuffer); return(INIT_SUCCEEDED); }}
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[],
+                const double &close[], const long &tick_volume[],
+                const long &volume[], const int &spread[]) {{
+  if(rates_total < 3) return(0);
+  SignalBuffer[1] = EMPTY_VALUE;
+  bool {entry_marker} = FastValue(2) <= SlowValue(2)
+                       && FastValue(1) > SlowValue(1);
+  if({entry_marker}) SignalBuffer[1] = low[1];
+  bool {exit_marker} = FastValue(2) >= SlowValue(2)
+                      && FastValue(1) < SlowValue(1);
+  if({exit_marker}) SignalBuffer[1] = high[1];
+  return(rates_total);
+}}
+"""
 
     def test_structured_generation_keeps_codex_read_only_and_runner_writes(self) -> None:
         captured: dict[str, object] = {}
@@ -229,6 +339,119 @@ class EaFactoryRunnerSandboxTests(unittest.TestCase):
         self.assertNotIn(
             self.SOURCE_CONTENT, json.dumps(result, ensure_ascii=False)
         )
+
+    def test_indicator_materializer_binds_rules_to_buffers_and_rejects_marker_sink(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            relative, source_root, prompt, requirements = self._indicator_factory_fixture(
+                root,
+                build_id="ea-build-indicator-valid",
+            )
+            indicator_source = self._exact_indicator_source(requirements)
+            raw = json.dumps({
+                "fileName": "BoundIndicator.mq4",
+                "content": indicator_source,
+            })
+            patches = self._patch_roots(root)
+            with patches[0], patches[1]:
+                result = self.runner.materialize_ea_factory_source_result(
+                    raw,
+                    prompt,
+                    relative,
+                )
+            values = {
+                item["field"]: item["value"]
+                for item in result["contractFields"]
+            }
+            manifest = json.loads(values["blueprintCoverageManifest"])
+            profile = json.loads(values["strategyProfile"])
+            checklist = json.loads(values["compileChecklist"])
+            self.assertTrue(manifest["complete"])
+            self.assertTrue(manifest["checks"]["ruleMarkersControlOutput"])
+            self.assertEqual(profile["artifactKind"], "custom_indicator")
+            self.assertFalse(profile["backtestApplicable"])
+            self.assertIn("do_not_attach_or_trade", checklist)
+            self.assertTrue((source_root / "BoundIndicator.mq4").is_file())
+
+            sink_relative, sink_root, sink_prompt, sink_requirements = (
+                self._indicator_factory_fixture(
+                    root,
+                    build_id="ea-build-indicator-sink",
+                )
+            )
+            sink_source = self._exact_indicator_source(sink_requirements)
+            for row in sink_requirements["requiredRuleMarkers"]:
+                sink_source = sink_source.replace(
+                    f"if({row['marker']}) SignalBuffer[1]",
+                    f"if({row['marker']}) markerSink",
+                )
+            sink_source = sink_source.replace(
+                "SignalBuffer[1] = EMPTY_VALUE;",
+                "SignalBuffer[1] = EMPTY_VALUE; int markerSink = 0;",
+            )
+            sink_raw = json.dumps({
+                "fileName": "SinkIndicator.mq4",
+                "content": sink_source,
+            })
+            patches = self._patch_roots(root)
+            with patches[0], patches[1]:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "does not bind every immutable rule predicate",
+                ):
+                    self.runner.materialize_ea_factory_source_result(
+                        sink_raw,
+                        sink_prompt,
+                        sink_relative,
+                    )
+            self.assertEqual(
+                {item.name for item in sink_root.iterdir()},
+                {"strategy-spec-v01.json"},
+            )
+
+    def test_indicator_materializer_rejects_arbitrary_or_swapped_rule_math(self) -> None:
+        mutations = {
+            "arbitrary": (
+                "FastValue(2) <= SlowValue(2)\n                       && FastValue(1) > SlowValue(1)",
+                "close[2] <= open[2] && close[1] > open[1]",
+            ),
+            "swapped": (
+                "FastValue(2) <= SlowValue(2)\n                       && FastValue(1) > SlowValue(1)",
+                "SlowValue(2) <= FastValue(2) && SlowValue(1) > FastValue(1)",
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for label, (expected, replacement) in mutations.items():
+                relative, source_root, prompt, requirements = (
+                    self._indicator_factory_fixture(
+                        root,
+                        build_id=f"ea-build-indicator-{label}",
+                    )
+                )
+                content = self._exact_indicator_source(requirements).replace(
+                    expected,
+                    replacement,
+                )
+                self.assertNotEqual(content, self._exact_indicator_source(requirements))
+                patches = self._patch_roots(root)
+                with patches[0], patches[1]:
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "does not bind every immutable rule predicate",
+                    ):
+                        self.runner.materialize_ea_factory_source_result(
+                            json.dumps({
+                                "fileName": f"Rejected{label.title()}.mq4",
+                                "content": content,
+                            }),
+                            prompt,
+                            relative,
+                        )
+                self.assertEqual(
+                    {item.name for item in source_root.iterdir()},
+                    {"strategy-spec-v01.json"},
+                )
 
     def test_invalid_structured_outputs_never_write_a_source(self) -> None:
         oversized_content = (

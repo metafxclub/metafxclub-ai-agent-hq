@@ -256,7 +256,7 @@
     },
     "right_server_racks": {
       "moduleNameTh": "โรงงานสร้าง EA และ Indicator",
-      "availability": {"ui": "ready", "data": "research_and_public_sheet_catalog_ready", "execution": "manual_stage_by_stage", "compile": "guarded_requires_verified_front_office_adapter", "backtest": "guarded_requires_verified_front_office_adapter"},
+      "availability": {"ui": "ready", "data": "research_and_public_sheet_catalog_ready", "execution": "manual_stage_by_stage", "compile": "implemented_backend_selected_metaeditor_compile_only", "backtest": "coming_soon_visual_strategy_tester_hard_blocked"},
       "localTabs": [
         {"id": "source", "labelTh": "1 เลือกระบบ", "actionIds": [], "viewOnly": false},
         {"id": "strategy_spec", "labelTh": "2 ตรวจ Strategy Spec", "actionIds": []},
@@ -273,16 +273,16 @@
         {"id": "codex_workspace", "labelTh": "พื้นที่สร้าง Source Code ผ่าน Codex", "required": true, "adapterStatus": "implemented", "mode": "guarded_workspace"},
         {"id": "mt4_terminal", "labelTh": "โปรแกรม MT4 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
         {"id": "mt5_terminal", "labelTh": "โปรแกรม MT5 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
-        {"id": "metaeditor_compile_adapter", "labelTh": "Compile MQL4/MQL5 ผ่าน MetaEditor ที่มองเห็นจริง", "required": false, "adapterStatus": "guarded_requires_selected_matching_terminal_and_proof"},
-        {"id": "strategy_tester_adapter", "labelTh": "Visual Backtest ผ่าน Strategy Tester", "required": false, "adapterStatus": "guarded_requires_selected_matching_terminal_and_proof"},
+        {"id": "metaeditor_compile_adapter", "labelTh": "Compile MQL4/MQL5 แบบ compile-only ผ่าน MetaEditor ที่ Backend เลือก", "required": false, "adapterStatus": "implemented_fail_closed_requires_selected_matching_terminal", "terminalLaunchAllowed": false, "frontendPathOrArgsAllowed": false, "successEvidence": ["fresh_unicode_log_exact_zero_zero", "source_compiler_selection_digests", "compiled_binary_sha256", "immutable_receipt"]},
+        {"id": "strategy_tester_adapter", "labelTh": "Visual Backtest ผ่าน Strategy Tester", "required": false, "adapterStatus": "coming_soon_hard_blocked"},
         {"id": "pine_validation_adapter", "labelTh": "ตรวจโครงสร้าง Pine Script", "required": false, "adapterStatus": "implemented_static_validation_only"},
         {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
         {"id": "report_routing", "labelTh": "ส่งผล Build กลับโรงงานและ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
-      "connectionRequirements": {"requiredForSourceGeneration": ["codex_workspace"], "requiredForGoogleSheetSource": ["google_sheets_adapter"], "requiredForMt4CompileAndBacktest": ["mt4_terminal", "metaeditor_compile_adapter", "strategy_tester_adapter"], "requiredForMt5CompileAndBacktest": ["mt5_terminal", "metaeditor_compile_adapter", "strategy_tester_adapter"], "notRequiredForPineSourceGenerationOrValidation": true},
+      "connectionRequirements": {"requiredForSourceGeneration": ["codex_workspace"], "requiredForGoogleSheetSource": ["google_sheets_adapter"], "requiredForMt4Compile": ["mt4_terminal", "metaeditor_compile_adapter"], "requiredForMt5Compile": ["mt5_terminal", "metaeditor_compile_adapter"], "requiredForMt4OrMt5Backtest": ["strategy_tester_adapter"], "notRequiredForPineSourceGenerationOrValidation": true},
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
       "operation": {"defaultMode": "manual_stage_by_stage", "allowedModes": ["manual_stage_by_stage"], "plannedModes": [], "intervalMinutes": null, "scheduled": false, "automaticLoop": false, "oneUserActionAdvancesOneStage": true},
-      "workflowReadiness": {"researchCatalog": "ready_backend_verified", "googleSheetsReadOnly": "implemented_central_adapter_runtime_status_required", "codexSourceGenerationWorkspace": "ready_guarded", "sourceCodeReview": "ready_guarded", "pineStaticValidation": "ready", "missionReportAudit": "ready", "metaEditorCompile": "requires_selected_terminal_and_verified_front_office_proof", "visualBacktest": "requires_selected_terminal_and_verified_front_office_proof"},
+      "workflowReadiness": {"researchCatalog": "ready_backend_verified", "googleSheetsReadOnly": "implemented_central_adapter_runtime_status_required", "codexSourceGenerationWorkspace": "ready_guarded", "sourceCodeReview": "ready_guarded", "pineStaticValidation": "ready", "missionReportAudit": "ready", "metaEditorCompile": "implemented_backend_selected_compile_only_fail_closed", "visualBacktest": "coming_soon_hard_blocked"},
       "reportRoute": {"targetPropId": "right_server_racks", "primaryReportType": "ea_build_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "left_analytics_console": {

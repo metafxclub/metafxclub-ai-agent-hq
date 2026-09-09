@@ -389,13 +389,23 @@ class DashboardWorkflowContractTests(unittest.TestCase):
             if isinstance(item, dict) and item.get("id")
         }
         for tool_id in (
-            "compile_strategy_code",
             "run_strategy_tester",
             "run_optimization",
             "run_ea_discovery_plugin",
         ):
             self.assertEqual(tools[tool_id]["adapterStatus"], "coming_soon")
             self.assertFalse(tools[tool_id]["realExecutionAvailable"])
+        compile_tool = tools["compile_strategy_code"]
+        self.assertEqual(
+            compile_tool["adapterStatus"],
+            "implemented_fail_closed_for_ea_factory",
+        )
+        self.assertTrue(compile_tool["realExecutionAvailable"])
+        self.assertEqual(compile_tool["implementedPropIds"], ["right_server_racks"])
+        self.assertEqual(compile_tool["comingSoonPropIds"], ["terminal_workstation"])
+        self.assertFalse(compile_tool["terminalLaunchAllowed"])
+        self.assertFalse(compile_tool["backtestAllowed"])
+        self.assertFalse(compile_tool["networkAllowed"])
         sheet_tool = tools["google_sheet_catalog_sync"]
         self.assertEqual(
             sheet_tool["adapterStatus"],

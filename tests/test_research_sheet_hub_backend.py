@@ -2234,6 +2234,38 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         self.assertFalse(by_consumer["indicatorEaTool"]["readReady"])
         self.assertNotIn("eaFactory", by_consumer)
 
+    def test_effective_verification_is_ready_when_active_reads_and_writes_are_ready(self) -> None:
+        self.configure_hub(revision=12, status="read_ready_write_unverified")
+        settings = self.bridge.load_dashboard_workflow_settings()
+        settings["researchSheetHub"]["lastWriteVerifiedAt"] = "2026-08-27T01:00:00Z"
+        settings["researchSheetHub"]["consumerWriteChecks"] = {
+            contract["consumerId"]: {
+                "configRevision": 12,
+                "verifiedAt": "2026-08-27T01:00:00Z",
+            }
+            for contract in self.bridge.RESEARCH_SHEET_HUB_PROP_TABS.values()
+            if contract.get("mode") == "read_write"
+        }
+        self.write_settings(settings)
+
+        with patch.object(
+            self.hub,
+            "credential_status",
+            return_value={"configured": True, "mode": "access_token"},
+        ):
+            model = self.bridge.research_sheet_hub_read_model()
+
+        self.assertTrue(model["active"])
+        self.assertTrue(model["readReady"])
+        self.assertTrue(model["writeReady"])
+        self.assertEqual(model["adapterStatus"], "ready")
+        self.assertEqual(model["verificationStatus"], "ready")
+        persisted = self.bridge.load_dashboard_workflow_settings()["researchSheetHub"]
+        self.assertEqual(
+            persisted["lastVerificationStatus"],
+            "read_ready_write_unverified",
+        )
+
     def test_writer_stays_unready_until_its_current_revision_outbox_is_complete(self) -> None:
         self.configure_hub(revision=10)
         settings = self.bridge.load_dashboard_workflow_settings()
