@@ -63,12 +63,22 @@ TEXT_SUFFIXES = {
     ".yml",
 }
 MAX_TEXT_BYTES = 8 * 1024 * 1024
+CENTRAL_GOOGLE_OAUTH_NATIVE_CLIENT_PATH = (
+    "backend/local-runner/google_oauth_native_client.txt"
+)
+CENTRAL_GOOGLE_OAUTH_CLIENT_ID_PATTERN = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]{8,240}\.apps\.googleusercontent\.com"
+)
+CENTRAL_GOOGLE_OAUTH_CLIENT_SECRET_PATTERN = re.compile(
+    r"GOCSPX-[A-Za-z0-9_-]{16,}"
+)
 
 
 HIGH_CONFIDENCE_PATTERNS = (
     ("private_key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")),
     ("google_oauth_client_secret", re.compile(r"(?<![A-Za-z0-9])GOCSPX-[A-Za-z0-9_-]{16,}")),
     ("google_refresh_token", re.compile(r"(?<![A-Za-z0-9])1//[A-Za-z0-9_-]{20,}")),
+    ("google_access_token", re.compile(r"(?<![A-Za-z0-9])ya29\.[A-Za-z0-9._~-]{20,}")),
     ("google_api_key", re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{30,}")),
     ("github_token", re.compile(r"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{30,}")),
     ("github_fine_grained_token", re.compile(r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}")),
@@ -93,6 +103,45 @@ SENSITIVE_FILENAMES = (
     ("dpapi_credential", re.compile(r"(?i).*\.dpapi$")),
     ("private_key_file", re.compile(r"(?i).*(?:\.key|\.pem|\.p12|\.pfx)$")),
 )
+
+
+def _valid_central_google_oauth_native_client(content: str) -> bool:
+    """Allow one installed-app credential file, and no broader exception.
+
+    Google Desktop/native clients are public installed applications.  Their
+    client secret is shipped application configuration rather than a user
+    confidentiality boundary, but it is still confined to this exact file so
+    it cannot drift into frontend code, docs, logs, or arbitrary artifacts.
+    """
+
+    if len(content.encode("utf-8")) > 4096:
+        return False
+    lines = content.splitlines()
+    if len(lines) != 2:
+        return False
+    if not lines[0].startswith("client_id=") or not lines[1].startswith(
+        "client_secret="
+    ):
+        return False
+    client_id = lines[0].removeprefix("client_id=")
+    client_secret = lines[1].removeprefix("client_secret=")
+    return bool(
+        CENTRAL_GOOGLE_OAUTH_CLIENT_ID_PATTERN.fullmatch(client_id)
+        and CENTRAL_GOOGLE_OAUTH_CLIENT_SECRET_PATTERN.fullmatch(client_secret)
+    )
+
+
+def _central_google_oauth_client_id(root: Path) -> str:
+    path = root / CENTRAL_GOOGLE_OAUTH_NATIVE_CLIENT_PATH
+    try:
+        if path.stat().st_size > 4096:
+            return ""
+        content = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        return ""
+    if not _valid_central_google_oauth_native_client(content):
+        return ""
+    return content.splitlines()[0].removeprefix("client_id=")
 
 
 def _distributed_files(root: Path):
@@ -127,8 +176,21 @@ def find_sensitive_filenames(root: Path) -> list[tuple[str, str]]:
     return sorted(set(findings))
 
 
-def scan_embedded_secrets(root: Path) -> list[tuple[str, str]]:
+def scan_embedded_secrets(
+    root: Path,
+    *,
+    allow_central_native_client: bool = False,
+) -> list[tuple[str, str]]:
+    """Scan distributed text without returning any matched secret value.
+
+    Source scans are strict by default: even the canonical native-client path
+    may not contain a real Google client secret in a Git checkout.  Release
+    packaging may opt into the narrowly scoped exception only after injecting
+    the validated two-line native-client file into an extracted/staged tree.
+    """
+
     findings: list[tuple[str, str]] = []
+    central_client_id = _central_google_oauth_client_id(root)
     for path in _distributed_files(root):
         if path.suffix.lower() not in TEXT_SUFFIXES and path.name not in ROOT_TEXT_FILES:
             continue
@@ -145,6 +207,27 @@ def scan_embedded_secrets(root: Path) -> list[tuple[str, str]]:
         except (OSError, UnicodeError):
             findings.append((path.relative_to(root).as_posix(), "unreadable_release_text"))
             continue
+        relative_path = path.relative_to(root).as_posix()
+        valid_central_native_client_schema = (
+            relative_path == CENTRAL_GOOGLE_OAUTH_NATIVE_CLIENT_PATH
+            and _valid_central_google_oauth_native_client(content)
+        )
+        allowed_central_native_client = (
+            allow_central_native_client and valid_central_native_client_schema
+        )
+        if (
+            relative_path == CENTRAL_GOOGLE_OAUTH_NATIVE_CLIENT_PATH
+            and not valid_central_native_client_schema
+        ):
+            findings.append(
+                (relative_path, "invalid_central_google_oauth_native_client")
+            )
+        if (
+            central_client_id
+            and relative_path != CENTRAL_GOOGLE_OAUTH_NATIVE_CLIENT_PATH
+            and central_client_id in content
+        ):
+            findings.append((relative_path, "central_google_oauth_client_id_copy"))
         if path.suffix.lower() == ".json":
             try:
                 document = json.loads(content)
@@ -162,5 +245,7 @@ def scan_embedded_secrets(root: Path) -> list[tuple[str, str]]:
                     )
         for rule, pattern in HIGH_CONFIDENCE_PATTERNS:
             if pattern.search(content):
-                findings.append((path.relative_to(root).as_posix(), rule))
+                if rule == "google_oauth_client_secret" and allowed_central_native_client:
+                    continue
+                findings.append((relative_path, rule))
     return sorted(set(findings))

@@ -997,7 +997,7 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
             "stale": stale,
         }
 
-    def test_all_scheduler_quota_gates_require_more_than_fifteen_percent(self) -> None:
+    def test_all_scheduler_quota_gates_allow_exact_central_threshold(self) -> None:
         common = {
             "refresh_quota": False,
             "operator_mode": {"mode": "auto_guarded"},
@@ -1009,15 +1009,15 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
             settings_key: self.bridge._dashboard_workflow_scheduler_gate(
                 **common,
                 settings_key=settings_key,
-                quota=self.quota(15),
+                quota=self.quota(14),
             )
             for settings_key in ("indicatorScoutSchedule", "discoverySchedule")
         }
-        allowed = {
+        exact = {
             settings_key: self.bridge._dashboard_workflow_scheduler_gate(
                 **common,
                 settings_key=settings_key,
-                quota=self.quota(16),
+                quota=self.quota(15),
             )
             for settings_key in ("indicatorScoutSchedule", "discoverySchedule")
         }
@@ -1033,36 +1033,41 @@ class BackendAutoSafeRadarPolicyTests(unittest.TestCase):
         )
 
         self.assertTrue(all(not result["allowed"] for result in blocked.values()))
-        self.assertTrue(all(result["allowed"] for result in allowed.values()))
+        self.assertTrue(all(result["allowed"] for result in exact.values()))
         self.assertEqual(
-            {result["rateReservePercent"] for result in (*blocked.values(), *allowed.values())},
+            {result["rateReservePercent"] for result in (*blocked.values(), *exact.values())},
             {15},
         )
         self.assertFalse(stale["allowed"])
         self.assertFalse(limited["allowed"])
 
     def test_collaboration_quota_gate_ignores_stale_caller_thresholds(self) -> None:
-        for stale_threshold in (40, 80):
-            with self.subTest(stale_threshold=stale_threshold):
-                config = {"minRemainingPercent": stale_threshold}
-                allowed = self.bridge._collaboration_quota_gate(
-                    config,
-                    refresh=False,
-                    quota=self.quota(16),
-                )
-                blocked = self.bridge._collaboration_quota_gate(
-                    config,
-                    refresh=False,
-                    quota=self.quota(15),
-                )
+        with mock.patch.object(
+            self.bridge,
+            "automation_min_remaining_percent",
+            return_value=15,
+        ):
+            for stale_threshold in (40, 80):
+                with self.subTest(stale_threshold=stale_threshold):
+                    config = {"minRemainingPercent": stale_threshold}
+                    exact = self.bridge._collaboration_quota_gate(
+                        config,
+                        refresh=False,
+                        quota=self.quota(15),
+                    )
+                    blocked = self.bridge._collaboration_quota_gate(
+                        config,
+                        refresh=False,
+                        quota=self.quota(14),
+                    )
 
-                self.assertTrue(allowed["allowed"], allowed)
-                self.assertEqual(allowed["reason"], "ready")
-                self.assertEqual(allowed["remainingPercent"], 16)
-                self.assertFalse(blocked["allowed"], blocked)
-                self.assertEqual(blocked["reason"], "quota_below_reserve")
-                self.assertEqual(blocked["remainingPercent"], 15)
-                self.assertIn("มากกว่า 15%", blocked["messageTh"])
+                    self.assertTrue(exact["allowed"], exact)
+                    self.assertEqual(exact["reason"], "ready")
+                    self.assertEqual(exact["remainingPercent"], 15)
+                    self.assertFalse(blocked["allowed"], blocked)
+                    self.assertEqual(blocked["reason"], "quota_below_reserve")
+                    self.assertEqual(blocked["remainingPercent"], 14)
+                    self.assertIn("ต่ำกว่าเกณฑ์ 15%", blocked["messageTh"])
 
     def test_quota_pause_does_not_burn_slots_and_recovery_dispatches_each_device_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, self.runtime(temp_dir):

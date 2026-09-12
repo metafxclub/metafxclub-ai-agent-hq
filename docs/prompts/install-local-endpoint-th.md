@@ -1,6 +1,6 @@
 # Prompt ให้ Codex ติดตั้งและยืนยัน Local Endpoint
 
-หากต้องการให้ Codex Clone Git Tag ที่ล็อกไว้ ใช้พอร์ตมาตรฐาน `127.0.0.1:4186` ที่ยืนยันล่วงหน้า และนำเข้า Google OAuth JSON ให้อัตโนมัติโดยผู้เรียนไม่ต้องดาวน์โหลด ZIP หรือกด BAT ให้ใช้ [Prompt ติดตั้งจาก GitHub พร้อม Google OAuth แบบอัตโนมัติ](install-github-google-auto-th.md) แทน เอกสารหน้านี้คงไว้สำหรับกรณีที่ต้องการให้ผู้ใช้เลือก Endpoint เอง
+หากต้องการให้ Codex Clone Git Tag ที่ล็อกไว้ ใช้พอร์ตมาตรฐาน `127.0.0.1:4186` ที่ยืนยันล่วงหน้า และใช้ Google OAuth native/installed-app client configuration กลางจาก Release โดยผู้เรียนไม่ต้องสร้าง Project/Client/Test users, ดาวน์โหลด JSON หรือแก้ Client ID ให้ใช้ [Prompt ติดตั้งจาก GitHub พร้อม OAuth Client กลาง](install-github-google-auto-th.md) แทน เอกสารหน้านี้คงไว้สำหรับกรณีที่ต้องการให้ผู้ใช้เลือก Endpoint เอง Client กลางมี `client_id` และ `client_secret` ซึ่งเป็น app metadata ที่ต้องแจกพร้อม installed app ไม่ใช่ Credential ของบัญชีผู้ใช้ ค่าจริงถูก GitHub Actions inject จาก Release secrets ตอน build Asset และห้าม commit ลง public Git tree ส่วน access/refresh token ของผู้ใช้ยังเข้ารหัสด้วย Windows current-user DPAPI และไม่เข้า Repository, Frontend, Report หรือ Log
 
 คัดลอกข้อความด้านล่างไปสั่ง Codex พร้อมแนบลิงก์ GitHub Release ของ Metafxclub AI Agent HQ ผู้ใช้ส่งคำขอครั้งเดียว และตอบยืนยัน URL อีกหนึ่งครั้งก่อนเริ่มติดตั้ง
 
@@ -22,11 +22,13 @@
    .\1-INSTALL-HQ.bat -Port PORT_ที่ผมเลือก -EndpointConfirmed
 8. ห้ามเปลี่ยนไปใช้ Port หรือ URL อื่นเอง หากพอร์ตถูกแย่งระหว่างติดตั้ง ให้หยุดและกลับมาเสนอ URL ว่างชุดใหม่
 9. หลังติดตั้ง ให้อ่าน URL และ health_url จาก data/runtime/bridge-endpoint.json ห้ามเดาเลข Port และต้องตรวจว่า Health ตอบ ok=true, status=ready, host=127.0.0.1 และ Port ตรงกัน
-10. เรียก scripts/check-codex-readiness.cmd เพื่อตรวจ Codex และ Rate Limit ของบัญชีที่ Login อยู่ใน Windows User เครื่องนี้
-11. ถ้าขึ้น auth_required ให้แจ้งว่าต้อง Login ด้วยบัญชีของนักเรียนเอง ห้ามอ่าน คัดลอก หรือแสดง Token, Cookie, API key, Auth file หรือข้อมูลบัญชี
-12. ถ้าขึ้น config_error ให้รายงานว่า Codex CLI มีค่า Config ที่ไม่รองรับ ห้ามแก้โดยเดาหรือคัดลอก Config จากเครื่องอื่น
-13. เมื่อ Health พร้อม ให้เปิด URL ที่ยืนยันแล้ว และรายงานเป็นภาษาไทยเฉพาะ: เวอร์ชัน, ตำแหน่งติดตั้ง, URL, Health, สถานะ Codex และ Rate Limit
-14. ถามผู้ใช้ว่าจะเปิด Bridge อัตโนมัติหลังเข้าสู่ Windows หรือไม่ หากตอบตกลง ให้รัน `scripts/register-bridge-autostart.cmd` จากชุดติดตั้งถาวร และยืนยันว่า Scheduled Task ของผู้ใช้ปัจจุบันถูกสร้างสำเร็จ
+10. ตรวจ GET `{url}api/props/mission_strategy_table/research-sheet/auth` ต้องได้ `clientConfigured=true` จาก native-app client configuration กลางใน Release โดยไม่แสดงค่า Client เต็ม หาก Client กลางไม่พร้อมให้หยุดและรายงานว่า Release ไม่สมบูรณ์ ห้ามขอ OAuth JSON, Client ID หรือ Client Secret จากนักเรียนแทน
+11. เรียก scripts/check-codex-readiness.cmd เพื่อตรวจ Codex และ Rate Limit ของบัญชีที่ Login อยู่ใน Windows User เครื่องนี้
+12. ถ้าขึ้น auth_required ให้แจ้งว่าต้อง Login ด้วยบัญชีของนักเรียนเอง ห้ามอ่าน คัดลอก หรือแสดง Token, Cookie, API key, Auth file หรือข้อมูลบัญชี
+13. ถ้าขึ้น config_error ให้รายงานว่า Codex CLI มีค่า Config ที่ไม่รองรับ ห้ามแก้โดยเดาหรือคัดลอก Config จากเครื่องอื่น
+14. เมื่อ Health พร้อม ให้เปิด URL ที่ยืนยันแล้ว และรายงานเป็นภาษาไทยเฉพาะ: เวอร์ชัน, ตำแหน่งติดตั้ง, URL, Health, สถานะ Client กลาง, สถานะ Codex และ Rate Limit
+15. หยุดก่อนกดเชื่อมบัญชี Google แจ้งให้ผู้ใช้กด **เชื่อมบัญชี Google**, เลือกบัญชีของตนเอง และยืนยัน Consent ใน System Browser ด้วยตนเอง หากแอปยัง Under review ผู้ใช้ใหม่อาจเห็น Unverified warning และ Project กลางอาจอยู่ภายใต้ OAuth unverified user cap
+16. ถามผู้ใช้ว่าจะเปิด Bridge อัตโนมัติหลังเข้าสู่ Windows หรือไม่ หากตอบตกลง ให้รัน `scripts/register-bridge-autostart.cmd` จากชุดติดตั้งถาวร และยืนยันว่า Scheduled Task ของผู้ใช้ปัจจุบันถูกสร้างสำเร็จ
 
 กติกาความปลอดภัย:
 - Local Bridge ต้องใช้ 127.0.0.1 เท่านั้น ห้ามใช้ 0.0.0.0, LAN IP หรือ Public IP
@@ -37,3 +39,5 @@
 ```
 
 หลักการสำคัญ: ระบบไม่สุ่ม IP โดยเด็ดขาด เพราะ `127.0.0.1` คือที่อยู่เฉพาะเครื่องและปลอดภัยกว่า ระบบเสนอเฉพาะหมายเลข Port ที่ตรวจว่าว่าง ณ เวลานั้น และจะใช้ Port นั้นต่อเมื่อผู้ใช้ยืนยันแล้วเท่านั้น
+
+`2-SETUP-GOOGLE-HQ.bat` และ Desktop OAuth JSON เป็น **Advanced/Recovery custom override** เท่านั้น ไม่ใช่ขั้นตอนติดตั้งปกติ หากเจ้าของระบบตั้งใจใช้ OAuth Project ของตนเองจึงค่อยใช้ BAT นี้กับ JSON ของ Project ที่ตนควบคุม ห้ามใช้หรือส่งไฟล์ของผู้สอน/เพื่อน และห้ามเปิดเผยค่า Client กลางเต็มที่มากับ Release

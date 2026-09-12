@@ -44,6 +44,158 @@ class ReleaseSecretHygieneTests(unittest.TestCase):
         self.assertEqual(findings, [("backend/example.py", "google_oauth_client_secret")])
         self.assertNotIn(synthetic_secret, repr(findings))
 
+    def test_scanner_detects_google_access_token_without_echoing_it(self) -> None:
+        synthetic_token = "ya" + "29." + ("A" * 32)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            target = root / "frontend" / "leaked-token.js"
+            target.parent.mkdir(parents=True)
+            target.write_text("const value = " + repr(synthetic_token), encoding="utf-8")
+            findings = scan_embedded_secrets(root)
+
+        self.assertEqual(findings, [("frontend/leaked-token.js", "google_access_token")])
+        self.assertNotIn(synthetic_token, repr(findings))
+
+    def test_central_native_client_exception_requires_explicit_staged_release_mode(self) -> None:
+        synthetic_secret = "GOC" + "SPX-" + ("C" * 24)
+        payload = (
+            "client_id=123456789012-central.apps.googleusercontent.com\n"
+            f"client_secret={synthetic_secret}\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            target = root / "backend" / "local-runner" / "google_oauth_native_client.txt"
+            target.parent.mkdir(parents=True)
+            target.write_text(payload, encoding="utf-8")
+
+            self.assertEqual(find_sensitive_filenames(root), [])
+            self.assertEqual(
+                scan_embedded_secrets(root),
+                [
+                    (
+                        "backend/local-runner/google_oauth_native_client.txt",
+                        "google_oauth_client_secret",
+                    )
+                ],
+            )
+            self.assertEqual(
+                scan_embedded_secrets(
+                    root,
+                    allow_central_native_client=True,
+                ),
+                [],
+            )
+
+            copied = root / "frontend" / "native-client.txt"
+            copied.parent.mkdir(parents=True)
+            copied.write_text(payload, encoding="utf-8")
+            findings = scan_embedded_secrets(
+                root,
+                allow_central_native_client=True,
+            )
+
+        self.assertEqual(
+            findings,
+            [
+                ("frontend/native-client.txt", "central_google_oauth_client_id_copy"),
+                ("frontend/native-client.txt", "google_oauth_client_secret"),
+            ],
+        )
+        self.assertNotIn(synthetic_secret, repr(findings))
+
+    def test_scanner_rejects_full_central_client_id_copied_to_frontend(self) -> None:
+        synthetic_secret = "GOC" + "SPX-" + ("E" * 24)
+        client_id = "123456789012-central.apps.googleusercontent.com"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            central = root / "backend" / "local-runner" / "google_oauth_native_client.txt"
+            central.parent.mkdir(parents=True)
+            central.write_text(
+                f"client_id={client_id}\nclient_secret={synthetic_secret}\n",
+                encoding="utf-8",
+            )
+            frontend = root / "frontend" / "app.js"
+            frontend.parent.mkdir(parents=True)
+            frontend.write_text("const client = " + repr(client_id), encoding="utf-8")
+            findings = scan_embedded_secrets(
+                root,
+                allow_central_native_client=True,
+            )
+
+        self.assertEqual(
+            findings,
+            [("frontend/app.js", "central_google_oauth_client_id_copy")],
+        )
+        self.assertFalse(
+            client_id in repr(findings) or synthetic_secret in repr(findings),
+            "scanner findings echoed central native client values",
+        )
+
+    def test_malformed_central_native_client_file_is_rejected_without_echoing_it(self) -> None:
+        synthetic_secret = "GOC" + "SPX-" + ("D" * 24)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            target = root / "backend" / "local-runner" / "google_oauth_native_client.txt"
+            target.parent.mkdir(parents=True)
+            target.write_text(
+                "client_id=123456789012-central.apps.googleusercontent.com\n"
+                f"client_secret={synthetic_secret}\n"
+                "unexpected=extra-line\n",
+                encoding="utf-8",
+            )
+            findings = scan_embedded_secrets(
+                root,
+                allow_central_native_client=True,
+            )
+
+        self.assertEqual(
+            findings,
+            [
+                (
+                    "backend/local-runner/google_oauth_native_client.txt",
+                    "google_oauth_client_secret",
+                ),
+                (
+                    "backend/local-runner/google_oauth_native_client.txt",
+                    "invalid_central_google_oauth_native_client",
+                ),
+            ],
+        )
+        self.assertNotIn(synthetic_secret, repr(findings))
+
+    def test_staged_release_exception_never_allows_user_tokens(self) -> None:
+        synthetic_secret = "GOC" + "SPX-" + ("F" * 24)
+        refresh_token = "1" + "//" + ("R" * 32)
+        access_token = "ya" + "29." + ("A" * 32)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            central = root / "backend" / "local-runner" / "google_oauth_native_client.txt"
+            central.parent.mkdir(parents=True)
+            central.write_text(
+                "client_id=123456789012-central.apps.googleusercontent.com\n"
+                f"client_secret={synthetic_secret}\n",
+                encoding="utf-8",
+            )
+            runtime = root / "backend" / "runtime.txt"
+            runtime.write_text(
+                f"refresh={refresh_token}\naccess={access_token}\n",
+                encoding="utf-8",
+            )
+            findings = scan_embedded_secrets(
+                root,
+                allow_central_native_client=True,
+            )
+
+        self.assertEqual(
+            findings,
+            [
+                ("backend/runtime.txt", "google_access_token"),
+                ("backend/runtime.txt", "google_refresh_token"),
+            ],
+        )
+        self.assertNotIn(refresh_token, repr(findings))
+        self.assertNotIn(access_token, repr(findings))
+
     def test_scanner_includes_curated_release_artifacts(self) -> None:
         synthetic_secret = "GOC" + "SPX-" + ("B" * 24)
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -153,6 +153,21 @@ int OnCalculate(const int rates_total, const int prev_calculated,
             "updated_at": "2026-08-24T09:00:00+07:00",
         }
 
+    @staticmethod
+    def compact_values() -> dict:
+        return {
+            "record_id": "system-compact-001",
+            "system_name": "Verified Compact Trend System",
+            "system_overview": "ระบบ trend-following สำหรับ Forex โดยให้ timeframe เป็น input",
+            "entry_rules": "Buy หลัง EMA เร็วตัดขึ้น EMA ช้าบนแท่งปิด; Sell กลับเงื่อนไข",
+            "recovery_rules": "ไม่มีการแก้ไม้ ห้าม Grid, Martingale, Averaging และ Hedging",
+            "exit_rules": "ปิดด้วย SL, TP, trailing stop หรือสัญญาณตัดกลับ",
+            "money_management": "รองรับ fixed lot และ risk percent จำกัดหนึ่ง position",
+            "order_execution": "ส่ง market order หลังแท่งสัญญาณปิด",
+            "display_requirements": "แสดงชื่อระบบ สัญญาณ Balance Equity และ Spread",
+            "additional_notes": "period, SL, TP และ trailing เป็น EA inputs",
+        }
+
     def csv_payload(self, values: dict, *, thai_suffix: bool = True) -> bytes:
         output = io.StringIO()
         writer = csv.writer(output)
@@ -220,7 +235,7 @@ int OnCalculate(const int rates_total, const int prev_calculated,
         self.assertIn("stop_loss", incomplete["missingCoreFields"])
         self.assertIn("source_urls", incomplete["missingCoreFields"])
 
-    def test_source_read_model_fails_closed_unless_blueprint_digest_revalidates(self) -> None:
+    def test_legacy_blueprint_source_is_digest_checked_but_always_read_only(self) -> None:
         values = self.valid_values()
         values["eaImplementationBlueprint"] = ready_ea_research_blueprint()
         record = self.bridge._ea_factory_normalize_record(
@@ -230,18 +245,24 @@ int OnCalculate(const int rates_total, const int prev_calculated,
             source_report_id="research-report-canonical-v2",
         )
         self.assertIsNotNone(record)
-        self.assertTrue(record["buildReady"])
+        self.assertFalse(record["buildReady"])
 
         read_model = self.bridge._ea_factory_source_record_read_model(record)
         research = read_model["eaResearch"]
-        self.assertTrue(read_model["buildReady"])
+        self.assertFalse(read_model["buildReady"])
         self.assertEqual(read_model["sourceReportId"], "research-report-canonical-v2")
-        self.assertTrue(research["validated"])
+        self.assertFalse(research["validated"])
         self.assertTrue(research["digestMatched"])
-        self.assertTrue(research["ready"])
-        self.assertEqual(research["validationStatus"], "canonical_validated")
+        self.assertFalse(research["ready"])
+        self.assertFalse(research["eaHandoffAllowed"])
+        self.assertTrue(research["requiresResearchRerun"])
+        self.assertEqual(research["validationStatus"], "legacy_blueprint_read_only")
         self.assertEqual(research["blueprintDigest"], record["eaBlueprintDigest"])
-        self.assertEqual(research["blueprint"], record["eaImplementationBlueprint"])
+        self.assertIsNone(research["blueprint"])
+        self.assertEqual(
+            research["legacyBlueprintDiagnostic"],
+            record["eaImplementationBlueprint"],
+        )
 
         tampered_record = dict(record)
         tampered_record["eaBlueprintDigest"] = "0" * 64
@@ -269,16 +290,21 @@ int OnCalculate(const int rates_total, const int prev_calculated,
 
     def test_create_build_explains_non_ready_blueprint_without_missing_core_fields(self) -> None:
         source_record_id = "ea-source-needs-clarification"
-        blocked_source = {
-            "sourceRecordId": source_record_id,
-            "recordDigest": "a" * 64,
+        blocked_source = self.bridge._ea_factory_normalize_record(
+            self.compact_values(),
+            source_kind="verified_deep_research",
+            source_key="research-needs-clarification",
+            source_report_id="report-needs-clarification",
+        )
+        blocked_source.update({
             "buildReady": False,
             "missingCoreFields": [],
             "readinessIssues": [
                 "ea_blueprint_needs_clarification",
                 "ENTRY_UNKNOWN:$.entry.buy.rules[0]",
             ],
-        }
+        })
+        source_record_id = blocked_source["sourceRecordId"]
         with (
             mock.patch.object(self.bridge, "load_missions", return_value=[]),
             mock.patch.object(self.bridge, "load_runtime_reports", return_value=[]),
@@ -362,7 +388,16 @@ int OnCalculate(const int rates_total, const int prev_calculated,
                     source_report_id=f"report-capability-{operator}",
                 )
                 self.assertIsNotNone(source_record)
-                self.assertTrue(source_record["buildReady"])
+                self.assertFalse(source_record["buildReady"])
+                source_model = self.bridge._ea_factory_source_record_read_model(
+                    source_record
+                )
+                self.assertFalse(source_model["buildReady"])
+                self.assertFalse(source_model["factoryCompatibility"]["ready"])
+                self.assertIn(
+                    "legacy_49_field_blueprint_read_only_rerun_required",
+                    " ".join(source_model["readinessIssues"]),
+                )
                 empty_state = self.bridge._empty_ea_factory_state()
                 with (
                     mock.patch.object(self.bridge, "load_missions", return_value=[]),
@@ -403,11 +438,7 @@ int OnCalculate(const int rates_total, const int prev_calculated,
 
                 self.assertEqual(raised.exception.status, 422)
                 message = str(raised.exception)
-                self.assertIn(
-                    self.bridge.EA_FACTORY_UNSUPPORTED_RULE_PREDICATE_CODE,
-                    message,
-                )
-                self.assertIn(f"ENTRY_BUY_001({operator})", message)
+                self.assertIn("Legacy A-W/A-M and Blueprint v2", message)
                 write_state.assert_not_called()
                 create_workspace.assert_not_called()
                 create_source_report.assert_not_called()
@@ -443,8 +474,7 @@ int OnCalculate(const int rates_total, const int prev_calculated,
             ("comparison", comparison_blueprint),
         ):
             with self.subTest(create_path=label):
-                values = self.valid_values()
-                values["eaImplementationBlueprint"] = blueprint
+                values = self.compact_values()
                 source_record = self.bridge._ea_factory_normalize_record(
                     values,
                     source_kind="verified_deep_research",
@@ -486,7 +516,7 @@ int OnCalculate(const int rates_total, const int prev_calculated,
                 write_state.assert_called_once()
                 create_workspace.assert_called_once()
 
-    def test_deep_research_nested_facts_project_to_clear_a_w_fields(self) -> None:
+    def test_unconfirmed_legacy_deep_research_never_reaches_factory(self) -> None:
         report_id = "auto-report-deep-research-nested"
         mission_id = "mission-deep-research-nested"
         report = {
@@ -540,20 +570,7 @@ int OnCalculate(const int rates_total, const int prev_calculated,
 
         records = self.bridge._ea_factory_research_source_records([report], [mission])
 
-        self.assertEqual(len(records), 1)
-        record = records[0]
-        self.assertEqual(record["displayName"], "CANSLIM Method")
-        self.assertEqual(record["core"]["strategy_family"], "growth momentum")
-        self.assertEqual(record["core"]["stop_loss"], "7-8% below entry")
-        self.assertEqual(record["core"]["take_profit"], "partial at 20-25%")
-        self.assertEqual(record["core"]["lot_risk"], "fixed fractional")
-        self.assertFalse(record["buildReady"])
-        self.assertIsNone(record["eaImplementationBlueprint"])
-        self.assertIsNone(record["eaBlueprintDigest"])
-        self.assertIn(
-            "legacy_or_invalid_ea_blueprint",
-            record["readinessIssues"],
-        )
+        self.assertEqual(records, [])
 
     def test_source_catalog_prefers_current_sheet_record_over_legacy_report_duplicate(self) -> None:
         values = self.valid_values()
@@ -624,9 +641,10 @@ int OnCalculate(const int rates_total, const int prev_calculated,
 
     def test_workspace_is_per_build_and_generated_source_must_originate_in_source_folder(self) -> None:
         record = self.bridge._ea_factory_normalize_record(
-            self.valid_values(),
-            source_kind="google_sheet_public_csv",
-            source_key="sheet-workspace",
+            self.compact_values(),
+            source_kind="verified_deep_research",
+            source_key="research-workspace",
+            source_report_id="report-workspace",
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -706,9 +724,10 @@ int OnCalculate(const int rates_total, const int prev_calculated,
                 self.bridge._ea_factory_create_build_workspace(
                     "ea-build-boundary-test",
                     self.bridge._ea_factory_normalize_record(
-                        self.valid_values(),
-                        source_kind="google_sheet_public_csv",
-                        source_key="sheet-boundary",
+                        self.compact_values(),
+                        source_kind="verified_deep_research",
+                        source_key="research-boundary",
+                        source_report_id="report-boundary",
                     ),
                     "mt4",
                 )
@@ -785,8 +804,7 @@ int OnCalculate(const int rates_total, const int prev_calculated,
             for row in manifest["ruleMarkerEvidence"]
         ))
 
-        values = self.valid_values()
-        values["eaImplementationBlueprint"] = blueprint
+        values = self.compact_values()
         source_record = self.bridge._ea_factory_normalize_record(
             values,
             source_kind="verified_deep_research",
@@ -815,12 +833,10 @@ int OnCalculate(const int rates_total, const int prev_calculated,
                 ).read_text(encoding="utf-8")
             )
         self.assertEqual(spec["artifactKind"], "custom_indicator")
+        self.assertEqual(spec["schemaVersion"], "ea-factory-strategy-spec-v3")
+        self.assertNotIn("eaImplementationBlueprint", spec)
         self.assertNotIn("blueprintCoverageRequirements", spec)
-        self.assertEqual(
-            spec["indicatorCoverageRequirements"],
-            requirements,
-        )
-        self.assertEqual(spec["buildGuardrails"]["backtestStage"], "not_applicable")
+        self.assertNotIn("backtestStage", spec["buildGuardrails"])
         self.assertTrue(spec["buildGuardrails"]["tradingFunctionsForbidden"])
 
         unsafe = source + "\nvoid OnTick(){ OrderSend(Symbol(),OP_BUY,0.1,Ask,3,0,0); }\n"
@@ -1367,7 +1383,8 @@ int OnCalculate(const int rates_total, const int prev_calculated,
         }
         generation = self.bridge._ea_factory_generation_brief(build)
         self.assertIn("[EA_FACTORY_ARTIFACT_KIND:custom_indicator]", generation)
-        self.assertIn("Generate one MQL Custom Indicator", generation)
+        self.assertIn("MQL Custom Indicator", generation)
+        self.assertIn("v3 compact A-J", generation)
         self.assertIn("No OnTick, CTrade, OrderSend", generation)
         self.assertIn("do not open MetaEditor/MT4/MT5, compile, backtest", generation)
         self.assertLessEqual(len(generation), 2400)
@@ -1392,6 +1409,416 @@ int OnCalculate(const int rates_total, const int prev_calculated,
                 "platform": "tradingview",
             })
         self.assertEqual(caught.exception.status, 422)
+
+    def test_invalid_output_source_retry_resets_only_source_less_generation(self) -> None:
+        failed_mission_id = "mission-ea-source-invalid"
+        retry_key = "ea-source-retry-client-1"
+        stage = {
+            "id": "generate_source",
+            "status": "failed",
+            "missionId": failed_mission_id,
+            "reportId": None,
+            "blockedReasonCode": "invalid_output",
+            "evidenceVerified": False,
+            "requestIdempotencyKey": "ea-factory-old-request",
+            "requestDigest": "a" * 64,
+            "startedAt": "2026-09-11T15:33:26+07:00",
+            "missionIdempotencyKey": "ea-factory:stage:old",
+            "manualRetryCount": 0,
+            "manualRetryHistory": [],
+            "updatedAt": "2026-09-11T15:34:58+07:00",
+        }
+        build = {
+            "id": "ea-build-retry-source",
+            "coverageStatus": "compact_current",
+            "platform": "mt4",
+            "versions": [],
+            "stages": [stage],
+            "status": "attention_required",
+        }
+        state = {"builds": [build]}
+        mission = {
+            "id": failed_mission_id,
+            "status": "failed",
+            "errorCode": "invalid_output",
+        }
+        dispatched = {
+            "ok": True,
+            "kind": "ea_factory_stage_dispatched",
+            "mission": {"id": "mission-ea-source-retry"},
+            "idempotentReplay": False,
+        }
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=state,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_sync_build_status",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_source_program_exists",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "load_missions",
+                return_value=[mission],
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_write_ea_factory_state_unlocked",
+            ) as write_state,
+            mock.patch.object(self.bridge, "append_audit") as audit,
+            mock.patch.object(
+                self.bridge,
+                "advance_ea_factory_build",
+                return_value=dispatched,
+            ) as advance,
+        ):
+            result = self.bridge.retry_ea_factory_build_stage(
+                build["id"],
+                {
+                    "stageId": "generate_source",
+                    "failedMissionId": failed_mission_id,
+                    "idempotencyKey": retry_key,
+                },
+            )
+
+        self.assertEqual(result["kind"], "ea_factory_stage_retry_dispatched")
+        self.assertEqual(result["retry"]["attempt"], 1)
+        self.assertTrue(result["retry"]["freshMission"])
+        self.assertEqual(stage["status"], "pending")
+        self.assertIsNone(stage["missionId"])
+        self.assertIsNone(stage["requestIdempotencyKey"])
+        self.assertEqual(stage["manualRetryCount"], 1)
+        self.assertEqual(len(stage["manualRetryHistory"]), 1)
+        receipt = stage["manualRetryHistory"][0]
+        self.assertEqual(receipt["failedMissionId"], failed_mission_id)
+        self.assertEqual(receipt["failureCode"], "invalid_output")
+        self.assertEqual(receipt["idempotencyKey"], retry_key)
+        advance.assert_called_once_with(
+            build["id"],
+            {
+                "stageId": "generate_source",
+                "idempotencyKey": receipt["advanceIdempotencyKey"],
+            },
+        )
+        write_state.assert_called_once_with(state)
+        audit.assert_called_once()
+
+    def test_stale_queued_invalid_output_projects_retryable_source_stage(self) -> None:
+        failed_mission_id = "mission-live-shaped-invalid-output"
+        stages = self.bridge._ea_factory_initial_stages(
+            "mt4",
+            {"id": "mission-live-shaped-spec"},
+            {"id": "report-live-shaped-spec"},
+        )
+        # The durable Build file may still say queued after the independently
+        # persisted Mission has already reached its terminal state.  GET uses
+        # this same reconciliation on a deep copy.
+        stages[0]["missionId"] = None
+        generation = next(
+            item for item in stages if item.get("id") == "generate_source"
+        )
+        generation.update({
+            "status": "queued",
+            "missionId": failed_mission_id,
+            "blockedReasonCode": None,
+            "evidenceVerified": False,
+            "manualRetryCount": 0,
+            "manualRetryHistory": [],
+            "updatedAt": "2026-09-11T18:29:42+07:00",
+        })
+        durable_build = {
+            "id": "ea-build-live-shaped-invalid-output",
+            "coverageStatus": "compact_current",
+            "platform": "mt4",
+            "artifactKind": "expert_advisor",
+            "versions": [],
+            "stages": stages,
+            "status": "in_progress",
+        }
+        projected_build = copy.deepcopy(durable_build)
+
+        changed = self.bridge._ea_factory_sync_build_status(
+            projected_build,
+            missions=[{
+                "id": failed_mission_id,
+                "status": "failed",
+                "errorCode": "invalid_output",
+                "updatedAt": "2026-09-11T18:33:25+07:00",
+            }],
+            reports=[],
+            ingest_sources=False,
+        )
+        projected_stage = self.bridge._ea_factory_stage_read_model(
+            projected_build,
+            self.bridge._ea_factory_stage_row(
+                projected_build,
+                "generate_source",
+            ),
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(projected_build["status"], "attention_required")
+        self.assertEqual(projected_stage["status"], "failed")
+        self.assertEqual(projected_stage["blockedReasonCode"], "invalid_output")
+        self.assertTrue(projected_stage["canRetry"])
+        self.assertEqual(projected_stage["retryAttemptCount"], 0)
+        self.assertEqual(
+            projected_stage["retryAttemptLimit"],
+            self.bridge.EA_FACTORY_MANUAL_SOURCE_RETRY_LIMIT,
+        )
+        self.assertEqual(
+            self.bridge._ea_factory_stage_row(
+                durable_build,
+                "generate_source",
+            )["status"],
+            "queued",
+        )
+
+    def test_source_retry_replay_is_idempotent_and_keeps_one_history_receipt(self) -> None:
+        failed_mission_id = "mission-ea-source-invalid-replay"
+        retry_key = "wf-ea-source-retry-one-logical-request"
+        stage = {
+            "id": "generate_source",
+            "status": "failed",
+            "missionId": failed_mission_id,
+            "reportId": None,
+            "blockedReasonCode": "invalid_output",
+            "evidenceVerified": False,
+            "manualRetryCount": 0,
+            "manualRetryHistory": [],
+        }
+        build = {
+            "id": "ea-build-retry-replay",
+            "coverageStatus": "compact_current",
+            "platform": "mt4",
+            "versions": [],
+            "stages": [stage],
+            "status": "attention_required",
+        }
+        state = {"builds": [build]}
+        mission = {
+            "id": failed_mission_id,
+            "status": "failed",
+            "errorCode": "invalid_output",
+        }
+        request = {
+            "stageId": "generate_source",
+            "failedMissionId": failed_mission_id,
+            "idempotencyKey": retry_key,
+        }
+        dispatched = {
+            "ok": True,
+            "kind": "ea_factory_stage_dispatched",
+            "mission": {"id": "mission-ea-source-retry-fresh"},
+            "idempotentReplay": False,
+        }
+        replayed = {
+            **dispatched,
+            "idempotentReplay": True,
+        }
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=state,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_sync_build_status",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_source_program_exists",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "load_missions",
+                return_value=[mission],
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_write_ea_factory_state_unlocked",
+            ) as write_state,
+            mock.patch.object(self.bridge, "append_audit") as audit,
+            mock.patch.object(
+                self.bridge,
+                "advance_ea_factory_build",
+                side_effect=[dispatched, replayed],
+            ) as advance,
+        ):
+            first = self.bridge.retry_ea_factory_build_stage(build["id"], request)
+            replay = self.bridge.retry_ea_factory_build_stage(build["id"], request)
+
+        self.assertEqual(first["kind"], "ea_factory_stage_retry_dispatched")
+        self.assertTrue(first["retry"]["freshMission"])
+        self.assertEqual(replay["kind"], "ea_factory_stage_retry_replayed")
+        self.assertFalse(replay["retry"]["freshMission"])
+        self.assertEqual(stage["manualRetryCount"], 1)
+        self.assertEqual(len(stage["manualRetryHistory"]), 1)
+        self.assertEqual(advance.call_count, 2)
+        self.assertEqual(
+            advance.call_args_list[0].args[1]["idempotencyKey"],
+            advance.call_args_list[1].args[1]["idempotencyKey"],
+        )
+        write_state.assert_called_once_with(state)
+        audit.assert_called_once()
+
+    def test_source_retry_rejects_wrong_mission_and_exhausted_limit(self) -> None:
+        build_id = "ea-build-retry-identity-guards"
+        current_failed_mission_id = "mission-ea-source-current-invalid"
+        stage = {
+            "id": "generate_source",
+            "status": "failed",
+            "missionId": current_failed_mission_id,
+            "blockedReasonCode": "invalid_output",
+            "manualRetryCount": 0,
+            "manualRetryHistory": [],
+        }
+        build = {
+            "id": build_id,
+            "coverageStatus": "compact_current",
+            "platform": "mt4",
+            "versions": [],
+            "stages": [stage],
+        }
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value={"builds": [build]},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_sync_build_status",
+                return_value=False,
+            ),
+        ):
+            with self.assertRaises(self.bridge.RequestError) as wrong_mission:
+                self.bridge.retry_ea_factory_build_stage(
+                    build_id,
+                    {
+                        "stageId": "generate_source",
+                        "failedMissionId": "mission-ea-source-stale-invalid",
+                        "idempotencyKey": "wf-ea-source-wrong-mission",
+                    },
+                )
+        self.assertEqual(wrong_mission.exception.status, 409)
+
+        history = []
+        for attempt in range(1, self.bridge.EA_FACTORY_MANUAL_SOURCE_RETRY_LIMIT + 1):
+            failed_id = f"mission-ea-source-prior-{attempt}"
+            retry_key = f"wf-ea-source-prior-{attempt}"
+            history.append({
+                "attempt": attempt,
+                "idempotencyKey": retry_key,
+                "advanceIdempotencyKey": self.bridge._ea_factory_source_retry_advance_key(
+                    build_id,
+                    failed_id,
+                    retry_key,
+                ),
+                "failedMissionId": failed_id,
+                "failureCode": "invalid_output",
+                "previousStatus": "failed",
+                "requestedAt": f"2026-09-11T18:0{attempt}:00+07:00",
+            })
+        stage["manualRetryCount"] = len(history)
+        stage["manualRetryHistory"] = history
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value={"builds": [build]},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_sync_build_status",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_source_program_exists",
+                return_value=False,
+            ),
+        ):
+            with self.assertRaises(self.bridge.RequestError) as exhausted:
+                self.bridge.retry_ea_factory_build_stage(
+                    build_id,
+                    {
+                        "stageId": "generate_source",
+                        "failedMissionId": current_failed_mission_id,
+                        "idempotencyKey": "wf-ea-source-limit-plus-one",
+                    },
+                )
+        self.assertEqual(exhausted.exception.status, 409)
+
+    def test_source_retry_rejects_existing_program_and_non_invalid_failure(self) -> None:
+        base_stage = {
+            "id": "generate_source",
+            "status": "failed",
+            "missionId": "mission-ea-source-failed",
+            "blockedReasonCode": "invalid_output",
+            "manualRetryCount": 0,
+            "manualRetryHistory": [],
+        }
+        build = {
+            "id": "ea-build-retry-guard",
+            "coverageStatus": "compact_current",
+            "platform": "mt4",
+            "versions": [],
+            "stages": [base_stage],
+        }
+        request = {
+            "stageId": "generate_source",
+            "failedMissionId": "mission-ea-source-failed",
+            "idempotencyKey": "ea-source-retry-guard",
+        }
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value={"builds": [build]},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_sync_build_status",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_source_program_exists",
+                return_value=True,
+            ),
+        ):
+            with self.assertRaises(self.bridge.RequestError) as existing_source:
+                self.bridge.retry_ea_factory_build_stage(build["id"], request)
+        self.assertEqual(existing_source.exception.status, 409)
+
+        base_stage["blockedReasonCode"] = "rate_limited"
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value={"builds": [build]},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_sync_build_status",
+                return_value=False,
+            ),
+        ):
+            with self.assertRaises(self.bridge.RequestError) as wrong_failure:
+                self.bridge.retry_ea_factory_build_stage(build["id"], request)
+        self.assertEqual(wrong_failure.exception.status, 409)
 
     def test_expert_advisor_default_preserves_legacy_request_identity(self) -> None:
         expected = self.bridge.payload_digest(
@@ -1440,14 +1867,14 @@ int OnCalculate(const int rates_total, const int prev_calculated,
         self.assertTrue(binding_fields.issubset(set(stored_review["outputFields"])))
         self.assertIn("strategyCoverage", stored_review["outputFields"])
 
-    def test_stage_gates_are_manual_and_pine_skips_backtest(self) -> None:
+    def test_legacy_pine_stage_is_read_only_and_skips_backtest(self) -> None:
         stages = self.bridge._ea_factory_initial_stages(
             "tradingview",
             {"id": "mission-spec"},
             {"id": "report-spec"},
         )
         build = {"stages": stages}
-        self.assertTrue(self.bridge._ea_factory_stage_can_advance(build, "generate_source"))
+        self.assertFalse(self.bridge._ea_factory_stage_can_advance(build, "generate_source"))
         self.assertFalse(self.bridge._ea_factory_stage_can_advance(build, "source_review"))
         self.assertEqual(
             self.bridge._ea_factory_stage_row(build, "backtest_recheck")["status"],
@@ -1484,7 +1911,7 @@ int OnCalculate(const int rates_total, const int prev_calculated,
             self.assertEqual(item["status"], "not_connected")
             self.assertFalse(item["adapterReady"])
 
-    def test_read_model_has_exact_manual_frontend_safe_shape(self) -> None:
+    def test_read_model_has_exact_one_click_frontend_safe_shape(self) -> None:
         empty_state = self.bridge._empty_ea_factory_state()
         sheet_id = "1MfxHQSyntheticSheetId0123456789ABCDEabcde"
         hub_model = {
@@ -1518,7 +1945,7 @@ int OnCalculate(const int rates_total, const int prev_calculated,
             ),
         ):
             model = self.bridge.ea_factory_read_model()
-        self.assertEqual(model["mode"], "manual_stage_by_stage")
+        self.assertEqual(model["mode"], "one_click_with_manual_stage_recovery")
         self.assertFalse(model["scheduled"])
         self.assertFalse(model["schedulerEnabled"])
         self.assertEqual(set(model["sourceCatalog"]), {"sheetSchema", "records", "googleSheets"})
@@ -1531,15 +1958,93 @@ int OnCalculate(const int rates_total, const int prev_calculated,
             self.assertNotIn(forbidden, serialized)
         self.assertFalse(model["terminalSelection"]["adapterReady"])
         self.assertFalse(model["safety"]["syntheticCompileOrBacktestSuccessAllowed"])
+        self.assertTrue(model["safety"]["automaticLoop"])
+        self.assertIn("oneClick", model)
+        self.assertTrue(model["oneClick"]["enabled"])
+        self.assertFalse(model["oneClick"]["liveTradingAllowed"])
         self.assertEqual(
             model["endpoints"]["downloadArtifactTemplate"],
             "/api/props/right_server_racks/ea-factory/builds/{buildId}/files/{fileId}",
         )
 
+    def test_read_model_marks_mt5_as_manual_only_and_never_launches_terminal(self) -> None:
+        empty_state = self.bridge._empty_ea_factory_state()
+        selected = {
+            "candidateId": "mtc-mt5-manual-only",
+            "platform": "mt5",
+            "labelTh": "MT5 ที่ตรวจพบ #1",
+            "detected": True,
+            "runningState": "platform_running_detected",
+        }
+
+        def gate(platform: str) -> dict:
+            if platform == "tradingview":
+                return {
+                    "required": False,
+                    "ready": True,
+                    "platform": None,
+                    "adapterReady": False,
+                }
+            return {
+                "required": True,
+                "ready": True,
+                "platform": platform,
+                "candidateId": selected["candidateId"],
+                "adapterReady": True,
+            }
+
+        hub_model = {
+            "configured": False,
+            "consumers": [{
+                "consumerId": "deepResearch",
+                "status": "not_configured",
+                "readReady": False,
+            }],
+        }
+        with (
+            mock.patch.object(self.bridge, "_load_ea_factory_state_unlocked", return_value=empty_state),
+            mock.patch.object(self.bridge, "load_missions", return_value=[]),
+            mock.patch.object(self.bridge, "load_runtime_reports", return_value=[]),
+            mock.patch.object(self.bridge, "research_sheet_hub_read_model", return_value=hub_model),
+            mock.patch.object(self.bridge, "peek_metatrader_status", return_value={"status": "detected", "candidates": [selected]}),
+            mock.patch.object(
+                self.bridge,
+                "_metatrader_selection_read_model",
+                return_value={
+                    "candidates": [selected],
+                    "selectedCandidate": selected,
+                    "adapterReady": True,
+                },
+            ),
+            mock.patch.object(self.bridge, "_ea_factory_terminal_gate", side_effect=gate),
+        ):
+            model = self.bridge.ea_factory_read_model()
+        self.assertFalse(model["oneClick"]["enabled"])
+        self.assertFalse(model["oneClick"]["canRun"])
+        self.assertFalse(model["oneClick"]["canCreateAndRun"])
+        self.assertFalse(model["oneClick"]["selectedPlatformSupported"])
+        self.assertEqual(model["oneClick"]["supportedVisiblePlatforms"], ["mt4"])
+        self.assertEqual(
+            model["oneClick"]["unsupportedReasonCode"],
+            "one_click_visible_mt5_not_implemented",
+        )
+        self.assertTrue(model["oneClick"]["terminalRunning"])
+        self.assertFalse(model["oneClick"]["terminalProcessLaunchAllowed"])
+        self.assertFalse(model["terminalSelection"]["terminalExecutionAllowed"])
+        mt5 = next(row for row in model["platforms"] if row["id"] == "mt5")
+        self.assertFalse(mt5["oneClickVisibleAvailable"])
+        self.assertEqual(mt5["compileMode"], "manual_stage_by_stage_visible_metaeditor")
+        self.assertEqual(
+            mt5["backtestMode"],
+            "manual_stage_by_stage_visible_strategy_tester",
+        )
+        self.assertTrue(mt5["terminalMustAlreadyBeRunning"])
+        self.assertFalse(mt5["terminalProcessLaunchAllowed"])
+
     def test_dedicated_get_create_and_advance_routes_dispatch(self) -> None:
         factory_model = {
             "schemaVersion": "ea-factory-v1",
-            "mode": "manual_stage_by_stage",
+            "mode": "one_click_with_manual_stage_recovery",
             "scheduled": False,
         }
         create_result = {
@@ -1555,10 +2060,33 @@ int OnCalculate(const int rates_total, const int prev_calculated,
             "kind": "ea_factory_stage_dispatched",
             "report": None,
         }
+        retry_result = {
+            **advance_result,
+            "kind": "ea_factory_stage_retry_dispatched",
+            "retry": {"stageId": "generate_source", "attempt": 1},
+        }
+        run_result = {
+            "ok": True,
+            "kind": "ea_factory_one_click_started",
+            "buildId": "ea-build-route",
+            "oneClickRun": {"status": "queued"},
+            "idempotentReplay": False,
+            "workerStarted": True,
+        }
         with (
             mock.patch.object(self.bridge, "ea_factory_read_model", return_value=factory_model),
             mock.patch.object(self.bridge, "create_ea_factory_build", return_value=create_result) as create,
             mock.patch.object(self.bridge, "advance_ea_factory_build", return_value=advance_result) as advance,
+            mock.patch.object(
+                self.bridge,
+                "retry_ea_factory_build_stage",
+                return_value=retry_result,
+            ) as retry,
+            mock.patch.object(
+                self.bridge,
+                "run_ea_factory_build_one_click",
+                return_value=run_result,
+            ) as run,
         ):
             server = self.bridge.BridgeHTTPServer(("127.0.0.1", 0), self.bridge.BridgeHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1583,8 +2111,40 @@ int OnCalculate(const int rates_total, const int prev_calculated,
                 )
                 self.assertEqual(status, 200)
                 self.assertEqual(body["kind"], "ea_factory_stage_dispatched")
+                status, body = self.request(
+                    server.server_port,
+                    "POST",
+                    "/api/props/right_server_racks/ea-factory/builds/ea-build-route/retry",
+                    {
+                        "stageId": "generate_source",
+                        "failedMissionId": "mission-ea-source-invalid",
+                        "idempotencyKey": "ea-source-retry-route",
+                    },
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(body["kind"], "ea_factory_stage_retry_dispatched")
+                status, body = self.request(
+                    server.server_port,
+                    "POST",
+                    "/api/props/right_server_racks/ea-factory/builds/ea-build-route/run",
+                    {"idempotencyKey": "ea-one-click-route"},
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(body["kind"], "ea_factory_one_click_started")
                 create.assert_called_once()
                 advance.assert_called_once_with("ea-build-route", {"stageId": "generate_source"})
+                retry.assert_called_once_with(
+                    "ea-build-route",
+                    {
+                        "stageId": "generate_source",
+                        "failedMissionId": "mission-ea-source-invalid",
+                        "idempotencyKey": "ea-source-retry-route",
+                    },
+                )
+                run.assert_called_once_with(
+                    "ea-build-route",
+                    {"idempotencyKey": "ea-one-click-route"},
+                )
             finally:
                 server.shutdown()
                 server.server_close()

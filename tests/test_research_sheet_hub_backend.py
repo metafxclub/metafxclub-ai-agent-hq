@@ -48,6 +48,27 @@ def ready_ea_research_blueprint() -> dict:
     return module.ready_blueprint()
 
 
+def ready_ea_strategy_brief() -> dict:
+    return {
+        "schemaVersion": "ea-strategy-brief/1.0.0",
+        "systemName": "Verified System 1",
+        "systemOverview": "ระบบ trend following สำหรับ Forex; timeframe เป็น input ที่ผู้ใช้เลือก",
+        "entryRules": "Buy เมื่อ EMA 10 ตัดขึ้น EMA 60 บนแท่งปิด; Sell ใช้เงื่อนไขกลับกัน",
+        "recoveryRules": "ไม่มีการแก้ไม้ ห้าม Grid, Martingale, Averaging และ Hedging",
+        "exitRules": "ปิดด้วย SL, TP, trailing stop หรือสัญญาณตัดกลับตาม input",
+        "moneyManagement": "รองรับ fixed lot และ risk percent พร้อมจำกัดหนึ่ง position",
+        "orderExecution": "ส่ง Buy/Sell แบบ market order หลังแท่งสัญญาณปิด",
+        "displayRequirements": "แสดงชื่อระบบ สถานะสัญญาณ Balance, Equity และ Spread",
+        "additionalNotes": "ค่า period, SL, TP และ trailing ต้องปรับได้จาก EA inputs",
+        "sourceLinks": [
+            "https://tradingfinder.com/education/system-1",
+            "https://forex-station.com/system-1-review",
+        ],
+        "checkedAt": "2026-08-27T03:00:00+00:00",
+        "limitations": ["เป็นข้อกำหนดสร้าง Source EA ไม่ใช่ผล Backtest"],
+    }
+
+
 class FakeJsonResponse:
     def __init__(self, payload: dict):
         self.payload = payload
@@ -85,6 +106,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "DASHBOARD_WORKFLOW_SETTINGS_PATH": self.runtime / "dashboard-workflow-settings.json",
             "RESEARCH_SHEET_OUTBOX_PATH": self.runtime / "research-sheet-outbox.json",
             "RESEARCH_SHEET_CACHE_PATH": self.runtime / "research-sheet-cache.json",
+            "DEEP_RESEARCH_CONFIRMATIONS_PATH": self.runtime / "deep-research-confirmations.json",
             "AUDIT_PATH": self.runtime / "bridge-audit.jsonl",
         }
         for name, value in replacements.items():
@@ -130,6 +152,55 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             }
         )
         self.write_settings(settings)
+
+    def confirm_deep_reports(self, *reports: dict) -> None:
+        records = []
+        for report in reports:
+            metrics = report["metrics"]
+            brief = self.bridge.normalize_strategy_brief(metrics["strategyBrief"])
+            digest = self.bridge.compute_strategy_brief_digest(brief)
+            records.append(
+                {
+                    "schemaVersion": self.bridge.DEEP_RESEARCH_CONFIRMATION_SCHEMA_VERSION,
+                    "status": "confirmed",
+                    "researchReportId": report["id"],
+                    "sourceMissionId": report.get("linkedMissionId"),
+                    "originalBriefDigest": digest,
+                    "confirmedBriefDigest": digest,
+                    "confirmedAssumptionIds": [],
+                    "confirmedAt": "2026-08-27T03:10:00Z",
+                    "actorProvenance": "test_local_human_confirmation",
+                    "saveToGoogleSheet": True,
+                    "sheetBinding": self.bridge._deep_research_active_sheet_binding(),
+                    "columnCompleteness": self.bridge._deep_research_projected_column_completeness(report),
+                }
+            )
+        self.bridge.write_json(
+            self.bridge.DEEP_RESEARCH_CONFIRMATIONS_PATH,
+            {
+                "schemaVersion": self.bridge.DEEP_RESEARCH_CONFIRMATION_STORE_VERSION,
+                "records": records,
+                "updatedAt": "2026-08-27T03:10:00Z",
+            },
+        )
+
+    def mark_deep_reports_synced(self, reports: list[dict], revision: int) -> None:
+        self.confirm_deep_reports(*reports)
+        ledger = []
+        for report in reports:
+            items = self.bridge._research_sheet_report_items(report, revision)
+            self.assertEqual(len(items), 1)
+            ledger.append(
+                {
+                    "id": items[0]["id"],
+                    "payloadDigest": items[0]["payloadDigest"],
+                    "configRevision": revision,
+                    "syncedAt": "2026-08-27T03:11:00Z",
+                }
+            )
+        outbox = self.bridge._research_sheet_outbox_default()
+        outbox["syncedLedger"] = ledger
+        self.bridge.write_json(self.bridge.RESEARCH_SHEET_OUTBOX_PATH, outbox)
 
     def ready_probe(
         self,
@@ -1066,6 +1137,43 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "duplicate_key_conflict")
         self.assertEqual(calls, ["GET", "GET"])
 
+    def test_google_sheet_upsert_rejects_extra_header_before_any_write(self) -> None:
+        exact_headers = list(self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS)
+        calls = []
+
+        def open_url(request, timeout):
+            method = request.get_method()
+            calls.append((method, unquote(request.full_url)))
+            if method == "GET" and "!1:1" in calls[-1][1]:
+                return FakeJsonResponse({
+                    "values": [[*exact_headers, "unexpected_k"]],
+                })
+            raise AssertionError(
+                f"Schema drift must fail before another request: {calls[-1]}"
+            )
+
+        with self.assertRaises(self.hub.GoogleSheetHubError) as caught:
+            self.hub.upsert_row(
+                SHEET_ID,
+                "Deep_Research",
+                "record_id",
+                "deep-no-write-001",
+                {
+                    "record_id": "deep-no-write-001",
+                    "system_name": "Must not be written",
+                },
+                exact_headers=tuple(exact_headers),
+                environ={
+                    "METAFX_GOOGLE_SHEETS_ACCESS_TOKEN": "backend-test-token"
+                },
+                open_url=open_url,
+            )
+
+        self.assertEqual(caught.exception.code, "schema_mismatch")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "GET")
+        self.assertFalse(any(method in {"POST", "PUT", "PATCH"} for method, _ in calls))
+
     def test_verified_reports_queue_only_three_physical_sheet_tabs(self) -> None:
         self.configure_hub(revision=7)
         world = self._world_report()
@@ -1076,6 +1184,13 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             self.bridge._research_sheet_queue_report(world, flush=False)["queued"],
             3,
         )
+        # A completed report is still only a review draft until the operator
+        # confirms the exact Blueprint digest and Sheet save intent.
+        self.assertEqual(
+            self.bridge._research_sheet_queue_report(deep, flush=False)["queued"],
+            0,
+        )
+        self.confirm_deep_reports(deep)
         self.assertEqual(
             self.bridge._research_sheet_queue_report(deep, flush=False)["queued"],
             1,
@@ -1279,7 +1394,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             item["id"] for item in after["items"]
         }))
 
-    def test_backfill_quarantines_one_oversized_report_and_continues_valid_reports(self) -> None:
+    def test_backfill_compact_projection_ignores_oversized_non_sheet_metadata(self) -> None:
         self.configure_hub(revision=19)
 
         def variant(report_id: str, source_report_id: str, source_record_id: str) -> dict:
@@ -1300,11 +1415,12 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "world-report-oversized",
             "system-oversized",
         )
-        # The canonical blueprint itself remains valid and bounded; optional
-        # presentation metadata makes only the Sheet cell envelope too large.
+        # Presentation-only metadata is not one of the ten compact Sheet
+        # columns and therefore must not inflate or quarantine the row.
         oversized["metrics"]["chartAnnotations"] = "X" * 49_000
         valid_b = variant("report-backfill-valid-b", "world-report-b", "system-b")
         reports = [valid_a, oversized, valid_b]
+        self.confirm_deep_reports(*reports)
         version_index = self.bridge._research_sheet_build_deep_version_index(reports)
         empty_flush = {"processed": 0, "synced": 0, "deferred": 0, "reason": None}
         empty_drain = {
@@ -1335,39 +1451,29 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
                 {"deepResearch"}
             )
 
-        self.assertEqual(result["recentQueued"], 2)
-        self.assertEqual(result["quarantinedReports"], 1)
+        self.assertEqual(result["recentQueued"], 3)
+        self.assertEqual(result["quarantinedReports"], 0)
         stored = self.bridge._load_research_sheet_outbox_unlocked()
         self.assertEqual(
             {item["reportId"] for item in stored["items"]},
-            {valid_a["id"], valid_b["id"]},
+            {valid_a["id"], oversized["id"], valid_b["id"]},
         )
-        quarantined = [
-            item for item in stored["quarantinedReports"]
-            if item.get("lastErrorCode") == "backfill_projection_integrity_failed"
-        ]
-        self.assertEqual(len(quarantined), 1)
-        self.assertEqual(quarantined[0]["reportId"], oversized["id"])
+        self.assertEqual(stored["quarantinedReports"], [])
         self.assertEqual(stored["failedLedger"], [])
         summary = self.bridge._research_sheet_outbox_summary(19)
         self.assertEqual(summary["failed"], 0)
-        self.assertEqual(summary["quarantined"], 1)
+        self.assertEqual(summary["quarantined"], 0)
         self.assertEqual(
             summary["byConsumer"]["deepResearch"]["quarantined"],
-            1,
+            0,
         )
-        self.assertFalse(any(
-            item.get("reportId") == oversized["id"]
-            for item in stored["items"]
-        ))
         audit = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH, limit=20)
         quarantine_events = [
             item for item in audit
             if item.get("type")
             == "research_sheet_hub.backfill_report_quarantined"
         ]
-        self.assertEqual(len(quarantine_events), 1)
-        self.assertEqual(quarantine_events[0]["reportId"], oversized["id"])
+        self.assertEqual(quarantine_events, [])
 
     def test_deferred_report_store_is_bounded_without_evicting_oldest_markers(self) -> None:
         self.configure_hub(revision=11)
@@ -1797,6 +1903,56 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         self.assertEqual(operation["flush"]["synced"], 1)
         self.assertEqual(stored[0]["status"], "synced")
         self.assertEqual(stored[0]["requeueCount"], 1)
+
+    def test_deep_research_outbox_flush_passes_exact_authoritative_headers(self) -> None:
+        self.configure_hub(revision=12)
+        item = self._outbox_item(
+            item_id="sheet-sync-deep-exact-headers",
+            record_key="deep-exact-001",
+            revision=12,
+        )
+        item.update({
+            "consumerId": "deepResearch",
+            "producerPropId": "left_server_racks",
+            "tabName": "Deep_Research",
+            "keyHeader": "record_id",
+            "row": {
+                header: (
+                    "deep-exact-001"
+                    if header == "record_id"
+                    else f"value for {header}"
+                )
+                for header in self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS
+            },
+        })
+        self.bridge._save_research_sheet_outbox_unlocked({"items": [item]})
+        observed_kwargs = []
+
+        def upsert(*_args, **kwargs):
+            observed_kwargs.append(kwargs)
+            return {
+                "rowNumber": 2,
+                "operation": "updated",
+                "readBackVerified": True,
+            }
+
+        with (
+            patch.object(
+                self.hub,
+                "credential_status",
+                return_value={"configured": True, "mode": "access_token"},
+            ),
+            patch.object(self.hub, "upsert_row", side_effect=upsert),
+            patch.object(self.bridge, "_refresh_research_sheet_cache"),
+        ):
+            result = self.bridge._flush_research_sheet_outbox(max_items=1)
+
+        self.assertEqual(result["synced"], 1)
+        self.assertEqual(len(observed_kwargs), 1)
+        self.assertEqual(
+            observed_kwargs[0]["exact_headers"],
+            tuple(self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS),
+        )
 
     def test_periodic_backfill_does_not_reset_unchanged_retry_budget(self) -> None:
         self.configure_hub(revision=12)
@@ -2356,24 +2512,11 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         self.assertNotIn(SHEET_ID, intent["prompt"])
 
     def test_deep_research_tab_maps_to_internal_factory_fields_without_a_fourth_tab(self) -> None:
-        deep_row = self.bridge._research_sheet_deep_rows(self._deep_report())[0][0]
-        deep_row.update(
-            {
-                "recovery_averaging_rules_json": json.dumps(["never average down"]),
-                "special_conditions_json": json.dumps(["one position at a time"]),
-                "position_sizing_rules_json": json.dumps(
-                    {
-                        "lotMode": "fixed_risk_percent",
-                        "riskPercent": 1.0,
-                        "maxOpenPositions": 1,
-                    }
-                ),
-            }
-        )
-        headers = [
-            *self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS,
-            "manual_note",
-        ]
+        self.configure_hub(revision=10)
+        report = self._deep_report()
+        self.confirm_deep_reports(report)
+        deep_row = self.bridge._research_sheet_deep_rows(report)[0][0]
+        headers = list(self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS)
         values = [
             headers,
             [deep_row.get(header, "") for header in headers],
@@ -2388,29 +2531,22 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         record = records[0]
         self.assertEqual(record["sourceKind"], "verified_deep_research_sheet")
         self.assertEqual(record["displayName"], "Verified System 1")
-        self.assertIn('"op":"cross_above"', record["core"]["entry_rules"])
-        self.assertIn('"type":"fixed_pips"', record["core"]["stop_loss"])
-        self.assertEqual(
-            record["sourceUrls"],
-            [
-                "https://forex-station.com/system-1-review",
-                "https://tradingfinder.com/education/system-1",
-            ],
-        )
+        self.assertIn("EMA 10", record["core"]["entry_rules"])
+        self.assertIn("SL", record["core"]["stop_loss"])
+        self.assertEqual(record["sourceUrls"], [])
         self.assertTrue(record["buildReady"])
-        self.assertEqual(
-            record["eaImplementationBlueprint"]["schemaVersion"],
-            self.bridge.EA_RESEARCH_SCHEMA_VERSION,
-        )
+        self.assertIsNone(record["eaImplementationBlueprint"])
+        self.assertEqual(record["strategyBrief"]["schemaVersion"], "ea-strategy-brief/1.0.0")
         self.assertEqual(record["readinessIssues"], [])
         schema = self.bridge._ea_factory_sheet_schema_read_model()
         self.assertEqual(schema["sheetTabDefault"], "Deep_Research")
+        self.assertEqual(schema["range"], "Deep_Research!A:J")
         self.assertEqual(schema["sourceRequiredHeaders"], list(self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS))
         self.assertNotIn("EA_Full_Cycle", json.dumps(schema, ensure_ascii=False))
 
         snapshot = {
             "schemaVersion": "ea-factory-sheet-snapshot-v1",
-            "sourceSchemaVersion": "deep-research-sheet-v1",
+            "sourceSchemaVersion": "deep-research-sheet-v2",
             "sourceKind": "verified_deep_research_sheet",
             "sourceKey": "sheet-deep-research-test",
             "sheetReferenceMasked": "1MfxHQ…bcde",
@@ -2420,7 +2556,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "rejectedRowCount": 0,
             "headerExact": True,
             "headerDigest": self.bridge.payload_digest(
-                "ea-factory-deep-research-header-v1",
+                "ea-factory-deep-research-header-v2",
                 list(self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS),
             ),
             "records": records,
@@ -2439,13 +2575,17 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         with self.assertRaises(self.bridge.DataIntegrityError):
             self.bridge._ea_factory_revalidated_snapshot(tampered)
 
-    def test_deep_research_same_source_versions_history_and_only_newest_is_current(self) -> None:
+    def test_deep_research_same_source_reuses_record_id_and_latest_upsert_wins(self) -> None:
+        self.configure_hub(revision=11)
         first = self._deep_report()
+        self.confirm_deep_reports(first)
         self.bridge.write_json(self.reports / f"{first['id']}.json", first)
         first_rows = self.bridge._research_sheet_deep_rows(first)[0]
         self.assertEqual(len(first_rows), 1)
-        self.assertEqual(first_rows[0]["research_version"], "1")
-        self.assertEqual(first_rows[0]["is_current"], "TRUE")
+        self.assertEqual(
+            set(first_rows[0]),
+            set(self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS),
+        )
 
         second = copy.deepcopy(first)
         second.update(
@@ -2465,28 +2605,28 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "workflowOutput": copy.deepcopy(first["metrics"]["workflowOutput"]),
             "eaBlueprint": second_blueprint,
             **self.bridge.ea_research_report_projection(second_blueprint),
+            "strategyBrief": {
+                **copy.deepcopy(first["metrics"]["strategyBrief"]),
+                "entryRules": "Enter after the confirmed closed-bar cross",
+            },
         }
+        second["metrics"]["briefDigest"] = self.bridge.compute_strategy_brief_digest(
+            second["metrics"]["strategyBrief"]
+        )
+        second["metrics"]["sourceDigest"] = second["metrics"]["briefDigest"]
         self.bridge.write_json(self.reports / f"{second['id']}.json", second)
+        self.confirm_deep_reports(first, second)
 
         version_rows = self.bridge._research_sheet_deep_rows(second)[0]
-        self.assertEqual(len(version_rows), 2)
-        by_research_id = {row["research_id"]: row for row in version_rows}
-        first_id = first_rows[0]["research_id"]
-        second_id = next(key for key in by_research_id if key != first_id)
-        self.assertEqual(by_research_id[first_id]["research_version"], "1")
-        self.assertEqual(by_research_id[first_id]["is_current"], "FALSE")
-        self.assertEqual(by_research_id[second_id]["research_version"], "2")
-        self.assertEqual(by_research_id[second_id]["is_current"], "TRUE")
-        self.assertEqual(
-            sum(row["is_current"] == "TRUE" for row in version_rows),
-            1,
-        )
+        self.assertEqual(len(version_rows), 1)
+        self.assertEqual(version_rows[0]["record_id"], first_rows[0]["record_id"])
+        self.assertIn("confirmed closed-bar", version_rows[0]["entry_rules"])
 
         # Model the two keyed upserts: the version-1 demotion is partial and
         # must preserve its original research fields while version 2 appends.
-        sheet_rows = {first_id: copy.deepcopy(first_rows[0])}
+        sheet_rows = {first_rows[0]["record_id"]: copy.deepcopy(first_rows[0])}
         for row in version_rows:
-            sheet_rows.setdefault(row["research_id"], {}).update(row)
+            sheet_rows.setdefault(row["record_id"], {}).update(row)
         headers = list(self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS)
         values = [
             headers,
@@ -2500,17 +2640,12 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "sheet-deep-version-test",
         )
         self.assertEqual(len(records), 1)
-        self.assertEqual(
-            records[0]["recordId"],
-            by_research_id[second_id]["ea_factory_record_id"],
-        )
+        self.assertEqual(records[0]["recordId"], version_rows[0]["record_id"])
         self.assertIn("confirmed close", records[0]["core"]["entry_rules"])
-        self.assertEqual(
-            records[0]["eaImplementationBlueprint"]["researchRevision"],
-            2,
-        )
+        self.assertEqual(records[0]["strategyBrief"]["entryRules"], version_rows[0]["entry_rules"])
 
     def test_same_record_id_from_different_source_reports_remains_two_factory_records(self) -> None:
+        self.configure_hub(revision=12)
         first = self._deep_report()
         second = copy.deepcopy(first)
         second.update({
@@ -2526,6 +2661,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             second["workflowContext"]["source"]["recordId"],
         )
         index = self.bridge._research_sheet_build_deep_version_index([first, second])
+        self.confirm_deep_reports(first, second)
 
         first_rows = self.bridge._research_sheet_deep_rows(
             first, version_index=index
@@ -2536,13 +2672,9 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
 
         self.assertEqual(len(first_rows), 1)
         self.assertEqual(len(second_rows), 1)
-        self.assertEqual(first_rows[0]["research_version"], "1")
-        self.assertEqual(second_rows[0]["research_version"], "1")
-        self.assertEqual(first_rows[0]["is_current"], "TRUE")
-        self.assertEqual(second_rows[0]["is_current"], "TRUE")
         self.assertNotEqual(
-            first_rows[0]["ea_factory_record_id"],
-            second_rows[0]["ea_factory_record_id"],
+            first_rows[0]["record_id"],
+            second_rows[0]["record_id"],
         )
         records = self.bridge._ea_factory_deep_research_records(
             [*first_rows, *second_rows],
@@ -2553,8 +2685,8 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         self.assertEqual(
             {record["recordId"] for record in records},
             {
-                first_rows[0]["ea_factory_record_id"],
-                second_rows[0]["ea_factory_record_id"],
+                first_rows[0]["record_id"],
+                second_rows[0]["record_id"],
             },
         )
         missions = []
@@ -2570,17 +2702,28 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
                 "reportIds": [report["id"]],
                 "targetId": "left_server_racks",
                 "owner": "mission_archivist",
+                "workflowContext": copy.deepcopy(report["workflowContext"]),
+                "workflowOutputContract": copy.deepcopy(
+                    report["metrics"]["workflowOutput"]
+                ),
             })
-        runtime_records = self.bridge._ea_factory_research_source_records(
-            [first, second],
-            missions,
-        )
+        self.configure_hub(revision=31)
+        self.mark_deep_reports_synced([first, second], 31)
+        with patch.object(
+            self.bridge,
+            "_deep_research_report_lineage",
+            side_effect=lambda report, mission: (copy.deepcopy(mission), None),
+        ):
+            runtime_records = self.bridge._ea_factory_research_source_records(
+                [first, second],
+                missions,
+            )
         self.assertEqual(len(runtime_records), 2)
         self.assertEqual(
             {record["recordId"] for record in runtime_records},
             {
-                first_rows[0]["ea_factory_record_id"],
-                second_rows[0]["ea_factory_record_id"],
+                first_rows[0]["record_id"],
+                second_rows[0]["record_id"],
             },
         )
 
@@ -2597,7 +2740,13 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "reportIds": [report["id"]],
             "targetId": "left_server_racks",
             "owner": "mission_archivist",
+            "workflowContext": copy.deepcopy(report["workflowContext"]),
+            "workflowOutputContract": copy.deepcopy(
+                report["metrics"]["workflowOutput"]
+            ),
         }
+        self.configure_hub(revision=32)
+        self.mark_deep_reports_synced([report], 32)
         version_index = self.bridge._research_sheet_build_deep_version_index(
             [report]
         )
@@ -2610,19 +2759,22 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             source_key="sheet-authoritative-identity",
             strict=True,
         )[0]
-        runtime_record = self.bridge._ea_factory_research_source_records(
-            [report],
-            [mission],
-        )[0]
+        with patch.object(
+            self.bridge,
+            "_deep_research_report_lineage",
+            side_effect=lambda candidate, candidate_mission: (
+                copy.deepcopy(candidate_mission),
+                None,
+            ),
+        ):
+            runtime_record = self.bridge._ea_factory_research_source_records(
+                [report],
+                [mission],
+            )[0]
 
         self.assertEqual(sheet_record["recordId"], runtime_record["recordId"])
-        self.assertEqual(sheet_record["recordId"], row["ea_factory_record_id"])
+        self.assertEqual(sheet_record["recordId"], row["record_id"])
         with (
-            patch.object(
-                self.bridge,
-                "_research_sheet_hub_internal",
-                return_value={"sheetId": SHEET_ID},
-            ),
             patch.object(
                 self.bridge,
                 "_research_sheet_cached_rows",
@@ -2690,6 +2842,11 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             "workflowOutput": {"applicable": True, "valid": True},
             "eaBlueprint": blueprint,
             **self.bridge.ea_research_report_projection(blueprint),
+            "strategyBrief": {
+                **copy.deepcopy(old_report["metrics"]["strategyBrief"]),
+                "entryRules": "",
+            },
+            "briefDigest": "0" * 64,
         }
         missions = [
             {
@@ -2704,19 +2861,11 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         version_index = self.bridge._research_sheet_build_deep_version_index(
             [new_report, old_report]
         )
-        current_rows = [
-            row
-            for row in self.bridge._research_sheet_deep_rows(
-                new_report,
-                version_index=version_index,
-            )[0]
-            if row.get("is_current") == "TRUE"
-        ]
-        self.assertEqual(len(current_rows), 1)
-        self.assertEqual(
-            current_rows[0]["verification_status"],
-            "needs_clarification",
-        )
+        current_rows = self.bridge._research_sheet_deep_rows(
+            new_report,
+            version_index=version_index,
+        )[0]
+        self.assertEqual(current_rows, [])
 
         with (
             patch.object(
@@ -2741,20 +2890,13 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
                 missions=missions,
             )
 
-        self.assertEqual(len(catalog), 1)
-        self.assertFalse(catalog[0]["buildReady"])
-        self.assertEqual(
-            catalog[0]["eaReadiness"]["status"],
-            "needs_clarification",
-        )
-        self.assertIn(
-            "ea_blueprint_needs_clarification",
-            catalog[0]["readinessIssues"],
-        )
+        self.assertEqual(catalog, [])
 
     def test_verified_deep_research_cache_feeds_factory_automatically(self) -> None:
         self.configure_hub(revision=14)
-        deep_row = self.bridge._research_sheet_deep_rows(self._deep_report())[0][0]
+        report = self._deep_report()
+        self.confirm_deep_reports(report)
+        deep_row = self.bridge._research_sheet_deep_rows(report)[0][0]
         deep_row.update(
             {
                 "recovery_averaging_rules_json": json.dumps(["none"]),
@@ -3375,7 +3517,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
                 "system_name": "Alpha Trend System",
             },
             "Deep_Research": {
-                "research_id": "deep-live-001",
+                "record_id": "deep-live-001",
                 "system_name": "Deep Mean Reversion",
             },
             "Indicator_EA_Tool": {
@@ -3581,15 +3723,15 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         self.assertEqual(result["matches"][0]["value"], "Live Reordered Trend")
         self.assertTrue(result["freshRead"])
 
-    def test_live_column_query_reads_aw_and_key_as_narrow_deduplicated_ranges(self) -> None:
+    def test_live_column_query_reads_j_and_key_as_narrow_deduplicated_ranges(self) -> None:
         self.configure_hub(revision=26)
         contract = self.bridge._research_sheet_tab_contracts()["deepResearch"]
         headers = list(contract["requiredHeaders"])
-        self.assertEqual(headers[0], "research_id")
-        self.assertEqual(headers[-1], "updated_at")
+        self.assertEqual(headers[0], "record_id")
+        self.assertEqual(headers[-1], "additional_notes")
         self.assertEqual(
             self.bridge._research_sheet_column_letter(len(headers)),
-            "AW",
+            "J",
         )
         calls = []
 
@@ -3601,8 +3743,8 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
                 return [headers]
             if cell_range == "A2:A10000":
                 return [["deep-live-aw-001"]]
-            if cell_range == "AW2:AW10000":
-                return [["2026-08-30T02:30:00Z"]]
+            if cell_range == "J2:J10000":
+                return [["EA inputs remain user configurable"]]
             raise AssertionError(cell_range)
 
         with (
@@ -3616,22 +3758,55 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             last_column = self.bridge.query_research_sheet_hub(
                 {
                     "tabName": "Deep_Research",
-                    "columnName": "updated_at",
+                    "columnName": "additional_notes",
                 }
             )
-            self.assertEqual(calls, ["1:1", "A2:A10000", "AW2:AW10000"])
+            self.assertEqual(calls, ["1:1", "A2:A10000", "J2:J10000"])
             calls.clear()
             key_column = self.bridge.query_research_sheet_hub(
                 {
                     "tabName": "Deep_Research",
-                    "columnName": "research_id",
+                    "columnName": "record_id",
                 }
             )
 
         self.assertEqual(calls, ["1:1", "A2:A10000"])
         self.assertEqual(last_column["matches"][0]["recordKey"], "deep-live-aw-001")
-        self.assertEqual(last_column["matches"][0]["value"], "2026-08-30T02:30:00Z")
+        self.assertEqual(last_column["matches"][0]["value"], "EA inputs remain user configurable")
         self.assertEqual(key_column["matches"][0]["value"], "deep-live-aw-001")
+
+    def test_live_deep_research_query_rejects_extra_k_before_reading_data(self) -> None:
+        self.configure_hub(revision=27)
+        contract = self.bridge._research_sheet_tab_contracts()["deepResearch"]
+        headers = [*contract["exactHeaders"], "unexpected_k"]
+        calls = []
+
+        def read_values(sheet_id, tab_name, cell_range):
+            self.assertEqual(sheet_id, SHEET_ID)
+            self.assertEqual(tab_name, "Deep_Research")
+            calls.append(cell_range)
+            if cell_range == "1:1":
+                return [headers]
+            raise AssertionError(
+                f"Schema drift must fail before data read: {cell_range}"
+            )
+
+        with (
+            patch.object(
+                self.hub,
+                "credential_status",
+                return_value={"configured": True, "mode": "access_token"},
+            ),
+            patch.object(self.hub, "read_values", side_effect=read_values),
+            self.assertRaises(self.bridge.RequestError) as caught,
+        ):
+            self.bridge.query_research_sheet_hub({
+                "tabName": "Deep_Research",
+                "columnName": "system_name",
+            })
+
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(calls, ["1:1"])
 
     def test_deep_research_sheet_cache_is_exposed_as_verified_history(self) -> None:
         self.configure_hub(revision=15)
@@ -3691,13 +3866,12 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         )
         self.assertIsNone(history["eaResearch"]["blueprint"])
 
-    def test_research_report_preserves_241_warnings_through_sheet_reconstruction(self) -> None:
-        blueprint = ready_ea_research_blueprint()
-        warnings = [f"bounded-warning-{index:03d}" for index in range(241)]
-        blueprint["completeness"]["warnings"] = warnings
-        normalized = self.bridge.normalize_ea_research_blueprint(blueprint)
-        digest = self.bridge.ea_research_blueprint_digest(normalized)
-        projection = self.bridge.ea_research_report_projection(normalized)
+    def test_research_report_preserves_bounded_limitations_outside_compact_sheet(self) -> None:
+        brief = ready_ea_strategy_brief()
+        limitations = [f"bounded-limitation-{index:02d}" for index in range(12)]
+        brief["limitations"] = limitations
+        normalized = self.bridge.normalize_strategy_brief(brief)
+        digest = self.bridge.compute_strategy_brief_digest(normalized)
         report_payload = self._deep_report()
         report_payload.update({
             "id": "report-deep-241-warnings",
@@ -3705,34 +3879,30 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         })
         report_payload["metrics"] = {
             "workflowOutput": {"applicable": True, "valid": True},
-            "eaBlueprint": normalized,
-            **projection,
+            "strategyBrief": normalized,
+            "briefDigest": digest,
+            "sourceDigest": digest,
+            "sourceLinks": list(normalized["sourceLinks"]),
+            "checkedAt": normalized["checkedAt"],
+            "limitations": list(normalized["limitations"]),
         }
 
         with patch.object(self.bridge, "RESEARCH_SHEET_AUTO_SYNC_ENABLED", False):
             stored = self.bridge.create_report(report_payload)
 
-        for candidate in (
-            stored["metrics"]["eaBlueprint"],
-            stored["metrics"]["eaImplementationBlueprint"],
-            stored["metrics"]["implementationNotes"]["eaImplementationBlueprint"],
-        ):
-            self.assertEqual(candidate["completeness"]["warnings"], warnings)
-            self.assertEqual(
-                self.bridge.ea_research_blueprint_digest(candidate),
-                digest,
-            )
+        self.assertEqual(stored["metrics"]["strategyBrief"]["limitations"], limitations)
+        self.assertEqual(stored["metrics"]["briefDigest"], digest)
 
         report_read_model = self.bridge.report_read_model_item(stored)
         self.assertEqual(
-            report_read_model["metrics"]["eaBlueprint"]["completeness"]["warnings"],
-            warnings,
+            report_read_model["metrics"]["strategyBrief"]["limitations"],
+            limitations,
         )
         read_model = report_read_model["eaResearch"]
         self.assertTrue(read_model["validated"])
         self.assertTrue(read_model["digestMatched"])
-        self.assertEqual(read_model["blueprintDigest"], digest)
-        self.assertEqual(read_model["warnings"], warnings)
+        self.assertEqual(read_model["briefDigest"], digest)
+        self.assertEqual(read_model["warnings"], limitations)
 
         version_index = self.bridge._research_sheet_build_deep_version_index([stored])
         rows, _factory_rows = self.bridge._research_sheet_deep_rows(
@@ -3740,19 +3910,15 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             version_index=version_index,
         )
         self.assertEqual(len(rows), 1)
-        reconstructed = self.bridge.reconstruct_ea_research_from_sheet(rows[0])
-        self.assertEqual(reconstructed["completeness"]["warnings"], warnings)
-        self.assertEqual(
-            self.bridge.ea_research_blueprint_digest(reconstructed),
-            digest,
-        )
+        self.assertEqual(set(rows[0]), set(self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS))
+        self.assertNotIn("limitations", rows[0])
 
-        oversized = ready_ea_research_blueprint()
-        oversized["completeness"]["warnings"] = ["x" * 46_000]
-        with self.assertRaises(self.bridge.EAResearchBlueprintValidationError):
-            self.bridge.ea_research_report_projection(oversized)
+        oversized = ready_ea_strategy_brief()
+        oversized["additionalNotes"] = "x" * 4_001
+        with self.assertRaises(self.bridge.StrategyBriefValidationError):
+            self.bridge.normalize_strategy_brief(oversized)
 
-    def test_deep_research_sheet_history_projects_digest_bound_canonical_blueprint(self) -> None:
+    def test_deep_research_sheet_history_keeps_legacy_blueprint_diagnostic_only(self) -> None:
         self.configure_hub(revision=16)
         blueprint = ready_ea_research_blueprint()
         projection = self.bridge.ea_research_report_projection(blueprint)
@@ -3802,18 +3968,23 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             return_value={"configured": True, "mode": "access_token"},
         ):
             history = self.bridge._deep_sheet_research_history_rows()[0]
-        self.assertFalse(history["requiresResearchRerun"])
-        self.assertTrue(history["eaResearch"]["validated"])
+        self.assertTrue(history["requiresResearchRerun"])
+        self.assertFalse(history["eaResearch"]["validated"])
         self.assertTrue(history["eaResearch"]["digestMatched"])
-        self.assertTrue(history["eaResearch"]["eaHandoffAllowed"])
+        self.assertFalse(history["eaResearch"]["eaHandoffAllowed"])
+        self.assertEqual(
+            history["eaResearch"]["validationStatus"],
+            "legacy_blueprint_read_only",
+        )
         self.assertEqual(
             history["eaResearch"]["blueprintDigest"],
             projection["blueprintDigest"],
         )
         self.assertEqual(
-            history["eaResearch"]["blueprint"],
+            history["eaResearch"]["legacyBlueprintDiagnostic"],
             self.bridge.normalize_ea_research_blueprint(blueprint),
         )
+        self.assertIsNone(history["eaResearch"]["blueprint"])
 
         tampered_row = copy.deepcopy(row)
         tampered_notes = json.loads(tampered_row["implementation_notes_json"])
@@ -3830,7 +4001,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         self.assertTrue(tampered["requiresResearchRerun"])
         self.assertIsNone(tampered["blueprint"])
 
-    def test_deep_research_sheet_history_retains_all_canonical_completeness_statuses(self) -> None:
+    def test_deep_research_sheet_history_retains_legacy_statuses_as_read_only(self) -> None:
         self.configure_hub(revision=17)
         now = self.bridge.utc_now()
         rows = []
@@ -3900,12 +4071,17 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         for verification_status, completeness_status in expected.items():
             with self.subTest(verification_status=verification_status):
                 ea_research = by_verification[verification_status]["eaResearch"]
-                self.assertTrue(ea_research["validated"])
+                self.assertFalse(ea_research["validated"])
                 self.assertTrue(ea_research["digestMatched"])
-                self.assertEqual(ea_research["status"], completeness_status)
-                self.assertFalse(ea_research["requiresResearchRerun"])
+                self.assertEqual(ea_research["status"], "legacy_read_only")
+                self.assertTrue(ea_research["requiresResearchRerun"])
+                self.assertFalse(ea_research["eaHandoffAllowed"])
+                self.assertEqual(
+                    ea_research["legacyBlueprintDiagnostic"]["completeness"]["status"],
+                    completeness_status,
+                )
 
-    def test_canonical_sheet_blueprint_survives_catalog_and_http_sanitizer_exactly(self) -> None:
+    def test_legacy_sheet_blueprint_survives_only_as_bounded_diagnostic(self) -> None:
         self.configure_hub(revision=18)
         blueprint = ready_ea_research_blueprint()
         # This valid, digest-bound cross rule deliberately exceeds the old
@@ -3983,11 +4159,16 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         ea_research = wire_payload["workflowDashboard"]["researchCatalog"][
             "googleSheetResearchHistory"
         ][0]["eaResearch"]
-        self.assertTrue(ea_research["validated"])
+        self.assertFalse(ea_research["validated"])
         self.assertTrue(ea_research["digestMatched"])
-        self.assertEqual(ea_research["blueprint"], normalized)
+        self.assertTrue(ea_research["requiresResearchRerun"])
+        self.assertFalse(ea_research["eaHandoffAllowed"])
+        self.assertIsNone(ea_research["blueprint"])
+        self.assertEqual(ea_research["legacyBlueprintDiagnostic"], normalized)
         self.assertEqual(
-            self.bridge.ea_research_blueprint_digest(ea_research["blueprint"]),
+            self.bridge.ea_research_blueprint_digest(
+                ea_research["legacyBlueprintDiagnostic"]
+            ),
             ea_research["blueprintDigest"],
         )
 
@@ -4060,31 +4241,22 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
         )
         self.assertIsNone(history[0]["eaResearch"]["blueprint"])
 
-    def test_ea_factory_decodes_canonical_sheet_blueprint_without_lossy_projection(self) -> None:
-        blueprint = ready_ea_research_blueprint()
-        blueprint["entry"]["buy"]["rules"][0]["humanTextTh"] = (
-            "ตรวจ cross จากแท่งปิด 2 ไปแท่งปิด 1 พร้อมคงสมการทุก operand; " * 48
+    def test_ea_factory_decodes_compact_sheet_brief_without_lossy_projection(self) -> None:
+        report = self._deep_report()
+        long_entry = "ตรวจ cross จากแท่งปิด 2 ไปแท่งปิด 1 พร้อมคงสมการ; " * 48
+        report["metrics"]["strategyBrief"]["entryRules"] = long_entry
+        report["metrics"]["briefDigest"] = self.bridge.compute_strategy_brief_digest(
+            report["metrics"]["strategyBrief"]
         )
-        projection = self.bridge.ea_research_report_projection(blueprint)
-        normalized = self.bridge.normalize_ea_research_blueprint(blueprint)
-        deep_row = self.bridge._research_sheet_deep_rows(self._deep_report())[0][0]
-        deep_row["implementation_notes_json"] = json.dumps(
-            projection["implementationNotes"],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+        report["metrics"]["sourceDigest"] = report["metrics"]["briefDigest"]
+        deep_row = self.bridge._research_sheet_deep_rows(report)[0][0]
 
         values = self.bridge._ea_factory_deep_research_values(deep_row)
 
-        self.assertEqual(values["eaImplementationBlueprint"], normalized)
-        self.assertEqual(
-            values["eaBlueprintDigest"],
-            projection["blueprintDigest"],
-        )
-        self.assertEqual(
-            values["special_conditions"]["implementationNotes"],
-            projection["implementationNotes"],
-        )
+        self.assertEqual(values["entry_rules"], long_entry.strip())
+        self.assertEqual(values["system_name"], "Verified System 1")
+        self.assertEqual(set(deep_row), set(self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS))
+        self.assertNotIn("eaImplementationBlueprint", values)
         self.assertNotIn("[TRUNCATED]", json.dumps(values, ensure_ascii=False))
 
     def test_radar_read_model_compares_verified_sheet_cache_and_revoked_auth_fails_closed(self) -> None:
@@ -4672,6 +4844,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
 
     def _deep_report(self) -> dict:
         blueprint = ready_ea_research_blueprint()
+        strategy_brief = ready_ea_strategy_brief()
         blueprint.update(
             {
                 "strategyId": "verified-system-1-v2",
@@ -4702,6 +4875,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             },
         ]
         projected_metrics = self.bridge.ea_research_report_projection(blueprint)
+        brief_digest = self.bridge.compute_strategy_brief_digest(strategy_brief)
         return {
             "id": "report-deep-sheet-001",
             "type": "trading_system_research_report",
@@ -4724,6 +4898,9 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
                 "workflowOutput": {"applicable": True, "valid": True},
                 "eaBlueprint": blueprint,
                 **projected_metrics,
+                "strategyBrief": strategy_brief,
+                "briefDigest": brief_digest,
+                "sourceDigest": brief_digest,
             },
         }
 

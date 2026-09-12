@@ -55,6 +55,14 @@ def desktop_client_json(
     )
 
 
+def central_native_client(
+    *,
+    client_id: str = CLIENT_ID,
+    client_secret: str = CLIENT_SECRET,
+) -> str:
+    return f"client_id={client_id}\nclient_secret={client_secret}\n"
+
+
 class GoogleOAuthClientStoreTests(unittest.TestCase):
     def test_client_configuration_is_only_persisted_inside_dpapi_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -226,6 +234,150 @@ class GoogleOAuthClientParserTests(unittest.TestCase):
         with self.assertRaises(hub.GoogleSheetHubError) as invalid_utf8:
             hub.parse_google_oauth_client_json(b"\xff\xfe")
         self.assertEqual(invalid_utf8.exception.code, "invalid_oauth_client_file")
+
+
+class GoogleOAuthCentralReleaseTests(unittest.TestCase):
+    def test_normal_runtime_priority_is_store_then_process_environment_then_central(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            central_path = Path(directory) / "google_oauth_native_client.txt"
+            central_path.write_text(central_native_client(), encoding="utf-8")
+            with (
+                mock.patch.object(hub, "GOOGLE_OAUTH_NATIVE_CLIENT_PATH", central_path),
+                mock.patch.object(store, "load_client_configuration_record", return_value=None),
+                mock.patch.dict(os.environ, {}, clear=True),
+            ):
+                central = hub.oauth_client_configuration()
+                central_again = hub.oauth_client_configuration()
+                central_path.write_text(
+                    central_native_client(client_secret="SECOND_TEST_ONLY_SECRET"),
+                    encoding="utf-8",
+                )
+                central_with_other_secret = hub.oauth_client_configuration()
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "METAFX_GOOGLE_OAUTH_CLIENT_ID": OTHER_CLIENT_ID,
+                        "METAFX_GOOGLE_OAUTH_CLIENT_SECRET": CLIENT_SECRET,
+                    },
+                    clear=True,
+                ):
+                    environment = hub.oauth_client_configuration()
+                stored_record = {
+                    "clientId": OTHER_CLIENT_ID,
+                    "clientSecret": CLIENT_SECRET,
+                    "clientGeneration": CLIENT_GENERATION,
+                }
+                with (
+                    mock.patch.object(
+                        store,
+                        "load_client_configuration_record",
+                        return_value=stored_record,
+                    ),
+                    mock.patch.dict(
+                        os.environ,
+                        {"METAFX_GOOGLE_OAUTH_CLIENT_ID": CLIENT_ID},
+                        clear=True,
+                    ),
+                ):
+                    stored = hub.oauth_client_configuration()
+
+        self.assertEqual(central["clientId"], CLIENT_ID)
+        self.assertEqual(central["clientSecret"], CLIENT_SECRET)
+        self.assertEqual(central["source"], "central_release")
+        self.assertRegex(central["clientGeneration"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            central["clientGeneration"],
+            central_again["clientGeneration"],
+        )
+        self.assertNotEqual(
+            central["clientGeneration"],
+            central_with_other_secret["clientGeneration"],
+        )
+        self.assertEqual(environment["clientId"], OTHER_CLIENT_ID)
+        self.assertEqual(environment["source"], "environment")
+        self.assertEqual(stored["clientId"], OTHER_CLIENT_ID)
+        self.assertEqual(stored["source"], "secure_store")
+
+    def test_explicit_environment_mapping_never_reads_central_release(self) -> None:
+        with mock.patch.object(hub, "_central_release_oauth_client") as central:
+            isolated = hub.oauth_client_configuration({})
+        central.assert_not_called()
+        self.assertEqual(isolated["source"], "not_configured")
+        self.assertEqual(isolated["clientId"], "")
+
+    def test_clean_central_release_status_requires_user_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            central_path = Path(directory) / "google_oauth_native_client.txt"
+            central_path.write_text(central_native_client(), encoding="utf-8")
+            with (
+                mock.patch.object(hub, "GOOGLE_OAUTH_NATIVE_CLIENT_PATH", central_path),
+                mock.patch.object(store, "load_client_configuration_record", return_value=None),
+                mock.patch.object(
+                    store,
+                    "status",
+                    return_value={"available": True, "stored": False, "status": "empty"},
+                ),
+                mock.patch.dict(os.environ, {}, clear=True),
+            ):
+                status = hub.google_oauth_status()
+
+        self.assertTrue(status["clientConfigured"])
+        self.assertFalse(status["connected"])
+        self.assertEqual(status["status"], "authorization_required")
+        self.assertEqual(status["clientSource"], "central_release")
+        self.assertTrue(status["clientHint"])
+        self.assertNotIn(CLIENT_ID, json.dumps(status))
+        self.assertNotIn(CLIENT_SECRET, json.dumps(status))
+
+    def test_invalid_central_release_native_file_fails_closed(self) -> None:
+        invalid_payloads = (
+            b"client_id=not-a-google-client\nclient_secret=test-secret\n",
+            f"client_id={CLIENT_ID}\n".encode("utf-8"),
+            f"client_id={CLIENT_ID}\nclient_secret=\n".encode("utf-8"),
+            (
+                f"client_id={CLIENT_ID}\n"
+                f"client_id={OTHER_CLIENT_ID}\n"
+            ).encode("utf-8"),
+            (
+                f"client_secret={CLIENT_SECRET}\n"
+                f"client_id={CLIENT_ID}\n"
+            ).encode("utf-8"),
+            (
+                f"client_id={CLIENT_ID}\n"
+                f"client_secret={CLIENT_SECRET}\n"
+                "extra=value\n"
+            ).encode("utf-8"),
+            (
+                f"client_id={CLIENT_ID}\n"
+                "client_secret=bad\x00secret\n"
+            ).encode("utf-8"),
+            b"client_id=\xff\nclient_secret=test-secret\n",
+            b"x" * (hub.MAX_OAUTH_NATIVE_CLIENT_BYTES + 1),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            central_path = Path(directory) / "google_oauth_native_client.txt"
+            for index, payload in enumerate(invalid_payloads):
+                with self.subTest(index=index):
+                    central_path.write_bytes(payload)
+                    with (
+                        mock.patch.object(
+                            hub,
+                            "GOOGLE_OAUTH_NATIVE_CLIENT_PATH",
+                            central_path,
+                        ),
+                        mock.patch.object(
+                            store,
+                            "load_client_configuration_record",
+                            return_value=None,
+                        ),
+                        mock.patch.dict(os.environ, {}, clear=True),
+                    ):
+                        with self.assertRaises(hub.GoogleSheetHubError) as caught:
+                            hub.oauth_client_configuration()
+                    self.assertEqual(caught.exception.code, "invalid_oauth_client")
+                    combined = f"{caught.exception.code}:{caught.exception.message}"
+                    self.assertNotIn(CLIENT_ID, combined)
+                    self.assertNotIn(CLIENT_SECRET, combined)
 
 
 class GoogleOAuthClientConfigurationTests(unittest.TestCase):
@@ -459,6 +611,8 @@ class GoogleOAuthClientCliAndFrontendTests(unittest.TestCase):
             local_app_data = root / "LocalAppData"
             environment = dict(os.environ)
             environment["LOCALAPPDATA"] = str(local_app_data)
+            environment.pop("METAFX_GOOGLE_OAUTH_CLIENT_ID", None)
+            environment.pop("METAFX_GOOGLE_OAUTH_CLIENT_SECRET", None)
             setup = subprocess.run(
                 [
                     "powershell.exe",
@@ -556,6 +710,12 @@ class GoogleOAuthClientCliAndFrontendTests(unittest.TestCase):
                 {"ok", "configured", "clientHint", "store", "removed"},
             )
             self.assertTrue(remove_status["removed"])
+            central_release_available = hub.GOOGLE_OAUTH_NATIVE_CLIENT_PATH.is_file()
+            self.assertEqual(remove_status["configured"], central_release_available)
+            self.assertEqual(
+                remove_status["store"],
+                "central_release" if central_release_available else "not_configured",
+            )
             self.assertFalse(protected.exists())
             self.assertFalse(refresh_path.exists())
             self.assertNotIn(CLIENT_ID, removed.stdout + removed.stderr)
@@ -624,6 +784,33 @@ class GoogleOAuthClientCliAndFrontendTests(unittest.TestCase):
         self.assertTrue(status["configured"])
         self.assertNotIn(CLIENT_ID, output.getvalue())
 
+        output.seek(0)
+        output.truncate(0)
+        with (
+            mock.patch.object(
+                cli.google_sheet_hub,
+                "remove_google_oauth_client_configuration",
+                return_value={"removed": True},
+            ),
+            mock.patch.object(
+                cli.google_sheet_hub,
+                "oauth_client_configuration",
+                return_value={
+                    "clientId": CLIENT_ID,
+                    "clientSecret": CLIENT_SECRET,
+                    "source": "central_release",
+                },
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(cli.main(["--remove"]), 0)
+        removed = json.loads(output.getvalue())
+        self.assertTrue(removed["configured"])
+        self.assertTrue(removed["removed"])
+        self.assertEqual(removed["store"], "central_release")
+        self.assertNotIn(CLIENT_ID, output.getvalue())
+        self.assertNotIn(CLIENT_SECRET, output.getvalue())
+
     def test_frontend_receives_only_safe_client_status_and_connect_action(self) -> None:
         source = (ROOT / "frontend" / "src" / "app" / "main.js").read_text(
             encoding="utf-8"
@@ -638,6 +825,25 @@ class GoogleOAuthClientCliAndFrontendTests(unittest.TestCase):
         self.assertNotIn('type="file"', auth_markup)
         self.assertNotIn("oauthClientJson", source)
         self.assertIn("researchSheetGoogleConnect", auth_markup)
+
+        failure_reason = source[
+            source.index("function researchSheetGoogleAuthFailureReason") :
+            source.index("function researchSheetGoogleAuthIsTerminalStatus")
+        ]
+        presentation = source[
+            source.index("function researchSheetGoogleAuthPresentation") :
+            source.index("function renderResearchSheetGoogleAuth")
+        ]
+        callback_poll = source[
+            source.index("async function pollResearchSheetGoogleAuth") :
+            source.index("async function startResearchSheetGoogleAuth")
+        ]
+        self.assertNotIn("Test users", failure_reason)
+        self.assertNotIn("สิทธิ์ผู้ทดสอบ", callback_poll)
+        self.assertIn("Google Client กลางในชุด Release ยังไม่พร้อม", presentation)
+        self.assertIn("ติดต่อผู้สอน", presentation)
+        self.assertIn("Advanced/Recovery สำหรับผู้ดูแลระบบเท่านั้น", presentation)
+        self.assertNotIn("เลือกไฟล์ Desktop OAuth Client JSON", presentation)
 
 
 if __name__ == "__main__":

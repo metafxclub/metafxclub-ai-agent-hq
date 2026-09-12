@@ -1384,10 +1384,18 @@ class RuntimeIntegrityTests(unittest.TestCase):
                     self.assertEqual(profile["operation"]["scheduleDefaultTimes"], ["09:00"])
                     self.assertEqual(profile["operation"]["scheduleHardMaximumRunsPerDay"], 1)
                 elif prop_id == "right_server_racks":
-                    self.assertEqual(profile["operation"]["defaultMode"], "manual_stage_by_stage")
+                    self.assertEqual(
+                        profile["operation"]["defaultMode"],
+                        "one_click_with_manual_stage_recovery",
+                    )
                     self.assertFalse(profile["operation"]["scheduled"])
-                    self.assertFalse(profile["operation"]["automaticLoop"])
-                    self.assertTrue(profile["operation"]["oneUserActionAdvancesOneStage"])
+                    self.assertTrue(profile["operation"]["automaticLoop"])
+                    self.assertFalse(
+                        profile["operation"]["oneUserActionAdvancesOneStage"]
+                    )
+                    self.assertTrue(
+                        profile["operation"]["oneUserClickAdvancesVerifiedStageChain"]
+                    )
                 else:
                     self.assertEqual(profile["operation"]["defaultMode"], "manual")
                     self.assertTrue(profile["operation"]["scheduleBackendOwned"])
@@ -1948,7 +1956,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertEqual(items["mt4_terminal"]["adapterStatus"], "runtime_detected")
         self.assertEqual(items["mt4_terminal"]["executionAdapterStatus"], "coming_soon")
         self.assertEqual(items["metaeditor_compile_adapter"]["status"], "not_connected")
-        self.assertEqual(items["strategy_tester_adapter"]["status"], "coming_soon")
+        self.assertEqual(items["strategy_tester_adapter"]["status"], "not_connected")
         self.assertEqual(checklist["connectionRequirements"]["anyOf"], [])
         self.assertTrue(checklist["connectionRequirements"]["anyOfSatisfied"])
         self.assertEqual(checklist["connectionRequirements"]["status"], "not_required")
@@ -3032,7 +3040,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertNotIn("submitManagerCommand", block)
 
     def test_agent_chat_runtime_version_and_executive_tiers(self) -> None:
-        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.15")
+        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.18")
         self.assertEqual(self.bridge.role_default_model_tier("ceo"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("manager"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("risk_guard"), "risk_quality")
@@ -3379,12 +3387,14 @@ class RuntimeIntegrityTests(unittest.TestCase):
             input_text=None,
             *,
             kill_process_tree_on_timeout=False,
+            structured_json_output=False,
         ):
             request = json.loads(input_text)
             calls.append({
                 "command": list(command),
                 "request": request,
                 "treeKill": kill_process_tree_on_timeout,
+                "structuredJsonOutput": structured_json_output,
             })
             agent_id = command[command.index("--agent-id") + 1]
             model_tier = command[command.index("--model-tier") + 1]
@@ -3476,6 +3486,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.assertEqual(calls[1]["request"]["history"][0]["content"], first_payload["message"])
                 self.assertEqual(calls[2]["request"]["history"], [])
                 self.assertTrue(all(item["treeKill"] for item in calls))
+                self.assertTrue(all(item["structuredJsonOutput"] for item in calls))
                 self.assertIn("manager_quality", calls[0]["command"])
                 self.assertTrue(second["ok"])
                 self.assertTrue(cross_agent["ok"])
@@ -3537,6 +3548,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             input_text=None,
             *,
             kill_process_tree_on_timeout=False,
+            structured_json_output=False,
         ):
             calls.append(json.loads(input_text))
             if calls[-1]["message"] == "auth":
@@ -4148,13 +4160,13 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertNotIn("git push", updater.lower())
         self.assertNotIn("git.exe -C $projectRoot push", updater)
 
-    def test_student_installer_copies_mt4_integrations_and_curated_gateway_build(self) -> None:
+    def test_student_installer_copies_curated_mt4_gateway_build(self) -> None:
         installer = INSTALLER_SCRIPT_PATH.read_text(encoding="utf-8-sig")
         uninstaller = UNINSTALL_SCRIPT_PATH.read_text(encoding="utf-8-sig")
         release_workflow = RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8-sig")
         gitignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8-sig")
 
-        self.assertIn('"integrations\\mt4-trade-gateway\\MetafxHQTradeGateway.mq4"', installer)
+        self.assertIn('"artifacts\\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\\MetafxHQTradeGateway.mq4"', installer)
         self.assertIn('"artifacts\\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\\MetafxHQTradeGateway.ex4"', installer)
         self.assertIn('"integrations", "runner", "scripts", "tests"', installer)
         self.assertIn('Sync-Directory -DirectoryName "artifacts\\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness"', installer)
@@ -4259,7 +4271,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         )
         registry_text = registry_path.read_text(encoding="utf-8-sig")
         attributes = (PROJECT_ROOT / ".gitattributes").read_text(encoding="utf-8-sig")
-        self.assertEqual(version, "0.9.15")
+        self.assertEqual(version, "0.9.18")
         self.assertNotRegex(registry_text, r"(?i)[a-z]:\\\\users\\\\")
         self.assertIn("*.mq4 text eol=lf", attributes)
         self.assertIn("*.mq5 text eol=lf", attributes)
@@ -6023,8 +6035,12 @@ class RuntimeIntegrityTests(unittest.TestCase):
             kill_process_tree_on_timeout=False,
             cancel_event=None,
             tracking_key=None,
+            structured_json_output=False,
         ):
-            runner_calls.append(list(command))
+            runner_calls.append({
+                "command": list(command),
+                "structuredJsonOutput": structured_json_output,
+            })
             result = {
                 "ok": True,
                 "status": "completed",
@@ -6159,7 +6175,8 @@ class RuntimeIntegrityTests(unittest.TestCase):
                     setattr(self.bridge, name, value)
 
         self.assertEqual(len(runner_calls), 1, finished)
-        command = runner_calls[0]
+        command = runner_calls[0]["command"]
+        self.assertTrue(runner_calls[0]["structuredJsonOutput"])
         self.assertEqual(
             command[command.index("--result-mode") + 1],
             "ai_trade_council_vote",
@@ -6625,7 +6642,14 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.bridge.MISSIONS_PATH = runtime / "missions.json"
                 self.bridge.AUDIT_PATH = runtime / "bridge-audit.jsonl"
                 self.bridge.bridge_status = lambda: {"codex": {"status": "ready_guarded"}}
-                self.bridge.codex_rate_limits = lambda force=False: {"ok": False, "status": "unavailable", "stale": False}
+                self.bridge.codex_rate_limits = lambda force=False: {
+                    "ok": True,
+                    "status": "ready",
+                    "stale": False,
+                    "limitReached": False,
+                    "primary": {"remainingPercent": 100},
+                    "secondary": {"remainingPercent": 100},
+                }
                 self.bridge.REAL_RUN_SEMAPHORE = BusySemaphore()
                 self.bridge.RATE_LIMIT_STATE.clear()
                 mission = {
@@ -7051,6 +7075,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             kill_process_tree_on_timeout=False,
             cancel_event=None,
             tracking_key=None,
+            structured_json_output=False,
         ):
             runner_calls.append({
                 "command": list(command),
@@ -7058,6 +7083,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 "input": input_text,
                 "treeKill": kill_process_tree_on_timeout,
                 "cancelEvent": cancel_event,
+                "structuredJsonOutput": structured_json_output,
             })
             result = {
                 "ok": True,
@@ -7121,6 +7147,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
 
                 self.assertEqual(len(runner_calls), 1)
                 self.assertTrue(runner_calls[0]["treeKill"])
+                self.assertTrue(runner_calls[0]["structuredJsonOutput"])
                 self.assertIn("--execution-mode", runner_calls[0]["command"])
                 mode_index = runner_calls[0]["command"].index("--execution-mode")
                 self.assertEqual(runner_calls[0]["command"][mode_index + 1], "auto_guarded")
@@ -7687,7 +7714,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
             )
         )
         original_peek = self.bridge.peek_codex_rate_limits
+        original_threshold = self.bridge.automation_min_remaining_percent
         try:
+            self.bridge.automation_min_remaining_percent = lambda settings=None: 15
             self.bridge.peek_codex_rate_limits = lambda: {
                 "ok": True,
                 "status": "ready",
@@ -7696,19 +7725,19 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 "limitReached": False,
                 "stale": False,
             }
-            blocked = self.bridge._collaboration_quota_gate(config, refresh=False)
-            self.assertFalse(blocked["allowed"])
-            self.assertEqual(blocked["reason"], "quota_below_reserve")
+            exact_reserve = self.bridge._collaboration_quota_gate(config, refresh=False)
+            self.assertTrue(exact_reserve["allowed"])
             self.bridge.peek_codex_rate_limits = lambda: {
                 "ok": True,
                 "status": "ready",
                 "primary": {"remainingPercent": 70},
-                "secondary": {"remainingPercent": 16},
+                "secondary": {"remainingPercent": 14.99},
                 "limitReached": False,
                 "stale": False,
             }
-            above_reserve = self.bridge._collaboration_quota_gate(config, refresh=False)
-            self.assertTrue(above_reserve["allowed"])
+            below_reserve = self.bridge._collaboration_quota_gate(config, refresh=False)
+            self.assertFalse(below_reserve["allowed"])
+            self.assertEqual(below_reserve["reason"], "quota_below_reserve")
             self.bridge.peek_codex_rate_limits = lambda: {
                 "ok": True,
                 "status": "ready",
@@ -7721,6 +7750,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             self.assertEqual(stale["reason"], "quota_stale")
         finally:
             self.bridge.peek_codex_rate_limits = original_peek
+            self.bridge.automation_min_remaining_percent = original_threshold
 
     def test_collaboration_runner_strips_task_authority_even_if_chat_classifies_task(self) -> None:
         original_chat = self.runner.run_agent_chat

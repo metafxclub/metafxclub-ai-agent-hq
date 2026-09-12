@@ -25,6 +25,7 @@ __pycache__/
 **/*secret*.json
 **/*oauth*client*.json
 **/*google*oauth*.json
+backend/local-runner/google_oauth_native_client.txt
 **/service-account*.json
 **/service_account*.json
 *.dpapi
@@ -49,6 +50,7 @@ frontend/legacy-static/
 docs/design-qa/
 design-qa.md
 outputs/
+validation/
 **/node_modules/
 artifacts/**
 !artifacts/mt4-ai-council-ea-v2.14-broker-compat-hardening/

@@ -12,7 +12,7 @@ from unittest import mock
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "bridge_server.py"
 RUNNER_PATH = PROJECT_ROOT / "runner" / "codex_cli_runner.py"
-EA_RESEARCH_BLUEPRINT_TEST_PATH = PROJECT_ROOT / "tests" / "test_ea_research_blueprint_v2.py"
+EA_STRATEGY_BRIEF_TEST_PATH = PROJECT_ROOT / "tests" / "test_ea_strategy_brief.py"
 
 
 def load_module(name: str, path: Path):
@@ -210,17 +210,15 @@ class EquipmentOutputContractTests(unittest.TestCase):
         self.assertEqual(parsed["evidenceKinds"], ["source_url"])
 
     def test_deep_research_profile_requires_every_exact_field_and_evidence_kind(self) -> None:
-        blueprint_support = load_module(
-            "metafx_equipment_output_blueprint_support",
-            EA_RESEARCH_BLUEPRINT_TEST_PATH,
+        brief_support = load_module(
+            "metafx_equipment_output_strategy_brief_support",
+            EA_STRATEGY_BRIEF_TEST_PATH,
         )
-        blueprint = blueprint_support.ready_blueprint()
-        blueprint["evidenceMap"][1] = {
-            "sourceRef": "S2",
-            "url": "https://www.tradingview.com/support/solutions/43000592270-moving-average/",
-            "title": "Moving average reference",
-            "checkedAt": blueprint["checkedAt"],
-        }
+        brief = brief_support.valid_brief()
+        brief["sourceLinks"] = [
+            "https://www.tradingview.com/support/solutions/43000592270-moving-average/",
+            "https://www.investopedia.com/terms/m/movingaverage.asp",
+        ]
         schema = self.runner.build_work_output_schema(
             64000,
             "trading_system_research",
@@ -240,12 +238,11 @@ class EquipmentOutputContractTests(unittest.TestCase):
                 {"label": "Proof", "url": "https://www.investopedia.com/terms/m/movingaverage.asp", "note": "Independent public proof"},
             ],
             "blockedCapability": "",
-            "research": blueprint,
+            "research": brief,
             "evidenceKinds": [
                 "at_least_two_source_urls",
                 "checked_at",
                 "limitations",
-                "ea_readiness",
                 "source_digest",
             ],
         }
@@ -264,7 +261,6 @@ class EquipmentOutputContractTests(unittest.TestCase):
                 "at_least_two_source_urls",
                 "checked_at",
                 "limitations",
-                "ea_readiness",
                 "source_digest",
             },
         )
@@ -294,6 +290,32 @@ class EquipmentOutputContractTests(unittest.TestCase):
         self.assertIn("systems", result["missingFields"])
         self.assertIn("source_url", result["missingEvidenceKinds"])
         self.assertEqual(result["expectedFields"], procedure["outputFields"])
+
+    def test_missing_deep_research_transport_reports_missing_fields_without_fake_brief_type(self) -> None:
+        procedure = self.bridge.equipment_action_profile(
+            "left_server_racks",
+            "deep_research_system",
+        )
+        mission = {
+            "id": "mission-deep-research-missing-transport",
+            "budget": {"outputLimitChars": 64000},
+            "workflowContext": {"pluginProcedure": procedure},
+        }
+        receipt = self.bridge.validate_dashboard_workflow_output_contract(
+            mission,
+            {
+                "status": "invalid_output",
+                "contractFields": [],
+                "evidenceKinds": [],
+                "evidence": [],
+            },
+        )
+
+        self.assertTrue(receipt["applicable"])
+        self.assertFalse(receipt["valid"])
+        self.assertIn("strategyBrief", receipt["missingFields"])
+        self.assertNotIn("BRIEF_TYPE:$", receipt["entryErrors"])
+        self.assertEqual(receipt["entryErrors"], [])
 
     def test_contract_value_over_budget_is_rejected_without_truncation(self) -> None:
         oversized = "x" * 7001

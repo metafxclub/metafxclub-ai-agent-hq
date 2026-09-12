@@ -169,7 +169,7 @@ const TRADING_RESEARCH_SIMULATION_REGIMES = Object.freeze([
 
     def test_canonical_tabs_and_actions_are_present(self):
         expected = {
-            "research": "deep_research_system",
+            "select": "deep_research_system",
             "backtest": "prepare_backtest_plan",
             "optimization": "prepare_optimization_plan",
             "ea_discovery": "prepare_ea_discovery_plan",
@@ -177,8 +177,7 @@ const TRADING_RESEARCH_SIMULATION_REGIMES = Object.freeze([
         for tab_id, action_id in expected.items():
             self.assertIn(f'id: "{tab_id}"', self.main)
             self.assertIn(f'id: "{action_id}"', self.main)
-        self.assertIn('id: "chart"', self.main)
-        self.assertIn('id: "report"', self.main)
+        self.assertIn('id: "analysis"', self.main)
         self.assertIn('id: "outputs"', self.main)
         self.assertIn('id: "systems"', self.main)
         self.assertIn('id: "schedule"', self.main)
@@ -265,7 +264,7 @@ const TRADING_RESEARCH_SIMULATION_REGIMES = Object.freeze([
         ):
             self.assertIn(selector, self.styles)
 
-    def test_research_vault_has_four_contract_aligned_tabs_and_authoritative_catalog_projection(self):
+    def test_research_vault_has_two_contract_aligned_steps_and_authoritative_catalog_projection(self):
         fallback_start = self.main.index(
             "left_server_racks: {",
             self.main.index("const WORKFLOW_DASHBOARD_FALLBACKS"),
@@ -274,13 +273,15 @@ const TRADING_RESEARCH_SIMULATION_REGIMES = Object.freeze([
         fallback = self.main[fallback_start:fallback_end]
         tab_positions = [
             fallback.index(f'id: "{tab_id}"')
-            for tab_id in ("research", "chart", "backtest", "report")
+            for tab_id in ("select", "analysis")
         ]
         self.assertEqual(tab_positions, sorted(tab_positions))
-        self.assertEqual(fallback.count("actionIds:"), 4)
-        self.assertIn('tabId: "research"', fallback)
-        self.assertIn("ช่วงไม่เกิน 10 ปี", fallback)
-        self.assertIn("ไม่สร้างตัวเลขทดแทน", fallback)
+        self.assertEqual(fallback.count("actionIds:"), 2)
+        self.assertIn('tabId: "select"', fallback)
+        self.assertIn("Strategy Brief 10 หัวข้อ", fallback)
+        self.assertIn("บันทึกระบบนี้ลง Google Sheet", self.main)
+        for removed_tab_id in ("research", "chart", "backtest", "report"):
+            self.assertNotIn(f'id: "{removed_tab_id}"', fallback)
 
         normalize_start = self.main.index("function normalizeTradingSystemResearchLabDomain")
         normalize_end = self.main.index("function tradingResearchNormalizeHeader", normalize_start)
@@ -315,13 +316,21 @@ const TRADING_RESEARCH_SIMULATION_REGIMES = Object.freeze([
         self.assertIn("systems.filter((system) => system.sourceReportId === reportId)", self.main)
         self.assertIn("session.selectedSystemId = paired?.id", self.main)
         self.assertIn("option.dataset.sourceReportId", self.main)
-        self.assertIn('label: "พร้อมวิจัยโดยไม่รออนุมัติ"', self.main)
+        self.assertIn('label: "พร้อมวิเคราะห์เชิงลึก"', self.main)
         self.assertNotIn(
             'เลือกชื่อระบบในฟอร์มด้านล่างแล้วกด “วิจัยระบบที่เลือกต่อ”',
             self.main,
         )
 
-    def test_research_source_pair_is_atomic_and_blueprint_v2_uses_safe_dom(self):
+        confirmation_start = self.main.index("const TRADING_RESEARCH_CONFIRMATION_ENDPOINT")
+        confirmation_end = self.main.index("function tradingResearchBlueprintHasValue", confirmation_start)
+        confirmation = self.main[confirmation_start:confirmation_end]
+        self.assertIn('"/api/props/left_server_racks/deep-research/confirm"', confirmation)
+        self.assertIn("const TRADING_RESEARCH_SHEET_COLUMN_COUNT = 10", confirmation)
+        self.assertIn("columnStatuses.length === requiredColumnCount", confirmation)
+        self.assertIn("const handoffReady = raw.handoffReady === true && deliverySynced", confirmation)
+
+    def test_research_source_pair_is_atomic_and_strategy_brief_uses_safe_dom(self):
         sources_start = self.main.index("function workflowDeepResearchCatalogSources")
         sources_end = self.main.index("function getWorkflowSpeechRecognitionConstructor", sources_start)
         sources = self.main[sources_start:sources_end]
@@ -336,52 +345,37 @@ const TRADING_RESEARCH_SIMULATION_REGIMES = Object.freeze([
         self.assertIn("system.sourceRecordId === sourceRecordId", validator)
         self.assertIn("รายงานต้นทางและระบบเทรดไม่ใช่คู่ข้อมูลเดียวกัน", validator)
 
-        reader_start = self.main.index("function tradingResearchEaBlueprintFromReport")
-        reader_end = self.main.index("function tradingResearchBlueprintHasValue", reader_start)
+        reader_start = self.main.index("function tradingResearchStrategyBriefReadModel")
+        reader_end = self.main.index("function createTradingResearchStrategyBrief", reader_start)
         reader = self.main[reader_start:reader_end]
-        self.assertIn("report.eaResearch", reader)
-        self.assertIn("readModel.validated === true", reader)
-        self.assertIn("readModel.digestMatched === true", reader)
-        self.assertIn('readModel.validationStatus === "canonical_validated"', reader)
-        self.assertIn("TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION", reader)
+        self.assertIn("eaResearch.strategyBrief", reader)
+        self.assertIn("metrics.strategyBrief", reader)
+        self.assertIn("eaResearch.briefDigest", reader)
+        self.assertIn("TRADING_RESEARCH_STRATEGY_BRIEF_SCHEMA_VERSION", reader)
         self.assertIn("/^[0-9a-f]{64}$/", reader)
-        self.assertNotIn("eaImplementationBlueprint", reader)
-        self.assertNotIn("eaBlueprint", reader)
-        self.assertIn("blueprint_digest_mismatch", reader)
-        self.assertIn("legacy_ea_blueprint_missing", reader)
-        self.assertIn("ไม่ใช้ alias หรือค่า ready ดิบแทน", reader)
+        self.assertIn("projectLegacyTradingResearchBlueprint", reader)
+        self.assertIn("legacy: true", reader)
 
-        blueprint_start = self.main.index("const TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION")
-        blueprint_end = self.main.index("function renderTradingResearchDetail", blueprint_start)
-        blueprint = self.main[blueprint_start:blueprint_end]
-        self.assertIn('"ea-ready-strategy-research/2.0.0"', blueprint)
+        brief_start = self.main.index("const TRADING_RESEARCH_STRATEGY_BRIEF_SCHEMA_VERSION")
+        brief_end = self.main.index("function renderTradingResearchDetail", brief_start)
+        brief = self.main[brief_start:brief_end]
+        self.assertIn('"ea-strategy-brief/1.0.0"', brief)
         for key in (
-            "barSemantics",
-            "entry.buy",
-            "entry.sell",
-            "exit.buy",
-            "exit.sell",
-            "orderManagement.breakEven",
-            "orderManagement.trailingStop",
-            "orderManagement.partialClose",
-            "orderManagement.scaleIn",
-            "orderManagement.scaleOut",
-            "orderManagement.modifyStopLoss",
-            "orderManagement.modifyTakeProfit",
-            "orderManagement.pendingOrders",
-            "riskAndSizing",
-            "stateMachine",
-            "precedence",
-            "pseudocode",
-            "testCases",
-            "completeness",
+            "record_id",
+            "system_name",
+            "system_overview",
+            "entry_rules",
+            "recovery_rules",
+            "exit_rules",
+            "money_management",
+            "order_execution",
+            "display_requirements",
+            "additional_notes",
         ):
-            self.assertIn(key, blueprint)
-        self.assertIn("MA10[2] <= MA60[2] && MA10[1] > MA60[1]", blueprint)
-        self.assertIn("MA10[2] >= MA60[2] && MA10[1] < MA60[1]", blueprint)
-        self.assertIn('document.createElement("details")', blueprint)
-        self.assertIn("textContent", blueprint)
-        self.assertNotIn("innerHTML", blueprint)
+            self.assertIn(key, brief)
+        self.assertIn('document.createElement("article")', brief)
+        self.assertIn("textContent", brief)
+        self.assertNotIn("innerHTML", brief)
 
     def test_research_room_expands_canonical_rules_into_ea_writer_view(self):
         blueprint_start = self.main.index("function tradingResearchBlueprintSourceStatusMeta")
@@ -426,12 +420,12 @@ const TRADING_RESEARCH_SIMULATION_REGIMES = Object.freeze([
         self.assertIn("options?.markTruncated === true", sanitizer)
         self.assertNotIn(".slice(0, 600)", sanitizer)
 
-        detail_start = self.main.index("function renderTradingResearchDetail")
-        detail_end = self.main.index("function renderTradingResearchSimulation", detail_start)
-        detail = self.main[detail_start:detail_end]
-        self.assertIn("{ limit: 5000, markTruncated: true }", detail)
-        self.assertIn("allFindings.slice(0, 50)", detail)
-        self.assertIn("ยังมีข้อค้นพบอีก", detail)
+        brief_start = self.main.index("function createTradingResearchStrategyBrief")
+        brief_end = self.main.index("function renderTradingResearchDetail", brief_start)
+        brief = self.main[brief_start:brief_end]
+        self.assertIn("markTruncated: true", brief)
+        self.assertIn("limit: 5000", brief)
+        self.assertIn("TRADING_RESEARCH_STRATEGY_BRIEF_FIELDS.forEach", brief)
 
     def test_research_management_cards_show_scope_and_provenance_even_when_disabled(self):
         start = self.main.index("function createTradingResearchBlueprintManagedFeature")
@@ -507,7 +501,9 @@ console.log(JSON.stringify({ above, below, unknown }));
         self.assertIn("domain.researchHistory", matcher)
         self.assertIn("historyReportId === sourceReportId && historyRecordId === sourceRecordId", matcher)
         self.assertIn("matchingNameSystems.length === 1", matcher)
-        self.assertIn("eaResearch: tradingResearchBlueprintObject(row.eaResearch)", matcher)
+        self.assertIn("...tradingResearchBlueprintObject(row.eaResearch)", matcher)
+        self.assertIn("row.strategyBrief", matcher)
+        self.assertIn("row.briefDigest", matcher)
         self.assertNotIn("eaImplementationBlueprint", matcher)
         self.assertNotIn("eaBlueprint", matcher)
 
@@ -560,11 +556,12 @@ console.log(JSON.stringify({
         render_start = self.main.index("function createTradingResearchRevisionCta")
         render_end = self.main.index("function renderTradingResearchDetail", render_start)
         rerun = self.main[render_start:render_end]
-        self.assertIn("เลือกระบบต้นทางเพื่อวิจัย Revision ใหม่", rerun)
+        self.assertIn("กลับไปเลือกและกดวิเคราะห์ Revision ใหม่", rerun)
+        self.assertIn("ระบบจะสร้าง Mission ใหม่เมื่อกด", self.main)
         self.assertIn('data-workflow-action-form="deep_research_system"', rerun)
         self.assertIn('data-workflow-field="sourceReportId"', rerun)
         self.assertIn('data-workflow-field="sourceRecordId"', rerun)
-        self.assertIn("รายงานเก่า ต้องวิจัยเป็น Revision ใหม่", self.main)
+        self.assertIn("ข้อมูลรุ่นเดิมถูกย่อเป็น 10 หัวข้อ", self.main)
 
     def test_research_room_reports_sheet_rows_rejected_by_backend_without_urls(self):
         normalizer_start = self.main.index("function normalizeTradingSystemResearchLabDomain")
@@ -782,30 +779,40 @@ console.log(JSON.stringify({
         self.assertIn("MN1", frontend_timeframes)
         self.assertIn("MN1: 30 * 24 * 60 * 60 * 1000", self.main[frontend_start:frontend_end])
 
-    def test_research_report_never_promotes_simulation_or_missing_backtest_numbers(self):
-        summary_start = self.main.index("function renderTradingResearchSummary")
-        summary_end = self.main.index("function renderTradingResearchLabPanel", summary_start)
-        summary = self.main[summary_start:summary_end]
-        self.assertIn("REPORT ที่ไม่สร้างตัวเลขทดแทน", summary)
-        self.assertIn("กราฟ Educational Simulation จะไม่ถูกนับเป็นผลทดสอบ", summary)
-        self.assertIn("session.backtest?.ok", summary)
-        self.assertIn("ยังไม่มีผล Backtest สำหรับระบบนี้", summary)
-        self.assertNotIn("generateTradingResearchSimulationBars", summary)
-
+    def test_research_panel_only_renders_two_steps_and_sheet_sync_gates_handoff(self):
         renderer_start = self.main.index("function renderTradingResearchLabPanel")
         renderer_end = self.main.index("function renderWorkflowDomainPanel", renderer_start)
         renderer = self.main[renderer_start:renderer_end]
-        for tab_id in ("research", "chart", "backtest", "report"):
+        for tab_id in ("select", "analysis"):
             self.assertIn(f'tabId === "{tab_id}"', renderer)
+        for removed_tab_id in ("research", "chart", "backtest", "report"):
+            self.assertNotIn(f'tabId === "{removed_tab_id}"', renderer)
         self.assertIn("metrics.systems แบบ array ครบ 3 ระบบ", renderer)
+
+        confirmation_start = self.main.index("function tradingResearchConfirmationReadModel")
+        confirmation_end = self.main.index("function tradingResearchBlueprintHasValue", confirmation_start)
+        confirmation = self.main[confirmation_start:confirmation_end]
+        self.assertIn("sheetDelivery.synced === true", confirmation)
+        self.assertIn("raw.handoffReady === true && deliverySynced", confirmation)
+        self.assertIn("!handoffReady", confirmation)
+
+        panel_start = self.main.index("function createTradingResearchConfirmationPanel")
+        panel_end = self.main.index("function createTradingResearchCatalogRejectionNotice", panel_start)
+        panel = self.main[panel_start:panel_end]
+        self.assertIn("confirmation.handoffReady", panel)
+        self.assertIn("บันทึกระบบนี้ลง Google Sheet", panel)
+        self.assertIn("submit.disabled = !canConfirm", panel)
+        self.assertNotIn('document.createElement("input")', panel)
+        self.assertIn("briefModel.canonical === true", panel)
+        self.assertIn("เปิดโรงงาน EA", panel)
+        self.assertIn("ลองบันทึก Google Sheet อีกครั้ง", panel)
 
         for selector in (
             ".workflow-trading-research-lab",
             ".workflow-research-lab-header",
-            ".workflow-research-system-selector",
-            ".workflow-research-candlestick-chart",
-            ".workflow-research-backtest-form",
-            ".workflow-research-backtest-result",
+            ".workflow-research-selection",
+            ".workflow-research-confirmation",
+            ".workflow-research-strategy-brief-grid",
         ):
             self.assertIn(selector, self.styles)
 
@@ -874,8 +881,9 @@ console.log(JSON.stringify({
         detail_end = self.main.index("function tradingResearchMovingAverage", detail_start)
         detail = self.main[detail_start:detail_end]
         self.assertIn("tradingResearchReportsForSystem(domain, system)[0]", detail)
-        self.assertIn('className = "workflow-research-result-provenance"', detail)
-        self.assertIn("matchingResearch.linkedMissionId", detail)
+        self.assertIn("tradingResearchStrategyBriefReadModel(matchingResearch)", detail)
+        self.assertIn("createTradingResearchStrategyBrief(briefReadModel, matchingResearch)", detail)
+        self.assertIn("briefReadModel.canonical", detail)
         summary_start = self.main.index("function renderTradingResearchSummary")
         summary_end = self.main.index("function renderTradingResearchLabPanel", summary_start)
         summary = self.main[summary_start:summary_end]
@@ -889,6 +897,140 @@ console.log(JSON.stringify({
         self.assertIn("isFxNewsDashboard || isDirectResearchDashboard", dashboard)
         self.assertIn('["right_server_racks", "right_tool_console", "terminal_workstation"].includes(subject.id)', dashboard)
         self.assertNotIn('["left_server_racks", "right_server_racks", "right_tool_console", "terminal_workstation"]', dashboard)
+
+    def test_research_analysis_shows_ten_field_brief_and_truthful_attempt_states(self):
+        normalize_start = self.main.index("function normalizeTradingSystemResearchLabDomain")
+        normalize_end = self.main.index("function resetTradingResearchConfirmationStatus", normalize_start)
+        normalizer = self.main[normalize_start:normalize_end]
+        self.assertIn('const researchAttempts = workflowReportRows(report, "trading_system_research_report")', normalizer)
+        self.assertIn("researchAttempts,", normalizer)
+        self.assertIn('["ready", "completed", "verified"]', normalizer)
+
+        detail_start = self.main.index("function renderTradingResearchDetail")
+        detail_end = self.main.index("function tradingResearchMovingAverage", detail_start)
+        detail = self.main[detail_start:detail_end]
+        self.assertNotIn("createTradingResearchSourceSnapshot(system, domain)", detail)
+        self.assertIn("createTradingResearchStrategyBrief(briefReadModel, matchingResearch)", detail)
+        self.assertIn("createTradingResearchConfirmationPanel(matchingResearch, briefReadModel)", detail)
+        self.assertIn("tradingResearchAttemptsForSystem(domain, system)", detail)
+        self.assertIn("createTradingResearchAttemptStatus(system, attempt)", detail)
+        self.assertNotIn("createTradingSystemCard(", detail)
+        self.assertNotIn("workflow-research-supporting-grid", detail)
+
+        attempt_start = self.main.index("function createTradingResearchAttemptStatus")
+        attempt_end = self.main.index("function createTradingResearchRevisionCta", attempt_start)
+        attempt_panel = self.main[attempt_start:attempt_end]
+        for exact_field in ("Mission ID", "Research Report ID", "Failure code"):
+            self.assertIn(exact_field, attempt_panel)
+        self.assertIn("Revision นี้กำลังวิเคราะห์เชิงลึก", attempt_panel)
+        self.assertIn("Revision ล่าสุดไม่ผ่านการตรวจจาก Backend", attempt_panel)
+        self.assertIn("ยังไม่มี Revision ที่บันทึกลง Google Sheet ได้", attempt_panel)
+        self.assertIn("Semantic repair", attempt_panel)
+
+        for selector in (
+            ".workflow-research-source-snapshot",
+            ".workflow-research-source-snapshot-facts",
+            ".workflow-research-attempt-status",
+            ".workflow-research-attempt-facts",
+            ".workflow-research-attempt-errors",
+        ):
+            self.assertIn(selector, self.styles)
+
+    def test_research_attempts_bind_exact_pair_and_failed_output_is_not_hidden(self):
+        helper_start = self.main.index("function tradingResearchAttemptsForSystem")
+        helper_end = self.main.index("function tradingResearchAttemptReadModel", helper_start)
+        helper = self.main[helper_start:helper_end]
+        source = helper + r"""
+const system = {
+  sourceReportId: "source-report-1",
+  sourceRecordId: "source-row-1",
+  latestResearchReportId: "attempt-blocked",
+};
+const domain = {
+  researchAttempts: [
+    { id: "attempt-ready", status: "ready", updatedAt: "2026-09-10T08:00:00Z", workflowContext: { source: { reportId: "source-report-1", recordId: "source-row-1" } } },
+    { id: "wrong-record", status: "blocked", updatedAt: "2026-09-10T09:30:00Z", workflowContext: { source: { reportId: "source-report-1", recordId: "source-row-2" } } },
+    { id: "attempt-blocked", status: "blocked", updatedAt: "2026-09-10T09:00:00Z", workflowContext: { source: { reportId: "source-report-1", recordId: "source-row-1" } } },
+  ],
+};
+console.log(JSON.stringify({
+  ids: tradingResearchAttemptsForSystem(domain, system).map((row) => row.id),
+  wrongPair: tradingResearchAttemptsForSystem(domain, { ...system, sourceRecordId: "missing" }).length,
+}));
+"""
+        result = self.run_node_json(source)
+        self.assertEqual(result["ids"], ["attempt-blocked", "attempt-ready"])
+        self.assertEqual(result["wrongPair"], 0)
+
+        reader_start = self.main.index("function tradingResearchAttemptQueueState")
+        reader_end = self.main.index("const TRADING_RESEARCH_BLUEPRINT_SCHEMA_VERSION", reader_start)
+        reader = self.main[reader_start:reader_end]
+        source = r"""
+const TRADING_RESEARCH_STATE_LABELS = Object.freeze({
+  not_started: "not started",
+  in_progress: "running",
+  needs_revision: "revision",
+  research_failed: "failed",
+});
+function tradingResearchBlueprintObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function safeDashboardDisplayText(value, fallback = "") {
+  const text = String(value ?? "").trim();
+  return text || fallback;
+}
+""" + reader + r"""
+const failed = tradingResearchAttemptReadModel(
+  { researchState: "needs_revision", latestResearchMissionId: "mission-fallback" },
+  {
+    id: "attempt-blocked",
+    status: "blocked",
+    linkedMissionId: "mission-exact",
+    summary: "Structured output invalid",
+    metrics: {
+      semanticRepair: {
+        attempted: true,
+        succeeded: false,
+        issues: [{ code: "ORIGINAL_ISSUE", path: "$.old", message: "old issue" }],
+        remainingIssues: [{ code: "RULE_MISSING", path: "$.entry.buy", message: "entry rule missing" }],
+      },
+      workflowOutput: {
+        failureCode: "trading_system_research_output_contract_invalid",
+        entryErrors: ["BLUEPRINT_JSON_INVALID:$"],
+        missingFields: ["eaBlueprint", "sourceDigest"],
+      },
+    },
+  },
+);
+const fallback = tradingResearchAttemptReadModel(
+  { researchState: "needs_revision" },
+  { status: "blocked", metrics: { workflowOutput: { entryErrors: ["BLUEPRINT_JSON_INVALID:$"] } } },
+);
+const running = tradingResearchAttemptReadModel(
+  { researchState: "in_progress", latestResearchMissionId: "mission-running" },
+  null,
+);
+console.log(JSON.stringify({ failed, fallback, running }));
+"""
+        result = self.run_node_json(source)
+        self.assertEqual(result["failed"]["state"], "research_failed")
+        self.assertTrue(result["failed"]["requiresRetry"])
+        self.assertEqual(result["failed"]["reportId"], "attempt-blocked")
+        self.assertEqual(result["failed"]["missionId"], "mission-exact")
+        self.assertEqual(
+            result["failed"]["failureCode"],
+            "trading_system_research_output_contract_invalid",
+        )
+        self.assertEqual(
+            result["failed"]["entryErrors"],
+            ["RULE_MISSING • @ $.entry.buy • entry rule missing"],
+        )
+        self.assertTrue(result["failed"]["semanticRepairAttempted"])
+        self.assertFalse(result["failed"]["semanticRepairSucceeded"])
+        self.assertEqual(result["fallback"]["entryErrors"], ["BLUEPRINT_JSON_INVALID:$"])
+        self.assertEqual(result["running"]["state"], "in_progress")
+        self.assertTrue(result["running"]["isRunning"])
+        self.assertEqual(result["running"]["missionId"], "mission-running")
 
     def test_out_of_order_agent_missions_use_newest_meaningful_activity(self):
         active_start = self.main.index("function getActiveMissionForAgent")
@@ -991,7 +1133,7 @@ console.log(JSON.stringify({ ordered, reversed, activeId: active?.id || null }))
         expected_last_ids = {
             "codex_mcp_portal": "catalog",
             "left_signal_cube": "history",
-            "left_server_racks": "report",
+            "left_server_racks": "analysis",
             "right_server_racks": "final_report",
             "right_tool_console": "history",
             "left_audit_crystals": "archive",
@@ -1024,7 +1166,7 @@ console.log(JSON.stringify({ ordered, reversed, activeId: active?.id || null }))
                         "ประวัติข่าว"
                         if prop_id == "left_signal_cube"
                         else (
-                            "สรุป Report"
+                            "2 แจกแจง EA-ready / บันทึก"
                             if prop_id == "left_server_racks"
                             else ("7 ไฟล์และ Report" if prop_id == "right_server_racks" else "ประวัติและรายงาน")
                         )
@@ -1069,7 +1211,9 @@ console.log(JSON.stringify({ ordered, reversed, activeId: active?.id || null }))
         self.assertIn("ยังไม่มีผล Visual Backtest จริง", self.main)
         self.assertIn("ระบบจะไม่แสดง Win Rate, Profit Factor หรือ Drawdown", self.main)
         self.assertIn('root.schemaVersion === "ea-factory-v1"', self.main)
-        self.assertIn('root.mode === "manual_stage_by_stage"', self.main)
+        self.assertIn("EA_FACTORY_SUPPORTED_MODES.has(root.mode)", self.main)
+        self.assertIn('"one_click_with_manual_stage_recovery"', self.main)
+        self.assertIn('"manual_stage_by_stage"', self.main)
         self.assertIn("root.scheduled === false", self.main)
         self.assertIn("const suppliedTabMap = new Map", self.main)
         self.assertIn("(fallback.tabs || []).length", self.main)
@@ -1147,7 +1291,10 @@ console.log(JSON.stringify({ ordered, reversed, activeId: active?.id || null }))
         self.assertIn("ปิดและเปิดอุปกรณ์นี้ใหม่เพื่อลองอีกครั้ง", availability)
         self.assertIn("dashboard.workflowReadModel?.authoritative === true", card)
         self.assertIn("submit.disabled = !canSubmit || inFlight", card)
-        self.assertLess(open_dialog.index("const reportRequest = loadPropReport(propId)"), open_dialog.index("openGameModal("))
+        self.assertLess(open_dialog.index("const eaFactoryRequest"), open_dialog.index("openGameModal("))
+        self.assertIn("? loadEaFactoryReadModel()", open_dialog)
+        self.assertIn("? Promise.resolve(null)\n    : loadPropReport(propId)", open_dialog)
+        self.assertNotIn("reportRequest.then(() => loadEaFactoryReadModel())", open_dialog)
         self.assertIn("await reportRequest", open_dialog)
         self.assertIn("state.modal.id === propId", open_dialog)
 

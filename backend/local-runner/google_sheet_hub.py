@@ -18,6 +18,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
@@ -36,8 +37,13 @@ GOOGLE_OAUTH_MAX_PENDING_FLOWS = 8
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_OAUTH_ERROR_RESPONSE_BYTES = 16 * 1024
 MAX_OAUTH_CLIENT_JSON_BYTES = 64 * 1024
+MAX_OAUTH_NATIVE_CLIENT_BYTES = 4 * 1024
 DEFAULT_TIMEOUT_SECONDS = 20
 OAUTH_STORE_REQUEST_LEASE_TIMEOUT_SECONDS = DEFAULT_TIMEOUT_SECONDS + 5
+GOOGLE_OAUTH_NATIVE_CLIENT_PATH = Path(__file__).resolve().with_name(
+    "google_oauth_native_client.txt"
+)
+_CENTRAL_CLIENT_GENERATION_DOMAIN = b"metafx-google-oauth-central-release-v2\x00"
 SAFE_SHEET_ID = re.compile(r"^[A-Za-z0-9_-]{20,128}$")
 _OAUTH_FLOW_LOCK = threading.RLock()
 _PENDING_OAUTH_FLOWS: dict[str, dict] = {}
@@ -146,29 +152,141 @@ def _environment_oauth_client(env: dict[str, str]) -> dict[str, str]:
     }
 
 
+def _central_release_oauth_client() -> dict[str, str]:
+    """Load the native-app credential injected into the verified release.
+
+    The credential is deliberately excluded from the public Git tree. User
+    grants and tokens remain in the Windows current-user DPAPI store. A
+    domain-separated, deterministic generation binds those grants to the
+    exact release credential pair.
+    """
+
+    path = Path(GOOGLE_OAUTH_NATIVE_CLIENT_PATH)
+    try:
+        with path.open("rb") as handle:
+            payload = handle.read(MAX_OAUTH_NATIVE_CLIENT_BYTES + 1)
+    except FileNotFoundError:
+        return _environment_oauth_client({})
+    except OSError as error:
+        raise GoogleSheetHubError(
+            "oauth_client_configuration_unreadable",
+            "The Metafxclub Google OAuth release client configuration could not be read.",
+            503,
+        ) from error
+    if not payload or len(payload) > MAX_OAUTH_NATIVE_CLIENT_BYTES:
+        raise GoogleSheetHubError(
+            "invalid_oauth_client",
+            "The Metafxclub Google OAuth release client configuration is invalid.",
+            503,
+        )
+    try:
+        text = payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise GoogleSheetHubError(
+            "invalid_oauth_client",
+            "The Metafxclub Google OAuth release client configuration is invalid.",
+            503,
+        ) from error
+    if any(character not in {"\r", "\n"} and ord(character) < 32 for character in text):
+        raise GoogleSheetHubError(
+            "invalid_oauth_client",
+            "The Metafxclub Google OAuth release client configuration is invalid.",
+            503,
+        )
+    # Permit the platform-standard LF or CRLF line separator and one optional
+    # final newline, while rejecting lone CR characters and all extra lines.
+    if "\r" in text.replace("\r\n", ""):
+        raise GoogleSheetHubError(
+            "invalid_oauth_client",
+            "The Metafxclub Google OAuth release client configuration is invalid.",
+            503,
+        )
+    lines = text.splitlines()
+    if len(lines) != 2:
+        raise GoogleSheetHubError(
+            "invalid_oauth_client",
+            "The Metafxclub Google OAuth release client configuration is invalid.",
+            503,
+        )
+    parsed: dict[str, str] = {}
+    keys: list[str] = []
+    for line in lines:
+        key, separator, value = line.partition("=")
+        if (
+            separator != "="
+            or not key
+            or not value
+            or key in parsed
+            or key != key.strip()
+            or value != value.strip()
+        ):
+            raise GoogleSheetHubError(
+                "invalid_oauth_client",
+                "The Metafxclub Google OAuth release client configuration is invalid.",
+                503,
+            )
+        keys.append(key)
+        parsed[key] = value
+    if keys != ["client_id", "client_secret"]:
+        raise GoogleSheetHubError(
+            "invalid_oauth_client",
+            "The Metafxclub Google OAuth release client configuration is invalid.",
+            503,
+        )
+    try:
+        configuration = google_oauth_store.validate_client_configuration(
+            parsed["client_id"],
+            parsed["client_secret"],
+        )
+    except google_oauth_store.SecureStoreError as error:
+        raise GoogleSheetHubError(error.code, error.message, 503) from error
+    if not configuration["clientSecret"]:
+        raise GoogleSheetHubError(
+            "invalid_oauth_client",
+            "The Metafxclub Google OAuth release client configuration is invalid.",
+            503,
+        )
+    generation = hashlib.sha256(
+        _CENTRAL_CLIENT_GENERATION_DOMAIN
+        + configuration["clientId"].encode("utf-8")
+        + b"\x00"
+        + configuration["clientSecret"].encode("utf-8")
+    ).hexdigest()
+    return {
+        **configuration,
+        "clientGeneration": generation,
+        "source": "central_release",
+    }
+
+
 def oauth_client_configuration(environ: dict[str, str] | None = None) -> dict[str, str]:
     """Resolve a Desktop OAuth client without exposing it to the browser.
 
     An explicitly supplied environment mapping is an isolated/test contract and
-    therefore never falls through to the current user's durable store.  Normal
-    runtime calls use the DPAPI-protected client first, then the legacy
-    environment configuration as a backwards-compatible fallback.
+    therefore never falls through to the current user's durable store or the
+    release file.  Normal runtime calls use the DPAPI-protected client first,
+    then the legacy process environment, then the central release client.
     """
 
-    env = environ if isinstance(environ, dict) else os.environ
-    if environ is None:
-        try:
-            stored = google_oauth_store.load_client_configuration_record()
-        except google_oauth_store.SecureStoreError as error:
-            raise GoogleSheetHubError(error.code, error.message, 503) from error
-        if isinstance(stored, dict) and str(stored.get("clientId") or "").strip():
-            return {
-                "clientId": str(stored.get("clientId") or "").strip(),
-                "clientSecret": str(stored.get("clientSecret") or "").strip(),
-                "clientGeneration": str(stored.get("clientGeneration") or "").strip(),
-                "source": "secure_store",
-            }
-    return _environment_oauth_client(env)
+    if isinstance(environ, dict):
+        # Explicit mappings are isolated test/integration contracts.  They do
+        # not inspect the Windows store, process environment, or release file.
+        return _environment_oauth_client(environ)
+    try:
+        stored = google_oauth_store.load_client_configuration_record()
+    except google_oauth_store.SecureStoreError as error:
+        raise GoogleSheetHubError(error.code, error.message, 503) from error
+    if isinstance(stored, dict) and str(stored.get("clientId") or "").strip():
+        return {
+            "clientId": str(stored.get("clientId") or "").strip(),
+            "clientSecret": str(stored.get("clientSecret") or "").strip(),
+            "clientGeneration": str(stored.get("clientGeneration") or "").strip(),
+            "source": "secure_store",
+        }
+    environment = _environment_oauth_client(os.environ)
+    if environment["clientId"]:
+        return environment
+    return _central_release_oauth_client()
 
 
 def _safe_client_status(configuration: dict[str, str]) -> dict:
@@ -364,12 +482,15 @@ def remove_google_oauth_client_configuration(
         or str(env.get("METAFX_GOOGLE_OAUTH_REFRESH_TOKEN") or "").strip()
         or str(env.get("METAFX_GOOGLE_SHEETS_ACCESS_TOKEN") or "").strip()
     )
+    fallback = oauth_client_configuration(environ)
+    fallback_client_id = str(fallback.get("clientId") or "").strip()
+    fallback_source = str(fallback.get("source") or "not_configured")
     return {
         "ok": True,
         "kind": "google_oauth_client_removed",
-        "configured": False,
-        "clientHint": "",
-        "store": "empty",
+        "configured": bool(fallback_client_id),
+        "clientHint": google_oauth_store.client_id_hint(fallback_client_id),
+        "store": fallback_source if fallback_client_id else "empty",
         "removed": bool(refresh_removed or client_removed),
         "clientRemoved": client_removed,
         "authorizationRemoved": refresh_removed,
@@ -426,7 +547,11 @@ def credential_status(environ: dict[str, str] | None = None) -> dict:
             or (
                 "ready"
                 if client.get("source") == "secure_store"
-                else ("environment" if client_id else "empty")
+                else (
+                    str(client.get("source") or "not_configured")
+                    if client_id
+                    else "empty"
+                )
             )
         ),
         "secureStoreStatus": str(store.get("status") or "unknown"),
@@ -1354,6 +1479,7 @@ def upsert_row(
     row_by_header: dict[str, object],
     *,
     optional_headers: set[str] | frozenset[str] | tuple[str, ...] = (),
+    exact_headers: tuple[str, ...] | list[str] = (),
     environ: dict[str, str] | None = None,
     open_url: Callable = urlopen,
     max_rows: int = 10000,
@@ -1372,6 +1498,21 @@ def upsert_row(
     duplicate_headers = sorted({header for header in headers if header and headers.count(header) > 1})
     if duplicate_headers:
         raise GoogleSheetHubError("schema_mismatch", "Google Sheet has duplicate canonical column names.", 409)
+    expected_headers = [
+        canonical_header(value)
+        for value in exact_headers
+        if canonical_header(value)
+    ]
+    if expected_headers and headers != expected_headers:
+        # Exact-schema tabs are authoritative transports, not extensible user
+        # tables.  Reject drift before reading record keys or issuing a write,
+        # otherwise an added/reordered column could silently change the row
+        # contract between verification and a later outbox flush.
+        raise GoogleSheetHubError(
+            "schema_mismatch",
+            "Google Sheet columns do not exactly match the configured schema.",
+            409,
+        )
     if key_header not in headers:
         raise GoogleSheetHubError("schema_mismatch", "Google Sheet key column is missing.", 409)
     optional = {

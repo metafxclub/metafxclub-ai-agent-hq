@@ -533,7 +533,7 @@ class EaFactoryBlueprintCoverageGateTests(unittest.TestCase):
             "}\n"
         )
 
-    def runner_fixture(
+    def legacy_runner_fixture(
         self,
         root: Path,
         build_id: str,
@@ -1228,7 +1228,7 @@ class EaFactoryBlueprintCoverageGateTests(unittest.TestCase):
                         target_platform="mt4",
                     )
 
-    def test_runner_rejects_marker_sink_without_trading_and_accepts_semantic_source(self) -> None:
+    def test_runner_rejects_all_legacy_v2_sources_without_writing(self) -> None:
         four_line_source = (
             "#property strict\n"
             "#define SIGNAL_NONE -1\n"
@@ -1237,7 +1237,7 @@ class EaFactoryBlueprintCoverageGateTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            relative, source_root, prompt = self.runner_fixture(
+            relative, source_root, prompt = self.legacy_runner_fixture(
                 root,
                 "ea-build-coverage-runner",
             )
@@ -1245,7 +1245,10 @@ class EaFactoryBlueprintCoverageGateTests(unittest.TestCase):
                 mock.patch.object(RUNNER, "PROJECT_ROOT", root),
                 mock.patch.object(RUNNER, "AUTO_WORKSPACE_ROOT", root / "workspace"),
             ):
-                with self.assertRaisesRegex(ValueError, "does not cover every"):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "only compact A-J Strategy Spec v3",
+                ):
                     RUNNER.materialize_ea_factory_source_result(
                         json.dumps({"fileName": "TinyEA.mq4", "content": four_line_source}),
                         prompt,
@@ -1253,7 +1256,10 @@ class EaFactoryBlueprintCoverageGateTests(unittest.TestCase):
                     )
                 self.assertFalse((source_root / "TinyEA.mq4").exists())
 
-                with self.assertRaisesRegex(ValueError, "does not cover every"):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "only compact A-J Strategy Spec v3",
+                ):
                     RUNNER.materialize_ea_factory_source_result(
                         json.dumps({
                             "fileName": "MarkerSinkEA.mq4",
@@ -1264,30 +1270,30 @@ class EaFactoryBlueprintCoverageGateTests(unittest.TestCase):
                     )
                 self.assertFalse((source_root / "MarkerSinkEA.mq4").exists())
 
-                result = RUNNER.materialize_ea_factory_source_result(
-                    json.dumps({"fileName": "CoveredEA.mq4", "content": self.covered_source()}),
-                    prompt,
-                    relative,
-                )
-            values = {
-                row["field"]: row["value"] for row in result["contractFields"]
-            }
-            manifest = json.loads(values["blueprintCoverageManifest"])
-            self.assertTrue(manifest["complete"])
-            self.assertEqual(manifest["expected"], manifest["observed"])
-            self.assertTrue(all(not rows for rows in manifest["semanticMissing"].values()))
-            self.assertEqual(manifest["capabilityMissing"], [])
-            self.assertEqual(manifest["targetPlatform"], "mt4")
-            self.assertLessEqual(len(values["blueprintCoverageManifest"]), 12000)
-            self.assertTrue((source_root / "CoveredEA.mq4").is_file())
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "only compact A-J Strategy Spec v3",
+                ):
+                    RUNNER.materialize_ea_factory_source_result(
+                        json.dumps({
+                            "fileName": "CoveredEA.mq4",
+                            "content": self.covered_source(),
+                        }),
+                        prompt,
+                        relative,
+                    )
+            self.assertEqual(
+                {item.name for item in source_root.iterdir()},
+                {"strategy-spec-v01.json"},
+            )
 
-    def test_max_rule_structured_result_fits_ea_factory_transport_budget(self) -> None:
+    def test_legacy_max_rule_v2_runner_is_rejected_without_write(self) -> None:
         blueprint, blueprint_digest, requirements, source = (
             self.maximum_rule_fixture()
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            relative, source_root, prompt = self.runner_fixture(
+            relative, source_root, prompt = self.legacy_runner_fixture(
                 root,
                 "ea-build-coverage-max-rules",
                 blueprint=blueprint,
@@ -1298,34 +1304,31 @@ class EaFactoryBlueprintCoverageGateTests(unittest.TestCase):
                 mock.patch.object(RUNNER, "PROJECT_ROOT", root),
                 mock.patch.object(RUNNER, "AUTO_WORKSPACE_ROOT", root / "workspace"),
             ):
-                result = RUNNER.materialize_ea_factory_source_result(
-                    json.dumps({"fileName": "MaximumRulesEA.mq4", "content": source}),
-                    prompt,
-                    relative,
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "only compact A-J Strategy Spec v3",
+                ):
+                    RUNNER.materialize_ea_factory_source_result(
+                        json.dumps({
+                            "fileName": "MaximumRulesEA.mq4",
+                            "content": source,
+                        }),
+                        prompt,
+                        relative,
+                    )
+                self.assertEqual(
+                    {item.name for item in source_root.iterdir()},
+                    {"strategy-spec-v01.json"},
                 )
-                self.assertTrue((source_root / "MaximumRulesEA.mq4").is_file())
-        values = {row["field"]: row["value"] for row in result["contractFields"]}
-        manifest = json.loads(values["blueprintCoverageManifest"])
-        serialized = json.dumps(
-            result,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        self.assertTrue(manifest["complete"], manifest)
-        self.assertGreater(len(serialized), 40_000)
-        self.assertLess(
-            len(serialized),
-            BRIDGE.EA_FACTORY_SOURCE_RUNNER_TRANSPORT_MAX_CHARS,
-        )
         self.assertEqual(
             BRIDGE.EA_FACTORY_SOURCE_RUNNER_TRANSPORT_MAX_CHARS,
             128_000,
         )
 
-    def test_runner_propagates_mt5_into_semantic_manifest(self) -> None:
+    def test_legacy_v2_mt5_runner_is_rejected_before_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            relative, source_root, prompt = self.runner_fixture(
+            relative, source_root, prompt = self.legacy_runner_fixture(
                 root,
                 "ea-build-coverage-runner-mt5",
                 "mt5",
@@ -1334,19 +1337,22 @@ class EaFactoryBlueprintCoverageGateTests(unittest.TestCase):
                 mock.patch.object(RUNNER, "PROJECT_ROOT", root),
                 mock.patch.object(RUNNER, "AUTO_WORKSPACE_ROOT", root / "workspace"),
             ):
-                result = RUNNER.materialize_ea_factory_source_result(
-                    json.dumps({
-                        "fileName": "CoveredRawEA.mq5",
-                        "content": self.covered_raw_mt5_source(),
-                    }),
-                    prompt,
-                    relative,
-                )
-            values = {row["field"]: row["value"] for row in result["contractFields"]}
-            manifest = json.loads(values["blueprintCoverageManifest"])
-            self.assertEqual(manifest["targetPlatform"], "mt5")
-            self.assertTrue(manifest["complete"])
-            self.assertTrue((source_root / "CoveredRawEA.mq5").is_file())
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "only compact A-J Strategy Spec v3",
+                ):
+                    RUNNER.materialize_ea_factory_source_result(
+                        json.dumps({
+                            "fileName": "CoveredRawEA.mq5",
+                            "content": self.covered_raw_mt5_source(),
+                        }),
+                        prompt,
+                        relative,
+                    )
+            self.assertEqual(
+                {item.name for item in source_root.iterdir()},
+                {"strategy-spec-v01.json"},
+            )
 
     def test_marker_sink_has_all_tokens_but_fails_semantic_capabilities(self) -> None:
         source = self.marker_sink_source()
@@ -2772,7 +2778,7 @@ class EaFactoryBlueprintCoverageGateTests(unittest.TestCase):
         self.assertTrue(manifest["capabilityEvidence"]["tradeEntry"])
         self.assertTrue(manifest["capabilityEvidence"]["tradeExit"])
 
-    def test_backend_rejects_missing_manifest_id_and_accepts_exact_recompute(self) -> None:
+    def test_backend_rejects_legacy_v2_workspace_without_mutation(self) -> None:
         build_id = "ea-build-coverage-backend"
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -2788,139 +2794,18 @@ class EaFactoryBlueprintCoverageGateTests(unittest.TestCase):
                     "eaImplementationBlueprint": self.blueprint,
                     "eaBlueprintDigest": self.blueprint_digest,
                 }
-                workspace = BRIDGE._ea_factory_create_build_workspace(
-                    build_id,
-                    source_record,
-                    "mt5",
-                )
-                source_path = (
-                    root
-                    / "workspace"
-                    / "ea-factory"
-                    / build_id
-                    / "Source"
-                    / "CoveredEA.mq5"
-                )
-                source_text = self.covered_raw_mt5_source()
-                source_path.write_text(source_text, encoding="utf-8")
-                source_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
-                expected_manifest = BRIDGE.ea_factory_coverage_manifest(
-                    self.requirements,
-                    source_text,
-                    strategy_spec_digest=workspace["strategySpecDigest"],
-                    source_digest=source_digest,
-                    target_platform="mt5",
-                )
-                stages = BRIDGE._ea_factory_initial_stages(
-                    "mt4",
-                    {"id": "mission-spec-coverage"},
-                    {"id": "report-spec-coverage"},
-                )
-                build = {
-                    "id": build_id,
-                    "sourceReportId": "report-spec-coverage",
-                    "sourceRecordId": "ea-source-coverage",
-                    "sourceRecordDigest": "a" * 64,
-                    "platform": "mt5",
-                    "brief": "",
-                    "workspace": workspace,
-                    "stages": stages,
-                    "versions": [],
-                }
-                values = {
-                    "sourceFiles": json.dumps([
-                        f"workspace/ea-factory/{build_id}/Source/CoveredEA.mq5"
-                    ]),
-                    "sourceDigest": source_digest,
-                    "sourceRecordDigest": "a" * 64,
-                    "strategySpecDigest": workspace["strategySpecDigest"],
-                    "blueprintCoverageManifest": json.dumps(expected_manifest),
-                    "platform": "mt5",
-                }
-                report = {
-                    "id": "report-generation-coverage",
-                    "type": "ea_build_report",
-                    "linkedPropId": "right_server_racks",
-                    "workflowContext": {
-                        "propId": "right_server_racks",
-                        "actionId": "build_strategy_code",
-                    },
-                    "metrics": {
-                        "workflowOutput": {
-                            "applicable": True,
-                            "valid": True,
-                            "expectedFields": list(BRIDGE.EA_FACTORY_STRUCTURED_SOURCE_OUTPUT_FIELDS),
-                            "providedFields": list(BRIDGE.EA_FACTORY_STRUCTURED_SOURCE_OUTPUT_FIELDS),
-                            "missingFields": [],
-                            "expectedEvidenceKinds": list(BRIDGE.EA_FACTORY_STRUCTURED_SOURCE_EVIDENCE_KINDS),
-                            "providedEvidenceKinds": list(BRIDGE.EA_FACTORY_STRUCTURED_SOURCE_EVIDENCE_KINDS),
-                            "missingEvidenceKinds": [],
-                            "values": values,
-                        }
-                    },
-                }
-                tampered = copy.deepcopy(expected_manifest)
-                category = next(key for key, rows in tampered["observed"].items() if rows)
-                tampered["observed"][category].pop()
-                report["metrics"]["workflowOutput"]["values"][
-                    "blueprintCoverageManifest"
-                ] = json.dumps(tampered)
-                with mock.patch.object(
-                    BRIDGE,
-                    "_ea_factory_report_binding_valid",
-                    return_value=True,
+                with self.assertRaisesRegex(
+                    BRIDGE.DataIntegrityError,
+                    "only digest-bound Strategy Spec v3 compact A-J builds",
                 ):
-                    self.assertFalse(
-                        BRIDGE._ea_factory_generation_evidence_valid(
-                            build,
-                            report,
-                            ingest_sources=False,
-                        )
+                    BRIDGE._ea_factory_create_build_workspace(
+                        build_id,
+                        source_record,
+                        "mt5",
                     )
-                    report["metrics"]["workflowOutput"]["values"][
-                        "blueprintCoverageManifest"
-                    ] = json.dumps(expected_manifest)
-                    self.assertTrue(
-                        BRIDGE._ea_factory_generation_evidence_valid(
-                            build,
-                            report,
-                            ingest_sources=False,
-                        )
-                    )
-                self.assertEqual(
-                    build["blueprintCoverageManifest"],
-                    expected_manifest,
+                self.assertFalse(
+                    (root / "workspace" / "ea-factory" / build_id).exists()
                 )
-                self.assertEqual(expected_manifest["targetPlatform"], "mt5")
-
-                # Even a Worker-supplied manifest recomputed from a file that
-                # names every marker must fail when the actual immutable bytes
-                # only contain a no-trade marker sink.
-                sink_text = self.marker_sink_source()
-                source_path.write_text(sink_text, encoding="utf-8")
-                sink_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
-                sink_manifest = BRIDGE.ea_factory_coverage_manifest(
-                    self.requirements,
-                    sink_text,
-                    strategy_spec_digest=workspace["strategySpecDigest"],
-                    source_digest=sink_digest,
-                    target_platform="mt5",
-                )
-                self.assertFalse(sink_manifest["complete"])
-                values["sourceDigest"] = sink_digest
-                values["blueprintCoverageManifest"] = json.dumps(sink_manifest)
-                with mock.patch.object(
-                    BRIDGE,
-                    "_ea_factory_report_binding_valid",
-                    return_value=True,
-                ):
-                    self.assertFalse(
-                        BRIDGE._ea_factory_generation_evidence_valid(
-                            build,
-                            report,
-                            ingest_sources=False,
-                        )
-                    )
 
 
 if __name__ == "__main__":

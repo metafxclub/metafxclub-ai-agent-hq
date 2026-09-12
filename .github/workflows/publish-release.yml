@@ -29,7 +29,10 @@ jobs:
   compatibility:
     needs: release_ref_guard
     runs-on: windows-latest
-    timeout-minutes: 10
+    # Cold hosted runners also create a pinned virtual environment before the
+    # 2,000+ test regression gate. Do not let runner variance cancel a valid
+    # classroom release before the package checks begin.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -105,6 +108,9 @@ jobs:
 
       - name: Build release package
         shell: pwsh
+        env:
+          METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_ID: ${{ secrets.METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_ID }}
+          METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_SECRET: ${{ secrets.METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_SECRET }}
         run: |
           $ErrorActionPreference = 'Stop'
           trap {
@@ -127,6 +133,15 @@ jobs:
           $tag = "v$version"
           $archive = "Metafxclub-AI-Agent-HQ-$tag-Windows.zip"
           $checksum = "$archive.sha256"
+
+          if (
+            [string]::IsNullOrWhiteSpace($env:METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_ID) -or
+            [string]::IsNullOrWhiteSpace($env:METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_SECRET) -or
+            $env:METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_ID -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{8,240}\.apps\.googleusercontent\.com$' -or
+            $env:METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_SECRET -notmatch '^GOCSPX-[A-Za-z0-9_-]{16,}$'
+          ) {
+            throw "Required release OAuth client configuration is missing or invalid."
+          }
 
           $existingRelease = $false
           $existingReleaseNeedsPublish = $false
@@ -179,7 +194,28 @@ jobs:
 
           # Always build and smoke-test the exact current archive. An existing
           # release tag must never bypass package integrity verification.
-          git archive --format=zip --prefix="Metafxclub-AI-Agent-HQ-$tag/" --output=$archive HEAD
+          # Keep the native-app credential out of the public Git tree. Build a
+          # clean archive from HEAD, inject the two release-only values from
+          # GitHub Actions secrets, and checksum the exact resulting package.
+          $packageNonce = [Guid]::NewGuid().ToString("N")
+          $sourceArchive = Join-Path $env:RUNNER_TEMP "metafxclub-source-$tag-$packageNonce.zip"
+          $injectionRoot = Join-Path $env:RUNNER_TEMP "metafxclub-release-inject-$tag-$packageNonce"
+          git archive --format=zip --prefix="Metafxclub-AI-Agent-HQ-$tag/" --output=$sourceArchive HEAD
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to archive the verified Git source for release packaging."
+          }
+          New-Item -ItemType Directory -Path $injectionRoot -Force | Out-Null
+          Expand-Archive -LiteralPath $sourceArchive -DestinationPath $injectionRoot -Force
+          $injectedPackageRoot = Join-Path $injectionRoot "Metafxclub-AI-Agent-HQ-$tag"
+          $injectedClientPath = Join-Path $injectedPackageRoot "backend\local-runner\google_oauth_native_client.txt"
+          New-Item -ItemType Directory -Path (Split-Path -Parent $injectedClientPath) -Force | Out-Null
+          $utf8NoBom = New-Object Text.UTF8Encoding($false)
+          $nativeClientPayload = "client_id=$($env:METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_ID)`nclient_secret=$($env:METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_SECRET)`n"
+          [IO.File]::WriteAllText($injectedClientPath, $nativeClientPayload, $utf8NoBom)
+          if (Test-Path -LiteralPath $archive) {
+            Remove-Item -LiteralPath $archive -Force
+          }
+          Compress-Archive -LiteralPath $injectedPackageRoot -DestinationPath $archive -CompressionLevel Optimal
           $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $archive" | Set-Content -LiteralPath $checksum -Encoding ascii
 
@@ -218,8 +254,12 @@ jobs:
               "backend\local-runner\ea_factory_blueprint_coverage.py",
               "backend\local-runner\ea_factory_indicator_coverage.py",
               "backend\local-runner\ea_factory_metaeditor_compile.py",
+              "backend\local-runner\ea_factory_visible_terminal.py",
+              "backend\local-runner\ea_factory_visible_terminal.ps1",
               "backend\local-runner\ea_research_blueprint.py",
+              "backend\local-runner\ea_strategy_brief.py",
               "backend\local-runner\configure_google_oauth_client.py",
+              "backend\local-runner\google_oauth_native_client.txt",
               "backend\local-runner\google_oauth_store.py",
               "backend\local-runner\google_sheet_hub.py",
               "contracts\research\ea-implementation-blueprint-v2.schema.json",
@@ -482,7 +522,15 @@ jobs:
                 throw "Release ZIP legacy-listener upgrade smoke failed with exit code $LASTEXITCODE"
               }
 
-              foreach ($requiredInstalledFile in @(".gitattributes", ".gitignore", "VERSION")) {
+              foreach ($requiredInstalledFile in @(
+                ".gitattributes",
+                ".gitignore",
+                "VERSION",
+                "backend\local-runner\google_oauth_native_client.txt",
+                "backend\local-runner\ea_strategy_brief.py",
+                "backend\local-runner\ea_factory_visible_terminal.py",
+                "backend\local-runner\ea_factory_visible_terminal.ps1"
+              )) {
                 if (-not (Test-Path -LiteralPath (Join-Path $installedRoot $requiredInstalledFile) -PathType Leaf)) {
                   throw "Installed Runtime is missing required file: $requiredInstalledFile"
                 }
@@ -631,6 +679,19 @@ jobs:
               throw "Verified-source sentinel is not ignored as required by the staging test."
             }
 
+            # Reproduce the classroom boundary: the verified clone remains
+            # clean while the separately checksummed Release contributes only
+            # the ignored, strictly validated central native-app credential.
+            $verifiedCentralClient = Join-Path $verifiedClone "backend\local-runner\google_oauth_native_client.txt"
+            Copy-Item `
+              -LiteralPath (Join-Path $packageRoot "backend\local-runner\google_oauth_native_client.txt") `
+              -Destination $verifiedCentralClient `
+              -Force
+            git -C $verifiedClone check-ignore --quiet -- "backend/local-runner/google_oauth_native_client.txt"
+            if ($LASTEXITCODE -ne 0) {
+              throw "The release-injected central OAuth file is not isolated by the Git ignore boundary."
+            }
+
             $verifiedListener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
             $verifiedListener.Start()
             $verifiedPort = ([Net.IPEndPoint]$verifiedListener.LocalEndpoint).Port
@@ -652,6 +713,29 @@ jobs:
             if (Test-Path -LiteralPath (Join-Path $verifiedInstalledRoot "data\runtime\ci-ignored-source-sentinel.txt")) {
               throw "Verified Git staging copied an ignored worktree file into Runtime."
             }
+            $verifiedPython = Join-Path $verifiedInstalledRoot "runner\.venv\Scripts\python.exe"
+            $env:METAFX_VERIFIED_RUNNER_PATH = Join-Path $verifiedInstalledRoot "backend\local-runner"
+            $verifiedAuthJson = @(& $verifiedPython -c @'
+import json
+import os
+import sys
+sys.path.insert(0, os.environ["METAFX_VERIFIED_RUNNER_PATH"])
+import google_sheet_hub
+print(json.dumps(google_sheet_hub.google_oauth_status(), sort_keys=True))
+'@ 2>$null) | Select-Object -Last 1
+            if ($LASTEXITCODE -ne 0 -or -not $verifiedAuthJson) {
+              throw "Verified Git Runtime central OAuth status probe failed."
+            }
+            $verifiedAuth = $verifiedAuthJson | ConvertFrom-Json
+            if (
+              $verifiedAuth.clientConfigured -ne $true -or
+              $verifiedAuth.connected -ne $false -or
+              [string]$verifiedAuth.status -cne "authorization_required" -or
+              [string]$verifiedAuth.clientSource -cne "central_release"
+            ) {
+              throw "Verified Git Runtime central OAuth clean-profile contract failed."
+            }
+            Remove-Item Env:METAFX_VERIFIED_RUNNER_PATH -ErrorAction SilentlyContinue
             node --check (Join-Path $verifiedInstalledRoot "frontend\src\app\main.js")
             if ($LASTEXITCODE -ne 0) {
               throw "Verified Git Runtime frontend syntax check failed with exit code $LASTEXITCODE."
@@ -683,11 +767,11 @@ jobs:
           ชุดติดตั้ง Metafxclub AI Agent HQ สำหรับ Windows
 
           วิธีหลักสำหรับห้องเรียน — Prompt เดียวผ่าน Codex:
-          1. ติดตั้ง Git for Windows และ Python 3.10-3.14 แบบ 64-bit จาก python.org พร้อม Add Python to PATH
-          2. เปิด docs/prompts/install-github-google-auto-th.md ของ Tag รุ่นนี้
-          3. เปลี่ยนเฉพาะ Google Client ID และ Path ของ Desktop OAuth JSON แล้ววาง Prompt ทั้งชุดใน Codex
-          4. Codex จะ Clone exact Tag, ตรวจ Commit กับ GitHub, ติดตั้ง ตรวจ Health/หน้าเว็บ และเปิด http://127.0.0.1:4186/
-          5. ผู้เรียนกดเชื่อมบัญชี Google และอนุญาตบัญชีของตนเองหนึ่งครั้งใน HQ
+          1. เปิด docs/prompts/install-github-google-auto-th.md ของ Tag รุ่นนี้
+          2. วาง Prompt ทั้งชุดใน Codex โดยไม่ต้องสร้าง OAuth Client, กรอก Client ID หรือส่งไฟล์ OAuth JSON
+          3. Codex จะใช้ Git เดิมที่ทำงานได้และ Python 3.10-3.14 แบบ 64-bit ถ้ามี หรือติดตั้งเฉพาะตัวที่ขาดผ่าน WinGet แบบ current-user
+          4. Codex จะ Clone exact Tag, ตรวจ Commit กับ GitHub, ตรวจ Release ZIP/.sha256 แล้วนำเฉพาะ Client กลางที่ Release inject ไว้เข้าสู่ชุดติดตั้ง ตรวจ Health/หน้าเว็บ และเปิด http://127.0.0.1:4186/
+          5. ผู้เรียนเพียงกดเชื่อมบัญชี Google และอนุญาตบัญชีของตนเองหนึ่งครั้งใน HQ โดยไม่ต้องสร้างหรือส่ง OAuth Client เอง
 
           วิธี ZIP เป็นทางเลือก Manual เท่านั้น:
           ดาวน์โหลด ZIP พร้อม .sha256, ตรวจ Hash, แตกไฟล์ แล้วใช้ 1-INSTALL-HQ.bat ตาม STUDENT-QUICKSTART-TH.md

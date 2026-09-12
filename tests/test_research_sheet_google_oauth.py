@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -130,6 +131,82 @@ class ResearchSheetGoogleOAuthTests(unittest.TestCase):
         serialized = json.dumps(result)
         self.assertNotIn(verifier, serialized)
         self.assertNotIn(environment["METAFX_GOOGLE_OAUTH_CLIENT_SECRET"], serialized)
+
+    def test_normal_runtime_central_release_supplies_secret_to_exchange_and_refresh_only(self) -> None:
+        callback = f"http://127.0.0.1:4191{hub.GOOGLE_OAUTH_CALLBACK_PATH}"
+        with tempfile.TemporaryDirectory() as directory:
+            central_path = Path(directory) / "google_oauth_native_client.txt"
+            central_id = "central-desktop-client.apps.googleusercontent.com"
+            central_secret = "CENTRAL_TEST_ONLY_NATIVE_SECRET"
+            central_path.write_text(
+                f"client_id={central_id}\nclient_secret={central_secret}\n",
+                encoding="utf-8",
+            )
+            requests = []
+
+            def open_url(request, timeout=0):
+                form = parse_qs(request.data.decode("utf-8"))
+                requests.append((form, timeout))
+                if form["grant_type"] == ["authorization_code"]:
+                    return FakeJsonResponse(
+                        {
+                            "access_token": "CENTRAL_CODE_ACCESS_MARKER",
+                            "refresh_token": "CENTRAL_REFRESH_MARKER",
+                            "scope": hub.SHEETS_SCOPE,
+                        }
+                    )
+                return FakeJsonResponse({"access_token": "CENTRAL_REFRESH_ACCESS_MARKER"})
+
+            with (
+                mock.patch.object(hub, "GOOGLE_OAUTH_NATIVE_CLIENT_PATH", central_path),
+                mock.patch.object(
+                    store,
+                    "load_client_configuration_record",
+                    return_value=None,
+                ),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "METAFX_GOOGLE_OAUTH_CLIENT_ID": "",
+                        "METAFX_GOOGLE_OAUTH_CLIENT_SECRET": "",
+                        "METAFX_GOOGLE_OAUTH_REFRESH_TOKEN": "",
+                        "METAFX_GOOGLE_SHEETS_ACCESS_TOKEN": "",
+                    },
+                    clear=False,
+                ),
+            ):
+                result = hub.start_google_oauth(callback, now_monotonic=100)
+                internal = hub.oauth_client_configuration()
+                state = parse_qs(urlsplit(result["authorizationUrl"]).query)["state"][0]
+                completed = hub.complete_google_oauth(
+                    {"state": [state], "code": ["CENTRAL_CODE_MARKER"]},
+                    open_url=open_url,
+                    now_monotonic=101,
+                )
+                access = hub.access_token(open_url=open_url)
+                status = hub.google_oauth_status()
+
+        query = parse_qs(urlsplit(result["authorizationUrl"]).query)
+        self.assertEqual(query["client_id"], [central_id])
+        self.assertEqual(query["code_challenge_method"], ["S256"])
+        self.assertEqual(result["auth"]["clientSource"], "central_release")
+        self.assertEqual(result["auth"]["status"], "authorization_required")
+        self.assertNotIn("client_secret", query)
+        self.assertEqual(internal["clientSecret"], central_secret)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0][0]["grant_type"], ["authorization_code"])
+        self.assertEqual(requests[0][0]["client_secret"], [central_secret])
+        self.assertEqual(requests[1][0]["grant_type"], ["refresh_token"])
+        self.assertEqual(requests[1][0]["client_secret"], [central_secret])
+        self.assertEqual(access, "CENTRAL_REFRESH_ACCESS_MARKER")
+        self.assertEqual(status["clientSource"], "central_release")
+        self.assertTrue(status["connected"])
+        public_payload = json.dumps(
+            {"started": result, "completed": completed, "status": status},
+            sort_keys=True,
+        )
+        self.assertNotIn(central_secret, result["authorizationUrl"])
+        self.assertNotIn(central_secret, public_payload)
 
     def test_callback_is_one_use_exchanges_pkce_and_persists_only_refresh_token(self) -> None:
         environment = {"METAFX_GOOGLE_OAUTH_CLIENT_ID": "desktop-client"}

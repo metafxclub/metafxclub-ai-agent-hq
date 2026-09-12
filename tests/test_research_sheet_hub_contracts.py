@@ -319,9 +319,12 @@ class ResearchSheetHubContractTests(unittest.TestCase):
         factory_read = tools["ea_factory_google_sheet_read"]
         self.assertEqual(factory_read["centralConfigurationPropId"], "mission_strategy_table")
         self.assertEqual(factory_read["sheetTabDefault"], "Deep_Research")
-        self.assertEqual(factory_read["sheetRange"], "A-AW")
-        self.assertEqual(factory_read["sheetHeadersRequired"], 49)
-        self.assertEqual(factory_read["internalMapping"], "23 EA strategy fields (not a Sheet range)")
+        self.assertEqual(factory_read["sheetRange"], "A-J")
+        self.assertEqual(factory_read["sheetHeadersRequired"], 10)
+        self.assertEqual(
+            factory_read["internalMapping"],
+            "one prose Strategy Brief with 10 authoritative fields",
+        )
         self.assertEqual(factory_read["frontendIntentFields"], ["configRevision", "idempotencyKey"])
         self.assertFalse(factory_read["externalWriteEnabled"])
 
@@ -357,8 +360,14 @@ class ResearchSheetHubContractTests(unittest.TestCase):
             {"tabName", "configRevision", "status", "readReady", "rowCount", "cachedRowCount", "observedAt"}
             <= set(factory_sheet["requiredReadEvidenceFields"])
         )
-        self.assertEqual(factory_sheet["sourceRangeRequired"], "A-AW (49 required headers; extra columns allowed)")
-        self.assertEqual(factory_sheet["internalMapping"], "23 EA strategy fields (not a Sheet range)")
+        self.assertEqual(
+            factory_sheet["sourceRangeRequired"],
+            "A-J (10 exact Strategy Brief headers)",
+        )
+        self.assertEqual(
+            factory_sheet["internalMapping"],
+            "One prose Strategy Brief with 10 authoritative fields",
+        )
         self.assertEqual(factory_sheet["frontendIntentFields"], ["configRevision", "idempotencyKey"])
         self.assertFalse(factory_sheet["externalWrites"])
         self.assertTrue(factory_sheet["credentialsBackendOnly"])

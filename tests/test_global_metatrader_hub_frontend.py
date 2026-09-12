@@ -196,6 +196,7 @@ class GlobalMetatraderHubFrontendTests(unittest.TestCase):
         self.assertIn("global_selection_readback_failed", block)
         self.assertIn("reconcileGlobalMetatraderSelection(platform, candidateId)", block)
         self.assertNotIn("ค่าเดิมของทุกระบบยังคงอยู่", block)
+        self.assertIn(".filter((target) => target.propId !== EA_FACTORY_PROP_ID)", block)
         self.assertIn("loadPropReport(target.propId, { forceFresh: true })", block)
         self.assertIn("loadEaFactoryReadModel({ forceFresh: true })", block)
         self.assertNotIn("Promise.allSettled(pendingTargets.map", block)

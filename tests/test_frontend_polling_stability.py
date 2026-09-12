@@ -126,6 +126,7 @@ class FrontendPollingStabilityTests(unittest.TestCase):
         self.assertIn("force: data?.missionReadModelChanged === true", mission_poll)
         self.assertIn("Date.now() - lastLoadedAt >= OPEN_PROP_REPORT_POLL_TTL_MS", open_report_poll)
         self.assertIn("await loadPropReport(propId, { signal })", open_report_poll)
+        self.assertIn("propId !== EA_FACTORY_PROP_ID && (force || reportTtlExpired)", open_report_poll)
         self.assertIn("void pollOpenPropReport();", mission_timer)
         self.assertIn("void pollOpenPropReport({ force: true });", automatic_start)
         self.assertIn('typeof document.hasFocus === "function" && !document.hasFocus()', open_report_poll)
@@ -137,6 +138,7 @@ class FrontendPollingStabilityTests(unittest.TestCase):
         executable_poll = f"async {open_report_poll}"
         script = "\n".join([
             "const OPEN_PROP_REPORT_POLL_TTL_MS = 30000;",
+            "const EA_FACTORY_PROP_ID = 'right_server_racks';",
             "let loadCount = 0; let renderCount = 0;",
             "let focused = true;",
             "const document = { visibilityState: 'visible', hasFocus: () => focused, activeElement: { matches: () => false } };",

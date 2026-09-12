@@ -112,7 +112,21 @@ class ResearchSheetHubSchemaTemplateTests(unittest.TestCase):
     def test_deep_research_is_the_only_factory_source_tab(self) -> None:
         headers, rows = read_schema_template(WRITE_TEMPLATE_BY_PROP["left_server_racks"])
         self.assertEqual(rows, [headers], "Schema templates must contain one header row only")
-        self.assertEqual(len(headers), 49)
+        self.assertEqual(
+            headers,
+            [
+                "record_id",
+                "system_name",
+                "system_overview",
+                "entry_rules",
+                "recovery_rules",
+                "exit_rules",
+                "money_management",
+                "order_execution",
+                "display_requirements",
+                "additional_notes",
+            ],
+        )
         self.assertNotIn("right_server_racks", self.contracts)
 
 

@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -224,6 +225,49 @@ class GoogleOAuthModuleSecurityTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.hub._PENDING_OAUTH_FLOWS.clear()
         self.stack.close()
+
+    def test_central_release_native_credential_is_internal_and_explicit_environment_stays_isolated(self) -> None:
+        central_id = "central-security-client.apps.googleusercontent.com"
+        central_secret = "CENTRAL_SECURITY_TEST_ONLY_SECRET"
+        with tempfile.TemporaryDirectory() as directory:
+            central_path = Path(directory) / "google_oauth_native_client.txt"
+            central_path.write_text(
+                f"client_id={central_id}\nclient_secret={central_secret}\n",
+                encoding="utf-8",
+            )
+            log = io.StringIO()
+            with (
+                patch.object(
+                    self.hub,
+                    "GOOGLE_OAUTH_NATIVE_CLIENT_PATH",
+                    central_path,
+                ),
+                patch.dict(os.environ, {}, clear=True),
+                redirect_stderr(log),
+            ):
+                first = self.hub.oauth_client_configuration()
+                second = self.hub.oauth_client_configuration()
+                status = self.hub.google_oauth_status()
+                started = self.hub.start_google_oauth(
+                    self.redirect_uri,
+                    now_monotonic=100,
+                )
+                isolated = self.hub.oauth_client_configuration({})
+
+        self.assertEqual(first["source"], "central_release")
+        self.assertEqual(first["clientSecret"], central_secret)
+        self.assertEqual(first["clientGeneration"], second["clientGeneration"])
+        self.assertRegex(first["clientGeneration"], r"^[0-9a-f]{64}$")
+        self.assertEqual(status["clientSource"], "central_release")
+        self.assertEqual(status["status"], "authorization_required")
+        self.assertNotIn(central_id, json.dumps(status))
+        public_output = json.dumps({"status": status, "started": started}, sort_keys=True)
+        self.assertNotIn(central_secret, public_output)
+        self.assertNotIn(central_secret, log.getvalue())
+        self.assertNotIn("client_secret", authorization_query(started))
+        assert_no_secret_fields(self, started)
+        self.assertEqual(isolated["source"], "not_configured")
+        self.assertEqual(isolated["clientId"], "")
 
     def start(self, *, now: float = 100.0, hub=None) -> tuple[dict, dict[str, list[str]]]:
         module = hub or self.hub

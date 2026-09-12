@@ -279,6 +279,13 @@
         "executionTimeframe": {
           "$ref": "#/$defs/nonEmptyString"
         },
+        "supportingTimeframes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
         "timezone": {
           "$ref": "#/$defs/nonEmptyString"
         },

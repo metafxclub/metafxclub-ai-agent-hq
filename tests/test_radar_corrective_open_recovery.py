@@ -211,7 +211,8 @@ class RadarCorrectiveOpenRecoveryTests(unittest.TestCase):
             "codex_exec_jsonl+isolated_direct_url_verifier",
         )
         self.assertTrue(result["webSearchEvidenceVerified"])
-        quota_probe.assert_called_once_with(timeout=5)
+        self.assertEqual(quota_probe.call_count, 4)
+        quota_probe.assert_has_calls([mock.call(timeout=5)] * 4)
         self.assertEqual(manifest["resultProfile"], "radar_website_tool")
         self.assertEqual(manifest["requiredUrlCount"], 6)
         self.assertEqual(

@@ -11,6 +11,14 @@ from tests.release_secret_scan import find_sensitive_filenames, scan_embedded_se
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CENTRAL_NATIVE_CLIENT_RELATIVE_PATH = (
+    Path("backend") / "local-runner" / "google_oauth_native_client.txt"
+)
+CENTRAL_NATIVE_CLIENT_PATH = PROJECT_ROOT / CENTRAL_NATIVE_CLIENT_RELATIVE_PATH
+
+
+def _is_source_checkout() -> bool:
+    return (PROJECT_ROOT / ".git").exists()
 
 
 class ReleaseCandidatePreflightTests(unittest.TestCase):
@@ -28,7 +36,10 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
             "docs/prompts/install-github-google-auto-th.md",
             "backend/local-runner/bridge_server.py",
             "backend/local-runner/ea_factory_blueprint_coverage.py",
+            "backend/local-runner/ea_factory_visible_terminal.py",
+            "backend/local-runner/ea_factory_visible_terminal.ps1",
             "backend/local-runner/ea_research_blueprint.py",
+            "backend/local-runner/ea_strategy_brief.py",
             "backend/local-runner/configure_google_oauth_client.py",
             "backend/local-runner/google_oauth_store.py",
             "backend/local-runner/google_sheet_hub.py",
@@ -41,14 +52,72 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
             "contracts/research/ea-implementation-blueprint-v2.schema.json",
             "contracts/workflows/ea-factory-contract.json",
         )
+        if not _is_source_checkout():
+            required += (CENTRAL_NATIVE_CLIENT_RELATIVE_PATH.as_posix(),)
         missing = [path for path in required if not (PROJECT_ROOT / path).is_file()]
         self.assertEqual(missing, [])
+
+    def test_central_google_oauth_native_client_is_release_only_and_exact(self) -> None:
+        if _is_source_checkout():
+            self.assertFalse(
+                CENTRAL_NATIVE_CLIENT_PATH.exists(),
+                "real central OAuth material may be injected only after source checkout",
+            )
+            ignored = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8-sig")
+            self.assertRegex(
+                ignored,
+                r"(?m)^/?backend/local-runner/google_oauth_native_client\.txt$",
+            )
+            tracked = subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    f"safe.directory={PROJECT_ROOT.as_posix()}",
+                    "ls-files",
+                    "--",
+                    CENTRAL_NATIVE_CLIENT_RELATIVE_PATH.as_posix(),
+                ],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(tracked.returncode, 0, tracked.stderr)
+            self.assertEqual(tracked.stdout.strip(), "")
+            return
+
+        raw = CENTRAL_NATIVE_CLIENT_PATH.read_text(encoding="utf-8")
+        lines = raw.splitlines()
+
+        self.assertLessEqual(len(raw.encode("utf-8")), 4096)
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("client_id="))
+        self.assertTrue(lines[1].startswith("client_secret="))
+        client_id = lines[0].removeprefix("client_id=")
+        client_secret = lines[1].removeprefix("client_secret=")
+        self.assertRegex(
+            client_id,
+            r"^[A-Za-z0-9][A-Za-z0-9._-]{8,240}\.apps\.googleusercontent\.com$",
+        )
+        self.assertRegex(client_secret, r"^GOCSPX-[A-Za-z0-9_-]{16,}$")
+        for prohibited in ("access_token", "refresh_token", "1//", "ya29.", "{", "}"):
+            with self.subTest(prohibited=prohibited):
+                self.assertNotIn(prohibited, raw)
 
     def test_release_tree_contains_no_secret_material_or_credential_files(self) -> None:
         # Findings intentionally contain only a relative path and a rule name;
         # never echo matching content into installer or GitHub Actions logs.
         self.assertEqual(find_sensitive_filenames(PROJECT_ROOT), [])
-        self.assertEqual(scan_embedded_secrets(PROJECT_ROOT), [])
+        self.assertEqual(
+            scan_embedded_secrets(
+                PROJECT_ROOT,
+                allow_central_native_client=not _is_source_checkout(),
+            ),
+            [],
+        )
 
     def test_all_distributed_python_sources_compile_without_importing(self) -> None:
         paths = [

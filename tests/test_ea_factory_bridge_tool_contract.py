@@ -24,12 +24,14 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
         )
         cls.tools = {row["id"]: row for row in permissions["tools"]}
 
-    def test_four_factory_control_endpoints_and_safe_download_are_declared(self):
+    def test_factory_control_endpoints_and_safe_download_are_declared(self):
         core_expected = {
             "GET /api/props/right_server_racks/ea-factory",
             "POST /api/props/right_server_racks/ea-factory/sources/google-sheet/sync",
             "POST /api/props/right_server_racks/ea-factory/builds",
             "POST /api/props/right_server_racks/ea-factory/builds/:buildId/advance",
+            "POST /api/props/right_server_racks/ea-factory/builds/:buildId/retry",
+            "POST /api/props/right_server_racks/ea-factory/builds/:buildId/run",
         }
         download = "GET /api/props/right_server_racks/ea-factory/builds/:buildId/files/:fileId"
         declared = {
@@ -77,6 +79,11 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
             shapes["syncGoogleSheet"]["requiredRequestFields"],
             [],
         )
+        self.assertEqual(shapes["runBuild"]["allowedRequestFields"], ["idempotencyKey"])
+        self.assertEqual(shapes["runBuild"]["requiredRequestFields"], ["idempotencyKey"])
+        self.assertTrue(shapes["runBuild"]["sameKeyResumesAwaitingVisibleTerminal"])
+        self.assertFalse(shapes["runBuild"]["phaseGateBypassAllowed"])
+        self.assertFalse(shapes["runBuild"]["liveTradingAllowed"])
         self.assertEqual(
             shapes["syncGoogleSheet"]["defaults"],
             {
@@ -86,7 +93,13 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
         )
         self.assertEqual(
             shapes["createBuild"]["allowedRequestFields"],
-            ["sourceRecordId", "platform", "brief", "idempotencyKey"],
+            [
+                "sourceRecordId",
+                "artifactKind",
+                "platform",
+                "brief",
+                "idempotencyKey",
+            ],
         )
         self.assertEqual(
             shapes["createBuild"]["requiredRequestFields"],
@@ -112,14 +125,31 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
                 "final_report",
             ],
         )
+        retry = shapes["retryBuildStage"]
+        self.assertEqual(
+            retry["allowedRequestFields"],
+            ["stageId", "failedMissionId", "idempotencyKey"],
+        )
+        self.assertEqual(retry["requiredRequestFields"], retry["allowedRequestFields"])
+        self.assertEqual(retry["stageIdValues"], ["generate_source"])
+        self.assertEqual(retry["allowedFailureCodes"], ["invalid_output"])
+        self.assertTrue(retry["requiresNoSourceOrVersion"])
+        self.assertTrue(retry["freshMission"])
+        self.assertEqual(retry["maximumAttempts"], 3)
 
-    def test_read_model_shape_is_manual_frontend_safe_and_stable(self):
+    def test_read_model_shape_is_one_click_frontend_safe_and_stable(self):
         factory = self.bridge["ea_factory"]
-        self.assertEqual(factory["execution"]["mode"], "manual_stage_by_stage")
+        self.assertEqual(
+            factory["execution"]["mode"],
+            "one_click_with_manual_stage_recovery",
+        )
         self.assertFalse(factory["execution"]["scheduled"])
         self.assertFalse(factory["execution"]["schedulerEnabled"])
-        self.assertFalse(factory["execution"]["automaticLoop"])
+        self.assertTrue(factory["execution"]["automaticLoop"])
         self.assertTrue(factory["execution"]["oneRequestAdvancesAtMostOneStage"])
+        self.assertTrue(factory["execution"]["oneClickCoordinatorAdvancesVerifiedStages"])
+        self.assertTrue(factory["execution"]["visibleTerminalStagesRequireExplicitCrashResume"])
+        self.assertEqual(factory["execution"]["visibleActionRetryLimit"], 3)
 
         model = factory["readModelShape"]
         self.assertEqual(model["envelopeFields"], ["ok", "eaFactory"])
@@ -138,6 +168,7 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
                 "stages",
                 "currentStageId",
                 "terminalSelection",
+                "oneClick",
                 "terminalGate",
                 "endpoints",
                 "safety",
@@ -167,6 +198,9 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
         )
         self.assertIn("evidenceVerified", model["stageFields"])
         self.assertIn("artifacts", model["stageFields"])
+        self.assertIn("canRetry", model["stageFields"])
+        self.assertIn("retryAttemptCount", model["stageFields"])
+        self.assertIn("retryAttemptLimit", model["stageFields"])
         self.assertEqual(
             model["fileFields"],
             [
@@ -187,7 +221,21 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
         self.assertEqual(model["fileDigestFields"], ["fileId", "sha256"])
         self.assertIn("platform", model["terminalCandidateFields"])
         self.assertIn("adapterReady", model["terminalGateFields"])
+        self.assertIn("terminalExecutionAllowed", model["terminalSelectionFields"])
+        self.assertIn("runEndpoint", model["oneClickFields"])
+        self.assertIn("supportedVisiblePlatforms", model["oneClickFields"])
+        self.assertIn("selectedPlatformSupported", model["oneClickFields"])
+        self.assertIn("terminalRunning", model["oneClickFields"])
+        self.assertIn("terminalMustAlreadyBeRunning", model["oneClickFields"])
+        self.assertIn("terminalProcessLaunchAllowed", model["oneClickFields"])
+        self.assertIn("idempotencyKey", model["oneClickRunFields"])
+        self.assertIn("canResume", model["oneClickRunFields"])
+        self.assertIn(
+            "requiresExplicitResume",
+            model["oneClickVisibleActionFields"],
+        )
         self.assertIn("downloadArtifactTemplate", model["endpointFields"])
+        self.assertIn("retryBuildStageTemplate", model["endpointFields"])
         self.assertNotIn("sheetId", model["frontendForbiddenFields"])
         self.assertNotIn("rawSheetId", model["frontendForbiddenFields"])
         self.assertIn("serviceAccountKey", model["frontendForbiddenFields"])

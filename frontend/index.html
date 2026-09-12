@@ -7,7 +7,7 @@
     <title>Metafxclub AI Pixel HQ - ห้องทำงาน Agent Codex/MCP</title>
   <link rel="icon" href="data:," />
   <base href="../" />
-  <link rel="stylesheet" href="./frontend/src/app/styles.css?v=20260907-global-metatrader-v079" />
+  <link rel="stylesheet" href="./frontend/src/app/styles.css?v=20260912-ea-factory-guard-v0918" />
   </head>
   <body>
     <main class="app-shell">
@@ -333,6 +333,25 @@
           <span id="codexRateReset">รอข้อมูลเวลารีเซ็ต</span>
           <span id="codexRateFreshness">กำลังตรวจสอบ</span>
         </div>
+        <form class="codex-rate-reserve" id="codexRateReserveForm">
+          <label for="codexRateReserveInput">ให้ AI ทำงานเมื่อคงเหลืออย่างน้อย</label>
+          <div class="codex-rate-reserve-controls">
+            <input
+              id="codexRateReserveInput"
+              type="number"
+              min="0"
+              max="100"
+              step="1"
+              inputmode="numeric"
+              value="15"
+              aria-describedby="codexRateReserveHint codexRateReserveStatus"
+            />
+            <span aria-hidden="true">%</span>
+            <button id="codexRateReserveSave" type="submit">บันทึก</button>
+          </div>
+          <small id="codexRateReserveHint">0 = ใช้ได้จนโควตาหมด • ค่านี้ใช้ร่วมกันทุกระบบ</small>
+          <output id="codexRateReserveStatus" for="codexRateReserveInput" aria-live="polite">เกณฑ์ส่วนกลาง 15%</output>
+        </form>
         <div class="codex-rate-secondary" id="codexRateSecondary" hidden>
           <div class="codex-rate-secondary-copy">
             <span id="codexRateSecondaryLabel">รอบโควตารอง</span>
@@ -1151,7 +1170,7 @@
     (() => {
       "use strict";
 
-      const RUNTIME_BUILD_VERSION = "20260907-global-metatrader-v079";
+      const RUNTIME_BUILD_VERSION = "20260912-ea-factory-guard-v0918";
       const EXPECTED_AGENT_COUNT = 10;
       const RUNTIME_PATH = "./frontend/src/app/main.js";
       const diagnostic = document.getElementById("bootDiagnostic");

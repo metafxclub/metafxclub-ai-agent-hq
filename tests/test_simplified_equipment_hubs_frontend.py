@@ -495,7 +495,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
         self.assertIn("เหตุการณ์ตลอดวัน", self.main)
 
         html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-        self.assertIn("20260907-global-metatrader-v079", html)
+        self.assertIn("20260912-ea-factory-guard-v0918", html)
         self.assertNotIn("20260814-ai-meeting-preview-v063", html)
         self.assertNotIn("20260814-radar-contract-v062", html)
         self.assertNotIn("20260814-daily-news-direct-v060", html)

@@ -35,27 +35,14 @@ class EaFactoryFollowupHardeningTests(unittest.TestCase):
         return {
             "record_id": "followup-system-001",
             "system_name": "Follow-up Verified System",
-            "strategy_family": "trend_following",
-            "symbols_market": "EURUSD / Forex",
-            "timeframe": "H1",
-            "entry_rules": "Enter only after a confirmed trend signal",
-            "exit_rules": "Exit only after the opposite confirmed signal",
-            "stop_loss": "fixed 100 points",
-            "take_profit": "fixed 200 points",
-            "recovery": "none",
-            "lot_risk": "1 percent fixed fractional",
-            "indicators": "EMA 20 and EMA 50",
-            "special_conditions": "one position at a time",
-            "source_urls": "https://example.org/followup-system",
-            "verification_status": "verified",
-            "backtest_status": "not_run",
-            "backtest_report": "",
-            "optimization_status": "not_run",
-            "optimization_report": "",
-            "issues": "none",
-            "next_action": "build",
-            "target_platform": "mt4",
-            "updated_at": "2026-08-24T09:00:00+07:00",
+            "system_overview": "Closed-bar EMA trend system for a selected liquid market and timeframe.",
+            "entry_rules": "Buy on a confirmed fast EMA cross above slow; sell on the inverse closed-bar cross.",
+            "recovery_rules": "No recovery, grid, martingale, averaging, or hedging.",
+            "exit_rules": "Close on the opposite signal with bounded stop loss and take profit.",
+            "money_management": "Use a positive fixed lot and at most one managed position.",
+            "order_execution": "Use market buy and sell orders on a new confirmed bar.",
+            "display_requirements": "Display system name, signal, Balance, Equity, and Spread.",
+            "additional_notes": "Compile and backtest separately before use.",
         }
 
     def writer_ready_status(self) -> dict:
@@ -128,6 +115,7 @@ class EaFactoryFollowupHardeningTests(unittest.TestCase):
         )
         build = {
             "id": build_id,
+            "coverageStatus": "compact_current",
             "platform": "mt4",
             "sourceRecordId": "ea-source-false-approval",
             "sourceRecordDigest": "a" * 64,
@@ -1203,6 +1191,40 @@ void OnTick()
         )
         self.assertIsNone(
             self.bridge._trusted_backend_ea_factory_worker_sandbox(tampered)
+        )
+
+    def test_compact_source_review_phrase_keeps_backend_auto_sandbox(self) -> None:
+        build, _legacy_brief, legacy_lineage = self.factory_review_fixture(
+            "ea-build-worker-review-compact"
+        )
+        with mock.patch.object(
+            self.bridge,
+            "_ea_factory_review_strategy_spec",
+            return_value={"schemaVersion": "ea-factory-strategy-spec-v3"},
+        ):
+            brief = self.bridge._ea_factory_review_brief(build)
+        self.assertIn("Do not edit files", brief)
+        form = {
+            "sourceReportId": "report-worker-generation",
+            "platform": "mt4",
+            "brief": brief,
+        }
+        profile = self.bridge._trusted_workflow_plugin_profile(
+            "right_server_racks",
+            "review_source_code",
+            form,
+        )
+        lineage = self.bridge._dashboard_workflow_lineage(
+            "right_server_racks",
+            "review_source_code",
+            form,
+            legacy_lineage["source"],
+            trigger_source="backend",
+            plugin_profile=profile,
+        )
+        self.assertEqual(
+            self.bridge._trusted_backend_ea_factory_stage_guard_intent(lineage),
+            "{}",
         )
 
     def test_factory_worker_commands_and_audit_use_exact_stage_sandboxes(self) -> None:
@@ -2672,6 +2694,7 @@ void OnTick()
         )
         build = {
             "id": build_id,
+            "coverageStatus": "compact_current",
             "platform": "mt4",
             "sourceRecordDigest": "a" * 64,
             "sourceReportId": "report-pending-strategy-spec",

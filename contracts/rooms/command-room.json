@@ -255,7 +255,7 @@
       "summary": "โรงงานแบบกดทำทีละขั้นจากคลังวิจัยหรือ Google Sheets: ตรวจ Strategy Spec สร้างและตรวจ Source จากนั้น Compile/Validate และ Visual Backtest ตามหลักฐานของแพลตฟอร์ม",
       "metrics": {
         "โหมด": "Manual ทีละขั้น",
-        "ข้อมูลต้นทาง": "คลังวิจัย + Sheet A-W",
+        "ข้อมูลต้นทาง": "Strategy Brief จากคลังวิจัย + Sheet A-J",
         "MT4 / MT5 / Pine": "รองรับ",
         "ขั้นตอน": "6 Stage + Source"
       },

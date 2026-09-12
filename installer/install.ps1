@@ -30,6 +30,7 @@ $sourceRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot)).TrimEnd
 $installRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "Metafxclub\AI-Agent-HQ")).TrimEnd("\")
 $installLog = Join-Path $env:LOCALAPPDATA "Metafxclub\AI-Agent-HQ-Install.log"
 $requirementsName = "requirements-runner.txt"
+$centralGoogleOAuthClientRelativePath = "backend\local-runner\google_oauth_native_client.txt"
 $bridgeEndpointPath = Join-Path $installRoot "data\runtime\bridge-endpoint.json"
 $installResultPath = Join-Path $installRoot "data\runtime\install-result.json"
 $bridgeTaskName = "Metafxclub AI Agent HQ Bridge"
@@ -49,6 +50,7 @@ $watchdogStatus = "pending"
 $watchdogFailure = $false
 $googleSetupFailure = $false
 $googleSetupStatus = "not_requested"
+$googleSetupSource = "not_checked"
 $validatedSourceCommit = ""
 $validatedGoogleClientJsonPath = ""
 
@@ -404,6 +406,49 @@ function Get-ComparablePath {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     return [IO.Path]::GetFullPath($Path).TrimEnd("\")
+}
+
+function Assert-CentralGoogleOAuthPublicClient {
+    param([Parameter(Mandatory = $true)][string]$CandidateRoot)
+
+    $clientPath = Join-Path $CandidateRoot $centralGoogleOAuthClientRelativePath
+    if (-not (Test-Path -LiteralPath $clientPath -PathType Leaf)) {
+        throw "ชุดติดตั้งไม่มี Google OAuth Client กลางจาก Release"
+    }
+    $file = Get-Item -LiteralPath $clientPath -Force
+    if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Google OAuth Client กลางจาก Release ต้องไม่เป็น Link/Junction"
+    }
+    if ($file.Length -lt 40 -or $file.Length -gt 4096) {
+        throw "Google OAuth Client กลางจาก Release มีขนาดไม่ถูกต้อง"
+    }
+    try {
+        $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+        $rawClientId = $strictUtf8.GetString([IO.File]::ReadAllBytes($clientPath))
+        $normalized = $rawClientId.Replace("`r`n", "`n").Replace("`r", "`n").TrimEnd("`n")
+        $lines = @($normalized.Split("`n"))
+    }
+    catch {
+        throw "Google OAuth Client กลางจาก Release ไม่ใช่ UTF-8 ที่ถูกต้อง"
+    }
+    if (
+        $lines.Count -ne 2 -or
+        -not $lines[0].StartsWith("client_id=", [StringComparison]::Ordinal) -or
+        -not $lines[1].StartsWith("client_secret=", [StringComparison]::Ordinal)
+    ) {
+        throw "Google OAuth Client กลางจาก Release ไม่ผ่านสัญญาความปลอดภัยของ Desktop app"
+    }
+    $clientId = $lines[0].Substring("client_id=".Length)
+    $clientSecret = $lines[1].Substring("client_secret=".Length)
+    if (
+        $clientId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{8,240}\.apps\.googleusercontent\.com$' -or
+        $clientSecret -notmatch '^GOCSPX-[A-Za-z0-9_-]{16,}$' -or
+        $clientSecret.Length -gt 2048 -or
+        $clientSecret -match '[\x00-\x1F\x7F]' -or
+        $rawClientId -match '(?i)access_token|refresh_token|\{|\}'
+    ) {
+        throw "Google OAuth Client กลางจาก Release ไม่ผ่านสัญญาความปลอดภัยของ Desktop app"
+    }
 }
 
 function Assert-GoogleOAuthOneRunInputs {
@@ -808,10 +853,12 @@ function Assert-SafeSource {
         "backend\local-runner\ea_factory_blueprint_coverage.py",
         "backend\local-runner\ea_factory_indicator_coverage.py",
         "backend\local-runner\ea_factory_metaeditor_compile.py",
+        "backend\local-runner\ea_factory_visible_terminal.py",
+        "backend\local-runner\ea_factory_visible_terminal.ps1",
         "backend\local-runner\ea_research_blueprint.py",
+        "backend\local-runner\ea_strategy_brief.py",
         "contracts\research\ea-implementation-blueprint-v2.schema.json",
         "frontend\index.html",
-        "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MetafxHQTradeGateway.mq4",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MetafxHQTradeGateway.ex4",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\README_TH.md",
@@ -836,6 +883,13 @@ function Assert-SafeSource {
         if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot $relativePath) -PathType Leaf)) {
             throw "ชุดติดตั้งไม่สมบูรณ์: ไม่พบ $relativePath"
         }
+    }
+    $centralClientPath = Join-Path $sourceRoot $centralGoogleOAuthClientRelativePath
+    if (Test-Path -LiteralPath $centralClientPath -PathType Leaf) {
+        Assert-CentralGoogleOAuthPublicClient -CandidateRoot $sourceRoot
+    }
+    elseif ([string]::IsNullOrWhiteSpace($validatedGoogleClientJsonPath)) {
+        throw "ชุดติดตั้งไม่สมบูรณ์: ไม่พบ $centralGoogleOAuthClientRelativePath"
     }
 
     $blockedNames = @(
@@ -944,13 +998,8 @@ function Assert-EaArtifactIntegrity {
         }
     }
 
-    $integrationSource = Join-Path $CandidateRoot "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4"
     $artifactSource = Join-Path $artifactDirectory "MetafxHQTradeGateway.mq4"
-    $integrationHash = Get-Sha256Hex -LiteralPath $integrationSource
     $artifactSourceHash = Get-Sha256Hex -LiteralPath $artifactSource
-    if ($integrationHash -cne $artifactSourceHash) {
-        throw "หยุดติดตั้ง: Source EA ใน Integration ไม่ตรงกับ Source ที่ใช้สร้าง Artifact"
-    }
 
     $artifactManifestPath = Join-Path $artifactDirectory "MANIFEST.json"
     try {
@@ -972,7 +1021,7 @@ function Assert-EaArtifactIntegrity {
         [string]$artifactManifest.packageVersion -cne "2.18" -or
         [string]$artifactManifest.candidateStatus -cne "ready_visible_metaeditor_compiled" -or
         [string]$artifactManifest.sourceFile -cne "MetafxHQTradeGateway.mq4" -or
-        [string]$artifactManifest.sourceSha256 -cne $integrationHash -or
+        [string]$artifactManifest.sourceSha256 -cne $artifactSourceHash -or
         [string]$artifactManifest.binaryFile -cne "MetafxHQTradeGateway.ex4" -or
         [string]$artifactManifest.binarySha256 -cne [string]$expectedHashes["MetafxHQTradeGateway.ex4"] -or
         [long]$artifactManifest.binaryBytes -ne [long](Get-Item -LiteralPath $binaryPath).Length -or
@@ -995,7 +1044,7 @@ function Assert-EaArtifactIntegrity {
         $buildLog -notmatch '(?m)^CompileResult:\s*PASS\s*$' -or
         $buildLog -notmatch '(?m)^CompileErrors:\s*0\s*$' -or
         $buildLog -notmatch '(?m)^CompileWarnings:\s*0\s*$' -or
-        $buildLog -notmatch ("(?m)^SourceSHA256:\s*{0}\s*$" -f [regex]::Escape($integrationHash)) -or
+        $buildLog -notmatch ("(?m)^SourceSHA256:\s*{0}\s*$" -f [regex]::Escape($artifactSourceHash)) -or
         $buildLog -notmatch ("(?m)^BinarySHA256:\s*{0}\s*$" -f [regex]::Escape([string]$expectedHashes["MetafxHQTradeGateway.ex4"])) -or
         $buildLog -notmatch ("(?m)^CompileProofSHA256:\s*{0}\s*$" -f [regex]::Escape([string]$expectedHashes["COMPILE_PROOF.png"]))
     ) {
@@ -1009,12 +1058,23 @@ function Assert-EaArtifactIntegrity {
 function Assert-NoEmbeddedHighConfidenceSecrets {
     param([string]$CandidateRoot = $sourceRoot)
 
+    $nativeClientPath = Join-Path $CandidateRoot $centralGoogleOAuthClientRelativePath
+    $nativeClientPresent = Test-Path -LiteralPath $nativeClientPath -PathType Leaf
+    if ($nativeClientPresent) {
+        Assert-CentralGoogleOAuthPublicClient -CandidateRoot $CandidateRoot
+    }
+    elseif ([string]::IsNullOrWhiteSpace($validatedGoogleClientJsonPath)) {
+        throw "ชุดติดตั้งไม่สมบูรณ์: ไม่พบ $centralGoogleOAuthClientRelativePath"
+    }
     $productionRoots = @(".github", "backend", "contracts", "docs", "frontend", "installer", "integrations", "runner", "scripts", "tests")
     $textExtensions = @(".bat", ".cmd", ".css", ".html", ".js", ".json", ".md", ".mq4", ".ps1", ".py", ".txt", ".vbs", ".yaml", ".yml")
     $secretPatterns = @(
         '(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{32,}',
         '(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{30,}',
         '(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{20,}',
+        '(?<![A-Za-z0-9])GOCSPX-[A-Za-z0-9_-]{16,}',
+        '(?<![A-Za-z0-9])1//[A-Za-z0-9_-]{20,}',
+        '(?<![A-Za-z0-9])ya29\.[A-Za-z0-9._-]{20,}',
         '(?<![A-Z0-9])AKIA[A-Z0-9]{16}(?![A-Z0-9])',
         '(?<![0-9])\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])',
         '-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'
@@ -1030,6 +1090,17 @@ function Assert-NoEmbeddedHighConfidenceSecrets {
                 continue
             }
             if ($file.FullName -match '[\\/](?:\.venv|node_modules|__pycache__|dist|build)[\\/]') {
+                continue
+            }
+            if ($nativeClientPresent -and [string]::Equals(
+                [IO.Path]::GetFullPath($file.FullName),
+                [IO.Path]::GetFullPath($nativeClientPath),
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+                # This exact file is the release-injected Google Desktop
+                # installed-app credential. It is deliberately absent from the
+                # public Git tree and its strict two-line schema is validated
+                # separately before this release-package scan.
                 continue
             }
             $content = [IO.File]::ReadAllText($file.FullName)
@@ -1478,6 +1549,23 @@ function Export-VerifiedGitSource {
         New-Item -ItemType Directory -Path $DestinationRoot -Force | Out-Null
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         [IO.Compression.ZipFile]::ExtractToDirectory($archivePath, $DestinationRoot)
+
+        # The verified Git commit intentionally excludes the Google native-app
+        # credential. It is injected only into the signed/checksummed GitHub
+        # Release asset, then placed beside the verified clone by the classroom
+        # installer flow. Copy only this separately validated release file into
+        # staging; no other ignored worktree content may cross this boundary.
+        $centralClientSource = Join-Path $sourceRoot $centralGoogleOAuthClientRelativePath
+        if (Test-Path -LiteralPath $centralClientSource -PathType Leaf) {
+            Assert-CentralGoogleOAuthPublicClient -CandidateRoot $sourceRoot
+            $centralClientDestination = Join-Path $DestinationRoot $centralGoogleOAuthClientRelativePath
+            New-Item -ItemType Directory -Path (Split-Path -Parent $centralClientDestination) -Force | Out-Null
+            Copy-Item -LiteralPath $centralClientSource -Destination $centralClientDestination -Force
+            Assert-CentralGoogleOAuthPublicClient -CandidateRoot $DestinationRoot
+        }
+        elseif ([string]::IsNullOrWhiteSpace($validatedGoogleClientJsonPath)) {
+            throw "ชุดติดตั้งไม่สมบูรณ์: ไม่พบ $centralGoogleOAuthClientRelativePath"
+        }
     }
     finally {
         if (Test-Path -LiteralPath $archivePath -PathType Leaf) {
@@ -2051,30 +2139,40 @@ function Test-InstalledApplication {
     }
 }
 
-function Test-GoogleOAuthDeploymentConfigured {
+function Get-GoogleOAuthDeploymentStatus {
     param([Parameter(Mandatory = $true)][string]$CandidateRoot)
 
     $configureCli = Join-Path $CandidateRoot "backend\local-runner\configure_google_oauth_client.py"
     if (-not (Test-Path -LiteralPath $configureCli -PathType Leaf)) {
-        return $false
+        return $null
     }
     try {
         $python = Resolve-SystemPython
         $arguments = @($python.PrefixArguments) + @($configureCli, "--status")
         $output = @(& $python.FilePath @arguments 2>$null)
         if ($LASTEXITCODE -ne 0) {
-            return $false
+            return $null
         }
         $jsonLine = @($output | ForEach-Object { [string]$_ } | Where-Object { $_.TrimStart().StartsWith("{") }) | Select-Object -Last 1
         if (-not $jsonLine) {
-            return $false
+            return $null
         }
         $status = $jsonLine | ConvertFrom-Json
-        return $status.ok -eq $true -and $status.configured -eq $true
+        if ($status.ok -ne $true) {
+            return $null
+        }
+        return $status
     }
     catch {
-        return $false
+        return $null
     }
+}
+
+function Test-GoogleOAuthDeploymentConfigured {
+    param([Parameter(Mandatory = $true)][string]$CandidateRoot)
+
+    $status = Get-GoogleOAuthDeploymentStatus -CandidateRoot $CandidateRoot
+    return $null -ne $status -and $status.configured -eq $true
 }
 
 function Invoke-GoogleOAuthFirstRunSetup {
@@ -2093,11 +2191,24 @@ function Invoke-GoogleOAuthFirstRunSetup {
         return
     }
 
-    $alreadyConfigured = Test-GoogleOAuthDeploymentConfigured -CandidateRoot $CandidateRoot
+    $deploymentStatus = Get-GoogleOAuthDeploymentStatus -CandidateRoot $CandidateRoot
+    $alreadyConfigured = $null -ne $deploymentStatus -and $deploymentStatus.configured -eq $true
     if ($alreadyConfigured -and -not $explicitClientSetup) {
-        $script:googleSetupStatus = "ready_existing"
-        Write-Host "Google OAuth Client ของ Windows User นี้ตั้งค่าไว้แล้ว" -ForegroundColor Green
+        $store = [string]$deploymentStatus.store
+        $script:googleSetupSource = $store
+        if ($store -ceq "central_release") {
+            $script:googleSetupStatus = "ready_central"
+            Write-Host "Google OAuth Client กลางของ Metafxclub พร้อมแล้ว ผู้ใช้เหลือเพียงกดเชื่อมบัญชี Google" -ForegroundColor Green
+        }
+        else {
+            $script:googleSetupStatus = "ready_existing_override"
+            Write-Host "Google OAuth Client แบบกำหนดเองของ Windows User นี้ยังใช้งานต่อโดยไม่ถูกเปลี่ยน" -ForegroundColor Green
+        }
         return
+    }
+
+    if (-not $explicitClientSetup) {
+        throw "Google OAuth Client กลางจาก Release ในชุดติดตั้งไม่พร้อมใช้งาน"
     }
 
     $setupScript = Join-Path $CandidateRoot "scripts\setup-google-oauth.ps1"
@@ -2105,55 +2216,35 @@ function Invoke-GoogleOAuthFirstRunSetup {
         Write-Warning "ไม่พบ Google first-run wizard ในชุดติดตั้ง ระบบหลักจะติดตั้งต่อโดยยังไม่เปิด Google Sheet"
         return
     }
-    if (-not $explicitClientSetup) {
-        Write-Host ""
-        Write-Host "ตั้งค่า Google Sheets แบบ Private ครั้งเดียว (ไม่บังคับ)" -ForegroundColor Cyan
-        Write-Host "ใช้ OAuth Client JSON ประเภท Desktop app ของผู้เรียนเอง ระบบจะตรวจไฟล์และเก็บด้วย Windows DPAPI" -ForegroundColor DarkGray
-        $answer = Read-Host "ต้องการเลือก OAuth Client JSON ตอนนี้หรือไม่? [Y/N]"
-        if ($answer -notmatch '^(?i)y(?:es)?$') {
-            $script:googleSetupStatus = "skipped_by_user"
-            Write-Host "ข้ามขั้นตอน Google ตอนนี้ เปิด 2-SETUP-GOOGLE-HQ.bat ภายหลังได้" -ForegroundColor Yellow
-            return
-        }
-    }
-
-    # Interactive and explicit paths both use -SkipBridgeEnsure -SkipOpen;
-    # the already-verified Bridge stays online while only the DPAPI client is updated.
+    # The advanced explicit override keeps the already-verified Bridge online
+    # while only the current user's DPAPI client configuration is updated.
     $setupArguments = @(
         "-NoLogo", "-NoProfile"
     )
-    if ($explicitClientSetup) {
-        $setupArguments += "-NonInteractive"
-    }
+    $setupArguments += "-NonInteractive"
     $setupArguments += @(
         "-ExecutionPolicy", "Bypass",
         "-File", $setupScript,
         "-SkipBridgeEnsure", "-SkipOpen"
     )
-    if ($explicitClientSetup) {
-        if ([string]::IsNullOrWhiteSpace($validatedGoogleClientJsonPath)) {
-            throw "ยังไม่ได้ตรวจ Google OAuth Desktop JSON ก่อนเริ่มตั้งค่า"
-        }
-        $setupArguments += @(
-            "-ClientJsonPath", $validatedGoogleClientJsonPath,
-            "-ExpectedClientId", $ExpectedGoogleClientId
-        )
+    if ([string]::IsNullOrWhiteSpace($validatedGoogleClientJsonPath)) {
+        throw "ยังไม่ได้ตรวจ Google OAuth Desktop JSON ก่อนเริ่มตั้งค่าแบบ Advanced"
     }
+    $setupArguments += @(
+        "-ClientJsonPath", $validatedGoogleClientJsonPath,
+        "-ExpectedClientId", $ExpectedGoogleClientId
+    )
     & powershell.exe @setupArguments
     if ($LASTEXITCODE -ne 0) {
-        if ($explicitClientSetup) {
-            throw "ติดตั้ง HQ สำเร็จ แต่การตั้งค่า Google OAuth ที่ระบุไม่ผ่าน กรุณาตรวจ Path และ Client ID แล้วรันติดตั้งซ้ำ"
-        }
-        Write-Warning "ยังตั้งค่า Google ไม่สำเร็จ ระบบหลักจะติดตั้งต่อ และสามารถเปิด 2-SETUP-GOOGLE-HQ.bat เพื่อลองใหม่"
+        throw "ติดตั้ง HQ สำเร็จ แต่การตั้งค่า Google OAuth แบบ Advanced ไม่ผ่าน กรุณาตรวจ Path และ Client ID แล้วรันติดตั้งซ้ำ"
     }
-    elseif (Test-GoogleOAuthDeploymentConfigured -CandidateRoot $CandidateRoot) {
+    $deploymentStatus = Get-GoogleOAuthDeploymentStatus -CandidateRoot $CandidateRoot
+    if ($null -ne $deploymentStatus -and $deploymentStatus.configured -eq $true) {
         $script:googleSetupStatus = "ready_imported"
-    }
-    elseif ($explicitClientSetup) {
-        throw "ตัวตั้งค่า Google OAuth จบโดยไม่ยืนยัน Client ที่นำเข้า"
+        $script:googleSetupSource = [string]$deploymentStatus.store
     }
     else {
-        $script:googleSetupStatus = "skipped_by_user"
+        throw "ตัวตั้งค่า Google OAuth จบโดยไม่ยืนยัน Client ที่นำเข้า"
     }
 }
 
@@ -2505,8 +2596,9 @@ function Write-InstallResult {
                 })
             }
             google_oauth_client = [ordered]@{
-                requested = -not [string]::IsNullOrWhiteSpace($GoogleClientJsonPath)
+                requested = -not ($SkipGoogleSetup -or $SkipLaunch)
                 status = $(if ($googleSetupFailure) { "repair_required" } else { $googleSetupStatus })
+                source = $googleSetupSource
             }
         }
         safety = [ordered]@{
@@ -2690,15 +2782,14 @@ try {
             Invoke-GoogleOAuthFirstRunSetup -CandidateRoot $installRoot
         }
         catch {
-            if (-not [string]::IsNullOrWhiteSpace($GoogleClientJsonPath)) {
-                $googleSetupFailure = $true
-                $googleMessage = "Agent HQ ติดตั้งและเปิดใช้งานแล้ว แต่ยังนำเข้า Google OAuth Client ไม่สำเร็จ กรุณาตรวจ JSON/Client ID แล้วเปิด 2-SETUP-GOOGLE-HQ.bat"
-                [void]$postInstallFailures.Add($googleMessage)
-                Write-Warning $googleMessage
-            }
-            else {
-                Write-Warning "ติดตั้ง Agent HQ สำเร็จ แต่ยังตั้งค่า Google ไม่ได้ ให้เปิด 2-SETUP-GOOGLE-HQ.bat ภายหลัง: $($_.Exception.Message)"
-            }
+            $googleSetupFailure = $true
+            $googleMessage = $(if (-not [string]::IsNullOrWhiteSpace($GoogleClientJsonPath)) {
+                "Agent HQ ติดตั้งและเปิดใช้งานแล้ว แต่ยังนำเข้า Google OAuth Client แบบ Advanced ไม่สำเร็จ กรุณาตรวจ JSON/Client ID แล้วเปิด 2-SETUP-GOOGLE-HQ.bat"
+            } else {
+                "Agent HQ ติดตั้งและเปิดใช้งานแล้ว แต่ Google OAuth Client กลางไม่พร้อม กรุณารัน Repair จากชุด Release ที่ถูกต้อง"
+            })
+            [void]$postInstallFailures.Add($googleMessage)
+            Write-Warning "${googleMessage}: $($_.Exception.Message)"
         }
         if (-not $SkipShortcuts) {
             try {

@@ -344,6 +344,12 @@ OPERAND_FIELDS_BY_KIND = {
         "takeprofit",
         "profit",
         "profitcurrency",
+        # Signed unrealized P/L percentage for this position, measured from
+        # its own entry price.  The canonical operand schema already exposes
+        # ``profitpercent`` and research commonly expresses exits such as a
+        # 7-8% loss from entry.  Keeping it out of the per-kind registry made
+        # an otherwise deterministic position exit fail semantic validation.
+        "profitpercent",
         "profitpoints",
         "profitpips",
         "agebars",
@@ -791,10 +797,116 @@ def _normalize_rules(node: object) -> object:
     return result
 
 
+def _expression_has_unresolved_reference(
+    value: object,
+    *,
+    input_ids: set[str],
+    indicator_ids: set[str],
+) -> bool:
+    """Return true when an expression cannot bind an operand unambiguously.
+
+    Structured Output exposes both the canonical ``ref`` and the typed alias
+    (``indicatorId``/``inputId``).  A model can populate both with different
+    values.  Choosing whichever happens to exist would silently change the
+    strategy -- in the observed CAN SLIM case it would turn market close above
+    MA50 into MA50 above itself.  Treat a conflict or missing target as an
+    unresolved research expression instead.
+    """
+
+    if isinstance(value, list):
+        return any(
+            _expression_has_unresolved_reference(
+                item,
+                input_ids=input_ids,
+                indicator_ids=indicator_ids,
+            )
+            for item in value
+        )
+    if not isinstance(value, Mapping):
+        return False
+
+    kind = _enum(value.get("kind"))
+    if kind in {"indicator", "input"}:
+        alias_key = "indicatorId" if kind == "indicator" else "inputId"
+        allowed_ids = indicator_ids if kind == "indicator" else input_ids
+        references = []
+        for key in ("ref", alias_key):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                references.append(candidate.strip())
+        if not references or len(set(references)) != 1 or references[0] not in allowed_ids:
+            return True
+
+    return any(
+        _expression_has_unresolved_reference(
+            item,
+            input_ids=input_ids,
+            indicator_ids=indicator_ids,
+        )
+        for item in value.values()
+    )
+
+
+def _normalize_unresolved_rule_references(
+    node: object,
+    *,
+    input_ids: set[str],
+    indicator_ids: set[str],
+) -> object:
+    """Fail closed by preserving a bad research rule as explicit unknown.
+
+    This canonicalization is used only for a Blueprint that already declares
+    itself non-ready.  It keeps rule identity, prose, and evidence intact while
+    ensuring an unresolved operand can never become executable accidentally.
+    """
+
+    if isinstance(node, list):
+        return [
+            _normalize_unresolved_rule_references(
+                item,
+                input_ids=input_ids,
+                indicator_ids=indicator_ids,
+            )
+            for item in node
+        ]
+    if not isinstance(node, Mapping):
+        return node
+
+    result = dict(node)
+    expression = result.get("expression")
+    if isinstance(expression, Mapping) and _expression_has_unresolved_reference(
+        expression,
+        input_ids=input_ids,
+        indicator_ids=indicator_ids,
+    ):
+        result["expression"] = {"op": "unknown"}
+        if "sourceStatus" in result:
+            result["sourceStatus"] = "unknown"
+
+    for key, item in list(result.items()):
+        if key == "expression":
+            continue
+        result[key] = _normalize_unresolved_rule_references(
+            item,
+            input_ids=input_ids,
+            indicator_ids=indicator_ids,
+        )
+    return result
+
+
 def _normalize_candidate(value: object) -> dict[str, Any]:
     result = _parse_mapping(value, "$")
     result = _normalize_json(result)  # type: ignore[assignment]
     assert isinstance(result, dict)
+
+    completeness_declaration = result.get("completeness")
+    declared_nonready = bool(
+        isinstance(completeness_declaration, Mapping)
+        and _enum(completeness_declaration.get("status"))
+        in {"needs_clarification", "not_ea_ready"}
+        and completeness_declaration.get("eaHandoffAllowed") is False
+        and completeness_declaration.get("deterministicBacktestAllowed") is False
+    )
 
     if isinstance(result.get("schemaVersion"), str):
         result["schemaVersion"] = result["schemaVersion"].strip()
@@ -817,6 +929,11 @@ def _normalize_candidate(value: object) -> dict[str, Any]:
         scope["enabledSides"] = _dedupe_sorted_strings(scope.get("enabledSides"))
         scope["suitableFor"] = _dedupe_sorted_strings(scope.get("suitableFor"))
         scope["sessions"] = _dedupe_sorted_strings(scope.get("sessions"))
+        if "supportingTimeframes" in scope:
+            scope["supportingTimeframes"] = _dedupe_sorted_strings(
+                scope.get("supportingTimeframes"),
+                upper=True,
+            )
         for key in ("signalTimeframe", "executionTimeframe"):
             if isinstance(scope.get(key), str):
                 scope[key] = scope[key].strip().upper()
@@ -828,6 +945,18 @@ def _normalize_candidate(value: object) -> dict[str, Any]:
                 if isinstance(record, dict):
                     if key == "inputs" and "type" in record:
                         record["type"] = _enum(record["type"])
+                    if (
+                        key == "inputs"
+                        and declared_nonready
+                        and record.get("default") is None
+                        and _enum(record.get("sourceStatus"))
+                        in {"verified_fact", "derived_expansion"}
+                    ):
+                        # A verified source may establish a range or threshold
+                        # without selecting one operational EA default.  Keep
+                        # null and all evidence/bounds, but make that missing
+                        # choice explicit instead of inventing min/max/midpoint.
+                        record["sourceStatus"] = "unknown"
                     if key == "indicators" and isinstance(record.get("timeframe"), str):
                         timeframe = record["timeframe"].strip()
                         record["timeframe"] = (
@@ -877,12 +1006,24 @@ def _normalize_candidate(value: object) -> dict[str, Any]:
                                     "inputRef": period_input_ref.strip()
                                 }
                                 parameters.pop("periodInputRef", None)
+                            generic_moving_average = (
+                                _normalized_indicator_token(record.get("kind"))
+                                in EXPLICIT_MOVING_AVERAGE_KINDS
+                            )
+                            if (
+                                generic_moving_average
+                                and parameters.get("method") in (None, "")
+                            ):
+                                # A source that says only "moving average" has
+                                # not established SMA/EMA/SMMA/LWMA.  Canonicalize
+                                # the absence to the contract's explicit unknown
+                                # state and downgrade provenance without touching
+                                # the evidence links.  This makes the research
+                                # displayable while readiness remains fail-closed.
+                                parameters["method"] = "unknown"
+                                record["sourceStatus"] = "unknown"
                             if "method" in parameters:
                                 parameters["method"] = _enum(parameters["method"])
-                                generic_moving_average = (
-                                    _normalized_indicator_token(record.get("kind"))
-                                    in EXPLICIT_MOVING_AVERAGE_KINDS
-                                )
                                 if (
                                     generic_moving_average
                                     and parameters["method"] == "unknown"
@@ -898,9 +1039,13 @@ def _normalize_candidate(value: object) -> dict[str, Any]:
                                     and _enum(record.get("sourceStatus")) == "unknown"
                                     and _normalized_indicator_token(parameters["method"])
                                     in {
+                                        "unknownfromsource",
                                         "unknowngenericmovingaverage",
                                         "unknownmovingaverage",
                                         "genericmovingaverageunknown",
+                                        "sourceunknown",
+                                        "unspecified",
+                                        "notspecified",
                                     }
                                 ):
                                     # This is only a lossless enum canonicalization:
@@ -918,6 +1063,27 @@ def _normalize_candidate(value: object) -> dict[str, Any]:
     for key in ("setup", "entry", "exit", "orderManagement"):
         if key in result:
             result[key] = _normalize_rules(result[key])
+
+    if declared_nonready:
+        input_ids = {
+            str(record.get("inputId"))
+            for record in result.get("inputs", [])
+            if isinstance(record, Mapping)
+            and isinstance(record.get("inputId"), str)
+        }
+        indicator_ids = {
+            str(record.get("indicatorId"))
+            for record in result.get("indicators", [])
+            if isinstance(record, Mapping)
+            and isinstance(record.get("indicatorId"), str)
+        }
+        for key in ("setup", "entry", "exit", "orderManagement"):
+            if key in result:
+                result[key] = _normalize_unresolved_rule_references(
+                    result[key],
+                    input_ids=input_ids,
+                    indicator_ids=indicator_ids,
+                )
 
     for lifecycle_key in ("entry", "exit"):
         lifecycle = result.get(lifecycle_key)
@@ -999,6 +1165,16 @@ def _normalize_candidate(value: object) -> dict[str, Any]:
                     ):
                         if enum_key in protection:
                             protection[enum_key] = _enum(protection[enum_key])
+                    if protection.get("freezeLevelPolicy") in {
+                        "reject_entry",
+                        "defer_modify",
+                    }:
+                        # Retry controls have no execution meaning under the
+                        # two explicit non-retry policies.  Structured Output
+                        # can still populate them, so remove only this provably
+                        # incompatible pair rather than inventing retry_bounded.
+                        protection.pop("freezeRetryLimit", None)
+                        protection.pop("freezeRetryDelayMs", None)
                     if "unit" in protection:
                         protection["unit"] = _normalize_protection_unit(protection["unit"])
                     if "formula" in protection:
@@ -2092,6 +2268,14 @@ def _validate_numeric_protection_input(
         )
         return
     default = input_record.get("default")
+    if default is None and input_record.get("sourceStatus") in {
+        "unknown",
+        "operator_assumption",
+    }:
+        # Incomplete research is allowed to retain the typed protection link
+        # and its min/max evidence without fabricating a single executable
+        # value.  Global unresolved-input tracking keeps EA handoff blocked.
+        return
     valid_number = (
         isinstance(default, (int, float))
         and not isinstance(default, bool)
@@ -3201,11 +3385,21 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
         _validate_string_list(scope.get("symbols"), "$.scope.symbols", issues, min_items=1)
         _validate_nonempty_string(scope.get("signalTimeframe"), "$.scope.signalTimeframe", issues)
         _validate_nonempty_string(scope.get("executionTimeframe"), "$.scope.executionTimeframe", issues)
+        supporting_timeframes = (
+            _validate_string_list(
+                scope.get("supportingTimeframes"),
+                "$.scope.supportingTimeframes",
+                issues,
+            )
+            if "supportingTimeframes" in scope
+            else []
+        )
         scope_timeframes = {
             str(value)
             for value in (
                 scope.get("signalTimeframe"),
                 scope.get("executionTimeframe"),
+                *supporting_timeframes,
             )
             if isinstance(value, str) and value
         }
@@ -3287,7 +3481,7 @@ def _validate_blueprint_candidate(candidate: Mapping[str, Any], *, require_ready
                     issues,
                     "INDICATOR_TIMEFRAME_UNBOUND",
                     f"{path}.timeframe",
-                    "Indicator timeframe must be signal, execution, or one of the scoped timeframes",
+                    "Indicator timeframe must be signal, execution, or one of scope.supportingTimeframes",
                 )
             parameters = record.get("parameters")
             if not isinstance(parameters, Mapping):
@@ -5423,6 +5617,173 @@ def normalize_blueprint(
     return candidate
 
 
+def confirm_execution_assumptions(
+    blueprint: object,
+    *,
+    confirmed_at: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """Confirm only explicit implementation assumptions and require EA readiness.
+
+    Deep Research may turn a source ambiguity such as an omitted risk percent
+    into an explicit, conservative implementation assumption.  That proposal
+    is still not executable until the local operator confirms it.  This helper
+    performs that narrow transition without weakening the normal Blueprint v2
+    validator: real unknowns, unresolved evidence conflicts, uncovered
+    ``operator_assumption`` records, and semantic inconsistencies continue to
+    fail closed.
+
+    ``blockingIssues`` are cleared only when every blocker is demonstrably an
+    assumption-confirmation blocker.  A free-form research blocker can never
+    be dismissed merely by pressing the confirmation button.
+    """
+
+    if not isinstance(confirmed_at, str) or not confirmed_at.strip():
+        raise BlueprintValidationError(
+            [
+                BlueprintIssue(
+                    "CONFIRMATION_TIME_REQUIRED",
+                    "$.confirmation.confirmedAt",
+                    "A trusted confirmation timestamp is required",
+                )
+            ]
+        )
+    candidate = normalize_blueprint(blueprint, require_ready=False)
+    completeness = candidate.get("completeness")
+    assumptions = candidate.get("assumptions")
+    if not isinstance(completeness, MutableMapping) or not isinstance(assumptions, list):
+        raise BlueprintValidationError(
+            [
+                BlueprintIssue(
+                    "ASSUMPTION_CONFIRMATION_UNAVAILABLE",
+                    "$.completeness",
+                    "Blueprint does not expose a confirmable completeness/assumptions contract",
+                )
+            ]
+        )
+
+    if completeness.get("unknownPaths"):
+        raise BlueprintValidationError(
+            [
+                BlueprintIssue(
+                    "UNKNOWN_EXECUTION_PATHS_REMAIN",
+                    "$.completeness.unknownPaths",
+                    "Unknown executable paths require another research revision",
+                )
+            ]
+        )
+    if completeness.get("conflictPaths"):
+        raise BlueprintValidationError(
+            [
+                BlueprintIssue(
+                    "CONFLICTING_EXECUTION_PATHS_REMAIN",
+                    "$.completeness.conflictPaths",
+                    "Conflicting executable paths require a resolved research revision",
+                )
+            ]
+        )
+
+    execution_assumptions: list[MutableMapping[str, Any]] = []
+    unconfirmed_execution_assumptions: list[MutableMapping[str, Any]] = []
+    unconfirmed_assumption_paths: set[str] = set()
+    unconfirmed_affected_paths: set[str] = set()
+    for index, item in enumerate(assumptions):
+        if not isinstance(item, MutableMapping) or item.get("affectsExecution") is not True:
+            continue
+        execution_assumptions.append(item)
+        if item.get("confirmed") is not True:
+            unconfirmed_execution_assumptions.append(item)
+            unconfirmed_assumption_paths.add(f"$.assumptions[{index}]")
+            unconfirmed_affected_paths.update(
+                str(path).strip()
+                for path in (item.get("affectsPaths") or [])
+                if isinstance(path, str) and path.strip()
+            )
+
+    def blocker_is_confirmation_only(blocker: object) -> bool:
+        if not isinstance(blocker, Mapping):
+            return False
+        path = str(blocker.get("path") or "").strip()
+        code = str(blocker.get("code") or "").strip().upper()
+        # Do not trust free-form blocker names merely because they contain the
+        # word ASSUMPTION.  The worker must emit this exact contract code and
+        # bind the blocker either to the unconfirmed assumption record or to a
+        # code path explicitly covered by that assumption.
+        if code != "EXECUTION_ASSUMPTION_CONFIRMATION_REQUIRED":
+            return False
+        return bool(
+            path
+            and any(
+                _assumption_covers_path(assumption_path, path)
+                for assumption_path in unconfirmed_assumption_paths
+            )
+        ) or bool(
+            path
+            and any(
+                _assumption_covers_path(affected, path)
+                for affected in unconfirmed_affected_paths
+            )
+        )
+
+    blockers = completeness.get("blockingIssues")
+    if not isinstance(blockers, list):
+        blockers = []
+    non_confirmation_blockers = [
+        blocker for blocker in blockers if not blocker_is_confirmation_only(blocker)
+    ]
+    if non_confirmation_blockers:
+        raise BlueprintValidationError(
+            [
+                BlueprintIssue(
+                    "NON_CONFIRMABLE_RESEARCH_BLOCKER",
+                    str(non_confirmation_blockers[0].get("path") or "$.completeness.blockingIssues"),
+                    "Research blockers unrelated to explicit implementation assumptions remain",
+                )
+            ]
+        )
+
+    # A button click is allowed to confirm explicit proposals, not to promote
+    # an arbitrary non-ready Blueprint whose author merely omitted blockers.
+    # A Blueprint that is already ready needs no assumptions, while every
+    # other transition must have at least one unconfirmed execution assumption
+    # for the operator to review.
+    already_ready = bool(
+        completeness.get("status") == "ready"
+        and completeness.get("eaHandoffAllowed") is True
+        and completeness.get("deterministicBacktestAllowed") is True
+    )
+    if not already_ready and not unconfirmed_execution_assumptions:
+        raise BlueprintValidationError(
+            [
+                BlueprintIssue(
+                    "NO_CONFIRMABLE_EXECUTION_ASSUMPTIONS",
+                    "$.assumptions",
+                    "A non-ready Blueprint requires at least one explicit unconfirmed execution assumption",
+                )
+            ]
+        )
+
+    confirmed_ids: list[str] = []
+    for item in execution_assumptions:
+        item["confirmed"] = True
+        assumption_id = str(item.get("assumptionId") or "").strip()
+        if assumption_id:
+            confirmed_ids.append(assumption_id)
+
+    completeness.update(
+        {
+            "status": "ready",
+            "score": 100,
+            "eaHandoffAllowed": True,
+            "deterministicBacktestAllowed": True,
+            "blockingIssues": [],
+            "unknownPaths": [],
+            "conflictPaths": [],
+        }
+    )
+    normalized = normalize_blueprint(candidate, require_ready=True)
+    return normalized, sorted(set(confirmed_ids))
+
+
 def canonical_blueprint_json(blueprint: object, *, require_ready: bool = False) -> str:
     """Serialize a validated blueprint using deterministic UTF-8 JSON rules."""
 
@@ -5457,8 +5818,9 @@ def project_blueprint_to_legacy_report_metrics(blueprint: object) -> dict[str, A
 
     The direct ``eaImplementationBlueprint`` member and the copy inside
     ``implementationNotes`` make the projection lossless.  Other members are
-    compatibility views for the current 49-column Deep_Research sheet and the
-    23-field EA Factory adapter.
+    read-only compatibility views for legacy 49-column Deep_Research backups
+    and the internal 23-field EA Factory adapter. New learner-facing writes use
+    the compact Strategy Brief A-J contract instead.
     """
 
     normalized = normalize_blueprint(blueprint)

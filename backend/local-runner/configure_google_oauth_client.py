@@ -74,13 +74,8 @@ def main(argv: list[str] | None = None) -> int:
             result = _safe_status()
         elif arguments == ["--remove"]:
             removed = google_sheet_hub.remove_google_oauth_client_configuration()
-            result = {
-                "ok": True,
-                "configured": False,
-                "clientHint": "",
-                "store": "empty",
-                "removed": removed.get("removed") is True,
-            }
+            result = _safe_status()
+            result["removed"] = removed.get("removed") is True
         elif (
             len(arguments) in {2, 4}
             and arguments[0] == "--file"

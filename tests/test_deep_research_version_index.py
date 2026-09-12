@@ -62,13 +62,24 @@ class DeepResearchVersionIndexTests(unittest.TestCase):
             },
             "metrics": {
                 "workflowOutput": {"applicable": True, "valid": True},
-                "systemIdentity": {
-                    "systemName": f"System {source_record_id}",
-                    "strategyFamily": "trend_following",
+                "strategyBrief": {
+                    "schemaVersion": "ea-strategy-brief/1.0.0",
+                    "systemName": f"System {source_record_id} {report_id}",
+                    "systemOverview": "Trend following on a user-selected market and timeframe.",
+                    "entryRules": "Buy on a confirmed closed-bar signal; Sell on the inverse signal.",
+                    "recoveryRules": "ไม่มีการแก้ไม้",
+                    "exitRules": "Close on the opposite signal; SL and TP remain user inputs.",
+                    "moneyManagement": "Use a user-selected fixed lot with one open position.",
+                    "orderExecution": "Use market Buy or Sell after the bar closes.",
+                    "displayRequirements": "Show system name, signal, Balance, Equity and Spread.",
+                    "additionalNotes": "ไม่มีหมายเหตุเพิ่มเติม",
+                    "sourceLinks": [
+                        "https://www.investopedia.com/terms/m/movingaverage.asp",
+                        "https://www.babypips.com/learn/forex/moving-averages",
+                    ],
+                    "checkedAt": "2026-09-10T12:00:00+07:00",
+                    "limitations": ["Research specification only; compile separately."],
                 },
-                "entrySteps": ["enter on close"],
-                "exitSteps": ["exit on signal"],
-                "riskModel": {"stopLoss": "1 ATR", "takeProfit": "2 ATR"},
             },
         }
 
@@ -124,23 +135,20 @@ class DeepResearchVersionIndexTests(unittest.TestCase):
                 version_index=version_index,
             )[0]
 
-        # The live/current projection demotes only the prior current row, not
-        # every historical version. This bounds one report to two upserts.
+        # A-J uses one stable record_id. Each accepted revision projects one
+        # replacement row; revision history remains in the Backend ledger.
         self.assertEqual(len(first_rows), 1)
-        self.assertEqual(len(second_rows), 2)
+        self.assertEqual(len(second_rows), 1)
         sheet_rows: dict[str, dict] = {}
         for row in [*first_rows, *second_rows]:
-            sheet_rows.setdefault(row["research_id"], {}).update(row)
-        self.assertEqual(len(sheet_rows), 2)
+            sheet_rows[row["record_id"]] = row
+        self.assertEqual(len(sheet_rows), 1)
+        current_row = next(iter(sheet_rows.values()))
+        self.assertIn("target-v2", current_row["system_name"])
         self.assertEqual(
-            sorted(row["research_version"] for row in sheet_rows.values()),
-            ["1", "2"],
+            set(current_row),
+            set(self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS),
         )
-        current_rows = [
-            row for row in sheet_rows.values() if row.get("is_current") == "TRUE"
-        ]
-        self.assertEqual(len(current_rows), 1)
-        self.assertEqual(current_rows[0]["research_version"], "2")
 
     def test_version_identity_uses_source_report_and_record_pair(self) -> None:
         same_pair_v1 = self.report(

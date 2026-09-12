@@ -2,37 +2,36 @@
 
 ## เตรียมเครื่องก่อนเริ่ม
 
-1. ใช้ Windows 10 หรือ 11 และเชื่อมต่ออินเทอร์เน็ต
-2. ติดตั้ง Git for Windows และตรวจว่าใช้คำสั่ง `git` ได้
-3. ติดตั้ง Python **3.10-3.14 แบบ 64-bit** จาก [python.org](https://www.python.org/downloads/windows/) และเลือก `Add Python to PATH`
-4. ใช้บัญชี Codex ของตนเอง ห้ามรับ Token, Cookie หรือไฟล์ Auth จากผู้สอนหรือเพื่อน
+1. ใช้ Windows 10 หรือ 11 แบบ 64-bit และเชื่อมต่ออินเทอร์เน็ต
+2. เปิด Codex และใช้บัญชีของตนเอง ห้ามรับ Token, Cookie หรือไฟล์ Auth จากผู้สอนหรือเพื่อน
 
-ตัวติดตั้งจะสร้าง Python Virtual Environment แยกให้เอง แต่จะไม่ดาวน์โหลดหรือติดตั้ง Python หลักแทนผู้เรียน หาก Python ไม่อยู่ในช่วงที่รองรับ ระบบจะหยุดก่อนติดตั้งและแจ้งวิธีแก้ การเชื่อม Google Sheet แบบ Private เป็นขั้นตอนเสริมภายหลังตาม `docs/research-sheet-hub-setup-th.md`; ไม่ต้องนำไฟล์ OAuth ของผู้สอนไปใส่เครื่องนักเรียน
+เมื่อใช้ Prompt หลัก ผู้เรียนไม่ต้องติดตั้ง Git หรือ Python เอง Prompt จะตรวจเครื่องก่อนเสมอ: ถ้ามี Git ที่ใช้ได้และ Python 3.10-3.14 แบบ 64-bit อยู่แล้วจะใช้ของเดิมและไม่ติดตั้งซ้ำ ถ้าขาดจึงติดตั้งแพ็กเกจทางการที่ล็อกไว้ผ่าน WinGet แบบ current-user แล้วตรวจซ้ำ ส่วน `installer/install.ps1` จะสร้าง Python Virtual Environment แยกและตรวจ Runtime ซ้ำอีกชั้น การเชื่อม Google Sheet แบบ Private เป็นขั้นตอนเสริมภายหลังตาม `docs/research-sheet-hub-setup-th.md`; Client กลางพร้อมมากับ Release แล้ว จึงไม่ต้องนำไฟล์ OAuth ของผู้สอนหรือของใครมาใส่เครื่องนักเรียน
 
 ## เชื่อม Google Sheet แบบ Private ครั้งเดียว
 
-1. เปิด Google Auth Platform ของ Project ตนเอง และดาวน์โหลด OAuth Client JSON ประเภท **Desktop app**
-2. ระหว่างติดตั้ง เลือกตั้งค่า Google แล้วเลือกไฟล์ JSON หรือข้ามไปก่อนก็ได้
-3. หากข้าม ให้ดับเบิลคลิก `2-SETUP-GOOGLE-HQ.bat` หรือจะลากไฟล์ JSON มาวางบน BAT นี้
-4. ระบบตรวจไฟล์และให้ Backend CLI บันทึก Client configuration ด้วย Windows current-user DPAPI โดย JSON/Secret ไม่ผ่าน Browser และไม่ถูกคัดลอกเข้า Project
-5. เมื่อ Agent HQ เปิดแล้ว กด **เชื่อมบัญชี Google ครั้งเดียว** เลือกบัญชีของตนเอง แล้วกลับมาใส่ Sheet ID
+1. ติดตั้ง Agent HQ จาก Release ที่อาจารย์ล็อกไว้ ตัวติดตั้งจะเตรียม Google OAuth native/installed-app client configuration กลางให้เอง
+2. เปิด Agent HQ แล้วกด **เชื่อมบัญชี Google**
+3. เลือก Gmail ของตนเองในหน้าทางการของ Google และกดยืนยัน Consent ด้วยตนเอง
+4. กลับมาที่ Agent HQ แล้วใส่ Google Sheet URL/ID ที่บัญชีของตนมีสิทธิ์ Editor
 
-ไฟล์ OAuth JSON ต้นฉบับใน Downloads หรือโฟลเดอร์ที่เลือกจะไม่ถูกลบอัตโนมัติ ต้องเก็บเป็นความลับและลบเองเมื่อไม่ต้องใช้แล้ว
+นักเรียน **ไม่ต้อง** สร้าง Google Cloud Project/OAuth Client, ไม่ต้องเพิ่ม Gmail เป็น Test user, ไม่ต้องดาวน์โหลดหรือส่ง OAuth JSON และไม่ต้องกรอกหรือแก้ Client ID กลาง
 
-> **สำคัญ:** หาก OAuth consent screen ยังอยู่สถานะ `Testing` ต้องเพิ่ม Gmail ของผู้เรียนใน **Test users** และ Google อาจทำให้สิทธิ์/Refresh token หมดอายุหลัง 7 วัน ผู้เรียนจึงต้องกดเชื่อมใหม่ หากต้องการให้การเชื่อมครั้งเดียวใช้งานต่อเนื่อง ต้องจัด Publishing status และ Verification ตามนโยบายของ Google ก่อนนำไปใช้ในชั้นเรียน ดูรายละเอียดจาก [Google Auth Platform — Audience](https://support.google.com/cloud/answer/15549945)
+Client กลางมี `client_id` และ `client_secret` ของ native app อยู่ใน Release Asset โดย GitHub Actions inject ค่าจริงจาก Release secrets ตอน build และไฟล์จริงไม่อยู่ใน public Git tree ห้าม commit หรือแสดงค่า Client เต็ม แม้ metadata นี้ต้องแจกพร้อม installed app และไม่ใช่ Credential ของ Gmail นักเรียน ส่วน access token และ refresh token ของนักเรียนจะถูกเข้ารหัสด้วย Windows current-user DPAPI และไม่เข้า Repository, Frontend, Report หรือ Log
 
-ห้ามส่ง OAuth JSON ให้ผู้สอนหรือเพื่อน และห้ามวาง JSON/Client Secret ในหน้าเว็บ, Mission, Chat หรือ GitHub
+> **ระหว่างรอ Google ตรวจสอบ:** ผู้ใช้ใหม่อาจเห็นหน้า `Google ยังไม่ได้ยืนยันแอปนี้` และ Project กลางอาจอยู่ภายใต้ OAuth unverified user cap ให้ทำตามคำแนะนำของอาจารย์และอนุญาตเฉพาะแอปชื่อ Metafxclub Agent HQ เท่านั้น เมื่อ Scope ได้รับอนุมัติแล้ว คำเตือนและเพดานนี้จะไม่ใช้กับ Scope ที่ได้รับอนุมัติ ดูรายละเอียดจาก [Google Auth Platform — Audience](https://support.google.com/cloud/answer/15549945)
+
+`2-SETUP-GOOGLE-HQ.bat` และ OAuth JSON เป็นโหมด **Advanced/Recovery custom override** เท่านั้น ใช้เมื่อเจ้าของ Project ต้องการ Client ของตนเองหรือผู้ดูแลสั่งให้กู้การตั้งค่า ไม่ใช่ขั้นตอนปกติของนักเรียน หากจำเป็นต้องใช้ ให้ใช้ JSON ของ Project ที่ตนควบคุมเองและห้ามวาง JSON หรือค่า Client แบบเต็มในหน้าเว็บ, Mission หรือ Chat
 
 ## วิธีที่ง่ายที่สุด: Prompt เดียว ไม่ต้องกด BAT
 
 1. เปิด [Prompt ติดตั้งอัตโนมัติ](docs/prompts/install-github-google-auto-th.md)
-2. Repository, Git Tag และ Version ถูกล็อกไว้โดยอาจารย์แล้ว เปลี่ยนเพียง `EXPECTED_GOOGLE_CLIENT_ID` และ `GOOGLE_DESKTOP_OAUTH_JSON`
-3. วาง Prompt ทั้งชุดลงใน Codex แล้วรอให้ Codex Clone Tag ที่กำหนด, ตรวจ Source, เรียก Installer โดยตรงรอบเดียว, นำเข้า JSON, ตรวจ Health/หน้าเว็บ, เปิด Watchdog และเปิด Agent HQ ที่ `http://127.0.0.1:4186/`
+2. Repository, Git Tag, Version และ Client กลางถูกเตรียมไว้แล้ว ห้ามแก้ Client ID และไม่ต้องเติม Path ของ OAuth JSON
+3. วาง Prompt ทั้งชุดลงใน Codex แล้วรอให้ Codex ตรวจ/ติดตั้งเฉพาะ Git หรือ Python ที่ขาด, Clone Tag ที่กำหนด, ตรวจ Source, ดาวน์โหลด Release ZIP กับ `.sha256`, ตรวจ hash และ extract เฉพาะ Client กลางจาก Asset เข้า Source ชั่วคราว จากนั้นเรียก Installer โดยตรงรอบเดียว ตรวจ Client กลาง/Health/หน้าเว็บ เปิด Watchdog และเปิด Agent HQ ที่ `http://127.0.0.1:4186/`
 4. เมื่อหน้า HQ เปิด ให้กด **เชื่อมบัญชี Google ครั้งเดียว** แล้ว Login/กดอนุญาตในหน้าทางการของ Google
 
-Prompt เป็นคำยืนยันล่วงหน้าให้ Codex ใช้ `127.0.0.1:4186` จึงไม่ต้องหยุดถามเลือก Port และไม่ต้องให้ผู้เรียนดาวน์โหลด ZIP หรือกด `1-INSTALL-HQ.bat`/`2-SETUP-GOOGLE-HQ.bat` เอง หาก Git/Tag/Version ไม่ตรง, พอร์ต 4186 ถูกใช้อยู่ หรือ Python, JSON, Deployment Preflight, Health หรือหน้าเว็บไม่ผ่าน Codex ต้องหยุดและบอกสาเหตุตามจริง
+Prompt เป็นคำยืนยันล่วงหน้าให้ Codex ใช้ `127.0.0.1:4186` และติดตั้งเฉพาะ Git/Python ที่ขาดแบบ current-user จึงไม่ต้องหยุดถามเลือก Port และไม่ต้องให้ผู้เรียนดาวน์โหลด ZIP หรือกด `1-INSTALL-HQ.bat`/`2-SETUP-GOOGLE-HQ.bat` เอง หาก WinGet/Bootstrap ไม่สำเร็จ, Git/Tag/Version ไม่ตรง, พอร์ต 4186 ถูกใช้อยู่ หรือ Client กลางใน Release, Deployment Preflight, Health หรือหน้าเว็บไม่ผ่าน Codex ต้องหยุดและบอกสาเหตุตามจริงพร้อมวิธีแก้หนึ่งขั้น
 
-Codex ต้อง Clone ลงโฟลเดอร์ชั่วคราวใหม่และห้ามแก้ Repository เดิมของผู้เรียน หาก Windows ขอสิทธิ์เพิ่มเติม ให้ตรวจว่าเป็น Source ทางการของ Metafxclub และแจ้งผู้เรียนก่อน ห้ามปิดระบบป้องกันไวรัสหรือข้ามคำเตือนของไฟล์ที่ไม่ทราบแหล่งที่มา
+Codex ต้อง Clone ลงโฟลเดอร์ชั่วคราวใหม่และห้ามแก้ Repository เดิมของผู้เรียน หาก Windows แสดง UAC หรือขอสิทธิ์ Administrator ให้กด **No/Cancel**, หยุดขั้นตอนนั้น และส่งข้อความผิดพลาดให้ผู้สอน ห้ามกดยอมรับแทน ห้ามปิดระบบป้องกันไวรัสหรือข้ามคำเตือนของไฟล์ที่ไม่ทราบแหล่งที่มา
 
 ## เลือก MT4 / MT5 จากจุดเดียว
 
@@ -52,22 +51,22 @@ Codex ต้อง Clone ลงโฟลเดอร์ชั่วคราว�
 5. เปิดโฟลเดอร์ที่แตกแล้ว
 6. ดับเบิลคลิก `1-INSTALL-HQ.bat`
 7. รอให้ตัวติดตั้งรัน Deployment Preflight และเปิด `http://127.0.0.1:4186/` ให้เอง หากพอร์ตนี้ถูกใช้อยู่ให้ปิดเฉพาะโปรแกรมที่คุณทราบว่าเป็นเจ้าของพอร์ต หรือขอผู้สอนช่วยตรวจ ห้ามสุ่มปิด Process
-8. หากตั้งค่า Google แล้ว ให้กด **เชื่อมบัญชี Google ครั้งเดียว** ใน Agent HQ แล้วกรอก Sheet ID
+8. Client กลางพร้อมมากับ Release แล้ว ให้กด **เชื่อมบัญชี Google ครั้งเดียว** ใน Agent HQ เลือกบัญชี/กดยืนยัน Consent ด้วยตนเอง แล้วกรอก Sheet ID
 
 ลิงก์มาตรฐานของห้องเรียนคือ `http://127.0.0.1:4186/` ตัวติดตั้งจะไม่ปิดโปรแกรมอื่นและไม่สลับ URL เอง
 
-## ถ้าต้องการเก็บ Source เพื่อเรียนหรือพัฒนา (ไม่ใช่ขั้นตอนห้องเรียน)
+## ถ้าต้องการเก็บ Source เพื่ออ่านหรือพัฒนา (ไม่ใช่การติดตั้ง)
 
 ```powershell
 git clone https://github.com/metafxclub/metafxclub-ai-agent-hq.git
 cd metafxclub-ai-agent-hq
-.\1-INSTALL-HQ.bat
+git status
 ```
 
-- โฟลเดอร์ Clone คือ Source สำหรับเรียนและแก้โค้ด เส้นทางนี้ไม่ใช่การติดตั้งแบบ Tag ที่ตรวจยืนยันกับ GitHub สำหรับห้องเรียน
+- โฟลเดอร์ Plain clone คือ Source สำหรับอ่าน เรียน GitHub แก้โค้ด และรันชุดทดสอบเท่านั้น ไม่ใช่ Runtime สำหรับห้องเรียน และจงใจไม่มีไฟล์ Client กลางจาก Release
+- ห้ามเปิด `1-INSTALL-HQ.bat` หรือ `UPDATE-HQ.bat` จาก Plain clone โดยคาดหวังว่าจะติดตั้งหรืออัปเดตชุดห้องเรียนพร้อม Google หากต้องติดตั้งให้ใช้ Prompt หลักที่ล็อก Tag/Version และตรวจ Release Asset + hash แล้ว
 - โปรแกรมที่เปิดใช้งานจริงอยู่ที่ `%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ`
-- เมื่อต้องการรับรุ่นใหม่ ให้ Commit หรือสำรองงานของตนเองให้เรียบร้อย แล้วดับเบิลคลิก `UPDATE-HQ.bat`
-- ตัวอัปเดตยอมรับเฉพาะการอัปเดตแบบ fast-forward หากมีไฟล์แก้ค้างหรือประวัติคนละทาง ระบบจะหยุดก่อนและไม่ทับงาน
+- เมื่อต้องการอัปเดต Runtime ห้องเรียน ให้อาจารย์ส่ง Prompt ฉบับใหม่ที่ล็อก Tag/Version ใหม่ ไม่ต้อง Pull `main` หรือใช้ `UPDATE-HQ.bat` จาก Plain clone
 - ถ้าต้องการส่งงานกลับ GitHub ให้ Fork Repository แล้ว Push Branch ของตนเองเพื่อเปิด Pull Request ห้าม Push Runtime, Memory, Log, Token หรือ Auth
 
 ## เปิด Bridge อัตโนมัติหลังเปิดเครื่อง
@@ -98,9 +97,9 @@ Task เปิดเฉพาะ Bridge ไม่เปิด Browser หรื�
 
 ## ถอนการติดตั้งและข้อมูล Google
 
-- ดับเบิลคลิก `UNINSTALL-HQ.bat` เป็นการถอนแบบปกติ: เก็บ Mission, Report, Memory, Log รวมทั้ง Google OAuth Client และการยืนยัน Google ที่เข้ารหัสไว้ เพื่อใช้ต่อเมื่อติดตั้งใหม่
-- หากต้องการลบข้อมูลทั้งหมดจริง ต้องเรียก `scripts\uninstall-hq.ps1` พร้อม `-RemoveUserData -ConfirmUserDataRemoval DELETE-METAFX-DATA` ระบบจึงจะให้ Backend CLI ลบทั้ง OAuth Client และการยืนยัน Google
-- Environment variable ที่ผู้ดูแลตั้งเองและ OAuth JSON ต้นฉบับใน Downloads จะไม่ถูกลบอัตโนมัติ
+- ดับเบิลคลิก `UNINSTALL-HQ.bat` เป็นการถอนแบบปกติ: เก็บ Mission, Report, Memory, Log และการยืนยัน Google ที่เข้ารหัสไว้ เพื่อใช้ต่อเมื่อติดตั้งใหม่
+- หากต้องการลบข้อมูลทั้งหมดจริง ต้องเรียก `scripts\uninstall-hq.ps1` พร้อม `-RemoveUserData -ConfirmUserDataRemoval DELETE-METAFX-DATA` ระบบจึงจะให้ Backend CLI ลบ durable Google grant และ OAuth Client แบบ custom override
+- Client กลางเป็นส่วนหนึ่งของ Release ส่วน Environment variable และ OAuth JSON ต้นฉบับที่ผู้ดูแลตั้งเองในโหมด Advanced จะไม่ถูกลบอัตโนมัติ
 
 ## โหมดเริ่มต้นที่ปลอดภัย
 

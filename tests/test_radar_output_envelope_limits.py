@@ -14,7 +14,7 @@ from unittest import mock
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "bridge_server.py"
 RUNNER_PATH = PROJECT_ROOT / "runner" / "codex_cli_runner.py"
-EA_RESEARCH_BLUEPRINT_TEST_PATH = PROJECT_ROOT / "tests" / "test_ea_research_blueprint_v2.py"
+EA_STRATEGY_BRIEF_TEST_PATH = PROJECT_ROOT / "tests" / "test_ea_strategy_brief.py"
 
 
 def load_module(name: str, path: Path):
@@ -769,23 +769,13 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
         ]
 
         def payload(source_links: list[str] | None = None) -> dict:
-            blueprint_support = load_module(
-                "metafx_radar_output_blueprint_support",
-                EA_RESEARCH_BLUEPRINT_TEST_PATH,
+            brief_support = load_module(
+                "metafx_radar_output_strategy_brief_support",
+                EA_STRATEGY_BRIEF_TEST_PATH,
             )
-            blueprint = blueprint_support.ready_blueprint()
+            brief = brief_support.valid_brief()
             selected_urls = source_links if source_links is not None else urls
-            blueprint["evidenceMap"] = [
-                {
-                    "sourceRef": f"S{index}",
-                    "url": url,
-                    "title": f"Public source {index}",
-                    "checkedAt": blueprint["checkedAt"],
-                }
-                for index, url in enumerate(selected_urls, start=1)
-            ]
-            # Existing rules cite S1 and remain valid when the second source is
-            # corroborating evidence for the overall research.
+            brief["sourceLinks"] = list(selected_urls)
             return {
                 "status": "completed",
                 "summary": "Verified deep research",
@@ -796,12 +786,11 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
                     for index, url in enumerate(urls, start=1)
                 ],
                 "blockedCapability": "",
-                "research": blueprint,
+                "research": brief,
                 "evidenceKinds": [
                     "at_least_two_source_urls",
                     "checked_at",
                     "limitations",
-                    "ea_readiness",
                     "source_digest",
                 ],
             }
@@ -915,6 +904,138 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
                 started_broad_search_without_action
             )
         )
+        bounded_time_lookup = json.dumps({
+            "type": "item.completed",
+            "item": {
+                "id": "time-lookup-1",
+                "type": "web_search",
+                "query": 'time: {"utc_offset":"+07:00"}',
+                "action": {
+                    "type": "search",
+                    "query": 'time: {"utc_offset":"+07:00"}',
+                    "queries": ['time: {"utc_offset":"+07:00"}'],
+                },
+            },
+        })
+        self.assertFalse(
+            self.runner.completed_web_search_broad_search_used(
+                bounded_time_lookup
+            )
+        )
+        for unsafe_time_query in (
+            "time in Bangkok",
+            'time: {"utc_offset":"+07:00","q":"find another source"}',
+            'time: {"utc_offset":"+07:00","utc_offset":"+08:00"}',
+            'time: {"utc_offset":"+07:00"} find another source',
+            'time: {"utc_offset":"+14:01"}',
+            'time: {"utc_offset":"-12:01"}',
+            'time: {"utc_offset":"-14:00"}',
+        ):
+            with self.subTest(unsafe_time_query=unsafe_time_query):
+                unsafe_time_lookup = json.dumps({
+                    "type": "item.completed",
+                    "item": {
+                        "id": "unsafe-time-lookup",
+                        "type": "web_search",
+                        "query": unsafe_time_query,
+                        "action": {
+                            "type": "search",
+                            "query": unsafe_time_query,
+                            "queries": [unsafe_time_query],
+                        },
+                    },
+                })
+                self.assertTrue(
+                    self.runner.completed_web_search_broad_search_used(
+                        unsafe_time_lookup
+                    )
+                )
+        safe_query = 'time: {"utc_offset":"+07:00"}'
+        inconsistent_time_events = (
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "time-without-query-list",
+                    "type": "web_search",
+                    "query": safe_query,
+                    "action": {"type": "search", "query": safe_query},
+                },
+            },
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "mismatched-item-query",
+                    "type": "web_search",
+                    "query": "find another source",
+                    "action": {
+                        "type": "search",
+                        "query": safe_query,
+                        "queries": [safe_query],
+                    },
+                },
+            },
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "extra-query",
+                    "type": "web_search",
+                    "query": safe_query,
+                    "action": {
+                        "type": "search",
+                        "query": safe_query,
+                        "queries": [safe_query, "find another source"],
+                    },
+                },
+            },
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "mismatched-query-list",
+                    "type": "web_search",
+                    "query": safe_query,
+                    "action": {
+                        "type": "search",
+                        "query": safe_query,
+                        "queries": ['time: {"utc_offset":"+08:00"}'],
+                    },
+                },
+            },
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "unknown-action-key",
+                    "type": "web_search",
+                    "query": safe_query,
+                    "action": {
+                        "type": "search",
+                        "query": safe_query,
+                        "queries": [safe_query],
+                        "related_queries": ["find another source"],
+                    },
+                },
+            },
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "started-time-query",
+                    "type": "web_search",
+                    "query": safe_query,
+                    "action": {"type": "search", "query": safe_query},
+                },
+            },
+        )
+        for inconsistent_time_event in inconsistent_time_events:
+            with self.subTest(inconsistent_time_event=inconsistent_time_event):
+                self.assertTrue(
+                    self.runner.completed_web_search_broad_search_used(
+                        json.dumps(inconsistent_time_event)
+                    )
+                )
+        self.assertTrue(
+            self.runner.completed_web_search_broad_search_used(
+                "\n".join((bounded_time_lookup, broad_search_event))
+            )
+        )
         self.assertFalse(
             self.runner.completed_web_search_broad_search_used(
                 "\n".join(
@@ -1012,25 +1133,170 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
             started_broad_result["structuredOutputError"],
         )
 
+    def test_deep_research_accepts_bounded_time_lookup_and_projects_contract(self) -> None:
+        urls = [
+            "https://macro-ops.com/william-oneils-can-slim-trading-strategy-explained/",
+            "https://www.businessinsider.com/how-does-can-slim-investing-work-2011-5",
+        ]
+        brief_support = load_module(
+            "metafx_deep_research_time_lookup_strategy_brief_support",
+            EA_STRATEGY_BRIEF_TEST_PATH,
+        )
+        brief = brief_support.valid_brief()
+        brief["systemName"] = "CAN SLIM"
+        brief["sourceLinks"] = list(urls)
+        payload = {
+            "status": "completed",
+            "summary": "CAN SLIM research from the exact Backend-bound sources",
+            "findings": ["The selected system was expanded into the compact brief"],
+            "nextSteps": [],
+            "evidence": [
+                {
+                    "label": f"Source {index}",
+                    "url": url,
+                    "note": "Backend-bound public source",
+                }
+                for index, url in enumerate(urls, start=1)
+            ],
+            "blockedCapability": "",
+            "research": brief,
+            "evidenceKinds": [
+                "at_least_two_source_urls",
+                "checked_at",
+                "limitations",
+                "source_digest",
+            ],
+        }
+        direct_open_events = "\n".join(
+            self.pure_direct_open_jsonl(
+                url,
+                event_id=f"can-slim-source-{index}",
+            )
+            for index, url in enumerate(urls, start=1)
+        )
+        time_lookup_started_event = json.dumps({
+            "type": "item.started",
+            "item": {
+                "id": "can-slim-checked-at",
+                "type": "web_search",
+                "query": "",
+                "action": {"type": "other"},
+            },
+        })
+        time_lookup_event = json.dumps({
+            "type": "item.completed",
+            "item": {
+                "id": "can-slim-checked-at",
+                "type": "web_search",
+                "query": 'time: {"utc_offset":"+07:00"}',
+                "action": {
+                    "type": "search",
+                    "query": 'time: {"utc_offset":"+07:00"}',
+                    "queries": ['time: {"utc_offset":"+07:00"}'],
+                },
+            },
+        })
+
+        def fake_chat(command, **_kwargs):
+            raw_path = Path(command[command.index("-o") + 1])
+            raw_path.write_text(self.compact(payload), encoding="utf-8")
+            return {
+                "ok": True,
+                "exitCode": 0,
+                "durationMs": 1,
+                "processStarted": True,
+                "processTreeTerminated": False,
+                "stdout": "\n".join((
+                    direct_open_events,
+                    time_lookup_started_event,
+                    time_lookup_event,
+                )),
+                "stderr": "",
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            self.runner,
+            "CODEX_RUNS_DIR",
+            Path(temp_dir),
+        ), mock.patch.object(
+            self.runner,
+            "chat_status",
+            return_value={"ok": True, "status": "ready"},
+        ), mock.patch.object(
+            self.runner,
+            "run_chat_command",
+            side_effect=fake_chat,
+        ):
+            result = self.runner.run_codex(
+                "Research only the two Backend-bound CAN SLIM pages.",
+                "mission_archivist",
+                "mission-can-slim-time-lookup",
+                output_limit=64000,
+                execution_mode="auto_guarded",
+                web_search=True,
+                read_only_work=True,
+                result_profile="trading_system_research",
+                required_open_urls=urls,
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["webSearchEvidenceVerified"])
+        self.assertIsNone(result["structuredOutputError"])
+        self.assertEqual(
+            [item["field"] for item in result["contractFields"]],
+            list(self.runner.TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS),
+        )
+        fields = {item["field"]: item["value"] for item in result["contractFields"]}
+        self.assertEqual(json.loads(fields["strategyBrief"])["systemName"], "CAN SLIM")
+        self.assertEqual(json.loads(fields["sourceLinks"]), urls)
+        self.assertEqual(
+            result["evidenceKinds"],
+            list(
+                self.runner.PROFILE_CONTRACT_REQUIREMENTS[
+                    "trading_system_research"
+                ]["evidenceKinds"]
+            ),
+        )
+        profile = self.bridge.equipment_action_profile(
+            "left_server_racks",
+            "deep_research_system",
+        )
+        receipt = self.bridge.validate_dashboard_workflow_output_contract(
+            {
+                "budget": {"outputLimitChars": 64000},
+                "workflowContext": {"pluginProcedure": profile},
+            },
+            result,
+        )
+        metrics = self.bridge.dashboard_workflow_output_metrics(receipt)
+        self.assertTrue(receipt["valid"], receipt)
+        self.assertEqual(receipt["missingFields"], [])
+        self.assertEqual(receipt["missingEvidenceKinds"], [])
+        self.assertEqual(receipt["entryErrors"], [])
+        self.assertEqual(
+            set(metrics) - {"workflowOutput"},
+            {
+                "strategyBrief",
+                "sourceDigest",
+                "sourceLinks",
+                "checkedAt",
+                "limitations",
+                "briefDigest",
+            },
+        )
+        self.assertEqual(metrics["sourceDigest"], metrics["briefDigest"])
+
     def test_deep_research_completes_only_missing_bound_url_in_one_isolated_child(self) -> None:
         urls = [
             "https://www.chrisperruna.com/2007/09/24/donchians-5-and-20-day-moving-averages/",
             "https://en.wikipedia.org/wiki/Richard_Donchian",
         ]
-        blueprint_support = load_module(
-            "metafx_deep_research_open_blueprint_support",
-            EA_RESEARCH_BLUEPRINT_TEST_PATH,
+        brief_support = load_module(
+            "metafx_deep_research_open_strategy_brief_support",
+            EA_STRATEGY_BRIEF_TEST_PATH,
         )
-        blueprint = blueprint_support.ready_blueprint()
-        blueprint["evidenceMap"] = [
-            {
-                "sourceRef": f"S{index}",
-                "url": url,
-                "title": f"Bound public source {index}",
-                "checkedAt": blueprint["checkedAt"],
-            }
-            for index, url in enumerate(urls, start=1)
-        ]
+        brief = brief_support.valid_brief()
+        brief["sourceLinks"] = list(urls)
         payload = {
             "status": "completed",
             "summary": "Verified exact two-source Deep Research",
@@ -1045,12 +1311,11 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
                 for index, url in enumerate(urls, start=1)
             ],
             "blockedCapability": "",
-            "research": blueprint,
+            "research": brief,
             "evidenceKinds": [
                 "at_least_two_source_urls",
                 "checked_at",
                 "limitations",
-                "ea_readiness",
                 "source_digest",
             ],
         }
@@ -1129,7 +1394,9 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
             [urls[1]],
         )
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0][1]["timeout"], 79)
+        # Reserve 41 seconds for the one exact-URL verifier and 19 seconds for
+        # the bounded semantic revision pass when the total budget is 120s.
+        self.assertEqual(calls[0][1]["timeout"], 60)
         quota_probe.assert_called_once_with(timeout=5)
         self.assertEqual(
             result["webSearchVerificationSource"],
@@ -1581,7 +1848,8 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
         )
         self.assertEqual(len(calls), 6)
         self.assertEqual(calls[0][1]["timeout"], 187)
-        quota_probe.assert_called_once_with(timeout=5)
+        self.assertEqual(quota_probe.call_count, 5)
+        quota_probe.assert_has_calls([mock.call(timeout=5)] * 5)
         self.assertEqual(
             result["correctiveOpenVerificationDigest"],
             hashlib.sha256(manifest_bytes).hexdigest(),
@@ -1835,29 +2103,38 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
             5,
         )
 
-    def test_corrective_child_batch_requires_fresh_quota_above_15_in_all_windows(self) -> None:
-        allowed = self.fresh_quota_snapshot(84)
-        allowed["secondary"] = {"remainingPercent": 16}
-        with mock.patch.object(
-            self.runner,
-            "read_rate_limits",
-            return_value=allowed,
-        ) as quota_probe:
-            self.assertIs(
-                self.runner.require_fresh_corrective_verifier_quota(),
-                allowed,
-            )
-        quota_probe.assert_called_once_with(timeout=5)
+    def test_corrective_child_batch_uses_configured_inclusive_quota_threshold(self) -> None:
+        allowed_cases = (
+            (15, self.fresh_quota_snapshot(15)),
+            (0, self.fresh_quota_snapshot(0)),
+            (100, self.fresh_quota_snapshot(100)),
+        )
+        allowed_cases[0][1]["secondary"] = {"remainingPercent": 15}
+        for threshold, allowed in allowed_cases:
+            with self.subTest(threshold=threshold), mock.patch.object(
+                self.runner,
+                "TRADING_SYSTEM_CORRECTIVE_MIN_REMAINING_PERCENT",
+                threshold,
+            ), mock.patch.object(
+                self.runner,
+                "read_rate_limits",
+                return_value=allowed,
+            ) as quota_probe:
+                self.assertIs(
+                    self.runner.require_fresh_corrective_verifier_quota(),
+                    allowed,
+                )
+            quota_probe.assert_called_once_with(timeout=5)
 
         secondary_blocked = self.fresh_quota_snapshot(84)
-        secondary_blocked["secondary"] = {"remainingPercent": 15}
+        secondary_blocked["secondary"] = {"remainingPercent": 14.999}
         stale = self.fresh_quota_snapshot(84)
         stale["stale"] = True
         limit_reached = self.fresh_quota_snapshot(84)
         limit_reached["limitReached"] = True
         invalid_snapshots = {
-            "primary_at_threshold": self.fresh_quota_snapshot(15),
-            "secondary_at_threshold": secondary_blocked,
+            "primary_below_threshold": self.fresh_quota_snapshot(14.999),
+            "secondary_below_threshold": secondary_blocked,
             "stale": stale,
             "limit_reached": limit_reached,
             "unavailable": {
@@ -1879,11 +2156,15 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
         for case_name, snapshot in invalid_snapshots.items():
             with self.subTest(case=case_name), mock.patch.object(
                 self.runner,
+                "TRADING_SYSTEM_CORRECTIVE_MIN_REMAINING_PERCENT",
+                15,
+            ), mock.patch.object(
+                self.runner,
                 "read_rate_limits",
                 return_value=snapshot,
             ) as quota_probe, self.assertRaisesRegex(
                 ValueError,
-                "strictly above 15 percent",
+                "at or above 15 percent",
             ):
                 self.runner.require_fresh_corrective_verifier_quota()
             quota_probe.assert_called_once_with(timeout=5)
@@ -1893,7 +2174,7 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
         stale = self.fresh_quota_snapshot(84)
         stale["stale"] = True
         rejected_snapshots = {
-            "at_threshold": self.fresh_quota_snapshot(15),
+            "below_threshold": self.fresh_quota_snapshot(14.999),
             "stale": stale,
             "unavailable": {
                 "ok": False,
@@ -1921,6 +2202,10 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
                 }
 
             with self.subTest(case=case_name), tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+                self.runner,
+                "TRADING_SYSTEM_CORRECTIVE_MIN_REMAINING_PERCENT",
+                15,
+            ), mock.patch.object(
                 self.runner,
                 "CODEX_RUNS_DIR",
                 Path(temp_dir),
@@ -1952,7 +2237,7 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
 
             self.assertFalse(result["ok"], result)
             self.assertEqual(result["status"], "invalid_output")
-            self.assertIn("strictly above 15 percent", result["structuredOutputError"])
+            self.assertIn("at or above 15 percent", result["structuredOutputError"])
             self.assertEqual(calls["count"], 1)
             quota_probe.assert_called_once_with(timeout=5)
 
@@ -2674,38 +2959,42 @@ class RadarOutputEnvelopeLimitTests(unittest.TestCase):
         for url in research_urls:
             self.assertIn(url, final_preflight)
         self.assertIn("separate call for each missing URL", final_preflight)
-        self.assertIn(
-            '`["safety","exit","manage","entry"]`',
-            final_preflight,
+        self.assertIn("every one of the nine prose fields is non-empty", final_preflight)
+        for field in (
+            "systemName",
+            "systemOverview",
+            "entryRules",
+            "recoveryRules",
+            "exitRules",
+            "moneyManagement",
+            "orderExecution",
+            "displayRequirements",
+            "additionalNotes",
+            "sourceLinks",
+            "checkedAt",
+            "limitations",
+        ):
+            self.assertIn(field, deep_research_prompt)
+        self.assertIn("closed-bar", deep_research_prompt)
+        self.assertIn("compact-ea-safe-inputs-v2", deep_research_prompt)
+        self.assertIn("component by component", deep_research_prompt)
+        self.assertIn("Do not silently implement an incomplete recovery", deep_research_prompt)
+        research_timestamp_line = next(
+            line
+            for line in deep_research_prompt.splitlines()
+            if line.startswith(
+                "- Trusted checkedAt timestamp for this Deep Research run: "
+            )
         )
-        self.assertIn("entry.buy", deep_research_prompt)
-        self.assertIn("side=both", deep_research_prompt)
-        self.assertIn("matching lowercase enum", deep_research_prompt)
+        research_timestamp = research_timestamp_line.split(": ", 1)[1]
+        self.assertIsNotNone(datetime.fromisoformat(research_timestamp).tzinfo)
+        self.assertEqual(deep_research_prompt.count(research_timestamp), 1)
         self.assertIn(
-            "each exact top-level left/right operand `ref` or `field` string",
+            "Set research.checkedAt exactly to that trusted timestamp",
             deep_research_prompt,
         )
         self.assertIn(
-            'JSON string keys `"2"` and `"1"`',
-            deep_research_prompt,
-        )
-        self.assertIn("ind_ma20_close_d1", deep_research_prompt)
-        self.assertIn("Never abbreviate", deep_research_prompt)
-        self.assertIn("ma20_2", deep_research_prompt)
-        self.assertIn('`{"kind":"time","field":"timeframe"}`', deep_research_prompt)
-        self.assertIn("Never encode it as `session.name`", deep_research_prompt)
-        self.assertIn(
-            "Every boundary case must set `expected.signal` explicitly",
-            deep_research_prompt,
-        )
-        self.assertIn("exact `buy`/`sell` signal", deep_research_prompt)
-        self.assertIn("or to `none`", deep_research_prompt)
-        self.assertIn(
-            "exact safe order safety, exit, manage, recovery",
-            deep_research_prompt,
-        )
-        self.assertNotIn(
-            "exact safe order safety, recovery",
+            "Do not call any time, clock, timezone, or date lookup tool",
             deep_research_prompt,
         )
         self.assertEqual(

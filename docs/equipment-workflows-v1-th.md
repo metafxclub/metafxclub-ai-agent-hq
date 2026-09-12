@@ -27,8 +27,8 @@
 - Mission ตามเวลาที่กำลัง `queued`, `running` หรือ `waiting_approval` จะล็อกเฉพาะคิวของอุปกรณ์/งานชนิดเดียวกัน งานของอุปกรณ์ A ที่ยังไม่จบจึงไม่ขวางอุปกรณ์ B ที่ถึงเวลา ส่วนอุปกรณ์เดิมจะไม่ถูกปล่อยงานซ้อนจนกว่า Mission เดิมพ้นสถานะทำงาน
 - เรดาร์ระบบเทรดและ Radar Website Tool เปิดอัตโนมัติวันละหนึ่งรอบเวลา 09:00 น. Asia/Bangkok แบบ Backend-owned คงที่ ผู้ใช้ปิด เปลี่ยนเวลา สั่งรันทันที หรือสร้าง Mission ทดแทนไม่ได้ ส่วนข่าวตลาดเปิดเวลา 00:00 และ 12:00 น. ตามเวลาไทย โดย Backend เป็นผู้สร้าง Mission ภายในเอง ผู้ใช้ไม่ต้องสร้างหรืออนุมัติ Mission อ่านเว็บ
 - ก่อน Bridge เปิดรับคำขอ Backend จะตรวจสัญญาอุปกรณ์ทั้งหมดตั้งแต่เริ่มระบบ ทั้ง Action, ฟิลด์รับเข้า, เวลา, Timezone, งานที่อนุญาตให้ตั้งเวลา และชนิดหลักฐาน หากรายการใดผิดหรือสะกดไม่ตรง Bridge จะไม่เริ่มทำงานแทนการปล่อย Workflow ที่ไม่ครบเข้า Runtime
-- การเปิดตารางเวลาไม่ได้แปลว่างานจะเริ่มทันที Backend ใช้หลัก Fail-closed: ต้องพบ Scheduler thread และ Mission Worker thread, heartbeat ของทั้งคู่ต้องยังสด, Timeout Watchdog ของ Worker ต้องทำงาน, สถานะ runtime ต้องพร้อม, Full Access แบบมีระบบป้องกัน, Codex Runner ต้องพร้อม และ Rate Limit ต้องสูงกว่าค่าสำรอง จึงตั้ง `effectiveEnabled=true`; ถ้าข้อใดไม่ผ่านจะพักงานพร้อมบอกสาเหตุ
-- เกณฑ์กลางของงานอัตโนมัติคือ Codex ต้องเหลือ **มากกว่า 15%**; ที่ 15% พอดีหรือต่ำกว่าจะพักงานโดยไม่เปิด Runner และกลับมาทำต่อเมื่อยอดสูงกว่า 15%
+- การเปิดตารางเวลาไม่ได้แปลว่างานจะเริ่มทันที Backend ใช้หลัก Fail-closed: ต้องพบ Scheduler thread และ Mission Worker thread, heartbeat ของทั้งคู่ต้องยังสด, Timeout Watchdog ของ Worker ต้องทำงาน, สถานะ runtime ต้องพร้อม, Full Access แบบมีระบบป้องกัน, Codex Runner ต้องพร้อม และ Rate Limit ต้องไม่น้อยกว่าเกณฑ์กลางที่ผู้ใช้กำหนด จึงตั้ง `effectiveEnabled=true`; ถ้าข้อใดไม่ผ่านจะพักงานพร้อมบอกสาเหตุ
+- ผู้ใช้กำหนดเกณฑ์กลางของ AI Agent ได้ตั้งแต่ **0–100%** ที่การ์ดโควตา Codex และทุกระบบอ่านค่าเดียวกัน งานจะพักเฉพาะเมื่อยอดคงเหลือ **ต่ำกว่า** เกณฑ์ (เท่ากับเกณฑ์ยังทำงานได้) ดังนั้นค่า `0%` อนุญาตให้ใช้ต่อจนผู้ให้บริการรายงานว่าโควตาถึงขีดจำกัดจริง
 - `/api/health` จะรายงาน `degraded` แม้ไฟล์และ Dashboard Scheduler ปกติ หาก Mission Worker หยุด, อยู่สถานะ `degraded`/`blocked`, heartbeat เก่า หรือ Timeout Watchdog ตาย เพราะ Scheduler ที่สร้าง Mission ได้แต่ไม่มี Worker ปลอดภัยมารับงานยังไม่ถือว่าระบบพร้อมใช้งาน
 - เมื่อ Bridge หรือเครื่องกลับมาทำงาน ระบบชดเชยได้เฉพาะ **รอบล่าสุดที่ถึงเวลาแล้วในวันเดียวกัน** และทำได้สูงสุดหนึ่งรอบต่ออุปกรณ์ต่อการตรวจหนึ่งครั้ง (`latest_due_slot_wins`) เพื่อป้องกันงานถาโถม การเพิ่งเปิดหรือแก้ตารางเวลาระหว่างวันจะไม่ย้อนรันรอบที่อยู่ก่อนเวลาบันทึก
 - Namespace ของ Idempotency Key ที่ขึ้นต้นด้วย `dashboard-schedule:` สงวนให้ Backend Scheduler เท่านั้น Frontend หรือคำขอทั่วไปใช้ชื่อนี้ไม่ได้
@@ -86,7 +86,7 @@
 ทำได้แล้ว:
 
 - รับ Report ที่ Agent นำส่งเข้ามาอย่างถูกต้องตามเส้นทางที่ Backend อนุญาต
-- ส่ง Mission ให้ Mission Archivist ตรวจ Entry, Exit, SL/TP, Position Sizing, การแก้ไม้, ตลาด, Timeframe, เงื่อนไขพิเศษ, ความเหมาะสม และข้อจำกัด
+- ส่ง Mission ให้ Mission Archivist สรุประบบเป็น Strategy Brief 10 ช่อง A-J: รหัส, ชื่อ, ภาพรวม, กฎเข้า, การแก้ไม้, กฎปิด, Money Management, การส่งคำสั่ง, สิ่งที่แสดง และหมายเหตุ
 - บันทึกสายที่มาจาก Report ต้นทางถึง Report วิจัย
 
 ระบบต้องปฏิเสธรายงานที่ติดขัด ถูกยกเลิก ไม่ใช่ประเภทรายงานที่ปลายทางรองรับ หรือไม่มี Mission ส่งต่อโดย Agent ที่เสร็จสมบูรณ์
@@ -100,16 +100,18 @@
 - 3 สร้างโค้ด
 - 4 ตรวจ Source Code
 - 5 Compile / Validate
-- 6 Visual Backtest / Logic Recheck
+- 6 Visual Backtest / Source-contract Recheck (ตรวจ Static 10 ช่อง/6 กลุ่มแยกจากรายการเทรด และไม่อ้างว่า 6 กลุ่มถูกกระตุ้นครบแบบ Dynamic)
 - 7 ไฟล์และ Report
 
 ทำได้แล้ว:
 
-- เลือก Record ที่ Backend ยืนยันจากคลังวิจัยเชิงลึก หรือ Sync แถวที่ผ่านเกณฑ์จากแท็บ `Deep_Research` ของ Google Sheet กลางโดยไม่รับ Credential แล้วแปลงเป็น 23 ฟิลด์ Strategy Spec ภายใน
-- แสดง A-M เป็นข้อมูลแกนกลางสำหรับเขียนระบบ ได้แก่ชื่อ/ตระกูล/ตลาด/Timeframe/Entry/Exit/SL/TP/การแก้ไม้/Lot-Risk/Indicator/เงื่อนไขพิเศษ และแสดง N-W เป็นสถานะ downstream
+- เลือก Record ที่ Backend ยืนยันจากคลังวิจัยเชิงลึก หรือ Sync แถวที่ผ่านเกณฑ์จากแท็บ `Deep_Research` ของ Google Sheet กลางโดยไม่รับ Credential แล้วอ่าน Strategy Brief 10 ช่อง A-J เป็นข้อมูลต้นทาง
+- แสดง `record_id`, `system_name`, `system_overview`, `entry_rules`, `recovery_rules`, `exit_rules`, `money_management`, `order_execution`, `display_requirements` และ `additional_notes` ตามลำดับ A-J; ชุด A-AW/49 ช่องเดิมเป็นเพียงสำรองแบบอ่านอย่างเดียว ไม่ใช่ Gate สำหรับงานใหม่
 - เลือก MT4/MQL4, MT5/MQL5 หรือ TradingView/Pine Script และยืนยัน Strategy Spec ก่อนเริ่มสร้างไฟล์
 - ทำงานแบบ Manual stage-by-stage เท่านั้น หนึ่งปุ่มเลื่อนได้ไม่เกินหนึ่งขั้น ไม่มี Scheduler และไม่มี Loop สร้าง-แก้อัตโนมัติ
 - สร้าง Source แต่ละเวอร์ชันใน `workspace/ea-factory/<build-id>` โดยไม่ทับเวอร์ชันเดิม พร้อมโฟลเดอร์ Source, EA_Versions, Reports, Sets, Screenshots และ Summaries
+- ก่อนเขียน Source จริง Backend ตรวจ semantic ของ EA กับ Strategy Brief A-J; ถ้าผลรอบแรกไม่ผ่าน จะส่งเฉพาะรหัสข้อผิดพลาดจาก Validator ให้ Codex สร้างใหม่ได้หนึ่งรอบภายใต้ Strategy Spec เดิม และยังไม่เขียนไฟล์จนกว่าจะผ่าน
+- หากรอบซ่อมยังจบเป็น `invalid_output` และยังไม่มี Source/Version หน้าโรงงานจะแสดงปุ่ม Retry ที่สร้าง Mission ใหม่จาก Strategy Spec เดิมได้สูงสุด 3 ครั้ง พร้อม Audit; Source Review และขั้นหลังจากนั้น Retry ด้วยเส้นทางนี้ไม่ได้
 - ตรวจ Source Code แบบ Static พร้อม Signal Guard, order lifecycle, look-ahead/repaint, Money Management, error handling และ source digest
 - Pine Script จบสาย execution หลัง Source validation แล้วเข้าสรุป Report โดยไม่อ้างว่าเผยแพร่หรือ Backtest บน TradingView
 - MT4/MT5 ต้องเลือก Terminal ให้ตรงแพลตฟอร์มก่อน และจะถือว่า Compile/Backtest ผ่านได้เฉพาะเมื่อมีหลักฐานหน้าบ้านจาก MetaEditor/Strategy Tester ที่ผูกกับ Source digest และ Audit ของ Build เดียวกัน
@@ -117,10 +119,10 @@
 
 กติกาหยุดแบบ Fail-closed:
 
-- หาก Google Sheet เป็น Private, คอลัมน์ไม่ครบ, Record ID ซ้ำ หรือข้อมูล A-M สำคัญขาด ระบบต้องหยุดก่อนสร้าง Build
+- หาก Google Sheet เป็น Private, หัวคอลัมน์ A-J ไม่ตรง, Record ID ซ้ำ หรือข้อมูล Strategy Brief สำคัญขาด ระบบต้องหยุดก่อนสร้าง Build; ห้ามบล็อกเพียงเพราะไม่มี Blueprint 49 ช่องเดิม
 - หากยังไม่ได้เลือก MT4/MT5 ที่ตรงแพลตฟอร์ม หรือยังไม่มีหลักฐาน MetaEditor/Visual Mode ระบบต้องแสดง `blocked` และห้ามแสดง Passed
 - Process exit code, Static review, ไฟล์ `.set` หรือ `.ini` อย่างเดียวไม่ใช่หลักฐาน Compile/Backtest
-- หาก Build ขั้นใดไม่ผ่าน ผู้ใช้เป็นผู้กดสร้างเวอร์ชันถัดไป ไม่มีการเปิด Loop แก้ซ้ำเอง
+- หาก Build ขั้นอื่นไม่ผ่าน ผู้ใช้เป็นผู้กดสร้างเวอร์ชันถัดไป ไม่มีการเปิด Loop แก้ซ้ำเอง; ข้อยกเว้นมีเฉพาะการซ่อม semantic ภายในหนึ่งรอบและปุ่ม Retry `generate_source` แบบจำกัดที่อธิบายด้านบน
 
 ## 4. ห้องทดลอง EA — ห้องทดสอบอิสระ
 
@@ -155,7 +157,7 @@ Google Sheets Adapter ทำงานหลัง Local Runner เท่าน�
 ## กติกาป้องกันงานซ้ำ
 
 - ทุกการกดส่งงานมี Idempotency Key
-- การกดซ้ำหรือ Retry คำขอเดิมต้องไม่สร้าง Mission ใหม่
+- การกดซ้ำด้วย Idempotency Key เดิมต้องไม่สร้าง Mission ใหม่; ปุ่ม Retry ของ `generate_source` เป็น Intent ใหม่ที่ผู้ใช้กดเอง จึงใช้ Key ใหม่และสร้าง Mission ใหม่โดยผูกกับ Mission `invalid_output` เดิม
 - รายการค้นพบใช้ URL ที่ Normalize แล้วร่วมกับชื่อระบบ ผู้เขียน ตลาด และ Timeframe เป็นกุญแจตรวจซ้ำ
 - รายการที่ยังตรวจไม่ได้ต้องแสดงว่า `ยังไม่ยืนยัน` ไม่ใช่ `ไม่ซ้ำแน่นอน`
 
@@ -256,7 +258,7 @@ Google Sheets Adapter ทำงานหลัง Local Runner เท่าน�
 - แสดง Mission Worker แบบ Fail-closed โดยตรวจสถานะ Worker thread, อายุ Heartbeat และ Timeout Watchdog แยกจาก Dashboard Scheduler; หากส่วนใดไม่พร้อม Health ของ Bridge จะเป็น `degraded`
 - รีเฟรชสถานะโดยไม่เรียก Codex และบันทึก Mission/Report/Audit
 - ตั้งค่าที่ปลอดภัย 5 รายการ: ภาษา, Model Tier, งบ Token โดยประมาณ, Timeout และ Output Limit; เกณฑ์โควตาเป็นนโยบายกลางที่ผู้ใช้แก้ไม่ได้
-- Backend บังคับ Timeout ที่ 15-600 วินาทีและ Output Limit ที่ 1,000-20,000 ตัวอักษรจริง ส่วนเกณฑ์โควตาคงที่ 15%: หยุดที่ 15% และเริ่มงานอัตโนมัติเมื่อค่าคงเหลือมากกว่า 15%
+- Backend บังคับ Timeout ที่ 15-600 วินาทีและ Output Limit ที่ 1,000-20,000 ตัวอักษรจริง ส่วนเกณฑ์เครดิตขั้นต่ำของ AI Agent ปรับได้จาก 0-100% ที่จุดกลางเดียว: ค่าเท่ากับเกณฑ์ยังทำงานได้ และจะพักเฉพาะเมื่อค่าคงเหลือต่ำกว่าเกณฑ์ (หากผู้ให้บริการแจ้งว่า Rate Limit หมดจริง ระบบยังคงหยุด)
 - งบ Token เป็นค่าแนะนำสำหรับประมาณการและ Audit (`advisory`) เท่านั้น Codex CLI ยังไม่มี Hard Token Ceiling จึงห้ามสื่อว่าค่านี้ตัดหรือหยุด Token ได้แน่นอน
 - ปฏิเสธ Token, API Key, Password, Cookie, Credential, Provider Model ID และการเปลี่ยนสิทธิ์ Tool จาก Frontend
 

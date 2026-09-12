@@ -67,8 +67,20 @@ class EaFactoryAdversarialTests(unittest.TestCase):
         source_key: str = "sheet-adversarial",
         verification_status: str = "verified",
     ) -> dict:
+        compact_values = {
+            "record_id": "system-adversarial-001",
+            "system_name": "Adversarial EMA crossover",
+            "system_overview": "Closed-bar trend system for a selected liquid market and timeframe.",
+            "entry_rules": "Buy on a confirmed EMA fast cross above slow; sell on the inverse closed-bar cross.",
+            "recovery_rules": "No recovery, grid, martingale, averaging, or hedging.",
+            "exit_rules": "Close on the opposite signal with bounded stop loss and take profit.",
+            "money_management": "Use a positive fixed lot and at most one managed position.",
+            "order_execution": "Use market buy and sell orders on a new confirmed bar.",
+            "display_requirements": "Display system name, signal, Balance, Equity, and Spread.",
+            "additional_notes": "Compile and backtest separately before use.",
+        }
         record = self.bridge._ea_factory_normalize_record(
-            self.valid_values(verification_status=verification_status),
+            compact_values,
             source_kind="google_sheet_public_csv",
             source_key=source_key,
             source_report_id="report-sheet-source",
@@ -537,8 +549,20 @@ class EaFactoryAdversarialTests(unittest.TestCase):
             digest = hashlib.sha256(source.read_bytes()).hexdigest()
             relative = source.relative_to(root).as_posix()
             baseline = self.generation_report(build, relative, digest)
+            expected_manifest = json.loads(
+                baseline["metrics"]["workflowOutput"]["values"][
+                    "blueprintCoverageManifest"
+                ]
+            )
 
-            with mock.patch.object(self.bridge, "PROJECT_ROOT", root):
+            with (
+                mock.patch.object(self.bridge, "PROJECT_ROOT", root),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_recomputed_generation_coverage_manifest",
+                    return_value=expected_manifest,
+                ),
+            ):
                 self.assertTrue(
                     self.bridge._ea_factory_generation_evidence_valid(
                         copy.deepcopy(build),
@@ -677,6 +701,113 @@ class EaFactoryAdversarialTests(unittest.TestCase):
                 "Critical unresolved review findings must require a new immutable version, not advance",
             )
 
+            advisory = self.review_report(build, "not_run")
+            advisory_values = advisory["metrics"]["workflowOutput"]["values"]
+            advisory_values["severity"] = (
+                "overall=medium; syntax=unknown_source_only; logic=medium; "
+                "lookahead_repaint=low; money_management=medium; "
+                "error_handling=medium"
+            )
+            advisory_values["issues"] = json.dumps([
+                {
+                    "severity": "medium",
+                    "type": "logic",
+                    "message": "52-week high and high spread need operator review",
+                },
+                {
+                    "severity": "low",
+                    "type": "error_handling",
+                    "message": "No syntax error was observed in source-only review",
+                },
+            ])
+            self.assertFalse(
+                self.bridge._ea_factory_review_requires_repair(advisory),
+                "Domain words such as 52-week high must not become a blocking severity",
+            )
+            self.assertTrue(
+                self.bridge._ea_factory_review_evidence_valid(build, advisory)
+            )
+            labelled_scalar_advisory = copy.deepcopy(advisory)
+            labelled_scalar_advisory["metrics"]["workflowOutput"]["values"][
+                "severity"
+            ] = "overall_medium"
+            self.assertTrue(
+                self.bridge._ea_factory_review_evidence_valid(
+                    build, labelled_scalar_advisory
+                ),
+                "The review contract emits labelled scalar severities such as overall_medium",
+            )
+            labelled_scalar_high = copy.deepcopy(advisory)
+            labelled_scalar_high["metrics"]["workflowOutput"]["values"][
+                "severity"
+            ] = "logic_high"
+            self.assertTrue(
+                self.bridge._ea_factory_review_requires_repair(
+                    labelled_scalar_high
+                )
+            )
+            self.assertFalse(
+                self.bridge._ea_factory_review_evidence_valid(
+                    build, labelled_scalar_high
+                ),
+                "A labelled scalar high finding must remain blocking",
+            )
+            ranged_advisory = copy.deepcopy(advisory)
+            ranged_advisory["metrics"]["workflowOutput"]["values"]["severity"] = (
+                "overall=medium; syntax=low_medium; logic=medium; "
+                "lookahead_repaint=low; lifecycle_error_handling=low-to-medium"
+            )
+            self.assertTrue(
+                self.bridge._ea_factory_review_evidence_valid(build, ranged_advisory),
+                "Known low-to-medium ranges must normalize conservatively to medium",
+            )
+            ranged_high = copy.deepcopy(advisory)
+            ranged_high["metrics"]["workflowOutput"]["values"]["severity"] = (
+                "overall=medium; logic=medium-to-high"
+            )
+            self.assertTrue(
+                self.bridge._ea_factory_review_requires_repair(ranged_high),
+                "A range ending at high must remain blocking",
+            )
+            self.assertFalse(
+                self.bridge._ea_factory_review_evidence_valid(build, ranged_high)
+            )
+            labelled_high = copy.deepcopy(advisory)
+            labelled_high["metrics"]["workflowOutput"]["values"]["severity"] = (
+                "overall=medium; syntax=unknown_source_only; logic=high"
+            )
+            self.assertTrue(
+                self.bridge._ea_factory_review_requires_repair(labelled_high),
+                "A labelled high component must remain blocking",
+            )
+            self.assertFalse(
+                self.bridge._ea_factory_review_evidence_valid(build, labelled_high)
+            )
+            malformed = copy.deepcopy(advisory)
+            malformed_values = malformed["metrics"]["workflowOutput"]["values"]
+            malformed_values["severity"] = "overall=medium; logic=severe"
+            malformed_values["reviewStatus"] = "passed"
+            self.assertFalse(
+                self.bridge._ea_factory_review_evidence_valid(build, malformed),
+                "Unknown severity assignments must fail closed even with a spoofed pass status",
+            )
+            missing = copy.deepcopy(advisory)
+            missing_values = missing["metrics"]["workflowOutput"]["values"]
+            missing_values.pop("severity")
+            missing_values["reviewStatus"] = "passed"
+            self.assertFalse(
+                self.bridge._ea_factory_review_evidence_valid(build, missing),
+                "A reviewStatus string cannot replace the required severity evidence",
+            )
+            nested_critical = copy.deepcopy(advisory)
+            nested_critical["metrics"]["workflowOutput"]["values"]["issues"] = {
+                "issues": [{"severity": "critical", "type": "logic_risk"}]
+            }
+            self.assertTrue(
+                self.bridge._ea_factory_review_requires_repair(nested_critical),
+                "Nested structured critical findings must remain blocking",
+            )
+
     def test_review_rehashes_manifest_source_version_and_spec_before_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -774,7 +905,7 @@ class EaFactoryAdversarialTests(unittest.TestCase):
                     "status": status,
                 }
 
-            def fake_report(payload):
+            def fake_report(payload, **_kwargs):
                 report_id = payload.get("id")
                 if not report_id:
                     report_id = f"report-pine-validation-{len(report_sequence) + 1}"
@@ -833,7 +964,7 @@ class EaFactoryAdversarialTests(unittest.TestCase):
             def fake_mission(payload, status="queued"):
                 return {"id": payload.get("id") or "mission-final-report", "status": status}
 
-            def fake_report(payload):
+            def fake_report(payload, **_kwargs):
                 return {
                     **copy.deepcopy(payload),
                     "id": payload.get("id") or "report-final-report",
@@ -1067,6 +1198,7 @@ class EaFactoryAdversarialTests(unittest.TestCase):
     def test_manual_stage_order_and_idempotent_replay_are_strict(self) -> None:
         build = {
             "id": "ea-build-manual-order",
+            "coverageStatus": "compact_current",
             "platform": "mt4",
             "sourceRecordDigest": "a" * 64,
             "sourceReportId": "report-strategy-spec",
@@ -1199,6 +1331,7 @@ class EaFactoryAdversarialTests(unittest.TestCase):
     def test_stage_replay_persists_explicit_post_reconciliation_without_redispatch(self) -> None:
         build = {
             "id": "ea-build-reconcile-replay",
+            "coverageStatus": "compact_current",
             "platform": "mt4",
             "sourceRecordDigest": "a" * 64,
             "sourceReportId": "report-strategy-spec",

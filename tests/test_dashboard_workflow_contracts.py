@@ -19,7 +19,7 @@ FX_PAIR_UNIVERSE = [
 
 WORKFLOW_DEVICE_TAB_IDS = {
     "codex_mcp_portal": ["systems", "schedule", "catalog"],
-    "left_server_racks": ["research", "chart", "backtest", "report"],
+    "left_server_racks": ["select", "analysis"],
     "right_server_racks": [
         "source",
         "strategy_spec",
@@ -110,6 +110,8 @@ class DashboardWorkflowContractTests(unittest.TestCase):
                 if prop_id == "right_server_racks"
                 else 3
                 if prop_id in {"codex_mcp_portal", "left_signal_cube"}
+                else 2
+                if prop_id == "left_server_racks"
                 else 1
                 if prop_id == "right_status_crystals"
                 else 4
@@ -149,9 +151,9 @@ class DashboardWorkflowContractTests(unittest.TestCase):
             elif prop_id == "left_signal_cube":
                 self.assertEqual(tabs[-1]["labelTh"], "ประวัติข่าว")
             elif prop_id == "left_server_racks":
-                self.assertEqual(ux["historyReportTabId"], "report")
+                self.assertEqual(ux["historyReportTabId"], "analysis")
                 self.assertEqual(ux["historyReportTabPosition"], "last")
-                self.assertEqual(tabs[-1]["labelTh"], "สรุป Report")
+                self.assertEqual(tabs[-1]["labelTh"], "2 แจกแจง EA-ready / บันทึก")
             elif prop_id == "right_server_racks":
                 self.assertEqual(ux["historyReportTabId"], "final_report")
                 self.assertEqual(ux["historyReportTabPosition"], "last")
@@ -167,10 +169,12 @@ class DashboardWorkflowContractTests(unittest.TestCase):
                 self.assertEqual(tabs[0]["actionIds"], [])
             else:
                 self.assertTrue(tabs[0]["actionIds"], prop_id)
-            self.assertLessEqual(len(tabs[0]["labelTh"]), 24)
+            label_limit = 32 if prop_id == "left_server_racks" else 24
+            purpose_limit = 128 if prop_id == "left_server_racks" else 80
+            self.assertLessEqual(len(tabs[0]["labelTh"]), label_limit)
             for tab in tabs:
-                self.assertLessEqual(len(tab["labelTh"]), 24)
-                self.assertLessEqual(len(tab["purpose"]), 80)
+                self.assertLessEqual(len(tab["labelTh"]), label_limit)
+                self.assertLessEqual(len(tab["purpose"]), purpose_limit)
                 plain_text = f"{tab['labelTh']} {tab['purpose']}".lower()
                 for forbidden in ("pipeline", "upstream", "downstream", "auto pull"):
                     self.assertNotIn(forbidden, plain_text)
@@ -289,12 +293,23 @@ class DashboardWorkflowContractTests(unittest.TestCase):
                 )
                 self.assertTrue(workflow["catalogProjection"]["requireValidWorkflowReceipt"])
             elif prop_id == "right_server_racks":
-                self.assertEqual(workflow["coordinationMode"], "manual_stage_by_stage")
-                self.assertTrue(workflow["agentTransferOnly"])
+                self.assertEqual(
+                    workflow["coordinationMode"],
+                    "one_click_backend_coordinator_with_manual_stage_recovery",
+                )
+                self.assertFalse(workflow["agentTransferOnly"])
                 self.assertFalse(workflow["directDashboardDependency"])
                 self.assertFalse(workflow["executionPolicy"]["scheduled"])
-                self.assertFalse(workflow["executionPolicy"]["automaticLoop"])
-                self.assertTrue(workflow["executionPolicy"]["oneUserActionAdvancesOneStage"])
+                self.assertTrue(workflow["executionPolicy"]["automaticLoop"])
+                self.assertFalse(
+                    workflow["executionPolicy"]["oneUserActionAdvancesOneStage"]
+                )
+                self.assertTrue(
+                    workflow["executionPolicy"]["oneUserClickAdvancesVerifiedStageChain"]
+                )
+                self.assertTrue(
+                    workflow["executionPolicy"]["oneCoordinatorIterationAdvancesAtMostOneStage"]
+                )
             else:
                 self.assertEqual(workflow["coordinationMode"], "agent_mission_only")
                 self.assertTrue(workflow["agentTransferOnly"])
@@ -646,8 +661,9 @@ class DashboardWorkflowContractTests(unittest.TestCase):
         self.assertFalse(tool["providerModelIdAllowed"])
         self.assertFalse(tool["frontendSelectedCredentialsAllowed"])
         reserve = role["agentPreferenceContract"]["fields"]["rateReservePercent"]
-        self.assertEqual(reserve["minimum"], 15)
-        self.assertEqual(reserve["maximum"], 15)
+        self.assertEqual(reserve["minimum"], 0)
+        self.assertEqual(reserve["maximum"], 100)
+        self.assertEqual(reserve["default"], 15)
 
     def test_terminal_source_contract_uses_opaque_source_ids_not_paths(self) -> None:
         for action_id in NEW_DEVICE_ACTIONS["terminal_workstation"]:

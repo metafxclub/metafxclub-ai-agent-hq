@@ -159,26 +159,29 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
         self.assertIn("normalizeResearchSheetHub(payload)", recovery)
         self.assertIn("if (!hub.data?.active || hub.inFlight) return hub.data", recovery)
 
-    def test_google_oauth_missing_backend_client_is_explicit_and_fail_closed(self):
+    def test_google_oauth_missing_central_release_client_is_explicit_and_fail_closed(self):
         normalize = self.block("function normalizeResearchSheetGoogleAuth", "function normalizeResearchSheetAuthorizationUrl")
         presentation = self.block("function researchSheetGoogleAuthPresentation", "function renderResearchSheetGoogleAuth")
         render = self.block("function renderResearchSheetGoogleAuth", "function researchSheetHubSummaryPresentation")
         self.assertIn("requiresAdminSetup", normalize)
         self.assertIn("client_not_configured", normalize)
         self.assertIn("oauth_client_not_configured", normalize)
-        self.assertIn("Backend ยังไม่ได้ตั้ง Google OAuth Client", presentation)
-        self.assertIn("ไม่ต้องใส่ Token หรือ Client Secret ที่หน้านี้", presentation)
+        self.assertIn("Google Client กลางในชุด Release ยังไม่พร้อม", presentation)
+        self.assertIn("กรุณาหยุดและติดต่อผู้สอน", presentation)
+        self.assertIn("Advanced/Recovery สำหรับผู้ดูแลระบบเท่านั้น", presentation)
         self.assertIn("!presentation.startAvailable", render)
         self.assertIn("!googleAuth.connected", self.block("function renderResearchSheetHub()", "function refreshOpenResearchSheetConsumer"))
         self.assertNotIn('"configured", "ready"', normalize)
 
-    def test_google_oauth_access_denied_explains_testing_audience(self):
+    def test_google_oauth_access_denied_does_not_assume_testing_audience(self):
         reason = self.block(
             "function researchSheetGoogleAuthFailureReason",
             "function researchSheetGoogleAuthIsTerminalStatus",
         )
-        self.assertIn("Audience > Test users", reason)
-        self.assertIn("กรณีแอปยังเป็น Testing", reason)
+        self.assertIn("บัญชี Google ที่ถูกต้อง", reason)
+        self.assertIn("ติดต่อผู้สอน", reason)
+        self.assertNotIn("Audience > Test users", reason)
+        self.assertNotIn("กรณีแอปยังเป็น Testing", reason)
 
     def test_google_disconnect_keeps_sheet_id_and_normal_sheet_flow_stays_confirmed(self):
         disconnect = self.block("async function disconnectResearchSheetGoogleAuth", "async function inspectResearchSheetHub")
@@ -667,7 +670,8 @@ console.log(JSON.stringify({{
         self.assertIn("sheetSchema.sheetTabDefault", schema_renderer)
         self.assertIn("eaFactorySpreadsheetColumnName(sourceHeaders.length)", schema_renderer)
         self.assertIn("${sourceHeaders.length} headers", schema_renderer)
-        self.assertIn("ไม่ใช่ช่วงคอลัมน์ Google Sheet", schema_renderer)
+        self.assertIn("Strategy Brief", schema_renderer)
+        self.assertIn("คอลัมน์ A-J", schema_renderer)
         self.assertNotIn("Schema Google Sheets A-W", schema_renderer)
 
     def test_progress_and_layout_are_accessible_and_responsive(self):

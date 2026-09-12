@@ -10,13 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER_PATH = ROOT / "runner" / "codex_cli_runner.py"
-BLUEPRINT_TEST_PATH = ROOT / "tests" / "test_ea_research_blueprint_v2.py"
-SCHEMA_PATH = (
-    ROOT
-    / "contracts"
-    / "research"
-    / "ea-implementation-blueprint-v2.schema.json"
-)
+BRIEF_TEST_PATH = ROOT / "tests" / "test_ea_strategy_brief.py"
 
 
 def load_module(name: str, path: Path):
@@ -29,9 +23,9 @@ def load_module(name: str, path: Path):
     return module
 
 
-BLUEPRINT_SUPPORT = load_module(
-    "metafx_ea_research_structured_output_blueprint_support",
-    BLUEPRINT_TEST_PATH,
+BRIEF_SUPPORT = load_module(
+    "metafx_ea_research_structured_output_brief_support",
+    BRIEF_TEST_PATH,
 )
 
 
@@ -43,262 +37,231 @@ class EAResearchStructuredOutputSchemaTests(unittest.TestCase):
             RUNNER_PATH,
         )
 
-    def ready_blueprint(self) -> dict:
-        blueprint = BLUEPRINT_SUPPORT.ready_blueprint()
-        blueprint["evidenceMap"].append(
-            {
-                "sourceRef": "S3",
-                "url": "https://www.metatrader4.com/en/trading-platform/help/analytics/tech_indicators/moving_average",
-                "title": "Independent EMA reference",
-                "checkedAt": blueprint["checkedAt"],
-            }
-        )
-        return blueprint
+    @staticmethod
+    def ready_brief() -> dict:
+        return copy.deepcopy(BRIEF_SUPPORT.valid_brief())
 
     @staticmethod
-    def result_payload(blueprint: dict) -> dict:
+    def result_payload(brief: dict) -> dict:
         return {
             "status": "completed",
-            "summary": "EA-ready deterministic research completed",
-            "findings": ["Closed-bar rules use typed expressions"],
-            "nextSteps": ["Archive the canonical blueprint"],
+            "summary": "EA Strategy Brief research completed",
+            "findings": ["Closed-bar entry and exit prose is implementation-ready"],
+            "nextSteps": ["Review the ten A-J Sheet fields before saving"],
             "evidence": [
                 {
-                    "label": item["title"],
-                    "url": item["url"],
-                    "note": "Public source opened by the research worker",
+                    "label": f"Public source {index}",
+                    "url": url,
+                    "note": "Opened by the research worker",
                 }
-                for item in blueprint["evidenceMap"]
+                for index, url in enumerate(brief["sourceLinks"], start=1)
             ],
             "blockedCapability": "",
-            "research": blueprint,
+            "research": brief,
             "evidenceKinds": [
                 "at_least_two_source_urls",
                 "checked_at",
                 "limitations",
-                "ea_readiness",
                 "source_digest",
             ],
         }
 
-    @staticmethod
-    def tag_json(value: object) -> str:
-        return "JSON:" + json.dumps(
-            value,
-            ensure_ascii=False,
-            separators=(",", ":"),
+    def parse(self, brief: dict) -> dict:
+        return self.runner.parse_work_result(
+            json.dumps(self.result_payload(brief), ensure_ascii=False),
+            64_000,
+            "trading_system_research",
         )
 
-    def tag_transport_free_form_values(self, blueprint: dict) -> None:
-        for record in blueprint["inputs"]:
-            record["default"] = self.tag_json(record["default"])
-        for record in blueprint["indicators"]:
-            record["parameters"] = self.tag_json(record["parameters"])
-        for feature in blueprint["orderManagement"].values():
-            if isinstance(feature, dict) and "parameters" in feature:
-                feature["parameters"] = self.tag_json(feature["parameters"])
-        for record in blueprint["testCases"]:
-            for key in ("given", "when", "expected"):
-                record[key] = self.tag_json(record[key])
-
-    def test_transport_schema_is_recursive_supported_subset_without_mutating_canonical(self) -> None:
-        canonical = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-        original = copy.deepcopy(canonical)
-        transport = self.runner._to_structured_output_schema(
-            canonical,
-            ref_prefix="#/$defs/",
-        )
-        self.assertEqual(canonical, original)
-
-        canonical_keys: set[str] = set()
-        forbidden_found: list[tuple[str, str]] = []
-        invalid_objects: list[str] = []
-        invalid_refs: list[str] = []
-        references: list[str] = []
-        forbidden = {
-            "$id",
-            "$schema",
-            "allOf",
-            "dependentRequired",
-            "dependentSchemas",
-            "else",
-            "format",
-            "if",
-            "not",
-            "oneOf",
-            "patternProperties",
-            "prefixItems",
-            "propertyNames",
-            "then",
-            "unevaluatedProperties",
-            "uniqueItems",
-        }
-
-        def walk(value: object, path: str, *, collect_canonical: bool = False) -> None:
-            if isinstance(value, dict):
-                if collect_canonical:
-                    canonical_keys.update(value)
-                else:
-                    for key in forbidden.intersection(value):
-                        forbidden_found.append((path, key))
-                    if value.get("type") == "object":
-                        properties = value.get("properties")
-                        if (
-                            not isinstance(properties, dict)
-                            or set(value.get("required", [])) != set(properties)
-                            or value.get("additionalProperties") is not False
-                        ):
-                            invalid_objects.append(path)
-                    reference = value.get("$ref")
-                    if isinstance(reference, str):
-                        references.append(reference)
-                        if not reference.startswith("#/$defs/"):
-                            invalid_refs.append(reference)
-                for key, child in value.items():
-                    walk(child, f"{path}.{key}", collect_canonical=collect_canonical)
-            elif isinstance(value, list):
-                for index, child in enumerate(value):
-                    walk(child, f"{path}[{index}]", collect_canonical=collect_canonical)
-
-        walk(canonical, "$", collect_canonical=True)
-        walk(transport, "$")
-        self.assertTrue({"uniqueItems", "allOf", "if", "then", "oneOf", "format"}.issubset(canonical_keys))
-        self.assertEqual(forbidden_found, [])
-        self.assertEqual(invalid_objects, [])
-        self.assertEqual(invalid_refs, [])
-        self.assertGreater(len(references), 100)
-        self.assertTrue(
-            all(reference[len("#/$defs/") :] in transport["$defs"] for reference in references)
-        )
-
-        definitions = transport["$defs"]
-        operand_field = definitions["operand"]["properties"]["field"]
-        field_enum = operand_field["anyOf"][0]["enum"]
-        self.assertIn("timeframe", field_enum)
-        self.assertIn("bars_since_initial_action_signal", field_enum)
-        self.assertNotIn("name", field_enum)
-        input_schema = definitions["input"]
-        self.assertEqual(
-            input_schema["properties"]["min"],
-            {"anyOf": [{"type": "number"}, {"type": "null"}]},
-        )
-        self.assertEqual(
-            input_schema["properties"]["default"]["type"],
-            "string",
-        )
-        self.assertNotIn("anyOf", input_schema["properties"]["default"])
-        self.assertEqual(
-            definitions["indicator"]["properties"]["parameters"]["type"],
-            "string",
-        )
-        object_pattern = definitions["indicator"]["properties"]["parameters"]["pattern"]
-        self.assertRegex("JSON:{}", object_pattern)
-        self.assertNotRegex("JSON:null", object_pattern)
-        self.assertEqual(
-            definitions["managedFeature"]["properties"]["parameters"]["pattern"],
-            object_pattern,
-        )
-        reset_condition = definitions["recovery"]["properties"]["resetCondition"]
-        self.assertEqual(reset_condition["anyOf"][-1], {"type": "null"})
-        self.assertIn("anyOf", reset_condition["anyOf"][0])
-        for definition_name in (
-            "recoverySpacing",
-            "recoveryLotFormula",
-            "basketThreshold",
-            "hedgeLifecycle",
-            "reentryPolicy",
-        ):
-            self.assertEqual(definitions[definition_name]["type"], "object")
-            self.assertIs(definitions[definition_name]["additionalProperties"], False)
-            self.assertEqual(
-                set(definitions[definition_name]["required"]),
-                set(definitions[definition_name]["properties"]),
-            )
-
+    def test_embedded_schema_is_exact_compact_supported_subset(self) -> None:
         embedded = self.runner.build_work_output_schema(
             64_000,
             "trading_system_research",
         )
-        expected_research = copy.deepcopy(transport)
-        expected_definitions = expected_research.pop("$defs")
-        self.assertEqual(embedded["properties"]["research"], expected_research)
-        self.assertEqual(embedded["$defs"], expected_definitions)
+        research = embedded["properties"]["research"]
+        expected = {
+            "schemaVersion",
+            "systemName",
+            "systemOverview",
+            "entryRules",
+            "recoveryRules",
+            "exitRules",
+            "moneyManagement",
+            "orderExecution",
+            "displayRequirements",
+            "additionalNotes",
+            "sourceLinks",
+            "checkedAt",
+            "limitations",
+        }
+
+        self.assertEqual(research["type"], "object")
+        self.assertIs(research["additionalProperties"], False)
+        self.assertEqual(set(research["properties"]), expected)
+        self.assertEqual(set(research["required"]), expected)
+        self.assertEqual(
+            research["properties"]["schemaVersion"]["enum"],
+            ["ea-strategy-brief/1.0.0"],
+        )
+        self.assertEqual(
+            research["properties"]["sourceLinks"]["minItems"],
+            2,
+        )
+        self.assertEqual(
+            research["properties"]["sourceLinks"]["maxItems"],
+            2,
+        )
         self.assertEqual(embedded["properties"]["evidence"]["minItems"], 2)
         self.assertEqual(embedded["properties"]["evidence"]["maxItems"], 2)
-        self.assertNotIn("$defs", embedded["properties"]["research"])
-        self.assertEqual(
-            embedded["properties"]["research"]["properties"]["strategyId"]["$ref"],
-            "#/$defs/id",
-        )
+        self.assertNotIn("$defs", embedded)
 
-    def test_transport_nulls_and_tagged_json_restore_to_canonical_blueprint(self) -> None:
-        canonical = self.ready_blueprint()
-        transport = copy.deepcopy(canonical)
-        self.tag_transport_free_form_values(transport)
-
-        # These fields are absent in the canonical value, but Structured
-        # Outputs makes every optional property required and nullable.
-        transport["inputs"][0]["allowedValues"] = None
-        transport["entry"]["buy"]["expiry"] = None
-        transport["recovery"]["trigger"] = None
-        transport["evidenceMap"][0]["quoteOrFinding"] = None
-
-        parsed = self.runner.parse_work_result(
-            json.dumps(self.result_payload(transport), ensure_ascii=False),
-            64_000,
-            "trading_system_research",
-        )
+    def test_direct_compact_brief_projects_exact_backend_fields(self) -> None:
+        brief = self.ready_brief()
+        parsed = self.parse(brief)
         fields = {item["field"]: item["value"] for item in parsed["contractFields"]}
-        restored = json.loads(fields["eaBlueprint"])
-        expected = self.runner.normalize_blueprint(canonical)
-        self.assertEqual(restored, expected)
-        self.assertNotIn("allowedValues", restored["inputs"][0])
-        self.assertNotIn("expiry", restored["entry"]["buy"])
-        self.assertNotIn("trigger", restored["recovery"])
-        self.assertIsInstance(restored["indicators"][0]["parameters"], dict)
-        self.assertIsInstance(restored["testCases"][0]["given"], dict)
 
-    def test_required_null_and_bad_tagged_json_still_fail_canonical_gate(self) -> None:
-        required_null = self.ready_blueprint()
-        required_null["checkedAt"] = None
-        with self.assertRaisesRegex(ValueError, "CHECKED_AT_INVALID"):
-            self.runner.parse_work_result(
-                json.dumps(self.result_payload(required_null), ensure_ascii=False),
-                64_000,
-                "trading_system_research",
-            )
+        self.assertEqual(
+            list(fields),
+            list(self.runner.TRADING_SYSTEM_RESEARCH_CONTRACT_FIELDS),
+        )
+        self.assertEqual(json.loads(fields["strategyBrief"]), brief)
+        self.assertRegex(fields["sourceDigest"], r"^[0-9a-f]{64}$")
+        self.assertEqual(json.loads(fields["sourceLinks"]), brief["sourceLinks"])
+        self.assertEqual(fields["checkedAt"], "2026-09-10T12:00:00+07:00")
+        self.assertEqual(json.loads(fields["limitations"]), brief["limitations"])
 
-        malformed = self.ready_blueprint()
-        malformed["inputs"][0]["default"] = "JSON:{not-json"
-        with self.assertRaisesRegex(ValueError, "INPUT_DEFAULT_TYPE"):
-            self.runner.parse_work_result(
-                json.dumps(self.result_payload(malformed), ensure_ascii=False),
-                64_000,
-                "trading_system_research",
-            )
-
-    def test_removed_transport_constraints_remain_semantically_enforced(self) -> None:
-        wrong_cross = self.runner.normalize_blueprint(self.ready_blueprint())
-        wrong_cross["entry"]["buy"]["rules"][0]["expression"]["expanded"]["all"][0]["op"] = ">="
-
-        duplicate_precedence = self.ready_blueprint()
-        duplicate_precedence["precedence"].append(duplicate_precedence["precedence"][0])
-
-        invalid_timestamp = self.ready_blueprint()
-        invalid_timestamp["checkedAt"] = "not-a-date"
-
-        for label, blueprint, issue_code in (
-            ("conditional cross", wrong_cross, "CROSS_EXPANSION_MISMATCH"),
-            ("unique precedence", duplicate_precedence, "PRECEDENCE_DUPLICATE"),
-            ("date-time format", invalid_timestamp, "CHECKED_AT_INVALID"),
+    def test_missing_operational_fields_receive_versioned_defaults_before_projection(self) -> None:
+        brief = self.ready_brief()
+        for field in (
+            "recoveryRules",
+            "exitRules",
+            "moneyManagement",
+            "orderExecution",
         ):
-            with self.subTest(label=label):
-                with self.assertRaisesRegex(ValueError, issue_code):
-                    self.runner.parse_work_result(
-                        json.dumps(self.result_payload(blueprint), ensure_ascii=False),
-                        64_000,
-                        "trading_system_research",
-                    )
+            brief.pop(field)
+
+        parsed = self.parse(brief)
+        fields = {item["field"]: item["value"] for item in parsed["contractFields"]}
+        restored = json.loads(fields["strategyBrief"])
+
+        self.assertIn("RecoveryMode=none", restored["recoveryRules"])
+        self.assertIn("StopLossPoints=300", restored["exitRules"])
+        self.assertIn("TakeProfitPoints=600", restored["exitRules"])
+        self.assertIn("PositionSizingMode=fixed_lot", restored["moneyManagement"])
+        self.assertIn("FixedLot=0.01", restored["moneyManagement"])
+        self.assertIn(
+            "MaxOpenPositionsPerSymbolMagic=1",
+            restored["moneyManagement"],
+        )
+        self.assertIn("Market Buy/Sell", restored["orderExecution"])
+        self.assertNotIn("COMPONENT=closed_bar_execution", restored["orderExecution"])
+        self.assertIn("compact-ea-safe-inputs-v2", restored["additionalNotes"])
+        self.assertIn(
+            "INPUT_METADATA_VERSION=ea-optimization-inputs-v1",
+            restored["additionalNotes"],
+        )
+        self.assertIn("DEFAULTED_COMPONENTS=", restored["additionalNotes"])
+
+    def test_text_is_normalized_and_safe_optional_defaults_are_restored(self) -> None:
+        brief = self.ready_brief()
+        brief["systemName"] = "  EMA   crossover  "
+        for field in (
+            "recoveryRules",
+            "displayRequirements",
+            "additionalNotes",
+            "limitations",
+        ):
+            brief.pop(field)
+
+        parsed = self.parse(brief)
+        fields = {item["field"]: item["value"] for item in parsed["contractFields"]}
+        restored = json.loads(fields["strategyBrief"])
+
+        self.assertEqual(restored["systemName"], "EMA crossover")
+        self.assertIn("RecoveryMode=none", restored["recoveryRules"])
+        self.assertIn("Balance", restored["displayRequirements"])
+        self.assertIn(
+            BRIEF_SUPPORT.BRIEF.IMPLEMENTATION_DEFAULT_MARKER,
+            restored["additionalNotes"],
+        )
+        self.assertIn("DEFAULTED_COMPONENTS=recovery", restored["additionalNotes"])
+        self.assertTrue(restored["limitations"])
+
+    def test_required_null_unknown_field_and_invalid_timestamp_fail_closed(self) -> None:
+        cases: list[tuple[str, dict, str]] = []
+
+        missing = self.ready_brief()
+        missing["entryRules"] = None
+        cases.append(("required null", missing, "BRIEF_TEXT_REQUIRED"))
+
+        unknown = self.ready_brief()
+        unknown["legacyBlueprint"] = {}
+        cases.append(("unknown field", unknown, "BRIEF_FIELDS_UNEXPECTED"))
+
+        invalid_time = self.ready_brief()
+        invalid_time["checkedAt"] = "not-a-date"
+        cases.append(("timestamp", invalid_time, "BRIEF_CHECKED_AT_INVALID"))
+
+        for label, brief, issue_code in cases:
+            with self.subTest(label=label), self.assertRaisesRegex(
+                self.runner.EAResearchSemanticValidationError,
+                issue_code,
+            ):
+                self.parse(brief)
+
+    def test_source_links_require_two_unique_independent_public_hosts(self) -> None:
+        cases = []
+
+        duplicate = self.ready_brief()
+        duplicate["sourceLinks"] = [duplicate["sourceLinks"][0]] * 2
+        cases.append(("duplicate", duplicate, "BRIEF_SOURCE_LINK_DUPLICATE"))
+
+        same_host = self.ready_brief()
+        same_host["sourceLinks"] = [
+            "https://www.investopedia.com/a",
+            "https://academy.investopedia.com/b",
+        ]
+        cases.append(("same host", same_host, "BRIEF_SOURCE_HOST_NOT_INDEPENDENT"))
+
+        private = self.ready_brief()
+        private["sourceLinks"] = [
+            "http://127.0.0.1/private",
+            private["sourceLinks"][1],
+        ]
+        cases.append(("private", private, "BRIEF_SOURCE_LINK_INVALID"))
+
+        for label, brief, issue_code in cases:
+            payload = self.result_payload(brief)
+            payload["evidence"] = [
+                {"label": "A", "url": "https://www.investopedia.com/a", "note": ""},
+                {"label": "B", "url": "https://www.babypips.com/b", "note": ""},
+            ]
+            with self.subTest(label=label), self.assertRaisesRegex(
+                self.runner.EAResearchSemanticValidationError,
+                issue_code,
+            ):
+                self.runner.parse_work_result(
+                    json.dumps(payload, ensure_ascii=False),
+                    64_000,
+                    "trading_system_research",
+                )
+
+    def test_semantic_failure_exposes_bounded_code_path_and_message_for_revision(self) -> None:
+        invalid = self.ready_brief()
+        invalid.pop("entryRules")
+        invalid["unexpected"] = "legacy"
+
+        with self.assertRaises(
+            self.runner.EAResearchSemanticValidationError,
+        ) as raised:
+            self.parse(invalid)
+
+        issues = raised.exception.issues
+        self.assertIn("BRIEF_FIELDS_MISSING", {item["code"] for item in issues})
+        self.assertIn("BRIEF_FIELDS_UNEXPECTED", {item["code"] for item in issues})
+        self.assertTrue(all(item["path"].startswith("$") for item in issues))
+        self.assertTrue(all(item["message"] for item in issues))
+        self.assertLessEqual(len(issues), 40)
 
 
 if __name__ == "__main__":

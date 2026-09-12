@@ -6,22 +6,24 @@ AI Agent Visual Office แบบ Local สำหรับจัดการ Miss
 
 ## สิ่งที่ต้องมีก่อนติดตั้งบน Windows
 
-- Windows 10 หรือ 11 และอินเทอร์เน็ตสำหรับติดตั้ง Dependency ที่ล็อกเวอร์ชันไว้
-- Git for Windows ใน PATH สำหรับเส้นทางติดตั้งด้วย Prompt/Codex
-- Python **3.10-3.14 แบบ 64-bit** จาก [python.org](https://www.python.org/downloads/windows/) โดยเลือก `Add Python to PATH` ระหว่างติดตั้ง
+- Windows 10 หรือ 11 แบบ 64-bit และอินเทอร์เน็ตสำหรับติดตั้ง Dependency ที่ล็อกเวอร์ชันไว้
 - บัญชี Codex ของผู้เรียนเอง (Login ภายหลังได้; HQ และ Health ยังเปิดตรวจได้แม้ Codex ยังไม่ Login)
+
+สำหรับเส้นทางหลักแบบ Prompt/Codex ผู้เรียน **ไม่ต้องติดตั้ง Git หรือ Python ล่วงหน้า** Prompt จะตรวจของเดิมก่อน หากพบ Git ที่ใช้งานได้และ Python 3.10-3.14 แบบ 64-bit จะใช้ของเดิมโดยไม่ติดตั้งซ้ำหรืออัปเกรด หากขาดจริงจึงติดตั้งแพ็กเกจทางการที่ล็อก ID ไว้ผ่าน WinGet แบบ current-user แล้วตรวจซ้ำก่อน Clone ส่วนผู้ที่เลือกติดตั้ง ZIP ด้วยตนเองยังต้องมี Python รุ่นที่รองรับตามหัวข้อ Manual ด้านล่าง
 
 ตัวติดตั้งจะลง Codex Python SDK และ Codex CLI จาก `requirements-runner.txt` เป็นรุ่นเดียวกัน พร้อมตรวจ SHA-256 และ `pip check` ห้ามเปลี่ยนเฉพาะไฟล์ `codex.exe` แยกจาก SDK เพราะการอ่าน Rate Limit ผ่าน app-server และการรันงานจริงต้องใช้ protocol รุ่นเดียวกัน
 
-ตัวติดตั้งไม่ดาวน์โหลด Python และไม่ขอสิทธิ์ Administrator เพื่อติดตั้ง Python แทนผู้เรียน หากหา Python รุ่นที่รองรับไม่พบ ระบบจะหยุดพร้อมข้อความแก้ไขและไม่ทิ้ง Runtime ที่ติดตั้งครึ่งเดียว การใช้ Google Sheet แบบ Private เป็นการตั้งค่าเสริมหลัง HQ พร้อมใช้งาน โดยทำตาม [docs/research-sheet-hub-setup-th.md](docs/research-sheet-hub-setup-th.md) และห้ามส่งไฟล์ OAuth Client Secret ให้ผู้อื่น
+`installer/install.ps1` ยังคงไม่ดาวน์โหลด Python และไม่ลดระดับการตรวจสอบใด ๆ การติดตั้ง Git/Python ที่ขาดเป็นหน้าที่ของ Prompt ก่อน Clone เท่านั้น และจำกัดอยู่ที่ current-user โดยไม่ขอสิทธิ์ Administrator หาก WinGet หรือการตรวจหลังติดตั้งไม่ผ่าน Prompt จะหยุดอย่างปลอดภัยก่อนสร้าง Runtime การใช้ Google Sheet แบบ Private เป็นการตั้งค่าเสริมหลัง HQ พร้อมใช้งาน โดยทำตาม [docs/research-sheet-hub-setup-th.md](docs/research-sheet-hub-setup-th.md)
 
-เมื่อต้องใช้ Google Sheet แบบ Private ให้ผู้เรียนดาวน์โหลด OAuth Client JSON ประเภท **Desktop app** จาก Google Auth Platform ของตนเอง แล้วเลือกไฟล์ใน First-run wizard ของตัวติดตั้ง หรือดับเบิลคลิก/ลากไฟล์ไปวางบน `2-SETUP-GOOGLE-HQ.bat` ภายหลัง ระบบส่งเฉพาะ Path ให้ Backend CLI อ่านและบันทึกด้วย Windows current-user DPAPI; JSON และ Client Secret ไม่ผ่าน Browser ไม่ถูกคัดลอกเข้า Project และไม่ถูกส่งให้ผู้สอน หลังนำเข้าแล้วเปิด Agent HQ กด **เชื่อมบัญชี Google ครั้งเดียว** จากนั้นจึงกรอก Sheet ID ไฟล์ JSON ต้นฉบับจะไม่ถูกลบอัตโนมัติ ผู้เรียนต้องเก็บเป็นความลับและลบเองเมื่อไม่ต้องใช้แล้ว
+Release สำหรับห้องเรียนมี Google OAuth native/installed-app client configuration กลางของ Metafxclub อยู่แล้วใน `backend/local-runner/google_oauth_native_client.txt` ไฟล์จริงถูก GitHub Actions inject จาก Release secrets ตอน build Asset และถูกกันออกจาก public Git tree; ห้าม commit ค่า Client จริงลง Source สาธารณะ แม้ `client_id`/`client_secret` ของ installed app จะเป็น metadata ที่ต้องแจกพร้อมตัวโปรแกรมและไม่ใช่รหัสผ่านหรือ Credential ของบัญชีผู้ใช้ ตัวติดตั้งตรวจ Client กลางจากชุด Release โดยอัตโนมัติ ผู้เรียนจึง **ไม่ต้อง** สร้าง Google Cloud Project/OAuth Client, เพิ่ม Gmail เป็น Test user, ดาวน์โหลด OAuth JSON, ส่งไฟล์ Credential หรือแก้ Client ID ใด ๆ หลังเปิด Agent HQ ผู้เรียนทำเองเพียงกด **เชื่อมบัญชี Google**, เลือกบัญชีของตน และกดยืนยัน Consent ในหน้าทางการของ Google แล้วจึงกรอก Sheet ID ส่วน access token และ refresh token ของผู้เรียนจะเก็บแบบเข้ารหัสด้วย Windows current-user DPAPI และไม่เข้า Repository, Frontend, Report หรือ Log
 
-หาก OAuth consent screen ยังเป็น `Testing` ต้องเพิ่มบัญชีผู้เรียนใน Test users และสิทธิ์/Refresh token อาจหมดอายุหลัง 7 วันตามนโยบาย Google หากต้องการประสบการณ์เชื่อมครั้งเดียวระยะยาว ต้องจัด Publishing status และ Verification ของ OAuth app ให้เหมาะสมก่อนแจก ดู [Google Auth Platform — Audience](https://support.google.com/cloud/answer/15549945)
+ระหว่างที่ Google ยังตรวจสอบ Sensitive Scope ของแอปกลาง ผู้ใช้ใหม่อาจเห็นหน้า `Google ยังไม่ได้ยืนยันแอปนี้` และจำนวนผู้ใช้ใหม่อาจอยู่ภายใต้ OAuth unverified user cap ของ Project กลาง เมื่อ Google อนุมัติ Scope ที่ระบบขอแล้ว คำเตือนและเพดานนี้จะไม่ใช้กับ Scope ที่ได้รับอนุมัติ ดู [Google Auth Platform — Audience](https://support.google.com/cloud/answer/15549945)
+
+`2-SETUP-GOOGLE-HQ.bat` และ Desktop OAuth JSON ยังคงมีไว้เฉพาะ **Advanced/Recovery custom override** สำหรับเจ้าของระบบที่ตั้งใจใช้ OAuth Project ของตนเอง ไม่ใช่ขั้นตอนติดตั้งของนักเรียน หากใช้โหมดนี้ต้องใช้ JSON ของ Project ที่ตนควบคุมเอง ห้ามส่งให้ผู้อื่น และไฟล์ต้นฉบับจะไม่ถูกลบอัตโนมัติ
 
 ## ติดตั้งด้วย Prompt เดียวผ่าน Codex
 
-เส้นทางหลักสำหรับห้องเรียนคือ [Prompt ติดตั้งอัตโนมัติ](docs/prompts/install-github-google-auto-th.md) ซึ่งล็อก Repository, Git Tag และ Version ไว้แล้ว ผู้เรียนแก้เพียง Client ID กับ Path ของ Desktop OAuth JSON จากนั้นวาง Prompt ทั้งชุดใน Codex หนึ่งครั้ง Codex จะ Clone Tag ที่กำหนดจาก GitHub ลงพื้นที่ชั่วคราว, ตรวจ Source, เรียก Installer พร้อมนำเข้า JSON ผ่าน Backend DPAPI, ตรวจ Bridge/Health/หน้าเว็บ, เปิด Watchdog หลัง Login และเปิด HQ ที่ `http://127.0.0.1:4186/` โดยผู้เรียนไม่ต้องดาวน์โหลด ZIP และไม่ต้องกด BAT
+เส้นทางหลักสำหรับห้องเรียนคือ [Prompt ติดตั้งอัตโนมัติ](docs/prompts/install-github-google-auto-th.md) ซึ่งล็อก Repository, Git Tag และ Version ไว้แล้ว ผู้เรียนวาง Prompt ทั้งชุดใน Codex ได้ทันทีโดยไม่ต้องกรอก Client ID หรือ Path ของ OAuth JSON Codex จะตรวจและใช้ Git/Python เดิมก่อน ติดตั้งเฉพาะตัวที่ขาดผ่าน WinGet แบบ current-user, Clone Tag ที่กำหนดจาก GitHub ลงพื้นที่ชั่วคราว, ตรวจ Source, ดาวน์โหลด Release ZIP กับ `.sha256` ที่ตรง Tag, ตรวจ hash แล้ว extract เฉพาะไฟล์ Client กลางที่ GitHub Actions inject เข้า SOURCE_DIR ก่อนเรียก Installer จากนั้นตรวจ Bridge/Health/หน้าเว็บ เปิด Watchdog หลัง Login และเปิด HQ ที่ `http://127.0.0.1:4186/` โดยผู้เรียนไม่ต้องติดตั้ง Git/Python ล่วงหน้า ไม่ต้องดาวน์โหลด ZIP เอง และไม่ต้องกด BAT
 
 ขั้นตอนที่ระบบไม่ทำแทนคือการ Login/เลือกบัญชี/กดอนุญาตในหน้าทางการของ Google ผู้เรียนเหลือเพียงกด **เชื่อมบัญชี Google ครั้งเดียว** ใน HQ เท่านั้น
 
@@ -38,7 +40,7 @@ Prompt ต้องล็อก Git Tag และ `EXPECTED_VERSION` ให้�
 5. ดับเบิลคลิก `1-INSTALL-HQ.bat`
 6. ตัวติดตั้งใช้ `http://127.0.0.1:4186/`, รัน Deployment Preflight, เปิด Bridge และตรวจทั้ง Health กับหน้าเว็บให้เอง หากพอร์ต 4186 ถูกโปรแกรมอื่นใช้อยู่ ระบบจะหยุดโดยไม่ปิดโปรแกรมนั้น
 7. รอจน Browser เปิดหน้า Agent HQ และตัวติดตั้งแจ้งว่าสำเร็จ พร้อมแสดง Health, Codex และ Rate Limit ของบัญชีเครื่องนี้
-8. หากตั้งค่า Google ใน First-run wizard แล้ว ให้กด **เชื่อมบัญชี Google ครั้งเดียว** ใน Agent HQ จากนั้นกรอก Sheet ID
+8. Client กลางพร้อมมากับ Release แล้ว ให้กด **เชื่อมบัญชี Google ครั้งเดียว** ใน Agent HQ เลือกบัญชีและยืนยัน Consent ด้วยตนเอง จากนั้นกรอก Sheet ID
 
 คู่มือฉบับย่อสำหรับส่งให้นักเรียนอยู่ที่ [STUDENT-QUICKSTART-TH.md](STUDENT-QUICKSTART-TH.md)
 
@@ -46,15 +48,15 @@ Prompt ต้องล็อก Git Tag และ `EXPECTED_VERSION` ให้�
 
 Repository หลัก: `https://github.com/metafxclub/metafxclub-ai-agent-hq`
 
-ส่วนนี้เป็นทางเลือกสำหรับนักเรียนที่ต้องการเก็บ Source เพื่อเรียน GitHub หรือพัฒนาโค้ด ไม่ใช่ขั้นตอนห้องเรียนและไม่ได้รับสถานะ `verified_remote_git_tag` แบบ Prompt อัตโนมัติ ตัวติดตั้งจะวาง Runtime ที่ใช้งานจริงไว้ใน `%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ` แยกจาก Source:
+ส่วนนี้มีไว้เก็บ Source เพื่ออ่าน เรียน GitHub แก้โค้ด และรันชุดทดสอบเท่านั้น ไม่ใช่เส้นทางติดตั้งสำหรับห้องเรียนและไม่ได้รับสถานะ `verified_remote_git_tag` แบบ Prompt อัตโนมัติ Public Git Source จงใจไม่มีไฟล์ Client กลางจาก Release ดังนั้น **ห้ามคาดหวังว่า Plain clone แล้วเปิด `1-INSTALL-HQ.bat` หรือ `UPDATE-HQ.bat` จะติดตั้ง Runtime ห้องเรียนพร้อม Google ได้** การติดตั้งหรืออัปเดต Runtime ของนักเรียนต้องใช้ [Prompt หลัก](docs/prompts/install-github-google-auto-th.md) ที่ล็อก Tag/Version และตรวจ Release Asset + hash แล้วเท่านั้น ส่วน Advanced/Recovery custom override สงวนไว้สำหรับผู้ดูแลระบบที่ควบคุม OAuth Project ของตนเอง ห้ามคัดลอก Client จาก Runtime กลับมา commit
 
 ```powershell
 git clone https://github.com/metafxclub/metafxclub-ai-agent-hq.git
 cd metafxclub-ai-agent-hq
-.\1-INSTALL-HQ.bat
+git status
 ```
 
-เมื่อต้องการรับรุ่นใหม่และ Source ไม่มีไฟล์ที่แก้ค้างอยู่ ให้ดับเบิลคลิก `UPDATE-HQ.bat` ระบบจะใช้ `fetch --all --prune` และ `merge --ff-only` เท่านั้น จากนั้นติดตั้ง Source รุ่นใหม่ไปยังตำแหน่งถาวรและรันชุดตรวจอีกครั้ง หาก Git มีงานของนักเรียนที่ยังไม่ Commit ระบบจะหยุดก่อนโดยไม่ Stash, Merge หรือทับไฟล์ให้อัตโนมัติ
+Plain clone ข้างต้นไม่ใช่ Runtime ที่ติดตั้งใน `%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ` และ `UPDATE-HQ.bat` ไม่ใช่ตัวอัปเดตสำหรับชุดห้องเรียนที่ติดตั้งด้วย Release เมื่อมีรุ่นใหม่ให้อาจารย์ส่ง Prompt ฉบับใหม่ที่ล็อก Tag/Version ใหม่ ห้ามเปลี่ยนเป็นการ Pull `main` แล้วติดตั้งทับ Runtime เอง
 
 นักเรียนที่ต้องการส่งโค้ดกลับควร Fork Repository ของตนเอง แล้วใช้ Branch → Commit → Push → Pull Request ตามบทเรียน GitHub โดยไม่ Commit โฟลเดอร์ `data/runtime`, `data/memory`, `outputs`, `.env`, `.codex`, Token, Auth หรือข้อมูลบัญชีใด ๆ ตัวติดตั้งใน `%LOCALAPPDATA%` ไม่ใช่ Git Repository และไม่ควรใช้เป็นโฟลเดอร์เขียนโค้ด
 
@@ -116,7 +118,7 @@ Agent Chat ไม่มีสิทธิ์เรียก Tool เอง โ�
 - Live Trading ปิดโดยค่าเริ่มต้น และเปิดได้เฉพาะใน MT4 EA เมื่อผ่าน Shadow/Demo, Risk limit, Kill Switch, Signed Envelope, Key pin/match และตั้ง `GatewayMode=GATEWAY_LIVE` กับ `LiveArmed=true`; ไม่ต้องอนุมัติทีละ Order และ AI/Frontend เปลี่ยนค่านี้ไม่ได้
 - ห้ามนำ `.env`, `.venv`, `data/runtime`, Log, Memory หรือ `%USERPROFILE%\.codex` ของบุคคลอื่นมาใส่ในชุดติดตั้ง
 
-การถอนด้วย `UNINSTALL-HQ.bat` แบบปกติจะเก็บ Mission/Report/Memory/Log และ Google credential ที่เข้ารหัสไว้ เพื่อให้ติดตั้งใหม่แล้วใช้ต่อได้ การลบข้อมูลทั้งหมดต้องเรียก `scripts\uninstall-hq.ps1 -RemoveUserData -ConfirmUserDataRemoval DELETE-METAFX-DATA` โดยตรง จึงจะลบ Google OAuth Client และ durable grant ผ่าน Backend CLI ด้วย ส่วน Environment variable ที่ผู้ดูแลตั้งเองและ OAuth JSON ต้นฉบับจะไม่ถูกลบอัตโนมัติ
+การถอนด้วย `UNINSTALL-HQ.bat` แบบปกติจะเก็บ Mission/Report/Memory/Log และ durable Google grant ที่เข้ารหัสไว้ เพื่อให้ติดตั้งใหม่แล้วใช้ต่อได้ การลบข้อมูลทั้งหมดต้องเรียก `scripts\uninstall-hq.ps1 -RemoveUserData -ConfirmUserDataRemoval DELETE-METAFX-DATA` โดยตรง จึงจะลบ durable grant และ OAuth Client แบบ custom override ผ่าน Backend CLI ด้วย ส่วน Client กลางเป็นส่วนหนึ่งของ Release และ Environment variable/OAuth JSON ต้นฉบับที่ผู้ดูแลตั้งเองในโหมด Advanced จะไม่ถูกลบอัตโนมัติ
 
 ## โครงสร้างระบบสำหรับผู้พัฒนา
 

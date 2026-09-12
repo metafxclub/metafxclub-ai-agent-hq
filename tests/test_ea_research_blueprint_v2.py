@@ -627,6 +627,40 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
             issue_codes(unbound_timeframe),
         )
 
+    def test_supporting_timeframes_are_optional_normalized_and_bind_indicators(self) -> None:
+        legacy = ready_blueprint()
+        normalized_legacy = CONTRACT.normalize_blueprint(legacy, require_ready=True)
+        self.assertNotIn("supportingTimeframes", normalized_legacy["scope"])
+
+        multi_timeframe = ready_blueprint()
+        multi_timeframe["scope"]["supportingTimeframes"] = ["w1", "m15", "W1"]
+        multi_timeframe["indicators"][0]["timeframe"] = "w1"
+        normalized = CONTRACT.normalize_blueprint(
+            multi_timeframe,
+            require_ready=True,
+        )
+
+        self.assertEqual(
+            normalized["scope"]["supportingTimeframes"],
+            ["M15", "W1"],
+        )
+        self.assertEqual(normalized["indicators"][0]["timeframe"], "W1")
+        self.assertNotIn("INDICATOR_TIMEFRAME_UNBOUND", issue_codes(multi_timeframe))
+
+    def test_supporting_timeframes_fail_closed_for_invalid_values(self) -> None:
+        invalid_type = ready_blueprint()
+        invalid_type["scope"]["supportingTimeframes"] = "W1"
+        self.assertIn("ARRAY_REQUIRED", issue_codes(invalid_type))
+
+        non_string_item = ready_blueprint()
+        non_string_item["scope"]["supportingTimeframes"] = ["W1", 15]
+        self.assertIn("STRING_REQUIRED", issue_codes(non_string_item))
+
+        still_unbound = ready_blueprint()
+        still_unbound["scope"]["supportingTimeframes"] = ["W1"]
+        still_unbound["indicators"][0]["timeframe"] = "M15"
+        self.assertIn("INDICATOR_TIMEFRAME_UNBOUND", issue_codes(still_unbound))
+
     def test_moving_average_contract_rejects_nonsensical_code_parameters(self) -> None:
         cases = [
             (
@@ -670,7 +704,20 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
 
         generic = ready_blueprint()
         generic["indicators"][0]["kind"] = "MA"
-        self.assertIn("INDICATOR_MA_METHOD_INVALID", issue_codes(generic))
+        normalized_generic, generic_issues = (
+            CONTRACT.normalize_and_validate_blueprint(generic)
+        )
+        generic_codes = {item["code"] for item in generic_issues}
+        self.assertNotIn("INDICATOR_MA_METHOD_INVALID", generic_codes)
+        self.assertIn("READINESS_UNRESOLVED", generic_codes)
+        self.assertEqual(
+            normalized_generic["indicators"][0]["parameters"]["method"],
+            "unknown",
+        )
+        self.assertEqual(
+            normalized_generic["indicators"][0]["sourceStatus"],
+            "unknown",
+        )
         generic["indicators"][0]["parameters"]["method"] = "EMA"
         self.assertEqual(CONTRACT.validate_blueprint(generic), [])
 
@@ -1069,6 +1116,44 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
         with self.assertRaises(CONTRACT.BlueprintValidationError):
             CONTRACT.normalize_blueprint(blueprint, require_ready=True)
 
+        incomplete_verified = ready_blueprint()
+        original_bounds = {
+            key: incomplete_verified["inputs"][0][key]
+            for key in ("min", "max", "step")
+        }
+        original_refs = copy.deepcopy(incomplete_verified["inputs"][0]["sourceRefs"])
+        incomplete_verified["inputs"][0]["default"] = None
+        incomplete_verified["completeness"].update(
+            status="needs_clarification",
+            score=65,
+            eaHandoffAllowed=False,
+            deterministicBacktestAllowed=False,
+            blockingIssues=[{
+                "code": "FAST_PERIOD_UNKNOWN",
+                "path": "$.inputs[0].default",
+                "messageTh": "ยังไม่ทราบค่า Fast MA period",
+                "questionTh": "โปรดยืนยันค่า Fast MA period",
+            }],
+            unknownPaths=["$.inputs[0].default"],
+        )
+        normalized = CONTRACT.normalize_blueprint(incomplete_verified)
+        normalized_again = CONTRACT.normalize_blueprint(normalized)
+        fast_input = next(
+            item for item in normalized["inputs"] if item["inputId"] == "fast_period"
+        )
+        self.assertEqual(normalized, normalized_again)
+        self.assertIsNone(fast_input["default"])
+        self.assertEqual(fast_input["sourceStatus"], "unknown")
+        self.assertEqual(fast_input["sourceRefs"], original_refs)
+        self.assertEqual(
+            {key: fast_input[key] for key in ("min", "max", "step")},
+            original_bounds,
+        )
+        self.assertEqual(
+            incomplete_verified["inputs"][0]["sourceStatus"],
+            "verified_fact",
+        )
+
         verified = ready_blueprint()
         verified["inputs"][0].update(
             default=None,
@@ -1077,6 +1162,128 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
         verified_codes = issue_codes(verified)
         self.assertIn("INPUT_DEFAULT_TYPE", verified_codes)
         self.assertIn("RULE_REF_UNDEFINED", verified_codes)
+
+    def test_nonready_conflicting_operand_alias_becomes_unknown_without_rebinding(self) -> None:
+        blueprint = ready_blueprint()
+        rule = blueprint["entry"]["buy"]["rules"][0]
+        original_human_text = rule["humanTextTh"]
+        original_source_refs = copy.deepcopy(rule["sourceRefs"])
+        rule["expression"]["left"] = {
+            "kind": "indicator",
+            "ref": "missing_market_close_proxy",
+            "indicatorId": "ema_fast",
+        }
+        blueprint["completeness"].update(
+            status="needs_clarification",
+            score=70,
+            eaHandoffAllowed=False,
+            deterministicBacktestAllowed=False,
+            blockingIssues=[{
+                "code": "MARKET_SERIES_REQUIRED",
+                "path": "$.entry.buy.rules[0].expression",
+                "messageTh": "ยังไม่ทราบชุดข้อมูลตลาด",
+                "questionTh": "โปรดระบุชุดข้อมูลตลาด",
+            }],
+            unknownPaths=["$.entry.buy.rules[0].expression"],
+        )
+
+        normalized = CONTRACT.normalize_blueprint(blueprint)
+        normalized_again = CONTRACT.normalize_blueprint(normalized)
+        normalized_rule = normalized["entry"]["buy"]["rules"][0]
+
+        self.assertEqual(normalized, normalized_again)
+        self.assertEqual(normalized_rule["expression"], {"op": "unknown"})
+        self.assertEqual(normalized_rule["sourceStatus"], "unknown")
+        self.assertEqual(normalized_rule["humanTextTh"], original_human_text)
+        self.assertEqual(normalized_rule["sourceRefs"], original_source_refs)
+        self.assertEqual(
+            blueprint["entry"]["buy"]["rules"][0]["expression"]["left"]["ref"],
+            "missing_market_close_proxy",
+        )
+
+        claimed_ready = ready_blueprint()
+        claimed_ready["entry"]["buy"]["rules"][0]["expression"]["left"] = {
+            "kind": "indicator",
+            "ref": "missing_market_close_proxy",
+            "indicatorId": "ema_fast",
+        }
+        self.assertIn("INDICATOR_REF_UNDEFINED", issue_codes(claimed_ready))
+
+        matching_alias = copy.deepcopy(blueprint)
+        matching_alias["entry"]["buy"]["rules"][0]["expression"]["left"] = {
+            "kind": "indicator",
+            "ref": "ema_fast",
+            "indicatorId": "ema_fast",
+        }
+        matching_normalized = CONTRACT.normalize_blueprint(matching_alias)
+        self.assertNotEqual(
+            matching_normalized["entry"]["buy"]["rules"][0]["expression"],
+            {"op": "unknown"},
+        )
+
+    def test_unresolved_protection_input_keeps_range_and_blocks_handoff(self) -> None:
+        blueprint = ready_blueprint()
+        stop_input = next(
+            item for item in blueprint["inputs"] if item["inputId"] == "sl_pips"
+        )
+        stop_input.update(
+            default=None,
+            min=7,
+            max=8,
+            sourceStatus="unknown",
+        )
+        blueprint["tpSl"]["sideOverrides"]["buy"]["stopLoss"] = copy.deepcopy(
+            blueprint["tpSl"]["stopLoss"]
+        )
+        blueprint["completeness"].update(
+            status="needs_clarification",
+            score=70,
+            eaHandoffAllowed=False,
+            deterministicBacktestAllowed=False,
+            blockingIssues=[{
+                "code": "STOP_VALUE_REQUIRED",
+                "path": "$.inputs[3].default",
+                "messageTh": "ยังไม่เลือก Stop Loss ระหว่าง 7 ถึง 8",
+                "questionTh": "โปรดยืนยันค่า Stop Loss",
+            }],
+            unknownPaths=["$.inputs[3].default"],
+        )
+
+        normalized = CONTRACT.normalize_blueprint(blueprint)
+        normalized_input = next(
+            item for item in normalized["inputs"] if item["inputId"] == "sl_pips"
+        )
+        self.assertIsNone(normalized_input["default"])
+        self.assertEqual((normalized_input["min"], normalized_input["max"]), (7, 8))
+        self.assertEqual(
+            normalized["tpSl"]["stopLoss"]["valueInputRef"],
+            "sl_pips",
+        )
+        self.assertEqual(
+            normalized["tpSl"]["sideOverrides"]["buy"]["stopLoss"]["valueInputRef"],
+            "sl_pips",
+        )
+        self.assertFalse(normalized["completeness"]["eaHandoffAllowed"])
+        with self.assertRaises(CONTRACT.BlueprintValidationError):
+            CONTRACT.normalize_blueprint(normalized, require_ready=True)
+
+        for bad_default in (0, -1, "7"):
+            with self.subTest(default=bad_default):
+                invalid = copy.deepcopy(blueprint)
+                next(
+                    item for item in invalid["inputs"] if item["inputId"] == "sl_pips"
+                )["default"] = bad_default
+                self.assertIn(
+                    "PROTECTION_INPUT_DEFAULT_INVALID",
+                    issue_codes(invalid),
+                )
+
+        wrong_type = copy.deepcopy(blueprint)
+        wrong_type_input = next(
+            item for item in wrong_type["inputs"] if item["inputId"] == "sl_pips"
+        )
+        wrong_type_input.update(type="string", default=None)
+        self.assertIn("PROTECTION_INPUT_TYPE_INVALID", issue_codes(wrong_type))
 
     def test_enabled_management_requires_idempotency_cadence_and_stop_guard(self) -> None:
         blueprint = ready_blueprint()
@@ -1118,6 +1325,82 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
 
         blueprint["exit"]["buy"]["rules"][0]["sourceStatus"] = "derived_expansion"
         self.assertEqual(CONTRACT.validate_blueprint(blueprint), [])
+
+    def test_confirmation_only_clears_exact_path_bound_assumption_blocker(self) -> None:
+        blueprint = ready_blueprint()
+        blueprint["inputs"][0]["sourceStatus"] = "operator_assumption"
+        blueprint["assumptions"] = [{
+            "assumptionId": "A_CONFIRM_FAST_PERIOD",
+            "description": "Operator confirms the conservative fast-period default",
+            "confirmed": False,
+            "affectsExecution": True,
+            "affectsPaths": ["$.inputs[0]"],
+        }]
+        blueprint["completeness"].update(
+            status="needs_clarification",
+            score=90,
+            eaHandoffAllowed=False,
+            deterministicBacktestAllowed=False,
+            blockingIssues=[{
+                "code": "EXECUTION_ASSUMPTION_CONFIRMATION_REQUIRED",
+                "path": "$.inputs[0].default",
+                "messageTh": "รอยืนยันค่าเริ่มต้น",
+                "questionTh": "ยืนยันค่าเริ่มต้นนี้หรือไม่",
+            }],
+            unknownPaths=[],
+            conflictPaths=[],
+        )
+
+        confirmed, confirmed_ids = CONTRACT.confirm_execution_assumptions(
+            blueprint,
+            confirmed_at="2026-09-09T12:00:00Z",
+        )
+
+        self.assertEqual(confirmed_ids, ["A_CONFIRM_FAST_PERIOD"])
+        self.assertTrue(confirmed["assumptions"][0]["confirmed"])
+        self.assertEqual(confirmed["completeness"]["status"], "ready")
+        self.assertEqual(CONTRACT.validate_blueprint(confirmed, require_ready=True), [])
+
+    def test_confirmation_rejects_free_form_or_unrelated_assumption_blocker(self) -> None:
+        base = ready_blueprint()
+        base["inputs"][0]["sourceStatus"] = "operator_assumption"
+        base["assumptions"] = [{
+            "assumptionId": "A_CONFIRM_FAST_PERIOD",
+            "description": "Operator confirms the conservative fast-period default",
+            "confirmed": False,
+            "affectsExecution": True,
+            "affectsPaths": ["$.inputs[0]"],
+        }]
+        base["completeness"].update(
+            status="needs_clarification",
+            score=90,
+            eaHandoffAllowed=False,
+            deterministicBacktestAllowed=False,
+            unknownPaths=[],
+            conflictPaths=[],
+        )
+        cases = (
+            ("ASSUMPTION_FATAL_RISK_BROKEN", "$.inputs[0].default"),
+            ("EXECUTION_ASSUMPTION_CONFIRMATION_REQUIRED", "$.riskAndSizing.maxRiskPerTradePercent"),
+        )
+        for blocker_code, blocker_path in cases:
+            with self.subTest(code=blocker_code, path=blocker_path):
+                blueprint = copy.deepcopy(base)
+                blueprint["completeness"]["blockingIssues"] = [{
+                    "code": blocker_code,
+                    "path": blocker_path,
+                    "messageTh": "ห้ามยกเลิก blocker นี้",
+                    "questionTh": "ต้องแก้งานวิจัยก่อน",
+                }]
+                with self.assertRaises(CONTRACT.BlueprintValidationError) as raised:
+                    CONTRACT.confirm_execution_assumptions(
+                        blueprint,
+                        confirmed_at="2026-09-09T12:00:00Z",
+                    )
+                self.assertIn(
+                    "NON_CONFIRMABLE_RESEARCH_BLOCKER",
+                    {item["code"] for item in raised.exception.issues},
+                )
 
     def test_enabled_management_requires_trigger_action_parameters_rule_and_lifecycle(self) -> None:
         incomplete = ready_blueprint()
@@ -1528,6 +1811,89 @@ class EAResearchBlueprintV2Tests(unittest.TestCase):
                     "right": {"kind": "constant", "value": 0},
                 }
                 self.assertIn("OPERAND_FIELD_INVALID", issue_codes(blueprint))
+
+    def test_position_profit_percent_is_a_deterministic_operand(self) -> None:
+        blueprint = ready_blueprint()
+        blueprint["entry"]["buy"]["rules"][0]["expression"] = {
+            "op": "<=",
+            "left": {
+                "kind": "position",
+                "field": "profit_percent",
+                "unit": "percent",
+            },
+            "right": {"kind": "constant", "value": -7.0, "unit": "percent"},
+        }
+
+        normalized = CONTRACT.normalize_blueprint(blueprint)
+
+        self.assertEqual(
+            normalized["entry"]["buy"]["rules"][0]["expression"]["left"]["field"],
+            "profit_percent",
+        )
+
+    def test_generic_ma_and_non_retry_freeze_fields_normalize_without_invention(self) -> None:
+        blueprint = ready_blueprint()
+        for indicator in blueprint["indicators"]:
+            indicator["kind"] = "MA"
+            indicator["parameters"].pop("method", None)
+        stop_loss = blueprint["tpSl"]["stopLoss"]
+        stop_loss.update(
+            freezeLevelPolicy="defer_modify",
+            freezeRetryLimit=3,
+            freezeRetryDelayMs=1000,
+        )
+        blueprint["tpSl"]["sideOverrides"]["buy"]["stopLoss"] = copy.deepcopy(
+            stop_loss
+        )
+        blueprint["completeness"].update(
+            status="needs_clarification",
+            score=80,
+            eaHandoffAllowed=False,
+            deterministicBacktestAllowed=False,
+            blockingIssues=[{
+                "code": "UNKNOWN_MA_METHOD",
+                "path": "$.indicators",
+                "messageTh": "แหล่งข้อมูลไม่ได้ระบุชนิดค่าเฉลี่ยเคลื่อนที่",
+                "questionTh": "ต้องการใช้ SMA, EMA, SMMA หรือ LWMA",
+            }],
+            unknownPaths=["$.indicators[0].parameters.method"],
+        )
+
+        normalized = CONTRACT.normalize_blueprint(blueprint)
+        normalized_again = CONTRACT.normalize_blueprint(normalized)
+
+        self.assertEqual(normalized, normalized_again)
+        self.assertTrue(all(
+            indicator["parameters"]["method"] == "unknown"
+            and indicator["sourceStatus"] == "unknown"
+            and indicator["sourceRefs"] == ["S1"]
+            for indicator in normalized["indicators"]
+        ))
+        self.assertNotIn("freezeRetryLimit", normalized["tpSl"]["stopLoss"])
+        self.assertNotIn("freezeRetryDelayMs", normalized["tpSl"]["stopLoss"])
+        buy_stop = normalized["tpSl"]["sideOverrides"]["buy"]["stopLoss"]
+        self.assertNotIn("freezeRetryLimit", buy_stop)
+        self.assertNotIn("freezeRetryDelayMs", buy_stop)
+        self.assertFalse(normalized["completeness"]["eaHandoffAllowed"])
+
+        source_unknown_alias = copy.deepcopy(blueprint)
+        source_unknown_alias["indicators"][0]["parameters"]["method"] = (
+            "unknown_from_source"
+        )
+        source_unknown_alias["indicators"][0]["sourceStatus"] = "unknown"
+        alias_normalized = CONTRACT.normalize_blueprint(source_unknown_alias)
+        self.assertEqual(
+            alias_normalized["indicators"][0]["parameters"]["method"],
+            "unknown",
+        )
+        self.assertEqual(
+            alias_normalized["indicators"][0]["sourceStatus"],
+            "unknown",
+        )
+
+        invalid_method = copy.deepcopy(blueprint)
+        invalid_method["indicators"][0]["parameters"]["method"] = "banana"
+        self.assertIn("INDICATOR_MA_METHOD_INVALID", issue_codes(invalid_method))
 
     def test_management_parameters_must_match_the_typed_action(self) -> None:
         blueprint = ready_blueprint()

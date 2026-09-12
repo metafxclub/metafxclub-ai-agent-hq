@@ -9,8 +9,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 UNIFIED_EA_PATH = (
     PROJECT_ROOT
-    / "integrations"
-    / "mt4-trade-gateway"
+    / "artifacts"
+    / "mt4-ai-council-ea-v2.18-enum-fail-closed-readiness"
     / "MetafxHQTradeGateway.mq4"
 )
 STANDALONE_INDICATOR_PATH = (

@@ -1,5 +1,5 @@
 {
-  "version": "bridge-contract-v020",
+  "version": "bridge-contract-v021",
   "purpose": "Local backend boundary for Codex CLI, MCP, filesystem, VPS, MT4/MT5, Telegram, and other real tools.",
   "base_url": "http://127.0.0.1:4186",
   "base_url_semantics": "Preferred first-run URL only; the confirmed runtime URL comes from runtime_endpoint.source.",
@@ -31,7 +31,9 @@
     "POST /api/collaboration/schedule": "Legacy compatibility endpoint. It accepts safe edits or disabling, but rejects enabled=true while the schedule control surface is retired.",
     "POST /api/collaboration/run-now": "Queue one explicit tool-free Agent meeting. It still enforces Full Access, daily cap, cooldown, fresh Rate Limit, single-run lock, Mission, transcript, report, and audit.",
     "GET /api/capabilities": "Read the sanitized, contract-owned capability registry and distinguish ready, approval-gated, unimplemented, and disabled adapters.",
-    "GET /api/codex/rate-limits": "Read a cached, frontend-safe Codex account quota snapshot from the authenticated local Codex app-server. No auth, account, plan, credit, path, or raw error data is exposed.",
+    "GET /api/codex/rate-limits": "Read a cached, frontend-safe Codex account quota snapshot plus the authoritative central automation reserve. No auth, account, plan, credit, path, or raw error data is exposed.",
+    "GET /api/automation/quota-policy": "Read the single operator-owned 0-100 minimum remaining percentage used by every AI Agent workflow. Work is admitted when remaining quota is greater than or equal to the threshold; a provider hard limit still blocks.",
+    "POST /api/automation/quota-policy": "Accept exactly rateReservePercent as a whole number from 0 to 100, persist it without creating a Mission, audit the change, and wake all quota-waiting queues immediately.",
     "POST /api/agents/chat": "Run one role-bound, tool-free Codex conversation turn. The request contains only agentId, message, sessionId, and idempotencyKey. The Chat Runner returns conversation or task_request plus a safe taskGoal; for task_request the Backend creates an idempotent guarded Mission, routes explicit public-web intent to codex_web_research, and returns taskCreated, taskMissionIds, taskStatus, and autoExecute.",
     "POST /api/bridge/run": "Create a guarded backend mission; approval-required tools are never executed in this request.",
     "POST /api/manager/delegate": "Create a Manager parent plan and bounded specialist subtasks. Optional requestedOwnerAgentId and requestedTargetId are backend validated; when target is omitted the Backend selects one permitted workstation from the goal.",
@@ -80,9 +82,11 @@
     "POST /api/props/mission_strategy_table/research-sheet/verify": "Accept exactly an empty JSON object after a successful Google reconnect, re-probe the already-active fixed Sheet and all three tab contracts, refresh its bounded cache, reopen only eligible current-revision auth or permission failures after live verification, backfill bounded recent reports, and return the frontend-safe Hub state. It never changes the active Sheet id and never accepts credentials.",
     "POST /api/props/mission_strategy_table/research-sheet/flush": "Accept an empty JSON object to flush pending Backend-owned report projections, or {retryFailed:true} to requeue a bounded batch from the active configuration revision before flushing. Failed-row requeue is audited, capped per item, never revives stale revisions, and every write remains idempotent by tab key, read back, and fail-closed when auth, schema, or write verification is unavailable.",
     "GET /api/props/right_server_racks/ea-factory": "Read the frontend-safe EA Factory read model only. The request has no body and performs no external read or tool action. It may display the central Sheet id and config revision already owned by the Mission Strategy Table; it never exposes OAuth/service-account credentials, terminal paths, account data, broker data, process ids, or absolute filesystem paths.",
-    "POST /api/props/right_server_racks/ea-factory/sources/google-sheet/sync": "Read verified strategy rows from the fixed Deep_Research tab in the central Sheet configured at the Mission Strategy Table, then map them to the factory's 23 internal strategy fields. Current clients send optional configRevision and idempotencyKey only; legacy googleSheetUrlOrId or tabName values are accepted solely when they match the central contract. Backend may use public CSV or Backend-only auth, creates Mission/report/audit lineage, never writes from the factory, and never advances an EA build.",
+    "POST /api/props/right_server_racks/ea-factory/sources/google-sheet/sync": "Read Strategy Brief rows from the fixed Deep_Research tab in the central Sheet configured at the Mission Strategy Table. The authoritative source is exactly A-J with record_id, system_name, system_overview, entry_rules, recovery_rules, exit_rules, money_management, order_execution, display_requirements, and additional_notes. Current clients send optional configRevision and idempotencyKey only; legacy googleSheetUrlOrId or tabName values are accepted solely when they match the central contract. Legacy A-AW/49-header snapshots remain read-only backup compatibility. Backend may use public CSV or Backend-only auth, creates Mission/report/audit lineage, never writes from the factory, and never advances an EA build.",
     "POST /api/props/right_server_racks/ea-factory/builds": "Accept exactly sourceRecordId, platform, optional brief, and optional idempotencyKey. Backend resolves the opaque source record, creates one manual EA Factory build and immutable Strategy Spec inside the managed Workspace, and does not generate, compile, backtest, schedule, loop, or trade inline.",
     "POST /api/props/right_server_racks/ea-factory/builds/:buildId/advance": "Accept exactly stageId and optional idempotencyKey. Backend resolves the opaque build id and may advance at most the exact next stage once; it rejects skipped, repeated, concurrent, or out-of-order stages and never treats static review, process exit, or terminal selection as Compile/Strategy Tester proof.",
+    "POST /api/props/right_server_racks/ea-factory/builds/:buildId/retry": "Accept exactly generate_source stageId, the currently failed failedMissionId, and a required idempotencyKey. Backend allows a fresh Mission only for terminal invalid_output with no Source program or immutable Version, records the replaced Mission, and caps manual retries at three. It never retries source_review or a later stage, overwrites a Source, loops automatically, compiles, backtests, or trades.",
+    "POST /api/props/right_server_racks/ea-factory/builds/:buildId/run": "Accept exactly one required idempotencyKey for an MT4 Expert Advisor build and persist one automatic EA run bound to the immutable compact A-J Strategy Brief plus the exact globally selected, already-running MT4 terminal revision. This endpoint never launches the selected terminal process. Backend advances only the next verified phase, reuses the existing source/review/compile/backtest handlers, and retries only eligible source invalid_output failures. Compile requires a visible MetaEditor-capable adapter; Backtest requires a visible MT4 Strategy Tester with Visual Mode, settings/result screenshots, and logic-recheck evidence. MT5 remains available only through the manual stage-by-stage workflow until a verified MT5 visible adapter exists, and an MT5 request to this endpoint is rejected fail-closed. If the MT4 adapter is unavailable the run remains awaiting_visible_terminal, never invents success, never bypasses a gate, and never permits live trading. Reposting the same key safely resumes the paused run; a different key is rejected.",
     "GET /api/props/right_server_racks/ea-factory/builds/:buildId/files/:fileId": "Stream one allowlisted EA Factory artifact through opaque buildId and fileId values. This same-origin read has no request body or domain/external side effects; Backend appends a local audit event when the stream is requested. It never returns a local/absolute path, directory listing, secret, credential, terminal metadata, or unsupported file type.",
     "GET /api/tools": "Read the sanitized tool permission matrix.",
     "GET /api/orchestration": "Read Manager delegation, model tier, budget, and approval policy.",
@@ -218,7 +222,7 @@
     },
     "consumers": [
       {"propId": "codex_mcp_portal", "consumerId": "worldSystem", "consumerPurpose": "world_trading_system_radar", "tabName": "World_System", "mode": "read_write", "keyHeader": "discovery_id", "producerReportType": "trading_system_discovery_report", "secondaryReaders": []},
-      {"propId": "left_server_racks", "consumerId": "deepResearch", "consumerPurpose": "deep_trading_system_research", "tabName": "Deep_Research", "mode": "read_write", "keyHeader": "research_id", "producerReportType": "trading_system_research_report", "secondaryReaders": [{"propId": "right_server_racks", "purpose": "ea_factory_verified_read_only_source", "mode": "read"}]},
+      {"propId": "left_server_racks", "consumerId": "deepResearch", "consumerPurpose": "deep_trading_system_research", "tabName": "Deep_Research", "mode": "read_write", "keyHeader": "record_id", "producerReportType": "trading_system_research_report", "secondaryReaders": [{"propId": "right_server_racks", "purpose": "ea_factory_verified_read_only_source", "mode": "read"}]},
       {"propId": "left_audit_crystals", "consumerId": "indicatorEaTool", "consumerPurpose": "radar_website_indicator_ea_tool", "tabName": "Indicator_EA_Tool", "mode": "read_write", "keyHeader": "radar_record_id", "producerReportType": "indicator_scout_report", "secondaryReaders": []}
     ],
     "excludedPropIds": ["right_tool_console", "terminal_workstation"],
@@ -241,11 +245,14 @@
       "crossOriginRequestsAllowed": false
     },
     "execution": {
-      "mode": "manual_stage_by_stage",
+      "mode": "one_click_with_manual_stage_recovery",
       "scheduled": false,
       "schedulerEnabled": false,
-      "automaticLoop": false,
+      "automaticLoop": true,
       "oneRequestAdvancesAtMostOneStage": true,
+      "oneClickCoordinatorAdvancesVerifiedStages": true,
+      "visibleTerminalStagesRequireExplicitCrashResume": true,
+      "visibleActionRetryLimit": 3,
       "previousStageMustPass": true,
       "inlineToolExecutionOnBuildCreate": false,
       "liveTradingAllowed": false
@@ -286,7 +293,7 @@
       "createBuild": {
         "method": "POST",
         "path": "/api/props/right_server_racks/ea-factory/builds",
-        "allowedRequestFields": ["sourceRecordId", "platform", "brief", "idempotencyKey"],
+        "allowedRequestFields": ["sourceRecordId", "artifactKind", "platform", "brief", "idempotencyKey"],
         "requiredRequestFields": ["sourceRecordId", "platform"],
         "platformValues": ["mt4", "mt5", "tradingview"],
         "limits": {"briefMaxCharacters": 900},
@@ -300,6 +307,31 @@
         "requiredRequestFields": ["stageId"],
         "stageIdValues": ["strategy_spec", "generate_source", "source_review", "compile_validate", "backtest_recheck", "final_report"],
         "responseEnvelopeFields": ["ok", "kind", "mission", "report", "build", "eaFactory", "idempotentReplay"]
+      },
+      "retryBuildStage": {
+        "method": "POST",
+        "path": "/api/props/right_server_racks/ea-factory/builds/:buildId/retry",
+        "pathParameters": ["buildId"],
+        "allowedRequestFields": ["stageId", "failedMissionId", "idempotencyKey"],
+        "requiredRequestFields": ["stageId", "failedMissionId", "idempotencyKey"],
+        "stageIdValues": ["generate_source"],
+        "allowedFailureCodes": ["invalid_output"],
+        "requiresNoSourceOrVersion": true,
+        "freshMission": true,
+        "maximumAttempts": 3,
+        "responseEnvelopeFields": ["ok", "kind", "mission", "report", "build", "eaFactory", "idempotentReplay", "retry"]
+      },
+      "runBuild": {
+        "method": "POST",
+        "path": "/api/props/right_server_racks/ea-factory/builds/:buildId/run",
+        "pathParameters": ["buildId"],
+        "allowedRequestFields": ["idempotencyKey"],
+        "requiredRequestFields": ["idempotencyKey"],
+        "sameKeyResumesAwaitingVisibleTerminal": true,
+        "differentKeyForExistingBuild": "reject_conflict",
+        "phaseGateBypassAllowed": false,
+        "liveTradingAllowed": false,
+        "responseEnvelopeFields": ["ok", "kind", "buildId", "oneClickRun", "idempotentReplay", "workerStarted"]
       },
       "downloadArtifact": {
         "method": "GET",
@@ -318,10 +350,10 @@
     },
     "readModelShape": {
       "envelopeFields": ["ok", "eaFactory"],
-      "topLevelFields": ["schemaVersion", "mode", "scheduled", "schedulerEnabled", "sourceCatalog", "sourceSnapshots", "platforms", "stageDefinitions", "builds", "stages", "currentStageId", "terminalSelection", "terminalGate", "endpoints", "safety", "updatedAt"],
+      "topLevelFields": ["schemaVersion", "mode", "scheduled", "schedulerEnabled", "sourceCatalog", "sourceSnapshots", "platforms", "stageDefinitions", "builds", "stages", "currentStageId", "terminalSelection", "oneClick", "terminalGate", "endpoints", "safety", "updatedAt"],
       "constants": {
         "schemaVersion": "ea-factory-v1",
-        "mode": "manual_stage_by_stage",
+        "mode": "one_click_with_manual_stage_recovery",
         "scheduled": false,
         "schedulerEnabled": false
       },
@@ -329,18 +361,21 @@
       "googleSheetsFields": ["status", "lastSyncAt", "lastErrorCode", "syncEndpoint", "canSync"],
       "sheetSchemaFields": ["schemaVersion", "sheetTabDefault", "range", "coreRange", "downstreamRange", "columns", "coreFields", "downstreamFields"],
       "sourceRecordFields": ["sourceRecordId", "sourceKind", "displayName", "recordId", "core", "downstream", "sourceUrls", "missingCoreFields", "buildReady", "recordDigest", "sourceReportId", "sourceMissionId"],
-      "buildFields": ["id", "sourceRecordId", "sourceDisplayName", "platform", "language", "status", "brief", "workspace", "stages", "versions", "files", "artifactLineage", "terminalGate", "createdAt", "updatedAt"],
+      "buildFields": ["id", "sourceRecordId", "sourceDisplayName", "platform", "language", "status", "brief", "workspace", "stages", "versions", "files", "artifactLineage", "terminalGate", "oneClickRun", "createdAt", "updatedAt"],
       "workspaceFields": ["workspaceId", "folderNames", "strategySpecFile", "rawFilesystemPathExposed"],
-      "stageFields": ["id", "labelTh", "status", "missionId", "reportId", "blockedReasonCode", "evidenceVerified", "artifacts", "updatedAt", "canAdvance"],
+      "stageFields": ["id", "labelTh", "status", "missionId", "reportId", "blockedReasonCode", "evidenceVerified", "artifacts", "updatedAt", "canAdvance", "canRetry", "retryAttemptCount", "retryAttemptLimit"],
       "versionFields": ["version", "fileName", "sourceDigest", "sourceFile", "versionFile", "sourceReportId", "immutable", "createdAt"],
       "fileFields": ["fileId", "fileName", "folder", "extension", "byteSize", "sha256", "stageId", "reportId", "artifactKind", "immutable", "downloadUrl"],
       "artifactLineageFields": ["sourceRecordId", "sourceRecordDigest", "strategySpecFile", "stageMissionReportPairs", "versionDigests", "artifactManifestDigest", "fileDigests"],
       "stageMissionReportPairFields": ["stageId", "missionId", "reportId"],
       "fileDigestFields": ["fileId", "sha256"],
-      "terminalSelectionFields": ["candidates", "selectedTerminalId", "adapterReady"],
+      "terminalSelectionFields": ["candidates", "selectedTerminalId", "adapterReady", "compileOnly", "terminalExecutionAllowed"],
       "terminalCandidateFields": ["candidateId", "platform", "labelTh", "detected", "runningState"],
       "terminalGateFields": ["required", "ready", "platform", "candidateId", "selectionRevision", "adapterReady", "reasonCode"],
-      "endpointFields": ["read", "syncGoogleSheet", "createBuild", "advanceBuildTemplate", "downloadArtifactTemplate"],
+      "oneClickFields": ["enabled", "canRun", "canCreateAndRun", "supportedVisiblePlatforms", "selectedPlatformSupported", "unsupportedReasonCode", "selectedPlatform", "selectedTerminalId", "selectedTerminalLabel", "terminalReady", "terminalRunning", "terminalMustAlreadyBeRunning", "terminalProcessLaunchAllowed", "visibleAdapterConnected", "requiresVisibleTerminal", "manualOnly", "visualModeRequired", "liveTradingAllowed", "runEndpoint", "runEndpointTemplate"],
+      "oneClickRunFields": ["schemaVersion", "runId", "idempotencyKey", "status", "currentStageId", "missionId", "reportId", "failureCode", "messageTh", "startedAt", "updatedAt", "completedAt", "stageResults", "evidence", "visibleAction", "canResume", "canRetry", "liveTradingAllowed", "visualModeRequired"],
+      "oneClickVisibleActionFields": ["stageId", "operationId", "state", "attemptCount", "attemptLimit", "requiresExplicitResume"],
+      "endpointFields": ["read", "syncGoogleSheet", "createBuild", "advanceBuildTemplate", "retryBuildStageTemplate", "runBuildTemplate", "downloadArtifactTemplate"],
       "frontendForbiddenFields": ["accessToken", "refreshToken", "serviceAccountKey", "cookie", "authorization", "terminalPath", "processId", "accountNumber", "brokerServer", "absolutePath"]
     },
     "googleSheets": {
@@ -348,8 +383,9 @@
       "mode": "central_sheet_read_only_consumer",
       "centralConfigurationPropId": "mission_strategy_table",
       "fixedTabName": "Deep_Research",
-      "sourceRangeRequired": "A-AW (49 required headers; extra columns allowed)",
-      "internalMapping": "23 EA strategy fields (not a Sheet range)",
+      "sourceRangeRequired": "A-J (10 exact Strategy Brief headers)",
+      "requiredHeaders": ["record_id", "system_name", "system_overview", "entry_rules", "recovery_rules", "exit_rules", "money_management", "order_execution", "display_requirements", "additional_notes"],
+      "internalMapping": "one prose Strategy Brief with 10 authoritative fields",
       "transport": "HTTPS public CSV export with Backend-authenticated read fallback",
       "userInitiatedOnly": true,
       "credentialsAcceptedFromFrontend": false,
@@ -359,16 +395,22 @@
       "rawSheetIdExposed": true,
       "sheetIdIsCredential": false,
       "oauthSecretsExposed": false,
-      "requiredSourceRange": "A-AW"
+      "requiredSourceRange": "A-J",
+      "legacyCompatibility": "Legacy A-AW/49-header snapshots are retained only as read-only backup/compatibility input and never replace the authoritative A-J schema."
     },
     "platformProof": {
-      "mt4": "Compile and Strategy Tester remain blocked until the exact selected MT4 terminal has verified front-office adapter evidence.",
-      "mt5": "Compile and Strategy Tester remain blocked until the exact selected MT5 terminal has verified front-office adapter evidence.",
+      "mt4": "One-click is available only when the exact selected MT4 terminal is already running and has verified visible front-office adapter evidence; the coordinator never launches the terminal process.",
+      "mt5": "MT5 remains available through the manual stage-by-stage flow only. One-click visible execution is disabled and rejected fail-closed until a verified MT5 adapter exists.",
       "tradingview": "Pine Script uses source/static validation only; MetaTrader Compile and Strategy Tester are not applicable.",
       "terminalSelectionIsExecutionProof": false,
       "processExitIsExecutionProof": false,
       "staticReviewIsCompileProof": false,
       "syntheticSuccessAllowed": false
+      ,"oneClickCoordinator": "persisted_phase_gated_same_key_resumable"
+      ,"oneClickVisibleAdapterUnavailableStatus": "awaiting_visible_terminal"
+      ,"oneClickSupportedVisiblePlatforms": ["mt4"]
+      ,"oneClickTerminalProcessLaunchAllowed": false
+      ,"oneClickLiveTradingAllowed": false
     }
   },
   "approval_required_actions": [

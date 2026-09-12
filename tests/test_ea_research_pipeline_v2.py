@@ -13,7 +13,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_PATH = ROOT / "backend" / "local-runner" / "bridge_server.py"
 RUNNER_PATH = ROOT / "runner" / "codex_cli_runner.py"
-BLUEPRINT_TEST_PATH = ROOT / "tests" / "test_ea_research_blueprint_v2.py"
+BRIEF_TEST_PATH = ROOT / "tests" / "test_ea_strategy_brief.py"
 
 
 def load_module(name: str, path: Path):
@@ -26,9 +26,9 @@ def load_module(name: str, path: Path):
     return module
 
 
-BLUEPRINT_SUPPORT = load_module(
-    "metafx_ea_research_pipeline_blueprint_support",
-    BLUEPRINT_TEST_PATH,
+BRIEF_SUPPORT = load_module(
+    "metafx_ea_research_pipeline_brief_support",
+    BRIEF_TEST_PATH,
 )
 
 
@@ -45,16 +45,9 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
         )
 
     def ready_blueprint(self) -> dict:
-        blueprint = BLUEPRINT_SUPPORT.ready_blueprint()
-        blueprint["evidenceMap"].append(
-            {
-                "sourceRef": "S3",
-                "url": "https://www.babypips.com/learn/forex/moving-averages",
-                "title": "Moving average reference",
-                "checkedAt": blueprint["checkedAt"],
-            }
-        )
-        return blueprint
+        """Return the compact Strategy Brief used by the A-J handoff."""
+
+        return copy.deepcopy(BRIEF_SUPPORT.valid_brief())
 
     def test_deep_research_prompt_preserves_rules_when_optional_metadata_exceeds_cap(self) -> None:
         action = self.bridge.DASHBOARD_WORKFLOW_ACTIONS["deep_research_system"]
@@ -137,6 +130,10 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
             "deep_research_system",
             form,
         )
+        preset = profile["inputPreset"]["brief"]
+        self.assertIn("compact-ea-safe-inputs-v2", preset)
+        self.assertIn("IMPLEMENTATION_DEFAULT_NOT_SOURCE_FACT", preset)
+        self.assertLessEqual(len(preset), 800)
         prompt = self.bridge._workflow_prompt(
             "deep_research_system",
             form,
@@ -153,6 +150,10 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
             len(prompt),
             self.bridge.TRADING_SYSTEM_RESEARCH_BUILDER_PROMPT_MAX_CHARS,
         )
+        self.assertIn("fast[2] <= slow[2]", prompt)
+        self.assertIn("compact-ea-safe-inputs-v2", prompt)
+        self.assertIn("component by component", prompt)
+        self.assertIn("RecoveryMode=none", prompt)
         self.assertEqual(decoded["recordId"], "world-system-one")
         self.assertEqual(len(decoded["sourceUrls"]), 2)
         self.assertTrue(decoded["sourceContextTruncated"])
@@ -363,41 +364,19 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
         self.assertIn("indicator/entry/exit/management/risk", str(raised.exception))
 
     def non_ready_blueprint(self) -> dict:
-        blueprint = self.ready_blueprint()
-        rule = blueprint["entry"]["buy"]["rules"][0]
-        rule["sourceStatus"] = "unknown"
-        rule["sourceRefs"] = []
-        rule["expression"] = {"op": "unknown"}
-        blueprint["completeness"].update(
-            {
-                "status": "needs_clarification",
-                "score": 65,
-                "eaHandoffAllowed": False,
-                "deterministicBacktestAllowed": False,
-                "blockingIssues": [
-                    {
-                        "code": "ENTRY_UNKNOWN",
-                        "path": "$.entry.buy.rules[0]",
-                        "messageTh": "ยังไม่ทราบเงื่อนไขเข้า Buy",
-                        "questionTh": "โปรดยืนยันเงื่อนไขเข้า Buy",
-                    }
-                ],
-                "warnings": [],
-                "unknownPaths": ["$.entry.buy.rules[0]"],
-                "conflictPaths": [],
-            }
-        )
-        return blueprint
+        brief = self.ready_blueprint()
+        brief.pop("entryRules")
+        return brief
 
     @staticmethod
     def result_payload(blueprint: dict) -> dict:
         evidence = [
             {
-                "label": str(item["title"]),
-                "url": str(item["url"]),
+                "label": f"Public source {index}",
+                "url": str(url),
                 "note": "Public source opened by the research worker",
             }
-            for item in blueprint["evidenceMap"]
+            for index, url in enumerate(blueprint.get("sourceLinks", []), start=1)
         ]
         return {
             "status": "completed",
@@ -411,7 +390,6 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
                 "at_least_two_source_urls",
                 "checked_at",
                 "limitations",
-                "ea_readiness",
                 "source_digest",
             ],
         }
@@ -483,7 +461,7 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
         row, _factory_rows = self.deep_rows_from_metrics(metrics)
         records = self.bridge._ea_factory_deep_research_records(
             [row],
-            source_key="sheet-ea-research-pipeline-v2",
+            source_key="sheet-ea-research-pipeline-aj",
             strict=True,
         )
         self.assertEqual(len(records), 1)
@@ -502,60 +480,100 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
         self.assertEqual(receipt["missingEvidenceKinds"], [])
         self.assertEqual(receipt["entryErrors"], [])
 
-        normalized = BLUEPRINT_SUPPORT.CONTRACT.normalize_blueprint(blueprint)
-        digest = BLUEPRINT_SUPPORT.CONTRACT.compute_blueprint_digest(normalized)
-        self.assertEqual(metrics["eaBlueprint"], normalized)
-        self.assertEqual(metrics["eaImplementationBlueprint"], normalized)
+        normalized = BRIEF_SUPPORT.BRIEF.normalize_strategy_brief(blueprint)
+        digest = BRIEF_SUPPORT.BRIEF.compute_strategy_brief_digest(normalized)
+        self.assertEqual(metrics["strategyBrief"], normalized)
         self.assertEqual(metrics["sourceDigest"], digest)
-        self.assertEqual(metrics["blueprintDigest"], digest)
-        self.assertEqual(metrics["eaReadiness"]["status"], "ready")
-        self.assertIn("cross_above", metrics["eaReadyText"])
+        self.assertEqual(metrics["briefDigest"], digest)
+        self.assertIn("fast[2]", metrics["strategyBrief"]["entryRules"])
 
-    def test_backend_projection_does_not_truncate_241_canonical_warnings(self) -> None:
+    def test_component_defaults_survive_backend_sheet_and_factory_handoff(self) -> None:
+        brief = self.ready_blueprint()
+        brief["recoveryRules"] = "not_publicly_stated"
+        brief["exitRules"] = (
+            "Source-backed StopLoss=20 pips; Take Profit not_publicly_stated; "
+            "Trailing Stop not_publicly_stated."
+        )
+        brief["moneyManagement"] = (
+            "Source-backed RiskPercent=0.5%; max positions not_publicly_stated."
+        )
+        brief.pop("orderExecution")
+
+        _parsed, receipt, metrics = self.parse_and_project(brief)
+
+        self.assertTrue(receipt["valid"], receipt)
+        projected = metrics["strategyBrief"]
+        self.assertIn("StopLoss=20 pips", projected["exitRules"])
+        self.assertNotIn("StopLossPoints=300", projected["exitRules"])
+        self.assertIn("TakeProfitPoints=600", projected["exitRules"])
+        self.assertIn("TrailingStop=false", projected["exitRules"])
+        self.assertIn("RiskPercent=0.5%", projected["moneyManagement"])
+        self.assertNotIn("RiskPercent=1.0", projected["moneyManagement"])
+        self.assertIn("LossPerLotAtSL", projected["moneyManagement"])
+        self.assertIn(
+            "MaxOpenPositionsPerSymbolMagic=1",
+            projected["moneyManagement"],
+        )
+        self.assertIn("RecoveryMode=none", projected["recoveryRules"])
+        self.assertIn("Market Buy/Sell", projected["orderExecution"])
+        self.assertIn("compact-ea-safe-inputs-v2", projected["additionalNotes"])
+        self.assertIn(
+            "INPUT_METADATA_VERSION=ea-optimization-inputs-v1",
+            projected["additionalNotes"],
+        )
+
+        row, _factory_rows = self.deep_rows_from_metrics(
+            metrics,
+            suffix="implementation-defaults",
+        )
+        self.assertEqual(row["exit_rules"], projected["exitRules"])
+        self.assertEqual(row["money_management"], projected["moneyManagement"])
+        records = self.bridge._ea_factory_deep_research_records(
+            [row],
+            source_key="sheet-component-defaults",
+            strict=True,
+        )
+        self.assertEqual(len(records), 1)
+        self.assertTrue(records[0]["buildReady"])
+        self.assertEqual(
+            " ".join(records[0]["strategyBrief"]["exitRules"].split()),
+            " ".join(row["exit_rules"].split()),
+        )
+        self.assertEqual(
+            records[0]["strategyBriefDigest"],
+            self.bridge._ea_factory_sheet_strategy_brief_digest(
+                records[0]["recordId"],
+                {
+                    sheet_name: records[0]["strategyBrief"][camel_name]
+                    for sheet_name, camel_name in self.bridge.EA_STRATEGY_BRIEF_SHEET_TO_CAMEL.items()
+                },
+            ),
+        )
+
+    def test_backend_projection_does_not_truncate_large_compact_notes(self) -> None:
         blueprint = self.ready_blueprint()
-        warnings = [f"bounded-warning-{index:03d}" for index in range(241)]
-        blueprint["completeness"]["warnings"] = warnings
+        notes = "bounded-note;" * 280
+        blueprint["additionalNotes"] = notes
 
         _parsed, receipt, metrics = self.parse_and_project(blueprint)
 
         self.assertTrue(receipt["valid"], receipt)
+        self.assertEqual(metrics["strategyBrief"]["additionalNotes"], notes)
         self.assertEqual(
-            metrics["eaBlueprint"]["completeness"]["warnings"],
-            warnings,
-        )
-        self.assertEqual(
-            metrics["eaImplementationBlueprint"]["completeness"]["warnings"],
-            warnings,
-        )
-        self.assertEqual(
-            self.bridge.ea_research_blueprint_digest(metrics["eaBlueprint"]),
-            metrics["blueprintDigest"],
+            self.bridge.compute_strategy_brief_digest(metrics["strategyBrief"]),
+            metrics["briefDigest"],
         )
 
-    def test_runner_rejects_plain_prose_and_wrong_cross_expansion(self) -> None:
+    def test_runner_rejects_incomplete_brief_and_wrong_schema(self) -> None:
         cases: list[tuple[str, dict, str]] = []
 
-        prose = self.ready_blueprint()
-        prose["entry"]["buy"]["rules"] = ["EMA 10 crosses EMA 60"]
-        cases.append(("plain prose", prose, "TYPED_RULE_REQUIRED"))
+        incomplete = self.ready_blueprint()
+        incomplete["entryRules"] = ""
+        cases.append(("missing entry prose", incomplete, "BRIEF_TEXT_REQUIRED"))
 
-        wrong_cross = self.ready_blueprint()
-        expression = wrong_cross["entry"]["buy"]["rules"][0]["expression"]
-        expression["expanded"] = {
-            "all": [
-                {
-                    "op": ">=",
-                    "left": {"kind": "indicator", "ref": "ema_fast", "shift": 2},
-                    "right": {"kind": "indicator", "ref": "ema_slow", "shift": 2},
-                },
-                {
-                    "op": "<",
-                    "left": {"kind": "indicator", "ref": "ema_fast", "shift": 1},
-                    "right": {"kind": "indicator", "ref": "ema_slow", "shift": 1},
-                },
-            ]
-        }
-        cases.append(("wrong cross", wrong_cross, "CROSS_EXPANSION_MISMATCH"))
+        wrong_schema = self.ready_blueprint()
+        wrong_schema["schemaVersion"] = "ea-strategy-brief/0.9.0"
+        cases.append(("wrong schema", wrong_schema, "BRIEF_SCHEMA_VERSION_INVALID"))
 
         for label, blueprint, expected_code in cases:
             with self.subTest(label=label):
@@ -566,48 +584,42 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
                         "trading_system_research",
                     )
 
-    def test_report_projects_one_49_header_row_and_preserves_blueprint_digest(self) -> None:
+    def test_report_projects_one_exact_a_j_row_and_preserves_brief_digest(self) -> None:
         blueprint = self.ready_blueprint()
         _parsed, receipt, metrics = self.parse_and_project(blueprint)
         self.assertTrue(receipt["valid"], receipt)
 
         row, factory_rows = self.deep_rows_from_metrics(metrics)
-        self.assertEqual(len(self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS), 49)
+        self.assertEqual(len(self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS), 10)
         self.assertEqual(set(row), set(self.bridge.RESEARCH_SHEET_DEEP_WRITE_HEADERS))
-        self.assertEqual(len(factory_rows), 1)
-        self.assertEqual(row["verification_status"], "verified_deep_research")
-
-        implementation = json.loads(row["implementation_notes_json"])
-        normalized = metrics["eaBlueprint"]
-        digest = metrics["blueprintDigest"]
-        self.assertEqual(implementation["schemaVersion"], self.bridge.EA_RESEARCH_SCHEMA_VERSION)
-        self.assertEqual(implementation["eaImplementationBlueprint"], normalized)
-        self.assertEqual(implementation["blueprintDigest"], digest)
-        self.assertEqual(
-            self.bridge.reconstruct_ea_research_from_sheet(row),
-            normalized,
-        )
-        risk_model = json.loads(row["risk_model_json"])
-        sizing_rules = json.loads(row["position_sizing_rules_json"])
-        self.assertEqual(risk_model, metrics["riskModel"])
-        self.assertEqual(sizing_rules, normalized["riskAndSizing"])
-        self.assertNotIn("stopLoss", sizing_rules)
-        self.assertNotEqual(sizing_rules, risk_model)
-        self.assertEqual(
-            json.loads(factory_rows[0]["lot_risk"]),
-            normalized["riskAndSizing"],
-        )
+        self.assertEqual(factory_rows, [])
+        normalized = metrics["strategyBrief"]
+        digest = metrics["briefDigest"]
+        field_map = {
+            "system_name": "systemName",
+            "system_overview": "systemOverview",
+            "entry_rules": "entryRules",
+            "recovery_rules": "recoveryRules",
+            "exit_rules": "exitRules",
+            "money_management": "moneyManagement",
+            "order_execution": "orderExecution",
+            "display_requirements": "displayRequirements",
+            "additional_notes": "additionalNotes",
+        }
+        for sheet_field, brief_field in field_map.items():
+            self.assertEqual(row[sheet_field], normalized[brief_field])
         sheet_factory_values = self.bridge._ea_factory_deep_research_values(row)
+        self.assertTrue(sheet_factory_values["_humanConfirmationValid"])
         self.assertEqual(
-            json.loads(sheet_factory_values["lot_risk"]),
-            normalized["riskAndSizing"],
+            self.bridge.compute_strategy_brief_digest(normalized),
+            digest,
         )
 
-    def test_sheet_blueprint_cell_preserves_long_pseudocode_and_digest(self) -> None:
+    def test_sheet_entry_cell_preserves_long_prose_and_digest(self) -> None:
         blueprint = self.ready_blueprint()
-        long_line = "IF closed bar is confirmed THEN " + ("ตรวจเงื่อนไข;" * 700)
-        self.assertGreater(len(long_line), 9000)
-        blueprint["pseudocode"]["lines"].append(long_line)
+        long_line = "IF closed bar is confirmed THEN " + ("ตรวจเงื่อนไข;" * 350)
+        self.assertGreater(len(long_line), 4000)
+        blueprint["entryRules"] = long_line
 
         _parsed, receipt, metrics = self.parse_and_project(blueprint)
         self.assertTrue(receipt["valid"], receipt)
@@ -616,53 +628,43 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
             suffix="long-pseudocode",
         )
 
-        self.assertLessEqual(
-            len(row["implementation_notes_json"].encode("utf-16-le")) // 2,
-            self.bridge.TRADING_SYSTEM_RESEARCH_SHEET_BLUEPRINT_CELL_MAX_CHARS,
+        self.assertEqual(row["entry_rules"], long_line)
+        records = self.bridge._ea_factory_deep_research_records(
+            [row],
+            source_key="sheet-long-entry",
+            strict=True,
         )
-        implementation = json.loads(row["implementation_notes_json"])
-        stored = implementation["eaImplementationBlueprint"]
-        self.assertEqual(stored["pseudocode"]["lines"][-1], long_line)
-        reconstructed = self.bridge.reconstruct_ea_research_from_sheet(row)
-        self.assertEqual(reconstructed, metrics["eaBlueprint"])
+        self.assertEqual(records[0]["strategyBrief"]["entryRules"], long_line)
         self.assertEqual(
-            self.bridge.ea_research_blueprint_digest(reconstructed),
-            metrics["blueprintDigest"],
+            records[0]["strategyBriefDigest"],
+            self.bridge._ea_factory_sheet_strategy_brief_digest(
+                row["record_id"],
+                row,
+            ),
         )
 
-    def test_sheet_blueprint_cell_rejects_oversize_before_outbox_item_exists(self) -> None:
+    def test_strategy_brief_rejects_oversize_entry_before_outbox_item_exists(self) -> None:
         blueprint = self.ready_blueprint()
-        blueprint["pseudocode"]["lines"].append("X" * 45_000)
+        blueprint["entryRules"] = "X" * 8_001
         with self.assertRaisesRegex(
-            self.bridge.EAResearchBlueprintValidationError,
-            "BLUEPRINT_TRANSPORT_SIZE_EXCEEDED",
+            self.bridge.StrategyBriefValidationError,
+            "BRIEF_TEXT_TOO_LONG",
         ):
-            self.bridge.normalize_ea_research_blueprint(blueprint)
+            self.bridge.normalize_strategy_brief(blueprint)
 
     def test_catalog_falls_back_from_corrupt_sheet_duplicate_to_ready_runtime(self) -> None:
         valid_sheet, _row, _metrics = self.ready_factory_record()
-        values = {
-            **copy.deepcopy(valid_sheet["columnValues"]),
-            "eaImplementationBlueprint": copy.deepcopy(
-                valid_sheet["eaImplementationBlueprint"]
-            ),
-        }
-        valid_runtime = self.bridge._ea_factory_normalize_record(
-            values,
-            source_kind="verified_deep_research",
-            source_key="runtime-complete-report",
-            source_report_id="report-runtime-complete",
-            source_mission_id="mission-runtime-complete",
-        )
-        corrupt_sheet = self.bridge._ea_factory_normalize_record(
-            valid_sheet["columnValues"],
-            source_kind="verified_deep_research_sheet",
-            source_key="central-sheet-corrupt",
-            source_report_id="report-sheet-corrupt",
-            source_mission_id="mission-sheet-corrupt",
-        )
-        self.assertIsNotNone(valid_runtime)
-        self.assertIsNotNone(corrupt_sheet)
+        valid_runtime = copy.deepcopy(valid_sheet)
+        valid_runtime.update({
+            "sourceKind": "verified_deep_research",
+            "sourceKey": "runtime-complete-report",
+        })
+        corrupt_sheet = copy.deepcopy(valid_sheet)
+        corrupt_sheet.update({
+            "sourceKey": "central-sheet-corrupt",
+            "buildReady": False,
+            "readinessIssues": ["incomplete compact Sheet projection"],
+        })
         self.assertTrue(valid_runtime["buildReady"])
         self.assertFalse(corrupt_sheet["buildReady"])
         self.assertEqual(valid_runtime["recordId"], corrupt_sheet["recordId"])
@@ -722,12 +724,12 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
         self.assertTrue(record["buildReady"], record)
         self.assertEqual(record["missingCoreFields"], [])
         self.assertEqual(record["readinessIssues"], [])
-        self.assertEqual(record["eaImplementationBlueprint"], metrics["eaBlueprint"])
-        self.assertEqual(record["eaBlueprintDigest"], metrics["blueprintDigest"])
-        self.assertEqual(record["eaReadiness"]["status"], "ready")
-        self.assertIn("EA HANDOFF: ALLOWED", record["eaReadyText"])
+        self.assertEqual(record["strategyBrief"]["systemName"], metrics["strategyBrief"]["systemName"])
+        self.assertRegex(record["strategyBriefDigest"], r"^[0-9a-f]{64}$")
+        self.assertIsNone(record["eaImplementationBlueprint"])
+        self.assertIsNone(record["eaBlueprintDigest"])
 
-    def test_strategy_spec_v2_workspace_revalidates_from_sheet_source(self) -> None:
+    def test_strategy_spec_v3_workspace_revalidates_from_sheet_source(self) -> None:
         record, _row, _metrics = self.ready_factory_record()
         build_id = "ea-build-research-pipeline-v2"
         platform = "mt4"
@@ -794,27 +796,27 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
                     / workspace["strategySpecFile"]
                 )
                 spec = json.loads(spec_path.read_text(encoding="utf-8"))
-                self.assertEqual(spec["schemaVersion"], "ea-factory-strategy-spec-v2")
-                self.assertEqual(spec["eaBlueprintDigest"], record["eaBlueprintDigest"])
+                self.assertEqual(spec["schemaVersion"], "ea-factory-strategy-spec-v3")
                 self.assertEqual(
-                    spec["eaImplementationBlueprint"],
-                    record["eaImplementationBlueprint"],
+                    spec["strategyBriefDigest"],
+                    record["strategyBriefDigest"],
                 )
+                self.assertEqual(spec["strategyBrief"], record["strategyBrief"])
+                self.assertNotIn("eaImplementationBlueprint", spec)
 
                 validated = self.bridge._ea_factory_revalidated_build(build)
 
         self.assertEqual(validated["id"], build_id)
         self.assertEqual(validated["sourceRecordId"], record["sourceRecordId"])
         self.assertFalse(validated["coverageUpgradeRequired"])
-        self.assertEqual(validated["coverageStatus"], "current")
+        self.assertEqual(validated["coverageStatus"], "compact_current")
 
-    def test_persisted_v3_coverage_loads_read_only_and_requires_v4_rebuild(self) -> None:
+    def test_persisted_compact_v3_loads_as_current_without_legacy_coverage(self) -> None:
         record, _row, _metrics = self.ready_factory_record()
-        build_id = "ea-build-research-persisted-v3"
+        build_id = "ea-build-research-persisted-compact-v3"
         platform = "mt4"
-        brief = ""
-        mission = {"id": "mission-ea-spec-persisted-v3"}
-        report = {"id": "report-ea-spec-persisted-v3"}
+        mission = {"id": "mission-ea-spec-persisted-compact-v3"}
+        report = {"id": "report-ea-spec-persisted-compact-v3"}
 
         with tempfile.TemporaryDirectory() as temporary:
             project_root = Path(temporary)
@@ -829,56 +831,6 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
                     record,
                     platform,
                 )
-                spec_path = (
-                    project_root
-                    / "workspace"
-                    / "ea-factory"
-                    / build_id
-                    / workspace["strategySpecFile"]
-                )
-                spec = json.loads(spec_path.read_text(encoding="utf-8"))
-                legacy_requirements = (
-                    self.bridge._ea_factory_legacy_v3_coverage_requirements(
-                        spec["eaImplementationBlueprint"],
-                        spec["eaBlueprintDigest"],
-                    )
-                )
-                self.assertEqual(
-                    legacy_requirements["schemaVersion"],
-                    "ea-factory-blueprint-coverage-requirements-v3",
-                )
-                self.assertFalse(
-                    self.bridge.ea_factory_coverage_requirements_valid(
-                        legacy_requirements,
-                        spec["eaImplementationBlueprint"],
-                        spec["eaBlueprintDigest"],
-                    )
-                )
-                forged_requirements = copy.deepcopy(legacy_requirements)
-                forged_requirements["semanticProfile"]["requiresClosedBar"] = not bool(
-                    forged_requirements["semanticProfile"]["requiresClosedBar"]
-                )
-                forged_requirements.pop("requirementsDigest")
-                forged_requirements["requirementsDigest"] = (
-                    self.bridge._ea_factory_canonical_json_sha256(
-                        forged_requirements
-                    )
-                )
-                self.assertFalse(
-                    self.bridge._ea_factory_legacy_v3_coverage_requirements_valid(
-                        forged_requirements,
-                        spec["eaImplementationBlueprint"],
-                        spec["eaBlueprintDigest"],
-                    )
-                )
-                spec["blueprintCoverageRequirements"] = legacy_requirements
-                spec_path.write_text(
-                    json.dumps(spec, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                )
-                workspace["strategySpecDigest"] = (
-                    self.bridge._ea_factory_file_sha256(spec_path)
-                )
                 build = {
                     "schemaVersion": "ea-factory-build-v1",
                     "id": build_id,
@@ -888,7 +840,7 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
                     "sourceReportId": report["id"],
                     "sourceMissionId": mission["id"],
                     "platform": platform,
-                    "brief": brief,
+                    "brief": "",
                     "status": "ready",
                     "workspace": workspace,
                     "stages": self.bridge._ea_factory_initial_stages(
@@ -902,21 +854,19 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
                     "createRequestDigest": self.bridge._ea_factory_create_request_digest(
                         record["sourceRecordId"],
                         platform,
-                        brief,
+                        "",
                     ),
                     "createdAt": "2026-09-08T09:40:00+07:00",
                     "updatedAt": "2026-09-08T09:40:00+07:00",
                 }
                 artifacts = self.bridge._ea_factory_register_artifacts(
                     build,
-                    [
-                        {
-                            "relativePath": workspace["strategySpecFile"],
-                            "stageId": "strategy_spec",
-                            "reportId": report["id"],
-                            "artifactKind": "strategy_spec",
-                        }
-                    ],
+                    [{
+                        "relativePath": workspace["strategySpecFile"],
+                        "stageId": "strategy_spec",
+                        "reportId": report["id"],
+                        "artifactKind": "strategy_spec",
+                    }],
                 )
                 self.bridge._ea_factory_stage_row(build, "strategy_spec")[
                     "artifacts"
@@ -929,94 +879,44 @@ class EAResearchPipelineV2Tests(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-                loaded = self.bridge._load_ea_factory_state_unlocked()
-                loaded_build = loaded["builds"][0]
+                loaded_build = self.bridge._load_ea_factory_state_unlocked()["builds"][0]
                 model = self.bridge._ea_factory_build_read_model(loaded_build)
-
-                self.assertTrue(loaded_build["coverageUpgradeRequired"])
-                self.assertEqual(
-                    loaded_build["coverageRequirementsSchemaVersion"],
-                    "ea-factory-blueprint-coverage-requirements-v3",
+                spec_path = (
+                    project_root
+                    / "workspace"
+                    / "ea-factory"
+                    / build_id
+                    / workspace["strategySpecFile"]
                 )
-                self.assertEqual(model["status"], "coverage_upgrade_required")
-                self.assertEqual(model["coverageStatus"], "coverage_upgrade_required")
-                self.assertTrue(model["rebuildRequired"])
-                self.assertTrue(
-                    all(stage["canAdvance"] is False for stage in model["stages"])
-                )
-                raw_persisted = json.loads(state_path.read_text(encoding="utf-8"))
-                self.assertNotIn(
-                    "coverageUpgradeRequired",
-                    raw_persisted["builds"][0],
-                )
+                spec = json.loads(spec_path.read_text(encoding="utf-8"))
 
-                with self.assertRaises(self.bridge.RequestError) as raised:
-                    self.bridge.advance_ea_factory_build(
-                        build_id,
-                        {"stageId": "generate_source"},
-                    )
-                self.assertEqual(raised.exception.status, 409)
-                self.assertIn("coverage contract is outdated", str(raised.exception))
+        self.assertEqual(spec["schemaVersion"], "ea-factory-strategy-spec-v3")
+        self.assertNotIn("eaImplementationBlueprint", spec)
+        self.assertFalse(loaded_build["coverageUpgradeRequired"])
+        self.assertEqual(loaded_build["coverageStatus"], "compact_current")
+        self.assertFalse(model["rebuildRequired"])
 
-    def test_legacy_v1_deep_row_is_visible_but_not_build_ready(self) -> None:
+    def test_legacy_v1_deep_row_is_rejected_before_factory(self) -> None:
         _record, row, _metrics = self.ready_factory_record()
         legacy_row = copy.deepcopy(row)
-        legacy_row["implementation_notes_json"] = json.dumps(
-            {"notes": ["Legacy prose-only research"]},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+        legacy_row["entry_rules"] = ""
 
-        records = self.bridge._ea_factory_deep_research_records(
-            [legacy_row],
-            source_key="sheet-ea-research-pipeline-v1",
-            strict=True,
-        )
+        with self.assertRaisesRegex(
+            self.bridge.RequestError,
+            "incomplete Strategy Brief row",
+        ):
+            self.bridge._ea_factory_deep_research_records(
+                [legacy_row],
+                source_key="sheet-ea-research-pipeline-v1",
+                strict=True,
+            )
 
-        self.assertEqual(len(records), 1)
-        self.assertFalse(records[0]["buildReady"])
-        self.assertIsNone(records[0]["eaImplementationBlueprint"])
-        self.assertIsNone(records[0]["eaBlueprintDigest"])
-        self.assertIn(
-            "legacy_or_invalid_ea_blueprint",
-            records[0]["readinessIssues"],
-        )
-
-    def test_non_ready_blueprint_archives_as_authoritative_factory_tombstone(self) -> None:
-        _parsed, receipt, metrics = self.parse_and_project(
-            self.non_ready_blueprint()
-        )
-        self.assertTrue(receipt["valid"], receipt)
-        self.assertEqual(metrics["eaReadiness"]["status"], "needs_clarification")
-
-        row, factory_rows = self.deep_rows_from_metrics(
-            metrics,
-            suffix="needs-clarification",
-        )
-        self.assertEqual(len(factory_rows), 1)
-        self.assertEqual(row["verification_status"], "needs_clarification")
-        self.assertIn("วิจัยใหม่", row["next_action"])
-        implementation = json.loads(row["implementation_notes_json"])
-        self.assertEqual(
-            implementation["eaImplementationBlueprint"]["completeness"]["status"],
-            "needs_clarification",
-        )
-
-        handoff_records = self.bridge._ea_factory_deep_research_records(
-            [row],
-            source_key="sheet-ea-research-non-ready-v2",
-            strict=True,
-        )
-        self.assertEqual(len(handoff_records), 1)
-        self.assertFalse(handoff_records[0]["buildReady"])
-        self.assertEqual(
-            handoff_records[0]["eaReadiness"]["status"],
-            "needs_clarification",
-        )
-        self.assertIn(
-            "ea_blueprint_needs_clarification",
-            handoff_records[0]["readinessIssues"],
-        )
+    def test_incomplete_strategy_brief_never_reaches_sheet_or_factory(self) -> None:
+        with self.assertRaisesRegex(
+            self.runner.EAResearchSemanticValidationError,
+            "BRIEF_FIELDS_MISSING",
+        ):
+            self.parse_and_project(self.non_ready_blueprint())
 
 
 if __name__ == "__main__":

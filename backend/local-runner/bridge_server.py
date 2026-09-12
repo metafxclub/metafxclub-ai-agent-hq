@@ -4,6 +4,7 @@ import argparse
 import copy
 import csv
 import hashlib
+import html as html_lib
 import io
 import ipaddress
 import importlib.util
@@ -20,6 +21,7 @@ import threading
 import time
 import unicodedata
 import zipfile
+import zlib
 from datetime import date, datetime, timedelta, timezone
 from decimal import (
     Decimal,
@@ -28,6 +30,7 @@ from decimal import (
     ROUND_FLOOR,
     ROUND_HALF_UP,
 )
+from html.parser import HTMLParser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -49,6 +52,7 @@ from equipment_workflow_profiles import (  # noqa: E402 - local guarded contract
 from ea_research_blueprint import (  # noqa: E402 - trusted EA-ready research contract
     SCHEMA_VERSION as EA_RESEARCH_SCHEMA_VERSION,
     BlueprintValidationError as EAResearchBlueprintValidationError,
+    confirm_execution_assumptions as confirm_ea_research_execution_assumptions,
     compute_blueprint_digest as ea_research_blueprint_digest,
     normalize_blueprint as normalize_ea_research_blueprint,
     public_evidence_independence_key,
@@ -56,6 +60,21 @@ from ea_research_blueprint import (  # noqa: E402 - trusted EA-ready research co
     reconstruct_blueprint_from_deep_sheet_row as reconstruct_ea_research_from_sheet,
     reconstruct_blueprint_from_research_metrics as reconstruct_ea_research_from_metrics,
     render_ea_ready_text as render_ea_research_text,
+)
+from ea_strategy_brief import (  # noqa: E402 - compact learner-facing EA contract
+    COMPACT_SHEET_FIELDS,
+    EA_SOURCE_MANIFEST_SCHEMA_VERSION,
+    INDICATOR_SOURCE_MANIFEST_SCHEMA_VERSION,
+    IMPLEMENTATION_DEFAULT_POLICY_PROMPT as EA_STRATEGY_BRIEF_IMPLEMENTATION_DEFAULT_POLICY,
+    SCHEMA_VERSION as EA_STRATEGY_BRIEF_SCHEMA_VERSION,
+    StrategyBriefValidationError,
+    analyze_compact_ea_source,
+    analyze_compact_indicator_source,
+    build_compact_ea_source_manifest,
+    build_compact_indicator_source_manifest,
+    compute_strategy_brief_digest,
+    normalize_strategy_brief,
+    project_strategy_brief_contract,
 )
 from ea_factory_blueprint_coverage import (  # noqa: E402 - trusted Factory source coverage
     build_coverage_manifest as ea_factory_coverage_manifest,
@@ -76,6 +95,10 @@ from ea_factory_metaeditor_compile import (  # noqa: E402 - compile-only local a
     resolve_compile_target as resolve_metaeditor_compile_target,
     snapshot_standard_include_tree as snapshot_metaeditor_standard_include_tree,
 )
+from ea_factory_visible_terminal import (  # noqa: E402 - visible MT4 front office
+    VisibleTerminalAdapterError,
+    create_production_visible_front_office_adapter,
+)
 import fx_news_direct  # noqa: E402 - isolated deterministic official-source service
 import google_sheet_hub  # noqa: E402 - backend-only authenticated Sheets adapter
 from ohlc_import import (  # noqa: E402 - bounded local-only CSV/XLSX parser
@@ -93,7 +116,7 @@ from radar_image_adapter import (  # noqa: E402 - public HTTPS publisher-image e
     verify_radar_entry_artifact,
 )
 
-BRIDGE_RUNTIME_VERSION = "0.9.15"
+BRIDGE_RUNTIME_VERSION = "0.9.18"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_STARTED_MONOTONIC = time.monotonic()
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
@@ -106,6 +129,7 @@ FX_DAILY_NEWS_DIRECT_STATE_PATH = RUNTIME_DIR / "fx-daily-news-direct-state.json
 EA_FACTORY_STATE_PATH = RUNTIME_DIR / "ea-factory-state.json"
 RESEARCH_SHEET_OUTBOX_PATH = RUNTIME_DIR / "research-sheet-outbox.json"
 RESEARCH_SHEET_CACHE_PATH = RUNTIME_DIR / "research-sheet-cache.json"
+DEEP_RESEARCH_CONFIRMATIONS_PATH = RUNTIME_DIR / "deep-research-confirmations.json"
 EA_FACTORY_ROOT = PROJECT_ROOT / "workspace" / "ea-factory"
 BRIDGE_CONTROL_PATH = RUNTIME_DIR / "bridge-control.json"
 AUDIT_PATH = RUNTIME_DIR / "bridge-audit.jsonl"
@@ -140,10 +164,40 @@ FX_DAILY_NEWS_DIRECT_LOCK = threading.RLock()
 FX_DAILY_NEWS_DIRECT_REFRESH_LOCK = threading.Lock()
 EA_FACTORY_LOCK = threading.RLock()
 EA_FACTORY_SHEET_SYNC_LOCK = threading.RLock()
+EA_FACTORY_ONE_CLICK_THREADS_LOCK = threading.RLock()
+EA_FACTORY_READ_MODEL_CACHE_LOCK = threading.RLock()
+EA_FACTORY_READ_MODEL_CACHE_CONDITION = threading.Condition(
+    EA_FACTORY_READ_MODEL_CACHE_LOCK
+)
+EA_FACTORY_WORLD_SHEET_CACHE_LOCK = threading.RLock()
+# Windows foreground focus is a machine-wide resource.  Keep every visible
+# MetaEditor/Strategy Tester action exclusive even when different builds have
+# independent coordinator threads.
+EA_FACTORY_VISIBLE_FRONT_OFFICE_ACTION_LOCK = threading.Lock()
+EA_FACTORY_ONE_CLICK_THREADS: dict[str, threading.Thread] = {}
+EA_FACTORY_READ_MODEL_CACHE: dict[str, object] = {
+    "signature": None,
+    "value": None,
+    "refreshing": False,
+    "generation": 0,
+}
+EA_FACTORY_WORLD_SHEET_CACHE: dict[str, object] = {
+    "signature": None,
+    "value": None,
+}
+EA_FACTORY_WORLD_SHEET_CACHE_BUCKET_SECONDS = 5
+# The desktop/front-office adapter is deliberately injected by the local
+# runtime.  None means "not connected" and can never be interpreted as proof.
+# A production adapter must report its capabilities and return persisted
+# Mission/Report evidence from the exact selected terminal.
+EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER = None
+EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER = None
+EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER = None
 RESEARCH_SHEET_OUTBOX_LOCK = threading.RLock()
 RESEARCH_SHEET_CACHE_LOCK = threading.RLock()
 RESEARCH_SHEET_FLUSH_LOCK = threading.RLock()
 RESEARCH_SHEET_PREVIEW_LOCK = threading.RLock()
+DEEP_RESEARCH_CONFIRMATION_LOCK = threading.RLock()
 RESEARCH_SHEET_VERIFICATION_PREVIEWS: dict[str, dict] = {}
 FX_DAILY_NEWS_DIRECT_RUNTIME = {
     "refreshInProgress": False,
@@ -408,8 +462,12 @@ AI_TRADE_COUNCIL_QUEUE_ASSEMBLY_GRACE_SECONDS = 30
 AI_TRADE_COUNCIL_AUTOMATION_MAX_DAILY_ROUNDS = 24
 AI_TRADE_COUNCIL_AUTOMATION_DAILY_LIMIT_MODES = ("unlimited", "limited")
 AI_TRADE_COUNCIL_AUTOMATION_DEFAULT_DAILY_LIMIT_MODE = "unlimited"
+# Backward-compatible name retained as the default for fresh installations.
+# The operator-owned value is persisted in dashboard workflow settings and is
+# read at every quota gate so changing it also affects missions already queued.
 AUTOMATION_MIN_REMAINING_PERCENT = 15
-AI_TRADE_COUNCIL_AUTOMATION_MIN_REMAINING_PERCENT = AUTOMATION_MIN_REMAINING_PERCENT
+AUTOMATION_MIN_REMAINING_PERCENT_MIN = 0
+AUTOMATION_MIN_REMAINING_PERCENT_MAX = 100
 AI_TRADE_COUNCIL_AUTOMATION_MAX_COVERAGE_RECORDS = 2_048
 AI_TRADE_COUNCIL_AUTOMATION_MAX_PENDING_RECORDS = 512
 AI_TRADE_COUNCIL_HISTORY_DEFAULT_LIMIT = 50
@@ -507,8 +565,8 @@ METATRADER_COMMON_FILES_DIR = (
 )
 METATRADER_UNIFIED_EA_SOURCE_PATH = (
     PROJECT_ROOT
-    / "integrations"
-    / "mt4-trade-gateway"
+    / "artifacts"
+    / "mt4-ai-council-ea-v2.18-enum-fail-closed-readiness"
     / "MetafxHQTradeGateway.mq4"
 )
 METATRADER_SNAPSHOT_FALLBACK_SOURCE_PATH = (
@@ -670,6 +728,12 @@ MAX_REPORT_DOWNLOAD_BYTES = 10 * 1024 * 1024
 # the generic response sanitizer byte-for-byte or be returned fail-closed; a
 # response must never advertise digestMatched=True for altered JSON.
 EA_RESEARCH_CANONICAL_RESPONSE_MAX_BYTES = 64 * 1024
+# A valid 64k logical Deep Research result can grow when its canonical
+# strategyBrief is embedded as a JSON string in the outer Runner envelope.
+# Keep one explicit finite transport ceiling that covers worst-case escaping;
+# logical contract limits are still enforced independently by the Runner and
+# Backend validators.
+EA_RESEARCH_RUNNER_TRANSPORT_MAX_CHARS = 128_000
 JSON_RESPONSE_MAX_DEPTH = 32
 EA_RESEARCH_RESPONSE_WRAPPER_DEPTH = 6
 EA_FACTORY_SCHEMA_VERSION = "ea-factory-v1"
@@ -682,6 +746,216 @@ EA_FACTORY_SHEET_TIMEOUT_SECONDS = 10
 EA_FACTORY_STATIC_REVIEW_SOURCE_MAX_BYTES = 2 * 1024 * 1024
 EA_FACTORY_BUILD_LIMIT = 100
 EA_FACTORY_MISSION_VISIBILITY_GRACE_SECONDS = 15
+EA_FACTORY_MANUAL_SOURCE_RETRY_LIMIT = 3
+EA_FACTORY_RETRYABLE_SOURCE_ERROR_CODES = frozenset({"invalid_output"})
+EA_FACTORY_ONE_CLICK_SCHEMA_VERSION = "ea-factory-one-click-run-v1"
+EA_FACTORY_ONE_CLICK_POLL_SECONDS = 1.0
+EA_FACTORY_ONE_CLICK_TIMEOUT_SECONDS = 3 * 60 * 60
+EA_FACTORY_ONE_CLICK_VISIBLE_RETRY_LIMIT = 3
+EA_FACTORY_ONE_CLICK_PRESTART_RECOVERY_LIMIT = 4
+EA_FACTORY_ONE_CLICK_PRESTART_RECOVERY_FAILURE_CODES = frozenset({
+    "navigator_refresh_anchor_unavailable",
+    "expert_exact_value_not_applied",
+    "tester_input_file_name_identity_invalid",
+    "tester_input_file_name_dialog_identity_invalid",
+    "tester_input_file_name_control_unavailable",
+    "tester_input_file_name_control_ambiguous",
+    "tester_input_file_name_label_ambiguous",
+    "tester_input_file_name_path_invalid",
+    "tester_input_file_name_binding_changed",
+    "tester_input_file_name_bounds_invalid",
+    "tester_input_file_name_focus_invalid",
+    "tester_input_file_name_value_unavailable",
+    "tester_input_file_name_value_read_only",
+    "tester_input_file_name_value_set_failed",
+    "tester_input_file_name_edit_readback_mismatch",
+    "tester_input_file_name_host_binding_changed",
+    "tester_input_file_name_host_readback_mismatch",
+})
+EA_FACTORY_ONE_CLICK_INFLIGHT_RECOVERY_FAILURE_CODES = frozenset({
+    "strategy_tester_timeout",
+    # Legacy runtimes reported this generic code when a completed run had the
+    # owner-drawn Report tab selected: Settings controls (including id 1034)
+    # are then intentionally hidden from UIA.  The recovery gate below still
+    # requires the exact durable Start boundary, immutable result screenshot,
+    # tester settings/input evidence and matching operation before allowing a
+    # collection-only resume, so accepting this code cannot reopen Start.
+    "control_1034_ambiguous",
+    "tester_settings_tab_unavailable",
+    "tester_settings_tab_strip_ambiguous",
+    "tester_settings_tab_strip_invalid",
+    "tester_settings_tab_scan_binding_changed",
+    "tester_settings_start_ambiguous",
+    "tester_settings_start_binding_mismatch",
+    "tester_results_tab_unavailable",
+    "tester_report_pane_invalid",
+    "tester_report_tab_unavailable",
+    "tester_report_tab_strip_ambiguous",
+    "tester_report_tab_strip_invalid",
+    "tester_report_tab_scan_binding_changed",
+    "tester_report_list_ambiguous",
+    "tester_report_list_owner_mismatch",
+    "tester_report_row_unavailable",
+    "tester_report_row_anchor_invalid",
+    "tester_save_report_binding_changed",
+    "tester_save_report_menu_unavailable",
+    "tester_save_dialog_missing",
+    "tester_save_filename_missing",
+    "tester_save_filename_ambiguous",
+    "tester_save_filename_dialog_identity_invalid",
+    "tester_save_filename_control_unavailable",
+    "tester_save_filename_control_ambiguous",
+    "tester_save_filename_label_ambiguous",
+    "tester_save_filename_path_invalid",
+    "tester_save_filename_binding_changed",
+    "tester_save_filename_bounds_invalid",
+    "tester_save_filename_focus_invalid",
+    "tester_save_filename_select_all_failed",
+    "tester_save_filename_focus_changed",
+    "tester_save_filename_type_failed",
+    "tester_save_filename_value_unavailable",
+    "tester_save_filename_value_read_only",
+    "tester_save_filename_value_set_failed",
+    "tester_save_filename_edit_readback_mismatch",
+    "tester_save_filename_host_binding_changed",
+    "tester_save_filename_host_readback_mismatch",
+    "tester_save_missing",
+    "tester_save_ambiguous",
+    "tester_report_not_created",
+    "tester_report_path_not_committed",
+    "visible_action_interrupted_by_restart",
+    "visible_action_state_uncertain",
+    "visible_ui_timeout",
+})
+EA_FACTORY_FRONT_OFFICE_PROBE_FRESH_SECONDS = 15
+EA_FACTORY_VISIBLE_EVIDENCE_MODE = "visible_front_office_v1"
+EA_FACTORY_VISIBLE_RESULT_SCHEMA_VERSION = (
+    "ea-factory-visible-front-office-result-v1"
+)
+EA_FACTORY_TESTER_SETTINGS_SCHEMA_VERSION = "ea-factory-tester-settings-v1"
+EA_FACTORY_TESTER_INPUT_PRESET_SCHEMA_VERSION = (
+    "ea-factory-tester-input-preset-v1"
+)
+EA_FACTORY_RESOLVED_TESTER_INPUT_PRESET_SCHEMA_VERSION = (
+    "ea-factory-resolved-tester-input-preset-v1"
+)
+EA_FACTORY_CAN_SLIM_CERTIFIED_INPUT_LAYOUT = (
+    ("InpStopLossPercent", "double"),
+    ("RewardRiskRatio", "double"),
+    ("RiskPercent", "double"),
+    ("ExecutionBufferPoints", "int"),
+    ("SlippagePoints", "int"),
+    ("MaxOpenPositionsPerSymbolMagic", "int"),
+    ("MagicNumber", "int"),
+    ("DailyMAPeriod", "int"),
+    ("WeeklyMAPeriod", "int"),
+    ("FiftyTwoWeekLookback", "int"),
+    ("FundamentalCriteriaConfirmed", "bool"),
+    ("ExternalBenchmarkUptrendConfirmed", "bool"),
+    ("MaxSpreadPoints", "int"),
+)
+EA_FACTORY_CAN_SLIM_SIMULATION_INPUT_NAMES = (
+    "FundamentalCriteriaConfirmed",
+    "ExternalBenchmarkUptrendConfirmed",
+)
+EA_FACTORY_CAN_SLIM_FIXED_SOURCE_DEFAULTS = {
+    "ExecutionBufferPoints": 2,
+    "SlippagePoints": 3,
+    "MagicNumber": 4186001,
+    "DailyMAPeriod": 50,
+    "WeeklyMAPeriod": 50,
+    "FiftyTwoWeekLookback": 52,
+    "FundamentalCriteriaConfirmed": False,
+    "ExternalBenchmarkUptrendConfirmed": False,
+    "MaxSpreadPoints": 30,
+}
+EA_FACTORY_MT4_TESTER_INPUT_TYPES = frozenset({"bool", "int", "double"})
+EA_FACTORY_MT4_TESTER_INPUT_MAX_COUNT = 64
+EA_FACTORY_MT4_TESTER_SIMULATION_NAME_PATTERN = re.compile(
+    r"(?:Fundamental|External|Eligibility|Screen|Criteria)",
+    re.IGNORECASE,
+)
+EA_FACTORY_MT4_TESTER_SIMULATION_FORBIDDEN_NAME_PATTERN = re.compile(
+    r"(?:EnableTrading|TradingEnabled|AllowTrading|LiveTrading|AutoTrading|Safety)",
+    re.IGNORECASE,
+)
+EA_FACTORY_RESOLVED_TESTER_SETTINGS_SCHEMA_VERSION = (
+    "ea-factory-resolved-tester-settings-v1"
+)
+EA_FACTORY_LOGIC_RECHECK_SCHEMA_VERSION = "ea-factory-logic-recheck-v1"
+EA_FACTORY_EXECUTION_GROUP_FIELDS = (
+    "entry_rules",
+    "recovery_rules",
+    "exit_rules",
+    "money_management",
+    "order_execution",
+    "display_requirements",
+)
+EA_FACTORY_VISIBLE_RESULT_MAX_BYTES = 96 * 1024
+EA_FACTORY_VISIBLE_ACTION_STAGES = frozenset({
+    "compile_validate",
+    "backtest_recheck",
+})
+EA_FACTORY_VISIBLE_ACTION_STATES = frozenset({
+    "reserved",
+    "uncertain",
+    "completed",
+})
+EA_FACTORY_VISIBLE_ARTIFACT_ALIASES = {
+    "compile_validate": {
+        "required": frozenset({
+            "compiled_binary",
+            "visible_window",
+            "compile_log",
+            "adapter_receipt",
+        }),
+        "allowed": frozenset({
+            "compiled_binary",
+            "visible_window",
+            "compile_log",
+            "adapter_receipt",
+        }),
+    },
+    "backtest_recheck": {
+        "required": frozenset({
+            "tester_settings",
+            "tester_result",
+            "tester_report_proof",
+            "tester_report",
+            "adapter_receipt",
+        }),
+        "allowed": frozenset({
+            "tester_settings",
+            "tester_input_preset",
+            "tester_input_preset_set",
+            "tester_input_readback_set",
+            "tester_result",
+            "tester_report_proof",
+            "tester_report",
+            "adapter_receipt",
+        }),
+    },
+}
+EA_FACTORY_ONE_CLICK_STATUSES = frozenset({
+    "queued",
+    "running",
+    "waiting_ai",
+    "awaiting_visible_terminal",
+    "blocked",
+    "failed",
+    "completed",
+})
+EA_FACTORY_ONE_CLICK_STAGE_IDS = (
+    "generate_source",
+    "source_review",
+    "compile_validate",
+    "backtest_recheck",
+    "final_report",
+)
+# The production visible front-office adapter is deliberately MT4-only.  MT5
+# remains available through the explicit manual stage-by-stage workflow until
+# an independently verified MT5 adapter is installed.
+EA_FACTORY_ONE_CLICK_VISIBLE_PLATFORMS = frozenset({"mt4"})
 EA_FACTORY_STAGE_IDS = (
     "strategy_spec",
     "generate_source",
@@ -695,7 +969,7 @@ EA_FACTORY_STAGE_LABELS_TH = {
     "generate_source": "สร้าง Source Code",
     "source_review": "ตรวจ Source Code และ Logic",
     "compile_validate": "Compile หรือ Validate Code",
-    "backtest_recheck": "Visual Backtest และ Logic Recheck",
+    "backtest_recheck": "Visual Backtest และตรวจ Source Contract 6 กลุ่ม",
     "final_report": "สรุป Report และไฟล์ทั้งหมด",
 }
 EA_FACTORY_PLATFORMS = frozenset({"mt4", "mt5", "tradingview"})
@@ -768,7 +1042,11 @@ EA_FACTORY_REQUIRED_CORE_FIELDS = frozenset(
     field for _column, field, _label, group in EA_FACTORY_SHEET_COLUMNS
     if group == "core"
 ) | frozenset({"source_urls", "verification_status"})
-EA_FACTORY_VERIFIED_STATUSES = frozenset({"verified", "verified_deep_research"})
+EA_FACTORY_VERIFIED_STATUSES = frozenset({
+    "verified",
+    "verified_deep_research",
+    "verified_strategy_brief",
+})
 # A current canonical research revision remains authoritative even when it
 # deliberately revokes EA handoff.  Keep those rows in the internal catalog as
 # non-build-ready tombstones so an older ready snapshot/report cannot silently
@@ -1148,27 +1426,15 @@ DASHBOARD_WORKFLOW_TABS = {
     ),
     "left_server_racks": (
         {
-            "id": "research",
-            "labelTh": "วิจัยระบบเชิงลึก",
-            "descriptionTh": "เลือกระบบที่ตรวจสอบแล้วจากคลัง Portal เพื่อขยายกฎ หลักฐาน และวิธีประยุกต์",
+            "id": "select",
+            "labelTh": "1 เลือกระบบ / วิเคราะห์เชิงลึก",
+            "descriptionTh": "เลือกระบบที่ตรวจสอบแล้วจาก Radar ระบบเทรดโลก รวมรายการที่กำลังศึกษา แล้วเริ่มแจกแจงกฎสำหรับเขียน EA",
             "actionIds": ["deep_research_system"],
         },
         {
-            "id": "chart",
-            "labelTh": "กราฟและจุดเข้าออก",
-            "descriptionTh": "แสดงกฎเข้า ออก และการจัดการสถานะจากระบบที่เลือก โดยยังไม่สั่งเทรด",
-            "actionIds": [],
-        },
-        {
-            "id": "backtest",
-            "labelTh": "Backtest จากข้อมูล OHLC",
-            "descriptionTh": "เตรียมนำเข้า OHLC แบบ Local read-only ช่วงข้อมูลไม่เกิน 10 ปี; ยังไม่เปิด MT4/MT5",
-            "actionIds": [],
-        },
-        {
-            "id": "report",
-            "labelTh": "รายงานและหลักฐาน",
-            "descriptionTh": "อ่านสรุป แหล่งอ้างอิง และประวัติ Mission/Report ที่ Backend ตรวจสายงานแล้ว",
+            "id": "analysis",
+            "labelTh": "2 แจกแจง EA-ready / บันทึก",
+            "descriptionTh": "สรุประบบเป็น Strategy Brief 10 ช่อง A-J แล้วกดยืนยันครั้งเดียวก่อนบันทึก Google Sheet และส่งเข้าโรงงาน EA",
             "actionIds": [],
         },
     ),
@@ -1176,13 +1442,13 @@ DASHBOARD_WORKFLOW_TABS = {
         {
             "id": "source",
             "labelTh": "1 เลือกระบบต้นทาง",
-            "descriptionTh": "เลือก Record A-W ที่ตรวจสอบแล้วจาก Google Sheet หรือคลังวิจัยเชิงลึก",
+            "descriptionTh": "เลือก Strategy Brief A-J ที่ตรวจสอบแล้วจาก Google Sheet หรือคลังวิจัยเชิงลึก",
             "actionIds": [],
         },
         {
             "id": "strategy_spec",
             "labelTh": "2 Strategy Spec",
-            "descriptionTh": "ยืนยันสเปก A-M และหลักฐาน N-W เป็นไฟล์ immutable ใน Build Workspace",
+            "descriptionTh": "ยืนยัน Strategy Brief 10 ช่อง A-J และหลักฐาน Backend เป็นไฟล์ immutable ใน Build Workspace",
             "actionIds": [],
         },
         {
@@ -1194,7 +1460,7 @@ DASHBOARD_WORKFLOW_TABS = {
         {
             "id": "source_review",
             "labelTh": "4 ตรวจ Source",
-            "descriptionTh": "ตรวจ Source แบบ Static และเทียบความครอบคลุมกับ Strategy Spec A-M",
+            "descriptionTh": "ตรวจ Source แบบ Static และเทียบความครอบคลุมกับ Strategy Brief A-J",
             "actionIds": ["review_source_code"],
         },
         {
@@ -1205,8 +1471,8 @@ DASHBOARD_WORKFLOW_TABS = {
         },
         {
             "id": "backtest_recheck",
-            "labelTh": "6 Backtest / Logic Recheck",
-            "descriptionTh": "MT4/MT5 ต้องใช้ Strategy Tester proof จริง; Pine เป็น not applicable",
+            "labelTh": "6 Backtest / Contract",
+            "descriptionTh": "MT4/MT5 ต้องใช้ Strategy Tester proof จริงและตรวจ Source Contract 10 ช่อง/6 กลุ่ม; ไม่อ้างว่าทั้ง 6 กลุ่มถูกกระตุ้นครบแบบ Dynamic; Pine เป็น not applicable",
             "actionIds": [],
         },
         {
@@ -1361,9 +1627,9 @@ DASHBOARD_WORKFLOW_ACTIONS = {
     },
     "deep_research_system": {
         "propId": "left_server_racks",
-        "tabId": "research",
-        "labelTh": "แตกกฎระบบเป็น EA-ready",
-        "descriptionTh": "ตรวจหลายแหล่งและแตกทุกกฎเป็นเงื่อนไขระดับแท่ง ราคา Indicator และลำดับทำงานที่นำไปเขียน EA ได้ โดยแยกข้อเท็จจริง สมมติฐาน สิ่งที่ยังไม่ทราบ และตัวขวางการส่งต่อ",
+        "tabId": "select",
+        "labelTh": "วิเคราะห์เชิงลึกระบบนี้",
+        "descriptionTh": "ตรวจหลายแหล่งแล้วสรุปเป็น Overview, Entry, Recovery, Exit, Money Management, Order Execution, Display และ Notes โดยแยกข้อเท็จจริงจากค่ามาตรฐานที่ระบบเติม",
         "toolId": "codex_web_research",
         "ownerAgentId": "mission_archivist",
         "reportType": "trading_system_research_report",
@@ -1652,7 +1918,14 @@ DASHBOARD_WORKFLOW_ACTIONS = {
             {"id": "tokenBudget", "labelTh": "งบ Token ต่อภารกิจ", "type": "integer", "required": False},
             {"id": "timeoutSeconds", "labelTh": "เวลาสูงสุดต่อภารกิจ (วินาที)", "type": "integer", "required": False},
             {"id": "outputLimitChars", "labelTh": "ขนาดผลลัพธ์สูงสุด (ตัวอักษร)", "type": "integer", "required": False},
-            {"id": "rateReservePercent", "labelTh": "เกณฑ์โควตาคงที่: ทำงานเมื่อเหลือมากกว่า 15%", "type": "integer", "required": False},
+            {
+                "id": "rateReservePercent",
+                "labelTh": "เครดิตขั้นต่ำก่อนให้ AI Agent ทำงาน (%)",
+                "type": "integer",
+                "required": False,
+                "minimum": AUTOMATION_MIN_REMAINING_PERCENT_MIN,
+                "maximum": AUTOMATION_MIN_REMAINING_PERCENT_MAX,
+            },
         ),
     },
 }
@@ -1800,8 +2073,12 @@ DASHBOARD_DISCOVERY_SHEET_COLUMNS = (
     "notes",
 )
 
-RESEARCH_SHEET_HUB_SCHEMA_VERSION = "research-sheet-hub-v1"
+RESEARCH_SHEET_HUB_SCHEMA_VERSION = "research-sheet-hub-v2"
 RESEARCH_SHEET_OUTBOX_SCHEMA_VERSION = "research-sheet-outbox-v5"
+DEEP_RESEARCH_CONFIRMATION_SCHEMA_VERSION = "deep-research-confirmation-v3"
+DEEP_RESEARCH_CONFIRMATION_STORE_VERSION = "deep-research-confirmation-store-v3"
+DEEP_RESEARCH_CONFIRMATION_ENDPOINT = "/api/props/left_server_racks/deep-research/confirm"
+DEEP_RESEARCH_CONFIRMATION_LIMIT = 500
 RESEARCH_SHEET_WORLD_WRITE_HEADERS = (
     "discovery_id", "record_type", "discovered_at", "last_verified_at",
     "system_name", "trader_or_author", "source_title", "source_url",
@@ -1825,23 +2102,34 @@ RESEARCH_SHEET_WORLD_WRITE_HEADERS = (
 )
 RESEARCH_SHEET_WORLD_OPTIONAL_WRITE_HEADERS = ("risk_source_url",)
 RESEARCH_SHEET_DEEP_WRITE_HEADERS = (
+    "record_id",
+    "system_name",
+    "system_overview",
+    "entry_rules",
+    "recovery_rules",
+    "exit_rules",
+    "money_management",
+    "order_execution",
+    "display_requirements",
+    "additional_notes",
+)
+RESEARCH_SHEET_DEEP_LEGACY_HEADERS = (
     "research_id", "research_version", "is_current", "system_id",
     "source_discovery_id", "source_report_id", "source_record_id",
     "source_mission_id", "research_mission_id", "research_report_id",
     "system_name", "system_identity_json", "strategy_family",
-    "verified_rules_json", "conflicting_evidence_json",
-    "setup_conditions_json", "indicator_settings_json", "entry_steps_json",
-    "exit_steps_json", "trade_management_steps_json", "risk_model_json",
-    "stop_loss_rules_json", "take_profit_rules_json",
-    "position_sizing_rules_json", "recovery_averaging_rules_json",
-    "special_conditions_json", "suitable_market", "symbols_json",
-    "suitable_timeframes_json", "sessions_json", "suitable_for_json",
-    "implementation_notes_json", "candidate_platforms_json",
-    "ohlc_backtest_readiness", "deterministic_rule_kind", "feasibility_status",
-    "feasibility_reasons_json", "source_links_json", "verification_status",
-    "checked_at", "limitations_json", "backtest_status",
-    "optimization_status", "ea_factory_record_id", "ea_build_status", "issues",
-    "next_action", "owner", "updated_at",
+    "verified_rules_json", "conflicting_evidence_json", "setup_conditions_json",
+    "indicator_settings_json", "entry_steps_json", "exit_steps_json",
+    "trade_management_steps_json", "risk_model_json", "stop_loss_rules_json",
+    "take_profit_rules_json", "position_sizing_rules_json",
+    "recovery_averaging_rules_json", "special_conditions_json",
+    "suitable_market", "symbols_json", "suitable_timeframes_json",
+    "sessions_json", "suitable_for_json", "implementation_notes_json",
+    "candidate_platforms_json", "ohlc_backtest_readiness",
+    "deterministic_rule_kind", "feasibility_status", "feasibility_reasons_json",
+    "source_links_json", "verification_status", "checked_at", "limitations_json",
+    "backtest_status", "optimization_status", "ea_factory_record_id",
+    "ea_build_status", "issues", "next_action", "owner", "updated_at",
 )
 RESEARCH_SHEET_RADAR_WRITE_HEADERS = (
     "radar_record_id", "duplicate_fingerprint", "tool_name", "tool_kind",
@@ -1877,8 +2165,9 @@ RESEARCH_SHEET_HUB_PROP_TABS = {
     "left_server_racks": {
         "consumerId": "deepResearch",
         "tabName": "Deep_Research",
-        "keyHeader": "research_id",
+        "keyHeader": "record_id",
         "requiredHeaders": list(RESEARCH_SHEET_DEEP_WRITE_HEADERS),
+        "exactHeaders": list(RESEARCH_SHEET_DEEP_WRITE_HEADERS),
         "mode": "read_write",
     },
     "left_audit_crystals": {
@@ -1952,9 +2241,30 @@ RESEARCH_SHEET_VERIFICATION_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,128}$
 
 
 class RequestError(Exception):
-    def __init__(self, message: str, status: int = 400):
+    def __init__(
+        self,
+        message: str,
+        status: int = 400,
+        *,
+        code: str | None = None,
+        retryable: bool = False,
+        response_payload: dict | None = None,
+    ):
         super().__init__(message)
         self.status = status
+        # Keep machine-readable adapter failures separate from the public
+        # message.  One-click recovery must distinguish a confirmed compiler
+        # rejection from an uncertain/transient UI outcome without exposing a
+        # path, command line, or compiler transcript through the API.
+        self.code = str(code or "")
+        self.retryable = bool(retryable)
+        # Only explicitly supplied, already-public fields may be added to the
+        # HTTP response. Internal exceptions remain message-only by default.
+        self.response_payload = (
+            copy.deepcopy(response_payload)
+            if isinstance(response_payload, dict)
+            else None
+        )
 
 
 class DataIntegrityError(RuntimeError):
@@ -2030,6 +2340,220 @@ def redact_text(value: str, limit: int = 8000) -> str:
     if home:
         text = text.replace(home, "%USERPROFILE%")
     return text[:limit]
+
+
+class StructuredCommandTransportError(DataIntegrityError):
+    """A trusted local Runner returned an unsafe or invalid JSON envelope."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def _validate_structured_command_value(value, depth: int = 0) -> None:
+    """Validate decoded Runner JSON without mutating integrity-bound strings.
+
+    Text redaction must never run against the serialized outer JSON envelope:
+    escaped newlines in a nested JSON string contain ``\\\\n`` at that layer and
+    can otherwise be mistaken for a UNC path. Decode first, then verify each
+    leaf. If a real secret or local path exists, reject the complete envelope
+    instead of changing a value while leaving its digest untouched.
+    """
+
+    if depth > JSON_RESPONSE_MAX_DEPTH:
+        raise StructuredCommandTransportError(
+            "structured_output_depth_exceeded",
+            "Structured Runner output exceeds the nesting limit.",
+        )
+    if isinstance(value, dict):
+        if len(value) > 2000:
+            raise StructuredCommandTransportError(
+                "structured_output_items_exceeded",
+                "Structured Runner output contains too many fields.",
+            )
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise StructuredCommandTransportError(
+                    "structured_output_invalid_json",
+                    "Structured Runner output contains a non-text field name.",
+                )
+            if redact_text(key, len(key) + 1) != key:
+                raise StructuredCommandTransportError(
+                    "structured_output_unsafe",
+                    "Structured Runner output contains a protected field name.",
+                )
+            compact_key = re.sub(r"[^a-z0-9]", "", key.lower())
+            if compact_key in {"containssecret", "frontendsecrets"}:
+                if item is not False:
+                    raise StructuredCommandTransportError(
+                        "structured_output_unsafe",
+                        "Structured Runner output contains invalid safety metadata.",
+                    )
+            elif compact_key == "secretredacted":
+                if not isinstance(item, bool):
+                    raise StructuredCommandTransportError(
+                        "structured_output_unsafe",
+                        "Structured Runner output contains invalid safety metadata.",
+                    )
+            elif is_sensitive_field_name(key) and item not in (None, "", [], {}):
+                raise StructuredCommandTransportError(
+                    "structured_output_unsafe",
+                    "Structured Runner output contains a protected field.",
+                )
+            _validate_structured_command_value(item, depth + 1)
+        return
+    if isinstance(value, list):
+        if len(value) > 5000:
+            raise StructuredCommandTransportError(
+                "structured_output_items_exceeded",
+                "Structured Runner output contains too many list items.",
+            )
+        for item in value:
+            _validate_structured_command_value(item, depth + 1)
+        return
+    if isinstance(value, str):
+        # Use the decoded leaf's full length so this call can only detect
+        # protected material; it cannot clip or rewrite a valid value.
+        if redact_text(value, len(value) + 1) != value:
+            raise StructuredCommandTransportError(
+                "structured_output_unsafe",
+                "Structured Runner output contains protected local data.",
+            )
+        return
+    if isinstance(value, float) and not math.isfinite(value):
+        raise StructuredCommandTransportError(
+            "structured_output_invalid_json",
+            "Structured Runner output contains a non-finite number.",
+        )
+    if value is not None and not isinstance(value, (bool, int, float)):
+        raise StructuredCommandTransportError(
+            "structured_output_invalid_json",
+            "Structured Runner output contains an unsupported value.",
+        )
+
+
+def _validated_structured_command_output(value: object, output_limit: int) -> str:
+    """Return exact, complete Runner JSON after parse-first safety validation."""
+
+    raw = str(value or "").strip()
+    if not raw:
+        raise StructuredCommandTransportError(
+            "structured_output_missing",
+            "Structured Runner output is empty.",
+        )
+    if len(raw) > output_limit:
+        raise StructuredCommandTransportError(
+            "structured_output_limit_exceeded",
+            "Structured Runner output exceeds its transport limit.",
+        )
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+        decoded = {}
+        for key, item in pairs:
+            if key in decoded:
+                raise ValueError("duplicate JSON field")
+            decoded[key] = item
+        return decoded
+
+    def reject_non_finite(_value: str):
+        raise ValueError("non-finite JSON number")
+
+    try:
+        payload = json.loads(
+            raw,
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_non_finite,
+        )
+    except (json.JSONDecodeError, RecursionError, ValueError) as error:
+        raise StructuredCommandTransportError(
+            "structured_output_invalid_json",
+            "Structured Runner output is not complete JSON.",
+        ) from error
+    if not isinstance(payload, dict):
+        raise StructuredCommandTransportError(
+            "structured_output_invalid_json",
+            "Structured Runner output must be one JSON object.",
+        )
+    _validate_structured_command_value(payload)
+    return raw
+
+
+def _structured_command_transport_rejection(
+    error: StructuredCommandTransportError,
+    output_limit: int,
+) -> str:
+    payload = {
+        "ok": False,
+        "status": error.code,
+        "workStatus": "failed",
+        "message": str(error),
+    }
+    output = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if len(output) <= output_limit:
+        return output
+    return '{"ok":false,"status":"structured_output_limit_exceeded"}'
+
+
+def _safe_command_failure_output(
+    status: str,
+    message: str,
+    output_limit: int,
+    *,
+    structured_json_output: bool,
+    diagnostic: object | None = None,
+) -> str:
+    """Return one bounded command failure without exposing exception details.
+
+    Structured Runner consumers parse every command result as JSON. Early
+    process failures therefore need the same parseable transport guarantee as
+    normal stdout. Raw OS exceptions are useful to legacy text callers, but may
+    contain executable paths, user directories, or command arguments, so a
+    fixed public message is used in structured mode.
+    """
+
+    if not structured_json_output:
+        detail = diagnostic if diagnostic is not None else message
+        return redact_text(str(detail or ""), output_limit)
+
+    safe_status = re.sub(
+        r"[^a-z0-9_.-]+",
+        "_",
+        str(status or "command_failed").strip().lower(),
+    ).strip("_.-")[:80] or "command_failed"
+    safe_message = redact_text(str(message or "Command failed."), 2000).strip()
+    limit = max(0, int(output_limit))
+    candidates = (
+        {
+            "ok": False,
+            "status": safe_status,
+            "workStatus": "failed",
+            "message": safe_message,
+        },
+        {"ok": False, "status": safe_status, "workStatus": "failed"},
+        {"ok": False, "status": safe_status},
+    )
+    for payload in candidates:
+        output = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if len(output) <= limit:
+            return output
+    # A JSON object is the shortest useful parseable fallback. Real structured
+    # call sites use limits of at least 16 KiB; this only protects direct callers
+    # that provide an impossibly small diagnostic budget.
+    return "{}"
+
+
+def _safe_command_output(
+    stdout: object,
+    stderr: object,
+    output_limit: int,
+    *,
+    structured_json_output: bool,
+) -> tuple[str, StructuredCommandTransportError | None]:
+    if not structured_json_output:
+        return redact_text((stdout or stderr or "").strip(), output_limit), None
+    try:
+        return _validated_structured_command_output(stdout, output_limit), None
+    except StructuredCommandTransportError as error:
+        return _structured_command_transport_rejection(error, output_limit), error
 
 
 def _redact_text_fail_closed(value: object, limit: int, field_name: str) -> str:
@@ -2189,6 +2713,95 @@ def sanitize_json_value(value, depth: int = 0, collection_limit: int = 100, stri
             cleaned[safe_key] = (
                 None if item is None else "[REDACTED_SECRET]"
             ) if is_sensitive_field_name(safe_key) else sanitize_json_value(item, depth + 1, collection_limit, string_limit)
+        return cleaned
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return redact_text(str(value), 1000)
+
+
+def request_error_response(error: RequestError) -> dict:
+    """Build the bounded public response for one expected request failure."""
+
+    response = {
+        "ok": False,
+        "error": redact_text(str(error), 500),
+    }
+    public = error.response_payload
+    if not isinstance(public, dict):
+        return response
+    safe_public = sanitize_json_value(
+        public,
+        collection_limit=40,
+        string_limit=500,
+    )
+    if not isinstance(safe_public, dict):
+        return response
+    for key in ("kind", "code", "messageTh", "busy"):
+        if key in safe_public:
+            response[key] = safe_public[key]
+    return response
+
+
+EA_FACTORY_VISIBLE_PRIVATE_PROCESS_ID_KEYS = frozenset({
+    "processid",
+    "terminalprocessid",
+    "terminalwindowownerprocessid",
+    "frontofficeprocessid",
+    "frontofficewindowownerprocessid",
+})
+
+
+def _ea_factory_visible_metrics_storage(
+    value: object,
+    depth: int = 0,
+    collection_limit: int = 100,
+    string_limit: int = 8000,
+) -> object:
+    """Sanitize private visible evidence while retaining required numeric PIDs.
+
+    The public Report projection removes all process/window identity fields.
+    The private persisted Report must keep the five numeric PIDs long enough
+    for the commit validator to bind artifacts to the exact live windows.
+    """
+
+    if depth > JSON_RESPONSE_MAX_DEPTH:
+        return "[TRUNCATED]"
+    if isinstance(value, str):
+        return redact_text(value, string_limit)
+    if isinstance(value, list):
+        return [
+            _ea_factory_visible_metrics_storage(
+                item,
+                depth + 1,
+                collection_limit,
+                string_limit,
+            )
+            for item in value[:collection_limit]
+        ]
+    if isinstance(value, dict):
+        cleaned: dict[str, object] = {}
+        for key, item in list(value.items())[:collection_limit]:
+            safe_key = str(key)[:120]
+            compact = re.sub(r"[^a-z0-9]", "", safe_key.lower())
+            if compact in EA_FACTORY_VISIBLE_PRIVATE_PROCESS_ID_KEYS:
+                cleaned[safe_key] = (
+                    item
+                    if isinstance(item, int)
+                    and not isinstance(item, bool)
+                    and item > 0
+                    else "[REDACTED_SECRET]"
+                )
+            elif is_sensitive_field_name(safe_key):
+                cleaned[safe_key] = (
+                    None if item is None else "[REDACTED_SECRET]"
+                )
+            else:
+                cleaned[safe_key] = _ea_factory_visible_metrics_storage(
+                    item,
+                    depth + 1,
+                    collection_limit,
+                    string_limit,
+                )
         return cleaned
     if value is None or isinstance(value, (bool, int, float)):
         return value
@@ -2885,7 +3498,7 @@ def _collaboration_default_store() -> dict:
             "intervalMinutes": 120,
             "maxTurns": 3,
             "maxDailyRuns": 3,
-            "minRemainingPercent": AUTOMATION_MIN_REMAINING_PERCENT,
+            "minRemainingPercent": automation_min_remaining_percent(),
             "participants": list(COLLABORATION_DEFAULT_PARTICIPANTS),
             "maxParticipants": 4,
             "perTurnTimeoutSeconds": 90,
@@ -2949,10 +3562,9 @@ def _collaboration_store_shape(value: object) -> dict:
     config["intervalMinutes"] = clamp_int(config.get("intervalMinutes"), 120, 30, 1440)
     config["maxTurns"] = clamp_int(config.get("maxTurns"), 3, 2, 4)
     config["maxDailyRuns"] = clamp_int(config.get("maxDailyRuns"), 3, 1, 6)
-    # One global automation reserve applies everywhere.  Persisted legacy
-    # values above 15% must not silently pause a subsystem after the operator
-    # has explicitly chosen the global "run when remaining > 15%" policy.
-    config["minRemainingPercent"] = AUTOMATION_MIN_REMAINING_PERCENT
+    # One global automation reserve applies everywhere. A legacy subsystem
+    # value is always replaced by the current central operator setting.
+    config["minRemainingPercent"] = automation_min_remaining_percent()
     config["enabled"] = bool(config.get("enabled", False))
     config["topic"] = redact_text(str(config.get("topic") or defaults["config"]["topic"]), 600)
     config["startTime"] = _valid_collaboration_time(config.get("startTime")) or "09:00"
@@ -3079,7 +3691,13 @@ def _collaboration_quota_gate(
     *,
     refresh: bool,
     quota: dict | None = None,
+    settings: dict | None = None,
 ) -> dict:
+    # Deliberately ignore the caller's embedded/snapshotted threshold. Existing
+    # queued missions call this without ``settings`` and therefore pick up a
+    # newly saved central value immediately. Bounded aggregate read models may
+    # pass the one settings snapshot they already loaded to avoid probe storms.
+    threshold = automation_min_remaining_percent(settings)
     quota = (
         quota
         if isinstance(quota, dict)
@@ -3091,6 +3709,7 @@ def _collaboration_quota_gate(
             "reason": "quota_unavailable",
             "messageTh": "พักไว้ก่อน เพราะยังอ่าน Rate Limit ของ Codex ไม่ได้",
             "remainingPercent": None,
+            "rateReservePercent": threshold,
             "quota": quota,
         }
     if quota.get("stale") is True:
@@ -3099,6 +3718,7 @@ def _collaboration_quota_gate(
             "reason": "quota_stale",
             "messageTh": "พักไว้ก่อน เพราะข้อมูล Rate Limit เก่าเกินไป",
             "remainingPercent": None,
+            "rateReservePercent": threshold,
             "quota": quota,
         }
     if quota.get("limitReached") is True:
@@ -3107,43 +3727,76 @@ def _collaboration_quota_gate(
             "reason": "quota_limit_reached",
             "messageTh": "พักไว้ก่อน เพราะ Codex ถึง Rate Limit แล้ว",
             "remainingPercent": 0,
+            "rateReservePercent": threshold,
             "quota": quota,
         }
     remaining_values = []
     for key in ("primary", "secondary"):
         window = quota.get(key)
+        if key == "secondary" and window is None:
+            continue
         if not isinstance(window, dict):
-            continue
+            return {
+                "allowed": False,
+                "reason": "quota_incomplete",
+                "messageTh": "พักไว้ก่อน เพราะข้อมูล Rate Limit ยังไม่ครบ",
+                "remainingPercent": None,
+                "rateReservePercent": threshold,
+                "quota": quota,
+            }
+        raw_remaining = window.get("remainingPercent")
+        if isinstance(raw_remaining, bool):
+            return {
+                "allowed": False,
+                "reason": "quota_incomplete",
+                "messageTh": "พักไว้ก่อน เพราะข้อมูล Rate Limit ยังไม่ครบ",
+                "remainingPercent": None,
+                "rateReservePercent": threshold,
+                "quota": quota,
+            }
         try:
-            remaining_values.append(float(window.get("remainingPercent")))
+            remaining_number = float(raw_remaining)
         except (TypeError, ValueError, OverflowError):
-            continue
+            remaining_number = float("nan")
+        if (
+            not math.isfinite(remaining_number)
+            or remaining_number < 0
+            or remaining_number > 100
+        ):
+            return {
+                "allowed": False,
+                "reason": "quota_incomplete",
+                "messageTh": "พักไว้ก่อน เพราะข้อมูล Rate Limit ยังไม่ครบ",
+                "remainingPercent": None,
+                "rateReservePercent": threshold,
+                "quota": quota,
+            }
+        remaining_values.append(remaining_number)
     if not remaining_values:
         return {
             "allowed": False,
             "reason": "quota_incomplete",
             "messageTh": "พักไว้ก่อน เพราะข้อมูล Rate Limit ยังไม่ครบ",
             "remainingPercent": None,
+            "rateReservePercent": threshold,
             "quota": quota,
         }
     remaining = min(remaining_values)
-    # This is one system-wide Backend policy, not a caller preference.  Keep
-    # the final gate fixed as well as the persisted/read-model values so a
-    # stale in-memory payload cannot silently restore an older 20-80% reserve.
-    threshold = AUTOMATION_MIN_REMAINING_PERCENT
-    if remaining <= threshold:
+    if remaining < threshold:
         return {
             "allowed": False,
             "reason": "quota_below_reserve",
-            "messageTh": f"พักงานไว้ เพราะ Codex เหลือ {remaining:g}% และต้องเหลือมากกว่า {threshold}%",
+            "messageTh": f"พักงานไว้ เพราะ Codex เหลือ {remaining:g}% ซึ่งต่ำกว่าเกณฑ์ {threshold}%",
             "remainingPercent": remaining,
+            "rateReservePercent": threshold,
             "quota": quota,
         }
     return {
         "allowed": True,
         "reason": "ready",
-        "messageTh": f"Rate Limit พร้อม เหลือ {remaining:g}% ซึ่งมากกว่า {threshold}%",
+        "messageTh": f"Rate Limit พร้อม เหลือ {remaining:g}% (เกณฑ์ขั้นต่ำ {threshold}%)",
         "remainingPercent": remaining,
+        "rateReservePercent": threshold,
         "quota": quota,
     }
 
@@ -3296,13 +3949,14 @@ def set_collaboration_schedule(payload: dict) -> dict:
             "messageTh": "รับเฉพาะการเปิดใช้งาน หัวข้อ ช่วงเวลา ความถี่ จำนวนรอบ และโควตาสำรอง",
             "_httpStatus": 422,
         }
+    current_reserve = automation_min_remaining_percent()
     integer_rules = {
         "intervalMinutes": (30, 1440),
         "maxTurns": (2, 4),
         "maxDailyRuns": (1, 6),
         "minRemainingPercent": (
-            AUTOMATION_MIN_REMAINING_PERCENT,
-            AUTOMATION_MIN_REMAINING_PERCENT,
+            current_reserve,
+            current_reserve,
         ),
     }
     validated: dict[str, object] = {}
@@ -3659,7 +4313,10 @@ def _trusted_backend_ea_factory_stage_guard_intent(context: object) -> str | Non
                 brief,
             )
             is None
-            or "Do not change files" not in brief
+            or (
+                "Do not edit files" not in brief
+                and "Do not change files" not in brief
+            )
         ):
             return None
     return "{}"
@@ -4124,7 +4781,7 @@ def resolve_budget(
         # outputLimitChars remain hard Backend-enforced limits.
         budget["tokenBudget"] = clamp_int(budget_payload.get("tokenBudget"), 12000, 256, 100000)
         budget["tokenBudgetMode"] = "advisory"
-        budget["rateReservePercent"] = AUTOMATION_MIN_REMAINING_PERCENT
+        budget["rateReservePercent"] = automation_min_remaining_percent()
     return tier_id, budget
 
 
@@ -5375,12 +6032,12 @@ def _interactive_meeting_admit_round(ai_turns_per_round: int) -> None:
     try:
         _interactive_meeting_require_full_access()
         quota_gate = _collaboration_quota_gate(
-            {"minRemainingPercent": AUTOMATION_MIN_REMAINING_PERCENT},
+            {},
             refresh=True,
         )
         if not quota_gate.get("allowed"):
             raise RequestError(
-                str(quota_gate.get("messageTh") or "Fresh Codex quota must remain strictly above 15%."),
+                str(quota_gate.get("messageTh") or "Fresh Codex quota must meet the central threshold."),
                 429,
             )
         if not CODEX_RUNNER_PYTHON.is_file() or not CODEX_RUNNER_SCRIPT.is_file():
@@ -5718,7 +6375,7 @@ def _run_interactive_meeting_round(session_id: str, round_id: str) -> None:
         for index, speaker_agent_id in enumerate(speakers, start=1):
             _interactive_meeting_require_full_access()
             quota_gate = _collaboration_quota_gate(
-                {"minRemainingPercent": AUTOMATION_MIN_REMAINING_PERCENT},
+                {},
                 refresh=True,
             )
             if not quota_gate.get("allowed"):
@@ -7628,6 +8285,10 @@ TRADING_SYSTEM_WORKFLOW_MAX_CONTRACT_FIELD_CHARS = 16000
 TRADING_SYSTEM_RESEARCH_MAX_CONTRACT_FIELD_CHARS = 48000
 TRADING_SYSTEM_RESEARCH_MAX_OUTPUT_CHARS = 64000
 TRADING_SYSTEM_RESEARCH_SHEET_BLUEPRINT_CELL_MAX_CHARS = 49000
+DEEP_RESEARCH_TRANSPORT_RECOVERY_VERSION = 1
+DEEP_RESEARCH_TRANSPORT_RECOVERY_SCHEMA_VERSION = (
+    "deep-research-transport-recovery-v1"
+)
 
 
 def _mission_output_limit_hard_cap(mission: object) -> int:
@@ -12816,20 +13477,17 @@ def _dashboard_workflow_result_envelope_chars(
             envelope.pop("contractFields", None)
             envelope["systems"] = direct_systems
     elif procedure_id == TRADING_SYSTEM_RESEARCH_WORKFLOW_PROCEDURE_ID:
-        # Runner receives one direct, typed ``research`` object from Codex and
-        # then projects it into the common Backend contract transport.  Count
-        # the original logical object once; counting the escaped JSON string
-        # plus its five derived receipt fields would reject a valid blueprint
-        # merely because of transport representation overhead.
-        blueprint_value = next(
+        # Count the direct compact Strategy Brief once, rather than counting
+        # both its escaped transport JSON and the derived integrity fields.
+        brief_value = next(
             (
                 item.get("value")
                 for item in envelope["contractFields"]
-                if isinstance(item, dict) and item.get("field") == "eaBlueprint"
+                if isinstance(item, dict) and item.get("field") == "strategyBrief"
             ),
             "",
         )
-        direct_research = _contract_decoded_value(str(blueprint_value or ""))
+        direct_research = _contract_decoded_value(str(brief_value or ""))
         if isinstance(direct_research, dict):
             envelope.pop("contractFields", None)
             envelope["research"] = direct_research
@@ -12869,34 +13527,13 @@ def _dashboard_workflow_contract_field_limit(
 
 
 def _ea_research_verified_contract_projection(
-    raw_blueprint: object,
+    raw_brief: object,
 ) -> tuple[dict[str, str], dict[str, object], dict[str, object]]:
-    """Validate and canonically project one EA Research Blueprint v2.
+    """Validate and canonically project one compact EA Strategy Brief."""
 
-    The six returned strings are the only untrusted worker fields accepted by
-    the equipment output contract.  The richer projection is derived locally
-    from the canonical blueprint, so downstream reports, Sheets, and the EA
-    Factory never trust duplicated prose supplied independently by the model.
-    """
-
-    normalized = normalize_ea_research_blueprint(raw_blueprint)
-    digest = ea_research_blueprint_digest(normalized)
-    projection = ea_research_report_projection(normalized)
-    completeness = (
-        normalized.get("completeness")
-        if isinstance(normalized.get("completeness"), dict)
-        else {}
-    )
-    source_links = projection.get("sourceLinks")
-    limitations = projection.get("limitations")
-    values: dict[str, object] = {
-        "eaBlueprint": normalized,
-        "sourceDigest": digest,
-        "eaReadiness": completeness.get("status"),
-        "sourceLinks": source_links,
-        "checkedAt": normalized.get("checkedAt"),
-        "limitations": limitations,
-    }
+    normalized = normalize_strategy_brief(raw_brief)
+    projection = project_strategy_brief_contract(normalized)
+    values: dict[str, object] = dict(projection)
     encoded = {
         key: (
             value.strip()
@@ -12911,10 +13548,10 @@ def _ea_research_verified_contract_projection(
         for key, value in values.items()
     }
     if any(not value for value in encoded.values()):
-        raise EAResearchBlueprintValidationError([{
-            "code": "PROJECTION_FIELD_EMPTY",
-            "path": "$.completeness",
-            "message": "Canonical research projection contains an empty required field",
+        raise StrategyBriefValidationError([{
+            "code": "BRIEF_PROJECTION_FIELD_EMPTY",
+            "path": "$",
+            "message": "Canonical strategy-brief projection contains an empty required field",
         }])
     return encoded, normalized, projection
 
@@ -13062,45 +13699,47 @@ def validate_dashboard_workflow_output_contract(mission: object, result: object)
             else:
                 provided_fields["systems"] = normalized_systems_json
     elif procedure.get("pluginSkillId") == TRADING_SYSTEM_RESEARCH_WORKFLOW_PROCEDURE_ID:
-        decoded_blueprint = _contract_decoded_value(
-            provided_fields.get("eaBlueprint", "")
-        )
-        try:
-            canonical_fields, _normalized_blueprint, _research_projection = (
-                _ea_research_verified_contract_projection(decoded_blueprint)
+        # A missing transport field is a plain contract omission.  Do not run
+        # semantic validation against an invented empty string because that
+        # obscures the real Runner error with the misleading ``BRIEF_TYPE:$``.
+        if "strategyBrief" in provided_fields:
+            decoded_brief = _contract_decoded_value(
+                provided_fields.get("strategyBrief", "")
             )
-        except EAResearchBlueprintValidationError as exc:
-            for issue in exc.issues[:24]:
-                code = safe_reference(issue.get("code")) or "BLUEPRINT_INVALID"
-                path = redact_text(str(issue.get("path") or "$"), 160)
-                if f"{code}:{path}" not in entry_errors:
-                    entry_errors.append(f"{code}:{path}")
-            provided_fields.pop("eaBlueprint", None)
-        except (TypeError, ValueError, OverflowError, json.JSONDecodeError):
-            entry_errors.append("BLUEPRINT_INVALID:$")
-            provided_fields.pop("eaBlueprint", None)
-        else:
-            mismatched_fields: list[str] = []
-            for field, expected_value in canonical_fields.items():
-                actual_value = str(provided_fields.get(field) or "").strip()
-                if field in {"eaBlueprint", "sourceLinks", "limitations"}:
-                    actual_decoded = _contract_decoded_value(actual_value)
-                    expected_decoded = _contract_decoded_value(expected_value)
-                    if actual_decoded != expected_decoded:
-                        mismatched_fields.append(field)
-                elif actual_value != expected_value:
-                    mismatched_fields.append(field)
-            if mismatched_fields:
-                entry_errors.extend(
-                    f"BLUEPRINT_PROJECTION_MISMATCH:{field}"
-                    for field in mismatched_fields
+            try:
+                canonical_fields, _normalized_brief, _research_projection = (
+                    _ea_research_verified_contract_projection(decoded_brief)
                 )
-                provided_fields.pop("eaBlueprint", None)
+            except StrategyBriefValidationError as exc:
+                for issue in exc.issues[:24]:
+                    code = safe_reference(issue.get("code")) or "STRATEGY_BRIEF_INVALID"
+                    path = redact_text(str(issue.get("path") or "$"), 160)
+                    if f"{code}:{path}" not in entry_errors:
+                        entry_errors.append(f"{code}:{path}")
+                provided_fields.pop("strategyBrief", None)
+            except (TypeError, ValueError, OverflowError, json.JSONDecodeError):
+                entry_errors.append("STRATEGY_BRIEF_INVALID:$")
+                provided_fields.pop("strategyBrief", None)
             else:
-                # Replace every supplied value with its canonical equivalent.
-                # This makes the stored receipt deterministic and binds digest,
-                # readiness, timestamp, sources, and limitations to one object.
-                provided_fields.update(canonical_fields)
+                mismatched_fields: list[str] = []
+                for field, expected_value in canonical_fields.items():
+                    actual_value = str(provided_fields.get(field) or "").strip()
+                    if field in {"strategyBrief", "sourceLinks", "limitations"}:
+                        actual_decoded = _contract_decoded_value(actual_value)
+                        expected_decoded = _contract_decoded_value(expected_value)
+                        if actual_decoded != expected_decoded:
+                            mismatched_fields.append(field)
+                    elif actual_value != expected_value:
+                        mismatched_fields.append(field)
+                if mismatched_fields:
+                    entry_errors.extend(
+                        f"STRATEGY_BRIEF_PROJECTION_MISMATCH:{field}"
+                        for field in mismatched_fields
+                    )
+                    provided_fields.pop("strategyBrief", None)
+                else:
+                    # Replace supplied transport values with canonical equivalents.
+                    provided_fields.update(canonical_fields)
     normalized_action_id = (
         context.get("actionId") if isinstance(context, dict) else raw_context.get("actionId")
     )
@@ -13240,13 +13879,10 @@ def dashboard_workflow_output_metrics(output_contract: object) -> dict:
         metrics[str(field)] = _contract_decoded_value(str(value or ""))
     if contract.get("procedureId") == TRADING_SYSTEM_RESEARCH_WORKFLOW_PROCEDURE_ID:
         try:
-            blueprint = normalize_ea_research_blueprint(metrics.get("eaBlueprint"))
-            # All human-readable legacy sections are trusted local projections
-            # of the typed blueprint.  The model cannot make those summaries
-            # disagree with the rules that the EA Factory will consume.
-            metrics.update(ea_research_report_projection(blueprint))
-            metrics["eaReadyText"] = render_ea_research_text(blueprint)
-        except EAResearchBlueprintValidationError:
+            brief = normalize_strategy_brief(metrics.get("strategyBrief"))
+            metrics["strategyBrief"] = brief
+            metrics["briefDigest"] = compute_strategy_brief_digest(brief)
+        except StrategyBriefValidationError:
             # A valid receipt cannot normally reach this branch.  Fail closed
             # on corrupted historical data instead of projecting partial prose.
             return sanitize_json_value({"workflowOutput": contract})
@@ -13280,6 +13916,35 @@ def _trading_system_research_metrics_storage(value: object) -> dict:
     """
 
     metrics = value if isinstance(value, dict) else {}
+    if "strategyBrief" in metrics:
+        try:
+            normalized_brief = normalize_strategy_brief(metrics.get("strategyBrief"))
+        except StrategyBriefValidationError as exc:
+            raise RequestError(
+                "Compact EA Strategy Brief is invalid and was not stored.",
+                422,
+            ) from exc
+        digest = compute_strategy_brief_digest(normalized_brief)
+        supplied_digest = str(
+            metrics.get("briefDigest") or metrics.get("sourceDigest") or ""
+        ).strip().lower()
+        if supplied_digest and not secrets.compare_digest(supplied_digest, digest):
+            raise RequestError(
+                "Compact EA Strategy Brief digest does not match and was not stored.",
+                422,
+            )
+        stored = sanitize_json_value(
+            metrics,
+            collection_limit=240,
+            string_limit=TRADING_SYSTEM_RESEARCH_MAX_CONTRACT_FIELD_CHARS,
+        )
+        stored["strategyBrief"] = copy.deepcopy(normalized_brief)
+        stored["briefDigest"] = digest
+        stored["sourceDigest"] = digest
+        stored["sourceLinks"] = copy.deepcopy(normalized_brief["sourceLinks"])
+        stored["checkedAt"] = normalized_brief["checkedAt"]
+        stored["limitations"] = copy.deepcopy(normalized_brief["limitations"])
+        return stored
     implementation_notes = (
         metrics.get("implementationNotes")
         if isinstance(metrics.get("implementationNotes"), dict)
@@ -13335,13 +14000,39 @@ def _trading_system_research_metrics_storage(value: object) -> dict:
     return stored
 
 
-def create_report(payload: dict) -> dict:
+def _report_snapshot_digest(value: object) -> str:
+    """Return one stable digest for compare-and-swap report updates."""
+
+    if not isinstance(value, dict):
+        return ""
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def create_report(
+    payload: dict,
+    *,
+    queue_research_sheet: bool = True,
+    expected_existing_digest: str | None = None,
+    _trusted_visible_process_identity: bool = False,
+    _trusted_created_at: str | None = None,
+) -> dict:
     ensure_runtime_dir()
     secret_redacted = json_contains_potential_secret(payload)
     report_id = safe_id(payload.get("id"), "report")
     report_path = RUNTIME_REPORTS_DIR / f"{report_id}.json"
     existing = read_json(report_path, {}) if report_path.exists() else {}
-    now = utc_now()
+    if _trusted_created_at is not None:
+        if not isinstance(_trusted_created_at, str) or parse_iso(_trusted_created_at) is None:
+            raise DataIntegrityError("Trusted Report creation timestamp is invalid.")
+        now = _trusted_created_at
+    else:
+        now = utc_now()
     safe_workflow_context = _workflow_context_storage(payload.get("workflowContext"))
     safe_agent_transfer = _agent_transfer_storage(
         payload.get("agentTransfer")
@@ -13349,11 +14040,20 @@ def create_report(payload: dict) -> dict:
     )
     report_type = str(payload.get("type") or "prop_report")
     raw_metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
-    stored_metrics = (
-        _trading_system_research_metrics_storage(raw_metrics)
-        if report_type == "trading_system_research_report"
-        else sanitize_json_value(raw_metrics)
-    )
+    if _trusted_visible_process_identity:
+        if (
+            report_type not in {"ea_compile_report", "ea_build_report"}
+            or raw_metrics.get("evidenceMode") != EA_FACTORY_VISIBLE_EVIDENCE_MODE
+            or not str(raw_metrics.get("operationId") or "").startswith("ea-visible-")
+        ):
+            raise DataIntegrityError(
+                "Trusted visible process identity escaped its exact Report invariant."
+            )
+        stored_metrics = _ea_factory_visible_metrics_storage(raw_metrics)
+    elif report_type == "trading_system_research_report":
+        stored_metrics = _trading_system_research_metrics_storage(raw_metrics)
+    else:
+        stored_metrics = sanitize_json_value(raw_metrics)
     report = {
         "id": report_id,
         "type": report_type,
@@ -13385,13 +14085,37 @@ def create_report(payload: dict) -> dict:
         "createdAt": existing.get("createdAt") or now,
         "updatedAt": now,
     }
+    expected_digest = str(expected_existing_digest or "").strip().lower()
+    if expected_existing_digest is not None and not re.fullmatch(
+        r"[0-9a-f]{64}", expected_digest
+    ):
+        raise RequestError("Expected report revision digest is invalid.", 422)
     with REPORTS_LOCK:
+        if expected_existing_digest is not None:
+            current = read_json(report_path, None) if report_path.exists() else None
+            if not isinstance(current, dict) or not secrets.compare_digest(
+                _report_snapshot_digest(current),
+                expected_digest,
+            ):
+                raise RequestError(
+                    "รายงานวิจัยถูกแก้ไขระหว่างการยืนยัน กรุณารีเฟรชและตรวจข้อมูลอีกครั้ง",
+                    409,
+                )
         write_json(report_path, report)
     append_audit({"type": "report.updated" if existing else "report.created", "reportId": report_id, "missionId": report.get("linkedMissionId"), "propId": report.get("linkedPropId")})
     # Google Sheet is a downstream archive, never the source of truth for a
     # report commit. Queue after the durable local write; an unavailable or
     # ambiguous external write must not corrupt or roll back the report.
-    if RESEARCH_SHEET_AUTO_SYNC_ENABLED and report.get("type") in RESEARCH_SHEET_SYNC_REPORT_TYPES:
+    research_save_confirmed = bool(
+        report.get("type") != "trading_system_research_report"
+        or _deep_research_report_is_human_confirmed(report)
+    )
+    if (
+        queue_research_sheet
+        and RESEARCH_SHEET_AUTO_SYNC_ENABLED
+        and report.get("type") in RESEARCH_SHEET_SYNC_REPORT_TYPES
+        and research_save_confirmed
+    ):
         try:
             queue_result = _research_sheet_queue_report(report)
             if (
@@ -14481,6 +15205,11 @@ def mission_read_model_item(mission: dict) -> dict:
             if isinstance(mission.get("workflowOutputContract"), dict)
             else None
         ),
+        "semanticRepair": sanitize_json_value(
+            mission.get("semanticRepair")
+            if isinstance(mission.get("semanticRepair"), dict)
+            else None
+        ),
         "result": redact_text(str(mission.get("result") or ""), 8000),
         "reportIds": [item for item in (safe_reference(value) for value in report_ids[:100]) if item],
         "attemptCount": clamp_int(mission.get("attemptCount"), 0, 0, 100000),
@@ -14740,6 +15469,556 @@ def mission_runtime_preencoded_response(
         return body, False
 
 
+def _empty_deep_research_confirmation_store() -> dict:
+    return {
+        "schemaVersion": DEEP_RESEARCH_CONFIRMATION_STORE_VERSION,
+        "records": [],
+        "updatedAt": None,
+    }
+
+
+def _load_deep_research_confirmation_store_unlocked() -> dict:
+    payload = read_json(
+        DEEP_RESEARCH_CONFIRMATIONS_PATH,
+        _empty_deep_research_confirmation_store(),
+    )
+    if not isinstance(payload, dict) or payload.get("schemaVersion") != DEEP_RESEARCH_CONFIRMATION_STORE_VERSION:
+        return _empty_deep_research_confirmation_store()
+    records = payload.get("records") if isinstance(payload.get("records"), list) else []
+    return {
+        "schemaVersion": DEEP_RESEARCH_CONFIRMATION_STORE_VERSION,
+        "records": [
+            copy.deepcopy(item)
+            for item in records[-DEEP_RESEARCH_CONFIRMATION_LIMIT:]
+            if isinstance(item, dict)
+        ],
+        "updatedAt": payload.get("updatedAt"),
+    }
+
+
+def _save_deep_research_confirmation_store_unlocked(store: dict) -> None:
+    ensure_runtime_dir()
+    records = store.get("records") if isinstance(store.get("records"), list) else []
+    write_json(
+        DEEP_RESEARCH_CONFIRMATIONS_PATH,
+        {
+            "schemaVersion": DEEP_RESEARCH_CONFIRMATION_STORE_VERSION,
+            "records": [
+                copy.deepcopy(item)
+                for item in records[-DEEP_RESEARCH_CONFIRMATION_LIMIT:]
+                if isinstance(item, dict)
+            ],
+            "updatedAt": utc_now(),
+        },
+    )
+
+
+def _deep_research_sheet_binding_from_internal(internal: object) -> dict | None:
+    hub = internal if isinstance(internal, dict) else {}
+    sheet_id = str(hub.get("sheetId") or "").strip()
+    revision = clamp_int(hub.get("configRevision"), -1, -1, 999999)
+    if not (
+        sheet_id
+        and revision >= 0
+        and hub.get("active") is True
+        and clamp_int(
+            hub.get("activeConfigRevision"),
+            -2,
+            -2,
+            999999,
+        )
+        == revision
+    ):
+        return None
+    contract = _research_sheet_tab_contracts().get("deepResearch") or {}
+    tab_name = str(contract.get("tabName") or "").strip()
+    if not tab_name:
+        return None
+    return {
+        "schemaVersion": "deep-research-sheet-binding-v1",
+        "configRevision": revision,
+        "sheetIdDigest": payload_digest(
+            "deep-research-active-sheet-id-v1",
+            sheet_id,
+        ),
+        "consumerId": "deepResearch",
+        "tabName": tab_name,
+    }
+
+
+def _deep_research_active_sheet_binding() -> dict | None:
+    """Bind one approval to the exact active central Sheet revision.
+
+    The raw Sheet id is intentionally not copied into the approval ledger.
+    Changing the central Sheet or its configuration revision invalidates an
+    earlier approval and requires the operator to review/save again.
+    """
+
+    return _deep_research_sheet_binding_from_internal(
+        _research_sheet_hub_internal()
+    )
+
+
+def _deep_research_confirmation_storage_record(
+    report: object,
+    *,
+    blueprint_digest: object = None,
+) -> dict | None:
+    row = report if isinstance(report, dict) else {}
+    report_id = safe_reference(row.get("id"))
+    if not report_id or row.get("type") != "trading_system_research_report":
+        return None
+    mission_id = safe_reference(row.get("linkedMissionId"))
+    active_sheet_binding = _deep_research_active_sheet_binding()
+    if not mission_id or active_sheet_binding is None:
+        return None
+    # A confirmation receipt authenticates only a Strategy Brief that was
+    # emitted explicitly by the current A-J research contract.  Historical
+    # 49-field Blueprints are retained for diagnosis, but converting one here
+    # would silently turn archived data into a current build authorization.
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    if not isinstance(metrics.get("strategyBrief"), dict):
+        return None
+    try:
+        report_digest = compute_strategy_brief_digest(metrics.get("strategyBrief"))
+    except StrategyBriefValidationError:
+        return None
+    digest = str(blueprint_digest or report_digest).strip().lower()
+    if not (
+        re.fullmatch(r"[0-9a-f]{64}", digest)
+        and secrets.compare_digest(digest, report_digest)
+    ):
+        return None
+    with DEEP_RESEARCH_CONFIRMATION_LOCK:
+        store = _load_deep_research_confirmation_store_unlocked()
+        records = list(store.get("records") or [])
+    for item in reversed(records):
+        if not isinstance(item, dict):
+            continue
+        if (
+            item.get("schemaVersion") == DEEP_RESEARCH_CONFIRMATION_SCHEMA_VERSION
+            and safe_reference(item.get("researchReportId")) == report_id
+            and safe_reference(item.get("sourceMissionId")) == mission_id
+            and item.get("status") == "confirmed"
+            and item.get("saveToGoogleSheet") is True
+            and item.get("sheetBinding") == active_sheet_binding
+            and isinstance(item.get("confirmedAt"), str)
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(item.get("confirmedBriefDigest") or ""),
+            )
+            and secrets.compare_digest(
+                str(item.get("confirmedBriefDigest") or ""),
+                digest,
+            )
+        ):
+            return copy.deepcopy(item)
+    return None
+
+
+def _deep_research_report_is_human_confirmed(report: object) -> bool:
+    return _deep_research_confirmation_storage_record(report) is not None
+
+
+def _deep_research_report_lineage(
+    report: object,
+    mission: object | None = None,
+) -> tuple[dict | None, str | None]:
+    """Validate the exact completed Deep Research Mission/Report relationship."""
+
+    row = report if isinstance(report, dict) else {}
+    report_id = safe_reference(row.get("id"))
+    mission_id = safe_reference(row.get("linkedMissionId"))
+    mission_row = mission if isinstance(mission, dict) else None
+    if mission_row is None and mission_id:
+        mission_row = find_mission(mission_id)
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    receipt = (
+        metrics.get("workflowOutput")
+        if isinstance(metrics.get("workflowOutput"), dict)
+        else {}
+    )
+    raw_context = (
+        row.get("workflowContext")
+        if isinstance(row.get("workflowContext"), dict)
+        else {}
+    )
+    context = _workflow_context_storage(raw_context)
+    if not isinstance(context, dict):
+        return None, "research_workflow_context_invalid"
+    source = context.get("source") if isinstance(context.get("source"), dict) else {}
+    report_ids = {
+        safe_reference(item)
+        for item in (
+            mission_row.get("reportIds")
+            if isinstance((mission_row or {}).get("reportIds"), list)
+            else []
+        )
+        if safe_reference(item)
+    }
+    mission_receipt = (
+        mission_row.get("workflowOutputContract")
+        if isinstance((mission_row or {}).get("workflowOutputContract"), dict)
+        else {}
+    )
+    mission_context = _workflow_context_storage(
+        mission_row.get("workflowContext") if isinstance(mission_row, dict) else None
+    )
+    if not report_id or not mission_id:
+        return None, "research_lineage_missing"
+    if not isinstance(mission_row, dict):
+        return None, "research_mission_missing"
+    if not (
+        row.get("type") == "trading_system_research_report"
+        and row.get("status") == "ready"
+        and safe_reference(row.get("linkedPropId")) == "left_server_racks"
+        and safe_reference(row.get("ownerAgentId")) == "mission_archivist"
+    ):
+        return None, "research_report_not_ready"
+    if not (
+        safe_reference(mission_row.get("id")) == mission_id
+        and mission_row.get("status") in DASHBOARD_WORKFLOW_SOURCE_MISSION_READY_STATUSES
+        and (
+            mission_row.get("status") != "archived"
+            or mission_row.get("archivedSuccessful") is True
+        )
+        and report_id in report_ids
+        and safe_reference(mission_row.get("targetId")) == "left_server_racks"
+        and safe_reference(mission_row.get("owner")) == "mission_archivist"
+    ):
+        return None, "research_mission_lineage_invalid"
+    if not (
+        mission_context == context
+        and context.get("propId") == "left_server_racks"
+        and context.get("actionId") == "deep_research_system"
+        and safe_reference(source.get("reportId"))
+        and safe_reference(source.get("recordId"))
+        and receipt.get("applicable") is True
+        and receipt.get("valid") is True
+        and mission_receipt
+        and receipt == mission_receipt
+    ):
+        return None, "research_output_contract_invalid"
+    required_urls, source_error = _deep_research_required_open_urls_for_mission(
+        mission_row
+    )
+    if source_error is not None or len(required_urls) != 2:
+        return None, source_error or "research_source_binding_invalid"
+    return copy.deepcopy(mission_row), None
+
+
+def _deep_research_sheet_preflight() -> tuple[dict, dict, str | None]:
+    hub = research_sheet_hub_read_model()
+    consumer = next(
+        (
+            item
+            for item in (hub.get("consumers") or [])
+            if isinstance(item, dict) and item.get("consumerId") == "deepResearch"
+        ),
+        {},
+    )
+    if hub.get("configured") is not True:
+        return hub, consumer, "google_sheet_not_configured"
+    if hub.get("active") is not True:
+        return hub, consumer, "google_sheet_activation_required"
+    if hub.get("authStatus") != "configured":
+        return hub, consumer, "google_oauth_required"
+    if not (
+        consumer.get("mode") == "read_write"
+        and consumer.get("readReady") is True
+        and consumer.get("configRevision") == hub.get("configRevision")
+    ):
+        return hub, consumer, "deep_research_sheet_not_verified"
+    return hub, consumer, None
+
+
+def _deep_research_sheet_delivery_read_model(report: object) -> dict:
+    """Resolve durable delivery for the exact confirmed Blueprint projection."""
+
+    row = report if isinstance(report, dict) else {}
+    confirmation = _deep_research_confirmation_storage_record(row)
+    if not confirmation:
+        return {
+            "status": "not_confirmed",
+            "synced": False,
+            "queued": False,
+            "requiredItemCount": 0,
+            "syncedItemCount": 0,
+            "pendingItemCount": 0,
+            "failedItemCount": 0,
+            "notQueuedItemCount": 0,
+            "reason": "human_confirmation_required",
+            "lastErrorCode": None,
+        }
+    internal = _research_sheet_hub_internal()
+    revision = clamp_int(internal.get("configRevision"), -1, -1, 999999)
+    if not (
+        revision >= 0
+        and internal.get("active") is True
+        and clamp_int(internal.get("activeConfigRevision"), -2, -2, 999999)
+        == revision
+    ):
+        return {
+            "status": "not_queued",
+            "synced": False,
+            "queued": False,
+            "requiredItemCount": 0,
+            "syncedItemCount": 0,
+            "pendingItemCount": 0,
+            "failedItemCount": 0,
+            "notQueuedItemCount": 0,
+            "reason": "google_sheet_activation_required",
+            "lastErrorCode": None,
+        }
+    expected = _research_sheet_report_items(row, revision)
+    expected = [
+        item
+        for item in expected
+        if isinstance(item, dict) and item.get("consumerId") == "deepResearch"
+    ]
+    if not expected:
+        return {
+            "status": "not_queued",
+            "synced": False,
+            "queued": False,
+            "requiredItemCount": 0,
+            "syncedItemCount": 0,
+            "pendingItemCount": 0,
+            "failedItemCount": 0,
+            "notQueuedItemCount": 0,
+            "reason": "report_not_eligible",
+            "lastErrorCode": None,
+        }
+    with RESEARCH_SHEET_OUTBOX_LOCK:
+        store = _load_research_sheet_outbox_unlocked()
+    items_by_id = {
+        safe_reference(item.get("id")): item
+        for item in (store.get("items") or [])
+        if isinstance(item, dict) and safe_reference(item.get("id"))
+    }
+    ledger_by_id = {
+        safe_reference(item.get("id")): item
+        for item in (store.get("syncedLedger") or [])
+        if isinstance(item, dict) and safe_reference(item.get("id"))
+    }
+    failed_by_id = {
+        safe_reference(item.get("id")): item
+        for item in (store.get("failedLedger") or [])
+        if isinstance(item, dict) and safe_reference(item.get("id"))
+    }
+    counts = {"synced": 0, "pending": 0, "failed": 0, "not_queued": 0}
+    last_error = None
+    for expected_item in expected:
+        item_id = safe_reference(expected_item.get("id"))
+        expected_digest = str(expected_item.get("payloadDigest") or "")
+        ledger = ledger_by_id.get(item_id)
+        current = items_by_id.get(item_id)
+        failure = failed_by_id.get(item_id)
+        if (
+            isinstance(ledger, dict)
+            and ledger.get("payloadDigest") == expected_digest
+            and clamp_int(ledger.get("configRevision"), -2, -2, 999999)
+            == revision
+        ) or (
+            isinstance(current, dict)
+            and current.get("status") == "synced"
+            and current.get("payloadDigest") == expected_digest
+            and clamp_int(current.get("configRevision"), -2, -2, 999999)
+            == revision
+        ):
+            counts["synced"] += 1
+        elif (
+            isinstance(current, dict)
+            and current.get("status") in {"pending", "retry_pending", "write_unknown"}
+            and current.get("payloadDigest") == expected_digest
+            and clamp_int(current.get("configRevision"), -2, -2, 999999)
+            == revision
+        ):
+            counts["pending"] += 1
+            last_error = last_error or current.get("lastErrorCode")
+        elif (
+            isinstance(failure, dict)
+            and failure.get("payloadDigest") == expected_digest
+            and clamp_int(failure.get("configRevision"), -2, -2, 999999)
+            == revision
+        ) or (
+            isinstance(current, dict)
+            and current.get("status") == "failed"
+            and current.get("payloadDigest") == expected_digest
+            and clamp_int(current.get("configRevision"), -2, -2, 999999)
+            == revision
+        ):
+            counts["failed"] += 1
+            source = failure if isinstance(failure, dict) else current
+            last_error = last_error or source.get("lastErrorCode")
+        else:
+            counts["not_queued"] += 1
+    required_count = len(expected)
+    all_synced = counts["synced"] == required_count
+    if all_synced:
+        status = "synced"
+        reason = None
+    elif counts["failed"]:
+        status = "failed"
+        reason = "google_sheet_write_failed"
+    elif counts["pending"]:
+        status = "pending"
+        reason = "google_sheet_write_pending"
+    else:
+        status = "not_queued"
+        reason = "google_sheet_write_not_queued"
+    return {
+        "status": status,
+        "synced": all_synced,
+        "queued": bool(counts["pending"] or counts["synced"]),
+        "requiredItemCount": required_count,
+        "syncedItemCount": counts["synced"],
+        "pendingItemCount": counts["pending"],
+        "failedItemCount": counts["failed"],
+        "notQueuedItemCount": counts["not_queued"],
+        "reason": reason,
+        "lastErrorCode": redact_text(str(last_error or ""), 120) or None,
+    }
+
+
+def _deep_research_report_is_handoff_ready(report: object) -> bool:
+    if _deep_research_sheet_delivery_read_model(report).get("synced") is not True:
+        return False
+    row = report if isinstance(report, dict) else {}
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    if not isinstance(metrics.get("strategyBrief"), dict):
+        return False
+    try:
+        brief = normalize_strategy_brief(metrics.get("strategyBrief"))
+        digest = compute_strategy_brief_digest(brief)
+    except StrategyBriefValidationError:
+        return False
+    return _deep_research_confirmation_storage_record(
+        row,
+        blueprint_digest=digest,
+    ) is not None
+
+
+def _deep_research_projected_column_completeness(report: object) -> dict:
+    required = list(RESEARCH_SHEET_DEEP_WRITE_HEADERS)
+    row = report if isinstance(report, dict) else {}
+    projected_rows: list[dict] = []
+    if row:
+        try:
+            projected_rows, _factory_rows = _research_sheet_deep_rows(row)
+        except (DataIntegrityError, EAResearchBlueprintValidationError, RequestError):
+            projected_rows = []
+    full_rows = [
+        candidate
+        for candidate in projected_rows
+        if isinstance(candidate, dict)
+        and set(required).issubset(candidate)
+    ]
+    projected = full_rows[0] if len(full_rows) == 1 else {}
+    statuses = []
+    missing = []
+    for name in required:
+        present = _research_sheet_cell_is_present(projected.get(name))
+        if not present:
+            missing.append(name)
+        statuses.append(
+            {
+                "name": name,
+                "present": present,
+                "status": "populated" if present else "missing",
+            }
+        )
+    return {
+        "requiredColumnCount": len(required),
+        "populatedColumnCount": len(required) - len(missing),
+        "missingColumns": missing,
+        "columnStatuses": statuses,
+    }
+
+
+def _deep_research_confirmation_read_model(
+    report: object,
+    ea_research: object,
+) -> dict:
+    row = report if isinstance(report, dict) else {}
+    research = ea_research if isinstance(ea_research, dict) else {}
+    report_id = safe_reference(row.get("id"))
+    digest = str(research.get("briefDigest") or "").strip().lower()
+    strategy_brief = (
+        research.get("strategyBrief")
+        if isinstance(research.get("strategyBrief"), dict)
+        else None
+    )
+    column_completeness = _deep_research_projected_column_completeness(row)
+    confirmation = _deep_research_confirmation_storage_record(
+        row,
+        blueprint_digest=digest,
+    )
+    _mission, lineage_error = _deep_research_report_lineage(row)
+    _hub, _consumer, sheet_error = _deep_research_sheet_preflight()
+    can_confirm = bool(
+        report_id
+        and strategy_brief
+        and research.get("validated") is True
+        and not column_completeness["missingColumns"]
+        and confirmation is None
+        and lineage_error is None
+        and sheet_error is None
+    )
+    factory_compatibility = {
+        "ready": bool(strategy_brief and research.get("validated") is True),
+        "compatiblePlatforms": ["mt4", "mt5", "tradingview"],
+        "capabilityIssues": [],
+        "readinessIssues": [],
+        "contract": EA_STRATEGY_BRIEF_SCHEMA_VERSION,
+    }
+    sheet_delivery = _deep_research_sheet_delivery_read_model(row)
+    return {
+        "required": confirmation is None,
+        "confirmed": confirmation is not None,
+        "canConfirm": can_confirm,
+        "endpoint": DEEP_RESEARCH_CONFIRMATION_ENDPOINT,
+        "reportId": report_id,
+        "briefDigest": digest if re.fullmatch(r"[0-9a-f]{64}", digest) else None,
+        "blueprintDigest": digest if re.fullmatch(r"[0-9a-f]{64}", digest) else None,
+        "assumptionCount": 0,
+        "unconfirmedAssumptionCount": 0,
+        "confirmedAssumptionIds": (
+            copy.deepcopy(confirmation.get("confirmedAssumptionIds") or [])
+            if confirmation
+            else []
+        ),
+        "originalBlueprintDigest": (
+            confirmation.get("originalBlueprintDigest") if confirmation else None
+        ),
+        "confirmedBlueprintDigest": (
+            (
+                confirmation.get("confirmedBriefDigest")
+                or confirmation.get("confirmedBlueprintDigest")
+            ) if confirmation else None
+        ),
+        "confirmedBriefDigest": (
+            confirmation.get("confirmedBriefDigest") if confirmation else None
+        ),
+        "confirmedAt": confirmation.get("confirmedAt") if confirmation else None,
+        # This field describes the required confirmation intent, not whether a
+        # click has already happened.  Keeping it true pre-confirmation lets the
+        # frontend present the explicit save checkbox without deadlocking the
+        # button; persisted proof still comes only from the separate store.
+        "saveToGoogleSheet": True,
+        "lineageStatus": "ready" if lineage_error is None else lineage_error,
+        "sheetPreflightStatus": "ready" if sheet_error is None else sheet_error,
+        "sheetDelivery": sheet_delivery,
+        "factoryCompatibility": factory_compatibility,
+        "handoffReady": (
+            confirmation is not None
+            and sheet_delivery.get("synced") is True
+            and factory_compatibility.get("ready") is True
+        ),
+        "columnCompleteness": column_completeness,
+    }
+
+
 def _ea_research_unavailable_read_model(
     reason_code: str,
     *,
@@ -14871,18 +16150,52 @@ def _ea_research_canonical_read_model(
     return read_model
 
 
-def _ea_research_report_read_model(report: dict, metrics: dict) -> dict:
-    implementation_notes = (
-        metrics.get("implementationNotes")
-        if isinstance(metrics.get("implementationNotes"), dict)
-        else {}
+def _ea_research_mark_legacy_read_only(diagnostic: dict) -> dict:
+    """Remove every executable authorization from validated legacy history."""
+
+    if diagnostic.get("validationStatus") != "canonical_validated":
+        return diagnostic
+    legacy_blueprint = diagnostic.get("blueprint")
+    warning = (
+        "legacy_49_field_blueprint_read_only; rerun Deep Research to create "
+        "an explicit Strategy Brief A-J before confirmation or EA build"
     )
-    expected_digest = (
-        metrics.get("blueprintDigest")
-        or implementation_notes.get("blueprintDigest")
-    )
+    return {
+        **diagnostic,
+        "validationStatus": "legacy_blueprint_read_only",
+        "validated": False,
+        "ready": False,
+        "status": "legacy_read_only",
+        "eaHandoffAllowed": False,
+        "deterministicBacktestAllowed": False,
+        "requiresResearchRerun": True,
+        "requiresResearchRevision": True,
+        "blueprint": None,
+        "legacyBlueprintDiagnostic": copy.deepcopy(legacy_blueprint),
+        "blockingIssues": [
+            {
+                "code": "LEGACY_49_FIELD_RERUN_REQUIRED",
+                "path": "$.metrics.strategyBrief",
+                "messageTh": (
+                    "Blueprint 49 ช่องเป็นประวัติแบบอ่านอย่างเดียว "
+                    "กรุณาวิเคราะห์ระบบใหม่เพื่อสร้าง Strategy Brief A-J"
+                ),
+            }
+        ],
+        "warnings": [*list(diagnostic.get("warnings") or []), warning],
+        "readinessIssues": [warning],
+    }
+
+
+def _ea_research_legacy_diagnostic_read_model(
+    metrics: object,
+    expected_digest: object,
+) -> dict:
+    """Expose a legacy 49-field Blueprint as history, never as build input."""
+
+    row = metrics if isinstance(metrics, dict) else {}
     try:
-        blueprint = reconstruct_ea_research_from_metrics(metrics)
+        blueprint = reconstruct_ea_research_from_metrics(row)
     except EAResearchBlueprintValidationError as exc:
         issue_codes = {
             str(item.get("code") or "")
@@ -14900,11 +16213,103 @@ def _ea_research_report_read_model(report: dict, metrics: dict) -> dict:
             reason,
             blueprint_digest=expected_digest,
         )
-    return _ea_research_canonical_read_model(
-        blueprint,
-        expected_digest,
-        missing_reason="legacy_ea_blueprint_missing",
+    return _ea_research_mark_legacy_read_only(
+        _ea_research_canonical_read_model(
+            blueprint,
+            expected_digest,
+            missing_reason="legacy_ea_blueprint_missing",
+        )
     )
+
+
+def _ea_strategy_brief_report_read_model(report: object, metrics: object) -> dict | None:
+    row = metrics if isinstance(metrics, dict) else {}
+    if not isinstance(row.get("strategyBrief"), dict):
+        return None
+    try:
+        brief = normalize_strategy_brief(row.get("strategyBrief"))
+        expected_digest = str(
+            row.get("briefDigest") or row.get("sourceDigest") or ""
+        ).strip().lower()
+    except StrategyBriefValidationError:
+        return None
+    digest = compute_strategy_brief_digest(brief)
+    if expected_digest and (
+        not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+        or not secrets.compare_digest(expected_digest, digest)
+    ):
+        return None
+    report_row = report if isinstance(report, dict) else {}
+    context = (
+        report_row.get("workflowContext")
+        if isinstance(report_row.get("workflowContext"), dict)
+        else {}
+    )
+    source = context.get("source") if isinstance(context.get("source"), dict) else {}
+    source_identity = _research_sheet_deep_source_identity(
+        safe_reference(report_row.get("id")),
+        source,
+    )
+    read_model = {
+        "schemaVersion": EA_STRATEGY_BRIEF_SCHEMA_VERSION,
+        "validationStatus": "strategy_brief_validated",
+        "validated": True,
+        "digestMatched": True,
+        "ready": True,
+        "status": "ready",
+        "score": 1.0,
+        "eaHandoffAllowed": True,
+        "deterministicBacktestAllowed": False,
+        "requiresResearchRerun": False,
+        "requiresResearchRevision": False,
+        "strategyBrief": brief,
+        "recordId": source_identity["eaFactoryRecordId"],
+        "briefDigest": digest,
+        "blueprintDigest": digest,
+        "blueprint": None,
+        "blockingIssues": [],
+        "warnings": copy.deepcopy(brief.get("limitations") or []),
+        "unknownPaths": [],
+        "conflictPaths": [],
+        "readinessIssues": [],
+        "provenance": "compact_strategy_brief",
+    }
+    read_model["confirmation"] = _deep_research_confirmation_read_model(
+        report,
+        read_model,
+    )
+    return read_model
+
+
+def _ea_research_report_read_model(report: dict, metrics: dict) -> dict:
+    compact = _ea_strategy_brief_report_read_model(report, metrics)
+    if compact is not None:
+        return compact
+    if "strategyBrief" in metrics:
+        unavailable = _ea_research_unavailable_read_model("strategy_brief_invalid")
+        unavailable["confirmation"] = _deep_research_confirmation_read_model(
+            report,
+            unavailable,
+        )
+        return unavailable
+    implementation_notes = (
+        metrics.get("implementationNotes")
+        if isinstance(metrics.get("implementationNotes"), dict)
+        else {}
+    )
+    expected_digest = (
+        metrics.get("blueprintDigest")
+        or implementation_notes.get("blueprintDigest")
+    )
+    read_model = _ea_research_legacy_diagnostic_read_model(
+        metrics,
+        expected_digest,
+    )
+    read_model["confirmation"] = _deep_research_confirmation_read_model(
+        report,
+        read_model,
+    )
+    return read_model
 
 
 def report_read_model_item(report: dict) -> dict:
@@ -14922,6 +16327,22 @@ def report_read_model_item(report: dict) -> dict:
         if recovered_systems:
             metrics["systems"] = recovered_systems
     metrics_read_model = sanitize_json_value(metrics)
+    # Visible terminal receipts intentionally retain exact PID/HWND bindings
+    # in the backend report so a later integrity pass can prove which process
+    # produced the evidence.  Those local-machine identifiers are not part of
+    # the frontend contract.  Project only opaque ids, hashes, settings and
+    # outcome flags while keeping the durable backend receipt intact.
+    if metrics.get("evidenceMode") == EA_FACTORY_VISIBLE_EVIDENCE_MODE:
+        metrics_read_model = sanitize_json_value({
+            key: value
+            for key, value in metrics.items()
+            if key not in {
+                "processId",
+                "windowHandle",
+                "processBinding",
+                "postProcessBinding",
+            }
+        })
     if report.get("type") == "trading_system_research_report":
         try:
             metrics_read_model = _trading_system_research_metrics_storage(metrics)
@@ -15166,6 +16587,19 @@ DASHBOARD_WORKFLOW_SCHEDULE_JOBS = (
         "maxRunsPerDay": 2,
     },
 )
+
+
+def normalize_automation_min_remaining_percent(value: object) -> int:
+    """Fail safely to the default for malformed persisted quota policy."""
+
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < AUTOMATION_MIN_REMAINING_PERCENT_MIN
+        or value > AUTOMATION_MIN_REMAINING_PERCENT_MAX
+    ):
+        return AUTOMATION_MIN_REMAINING_PERCENT
+    return value
 
 
 def _default_dashboard_workflow_settings() -> dict:
@@ -15460,6 +16894,15 @@ def _dashboard_workflow_settings_shape(value: object) -> dict:
         "tabName": RESEARCH_SHEET_HUB_PROP_TABS["left_audit_crystals"]["tabName"],
         "savedAt": hub.get("savedAt"),
     }
+    preferences = (
+        result.get("agentPreferences")
+        if isinstance(result.get("agentPreferences"), dict)
+        else {}
+    )
+    preferences["rateReservePercent"] = normalize_automation_min_remaining_percent(
+        preferences.get("rateReservePercent"),
+    )
+    result["agentPreferences"] = preferences
     result["version"] = "dashboard-workflow-settings-v2"
     return result
 
@@ -15504,6 +16947,40 @@ def load_dashboard_workflow_settings() -> dict:
                 keep_backup=existed,
             )
         return shaped
+
+
+def automation_min_remaining_percent(settings: object | None = None) -> int:
+    """Return the single operator-owned reserve used by every AI quota gate."""
+
+    if isinstance(settings, dict):
+        source = settings
+    else:
+        try:
+            source = load_dashboard_workflow_settings()
+        except (OSError, ValueError, DataIntegrityError):
+            return AUTOMATION_MIN_REMAINING_PERCENT
+    preferences = (
+        source.get("agentPreferences")
+        if isinstance(source.get("agentPreferences"), dict)
+        else {}
+    )
+    return normalize_automation_min_remaining_percent(
+        preferences.get("rateReservePercent"),
+    )
+
+
+def automation_quota_policy_read_model(settings: object | None = None) -> dict:
+    threshold = automation_min_remaining_percent(settings)
+    return {
+        "rateReservePercent": threshold,
+        "minRemainingPercent": threshold,
+        "comparison": "remaining_greater_than_or_equal_to_threshold",
+        "blocksWhen": "remaining_below_threshold",
+        "appliesTo": "all_ai_agent_workflows",
+        "editable": True,
+        "minimum": AUTOMATION_MIN_REMAINING_PERCENT_MIN,
+        "maximum": AUTOMATION_MIN_REMAINING_PERCENT_MAX,
+    }
 
 
 def _load_dashboard_workflow_settings_read_only() -> dict:
@@ -16037,7 +17514,20 @@ def query_research_sheet_hub(payload: object) -> dict:
         duplicate_headers = {
             header for header in headers if header and headers.count(header) > 1
         }
-        if not headers or required_headers - set(headers) or duplicate_headers:
+        exact_headers = [
+            google_sheet_hub.canonical_header(value)
+            for value in (contract.get("exactHeaders") or [])
+            if google_sheet_hub.canonical_header(value)
+        ]
+        exact_header_mismatch = bool(
+            exact_headers and headers != exact_headers
+        )
+        if (
+            not headers
+            or required_headers - set(headers)
+            or duplicate_headers
+            or exact_header_mismatch
+        ):
             raise RequestError(
                 f"โครงสร้างแท็บ {tab_name} เปลี่ยนไป กรุณาตรวจสอบ Google Sheet อีกครั้ง",
                 409,
@@ -16653,6 +18143,7 @@ def _research_sheet_requeue_failed_current_revision(
     *,
     reason: str,
     max_items: int = RESEARCH_SHEET_OUTBOX_REQUEUE_BATCH_LIMIT,
+    allowed_item_ids: set[str] | None = None,
 ) -> dict:
     """Requeue only bounded terminal failures for the active Sheet revision.
 
@@ -16703,6 +18194,15 @@ def _research_sheet_requeue_failed_current_revision(
         "verification_succeeded",
         "activation_verified",
     }
+    allowed_ids = (
+        None
+        if allowed_item_ids is None
+        else {
+            safe_reference(item)
+            for item in allowed_item_ids
+            if safe_reference(item)
+        }
+    )
     with RESEARCH_SHEET_OUTBOX_LOCK:
         store = _load_research_sheet_outbox_unlocked()
         stored_items = [
@@ -16716,6 +18216,11 @@ def _research_sheet_requeue_failed_current_revision(
         eligible: list[tuple[str, dict, bool]] = []
         for item in stored_items:
             if not isinstance(item, dict) or item.get("status") != "failed":
+                continue
+            if (
+                allowed_ids is not None
+                and safe_reference(item.get("id")) not in allowed_ids
+            ):
                 continue
             item_revision = clamp_int(
                 item.get("configRevision"),
@@ -16755,6 +18260,8 @@ def _research_sheet_requeue_failed_current_revision(
             # Every retained failed item also has a ledger marker. Process the
             # full payload once and use the ledger only for pruned failures.
             if not entry_id or entry_id in item_by_id:
+                continue
+            if allowed_ids is not None and entry_id not in allowed_ids:
                 continue
             entry_revision = clamp_int(
                 entry.get("configRevision"),
@@ -18497,7 +20004,9 @@ def _dashboard_agent_preferences_read_model(settings: object | None = None) -> d
         "tokenBudget": clamp_int(stored.get("tokenBudget"), 12000, 256, 100000),
         "timeoutSeconds": clamp_int(stored.get("timeoutSeconds"), 120, 15, 600),
         "outputLimitChars": clamp_int(stored.get("outputLimitChars"), 7000, 1000, 20000),
-        "rateReservePercent": AUTOMATION_MIN_REMAINING_PERCENT,
+        "rateReservePercent": normalize_automation_min_remaining_percent(
+            stored.get("rateReservePercent"),
+        ),
         "savedAt": stored.get("savedAt"),
         "lastSavedAt": stored.get("savedAt"),
         "providerModelIdAccepted": False,
@@ -18599,13 +20108,13 @@ def _dashboard_workflow_execution_preferences(
     }:
         # Both public-web radars share the same strict global reserve and need
         # enough time to return source-backed structured JSON.
-        effective["rateReservePercent"] = AUTOMATION_MIN_REMAINING_PERCENT
+        effective["rateReservePercent"] = preferences["rateReservePercent"]
         effective["timeoutSeconds"] = max(
             600,
             clamp_int(preferences.get("timeoutSeconds"), 120, 15, 600),
         )
     elif action_id == "deep_research_system":
-        effective["rateReservePercent"] = AUTOMATION_MIN_REMAINING_PERCENT
+        effective["rateReservePercent"] = preferences["rateReservePercent"]
         effective["timeoutSeconds"] = max(
             # EA-ready Strategy Research v2 is intentionally much denser than
             # the legacy prose report: it performs live source verification and
@@ -21511,6 +23020,96 @@ def _ea_factory_build_root() -> Path:
     return PROJECT_ROOT / "workspace" / "ea-factory"
 
 
+def _ea_factory_cache_file_signature(
+    path: Path,
+) -> tuple[str, int | None, int | None]:
+    target = Path(path)
+    try:
+        stat = target.stat()
+    except (FileNotFoundError, OSError):
+        return (str(target), None, None)
+    return (str(target), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _ea_factory_report_store_signature() -> tuple[str, int, str]:
+    """Return a bounded identity for the same newest reports used by Factory."""
+
+    root = Path(RUNTIME_REPORTS_DIR)
+    entries: list[tuple[int, str, int]] = []
+    try:
+        paths = list(root.glob("*.json"))
+    except OSError:
+        paths = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except (FileNotFoundError, OSError):
+            continue
+        entries.append((int(stat.st_mtime_ns), path.name, int(stat.st_size)))
+    entries.sort(reverse=True)
+    digest = hashlib.sha256()
+    # Hash every metadata row conservatively. Loading still uses only the
+    # newest bounded window, but a timestamp change can promote any older file
+    # into that window and must invalidate the cached projection.
+    for mtime_ns, name, size in entries:
+        digest.update(f"{mtime_ns}:{size}:{name}\n".encode("utf-8", errors="strict"))
+    return (str(root), len(entries), digest.hexdigest())
+
+
+def _ea_factory_workspace_signature() -> tuple[str, int, str]:
+    """Track artifact/workspace mutations without rebuilding their read models."""
+
+    root = Path(_ea_factory_build_root())
+    digest = hashlib.sha256()
+    file_count = 0
+    try:
+        walker = os.walk(root, followlinks=False)
+        for directory, directory_names, file_names in walker:
+            directory_names.sort()
+            file_names.sort()
+            base = Path(directory)
+            for name in directory_names:
+                path = base / name
+                try:
+                    stat = path.lstat()
+                    relative = path.relative_to(root).as_posix()
+                except (FileNotFoundError, OSError, ValueError):
+                    continue
+                digest.update(
+                    f"D:{relative}:{stat.st_mode}:{stat.st_mtime_ns}\n".encode(
+                        "utf-8",
+                        errors="strict",
+                    )
+                )
+            for name in file_names:
+                path = base / name
+                try:
+                    stat = path.lstat()
+                    relative = path.relative_to(root).as_posix()
+                except (FileNotFoundError, OSError, ValueError):
+                    continue
+                file_count += 1
+                digest.update(
+                    f"{relative}:{stat.st_mode}:{stat.st_mtime_ns}:{stat.st_size}\n".encode(
+                        "utf-8",
+                        errors="strict",
+                    )
+                )
+    except OSError:
+        pass
+    return (str(root), file_count, digest.hexdigest())
+
+
+def _invalidate_ea_factory_read_model_cache() -> None:
+    with EA_FACTORY_READ_MODEL_CACHE_CONDITION:
+        EA_FACTORY_READ_MODEL_CACHE["signature"] = None
+        EA_FACTORY_READ_MODEL_CACHE["value"] = None
+        EA_FACTORY_READ_MODEL_CACHE["generation"] = (
+            int(EA_FACTORY_READ_MODEL_CACHE.get("generation") or 0) + 1
+        )
+        EA_FACTORY_READ_MODEL_CACHE_CONDITION.notify_all()
+
+
 def _empty_ea_factory_state() -> dict:
     return {
         "schemaVersion": EA_FACTORY_STATE_SCHEMA_VERSION,
@@ -21548,14 +23147,22 @@ def _ea_factory_revalidated_snapshot(snapshot: dict) -> dict:
         snapshot.get("sourceSchemaVersion") or "ea-full-cycle-a-w-v1"
     )
     source_kind = str(snapshot.get("sourceKind") or "google_sheet_public_csv")
-    if source_schema_version == "deep-research-sheet-v1":
+    if source_schema_version == "deep-research-sheet-v2":
         expected_header_digest = payload_digest(
-            "ea-factory-deep-research-header-v1",
+            "ea-factory-deep-research-header-v2",
             list(RESEARCH_SHEET_DEEP_WRITE_HEADERS),
         )
         expected_tab_name = RESEARCH_SHEET_HUB_PROP_TABS["left_server_racks"]["tabName"]
         if source_kind != "verified_deep_research_sheet" or tab_name != expected_tab_name:
             raise DataIntegrityError("EA Factory Deep Research snapshot source is invalid.")
+    elif source_schema_version == "deep-research-sheet-v1":
+        expected_header_digest = payload_digest(
+            "ea-factory-deep-research-header-v1",
+            list(RESEARCH_SHEET_DEEP_LEGACY_HEADERS),
+        )
+        expected_tab_name = RESEARCH_SHEET_HUB_PROP_TABS["left_server_racks"]["tabName"]
+        if source_kind != "verified_deep_research_sheet" or tab_name != expected_tab_name:
+            raise DataIntegrityError("EA Factory legacy Deep Research snapshot source is invalid.")
     elif source_schema_version == "ea-full-cycle-a-w-v1":
         # Existing local snapshots remain readable after the central Sheet is
         # reduced to three tabs. They are historical state only; new syncs are
@@ -21595,6 +23202,14 @@ def _ea_factory_revalidated_snapshot(snapshot: dict) -> dict:
         )
         if stored_blueprint is not None:
             values["eaImplementationBlueprint"] = stored_blueprint
+        stored_strategy_brief = (
+            stored.get("strategyBrief")
+            if isinstance(stored.get("strategyBrief"), dict)
+            else None
+        )
+        if stored_strategy_brief is not None:
+            values["strategyBrief"] = stored_strategy_brief
+            values["record_id"] = stored.get("recordId")
         legacy_deep_record = bool(
             source_kind == "verified_deep_research_sheet"
             and stored_blueprint is None
@@ -21632,6 +23247,14 @@ def _ea_factory_revalidated_snapshot(snapshot: dict) -> dict:
                     or record.get("eaReadyText") != stored.get("eaReadyText")
                 )
             )
+            or (
+                stored_strategy_brief is not None
+                and (
+                    record.get("strategyBrief") != stored_strategy_brief
+                    or record.get("strategyBriefDigest")
+                    != stored.get("strategyBriefDigest")
+                )
+            )
             or record["sourceRecordId"] in seen
         ):
             raise DataIntegrityError("EA Factory Sheet record digest or lineage is invalid.")
@@ -21655,6 +23278,9 @@ EA_FACTORY_BLUEPRINT_COVERAGE_REQUIREMENTS_V3 = (
 )
 EA_FACTORY_BLUEPRINT_COVERAGE_MANIFEST_V3 = (
     "ea-factory-blueprint-coverage-manifest-v3"
+)
+EA_FACTORY_LEGACY_COMPACT_EA_SOURCE_MANIFEST_V1 = (
+    "ea-factory-compact-ea-source-manifest/1.0.0"
 )
 _EA_FACTORY_BLUEPRINT_COVERAGE_V3_KEYS = (
     "blueprintDigests",
@@ -21912,6 +23538,233 @@ def _ea_factory_legacy_v3_coverage_manifest_valid(
     )
 
 
+def _ea_factory_legacy_compact_ea_source_manifest_valid(
+    value: object,
+    *,
+    strategy_brief_digest: str,
+    strategy_spec_digest: str,
+    source_digest: str,
+    target_platform: str,
+) -> bool:
+    """Authenticate a sealed compact-v1 manifest without upgrading its claims.
+
+    The 1.1 analyzer adds stricter display semantics.  Historical 1.0 builds
+    remain useful audit records, but recomputing them with newer semantics must
+    not make the complete Factory catalog look corrupt.  The old manifest is
+    accepted only when every immutable identity binding and its original seal
+    still match; the caller marks the build read-only and requires a fresh
+    build before any further stage may run.
+    """
+
+    if not isinstance(value, dict):
+        return False
+    expected_keys = {
+        "schemaVersion",
+        "coverageMode",
+        "artifactKind",
+        "targetPlatform",
+        "strategyBriefDigest",
+        "strategySpecDigest",
+        "sourceDigest",
+        "checks",
+        "coveredFields",
+        "missingFields",
+        "findings",
+        "complete",
+        "manifestDigest",
+    }
+    unsigned = copy.deepcopy(value)
+    claimed_digest = unsigned.pop("manifestDigest", None)
+    checks = value.get("checks")
+    return bool(
+        set(value) == expected_keys
+        and value.get("schemaVersion")
+        == EA_FACTORY_LEGACY_COMPACT_EA_SOURCE_MANIFEST_V1
+        and value.get("coverageMode")
+        == "compact_brief_digest_bound_structural_ea_review"
+        and value.get("artifactKind") == "expert_advisor"
+        and value.get("targetPlatform") == target_platform
+        and value.get("strategyBriefDigest")
+        == str(strategy_brief_digest).lower()
+        and value.get("strategySpecDigest")
+        == str(strategy_spec_digest).lower()
+        and value.get("sourceDigest") == str(source_digest).lower()
+        and isinstance(checks, dict)
+        and 1 <= len(checks) <= 64
+        and all(
+            isinstance(name, str)
+            and re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", name)
+            and flag is True
+            for name, flag in checks.items()
+        )
+        and value.get("coveredFields") == list(COMPACT_SHEET_FIELDS)
+        and value.get("missingFields") == []
+        and value.get("findings") == []
+        and value.get("complete") is True
+        and re.fullmatch(r"[0-9a-f]{64}", str(claimed_digest or ""))
+        is not None
+        and _ea_factory_canonical_json_sha256(unsigned) == claimed_digest
+    )
+
+
+def _ea_factory_one_click_request_digest(build: dict) -> str:
+    """Bind one automatic run to the immutable build, not to browser state."""
+
+    return payload_digest(
+        "ea-factory-one-click-run-v1",
+        safe_reference(build.get("id")),
+        build.get("createRequestDigest"),
+        build.get("sourceRecordDigest"),
+        build.get("platform"),
+        _ea_factory_program_kind(build.get("artifactKind")),
+    )
+
+
+def _ea_factory_one_click_visible_operation_id(
+    build: dict,
+    run: dict,
+    stage_id: object,
+) -> str:
+    """Return the stable front-office operation identity for crash recovery.
+
+    The visible adapter must treat this identity as idempotent: after an
+    uncertain process crash it recovers the same receipt instead of clicking
+    Compile/Start a second time.
+    """
+
+    binding = run.get("terminalBinding") if isinstance(run.get("terminalBinding"), dict) else {}
+    return "ea-visible-" + payload_digest(
+        EA_FACTORY_VISIBLE_EVIDENCE_MODE,
+        safe_reference(run.get("runId")),
+        safe_reference(build.get("id")),
+        safe_reference(stage_id),
+        build.get("createRequestDigest"),
+        build.get("sourceRecordDigest"),
+        binding.get("platform"),
+        binding.get("candidateId"),
+        binding.get("selectionRevision"),
+        binding.get("bindingDigest"),
+    )[:24]
+
+
+def _ea_factory_revalidated_one_click_run(build: dict) -> dict | None:
+    raw = build.get("oneClickRun")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise DataIntegrityError("EA Factory one-click run is malformed.")
+    run_id = safe_reference(raw.get("runId"))
+    request_key = str(raw.get("idempotencyKey") or "")
+    request_digest = str(raw.get("requestDigest") or "")
+    status = str(raw.get("status") or "")
+    current_stage_id = safe_reference(raw.get("currentStageId"))
+    terminal = raw.get("terminalBinding") if isinstance(raw.get("terminalBinding"), dict) else {}
+    platform = str(terminal.get("platform") or "")
+    candidate_id = safe_reference(terminal.get("candidateId"))
+    selection_revision = terminal.get("selectionRevision")
+    binding_digest = str(terminal.get("bindingDigest") or "")
+    failure_code = safe_reference(raw.get("failureCode"))
+    started_at = str(raw.get("startedAt") or "")
+    updated_at = str(raw.get("updatedAt") or "")
+    completed_at = raw.get("completedAt")
+    completed_text = str(completed_at or "")
+    message_th = str(raw.get("messageTh") or "")
+    visible_action = raw.get("visibleAction")
+    if (
+        raw.get("schemaVersion") != EA_FACTORY_ONE_CLICK_SCHEMA_VERSION
+        or not run_id
+        or not run_id.startswith("ea-run-")
+        or not SAFE_IDEMPOTENCY_PATTERN.fullmatch(request_key)
+        or request_digest != _ea_factory_one_click_request_digest(build)
+        or status not in EA_FACTORY_ONE_CLICK_STATUSES
+        or current_stage_id not in {*EA_FACTORY_ONE_CLICK_STAGE_IDS, None}
+        or platform != build.get("platform")
+        or platform not in {"mt4", "mt5"}
+        or not candidate_id
+        or not candidate_id.startswith("mtc-")
+        or isinstance(selection_revision, bool)
+        or not isinstance(selection_revision, int)
+        or selection_revision < 1
+        or re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None
+        or parse_iso(started_at) is None
+        or parse_iso(updated_at) is None
+        or (completed_at is not None and parse_iso(completed_text) is None)
+        or (status in {"completed", "blocked", "failed"}) != bool(completed_at)
+        or (status in {"blocked", "failed"}) != bool(failure_code)
+        or len(message_th) > 500
+        or contains_potential_secret(message_th)
+    ):
+        raise DataIntegrityError("EA Factory one-click run failed integrity validation.")
+    if visible_action is not None:
+        if not isinstance(visible_action, dict):
+            raise DataIntegrityError("EA Factory one-click visible action is malformed.")
+        action_stage_id = safe_reference(visible_action.get("stageId"))
+        operation_id = safe_reference(visible_action.get("operationId"))
+        action_state = str(visible_action.get("state") or "")
+        attempt_count = visible_action.get("attemptCount")
+        reserved_at = str(visible_action.get("reservedAt") or "")
+        action_updated_at = str(visible_action.get("updatedAt") or "")
+        last_failure_code = safe_reference(visible_action.get("lastFailureCode"))
+        action_stage = next(
+            (
+                item
+                for item in (
+                    build.get("stages")
+                    if isinstance(build.get("stages"), list)
+                    else []
+                )
+                if isinstance(item, dict) and item.get("id") == action_stage_id
+            ),
+            None,
+        )
+        if (
+            set(visible_action)
+            != {
+                "stageId",
+                "operationId",
+                "state",
+                "attemptCount",
+                "reservedAt",
+                "updatedAt",
+                "lastFailureCode",
+                "requiresExplicitResume",
+            }
+            or action_stage_id not in EA_FACTORY_VISIBLE_ACTION_STAGES
+            or not operation_id
+            or not operation_id.startswith("ea-visible-")
+            or operation_id
+            != _ea_factory_one_click_visible_operation_id(
+                build,
+                raw,
+                action_stage_id,
+            )
+            or action_state not in EA_FACTORY_VISIBLE_ACTION_STATES
+            or isinstance(attempt_count, bool)
+            or not isinstance(attempt_count, int)
+            or attempt_count < 1
+            or attempt_count > EA_FACTORY_ONE_CLICK_PRESTART_RECOVERY_LIMIT
+            or parse_iso(reserved_at) is None
+            or parse_iso(action_updated_at) is None
+            or (
+                visible_action.get("requiresExplicitResume") is True
+            )
+            != (action_state == "uncertain")
+            or (action_state == "uncertain") != bool(last_failure_code)
+            or (
+                action_state == "completed"
+                and (
+                    not isinstance(action_stage, dict)
+                    or action_stage.get("status") != "completed"
+                    or action_stage.get("evidenceVerified") is not True
+                )
+            )
+        ):
+            raise DataIntegrityError(
+                "EA Factory one-click visible action failed integrity validation."
+            )
+    return copy.deepcopy(raw)
+
+
 def _ea_factory_revalidated_build(build: dict) -> dict:
     build_id = safe_reference(build.get("id"))
     source_record_id = safe_reference(build.get("sourceRecordId"))
@@ -21976,6 +23829,9 @@ def _ea_factory_revalidated_build(build: dict) -> dict:
     }
     spec_schema_version = str(spec.get("schemaVersion") or "") if isinstance(spec, dict) else ""
     blueprint_digest = ""
+    strategy_brief_digest = ""
+    strategy_brief_projection = None
+    strategy_brief_shape_valid = False
     blueprint = None
     coverage_requirements = None
     coverage_requirements_schema = None
@@ -22035,17 +23891,66 @@ def _ea_factory_revalidated_build(build: dict) -> dict:
             )
         except EAResearchBlueprintValidationError:
             blueprint_valid = False
+    elif spec_schema_version == "ea-factory-strategy-spec-v3":
+        raw_strategy_brief = spec.get("strategyBrief")
+        strategy_brief_projection = _ea_factory_compact_strategy_brief({
+            "record_id": core.get("record_id"),
+            "strategyBrief": raw_strategy_brief,
+        })
+        strategy_brief_digest = (
+            str(strategy_brief_projection.get("digest") or "")
+            if isinstance(strategy_brief_projection, dict)
+            else ""
+        )
+        compact_brief_keys = {
+            "schemaVersion",
+            *EA_STRATEGY_BRIEF_SHEET_TO_CAMEL.values(),
+        }
+        strategy_brief_shape_valid = bool(
+            isinstance(raw_strategy_brief, dict)
+            and (
+                bool(
+                    isinstance(strategy_brief_projection, dict)
+                    and strategy_brief_projection.get("fullValidated") is True
+                )
+                or set(raw_strategy_brief) == compact_brief_keys
+            )
+        )
+        blueprint_valid = bool(
+            isinstance(strategy_brief_projection, dict)
+            and strategy_brief_shape_valid
+            and spec.get("strategySchemaVersion") == EA_STRATEGY_BRIEF_SCHEMA_VERSION
+            and spec.get("strategyBriefDigest") == strategy_brief_digest
+            and "eaImplementationBlueprint" not in spec
+            and "eaBlueprintDigest" not in spec
+            and "blueprintCoverageRequirements" not in spec
+            and "indicatorCoverageRequirements" not in spec
+        )
+        persisted_compact_manifest = (
+            build.get("blueprintCoverageManifest")
+            if isinstance(build.get("blueprintCoverageManifest"), dict)
+            else {}
+        )
+        coverage_requirements_schema = str(
+            persisted_compact_manifest.get("schemaVersion") or ""
+        ) or None
+        coverage_upgrade_required = bool(
+            artifact_kind == "expert_advisor"
+            and coverage_requirements_schema
+            == EA_FACTORY_LEGACY_COMPACT_EA_SOURCE_MANIFEST_V1
+        )
+    identity_contract_digest = strategy_brief_digest or blueprint_digest
     expected_record_digest = _ea_factory_normalized_record_digest(
         normalized_values,
         source_kind,
         source_key,
-        blueprint_digest,
+        identity_contract_digest,
     )
     expected_source_record_id = _ea_factory_normalized_source_record_id(
         normalized_values,
         source_kind,
         source_key,
-        blueprint_digest,
+        identity_contract_digest,
     )
     verification = re.sub(r"[^a-z0-9]+", "_", str(downstream.get("verification_status") or "").lower()).strip("_")
     if (
@@ -22053,10 +23958,14 @@ def _ea_factory_revalidated_build(build: dict) -> dict:
         or spec_schema_version not in {
             "ea-factory-strategy-spec-v1",
             "ea-factory-strategy-spec-v2",
+            "ea-factory-strategy-spec-v3",
         }
         or (
             artifact_kind == "custom_indicator"
-            and spec_schema_version != "ea-factory-strategy-spec-v2"
+            and spec_schema_version not in {
+                "ea-factory-strategy-spec-v2",
+                "ea-factory-strategy-spec-v3",
+            }
         )
         or not blueprint_valid
         or spec.get("buildId") != build_id
@@ -22071,7 +23980,10 @@ def _ea_factory_revalidated_build(build: dict) -> dict:
         or expected_source_record_id != build.get("sourceRecordId")
         or workspace.get("strategySpecDigest") != spec_digest
         or any(not _ea_factory_text(core.get(field)) for field in EA_FACTORY_REQUIRED_CORE_FIELDS if field not in {"source_urls", "verification_status"})
-        or not _ea_factory_public_urls(downstream.get("source_urls"))
+        or (
+            spec_schema_version != "ea-factory-strategy-spec-v3"
+            and not _ea_factory_public_urls(downstream.get("source_urls"))
+        )
         or verification not in EA_FACTORY_VERIFIED_STATUSES
     ):
         raise DataIntegrityError("EA Factory immutable Strategy Spec failed integrity validation.")
@@ -22117,6 +24029,46 @@ def _ea_factory_revalidated_build(build: dict) -> dict:
                 )
             ):
                 raise DataIntegrityError("EA Factory stage durable request reservation is invalid.")
+        retry_count = stage.get("manualRetryCount", 0)
+        retry_history = (
+            stage.get("manualRetryHistory")
+            if isinstance(stage.get("manualRetryHistory"), list)
+            else []
+        )
+        if (
+            isinstance(retry_count, bool)
+            or not isinstance(retry_count, int)
+            or retry_count < 0
+            or retry_count > EA_FACTORY_MANUAL_SOURCE_RETRY_LIMIT
+            or len(retry_history) != retry_count
+            or (retry_count and stage_id != "generate_source")
+        ):
+            raise DataIntegrityError("EA Factory manual Source retry history is invalid.")
+        seen_retry_keys: set[str] = set()
+        for retry_number, retry_row in enumerate(retry_history, start=1):
+            if not isinstance(retry_row, dict):
+                raise DataIntegrityError("EA Factory manual Source retry receipt is malformed.")
+            retry_key = str(retry_row.get("idempotencyKey") or "")
+            failed_mission_id = safe_reference(retry_row.get("failedMissionId"))
+            advance_key = str(retry_row.get("advanceIdempotencyKey") or "")
+            if (
+                retry_row.get("attempt") != retry_number
+                or not SAFE_IDEMPOTENCY_PATTERN.fullmatch(retry_key)
+                or retry_key in seen_retry_keys
+                or not failed_mission_id
+                or retry_row.get("failureCode")
+                not in EA_FACTORY_RETRYABLE_SOURCE_ERROR_CODES
+                or retry_row.get("previousStatus") not in {"blocked", "failed"}
+                or parse_iso(str(retry_row.get("requestedAt") or "")) is None
+                or advance_key
+                != _ea_factory_source_retry_advance_key(
+                    build_id,
+                    failed_mission_id,
+                    retry_key,
+                )
+            ):
+                raise DataIntegrityError("EA Factory manual Source retry receipt failed validation.")
+            seen_retry_keys.add(retry_key)
     versions = build.get("versions") if isinstance(build.get("versions"), list) else []
     if versions:
         generation = next(
@@ -22221,6 +24173,144 @@ def _ea_factory_revalidated_build(build: dict) -> dict:
                 raise DataIntegrityError(
                     "EA Factory immutable source does not cover Blueprint v2."
                 )
+        elif (
+            spec_schema_version == "ea-factory-strategy-spec-v3"
+            and artifact_kind == "custom_indicator"
+        ):
+            if len(versions) != 1 or not isinstance(versions[0], dict):
+                raise DataIntegrityError(
+                    "EA Factory compact Indicator must have one immutable source version."
+                )
+            source_ref = Path(str(versions[0].get("sourceFile") or ""))
+            lexical_source = build_dir / source_ref
+            try:
+                compact_indicator_source = lexical_source.resolve(strict=False)
+                compact_indicator_source.relative_to(source_dir)
+            except (OSError, RuntimeError, ValueError) as error:
+                raise DataIntegrityError(
+                    "EA Factory compact Indicator source path is unsafe."
+                ) from error
+            stable_source = _ea_factory_read_stable_file(
+                compact_indicator_source,
+                256 * 1024,
+            )
+            try:
+                source_text = (
+                    stable_source[0].decode("utf-8", errors="strict")
+                    if stable_source is not None
+                    else ""
+                )
+            except UnicodeDecodeError as error:
+                raise DataIntegrityError(
+                    "EA Factory compact Indicator source is not valid UTF-8."
+                ) from error
+            expected_coverage = build_compact_indicator_source_manifest(
+                source_text,
+                strategy_brief_digest=strategy_brief_digest,
+                strategy_spec_digest=spec_digest,
+                source_digest=(stable_source or (b"", ""))[1],
+                target_platform=platform,
+            )
+            if (
+                compact_indicator_source.parent != source_dir
+                or stable_source is None
+                or stable_source[1] != versions[0].get("sourceDigest")
+                or expected_coverage.get("complete") is not True
+                or not _ea_factory_coverage_manifest_equal(
+                    build.get("blueprintCoverageManifest"),
+                    expected_coverage,
+                )
+                or not _ea_factory_coverage_manifest_equal(
+                    generation.get("blueprintCoverageManifest"),
+                    expected_coverage,
+                )
+            ):
+                raise DataIntegrityError(
+                    "EA Factory compact Indicator source evidence is invalid."
+                )
+        elif (
+            spec_schema_version == "ea-factory-strategy-spec-v3"
+            and artifact_kind == "expert_advisor"
+        ):
+            if len(versions) != 1 or not isinstance(versions[0], dict):
+                raise DataIntegrityError(
+                    "EA Factory compact Expert Advisor must have one immutable source version."
+                )
+            source_ref = Path(str(versions[0].get("sourceFile") or ""))
+            lexical_source = build_dir / source_ref
+            try:
+                compact_ea_source = lexical_source.resolve(strict=False)
+                compact_ea_source.relative_to(source_dir)
+            except (OSError, RuntimeError, ValueError) as error:
+                raise DataIntegrityError(
+                    "EA Factory compact Expert Advisor source path is unsafe."
+                ) from error
+            stable_source = _ea_factory_read_stable_file(
+                compact_ea_source,
+                256 * 1024,
+            )
+            try:
+                source_text = (
+                    stable_source[0].decode("utf-8", errors="strict")
+                    if stable_source is not None
+                    else ""
+                )
+            except UnicodeDecodeError as error:
+                raise DataIntegrityError(
+                    "EA Factory compact Expert Advisor source is not valid UTF-8."
+                ) from error
+            expected_coverage = None
+            if not coverage_upgrade_required:
+                expected_coverage = build_compact_ea_source_manifest(
+                    source_text,
+                    strategy_brief=(strategy_brief_projection or {}).get("brief"),
+                    strategy_brief_digest=strategy_brief_digest,
+                    strategy_spec_digest=spec_digest,
+                    source_digest=(stable_source or (b"", ""))[1],
+                    target_platform=platform,
+                )
+            legacy_coverage_valid = bool(
+                coverage_upgrade_required
+                and stable_source is not None
+                and _ea_factory_legacy_compact_ea_source_manifest_valid(
+                    build.get("blueprintCoverageManifest"),
+                    strategy_brief_digest=strategy_brief_digest,
+                    strategy_spec_digest=spec_digest,
+                    source_digest=stable_source[1],
+                    target_platform=platform,
+                )
+                and _ea_factory_coverage_manifest_equal(
+                    generation.get("blueprintCoverageManifest"),
+                    build.get("blueprintCoverageManifest"),
+                )
+            )
+            if (
+                compact_ea_source.parent != source_dir
+                or stable_source is None
+                or stable_source[1] != versions[0].get("sourceDigest")
+                or (
+                    coverage_upgrade_required
+                    and not legacy_coverage_valid
+                )
+                or (
+                    not coverage_upgrade_required
+                    and (
+                        not isinstance(expected_coverage, dict)
+                        or expected_coverage.get("complete") is not True
+                        or not _ea_factory_coverage_manifest_equal(
+                            build.get("blueprintCoverageManifest"),
+                            expected_coverage,
+                        )
+                        or not _ea_factory_coverage_manifest_equal(
+                            generation.get("blueprintCoverageManifest"),
+                            expected_coverage,
+                        )
+                    )
+                )
+            ):
+                raise DataIntegrityError(
+                    "EA Factory compact Expert Advisor source evidence is invalid."
+                )
     artifact_manifest = _ea_factory_revalidated_artifact_manifest(build)
     manifest_ids = {str(item.get("fileId")) for item in artifact_manifest}
     for stage in stages:
@@ -22244,51 +24334,111 @@ def _ea_factory_revalidated_build(build: dict) -> dict:
         and isinstance(compile_stage, dict)
         and compile_stage.get("status") == "completed"
     ):
-        reports_dir = _ea_factory_managed_folder(build_dir, "Reports")
-        receipt_path = (
-            reports_dir / "metaeditor-compile-v01.json"
-            if reports_dir is not None
-            else None
-        )
-        compile_entries = [
-            item
-            for item in artifact_manifest
-            if item.get("stageId") == "compile_validate"
-            and item.get("artifactKind") == "compile_evidence"
-        ]
-        compile_paths = {
-            str(item.get("relativePath") or "") for item in compile_entries
-        }
-        expected_paths = {
-            "Reports/metaeditor-compile-v01.json",
-            "Reports/metaeditor-compile-v01.txt",
-            *(
-                f"EA_Versions/{Path(str(version.get('versionFile') or '')).with_suffix('.ex4' if platform == 'mt4' else '.ex5').name}"
-                for version in versions
-                if isinstance(version, dict)
-            ),
-        }
-        compile_receipt = (
-            read_json(receipt_path, None)
-            if receipt_path is not None and receipt_path.is_file()
-            else None
-        )
-        if (
-            compile_stage.get("evidenceVerified") is not True
-            or not re.fullmatch(
-                r"[0-9a-f]{64}",
-                str(compile_stage.get("compileReceiptDigest") or ""),
+        if compile_stage.get("visibleEvidenceMode") == EA_FACTORY_VISIBLE_EVIDENCE_MODE:
+            compile_report_id = safe_reference(compile_stage.get("reportId"))
+            compile_report_path = (
+                RUNTIME_REPORTS_DIR / f"{compile_report_id}.json"
+                if compile_report_id
+                else None
             )
-            or compile_paths != expected_paths
-            or set(str(value) for value in (compile_stage.get("artifacts") or []))
-            != {str(item.get("fileId")) for item in compile_entries}
-            or not _ea_factory_compile_receipt_valid(build, compile_receipt)
-            or compile_stage.get("compileReceiptDigest")
-            != compile_receipt.get("receiptDigest")
-        ):
-            raise DataIntegrityError(
-                "EA Factory MetaEditor compile evidence failed integrity validation."
+            compile_report = (
+                read_json(compile_report_path, None)
+                if compile_report_path is not None and compile_report_path.is_file()
+                else None
             )
+            if (
+                not _ea_factory_visible_front_office_evidence_valid(
+                    build,
+                    compile_stage,
+                    {"id": compile_stage.get("missionId")},
+                    compile_report,
+                    expected_operation_id=compile_stage.get("visibleOperationId"),
+                )
+                or compile_stage.get("visibleEvidenceDigest")
+                != ((compile_report or {}).get("metrics") or {}).get(
+                    "stageArtifactManifestDigest"
+                )
+            ):
+                raise DataIntegrityError(
+                    "EA Factory visible MetaEditor evidence failed integrity validation."
+                )
+        else:
+            reports_dir = _ea_factory_managed_folder(build_dir, "Reports")
+            receipt_path = (
+                reports_dir / "metaeditor-compile-v01.json"
+                if reports_dir is not None
+                else None
+            )
+            compile_entries = [
+                item
+                for item in artifact_manifest
+                if item.get("stageId") == "compile_validate"
+                and item.get("artifactKind") == "compile_evidence"
+            ]
+            compile_paths = {
+                str(item.get("relativePath") or "") for item in compile_entries
+            }
+            expected_paths = {
+                "Reports/metaeditor-compile-v01.json",
+                "Reports/metaeditor-compile-v01.txt",
+                *(
+                    f"EA_Versions/{Path(str(version.get('versionFile') or '')).with_suffix('.ex4' if platform == 'mt4' else '.ex5').name}"
+                    for version in versions
+                    if isinstance(version, dict)
+                ),
+            }
+            compile_receipt = (
+                read_json(receipt_path, None)
+                if receipt_path is not None and receipt_path.is_file()
+                else None
+            )
+            if (
+                compile_stage.get("evidenceVerified") is not True
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(compile_stage.get("compileReceiptDigest") or ""),
+                )
+                or compile_paths != expected_paths
+                or set(str(value) for value in (compile_stage.get("artifacts") or []))
+                != {str(item.get("fileId")) for item in compile_entries}
+                or not _ea_factory_compile_receipt_valid(build, compile_receipt)
+                or compile_stage.get("compileReceiptDigest")
+                != compile_receipt.get("receiptDigest")
+            ):
+                raise DataIntegrityError(
+                    "EA Factory MetaEditor compile evidence failed integrity validation."
+                )
+    if platform in {"mt4", "mt5"} and artifact_kind == "expert_advisor":
+        if isinstance(backtest_stage, dict) and backtest_stage.get("status") == "completed":
+            backtest_report_id = safe_reference(backtest_stage.get("reportId"))
+            backtest_report_path = (
+                RUNTIME_REPORTS_DIR / f"{backtest_report_id}.json"
+                if backtest_report_id
+                else None
+            )
+            backtest_report = (
+                read_json(backtest_report_path, None)
+                if backtest_report_path is not None and backtest_report_path.is_file()
+                else None
+            )
+            if (
+                backtest_stage.get("visibleEvidenceMode")
+                != EA_FACTORY_VISIBLE_EVIDENCE_MODE
+                or not _ea_factory_visible_front_office_evidence_valid(
+                    build,
+                    backtest_stage,
+                    {"id": backtest_stage.get("missionId")},
+                    backtest_report,
+                    expected_operation_id=backtest_stage.get("visibleOperationId"),
+                )
+                or backtest_stage.get("visibleEvidenceDigest")
+                != ((backtest_report or {}).get("metrics") or {}).get(
+                    "stageArtifactManifestDigest"
+                )
+            ):
+                raise DataIntegrityError(
+                    "EA Factory visible Strategy Tester evidence failed integrity validation."
+                )
     final_stage = next(
         (item for item in stages if isinstance(item, dict) and item.get("id") == "final_report"),
         None,
@@ -22346,7 +24496,10 @@ def _ea_factory_revalidated_build(build: dict) -> dict:
             != _ea_factory_artifact_manifest_digest(manifest_without_self)
         ):
             raise DataIntegrityError("EA Factory final manifest or audit lineage failed verification.")
+    one_click_run = _ea_factory_revalidated_one_click_run(build)
     validated = copy.deepcopy(build)
+    if one_click_run is not None:
+        validated["oneClickRun"] = one_click_run
     # These fields are derived from the immutable Strategy Spec on every load;
     # never trust a persisted flag to make an obsolete coverage contract look
     # current.  Exact v3 artifacts remain inspectable, but cannot advance.
@@ -22357,6 +24510,8 @@ def _ea_factory_revalidated_build(build: dict) -> dict:
         if coverage_upgrade_required
         else "current"
         if spec_schema_version == "ea-factory-strategy-spec-v2"
+        else "compact_current"
+        if spec_schema_version == "ea-factory-strategy-spec-v3"
         else "legacy_not_applicable"
     )
     return validated
@@ -22497,29 +24652,43 @@ def _write_ea_factory_state_unlocked(payload: dict) -> None:
     payload["schemaVersion"] = EA_FACTORY_STATE_SCHEMA_VERSION
     payload["updatedAt"] = utc_now()
     write_json(_ea_factory_state_path(), payload, keep_backup=True)
+    _invalidate_ea_factory_read_model_cache()
 
 
 def _ea_factory_sheet_schema_read_model() -> dict:
+    labels = {
+        "record_id": "Record ID",
+        "system_name": "System Name",
+        "system_overview": "System Overview",
+        "entry_rules": "Entry Rules",
+        "recovery_rules": "Recovery Rules",
+        "exit_rules": "Exit Rules",
+        "money_management": "Money Management",
+        "order_execution": "Order Execution",
+        "display_requirements": "Display Requirements",
+        "additional_notes": "Additional Notes",
+    }
     columns = [
         {
-            "column": column,
+            "column": chr(ord("A") + index),
             "field": field,
-            "label": label,
-            "group": group,
+            "label": labels[field],
+            "group": "strategy_brief",
         }
-        for column, field, label, group in EA_FACTORY_SHEET_COLUMNS
+        for index, field in enumerate(RESEARCH_SHEET_DEEP_WRITE_HEADERS)
     ]
     return {
-        "schemaVersion": "ea-factory-deep-research-mapping-v1",
+        "schemaVersion": "ea-factory-strategy-brief-mapping-v1",
         "sheetTabDefault": "Deep_Research",
-        "sourceSchemaVersion": "deep-research-sheet-v1",
+        "sourceSchemaVersion": RESEARCH_SHEET_HUB_SCHEMA_VERSION,
         "sourceRequiredHeaders": list(RESEARCH_SHEET_DEEP_WRITE_HEADERS),
-        "range": "Deep_Research mapped fields",
-        "coreRange": "mapped strategy core",
-        "downstreamRange": "mapped research status",
+        "range": "Deep_Research!A:J",
+        "coreRange": "Strategy Brief A:J",
+        "downstreamRange": "Backend report and confirmation ledger",
         "columns": columns,
-        "coreFields": [row[1] for row in EA_FACTORY_SHEET_COLUMNS if row[3] == "core"],
-        "downstreamFields": [row[1] for row in EA_FACTORY_SHEET_COLUMNS if row[3] == "downstream"],
+        "coreFields": list(RESEARCH_SHEET_DEEP_WRITE_HEADERS),
+        "downstreamFields": [],
+        "downstreamStorage": "backend_only",
     }
 
 
@@ -22566,11 +24735,13 @@ def _ea_factory_public_urls(value: object) -> list[str]:
         except ValueError:
             parsed = urlparse("")
         hostname = str(parsed.hostname or "").lower().rstrip(".")
-        # Source evidence is never fetched by this helper, but it still must be
-        # a real public HTTPS reference.  Reserved test TLDs are not evidence.
+        # Source evidence is never fetched by this helper. Accept the same
+        # structurally-public HTTP(S) references as the canonical Research
+        # validator so a valid producer row cannot lose column N in Factory.
+        # Reserved test TLDs are still not evidence.
         if (
             normalized
-            and parsed.scheme.lower() == "https"
+            and parsed.scheme.lower() in {"http", "https"}
             and hostname
             and not hostname.endswith((".invalid", ".test", ".example"))
             and hostname not in {"invalid", "test", "example"}
@@ -22624,6 +24795,102 @@ def _ea_factory_normalized_source_record_id(
     )[:24]
 
 
+EA_STRATEGY_BRIEF_SHEET_TO_CAMEL = {
+    "system_name": "systemName",
+    "system_overview": "systemOverview",
+    "entry_rules": "entryRules",
+    "recovery_rules": "recoveryRules",
+    "exit_rules": "exitRules",
+    "money_management": "moneyManagement",
+    "order_execution": "orderExecution",
+    "display_requirements": "displayRequirements",
+    "additional_notes": "additionalNotes",
+}
+
+
+def _ea_factory_sheet_strategy_brief_digest(record_id: str, content: dict) -> str:
+    canonical_row = {
+        "record_id": str(record_id or ""),
+        **{
+            field: str(content.get(field) or "")
+            for field in EA_STRATEGY_BRIEF_SHEET_TO_CAMEL
+        },
+    }
+    return payload_digest("ea-strategy-brief-sheet-row-v1", canonical_row)
+
+
+def _ea_factory_compact_strategy_brief(values: object) -> dict | None:
+    """Normalize either a full report brief or the exact content-only A-J row."""
+
+    if not isinstance(values, dict):
+        return None
+    raw_brief = values.get("strategyBrief")
+    full_brief = None
+    if isinstance(raw_brief, dict):
+        try:
+            full_brief = normalize_strategy_brief(raw_brief)
+        except StrategyBriefValidationError:
+            # Authenticated A-J snapshots intentionally keep evidence metadata
+            # in the Backend ledger, so their immutable cached brief contains
+            # only the nine content fields.
+            full_brief = None
+    if full_brief is not None:
+        record_id = _ea_factory_text(
+            values.get("record_id") or values.get("recordId"),
+            300,
+        )
+        if not record_id:
+            record_id = "EA-" + compute_strategy_brief_digest(full_brief)[:24]
+        content = {
+            sheet_name: _ea_factory_text(full_brief[camel_name], 8000)
+            for sheet_name, camel_name in EA_STRATEGY_BRIEF_SHEET_TO_CAMEL.items()
+        }
+        digest = compute_strategy_brief_digest(full_brief)
+        source_urls = list(full_brief.get("sourceLinks") or [])
+    else:
+        record_id = _ea_factory_text(
+            values.get("record_id") or values.get("recordId"),
+            300,
+        )
+        content = {
+            sheet_name: _ea_factory_text(
+                values.get(
+                    sheet_name,
+                    values.get(camel_name, (raw_brief or {}).get(camel_name)),
+                ),
+                8000,
+            )
+            for sheet_name, camel_name in EA_STRATEGY_BRIEF_SHEET_TO_CAMEL.items()
+        }
+        if not record_id or any(not content[name] for name in EA_STRATEGY_BRIEF_SHEET_TO_CAMEL):
+            return None
+        digest = _ea_factory_sheet_strategy_brief_digest(record_id, content)
+        source_urls = _ea_factory_public_urls(
+            values.get("sourceLinks") or values.get("source_urls")
+        )
+    brief = {
+        "schemaVersion": EA_STRATEGY_BRIEF_SCHEMA_VERSION,
+        **{
+            camel_name: content[sheet_name]
+            for sheet_name, camel_name in EA_STRATEGY_BRIEF_SHEET_TO_CAMEL.items()
+        },
+    }
+    if full_brief is not None:
+        brief.update({
+            "sourceLinks": list(full_brief["sourceLinks"]),
+            "checkedAt": full_brief["checkedAt"],
+            "limitations": list(full_brief["limitations"]),
+        })
+    return {
+        "recordId": record_id,
+        "content": content,
+        "brief": brief,
+        "digest": digest,
+        "sourceUrls": source_urls,
+        "fullValidated": full_brief is not None,
+    }
+
+
 def _ea_factory_normalize_record(
     values: object,
     *,
@@ -22635,13 +24902,28 @@ def _ea_factory_normalize_record(
     research_blueprint = None
     research_blueprint_digest = ""
     research_readiness_issues: list[str] = []
+    strategy_brief_projection = _ea_factory_compact_strategy_brief(values)
+    strategy_brief = (
+        strategy_brief_projection.get("brief")
+        if isinstance(strategy_brief_projection, dict)
+        and isinstance(strategy_brief_projection.get("brief"), dict)
+        else None
+    )
+    strategy_brief_digest = (
+        str(strategy_brief_projection.get("digest") or "")
+        if isinstance(strategy_brief_projection, dict)
+        else ""
+    )
     if isinstance(values, dict):
         raw_blueprint = (
             values.get("eaImplementationBlueprint")
             if values.get("eaImplementationBlueprint") is not None
             else values.get("eaBlueprint")
         )
-        if source_kind in {"verified_deep_research", "verified_deep_research_sheet"}:
+        if (
+            source_kind in {"verified_deep_research", "verified_deep_research_sheet"}
+            and not isinstance(strategy_brief_projection, dict)
+        ):
             try:
                 research_blueprint = normalize_ea_research_blueprint(
                     _contract_decoded_value(raw_blueprint)
@@ -22654,10 +24936,42 @@ def _ea_factory_normalize_record(
             except EAResearchBlueprintValidationError:
                 research_blueprint = None
                 research_readiness_issues.append("legacy_or_invalid_ea_blueprint")
-        raw_by_field = {
-            field: values.get(field, values.get(column, ""))
-            for column, field, _label, _group in EA_FACTORY_SHEET_COLUMNS
-        }
+        if isinstance(strategy_brief_projection, dict):
+            content = strategy_brief_projection["content"]
+            raw_by_field = {
+                "record_id": strategy_brief_projection["recordId"],
+                "system_name": content["system_name"],
+                "strategy_family": content["system_overview"],
+                "symbols_market": content["system_overview"],
+                "timeframe": "ใช้ Timeframe ปัจจุบันหรือค่าที่ผู้ใช้เลือก; ไม่ล็อกจากงานวิจัย",
+                "entry_rules": content["entry_rules"],
+                "exit_rules": content["exit_rules"],
+                "stop_loss": content["exit_rules"],
+                "take_profit": content["exit_rules"],
+                "recovery": content["recovery_rules"],
+                "lot_risk": content["money_management"],
+                "indicators": content["entry_rules"],
+                "special_conditions": "\n".join([
+                    content["order_execution"],
+                    content["display_requirements"],
+                    content["additional_notes"],
+                ]),
+                "source_urls": "\n".join(strategy_brief_projection["sourceUrls"]),
+                "verification_status": "verified_strategy_brief",
+                "backtest_status": "not_run",
+                "backtest_report": "",
+                "optimization_status": "not_run",
+                "optimization_report": "",
+                "issues": "",
+                "next_action": "ยืนยัน Strategy Spec และแพลตฟอร์มก่อนสร้าง Source",
+                "target_platform": "",
+                "updated_at": values.get("updated_at") or values.get("checkedAt") or "",
+            }
+        else:
+            raw_by_field = {
+                field: values.get(field, values.get(column, ""))
+                for column, field, _label, _group in EA_FACTORY_SHEET_COLUMNS
+            }
     elif isinstance(values, (list, tuple)):
         bounded = list(values[: len(EA_FACTORY_SHEET_COLUMNS)])
         bounded.extend([""] * (len(EA_FACTORY_SHEET_COLUMNS) - len(bounded)))
@@ -22682,6 +24996,10 @@ def _ea_factory_normalize_record(
     missing_core = {
         field for field in EA_FACTORY_REQUIRED_CORE_FIELDS if not normalized.get(field)
     }
+    # Compact A-J rows intentionally keep source evidence in the authenticated
+    # Backend report ledger instead of duplicating URLs into the learner Sheet.
+    if isinstance(strategy_brief_projection, dict):
+        missing_core.discard("source_urls")
     verification_status = re.sub(
         r"[^a-z0-9]+",
         "_",
@@ -22689,32 +25007,23 @@ def _ea_factory_normalize_record(
     ).strip("_")
     if verification_status not in EA_FACTORY_VERIFIED_STATUSES:
         missing_core.add("verification_status")
-    if not urls:
+    if not urls and not isinstance(strategy_brief_projection, dict):
         missing_core.add("source_urls")
-    if source_kind in {"verified_deep_research", "verified_deep_research_sheet"}:
-        completeness = (
-            research_blueprint.get("completeness")
-            if isinstance(research_blueprint, dict)
-            and isinstance(research_blueprint.get("completeness"), dict)
-            else {}
+    if (
+        source_kind in {"verified_deep_research", "verified_deep_research_sheet"}
+        and not isinstance(strategy_brief_projection, dict)
+    ):
+        # A valid old Blueprint is still old. Its validity is useful only for
+        # history diagnostics and must never make the record build-ready.
+        research_readiness_issues.append(
+            "legacy_49_field_blueprint_read_only_rerun_required"
         )
-        if not research_blueprint:
-            if "legacy_or_invalid_ea_blueprint" not in research_readiness_issues:
-                research_readiness_issues.append("legacy_or_invalid_ea_blueprint")
-        elif not (
-            completeness.get("status") == "ready"
-            and completeness.get("eaHandoffAllowed") is True
-            and completeness.get("deterministicBacktestAllowed") is True
-        ):
-            research_readiness_issues.append(
-                "ea_blueprint_needs_clarification"
-            )
     missing_core_fields = sorted(missing_core)
     source_record_id = _ea_factory_normalized_source_record_id(
         normalized,
         source_kind,
         source_key,
-        research_blueprint_digest,
+        strategy_brief_digest or research_blueprint_digest,
     )
     core = {
         field: normalized[field]
@@ -22752,6 +25061,8 @@ def _ea_factory_normalize_record(
         "missingCoreFields": missing_core_fields,
         "readinessIssues": readiness_issues,
         "buildReady": not missing_core_fields and not research_readiness_issues,
+        "strategyBrief": copy.deepcopy(strategy_brief),
+        "strategyBriefDigest": strategy_brief_digest or None,
         "eaImplementationBlueprint": copy.deepcopy(research_blueprint),
         "eaBlueprintDigest": research_blueprint_digest or None,
         "eaReadiness": (
@@ -22768,7 +25079,7 @@ def _ea_factory_normalize_record(
             normalized,
             source_kind,
             source_key,
-            research_blueprint_digest,
+            strategy_brief_digest or research_blueprint_digest,
         ),
     }
 
@@ -22893,20 +25204,35 @@ def _ea_factory_parse_sheet_rows(
     first_row = [str(value or "").strip() for value in parsed_rows[0]]
     canonical_header = tuple(expected_fields)
     supplied_header = tuple(first_row)
-    if supplied_header not in {canonical_header, EA_FACTORY_SHEET_TEMPLATE_HEADERS}:
-        raise RequestError("Google Sheet A-W header is missing, reordered, or not canonical.", 422)
+    compact_header = tuple(RESEARCH_SHEET_DEEP_WRITE_HEADERS)
+    if supplied_header not in {
+        compact_header,
+        canonical_header,
+        EA_FACTORY_SHEET_TEMPLATE_HEADERS,
+    }:
+        raise RequestError("Google Sheet header must be the canonical Strategy Brief A-J schema.", 422)
+    compact_mode = supplied_header == compact_header
+    row_width = len(compact_header) if compact_mode else len(EA_FACTORY_SHEET_COLUMNS)
     start_index = 1
     records: list[dict] = []
     seen_record_ids: set[str] = set()
     for row in parsed_rows[start_index : start_index + EA_FACTORY_SOURCE_ROW_LIMIT]:
-        if not any(str(value or "").strip() for value in row[: len(EA_FACTORY_SHEET_COLUMNS)]):
+        if not any(str(value or "").strip() for value in row[:row_width]):
             continue
-        if len(row) > len(EA_FACTORY_SHEET_COLUMNS) and any(
-            str(value or "").strip() for value in row[len(EA_FACTORY_SHEET_COLUMNS) :]
+        if len(row) > row_width and any(
+            str(value or "").strip() for value in row[row_width:]
         ):
-            raise RequestError("Google Sheet rows must use only columns A-W.", 422)
+            raise RequestError("Google Sheet rows contain data outside the declared schema.", 422)
+        values = (
+            {
+                header: row[index] if index < len(row) else ""
+                for index, header in enumerate(compact_header)
+            }
+            if compact_mode
+            else row
+        )
         record = _ea_factory_normalize_record(
-            row,
+            values,
             source_kind=source_kind,
             source_key=source_key,
         )
@@ -22921,7 +25247,7 @@ def _ea_factory_parse_sheet_rows(
         seen_record_ids.add(logical_record_id)
         records.append(record)
     if not records:
-        raise RequestError("Google Sheet has no usable A-W strategy records.", 422)
+        raise RequestError("Google Sheet has no usable Strategy Brief records.", 422)
     if len(parsed_rows) - start_index > EA_FACTORY_SOURCE_ROW_LIMIT:
         raise RequestError("Google Sheet exceeds the maximum row count for one sync.", 413)
     return records
@@ -22935,100 +25261,68 @@ def _ea_factory_deep_research_values(row: dict) -> dict:
     source of truth and build/backtest state stays in the local factory ledger.
     """
 
-    risk_model = _research_sheet_json_cell(
-        row.get("risk_model_json"), expected=dict, fallback={}
-    )
-    implementation_notes = _research_sheet_lossless_json_cell_decode(
-        row.get("implementation_notes_json"),
-        expected=dict,
-        fallback={},
-        max_chars=TRADING_SYSTEM_RESEARCH_SHEET_BLUEPRINT_CELL_MAX_CHARS,
-        field_name="implementation_notes_json",
-    )
-    try:
-        research_blueprint = reconstruct_ea_research_from_sheet({
-            **row,
-            "implementation_notes_json": implementation_notes,
-        })
-    except EAResearchBlueprintValidationError:
-        research_blueprint = None
-    lineage_record_id = (
-        safe_reference(row.get("source_record_id"))
-        or safe_reference(row.get("source_discovery_id"))
-    )
-    lineage_report_id = safe_reference(row.get("source_report_id"))
-    research_report_id = (
-        safe_reference(row.get("research_report_id"))
-        or safe_reference(row.get("research_id"))
-        or "legacy-deep-sheet-row"
-    )
-    source_record_id = (
-        _research_sheet_deep_source_identity(
-            research_report_id,
-            {
-                "recordId": lineage_record_id,
-                "reportId": lineage_report_id,
+    if all(name in row for name in RESEARCH_SHEET_DEEP_WRITE_HEADERS):
+        return {
+            **{
+                name: row.get(name)
+                for name in RESEARCH_SHEET_DEEP_WRITE_HEADERS
             },
-        )["eaFactoryRecordId"]
-        if lineage_record_id
-        else safe_reference(row.get("ea_factory_record_id"))
-        or safe_reference(row.get("research_id"))
+            "_humanConfirmationValid": True,
+        }
+    raise RequestError(
+        "Legacy 49-field Deep_Research rows are read-only history. "
+        "Rerun Deep Research to create an exact Strategy Brief A-J row.",
+        422,
     )
-    return {
-        "eaImplementationBlueprint": research_blueprint,
-        "eaBlueprintDigest": (
-            ea_research_blueprint_digest(research_blueprint)
-            if isinstance(research_blueprint, dict)
-            else None
-        ),
-        "record_id": source_record_id,
-        "system_name": row.get("system_name"),
-        "strategy_family": row.get("strategy_family") or row.get("system_identity_json"),
-        "symbols_market": row.get("suitable_market") or row.get("symbols_json"),
-        "timeframe": row.get("suitable_timeframes_json"),
-        "entry_rules": row.get("entry_steps_json") or row.get("verified_rules_json"),
-        "exit_rules": row.get("exit_steps_json"),
-        "stop_loss": (
-            row.get("stop_loss_rules_json")
-            or _ea_factory_mapping_value(
-                risk_model, "stopLossRules", "stopLoss", "stop_loss", "invalidation"
-            )
-        ),
-        "take_profit": (
-            row.get("take_profit_rules_json")
-            or _ea_factory_mapping_value(
-                risk_model, "takeProfitRules", "takeProfit", "take_profit", "profitTarget"
-            )
-        ),
-        "recovery": row.get("recovery_averaging_rules_json"),
-        "lot_risk": (
-            row.get("position_sizing_rules_json")
-            or _ea_factory_mapping_value(
-                risk_model,
-                "riskAndSizing",
-                "positionSizingRules",
-                "positionSizing",
-                "lotRisk",
-            )
-        ),
-        "indicators": row.get("indicator_settings_json"),
-        "special_conditions": {
-            "setupConditions": row.get("setup_conditions_json"),
-            "specialConditions": row.get("special_conditions_json"),
-            "tradeManagement": row.get("trade_management_steps_json"),
-            "implementationNotes": implementation_notes,
-        },
-        "source_urls": row.get("source_links_json"),
-        "verification_status": row.get("verification_status"),
-        "backtest_status": row.get("backtest_status") or "not_run",
-        "backtest_report": "",
-        "optimization_status": row.get("optimization_status") or "not_run",
-        "optimization_report": "",
-        "issues": row.get("issues") or row.get("limitations_json"),
-        "next_action": row.get("next_action"),
-        "target_platform": row.get("candidate_platforms_json"),
-        "updated_at": row.get("updated_at") or row.get("checked_at"),
-    }
+
+
+def _ea_factory_sheet_human_confirmation_valid(
+    row: object,
+    implementation_notes: object,
+    blueprint: object,
+) -> bool:
+    """Validate the approval receipt embedded in one exact Sheet blueprint."""
+
+    source = row if isinstance(row, dict) else {}
+    notes = implementation_notes if isinstance(implementation_notes, dict) else {}
+    research = blueprint if isinstance(blueprint, dict) else None
+    confirmation = (
+        notes.get("humanConfirmation")
+        if isinstance(notes.get("humanConfirmation"), dict)
+        else {}
+    )
+    report_id = safe_reference(source.get("research_report_id"))
+    confirmed_report_id = safe_reference(confirmation.get("researchReportId"))
+    mission_id = safe_reference(source.get("research_mission_id"))
+    confirmed_digest = str(
+        confirmation.get("confirmedBlueprintDigest") or ""
+    ).strip().lower()
+    confirmed_at = parse_iso(confirmation.get("confirmedAt"))
+    confirmed_assumption_ids = confirmation.get("confirmedAssumptionIds")
+    if not (
+        research
+        and report_id
+        and confirmed_report_id == report_id
+        and mission_id
+        and safe_reference(confirmation.get("sourceMissionId")) == mission_id
+        and confirmation.get("schemaVersion")
+        == DEEP_RESEARCH_CONFIRMATION_SCHEMA_VERSION
+        and confirmation.get("saveToGoogleSheet") is True
+        and confirmation.get("sheetBinding")
+        == _deep_research_active_sheet_binding()
+        and isinstance(confirmed_assumption_ids, list)
+        and all(
+            isinstance(item, str) and bool(safe_reference(item))
+            for item in confirmed_assumption_ids
+        )
+        and confirmed_at is not None
+        and re.fullmatch(r"[0-9a-f]{64}", confirmed_digest)
+    ):
+        return False
+    return secrets.compare_digest(
+        confirmed_digest,
+        ea_research_blueprint_digest(research),
+    )
 
 
 def _ea_factory_deep_research_records(
@@ -23040,56 +25334,60 @@ def _ea_factory_deep_research_records(
     records: list[dict] = []
     seen_record_ids: set[str] = set()
     source_rows = rows if isinstance(rows, list) else []
-    # Prefer the newest current research rows when the bounded cache contains
-    # multiple versions of the same system.
-    for row in reversed(source_rows[-RESEARCH_SHEET_CACHE_ROW_LIMIT:]):
-        if not isinstance(row, dict):
-            continue
-        is_current = str(row.get("is_current") or "").strip().lower()
-        verification_status = re.sub(
-            r"[^a-z0-9]+",
-            "_",
-            str(row.get("verification_status") or "").strip().lower(),
-        ).strip("_")
-        if is_current not in {"1", "true", "yes", "current"}:
-            continue
-        if verification_status not in EA_FACTORY_CANONICAL_RESEARCH_STATUSES:
-            continue
-        values = _ea_factory_deep_research_values(row)
-        record = _ea_factory_normalize_record(
-            values,
-            source_kind="verified_deep_research_sheet",
-            source_key=source_key,
-            source_report_id=(
-                row.get("research_report_id") or row.get("source_report_id")
-            ),
-            source_mission_id=(
-                row.get("research_mission_id") or row.get("source_mission_id")
-            ),
+    compact_rows = [
+        row
+        for row in source_rows[-RESEARCH_SHEET_CACHE_ROW_LIMIT:]
+        if isinstance(row, dict)
+        and all(name in row for name in RESEARCH_SHEET_DEEP_WRITE_HEADERS)
+    ]
+    if compact_rows:
+        for row in reversed(compact_rows):
+            missing_columns = [
+                name
+                for name in RESEARCH_SHEET_DEEP_WRITE_HEADERS
+                if not _research_sheet_cell_is_present(row.get(name))
+            ]
+            if missing_columns:
+                if strict:
+                    raise RequestError(
+                        "Deep_Research contains an incomplete Strategy Brief row.",
+                        422,
+                    )
+                continue
+            record = _ea_factory_normalize_record(
+                _ea_factory_deep_research_values(row),
+                source_kind="verified_deep_research_sheet",
+                source_key=source_key,
+            )
+            if record is None:
+                if strict:
+                    raise RequestError(
+                        "Deep_Research contains an invalid Strategy Brief row.",
+                        422,
+                    )
+                continue
+            logical_record_id = str(record.get("recordId") or "").casefold()
+            if logical_record_id in seen_record_ids:
+                if strict:
+                    raise RequestError(
+                        "Deep_Research contains duplicate Strategy Brief record IDs.",
+                        409,
+                    )
+                continue
+            seen_record_ids.add(logical_record_id)
+            records.append(record)
+            if len(records) >= EA_FACTORY_SOURCE_ROW_LIMIT:
+                break
+        return records
+    # Historical wide Deep_Research rows stay available in the research
+    # history UI, but they are never converted into a current factory source.
+    if strict and any(isinstance(row, dict) for row in source_rows):
+        raise RequestError(
+            "Deep_Research contains only legacy 49-field rows. Rerun Deep "
+            "Research to create exact Strategy Brief A-J records.",
+            422,
         )
-        if record is None:
-            if strict:
-                raise RequestError(
-                    "Deep_Research contains a current verified row with invalid identifiers or unsafe content.",
-                    422,
-                )
-            continue
-        logical_record_id = str(record.get("recordId") or "").lower()
-        if logical_record_id in seen_record_ids:
-            # A central research row is versioned. Newest wins in the automatic
-            # cache projection; an explicit sync fails closed so the owner can
-            # repair two simultaneously-current rows.
-            if strict:
-                raise RequestError(
-                    "Deep_Research contains duplicate current EA Factory record IDs.",
-                    409,
-                )
-            continue
-        seen_record_ids.add(logical_record_id)
-        records.append(record)
-        if len(records) >= EA_FACTORY_SOURCE_ROW_LIMIT:
-            break
-    return records
+    return []
 
 
 def _ea_factory_parse_deep_research_values(
@@ -23104,7 +25402,11 @@ def _ea_factory_parse_deep_research_values(
         {header for header in headers if header and headers.count(header) > 1}
     )
     missing_headers = sorted(set(RESEARCH_SHEET_DEEP_WRITE_HEADERS) - set(headers))
-    if duplicate_headers or missing_headers:
+    if (
+        duplicate_headers
+        or missing_headers
+        or headers != list(RESEARCH_SHEET_DEEP_WRITE_HEADERS)
+    ):
         raise RequestError(
             "Deep_Research header is missing, duplicated, or not canonical.",
             422,
@@ -23132,7 +25434,7 @@ def _ea_factory_parse_deep_research_values(
     )
     if not records:
         raise RequestError(
-            "Deep_Research has no current verified strategy records for EA Factory.",
+            "Deep_Research has no complete Strategy Brief records for EA Factory.",
             422,
         )
     return records
@@ -23143,9 +25445,9 @@ def _ea_factory_read_deep_research_values(sheet_id: str, tab_name: str) -> list[
     if not header_rows:
         raise RequestError("Deep_Research has no header row.", 422)
     headers = [google_sheet_hub.canonical_header(value) for value in header_rows[0]]
-    if "research_id" not in headers:
+    if "record_id" not in headers:
         raise RequestError("Deep_Research key column is missing.", 422)
-    key_column = _research_sheet_column_letter(headers.index("research_id") + 1)
+    key_column = _research_sheet_column_letter(headers.index("record_id") + 1)
     key_rows = google_sheet_hub.read_values(
         sheet_id,
         tab_name,
@@ -23210,34 +25512,36 @@ def _ea_factory_research_source_records(
     for report in report_rows:
         if not isinstance(report, dict):
             continue
+        # Reject rows that the lineage validator can never accept before it
+        # resolves Mission context and verified World_System evidence. Runtime
+        # archives contain thousands of unrelated reports; this preserves the
+        # exact trust boundary while avoiding expensive work for each one.
+        if not (
+            report.get("type") == "trading_system_research_report"
+            and report.get("status") == "ready"
+            and safe_reference(report.get("linkedPropId")) == "left_server_racks"
+            and safe_reference(report.get("ownerAgentId")) == "mission_archivist"
+        ):
+            continue
         report_id = safe_reference(report.get("id"))
         mission_id = safe_reference(report.get("linkedMissionId"))
         mission = mission_by_id.get(mission_id)
         metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
-        receipt = metrics.get("workflowOutput") if isinstance(metrics.get("workflowOutput"), dict) else {}
+        if not isinstance(metrics.get("strategyBrief"), dict):
+            continue
         context = report.get("workflowContext") if isinstance(report.get("workflowContext"), dict) else {}
-        report_ids = {
-            safe_reference(item)
-            for item in (mission.get("reportIds") if isinstance((mission or {}).get("reportIds"), list) else [])
-            if safe_reference(item)
-        }
-        if not (
-            report_id
-            and mission_id
-            and isinstance(mission, dict)
-            and report.get("type") == "trading_system_research_report"
-            and report.get("status") == "ready"
-            and safe_reference(report.get("linkedPropId")) == "left_server_racks"
-            and safe_reference(report.get("ownerAgentId")) == "mission_archivist"
-            and mission.get("status") in DASHBOARD_WORKFLOW_SOURCE_MISSION_READY_STATUSES
-            and report_id in report_ids
-            and safe_reference(mission.get("targetId")) == "left_server_racks"
-            and safe_reference(mission.get("owner")) == "mission_archivist"
-            and context.get("propId") == "left_server_racks"
-            and context.get("actionId") == "deep_research_system"
-            and receipt.get("applicable") is True
-            and receipt.get("valid") is True
-        ):
+        lineage_mission, lineage_error = _deep_research_report_lineage(
+            report,
+            mission,
+        )
+        if lineage_error is not None or not isinstance(lineage_mission, dict):
+            continue
+        # A completed research Mission is still a review draft.  It becomes a
+        # selectable EA Factory source only after the local operator confirms
+        # the exact Strategy Brief digest and the resulting Deep_Research row
+        # has a verified Google Sheet write receipt. A legacy Blueprint never
+        # satisfies this handoff contract.
+        if not _deep_research_report_is_handoff_ready(report):
             continue
         source = context.get("source") if isinstance(context.get("source"), dict) else {}
         source_identity = _research_sheet_deep_source_identity(report_id, source)
@@ -23250,99 +25554,15 @@ def _ea_factory_research_source_records(
         if current_report_id and current_report_id != report_id:
             continue
         try:
-            research_blueprint = reconstruct_ea_research_from_metrics(metrics)
-        except EAResearchBlueprintValidationError:
-            research_blueprint = None
-        completeness = (
-            research_blueprint.get("completeness")
-            if isinstance(research_blueprint, dict)
-            and isinstance(research_blueprint.get("completeness"), dict)
-            else {}
-        )
-        research_ea_ready = bool(
-            completeness.get("status") == "ready"
-            and completeness.get("eaHandoffAllowed") is True
-            and completeness.get("deterministicBacktestAllowed") is True
-        )
-        system_identity = metrics.get("systemIdentity")
-        risk_model = metrics.get("riskModel")
-        identity_name = _ea_factory_mapping_value(
-            system_identity,
-            "systemName",
-            "name",
-            "title",
-        )
-        identity_family = _ea_factory_mapping_value(
-            system_identity,
-            "strategyFamily",
-            "family",
-            "type",
-        )
-        values = {
-            "eaImplementationBlueprint": research_blueprint,
-            "eaBlueprintDigest": (
-                ea_research_blueprint_digest(research_blueprint)
-                if isinstance(research_blueprint, dict)
-                else None
-            ),
-            # Use the exact same collision-safe identity as the Deep_Research
-            # Sheet projection.  This makes the live runtime fallback and its
-            # archived Sheet copy one logical record while still preserving two
-            # source reports that happen to reuse the same recordId.
-            "record_id": source_identity["eaFactoryRecordId"],
-            "system_name": identity_name or report.get("title"),
-            "strategy_family": identity_family or system_identity,
-            "symbols_market": metrics.get("suitableMarket"),
-            "timeframe": metrics.get("suitableTimeframe"),
-            "entry_rules": metrics.get("entrySteps") or metrics.get("verifiedRules"),
-            "exit_rules": metrics.get("exitSteps"),
-            "stop_loss": _ea_factory_mapping_value(
-                risk_model,
-                "stopLoss",
-                "stop_loss",
-                "invalidation",
-            ),
-            "take_profit": _ea_factory_mapping_value(
-                risk_model,
-                "takeProfit",
-                "take_profit",
-                "profitTarget",
-            ),
-            "recovery": metrics.get("recoveryAndAveragingRules"),
-            "lot_risk": _ea_factory_mapping_value(
-                risk_model,
-                "riskAndSizing",
-                "positionSizingRules",
-                "positionSizing",
-                "lotRisk",
-            ),
-            "indicators": metrics.get("indicatorSettings"),
-            "special_conditions": {
-                "specialConditions": metrics.get("specialConditions"),
-                "tradeManagement": metrics.get("tradeManagementSteps"),
-                "implementationNotes": metrics.get("implementationNotes"),
-            },
-            "source_urls": metrics.get("sourceLinks"),
-            "verification_status": (
-                "verified_deep_research"
-                if research_ea_ready
-                else str(completeness.get("status") or "legacy_needs_enrichment")
-            ),
-            "backtest_status": "not_run",
-            "backtest_report": "",
-            "optimization_status": "not_run",
-            "optimization_report": "",
-            "issues": metrics.get("limitations") or metrics.get("conflictingEvidence"),
-            "next_action": (
-                "เลือกแพลตฟอร์มและยืนยัน Strategy Spec ก่อนสร้าง Source"
-                if research_ea_ready
-                else "เติมกฎที่ยังไม่ทราบ/ขัดแย้ง แล้ววิจัยใหม่ก่อนสร้าง Source"
-            ),
-            "target_platform": "",
-            "updated_at": report.get("updatedAt") or report.get("createdAt"),
-        }
+            strategy_brief = normalize_strategy_brief(metrics.get("strategyBrief"))
+        except StrategyBriefValidationError:
+            continue
         record = _ea_factory_normalize_record(
-            values,
+            {
+                "record_id": source_identity["eaFactoryRecordId"],
+                "strategyBrief": strategy_brief,
+                "updated_at": report.get("updatedAt") or report.get("createdAt"),
+            },
             source_kind="verified_deep_research",
             source_key=report_id,
             source_report_id=report_id,
@@ -23363,7 +25583,22 @@ def _ea_factory_google_sheet_records(state: dict) -> list[dict]:
             continue
         for row in snapshot.get("records") if isinstance(snapshot.get("records"), list) else []:
             if isinstance(row, dict):
-                records.append(copy.deepcopy(row))
+                stored = copy.deepcopy(row)
+                if (
+                    isinstance(stored.get("eaImplementationBlueprint"), dict)
+                    and not isinstance(stored.get("strategyBrief"), dict)
+                ):
+                    stored["buildReady"] = False
+                    issues = [
+                        redact_text(str(item or ""), 160)
+                        for item in (stored.get("readinessIssues") or [])
+                        if str(item or "").strip()
+                    ]
+                    rerun_issue = "legacy_49_field_blueprint_read_only_rerun_required"
+                    if rerun_issue not in issues:
+                        issues.append(rerun_issue)
+                    stored["readinessIssues"] = issues
+                records.append(stored)
             if len(records) >= EA_FACTORY_SOURCE_ROW_LIMIT:
                 return records
     return records
@@ -23376,6 +25611,70 @@ def _ea_factory_source_catalog(
     missions: list[dict] | None = None,
 ) -> list[dict]:
     source_state = state if isinstance(state, dict) else _load_ea_factory_state_unlocked()
+    report_rows = (
+        reports
+        if isinstance(reports, list)
+        else load_runtime_reports(limit=EA_FACTORY_SOURCE_REPORT_LIMIT)
+    )
+    version_index = _research_sheet_build_deep_version_index(report_rows)
+    current_deep_report_by_record: dict[str, dict] = {}
+    report_by_id = {
+        safe_reference(row.get("id")): row
+        for row in report_rows
+        if isinstance(row, dict) and safe_reference(row.get("id"))
+    }
+    for version_group in version_index.values():
+        if not isinstance(version_group, dict):
+            continue
+        current_report_id = safe_reference(version_group.get("currentReportId"))
+        by_report_id = (
+            version_group.get("byReportId")
+            if isinstance(version_group.get("byReportId"), dict)
+            else {}
+        )
+        current = by_report_id.get(current_report_id)
+        logical_record_id = str(
+            current.get("eaFactoryRecordId")
+            if isinstance(current, dict)
+            else ""
+        ).strip().casefold()
+        if logical_record_id and current_report_id:
+            current_report = report_by_id.get(current_report_id)
+            current_metrics = (
+                current_report.get("metrics")
+                if isinstance(current_report, dict)
+                and isinstance(current_report.get("metrics"), dict)
+                else {}
+            )
+            try:
+                if not isinstance(current_metrics.get("strategyBrief"), dict):
+                    raise StrategyBriefValidationError([
+                        {
+                            "code": "BRIEF_RERUN_REQUIRED",
+                            "path": "$.strategyBrief",
+                            "messageTh": "ต้องวิจัยใหม่เพื่อสร้าง Strategy Brief A-J",
+                        }
+                    ])
+                current_brief = normalize_strategy_brief(
+                    current_metrics.get("strategyBrief")
+                )
+                current_brief_digest = compute_strategy_brief_digest(current_brief)
+                current_sheet_brief_digest = _ea_factory_sheet_strategy_brief_digest(
+                    logical_record_id,
+                    {
+                        sheet_name: current_brief[camel_name]
+                        for sheet_name, camel_name
+                        in EA_STRATEGY_BRIEF_SHEET_TO_CAMEL.items()
+                    },
+                )
+            except StrategyBriefValidationError:
+                current_brief_digest = ""
+                current_sheet_brief_digest = ""
+            current_deep_report_by_record[logical_record_id] = {
+                "reportId": current_report_id,
+                "briefDigest": current_brief_digest,
+                "sheetBriefDigest": current_sheet_brief_digest,
+            }
     hub = _research_sheet_hub_internal()
     sheet_id = str(hub.get("sheetId") or "")
     deep_tab_name = RESEARCH_SHEET_HUB_PROP_TABS["left_server_racks"]["tabName"]
@@ -23390,7 +25689,7 @@ def _ea_factory_source_catalog(
     combined = [
         *cached_deep_records,
         *_ea_factory_google_sheet_records(source_state),
-        *_ea_factory_research_source_records(reports, missions),
+        *_ea_factory_research_source_records(report_rows, missions),
     ]
     records: list[dict] = []
     seen_source_ids: set[str] = set()
@@ -23407,26 +25706,57 @@ def _ea_factory_source_catalog(
             or not re.fullmatch(r"[0-9a-f]{64}", digest)
         ):
             continue
+        current_deep_decision = current_deep_report_by_record.get(logical_record_id) or {}
+        current_deep_report_id = safe_reference(current_deep_decision.get("reportId"))
+        record_report_id = safe_reference(record.get("sourceReportId"))
+        compact_sheet_matches_current = bool(
+            record.get("sourceKind") == "verified_deep_research_sheet"
+            and not record_report_id
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(record.get("strategyBriefDigest") or ""),
+            )
+            and record.get("strategyBriefDigest")
+            == current_deep_decision.get("sheetBriefDigest")
+        )
+        if (
+            current_deep_report_id
+            and record.get("sourceKind")
+            in {"verified_deep_research", "verified_deep_research_sheet"}
+            and record_report_id != current_deep_report_id
+            and not compact_sheet_matches_current
+        ):
+            # A newer canonical revision is the decision, even while it awaits
+            # confirmation/Sheet delivery or needs clarification. Never fall
+            # back to an older ready cache row and build stale logic.
+            continue
         existing_index = logical_record_indexes.get(logical_record_id)
         if existing_index is not None:
             existing = records[existing_index]
+            if (
+                existing.get("sourceKind") == "verified_deep_research_sheet"
+                and existing.get("strategyBriefDigest")
+                and existing.get("strategyBriefDigest")
+                == current_deep_decision.get("sheetBriefDigest")
+                and record.get("strategyBriefDigest")
+                == current_deep_decision.get("briefDigest")
+                and record.get("sourceKind") == "verified_deep_research"
+            ):
+                # Keep the Sheet as the selected immutable A-J payload while
+                # hydrating evidence lineage from the matching Backend report.
+                hydrated = copy.deepcopy(existing)
+                hydrated["sourceUrls"] = copy.deepcopy(record.get("sourceUrls") or [])
+                hydrated["sourceReportId"] = record.get("sourceReportId")
+                hydrated["sourceMissionId"] = record.get("sourceMissionId")
+                records[existing_index] = hydrated
+                existing = hydrated
             # A current, complete Sheet row remains authoritative because the
             # Sheet projection is first in ``combined``.  A corrupt/legacy or
             # otherwise non-build-ready Sheet copy must not hide the verified
             # runtime report from which that same row can be repaired.
-            existing_has_canonical_research_decision = bool(
-                existing.get("sourceKind")
-                in {"verified_deep_research", "verified_deep_research_sheet"}
-                and isinstance(existing.get("eaImplementationBlueprint"), dict)
-                and re.fullmatch(
-                    r"[0-9a-f]{64}",
-                    str(existing.get("eaBlueprintDigest") or ""),
-                )
-            )
             if (
                 existing.get("buildReady") is not True
                 and record.get("buildReady") is True
-                and not existing_has_canonical_research_decision
                 and (
                     source_record_id not in seen_source_ids
                     or source_record_id
@@ -23598,7 +25928,7 @@ def _sync_ea_factory_google_sheet_serial(payload: object) -> dict:
         synced_at = utc_now()
         snapshot = {
             "schemaVersion": "ea-factory-sheet-snapshot-v1",
-            "sourceSchemaVersion": "deep-research-sheet-v1",
+            "sourceSchemaVersion": "deep-research-sheet-v2",
             "sourceKind": source_kind,
             "sourceKey": source_key,
             "sheetReferenceMasked": f"{sheet_id[:6]}…{sheet_id[-4:]}",
@@ -23608,7 +25938,7 @@ def _sync_ea_factory_google_sheet_serial(payload: object) -> dict:
             "rejectedRowCount": 0,
             "headerExact": True,
             "headerDigest": payload_digest(
-                "ea-factory-deep-research-header-v1",
+                "ea-factory-deep-research-header-v2",
                 list(RESEARCH_SHEET_DEEP_WRITE_HEADERS),
             ),
             "records": records,
@@ -23877,6 +26207,38 @@ def _ea_factory_indicator_coverage_manifest(
     )
 
 
+def _ea_factory_current_compact_source_valid(source_record: object) -> bool:
+    """Accept only a digest-bound v3 compact A-J source for new Factory work."""
+
+    if not isinstance(source_record, dict):
+        return False
+    raw_brief = source_record.get("strategyBrief")
+    core = source_record.get("core") if isinstance(source_record.get("core"), dict) else {}
+    projection = _ea_factory_compact_strategy_brief({
+        "record_id": core.get("record_id") or source_record.get("record_id"),
+        "strategyBrief": raw_brief,
+    })
+    compact_brief_keys = {
+        "schemaVersion",
+        *EA_STRATEGY_BRIEF_SHEET_TO_CAMEL.values(),
+    }
+    return bool(
+        isinstance(raw_brief, dict)
+        and isinstance(projection, dict)
+        and (
+            projection.get("fullValidated") is True
+            or set(raw_brief) == compact_brief_keys
+        )
+        and source_record.get("strategyBriefDigest") == projection.get("digest")
+        and re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(source_record.get("strategyBriefDigest") or ""),
+        )
+        and not isinstance(source_record.get("eaImplementationBlueprint"), dict)
+        and not source_record.get("eaBlueprintDigest")
+    )
+
+
 def _ea_factory_create_build_workspace(
     build_id: str,
     source_record: dict,
@@ -23886,14 +26248,20 @@ def _ea_factory_create_build_workspace(
     normalized_kind = _ea_factory_program_kind(artifact_kind, default_legacy=False)
     if not normalized_kind:
         raise DataIntegrityError("EA Factory artifact kind is unsupported.")
+    if not _ea_factory_current_compact_source_valid(source_record):
+        raise DataIntegrityError(
+            "Current EA Factory creates only digest-bound Strategy Spec v3 compact A-J builds; "
+            "legacy A-W/A-M and Blueprint v2 records are read-only."
+        )
     if normalized_kind == "custom_indicator" and platform not in {"mt4", "mt5"}:
         raise DataIntegrityError("Custom Indicator builds require MT4 or MT5.")
     if (
         normalized_kind == "custom_indicator"
         and not isinstance(source_record.get("eaImplementationBlueprint"), dict)
+        and not isinstance(source_record.get("strategyBrief"), dict)
     ):
         raise DataIntegrityError(
-            "Custom Indicator builds require a canonical ready EA Blueprint."
+            "Custom Indicator builds require a ready Strategy Brief or canonical Blueprint."
         )
     build_dir = _ea_factory_build_directory(build_id)
     if build_dir is None:
@@ -23922,6 +26290,14 @@ def _ea_factory_create_build_workspace(
         else None
     )
     source_blueprint_digest = str(source_record.get("eaBlueprintDigest") or "")
+    source_strategy_brief = (
+        copy.deepcopy(source_record.get("strategyBrief"))
+        if isinstance(source_record.get("strategyBrief"), dict)
+        else None
+    )
+    source_strategy_brief_digest = str(
+        source_record.get("strategyBriefDigest") or ""
+    )
     if source_blueprint is not None:
         try:
             source_blueprint = normalize_ea_research_blueprint(
@@ -23940,6 +26316,8 @@ def _ea_factory_create_build_workspace(
         "schemaVersion": (
             "ea-factory-strategy-spec-v2"
             if source_blueprint is not None
+            else "ea-factory-strategy-spec-v3"
+            if source_strategy_brief is not None
             else "ea-factory-strategy-spec-v1"
         ),
         "buildId": build_id,
@@ -23947,8 +26325,12 @@ def _ea_factory_create_build_workspace(
         "recordDigest": source_record.get("recordDigest"),
         "sourceKind": source_record.get("sourceKind"),
         "sourceKey": source_record.get("sourceKey"),
-        "coreRange": "A-M",
-        "downstreamRange": "N-W",
+        "coreRange": "A-J" if source_strategy_brief is not None else "A-M",
+        "downstreamRange": (
+            "Backend report and confirmation ledger"
+            if source_strategy_brief is not None
+            else "N-W"
+        ),
         "core": copy.deepcopy(source_record.get("core") or {}),
         "downstream": copy.deepcopy(source_record.get("downstream") or {}),
         "sourceUrls": copy.deepcopy(source_record.get("sourceUrls") or []),
@@ -23972,6 +26354,14 @@ def _ea_factory_create_build_workspace(
         "createdAt": utc_now(),
         "immutable": True,
     }
+    if source_strategy_brief is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", source_strategy_brief_digest):
+            raise DataIntegrityError("EA Factory Strategy Brief digest is invalid.")
+        strategy_spec.update({
+            "strategySchemaVersion": EA_STRATEGY_BRIEF_SCHEMA_VERSION,
+            "strategyBrief": source_strategy_brief,
+            "strategyBriefDigest": source_strategy_brief_digest,
+        })
     if source_blueprint is not None:
         strategy_spec.update({
             "strategySchemaVersion": EA_RESEARCH_SCHEMA_VERSION,
@@ -24364,14 +26754,13 @@ def _ea_factory_generation_brief(build: dict) -> str:
             f"[EA_FACTORY_PLATFORM:{platform}]"
             "[EA_FACTORY_ARTIFACT_KIND:custom_indicator] "
             f"Read ea-factory/{build_id}/Source/strategy-spec-v01.json and verify SHA-256/bindings. "
-            "Generate one MQL Custom Indicator, never an Expert Advisor. Implement OnCalculate, declare and bind "
-            "at least one visible indicator buffer/plot, and assign its output in OnCalculate. Use every "
-            "indicatorCoverageRequirements.requiredIndicatorSemanticMarkers on the exact indicator helpers and "
-            "every requiredRuleMarkers marker on its matching requiredRulePredicates expression. Preserve operand "
-            "identity, operator, and closed-bar shifts exactly; swapped aliases, arbitrary math, dead branches, "
-            "EMPTY_VALUE-only branches, comments, strings and declarations alone fail. Each true rule branch must "
-            "write a non-empty visible buffer value. No OnTick, CTrade, OrderSend/OrderClose/OrderModify, Buy/Sell, position "
-            "opening/closing, lot sizing, recovery or other trading side effects. Avoid look-ahead/repaint. "
+            "Generate one MQL Custom Indicator from v3 compact A-J, never an Expert Advisor. Implement OnCalculate and write each true signal "
+            "to a visible bound buffer/plot. Map Strategy Brief entry/exit prose to at least two conditional, closed-bar "
+            "non-trading signal writes and adds #property description EA_STRATEGY_BRIEF_SHA256:<strategyBriefDigest>. "
+            "Declare indicator_buffers, a non-DRAW_NONE plot, SetIndexBuffer bindings and a rates_total guard; preserve operands, "
+            "operator and closed-bar shifts. Comments, dead code, arbitrary math and EMPTY_VALUE-only branches fail. "
+            "Legacy v1/v2 specs are history-only and must not be generated. No OnTick, CTrade, OrderSend"
+            "/OrderClose/OrderModify, Buy/Sell, lot sizing, recovery or other trading side effect. No look-ahead/repaint. "
             f"Write only ea-factory/{build_id}/Source/<file>{extension}; return PROJECT-relative sourceFiles and "
             "exact sourceDigest plus the Backend-verifiable coverage manifest. SOURCE-ONLY/UNCOMPILED; do not open "
             "MetaEditor/MT4/MT5, compile, backtest, attach to a chart, deploy, schedule, loop, or trade. "
@@ -24381,11 +26770,13 @@ def _ea_factory_generation_brief(build: dict) -> str:
             raise RequestError("EA Factory generation requirements exceed the bounded Mission input.", 422)
         return brief
     mql_guard = (
-        " For MQL define SIGNAL_NONE=-1; 0 is BUY, never no-signal. "
-        "Risk sizing must fail closed: finite/bounded numerics; worst-case loss incl. slippage/spread <= budget, "
-        "zero tolerance; no min-lot uplift; reject invalid price/stops/margin/step/min-lot/fresh margin error; "
-        "use lot-step digits, tick alignment, live Bid/Ask, stop/freeze. If closed-bar time is zero, prime first "
-        "available and return; no stale first trade."
+        " For MQL SIGNAL_NONE=-1; BUY=0. Risk sizing must fail closed: finite; "
+        "worst-case loss incl costs <= budget; no min-lot uplift; validate "
+        "volume/stops/margin/tick alignment/Bid/Ask. Closed-bar time zero: "
+        "prime first available and return. "
+        "Standalone: exact #define SIGNAL_NONE -1; no macro/#if/object/global call/"
+        "external I/O or side effects. Only OnInit/OnDeinit/one OnTick; trades only "
+        "in OnTick graph; no async/OrderOpen/while/do; for bounded+braced; guards direct; no recursion."
         if platform in {"mt4", "mt5"}
         else ""
     )
@@ -24396,19 +26787,58 @@ def _ea_factory_generation_brief(build: dict) -> str:
         f"[EA_FACTORY_SOURCE_RECORD_DIGEST:{record_digest}]"
         f"[EA_FACTORY_STRATEGY_SPEC_DIGEST:{spec_digest}]"
         f"[EA_FACTORY_PLATFORM:{platform}] "
-        f"Read ea-factory/{build_id}/Source/strategy-spec-v01.json; verify SHA-256/bindings. For v2 implement "
-        "the whole immutable Blueprint and use every requiredMarker in reachable matching logic: rule branch, "
-        "indicator call, state transition, input consumption, or called test. Declarations/comments/strings/"
-        "dummy/unused markers fail. Reachable entry and required exit/SL/TP calls are mandatory. Legacy v1 "
-        "uses A-M only. "
-        f"Write only ea-factory/{build_id}/Source/<file>{extension}; return its PROJECT-relative path, "
-        "sourceFiles and exact sourceDigest."
-        f"{mql_guard} SOURCE-ONLY/UNCOMPILED; no terminal, compile, backtest, deploy, schedule, loop, or trade. "
+        f"Read ea-factory/{build_id}/Source/strategy-spec-v01.json; verify SHA-256/bindings. "
+        "v3 compact A-J only; v1/v2 read-only. Reachable OnTick implements entry, exit/protection, "
+        "sizing, order, recovery and display. "
+        "Require #property description EA_STRATEGY_BRIEF_SHA256:<strategyBriefDigest>. "
+        "Reject empty/dead/text-only or invented code. "
+        f"Write only ea-factory/{build_id}/Source/<file>{extension}; return sourceFiles/sourceDigest."
+        f"{mql_guard} SOURCE-ONLY/UNCOMPILED; no terminal/compile/backtest/deploy/trade. "
         f"[USER_BUILD_REQUIREMENTS]{user_requirements}[/USER_BUILD_REQUIREMENTS]"
     )
     if len(brief) > 2400 or contains_potential_secret(brief):
         raise RequestError("EA Factory generation requirements exceed the bounded Mission input.", 422)
     return brief
+
+
+def _ea_factory_review_strategy_spec(build: dict) -> dict | None:
+    """Read the immutable Strategy Spec used by the source-review gate.
+
+    Review instructions and coverage fields must be selected from the actual
+    digest-bound spec, never inferred from an artifact kind or an old build
+    label. Returning ``None`` keeps historical pre-workspace fixtures readable
+    while current builds fail closed later at the artifact snapshot boundary.
+    """
+
+    build_dir = _ea_factory_build_directory(build.get("id"))
+    source_dir = (
+        _ea_factory_managed_folder(build_dir, "Source")
+        if build_dir is not None
+        else None
+    )
+    workspace = (
+        build.get("workspace") if isinstance(build.get("workspace"), dict) else {}
+    )
+    expected_digest = str(workspace.get("strategySpecDigest") or "").lower()
+    stable_spec = (
+        _ea_factory_read_stable_file(
+            source_dir / "strategy-spec-v01.json",
+            2 * 1024 * 1024,
+        )
+        if source_dir is not None
+        else None
+    )
+    if (
+        stable_spec is None
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+        or stable_spec[1] != expected_digest
+    ):
+        return None
+    try:
+        value = json.loads(stable_spec[0].decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def _ea_factory_review_brief(build: dict) -> str:
@@ -24437,7 +26867,18 @@ def _ea_factory_review_brief(build: dict) -> str:
     ):
         raise DataIntegrityError("EA Factory source-review binding is incomplete.")
     user_requirements = str(build.get("brief") or "").strip() or "none"
+    review_spec = _ea_factory_review_strategy_spec(build)
+    compact_strategy_brief = bool(
+        isinstance(review_spec, dict)
+        and review_spec.get("schemaVersion") == "ea-factory-strategy-spec-v3"
+    )
     if artifact_kind == "custom_indicator":
+        coverage_instruction = (
+            "review exact A-J fields record_id, system_name, system_overview, entry_rules, recovery_rules, exit_rules, "
+            "money_management, order_execution, display_requirements and additional_notes"
+            if compact_strategy_brief
+            else "review the immutable v2 Indicator rule coverage"
+        )
         brief = (
             f"[EA_FACTORY_BUILD_ID:{build_id}]"
             f"[EA_FACTORY_GENERATION_REPORT_ID:{generation_report_id}]"
@@ -24449,15 +26890,45 @@ def _ea_factory_review_brief(build: dict) -> str:
             f"Read ea-factory/{build_id}/Source/strategy-spec-v01.json and generated Source read-only. Trusted "
             "Backend rehashes the real bytes; echo digest markers exactly. Audit this as an MQL Custom Indicator: "
             "require #property indicator window plus #property indicator_buffers, OnCalculate, SetIndexBuffer, real buffer assignments, "
-            "closed-bar/no-look-ahead behavior, semantic-marker-bound indicator helpers, and every exact rule predicate "
-            "controlling a non-empty buffer write in OnCalculate. Reject swapped operands, arbitrary/dead marker logic, "
+            "closed-bar/no-look-ahead behavior and no trading API. For v3 require the exact Strategy Brief digest in compiled "
+            f"#property description metadata plus at least two conditional non-empty signal writes; {coverage_instruction}. "
+            "For v2 require semantic-marker-bound Indicator helpers "
+            "and every exact rule predicate controlling a non-empty buffer write in OnCalculate. Reject swapped operands, arbitrary/dead marker logic, "
             "EMPTY_VALUE-only branches, OnTick, CTrade, "
             "OrderSend/OrderClose/OrderModify, Buy/Sell, position lifecycle, lot sizing or any trading side effect. "
-            "strategyCoverage must cover record_id, system_name, strategy_family, symbols_market, timeframe, "
-            "entry_rules, exit_rules, indicators and special_conditions with uncoveredFields=[] only when true. "
+            "strategyCoverage must use the fields for the active spec version with uncoveredFields=[] only when true. "
             f"Exact user requirements: [USER_BUILD_REQUIREMENTS]{user_requirements}[/USER_BUILD_REQUIREMENTS]. "
             "Return all fields/evidence; compileStatus exactly source_only. Do not edit files, open MetaEditor/MT4/MT5, "
             "compile, backtest, attach to a chart, deploy, schedule, loop, or trade."
+        )
+        if len(brief) > 2400 or contains_potential_secret(brief):
+            raise RequestError("EA Factory review requirements exceed the bounded Mission input.", 422)
+        return brief
+    if compact_strategy_brief:
+        brief = (
+            f"[EA_FACTORY_BUILD_ID:{build_id}]"
+            f"[EA_FACTORY_GENERATION_REPORT_ID:{generation_report_id}]"
+            f"[EA_FACTORY_PLATFORM:{platform}]"
+            f"[EA_FACTORY_SOURCE_RECORD_DIGEST:{source_record_digest}]"
+            f"[EA_FACTORY_STRATEGY_SPEC_DIGEST:{spec_digest}]"
+            f"[EA_FACTORY_IMMUTABLE_DIGESTS:{','.join(digests)}] "
+            f"Read ea-factory/{build_id}/Source/strategy-spec-v01.json and generated Source read-only. "
+            "Trusted Backend alone rehashes Source and recomputes coverage. Return sourceDigest as only the exact bare "
+            "64-hex value from EA_FACTORY_IMMUTABLE_DIGESTS (never the EA_STRATEGY_BRIEF digest or prose). "
+            "Audit exact Strategy Brief A-J coverage only: record_id, system_name, system_overview, entry_rules, "
+            "recovery_rules, exit_rules, money_management, order_execution, display_requirements and additional_notes. "
+            "The exact Strategy Brief digest binding covers record_id, system_name, system_overview and additional_notes; "
+            "do not demand duplicate executable code for descriptive fields. Unavailable fundamental/external facts may use "
+            "explicit fail-closed tester/operator inputs. Do not invent legacy A-M fields. Confirm executable entry, exit, "
+            "risk, recovery, order execution and display behavior. strategyCoverage is advisory; Backend recomputes it from "
+            "immutable bytes and accepts uncoveredFields=[] only when deterministic checks prove all A-J fields. "
+            "Use high/critical only for a concrete executable defect that makes the declared rule unsafe, unbounded, or "
+            "deterministically wrong; classify documented fail-closed external inputs, broker-dependent runtime checks, "
+            "source-only compile uncertainty, and optional enhancements as medium or lower. A closed W1 lookback beginning "
+            "at shift 1 includes the immediately previous completed week and excludes the forming shift-0 week. "
+            f"Exact user requirements: [USER_BUILD_REQUIREMENTS]{user_requirements}[/USER_BUILD_REQUIREMENTS]. "
+            "Return all required evidence; compileStatus exactly source_only. Do not edit files, open MetaEditor/MT4/MT5, "
+            "compile, backtest, deploy, schedule, loop, or trade."
         )
         if len(brief) > 2400 or contains_potential_secret(brief):
             raise RequestError("EA Factory review requirements exceed the bounded Mission input.", 422)
@@ -25026,15 +27497,65 @@ def _ea_factory_indicator_static_review_findings(
         return ["indicator_strategy_spec_digest_mismatch"]
     try:
         spec = json.loads(stable_spec[0].decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ["indicator_coverage_requirements_invalid"]
+    if not isinstance(spec, dict) or spec.get("artifactKind") != "custom_indicator":
+        return ["indicator_coverage_requirements_invalid"]
+
+    schema_version = str(spec.get("schemaVersion") or "")
+    if schema_version == "ea-factory-strategy-spec-v3":
+        core = spec.get("core") if isinstance(spec.get("core"), dict) else {}
+        projection = _ea_factory_compact_strategy_brief({
+            "record_id": core.get("record_id"),
+            "strategyBrief": spec.get("strategyBrief"),
+        })
+        brief_digest = (
+            str(projection.get("digest") or "")
+            if isinstance(projection, dict)
+            else ""
+        )
+        if (
+            not isinstance(projection, dict)
+            or spec.get("strategySchemaVersion")
+            != EA_STRATEGY_BRIEF_SCHEMA_VERSION
+            or spec.get("strategyBriefDigest") != brief_digest
+            or "eaImplementationBlueprint" in spec
+            or "eaBlueprintDigest" in spec
+            or "indicatorCoverageRequirements" in spec
+            or "blueprintCoverageRequirements" in spec
+        ):
+            return ["indicator_compact_strategy_brief_invalid"]
+        analysis = analyze_compact_indicator_source(
+            source_text,
+            strategy_brief_digest=brief_digest,
+            strategy_spec_digest=stable_spec[1],
+            source_digest=hashlib.sha256(
+                source_text.encode("utf-8", errors="strict")
+            ).hexdigest(),
+            target_platform=str(build.get("platform") or ""),
+        )
+        findings = (
+            analysis.get("findings") if isinstance(analysis, dict) else None
+        )
+        return list(dict.fromkeys(
+            str(item)
+            for item in (findings if isinstance(findings, list) else [])
+            if str(item).strip()
+        )) or ([] if analysis.get("complete") is True else [
+            "indicator_compact_source_evidence_invalid"
+        ])
+
+    if schema_version != "ea-factory-strategy-spec-v2":
+        return ["indicator_coverage_requirements_invalid"]
+    try:
         blueprint = normalize_ea_research_blueprint(
-            spec.get("eaImplementationBlueprint") if isinstance(spec, dict) else None,
+            spec.get("eaImplementationBlueprint"),
             require_ready=True,
         )
         blueprint_digest = ea_research_blueprint_digest(blueprint)
         requirements = spec.get("indicatorCoverageRequirements")
         if (
-            spec.get("artifactKind") != "custom_indicator"
-            or spec.get("eaBlueprintDigest") != blueprint_digest
+            spec.get("eaBlueprintDigest") != blueprint_digest
             or not _ea_factory_indicator_coverage_requirements_valid(
                 requirements,
                 blueprint,
@@ -25048,8 +27569,6 @@ def _ea_factory_indicator_static_review_findings(
             target_platform=str(build.get("platform") or ""),
         )
     except (
-        UnicodeDecodeError,
-        json.JSONDecodeError,
         EAResearchBlueprintValidationError,
         TypeError,
         ValueError,
@@ -25077,6 +27596,78 @@ def _ea_factory_indicator_static_review_findings(
         for identifier in (analysis.get("missingRuleMarkers") or [])[:1000]
     )
     return list(dict.fromkeys(findings))
+
+
+def _ea_factory_compact_ea_static_review_findings(
+    build: dict,
+    source_text: str,
+) -> list[str] | None:
+    """Review a current v3 EA against its immutable compact A-J brief.
+
+    ``None`` means the build is historical rather than v3; callers may retain
+    their legacy diagnostic review but must not treat that as current Factory
+    semantic evidence.
+    """
+
+    spec = _ea_factory_review_strategy_spec(build)
+    if not isinstance(spec, dict) or spec.get("schemaVersion") != "ea-factory-strategy-spec-v3":
+        return None
+    if _ea_factory_program_kind(spec.get("artifactKind")) != "expert_advisor":
+        return ["ea_compact_artifact_kind_invalid"]
+    core = spec.get("core") if isinstance(spec.get("core"), dict) else {}
+    raw_brief = spec.get("strategyBrief")
+    projection = _ea_factory_compact_strategy_brief({
+        "record_id": core.get("record_id"),
+        "strategyBrief": raw_brief,
+    })
+    brief_digest = (
+        str(projection.get("digest") or "")
+        if isinstance(projection, dict)
+        else ""
+    )
+    compact_brief_keys = {
+        "schemaVersion",
+        *EA_STRATEGY_BRIEF_SHEET_TO_CAMEL.values(),
+    }
+    if (
+        not isinstance(projection, dict)
+        or not isinstance(raw_brief, dict)
+        or not (
+            projection.get("fullValidated") is True
+            or set(raw_brief) == compact_brief_keys
+        )
+        or spec.get("strategySchemaVersion") != EA_STRATEGY_BRIEF_SCHEMA_VERSION
+        or spec.get("strategyBriefDigest") != brief_digest
+        or "eaImplementationBlueprint" in spec
+        or "eaBlueprintDigest" in spec
+        or "blueprintCoverageRequirements" in spec
+        or "indicatorCoverageRequirements" in spec
+    ):
+        return ["ea_compact_strategy_brief_invalid"]
+    workspace = build.get("workspace") if isinstance(build.get("workspace"), dict) else {}
+    spec_digest = str(workspace.get("strategySpecDigest") or "").lower()
+    try:
+        source_digest = hashlib.sha256(
+            source_text.encode("utf-8", errors="strict")
+        ).hexdigest()
+    except UnicodeEncodeError:
+        return ["ea_compact_source_encoding_invalid"]
+    analysis = analyze_compact_ea_source(
+        source_text,
+        strategy_brief=projection.get("brief"),
+        strategy_brief_digest=brief_digest,
+        strategy_spec_digest=spec_digest,
+        source_digest=source_digest,
+        target_platform=str(build.get("platform") or ""),
+    )
+    findings = analysis.get("findings") if isinstance(analysis, dict) else None
+    return list(dict.fromkeys(
+        str(item)
+        for item in (findings if isinstance(findings, list) else [])
+        if str(item).strip()
+    )) or ([] if analysis.get("complete") is True else [
+        "ea_compact_source_evidence_invalid"
+    ])
 
 
 def _ea_factory_mql_static_review_findings(build: dict) -> list[str]:
@@ -25130,6 +27721,12 @@ def _ea_factory_mql_static_review_findings(build: dict) -> list[str]:
     source_text = "\n".join(decoded_sources)
     if _ea_factory_program_kind(build.get("artifactKind")) == "custom_indicator":
         return _ea_factory_indicator_static_review_findings(build, source_text)
+    compact_findings = _ea_factory_compact_ea_static_review_findings(
+        build,
+        source_text,
+    )
+    if compact_findings is not None:
+        return compact_findings
     return _ea_factory_mql_static_review_findings_for_text(
         source_text,
         str(build.get("brief") or ""),
@@ -26206,12 +28803,60 @@ def _ea_factory_recomputed_generation_coverage_manifest(
                     source_digest=source_digest,
                     target_platform=str(build.get("platform") or ""),
                 )
-        elif schema_version == "ea-factory-strategy-spec-v1":
+        elif schema_version == "ea-factory-strategy-spec-v3":
             if (
-                artifact_kind == "custom_indicator"
-                or "blueprintCoverageRequirements" in spec
+                "blueprintCoverageRequirements" in spec
                 or "indicatorCoverageRequirements" in spec
+                or "eaImplementationBlueprint" in spec
+                or "eaBlueprintDigest" in spec
             ):
+                return None
+            core = spec.get("core") if isinstance(spec.get("core"), dict) else {}
+            raw_brief = spec.get("strategyBrief")
+            brief_projection = _ea_factory_compact_strategy_brief({
+                "record_id": core.get("record_id"),
+                "strategyBrief": raw_brief,
+            })
+            brief_digest = (
+                str(brief_projection.get("digest") or "")
+                if isinstance(brief_projection, dict)
+                else ""
+            )
+            compact_brief_keys = {
+                "schemaVersion",
+                *EA_STRATEGY_BRIEF_SHEET_TO_CAMEL.values(),
+            }
+            if (
+                not isinstance(brief_projection, dict)
+                or not isinstance(raw_brief, dict)
+                or not (
+                    brief_projection.get("fullValidated") is True
+                    or set(raw_brief) == compact_brief_keys
+                )
+                or spec.get("strategySchemaVersion")
+                != EA_STRATEGY_BRIEF_SCHEMA_VERSION
+                or spec.get("strategyBriefDigest") != brief_digest
+            ):
+                return None
+            if artifact_kind == "custom_indicator":
+                manifest = build_compact_indicator_source_manifest(
+                    source_text,
+                    strategy_brief_digest=brief_digest,
+                    strategy_spec_digest=expected_spec_digest,
+                    source_digest=source_digest,
+                    target_platform=str(build.get("platform") or ""),
+                )
+            else:
+                manifest = build_compact_ea_source_manifest(
+                    source_text,
+                    strategy_brief=brief_projection.get("brief"),
+                    strategy_brief_digest=brief_digest,
+                    strategy_spec_digest=expected_spec_digest,
+                    source_digest=source_digest,
+                    target_platform=str(build.get("platform") or ""),
+                )
+        elif schema_version == "ea-factory-strategy-spec-v1":
+            if artifact_kind != "expert_advisor":
                 return None
             manifest = ea_factory_legacy_coverage_manifest(
                 strategy_spec_digest=expected_spec_digest,
@@ -26319,6 +28964,307 @@ def _ea_factory_generation_evidence_valid(
     )
 
 
+def _ea_factory_recomputed_compact_review_manifest(build: dict) -> dict | None:
+    """Recompute current A-J review identity and coverage from immutable bytes.
+
+    Worker output remains useful for qualitative issues and severity, but it is
+    not an authority for hashes or structural coverage.  This verifier re-reads
+    the manifest-bound Strategy Spec and generated Source, checks the immutable
+    version pair, and runs the same deterministic compact analyzer used at the
+    generation boundary.
+    """
+
+    if not _ea_factory_review_artifact_snapshot_valid(build):
+        return None
+    spec = _ea_factory_review_strategy_spec(build)
+    if not isinstance(spec, dict) or spec.get("schemaVersion") != "ea-factory-strategy-spec-v3":
+        return None
+    artifact_kind = _ea_factory_program_kind(build.get("artifactKind"))
+    platform = str(build.get("platform") or "")
+    if (
+        artifact_kind != "expert_advisor"
+        or spec.get("buildId") != build.get("id")
+        or spec.get("recordDigest") != build.get("sourceRecordDigest")
+        or spec.get("targetPlatform") != platform
+        or _ea_factory_program_kind(spec.get("artifactKind")) != artifact_kind
+        or spec.get("immutable") is not True
+    ):
+        return None
+
+    expected_extension = {
+        "mt4": ".mq4",
+        "mt5": ".mq5",
+        "tradingview": ".pine",
+    }.get(platform)
+    build_dir = _ea_factory_build_directory(build.get("id"))
+    source_dir = (
+        _ea_factory_managed_folder(build_dir, "Source")
+        if build_dir is not None
+        else None
+    )
+    if not expected_extension or source_dir is None:
+        return None
+    try:
+        artifact_manifest = _ea_factory_revalidated_artifact_manifest(build)
+    except DataIntegrityError:
+        return None
+    source_entries = [
+        item
+        for item in artifact_manifest
+        if isinstance(item, dict)
+        and item.get("artifactKind") == "generated_source"
+        and item.get("folder") == "Source"
+        and str(item.get("extension") or "").lower() == expected_extension
+    ]
+    if len(source_entries) != 1:
+        return None
+    source_entry = source_entries[0]
+    source_digest = str(source_entry.get("sha256") or "").lower()
+    immutable_digests = {
+        str(item.get("sourceDigest") or "").lower()
+        for item in (
+            build.get("versions")
+            if isinstance(build.get("versions"), list)
+            else []
+        )
+        if isinstance(item, dict)
+        and item.get("immutable") is True
+        and re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(item.get("sourceDigest") or "").lower(),
+        )
+    }
+    if not re.fullmatch(r"[0-9a-f]{64}", source_digest) or immutable_digests != {
+        source_digest
+    }:
+        return None
+    source_path = source_dir / str(source_entry.get("fileName") or "")
+    stable_source = _ea_factory_read_stable_file(
+        source_path,
+        EA_FACTORY_STATIC_REVIEW_SOURCE_MAX_BYTES,
+    )
+    if stable_source is None or stable_source[1] != source_digest:
+        return None
+    try:
+        source_text = stable_source[0].decode("utf-8-sig", errors="strict")
+    except UnicodeDecodeError:
+        return None
+
+    core = spec.get("core") if isinstance(spec.get("core"), dict) else {}
+    raw_brief = spec.get("strategyBrief")
+    projection = _ea_factory_compact_strategy_brief({
+        "record_id": core.get("record_id"),
+        "strategyBrief": raw_brief,
+    })
+    brief_digest = (
+        str(projection.get("digest") or "")
+        if isinstance(projection, dict)
+        else ""
+    )
+    compact_brief_keys = {
+        "schemaVersion",
+        *EA_STRATEGY_BRIEF_SHEET_TO_CAMEL.values(),
+    }
+    workspace = build.get("workspace") if isinstance(build.get("workspace"), dict) else {}
+    strategy_spec_digest = str(workspace.get("strategySpecDigest") or "").lower()
+    if (
+        not isinstance(projection, dict)
+        or not isinstance(raw_brief, dict)
+        or not (
+            projection.get("fullValidated") is True
+            or set(raw_brief) == compact_brief_keys
+        )
+        or spec.get("strategySchemaVersion") != EA_STRATEGY_BRIEF_SCHEMA_VERSION
+        or spec.get("strategyBriefDigest") != brief_digest
+        or not re.fullmatch(r"[0-9a-f]{64}", strategy_spec_digest)
+        or "eaImplementationBlueprint" in spec
+        or "eaBlueprintDigest" in spec
+        or "blueprintCoverageRequirements" in spec
+        or "indicatorCoverageRequirements" in spec
+    ):
+        return None
+    try:
+        manifest = build_compact_ea_source_manifest(
+            source_text,
+            strategy_brief=projection.get("brief"),
+            strategy_brief_digest=brief_digest,
+            strategy_spec_digest=strategy_spec_digest,
+            source_digest=source_digest,
+            target_platform=platform,
+        )
+    except (TypeError, UnicodeError, ValueError):
+        return None
+    required_fields = list(RESEARCH_SHEET_DEEP_WRITE_HEADERS)
+    if not (
+        isinstance(manifest, dict)
+        and manifest.get("complete") is True
+        and manifest.get("sourceDigest") == source_digest
+        and manifest.get("strategySpecDigest") == strategy_spec_digest
+        and manifest.get("strategyBriefDigest") == brief_digest
+        and manifest.get("targetPlatform") == platform
+        and manifest.get("artifactKind") == artifact_kind
+        and manifest.get("coveredFields") == required_fields
+        and manifest.get("missingFields") == []
+        and manifest.get("findings") == []
+    ):
+        return None
+    return manifest
+
+
+def _ea_factory_review_severity_summary(value: object) -> tuple[set[str], bool]:
+    """Return explicitly declared levels plus a fail-closed parse result.
+
+    Workers may return either a scalar (``medium``), a labelled scalar
+    (``overall_medium``), a mapping, or a compact summary such as
+    ``overall=medium; syntax=unknown_source_only``.  Parsing
+    only exact scalar values and labelled assignments avoids treating domain
+    prose such as ``52-week high`` as a severity while still failing closed
+    when any declared component is high or critical.  A bounded range made
+    from two known levels (for example ``low_medium`` or ``medium-to-high``)
+    is reduced conservatively to its more severe endpoint.  Any other unknown
+    assignment invalidates the summary; the only accepted non-severity
+    sentinel is the source-only syntax state emitted by this review contract.
+    """
+
+    decoded = (
+        value
+        if isinstance(value, (dict, list))
+        else _contract_decoded_value(value)
+    )
+    known_levels = {
+        "no_issue",
+        "none",
+        "info",
+        "informational",
+        "low",
+        "medium",
+        "high",
+        "critical",
+        "blocker",
+        "blocking",
+        "error",
+        "fatal",
+    }
+    allowed_sentinels = {"unknown", "unknown_source_only", "not_applicable", "n_a"}
+    sentinel_keys = {"syntax", "compile", "compile_status"}
+    severity_label_keys = {
+        "overall",
+        "syntax",
+        "logic",
+        "lookahead",
+        "repaint",
+        "lookahead_repaint",
+        "money_management",
+        "risk",
+        "execution",
+        "error_handling",
+        "lifecycle_error_handling",
+        "compile",
+        "compile_status",
+    }
+
+    def token(value: object) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+    severity_rank = {
+        "info": 0,
+        "informational": 0,
+        "low": 1,
+        "medium": 2,
+        "high": 3,
+        "critical": 4,
+    }
+
+    def canonical_level(value: object) -> str | None:
+        normalized = token(value)
+        if normalized in known_levels:
+            return normalized
+        labelled_match = re.fullmatch(
+            r"([a-z][a-z0-9_]{0,47})_"
+            r"(no_issue|none|info|informational|low|medium|high|critical|"
+            r"blocker|blocking|error|fatal)",
+            normalized,
+        )
+        if labelled_match is not None and labelled_match.group(1) in severity_label_keys:
+            return labelled_match.group(2)
+        range_match = re.fullmatch(
+            r"(info|informational|low|medium|high|critical)_(?:to_)?"
+            r"(info|informational|low|medium|high|critical)",
+            normalized,
+        )
+        if range_match is None:
+            return None
+        endpoints = list(range_match.groups())
+        most_severe = max(endpoints, key=lambda item: severity_rank[item])
+        return "info" if most_severe == "informational" else most_severe
+
+    if isinstance(decoded, dict):
+        if not decoded:
+            return set(), False
+        levels: set[str] = set()
+        valid = True
+        for key, nested in decoded.items():
+            if isinstance(nested, (dict, list)):
+                nested_levels, nested_valid = _ea_factory_review_severity_summary(nested)
+                levels.update(nested_levels)
+                valid = valid and nested_valid
+                continue
+            normalized_value = token(nested)
+            normalized_key = token(key)
+            canonical = canonical_level(normalized_value)
+            if canonical is not None:
+                levels.add(canonical)
+            elif normalized_key in sentinel_keys and normalized_value in allowed_sentinels:
+                continue
+            else:
+                valid = False
+        return levels, bool(valid and levels)
+    if isinstance(decoded, list):
+        if not decoded:
+            return set(), False
+        levels = set()
+        valid = True
+        for nested in decoded:
+            nested_levels, nested_valid = _ea_factory_review_severity_summary(nested)
+            levels.update(nested_levels)
+            valid = valid and nested_valid
+        return levels, bool(valid and levels)
+    text = str(decoded or "").strip().lower()
+    normalized = token(text)
+    canonical = canonical_level(normalized)
+    if canonical is not None:
+        return {canonical}, True
+    if not text:
+        return set(), False
+    levels: set[str] = set()
+    valid = True
+    for part in re.split(r"[;,|]+", text):
+        part = part.strip()
+        if not part:
+            continue
+        match = re.fullmatch(
+            r"([a-z][a-z0-9_ -]{0,48})\s*[:=]\s*([a-z][a-z0-9_ -]{0,48})",
+            part,
+        )
+        if match is None:
+            valid = False
+            continue
+        normalized_key = token(match.group(1))
+        normalized_value = token(match.group(2))
+        canonical = canonical_level(normalized_value)
+        if canonical is not None:
+            levels.add(canonical)
+        elif normalized_key in sentinel_keys and normalized_value in allowed_sentinels:
+            continue
+        else:
+            valid = False
+    return levels, bool(valid and levels)
+
+
+def _ea_factory_review_severity_levels(value: object) -> set[str]:
+    return _ea_factory_review_severity_summary(value)[0]
+
+
 def _ea_factory_review_evidence_valid(
     build: dict,
     report: dict,
@@ -26346,18 +29292,60 @@ def _ea_factory_review_evidence_valid(
     metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
     receipt = metrics.get("workflowOutput") if isinstance(metrics.get("workflowOutput"), dict) else {}
     values = receipt.get("values") if isinstance(receipt.get("values"), dict) else {}
+    artifact_kind = _ea_factory_program_kind(build.get("artifactKind"))
+    coverage_spec = _ea_factory_review_strategy_spec(build)
+    compact_strategy_brief = bool(
+        isinstance(coverage_spec, dict)
+        and coverage_spec.get("schemaVersion") == "ea-factory-strategy-spec-v3"
+    )
+    backend_authoritative_compact_review = bool(
+        compact_strategy_brief and artifact_kind == "expert_advisor"
+    )
     workspace = build.get("workspace") if isinstance(build.get("workspace"), dict) else {}
     expected_spec_digest = str(workspace.get("strategySpecDigest") or "").lower()
-    if set(_ea_factory_digest_values(values.get("strategySpecDigest"))) != {expected_spec_digest}:
-        return False
-    if set(_ea_factory_digest_values(values.get("sourceRecordDigest"))) != {
-        str(build.get("sourceRecordDigest") or "").lower()
-    }:
-        return False
-    if str(_contract_decoded_value(values.get("platform")) or "").strip().lower() != str(build.get("platform") or ""):
-        return False
-    coverage = _contract_decoded_value(values.get("strategyCoverage"))
+    if backend_authoritative_compact_review:
+        # Keep a stable Worker audit envelope, but never trust its identity or
+        # coverage values.  Exact lineage plus Backend-recomputed immutable
+        # evidence is authoritative for the Factory gate.
+        if not all(
+            field in values
+            for field in (
+                "sourceDigest",
+                "sourceRecordDigest",
+                "strategySpecDigest",
+                "platform",
+                "strategyCoverage",
+            )
+        ):
+            return False
+        backend_manifest = _ea_factory_recomputed_compact_review_manifest(build)
+        coverage_valid = isinstance(backend_manifest, dict)
+        reviewed_digests = (
+            {str(backend_manifest.get("sourceDigest") or "").lower()}
+            if coverage_valid
+            else set()
+        )
+    else:
+        if set(_ea_factory_digest_values(values.get("strategySpecDigest"))) != {
+            expected_spec_digest
+        }:
+            return False
+        if set(_ea_factory_digest_values(values.get("sourceRecordDigest"))) != {
+            str(build.get("sourceRecordDigest") or "").lower()
+        }:
+            return False
+        if (
+            str(_contract_decoded_value(values.get("platform")) or "")
+            .strip()
+            .lower()
+            != str(build.get("platform") or "")
+        ):
+            return False
+        coverage = _contract_decoded_value(values.get("strategyCoverage"))
     required_fields = (
+        set(RESEARCH_SHEET_DEEP_WRITE_HEADERS)
+        if compact_strategy_brief
+        else
         {
             "record_id",
             "system_name",
@@ -26369,15 +29357,31 @@ def _ea_factory_review_evidence_valid(
             "indicators",
             "special_conditions",
         }
-        if _ea_factory_program_kind(build.get("artifactKind")) == "custom_indicator"
+        if artifact_kind == "custom_indicator"
         else {
             field
             for _column, field, _label, group in EA_FACTORY_SHEET_COLUMNS
             if group == "core"
         }
     )
-    coverage_valid = False
-    if isinstance(coverage, dict):
+    if (
+        compact_strategy_brief
+        and not backend_authoritative_compact_review
+        and isinstance(coverage, dict)
+    ):
+        raw_covered = coverage.get("coveredFields")
+        raw_uncovered = coverage.get("uncoveredFields")
+        coverage_valid = bool(
+            set(coverage) == {"coveredFields", "uncoveredFields"}
+            and isinstance(raw_covered, list)
+            and isinstance(raw_uncovered, list)
+            and all(isinstance(item, str) and item.strip() for item in raw_covered)
+            and len(raw_covered) == len(required_fields)
+            and len(set(raw_covered)) == len(raw_covered)
+            and set(raw_covered) == required_fields
+            and raw_uncovered == []
+        )
+    elif not compact_strategy_brief and isinstance(coverage, dict):
         covered = {
             str(item or "").strip()
             for item in (coverage.get("coveredFields") if isinstance(coverage.get("coveredFields"), list) else [])
@@ -26388,11 +29392,16 @@ def _ea_factory_review_evidence_valid(
             if str(item or "").strip()
         }
         coverage_valid = required_fields.issubset(covered) and not uncovered
-    elif isinstance(coverage, list):
+    elif not compact_strategy_brief and isinstance(coverage, list):
         coverage_valid = required_fields.issubset({str(item or "").strip() for item in coverage})
-    elif isinstance(coverage, str):
-        coverage_valid = re.sub(r"[^a-z0-9]+", "_", coverage.lower()).strip("_") == "all_a_m_covered"
-    reviewed_digests = set(_ea_factory_digest_values(values.get("sourceDigest")))
+    elif not compact_strategy_brief and isinstance(coverage, str):
+        coverage_valid = bool(
+            not compact_strategy_brief
+            and re.sub(r"[^a-z0-9]+", "_", coverage.lower()).strip("_")
+            == "all_a_m_covered"
+        )
+    if not backend_authoritative_compact_review:
+        reviewed_digests = set(_ea_factory_digest_values(values.get("sourceDigest")))
     immutable_digests = {
         str(item.get("sourceDigest") or "").lower()
         for item in (build.get("versions") if isinstance(build.get("versions"), list) else [])
@@ -26410,19 +29419,13 @@ def _ea_factory_review_evidence_valid(
         "source_only",
         "static_analysis_only",
     }
-    severity = re.sub(
-        r"[^a-z0-9]+",
-        "_",
-        str(_contract_decoded_value(values.get("severity")) or "").strip().lower(),
-    ).strip("_")
-    review_status = re.sub(
-        r"[^a-z0-9]+",
-        "_",
-        str(_contract_decoded_value(values.get("reviewStatus")) or "").strip().lower(),
-    ).strip("_")
-    severity_allows_progress = (
-        severity in {"no_issue", "none", "info", "informational", "low", "medium"}
-        or review_status in {"review_passed", "passed"}
+    severity_levels, severity_valid = _ea_factory_review_severity_summary(
+        values.get("severity")
+    )
+    blocking_levels = {"critical", "high", "blocker", "blocking", "error", "fatal"}
+    severity_allows_progress = bool(
+        severity_valid
+        and severity_levels.isdisjoint(blocking_levels)
     )
     return bool(
         immutable_digests
@@ -26438,19 +29441,81 @@ def _ea_factory_review_requires_repair(report: dict) -> bool:
     metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
     receipt = metrics.get("workflowOutput") if isinstance(metrics.get("workflowOutput"), dict) else {}
     values = receipt.get("values") if isinstance(receipt.get("values"), dict) else {}
-    severity = re.sub(
-        r"[^a-z0-9]+",
-        "_",
-        str(_contract_decoded_value(values.get("severity")) or "").strip().lower(),
-    ).strip("_")
-    if severity in {"critical", "high", "blocker", "blocking", "error", "fatal"}:
+    severity_levels = _ea_factory_review_severity_levels(values.get("severity"))
+    if severity_levels.intersection(
+        {"critical", "high", "blocker", "blocking", "error", "fatal"}
+    ):
         return True
-    decoded = _contract_decoded_value(values.get("issues"))
+    raw_issues = values.get("issues")
+    decoded = (
+        raw_issues
+        if isinstance(raw_issues, (dict, list))
+        else _contract_decoded_value(raw_issues)
+    )
+    blocking_levels = {"critical", "high", "blocker", "blocking", "error", "fatal"}
+    blocking_issue_kinds = {
+        "compile_error",
+        "syntax_error",
+        "unsafe_execution",
+        "unbounded_risk",
+    }
+
+    def structured_issue_requires_repair(value: object) -> bool:
+        if isinstance(value, list):
+            return any(structured_issue_requires_repair(item) for item in value)
+        if not isinstance(value, dict):
+            return False
+        issue_severity = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(value.get("severity") or value.get("priority") or "").lower(),
+        ).strip("_")
+        issue_kind = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(value.get("type") or value.get("code") or value.get("kind") or "").lower(),
+        ).strip("_")
+        if bool(
+            issue_severity in blocking_levels
+            or issue_kind in blocking_issue_kinds
+            or value.get("blocking") is True
+            or value.get("requiresRepair") is True
+        ):
+            return True
+        return any(
+            structured_issue_requires_repair(nested)
+            for nested in value.values()
+            if isinstance(nested, (list, dict))
+        )
+
+    if isinstance(decoded, (list, dict)):
+        # Descriptive notes may legitimately contain domain phrases such as
+        # "52-week high" or "high spread".  Only structured severity/type
+        # fields are authoritative for a blocking review decision.
+        return structured_issue_requires_repair(decoded)
     text = " ".join(json.dumps(decoded, ensure_ascii=False, sort_keys=True).lower().split())
     if text in {"", '""', "[]", "{}", '"none"', '"no_issue"', '"no issues"'}:
         return False
-    text = text.replace("no errors", "").replace("no error", "").replace("no blockers", "")
-    return bool(re.search(r"\b(?:critical|high|blocker|blocking|fatal|compile[_ -]?error|syntax[_ -]?error)\b", text))
+    for non_blocking_phrase in (
+        "no errors",
+        "no error",
+        "no blockers",
+        "no blocker",
+        "not blocking",
+        "not a compile error",
+        "not a syntax error",
+        "no compile error",
+        "no syntax error",
+    ):
+        text = text.replace(non_blocking_phrase, "")
+    return bool(
+        re.search(
+            r"\b(?:blocker|blocking|fatal|compile[_ -]?error|syntax[_ -]?error)\b"
+            r"|\b(?:severity|priority|risk)\s*[:=]\s*(?:critical|high)\b"
+            r"|\b(?:critical|high)\s+(?:severity|priority|risk)\b",
+            text,
+        )
+    )
 
 
 def _ea_factory_copy_generated_sources(build: dict, report: dict) -> list[dict]:
@@ -26867,6 +29932,121 @@ def _ea_factory_metaeditor_target_context(platform: str) -> tuple[dict, dict]:
     return context, target
 
 
+def _ea_factory_visible_adapter_target_resolver(
+    *,
+    platform: str,
+    terminal_binding: dict,
+) -> dict:
+    """Resolve the visible adapter only from the current Backend selection.
+
+    The browser cannot supply any executable or data-folder path.  The opaque
+    one-click binding must still match the currently selected terminal before
+    the adapter is allowed to inspect a visible window.
+    """
+
+    if str(platform or "").strip().lower() != "mt4":
+        raise VisibleTerminalAdapterError("mt5_visible_adapter_not_verified")
+    if not isinstance(terminal_binding, dict):
+        raise VisibleTerminalAdapterError("terminal_binding_missing")
+    try:
+        context, target = _ea_factory_metaeditor_target_context("mt4")
+    except MetaEditorCompileError as error:
+        raise VisibleTerminalAdapterError(
+            safe_reference(error.code) or "terminal_target_resolution_failed"
+        ) from error
+    record = context.get("record") if isinstance(context, dict) else None
+    if not isinstance(record, dict):
+        raise VisibleTerminalAdapterError("terminal_target_resolution_failed")
+    if (
+        target.get("candidateId") != terminal_binding.get("candidateId")
+        or target.get("selectionRevision")
+        != terminal_binding.get("selectionRevision")
+        or not secrets.compare_digest(
+            str(target.get("bindingDigest") or ""),
+            str(terminal_binding.get("bindingDigest") or ""),
+        )
+    ):
+        raise VisibleTerminalAdapterError("terminal_binding_mismatch")
+
+    install_path = Path(str(target.get("installPath") or ""))
+    compiler_path = Path(str(target.get("compilerPath") or ""))
+    data_path = Path(str(record.get("dataPath") or record.get("localPath") or ""))
+    terminal_path = install_path / "terminal.exe"
+    try:
+        resolved = {
+            "installPath": install_path.resolve(strict=True),
+            "compilerPath": compiler_path.resolve(strict=True),
+            "dataPath": data_path.resolve(strict=True),
+            "terminalPath": terminal_path.resolve(strict=True),
+        }
+    except (OSError, RuntimeError, ValueError) as error:
+        raise VisibleTerminalAdapterError("terminal_target_path_unavailable") from error
+    if (
+        resolved["terminalPath"].parent != resolved["installPath"]
+        or resolved["compilerPath"].parent != resolved["installPath"]
+        or any(_ea_factory_path_is_link_or_reparse(path) for path in resolved.values())
+    ):
+        raise VisibleTerminalAdapterError("terminal_target_origin_invalid")
+    return {
+        "candidateId": target.get("candidateId"),
+        "selectionRevision": target.get("selectionRevision"),
+        "bindingDigest": target.get("bindingDigest"),
+        "platform": "mt4",
+        **{key: str(path) for key, path in resolved.items()},
+    }
+
+
+def configure_ea_factory_visible_front_office_adapter() -> bool:
+    """Install the production MT4 UI adapter, or leave every gate closed."""
+
+    global EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER
+    global EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER
+    global EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER
+
+    EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER = None
+    EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER = None
+    EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER = None
+    try:
+        adapter = create_production_visible_front_office_adapter(
+            target_resolver=_ea_factory_visible_adapter_target_resolver,
+        )
+        provider = adapter.capability_provider
+        compile_handler = adapter.compile_handler
+        backtest_handler = adapter.backtest_handler
+        if (
+            not callable(provider)
+            or not callable(compile_handler)
+            or not callable(backtest_handler)
+            or frozenset(getattr(adapter, "supported_platforms", ()))
+            != frozenset({"mt4"})
+        ):
+            raise RuntimeError("visible_adapter_contract_invalid")
+        EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER = provider
+        EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER = compile_handler
+        EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER = backtest_handler
+    except Exception as error:
+        try:
+            append_audit({
+                "type": "ea_factory.visible_front_office_adapter_unavailable",
+                "errorType": type(error).__name__,
+                "reasonCode": safe_reference(getattr(error, "code", None))
+                or "visible_adapter_configuration_failed",
+                "supportedPlatforms": [],
+                "liveTradingAllowed": False,
+            })
+        except Exception:
+            pass
+        return False
+    append_audit({
+        "type": "ea_factory.visible_front_office_adapter_configured",
+        "supportedPlatforms": ["mt4"],
+        "visibleMetaEditorCompile": True,
+        "visibleStrategyTester": True,
+        "liveTradingAllowed": False,
+    })
+    return True
+
+
 def _ea_factory_metaeditor_selection_is_current(
     platform: str,
     binding_digest: str,
@@ -27032,6 +30212,20 @@ def _ea_factory_stage_mission_idempotency_key(
     )[:32]
 
 
+def _ea_factory_source_retry_advance_key(
+    build_id: object,
+    failed_mission_id: object,
+    retry_idempotency_key: object,
+) -> str:
+    """Bind one manual Source retry to the failed Mission it replaces."""
+
+    return "ea-factory:source-retry:" + payload_digest(
+        safe_reference(build_id),
+        safe_reference(failed_mission_id),
+        str(retry_idempotency_key or ""),
+    )[:32]
+
+
 def _ea_factory_stage_definitions() -> list[dict]:
     return [
         {
@@ -27079,6 +30273,8 @@ def _ea_factory_initial_stages(
             "evidenceVerified": evidence_verified,
             "requestIdempotencyKey": None,
             "requestDigest": None,
+            "manualRetryCount": 0,
+            "manualRetryHistory": [],
             "updatedAt": created_at,
         })
     return rows
@@ -27118,7 +30314,7 @@ def _ea_factory_source_report(
             "prompt": (
                 f"Create one immutable {program_label} record for EA Factory build {build_id}; "
                 f"sourceRecordId={source_record.get('sourceRecordId')}; platform={platform}; "
-                "A-W mapping has already been validated by Backend. This stage does not generate source, "
+                "the compact Strategy Brief has already been validated by Backend. This stage does not generate source, "
                 "compile, backtest, attach an Indicator, schedule, loop, deploy, or trade."
             ),
             "agentId": "mission_archivist",
@@ -27136,7 +30332,7 @@ def _ea_factory_source_report(
         "type": "trading_system_research_report",
         "title": f"{program_label}: {source_record.get('displayName')}",
         "summary": (
-            f"ยืนยัน {program_label} A-W สำหรับ {EA_FACTORY_PLATFORM_LANGUAGE.get(platform)} แล้ว "
+            f"ยืนยัน {program_label} จาก Strategy Brief 10 ช่องสำหรับ {EA_FACTORY_PLATFORM_LANGUAGE.get(platform)} แล้ว "
             "โดยยังไม่สร้าง Source, Compile หรือ Backtest"
         ),
         "ownerAgentId": "mission_archivist",
@@ -27144,15 +30340,21 @@ def _ea_factory_source_report(
         "linkedPropId": "left_server_racks",
         "status": "ready",
         "findings": [
-            "A-M core fields complete",
-            "N public source URL present",
-            "O verification status is verified",
+            "Strategy Brief A-J complete",
+            "source evidence remains bound in the Backend report ledger",
+            "verification status is verified",
             f"target platform: {platform}",
             f"artifact kind: {normalized_kind}",
         ],
         "metrics": {
             "eaFactoryStrategySpec": {
-                "schemaVersion": "ea-factory-strategy-spec-v1",
+                "schemaVersion": (
+                    "ea-factory-strategy-spec-v3"
+                    if isinstance(source_record.get("strategyBrief"), dict)
+                    else "ea-factory-strategy-spec-v2"
+                    if isinstance(source_record.get("eaImplementationBlueprint"), dict)
+                    else "ea-factory-strategy-spec-v1"
+                ),
                 "buildId": build_id,
                 "sourceRecordId": source_record.get("sourceRecordId"),
                 "recordDigest": source_record.get("recordDigest"),
@@ -27165,6 +30367,8 @@ def _ea_factory_source_report(
                 "core": copy.deepcopy(source_record.get("core") or {}),
                 "downstream": copy.deepcopy(source_record.get("downstream") or {}),
                 "sourceUrls": copy.deepcopy(source_record.get("sourceUrls") or []),
+                "strategyBrief": copy.deepcopy(source_record.get("strategyBrief")),
+                "strategyBriefDigest": source_record.get("strategyBriefDigest"),
                 "immutable": True,
             }
         },
@@ -27201,6 +30405,20 @@ def _ea_factory_build_current_stage_id(build: dict) -> str | None:
 def _ea_factory_stage_can_advance(build: dict, stage_id: str) -> bool:
     if build.get("coverageUpgradeRequired") is True:
         return False
+    coverage_status = str(build.get("coverageStatus") or "")
+    if coverage_status:
+        if coverage_status != "compact_current":
+            return False
+    else:
+        review_spec = _ea_factory_review_strategy_spec(build)
+        if (
+            not isinstance(review_spec, dict)
+            or review_spec.get("schemaVersion") != "ea-factory-strategy-spec-v3"
+            or not isinstance(review_spec.get("strategyBrief"), dict)
+            or "eaImplementationBlueprint" in review_spec
+            or "eaBlueprintDigest" in review_spec
+        ):
+            return False
     stages = build.get("stages") if isinstance(build.get("stages"), list) else []
     for stage in stages:
         if not isinstance(stage, dict):
@@ -27216,6 +30434,20 @@ def _ea_factory_stage_can_advance(build: dict, stage_id: str) -> bool:
 
 def _ea_factory_stage_read_model(build: dict, stage: dict) -> dict:
     stage_id = str(stage.get("id") or "")
+    retry_count = clamp_int(
+        stage.get("manualRetryCount"),
+        0,
+        0,
+        EA_FACTORY_MANUAL_SOURCE_RETRY_LIMIT,
+    )
+    retry_available = bool(
+        stage_id == "generate_source"
+        and stage.get("status") in {"blocked", "failed"}
+        and stage.get("blockedReasonCode")
+        in EA_FACTORY_RETRYABLE_SOURCE_ERROR_CODES
+        and not (build.get("versions") if isinstance(build.get("versions"), list) else [])
+        and retry_count < EA_FACTORY_MANUAL_SOURCE_RETRY_LIMIT
+    )
     return {
         "id": stage_id,
         "labelTh": EA_FACTORY_STAGE_LABELS_TH.get(stage_id, stage_id),
@@ -27224,12 +30456,1079 @@ def _ea_factory_stage_read_model(build: dict, stage: dict) -> dict:
         "reportId": safe_reference(stage.get("reportId")),
         "blockedReasonCode": safe_reference(stage.get("blockedReasonCode")),
         "evidenceVerified": stage.get("evidenceVerified") is True,
+        "attentionRequired": stage.get("attentionRequired") is True,
+        "attentionReasonCode": safe_reference(stage.get("attentionReasonCode")),
         "artifacts": [
             str(value) for value in (stage.get("artifacts") if isinstance(stage.get("artifacts"), list) else [])
             if SAFE_ID_PATTERN.fullmatch(str(value or ""))
         ],
         "updatedAt": stage.get("updatedAt"),
         "canAdvance": _ea_factory_stage_can_advance(build, stage_id),
+        "canRetry": retry_available,
+        "retryAttemptCount": retry_count,
+        "retryAttemptLimit": EA_FACTORY_MANUAL_SOURCE_RETRY_LIMIT,
+    }
+
+
+def _ea_factory_one_click_terminal_binding_current(build: dict) -> bool:
+    run = build.get("oneClickRun") if isinstance(build.get("oneClickRun"), dict) else {}
+    binding = run.get("terminalBinding") if isinstance(run.get("terminalBinding"), dict) else {}
+    platform = str(build.get("platform") or "")
+    try:
+        _context, target = _ea_factory_metaeditor_target_context(platform)
+    except MetaEditorCompileError:
+        return False
+    return bool(
+        str(target.get("platform") or platform) == platform
+        and secrets.compare_digest(
+            str(target.get("candidateId") or ""),
+            str(binding.get("candidateId") or ""),
+        )
+        and target.get("selectionRevision") == binding.get("selectionRevision")
+        and secrets.compare_digest(
+            str(target.get("bindingDigest") or ""),
+            str(binding.get("bindingDigest") or ""),
+        )
+    )
+
+
+def _ea_factory_front_office_process_binding_digest(value: dict) -> str:
+    return payload_digest(
+        "ea-factory-front-office-process-binding-v1",
+        {key: value.get(key) for key in sorted(value) if key != "processBindingDigest"},
+    )
+
+
+def _ea_factory_front_office_process_binding(
+    value: object,
+    terminal_binding: dict,
+    stage_id: str,
+    *,
+    require_fresh: bool,
+) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    expected_keys = {
+        "schemaVersion",
+        "observedAt",
+        "stageId",
+        "terminalCandidateId",
+        "terminalSelectionRevision",
+        "terminalBindingDigest",
+        "terminalProcessId",
+        "terminalExecutableSha256",
+        "terminalWindowHandle",
+        "terminalWindowOwnerProcessId",
+        "terminalWindowTitleSha256",
+        "terminalWindowClassSha256",
+        "frontOfficeKind",
+        "frontOfficeProcessId",
+        "frontOfficeExecutableSha256",
+        "frontOfficeWindowHandle",
+        "frontOfficeWindowOwnerProcessId",
+        "frontOfficeWindowTitleSha256",
+        "frontOfficeWindowClassSha256",
+        "processBindingDigest",
+    }
+    observed = parse_iso(str(value.get("observedAt") or ""))
+    now = datetime.now(timezone.utc)
+    integer_fields = (
+        "terminalProcessId",
+        "terminalWindowHandle",
+        "terminalWindowOwnerProcessId",
+        "frontOfficeProcessId",
+        "frontOfficeWindowHandle",
+        "frontOfficeWindowOwnerProcessId",
+    )
+    digest_fields = (
+        "terminalExecutableSha256",
+        "terminalWindowTitleSha256",
+        "terminalWindowClassSha256",
+        "frontOfficeExecutableSha256",
+        "frontOfficeWindowTitleSha256",
+        "frontOfficeWindowClassSha256",
+        "processBindingDigest",
+    )
+    expected_kind = "metaeditor" if stage_id == "compile_validate" else "strategy_tester"
+    if (
+        set(value) != expected_keys
+        or value.get("schemaVersion")
+        != "ea-factory-front-office-process-binding-v1"
+        or observed is None
+        or (
+            require_fresh
+            and (
+                observed > now + timedelta(seconds=2)
+                or now - observed
+                > timedelta(seconds=EA_FACTORY_FRONT_OFFICE_PROBE_FRESH_SECONDS)
+            )
+        )
+        or value.get("stageId") != stage_id
+        or value.get("frontOfficeKind") != expected_kind
+        or value.get("terminalCandidateId") != terminal_binding.get("candidateId")
+        or value.get("terminalSelectionRevision")
+        != terminal_binding.get("selectionRevision")
+        or value.get("terminalBindingDigest") != terminal_binding.get("bindingDigest")
+        or any(
+            isinstance(value.get(field), bool)
+            or not isinstance(value.get(field), int)
+            or value.get(field) <= 0
+            for field in integer_fields
+        )
+        or value.get("terminalWindowOwnerProcessId")
+        != value.get("terminalProcessId")
+        or value.get("frontOfficeWindowOwnerProcessId")
+        != value.get("frontOfficeProcessId")
+        or any(
+            re.fullmatch(r"[0-9a-f]{64}", str(value.get(field) or "")) is None
+            for field in digest_fields
+        )
+        or value.get("processBindingDigest")
+        != _ea_factory_front_office_process_binding_digest(value)
+    ):
+        return None
+    return copy.deepcopy(value)
+
+
+def _ea_factory_visible_handler(stage_id: str):
+    return (
+        EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER
+        if stage_id == "compile_validate"
+        else EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER
+        if stage_id == "backtest_recheck"
+        else None
+    )
+
+
+def _ea_factory_front_office_supported_platforms() -> frozenset[str]:
+    """Return explicit adapter platform metadata, failing closed if absent.
+
+    The capability provider may be a bound method.  Its owner must publish a
+    finite ``supported_platforms`` collection so the GET read model never
+    advertises MT5 merely because an MT4-only adapter installed callables.
+    Actual execution still repeats the full capability probe for the exact
+    selected terminal and stage.
+    """
+
+    provider = EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER
+    owner = getattr(provider, "__self__", None)
+    raw = getattr(provider, "supported_platforms", None)
+    if raw is None and owner is not None:
+        raw = getattr(owner, "supported_platforms", None)
+    values = raw if isinstance(raw, (set, frozenset, tuple, list)) else ()
+    return frozenset(
+        str(value).strip().lower()
+        for value in values
+        if str(value).strip().lower() in EA_FACTORY_ONE_CLICK_VISIBLE_PLATFORMS
+    )
+
+
+def _ea_factory_front_office_capability_ready(
+    capability: object,
+    stage_id: str,
+) -> bool:
+    value = capability if isinstance(capability, dict) else {}
+    common_ready = bool(
+        value.get("ready") is True
+        and value.get("freshProcessProbe") is True
+        and value.get("foregroundInteraction") is True
+        and value.get("visibleEvidenceCapture") is True
+        and value.get("terminalSelectionBound") is True
+        and value.get("liveTradingAllowed") is False
+        and value.get("terminalProcessMayRemainOpen") is True
+        and value.get("processAndWindowBinding") is True
+        and value.get("idempotentOperationBinding") is True
+        and value.get("durableReceiptRecovery") is True
+        and value.get("terminalShutdownAllowed") is False
+        and value.get("autoTradingMayBeToggled") is False
+        and value.get("chartAttachmentAllowed") is False
+    )
+    if stage_id == "compile_validate":
+        return bool(common_ready and value.get("visibleMetaEditorCompile") is True)
+    if stage_id == "backtest_recheck":
+        return bool(
+            common_ready
+            and value.get("visibleStrategyTester") is True
+            and value.get("visualModeRequired") is True
+            and value.get("testerTradeRowsEvidence") is True
+        )
+    return False
+
+
+def _ea_factory_one_click_visible_gate(build: dict, stage_id: str) -> dict:
+    """Return a fail-closed front-office capability projection.
+
+    Merely having MetaEditor.exe is not enough.  The injected adapter must say
+    it can foreground the selected application, use visible controls, capture
+    evidence, and keep live trading disabled.  This prevents the old hidden
+    compile-only adapter from being upgraded to visible proof by wording.
+    """
+
+    platform = str(build.get("platform") or "")
+    if platform not in {"mt4", "mt5"}:
+        return {
+            "ready": False,
+            "reasonCode": "one_click_requires_mt4_or_mt5",
+            "mode": "front_office_not_applicable",
+        }
+    if platform not in EA_FACTORY_ONE_CLICK_VISIBLE_PLATFORMS:
+        return {
+            "ready": False,
+            "reasonCode": "one_click_visible_mt5_not_implemented",
+            "mode": "manual_stage_by_stage_only",
+            "visibleMetaEditorCompile": False,
+            "visibleStrategyTester": False,
+            "visualModeRequired": True,
+            "visibleEvidenceCapture": False,
+            "liveTradingAllowed": False,
+            "terminalProcessLaunchAllowed": False,
+        }
+    if not _ea_factory_one_click_terminal_binding_current(build):
+        return {
+            "ready": False,
+            "reasonCode": "terminal_selection_changed",
+            "mode": "front_office_selection_binding_failed",
+        }
+    provider = EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER
+    handler = _ea_factory_visible_handler(stage_id)
+    if not callable(provider) or not callable(handler):
+        return {
+            "ready": False,
+            "reasonCode": "visible_terminal_adapter_not_connected",
+            "mode": "awaiting_visible_front_office_adapter",
+        }
+    run = build.get("oneClickRun") if isinstance(build.get("oneClickRun"), dict) else {}
+    binding = run.get("terminalBinding") if isinstance(run.get("terminalBinding"), dict) else {}
+    stored_action = run.get("visibleAction") if isinstance(run.get("visibleAction"), dict) else {}
+    operation = {
+        "stageId": stage_id,
+        "operationId": _ea_factory_one_click_visible_operation_id(
+            build,
+            run,
+            stage_id,
+        ),
+        "state": stored_action.get("state"),
+        "attemptCount": stored_action.get("attemptCount", 0),
+        "requiresExplicitResume": stored_action.get("requiresExplicitResume") is True,
+    }
+    try:
+        raw = provider(
+            platform=platform,
+            stage_id=stage_id,
+            terminal_binding=copy.deepcopy(binding),
+            visible_operation=operation,
+        )
+    except Exception:
+        raw = None
+    capability = raw if isinstance(raw, dict) else {}
+    ready = _ea_factory_front_office_capability_ready(capability, stage_id)
+    return {
+        "ready": ready,
+        "reasonCode": (
+            None
+            if ready
+            else safe_reference(capability.get("reasonCode"))
+            or "visible_terminal_adapter_not_ready"
+        ),
+        "mode": "visible_front_office",
+        "visibleMetaEditorCompile": capability.get("visibleMetaEditorCompile") is True,
+        "visibleStrategyTester": capability.get("visibleStrategyTester") is True,
+        "visualModeRequired": capability.get("visualModeRequired") is True,
+        "visibleEvidenceCapture": capability.get("visibleEvidenceCapture") is True,
+        "liveTradingAllowed": False,
+        "operationId": operation["operationId"],
+        "durableReceiptRecovery": capability.get("durableReceiptRecovery") is True,
+    }
+
+
+def _ea_factory_one_click_durable_receipt_recovery_available(
+    build: dict,
+    stage_id: object,
+    visible_action: object,
+) -> bool:
+    """Return whether retry can be receipt-only after the UI retry budget.
+
+    Existence is only an action-suppression signal.  The adapter still verifies
+    the exact intent, receipt schema/digests, artifacts and live window binding
+    before the Backend may commit anything.
+    """
+
+    action = visible_action if isinstance(visible_action, dict) else {}
+    safe_stage_id = safe_reference(stage_id)
+    operation_id = safe_reference(action.get("operationId"))
+    if (
+        safe_stage_id not in EA_FACTORY_VISIBLE_ACTION_STAGES
+        or action.get("stageId") != safe_stage_id
+        or not operation_id
+    ):
+        return False
+    build_dir = _ea_factory_build_directory(build.get("id"))
+    if build_dir is None:
+        return False
+    token = "compile" if safe_stage_id == "compile_validate" else "backtest"
+    receipt = build_dir / "Summaries" / f"{operation_id}-{token}-receipt.json"
+    try:
+        return receipt.is_file() and 0 < receipt.stat().st_size <= 256 * 1024
+    except OSError:
+        return False
+
+
+def _ea_factory_one_click_prestart_recovery_available(
+    build: dict,
+    stage_id: object,
+    visible_action: object,
+) -> bool:
+    """Allow one extra retry only for a proven pre-Start MT4 checkpoint.
+
+    The normal visible-action budget remains three.  A fourth reservation is
+    available only when the exact backtest intent/action/preset are intact and
+    every artifact that can indicate Start or a later checkpoint is absent.
+    Any malformed, linked, replaced, or ambiguous path fails closed.
+    """
+
+    action = visible_action if isinstance(visible_action, dict) else {}
+    run = build.get("oneClickRun") if isinstance(build.get("oneClickRun"), dict) else {}
+    safe_stage_id = safe_reference(stage_id)
+    operation_id = safe_reference(action.get("operationId"))
+    terminal_binding = (
+        run.get("terminalBinding")
+        if isinstance(run.get("terminalBinding"), dict)
+        else {}
+    )
+    if (
+        safe_stage_id != "backtest_recheck"
+        or run.get("status") != "awaiting_visible_terminal"
+        or safe_reference(run.get("currentStageId")) != safe_stage_id
+        or action.get("stageId") != safe_stage_id
+        or action.get("state") != "uncertain"
+        or action.get("requiresExplicitResume") is not True
+        or action.get("attemptCount") != EA_FACTORY_ONE_CLICK_VISIBLE_RETRY_LIMIT
+        or safe_reference(action.get("lastFailureCode"))
+        not in EA_FACTORY_ONE_CLICK_PRESTART_RECOVERY_FAILURE_CODES
+        or not operation_id
+        or operation_id
+        != _ea_factory_one_click_visible_operation_id(build, run, safe_stage_id)
+    ):
+        return False
+
+    build_dir = _ea_factory_build_directory(build.get("id"))
+    if build_dir is None:
+        return False
+    folders = {
+        name: _ea_factory_managed_folder(build_dir, name)
+        for name in ("Summaries", "Screenshots", "Reports", "Sets")
+    }
+    if any(folder is None for folder in folders.values()):
+        return False
+    summaries = folders["Summaries"]
+    screenshots = folders["Screenshots"]
+    reports = folders["Reports"]
+    sets = folders["Sets"]
+    if not all(isinstance(path, Path) for path in folders.values()):
+        return False
+
+    irreversible_or_post_start_paths = (
+        summaries / f"{operation_id}-backtest-start-boundary.json",
+        summaries / f"{operation_id}-backtest-receipt.json",
+        summaries / f"{operation_id}-backtest-ui.json",
+        screenshots / f"{operation_id}-tester-result.png",
+        reports / f"{operation_id}-tester.htm",
+        reports / f"{operation_id}-tester.html",
+    )
+    try:
+        if any(os.path.lexists(path) for path in irreversible_or_post_start_paths):
+            return False
+    except (OSError, TypeError, ValueError):
+        return False
+
+    intent_path = summaries / f"{operation_id}-backtest-intent.json"
+    action_request_path = summaries / f"{operation_id}-backtest-action-request.json"
+    preset_path = sets / f"{operation_id}-tester-input-preset.set"
+    intent_stable = _ea_factory_read_stable_file(intent_path, maximum_bytes=32 * 1024)
+    action_request_stable = _ea_factory_read_stable_file(
+        action_request_path,
+        maximum_bytes=32 * 1024,
+    )
+    preset_stable = _ea_factory_read_stable_file(preset_path, maximum_bytes=64 * 1024)
+    if intent_stable is None or action_request_stable is None or preset_stable is None:
+        return False
+    try:
+        intent = json.loads(intent_stable[0].decode("utf-8", errors="strict"))
+        action_request = json.loads(
+            action_request_stable[0].decode("utf-8", errors="strict")
+        )
+        binary = _ea_factory_backtest_binary(build)
+        tester_settings = _ea_factory_default_tester_settings(build)
+        preset = tester_settings.get("testerInputPreset")
+        if not isinstance(preset, dict) or not isinstance(preset.get("assumptions"), list):
+            return False
+        preset_lines: list[str] = []
+        for item in preset["assumptions"]:
+            if not isinstance(item, dict):
+                return False
+            name = str(item.get("inputName") or "")
+            input_type = str(item.get("inputType") or "")
+            value = item.get("testerValue")
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None:
+                return False
+            if input_type == "bool" and isinstance(value, bool):
+                token = "true" if value else "false"
+            elif input_type == "int" and isinstance(value, int) and not isinstance(value, bool):
+                token = str(value)
+            elif (
+                input_type == "double"
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+            ):
+                token = format(float(value), ".15g")
+            else:
+                return False
+            preset_lines.append(f"{name}={token}")
+        expected_preset_bytes = ("\r\n".join(preset_lines) + "\r\n").encode(
+            "ascii",
+            errors="strict",
+        )
+    except (OSError, UnicodeError, ValueError, TypeError, RequestError):
+        return False
+    if not secrets.compare_digest(preset_stable[0], expected_preset_bytes):
+        return False
+
+    source_digest = str(preset.get("sourceDigest") or "")
+    binary_sha256 = str(binary.get("sha256") or "")
+    binary_name = str(binary.get("fileName") or "")
+    build_id = safe_reference(build.get("id"))
+    candidate_id = safe_reference(terminal_binding.get("candidateId"))
+    selection_revision = terminal_binding.get("selectionRevision")
+    binding_digest = str(terminal_binding.get("bindingDigest") or "")
+    if (
+        not build_id
+        or not candidate_id
+        or isinstance(selection_revision, bool)
+        or not isinstance(selection_revision, int)
+        or selection_revision < 1
+        or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None
+        or re.fullmatch(r"[0-9a-f]{64}", binary_sha256) is None
+        or re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(preset.get("presetDigest") or ""))
+        is None
+        or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}\.ex4", binary_name) is None
+    ):
+        return False
+    identity_suffix = payload_digest(
+        "ea-factory-visible-front-office-stage-v1",
+        build_id,
+        safe_stage_id,
+        operation_id,
+    )[:24]
+    safety = {
+        "liveTradingAllowed": False,
+        "autoTradingMayBeToggled": False,
+        "chartAttachmentAllowed": False,
+        "terminalShutdownAllowed": False,
+        "visualModeRequired": True,
+        "optimizationAllowed": False,
+    }
+    expected_intent = {
+        "schemaVersion": "ea-factory-visible-front-office-action-intent-v1",
+        "operationId": operation_id,
+        "stageId": safe_stage_id,
+        "sourceDigest": source_digest,
+        "terminalCandidateId": candidate_id,
+        "terminalSelectionRevision": selection_revision,
+        "terminalBindingDigest": binding_digest,
+    }
+    expert_ui_path = (
+        f"Metafxclub\\AgentHQ\\{operation_id}\\{Path(binary_name).stem}"
+    )
+    expected_action_request = {
+        "schemaVersion": "ea-factory-visible-backtest-action-request-v1",
+        "protocolVersion": "durable-start-boundary-v1",
+        "operationId": operation_id,
+        "stageId": safe_stage_id,
+        "buildId": build_id,
+        "missionId": f"mission-eaf-{identity_suffix}",
+        "reportId": f"report-eaf-{identity_suffix}",
+        "terminalCandidateId": candidate_id,
+        "terminalSelectionRevision": selection_revision,
+        "terminalBindingDigest": binding_digest,
+        "sourceDigest": source_digest,
+        "compiledBinarySha256": binary_sha256,
+        "expertFileName": binary_name,
+        "expertUiPathDigest": hashlib.sha256(
+            expert_ui_path.encode("utf-8")
+        ).hexdigest(),
+        "testerSettingsDigest": _ea_factory_canonical_json_sha256(tester_settings),
+        "testerInputPresetDigest": str(preset.get("presetDigest") or ""),
+        "safetyPolicyDigest": _ea_factory_canonical_json_sha256(safety),
+    }
+    expected_action_request["actionRequestDigest"] = (
+        _ea_factory_canonical_json_sha256(expected_action_request)
+    )
+    return bool(
+        isinstance(intent, dict)
+        and intent == expected_intent
+        and isinstance(action_request, dict)
+        and action_request == expected_action_request
+    )
+
+
+def _ea_factory_tester_readback_matches_preset(
+    payload: bytes,
+    assumptions: object,
+) -> bool:
+    """Match the primary MT4 ``.set`` values to the trusted tester preset."""
+
+    if not isinstance(payload, bytes) or not isinstance(assumptions, list):
+        return False
+    try:
+        text = payload.decode("ascii", errors="strict")
+    except UnicodeDecodeError:
+        return False
+    primary: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith((";", "#")) or "=" not in line:
+            continue
+        name, raw_value = line.split("=", 1)
+        name = name.strip()
+        if "," in name:
+            continue
+        if (
+            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None
+            or name in primary
+        ):
+            return False
+        primary[name] = raw_value.strip()
+    if len(primary) != len(assumptions):
+        return False
+    for item in assumptions:
+        if not isinstance(item, dict):
+            return False
+        name = str(item.get("inputName") or "")
+        input_type = str(item.get("inputType") or "")
+        expected = item.get("testerValue")
+        token = primary.get(name)
+        if token is None:
+            return False
+        if input_type == "bool" and isinstance(expected, bool):
+            if token.casefold() not in ({"1", "true"} if expected else {"0", "false"}):
+                return False
+        elif input_type == "int" and isinstance(expected, int) and not isinstance(expected, bool):
+            if re.fullmatch(r"[+-]?\d+", token) is None or int(token) != expected:
+                return False
+        elif (
+            input_type == "double"
+            and isinstance(expected, (int, float))
+            and not isinstance(expected, bool)
+            and math.isfinite(float(expected))
+        ):
+            try:
+                observed = Decimal(token)
+                expected_decimal = Decimal(str(expected))
+            except InvalidOperation:
+                return False
+            if not observed.is_finite() or observed != expected_decimal:
+                return False
+        else:
+            return False
+    return True
+
+
+def _ea_factory_one_click_inflight_recovery_available(
+    build: dict,
+    stage_id: object,
+    visible_action: object,
+    *,
+    collected_checkpoint: bool = False,
+) -> bool:
+    """Allow collection of one already-running or already-collected MT4 test.
+
+    Neither mode reopens the Start budget.  Normal inflight recovery must still
+    observe ``Stop`` on the selected terminal, wait for ``Stop -> Start`` and
+    verify the fresh report before it can create a receipt.  Collected recovery
+    instead requires the canonical report plus both post-Start screenshots and
+    allows only their verification; the visible adapter must not save or Start.
+    """
+
+    action = visible_action if isinstance(visible_action, dict) else {}
+    run = build.get("oneClickRun") if isinstance(build.get("oneClickRun"), dict) else {}
+    operation_id = safe_reference(action.get("operationId"))
+    safe_stage_id = safe_reference(stage_id)
+    attempt_count = action.get("attemptCount")
+    terminal_binding = (
+        run.get("terminalBinding")
+        if isinstance(run.get("terminalBinding"), dict)
+        else {}
+    )
+    if (
+        safe_stage_id != "backtest_recheck"
+        or run.get("status") != "awaiting_visible_terminal"
+        or safe_reference(run.get("currentStageId")) != safe_stage_id
+        or action.get("stageId") != safe_stage_id
+        or action.get("state") != "uncertain"
+        or action.get("requiresExplicitResume") is not True
+        or isinstance(attempt_count, bool)
+        or not isinstance(attempt_count, int)
+        or attempt_count < EA_FACTORY_ONE_CLICK_VISIBLE_RETRY_LIMIT
+        or attempt_count > EA_FACTORY_ONE_CLICK_PRESTART_RECOVERY_LIMIT
+        or safe_reference(action.get("lastFailureCode"))
+        not in EA_FACTORY_ONE_CLICK_INFLIGHT_RECOVERY_FAILURE_CODES
+        or not operation_id
+        or operation_id
+        != _ea_factory_one_click_visible_operation_id(build, run, safe_stage_id)
+    ):
+        return False
+
+    build_dir = _ea_factory_build_directory(build.get("id"))
+    if build_dir is None:
+        return False
+    folders = {
+        name: _ea_factory_managed_folder(build_dir, name)
+        for name in ("Summaries", "Screenshots", "Reports", "Sets")
+    }
+    if any(folder is None for folder in folders.values()):
+        return False
+    summaries = folders["Summaries"]
+    screenshots = folders["Screenshots"]
+    reports = folders["Reports"]
+    sets = folders["Sets"]
+    if not all(isinstance(path, Path) for path in folders.values()):
+        return False
+
+    receipt = summaries / f"{operation_id}-backtest-receipt.json"
+    normal_ui = summaries / f"{operation_id}-backtest-ui.json"
+    recovery_ui = summaries / f"{operation_id}-backtest-ui-inflight-recovery.json"
+    completed_recovery_ui = (
+        summaries / f"{operation_id}-backtest-ui-completed-recovery.json"
+    )
+    collected_recovery_ui = (
+        summaries / f"{operation_id}-backtest-ui-collected-recovery.json"
+    )
+    result = screenshots / f"{operation_id}-tester-result.png"
+    report_proof = screenshots / f"{operation_id}-tester-report.png"
+    report = reports / f"{operation_id}-tester.htm"
+    legacy_report = reports / f"{operation_id}-tester.html"
+    try:
+        if any(
+            os.path.lexists(path)
+            for path in (
+                receipt,
+                normal_ui,
+                recovery_ui,
+                completed_recovery_ui,
+                collected_recovery_ui,
+                legacy_report,
+            )
+        ):
+            return False
+        report_exists = os.path.lexists(report)
+        if report_exists is not collected_checkpoint:
+            return False
+    except (OSError, TypeError, ValueError):
+        return False
+
+    # A missing result means the original test must still be observed running.
+    # A present result is allowed only as the exact post-completion checkpoint
+    # emitted after the durable Start boundary; the adapter will additionally
+    # require idle Start, advanced tester log, exact settings and report proof.
+    result_checkpoint = None
+    report_proof_checkpoint = None
+    report_checkpoint = None
+    try:
+        if os.path.lexists(result):
+            result_checkpoint = _ea_factory_read_stable_file(
+                result,
+                maximum_bytes=32 * 1024 * 1024,
+            )
+            if (
+                result_checkpoint is None
+                or len(result_checkpoint[0]) < 1024
+                or not result_checkpoint[0].startswith(b"\x89PNG\r\n\x1a\n")
+            ):
+                return False
+        if os.path.lexists(report_proof):
+            report_proof_checkpoint = _ea_factory_read_stable_file(
+                report_proof,
+                maximum_bytes=32 * 1024 * 1024,
+            )
+            if (
+                report_proof_checkpoint is None
+                or len(report_proof_checkpoint[0]) < 1024
+                or not report_proof_checkpoint[0].startswith(b"\x89PNG\r\n\x1a\n")
+                or result_checkpoint is None
+            ):
+                return False
+        if collected_checkpoint:
+            report_checkpoint = _ea_factory_read_stable_file(
+                report,
+                maximum_bytes=8 * 1024 * 1024,
+            )
+            if (
+                result_checkpoint is None
+                or report_proof_checkpoint is None
+                or report_checkpoint is None
+                or len(report_checkpoint[0]) < 1024
+            ):
+                return False
+            decoded_report = _ea_factory_tester_report_decoded(
+                report_checkpoint[0]
+            ).casefold()
+            if (
+                "<html" not in decoded_report[:8192]
+                or "<table" not in decoded_report
+                or "</html>" not in decoded_report[-8192:]
+            ):
+                return False
+    except (OSError, TypeError, ValueError):
+        return False
+    if (
+        safe_reference(action.get("lastFailureCode"))
+        in {"tester_results_tab_unavailable", "tester_report_tab_unavailable"}
+        and result_checkpoint is None
+    ):
+        return False
+
+    intent_path = summaries / f"{operation_id}-backtest-intent.json"
+    action_request_path = summaries / f"{operation_id}-backtest-action-request.json"
+    boundary_path = summaries / f"{operation_id}-backtest-start-boundary.json"
+    preset_path = sets / f"{operation_id}-tester-input-preset.set"
+    readback_path = sets / f"{operation_id}-tester-input-readback.set"
+    settings_png_path = screenshots / f"{operation_id}-tester-settings.png"
+    input_png_path = screenshots / f"{operation_id}-tester-input-preset.png"
+    stable = {
+        "intent": _ea_factory_read_stable_file(intent_path, maximum_bytes=32 * 1024),
+        "action": _ea_factory_read_stable_file(
+            action_request_path,
+            maximum_bytes=32 * 1024,
+        ),
+        "boundary": _ea_factory_read_stable_file(
+            boundary_path,
+            maximum_bytes=32 * 1024,
+        ),
+        "preset": _ea_factory_read_stable_file(preset_path, maximum_bytes=64 * 1024),
+        "readback": _ea_factory_read_stable_file(
+            readback_path,
+            maximum_bytes=1024 * 1024,
+        ),
+        "settings_png": _ea_factory_read_stable_file(
+            settings_png_path,
+            maximum_bytes=32 * 1024 * 1024,
+        ),
+        "input_png": _ea_factory_read_stable_file(
+            input_png_path,
+            maximum_bytes=32 * 1024 * 1024,
+        ),
+    }
+    if any(value is None for value in stable.values()):
+        return False
+    if (
+        len(stable["settings_png"][0]) < 1024
+        or not stable["settings_png"][0].startswith(b"\x89PNG\r\n\x1a\n")
+        or len(stable["input_png"][0]) < 1024
+        or not stable["input_png"][0].startswith(b"\x89PNG\r\n\x1a\n")
+        or not stable["readback"][0]
+    ):
+        return False
+
+    if collected_checkpoint:
+        try:
+            boundary_mtime_ns = boundary_path.stat(
+                follow_symlinks=False
+            ).st_mtime_ns
+            now_ns = time.time_ns()
+            earliest_ns = boundary_mtime_ns - 1_000_000_000
+            latest_ns = now_ns + 60_000_000_000
+            checkpoint_mtimes = (
+                result.stat(follow_symlinks=False).st_mtime_ns,
+                report_proof.stat(follow_symlinks=False).st_mtime_ns,
+                report.stat(follow_symlinks=False).st_mtime_ns,
+            )
+        except (OSError, TypeError, ValueError):
+            return False
+        if (
+            boundary_mtime_ns > latest_ns
+            or any(
+                observed < earliest_ns or observed > latest_ns
+                for observed in checkpoint_mtimes
+            )
+        ):
+            return False
+
+    try:
+        intent = json.loads(stable["intent"][0].decode("utf-8", errors="strict"))
+        action_request = json.loads(
+            stable["action"][0].decode("utf-8", errors="strict")
+        )
+        boundary = json.loads(
+            stable["boundary"][0].decode("utf-8", errors="strict")
+        )
+        binary = _ea_factory_backtest_binary(build)
+        tester_settings = _ea_factory_default_tester_settings(build)
+        preset = tester_settings.get("testerInputPreset")
+        if not isinstance(preset, dict) or not isinstance(preset.get("assumptions"), list):
+            return False
+        expected_preset_lines: list[str] = []
+        for item in preset["assumptions"]:
+            if not isinstance(item, dict):
+                return False
+            name = str(item.get("inputName") or "")
+            input_type = str(item.get("inputType") or "")
+            value = item.get("testerValue")
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None:
+                return False
+            if input_type == "bool" and isinstance(value, bool):
+                token = "true" if value else "false"
+            elif input_type == "int" and isinstance(value, int) and not isinstance(value, bool):
+                token = str(value)
+            elif (
+                input_type == "double"
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+            ):
+                token = format(float(value), ".15g")
+            else:
+                return False
+            expected_preset_lines.append(f"{name}={token}")
+        expected_preset_bytes = (
+            "\r\n".join(expected_preset_lines) + "\r\n"
+        ).encode("ascii", errors="strict")
+    except (OSError, UnicodeError, ValueError, TypeError, RequestError):
+        return False
+    if not secrets.compare_digest(stable["preset"][0], expected_preset_bytes):
+        return False
+    if collected_checkpoint and not _ea_factory_tester_readback_matches_preset(
+        stable["readback"][0],
+        preset.get("assumptions"),
+    ):
+        return False
+
+    source_digest = str(preset.get("sourceDigest") or "")
+    binary_sha256 = str(binary.get("sha256") or "")
+    binary_name = str(binary.get("fileName") or "")
+    build_id = safe_reference(build.get("id"))
+    candidate_id = safe_reference(terminal_binding.get("candidateId"))
+    selection_revision = terminal_binding.get("selectionRevision")
+    binding_digest = str(terminal_binding.get("bindingDigest") or "")
+    if (
+        not build_id
+        or not candidate_id
+        or isinstance(selection_revision, bool)
+        or not isinstance(selection_revision, int)
+        or selection_revision < 1
+        or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None
+        or re.fullmatch(r"[0-9a-f]{64}", binary_sha256) is None
+        or re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(preset.get("presetDigest") or ""))
+        is None
+        or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}\.ex4", binary_name) is None
+    ):
+        return False
+    identity_suffix = payload_digest(
+        "ea-factory-visible-front-office-stage-v1",
+        build_id,
+        safe_stage_id,
+        operation_id,
+    )[:24]
+    safety = {
+        "liveTradingAllowed": False,
+        "autoTradingMayBeToggled": False,
+        "chartAttachmentAllowed": False,
+        "terminalShutdownAllowed": False,
+        "visualModeRequired": True,
+        "optimizationAllowed": False,
+    }
+    expected_intent = {
+        "schemaVersion": "ea-factory-visible-front-office-action-intent-v1",
+        "operationId": operation_id,
+        "stageId": safe_stage_id,
+        "sourceDigest": source_digest,
+        "terminalCandidateId": candidate_id,
+        "terminalSelectionRevision": selection_revision,
+        "terminalBindingDigest": binding_digest,
+    }
+    expert_ui_path = f"Metafxclub\\AgentHQ\\{operation_id}\\{Path(binary_name).stem}"
+    expected_action_request = {
+        "schemaVersion": "ea-factory-visible-backtest-action-request-v1",
+        "protocolVersion": "durable-start-boundary-v1",
+        "operationId": operation_id,
+        "stageId": safe_stage_id,
+        "buildId": build_id,
+        "missionId": f"mission-eaf-{identity_suffix}",
+        "reportId": f"report-eaf-{identity_suffix}",
+        "terminalCandidateId": candidate_id,
+        "terminalSelectionRevision": selection_revision,
+        "terminalBindingDigest": binding_digest,
+        "sourceDigest": source_digest,
+        "compiledBinarySha256": binary_sha256,
+        "expertFileName": binary_name,
+        "expertUiPathDigest": hashlib.sha256(expert_ui_path.encode("utf-8")).hexdigest(),
+        "testerSettingsDigest": _ea_factory_canonical_json_sha256(tester_settings),
+        "testerInputPresetDigest": str(preset.get("presetDigest") or ""),
+        "safetyPolicyDigest": _ea_factory_canonical_json_sha256(safety),
+    }
+    expected_action_request["actionRequestDigest"] = (
+        _ea_factory_canonical_json_sha256(expected_action_request)
+    )
+    expected_boundary = {
+        "schemaVersion": "ea-factory-tester-start-boundary-v1",
+        "operationId": operation_id,
+        "stageId": safe_stage_id,
+        "actionRequestDigest": expected_action_request["actionRequestDigest"],
+    }
+    expected_boundary_bytes = json.dumps(
+        expected_boundary,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return bool(
+        isinstance(intent, dict)
+        and intent == expected_intent
+        and isinstance(action_request, dict)
+        and action_request == expected_action_request
+        and isinstance(boundary, dict)
+        and boundary == expected_boundary
+        and secrets.compare_digest(stable["boundary"][0], expected_boundary_bytes)
+    )
+
+
+def _ea_factory_one_click_collected_recovery_available(
+    build: dict,
+    stage_id: object,
+    visible_action: object,
+) -> bool:
+    """Allow receipt creation from one exact, fully collected checkpoint."""
+
+    return _ea_factory_one_click_inflight_recovery_available(
+        build,
+        stage_id,
+        visible_action,
+        collected_checkpoint=True,
+    )
+
+
+def _ea_factory_one_click_read_model(build: dict) -> dict | None:
+    run = build.get("oneClickRun")
+    if not isinstance(run, dict):
+        return None
+    stages = [
+        _ea_factory_stage_read_model(build, stage)
+        for stage in (build.get("stages") if isinstance(build.get("stages"), list) else [])
+        if isinstance(stage, dict) and stage.get("id") in EA_FACTORY_ONE_CLICK_STAGE_IDS
+    ]
+    current_stage_id = safe_reference(run.get("currentStageId"))
+    current = next((stage for stage in stages if stage.get("id") == current_stage_id), None)
+    status = str(run.get("status") or "failed")
+    visible_action = (
+        run.get("visibleAction") if isinstance(run.get("visibleAction"), dict) else {}
+    )
+    visible_attempt_count = clamp_int(
+        visible_action.get("attemptCount"),
+        0,
+        0,
+        EA_FACTORY_ONE_CLICK_PRESTART_RECOVERY_LIMIT,
+    )
+    prestart_recovery_available = (
+        _ea_factory_one_click_prestart_recovery_available(
+            build,
+            current_stage_id,
+            visible_action,
+        )
+    )
+    inflight_recovery_available = (
+        _ea_factory_one_click_inflight_recovery_available(
+            build,
+            current_stage_id,
+            visible_action,
+        )
+    )
+    collected_recovery_available = (
+        _ea_factory_one_click_collected_recovery_available(
+            build,
+            current_stage_id,
+            visible_action,
+        )
+    )
+    visible_attempt_limit = (
+        EA_FACTORY_ONE_CLICK_PRESTART_RECOVERY_LIMIT
+        if (
+            prestart_recovery_available
+            or visible_attempt_count >= EA_FACTORY_ONE_CLICK_PRESTART_RECOVERY_LIMIT
+        )
+        else EA_FACTORY_ONE_CLICK_VISIBLE_RETRY_LIMIT
+    )
+    visible_retry_available = bool(
+        status == "awaiting_visible_terminal"
+        and (
+            visible_attempt_count < EA_FACTORY_ONE_CLICK_VISIBLE_RETRY_LIMIT
+            or prestart_recovery_available
+            or inflight_recovery_available
+            or collected_recovery_available
+            or _ea_factory_one_click_durable_receipt_recovery_available(
+                build,
+                current_stage_id,
+                visible_action,
+            )
+        )
+    )
+    file_by_id = {
+        str(item.get("fileId")): item
+        for item in _ea_factory_file_catalog(build)
+        if isinstance(item, dict) and item.get("fileId")
+    }
+    evidence = [
+        copy.deepcopy(file_by_id[file_id])
+        for stage_row in stages
+        for file_id in (stage_row.get("artifacts") or [])
+        if file_id in file_by_id
+    ]
+    return {
+        "schemaVersion": EA_FACTORY_ONE_CLICK_SCHEMA_VERSION,
+        "runId": safe_reference(run.get("runId")),
+        # This is an opaque bounded operation key, not a credential.  Returning
+        # it allows a page reload to resume the same operation without creating
+        # a second Mission.
+        "idempotencyKey": str(run.get("idempotencyKey") or ""),
+        "status": status,
+        "currentStageId": current_stage_id,
+        "missionId": safe_reference((current or {}).get("missionId")),
+        "reportId": safe_reference((current or {}).get("reportId")),
+        "failureCode": safe_reference(run.get("failureCode"))
+        or safe_reference(visible_action.get("lastFailureCode")),
+        "messageTh": redact_text(str(run.get("messageTh") or ""), 500),
+        "startedAt": run.get("startedAt"),
+        "updatedAt": run.get("updatedAt"),
+        "completedAt": run.get("completedAt"),
+        "stageResults": stages,
+        "evidence": evidence,
+        "visibleAction": (
+            {
+                "stageId": safe_reference(visible_action.get("stageId")),
+                "operationId": safe_reference(visible_action.get("operationId")),
+                "state": str(visible_action.get("state") or ""),
+                "attemptCount": visible_attempt_count,
+                "attemptLimit": visible_attempt_limit,
+                "requiresExplicitResume": visible_action.get(
+                    "requiresExplicitResume"
+                )
+                is True,
+            }
+            if visible_action
+            else None
+        ),
+        "canResume": visible_retry_available,
+        "canRetry": bool(
+            visible_retry_available
+            or (
+                status in {"blocked", "failed"}
+                and isinstance(current, dict)
+                and current.get("canRetry") is True
+            )
+        ),
+        "liveTradingAllowed": False,
+        "visualModeRequired": True,
     }
 
 
@@ -27343,23 +31642,79 @@ def _ea_factory_build_read_model(build: dict) -> dict:
         "files": files,
         "artifactLineage": artifact_lineage,
         "terminalGate": terminal_gate,
+        "oneClickRun": _ea_factory_one_click_read_model(build),
         "createdAt": build.get("createdAt"),
         "updatedAt": build.get("updatedAt"),
     }
 
 
 def _ea_factory_source_record_read_model(record: dict) -> dict:
-    ea_research = _ea_research_canonical_read_model(
-        record.get("eaImplementationBlueprint"),
-        record.get("eaBlueprintDigest"),
-        missing_reason="legacy_ea_blueprint_missing",
+    strategy_brief = (
+        copy.deepcopy(record.get("strategyBrief"))
+        if isinstance(record.get("strategyBrief"), dict)
+        else None
     )
+    strategy_brief_digest = str(
+        record.get("strategyBriefDigest") or ""
+    ).strip().lower()
+    if strategy_brief is not None and re.fullmatch(r"[0-9a-f]{64}", strategy_brief_digest):
+        ea_research = {
+            "schemaVersion": EA_STRATEGY_BRIEF_SCHEMA_VERSION,
+            "validationStatus": "strategy_brief_validated",
+            "validated": True,
+            "digestMatched": True,
+            "ready": True,
+            "status": "ready",
+            "eaHandoffAllowed": True,
+            "deterministicBacktestAllowed": False,
+            "requiresResearchRerun": False,
+            "requiresResearchRevision": False,
+            "strategyBrief": strategy_brief,
+            "briefDigest": strategy_brief_digest,
+            "readinessIssues": [],
+            "blockingIssues": [],
+            "warnings": [],
+        }
+        factory_compatibility = {
+            "ready": True,
+            "compatiblePlatforms": ["mt4", "mt5", "tradingview"],
+            "capabilityIssues": [],
+            "readinessIssues": [],
+            "contract": EA_STRATEGY_BRIEF_SCHEMA_VERSION,
+        }
+    else:
+        canonical = _ea_research_canonical_read_model(
+            record.get("eaImplementationBlueprint"),
+            record.get("eaBlueprintDigest"),
+            missing_reason="legacy_ea_blueprint_missing",
+        )
+        ea_research = (
+            _ea_research_mark_legacy_read_only(canonical)
+            if isinstance(record.get("eaImplementationBlueprint"), dict)
+            else canonical
+        )
+        factory_compatibility = (
+            _ea_factory_blueprint_compatibility_read_model(
+                record.get("eaImplementationBlueprint")
+            )
+            if ea_research.get("ready") is True
+            else {
+                "ready": False,
+                "compatiblePlatforms": [],
+                "capabilityIssues": [],
+                "readinessIssues": ["ea_factory_blueprint_not_ready"],
+            }
+        )
     readiness_issues = [
         redact_text(str(item or ""), 160)
         for item in (record.get("readinessIssues") or [])[:40]
         if str(item or "").strip()
     ]
     for item in ea_research.get("readinessIssues") or []:
+        normalized = redact_text(str(item or ""), 160)
+        if normalized and normalized not in readiness_issues:
+            readiness_issues.append(normalized)
+    for item in factory_compatibility.get("readinessIssues") or []:
         normalized = redact_text(str(item or ""), 160)
         if normalized and normalized not in readiness_issues:
             readiness_issues.append(normalized)
@@ -27375,9 +31730,17 @@ def _ea_factory_source_record_read_model(record: dict) -> dict:
             field for field in (record.get("missingCoreFields") or [])
             if field in EA_FACTORY_REQUIRED_CORE_FIELDS
         ],
-        "buildReady": record.get("buildReady") is True and ea_research.get("ready") is True,
+        "buildReady": (
+            record.get("buildReady") is True
+            and ea_research.get("ready") is True
+            and factory_compatibility.get("ready") is True
+        ),
         "readinessIssues": readiness_issues[:40],
         "eaResearch": ea_research,
+        "compatiblePlatforms": list(
+            factory_compatibility.get("compatiblePlatforms") or []
+        ),
+        "factoryCompatibility": factory_compatibility,
         "recordDigest": (
             str(record.get("recordDigest"))
             if re.fullmatch(r"[0-9a-f]{64}", str(record.get("recordDigest") or ""))
@@ -27388,7 +31751,280 @@ def _ea_factory_source_record_read_model(record: dict) -> dict:
     }
 
 
-def ea_factory_read_model() -> dict:
+EA_FACTORY_ACTIVE_MISSION_STATUSES = frozenset({"queued", "running"})
+
+
+def _ea_factory_active_worker_payload(
+    state: dict,
+    missions: list[dict],
+) -> dict | None:
+    """Return one actually-active Factory worker without trusting stale stages."""
+
+    with EA_FACTORY_ONE_CLICK_THREADS_LOCK:
+        alive_build_ids: set[str] = set()
+        for raw_build_id, worker in EA_FACTORY_ONE_CLICK_THREADS.items():
+            try:
+                alive = callable(getattr(worker, "is_alive", None)) and worker.is_alive()
+            except Exception:
+                alive = False
+            build_id = safe_reference(raw_build_id)
+            if build_id and alive:
+                alive_build_ids.add(build_id)
+
+    mission_by_id = {
+        mission_id: row
+        for row in missions
+        if isinstance(row, dict)
+        and (mission_id := safe_reference(row.get("id")))
+    }
+
+    def active_stage_mission(build_id: str, stage: dict) -> dict | None:
+        """Resolve Mission truth, including the post-dispatch crash window.
+
+        The durable stage reservation is written before dashboard dispatch. A
+        Mission can therefore exist while ``stage.missionId`` is still empty.
+        Only the exact Backend-owned Factory scope may use the idempotency-key
+        fallback; unrelated Missions can never make the Factory appear busy.
+        """
+
+        mission_id = safe_reference(stage.get("missionId"))
+        direct = mission_by_id.get(mission_id or "")
+        direct_status = str((direct or {}).get("status") or "").strip().lower()
+        if direct_status in EA_FACTORY_ACTIVE_MISSION_STATUSES:
+            return direct
+        if mission_id:
+            return None
+        stage_id = safe_reference(stage.get("id"))
+        mission_key = str(stage.get("missionIdempotencyKey") or "")
+        if (
+            stage_id not in set(EA_FACTORY_BACKEND_AUTO_STAGE_ACTIONS.values())
+            or not SAFE_IDEMPOTENCY_PATTERN.fullmatch(mission_key)
+        ):
+            return None
+        for candidate in missions:
+            if not isinstance(candidate, dict):
+                continue
+            if (
+                candidate.get("idempotencyKey") != mission_key
+                or candidate.get("targetId") != "right_server_racks"
+                or candidate.get("requester") != "human"
+                or candidate.get("owner") != "ea_developer"
+                or candidate.get("toolId") != "codex_cli_task"
+                or candidate.get("reportType") != "ea_build_report"
+                or str(candidate.get("status") or "").strip().lower()
+                not in EA_FACTORY_ACTIVE_MISSION_STATUSES
+            ):
+                continue
+            sandbox = _trusted_backend_ea_factory_worker_sandbox(candidate)
+            if (
+                isinstance(sandbox, dict)
+                and sandbox.get("buildId") == build_id
+                and sandbox.get("stageId") == stage_id
+            ):
+                return candidate
+        return None
+
+    for build in state.get("builds", []):
+        if not isinstance(build, dict):
+            continue
+        build_id = safe_reference(build.get("id"))
+        if not build_id:
+            continue
+        display_name = (
+            redact_text(str(build.get("sourceDisplayName") or ""), 180)
+            or build_id
+        )
+        if build_id in alive_build_ids:
+            run = (
+                build.get("oneClickRun")
+                if isinstance(build.get("oneClickRun"), dict)
+                else {}
+            )
+            run_status = str(run.get("status") or "").strip().lower()
+            if run_status not in {"queued", "running", "waiting_ai"}:
+                run_status = "running"
+            current_stage_id = (
+                safe_reference(run.get("currentStageId"))
+                or _ea_factory_build_current_stage_id(build)
+            )
+            current_stage = (
+                _ea_factory_stage_row(build, current_stage_id)
+                if current_stage_id
+                else None
+            )
+            mission = (
+                active_stage_mission(build_id, current_stage)
+                if isinstance(current_stage, dict)
+                else None
+            )
+            mission_id = safe_reference((mission or {}).get("id"))
+            mission_status = str((mission or {}).get("status") or "").strip().lower()
+            if mission_status not in EA_FACTORY_ACTIVE_MISSION_STATUSES:
+                mission_id = None
+                mission_status = ""
+            return {
+                "buildId": build_id,
+                "displayName": display_name,
+                "stageId": current_stage_id,
+                "status": run_status,
+                "missionId": mission_id,
+                "missionStatus": mission_status or None,
+                "activeOperation": "one_click_run",
+            }
+        stages = build.get("stages") if isinstance(build.get("stages"), list) else []
+        for stage in stages:
+            if not isinstance(stage, dict):
+                continue
+            mission = active_stage_mission(build_id, stage)
+            if not isinstance(mission, dict):
+                continue
+            mission_id = safe_reference(mission.get("id"))
+            mission_status = str(mission.get("status") or "").strip().lower()
+            return {
+                "buildId": build_id,
+                "displayName": display_name,
+                "stageId": safe_reference(stage.get("id")),
+                "status": mission_status,
+                "missionId": mission_id,
+                "missionStatus": mission_status,
+                "activeOperation": (
+                    safe_reference(stage.get("id"))
+                    if safe_reference(stage.get("id"))
+                    in {
+                        "generate_source",
+                        "source_review",
+                        "compile_validate",
+                        "backtest_recheck",
+                    }
+                    else "advance_stage"
+                ),
+            }
+    return None
+
+
+def _ea_factory_current_thread_is_one_click_worker(build_id: object) -> bool:
+    safe_build_id = safe_reference(build_id)
+    if not safe_build_id:
+        return False
+    with EA_FACTORY_ONE_CLICK_THREADS_LOCK:
+        return EA_FACTORY_ONE_CLICK_THREADS.get(safe_build_id) is threading.current_thread()
+
+
+def _ea_factory_current_thread_owns_active_stage(
+    active_worker: object,
+    build_id: object,
+    stage_id: object,
+) -> bool:
+    """Allow only the exact coordinator to advance its own current Stage."""
+
+    safe_build_id = safe_reference(build_id)
+    safe_stage_id = safe_reference(stage_id)
+    return bool(
+        isinstance(active_worker, dict)
+        and safe_build_id
+        and safe_stage_id
+        and active_worker.get("buildId") == safe_build_id
+        and active_worker.get("stageId") == safe_stage_id
+        and _ea_factory_current_thread_is_one_click_worker(safe_build_id)
+    )
+
+
+def _raise_ea_factory_busy(busy: dict) -> None:
+    message_th = (
+        "โรงงานสร้าง EA กำลังทำงานอยู่ จึงยังไม่รับงานใหม่ "
+        "กรุณารอให้งานปัจจุบันสิ้นสุดก่อน"
+    )
+    raise RequestError(
+        message_th,
+        409,
+        code="ea_factory_single_active_build",
+        response_payload={
+            "kind": "ea_factory_busy",
+            "code": "ea_factory_single_active_build",
+            "messageTh": message_th,
+            "busy": busy,
+        },
+    )
+
+
+def _ea_factory_pure_stage_replay_response(
+    build: dict,
+    stage: dict,
+    missions: list[dict],
+    *,
+    kind: str = "ea_factory_stage_replayed",
+) -> dict:
+    mission_id = safe_reference(stage.get("missionId"))
+    mission = next(
+        (
+            row
+            for row in missions
+            if isinstance(row, dict)
+            and safe_reference(row.get("id")) == mission_id
+        ),
+        None,
+    )
+    report_id = safe_reference(stage.get("reportId"))
+    report = None
+    if report_id:
+        report_path = RUNTIME_REPORTS_DIR / f"{report_id}.json"
+        stored = read_json(report_path, None) if report_path.is_file() else None
+        report = stored if isinstance(stored, dict) else None
+    return {
+        "ok": True,
+        "kind": kind,
+        "mission": mission_read_model_item(mission) if isinstance(mission, dict) else None,
+        "report": report_read_model_item(report) if isinstance(report, dict) else None,
+        "build": _ea_factory_build_read_model(build),
+        "idempotentReplay": True,
+        "messageTh": "คำขอนี้ถูกส่งไว้แล้ว ระบบจึงแสดงสถานะเดิมโดยไม่เริ่มงานซ้ำ",
+    }
+
+
+def _ea_factory_read_model_signature(
+    selection: dict,
+    terminal_gates: dict,
+    research_sheet_hub_model: dict,
+    front_office_supported_platforms: tuple[str, ...],
+    front_office_handlers_connected: bool,
+) -> tuple[object, ...]:
+    volatile_digest = payload_digest(
+        "ea-factory-read-model-volatile-v1",
+        selection,
+        terminal_gates,
+        research_sheet_hub_model,
+        list(front_office_supported_platforms),
+        front_office_handlers_connected,
+    )
+    return (
+        _mission_store_signature(),
+        _ea_factory_report_store_signature(),
+        _ea_factory_cache_file_signature(_ea_factory_state_path()),
+        _ea_factory_workspace_signature(),
+        _ea_factory_cache_file_signature(DASHBOARD_WORKFLOW_SETTINGS_PATH),
+        _ea_factory_cache_file_signature(RESEARCH_SHEET_CACHE_PATH),
+        _ea_factory_cache_file_signature(RESEARCH_SHEET_OUTBOX_PATH),
+        _ea_factory_cache_file_signature(DEEP_RESEARCH_CONFIRMATIONS_PATH),
+        volatile_digest,
+    )
+
+
+def _ea_factory_lock_owned_by_current_thread() -> bool:
+    checker = getattr(EA_FACTORY_LOCK, "_is_owned", None)
+    try:
+        return bool(callable(checker) and checker())
+    except Exception:
+        return False
+
+
+def _ea_factory_read_model_uncached(
+    *,
+    selection: dict,
+    terminal_gates: dict,
+    research_sheet_hub_model: dict,
+    front_office_supported_platforms: tuple[str, ...],
+    front_office_handlers_connected: bool,
+) -> dict:
     mission_rows = load_missions(shared_snapshot=True)
     report_rows = load_runtime_reports(limit=EA_FACTORY_SOURCE_REPORT_LIMIT)
     with EA_FACTORY_LOCK:
@@ -27420,18 +32056,33 @@ def ea_factory_read_model() -> dict:
             for item in state["builds"]
             if isinstance(item, dict)
         ]
-    terminal_model = peek_metatrader_status()
-    selection = _metatrader_selection_read_model("right_server_racks", terminal_model)
+        busy = _ea_factory_active_worker_payload(state, mission_rows)
     selected = selection.get("selectedCandidate") if isinstance(selection.get("selectedCandidate"), dict) else {}
     selected_platform = str(selected.get("platform") or "")
+    selected_terminal_running = bool(
+        selected.get("runningState") == "platform_running_detected"
+    )
+    selected_one_click_supported = bool(
+        selected_platform in EA_FACTORY_ONE_CLICK_VISIBLE_PLATFORMS
+    )
     selected_compile_gate = (
-        _ea_factory_terminal_gate(selected_platform)
+        terminal_gates.get(selected_platform)
         if selected_platform in {"mt4", "mt5"}
         else None
     )
+    front_office_adapter_connected = bool(
+        front_office_handlers_connected
+        and selected_one_click_supported
+        and selected_platform in front_office_supported_platforms
+    )
+    selected_one_click_terminal_ready = bool(
+        selected_one_click_supported
+        and selected_terminal_running
+        and isinstance(selected_compile_gate, dict)
+        and selected_compile_gate.get("ready") is True
+    )
     latest_snapshot = source_snapshots[0] if source_snapshots else None
     latest_build = build_models[0] if build_models else None
-    research_sheet_hub_model = research_sheet_hub_read_model()
     research_sheet_consumer = next(
         (
             item for item in (research_sheet_hub_model.get("consumers") or [])
@@ -27441,7 +32092,7 @@ def ea_factory_read_model() -> dict:
     )
     return sanitize_json_value({
         "schemaVersion": EA_FACTORY_SCHEMA_VERSION,
-        "mode": "manual_stage_by_stage",
+        "mode": "one_click_with_manual_stage_recovery",
         "scheduled": False,
         "schedulerEnabled": False,
         "sourceCatalog": {
@@ -27481,9 +32132,25 @@ def ea_factory_read_model() -> dict:
                 "compileMode": (
                     "static_source_validation"
                     if platform == "tradingview"
-                    else "selected_metaeditor_compile_only"
+                    else "one_click_visible_metaeditor_or_manual_stage_by_stage"
+                    if platform == "mt4"
+                    else "manual_stage_by_stage_visible_metaeditor"
                 ),
-                "backtestMode": "not_applicable" if platform == "tradingview" else "selected_terminal_strategy_tester_required",
+                "backtestMode": (
+                    "not_applicable"
+                    if platform == "tradingview"
+                    else "one_click_visible_strategy_tester_or_manual_stage_by_stage"
+                    if platform == "mt4"
+                    else "manual_stage_by_stage_visible_strategy_tester"
+                ),
+                "oneClickVisibleAvailable": platform == "mt4",
+                "oneClickBlockedReasonCode": (
+                    "one_click_visible_mt5_not_implemented"
+                    if platform == "mt5"
+                    else None
+                ),
+                "terminalMustAlreadyBeRunning": platform in {"mt4", "mt5"},
+                "terminalProcessLaunchAllowed": False,
                 "compatibleArtifactKinds": (
                     ["expert_advisor"]
                     if platform == "tradingview"
@@ -27510,6 +32177,10 @@ def ea_factory_read_model() -> dict:
             },
         ],
         "stageDefinitions": _ea_factory_stage_definitions(),
+        # This is the same bounded public projection returned with admission
+        # errors. Polling clients must not infer availability from stale Stage
+        # copies or erase a still-active 409 notice.
+        "busy": busy,
         "builds": build_models,
         "stages": latest_build.get("stages", []) if latest_build else [],
         "currentStageId": (
@@ -27529,19 +32200,56 @@ def ea_factory_read_model() -> dict:
                 isinstance(selected_compile_gate, dict)
                 and selected_compile_gate.get("adapterReady") is True
             ),
-            "compileOnly": True,
-            "terminalExecutionAllowed": False,
+            # The legacy/manual adapter remains compile-only.  A connected
+            # visible front-office adapter may also drive the selected local
+            # Strategy Tester, but it is still forbidden from live trading.
+            "compileOnly": not front_office_adapter_connected,
+            "terminalExecutionAllowed": front_office_adapter_connected,
+        },
+        "oneClick": {
+            "enabled": selected_platform != "mt5",
+            "canRun": bool(
+                selected_one_click_terminal_ready
+            ),
+            "canCreateAndRun": bool(
+                selected_one_click_terminal_ready
+            ),
+            "supportedVisiblePlatforms": sorted(
+                EA_FACTORY_ONE_CLICK_VISIBLE_PLATFORMS
+            ),
+            "selectedPlatformSupported": selected_one_click_supported,
+            "unsupportedReasonCode": (
+                "one_click_visible_mt5_not_implemented"
+                if selected_platform == "mt5"
+                else None
+            ),
+            "selectedPlatform": selected_platform or None,
+            "selectedTerminalId": safe_reference(selected.get("candidateId")),
+            "selectedTerminalLabel": redact_text(str(selected.get("labelTh") or ""), 120) or None,
+            "terminalReady": selected_one_click_terminal_ready,
+            "terminalRunning": selected_terminal_running,
+            "terminalMustAlreadyBeRunning": True,
+            "terminalProcessLaunchAllowed": False,
+            "visibleAdapterConnected": front_office_adapter_connected,
+            "requiresVisibleTerminal": True,
+            "manualOnly": not front_office_adapter_connected,
+            "visualModeRequired": True,
+            "liveTradingAllowed": False,
+            "runEndpoint": "/api/props/right_server_racks/ea-factory/builds/{buildId}/run",
+            "runEndpointTemplate": "/api/props/right_server_racks/ea-factory/builds/{buildId}/run",
         },
         "terminalGate": {
-            "mt4": _ea_factory_terminal_gate("mt4"),
-            "mt5": _ea_factory_terminal_gate("mt5"),
-            "tradingview": _ea_factory_terminal_gate("tradingview"),
+            "mt4": terminal_gates.get("mt4"),
+            "mt5": terminal_gates.get("mt5"),
+            "tradingview": terminal_gates.get("tradingview"),
         },
         "endpoints": {
             "read": "/api/props/right_server_racks/ea-factory",
             "syncGoogleSheet": "/api/props/right_server_racks/ea-factory/sources/google-sheet/sync",
             "createBuild": "/api/props/right_server_racks/ea-factory/builds",
             "advanceBuildTemplate": "/api/props/right_server_racks/ea-factory/builds/{buildId}/advance",
+            "retryBuildStageTemplate": "/api/props/right_server_racks/ea-factory/builds/{buildId}/retry",
+            "runBuildTemplate": "/api/props/right_server_racks/ea-factory/builds/{buildId}/run",
             "downloadArtifactTemplate": "/api/props/right_server_racks/ea-factory/builds/{buildId}/files/{fileId}",
         },
         "safety": {
@@ -27551,14 +32259,139 @@ def ea_factory_read_model() -> dict:
             "oauthSecretsExposed": False,
             "terminalPathExposed": False,
             "syntheticCompileOrBacktestSuccessAllowed": False,
-            "compileAdapterMode": "compile_only_hidden_no_terminal_execution",
+            "compileAdapterMode": (
+                "visible_front_office_injected"
+                if front_office_adapter_connected
+                else "manual_stage_by_stage_only_mt5"
+                if selected_platform == "mt5"
+                else "visible_front_office_required_not_connected"
+            ),
+            "oneClickVisiblePlatforms": sorted(
+                EA_FACTORY_ONE_CLICK_VISIBLE_PLATFORMS
+            ),
+            "oneClickMayLaunchTerminalProcess": False,
             "metaEditorPathExposed": False,
             "liveTradingAllowed": False,
-            "automaticLoop": False,
+            "automaticLoop": True,
             "immutableVersions": True,
         },
         "updatedAt": utc_now(),
-    }, collection_limit=1000, string_limit=4000)
+    }, collection_limit=1000, string_limit=20000)
+
+
+def ea_factory_read_model() -> dict:
+    """Return a signature-bound, single-flight Factory projection."""
+
+    # One invalidation can legitimately occur while the uncached projection is
+    # being assembled (for example, reconciliation persists a fresher Stage).
+    # Re-enter single-flight once so this GET never returns that pre-write
+    # snapshot. A second moving-target result fails closed instead of spinning
+    # forever or exposing a value whose signature was already invalidated.
+    for refresh_attempt in range(2):
+        terminal_model = peek_metatrader_status()
+        selection = _metatrader_selection_read_model(
+            "right_server_racks",
+            terminal_model,
+        )
+        terminal_gates = {
+            platform: _ea_factory_terminal_gate(platform)
+            for platform in ("mt4", "mt5", "tradingview")
+        }
+        research_sheet_hub_model = research_sheet_hub_read_model()
+        supported_platforms = tuple(sorted(_ea_factory_front_office_supported_platforms()))
+        handlers_connected = bool(
+            callable(EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER)
+            and callable(EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER)
+            and callable(EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER)
+        )
+        signature = _ea_factory_read_model_signature(
+            selection,
+            terminal_gates,
+            research_sheet_hub_model,
+            supported_platforms,
+            handlers_connected,
+        )
+        bypass_inflight = False
+        with EA_FACTORY_READ_MODEL_CACHE_CONDITION:
+            while True:
+                cached = EA_FACTORY_READ_MODEL_CACHE.get("value")
+                if (
+                    EA_FACTORY_READ_MODEL_CACHE.get("signature") == signature
+                    and isinstance(cached, dict)
+                ):
+                    return copy.deepcopy(cached)
+                if EA_FACTORY_READ_MODEL_CACHE.get("refreshing") is not True:
+                    EA_FACTORY_READ_MODEL_CACHE["refreshing"] = True
+                    generation = int(
+                        EA_FACTORY_READ_MODEL_CACHE.get("generation") or 0
+                    )
+                    break
+                # Some mutation responses intentionally assemble the fresh read
+                # model while holding EA_FACTORY_LOCK. If another reader marked a
+                # cold refresh in flight and is waiting for that same lock, waiting
+                # here would invert the locks. Build one uncached nested response;
+                # the original single-flight owner remains responsible for cache.
+                if _ea_factory_lock_owned_by_current_thread():
+                    bypass_inflight = True
+                    generation = int(
+                        EA_FACTORY_READ_MODEL_CACHE.get("generation") or 0
+                    )
+                    break
+                EA_FACTORY_READ_MODEL_CACHE_CONDITION.wait(timeout=0.5)
+
+        try:
+            value = _ea_factory_read_model_uncached(
+                selection=selection,
+                terminal_gates=terminal_gates,
+                research_sheet_hub_model=research_sheet_hub_model,
+                front_office_supported_platforms=supported_platforms,
+                front_office_handlers_connected=handlers_connected,
+            )
+            final_signature = _ea_factory_read_model_signature(
+                selection,
+                terminal_gates,
+                research_sheet_hub_model,
+                supported_platforms,
+                handlers_connected,
+            )
+        except Exception:
+            if not bypass_inflight:
+                with EA_FACTORY_READ_MODEL_CACHE_CONDITION:
+                    EA_FACTORY_READ_MODEL_CACHE["refreshing"] = False
+                    EA_FACTORY_READ_MODEL_CACHE_CONDITION.notify_all()
+            raise
+
+        stable = False
+        if bypass_inflight:
+            with EA_FACTORY_READ_MODEL_CACHE_CONDITION:
+                stable = bool(
+                    signature == final_signature
+                    and generation
+                    == int(EA_FACTORY_READ_MODEL_CACHE.get("generation") or 0)
+                )
+        else:
+            with EA_FACTORY_READ_MODEL_CACHE_CONDITION:
+                stable = bool(
+                    signature == final_signature
+                    and generation
+                    == int(EA_FACTORY_READ_MODEL_CACHE.get("generation") or 0)
+                )
+                if stable:
+                    EA_FACTORY_READ_MODEL_CACHE["signature"] = signature
+                    EA_FACTORY_READ_MODEL_CACHE["value"] = copy.deepcopy(value)
+                EA_FACTORY_READ_MODEL_CACHE["refreshing"] = False
+                EA_FACTORY_READ_MODEL_CACHE_CONDITION.notify_all()
+        if stable:
+            return copy.deepcopy(value)
+        if refresh_attempt == 0:
+            continue
+        raise RequestError(
+            "EA Factory state changed repeatedly while the read model was being built; retry the request.",
+            503,
+            code="ea_factory_read_model_changed",
+        )
+
+    raise DataIntegrityError("EA Factory read model retry bound was not enforced.")
 
 
 EA_FACTORY_UNSUPPORTED_RULE_PREDICATE_CODE = (
@@ -27644,6 +32477,48 @@ def _ea_factory_rule_predicate_capability_issues(
     return issues
 
 
+def _ea_factory_blueprint_compatibility_read_model(
+    blueprint_value: object,
+) -> dict:
+    """Describe whether one exact canonical Blueprint can enter Factory."""
+
+    try:
+        blueprint = normalize_ea_research_blueprint(
+            blueprint_value,
+            require_ready=True,
+        )
+        capability_issues = _ea_factory_rule_predicate_capability_issues(
+            blueprint
+        )
+    except (EAResearchBlueprintValidationError, DataIntegrityError, TypeError, ValueError):
+        return {
+            "ready": False,
+            "compatiblePlatforms": [],
+            "capabilityIssues": [],
+            "readinessIssues": ["ea_factory_blueprint_not_ready"],
+        }
+    scope = blueprint.get("scope") if isinstance(blueprint.get("scope"), dict) else {}
+    compatible_platforms = [
+        normalized
+        for raw in (scope.get("platforms") or [])
+        for normalized in [{"MT4": "mt4", "MT5": "mt5"}.get(str(raw).upper())]
+        if normalized
+    ]
+    compatible_platforms = list(dict.fromkeys(compatible_platforms))
+    readiness_issues = [
+        f"{EA_FACTORY_UNSUPPORTED_RULE_PREDICATE_CODE}:{row['ruleId']}:{row['operator']}"
+        for row in capability_issues
+    ]
+    if not compatible_platforms:
+        readiness_issues.append("ea_factory_compatible_platform_missing")
+    return {
+        "ready": not readiness_issues,
+        "compatiblePlatforms": compatible_platforms,
+        "capabilityIssues": capability_issues,
+        "readinessIssues": readiness_issues,
+    }
+
+
 def create_ea_factory_build(payload: object) -> dict:
     request = payload if isinstance(payload, dict) else {}
     unexpected = sorted(set(request) - {
@@ -27694,8 +32569,6 @@ def create_ea_factory_build(payload: object) -> dict:
     # Use the exact same bounded source snapshot as GET.  A sourceRecordId that
     # the user can select from the read model must not disappear merely because
     # the create path used a smaller Report window.
-    mission_rows = load_missions(shared_snapshot=True)
-    report_rows = load_runtime_reports(limit=EA_FACTORY_SOURCE_REPORT_LIMIT)
     with EA_FACTORY_LOCK:
         state = _load_ea_factory_state_unlocked()
         existing = next(
@@ -27719,6 +32592,11 @@ def create_ea_factory_build(payload: object) -> dict:
         if isinstance(existing, dict):
             if existing.get("createRequestDigest") != request_digest:
                 raise RequestError("Idempotency key is already used by another EA Factory build.", 409)
+            if existing.get("coverageStatus") != "compact_current":
+                raise RequestError(
+                    "Legacy EA Factory builds are read-only; create a new compact A-J v3 build.",
+                    409,
+                )
             model = ea_factory_read_model()
             build_model = next(item for item in model["builds"] if item.get("id") == existing.get("id"))
             return {
@@ -27729,6 +32607,10 @@ def create_ea_factory_build(payload: object) -> dict:
                 "eaFactory": model,
                 "idempotentReplay": True,
             }
+        # Refresh Mission truth only after acquiring the Factory admission
+        # lock. A stage dispatch may have committed between request arrival and
+        # this critical section; the guard must observe that new queued Mission.
+        mission_rows = load_missions(shared_snapshot=True)
         reservation_by_key = next(
             (
                 row for row in state.get("createReservations", [])
@@ -27755,6 +32637,13 @@ def create_ea_factory_build(payload: object) -> dict:
         if len({str(row.get("buildId") or "") for row in digest_reservations}) > 1:
             raise DataIntegrityError("EA Factory create request has conflicting durable reservations.")
         reservation = reservation_by_key or (digest_reservations[0] if digest_reservations else None)
+        # A completed build replay returned above without side effects. A
+        # durable reservation still has to create a workspace/Mission, so it
+        # remains subject to the same single-active invariant as a new request.
+        busy = _ea_factory_active_worker_payload(state, mission_rows)
+        if isinstance(busy, dict):
+            _raise_ea_factory_busy(busy)
+        report_rows = load_runtime_reports(limit=EA_FACTORY_SOURCE_REPORT_LIMIT)
         source_record = next(
             (
                 item for item in _ea_factory_source_catalog(
@@ -27773,6 +32662,12 @@ def create_ea_factory_build(payload: object) -> dict:
                     409,
                 )
             raise RequestError("EA Factory source record was not found.", 404)
+        if not _ea_factory_current_compact_source_valid(source_record):
+            raise RequestError(
+                "Legacy A-W/A-M and Blueprint v2 sources are read-only. Rerun Deep "
+                "Research and select a digest-bound Strategy Brief A-J v3 record.",
+                422,
+            )
         if source_record.get("buildReady") is not True:
             reasons: list[str] = []
             for raw_reason in [
@@ -27794,16 +32689,18 @@ def create_ea_factory_build(payload: object) -> dict:
         if (
             artifact_kind == "custom_indicator"
             and not isinstance(source_record.get("eaImplementationBlueprint"), dict)
+            and not isinstance(source_record.get("strategyBrief"), dict)
         ):
             raise RequestError(
-                "Custom Indicator requires a canonical ready EA Blueprint from Research.",
+                "Custom Indicator requires a ready Strategy Brief or canonical Blueprint from Research.",
                 422,
             )
         canonical_blueprint = source_record.get("eaImplementationBlueprint")
         if isinstance(canonical_blueprint, dict):
-            capability_issues = _ea_factory_rule_predicate_capability_issues(
+            factory_compatibility = _ea_factory_blueprint_compatibility_read_model(
                 canonical_blueprint
             )
+            capability_issues = factory_compatibility.get("capabilityIssues") or []
             if capability_issues:
                 issue_summary = ", ".join(
                     f"{row['ruleId']}({row['operator']})"
@@ -27815,6 +32712,15 @@ def create_ea_factory_build(payload: object) -> dict:
                     f"canonical rule predicates: {issue_summary}. "
                     "Expand each affected Research rule to one supported "
                     "comparison or an exact cross_above/cross_below predicate.",
+                    422,
+                )
+            compatible_platforms = set(
+                factory_compatibility.get("compatiblePlatforms") or []
+            )
+            if platform not in compatible_platforms:
+                raise RequestError(
+                    "platform is not declared by the selected canonical EA Blueprint; "
+                    f"choose one of: {', '.join(sorted(compatible_platforms)) or 'none'}.",
                     422,
                 )
         if isinstance(reservation, dict):
@@ -28897,26 +33803,172 @@ def _ea_factory_complete_final_report(build: dict, stage: dict) -> tuple[dict, d
     )[:24]
     mission_id = f"mission-eaf-{local_digest}"
     report_id = f"report-eaf-{local_digest}"
-    mission = create_mission(
-        {
-            "id": mission_id,
-            "title": f"EA Factory final report: {build.get('id')}",
-            "prompt": (
-                f"Finalize the evidence ledger for EA Factory build {build.get('id')}; "
-                "do not run tools, compile, backtest, deploy, schedule, loop, or trade."
-            ),
-            "agentId": "ea_developer",
-            "requester": "human",
-            "toolId": "manager_mission",
-            "targetId": "right_server_racks",
-            "risk": "low",
-            "reportType": "ea_build_report",
-            "idempotencyKey": str(stage.get("missionIdempotencyKey") or ""),
-        },
-        status="completed",
-    )
     completed_at = stage.get("startedAt") or build.get("createdAt")
     artifact_kind = _ea_factory_program_kind(build.get("artifactKind"))
+    compile_stage = _ea_factory_stage_row(build, "compile_validate")
+    backtest_stage = _ea_factory_stage_row(build, "backtest_recheck")
+
+    def visible_stage_metrics(stage_row: dict) -> dict | None:
+        if stage_row.get("visibleEvidenceMode") != EA_FACTORY_VISIBLE_EVIDENCE_MODE:
+            return None
+        stage_report_id = safe_reference(stage_row.get("reportId"))
+        stage_report_path = (
+            RUNTIME_REPORTS_DIR / f"{stage_report_id}.json"
+            if stage_report_id
+            else None
+        )
+        stage_report = (
+            read_json(stage_report_path, None)
+            if stage_report_path is not None and stage_report_path.is_file()
+            else None
+        )
+        if not _ea_factory_visible_front_office_evidence_valid(
+            build,
+            stage_row,
+            {"id": stage_row.get("missionId")},
+            stage_report,
+            expected_operation_id=stage_row.get("visibleOperationId"),
+        ):
+            raise DataIntegrityError(
+                "EA Factory final report cannot use invalid visible terminal evidence."
+            )
+        return copy.deepcopy((stage_report or {}).get("metrics") or {})
+
+    compile_visible_metrics = visible_stage_metrics(compile_stage)
+    backtest_visible_metrics = visible_stage_metrics(backtest_stage)
+    execution_evidence = {
+        "visibleFrontOffice": bool(
+            compile_visible_metrics or backtest_visible_metrics
+        ),
+        "compile": (
+            {
+                "reportId": compile_stage.get("reportId"),
+                "operationId": compile_stage.get("visibleOperationId"),
+                "sourceDigest": compile_visible_metrics.get("sourceDigest"),
+                "compiledBinarySha256": compile_visible_metrics.get(
+                    "compiledBinarySha256"
+                ),
+                "visibleWindowEvidenceSha256": compile_visible_metrics.get(
+                    "visibleWindowEvidenceSha256"
+                ),
+                "zeroErrors": compile_visible_metrics.get("zeroErrors") is True,
+                "zeroWarnings": compile_visible_metrics.get("zeroWarnings") is True,
+            }
+            if compile_visible_metrics
+            else None
+        ),
+        "backtest": (
+            {
+                "reportId": backtest_stage.get("reportId"),
+                "operationId": backtest_stage.get("visibleOperationId"),
+                "compiledBinarySha256": backtest_visible_metrics.get(
+                    "compiledBinarySha256"
+                ),
+                "settingsScreenshotSha256": backtest_visible_metrics.get(
+                    "settingsScreenshotSha256"
+                ),
+                "resultScreenshotSha256": backtest_visible_metrics.get(
+                    "resultScreenshotSha256"
+                ),
+                "reportScreenshotSha256": backtest_visible_metrics.get(
+                    "reportScreenshotSha256"
+                ),
+                "testerReportSha256": backtest_visible_metrics.get(
+                    "testerReportSha256"
+                ),
+                "testerInputPresetApplied": backtest_visible_metrics.get(
+                    "testerInputPresetApplied"
+                )
+                is True,
+                "testerInputPresetReadbackVerified": backtest_visible_metrics.get(
+                    "testerInputPresetReadbackVerified"
+                )
+                is True,
+                "testerInputPresetReportVerified": backtest_visible_metrics.get(
+                    "testerInputPresetReportVerified"
+                )
+                is True,
+                "simulationAssumptionsExplicit": backtest_visible_metrics.get(
+                    "simulationAssumptionsExplicit"
+                )
+                is True,
+                "testerInputPresetDigest": backtest_visible_metrics.get(
+                    "testerInputPresetDigest"
+                ),
+                "resolvedTesterInputPreset": copy.deepcopy(
+                    backtest_visible_metrics.get("resolvedTesterInputPreset")
+                ),
+                "inputPresetScreenshotSha256": backtest_visible_metrics.get(
+                    "inputPresetScreenshotSha256"
+                ),
+                "inputPresetSetSha256": backtest_visible_metrics.get(
+                    "inputPresetSetSha256"
+                ),
+                "inputReadbackSetSha256": backtest_visible_metrics.get(
+                    "inputReadbackSetSha256"
+                ),
+                "tradeCount": backtest_visible_metrics.get("tradeCount"),
+                "tradeRowCount": backtest_visible_metrics.get(
+                    "tradeRowCount"
+                ),
+                "buyTradeCount": backtest_visible_metrics.get("buyTradeCount"),
+                "sellTradeCount": backtest_visible_metrics.get("sellTradeCount"),
+                "zeroTrade": backtest_visible_metrics.get("zeroTrade") is True,
+                "mismatchedChartErrors": backtest_visible_metrics.get(
+                    "mismatchedChartErrors"
+                ),
+                "historyQualityIssue": backtest_visible_metrics.get(
+                    "historyQualityIssue"
+                )
+                is True,
+                "historyQualityVerified": backtest_visible_metrics.get(
+                    "historyQualityVerified"
+                )
+                is True,
+                "attentionRequired": backtest_visible_metrics.get(
+                    "attentionRequired"
+                )
+                is True,
+                "attentionReasonCode": backtest_visible_metrics.get(
+                    "attentionReasonCode"
+                ),
+                "executionOutcome": backtest_visible_metrics.get(
+                    "executionOutcome"
+                ),
+                "performanceEvaluationAvailable": backtest_visible_metrics.get(
+                    "performanceEvaluationAvailable"
+                )
+                is True,
+                "testerTradeRowsVerified": backtest_visible_metrics.get(
+                    "testerTradeRowsVerified"
+                )
+                is True,
+                "staticTenColumnSourceContractVerified": backtest_visible_metrics.get(
+                    "staticTenColumnSourceContractVerified"
+                )
+                is True,
+                "staticSixGroupSourceContractVerified": backtest_visible_metrics.get(
+                    "staticSixGroupSourceContractVerified"
+                )
+                is True,
+                "logicRecheckVerified": backtest_visible_metrics.get(
+                    "logicRecheckVerified"
+                )
+                is True,
+                "logicRecheckDigest": backtest_visible_metrics.get(
+                    "logicRecheckDigest"
+                ),
+                "logicRecheck": copy.deepcopy(
+                    backtest_visible_metrics.get("logicRecheck")
+                ),
+                "fullDynamicSixGroupVerified": False,
+                "visualMode": backtest_visible_metrics.get("visualMode") is True,
+            }
+            if backtest_visible_metrics
+            else None
+        ),
+        "liveTradingExecuted": False,
+    }
     stage.update({
         "status": "completed",
         "missionId": mission_id,
@@ -28950,9 +34002,10 @@ def _ea_factory_complete_final_report(build: dict, stage: dict) -> tuple[dict, d
         "compileTruth": (
             "static_validation_only_no_runtime_compile"
             if build.get("platform") == "tradingview"
+            else "visible_metaeditor_compile_verified_zero_errors_zero_warnings"
+            if compile_visible_metrics
             else "metaeditor_compile_only_verified_zero_errors_zero_warnings"
-            if _ea_factory_stage_row(build, "compile_validate").get("status")
-            == "completed"
+            if compile_stage.get("status") == "completed"
             else "metaeditor_compile_only_required"
         ),
         "backtestTruth": (
@@ -28960,8 +34013,28 @@ def _ea_factory_complete_final_report(build: dict, stage: dict) -> tuple[dict, d
             if artifact_kind == "custom_indicator"
             else "not_applicable"
             if build.get("platform") == "tradingview"
+            else (
+                "visible_strategy_tester_completed_zero_trades_with_history_"
+                "quality_errors_attention_required"
+                if backtest_visible_metrics.get("zeroTrade") is True
+                and backtest_visible_metrics.get("historyQualityIssue") is True
+                else "visible_strategy_tester_completed_zero_trades_plus_static_"
+                "ten_column_six_group_source_contract_verified_dynamic_"
+                "six_group_not_proven_attention_required"
+                if backtest_visible_metrics.get("zeroTrade") is True
+                else "visible_strategy_tester_nonzero_trades_with_history_quality_"
+                "errors_attention_required_performance_unavailable"
+                if backtest_visible_metrics.get("historyQualityIssue") is True
+                else (
+                    "visible_strategy_tester_nonzero_trade_rows_plus_static_"
+                    "ten_column_six_group_source_contract_verified_dynamic_"
+                    "six_group_not_proven"
+                )
+            )
+            if backtest_visible_metrics
             else "verified_strategy_tester_proof_required"
         ),
+        "executionEvidence": execution_evidence,
         "createdAt": stage.get("startedAt") or build.get("createdAt"),
         "immutable": True,
     }
@@ -29068,30 +34141,59 @@ def _ea_factory_complete_final_report(build: dict, stage: dict) -> tuple[dict, d
         or _ea_factory_revalidated_artifact_manifest(build) != build.get("artifactManifest")
     ):
         raise DataIntegrityError("EA Factory final artifact manifest could not be verified.")
-    report = create_report({
-        "id": report_id,
-        "type": "ea_build_report",
-        "title": f"EA Factory final report: {build.get('sourceDisplayName')}",
-        "summary": "สรุป Source, Version และหลักฐานทุกขั้นเรียบร้อยตามขอบเขตที่ทำจริง",
-        "ownerAgentId": "ea_developer",
-        "linkedMissionId": mission.get("id"),
-        "linkedPropId": "right_server_racks",
-        "status": "ready",
-        "findings": [f"immutable versions: {len(build.get('versions') or [])}", summary["compileTruth"], summary["backtestTruth"]],
-        "metrics": {
-            "eaFactoryFinalSummary": summary,
-            "artifactManifestDigest": manifest_digest,
-            "auditLineageId": lineage_id,
-            "stageArtifactIds": [
-                str(item.get("fileId"))
-                for item in final_artifacts
-                if item.get("fileId")
-            ],
+    # Do not persist a successful Mission/Report until every upstream visible
+    # terminal receipt and every immutable final artifact has passed the
+    # fail-closed validators above.  A failed visible proof therefore cannot
+    # leave an orphan Mission marked completed or a Report marked ready.
+    mission = create_mission(
+        {
+            "id": mission_id,
+            "title": f"EA Factory final report: {build.get('id')}",
+            "prompt": (
+                f"Finalize the evidence ledger for EA Factory build {build.get('id')}; "
+                "do not run tools, compile, backtest, deploy, schedule, loop, or trade."
+            ),
+            "agentId": "ea_developer",
+            "requester": "human",
+            "toolId": "manager_mission",
+            "targetId": "right_server_racks",
+            "risk": "low",
+            "reportType": "ea_build_report",
+            "idempotencyKey": str(stage.get("missionIdempotencyKey") or ""),
         },
-        "risks": ["No profitability guarantee."],
-        "nextActions": ["ดาวน์โหลด Source/Report ที่ Backend อนุญาต"],
-        "safety": {"approvalRequired": False, "publicShareable": False},
-    })
+        status="running",
+    )
+    report = create_report(
+        {
+            "id": report_id,
+            "type": "ea_build_report",
+            "title": f"EA Factory final report: {build.get('sourceDisplayName')}",
+            "summary": "สรุป Source, Version และหลักฐานทุกขั้นเรียบร้อยตามขอบเขตที่ทำจริง",
+            "ownerAgentId": "ea_developer",
+            "linkedMissionId": mission.get("id"),
+            "linkedPropId": "right_server_racks",
+            "status": "ready",
+            "findings": [
+                f"immutable versions: {len(build.get('versions') or [])}",
+                summary["compileTruth"],
+                summary["backtestTruth"],
+            ],
+            "metrics": {
+                "eaFactoryFinalSummary": summary,
+                "artifactManifestDigest": manifest_digest,
+                "auditLineageId": lineage_id,
+                "stageArtifactIds": [
+                    str(item.get("fileId"))
+                    for item in final_artifacts
+                    if item.get("fileId")
+                ],
+            },
+            "risks": ["No profitability guarantee."],
+            "nextActions": ["ดาวน์โหลด Source/Report ที่ Backend อนุญาต"],
+            "safety": {"approvalRequired": False, "publicShareable": False},
+        },
+        queue_research_sheet=False,
+    )
     _ea_factory_complete_local_mission(
         mission,
         report,
@@ -29129,8 +34231,15 @@ def _ea_factory_complete_final_report(build: dict, stage: dict) -> tuple[dict, d
             "reportId": report_id,
             "artifactManifestDigest": manifest_digest,
             "summaryDigest": summary_digest,
-            "manualStageByStage": True,
-            "compileOrBacktestExecuted": False,
+            "manualStageByStage": not isinstance(build.get("oneClickRun"), dict),
+            "compileOrBacktestExecuted": bool(
+                compile_visible_metrics or backtest_visible_metrics
+            ),
+            "visibleMetaEditorCompileVerified": bool(compile_visible_metrics),
+            "visibleStrategyTesterBacktestVerified": bool(
+                backtest_visible_metrics
+            ),
+            "liveTradingExecuted": False,
         })
     stage.update({
         "artifacts": stage_artifact_ids,
@@ -29140,6 +34249,4184 @@ def _ea_factory_complete_final_report(build: dict, stage: dict) -> tuple[dict, d
         "evidenceVerified": True,
     })
     return mission, report
+
+
+def _ea_factory_source_program_exists(build: dict) -> bool:
+    """Return whether the immutable Source folder already contains a program."""
+
+    build_dir = _ea_factory_build_directory(build.get("id"))
+    source_dir = (
+        _ea_factory_managed_folder(build_dir, "Source")
+        if build_dir is not None
+        else None
+    )
+    platform = str(build.get("platform") or "")
+    expected_suffix = {"mt4": ".mq4", "mt5": ".mq5", "tradingview": ".pine"}.get(
+        platform,
+        "",
+    )
+    if source_dir is None or not expected_suffix:
+        return True
+    try:
+        candidates = list(source_dir.iterdir())
+    except OSError:
+        return True
+    return any(
+        candidate.suffix.lower() == expected_suffix
+        or _ea_factory_path_is_link_or_reparse(candidate)
+        for candidate in candidates
+    )
+
+
+def retry_ea_factory_build_stage(build_id: object, payload: object) -> dict:
+    """Reset one failed, source-less generation Stage and dispatch a fresh Mission.
+
+    This is deliberately narrower than ``advance``: only terminal
+    ``invalid_output`` failures before any program was materialized may be
+    retried.  Source review and later stages remain immutable-version flows.
+    """
+
+    safe_build_id = safe_reference(build_id)
+    if not safe_build_id or not str(safe_build_id).startswith("ea-build-"):
+        raise RequestError("Invalid EA Factory build id.", 422)
+    request = payload if isinstance(payload, dict) else {}
+    unexpected = sorted(
+        set(request) - {"stageId", "failedMissionId", "idempotencyKey"}
+    )
+    if unexpected:
+        raise RequestError("EA Factory retry request contains unsupported fields.", 422)
+    stage_id = safe_reference(request.get("stageId"))
+    if stage_id != "generate_source":
+        raise RequestError(
+            "Only a source-less generate_source invalid_output Stage can be retried.",
+            422,
+        )
+    failed_mission_id = safe_reference(request.get("failedMissionId"))
+    if not failed_mission_id:
+        raise RequestError("failedMissionId is required for a Source retry.", 422)
+    retry_key = _ea_factory_validate_idempotency(request.get("idempotencyKey"))
+    if not retry_key:
+        raise RequestError("idempotencyKey is required for a Source retry.", 422)
+
+    advance_key = ""
+    retry_attempt = 0
+    idempotent_retry = False
+    with EA_FACTORY_LOCK:
+        state = _load_ea_factory_state_unlocked()
+        build = next(
+            (
+                item
+                for item in state["builds"]
+                if isinstance(item, dict) and item.get("id") == safe_build_id
+            ),
+            None,
+        )
+        if not isinstance(build, dict):
+            raise RequestError("EA Factory build not found.", 404)
+        if build.get("coverageStatus") != "compact_current":
+            raise RequestError(
+                "Only a current compact A-J v3 Build can retry Source generation.",
+                409,
+            )
+        mission_rows = load_missions(shared_snapshot=True)
+        stage = _ea_factory_stage_row(build, stage_id)
+        history = (
+            list(stage.get("manualRetryHistory"))
+            if isinstance(stage.get("manualRetryHistory"), list)
+            else []
+        )
+        existing_receipt = next(
+            (
+                item
+                for item in history
+                if isinstance(item, dict) and item.get("idempotencyKey") == retry_key
+            ),
+            None,
+        )
+        active_worker = _ea_factory_active_worker_payload(state, mission_rows)
+        if isinstance(existing_receipt, dict):
+            if existing_receipt.get("failedMissionId") != failed_mission_id:
+                raise RequestError(
+                    "EA Factory retry idempotency key is already bound to another failed Mission.",
+                    409,
+                )
+            advance_key = str(existing_receipt.get("advanceIdempotencyKey") or "")
+            retry_attempt = int(existing_receipt.get("attempt") or 0)
+            idempotent_retry = True
+            if (
+                isinstance(active_worker, dict)
+                and not _ea_factory_current_thread_owns_active_stage(
+                    active_worker,
+                    safe_build_id,
+                    stage_id,
+                )
+            ):
+                downstream_started = bool(
+                    stage.get("requestIdempotencyKey") == advance_key
+                    and (
+                        stage.get("status") != "pending"
+                        or safe_reference(stage.get("missionId"))
+                        or (
+                            active_worker.get("buildId") == safe_build_id
+                            and active_worker.get("stageId") == stage_id
+                            and safe_reference(active_worker.get("missionId"))
+                        )
+                    )
+                )
+                if downstream_started:
+                    result = _ea_factory_pure_stage_replay_response(
+                        build,
+                        stage,
+                        mission_rows,
+                        kind="ea_factory_stage_retry_replayed",
+                    )
+                    result["retry"] = {
+                        "stageId": stage_id,
+                        "attempt": retry_attempt,
+                        "maximumAttempts": EA_FACTORY_MANUAL_SOURCE_RETRY_LIMIT,
+                        "replacedMissionId": failed_mission_id,
+                        "freshMission": False,
+                    }
+                    result["messageTh"] = (
+                        "พบคำขอ Retry เดิมที่เริ่มทำงานแล้ว "
+                        "ระบบจึงแสดงสถานะเดิมโดยไม่เริ่ม Mission ซ้ำ"
+                    )
+                    return result
+                # A retry receipt is persisted before its downstream advance.
+                # It proves ownership/idempotency, not that a Mission was sent.
+                # Preserve the receipt and ask the same client to retry after
+                # the other active worker finishes.
+                _raise_ea_factory_busy(active_worker)
+            _ea_factory_sync_build_status(
+                build,
+                missions=mission_rows,
+                ingest_sources=True,
+            )
+        else:
+            if (
+                isinstance(active_worker, dict)
+                and not _ea_factory_current_thread_owns_active_stage(
+                    active_worker,
+                    safe_build_id,
+                    stage_id,
+                )
+            ):
+                _raise_ea_factory_busy(active_worker)
+            _ea_factory_sync_build_status(
+                build,
+                missions=mission_rows,
+                ingest_sources=True,
+            )
+            if (
+                stage.get("status") not in {"blocked", "failed"}
+                or stage.get("blockedReasonCode")
+                not in EA_FACTORY_RETRYABLE_SOURCE_ERROR_CODES
+                or safe_reference(stage.get("missionId")) != failed_mission_id
+            ):
+                raise RequestError(
+                    "EA Factory Source retry requires the currently failed invalid_output Mission.",
+                    409,
+                )
+            if build.get("versions") or _ea_factory_source_program_exists(build):
+                raise RequestError(
+                    "A Source program or immutable Version already exists; create a new Build instead.",
+                    409,
+                )
+            if len(history) >= EA_FACTORY_MANUAL_SOURCE_RETRY_LIMIT:
+                raise RequestError(
+                    "EA Factory Source retry limit was reached; create a new Build.",
+                    409,
+                )
+            mission = next(
+                (
+                    item
+                    for item in mission_rows
+                    if isinstance(item, dict)
+                    and safe_reference(item.get("id")) == failed_mission_id
+                ),
+                None,
+            )
+            mission_status = str((mission or {}).get("status") or "")
+            mission_failure = safe_reference((mission or {}).get("errorCode"))
+            if mission_status == "archived":
+                mission_status = (
+                    "completed"
+                    if (mission or {}).get("archivedSuccessful") is True
+                    else "failed"
+                )
+            if (
+                mission_status not in {"blocked", "failed"}
+                or mission_failure not in EA_FACTORY_RETRYABLE_SOURCE_ERROR_CODES
+            ):
+                raise RequestError(
+                    "The bound Mission is not a retryable invalid_output failure.",
+                    409,
+                )
+            retry_attempt = len(history) + 1
+            advance_key = _ea_factory_source_retry_advance_key(
+                safe_build_id,
+                failed_mission_id,
+                retry_key,
+            )
+            history.append({
+                "attempt": retry_attempt,
+                "idempotencyKey": retry_key,
+                "advanceIdempotencyKey": advance_key,
+                "failedMissionId": failed_mission_id,
+                "failureCode": mission_failure,
+                "previousStatus": str(stage.get("status") or "failed"),
+                "requestedAt": utc_now(),
+            })
+            stage.update({
+                "status": "pending",
+                "missionId": None,
+                "reportId": None,
+                "blockedReasonCode": None,
+                "evidenceVerified": False,
+                "requestIdempotencyKey": None,
+                "requestDigest": None,
+                "startedAt": None,
+                "missionIdempotencyKey": None,
+                "transferMissionId": None,
+                "artifacts": [],
+                "manualRetryCount": retry_attempt,
+                "manualRetryHistory": history,
+                "updatedAt": utc_now(),
+            })
+            build["status"] = "ready"
+            build["updatedAt"] = stage["updatedAt"]
+            _write_ea_factory_state_unlocked(state)
+            append_audit({
+                "type": "ea_factory.source_retry_reserved",
+                "buildId": safe_build_id,
+                "stageId": stage_id,
+                "failedMissionId": failed_mission_id,
+                "attempt": retry_attempt,
+                "maximumAttempts": EA_FACTORY_MANUAL_SOURCE_RETRY_LIMIT,
+                "failureCode": mission_failure,
+            })
+
+    result = advance_ea_factory_build(
+        safe_build_id,
+        {"stageId": stage_id, "idempotencyKey": advance_key},
+    )
+    mission_started = bool(
+        isinstance(result.get("mission"), dict)
+        and safe_reference(result["mission"].get("id"))
+    )
+    result["kind"] = (
+        "ea_factory_stage_retry_replayed"
+        if idempotent_retry and mission_started
+        else "ea_factory_stage_retry_dispatched"
+        if mission_started
+        else "ea_factory_stage_retry_reserved"
+    )
+    result["retry"] = {
+        "stageId": stage_id,
+        "attempt": retry_attempt,
+        "maximumAttempts": EA_FACTORY_MANUAL_SOURCE_RETRY_LIMIT,
+        "replacedMissionId": failed_mission_id,
+        "freshMission": bool(mission_started and not result.get("idempotentReplay")),
+    }
+    result["messageTh"] = (
+        "ส่งงานสร้าง Source ใหม่แล้ว โดยใช้ Strategy Spec เดิมและ Mission ใหม่"
+        if mission_started and not idempotent_retry
+        else "คำขอ Retry นี้เริ่มทำงานไว้แล้ว ระบบจึงแสดงสถานะล่าสุดของ Mission เดิม"
+        if mission_started
+        else (
+            "บันทึกคำขอ Retry เดิมไว้แล้ว แต่ยังไม่ได้ส่ง Mission ใหม่ "
+            "กรุณาลองคำขอเดิมอีกครั้งเมื่อโรงงานว่าง"
+        )
+    )
+    return result
+
+
+def _ea_factory_one_click_update(
+    run: dict,
+    *,
+    status: str,
+    current_stage_id: object = None,
+    failure_code: object = None,
+    message_th: str,
+) -> None:
+    if status not in EA_FACTORY_ONE_CLICK_STATUSES:
+        raise DataIntegrityError("Unsupported EA Factory one-click status.")
+    now = utc_now()
+    run["status"] = status
+    run["currentStageId"] = safe_reference(current_stage_id)
+    run["failureCode"] = safe_reference(failure_code)
+    run["messageTh"] = redact_text(message_th, 500)
+    run["updatedAt"] = now
+    run["completedAt"] = now if status in {"completed", "blocked", "failed"} else None
+
+
+def _ea_factory_one_click_reserve_visible_action(
+    build: dict,
+    run: dict,
+    stage_id: str,
+    *,
+    explicit_resume: bool = False,
+) -> bool:
+    """Persist one recoverable visible action before any UI side effect.
+
+    Returns ``False`` when the bounded retry budget is exhausted.  Retries keep
+    the same operation id so an injected adapter can recover a durable receipt
+    and must not issue a second unbound Compile/Start click.
+    """
+
+    if stage_id not in EA_FACTORY_VISIBLE_ACTION_STAGES:
+        raise DataIntegrityError("EA Factory visible action stage is invalid.")
+    operation_id = _ea_factory_one_click_visible_operation_id(build, run, stage_id)
+    existing = run.get("visibleAction") if isinstance(run.get("visibleAction"), dict) else None
+    now = utc_now()
+    if (
+        isinstance(existing, dict)
+        and existing.get("stageId") == stage_id
+        and existing.get("operationId") == operation_id
+        and existing.get("state") != "completed"
+    ):
+        attempt_count = int(existing.get("attemptCount") or 0)
+        if explicit_resume:
+            if attempt_count >= EA_FACTORY_ONE_CLICK_VISIBLE_RETRY_LIMIT:
+                if _ea_factory_one_click_durable_receipt_recovery_available(
+                    build,
+                    stage_id,
+                    existing,
+                ):
+                    pass
+                elif _ea_factory_one_click_collected_recovery_available(
+                    build,
+                    stage_id,
+                    existing,
+                ):
+                    # The canonical report and both screenshots already exist.
+                    # Keep the same attempt so the adapter can only verify and
+                    # mint the missing receipt; it must not Save or Start.
+                    pass
+                elif _ea_factory_one_click_inflight_recovery_available(
+                    build,
+                    stage_id,
+                    existing,
+                ):
+                    # Collection-only recovery keeps the same Start attempt.
+                    # The adapter is forbidden from invoking Start in this path.
+                    pass
+                elif (
+                    attempt_count == EA_FACTORY_ONE_CLICK_VISIBLE_RETRY_LIMIT
+                    and _ea_factory_one_click_prestart_recovery_available(
+                        build,
+                        stage_id,
+                        existing,
+                    )
+                ):
+                    attempt_count += 1
+                else:
+                    return False
+            else:
+                attempt_count += 1
+        existing.update({
+            "state": "reserved",
+            "attemptCount": max(1, attempt_count),
+            "updatedAt": now,
+            "lastFailureCode": None,
+            "requiresExplicitResume": False,
+        })
+        return True
+    run["visibleAction"] = {
+        "stageId": stage_id,
+        "operationId": operation_id,
+        "state": "reserved",
+        "attemptCount": 1,
+        "reservedAt": now,
+        "updatedAt": now,
+        "lastFailureCode": None,
+        "requiresExplicitResume": False,
+    }
+    return True
+
+
+def _ea_factory_one_click_mark_visible_uncertain(
+    run: dict,
+    *,
+    stage_id: str,
+    failure_code: object,
+) -> None:
+    action = run.get("visibleAction") if isinstance(run.get("visibleAction"), dict) else None
+    if not isinstance(action, dict) or action.get("stageId") != stage_id:
+        return
+    action.update({
+        "state": "uncertain",
+        "updatedAt": utc_now(),
+        "lastFailureCode": safe_reference(failure_code) or "visible_action_outcome_uncertain",
+        "requiresExplicitResume": True,
+    })
+
+
+def _ea_factory_one_click_finish(
+    build_id: str,
+    *,
+    status: str,
+    current_stage_id: object,
+    failure_code: object,
+    message_th: str,
+) -> None:
+    with EA_FACTORY_LOCK:
+        state = _load_ea_factory_state_unlocked()
+        build = next(
+            (
+                item for item in state["builds"]
+                if isinstance(item, dict) and item.get("id") == build_id
+            ),
+            None,
+        )
+        if not isinstance(build, dict) or not isinstance(build.get("oneClickRun"), dict):
+            return
+        stored_failure_code = (
+            None if status == "awaiting_visible_terminal" else failure_code
+        )
+        _ea_factory_one_click_update(
+            build["oneClickRun"],
+            status=status,
+            current_stage_id=current_stage_id,
+            failure_code=stored_failure_code,
+            message_th=message_th,
+        )
+        if (
+            status == "awaiting_visible_terminal"
+            and current_stage_id in EA_FACTORY_VISIBLE_ACTION_STAGES
+        ):
+            _ea_factory_one_click_mark_visible_uncertain(
+                build["oneClickRun"],
+                stage_id=str(current_stage_id),
+                failure_code=failure_code,
+            )
+        build["updatedAt"] = build["oneClickRun"]["updatedAt"]
+        _write_ea_factory_state_unlocked(state)
+    append_audit({
+        "type": f"ea_factory.one_click_{status}",
+        "buildId": build_id,
+        "stageId": safe_reference(current_stage_id),
+        "failureCode": safe_reference(failure_code),
+        "liveTradingAllowed": False,
+    })
+
+
+def _ea_factory_one_click_next_action(build_id: str) -> dict:
+    """Reconcile one run and return at most one safe next action."""
+
+    with EA_FACTORY_LOCK:
+        state = _load_ea_factory_state_unlocked()
+        build = next(
+            (
+                item for item in state["builds"]
+                if isinstance(item, dict) and item.get("id") == build_id
+            ),
+            None,
+        )
+        if not isinstance(build, dict):
+            return {"kind": "stop", "reasonCode": "build_not_found"}
+        run = build.get("oneClickRun") if isinstance(build.get("oneClickRun"), dict) else None
+        if not isinstance(run, dict):
+            return {"kind": "stop", "reasonCode": "one_click_run_missing"}
+        if run.get("status") in {"completed", "blocked", "failed"}:
+            return {"kind": "stop", "reasonCode": run.get("failureCode")}
+        if str(build.get("platform") or "") not in EA_FACTORY_ONE_CLICK_VISIBLE_PLATFORMS:
+            _ea_factory_one_click_update(
+                run,
+                status="blocked",
+                current_stage_id=_ea_factory_build_current_stage_id(build),
+                failure_code="one_click_visible_mt5_not_implemented",
+                message_th=(
+                    "One-click แบบเปิดหน้าต่างจริงรองรับ MT4 เท่านั้นในรุ่นนี้ "
+                    "งาน MT5 ยังทำต่อได้จากแท็บขั้นละเอียดแบบ Manual"
+                ),
+            )
+            build["updatedAt"] = run["updatedAt"]
+            _write_ea_factory_state_unlocked(state)
+            return {
+                "kind": "blocked",
+                "stageId": run.get("currentStageId"),
+                "reasonCode": "one_click_visible_mt5_not_implemented",
+            }
+        changed = _ea_factory_sync_build_status(build, ingest_sources=True)
+        current_stage_id = _ea_factory_build_current_stage_id(build)
+        if current_stage_id is None:
+            _ea_factory_one_click_update(
+                run,
+                status="completed",
+                current_stage_id=None,
+                failure_code=None,
+                message_th="สร้าง Source, ตรวจโค้ด, Compile, Visual Backtest และสรุปรายงานครบแล้ว",
+            )
+            build["updatedAt"] = run["updatedAt"]
+            _write_ea_factory_state_unlocked(state)
+            return {"kind": "completed"}
+        stage = _ea_factory_stage_row(build, current_stage_id)
+        stage_status = str(stage.get("status") or "")
+        if stage_status in {"queued", "running"}:
+            desired = (
+                "waiting_ai"
+                if current_stage_id in {"generate_source", "source_review"}
+                else "running"
+            )
+            if run.get("status") != desired or run.get("currentStageId") != current_stage_id:
+                _ea_factory_one_click_update(
+                    run,
+                    status=desired,
+                    current_stage_id=current_stage_id,
+                    failure_code=None,
+                    message_th=(
+                        "AI กำลังทำงานในขั้นนี้ ระบบจะไปขั้นถัดไปเมื่อหลักฐานครบ"
+                        if desired == "waiting_ai"
+                        else "กำลังทำงานในขั้นนี้และตรวจหลักฐานก่อนดำเนินการต่อ"
+                    ),
+                )
+                build["updatedAt"] = run["updatedAt"]
+                changed = True
+            if changed:
+                _write_ea_factory_state_unlocked(state)
+            return {"kind": "wait", "stageId": current_stage_id}
+        if stage_status == "waiting_approval":
+            _ea_factory_one_click_update(
+                run,
+                status="blocked",
+                current_stage_id=current_stage_id,
+                failure_code="unexpected_human_approval_gate",
+                message_th="ขั้น Source-only ถูกส่งไป Approval โดยไม่คาดหมาย จึงหยุดอย่างปลอดภัย",
+            )
+            build["updatedAt"] = run["updatedAt"]
+            _write_ea_factory_state_unlocked(state)
+            return {"kind": "blocked", "stageId": current_stage_id}
+        if stage_status in {"blocked", "failed"}:
+            retry_count = clamp_int(
+                stage.get("manualRetryCount"),
+                0,
+                0,
+                EA_FACTORY_MANUAL_SOURCE_RETRY_LIMIT,
+            )
+            retryable = bool(
+                current_stage_id == "generate_source"
+                and stage.get("blockedReasonCode") in EA_FACTORY_RETRYABLE_SOURCE_ERROR_CODES
+                and not (build.get("versions") if isinstance(build.get("versions"), list) else [])
+                and retry_count < EA_FACTORY_MANUAL_SOURCE_RETRY_LIMIT
+                and safe_reference(stage.get("missionId"))
+            )
+            if retryable:
+                _ea_factory_one_click_update(
+                    run,
+                    status="running",
+                    current_stage_id=current_stage_id,
+                    failure_code=None,
+                    message_th="AI ส่ง Source ไม่ผ่าน Validator ระบบกำลัง Retry ด้วย Strategy Spec เดิม",
+                )
+                build["updatedAt"] = run["updatedAt"]
+                _write_ea_factory_state_unlocked(state)
+                return {
+                    "kind": "retry_source",
+                    "stageId": current_stage_id,
+                    "failedMissionId": safe_reference(stage.get("missionId")),
+                    "attempt": retry_count + 1,
+                    "runId": run.get("runId"),
+                }
+            failure_code = safe_reference(stage.get("blockedReasonCode")) or (
+                "stage_failed" if stage_status == "failed" else "stage_blocked"
+            )
+            _ea_factory_one_click_update(
+                run,
+                status="failed" if stage_status == "failed" else "blocked",
+                current_stage_id=current_stage_id,
+                failure_code=failure_code,
+                message_th="ขั้นปัจจุบันไม่ผ่านหลักฐาน ระบบจึงหยุดโดยไม่ข้าม Gate",
+            )
+            build["updatedAt"] = run["updatedAt"]
+            _write_ea_factory_state_unlocked(state)
+            return {"kind": "blocked", "stageId": current_stage_id, "reasonCode": failure_code}
+        if stage_status != "pending" or not _ea_factory_stage_can_advance(build, current_stage_id):
+            _ea_factory_one_click_update(
+                run,
+                status="failed",
+                current_stage_id=current_stage_id,
+                failure_code="one_click_stage_order_invalid",
+                message_th="ลำดับขั้นไม่ตรงกับ Phase Gate จึงหยุดก่อนเกิดการทำงานภายนอก",
+            )
+            build["updatedAt"] = run["updatedAt"]
+            _write_ea_factory_state_unlocked(state)
+            return {"kind": "blocked", "stageId": current_stage_id}
+        if current_stage_id in {"compile_validate", "backtest_recheck"}:
+            handler = _ea_factory_visible_handler(current_stage_id)
+            adapter_connected = bool(
+                callable(EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER)
+                and callable(handler)
+            )
+            terminal_binding_current = _ea_factory_one_click_terminal_binding_current(
+                build
+            )
+            if not adapter_connected or not terminal_binding_current:
+                reason_code = (
+                    "visible_terminal_adapter_not_connected"
+                    if not adapter_connected
+                    else "terminal_selection_changed"
+                )
+                _ea_factory_one_click_update(
+                    run,
+                    status="awaiting_visible_terminal",
+                    current_stage_id=current_stage_id,
+                    failure_code=None,
+                    message_th=(
+                        "พร้อมทำต่อ แต่ต้องเปิดและควบคุม MetaEditor ที่มองเห็นจริงก่อน"
+                        if current_stage_id == "compile_validate"
+                        else "พร้อมทำต่อ แต่ต้องเปิด Strategy Tester แบบ Visual Mode และเก็บหลักฐานจริงก่อน"
+                    ),
+                )
+                build["updatedAt"] = run["updatedAt"]
+                _write_ea_factory_state_unlocked(state)
+                return {
+                    "kind": "awaiting_visible_terminal",
+                    "stageId": current_stage_id,
+                    "reasonCode": reason_code,
+                }
+            if not _ea_factory_one_click_reserve_visible_action(
+                build,
+                run,
+                current_stage_id,
+            ):
+                _ea_factory_one_click_update(
+                    run,
+                    status="failed",
+                    current_stage_id=current_stage_id,
+                    failure_code="visible_terminal_retry_limit_reached",
+                    message_th="ขั้นหน้าจอจริง Retry ครบจำนวนที่กำหนดแล้ว จึงหยุดโดยไม่กดซ้ำ",
+                )
+                build["updatedAt"] = run["updatedAt"]
+                _write_ea_factory_state_unlocked(state)
+                return {
+                    "kind": "blocked",
+                    "stageId": current_stage_id,
+                    "reasonCode": "visible_terminal_retry_limit_reached",
+                }
+        _ea_factory_one_click_update(
+            run,
+            status="running",
+            current_stage_id=current_stage_id,
+            failure_code=None,
+            message_th=f"กำลังเริ่มขั้น {EA_FACTORY_STAGE_LABELS_TH.get(current_stage_id, current_stage_id)}",
+        )
+        build["updatedAt"] = run["updatedAt"]
+        _write_ea_factory_state_unlocked(state)
+        return {
+            "kind": "advance",
+            "stageId": current_stage_id,
+            "runId": run.get("runId"),
+        }
+
+
+def _ea_factory_one_click_worker(build_id: str) -> None:
+    deadline = time.monotonic() + EA_FACTORY_ONE_CLICK_TIMEOUT_SECONDS
+    try:
+        while time.monotonic() < deadline:
+            action = _ea_factory_one_click_next_action(build_id)
+            kind = str(action.get("kind") or "stop")
+            if kind in {"completed", "blocked", "awaiting_visible_terminal", "stop"}:
+                return
+            if kind == "wait":
+                time.sleep(EA_FACTORY_ONE_CLICK_POLL_SECONDS)
+                continue
+            try:
+                if kind == "retry_source":
+                    retry_ea_factory_build_stage(
+                        build_id,
+                        {
+                            "stageId": "generate_source",
+                            "failedMissionId": action.get("failedMissionId"),
+                            "idempotencyKey": "ea-factory:one-click-retry:"
+                            + payload_digest(
+                                action.get("runId"),
+                                action.get("failedMissionId"),
+                                action.get("attempt"),
+                            )[:24],
+                        },
+                    )
+                elif kind == "advance":
+                    advance_ea_factory_build(
+                        build_id,
+                        {
+                            "stageId": action.get("stageId"),
+                            "idempotencyKey": "ea-factory:one-click-stage:"
+                            + payload_digest(
+                                action.get("runId"),
+                                action.get("stageId"),
+                            )[:24],
+                        },
+                    )
+                else:
+                    return
+            except (RequestError, DataIntegrityError, MetaEditorCompileError) as error:
+                code = safe_reference(getattr(error, "code", None)) or "one_click_stage_dispatch_failed"
+                visible_stage = action.get("stageId") in EA_FACTORY_VISIBLE_ACTION_STAGES
+                append_audit({
+                    "type": "ea_factory.one_click_stage_exception",
+                    "buildId": build_id,
+                    "stageId": safe_reference(action.get("stageId")),
+                    "failureCode": code,
+                    "exceptionClass": type(error).__name__,
+                    "errorMessage": redact_text(str(error), 500),
+                    "liveTradingAllowed": False,
+                })
+                _ea_factory_one_click_finish(
+                    build_id,
+                    status=(
+                        "awaiting_visible_terminal" if visible_stage else "failed"
+                    ),
+                    current_stage_id=action.get("stageId"),
+                    failure_code=code,
+                    message_th=(
+                        "ผลจากหน้าจอจริงยังยืนยันไม่ได้ จึงหยุดรอให้ผู้ใช้กดทำต่อด้วยคำขอเดิม"
+                        if visible_stage
+                        else "เริ่มขั้นถัดไปไม่สำเร็จ ระบบหยุดโดยไม่ข้าม Gate"
+                    ),
+                )
+                return
+        _ea_factory_one_click_finish(
+            build_id,
+            status="failed",
+            current_stage_id=None,
+            failure_code="one_click_timeout",
+            message_th="งานหนึ่งคลิกเกินเวลาสูงสุดและถูกหยุดอย่างปลอดภัย",
+        )
+    finally:
+        removed = False
+        with EA_FACTORY_ONE_CLICK_THREADS_LOCK:
+            current = EA_FACTORY_ONE_CLICK_THREADS.get(build_id)
+            if current is threading.current_thread():
+                EA_FACTORY_ONE_CLICK_THREADS.pop(build_id, None)
+                removed = True
+        if removed:
+            # A coordinator can exit without another durable state write (for
+            # example, a stop/no-op action). Clear a cached busy projection as
+            # soon as the in-memory worker registry changes.
+            _invalidate_ea_factory_read_model_cache()
+
+
+def _start_ea_factory_one_click_thread(build_id: str) -> bool:
+    with EA_FACTORY_ONE_CLICK_THREADS_LOCK:
+        for registered_build_id, existing in list(EA_FACTORY_ONE_CLICK_THREADS.items()):
+            try:
+                alive = callable(getattr(existing, "is_alive", None)) and existing.is_alive()
+            except Exception:
+                alive = False
+            if alive:
+                # The coordinator is a global Factory resource, not merely a
+                # per-Build convenience. Never start a second one even when a
+                # caller bypasses the HTTP admission path.
+                return False
+            if registered_build_id != build_id:
+                EA_FACTORY_ONE_CLICK_THREADS.pop(registered_build_id, None)
+        worker = threading.Thread(
+            target=_ea_factory_one_click_worker,
+            args=(build_id,),
+            name=f"ea-factory-one-click-{build_id[-12:]}",
+            daemon=True,
+        )
+        EA_FACTORY_ONE_CLICK_THREADS[build_id] = worker
+        try:
+            worker.start()
+        except Exception:
+            if EA_FACTORY_ONE_CLICK_THREADS.get(build_id) is worker:
+                EA_FACTORY_ONE_CLICK_THREADS.pop(build_id, None)
+            _invalidate_ea_factory_read_model_cache()
+            raise
+        # Registration is itself observable Factory state: invalidate even
+        # before the worker performs its first durable Stage transition.
+        _invalidate_ea_factory_read_model_cache()
+        return True
+
+
+def resume_interrupted_ea_factory_one_click_runs() -> int:
+    """Resume non-terminal AI/local phases after Bridge restart.
+
+    A run paused at a visible terminal is intentionally not auto-opened during
+    server startup; the user resumes it with the same opaque key from the UI.
+    """
+
+    try:
+        with EA_FACTORY_LOCK:
+            state = _load_ea_factory_state_unlocked()
+            mission_rows = load_missions(shared_snapshot=True)
+            candidates: list[dict] = []
+            paused_visible = 0
+            quarantined = 0
+            state_changed = False
+            for build in state.get("builds", []):
+                if not isinstance(build, dict) or not isinstance(build.get("oneClickRun"), dict):
+                    continue
+                run = build["oneClickRun"]
+                if run.get("status") not in {"queued", "running", "waiting_ai"}:
+                    continue
+                current_stage_id = _ea_factory_build_current_stage_id(build)
+                if current_stage_id in EA_FACTORY_VISIBLE_ACTION_STAGES:
+                    action = run.get("visibleAction") if isinstance(run.get("visibleAction"), dict) else None
+                    _ea_factory_one_click_update(
+                        run,
+                        status="awaiting_visible_terminal",
+                        current_stage_id=current_stage_id,
+                        failure_code=None,
+                        message_th=(
+                            "Bridge เริ่มใหม่ระหว่างขั้นหน้าจอจริง จึงหยุดรอให้ผู้ใช้กดทำต่อเพื่อป้องกันการกดซ้ำ"
+                        ),
+                    )
+                    if (
+                        isinstance(action, dict)
+                        and action.get("stageId") == current_stage_id
+                        and action.get("state") == "reserved"
+                    ):
+                        _ea_factory_one_click_mark_visible_uncertain(
+                            run,
+                            stage_id=current_stage_id,
+                            failure_code="visible_action_interrupted_by_restart",
+                        )
+                    build["updatedAt"] = run["updatedAt"]
+                    paused_visible += 1
+                    state_changed = True
+                    continue
+                build_id = safe_reference(build.get("id"))
+                if not build_id:
+                    continue
+                started_at = str(
+                    run.get("startedAt")
+                    or build.get("createdAt")
+                    or run.get("updatedAt")
+                    or build.get("updatedAt")
+                    or ""
+                )
+                candidates.append({
+                    "build": build,
+                    "buildId": build_id,
+                    "currentStageId": current_stage_id,
+                    # A missing timestamp sorts last; Build id is the stable
+                    # final tiebreaker, so file/list order cannot change which
+                    # interrupted run is selected.
+                    "sortKey": (not bool(started_at), started_at, build_id),
+                })
+
+            candidates.sort(key=lambda item: item["sortKey"])
+            active_candidates = [
+                candidate
+                for candidate in candidates
+                if _ea_factory_active_worker_payload(
+                    {"builds": [candidate["build"]]},
+                    mission_rows,
+                )
+                is not None
+            ]
+            # More than one queued/running Mission is already a legacy dirty
+            # state that this coordinator cannot cancel safely. Starting even
+            # one monitor could let the remaining Mission advance concurrently,
+            # so quarantine every interrupted run and require operator review.
+            selected = active_candidates[0] if len(active_candidates) == 1 else None
+            if selected is None and candidates:
+                # If an active Factory Mission belongs to a non-one-click
+                # Build, do not resurrect any interrupted coordinator beside
+                # it. Otherwise resume exactly the oldest deterministic run.
+                global_active = _ea_factory_active_worker_payload(state, mission_rows)
+                if global_active is None:
+                    selected = candidates[0]
+
+            selected_build_id = selected.get("buildId") if isinstance(selected, dict) else None
+            for candidate in candidates:
+                if candidate.get("buildId") == selected_build_id:
+                    continue
+                build = candidate["build"]
+                run = build["oneClickRun"]
+                _ea_factory_one_click_update(
+                    run,
+                    status="blocked",
+                    current_stage_id=candidate.get("currentStageId"),
+                    failure_code="restart_single_active_conflict",
+                    message_th=(
+                        "Bridge พบงานหนึ่งคลิกค้างมากกว่าหนึ่งงาน "
+                        "จึงกักงานนี้ไว้เพื่อป้องกัน Worker ทำงานพร้อมกัน"
+                    ),
+                )
+                build["updatedAt"] = run["updatedAt"]
+                quarantined += 1
+                state_changed = True
+            if state_changed:
+                _write_ea_factory_state_unlocked(state)
+            started = int(
+                bool(
+                    selected_build_id
+                    and _start_ea_factory_one_click_thread(selected_build_id)
+                )
+            )
+    except (DataIntegrityError, OSError):
+        return 0
+    if started or paused_visible or quarantined:
+        append_audit({
+            "type": "ea_factory.one_click_runs_resumed_after_restart",
+            "count": started,
+            "pausedVisibleCount": paused_visible,
+            "quarantinedConflictCount": quarantined,
+            "selectedBuildId": selected_build_id,
+            "visibleTerminalOpenedDuringStartup": False,
+            "liveTradingAllowed": False,
+        })
+    return started
+
+
+def run_ea_factory_build_one_click(build_id: object, payload: object) -> dict:
+    safe_build_id = safe_reference(build_id)
+    if not safe_build_id or not safe_build_id.startswith("ea-build-"):
+        raise RequestError("Invalid EA Factory build id.", 422)
+    request = payload if isinstance(payload, dict) else {}
+    if sorted(request) != ["idempotencyKey"]:
+        raise RequestError("EA Factory one-click run requires exactly idempotencyKey.", 422)
+    idempotency_key = _ea_factory_validate_idempotency(request.get("idempotencyKey"))
+    if not idempotency_key:
+        raise RequestError("idempotencyKey is required.", 422)
+    replay = False
+    resumed = False
+    state_written = False
+    with EA_FACTORY_LOCK:
+        state = _load_ea_factory_state_unlocked()
+        build = next(
+            (
+                item for item in state["builds"]
+                if isinstance(item, dict) and item.get("id") == safe_build_id
+            ),
+            None,
+        )
+        if not isinstance(build, dict):
+            raise RequestError("EA Factory build not found.", 404)
+        reconciliation_changed = False
+        if build.get("coverageStatus") != "compact_current":
+            raise RequestError("One-click requires a current compact Strategy Brief A-J build.", 409)
+        if _ea_factory_program_kind(build.get("artifactKind")) != "expert_advisor":
+            raise RequestError("One-click Compile and Backtest supports Expert Advisor builds only.", 409)
+        platform = str(build.get("platform") or "")
+        if platform not in EA_FACTORY_ONE_CLICK_VISIBLE_PLATFORMS:
+            if platform == "mt5":
+                raise RequestError(
+                    "MT5 one-click visible flow is not available yet; use the manual stage-by-stage MT5 flow.",
+                    409,
+                )
+            raise RequestError("One-click Compile and Backtest requires MT4.", 409)
+        mission_rows = load_missions(shared_snapshot=True)
+        existing = build.get("oneClickRun") if isinstance(build.get("oneClickRun"), dict) else None
+        request_digest = _ea_factory_one_click_request_digest(build)
+        if isinstance(existing, dict):
+            if (
+                existing.get("idempotencyKey") != idempotency_key
+                or existing.get("requestDigest") != request_digest
+            ):
+                raise RequestError("This build is already owned by another one-click request.", 409)
+            active_worker = _ea_factory_active_worker_payload(state, mission_rows)
+            if existing.get("status") == "completed" or isinstance(active_worker, dict):
+                # Exact replay is always readable, but must be side-effect free
+                # while this or another build has an active worker. In
+                # particular, never resurrect a stale queued run beside a live
+                # worker from another build.
+                return {
+                    "ok": True,
+                    "kind": "ea_factory_one_click_replayed",
+                    "buildId": safe_build_id,
+                    "oneClickRun": _ea_factory_one_click_read_model(build),
+                    "idempotentReplay": True,
+                    "workerStarted": False,
+                }
+            if existing.get("status") in {"blocked", "failed"}:
+                reconciliation_changed = _ea_factory_sync_build_status(
+                    build,
+                    ingest_sources=True,
+                )
+            replay = True
+            if existing.get("status") == "awaiting_visible_terminal":
+                resume_stage_id = safe_reference(existing.get("currentStageId"))
+                action = (
+                    existing.get("visibleAction")
+                    if isinstance(existing.get("visibleAction"), dict)
+                    else None
+                )
+                retry_allowed = True
+                if (
+                    resume_stage_id in EA_FACTORY_VISIBLE_ACTION_STAGES
+                    and isinstance(action, dict)
+                    and action.get("stageId") == resume_stage_id
+                    and action.get("state") == "uncertain"
+                ):
+                    retry_allowed = _ea_factory_one_click_reserve_visible_action(
+                        build,
+                        existing,
+                        resume_stage_id,
+                        explicit_resume=True,
+                    )
+                _ea_factory_one_click_update(
+                    existing,
+                    status="queued" if retry_allowed else "failed",
+                    current_stage_id=resume_stage_id,
+                    failure_code=(
+                        None
+                        if retry_allowed
+                        else "visible_terminal_retry_limit_reached"
+                    ),
+                    message_th=(
+                        "กำลังตรวจ MetaEditor/Strategy Tester ที่มองเห็นจริงอีกครั้ง"
+                        if retry_allowed
+                        else "ขั้นหน้าจอจริง Retry ครบจำนวนที่กำหนดแล้ว จึงหยุดโดยไม่กดซ้ำ"
+                    ),
+                )
+                build["updatedAt"] = existing["updatedAt"]
+                _write_ea_factory_state_unlocked(state)
+                state_written = True
+                resumed = retry_allowed
+            elif existing.get("status") in {"blocked", "failed"}:
+                # A newer Backend may be able to validate durable evidence that
+                # an older process version rejected.  Resume the same owned run
+                # only when reconciliation has already completed the exact
+                # failed stage and exposed a different pending next stage.  No
+                # Mission is repeated and no uncertain visible action is
+                # replayed through this recovery path.
+                previous_stage_id = safe_reference(existing.get("currentStageId"))
+                current_stage_id = _ea_factory_build_current_stage_id(build)
+                previous_stage = (
+                    _ea_factory_stage_row(build, previous_stage_id)
+                    if previous_stage_id
+                    else None
+                )
+                current_stage = (
+                    _ea_factory_stage_row(build, current_stage_id)
+                    if current_stage_id
+                    else None
+                )
+                healed_evidence = bool(
+                    isinstance(previous_stage, dict)
+                    and previous_stage.get("status") == "completed"
+                    and previous_stage.get("evidenceVerified") is True
+                    and current_stage_id
+                    and current_stage_id != previous_stage_id
+                    and isinstance(current_stage, dict)
+                    and current_stage.get("status") == "pending"
+                    and not isinstance(existing.get("visibleAction"), dict)
+                    and _ea_factory_stage_can_advance(build, current_stage_id)
+                )
+                if healed_evidence:
+                    _ea_factory_one_click_update(
+                        existing,
+                        status="queued",
+                        current_stage_id=current_stage_id,
+                        failure_code=None,
+                        message_th=(
+                            "Backend ตรวจหลักฐานเดิมผ่านแล้ว กำลังทำงานต่อจากขั้นถัดไป"
+                        ),
+                    )
+                    build["updatedAt"] = existing["updatedAt"]
+                    _write_ea_factory_state_unlocked(state)
+                    state_written = True
+                    resumed = True
+        else:
+            busy = _ea_factory_active_worker_payload(state, mission_rows)
+            if isinstance(busy, dict):
+                _raise_ea_factory_busy(busy)
+            try:
+                context, target = _ea_factory_metaeditor_target_context(platform)
+            except MetaEditorCompileError as error:
+                raise RequestError(
+                    f"Selected {platform.upper()} terminal is not ready: {safe_reference(error.code) or 'terminal_not_ready'}.",
+                    409,
+                ) from error
+            selected_record = (
+                context.get("record") if isinstance(context, dict) else None
+            )
+            if (
+                not isinstance(selected_record, dict)
+                or selected_record.get("runningState")
+                != "platform_running_detected"
+            ):
+                raise RequestError(
+                    "Selected MT4 terminal must already be running; one-click never launches the terminal process.",
+                    409,
+                )
+            candidate_id = safe_reference(target.get("candidateId"))
+            selection_revision = target.get("selectionRevision")
+            binding_digest = str(target.get("bindingDigest") or "")
+            if (
+                not candidate_id
+                or isinstance(selection_revision, bool)
+                or not isinstance(selection_revision, int)
+                or selection_revision < 1
+                or re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None
+            ):
+                raise RequestError("Selected terminal binding is incomplete.", 409)
+            current_stage_id = _ea_factory_build_current_stage_id(build)
+            current_stage = (
+                _ea_factory_stage_row(build, current_stage_id)
+                if current_stage_id
+                else None
+            )
+            if isinstance(current_stage, dict) and current_stage.get("status") in {"blocked", "failed"}:
+                raise RequestError("The current stage is already terminal; create a new build or use its supported Retry.", 409)
+            now = utc_now()
+            build["oneClickRun"] = {
+                "schemaVersion": EA_FACTORY_ONE_CLICK_SCHEMA_VERSION,
+                "runId": "ea-run-" + payload_digest(safe_build_id, idempotency_key)[:24],
+                "idempotencyKey": idempotency_key,
+                "requestDigest": request_digest,
+                "status": "queued",
+                "currentStageId": current_stage_id,
+                "terminalBinding": {
+                    "platform": platform,
+                    "candidateId": candidate_id,
+                    "selectionRevision": selection_revision,
+                    "bindingDigest": binding_digest,
+                },
+                "failureCode": None,
+                "messageTh": "รับคำขอหนึ่งคลิกแล้ว ระบบจะทำงานตาม Phase Gate ทีละขั้น",
+                "startedAt": now,
+                "updatedAt": now,
+                "completedAt": None,
+            }
+            build["updatedAt"] = now
+            _write_ea_factory_state_unlocked(state)
+            state_written = True
+        if reconciliation_changed and not state_written:
+            _write_ea_factory_state_unlocked(state)
+        # Register/start before releasing the Factory lock so a concurrent new
+        # request cannot slip through the single-active guard between durable
+        # run reservation and Thread.start(). The worker blocks on this RLock
+        # until the coherent state commit is visible.
+        started = False
+        run_status = str((build.get("oneClickRun") or {}).get("status") or "")
+        if run_status not in {"completed", "blocked", "failed"}:
+            started = _start_ea_factory_one_click_thread(safe_build_id)
+    append_audit({
+        "type": "ea_factory.one_click_resumed" if resumed else "ea_factory.one_click_requested",
+        "buildId": safe_build_id,
+        "runId": safe_reference((build.get("oneClickRun") or {}).get("runId")),
+        "idempotentReplay": replay,
+        "workerStarted": started,
+        "terminalPlatform": build.get("platform"),
+        "visibleMetaEditorRequired": True,
+        "visualStrategyTesterRequired": True,
+        "liveTradingAllowed": False,
+    })
+    return {
+        "ok": True,
+        "kind": "ea_factory_one_click_resumed" if resumed else "ea_factory_one_click_replayed" if replay else "ea_factory_one_click_started",
+        "buildId": safe_build_id,
+        "oneClickRun": _ea_factory_one_click_read_model(build),
+        "idempotentReplay": replay,
+        "workerStarted": started,
+    }
+
+
+def _ea_factory_one_click_front_office_active(build: dict, stage_id: str) -> bool:
+    run = build.get("oneClickRun") if isinstance(build.get("oneClickRun"), dict) else {}
+    return bool(
+        run.get("status") == "running"
+        and run.get("currentStageId") == stage_id
+        and stage_id in {"compile_validate", "backtest_recheck"}
+    )
+
+
+def _ea_factory_visible_stage_manifest_digest(entries: list[dict]) -> str:
+    return payload_digest(
+        "ea-factory-visible-stage-artifacts-v1",
+        [
+            {
+                "fileId": item.get("fileId"),
+                "relativePath": item.get("relativePath"),
+                "byteSize": item.get("byteSize"),
+                "sha256": item.get("sha256"),
+                "stageId": item.get("stageId"),
+                "reportId": item.get("reportId"),
+                "artifactKind": item.get("artifactKind"),
+            }
+            for item in sorted(entries, key=lambda row: str(row.get("fileId") or ""))
+        ],
+    )
+
+
+def _ea_factory_visible_artifact_payload(
+    build: dict,
+    descriptor: object,
+    *,
+    maximum_bytes: int = 20 * 1024 * 1024,
+) -> bytes | None:
+    if not isinstance(descriptor, dict):
+        return None
+    build_dir = _ea_factory_build_directory(build.get("id"))
+    relative = Path(str(descriptor.get("relativePath") or ""))
+    if (
+        build_dir is None
+        or len(relative.parts) != 2
+        or relative.parts[0] not in EA_FACTORY_BUILD_FOLDER_NAMES
+        or ".." in relative.parts
+    ):
+        return None
+    folder = _ea_factory_managed_folder(build_dir, relative.parts[0])
+    if folder is None:
+        return None
+    path = folder / relative.parts[1]
+    stable = _ea_factory_read_stable_file(path, maximum_bytes)
+    if stable is None:
+        return None
+    payload, digest = stable
+    if (
+        digest != descriptor.get("sha256")
+        or len(payload) != descriptor.get("byteSize")
+    ):
+        return None
+    return payload
+
+
+def _ea_factory_visible_png_valid(payload: object) -> bool:
+    """Accept one real, non-trivial, non-interlaced 8-bit PNG screenshot."""
+
+    if not isinstance(payload, bytes) or not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return False
+    offset = 8
+    ihdr: bytes | None = None
+    compressed = bytearray()
+    saw_end = False
+    while offset + 12 <= len(payload):
+        length = int.from_bytes(payload[offset : offset + 4], "big")
+        chunk_type = payload[offset + 4 : offset + 8]
+        end = offset + 12 + length
+        if length < 0 or end > len(payload):
+            return False
+        chunk_data = payload[offset + 8 : offset + 8 + length]
+        claimed_crc = int.from_bytes(payload[offset + 8 + length : end], "big")
+        if zlib.crc32(chunk_type + chunk_data) & 0xFFFFFFFF != claimed_crc:
+            return False
+        if chunk_type == b"IHDR":
+            if ihdr is not None or length != 13:
+                return False
+            ihdr = chunk_data
+        elif chunk_type == b"IDAT":
+            compressed.extend(chunk_data)
+            if len(compressed) > 20 * 1024 * 1024:
+                return False
+        elif chunk_type == b"IEND":
+            saw_end = True
+            break
+        offset = end
+    if ihdr is None or not saw_end:
+        return False
+    width = int.from_bytes(ihdr[0:4], "big")
+    height = int.from_bytes(ihdr[4:8], "big")
+    bit_depth = ihdr[8]
+    color_type = ihdr[9]
+    compression_method, filter_method, interlace = ihdr[10:13]
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color_type)
+    if (
+        width < 320
+        or height < 180
+        or width > 10000
+        or height > 10000
+        or bit_depth != 8
+        or channels is None
+        or compression_method != 0
+        or filter_method != 0
+        or interlace != 0
+        or width * height * channels > 64 * 1024 * 1024
+    ):
+        return False
+    expected_raw_size = (width * channels + 1) * height
+    try:
+        inflater = zlib.decompressobj()
+        raw = inflater.decompress(
+            bytes(compressed),
+            expected_raw_size + 1,
+        )
+        if len(raw) > expected_raw_size or inflater.unconsumed_tail:
+            return False
+        raw += inflater.flush(max(1, expected_raw_size + 1 - len(raw)))
+    except zlib.error:
+        return False
+    stride = width * channels
+    if (
+        len(raw) != expected_raw_size
+        or not inflater.eof
+        or inflater.unconsumed_tail
+    ):
+        return False
+    prior = bytearray(stride)
+    colors: set[bytes] = set()
+
+    def paeth(left: int, above: int, upper_left: int) -> int:
+        estimate = left + above - upper_left
+        left_distance = abs(estimate - left)
+        above_distance = abs(estimate - above)
+        upper_left_distance = abs(estimate - upper_left)
+        if left_distance <= above_distance and left_distance <= upper_left_distance:
+            return left
+        return above if above_distance <= upper_left_distance else upper_left
+
+    cursor = 0
+    for _row in range(height):
+        filter_type = raw[cursor]
+        encoded = raw[cursor + 1 : cursor + 1 + stride]
+        cursor += stride + 1
+        if filter_type > 4:
+            return False
+        decoded = bytearray(stride)
+        for index, byte in enumerate(encoded):
+            left = decoded[index - channels] if index >= channels else 0
+            above = prior[index]
+            upper_left = prior[index - channels] if index >= channels else 0
+            predictor = (
+                0
+                if filter_type == 0
+                else left
+                if filter_type == 1
+                else above
+                if filter_type == 2
+                else (left + above) // 2
+                if filter_type == 3
+                else paeth(left, above, upper_left)
+            )
+            decoded[index] = (byte + predictor) & 0xFF
+        # Nine distinct pixel values is enough to reject blank/solid evidence
+        # without retaining the whole screenshot in memory a second time.
+        for index in range(0, stride, channels):
+            colors.add(bytes(decoded[index : index + channels]))
+            if len(colors) >= 9:
+                return True
+        prior = decoded
+    return False
+
+
+def _ea_factory_visible_receipt_valid(
+    payload: object,
+    *,
+    stage_id: str,
+    operation_id: str,
+    terminal_candidate_id: object,
+    process_binding_digest: object,
+    post_process_binding_digest: object,
+    source_digest: object,
+    compiled_binary_sha256: object,
+    resolved_tester_settings_digest: object = None,
+    tester_input_preset_digest: object = None,
+    resolved_tester_input_preset_digest: object = None,
+    tester_input_preset_screenshot_sha256: object = None,
+    tester_input_preset_set_sha256: object = None,
+    tester_input_readback_set_sha256: object = None,
+    tester_input_preset_report_verified: object = None,
+    tester_report_screenshot_sha256: object = None,
+    trade_count: object = None,
+    trade_row_count: object = None,
+    buy_trade_count: object = None,
+    sell_trade_count: object = None,
+    zero_trade: object = None,
+    mismatched_chart_errors: object = None,
+    history_quality_issue: object = None,
+    history_quality_verified: object = None,
+    attention_required: object = None,
+    attention_reason_code: object = None,
+    execution_outcome: object = None,
+    performance_evaluation_available: object = None,
+) -> bool:
+    if not isinstance(payload, bytes) or len(payload) > 256 * 1024:
+        return False
+    try:
+        value = json.loads(payload.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(value, dict) or json_contains_potential_secret(value):
+        return False
+    required = {
+        "schemaVersion",
+        "operationId",
+        "stageId",
+        "terminalCandidateId",
+        "status",
+        "processBindingDigest",
+        "postProcessBindingDigest",
+        "sourceDigest",
+        "compiledBinarySha256",
+    }
+    if (
+        not required.issubset(value)
+        or value.get("schemaVersion")
+        != "ea-factory-visible-front-office-receipt-v1"
+        or value.get("operationId") != operation_id
+        or value.get("stageId") != stage_id
+        or value.get("terminalCandidateId") != terminal_candidate_id
+        or value.get("status") != "verified"
+        or value.get("processBindingDigest") != process_binding_digest
+        or value.get("postProcessBindingDigest") != post_process_binding_digest
+        or value.get("sourceDigest") != source_digest
+        or value.get("compiledBinarySha256") != compiled_binary_sha256
+    ):
+        return False
+    if stage_id == "backtest_recheck":
+        return bool(
+            value.get("resolvedTesterSettingsDigest")
+            == resolved_tester_settings_digest
+            and value.get("testerInputPresetDigest")
+            == tester_input_preset_digest
+            and value.get("resolvedTesterInputPresetDigest")
+            == resolved_tester_input_preset_digest
+            and value.get("testerInputPresetScreenshotSha256")
+            == tester_input_preset_screenshot_sha256
+            and value.get("testerInputPresetSetSha256")
+            == tester_input_preset_set_sha256
+            and value.get("testerInputReadbackSetSha256")
+            == tester_input_readback_set_sha256
+            and value.get("testerInputPresetReportVerified")
+            is tester_input_preset_report_verified
+            and value.get("testerReportScreenshotSha256")
+            == tester_report_screenshot_sha256
+            and value.get("visualMode") is True
+            and value.get("optimizationEnabled") is False
+            and value.get("shutdownTerminalAfterTest") is False
+            and value.get("liveTradingExecuted") is False
+            and value.get("tradeCount") == trade_count
+            and value.get("tradeRowCount") == trade_row_count
+            and value.get("buyTradeCount") == buy_trade_count
+            and value.get("sellTradeCount") == sell_trade_count
+            and value.get("zeroTrade") is zero_trade
+            and value.get("mismatchedChartErrors") == mismatched_chart_errors
+            and value.get("historyQualityIssue") is history_quality_issue
+            and value.get("historyQualityVerified") is history_quality_verified
+            and value.get("attentionRequired") is attention_required
+            and value.get("attentionReasonCode") == attention_reason_code
+            and value.get("executionOutcome") == execution_outcome
+            and value.get("performanceEvaluationAvailable")
+            is performance_evaluation_available
+        )
+    return bool(
+        value.get("zeroErrors") is True
+        and value.get("zeroWarnings") is True
+        and value.get("liveTradingExecuted") is False
+    )
+
+
+def _ea_factory_resolved_tester_settings_valid(
+    value: object,
+    *,
+    expert_file_name: object,
+) -> bool:
+    if not isinstance(value, dict):
+        return False
+    expected_keys = {
+        "schemaVersion",
+        "expertFileName",
+        "symbol",
+        "period",
+        "model",
+        "spread",
+        "useDate",
+        "fromDate",
+        "toDate",
+        "deposit",
+        "visualMode",
+        "optimizationEnabled",
+        "shutdownTerminalAfterTest",
+    }
+    symbol = str(value.get("symbol") or "")
+    spread = value.get("spread")
+    if isinstance(spread, str):
+        spread = spread.strip()
+        if spread.casefold() == "current":
+            spread = "current"
+        elif spread.isdecimal():
+            spread = int(spread)
+    deposit = value.get("deposit")
+    return bool(
+        set(value) == expected_keys
+        and value.get("schemaVersion")
+        == EA_FACTORY_RESOLVED_TESTER_SETTINGS_SCHEMA_VERSION
+        and value.get("expertFileName") == expert_file_name
+        and re.fullmatch(r"[A-Za-z0-9._#-]{2,40}", symbol) is not None
+        and value.get("period") == "H1"
+        and value.get("model") == "every_tick"
+        and (
+            spread == "current"
+            or (
+                isinstance(spread, int)
+                and not isinstance(spread, bool)
+                and 0 <= spread <= 100000
+            )
+        )
+        and value.get("useDate") is False
+        and value.get("fromDate") is None
+        and value.get("toDate") is None
+        and isinstance(deposit, (int, float))
+        and not isinstance(deposit, bool)
+        and math.isfinite(float(deposit))
+        and 0 < float(deposit) <= 1_000_000_000
+        and value.get("visualMode") is True
+        and value.get("optimizationEnabled") is False
+        and value.get("shutdownTerminalAfterTest") is False
+    )
+
+
+def _ea_factory_resolved_tester_input_preset_valid(
+    value: object,
+    *,
+    preset: object,
+) -> bool:
+    if not isinstance(value, dict) or not isinstance(preset, dict):
+        return False
+    expected_keys = {
+        "schemaVersion",
+        "presetDigest",
+        "sourceDigest",
+        "mode",
+        "scope",
+        "readback",
+        "visibleExpertProperties",
+        "inputsTabSelected",
+        "sourceDefaultsPreserved",
+        "appliedOnlyToStrategyTester",
+        "notAppliedToLiveChart",
+        "readbackVerified",
+    }
+    expected_readback = [
+        {**copy.deepcopy(item), "observedValue": item.get("testerValue")}
+        for item in (preset.get("assumptions") or [])
+        if isinstance(item, dict)
+    ]
+    observed_readback = value.get("readback")
+    readback_matches = bool(
+        isinstance(observed_readback, list)
+        and len(observed_readback) == len(expected_readback)
+        and all(
+            isinstance(observed, dict)
+            and set(observed) == set(expected)
+            and all(
+                _ea_factory_input_values_equal(
+                    observed.get(key),
+                    expected.get(key),
+                    str(expected.get("inputType") or ""),
+                )
+                if key in {"sourceDefault", "testerValue", "observedValue"}
+                else observed.get(key) == expected.get(key)
+                for key in expected
+            )
+            for observed, expected in zip(observed_readback, expected_readback)
+        )
+    )
+    return bool(
+        set(value) == expected_keys
+        and value.get("schemaVersion")
+        == EA_FACTORY_RESOLVED_TESTER_INPUT_PRESET_SCHEMA_VERSION
+        and value.get("presetDigest") == preset.get("presetDigest")
+        and value.get("sourceDigest") == preset.get("sourceDigest")
+        and value.get("mode") == preset.get("mode")
+        and value.get("scope") == preset.get("scope")
+        and readback_matches
+        and value.get("visibleExpertProperties") is True
+        and value.get("inputsTabSelected") is True
+        and value.get("sourceDefaultsPreserved") is True
+        and value.get("appliedOnlyToStrategyTester") is True
+        and value.get("notAppliedToLiveChart") is True
+        and value.get("readbackVerified") is True
+    )
+
+
+def _ea_factory_input_value_token(value: object, input_type: str) -> str | None:
+    if input_type == "bool" and isinstance(value, bool):
+        return "true" if value else "false"
+    if input_type == "int" and isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if input_type == "double" and isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = float(value)
+        if math.isfinite(number):
+            return format(number, ".15g")
+    return None
+
+
+def _ea_factory_parse_input_token(token: object, input_type: str) -> bool | int | float | None:
+    normalized = str(token or "").strip()
+    if input_type == "bool":
+        folded = normalized.casefold()
+        if folded in {"true", "1"}:
+            return True
+        if folded in {"false", "0"}:
+            return False
+    elif input_type == "int" and re.fullmatch(r"[+-]?\d+", normalized):
+        value = int(normalized)
+        if -2_147_483_648 <= value <= 2_147_483_647:
+            return value
+    elif input_type == "double" and re.fullmatch(
+        r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?",
+        normalized,
+    ):
+        value = float(normalized)
+        if math.isfinite(value):
+            return value
+    return None
+
+
+def _ea_factory_input_values_equal(
+    observed: object,
+    expected: object,
+    input_type: str,
+) -> bool:
+    if input_type in {"bool", "int"}:
+        return type(observed) is type(expected) and observed == expected
+    if (
+        input_type == "double"
+        and isinstance(observed, (int, float))
+        and not isinstance(observed, bool)
+        and isinstance(expected, (int, float))
+        and not isinstance(expected, bool)
+    ):
+        left = float(observed)
+        right = float(expected)
+        return bool(
+            math.isfinite(left)
+            and math.isfinite(right)
+            and abs(left - right) <= 1e-12 * max(1.0, abs(right))
+        )
+    return False
+
+
+def _ea_factory_tester_set_values(
+    payload: object,
+    preset: object,
+) -> dict[str, bool | int | float] | None:
+    if not isinstance(payload, bytes) or not payload or len(payload) > 1024 * 1024:
+        return None
+    if not isinstance(preset, dict) or not isinstance(preset.get("assumptions"), list):
+        return None
+    try:
+        if payload.startswith((b"\xff\xfe", b"\xfe\xff")):
+            text = payload.decode("utf-16", errors="strict")
+        elif payload.startswith(b"\xef\xbb\xbf"):
+            text = payload.decode("utf-8-sig", errors="strict")
+        elif payload[:512].count(b"\x00") > 40:
+            text = payload.decode("utf-16-le", errors="strict")
+        else:
+            text = payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    assumptions = preset["assumptions"]
+    expected_by_name = {
+        str(item.get("inputName") or ""): item
+        for item in assumptions
+        if isinstance(item, dict)
+    }
+    if (
+        not (1 <= len(assumptions) <= EA_FACTORY_MT4_TESTER_INPUT_MAX_COUNT)
+        or len(expected_by_name) != len(assumptions)
+        or len({name.casefold() for name in expected_by_name}) != len(expected_by_name)
+    ):
+        return None
+    values: dict[str, bool | int | float] = {}
+    optimization_metadata_seen: set[str] = set()
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith((";", "#")) or "=" not in line:
+            continue
+        name, raw_value = line.split("=", 1)
+        name = name.strip()
+        if name not in expected_by_name:
+            metadata = re.fullmatch(r"(.+),(F|1|2|3)", name)
+            if (
+                metadata is not None
+                and metadata.group(1) in expected_by_name
+                and name not in optimization_metadata_seen
+            ):
+                optimization_metadata_seen.add(name)
+                continue
+            return None
+        if name in values:
+            return None
+        value = _ea_factory_parse_input_token(
+            raw_value.split("||", 1)[0],
+            str(expected_by_name[name].get("inputType") or ""),
+        )
+        if value is None:
+            return None
+        values[name] = value
+    if set(values) != set(expected_by_name) or any(
+        not _ea_factory_input_values_equal(
+            values[str(item.get("inputName"))],
+            item.get("testerValue"),
+            str(item.get("inputType") or ""),
+        )
+        for item in assumptions
+    ):
+        return None
+    return values
+
+
+def _ea_factory_tester_report_preset_matches(text: str, preset: object) -> bool:
+    if not isinstance(preset, dict) or not isinstance(preset.get("assumptions"), list):
+        return False
+    assumptions = preset["assumptions"]
+    names = [
+        str(item.get("inputName") or "")
+        for item in assumptions
+        if isinstance(item, dict)
+    ]
+    if (
+        not (1 <= len(assumptions) <= EA_FACTORY_MT4_TESTER_INPUT_MAX_COUNT)
+        or len(names) != len(assumptions)
+        or any(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None for name in names)
+        or len({name.casefold() for name in names}) != len(names)
+    ):
+        return False
+    marker = re.search(
+        r"(?:^|\s)(?:parameters|inputs|พารามิเตอร์)\s*:?\s*",
+        text,
+        re.IGNORECASE,
+    )
+    if marker is None:
+        return False
+    parameters = text[marker.end() :]
+    observed: dict[str, bool | int | float] = {}
+    for item in assumptions:
+        if not isinstance(item, dict):
+            return False
+        name = str(item.get("inputName") or "")
+        matches = re.findall(
+            rf"(?<![A-Za-z0-9_]){re.escape(name)}\s*=\s*([^\s;,<]+)",
+            parameters,
+        )
+        if len(matches) != 1:
+            return False
+        value = _ea_factory_parse_input_token(
+            matches[0],
+            str(item.get("inputType") or ""),
+        )
+        if value is None or not _ea_factory_input_values_equal(
+            value,
+            item.get("testerValue"),
+            str(item.get("inputType") or ""),
+        ):
+            return False
+        observed[name] = value
+    return len(observed) == len(assumptions)
+
+
+def _ea_factory_tester_report_decoded(payload: bytes) -> str:
+    encodings: list[str] = []
+    if payload.startswith((b"\xff\xfe", b"\xfe\xff")):
+        encodings.append("utf-16")
+    elif payload[:512].count(b"\x00") > 40:
+        encodings.append("utf-16-le")
+    encodings.extend(("utf-8-sig", "cp1252"))
+    for encoding in encodings:
+        try:
+            return payload.decode(encoding, errors="strict")
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return ""
+
+
+class _EAFactoryTesterTableParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[str]] = []
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        lowered = tag.casefold()
+        if lowered == "tr":
+            self._row = []
+        elif lowered in {"td", "th"} and self._row is not None:
+            self._cell = []
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        lowered = tag.casefold()
+        if lowered in {"td", "th"} and self._cell is not None:
+            if self._row is not None:
+                self._row.append(" ".join("".join(self._cell).split()))
+            self._cell = None
+        elif lowered == "tr" and self._row is not None:
+            if self._row:
+                self.rows.append(self._row)
+            self._row = None
+            self._cell = None
+
+
+def _ea_factory_tester_report_rows(payload: bytes) -> list[list[str]]:
+    decoded = _ea_factory_tester_report_decoded(payload)
+    if not decoded:
+        return []
+    parser = _EAFactoryTesterTableParser()
+    try:
+        parser.feed(decoded)
+    except Exception:
+        return []
+    return parser.rows
+
+
+def _ea_factory_tester_report_text(payload: bytes) -> str:
+    decoded = _ea_factory_tester_report_decoded(payload)
+    if not decoded:
+        return ""
+    without_markup = re.sub(r"<[^>]{1,500}>", " ", decoded)
+    return re.sub(
+        r"\s+",
+        " ",
+        html_lib.unescape(without_markup),
+    ).strip()
+
+
+def _ea_factory_report_label(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def _ea_factory_unique_report_value(
+    rows: list[list[str]],
+    labels: set[str],
+) -> str | None:
+    normalized_labels = {_ea_factory_report_label(label) for label in labels}
+    matches: list[str] = []
+    for row in rows:
+        if len(row) < 2 or _ea_factory_report_label(row[0]) not in normalized_labels:
+            continue
+        values = [str(cell).strip() for cell in row[1:] if str(cell).strip()]
+        if len(values) != 1:
+            return None
+        matches.append(values[0])
+    return matches[0] if len(matches) == 1 else None
+
+
+def _ea_factory_report_expert_value(
+    decoded: str,
+    rows: list[list[str]],
+) -> str | None:
+    """Read the EA identity from either supported MT4 report layout.
+
+    MT4 build 1470 can omit the ``Expert`` metadata row and keep the exact EA
+    name only in ``<title>Strategy Tester: ...</title>``.  Prefer a unique
+    metadata row whenever one exists.  Never fall back to the title when an
+    Expert row is malformed or duplicated, and accept only one bounded title.
+    """
+
+    normalized_labels = {
+        _ea_factory_report_label(label) for label in {"expert", "expert advisor"}
+    }
+    row_matches: list[str] = []
+    for row in rows:
+        if len(row) < 2 or _ea_factory_report_label(row[0]) not in normalized_labels:
+            continue
+        values = [str(cell).strip() for cell in row[1:] if str(cell).strip()]
+        if len(values) != 1:
+            return None
+        row_matches.append(values[0])
+    if len(row_matches) > 1:
+        return None
+    if len(row_matches) == 1:
+        return row_matches[0]
+
+    title_matches = re.findall(
+        r"<title\b[^>]{0,512}>\s*Strategy\s+Tester\s*:\s*([^<]{1,260}?)\s*</title>",
+        decoded,
+        re.IGNORECASE | re.DOTALL,
+    )
+    normalized_titles = [
+        " ".join(html_lib.unescape(value).split()) for value in title_matches
+    ]
+    return (
+        normalized_titles[0]
+        if len(normalized_titles) == 1 and normalized_titles[0]
+        else None
+    )
+
+
+def _ea_factory_report_symbol_matches(value: str | None, expected: object) -> bool:
+    normalized = " ".join(str(value or "").split())
+    expected_value = str(expected or "").strip()
+    return bool(
+        expected_value
+        and re.fullmatch(
+            rf"{re.escape(expected_value)}(?:\s*\([^\r\n]*\))?",
+            normalized,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _ea_factory_report_period_matches(value: str | None, expected: object) -> bool:
+    normalized = " ".join(str(value or "").split())
+    expected_value = str(expected or "").strip()
+    if not expected_value:
+        return False
+    return bool(
+        normalized.casefold() == expected_value.casefold()
+        or re.search(
+            rf"(?<![A-Za-z0-9])\({re.escape(expected_value)}\)(?![A-Za-z0-9])",
+            normalized,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _ea_factory_report_model_matches(value: str | None, expected: object) -> bool:
+    expected_label = {
+        "every_tick": "every tick",
+        "control_points": "control points",
+        "open_prices": "open prices",
+    }.get(str(expected or ""))
+    normalized = " ".join(str(value or "").split()).casefold()
+    return bool(
+        expected_label
+        and re.fullmatch(
+            rf"{re.escape(expected_label)}(?:\s*\([^\r\n]*\))?",
+            normalized,
+        )
+    )
+
+
+def _ea_factory_report_mismatched_chart_errors(
+    rows: list[list[str]],
+) -> int | None:
+    token = _ea_factory_unique_report_value(
+        rows,
+        {"mismatched chart errors", "mismatched charts errors"},
+    )
+    if token is None or re.fullmatch(r"[0-9][0-9 ,]*", token) is None:
+        return None
+    try:
+        value = int(token.replace(" ", "").replace(",", ""))
+    except ValueError:
+        return None
+    return value if 0 <= value <= 1_000_000_000 else None
+
+
+def _ea_factory_backtest_attention_fields(
+    zero_trade: bool,
+    mismatched_chart_errors: int,
+) -> dict:
+    history_quality_issue = mismatched_chart_errors > 0
+    if zero_trade and history_quality_issue:
+        reason = "backtest_zero_trades_and_history_quality_errors"
+        outcome = "completed_zero_trades_with_history_quality_errors"
+    elif zero_trade:
+        reason = "backtest_zero_trades"
+        outcome = "completed_zero_trades"
+    elif history_quality_issue:
+        reason = "backtest_history_quality_errors"
+        outcome = "completed_with_trades_history_quality_errors"
+    else:
+        reason = None
+        outcome = "completed_with_trades"
+    attention_required = bool(zero_trade or history_quality_issue)
+    return {
+        "mismatchedChartErrors": mismatched_chart_errors,
+        "historyQualityIssue": history_quality_issue,
+        "historyQualityVerified": not history_quality_issue,
+        "attentionRequired": attention_required,
+        "attentionReasonCode": reason,
+        "performanceEvaluationAvailable": not attention_required,
+        "executionOutcome": outcome,
+    }
+
+
+def _ea_factory_tester_report_spread(text: str) -> int | None:
+    match = re.search(
+        r"(?:spread|สเปรด)\s*:?\s*(?:current\s*\(\s*(\d+)\s*\)|(\d+))",
+        text,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    value = int(match.group(1) or match.group(2))
+    return value if 0 <= value <= 100000 else None
+
+
+def _ea_factory_tester_report_matches(
+    payload: object,
+    settings: dict,
+    *,
+    trade_count: int,
+    buy_trade_count: int,
+    sell_trade_count: int,
+    mismatched_chart_errors: int,
+    tester_input_preset: object = None,
+) -> bool:
+    if not isinstance(payload, bytes) or not payload:
+        return False
+    decoded = _ea_factory_tester_report_decoded(payload)
+    text = _ea_factory_tester_report_text(payload)
+    folded = text.casefold()
+    rows = _ea_factory_tester_report_rows(payload)
+    expert_name = str(settings.get("expertFileName") or "")
+    expert_stem = Path(expert_name).stem
+    expert_report_value = _ea_factory_report_expert_value(decoded, rows)
+    expert_report_name = Path(str(expert_report_value or "").replace("\\", "/")).name
+    expert_report_stem = Path(expert_report_name).stem
+    symbol_report_value = _ea_factory_unique_report_value(rows, {"symbol"})
+    period_report_value = _ea_factory_unique_report_value(rows, {"period"})
+    model_report_value = _ea_factory_unique_report_value(rows, {"model"})
+    observed_mismatched_chart_errors = _ea_factory_report_mismatched_chart_errors(rows)
+    deposit_text = format(float(settings.get("deposit") or 0), ".2f")
+    report_spread = _ea_factory_tester_report_spread(text)
+    expected_spread = settings.get("spread")
+    if isinstance(expected_spread, str):
+        expected_spread = expected_spread.strip()
+        if expected_spread.isdecimal():
+            expected_spread = int(expected_spread)
+        elif expected_spread.casefold() == "current":
+            expected_spread = "current"
+    if (
+        not text
+        or not expert_stem
+        or expert_report_stem.casefold() != expert_stem.casefold()
+        or expert_report_name.casefold()
+        not in {expert_stem.casefold(), expert_name.casefold()}
+        or not _ea_factory_report_symbol_matches(
+            symbol_report_value,
+            settings.get("symbol"),
+        )
+        or not _ea_factory_report_period_matches(
+            period_report_value,
+            settings.get("period"),
+        )
+        or not _ea_factory_report_model_matches(
+            model_report_value,
+            settings.get("model"),
+        )
+        or observed_mismatched_chart_errors != mismatched_chart_errors
+        or "spread" not in folded
+        or report_spread is None
+        or (
+            expected_spread != "current"
+            and expected_spread != report_spread
+        )
+        or "deposit" not in folded
+        or (
+            deposit_text.casefold() not in folded
+            and deposit_text.rstrip("0").rstrip(".").casefold() not in folded
+        )
+    ):
+        return False
+    total_match = re.search(
+        r"(?:total\s+(?:trades|deals)|จำนวน(?:การ)?ซื้อขายทั้งหมด)\D{0,80}(\d+)",
+        text,
+        re.IGNORECASE,
+    )
+    short_match = re.search(
+        r"short\s+positions[^0-9]{0,80}(\d+)",
+        text,
+        re.IGNORECASE,
+    )
+    long_match = re.search(
+        r"long\s+positions[^0-9]{0,80}(\d+)",
+        text,
+        re.IGNORECASE,
+    )
+    return bool(
+        total_match
+        and int(total_match.group(1)) == trade_count
+        and buy_trade_count >= 0
+        and sell_trade_count >= 0
+        and buy_trade_count + sell_trade_count == trade_count
+        and (not short_match or int(short_match.group(1)) == sell_trade_count)
+        and (not long_match or int(long_match.group(1)) == buy_trade_count)
+        and (
+            tester_input_preset is None
+            or _ea_factory_tester_report_preset_matches(text, tester_input_preset)
+        )
+    )
+
+
+def _ea_factory_visible_front_office_evidence_valid(
+    build: dict,
+    stage: dict,
+    mission: object,
+    report: object,
+    *,
+    expected_operation_id: object = None,
+    require_fresh_process_proof: bool = False,
+    require_persisted_report: bool = True,
+) -> bool:
+    """Re-read every visible-action artifact and validate exact lineage.
+
+    This is intentionally stricter than accepting booleans in a Report.  The
+    screenshot, binary, settings and Tester report ids must resolve through the
+    immutable EA Factory manifest, whose descriptors are rebuilt from stable
+    on-disk bytes by ``_ea_factory_revalidated_artifact_manifest``.
+    """
+
+    if not isinstance(mission, dict) or not isinstance(report, dict):
+        return False
+    stage_id = safe_reference(stage.get("id"))
+    if stage_id not in EA_FACTORY_VISIBLE_ACTION_STAGES:
+        return False
+    mission_id = safe_reference(mission.get("id"))
+    report_id = safe_reference(report.get("id"))
+    metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
+    run = build.get("oneClickRun") if isinstance(build.get("oneClickRun"), dict) else {}
+    binding = run.get("terminalBinding") if isinstance(run.get("terminalBinding"), dict) else {}
+    operation_id = safe_reference(expected_operation_id) or safe_reference(
+        stage.get("visibleOperationId")
+    )
+    expected_operation = _ea_factory_one_click_visible_operation_id(
+        build,
+        run,
+        stage_id,
+    )
+    report_path = RUNTIME_REPORTS_DIR / f"{report_id}.json" if report_id else None
+    persisted_report = (
+        read_json(report_path, None)
+        if report_path is not None and report_path.is_file()
+        else None
+    )
+    # The pre-action proof was required to be fresh by the capability gate at
+    # reservation/invocation time.  A real visual backtest can legitimately
+    # run longer than the freshness window, so do not re-age that immutable
+    # proof at commit.  The post-action proof must still be fresh now.
+    process_binding = _ea_factory_front_office_process_binding(
+        metrics.get("processBinding"),
+        binding,
+        stage_id,
+        require_fresh=False,
+    )
+    post_process_binding = _ea_factory_front_office_process_binding(
+        metrics.get("postProcessBinding"),
+        binding,
+        stage_id,
+        require_fresh=require_fresh_process_proof,
+    )
+    capability_checked_at = parse_iso(
+        str(metrics.get("capabilityCheckedAt") or "")
+    )
+    expected_terminal_executable = str(
+        stage.get("terminalExecutableSha256") or ""
+    )
+    expected_front_office_executable = str(
+        stage.get("frontOfficeExecutableSha256") or ""
+    )
+    try:
+        manifest = _ea_factory_revalidated_artifact_manifest(build)
+    except DataIntegrityError:
+        return False
+    by_id = {
+        str(item.get("fileId")): item
+        for item in manifest
+        if isinstance(item, dict) and item.get("fileId")
+    }
+    stage_ids = [str(value) for value in (stage.get("artifacts") or [])]
+    stage_entries = [by_id.get(file_id) for file_id in stage_ids]
+    if (
+        not mission_id
+        or not report_id
+        or (require_persisted_report and persisted_report != report)
+        or report.get("status") != "ready"
+        or safe_reference(report.get("linkedMissionId")) != mission_id
+        or stage.get("status") != "completed"
+        or stage.get("evidenceVerified") is not True
+        or safe_reference(stage.get("missionId")) != mission_id
+        or safe_reference(stage.get("reportId")) != report_id
+        or not operation_id
+        or operation_id != expected_operation
+        or metrics.get("evidenceMode") != EA_FACTORY_VISIBLE_EVIDENCE_MODE
+        or metrics.get("operationId") != operation_id
+        or metrics.get("eaFactoryStage") != stage_id
+        or metrics.get("platform") != build.get("platform")
+        or metrics.get("terminalCandidateId") != binding.get("candidateId")
+        or metrics.get("terminalSelectionRevision") != binding.get("selectionRevision")
+        or not secrets.compare_digest(
+            str(metrics.get("terminalBindingDigest") or ""),
+            str(binding.get("bindingDigest") or ""),
+        )
+        or process_binding is None
+        or post_process_binding is None
+        or metrics.get("processBindingDigest")
+        != process_binding.get("processBindingDigest")
+        or metrics.get("postProcessBindingDigest")
+        != post_process_binding.get("processBindingDigest")
+        or post_process_binding.get("terminalProcessId")
+        != process_binding.get("terminalProcessId")
+        or post_process_binding.get("terminalExecutableSha256")
+        != process_binding.get("terminalExecutableSha256")
+        or post_process_binding.get("terminalWindowHandle")
+        != process_binding.get("terminalWindowHandle")
+        or post_process_binding.get("terminalWindowOwnerProcessId")
+        != process_binding.get("terminalWindowOwnerProcessId")
+        or post_process_binding.get("terminalWindowTitleSha256")
+        != process_binding.get("terminalWindowTitleSha256")
+        or post_process_binding.get("terminalWindowClassSha256")
+        != process_binding.get("terminalWindowClassSha256")
+        or post_process_binding.get("frontOfficeProcessId")
+        != process_binding.get("frontOfficeProcessId")
+        or post_process_binding.get("frontOfficeExecutableSha256")
+        != process_binding.get("frontOfficeExecutableSha256")
+        or post_process_binding.get("frontOfficeWindowHandle")
+        != process_binding.get("frontOfficeWindowHandle")
+        or post_process_binding.get("frontOfficeWindowOwnerProcessId")
+        != process_binding.get("frontOfficeWindowOwnerProcessId")
+        or post_process_binding.get("frontOfficeWindowTitleSha256")
+        != process_binding.get("frontOfficeWindowTitleSha256")
+        or post_process_binding.get("frontOfficeWindowClassSha256")
+        != process_binding.get("frontOfficeWindowClassSha256")
+        or re.fullmatch(r"[0-9a-f]{64}", expected_terminal_executable) is None
+        or re.fullmatch(r"[0-9a-f]{64}", expected_front_office_executable) is None
+        or process_binding.get("terminalExecutableSha256")
+        != expected_terminal_executable
+        or process_binding.get("frontOfficeExecutableSha256")
+        != expected_front_office_executable
+        or capability_checked_at is None
+        or parse_iso(str(process_binding.get("observedAt") or ""))
+        < capability_checked_at - timedelta(seconds=2)
+        or parse_iso(str(post_process_binding.get("observedAt") or ""))
+        < parse_iso(str(process_binding.get("observedAt") or ""))
+        or metrics.get("liveTradingExecuted") is not False
+        or metrics.get("autoTradingToggled") is not False
+        or metrics.get("chartAttached") is not False
+        or metrics.get("terminalClosedByAdapter") is not False
+        or metrics.get("terminalStillRunning") is not True
+        or metrics.get("terminalStillOpen") is not True
+        or not isinstance(metrics.get("autoTradingStateBefore"), bool)
+        or metrics.get("autoTradingStateAfter")
+        is not metrics.get("autoTradingStateBefore")
+        or isinstance(metrics.get("processId"), bool)
+        or not isinstance(metrics.get("processId"), int)
+        or metrics.get("processId") <= 0
+        or metrics.get("processId") != process_binding.get("frontOfficeProcessId")
+        or isinstance(metrics.get("windowHandle"), bool)
+        or not isinstance(metrics.get("windowHandle"), int)
+        or metrics.get("windowHandle") <= 0
+        or metrics.get("windowHandle")
+        != process_binding.get("frontOfficeWindowHandle")
+        or not stage_ids
+        or len(stage_ids) != len(set(stage_ids))
+        or any(not isinstance(item, dict) for item in stage_entries)
+        or any(item.get("stageId") != stage_id for item in stage_entries)
+        or any(item.get("reportId") != report_id for item in stage_entries)
+        or metrics.get("evidenceArtifactIds") != stage_ids
+        or metrics.get("stageArtifactManifestDigest")
+        != _ea_factory_visible_stage_manifest_digest(stage_entries)
+    ):
+        return False
+
+    versions = [
+        item
+        for item in (build.get("versions") if isinstance(build.get("versions"), list) else [])
+        if isinstance(item, dict)
+    ]
+    source_digests = {str(item.get("sourceDigest") or "") for item in versions}
+    compiled_id = str(metrics.get("compiledBinaryFileId") or "")
+    compiled = by_id.get(compiled_id)
+    screenshot_id = str(metrics.get("visibleWindowEvidenceFileId") or "")
+    screenshot = by_id.get(screenshot_id)
+    receipt_id = str(metrics.get("adapterReceiptFileId") or "")
+    receipt = by_id.get(receipt_id)
+    expected_binary_suffix = ".ex4" if build.get("platform") == "mt4" else ".ex5"
+    expected_binary_names = {
+        Path(str(item.get("versionFile") or "")).with_suffix(
+            expected_binary_suffix
+        ).name
+        for item in versions
+    }
+    screenshot_payload = _ea_factory_visible_artifact_payload(build, screenshot)
+    receipt_payload = _ea_factory_visible_artifact_payload(
+        build,
+        receipt,
+        maximum_bytes=256 * 1024,
+    )
+    if (
+        len(source_digests) != 1
+        or len(expected_binary_names) != 1
+        or metrics.get("sourceDigest") not in source_digests
+        or not isinstance(compiled, dict)
+        or compiled.get("stageId") != "compile_validate"
+        or compiled.get("artifactKind") != "compile_evidence"
+        or compiled.get("extension") != expected_binary_suffix
+        or compiled.get("fileName") not in expected_binary_names
+        or compiled.get("sha256") != metrics.get("compiledBinarySha256")
+        or not isinstance(screenshot, dict)
+        or screenshot.get("artifactKind") != "screenshot_evidence"
+        or screenshot.get("extension") != ".png"
+        or screenshot.get("sha256")
+        != metrics.get("visibleWindowEvidenceSha256")
+        or not _ea_factory_visible_png_valid(screenshot_payload)
+        or not isinstance(receipt, dict)
+        or receipt.get("stageId") != stage_id
+        or receipt.get("reportId") != report_id
+        or receipt.get("artifactKind")
+        != (
+            "compile_evidence"
+            if stage_id == "compile_validate"
+            else "backtest_evidence"
+        )
+        or receipt.get("extension") != ".json"
+        or receipt.get("sha256") != metrics.get("adapterReceiptSha256")
+        or receipt_id not in stage_ids
+    ):
+        return False
+
+    if stage_id == "compile_validate":
+        compile_log_id = str(metrics.get("compileLogFileId") or "")
+        compile_log = by_id.get(compile_log_id)
+        compile_log_payload = _ea_factory_visible_artifact_payload(
+            build,
+            compile_log,
+            maximum_bytes=2 * 1024 * 1024,
+        )
+        try:
+            compile_log_text = (
+                compile_log_payload.decode("utf-8", errors="strict")
+                if isinstance(compile_log_payload, bytes)
+                else ""
+            )
+        except UnicodeDecodeError:
+            compile_log_text = ""
+        result_line = str(metrics.get("resultLine") or "")
+        return bool(
+            screenshot.get("stageId") == stage_id
+            and screenshot.get("reportId") == report_id
+            and compiled_id in stage_ids
+            and screenshot_id in stage_ids
+            and isinstance(compile_log, dict)
+            and compile_log.get("stageId") == stage_id
+            and compile_log.get("reportId") == report_id
+            and compile_log.get("artifactKind") == "compile_evidence"
+            and compile_log.get("extension") == ".txt"
+            and compile_log.get("sha256") == metrics.get("compileLogSha256")
+            and compile_log_id in stage_ids
+            and re.fullmatch(
+                r"Result:\s*0\s+errors?,\s*0\s+warnings?",
+                result_line,
+                re.IGNORECASE,
+            )
+            is not None
+            and result_line in compile_log_text
+            and str(metrics.get("sourceDigest")) in compile_log_text
+            and str(metrics.get("compiledBinarySha256")) in compile_log_text
+            and metrics.get("visibleMetaEditor") is True
+            and metrics.get("compileVerified") is True
+            and (
+                metrics.get("compileExecuted") is True
+                or metrics.get("recoveredExistingReceipt") is True
+            )
+            and metrics.get("zeroErrors") is True
+            and metrics.get("zeroWarnings") is True
+            and metrics.get("backtestExecuted") is False
+            and _ea_factory_visible_receipt_valid(
+                receipt_payload,
+                stage_id=stage_id,
+                operation_id=operation_id,
+                terminal_candidate_id=binding.get("candidateId"),
+                process_binding_digest=metrics.get("processBindingDigest"),
+                post_process_binding_digest=metrics.get(
+                    "postProcessBindingDigest"
+                ),
+                source_digest=metrics.get("sourceDigest"),
+                compiled_binary_sha256=metrics.get("compiledBinarySha256"),
+            )
+        )
+
+    settings = by_id.get(str(metrics.get("settingsScreenshotFileId") or ""))
+    input_preset_screenshot = by_id.get(
+        str(metrics.get("inputPresetScreenshotFileId") or "")
+    )
+    input_preset_set = by_id.get(str(metrics.get("inputPresetSetFileId") or ""))
+    input_readback_set = by_id.get(str(metrics.get("inputReadbackSetFileId") or ""))
+    result = by_id.get(str(metrics.get("resultScreenshotFileId") or ""))
+    report_proof = by_id.get(str(metrics.get("reportScreenshotFileId") or ""))
+    tester_report = by_id.get(str(metrics.get("testerReportFileId") or ""))
+    settings_payload = _ea_factory_visible_artifact_payload(build, settings)
+    input_preset_screenshot_payload = _ea_factory_visible_artifact_payload(
+        build,
+        input_preset_screenshot,
+    )
+    input_preset_set_payload = _ea_factory_visible_artifact_payload(
+        build,
+        input_preset_set,
+        maximum_bytes=1024 * 1024,
+    )
+    input_readback_set_payload = _ea_factory_visible_artifact_payload(
+        build,
+        input_readback_set,
+        maximum_bytes=1024 * 1024,
+    )
+    result_payload = _ea_factory_visible_artifact_payload(build, result)
+    report_proof_payload = _ea_factory_visible_artifact_payload(build, report_proof)
+    tester_report_payload = _ea_factory_visible_artifact_payload(
+        build,
+        tester_report,
+        maximum_bytes=8 * 1024 * 1024,
+    )
+    resolved_settings = (
+        metrics.get("resolvedTesterSettings")
+        if isinstance(metrics.get("resolvedTesterSettings"), dict)
+        else {}
+    )
+    resolved_settings_digest = payload_digest(
+        "ea-factory-resolved-tester-settings-v1",
+        resolved_settings,
+    )
+    try:
+        expected_tester_settings = _ea_factory_default_tester_settings(build)
+        expected_tester_request_digest = payload_digest(
+            "ea-factory-tester-settings-request-v1",
+            expected_tester_settings,
+        )
+    except (RequestError, DataIntegrityError):
+        return False
+    expected_input_preset = expected_tester_settings.get("testerInputPreset")
+    resolved_input_preset = metrics.get("resolvedTesterInputPreset")
+    resolved_input_preset_digest = (
+        payload_digest(
+            EA_FACTORY_RESOLVED_TESTER_INPUT_PRESET_SCHEMA_VERSION,
+            resolved_input_preset,
+        )
+        if isinstance(resolved_input_preset, dict)
+        else None
+    )
+    expected_preset_set_payload = (
+        (
+            "\r\n".join(
+                f"{item['inputName']}={_ea_factory_input_value_token(item['testerValue'], item['inputType'])}"
+                for item in expected_input_preset.get("assumptions", [])
+            )
+            + "\r\n"
+        ).encode("ascii", errors="strict")
+        if isinstance(expected_input_preset, dict)
+        else None
+    )
+    readback_values = _ea_factory_tester_set_values(
+        input_readback_set_payload,
+        expected_input_preset,
+    )
+    input_preset_evidence_valid = bool(
+        (
+            isinstance(expected_input_preset, dict)
+            and isinstance(input_preset_screenshot, dict)
+            and input_preset_screenshot.get("stageId") == stage_id
+            and input_preset_screenshot.get("reportId") == report_id
+            and input_preset_screenshot.get("artifactKind") == "screenshot_evidence"
+            and input_preset_screenshot.get("extension") == ".png"
+            and input_preset_screenshot.get("sha256")
+            == metrics.get("inputPresetScreenshotSha256")
+            and str(input_preset_screenshot.get("fileId")) in stage_ids
+            and _ea_factory_visible_png_valid(input_preset_screenshot_payload)
+            and isinstance(input_preset_set, dict)
+            and input_preset_set.get("stageId") == stage_id
+            and input_preset_set.get("reportId") == report_id
+            and input_preset_set.get("artifactKind") == "set_file"
+            and input_preset_set.get("extension") == ".set"
+            and input_preset_set.get("sha256") == metrics.get("inputPresetSetSha256")
+            and str(input_preset_set.get("fileId")) in stage_ids
+            and input_preset_set_payload == expected_preset_set_payload
+            and isinstance(input_readback_set, dict)
+            and input_readback_set.get("stageId") == stage_id
+            and input_readback_set.get("reportId") == report_id
+            and input_readback_set.get("artifactKind") == "set_file"
+            and input_readback_set.get("extension") == ".set"
+            and input_readback_set.get("sha256")
+            == metrics.get("inputReadbackSetSha256")
+            and str(input_readback_set.get("fileId")) in stage_ids
+            and readback_values
+            == {
+                item["inputName"]: item["testerValue"]
+                for item in expected_input_preset.get("assumptions", [])
+            }
+            and metrics.get("testerInputPresetApplied") is True
+            and metrics.get("testerInputPresetReadbackVerified") is True
+            and metrics.get("testerInputPresetReportVerified") is True
+            and metrics.get("simulationAssumptionsExplicit") is True
+            and metrics.get("testerInputPresetDigest")
+            == expected_input_preset.get("presetDigest")
+            and _ea_factory_resolved_tester_input_preset_valid(
+                resolved_input_preset,
+                preset=expected_input_preset,
+            )
+            and metrics.get("resolvedTesterInputPresetDigest")
+            == resolved_input_preset_digest
+        )
+        if isinstance(expected_input_preset, dict)
+        else (
+            input_preset_screenshot is None
+            and input_preset_set is None
+            and input_readback_set is None
+            and resolved_input_preset is None
+            and metrics.get("testerInputPresetApplied") not in {True}
+            and metrics.get("testerInputPresetReadbackVerified") not in {True}
+            and metrics.get("testerInputPresetReportVerified") not in {True}
+            and metrics.get("simulationAssumptionsExplicit") not in {True}
+        )
+    )
+    trade_count = metrics.get("tradeCount")
+    buy_trade_count = metrics.get("buyTradeCount")
+    sell_trade_count = metrics.get("sellTradeCount")
+    trade_row_count = metrics.get("tradeRowCount")
+    zero_trade = bool(
+        isinstance(trade_count, int)
+        and not isinstance(trade_count, bool)
+        and trade_count == 0
+    )
+    mismatched_chart_errors = metrics.get("mismatchedChartErrors")
+    expected_attention = (
+        _ea_factory_backtest_attention_fields(zero_trade, mismatched_chart_errors)
+        if isinstance(mismatched_chart_errors, int)
+        and not isinstance(mismatched_chart_errors, bool)
+        and mismatched_chart_errors >= 0
+        else None
+    )
+    expected_logic_recheck = _ea_factory_logic_recheck_projection(build, metrics)
+    return bool(
+        isinstance(settings, dict)
+        and settings.get("stageId") == stage_id
+        and settings.get("reportId") == report_id
+        and settings.get("artifactKind") == "screenshot_evidence"
+        and settings.get("extension") == ".png"
+        and settings.get("sha256") == metrics.get("settingsScreenshotSha256")
+        and _ea_factory_visible_png_valid(settings_payload)
+        and isinstance(result, dict)
+        and result.get("stageId") == stage_id
+        and result.get("reportId") == report_id
+        and result.get("artifactKind") == "screenshot_evidence"
+        and result.get("extension") == ".png"
+        and result.get("sha256") == metrics.get("resultScreenshotSha256")
+        and _ea_factory_visible_png_valid(result_payload)
+        and isinstance(report_proof, dict)
+        and report_proof.get("stageId") == stage_id
+        and report_proof.get("reportId") == report_id
+        and report_proof.get("artifactKind") == "screenshot_evidence"
+        and report_proof.get("extension") == ".png"
+        and report_proof.get("sha256") == metrics.get("reportScreenshotSha256")
+        and _ea_factory_visible_png_valid(report_proof_payload)
+        and isinstance(tester_report, dict)
+        and tester_report.get("stageId") == stage_id
+        and tester_report.get("reportId") == report_id
+        and tester_report.get("artifactKind") == "backtest_evidence"
+        and tester_report.get("extension") in {".htm", ".html"}
+        and tester_report.get("sha256") == metrics.get("testerReportSha256")
+        and metrics.get("expertFileName") == compiled.get("fileName")
+        and _ea_factory_resolved_tester_settings_valid(
+            resolved_settings,
+            expert_file_name=compiled.get("fileName"),
+        )
+        and metrics.get("resolvedTesterSettingsDigest")
+        == resolved_settings_digest
+        and metrics.get("testerSettingsRequestDigest")
+        == stage.get("testerSettingsRequestDigest")
+        and stage.get("testerSettingsRequestDigest")
+        == expected_tester_request_digest
+        and input_preset_evidence_valid
+        and metrics.get("visibleStrategyTester") is True
+        and metrics.get("visualMode") is True
+        and metrics.get("optimizationEnabled") is False
+        and metrics.get("backtestVerified") is True
+        and (
+            metrics.get("backtestExecuted") is True
+            or metrics.get("recoveredExistingReceipt") is True
+        )
+        and metrics.get("testerTradeRowsVerified") is True
+        and metrics.get("staticTenColumnSourceContractVerified") is True
+        and metrics.get("staticSixGroupSourceContractVerified") is True
+        and metrics.get("logicRecheckVerified") is True
+        and metrics.get("fullDynamicSixGroupVerified") is False
+        and all(
+            metrics.get(key) == value
+            for key, value in expected_logic_recheck.items()
+        )
+        and metrics.get("zeroTrade") is zero_trade
+        and expected_attention is not None
+        and all(
+            metrics.get(key) == value
+            for key, value in expected_attention.items()
+        )
+        and isinstance(trade_count, int)
+        and not isinstance(trade_count, bool)
+        and trade_count >= 0
+        and isinstance(buy_trade_count, int)
+        and not isinstance(buy_trade_count, bool)
+        and isinstance(sell_trade_count, int)
+        and not isinstance(sell_trade_count, bool)
+        and buy_trade_count >= 0
+        and sell_trade_count >= 0
+        and buy_trade_count + sell_trade_count == trade_count
+        and isinstance(trade_row_count, int)
+        and not isinstance(trade_row_count, bool)
+        and trade_row_count >= 0
+        and trade_row_count == trade_count
+        and _ea_factory_tester_report_matches(
+            tester_report_payload,
+            resolved_settings,
+            trade_count=trade_count,
+            buy_trade_count=buy_trade_count,
+            sell_trade_count=sell_trade_count,
+            mismatched_chart_errors=mismatched_chart_errors,
+            tester_input_preset=expected_input_preset,
+        )
+        and _ea_factory_visible_receipt_valid(
+            receipt_payload,
+            stage_id=stage_id,
+            operation_id=operation_id,
+            terminal_candidate_id=binding.get("candidateId"),
+            process_binding_digest=metrics.get("processBindingDigest"),
+            post_process_binding_digest=metrics.get("postProcessBindingDigest"),
+            source_digest=metrics.get("sourceDigest"),
+            compiled_binary_sha256=metrics.get("compiledBinarySha256"),
+            resolved_tester_settings_digest=resolved_settings_digest,
+            tester_input_preset_digest=(
+                expected_input_preset.get("presetDigest")
+                if isinstance(expected_input_preset, dict)
+                else None
+            ),
+            resolved_tester_input_preset_digest=resolved_input_preset_digest,
+            tester_input_preset_screenshot_sha256=metrics.get(
+                "inputPresetScreenshotSha256"
+            ),
+            tester_input_preset_set_sha256=metrics.get("inputPresetSetSha256"),
+            tester_input_readback_set_sha256=metrics.get(
+                "inputReadbackSetSha256"
+            ),
+            tester_input_preset_report_verified=(
+                True if isinstance(expected_input_preset, dict) else False
+            ),
+            tester_report_screenshot_sha256=metrics.get(
+                "reportScreenshotSha256"
+            ),
+            trade_count=trade_count,
+            trade_row_count=trade_row_count,
+            buy_trade_count=buy_trade_count,
+            sell_trade_count=sell_trade_count,
+            zero_trade=zero_trade,
+            mismatched_chart_errors=mismatched_chart_errors,
+            history_quality_issue=expected_attention.get("historyQualityIssue"),
+            history_quality_verified=expected_attention.get("historyQualityVerified"),
+            attention_required=expected_attention.get("attentionRequired"),
+            attention_reason_code=expected_attention.get("attentionReasonCode"),
+            execution_outcome=expected_attention.get("executionOutcome"),
+            performance_evaluation_available=expected_attention.get(
+                "performanceEvaluationAvailable"
+            ),
+        )
+    )
+
+
+def _ea_factory_stable_executable_sha256(path: Path) -> str:
+    try:
+        if _ea_factory_path_is_link_or_reparse(path) or not path.is_file():
+            raise OSError("not a stable executable")
+        before = path.stat(follow_symlinks=False)
+        digest = _ea_factory_file_sha256(path)
+        after = path.stat(follow_symlinks=False)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise RequestError(
+            "Selected terminal executable changed or is unavailable.",
+            409,
+        ) from error
+    if (
+        before.st_size <= 0
+        or after.st_size != before.st_size
+        or after.st_mtime_ns != before.st_mtime_ns
+        or getattr(after, "st_ino", None) != getattr(before, "st_ino", None)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+    ):
+        raise RequestError(
+            "Selected terminal executable changed during verification.",
+            409,
+        )
+    return digest
+
+
+def _ea_factory_resolved_front_office_target(
+    build: dict,
+    stage_id: str,
+) -> dict:
+    platform = str(build.get("platform") or "")
+    try:
+        context, target = _ea_factory_metaeditor_target_context(platform)
+    except MetaEditorCompileError as error:
+        raise RequestError(
+            "Selected MetaTrader terminal is not available for visible execution.",
+            409,
+        ) from error
+    record = context.get("record") if isinstance(context, dict) else None
+    run = build.get("oneClickRun") if isinstance(build.get("oneClickRun"), dict) else {}
+    binding = run.get("terminalBinding") if isinstance(run.get("terminalBinding"), dict) else {}
+    if (
+        not isinstance(record, dict)
+        or target.get("candidateId") != binding.get("candidateId")
+        or target.get("selectionRevision") != binding.get("selectionRevision")
+        or target.get("bindingDigest") != binding.get("bindingDigest")
+    ):
+        raise RequestError("Selected terminal binding changed before visible execution.", 409)
+    install_path = Path(str(target.get("installPath") or ""))
+    compiler_path = Path(str(target.get("compilerPath") or ""))
+    terminal_name = "terminal.exe" if platform == "mt4" else "terminal64.exe"
+    terminal_path = install_path / terminal_name
+    raw_data_path = str(record.get("dataPath") or record.get("localPath") or "")
+    data_path = Path(raw_data_path)
+    try:
+        resolved_paths = {
+            "terminalPath": terminal_path.resolve(strict=True),
+            "compilerPath": compiler_path.resolve(strict=True),
+            "installPath": install_path.resolve(strict=True),
+            "dataPath": data_path.resolve(strict=True),
+        }
+    except (OSError, RuntimeError, ValueError) as error:
+        raise RequestError("Selected terminal paths are unavailable.", 409) from error
+    if (
+        any(not path.is_absolute() for path in resolved_paths.values())
+        or any(_ea_factory_path_is_link_or_reparse(path) for path in resolved_paths.values())
+        or resolved_paths["terminalPath"].parent != resolved_paths["installPath"]
+        or resolved_paths["compilerPath"].parent != resolved_paths["installPath"]
+    ):
+        raise RequestError("Selected terminal paths failed safety validation.", 409)
+    terminal_sha = _ea_factory_stable_executable_sha256(
+        resolved_paths["terminalPath"]
+    )
+    compiler_sha = _ea_factory_stable_executable_sha256(
+        resolved_paths["compilerPath"]
+    )
+    return {
+        "terminalPath": str(resolved_paths["terminalPath"]),
+        "compilerPath": str(resolved_paths["compilerPath"]),
+        "installPath": str(resolved_paths["installPath"]),
+        "dataPath": str(resolved_paths["dataPath"]),
+        "terminalExecutableSha256": terminal_sha,
+        "frontOfficeExecutableSha256": (
+            compiler_sha if stage_id == "compile_validate" else terminal_sha
+        ),
+    }
+
+
+def _ea_factory_backtest_binary(build: dict) -> dict:
+    suffix = ".ex4" if build.get("platform") == "mt4" else ".ex5"
+    candidates = [
+        item
+        for item in _ea_factory_revalidated_artifact_manifest(build)
+        if item.get("stageId") == "compile_validate"
+        and item.get("artifactKind") == "compile_evidence"
+        and item.get("extension") == suffix
+    ]
+    if len(candidates) != 1:
+        raise RequestError(
+            "Visible backtest requires exactly one verified compiled EA binary.",
+            409,
+        )
+    return copy.deepcopy(candidates[0])
+
+
+def _ea_factory_default_tester_settings(build: dict) -> dict:
+    binary = _ea_factory_backtest_binary(build)
+    # The compact Strategy Brief intentionally does not lock a market or
+    # timeframe.  The adapter resolves the currently selected tester symbol,
+    # but every other safety-critical switch is backend-owned and versioned.
+    settings = {
+        "schemaVersion": EA_FACTORY_TESTER_SETTINGS_SCHEMA_VERSION,
+        "expertFileName": binary.get("fileName"),
+        "symbolPolicy": "current_tester_selection_required",
+        "period": "H1",
+        "model": "every_tick",
+        "spreadPolicy": "current",
+        "useDate": False,
+        "fromDate": None,
+        "toDate": None,
+        "depositPolicy": "current_tester_deposit",
+        "visualMode": True,
+        "optimizationEnabled": False,
+        "shutdownTerminalAfterTest": False,
+        "liveTradingAllowed": False,
+    }
+    preset = _ea_factory_mt4_tester_input_preset(build)
+    if preset is not None:
+        settings["testerInputPreset"] = preset
+    return settings
+
+
+def _ea_factory_mask_mql_comments_and_strings(source_text: str) -> str | None:
+    output = list(source_text)
+    state = "code"
+    index = 0
+    while index < len(source_text):
+        current = source_text[index]
+        following = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "code":
+            if current == "/" and following == "/":
+                output[index] = output[index + 1] = " "
+                index += 2
+                state = "line_comment"
+                continue
+            if current == "/" and following == "*":
+                output[index] = output[index + 1] = " "
+                index += 2
+                state = "block_comment"
+                continue
+            if current == '"':
+                output[index] = " "
+                index += 1
+                state = "string"
+                continue
+        elif state == "line_comment":
+            if current in "\r\n":
+                state = "code"
+            else:
+                output[index] = " "
+            index += 1
+            continue
+        elif state == "block_comment":
+            if current == "*" and following == "/":
+                output[index] = output[index + 1] = " "
+                index += 2
+                state = "code"
+                continue
+            if current not in "\r\n":
+                output[index] = " "
+            index += 1
+            continue
+        elif state == "string":
+            output[index] = current if current in "\r\n" else " "
+            if current == "\\" and index + 1 < len(source_text):
+                if source_text[index + 1] not in "\r\n":
+                    output[index + 1] = " "
+                index += 2
+                continue
+            if current == '"':
+                state = "code"
+            elif current in "\r\n":
+                return None
+            index += 1
+            continue
+        index += 1
+    return "".join(output) if state in {"code", "line_comment"} else None
+
+
+def _ea_factory_brace_depth_at(code: str, position: int) -> int:
+    depth = 0
+    for character in code[:position]:
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth < 0:
+                return -1
+    return depth
+
+
+def _ea_factory_guarded_tester_simulation(code: str, input_name: str) -> bool:
+    if (
+        EA_FACTORY_MT4_TESTER_SIMULATION_NAME_PATTERN.search(input_name) is None
+        or EA_FACTORY_MT4_TESTER_SIMULATION_FORBIDDEN_NAME_PATTERN.search(input_name)
+        is not None
+    ):
+        return False
+    name = re.escape(input_name)
+    return re.search(
+        rf"(?mi)^[ \t]*if[ \t]*\([ \t]*(?:![ \t]*{name}\b|"
+        rf"{name}\b[ \t]*==[ \t]*false\b|false\b[ \t]*==[ \t]*{name}\b)"
+        r"[ \t]*\)[ \t]*(?:\{[ \t]*)?return[ \t]*;",
+        code,
+    ) is not None
+
+
+def _ea_factory_tester_simulation_input_names(assumptions: list[dict]) -> list[str]:
+    return [
+        str(item["inputName"])
+        for item in assumptions
+        if item.get("testerValue") != item.get("sourceDefault")
+    ]
+
+
+def _ea_factory_mt4_source_input_snapshot(source_text: str) -> list[dict] | None:
+    """Return all exact scalar defaults; ``None`` means unsafe/unsupported."""
+
+    if not isinstance(source_text, str) or not source_text.strip():
+        return None
+    code = _ea_factory_mask_mql_comments_and_strings(source_text)
+    if code is None:
+        return None
+    input_tokens = list(re.finditer(r"(?i)\b(?:input|extern|sinput)\b", code))
+    if len(input_tokens) > EA_FACTORY_MT4_TESTER_INPUT_MAX_COUNT:
+        return None
+    declarations: list[tuple[str, str, str]] = []
+    seen_lines: set[int] = set()
+    for token_match in input_tokens:
+        line_start = code.rfind("\n", 0, token_match.start()) + 1
+        line_end = code.find("\n", token_match.end())
+        if line_end < 0:
+            line_end = len(code)
+        if line_start in seen_lines:
+            return None
+        seen_lines.add(line_start)
+        line = code[line_start:line_end].rstrip("\r")
+        declaration = re.fullmatch(
+            r"[ \t]*(input|extern)[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
+            r"[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*"
+            r"([^;\r\n]+?)[ \t]*;[ \t]*",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if declaration is None or _ea_factory_brace_depth_at(code, line_start) != 0:
+            return None
+        kind = declaration.group(2).lower()
+        if kind not in EA_FACTORY_MT4_TESTER_INPUT_TYPES:
+            return None
+        declarations.append((kind, declaration.group(3), declaration.group(4).strip()))
+    folded_names = [name.casefold() for _kind, name, _literal in declarations]
+    if len(folded_names) != len(set(folded_names)):
+        return None
+    snapshot: list[dict] = []
+    for kind, name, literal in declarations:
+        source_default = _ea_factory_parse_input_token(literal, kind)
+        if source_default is None:
+            return None
+        simulation = bool(
+            kind == "bool"
+            and source_default is False
+            and _ea_factory_guarded_tester_simulation(code, name)
+        )
+        snapshot.append({
+            "inputName": name,
+            "inputType": kind,
+            "sourceDefault": source_default,
+            "testerValue": True if simulation else source_default,
+            "reasonCode": (
+                "simulate_external_fundamental_confirmation_for_historical_test_only"
+                if name == "FundamentalCriteriaConfirmed"
+                else "simulate_external_benchmark_uptrend_for_historical_test_only"
+                if name == "ExternalBenchmarkUptrendConfirmed"
+                else "simulate_external_manual_confirmation_for_historical_test_only"
+                if simulation
+                else "reset_to_certified_source_default_to_prevent_stale_tester_state"
+            ),
+        })
+    return snapshot
+
+
+def _ea_factory_can_slim_certified_input_snapshot(source_text: str) -> list[dict] | None:
+    """Compatibility attestation for the existing certified CAN SLIM profile."""
+
+    if re.search(
+        r'(?m)^\s*const\s+string\s+CERTIFIED_PROFILE_VERSION\s*=\s*'
+        r'"can-slim-mt4-certified-v3"\s*;\s*$',
+        source_text,
+    ) is None:
+        return None
+    snapshot = _ea_factory_mt4_source_input_snapshot(source_text)
+    if snapshot is None or [
+        (item["inputName"], item["inputType"]) for item in snapshot
+    ] != list(EA_FACTORY_CAN_SLIM_CERTIFIED_INPUT_LAYOUT):
+        return None
+    if any(
+        item["sourceDefault"] != EA_FACTORY_CAN_SLIM_FIXED_SOURCE_DEFAULTS[item["inputName"]]
+        for item in snapshot
+        if item["inputName"] in EA_FACTORY_CAN_SLIM_FIXED_SOURCE_DEFAULTS
+    ):
+        return None
+    if _ea_factory_tester_simulation_input_names(snapshot) != list(
+        EA_FACTORY_CAN_SLIM_SIMULATION_INPUT_NAMES
+    ):
+        return None
+    return snapshot
+
+
+def _ea_factory_mt4_tester_input_preset(build: dict) -> dict | None:
+    """Create a digest-bound full Input reset for every current MT4 EA."""
+
+    if (
+        str(build.get("platform") or "") != "mt4"
+        or _ea_factory_program_kind(build.get("artifactKind")) != "expert_advisor"
+    ):
+        return None
+    versions = build.get("versions") if isinstance(build.get("versions"), list) else []
+    if not versions or not isinstance(versions[-1], dict):
+        return None
+    version = versions[-1]
+    source_digest = str(version.get("sourceDigest") or "").strip().lower()
+    version_ref = Path(str(version.get("versionFile") or ""))
+    build_dir = _ea_factory_build_directory(build.get("id"))
+    versions_dir = (
+        _ea_factory_managed_folder(build_dir, "EA_Versions")
+        if build_dir is not None
+        else None
+    )
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", source_digest) is None
+        or len(version_ref.parts) != 2
+        or version_ref.parts[0] != "EA_Versions"
+        or version_ref.suffix.lower() != ".mq4"
+        or versions_dir is None
+    ):
+        raise RequestError("MT4 Tester Input source contract is unavailable.", 409)
+    stable = _ea_factory_read_stable_file(
+        versions_dir / version_ref.name,
+        maximum_bytes=4 * 1024 * 1024,
+    )
+    if stable is None or stable[1] != source_digest:
+        raise RequestError("MT4 Tester Input source digest is invalid.", 409)
+    try:
+        source_text = stable[0].decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise RequestError("MT4 Tester Input source encoding is invalid.", 409) from error
+    assumptions = _ea_factory_mt4_source_input_snapshot(source_text)
+    if assumptions is None:
+        raise RequestError(
+            "MT4 Tester Inputs must use top-level single-line literal bool, int, or double declarations.",
+            409,
+        )
+    if not assumptions:
+        return None
+    unsigned = {
+        "schemaVersion": EA_FACTORY_TESTER_INPUT_PRESET_SCHEMA_VERSION,
+        "mode": "full_certified_input_snapshot_with_explicit_simulation_assumptions",
+        "scope": "mt4_strategy_tester_only",
+        "sourceDigest": source_digest,
+        "assumptions": assumptions,
+        "liveSourceDefaultsPreserved": True,
+        "visibleExpertPropertiesRequired": True,
+        "readbackRequired": True,
+        "liveTradingAllowed": False,
+        "fullCertifiedInputSnapshot": True,
+        "simulationInputNames": _ea_factory_tester_simulation_input_names(assumptions),
+    }
+    return {
+        **unsigned,
+        "presetDigest": _ea_factory_canonical_json_sha256(unsigned),
+    }
+
+
+def _ea_factory_can_slim_tester_input_preset(build: dict) -> dict | None:
+    """Compatibility helper retained for certified-profile regression tests."""
+
+    try:
+        preset = _ea_factory_mt4_tester_input_preset(build)
+    except RequestError:
+        return None
+    if preset is None:
+        return None
+    versions = build.get("versions") if isinstance(build.get("versions"), list) else []
+    build_dir = _ea_factory_build_directory(build.get("id"))
+    if not versions or not isinstance(versions[-1], dict) or build_dir is None:
+        return None
+    version_ref = Path(str(versions[-1].get("versionFile") or ""))
+    versions_dir = _ea_factory_managed_folder(build_dir, "EA_Versions")
+    stable = (
+        _ea_factory_read_stable_file(
+            versions_dir / version_ref.name,
+            maximum_bytes=4 * 1024 * 1024,
+        )
+        if versions_dir is not None
+        else None
+    )
+    if stable is None:
+        return None
+    try:
+        source_text = stable[0].decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    return (
+        preset
+        if _ea_factory_can_slim_certified_input_snapshot(source_text) is not None
+        else None
+    )
+
+
+def _ea_factory_prepare_visible_front_office_request(
+    build: dict,
+    stage: dict,
+) -> dict:
+    stage_id = str(stage.get("id") or "")
+    if (
+        stage_id not in EA_FACTORY_VISIBLE_ACTION_STAGES
+        or not callable(EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER)
+        or not callable(_ea_factory_visible_handler(stage_id))
+        or not _ea_factory_one_click_terminal_binding_current(build)
+    ):
+        raise RequestError(
+            "Visible MetaEditor/Strategy Tester adapter is not ready for the exact selected terminal.",
+            409,
+        )
+    run = build.get("oneClickRun") if isinstance(build.get("oneClickRun"), dict) else {}
+    binding = run.get("terminalBinding") if isinstance(run.get("terminalBinding"), dict) else {}
+    visible_action = (
+        run.get("visibleAction") if isinstance(run.get("visibleAction"), dict) else {}
+    )
+    operation_id = _ea_factory_one_click_visible_operation_id(build, run, stage_id)
+    if (
+        visible_action.get("stageId") != stage_id
+        or visible_action.get("operationId") != operation_id
+        or visible_action.get("state") != "reserved"
+        or visible_action.get("requiresExplicitResume") is not False
+    ):
+        raise RequestError(
+            "Visible front-office action has no durable reservation.",
+            409,
+        )
+    build_dir = _ea_factory_build_directory(build.get("id"))
+    if build_dir is None:
+        raise RequestError("EA Factory visible workspace is unavailable.", 409)
+    identity_suffix = payload_digest(
+        "ea-factory-visible-front-office-stage-v1",
+        safe_reference(build.get("id")),
+        stage_id,
+        operation_id,
+    )[:24]
+    resolved_target = _ea_factory_resolved_front_office_target(build, stage_id)
+    tester_settings = (
+        _ea_factory_default_tester_settings(build)
+        if stage_id == "backtest_recheck"
+        else None
+    )
+    return {
+        "schemaVersion": "ea-factory-visible-front-office-request-v1",
+        "buildId": safe_reference(build.get("id")),
+        "stageId": stage_id,
+        "platform": str(build.get("platform") or ""),
+        "artifactKind": _ea_factory_program_kind(build.get("artifactKind")),
+        "workspaceRoot": str(build_dir),
+        "versions": [
+            {
+                "version": item.get("version"),
+                "fileName": item.get("fileName"),
+                "sourceFile": item.get("sourceFile"),
+                "versionFile": item.get("versionFile"),
+                "sourceDigest": item.get("sourceDigest"),
+            }
+            for item in (
+                build.get("versions") if isinstance(build.get("versions"), list) else []
+            )
+            if isinstance(item, dict)
+        ],
+        "terminalBinding": copy.deepcopy(binding),
+        "resolvedTarget": resolved_target,
+        "visibleOperation": copy.deepcopy(visible_action),
+        "testerSettings": tester_settings,
+        "missionId": f"mission-eaf-{identity_suffix}",
+        "reportId": f"report-eaf-{identity_suffix}",
+        "safety": {
+            "liveTradingAllowed": False,
+            "autoTradingMayBeToggled": False,
+            "chartAttachmentAllowed": False,
+            "terminalShutdownAllowed": False,
+            "visualModeRequired": stage_id == "backtest_recheck",
+            "optimizationAllowed": False,
+        },
+    }
+
+
+def _ea_factory_invoke_visible_front_office_handler(request: dict) -> dict:
+    """Probe and run one visible action without allowing UI interleaving."""
+
+    if not EA_FACTORY_VISIBLE_FRONT_OFFICE_ACTION_LOCK.acquire(blocking=False):
+        raise RequestError(
+            "Visible MetaEditor/Strategy Tester is busy with another EA build.",
+            409,
+        )
+    try:
+        return _ea_factory_invoke_visible_front_office_handler_unlocked(request)
+    finally:
+        EA_FACTORY_VISIBLE_FRONT_OFFICE_ACTION_LOCK.release()
+
+
+def _ea_factory_invoke_visible_front_office_handler_unlocked(request: dict) -> dict:
+    """Run the injected UI adapter without holding ``EA_FACTORY_LOCK``."""
+
+    stage_id = str(request.get("stageId") or "")
+    handler = _ea_factory_visible_handler(stage_id)
+    provider = EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER
+    if not callable(handler) or not callable(provider):
+        raise RequestError("Visible front-office adapter is not connected.", 409)
+    try:
+        capability = provider(
+            platform=request.get("platform"),
+            stage_id=stage_id,
+            terminal_binding=copy.deepcopy(request.get("terminalBinding") or {}),
+            visible_operation=copy.deepcopy(request.get("visibleOperation") or {}),
+            resolved_target=copy.deepcopy(request.get("resolvedTarget") or {}),
+            tester_settings=copy.deepcopy(request.get("testerSettings")),
+        )
+    except Exception as error:
+        raise RequestError(
+            "Visible front-office capability probe failed.",
+            503,
+        ) from error
+    if not _ea_factory_front_office_capability_ready(capability, stage_id):
+        raise RequestError(
+            "Visible front-office adapter is not ready for this terminal stage.",
+            409,
+        )
+    invocation_request = copy.deepcopy(request)
+    invocation_request["capabilityCheckedAt"] = utc_now()
+    try:
+        raw = handler(request=invocation_request)
+    except VisibleTerminalAdapterError as error:
+        raise RequestError(
+            "Visible front-office adapter failed without verified evidence.",
+            503,
+            code=error.code,
+            retryable=error.retryable,
+        ) from error
+    except Exception as error:
+        raise RequestError("Visible front-office adapter failed without verified evidence.", 503) from error
+    try:
+        encoded = json.dumps(
+            raw,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError) as error:
+        raise RequestError(
+            "Visible front-office adapter returned non-JSON evidence.",
+            503,
+        ) from error
+    specifications = (
+        raw.get("artifactSpecifications") if isinstance(raw, dict) else None
+    )
+    alias_policy = EA_FACTORY_VISIBLE_ARTIFACT_ALIASES.get(stage_id) or {}
+    aliases = [
+        str(item.get("alias") or "")
+        for item in specifications
+        if isinstance(specifications, list) and isinstance(item, dict)
+    ]
+    forbidden_metric_keys = {
+        "absolutepath",
+        "terminalpath",
+        "compilerpath",
+        "installpath",
+        "datapath",
+        "accountnumber",
+        "brokerserver",
+        "accesstoken",
+        "refreshtoken",
+        "authorization",
+        "cookie",
+    }
+    allowed_process_identity_keys = {
+        "processid",
+        "terminalprocessid",
+        "terminalwindowownerprocessid",
+        "frontofficeprocessid",
+        "frontofficewindowownerprocessid",
+    }
+
+    def metrics_contain_potential_secret(value: object, depth: int = 0) -> bool:
+        """Permit only the numeric process identities required for evidence.
+
+        The generic JSON secret scanner deliberately treats every ``*ProcessId``
+        field as sensitive.  Visible-terminal evidence must retain those exact
+        PIDs until the private Report validator binds the screenshot and receipt
+        to the real MetaEditor/terminal windows.  They are stripped by the
+        public Report read model, so accept only positive integers under the
+        five contract-owned identity keys while keeping every credential/path
+        guard fail-closed.
+        """
+
+        if depth > 8:
+            return False
+        if isinstance(value, str):
+            return contains_potential_secret(value)
+        if isinstance(value, list):
+            return any(
+                metrics_contain_potential_secret(item, depth + 1)
+                for item in value[:500]
+            )
+        if isinstance(value, dict):
+            for key, item in list(value.items())[:500]:
+                compact = re.sub(r"[^a-z0-9]", "", str(key or "").lower())
+                if is_sensitive_field_name(key) and item is not None:
+                    if (
+                        compact not in allowed_process_identity_keys
+                        or isinstance(item, bool)
+                        or not isinstance(item, int)
+                        or item <= 0
+                    ):
+                        return True
+                if metrics_contain_potential_secret(item, depth + 1):
+                    return True
+        return False
+
+    def has_forbidden_metric_key(value: object) -> bool:
+        if isinstance(value, dict):
+            return any(
+                re.sub(r"[^a-z0-9]", "", str(key).casefold())
+                in forbidden_metric_keys
+                or has_forbidden_metric_key(item)
+                for key, item in value.items()
+            )
+        if isinstance(value, list):
+            return any(has_forbidden_metric_key(item) for item in value)
+        return False
+
+    if (
+        not isinstance(raw, dict)
+        or set(raw)
+        != {
+            "schemaVersion",
+            "operationId",
+            "metrics",
+            "artifactSpecifications",
+        }
+        or raw.get("schemaVersion") != EA_FACTORY_VISIBLE_RESULT_SCHEMA_VERSION
+        or raw.get("operationId")
+        != (request.get("visibleOperation") or {}).get("operationId")
+        or not isinstance(raw.get("metrics"), dict)
+        or metrics_contain_potential_secret(raw.get("metrics"))
+        or has_forbidden_metric_key(raw.get("metrics"))
+        or len(encoded) > EA_FACTORY_VISIBLE_RESULT_MAX_BYTES
+        or not isinstance(specifications, list)
+        or not specifications
+        or len(specifications) > 8
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"alias", "relativePath", "artifactKind"}
+            for item in specifications
+        )
+        or len(aliases) != len(set(aliases))
+        or not set(alias_policy.get("required") or set()).issubset(aliases)
+        or not set(aliases).issubset(alias_policy.get("allowed") or set())
+        or any(
+            contains_potential_secret(str(item.get("relativePath") or ""))
+            for item in specifications
+        )
+    ):
+        raise RequestError(
+            "Visible front-office adapter returned an invalid result envelope.",
+            503,
+            code="visible_result_envelope_invalid",
+        )
+    expected_suffix = ".ex4" if request.get("platform") == "mt4" else ".ex5"
+    expected_shapes = {
+        "compiled_binary": ("compile_evidence", {expected_suffix}),
+        "visible_window": ("screenshot_evidence", {".png"}),
+        "compile_log": ("compile_evidence", {".txt"}),
+        "tester_settings": ("screenshot_evidence", {".png"}),
+        "tester_input_preset": ("screenshot_evidence", {".png"}),
+        "tester_input_preset_set": ("set_file", {".set"}),
+        "tester_input_readback_set": ("set_file", {".set"}),
+        "tester_result": ("screenshot_evidence", {".png"}),
+        "tester_report_proof": ("screenshot_evidence", {".png"}),
+        "tester_report": ("backtest_evidence", {".htm", ".html"}),
+        "adapter_receipt": (
+            "compile_evidence" if stage_id == "compile_validate" else "backtest_evidence",
+            {".json"},
+        ),
+    }
+    if any(
+        item.get("artifactKind") != expected_shapes[item["alias"]][0]
+        or Path(str(item.get("relativePath") or "")).suffix.lower()
+        not in expected_shapes[item["alias"]][1]
+        for item in specifications
+    ):
+        raise RequestError(
+            "Visible front-office artifact aliases do not match their required file types.",
+            503,
+            code="visible_artifact_alias_shape_invalid",
+        )
+    normalized = copy.deepcopy(raw)
+    normalized["backendInvocation"] = {
+        "capabilityCheckedAt": invocation_request["capabilityCheckedAt"],
+    }
+    return normalized
+
+
+def _ea_factory_logic_recheck_projection(
+    build: dict,
+    adapter_metrics: object,
+) -> dict:
+    """Project bounded static-source and tester-row evidence without overclaiming.
+
+    A Strategy Tester report can prove that rows were produced for the exact
+    compiled EA, but it cannot prove that every Entry, Recovery, Exit, Money
+    Management, Order Execution and Display branch fired dynamically.  The
+    six-group assertion below is therefore limited to the digest-bound static
+    source manifest.  Runtime evidence is a separate non-zero, internally
+    consistent trade-row observation, and the full-dynamic flag is always
+    false.
+    """
+
+    metrics = adapter_metrics if isinstance(adapter_metrics, dict) else {}
+    manifest = (
+        build.get("blueprintCoverageManifest")
+        if isinstance(build.get("blueprintCoverageManifest"), dict)
+        else {}
+    )
+    expected_manifest_keys = {
+        "schemaVersion",
+        "coverageMode",
+        "artifactKind",
+        "targetPlatform",
+        "strategyBriefDigest",
+        "strategySpecDigest",
+        "sourceDigest",
+        "checks",
+        "coveredFields",
+        "missingFields",
+        "findings",
+        "complete",
+        "manifestDigest",
+    }
+    checks = manifest.get("checks") if isinstance(manifest.get("checks"), dict) else {}
+    covered_fields = (
+        manifest.get("coveredFields")
+        if isinstance(manifest.get("coveredFields"), list)
+        else []
+    )
+    source_digest = str(metrics.get("sourceDigest") or "").strip().lower()
+    manifest_source_digest = str(manifest.get("sourceDigest") or "").strip().lower()
+    manifest_digest = str(manifest.get("manifestDigest") or "").strip().lower()
+    canonical_manifest = {
+        key: copy.deepcopy(value)
+        for key, value in manifest.items()
+        if key != "manifestDigest"
+    }
+    try:
+        expected_manifest_digest = hashlib.sha256(json.dumps(
+            canonical_manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+    except (TypeError, ValueError):
+        expected_manifest_digest = ""
+    manifest_valid = bool(
+        set(manifest) == expected_manifest_keys
+        and manifest.get("schemaVersion") == EA_SOURCE_MANIFEST_SCHEMA_VERSION
+        and manifest.get("coverageMode")
+        == "compact_brief_digest_bound_structural_ea_review"
+        and manifest.get("artifactKind") == "expert_advisor"
+        and manifest.get("targetPlatform") == build.get("platform")
+        and re.fullmatch(r"[0-9a-f]{64}", source_digest) is not None
+        and manifest_source_digest == source_digest
+        and re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(manifest.get("strategyBriefDigest") or ""),
+        )
+        is not None
+        and re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(manifest.get("strategySpecDigest") or ""),
+        )
+        is not None
+        and re.fullmatch(r"[0-9a-f]{64}", manifest_digest) is not None
+        and secrets.compare_digest(manifest_digest, expected_manifest_digest)
+        and manifest.get("complete") is True
+        and checks
+        and all(value is True for value in checks.values())
+        and covered_fields == list(COMPACT_SHEET_FIELDS)
+        and manifest.get("missingFields") == []
+        and manifest.get("findings") == []
+    )
+    ten_column_verified = manifest_valid
+    six_group_verified = bool(
+        manifest_valid
+        and all(field in covered_fields for field in EA_FACTORY_EXECUTION_GROUP_FIELDS)
+    )
+
+    def positive_or_zero_integer(value: object) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+    trade_row_count = metrics.get("tradeRowCount")
+    trade_count = metrics.get("tradeCount")
+    buy_trade_count = metrics.get("buyTradeCount")
+    sell_trade_count = metrics.get("sellTradeCount")
+    row_count_nonzero = bool(
+        positive_or_zero_integer(trade_row_count) and trade_row_count > 0
+    )
+    row_totals_match = bool(
+        positive_or_zero_integer(trade_row_count)
+        and positive_or_zero_integer(trade_count)
+        and trade_row_count == trade_count
+        and positive_or_zero_integer(buy_trade_count)
+        and positive_or_zero_integer(sell_trade_count)
+        and buy_trade_count + sell_trade_count == trade_count
+    )
+    tester_trade_rows_verified = bool(
+        metrics.get("testerTradeRowsVerified") is True
+        and row_totals_match
+    )
+    combined_verified = bool(
+        ten_column_verified
+        and six_group_verified
+        and tester_trade_rows_verified
+    )
+    logic_recheck = {
+        "schemaVersion": EA_FACTORY_LOGIC_RECHECK_SCHEMA_VERSION,
+        "scope": "static_source_contract_plus_tester_trade_rows",
+        "meaning": (
+            "digest_bound_static_10_column_and_6_group_source_contract_"
+            "plus_consistent_tester_trade_rows_zero_is_valid_execution"
+        ),
+        "verified": combined_verified,
+        "staticSourceContract": {
+            "manifestDigestVerified": manifest_valid,
+            "tenColumnCoverageVerified": ten_column_verified,
+            "sixExecutionGroupCoverageVerified": six_group_verified,
+            "coveredFields": list(covered_fields),
+            "executionGroupFields": list(EA_FACTORY_EXECUTION_GROUP_FIELDS),
+            "manifestDigest": manifest_digest or None,
+            "sourceDigest": source_digest or None,
+        },
+        "runtimeObservation": {
+            "scope": "tester_trade_rows_only_no_six_group_trigger_proof",
+            "testerTradeRowsVerified": tester_trade_rows_verified,
+            "tradeRowCount": trade_row_count,
+            "tradeCount": trade_count,
+            "buyTradeCount": buy_trade_count,
+            "sellTradeCount": sell_trade_count,
+            "observed": [
+                evidence
+                for evidence, present in (
+                    ("tester_trade_totals_consistent", row_totals_match),
+                    ("nonzero_trade_rows", row_count_nonzero),
+                    ("buy_sell_row_totals_match", row_totals_match),
+                )
+                if present
+            ],
+            "notDynamicallyProven": list(EA_FACTORY_EXECUTION_GROUP_FIELDS),
+        },
+        "fullDynamicSixGroupVerified": False,
+    }
+    logic_recheck_digest = payload_digest(
+        EA_FACTORY_LOGIC_RECHECK_SCHEMA_VERSION,
+        json.dumps(
+            logic_recheck,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+    return {
+        "staticTenColumnSourceContractVerified": ten_column_verified,
+        "staticSixGroupSourceContractVerified": six_group_verified,
+        "testerTradeRowsVerified": tester_trade_rows_verified,
+        "logicRecheck": logic_recheck,
+        "logicRecheckDigest": logic_recheck_digest,
+        # Compatibility name: this means only the documented static contract
+        # plus tester-row proof above, never six dynamically fired branches.
+        "logicRecheckVerified": combined_verified,
+        "fullDynamicSixGroupVerified": False,
+    }
+
+
+def _ea_factory_visible_result_metrics(
+    build: dict,
+    stage_id: str,
+    request: dict,
+    result: dict,
+    artifact_rows: list[dict],
+) -> dict:
+    specifications = result.get("artifactSpecifications") or []
+    if len(specifications) != len(artifact_rows):
+        raise DataIntegrityError(
+            "Visible front-office artifact registration did not preserve aliases."
+        )
+    by_alias = {
+        str(specification.get("alias")): row
+        for specification, row in zip(specifications, artifact_rows)
+    }
+    if len(by_alias) != len(artifact_rows):
+        raise DataIntegrityError("Visible front-office artifact aliases are ambiguous.")
+    run = build.get("oneClickRun") if isinstance(build.get("oneClickRun"), dict) else {}
+    binding = run.get("terminalBinding") if isinstance(run.get("terminalBinding"), dict) else {}
+    metrics = copy.deepcopy(result.get("metrics") or {})
+    process_binding = (
+        metrics.get("processBinding")
+        if isinstance(metrics.get("processBinding"), dict)
+        else {}
+    )
+    metrics.update({
+        "evidenceMode": EA_FACTORY_VISIBLE_EVIDENCE_MODE,
+        "operationId": (request.get("visibleOperation") or {}).get("operationId"),
+        "eaFactoryStage": stage_id,
+        "platform": build.get("platform"),
+        "artifactKind": _ea_factory_program_kind(build.get("artifactKind")),
+        "terminalCandidateId": binding.get("candidateId"),
+        "terminalSelectionRevision": binding.get("selectionRevision"),
+        "terminalBindingDigest": binding.get("bindingDigest"),
+        "processBindingDigest": process_binding.get("processBindingDigest"),
+        "postProcessBindingDigest": (
+            (metrics.get("postProcessBinding") or {}).get("processBindingDigest")
+            if isinstance(metrics.get("postProcessBinding"), dict)
+            else None
+        ),
+        "processId": process_binding.get("frontOfficeProcessId"),
+        "windowHandle": process_binding.get("frontOfficeWindowHandle"),
+        "capabilityCheckedAt": (
+            (result.get("backendInvocation") or {}).get("capabilityCheckedAt")
+            if isinstance(result.get("backendInvocation"), dict)
+            else None
+        ),
+        "evidenceArtifactIds": [
+            str(item.get("fileId")) for item in artifact_rows
+        ],
+        "stageArtifactManifestDigest": _ea_factory_visible_stage_manifest_digest(
+            artifact_rows
+        ),
+    })
+    receipt = by_alias.get("adapter_receipt")
+    metrics.update({
+        "adapterReceiptFileId": (receipt or {}).get("fileId"),
+        "adapterReceiptSha256": (receipt or {}).get("sha256"),
+    })
+    if stage_id == "compile_validate":
+        compiled = by_alias.get("compiled_binary")
+        screenshot = by_alias.get("visible_window")
+        compile_log = by_alias.get("compile_log")
+        metrics.update({
+            "compiledBinaryFileId": (compiled or {}).get("fileId"),
+            "compiledBinarySha256": (compiled or {}).get("sha256"),
+            "visibleWindowEvidenceFileId": (screenshot or {}).get("fileId"),
+            "visibleWindowEvidenceSha256": (screenshot or {}).get("sha256"),
+            "compileLogFileId": (compile_log or {}).get("fileId"),
+            "compileLogSha256": (compile_log or {}).get("sha256"),
+        })
+    else:
+        compiled = _ea_factory_backtest_binary(build)
+        settings = by_alias.get("tester_settings")
+        input_preset_screenshot = by_alias.get("tester_input_preset")
+        input_preset_set = by_alias.get("tester_input_preset_set")
+        input_readback_set = by_alias.get("tester_input_readback_set")
+        tester_result = by_alias.get("tester_result")
+        report_proof = by_alias.get("tester_report_proof")
+        tester_report = by_alias.get("tester_report")
+        resolved_settings = (
+            metrics.get("resolvedTesterSettings")
+            if isinstance(metrics.get("resolvedTesterSettings"), dict)
+            else None
+        )
+        metrics.update({
+            "compiledBinaryFileId": compiled.get("fileId"),
+            "compiledBinarySha256": compiled.get("sha256"),
+            "expertFileName": compiled.get("fileName"),
+            "visibleWindowEvidenceFileId": (tester_result or {}).get("fileId"),
+            "visibleWindowEvidenceSha256": (tester_result or {}).get("sha256"),
+            "settingsScreenshotFileId": (settings or {}).get("fileId"),
+            "settingsScreenshotSha256": (settings or {}).get("sha256"),
+            "inputPresetScreenshotFileId": (input_preset_screenshot or {}).get("fileId"),
+            "inputPresetScreenshotSha256": (input_preset_screenshot or {}).get("sha256"),
+            "inputPresetSetFileId": (input_preset_set or {}).get("fileId"),
+            "inputPresetSetSha256": (input_preset_set or {}).get("sha256"),
+            "inputReadbackSetFileId": (input_readback_set or {}).get("fileId"),
+            "inputReadbackSetSha256": (input_readback_set or {}).get("sha256"),
+            "resultScreenshotFileId": (tester_result or {}).get("fileId"),
+            "resultScreenshotSha256": (tester_result or {}).get("sha256"),
+            "reportScreenshotFileId": (report_proof or {}).get("fileId"),
+            "reportScreenshotSha256": (report_proof or {}).get("sha256"),
+            "testerReportFileId": (tester_report or {}).get("fileId"),
+            "testerReportSha256": (tester_report or {}).get("sha256"),
+            "testerSettingsRequestDigest": payload_digest(
+                "ea-factory-tester-settings-request-v1",
+                request.get("testerSettings"),
+            ),
+            "resolvedTesterSettingsDigest": (
+                payload_digest(
+                    "ea-factory-resolved-tester-settings-v1",
+                    resolved_settings,
+                )
+                if resolved_settings is not None
+                else None
+            ),
+        })
+        metrics.update(_ea_factory_logic_recheck_projection(build, metrics))
+    return metrics
+
+
+def _ea_factory_success_record_snapshot(
+    mission_id: str,
+    report_id: str,
+) -> dict:
+    """Capture exact local success-record state for compensating rollback."""
+
+    with MISSIONS_LOCK:
+        missions = load_missions()
+        mission_index = next(
+            (
+                index
+                for index, row in enumerate(missions)
+                if isinstance(row, dict) and row.get("id") == mission_id
+            ),
+            None,
+        )
+        mission_row = (
+            copy.deepcopy(missions[mission_index])
+            if mission_index is not None
+            else None
+        )
+    report_path = RUNTIME_REPORTS_DIR / f"{report_id}.json"
+    with REPORTS_LOCK:
+        report_row = (
+            read_json(report_path, None) if report_path.is_file() else None
+        )
+    return {
+        "missionIndex": mission_index,
+        "mission": copy.deepcopy(mission_row),
+        "report": copy.deepcopy(report_row) if isinstance(report_row, dict) else None,
+    }
+
+
+def _ea_factory_restore_success_record_snapshot(
+    mission_id: str,
+    report_id: str,
+    snapshot: dict,
+) -> None:
+    """Remove or restore a partial visible/final success transaction.
+
+    Mission and Report stores are separate atomic files.  If a later receipt
+    recheck or EA Factory state CAS fails, compensate both stores to their
+    exact pre-transaction rows so no ready/completed orphan is observable.
+    """
+
+    prior_mission = snapshot.get("mission") if isinstance(snapshot, dict) else None
+    prior_index = snapshot.get("missionIndex") if isinstance(snapshot, dict) else None
+    with MISSIONS_LOCK:
+        missions = [
+            row
+            for row in load_missions()
+            if not (isinstance(row, dict) and row.get("id") == mission_id)
+        ]
+        if isinstance(prior_mission, dict):
+            insertion = (
+                prior_index
+                if isinstance(prior_index, int)
+                and not isinstance(prior_index, bool)
+                and 0 <= prior_index <= len(missions)
+                else 0
+            )
+            missions.insert(insertion, copy.deepcopy(prior_mission))
+        save_missions(missions)
+    report_path = RUNTIME_REPORTS_DIR / f"{report_id}.json"
+    prior_report = snapshot.get("report") if isinstance(snapshot, dict) else None
+    with REPORTS_LOCK:
+        if isinstance(prior_report, dict):
+            write_json(report_path, copy.deepcopy(prior_report))
+        elif report_path.exists():
+            report_path.unlink()
+
+
+def _ea_factory_visible_commit_is_durable(
+    build_id: str,
+    stage_id: str,
+    operation_id: str,
+    report_id: str,
+) -> bool:
+    """Detect the narrow case where state committed before a write raised."""
+
+    try:
+        state = _load_ea_factory_state_unlocked()
+        build = next(
+            (
+                row
+                for row in state.get("builds", [])
+                if isinstance(row, dict) and row.get("id") == build_id
+            ),
+            None,
+        )
+        if not isinstance(build, dict):
+            return False
+        stage = _ea_factory_stage_row(build, stage_id)
+        action = (
+            (build.get("oneClickRun") or {}).get("visibleAction")
+            if isinstance(build.get("oneClickRun"), dict)
+            else None
+        )
+        return bool(
+            stage.get("status") == "completed"
+            and stage.get("evidenceVerified") is True
+            and stage.get("reportId") == report_id
+            and stage.get("visibleOperationId") == operation_id
+            and isinstance(action, dict)
+            and action.get("operationId") == operation_id
+            and action.get("state") == "completed"
+        )
+    except (DataIntegrityError, OSError, RuntimeError, ValueError):
+        return False
+
+
+def _ea_factory_final_commit_is_durable(
+    build_id: str,
+    report_id: str,
+) -> bool:
+    """Return whether the final Stage reached the durable EA Factory store."""
+
+    try:
+        state = _load_ea_factory_state_unlocked()
+        build = next(
+            (
+                row
+                for row in state.get("builds", [])
+                if isinstance(row, dict) and row.get("id") == build_id
+            ),
+            None,
+        )
+        if not isinstance(build, dict):
+            return False
+        stage = _ea_factory_stage_row(build, "final_report")
+        return bool(
+            stage.get("status") == "completed"
+            and stage.get("evidenceVerified") is True
+            and stage.get("reportId") == report_id
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(stage.get("artifactManifestDigest") or ""),
+            )
+            is not None
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(stage.get("summaryDigest") or ""),
+            )
+            is not None
+        )
+    except (DataIntegrityError, OSError, RuntimeError, ValueError):
+        return False
+
+
+def _ea_factory_commit_visible_front_office_result(
+    request: dict,
+    result: dict,
+) -> tuple[dict, dict]:
+    """Commit one visible result only after fresh binding and byte validation."""
+
+    build_id = safe_reference(request.get("buildId"))
+    stage_id = safe_reference(request.get("stageId"))
+    operation_id = safe_reference((request.get("visibleOperation") or {}).get("operationId"))
+    mission_id = safe_reference(request.get("missionId"))
+    report_id = safe_reference(request.get("reportId"))
+    with EA_FACTORY_LOCK:
+        state = _load_ea_factory_state_unlocked()
+        index = next(
+            (
+                position
+                for position, item in enumerate(state.get("builds", []))
+                if isinstance(item, dict) and item.get("id") == build_id
+            ),
+            None,
+        )
+        if index is None:
+            raise RequestError("EA Factory build disappeared before visible commit.", 409)
+        stored_build = state["builds"][index]
+        stored_run = (
+            stored_build.get("oneClickRun")
+            if isinstance(stored_build.get("oneClickRun"), dict)
+            else {}
+        )
+        stored_action = (
+            stored_run.get("visibleAction")
+            if isinstance(stored_run.get("visibleAction"), dict)
+            else {}
+        )
+        stored_stage = _ea_factory_stage_row(stored_build, stage_id)
+        if (
+            stored_stage.get("status") != "pending"
+            or not stored_stage.get("requestIdempotencyKey")
+            or stored_action.get("stageId") != stage_id
+            or stored_action.get("operationId") != operation_id
+            or stored_action.get("state") != "reserved"
+            or request.get("terminalBinding") != stored_run.get("terminalBinding")
+            or operation_id
+            != _ea_factory_one_click_visible_operation_id(
+                stored_build,
+                stored_run,
+                stage_id,
+            )
+        ):
+            raise RequestError(
+                "EA Factory visible reservation changed before commit.",
+                409,
+            )
+        candidate = copy.deepcopy(stored_build)
+        candidate_stage = _ea_factory_stage_row(candidate, stage_id)
+        artifact_rows = _ea_factory_register_artifacts(
+            candidate,
+            [
+                {
+                    "relativePath": item.get("relativePath"),
+                    "stageId": stage_id,
+                    "reportId": report_id,
+                    "artifactKind": item.get("artifactKind"),
+                }
+                for item in result.get("artifactSpecifications", [])
+            ],
+        )
+        metrics = _ea_factory_visible_result_metrics(
+            candidate,
+            stage_id,
+            request,
+            result,
+            artifact_rows,
+        )
+        zero_trade_result = bool(
+            stage_id == "backtest_recheck" and metrics.get("zeroTrade") is True
+        )
+        history_quality_result = bool(
+            stage_id == "backtest_recheck"
+            and metrics.get("historyQualityIssue") is True
+        )
+        backtest_attention_result = bool(
+            stage_id == "backtest_recheck"
+            and metrics.get("attentionRequired") is True
+        )
+        resolved_target = (
+            request.get("resolvedTarget")
+            if isinstance(request.get("resolvedTarget"), dict)
+            else {}
+        )
+        candidate_stage.update({
+            "status": "completed",
+            "missionId": mission_id,
+            "reportId": report_id,
+            "artifacts": [str(item.get("fileId")) for item in artifact_rows],
+            "blockedReasonCode": None,
+            "evidenceVerified": True,
+            "updatedAt": utc_now(),
+            "visibleEvidenceMode": EA_FACTORY_VISIBLE_EVIDENCE_MODE,
+            "visibleOperationId": operation_id,
+            "visibleEvidenceDigest": metrics.get(
+                "stageArtifactManifestDigest"
+            ),
+            "terminalExecutableSha256": resolved_target.get(
+                "terminalExecutableSha256"
+            ),
+            "frontOfficeExecutableSha256": resolved_target.get(
+                "frontOfficeExecutableSha256"
+            ),
+            "testerSettingsRequestDigest": (
+                metrics.get("testerSettingsRequestDigest")
+                if stage_id == "backtest_recheck"
+                else None
+            ),
+            "attentionRequired": backtest_attention_result,
+            "attentionReasonCode": (
+                metrics.get("attentionReasonCode")
+                if backtest_attention_result
+                else None
+            ),
+        })
+        # Fail closed before creating globally visible success Mission/Report
+        # records.  This pure pass re-reads every candidate artifact byte and
+        # validates the process/window/settings binding without requiring a
+        # report file to exist yet.
+        provisional_mission = {"id": mission_id}
+        provisional_report = {
+            "id": report_id,
+            "status": "ready",
+            "linkedMissionId": mission_id,
+            "metrics": metrics,
+        }
+        if (
+            not mission_id
+            or not report_id
+            or not _ea_factory_one_click_terminal_binding_current(candidate)
+            or not _ea_factory_visible_front_office_evidence_valid(
+                candidate,
+                candidate_stage,
+                provisional_mission,
+                provisional_report,
+                expected_operation_id=operation_id,
+                require_fresh_process_proof=True,
+                require_persisted_report=False,
+            )
+        ):
+            raise RequestError(
+                "Visible front-office adapter evidence is incomplete.",
+                503,
+                code="visible_evidence_incomplete",
+            )
+        success_snapshot = _ea_factory_success_record_snapshot(
+            mission_id,
+            report_id,
+        )
+        mission: dict | None = None
+        report: dict | None = None
+        try:
+            mission = create_mission(
+                {
+                    "id": mission_id,
+                    "title": (
+                        f"EA Factory visible MetaEditor compile: {build_id}"
+                        if stage_id == "compile_validate"
+                        else f"EA Factory visible Strategy Tester: {build_id}"
+                    ),
+                    "prompt": (
+                        "Record verified visible terminal evidence only; never trade live, toggle AutoTrading, attach a chart, or close the terminal."
+                    ),
+                    "agentId": "ea_developer",
+                    "requester": "human",
+                    "toolId": "manager_mission",
+                    "targetId": "right_server_racks",
+                    "risk": "low",
+                    "reportType": (
+                        "ea_compile_report"
+                        if stage_id == "compile_validate"
+                        else "ea_build_report"
+                    ),
+                    "idempotencyKey": str(
+                        candidate_stage.get("missionIdempotencyKey") or ""
+                    ),
+                },
+                # Evidence has passed the pure validator, but the Mission is
+                # not completed until the persisted Report is re-read below.
+                status="running",
+            )
+            report = create_report(
+                {
+                    "id": report_id,
+                    "type": (
+                        "ea_compile_report"
+                        if stage_id == "compile_validate"
+                        else "ea_build_report"
+                    ),
+                    "title": (
+                        f"Visible MetaEditor compile verified: {stored_build.get('sourceDisplayName')}"
+                        if stage_id == "compile_validate"
+                        else f"Visible Strategy Tester verified: {stored_build.get('sourceDisplayName')}"
+                    ),
+                    "summary": (
+                        "MetaEditor compile แบบมองเห็นจริงผ่าน 0 errors, 0 warnings พร้อมหลักฐานไฟล์"
+                        if stage_id == "compile_validate"
+                        else (
+                            "Strategy Tester แบบ Visual Mode ทำงานจบจริง แต่ไม่เกิดรายการเทรด "
+                            "และพบ Mismatched chart errors; ต้องแก้คุณภาพข้อมูลก่อนประเมินประสิทธิภาพ"
+                            if zero_trade_result and history_quality_result
+                            else "Strategy Tester แบบ Visual Mode ทำงานจบจริง แต่ไม่เกิดรายการเทรด "
+                            "ในข้อมูลที่ทดสอบ; Source Contract 10 ช่อง/6 กลุ่มผ่าน และต้อง "
+                            "ตรวจช่วงข้อมูล/เงื่อนไขก่อนประเมินประสิทธิภาพ"
+                            if zero_trade_result
+                            else "Strategy Tester แบบ Visual Mode ทำงานจบและมีรายการเทรด แต่พบ "
+                            "Mismatched chart errors; ยังไม่อนุญาตให้ประเมินประสิทธิภาพจนกว่าจะแก้ข้อมูล"
+                            if history_quality_result
+                            else (
+                                "Strategy Tester แบบ Visual Mode ทำงานจริง มีรายการเทรด "
+                                "พร้อมตรวจ Source Contract 10 ช่อง/6 กลุ่ม; "
+                                "ไม่อ้างว่าทั้ง 6 กลุ่มถูกกระตุ้นครบแบบ Dynamic"
+                            )
+                        )
+                    ),
+                    "ownerAgentId": "ea_developer",
+                    "linkedMissionId": mission_id,
+                    "linkedPropId": "right_server_racks",
+                    "status": "ready",
+                    "findings": [
+                        EA_FACTORY_STAGE_LABELS_TH.get(stage_id, stage_id),
+                        "visible process/window and immutable artifact evidence verified",
+                        *(
+                            ["backtest completed with zero trades; performance metrics unavailable"]
+                            if zero_trade_result
+                            else []
+                        ),
+                        *(
+                            [
+                                "tester report contains mismatched chart errors; "
+                                "history quality requires attention"
+                            ]
+                            if history_quality_result
+                            else []
+                        ),
+                    ],
+                    "metrics": metrics,
+                    "risks": [
+                        "Backtest and compile evidence do not guarantee future profitability.",
+                        *(
+                            [
+                                "No trade was generated in the tested data; review history quality, "
+                                "test range, symbol and strategy conditions before optimization."
+                            ]
+                            if zero_trade_result
+                            else []
+                        ),
+                        *(
+                            [
+                                "Mismatched chart errors were reported; performance evaluation "
+                                "is unavailable until historical data quality is corrected."
+                            ]
+                            if history_quality_result
+                            else []
+                        ),
+                    ],
+                    "nextActions": [
+                        "ทำขั้นถัดไปเมื่อ Phase Gate ตรวจหลักฐานครบ"
+                    ],
+                    "safety": {
+                        "approvalRequired": False,
+                        "publicShareable": False,
+                    },
+                },
+                queue_research_sheet=False,
+                _trusted_visible_process_identity=True,
+            )
+            _ea_factory_complete_local_mission(
+                mission,
+                report,
+                (
+                    "Visible MetaEditor compile evidence verified."
+                    if stage_id == "compile_validate"
+                    else "Visible Strategy Tester evidence verified."
+                ),
+                phase=(
+                    "ea_factory_visible_metaeditor_compile_completed"
+                    if stage_id == "compile_validate"
+                    else "ea_factory_visible_strategy_tester_completed"
+                ),
+            )
+            if (
+                safe_reference(mission.get("id")) != mission_id
+                or safe_reference(report.get("id")) != report_id
+                or not _ea_factory_visible_front_office_evidence_valid(
+                    candidate,
+                    candidate_stage,
+                    mission,
+                    report,
+                    expected_operation_id=operation_id,
+                    require_fresh_process_proof=True,
+                )
+            ):
+                raise RequestError(
+                    "Visible front-office adapter evidence is incomplete.",
+                    503,
+                    code="visible_evidence_incomplete",
+                )
+            candidate_action = candidate["oneClickRun"]["visibleAction"]
+            candidate_action.update({
+                "state": "completed",
+                "updatedAt": utc_now(),
+                "lastFailureCode": None,
+                "requiresExplicitResume": False,
+            })
+            _ea_factory_sync_build_status(candidate, ingest_sources=True)
+            candidate["updatedAt"] = candidate_action["updatedAt"]
+            state["builds"][index] = candidate
+            _write_ea_factory_state_unlocked(state)
+        except Exception as transaction_error:
+            if (
+                isinstance(mission, dict)
+                and isinstance(report, dict)
+                and _ea_factory_visible_commit_is_durable(
+                    str(build_id),
+                    str(stage_id),
+                    str(operation_id),
+                    str(report_id),
+                )
+            ):
+                append_audit({
+                    "type": "ea_factory.visible_commit_recovered_after_write_error",
+                    "buildId": build_id,
+                    "stageId": stage_id,
+                    "operationId": operation_id,
+                    "reportId": report_id,
+                    "liveTradingExecuted": False,
+                })
+                return copy.deepcopy(mission), copy.deepcopy(report)
+            try:
+                _ea_factory_restore_success_record_snapshot(
+                    str(mission_id),
+                    str(report_id),
+                    success_snapshot,
+                )
+            except Exception as rollback_error:
+                raise DataIntegrityError(
+                    "EA Factory visible success transaction rollback failed."
+                ) from rollback_error
+            append_audit({
+                "type": "ea_factory.visible_success_transaction_rolled_back",
+                "buildId": build_id,
+                "stageId": stage_id,
+                "operationId": operation_id,
+                "reportId": report_id,
+                "liveTradingExecuted": False,
+            })
+            raise transaction_error
+    return copy.deepcopy(mission), copy.deepcopy(report)
 
 
 def advance_ea_factory_build(build_id: object, payload: object) -> dict:
@@ -29160,6 +38447,8 @@ def advance_ea_factory_build(build_id: object, payload: object) -> dict:
     kind = "ea_factory_stage_dispatched"
     idempotent_replay = False
     writer_recovered = False
+    final_state_written = False
+    visible_front_office_request: dict | None = None
     with EA_FACTORY_LOCK:
         state = _load_ea_factory_state_unlocked()
         build = next(
@@ -29168,6 +38457,11 @@ def advance_ea_factory_build(build_id: object, payload: object) -> dict:
         )
         if not isinstance(build, dict):
             raise RequestError("EA Factory build not found.", 404)
+        if build.get("coverageStatus") != "compact_current":
+            raise RequestError(
+                "Legacy EA Factory builds are read-only and cannot advance; create a new compact A-J v3 build.",
+                409,
+            )
         if build.get("coverageUpgradeRequired") is True:
             raise RequestError(
                 "EA Factory coverage contract is outdated; create a new build to rebuild coverage with the current schema.",
@@ -29181,11 +38475,41 @@ def advance_ea_factory_build(build_id: object, payload: object) -> dict:
                 "Custom Indicator backtest stage is not applicable; no trading execution is performed.",
                 409,
             )
+        mission_rows = load_missions(shared_snapshot=True)
+        requested_stage = _ea_factory_stage_row(build, stage_id)
+        initial_request_digest = _ea_factory_advance_request_digest(build, stage_id)
+        initial_stored_key = str(requested_stage.get("requestIdempotencyKey") or "")
+        exact_started_replay = bool(
+            initial_stored_key
+            and requested_stage.get("requestDigest") == initial_request_digest
+            and requested_stage.get("status") != "pending"
+        )
+        active_worker = _ea_factory_active_worker_payload(state, mission_rows)
+        if (
+            isinstance(active_worker, dict)
+            and not _ea_factory_current_thread_owns_active_stage(
+                active_worker,
+                safe_build_id,
+                stage_id,
+            )
+        ):
+            same_active_stage_replay = bool(
+                exact_started_replay
+                and active_worker.get("buildId") == safe_build_id
+                and active_worker.get("stageId") == stage_id
+            )
+            if exact_started_replay and not same_active_stage_replay:
+                return _ea_factory_pure_stage_replay_response(
+                    build,
+                    requested_stage,
+                    mission_rows,
+                )
+            if not same_active_stage_replay:
+                _raise_ea_factory_busy(active_worker)
         # The one-time legacy writer migration must run before ordinary
         # reconciliation turns the queued Stage into a terminal replay.  It
         # requeues the same Mission and never allocates a second idempotency
         # scope or Mission id.
-        requested_stage = _ea_factory_stage_row(build, stage_id)
         if stage_id == "generate_source":
             recovered = _ea_factory_recover_legacy_runner_writer_failure(
                 build,
@@ -29243,7 +38567,7 @@ def advance_ea_factory_build(build_id: object, payload: object) -> dict:
             if persisted_mission_id:
                 mission_result = next(
                     (
-                        item for item in load_missions(shared_snapshot=True)
+                        item for item in mission_rows
                         if isinstance(item, dict)
                         and safe_reference(item.get("id")) == persisted_mission_id
                     ),
@@ -29346,6 +38670,12 @@ def advance_ea_factory_build(build_id: object, payload: object) -> dict:
                 if build.get("platform") == "tradingview":
                     mission_result, report_result = _ea_factory_complete_pine_validation(build, stage)
                     kind = "ea_factory_pine_static_validation_completed"
+                elif _ea_factory_one_click_front_office_active(build, stage_id):
+                    visible_front_office_request = _ea_factory_prepare_visible_front_office_request(
+                        build,
+                        stage,
+                    )
+                    kind = "ea_factory_visible_metaeditor_compile_reserved"
                 else:
                     gate = _ea_factory_terminal_gate(str(build.get("platform") or ""))
                     if gate.get("ready") is not True or gate.get("adapterReady") is not True:
@@ -29376,22 +38706,108 @@ def advance_ea_factory_build(build_id: object, payload: object) -> dict:
             elif stage_id == "backtest_recheck":
                 if build.get("platform") == "tradingview":
                     raise RequestError("Pine backtest stage is not applicable.", 409)
-                gate = _ea_factory_backtest_gate(str(build.get("platform") or ""))
-                mission_result, report_result = _ea_factory_block_adapter_stage(build, stage, gate)
-                kind = "ea_factory_stage_blocked"
+                if _ea_factory_one_click_front_office_active(build, stage_id):
+                    visible_front_office_request = _ea_factory_prepare_visible_front_office_request(
+                        build,
+                        stage,
+                    )
+                    kind = "ea_factory_visible_strategy_tester_reserved"
+                else:
+                    gate = _ea_factory_backtest_gate(str(build.get("platform") or ""))
+                    mission_result, report_result = _ea_factory_block_adapter_stage(build, stage, gate)
+                    kind = "ea_factory_stage_blocked"
             elif stage_id == "final_report":
-                mission_result, report_result = _ea_factory_complete_final_report(build, stage)
+                final_digest = payload_digest(
+                    "ea-factory-local-stage-v1",
+                    build.get("id"),
+                    stage.get("id"),
+                    stage.get("missionIdempotencyKey"),
+                )[:24]
+                final_mission_id = f"mission-eaf-{final_digest}"
+                final_report_id = f"report-eaf-{final_digest}"
+                final_snapshot = _ea_factory_success_record_snapshot(
+                    final_mission_id,
+                    final_report_id,
+                )
+                try:
+                    mission_result, report_result = (
+                        _ea_factory_complete_final_report(build, stage)
+                    )
+                    _ea_factory_sync_build_status(build, ingest_sources=True)
+                    build["updatedAt"] = utc_now()
+                    _write_ea_factory_state_unlocked(state)
+                    final_state_written = True
+                except Exception as transaction_error:
+                    if (
+                        isinstance(mission_result, dict)
+                        and isinstance(report_result, dict)
+                        and _ea_factory_final_commit_is_durable(
+                            str(safe_build_id),
+                            final_report_id,
+                        )
+                    ):
+                        final_state_written = True
+                        append_audit({
+                            "type": "ea_factory.final_commit_recovered_after_write_error",
+                            "buildId": safe_build_id,
+                            "reportId": final_report_id,
+                            "liveTradingExecuted": False,
+                        })
+                    else:
+                        try:
+                            _ea_factory_restore_success_record_snapshot(
+                                final_mission_id,
+                                final_report_id,
+                                final_snapshot,
+                            )
+                        except Exception as rollback_error:
+                            raise DataIntegrityError(
+                                "EA Factory final success transaction rollback failed."
+                            ) from rollback_error
+                        append_audit({
+                            "type": "ea_factory.final_success_transaction_rolled_back",
+                            "buildId": safe_build_id,
+                            "reportId": final_report_id,
+                            "liveTradingExecuted": False,
+                        })
+                        raise transaction_error
                 kind = "ea_factory_final_report_completed"
             else:
                 raise RequestError("Strategy Spec is completed only when the build is created.", 409)
-            _ea_factory_sync_build_status(build, ingest_sources=True)
-            build["updatedAt"] = utc_now()
-            _write_ea_factory_state_unlocked(state)
+            if not final_state_written:
+                _ea_factory_sync_build_status(build, ingest_sources=True)
+                build["updatedAt"] = utc_now()
+                _write_ea_factory_state_unlocked(state)
         elif reconciliation_changed:
             # POST is the explicit mutation boundary for ingesting a completed
             # Runner report.  A replay must persist that reconciliation even
             # though it never dispatches a second Mission.
             _write_ea_factory_state_unlocked(state)
+    if visible_front_office_request is not None:
+        visible_result = _ea_factory_invoke_visible_front_office_handler(
+            visible_front_office_request
+        )
+        mission_result, report_result = _ea_factory_commit_visible_front_office_result(
+            visible_front_office_request,
+            visible_result,
+        )
+        kind = (
+            "ea_factory_visible_metaeditor_compile_completed"
+            if stage_id == "compile_validate"
+            else "ea_factory_visible_strategy_tester_completed"
+        )
+        # Refresh the reference used by the audit/read response after the
+        # two-phase commit; the pre-action object is deliberately stale.
+        with EA_FACTORY_LOCK:
+            refreshed_state = _load_ea_factory_state_unlocked()
+            build = next(
+                (
+                    item
+                    for item in refreshed_state.get("builds", [])
+                    if isinstance(item, dict) and item.get("id") == safe_build_id
+                ),
+                build,
+            )
     append_audit({
         "type": "ea_factory.stage_advanced",
         "buildId": safe_build_id,
@@ -29400,10 +38816,28 @@ def advance_ea_factory_build(build_id: object, payload: object) -> dict:
         "reportId": safe_reference((report_result or {}).get("id")),
         "resultKind": kind,
         "idempotentReplay": idempotent_replay,
-        "manualStageByStage": True,
+        "manualStageByStage": not bool(
+            isinstance(build.get("oneClickRun"), dict)
+            and build["oneClickRun"].get("runId")
+        ),
+        "oneClickRunId": safe_reference((build.get("oneClickRun") or {}).get("runId")),
         "schedulerEnabled": False,
-        "realMetaTraderAction": False,
-        "terminalProcessExecuted": False,
+        "realMetaTraderAction": bool(
+            isinstance(report_result, dict)
+            and isinstance(report_result.get("metrics"), dict)
+            and (
+                report_result["metrics"].get("visibleMetaEditor") is True
+                or report_result["metrics"].get("visibleStrategyTester") is True
+            )
+        ),
+        "terminalProcessExecuted": bool(
+            isinstance(report_result, dict)
+            and isinstance(report_result.get("metrics"), dict)
+            and (
+                report_result["metrics"].get("visibleMetaEditor") is True
+                or report_result["metrics"].get("visibleStrategyTester") is True
+            )
+        ),
         "metaEditorCompileExecuted": bool(
             isinstance(report_result, dict)
             and isinstance(report_result.get("metrics"), dict)
@@ -29414,7 +38848,12 @@ def advance_ea_factory_build(build_id: object, payload: object) -> dict:
             and isinstance(report_result.get("metrics"), dict)
             and report_result["metrics"].get("compileExecuted") is True
         ),
-        "backtestExecuted": False,
+        "backtestExecuted": bool(
+            isinstance(report_result, dict)
+            and isinstance(report_result.get("metrics"), dict)
+            and report_result["metrics"].get("backtestExecuted") is True
+        ),
+        "liveTradingExecuted": False,
     })
     model = ea_factory_read_model()
     build_model = next(item for item in model["builds"] if item.get("id") == safe_build_id)
@@ -30113,7 +39552,7 @@ def _world_sheet_row_identity(row: dict) -> tuple[str, str, str] | None:
     return report_id, explicit_record_id, discovery_id
 
 
-def _world_sheet_catalog_projection() -> tuple[list[dict], dict[str, object]]:
+def _world_sheet_catalog_projection_uncached() -> tuple[list[dict], dict[str, object]]:
     """Project verified World_System cache rows into safe Deep Research sources.
 
     The cache is populated only after the Backend has authenticated, verified
@@ -30519,6 +39958,42 @@ def _world_sheet_catalog_projection() -> tuple[list[dict], dict[str, object]]:
     }
 
 
+def _world_sheet_catalog_projection() -> tuple[list[dict], dict[str, object]]:
+    """Reuse the verified Sheet projection until its durable cache changes."""
+
+    credential = google_sheet_hub.credential_status()
+    signature = (
+        _ea_factory_cache_file_signature(RESEARCH_SHEET_CACHE_PATH),
+        _ea_factory_cache_file_signature(DASHBOARD_WORKFLOW_SETTINGS_PATH),
+        (
+            bool(credential.get("configured")),
+            str(credential.get("mode") or ""),
+            str(credential.get("status") or ""),
+            safe_reference(credential.get("errorCode")),
+        ),
+        int(time.monotonic() // EA_FACTORY_WORLD_SHEET_CACHE_BUCKET_SECONDS),
+        id(_research_sheet_cached_rows),
+    )
+    with EA_FACTORY_WORLD_SHEET_CACHE_LOCK:
+        cached = EA_FACTORY_WORLD_SHEET_CACHE.get("value")
+        if (
+            EA_FACTORY_WORLD_SHEET_CACHE.get("signature") == signature
+            and isinstance(cached, tuple)
+            and len(cached) == 2
+        ):
+            return copy.deepcopy(cached)
+        value = _world_sheet_catalog_projection_uncached()
+        if (
+            _ea_factory_cache_file_signature(RESEARCH_SHEET_CACHE_PATH)
+            == signature[0]
+        ):
+            EA_FACTORY_WORLD_SHEET_CACHE.update({
+                "signature": signature,
+                "value": copy.deepcopy(value),
+            })
+        return copy.deepcopy(value)
+
+
 def _world_sheet_catalog_rows() -> list[dict]:
     rows, _diagnostics = _world_sheet_catalog_projection()
     return rows
@@ -30543,6 +40018,29 @@ def _deep_sheet_ea_research_read_model(row: dict) -> dict:
     fabricated executable rules.  They are explicitly marked for a new Deep
     Research run instead.
     """
+
+    compact = _ea_factory_compact_strategy_brief(row)
+    if isinstance(compact, dict):
+        return {
+            "schemaVersion": EA_STRATEGY_BRIEF_SCHEMA_VERSION,
+            "validationStatus": "strategy_brief_sheet_validated",
+            "validated": True,
+            "digestMatched": True,
+            "ready": True,
+            "status": "ready",
+            "eaHandoffAllowed": True,
+            "deterministicBacktestAllowed": False,
+            "requiresResearchRerun": False,
+            "requiresResearchRevision": False,
+            "strategyBrief": compact["brief"],
+            "recordId": compact["recordId"],
+            "briefDigest": compact["digest"],
+            "blockingIssues": [],
+            "warnings": [],
+            "unknownPaths": [],
+            "conflictPaths": [],
+            "readinessIssues": [],
+        }
 
     implementation_notes = _research_sheet_lossless_json_cell_decode(
         row.get("implementation_notes_json"),
@@ -30578,10 +40076,12 @@ def _deep_sheet_ea_research_read_model(row: dict) -> dict:
             reason,
             blueprint_digest=expected_digest,
         )
-    return _ea_research_canonical_read_model(
-        blueprint,
-        expected_digest,
-        missing_reason="legacy_ea_blueprint_missing",
+    return _ea_research_mark_legacy_read_only(
+        _ea_research_canonical_read_model(
+            blueprint,
+            expected_digest,
+            missing_reason="legacy_ea_blueprint_missing",
+        )
     )
 
 
@@ -30591,6 +40091,39 @@ def _deep_sheet_research_history_rows() -> list[dict]:
     result: list[dict] = []
     seen: set[str] = set()
     for row in reversed(_research_sheet_cached_rows("deepResearch")):
+        if all(name in row for name in RESEARCH_SHEET_DEEP_WRITE_HEADERS):
+            research_id = safe_reference(row.get("record_id"))
+            if not research_id or research_id in seen:
+                continue
+            system_name = redact_text(str(row.get("system_name") or ""), 300)
+            ea_research = _deep_sheet_ea_research_read_model(row)
+            if not system_name or ea_research.get("ready") is not True:
+                continue
+            seen.add(research_id)
+            result.append(sanitize_json_value({
+                "researchId": research_id,
+                "researchReportId": None,
+                "sourceReportId": None,
+                "sourceRecordId": research_id,
+                "systemName": system_name,
+                "strategyFamily": "strategy_brief",
+                "verificationStatus": "verified_strategy_brief",
+                "feasibilityStatus": "ready",
+                "backtestStatus": "not_run",
+                "eaBuildStatus": "not_started",
+                "symbols": [],
+                "timeframes": [],
+                "candidatePlatforms": ["mt4", "mt5", "tradingview"],
+                "sourceLinks": [],
+                "eaResearch": ea_research,
+                "requiresResearchRerun": False,
+                "factoryEligible": True,
+                "updatedAt": None,
+                "sourceKind": "verified_strategy_brief_sheet_record",
+            }, collection_limit=1000, string_limit=20000))
+            if len(result) >= 80:
+                break
+            continue
         research_id = safe_reference(row.get("research_id"))
         status = str(row.get("verification_status") or "").strip().lower()
         if not research_id or research_id in seen:
@@ -30636,11 +40169,17 @@ def _deep_sheet_research_history_rows() -> list[dict]:
         # requirement.  Current writers persist completeness.status for valid
         # non-ready research, so those canonical/digest-bound rows must not
         # disappear merely because EA handoff is correctly blocked.
-        legacy_verified = status in {"verified", "verified_deep_research"}
+        legacy_history = status in {
+            "verified",
+            "verified_deep_research",
+            "ready",
+            "needs_clarification",
+            "not_ea_ready",
+        }
         if (
             not canonical_verified
             and not canonical_response_fail_closed
-            and not legacy_verified
+            and not legacy_history
         ):
             continue
         source_links = [
@@ -30650,6 +40189,26 @@ def _deep_sheet_research_history_rows() -> list[dict]:
             )
             if (normalized := _normalized_contract_public_url(raw_url))
         ]
+        try:
+            implementation_notes = _research_sheet_lossless_json_cell_decode(
+                row.get("implementation_notes_json"),
+                expected=dict,
+                fallback={},
+                max_chars=TRADING_SYSTEM_RESEARCH_SHEET_BLUEPRINT_CELL_MAX_CHARS,
+                field_name="implementation_notes_json",
+            )
+        except DataIntegrityError:
+            implementation_notes = {}
+        factory_eligible = bool(
+            canonical_verified
+            and ea_research.get("status") == "ready"
+            and ea_research.get("requiresResearchRerun") is not True
+            and _ea_factory_sheet_human_confirmation_valid(
+                row,
+                implementation_notes,
+                ea_research.get("blueprint"),
+            )
+        )
         seen.add(research_id)
         result.append(sanitize_json_value({
             "researchId": research_id,
@@ -30673,6 +40232,7 @@ def _deep_sheet_research_history_rows() -> list[dict]:
             "eaResearch": ea_research,
             "requiresResearchRerun": ea_research.get("requiresResearchRerun")
             is True,
+            "factoryEligible": factory_eligible,
             "updatedAt": row.get("updated_at") or row.get("checked_at"),
             "sourceKind": "verified_deep_research_sheet_record",
         }, collection_limit=1000, string_limit=20000))
@@ -30712,6 +40272,192 @@ def _deep_research_catalog_read_model(
         and (report_id := safe_reference(row.get("reportId")))
         and (transfer := _agent_transfer_storage(row.get("agentTransfer")))
     }
+    def research_source_key(value: object) -> tuple[str, str] | None:
+        row = value if isinstance(value, dict) else {}
+        context = (
+            row.get("workflowContext")
+            if isinstance(row.get("workflowContext"), dict)
+            else {}
+        )
+        source = context.get("source") if isinstance(context.get("source"), dict) else {}
+        source_report_id = safe_reference(source.get("reportId"))
+        source_record_id = safe_reference(source.get("recordId"))
+        if not source_report_id or not source_record_id:
+            return None
+        return source_report_id, source_record_id
+
+    status_labels = {
+        "not_started": "ยังไม่ได้เริ่มวิเคราะห์เชิงลึก",
+        "in_progress": "กำลังวิเคราะห์เชิงลึก",
+        "awaiting_confirmation": "วิเคราะห์ครบแล้ว รอตรวจและยืนยันบันทึก",
+        "sheet_setup_required": "วิเคราะห์ครบแล้ว แต่ Google Sheet ยังไม่พร้อม",
+        "sheet_sync_pending": "ยืนยันแล้ว กำลังรอบันทึก Google Sheet",
+        "sheet_sync_failed": "ยืนยันแล้ว แต่บันทึก Google Sheet ไม่สำเร็จ",
+        "saved_to_sheet": "บันทึก Google Sheet แล้ว พร้อมใช้ในโรงงาน EA",
+        "needs_revision": "ข้อมูลยังไม่ครบหรือมีเงื่อนไขที่ต้องวิจัยเพิ่ม",
+        "research_failed": "การวิเคราะห์ครั้งล่าสุดไม่สำเร็จ",
+    }
+    research_status_by_key: dict[tuple[str, str], dict] = {}
+    research_event_at_by_key: dict[tuple[str, str], datetime] = {}
+
+    def research_event_at(value: object) -> datetime:
+        row = value if isinstance(value, dict) else {}
+        parsed = parse_iso(
+            row.get("updatedAt")
+            or row.get("completedAt")
+            or row.get("createdAt")
+        )
+        return parsed or datetime.min.replace(tzinfo=timezone.utc)
+
+    for mission in mission_rows:
+        if not isinstance(mission, dict):
+            continue
+        context = (
+            mission.get("workflowContext")
+            if isinstance(mission.get("workflowContext"), dict)
+            else {}
+        )
+        if not (
+            context.get("propId") == "left_server_racks"
+            and context.get("actionId") == "deep_research_system"
+        ):
+            continue
+        key = research_source_key(mission)
+        if key is None:
+            continue
+        mission_status = str(mission.get("status") or "")
+        if mission_status in {"queued", "running", "waiting_approval"}:
+            state = "in_progress"
+        elif mission_status in {"failed", "blocked"}:
+            state = "research_failed"
+        else:
+            # A completed Mission may be waiting for its report commit.  Keep
+            # it visible as being processed until a report projection below
+            # supplies the authoritative review/save state.
+            state = "in_progress"
+        event_at = research_event_at(mission)
+        if event_at >= research_event_at_by_key.get(
+            key,
+            datetime.min.replace(tzinfo=timezone.utc),
+        ):
+            research_status_by_key[key] = {
+                "researchState": state,
+                "currentlyStudying": state == "in_progress",
+                "latestResearchMissionId": safe_reference(mission.get("id")),
+                "latestResearchReportId": None,
+                "researchStatusTh": status_labels[state],
+                "confirmation": None,
+            }
+            research_event_at_by_key[key] = event_at
+    # Runtime files are loaded by filesystem mtime, which is not a workflow
+    # ordering guarantee.  Recovery may intentionally write an older logical
+    # revision after a newer one.  Select one report per World_System identity
+    # by the Backend-owned semantic timestamp and use the latest Mission's
+    # committed reportIds as the authoritative tie-breaker.
+    mission_by_id = {
+        mission_id: mission
+        for mission in mission_rows
+        if isinstance(mission, dict)
+        and (mission_id := safe_reference(mission.get("id")))
+    }
+    selected_research_reports: dict[
+        tuple[str, str],
+        tuple[tuple[datetime, int, int, str], dict],
+    ] = {}
+    for research_report in report_rows:
+        if not isinstance(research_report, dict) or research_report.get("type") != "trading_system_research_report":
+            continue
+        key = research_source_key(research_report)
+        if key is None:
+            continue
+        report_event_at = research_event_at(research_report)
+        if report_event_at < research_event_at_by_key.get(
+            key,
+            datetime.min.replace(tzinfo=timezone.utc),
+        ):
+            # A newly-started Mission is the active revision.  Do not let its
+            # older completed report overwrite the visible in-progress state.
+            continue
+        report_id = safe_reference(research_report.get("id")) or ""
+        linked_mission_id = safe_reference(research_report.get("linkedMissionId"))
+        latest_mission_id = safe_reference(
+            (research_status_by_key.get(key) or {}).get("latestResearchMissionId")
+        )
+        latest_mission = mission_by_id.get(latest_mission_id or "", {})
+        committed_report_ids = {
+            report_ref
+            for raw_report_id in (
+                latest_mission.get("reportIds")
+                if isinstance(latest_mission.get("reportIds"), list)
+                else []
+            )
+            if (report_ref := safe_reference(raw_report_id))
+        }
+        bound_to_latest_mission = bool(
+            latest_mission_id and linked_mission_id == latest_mission_id
+        )
+        committed_by_latest_mission = bool(
+            bound_to_latest_mission and report_id in committed_report_ids
+        )
+        report_rank = (
+            report_event_at,
+            int(committed_by_latest_mission),
+            int(bound_to_latest_mission),
+            report_id,
+        )
+        selected = selected_research_reports.get(key)
+        if selected is None or report_rank > selected[0]:
+            selected_research_reports[key] = (report_rank, research_report)
+
+    for _report_rank, research_report in selected_research_reports.values():
+        key = research_source_key(research_report)
+        if key is None:  # Defensive: every selected report was keyed above.
+            continue
+        report_event_at = research_event_at(research_report)
+        research_metrics = (
+            research_report.get("metrics")
+            if isinstance(research_report.get("metrics"), dict)
+            else {}
+        )
+        ea_research = _ea_research_report_read_model(
+            research_report,
+            research_metrics,
+        )
+        confirmation = (
+            ea_research.get("confirmation")
+            if isinstance(ea_research.get("confirmation"), dict)
+            else {}
+        )
+        delivery = (
+            confirmation.get("sheetDelivery")
+            if isinstance(confirmation.get("sheetDelivery"), dict)
+            else {}
+        )
+        if confirmation.get("handoffReady") is True and delivery.get("synced") is True:
+            state = "saved_to_sheet"
+        elif confirmation.get("confirmed") is True and delivery.get("status") == "failed":
+            state = "sheet_sync_failed"
+        elif confirmation.get("confirmed") is True:
+            state = "sheet_sync_pending"
+        elif confirmation.get("canConfirm") is True:
+            state = "awaiting_confirmation"
+        elif confirmation.get("sheetPreflightStatus") not in {None, "ready"} and ea_research.get("validated") is True:
+            state = "sheet_setup_required"
+        elif research_report.get("status") in {"failed", "blocked"}:
+            state = "research_failed"
+        else:
+            state = "needs_revision"
+        research_status_by_key[key] = {
+            "researchState": state,
+            "currentlyStudying": state in {"in_progress", "awaiting_confirmation"},
+            "latestResearchMissionId": safe_reference(
+                research_report.get("linkedMissionId")
+            ),
+            "latestResearchReportId": safe_reference(research_report.get("id")),
+            "researchStatusTh": status_labels[state],
+            "confirmation": copy.deepcopy(confirmation) if confirmation else None,
+        }
+        research_event_at_by_key[key] = report_event_at
     catalog_rows: list[dict] = []
     catalog_keys: set[tuple[str, str]] = set()
     report_count = 0
@@ -30747,6 +40493,17 @@ def _deep_research_catalog_read_model(
             ]
             if not record_id or len(source_urls) != 2:
                 continue
+            research_status = research_status_by_key.get(
+                (report_id, record_id),
+                {
+                    "researchState": "not_started",
+                    "currentlyStudying": False,
+                    "latestResearchMissionId": None,
+                    "latestResearchReportId": None,
+                    "researchStatusTh": status_labels["not_started"],
+                    "confirmation": None,
+                },
+            )
             catalog_row = sanitize_json_value({
                 "sourceReportId": report_id,
                 "sourceMissionId": safe_reference(report.get("linkedMissionId")),
@@ -30762,6 +40519,7 @@ def _deep_research_catalog_read_model(
                 "verificationStatus": system.get("verificationStatus"),
                 "sourceUrls": source_urls,
                 "system": system,
+                **research_status,
             }, collection_limit=200, string_limit=2000)
             catalog_rows.append(catalog_row)
             catalog_keys.add((report_id, record_id))
@@ -30771,6 +40529,32 @@ def _deep_research_catalog_read_model(
             break
     sheet_rows, sheet_diagnostics = _world_sheet_catalog_projection()
     sheet_research_history = _deep_sheet_research_history_rows()
+    sheet_history_keys = {
+        (
+            safe_reference(row.get("sourceReportId")),
+            safe_reference(row.get("sourceRecordId")),
+        )
+        for row in sheet_research_history
+        if isinstance(row, dict)
+        and row.get("factoryEligible") is True
+        and safe_reference(row.get("sourceReportId"))
+        and safe_reference(row.get("sourceRecordId"))
+    }
+    for catalog_row in catalog_rows:
+        key = (
+            safe_reference(catalog_row.get("sourceReportId")),
+            safe_reference(catalog_row.get("sourceRecordId")),
+        )
+        if (
+            key in sheet_history_keys
+            and key not in research_status_by_key
+            and catalog_row.get("researchState") == "not_started"
+        ):
+            catalog_row.update({
+                "researchState": "saved_to_sheet",
+                "currentlyStudying": False,
+                "researchStatusTh": status_labels["saved_to_sheet"],
+            })
     for row in sheet_rows:
         key = (
             safe_reference(row.get("sourceReportId")) or "",
@@ -30779,7 +40563,29 @@ def _deep_research_catalog_read_model(
         if not all(key) or key in catalog_keys:
             continue
         catalog_keys.add(key)
-        catalog_rows.append(row)
+        research_status = research_status_by_key.get(key)
+        if research_status is None and key in sheet_history_keys:
+            research_status = {
+                "researchState": "saved_to_sheet",
+                "currentlyStudying": False,
+                "latestResearchMissionId": None,
+                "latestResearchReportId": None,
+                "researchStatusTh": status_labels["saved_to_sheet"],
+                "confirmation": None,
+            }
+        if research_status is None:
+            research_status = {
+                "researchState": "not_started",
+                "currentlyStudying": False,
+                "latestResearchMissionId": None,
+                "latestResearchReportId": None,
+                "researchStatusTh": status_labels["not_started"],
+                "confirmation": None,
+            }
+        catalog_rows.append(sanitize_json_value({
+            **row,
+            **research_status,
+        }, collection_limit=240, string_limit=2000))
         if len(catalog_rows) >= 80:
             break
     hub = research_sheet_hub_read_model()
@@ -30819,6 +40625,18 @@ def _deep_research_catalog_read_model(
         "googleSheetResearchHistoryCount": len(sheet_research_history),
         "googleSheetResearchHistoryTabName": deep_sheet_consumer.get("tabName"),
         "googleSheetResearchHistory": sheet_research_history,
+        "confirmationEndpoint": DEEP_RESEARCH_CONFIRMATION_ENDPOINT,
+        "requiredDeepResearchColumnCount": len(RESEARCH_SHEET_DEEP_WRITE_HEADERS),
+        "workflowSteps": [
+            {
+                "id": "select",
+                "labelTh": "เลือกระบบและวิเคราะห์เชิงลึก",
+            },
+            {
+                "id": "analysis",
+                "labelTh": "ตรวจ Strategy Brief 10 ช่อง ยืนยันบันทึก และส่งเข้าโรงงาน EA",
+            },
+        ],
         "systems": catalog_rows,
         "failClosed": True,
         # This read model only consumes the verified Sheet cache.  A writable
@@ -31951,6 +41769,14 @@ def _research_sheet_deep_rows(
     *,
     version_index: dict[tuple[str, str], dict] | None = None,
 ) -> tuple[list[dict], list[dict]]:
+    """Project one accepted report to the authoritative compact A-J row.
+
+    Evidence URLs, timestamps, limitations, lineage, and the digest remain in
+    the Backend report/confirmation ledger.  They are deliberately not extra
+    learner-facing Sheet columns.
+    """
+
+    del version_index
     if not (
         report.get("type") == "trading_system_research_report"
         and report.get("status") == "ready"
@@ -31961,237 +41787,42 @@ def _research_sheet_deep_rows(
     receipt = metrics.get("workflowOutput") if isinstance(metrics.get("workflowOutput"), dict) else {}
     if receipt.get("applicable") is not True or receipt.get("valid") is not True:
         return [], []
-    # EA Factory Strategy Spec reports reuse the research report envelope so
-    # they can be reviewed in the same dashboard, but they are downstream
-    # build artifacts. Feeding them back into Deep_Research creates a second
-    # simultaneously-current row for the same EA Factory record and blocks the
-    # next read-only factory sync. Deep_Research must remain the upstream
-    # research source of truth, never a build-history feedback channel.
     if isinstance(metrics.get("eaFactoryStrategySpec"), dict):
         return [], []
-    research_blueprint = None
+    if not isinstance(metrics.get("strategyBrief"), dict):
+        return [], []
     try:
-        research_blueprint = reconstruct_ea_research_from_metrics(metrics)
-    except EAResearchBlueprintValidationError:
-        # Historical v1 reports remain visible/backfillable, but they are not
-        # silently promoted to an executable EA specification.
-        research_blueprint = None
-    if isinstance(research_blueprint, dict):
-        metrics = {**metrics, **ea_research_report_projection(research_blueprint)}
-    completeness = (
-        research_blueprint.get("completeness")
-        if isinstance(research_blueprint, dict)
-        and isinstance(research_blueprint.get("completeness"), dict)
-        else {}
-    )
-    ea_ready = bool(
-        completeness.get("status") == "ready"
-        and completeness.get("eaHandoffAllowed") is True
-        and completeness.get("deterministicBacktestAllowed") is True
-    )
-    verification_status = (
-        "verified_deep_research"
-        if ea_ready
-        else str(completeness.get("status") or "legacy_needs_enrichment")
-    )
-    next_action = (
-        "เลือกแพลตฟอร์มและยืนยัน Strategy Spec ก่อนสร้าง Source"
-        if ea_ready
-        else "เติมกฎที่ยังไม่ทราบ/ขัดแย้ง แล้ววิจัยใหม่ก่อนส่งเข้าโรงงาน EA"
-    )
+        brief = normalize_strategy_brief(metrics.get("strategyBrief"))
+    except StrategyBriefValidationError:
+        return [], []
     report_id = safe_reference(report.get("id"))
-    mission_id = safe_reference(report.get("linkedMissionId"))
     context = report.get("workflowContext") if isinstance(report.get("workflowContext"), dict) else {}
     source = context.get("source") if isinstance(context.get("source"), dict) else {}
     source_identity = _research_sheet_deep_source_identity(report_id, source)
-    source_record_id = str(source_identity["sourceRecordId"])
-    identity = metrics.get("systemIdentity")
-    risk = metrics.get("riskModel")
-    system_name = _research_sheet_mapping_value(identity, "systemName", "name", "title") or report.get("title")
-    family = _research_sheet_mapping_value(identity, "strategyFamily", "family", "type") or identity
-    research_id = f"DR-{payload_digest('deep-research-sheet-v1', report_id, source_record_id)[:24]}"
-    # A backfill shares one complete, horizon-free index. Direct/live calls
-    # build it once from durable report files. Per-row lookup is O(1).
-    resolved_version_index = (
-        version_index
-        if isinstance(version_index, dict)
-        else _research_sheet_runtime_deep_version_index(report)
-    )
-    version_key = source_identity["versionKey"]
-    source_versions = (
-        resolved_version_index.get(version_key)
-        if isinstance(resolved_version_index.get(version_key), dict)
-        else {}
-    )
-    version_lookup = (
-        source_versions.get("byReportId")
-        if isinstance(source_versions.get("byReportId"), dict)
-        else {}
-    )
-    version_record = (
-        version_lookup.get(report_id)
-        if isinstance(version_lookup.get(report_id), dict)
-        else {}
-    )
-    current_version = clamp_int(version_record.get("researchVersion"), 1, 1, 10_000_000)
-    newest_report_id = str(source_versions.get("currentReportId") or report_id)
-    is_current_version = newest_report_id == report_id
-    source_links = metrics.get("sourceLinks") if isinstance(metrics.get("sourceLinks"), list) else []
-    implementation_notes = (
-        {
-            "schemaVersion": EA_RESEARCH_SCHEMA_VERSION,
-            "blueprintDigest": ea_research_blueprint_digest(research_blueprint),
-            "eaImplementationBlueprint": copy.deepcopy(research_blueprint),
-        }
-        if isinstance(research_blueprint, dict)
-        else (
-            copy.deepcopy(metrics.get("implementationNotes"))
-            if isinstance(metrics.get("implementationNotes"), dict)
-            else {"notes": metrics.get("implementationNotes")}
-        )
-    )
-    if metrics.get("chartAnnotations") is not None:
-        implementation_notes["chartAnnotations"] = metrics.get("chartAnnotations")
-    if metrics.get("simulationAssumptions") is not None:
-        implementation_notes["simulationAssumptions"] = metrics.get("simulationAssumptions")
-    deep_row = {
-        "research_id": research_id,
-        "research_version": current_version,
-        "is_current": is_current_version,
-        "system_id": safe_reference(source.get("systemId")),
-        "source_discovery_id": source_record_id,
-        "source_report_id": source_identity.get("sourceReportId"),
-        "source_record_id": source_record_id,
-        "source_mission_id": safe_reference(source.get("missionId")),
-        "research_mission_id": mission_id,
-        "research_report_id": report_id,
-        "system_name": system_name,
-        "system_identity_json": identity,
-        "strategy_family": family,
-        "verified_rules_json": metrics.get("verifiedRules"),
-        "conflicting_evidence_json": metrics.get("conflictingEvidence"),
-        "setup_conditions_json": metrics.get("setupConditions"),
-        "indicator_settings_json": metrics.get("indicatorSettings"),
-        "entry_steps_json": metrics.get("entrySteps"),
-        "exit_steps_json": metrics.get("exitSteps"),
-        "trade_management_steps_json": metrics.get("tradeManagementSteps"),
-        "risk_model_json": risk,
-        "stop_loss_rules_json": _research_sheet_mapping_value(
-            risk, "stopLossRules", "stopLoss", "stop_loss", "invalidation"
-        ),
-        "take_profit_rules_json": _research_sheet_mapping_value(
-            risk, "takeProfitRules", "takeProfit", "take_profit", "profitTarget"
-        ),
-        "position_sizing_rules_json": _research_sheet_mapping_value(
-            risk,
-            "riskAndSizing",
-            "positionSizingRules",
-            "positionSizing",
-            "lotRisk",
-        ),
-        "recovery_averaging_rules_json": metrics.get("recoveryAndAveragingRules"),
-        "special_conditions_json": metrics.get("specialConditions"),
-        "suitable_market": metrics.get("suitableMarket"),
-        "symbols_json": metrics.get("symbols"),
-        "suitable_timeframes_json": metrics.get("suitableTimeframe"),
-        "sessions_json": metrics.get("sessions"),
-        "suitable_for_json": metrics.get("suitableFor"),
-        # Keep the canonical blueprint exactly once in this existing JSON cell;
-        # no new required Sheet column is introduced, so student Sheets using
-        # the stable 49-header contract continue to work.
-        "implementation_notes_json": implementation_notes,
-        "candidate_platforms_json": metrics.get("targetPlatforms"),
-        "ohlc_backtest_readiness": metrics.get("ohlcBacktestReadiness") or "research_only",
-        "deterministic_rule_kind": metrics.get("deterministicRuleKind") or "not_classified",
-        "feasibility_status": metrics.get("feasibilityStatus") or "research_only",
-        "feasibility_reasons_json": (
-            metrics.get("feasibilityReasons")
-            or metrics.get("simulationAssumptions")
-            or metrics.get("limitations")
-        ),
-        "verification_status": verification_status,
-        "limitations_json": metrics.get("limitations") or metrics.get("conflictingEvidence"),
-        "source_links_json": source_links,
-        "checked_at": metrics.get("checkedAt") or report.get("updatedAt") or report.get("createdAt"),
-        "backtest_status": "not_run",
-        "optimization_status": "not_run",
-        "ea_factory_record_id": source_identity["eaFactoryRecordId"],
-        "ea_build_status": "not_started",
-        "issues": metrics.get("limitations") or metrics.get("conflictingEvidence"),
-        "next_action": next_action,
-        "owner": report.get("ownerAgentId"),
-        "updated_at": report.get("updatedAt") or report.get("createdAt"),
-    }
-    factory_row = {
+    row = {
         "record_id": source_identity["eaFactoryRecordId"],
-        "system_name": system_name,
-        "strategy_family": family,
-        "symbols_market": metrics.get("suitableMarket"),
-        "timeframe": metrics.get("suitableTimeframe"),
-        "entry_rules": metrics.get("entrySteps") or metrics.get("verifiedRules"),
-        "exit_rules": metrics.get("exitSteps"),
-        "stop_loss": _research_sheet_mapping_value(risk, "stopLoss", "stop_loss", "invalidation"),
-        "take_profit": _research_sheet_mapping_value(risk, "takeProfit", "take_profit", "profitTarget"),
-        "recovery": metrics.get("recoveryAndAveragingRules"),
-        "lot_risk": _research_sheet_mapping_value(
-            risk,
-            "riskAndSizing",
-            "positionSizingRules",
-            "positionSizing",
-            "lotRisk",
-        ),
-        "indicators": metrics.get("indicatorSettings"),
-        "special_conditions": {
-            "specialConditions": metrics.get("specialConditions"),
-            "tradeManagement": metrics.get("tradeManagementSteps"),
-            "implementationNotes": metrics.get("implementationNotes"),
-        },
-        "source_urls": "\n".join(str(url) for url in source_links if _normalized_contract_public_url(url)),
-        "verification_status": verification_status,
-        "backtest_status": "not_run",
-        "optimization_status": "not_run",
-        "issues": metrics.get("limitations") or metrics.get("conflictingEvidence"),
-        "next_action": next_action,
-        "target_platform": "",
-        "updated_at": report.get("updatedAt") or report.get("createdAt"),
+        "system_name": brief["systemName"],
+        "system_overview": brief["systemOverview"],
+        "entry_rules": brief["entryRules"],
+        "recovery_rules": brief["recoveryRules"],
+        "exit_rules": brief["exitRules"],
+        "money_management": brief["moneyManagement"],
+        "order_execution": brief["orderExecution"],
+        "display_requirements": brief["displayRequirements"],
+        "additional_notes": brief["additionalNotes"],
     }
-    version_rows: list[dict] = []
-    if is_current_version:
-        ordered_versions = (
-            source_versions.get("ordered")
-            if isinstance(source_versions.get("ordered"), list)
-            else []
-        )
-        # A live write only needs to demote the immediately-previous current
-        # row. During backfill each older report projects itself as non-current,
-        # so emitting the entire history here would only duplicate work and can
-        # overflow the bounded outbox for long-lived sources.
-        if len(ordered_versions) >= 2:
-            item = ordered_versions[-2]
-            version_rows.append({
-                "research_id": item.get("researchId"),
-                "research_version": item.get("researchVersion"),
-                "is_current": False,
-                "updated_at": report.get("updatedAt") or report.get("createdAt"),
-            })
-    version_rows.append(deep_row)
-    encoded_version_rows: list[dict] = []
-    for row in version_rows:
-        encoded_row = {
-            key: (
-                _research_sheet_blueprint_cell(value, research_blueprint)
-                if key == "implementation_notes_json"
-                and isinstance(research_blueprint, dict)
-                else _research_sheet_cell(value)
-            )
-            for key, value in row.items()
-        }
-        encoded_version_rows.append(encoded_row)
-    return (
-        encoded_version_rows,
-        [{key: _research_sheet_cell(value) for key, value in factory_row.items()}],
-    )
+    return ([{key: _research_sheet_cell(value) for key, value in row.items()}], [])
 
+
+def _research_sheet_deep_rows_legacy_projection(
+    report: dict,
+    *,
+    version_index: dict[tuple[str, str], dict] | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Keep the historical symbol non-writing for old installed callers."""
+
+    del report, version_index
+    return [], []
 
 def _research_sheet_radar_rows(report: dict) -> list[dict]:
     if not (
@@ -32277,6 +41908,8 @@ def _research_sheet_report_items(
     if report.get("type") == "trading_system_discovery_report":
         projections.append(("worldSystem", _research_sheet_world_rows(report)))
     elif report.get("type") == "trading_system_research_report":
+        if not _deep_research_report_is_human_confirmed(report):
+            return []
         deep_rows, _legacy_factory_rows = _research_sheet_deep_rows(
             report,
             version_index=deep_version_index,
@@ -32428,8 +42061,15 @@ def _research_sheet_queue_report(
     flush: bool = True,
     allowed_consumer_ids: set[str] | None = None,
     deep_version_index: dict[tuple[str, str], dict] | None = None,
+    expected_sheet_binding: dict | None = None,
 ) -> dict:
     internal = _research_sheet_hub_internal()
+    if (
+        expected_sheet_binding is not None
+        and _deep_research_sheet_binding_from_internal(internal)
+        != expected_sheet_binding
+    ):
+        return {"queued": 0, "reason": "sheet_configuration_changed"}
     sheet_id = str(internal.get("sheetId") or "")
     if not sheet_id:
         return {"queued": 0, "reason": "not_configured"}
@@ -32870,16 +42510,27 @@ def _research_sheet_mark_write_verified(config_revision: int, consumer_id: str) 
     _mutate_dashboard_workflow_settings(mutate)
 
 
-def _flush_research_sheet_outbox(*, max_items: int = 20) -> dict:
+def _flush_research_sheet_outbox(
+    *,
+    max_items: int = 20,
+    allowed_item_ids: set[str] | None = None,
+) -> dict:
     if not RESEARCH_SHEET_FLUSH_LOCK.acquire(blocking=False):
         return {"processed": 0, "synced": 0, "reason": "flush_in_progress"}
     try:
-        return _flush_research_sheet_outbox_locked(max_items=max_items)
+        return _flush_research_sheet_outbox_locked(
+            max_items=max_items,
+            allowed_item_ids=allowed_item_ids,
+        )
     finally:
         RESEARCH_SHEET_FLUSH_LOCK.release()
 
 
-def _retry_failed_research_sheet_outbox(*, max_items: int = 50) -> dict:
+def _retry_failed_research_sheet_outbox(
+    *,
+    max_items: int = 50,
+    allowed_item_ids: set[str] | None = None,
+) -> dict:
     """Atomically reopen a bounded failed batch and attempt delivery once."""
 
     if not RESEARCH_SHEET_FLUSH_LOCK.acquire(blocking=False):
@@ -32898,14 +42549,22 @@ def _retry_failed_research_sheet_outbox(*, max_items: int = 50) -> dict:
         retry = _research_sheet_requeue_failed_current_revision(
             reason="explicit_retry",
             max_items=max_items,
+            allowed_item_ids=allowed_item_ids,
         )
-        flush = _flush_research_sheet_outbox_locked(max_items=max_items)
+        flush = _flush_research_sheet_outbox_locked(
+            max_items=max_items,
+            allowed_item_ids=allowed_item_ids,
+        )
         return {"retry": retry, "flush": flush}
     finally:
         RESEARCH_SHEET_FLUSH_LOCK.release()
 
 
-def _flush_research_sheet_outbox_locked(*, max_items: int = 20) -> dict:
+def _flush_research_sheet_outbox_locked(
+    *,
+    max_items: int = 20,
+    allowed_item_ids: set[str] | None = None,
+) -> dict:
     internal = _research_sheet_hub_internal()
     sheet_id = str(internal.get("sheetId") or "")
     revision = int(internal.get("configRevision") or 0)
@@ -32919,6 +42578,15 @@ def _flush_research_sheet_outbox_locked(*, max_items: int = 20) -> dict:
         return {"processed": 0, "synced": 0, "reason": "activation_required"}
     if not auth.get("configured"):
         return {"processed": 0, "synced": 0, "reason": "auth_required" if sheet_id else "not_configured"}
+    allowed_ids = (
+        None
+        if allowed_item_ids is None
+        else {
+            safe_reference(item)
+            for item in allowed_item_ids
+            if safe_reference(item)
+        }
+    )
     with RESEARCH_SHEET_OUTBOX_LOCK:
         store = _load_research_sheet_outbox_unlocked()
         now = datetime.now(timezone.utc)
@@ -32927,6 +42595,10 @@ def _flush_research_sheet_outbox_locked(*, max_items: int = 20) -> dict:
             for item in store.get("items") or []
             if isinstance(item, dict)
             and item.get("status") in {"pending", "retry_pending", "write_unknown"}
+            and (
+                allowed_ids is None
+                or safe_reference(item.get("id")) in allowed_ids
+            )
             and int(item.get("configRevision") or -1) == revision
             and (
                 parse_iso(item.get("nextAttemptAt")) is None
@@ -32961,6 +42633,9 @@ def _flush_research_sheet_outbox_locked(*, max_items: int = 20) -> dict:
                 candidate.get("row") if isinstance(candidate.get("row"), dict) else {},
                 optional_headers=tuple(
                     candidate_contract.get("optionalWriteHeaders") or []
+                ),
+                exact_headers=tuple(
+                    candidate_contract.get("exactHeaders") or []
                 ),
             )
             status = "synced"
@@ -33182,6 +42857,309 @@ def _research_sheet_backfill_recent_reports(
         ),
     }
 
+
+def _deep_research_confirmation_failure(
+    kind: str,
+    message_th: str,
+    *,
+    status: int = 409,
+    report: object = None,
+) -> dict:
+    row = report if isinstance(report, dict) else {}
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    ea_research = (
+        _ea_research_report_read_model(row, metrics)
+        if row.get("type") == "trading_system_research_report"
+        else _ea_research_unavailable_read_model(kind)
+    )
+    return {
+        "ok": False,
+        "kind": kind,
+        "messageTh": message_th,
+        "confirmation": (
+            ea_research.get("confirmation")
+            if isinstance(ea_research.get("confirmation"), dict)
+            else None
+        ),
+        "_httpStatus": status,
+    }
+
+
+def _confirm_deep_research_strategy_brief(payload: dict) -> dict:
+    """Persist one digest-bound A-J approval, then write the compact Sheet row."""
+
+    allowed_fields = {
+        "researchReportId",
+        "confirmBriefDigest",
+        "confirmSaveToGoogleSheet",
+    }
+    unexpected = sorted(set(payload) - allowed_fields)
+    if unexpected:
+        raise RequestError("คำขอยืนยัน Strategy Brief มีฟิลด์ที่ระบบไม่รองรับ", 422)
+    raw_report_id = str(payload.get("researchReportId") or "").strip()
+    report_id = safe_reference(raw_report_id)
+    supplied_digest = str(payload.get("confirmBriefDigest") or "").strip().lower()
+    if not report_id or report_id != raw_report_id or not SAFE_ID_PATTERN.fullmatch(report_id):
+        raise RequestError("รหัสรายงานวิจัยไม่ถูกต้อง", 422)
+    if not re.fullmatch(r"[0-9a-f]{64}", supplied_digest):
+        raise RequestError("Strategy Brief digest ที่ยืนยันไม่ถูกต้อง", 422)
+    if payload.get("confirmSaveToGoogleSheet") is not True:
+        raise RequestError("ต้องยืนยันการบันทึกลง Google Sheet ก่อน", 422)
+
+    report_path = (RUNTIME_REPORTS_DIR / f"{report_id}.json").resolve(strict=False)
+    try:
+        report_path.relative_to(RUNTIME_REPORTS_DIR.resolve(strict=False))
+    except ValueError as exc:
+        raise RequestError("รหัสรายงานวิจัยไม่ถูกต้อง", 422) from exc
+
+    with DEEP_RESEARCH_CONFIRMATION_LOCK:
+        report = read_json(report_path, None) if report_path.is_file() else None
+        if not isinstance(report, dict) or safe_reference(report.get("id")) != report_id:
+            raise RequestError("ไม่พบรายงานวิจัยที่เลือก", 404)
+        mission, lineage_error = _deep_research_report_lineage(report)
+        if lineage_error is not None:
+            return _deep_research_confirmation_failure(
+                lineage_error,
+                "รายงานนี้ยังไม่ผ่านสายงาน Backend และ Mission ที่ตรวจสอบย้อนกลับได้",
+                status=409,
+                report=report,
+            )
+        _hub, _consumer, sheet_error = _deep_research_sheet_preflight()
+        if sheet_error is not None:
+            sheet_messages = {
+                "google_sheet_not_configured": "ยังไม่ได้ตั้ง Google Sheet กลาง",
+                "google_sheet_activation_required": "Google Sheet กลางยังไม่ได้เปิดใช้",
+                "google_oauth_required": "Google OAuth ยังไม่พร้อม กรุณาเชื่อมบัญชี Google ใหม่",
+                "deep_research_sheet_not_verified": "แท็บ Deep_Research ยังไม่ผ่านการตรวจ Schema A-J และสิทธิ์อ่านเขียน",
+            }
+            return _deep_research_confirmation_failure(
+                sheet_error,
+                sheet_messages.get(sheet_error, "Google Sheet ยังไม่พร้อมบันทึก"),
+                status=409,
+                report=report,
+            )
+        sheet_binding = _deep_research_active_sheet_binding()
+        if sheet_binding is None:
+            return _deep_research_confirmation_failure(
+                "google_sheet_activation_required",
+                "Google Sheet กลางเปลี่ยนสถานะระหว่างการตรวจ กรุณารีเฟรชแล้วกดยืนยันอีกครั้ง",
+                status=409,
+                report=report,
+            )
+        metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
+        if not isinstance(metrics.get("strategyBrief"), dict):
+            return _deep_research_confirmation_failure(
+                "legacy_49_field_rerun_required",
+                "รายงานแบบ Blueprint 49 ช่องเป็นประวัติแบบอ่านอย่างเดียว กรุณาวิเคราะห์ระบบใหม่เพื่อสร้าง Strategy Brief A-J",
+                status=422,
+                report=report,
+            )
+        try:
+            brief = normalize_strategy_brief(metrics.get("strategyBrief"))
+            current_digest = compute_strategy_brief_digest(brief)
+        except StrategyBriefValidationError:
+            return _deep_research_confirmation_failure(
+                "strategy_brief_invalid",
+                "Strategy Brief ของรายงานยังไม่ครบ 10 ช่อง กรุณาวิเคราะห์ระบบนี้ใหม่",
+                status=422,
+                report=report,
+            )
+        stored_confirmation = _deep_research_confirmation_storage_record(
+            report,
+            blueprint_digest=current_digest,
+        )
+        accepted_digests = {current_digest}
+        if stored_confirmation:
+            accepted_digests.update(
+                str(stored_confirmation.get(key) or "").strip().lower()
+                for key in (
+                    "originalBriefDigest",
+                    "confirmedBriefDigest",
+                    "originalBlueprintDigest",
+                    "confirmedBlueprintDigest",
+                )
+            )
+        if supplied_digest not in accepted_digests:
+            return _deep_research_confirmation_failure(
+                "strategy_brief_digest_stale",
+                "ข้อมูลวิจัยเปลี่ยนจากหน้าที่เปิดอยู่ กรุณารีเฟรชและตรวจรายละเอียดอีกครั้ง",
+                status=409,
+                report=report,
+            )
+        column_completeness = _deep_research_projected_column_completeness(report)
+        if column_completeness.get("missingColumns"):
+            return _deep_research_confirmation_failure(
+                "strategy_brief_columns_incomplete",
+                "Strategy Brief ยังไม่ครบ 10 ช่อง A-J กรุณาวิเคราะห์ระบบนี้ใหม่ก่อนบันทึก",
+                status=422,
+                report=report,
+            )
+        confirmation_created = stored_confirmation is None
+        if confirmation_created:
+            confirmed_at = utc_now()
+            confirmation_record = {
+                "schemaVersion": DEEP_RESEARCH_CONFIRMATION_SCHEMA_VERSION,
+                "status": "confirmed",
+                "researchReportId": report_id,
+                "sourceMissionId": safe_reference((mission or {}).get("id")),
+                "originalBriefDigest": current_digest,
+                "confirmedBriefDigest": current_digest,
+                # Compatibility aliases keep historical audit readers bounded.
+                "originalBlueprintDigest": current_digest,
+                "confirmedBlueprintDigest": current_digest,
+                "confirmedAssumptionIds": [],
+                "confirmedAt": confirmed_at,
+                "actorProvenance": "local_visual_office_human_confirmation",
+                "saveToGoogleSheet": True,
+                "sheetBinding": copy.deepcopy(sheet_binding),
+                "columnCompleteness": column_completeness,
+            }
+            store = _load_deep_research_confirmation_store_unlocked()
+            records = [
+                item
+                for item in (store.get("records") or [])
+                if isinstance(item, dict)
+                and safe_reference(item.get("researchReportId")) != report_id
+            ]
+            records.append(confirmation_record)
+            store["records"] = records[-DEEP_RESEARCH_CONFIRMATION_LIMIT:]
+            _save_deep_research_confirmation_store_unlocked(store)
+        updated_report = report
+
+    if _deep_research_active_sheet_binding() != sheet_binding:
+        return _deep_research_confirmation_failure(
+            "sheet_configuration_changed",
+            "Google Sheet กลางถูกเปลี่ยนระหว่างการยืนยัน กรุณารีเฟรชและยืนยันกับ Sheet ปัจจุบันอีกครั้ง",
+            status=409,
+            report=updated_report,
+        )
+    expected_items = [
+        item
+        for item in _research_sheet_report_items(
+            updated_report,
+            int(sheet_binding["configRevision"]),
+        )
+        if isinstance(item, dict) and item.get("consumerId") == "deepResearch"
+    ]
+    expected_item_ids = {
+        safe_reference(item.get("id"))
+        for item in expected_items
+        if safe_reference(item.get("id"))
+    }
+    if not expected_item_ids:
+        return _deep_research_confirmation_failure(
+            "strategy_brief_projection_unavailable",
+            "ไม่สามารถสร้างแถว Strategy Brief A-J ที่ผูกกับการยืนยันนี้ได้ กรุณาวิเคราะห์ใหม่",
+            status=422,
+            report=updated_report,
+        )
+    delivery_before = _deep_research_sheet_delivery_read_model(updated_report)
+    retry_result = None
+    if delivery_before.get("status") == "failed":
+        retry_operation = _retry_failed_research_sheet_outbox(
+            max_items=50,
+            allowed_item_ids=expected_item_ids,
+        )
+        retry_result = retry_operation.get("retry")
+        flush_result = retry_operation.get("flush") or {}
+        queue_result = {"queued": 0, "reason": None}
+    else:
+        queue_result = _research_sheet_queue_report(
+            updated_report,
+            flush=False,
+            allowed_consumer_ids={"deepResearch"},
+            expected_sheet_binding=sheet_binding,
+        )
+        if queue_result.get("reason") == "sheet_configuration_changed":
+            return _deep_research_confirmation_failure(
+                "sheet_configuration_changed",
+                "Google Sheet กลางถูกเปลี่ยนระหว่างบันทึก กรุณารีเฟรชและยืนยันใหม่",
+                status=409,
+                report=updated_report,
+            )
+        flush_result = _flush_research_sheet_outbox(
+            max_items=50,
+            allowed_item_ids=expected_item_ids,
+        )
+    if (
+        _deep_research_active_sheet_binding() != sheet_binding
+        or _deep_research_confirmation_storage_record(
+            updated_report,
+            blueprint_digest=current_digest,
+        ) is None
+    ):
+        return _deep_research_confirmation_failure(
+            "sheet_configuration_changed",
+            "Google Sheet กลางเปลี่ยนก่อนจบการบันทึก กรุณารีเฟรชและยืนยันใหม่",
+            status=409,
+            report=updated_report,
+        )
+    delivery = _deep_research_sheet_delivery_read_model(updated_report)
+    ea_research = _ea_research_report_read_model(updated_report, metrics)
+    confirmation_model = (
+        ea_research.get("confirmation")
+        if isinstance(ea_research.get("confirmation"), dict)
+        else {}
+    )
+    kind = (
+        "deep_research_confirmed_and_saved"
+        if delivery.get("synced") is True
+        else "deep_research_confirmed_sheet_pending"
+    )
+    append_audit({
+        "type": "deep_research.strategy_brief_confirmed_for_ea",
+        "reportId": report_id,
+        "missionId": safe_reference((mission or {}).get("id")),
+        "confirmationCreated": confirmation_created,
+        "sheetDeliveryStatus": delivery.get("status"),
+        "sheetQueuedCount": queue_result.get("queued"),
+        "sheetSyncedCount": flush_result.get("synced"),
+        "credentialsIncluded": False,
+    })
+    return {
+        "ok": True,
+        "kind": kind,
+        "idempotentReplay": not confirmation_created,
+        "messageTh": (
+            "บันทึก Strategy Brief A-J ลง Google Sheet สำเร็จ และพร้อมเลือกในโรงงาน EA แล้ว"
+            if delivery.get("synced") is True
+            else "ยืนยันข้อมูลแล้ว แต่ Google Sheet ยังบันทึกไม่สำเร็จ ระบบเก็บคิวไว้และยังไม่ปล่อยเข้าโรงงาน EA"
+        ),
+        "confirmation": confirmation_model,
+        "sheetDelivery": {
+            **delivery,
+            "queuedThisRequest": clamp_int(
+                queue_result.get("queued"), 0, 0, RESEARCH_SHEET_OUTBOX_LIMIT
+            ),
+            "syncedThisRequest": clamp_int(
+                flush_result.get("synced"), 0, 0, RESEARCH_SHEET_OUTBOX_LIMIT
+            ),
+            "flushReason": flush_result.get("reason"),
+            "queueReason": queue_result.get("reason"),
+            "retry": retry_result,
+        },
+        "researchCatalog": _deep_research_catalog_read_model(),
+        "eaFactory": ea_factory_read_model(),
+    }
+
+
+def confirm_deep_research_for_ea(payload: object) -> dict:
+    """Confirm only the explicit compact Strategy Brief A-J contract."""
+
+    source = payload if isinstance(payload, dict) else {}
+    legacy_fields = {"confirmBlueprintDigest", "confirmAssumptions"}
+    if legacy_fields.intersection(source):
+        raise RequestError(
+            "คำขอแบบ Blueprint 49 ช่องยกเลิกแล้วและเป็นประวัติแบบอ่านอย่างเดียว "
+            "กรุณากลับไปวิเคราะห์ระบบใหม่ แล้วกดยืนยัน Strategy Brief A-J",
+            422,
+        )
+    if "confirmBriefDigest" not in source:
+        raise RequestError(
+            "ต้องใช้ Strategy Brief A-J จากงานวิจัยรอบใหม่ก่อนยืนยันและบันทึก",
+            422,
+        )
+    return _confirm_deep_research_strategy_brief(source)
 
 def _radar_website_tool_read_model(
     reports: object,
@@ -33822,21 +43800,6 @@ def workflow_dashboard_read_model(
             missions=missions,
             delivered_sources=delivered_sources,
         )
-        model["ohlcImport"] = {
-            "status": "ready_local_runner",
-            "mode": "local_read_only_in_memory",
-            "endpoint": "/api/props/left_server_racks/ohlc/import",
-            "maximumHistoryYears": 10,
-            "maximumFileBytes": MAX_OHLC_FILE_BYTES,
-            "maximumRows": MAX_OHLC_ROWS,
-            "acceptedFormats": ["csv", "xlsx"],
-            "writeFiles": False,
-            "networkUpload": False,
-            "metaTraderActions": False,
-            "messageTh": "Local Runner อ่าน CSV/XLSX ในหน่วยความจำ ไม่บันทึกไฟล์ ไม่ส่งอินเทอร์เน็ต และไม่สั่ง MT4/MT5",
-        }
-    elif prop_id == "right_server_racks":
-        model["eaFactory"] = ea_factory_read_model()
     elif prop_id == "left_audit_crystals":
         workflow_settings = load_dashboard_workflow_settings()
         model["schedule"] = _dashboard_saved_schedule_read_model(
@@ -34068,6 +44031,11 @@ def _sanitize_dashboard_workflow_form(action: dict, value: object) -> dict:
                 if required:
                     raise RequestError(f"Missing required workflow field: {field_id}", 422)
                 continue
+            if field_id == "rateReservePercent" and isinstance(raw, bool):
+                raise RequestError(
+                    "Rate Limit reserve must be a whole percentage.",
+                    422,
+                )
             try:
                 numeric = float(raw)
             except (TypeError, ValueError):
@@ -34089,12 +44057,21 @@ def _sanitize_dashboard_workflow_form(action: dict, value: object) -> dict:
             if field_id == "outputLimitChars":
                 numeric = max(1000, min(100000, int(numeric)))
             if field_id == "rateReservePercent":
-                if int(numeric) != AUTOMATION_MIN_REMAINING_PERCENT:
+                if numeric != int(numeric):
                     raise RequestError(
-                        "Rate Limit reserve is fixed at 15%; automatic work runs only when remaining quota is greater than 15%.",
+                        "Rate Limit reserve must be a whole percentage.",
                         422,
                     )
-                numeric = AUTOMATION_MIN_REMAINING_PERCENT
+                if not (
+                    AUTOMATION_MIN_REMAINING_PERCENT_MIN
+                    <= int(numeric)
+                    <= AUTOMATION_MIN_REMAINING_PERCENT_MAX
+                ):
+                    raise RequestError(
+                        "Rate Limit reserve must be between 0 and 100 percent.",
+                        422,
+                    )
+                numeric = int(numeric)
             result[field_id] = int(numeric) if field_type == "integer" else numeric
             continue
         text_value = " ".join(str(raw or "").replace("\x00", " ").split()).strip()
@@ -34962,63 +44939,55 @@ def _workflow_prompt(
         "deep_research_system": (
             "วิจัยเฉพาะ system record ที่ Backend เลือกและ bind ไว้ใน Source เท่านั้น ห้ามสลับไปเป็นระบบอื่น. "
             "Runner จะ bind URL ต้นทาง 2 รายการแยกจาก Mission: เปิดตรงทั้งคู่ ห้ามค้นกว้าง เปลี่ยน หรือเพิ่ม URL; evidence/sourceLinks ต้องตรงชุดนั้น. "
-            "แตกหลักฐานเป็น EA-ready Strategy Research v2 ที่ใช้ ruleId/operand/operator/timeframe/bar shift ได้ตรง ๆ; "
-            "ส่ง object research ตาม Output Schema เท่านั้น แล้ว Runner จะตรวจ blueprint/digest/projection. "
-            "กำหนด barSemantics ให้ชัด: bar 0 คือแท่งกำลังก่อตัว, bar 1 คือแท่งปิดล่าสุด, bar 2 คือแท่งปิดก่อนหน้า, "
-            "closed-bar strategy ต้อง evaluateOn=new_closed_bar, signalBar=1, previousBar=2 และ lookaheadForbidden=true. "
-            "Cross ขึ้นต้องขยายเป็น fast[2] <= slow[2] AND fast[1] > slow[1]; Cross ลงต้องขยายเป็น "
-            "fast[2] >= slow[2] AND fast[1] < slow[1]. ถ้าแหล่งบอกเพียง cross แต่ไม่บอกทิศ หรือสมการขัดกับคำอธิบาย "
-            "ให้สร้าง blockingIssue และ eaHandoffAllowed=false ห้ามเดา. "
-            "ระบุ scope และ inputs ตาม schema; indicators ต้อง bind timeframe/outputLine และมี period/method/shift/buffer หรือ inputRef จริง ห้าม parameters={}. "
-            "setup/entry/exit แยก Buy/Sell; ทุกกฎต้องเป็น typed expression และระบุ ruleId/phase/side/evaluationEvent/sourceRefs/humanTextTh ตรงกล่อง. "
-            "กฎใน entry.buy และ exit.buy ต้อง side=buy เท่านั้น; entry.sell และ exit.sell ต้อง side=sell เท่านั้น ห้าม side=both ในกล่องเฉพาะฝั่ง. "
-            "delay หรือ policy ที่ใช้ร่วมกันต้องอยู่ใน execution หรือ unknowns ห้ามคัดลอกเป็นกฎซ้ำใน entry ของแต่ละฝั่ง. "
-            "closed-bar ใช้ new_closed_bar และ shift อยู่ใน operand; ห้าม free text หรือ mirror กฎข้ามฝั่ง. "
-            "ถ้าแหล่งระบุเพียงฝั่งเดียว ห้าม mirror อีกฝั่งเอง ให้ disabled พร้อมเหตุผลและ blocker ตามผลกระทบ. "
-            "TP/SL ต้องมี default+sideOverrides และ method/reference/unit/distance/formula/buffer/placement/min-stop/freeze/neverWorsen. "
-            "orderManagement ต้องมี Break-even, Trailing stop, Partial close, scaleIn, scaleOut, modifyStopLoss, modifyTakeProfit "
-            "และ pendingOrders สำหรับ cancel/expire/reprice/modify โดยฟังก์ชันที่ไม่ใช้ต้องส่ง enabled=false อย่างชัดเจน. "
-            "ที่เปิดใช้ต้องมี matching typed trigger/rule, action.kind, parameters, lifecycle test, idempotency/cadence/precedence/stop guard; ห้าม placeholder. "
-            "riskAndSizing ต้องครบ lot mode/base/risk/stop dependency/normalization/exposure/spread/slippage/loss-stop/cooldown. "
-            "แจกแจง recovery แบบ none/grid/martingale/averaging/hedging: trigger, direction, spacing, maxLevels, lot formula/multiplier/cap, "
-            "basket TP/SL, equity hard stop, hedge lifecycle, re-entry policy, reset และ abort condition; ถ้าขาด safety cap ต้องไม่พร้อมส่ง EA. "
-            "เมื่อ recovery เปิดใช้ ให้กรอก spacing.method/reference/unit/adverseMoveOnly และตัวกำหนด value/input/ATR/formula; "
-            "lotFormula.mode/base/multiplier/sequence/formula/levelVariable/lot-step normalization; basketTakeProfit และ basketStopLoss "
-            "ต้องระบุ enabled/method/reference/unit/value หรือ formula; ต้องมี maxBasketLots, maxDrawdownPercent, reentryPolicy และ levelRules "
-            "อย่างน้อยหนึ่งกฎ phase=recovery พร้อม lifecycle test. โหมด hedging ต้องมี openTrigger, closeTrigger, maxConcurrentHedges, "
-            "closeOrder และ lotFormula ของ hedge ครบ ห้ามใช้ object เปล่าหรือข้อความกว้าง ๆ แทนสมการ. "
-            "lotMode ใช้ enum ใน schema (sequence ต้องมี lotSequence บวก); execution ต้องมี duplicate/price-normalize/bounded-retry/restart policy; "
-            "limit/stop ต้องเปิด pendingOrders พร้อม typed orderType/entryPrice/expiry/cancel-replace. "
-            "กำหนด stateMachine อย่างน้อย FLAT กับ LONG/SHORT; เพิ่ม PENDING/RECOVERY/COOLDOWN/HALTED เมื่อใช้ lifecycle นั้น. "
-            "execution.evaluationOrder/precedence ต้องเป็น safety > exit > manage > recovery (เฉพาะ enabled) > entry; "
-            "exit มาก่อนแก้ไข/เพิ่ม exposure, management ห้ามทำให้ stop แย่ลง และ recovery ตรวจ abort/basket exit/cap ก่อนเพิ่มระดับ. "
-            "transition/pseudocode ต้องอ้าง enabled ruleId; tests ต้องมี positive/negative (+boundary เมื่อ Cross) สำหรับ setup/entry/exit "
-            "และ lifecycle สำหรับ management/recovery. "
-            "เมื่อแหล่งระบุ EMA/SMA/SMMA/LWMA ให้ method ใช้ enum ema/sma/smma/lwma ตรงชนิดนั้น; ใช้ unknown เฉพาะเมื่อแหล่งบอกเพียง MA โดยไม่ระบุวิธีจริง. "
-            "ค่าที่มีผลต่อโค้ดต้องมี sourceStatus/sourceRefs ตาม schema; derived ต้องมีหลักฐาน, assumption ต้องมี evidence+confirmed affectsPaths; "
-            "กฎหลัก assumption ล้วนห้าม ready—ถ้าไม่รองรับให้ unknown/blocker. "
-            "ห้ามสร้างตัวเลขที่ไม่ปรากฏในแหล่ง; assumptions, unknowns และ conflicts ต้องมี path กับคำถามภาษาไทยที่ใช้สร้าง revision ถัดไป. "
-            "ประวัติเก่าที่ไม่มี blueprint/digest หรือ rule metadata ต้องวิจัย revision ใหม่ ห้ามเดาอัปเกรดจากสรุปเก่า. "
-            "completeness ต้องรายงาน status ready/needs_clarification/not_ea_ready, score, eaHandoffAllowed, deterministicBacktestAllowed, "
-            "blockingIssues, warnings, unknownPaths และ conflictPaths ตามความจริง; verified source ไม่ได้แปลว่า EA-ready. "
+            "ส่ง object research เป็น Strategy Brief แบบร้อยแก้วตาม Output Schema เท่านั้น: systemName, systemOverview, entryRules, "
+            "recoveryRules, exitRules, moneyManagement, orderExecution, displayRequirements และ additionalNotes. "
+            "systemOverview ต้องรวมแนวคิด ตลาด/สัญลักษณ์ รูปแบบระบบ และกรอบเวลาที่แหล่งกล่าวถึง แต่ห้ามล็อก Timeframe ของ EA; "
+            "ให้ระบุว่าผู้ใช้เลือกกรอบเวลาใช้งานจริงได้ เว้นแต่แหล่งกำหนดชัดว่าห้ามเปลี่ยน. "
+            "entryRules เขียน Buy/Sell, Indicator, ค่า parameter, เงื่อนไข AND/OR และจังหวะแท่งเท่าที่หลักฐานระบุเป็นประโยคที่คนเขียน EA ทำตามได้. "
+            "ตัวอย่าง cross ขึ้นที่อิงแท่งปิดคือ fast[2] <= slow[2] และ fast[1] > slow[1]; cross ลงคือ fast[2] >= slow[2] และ fast[1] < slow[1]. "
+            "recoveryRules, exitRules, moneyManagement และ orderExecution ต้องเก็บกฎจากแหล่งข้อมูลก่อน แล้วเติมเฉพาะส่วนที่ขาดตามนโยบายถาวรนี้:\n"
+            + EA_STRATEGY_BRIEF_IMPLEMENTATION_DEFAULT_POLICY
+            + "\n"
+            "displayRequirements ใช้ค่าเริ่มต้นเป็น Comment/Panel แสดงชื่อระบบ สัญญาณ Balance, Equity และ Spread หากแหล่งไม่กำหนด. "
+            "additionalNotes รวมข้อควรระวังและสิ่งที่ผู้ใช้ต้องเลือกเอง; ไม่มีให้เขียน ไม่มีหมายเหตุเพิ่มเติม. "
             "ตรวจอย่างน้อยสอง public URL คนละโดเมน เปิดจริงและให้ sourceLinks ตรง evidence; local/private/โดเมนเดียวไม่นับสองแหล่ง. "
-            "checkedAt ต้องเป็น ISO 8601 พร้อม UTC offset; evidenceKinds ต้องตรงตัว at_least_two_source_urls, checked_at, limitations, "
-            "ea_readiness, source_digest เท่านั้น. งานนี้เป็น Research/Analysis-only ไม่ใช่ผล Compile, Backtest หรือการรับประกันกำไร. "
+            "checkedAt ต้องเป็น ISO 8601 พร้อม UTC offset; limitations ต้องมีอย่างน้อยหนึ่งข้อ; evidenceKinds ต้องตรงตัว "
+            "at_least_two_source_urls, checked_at, limitations, source_digest เท่านั้น. "
+            "งานนี้เป็น Research/Analysis-only ไม่ใช่ผล Compile, Backtest หรือการรับประกันกำไร. "
             "ห้าม Sign in กรอกฟอร์ม ดาวน์โหลดหรือรันไฟล์ เขียนระบบภายนอก หรือเรียก MT4/MT5."
         ),
         "build_strategy_code": (
             "สร้างร่าง Source Code ตามรายงานต้นทางและแพลตฟอร์มที่เลือก ภายใน PROJECT_ROOT/workspace เท่านั้น. "
             "ผลลัพธ์นี้เป็น SOURCE-ONLY / UNCOMPILED. ห้ามเปิด MetaEditor, MT4, MT5 หรือ TradingView; "
             "ห้าม Compile, Backtest, Optimize, Deploy หรือส่งคำสั่งเทรด. รายงานไฟล์แบบ project-relative เท่านั้นและระบุขั้นตรวจถัดไป. "
+            "Source ต้องเป็นไฟล์เดี่ยวที่ตรวจได้ครบ: ห้าม #import/#include/#resource, DLL/OS/process, WebRequest/Socket, "
+            "File/Folder/Database/Resource, TerminalClose/ExpertRemove, การควบคุมวงจร Chart/Template, การแก้ persistent GlobalVariable, "
+            "Timer/TesterStop/TesterWithdrawal, การลบ Object, SendMail/SendNotification/SendFTP และ Alert/MessageBox/PlaySound/Sleep; "
+            "อนุญาต event handler เฉพาะ OnInit/OnDeinit/OnTick และคำสั่งเทรดทุกจุดต้องอยู่ใน call graph ของ OnTick เท่านั้น; "
+            "อนุญาต macro เพียง #define SIGNAL_NONE -1 และห้าม class/struct/new/delete หรือเรียกฟังก์ชันที่ global scope; "
+            "ห้าม OrderSendAsync/.OrderOpen ห้ามลูปที่ไม่มีขอบเขต/วนศูนย์รอบ/ไม่มีวงเล็บปีกกา "
+            "ห้ามครอบ safety guard ด้วย flag หรือ control อื่น "
+            "และห้าม direct/mutual recursion ที่ lifecycle เรียกถึง; "
+            "หากผิดเงื่อนไข Backend ต้องปฏิเสธก่อนเปิด MetaEditor. "
             "คัดลอกค่า sourceRecordDigest, strategySpecDigest และ platform จาก EA_FACTORY markers ใน brief กลับมาแบบตรงตัวทุกอักขระ; "
             "ห้ามคำนวณใหม่ ห้ามเดา และห้ามเปลี่ยนแพลตฟอร์ม."
         ),
         "review_source_code": (
             "ตรวจ Source Code แบบ STATIC ANALYSIS / SOURCE-ONLY จากผลงานต้นทาง. ห้ามเปิด MetaEditor, MT4, MT5 หรือ TradingView; "
             "ห้าม Compile, Backtest, Optimize, Deploy หรือเทรด. สรุป syntax risk, logic risk, look-ahead/repaint, money-management risk "
-            "และรายการแก้ไขโดยห้ามอ้างว่าผ่าน Compile หรือทดสอบแล้ว. คัดลอก sourceRecordDigest, strategySpecDigest และ platform "
-            "จาก EA_FACTORY markers กลับมาแบบตรงตัว และคืน strategyCoverage เป็น JSON ที่มี coveredFields ครบ A-M ทั้ง 13 fields "
-            "กับ uncoveredFields=[] เฉพาะเมื่อ Source ใช้กฎครบจริง; หากไม่ครบต้องระบุช่องที่ขาดและให้ severity สะท้อน blocker ตามจริง."
+            "และรายการแก้ไขโดยห้ามอ้างว่าผ่าน Compile หรือทดสอบแล้ว. คืน sourceDigest เป็นค่า 64-hex เปล่าจาก "
+            "EA_FACTORY_IMMUTABLE_DIGESTS เท่านั้น ห้ามใช้ EA_STRATEGY_BRIEF_SHA256 หรือเขียนคำอธิบายปน. คัดลอก "
+            "sourceRecordDigest, strategySpecDigest และ platform จาก EA_FACTORY markers กลับมาแบบตรงตัว. "
+            "ค่า hash และ strategyCoverage ที่ Worker คืนเป็นข้อสังเกตเท่านั้น; Backend จะ rehash ไฟล์ immutable และคำนวณ "
+            "deterministic coverage ใหม่ก่อนผ่าน Gate. "
+            "สำหรับ v3 ต้องเป็น JSON object ที่มีเพียง coveredFields/uncoveredFields โดย coveredFields เท่ากับ A-J ทั้ง 10 ชื่อ "
+            "ตาม Backend brief แบบตรงชุด ไม่มี field เกิน และ uncoveredFields=[] เฉพาะเมื่อ Source ใช้กฎครบจริง. Digest binding "
+            "ครอบคลุม record_id/system_name/system_overview/additional_notes โดยไม่ต้องมี logic ซ้ำ; ข้อมูล fundamental/external "
+            "ที่ไม่มีอาจใช้ input แบบ fail-closed สำหรับ tester/operator ได้; "
+            "ให้ใช้ severity high/critical เฉพาะข้อบกพร่อง executable ที่ทำให้กฎผิดแน่นอน ไม่ปลอดภัย หรือ risk ไร้ขอบเขต; "
+            "ข้อจำกัดข้อมูลภายนอกแบบ fail-closed, ความไม่แน่นอนก่อน compile, ค่า broker runtime และข้อเสนอปรับปรุงให้เป็น medium หรือต่ำกว่า. "
+            "W1 lookback ที่เริ่ม shift 1 หมายถึงรวมสัปดาห์ปิดล่าสุดและไม่อ่านสัปดาห์ shift 0 ที่ยังไม่ปิด. "
+            "ห้ามใช้ชื่อ A-M/Blueprint เดิมกับ v3. v1/v2 ใช้ได้เฉพาะงานประวัติแบบอ่านอย่างเดียวและห้ามผ่าน Factory gate."
         ),
         "prepare_backtest_plan": (
             "จัดทำ BACKTEST PLAN / ANALYSIS-ONLY สำหรับ Source ที่เลือก. ห้ามเปิดหรือควบคุม MT4/MT5, "
@@ -35435,22 +45404,296 @@ def save_direct_daily_fx_news_schedule(payload: object) -> dict:
 
 
 def _save_dashboard_agent_preferences(form: dict) -> dict:
+    previous_holder: dict[str, int] = {}
+
     def apply(settings: dict) -> dict:
         current = _dashboard_agent_preferences_read_model(settings)
+        previous_holder["value"] = current["rateReservePercent"]
         settings["agentPreferences"] = {
             "language": form.get("language", current["language"]),
             "modelTier": form.get("modelTier", current["modelTier"]),
             "tokenBudget": form.get("tokenBudget", current["tokenBudget"]),
             "timeoutSeconds": form.get("timeoutSeconds", current["timeoutSeconds"]),
             "outputLimitChars": form.get("outputLimitChars", current["outputLimitChars"]),
-            "rateReservePercent": AUTOMATION_MIN_REMAINING_PERCENT,
+            "rateReservePercent": form.get(
+                "rateReservePercent",
+                current["rateReservePercent"],
+            ),
             "savedAt": utc_now(),
         }
         return settings
 
     settings = _mutate_dashboard_workflow_settings(apply)
-    DASHBOARD_WORKFLOW_SCHEDULER_WAKE.set()
+    current_reserve = automation_min_remaining_percent(settings)
+    rescheduled: dict[str, object] = {}
+    if (
+        "rateReservePercent" in form
+        and previous_holder.get("value") != current_reserve
+    ):
+        try:
+            wake_result = _wake_ai_quota_policy_consumers()
+            if isinstance(wake_result, dict):
+                rescheduled = wake_result
+        except Exception as error:  # noqa: BLE001 - setting is already durable
+            rescheduled = {
+                "quotaRescheduleDegraded": True,
+                "quotaRescheduleErrorType": redact_text(type(error).__name__, 80),
+            }
+            for event in (
+                MISSION_WORKER_WAKE,
+                AI_TRADE_COUNCIL_AUTOMATION_WAKE,
+                DASHBOARD_WORKFLOW_SCHEDULER_WAKE,
+                COLLABORATION_SCHEDULER_WAKE,
+            ):
+                try:
+                    event.set()
+                except Exception:  # noqa: BLE001 - best-effort compatibility wake
+                    pass
+    try:
+        append_audit({
+            "type": "automation.quota_policy_saved",
+            "source": "agent_preferences_compatibility_action",
+            "previousRateReservePercent": previous_holder.get(
+                "value",
+                AUTOMATION_MIN_REMAINING_PERCENT,
+            ),
+            "rateReservePercent": current_reserve,
+            "queuedWorkersWoken": bool(rescheduled),
+            **rescheduled,
+        })
+    except Exception:  # noqa: BLE001 - audit follows an already durable save
+        pass
     return _dashboard_agent_preferences_read_model(settings)
+
+
+AUTOMATION_QUOTA_DEFERRED_REASONS = frozenset({
+    "quota_unavailable_or_stale",
+    "quota_unavailable",
+    "quota_stale",
+    "quota_incomplete",
+    "quota_below_reserve",
+    "quota_below_workflow_reserve",
+    "remaining_percent_below_reserve",
+    "codex_limit_reached",
+    "quota_limit_reached",
+})
+
+
+def _reschedule_quota_deferred_work() -> dict:
+    """Clear only quota backoffs so a new threshold is observed immediately."""
+
+    mission_count = 0
+    now_text = utc_now()
+    with MISSIONS_LOCK:
+        missions = load_missions()
+        changed = False
+        for mission in missions:
+            execution = (
+                mission.get("execution")
+                if isinstance(mission.get("execution"), dict)
+                else {}
+            )
+            reason = str(execution.get("lastDeferredReason") or "").strip()
+            if not (
+                mission.get("status") == "queued"
+                and mission.get("autoEligible") is True
+                and mission.get("executionMode") == "auto_guarded"
+                and execution.get("dispatchState") == "deferred"
+                and reason in AUTOMATION_QUOTA_DEFERRED_REASONS
+            ):
+                continue
+            execution["nextAttemptAt"] = None
+            mission["execution"] = execution
+            mission["updatedAt"] = now_text
+            mission_count += 1
+            changed = True
+        if changed:
+            save_missions(missions)
+
+    schedule_count = 0
+
+    def clear_schedule_quota_backoff(settings: dict) -> dict:
+        nonlocal schedule_count
+        for job in DASHBOARD_WORKFLOW_SCHEDULE_JOBS:
+            settings_key = str(job.get("settingsKey") or "")
+            schedule = (
+                settings.get(settings_key)
+                if isinstance(settings.get(settings_key), dict)
+                else None
+            )
+            if not isinstance(schedule, dict):
+                continue
+            reason = str(schedule.get("lastResultKind") or "").strip()
+            if reason not in AUTOMATION_QUOTA_DEFERRED_REASONS:
+                continue
+            schedule["lastRunStatus"] = "pending"
+            schedule["lastResultKind"] = None
+            schedule["lastError"] = None
+            schedule["lastErrorAt"] = None
+            schedule_count += 1
+        return settings
+
+    _mutate_dashboard_workflow_settings(clear_schedule_quota_backoff)
+    return {
+        "quotaDeferredMissionsRescheduled": mission_count,
+        "quotaDeferredSchedulesRescheduled": schedule_count,
+    }
+
+
+def _wake_ai_quota_policy_consumers() -> dict:
+    """Reschedule and wake every queue waiting on the central threshold."""
+
+    rescheduled: dict[str, object] = {
+        "quotaDeferredMissionsRescheduled": 0,
+        "quotaDeferredSchedulesRescheduled": 0,
+    }
+    reschedule_error: Exception | None = None
+    # Both durable stores are updated idempotently. A bounded second attempt
+    # closes a transient Windows replace race and also completes the schedule
+    # half if the Mission half committed before the first attempt failed.
+    for _attempt in range(2):
+        try:
+            retry_result = _reschedule_quota_deferred_work()
+            for key in (
+                "quotaDeferredMissionsRescheduled",
+                "quotaDeferredSchedulesRescheduled",
+            ):
+                rescheduled[key] = max(
+                    int(rescheduled.get(key) or 0),
+                    int(retry_result.get(key) or 0),
+                )
+            reschedule_error = None
+            break
+        except Exception as error:  # noqa: BLE001 - post-commit recovery boundary
+            reschedule_error = error
+    signaled = True
+    for event in (
+        MISSION_WORKER_WAKE,
+        AI_TRADE_COUNCIL_AUTOMATION_WAKE,
+        DASHBOARD_WORKFLOW_SCHEDULER_WAKE,
+        COLLABORATION_SCHEDULER_WAKE,
+    ):
+        try:
+            event.set()
+        except Exception:  # noqa: BLE001 - one broken consumer must not block the rest
+            signaled = False
+    rescheduled["quotaConsumersSignaled"] = signaled
+    rescheduled["quotaRescheduleDegraded"] = reschedule_error is not None
+    if reschedule_error is not None:
+        # Either durable half may already have committed before the exception.
+        # Report unknown instead of the misleading exact value zero.
+        rescheduled["quotaDeferredMissionsRescheduled"] = None
+        rescheduled["quotaDeferredSchedulesRescheduled"] = None
+        rescheduled["quotaRescheduleCountsReliable"] = False
+        rescheduled["quotaRescheduleErrorType"] = redact_text(
+            type(reschedule_error).__name__,
+            80,
+        )
+    else:
+        rescheduled["quotaRescheduleCountsReliable"] = True
+    return rescheduled
+
+
+def save_automation_quota_policy(payload: object) -> dict:
+    """Persist the single 0-100 quota threshold without creating a Mission."""
+
+    if not isinstance(payload, dict) or set(payload) != {"rateReservePercent"}:
+        raise RequestError(
+            "Quota policy accepts exactly rateReservePercent.",
+            422,
+        )
+    raw_value = payload.get("rateReservePercent")
+    if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+        raise RequestError(
+            "rateReservePercent must be a whole number from 0 to 100.",
+            422,
+        )
+    if not (
+        AUTOMATION_MIN_REMAINING_PERCENT_MIN
+        <= raw_value
+        <= AUTOMATION_MIN_REMAINING_PERCENT_MAX
+    ):
+        raise RequestError(
+            "rateReservePercent must be between 0 and 100.",
+            422,
+        )
+
+    previous_holder: dict[str, int] = {}
+
+    def apply(settings: dict) -> dict:
+        current = _dashboard_agent_preferences_read_model(settings)
+        previous_holder["value"] = current["rateReservePercent"]
+        settings["agentPreferences"] = {
+            "language": current["language"],
+            "modelTier": current["modelTier"],
+            "tokenBudget": current["tokenBudget"],
+            "timeoutSeconds": current["timeoutSeconds"],
+            "outputLimitChars": current["outputLimitChars"],
+            "rateReservePercent": raw_value,
+            "savedAt": utc_now(),
+        }
+        return settings
+
+    settings = _mutate_dashboard_workflow_settings(apply)
+    policy = automation_quota_policy_read_model(settings)
+    rescheduled: dict[str, object] = {}
+    policy_changed = previous_holder.get("value") != policy["rateReservePercent"]
+    if policy_changed:
+        try:
+            wake_result = _wake_ai_quota_policy_consumers()
+            if isinstance(wake_result, dict):
+                rescheduled = wake_result
+        except Exception as error:  # noqa: BLE001 - setting is already durable
+            # A mocked or unexpectedly broken wake helper must never turn a
+            # successful durable save into an HTTP 500. Signal every consumer
+            # directly so each one can re-read the central policy.
+            signal_ok = True
+            for event in (
+                MISSION_WORKER_WAKE,
+                AI_TRADE_COUNCIL_AUTOMATION_WAKE,
+                DASHBOARD_WORKFLOW_SCHEDULER_WAKE,
+                COLLABORATION_SCHEDULER_WAKE,
+            ):
+                try:
+                    event.set()
+                except Exception:  # noqa: BLE001 - best-effort post-commit signal
+                    signal_ok = False
+            rescheduled = {
+                "quotaDeferredMissionsRescheduled": None,
+                "quotaDeferredSchedulesRescheduled": None,
+                "quotaConsumersSignaled": signal_ok,
+                "quotaRescheduleDegraded": True,
+                "quotaRescheduleCountsReliable": False,
+                "quotaRescheduleErrorType": redact_text(type(error).__name__, 80),
+            }
+    consumers_signaled = bool(
+        policy_changed
+        and rescheduled.get("quotaConsumersSignaled", True)
+    )
+    audit_recorded = True
+    try:
+        append_audit({
+            "type": "automation.quota_policy_saved",
+            "source": "central_quota_policy_endpoint",
+            "previousRateReservePercent": previous_holder.get(
+                "value",
+                AUTOMATION_MIN_REMAINING_PERCENT,
+            ),
+            "rateReservePercent": policy["rateReservePercent"],
+            "queuedWorkersWoken": consumers_signaled,
+            **rescheduled,
+        })
+    except Exception:  # noqa: BLE001 - audit follows an already durable save
+        audit_recorded = False
+    return {
+        "ok": True,
+        "kind": "automation_quota_policy_saved",
+        **policy,
+        "policy": policy,
+        "queuedWorkersWoken": consumers_signaled,
+        "auditRecorded": audit_recorded,
+        **rescheduled,
+    }
 
 
 def _workflow_existing_report(mission: dict) -> dict | None:
@@ -36080,6 +46323,26 @@ def run_dashboard_workflow_action(
         if not isinstance(action, dict) or action.get("propId") != prop_id:
             stage = "action_not_allowed_for_prop"
             raise RequestError("Action is not allowed for this dashboard.", 422)
+        if (
+            prop_id == "right_server_racks"
+            and action_id in EA_FACTORY_BACKEND_AUTO_STAGE_ACTIONS
+            and trigger_source != "backend"
+        ):
+            stage = "ea_factory_dedicated_endpoint_required"
+            message_th = (
+                "ขั้นสร้างและตรวจ Source ต้องเริ่มจากโรงงานสร้าง EA เท่านั้น "
+                "กรุณาใช้ปุ่มใน EA Factory เพื่อให้ Build, Stage และ Mission ผูกกันครบ"
+            )
+            raise RequestError(
+                message_th,
+                409,
+                code="ea_factory_dedicated_endpoint_required",
+                response_payload={
+                    "kind": "ea_factory_dedicated_endpoint_required",
+                    "code": "ea_factory_dedicated_endpoint_required",
+                    "messageTh": message_th,
+                },
+            )
         if (
             (prop_id, action_id) in BACKEND_OWNED_DAILY_EXECUTION_ACTIONS
             and trigger_source != "schedule"
@@ -37167,11 +47430,17 @@ def _dashboard_workflow_scheduler_gate(
             ),
         }
     normalized_settings_key = str(settings_key or "").strip()
-    reserve = AUTOMATION_MIN_REMAINING_PERCENT
     quota_gate = _collaboration_quota_gate(
-        {"minRemainingPercent": reserve},
+        {},
         refresh=refresh_quota,
         quota=quota,
+        settings=settings,
+    )
+    reserve = clamp_int(
+        quota_gate.get("rateReservePercent"),
+        AUTOMATION_MIN_REMAINING_PERCENT,
+        AUTOMATION_MIN_REMAINING_PERCENT_MIN,
+        AUTOMATION_MIN_REMAINING_PERCENT_MAX,
     )
     if quota_gate.get("allowed"):
         return {
@@ -37182,7 +47451,7 @@ def _dashboard_workflow_scheduler_gate(
     reason = str(quota_gate.get("reason") or "quota_unavailable")
     remaining = quota_gate.get("remainingPercent")
     if reason == "quota_below_reserve" and remaining is not None:
-        message_th = f"Scheduler พักงานไว้ เพราะ Codex เหลือ {remaining:g}% และต้องเหลือมากกว่า {reserve}%"
+        message_th = f"Scheduler พักงานไว้ เพราะ Codex เหลือ {remaining:g}% ซึ่งต่ำกว่าเกณฑ์ {reserve}%"
     elif reason == "quota_limit_reached":
         message_th = "Scheduler พักงานไว้ เพราะ Codex ถึง Rate Limit แล้ว"
     elif reason == "quota_stale":
@@ -37543,15 +47812,20 @@ def dashboard_workflow_scheduler_tick(
                             "maximumRunsPerDay": reservation.get("maximumRunsPerDay"),
                         })
                         continue
-                    result = run_dashboard_workflow_action(
-                        str(pending["propId"]),
-                        {
-                            "actionId": pending["actionId"],
-                            "form": form,
-                            "idempotencyKey": idempotency_key,
-                        },
-                        trusted_trigger_source="schedule",
-                    )
+                # The reservation above is the atomic ownership boundary.
+                # Mission creation must run after releasing the settings lock:
+                # Mission completion/recovery legitimately reads scheduler
+                # settings while holding MISSIONS_LOCK, so holding the locks
+                # in the opposite order here can deadlock the whole Bridge.
+                result = run_dashboard_workflow_action(
+                    str(pending["propId"]),
+                    {
+                        "actionId": pending["actionId"],
+                        "form": form,
+                        "idempotencyKey": idempotency_key,
+                    },
+                    trusted_trigger_source="schedule",
+                )
             except Exception as error:
                 _dashboard_workflow_record_scheduler_error(
                     pending,
@@ -40520,6 +50794,33 @@ def _agent_chat_runner_request_payload(
     return payload
 
 
+def _repair_jsonl_partial_tail_locked(path: Path) -> bool:
+    """Discard only an unterminated crash tail before the next durable append."""
+
+    if not path.exists():
+        return False
+    if path.is_symlink() or not path.is_file():
+        raise DataIntegrityError("Audit history contains an unsafe active segment.")
+    try:
+        with path.open("r+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            if size == 0:
+                return False
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) == b"\n":
+                return False
+            handle.seek(0)
+            encoded = handle.read()
+            last_complete = encoded.rfind(b"\n")
+            handle.truncate(last_complete + 1 if last_complete >= 0 else 0)
+            handle.flush()
+            os.fsync(handle.fileno())
+            return True
+    except OSError as error:
+        raise DataIntegrityError("Audit crash tail could not be repaired.") from error
+
+
 def append_audit(event: dict) -> None:
     ensure_runtime_dir()
     record = {
@@ -40527,9 +50828,70 @@ def append_audit(event: dict) -> None:
         **sanitize_json_value(event),
     }
     with AUDIT_LOCK:
+        _repair_jsonl_partial_tail_locked(AUDIT_PATH)
         rotate_jsonl_segment(AUDIT_PATH)
         with AUDIT_PATH.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def append_audit_once(event: dict) -> bool:
+    """Append one deterministic audit event, including across JSONL rotation."""
+
+    ensure_runtime_dir()
+    safe_event = sanitize_json_value(event)
+    event_id = safe_reference(
+        safe_event.get("eventId") if isinstance(safe_event, dict) else None
+    )
+    if not event_id or safe_event.get("eventId") != event_id:
+        raise DataIntegrityError("Idempotent audit event ID is invalid.")
+    archive_dir = RUNTIME_DIR / "archive" / AUDIT_PATH.stem
+    with AUDIT_LOCK:
+        _repair_jsonl_partial_tail_locked(AUDIT_PATH)
+        paths = [AUDIT_PATH]
+        matching_event_found = False
+        if archive_dir.is_dir():
+            paths.extend(sorted(archive_dir.glob(f"{AUDIT_PATH.stem}-*{AUDIT_PATH.suffix}")))
+        for path in paths:
+            if not path.exists():
+                continue
+            if path.is_symlink() or not path.is_file():
+                raise DataIntegrityError("Audit history contains an unsafe segment.")
+            try:
+                with path.open("r", encoding="utf-8", errors="strict") as handle:
+                    for line in handle:
+                        if event_id not in line:
+                            continue
+                        try:
+                            existing = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if (
+                            isinstance(existing, dict)
+                            and existing.get("eventId") == event_id
+                        ):
+                            comparable = {
+                                key: value
+                                for key, value in existing.items()
+                                if key != "time"
+                            }
+                            if comparable != safe_event:
+                                raise DataIntegrityError(
+                                    "Idempotent audit event ID collided with different content."
+                                )
+                            matching_event_found = True
+            except (OSError, UnicodeError) as error:
+                raise DataIntegrityError(
+                    "Audit history could not be checked for an idempotent event."
+                ) from error
+        if matching_event_found:
+            return False
+        record = {"time": utc_now(), **safe_event}
+        rotate_jsonl_segment(AUDIT_PATH)
+        with AUDIT_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return True
 
 
 def _agent_chat_transcript_path() -> Path:
@@ -40937,6 +51299,7 @@ def _run_safe_command_with_tree_timeout(
     input_text: str | None,
     cancel_event: threading.Event | None = None,
     tracking_key: str | None = None,
+    structured_json_output: bool = False,
 ) -> dict:
     global MISSION_WORKER_PROCESS, MISSION_WORKER_JOB_HOLDER
     started = time.perf_counter()
@@ -41005,7 +51368,12 @@ def _run_safe_command_with_tree_timeout(
             return {
                 "ok": False,
                 "exitCode": "timeout",
-                "output": f"Command timed out after {timeout}s.",
+                "output": _safe_command_failure_output(
+                    "timeout",
+                    f"Command timed out after {timeout}s.",
+                    output_limit,
+                    structured_json_output=structured_json_output,
+                ),
                 "durationMs": round((time.perf_counter() - started) * 1000),
                 "processTreeTerminated": tree_terminated,
                 "processStarted": True,
@@ -41016,16 +51384,27 @@ def _run_safe_command_with_tree_timeout(
             return {
                 "ok": False,
                 "exitCode": "cancelled",
-                "output": "Command was cancelled because the local Bridge is stopping.",
+                "output": _safe_command_failure_output(
+                    "cancelled",
+                    "Command was cancelled because the local Bridge is stopping.",
+                    output_limit,
+                    structured_json_output=structured_json_output,
+                ),
                 "durationMs": round((time.perf_counter() - started) * 1000),
                 "processTreeTerminated": bool(cancellation["treeTerminated"]),
                 "processStarted": True,
             }
-        output = redact_text((stdout or stderr or "").strip(), output_limit)
+        output, transport_error = _safe_command_output(
+            stdout,
+            stderr,
+            output_limit,
+            structured_json_output=structured_json_output,
+        )
         _close_windows_kill_job(job_holder)
         return {
-            "ok": process.returncode == 0,
-            "exitCode": process.returncode,
+            "ok": process.returncode == 0 and transport_error is None,
+            "exitCode": transport_error.code if transport_error else process.returncode,
+            "processExitCode": process.returncode,
             "output": output,
             "durationMs": round((time.perf_counter() - started) * 1000),
             "processTreeTerminated": False,
@@ -41035,7 +51414,13 @@ def _run_safe_command_with_tree_timeout(
         return {
             "ok": False,
             "exitCode": "permission_denied",
-            "output": redact_text(str(error), output_limit),
+            "output": _safe_command_failure_output(
+                "permission_denied",
+                "Command could not start because permission was denied.",
+                output_limit,
+                structured_json_output=structured_json_output,
+                diagnostic=error,
+            ),
             "durationMs": round((time.perf_counter() - started) * 1000),
             "processTreeTerminated": False,
             "processStarted": False,
@@ -41044,7 +51429,13 @@ def _run_safe_command_with_tree_timeout(
         return {
             "ok": False,
             "exitCode": "not_found",
-            "output": redact_text(str(error), output_limit),
+            "output": _safe_command_failure_output(
+                "not_found",
+                "Command executable was not found.",
+                output_limit,
+                structured_json_output=structured_json_output,
+                diagnostic=error,
+            ),
             "durationMs": round((time.perf_counter() - started) * 1000),
             "processTreeTerminated": False,
             "processStarted": False,
@@ -41056,7 +51447,13 @@ def _run_safe_command_with_tree_timeout(
         return {
             "ok": False,
             "exitCode": "exception",
-            "output": redact_text(str(error), output_limit),
+            "output": _safe_command_failure_output(
+                "exception",
+                "Command failed because the local runner encountered an internal exception.",
+                output_limit,
+                structured_json_output=structured_json_output,
+                diagnostic=error,
+            ),
             "durationMs": round((time.perf_counter() - started) * 1000),
             "processTreeTerminated": tree_terminated,
             "processStarted": process is not None,
@@ -41086,6 +51483,7 @@ def run_safe_command(
     kill_process_tree_on_timeout: bool = False,
     cancel_event: threading.Event | None = None,
     tracking_key: str | None = None,
+    structured_json_output: bool = False,
 ) -> dict:
     if kill_process_tree_on_timeout:
         return _run_safe_command_with_tree_timeout(
@@ -41095,6 +51493,7 @@ def run_safe_command(
             input_text,
             cancel_event=cancel_event,
             tracking_key=tracking_key,
+            structured_json_output=structured_json_output,
         )
     started = time.perf_counter()
     try:
@@ -41109,10 +51508,16 @@ def run_safe_command(
             timeout=timeout,
             shell=False,
         )
-        output = redact_text((result.stdout or result.stderr or "").strip(), output_limit)
+        output, transport_error = _safe_command_output(
+            result.stdout,
+            result.stderr,
+            output_limit,
+            structured_json_output=structured_json_output,
+        )
         return {
-            "ok": result.returncode == 0,
-            "exitCode": result.returncode,
+            "ok": result.returncode == 0 and transport_error is None,
+            "exitCode": transport_error.code if transport_error else result.returncode,
+            "processExitCode": result.returncode,
             "output": output,
             "durationMs": round((time.perf_counter() - started) * 1000),
         }
@@ -41120,21 +51525,51 @@ def run_safe_command(
         return {
             "ok": False,
             "exitCode": "permission_denied",
-            "output": redact_text(str(error), output_limit),
+            "output": _safe_command_failure_output(
+                "permission_denied",
+                "Command could not start because permission was denied.",
+                output_limit,
+                structured_json_output=structured_json_output,
+                diagnostic=error,
+            ),
             "durationMs": round((time.perf_counter() - started) * 1000),
         }
     except FileNotFoundError as error:
         return {
             "ok": False,
             "exitCode": "not_found",
-            "output": redact_text(str(error), output_limit),
+            "output": _safe_command_failure_output(
+                "not_found",
+                "Command executable was not found.",
+                output_limit,
+                structured_json_output=structured_json_output,
+                diagnostic=error,
+            ),
             "durationMs": round((time.perf_counter() - started) * 1000),
         }
     except subprocess.TimeoutExpired:
         return {
             "ok": False,
             "exitCode": "timeout",
-            "output": f"Command timed out after {timeout}s.",
+            "output": _safe_command_failure_output(
+                "timeout",
+                f"Command timed out after {timeout}s.",
+                output_limit,
+                structured_json_output=structured_json_output,
+            ),
+            "durationMs": round((time.perf_counter() - started) * 1000),
+        }
+    except Exception as error:
+        return {
+            "ok": False,
+            "exitCode": "exception",
+            "output": _safe_command_failure_output(
+                "exception",
+                "Command failed because the local runner encountered an internal exception.",
+                output_limit,
+                structured_json_output=structured_json_output,
+                diagnostic=error,
+            ),
             "durationMs": round((time.perf_counter() - started) * 1000),
         }
 
@@ -43999,10 +54434,7 @@ def _empty_mt4_trade_gateway_status(
         "schemaVersion": "metafx-hq-mt4-trade-gateway-read-model-v1",
         "sourceReady": MT4_TRADE_GATEWAY_MODULE_PATH.is_file(),
         "eaSourceReady": (
-            PROJECT_ROOT
-            / "integrations"
-            / "mt4-trade-gateway"
-            / "MetafxHQTradeGateway.mq4"
+            METATRADER_UNIFIED_EA_SOURCE_PATH
         ).is_file(),
         "connected": False,
         "status": status,
@@ -46950,7 +57382,7 @@ def _empty_metatrader_snapshot_read_model(
         },
         "installPreparation": {
             "sourceReady": source_ready,
-            "sourceAsset": "integrations/mt4-trade-gateway/MetafxHQTradeGateway.mq4",
+            "sourceAsset": "artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/MetafxHQTradeGateway.mq4",
             "sourceDisplayName": "MetafxHQ AI Council EA",
             "installKind": "expert_advisor",
             "defaultGatewayMode": "shadow",
@@ -48201,7 +58633,7 @@ def _ai_trade_council_automation_default_store() -> dict:
                 AI_TRADE_COUNCIL_AUTOMATION_DEFAULT_DAILY_LIMIT_MODE
             ),
             "maxDailyRounds": AI_TRADE_COUNCIL_AUTOMATION_MAX_DAILY_ROUNDS,
-            "minRemainingPercent": AI_TRADE_COUNCIL_AUTOMATION_MIN_REMAINING_PERCENT,
+            "minRemainingPercent": automation_min_remaining_percent(),
             "analysisBarCount": AI_TRADE_COUNCIL_DEFAULT_ANALYSIS_BAR_COUNT,
             "requiredVotes": AI_TRADE_COUNCIL_DEFAULT_REQUIRED_VOTES,
             "maxManagedOrders": AI_TRADE_COUNCIL_DEFAULT_MAX_MANAGED_ORDERS,
@@ -48434,9 +58866,9 @@ def _ai_trade_council_automation_store_shape(value: object) -> dict:
             1,
             AI_TRADE_COUNCIL_AUTOMATION_MAX_DAILY_ROUNDS,
         ),
-        # Keep the Council on the same global strict gate as every other
-        # automatic subsystem: 15% pauses, anything above 15% may run.
-        "minRemainingPercent": AI_TRADE_COUNCIL_AUTOMATION_MIN_REMAINING_PERCENT,
+        # Mirror the operator-owned central threshold. Equality is admitted;
+        # only remaining quota below this value pauses new work.
+        "minRemainingPercent": automation_min_remaining_percent(),
         "analysisBarCount": configured_analysis_bar_count,
         "requiredVotes": configured_required_votes,
         "maxManagedOrders": configured_max_managed_orders,
@@ -48892,8 +59324,8 @@ def set_ai_trade_council_automation(payload: dict) -> dict:
     integer_rules = {
         "maxDailyRounds": (1, AI_TRADE_COUNCIL_AUTOMATION_MAX_DAILY_ROUNDS),
         "minRemainingPercent": (
-            AUTOMATION_MIN_REMAINING_PERCENT,
-            AUTOMATION_MIN_REMAINING_PERCENT,
+            automation_min_remaining_percent(),
+            automation_min_remaining_percent(),
         ),
     }
     for field, (minimum, maximum) in integer_rules.items():
@@ -50447,19 +60879,53 @@ def _connection_item_status(
         item_id in {"metaeditor_compile_adapter", "strategy_tester_adapter"}
         and adapter_status == "guarded_requires_selected_matching_terminal_and_proof"
     ):
-        status_name = "not_connected"
+        selection_model = (
+            metatrader_selection
+            if isinstance(metatrader_selection, dict)
+            else {}
+        )
+        selected_candidate = selection_model.get("selectedCandidate")
+        selected_platform = (
+            str(selected_candidate.get("platform") or "")
+            if isinstance(selected_candidate, dict)
+            else ""
+        )
+        adapter_ready = bool(
+            selected_platform in _ea_factory_front_office_supported_platforms()
+            and callable(EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER)
+            and callable(
+                EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER
+                if item_id == "metaeditor_compile_adapter"
+                else EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER
+            )
+        )
+        status_name = "ready" if adapter_ready else "not_connected"
         status_source = "backend_stage_readiness"
-        execution_adapter_status = "not_connected"
+        execution_adapter_status = (
+            "visible_front_office_adapter_connected"
+            if adapter_ready
+            else "not_connected"
+        )
         detail = (
-            "ยังไม่มี MetaEditor Adapter ที่ยืนยัน Compile จาก Terminal ที่เลือกด้วยหลักฐานจริง"
-            if item_id == "metaeditor_compile_adapter"
-            else "ยังไม่มี Strategy Tester Adapter ที่ยืนยัน Backtest จาก Terminal ที่เลือกด้วยหลักฐานจริง"
+            (
+                "Visible MetaEditor Adapter เชื่อมกับแพลตฟอร์มที่เลือกแล้ว; ขั้นทำงานจะตรวจ capability และหลักฐานซ้ำ"
+                if item_id == "metaeditor_compile_adapter"
+                else "Visible Strategy Tester Adapter เชื่อมกับแพลตฟอร์มที่เลือกแล้ว; ขั้นทำงานจะตรวจ capability และหลักฐานซ้ำ"
+            )
+            if adapter_ready
+            else (
+                "ยังไม่มี MetaEditor Adapter ที่ยืนยัน Compile จาก Terminal ที่เลือกด้วยหลักฐานจริง"
+                if item_id == "metaeditor_compile_adapter"
+                else "ยังไม่มี Strategy Tester Adapter ที่ยืนยัน Backtest จาก Terminal ที่เลือกด้วยหลักฐานจริง"
+            )
         )
         terminal_selection_fields = {
-            "selectionStatus": str((metatrader_selection or {}).get("status") or "not_selected"),
-            "configurationStatus": str((metatrader_selection or {}).get("configurationStatus") or "not_configured"),
-            "selected": isinstance((metatrader_selection or {}).get("selectedCandidate"), dict),
-            "adapterReady": False,
+            "selectionStatus": str(selection_model.get("status") or "not_selected"),
+            "configurationStatus": str(
+                selection_model.get("configurationStatus") or "not_configured"
+            ),
+            "selected": isinstance(selected_candidate, dict),
+            "adapterReady": adapter_ready,
         }
     elif item_id == "memory_store":
         status_name, detail = "ready", "คลังความจำ Local พร้อมใช้งานแบบไม่ส่งข้อมูลออกนอกเครื่อง"
@@ -52485,10 +62951,13 @@ def _run_ai_trade_council_analysis_unlocked(
     if codex_status not in {"ready", "ready_guarded"}:
         raise RequestError("Codex Runner ยังไม่พร้อม จึงยังไม่สร้างงานวิเคราะห์", 503)
     quota = codex_rate_limits()
-    if quota.get("ok") is not True or quota.get("stale") is True:
-        raise RequestError("ยังตรวจสอบ Rate Limit ของ Codex ไม่ได้ จึงหยุดไว้ก่อนแบบปลอดภัย", 503)
-    if quota.get("limitReached") is True:
-        raise RequestError("Codex ถึง Rate Limit แล้ว กรุณารอรอบถัดไป", 429)
+    quota_gate = _collaboration_quota_gate({}, refresh=False, quota=quota)
+    if quota_gate.get("allowed") is not True:
+        quota_reason = str(quota_gate.get("reason") or "quota_unavailable")
+        raise RequestError(
+            str(quota_gate.get("messageTh") or "ยังตรวจสอบ Rate Limit ของ Codex ไม่ได้"),
+            429 if quota_reason in {"quota_below_reserve", "quota_limit_reached"} else 503,
+        )
     allowed, retry_after = check_rate_limit(
         "ai-trade-council:analyze",
         12,
@@ -54420,7 +64889,7 @@ def _apply_scheduled_radar_evidence_open_retry(
         if isinstance(mission.get("budget"), dict)
         else {}
     )
-    budget["rateReservePercent"] = AUTOMATION_MIN_REMAINING_PERCENT
+    budget["rateReservePercent"] = automation_min_remaining_percent()
     budget["timeoutSeconds"] = max(
         300,
         clamp_int(budget.get("timeoutSeconds"), 120, 15, 600),
@@ -55463,7 +65932,7 @@ def _apply_scheduled_radar_batch_completion_repair(
         if isinstance(mission.get("budget"), dict)
         else {}
     )
-    budget["rateReservePercent"] = AUTOMATION_MIN_REMAINING_PERCENT
+    budget["rateReservePercent"] = automation_min_remaining_percent()
     budget["timeoutSeconds"] = max(
         300,
         clamp_int(budget.get("timeoutSeconds"), 120, 15, 600),
@@ -55935,7 +66404,7 @@ def _scheduled_portal_trusted_prompt_repair_candidate(
         and row.get("executionMode") == "auto_guarded"
         and row.get("autoEligible") is True
         and row.get("modelTier") == "manager_quality"
-        and budget.get("rateReservePercent") == AUTOMATION_MIN_REMAINING_PERCENT
+        and budget.get("rateReservePercent") == automation_min_remaining_percent()
         and approval.get("required") is False
         and approval.get("state") == "not_required"
         and execution.get("processStarted") is True
@@ -56068,7 +66537,7 @@ def _apply_scheduled_portal_trusted_prompt_repair(
         if isinstance(mission.get("budget"), dict)
         else {}
     )
-    budget["rateReservePercent"] = AUTOMATION_MIN_REMAINING_PERCENT
+    budget["rateReservePercent"] = automation_min_remaining_percent()
     budget["timeoutSeconds"] = max(
         300,
         clamp_int(budget.get("timeoutSeconds"), 120, 15, 600),
@@ -56253,7 +66722,7 @@ def _scheduled_portal_deterministic_open_repair_candidate(
         and row.get("executionMode") == "auto_guarded"
         and row.get("autoEligible") is True
         and row.get("modelTier") == "manager_quality"
-        and budget.get("rateReservePercent") == AUTOMATION_MIN_REMAINING_PERCENT
+        and budget.get("rateReservePercent") == automation_min_remaining_percent()
         and approval.get("required") is False
         and approval.get("state") == "not_required"
         and execution.get("processStarted") is True
@@ -56375,7 +66844,7 @@ def _apply_scheduled_portal_deterministic_open_repair(
         if isinstance(mission.get("budget"), dict)
         else {}
     )
-    budget["rateReservePercent"] = AUTOMATION_MIN_REMAINING_PERCENT
+    budget["rateReservePercent"] = automation_min_remaining_percent()
     budget["timeoutSeconds"] = max(
         300,
         clamp_int(budget.get("timeoutSeconds"), 120, 15, 600),
@@ -56512,7 +66981,7 @@ def _apply_scheduled_portal_evidence_open_retry(
         if isinstance(mission.get("budget"), dict)
         else {}
     )
-    budget["rateReservePercent"] = AUTOMATION_MIN_REMAINING_PERCENT
+    budget["rateReservePercent"] = automation_min_remaining_percent()
     budget["timeoutSeconds"] = max(
         300,
         clamp_int(budget.get("timeoutSeconds"), 120, 15, 600),
@@ -56681,7 +67150,7 @@ def reconcile_stale_approval_missions() -> int:
                         if isinstance(mission.get("budget"), dict)
                         else {}
                     )
-                    budget["rateReservePercent"] = AUTOMATION_MIN_REMAINING_PERCENT
+                    budget["rateReservePercent"] = automation_min_remaining_percent()
                     budget["timeoutSeconds"] = max(
                         300,
                         clamp_int(budget.get("timeoutSeconds"), 120, 15, 600),
@@ -57819,6 +68288,906 @@ def reconcile_pending_radar_batch_report_commits() -> int:
     return len(reconciled)
 
 
+def _deep_research_transport_recovery_artifacts(
+    artifact_reference: object,
+) -> dict | None:
+    """Read the exact final/stdout pair for one bounded local Codex run."""
+
+    final_reference = safe_codex_artifact_reference(artifact_reference)
+    if not final_reference or not final_reference.endswith(".final.md"):
+        return None
+    artifact_name = Path(final_reference).name
+    run_id = artifact_name.removesuffix(".final.md")
+    if not run_id or artifact_name != f"{run_id}.final.md" or not SAFE_ID_PATTERN.fullmatch(run_id):
+        return None
+    allowed_root = (RUNTIME_DIR / "codex-runs").resolve(strict=False)
+    try:
+        final_candidate = PROJECT_ROOT / final_reference
+        if final_candidate.is_symlink():
+            return None
+        final_path = final_candidate.resolve(strict=True)
+        final_path.relative_to(allowed_root)
+        final_bytes = final_path.read_bytes()
+        if not 0 < len(final_bytes) <= 100_000:
+            return None
+        final_text = final_bytes.decode("utf-8", errors="strict")
+        if len(final_text) > TRADING_SYSTEM_RESEARCH_MAX_OUTPUT_CHARS:
+            return None
+
+        stdout_candidate = RUNTIME_DIR / "codex-runs" / f"{run_id}.stdout.log"
+        if stdout_candidate.is_symlink():
+            return None
+        stdout_path = stdout_candidate.resolve(strict=True)
+        stdout_path.relative_to(allowed_root)
+        stdout_bytes = stdout_path.read_bytes()
+        if not 0 < len(stdout_bytes) <= 256_000:
+            return None
+        stdout_text = stdout_bytes.decode("utf-8", errors="strict")
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+        decoded: dict[str, object] = {}
+        for key, value in pairs:
+            if key in decoded:
+                raise ValueError("duplicate JSON field")
+            decoded[key] = value
+        return decoded
+
+    def reject_non_finite(_value: str):
+        raise ValueError("non-finite JSON number")
+
+    agent_messages: list[str] = []
+    for line in stdout_text.splitlines():
+        if not line or len(line) > 160_000:
+            continue
+        try:
+            event = json.loads(
+                line,
+                object_pairs_hook=reject_duplicate_keys,
+                parse_constant=reject_non_finite,
+            )
+        except (TypeError, ValueError, RecursionError, json.JSONDecodeError):
+            continue
+        item = event.get("item") if isinstance(event, dict) else None
+        message = item.get("text") if isinstance(item, dict) else None
+        if not (
+            isinstance(event, dict)
+            and event.get("type") == "item.completed"
+            and isinstance(item, dict)
+            and item.get("type") == "agent_message"
+            and isinstance(message, str)
+            and message == message.strip()
+            and 0 < len(message) <= TRADING_SYSTEM_RESEARCH_MAX_OUTPUT_CHARS
+        ):
+            continue
+        agent_messages.append(message)
+    if len(agent_messages) != 1:
+        return None
+    return {
+        "runId": run_id,
+        "finalReference": final_reference,
+        "formattedReport": final_text,
+        "agentMessage": agent_messages[0],
+        "formattedReportSha256": hashlib.sha256(final_bytes).hexdigest(),
+        "stdoutSha256": hashlib.sha256(stdout_bytes).hexdigest(),
+        "agentMessageSha256": hashlib.sha256(
+            agent_messages[0].encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _deep_research_transport_recovery_candidate(mission: object) -> dict | None:
+    """Bind one exact historical transport-only failure to immutable artifacts."""
+
+    row = mission if isinstance(mission, dict) else {}
+    mission_id = safe_reference(row.get("id"))
+    report_ids = row.get("reportIds") if isinstance(row.get("reportIds"), list) else []
+    report_id = safe_reference(report_ids[0]) if len(report_ids) == 1 else None
+    context = _workflow_context_storage(row.get("workflowContext"))
+    procedure = (
+        context.get("pluginProcedure")
+        if isinstance(context, dict)
+        and isinstance(context.get("pluginProcedure"), dict)
+        else {}
+    )
+    approval = row.get("approval") if isinstance(row.get("approval"), dict) else {}
+    execution = row.get("execution") if isinstance(row.get("execution"), dict) else {}
+    receipt = (
+        row.get("workflowOutputContract")
+        if isinstance(row.get("workflowOutputContract"), dict)
+        else {}
+    )
+    receipt_values = receipt.get("values") if isinstance(receipt.get("values"), dict) else {}
+    original_source_digest = str(receipt_values.get("sourceDigest") or "").strip().lower()
+    mission_failed_at = row.get("completedAt")
+    mission_failed_time = (
+        parse_iso(mission_failed_at) if isinstance(mission_failed_at, str) else None
+    )
+    if not (
+        mission_id
+        and report_id
+        and row.get("owner") == "mission_archivist"
+        and row.get("status") in {"blocked", "failed"}
+        and row.get("phase")
+        == "auto_guarded_trading_system_research_output_contract_invalid"
+        and row.get("workStatus")
+        == "trading_system_research_output_contract_invalid"
+        and row.get("errorCode")
+        == "trading_system_research_output_contract_invalid"
+        and row.get("targetId") == "left_server_racks"
+        and row.get("toolId") == "codex_web_research"
+        and row.get("reportType") == "trading_system_research_report"
+        and row.get("requiresHumanApproval") is False
+        and approval.get("required") is False
+        and approval.get("state") == "not_required"
+        and isinstance(context, dict)
+        and context.get("propId") == "left_server_racks"
+        and context.get("actionId") == "deep_research_system"
+        and procedure.get("pluginSkillId")
+        == TRADING_SYSTEM_RESEARCH_WORKFLOW_PROCEDURE_ID
+        and procedure.get("procedureKind") == "backend_procedure"
+        and receipt.get("applicable") is True
+        and receipt.get("valid") is False
+        and receipt.get("failureCode")
+        == "trading_system_research_output_contract_invalid"
+        and receipt.get("procedureId")
+        == TRADING_SYSTEM_RESEARCH_WORKFLOW_PROCEDURE_ID
+        and receipt.get("entryErrors")
+        == ["STRATEGY_BRIEF_PROJECTION_MISMATCH:sourceDigest"]
+        and receipt.get("missingFields") == ["strategyBrief"]
+        and receipt.get("missingEvidenceKinds") == []
+        and receipt.get("oversizedFields") == []
+        and receipt.get("sourceUrlCount") == 2
+        and re.fullmatch(r"[0-9a-f]{64}", original_source_digest)
+        and execution.get("processStarted") is True
+        and execution.get("workingDirectory") == "workspace"
+        and execution.get("writeRoots") == []
+        and execution.get("controlPlaneWritable") is False
+        and execution.get("webSearchEnabled") is True
+        and execution.get("webSearchUsed") is True
+        and execution.get("webSearchEvidenceVerified") is True
+        and mission_failed_time is not None
+        and row.get("updatedAt") == mission_failed_at
+        and execution.get("completedAt") == mission_failed_at
+        and execution.get("resultProfile")
+        in (None, "", "trading_system_research")
+    ):
+        return None
+
+    report_path = RUNTIME_REPORTS_DIR / f"{report_id}.json"
+    report = read_json(report_path, None) if report_path.is_file() else None
+    report_metrics = report.get("metrics") if isinstance(report, dict) and isinstance(report.get("metrics"), dict) else {}
+    report_receipt = (
+        report_metrics.get("workflowOutput")
+        if isinstance(report_metrics.get("workflowOutput"), dict)
+        else {}
+    )
+    report_artifacts = report.get("artifacts") if isinstance(report, dict) and isinstance(report.get("artifacts"), list) else []
+    final_artifacts = [
+        reference
+        for value in report_artifacts
+        if (reference := safe_codex_artifact_reference(report_artifact_storage_value(value)[0]))
+        and reference.endswith(".final.md")
+    ]
+    mission_artifact = safe_codex_artifact_reference(row.get("artifactPath"))
+    report_created_at = report.get("createdAt") if isinstance(report, dict) else None
+    report_created_time = (
+        parse_iso(report_created_at) if isinstance(report_created_at, str) else None
+    )
+    if not (
+        isinstance(report, dict)
+        and report.get("id") == report_id
+        and report.get("type") == "trading_system_research_report"
+        and report.get("title") == row.get("title")
+        and report.get("ownerAgentId") == row.get("owner")
+        and report.get("status") == "blocked"
+        and report.get("linkedMissionId") == mission_id
+        and report.get("linkedPropId") == "left_server_racks"
+        and _workflow_context_storage(report.get("workflowContext")) == context
+        and report_receipt == receipt
+        and report_created_time is not None
+        and report.get("updatedAt") == report_created_at
+        and report_created_time.astimezone(timezone.utc)
+        >= mission_failed_time.astimezone(timezone.utc)
+        and report_created_time.astimezone(timezone.utc)
+        <= datetime.now(timezone.utc) + timedelta(minutes=5)
+        and len(final_artifacts) == 1
+        and mission_artifact == final_artifacts[0]
+    ):
+        return None
+    # Historical source reports may already have rolled out of the bounded
+    # report catalog.  The Mission still carries the dispatch-time binding that
+    # ``_workflow_context_storage`` authenticated against its selected source,
+    # inputs, two independent hosts, and digest.  Bind recovery to that frozen
+    # packet plus the failed Report and both Runner artifacts; do not silently
+    # retarget it to whatever report is newest today.
+    source_binding = (
+        context.get("deepResearchSourceBinding")
+        if isinstance(context.get("deepResearchSourceBinding"), dict)
+        else {}
+    )
+    required_urls = list(source_binding.get("sourceUrls") or [])
+    stored_binding_digest = str(
+        source_binding.get("sourceUrlDigest") or ""
+    ).strip().lower()
+    expected_binding_digest = _deep_research_source_binding_digest(source_binding)
+    report_evidence_urls = [
+        item["url"] for item in _unique_public_evidence_rows(report.get("evidence"))
+    ]
+    if not (
+        source_binding.get("schemaVersion")
+        == TRADING_SYSTEM_RESEARCH_SOURCE_BINDING_VERSION
+        and len(required_urls) == 2
+        and re.fullmatch(r"[0-9a-f]{64}", stored_binding_digest)
+        and secrets.compare_digest(stored_binding_digest, expected_binding_digest)
+        and report_evidence_urls == required_urls
+    ):
+        return None
+    artifacts = _deep_research_transport_recovery_artifacts(mission_artifact)
+    if artifacts is None:
+        return None
+    return {
+        "missionId": mission_id,
+        "originalReportId": report_id,
+        "originalReportDigest": _report_snapshot_digest(report),
+        "originalReportCreatedAt": report_created_at,
+        "originalSourceDigest": original_source_digest,
+        "failedAt": mission_failed_at,
+        "requiredUrls": required_urls,
+        "context": context,
+        "artifacts": artifacts,
+    }
+
+
+def _deep_research_transport_recovery_transaction(
+    recovered_report_id: str,
+    candidate: dict,
+    artifacts: dict,
+    recovered_source_digest: str,
+) -> dict | None:
+    """Derive one immutable logical recovery transaction for crash replay."""
+
+    transaction_id = "recovery-tx-" + payload_digest(
+        DEEP_RESEARCH_TRANSPORT_RECOVERY_SCHEMA_VERSION,
+        candidate.get("missionId"),
+        candidate.get("originalReportId"),
+        recovered_report_id,
+        artifacts.get("formattedReportSha256"),
+        artifacts.get("stdoutSha256"),
+        recovered_source_digest,
+    )[:32]
+    original_report_created_at = candidate.get("originalReportCreatedAt")
+    original_report_created_time = (
+        parse_iso(original_report_created_at)
+        if isinstance(original_report_created_at, str)
+        else None
+    )
+    failed_time = parse_iso(candidate.get("failedAt"))
+    if not (
+        original_report_created_time is not None
+        and failed_time is not None
+        and original_report_created_time.astimezone(timezone.utc)
+        >= failed_time.astimezone(timezone.utc)
+        and original_report_created_time.astimezone(timezone.utc)
+        <= datetime.now(timezone.utc) + timedelta(minutes=5)
+    ):
+        return None
+    recovered_at = (
+        original_report_created_time + timedelta(microseconds=1)
+    ).isoformat()
+    transaction = {
+        "schemaVersion": DEEP_RESEARCH_TRANSPORT_RECOVERY_SCHEMA_VERSION,
+        "version": DEEP_RESEARCH_TRANSPORT_RECOVERY_VERSION,
+        "transactionId": transaction_id,
+        "missionId": candidate.get("missionId"),
+        "originalReportId": candidate.get("originalReportId"),
+        "originalReportDigest": candidate.get("originalReportDigest"),
+        "recoveredReportId": recovered_report_id,
+        "formattedReportSha256": artifacts.get("formattedReportSha256"),
+        "stdoutSha256": artifacts.get("stdoutSha256"),
+        "agentMessageSha256": artifacts.get("agentMessageSha256"),
+        "sourceDigest": recovered_source_digest,
+        "failedAt": candidate.get("failedAt"),
+        # This logical commit is exactly one microsecond after the immutable
+        # original blocked Report, not the wall-clock time of Bridge startup.
+        # The audit record carries actual observation time. A deterministic,
+        # strictly newer value keeps ordering stable and makes crash replay
+        # independent of any attacker-edited recovery orphan.
+        "recoveredAt": recovered_at,
+    }
+    transaction["transactionDigest"] = _report_snapshot_digest(transaction)
+    return transaction
+
+
+def _deep_research_transport_recovered_report(
+    mission: dict,
+    candidate: dict,
+) -> tuple[dict, dict, dict] | None:
+    """Revalidate matching artifacts and persist a new unconfirmed ready Report."""
+
+    artifacts = candidate["artifacts"]
+    recovery_request = json.dumps(
+        {
+            "formattedReport": artifacts["formattedReport"],
+            "agentMessage": artifacts["agentMessage"],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    runner = run_safe_command(
+        [
+            str(CODEX_RUNNER_PYTHON),
+            str(CODEX_RUNNER_SCRIPT),
+            "--recover-ea-research-transport-stdin",
+            "--output-limit",
+            str(TRADING_SYSTEM_RESEARCH_MAX_OUTPUT_CHARS),
+        ],
+        timeout=30,
+        output_limit=EA_RESEARCH_RUNNER_TRANSPORT_MAX_CHARS,
+        input_text=recovery_request,
+        structured_json_output=True,
+    )
+    try:
+        result = json.loads(runner.get("output") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    recovery_claim = result.get("recovery") if isinstance(result, dict) and isinstance(result.get("recovery"), dict) else {}
+    format_recovery = result.get("formatRecovery") if isinstance(result, dict) and isinstance(result.get("formatRecovery"), dict) else {}
+    if not (
+        runner.get("ok") is True
+        and isinstance(result, dict)
+        and result.get("ok") is True
+        and result.get("status") == "completed"
+        and result.get("workStatus") == "completed"
+        and result.get("resultProfile") == "trading_system_research"
+        and recovery_claim == {
+            "aiInvoked": False,
+            "webSearchInvoked": False,
+            "externalWrites": False,
+        }
+        and format_recovery.get("attempted") is True
+        and format_recovery.get("succeeded") is True
+        and format_recovery.get("formattedReportSha256")
+        == artifacts["formattedReportSha256"]
+        and format_recovery.get("agentMessageSha256")
+        == artifacts["agentMessageSha256"]
+    ):
+        return None
+    output_contract = validate_dashboard_workflow_output_contract(mission, result)
+    output_values = output_contract.get("values") if isinstance(output_contract.get("values"), dict) else {}
+    recovered_source_digest = str(output_values.get("sourceDigest") or "").strip().lower()
+    recovered_source_links = _contract_decoded_value(output_values.get("sourceLinks", ""))
+    evidence_urls = [item["url"] for item in _unique_public_evidence_rows(result.get("evidence"))]
+    if not (
+        output_contract.get("applicable") is True
+        and output_contract.get("valid") is True
+        and output_contract.get("failureCode") in (None, "")
+        and output_contract.get("procedureId")
+        == TRADING_SYSTEM_RESEARCH_WORKFLOW_PROCEDURE_ID
+        and output_contract.get("missingFields") == []
+        and output_contract.get("missingEvidenceKinds") == []
+        and output_contract.get("entryErrors") == []
+        and output_contract.get("oversizedFields") == []
+        and re.fullmatch(r"[0-9a-f]{64}", recovered_source_digest)
+        and secrets.compare_digest(
+            recovered_source_digest,
+            candidate["originalSourceDigest"],
+        )
+        and recovered_source_links == candidate["requiredUrls"]
+        and evidence_urls == candidate["requiredUrls"]
+    ):
+        return None
+
+    recovered_report_id = "auto-report-" + payload_digest(
+        DEEP_RESEARCH_TRANSPORT_RECOVERY_SCHEMA_VERSION,
+        candidate["missionId"],
+        candidate["originalReportId"],
+        artifacts["formattedReportSha256"],
+        artifacts["stdoutSha256"],
+        recovered_source_digest,
+    )[:24]
+    recovery_transaction = _deep_research_transport_recovery_transaction(
+        recovered_report_id,
+        candidate,
+        artifacts,
+        recovered_source_digest,
+    )
+    if recovery_transaction is None:
+        return None
+    recovered_at = recovery_transaction["recoveredAt"]
+    existing_path = RUNTIME_REPORTS_DIR / f"{recovered_report_id}.json"
+    existing_report = read_json(existing_path, None) if existing_path.is_file() else None
+    existing_metrics = (
+        existing_report.get("metrics")
+        if isinstance(existing_report, dict)
+        and isinstance(existing_report.get("metrics"), dict)
+        else {}
+    )
+    existing_recovery = (
+        existing_metrics.get("transportRecovery")
+        if isinstance(existing_metrics.get("transportRecovery"), dict)
+        else {}
+    )
+    if isinstance(existing_report, dict):
+        existing_created_at = existing_report.get("createdAt")
+        existing_updated_at = existing_report.get("updatedAt")
+        stored_recovered_at = existing_recovery.get("recoveredAt")
+        existing_workflow_output = (
+            existing_metrics.get("workflowOutput")
+            if isinstance(existing_metrics.get("workflowOutput"), dict)
+            else {}
+        )
+        stored_checked_at = existing_workflow_output.get("checkedAt")
+        if not (
+            stored_recovered_at == recovered_at
+            and existing_created_at == recovered_at
+            and existing_updated_at == stored_recovered_at
+            and stored_checked_at == stored_recovered_at
+        ):
+            return None
+
+    # Make the validation receipt replay-stable. Its ``checkedAt`` field is an
+    # audit timestamp rather than a source projection, so bind it to this
+    # recovery transaction (or to the already persisted transaction on crash
+    # replay) before constructing the exact expected Report below.
+    output_contract = copy.deepcopy(output_contract)
+    output_contract["checkedAt"] = recovered_at
+
+    receipt = {
+        "schemaVersion": DEEP_RESEARCH_TRANSPORT_RECOVERY_SCHEMA_VERSION,
+        "version": DEEP_RESEARCH_TRANSPORT_RECOVERY_VERSION,
+        "missionId": candidate["missionId"],
+        "originalReportId": candidate["originalReportId"],
+        "originalReportDigest": candidate["originalReportDigest"],
+        "recoveredReportId": recovered_report_id,
+        "formattedReportSha256": artifacts["formattedReportSha256"],
+        "stdoutSha256": artifacts["stdoutSha256"],
+        "agentMessageSha256": artifacts["agentMessageSha256"],
+        "recoveryTransactionId": recovery_transaction["transactionId"],
+        "recoveryTransactionDigest": recovery_transaction["transactionDigest"],
+        "sourceDigest": recovered_source_digest,
+        "failedAt": recovery_transaction["failedAt"],
+        "aiRerun": False,
+        "webSearchRerun": False,
+        "externalWrites": False,
+        "googleSheetQueued": False,
+        "recoveredAt": recovered_at,
+    }
+    metrics = dashboard_workflow_output_metrics(output_contract)
+    metrics["formatRecovery"] = sanitize_json_value(format_recovery)
+    metrics["transportRecovery"] = receipt
+    report_payload = {
+        "id": recovered_report_id,
+        "type": "trading_system_research_report",
+        "title": mission.get("title"),
+        "summary": result.get("structuredSummary") or result.get("finalMessage"),
+        "ownerAgentId": mission.get("owner"),
+        "linkedMissionId": candidate["missionId"],
+        "linkedPropId": "left_server_racks",
+        "status": "ready",
+        "findings": result.get("findings") if isinstance(result.get("findings"), list) else [],
+        "metrics": metrics,
+        "risks": [],
+        "nextActions": result.get("nextSteps") if isinstance(result.get("nextSteps"), list) else [],
+        "evidence": result.get("evidence") if isinstance(result.get("evidence"), list) else [],
+        "artifacts": [artifacts["finalReference"]],
+        "workflowContext": mission.get("workflowContext"),
+        "safety": {"approvalRequired": False, "publicShareable": False},
+    }
+    if existing_report is None:
+        report = create_report(
+            report_payload,
+            queue_research_sheet=False,
+            _trusted_created_at=recovered_at,
+        )
+        if not (
+            report.get("createdAt") == recovered_at
+            and report.get("updatedAt") == recovered_at
+            and (report.get("metrics") or {}).get("transportRecovery") == receipt
+            and (report.get("metrics") or {}).get("workflowOutput") == output_contract
+        ):
+            return None
+    else:
+        # A deterministic ID alone is not proof that a crash-orphaned Report is
+        # safe to reuse. Reconstruct the exact storage projection from the two
+        # freshly re-parsed artifacts and require full immutable equality. This
+        # rejects ID collisions and any edits to the brief, digest, evidence,
+        # context, receipt, artifacts, summary or ownership before the Mission
+        # can be promoted to completed.
+        safe_workflow_context = _workflow_context_storage(
+            report_payload.get("workflowContext")
+        )
+        safe_agent_transfer = _agent_transfer_storage(
+            report_payload.get("agentTransfer")
+            or ((safe_workflow_context or {}).get("agentTransfer"))
+        )
+        expected_report = {
+            "id": recovered_report_id,
+            "type": "trading_system_research_report",
+            "title": redact_text(str(report_payload.get("title") or "Agent Report"), 160),
+            "summary": redact_text(str(report_payload.get("summary") or ""), 8000),
+            "ownerAgentId": str(report_payload.get("ownerAgentId") or "manager"),
+            "linkedMissionId": candidate["missionId"],
+            "linkedPropId": "left_server_racks",
+            "status": "ready",
+            "findings": sanitize_json_value(report_payload["findings"]),
+            "metrics": _trading_system_research_metrics_storage(metrics),
+            "risks": [],
+            "nextActions": sanitize_json_value(report_payload["nextActions"]),
+            "evidence": evidence_read_model(report_payload["evidence"]),
+            "executionEvidence": report_execution_evidence_read_model(
+                None,
+                "trading_system_research_report",
+                candidate["missionId"],
+            ),
+            "artifacts": sanitize_json_value(report_payload["artifacts"]),
+            "workflowContext": safe_workflow_context,
+            "agentTransfer": safe_agent_transfer,
+            "safety": {
+                "containsSecret": False,
+                "secretRedacted": json_contains_potential_secret(report_payload),
+                "approvalRequired": False,
+                "publicShareable": False,
+            },
+            "createdAt": existing_created_at,
+            "updatedAt": existing_updated_at,
+        }
+        if not (
+            isinstance(existing_created_at, str)
+            and parse_iso(existing_created_at) is not None
+            and existing_created_at == existing_updated_at
+            and existing_created_at == recovered_at
+            and existing_report == expected_report
+        ):
+            return None
+        report = existing_report
+    return report, output_contract, receipt
+
+
+def _deep_research_transport_recovery_audit_event(
+    item: dict,
+    *,
+    committed: bool,
+) -> dict:
+    event_kind = "recovered" if committed else "prepared"
+    event_id = "audit-" + payload_digest(
+        DEEP_RESEARCH_TRANSPORT_RECOVERY_SCHEMA_VERSION,
+        event_kind,
+        item.get("missionId"),
+        item.get("originalReportId"),
+        item.get("recoveredReportId"),
+        item.get("recoveredReportDigest"),
+        item.get("sourceDigest"),
+    )[:32]
+    return {
+        "type": (
+            "mission.deep_research_transport_recovered"
+            if committed
+            else "mission.deep_research_transport_recovery_prepared"
+        ),
+        "eventId": event_id,
+        "missionId": item.get("missionId"),
+        "originalReportId": item.get("originalReportId"),
+        "recoveredReportId": item.get("recoveredReportId"),
+        "recoveredReportDigest": item.get("recoveredReportDigest"),
+        "sourceDigest": item.get("sourceDigest"),
+        "recoveredAt": item.get("recoveredAt"),
+        "recoveryVersion": DEEP_RESEARCH_TRANSPORT_RECOVERY_VERSION,
+        "missionCommitPending": not committed,
+        "aiRerun": False,
+        "webSearchRerun": False,
+        "externalWrites": False,
+        "googleSheetQueued": False,
+    }
+
+
+def _completed_deep_research_transport_recovery_audit_item(
+    mission: object,
+) -> dict | None:
+    """Validate a committed recovery before repairing a missing completion audit."""
+
+    row = mission if isinstance(mission, dict) else {}
+    receipt = (
+        row.get("deterministicTransportRecovery")
+        if isinstance(row.get("deterministicTransportRecovery"), dict)
+        else {}
+    )
+    expected_receipt_keys = {
+        "schemaVersion",
+        "version",
+        "missionId",
+        "originalReportId",
+        "originalReportDigest",
+        "recoveredReportId",
+        "formattedReportSha256",
+        "stdoutSha256",
+        "agentMessageSha256",
+        "recoveryTransactionId",
+        "recoveryTransactionDigest",
+        "recoveredReportDigest",
+        "sourceDigest",
+        "failedAt",
+        "aiRerun",
+        "webSearchRerun",
+        "externalWrites",
+        "googleSheetQueued",
+        "recoveredAt",
+    }
+    mission_id = safe_reference(row.get("id"))
+    original_report_id = safe_reference(receipt.get("originalReportId"))
+    recovered_report_id = safe_reference(receipt.get("recoveredReportId"))
+    recovered_at = receipt.get("recoveredAt")
+    failed_at = receipt.get("failedAt")
+    recovery_transaction_id = safe_reference(receipt.get("recoveryTransactionId"))
+    recovered_report_digest = str(
+        receipt.get("recoveredReportDigest") or ""
+    ).strip().lower()
+    hashes = [
+        str(receipt.get(field) or "").strip().lower()
+        for field in (
+            "originalReportDigest",
+            "formattedReportSha256",
+            "stdoutSha256",
+            "agentMessageSha256",
+            "recoveryTransactionDigest",
+            "sourceDigest",
+        )
+    ]
+    execution = row.get("execution") if isinstance(row.get("execution"), dict) else {}
+    output_contract = (
+        row.get("workflowOutputContract")
+        if isinstance(row.get("workflowOutputContract"), dict)
+        else {}
+    )
+    if not (
+        set(receipt) == expected_receipt_keys
+        and mission_id
+        and original_report_id
+        and recovered_report_id
+        and recovery_transaction_id
+        and re.fullmatch(r"[0-9a-f]{64}", recovered_report_digest)
+        and receipt.get("schemaVersion")
+        == DEEP_RESEARCH_TRANSPORT_RECOVERY_SCHEMA_VERSION
+        and receipt.get("version") == DEEP_RESEARCH_TRANSPORT_RECOVERY_VERSION
+        and receipt.get("missionId") == mission_id
+        and all(re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes)
+        and receipt.get("aiRerun") is False
+        and receipt.get("webSearchRerun") is False
+        and receipt.get("externalWrites") is False
+        and receipt.get("googleSheetQueued") is False
+        and isinstance(recovered_at, str)
+        and parse_iso(recovered_at) is not None
+        and isinstance(failed_at, str)
+        and parse_iso(failed_at) is not None
+        and row.get("owner") == "mission_archivist"
+        and row.get("status") == "completed"
+        and row.get("phase") == "auto_guarded_completed_transport_recovered"
+        and row.get("workStatus") == "completed"
+        and row.get("errorCode") is None
+        and row.get("targetId") == "left_server_racks"
+        and row.get("reportType") == "trading_system_research_report"
+        and row.get("reportIds") == [recovered_report_id]
+        and row.get("updatedAt") == recovered_at
+        and row.get("heartbeatAt") == recovered_at
+        and row.get("completedAt") == recovered_at
+        and execution.get("dispatchState") == "completed"
+        and execution.get("heartbeatAt") == recovered_at
+        and execution.get("completedAt") == recovered_at
+        and execution.get("automaticRetry") is False
+        and execution.get("deterministicTransportRecovery")
+        == {
+            "schemaVersion": DEEP_RESEARCH_TRANSPORT_RECOVERY_SCHEMA_VERSION,
+            "aiRerun": False,
+            "webSearchRerun": False,
+            "externalWrites": False,
+        }
+        and output_contract.get("applicable") is True
+        and output_contract.get("valid") is True
+        and output_contract.get("failureCode") in (None, "")
+        and output_contract.get("missingFields") == []
+        and output_contract.get("missingEvidenceKinds") == []
+        and output_contract.get("entryErrors") == []
+        and output_contract.get("oversizedFields") == []
+        and output_contract.get("checkedAt") == recovered_at
+        and str((output_contract.get("values") or {}).get("sourceDigest") or "")
+        .strip()
+        .lower()
+        == hashes[-1]
+    ):
+        return None
+    expected_recovered_report_id = "auto-report-" + payload_digest(
+        DEEP_RESEARCH_TRANSPORT_RECOVERY_SCHEMA_VERSION,
+        mission_id,
+        original_report_id,
+        receipt.get("formattedReportSha256"),
+        receipt.get("stdoutSha256"),
+        receipt.get("sourceDigest"),
+    )[:24]
+    report_receipt = {
+        key: value for key, value in receipt.items() if key != "recoveredReportDigest"
+    }
+    original_report_path = RUNTIME_REPORTS_DIR / f"{original_report_id}.json"
+    original_report = (
+        read_json(original_report_path, None)
+        if original_report_path.is_file()
+        else None
+    )
+    if not (
+        recovered_report_id == expected_recovered_report_id
+        and isinstance(original_report, dict)
+        and _report_snapshot_digest(original_report)
+        == receipt.get("originalReportDigest")
+    ):
+        return None
+    expected_transaction = _deep_research_transport_recovery_transaction(
+        recovered_report_id,
+        {
+            "missionId": mission_id,
+            "originalReportId": original_report_id,
+            "originalReportDigest": receipt.get("originalReportDigest"),
+            "originalReportCreatedAt": original_report.get("createdAt"),
+            "failedAt": failed_at,
+        },
+        {
+            "formattedReportSha256": receipt.get("formattedReportSha256"),
+            "stdoutSha256": receipt.get("stdoutSha256"),
+            "agentMessageSha256": receipt.get("agentMessageSha256"),
+        },
+        receipt.get("sourceDigest"),
+    )
+    if not (
+        isinstance(expected_transaction, dict)
+        and receipt.get("recoveryTransactionId")
+        == expected_transaction.get("transactionId")
+        and receipt.get("recoveryTransactionDigest")
+        == expected_transaction.get("transactionDigest")
+        and recovered_at == expected_transaction.get("recoveredAt")
+        and failed_at == expected_transaction.get("failedAt")
+    ):
+        return None
+    report_path = RUNTIME_REPORTS_DIR / f"{recovered_report_id}.json"
+    report = read_json(report_path, None) if report_path.is_file() else None
+    metrics = (
+        report.get("metrics")
+        if isinstance(report, dict) and isinstance(report.get("metrics"), dict)
+        else {}
+    )
+    if not (
+        isinstance(report, dict)
+        and report.get("id") == recovered_report_id
+        and report.get("type") == "trading_system_research_report"
+        and report.get("status") == "ready"
+        and report.get("ownerAgentId") == "mission_archivist"
+        and report.get("linkedMissionId") == mission_id
+        and report.get("linkedPropId") == "left_server_racks"
+        and report.get("createdAt") == recovered_at
+        and report.get("updatedAt") == recovered_at
+        and report.get("title") == row.get("title")
+        and report.get("summary") == row.get("result")
+        and report.get("evidence") == row.get("evidence")
+        and _workflow_context_storage(report.get("workflowContext"))
+        == _workflow_context_storage(row.get("workflowContext"))
+        and metrics.get("transportRecovery") == report_receipt
+        and metrics.get("workflowOutput") == output_contract
+        and _report_snapshot_digest(report) == recovered_report_digest
+    ):
+        return None
+    return {
+        "missionId": mission_id,
+        "originalReportId": original_report_id,
+        "recoveredReportId": recovered_report_id,
+        "recoveredReportDigest": recovered_report_digest,
+        "sourceDigest": hashes[-1],
+        "recoveredAt": recovered_at,
+    }
+
+
+def reconcile_deep_research_transport_failures() -> int:
+    """Promote only proven transport-only failures without rerunning AI/web."""
+
+    recovered: list[dict] = []
+    committed_audit_items: list[dict] = []
+    parent_ids: set[str] = set()
+    with MISSIONS_LOCK:
+        missions = load_missions()
+        committed_audit_items.extend(
+            item
+            for mission in missions
+            if (
+                item := _completed_deep_research_transport_recovery_audit_item(
+                    mission
+                )
+            )
+            is not None
+        )
+        for mission in missions:
+            candidate = _deep_research_transport_recovery_candidate(mission)
+            if candidate is None:
+                continue
+            recovered_values = _deep_research_transport_recovered_report(
+                mission,
+                candidate,
+            )
+            if recovered_values is None:
+                continue
+            report, output_contract, receipt = recovered_values
+            recovered_at = receipt["recoveredAt"]
+            execution = mission.get("execution") if isinstance(mission.get("execution"), dict) else {}
+            execution["dispatchState"] = "completed"
+            execution["heartbeatAt"] = recovered_at
+            execution["completedAt"] = recovered_at
+            execution["automaticRetry"] = False
+            execution["deterministicTransportRecovery"] = {
+                "schemaVersion": DEEP_RESEARCH_TRANSPORT_RECOVERY_SCHEMA_VERSION,
+                "aiRerun": False,
+                "webSearchRerun": False,
+                "externalWrites": False,
+            }
+            mission["status"] = "completed"
+            mission["phase"] = "auto_guarded_completed_transport_recovered"
+            mission["workStatus"] = "completed"
+            mission["errorCode"] = None
+            mission["result"] = report.get("summary")
+            mission["evidence"] = copy.deepcopy(report.get("evidence") or [])
+            mission["workflowOutputContract"] = copy.deepcopy(output_contract)
+            mission["semanticRepair"] = None
+            mission["blockedCapability"] = ""
+            mission["structuredOutputError"] = None
+            mission["reportIds"] = [report["id"]]
+            mission["artifactPath"] = candidate["artifacts"]["finalReference"]
+            mission["webSearchUsed"] = True
+            mission["webSearchEvidenceVerified"] = True
+            mission_recovery_receipt = {
+                **receipt,
+                "recoveredReportDigest": _report_snapshot_digest(report),
+            }
+            mission["deterministicTransportRecovery"] = mission_recovery_receipt
+            mission["updatedAt"] = recovered_at
+            mission["heartbeatAt"] = recovered_at
+            mission["completedAt"] = recovered_at
+            mission["execution"] = execution
+            parent_id = safe_reference(mission.get("parentMissionId"))
+            if parent_id:
+                parent_ids.add(parent_id)
+            recovered.append({
+                "missionId": candidate["missionId"],
+                "originalReportId": candidate["originalReportId"],
+                "recoveredReportId": report["id"],
+                "recoveredReportDigest": mission_recovery_receipt[
+                    "recoveredReportDigest"
+                ],
+                "sourceDigest": receipt["sourceDigest"],
+                "recoveredAt": recovered_at,
+            })
+        if recovered:
+            # The prepared event truthfully records a durable ready Report while
+            # the Mission commit is still pending. If mission persistence fails,
+            # restart replay deduplicates this event and retries the same commit.
+            for item in recovered:
+                append_audit_once(
+                    _deep_research_transport_recovery_audit_event(
+                        item,
+                        committed=False,
+                    )
+                )
+            save_missions(missions)
+            committed_audit_items.extend(recovered)
+    # Completion is audited only after the durable Mission commit. A crash after
+    # that commit is repaired on the next startup by the validated completed-
+    # mission scan above, using the same deterministic event ID.
+    for item in committed_audit_items:
+        append_audit_once(
+            _deep_research_transport_recovery_audit_event(
+                item,
+                committed=True,
+            )
+        )
+    for parent_id in parent_ids:
+        refresh_parent_mission(parent_id)
+    return len(recovered)
+
+
 def reconcile_current_day_public_research_output_repairs() -> int:
     """Requeue each exact current-day output bug without consuming a new slot."""
 
@@ -58028,7 +69397,7 @@ def reconcile_current_day_public_research_output_repairs() -> int:
                 if isinstance(mission.get("budget"), dict)
                 else {}
             )
-            budget["rateReservePercent"] = AUTOMATION_MIN_REMAINING_PERCENT
+            budget["rateReservePercent"] = automation_min_remaining_percent()
             budget["timeoutSeconds"] = max(
                 300,
                 clamp_int(budget.get("timeoutSeconds"), 120, 15, 600),
@@ -62986,6 +74355,40 @@ def execute_mission(mission_id: str, payload: dict | None = None) -> dict:
     mission = find_mission(mission_id)
     if not mission:
         return {"ok": False, "kind": "not_found", "message": "Mission not found.", "_httpStatus": 404}
+    workflow_context = (
+        mission.get("workflowContext")
+        if isinstance(mission.get("workflowContext"), dict)
+        else {}
+    )
+    legacy_factory_action_id = str(workflow_context.get("actionId") or "")
+    if (
+        mission.get("targetId") == "right_server_racks"
+        and legacy_factory_action_id in EA_FACTORY_BACKEND_AUTO_STAGE_ACTIONS
+    ):
+        # Factory source work is admitted only by advance_ea_factory_build,
+        # which owns the durable Build/Stage reservation and exact sandbox.
+        # An old waiting-approval Mission from the generic dashboard has no
+        # authority to enter the manual real-run path, even after approval.
+        message_th = (
+            "Mission รุ่นเดิมนี้ไม่สามารถสั่งรันตรงได้ "
+            "กรุณากลับไปเริ่มหรือทำต่อจากโรงงานสร้าง EA"
+        )
+        append_audit({
+            "type": "mission.execute_ea_factory_legacy_redirected",
+            "missionId": mission_id,
+            "actionId": legacy_factory_action_id,
+            "targetId": "right_server_racks",
+            "manualRunnerStarted": False,
+        })
+        return {
+            "ok": False,
+            "kind": "ea_factory_dedicated_endpoint_required",
+            "code": "ea_factory_dedicated_endpoint_required",
+            "mission": mission,
+            "message": message_th,
+            "messageTh": message_th,
+            "_httpStatus": 409,
+        }
     if mission.get("status") != "waiting_approval":
         return {"ok": False, "kind": "invalid_mission_state", "message": "Only waiting_approval missions can be executed.", "_httpStatus": 409}
     approval = mission.get("approval") if isinstance(mission.get("approval"), dict) else {}
@@ -63080,21 +74483,43 @@ def execute_mission(mission_id: str, payload: dict | None = None) -> dict:
     tier = (load_orchestration_contract().get("modelTiers") or {}).get(tier_id) or {}
     max_runs = clamp_int(tier.get("maxRunsPerHour"), 12, 1, 200)
     quota = codex_rate_limits()
-    if quota.get("ok") is True and quota.get("limitReached") is True:
+    quota_gate = _collaboration_quota_gate({}, refresh=False, quota=quota)
+    if quota_gate.get("allowed") is not True:
+        quota_reason = str(quota_gate.get("reason") or "quota_unavailable")
+        provider_limit_reached = quota_reason == "quota_limit_reached"
         append_audit({
-            "type": "guard.codex_limit_reached",
+            # Preserve the established manual-execution receipt while the
+            # shared gate keeps its normalized internal reason.
+            "type": (
+                "guard.codex_limit_reached"
+                if provider_limit_reached
+                else "guard.codex_quota_blocked"
+            ),
             "missionId": mission_id,
             "agentId": agent_id,
             "toolId": tool_id,
+            "reason": quota_reason,
+            "remainingPercent": quota_gate.get("remainingPercent"),
+            "rateReservePercent": quota_gate.get("rateReservePercent"),
             "quotaStatus": quota.get("status"),
             "quotaStale": bool(quota.get("stale", False)),
         })
         return {
             "ok": False,
-            "kind": "codex_limit_reached",
+            "kind": (
+                "codex_limit_reached"
+                if provider_limit_reached
+                else quota_reason
+            ),
             "mission": mission,
-            "message": "Codex แจ้งว่าบัญชีถึง Rate Limit แล้ว ระบบจึงไม่ได้เริ่มงานใหม่ใน Runner",
-            "_httpStatus": 429,
+            "message": quota_gate.get("messageTh"),
+            "rateReservePercent": quota_gate.get("rateReservePercent"),
+            "remainingPercent": quota_gate.get("remainingPercent"),
+            "_httpStatus": (
+                429
+                if quota_reason in {"quota_below_reserve", "quota_limit_reached"}
+                else 503
+            ),
         }
 
     rate_key = f"real:{agent_id}:{tool_id}:{tier_id}"
@@ -63135,6 +74560,8 @@ def execute_mission(mission_id: str, payload: dict | None = None) -> dict:
             "timeoutSeconds": timeout_seconds,
             "outputLimitChars": output_limit,
             "webSearchEnabled": tool_id == "codex_web_research",
+            "rateReservePercent": quota_gate.get("rateReservePercent"),
+            "remainingPercent": quota_gate.get("remainingPercent"),
         })
         execution_mode = (
             "approved_workspace"
@@ -63152,6 +74579,7 @@ def execute_mission(mission_id: str, payload: dict | None = None) -> dict:
             "--timeout", str(timeout_seconds),
             "--model-tier", tier_id,
             "--output-limit", str(output_limit),
+            "--min-remaining-percent", str(automation_min_remaining_percent()),
         ]
         if meeting_workspace_binding:
             runner_command.extend([
@@ -63165,13 +74593,28 @@ def execute_mission(mission_id: str, payload: dict | None = None) -> dict:
         runner = run_safe_command(
             runner_command,
             timeout=timeout_seconds + 30,
-            output_limit=max(40000, output_limit + 10000),
+            output_limit=max(
+                40000,
+                min(
+                    EA_RESEARCH_RUNNER_TRANSPORT_MAX_CHARS,
+                    (output_limit * 2) + 10000,
+                ),
+            ),
             input_text=str(mission.get("detail") or ""),
+            structured_json_output=True,
         )
         try:
             result = json.loads(runner["output"]) if runner["output"] else {}
         except json.JSONDecodeError:
             result = {"ok": False, "status": "failed", "message": "Runner returned invalid JSON."}
+        if not isinstance(result, dict):
+            result = {"ok": False, "status": "invalid_runner_output", "message": "Runner returned an invalid result object."}
+        elif result.get("ok") is True and runner.get("ok") is not True:
+            result = {
+                "ok": False,
+                "status": "runner_process_untrusted",
+                "message": "Runner process did not complete successfully; its success payload was rejected.",
+            }
         if meeting_workspace_binding:
             echoed_binding = (
                 result.get("approvalBinding")
@@ -64147,7 +75590,7 @@ def _apply_scheduled_public_research_completion_retry(
         if isinstance(mission.get("budget"), dict)
         else {}
     )
-    budget["rateReservePercent"] = AUTOMATION_MIN_REMAINING_PERCENT
+    budget["rateReservePercent"] = automation_min_remaining_percent()
     budget["timeoutSeconds"] = 600
     budget["outputLimitChars"] = 20000
     mission["budget"] = budget
@@ -65072,6 +76515,20 @@ def finish_auto_mission(mission_id: str, lease_id: str, runner: dict, result: di
         "risks": [] if succeeded else [terminal_failure_code],
         "workflowContext": current.get("workflowContext"),
     }
+    semantic_repair = sanitize_json_value(
+        result.get("semanticRepair")
+        if isinstance(result.get("semanticRepair"), dict)
+        else None,
+        string_limit=1000,
+    )
+    if isinstance(semantic_repair, dict):
+        report_metrics = (
+            report_payload.get("metrics")
+            if isinstance(report_payload.get("metrics"), dict)
+            else {}
+        )
+        report_metrics["semanticRepair"] = semantic_repair
+        report_payload["metrics"] = report_metrics
     finished = None
     parent_id = None
     current_batch_repair = (
@@ -65127,6 +76584,7 @@ def finish_auto_mission(mission_id: str, lease_id: str, runner: dict, result: di
                 else (result.get("evidence") if isinstance(result.get("evidence"), list) else [])
             )
             mission["workflowOutputContract"] = output_contract
+            mission["semanticRepair"] = copy.deepcopy(semantic_repair)
             mission["blockedCapability"] = redact_text(
                 str(result.get("blockedCapability") or ""),
                 160,
@@ -65245,6 +76703,14 @@ def finish_auto_mission(mission_id: str, lease_id: str, runner: dict, result: di
                     corrective_open_verification_receipt
                 )
             execution["automaticRetry"] = False
+            execution["semanticRepairAttempted"] = bool(
+                isinstance(semantic_repair, dict)
+                and semantic_repair.get("attempted") is True
+            )
+            execution["semanticRepairSucceeded"] = bool(
+                isinstance(semantic_repair, dict)
+                and semantic_repair.get("succeeded") is True
+            )
             mission["execution"] = execution
             if radar_batch_report_commit_requested:
                 commit_packet = _prepare_radar_batch_report_commit(
@@ -66434,11 +77900,10 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
         )
         return
     workflow_context = _workflow_context_storage(mission.get("workflowContext"))
-    # Every automatic Mission uses one system-wide reserve. At exactly 15%
-    # the worker pauses; execution resumes only when the remaining quota is
-    # strictly greater than 15%.
+    # Every automatic Mission reads the current central reserve. At exactly
+    # the threshold it is allowed; only a value below the threshold pauses.
     reserve_gate = _collaboration_quota_gate(
-        {"minRemainingPercent": AUTOMATION_MIN_REMAINING_PERCENT},
+        {},
         refresh=False,
         quota=quota,
     )
@@ -67004,7 +78469,9 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
             "outputLimitChars": output_limit,
             "tokenBudget": budget.get("tokenBudget"),
             "tokenBudgetMode": budget.get("tokenBudgetMode"),
-            "rateReservePercent": budget.get("rateReservePercent"),
+            "rateReservePercent": reserve_gate.get("rateReservePercent"),
+            "remainingPercent": reserve_gate.get("remainingPercent"),
+            "budgetRateReservePercent": budget.get("rateReservePercent"),
             "requestedSandbox": (
                 "read-only+structured-source-writer"
                 if ea_factory_scoped_write_root
@@ -67073,6 +78540,7 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                 "--timeout", str(timeout_seconds),
                 "--model-tier", tier_id,
                 "--output-limit", str(output_limit),
+                "--min-remaining-percent", str(automation_min_remaining_percent()),
             ]
             if tool_id == "codex_web_research":
                 runner_command.append("--web-search")
@@ -67107,6 +78575,8 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
             runner_transport_limit = (
                 EA_FACTORY_SOURCE_RUNNER_TRANSPORT_MAX_CHARS
                 if worker_result_profile == EA_FACTORY_SOURCE_RESULT_PROFILE
+                else EA_RESEARCH_RUNNER_TRANSPORT_MAX_CHARS
+                if worker_result_profile == "trading_system_research"
                 else max(40000, output_limit + 10000)
             )
             runner = run_safe_command(
@@ -67117,6 +78587,7 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                 kill_process_tree_on_timeout=True,
                 cancel_event=MISSION_WORKER_STOP,
                 tracking_key=mission_id,
+                structured_json_output=True,
             )
         finally:
             heartbeat_stop.set()
@@ -67138,6 +78609,12 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                 }
         if not isinstance(result, dict):
             result = {"ok": False, "status": "invalid_runner_output", "message": "Invalid runner result."}
+        elif result.get("ok") is True and runner.get("ok") is not True:
+            result = {
+                "ok": False,
+                "status": "runner_process_untrusted",
+                "message": "Codex Worker process did not complete successfully; its success payload was rejected.",
+            }
         finish_auto_mission(mission_id, lease_id, runner, result)
     except Exception:
         current = find_mission(mission_id)
@@ -67649,7 +79126,7 @@ def run_bridge_task(
             1000,
             trusted_output_hard_limit,
         ),
-        "rateReservePercent": AUTOMATION_MIN_REMAINING_PERCENT,
+        "rateReservePercent": automation_min_remaining_percent(),
     }
     mission = create_mission(
         {
@@ -68188,23 +79665,28 @@ def run_agent_chat_request(payload: dict) -> dict:
             )
 
         quota = codex_rate_limits()
-        if quota.get("ok") is True and quota.get("limitReached") is True:
+        quota_gate = _collaboration_quota_gate({}, refresh=False, quota=quota)
+        if quota_gate.get("allowed") is not True:
+            quota_reason = str(quota_gate.get("reason") or "quota_unavailable")
             append_audit({
                 "type": "agent.chat_blocked",
                 "agentId": agent_id,
                 "sessionDigest": payload_digest(session_id)[:16],
-                "reason": "codex_limit_reached",
+                "reason": quota_reason,
+                "remainingPercent": quota_gate.get("remainingPercent"),
+                "rateReservePercent": quota_gate.get("rateReservePercent"),
                 "quotaStatus": quota.get("status"),
                 "quotaStale": bool(quota.get("stale", False)),
             })
             response = _agent_chat_error(
-                "codex_limit_reached",
-                "Codex แจ้งว่าบัญชีถึง Rate Limit แล้ว ระบบจึงไม่ได้ส่งข้อความใหม่",
-                429,
+                quota_reason,
+                str(quota_gate.get("messageTh") or "ยังตรวจสอบ Rate Limit ของ Codex ไม่ได้"),
+                429 if quota_reason in {"quota_below_reserve", "quota_limit_reached"} else 503,
                 agent_id=agent_id,
                 session_id=session_id,
             )
             response["rateLimit"] = _agent_chat_rate_limit_read_model(quota)
+            response["rateReservePercent"] = quota_gate.get("rateReservePercent")
             return response
 
         allowed, retry_after = check_rate_limit(
@@ -68359,11 +79841,14 @@ def run_agent_chat_request(payload: dict) -> dict:
                 model_tier,
                 "--output-limit",
                 str(output_limit),
+                "--min-remaining-percent",
+                str(automation_min_remaining_percent()),
             ],
             timeout=timeout_seconds + 45,
             output_limit=30000,
             input_text=json.dumps(runner_request, ensure_ascii=False),
             kill_process_tree_on_timeout=True,
+            structured_json_output=True,
         )
         try:
             runner_result = json.loads(runner.get("output") or "{}")
@@ -68374,6 +79859,14 @@ def run_agent_chat_request(payload: dict) -> dict:
                 "message": "Codex Chat Runner ส่งผลลัพธ์ที่ตรวจสอบไม่ได้",
             }
         runner_result = runner_result if isinstance(runner_result, dict) else {}
+        if runner_result.get("ok") is True and runner.get("ok") is not True:
+            runner_result = {
+                "ok": False,
+                "status": "runner_process_untrusted",
+                "message": "Codex Chat process did not complete successfully; its success payload was rejected.",
+                "quotaAttempted": bool(runner.get("processStarted", False)),
+                "quotaConsumption": "possible" if runner.get("processStarted") else "none",
+            }
         quota_attempted = bool(runner_result.get("quotaAttempted", False))
         quota_consumption = str(runner_result.get("quotaConsumption") or "")
         if quota_consumption not in {"none", "possible", "confirmed"}:
@@ -68880,6 +80373,7 @@ def _run_collaboration_agent_turn(
         input_text=json.dumps({"message": message, "history": []}, ensure_ascii=False),
         kill_process_tree_on_timeout=True,
         cancel_event=COLLABORATION_SCHEDULER_STOP,
+        structured_json_output=True,
     )
     try:
         result = json.loads(runner.get("output") or "{}")
@@ -68890,6 +80384,12 @@ def _run_collaboration_agent_turn(
             "message": "Codex ส่งผลประชุมที่ตรวจสอบรูปแบบไม่ได้",
         }
     result = result if isinstance(result, dict) else {}
+    if result.get("ok") is True and runner.get("ok") is not True:
+        result = {
+            "ok": False,
+            "status": "runner_process_untrusted",
+            "message": "Codex meeting process did not complete successfully; its success payload was rejected.",
+        }
     guardrails = result.get("guardrails") if isinstance(result.get("guardrails"), dict) else {}
     contribution = _bounded_meeting_contribution(
         result.get("meetingContribution"),
@@ -69969,7 +81469,7 @@ class BridgeHandler(SimpleHTTPRequestHandler):
                 return
             super().do_HEAD()
         except RequestError as error:
-            self.send_json({"ok": False, "error": str(error)}, status=error.status)
+            self.send_json(request_error_response(error), status=error.status)
         except DataIntegrityError:
             request_id = safe_id(None, "request")
             try:
@@ -70017,7 +81517,7 @@ class BridgeHandler(SimpleHTTPRequestHandler):
             return
         except RequestError as error:
             self.send_json_disconnect_safe(
-                {"ok": False, "error": str(error)},
+                request_error_response(error),
                 status=error.status,
             )
         except DataIntegrityError:
@@ -70070,7 +81570,7 @@ class BridgeHandler(SimpleHTTPRequestHandler):
             else:
                 self.validate_local_request()
         except RequestError as error:
-            self.send_json({"ok": False, "error": str(error)}, status=error.status)
+            self.send_json(request_error_response(error), status=error.status)
             return
         query = parse_qs(parsed.query, keep_blank_values=True)
         if path == google_sheet_hub.GOOGLE_OAUTH_CALLBACK_PATH:
@@ -70153,7 +81653,23 @@ class BridgeHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/codex/rate-limits":
             force = str(query.get("refresh", [""])[0]).lower() in {"1", "true", "yes"}
-            self.send_json(codex_rate_limits(force=force))
+            quota = codex_rate_limits(force=force)
+            policy = automation_quota_policy_read_model()
+            self.send_json({
+                **quota,
+                "rateReservePercent": policy["rateReservePercent"],
+                "minRemainingPercent": policy["minRemainingPercent"],
+                "automationPolicy": policy,
+            })
+            return
+        if path == "/api/automation/quota-policy":
+            policy = automation_quota_policy_read_model()
+            self.send_json({
+                "ok": True,
+                "kind": "automation_quota_policy",
+                **policy,
+                "policy": policy,
+            })
             return
         if path == "/api/agents":
             self.send_json(read_json(AGENTS_PATH, {"agents": []}))
@@ -70557,6 +82073,9 @@ class BridgeHandler(SimpleHTTPRequestHandler):
             if path == "/api/operator-mode":
                 self.send_result(set_operator_mode(payload))
                 return
+            if path == "/api/automation/quota-policy":
+                self.send_result(save_automation_quota_policy(payload))
+                return
             if path == "/api/collaboration/schedule":
                 self.send_result(set_collaboration_schedule(payload))
                 return
@@ -70777,6 +82296,9 @@ class BridgeHandler(SimpleHTTPRequestHandler):
             if path == "/api/props/mission_strategy_table/research-sheet/query":
                 self.send_result(query_research_sheet_hub(payload))
                 return
+            if path == DEEP_RESEARCH_CONFIRMATION_ENDPOINT:
+                self.send_result(confirm_deep_research_for_ea(payload))
+                return
             if path == "/api/props/right_server_racks/ea-factory/sources/google-sheet/sync":
                 result = sync_ea_factory_google_sheet(payload)
                 result["eaFactory"] = ea_factory_read_model()
@@ -70793,6 +82315,30 @@ class BridgeHandler(SimpleHTTPRequestHandler):
                 self.send_result(
                     advance_ea_factory_build(
                         unquote(ea_factory_advance.group(1)),
+                        payload,
+                    )
+                )
+                return
+            ea_factory_retry = re.fullmatch(
+                r"/api/props/right_server_racks/ea-factory/builds/([^/]+)/retry",
+                path,
+            )
+            if ea_factory_retry:
+                self.send_result(
+                    retry_ea_factory_build_stage(
+                        unquote(ea_factory_retry.group(1)),
+                        payload,
+                    )
+                )
+                return
+            ea_factory_one_click = re.fullmatch(
+                r"/api/props/right_server_racks/ea-factory/builds/([^/]+)/run",
+                path,
+            )
+            if ea_factory_one_click:
+                self.send_result(
+                    run_ea_factory_build_one_click(
+                        unquote(ea_factory_one_click.group(1)),
                         payload,
                     )
                 )
@@ -70915,7 +82461,7 @@ class BridgeHandler(SimpleHTTPRequestHandler):
             return
         except RequestError as error:
             self.send_json_disconnect_safe(
-                {"ok": False, "error": str(error)},
+                request_error_response(error),
                 status=error.status,
             )
         except DataIntegrityError:
@@ -71003,6 +82549,9 @@ def main() -> int:
         reconciled_radar_report_digest_count = (
             reconcile_completed_radar_batch_report_digests()
         )
+        recovered_deep_research_transport_count = (
+            reconcile_deep_research_transport_failures()
+        )
         repaired_public_research_output_count = (
             reconcile_current_day_public_research_output_repairs()
         )
@@ -71015,10 +82564,16 @@ def main() -> int:
             recover_interrupted_interactive_meeting_sessions()
         )
         reconciled_parent_count = reconcile_parent_mission_statuses()
+        visible_ea_front_office_adapter_configured = (
+            configure_ea_factory_visible_front_office_adapter()
+        )
         httpd = BridgeHTTPServer((args.host, args.port), BridgeHandler)
         actual_port = int(httpd.server_port)
         write_bridge_control_file(args.host, actual_port)
         start_mission_worker()
+        resumed_ea_factory_one_click_runs = (
+            resume_interrupted_ea_factory_one_click_runs()
+        )
         start_dashboard_workflow_scheduler()
         start_ai_trade_council_automation_scheduler()
         RADAR_IMAGE_ADAPTER_RUNTIME_ENABLED = True
@@ -71035,6 +82590,9 @@ def main() -> int:
             "reconciledRadarBatchReportDigests": (
                 reconciled_radar_report_digest_count
             ),
+            "recoveredDeepResearchTransportMissions": (
+                recovered_deep_research_transport_count
+            ),
             "repairedPublicResearchOutputMissions": (
                 repaired_public_research_output_count
             ),
@@ -71048,6 +82606,10 @@ def main() -> int:
             ),
             "reconciledParentMissions": reconciled_parent_count,
             "missionWorker": mission_worker_read_model(),
+            "visibleEaFrontOfficeAdapterConfigured": (
+                visible_ea_front_office_adapter_configured
+            ),
+            "resumedEaFactoryOneClickRuns": resumed_ea_factory_one_click_runs,
             "dashboardWorkflowScheduler": dashboard_workflow_scheduler_read_model(),
             "collaboration": collaboration_schedule_read_model(),
             "collaborationScheduledAutomationStarted": False,

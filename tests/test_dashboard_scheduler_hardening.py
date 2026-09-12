@@ -289,8 +289,8 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
             },
         )
 
-    def test_rate_reserve_is_fixed_at_15_everywhere(self) -> None:
-        """Legacy storage normalizes to 15 and submitted overrides are rejected."""
+    def test_rate_reserve_accepts_zero_to_one_hundred_and_fails_safe(self) -> None:
+        """Malformed storage defaults to 15; valid whole percentages are accepted."""
 
         action = self.bridge.DASHBOARD_WORKFLOW_ACTIONS["save_agent_preferences"]
         low_model = self.bridge._dashboard_agent_preferences_read_model(
@@ -299,15 +299,16 @@ class DashboardSchedulerHardeningTests(unittest.TestCase):
         high_model = self.bridge._dashboard_agent_preferences_read_model(
             {"agentPreferences": {"rateReservePercent": 999}}
         )
-        exact_form = self.bridge._sanitize_dashboard_workflow_form(
-            action,
-            {"rateReservePercent": 15},
-        )
-
         self.assertEqual(low_model["rateReservePercent"], 15)
         self.assertEqual(high_model["rateReservePercent"], 15)
-        self.assertEqual(exact_form["rateReservePercent"], 15)
-        for invalid in (-999, 16, 999):
+        for valid in (0, 15, 16, 100):
+            with self.subTest(valid=valid):
+                form = self.bridge._sanitize_dashboard_workflow_form(
+                    action,
+                    {"rateReservePercent": valid},
+                )
+                self.assertEqual(form["rateReservePercent"], valid)
+        for invalid in (-999, 101, 999, True, 15.5):
             with self.subTest(invalid=invalid), self.assertRaises(
                 self.bridge.RequestError
             ):

@@ -1420,7 +1420,7 @@ class GlobalMetatraderBackendTests(unittest.TestCase):
         self.assertFalse(hub["legacyPerDashboardEndpointMayWriteSingleConsumer"])
 
         bridge_contract = json.loads(BRIDGE_CONTRACT_PATH.read_text(encoding="utf-8"))
-        self.assertEqual(bridge_contract["version"], "bridge-contract-v020")
+        self.assertEqual(bridge_contract["version"], "bridge-contract-v021")
         endpoints = bridge_contract["endpoints"]
         for endpoint in (
             "GET /api/integrations/metatrader/global",

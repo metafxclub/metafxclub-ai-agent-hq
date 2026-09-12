@@ -38,6 +38,28 @@ def ready_ea_research_blueprint() -> dict:
     return fixture.ready_blueprint()
 
 
+def ready_ea_strategy_brief(urls: list[str] | None = None) -> dict:
+    source_urls = urls or [
+        "https://tradingfinder.com/education/system",
+        "https://forex-station.com/system-review",
+    ]
+    return {
+        "schemaVersion": "ea-strategy-brief/1.0.0",
+        "systemName": "EMA Closed-Bar Crossover",
+        "systemOverview": "ระบบตามแนวโน้มสำหรับ Forex และใช้ timeframe ที่ผู้ใช้เลือกใน EA",
+        "entryRules": "Buy เมื่อ EMA 10 ตัดขึ้น EMA 60 บนแท่งปิด; Sell ใช้เงื่อนไขกลับกัน",
+        "recoveryRules": "ไม่มีการแก้ไม้ ห้าม Grid, Martingale, Averaging และ Hedging",
+        "exitRules": "ปิดด้วย SL, TP, trailing stop หรือสัญญาณตัดกลับตาม input",
+        "moneyManagement": "ใช้ fixed lot หรือ risk percent ตาม input และจำกัดหนึ่ง position",
+        "orderExecution": "ส่ง Buy/Sell แบบ market order หลังแท่งสัญญาณปิด",
+        "displayRequirements": "แสดงชื่อระบบ สถานะสัญญาณ Balance, Equity และ Spread",
+        "additionalNotes": "ค่า period, SL, TP และ trailing ต้องปรับได้",
+        "sourceLinks": list(source_urls),
+        "checkedAt": "2026-08-22T10:00:00+07:00",
+        "limitations": ["เป็นข้อกำหนดสร้าง Source EA ไม่ใช่ผล Backtest"],
+    }
+
+
 class DashboardWorkflowBackendTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -214,6 +236,96 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         }
         return report, mission, transfer
 
+    def recovered_research_catalog_fixture(
+        self,
+        *,
+        stale_at: str,
+        recovered_at: str,
+        mission_at: str,
+    ) -> tuple[dict, dict, dict, dict]:
+        source_report, source_mission, _transfer = (
+            self.verified_portal_system_fixture()
+        )
+        source_system = source_report["metrics"]["systems"][0]
+        source_record_id = source_system["recordId"]
+        source_urls = [
+            source_system["sourceUrl"],
+            source_system["corroboratingUrls"][0],
+        ]
+        strategy_brief = self.bridge.normalize_strategy_brief(
+            ready_ea_strategy_brief(source_urls)
+        )
+        brief_digest = self.bridge.compute_strategy_brief_digest(strategy_brief)
+        context = {
+            "propId": "left_server_racks",
+            "actionId": "deep_research_system",
+            "source": {
+                "reportId": source_report["id"],
+                "recordId": source_record_id,
+            },
+        }
+        recovered_report_id = "report-deep-transport-recovered"
+        recovered_mission = {
+            "id": "mission-deep-transport-recovered",
+            "status": "completed",
+            "phase": "auto_guarded_completed_transport_recovered",
+            "workStatus": "completed",
+            "targetId": "left_server_racks",
+            "owner": "mission_archivist",
+            "workflowContext": copy.deepcopy(context),
+            "workflowOutputContract": {"applicable": True, "valid": True},
+            "reportIds": [recovered_report_id],
+            "createdAt": mission_at,
+            "updatedAt": mission_at,
+        }
+        recovered_report = {
+            "id": recovered_report_id,
+            "type": "trading_system_research_report",
+            "status": "ready",
+            "linkedPropId": "left_server_racks",
+            "linkedMissionId": recovered_mission["id"],
+            "ownerAgentId": "mission_archivist",
+            "workflowContext": copy.deepcopy(context),
+            "metrics": {
+                "workflowOutput": copy.deepcopy(
+                    recovered_mission["workflowOutputContract"]
+                ),
+                "strategyBrief": strategy_brief,
+                "briefDigest": brief_digest,
+                "sourceDigest": brief_digest,
+                "sourceLinks": list(strategy_brief["sourceLinks"]),
+                "checkedAt": strategy_brief["checkedAt"],
+                "limitations": list(strategy_brief["limitations"]),
+            },
+            "createdAt": recovered_at,
+            "updatedAt": recovered_at,
+        }
+        stale_report = {
+            "id": "report-deep-transport-blocked-original",
+            "type": "trading_system_research_report",
+            "status": "blocked",
+            "linkedPropId": "left_server_racks",
+            "linkedMissionId": recovered_mission["id"],
+            "ownerAgentId": "mission_archivist",
+            "workflowContext": copy.deepcopy(context),
+            "metrics": {
+                "workflowOutput": {
+                    "applicable": True,
+                    "valid": False,
+                    "failureCode": (
+                        "trading_system_research_output_contract_invalid"
+                    ),
+                },
+            },
+            "createdAt": stale_at,
+            "updatedAt": stale_at,
+        }
+        return source_report, source_mission, recovered_mission, {
+            "sourceRecordId": source_record_id,
+            "recoveredReport": recovered_report,
+            "staleReport": stale_report,
+        }
+
     def disable_direct_news_schedule(self) -> None:
         self.bridge.save_direct_daily_fx_news_schedule(
             {"enabled": False, "times": ["00:00", "12:00"]}
@@ -301,6 +413,8 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 if prop_id in {"codex_mcp_portal", "left_signal_cube"}
                 else 1
                 if prop_id == "right_status_crystals"
+                else 2
+                if prop_id == "left_server_racks"
                 else 4
             )
             self.assertEqual(len(tabs), expected_count, prop_id)
@@ -453,7 +567,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         )
         self.assertEqual(
             [tab["id"] for tab in model["tabs"]],
-            ["research", "chart", "backtest", "report"],
+            ["select", "analysis"],
         )
         self.assertTrue(model["transferPolicy"]["publicSourceCatalogExposed"])
         self.assertEqual(
@@ -482,16 +596,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertIsNone(first["handoffMissionId"])
         self.assertEqual(len(first["system"]["entrySteps"]), 2)
         self.assertEqual(first["system"]["riskManagement"]["recoveryRules"], [])
-        self.assertEqual(model["ohlcImport"]["status"], "ready_local_runner")
-        self.assertEqual(
-            model["ohlcImport"]["endpoint"],
-            "/api/props/left_server_racks/ohlc/import",
-        )
-        self.assertEqual(model["ohlcImport"]["acceptedFormats"], ["csv", "xlsx"])
-        self.assertFalse(model["ohlcImport"]["writeFiles"])
-        self.assertFalse(model["ohlcImport"]["networkUpload"])
-        self.assertFalse(model["ohlcImport"]["metaTraderActions"])
-        self.assertEqual(model["ohlcImport"]["maximumHistoryYears"], 10)
+        self.assertNotIn("ohlcImport", model)
 
         blocked = copy.deepcopy(report)
         blocked["status"] = "blocked"
@@ -514,6 +619,288 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 )
                 self.assertEqual(rejected["verifiedSystemCount"], 0)
                 self.assertEqual(rejected["systems"], [])
+
+    def test_newer_active_research_mission_wins_over_older_report_state(self) -> None:
+        source_report, source_mission, _transfer = self.verified_portal_system_fixture()
+        source_record_id = source_report["metrics"]["systems"][0]["recordId"]
+        context = {
+            "propId": "left_server_racks",
+            "actionId": "deep_research_system",
+            "source": {
+                "reportId": source_report["id"],
+                "recordId": source_record_id,
+            },
+        }
+        older_report = {
+            "id": "report-deep-older-revision",
+            "type": "trading_system_research_report",
+            "status": "ready",
+            "linkedPropId": "left_server_racks",
+            "linkedMissionId": "mission-deep-older-revision",
+            "ownerAgentId": "mission_archivist",
+            "workflowContext": copy.deepcopy(context),
+            "metrics": {},
+            "createdAt": "2026-09-09T01:00:00+00:00",
+            "updatedAt": "2026-09-09T01:05:00+00:00",
+        }
+        active_mission = {
+            "id": "mission-deep-new-revision",
+            "status": "running",
+            "targetId": "left_server_racks",
+            "owner": "mission_archivist",
+            "workflowContext": copy.deepcopy(context),
+            "createdAt": "2026-09-09T02:00:00+00:00",
+            "updatedAt": "2026-09-09T02:01:00+00:00",
+        }
+        catalog = self.bridge._deep_research_catalog_read_model(
+            reports=[older_report, source_report],
+            missions=[active_mission, source_mission],
+            delivered_sources=[],
+        )
+        selected = next(
+            row
+            for row in catalog["systems"]
+            if row["sourceRecordId"] == source_record_id
+        )
+        self.assertEqual(selected["researchState"], "in_progress")
+        self.assertTrue(selected["currentlyStudying"])
+        self.assertEqual(
+            selected["latestResearchMissionId"],
+            active_mission["id"],
+        )
+
+    def test_recovered_ready_report_is_not_poisoned_by_stale_report_order(self) -> None:
+        (
+            source_report,
+            source_mission,
+            recovered_mission,
+            recovery,
+        ) = self.recovered_research_catalog_fixture(
+            stale_at="2026-09-09T03:01:00+00:00",
+            recovered_at="2026-09-09T03:02:00+00:00",
+            mission_at="2026-09-09T03:02:00+00:00",
+        )
+        recovered_report = recovery["recoveredReport"]
+        stale_report = recovery["staleReport"]
+
+        def confirmation(report: dict, _ea_research: dict) -> dict:
+            return {
+                "canConfirm": report.get("id") == recovered_report["id"],
+                "confirmed": False,
+                "sheetPreflightStatus": "ready",
+            }
+
+        report_orders = {
+            "stale_first": [stale_report, recovered_report, source_report],
+            "recovered_first": [recovered_report, stale_report, source_report],
+        }
+        for name, reports in report_orders.items():
+            with (
+                self.subTest(order=name),
+                mock.patch.object(
+                    self.bridge,
+                    "_deep_research_confirmation_read_model",
+                    side_effect=confirmation,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_world_sheet_catalog_projection",
+                    return_value=([], {"cachedRowCount": 0}),
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_deep_sheet_research_history_rows",
+                    return_value=[],
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "research_sheet_hub_read_model",
+                    return_value={"consumers": []},
+                ),
+            ):
+                catalog = self.bridge._deep_research_catalog_read_model(
+                    reports=reports,
+                    missions=[recovered_mission, source_mission],
+                    delivered_sources=[],
+                )
+
+            selected = next(
+                row
+                for row in catalog["systems"]
+                if row["sourceRecordId"] == recovery["sourceRecordId"]
+            )
+            self.assertEqual(selected["researchState"], "awaiting_confirmation")
+            self.assertTrue(selected["currentlyStudying"])
+            self.assertEqual(
+                selected["latestResearchMissionId"],
+                recovered_mission["id"],
+            )
+            self.assertEqual(
+                selected["latestResearchReportId"],
+                recovered_report["id"],
+            )
+
+    def test_equal_timestamp_prefers_report_in_latest_mission_report_ids(self) -> None:
+        tied_at = "2026-09-09T04:00:00+00:00"
+        (
+            source_report,
+            source_mission,
+            recovered_mission,
+            recovery,
+        ) = self.recovered_research_catalog_fixture(
+            stale_at=tied_at,
+            recovered_at=tied_at,
+            mission_at=tied_at,
+        )
+        recovered_report = recovery["recoveredReport"]
+        stale_report = recovery["staleReport"]
+        self.assertEqual(recovered_mission["reportIds"], [recovered_report["id"]])
+        self.assertNotIn(stale_report["id"], recovered_mission["reportIds"])
+
+        def confirmation(report: dict, _ea_research: dict) -> dict:
+            return {
+                "canConfirm": report.get("id") == recovered_report["id"],
+                "confirmed": False,
+                "sheetPreflightStatus": "ready",
+            }
+
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_deep_research_confirmation_read_model",
+                side_effect=confirmation,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_world_sheet_catalog_projection",
+                return_value=([], {"cachedRowCount": 0}),
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_deep_sheet_research_history_rows",
+                return_value=[],
+            ),
+            mock.patch.object(
+                self.bridge,
+                "research_sheet_hub_read_model",
+                return_value={"consumers": []},
+            ),
+        ):
+            catalog = self.bridge._deep_research_catalog_read_model(
+                reports=[stale_report, recovered_report, source_report],
+                missions=[recovered_mission, source_mission],
+                delivered_sources=[],
+            )
+
+        selected = next(
+            row
+            for row in catalog["systems"]
+            if row["sourceRecordId"] == recovery["sourceRecordId"]
+        )
+        self.assertEqual(selected["researchState"], "awaiting_confirmation")
+        self.assertTrue(selected["currentlyStudying"])
+        self.assertEqual(
+            selected["latestResearchMissionId"],
+            recovered_mission["id"],
+        )
+        self.assertEqual(
+            selected["latestResearchReportId"],
+            recovered_report["id"],
+        )
+
+    def test_blocked_deep_research_attempt_is_reported_as_failed_not_running(self) -> None:
+        source_report, source_mission, _transfer = self.verified_portal_system_fixture()
+        source_record_id = source_report["metrics"]["systems"][0]["recordId"]
+        context = {
+            "propId": "left_server_racks",
+            "actionId": "deep_research_system",
+            "source": {
+                "reportId": source_report["id"],
+                "recordId": source_record_id,
+            },
+        }
+        blocked_mission = {
+            "id": "mission-deep-blocked-revision",
+            "status": "blocked",
+            "targetId": "left_server_racks",
+            "owner": "mission_archivist",
+            "workflowContext": copy.deepcopy(context),
+            "createdAt": "2026-09-09T03:00:00+00:00",
+            "updatedAt": "2026-09-09T03:01:00+00:00",
+        }
+        blocked_report = {
+            "id": "report-deep-blocked-revision",
+            "type": "trading_system_research_report",
+            "status": "blocked",
+            "linkedPropId": "left_server_racks",
+            "linkedMissionId": blocked_mission["id"],
+            "ownerAgentId": "mission_archivist",
+            "workflowContext": copy.deepcopy(context),
+            "metrics": {
+                "semanticRepair": {
+                    "attempted": True,
+                    "succeeded": False,
+                    "issues": [{
+                        "code": "RULE_REF_UNDEFINED",
+                        "path": "$.inputs[0].usedByRuleIds[0]",
+                        "message": "Referenced ruleId does not exist",
+                    }],
+                },
+            },
+            "createdAt": "2026-09-09T03:01:00+00:00",
+            "updatedAt": "2026-09-09T03:02:00+00:00",
+        }
+
+        catalog = self.bridge._deep_research_catalog_read_model(
+            reports=[blocked_report, source_report],
+            missions=[blocked_mission, source_mission],
+            delivered_sources=[],
+        )
+        selected = next(
+            row
+            for row in catalog["systems"]
+            if row["sourceRecordId"] == source_record_id
+        )
+        self.assertEqual(selected["researchState"], "research_failed")
+        self.assertFalse(selected["currentlyStudying"])
+        self.assertEqual(
+            selected["latestResearchReportId"],
+            blocked_report["id"],
+        )
+
+    def test_legacy_sheet_history_never_claims_factory_ready(self) -> None:
+        source_report, source_mission, _transfer = self.verified_portal_system_fixture()
+        source_record_id = source_report["metrics"]["systems"][0]["recordId"]
+        legacy_history = [{
+            "sourceReportId": source_report["id"],
+            "sourceRecordId": source_record_id,
+            "requiresResearchRerun": True,
+            "factoryEligible": False,
+        }]
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_deep_sheet_research_history_rows",
+                return_value=legacy_history,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_world_sheet_catalog_projection",
+                return_value=([], {"cachedRowCount": 0}),
+            ),
+        ):
+            catalog = self.bridge._deep_research_catalog_read_model(
+                reports=[source_report],
+                missions=[source_mission],
+                delivered_sources=[],
+            )
+        selected = next(
+            row
+            for row in catalog["systems"]
+            if row["sourceRecordId"] == source_record_id
+        )
+        self.assertEqual(selected["researchState"], "not_started")
+        self.assertNotIn("พร้อมใช้ในโรงงาน EA", selected["researchStatusTh"])
 
     def test_deep_research_selection_is_bound_to_one_verified_record(self) -> None:
         report, source_mission, _transfer = self.verified_portal_system_fixture()
@@ -682,40 +1069,24 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             "https://tradingfinder.com/education/system",
             "https://forex-station.com/system-review",
         ]
-        blueprint = ready_ea_research_blueprint()
-        blueprint["checkedAt"] = "2026-08-22T10:00:00+07:00"
-        blueprint["evidenceMap"] = [
-            {
-                "sourceRef": "S1",
-                "url": urls[0],
-                "title": "Primary public rules",
-                "checkedAt": blueprint["checkedAt"],
-            },
-            {
-                "sourceRef": "S2",
-                "url": urls[1],
-                "title": "Independent public confirmation",
-                "checkedAt": blueprint["checkedAt"],
-            },
-        ]
+        strategy_brief = ready_ea_strategy_brief(urls)
 
-        def result(current_blueprint: dict) -> dict:
+        def result(current_brief: dict) -> dict:
             direct_result = {
                 "status": "completed",
                 "summary": "Deep research completed",
                 "findings": ["Closed-bar rules were expanded deterministically"],
-                "nextSteps": ["Archive the canonical blueprint"],
+                "nextSteps": ["Archive the compact strategy brief"],
                 "blockedCapability": "",
                 "evidence": [
                     {"label": f"Source {index}", "url": url, "note": "opened"}
                     for index, url in enumerate(urls, start=1)
                 ],
-                "research": current_blueprint,
+                "research": current_brief,
                 "evidenceKinds": [
                     "at_least_two_source_urls",
                     "checked_at",
                     "limitations",
-                    "ea_readiness",
                     "source_digest",
                 ],
             }
@@ -735,7 +1106,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             item["value"] = value
             return changed
 
-        parsed = result(blueprint)
+        parsed = result(strategy_brief)
         valid = self.bridge.validate_dashboard_workflow_output_contract(
             mission,
             parsed,
@@ -752,7 +1123,6 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 "at_least_two_source_urls",
                 "checked_at",
                 "limitations",
-                "ea_readiness",
                 "source_digest",
             ],
         )
@@ -2116,6 +2486,15 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 mock.patch.object(self.bridge, "DASHBOARD_WORKFLOW_SETTINGS_PATH", settings_path),
                 mock.patch.object(self.bridge, "load_missions", return_value=[]),
                 mock.patch.object(self.bridge, "append_audit"),
+                mock.patch.object(
+                    self.bridge,
+                    "dashboard_workflow_scheduler_tick",
+                    return_value={
+                        "ok": True,
+                        "kind": "scheduler_idle",
+                        "dispatched": False,
+                    },
+                ),
             ):
                 thread = self.bridge.start_dashboard_workflow_scheduler()
                 self.assertTrue(thread.is_alive())
@@ -2124,7 +2503,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                 self.assertFalse(thread.is_alive())
                 self.assertFalse(self.bridge._dashboard_workflow_scheduler_alive())
 
-    def test_build_action_dispatches_source_only_prompt_and_no_mt_execution(self) -> None:
+    def test_trusted_factory_build_action_dispatches_source_only_prompt_and_no_mt_execution(self) -> None:
         captured: dict = {}
 
         def fake_run_bridge_task(payload: dict, **kwargs) -> dict:
@@ -2172,6 +2551,7 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
                         "brief": "Use fixed lot input",
                     },
                 },
+                trusted_trigger_source="backend",
             )
         self.assertTrue(result["ok"])
         self.assertEqual(captured["toolId"], "codex_cli_task")
@@ -2391,9 +2771,17 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertNotIn("inputs", model["workflowContext"])
         self.assertEqual(model["workflowContext"]["inputFields"], ["brief", "market"])
 
-    def test_research_report_read_model_requires_canonical_blueprint_and_matching_digest(self) -> None:
-        blueprint = ready_ea_research_blueprint()
-        metrics = self.bridge.ea_research_report_projection(blueprint)
+    def test_research_report_read_model_requires_compact_brief_and_matching_digest(self) -> None:
+        strategy_brief = ready_ea_strategy_brief()
+        digest = self.bridge.compute_strategy_brief_digest(strategy_brief)
+        metrics = {
+            "strategyBrief": strategy_brief,
+            "briefDigest": digest,
+            "sourceDigest": digest,
+            "sourceLinks": list(strategy_brief["sourceLinks"]),
+            "checkedAt": strategy_brief["checkedAt"],
+            "limitations": list(strategy_brief["limitations"]),
+        }
         report = {
             "id": "research-report-canonical-v2",
             "type": "trading_system_research_report",
@@ -2406,30 +2794,40 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         self.assertTrue(read_model["validated"])
         self.assertTrue(read_model["digestMatched"])
         self.assertTrue(read_model["ready"])
-        self.assertEqual(read_model["validationStatus"], "canonical_validated")
+        self.assertEqual(read_model["validationStatus"], "strategy_brief_validated")
         self.assertEqual(
             read_model["schemaVersion"],
-            "ea-ready-strategy-research/2.0.0",
+            "ea-strategy-brief/1.0.0",
         )
-        self.assertEqual(read_model["blueprintDigest"], metrics["blueprintDigest"])
-        self.assertEqual(read_model["blueprint"], self.bridge.normalize_ea_research_blueprint(blueprint))
+        self.assertEqual(read_model["briefDigest"], digest)
+        self.assertEqual(read_model["strategyBrief"], strategy_brief)
+        self.assertIsNone(read_model["blueprint"])
 
         tampered_metrics = copy.deepcopy(metrics)
-        tampered_metrics["eaImplementationBlueprint"]["scope"]["systemName"] = "Tampered"
+        tampered_metrics["strategyBrief"]["systemName"] = "Tampered"
         tampered = self.bridge.report_read_model_item({**report, "metrics": tampered_metrics})["eaResearch"]
         self.assertFalse(tampered["validated"])
         self.assertFalse(tampered["digestMatched"])
         self.assertFalse(tampered["ready"])
-        self.assertEqual(tampered["validationStatus"], "blueprint_digest_mismatch")
-        self.assertIsNone(tampered["blueprint"])
+        self.assertEqual(tampered["validationStatus"], "strategy_brief_invalid")
+        self.assertIsNone(tampered.get("strategyBrief"))
 
+        blueprint = ready_ea_research_blueprint()
         legacy = self.bridge.report_read_model_item({
             **report,
-            "metrics": {"eaBlueprint": blueprint, "ready": True},
+            "metrics": {
+                "eaBlueprint": blueprint,
+                "blueprintDigest": self.bridge.ea_research_blueprint_digest(blueprint),
+                "ready": True,
+            },
         })["eaResearch"]
         self.assertFalse(legacy["validated"])
         self.assertFalse(legacy["ready"])
-        self.assertEqual(legacy["validationStatus"], "blueprint_digest_missing")
+        self.assertFalse(legacy["eaHandoffAllowed"])
+        self.assertTrue(legacy["requiresResearchRerun"])
+        self.assertEqual(legacy["validationStatus"], "legacy_blueprint_read_only")
+        self.assertIsInstance(legacy["legacyBlueprintDiagnostic"], dict)
+        self.assertIsNone(legacy.get("strategyBrief"))
         self.assertIsNone(legacy["blueprint"])
 
     def test_manual_backend_owned_action_rejection_is_audited_without_form_values(self) -> None:

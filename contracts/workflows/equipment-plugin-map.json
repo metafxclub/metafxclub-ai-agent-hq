@@ -139,9 +139,9 @@
           "referencePluginVersion": "0.1.2",
           "automationMode": "mission_on_demand",
           "requiredInputs": ["sourceReportId", "sourceRecordId"],
-          "inputPreset": {"brief": "แตกกฎระบบที่เลือกเป็น EA-ready Blueprint v2 แบบ deterministic: กำหนด bar[0]/bar[1]/bar[2], Indicator และ Input ทุกค่า, Buy/Sell Entry, Buy/Sell Exit, SL/TP, Break-even, Trailing, Partial close, Pending order, Risk/Lot, การแก้ไม้ Grid/Martingale/Averaging/Hedge, ลำดับ precedence, state machine, pseudocode และ positive/negative/boundary tests; แยก fact, derived expansion, assumption, conflict และ unknown โดยห้ามเดาค่าที่แหล่งข้อมูลไม่ระบุ"},
-          "outputFields": ["eaBlueprint", "sourceDigest", "eaReadiness", "sourceLinks", "checkedAt", "limitations"],
-          "evidenceRequired": ["at_least_two_source_urls", "checked_at", "limitations", "ea_readiness", "source_digest"],
+          "inputPreset": {"brief": "ขยายระบบที่เลือกเป็น Strategy Brief ภาษาไทย 9 ฟิลด์: systemName, systemOverview, entryRules, recoveryRules, exitRules, moneyManagement, orderExecution, displayRequirements, additionalNotes; Backend สร้าง record_id และ Sheet A-J; รวมตลาด สัญลักษณ์ กรอบเวลาใน systemOverview; คงกฎต้นทาง ห้ามเดาผลกำไร; เติมเฉพาะที่ขาดตาม compact-ea-safe-inputs-v2 พร้อมป้าย IMPLEMENTATION_DEFAULT_NOT_SOURCE_FACT: StopLossPoints=300, TakeProfitPoints=600, PositionSizingMode=fixed_lot, FixedLot=0.01, optional RiskPercent=1.0, cap=1 ต่อ Symbol+Magic, SignalBarShift=1, TradeOnNewBar=true และ Market ตามทิศทางต้นทาง; ค่าที่เติมเป็น EA inputs พร้อม Start/Step/Stop; Trailing/Break-even/Partial Close=false เมื่อขาด; Recovery ไม่ครบให้ RecoveryMode=none ห้าม Grid/Martingale/Averaging/Hedging"},
+          "outputFields": ["strategyBrief", "sourceDigest", "sourceLinks", "checkedAt", "limitations"],
+          "evidenceRequired": ["at_least_two_source_urls", "checked_at", "limitations", "source_digest"],
           "screenshotPolicy": "optional_when_backend_adapter_available",
           "reportType": "trading_system_research_report",
           "failureHelpTh": "เลือกระบบหนึ่งรายการจากแค็ตตาล็อกที่ Backend รับจากเรดาร์และตรวจหลักฐานแล้ว ก่อนเริ่มวิจัยเชิงลึก"
@@ -155,33 +155,35 @@
       "schedule": {"supported": false, "reasonTh": "งานสร้างและตรวจจริงต้องเลือกแพลตฟอร์ม Source และ Terminal"},
       "factoryFlow": {
         "schemaVersion": "ea-factory-v1",
-        "mode": "manual_stage_by_stage",
+        "mode": "one_click_with_manual_stage_recovery",
         "scheduled": false,
-        "automaticLoop": false,
-        "oneUserActionAdvancesOneStage": true,
+        "automaticLoop": true,
+        "oneUserActionAdvancesOneStage": false,
+        "oneUserClickAdvancesVerifiedStageChain": true,
+        "oneCoordinatorIterationAdvancesAtMostOneStage": true,
+        "oneClick": {"endpoint": "/api/props/right_server_racks/ea-factory/builds/{buildId}/run", "requestFields": ["idempotencyKey"], "supportedVisiblePlatforms": ["mt4"], "mt5Mode": "manual_stage_by_stage_only", "selectedTerminalMustAlreadyBeRunning": true, "terminalProcessLaunchAllowed": false, "sameKeyResume": true, "phaseGateBypassAllowed": false, "visibleMetaEditorRequired": true, "visibleStrategyTesterRequired": true, "visualModeRequired": true, "liveTradingAllowed": false},
         "artifactKinds": {
           "default": "expert_advisor",
           "expert_advisor": {"platforms": ["mt4", "mt5", "tradingview"], "backtestApplicable": true},
           "custom_indicator": {"platforms": ["mt4", "mt5"], "requiredEntryPoint": "OnCalculate", "indicatorBufferRequired": true, "tradingFunctionsAllowed": false, "backtestApplicable": false, "chartAttachmentAllowed": false}
         },
         "sourceColumnContract": {
-          "range": "A-W",
-          "core": "A-M",
-          "downstream": "N-W",
-          "columns": ["record_id", "system_name", "strategy_family", "symbols_market", "timeframe", "entry_rules", "exit_rules", "stop_loss", "take_profit", "recovery", "lot_risk", "indicators", "special_conditions", "source_urls", "verification_status", "backtest_status", "backtest_report", "optimization_status", "optimization_report", "issues", "next_action", "target_platform", "updated_at"]
+          "range": "A-J",
+          "columns": ["record_id", "system_name", "system_overview", "entry_rules", "recovery_rules", "exit_rules", "money_management", "order_execution", "display_requirements", "additional_notes"],
+          "legacyReadOnlyCompatibility": {"range": "A-AW", "headerCount": 49, "authoritative": false}
         },
         "stages": [
           {"id": "strategy_spec", "requires": ["source_record"], "ownerAgentId": "ea_developer"},
           {"id": "generate_source", "requires": ["strategy_spec_confirmed"], "ownerAgentId": "ea_developer", "actionId": "build_strategy_code"},
           {"id": "source_review", "requires": ["source_artifact_and_digest"], "ownerAgentId": "ea_developer", "actionId": "review_source_code"},
-          {"id": "compile_validate", "requires": ["source_review_passed"], "ownerAgentId": "ea_developer", "platformPolicy": {"mt4": "backend_selected_mt4_metaeditor_compile_only_receipt", "mt5": "backend_selected_mt5_metaeditor_compile_only_receipt", "tradingview": "static_pine_validation"}, "terminalLaunchAllowed": false, "backtestAllowed": false, "frontendPathOrArgsAllowed": false},
-          {"id": "backtest_recheck", "requires": ["compile_validate_passed"], "ownerAgentId": "backtest_analyst", "platformPolicy": {"mt4": "visible_strategy_tester_proof_for_expert_advisor", "mt5": "visible_strategy_tester_proof_for_expert_advisor", "tradingview": "not_applicable"}, "artifactKindPolicy": {"custom_indicator": "not_applicable_no_trade_execution"}},
+          {"id": "compile_validate", "requires": ["source_review_passed"], "ownerAgentId": "ea_developer", "platformPolicy": {"mt4": "one_click_visible_metaeditor_or_manual_stage_by_stage", "mt5": "manual_stage_by_stage_visible_metaeditor", "tradingview": "static_pine_validation"}, "oneClickTerminalLaunchAllowed": false, "selectedTerminalMustAlreadyBeRunning": true, "manualTerminalLaunchAllowed": false, "backtestAllowed": false, "frontendPathOrArgsAllowed": false},
+          {"id": "backtest_recheck", "requires": ["compile_validate_passed"], "ownerAgentId": "backtest_analyst", "platformPolicy": {"mt4": "one_click_visible_strategy_tester_proof_for_expert_advisor", "mt5": "manual_stage_by_stage_visible_strategy_tester", "tradingview": "not_applicable"}, "artifactKindPolicy": {"custom_indicator": "not_applicable_no_trade_execution"}},
           {"id": "final_report", "requires": ["all_applicable_prior_stages_passed"], "ownerAgentId": "mission_archivist"}
         ],
         "workspaceFolders": ["Source", "EA_Versions", "Reports", "Sets", "Screenshots", "Summaries"],
         "immutableVersions": true,
         "frontendMaySendCredentials": false,
-        "googleSheets": {"mode": "shared_deep_research_read_only_source", "configurationPropId": "mission_strategy_table", "tabName": "Deep_Research", "tabNameFixed": true, "sharedConsumerPropId": "left_server_racks", "externalWrites": false, "credentialsAcceptedFromFrontend": false, "credentialsBackendOnly": true, "runtimeStatusRequired": true, "internalMapping": "23 EA strategy fields (not a Sheet range)"}
+        "googleSheets": {"mode": "shared_deep_research_read_only_source", "configurationPropId": "mission_strategy_table", "tabName": "Deep_Research", "tabNameFixed": true, "sharedConsumerPropId": "left_server_racks", "externalWrites": false, "credentialsAcceptedFromFrontend": false, "credentialsBackendOnly": true, "runtimeStatusRequired": true, "internalMapping": "one prose Strategy Brief with 10 authoritative fields", "legacyCompatibility": "A-AW/49-header snapshots are read-only backup input only"}
       },
       "actions": {
         "discover_metatrader": {

@@ -19,6 +19,9 @@ if ($RemoveUserData -and $ConfirmUserDataRemoval -cne "DELETE-METAFX-DATA") {
 function Remove-GoogleOAuthUserConfiguration {
     $pythonPath = Join-Path $installRoot "runner\.venv\Scripts\python.exe"
     $configureCli = Join-Path $installRoot "backend\local-runner\configure_google_oauth_client.py"
+    $googleOAuthCredentialRoot = [IO.Path]::GetFullPath(
+        (Join-Path $env:LOCALAPPDATA "Metafxclub\AgentHQ\credentials")
+    ).TrimEnd("\")
     if (
         -not (Test-Path -LiteralPath $pythonPath -PathType Leaf) -or
         -not (Test-Path -LiteralPath $configureCli -PathType Leaf)
@@ -40,8 +43,33 @@ function Remove-GoogleOAuthUserConfiguration {
     catch {
         throw "อ่านผลยืนยันการลบ Google ไม่สำเร็จ จึงยังไม่ถอนข้อมูลผู้ใช้"
     }
-    if ($result.ok -ne $true -or $result.configured -ne $false) {
+    if ($result.ok -ne $true) {
         throw "Backend ยังไม่ยืนยันว่าลบการตั้งค่า Google แล้ว จึงยังไม่ถอนข้อมูลผู้ใช้"
+    }
+
+    # Removing the current-user override may intentionally expose the packaged
+    # central client (or an administrator-provided environment client).  That
+    # safe fallback is still "configured" and must not make full uninstall
+    # fail.  A secure-store or unknown post-remove source is never accepted.
+    $fallbackStore = [string]$result.store
+    $fallbackStateIsSafe = (
+        ($result.configured -eq $true -and $fallbackStore -in @("central_release", "environment")) -or
+        ($result.configured -eq $false -and $fallbackStore -in @("not_configured", "empty"))
+    )
+    if (-not $fallbackStateIsSafe) {
+        throw "Backend คืนสถานะ Google OAuth หลังลบที่ไม่ปลอดภัย จึงยังไม่ถอนข้อมูลผู้ใช้"
+    }
+
+    # Independently prove that both current-user DPAPI artifacts are gone.
+    # This catches a partial or stale CLI result even when a central fallback
+    # makes the resolved OAuth status report configured=true.
+    $remainingOAuthArtifacts = @(
+        @("google-oauth-client.dpapi", "google-sheets-refresh.dpapi") |
+            ForEach-Object { Join-Path $googleOAuthCredentialRoot $_ } |
+            Where-Object { Test-Path -LiteralPath $_ }
+    )
+    if ($remainingOAuthArtifacts.Count -gt 0) {
+        throw "Backend ยังลบ OAuth Client หรือการยืนยัน Google แบบ DPAPI ของ Windows User นี้ไม่ครบ จึงยังไม่ถอนข้อมูลผู้ใช้"
     }
 }
 

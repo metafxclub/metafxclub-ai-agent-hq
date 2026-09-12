@@ -86,16 +86,16 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             digest = hashlib.sha256((ARTIFACT / filename).read_bytes()).hexdigest().upper()
             self.assertEqual(digest, manifest[filename])
 
-        integration_digest = hashlib.sha256(
-            (ROOT / "integrations" / "mt4-trade-gateway" / "MetafxHQTradeGateway.mq4").read_bytes()
+        source_digest = hashlib.sha256(
+            (ARTIFACT / "MetafxHQTradeGateway.mq4").read_bytes()
         ).hexdigest().upper()
-        self.assertEqual(integration_digest, manifest["MetafxHQTradeGateway.mq4"])
+        self.assertEqual(source_digest, manifest["MetafxHQTradeGateway.mq4"])
 
         artifact_manifest = json.loads((ARTIFACT / "MANIFEST.json").read_text(encoding="utf-8"))
         self.assertEqual("metafx-hq-mt4-ea-artifact-v1", artifact_manifest["schemaVersion"])
         self.assertEqual("2.18", artifact_manifest["packageVersion"])
         self.assertEqual("ready_visible_metaeditor_compiled", artifact_manifest["candidateStatus"])
-        self.assertEqual(integration_digest, artifact_manifest["sourceSha256"])
+        self.assertEqual(source_digest, artifact_manifest["sourceSha256"])
         self.assertEqual(manifest["MetafxHQTradeGateway.ex4"], artifact_manifest["binarySha256"])
         self.assertEqual(
             (ARTIFACT / "MetafxHQTradeGateway.ex4").stat().st_size,
@@ -150,7 +150,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("Assert-NoEmbeddedHighConfidenceSecrets", installer)
         self.assertIn("function Get-Sha256Hex", installer)
         self.assertIsNone(re.search(r"(?m)^[^#\r\n]*\bGet-FileHash\b", installer))
-        self.assertIn("Source EA ใน Integration ไม่ตรงกับ Source", installer)
+        self.assertIn("$artifactSourceHash = Get-Sha256Hex -LiteralPath $artifactSource", installer)
         self.assertIn("หลักฐาน Compile ของ EA ไม่ตรงกับ Source/Binary", installer)
         self.assertIn("MANIFEST/Compile proof ของ EA v2.18", installer)
         self.assertIn('install_root = "%LOCALAPPDATA%\\Metafxclub\\AI-Agent-HQ"', installer)
@@ -200,6 +200,18 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         )
         self.assertIn(
             '"backend\\local-runner\\ea_factory_metaeditor_compile.py"',
+            safe_source,
+        )
+        self.assertIn(
+            '"backend\\local-runner\\ea_factory_visible_terminal.py"',
+            safe_source,
+        )
+        self.assertIn(
+            '"backend\\local-runner\\ea_factory_visible_terminal.ps1"',
+            safe_source,
+        )
+        self.assertIn(
+            '"backend\\local-runner\\ea_strategy_brief.py"',
             safe_source,
         )
         self.assertIn("function Export-VerifiedGitSource", installer)
@@ -350,6 +362,36 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         ]
         self.assertIn("Assert-NoEmbeddedHighConfidenceSecrets -CandidateRoot $stagingRoot", staged)
 
+        verified_export = installer[
+            installer.index("function Export-VerifiedGitSource") :
+            installer.index("function Get-InstallerTemporaryParent")
+        ]
+        self.assertIn(
+            "Assert-CentralGoogleOAuthPublicClient -CandidateRoot $sourceRoot",
+            verified_export,
+        )
+        self.assertIn(
+            "$centralClientSource = Join-Path $sourceRoot $centralGoogleOAuthClientRelativePath",
+            verified_export,
+        )
+        self.assertIn(
+            "$centralClientDestination = Join-Path $DestinationRoot $centralGoogleOAuthClientRelativePath",
+            verified_export,
+        )
+        self.assertEqual(
+            verified_export.count("Copy-Item"),
+            1,
+            "verified staging may copy only the separately validated central client outside git archive",
+        )
+        self.assertLess(
+            verified_export.index("Assert-CentralGoogleOAuthPublicClient -CandidateRoot $sourceRoot"),
+            verified_export.index("Copy-Item"),
+        )
+        self.assertLess(
+            verified_export.index("Copy-Item"),
+            verified_export.index("Assert-CentralGoogleOAuthPublicClient -CandidateRoot $DestinationRoot"),
+        )
+
         copy_scope = installer[
             installer.index("function Copy-ApplicationFiles"):
             installer.index("function Stop-CandidateBridgeAfterFailedStart")
@@ -369,8 +411,22 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn('"*.dpapi"', sync_scope)
         self.assertIn('"2-SETUP-GOOGLE-HQ.bat"', copy_scope)
         self.assertIn('"scripts\\setup-google-oauth.ps1"', installer)
+        self.assertIn('"backend\\local-runner\\google_oauth_native_client.txt"', installer)
         self.assertIn('"tests\\release_secret_scan.py"', installer)
         self.assertIn('"tests\\test_release_candidate_preflight.py"', installer)
+        for google_secret_pattern in ("GOCSPX-", "1//", "ya29"):
+            with self.subTest(google_secret_pattern=google_secret_pattern):
+                self.assertIn(google_secret_pattern, secret_gate)
+        central_validator = installer[
+            installer.index("function Assert-CentralGoogleOAuthPublicClient") :
+            installer.index("function Assert-GoogleOAuthOneRunInputs")
+        ]
+        self.assertIn("$centralGoogleOAuthClientRelativePath", central_validator)
+        self.assertIn("client_id=", central_validator)
+        self.assertIn("client_secret=", central_validator)
+        self.assertIn("GOCSPX-", central_validator)
+        self.assertIn("$lines.Count -ne 2", central_validator)
+        self.assertIn("New-Object Text.UTF8Encoding($false, $true)", central_validator)
 
         exclude_match = re.search(r'"/XF",(?P<filters>.*?)\r?\n\s*"/XD"', sync_scope, re.DOTALL)
         self.assertIsNotNone(exclude_match)
@@ -378,6 +434,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         for safe_source_name in (
             "release_secret_scan.py",
             "test_release_secret_hygiene.py",
+            "google_oauth_native_client.txt",
             "google_oauth_store.py",
         ):
             with self.subTest(safe_source_name=safe_source_name):
@@ -488,6 +545,33 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertGreaterEqual(verify_step.count("$LASTEXITCODE -ne 0"), 2)
         self.assertIn("Always build and smoke-test the exact current archive", workflow)
         self.assertIn("git archive --format=zip", workflow)
+        self.assertIn(
+            "METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_ID: ${{ secrets.METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_ID }}",
+            workflow,
+        )
+        self.assertIn(
+            "METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_SECRET: ${{ secrets.METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_SECRET }}",
+            workflow,
+        )
+        injection = workflow[
+            workflow.index("$sourceArchive =") :
+            workflow.index("# Test the exact ZIP layout")
+        ]
+        self.assertIn("--output=$sourceArchive HEAD", injection)
+        self.assertIn("Expand-Archive -LiteralPath $sourceArchive", injection)
+        self.assertIn(r"backend\local-runner\google_oauth_native_client.txt", injection)
+        self.assertIn("client_id=$($env:METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_ID)", injection)
+        self.assertIn("client_secret=$($env:METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_SECRET)", injection)
+        self.assertIn("New-Object Text.UTF8Encoding($false)", injection)
+        self.assertIn("[IO.File]::WriteAllText($injectedClientPath", injection)
+        self.assertIn("Compress-Archive -LiteralPath $injectedPackageRoot", injection)
+        self.assertLess(injection.index("git archive --format=zip"), injection.index("client_id=$($env:"))
+        self.assertLess(injection.index("client_id=$($env:"), injection.index("Get-FileHash -LiteralPath $archive"))
+        self.assertNotIn("--output=$archive HEAD", injection)
+        self.assertGreaterEqual(
+            workflow.count('"backend\\local-runner\\ea_strategy_brief.py"'),
+            2,
+        )
         self.assertIn("legacy-listener upgrade smoke failed", workflow)
         self.assertIn('runner\\.venv\\Scripts\\python.exe', workflow)
         self.assertIn("print(sys._base_executable)", workflow)
@@ -526,6 +610,18 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn(
             '"backend\\local-runner\\ea_factory_metaeditor_compile.py"',
             workflow,
+        )
+        self.assertGreaterEqual(
+            workflow.count(
+                '"backend\\local-runner\\ea_factory_visible_terminal.py"'
+            ),
+            2,
+        )
+        self.assertGreaterEqual(
+            workflow.count(
+                '"backend\\local-runner\\ea_factory_visible_terminal.ps1"'
+            ),
+            2,
         )
         self.assertIn("gh release upload $tag $archive $checksum", workflow)
         self.assertIn("--clobber", workflow)
@@ -578,9 +674,28 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("could not be downloaded with the verified local package checksum", workflow)
         self.assertIn("Release $tag verified", workflow)
         self.assertIn("-PackageSmoke", workflow)
+        self.assertIn("Verified Git Runtime central OAuth status probe failed", workflow)
+        self.assertIn("$verifiedAuth.clientConfigured -ne $true", workflow)
+        self.assertIn("$verifiedAuth.connected -ne $false", workflow)
+        self.assertIn('[string]$verifiedAuth.status -cne "authorization_required"', workflow)
+        self.assertIn('[string]$verifiedAuth.clientSource -cne "central_release"', workflow)
+        self.assertIn("Verified Git Runtime central OAuth clean-profile contract failed", workflow)
         self.assertIn("https://github.com/metafxclub/metafxclub-ai-agent-hq.git", workflow)
         self.assertIn("git -C $verifiedClone fetch --depth 1 origin $env:GITHUB_SHA", workflow)
         self.assertIn("git -C $verifiedClone checkout --detach $env:GITHUB_SHA", workflow)
+        verified_clone_setup = workflow[
+            workflow.index("$verifiedCentralClient = Join-Path $verifiedClone") :
+            workflow.index("$verifiedListener =", workflow.index("$verifiedCentralClient = Join-Path $verifiedClone"))
+        ]
+        self.assertIn(
+            r'Join-Path $packageRoot "backend\local-runner\google_oauth_native_client.txt"',
+            verified_clone_setup,
+        )
+        self.assertIn("Copy-Item", verified_clone_setup)
+        self.assertIn(
+            'git -C $verifiedClone check-ignore --quiet -- "backend/local-runner/google_oauth_native_client.txt"',
+            verified_clone_setup,
+        )
         self.assertIn("-PrePublishVerification", workflow)
         self.assertIn("-ExpectedGitCommit $env:GITHUB_SHA", workflow)
         self.assertLess(
@@ -624,6 +739,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             workflow.index("    strategy:", workflow.index("  compatibility:"))
         ]
         self.assertIn("needs: release_ref_guard", compatibility_header)
+        self.assertIn("timeout-minutes: 30", compatibility_header)
         self.assertLess(
             workflow.index("  release_ref_guard:"),
             workflow.index("  compatibility:"),
@@ -654,6 +770,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             "scripts\\start-local-bridge.ps1",
             "google_oauth_store.py",
             "google_sheet_hub.py",
+            "google_oauth_native_client.txt",
             "ea-factory-contract.json",
             "research-sheet-hub-setup-th.md",
             "test_release_candidate_preflight.py",
@@ -673,6 +790,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405", verify_workflow)
         self.assertIn('python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]', verify_workflow)
         self.assertIn('python-version: ${{ matrix.python-version }}', verify_workflow)
+        self.assertIn("timeout-minutes: 30", verify_workflow)
         self.assertIn('python-version: "3.11"', workflow)
         self.assertIn("needs: compatibility", workflow)
         self.assertIn('python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]', workflow)
@@ -743,8 +861,61 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("context=metafxclub/release", prompt)
         self.assertIn("state=success", prompt)
         self.assertIn("ห้ามเชื่อเพียงว่า Tag มีอยู่", prompt)
+        self.assertIn("objects.githubusercontent.com", prompt)
+        self.assertIn("release-assets.githubusercontent.com", prompt)
+        self.assertIn(
+            "Metafxclub-AI-Agent-HQ-<GITHUB_TAG>/backend/local-runner/google_oauth_native_client.txt",
+            prompt,
+        )
+        self.assertIn("อ่าน bytes ของ entry นี้แล้วเขียนแบบ atomic ไปที่", prompt)
+        self.assertIn("ตัดเฉพาะชื่อ root ของ Archive ออก", prompt)
 
-    def test_one_run_inputs_fail_before_install_mutation_and_batches_do_not_prompt_automation(self) -> None:
+    def test_student_prompt_bootstrap_is_locked_per_user_and_precedes_clone(self) -> None:
+        prompt = (ROOT / "docs" / "prompts" / "install-github-google-auto-th.md").read_text(
+            encoding="utf-8"
+        )
+        bootstrap = prompt[prompt.index("1. ตรวจว่าเป็น Windows") : prompt.index("2. ใช้เฉพาะ")]
+        install_lines = [line for line in bootstrap.splitlines() if "`winget install " in line]
+
+        self.assertEqual(2, len(install_lines))
+        self.assertTrue(any("--id Git.Git" in line for line in install_lines))
+        self.assertTrue(any("--id Python.Python.3.13" in line for line in install_lines))
+        for line in install_lines:
+            for required in (
+                "--exact",
+                "--source winget",
+                "--scope user",
+                "--architecture x64",
+                "--silent",
+                "--no-upgrade",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "--disable-interactivity",
+            ):
+                self.assertIn(required, line)
+            for forbidden in ("--scope machine", "--force", "--override", "winget upgrade"):
+                self.assertNotIn(forbidden, line)
+
+        self.assertIn("ใช้ของเดิมทันที", bootstrap)
+        self.assertIn("ห้ามติดตั้งซ้ำ", bootstrap)
+        self.assertIn("Merge Process PATH เดิมกับ Machine PATH และ User PATH", bootstrap)
+        self.assertIn("ไม่ใช้ `setx`", bootstrap)
+        self.assertIn('`-3.10` และ `-3` เป็นทางเลือกสุดท้าย', bootstrap)
+        self.assertIn("git version --build-options", bootstrap)
+        self.assertIn("cpu: x86_64", bootstrap)
+        self.assertIn("sizeof-size_t: 8", bootstrap)
+        self.assertIn("https://cdn.winget.microsoft.com/cache", bootstrap)
+        self.assertIn("Microsoft.PreIndexed.Package", bootstrap)
+        self.assertIn("winget source list --name winget", bootstrap)
+        self.assertIn("Deadline รายการละ 15 นาที", bootstrap)
+        self.assertIn("ห้ามเริ่ม Process ที่สอง", bootstrap)
+        self.assertIn("ห้าม Reset/เพิ่ม Source เอง", bootstrap)
+        self.assertIn("ห้ามใช้ `winget upgrade`", bootstrap)
+        self.assertIn("ห้ามเปลี่ยนไปใช้ Package/Source อื่น", bootstrap)
+        self.assertLess(prompt.index("1. ตรวจว่าเป็น Windows"), prompt.index("/releases/tags/<GITHUB_TAG>"))
+        self.assertLess(prompt.index("/releases/tags/<GITHUB_TAG>"), prompt.index("git clone --depth 1"))
+
+    def test_central_default_is_noninteractive_and_advanced_inputs_validate_before_mutation(self) -> None:
         installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
         validator = installer[
             installer.index("function Assert-GoogleOAuthOneRunInputs") :
@@ -787,16 +958,19 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             installer.index("function Invoke-GoogleOAuthFirstRunSetup") :
             installer.index("function Invoke-BridgeLifecycleProcess")
         ]
+        self.assertIn("Get-GoogleOAuthDeploymentStatus -CandidateRoot", first_run)
+        self.assertIn('"central_release"', first_run)
+        self.assertIn('$script:googleSetupStatus = "ready_central"', first_run)
+        self.assertIn('$script:googleSetupStatus = "ready_existing_override"', first_run)
         self.assertIn("if (-not $explicitClientSetup)", first_run)
-        self.assertIn("Read-Host", first_run)
+        self.assertNotIn("Read-Host", first_run)
         self.assertIn('$setupArguments += "-NonInteractive"', first_run)
         self.assertIn('"-ClientJsonPath", $validatedGoogleClientJsonPath', first_run)
         self.assertIn('"-ExpectedClientId", $ExpectedGoogleClientId', first_run)
         self.assertIn('$script:googleSetupStatus = "ready_imported"', first_run)
-        self.assertIn("Test-GoogleOAuthDeploymentConfigured -CandidateRoot", first_run)
         self.assertLess(
             first_run.index("if ($SkipGoogleSetup -and -not $explicitClientSetup)"),
-            first_run.index("Test-GoogleOAuthDeploymentConfigured -CandidateRoot"),
+            first_run.index("$deploymentStatus = Get-GoogleOAuthDeploymentStatus"),
         )
 
         completion = installer[
@@ -811,8 +985,18 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             installer.index("try {\n    # Validate explicit classroom onboarding inputs")
         ]
         self.assertIn("google_oauth_client", result_writer)
-        self.assertIn("requested = -not [string]::IsNullOrWhiteSpace($GoogleClientJsonPath)", result_writer)
+        self.assertIn("requested = -not ($SkipGoogleSetup -or $SkipLaunch)", result_writer)
         self.assertIn('status = $(if ($googleSetupFailure) { "repair_required" } else { $googleSetupStatus })', result_writer)
+        self.assertIn("source = $googleSetupSource", result_writer)
+        for forbidden_field in (
+            "client_id =",
+            "client_secret =",
+            "access_token =",
+            "refresh_token =",
+            "json_path =",
+        ):
+            with self.subTest(forbidden_field=forbidden_field):
+                self.assertNotIn(forbidden_field, result_writer.lower())
 
         for batch_name in ("1-INSTALL-HQ.bat", "UPDATE-HQ.bat"):
             batch = (ROOT / batch_name).read_text(encoding="utf-8-sig")

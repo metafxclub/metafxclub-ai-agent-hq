@@ -439,7 +439,6 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
             "tokenBudget",
             "timeoutSeconds",
             "outputLimitChars",
-            "rateReservePercent",
         ])
         self.assertNotIn("agentId", fields)
         self.assertNotIn("responseStyle", fields)
@@ -449,9 +448,9 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
         self.assertIn("tokenBudget: { min: 256, max: 100000, step: 1 }", self.main)
         self.assertIn("timeoutSeconds: { min: 15, max: 600, step: 1 }", self.main)
         self.assertIn("outputLimitChars: { min: 1000, max: 20000, step: 1 }", self.main)
-        self.assertIn("rateReservePercent: { min: 15, max: 15, step: 1 }", self.main)
-        self.assertIn('field.id === "rateReservePercent"', self.main)
-        self.assertIn('control.disabled = true', self.main)
+        self.assertNotIn("rateReservePercent", fields)
+        self.assertIn('id === "save_agent_preferences" && field.id === "rateReservePercent"', self.main)
+        self.assertIn("เกณฑ์โควตากลางปรับจากการ์ดโควตา Codex ด้านซ้าย", self.main)
         self.assertIn('field.integer ? Math.trunc(numeric) : numeric', self.main)
 
     def test_public_read_only_scope_survives_normalization_and_drives_the_cta(self):

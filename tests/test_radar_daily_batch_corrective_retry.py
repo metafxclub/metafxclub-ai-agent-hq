@@ -1331,6 +1331,9 @@ class RadarDailyBatchCorrectiveRetryTests(unittest.TestCase):
             expired = self.bridge._expire_prior_day_radar_mission(mission)
             stored = self.bridge.find_mission(mission["id"])
             audit = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH)
+            next_auto_mission = self.bridge._find_next_auto_mission_unlocked(
+                council_only=False
+            )
 
         self.assertTrue(expired)
         self.assertEqual(stored["status"], "blocked")
@@ -1340,9 +1343,7 @@ class RadarDailyBatchCorrectiveRetryTests(unittest.TestCase):
         self.assertFalse(stored["execution"]["automaticRetry"])
         self.assertFalse(stored["execution"]["processStarted"])
         self.assertIsNone(stored["execution"]["nextAttemptAt"])
-        self.assertIsNone(
-            self.bridge._find_next_auto_mission_unlocked(council_only=False)
-        )
+        self.assertIsNone(next_auto_mission)
         self.assertFalse(
             any(
                 row.get("type")

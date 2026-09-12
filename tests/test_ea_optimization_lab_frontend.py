@@ -1030,7 +1030,7 @@ process.stdout.write(JSON.stringify({
     def test_right_tool_console_has_no_generic_rail_actions(self) -> None:
         rail_source = self.function_source("workflowRailActions")
         self.assertIn(
-            "if ([EA_FACTORY_PROP_ID, EA_OPTIMIZATION_LAB_PROP_ID].includes(subject?.id)) return [];",
+            "if ([TRADING_RESEARCH_LAB_PROP_ID, EA_FACTORY_PROP_ID, EA_OPTIMIZATION_LAB_PROP_ID].includes(subject?.id)) return [];",
             rail_source,
         )
 
@@ -1171,7 +1171,7 @@ process.stdout.write(JSON.stringify({
         self.assertIsNotNone(stylesheet_match)
         self.assertIsNotNone(runtime_match)
         self.assertEqual(stylesheet_match.group(1), runtime_match.group(1))
-        self.assertEqual(runtime_match.group(1), "20260907-global-metatrader-v079")
+        self.assertEqual(runtime_match.group(1), "20260912-ea-factory-guard-v0918")
 
 
 if __name__ == "__main__":
