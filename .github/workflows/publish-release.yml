@@ -111,6 +111,7 @@ jobs:
         env:
           METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_ID: ${{ secrets.METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_ID }}
           METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_SECRET: ${{ secrets.METAFX_GOOGLE_OAUTH_DESKTOP_CLIENT_SECRET }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
           trap {
@@ -946,5 +947,3 @@ jobs:
             }
             throw
           }
-        env:
-          GH_TOKEN: ${{ github.token }}

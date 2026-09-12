@@ -675,6 +675,11 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("Release $tag verified", workflow)
         self.assertIn("-PackageSmoke", workflow)
         self.assertIn("Verified Git Runtime central OAuth status probe failed", workflow)
+        build_step = workflow[
+            workflow.index("      - name: Build release package") :
+        ]
+        self.assertEqual(build_step.count("\n        env:\n"), 1)
+        self.assertIn("          GH_TOKEN: ${{ github.token }}", build_step)
         self.assertNotIn("\nimport json\n", workflow)
         self.assertIn(
             "\n          import json\n"
