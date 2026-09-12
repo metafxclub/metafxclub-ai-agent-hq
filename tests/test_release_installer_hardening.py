@@ -675,6 +675,17 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("Release $tag verified", workflow)
         self.assertIn("-PackageSmoke", workflow)
         self.assertIn("Verified Git Runtime central OAuth status probe failed", workflow)
+        self.assertNotIn("\nimport json\n", workflow)
+        self.assertIn(
+            "\n          import json\n"
+            "          import os\n"
+            "          import sys\n"
+            '          sys.path.insert(0, os.environ["METAFX_VERIFIED_RUNNER_PATH"])\n'
+            "          import google_sheet_hub\n"
+            "          print(json.dumps(google_sheet_hub.google_oauth_status(), sort_keys=True))\n"
+            "          '@ 2>$null) | Select-Object -Last 1\n",
+            workflow,
+        )
         self.assertIn("$verifiedAuth.clientConfigured -ne $true", workflow)
         self.assertIn("$verifiedAuth.connected -ne $false", workflow)
         self.assertIn('[string]$verifiedAuth.status -cne "authorization_required"', workflow)

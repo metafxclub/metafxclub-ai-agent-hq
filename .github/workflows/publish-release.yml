@@ -716,13 +716,13 @@ jobs:
             $verifiedPython = Join-Path $verifiedInstalledRoot "runner\.venv\Scripts\python.exe"
             $env:METAFX_VERIFIED_RUNNER_PATH = Join-Path $verifiedInstalledRoot "backend\local-runner"
             $verifiedAuthJson = @(& $verifiedPython -c @'
-import json
-import os
-import sys
-sys.path.insert(0, os.environ["METAFX_VERIFIED_RUNNER_PATH"])
-import google_sheet_hub
-print(json.dumps(google_sheet_hub.google_oauth_status(), sort_keys=True))
-'@ 2>$null) | Select-Object -Last 1
+          import json
+          import os
+          import sys
+          sys.path.insert(0, os.environ["METAFX_VERIFIED_RUNNER_PATH"])
+          import google_sheet_hub
+          print(json.dumps(google_sheet_hub.google_oauth_status(), sort_keys=True))
+          '@ 2>$null) | Select-Object -Last 1
             if ($LASTEXITCODE -ne 0 -or -not $verifiedAuthJson) {
               throw "Verified Git Runtime central OAuth status probe failed."
             }
