@@ -50,7 +50,25 @@ jobs:
         shell: pwsh
         run: |
           python -m venv runner/.venv
-          .\runner\.venv\Scripts\python.exe -m pip install --disable-pip-version-check --require-hashes --requirement requirements-runner.txt
+          $pipEnvironmentNames = @(Get-ChildItem Env: | Where-Object { $_.Name -like "PIP_*" } | ForEach-Object { [string]$_.Name })
+          foreach ($name in @($pipEnvironmentNames + @("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR"))) {
+            Remove-Item -LiteralPath ("Env:{0}" -f $name) -Force -ErrorAction SilentlyContinue
+          }
+          $env:PIP_CONFIG_FILE = "nul"
+          $pipWheel = "installer/bootstrap/pip-26.2.1-py3-none-any.whl"
+          $pipWheelHash = (Get-FileHash -LiteralPath $pipWheel -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($pipWheelHash -cne "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e") {
+            throw "Offline pip bootstrap SHA-256 mismatch"
+          }
+          .\runner\.venv\Scripts\python.exe -m pip --disable-pip-version-check install --no-index --no-deps --upgrade $pipWheel
+          if ($LASTEXITCODE -ne 0) {
+            throw "Offline pip bootstrap failed on Python ${{ matrix.python-version }} with exit code $LASTEXITCODE"
+          }
+          $pipVersion = (& .\runner\.venv\Scripts\python.exe -I -c "import pip; print(pip.__version__)").Trim()
+          if ($LASTEXITCODE -ne 0 -or $pipVersion -cne "26.2.1") {
+            throw "Expected verified pip 26.2.1, found '$pipVersion'"
+          }
+          .\runner\.venv\Scripts\python.exe -m pip --disable-pip-version-check install --index-url https://pypi.org/simple --require-hashes --only-binary=:all: --requirement requirements-runner.txt
           if ($LASTEXITCODE -ne 0) {
             throw "Pinned dependency installation failed on Python ${{ matrix.python-version }} with exit code $LASTEXITCODE"
           }
@@ -87,7 +105,25 @@ jobs:
         shell: pwsh
         run: |
           python -m venv runner/.venv
-          .\runner\.venv\Scripts\python.exe -m pip install --disable-pip-version-check --require-hashes --requirement requirements-runner.txt
+          $pipEnvironmentNames = @(Get-ChildItem Env: | Where-Object { $_.Name -like "PIP_*" } | ForEach-Object { [string]$_.Name })
+          foreach ($name in @($pipEnvironmentNames + @("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR"))) {
+            Remove-Item -LiteralPath ("Env:{0}" -f $name) -Force -ErrorAction SilentlyContinue
+          }
+          $env:PIP_CONFIG_FILE = "nul"
+          $pipWheel = "installer/bootstrap/pip-26.2.1-py3-none-any.whl"
+          $pipWheelHash = (Get-FileHash -LiteralPath $pipWheel -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($pipWheelHash -cne "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e") {
+            throw "Offline pip bootstrap SHA-256 mismatch"
+          }
+          .\runner\.venv\Scripts\python.exe -m pip --disable-pip-version-check install --no-index --no-deps --upgrade $pipWheel
+          if ($LASTEXITCODE -ne 0) {
+            throw "Offline pip bootstrap failed with exit code $LASTEXITCODE"
+          }
+          $pipVersion = (& .\runner\.venv\Scripts\python.exe -I -c "import pip; print(pip.__version__)").Trim()
+          if ($LASTEXITCODE -ne 0 -or $pipVersion -cne "26.2.1") {
+            throw "Expected verified pip 26.2.1, found '$pipVersion'"
+          }
+          .\runner\.venv\Scripts\python.exe -m pip --disable-pip-version-check install --index-url https://pypi.org/simple --require-hashes --only-binary=:all: --requirement requirements-runner.txt
           if ($LASTEXITCODE -ne 0) {
             throw "Pinned runner dependency installation failed with exit code $LASTEXITCODE"
           }
@@ -248,6 +284,8 @@ jobs:
               "VERSION",
               "requirements-runner.txt",
               "installer\install.ps1",
+              "installer\bootstrap\pip-26.2.1-py3-none-any.whl",
+              "installer\bootstrap\README.md",
               "2-SETUP-GOOGLE-HQ.bat",
               "docs\prompts\install-github-google-auto-th.md",
               "scripts\setup-google-oauth.ps1",

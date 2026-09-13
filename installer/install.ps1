@@ -30,6 +30,10 @@ $sourceRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot)).TrimEnd
 $installRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "Metafxclub\AI-Agent-HQ")).TrimEnd("\")
 $installLog = Join-Path $env:LOCALAPPDATA "Metafxclub\AI-Agent-HQ-Install.log"
 $requirementsName = "requirements-runner.txt"
+$pipBootstrapRelativePath = "installer\bootstrap\pip-26.2.1-py3-none-any.whl"
+$pipBootstrapVersion = "26.2.1"
+$pipBootstrapLength = 1816632
+$pipBootstrapSha256 = "71138ADF1F4CA900CDB7D289C21B7494329F2332B6D85F0E1C42108C0384ED3E"
 $centralGoogleOAuthClientRelativePath = "backend\local-runner\google_oauth_native_client.txt"
 $bridgeEndpointPath = Join-Path $installRoot "data\runtime\bridge-endpoint.json"
 $installResultPath = Join-Path $installRoot "data\runtime\install-result.json"
@@ -661,6 +665,47 @@ function Invoke-CheckedNative {
     }
 }
 
+function Invoke-PipWithCleanConfiguration {
+    param(
+        [Parameter(Mandatory = $true)][string]$PythonPath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$FailureMessage
+    )
+
+    # `--isolated` still reads machine-wide and virtual-environment pip.ini
+    # files. Use pip's documented os.devnull sentinel instead, and remove pip
+    # and certificate-bundle environment overrides only for this child call.
+    # Standard HTTPS proxy variables remain available for managed networks.
+    $savedEnvironment = @{}
+    $namesToClear = @(
+        @(Get-ChildItem Env: | Where-Object { $_.Name -like "PIP_*" } | ForEach-Object { [string]$_.Name }) +
+        @("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR")
+    ) | Select-Object -Unique
+    foreach ($name in $namesToClear) {
+        $value = [Environment]::GetEnvironmentVariable($name, "Process")
+        if ($null -ne $value) {
+            $savedEnvironment[$name] = $value
+        }
+        $environmentPath = "Env:{0}" -f $name
+        if (Test-Path -LiteralPath $environmentPath) {
+            Remove-Item -LiteralPath $environmentPath -Force
+        }
+    }
+    $env:PIP_CONFIG_FILE = "nul"
+    try {
+        Invoke-CheckedNative `
+            -FilePath $PythonPath `
+            -Arguments (@("-m", "pip") + @($Arguments)) `
+            -FailureMessage $FailureMessage
+    }
+    finally {
+        Remove-Item -LiteralPath Env:PIP_CONFIG_FILE -Force -ErrorAction SilentlyContinue
+        foreach ($name in $savedEnvironment.Keys) {
+            Set-Item -LiteralPath ("Env:{0}" -f [string]$name) -Value ([string]$savedEnvironment[$name])
+        }
+    }
+}
+
 function Get-Sha256Hex {
     param([Parameter(Mandatory = $true)][string]$LiteralPath)
 
@@ -678,6 +723,27 @@ function Get-Sha256Hex {
         $sha256.Dispose()
         $stream.Dispose()
     }
+}
+
+function Assert-PipBootstrapWheel {
+    param([Parameter(Mandatory = $true)][string]$CandidateRoot)
+
+    $wheelPath = Join-Path $CandidateRoot $pipBootstrapRelativePath
+    if (-not (Test-Path -LiteralPath $wheelPath -PathType Leaf)) {
+        throw "ชุดติดตั้งไม่สมบูรณ์: ไม่พบ pip bootstrap ที่ล็อกไว้"
+    }
+    $wheel = Get-Item -LiteralPath $wheelPath -Force
+    if (($wheel.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "หยุดติดตั้ง: pip bootstrap ต้องไม่เป็น Link/Junction"
+    }
+    if ([int64]$wheel.Length -ne [int64]$pipBootstrapLength) {
+        throw "หยุดติดตั้ง: ขนาด pip bootstrap ไม่ตรงกับ Release ที่ตรวจสอบแล้ว"
+    }
+    $actualHash = Get-Sha256Hex -LiteralPath $wheelPath
+    if ($actualHash -cne $pipBootstrapSha256) {
+        throw "หยุดติดตั้ง: SHA-256 ของ pip bootstrap ไม่ตรงกับ Release ที่ตรวจสอบแล้ว"
+    }
+    return $wheelPath
 }
 
 function Invoke-GitSourceCapture {
@@ -877,13 +943,15 @@ function Assert-SafeSource {
         "tests\release_secret_scan.py",
         "tests\test_release_candidate_preflight.py",
         "tests\test_runtime_integrity.py",
-        $requirementsName
+        $requirementsName,
+        $pipBootstrapRelativePath
     )
     foreach ($relativePath in $requiredFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot $relativePath) -PathType Leaf)) {
             throw "ชุดติดตั้งไม่สมบูรณ์: ไม่พบ $relativePath"
         }
     }
+    $null = Assert-PipBootstrapWheel -CandidateRoot $sourceRoot
     $centralClientPath = Join-Path $sourceRoot $centralGoogleOAuthClientRelativePath
     if (Test-Path -LiteralPath $centralClientPath -PathType Leaf) {
         Assert-CentralGoogleOAuthPublicClient -CandidateRoot $sourceRoot
@@ -2096,9 +2164,41 @@ function Initialize-PythonEnvironment {
         Write-Step ("กำลังตรวจและใช้ Virtual Environment เดิม (Python {0})" -f $venvDetails.Version)
     }
 
-    Write-Step "กำลังติดตั้ง Dependency ที่ล็อกเวอร์ชันไว้"
-    Invoke-CheckedNative -FilePath $venvPython -Arguments @("-m", "pip", "install", "--disable-pip-version-check", "--require-hashes", "--upgrade", "--requirement", $requirements) -FailureMessage "ติดตั้ง Dependency ไม่สำเร็จ กรุณาตรวจอินเทอร์เน็ตแล้วลองใหม่"
-    Invoke-CheckedNative -FilePath $venvPython -Arguments @("-m", "pip", "check") -FailureMessage "Dependency ตรวจสอบไม่ผ่าน"
+    # The pip bundled with an otherwise supported Python can predate Windows
+    # system-certificate integration. Bootstrap a pinned, hash-verified modern
+    # pip entirely offline before making any package-index connection. This
+    # fixes legitimate classroom TLS interception only when its CA is trusted
+    # by Windows; certificate and hostname verification remain enabled.
+    $pipBootstrapWheel = Assert-PipBootstrapWheel -CandidateRoot $installRoot
+    Write-Step "กำลังเตรียม pip $pipBootstrapVersion จากไฟล์ Offline ที่ตรวจ SHA-256 แล้ว"
+    Invoke-PipWithCleanConfiguration `
+        -PythonPath $venvPython `
+        -Arguments @(
+            "--disable-pip-version-check", "install",
+            "--no-index", "--no-deps", "--upgrade", $pipBootstrapWheel
+        ) `
+        -FailureMessage "เตรียม pip แบบ Offline ไม่สำเร็จ"
+
+    $pipVersionOutput = @(& $venvPython -I -c "import pip; print(pip.__version__)" 2>$null)
+    $pipVersionExitCode = $LASTEXITCODE
+    if (
+        $pipVersionExitCode -ne 0 -or
+        $pipVersionOutput.Count -ne 1 -or
+        ([string]$pipVersionOutput[0]).Trim() -cne $pipBootstrapVersion
+    ) {
+        throw "ตรวจ pip ที่ติดตั้งแล้วไม่ผ่าน: ต้องเป็นเวอร์ชัน $pipBootstrapVersion"
+    }
+
+    Write-Step "กำลังติดตั้ง Dependency ที่ล็อกเวอร์ชันไว้ผ่าน Windows certificate store"
+    Invoke-PipWithCleanConfiguration `
+        -PythonPath $venvPython `
+        -Arguments @(
+            "--disable-pip-version-check", "install",
+            "--index-url", "https://pypi.org/simple", "--require-hashes", "--only-binary=:all:",
+            "--upgrade", "--requirement", $requirements
+        ) `
+        -FailureMessage "ติดตั้ง Dependency ผ่าน Windows certificate store ไม่สำเร็จ หากพบ CERTIFICATE_VERIFY_FAILED ให้ผู้ดูแลตรวจ Windows Trusted Root, Proxy หรือ Antivirus; ระบบจะไม่ปิดการตรวจ TLS"
+    Invoke-PipWithCleanConfiguration -PythonPath $venvPython -Arguments @("check") -FailureMessage "Dependency ตรวจสอบไม่ผ่าน"
 
     $codexBinary = Join-Path $venvRoot "Lib\site-packages\codex_cli_bin\bin\codex.exe"
     if (-not (Test-Path -LiteralPath $codexBinary -PathType Leaf)) {

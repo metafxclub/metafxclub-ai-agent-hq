@@ -10,8 +10,8 @@ Prompt นี้ใช้สำหรับให้นักเรียนว�
 ช่วยติดตั้ง Metafxclub AI Agent HQ บน Windows User ปัจจุบันให้เสร็จอัตโนมัติ โดยให้คุณ Clone Tag จาก GitHub, ดาวน์โหลด Release ZIP กับ `.sha256` เพื่อตรวจและนำเข้าเฉพาะ Client กลาง แล้วเรียก Installer เอง ฉันจะไม่ดาวน์โหลด ZIP และไม่กดไฟล์ BAT
 
 GITHUB_REPOSITORY = "https://github.com/metafxclub/metafxclub-ai-agent-hq.git"
-GITHUB_TAG = "v0.9.19"
-EXPECTED_VERSION = "0.9.19"
+GITHUB_TAG = "v0.9.20"
+EXPECTED_VERSION = "0.9.20"
 
 ข้อความนี้เป็นการยืนยันล่วงหน้าให้ Codex ใช้ Local endpoint มาตรฐาน `http://127.0.0.1:4186/` และส่งพอร์ต 4186 เข้า Installer ด้วย `-EndpointConfirmed` ได้ ไม่ต้องถามฉันให้เลือก Port หรือกดไฟล์ BAT ซ้ำ ห้ามใช้ 0.0.0.0, LAN IP หรือ Public IP
 
@@ -44,7 +44,7 @@ EXPECTED_VERSION = "0.9.19"
    `git clone --depth 1 --single-branch --branch "<GITHUB_TAG>" "<GITHUB_REPOSITORY>" "<SOURCE_DIR>"`
    ห้ามใช้หรือแก้ Repository เดิมของผู้เรียน ห้าม Pull/Merge/Stash/Reset งานเดิม หลัง Clone ให้ตรวจว่า `origin` ตรงกับ GITHUB_REPOSITORY, `HEAD` ตรงกับทั้ง `REMOTE_TAG_COMMIT` และ `refs/tags/GITHUB_TAG^{commit}`, อยู่ใน detached HEAD, `git status --porcelain --untracked-files=all` ว่าง และไฟล์ `VERSION` ตรงกับ EXPECTED_VERSION หากข้อใดไม่ตรงให้หยุด
 
-4. เส้นทางหลักต้องใช้ OAuth native/installed-app client configuration กลางที่ GitHub Actions inject จาก Release secrets ตอน build Asset เท่านั้น ไฟล์จริงต้องไม่อยู่ใน public Git tree หลัง Clone ให้ยืนยันว่า `backend/local-runner/google_oauth_native_client.txt` ไม่มีอยู่ใน Git index, คำสั่ง `git check-ignore -q -- backend/local-runner/google_oauth_native_client.txt` ผ่าน และ worktree ยังสะอาด จาก ZIP ที่ตรวจ hash แล้ว ให้เปิดแบบอ่านอย่างเดียวและยอมรับเฉพาะ entry ปกติที่ path ตรง `Metafxclub-AI-Agent-HQ-<GITHUB_TAG>/backend/local-runner/google_oauth_native_client.txt` เพียงหนึ่งรายการ (เช่น `Metafxclub-AI-Agent-HQ-v0.9.19/...`) ห้ามมี absolute path, `..`, duplicate, directory, symlink หรือ ReparsePoint อ่าน bytes ของ entry นี้แล้วเขียนแบบ atomic ไปที่ `SOURCE_DIR/backend/local-runner/google_oauth_native_client.txt` โดยตัดเฉพาะชื่อ root ของ Archive ออก ห้าม extract ไฟล์อื่นหรือทับ Source จาก Git และตรวจ `git status --porcelain --untracked-files=all` ต้องยังว่างเพราะไฟล์ถูก ignore
+4. เส้นทางหลักต้องใช้ OAuth native/installed-app client configuration กลางที่ GitHub Actions inject จาก Release secrets ตอน build Asset เท่านั้น ไฟล์จริงต้องไม่อยู่ใน public Git tree หลัง Clone ให้ยืนยันว่า `backend/local-runner/google_oauth_native_client.txt` ไม่มีอยู่ใน Git index, คำสั่ง `git check-ignore -q -- backend/local-runner/google_oauth_native_client.txt` ผ่าน และ worktree ยังสะอาด จาก ZIP ที่ตรวจ hash แล้ว ให้เปิดแบบอ่านอย่างเดียวและยอมรับเฉพาะ entry ปกติที่ path ตรง `Metafxclub-AI-Agent-HQ-<GITHUB_TAG>/backend/local-runner/google_oauth_native_client.txt` เพียงหนึ่งรายการ (เช่น `Metafxclub-AI-Agent-HQ-v0.9.20/...`) ห้ามมี absolute path, `..`, duplicate, directory, symlink หรือ ReparsePoint อ่าน bytes ของ entry นี้แล้วเขียนแบบ atomic ไปที่ `SOURCE_DIR/backend/local-runner/google_oauth_native_client.txt` โดยตัดเฉพาะชื่อ root ของ Archive ออก ห้าม extract ไฟล์อื่นหรือทับ Source จาก Git และตรวจ `git status --porcelain --untracked-files=all` ต้องยังว่างเพราะไฟล์ถูก ignore
 
    ไฟล์ Client กลางมี `client_id` และ `client_secret` ของ installed app ซึ่งเป็น app metadata ที่ต้องแจกพร้อมโปรแกรม ไม่ใช่ Credential ของบัญชีนักเรียน แต่ห้าม commit ค่าจริงลง public Source และห้ามพิมพ์ค่าเต็มใน console, Chat, Frontend, Mission, Report หรือ Log ห้ามถามนักเรียนหา Client ID, Client Secret, OAuth JSON หรือ Google Cloud Project Installer ทางการต้องตรวจรูปแบบและ metadata ด้วย Release preflight เอง หากไฟล์ขาดหรือรูปแบบไม่ถูกต้องให้หยุดและแจ้งว่า Release Asset ไม่สมบูรณ์ ห้ามแก้ด้วย Credential ของนักเรียนแบบเงียบ ๆ
 
@@ -52,7 +52,7 @@ EXPECTED_VERSION = "0.9.19"
 
 6. จาก SOURCE_DIR ที่ตรวจแล้ว ให้อ่าน `AGENTS.md`, `README.md`, `STUDENT-QUICKSTART-TH.md` และ `docs/research-sheet-hub-setup-th.md` ก่อนติดตั้ง โดยคำสั่งใน Prompt นี้เป็นโหมด Git Clone และพอร์ตมาตรฐานที่ผู้ใช้ยืนยันไว้แล้ว จึงไม่ต้องเปลี่ยนไปใช้คู่มือเลือก Endpoint หรือใช้ ZIP เป็น Source ติดตั้ง; ZIP ที่ตรวจแล้วมีหน้าที่ส่งมอบ Client กลางเพียงไฟล์เดียวตามข้อ 4
 
-7. ตรวจ Git และ Python ซ้ำจาก Path ที่ Resolve หลัง Bootstrap: Git ต้องเรียกใช้งานได้ และ Python ต้องเป็น 3.10-3.14 แบบ 64-bit หากข้อใดไม่ผ่านให้หยุดก่อนเรียก Installer ห้ามติดตั้ง Dependency แบบ Global เพราะ Installer จะสร้าง pinned Virtual Environment แยกเอง
+7. ตรวจ Git และ Python ซ้ำจาก Path ที่ Resolve หลัง Bootstrap: Git ต้องเรียกใช้งานได้ และ Python ต้องเป็น 3.10-3.14 แบบ 64-bit หากข้อใดไม่ผ่านให้หยุดก่อนเรียก Installer ห้ามติดตั้ง Dependency แบบ Global เพราะ Installer จะสร้าง pinned Virtual Environment แยกเอง ตัว Installer มี `pip==26.2.1` แบบ Offline ที่ล็อก SHA-256 ไว้และจะตรวจ/ติดตั้งจากไฟล์ใน Tag ก่อนเชื่อม PyPI เพื่อให้ใช้ Windows certificate store โดยไม่ลดความปลอดภัย
 
 8. จาก SOURCE_DIR ให้เรียกคำสั่งตรวจแบบ Read-only พร้อมให้ Installer ตรวจ Git ซ้ำด้วยตัวเอง:
    `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File ".\installer\install.ps1" -ListAvailableEndpoints -RequireVerifiedGitSource -ExpectedGitRepository "<GITHUB_REPOSITORY>" -ExpectedGitTag "<GITHUB_TAG>" -ExpectedSourceVersion "<EXPECTED_VERSION>"`
@@ -60,7 +60,7 @@ EXPECTED_VERSION = "0.9.19"
 
 9. เรียก Installer เพียงรอบเดียวจาก SOURCE_DIR พร้อมพอร์ตที่ยืนยันแล้ว โดยไม่ส่ง Credential หรือค่า Google เพิ่มเติม ห้ามใช้ `-SkipLaunch`, `-SkipAutostart` หรือ BAT:
    `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File ".\installer\install.ps1" -Port 4186 -EndpointConfirmed -RequireVerifiedGitSource -ExpectedGitRepository "<GITHUB_REPOSITORY>" -ExpectedGitTag "<GITHUB_TAG>" -ExpectedSourceVersion "<EXPECTED_VERSION>"`
-   รอให้ตัวติดตั้งรัน Preflight, สร้าง pinned venv, รันชุดตรวจติดตั้ง, เปิด Bridge, ตรวจ Health/หน้าเว็บ, ยืนยัน OAuth native-app client configuration กลางจาก Release และลงทะเบียน Watchdog หลัง Login จบ ห้ามรายงานว่าสำเร็จถ้าตัวติดตั้งคืน Exit code ที่ไม่ใช่ 0 โดยรหัส partial คือ `2=Google OAuth`, `3=Watchdog` และ `4=ทั้ง Google OAuth กับ Watchdog`; Runtime ที่ Health ผ่านจะไม่ถูก Rollback ให้ซ่อมเฉพาะส่วนที่แจ้งและห้ามรันติดตั้ง Source เต็มซ้ำโดยไม่จำเป็น
+   รอให้ตัวติดตั้งรัน Preflight, ตรวจ SHA-256 และ Bootstrap `pip==26.2.1` จากไฟล์ Offline ก่อน Network, สร้าง pinned venv, รันชุดตรวจติดตั้ง, เปิด Bridge, ตรวจ Health/หน้าเว็บ, ยืนยัน OAuth native-app client configuration กลางจาก Release และลงทะเบียน Watchdog หลัง Login จบ ห้ามรายงานว่าสำเร็จถ้าตัวติดตั้งคืน Exit code ที่ไม่ใช่ 0 โดยรหัส partial คือ `2=Google OAuth`, `3=Watchdog` และ `4=ทั้ง Google OAuth กับ Watchdog`; Runtime ที่ Health ผ่านจะไม่ถูก Rollback ให้ซ่อมเฉพาะส่วนที่แจ้งและห้ามรันติดตั้ง Source เต็มซ้ำโดยไม่จำเป็น หากยังพบ `CERTIFICATE_VERIFY_FAILED` หลัง Bootstrap ให้หยุดและแจ้งว่าผู้ดูแลเครื่องต้องตรวจ Windows Trusted Root, Proxy หรือ Antivirus แล้ววาง Prompt เดิมใหม่ ห้ามใช้ `--trusted-host`, ปิด TLS/certificate verification หรือติดตั้ง CA ที่ไม่ทราบแหล่งที่มา
 
 10. ห้ามเรียกขั้นตอนนำเข้า OAuth Client แบบกำหนดเองเมื่อ Installer สำเร็จ หาก Client กลางไม่พร้อม ให้หยุดและให้อาจารย์แก้ Release แล้วออก Tag ใหม่ ห้ามเปลี่ยนไปขอ JSON หรือ Client ID จากนักเรียน โหมด custom override เป็น Advanced/Recovery แยกจาก Prompt ห้องเรียนนี้และใช้ได้เฉพาะเมื่อเจ้าของ OAuth Project ตั้งใจดำเนินการเอง
 

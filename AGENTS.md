@@ -85,4 +85,5 @@ $health | Select-Object ok, status, agentCount, agentRosterComplete, version
 - รักษาไฟล์และข้อมูลเดิมของผู้ใช้ ห้ามลบหรือย้ายโดยไม่จำเป็น
 - Real tool call ทุกครั้งต้องมี Mission ID, Owner agent, Status, Audit log และ Report routing
 - การเปลี่ยน Installer ต้องคง Entry point เหล่านี้: `1-INSTALL-HQ.bat`, `installer/install.ps1`, `Open Metafx Agent HQ.cmd`, `scripts/repair-hq.cmd` และ `scripts/status-local-bridge.cmd`
+- การติดตั้ง Dependency ต้อง Bootstrap `pip==26.2.1` จาก `installer/bootstrap/pip-26.2.1-py3-none-any.whl` หลังตรวจ SHA-256 แบบ Offline แล้วปิด pip config/environment overrides ด้วย `PIP_CONFIG_FILE=nul`, ใช้ `--require-hashes` และ Windows system certificate store ห้ามใช้ `--trusted-host`, `legacy-certs` หรือปิด TLS/certificate verification
 - หลังแก้ต้องรันชุดทดสอบที่ Repository จัดเตรียมไว้ และตรวจ `/api/health` โดยไม่เรียก Real tool

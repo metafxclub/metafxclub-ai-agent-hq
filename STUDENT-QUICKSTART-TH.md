@@ -5,7 +5,7 @@
 1. ใช้ Windows 10 หรือ 11 แบบ 64-bit และเชื่อมต่ออินเทอร์เน็ต
 2. เปิด Codex และใช้บัญชีของตนเอง ห้ามรับ Token, Cookie หรือไฟล์ Auth จากผู้สอนหรือเพื่อน
 
-เมื่อใช้ Prompt หลัก ผู้เรียนไม่ต้องติดตั้ง Git หรือ Python เอง Prompt จะตรวจเครื่องก่อนเสมอ: ถ้ามี Git ที่ใช้ได้และ Python 3.10-3.14 แบบ 64-bit อยู่แล้วจะใช้ของเดิมและไม่ติดตั้งซ้ำ ถ้าขาดจึงติดตั้งแพ็กเกจทางการที่ล็อกไว้ผ่าน WinGet แบบ current-user แล้วตรวจซ้ำ ส่วน `installer/install.ps1` จะสร้าง Python Virtual Environment แยกและตรวจ Runtime ซ้ำอีกชั้น การเชื่อม Google Sheet แบบ Private เป็นขั้นตอนเสริมภายหลังตาม `docs/research-sheet-hub-setup-th.md`; Client กลางพร้อมมากับ Release แล้ว จึงไม่ต้องนำไฟล์ OAuth ของผู้สอนหรือของใครมาใส่เครื่องนักเรียน
+เมื่อใช้ Prompt หลัก ผู้เรียนไม่ต้องติดตั้ง Git หรือ Python เอง Prompt จะตรวจเครื่องก่อนเสมอ: ถ้ามี Git ที่ใช้ได้และ Python 3.10-3.14 แบบ 64-bit อยู่แล้วจะใช้ของเดิมและไม่ติดตั้งซ้ำ ถ้าขาดจึงติดตั้งแพ็กเกจทางการที่ล็อกไว้ผ่าน WinGet แบบ current-user แล้วตรวจซ้ำ ส่วน `installer/install.ps1` จะสร้าง Python Virtual Environment แยก ตรวจ SHA-256 และ Bootstrap `pip==26.2.1` จากไฟล์ Offline ก่อนเชื่อม PyPI เพื่อใช้ Windows certificate store แล้วตรวจ Runtime ซ้ำอีกชั้น การเชื่อม Google Sheet แบบ Private เป็นขั้นตอนเสริมภายหลังตาม `docs/research-sheet-hub-setup-th.md`; Client กลางพร้อมมากับ Release แล้ว จึงไม่ต้องนำไฟล์ OAuth ของผู้สอนหรือของใครมาใส่เครื่องนักเรียน
 
 ## เชื่อม Google Sheet แบบ Private ครั้งเดียว
 
@@ -86,6 +86,8 @@ Task เปิดเฉพาะ Bridge ไม่เปิด Browser หรื�
 5. หากยังไม่สำเร็จ ให้ส่งข้อความที่หน้าจอแจ้งเตือนให้อาจารย์ โดยลบข้อมูลส่วนตัวหรือรหัสผ่านออกก่อน
 
 ไม่ควรปิด Process หรือโปรแกรมอื่นเองเพียงเพราะ Port เดิมถูกใช้งาน ระบบจะรักษาโปรแกรมนั้นไว้และขอให้นักเรียนยืนยัน URL ว่างใหม่บน `127.0.0.1`
+
+หาก Installer แจ้ง `CERTIFICATE_VERIFY_FAILED` ตัวติดตั้งจะหยุดและคืน Last-good โดยไม่ปิด TLS ให้ส่งข้อความผิดพลาดให้อาจารย์หรือผู้ดูแลเครื่องตรวจ Windows Trusted Root, Proxy หรือ Antivirus แล้วจึงวาง Prompt รุ่นเดิมใหม่ ห้ามเติม `--trusted-host`, ปิด certificate verification หรือติดตั้งใบรับรองที่ไม่ทราบแหล่งที่มาเอง
 
 ## เรื่องบัญชี Codex
 

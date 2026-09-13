@@ -273,6 +273,36 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("Enable-ScheduledTask -TaskName $bridgeTaskName", suspend)
         self.assertIn("Test-InstalledApplication -PythonPath", installer)
         self.assertIn('"--require-hashes"', installer)
+        dependency_setup = installer[
+            installer.index("function Initialize-PythonEnvironment"):
+            installer.index("function Test-InstalledApplication")
+        ]
+        self.assertIn("Assert-PipBootstrapWheel -CandidateRoot $installRoot", dependency_setup)
+        self.assertIn('"--no-index", "--no-deps", "--upgrade", $pipBootstrapWheel', dependency_setup)
+        self.assertIn('"--only-binary=:all:"', dependency_setup)
+        self.assertIn('"https://pypi.org/simple"', dependency_setup)
+        self.assertIn('print(pip.__version__)', dependency_setup)
+        self.assertIn("Windows certificate store", dependency_setup)
+        clean_pip = installer[
+            installer.index("function Invoke-PipWithCleanConfiguration"):
+            installer.index("function Get-Sha256Hex")
+        ]
+        self.assertIn('$_.Name -like "PIP_*"', clean_pip)
+        self.assertIn('$env:PIP_CONFIG_FILE = "nul"', clean_pip)
+        self.assertIn('Remove-Item -LiteralPath $environmentPath -Force', clean_pip)
+        for certificate_override in (
+            "REQUESTS_CA_BUNDLE",
+            "CURL_CA_BUNDLE",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+        ):
+            self.assertIn(certificate_override, clean_pip)
+        self.assertLess(
+            dependency_setup.index('"--no-index"'),
+            dependency_setup.index('"https://pypi.org/simple"'),
+        )
+        for unsafe_option in ("--trusted-host", "legacy-certs", "PIP_TRUSTED_HOST"):
+            self.assertNotIn(unsafe_option, dependency_setup)
         installed_check = installer[
             installer.index("function Test-InstalledApplication"):
             installer.index("function Test-GoogleOAuthDeploymentConfigured")
@@ -531,7 +561,11 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("Python regression suite failed with exit code", verify_step)
         self.assertIn("Frontend syntax check failed with exit code", verify_step)
         self.assertIn("python -m venv runner/.venv", verify_step)
-        self.assertIn("--require-hashes --requirement requirements-runner.txt", verify_step)
+        self.assertIn("--no-index --no-deps --upgrade $pipWheel", verify_step)
+        self.assertIn("Expected verified pip 26.2.1", verify_step)
+        self.assertIn("--index-url https://pypi.org/simple --require-hashes --only-binary=:all: --requirement requirements-runner.txt", verify_step)
+        self.assertIn("$env:PIP_CONFIG_FILE = \"nul\"", verify_step)
+        self.assertIn("-m pip check", verify_step)
         self.assertIn(r".\scripts\run-regression-suite.ps1", verify_step)
         self.assertIn(
             '& $resolvedPython -m unittest discover -s tests -p "test_*.py" -v',
@@ -783,6 +817,8 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("Python 3.10-3.14", workflow)
         for filename in (
             "requirements-runner.txt",
+            "installer\\bootstrap\\pip-26.2.1-py3-none-any.whl",
+            "installer\\bootstrap\\README.md",
             "scripts\\start-local-bridge.ps1",
             "google_oauth_store.py",
             "google_sheet_hub.py",
@@ -811,6 +847,19 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("needs: compatibility", workflow)
         self.assertIn('python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]', workflow)
         self.assertIn("Regression suite failed on Python ${{ matrix.python-version }}", workflow)
+        self.assertGreaterEqual(workflow.count("Offline pip bootstrap SHA-256 mismatch"), 2)
+        self.assertGreaterEqual(workflow.count("--no-index --no-deps --upgrade $pipWheel"), 2)
+        self.assertGreaterEqual(workflow.count("--only-binary=:all:"), 2)
+        self.assertGreaterEqual(workflow.count('$env:PIP_CONFIG_FILE = "nul"'), 2)
+        self.assertGreaterEqual(workflow.count("-m pip check"), 2)
+        self.assertIn("Offline pip bootstrap SHA-256 mismatch", verify_workflow)
+        self.assertIn("--no-index --no-deps --upgrade $pipWheel", verify_workflow)
+        self.assertIn("--only-binary=:all:", verify_workflow)
+        self.assertIn('$env:PIP_CONFIG_FILE = "nul"', verify_workflow)
+        self.assertIn("-m pip check", verify_workflow)
+        for unsafe_option in ("--trusted-host", "legacy-certs", "PIP_TRUSTED_HOST"):
+            self.assertNotIn(unsafe_option, workflow)
+            self.assertNotIn(unsafe_option, verify_workflow)
 
     def test_degraded_endpoint_upgrade_is_exact_owned_and_foreign_fail_closed(self) -> None:
         installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")

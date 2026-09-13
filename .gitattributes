@@ -33,3 +33,4 @@ integrations/mt4-trade-gateway/MetafxHQTradeGateway.mq4 -text -diff
 *.ico binary
 *.woff binary
 *.woff2 binary
+*.whl binary

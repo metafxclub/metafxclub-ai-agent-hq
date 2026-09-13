@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import subprocess
 import unittest
+import zipfile
 from pathlib import Path
 
 from tests.release_secret_scan import find_sensitive_filenames, scan_embedded_secrets
@@ -15,6 +17,14 @@ CENTRAL_NATIVE_CLIENT_RELATIVE_PATH = (
     Path("backend") / "local-runner" / "google_oauth_native_client.txt"
 )
 CENTRAL_NATIVE_CLIENT_PATH = PROJECT_ROOT / CENTRAL_NATIVE_CLIENT_RELATIVE_PATH
+PIP_BOOTSTRAP_RELATIVE_PATH = (
+    Path("installer") / "bootstrap" / "pip-26.2.1-py3-none-any.whl"
+)
+PIP_BOOTSTRAP_PATH = PROJECT_ROOT / PIP_BOOTSTRAP_RELATIVE_PATH
+PIP_BOOTSTRAP_SHA256 = (
+    "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e"
+)
+PIP_BOOTSTRAP_SIZE = 1_816_632
 
 
 def _is_source_checkout() -> bool:
@@ -32,6 +42,8 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
             "README.md",
             "STUDENT-QUICKSTART-TH.md",
             "installer/install.ps1",
+            PIP_BOOTSTRAP_RELATIVE_PATH.as_posix(),
+            "installer/bootstrap/README.md",
             "2-SETUP-GOOGLE-HQ.bat",
             "docs/prompts/install-github-google-auto-th.md",
             "backend/local-runner/bridge_server.py",
@@ -56,6 +68,27 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
             required += (CENTRAL_NATIVE_CLIENT_RELATIVE_PATH.as_posix(),)
         missing = [path for path in required if not (PROJECT_ROOT / path).is_file()]
         self.assertEqual(missing, [])
+
+    def test_offline_pip_bootstrap_is_the_exact_verified_universal_wheel(self) -> None:
+        self.assertTrue(PIP_BOOTSTRAP_PATH.is_file())
+        self.assertFalse(PIP_BOOTSTRAP_PATH.is_symlink())
+        payload = PIP_BOOTSTRAP_PATH.read_bytes()
+        self.assertEqual(len(payload), PIP_BOOTSTRAP_SIZE)
+        self.assertEqual(hashlib.sha256(payload).hexdigest(), PIP_BOOTSTRAP_SHA256)
+
+        with zipfile.ZipFile(PIP_BOOTSTRAP_PATH) as wheel:
+            names = set(wheel.namelist())
+            metadata_path = "pip-26.2.1.dist-info/METADATA"
+            wheel_path = "pip-26.2.1.dist-info/WHEEL"
+            self.assertIn(metadata_path, names)
+            self.assertIn(wheel_path, names)
+            metadata = wheel.read(metadata_path).decode("utf-8")
+            wheel_metadata = wheel.read(wheel_path).decode("utf-8")
+
+        self.assertRegex(metadata, r"(?m)^Name: pip$")
+        self.assertRegex(metadata, r"(?m)^Version: 26\.2\.1$")
+        self.assertRegex(metadata, r"(?m)^Requires-Python: >=3\.10$")
+        self.assertRegex(wheel_metadata, r"(?m)^Tag: py3-none-any$")
 
     def test_central_google_oauth_native_client_is_release_only_and_exact(self) -> None:
         if _is_source_checkout():
