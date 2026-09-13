@@ -66,6 +66,10 @@ from ea_strategy_brief import (  # noqa: E402 - compact learner-facing EA contra
     EA_SOURCE_MANIFEST_SCHEMA_VERSION,
     INDICATOR_SOURCE_MANIFEST_SCHEMA_VERSION,
     IMPLEMENTATION_DEFAULT_POLICY_PROMPT as EA_STRATEGY_BRIEF_IMPLEMENTATION_DEFAULT_POLICY,
+    LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST,
+    LINDA_HOLY_GRAIL_CERTIFIED_PROFILE_VERSION,
+    LINDA_HOLY_GRAIL_DIRECTION_RULE,
+    LINDA_HOLY_GRAIL_LEGACY_BRIEF_DIGEST,
     SCHEMA_VERSION as EA_STRATEGY_BRIEF_SCHEMA_VERSION,
     StrategyBriefValidationError,
     analyze_compact_ea_source,
@@ -73,8 +77,10 @@ from ea_strategy_brief import (  # noqa: E402 - compact learner-facing EA contra
     build_compact_ea_source_manifest,
     build_compact_indicator_source_manifest,
     compute_strategy_brief_digest,
+    linda_holy_grail_certified_profile_metadata,
     normalize_strategy_brief,
     project_strategy_brief_contract,
+    upgrade_linda_holy_grail_brief_for_certified_profile,
 )
 from ea_factory_blueprint_coverage import (  # noqa: E402 - trusted Factory source coverage
     build_coverage_manifest as ea_factory_coverage_manifest,
@@ -116,7 +122,7 @@ from radar_image_adapter import (  # noqa: E402 - public HTTPS publisher-image e
     verify_radar_entry_artifact,
 )
 
-BRIDGE_RUNTIME_VERSION = "0.9.18"
+BRIDGE_RUNTIME_VERSION = "0.9.19"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_STARTED_MONOTONIC = time.monotonic()
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
@@ -169,6 +175,8 @@ EA_FACTORY_READ_MODEL_CACHE_LOCK = threading.RLock()
 EA_FACTORY_READ_MODEL_CACHE_CONDITION = threading.Condition(
     EA_FACTORY_READ_MODEL_CACHE_LOCK
 )
+EA_FACTORY_STATE_CACHE_LOCK = threading.RLock()
+EA_FACTORY_REPORT_ROWS_CACHE_LOCK = threading.RLock()
 EA_FACTORY_WORLD_SHEET_CACHE_LOCK = threading.RLock()
 # Windows foreground focus is a machine-wide resource.  Keep every visible
 # MetaEditor/Strategy Tester action exclusive even when different builds have
@@ -180,6 +188,14 @@ EA_FACTORY_READ_MODEL_CACHE: dict[str, object] = {
     "value": None,
     "refreshing": False,
     "generation": 0,
+}
+EA_FACTORY_STATE_CACHE: dict[str, object] = {
+    "signature": None,
+    "value": None,
+}
+EA_FACTORY_REPORT_ROWS_CACHE: dict[str, object] = {
+    "signature": None,
+    "rows": None,
 }
 EA_FACTORY_WORLD_SHEET_CACHE: dict[str, object] = {
     "signature": None,
@@ -1154,7 +1170,8 @@ SAFE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,119}$")
 SAFE_IDEMPOTENCY_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$")
 GOOGLE_SHEET_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{20,128}$")
 SECRET_PATTERNS = [
-    re.compile(r"(?i)\b(?:api[_ -]?key|token|password|passwd|secret|authorization|cookie|bot[_ -]?token|broker[_ -]?password|database[_ -]?url|connection[_ -]?string|private[_ -]?key|aws[_ -]?secret[_ -]?access[_ -]?key|github[_ -]?token)\b[\"']?\s*[:=]\s*[\"']?[^\s,;}\"']{4,}"),
+    re.compile(r"(?i)\b(?:(?:oauth[_ -]?)?client[_ -]?secret|api[_ -]?key|token|password|passwd|secret|authorization|cookie|bot[_ -]?token|broker[_ -]?password|database[_ -]?url|connection[_ -]?string|private[_ -]?key|aws[_ -]?secret[_ -]?access[_ -]?key|github[_ -]?token)\b[\"']?\s*[:=]\s*[\"']?[^\s,;}\"']{4,}"),
+    re.compile(r"(?i)\bGOCSPX-[a-z0-9_-]{16,}\b"),
     re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/-]{12,}"),
     re.compile(r"\bsk-[a-zA-Z0-9_-]{16,}\b"),
     re.compile(r"\b\d{6,12}:[a-zA-Z0-9_-]{20,}\b"),
@@ -2749,12 +2766,13 @@ EA_FACTORY_VISIBLE_PRIVATE_PROCESS_ID_KEYS = frozenset({
     "frontofficeprocessid",
     "frontofficewindowownerprocessid",
 })
+EA_FACTORY_VISIBLE_METRICS_COLLECTION_LIMIT = 160
 
 
 def _ea_factory_visible_metrics_storage(
     value: object,
     depth: int = 0,
-    collection_limit: int = 100,
+    collection_limit: int = EA_FACTORY_VISIBLE_METRICS_COLLECTION_LIMIT,
     string_limit: int = 8000,
 ) -> object:
     """Sanitize private visible evidence while retaining required numeric PIDs.
@@ -2769,6 +2787,10 @@ def _ea_factory_visible_metrics_storage(
     if isinstance(value, str):
         return redact_text(value, string_limit)
     if isinstance(value, list):
+        if len(value) > collection_limit:
+            raise DataIntegrityError(
+                "Trusted visible Report metrics exceed the collection bound."
+            )
         return [
             _ea_factory_visible_metrics_storage(
                 item,
@@ -2779,9 +2801,27 @@ def _ea_factory_visible_metrics_storage(
             for item in value[:collection_limit]
         ]
     if isinstance(value, dict):
+        if len(value) > collection_limit:
+            raise DataIntegrityError(
+                "Trusted visible Report metrics exceed the collection bound."
+            )
+        raw_keys = list(value)
+        if any(not isinstance(key, str) for key in raw_keys):
+            raise DataIntegrityError(
+                "Trusted visible Report metric keys are invalid."
+            )
+        normalized_keys = [str(key)[:120] for key in raw_keys]
+        if len(normalized_keys) != len(set(normalized_keys)):
+            raise DataIntegrityError(
+                "Trusted visible Report metric keys are ambiguous."
+            )
+        if any(len(key) > 120 for key in raw_keys):
+            raise DataIntegrityError(
+                "Trusted visible Report metric keys are invalid."
+            )
         cleaned: dict[str, object] = {}
         for key, item in list(value.items())[:collection_limit]:
-            safe_key = str(key)[:120]
+            safe_key = key
             compact = re.sub(r"[^a-z0-9]", "", safe_key.lower())
             if compact in EA_FACTORY_VISIBLE_PRIVATE_PROCESS_ID_KEYS:
                 cleaned[safe_key] = (
@@ -14050,6 +14090,13 @@ def create_report(
                 "Trusted visible process identity escaped its exact Report invariant."
             )
         stored_metrics = _ea_factory_visible_metrics_storage(raw_metrics)
+        if (
+            not isinstance(stored_metrics, dict)
+            or tuple(stored_metrics) != tuple(raw_metrics)
+        ):
+            raise DataIntegrityError(
+                "Trusted visible Report metric keys were not preserved exactly."
+            )
     elif report_type == "trading_system_research_report":
         stored_metrics = _trading_system_research_metrics_storage(raw_metrics)
     else:
@@ -23056,6 +23103,34 @@ def _ea_factory_report_store_signature() -> tuple[str, int, str]:
     return (str(root), len(entries), digest.hexdigest())
 
 
+def _ea_factory_report_rows_snapshot() -> list[dict]:
+    """Reuse the immutable Factory report window until its store changes.
+
+    One-click reconciliation polls once per second. Re-reading and parsing up
+    to 800 immutable report files on every poll can monopolize the Factory
+    coordinator and make the operator progress endpoint time out. The metadata
+    signature is already the cache authority used by the read model, so the
+    same bounded report window is safe to share with read-only consumers.
+    """
+
+    signature = _ea_factory_report_store_signature()
+    with EA_FACTORY_REPORT_ROWS_CACHE_LOCK:
+        cached = EA_FACTORY_REPORT_ROWS_CACHE.get("rows")
+        if (
+            EA_FACTORY_REPORT_ROWS_CACHE.get("signature") == signature
+            and isinstance(cached, list)
+        ):
+            return cached
+        rows = load_runtime_reports(limit=EA_FACTORY_SOURCE_REPORT_LIMIT)
+        final_signature = _ea_factory_report_store_signature()
+        if signature == final_signature:
+            EA_FACTORY_REPORT_ROWS_CACHE.update({
+                "signature": signature,
+                "rows": rows,
+            })
+        return rows
+
+
 def _ea_factory_workspace_signature() -> tuple[str, int, str]:
     """Track artifact/workspace mutations without rebuilding their read models."""
 
@@ -24517,7 +24592,7 @@ def _ea_factory_revalidated_build(build: dict) -> dict:
     return validated
 
 
-def _load_ea_factory_state_unlocked() -> dict:
+def _load_ea_factory_state_uncached() -> dict:
     payload = read_json(_ea_factory_state_path(), _empty_ea_factory_state())
     if not isinstance(payload, dict):
         raise DataIntegrityError("EA Factory state is not a JSON object.")
@@ -24648,10 +24723,53 @@ def _load_ea_factory_state_unlocked() -> dict:
     }
 
 
+def _ea_factory_state_validation_signature() -> tuple[object, ...]:
+    """Identify every durable input checked while validating Factory state."""
+
+    return (
+        _ea_factory_cache_file_signature(_ea_factory_state_path()),
+        _ea_factory_workspace_signature(),
+        _ea_factory_report_store_signature(),
+    )
+
+
+def _invalidate_ea_factory_state_cache() -> None:
+    with EA_FACTORY_STATE_CACHE_LOCK:
+        EA_FACTORY_STATE_CACHE.update({"signature": None, "value": None})
+
+
+def _load_ea_factory_state_unlocked() -> dict:
+    """Return a defensive copy of fully revalidated durable Factory state.
+
+    Build validation hashes Strategy Specs, generated Source and evidence files.
+    Those checks are intentionally strict but expensive, so reuse the validated
+    value only while the state file, workspace tree and report store signatures
+    all remain identical.
+    """
+
+    signature = _ea_factory_state_validation_signature()
+    with EA_FACTORY_STATE_CACHE_LOCK:
+        cached = EA_FACTORY_STATE_CACHE.get("value")
+        if (
+            EA_FACTORY_STATE_CACHE.get("signature") == signature
+            and isinstance(cached, dict)
+        ):
+            return copy.deepcopy(cached)
+        value = _load_ea_factory_state_uncached()
+        final_signature = _ea_factory_state_validation_signature()
+        if signature == final_signature:
+            EA_FACTORY_STATE_CACHE.update({
+                "signature": signature,
+                "value": copy.deepcopy(value),
+            })
+        return value
+
+
 def _write_ea_factory_state_unlocked(payload: dict) -> None:
     payload["schemaVersion"] = EA_FACTORY_STATE_SCHEMA_VERSION
     payload["updatedAt"] = utc_now()
     write_json(_ea_factory_state_path(), payload, keep_backup=True)
+    _invalidate_ea_factory_state_cache()
     _invalidate_ea_factory_read_model_cache()
 
 
@@ -24868,19 +24986,23 @@ def _ea_factory_compact_strategy_brief(values: object) -> dict | None:
         source_urls = _ea_factory_public_urls(
             values.get("sourceLinks") or values.get("source_urls")
         )
-    brief = {
-        "schemaVersion": EA_STRATEGY_BRIEF_SCHEMA_VERSION,
-        **{
-            camel_name: content[sheet_name]
-            for sheet_name, camel_name in EA_STRATEGY_BRIEF_SHEET_TO_CAMEL.items()
-        },
-    }
-    if full_brief is not None:
-        brief.update({
-            "sourceLinks": list(full_brief["sourceLinks"]),
-            "checkedAt": full_brief["checkedAt"],
-            "limitations": list(full_brief["limitations"]),
-        })
+    # A validated report brief is already the canonical object covered by
+    # ``compute_strategy_brief_digest``.  Keep it byte-for-byte equivalent at
+    # the value level.  Rebuilding it from ``content`` is unsafe because
+    # ``_ea_factory_text`` deliberately collapses whitespace for the compact
+    # A-J projection; multiline rules would then be advertised as ready by GET
+    # but fail the digest gate when POST /builds revalidates the same record.
+    brief = (
+        copy.deepcopy(full_brief)
+        if full_brief is not None
+        else {
+            "schemaVersion": EA_STRATEGY_BRIEF_SCHEMA_VERSION,
+            **{
+                camel_name: content[sheet_name]
+                for sheet_name, camel_name in EA_STRATEGY_BRIEF_SHEET_TO_CAMEL.items()
+            },
+        }
+    )
     return {
         "recordId": record_id,
         "content": content,
@@ -24903,6 +25025,30 @@ def _ea_factory_normalize_record(
     research_blueprint_digest = ""
     research_readiness_issues: list[str] = []
     strategy_brief_projection = _ea_factory_compact_strategy_brief(values)
+    # A previously confirmed Linda brief described "the original trend
+    # direction" but did not define an executable direction predicate.  Derive
+    # the reviewed v3 engineering default only while ingesting a *new* source
+    # record, before its immutable ids/digests exist.  Historical Build/Spec
+    # validation calls _ea_factory_compact_strategy_brief directly and therefore
+    # remains byte-for-byte tied to the old digest.
+    if (
+        isinstance(strategy_brief_projection, dict)
+        and strategy_brief_projection.get("fullValidated") is True
+        and isinstance(strategy_brief_projection.get("brief"), dict)
+    ):
+        try:
+            upgraded_brief = upgrade_linda_holy_grail_brief_for_certified_profile(
+                strategy_brief_projection["brief"]
+            )
+        except StrategyBriefValidationError:
+            return None
+        upgraded_digest = compute_strategy_brief_digest(upgraded_brief)
+        if upgraded_digest != strategy_brief_projection.get("digest"):
+            upgraded_values = dict(values) if isinstance(values, dict) else {}
+            upgraded_values["strategyBrief"] = upgraded_brief
+            strategy_brief_projection = _ea_factory_compact_strategy_brief(
+                upgraded_values
+            )
     strategy_brief = (
         strategy_brief_projection.get("brief")
         if isinstance(strategy_brief_projection, dict)
@@ -25063,6 +25209,11 @@ def _ea_factory_normalize_record(
         "buildReady": not missing_core_fields and not research_readiness_issues,
         "strategyBrief": copy.deepcopy(strategy_brief),
         "strategyBriefDigest": strategy_brief_digest or None,
+        "certifiedStrategyProfile": (
+            linda_holy_grail_certified_profile_metadata(strategy_brief)
+            if isinstance(strategy_brief, dict)
+            else None
+        ),
         "eaImplementationBlueprint": copy.deepcopy(research_blueprint),
         "eaBlueprintDigest": research_blueprint_digest or None,
         "eaReadiness": (
@@ -26298,6 +26449,11 @@ def _ea_factory_create_build_workspace(
     source_strategy_brief_digest = str(
         source_record.get("strategyBriefDigest") or ""
     )
+    certified_strategy_profile = (
+        linda_holy_grail_certified_profile_metadata(source_strategy_brief)
+        if isinstance(source_strategy_brief, dict)
+        else None
+    )
     if source_blueprint is not None:
         try:
             source_blueprint = normalize_ea_research_blueprint(
@@ -26362,6 +26518,10 @@ def _ea_factory_create_build_workspace(
             "strategyBrief": source_strategy_brief,
             "strategyBriefDigest": source_strategy_brief_digest,
         })
+        if certified_strategy_profile is not None:
+            strategy_spec["certifiedStrategyProfile"] = copy.deepcopy(
+                certified_strategy_profile
+            )
     if source_blueprint is not None:
         strategy_spec.update({
             "strategySchemaVersion": EA_RESEARCH_SCHEMA_VERSION,
@@ -26841,6 +27001,23 @@ def _ea_factory_review_strategy_spec(build: dict) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+def _ea_factory_linda_certified_review_profile(spec: object) -> dict | None:
+    """Recognize only the exact digest-bound Linda v3 review profile."""
+
+    if not isinstance(spec, dict):
+        return None
+    brief = spec.get("strategyBrief")
+    metadata = linda_holy_grail_certified_profile_metadata(brief)
+    if (
+        metadata is None
+        or spec.get("strategyBriefDigest")
+        != LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST
+        or spec.get("certifiedStrategyProfile") != metadata
+    ):
+        return None
+    return metadata
+
+
 def _ea_factory_review_brief(build: dict) -> str:
     build_id = safe_reference(build.get("id"))
     platform = str(build.get("platform") or "")
@@ -26872,12 +27049,40 @@ def _ea_factory_review_brief(build: dict) -> str:
         isinstance(review_spec, dict)
         and review_spec.get("schemaVersion") == "ea-factory-strategy-spec-v3"
     )
+    linda_profile = _ea_factory_linda_certified_review_profile(review_spec)
+    linda_review_instruction = (
+        "Exact certified Linda v3 rule: Long SMA20[s]>SMA20[s+1], Short <; require "
+        "close/touch; no DI/crossover. PendingExpirationDays*86400=3 calendar days. "
+        "Missing/mutated=high; do not suppress any other high/critical."
+        if linda_profile is not None
+        else ""
+    )
     if artifact_kind == "custom_indicator":
+        if compact_strategy_brief:
+            brief = (
+                f"[EA_FACTORY_BUILD_ID:{build_id}]"
+                f"[EA_FACTORY_GENERATION_REPORT_ID:{generation_report_id}]"
+                f"[EA_FACTORY_PLATFORM:{platform}]"
+                f"[EA_FACTORY_SOURCE_RECORD_DIGEST:{source_record_digest}]"
+                f"[EA_FACTORY_STRATEGY_SPEC_DIGEST:{spec_digest}]"
+                f"[EA_FACTORY_IMMUTABLE_DIGESTS:{','.join(digests)}]"
+                "[EA_FACTORY_ARTIFACT_KIND:custom_indicator] "
+                f"Read-only: ea-factory/{build_id}/Source/strategy-spec-v01.json + Source. "
+                "Trusted Backend rehashes; sourceDigest=bare IMMUTABLE digest and markers exact. Audit exact v3 A-J: all 10 "
+                "immutable-spec keys. MQL Indicator requires #property indicator window/buffers, OnCalculate, SetIndexBuffer, "
+                "real buffer writes, closed-bar/no-look-ahead, exact brief digest in #property description, and >=2 conditional "
+                "non-EMPTY signal writes. Reject swapped operands, dead markers, EMPTY-only branches, OnTick/CTrade/trading APIs, "
+                "position/lot logic, and every trading side effect. strategyCoverage uses exact v3 fields; uncoveredFields=[] only "
+                "when true. "
+                f"Req:[USER_BUILD_REQUIREMENTS]{user_requirements}[/USER_BUILD_REQUIREMENTS]. "
+                "Return evidence; compileStatus exactly source_only. Do not edit files/open terminals/compile/backtest/attach/"
+                "deploy/schedule/loop/trade."
+            )
+            if len(brief) > 2400 or contains_potential_secret(brief):
+                raise RequestError("EA Factory review requirements exceed the bounded Mission input.", 422)
+            return brief
         coverage_instruction = (
-            "review exact A-J fields record_id, system_name, system_overview, entry_rules, recovery_rules, exit_rules, "
-            "money_management, order_execution, display_requirements and additional_notes"
-            if compact_strategy_brief
-            else "review the immutable v2 Indicator rule coverage"
+            "review the immutable v2 Indicator rule coverage"
         )
         brief = (
             f"[EA_FACTORY_BUILD_ID:{build_id}]"
@@ -26905,6 +27110,14 @@ def _ea_factory_review_brief(build: dict) -> str:
             raise RequestError("EA Factory review requirements exceed the bounded Mission input.", 422)
         return brief
     if compact_strategy_brief:
+        compact_scope_instruction = (
+            "Audit exact Strategy Brief A-J coverage only: all immutable keys; no A-M. "
+        )
+        compact_time_instruction = (
+            ""
+            if linda_profile is not None
+            else "W1 shift-1=prior completed week, excluding shift-0. "
+        )
         brief = (
             f"[EA_FACTORY_BUILD_ID:{build_id}]"
             f"[EA_FACTORY_GENERATION_REPORT_ID:{generation_report_id}]"
@@ -26912,23 +27125,18 @@ def _ea_factory_review_brief(build: dict) -> str:
             f"[EA_FACTORY_SOURCE_RECORD_DIGEST:{source_record_digest}]"
             f"[EA_FACTORY_STRATEGY_SPEC_DIGEST:{spec_digest}]"
             f"[EA_FACTORY_IMMUTABLE_DIGESTS:{','.join(digests)}] "
-            f"Read ea-factory/{build_id}/Source/strategy-spec-v01.json and generated Source read-only. "
-            "Trusted Backend alone rehashes Source and recomputes coverage. Return sourceDigest as only the exact bare "
-            "64-hex value from EA_FACTORY_IMMUTABLE_DIGESTS (never the EA_STRATEGY_BRIEF digest or prose). "
-            "Audit exact Strategy Brief A-J coverage only: record_id, system_name, system_overview, entry_rules, "
-            "recovery_rules, exit_rules, money_management, order_execution, display_requirements and additional_notes. "
-            "The exact Strategy Brief digest binding covers record_id, system_name, system_overview and additional_notes; "
-            "do not demand duplicate executable code for descriptive fields. Unavailable fundamental/external facts may use "
-            "explicit fail-closed tester/operator inputs. Do not invent legacy A-M fields. Confirm executable entry, exit, "
-            "risk, recovery, order execution and display behavior. strategyCoverage is advisory; Backend recomputes it from "
-            "immutable bytes and accepts uncoveredFields=[] only when deterministic checks prove all A-J fields. "
-            "Use high/critical only for a concrete executable defect that makes the declared rule unsafe, unbounded, or "
-            "deterministically wrong; classify documented fail-closed external inputs, broker-dependent runtime checks, "
-            "source-only compile uncertainty, and optional enhancements as medium or lower. A closed W1 lookback beginning "
-            "at shift 1 includes the immediately previous completed week and excludes the forming shift-0 week. "
-            f"Exact user requirements: [USER_BUILD_REQUIREMENTS]{user_requirements}[/USER_BUILD_REQUIREMENTS]. "
-            "Return all required evidence; compileStatus exactly source_only. Do not edit files, open MetaEditor/MT4/MT5, "
-            "compile, backtest, deploy, schedule, loop, or trade."
+            f"Read-only: ea-factory/{build_id}/Source/strategy-spec-v01.json + Source. "
+            "Trusted Backend rehashes; sourceDigest=bare IMMUTABLE digest, not brief/prose; coverage recomputed. "
+            f"{compact_scope_instruction}"
+            "Digest covers descriptions; no code duplicate. External facts need fail-closed inputs. "
+            "Verify executable entry/exit/risk/recovery/order/display; strategyCoverage advisory; uncoveredFields=[] only after "
+            "deterministic A-J. high/critical only for concrete executable unsafe/unbounded/wrong; fail-closed "
+            "external/broker/runtime/source-only unknowns/options <=medium. "
+            f"{compact_time_instruction}"
+            f"{linda_review_instruction} "
+            f"Req:[USER_BUILD_REQUIREMENTS]{user_requirements}[/USER_BUILD_REQUIREMENTS]. "
+            "Return evidence; compileStatus exactly source_only. Do not edit files/open terminals; "
+            "no compile/backtest/deploy/schedule/loop/trade."
         )
         if len(brief) > 2400 or contains_potential_secret(brief):
             raise RequestError("EA Factory review requirements exceed the bounded Mission input.", 422)
@@ -29822,6 +30030,7 @@ def _ea_factory_sync_build_status(
                 stage["blockedReasonCode"] = "stage_mission_missing"
                 changed = True
             continue
+        stage_semantic_changed = False
         mission_status = str(mission.get("status") or "unknown")
         effective_status = mission_status
         if mission_status == "archived":
@@ -29844,6 +30053,7 @@ def _ea_factory_sync_build_status(
                     )
                     if build.get("versions") != previous_versions:
                         changed = True
+                        stage_semantic_changed = True
                 elif stage_id == "source_review":
                     static_review_findings = _ea_factory_mql_static_review_findings(build)
                     evidence_valid = _ea_factory_review_evidence_valid(
@@ -29859,14 +30069,17 @@ def _ea_factory_sync_build_status(
                     if stage.get("reportId") != report.get("id"):
                         stage["reportId"] = report.get("id")
                         changed = True
+                        stage_semantic_changed = True
                     if stage.get("evidenceVerified") is not True:
                         stage["evidenceVerified"] = True
                         changed = True
+                        stage_semantic_changed = True
                 else:
                     new_status = "blocked"
                     if stage.get("evidenceVerified") is not False:
                         stage["evidenceVerified"] = False
                         changed = True
+                        stage_semantic_changed = True
                     blocked_reason = (
                         "review_findings_require_new_version"
                         if stage_id == "source_review"
@@ -29888,13 +30101,18 @@ def _ea_factory_sync_build_status(
         if stage.get("status") != new_status:
             stage["status"] = new_status
             changed = True
+            stage_semantic_changed = True
         if stage.get("blockedReasonCode") != blocked_reason:
             stage["blockedReasonCode"] = blocked_reason
             changed = True
+            stage_semantic_changed = True
         updated_at = mission.get("updatedAt")
-        if updated_at and stage.get("updatedAt") != updated_at:
+        if (
+            stage_semantic_changed
+            and updated_at
+            and stage.get("updatedAt") != updated_at
+        ):
             stage["updatedAt"] = updated_at
-            changed = True
     terminal_statuses = {
         str(stage.get("status") or "")
         for stage in build.get("stages") if isinstance(stage, dict)
@@ -31657,7 +31875,12 @@ def _ea_factory_source_record_read_model(record: dict) -> dict:
     strategy_brief_digest = str(
         record.get("strategyBriefDigest") or ""
     ).strip().lower()
-    if strategy_brief is not None and re.fullmatch(r"[0-9a-f]{64}", strategy_brief_digest):
+    compact_source_valid = _ea_factory_current_compact_source_valid(record)
+    if (
+        strategy_brief is not None
+        and re.fullmatch(r"[0-9a-f]{64}", strategy_brief_digest)
+        and compact_source_valid
+    ):
         ea_research = {
             "schemaVersion": EA_STRATEGY_BRIEF_SCHEMA_VERSION,
             "validationStatus": "strategy_brief_validated",
@@ -31718,6 +31941,10 @@ def _ea_factory_source_record_read_model(record: dict) -> dict:
         normalized = redact_text(str(item or ""), 160)
         if normalized and normalized not in readiness_issues:
             readiness_issues.append(normalized)
+    if strategy_brief is not None and not compact_source_valid:
+        issue = "ea_factory_compact_source_digest_invalid"
+        if issue not in readiness_issues:
+            readiness_issues.append(issue)
     return {
         "sourceRecordId": safe_reference(record.get("sourceRecordId")),
         "sourceKind": redact_text(str(record.get("sourceKind") or ""), 80),
@@ -31732,6 +31959,7 @@ def _ea_factory_source_record_read_model(record: dict) -> dict:
         ],
         "buildReady": (
             record.get("buildReady") is True
+            and compact_source_valid
             and ea_research.get("ready") is True
             and factory_compatibility.get("ready") is True
         ),
@@ -31947,6 +32175,27 @@ def _raise_ea_factory_busy(busy: dict) -> None:
     )
 
 
+def _raise_ea_factory_request_rejected(
+    message: str,
+    status: int,
+    *,
+    code: str,
+    message_th: str,
+) -> None:
+    """Raise one expected Factory rejection with a safe actionable UI copy."""
+
+    raise RequestError(
+        message,
+        status,
+        code=code,
+        response_payload={
+            "kind": "ea_factory_request_rejected",
+            "code": code,
+            "messageTh": message_th,
+        },
+    )
+
+
 def _ea_factory_pure_stage_replay_response(
     build: dict,
     stage: dict,
@@ -31987,6 +32236,8 @@ def _ea_factory_read_model_signature(
     research_sheet_hub_model: dict,
     front_office_supported_platforms: tuple[str, ...],
     front_office_handlers_connected: bool,
+    *,
+    missions: list[dict] | None = None,
 ) -> tuple[object, ...]:
     volatile_digest = payload_digest(
         "ea-factory-read-model-volatile-v1",
@@ -31997,7 +32248,7 @@ def _ea_factory_read_model_signature(
         front_office_handlers_connected,
     )
     return (
-        _mission_store_signature(),
+        _ea_factory_mission_projection_signature(missions),
         _ea_factory_report_store_signature(),
         _ea_factory_cache_file_signature(_ea_factory_state_path()),
         _ea_factory_workspace_signature(),
@@ -32006,6 +32257,92 @@ def _ea_factory_read_model_signature(
         _ea_factory_cache_file_signature(RESEARCH_SHEET_OUTBOX_PATH),
         _ea_factory_cache_file_signature(DEEP_RESEARCH_CONFIRMATIONS_PATH),
         volatile_digest,
+    )
+
+
+def _ea_factory_mission_projection_signature(
+    missions: list[dict] | None = None,
+) -> tuple[str, int, str]:
+    """Hash only Mission fields that can change the Factory projection.
+
+    Runner heartbeats update transport timestamps while a Mission is running.
+    Those timestamps do not change Factory status, lineage or evidence and must
+    not invalidate the expensive read model once per polling interval.
+    """
+
+    rows = (
+        missions
+        if isinstance(missions, list)
+        else load_missions(shared_snapshot=True)
+    )
+    projected: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        context = _workflow_context_storage(row.get("workflowContext"))
+        target_id = safe_reference(row.get("targetId"))
+        report_type = safe_reference(row.get("reportType"))
+        is_factory_stage = bool(
+            target_id == "right_server_racks"
+            and report_type == "ea_build_report"
+        )
+        is_research_source = bool(
+            target_id == "left_server_racks"
+            and report_type == "trading_system_research_report"
+            and isinstance(context, dict)
+            and context.get("actionId") == "deep_research_system"
+        )
+        if not (is_factory_stage or is_research_source):
+            continue
+        projected.append({
+            "id": safe_reference(row.get("id")),
+            "idempotencyKey": str(row.get("idempotencyKey") or ""),
+            "status": str(row.get("status") or ""),
+            "phase": str(row.get("phase") or ""),
+            "workStatus": str(row.get("workStatus") or ""),
+            "errorCode": safe_reference(row.get("errorCode")),
+            "reportIds": [
+                value
+                for value in (
+                    safe_reference(item)
+                    for item in (
+                        row.get("reportIds")
+                        if isinstance(row.get("reportIds"), list)
+                        else []
+                    )
+                )
+                if value
+            ],
+            "reportId": safe_reference(row.get("reportId")),
+            "archivedSuccessful": row.get("archivedSuccessful") is True,
+            "requiresHumanApproval": row.get("requiresHumanApproval") is True,
+            "approval": copy.deepcopy(row.get("approval")),
+            "targetId": target_id,
+            "requester": str(row.get("requester") or ""),
+            "owner": str(row.get("owner") or ""),
+            "toolId": safe_reference(row.get("toolId")),
+            "reportType": report_type,
+            "workflowContext": context,
+            "workflowOutputContract": copy.deepcopy(
+                row.get("workflowOutputContract")
+            ),
+            "risk": str(row.get("risk") or ""),
+            "modelTier": str(row.get("modelTier") or ""),
+            "executionMode": str(row.get("executionMode") or ""),
+            "autoEligible": row.get("autoEligible") is True,
+            "execution": copy.deepcopy(row.get("execution")),
+            "budget": copy.deepcopy(row.get("budget")),
+            "detail": str(row.get("detail") or ""),
+            "parentMissionId": safe_reference(row.get("parentMissionId")),
+            "idempotencyScopeDigest": str(
+                row.get("idempotencyScopeDigest") or ""
+            ),
+        })
+    projected.sort(key=lambda item: str(item.get("id") or ""))
+    return (
+        str(MISSIONS_PATH),
+        len(projected),
+        payload_digest("ea-factory-mission-projection-v1", projected),
     )
 
 
@@ -32024,39 +32361,54 @@ def _ea_factory_read_model_uncached(
     research_sheet_hub_model: dict,
     front_office_supported_platforms: tuple[str, ...],
     front_office_handlers_connected: bool,
+    missions: list[dict] | None = None,
 ) -> dict:
-    mission_rows = load_missions(shared_snapshot=True)
-    report_rows = load_runtime_reports(limit=EA_FACTORY_SOURCE_REPORT_LIMIT)
+    mission_rows = (
+        missions
+        if isinstance(missions, list)
+        else load_missions(shared_snapshot=True)
+    )
+    report_rows = _ea_factory_report_rows_snapshot()
     with EA_FACTORY_LOCK:
         # GET is a pure projection.  Reconcile worker completion on a deep copy
         # so polling can show the next manual stage without copying artifacts or
         # changing durable state.  The following advance POST repeats the same
         # validation with ingest_sources=True and persists the transition.
-        state = copy.deepcopy(_load_ea_factory_state_unlocked())
-        for build in state["builds"]:
-            if isinstance(build, dict):
-                _ea_factory_sync_build_status(
-                build,
-                missions=mission_rows,
-                reports=report_rows,
-                ingest_sources=False,
-            )
-        source_records = _ea_factory_source_catalog(
-            state=state,
-            reports=report_rows,
+        state = _load_ea_factory_state_unlocked()
+    # Historical terminal Builds are immutable.  Reconcile only Builds that
+    # can still move, and do all projection work after releasing the mutation
+    # lock so a one-click coordinator never stalls behind browser polling.
+    active_stage_statuses = {"queued", "running", "waiting_approval"}
+    for build in state["builds"]:
+        stages = build.get("stages") if isinstance(build, dict) else None
+        if not isinstance(stages, list) or not any(
+            isinstance(stage, dict)
+            and str(stage.get("status") or "") in active_stage_statuses
+            for stage in stages
+        ):
+            continue
+        _ea_factory_sync_build_status(
+            build,
             missions=mission_rows,
+            reports=report_rows,
+            ingest_sources=False,
         )
-        source_snapshots = [
-            _ea_factory_sheet_snapshot_read_model(item)
-            for item in state["sourceSnapshots"]
-            if isinstance(item, dict)
-        ]
-        build_models = [
-            _ea_factory_build_read_model(item)
-            for item in state["builds"]
-            if isinstance(item, dict)
-        ]
-        busy = _ea_factory_active_worker_payload(state, mission_rows)
+    source_records = _ea_factory_source_catalog(
+        state=state,
+        reports=report_rows,
+        missions=mission_rows,
+    )
+    source_snapshots = [
+        _ea_factory_sheet_snapshot_read_model(item)
+        for item in state["sourceSnapshots"]
+        if isinstance(item, dict)
+    ]
+    build_models = [
+        _ea_factory_build_read_model(item)
+        for item in state["builds"]
+        if isinstance(item, dict)
+    ]
+    busy = _ea_factory_active_worker_payload(state, mission_rows)
     selected = selection.get("selectedCandidate") if isinstance(selection.get("selectedCandidate"), dict) else {}
     selected_platform = str(selected.get("platform") or "")
     selected_terminal_running = bool(
@@ -32092,6 +32444,7 @@ def _ea_factory_read_model_uncached(
     )
     return sanitize_json_value({
         "schemaVersion": EA_FACTORY_SCHEMA_VERSION,
+        "snapshotStale": False,
         "mode": "one_click_with_manual_stage_recovery",
         "scheduled": False,
         "schedulerEnabled": False,
@@ -32285,8 +32638,10 @@ def ea_factory_read_model() -> dict:
     # One invalidation can legitimately occur while the uncached projection is
     # being assembled (for example, reconciliation persists a fresher Stage).
     # Re-enter single-flight once so this GET never returns that pre-write
-    # snapshot. A second moving-target result fails closed instead of spinning
-    # forever or exposing a value whose signature was already invalidated.
+    # snapshot. If a Mission heartbeat moves the signature during both bounded
+    # attempts, the second value is still a coherent point-in-time projection;
+    # return it without caching instead of turning normal progress polling into
+    # a user-visible 503.
     for refresh_attempt in range(2):
         terminal_model = peek_metatrader_status()
         selection = _metatrader_selection_read_model(
@@ -32304,12 +32659,17 @@ def ea_factory_read_model() -> dict:
             and callable(EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER)
             and callable(EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER)
         )
+        # Bind the initial cache signature and the projection to one coherent
+        # immutable Mission snapshot. The final signature below intentionally
+        # reloads once to detect a semantic Mission transition during assembly.
+        mission_rows = load_missions(shared_snapshot=True)
         signature = _ea_factory_read_model_signature(
             selection,
             terminal_gates,
             research_sheet_hub_model,
             supported_platforms,
             handlers_connected,
+            missions=mission_rows,
         )
         bypass_inflight = False
         with EA_FACTORY_READ_MODEL_CACHE_CONDITION:
@@ -32326,6 +32686,23 @@ def ea_factory_read_model() -> dict:
                         EA_FACTORY_READ_MODEL_CACHE.get("generation") or 0
                     )
                     break
+                if isinstance(cached, dict):
+                    # One caller is already assembling the current signature.
+                    # Serve the last coherent projection immediately instead of
+                    # queuing every one-second browser poll.  Mutation paths
+                    # clear the cached value, so this fallback can never revive
+                    # a known-stale admission/busy decision after a write.
+                    stale = copy.deepcopy(cached)
+                    stale["snapshotStale"] = True
+                    stale_one_click = (
+                        stale.get("oneClick")
+                        if isinstance(stale.get("oneClick"), dict)
+                        else None
+                    )
+                    if stale_one_click is not None:
+                        stale_one_click["canRun"] = False
+                        stale_one_click["canCreateAndRun"] = False
+                    return stale
                 # Some mutation responses intentionally assemble the fresh read
                 # model while holding EA_FACTORY_LOCK. If another reader marked a
                 # cold refresh in flight and is waiting for that same lock, waiting
@@ -32346,6 +32723,7 @@ def ea_factory_read_model() -> dict:
                 research_sheet_hub_model=research_sheet_hub_model,
                 front_office_supported_platforms=supported_platforms,
                 front_office_handlers_connected=handlers_connected,
+                missions=mission_rows,
             )
             final_signature = _ea_factory_read_model_signature(
                 selection,
@@ -32385,13 +32763,36 @@ def ea_factory_read_model() -> dict:
             return copy.deepcopy(value)
         if refresh_attempt == 0:
             continue
-        raise RequestError(
-            "EA Factory state changed repeatedly while the read model was being built; retry the request.",
-            503,
-            code="ea_factory_read_model_changed",
-        )
+        return copy.deepcopy(value)
 
     raise DataIntegrityError("EA Factory read model retry bound was not enforced.")
+
+
+def ea_factory_read_result() -> dict:
+    """Return a fail-closed HTTP result when Factory evidence loses integrity."""
+
+    try:
+        return {"ok": True, "eaFactory": ea_factory_read_model()}
+    except DataIntegrityError:
+        return {
+            "ok": False,
+            "kind": "ea_factory_integrity_blocked",
+            "code": "ea_factory_artifact_integrity_failed",
+            "status": "blocked",
+            "messageTh": (
+                "ตรวจพบว่าไฟล์หลักฐานของ EA Factory สูญหายหรือถูกเปลี่ยนแปลง "
+                "ระบบจึงปิดคำสั่งสร้าง Compile และ Backtest ไว้ก่อนเพื่อความปลอดภัย "
+                "หากเพิ่งสั่งงานผ่านหน้าต่าง MT4 ให้ถือว่าผลลัพธ์ยังไม่แน่นอน "
+                "กรุณากู้ไฟล์ของ Build เดิมหรือเริ่ม Build ใหม่แล้วตรวจสถานะอีกครั้ง"
+            ),
+            "oneClick": {
+                "commandsAllowed": False,
+                "visibleActionState": "uncertain",
+                "requiresExplicitRecovery": True,
+            },
+            "liveTradingAllowed": False,
+            "_httpStatus": 409,
+        }
 
 
 EA_FACTORY_UNSUPPORTED_RULE_PREDICATE_CODE = (
@@ -32529,29 +32930,61 @@ def create_ea_factory_build(payload: object) -> dict:
         "idempotencyKey",
     })
     if unexpected:
-        raise RequestError("EA Factory build request contains unsupported fields.", 422)
+        _raise_ea_factory_request_rejected(
+            "EA Factory build request contains unsupported fields.",
+            422,
+            code="ea_factory_request_fields_invalid",
+            message_th="ข้อมูลเริ่มงานไม่ถูกต้อง กรุณารีเฟรชหน้าโรงงานแล้วเลือกงานใหม่อีกครั้ง",
+        )
     source_record_id = safe_reference(request.get("sourceRecordId"))
     if not source_record_id:
-        raise RequestError("sourceRecordId is required.", 422)
+        _raise_ea_factory_request_rejected(
+            "sourceRecordId is required.",
+            422,
+            code="ea_factory_source_required",
+            message_th="ยังไม่ได้เลือกระบบจาก Google Sheets กรุณาเลือกระบบก่อนเริ่มเขียน EA",
+        )
     platform = str(request.get("platform") or "").strip().lower()
     if platform not in EA_FACTORY_PLATFORMS:
-        raise RequestError("platform must be mt4, mt5, or tradingview.", 422)
+        _raise_ea_factory_request_rejected(
+            "platform must be mt4, mt5, or tradingview.",
+            422,
+            code="ea_factory_platform_invalid",
+            message_th="แพลตฟอร์มที่เลือกไม่ถูกต้อง กรุณาเลือก MT4, MT5 หรือ TradingView ใหม่",
+        )
     artifact_kind = _ea_factory_program_kind(request.get("artifactKind"))
     if not artifact_kind:
-        raise RequestError("artifactKind must be expert_advisor or custom_indicator.", 422)
+        _raise_ea_factory_request_rejected(
+            "artifactKind must be expert_advisor or custom_indicator.",
+            422,
+            code="ea_factory_artifact_kind_invalid",
+            message_th="ประเภทงานไม่ถูกต้อง กรุณาเลือก EA หรือ Custom Indicator ใหม่",
+        )
     if artifact_kind == "custom_indicator" and platform not in {"mt4", "mt5"}:
-        raise RequestError("custom_indicator supports only mt4 or mt5.", 422)
+        _raise_ea_factory_request_rejected(
+            "custom_indicator supports only mt4 or mt5.",
+            422,
+            code="ea_factory_indicator_platform_invalid",
+            message_th="Custom Indicator รองรับเฉพาะ MT4 หรือ MT5 กรุณาเลือกแพลตฟอร์มใหม่",
+        )
     brief = " ".join(str(request.get("brief") or "").replace("\x00", " ").split()).strip()
     if len(brief) > 900 or contains_potential_secret(brief):
-        raise RequestError("EA Factory brief is too long or contains a potential secret.", 422)
+        _raise_ea_factory_request_rejected(
+            "EA Factory brief is too long or contains a potential secret.",
+            422,
+            code="ea_factory_brief_invalid",
+            message_th="ข้อกำหนดเพิ่มเติมยาวเกินไปหรืออาจมีข้อมูลลับ กรุณาลบ Credential/Secret แล้วลองใหม่",
+        )
     if re.search(
         r"(?:\[EA_FACTORY_|\[/?USER_BUILD_REQUIREMENTS\])",
         brief,
         re.IGNORECASE,
     ):
-        raise RequestError(
+        _raise_ea_factory_request_rejected(
             "EA Factory brief contains a reserved Backend marker.",
             422,
+            code="ea_factory_brief_reserved_marker",
+            message_th="ข้อกำหนดเพิ่มเติมมีคำสงวนของระบบ กรุณาลบข้อความในวงเล็บ EA_FACTORY แล้วลองใหม่",
         )
     idempotency_key = _ea_factory_validate_idempotency(request.get("idempotencyKey"))
     request_digest = _ea_factory_create_request_digest(
@@ -32591,11 +33024,18 @@ def create_ea_factory_build(payload: object) -> dict:
         )
         if isinstance(existing, dict):
             if existing.get("createRequestDigest") != request_digest:
-                raise RequestError("Idempotency key is already used by another EA Factory build.", 409)
+                _raise_ea_factory_request_rejected(
+                    "Idempotency key is already used by another EA Factory build.",
+                    409,
+                    code="ea_factory_create_key_conflict",
+                    message_th="คำขอรอบนี้อ้างถึง Build คนละงาน กรุณารีเฟรชสถานะแล้วเริ่มจากหน้า 1 ใหม่",
+                )
             if existing.get("coverageStatus") != "compact_current":
-                raise RequestError(
+                _raise_ea_factory_request_rejected(
                     "Legacy EA Factory builds are read-only; create a new compact A-J v3 build.",
                     409,
+                    code="ea_factory_legacy_build_read_only",
+                    message_th="Build รุ่นเดิมเปิดดูได้อย่างเดียว กรุณาเลือก Strategy Brief ล่าสุดแล้วสร้าง Build ใหม่",
                 )
             model = ea_factory_read_model()
             build_model = next(item for item in model["builds"] if item.get("id") == existing.get("id"))
@@ -32629,7 +33069,12 @@ def create_ea_factory_build(payload: object) -> dict:
             isinstance(reservation_by_key, dict)
             and reservation_by_key.get("requestDigest") != request_digest
         ):
-            raise RequestError("Idempotency key is already reserved for another EA Factory build.", 409)
+            _raise_ea_factory_request_rejected(
+                "Idempotency key is already reserved for another EA Factory build.",
+                409,
+                code="ea_factory_create_reservation_conflict",
+                message_th="คำขอนี้ถูกจองไว้กับ Build คนละงาน กรุณารีเฟรชสถานะแล้วเริ่มจากหน้า 1 ใหม่",
+            )
         digest_reservations = [
             row for row in state.get("createReservations", [])
             if isinstance(row, dict) and row.get("requestDigest") == request_digest
@@ -32657,16 +33102,28 @@ def create_ea_factory_build(payload: object) -> dict:
         )
         if not isinstance(source_record, dict):
             if isinstance(reservation, dict):
-                raise RequestError(
+                _raise_ea_factory_request_rejected(
                     "EA Factory reserved source is no longer available in the current bounded catalog.",
                     409,
+                    code="ea_factory_reserved_source_missing",
+                    message_th="ข้อมูลระบบที่จองไว้หมดอายุแล้ว กรุณารีเฟรชและเลือกงานจาก Google Sheets ใหม่",
                 )
-            raise RequestError("EA Factory source record was not found.", 404)
+            _raise_ea_factory_request_rejected(
+                "EA Factory source record was not found.",
+                404,
+                code="ea_factory_source_not_found",
+                message_th="ไม่พบระบบที่เลือกในข้อมูลล่าสุด กรุณารีเฟรชและเลือกระบบจาก Google Sheets ใหม่",
+            )
         if not _ea_factory_current_compact_source_valid(source_record):
-            raise RequestError(
-                "Legacy A-W/A-M and Blueprint v2 sources are read-only. Rerun Deep "
-                "Research and select a digest-bound Strategy Brief A-J v3 record.",
+            _raise_ea_factory_request_rejected(
+                "Legacy A-W/A-M and Blueprint v2 sources are read-only, or the "
+                "selected Strategy Brief no longer matches its confirmed digest.",
                 422,
+                code="ea_factory_source_digest_invalid",
+                message_th=(
+                    "ข้อมูลระบบที่เลือกไม่ตรงกับฉบับที่ยืนยันแล้ว "
+                    "กรุณารีเฟรชหน้าโรงงาน หรือกลับไปยืนยันและบันทึก Deep Research ลง Google Sheets ใหม่"
+                ),
             )
         if source_record.get("buildReady") is not True:
             reasons: list[str] = []
@@ -32681,19 +33138,26 @@ def create_ea_factory_build(payload: object) -> dict:
                     break
             if not reasons:
                 reasons.append("source_not_build_ready")
-            raise RequestError(
+            _raise_ea_factory_request_rejected(
                 "EA Factory source is incomplete or unverified: "
                 + ", ".join(reasons),
                 422,
+                code="ea_factory_source_not_ready",
+                message_th=(
+                    "ระบบที่เลือกยังไม่พร้อมเขียน EA กรุณาตรวจ Deep Research และการบันทึก Google Sheets "
+                    "แล้วกดรีเฟรชก่อนลองใหม่"
+                ),
             )
         if (
             artifact_kind == "custom_indicator"
             and not isinstance(source_record.get("eaImplementationBlueprint"), dict)
             and not isinstance(source_record.get("strategyBrief"), dict)
         ):
-            raise RequestError(
+            _raise_ea_factory_request_rejected(
                 "Custom Indicator requires a ready Strategy Brief or canonical Blueprint from Research.",
                 422,
+                code="ea_factory_indicator_source_not_ready",
+                message_th="ข้อมูลวิจัยยังไม่พร้อมสร้าง Custom Indicator กรุณายืนยัน Strategy Brief ก่อน",
             )
         canonical_blueprint = source_record.get("eaImplementationBlueprint")
         if isinstance(canonical_blueprint, dict):
@@ -32706,26 +33170,35 @@ def create_ea_factory_build(payload: object) -> dict:
                     f"{row['ruleId']}({row['operator']})"
                     for row in capability_issues[:12]
                 )
-                raise RequestError(
+                _raise_ea_factory_request_rejected(
                     f"{EA_FACTORY_UNSUPPORTED_RULE_PREDICATE_CODE}: "
                     "EA Factory cannot yet generate source with verifiable "
                     f"canonical rule predicates: {issue_summary}. "
                     "Expand each affected Research rule to one supported "
                     "comparison or an exact cross_above/cross_below predicate.",
                     422,
+                    code=EA_FACTORY_UNSUPPORTED_RULE_PREDICATE_CODE.lower(),
+                    message_th="กฎบางข้อในงานวิจัยยังแปลงเป็นโค้ดที่ตรวจสอบได้ไม่ได้ กรุณาแจกแจงกฎนั้นให้เป็นเงื่อนไขเปรียบเทียบที่ชัดเจนแล้ววิเคราะห์ใหม่",
                 )
             compatible_platforms = set(
                 factory_compatibility.get("compatiblePlatforms") or []
             )
             if platform not in compatible_platforms:
-                raise RequestError(
+                _raise_ea_factory_request_rejected(
                     "platform is not declared by the selected canonical EA Blueprint; "
                     f"choose one of: {', '.join(sorted(compatible_platforms)) or 'none'}.",
                     422,
+                    code="ea_factory_source_platform_mismatch",
+                    message_th="ระบบที่เลือกไม่รองรับแพลตฟอร์มนี้ กรุณาเลือกแพลตฟอร์มที่ระบุไว้ในงานวิจัย",
                 )
         if isinstance(reservation, dict):
             if reservation.get("sourceRecordDigest") != source_record.get("recordDigest"):
-                raise RequestError("EA Factory source changed after the create request was reserved.", 409)
+                _raise_ea_factory_request_rejected(
+                    "EA Factory source changed after the create request was reserved.",
+                    409,
+                    code="ea_factory_reserved_source_changed",
+                    message_th="ข้อมูลระบบเปลี่ยนหลังเริ่มคำขอแล้ว ระบบจึงหยุดเพื่อความปลอดภัย กรุณารีเฟรชและเลือก Revision ล่าสุดใหม่",
+                )
             build_id = str(reservation.get("buildId"))
             durable_create_key = str(reservation.get("idempotencyKey") or "")
             aliases = list(dict.fromkeys(
@@ -32738,7 +33211,12 @@ def create_ea_factory_build(payload: object) -> dict:
                 if value
             ))
             if len(aliases) > 8:
-                raise RequestError("EA Factory create retry key alias limit was reached.", 409)
+                _raise_ea_factory_request_rejected(
+                    "EA Factory create retry key alias limit was reached.",
+                    409,
+                    code="ea_factory_create_retry_limit",
+                    message_th="คำขอเดิมถูกลองซ้ำหลายครั้งเกินกำหนด กรุณารีเฟรชสถานะแล้วเริ่ม Build ใหม่จากหน้า 1",
+                )
             if reservation.get("idempotencyKeys") != aliases:
                 reservation["idempotencyKeys"] = aliases
                 _write_ea_factory_state_unlocked(state)
@@ -34662,58 +35140,308 @@ def _ea_factory_one_click_mark_visible_uncertain(
     })
 
 
+def _ea_factory_one_click_finish_from_raw_state_unlocked(
+    build_id: str,
+    *,
+    expected_run_snapshot: object = None,
+    status: str,
+    current_stage_id: object,
+    failure_code: object,
+    message_th: str,
+) -> bool:
+    """Persist only a terminal/uncertain run outcome after artifact drift.
+
+    A visible action may remove or replace an immutable workspace file between
+    dispatch and the failure callback.  The normal state loader must reject
+    that drift, but the callback must still retire its durable ``running``
+    marker.  This narrow path validates the JSON store, Build identity and
+    digest-bound one-click run without accepting or repairing any artifact.  It
+    changes only ``oneClickRun``, ``build.updatedAt`` and ``state.updatedAt``;
+    no Stage, evidence, version or manifest field can be promoted here.
+    """
+
+    if status not in {"awaiting_visible_terminal", "blocked", "failed"}:
+        raise DataIntegrityError(
+            "EA Factory degraded one-click finish accepts only fail-closed statuses."
+        )
+    safe_build_id = safe_reference(build_id)
+    safe_stage_id = safe_reference(current_stage_id)
+    if not safe_build_id or safe_build_id != build_id:
+        raise DataIntegrityError("EA Factory degraded one-click build id is invalid.")
+    if (
+        status == "awaiting_visible_terminal"
+        and safe_stage_id not in EA_FACTORY_VISIBLE_ACTION_STAGES
+    ):
+        raise DataIntegrityError(
+            "EA Factory degraded visible finish is not bound to a visible Stage."
+        )
+
+    state_path = _ea_factory_state_path()
+    stable = _ea_factory_read_stable_file(
+        state_path,
+        maximum_bytes=32 * 1024 * 1024,
+    )
+    if stable is None:
+        raise DataIntegrityError("EA Factory state is unavailable for fail-closed finish.")
+    raw_bytes, raw_digest = stable
+    try:
+        payload = json.loads(raw_bytes.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise DataIntegrityError(
+            "EA Factory state JSON is invalid for fail-closed finish."
+        ) from error
+    expected_state_keys = {
+        "schemaVersion",
+        "sourceSnapshots",
+        "builds",
+        "createReservations",
+        "updatedAt",
+    }
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != expected_state_keys
+        or payload.get("schemaVersion") != EA_FACTORY_STATE_SCHEMA_VERSION
+        or not isinstance(payload.get("sourceSnapshots"), list)
+        or not isinstance(payload.get("builds"), list)
+        or not isinstance(payload.get("createReservations"), list)
+        or len(payload["sourceSnapshots"]) > EA_FACTORY_SOURCE_SNAPSHOT_LIMIT
+        or len(payload["builds"]) > EA_FACTORY_BUILD_LIMIT
+        or len(payload["createReservations"]) > EA_FACTORY_BUILD_LIMIT
+    ):
+        raise DataIntegrityError(
+            "EA Factory state shape is invalid for fail-closed finish."
+        )
+
+    build_ids = [
+        safe_reference(item.get("id")) if isinstance(item, dict) else None
+        for item in payload["builds"]
+    ]
+    if (
+        any(not value for value in build_ids)
+        or len(set(build_ids)) != len(build_ids)
+        or build_ids.count(safe_build_id) != 1
+    ):
+        raise DataIntegrityError(
+            "EA Factory Build identity is ambiguous for fail-closed finish."
+        )
+    build = next(
+        item
+        for item in payload["builds"]
+        if isinstance(item, dict) and item.get("id") == safe_build_id
+    )
+    artifact_kind = _ea_factory_program_kind(build.get("artifactKind"))
+    brief = str(build.get("brief") or "")
+    stages = build.get("stages") if isinstance(build.get("stages"), list) else []
+    if (
+        build.get("schemaVersion") != "ea-factory-build-v1"
+        or safe_reference(build.get("sourceRecordId")) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(build.get("sourceRecordDigest") or ""))
+        is None
+        or str(build.get("platform") or "") not in EA_FACTORY_PLATFORMS
+        or artifact_kind is None
+        or len(brief) > 900
+        or contains_potential_secret(brief)
+        or build.get("createRequestDigest")
+        != _ea_factory_create_request_digest(
+            build.get("sourceRecordId"),
+            build.get("platform"),
+            brief,
+            artifact_kind,
+        )
+        or [item.get("id") for item in stages if isinstance(item, dict)]
+        != list(EA_FACTORY_STAGE_IDS)
+    ):
+        raise DataIntegrityError(
+            "EA Factory Build contract is invalid for fail-closed finish."
+        )
+    run = _ea_factory_revalidated_one_click_run(build)
+    if not isinstance(run, dict):
+        raise DataIntegrityError(
+            "EA Factory one-click run is unavailable for fail-closed finish."
+        )
+    if not isinstance(expected_run_snapshot, dict) or run != expected_run_snapshot:
+        raise DataIntegrityError(
+            "EA Factory one-click run changed before fail-closed finish."
+        )
+    if status == "awaiting_visible_terminal":
+        visible_action = (
+            run.get("visibleAction")
+            if isinstance(run.get("visibleAction"), dict)
+            else None
+        )
+        if (
+            not isinstance(visible_action, dict)
+            or visible_action.get("stageId") != safe_stage_id
+            or visible_action.get("state") == "completed"
+        ):
+            raise DataIntegrityError(
+                "EA Factory visible action cannot be marked uncertain safely."
+            )
+
+    patched = copy.deepcopy(payload)
+    patched_build = next(
+        item
+        for item in patched["builds"]
+        if isinstance(item, dict) and item.get("id") == safe_build_id
+    )
+    patched_run = patched_build["oneClickRun"]
+    stored_failure_code = (
+        None if status == "awaiting_visible_terminal" else failure_code
+    )
+    _ea_factory_one_click_update(
+        patched_run,
+        status=status,
+        current_stage_id=safe_stage_id,
+        failure_code=stored_failure_code,
+        message_th=message_th,
+    )
+    if status == "awaiting_visible_terminal":
+        _ea_factory_one_click_mark_visible_uncertain(
+            patched_run,
+            stage_id=str(safe_stage_id),
+            failure_code=failure_code,
+        )
+    patched_build["updatedAt"] = patched_run["updatedAt"]
+    patched["updatedAt"] = utc_now()
+    if not isinstance(_ea_factory_revalidated_one_click_run(patched_build), dict):
+        raise DataIntegrityError(
+            "EA Factory fail-closed one-click patch failed validation."
+        )
+
+    # Refuse a lost update even though the in-process mutation lock is held;
+    # antivirus, recovery tools or another Bridge process can still replace the
+    # file outside this process.
+    checkpoint = _ea_factory_read_stable_file(
+        state_path,
+        maximum_bytes=32 * 1024 * 1024,
+    )
+    if (
+        checkpoint is None
+        or checkpoint[1] != raw_digest
+        or checkpoint[0] != raw_bytes
+    ):
+        raise DataIntegrityError(
+            "EA Factory state changed during fail-closed one-click finish."
+        )
+    # The normal loader rejected this state, so it must never replace the last
+    # known-good backup while we persist only the bound terminal marker.
+    write_json(state_path, patched, keep_backup=False)
+    _invalidate_ea_factory_state_cache()
+    _invalidate_ea_factory_read_model_cache()
+    return True
+
+
 def _ea_factory_one_click_finish(
     build_id: str,
     *,
+    expected_run_snapshot: object = None,
     status: str,
     current_stage_id: object,
     failure_code: object,
     message_th: str,
 ) -> None:
+    if status not in EA_FACTORY_ONE_CLICK_STATUSES:
+        raise DataIntegrityError("Unsupported EA Factory one-click status.")
+    state_persisted = False
+    persistence_mode = "validated_state"
+    finish_exception: Exception | None = None
+    target_found = True
     with EA_FACTORY_LOCK:
-        state = _load_ea_factory_state_unlocked()
-        build = next(
-            (
-                item for item in state["builds"]
-                if isinstance(item, dict) and item.get("id") == build_id
-            ),
-            None,
-        )
-        if not isinstance(build, dict) or not isinstance(build.get("oneClickRun"), dict):
-            return
-        stored_failure_code = (
-            None if status == "awaiting_visible_terminal" else failure_code
-        )
-        _ea_factory_one_click_update(
-            build["oneClickRun"],
-            status=status,
-            current_stage_id=current_stage_id,
-            failure_code=stored_failure_code,
-            message_th=message_th,
-        )
-        if (
-            status == "awaiting_visible_terminal"
-            and current_stage_id in EA_FACTORY_VISIBLE_ACTION_STAGES
-        ):
-            _ea_factory_one_click_mark_visible_uncertain(
-                build["oneClickRun"],
-                stage_id=str(current_stage_id),
-                failure_code=failure_code,
+        try:
+            state = _load_ea_factory_state_unlocked()
+            build = next(
+                (
+                    item for item in state["builds"]
+                    if isinstance(item, dict) and item.get("id") == build_id
+                ),
+                None,
             )
-        build["updatedAt"] = build["oneClickRun"]["updatedAt"]
-        _write_ea_factory_state_unlocked(state)
+            if not isinstance(build, dict) or not isinstance(build.get("oneClickRun"), dict):
+                target_found = False
+            elif (
+                not isinstance(expected_run_snapshot, dict)
+                or build["oneClickRun"] != expected_run_snapshot
+            ):
+                persistence_mode = "stale_callback_ignored"
+            else:
+                stored_failure_code = (
+                    None if status == "awaiting_visible_terminal" else failure_code
+                )
+                _ea_factory_one_click_update(
+                    build["oneClickRun"],
+                    status=status,
+                    current_stage_id=current_stage_id,
+                    failure_code=stored_failure_code,
+                    message_th=message_th,
+                )
+                if (
+                    status == "awaiting_visible_terminal"
+                    and current_stage_id in EA_FACTORY_VISIBLE_ACTION_STAGES
+                ):
+                    _ea_factory_one_click_mark_visible_uncertain(
+                        build["oneClickRun"],
+                        stage_id=str(current_stage_id),
+                        failure_code=failure_code,
+                    )
+                build["updatedAt"] = build["oneClickRun"]["updatedAt"]
+                _write_ea_factory_state_unlocked(state)
+                state_persisted = True
+        except Exception as error:
+            finish_exception = error
+            persistence_mode = "fail_closed_raw_terminal_patch"
+            try:
+                state_persisted = _ea_factory_one_click_finish_from_raw_state_unlocked(
+                    build_id,
+                    expected_run_snapshot=expected_run_snapshot,
+                    status=status,
+                    current_stage_id=current_stage_id,
+                    failure_code=failure_code,
+                    message_th=message_th,
+                )
+            except Exception as fallback_error:
+                persistence_mode = "audit_only"
+                finish_exception = fallback_error
+                state_persisted = False
+    if not target_found:
+        return
     append_audit({
         "type": f"ea_factory.one_click_{status}",
         "buildId": build_id,
         "stageId": safe_reference(current_stage_id),
         "failureCode": safe_reference(failure_code),
+        "messageTh": redact_text(message_th, 500),
+        "visibleActionState": (
+            "uncertain"
+            if status == "awaiting_visible_terminal"
+            and current_stage_id in EA_FACTORY_VISIBLE_ACTION_STAGES
+            else None
+        ),
+        "statePersisted": state_persisted,
+        "persistenceMode": persistence_mode,
+        "finishExceptionClass": (
+            type(finish_exception).__name__ if finish_exception is not None else None
+        ),
+        "finishExceptionMessage": (
+            redact_text(str(finish_exception), 500)
+            if finish_exception is not None
+            else None
+        ),
         "liveTradingAllowed": False,
     })
 
 
-def _ea_factory_one_click_next_action(build_id: str) -> dict:
+def _ea_factory_one_click_next_action(
+    build_id: str,
+    *,
+    include_expected_run_snapshot: bool = False,
+) -> dict:
     """Reconcile one run and return at most one safe next action."""
 
+    # The Mission archive and report catalog can be large. Capture immutable
+    # read-only snapshots before entering the state mutation lock so a running
+    # AI task cannot starve the operator's progress GET requests.
+    mission_rows = load_missions(shared_snapshot=True)
+    report_rows = _ea_factory_report_rows_snapshot()
     with EA_FACTORY_LOCK:
         state = _load_ea_factory_state_unlocked()
         build = next(
@@ -34728,8 +35456,16 @@ def _ea_factory_one_click_next_action(build_id: str) -> dict:
         run = build.get("oneClickRun") if isinstance(build.get("oneClickRun"), dict) else None
         if not isinstance(run, dict):
             return {"kind": "stop", "reasonCode": "one_click_run_missing"}
+        def action_result(value: dict) -> dict:
+            if include_expected_run_snapshot:
+                value["_expectedRunSnapshot"] = copy.deepcopy(run)
+            return value
+
         if run.get("status") in {"completed", "blocked", "failed"}:
-            return {"kind": "stop", "reasonCode": run.get("failureCode")}
+            return action_result({
+                "kind": "stop",
+                "reasonCode": run.get("failureCode"),
+            })
         if str(build.get("platform") or "") not in EA_FACTORY_ONE_CLICK_VISIBLE_PLATFORMS:
             _ea_factory_one_click_update(
                 run,
@@ -34743,12 +35479,17 @@ def _ea_factory_one_click_next_action(build_id: str) -> dict:
             )
             build["updatedAt"] = run["updatedAt"]
             _write_ea_factory_state_unlocked(state)
-            return {
+            return action_result({
                 "kind": "blocked",
                 "stageId": run.get("currentStageId"),
                 "reasonCode": "one_click_visible_mt5_not_implemented",
-            }
-        changed = _ea_factory_sync_build_status(build, ingest_sources=True)
+            })
+        changed = _ea_factory_sync_build_status(
+            build,
+            missions=mission_rows,
+            reports=report_rows,
+            ingest_sources=True,
+        )
         current_stage_id = _ea_factory_build_current_stage_id(build)
         if current_stage_id is None:
             _ea_factory_one_click_update(
@@ -34760,7 +35501,7 @@ def _ea_factory_one_click_next_action(build_id: str) -> dict:
             )
             build["updatedAt"] = run["updatedAt"]
             _write_ea_factory_state_unlocked(state)
-            return {"kind": "completed"}
+            return action_result({"kind": "completed"})
         stage = _ea_factory_stage_row(build, current_stage_id)
         stage_status = str(stage.get("status") or "")
         if stage_status in {"queued", "running"}:
@@ -34785,7 +35526,7 @@ def _ea_factory_one_click_next_action(build_id: str) -> dict:
                 changed = True
             if changed:
                 _write_ea_factory_state_unlocked(state)
-            return {"kind": "wait", "stageId": current_stage_id}
+            return action_result({"kind": "wait", "stageId": current_stage_id})
         if stage_status == "waiting_approval":
             _ea_factory_one_click_update(
                 run,
@@ -34796,7 +35537,7 @@ def _ea_factory_one_click_next_action(build_id: str) -> dict:
             )
             build["updatedAt"] = run["updatedAt"]
             _write_ea_factory_state_unlocked(state)
-            return {"kind": "blocked", "stageId": current_stage_id}
+            return action_result({"kind": "blocked", "stageId": current_stage_id})
         if stage_status in {"blocked", "failed"}:
             retry_count = clamp_int(
                 stage.get("manualRetryCount"),
@@ -34821,13 +35562,13 @@ def _ea_factory_one_click_next_action(build_id: str) -> dict:
                 )
                 build["updatedAt"] = run["updatedAt"]
                 _write_ea_factory_state_unlocked(state)
-                return {
+                return action_result({
                     "kind": "retry_source",
                     "stageId": current_stage_id,
                     "failedMissionId": safe_reference(stage.get("missionId")),
                     "attempt": retry_count + 1,
                     "runId": run.get("runId"),
-                }
+                })
             failure_code = safe_reference(stage.get("blockedReasonCode")) or (
                 "stage_failed" if stage_status == "failed" else "stage_blocked"
             )
@@ -34840,7 +35581,11 @@ def _ea_factory_one_click_next_action(build_id: str) -> dict:
             )
             build["updatedAt"] = run["updatedAt"]
             _write_ea_factory_state_unlocked(state)
-            return {"kind": "blocked", "stageId": current_stage_id, "reasonCode": failure_code}
+            return action_result({
+                "kind": "blocked",
+                "stageId": current_stage_id,
+                "reasonCode": failure_code,
+            })
         if stage_status != "pending" or not _ea_factory_stage_can_advance(build, current_stage_id):
             _ea_factory_one_click_update(
                 run,
@@ -34851,7 +35596,7 @@ def _ea_factory_one_click_next_action(build_id: str) -> dict:
             )
             build["updatedAt"] = run["updatedAt"]
             _write_ea_factory_state_unlocked(state)
-            return {"kind": "blocked", "stageId": current_stage_id}
+            return action_result({"kind": "blocked", "stageId": current_stage_id})
         if current_stage_id in {"compile_validate", "backtest_recheck"}:
             handler = _ea_factory_visible_handler(current_stage_id)
             adapter_connected = bool(
@@ -34880,11 +35625,11 @@ def _ea_factory_one_click_next_action(build_id: str) -> dict:
                 )
                 build["updatedAt"] = run["updatedAt"]
                 _write_ea_factory_state_unlocked(state)
-                return {
+                return action_result({
                     "kind": "awaiting_visible_terminal",
                     "stageId": current_stage_id,
                     "reasonCode": reason_code,
-                }
+                })
             if not _ea_factory_one_click_reserve_visible_action(
                 build,
                 run,
@@ -34899,11 +35644,11 @@ def _ea_factory_one_click_next_action(build_id: str) -> dict:
                 )
                 build["updatedAt"] = run["updatedAt"]
                 _write_ea_factory_state_unlocked(state)
-                return {
+                return action_result({
                     "kind": "blocked",
                     "stageId": current_stage_id,
                     "reasonCode": "visible_terminal_retry_limit_reached",
-                }
+                })
         _ea_factory_one_click_update(
             run,
             status="running",
@@ -34913,25 +35658,45 @@ def _ea_factory_one_click_next_action(build_id: str) -> dict:
         )
         build["updatedAt"] = run["updatedAt"]
         _write_ea_factory_state_unlocked(state)
-        return {
+        return action_result({
             "kind": "advance",
             "stageId": current_stage_id,
             "runId": run.get("runId"),
-        }
+        })
 
 
-def _ea_factory_one_click_worker(build_id: str) -> None:
+def _ea_factory_one_click_worker(
+    build_id: str,
+    expected_run_snapshot: object = None,
+) -> None:
     deadline = time.monotonic() + EA_FACTORY_ONE_CLICK_TIMEOUT_SECONDS
+    expected_run = (
+        copy.deepcopy(expected_run_snapshot)
+        if isinstance(expected_run_snapshot, dict)
+        else None
+    )
     try:
         while time.monotonic() < deadline:
-            action = _ea_factory_one_click_next_action(build_id)
-            kind = str(action.get("kind") or "stop")
-            if kind in {"completed", "blocked", "awaiting_visible_terminal", "stop"}:
-                return
-            if kind == "wait":
-                time.sleep(EA_FACTORY_ONE_CLICK_POLL_SECONDS)
-                continue
+            action: dict = {}
             try:
+                action = _ea_factory_one_click_next_action(
+                    build_id,
+                    include_expected_run_snapshot=True,
+                )
+                bound_run = action.pop("_expectedRunSnapshot", None)
+                if isinstance(bound_run, dict):
+                    expected_run = bound_run
+                kind = str(action.get("kind") or "stop")
+                if kind in {
+                    "completed",
+                    "blocked",
+                    "awaiting_visible_terminal",
+                    "stop",
+                }:
+                    return
+                if kind == "wait":
+                    time.sleep(EA_FACTORY_ONE_CLICK_POLL_SECONDS)
+                    continue
                 if kind == "retry_source":
                     retry_ea_factory_build_stage(
                         build_id,
@@ -34960,39 +35725,63 @@ def _ea_factory_one_click_worker(build_id: str) -> None:
                     )
                 else:
                     return
-            except (RequestError, DataIntegrityError, MetaEditorCompileError) as error:
-                code = safe_reference(getattr(error, "code", None)) or "one_click_stage_dispatch_failed"
-                visible_stage = action.get("stageId") in EA_FACTORY_VISIBLE_ACTION_STAGES
-                append_audit({
-                    "type": "ea_factory.one_click_stage_exception",
-                    "buildId": build_id,
-                    "stageId": safe_reference(action.get("stageId")),
-                    "failureCode": code,
-                    "exceptionClass": type(error).__name__,
-                    "errorMessage": redact_text(str(error), 500),
-                    "liveTradingAllowed": False,
-                })
-                _ea_factory_one_click_finish(
-                    build_id,
-                    status=(
-                        "awaiting_visible_terminal" if visible_stage else "failed"
-                    ),
-                    current_stage_id=action.get("stageId"),
-                    failure_code=code,
-                    message_th=(
-                        "ผลจากหน้าจอจริงยังยืนยันไม่ได้ จึงหยุดรอให้ผู้ใช้กดทำต่อด้วยคำขอเดิม"
-                        if visible_stage
-                        else "เริ่มขั้นถัดไปไม่สำเร็จ ระบบหยุดโดยไม่ข้าม Gate"
-                    ),
+            except Exception as error:
+                stage_id = safe_reference(action.get("stageId")) or (
+                    safe_reference(expected_run.get("currentStageId"))
+                    if isinstance(expected_run, dict)
+                    else None
                 )
+                code = safe_reference(getattr(error, "code", None)) or (
+                    "one_click_state_integrity_failed"
+                    if isinstance(error, DataIntegrityError)
+                    else "one_click_coordinator_failed"
+                )
+                visible_stage = stage_id in EA_FACTORY_VISIBLE_ACTION_STAGES
+                # Retire the exact run before any diagnostic I/O. An audit
+                # disk failure must never leave a durable `running` marker.
+                try:
+                    _ea_factory_one_click_finish(
+                        build_id,
+                        expected_run_snapshot=expected_run,
+                        status=(
+                            "awaiting_visible_terminal"
+                            if visible_stage
+                            else "failed"
+                        ),
+                        current_stage_id=stage_id,
+                        failure_code=code,
+                        message_th=(
+                            "ผลจากหน้าจอจริงยังยืนยันไม่ได้ จึงหยุดรอให้ผู้ใช้กดทำต่อด้วยคำขอเดิม"
+                            if visible_stage
+                            else "ประสานงานขั้นถัดไปไม่สำเร็จ ระบบหยุดโดยไม่ข้าม Gate"
+                        ),
+                    )
+                except Exception:
+                    pass
+                try:
+                    append_audit({
+                        "type": "ea_factory.one_click_stage_exception",
+                        "buildId": build_id,
+                        "stageId": stage_id,
+                        "failureCode": code,
+                        "exceptionClass": type(error).__name__,
+                        "errorMessage": redact_text(str(error), 500),
+                        "liveTradingAllowed": False,
+                    })
+                except Exception:
+                    pass
                 return
-        _ea_factory_one_click_finish(
-            build_id,
-            status="failed",
-            current_stage_id=None,
-            failure_code="one_click_timeout",
-            message_th="งานหนึ่งคลิกเกินเวลาสูงสุดและถูกหยุดอย่างปลอดภัย",
-        )
+        try:
+            _ea_factory_one_click_finish(
+                build_id,
+                expected_run_snapshot=expected_run,
+                status="failed",
+                current_stage_id=None,
+                failure_code="one_click_timeout",
+                message_th="งานหนึ่งคลิกเกินเวลาสูงสุดและถูกหยุดอย่างปลอดภัย",
+            )
+        except Exception:
+            pass
     finally:
         removed = False
         with EA_FACTORY_ONE_CLICK_THREADS_LOCK:
@@ -35007,7 +35796,11 @@ def _ea_factory_one_click_worker(build_id: str) -> None:
             _invalidate_ea_factory_read_model_cache()
 
 
-def _start_ea_factory_one_click_thread(build_id: str) -> bool:
+def _start_ea_factory_one_click_thread(
+    build_id: str,
+    *,
+    expected_run_snapshot: object = None,
+) -> bool:
     with EA_FACTORY_ONE_CLICK_THREADS_LOCK:
         for registered_build_id, existing in list(EA_FACTORY_ONE_CLICK_THREADS.items()):
             try:
@@ -35023,7 +35816,7 @@ def _start_ea_factory_one_click_thread(build_id: str) -> bool:
                 EA_FACTORY_ONE_CLICK_THREADS.pop(registered_build_id, None)
         worker = threading.Thread(
             target=_ea_factory_one_click_worker,
-            args=(build_id,),
+            args=(build_id, copy.deepcopy(expected_run_snapshot)),
             name=f"ea-factory-one-click-{build_id[-12:]}",
             daemon=True,
         )
@@ -35155,7 +35948,12 @@ def resume_interrupted_ea_factory_one_click_runs() -> int:
             started = int(
                 bool(
                     selected_build_id
-                    and _start_ea_factory_one_click_thread(selected_build_id)
+                    and _start_ea_factory_one_click_thread(
+                        selected_build_id,
+                        expected_run_snapshot=copy.deepcopy(
+                            selected["build"]["oneClickRun"]
+                        ),
+                    )
                 )
             )
     except (DataIntegrityError, OSError):
@@ -35396,7 +36194,10 @@ def run_ea_factory_build_one_click(build_id: object, payload: object) -> dict:
         started = False
         run_status = str((build.get("oneClickRun") or {}).get("status") or "")
         if run_status not in {"completed", "blocked", "failed"}:
-            started = _start_ea_factory_one_click_thread(safe_build_id)
+            started = _start_ea_factory_one_click_thread(
+                safe_build_id,
+                expected_run_snapshot=copy.deepcopy(build["oneClickRun"]),
+            )
     append_audit({
         "type": "ea_factory.one_click_resumed" if resumed else "ea_factory.one_click_requested",
         "buildId": safe_build_id,
@@ -81634,7 +82435,7 @@ class BridgeHandler(SimpleHTTPRequestHandler):
             self.send_json(bridge_status_read_model())
             return
         if path == "/api/props/right_server_racks/ea-factory":
-            self.send_json({"ok": True, "eaFactory": ea_factory_read_model()})
+            self.send_result(ea_factory_read_result())
             return
         ea_factory_file_match = re.fullmatch(
             r"/api/props/right_server_racks/ea-factory/builds/([^/]+)/files/([^/]+)",

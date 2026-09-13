@@ -2399,7 +2399,16 @@ void OnTick()
             [item["sourceRecordId"] for item in read_model["sourceCatalog"]["records"]],
             [record["sourceRecordId"]],
         )
-        load_missions.assert_called_once_with(shared_snapshot=True)
+        # The initial signature and projection share one immutable snapshot;
+        # one final reload is required to detect a semantic transition while
+        # the model was assembled. This must not regress to three loads.
+        self.assertEqual(
+            load_missions.call_args_list,
+            [
+                mock.call(shared_snapshot=True),
+                mock.call(shared_snapshot=True),
+            ],
+        )
         load_runtime_reports.assert_called_once_with(
             limit=self.bridge.EA_FACTORY_SOURCE_REPORT_LIMIT,
         )

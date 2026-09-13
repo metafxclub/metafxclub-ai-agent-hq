@@ -34,6 +34,14 @@ class EaFactoryBackendAdmissionAndCacheTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.bridge.EA_FACTORY_ONE_CLICK_THREADS.clear()
+        self.bridge.EA_FACTORY_REPORT_ROWS_CACHE.update({
+            "signature": None,
+            "rows": None,
+        })
+        self.bridge.EA_FACTORY_STATE_CACHE.update({
+            "signature": None,
+            "value": None,
+        })
         self.bridge.EA_FACTORY_WORLD_SHEET_CACHE.update({
             "signature": None,
             "value": None,
@@ -207,6 +215,18 @@ class EaFactoryBackendAdmissionAndCacheTests(unittest.TestCase):
             inspect.getsource(self.bridge.BridgeHandler.do_POST),
         )
 
+    def test_create_validation_exposes_actionable_thai_reason(self) -> None:
+        with self.assertRaises(self.bridge.RequestError) as raised:
+            self.bridge.create_ea_factory_build({})
+
+        error = raised.exception
+        response = self.bridge.request_error_response(error)
+        self.assertEqual(error.status, 422)
+        self.assertEqual(response["kind"], "ea_factory_request_rejected")
+        self.assertEqual(response["code"], "ea_factory_source_required")
+        self.assertIn("เลือกระบบ", response["messageTh"])
+        self.assertNotEqual(response["messageTh"], "คำขอถูกปฏิเสธ")
+
     def test_world_sheet_projection_cache_is_signature_bound(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cache_path = Path(temporary) / "research-sheet-cache.json"
@@ -298,6 +318,222 @@ class EaFactoryBackendAdmissionAndCacheTests(unittest.TestCase):
         self.assertEqual(calls, [1, 2])
         self.assertEqual(result["revision"], 2)
         self.assertEqual(self.bridge.EA_FACTORY_READ_MODEL_CACHE["value"]["revision"], 2)
+
+    def test_read_model_returns_second_coherent_snapshot_during_live_heartbeat(self) -> None:
+        calls = []
+
+        def build_model(**_kwargs):
+            revision = len(calls) + 1
+            calls.append(revision)
+            return {"schemaVersion": "ea-factory-v1", "revision": revision}
+
+        patches = self.volatile_patches()
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_read_model_signature",
+                side_effect=[("start-1",), ("end-1",), ("start-2",), ("end-2",)],
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_read_model_uncached",
+                side_effect=build_model,
+            ),
+        ):
+            result = self.bridge.ea_factory_read_model()
+
+        self.assertEqual(calls, [1, 2])
+        self.assertEqual(result["revision"], 2)
+        self.assertIsNone(self.bridge.EA_FACTORY_READ_MODEL_CACHE["value"])
+
+    def test_mission_projection_signature_ignores_heartbeat_but_tracks_factory_truth(self) -> None:
+        mission = {
+            "id": "mission-signature",
+            "idempotencyKey": "ea-factory:stage:signature",
+            "status": "running",
+            "phase": "running",
+            "workStatus": "running",
+            "updatedAt": "2026-09-12T00:00:00Z",
+            "lastHeartbeatAt": "2026-09-12T00:00:00Z",
+            "reportIds": [],
+            "targetId": "right_server_racks",
+            "requester": "human",
+            "owner": "ea_developer",
+            "toolId": "codex_cli_task",
+            "reportType": "ea_build_report",
+            "workflowContext": {
+                "propId": "right_server_racks",
+                "actionId": "build_strategy_code",
+                "inputs": {"brief": "[EA_FACTORY_BUILD_ID:ea-build-signature]"},
+            },
+        }
+
+        def signature_for(row):
+            with (
+                mock.patch.object(
+                    self.bridge,
+                    "load_missions",
+                    return_value=[copy.deepcopy(row)],
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_workflow_context_storage",
+                    side_effect=lambda value: copy.deepcopy(value),
+                ),
+            ):
+                return self.bridge._ea_factory_mission_projection_signature()
+
+        baseline = signature_for(mission)
+        heartbeat = copy.deepcopy(mission)
+        heartbeat["updatedAt"] = "2026-09-12T00:01:00Z"
+        heartbeat["lastHeartbeatAt"] = "2026-09-12T00:01:00Z"
+        self.assertEqual(signature_for(heartbeat), baseline)
+
+        for field, value in (
+            ("status", "completed"),
+            ("targetId", "left_server_racks"),
+            ("owner", "other_agent"),
+            ("reportIds", ["report-signature"]),
+        ):
+            changed = copy.deepcopy(mission)
+            changed[field] = value
+            with self.subTest(field=field):
+                self.assertNotEqual(signature_for(changed), baseline)
+
+        context_changed = copy.deepcopy(mission)
+        context_changed["workflowContext"]["actionId"] = "source_review"
+        self.assertNotEqual(signature_for(context_changed), baseline)
+
+    def test_sync_does_not_persist_mission_heartbeat_as_stage_change(self) -> None:
+        stage = self.stage("generate_source", "mission-heartbeat", "running")
+        build = self.build(
+            "ea-build-heartbeat",
+            [stage, self.stage("final_report", None, "pending")],
+        )
+        build["status"] = "in_progress"
+        original_updated_at = stage["updatedAt"]
+        changed = self.bridge._ea_factory_sync_build_status(
+            build,
+            missions=[{
+                "id": "mission-heartbeat",
+                "status": "running",
+                "updatedAt": "2026-09-12T00:05:00Z",
+            }],
+            reports=[],
+        )
+        self.assertFalse(changed)
+        self.assertEqual(stage["updatedAt"], original_updated_at)
+
+    def test_concurrent_stale_projection_fails_closed_one_click_actions(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        def build_model(**_kwargs):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("test did not release cache builder")
+            return {
+                "schemaVersion": "ea-factory-v1",
+                "snapshotStale": False,
+                "oneClick": {"canRun": True, "canCreateAndRun": True},
+            }
+
+        patches = self.volatile_patches()
+        with self.bridge.EA_FACTORY_READ_MODEL_CACHE_CONDITION:
+            self.bridge.EA_FACTORY_READ_MODEL_CACHE.update({
+                "signature": ("old-signature",),
+                "value": {
+                    "schemaVersion": "ea-factory-v1",
+                    "snapshotStale": False,
+                    "oneClick": {"canRun": True, "canCreateAndRun": True},
+                },
+            })
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], mock.patch.object(
+            self.bridge,
+            "_ea_factory_read_model_uncached",
+            side_effect=build_model,
+        ):
+            result = []
+            first = threading.Thread(
+                target=lambda: result.append(self.bridge.ea_factory_read_model())
+            )
+            first.start()
+            self.assertTrue(entered.wait(1))
+            stale = self.bridge.ea_factory_read_model()
+            release.set()
+            first.join(2)
+
+        self.assertFalse(first.is_alive())
+        self.assertTrue(stale["snapshotStale"])
+        self.assertFalse(stale["oneClick"]["canRun"])
+        self.assertFalse(stale["oneClick"]["canCreateAndRun"])
+        self.assertEqual(len(result), 1)
+
+    def test_one_click_poll_captures_heavy_snapshots_before_factory_lock(self) -> None:
+        build = self.build(
+            "ea-build-progress-responsive",
+            [self.stage("generate_source", "mission-progress", "queued")],
+        )
+        build["oneClickRun"] = {
+            "runId": "ea-run-progress-responsive",
+            "status": "waiting_ai",
+            "currentStageId": "generate_source",
+            "failureCode": None,
+        }
+        observations = []
+        mission_rows = [{"id": "mission-progress", "status": "queued"}]
+        report_rows = [{"id": "report-progress"}]
+
+        def load_missions(*, shared_snapshot=False):
+            observations.append(
+                ("missions", self.bridge._ea_factory_lock_owned_by_current_thread(), shared_snapshot)
+            )
+            return mission_rows
+
+        def load_reports():
+            observations.append(
+                ("reports", self.bridge._ea_factory_lock_owned_by_current_thread(), True)
+            )
+            return report_rows
+
+        with (
+            mock.patch.object(self.bridge, "load_missions", side_effect=load_missions),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_report_rows_snapshot",
+                side_effect=load_reports,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=self.state(build),
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_sync_build_status",
+                return_value=False,
+            ) as sync,
+            mock.patch.object(self.bridge, "_write_ea_factory_state_unlocked") as write,
+        ):
+            action = self.bridge._ea_factory_one_click_next_action(build["id"])
+
+        self.assertEqual(action, {"kind": "wait", "stageId": "generate_source"})
+        self.assertEqual(
+            observations,
+            [("missions", False, True), ("reports", False, True)],
+        )
+        sync.assert_called_once_with(
+            build,
+            missions=mission_rows,
+            reports=report_rows,
+            ingest_sources=True,
+        )
+        write.assert_not_called()
 
     def test_thread_registry_invalidates_cached_busy_on_register_and_removal(self) -> None:
         build_id = "ea-build-thread-cache"
@@ -672,7 +908,12 @@ class EaFactoryBackendAdmissionAndCacheTests(unittest.TestCase):
         ):
             resumed = self.bridge.resume_interrupted_ea_factory_one_click_runs()
         self.assertEqual(resumed, 1)
-        start.assert_called_once_with(older["id"])
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args, (older["id"],))
+        self.assertEqual(
+            start.call_args.kwargs["expected_run_snapshot"],
+            older["oneClickRun"],
+        )
         self.assertEqual(older["oneClickRun"]["status"], "queued")
         self.assertEqual(newer["oneClickRun"]["status"], "blocked")
         self.assertEqual(

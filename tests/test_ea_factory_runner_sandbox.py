@@ -13,6 +13,9 @@ from unittest import mock
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_PATH = PROJECT_ROOT / "runner" / "codex_cli_runner.py"
 BLUEPRINT_FIXTURE_PATH = PROJECT_ROOT / "tests" / "test_ea_research_blueprint_v2.py"
+LINDA_LEGACY_BRIEF_FIXTURE_PATH = (
+    PROJECT_ROOT / "tests" / "fixtures" / "linda_holy_grail_legacy_brief_v2.json"
+)
 
 
 def load_runner():
@@ -34,6 +37,10 @@ def load_ready_blueprint() -> dict:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.ready_blueprint()
+
+
+def load_linda_legacy_brief() -> dict:
+    return json.loads(LINDA_LEGACY_BRIEF_FIXTURE_PATH.read_text(encoding="utf-8"))
 
 
 class EaFactoryRunnerSandboxTests(unittest.TestCase):
@@ -116,6 +123,12 @@ void OnTick() {{
         cls.SOURCE_CONTENT = cls._compact_ea_source(cls.STRATEGY_BRIEF_DIGEST)
 
     @classmethod
+    def _linda_holy_grail_certified_brief(cls) -> dict:
+        return cls.runner.upgrade_linda_holy_grail_brief_for_certified_profile(
+            load_linda_legacy_brief()
+        )
+
+    @classmethod
     def _can_slim_legacy_brief(cls) -> dict:
         brief = dict(cls.STRATEGY_BRIEF)
         brief.update({
@@ -159,6 +172,77 @@ void OnTick() {{
                 "ใช้ Comment แสดง SystemName, SignalState, Balance, Equity, Spread, "
                 "Symbol, Timeframe, MarketDirection, BreakoutLevel, "
                 "StopLossPercent, RiskPercent และ RecoveryMode=none"
+            ),
+        })
+        return cls.runner.normalize_strategy_brief(brief)
+
+    @classmethod
+    def _linda_holy_grail_brief(cls) -> dict:
+        marker = "[IMPLEMENTATION_DEFAULT_NOT_SOURCE_FACT]"
+        policy = "[POLICY=compact-ea-safe-inputs-v2]"
+        brief = dict(cls.STRATEGY_BRIEF)
+        brief.update({
+            "systemName": "Linda Bradford Raschke Holy Grail Pullback",
+            "entryRules": (
+                "Buy: use a confirmed closed bar [1], ADX(14), SMA(20), "
+                "ADX[1] > 30 AND ADX[1] > ADX[2], then place a buy stop "
+                "above the signal high after a pullback to SMA(20). Sell: use "
+                "the inverse trend and pullback rule and place a sell stop below "
+                "the signal low. Cancel an untriggered order after 3 days."
+            ),
+            "recoveryRules": (
+                f"{marker}{policy}[COMPONENT=recoveryRules] RecoveryMode=none; "
+                "no grid, martingale, averaging, hedging, recovery orders, or "
+                "lot increase after a loss."
+            ),
+            "exitRules": (
+                "Buy Stop Loss is below the pullback swing low and Sell Stop "
+                "Loss is above the pullback swing high. Move protection with "
+                "successive swing lows or successive swing highs. "
+                f"{marker}{policy}[COMPONENT=exitRules] Use StopLossPoints=300 "
+                "only as fallback with ExecutionBufferPoints=2 and use "
+                "TakeProfitPoints=600 as an editable default. "
+                f"{marker}{policy}[COMPONENT=take_profit] TakeProfitPoints=600 "
+                "broker points above Buy entry or below Sell entry. "
+                f"{marker}{policy}[COMPONENT=trailing_stop] TrailingStop=false. "
+                f"{marker}{policy}[COMPONENT=break_even] BreakEven=false. "
+                f"{marker}{policy}[COMPONENT=partial_close] PartialClose=false."
+            ),
+            "moneyManagement": (
+                f"{marker}{policy}[COMPONENT=moneyManagement] "
+                "PositionSizingMode=fixed_lot and FixedLot=0.01 by default; "
+                "optional percent_equity uses RiskPercent=1.0 and validates "
+                "broker min/max/step volume and margin. Set "
+                "MaxOpenPositionsPerSymbolMagic=1 and count live and pending "
+                "orders for the same Symbol+Magic. "
+                f"{marker}{policy}[COMPONENT=lot_calculation] "
+                "RiskMoney=Equity*RiskPercent/100 and "
+                "Lot=RiskMoney/LossPerLotAtSL from actual stop distance, "
+                "TickSize and TickValue, rounded down by VolumeStep."
+            ),
+            "orderExecution": (
+                "กฎจากแหล่งข้อมูลระบุการวาง pending order: Buy ใช้ buy stop "
+                "เหนือ high ของแท่งที่แตะ 20-SMA และ Sell ใช้ sell stop ใต้ low "
+                "ของแท่งที่แตะ 20-SMA พร้อมยกเลิกหากไม่ถูก trigger ภายใน 3 วัน "
+                "จึงต้องรักษากฎ pending stop order นี้ไว้ ไม่แปลงเป็น Market order "
+                "สำหรับ entry หลัก "
+                f"{marker}{policy}[COMPONENT=orderExecution] "
+                "เฉพาะส่วน timing ที่แหล่งไม่ได้ระบุสำหรับ EA ให้ใช้ "
+                "SignalBarShift=1, TradeOnNewBar=true, prime current bar on "
+                "startup, อ่านเฉพาะแท่งปิด และประมวลผลหนึ่งครั้งบน first tick "
+                "ของแท่งใหม่ Pending order ต้องผูก MagicNumber, Symbol, "
+                "timeframe/input profile และ expiration/cancel logic ตาม 3 วัน "
+                "หรือจำนวนแท่งที่สอดคล้องกับ timeframe ที่ผู้ใช้เลือก โดยไม่ใช้ "
+                "bar 0 ในการยืนยันสัญญาณ"
+            ),
+            "displayRequirements": (
+                f"{marker}{policy}[COMPONENT=displayRequirements] Display system "
+                "name, signal state, balance, equity, spread, ADX(14), SMA(20), "
+                "live plus pending count, Symbol+Magic and TradeOnNewBar state."
+            ),
+            "additionalNotes": (
+                f"{marker}{policy}[COMPONENT=optimization_inputs] Inputs remain "
+                "user-editable and require Compile, Backtest and Demo validation."
             ),
         })
         return cls.runner.normalize_strategy_brief(brief)
@@ -697,6 +781,457 @@ int OnCalculate(const int rates_total, const int prev_calculated,
                     self.runner._ea_factory_can_slim_scaffold_meets_mission(source)
                 )
         self.assertNotEqual(*manifest_digests)
+
+    def test_linda_holy_grail_scaffold_passes_every_immutable_gate(self) -> None:
+        self.assertEqual(
+            self.runner.EA_FACTORY_LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST,
+            "877de2f4dd4e6081fe7ea886eca309099da4e9c2134f433d9cd079f1b1f16a42",
+        )
+        legacy_brief = self.runner.normalize_strategy_brief(
+            load_linda_legacy_brief()
+        )
+        self.assertEqual(
+            self.runner.compute_strategy_brief_digest(legacy_brief),
+            self.runner.EA_FACTORY_LINDA_HOLY_GRAIL_LEGACY_BRIEF_DIGEST,
+        )
+        brief = self._linda_holy_grail_certified_brief()
+        brief_digest = self.runner.compute_strategy_brief_digest(brief)
+        self.assertEqual(
+            brief_digest,
+            self.runner.EA_FACTORY_LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST,
+        )
+        self.assertIn(
+            self.runner.EA_FACTORY_LINDA_HOLY_GRAIL_DIRECTION_RULE,
+            brief["entryRules"],
+        )
+        spec_digest = "6" * 64
+        scaffold = self.runner._build_ea_factory_source_semantic_repair_scaffold(
+            brief,
+            strategy_brief_digest=brief_digest,
+            strategy_spec_digest=spec_digest,
+            target_platform="mt4",
+        )
+        attested = self.runner._ea_factory_linda_holy_grail_scaffold_meets_mission(
+            scaffold
+        )
+        profile = self.runner._ea_factory_certified_scaffold_profile(
+            brief_digest,
+            scaffold,
+        )
+
+        self.assertTrue(scaffold)
+        self.assertTrue(attested)
+        self.assertEqual(
+            profile,
+            self.runner.EA_FACTORY_LINDA_HOLY_GRAIL_CERTIFIED_PROFILE_VERSION,
+        )
+        self.assertLessEqual(
+            len(scaffold),
+            self.runner.EA_FACTORY_SEMANTIC_REPAIR_SCAFFOLD_MAX_CHARS,
+        )
+        manifest = self.runner.build_compact_ea_source_manifest(
+            scaffold,
+            strategy_brief=brief,
+            strategy_brief_digest=brief_digest,
+            strategy_spec_digest=spec_digest,
+            source_digest=hashlib.sha256(scaffold.encode("utf-8")).hexdigest(),
+            target_platform="mt4",
+        )
+        self.assertTrue(manifest["complete"], manifest)
+        self.assertTrue(all(manifest["checks"].values()), manifest)
+        self.assertIn("ADXPeriod = 14", scaffold)
+        self.assertIn("SMAPeriod = 20", scaffold)
+        self.assertIn("OrderDelete(OrderTicket())", scaffold)
+        self.assertIn("OrderModify(OrderTicket()", scaffold)
+        self.assertIn("CERTIFIED_SELL_STOP_ORDER = 5", scaffold)
+        self.assertIn("iTime(Symbol(), timeframe, 0)", scaffold)
+        self.assertNotIn("Time[0]", scaffold)
+        self.assertIn(
+            "MODE_MAIN, SignalBarShift + 1)",
+            scaffold,
+        )
+        self.assertIn(
+            "MODE_SMA, PRICE_CLOSE, SignalBarShift + 1)",
+            scaffold,
+        )
+        self.assertIn(
+            'CERTIFIED_DIRECTION_RULE = "IMPLEMENTATION_DEFAULT_NOT_SOURCE_FACT:SMA20_SLOPE"',
+            scaffold,
+        )
+        self.assertIn(
+            "bool directionalUptrend = smaCurrent > smaPrevious;",
+            scaffold,
+        )
+        self.assertIn(
+            "bool directionalDowntrend = smaCurrent < smaPrevious;",
+            scaffold,
+        )
+        self.assertIn(
+            "bool longPullback = directionalUptrend && signalClose > smaCurrent",
+            scaffold,
+        )
+        self.assertIn(
+            "bool shortPullback = directionalDowntrend && signalClose < smaCurrent",
+            scaffold,
+        )
+        self.assertIn("input int PendingExpirationDays = 3;", scaffold)
+        self.assertIn("PendingExpirationDays * 86400", scaffold)
+        self.assertIn(
+            "if(PendingExpirationDays > 3650) return(INIT_PARAMETERS_INCORRECT);",
+            scaffold,
+        )
+        self.assertIn(
+            "long expirationSeconds = (long)PendingExpirationDays * 86400;",
+            scaffold,
+        )
+        self.assertNotIn("PendingExpirationBars", scaffold)
+        self.assertNotIn("PeriodSeconds(timeframe)", scaffold)
+        self.assertIn("MagicNumber <= 0", scaffold)
+        self.assertIn(
+            "int marginSide = signal == OP_BUYSTOP ? OP_BUY : OP_SELL;",
+            scaffold,
+        )
+        self.assertIn(
+            "gOrderLot = ValidateFixedLot(FixedLot, marginSide);",
+            scaffold,
+        )
+        self.assertIn(
+            "gOrderLot = CalculateRiskLot(entryPrice, stopLoss, currentSpread,",
+            scaffold,
+        )
+        risk_helper = scaffold.split("double CalculateRiskLot(", 1)[1].split(
+            "\n}\n\nint ManageExistingOrders", 1
+        )[0]
+        self.assertNotIn("FixedLot", risk_helper)
+        self.assertIn(
+            "double executionCostDistance = (spreadPoints + slippagePoints) * Point;",
+            risk_helper,
+        )
+        self.assertIn(
+            "AccountFreeMarginCheck(Symbol(), marginSide, gOrderLot)",
+            scaffold,
+        )
+        self.assertIn("MODE_FREEZELEVEL", scaffold)
+        self.assertIn(
+            "MathMax(stopLevel, freezeLevel) + ExecutionBufferPoints",
+            scaffold,
+        )
+        self.assertIn("string BuildManagedProfileTag(int timeframe)", scaffold)
+        self.assertIn(
+            "StringFind(OrderComment(), managedProfileTag, 0) != 0",
+            scaffold,
+        )
+        self.assertIn(
+            "string orderComment = BuildManagedProfileTag(timeframe);",
+            scaffold,
+        )
+        self.assertNotIn("MathMax(requestedEntry", scaffold)
+        self.assertNotIn("MathMin(requestedEntry", scaffold)
+        self.assertIn("OrdersHistoryTotal()", scaffold)
+        self.assertIn(
+            "const int CERTIFIED_ORDER_HISTORY_RECORDS = 10000;",
+            scaffold,
+        )
+        self.assertIn(
+            "gManagedHistoryTruncated = historyTotal > CERTIFIED_ORDER_HISTORY_RECORDS;",
+            scaffold,
+        )
+        self.assertIn('SetStatusComment("History Review Required"', scaffold)
+        self.assertIn("OrderType() != OP_BUY && OrderType() != OP_SELL", scaffold)
+        self.assertIn("gAdxRearmRequired = true;", scaffold)
+        self.assertEqual(
+            scaffold.count(
+                "if(CountManagedOrders() >= MaxOpenPositionsPerSymbolMagic) return;"
+            ),
+            2,
+        )
+        submitting_index = scaffold.index('SetStatusComment("Submitting Buy Stop"')
+        send_index = scaffold.index("OrderSend(")
+        failed_index = scaffold.index('SetStatusComment("Order Failed"')
+        pending_index = scaffold.index(
+            'SetStatusComment("Pending Buy Stop"',
+            send_index,
+        )
+        self.assertLess(submitting_index, send_index)
+        self.assertLess(send_index, failed_index)
+        self.assertLess(failed_index, pending_index)
+        self.assertIn("MT4 MODE_TICKSIZE is expressed in points", scaffold)
+        self.assertEqual(scaffold.count("OrderSend("), 1)
+
+        mission_guard_mutations = {
+            "first_attach_prime": (
+                "if(lastBar == 0) { lastBar = currentBar; return; }",
+                "if(lastBar == 0) lastBar = currentBar;",
+            ),
+            "adx_rising": (
+                "adxCurrent > ADXThreshold && adxCurrent > adxPrevious",
+                "adxCurrent > ADXThreshold",
+            ),
+            "selected_timeframe_bar_clock": (
+                "iTime(Symbol(), timeframe, 0)",
+                "Time[0]",
+            ),
+            "signal_shift_alignment": (
+                "MODE_MAIN, SignalBarShift + 1)",
+                "MODE_MAIN, 2)",
+            ),
+            "direction_profile_metadata": (
+                'CERTIFIED_DIRECTION_RULE = "IMPLEMENTATION_DEFAULT_NOT_SOURCE_FACT:SMA20_SLOPE"',
+                'CERTIFIED_DIRECTION_RULE = "SMA20_SLOPE"',
+            ),
+            "sma_direction_shift_alignment": (
+                "MODE_SMA, PRICE_CLOSE, SignalBarShift + 1)",
+                "MODE_SMA, PRICE_CLOSE, 2)",
+            ),
+            "long_direction_filter": (
+                "bool longPullback = directionalUptrend && signalClose > smaCurrent",
+                "bool longPullback = signalClose > smaCurrent",
+            ),
+            "short_direction_filter": (
+                "bool shortPullback = directionalDowntrend && signalClose < smaCurrent",
+                "bool shortPullback = signalClose < smaCurrent",
+            ),
+            "pending_expiry": (
+                "long expirationSeconds = (long)PendingExpirationDays * 86400;",
+                "long expirationSeconds = (long)PendingExpirationDays * PeriodSeconds(timeframe);",
+            ),
+            "pending_expiry_upper_bound": (
+                "if(PendingExpirationDays > 3650) return(INIT_PARAMETERS_INCORRECT);",
+                "if(PendingExpirationDays > 36500) return(INIT_PARAMETERS_INCORRECT);",
+            ),
+            "manual_order_magic_guard": (
+                "MagicNumber <= 0",
+                "MagicNumber < 0",
+            ),
+            "pending_margin_side": (
+                "int marginSide = signal == OP_BUYSTOP ? OP_BUY : OP_SELL;",
+                "int marginSide = signal;",
+            ),
+            "fixed_lot_is_separate": (
+                "gOrderLot = ValidateFixedLot(FixedLot, marginSide);",
+                "gOrderLot = FixedLot;",
+            ),
+            "fixed_lot_must_be_step_aligned_before_normalization": (
+                "double requestedStepUnits = requestedLot / volumeStep;",
+                "double requestedStepUnits = MathRound(requestedLot / volumeStep);",
+            ),
+            "fixed_lot_cannot_round_up": (
+                "if(lot > requestedLot + volumeStep * 0.0000001) return(0);",
+                "if(lot < requestedLot - volumeStep * 0.0000001) return(0);",
+            ),
+            "risk_lot_uses_market_margin_side": (
+                "SlippagePoints, marginSide);",
+                "SlippagePoints, signal);",
+            ),
+            "risk_includes_execution_cost": (
+                "double executionCostDistance = (spreadPoints + slippagePoints) * Point;",
+                "double executionCostDistance = 0;",
+            ),
+            "final_margin_uses_market_side": (
+                "AccountFreeMarginCheck(Symbol(), marginSide, gOrderLot)",
+                "AccountFreeMarginCheck(Symbol(), signal, gOrderLot)",
+            ),
+            "freeze_level_modify_floor": (
+                "MathMax(stopLevel, freezeLevel) + ExecutionBufferPoints",
+                "stopLevel + ExecutionBufferPoints",
+            ),
+            "profile_bound_management": (
+                "StringFind(OrderComment(), managedProfileTag, 0) != 0",
+                "StringFind(OrderComment(), managedProfileTag, 0) == 0",
+            ),
+            "profile_bound_order_comment": (
+                "string orderComment = BuildManagedProfileTag(timeframe);",
+                'string orderComment = "Linda Holy Grail";',
+            ),
+            "profile_binds_selected_timeframe": (
+                "long profileHash = timeframe;",
+                "long profileHash = SignalTimeframe;",
+            ),
+            "history_excludes_pending_cancel": (
+                "if(OrderType() != OP_BUY && OrderType() != OP_SELL) continue;",
+                "if(OrderType() != OP_BUYSTOP && OrderType() != OP_SELLSTOP) continue;",
+            ),
+            "truncated_history_fails_closed": (
+                'SetStatusComment("History Review Required", adxCurrent, smaCurrent,',
+                'SetStatusComment("Waiting Trend", adxCurrent, smaCurrent,',
+            ),
+            "history_rearm": (
+                "gAdxRearmRequired = true;",
+                "gAdxRearmRequired = false;",
+            ),
+            "same_bar_close_cannot_rearm": (
+                "adxCurrent <= ADXThreshold &&\n       latestClosedBar > gLastProcessedManagedCloseTime",
+                "adxCurrent <= ADXThreshold",
+            ),
+            "buy_no_chase": (
+                "entryPrice = NormalizePriceUpToTick(requestedEntry, priceTick);",
+                "entryPrice = NormalizePriceUpToTick(MathMax(requestedEntry, Ask + brokerFloor), priceTick);",
+            ),
+            "sell_no_chase": (
+                "entryPrice = NormalizePriceDownToTick(requestedEntry, priceTick);",
+                "entryPrice = NormalizePriceDownToTick(MathMin(requestedEntry, Bid - brokerFloor), priceTick);",
+            ),
+            "mt4_tick_size_units": (
+                "double priceTick = tickSize * Point;",
+                "double priceTick = tickSize;",
+            ),
+            "swing_management": (
+                "bool modifySucceeded = OrderModify(",
+                "bool modifySucceeded = MissingOrderModify(",
+            ),
+            "risk_budget": (
+                "double riskMoney = AccountEquity() * RiskPercent / 100.0;",
+                "double riskMoney = AccountEquity();",
+            ),
+            "sell_stop_mode": (
+                "const int CERTIFIED_SELL_STOP_ORDER = 5;",
+                "const int CERTIFIED_SELL_STOP_ORDER = 1;",
+            ),
+        }
+        with mock.patch.object(
+            self.runner,
+            "EA_FACTORY_LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST",
+            brief_digest,
+        ):
+            for label, (required, replacement) in mission_guard_mutations.items():
+                with self.subTest(label=label):
+                    mutated = scaffold.replace(required, replacement)
+                    self.assertNotEqual(mutated, scaffold)
+                    self.assertFalse(
+                        self.runner._ea_factory_linda_holy_grail_scaffold_meets_mission(
+                            mutated
+                        )
+                    )
+
+        last_cap = scaffold.rfind(
+            "if(CountManagedOrders() >= MaxOpenPositionsPerSymbolMagic) return;"
+        )
+        cap_removed = scaffold[:last_cap] + scaffold[
+            last_cap
+            + len(
+                "if(CountManagedOrders() >= MaxOpenPositionsPerSymbolMagic) return;"
+            ):
+        ]
+        self.assertFalse(
+            self.runner._ea_factory_linda_holy_grail_scaffold_meets_mission(
+                cap_removed
+            )
+        )
+
+        status_reordered = scaffold.replace(
+            'SetStatusComment("Submitting Buy Stop", adxCurrent, smaCurrent, currentSpread, CountManagedOrders());',
+            'SetStatusComment("Pending Buy Stop", adxCurrent, smaCurrent, currentSpread, CountManagedOrders());',
+            1,
+        )
+        self.assertFalse(
+            self.runner._ea_factory_linda_holy_grail_scaffold_meets_mission(
+                status_reordered
+            )
+        )
+
+    def test_linda_holy_grail_scaffold_is_exact_profile_and_mt4_only(self) -> None:
+        brief = self._linda_holy_grail_certified_brief()
+        brief_digest = self.runner.compute_strategy_brief_digest(brief)
+        spec_digest = "5" * 64
+        self.assertEqual(
+            self.runner._build_ea_factory_source_semantic_repair_scaffold(
+                brief,
+                strategy_brief_digest=brief_digest,
+                strategy_spec_digest=spec_digest,
+                target_platform="mt5",
+            ),
+            "",
+        )
+        legacy_brief = self.runner.normalize_strategy_brief(
+            load_linda_legacy_brief()
+        )
+        self.assertEqual(
+            self.runner._build_ea_factory_source_semantic_repair_scaffold(
+                legacy_brief,
+                strategy_brief_digest=(
+                    self.runner.EA_FACTORY_LINDA_HOLY_GRAIL_LEGACY_BRIEF_DIGEST
+                ),
+                strategy_spec_digest=spec_digest,
+                target_platform="mt4",
+            ),
+            "",
+        )
+        wrong_digest = hashlib.sha256(b"different-linda-brief").hexdigest()
+        self.assertEqual(
+            self.runner._build_ea_factory_source_semantic_repair_scaffold(
+                brief,
+                strategy_brief_digest=wrong_digest,
+                strategy_spec_digest=spec_digest,
+                target_platform="mt4",
+            ),
+            "",
+        )
+        different_system = dict(brief)
+        different_system["systemName"] = "Different Holy Grail variant"
+        different_digest = self.runner.compute_strategy_brief_digest(
+            different_system
+        )
+        self.assertEqual(
+            self.runner._build_ea_factory_source_semantic_repair_scaffold(
+                different_system,
+                strategy_brief_digest=different_digest,
+                strategy_spec_digest=spec_digest,
+                target_platform="mt4",
+            ),
+            "",
+        )
+
+    def test_linda_exact_profile_preflight_requires_the_certified_source(self) -> None:
+        brief = self._linda_holy_grail_certified_brief()
+        brief_digest = self.runner.compute_strategy_brief_digest(brief)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            relative, source_root, prompt, _record_digest, spec_digest = (
+                self._factory_fixture(root, strategy_brief=brief)
+            )
+            patches = self._patch_roots(root)
+            with patches[0], patches[1]:
+                scaffold = self.runner._build_ea_factory_source_semantic_repair_scaffold(
+                    brief,
+                    strategy_brief_digest=brief_digest,
+                    strategy_spec_digest=spec_digest,
+                    target_platform="mt4",
+                )
+                accepted = json.dumps(
+                    {"fileName": "LindaHolyGrail.mq4", "content": scaffold}
+                )
+                self.runner.preflight_ea_factory_source_semantics(
+                    accepted,
+                    prompt,
+                    relative,
+                )
+                mutated = scaffold.replace(
+                    "long expirationSeconds = (long)PendingExpirationDays * 86400;",
+                    "long expirationSeconds = (long)PendingExpirationDays * PeriodSeconds(timeframe);",
+                )
+                spoofed = mutated + (
+                    "\n// long expirationSeconds = (long)PendingExpirationDays * 86400;\n"
+                )
+                with self.assertRaises(
+                    self.runner.EAFactorySourceSemanticValidationError
+                ) as raised:
+                    self.runner.preflight_ea_factory_source_semantics(
+                        json.dumps({
+                            "fileName": "SpoofedLindaHolyGrail.mq4",
+                            "content": spoofed,
+                        }),
+                        prompt,
+                        relative,
+                    )
+                self.assertIn(
+                    "ea_explicit_mission_guardrails_missing",
+                    raised.exception.findings,
+                )
+
+            self.assertEqual(
+                {item.name for item in source_root.iterdir()},
+                {"strategy-spec-v01.json"},
+            )
 
     def test_certified_scaffold_is_omitted_for_mixed_policy_or_mt5(self) -> None:
         brief = self._can_slim_legacy_brief()

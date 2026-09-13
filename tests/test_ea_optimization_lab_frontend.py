@@ -1171,7 +1171,7 @@ process.stdout.write(JSON.stringify({
         self.assertIsNotNone(stylesheet_match)
         self.assertIsNotNone(runtime_match)
         self.assertEqual(stylesheet_match.group(1), runtime_match.group(1))
-        self.assertEqual(runtime_match.group(1), "20260912-ea-factory-guard-v0918")
+        self.assertEqual(runtime_match.group(1), "20260913-ea-factory-3page-state-v0919")
 
 
 if __name__ == "__main__":

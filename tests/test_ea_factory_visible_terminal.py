@@ -131,6 +131,7 @@ class MockVisibleRunner:
     def __init__(self, fixture: "AdapterFixture") -> None:
         self.fixture = fixture
         self.actions: list[str] = []
+        self.payloads: list[dict] = []
         self.drift_post_pid = False
         self.drift_post_window = False
         self.pre_observation_age_seconds = 0
@@ -178,6 +179,7 @@ class MockVisibleRunner:
     def __call__(self, payload: dict, *, response_path: Path, timeout_seconds: int) -> dict:
         action = str(payload["action"])
         self.actions.append(action)
+        self.payloads.append(copy.deepcopy(payload))
         base = {
             "schemaVersion": "ea-factory-visible-powershell-result-v1",
             "ok": True,
@@ -205,7 +207,10 @@ class MockVisibleRunner:
                 {
                     "compileInvoked": True,
                     "exactSourceWindowVerified": True,
+                    "compileWorkingCopyVerified": True,
                     "freshBinaryObserved": True,
+                    "workingSourceSha256": sha256(Path(payload["sourcePath"])),
+                    "workingBinarySha256": sha256(Path(payload["binaryPath"])),
                     "compileResultLine": "Result: 0 errors, 0 warnings",
                 }
             )
@@ -214,6 +219,31 @@ class MockVisibleRunner:
                 {
                     "recoveredWithoutAction": True,
                     "exactSourceWindowVerified": True,
+                    "compileWorkingCopyVerified": True,
+                    "workingSourceSha256": sha256(Path(payload["sourcePath"])),
+                    "workingBinarySha256": sha256(Path(payload["binaryPath"])),
+                    "compileResultLine": "Result: 0 errors, 0 warnings",
+                }
+            )
+        elif action == "recover_inflight_compile":
+            binary_path = Path(payload["binaryPath"])
+            if not binary_path.is_file():
+                raise self.fixture.module.VisibleTerminalAdapterError(
+                    "visible_compile_binary_not_fresh"
+                )
+            screenshot_reused = bool(payload["reuseExistingScreenshot"])
+            if not screenshot_reused:
+                write_png(Path(payload["screenshotPath"]))
+            base.update(
+                {
+                    "compileInvoked": False,
+                    "recoveredWithoutCompile": True,
+                    "exactSourceWindowVerified": True,
+                    "compileWorkingCopyVerified": True,
+                    "freshBinaryObserved": True,
+                    "screenshotReused": screenshot_reused,
+                    "workingSourceSha256": sha256(Path(payload["sourcePath"])),
+                    "workingBinarySha256": sha256(binary_path),
                     "compileResultLine": "Result: 0 errors, 0 warnings",
                 }
             )
@@ -615,6 +645,7 @@ class VisibleTerminalAdapterTests(unittest.TestCase):
     def test_compile_success_and_retry_recovers_without_second_compile(self) -> None:
         adapter = self.fixture.adapter()
         request = self.fixture.request("compile_validate")
+        immutable_source_before = self.fixture.source.read_bytes()
         self.prime(adapter, request)
         first = adapter.compile_handler(request=request)
         self.prime(adapter, request)
@@ -624,9 +655,46 @@ class VisibleTerminalAdapterTests(unittest.TestCase):
             ["probe", "compile", "probe", "recover_compile"],
         )
         self.assertTrue(first["metrics"]["compileExecuted"])
+        self.assertTrue(first["metrics"]["compileWorkingCopyVerified"])
+        self.assertTrue(first["metrics"]["compiledBinaryPublishedFromWorkingCopy"])
+        self.assertTrue(first["metrics"]["immutableSourcePreserved"])
         self.assertFalse(first["metrics"]["recoveredExistingReceipt"])
         self.assertFalse(second["metrics"]["compileExecuted"])
         self.assertTrue(second["metrics"]["recoveredExistingReceipt"])
+        self.assertEqual(self.fixture.source.read_bytes(), immutable_source_before)
+        operation_id = request["visibleOperation"]["operationId"]
+        expected_working_source = (
+            self.fixture.data
+            / "MQL4"
+            / "Experts"
+            / "Metafxclub"
+            / "AgentHQ"
+            / operation_id
+            / f"agenthq_{operation_id.removeprefix('ea-visible-')}.mq4"
+        ).resolve()
+        compile_payload = next(
+            payload
+            for payload in self.fixture.runner.payloads
+            if payload["action"] == "compile"
+        )
+        recovery_payload = next(
+            payload
+            for payload in self.fixture.runner.payloads
+            if payload["action"] == "recover_compile"
+        )
+        self.assertEqual(Path(compile_payload["sourcePath"]), expected_working_source)
+        self.assertEqual(
+            Path(compile_payload["binaryPath"]),
+            expected_working_source.with_suffix(".ex4"),
+        )
+        self.assertEqual(recovery_payload["sourcePath"], compile_payload["sourcePath"])
+        self.assertEqual(recovery_payload["binaryPath"], compile_payload["binaryPath"])
+        self.assertNotEqual(Path(compile_payload["sourcePath"]), self.fixture.source)
+        self.assertEqual(expected_working_source.read_bytes(), immutable_source_before)
+        self.assertEqual(
+            expected_working_source.with_suffix(".ex4").read_bytes(),
+            self.fixture.source.with_suffix(".ex4").read_bytes(),
+        )
         self.assertEqual(
             {item["alias"] for item in second["artifactSpecifications"]},
             {"compiled_binary", "visible_window", "compile_log", "adapter_receipt"},
@@ -639,6 +707,9 @@ class VisibleTerminalAdapterTests(unittest.TestCase):
         text = log_path.read_text(encoding="utf-8")
         self.assertIn("sourceDigest:", text)
         self.assertIn("compiledBinarySha256:", text)
+        self.assertIn("compileWorkingCopyRelativePathSha256:", text)
+        self.assertIn("compiledBinaryPublishedFromWorkingCopy: true", text)
+        self.assertIn("immutableSourcePreserved: true", text)
         self.assertIn("Result: 0 errors, 0 warnings", text)
         recovery_receipt = self.fixture.workspace / next(
             item["relativePath"]
@@ -649,6 +720,40 @@ class VisibleTerminalAdapterTests(unittest.TestCase):
         self.assertEqual(
             payload["schemaVersion"],
             "ea-factory-visible-front-office-receipt-v1",
+        )
+        self.assertTrue(payload["compiledBinaryPublishedFromWorkingCopy"])
+        self.assertTrue(payload["immutableSourcePreserved"])
+        self.assertEqual(
+            payload["compileWorkingBinarySha256"],
+            sha256(self.fixture.source.with_suffix(".ex4")),
+        )
+
+    def test_compile_publication_digest_is_backtest_deployment_lineage(self) -> None:
+        adapter = self.fixture.adapter()
+        compile_request = self.fixture.request("compile_validate")
+        self.prime(adapter, compile_request)
+        compiled = adapter.compile_handler(request=compile_request)
+
+        backtest_request = self.fixture.request("backtest_recheck")
+        self.prime(adapter, backtest_request)
+        backtested = adapter.backtest_handler(request=backtest_request)
+
+        backtest_payload = next(
+            payload
+            for payload in self.fixture.runner.payloads
+            if payload["action"] == "backtest"
+        )
+        self.assertEqual(
+            backtest_payload["expectedDeployedExpertSha256"],
+            compiled["metrics"]["compiledBinarySha256"],
+        )
+        self.assertEqual(
+            backtested["metrics"]["compiledBinarySha256"],
+            compiled["metrics"]["compiledBinarySha256"],
+        )
+        self.assertEqual(
+            sha256(Path(backtest_payload["deployedExpertPath"])),
+            compiled["metrics"]["compiledBinarySha256"],
         )
 
     def test_compile_result_is_rejected_without_fresh_binary_artifact(self) -> None:
@@ -711,6 +816,118 @@ class VisibleTerminalAdapterTests(unittest.TestCase):
         ):
             adapter.compile_handler(request=request)
 
+    def test_compile_never_touches_deleted_immutable_source(self) -> None:
+        original_runner = self.fixture.runner
+
+        def deleting_runner(
+            payload: dict, *, response_path: Path, timeout_seconds: int
+        ) -> dict:
+            result = original_runner(
+                payload,
+                response_path=response_path,
+                timeout_seconds=timeout_seconds,
+            )
+            if payload["action"] == "compile":
+                self.fixture.source.unlink()
+            return result
+
+        adapter = self.fixture.adapter()
+        adapter._powershell_runner = deleting_runner
+        request = self.fixture.request("compile_validate")
+        self.prime(adapter, request)
+        with self.assertRaises(self.module.VisibleTerminalAdapterError) as error:
+            adapter.compile_handler(request=request)
+        self.assertEqual(
+            error.exception.code,
+            "immutable_source_missing_during_visible_compile",
+        )
+        self.assertFalse(self.fixture.source.with_suffix(".ex4").exists())
+
+    def test_working_source_hardlink_is_rejected(self) -> None:
+        original_runner = self.fixture.runner
+
+        def hardlink_source_runner(
+            payload: dict, *, response_path: Path, timeout_seconds: int
+        ) -> dict:
+            result = original_runner(
+                payload,
+                response_path=response_path,
+                timeout_seconds=timeout_seconds,
+            )
+            if payload["action"] == "compile":
+                working_source = Path(payload["sourcePath"])
+                working_source.unlink()
+                os.link(self.fixture.source, working_source)
+            return result
+
+        adapter = self.fixture.adapter()
+        adapter._powershell_runner = hardlink_source_runner
+        request = self.fixture.request("compile_validate")
+        self.prime(adapter, request)
+        with self.assertRaises(self.module.VisibleTerminalAdapterError) as error:
+            adapter.compile_handler(request=request)
+        self.assertEqual(
+            error.exception.code,
+            "compile_working_source_hardlink_rejected",
+        )
+        self.assertFalse(self.fixture.source.with_suffix(".ex4").exists())
+
+    def test_working_binary_hardlink_is_rejected(self) -> None:
+        original_runner = self.fixture.runner
+
+        def hardlink_binary_runner(
+            payload: dict, *, response_path: Path, timeout_seconds: int
+        ) -> dict:
+            result = original_runner(
+                payload,
+                response_path=response_path,
+                timeout_seconds=timeout_seconds,
+            )
+            if payload["action"] == "compile":
+                working_binary = Path(payload["binaryPath"])
+                os.link(working_binary, working_binary.with_suffix(".alias"))
+            return result
+
+        adapter = self.fixture.adapter()
+        adapter._powershell_runner = hardlink_binary_runner
+        request = self.fixture.request("compile_validate")
+        self.prime(adapter, request)
+        with self.assertRaises(self.module.VisibleTerminalAdapterError) as error:
+            adapter.compile_handler(request=request)
+        self.assertEqual(
+            error.exception.code,
+            "compile_working_binary_hardlink_rejected",
+        )
+        self.assertFalse(self.fixture.source.with_suffix(".ex4").exists())
+
+    def test_compile_working_root_reparse_is_rejected_before_mutation(self) -> None:
+        experts = self.fixture.data / "MQL4" / "Experts"
+        outside = self.fixture.root / "outside-working-root"
+        outside.mkdir()
+        link = experts / "Metafxclub"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"directory symlink unavailable: {error}")
+        adapter = self.fixture.adapter()
+        request = self.fixture.request("compile_validate")
+        self.prime(adapter, request)
+        with self.assertRaises(self.module.VisibleTerminalAdapterError) as error:
+            adapter.compile_handler(request=request)
+        self.assertEqual(error.exception.code, "compile_working_copy_path_unsafe")
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_published_binary_collision_is_not_overwritten(self) -> None:
+        published = self.fixture.source.with_suffix(".ex4")
+        published.write_bytes(b"existing-different-binary")
+        adapter = self.fixture.adapter()
+        request = self.fixture.request("compile_validate")
+        self.prime(adapter, request)
+        with self.assertRaises(self.module.VisibleTerminalAdapterError) as error:
+            adapter.compile_handler(request=request)
+        self.assertEqual(error.exception.code, "compiled_binary_publish_collision")
+        self.assertEqual(published.read_bytes(), b"existing-different-binary")
+
     def test_long_visible_operation_keeps_pre_binding_but_requires_fresh_post_binding(self) -> None:
         adapter = self.fixture.adapter()
         request = self.fixture.request("compile_validate")
@@ -719,6 +936,192 @@ class VisibleTerminalAdapterTests(unittest.TestCase):
         result = adapter.compile_handler(request=request)
         self.assertTrue(result["metrics"]["compileVerified"])
         self.assertEqual(self.fixture.runner.actions, ["probe", "compile"])
+
+    def test_terminal_title_chart_suffix_change_preserves_stable_process_binding(self) -> None:
+        stable = "63441916: RoboForex-DemoPro - Demo Account - RoboForex Ltd"
+        before_title = f"{stable} - [XAUUSD,M5]"
+        after_title = f"{stable} - [GBPUSD,H1 (visual)]"
+        before = self.fixture.runner.binding("backtest_recheck")
+        after = self.fixture.runner.binding("backtest_recheck", post=True)
+        before["terminalWindowTitle"] = before_title
+        after["terminalWindowTitle"] = after_title
+        target = {**self.fixture.target, **self.fixture.binding}
+
+        process_binding, post_binding = self.module._binding_pair(
+            {
+                "processBinding": before,
+                "postProcessBinding": after,
+            },
+            target=target,
+            stage_id="backtest_recheck",
+            maximum_operation_seconds=30,
+        )
+
+        expected_digest = self.module._terminal_window_title_identity_digest(before_title)
+        self.assertEqual(
+            self.module._terminal_window_title_identity(before_title),
+            (stable, True),
+        )
+        self.assertEqual(
+            self.module._terminal_window_title_identity(after_title),
+            (stable, True),
+        )
+        self.assertEqual(process_binding["terminalWindowTitleSha256"], expected_digest)
+        self.assertEqual(
+            post_binding["terminalWindowTitleSha256"],
+            expected_digest,
+        )
+        self.assertNotEqual(expected_digest, self.module._sha256_text(before_title))
+        self.assertEqual(process_binding["terminalCandidateId"], "mtc-robo-mt4")
+        self.assertEqual(process_binding["terminalSelectionRevision"], 7)
+        self.assertEqual(process_binding["terminalBindingDigest"], "a" * 64)
+        self.assertNotIn("terminalStableWindowTitleSha256", process_binding)
+
+    def test_terminal_title_stable_prefix_drift_is_rejected(self) -> None:
+        stable = "63441916: RoboForex-DemoPro - Demo Account - RoboForex Ltd"
+        changed_prefixes = (
+            "73441916: RoboForex-DemoPro - Demo Account - RoboForex Ltd",
+            "63441916: RoboForex-Pro - Demo Account - RoboForex Ltd",
+            "63441916: RoboForex-DemoPro - Live Account - RoboForex Ltd",
+        )
+        target = {**self.fixture.target, **self.fixture.binding}
+        for changed in changed_prefixes:
+            with self.subTest(changed=changed):
+                before = self.fixture.runner.binding("backtest_recheck")
+                after = self.fixture.runner.binding("backtest_recheck", post=True)
+                before["terminalWindowTitle"] = f"{stable} - [XAUUSD,M5]"
+                after["terminalWindowTitle"] = f"{changed} - [GBPUSD,H1 (visual)]"
+                with self.assertRaises(self.module.VisibleTerminalAdapterError) as error:
+                    self.module._binding_pair(
+                        {
+                            "processBinding": before,
+                            "postProcessBinding": after,
+                        },
+                        target=target,
+                        stage_id="backtest_recheck",
+                        maximum_operation_seconds=30,
+                    )
+                self.assertEqual(error.exception.code, "process_binding_drift")
+
+    def test_terminal_title_parser_rejects_ambiguous_or_unsafe_shapes(self) -> None:
+        self.assertEqual(
+            self.module._terminal_window_title_identity("DemoPro - EURUSD,H1"),
+            ("DemoPro - EURUSD,H1", False),
+        )
+        invalid_titles = (
+            None,
+            "",
+            " ",
+            " Prefix",
+            "Prefix ",
+            "Prefix\n",
+            "Prefix\u202e",
+            "Prefix - []",
+            "Prefix - [ ]",
+            "Prefix - [XAUUSD,M5",
+            "Prefix - XAUUSD,M5]",
+            "Prefix - [XAUUSD,M5]]",
+            "Prefix - [X[AU]USD,M5]",
+            "Prefix - [one] - [two]",
+            "Prefix - [XAU\nUSD,M5]",
+            "Prefix - [XAU\u202eUSD,M5]",
+            "A" * (self.module.MAX_TERMINAL_WINDOW_TITLE_CHARS + 1),
+            "A" * (self.module.MAX_TERMINAL_STABLE_TITLE_CHARS + 1) + " - [X]",
+            "Prefix - [" + "X" * (self.module.MAX_TERMINAL_CHART_SUFFIX_CHARS + 1) + "]",
+        )
+        for title in invalid_titles:
+            with self.subTest(title=repr(title)[:80]):
+                with self.assertRaises(self.module.VisibleTerminalAdapterError) as error:
+                    self.module._terminal_window_title_identity(title)
+                self.assertEqual(
+                    error.exception.code,
+                    "process_binding_terminal_title_invalid",
+                )
+
+    def test_terminal_title_one_sided_suffix_or_exact_title_drift_is_rejected(self) -> None:
+        stable = "63441916: RoboForex-DemoPro - Demo Account - RoboForex Ltd"
+        title_pairs = (
+            (f"{stable} - [XAUUSD,M5]", stable),
+            (stable, f"{stable} - [GBPUSD,H1 (visual)]"),
+            ("DemoPro - EURUSD,H1", "DemoPro - GBPUSD,H1"),
+        )
+        target = {**self.fixture.target, **self.fixture.binding}
+        for before_title, after_title in title_pairs:
+            with self.subTest(before=before_title, after=after_title):
+                before = self.fixture.runner.binding("backtest_recheck")
+                after = self.fixture.runner.binding("backtest_recheck", post=True)
+                before["terminalWindowTitle"] = before_title
+                after["terminalWindowTitle"] = after_title
+                with self.assertRaises(self.module.VisibleTerminalAdapterError) as error:
+                    self.module._binding_pair(
+                        {
+                            "processBinding": before,
+                            "postProcessBinding": after,
+                        },
+                        target=target,
+                        stage_id="backtest_recheck",
+                        maximum_operation_seconds=30,
+                    )
+                self.assertEqual(error.exception.code, "process_binding_drift")
+
+    def test_process_binding_still_rejects_all_non_title_identity_drift(self) -> None:
+        target = {**self.fixture.target, **self.fixture.binding}
+        raw = self.fixture.runner.binding("backtest_recheck")
+        base = self.module._fresh_raw_binding(
+            raw,
+            target=target,
+            stage_id="backtest_recheck",
+        )
+        compared_fields = (
+            "terminalProcessId",
+            "frontOfficeProcessId",
+            "terminalWindowHandle",
+            "frontOfficeWindowHandle",
+            "terminalExecutableSha256",
+            "frontOfficeExecutableSha256",
+            "terminalWindowClassSha256",
+            "frontOfficeWindowTitleSha256",
+            "frontOfficeWindowClassSha256",
+            "frontOfficeKind",
+        )
+        for field in compared_fields:
+            with self.subTest(field=field):
+                post = copy.deepcopy(base)
+                post[field] = (
+                    int(post[field]) + 1
+                    if isinstance(post[field], int)
+                    else ("b" * 64 if str(post[field]) != "b" * 64 else "c" * 64)
+                )
+                with mock.patch.object(
+                    self.module,
+                    "_fresh_raw_binding",
+                    side_effect=[copy.deepcopy(base), post],
+                ):
+                    with self.assertRaises(self.module.VisibleTerminalAdapterError) as error:
+                        self.module._binding_pair(
+                            {
+                                "processBinding": {"autoTradingState": False},
+                                "postProcessBinding": {"autoTradingState": False},
+                            },
+                            target=target,
+                            stage_id="backtest_recheck",
+                            maximum_operation_seconds=30,
+                        )
+                self.assertEqual(error.exception.code, "process_binding_drift")
+
+        after = self.fixture.runner.binding("backtest_recheck", post=True)
+        after["autoTradingState"] = True
+        with self.assertRaises(self.module.VisibleTerminalAdapterError) as error:
+            self.module._binding_pair(
+                {
+                    "processBinding": raw,
+                    "postProcessBinding": after,
+                },
+                target=target,
+                stage_id="backtest_recheck",
+                maximum_operation_seconds=30,
+            )
+        self.assertEqual(error.exception.code, "process_binding_drift")
 
     def test_recreated_terminal_window_is_rejected_even_with_same_process(self) -> None:
         adapter = self.fixture.adapter()
@@ -729,13 +1132,19 @@ class VisibleTerminalAdapterTests(unittest.TestCase):
             adapter.compile_handler(request=request)
         self.assertEqual(error.exception.code, "process_binding_drift")
 
-    def test_incomplete_compile_intent_never_clicks_compile_twice(self) -> None:
+    def test_incomplete_compile_intent_reconciles_without_second_compile(self) -> None:
         calls: list[str] = []
 
         def crashing_runner(payload: dict, *, response_path: Path, timeout_seconds: int):
             action = str(payload["action"])
             calls.append(action)
             if action == "probe":
+                return self.fixture.runner(
+                    payload,
+                    response_path=response_path,
+                    timeout_seconds=timeout_seconds,
+                )
+            if action == "recover_inflight_compile":
                 return self.fixture.runner(
                     payload,
                     response_path=response_path,
@@ -755,8 +1164,182 @@ class VisibleTerminalAdapterTests(unittest.TestCase):
             adapter.compile_handler(request=request)
         with self.assertRaises(self.module.VisibleTerminalAdapterError) as retry:
             adapter.compile_handler(request=request)
-        self.assertEqual(retry.exception.code, "visible_action_state_uncertain")
+        self.assertEqual(retry.exception.code, "visible_compile_binary_not_fresh")
         self.assertEqual(calls.count("compile"), 1)
+        self.assertEqual(calls.count("recover_inflight_compile"), 1)
+
+    def test_timeout_after_binary_recovers_without_second_compile(self) -> None:
+        calls: list[str] = []
+        first_compile = True
+
+        def timeout_after_binary_runner(
+            payload: dict, *, response_path: Path, timeout_seconds: int
+        ) -> dict:
+            nonlocal first_compile
+            action = str(payload["action"])
+            calls.append(action)
+            if action == "compile" and first_compile:
+                first_compile = False
+                Path(payload["binaryPath"]).write_bytes(b"compiled-after-timeout")
+                raise RuntimeError("simulated wrapper timeout after Compile")
+            return self.fixture.runner(
+                payload,
+                response_path=response_path,
+                timeout_seconds=timeout_seconds,
+            )
+
+        adapter = self.module.create_visible_front_office_adapter(
+            target_resolver=lambda **_kwargs: copy.deepcopy(self.fixture.target),
+            compile_verifier=self.module.verify_visible_metaeditor_compile,
+            backtest_verifier=self.module.verify_mt4_tester_report,
+            powershell_runner=timeout_after_binary_runner,
+        )
+        request = self.fixture.request("compile_validate")
+        immutable_before = self.fixture.source.read_bytes()
+        self.prime(adapter, request)
+        with self.assertRaisesRegex(RuntimeError, "wrapper timeout"):
+            adapter.compile_handler(request=request)
+
+        self.prime(adapter, request)
+        recovered = adapter.compile_handler(request=request)
+
+        self.assertEqual(calls.count("compile"), 1)
+        self.assertEqual(calls.count("recover_inflight_compile"), 1)
+        self.assertTrue(recovered["metrics"]["compileExecuted"])
+        self.assertFalse(recovered["metrics"]["compileIssuedByCurrentAttempt"])
+        self.assertTrue(recovered["metrics"]["recoveredInflightCompile"])
+        self.assertEqual(self.fixture.source.read_bytes(), immutable_before)
+        self.assertEqual(
+            self.fixture.source.with_suffix(".ex4").read_bytes(),
+            b"compiled-after-timeout",
+        )
+
+    def test_partial_timeout_artifact_is_not_published_or_recompiled(self) -> None:
+        calls: list[str] = []
+
+        def partial_artifact_runner(
+            payload: dict, *, response_path: Path, timeout_seconds: int
+        ) -> dict:
+            action = str(payload["action"])
+            calls.append(action)
+            if action == "probe":
+                return self.fixture.runner(
+                    payload,
+                    response_path=response_path,
+                    timeout_seconds=timeout_seconds,
+                )
+            if action == "compile":
+                Path(payload["binaryPath"]).write_bytes(b"partial")
+                raise RuntimeError("simulated timeout with partial artifact")
+            if action == "recover_inflight_compile":
+                raise self.module.VisibleTerminalAdapterError(
+                    "metaeditor_compile_result_unreadable"
+                )
+            raise AssertionError(action)
+
+        adapter = self.module.create_visible_front_office_adapter(
+            target_resolver=lambda **_kwargs: copy.deepcopy(self.fixture.target),
+            compile_verifier=self.module.verify_visible_metaeditor_compile,
+            backtest_verifier=self.module.verify_mt4_tester_report,
+            powershell_runner=partial_artifact_runner,
+        )
+        request = self.fixture.request("compile_validate")
+        self.prime(adapter, request)
+        with self.assertRaisesRegex(RuntimeError, "partial artifact"):
+            adapter.compile_handler(request=request)
+        self.prime(adapter, request)
+        with self.assertRaises(self.module.VisibleTerminalAdapterError) as error:
+            adapter.compile_handler(request=request)
+        self.assertEqual(error.exception.code, "metaeditor_compile_result_unreadable")
+        self.assertEqual(calls.count("compile"), 1)
+        self.assertEqual(calls.count("recover_inflight_compile"), 1)
+        self.assertFalse(self.fixture.source.with_suffix(".ex4").exists())
+
+    def test_recovery_screenshot_checkpoint_is_reused_after_crash(self) -> None:
+        calls: list[dict] = []
+        initial_failed = False
+        recovery_failed = False
+
+        def checkpoint_crash_runner(
+            payload: dict, *, response_path: Path, timeout_seconds: int
+        ) -> dict:
+            nonlocal initial_failed, recovery_failed
+            calls.append(copy.deepcopy(payload))
+            action = str(payload["action"])
+            if action == "compile" and not initial_failed:
+                initial_failed = True
+                Path(payload["binaryPath"]).write_bytes(b"compiled-checkpoint")
+                raise RuntimeError("lost after compile")
+            result = self.fixture.runner(
+                payload,
+                response_path=response_path,
+                timeout_seconds=timeout_seconds,
+            )
+            if action == "recover_inflight_compile" and not recovery_failed:
+                recovery_failed = True
+                raise RuntimeError("lost after recovery screenshot")
+            return result
+
+        adapter = self.module.create_visible_front_office_adapter(
+            target_resolver=lambda **_kwargs: copy.deepcopy(self.fixture.target),
+            compile_verifier=self.module.verify_visible_metaeditor_compile,
+            backtest_verifier=self.module.verify_mt4_tester_report,
+            powershell_runner=checkpoint_crash_runner,
+        )
+        request = self.fixture.request("compile_validate")
+        self.prime(adapter, request)
+        with self.assertRaisesRegex(RuntimeError, "after compile"):
+            adapter.compile_handler(request=request)
+        self.prime(adapter, request)
+        with self.assertRaisesRegex(RuntimeError, "recovery screenshot"):
+            adapter.compile_handler(request=request)
+        self.prime(adapter, request)
+        recovered = adapter.compile_handler(request=request)
+
+        compile_calls = [item for item in calls if item["action"] == "compile"]
+        recovery_calls = [
+            item for item in calls if item["action"] == "recover_inflight_compile"
+        ]
+        self.assertEqual(len(compile_calls), 1)
+        self.assertEqual(len(recovery_calls), 2)
+        self.assertFalse(recovery_calls[0]["reuseExistingScreenshot"])
+        self.assertTrue(recovery_calls[1]["reuseExistingScreenshot"])
+        self.assertTrue(recovered["metrics"]["compileExecuted"])
+        self.assertTrue(recovered["metrics"]["recoveredInflightCompile"])
+        self.assertTrue(recovered["metrics"]["compileScreenshotReusedExactEvidence"])
+
+    def test_compile_log_checkpoint_is_reused_after_receipt_crash(self) -> None:
+        adapter = self.fixture.adapter()
+        request = self.fixture.request("compile_validate")
+        original_write = self.module._write_exclusive
+        crashed = False
+
+        def crash_before_receipt(path: Path, payload: bytes, code: str) -> None:
+            nonlocal crashed
+            if code == "visible_receipt_already_exists" and not crashed:
+                crashed = True
+                raise RuntimeError("lost before compile receipt")
+            original_write(path, payload, code)
+
+        self.prime(adapter, request)
+        with mock.patch.object(
+            self.module,
+            "_write_exclusive",
+            side_effect=crash_before_receipt,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "compile receipt"):
+                adapter.compile_handler(request=request)
+
+        self.prime(adapter, request)
+        recovered = adapter.compile_handler(request=request)
+
+        self.assertEqual(self.fixture.runner.actions.count("compile"), 1)
+        self.assertEqual(
+            self.fixture.runner.actions.count("recover_inflight_compile"),
+            1,
+        )
+        self.assertTrue(recovered["metrics"]["compileLogReusedExactBytes"])
+        self.assertTrue(recovered["metrics"]["compileScreenshotReusedExactEvidence"])
 
     def test_backtest_pre_start_intent_retries_same_operation_safely(self) -> None:
         self.fixture.source.with_suffix(".ex4").write_bytes(b"compiled-ex4-v1")
@@ -2169,6 +2752,50 @@ void OnTick(){
             + self.module.POWERSHELL_COMPLETION_MARGIN_SECONDS,
         )
 
+    def test_compile_wrapper_grace_preserves_inner_timeout_failure_code(self) -> None:
+        response = Path(self.temporary.name) / "compile-ui-response.json"
+        observed: dict[str, int] = {}
+
+        def fake_run(*_args, **kwargs):
+            observed["timeout"] = int(kwargs["timeout"])
+            response.write_text(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "reasonCode": "visible_compile_binary_not_fresh",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return mock.Mock(returncode=1, stdout=b"", stderr=b"")
+
+        with (
+            mock.patch.object(
+                self.module,
+                "_powershell_executable",
+                return_value=Path(
+                    "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+                ),
+            ),
+            mock.patch.object(self.module.subprocess, "run", side_effect=fake_run),
+        ):
+            with self.assertRaises(self.module.VisibleTerminalAdapterError) as error:
+                self.module._default_powershell_runner(
+                    {"platform": "mt4", "action": "compile"},
+                    response_path=response,
+                    timeout_seconds=self.module.DEFAULT_UI_TIMEOUT_SECONDS,
+                )
+        self.assertEqual(error.exception.code, "visible_compile_binary_not_fresh")
+        self.assertEqual(
+            observed["timeout"],
+            self.module.DEFAULT_UI_TIMEOUT_SECONDS
+            + self.module.POWERSHELL_COMPILE_COMPLETION_MARGIN_SECONDS,
+        )
+        self.assertGreater(
+            observed["timeout"],
+            self.module.DEFAULT_UI_TIMEOUT_SECONDS,
+        )
+
     def test_powershell_contract_has_bounded_visible_safety_controls(self) -> None:
         source = POWERSHELL_PATH.read_text(encoding="utf-8")
         for prohibited in (
@@ -2192,6 +2819,7 @@ void OnTick(){
             '"4011"',
             '"4012"',
             "recover_compile",
+            "recover_inflight_compile",
             "recover_inflight_backtest",
             "recover_completed_backtest",
             "recover_collected_backtest",
@@ -2210,6 +2838,14 @@ void OnTick(){
             "Test-TesterInputReadbackSet",
             "Write-DurableStartBoundary",
             "Assert-DeployedExpertDigest",
+            "Assert-CompileWorkingCopy",
+            "Assert-SingleFileLink",
+            "Assert-NoReparsePathComponents",
+            "GetFileLinkCount",
+            '"agenthq_{0}.mq4"',
+            "compileWorkingCopyVerified = $true",
+            "workingSourceSha256",
+            "workingBinarySha256",
             "FileMode]::CreateNew",
             "FileOptions]::WriteThrough",
             "Flush($true)",
@@ -2242,6 +2878,9 @@ void OnTick(){
             "$attachedForeground",
         ):
             self.assertIn(required, source)
+        self.assertGreaterEqual(source.count("compileWorkingCopyVerified = $true"), 3)
+        self.assertGreaterEqual(source.count("workingSourceSha256 ="), 3)
+        self.assertGreaterEqual(source.count("workingBinarySha256 ="), 3)
 
         unique_start = source.index("function Get-UniqueControl(")
         unique_end = source.index("\nfunction ", unique_start + 1)
@@ -2393,6 +3032,32 @@ void OnTick(){
         self.assertIn("IsWindow($propertiesHandle)", apply_contract)
         self.assertNotRegex(apply_contract, r"catch\s*\{[\s\S]*?testerInputPresetApplied\s*=\s*\$true")
 
+    def test_powershell_backtest_reactivates_settings_before_idle_and_refresh(self) -> None:
+        source = POWERSHELL_PATH.read_text(encoding="utf-8")
+        branch_start = source.index('if ($request.action -eq "backtest")')
+        branch = source[branch_start:]
+
+        ensure_visible = branch.index("Ensure-TesterVisible $terminal")
+        no_modal = branch.index("Assert-NoModal", ensure_visible)
+        settings_checkpoint = branch.index(
+            '$checkpoint = "tester_settings_surface"', no_modal
+        )
+        select_settings = branch.index(
+            "$tester = Select-TesterSettingsTab", settings_checkpoint
+        )
+        idle_checkpoint = branch.index('$checkpoint = "tester_idle"', select_settings)
+        start_readback = branch.index("Get-TesterStartButton", idle_checkpoint)
+        refresh = branch.index("Refresh-ExpertInventory", start_readback)
+
+        self.assertLess(ensure_visible, no_modal)
+        self.assertLess(no_modal, settings_checkpoint)
+        self.assertLess(settings_checkpoint, select_settings)
+        self.assertLess(select_settings, idle_checkpoint)
+        self.assertLess(idle_checkpoint, start_readback)
+        self.assertLess(start_readback, refresh)
+        self.assertNotIn("catch", branch[settings_checkpoint:idle_checkpoint])
+        self.assertNotIn("Get-TesterPane", branch[settings_checkpoint:idle_checkpoint])
+
     def test_powershell_refreshes_the_exact_operation_not_a_stale_basename(self) -> None:
         source = POWERSHELL_PATH.read_text(encoding="utf-8")
         refresh_start = source.index("function Refresh-ExpertInventory(")
@@ -2458,18 +3123,47 @@ void OnTick(){
 
     def test_powershell_commits_exact_expert_through_the_visible_exact_tree_path(self) -> None:
         source = POWERSHELL_PATH.read_text(encoding="utf-8")
+        msaa_start = source.index("public static class MetafxVisibleMsaa")
+        msaa_end = source.index('"@ -ReferencedAssemblies @("Accessibility.dll")', msaa_start)
+        msaa_contract = source[msaa_start:msaa_end]
+        self.assertIn("ReadHierarchyLevel", msaa_contract)
+        self.assertIn("ReadFlatTreeItems", msaa_contract)
+        self.assertIn("get_accValue", msaa_contract)
+        self.assertIn("MaximumNodes", msaa_contract)
+        self.assertIn("MaximumDepth", msaa_contract)
+        self.assertIn(
+            "while (stack.Count > 0 && stack[stack.Count - 1].Level >= level)",
+            msaa_contract,
+        )
+        self.assertIn("candidate.Level != baseLevel + offset", msaa_contract)
+        self.assertNotIn("NAVDIR_LEFT", msaa_contract)
+        self.assertNotIn("accNavigate", msaa_contract)
+
         select_start = source.index("function Select-ExactExpert(")
         select_end = source.index("\nfunction ", select_start + 1)
         contract = source[select_start:select_end]
         self.assertIn("CB_SHOWDROPDOWN", contract)
         self.assertIn('"SysTreeView32"', contract)
-        self.assertIn('$folderPath = @("Metafxclub", "AgentHQ", $operationFolder)', contract)
+        self.assertIn('[string[]]@("Metafxclub")', contract)
+        self.assertIn('[string[]]@("Metafxclub", "AgentHQ")', contract)
+        self.assertIn(
+            '[string[]]@("Metafxclub", "AgentHQ", $operationFolder)',
+            contract,
+        )
         self.assertIn(
             '$expertPath = @("Metafxclub", "AgentHQ", $operationFolder, $FileName)',
             contract,
         )
         self.assertIn("CountExactPath($pickerHandle, $expertPath)", contract)
-        self.assertIn("SelectUniqueExactPath($pickerHandle, $folderPath)", contract)
+        self.assertIn("foreach ($folderPrefix in $folderPrefixes)", contract)
+        self.assertIn("CountExactPath($pickerHandle, $prefixPath)", contract)
+        self.assertIn("SelectUniqueExactPath($pickerHandle, $prefixPath)", contract)
+        self.assertIn("IsUniqueExactPathSelected($pickerHandle, $prefixPath)", contract)
+        self.assertIn("$attemptsRemaining--", contract)
+        self.assertIn('Stop-Adapter "expert_picker_folder_ambiguous"', contract)
+        self.assertIn('Stop-Adapter "expert_picker_folder_unavailable"', contract)
+        self.assertIn('Stop-Adapter "expert_picker_leaf_ambiguous"', contract)
+        self.assertIn('Stop-Adapter "expert_picker_leaf_unavailable"', contract)
         self.assertIn("Send-BalancedKey $pickerHandle 0x27", contract)
         self.assertIn("SelectUniqueExactPath($pickerHandle, $expertPath)", contract)
         self.assertIn("IsUniqueExactPathSelected($pickerHandle, $expertPath)", contract)
@@ -2479,12 +3173,44 @@ void OnTick(){
         self.assertNotIn("$readback.edit", contract)
         self.assertLess(
             contract.index("CB_SHOWDROPDOWN"),
+            contract.index("foreach ($folderPrefix in $folderPrefixes)"),
+        )
+        self.assertLess(
+            contract.index("foreach ($folderPrefix in $folderPrefixes)"),
             contract.index("SelectUniqueExactPath($pickerHandle, $expertPath)"),
         )
         self.assertLess(
             contract.index("IsUniqueExactPathSelected($pickerHandle, $expertPath)"),
             contract.index("Send-BalancedKey $pickerHandle 0x0D"),
         )
+
+    def test_powershell_materializes_lazy_picker_prefixes_before_leaf_selection(self) -> None:
+        source = POWERSHELL_PATH.read_text(encoding="utf-8")
+        select_start = source.index("function Select-ExactExpert(")
+        select_end = source.index("\nfunction ", select_start + 1)
+        contract = source[select_start:select_end]
+
+        root_prefix = contract.index('[string[]]@("Metafxclub")')
+        agent_prefix = contract.index('[string[]]@("Metafxclub", "AgentHQ")')
+        operation_prefix = contract.index(
+            '[string[]]@("Metafxclub", "AgentHQ", $operationFolder)'
+        )
+        prefix_loop = contract.index("foreach ($folderPrefix in $folderPrefixes)")
+        expand_prefix = contract.index("Send-BalancedKey $pickerHandle 0x27")
+        leaf_loop = contract.index("[bool]$leafSelected = $false")
+
+        self.assertLess(root_prefix, agent_prefix)
+        self.assertLess(agent_prefix, operation_prefix)
+        self.assertLess(operation_prefix, prefix_loop)
+        self.assertLess(prefix_loop, expand_prefix)
+        self.assertLess(expand_prefix, leaf_loop)
+        self.assertEqual(contract.count("[int]$attemptsRemaining = $MaximumSteps"), 1)
+        self.assertEqual(contract.count("$attemptsRemaining--"), 2)
+        self.assertEqual(contract.count("Send-BalancedKey $pickerHandle 0x27"), 1)
+        self.assertIn("Start-Sleep -Milliseconds 50", contract[prefix_loop:expand_prefix])
+        self.assertNotIn('CountExactName($pickerHandle, $FileName)', contract)
+        self.assertNotIn('SelectUniqueExact($pickerHandle, $FileName)', contract)
+        self.assertNotIn('"Loading"', contract)
 
     def test_powershell_modal_buttons_are_posted_then_observed(self) -> None:
         source = POWERSHELL_PATH.read_text(encoding="utf-8")
@@ -2511,6 +3237,22 @@ void OnTick(){
         self.assertLess(properties_click, properties_wait)
         self.assertLess(load_click, load_wait)
         self.assertLess(save_click, save_wait)
+        properties_handle = contract.index("[IntPtr]$propertiesHandle")
+        guarded_work = contract.index("try {", properties_handle)
+        cleanup = contract.index(
+            "Close-ExactOwnedFileDialogAfterFailure",
+            save_wait,
+        )
+        rethrow = contract.index("throw", cleanup)
+        self.assertLess(properties_handle, guarded_work)
+        self.assertLess(guarded_work, load_click)
+        self.assertLess(load_wait, save_click)
+        self.assertLess(save_wait, cleanup)
+        self.assertLess(cleanup, rethrow)
+        self.assertIn("$properties `", contract[cleanup:rethrow])
+        self.assertIn("$propertiesHandle `", contract[cleanup:rethrow])
+        self.assertIn("$ProcessId)", contract[cleanup:rethrow])
+        self.assertNotIn("throw $", contract[cleanup:])
 
     def test_powershell_selects_inputs_tab_by_semantic_name_across_mt4_variants(self) -> None:
         source = POWERSHELL_PATH.read_text(encoding="utf-8")
@@ -2548,6 +3290,37 @@ void OnTick(){
             'Read-SelectedNativeComboValue $tester ([int]$terminal.Process.Id) "4027"',
             recovery,
         )
+
+    def test_receipt_recovery_reactivates_settings_without_starting_again(self) -> None:
+        source = POWERSHELL_PATH.read_text(encoding="utf-8")
+        recovery_start = source.index('if ($request.action -eq "recover_backtest")')
+        recovery_end = source.index(
+            'if ($request.action -eq "compile")',
+            recovery_start,
+        )
+        recovery = source[recovery_start:recovery_end]
+
+        self.assertEqual(recovery.count("Select-TesterSettingsTab"), 2)
+        first_settings = recovery.index("Select-TesterSettingsTab")
+        start_readback = recovery.index("Get-TesterStartButton", first_settings)
+        expert_readback = recovery.index("Read-ExpertSelection", start_readback)
+        post_terminal = recovery.index("$terminalPost = Get-ExistingVisibleProcess")
+        second_settings = recovery.index("Select-TesterSettingsTab", post_terminal)
+        post_binding = recovery.index("New-RawBinding", second_settings)
+        self.assertLess(first_settings, start_readback)
+        self.assertLess(start_readback, expert_readback)
+        self.assertLess(post_terminal, second_settings)
+        self.assertLess(second_settings, post_binding)
+
+        for forbidden in (
+            "Invoke-StartButton",
+            "Start Strategy Tester",
+            "startInvoked = $true",
+            "executionObservedRunning = $true",
+        ):
+            self.assertNotIn(forbidden, recovery)
+        self.assertIn("recoveredWithoutAction = $true", recovery)
+        self.assertIn("settingsStillVerified = $true", recovery)
 
     def test_powershell_validates_period_and_model_selected_items_not_labels(self) -> None:
         source = POWERSHELL_PATH.read_text(encoding="utf-8")
@@ -2797,10 +3570,22 @@ void OnTick(){
 
     def test_powershell_targets_only_the_exact_file_name_edit(self) -> None:
         source = POWERSHELL_PATH.read_text(encoding="utf-8")
+        native_label_start = source.index("function Test-NativeFileNameLabel(")
+        native_label_end = source.index("\nfunction ", native_label_start + 1)
+        native_label = source[native_label_start:native_label_end]
+        self.assertIn("$normalized.IndexOf([char]0x26)", native_label)
+        self.assertIn(
+            "$normalized.IndexOf([char]0x26, $acceleratorIndex + 1)",
+            native_label,
+        )
+        self.assertIn("$normalized.Remove($acceleratorIndex, 1)", native_label)
+        self.assertIn("return Test-FileNameLabel $normalized", native_label)
+
         helper_start = source.index("function Get-FileDialogFileNameBinding(")
         helper_end = source.index("\nfunction ", helper_start + 1)
         helper = source[helper_start:helper_end]
         self.assertIn('Find-DescendantsById $Dialog "1001"', helper)
+        self.assertIn('Find-DescendantsById $Dialog "1148"', helper)
         self.assertIn('Find-DescendantsById $Dialog "1152"', helper)
         self.assertIn('[string]$candidate.Current.ClassName -ne "Edit"', helper)
         self.assertIn("$candidate.Current.ProcessId", helper)
@@ -2817,13 +3602,62 @@ void OnTick(){
         self.assertIn("$eligibleByHandle[$key]", helper)
         self.assertNotIn('foreach ($automationId in @(\"1148\", \"1001\"))', helper)
 
+        nested_start = helper.index('$nativeId -eq 1148')
+        classic_start = helper.index('# A classic common dialog', nested_start)
+        nested = helper[nested_start:classic_start]
+        self.assertIn('[string]$candidate.Current.AutomationId -eq "1148"', nested)
+        self.assertIn(
+            '$candidate.Current.ControlType -eq '
+            '[System.Windows.Automation.ControlType]::Pane',
+            nested,
+        )
+        self.assertIn('(Get-WindowClass $comboHandle) -eq "ComboBox"', nested)
+        self.assertIn('GetDlgCtrlID($comboHandle) -eq 1148', nested)
+        self.assertIn('(Get-WindowClass $comboExHandle) -eq "ComboBoxEx32"', nested)
+        self.assertIn('GetDlgCtrlID($comboExHandle) -eq 1148', nested)
+        self.assertIn('GetParent($comboExHandle) -eq $dialogHandle', nested)
+        self.assertGreaterEqual(
+            nested.count('[System.Windows.Automation.ControlType]::Pane'),
+            3,
+        )
+        self.assertIn('[string]$comboHost.Current.AutomationId -eq "1148"', nested)
+        self.assertIn('[string]$comboExHost.Current.AutomationId -eq "1148"', nested)
+        self.assertNotIn(
+            '$comboHost.Current.ControlType -eq '
+            '[System.Windows.Automation.ControlType]::ComboBox',
+            nested,
+        )
+        self.assertNotIn(
+            '$comboExHost.Current.ControlType -eq '
+            '[System.Windows.Automation.ControlType]::ComboBox',
+            nested,
+        )
+        self.assertIn('[string]$_.Current.AutomationId -eq "1090"', nested)
+        self.assertIn('GetDlgCtrlID(', nested)
+        self.assertIn(') -eq 1090', nested)
+        self.assertIn('Test-NativeFileNameLabel', nested)
+        self.assertIn('Test-FileNameLabel ([string]$_.Current.Name)', nested)
+        self.assertIn('Kind = "nested_1148"', nested)
+        self.assertNotIn('$nativeId -eq 1001', nested)
+
+        modern_start = helper.index('$nativeId -eq 1001')
+        modern = helper[modern_start:nested_start]
+        self.assertIn(
+            '[string]$fileNameHost.Current.AutomationId -in '
+            '@("FileNameControlHost", "1148")',
+            modern,
+        )
+        self.assertIn('Test-FileNameLabel ([string]$candidate.Current.Name)', modern)
+        self.assertNotIn('Kind = "nested_1148"', modern)
+
         setter_start = source.index("function Set-FileDialogFileNameExact(")
         setter_end = source.index("\nfunction ", setter_start + 1)
         setter = source[setter_start:setter_end]
         self.assertIn("Restore-Foreground $Binding.Dialog", setter)
         self.assertIn("Invoke-PhysicalMouseClickAtScreenPoint", setter)
         self.assertIn("AutomationElement]::FocusedElement", setter)
-        self.assertIn("ReplaceFocusedText($Value)", setter)
+        self.assertIn("Select-AllFileDialogEditTextExact", setter)
+        self.assertIn("TypeFocusedText($Value)", setter)
         self.assertIn("SendVirtualKeyPress", setter)
         self.assertIn("[MetafxVisibleNative]::VK_TAB", setter)
         self.assertIn("Test-ForegroundWindowBinding", setter)
@@ -2831,11 +3665,45 @@ void OnTick(){
         self.assertIn("$Binding.Edit", setter)
         self.assertNotIn("$valuePattern.SetValue($Value)", setter)
         self.assertNotIn("Set-NativeEditTextExact", setter)
-        self.assertIn("Read-Win32Text $editHandle", setter)
+        self.assertIn("Read-Win32TextExact $editHandle", setter)
         self.assertIn("Read-AutomationValueExact $Binding.Edit", setter)
         self.assertIn("$hostNativeValue", setter)
         self.assertIn("$hostAutomationValue", setter)
-        self.assertIn("public static bool ReplaceFocusedText", source)
+        self.assertIn('$bindingKind -eq "nested_1148"', setter)
+        self.assertIn('"native_nested_1148"', setter)
+        self.assertIn('GetDlgCtrlID($editHandle) -ne 1148', setter)
+        self.assertIn('GetDlgCtrlID($fileNameHostHandle) -ne 1148', setter)
+        self.assertIn('GetDlgCtrlID($fileNameOuterHostHandle) -ne 1148', setter)
+        self.assertIn('GetParent($fileNameOuterHostHandle) -ne $dialogHandle', setter)
+        self.assertIn('Test-NativeFileNameLabel', setter)
+        self.assertGreaterEqual(
+            setter.count('[System.Windows.Automation.ControlType]::Pane'),
+            3,
+        )
+        self.assertIn(
+            'has no guaranteed ValuePattern',
+            setter,
+        )
+        nested_readback = setter[setter.index(
+            '} elseif ($bindingKind -eq "nested_1148") {'
+        ):]
+        self.assertNotIn(
+            'Read-AutomationValueExact $Binding.Edit',
+            nested_readback,
+        )
+        self.assertNotIn(
+            'Read-AutomationValueExact $Binding.FileNameOuterHost',
+            setter,
+        )
+        self.assertNotIn(
+            '$Binding.Edit.Current.ControlType -ne '
+            '[System.Windows.Automation.ControlType]::Edit',
+            setter,
+        )
+        self.assertIn("public static bool TypeFocusedText", source)
+        self.assertNotIn("public static bool ReplaceFocusedText", source)
+        self.assertNotIn("VK_CONTROL", source)
+        self.assertNotIn("VK_A", source)
         self.assertIn("KEYEVENTF_UNICODE", source)
         self.assertIn("Marshal.SizeOf(typeof(UNIVERSALINPUT))", source)
         self.assertIn("function Get-FileSha256Hex", source)
@@ -2845,15 +3713,665 @@ void OnTick(){
         load_end = source.index("\nfunction ", load_start + 1)
         load = source[load_start:load_end]
         self.assertIn(
-            'Get-FileDialogFileNameBinding `',
+            'Wait-FileDialogFileNameBinding `',
             load,
         )
         self.assertIn('"tester_input_file_name"', load)
         self.assertIn("Set-FileDialogFileNameExact", load)
         self.assertNotIn('Get-UniqueControl $dialog "1001"', load)
+        self.assertIn("Invoke-ExactNativeDialogButton", load)
+        self.assertIn("$fileNameBinding.Dialog `", load)
+        self.assertNotIn("Invoke-ExactButton $dialog", load)
         self.assertIn("Close-ExactOwnedFileDialogAfterFailure", load)
         self.assertIn("throw", load)
         self.assertNotIn("throw $originalFailure", load)
+
+    def test_native_file_dialog_fallback_requires_exact_bounded_unique_shape(self) -> None:
+        source = POWERSHELL_PATH.read_text(encoding="utf-8")
+
+        native_start = source.index("public static class MetafxVisibleNative")
+        native_end = source.index('"@', native_start)
+        native = source[native_start:native_end]
+        for required in (
+            "GW_HWNDNEXT = 2",
+            "GW_CHILD = 5",
+            "GetWindow(IntPtr hWnd, uint command)",
+            "IsWindowEnabled(IntPtr hWnd)",
+            "GetGUIThreadInfo(uint threadId",
+            "GetFocusedWindowFor(IntPtr target)",
+        ):
+            self.assertIn(required, native)
+
+        children_start = source.index("function Get-BoundedNativeDirectChildren(")
+        children_end = source.index("\nfunction ", children_start + 1)
+        children = source[children_start:children_end]
+        self.assertIn("[MetafxVisibleNative]::GW_CHILD", children)
+        self.assertIn("[MetafxVisibleNative]::GW_HWNDNEXT", children)
+        self.assertIn("$index -lt 256", children)
+        self.assertIn("GetParent($current) -ne $ParentHandle", children)
+        self.assertIn("_native_children_limit_exceeded", children)
+
+        assert_start = source.index("function Assert-NativeNested1148Binding(")
+        assert_end = source.index("\nfunction ", assert_start + 1)
+        exact_assert = source[assert_start:assert_end]
+        for required in (
+            "IsWindow([IntPtr]$handle)",
+            "IsWindowVisible([IntPtr]$handle)",
+            "IsWindowEnabled([IntPtr]$handle)",
+            "Get-WindowOwner ([IntPtr]$handle)",
+            '(Get-WindowClass $dialogHandle) -ne "#32770"',
+            '(Get-WindowClass $outerHandle) -ne "ComboBoxEx32"',
+            '(Get-WindowClass $comboHandle) -ne "ComboBox"',
+            '(Get-WindowClass $editHandle) -ne "Edit"',
+            '(Get-WindowClass $labelHandle) -ne "Static"',
+            "GetDlgCtrlID($outerHandle) -ne 1148",
+            "GetDlgCtrlID($comboHandle) -ne 1148",
+            "GetDlgCtrlID($editHandle) -ne 1148",
+            "GetDlgCtrlID($labelHandle) -ne 1090",
+            "GetParent($outerHandle) -ne $dialogHandle",
+            "GetParent($comboHandle) -ne $outerHandle",
+            "GetParent($editHandle) -ne $comboHandle",
+            "GetParent($labelHandle) -ne $dialogHandle",
+            "Test-NativeFileNameLabel (Read-Win32Text $labelHandle)",
+            "GetWindowRect($dialogHandle",
+            "GetWindowRect($editHandle",
+            "$editRect.Left -lt $dialogRect.Left",
+            "$editRect.Right -gt $dialogRect.Right",
+        ):
+            self.assertIn(required, exact_assert)
+
+        fallback_start = source.index(
+            "function Get-ExactNativeFileDialogFileNameBinding("
+        )
+        fallback_end = source.index("\nfunction ", fallback_start + 1)
+        fallback = source[fallback_start:fallback_end]
+        outer = fallback.index(
+            "Get-NativeDirectChildrenById $dialogHandle 1148"
+        )
+        combo = fallback.index(
+            "Get-NativeDirectChildrenById $outerHandle 1148"
+        )
+        edit = fallback.index(
+            "Get-NativeDirectChildrenById $comboHandle 1148"
+        )
+        label = fallback.index(
+            "Get-NativeDirectChildrenById $dialogHandle 1090"
+        )
+        bind = fallback.index('Kind = "native_nested_1148"')
+        final_assert = fallback.index("Assert-NativeNested1148Binding")
+        self.assertLess(outer, combo)
+        self.assertLess(combo, edit)
+        self.assertLess(edit, label)
+        self.assertLess(label, bind)
+        self.assertLess(bind, final_assert)
+        self.assertEqual(fallback.count("_native_control_ambiguous"), 3)
+        self.assertEqual(fallback.count("_native_label_ambiguous"), 1)
+        self.assertGreaterEqual(fallback.count(".Count -eq 0) { return $null }"), 4)
+        self.assertNotIn(' 1001 ', fallback)
+        self.assertNotIn(' 1152 ', fallback)
+        self.assertNotIn("Find-DescendantsById", fallback)
+        for mutation in (
+            "PostMessage",
+            "TypeFocusedText",
+            "Restore-Foreground",
+            "Invoke-PhysicalMouseClickAtScreenPoint",
+        ):
+            self.assertNotIn(mutation, fallback)
+            self.assertNotIn(mutation, exact_assert)
+
+        binding_start = source.index("function Get-FileDialogFileNameBinding(")
+        binding_end = source.index("\nfunction ", binding_start + 1)
+        binding = source[binding_start:binding_end]
+        fallback_call = binding.index("Get-ExactNativeFileDialogFileNameBinding")
+        unavailable = binding.index(
+            'Stop-Adapter ("{0}_control_unavailable" -f $FailureCode)',
+            fallback_call,
+        )
+        self.assertLess(fallback_call, unavailable)
+
+        native_button_start = source.index("function Invoke-ExactNativeDialogButton(")
+        native_button_end = source.index("\nfunction ", native_button_start + 1)
+        native_button = source[native_button_start:native_button_end]
+        for required in (
+            "Get-NativeDirectChildrenById $dialogHandle $ControlId",
+            "$buttons.Count -gt 1",
+            "$buttons.Count -eq 0",
+            "IsWindow($buttonHandle)",
+            "IsWindowVisible($buttonHandle)",
+            "IsWindowEnabled($buttonHandle)",
+            "Get-WindowOwner $buttonHandle",
+            '(Get-WindowClass $buttonHandle) -ne "Button"',
+            "GetDlgCtrlID($buttonHandle) -ne $ControlId",
+            "GetParent($buttonHandle) -ne $dialogHandle",
+            "Test-NativeAllowedName (Read-Win32Text $buttonHandle)",
+            "PostMessage",
+            "BM_CLICK",
+        ):
+            self.assertIn(required, native_button)
+        self.assertNotIn("Find-DescendantsById", native_button)
+        action_assert = native_button.index("Assert-NativeNested1148Binding")
+        button_lookup = native_button.index(
+            "Get-NativeDirectChildrenById $dialogHandle $ControlId"
+        )
+        button_post = native_button.index("PostMessage")
+        self.assertLess(action_assert, button_lookup)
+        self.assertLess(button_lookup, button_post)
+
+    def test_native_file_dialog_fallback_avoids_laggy_uia_semantics(self) -> None:
+        source = POWERSHELL_PATH.read_text(encoding="utf-8")
+        fallback_start = source.index(
+            "function Get-ExactNativeFileDialogFileNameBinding("
+        )
+        fallback_end = source.index("\nfunction ", fallback_start + 1)
+        fallback = source[fallback_start:fallback_end]
+        for prohibited in (
+            ".Current.Name",
+            ".Current.AutomationId",
+            ".Current.ControlType",
+            ".Current.IsOffscreen",
+            ".Current.IsEnabled",
+        ):
+            self.assertNotIn(prohibited, fallback)
+        self.assertNotIn("AutomationElement]::FromHandle", fallback)
+        self.assertIn("Edit = $null", fallback)
+        self.assertIn("FileNameHost = $null", fallback)
+        self.assertIn("FileNameOuterHost = $null", fallback)
+        self.assertIn("FileNameLabel = $null", fallback)
+
+        setter_start = source.index("function Set-FileDialogFileNameExact(")
+        setter_end = source.index("\nfunction ", setter_start + 1)
+        setter = source[setter_start:setter_end]
+        native_pre_start = setter.index(
+            '} elseif ($bindingKind -eq "native_nested_1148") {'
+        )
+        native_pre_end = setter.index("Restore-Foreground", native_pre_start)
+        native_pre = setter[native_pre_start:native_pre_end]
+        self.assertIn("Assert-NativeNested1148Binding", native_pre)
+        for prohibited in (
+            ".Current.Name",
+            ".Current.AutomationId",
+            ".Current.ControlType",
+            ".Current.IsOffscreen",
+            ".Current.IsEnabled",
+        ):
+            self.assertNotIn(prohibited, native_pre)
+
+        click = setter.index("Invoke-PhysicalMouseClickAtScreenPoint")
+        native_focus = setter.index(
+            '$bindingKind -eq "native_nested_1148"',
+            click,
+        )
+        focused_native = setter.index("GetFocusedWindowFor($editHandle)", native_focus)
+        focused_uia = setter.index("AutomationElement]::FocusedElement", focused_native)
+        pre_keyboard_assert = setter.index(
+            "Assert-NativeNested1148Binding",
+            focused_uia,
+        )
+        selection = setter.index(
+            "Select-AllFileDialogEditTextExact",
+            pre_keyboard_assert,
+        )
+        typing_boundary = setter.index(
+            "Assert-FileDialogEditMutationBoundary",
+            selection,
+        )
+        keyboard = setter.index("TypeFocusedText($Value)", typing_boundary)
+        precommit_wait = setter.index(
+            "Wait-ExactFileDialogPreCommitValue",
+            keyboard,
+        )
+        commit = setter.index("SendVirtualKeyPress", precommit_wait)
+        post_commit_assert = setter.index(
+            "Assert-NativeNested1148Binding",
+            commit,
+        )
+        boundary_start = source.index("function Assert-FileDialogEditMutationBoundary(")
+        boundary_end = source.index("\nfunction ", boundary_start + 1)
+        boundary = source[boundary_start:boundary_end]
+        self.assertIn("Assert-NativeNested1148Binding", boundary)
+        self.assertIn("GetFocusedWindowFor($editHandle)", boundary)
+        self.assertLess(click, native_focus)
+        self.assertLess(native_focus, focused_native)
+        self.assertLess(focused_native, focused_uia)
+        self.assertLess(focused_uia, pre_keyboard_assert)
+        self.assertLess(pre_keyboard_assert, selection)
+        self.assertLess(selection, typing_boundary)
+        self.assertLess(typing_boundary, keyboard)
+        self.assertLess(keyboard, precommit_wait)
+        self.assertLess(precommit_wait, commit)
+        self.assertLess(commit, post_commit_assert)
+        self.assertIn(
+            '$bindingKind -notin @("nested_1148", "native_nested_1148")',
+            setter,
+        )
+
+    def test_post_tab_basename_requires_exact_folder_and_target_snapshot(self) -> None:
+        source = POWERSHELL_PATH.read_text(encoding="utf-8")
+        self.assertIn("CDM_GETFOLDERPATH = 0x0466", source)
+
+        folder_start = source.index("function Read-CommonDialogFolderPathExact(")
+        folder_end = source.index("\nfunction ", folder_start + 1)
+        folder = source[folder_start:folder_end]
+        for required in (
+            "IsWindow($DialogHandle)",
+            "IsWindowVisible($DialogHandle)",
+            "IsWindowEnabled($DialogHandle)",
+            "Get-WindowOwner $DialogHandle",
+            '(Get-WindowClass $DialogHandle) -ne "#32770"',
+            "SendMessageTimeout",
+            "[MetafxVisibleNative]::CDM_GETFOLDERPATH",
+            "$reportedLength -le 0",
+            "$reportedLength -ge $capacity",
+            "[System.IO.Path]::IsPathRooted($observed)",
+            "[System.IO.Directory]::Exists($full)",
+        ):
+            self.assertIn(required, folder)
+
+        setter_start = source.index("function Set-FileDialogFileNameExact(")
+        setter_end = source.index("\nfunction ", setter_start + 1)
+        setter = source[setter_start:setter_end]
+        snapshot = setter.index(
+            "[bool]$targetExistedBefore = [System.IO.File]::Exists($Value)"
+        )
+        snapshot_hash = setter.index(
+            "$targetSha256Before = Get-FileSha256Hex $Value",
+            snapshot,
+        )
+        first_mutation = setter.index("Restore-Foreground")
+        keyboard = setter.index("TypeFocusedText($Value)")
+        precommit_wait = setter.index(
+            "Wait-ExactFileDialogPreCommitValue",
+            keyboard,
+        )
+        commit = setter.index("SendVirtualKeyPress", precommit_wait)
+        postcommit_read = setter.index(
+            "$editNativeValue = Read-Win32TextExact $editHandle",
+            commit,
+        )
+        snapshot_verify = setter.index(
+            '(Get-FileSha256Hex $Value),',
+            postcommit_read,
+        )
+        full_path_gate = setter.index(
+            "$postCommitIsExactFullPath = [string]::Equals(",
+            snapshot_verify,
+        )
+        basename_gate = setter.index(
+            "$postCommitIsExactBasename = $false",
+            full_path_gate,
+        )
+        exact_basename = setter.index(
+            "$expectedFileName,",
+            basename_gate,
+        )
+        folder_readback = setter.index(
+            "Read-CommonDialogFolderPathExact",
+            exact_basename,
+        )
+        exact_folder = setter.index(
+            "$postCommitIsExactBasename = Test-SamePath",
+            folder_readback,
+        )
+        mismatch = setter.index(
+            'Stop-Adapter ("{0}_edit_readback_mismatch" -f $FailureCode)',
+            exact_folder,
+        )
+        self.assertLess(snapshot, snapshot_hash)
+        self.assertLess(snapshot_hash, first_mutation)
+        self.assertLess(keyboard, precommit_wait)
+        self.assertLess(precommit_wait, commit)
+        self.assertLess(commit, postcommit_read)
+        self.assertLess(postcommit_read, snapshot_verify)
+        self.assertLess(snapshot_verify, full_path_gate)
+        self.assertLess(full_path_gate, basename_gate)
+        self.assertLess(basename_gate, exact_basename)
+        self.assertLess(exact_basename, folder_readback)
+        self.assertLess(folder_readback, exact_folder)
+        self.assertLess(exact_folder, mismatch)
+        self.assertIn(
+            '[System.IO.File]::Exists($Value) -or\n'
+            '        [System.IO.Directory]::Exists($Value)',
+            setter,
+        )
+        self.assertIn('"{0}_target_snapshot_changed"', setter)
+        self.assertNotIn("Trim('\\\"')", setter)
+        self.assertNotIn('Replace("\\\"", "")', setter)
+
+    def test_native_edit_existing_wildcard_is_selected_before_unicode_typing(self) -> None:
+        source = POWERSHELL_PATH.read_text(encoding="utf-8")
+        self.assertIn("public const int EM_GETSEL = 0x00B0;", source)
+        self.assertIn("public const int EM_SETSEL = 0x00B1;", source)
+
+        typing_start = source.index("public static bool TypeFocusedText(string value)")
+        typing_end = source.index("\n    public static ", typing_start + 1)
+        typing = source[typing_start:typing_end]
+        self.assertIn("value.Length * 2", typing)
+        self.assertIn("UnicodeKey(character, 0)", typing)
+        self.assertIn("UnicodeKey(character, KEYEVENTF_KEYUP)", typing)
+        self.assertIn("SendKeyboardInput", typing)
+        self.assertNotIn("VK_CONTROL", typing)
+        self.assertNotIn("VK_A", typing)
+        self.assertNotIn("EM_SETSEL", typing)
+        self.assertNotIn("EM_GETSEL", typing)
+
+        reader_start = source.index("function Read-Win32TextExact(")
+        reader_end = source.index("\nfunction ", reader_start + 1)
+        reader = source[reader_start:reader_end]
+        self.assertIn("WM_GETTEXTLENGTH", reader)
+        self.assertIn("WM_GETTEXT", reader)
+        self.assertIn("$length -lt 0", reader)
+        self.assertNotIn("$length -le 0", reader)
+        self.assertIn("return $buffer.ToString()", reader)
+        self.assertNotIn(".Trim()", reader)
+
+        selection_start = source.index("function Select-AllFileDialogEditTextExact(")
+        selection_end = source.index("\nfunction ", selection_start + 1)
+        selection = source[selection_start:selection_end]
+        self.assertIn("[int]$initialLength = $initialValue.Length", selection)
+        self.assertNotIn('"*.set"', selection)
+        first_boundary = selection.index("Assert-FileDialogEditMutationBoundary")
+        initial_read = selection.index("Read-Win32TextExact $editHandle", first_boundary)
+        second_boundary = selection.index(
+            "Assert-FileDialogEditMutationBoundary",
+            initial_read,
+        )
+        set_selection = selection.index("[MetafxVisibleNative]::EM_SETSEL", second_boundary)
+        third_boundary = selection.index(
+            "Assert-FileDialogEditMutationBoundary",
+            set_selection,
+        )
+        get_selection = selection.index("[MetafxVisibleNative]::EM_GETSEL", third_boundary)
+        selection_start_decode = selection.index(
+            "$selectionStart =",
+            get_selection,
+        )
+        selection_end_decode = selection.index(
+            "$selectionEnd =",
+            selection_start_decode,
+        )
+        selection_minimum = selection.index(
+            "$selectionMinimum =",
+            selection_end_decode,
+        )
+        selection_maximum = selection.index(
+            "$selectionMaximum =",
+            selection_minimum,
+        )
+        fourth_boundary = selection.index(
+            "Assert-FileDialogEditMutationBoundary",
+            selection_maximum,
+        )
+        exact_selection = selection.index(
+            "$selectionStart -eq 0xFFFF",
+            fourth_boundary,
+        )
+        self.assertLess(first_boundary, initial_read)
+        self.assertLess(initial_read, second_boundary)
+        self.assertLess(second_boundary, set_selection)
+        self.assertLess(set_selection, third_boundary)
+        self.assertLess(third_boundary, get_selection)
+        self.assertLess(get_selection, selection_start_decode)
+        self.assertLess(selection_start_decode, selection_end_decode)
+        self.assertLess(selection_end_decode, selection_minimum)
+        self.assertLess(selection_minimum, selection_maximum)
+        self.assertLess(selection_maximum, fourth_boundary)
+        self.assertLess(fourth_boundary, exact_selection)
+        for required in (
+            "[IntPtr]::Zero,\n        [IntPtr](-1)",
+            "SMTO_ABORTIFHUNG",
+            "$selectionCall -eq [IntPtr]::Zero",
+            '"{0}_selection_message_timeout"',
+            "$packedSelection -band 0xFFFF",
+            "($packedSelection -shr 16) -band 0xFFFF",
+            "[Math]::Min($selectionStart, $selectionEnd)",
+            "[Math]::Max($selectionStart, $selectionEnd)",
+            "$selectionEnd -eq 0xFFFF",
+            "$selectionStart -gt $initialLength",
+            "$selectionEnd -gt $initialLength",
+            "$selectionMinimum -ne 0",
+            "$selectionMaximum -ne $initialLength",
+            "$initialLength",
+            "Get-Sha256Hex $initialBytes",
+            ".Substring(0, 12)",
+            "_cedit",
+            "$diagnosticCode.Length -gt 80",
+            "^[a-z0-9_]{3,80}$",
+            '"{0}_selection_not_applied"',
+        ):
+            self.assertIn(required, selection)
+        self.assertNotIn("$initialLength -le 0", selection)
+        self.assertNotIn("$initialLength -eq 0", selection)
+        selection_cases = (
+            (0, 5, 5, True),
+            (5, 0, 5, True),
+            (1, 5, 5, False),
+            (0, 4, 5, False),
+            (0, 0, 5, False),
+            (0, 0, 0, True),
+            (6, 0, 5, False),
+            (0xFFFF, 0, 5, False),
+        )
+        for start, end, initial_length, expected in selection_cases:
+            with self.subTest(
+                start=start,
+                end=end,
+                initial_length=initial_length,
+            ):
+                accepted = (
+                    start != 0xFFFF
+                    and end != 0xFFFF
+                    and start <= initial_length
+                    and end <= initial_length
+                    and min(start, end) == 0
+                    and max(start, end) == initial_length
+                )
+                self.assertEqual(accepted, expected)
+        for forbidden in (
+            "TypeFocusedText",
+            "SendVirtualKeyPress",
+            "VK_TAB",
+            "Invoke-ExactButton",
+            "Invoke-ExactNativeDialogButton",
+            "PostMessage",
+            "BM_CLICK",
+            "Start Strategy Tester",
+            "WM_SETTEXT",
+            "$initialValue,",
+        ):
+            self.assertNotIn(forbidden, selection)
+
+        setter_start = source.index("function Set-FileDialogFileNameExact(")
+        setter_end = source.index("\nfunction ", setter_start + 1)
+        setter = source[setter_start:setter_end]
+        selection_call = setter.index("Select-AllFileDialogEditTextExact")
+        typing_boundary = setter.index(
+            "Assert-FileDialogEditMutationBoundary",
+            selection_call,
+        )
+        typing_call = setter.index("TypeFocusedText($Value)", typing_boundary)
+        exact_wait = setter.index("Wait-ExactFileDialogPreCommitValue", typing_call)
+        commit = setter.index("SendVirtualKeyPress", exact_wait)
+        self.assertLess(selection_call, typing_boundary)
+        self.assertLess(typing_boundary, typing_call)
+        self.assertLess(typing_call, exact_wait)
+        self.assertLess(exact_wait, commit)
+        self.assertNotIn("ReplaceFocusedText", setter)
+
+    def test_precommit_readback_waits_for_exact_full_path_and_fails_closed(self) -> None:
+        source = POWERSHELL_PATH.read_text(encoding="utf-8")
+        wait_start = source.index("function Wait-ExactFileDialogPreCommitValue(")
+        wait_end = source.index("\nfunction ", wait_start + 1)
+        wait = source[wait_start:wait_end]
+        boundary_start = source.index("function Assert-FileDialogEditMutationBoundary(")
+        boundary_end = source.index("\nfunction ", boundary_start + 1)
+        boundary = source[boundary_start:boundary_end]
+
+        deadline = wait.index("[DateTime]::UtcNow.AddSeconds(5)")
+        loop = wait.index("do {", deadline)
+        boundary_call = wait.index("Assert-FileDialogEditMutationBoundary", loop)
+        stage = wait.index('"precommit"', boundary_call)
+        readback = wait.index("Read-Win32TextExact $editHandle", stage)
+        exact = wait.index("$ExpectedValue,", readback)
+        success = wait.index("return", exact)
+        deadline_gate = wait.index("[DateTime]::UtcNow -ge $deadline", success)
+        delay = wait.index("Start-Sleep -Milliseconds 50", deadline_gate)
+        timeout_diagnostic = wait.index("$lastObserved.Length", delay)
+        self.assertLess(loop, boundary_call)
+        self.assertLess(boundary_call, stage)
+        self.assertLess(stage, readback)
+        self.assertLess(readback, exact)
+        self.assertLess(exact, success)
+        self.assertLess(success, deadline_gate)
+        self.assertLess(deadline_gate, delay)
+        self.assertLess(delay, timeout_diagnostic)
+        self.assertNotIn("Stop-Adapter", wait[readback:delay])
+
+        for required in (
+            "IsWindow($dialogHandle)",
+            "IsWindowVisible($dialogHandle)",
+            "IsWindowEnabled($dialogHandle)",
+            "Get-WindowOwner $dialogHandle",
+            '(Get-WindowClass $dialogHandle) -ne "#32770"',
+            "IsWindow($editHandle)",
+            "IsWindowVisible($editHandle)",
+            "IsWindowEnabled($editHandle)",
+            "Get-WindowOwner $editHandle",
+            '(Get-WindowClass $editHandle) -ne "Edit"',
+            "Test-NativeWindowDescendantOf $editHandle $dialogHandle",
+            '"{0}_{1}_binding_changed"',
+            '"{0}_{1}_focus_changed"',
+            "Assert-NativeNested1148Binding",
+            "GetFocusedWindowFor($editHandle)",
+            "[System.Windows.Automation.AutomationElement]::FocusedElement",
+            "Test-ForegroundWindowBinding",
+            "Assert-FileDialogTargetSnapshot",
+        ):
+            self.assertIn(required, boundary)
+        for required in (
+            "[System.StringComparison]::OrdinalIgnoreCase",
+            "$ExpectedValue.Length",
+            "Get-Sha256Hex $observedBytes",
+            ".Substring(0, 12)",
+            "_cedit_timeout",
+            "$diagnosticCode.Length -gt 80",
+            "^[a-z0-9_]{3,80}$",
+            '"{0}_precommit_readback_timeout"',
+        ):
+            self.assertIn(required, wait)
+        for forbidden in (
+            "SendVirtualKeyPress",
+            "Invoke-ExactButton",
+            "Invoke-ExactNativeDialogButton",
+            "PostMessage",
+            "BM_CLICK",
+            "VK_TAB",
+            "Start Strategy Tester",
+            "Trim('\\\"')",
+            'Replace("\\\"", "")',
+        ):
+            self.assertNotIn(forbidden, wait)
+
+        setter_start = source.index("function Set-FileDialogFileNameExact(")
+        setter_end = source.index("\nfunction ", setter_start + 1)
+        setter = source[setter_start:setter_end]
+        keyboard = setter.index("TypeFocusedText($Value)")
+        bounded_wait = setter.index("Wait-ExactFileDialogPreCommitValue", keyboard)
+        commit = setter.index("SendVirtualKeyPress", bounded_wait)
+        self.assertLess(keyboard, bounded_wait)
+        self.assertLess(bounded_wait, commit)
+        self.assertNotIn(
+            "Start-Sleep -Milliseconds 100",
+            setter[keyboard:commit],
+        )
+
+    def test_file_dialog_binding_wait_retries_only_exact_unavailable_signal(self) -> None:
+        source = POWERSHELL_PATH.read_text(encoding="utf-8")
+        wait_start = source.index("function Wait-FileDialogFileNameBinding(")
+        wait_end = source.index("\nfunction ", wait_start + 1)
+        wait = source[wait_start:wait_end]
+
+        expected_handle = wait.index(
+            "[IntPtr]$expectedDialogHandle = "
+            "[IntPtr]$Dialog.Current.NativeWindowHandle"
+        )
+        expected_pid = wait.index("[int]$expectedProcessId = $ProcessId")
+        deadline = wait.index("[DateTime]::UtcNow.AddSeconds(10)")
+        rebind = wait.index(
+            "[System.Windows.Automation.AutomationElement]::FromHandle("
+        )
+        native_window = wait.index(
+            "[MetafxVisibleNative]::IsWindow($expectedDialogHandle)",
+            rebind,
+        )
+        handle_readback = wait.index(
+            "[IntPtr]$freshDialog.Current.NativeWindowHandle "
+            "-ne $expectedDialogHandle"
+        )
+        class_readback = wait.index(
+            '[string]$freshDialog.Current.ClassName -ne "#32770"'
+        )
+        pid_readback = wait.index(
+            "[int]$freshDialog.Current.ProcessId -ne $expectedProcessId"
+        )
+        native_class = wait.index(
+            '(Get-WindowClass $expectedDialogHandle) -ne "#32770"',
+            pid_readback,
+        )
+        native_owner = wait.index(
+            "(Get-WindowOwner $expectedDialogHandle) -ne $expectedProcessId",
+            native_class,
+        )
+        native_visible = wait.index(
+            "[MetafxVisibleNative]::IsWindowVisible($expectedDialogHandle)",
+            native_owner,
+        )
+        offscreen_readback = wait.index(
+            "[bool]$freshDialog.Current.IsOffscreen"
+        )
+        lookup = wait.index("return Get-FileDialogFileNameBinding `")
+        fresh_lookup = wait.index("$freshDialog `", lookup)
+        pid_lookup = wait.index("$expectedProcessId `", fresh_lookup)
+        exact_signal = wait.index(
+            '"METAFX_VISIBLE:{0}_control_unavailable" -f $FailureCode'
+        )
+        exact_compare = wait.index("[System.StringComparison]::Ordinal")
+        immediate_rethrow = wait.index("throw", exact_compare)
+        bounded_rethrow = wait.index(
+            "if ([DateTime]::UtcNow -ge $deadline) { throw }",
+            immediate_rethrow,
+        )
+        sleep = wait.index("Start-Sleep -Milliseconds 100", bounded_rethrow)
+        terminal_failure = wait.index(
+            'Stop-Adapter ("{0}_control_unavailable" -f $FailureCode)',
+            sleep,
+        )
+
+        self.assertLess(expected_handle, expected_pid)
+        self.assertLess(expected_pid, deadline)
+        self.assertLess(deadline, rebind)
+        self.assertLess(rebind, native_window)
+        self.assertLess(native_window, handle_readback)
+        self.assertLess(handle_readback, class_readback)
+        self.assertLess(class_readback, pid_readback)
+        self.assertLess(pid_readback, native_class)
+        self.assertLess(native_class, native_owner)
+        self.assertLess(native_owner, native_visible)
+        self.assertLess(native_visible, offscreen_readback)
+        self.assertLess(offscreen_readback, lookup)
+        self.assertLess(lookup, fresh_lookup)
+        self.assertLess(fresh_lookup, pid_lookup)
+        self.assertLess(exact_signal, exact_compare)
+        self.assertLess(exact_compare, immediate_rethrow)
+        self.assertLess(immediate_rethrow, bounded_rethrow)
+        self.assertLess(bounded_rethrow, sleep)
+        self.assertLess(sleep, terminal_failure)
+        self.assertNotIn("control_ambiguous", wait)
+        self.assertNotIn("Restore-Foreground", wait)
+        self.assertNotIn("Invoke-", wait)
+        self.assertNotIn(
+            "Get-FileDialogFileNameBinding $Dialog $ProcessId",
+            wait,
+        )
 
     def test_distributed_powershell_adapter_is_ascii_and_ps51_parseable(self) -> None:
         source_bytes = POWERSHELL_PATH.read_bytes()

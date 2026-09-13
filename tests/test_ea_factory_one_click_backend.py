@@ -342,7 +342,12 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
         self.assertEqual(binding["selectionRevision"], 7)
         self.assertEqual(binding["bindingDigest"], "c" * 64)
         write_state.assert_called_once()
-        start.assert_called_once_with(build["id"])
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args, (build["id"],))
+        self.assertEqual(
+            start.call_args.kwargs["expected_run_snapshot"]["runId"],
+            build["oneClickRun"]["runId"],
+        )
         validated = self.bridge._ea_factory_revalidated_one_click_run(build)
         self.assertEqual(validated["currentStageId"], "generate_source")
 
@@ -473,7 +478,12 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
         self.assertIsNone(build["oneClickRun"]["failureCode"])
         self.assertIsNone(build["oneClickRun"]["completedAt"])
         write_state.assert_called_once()
-        start.assert_called_once_with(build["id"])
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args, (build["id"],))
+        self.assertEqual(
+            start.call_args.kwargs["expected_run_snapshot"]["runId"],
+            build["oneClickRun"]["runId"],
+        )
         sync_status.assert_called_once_with(build, ingest_sources=True)
 
         uncertain = copy.deepcopy(build)
@@ -786,7 +796,10 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
             mock.patch.object(self.bridge, "_write_ea_factory_state_unlocked"),
             mock.patch.object(self.bridge, "append_audit"),
         ):
-            self.bridge._ea_factory_one_click_worker(build["id"])
+            self.bridge._ea_factory_one_click_worker(
+                build["id"],
+                copy.deepcopy(build["oneClickRun"]),
+            )
         self.assertEqual(build["oneClickRun"]["status"], "awaiting_visible_terminal")
         self.assertEqual(build["oneClickRun"]["visibleAction"]["state"], "uncertain")
         self.assertEqual(
@@ -810,6 +823,306 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
             operation_id,
         )
         self.assertEqual(build["oneClickRun"]["visibleAction"]["attemptCount"], 2)
+
+    def test_finish_persists_uncertain_visible_state_when_immutable_version_is_missing(self) -> None:
+        build = self.build()
+        build["createRequestDigest"] = self.bridge._ea_factory_create_request_digest(
+            build["sourceRecordId"],
+            build["platform"],
+            build["brief"],
+            build["artifactKind"],
+        )
+        build["versions"] = [{
+            "version": 1,
+            "fileName": "MissingEA.mq4",
+            "sourceDigest": "d" * 64,
+            "sourceFile": "Source/MissingEA.mq4",
+            "versionFile": "EA_Versions/MissingEA_v01.mq4",
+            "sourceReportId": "report-source-missing",
+            "immutable": True,
+            "createdAt": "2026-09-11T00:00:00Z",
+        }]
+        build["oneClickRun"] = self._run(
+            build,
+            current_stage="compile_validate",
+        )
+        build["oneClickRun"]["status"] = "running"
+        self.bridge._ea_factory_one_click_reserve_visible_action(
+            build,
+            build["oneClickRun"],
+            "compile_validate",
+        )
+        state = self.state(build)
+        original_stages = copy.deepcopy(build["stages"])
+        original_versions = copy.deepcopy(build["versions"])
+        audit_events = []
+        message_th = (
+            "ตรวจผล Compile ไม่สำเร็จ ระบบหยุดไว้ก่อน "
+            "และจะไม่กด Compile ซ้ำจนกว่าจะยืนยันผลเดิม"
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "ea-factory-state.json"
+            backup_path = state_path.with_name(f"{state_path.name}.bak")
+            backup_path.write_text("known-good-backup", encoding="utf-8")
+            state_path.write_text(
+                json.dumps(state, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_state_path",
+                    return_value=state_path,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_load_ea_factory_state_unlocked",
+                    side_effect=self.bridge.DataIntegrityError(
+                        "EA Factory immutable source versions failed integrity validation."
+                    ),
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_invalidate_ea_factory_state_cache",
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_invalidate_ea_factory_read_model_cache",
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "append_audit",
+                    side_effect=audit_events.append,
+                ),
+            ):
+                self.bridge._ea_factory_one_click_finish(
+                    build["id"],
+                    expected_run_snapshot=copy.deepcopy(build["oneClickRun"]),
+                    status="awaiting_visible_terminal",
+                    current_stage_id="compile_validate",
+                    failure_code="compile_verification_failed",
+                    message_th=message_th,
+                )
+
+            stored = json.loads(state_path.read_text(encoding="utf-8"))
+            backup_after = backup_path.read_text(encoding="utf-8")
+
+        stored_build = stored["builds"][0]
+        stored_run = stored_build["oneClickRun"]
+        self.assertEqual(stored_run["status"], "awaiting_visible_terminal")
+        self.assertIsNone(stored_run["failureCode"])
+        self.assertEqual(stored_run["messageTh"], message_th)
+        self.assertIsNone(stored_run["completedAt"])
+        self.assertEqual(stored_run["visibleAction"]["state"], "uncertain")
+        self.assertEqual(
+            stored_run["visibleAction"]["lastFailureCode"],
+            "compile_verification_failed",
+        )
+        self.assertTrue(
+            stored_run["visibleAction"]["requiresExplicitResume"]
+        )
+        self.assertEqual(stored_build["stages"], original_stages)
+        self.assertEqual(stored_build["versions"], original_versions)
+        self.assertEqual(backup_after, "known-good-backup")
+        self.assertTrue(audit_events[-1]["statePersisted"])
+        self.assertEqual(
+            audit_events[-1]["persistenceMode"],
+            "fail_closed_raw_terminal_patch",
+        )
+        self.assertEqual(
+            audit_events[-1]["finishExceptionClass"],
+            "DataIntegrityError",
+        )
+        self.assertEqual(audit_events[-1]["visibleActionState"], "uncertain")
+
+    def test_finish_falls_back_to_audit_without_leaving_worker_exception(self) -> None:
+        audit_events = []
+        message_th = "ระบบหยุดงานเพื่อความปลอดภัย กรุณาตรวจ Build ก่อนเริ่มใหม่"
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                side_effect=RuntimeError("primary state load failed"),
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_one_click_finish_from_raw_state_unlocked",
+                side_effect=self.bridge.DataIntegrityError(
+                    "raw state is unsafe to update"
+                ),
+            ),
+            mock.patch.object(
+                self.bridge,
+                "append_audit",
+                side_effect=audit_events.append,
+            ),
+        ):
+            self.bridge._ea_factory_one_click_finish(
+                "ea-build-one-click-test",
+                expected_run_snapshot={},
+                status="blocked",
+                current_stage_id="generate_source",
+                failure_code="one_click_worker_exception",
+                message_th=message_th,
+            )
+
+        self.assertEqual(len(audit_events), 1)
+        self.assertFalse(audit_events[0]["statePersisted"])
+        self.assertEqual(audit_events[0]["persistenceMode"], "audit_only")
+        self.assertEqual(
+            audit_events[0]["finishExceptionClass"],
+            "DataIntegrityError",
+        )
+        self.assertEqual(audit_events[0]["messageTh"], message_th)
+        self.assertFalse(audit_events[0]["liveTradingAllowed"])
+
+    def test_next_action_integrity_error_finishes_before_audit_io(self) -> None:
+        build = self.build()
+        build["oneClickRun"] = self._run(
+            build,
+            current_stage="generate_source",
+        )
+        expected_run = copy.deepcopy(build["oneClickRun"])
+        call_order = []
+
+        def finish(*_args, **_kwargs):
+            call_order.append("finish")
+
+        def failed_audit(_event):
+            call_order.append("audit")
+            raise OSError("audit disk unavailable")
+
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_one_click_next_action",
+                side_effect=self.bridge.DataIntegrityError(
+                    "EA Factory immutable source versions failed integrity validation."
+                ),
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_one_click_finish",
+                side_effect=finish,
+            ) as finish_call,
+            mock.patch.object(
+                self.bridge,
+                "append_audit",
+                side_effect=failed_audit,
+            ),
+        ):
+            self.bridge._ea_factory_one_click_worker(
+                build["id"],
+                expected_run,
+            )
+
+        self.assertEqual(call_order, ["finish", "audit"])
+        finish_call.assert_called_once()
+        finish_kwargs = finish_call.call_args.kwargs
+        self.assertEqual(finish_kwargs["expected_run_snapshot"], expected_run)
+        self.assertEqual(finish_kwargs["status"], "failed")
+        self.assertEqual(finish_kwargs["current_stage_id"], "generate_source")
+        self.assertEqual(
+            finish_kwargs["failure_code"],
+            "one_click_state_integrity_failed",
+        )
+
+    def test_stale_callback_cannot_downgrade_newer_raw_run(self) -> None:
+        build = self.build()
+        build["createRequestDigest"] = self.bridge._ea_factory_create_request_digest(
+            build["sourceRecordId"],
+            build["platform"],
+            build["brief"],
+            build["artifactKind"],
+        )
+        build["oneClickRun"] = self._run(
+            build,
+            current_stage="generate_source",
+        )
+        expected_old_run = copy.deepcopy(build["oneClickRun"])
+        self.bridge._ea_factory_one_click_update(
+            build["oneClickRun"],
+            status="running",
+            current_stage_id="generate_source",
+            failure_code=None,
+            message_th="งานรอบใหม่กำลังทำขั้นสร้าง Source",
+        )
+        state = self.state(build)
+        audit_events = []
+
+        with tempfile.TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "ea-factory-state.json"
+            state_path.write_text(
+                json.dumps(state, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            before = state_path.read_bytes()
+            with (
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_state_path",
+                    return_value=state_path,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_load_ea_factory_state_unlocked",
+                    side_effect=self.bridge.DataIntegrityError(
+                        "EA Factory immutable source versions failed integrity validation."
+                    ),
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "append_audit",
+                    side_effect=audit_events.append,
+                ),
+            ):
+                self.bridge._ea_factory_one_click_finish(
+                    build["id"],
+                    expected_run_snapshot=expected_old_run,
+                    status="failed",
+                    current_stage_id="generate_source",
+                    failure_code="one_click_coordinator_failed",
+                    message_th="callback เก่าต้องไม่ปิดงานรอบใหม่",
+                )
+            after = state_path.read_bytes()
+
+        self.assertEqual(after, before)
+        self.assertEqual(build["oneClickRun"]["status"], "running")
+        self.assertFalse(audit_events[-1]["statePersisted"])
+        self.assertEqual(audit_events[-1]["persistenceMode"], "audit_only")
+        self.assertEqual(
+            audit_events[-1]["finishExceptionClass"],
+            "DataIntegrityError",
+        )
+
+    def test_integrity_failure_get_returns_actionable_fail_closed_result(self) -> None:
+        handler = object.__new__(self.bridge.BridgeHandler)
+        handler.path = "/api/props/right_server_racks/ea-factory"
+        handler.validate_local_request = mock.Mock(return_value=None)
+        handler.send_json = mock.Mock()
+        with mock.patch.object(
+            self.bridge,
+            "ea_factory_read_model",
+            side_effect=self.bridge.DataIntegrityError(
+                "EA Factory immutable source versions failed integrity validation."
+            ),
+        ):
+            handler._do_GET_guarded()
+
+        handler.send_json.assert_called_once()
+        result = handler.send_json.call_args.args[0]
+        self.assertEqual(handler.send_json.call_args.kwargs["status"], 409)
+        self.assertNotIn("_httpStatus", result)
+        self.assertEqual(result["kind"], "ea_factory_integrity_blocked")
+        self.assertEqual(result["code"], "ea_factory_artifact_integrity_failed")
+        self.assertEqual(result["status"], "blocked")
+        self.assertFalse(result["oneClick"]["commandsAllowed"])
+        self.assertEqual(result["oneClick"]["visibleActionState"], "uncertain")
+        self.assertTrue(result["oneClick"]["requiresExplicitRecovery"])
+        self.assertIn("ไฟล์หลักฐาน", result["messageTh"])
+        self.assertIn("ไม่แน่นอน", result["messageTh"])
+        self.assertNotIn("eaFactory", result)
 
     def test_visible_handler_receives_immutable_request_dto(self) -> None:
         build = self.build()
@@ -1046,6 +1359,130 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
             public = self.bridge.report_read_model_item(report)
             self.assertNotIn("processId", public["metrics"])
             self.assertNotIn("processBinding", public["metrics"])
+
+    def test_trusted_visible_report_round_trip_preserves_104_metric_contract(self) -> None:
+        required_tail = {
+            "staticSixGroupSourceContractVerified": True,
+            "logicRecheck": {"verified": True},
+            "logicRecheckDigest": "a" * 64,
+            "logicRecheckVerified": True,
+        }
+        metrics = {
+            "evidenceMode": self.bridge.EA_FACTORY_VISIBLE_EVIDENCE_MODE,
+            "operationId": "ea-visible-104-metric-round-trip",
+        }
+        metrics.update({
+            f"boundedMetric{index:03d}": index
+            for index in range(97)
+        })
+        metrics["password"] = "not-a-real-password"
+        metrics.update(required_tail)
+        self.assertEqual(len(metrics), 104)
+        self.assertEqual(list(metrics)[100:], list(required_tail))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            reports = Path(temporary) / "reports"
+            reports.mkdir()
+            payload = {
+                "id": "report-eaf-visible-104-metric-round-trip",
+                "type": "ea_build_report",
+                "linkedMissionId": "mission-eaf-visible-104-metric-round-trip",
+                "status": "ready",
+                "metrics": metrics,
+            }
+            with (
+                mock.patch.object(self.bridge, "RUNTIME_REPORTS_DIR", reports),
+                mock.patch.object(self.bridge, "append_audit"),
+            ):
+                report = self.bridge.create_report(
+                    payload,
+                    queue_research_sheet=False,
+                    _trusted_visible_process_identity=True,
+                )
+                persisted = self.bridge.read_json(
+                    reports / "report-eaf-visible-104-metric-round-trip.json",
+                    None,
+                )
+
+        self.assertEqual(persisted, report)
+        self.assertEqual(len(report["metrics"]), 104)
+        self.assertEqual(list(report["metrics"])[100:], list(required_tail))
+        self.assertEqual(report["metrics"]["password"], "[REDACTED_SECRET]")
+        self.assertTrue(report["safety"]["secretRedacted"])
+        for key, value in required_tail.items():
+            self.assertEqual(report["metrics"][key], value)
+
+    def test_trusted_visible_report_rejects_lossy_or_over_limit_metrics(self) -> None:
+        exact_limit = self.bridge.EA_FACTORY_VISIBLE_METRICS_COLLECTION_LIMIT
+        over_limit_metrics = {
+            "evidenceMode": self.bridge.EA_FACTORY_VISIBLE_EVIDENCE_MODE,
+            "operationId": "ea-visible-over-limit-metrics",
+        }
+        over_limit_metrics.update({
+            f"boundedMetric{index:03d}": index
+            for index in range(exact_limit - 1)
+        })
+        self.assertEqual(len(over_limit_metrics), exact_limit + 1)
+        lossy_key_metrics = {
+            "evidenceMode": self.bridge.EA_FACTORY_VISIBLE_EVIDENCE_MODE,
+            "operationId": "ea-visible-lossy-metric-key",
+            "x" * 121: "must-not-be-persisted",
+        }
+        nested_overlong_key_metrics = {
+            "evidenceMode": self.bridge.EA_FACTORY_VISIBLE_EVIDENCE_MODE,
+            "operationId": "ea-visible-nested-overlong-metric-key",
+            "outer": {"x" * 121: "must-not-be-persisted"},
+        }
+        nested_colliding_key_metrics = {
+            "evidenceMode": self.bridge.EA_FACTORY_VISIBLE_EVIDENCE_MODE,
+            "operationId": "ea-visible-nested-colliding-metric-keys",
+            "outer": {
+                ("x" * 120) + "a": "first-must-not-be-persisted",
+                ("x" * 120) + "b": "second-must-not-be-persisted",
+            },
+        }
+        nested_non_string_key_metrics = {
+            "evidenceMode": self.bridge.EA_FACTORY_VISIBLE_EVIDENCE_MODE,
+            "operationId": "ea-visible-nested-non-string-metric-key",
+            "outer": {1: "must-not-be-persisted"},
+        }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            reports = Path(temporary) / "reports"
+            reports.mkdir()
+            with (
+                mock.patch.object(self.bridge, "RUNTIME_REPORTS_DIR", reports),
+                mock.patch.object(self.bridge, "append_audit"),
+            ):
+                for report_id, metrics in (
+                    ("report-eaf-visible-over-limit", over_limit_metrics),
+                    ("report-eaf-visible-lossy-key", lossy_key_metrics),
+                    (
+                        "report-eaf-visible-nested-overlong-key",
+                        nested_overlong_key_metrics,
+                    ),
+                    (
+                        "report-eaf-visible-nested-colliding-keys",
+                        nested_colliding_key_metrics,
+                    ),
+                    (
+                        "report-eaf-visible-nested-non-string-key",
+                        nested_non_string_key_metrics,
+                    ),
+                ):
+                    with self.subTest(report_id=report_id):
+                        with self.assertRaises(self.bridge.DataIntegrityError):
+                            self.bridge.create_report(
+                                {
+                                    "id": report_id,
+                                    "type": "ea_build_report",
+                                    "status": "ready",
+                                    "metrics": metrics,
+                                },
+                                queue_research_sheet=False,
+                                _trusted_visible_process_identity=True,
+                            )
+                        self.assertFalse((reports / f"{report_id}.json").exists())
 
     def test_visible_retry_limit_allows_receipt_only_recovery_without_increment(self) -> None:
         build = self.build()

@@ -7758,6 +7758,18 @@ button:disabled {
   scrollbar-width: thin;
 }
 
+.workflow-tabs[data-ea-factory-pages="true"] {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  overflow: visible;
+}
+
+.workflow-tabs[data-ea-factory-pages="true"] .workflow-tab {
+  width: 100%;
+  min-width: 0;
+  white-space: normal;
+}
+
 .workflow-tab {
   display: inline-flex;
   flex: 1 0 155px;
@@ -8809,6 +8821,16 @@ button:disabled {
   color: #ff9296;
 }
 
+.ea-factory-page-heading {
+  border-color: rgba(40, 200, 239, 0.5);
+  border-left-color: var(--cyan);
+  background: linear-gradient(90deg, rgba(0, 89, 117, 0.18), rgba(2, 12, 19, 0.9) 55%);
+}
+
+.ea-factory-page-heading span {
+  color: var(--cyan);
+}
+
 .ea-factory-sheet-sync,
 .ea-factory-source-detail,
 .ea-factory-research-gate,
@@ -9366,6 +9388,72 @@ button:disabled {
   margin-bottom: 10px;
 }
 
+.ea-factory-source-advanced-body,
+.ea-factory-current-stage-body {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.ea-factory-page-navigation {
+  justify-self: end;
+  min-width: 240px;
+  border-color: rgba(40, 200, 239, 0.55);
+  color: var(--cyan);
+}
+
+.ea-factory-result-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.ea-factory-result-summary article {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(84, 119, 142, 0.42);
+  border-top: 3px solid #54778e;
+  background: rgba(1, 11, 17, 0.82);
+}
+
+.ea-factory-result-summary article[data-status="completed"] {
+  border-color: rgba(37, 215, 122, 0.5);
+  border-top-color: var(--green);
+}
+
+.ea-factory-result-summary article[data-status="running"],
+.ea-factory-result-summary article[data-status="ready"] {
+  border-top-color: var(--amber);
+}
+
+.ea-factory-result-summary article[data-status="failed"],
+.ea-factory-result-summary article[data-status="blocked"] {
+  border-color: rgba(229, 72, 77, 0.55);
+  border-top-color: #e5484d;
+}
+
+.ea-factory-result-summary strong {
+  color: #e8f5fa;
+  font-size: 12px;
+}
+
+.ea-factory-result-summary span {
+  color: var(--cyan);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.ea-factory-result-summary small {
+  color: #8fa8b5;
+  font-size: 9px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .ea-factory-stage-action {
   justify-self: end;
   min-width: 280px;
@@ -9429,6 +9517,57 @@ button:disabled {
 
 .ea-factory-rail-terminal {
   min-width: 0;
+}
+
+.ea-factory-rail-task-status {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid rgba(37, 215, 122, 0.48);
+  border-left: 4px solid var(--green);
+  background: rgba(3, 31, 23, 0.58);
+}
+
+.ea-factory-rail-task-status[data-status="running"] {
+  border-color: rgba(255, 178, 63, 0.55);
+  border-left-color: var(--amber);
+  background: rgba(47, 30, 5, 0.48);
+}
+
+.ea-factory-rail-task-status[data-status="checking"] {
+  border-color: rgba(40, 200, 239, 0.48);
+  border-left-color: var(--cyan);
+  background: rgba(2, 30, 43, 0.52);
+}
+
+.ea-factory-rail-task-status strong,
+.ea-factory-rail-task-status p,
+.ea-factory-rail-task-status small {
+  margin: 0;
+}
+
+.ea-factory-rail-task-status strong {
+  color: #ebf7fb;
+  font-size: 12px;
+}
+
+.ea-factory-rail-task-status p,
+.ea-factory-rail-task-status small {
+  color: #a7bdc7;
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ea-factory-rail-task-status button {
+  min-height: 34px;
+  border: 1px solid rgba(40, 200, 239, 0.5);
+  background: rgba(4, 18, 27, 0.9);
+  color: var(--cyan);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 900;
+  cursor: pointer;
 }
 
 .ea-factory-rail-terminal .ea-factory-terminal-picker {
@@ -20645,8 +20784,19 @@ button:disabled {
   }
 
   .ea-factory-one-click-progress,
-  .ea-factory-one-click-facts {
+  .ea-factory-one-click-facts,
+  .ea-factory-result-summary {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workflow-tabs[data-ea-factory-pages="true"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ea-factory-page-navigation {
+    width: 100%;
+    min-width: 0;
+    justify-self: stretch;
   }
 }
 

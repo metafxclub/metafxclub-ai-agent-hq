@@ -557,6 +557,63 @@ class DeepResearchConfirmationGateTests(unittest.TestCase):
         self.assertTrue(factory_records[0]["buildReady"])
         self.assertEqual(factory_records[0]["strategyBriefDigest"], self.digest_for(report))
 
+    def test_multiline_runtime_brief_stays_digest_valid_for_factory_create_gate(self) -> None:
+        """GET-ready report sources must also pass POST /builds digest validation."""
+
+        report = self.deep_report()
+        multiline_rules = (
+            "BUY เมื่อแท่งปิดทะลุกรอบ\n"
+            "ยืนยัน ATR และ Spread ก่อนส่งคำสั่ง\r\n"
+            "SELL ใช้กฎกลับด้าน\tและห้ามเปิดซ้ำในแท่งเดียว"
+        )
+        report["metrics"]["strategyBrief"]["entryRules"] = multiline_rules
+        canonical_brief = self.bridge.normalize_strategy_brief(
+            report["metrics"]["strategyBrief"]
+        )
+        digest = self.bridge.compute_strategy_brief_digest(canonical_brief)
+        report["metrics"]["briefDigest"] = digest
+        report["metrics"]["sourceDigest"] = digest
+        mission = self.mission(report)
+        self.persist_report_and_mission(report)
+        self.configure_active_sheet()
+        self.write_confirmation(report)
+
+        sheet_items = self.bridge._research_sheet_report_items(report, 1)
+        outbox = self.bridge._research_sheet_outbox_default()
+        outbox["syncedLedger"] = [
+            {
+                "id": sheet_items[0]["id"],
+                "payloadDigest": sheet_items[0]["payloadDigest"],
+                "configRevision": 1,
+                "syncedAt": "2026-09-09T01:16:00Z",
+            }
+        ]
+        self.bridge.write_json(self.bridge.RESEARCH_SHEET_OUTBOX_PATH, outbox)
+
+        records = self.bridge._ea_factory_research_source_records([report], [mission])
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(
+            record["strategyBrief"]["entryRules"],
+            canonical_brief["entryRules"],
+        )
+        self.assertIn("\n", record["strategyBrief"]["entryRules"])
+        self.assertEqual(record["strategyBriefDigest"], digest)
+        self.assertTrue(self.bridge._ea_factory_current_compact_source_valid(record))
+
+        projection = self.bridge._ea_factory_compact_strategy_brief(
+            {
+                "record_id": record["recordId"],
+                "strategyBrief": record["strategyBrief"],
+            }
+        )
+        self.assertIsInstance(projection, dict)
+        self.assertEqual(projection["brief"], canonical_brief)
+        self.assertEqual(projection["digest"], digest)
+        public_record = self.bridge._ea_factory_source_record_read_model(record)
+        self.assertTrue(public_record["buildReady"])
+        self.assertTrue(public_record["eaResearch"]["digestMatched"])
+
     def test_legacy_blueprint_is_diagnostic_only_and_requires_research_rerun(self) -> None:
         report = self.deep_report()
         legacy_digest = report["metrics"]["blueprintDigest"]

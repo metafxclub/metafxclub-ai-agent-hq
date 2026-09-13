@@ -727,7 +727,7 @@ class MissionAiRoomFrontendTests(unittest.TestCase):
             self.assertIn(f'id: "{status}"', columns)
 
     def test_cache_version_keeps_expanded_meeting_room_in_latest_build(self) -> None:
-        self.assertGreaterEqual(self.html.count("20260912-ea-factory-guard-v0918"), 2)
+        self.assertGreaterEqual(self.html.count("20260913-ea-factory-3page-state-v0919"), 2)
         self.assertNotIn("20260824-ea-optimization-lab-v072", self.html)
         self.assertNotIn("20260823-radar-run-truth-v069", self.html)
         self.assertNotIn("20260822-ai-meeting-chat-first-v067", self.html)

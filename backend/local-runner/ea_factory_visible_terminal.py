@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -48,10 +49,18 @@ MAX_SET_BYTES = 1024 * 1024
 DEFAULT_UI_TIMEOUT_SECONDS = 120
 DEFAULT_BACKTEST_TIMEOUT_SECONDS = 2 * 60 * 60
 POWERSHELL_COMPLETION_MARGIN_SECONDS = 90
+POWERSHELL_COMPILE_COMPLETION_MARGIN_SECONDS = 30
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 SAFE_OPERATION_ID = re.compile(r"ea-visible-[a-f0-9]{24}\Z")
 SAFE_SYMBOL = re.compile(r"[A-Za-z0-9._#-]{1,40}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+MAX_TERMINAL_WINDOW_TITLE_CHARS = 512
+MAX_TERMINAL_STABLE_TITLE_CHARS = 384
+MAX_TERMINAL_CHART_SUFFIX_CHARS = 128
+TERMINAL_CHART_SUFFIX_TITLE = re.compile(
+    rf"(?P<stable>[^\[\]]{{1,{MAX_TERMINAL_STABLE_TITLE_CHARS}}})"
+    rf" - \[(?P<chart>[^\[\]]{{1,{MAX_TERMINAL_CHART_SUFFIX_CHARS}}})\]\Z"
+)
 CAN_SLIM_CERTIFIED_INPUT_LAYOUT = (
     ("InpStopLossPercent", "double"),
     ("RewardRiskRatio", "double"),
@@ -151,6 +160,41 @@ def _sha256_text(value: object) -> str:
     return _sha256_bytes(str(value or "").encode("utf-8", errors="replace"))
 
 
+def _terminal_window_title_identity(value: object) -> tuple[str, bool]:
+    """Return the exact stable MT4 title and whether one chart suffix was removed."""
+
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > MAX_TERMINAL_WINDOW_TITLE_CHARS
+        or value != value.strip()
+        or any(unicodedata.category(character).startswith("C") for character in value)
+    ):
+        raise VisibleTerminalAdapterError("process_binding_terminal_title_invalid")
+
+    contains_bracket = "[" in value or "]" in value
+    if not contains_bracket:
+        return value, False
+
+    match = TERMINAL_CHART_SUFFIX_TITLE.fullmatch(value)
+    if match is None:
+        raise VisibleTerminalAdapterError("process_binding_terminal_title_invalid")
+    stable = match.group("stable")
+    chart = match.group("chart")
+    if stable != stable.strip() or chart != chart.strip():
+        raise VisibleTerminalAdapterError("process_binding_terminal_title_invalid")
+    return stable, True
+
+
+def _terminal_window_title_identity_digest(value: object) -> str:
+    stable, chart_suffix_removed = _terminal_window_title_identity(value)
+    mode = "chart-suffix" if chart_suffix_removed else "exact-title"
+    # Include the parse mode so a one-sided suffix parse can never compare equal.
+    return _sha256_text(
+        f"ea-factory-terminal-window-title-identity-v1\n{mode}\n{stable}"
+    )
+
+
 def _path_has_reparse_component(path: Path) -> bool:
     try:
         absolute = path.absolute()
@@ -214,6 +258,63 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _require_single_link(path: Path, code: str) -> None:
+    """Reject a file that aliases another path through a hard link."""
+
+    try:
+        metadata = path.stat(follow_symlinks=False)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise VisibleTerminalAdapterError(code) from error
+    if not stat.S_ISREG(metadata.st_mode) or int(metadata.st_nlink) != 1:
+        raise VisibleTerminalAdapterError(code)
+
+
+def _safe_child_directory(
+    parent: Path,
+    name: str,
+    *,
+    containment_root: Path,
+    create: bool,
+    code: str,
+) -> Path:
+    """Resolve or create one child without traversing an unchecked junction."""
+
+    if not name or name in {".", ".."} or any(token in name for token in ("/", "\\", ":")):
+        raise VisibleTerminalAdapterError(code)
+    candidate = parent / name
+    try:
+        # Check the already-existing parent before mutating anything.  If a
+        # racing creator wins mkdir, the same validations run on its object.
+        if _path_has_reparse_component(parent):
+            raise VisibleTerminalAdapterError(code)
+        resolved_parent = parent.resolve(strict=True)
+        if not _is_relative_to(resolved_parent, containment_root):
+            raise VisibleTerminalAdapterError(code)
+        if not candidate.exists():
+            if not create:
+                raise VisibleTerminalAdapterError(code)
+            try:
+                candidate.mkdir()
+            except FileExistsError:
+                pass
+        metadata = candidate.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or int(getattr(metadata, "st_file_attributes", 0) or 0) & 0x400
+            or _path_has_reparse_component(candidate)
+        ):
+            raise VisibleTerminalAdapterError(code)
+        resolved = candidate.resolve(strict=True)
+    except VisibleTerminalAdapterError:
+        raise
+    except (OSError, RuntimeError, ValueError) as error:
+        raise VisibleTerminalAdapterError(code) from error
+    if resolved.parent != resolved_parent or not _is_relative_to(resolved, containment_root):
+        raise VisibleTerminalAdapterError(code)
+    return resolved
 
 
 def _managed_path(root: Path, relative: object, code: str) -> Path:
@@ -287,21 +388,66 @@ def _write_exclusive(path: Path, payload: bytes, code: str) -> None:
             os.close(descriptor)
 
 
-def _copy_exclusive_or_verify(source: Path, destination: Path) -> tuple[str, int, bool]:
-    source_digest, source_size = _stable_digest(source, maximum_bytes=MAX_BINARY_BYTES)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if _path_has_reparse_component(destination.parent):
-        raise VisibleTerminalAdapterError("expert_deployment_path_unsafe")
+def _write_exclusive_or_verify_bytes(
+    path: Path,
+    payload: bytes,
+    *,
+    exists_code: str,
+    mismatch_code: str,
+) -> bool:
+    """Write once, or reuse only byte-identical single-link evidence."""
+
+    if path.exists():
+        _require_single_link(path, mismatch_code)
+        try:
+            observed = path.read_bytes()
+        except OSError as error:
+            raise VisibleTerminalAdapterError(mismatch_code) from error
+        if not secrets.compare_digest(
+            hashlib.sha256(observed).digest(),
+            hashlib.sha256(payload).digest(),
+        ) or observed != payload:
+            raise VisibleTerminalAdapterError(mismatch_code)
+        return True
+    _write_exclusive(path, payload, exists_code)
+    _require_single_link(path, mismatch_code)
+    try:
+        observed = path.read_bytes()
+    except OSError as error:
+        raise VisibleTerminalAdapterError(mismatch_code) from error
+    if observed != payload:
+        raise VisibleTerminalAdapterError(mismatch_code)
+    return False
+
+
+def _copy_exclusive_or_verify_bounded(
+    source: Path,
+    destination: Path,
+    *,
+    maximum_bytes: int,
+    unsafe_code: str,
+    collision_code: str,
+    copy_failed_code: str,
+    digest_mismatch_code: str,
+) -> tuple[str, int, bool]:
+    _require_single_link(source, unsafe_code)
+    source_digest, source_size = _stable_digest(source, maximum_bytes=maximum_bytes)
+    if (
+        not destination.parent.is_dir()
+        or _path_has_reparse_component(destination.parent)
+    ):
+        raise VisibleTerminalAdapterError(unsafe_code)
     if destination.exists():
+        _require_single_link(destination, unsafe_code)
         destination_digest, destination_size = _stable_digest(
             destination,
-            maximum_bytes=MAX_BINARY_BYTES,
+            maximum_bytes=maximum_bytes,
         )
         if (
             destination_size != source_size
             or not secrets.compare_digest(destination_digest, source_digest)
         ):
-            raise VisibleTerminalAdapterError("expert_deployment_collision")
+            raise VisibleTerminalAdapterError(collision_code)
         return source_digest, source_size, True
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_BINARY"):
@@ -316,16 +462,104 @@ def _copy_exclusive_or_verify(source: Path, destination: Path) -> tuple[str, int
             output_handle.flush()
             os.fsync(output_handle.fileno())
     except FileExistsError:
-        return _copy_exclusive_or_verify(source, destination)
+        return _copy_exclusive_or_verify_bounded(
+            source,
+            destination,
+            maximum_bytes=maximum_bytes,
+            unsafe_code=unsafe_code,
+            collision_code=collision_code,
+            copy_failed_code=copy_failed_code,
+            digest_mismatch_code=digest_mismatch_code,
+        )
     except (OSError, ValueError) as error:
-        raise VisibleTerminalAdapterError("expert_deployment_failed") from error
+        raise VisibleTerminalAdapterError(copy_failed_code) from error
     finally:
         if descriptor is not None:
             os.close(descriptor)
-    copied_digest, copied_size = _stable_digest(destination, maximum_bytes=MAX_BINARY_BYTES)
+    copied_digest, copied_size = _stable_digest(
+        destination,
+        maximum_bytes=maximum_bytes,
+    )
+    _require_single_link(destination, unsafe_code)
     if copied_size != source_size or not secrets.compare_digest(copied_digest, source_digest):
-        raise VisibleTerminalAdapterError("expert_deployment_digest_mismatch")
+        raise VisibleTerminalAdapterError(digest_mismatch_code)
     return copied_digest, copied_size, False
+
+
+def _copy_exclusive_or_verify(source: Path, destination: Path) -> tuple[str, int, bool]:
+    return _copy_exclusive_or_verify_bounded(
+        source,
+        destination,
+        maximum_bytes=MAX_BINARY_BYTES,
+        unsafe_code="expert_deployment_path_unsafe",
+        collision_code="expert_deployment_collision",
+        copy_failed_code="expert_deployment_failed",
+        digest_mismatch_code="expert_deployment_digest_mismatch",
+    )
+
+
+def _compile_working_copy_paths(
+    target: dict,
+    operation_id: str,
+    source: Path,
+    *,
+    create: bool,
+) -> tuple[Path, Path, str]:
+    """Resolve one operation-bound source/binary pair inside terminal data."""
+
+    try:
+        data_root = target["dataPath"].resolve(strict=True)
+        experts_candidate = data_root / "MQL4" / "Experts"
+        if _path_has_reparse_component(experts_candidate):
+            raise VisibleTerminalAdapterError("compile_working_copy_path_unsafe")
+        experts_root = experts_candidate.resolve(strict=True)
+    except VisibleTerminalAdapterError:
+        raise
+    except (OSError, RuntimeError, ValueError) as error:
+        raise VisibleTerminalAdapterError("compile_working_copy_path_invalid") from error
+    if (
+        _path_has_reparse_component(data_root)
+        or _path_has_reparse_component(experts_root)
+        or not _is_relative_to(experts_root, data_root)
+    ):
+        raise VisibleTerminalAdapterError("compile_working_copy_path_unsafe")
+    resolved_root = experts_root
+    for component in ("Metafxclub", "AgentHQ", operation_id):
+        resolved_root = _safe_child_directory(
+            resolved_root,
+            component,
+            containment_root=experts_root,
+            create=create,
+            code=(
+                "compile_working_copy_path_unsafe"
+                if create
+                else "compile_working_copy_path_invalid"
+            ),
+        )
+    # The MetaEditor title exposes only the file name.  Bind that title to one
+    # operation by using its validated 96-bit operation token, rather than the
+    # immutable source's reusable basename.
+    working_source = resolved_root / f"agenthq_{operation_id.removeprefix('ea-visible-')}.mq4"
+    working_binary = working_source.with_suffix(".ex4")
+    relative = working_source.relative_to(target["dataPath"]).as_posix()
+    return working_source, working_binary, relative
+
+
+def _require_exact_digest(
+    path: Path,
+    expected_digest: str,
+    *,
+    maximum_bytes: int,
+    missing_code: str,
+    mismatch_code: str,
+) -> tuple[str, int]:
+    try:
+        digest, size = _stable_digest(path, maximum_bytes=maximum_bytes)
+    except VisibleTerminalAdapterError as error:
+        raise VisibleTerminalAdapterError(missing_code) from error
+    if not secrets.compare_digest(digest, expected_digest):
+        raise VisibleTerminalAdapterError(mismatch_code)
+    return digest, size
 
 
 def _process_binding_digest(value: Mapping[str, object]) -> str:
@@ -438,12 +672,14 @@ def _fresh_raw_binding(
         or os.path.normcase(str(front_path)) != os.path.normcase(str(expected_front))
         or raw.get("frontOfficeKind")
         != ("metaeditor" if stage_id == "compile_validate" else "strategy_tester")
-        or not str(raw.get("terminalWindowTitle") or "").strip()
         or not str(raw.get("terminalWindowClass") or "").strip()
         or not str(raw.get("frontOfficeWindowTitle") or "").strip()
         or not str(raw.get("frontOfficeWindowClass") or "").strip()
     ):
         raise VisibleTerminalAdapterError("process_binding_target_mismatch")
+    terminal_title_identity_digest = _terminal_window_title_identity_digest(
+        raw.get("terminalWindowTitle")
+    )
     terminal_digest, _ = _stable_digest(terminal_path, maximum_bytes=1024 * 1024 * 1024)
     front_digest, _ = _stable_digest(front_path, maximum_bytes=1024 * 1024 * 1024)
     binding = {
@@ -457,7 +693,9 @@ def _fresh_raw_binding(
         "terminalExecutableSha256": terminal_digest,
         "terminalWindowHandle": raw["terminalWindowHandle"],
         "terminalWindowOwnerProcessId": raw["terminalWindowOwnerProcessId"],
-        "terminalWindowTitleSha256": _sha256_text(raw["terminalWindowTitle"]),
+        # Keep the established bridge schema key while storing a tagged digest of
+        # the stable title identity.  Only one exact final MT4 chart suffix may vary.
+        "terminalWindowTitleSha256": terminal_title_identity_digest,
         "terminalWindowClassSha256": _sha256_text(raw["terminalWindowClass"]),
         "frontOfficeKind": raw["frontOfficeKind"],
         "frontOfficeProcessId": raw["frontOfficeProcessId"],
@@ -976,11 +1214,18 @@ def _default_powershell_runner(
     ]
     started = time.perf_counter()
     bounded_timeout = max(10, min(int(timeout_seconds), DEFAULT_BACKTEST_TIMEOUT_SECONDS))
-    process_timeout = (
-        bounded_timeout + POWERSHELL_COMPLETION_MARGIN_SECONDS
-        if bounded_timeout == DEFAULT_BACKTEST_TIMEOUT_SECONDS
-        else bounded_timeout
-    )
+    action = str(payload.get("action") or "")
+    if bounded_timeout == DEFAULT_BACKTEST_TIMEOUT_SECONDS:
+        process_timeout = bounded_timeout + POWERSHELL_COMPLETION_MARGIN_SECONDS
+    elif action == "compile":
+        # MetaEditor owns a bounded 120-second evidence window.  The wrapper
+        # needs a small post-deadline allowance so PowerShell can persist its
+        # exact failure response instead of being killed at the same instant.
+        process_timeout = (
+            bounded_timeout + POWERSHELL_COMPILE_COMPLETION_MARGIN_SECONDS
+        )
+    else:
+        process_timeout = bounded_timeout
     try:
         result = subprocess.run(
             command,
@@ -1067,6 +1312,7 @@ def _normalized_compile_log(
     source_digest: str,
     binary_name: str,
     binary_digest: str,
+    working_copy_relative_path_digest: str,
 ) -> bytes:
     if re.fullmatch(r"Result:\s*0\s+errors?,\s*0\s+warnings?", result_line.strip(), re.I) is None:
         raise VisibleTerminalAdapterError("compile_result_line_unverified")
@@ -1074,8 +1320,14 @@ def _normalized_compile_log(
         "MetaEditor verified compile result\n"
         f"Source: {source_name}\n"
         f"sourceDigest: {source_digest}\n"
+        "Compile working copy: terminal data operation folder\n"
+        f"compileWorkingCopyRelativePathSha256: {working_copy_relative_path_digest}\n"
+        f"compileWorkingSourceSha256: {source_digest}\n"
         f"Compiled binary: {binary_name}\n"
         f"compiledBinarySha256: {binary_digest}\n"
+        f"compileWorkingBinarySha256: {binary_digest}\n"
+        "compiledBinaryPublishedFromWorkingCopy: true\n"
+        "immutableSourcePreserved: true\n"
         f"{result_line.strip()}\n"
     ).encode("utf-8")
 
@@ -2344,6 +2596,9 @@ class VisibleFrontOfficeAdapter:
         source: Path,
         source_digest: str,
         binary: Path,
+        working_source: Path,
+        working_binary: Path,
+        working_relative: str,
         screenshot: Path,
         compile_log: Path,
         base_receipt_path: Path,
@@ -2360,6 +2615,36 @@ class VisibleFrontOfficeAdapter:
             expected_binary,
             maximum_bytes=MAX_BINARY_BYTES,
         )
+        _require_exact_digest(
+            source,
+            source_digest,
+            maximum_bytes=MAX_SOURCE_BYTES,
+            missing_code="immutable_source_missing_before_visible_recovery",
+            mismatch_code="immutable_source_changed_before_visible_recovery",
+        )
+        working_source_digest, _ = _require_exact_digest(
+            working_source,
+            source_digest,
+            maximum_bytes=MAX_SOURCE_BYTES,
+            missing_code="compile_working_source_missing_before_visible_recovery",
+            mismatch_code="compile_working_source_changed_before_visible_recovery",
+        )
+        _require_single_link(
+            working_source,
+            "compile_working_source_hardlink_rejected",
+        )
+        working_binary_digest, _ = _require_exact_digest(
+            working_binary,
+            binary_digest,
+            maximum_bytes=MAX_BINARY_BYTES,
+            missing_code="compile_working_binary_missing_before_visible_recovery",
+            mismatch_code="compile_working_binary_changed_before_visible_recovery",
+        )
+        _require_single_link(
+            working_binary,
+            "compile_working_binary_hardlink_rejected",
+        )
+        working_relative_digest = _sha256_text(working_relative)
         receipt = _validate_receipt_common(
             _read_json_object(base_receipt_path, "visible_receipt_invalid"),
             operation_id=operation_id,
@@ -2380,6 +2665,12 @@ class VisibleFrontOfficeAdapter:
             or receipt.get("liveTradingExecuted") is not False
             or receipt.get("visibleWindowSha256") != screenshot_digest
             or receipt.get("compileLogSha256") != compile_log_digest
+            or receipt.get("compileWorkingCopyRelativePathSha256")
+            != working_relative_digest
+            or receipt.get("compileWorkingSourceSha256") != working_source_digest
+            or receipt.get("compileWorkingBinarySha256") != working_binary_digest
+            or receipt.get("compiledBinaryPublishedFromWorkingCopy") is not True
+            or receipt.get("immutableSourcePreserved") is not True
             or re.fullmatch(
                 r"Result:\s*0\s+errors?,\s*0\s+warnings?",
                 result_line,
@@ -2416,8 +2707,8 @@ class VisibleFrontOfficeAdapter:
                 "terminalPath": str(target["terminalPath"]),
                 "compilerPath": str(target["compilerPath"]),
                 "dataPath": str(target["dataPath"]),
-                "sourcePath": str(source),
-                "binaryPath": str(expected_binary),
+                "sourcePath": str(working_source),
+                "binaryPath": str(working_binary),
                 "expectedSourceDigest": source_digest,
                 "expectedBinaryDigest": binary_digest,
                 "expectedTerminalProcessId": preflight_probe["processId"],
@@ -2433,6 +2724,9 @@ class VisibleFrontOfficeAdapter:
             or ui.get("operationId") != operation_id
             or ui.get("recoveredWithoutAction") is not True
             or ui.get("exactSourceWindowVerified") is not True
+            or ui.get("compileWorkingCopyVerified") is not True
+            or ui.get("workingSourceSha256") != working_source_digest
+            or ui.get("workingBinarySha256") != working_binary_digest
             or str(ui.get("compileResultLine") or "").strip() != result_line
         ):
             raise VisibleTerminalAdapterError("visible_compile_recovery_invalid")
@@ -2489,6 +2783,12 @@ class VisibleFrontOfficeAdapter:
             "terminalStillRunning": True,
             "terminalStillOpen": True,
             "sourceDigest": source_digest,
+            "compileWorkingCopyVerified": True,
+            "compileWorkingCopyRelativePathSha256": working_relative_digest,
+            "compileWorkingSourceSha256": working_source_digest,
+            "compileWorkingBinarySha256": working_binary_digest,
+            "compiledBinaryPublishedFromWorkingCopy": True,
+            "immutableSourcePreserved": True,
             "compiledBinaryArtifactAlias": "compiled_binary",
             "compiledBinarySha256": binary_digest,
             "visibleWindowEvidenceArtifactAlias": "visible_window",
@@ -2528,7 +2828,20 @@ class VisibleFrontOfficeAdapter:
         source_digest = context["source"]["digest"]
         binary = source.with_suffix(".ex4")
         operation_id = context["operation"]["operationId"]
-        screenshot = workspace / "Screenshots" / f"{operation_id}-metaeditor.png"
+        working_relative = (
+            Path("MQL4")
+            / "Experts"
+            / "Metafxclub"
+            / "AgentHQ"
+            / operation_id
+            / f"agenthq_{operation_id.removeprefix('ea-visible-')}.mq4"
+        ).as_posix()
+        working_relative_digest = _sha256_text(working_relative)
+        initial_screenshot = workspace / "Screenshots" / f"{operation_id}-metaeditor.png"
+        recovery_screenshot = (
+            workspace / "Screenshots" / f"{operation_id}-metaeditor-recovery.png"
+        )
+        screenshot = initial_screenshot
         compile_log = workspace / "Reports" / f"{operation_id}-compile.txt"
         receipt_path = workspace / "Summaries" / f"{operation_id}-compile-receipt.json"
         intent_path = workspace / "Summaries" / f"{operation_id}-compile-intent.json"
@@ -2540,71 +2853,238 @@ class VisibleFrontOfficeAdapter:
         expected_intent = _action_intent_payload(context, target)
         if receipt_path.exists():
             _require_exact_action_intent(intent_path, expected_intent)
+            if recovery_screenshot.exists():
+                screenshot = recovery_screenshot
+            working_source, working_binary, observed_relative = (
+                _compile_working_copy_paths(
+                    target,
+                    operation_id,
+                    source,
+                    create=False,
+                )
+            )
+            if observed_relative != working_relative:
+                raise VisibleTerminalAdapterError("compile_working_copy_path_mismatch")
             return self._recover_compile(
                 context=context,
                 target=target,
                 source=source,
                 source_digest=source_digest,
                 binary=binary,
+                working_source=working_source,
+                working_binary=working_binary,
+                working_relative=working_relative,
                 screenshot=screenshot,
                 compile_log=compile_log,
                 base_receipt_path=receipt_path,
                 preflight_probe=preflight_probe,
             )
-        if intent_path.exists() or screenshot.exists() or compile_log.exists():
-            # A visible action may already have happened.  Never issue a second
-            # Compile click without a complete verified operation receipt.
-            raise VisibleTerminalAdapterError("visible_action_state_uncertain")
-        payload = {
-            "schemaVersion": "ea-factory-visible-powershell-request-v1",
-            "action": "compile",
-            "platform": "mt4",
-            "operationId": operation_id,
-            "terminalPath": str(target["terminalPath"]),
-            "compilerPath": str(target["compilerPath"]),
-            "dataPath": str(target["dataPath"]),
-            "sourcePath": str(source),
-            "expectedSourceDigest": source_digest,
-            "binaryPath": str(binary),
-            "screenshotPath": str(screenshot),
-            "timeoutSeconds": DEFAULT_UI_TIMEOUT_SECONDS,
-            "expectedTerminalProcessId": preflight_probe["processId"],
-            "expectedTerminalWindowHandle": preflight_probe["windowHandle"],
-        }
-        _write_exclusive(
-            intent_path,
-            _canonical_json(expected_intent),
-            "visible_action_intent_exists",
+        recovering_inflight_compile = intent_path.exists()
+        reused_working_source = False
+        reused_compile_screenshot = False
+        if recovering_inflight_compile:
+            # A Compile click may already have happened.  Reconcile only by
+            # observing the exact working copy and bound MetaEditor window;
+            # never issue another Compile command for this operation.
+            _require_exact_action_intent(intent_path, expected_intent)
+            working_source, working_binary, observed_relative = (
+                _compile_working_copy_paths(
+                    target,
+                    operation_id,
+                    source,
+                    create=False,
+                )
+            )
+            if observed_relative != working_relative:
+                raise VisibleTerminalAdapterError("compile_working_copy_path_mismatch")
+            _require_exact_digest(
+                source,
+                source_digest,
+                maximum_bytes=MAX_SOURCE_BYTES,
+                missing_code="immutable_source_missing_during_compile_recovery",
+                mismatch_code="immutable_source_changed_during_compile_recovery",
+            )
+            working_source_digest, _working_source_size = _require_exact_digest(
+                working_source,
+                source_digest,
+                maximum_bytes=MAX_SOURCE_BYTES,
+                missing_code="compile_working_source_missing_during_recovery",
+                mismatch_code="compile_working_source_changed_during_recovery",
+            )
+            _require_single_link(
+                working_source,
+                "compile_working_source_hardlink_rejected",
+            )
+            expected_recovery_binary_digest = ""
+            if working_binary.exists():
+                _require_single_link(
+                    working_binary,
+                    "compile_working_binary_hardlink_rejected",
+                )
+                expected_recovery_binary_digest, _ = _stable_digest(
+                    working_binary,
+                    maximum_bytes=MAX_BINARY_BYTES,
+                )
+            if recovery_screenshot.exists():
+                screenshot = recovery_screenshot
+                _validate_png(screenshot)
+                reused_compile_screenshot = True
+            elif initial_screenshot.exists():
+                screenshot = initial_screenshot
+                _validate_png(screenshot)
+                reused_compile_screenshot = True
+            else:
+                screenshot = recovery_screenshot
+            response_path = (
+                workspace / "Summaries" / f"{operation_id}-compile-reconcile-ui.json"
+            )
+            payload = {
+                "schemaVersion": "ea-factory-visible-powershell-request-v1",
+                "action": "recover_inflight_compile",
+                "platform": "mt4",
+                "operationId": operation_id,
+                "terminalPath": str(target["terminalPath"]),
+                "compilerPath": str(target["compilerPath"]),
+                "dataPath": str(target["dataPath"]),
+                "sourcePath": str(working_source),
+                "expectedSourceDigest": source_digest,
+                "binaryPath": str(working_binary),
+                "expectedBinaryDigest": expected_recovery_binary_digest,
+                "screenshotPath": str(screenshot),
+                "reuseExistingScreenshot": reused_compile_screenshot,
+                "timeoutSeconds": 30,
+                "expectedTerminalProcessId": preflight_probe["processId"],
+                "expectedTerminalWindowHandle": preflight_probe["windowHandle"],
+            }
+        else:
+            if initial_screenshot.exists() or recovery_screenshot.exists() or compile_log.exists():
+                raise VisibleTerminalAdapterError("visible_action_state_uncertain")
+            working_source, working_binary, observed_relative = (
+                _compile_working_copy_paths(
+                    target,
+                    operation_id,
+                    source,
+                    create=True,
+                )
+            )
+            if observed_relative != working_relative:
+                raise VisibleTerminalAdapterError("compile_working_copy_path_mismatch")
+            if working_binary.exists():
+                raise VisibleTerminalAdapterError("compile_working_binary_collision")
+            working_source_digest, _working_source_size, reused_working_source = (
+                _copy_exclusive_or_verify_bounded(
+                    source,
+                    working_source,
+                    maximum_bytes=MAX_SOURCE_BYTES,
+                    unsafe_code="compile_working_copy_path_unsafe",
+                    collision_code="compile_working_source_collision",
+                    copy_failed_code="compile_working_source_copy_failed",
+                    digest_mismatch_code="compile_working_source_digest_mismatch",
+                )
+            )
+            if not secrets.compare_digest(working_source_digest, source_digest):
+                raise VisibleTerminalAdapterError("compile_working_source_digest_mismatch")
+            _require_single_link(
+                working_source,
+                "compile_working_source_hardlink_rejected",
+            )
+            try:
+                unexpected_working_entries = [
+                    entry
+                    for entry in working_source.parent.iterdir()
+                    if entry.name != working_source.name
+                ]
+            except OSError as error:
+                raise VisibleTerminalAdapterError("compile_working_copy_path_invalid") from error
+            if unexpected_working_entries:
+                raise VisibleTerminalAdapterError("compile_working_copy_collision")
+            payload = {
+                "schemaVersion": "ea-factory-visible-powershell-request-v1",
+                "action": "compile",
+                "platform": "mt4",
+                "operationId": operation_id,
+                "terminalPath": str(target["terminalPath"]),
+                "compilerPath": str(target["compilerPath"]),
+                "dataPath": str(target["dataPath"]),
+                "sourcePath": str(working_source),
+                "expectedSourceDigest": source_digest,
+                "binaryPath": str(working_binary),
+                "screenshotPath": str(screenshot),
+                "timeoutSeconds": DEFAULT_UI_TIMEOUT_SECONDS,
+                "expectedTerminalProcessId": preflight_probe["processId"],
+                "expectedTerminalWindowHandle": preflight_probe["windowHandle"],
+            }
+            _write_exclusive(
+                intent_path,
+                _canonical_json(expected_intent),
+                "visible_action_intent_exists",
+            )
+        visible_timeout_seconds = (
+            30 if recovering_inflight_compile else DEFAULT_UI_TIMEOUT_SECONDS
         )
         ui = self._powershell_runner(
             payload,
             response_path=response_path,
-            timeout_seconds=DEFAULT_UI_TIMEOUT_SECONDS,
+            timeout_seconds=visible_timeout_seconds,
+        )
+        expected_ui_action = (
+            "recover_inflight_compile" if recovering_inflight_compile else "compile"
         )
         if (
             not isinstance(ui, dict)
             or ui.get("schemaVersion") != POWERSHELL_RESULT_SCHEMA
-            or ui.get("action") != "compile"
+            or ui.get("action") != expected_ui_action
             or ui.get("operationId") != operation_id
-            or ui.get("compileInvoked") is not True
             or ui.get("exactSourceWindowVerified") is not True
+            or ui.get("compileWorkingCopyVerified") is not True
+            or ui.get("workingSourceSha256") != working_source_digest
+            or (
+                recovering_inflight_compile
+                and ui.get("screenshotReused") is not reused_compile_screenshot
+            )
+            or (
+                recovering_inflight_compile
+                and (
+                    ui.get("compileInvoked") is not False
+                    or ui.get("recoveredWithoutCompile") is not True
+                )
+            )
+            or (
+                not recovering_inflight_compile
+                and ui.get("compileInvoked") is not True
+            )
         ):
             raise VisibleTerminalAdapterError("visible_compile_result_invalid")
         process_binding, post_binding = _binding_pair(
             ui,
             target=target,
             stage_id="compile_validate",
-            maximum_operation_seconds=DEFAULT_UI_TIMEOUT_SECONDS,
+            maximum_operation_seconds=visible_timeout_seconds,
         )
         _assert_preflight_continuity(process_binding, preflight_probe)
-        current_source_digest, _ = _stable_digest(source, maximum_bytes=MAX_SOURCE_BYTES)
-        if not secrets.compare_digest(current_source_digest, source_digest):
-            raise VisibleTerminalAdapterError("source_changed_during_visible_compile")
+        _require_exact_digest(
+            source,
+            source_digest,
+            maximum_bytes=MAX_SOURCE_BYTES,
+            missing_code="immutable_source_missing_during_visible_compile",
+            mismatch_code="immutable_source_changed_during_visible_compile",
+        )
+        _require_exact_digest(
+            working_source,
+            source_digest,
+            maximum_bytes=MAX_SOURCE_BYTES,
+            missing_code="compile_working_source_missing_during_visible_compile",
+            mismatch_code="compile_working_source_changed_during_visible_compile",
+        )
+        _require_single_link(
+            working_source,
+            "compile_working_source_hardlink_rejected",
+        )
         verifier_context = {
             "platform": "mt4",
             "operationId": operation_id,
-            "sourcePath": source,
-            "binaryPath": binary,
+            "sourcePath": working_source,
+            "binaryPath": working_binary,
             "sourceDigest": source_digest,
             "terminalTarget": copy.deepcopy(target),
             "visibleUiResult": copy.deepcopy(ui),
@@ -2619,31 +3099,88 @@ class VisibleFrontOfficeAdapter:
             raise VisibleTerminalAdapterError("compile_verifier_result_invalid")
         result_line = str(verified.get("resultLine") or "").strip()
         visible_result_line = str(ui.get("compileResultLine") or "").strip()
-        expected_binary = _resolved_file(
-            binary,
-            "compiled_binary_missing",
+        expected_working_binary = _resolved_file(
+            working_binary,
+            "compile_working_binary_missing",
             maximum_bytes=MAX_BINARY_BYTES,
         )
-        binary_digest, _ = _stable_digest(expected_binary, maximum_bytes=MAX_BINARY_BYTES)
+        _require_single_link(
+            expected_working_binary,
+            "compile_working_binary_hardlink_rejected",
+        )
+        binary_digest, _ = _stable_digest(
+            expected_working_binary,
+            maximum_bytes=MAX_BINARY_BYTES,
+        )
         if (
             verified.get("compileVerified") is not True
             or verified.get("errorCount") != 0
             or verified.get("warningCount") != 0
             or verified.get("sourceDigest") != source_digest
             or verified.get("compiledDigest") != binary_digest
+            or ui.get("workingBinarySha256") != binary_digest
             or result_line != visible_result_line
         ):
             raise VisibleTerminalAdapterError("compile_verification_failed")
-        _write_exclusive(
-            compile_log,
-            _normalized_compile_log(
+        published_digest, _published_size, reused_published_binary = (
+            _copy_exclusive_or_verify_bounded(
+                expected_working_binary,
+                binary,
+                maximum_bytes=MAX_BINARY_BYTES,
+                unsafe_code="compiled_binary_publish_path_unsafe",
+                collision_code="compiled_binary_publish_collision",
+                copy_failed_code="compiled_binary_publish_failed",
+                digest_mismatch_code="compiled_binary_publish_digest_mismatch",
+            )
+        )
+        expected_binary = _resolved_file(
+            binary,
+            "compiled_binary_publish_missing",
+            maximum_bytes=MAX_BINARY_BYTES,
+        )
+        if not secrets.compare_digest(published_digest, binary_digest):
+            raise VisibleTerminalAdapterError("compiled_binary_publish_digest_mismatch")
+        _require_exact_digest(
+            source,
+            source_digest,
+            maximum_bytes=MAX_SOURCE_BYTES,
+            missing_code="immutable_source_missing_after_visible_compile",
+            mismatch_code="immutable_source_changed_after_visible_compile",
+        )
+        _require_exact_digest(
+            working_source,
+            source_digest,
+            maximum_bytes=MAX_SOURCE_BYTES,
+            missing_code="compile_working_source_missing_after_visible_compile",
+            mismatch_code="compile_working_source_changed_after_visible_compile",
+        )
+        _require_exact_digest(
+            expected_working_binary,
+            binary_digest,
+            maximum_bytes=MAX_BINARY_BYTES,
+            missing_code="compile_working_binary_missing_after_publish",
+            mismatch_code="compile_working_binary_changed_after_publish",
+        )
+        _require_exact_digest(
+            expected_binary,
+            binary_digest,
+            maximum_bytes=MAX_BINARY_BYTES,
+            missing_code="compiled_binary_publish_missing",
+            mismatch_code="compiled_binary_publish_digest_mismatch",
+        )
+        compile_log_payload = _normalized_compile_log(
                 result_line,
                 source.name,
                 source_digest,
                 expected_binary.name,
                 binary_digest,
-            ),
-            "compile_log_already_exists",
+                working_relative_digest,
+            )
+        reused_compile_log = _write_exclusive_or_verify_bytes(
+            compile_log,
+            compile_log_payload,
+            exists_code="compile_log_already_exists",
+            mismatch_code="compile_log_existing_content_mismatch",
         )
         screenshot_digest, _ = _validate_png(screenshot)
         compile_log_digest, _ = _stable_digest(compile_log, maximum_bytes=MAX_EVIDENCE_BYTES)
@@ -2656,6 +3193,11 @@ class VisibleFrontOfficeAdapter:
             "processBindingDigest": process_binding["processBindingDigest"],
             "postProcessBindingDigest": post_binding["processBindingDigest"],
             "sourceDigest": source_digest,
+            "compileWorkingCopyRelativePathSha256": working_relative_digest,
+            "compileWorkingSourceSha256": working_source_digest,
+            "compileWorkingBinarySha256": binary_digest,
+            "compiledBinaryPublishedFromWorkingCopy": True,
+            "immutableSourcePreserved": True,
             "compiledBinarySha256": binary_digest,
             "compileLogSha256": compile_log_digest,
             "visibleWindowSha256": screenshot_digest,
@@ -2664,6 +3206,7 @@ class VisibleFrontOfficeAdapter:
             "zeroErrors": True,
             "zeroWarnings": True,
             "liveTradingExecuted": False,
+            "recoveredInflightCompile": recovering_inflight_compile,
         }
         _write_exclusive(
             receipt_path,
@@ -2693,6 +3236,16 @@ class VisibleFrontOfficeAdapter:
             "terminalStillRunning": True,
             "terminalStillOpen": True,
             "sourceDigest": source_digest,
+            "compileWorkingCopyVerified": True,
+            "compileWorkingCopyRelativePathSha256": working_relative_digest,
+            "compileWorkingSourceSha256": working_source_digest,
+            "compileWorkingSourceReusedExactBytes": reused_working_source,
+            "compileScreenshotReusedExactEvidence": reused_compile_screenshot,
+            "compileLogReusedExactBytes": reused_compile_log,
+            "compileWorkingBinarySha256": binary_digest,
+            "compiledBinaryPublishedFromWorkingCopy": True,
+            "compiledBinaryPublishReusedExactBytes": reused_published_binary,
+            "immutableSourcePreserved": True,
             "compiledBinaryArtifactAlias": "compiled_binary",
             "compiledBinarySha256": binary_digest,
             "visibleWindowEvidenceArtifactAlias": "visible_window",
@@ -2702,7 +3255,12 @@ class VisibleFrontOfficeAdapter:
             "adapterReceiptArtifactAlias": "adapter_receipt",
             "visibleMetaEditor": True,
             "compileVerified": True,
+            # This is operation-level evidence: a successful reconciliation
+            # proves the original Compile command completed.  The next field
+            # distinguishes it from issuing another command on this attempt.
             "compileExecuted": True,
+            "compileIssuedByCurrentAttempt": not recovering_inflight_compile,
+            "recoveredInflightCompile": recovering_inflight_compile,
             "recoveredExistingReceipt": False,
             "zeroErrors": True,
             "zeroWarnings": True,

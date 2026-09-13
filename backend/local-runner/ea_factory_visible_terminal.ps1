@@ -26,6 +26,8 @@ public static class MetafxVisibleNative {
     public const int WM_GETTEXT = 0x000D;
     public const int WM_GETTEXTLENGTH = 0x000E;
     public const int WM_SETTEXT = 0x000C;
+    public const int EM_GETSEL = 0x00B0;
+    public const int EM_SETSEL = 0x00B1;
     public const int BM_CLICK = 0x00F5;
     public const int BM_GETCHECK = 0x00F0;
     public const int CB_GETCOUNT = 0x0146;
@@ -34,6 +36,7 @@ public static class MetafxVisibleNative {
     public const int CB_GETLBTEXTLEN = 0x0149;
     public const int CB_SETCURSEL = 0x014E;
     public const int CB_SHOWDROPDOWN = 0x014F;
+    public const int CDM_GETFOLDERPATH = 0x0466;
     public const int MN_GETHMENU = 0x01E1;
     public const int TB_GETSTATE = 0x0412;
     public const int TCM_GETITEMCOUNT = 0x1304;
@@ -64,13 +67,25 @@ public static class MetafxVisibleNative {
     public const uint KEYEVENTF_KEYUP = 0x0002;
     public const uint KEYEVENTF_UNICODE = 0x0004;
     public const ushort VK_TAB = 0x09;
-    public const ushort VK_CONTROL = 0x11;
-    public const ushort VK_A = 0x41;
     public const int SW_RESTORE = 9;
     public const uint GA_ROOT = 2;
+    public const uint GW_HWNDNEXT = 2;
+    public const uint GW_CHILD = 5;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GUITHREADINFO {
+        public int cbSize;
+        public int flags;
+        public IntPtr hwndActive;
+        public IntPtr hwndFocus;
+        public IntPtr hwndCapture;
+        public IntPtr hwndMenuOwner;
+        public IntPtr hwndMoveSize;
+        public IntPtr hwndCaret;
+        public RECT rcCaret;
+    }
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int X; public int Y; }
     [StructLayout(LayoutKind.Sequential)]
@@ -105,6 +120,19 @@ public static class MetafxVisibleNative {
         public uint type;
         public INPUTUNION value;
     }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BY_HANDLE_FILE_INFORMATION {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
 
     [DllImport("user32.dll", SetLastError=true)]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
@@ -118,6 +146,15 @@ public static class MetafxVisibleNative {
     public static extern bool PostMessage(IntPtr hWnd, int message, IntPtr wParam, IntPtr lParam);
     [DllImport("kernel32.dll")]
     public static extern uint GetCurrentThreadId();
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern IntPtr CreateFile(
+        string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes,
+        uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool GetFileInformationByHandle(
+        IntPtr fileHandle, out BY_HANDLE_FILE_INFORMATION information);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool CloseHandle(IntPtr handle);
     [DllImport("user32.dll", SetLastError=true)]
     public static extern bool AttachThreadInput(uint sourceThreadId, uint targetThreadId, bool attach);
     [DllImport("user32.dll")]
@@ -168,6 +205,12 @@ public static class MetafxVisibleNative {
     public static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll", SetLastError=true)]
     public static extern bool IsWindow(IntPtr hWnd);
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern bool IsWindowEnabled(IntPtr hWnd);
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern IntPtr GetWindow(IntPtr hWnd, uint command);
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern bool GetGUIThreadInfo(uint threadId, ref GUITHREADINFO information);
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
     [DllImport("user32.dll", SetLastError=true)]
     public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
@@ -234,13 +277,9 @@ public static class MetafxVisibleNative {
         return input;
     }
 
-    public static bool ReplaceFocusedText(string value) {
+    public static bool TypeFocusedText(string value) {
         if (value == null || value.Length == 0 || value.Length > 2048) return false;
-        List<UNIVERSALINPUT> inputs = new List<UNIVERSALINPUT>(4 + value.Length * 2);
-        inputs.Add(VirtualKey(VK_CONTROL, 0));
-        inputs.Add(VirtualKey(VK_A, 0));
-        inputs.Add(VirtualKey(VK_A, KEYEVENTF_KEYUP));
-        inputs.Add(VirtualKey(VK_CONTROL, KEYEVENTF_KEYUP));
+        List<UNIVERSALINPUT> inputs = new List<UNIVERSALINPUT>(value.Length * 2);
         foreach (char character in value) {
             inputs.Add(UnicodeKey(character, 0));
             inputs.Add(UnicodeKey(character, KEYEVENTF_KEYUP));
@@ -252,6 +291,18 @@ public static class MetafxVisibleNative {
             Marshal.SizeOf(typeof(UNIVERSALINPUT))) == (uint)payload.Length;
     }
 
+    public static uint GetFileLinkCount(string path) {
+        IntPtr handle = CreateFile(path, 0, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) return 0;
+        try {
+            BY_HANDLE_FILE_INFORMATION information;
+            if (!GetFileInformationByHandle(handle, out information)) return 0;
+            return information.NumberOfLinks;
+        } finally {
+            CloseHandle(handle);
+        }
+    }
+
     public static bool SendVirtualKeyPress(ushort key) {
         UNIVERSALINPUT[] inputs = new UNIVERSALINPUT[2];
         inputs[0] = VirtualKey(key, 0);
@@ -260,6 +311,16 @@ public static class MetafxVisibleNative {
             (uint)inputs.Length,
             inputs,
             Marshal.SizeOf(typeof(UNIVERSALINPUT))) == (uint)inputs.Length;
+    }
+
+    public static IntPtr GetFocusedWindowFor(IntPtr target) {
+        uint processId;
+        uint threadId = GetWindowThreadProcessId(target, out processId);
+        if (threadId == 0) return IntPtr.Zero;
+        GUITHREADINFO information = new GUITHREADINFO();
+        information.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+        if (!GetGUIThreadInfo(threadId, ref information)) return IntPtr.Zero;
+        return information.hwndFocus;
     }
 
 }
@@ -278,7 +339,6 @@ public static class MetafxVisibleMsaa {
     private const int STATE_SYSTEM_SELECTED = 0x2;
     private const int STATE_SYSTEM_INVISIBLE = 0x8000;
     private const int STATE_SYSTEM_OFFSCREEN = 0x10000;
-    private const int NAVDIR_LEFT = 0x3;
     private const int MaximumNodes = 8192;
     private const int MaximumDepth = 48;
 
@@ -302,6 +362,11 @@ public static class MetafxVisibleMsaa {
         public int Top;
         public int Width;
         public int Height;
+    }
+
+    private sealed class HierarchyNode {
+        public NodeRef Node;
+        public int Level;
     }
 
     [DllImport("oleacc.dll")]
@@ -345,6 +410,18 @@ public static class MetafxVisibleMsaa {
                 ? node.Child.get_accRole(0)
                 : node.Owner.get_accRole(node.ChildId);
             return Convert.ToInt32(value);
+        } catch { return -1; }
+    }
+
+    private static int ReadHierarchyLevel(NodeRef node) {
+        try {
+            string value = node.Child != null
+                ? node.Child.get_accValue(0)
+                : node.Owner.get_accValue(node.ChildId);
+            int level;
+            if (!Int32.TryParse((value ?? String.Empty).Trim(), out level) ||
+                level < 0 || level > MaximumDepth) return -1;
+            return level;
         } catch { return -1; }
     }
 
@@ -394,21 +471,6 @@ public static class MetafxVisibleMsaa {
         return matches;
     }
 
-    private static NodeRef Navigate(NodeRef node, int direction) {
-        if (node == null) return null;
-        IAccessible basis = node.Child != null ? node.Child : node.Owner;
-        object childId = node.Child != null ? (object)0 : node.ChildId;
-        if (basis == null) return null;
-        object value;
-        try { value = basis.accNavigate(direction, childId); }
-        catch { return null; }
-        if (value == null) return null;
-        IAccessible child = value as IAccessible;
-        return child != null
-            ? new NodeRef { Owner = child, ChildId = 0, Child = child }
-            : new NodeRef { Owner = basis, ChildId = value, Child = null };
-    }
-
     private static bool ValidPath(string[] path) {
         if (path == null || path.Length < 1 || path.Length > 8) return false;
         foreach (string part in path) {
@@ -417,24 +479,67 @@ public static class MetafxVisibleMsaa {
         return true;
     }
 
-    private static bool MatchesExactPath(NodeRef node, string[] path) {
-        if (!ValidPath(path) || node == null ||
-            !String.Equals(ReadName(node), path[path.Length - 1].Trim(),
-                StringComparison.OrdinalIgnoreCase)) return false;
-        for (int index = path.Length - 2; index >= 0; index--) {
-            node = Navigate(node, NAVDIR_LEFT);
-            if (node == null ||
-                !String.Equals(ReadName(node), path[index].Trim(),
-                    StringComparison.OrdinalIgnoreCase)) return false;
+    private static List<NodeRef> ReadFlatTreeItems(IntPtr handle) {
+        List<NodeRef> nodes = new List<NodeRef>();
+        IAccessible root = FromHandle(handle);
+        if (root == null) return nodes;
+        // SysTreeView32 exposes each currently materialized item as a simple
+        // child of the control.  Its accValue is the indentation level; the
+        // MSAA object-parent relationship is not the visual tree hierarchy.
+        int count;
+        try { count = root.accChildCount; }
+        catch { return nodes; }
+        if (count < 1 || count > MaximumNodes) return nodes;
+        object[] children = new object[count];
+        int obtained;
+        int result;
+        try { result = AccessibleChildren(root, 0, count, children, out obtained); }
+        catch { return nodes; }
+        if (result < 0 || obtained < 0 || obtained > count) return nodes;
+        for (int index = 0; index < obtained && nodes.Count < MaximumNodes; index++) {
+            IAccessible child = children[index] as IAccessible;
+            nodes.Add(new NodeRef {
+                Owner = root,
+                ChildId = child == null ? children[index] : (object)0,
+                Child = child
+            });
         }
-        return true;
+        return nodes;
     }
 
     private static List<NodeRef> FindExactPath(IntPtr handle, string[] path) {
         List<NodeRef> matches = new List<NodeRef>();
         if (!ValidPath(path)) return matches;
-        foreach (NodeRef node in FindExact(handle, path[path.Length - 1].Trim())) {
-            if (MatchesExactPath(node, path)) matches.Add(node);
+        List<HierarchyNode> stack = new List<HierarchyNode>();
+        foreach (NodeRef node in ReadFlatTreeItems(handle)) {
+            int level = ReadHierarchyLevel(node);
+            if (level < 0) {
+                stack.Clear();
+                continue;
+            }
+            while (stack.Count > 0 && stack[stack.Count - 1].Level >= level) {
+                stack.RemoveAt(stack.Count - 1);
+            }
+            if (stack.Count > 0 && level != stack[stack.Count - 1].Level + 1) {
+                stack.Clear();
+            }
+            stack.Add(new HierarchyNode { Node = node, Level = level });
+            if (stack.Count < path.Length ||
+                !String.Equals(ReadName(node), path[path.Length - 1].Trim(),
+                    StringComparison.OrdinalIgnoreCase)) continue;
+            int start = stack.Count - path.Length;
+            int baseLevel = stack[start].Level;
+            bool exact = true;
+            for (int offset = 0; offset < path.Length; offset++) {
+                HierarchyNode candidate = stack[start + offset];
+                if (candidate.Level != baseLevel + offset ||
+                    !String.Equals(ReadName(candidate.Node), path[offset].Trim(),
+                        StringComparison.OrdinalIgnoreCase)) {
+                    exact = false;
+                    break;
+                }
+            }
+            if (exact) matches.Add(node);
         }
         return matches;
     }
@@ -1681,6 +1786,72 @@ function Read-Win32Text([IntPtr]$Handle) {
     return $buffer.ToString().Trim()
 }
 
+function Read-Win32TextExact([IntPtr]$Handle) {
+    [IntPtr]$lengthResult = [IntPtr]::Zero
+    $lengthCall = [MetafxVisibleNative]::SendMessageTimeout(
+        $Handle, [MetafxVisibleNative]::WM_GETTEXTLENGTH,
+        [IntPtr]::Zero, [IntPtr]::Zero,
+        [MetafxVisibleNative]::SMTO_ABORTIFHUNG, 1500, [ref]$lengthResult
+    )
+    if ($lengthCall -eq [IntPtr]::Zero) { Stop-Adapter "control_text_timeout" }
+    $length = $lengthResult.ToInt32()
+    if ($length -lt 0 -or $length -gt 4096) { Stop-Adapter "control_text_length_invalid" }
+    $buffer = New-Object System.Text.StringBuilder ([Math]::Max(2, $length + 2))
+    [IntPtr]$textResult = [IntPtr]::Zero
+    $textCall = [MetafxVisibleNative]::SendMessageTimeout(
+        $Handle, [MetafxVisibleNative]::WM_GETTEXT,
+        [IntPtr]$buffer.Capacity, $buffer,
+        [MetafxVisibleNative]::SMTO_ABORTIFHUNG, 1500, [ref]$textResult
+    )
+    if ($textCall -eq [IntPtr]::Zero) { Stop-Adapter "control_text_timeout" }
+    return $buffer.ToString()
+}
+
+function Read-CommonDialogFolderPathExact(
+    [IntPtr]$DialogHandle,
+    [int]$ProcessId,
+    [string]$FailureCode
+) {
+    if ($DialogHandle -eq [IntPtr]::Zero -or
+        -not [MetafxVisibleNative]::IsWindow($DialogHandle) -or
+        -not [MetafxVisibleNative]::IsWindowVisible($DialogHandle) -or
+        -not [MetafxVisibleNative]::IsWindowEnabled($DialogHandle) -or
+        (Get-WindowOwner $DialogHandle) -ne $ProcessId -or
+        (Get-WindowClass $DialogHandle) -ne "#32770") {
+        Stop-Adapter ("{0}_dialog_identity_invalid" -f $FailureCode)
+    }
+    $capacity = 32768
+    $buffer = New-Object System.Text.StringBuilder $capacity
+    [IntPtr]$result = [IntPtr]::Zero
+    $call = [MetafxVisibleNative]::SendMessageTimeout(
+        $DialogHandle,
+        [MetafxVisibleNative]::CDM_GETFOLDERPATH,
+        [IntPtr]$capacity,
+        $buffer,
+        [MetafxVisibleNative]::SMTO_ABORTIFHUNG,
+        1500,
+        [ref]$result
+    )
+    [int64]$reportedLength = $result.ToInt64()
+    $observed = $buffer.ToString()
+    if ($call -eq [IntPtr]::Zero -or
+        $reportedLength -le 0 -or
+        $reportedLength -ge $capacity -or
+        [string]::IsNullOrWhiteSpace($observed) -or
+        -not [System.IO.Path]::IsPathRooted($observed)) {
+        Stop-Adapter ("{0}_folder_unavailable" -f $FailureCode)
+    }
+    try {
+        $full = [System.IO.Path]::GetFullPath($observed)
+    } catch {
+        Stop-Adapter ("{0}_folder_invalid" -f $FailureCode)
+    }
+    if (-not [System.IO.Directory]::Exists($full)) {
+        Stop-Adapter ("{0}_folder_invalid" -f $FailureCode)
+    }
+    return $full
+}
+
 function Convert-ComboMessageInteger(
     [IntPtr]$Value,
     [bool]$AllowCbErr,
@@ -1717,6 +1888,133 @@ function Assert-DeployedExpertDigest(
     $observed = Get-FileSha256Hex $resolved
     if ($observed -ne $digest) { Stop-Adapter "deployed_expert_digest_mismatch" }
     return $observed
+}
+
+function Assert-SingleFileLink([string]$Path, [string]$FailureCode) {
+    if ([MetafxVisibleNative]::GetFileLinkCount((Get-FullPath $Path)) -ne 1) {
+        Stop-Adapter $FailureCode
+    }
+}
+
+function Assert-NoReparsePathComponents([string]$Path, [string]$FailureCode) {
+    $full = Get-FullPath $Path
+    $cursor = $full
+    if (-not [System.IO.File]::Exists($cursor) -and
+        -not [System.IO.Directory]::Exists($cursor)) {
+        $cursor = [System.IO.Path]::GetDirectoryName($cursor)
+    }
+    while (-not [string]::IsNullOrWhiteSpace($cursor)) {
+        if (-not [System.IO.File]::Exists($cursor) -and
+            -not [System.IO.Directory]::Exists($cursor)) {
+            Stop-Adapter $FailureCode
+        }
+        $item = Get-Item -LiteralPath $cursor -Force
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            Stop-Adapter $FailureCode
+        }
+        $parent = [System.IO.Path]::GetDirectoryName($cursor)
+        if ([string]::IsNullOrWhiteSpace($parent) -or (Test-SamePath $parent $cursor)) {
+            break
+        }
+        $cursor = $parent
+    }
+}
+
+function Assert-ExistingPngEvidence([string]$Path) {
+    $resolved = Get-FullPath $Path
+    Assert-NoReparsePathComponents $resolved "compile_recovery_screenshot_unsafe"
+    if (-not [System.IO.File]::Exists($resolved) -or
+        [System.IO.Path]::GetExtension($resolved) -ine ".png") {
+        Stop-Adapter "compile_recovery_screenshot_invalid"
+    }
+    $item = Get-Item -LiteralPath $resolved
+    if ($item.Length -lt 1024 -or $item.Length -gt 16777216) {
+        Stop-Adapter "compile_recovery_screenshot_invalid"
+    }
+    Assert-SingleFileLink $resolved "compile_recovery_screenshot_unsafe"
+    $stream = [System.IO.File]::Open(
+        $resolved,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    try {
+        $signature = New-Object byte[] 8
+        if ($stream.Read($signature, 0, 8) -ne 8 -or
+            $signature[0] -ne 137 -or $signature[1] -ne 80 -or
+            $signature[2] -ne 78 -or $signature[3] -ne 71 -or
+            $signature[4] -ne 13 -or $signature[5] -ne 10 -or
+            $signature[6] -ne 26 -or $signature[7] -ne 10) {
+            Stop-Adapter "compile_recovery_screenshot_invalid"
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Assert-CompileWorkingCopy(
+    [string]$SourcePath,
+    [string]$BinaryPath,
+    [string]$DataPath,
+    [string]$OperationId,
+    [string]$ExpectedSourceDigest,
+    [bool]$RequireBinary,
+    [string]$ExpectedBinaryDigest
+) {
+    $source = Get-FullPath $SourcePath
+    $binary = Get-FullPath $BinaryPath
+    if ($OperationId -notmatch '^ea-visible-[a-f0-9]{24}$') {
+        Stop-Adapter "compile_working_copy_identity_invalid"
+    }
+    $expectedRoot = Get-FullPath (Join-Path $DataPath (
+        "MQL4\Experts\Metafxclub\AgentHQ\{0}" -f $OperationId
+    ))
+    $operationToken = $OperationId.Substring("ea-visible-".Length)
+    $expectedSource = Get-FullPath (Join-Path $expectedRoot (
+        "agenthq_{0}.mq4" -f $operationToken
+    ))
+    $expectedBinary = [System.IO.Path]::ChangeExtension($expectedSource, ".ex4")
+    $sourceDigest = $ExpectedSourceDigest.Trim().ToLowerInvariant()
+    Assert-NoReparsePathComponents $expectedRoot "compile_working_copy_identity_invalid"
+    Assert-NoReparsePathComponents $source "compile_working_copy_identity_invalid"
+    Assert-NoReparsePathComponents $binary "compile_working_copy_identity_invalid"
+    if (-not (Test-SamePath $source $expectedSource) -or
+        -not (Test-SamePath $binary $expectedBinary) -or
+        $sourceDigest -notmatch '^[0-9a-f]{64}$' -or
+        -not [System.IO.Directory]::Exists($expectedRoot) -or
+        -not [System.IO.File]::Exists($source) -or
+        [System.IO.Path]::GetExtension($source) -ine ".mq4" -or
+        (Get-Item -LiteralPath $source).Length -le 0 -or
+        ((Get-Item -LiteralPath $source).Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
+        ((Get-Item -LiteralPath $expectedRoot).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        Stop-Adapter "compile_working_copy_identity_invalid"
+    }
+    $observedSourceDigest = Get-FileSha256Hex $source
+    Assert-SingleFileLink $source "compile_working_source_hardlink_rejected"
+    if ($observedSourceDigest -ne $sourceDigest) {
+        Stop-Adapter "compile_working_source_digest_mismatch"
+    }
+    $observedBinaryDigest = $null
+    if ($RequireBinary) {
+        $binaryDigest = $ExpectedBinaryDigest.Trim().ToLowerInvariant()
+        if ($binaryDigest -notmatch '^[0-9a-f]{64}$' -or
+            -not [System.IO.File]::Exists($binary) -or
+            (Get-Item -LiteralPath $binary).Length -le 0 -or
+            ((Get-Item -LiteralPath $binary).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            Stop-Adapter "compile_working_binary_identity_invalid"
+        }
+        $observedBinaryDigest = Get-FileSha256Hex $binary
+        Assert-SingleFileLink $binary "compile_working_binary_hardlink_rejected"
+        if ($observedBinaryDigest -ne $binaryDigest) {
+            Stop-Adapter "compile_working_binary_digest_mismatch"
+        }
+    }
+    return [pscustomobject]@{
+        SourcePath = $source
+        BinaryPath = $binary
+        SourceSha256 = $observedSourceDigest
+        BinarySha256 = $observedBinaryDigest
+    }
 }
 
 function Get-ComboRuntimeInfo([System.Windows.Automation.AutomationElement]$Combo, [int]$ProcessId) {
@@ -2301,29 +2599,49 @@ function Select-ExactExpert(
             $pickerRect.Bottom -le ($pickerRect.Top + 30)) {
             Stop-Adapter "expert_picker_bounds_invalid"
         }
-        [string[]]$folderPath = @("Metafxclub", "AgentHQ", $operationFolder)
         [string[]]$expertPath = @("Metafxclub", "AgentHQ", $operationFolder, $FileName)
-        $leafCount = [MetafxVisibleMsaa]::CountExactPath($pickerHandle, $expertPath)
-        if ($leafCount -gt 1) { Stop-Adapter "expert_picker_leaf_ambiguous" }
-        if ($leafCount -eq 0) {
-            if ([MetafxVisibleMsaa]::CountExactPath($pickerHandle, $folderPath) -ne 1 -or
-                -not [MetafxVisibleMsaa]::SelectUniqueExactPath($pickerHandle, $folderPath)) {
-                Stop-Adapter "expert_picker_folder_unavailable"
+        # This picker lazily replaces a Loading child only after its exact
+        # collapsed parent is selected and expanded.  Materialize one verified
+        # prefix at a time; never infer a path from a leaf basename.
+        $folderPrefixes = @(
+            [pscustomobject]@{ Parts = [string[]]@("Metafxclub") },
+            [pscustomobject]@{ Parts = [string[]]@("Metafxclub", "AgentHQ") },
+            [pscustomobject]@{ Parts = [string[]]@("Metafxclub", "AgentHQ", $operationFolder) }
+        )
+        [int]$attemptsRemaining = $MaximumSteps
+        foreach ($folderPrefix in $folderPrefixes) {
+            [string[]]$prefixPath = [string[]]$folderPrefix.Parts
+            [bool]$prefixSelected = $false
+            while ($attemptsRemaining -gt 0) {
+                $attemptsRemaining--
+                $prefixCount = [MetafxVisibleMsaa]::CountExactPath($pickerHandle, $prefixPath)
+                if ($prefixCount -gt 1) { Stop-Adapter "expert_picker_folder_ambiguous" }
+                if ($prefixCount -eq 1 -and
+                    [MetafxVisibleMsaa]::SelectUniqueExactPath($pickerHandle, $prefixPath) -and
+                    [MetafxVisibleMsaa]::IsUniqueExactPathSelected($pickerHandle, $prefixPath)) {
+                    $prefixSelected = $true
+                    break
+                }
+                Start-Sleep -Milliseconds 50
             }
+            if (-not $prefixSelected) { Stop-Adapter "expert_picker_folder_unavailable" }
             [void][MetafxVisibleNative]::SetFocus($pickerHandle)
             Send-BalancedKey $pickerHandle 0x27
-            for ($step = 0; $step -lt $MaximumSteps; $step++) {
-                Start-Sleep -Milliseconds 50
-                $leafCount = [MetafxVisibleMsaa]::CountExactPath($pickerHandle, $expertPath)
-                if ($leafCount -gt 1) { Stop-Adapter "expert_picker_leaf_ambiguous" }
-                if ($leafCount -eq 1) { break }
+        }
+        [bool]$leafSelected = $false
+        while ($attemptsRemaining -gt 0) {
+            $attemptsRemaining--
+            $leafCount = [MetafxVisibleMsaa]::CountExactPath($pickerHandle, $expertPath)
+            if ($leafCount -gt 1) { Stop-Adapter "expert_picker_leaf_ambiguous" }
+            if ($leafCount -eq 1 -and
+                [MetafxVisibleMsaa]::SelectUniqueExactPath($pickerHandle, $expertPath) -and
+                [MetafxVisibleMsaa]::IsUniqueExactPathSelected($pickerHandle, $expertPath)) {
+                $leafSelected = $true
+                break
             }
+            Start-Sleep -Milliseconds 50
         }
-        if ($leafCount -ne 1) { Stop-Adapter "expert_picker_leaf_unavailable" }
-        if (-not [MetafxVisibleMsaa]::SelectUniqueExactPath($pickerHandle, $expertPath) -or
-            -not [MetafxVisibleMsaa]::IsUniqueExactPathSelected($pickerHandle, $expertPath)) {
-            Stop-Adapter "expert_picker_leaf_selection_failed"
-        }
+        if (-not $leafSelected) { Stop-Adapter "expert_picker_leaf_unavailable" }
         Send-BalancedKey $pickerHandle 0x0D
         $deadline = [DateTime]::UtcNow.AddSeconds(5)
         do {
@@ -3092,6 +3410,224 @@ function Test-FileNameLabel([string]$Value) {
     return $Value.Trim() -in @("File name:", $thaiFileName, $thaiFile)
 }
 
+function Test-NativeFileNameLabel([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
+    $normalized = $Value.Trim()
+    $acceleratorIndex = $normalized.IndexOf([char]0x26)
+    if ($acceleratorIndex -ge 0) {
+        if ($normalized.IndexOf([char]0x26, $acceleratorIndex + 1) -ge 0) {
+            return $false
+        }
+        $normalized = $normalized.Remove($acceleratorIndex, 1)
+    }
+    return Test-FileNameLabel $normalized
+}
+
+function Test-NativeAllowedName(
+    [string]$Value,
+    [string[]]$AllowedNames
+) {
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
+    $normalized = $Value.Trim()
+    $acceleratorIndex = $normalized.IndexOf([char]0x26)
+    if ($acceleratorIndex -ge 0) {
+        if ($normalized.IndexOf([char]0x26, $acceleratorIndex + 1) -ge 0) {
+            return $false
+        }
+        $normalized = $normalized.Remove($acceleratorIndex, 1)
+    }
+    foreach ($allowed in @($AllowedNames)) {
+        if (-not [string]::IsNullOrWhiteSpace($allowed) -and
+            [string]::Equals(
+                $normalized,
+                $allowed.Trim(),
+                [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-BoundedNativeDirectChildren(
+    [IntPtr]$ParentHandle,
+    [string]$FailureCode
+) {
+    if ($ParentHandle -eq [IntPtr]::Zero -or
+        -not [MetafxVisibleNative]::IsWindow($ParentHandle)) {
+        Stop-Adapter ("{0}_native_parent_invalid" -f $FailureCode)
+    }
+    $children = @()
+    [IntPtr]$current = [MetafxVisibleNative]::GetWindow(
+        $ParentHandle,
+        [MetafxVisibleNative]::GW_CHILD
+    )
+    $index = 0
+    while ($current -ne [IntPtr]::Zero -and $index -lt 256) {
+        if (-not [MetafxVisibleNative]::IsWindow($current) -or
+            [MetafxVisibleNative]::GetParent($current) -ne $ParentHandle) {
+            Stop-Adapter ("{0}_native_child_identity_invalid" -f $FailureCode)
+        }
+        $children += $current
+        $current = [MetafxVisibleNative]::GetWindow(
+            $current,
+            [MetafxVisibleNative]::GW_HWNDNEXT
+        )
+        $index++
+    }
+    if ($current -ne [IntPtr]::Zero) {
+        Stop-Adapter ("{0}_native_children_limit_exceeded" -f $FailureCode)
+    }
+    return @($children)
+}
+
+function Get-NativeDirectChildrenById(
+    [IntPtr]$ParentHandle,
+    [int]$ControlId,
+    [string]$FailureCode
+) {
+    $matches = @()
+    foreach ($child in @(Get-BoundedNativeDirectChildren $ParentHandle $FailureCode)) {
+        if ([MetafxVisibleNative]::GetDlgCtrlID([IntPtr]$child) -eq $ControlId) {
+            $matches += [IntPtr]$child
+        }
+    }
+    return @($matches)
+}
+
+function Assert-NativeNested1148Binding(
+    [object]$Binding,
+    [int]$ProcessId,
+    [string]$FailureCode
+) {
+    [IntPtr]$dialogHandle = [IntPtr]$Binding.DialogHandle
+    [IntPtr]$outerHandle = [IntPtr]$Binding.FileNameOuterHostHandle
+    [IntPtr]$comboHandle = [IntPtr]$Binding.FileNameHostHandle
+    [IntPtr]$editHandle = [IntPtr]$Binding.EditHandle
+    [IntPtr]$labelHandle = [IntPtr]$Binding.FileNameLabelHandle
+    $handles = @(
+        $dialogHandle,
+        $outerHandle,
+        $comboHandle,
+        $editHandle,
+        $labelHandle
+    )
+    $uniqueHandles = @{}
+    foreach ($handle in $handles) {
+        if ([IntPtr]$handle -eq [IntPtr]::Zero -or
+            -not [MetafxVisibleNative]::IsWindow([IntPtr]$handle) -or
+            -not [MetafxVisibleNative]::IsWindowVisible([IntPtr]$handle) -or
+            -not [MetafxVisibleNative]::IsWindowEnabled([IntPtr]$handle) -or
+            (Get-WindowOwner ([IntPtr]$handle)) -ne $ProcessId) {
+            Stop-Adapter $FailureCode
+        }
+        $key = ([IntPtr]$handle).ToInt64().ToString()
+        if ($uniqueHandles.ContainsKey($key)) { Stop-Adapter $FailureCode }
+        $uniqueHandles[$key] = $true
+    }
+    if ((Get-WindowClass $dialogHandle) -ne "#32770" -or
+        (Get-WindowClass $outerHandle) -ne "ComboBoxEx32" -or
+        (Get-WindowClass $comboHandle) -ne "ComboBox" -or
+        (Get-WindowClass $editHandle) -ne "Edit" -or
+        (Get-WindowClass $labelHandle) -ne "Static" -or
+        [MetafxVisibleNative]::GetDlgCtrlID($outerHandle) -ne 1148 -or
+        [MetafxVisibleNative]::GetDlgCtrlID($comboHandle) -ne 1148 -or
+        [MetafxVisibleNative]::GetDlgCtrlID($editHandle) -ne 1148 -or
+        [MetafxVisibleNative]::GetDlgCtrlID($labelHandle) -ne 1090 -or
+        [MetafxVisibleNative]::GetParent($outerHandle) -ne $dialogHandle -or
+        [MetafxVisibleNative]::GetParent($comboHandle) -ne $outerHandle -or
+        [MetafxVisibleNative]::GetParent($editHandle) -ne $comboHandle -or
+        [MetafxVisibleNative]::GetParent($labelHandle) -ne $dialogHandle -or
+        -not (Test-NativeFileNameLabel (Read-Win32Text $labelHandle))) {
+        Stop-Adapter $FailureCode
+    }
+    $dialogRect = New-Object MetafxVisibleNative+RECT
+    $editRect = New-Object MetafxVisibleNative+RECT
+    if (-not [MetafxVisibleNative]::GetWindowRect($dialogHandle, [ref]$dialogRect) -or
+        -not [MetafxVisibleNative]::GetWindowRect($editHandle, [ref]$editRect) -or
+        $dialogRect.Right -le $dialogRect.Left -or
+        $dialogRect.Bottom -le $dialogRect.Top -or
+        $editRect.Right -le $editRect.Left -or
+        $editRect.Bottom -le $editRect.Top -or
+        $editRect.Left -lt $dialogRect.Left -or
+        $editRect.Top -lt $dialogRect.Top -or
+        $editRect.Right -gt $dialogRect.Right -or
+        $editRect.Bottom -gt $dialogRect.Bottom) {
+        Stop-Adapter $FailureCode
+    }
+}
+
+function Get-ExactNativeFileDialogFileNameBinding(
+    [System.Windows.Automation.AutomationElement]$Dialog,
+    [int]$ProcessId,
+    [string]$FailureCode
+) {
+    [IntPtr]$dialogHandle = [IntPtr]$Dialog.Current.NativeWindowHandle
+    if ($dialogHandle -eq [IntPtr]::Zero -or
+        -not [MetafxVisibleNative]::IsWindow($dialogHandle) -or
+        -not [MetafxVisibleNative]::IsWindowVisible($dialogHandle) -or
+        -not [MetafxVisibleNative]::IsWindowEnabled($dialogHandle) -or
+        (Get-WindowOwner $dialogHandle) -ne $ProcessId -or
+        (Get-WindowClass $dialogHandle) -ne "#32770") {
+        Stop-Adapter ("{0}_native_dialog_identity_invalid" -f $FailureCode)
+    }
+
+    $outerCandidates = @(
+        Get-NativeDirectChildrenById $dialogHandle 1148 $FailureCode
+    )
+    if ($outerCandidates.Count -gt 1) {
+        Stop-Adapter ("{0}_native_control_ambiguous" -f $FailureCode)
+    }
+    if ($outerCandidates.Count -eq 0) { return $null }
+    [IntPtr]$outerHandle = [IntPtr]$outerCandidates[0]
+
+    $comboCandidates = @(
+        Get-NativeDirectChildrenById $outerHandle 1148 $FailureCode
+    )
+    if ($comboCandidates.Count -gt 1) {
+        Stop-Adapter ("{0}_native_control_ambiguous" -f $FailureCode)
+    }
+    if ($comboCandidates.Count -eq 0) { return $null }
+    [IntPtr]$comboHandle = [IntPtr]$comboCandidates[0]
+
+    $editCandidates = @(
+        Get-NativeDirectChildrenById $comboHandle 1148 $FailureCode
+    )
+    if ($editCandidates.Count -gt 1) {
+        Stop-Adapter ("{0}_native_control_ambiguous" -f $FailureCode)
+    }
+    if ($editCandidates.Count -eq 0) { return $null }
+    [IntPtr]$editHandle = [IntPtr]$editCandidates[0]
+
+    $labelCandidates = @(
+        Get-NativeDirectChildrenById $dialogHandle 1090 $FailureCode
+    )
+    if ($labelCandidates.Count -gt 1) {
+        Stop-Adapter ("{0}_native_label_ambiguous" -f $FailureCode)
+    }
+    if ($labelCandidates.Count -eq 0) { return $null }
+    [IntPtr]$labelHandle = [IntPtr]$labelCandidates[0]
+
+    $binding = [pscustomobject]@{
+        Kind = "native_nested_1148"
+        Dialog = $Dialog
+        DialogHandle = $dialogHandle
+        Edit = $null
+        EditHandle = $editHandle
+        FileNameHost = $null
+        FileNameHostHandle = $comboHandle
+        FileNameOuterHost = $null
+        FileNameOuterHostHandle = $outerHandle
+        FileNameLabel = $null
+        FileNameLabelHandle = $labelHandle
+    }
+    Assert-NativeNested1148Binding `
+        $binding `
+        $ProcessId `
+        ("{0}_native_shape_invalid" -f $FailureCode)
+    return $binding
+}
+
 function Get-FileDialogFileNameBinding(
     [System.Windows.Automation.AutomationElement]$Dialog,
     [int]$ProcessId,
@@ -3110,6 +3646,7 @@ function Get-FileDialogFileNameBinding(
     $eligibleByHandle = @{}
     $candidates = @(
         @(Find-DescendantsById $Dialog "1001") +
+        @(Find-DescendantsById $Dialog "1148") +
         @(Find-DescendantsById $Dialog "1152")
     )
     foreach ($candidate in $candidates) {
@@ -3162,6 +3699,93 @@ function Get-FileDialogFileNameBinding(
             }
         }
 
+        # This MT4 Open dialog exposes the file-name Edit itself as id 1148.
+        # Its two native hosts are also id 1148, but UIA maps both hosts to
+        # Pane. Bind the complete native chain and the exact direct-dialog
+        # label so an address/search Edit can never qualify by id alone.
+        if ($null -eq $binding -and
+            $nativeId -eq 1148 -and
+            [string]$candidate.Current.AutomationId -eq "1148" -and
+            $candidate.Current.ControlType -eq [System.Windows.Automation.ControlType]::Pane) {
+            [IntPtr]$comboHandle = $parentHandle
+            [IntPtr]$comboExHandle = if ($comboHandle -ne [IntPtr]::Zero) {
+                [MetafxVisibleNative]::GetParent($comboHandle)
+            } else { [IntPtr]::Zero }
+            if ($comboHandle -ne [IntPtr]::Zero -and
+                $comboExHandle -ne [IntPtr]::Zero -and
+                (Get-WindowClass $comboHandle) -eq "ComboBox" -and
+                [MetafxVisibleNative]::GetDlgCtrlID($comboHandle) -eq 1148 -and
+                [MetafxVisibleNative]::GetParent($comboHandle) -eq $comboExHandle -and
+                (Get-WindowClass $comboExHandle) -eq "ComboBoxEx32" -and
+                [MetafxVisibleNative]::GetDlgCtrlID($comboExHandle) -eq 1148 -and
+                [MetafxVisibleNative]::GetParent($comboExHandle) -eq $dialogHandle -and
+                (Get-WindowOwner $comboHandle) -eq $ProcessId -and
+                (Get-WindowOwner $comboExHandle) -eq $ProcessId -and
+                [MetafxVisibleNative]::IsWindowVisible($comboHandle) -and
+                [MetafxVisibleNative]::IsWindowVisible($comboExHandle)) {
+                $comboHost = [System.Windows.Automation.AutomationElement]::FromHandle(
+                    $comboHandle
+                )
+                $comboExHost = [System.Windows.Automation.AutomationElement]::FromHandle(
+                    $comboExHandle
+                )
+                if ($null -ne $comboHost -and
+                    $null -ne $comboExHost -and
+                    [int]$comboHost.Current.ProcessId -eq $ProcessId -and
+                    [int]$comboExHost.Current.ProcessId -eq $ProcessId -and
+                    [IntPtr]$comboHost.Current.NativeWindowHandle -eq $comboHandle -and
+                    [IntPtr]$comboExHost.Current.NativeWindowHandle -eq $comboExHandle -and
+                    [string]$comboHost.Current.AutomationId -eq "1148" -and
+                    [string]$comboExHost.Current.AutomationId -eq "1148" -and
+                    $comboHost.Current.ControlType -eq [System.Windows.Automation.ControlType]::Pane -and
+                    $comboExHost.Current.ControlType -eq [System.Windows.Automation.ControlType]::Pane -and
+                    [bool]$comboHost.Current.IsEnabled -and
+                    [bool]$comboExHost.Current.IsEnabled -and
+                    -not [bool]$comboHost.Current.IsOffscreen -and
+                    -not [bool]$comboExHost.Current.IsOffscreen) {
+                    $labels = @(
+                        Find-DescendantsById $Dialog "1090" | Where-Object {
+                            [string]$_.Current.AutomationId -eq "1090" -and
+                            [string]$_.Current.ClassName -eq "Static" -and
+                            [int]$_.Current.ProcessId -eq $ProcessId -and
+                            [IntPtr]$_.Current.NativeWindowHandle -ne [IntPtr]::Zero -and
+                            [MetafxVisibleNative]::GetDlgCtrlID(
+                                [IntPtr]$_.Current.NativeWindowHandle
+                            ) -eq 1090 -and
+                            [MetafxVisibleNative]::GetParent(
+                                [IntPtr]$_.Current.NativeWindowHandle
+                            ) -eq $dialogHandle -and
+                            (Test-NativeFileNameLabel (
+                                Read-Win32Text ([IntPtr]$_.Current.NativeWindowHandle)
+                            )) -and
+                            (Test-FileNameLabel ([string]$_.Current.Name)) -and
+                            [MetafxVisibleNative]::IsWindowVisible(
+                                [IntPtr]$_.Current.NativeWindowHandle
+                            ) -and
+                            -not [bool]$_.Current.IsOffscreen
+                        }
+                    )
+                    if ($labels.Count -eq 1) {
+                        $binding = [pscustomobject]@{
+                            Kind = "nested_1148"
+                            Dialog = $Dialog
+                            DialogHandle = $dialogHandle
+                            Edit = $candidate
+                            EditHandle = $candidateHandle
+                            FileNameHost = $comboHost
+                            FileNameHostHandle = $comboHandle
+                            FileNameOuterHost = $comboExHost
+                            FileNameOuterHostHandle = $comboExHandle
+                            FileNameLabel = $labels[0]
+                            FileNameLabelHandle = [IntPtr]$labels[0].Current.NativeWindowHandle
+                        }
+                    } elseif ($labels.Count -gt 1) {
+                        Stop-Adapter ("{0}_label_ambiguous" -f $FailureCode)
+                    }
+                }
+            }
+        }
+
         # A classic common dialog uses a direct Edit id 1152 and a sibling
         # Static label id 1090.  Keep this shape separate and equally strict.
         if ($null -eq $binding -and
@@ -3208,9 +3832,68 @@ function Get-FileDialogFileNameBinding(
         Stop-Adapter ("{0}_control_ambiguous" -f $FailureCode)
     }
     if ($eligible.Count -eq 0) {
+        $nativeBinding = Get-ExactNativeFileDialogFileNameBinding `
+            $Dialog `
+            $ProcessId `
+            $FailureCode
+        if ($null -ne $nativeBinding) { return $nativeBinding }
         Stop-Adapter ("{0}_control_unavailable" -f $FailureCode)
     }
     return $eligible[0]
+}
+
+function Wait-FileDialogFileNameBinding(
+    [System.Windows.Automation.AutomationElement]$Dialog,
+    [int]$ProcessId,
+    [string]$FailureCode
+) {
+    [IntPtr]$expectedDialogHandle = [IntPtr]$Dialog.Current.NativeWindowHandle
+    [int]$expectedProcessId = $ProcessId
+    if ($expectedDialogHandle -eq [IntPtr]::Zero) {
+        Stop-Adapter ("{0}_dialog_identity_invalid" -f $FailureCode)
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    $retryableMessage = "METAFX_VISIBLE:{0}_control_unavailable" -f $FailureCode
+    do {
+        try {
+            # The native dialog can exist before its UIA fragment provider has
+            # materialized the legacy child controls. Rebind the exact immutable
+            # HWND on every attempt; never reuse the early AutomationElement as
+            # the matcher root.
+            $freshDialog = [System.Windows.Automation.AutomationElement]::FromHandle(
+                $expectedDialogHandle
+            )
+            if ($null -eq $freshDialog -or
+                -not [MetafxVisibleNative]::IsWindow($expectedDialogHandle) -or
+                [IntPtr]$freshDialog.Current.NativeWindowHandle -ne $expectedDialogHandle -or
+                [string]$freshDialog.Current.ClassName -ne "#32770" -or
+                [int]$freshDialog.Current.ProcessId -ne $expectedProcessId -or
+                (Get-WindowClass $expectedDialogHandle) -ne "#32770" -or
+                (Get-WindowOwner $expectedDialogHandle) -ne $expectedProcessId -or
+                -not [MetafxVisibleNative]::IsWindowVisible($expectedDialogHandle) -or
+                [bool]$freshDialog.Current.IsOffscreen) {
+                Stop-Adapter ("{0}_dialog_identity_invalid" -f $FailureCode)
+            }
+            return Get-FileDialogFileNameBinding `
+                $freshDialog `
+                $expectedProcessId `
+                $FailureCode
+        } catch {
+            # The top-level #32770 can become visible before its legacy child
+            # providers are materialized. Retry only that exact absence signal;
+            # ambiguity, identity drift and every other failure stay fail-closed.
+            if (-not [string]::Equals(
+                    [string]$_.Exception.Message,
+                    $retryableMessage,
+                    [System.StringComparison]::Ordinal
+                )) {
+                throw
+            }
+            if ([DateTime]::UtcNow -ge $deadline) { throw }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    Stop-Adapter ("{0}_control_unavailable" -f $FailureCode)
 }
 
 function Read-AutomationValueExact(
@@ -3227,6 +3910,242 @@ function Read-AutomationValueExact(
     }
 }
 
+function Assert-FileDialogTargetSnapshot(
+    [string]$Path,
+    [bool]$ExistedBefore,
+    [string]$ExpectedSha256,
+    [string]$FailureCode
+) {
+    if ($ExistedBefore) {
+        if ($ExpectedSha256 -notmatch '^[a-f0-9]{64}$' -or
+            -not [System.IO.File]::Exists($Path) -or
+            -not [string]::Equals(
+                (Get-FileSha256Hex $Path),
+                $ExpectedSha256,
+                [System.StringComparison]::Ordinal
+            )) {
+            Stop-Adapter ("{0}_target_snapshot_changed" -f $FailureCode)
+        }
+    } elseif ($ExpectedSha256 -or
+        [System.IO.File]::Exists($Path) -or
+        [System.IO.Directory]::Exists($Path)) {
+        Stop-Adapter ("{0}_target_snapshot_changed" -f $FailureCode)
+    }
+}
+
+function Assert-FileDialogEditMutationBoundary(
+    [object]$Binding,
+    [int]$ProcessId,
+    [string]$ExpectedPath,
+    [bool]$TargetExistedBefore,
+    [string]$TargetSha256Before,
+    [string]$FailureCode,
+    [string]$Stage
+) {
+    [IntPtr]$dialogHandle = [IntPtr]$Binding.DialogHandle
+    [IntPtr]$editHandle = [IntPtr]$Binding.EditHandle
+    [string]$bindingKind = [string]$Binding.Kind
+    $bindingFailure = "{0}_{1}_binding_changed" -f $FailureCode, $Stage
+    $focusFailure = "{0}_{1}_focus_changed" -f $FailureCode, $Stage
+    if ($bindingKind -notin @(
+            "modern",
+            "nested_1148",
+            "native_nested_1148",
+            "classic"
+        ) -or
+        $dialogHandle -eq [IntPtr]::Zero -or
+        $editHandle -eq [IntPtr]::Zero -or
+        -not [MetafxVisibleNative]::IsWindow($dialogHandle) -or
+        -not [MetafxVisibleNative]::IsWindowVisible($dialogHandle) -or
+        -not [MetafxVisibleNative]::IsWindowEnabled($dialogHandle) -or
+        (Get-WindowOwner $dialogHandle) -ne $ProcessId -or
+        (Get-WindowClass $dialogHandle) -ne "#32770" -or
+        -not [MetafxVisibleNative]::IsWindow($editHandle) -or
+        -not [MetafxVisibleNative]::IsWindowVisible($editHandle) -or
+        -not [MetafxVisibleNative]::IsWindowEnabled($editHandle) -or
+        (Get-WindowOwner $editHandle) -ne $ProcessId -or
+        (Get-WindowClass $editHandle) -ne "Edit" -or
+        -not (Test-NativeWindowDescendantOf $editHandle $dialogHandle)) {
+        Stop-Adapter $bindingFailure
+    }
+    if ($bindingKind -eq "native_nested_1148") {
+        Assert-NativeNested1148Binding $Binding $ProcessId $bindingFailure
+        if ([MetafxVisibleNative]::GetFocusedWindowFor($editHandle) -ne
+            $editHandle) {
+            Stop-Adapter $focusFailure
+        }
+    } else {
+        if ($null -eq $Binding.Edit -or
+            [IntPtr]$Binding.Edit.Current.NativeWindowHandle -ne $editHandle -or
+            [int]$Binding.Edit.Current.ProcessId -ne $ProcessId -or
+            [string]$Binding.Edit.Current.ClassName -ne "Edit" -or
+            -not [bool]$Binding.Edit.Current.IsEnabled -or
+            [bool]$Binding.Edit.Current.IsOffscreen) {
+            Stop-Adapter $bindingFailure
+        }
+        $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+        if ($null -eq $focused -or
+            [IntPtr]$focused.Current.NativeWindowHandle -ne $editHandle -or
+            [int]$focused.Current.ProcessId -ne $ProcessId) {
+            Stop-Adapter $focusFailure
+        }
+    }
+    if (-not (Test-ForegroundWindowBinding $Binding.Dialog $ProcessId)) {
+        Stop-Adapter $focusFailure
+    }
+    Assert-FileDialogTargetSnapshot `
+        $ExpectedPath `
+        $TargetExistedBefore `
+        $TargetSha256Before `
+        $FailureCode
+}
+
+function Select-AllFileDialogEditTextExact(
+    [object]$Binding,
+    [int]$ProcessId,
+    [string]$ExpectedPath,
+    [bool]$TargetExistedBefore,
+    [string]$TargetSha256Before,
+    [string]$FailureCode
+) {
+    [IntPtr]$editHandle = [IntPtr]$Binding.EditHandle
+    Assert-FileDialogEditMutationBoundary `
+        $Binding `
+        $ProcessId `
+        $ExpectedPath `
+        $TargetExistedBefore `
+        $TargetSha256Before `
+        $FailureCode `
+        "selection"
+    [string]$initialValue = Read-Win32TextExact $editHandle
+    [int]$initialLength = $initialValue.Length
+    Assert-FileDialogEditMutationBoundary `
+        $Binding `
+        $ProcessId `
+        $ExpectedPath `
+        $TargetExistedBefore `
+        $TargetSha256Before `
+        $FailureCode `
+        "selection"
+
+    [IntPtr]$selectionResult = [IntPtr]::Zero
+    $selectionCall = [MetafxVisibleNative]::SendMessageTimeout(
+        $editHandle,
+        [MetafxVisibleNative]::EM_SETSEL,
+        [IntPtr]::Zero,
+        [IntPtr](-1),
+        [MetafxVisibleNative]::SMTO_ABORTIFHUNG,
+        1500,
+        [ref]$selectionResult
+    )
+    if ($selectionCall -eq [IntPtr]::Zero) {
+        Stop-Adapter ("{0}_selection_message_timeout" -f $FailureCode)
+    }
+    Assert-FileDialogEditMutationBoundary `
+        $Binding `
+        $ProcessId `
+        $ExpectedPath `
+        $TargetExistedBefore `
+        $TargetSha256Before `
+        $FailureCode `
+        "selection"
+
+    $selectionResult = [IntPtr]::Zero
+    $selectionCall = [MetafxVisibleNative]::SendMessageTimeout(
+        $editHandle,
+        [MetafxVisibleNative]::EM_GETSEL,
+        [IntPtr]::Zero,
+        [IntPtr]::Zero,
+        [MetafxVisibleNative]::SMTO_ABORTIFHUNG,
+        1500,
+        [ref]$selectionResult
+    )
+    if ($selectionCall -eq [IntPtr]::Zero) {
+        Stop-Adapter ("{0}_selection_message_timeout" -f $FailureCode)
+    }
+    [uint64]$packedSelection = [uint64]($selectionResult.ToInt64())
+    [int]$selectionStart = [int]($packedSelection -band 0xFFFF)
+    [int]$selectionEnd = [int](($packedSelection -shr 16) -band 0xFFFF)
+    [int]$selectionMinimum = [Math]::Min($selectionStart, $selectionEnd)
+    [int]$selectionMaximum = [Math]::Max($selectionStart, $selectionEnd)
+    Assert-FileDialogEditMutationBoundary `
+        $Binding `
+        $ProcessId `
+        $ExpectedPath `
+        $TargetExistedBefore `
+        $TargetSha256Before `
+        $FailureCode `
+        "selection"
+    if ($selectionStart -eq 0xFFFF -or
+        $selectionEnd -eq 0xFFFF -or
+        $selectionStart -gt $initialLength -or
+        $selectionEnd -gt $initialLength -or
+        $selectionMinimum -ne 0 -or
+        $selectionMaximum -ne $initialLength) {
+        $initialBytes = [System.Text.Encoding]::UTF8.GetBytes($initialValue)
+        $initialHashPrefix = (Get-Sha256Hex $initialBytes).Substring(0, 12)
+        $diagnosticCode = "{0}_selection_l{1}_s{2}_e{3}_h{4}_cedit" -f @(
+            $FailureCode,
+            $initialLength,
+            $selectionStart,
+            $selectionEnd,
+            $initialHashPrefix
+        )
+        if ($diagnosticCode.Length -gt 80 -or
+            $diagnosticCode -notmatch '^[a-z0-9_]{3,80}$') {
+            Stop-Adapter ("{0}_selection_not_applied" -f $FailureCode)
+        }
+        Stop-Adapter $diagnosticCode
+    }
+}
+
+function Wait-ExactFileDialogPreCommitValue(
+    [object]$Binding,
+    [int]$ProcessId,
+    [string]$ExpectedValue,
+    [bool]$TargetExistedBefore,
+    [string]$TargetSha256Before,
+    [string]$FailureCode
+) {
+    [IntPtr]$editHandle = [IntPtr]$Binding.EditHandle
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    [string]$lastObserved = ""
+    do {
+        Assert-FileDialogEditMutationBoundary `
+            $Binding `
+            $ProcessId `
+            $ExpectedValue `
+            $TargetExistedBefore `
+            $TargetSha256Before `
+            $FailureCode `
+            "precommit"
+        $lastObserved = Read-Win32TextExact $editHandle
+        if ([string]::Equals(
+                $lastObserved,
+                $ExpectedValue,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+            return
+        }
+        if ([DateTime]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $observedBytes = [System.Text.Encoding]::UTF8.GetBytes($lastObserved)
+    $observedHashPrefix = (Get-Sha256Hex $observedBytes).Substring(0, 12)
+    $diagnosticCode = "{0}_precommit_l{1}_e{2}_h{3}_cedit_timeout" -f @(
+        $FailureCode,
+        $lastObserved.Length,
+        $ExpectedValue.Length,
+        $observedHashPrefix
+    )
+    if ($diagnosticCode.Length -gt 80 -or
+        $diagnosticCode -notmatch '^[a-z0-9_]{3,80}$') {
+        Stop-Adapter ("{0}_precommit_readback_timeout" -f $FailureCode)
+    }
+    Stop-Adapter $diagnosticCode
+}
+
 function Set-FileDialogFileNameExact(
     [object]$Binding,
     [int]$ProcessId,
@@ -3237,9 +4156,29 @@ function Set-FileDialogFileNameExact(
         [System.IO.Path]::GetFullPath($Value) -ne $Value) {
         Stop-Adapter ("{0}_path_invalid" -f $FailureCode)
     }
+    [string]$expectedDirectory = [System.IO.Path]::GetDirectoryName($Value)
+    [string]$expectedFileName = [System.IO.Path]::GetFileName($Value)
+    if ([string]::IsNullOrWhiteSpace($expectedDirectory) -or
+        [string]::IsNullOrWhiteSpace($expectedFileName) -or
+        -not [System.IO.Directory]::Exists($expectedDirectory) -or
+        [System.IO.Directory]::Exists($Value)) {
+        Stop-Adapter ("{0}_path_invalid" -f $FailureCode)
+    }
+    [bool]$targetExistedBefore = [System.IO.File]::Exists($Value)
+    [string]$targetSha256Before = ""
+    if ($targetExistedBefore) {
+        $targetSha256Before = Get-FileSha256Hex $Value
+    }
     [IntPtr]$dialogHandle = [IntPtr]$Binding.DialogHandle
     [IntPtr]$editHandle = [IntPtr]$Binding.EditHandle
-    if ($dialogHandle -eq [IntPtr]::Zero -or
+    [string]$bindingKind = [string]$Binding.Kind
+    if ($bindingKind -notin @(
+            "modern",
+            "nested_1148",
+            "native_nested_1148",
+            "classic"
+        ) -or
+        $dialogHandle -eq [IntPtr]::Zero -or
         $editHandle -eq [IntPtr]::Zero -or
         -not [MetafxVisibleNative]::IsWindow($dialogHandle) -or
         -not [MetafxVisibleNative]::IsWindowVisible($dialogHandle) -or
@@ -3251,6 +4190,70 @@ function Set-FileDialogFileNameExact(
         (Get-WindowClass $editHandle) -ne "Edit" -or
         -not (Test-NativeWindowDescendantOf $editHandle $dialogHandle)) {
         Stop-Adapter ("{0}_binding_changed" -f $FailureCode)
+    }
+    if ($bindingKind -eq "nested_1148") {
+        [IntPtr]$fileNameHostHandle = [IntPtr]$Binding.FileNameHostHandle
+        [IntPtr]$fileNameOuterHostHandle = [IntPtr]$Binding.FileNameOuterHostHandle
+        [IntPtr]$fileNameLabelHandle = [IntPtr]$Binding.FileNameLabelHandle
+        if ([string]$Binding.Edit.Current.AutomationId -ne "1148" -or
+            [string]$Binding.Edit.Current.ClassName -ne "Edit" -or
+            [int]$Binding.Edit.Current.ProcessId -ne $ProcessId -or
+            [IntPtr]$Binding.Edit.Current.NativeWindowHandle -ne $editHandle -or
+            $Binding.Edit.Current.ControlType -ne [System.Windows.Automation.ControlType]::Pane -or
+            -not [bool]$Binding.Edit.Current.IsEnabled -or
+            [bool]$Binding.Edit.Current.IsOffscreen -or
+            [MetafxVisibleNative]::GetDlgCtrlID($editHandle) -ne 1148 -or
+            $fileNameHostHandle -eq [IntPtr]::Zero -or
+            $fileNameOuterHostHandle -eq [IntPtr]::Zero -or
+            $fileNameLabelHandle -eq [IntPtr]::Zero -or
+            [MetafxVisibleNative]::GetParent($editHandle) -ne $fileNameHostHandle -or
+            (Get-WindowClass $fileNameHostHandle) -ne "ComboBox" -or
+            [MetafxVisibleNative]::GetDlgCtrlID($fileNameHostHandle) -ne 1148 -or
+            [MetafxVisibleNative]::GetParent($fileNameHostHandle) -ne
+                $fileNameOuterHostHandle -or
+            (Get-WindowClass $fileNameOuterHostHandle) -ne "ComboBoxEx32" -or
+            [MetafxVisibleNative]::GetDlgCtrlID($fileNameOuterHostHandle) -ne 1148 -or
+            [MetafxVisibleNative]::GetParent($fileNameOuterHostHandle) -ne $dialogHandle -or
+            (Get-WindowOwner $fileNameHostHandle) -ne $ProcessId -or
+            (Get-WindowOwner $fileNameOuterHostHandle) -ne $ProcessId -or
+            -not [MetafxVisibleNative]::IsWindowVisible($fileNameHostHandle) -or
+            -not [MetafxVisibleNative]::IsWindowVisible($fileNameOuterHostHandle) -or
+            [int]$Binding.FileNameHost.Current.ProcessId -ne $ProcessId -or
+            [int]$Binding.FileNameOuterHost.Current.ProcessId -ne $ProcessId -or
+            [IntPtr]$Binding.FileNameHost.Current.NativeWindowHandle -ne
+                $fileNameHostHandle -or
+            [IntPtr]$Binding.FileNameOuterHost.Current.NativeWindowHandle -ne
+                $fileNameOuterHostHandle -or
+            [string]$Binding.FileNameHost.Current.AutomationId -ne "1148" -or
+            [string]$Binding.FileNameOuterHost.Current.AutomationId -ne "1148" -or
+            $Binding.FileNameHost.Current.ControlType -ne
+                [System.Windows.Automation.ControlType]::Pane -or
+            $Binding.FileNameOuterHost.Current.ControlType -ne
+                [System.Windows.Automation.ControlType]::Pane -or
+            -not [bool]$Binding.FileNameHost.Current.IsEnabled -or
+            -not [bool]$Binding.FileNameOuterHost.Current.IsEnabled -or
+            [bool]$Binding.FileNameHost.Current.IsOffscreen -or
+            [bool]$Binding.FileNameOuterHost.Current.IsOffscreen -or
+            [string]$Binding.FileNameLabel.Current.AutomationId -ne "1090" -or
+            [string]$Binding.FileNameLabel.Current.ClassName -ne "Static" -or
+            [int]$Binding.FileNameLabel.Current.ProcessId -ne $ProcessId -or
+            [IntPtr]$Binding.FileNameLabel.Current.NativeWindowHandle -ne
+                $fileNameLabelHandle -or
+            [MetafxVisibleNative]::GetDlgCtrlID($fileNameLabelHandle) -ne 1090 -or
+            [MetafxVisibleNative]::GetParent($fileNameLabelHandle) -ne $dialogHandle -or
+            (Get-WindowOwner $fileNameLabelHandle) -ne $ProcessId -or
+            (Get-WindowClass $fileNameLabelHandle) -ne "Static" -or
+            -not (Test-NativeFileNameLabel (Read-Win32Text $fileNameLabelHandle)) -or
+            -not (Test-FileNameLabel ([string]$Binding.FileNameLabel.Current.Name)) -or
+            -not [MetafxVisibleNative]::IsWindowVisible($fileNameLabelHandle) -or
+            [bool]$Binding.FileNameLabel.Current.IsOffscreen) {
+            Stop-Adapter ("{0}_binding_changed" -f $FailureCode)
+        }
+    } elseif ($bindingKind -eq "native_nested_1148") {
+        Assert-NativeNested1148Binding `
+            $Binding `
+            $ProcessId `
+            ("{0}_binding_changed" -f $FailureCode)
     }
 
     Restore-Foreground $Binding.Dialog
@@ -3275,21 +4278,57 @@ function Set-FileDialogFileNameExact(
             "left" `
             $FailureCode
         Start-Sleep -Milliseconds 100
-        $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-        if ($null -eq $focused -or
-            [IntPtr]$focused.Current.NativeWindowHandle -ne $editHandle -or
-            [int]$focused.Current.ProcessId -ne $ProcessId -or
-            -not (Test-ForegroundWindowBinding $Binding.Dialog $ProcessId)) {
-            Stop-Adapter ("{0}_focus_invalid" -f $FailureCode)
+        if ($bindingKind -eq "native_nested_1148") {
+            [IntPtr]$focusedNative = [MetafxVisibleNative]::GetFocusedWindowFor($editHandle)
+            if ($focusedNative -ne $editHandle -or
+                -not (Test-ForegroundWindowBinding $Binding.Dialog $ProcessId)) {
+                Stop-Adapter ("{0}_focus_invalid" -f $FailureCode)
+            }
+        } else {
+            $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+            if ($null -eq $focused -or
+                [IntPtr]$focused.Current.NativeWindowHandle -ne $editHandle -or
+                [int]$focused.Current.ProcessId -ne $ProcessId -or
+                -not (Test-ForegroundWindowBinding $Binding.Dialog $ProcessId)) {
+                Stop-Adapter ("{0}_focus_invalid" -f $FailureCode)
+            }
+        }
+        if ($bindingKind -eq "native_nested_1148") {
+            Assert-NativeNested1148Binding `
+                $Binding `
+                $ProcessId `
+                ("{0}_focus_binding_changed" -f $FailureCode)
         }
         # ValuePattern/WM_SETTEXT can update only the visible child Edit while
         # the shell dialog keeps its internal file-name model at StrategyTester.
-        # Replace the text through the real foreground keyboard path, then move
-        # focus with Tab so the common dialog commits the edit before BM_CLICK.
-        if (-not [MetafxVisibleNative]::ReplaceFocusedText($Value)) {
+        # Select the exact native Edit contents and prove that selection before
+        # typing through the real foreground keyboard path.  Then move focus
+        # with Tab so the common dialog commits the edit before BM_CLICK.
+        Select-AllFileDialogEditTextExact `
+            $Binding `
+            $ProcessId `
+            $Value `
+            $targetExistedBefore `
+            $targetSha256Before `
+            $FailureCode
+        Assert-FileDialogEditMutationBoundary `
+            $Binding `
+            $ProcessId `
+            $Value `
+            $targetExistedBefore `
+            $targetSha256Before `
+            $FailureCode `
+            "typing"
+        if (-not [MetafxVisibleNative]::TypeFocusedText($Value)) {
             Stop-Adapter ("{0}_keyboard_input_failed" -f $FailureCode)
         }
-        Start-Sleep -Milliseconds 300
+        Wait-ExactFileDialogPreCommitValue `
+            $Binding `
+            $ProcessId `
+            $Value `
+            $targetExistedBefore `
+            $targetSha256Before `
+            $FailureCode
         if (-not (Test-ForegroundWindowBinding $Binding.Dialog $ProcessId) -or
             -not [MetafxVisibleNative]::IsWindow($dialogHandle) -or
             -not [MetafxVisibleNative]::IsWindowVisible($dialogHandle)) {
@@ -3301,6 +4340,12 @@ function Set-FileDialogFileNameExact(
             Stop-Adapter ("{0}_commit_key_failed" -f $FailureCode)
         }
         Start-Sleep -Milliseconds 300
+        if ($bindingKind -eq "native_nested_1148") {
+            Assert-NativeNested1148Binding `
+                $Binding `
+                $ProcessId `
+                ("{0}_commit_binding_changed" -f $FailureCode)
+        }
         if (-not (Test-ForegroundWindowBinding $Binding.Dialog $ProcessId) -or
             -not [MetafxVisibleNative]::IsWindowVisible($dialogHandle)) {
             Stop-Adapter ("{0}_commit_binding_changed" -f $FailureCode)
@@ -3309,21 +4354,55 @@ function Set-FileDialogFileNameExact(
         Restore-CursorSnapshot $cursorSnapshot $FailureCode
     }
 
-    $editNativeValue = Read-Win32Text $editHandle
-    $editAutomationValue = Read-AutomationValueExact $Binding.Edit $FailureCode
-    if (-not [string]::Equals(
+    $editNativeValue = Read-Win32TextExact $editHandle
+    if ($targetExistedBefore) {
+        if (-not [System.IO.File]::Exists($Value) -or
+            -not [string]::Equals(
+                (Get-FileSha256Hex $Value),
+                $targetSha256Before,
+                [System.StringComparison]::Ordinal
+            )) {
+            Stop-Adapter ("{0}_target_snapshot_changed" -f $FailureCode)
+        }
+    } elseif ([System.IO.File]::Exists($Value) -or
+        [System.IO.Directory]::Exists($Value)) {
+        Stop-Adapter ("{0}_target_snapshot_changed" -f $FailureCode)
+    }
+    $postCommitIsExactFullPath = [string]::Equals(
+        $editNativeValue,
+        $Value,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+    $postCommitIsExactBasename = $false
+    if (-not $postCommitIsExactFullPath -and
+        [string]::Equals(
             $editNativeValue,
-            $Value,
-            [System.StringComparison]::OrdinalIgnoreCase
-        ) -or
-        -not [string]::Equals(
-            $editAutomationValue,
-            $Value,
+            $expectedFileName,
             [System.StringComparison]::OrdinalIgnoreCase
         )) {
+        $observedFolder = Read-CommonDialogFolderPathExact `
+            $dialogHandle `
+            $ProcessId `
+            $FailureCode
+        $postCommitIsExactBasename = Test-SamePath `
+            $observedFolder `
+            $expectedDirectory
+    }
+    if (-not $postCommitIsExactFullPath -and
+        -not $postCommitIsExactBasename) {
         Stop-Adapter ("{0}_edit_readback_mismatch" -f $FailureCode)
     }
-    if ([string]$Binding.Kind -eq "modern") {
+    if ($bindingKind -notin @("nested_1148", "native_nested_1148")) {
+        $editAutomationValue = Read-AutomationValueExact $Binding.Edit $FailureCode
+        if (-not [string]::Equals(
+                $editAutomationValue,
+                $Value,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+            Stop-Adapter ("{0}_edit_readback_mismatch" -f $FailureCode)
+        }
+    }
+    if ($bindingKind -eq "modern") {
         [IntPtr]$fileNameHostHandle = [IntPtr]$Binding.FileNameHostHandle
         if ($fileNameHostHandle -eq [IntPtr]::Zero -or
             [MetafxVisibleNative]::GetParent($editHandle) -ne $fileNameHostHandle -or
@@ -3347,6 +4426,56 @@ function Set-FileDialogFileNameExact(
             )) {
             Stop-Adapter ("{0}_host_readback_mismatch" -f $FailureCode)
         }
+    } elseif ($bindingKind -eq "nested_1148") {
+        # This legacy MT4 dialog maps even the native Edit to UIA Pane, so it
+        # has no guaranteed ValuePattern. The exact native Edit readback above
+        # plus a fresh full-chain identity check are authoritative here.
+        if (-not [MetafxVisibleNative]::IsWindow($editHandle) -or
+            -not [MetafxVisibleNative]::IsWindowVisible($editHandle) -or
+            (Get-WindowOwner $editHandle) -ne $ProcessId -or
+            (Get-WindowClass $editHandle) -ne "Edit" -or
+            [MetafxVisibleNative]::GetDlgCtrlID($editHandle) -ne 1148 -or
+            [int]$Binding.Edit.Current.ProcessId -ne $ProcessId -or
+            [IntPtr]$Binding.Edit.Current.NativeWindowHandle -ne $editHandle -or
+            [string]$Binding.Edit.Current.AutomationId -ne "1148" -or
+            [string]$Binding.Edit.Current.ClassName -ne "Edit" -or
+            $Binding.Edit.Current.ControlType -ne
+                [System.Windows.Automation.ControlType]::Pane -or
+            -not [bool]$Binding.Edit.Current.IsEnabled -or
+            [bool]$Binding.Edit.Current.IsOffscreen -or
+            [MetafxVisibleNative]::GetParent($editHandle) -ne
+                [IntPtr]$Binding.FileNameHostHandle -or
+            [MetafxVisibleNative]::GetParent(
+                [IntPtr]$Binding.FileNameHostHandle
+            ) -ne [IntPtr]$Binding.FileNameOuterHostHandle -or
+            [MetafxVisibleNative]::GetParent(
+                [IntPtr]$Binding.FileNameOuterHostHandle
+            ) -ne $dialogHandle -or
+            (Get-WindowClass ([IntPtr]$Binding.FileNameHostHandle)) -ne "ComboBox" -or
+            [MetafxVisibleNative]::GetDlgCtrlID(
+                [IntPtr]$Binding.FileNameHostHandle
+            ) -ne 1148 -or
+            (Get-WindowClass ([IntPtr]$Binding.FileNameOuterHostHandle)) -ne "ComboBoxEx32" -or
+            [MetafxVisibleNative]::GetDlgCtrlID(
+                [IntPtr]$Binding.FileNameOuterHostHandle
+            ) -ne 1148 -or
+            (Get-WindowOwner ([IntPtr]$Binding.FileNameHostHandle)) -ne $ProcessId -or
+            (Get-WindowOwner ([IntPtr]$Binding.FileNameOuterHostHandle)) -ne $ProcessId -or
+            -not [MetafxVisibleNative]::IsWindowVisible(
+                [IntPtr]$Binding.FileNameHostHandle
+            ) -or
+            -not [MetafxVisibleNative]::IsWindowVisible(
+                [IntPtr]$Binding.FileNameOuterHostHandle
+            )) {
+            Stop-Adapter ("{0}_host_binding_changed" -f $FailureCode)
+        }
+    } elseif ($bindingKind -eq "native_nested_1148") {
+        # The exact native chain and WM_GETTEXT readback are authoritative for
+        # this legacy shape because its UIA child fragment can be incomplete.
+        Assert-NativeNested1148Binding `
+            $Binding `
+            $ProcessId `
+            ("{0}_host_binding_changed" -f $FailureCode)
     }
 }
 
@@ -3416,6 +4545,48 @@ function Close-ExactOwnedFileDialogAfterFailure(
     return $false
 }
 
+function Invoke-ExactNativeDialogButton(
+    [object]$Binding,
+    [int]$ProcessId,
+    [int]$ControlId,
+    [string[]]$AllowedNames,
+    [string]$FailureCode
+) {
+    [IntPtr]$dialogHandle = [IntPtr]$Binding.DialogHandle
+    Assert-NativeNested1148Binding `
+        $Binding `
+        $ProcessId `
+        ("{0}_binding_changed" -f $FailureCode)
+    $buttons = @(
+        Get-NativeDirectChildrenById $dialogHandle $ControlId $FailureCode
+    )
+    if ($buttons.Count -gt 1) {
+        Stop-Adapter ("{0}_control_ambiguous" -f $FailureCode)
+    }
+    if ($buttons.Count -eq 0) {
+        Stop-Adapter ("{0}_control_unavailable" -f $FailureCode)
+    }
+    [IntPtr]$buttonHandle = [IntPtr]$buttons[0]
+    if (-not [MetafxVisibleNative]::IsWindow($buttonHandle) -or
+        -not [MetafxVisibleNative]::IsWindowVisible($buttonHandle) -or
+        -not [MetafxVisibleNative]::IsWindowEnabled($buttonHandle) -or
+        (Get-WindowOwner $buttonHandle) -ne $ProcessId -or
+        (Get-WindowClass $buttonHandle) -ne "Button" -or
+        [MetafxVisibleNative]::GetDlgCtrlID($buttonHandle) -ne $ControlId -or
+        [MetafxVisibleNative]::GetParent($buttonHandle) -ne $dialogHandle -or
+        -not (Test-NativeAllowedName (Read-Win32Text $buttonHandle) $AllowedNames)) {
+        Stop-Adapter ("{0}_semantic_mismatch" -f $FailureCode)
+    }
+    if (-not [MetafxVisibleNative]::PostMessage(
+        $buttonHandle,
+        [MetafxVisibleNative]::BM_CLICK,
+        [IntPtr]::Zero,
+        [IntPtr]::Zero
+    )) {
+        Stop-Adapter ("{0}_post_failed" -f $FailureCode)
+    }
+}
+
 function Invoke-FileDialogPath(
     [int]$ProcessId,
     [IntPtr]$PropertiesHandle,
@@ -3432,7 +4603,7 @@ function Invoke-FileDialogPath(
     $dialog = Wait-UniqueOwnedDialog $ProcessId $PropertiesHandle "tester_input_file_dialog_missing"
     [IntPtr]$dialogHandle = [IntPtr]$dialog.Current.NativeWindowHandle
     try {
-        $fileNameBinding = Get-FileDialogFileNameBinding `
+        $fileNameBinding = Wait-FileDialogFileNameBinding `
             $dialog `
             $ProcessId `
             "tester_input_file_name"
@@ -3441,7 +4612,21 @@ function Invoke-FileDialogPath(
             $ProcessId `
             $Path `
             "tester_input_file_name"
-        Invoke-ExactButton $dialog $ProcessId "1" $AllowedActionNames "tester_input_file_action"
+        if ([string]$fileNameBinding.Kind -eq "native_nested_1148") {
+            Invoke-ExactNativeDialogButton `
+                $fileNameBinding `
+                $ProcessId `
+                1 `
+                $AllowedActionNames `
+                "tester_input_file_action"
+        } else {
+            Invoke-ExactButton `
+                $fileNameBinding.Dialog `
+                $ProcessId `
+                "1" `
+                $AllowedActionNames `
+                "tester_input_file_action"
+        }
         $deadline = [DateTime]::UtcNow.AddSeconds(15)
         do {
             Start-Sleep -Milliseconds 100
@@ -3562,38 +4747,49 @@ function Apply-TesterInputPreset(
     Invoke-ExactButton $TesterPane $ProcessId "1025" @("Expert properties") "expert_properties"
     $properties = Wait-UniqueOwnedDialog $ProcessId ([IntPtr]::Zero) "expert_properties_dialog_missing"
     [IntPtr]$propertiesHandle = [IntPtr]$properties.Current.NativeWindowHandle
-    Restore-Foreground $properties
-    Select-ExpertInputsTab $properties $ProcessId
-    Invoke-ExactButton $properties $ProcessId "4011" @("Load") "expert_inputs_load"
-    Invoke-FileDialogPath $ProcessId $propertiesHandle $PresetSetPath @("Open") $true
-    $properties = Wait-VerifiedElementFromHandle $propertiesHandle $ProcessId "expert_properties_dialog_lost_after_load"
-    Select-ExpertInputsTab $properties $ProcessId
-    Invoke-ExactButton $properties $ProcessId "4012" @("Save") "expert_inputs_save"
-    Invoke-FileDialogPath $ProcessId $propertiesHandle $ReadbackSetPath @("Save") $false
-    if (-not (Test-TesterInputReadbackSet $ReadbackSetPath $Preset)) {
-        Stop-Adapter "tester_input_readback_value_mismatch"
-    }
-    $properties = Wait-VerifiedElementFromHandle $propertiesHandle $ProcessId "expert_properties_dialog_lost_after_save"
-    Select-ExpertInputsTab $properties $ProcessId
-    Save-WindowPng $properties $ScreenshotPath
-    # The values are scoped to Strategy Tester and never applied to a live
-    # chart. MT4 may retain Tester Inputs after this run, so do not describe
-    # this as an ephemeral "this run only" mutation.
-    Invoke-ExactButton $properties $ProcessId "1" @("OK") "expert_properties_ok"
-    $deadline = [DateTime]::UtcNow.AddSeconds(10)
-    do {
-        Start-Sleep -Milliseconds 100
-        if (-not [MetafxVisibleNative]::IsWindow($propertiesHandle)) {
-            return [ordered]@{
-                testerInputPresetApplied = $true
-                testerInputPresetReadbackVerified = $true
-                inputPresetReadbackSaved = $true
-            }
-        } elseif ((Get-WindowOwner $propertiesHandle) -ne $ProcessId) {
-            Stop-Adapter "expert_properties_dialog_owner_changed"
+    try {
+        Restore-Foreground $properties
+        Select-ExpertInputsTab $properties $ProcessId
+        Invoke-ExactButton $properties $ProcessId "4011" @("Load") "expert_inputs_load"
+        Invoke-FileDialogPath $ProcessId $propertiesHandle $PresetSetPath @("Open") $true
+        $properties = Wait-VerifiedElementFromHandle $propertiesHandle $ProcessId "expert_properties_dialog_lost_after_load"
+        Select-ExpertInputsTab $properties $ProcessId
+        Invoke-ExactButton $properties $ProcessId "4012" @("Save") "expert_inputs_save"
+        Invoke-FileDialogPath $ProcessId $propertiesHandle $ReadbackSetPath @("Save") $false
+        if (-not (Test-TesterInputReadbackSet $ReadbackSetPath $Preset)) {
+            Stop-Adapter "tester_input_readback_value_mismatch"
         }
-    } while ([DateTime]::UtcNow -lt $deadline)
-    Stop-Adapter "expert_properties_dialog_not_closed"
+        $properties = Wait-VerifiedElementFromHandle $propertiesHandle $ProcessId "expert_properties_dialog_lost_after_save"
+        Select-ExpertInputsTab $properties $ProcessId
+        Save-WindowPng $properties $ScreenshotPath
+        # The values are scoped to Strategy Tester and never applied to a live
+        # chart. MT4 may retain Tester Inputs after this run, so do not describe
+        # this as an ephemeral "this run only" mutation.
+        Invoke-ExactButton $properties $ProcessId "1" @("OK") "expert_properties_ok"
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            Start-Sleep -Milliseconds 100
+            if (-not [MetafxVisibleNative]::IsWindow($propertiesHandle)) {
+                return [ordered]@{
+                    testerInputPresetApplied = $true
+                    testerInputPresetReadbackVerified = $true
+                    inputPresetReadbackSaved = $true
+                }
+            } elseif ((Get-WindowOwner $propertiesHandle) -ne $ProcessId) {
+                Stop-Adapter "expert_properties_dialog_owner_changed"
+            }
+        } while ([DateTime]::UtcNow -lt $deadline)
+        Stop-Adapter "expert_properties_dialog_not_closed"
+    } catch {
+        # Invoke-FileDialogPath closes its verified child dialog first. Close
+        # only this still-owned Expert Properties handle before preserving the
+        # original failure so an explicit retry cannot inherit a disabled pane.
+        [void](Close-ExactOwnedFileDialogAfterFailure `
+            $properties `
+            $propertiesHandle `
+            $ProcessId)
+        throw
+    }
 }
 
 function Invoke-StartButton([System.Windows.Automation.AutomationElement]$TesterPane, [int]$ProcessId) {
@@ -3919,19 +5115,15 @@ try {
     if ($request.action -eq "recover_compile") {
         $sourcePath = Get-FullPath $request.sourcePath
         $binaryPath = Get-FullPath $request.binaryPath
-        if (-not [System.IO.File]::Exists($sourcePath) -or [System.IO.Path]::GetExtension($sourcePath) -ine ".mq4") {
-            Stop-Adapter "source_file_invalid"
-        }
-        if (-not (Test-SamePath $binaryPath ([System.IO.Path]::ChangeExtension($sourcePath, ".ex4"))) -or
-            -not [System.IO.File]::Exists($binaryPath) -or
-            (Get-Item -LiteralPath $binaryPath).Length -le 0) {
-            Stop-Adapter "metaeditor_recovery_binary_invalid"
-        }
         $expectedBinaryDigest = ([string]$request.expectedBinaryDigest).Trim().ToLowerInvariant()
-        if ($expectedBinaryDigest -notmatch '^[0-9a-f]{64}$' -or
-            (Get-FileSha256Hex $binaryPath) -ne $expectedBinaryDigest) {
-            Stop-Adapter "metaeditor_recovery_binary_digest_mismatch"
-        }
+        $workingCopy = Assert-CompileWorkingCopy `
+            $sourcePath `
+            $binaryPath `
+            $dataPath `
+            ([string]$request.operationId) `
+            ([string]$request.expectedSourceDigest) `
+            $true `
+            $expectedBinaryDigest
         $editors = @(Get-ExactProcesses $compilerPath)
         if ($editors.Count -ne 1) { Stop-Adapter "metaeditor_recovery_process_ambiguous" }
         $editorWindow = Get-TopWindow ([int]$editors[0].Id) "metaeditor"
@@ -3964,6 +5156,93 @@ try {
             postProcessBinding = $postBinding
             recoveredWithoutAction = $true
             exactSourceWindowVerified = $true
+            compileWorkingCopyVerified = $true
+            workingSourceSha256 = [string]$workingCopy.SourceSha256
+            workingBinarySha256 = [string]$workingCopy.BinarySha256
+            compileResultLine = $compileResultLine
+        }) 0
+    }
+
+    if ($request.action -eq "recover_inflight_compile") {
+        # Observation-only recovery: an earlier Compile click may have finished
+        # after its caller disconnected.  Never send a second Compile command.
+        $sourcePath = Get-FullPath $request.sourcePath
+        $binaryPath = Get-FullPath $request.binaryPath
+        $screenshotPath = Get-FullPath $request.screenshotPath
+        $reuseExistingScreenshot = [bool]$request.reuseExistingScreenshot
+        $expectedBinaryDigest = ([string]$request.expectedBinaryDigest).Trim().ToLowerInvariant()
+        $binaryWasBound = $expectedBinaryDigest -match '^[0-9a-f]{64}$'
+        $workingCopy = Assert-CompileWorkingCopy `
+            $sourcePath `
+            $binaryPath `
+            $dataPath `
+            ([string]$request.operationId) `
+            ([string]$request.expectedSourceDigest) `
+            $binaryWasBound `
+            $expectedBinaryDigest
+        $editors = @(Get-ExactProcesses $compilerPath)
+        if ($editors.Count -ne 1) { Stop-Adapter "metaeditor_recovery_process_ambiguous" }
+        $editorWindow = Get-TopWindow ([int]$editors[0].Id) "metaeditor"
+        if ($editorWindow.Current.Name -ne ("MetaEditor - [{0}]" -f [System.IO.Path]::GetFileName($sourcePath))) {
+            Stop-Adapter "metaeditor_recovery_source_mismatch"
+        }
+        Assert-NoModal ([int]$editors[0].Id) ([IntPtr]$editorWindow.Current.NativeWindowHandle)
+        $editor = [pscustomobject]@{ Process = $editors[0]; Window = $editorWindow }
+        $freshBinary = (
+            [System.IO.File]::Exists($binaryPath) -and
+            (Get-Item -LiteralPath $binaryPath).Length -gt 0
+        )
+        $compileResultLine = Read-MetaEditorCompileResult `
+            $editor.Window `
+            ([int]$editor.Process.Id) `
+            ([System.IO.Path]::GetFileName($sourcePath)) `
+            $freshBinary
+        if (-not $freshBinary) { Stop-Adapter "visible_compile_binary_not_fresh" }
+        $observedBinaryDigest = Get-FileSha256Hex $binaryPath
+        if ($binaryWasBound -and $observedBinaryDigest -ne $expectedBinaryDigest) {
+            Stop-Adapter "compile_working_binary_changed_during_recovery"
+        }
+        $workingCopy = Assert-CompileWorkingCopy `
+            $sourcePath `
+            $binaryPath `
+            $dataPath `
+            ([string]$request.operationId) `
+            ([string]$request.expectedSourceDigest) `
+            $true `
+            $observedBinaryDigest
+        $processBinding = New-RawBinding $terminal $editor "metaeditor" $autoBefore
+        if ($reuseExistingScreenshot) {
+            Assert-ExistingPngEvidence $screenshotPath
+        } else {
+            if ([System.IO.File]::Exists($screenshotPath)) {
+                Stop-Adapter "compile_recovery_screenshot_collision"
+            }
+            Save-WindowPng $editor.Window $screenshotPath
+            Assert-ExistingPngEvidence $screenshotPath
+        }
+        $terminalPost = Get-ExistingVisibleProcess $terminalPath "terminal"
+        $editorPost = Get-ExistingVisibleProcess $compilerPath "metaeditor"
+        if ($editorPost.Window.Current.Name -ne $editor.Window.Current.Name) {
+            Stop-Adapter "metaeditor_recovery_source_drift"
+        }
+        $autoAfter = Get-AutoTradingState $terminalPost.Window ([int]$terminalPost.Process.Id)
+        if ($autoAfter -ne $autoBefore) { Stop-Adapter "autotrading_state_changed" }
+        $postBinding = New-RawBinding $terminalPost $editorPost "metaeditor" $autoAfter
+        Write-JsonResult ([ordered]@{
+            schemaVersion = "ea-factory-visible-powershell-result-v1"
+            ok = $true
+            action = "recover_inflight_compile"
+            operationId = [string]$request.operationId
+            processBinding = $processBinding
+            postProcessBinding = $postBinding
+            compileInvoked = $false
+            recoveredWithoutCompile = $true
+            exactSourceWindowVerified = $true
+            compileWorkingCopyVerified = $true
+            freshBinaryObserved = $freshBinary
+            screenshotReused = $reuseExistingScreenshot
+            workingSourceSha256 = [string]$workingCopy.SourceSha256
+            workingBinarySha256 = [string]$workingCopy.BinarySha256
             compileResultLine = $compileResultLine
         }) 0
     }
@@ -4228,7 +5507,11 @@ try {
             ([string]$request.deployedExpertPath) `
             $expectedExpertPath `
             ([string]$request.expectedDeployedExpertSha256)
-        $tester = Get-TesterPane $terminal.Window ([int]$terminal.Process.Id)
+        # The completed Tester may still be showing the Report tab. Recovery
+        # is observation-only, but its exact Start/expert/settings readback
+        # still requires the visible Settings surface. Select that surface
+        # before reading any control; this helper never invokes Start.
+        $tester = Select-TesterSettingsTab $terminal.Window ([int]$terminal.Process.Id)
         $start = Get-TesterStartButton $tester ([int]$terminal.Process.Id)
         if (([string]$start.Current.Name).Trim() -ne "Start") { Stop-Adapter "tester_recovery_not_idle" }
         $expert = Read-ExpertSelection $tester ([int]$terminal.Process.Id)
@@ -4267,7 +5550,7 @@ try {
         $processBinding = New-RawBinding $terminal $testerFrontOffice "strategy_tester" $autoBefore
         Start-Sleep -Milliseconds 100
         $terminalPost = Get-ExistingVisibleProcess $terminalPath "terminal"
-        $testerPost = Get-TesterPane $terminalPost.Window ([int]$terminalPost.Process.Id)
+        $testerPost = Select-TesterSettingsTab $terminalPost.Window ([int]$terminalPost.Process.Id)
         $autoAfter = Get-AutoTradingState $terminalPost.Window ([int]$terminalPost.Process.Id)
         if ($autoAfter -ne $autoBefore) { Stop-Adapter "autotrading_state_changed" }
         $postFrontOffice = [pscustomobject]@{ Process = $terminalPost.Process; Window = $testerPost }
@@ -4291,9 +5574,14 @@ try {
         $sourcePath = Get-FullPath $request.sourcePath
         $binaryPath = Get-FullPath $request.binaryPath
         $screenshotPath = Get-FullPath $request.screenshotPath
-        if (-not [System.IO.File]::Exists($sourcePath) -or [System.IO.Path]::GetExtension($sourcePath) -ine ".mq4") {
-            Stop-Adapter "source_file_invalid"
-        }
+        $workingCopy = Assert-CompileWorkingCopy `
+            $sourcePath `
+            $binaryPath `
+            $dataPath `
+            ([string]$request.operationId) `
+            ([string]$request.expectedSourceDigest) `
+            $false `
+            ""
         $editorProcesses = @(Get-ExactProcesses $compilerPath)
         if ($editorProcesses.Count -gt 1) { Stop-Adapter "metaeditor_process_ambiguous" }
         # Always pass the exact absolute source to MetaEditor.  If an instance
@@ -4338,6 +5626,15 @@ try {
             }
         } while ([DateTime]::UtcNow -lt $deadline)
         if (-not $freshBinary) { Stop-Adapter "visible_compile_binary_not_fresh" }
+        $workingBinarySha256 = Get-FileSha256Hex $binaryPath
+        $workingCopy = Assert-CompileWorkingCopy `
+            $sourcePath `
+            $binaryPath `
+            $dataPath `
+            ([string]$request.operationId) `
+            ([string]$request.expectedSourceDigest) `
+            $true `
+            $workingBinarySha256
         $compileResultLine = Read-MetaEditorCompileResult `
             $editor.Window `
             ([int]$editor.Process.Id) `
@@ -4358,7 +5655,10 @@ try {
             postProcessBinding = $postBinding
             compileInvoked = $true
             exactSourceWindowVerified = $true
+            compileWorkingCopyVerified = $true
             freshBinaryObserved = $true
+            workingSourceSha256 = [string]$workingCopy.SourceSha256
+            workingBinarySha256 = $workingBinarySha256
             compileResultLine = $compileResultLine
         }
         Write-JsonResult $result 0
@@ -4380,8 +5680,8 @@ try {
         Restore-Foreground $terminal.Window
         $checkpoint = "assert_no_modal"
         Assert-NoModal ([int]$terminal.Process.Id) ([IntPtr]$terminal.Window.Current.NativeWindowHandle)
-        $checkpoint = "tester_pane"
-        $tester = Get-TesterPane $terminal.Window ([int]$terminal.Process.Id)
+        $checkpoint = "tester_settings_surface"
+        $tester = Select-TesterSettingsTab $terminal.Window ([int]$terminal.Process.Id)
         $checkpoint = "tester_idle"
         $startButton = Get-TesterStartButton $tester ([int]$terminal.Process.Id)
         if (([string]$startButton.Current.Name).Trim() -ne "Start") { Stop-Adapter "tester_not_idle" }

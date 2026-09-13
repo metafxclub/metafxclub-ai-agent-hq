@@ -77,6 +77,7 @@ const GLOBAL_METATRADER_POLL_MS = 15000;
 const MISSION_FETCH_TIMEOUT_MS = 25000;
 const OPEN_PROP_REPORT_POLL_TTL_MS = 30000;
 const EA_FACTORY_READ_MODEL_MAX_AGE_MS = 90000;
+const EA_FACTORY_ACTION_TIMEOUT_MS = 45000;
 // Accept the current one-click contract plus the immediately preceding mode
 // while Backend/Frontend versions roll forward independently. Unknown modes
 // remain fail-closed so an incompatible coordinator cannot expose actions.
@@ -624,6 +625,27 @@ const EA_FACTORY_ONE_CLICK_STAGE_IDS = Object.freeze([
   "compile_validate",
   "backtest_recheck",
 ]);
+// The backend contract intentionally keeps its seven auditable stages. The
+// operator-facing factory is condensed into three pages so a user can always
+// answer: what did I select, what is running now, and what was produced?
+const EA_FACTORY_PAGE_IDS = Object.freeze(["source", "progress", "result"]);
+const EA_FACTORY_PAGE_COPY = Object.freeze({
+  source: {
+    labelTh: "1 เลือกระบบและเริ่มเขียน",
+    titleTh: "เลือกระบบจาก Google Sheets แล้วเริ่มเขียน EA",
+    descriptionTh: "เลือก Strategy Brief ที่ Backend ตรวจแล้ว ตรวจ Terminal กลาง และเริ่มงานจากหน้าเดียว",
+  },
+  progress: {
+    labelTh: "2 สถานะการทำงาน",
+    titleTh: "ติดตามการเขียน Source, MetaEditor และ Compile",
+    descriptionTh: "ดูงานที่ Backend กำลังทำจริง พร้อมขั้นปัจจุบัน Mission และจุดที่ต้องเปิดโปรแกรมหน้าบ้าน",
+  },
+  result: {
+    labelTh: "3 ตรวจโค้ดและเสร็จสิ้น",
+    titleTh: "ตรวจผลโค้ด หลักฐาน และไฟล์ที่สร้าง",
+    descriptionTh: "สรุป Source Review, Compile, Backtest, Artifact และ Final Report ของ Build ที่เลือก",
+  },
+});
 const EA_FACTORY_STAGE_COPY = Object.freeze({
   source: {
     labelTh: "1 เลือกระบบ",
@@ -962,11 +984,11 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
   },
   right_server_racks: {
     titleTh: "โรงงานสร้าง EA และ Indicator",
-    summaryTh: "กระบวนการ Manual 7 ขั้นจาก Strategy Record ที่ Backend อนุญาต ไปสู่ MQL4, MQL5 หรือ Pine Script พร้อมตรวจ Source, Compile/Validate, Backtest และเก็บไฟล์ใน Workspace",
-    tabs: EA_FACTORY_STAGE_IDS.map((id) => ({
+    summaryTh: "กระบวนการ 3 หน้า ตั้งแต่เลือก Strategy Record ที่ Backend อนุญาต ติดตามงานจริง ไปจนถึงตรวจโค้ดและดาวน์โหลดผลลัพธ์",
+    tabs: EA_FACTORY_PAGE_IDS.map((id) => ({
       id,
-      labelTh: EA_FACTORY_STAGE_COPY[id].labelTh,
-      descriptionTh: EA_FACTORY_STAGE_COPY[id].descriptionTh,
+      labelTh: EA_FACTORY_PAGE_COPY[id].labelTh,
+      descriptionTh: EA_FACTORY_PAGE_COPY[id].descriptionTh,
       actionIds: [],
     })),
     actions: [],
@@ -1409,6 +1431,8 @@ const state = {
       oneClickBuildId: "",
       message: "",
       tone: "neutral",
+      messageKind: "",
+      readModelStateKey: "",
     },
     eaOptimizationLab: {
       platform: "",
@@ -18520,6 +18544,7 @@ function normalizeWorkflowDashboard(subject, propertyRole, report = {}) {
   if (
     visibleTabs.length
     && subject?.id !== TRADING_RESEARCH_LAB_PROP_ID
+    && subject?.id !== EA_FACTORY_PROP_ID
     && !WORKFLOW_DASHBOARD_HISTORY_TAB_IDS.has(visibleTabs.at(-1).id)
   ) {
     visibleTabs.push({
@@ -18533,7 +18558,9 @@ function normalizeWorkflowDashboard(subject, propertyRole, report = {}) {
   const primaryTabCopy = WORKFLOW_DASHBOARD_PRIMARY_TABS[subject?.id] || {};
   const tabs = visibleTabs.map((tab, index, list) => {
     const isPrimary = index === 0;
-    const isHistory = subject?.id !== TRADING_RESEARCH_LAB_PROP_ID && index === list.length - 1;
+    const isHistory = subject?.id !== TRADING_RESEARCH_LAB_PROP_ID
+      && subject?.id !== EA_FACTORY_PROP_ID
+      && index === list.length - 1;
     const isPortalCatalog = subject?.id === "codex_mcp_portal" && tab.id === "catalog";
     const isEaFactoryFinal = subject?.id === EA_FACTORY_PROP_ID && tab.id === "artifacts_report";
     const historyLabelTh = isHistory ? "ประวัติและรายงาน" : tab.labelTh;
@@ -18616,6 +18643,14 @@ function normalizeWorkflowDashboard(subject, propertyRole, report = {}) {
       descriptionTh: EA_OPTIMIZATION_LAB_STAGE_PRESENTATION.find((item) => item.id === tab.id)?.descriptionTh || tab.descriptionTh,
       actionIds: [],
     }));
+  } else if (subject?.id === EA_FACTORY_PROP_ID) {
+    presentationTabs = EA_FACTORY_PAGE_IDS.map((id) => ({
+      id,
+      labelTh: EA_FACTORY_PAGE_COPY[id].labelTh,
+      descriptionTh: EA_FACTORY_PAGE_COPY[id].descriptionTh,
+      emptyMessageTh: "",
+      actionIds: [],
+    }));
   }
   const deliveredSourceRows = Array.isArray(backend.agentDeliveredSources)
     ? backend.agentDeliveredSources
@@ -18656,39 +18691,44 @@ function normalizeWorkflowDashboard(subject, propertyRole, report = {}) {
 function getWorkflowSelectedTab(propId, dashboard) {
   const tabs = Array.isArray(dashboard?.tabs) ? dashboard.tabs : [];
   const requested = state.modal.workflowTabs[propId];
+  if (propId === EA_FACTORY_PROP_ID) {
+    return tabs.find((tab) => tab.id === requested)
+      || tabs.find((tab) => tab.id === eaFactoryPreferredPageId(dashboard?.domainData?.eaFactory || {}))
+      || tabs[0]
+      || null;
+  }
   return tabs.find((tab) => tab.id === requested) || tabs[0] || null;
 }
 
 function renderWorkflowTabs(propId, dashboard, selectedTab) {
   if (!els.workflowDashboardTabs) return;
   els.workflowDashboardTabs.innerHTML = "";
+  const factoryPages = propId === EA_FACTORY_PROP_ID;
+  els.workflowDashboardTabs.dataset.eaFactoryPages = factoryPages ? "true" : "false";
   dashboard.tabs.forEach((tab) => {
     const button = document.createElement("button");
     const active = tab.id === selectedTab?.id;
-    const factoryStage = propId === EA_FACTORY_PROP_ID
-      ? dashboard?.domainData?.eaFactory?.stages?.find((stage) => stage.id === tab.id)
-      : null;
-    const factoryReadOnlyHistory = propId === EA_FACTORY_PROP_ID
-      && tab.id === "artifacts_report"
-      && (dashboard?.domainData?.eaFactory?.builds?.length || 0) > 0;
-    const factoryLocked = factoryStage
-      && ["locked", "unknown"].includes(factoryStage.status)
-      && !factoryReadOnlyHistory;
+    const factoryPageStatus = factoryPages
+      ? eaFactoryPageStatus(dashboard?.domainData?.eaFactory || {}, tab.id)
+      : "";
+    // The three operator pages are always inspectable. Internal stage gates
+    // still disable their own action buttons inside each page.
+    const factoryLocked = false;
     button.type = "button";
     button.className = "workflow-tab";
     button.dataset.workflowTab = tab.id;
-    if (factoryStage) button.dataset.workflowStageStatus = factoryStage.status;
+    if (factoryPageStatus) button.dataset.workflowStageStatus = factoryPageStatus;
     button.setAttribute("role", "tab");
     button.setAttribute("aria-selected", active ? "true" : "false");
     button.setAttribute("aria-controls", "workflowDashboardContent");
     button.tabIndex = active ? 0 : -1;
     button.disabled = Boolean(factoryLocked);
     button.classList.toggle("active", active);
-    if (factoryStage) {
+    if (factoryPageStatus) {
       const label = document.createElement("span");
       const status = document.createElement("small");
       label.textContent = tab.labelTh;
-      status.textContent = eaFactoryStageStatusLabel(factoryStage.status);
+      status.textContent = eaFactoryStageStatusLabel(factoryPageStatus);
       button.setAttribute("aria-label", `${tab.labelTh} • ${status.textContent}`);
       button.append(label, status);
     } else {
@@ -22805,6 +22845,12 @@ function normalizeEaFactoryAudit(build = {}, root = {}) {
   return [...stageRows, ...versionRows].slice(0, 80);
 }
 
+function applyEaFactoryStageAdmission(stage, authoritative, backendBusyActive) {
+  if (!stage) return stage;
+  if (authoritative === true && backendBusyActive !== true) return stage;
+  return { ...stage, canRun: false, canRetry: false };
+}
+
 function normalizeEaFactoryDomain(backend = {}) {
   const root = workflowDomainObject(
     backend.eaFactory,
@@ -22817,13 +22863,22 @@ function normalizeEaFactoryDomain(backend = {}) {
     root.strategyRecords,
   ).slice(0, 200).map(normalizeEaFactorySourceRecord).filter(Boolean);
   const builds = eaFactoryFirstArray(root.builds).slice(0, 100);
+  const backendBusy = workflowDomainObject(state.eaFactoryReadModel.busy);
+  const backendBusyActive = Object.keys(backendBusy).length > 0;
+  const busyBuildId = String(backendBusy.buildId || "").trim();
+  const busyBuild = backendBusyActive ? builds.find((item) => (
+    String(item?.id || item?.buildId || "").trim() === busyBuildId
+  )) : null;
+  const rootActiveBuild = workflowDomainObject(root.activeBuild);
+  const rootActiveBuildId = String(rootActiveBuild?.id || rootActiveBuild?.buildId || "").trim();
+  const matchingBusyRootBuild = rootActiveBuildId === busyBuildId ? rootActiveBuild : null;
   const requestedBuildId = String(state.modal.eaFactory.selectedBuildId || "").trim();
   const requestedBuild = builds.find((item) => String(item?.id || item?.buildId || "").trim() === requestedBuildId);
   const activeBuildRaw = workflowDomainObject(
-    requestedBuild,
-    root.activeBuild,
-    builds.find((item) => ["running", "in_progress", "ready", "blocked", "awaiting_user"].includes(String(item?.status || "").toLowerCase())),
-    builds[0],
+    busyBuild,
+    backendBusyActive ? matchingBusyRootBuild : requestedBuild,
+    backendBusyActive ? null : rootActiveBuild,
+    backendBusyActive ? null : builds[0],
   );
   const buildId = String(activeBuildRaw?.id || activeBuildRaw?.buildId || "").trim();
   const buildVersions = eaFactoryFirstArray(activeBuildRaw?.versions);
@@ -22866,21 +22921,12 @@ function normalizeEaFactoryDomain(backend = {}) {
     oneClickRun: normalizeEaFactoryOneClickRun(activeBuildRaw?.oneClickRun),
     raw: activeBuildRaw,
   } : null;
-  const activeBuildStatus = String(activeBuildRaw?.status || "").trim().toLowerCase();
   const oneClickOwnsBuild = ["queued", "running", "waiting_ai", "awaiting_visible_terminal"]
     .includes(activeBuild?.oneClickRun?.status);
-  const backendBusy = workflowDomainObject(state.eaFactoryReadModel.busy);
-  const backendBusyActive = Object.keys(backendBusy).length > 0;
-  const canStartNewBuild = !backendBusyActive && !oneClickOwnsBuild && (
-    !activeBuild || [
-      "completed",
-      "attention_required",
-      "blocked",
-      "failed",
-      "cancelled",
-      "canceled",
-    ].includes(activeBuildStatus)
-  );
+  // Only the dedicated Backend busy model owns admission. Historical Build
+  // and oneClickRun statuses remain visible for diagnosis but can never leave
+  // the factory permanently locked after Backend has reported busy=null.
+  const canStartNewBuild = !backendBusyActive;
   const rawStages = eaFactoryFirstArray(activeBuildRaw?.stages, root.stages);
   if (!rawStages.length) {
     const stageMap = workflowDomainObject(activeBuildRaw?.stageStates, root.stageStates);
@@ -22900,6 +22946,8 @@ function normalizeEaFactoryDomain(backend = {}) {
     && dedicatedLoadedAt > 0
     && Date.now() - dedicatedLoadedAt <= EA_FACTORY_READ_MODEL_MAX_AGE_MS;
   const authoritative = dedicatedReadModelFresh
+    && state.eaFactoryReadModel.stale !== true
+    && root.snapshotStale !== true
     && root.schemaVersion === "ea-factory-v1"
     && EA_FACTORY_SUPPORTED_MODES.has(root.mode)
     && root.scheduled === false;
@@ -22918,7 +22966,7 @@ function normalizeEaFactoryDomain(backend = {}) {
       };
     }
     const stage = normalizedStageMap.get(id);
-    if (stage) return backendBusyActive ? { ...stage, canRun: false } : stage;
+    if (stage) return applyEaFactoryStageAdmission(stage, authoritative, backendBusyActive);
     if (id === "spec" && canStartNewBuild && buildReadyRecordCount) {
       return {
         id,
@@ -22988,6 +23036,8 @@ function normalizeEaFactoryDomain(backend = {}) {
     builds,
     activeBuild,
     canStartNewBuild,
+    hasBackendTask: backendBusyActive,
+    historicalRunLooksActive: !backendBusyActive && oneClickOwnsBuild,
     stages,
     selectedSourceId,
     currentStageId: EA_FACTORY_UI_STAGE_BY_BACKEND[String(
@@ -23029,7 +23079,7 @@ function normalizeEaFactoryDomain(backend = {}) {
       terminalReady: oneClickCapability.terminalReady === true || globalSelectedTerminal?.ready === true,
       terminalRunning: oneClickCapability.terminalRunning === true,
       terminalMustAlreadyBeRunning: oneClickCapability.terminalMustAlreadyBeRunning !== false,
-      terminalProcessLaunchAllowed: false,
+      terminalProcessLaunchAllowed: oneClickCapability.terminalProcessLaunchAllowed === true,
       visibleAdapterConnected: oneClickCapability.visibleAdapterConnected === true,
       requiresVisibleTerminal: oneClickCapability.requiresVisibleTerminal !== false,
       manualOnly: oneClickCapability.manualOnly === true,
@@ -25054,6 +25104,67 @@ function eaFactoryStageStatusLabel(status) {
   }[status] || "รอสถานะ Backend";
 }
 
+function eaFactoryPageStatus(domain = {}, pageId = "") {
+  const stages = Array.isArray(domain.stages) ? domain.stages : [];
+  const finalStage = stages.find((stage) => stage.id === "artifacts_report");
+  const runStatus = String(domain.oneClick?.run?.status || "idle").trim().toLowerCase();
+  if (!domain.authoritative) {
+    return pageId === "source" ? "blocked" : "unknown";
+  }
+  if (pageId === "source") {
+    if (domain.backendBusy) return "completed";
+    return (domain.sourceCatalog?.records || []).some(eaFactorySourceIsBuildSelectable)
+      ? "ready"
+      : "blocked";
+  }
+  if (pageId === "progress") {
+    if (domain.backendBusy) return "running";
+    if (["failed", "blocked"].includes(runStatus)) return "failed";
+    if (runStatus === "awaiting_visible_terminal") return "blocked";
+    if (runStatus === "completed") return "completed";
+    return domain.activeBuild ? "ready" : "locked";
+  }
+  if (pageId === "result") {
+    if (finalStage?.status === "completed" || runStatus === "completed") return "completed";
+    if (stages.some((stage) => stage.attentionRequired === true)) return "blocked";
+    if (stages.some((stage) => stage.status === "failed")) return "failed";
+    if (domain.backendBusy) return "running";
+    return domain.activeBuild ? "ready" : "locked";
+  }
+  return "unknown";
+}
+
+function eaFactoryPreferredPageId(domain = {}) {
+  if (domain.backendBusy) return "progress";
+  const runStatus = String(domain.oneClick?.run?.status || "idle").trim().toLowerCase();
+  const finalStatus = domain.stages?.find((stage) => stage.id === "artifacts_report")?.status;
+  if (runStatus === "completed" || finalStatus === "completed") return "result";
+  // Every non-completed run marker is historical once Backend busy=null,
+  // including failed, blocked and awaiting-visible-terminal states.
+  return "source";
+}
+
+function createEaFactoryPageHeader(pageId, domain = {}) {
+  const header = document.createElement("header");
+  const copy = document.createElement("div");
+  const eyebrow = document.createElement("span");
+  const title = document.createElement("h4");
+  const description = document.createElement("p");
+  const badge = document.createElement("strong");
+  const pageIndex = Math.max(0, EA_FACTORY_PAGE_IDS.indexOf(pageId)) + 1;
+  const pageCopy = EA_FACTORY_PAGE_COPY[pageId] || EA_FACTORY_PAGE_COPY.source;
+  const pageStatus = eaFactoryPageStatus(domain, pageId);
+  header.className = "ea-factory-stage-heading ea-factory-page-heading";
+  eyebrow.textContent = `หน้า ${pageIndex} / ${EA_FACTORY_PAGE_IDS.length}`;
+  title.textContent = pageCopy.titleTh;
+  description.textContent = pageCopy.descriptionTh;
+  badge.dataset.status = pageStatus;
+  badge.textContent = eaFactoryStageStatusLabel(pageStatus);
+  copy.append(eyebrow, title, description);
+  header.append(copy, badge);
+  return header;
+}
+
 function eaFactoryPlatformLabel(platform) {
   return {
     mt4: "MT4 / MQL4",
@@ -25074,12 +25185,12 @@ function eaFactorySourceIsBuildSelectable(record = {}) {
 
 function eaFactorySelectedSource(domain = {}) {
   const records = domain?.sourceCatalog?.records || [];
-  const requested = (!domain.canStartNewBuild && domain.activeBuild?.sourceRecordId)
+  const requested = (domain.backendBusy && domain.activeBuild?.sourceRecordId)
     || state.modal.eaFactory.selectedSourceId
     || domain.activeBuild?.sourceRecordId
     || domain.selectedSourceId;
   const requestedRecord = records.find((record) => record.sourceRecordId === requested);
-  if (!domain.canStartNewBuild && requestedRecord) return requestedRecord;
+  if (domain.backendBusy && requestedRecord) return requestedRecord;
   const selectableRecords = records.filter(eaFactorySourceIsBuildSelectable);
   return selectableRecords.find((record) => record.sourceRecordId === requested)
     || selectableRecords[0]
@@ -25092,6 +25203,8 @@ function createEaFactoryNotice(tone, titleText, detailText) {
   const detail = document.createElement("p");
   notice.className = "ea-factory-notice";
   notice.dataset.tone = tone;
+  notice.setAttribute("role", tone === "error" ? "alert" : "status");
+  notice.setAttribute("aria-live", tone === "error" ? "assertive" : "polite");
   title.textContent = titleText;
   detail.textContent = detailText;
   notice.append(title, detail);
@@ -25141,7 +25254,7 @@ function createEaFactoryStageHeader(stageId, stage) {
   const badge = document.createElement("strong");
   const index = EA_FACTORY_STAGE_IDS.indexOf(stageId) + 1;
   header.className = "ea-factory-stage-heading";
-  eyebrow.textContent = `รายละเอียดขั้นที่ ${index} / ${EA_FACTORY_STAGE_IDS.length}`;
+  eyebrow.textContent = `ขั้นตรวจภายใน ${index} / ${EA_FACTORY_STAGE_IDS.length}`;
   title.textContent = EA_FACTORY_STAGE_COPY[stageId]?.titleTh || "โรงงานสร้าง EA";
   description.textContent = EA_FACTORY_STAGE_COPY[stageId]?.descriptionTh || "";
   badge.dataset.status = stage?.status || "unknown";
@@ -25320,8 +25433,7 @@ function renderEaFactoryStatusStrip(section, domain = {}) {
   const strip = document.createElement("div");
   const mode = document.createElement("strong");
   const build = document.createElement("span");
-  const artifactKind = document.createElement("span");
-  const platform = document.createElement("span");
+  const target = document.createElement("span");
   strip.className = "ea-factory-status-strip";
   mode.textContent = domain.authoritative
     ? (domain.oneClick?.enabled
@@ -25330,11 +25442,10 @@ function renderEaFactoryStatusStrip(section, domain = {}) {
     : "กำลังรอ Read Model ea-factory-v1 จาก Backend";
   mode.dataset.ready = String(domain.authoritative);
   build.textContent = domain.activeBuild ? `Build ${domain.activeBuild.id} • ${domain.activeBuild.status}` : "ยังไม่มี Build ที่เลือก";
-  artifactKind.textContent = domain.activeBuild
-    ? eaFactoryArtifactKindLabel(domain.activeBuild.artifactKind)
-    : "ยังไม่ได้เลือกประเภทผลงาน";
-  platform.textContent = eaFactoryPlatformLabel(domain.activeBuild?.platform);
-  strip.append(mode, build, artifactKind, platform);
+  target.textContent = domain.activeBuild
+    ? `${eaFactoryArtifactKindLabel(domain.activeBuild.artifactKind)} • ${eaFactoryPlatformLabel(domain.activeBuild.platform)}`
+    : "เลือกผลงานและแพลตฟอร์มเมื่อเริ่มงาน";
+  strip.append(mode, build, target);
   section.appendChild(strip);
 }
 
@@ -25503,8 +25614,7 @@ function renderEaFactoryResearchGate(container, source, { showBrief = false } = 
 }
 
 function renderEaFactorySourceStage(section, domain) {
-  const stage = domain.stages.find((item) => item.id === "source");
-  section.appendChild(createEaFactoryStageHeader("source", stage));
+  section.appendChild(createEaFactoryPageHeader("source", domain));
   renderEaFactoryGoogleSheetSync(section, domain);
   renderEaFactorySheetSchema(section, domain);
   const records = domain.sourceCatalog.records;
@@ -25519,7 +25629,7 @@ function renderEaFactorySourceStage(section, domain) {
   selector.className = "ea-factory-source-selector";
   selector.textContent = "เลือกระบบที่จะสร้าง";
   select.dataset.eaFactorySourceSelect = "true";
-  select.disabled = !domain.canStartNewBuild;
+  select.disabled = !domain.authoritative || !domain.canStartNewBuild;
   const selected = eaFactorySelectedSource(domain);
   if (!selected && domain.canStartNewBuild) {
     const placeholder = document.createElement("option");
@@ -25572,55 +25682,58 @@ function renderEaFactorySourceStage(section, domain) {
   heading.append(title, verified);
   summary.appendChild(heading);
   section.appendChild(summary);
-  section.appendChild(createTradingResearchStrategyBrief({
-    brief: selected.strategyBrief,
-    schemaVersion: selected.eaResearch.schemaVersion,
-    briefDigest: selected.eaResearch.briefDigest,
-    canonical: selected.eaResearch.validated && selected.eaResearch.digestMatched && !selected.eaResearch.legacy,
-    legacy: selected.eaResearch.legacy === true,
-  }, { id: selected.sourceReportId || selected.sourceRecordId }));
   renderEaFactoryResearchGate(section, selected);
   if (domain.canStartNewBuild) {
     renderEaFactoryOneClickSetup(section, domain, selected);
-    const inspectSpec = document.createElement("button");
-    inspectSpec.type = "button";
-    inspectSpec.className = "modal-action ea-factory-terminal-central-link";
-    inspectSpec.disabled = !domain.authoritative || !selected.buildReady;
-    inspectSpec.textContent = "ตรวจ Strategy Spec / เปิดตัวเลือกขั้นสูง";
-    inspectSpec.addEventListener("click", () => {
-      setWorkflowDashboardTab(EA_FACTORY_PROP_ID, "spec", { focus: true });
-    });
-    section.appendChild(inspectSpec);
+    const advanced = document.createElement("details");
+    const advancedSummary = document.createElement("summary");
+    const advancedBody = document.createElement("div");
+    advanced.className = "ea-factory-manual-details ea-factory-source-advanced";
+    advancedSummary.textContent = "ดู Strategy Brief เต็มและตัวเลือกขั้นสูง";
+    advancedBody.className = "ea-factory-source-advanced-body";
+    advancedBody.appendChild(createTradingResearchStrategyBrief({
+      brief: selected.strategyBrief,
+      schemaVersion: selected.eaResearch.schemaVersion,
+      briefDigest: selected.eaResearch.briefDigest,
+      canonical: selected.eaResearch.validated && selected.eaResearch.digestMatched && !selected.eaResearch.legacy,
+      legacy: selected.eaResearch.legacy === true,
+    }, { id: selected.sourceReportId || selected.sourceRecordId }));
+    renderEaFactorySpecStage(advancedBody, domain, { embedded: true });
+    advanced.append(advancedSummary, advancedBody);
+    section.appendChild(advanced);
   } else {
+    const busy = domain.backendBusy || {};
     section.appendChild(createEaFactoryNotice(
-      "ready",
-      `Build ${domain.activeBuild.id} ใช้ Record นี้แล้ว`,
-      "Build นี้กำลังเดินขั้นตอนอยู่ ให้ทำขั้นปัจจุบันเสร็จก่อนเพื่อไม่ให้ Version และ Audit ปะปนกัน",
+      "warning",
+      "มีงาน EA Factory กำลังทำอยู่",
+      `${busy.buildId ? `Build ${busy.buildId} • ` : ""}${eaFactoryBusyOperationLabel(busy.activeOperation)} • เปิดหน้า 2 สถานะการทำงานเพื่อติดตามงานเดิมก่อนเริ่มงานใหม่`,
     ));
   }
 }
 
-function renderEaFactorySpecStage(section, domain) {
+function renderEaFactorySpecStage(section, domain, { embedded = false } = {}) {
   const stage = domain.stages.find((item) => item.id === "spec");
   const source = eaFactorySelectedSource(domain);
-  section.appendChild(createEaFactoryStageHeader("spec", stage));
+  if (!embedded) section.appendChild(createEaFactoryStageHeader("spec", stage));
   if (!source) {
     section.appendChild(createWorkflowTruthEmpty("กลับไปขั้น 1 และเลือก Strategy Record ก่อน"));
     return;
   }
-  const facts = document.createElement("dl");
-  facts.className = "ea-factory-stage-facts";
-  appendEaFactoryFact(facts, "Source Record", source.sourceRecordId);
-  appendEaFactoryFact(facts, "Research Record", source.recordId);
-  appendEaFactoryFact(facts, "System", source.systemName);
-  appendEaFactoryFact(facts, "Source Kind", source.sourceKind);
-  appendEaFactoryFact(facts, "Brief SHA-256", source.briefDigest || source.blueprintDigest || "ยังไม่มี digest", { wide: true });
-  section.appendChild(facts);
-  renderEaFactoryResearchGate(section, source, { showBrief: true });
+  if (!embedded) {
+    const facts = document.createElement("dl");
+    facts.className = "ea-factory-stage-facts";
+    appendEaFactoryFact(facts, "Source Record", source.sourceRecordId);
+    appendEaFactoryFact(facts, "Research Record", source.recordId);
+    appendEaFactoryFact(facts, "System", source.systemName);
+    appendEaFactoryFact(facts, "Source Kind", source.sourceKind);
+    appendEaFactoryFact(facts, "Brief SHA-256", source.briefDigest || source.blueprintDigest || "ยังไม่มี digest", { wide: true });
+    section.appendChild(facts);
+    renderEaFactoryResearchGate(section, source, { showBrief: true });
+  }
   if (domain.canStartNewBuild) {
     if (!source.buildReady || !source.eaResearch.ready) return;
-    renderEaFactoryOneClickSetup(section, domain, source);
-    if (domain.activeBuild) {
+    if (!embedded) renderEaFactoryOneClickSetup(section, domain, source);
+    if (!embedded && domain.activeBuild) {
       section.appendChild(createEaFactoryNotice(
         "neutral",
         `Build ก่อนหน้า ${domain.activeBuild.id} อยู่ในสถานะ ${domain.activeBuild.status}`,
@@ -25723,7 +25836,15 @@ function renderEaFactorySpecStage(section, domain) {
     advanced.className = "ea-factory-manual-details";
     advancedSummary.textContent = "ตัวเลือกขั้นสูง • Indicator / TradingView / ทำทีละขั้น";
     advanced.append(advancedSummary, form);
-    section.appendChild(advanced);
+    section.appendChild(embedded ? form : advanced);
+    return;
+  }
+  if (embedded) {
+    section.appendChild(createEaFactoryNotice(
+      "warning",
+      "ตัวเลือกขั้นสูงถูกพักระหว่างมีงานเดิม",
+      "Backend ยังรายงานงาน EA Factory อยู่ จึงยังไม่สร้าง Build ใหม่หรือยืนยันขั้น Manual ซ้อนกัน",
+    ));
     return;
   }
   appendEaFactoryStageEvidence(section, stage);
@@ -25848,6 +25969,44 @@ function eaFactoryOneClickStageStatus(domain = {}, stageId = "") {
   return domain.stages?.find((item) => item.id === stageId)?.status || "unknown";
 }
 
+function eaFactoryExistingOneClickAdmission(domain = {}) {
+  const capability = domain.oneClick || {};
+  const run = capability.run || {};
+  const status = run.status || "idle";
+  const active = ["queued", "running", "waiting_ai"].includes(status);
+  const resumable = status === "awaiting_visible_terminal" && capability.canResume === true;
+  const retryable = ["failed", "blocked"].includes(status) && capability.canRetry === true;
+  const currentStage = domain.stages?.find((item) => item.id === domain.currentStageId);
+  const initial = status === "idle"
+    && capability.canRun === true
+    && !["failed", "blocked"].includes(currentStage?.status);
+  const selectedTerminal = Boolean(capability.selectedTerminalId || domain.selectedTerminalId);
+  const platformReady = domain.activeBuild?.platform === "mt4"
+    && capability.selectedPlatformSupported === true;
+  const terminalMatchesBuild = selectedTerminal
+    && capability.selectedPlatform === domain.activeBuild?.platform;
+  const requestInFlight = state.modal.eaFactory.inFlight === true;
+  const canSubmit = domain.authoritative === true
+    && !domain.backendBusy
+    && !requestInFlight
+    && capability.enabled === true
+    && terminalMatchesBuild
+    && platformReady
+    && capability.terminalRunning === true
+    && capability.terminalProcessLaunchAllowed === false
+    && !active
+    && status !== "completed"
+    && (initial || resumable || retryable);
+  return {
+    active,
+    resumable,
+    retryable,
+    terminalMatchesBuild,
+    requestInFlight,
+    canSubmit,
+  };
+}
+
 function renderEaFactoryOneClickPanel(container, domain = {}) {
   if (!domain.activeBuild || domain.activeBuild.artifactKind !== "expert_advisor") return;
   if (domain.activeBuild.platform !== "mt4") {
@@ -25953,24 +26112,13 @@ function renderEaFactoryOneClickPanel(container, domain = {}) {
     ));
   }
 
-  const active = ["queued", "running", "waiting_ai"].includes(status);
-  const resumable = status === "awaiting_visible_terminal" && capability.canResume === true;
-  const retryable = ["failed", "blocked"].includes(status) && capability.canRetry === true;
-  const currentStage = domain.stages?.find((item) => item.id === domain.currentStageId);
-  const initial = status === "idle"
-    && capability.canRun === true
-    && !["failed", "blocked"].includes(currentStage?.status);
-  const selectedTerminal = Boolean(capability.selectedTerminalId || domain.selectedTerminalId);
-  const platformReady = domain.activeBuild.platform === "mt4"
-    && capability.selectedPlatformSupported === true;
-  const terminalMatchesBuild = selectedTerminal
-    && capability.selectedPlatform === domain.activeBuild.platform;
-  const canSubmit = capability.enabled === true
-    && terminalMatchesBuild
-    && platformReady
-    && capability.terminalRunning === true
-    && capability.terminalProcessLaunchAllowed === false
-    && (initial || resumable || retryable);
+  const {
+    active,
+    retryable,
+    terminalMatchesBuild,
+    requestInFlight,
+    canSubmit,
+  } = eaFactoryExistingOneClickAdmission(domain);
   const actionLabel = active
     ? "กำลังทำงาน • รอผลจาก Backend"
     : (status === "awaiting_visible_terminal"
@@ -25988,12 +26136,30 @@ function renderEaFactoryOneClickPanel(container, domain = {}) {
     "one_click_run",
     actionLabel,
     () => void runEaFactoryOneClick(domain.activeBuild.id),
-    { disabled: !canSubmit || active || status === "completed" },
+    { disabled: !canSubmit },
   );
   action.dataset.eaFactoryOneClickAction = status;
   panel.appendChild(action);
 
-  if (!terminalMatchesBuild) {
+  if (domain.authoritative !== true) {
+    panel.appendChild(createEaFactoryNotice(
+      "warning",
+      "ยังยืนยันสิทธิ์เริ่ม One-click ไม่ได้",
+      "Read Model ล่าสุดยังไม่ได้รับการยืนยันจาก Backend ปุ่มจึงปิดไว้ก่อน และจะเปิดเมื่อ Backend ส่งสถานะปัจจุบันกลับมา",
+    ));
+  } else if (domain.backendBusy) {
+    panel.appendChild(createEaFactoryNotice(
+      "warning",
+      "มีงาน EA อื่นกำลังทำอยู่",
+      "Backend ยืนยันว่ามีงาน EA กำลังทำ ปุ่ม One-click ของ Build นี้จะเปิดเมื่อ Backend ยืนยันว่า busy=null",
+    ));
+  } else if (requestInFlight) {
+    panel.appendChild(createEaFactoryNotice(
+      "working",
+      "กำลังส่งคำขอเดิมไปยัง Local Runner",
+      `${state.modal.eaFactory.message || "รอการตอบกลับจาก Backend"} • ปุ่มปิดไว้เพื่อป้องกันการส่งคำขอซ้ำ`,
+    ));
+  } else if (!terminalMatchesBuild) {
     const openGlobal = document.createElement("button");
     openGlobal.type = "button";
     openGlobal.className = "modal-action ea-factory-terminal-central-link";
@@ -26393,11 +26559,153 @@ function renderEaFactoryOperationalStage(section, stageId, domain, report) {
   }
 }
 
+function createEaFactoryPageNavigation(label, pageId) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "modal-action ea-factory-page-navigation";
+  button.textContent = label;
+  button.addEventListener("click", () => {
+    setWorkflowDashboardTab(EA_FACTORY_PROP_ID, pageId, { focus: true });
+  });
+  return button;
+}
+
+function renderEaFactoryProgressPage(section, domain = {}, report = {}) {
+  section.appendChild(createEaFactoryPageHeader("progress", domain));
+  const actionInFlight = state.modal.eaFactory.inFlight === true;
+  if (domain.backendBusy) {
+    const busy = eaFactoryBusyPresentation(domain.backendBusy);
+    section.appendChild(createEaFactoryNotice(
+      busy.tone,
+      domain.authoritative ? busy.title : "งานล่าสุดที่ Backend เคยยืนยัน • ยังไม่ใช่สถานะสด",
+      domain.authoritative
+        ? busy.message
+        : `${busy.message} • ขณะนี้ Read Model เป็นข้อมูลเก่า จึงยังยืนยันไม่ได้ว่างานนี้ทำต่ออยู่หรือสิ้นสุดแล้ว`,
+    ));
+  } else if (actionInFlight) {
+    section.appendChild(createEaFactoryNotice(
+      "working",
+      "กำลังส่งคำขอไปยัง Local Runner",
+      state.modal.eaFactory.message || "รอ Backend รับคำขอและยืนยัน Build ที่กำลังทำ",
+    ));
+  } else if (!domain.authoritative) {
+    section.appendChild(createEaFactoryNotice(
+      "neutral",
+      "กำลังตรวจสอบสถานะงาน EA",
+      "ยังไม่ได้รับ Read Model ปัจจุบันจาก Backend จึงยังยืนยันไม่ได้ว่ามีงานค้างอยู่หรือพร้อมรับงานใหม่ กรุณารอการตรวจซ้ำ",
+    ));
+  } else {
+    section.appendChild(createEaFactoryNotice(
+      "ready",
+      "ไม่มีงาน EA ค้างอยู่",
+      "Backend ยืนยัน busy=null จึงพร้อมรับงานใหม่ สถานะ MT4 เปิดอยู่เป็นเพียงสถานะโปรแกรมและไม่ใช่งาน EA ที่กำลังค้าง",
+    ));
+    if (domain.historicalRunLooksActive) {
+      section.appendChild(createEaFactoryNotice(
+        "neutral",
+        "Build ล่าสุดมีสถานะเดิมค้างในประวัติ",
+        "หน้าจอเก็บสถานะเดิมไว้เพื่อวินิจฉัยเท่านั้น แต่จะไม่ใช้สถานะประวัตินี้ปิดปุ่มเริ่มงานใหม่ เพราะ Backend ไม่ได้รายงานงานที่กำลังทำ",
+      ));
+    }
+  }
+  if (!domain.activeBuild) {
+    if (domain.backendBusy) {
+      section.appendChild(createEaFactoryNotice(
+        domain.authoritative ? "working" : "warning",
+        domain.authoritative
+          ? "กำลังรอรายละเอียด Build จาก Backend"
+          : "รายละเอียด Build จากสถานะล่าสุดยังยืนยันไม่ได้",
+        domain.authoritative
+          ? `${domain.backendBusy.buildId ? `Backend ยืนยัน Build ${domain.backendBusy.buildId}` : "Backend ยืนยันว่ามีงานกำลังทำ"} แต่รายการ Build ยังซิงก์มาไม่ครบ หน้าจอจะตรวจซ้ำอัตโนมัติโดยไม่หยิบประวัติงานอื่นมาแสดงแทน`
+          : `${domain.backendBusy.buildId ? `ข้อมูลล่าสุดระบุ Build ${domain.backendBusy.buildId}` : "ข้อมูลล่าสุดระบุว่ามีงาน"} แต่ Read Model ปัจจุบันอ่านไม่สำเร็จ จึงไม่แสดงข้อมูลนี้เป็นงานที่กำลังทำสด`,
+      ));
+    } else {
+      section.appendChild(createWorkflowTruthEmpty("ยังไม่มี Build ให้ติดตาม เลือกระบบและเริ่มเขียนจากหน้า 1"));
+      section.appendChild(createEaFactoryPageNavigation("กลับไปหน้า 1 เลือกระบบ", "source"));
+    }
+    return;
+  }
+  renderEaFactoryOneClickPanel(section, domain);
+  const busyStageId = EA_FACTORY_UI_STAGE_BY_BACKEND[String(domain.backendBusy?.stageId || "").trim()]
+    || String(domain.backendBusy?.stageId || "").trim();
+  const currentStageId = busyStageId
+    || domain.oneClick?.run?.currentStageId
+    || domain.currentStageId;
+  if (["generate", "review", "compile_validate", "backtest_recheck", "artifacts_report"].includes(currentStageId)) {
+    const stage = domain.stages.find((item) => item.id === currentStageId);
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    const body = document.createElement("div");
+    details.className = "ea-factory-manual-details ea-factory-current-stage-details";
+    details.open = Boolean(domain.backendBusy) || ["failed", "blocked"].includes(stage?.status);
+    summary.textContent = `ดูรายละเอียดและวิธีทำต่อ • ${EA_FACTORY_STAGE_COPY[currentStageId]?.titleTh || currentStageId}`;
+    body.className = "ea-factory-current-stage-body";
+    renderEaFactoryOperationalStage(body, currentStageId, domain, report);
+    details.append(summary, body);
+    section.appendChild(details);
+  }
+  if (!domain.backendBusy && domain.oneClick?.run?.status === "completed") {
+    section.appendChild(createEaFactoryPageNavigation("ไปหน้า 3 ตรวจโค้ดและผลลัพธ์", "result"));
+  }
+}
+
+function renderEaFactoryResultPage(section, domain = {}, report = {}) {
+  section.appendChild(createEaFactoryPageHeader("result", domain));
+  if (!domain.activeBuild) {
+    section.appendChild(createWorkflowTruthEmpty("ยังไม่มี Build สำหรับตรวจผล เลือกระบบและเริ่มเขียนจากหน้า 1 ก่อน"));
+    section.appendChild(createEaFactoryPageNavigation("กลับไปหน้า 1 เลือกระบบ", "source"));
+    return;
+  }
+  const finalStage = domain.stages.find((item) => item.id === "artifacts_report");
+  const attention = domain.stages.some((stage) => stage.attentionRequired === true);
+  const completed = finalStage?.status === "completed" || domain.oneClick?.run?.status === "completed";
+  section.appendChild(createEaFactoryNotice(
+    attention ? "warning" : (completed ? "success" : "neutral"),
+    attention
+      ? "งานเสร็จแบบต้องตรวจสอบคำเตือน"
+      : (completed ? "EA Factory ทำงานครบตามหลักฐาน Backend" : "ผลลัพธ์ยังไม่ครบทุก Gate"),
+    attention
+      ? "ตรวจคำเตือน Backtest และคุณภาพข้อมูลก่อนนำไฟล์ไปใช้งานจริง"
+      : (completed
+        ? "ตรวจ Source Review, Compile, Backtest และไฟล์ที่ Backend อนุญาตด้านล่าง"
+        : "ดูสถานะแต่ละส่วนได้ทันที และกลับไปหน้า 2 หากงานยังดำเนินอยู่หรือรอโปรแกรมหน้าบ้าน"),
+  ));
+  const summary = document.createElement("div");
+  summary.className = "ea-factory-result-summary";
+  ["review", "compile_validate", "backtest_recheck", "artifacts_report"].forEach((stageId) => {
+    const stage = domain.stages.find((item) => item.id === stageId) || { status: "unknown", evidence: [] };
+    const card = document.createElement("article");
+    const title = document.createElement("strong");
+    const status = document.createElement("span");
+    const detail = document.createElement("small");
+    card.dataset.status = stage.status;
+    title.textContent = {
+      review: "ตรวจ Source",
+      compile_validate: "Compile / Validate",
+      backtest_recheck: "Backtest / Recheck",
+      artifacts_report: "ไฟล์และ Final Report",
+    }[stageId];
+    status.textContent = eaFactoryStageStatusLabel(stage.status);
+    detail.textContent = stage.reportId
+      ? `Report ${stage.reportId}`
+      : (stage.evidence?.length ? `หลักฐาน ${stage.evidence.length} รายการ` : (stage.detail || "รอหลักฐานจาก Backend"));
+    card.append(title, status, detail);
+    summary.appendChild(card);
+  });
+  section.appendChild(summary);
+  renderEaFactoryOperationalStage(section, "artifacts_report", domain, report);
+}
+
 function renderEaFactoryPanel(container, tabId, domain = {}, report = {}) {
   const section = document.createElement("section");
   section.className = "workflow-domain-panel ea-factory-panel";
   renderEaFactoryStatusStrip(section, domain);
-  const readModelNoticeMessage = renderEaFactoryReadModelNotice(section);
+  const progressOwnsBusyNotice = tabId === "progress"
+    && Boolean(domain.backendBusy)
+    && domain.authoritative === true;
+  const readModelNoticeMessage = progressOwnsBusyNotice
+    ? eaFactoryBusyPresentation(domain.backendBusy).message
+    : renderEaFactoryReadModelNotice(section);
   if (!domain.authoritative) {
     section.appendChild(createEaFactoryNotice(
       "warning",
@@ -26405,12 +26713,10 @@ function renderEaFactoryPanel(container, tabId, domain = {}, report = {}) {
       "ต้องได้รับ schemaVersion ea-factory-v1, mode one_click_with_manual_stage_recovery (หรือโหมดเดิมระหว่างอัปเดต) และ scheduled=false จาก Backend ก่อน ปุ่มทุกขั้นจึงเปิดได้",
     ));
   }
-  if (domain.activeBuild) renderEaFactoryOneClickPanel(section, domain);
   if (tabId === "source") renderEaFactorySourceStage(section, domain);
-  else if (tabId === "spec") renderEaFactorySpecStage(section, domain);
-  else if (["generate", "review", "compile_validate", "backtest_recheck", "artifacts_report"].includes(tabId)) {
-    renderEaFactoryOperationalStage(section, tabId, domain, report);
-  } else section.appendChild(createWorkflowTruthEmpty("ไม่พบขั้นตอนโรงงานที่รองรับ"));
+  else if (tabId === "progress") renderEaFactoryProgressPage(section, domain, report);
+  else if (tabId === "result") renderEaFactoryResultPage(section, domain, report);
+  else section.appendChild(createWorkflowTruthEmpty("ไม่พบหน้าโรงงานที่รองรับ"));
   const actionPresentation = eaFactoryActionPresentation(domain);
   if (actionPresentation.message && actionPresentation.message !== readModelNoticeMessage) {
     section.appendChild(createEaFactoryNotice(
@@ -26434,10 +26740,13 @@ function validateEaFactoryBusyModel(value) {
     ...EA_FACTORY_STAGE_IDS,
     ...Object.values(EA_FACTORY_BACKEND_STAGE_BY_UI),
   ]);
-  const supportedStatuses = new Set(["queued", "running", "waiting_ai"]);
+  const supportedStatuses = new Set(["queued", "running", "waiting_ai", "awaiting_visible_terminal"]);
   const supportedOperations = new Set([
+    "create_build",
+    "sync_google_sheet",
     "one_click_run",
     "advance_stage",
+    "retry_stage",
     "generate_source",
     "source_review",
     "compile_validate",
@@ -26530,6 +26839,20 @@ function eaFactoryReadModelFailurePresentation(error = {}, { hasLastGood = false
   if (busy) return eaFactoryBusyPresentation(busy);
   const status = Number(error?.status || 0);
   const kind = String(error?.kind || "").trim();
+  const body = workflowDomainObject(error?.body);
+  const messageTh = safeDashboardDisplayText(body.messageTh, "", { limit: 600 });
+  // Structured busy responses already returned above. Raw transport detail is
+  // retained only for the transport/timeout branches below.
+  const rawTransportReason = typeof error.message === "string" ? error.message : "";
+  const transportReason = safeDashboardDisplayText(messageTh || rawTransportReason, "", { limit: 600 });
+  const structuredFactoryRejection = status >= 400
+    && status < 500
+    && Boolean(messageTh)
+    && (
+      kind === "ea_factory_request_rejected"
+      || String(body.kind || "").startsWith("ea_factory_")
+      || String(body.code || "").startsWith("ea_factory_")
+    );
   const staleNote = hasLastGood
     ? " • หน้าจอยังคงข้อมูลล่าสุดที่ Backend เคยยืนยันไว้ชั่วคราว และจะปิดสิทธิ์สั่งงานเองเมื่อข้อมูลเกินอายุ"
     : "";
@@ -26539,7 +26862,7 @@ function eaFactoryReadModelFailurePresentation(error = {}, { hasLastGood = false
       kind: "timeout",
       tone: hasLastGood ? "warning" : "error",
       title: "Backend เตรียม EA Factory Read Model ไม่ทันเวลา",
-      message: `รอเกิน ${seconds} วินาที จึงหยุดเฉพาะคำขอรอบนี้ กรุณารอให้ Backend ทำงานเดิมจบแล้วกดตรวจซ้ำ${staleNote}`,
+      message: `รอเกิน ${seconds} วินาที จึงหยุดเฉพาะคำขอรอบนี้ กรุณารอให้ Backend ทำงานเดิมจบแล้วกดตรวจซ้ำ${transportReason ? ` • สาเหตุ: ${transportReason}` : ""}${staleNote}`,
       busy: null,
     };
   }
@@ -26549,6 +26872,15 @@ function eaFactoryReadModelFailurePresentation(error = {}, { hasLastGood = false
       tone: "error",
       title: "EA Factory Read Model ไม่ตรงรุ่นที่รองรับ",
       message: "Backend ไม่ได้ส่ง schemaVersion ea-factory-v1 จึงปิดปุ่มสั่งงานเพื่อไม่ให้ใช้ข้อมูลผิดรุ่น",
+      busy: null,
+    };
+  }
+  if (structuredFactoryRejection) {
+    return {
+      kind: "request_rejected",
+      tone: "error",
+      title: "EA Factory แจ้งเหตุผลที่ยังเริ่มงานไม่ได้",
+      message: `${messageTh}${staleNote}`,
       busy: null,
     };
   }
@@ -26566,11 +26898,10 @@ function eaFactoryReadModelFailurePresentation(error = {}, { hasLastGood = false
       kind: "transport",
       tone: hasLastGood ? "warning" : "error",
       title: "ติดต่อ EA Factory Backend ไม่สำเร็จ",
-      message: `ตรวจว่า Local Runner ยังเปิดอยู่และไม่มีงานหนักค้าง จากนั้นกดตรวจซ้ำ${staleNote}`,
+      message: `ตรวจว่า Local Runner ยังเปิดอยู่และไม่มีงานหนักค้าง จากนั้นกดตรวจซ้ำ${transportReason ? ` • สาเหตุ: ${transportReason}` : ""}${staleNote}`,
       busy: null,
     };
   }
-  const messageTh = safeDashboardDisplayText(error?.body?.messageTh, "", { limit: 600 });
   return {
     kind: "backend_error",
     tone: hasLastGood ? "warning" : "error",
@@ -26582,9 +26913,8 @@ function eaFactoryReadModelFailurePresentation(error = {}, { hasLastGood = false
 
 function renderEaFactoryReadModelNotice(section) {
   const readModelState = state.eaFactoryReadModel;
-  const presentation = readModelState.busy
-    ? eaFactoryBusyPresentation(readModelState.busy)
-    : readModelState.lastError;
+  const presentation = readModelState.lastError
+    || (readModelState.busy ? eaFactoryBusyPresentation(readModelState.busy) : null);
   if (!presentation?.message) return "";
   const loadedAt = Number(readModelState.lastLoadedAt || 0);
   const lastGood = readModelState.stale && loadedAt > 0
@@ -26598,20 +26928,150 @@ function renderEaFactoryReadModelNotice(section) {
   return presentation.message;
 }
 
+function eaFactoryReadModelStateKey(payload = {}) {
+  const model = workflowDomainObject(payload?.eaFactory, payload);
+  const dedicatedLoadedAt = Number(state.eaFactoryReadModel?.lastLoadedAt || 0);
+  const dedicatedReadModelFresh = Number.isFinite(dedicatedLoadedAt)
+    && dedicatedLoadedAt > 0
+    && Date.now() - dedicatedLoadedAt <= EA_FACTORY_READ_MODEL_MAX_AGE_MS;
+  const authoritative = dedicatedReadModelFresh
+    && state.eaFactoryReadModel?.stale !== true
+    && model.snapshotStale !== true
+    && model.schemaVersion === "ea-factory-v1"
+    && EA_FACTORY_SUPPORTED_MODES.has(model.mode)
+    && model.scheduled === false;
+  const busy = workflowDomainObject(model.busy);
+  const sourceCatalog = workflowDomainObject(model.sourceCatalog);
+  const terminalSelection = workflowDomainObject(model.terminalSelection);
+  const selectedTerminal = workflowDomainObject(terminalSelection.selectedCandidate);
+  const oneClick = workflowDomainObject(model.oneClick);
+  const builds = eaFactoryFirstArray(model.builds).slice(0, 100).map((build) => {
+    const run = workflowDomainObject(build?.oneClickRun);
+    const terminalGate = workflowDomainObject(build?.terminalGate);
+    return [
+      String(build?.id || build?.buildId || ""),
+      String(build?.status || ""),
+      String(build?.currentStageId || ""),
+      String(build?.sourceRecordId || build?.source_record_id || ""),
+      String(build?.platform || build?.targetPlatform || ""),
+      String(run.runId || ""),
+      String(run.status || ""),
+      String(run.currentStageId || ""),
+      String(run.failureCode || ""),
+      run.canResume === true,
+      run.canRetry === true,
+      [
+        terminalGate.ready === true,
+        terminalGate.adapterReady === true,
+        String(terminalGate.platform || ""),
+        String(terminalGate.candidateId || terminalGate.terminalId || ""),
+      ],
+      eaFactoryFirstArray(build?.stages).map((stage) => [
+        String(stage?.id || ""),
+        String(stage?.status || ""),
+        String(stage?.missionId || ""),
+        String(stage?.reportId || ""),
+        String(stage?.failureCode || ""),
+        stage?.canAdvance === true || stage?.canRun === true,
+        stage?.canRetry === true,
+        stage?.attentionRequired === true,
+        Number.parseInt(stage?.retryAttemptCount, 10) || 0,
+        Number.parseInt(stage?.retryAttemptLimit, 10) || 0,
+      ]),
+    ];
+  });
+  const sources = eaFactoryFirstArray(sourceCatalog.records).slice(0, 200).map((source) => {
+    const compatibility = workflowDomainObject(source?.factoryCompatibility);
+    return [
+      String(source?.sourceRecordId || source?.id || ""),
+      source?.buildReady === true,
+      String(source?.verificationStatus || ""),
+      String(source?.briefDigest || source?.blueprintDigest || ""),
+      eaFactoryFirstArray(source?.compatiblePlatforms, compatibility.compatiblePlatforms)
+        .map((value) => String(value || "")),
+      eaFactoryFirstArray(source?.readinessIssues).map((value) => (
+        typeof value === "string" ? value : JSON.stringify(value)
+      )),
+      compatibility.ready === true,
+      eaFactoryFirstArray(compatibility.readinessIssues).map((value) => (
+        typeof value === "string" ? value : JSON.stringify(value)
+      )),
+    ];
+  });
+  return JSON.stringify({
+    admission: [
+      authoritative,
+      String(model.schemaVersion || ""),
+      model.snapshotStale === true,
+      String(model.mode || ""),
+      model.scheduled === true,
+      String(model.currentStageId || ""),
+    ],
+    busy: [busy.buildId || "", busy.stageId || "", busy.status || "", busy.activeOperation || ""],
+    builds,
+    sources,
+    terminal: [
+      terminalSelection.selectedTerminalId || terminalSelection.selectedCandidate?.candidateId || "",
+      terminalSelection.adapterReady === true,
+      String(selectedTerminal.candidateId || selectedTerminal.id || ""),
+      String(selectedTerminal.platform || ""),
+      String(selectedTerminal.status || selectedTerminal.runningState || ""),
+      selectedTerminal.ready === true || selectedTerminal.adapterReady === true,
+      selectedTerminal.detected === true,
+    ],
+    oneClick: [
+      oneClick.enabled === true || oneClick.available === true,
+      oneClick.canRun === true,
+      oneClick.canCreateAndRun === true,
+      oneClick.canResume === true,
+      oneClick.canRetry === true,
+      eaFactoryFirstArray(oneClick.supportedVisiblePlatforms).map((value) => String(value || "")),
+      oneClick.selectedPlatformSupported === true,
+      String(oneClick.selectedPlatform || ""),
+      oneClick.selectedTerminalId || "",
+      oneClick.terminalReady === true,
+      oneClick.terminalRunning === true,
+      oneClick.terminalProcessLaunchAllowed === true,
+      oneClick.visibleAdapterConnected === true,
+    ],
+  });
+}
+
 function mergeEaFactoryReadModel(payload = {}) {
   const model = workflowDomainObject(payload?.eaFactory, payload?.workflowDashboard?.eaFactory, payload);
   if (model.schemaVersion !== "ea-factory-v1") return false;
   const busyValidation = validateEaFactoryBusyModel(model.busy);
   if (!busyValidation.valid) return false;
+  const backendSnapshotStale = model.snapshotStale === true;
   state.eaFactoryReadModel.payload = model;
   state.eaFactoryReadModel.lastLoadedAt = Date.now();
-  state.eaFactoryReadModel.stale = false;
-  state.eaFactoryReadModel.lastError = null;
+  state.eaFactoryReadModel.stale = backendSnapshotStale;
+  state.eaFactoryReadModel.lastError = backendSnapshotStale ? {
+    kind: "refreshing",
+    tone: "warning",
+    title: "กำลังรีเฟรชสถานะ EA Factory",
+    message: "Backend ส่ง Snapshot ที่ตรวจแล้วรอบก่อนชั่วคราว ปุ่มเริ่มและ Retry จึงปิดไว้จนกว่าสถานะล่าสุดจะพร้อม",
+    at: new Date().toISOString(),
+  } : null;
   state.eaFactoryReadModel.busy = busyValidation.busy;
-  if (state.modal.eaFactory.stageId === "read_model") {
-    state.modal.eaFactory.stageId = "";
-    state.modal.eaFactory.message = "";
-    state.modal.eaFactory.tone = "neutral";
+  const actionState = state.modal.eaFactory;
+  const stickyActionRejection = ["request_rejected", "local_preflight_rejected"]
+    .includes(actionState.messageKind);
+  const authoritativeStateChanged = stickyActionRejection
+    && Boolean(actionState.readModelStateKey)
+    && actionState.readModelStateKey !== eaFactoryReadModelStateKey(model);
+  const staleActionError = !actionState.inFlight
+    && ["error", "warning"].includes(state.modal.eaFactory.tone);
+  if (!backendSnapshotStale && (
+    actionState.stageId === "read_model"
+    || (staleActionError && !stickyActionRejection)
+    || authoritativeStateChanged
+  )) {
+    actionState.stageId = "";
+    actionState.message = "";
+    actionState.tone = "neutral";
+    actionState.messageKind = "";
+    actionState.readModelStateKey = "";
   }
   const current = state.propReports[EA_FACTORY_PROP_ID] || {};
   const workflowDashboard = workflowDomainObject(current.workflowDashboard);
@@ -26707,13 +27167,52 @@ async function loadEaFactoryReadModel({ signal = null, forceFresh = false } = {}
   }
 }
 
-function setEaFactoryActionState({ inFlight = false, stageId = "", message = "", tone = "neutral" } = {}) {
+function setEaFactoryActionState({
+  inFlight = false,
+  stageId = "",
+  message = "",
+  tone = "neutral",
+  messageKind = "",
+  readModelStateKey = "",
+} = {}) {
   state.modal.eaFactory.inFlight = Boolean(inFlight);
   state.modal.eaFactory.stageId = stageId;
   state.modal.eaFactory.message = safeDashboardDisplayText(message, "");
   state.modal.eaFactory.tone = ["neutral", "working", "success", "error", "ready", "warning"].includes(tone) ? tone : "neutral";
+  state.modal.eaFactory.messageKind = String(messageKind || "");
+  state.modal.eaFactory.readModelStateKey = String(readModelStateKey || "");
   if (state.modal.open && state.modal.id === EA_FACTORY_PROP_ID) {
     renderWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()), state.propReports[EA_FACTORY_PROP_ID] || {});
+  }
+}
+
+async function postEaFactoryJson(path, payload = {}, { timeoutMs = EA_FACTORY_ACTION_TIMEOUT_MS } = {}) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => {
+    if (!controller.signal.aborted) controller.abort(new FetchTimeoutError(path, timeoutMs));
+  }, timeoutMs);
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(body.messageTh || body.message || body.error || `ส่งข้อมูลไปยัง ${path} ไม่สำเร็จ`);
+      error.status = response.status;
+      error.body = body;
+      error.kind = body.kind || body.code || "http_error";
+      error.code = body.code || "";
+      throw error;
+    }
+    return body;
+  } catch (error) {
+    if (controller.signal.reason instanceof FetchTimeoutError) throw controller.signal.reason;
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
   }
 }
 
@@ -26759,29 +27258,66 @@ async function runEaFactoryRequest(stageId, request, successMessage, { terminalA
     return response;
   } catch (error) {
     const hasLastGood = Boolean(state.eaFactoryReadModel.payload);
-    const presentation = eaFactoryReadModelFailurePresentation(error, { hasLastGood });
+    const failedRequestPresentation = eaFactoryReadModelFailurePresentation(error, { hasLastGood });
+    const refreshed = await loadEaFactoryReadModel({ forceFresh: true });
+    const busyClearedByFreshRead = Boolean(refreshed)
+      && failedRequestPresentation.kind === "busy"
+      && !state.eaFactoryReadModel.busy;
+    const presentation = state.eaFactoryReadModel.busy
+      ? eaFactoryBusyPresentation(state.eaFactoryReadModel.busy)
+      : (busyClearedByFreshRead
+        ? {
+            kind: "busy_reconciled",
+            tone: "ready",
+            title: "Backend ยืนยันว่าไม่มีงาน EA ค้างอยู่",
+            message: "ตรวจสถานะใหม่แล้ว Backend ยืนยัน busy=null คำขอก่อนหน้าจึงไม่ได้เริ่มงานและไม่ปิดรับงานใหม่ กรุณากดเริ่มอีกครั้งได้",
+            busy: null,
+          }
+        : failedRequestPresentation);
     if (presentation.busy) state.eaFactoryReadModel.busy = presentation.busy;
-    state.eaFactoryReadModel.lastError = {
-      kind: presentation.kind,
-      tone: presentation.tone,
-      title: presentation.title,
-      message: presentation.message,
-      at: new Date().toISOString(),
-    };
-    state.eaFactoryReadModel.stale = hasLastGood;
+    if (refreshed) {
+      // The GET is the current source of truth. Keep the POST outcome in the
+      // action message, but do not relabel a fresh Read Model as stale/error.
+      state.eaFactoryReadModel.lastError = null;
+      state.eaFactoryReadModel.stale = false;
+    } else if (!state.eaFactoryReadModel.lastError) {
+      state.eaFactoryReadModel.lastError = {
+        kind: presentation.kind,
+        tone: presentation.tone,
+        title: presentation.title,
+        message: presentation.message,
+        at: new Date().toISOString(),
+      };
+      state.eaFactoryReadModel.stale = hasLastGood;
+    }
     setEaFactoryActionState({
       inFlight: false,
-      stageId,
+      // A stale one-click/stage marker must not override the reconciled
+      // busy=null message with a contradictory "กำลังทำงาน" presentation.
+      stageId: busyClearedByFreshRead ? "" : stageId,
       message: presentation.message,
       tone: presentation.tone,
+      messageKind: presentation.kind,
+      readModelStateKey: presentation.kind === "request_rejected"
+        ? eaFactoryReadModelStateKey(state.eaFactoryReadModel.payload || {})
+        : "",
     });
     return null;
+  } finally {
+    if (state.modal.eaFactory.inFlight && state.modal.eaFactory.stageId === stageId) {
+      setEaFactoryActionState({
+        inFlight: false,
+        stageId,
+        message: "คำขอสิ้นสุดแล้ว • กดตรวจสถานะอีกครั้งได้",
+        tone: "warning",
+      });
+    }
   }
 }
 
 async function syncEaFactoryGoogleSheet() {
   const idempotencyKey = createWorkflowIdempotencyKey();
-  const response = await runEaFactoryRequest("sheet_sync", () => postJson(
+  const response = await runEaFactoryRequest("sheet_sync", () => postEaFactoryJson(
     "/api/props/right_server_racks/ea-factory/sources/google-sheet/sync",
     { idempotencyKey },
   ), "Backend อ่าน Google Sheets และอัปเดต Strategy Record แล้ว");
@@ -26801,19 +27337,37 @@ async function createEaFactoryBuild(sourceRecordId, artifactKind, platform, brie
   const source = dashboard.domainData.eaFactory.sourceCatalog.records.find(
     (item) => item.sourceRecordId === sourceRecordId,
   );
+  const domain = dashboard.domainData.eaFactory;
   if (
-    !sourceRecordId
+    !domain.authoritative
+    || Boolean(domain.backendBusy)
+    || domain.canStartNewBuild !== true
+    || !sourceRecordId
     || !source
     || source.buildReady !== true
     || !normalizedPlatform
     || !source.compatiblePlatforms.includes(normalizedPlatform)
     || (normalizedArtifactKind === "custom_indicator" && normalizedPlatform === "tradingview")
-  ) return null;
+  ) {
+    setEaFactoryActionState({
+      inFlight: false,
+      stageId: "create_build",
+      message: domain.authoritative !== true
+        ? "ยังเริ่มสร้าง Build ไม่ได้ เพราะ Read Model ล่าสุดยังไม่ได้รับการยืนยันจาก Backend"
+        : (domain.backendBusy
+          ? "ยังเริ่มสร้าง Build ไม่ได้ เพราะ Backend ยืนยันว่ามีงาน EA Factory กำลังทำอยู่"
+          : "ยังเริ่มสร้าง Build ไม่ได้ กรุณาตรวจ Strategy Brief, Target Platform และ Gate ที่ Backend ระบุ"),
+      tone: "warning",
+      messageKind: "local_preflight_rejected",
+      readModelStateKey: eaFactoryReadModelStateKey(state.eaFactoryReadModel.payload || domain),
+    });
+    return null;
+  }
   state.modal.eaFactory.selectedBuildId = "";
   state.modal.eaFactory.selectedArtifactKind = normalizedArtifactKind;
   state.modal.eaFactory.selectedPlatform = normalizedPlatform;
   const idempotencyKey = createWorkflowIdempotencyKey();
-  const response = await runEaFactoryRequest("create_build", () => postJson(
+  const response = await runEaFactoryRequest("create_build", () => postEaFactoryJson(
     "/api/props/right_server_racks/ea-factory/builds",
     {
       sourceRecordId,
@@ -26824,7 +27378,12 @@ async function createEaFactoryBuild(sourceRecordId, artifactKind, platform, brie
     },
   ), "สร้าง Build แล้ว ตรวจ Strategy Spec ก่อนกดทำขั้นถัดไป");
   const buildId = String(response?.build?.id || response?.build?.buildId || "").trim();
-  if (buildId) state.modal.eaFactory.selectedBuildId = buildId;
+  if (buildId) {
+    state.modal.eaFactory.selectedBuildId = buildId;
+    // Render page 2 now, before a one-click preflight can stop locally.
+    // setWorkflowDashboardTab also persists the selected page snapshot.
+    setWorkflowDashboardTab(EA_FACTORY_PROP_ID, "progress");
+  }
   return response;
 }
 
@@ -26854,7 +27413,17 @@ async function runEaFactoryOneClick(buildIdOverride = "", { allowFreshBuild = fa
   const dashboard = normalizeWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()), report);
   const domain = dashboard.domainData.eaFactory;
   const buildId = String(buildIdOverride || domain.activeBuild?.id || "").trim();
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(buildId)) return null;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(buildId)) {
+    setEaFactoryActionState({
+      inFlight: false,
+      stageId: "one_click_run",
+      message: "ยังเริ่ม One-click ไม่ได้ เพราะยังไม่มี Build ที่ Backend ยืนยัน กรุณากลับไปหน้า 1 แล้วเลือก Strategy ใหม่",
+      tone: "warning",
+      messageKind: "local_preflight_rejected",
+      readModelStateKey: eaFactoryReadModelStateKey(state.eaFactoryReadModel.payload || domain),
+    });
+    return null;
+  }
   const matchingBuild = domain.activeBuild?.id === buildId ? domain.activeBuild : null;
   const capability = domain.oneClick || {};
   const run = matchingBuild?.oneClickRun || capability.run || {};
@@ -26871,6 +27440,7 @@ async function runEaFactoryOneClick(buildIdOverride = "", { allowFreshBuild = fa
   if (
     active
     || !domain.authoritative
+    || Boolean(domain.backendBusy)
     || capability.enabled !== true
     || !terminalSelected
     || platform !== "mt4"
@@ -26880,9 +27450,28 @@ async function runEaFactoryOneClick(buildIdOverride = "", { allowFreshBuild = fa
     || capability.selectedPlatform !== platform
     || (!allowFreshBuild && !matchingBuild)
     || !permitted
-  ) return null;
+  ) {
+    const message = !domain.authoritative
+      ? "ยังเริ่ม One-click ไม่ได้ เพราะ Read Model ปัจจุบันยังไม่ได้รับการยืนยันจาก Backend กรุณารอการตรวจซ้ำ"
+      : (domain.backendBusy
+        ? "Backend ยืนยันว่ามีงาน EA กำลังทำอยู่ กรุณาติดตามงานเดิมในหน้า 2 ก่อนเริ่มงานใหม่"
+        : (active
+          ? "Build นี้กำลังทำงานอยู่แล้ว กรุณาติดตามความคืบหน้าในหน้า 2"
+          : (!terminalSelected || capability.terminalRunning !== true
+            ? "ยังเริ่ม One-click ไม่ได้ เพราะ MT4 ที่เลือกยังไม่พร้อม กรุณาเปิด MT4 และตรวจการเชื่อมต่ออีกครั้ง"
+            : "เงื่อนไข One-click ของ Build นี้ยังไม่ผ่าน กรุณาดูเหตุผลและขั้นปัจจุบันในหน้า 2")));
+    setEaFactoryActionState({
+      inFlight: false,
+      stageId: "one_click_run",
+      message,
+      tone: "warning",
+      messageKind: "local_preflight_rejected",
+      readModelStateKey: eaFactoryReadModelStateKey(state.eaFactoryReadModel.payload || domain),
+    });
+    return null;
+  }
   const idempotencyKey = eaFactoryOneClickRequestKey(buildId, run);
-  return runEaFactoryRequest("one_click_run", () => postJson(
+  return runEaFactoryRequest("one_click_run", () => postEaFactoryJson(
     `/api/props/right_server_racks/ea-factory/builds/${encodeURIComponent(buildId)}/run`,
     { idempotencyKey },
   ), "Local Runner รับ One-click EA Flow แล้ว", { terminalAware: true });
@@ -26890,13 +27479,17 @@ async function runEaFactoryOneClick(buildIdOverride = "", { allowFreshBuild = fa
 
 async function createAndRunEaFactoryBuild(sourceRecordId, platform, brief) {
   const normalizedPlatform = normalizeEaFactoryPlatform(platform);
-  if (normalizedPlatform !== "mt4") return null;
-  setEaFactoryActionState({
-    inFlight: false,
-    stageId: "one_click_create_run",
-    message: "กำลังสร้าง Build จาก Strategy Brief 10 ช่อง แล้วจะเริ่ม One-click EA Flow",
-    tone: "working",
-  });
+  if (normalizedPlatform !== "mt4") {
+    setEaFactoryActionState({
+      inFlight: false,
+      stageId: "one_click_create_run",
+      message: "One-click EA รองรับ MT4 เท่านั้น กรุณาเลือก MT4 หรือใช้ตัวเลือกขั้นสูงสำหรับแพลตฟอร์มอื่น",
+      tone: "warning",
+      messageKind: "local_preflight_rejected",
+      readModelStateKey: eaFactoryReadModelStateKey(state.eaFactoryReadModel.payload || {}),
+    });
+    return null;
+  }
   const created = await createEaFactoryBuild(
     sourceRecordId,
     "expert_advisor",
@@ -26915,9 +27508,40 @@ async function advanceEaFactoryStage(uiStageId) {
   const domain = dashboard.domainData.eaFactory;
   const stage = domain.stages.find((item) => item.id === uiStageId);
   const buildId = domain.activeBuild?.id;
-  if (!buildId || !stage?.backendId || !stage.canRun || domain.currentStageId !== uiStageId) return null;
+  if (
+    domain.authoritative !== true
+    || Boolean(domain.backendBusy)
+    || state.modal.eaFactory.inFlight
+    || !buildId
+    || !stage?.backendId
+    || stage.canRun !== true
+    || domain.currentStageId !== uiStageId
+  ) {
+    const message = domain.authoritative !== true
+      ? "ยังส่งคำขอขั้นต่อไปไม่ได้ เพราะ Read Model ล่าสุดยังไม่ได้รับการยืนยันจาก Backend"
+      : (Boolean(domain.backendBusy)
+        ? "ยังส่งคำขอขั้นต่อไปไม่ได้ เพราะ Backend ยืนยันว่ามีงาน EA Factory กำลังทำอยู่"
+        : (state.modal.eaFactory.inFlight
+          ? "คำขอก่อนหน้ายังกำลังส่งไปยัง Local Runner กรุณารอผลของคำขอนั้นก่อน"
+          : (!buildId
+            ? "ยังส่งคำขอขั้นต่อไปไม่ได้ เพราะไม่พบ Build ที่ Backend ยืนยัน"
+            : (!stage?.backendId
+              ? "ยังส่งคำขอขั้นต่อไปไม่ได้ เพราะขั้นงานนี้ไม่มีรหัส Backend ที่ยืนยัน"
+              : (stage.canRun !== true
+                ? "Backend ยังไม่อนุญาตให้เริ่มขั้นนี้ กรุณาดูสถานะและเหตุผลล่าสุดในหน้า 2"
+                : "สถานะงานเปลี่ยนไปแล้ว กรุณาดูขั้นปัจจุบันที่ Backend ยืนยันในหน้า 2")))));
+    setEaFactoryActionState({
+      inFlight: Boolean(state.modal.eaFactory.inFlight),
+      stageId: uiStageId,
+      message,
+      tone: "warning",
+      messageKind: "local_preflight_rejected",
+      readModelStateKey: eaFactoryReadModelStateKey(state.eaFactoryReadModel.payload || domain),
+    });
+    return null;
+  }
   const idempotencyKey = createWorkflowIdempotencyKey();
-  return runEaFactoryRequest(uiStageId, () => postJson(
+  return runEaFactoryRequest(uiStageId, () => postEaFactoryJson(
     `/api/props/right_server_racks/ea-factory/builds/${encodeURIComponent(buildId)}/advance`,
     { stageId: stage.backendId, idempotencyKey },
   ), `Local Runner รับขั้น ${EA_FACTORY_STAGE_COPY[uiStageId]?.titleTh || uiStageId} แล้ว`, { terminalAware: true });
@@ -26929,9 +27553,37 @@ async function retryEaFactoryStage(uiStageId) {
   const domain = dashboard.domainData.eaFactory;
   const stage = domain.stages.find((item) => item.id === uiStageId);
   const buildId = domain.activeBuild?.id;
-  if (!buildId || !stage?.missionId || !eaFactoryRetryableInvalidOutput(domain, stage)) return null;
+  if (
+    domain.authoritative !== true
+    || Boolean(domain.backendBusy)
+    || state.modal.eaFactory.inFlight
+    || !buildId
+    || !stage?.missionId
+    || !eaFactoryRetryableInvalidOutput(domain, stage)
+  ) {
+    const message = domain.authoritative !== true
+      ? "ยังลองสร้าง Source ใหม่ไม่ได้ เพราะ Read Model ล่าสุดยังไม่ได้รับการยืนยันจาก Backend"
+      : (Boolean(domain.backendBusy)
+        ? "ยังลองสร้าง Source ใหม่ไม่ได้ เพราะ Backend ยืนยันว่ามีงาน EA Factory กำลังทำอยู่"
+        : (state.modal.eaFactory.inFlight
+          ? "คำขอก่อนหน้ายังกำลังส่งไปยัง Local Runner กรุณารอผลของคำขอนั้นก่อน"
+          : (!buildId
+            ? "ยังลองสร้าง Source ใหม่ไม่ได้ เพราะไม่พบ Build ที่ Backend ยืนยัน"
+            : (!stage?.missionId
+              ? "ยังลองสร้าง Source ใหม่ไม่ได้ เพราะไม่พบ Mission ที่ล้มเหลวซึ่ง Backend ยืนยัน"
+              : "Backend ไม่อนุญาตให้ลองขั้นนี้ใหม่ กรุณาดูสถานะและจำนวนครั้งที่เหลือในหน้า 2"))));
+    setEaFactoryActionState({
+      inFlight: Boolean(state.modal.eaFactory.inFlight),
+      stageId: uiStageId,
+      message,
+      tone: "warning",
+      messageKind: "local_preflight_rejected",
+      readModelStateKey: eaFactoryReadModelStateKey(state.eaFactoryReadModel.payload || domain),
+    });
+    return null;
+  }
   const idempotencyKey = createWorkflowIdempotencyKey();
-  return runEaFactoryRequest(uiStageId, () => postJson(
+  return runEaFactoryRequest(uiStageId, () => postEaFactoryJson(
     `/api/props/right_server_racks/ea-factory/builds/${encodeURIComponent(buildId)}/retry`,
     {
       stageId: stage.backendId,
@@ -31639,9 +32291,9 @@ function createWorkflowUseGuideCard(subject) {
       "กดเปิดอุปกรณ์เพื่อดูรายละเอียดหรือขอผลตรวจใหม่",
     ],
     [EA_FACTORY_PROP_ID]: [
-      "เลือก Strategy Brief 10 หัวข้อจากคลังวิจัยหรือ Google Sheets",
-      "ยืนยัน Target และกดทำทีละขั้น โดยปุ่มถัดไปเปิดเมื่อ Backend ผ่าน Gate เท่านั้น",
-      "MT4/MT5 ต้องยืนยัน Terminal ก่อน Compile/Backtest • Pine Script ใช้ Code Validation และข้าม Backtest",
+      "หน้า 1 เลือก Strategy Brief จาก Google Sheets และกดเริ่มเขียน EA",
+      "หน้า 2 ดูสถานะจริง: เขียน Source, เปิด MetaEditor, Compile และ Backtest",
+      "หน้า 3 ตรวจโค้ด หลักฐาน Final Report และดาวน์โหลดไฟล์ที่ Backend อนุญาต",
     ],
     [EA_OPTIMIZATION_LAB_PROP_ID]: [
       "เลือก EA สำหรับ MT4 หรือ MT5 แล้วอ่าน Inputs จาก Source หรือไฟล์ .set",
@@ -31673,6 +32325,59 @@ function createWorkflowUseGuideCard(subject) {
     openHub.textContent = "ดูการเชื่อมต่อทุกอุปกรณ์";
     card.appendChild(openHub);
   }
+  return card;
+}
+
+function createEaFactoryRailTaskStatus(domain = {}) {
+  const card = document.createElement("section");
+  const title = document.createElement("strong");
+  const detail = document.createElement("p");
+  const terminal = document.createElement("small");
+  const openProgress = document.createElement("button");
+  const busy = workflowDomainObject(domain.backendBusy);
+  const requestInFlight = state.modal.eaFactory.inFlight === true;
+  const hasBusySnapshot = Object.keys(busy).length > 0;
+  const staleBusy = hasBusySnapshot && domain.authoritative !== true;
+  const hasTask = (hasBusySnapshot && !staleBusy) || requestInFlight;
+  const terminalLabel = domain.oneClick?.selectedTerminalLabel
+    || domain.globalSelectedTerminal?.label
+    || domain.selectedTerminalId
+    || "ยังไม่ได้เลือก MT4 / MT5";
+  const terminalRunning = domain.oneClick?.terminalRunning === true;
+  const authorityPending = domain.authoritative !== true && !requestInFlight;
+  const readError = state.eaFactoryReadModel.lastError;
+  const loadedAt = Number(state.eaFactoryReadModel.lastLoadedAt || 0);
+  const lastGood = loadedAt > 0
+    ? ` • ข้อมูลล่าสุดที่เก็บไว้เมื่อ ${formatThaiDateTime(new Date(loadedAt).toISOString())}`
+    : "";
+  const busyDetail = `${busy.buildId ? `Build ${busy.buildId} • ` : ""}${eaFactoryBusyStatusLabel(busy.status)} • ${eaFactoryBusyOperationLabel(busy.activeOperation)}`;
+  card.className = "ea-factory-rail-task-status";
+  card.dataset.status = staleBusy ? "checking" : (hasTask ? "running" : (authorityPending ? "checking" : "ready"));
+  title.textContent = staleBusy
+    ? "สถานะงานล่าสุดยังยืนยันไม่ได้"
+    : (hasTask
+    ? "มีงาน EA กำลังทำ"
+    : (authorityPending ? "กำลังตรวจสอบสถานะงาน EA" : "ไม่มีงาน EA ค้างอยู่"));
+  detail.textContent = staleBusy
+    ? `${busyDetail} • เป็นสถานะครั้งล่าสุดที่เคยยืนยัน ไม่ใช่สถานะสด • ${safeDashboardDisplayText(readError?.message, "Read Model ปัจจุบันอ่านไม่สำเร็จ")}${lastGood}`
+    : (hasBusySnapshot
+      ? busyDetail
+      : (requestInFlight
+      ? (state.modal.eaFactory.message || "กำลังส่งคำขอไปยัง Local Runner")
+      : (authorityPending
+        ? `${safeDashboardDisplayText(readError?.message, "ยังไม่ได้รับ Read Model ปัจจุบัน จึงยังยืนยันไม่ได้ว่ามีงานค้างอยู่หรือพร้อมรับงานใหม่")}${lastGood}`
+        : "Backend ยืนยัน busy=null • พร้อมรับงานใหม่")));
+  terminal.textContent = `${terminalLabel} • ${terminalRunning ? "โปรแกรมเปิดอยู่" : "ยังไม่ยืนยันว่าโปรแกรมเปิดอยู่"} • นี่คือสถานะ Terminal ไม่ใช่งาน EA ที่ค้าง`;
+  openProgress.type = "button";
+  openProgress.textContent = staleBusy
+    ? "ดูเหตุผลและสถานะหน้า 2"
+    : (hasTask
+    ? "ดูสถานะงานหน้า 2"
+    : (authorityPending ? "เปิดหน้าตรวจสอบสถานะ" : "เปิดหน้าสถานะงาน"));
+  openProgress.addEventListener("click", () => {
+    setWorkflowDashboardTab(EA_FACTORY_PROP_ID, "progress", { focus: true });
+  });
+  card.append(title, detail, terminal, openProgress);
   return card;
 }
 
@@ -31952,10 +32657,15 @@ function renderWorkflowSettingsRail(subject, dashboard, identity = getWorkflowDa
   els.workflowSettingsRail.dataset.dashboardIdentity = identity.id;
   if (els.workflowSettingsRailTitle) {
     els.workflowSettingsRailTitle.textContent = subject?.id === EA_FACTORY_PROP_ID
-      ? "โรงงาน Manual 7 ขั้น"
+      ? "โรงงาน EA • 3 หน้า"
       : "วิธีใช้และคำสั่ง";
   }
   els.workflowSettingsRailContent.innerHTML = "";
+  if (subject?.id === EA_FACTORY_PROP_ID) {
+    els.workflowSettingsRailContent.appendChild(
+      createEaFactoryRailTaskStatus(dashboard?.domainData?.eaFactory || {}),
+    );
+  }
   els.workflowSettingsRailContent.appendChild(createWorkflowUseGuideCard(subject));
   if (RESEARCH_SHEET_CONSUMER_PROP_IDS.has(subject?.id)) {
     els.workflowSettingsRailContent.appendChild(createResearchSheetConsumerCard(subject.id));
@@ -31965,10 +32675,14 @@ function renderWorkflowSettingsRail(subject, dashboard, identity = getWorkflowDa
     );
   }
   if (subject?.id === EA_FACTORY_PROP_ID) {
-    const terminalRail = document.createElement("div");
-    terminalRail.className = "ea-factory-rail-terminal";
-    renderEaFactoryTerminalPicker(terminalRail, dashboard?.domainData?.eaFactory || {});
-    els.workflowSettingsRailContent.appendChild(terminalRail);
+    const selectedPageId = getWorkflowSelectedTab(subject.id, dashboard)?.id;
+    const factoryDomain = dashboard?.domainData?.eaFactory || {};
+    if (selectedPageId === "progress" || factoryDomain.backendBusy) {
+      const terminalRail = document.createElement("div");
+      terminalRail.className = "ea-factory-rail-terminal";
+      renderEaFactoryTerminalPicker(terminalRail, factoryDomain);
+      els.workflowSettingsRailContent.appendChild(terminalRail);
+    }
   }
   if (subject?.id === "codex_mcp_portal") {
     els.workflowSettingsRailContent.appendChild(
@@ -32311,7 +33025,7 @@ function renderWorkflowDashboard(subject, propertyRole, report = {}) {
     els.workflowDashboardContent.innerHTML = "";
     els.workflowDashboardContent.hidden = false;
     if (!isPrimaryTab && !isHistoryTab) {
-      if (!isEaOptimizationLabDashboard && !isDirectResearchDashboard) {
+      if (!isEaOptimizationLabDashboard && !isDirectResearchDashboard && !isEaFactoryDashboard) {
         const intro = document.createElement("header");
         const title = document.createElement("h4");
         const description = document.createElement("p");
@@ -32380,15 +33094,9 @@ function setWorkflowDashboardTab(propId, tabId, { focus = false } = {}) {
   const dashboard = normalizeWorkflowDashboard(subject, propertyRole, report);
   const selected = dashboard.tabs.find((tab) => tab.id === tabId) || dashboard.tabs[0];
   if (!selected) return;
-  if (propId === EA_FACTORY_PROP_ID) {
-    const stage = dashboard.domainData.eaFactory?.stages?.find((item) => item.id === selected.id);
-    const readOnlyHistory = selected.id === "artifacts_report"
-      && (dashboard.domainData.eaFactory?.builds?.length || 0) > 0;
-    if (stage && ["locked", "unknown"].includes(stage.status) && !readOnlyHistory) return;
-  }
   state.modal.workflowTabs[propId] = selected.id;
   renderWorkflowDashboard(subject, propertyRole, report);
-  if (propId === EA_OPTIMIZATION_LAB_PROP_ID) {
+  if ([EA_OPTIMIZATION_LAB_PROP_ID, EA_FACTORY_PROP_ID].includes(propId)) {
     const scrollArea = els.workflowDashboardContent?.closest(".workflow-dashboard-scroll");
     if (scrollArea) scrollArea.scrollTop = 0;
   }
@@ -36725,17 +37433,22 @@ async function pollOpenPropReport({ force = false, signal = null } = {}) {
       state.propReports[EA_FACTORY_PROP_ID] || {},
     ).domainData.eaFactory
     : null;
-  const factoryStageActive = factoryDomain?.stages?.some((stage) => ["running"].includes(stage.status)) === true;
-  const factoryOneClickActive = ["queued", "running", "waiting_ai"].includes(
-    String(factoryDomain?.oneClick?.run?.status || ""),
-  );
+  const factoryBackendBusy = Boolean(factoryDomain?.backendBusy);
+  // Stage/run values also exist in history. They are live polling signals only
+  // while the dedicated Backend busy model confirms an active operation.
+  const factoryStageActive = factoryBackendBusy
+    && factoryDomain?.stages?.some((stage) => ["running"].includes(stage.status)) === true;
+  const factoryOneClickActive = factoryBackendBusy
+    && ["queued", "running", "waiting_ai", "awaiting_visible_terminal"].includes(
+      String(factoryDomain?.oneClick?.run?.status || ""),
+    );
   const factoryTtlExpired = propId === "right_server_racks" && (
     !Number.isFinite(Number(state.eaFactoryReadModel.lastLoadedAt))
     || Date.now() - Number(state.eaFactoryReadModel.lastLoadedAt || 0) >= OPEN_PROP_REPORT_POLL_TTL_MS
   );
   const shouldRefreshReport = propId !== EA_FACTORY_PROP_ID && (force || reportTtlExpired);
   const shouldRefreshFactory = propId === "right_server_racks"
-    && (force || factoryStageActive || factoryOneClickActive || factoryTtlExpired);
+    && (force || factoryBackendBusy || factoryStageActive || factoryOneClickActive || factoryTtlExpired);
   if (!shouldRefreshReport && !shouldRefreshFactory) return state.propReports[propId] || null;
   if (shouldRefreshFactory && !signal?.aborted) await loadEaFactoryReadModel({ signal });
   const reports = shouldRefreshReport

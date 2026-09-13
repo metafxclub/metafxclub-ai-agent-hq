@@ -52,6 +52,10 @@ from ea_strategy_brief import (  # noqa: E402 - compact trusted research handoff
     IMPLEMENTATION_DEFAULT_POLICY_ID as EA_STRATEGY_BRIEF_IMPLEMENTATION_POLICY_ID,
     IMPLEMENTATION_DEFAULT_POLICY_PROMPT as EA_STRATEGY_BRIEF_IMPLEMENTATION_DEFAULT_POLICY,
     LEGACY_IMPLEMENTATION_DEFAULT_POLICY_ID as EA_STRATEGY_BRIEF_LEGACY_POLICY_ID,
+    LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST as EA_FACTORY_LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST,
+    LINDA_HOLY_GRAIL_CERTIFIED_PROFILE_VERSION as EA_FACTORY_LINDA_HOLY_GRAIL_CERTIFIED_PROFILE_VERSION,
+    LINDA_HOLY_GRAIL_DIRECTION_RULE as EA_FACTORY_LINDA_HOLY_GRAIL_DIRECTION_RULE,
+    LINDA_HOLY_GRAIL_LEGACY_BRIEF_DIGEST as EA_FACTORY_LINDA_HOLY_GRAIL_LEGACY_BRIEF_DIGEST,
     SCHEMA_VERSION as EA_STRATEGY_BRIEF_SCHEMA_VERSION,
     StrategyBriefValidationError,
     apply_strategy_brief_implementation_defaults,
@@ -60,6 +64,7 @@ from ea_strategy_brief import (  # noqa: E402 - compact trusted research handoff
     compute_strategy_brief_digest,
     normalize_strategy_brief,
     project_strategy_brief_contract,
+    upgrade_linda_holy_grail_brief_for_certified_profile,
 )
 from ea_factory_blueprint_coverage import (  # noqa: E402 - trusted Factory source coverage
     build_coverage_manifest as ea_factory_coverage_manifest,
@@ -84,7 +89,11 @@ EA_FACTORY_SCOPED_WRITE_ROOT_PATTERN = re.compile(
 )
 EA_FACTORY_SOURCE_RESULT_PROFILE = "ea_factory_source_generation"
 EA_FACTORY_SOURCE_WRITER_VERSION = "ea-factory-structured-source-v2"
-EA_FACTORY_SOURCE_SEMANTIC_REPAIR_MAX_SECONDS = 120
+# A complete MQL4 source revision commonly exceeds two minutes when the first
+# candidate reaches the strict A-J semantic gate but misses several reachable
+# safety paths. Keep the overall Mission deadline bounded at ten minutes while
+# reserving enough time for the single permitted corrective pass to finish.
+EA_FACTORY_SOURCE_SEMANTIC_REPAIR_MAX_SECONDS = 240
 EA_FACTORY_SEMANTIC_REPAIR_SOURCE_MAX_CHARS = 64 * 1024
 EA_FACTORY_SEMANTIC_REPAIR_SCAFFOLD_MAX_CHARS = 32 * 1024
 EA_FACTORY_CAN_SLIM_CERTIFIED_BRIEF_DIGEST = (
@@ -8031,7 +8040,7 @@ def _ea_factory_can_slim_scaffold_meets_mission(source: object) -> bool:
     )
 
 
-def _build_ea_factory_source_semantic_repair_scaffold(
+def _build_ea_factory_can_slim_source_semantic_repair_scaffold(
     strategy_brief: object,
     *,
     strategy_brief_digest: object,
@@ -8468,6 +8477,855 @@ void OnTick() {{
     return source
 
 
+def _ea_factory_linda_holy_grail_scaffold_meets_mission(source: object) -> bool:
+    """Attest the Linda Holy Grail clauses not fully modeled by the generic gate."""
+
+    if not isinstance(source, str) or not source:
+        return False
+    compact = " ".join(source.split())
+    required_fragments = (
+        f"EA_STRATEGY_BRIEF_SHA256:{EA_FACTORY_LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST}",
+        f'const string CERTIFIED_PROFILE_VERSION = "{EA_FACTORY_LINDA_HOLY_GRAIL_CERTIFIED_PROFILE_VERSION}";',
+        'const string CERTIFIED_DIRECTION_RULE = "IMPLEMENTATION_DEFAULT_NOT_SOURCE_FACT:SMA20_SLOPE";',
+        "input int PositionSizingMode = 0;",
+        "input double FixedLot = 0.01;",
+        "input double RiskPercent = 1.0;",
+        "input int StopLossPoints = 300;",
+        "input int TakeProfitPoints = 600;",
+        "input int MaxOpenPositionsPerSymbolMagic = 1;",
+        "input int SignalBarShift = 1;",
+        "input bool TradeOnNewBar = true;",
+        "input int ADXPeriod = 14;",
+        "input double ADXThreshold = 30.0;",
+        "input int SMAPeriod = 20;",
+        "input int PendingExpirationDays = 3;",
+        "if(PendingExpirationDays > 3650) return(INIT_PARAMETERS_INCORRECT);",
+        "MagicNumber <= 0",
+        "if(currentBar == lastBar) return;",
+        "if(lastBar == 0) { lastBar = currentBar; return; }",
+        "iTime(Symbol(), timeframe, 0)",
+        "iTime(Symbol(), timeframe, 1)",
+        "iClose(Symbol(), timeframe, 1)",
+        "iADX(Symbol(), timeframe, ADXPeriod, PRICE_CLOSE, MODE_MAIN, SignalBarShift)",
+        "iADX(Symbol(), timeframe, ADXPeriod, PRICE_CLOSE, MODE_MAIN, SignalBarShift + 1)",
+        "iMA(Symbol(), timeframe, SMAPeriod, 0, MODE_SMA, PRICE_CLOSE, SignalBarShift)",
+        "iMA(Symbol(), timeframe, SMAPeriod, 0, MODE_SMA, PRICE_CLOSE, SignalBarShift + 1)",
+        "iHigh(Symbol(), timeframe, SignalBarShift)",
+        "iLow(Symbol(), timeframe, SignalBarShift)",
+        "iClose(Symbol(), timeframe, SignalBarShift)",
+        "adxCurrent > ADXThreshold && adxCurrent > adxPrevious",
+        "bool directionalUptrend = smaCurrent > smaPrevious;",
+        "bool directionalDowntrend = smaCurrent < smaPrevious;",
+        "bool longPullback = directionalUptrend && signalClose > smaCurrent",
+        "bool shortPullback = directionalDowntrend && signalClose < smaCurrent",
+        "signalHigh + ExecutionBufferPoints * Point",
+        "signalLow - ExecutionBufferPoints * Point",
+        "long expirationSeconds = (long)PendingExpirationDays * 86400;",
+        "expirationSeconds > 315360000",
+        "TimeCurrent() + expirationSeconds",
+        "OrderType() == OP_BUYSTOP || OrderType() == OP_SELLSTOP",
+        "bool deleteSucceeded = OrderDelete(OrderTicket())",
+        "if(deleteSucceeded) managementAction = MANAGED_ACTION_CANCELLED;",
+        "bool modifySucceeded = OrderModify(",
+        "double freezeLevel = MarketInfo(Symbol(), MODE_FREEZELEVEL);",
+        "MathMax(stopLevel, freezeLevel) + ExecutionBufferPoints",
+        "iLowest(Symbol(), timeframe, MODE_LOW, SwingLookbackBars, 1)",
+        "iHighest(Symbol(), timeframe, MODE_HIGH, SwingLookbackBars, 1)",
+        "double riskMoney = AccountEquity() * RiskPercent / 100.0;",
+        "double executionCostDistance = (spreadPoints + slippagePoints) * Point;",
+        "double worstCaseDistance = stopDistance + executionCostDistance;",
+        "double lossPerLotAtSL = (worstCaseDistance / priceTick) * tickValue;",
+        "MarketInfo(Symbol(), MODE_TICKSIZE)",
+        "MarketInfo(Symbol(), MODE_TICKVALUE)",
+        "MarketInfo(Symbol(), MODE_LOTSTEP)",
+        "MarketInfo(Symbol(), MODE_MINLOT)",
+        "MarketInfo(Symbol(), MODE_MAXLOT)",
+        "MT4 MODE_TICKSIZE is expressed in points",
+        "double priceTick = tickSize * Point;",
+        "MathFloor((riskMoney / lossPerLotAtSL) / volumeStep) * volumeStep",
+        "if(lot < minimumLot) return(0);",
+        "if(lot > maximumLot) return(0);",
+        "AccountFreeMarginCheck(Symbol(), orderType, lot)",
+        "int marginSide = signal == OP_BUYSTOP ? OP_BUY : OP_SELL;",
+        "double ValidateFixedLot(double requestedLot, int orderType)",
+        "double requestedStepUnits = requestedLot / volumeStep;",
+        "MathAbs(requestedStepUnits - MathRound(requestedStepUnits)) > 0.0000001",
+        "lot > requestedLot + volumeStep * 0.0000001",
+        "double CalculateRiskLot(double entryPrice, double stopLoss,",
+        "gOrderLot = ValidateFixedLot(FixedLot, marginSide);",
+        "gOrderLot = CalculateRiskLot(entryPrice, stopLoss, currentSpread,",
+        "SlippagePoints, marginSide);",
+        "AccountFreeMarginCheck(Symbol(), marginSide, gOrderLot)",
+        "string BuildManagedProfileTag(int timeframe)",
+        "long profileHash = timeframe;",
+        "profileHash = (profileHash * 131 + SignalTimeframe) % 2147483629;",
+        "profileHash = (profileHash * 131 + PendingExpirationDays) % 2147483629;",
+        'return("LHG3:" + IntegerToString((int)profileHash));',
+        "bool FindLatestManagedMarketClose(int timeframe)",
+        "OrdersHistoryTotal()",
+        "const int CERTIFIED_ORDER_HISTORY_RECORDS = 10000;",
+        "for(int historyIndex=0; historyIndex<10000; historyIndex++)",
+        "gManagedHistoryTruncated = historyTotal > CERTIFIED_ORDER_HISTORY_RECORDS;",
+        "OrderSelect(historyIndex, SELECT_BY_POS, MODE_HISTORY)",
+        "OrderType() != OP_BUY && OrderType() != OP_SELL",
+        "StringFind(OrderComment(), managedProfileTag, 0) != 0",
+        "int GetManagedProfileState(int timeframe)",
+        "int managementAction = ManageExistingOrders(timeframe);",
+        'SetStatusComment("In Position"',
+        'SetStatusComment("Other Profile Active"',
+        'SetStatusComment("Cancelled Pending Order"',
+        "bool HasClosedAdxResetAfter(datetime closeTime, int timeframe)",
+        "CERTIFIED_ADX_HISTORY_BARS",
+        "gAdxRearmRequired = true;",
+        "gAdxResetObserved = false;",
+        'SetStatusComment("History Review Required"',
+        "adxCurrent <= ADXThreshold && latestClosedBar > gLastProcessedManagedCloseTime",
+        "if(!gAdxResetObserved || !strongTrend) return;",
+        "NormalizePriceUpToTick(requestedEntry, priceTick)",
+        "entryPrice <= Ask + brokerFloor",
+        "NormalizePriceDownToTick(requestedEntry, priceTick)",
+        "entryPrice >= Bid - brokerFloor",
+        "string orderComment = BuildManagedProfileTag(timeframe);",
+        "if(CountManagedOrders() >= MaxOpenPositionsPerSymbolMagic) return;",
+        "const int CERTIFIED_SELL_STOP_ORDER = 5;",
+        "if(longPullback) signal = OP_BUYSTOP;",
+        "if(shortPullback) signal = CERTIFIED_SELL_STOP_ORDER;",
+        "OrderSend(Symbol(), signal, gOrderLot",
+        'SetStatusComment("Waiting Trend"',
+        'SetStatusComment("Pullback Found"',
+        'SetStatusComment("Submitting Buy Stop"',
+        'SetStatusComment("Submitting Sell Stop"',
+        'SetStatusComment("Order Failed"',
+        'SetStatusComment("Pending Buy Stop"',
+        'SetStatusComment("Pending Sell Stop"',
+    )
+    if not all(fragment in compact for fragment in required_fragments):
+        return False
+    if len(re.findall(r"\bOrderSend\s*\(", source, re.IGNORECASE)) != 1:
+        return False
+    if re.search(r"\bOrderSend\s*\([^;]{0,240}\bOP_(?:BUY|SELL)\b", source, re.IGNORECASE):
+        return False
+    if re.search(r"\b(?:while|do)\b", source, re.IGNORECASE):
+        return False
+    if re.search(r"\bTime\s*\[\s*0\s*\]", source, re.IGNORECASE):
+        return False
+    risk_start = source.find("double CalculateRiskLot(")
+    risk_end = source.find("\n}\n\nint ManageExistingOrders", risk_start)
+    if risk_start < 0 or risk_end < 0 or "FixedLot" in source[risk_start:risk_end]:
+        return False
+    if "MathMax(requestedEntry" in source or "MathMin(requestedEntry" in source:
+        return False
+    manage_call = source.find("ManageExistingOrders(timeframe);")
+    sizing_gate = source.find(
+        "if(PositionSizingMode < POSITION_SIZING_FIXED_LOT)",
+        manage_call,
+    )
+    first_open = source.find("OrderSend(")
+    final_margin = source.rfind(
+        "if(AccountFreeMarginCheck(Symbol(), marginSide, gOrderLot) <= 0) return;",
+        0,
+        first_open,
+    )
+    final_cap = source.rfind(
+        "if(CountManagedOrders() >= MaxOpenPositionsPerSymbolMagic) return;",
+        0,
+        first_open,
+    )
+    submitting = min(
+        index for index in (
+            source.find('SetStatusComment("Submitting Buy Stop"'),
+            source.find('SetStatusComment("Submitting Sell Stop"'),
+        ) if index >= 0
+    )
+    order_failed = source.find('SetStatusComment("Order Failed"', first_open)
+    first_pending = min(
+        index for index in (
+            source.find('SetStatusComment("Pending Buy Stop"', first_open),
+            source.find('SetStatusComment("Pending Sell Stop"', first_open),
+        ) if index >= 0
+    )
+    active_status = source.find('SetStatusComment("In Position"')
+    waiting_status = source.find('SetStatusComment("Waiting Trend"')
+    return bool(
+        0 <= manage_call < sizing_gate
+        and 0 <= active_status < waiting_status < final_margin
+        and final_margin < final_cap < submitting < first_open
+        < order_failed < first_pending
+    )
+
+
+def _build_ea_factory_linda_holy_grail_source_semantic_repair_scaffold(
+    strategy_brief: object,
+    *,
+    strategy_brief_digest: object,
+    strategy_spec_digest: object,
+    target_platform: object,
+) -> str:
+    """Build the digest-bound MT4 baseline for the Linda Holy Grail brief.
+
+    This is deliberately not a generic template.  It is enabled only for the
+    reviewed compact A-J brief digest and verifies the source-backed ADX/SMA,
+    pending-stop, expiry, swing-stop and no-recovery clauses before generating
+    source.  The result must still pass the ordinary immutable manifest.
+    """
+
+    if not isinstance(strategy_brief, dict) or target_platform != "mt4":
+        return ""
+    system_name = re.sub(
+        r"\s+", " ", str(strategy_brief.get("systemName") or "").strip()
+    ).casefold()
+    if system_name != "linda bradford raschke holy grail pullback":
+        return ""
+    brief_digest = str(strategy_brief_digest or "").strip().lower()
+    spec_digest = str(strategy_spec_digest or "").strip().lower()
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", brief_digest) is None
+        or re.fullmatch(r"[0-9a-f]{64}", spec_digest) is None
+        or brief_digest != EA_FACTORY_LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST
+    ):
+        return ""
+
+    entry_text = str(strategy_brief.get("entryRules") or "")
+    recovery_text = str(strategy_brief.get("recoveryRules") or "")
+    exit_text = str(strategy_brief.get("exitRules") or "")
+    money_text = str(strategy_brief.get("moneyManagement") or "")
+    order_text = str(strategy_brief.get("orderExecution") or "")
+    current_marker = "[policy=compact-ea-safe-inputs-v2]"
+    if EA_FACTORY_LINDA_HOLY_GRAIL_DIRECTION_RULE not in entry_text:
+        return ""
+    if any(
+        current_marker not in component.casefold()
+        for component in (recovery_text, exit_text, money_text, order_text)
+    ):
+        return ""
+    entry_requirements = (
+        r"\bADX\s*\(?\s*14\s*\)?",
+        r"\bADX\s*\[\s*1\s*\]\s*>\s*30",
+        r"\bADX\s*\[\s*1\s*\]\s*>\s*ADX\s*\[\s*2\s*\]",
+        r"\bSMA\s*\(?\s*20\s*\)?",
+        r"\bbuy[ -]?stop\b",
+        r"\bsell[ -]?stop\b",
+    )
+    if not all(re.search(pattern, entry_text, re.IGNORECASE) for pattern in entry_requirements):
+        return ""
+    if not (
+        re.search(r"\b(?:3\s*days?|PendingExpirationDays\s*=\s*3)\b|3\s*วัน", entry_text + " " + order_text, re.IGNORECASE)
+        and re.search(r"swing\s+(?:low|high)|successive\s+swing", exit_text, re.IGNORECASE)
+        and re.search(r"RecoveryMode\s*=\s*none", recovery_text, re.IGNORECASE)
+        and re.search(r"FixedLot\s*=\s*0\.01", money_text, re.IGNORECASE)
+        and re.search(r"RiskPercent\s*=\s*1\.0", money_text, re.IGNORECASE)
+        and re.search(r"MaxOpenPositionsPerSymbolMagic\s*=\s*1", money_text, re.IGNORECASE)
+        and re.search(r"StopLossPoints\s*=\s*300", exit_text, re.IGNORECASE)
+        and re.search(r"TakeProfitPoints\s*=\s*600", exit_text, re.IGNORECASE)
+    ):
+        return ""
+
+    source = '''#property strict
+#property description "EA_STRATEGY_BRIEF_SHA256:__BRIEF_DIGEST__"
+#define SIGNAL_NONE -1
+const string CERTIFIED_PROFILE_VERSION = "__PROFILE_VERSION__";
+const string CERTIFIED_DIRECTION_RULE = "IMPLEMENTATION_DEFAULT_NOT_SOURCE_FACT:SMA20_SLOPE";
+const int POSITION_SIZING_FIXED_LOT = 0;
+const int POSITION_SIZING_PERCENT_EQUITY = 1;
+const int CERTIFIED_SELL_STOP_ORDER = 5;
+input int PositionSizingMode = 0;
+input double FixedLot = 0.01;
+input double RiskPercent = 1.0;
+input int StopLossPoints = 300;
+input int TakeProfitPoints = 600;
+input int MaxOpenPositionsPerSymbolMagic = 1;
+input int SignalBarShift = 1;
+input bool TradeOnNewBar = true;
+input int SignalTimeframe = 0;
+input int ADXPeriod = 14;
+input double ADXThreshold = 30.0;
+input int SMAPeriod = 20;
+input int PullbackTolerancePoints = 10;
+input int PendingExpirationDays = 3;
+input int SwingLookbackBars = 5;
+input int ExecutionBufferPoints = 2;
+input int SlippagePoints = 3;
+input int MaxSpreadPoints = 30;
+input int MagicNumber = 4186020;
+input bool BreakEven = false;
+input bool PartialClose = false;
+double gOrderLot = 0.01;
+datetime gLastProcessedManagedCloseTime = 0;
+int gLastProcessedManagedCloseTicket = -1;
+datetime gDetectedManagedCloseTime = 0;
+int gDetectedManagedCloseTicket = -1;
+bool gAdxHistoryInitialized = false;
+bool gAdxRearmRequired = false;
+bool gAdxResetObserved = false;
+bool gManagedHistoryTruncated = false;
+const int CERTIFIED_ADX_HISTORY_BARS = 512;
+const int CERTIFIED_ORDER_HISTORY_RECORDS = 10000;
+const int MANAGED_STATE_NONE = 0;
+const int MANAGED_STATE_LIVE = 1;
+const int MANAGED_STATE_BUY_STOP = 2;
+const int MANAGED_STATE_SELL_STOP = 3;
+const int MANAGED_ACTION_NONE = 0;
+const int MANAGED_ACTION_CANCELLED = 1;
+
+int OnInit() {
+  if(PositionSizingMode < POSITION_SIZING_FIXED_LOT) return(INIT_PARAMETERS_INCORRECT);
+  if(PositionSizingMode > POSITION_SIZING_PERCENT_EQUITY) return(INIT_PARAMETERS_INCORRECT);
+  if(!MathIsValidNumber(FixedLot) || FixedLot <= 0) return(INIT_PARAMETERS_INCORRECT);
+  if(FixedLot > 1000000) return(INIT_PARAMETERS_INCORRECT);
+  if(!MathIsValidNumber(RiskPercent) || RiskPercent <= 0) return(INIT_PARAMETERS_INCORRECT);
+  if(RiskPercent > 100) return(INIT_PARAMETERS_INCORRECT);
+  if(StopLossPoints <= 0 || TakeProfitPoints <= 0) return(INIT_PARAMETERS_INCORRECT);
+  if(MaxOpenPositionsPerSymbolMagic < 1) return(INIT_PARAMETERS_INCORRECT);
+  if(SignalBarShift < 1 || ADXPeriod < 2 || SMAPeriod < 2) return(INIT_PARAMETERS_INCORRECT);
+  if(!MathIsValidNumber(ADXThreshold) || ADXThreshold <= 0) return(INIT_PARAMETERS_INCORRECT);
+  if(ADXThreshold > 100) return(INIT_PARAMETERS_INCORRECT);
+  if(PullbackTolerancePoints < 0 || PendingExpirationDays < 1) return(INIT_PARAMETERS_INCORRECT);
+  if(PendingExpirationDays > 3650) return(INIT_PARAMETERS_INCORRECT);
+  if(SwingLookbackBars < 2 || ExecutionBufferPoints < 0) return(INIT_PARAMETERS_INCORRECT);
+  if(SlippagePoints < 0 || MaxSpreadPoints <= 0 || MagicNumber <= 0) return(INIT_PARAMETERS_INCORRECT);
+  if(!TradeOnNewBar || BreakEven || PartialClose) return(INIT_PARAMETERS_INCORRECT);
+  return(INIT_SUCCEEDED);
+}
+
+void SetStatusComment(string state, double adxValue, double smaValue,
+                      double spreadValue, int managedCount) {
+  Comment("Linda Holy Grail Profile=", CERTIFIED_PROFILE_VERSION,
+          " SignalState=", state, " Balance=", AccountBalance(),
+          " Equity=", AccountEquity(), " Spread=", spreadValue,
+          " ADX(14)=", adxValue, " SMA(20)=", smaValue,
+          " Live+Pending=", managedCount, " Symbol=", Symbol(),
+          " Magic=", MagicNumber, " TradeOnNewBar=", TradeOnNewBar);
+}
+
+double NormalizePriceDownToTick(double price, double priceTick) {
+  if(!MathIsValidNumber(price) || price <= 0) return(0);
+  if(!MathIsValidNumber(priceTick) || priceTick <= 0) return(0);
+  return(NormalizeDouble(MathFloor(price / priceTick) * priceTick, Digits));
+}
+
+double NormalizePriceUpToTick(double price, double priceTick) {
+  if(!MathIsValidNumber(price) || price <= 0) return(0);
+  if(!MathIsValidNumber(priceTick) || priceTick <= 0) return(0);
+  return(NormalizeDouble(MathCeil(price / priceTick) * priceTick, Digits));
+}
+
+int CountManagedOrders() {
+  int count = 0;
+  for(int orderIndex=OrdersTotal()-1; orderIndex>=0; orderIndex--) {
+    if(!OrderSelect(orderIndex, SELECT_BY_POS, MODE_TRADES)) continue;
+    if(OrderSymbol() == Symbol() && OrderMagicNumber() == MagicNumber) count++;
+  }
+  return(count);
+}
+
+string BuildManagedProfileTag(int timeframe) {
+  long profileHash = timeframe;
+  profileHash = (profileHash * 131 + SignalTimeframe) % 2147483629;
+  profileHash = (profileHash * 131 + PositionSizingMode) % 2147483629;
+  profileHash = (profileHash * 131 + (long)MathRound(FixedLot * 100000000)) % 2147483629;
+  profileHash = (profileHash * 131 + (long)MathRound(RiskPercent * 100000000)) % 2147483629;
+  profileHash = (profileHash * 131 + StopLossPoints) % 2147483629;
+  profileHash = (profileHash * 131 + TakeProfitPoints) % 2147483629;
+  profileHash = (profileHash * 131 + MaxOpenPositionsPerSymbolMagic) % 2147483629;
+  profileHash = (profileHash * 131 + SignalBarShift) % 2147483629;
+  profileHash = (profileHash * 131 + (TradeOnNewBar ? 1 : 0)) % 2147483629;
+  profileHash = (profileHash * 131 + ADXPeriod) % 2147483629;
+  profileHash = (profileHash * 131 + (long)MathRound(ADXThreshold * 100000000)) % 2147483629;
+  profileHash = (profileHash * 131 + SMAPeriod) % 2147483629;
+  profileHash = (profileHash * 131 + PullbackTolerancePoints) % 2147483629;
+  profileHash = (profileHash * 131 + PendingExpirationDays) % 2147483629;
+  profileHash = (profileHash * 131 + SwingLookbackBars) % 2147483629;
+  profileHash = (profileHash * 131 + ExecutionBufferPoints) % 2147483629;
+  profileHash = (profileHash * 131 + SlippagePoints) % 2147483629;
+  profileHash = (profileHash * 131 + MaxSpreadPoints) % 2147483629;
+  profileHash = (profileHash * 131 + MagicNumber) % 2147483629;
+  profileHash = (profileHash * 131 + (BreakEven ? 1 : 0)) % 2147483629;
+  profileHash = (profileHash * 131 + (PartialClose ? 1 : 0)) % 2147483629;
+  return("LHG3:" + IntegerToString((int)profileHash));
+}
+
+int GetManagedProfileState(int timeframe) {
+  string managedProfileTag = BuildManagedProfileTag(timeframe);
+  int pendingState = MANAGED_STATE_NONE;
+  for(int orderIndex=OrdersTotal()-1; orderIndex>=0; orderIndex--) {
+    if(!OrderSelect(orderIndex, SELECT_BY_POS, MODE_TRADES)) continue;
+    if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
+    if(StringFind(OrderComment(), managedProfileTag, 0) != 0) continue;
+    if(OrderType() == OP_BUY || OrderType() == OP_SELL)
+      return(MANAGED_STATE_LIVE);
+    if(OrderType() == OP_BUYSTOP) pendingState = MANAGED_STATE_BUY_STOP;
+    if(OrderType() == OP_SELLSTOP) pendingState = MANAGED_STATE_SELL_STOP;
+  }
+  return(pendingState);
+}
+
+bool FindLatestManagedMarketClose(int timeframe) {
+  gDetectedManagedCloseTime = 0;
+  gDetectedManagedCloseTicket = -1;
+  string managedProfileTag = BuildManagedProfileTag(timeframe);
+  int historyTotal = OrdersHistoryTotal();
+  gManagedHistoryTruncated = historyTotal > CERTIFIED_ORDER_HISTORY_RECORDS;
+  for(int historyIndex=0; historyIndex<10000; historyIndex++) {
+    if(historyIndex >= historyTotal) break;
+    if(!OrderSelect(historyIndex, SELECT_BY_POS, MODE_HISTORY)) continue;
+    if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
+    if(StringFind(OrderComment(), managedProfileTag, 0) != 0) continue;
+    if(OrderType() != OP_BUY && OrderType() != OP_SELL) continue;
+    datetime candidateCloseTime = OrderCloseTime();
+    int candidateTicket = OrderTicket();
+    if(candidateCloseTime <= 0 || candidateTicket < 0) continue;
+    if(candidateCloseTime > gDetectedManagedCloseTime ||
+       (candidateCloseTime == gDetectedManagedCloseTime &&
+        candidateTicket > gDetectedManagedCloseTicket)) {
+      gDetectedManagedCloseTime = candidateCloseTime;
+      gDetectedManagedCloseTicket = candidateTicket;
+    }
+  }
+  return(gDetectedManagedCloseTime > 0 && gDetectedManagedCloseTicket >= 0);
+}
+
+bool HasClosedAdxResetAfter(datetime closeTime, int timeframe) {
+  int closeShift = iBarShift(Symbol(), timeframe, closeTime, false);
+  if(closeShift <= 1) return(false);
+  int maximumShift = closeShift - 1;
+  if(maximumShift > CERTIFIED_ADX_HISTORY_BARS)
+    maximumShift = CERTIFIED_ADX_HISTORY_BARS;
+  for(int resetShift=1; resetShift<=512; resetShift++) {
+    if(resetShift > maximumShift) break;
+    int probeShift = resetShift;
+    datetime resetBarTime = iTime(Symbol(), timeframe, probeShift);
+    if(resetBarTime <= closeTime) continue;
+    double resetAdx = iADX(Symbol(), timeframe, ADXPeriod, PRICE_CLOSE,
+                           MODE_MAIN, probeShift);
+    if(MathIsValidNumber(resetAdx) && resetAdx >= 0 &&
+       resetAdx <= ADXThreshold) return(true);
+  }
+  return(false);
+}
+
+double ValidateFixedLot(double requestedLot, int orderType) {
+  double volumeStep = MarketInfo(Symbol(), MODE_LOTSTEP);
+  double minimumLot = MarketInfo(Symbol(), MODE_MINLOT);
+  double maximumLot = MarketInfo(Symbol(), MODE_MAXLOT);
+  if(!MathIsValidNumber(volumeStep) || volumeStep <= 0) return(0);
+  if(!MathIsValidNumber(minimumLot) || minimumLot <= 0) return(0);
+  if(!MathIsValidNumber(maximumLot) || maximumLot <= 0) return(0);
+  if(!MathIsValidNumber(requestedLot) || requestedLot <= 0) return(0);
+  int volumeDigits = 0;
+  double scaledStep = volumeStep;
+  for(int digitAttempt=0; digitAttempt<8; digitAttempt++) {
+    if(MathAbs(scaledStep - MathRound(scaledStep)) <= 0.0000001) break;
+    scaledStep *= 10.0;
+    volumeDigits++;
+  }
+  double requestedStepUnits = requestedLot / volumeStep;
+  if(!MathIsValidNumber(requestedStepUnits) || requestedStepUnits <= 0) return(0);
+  if(MathAbs(requestedStepUnits - MathRound(requestedStepUnits)) > 0.0000001) return(0);
+  double lot = NormalizeDouble(requestedLot, volumeDigits);
+  if(!MathIsValidNumber(lot) || lot <= 0) return(0);
+  if(lot > requestedLot + volumeStep * 0.0000001) return(0);
+  if(MathAbs(lot / volumeStep - MathRound(lot / volumeStep)) > 0.0000001) return(0);
+  if(lot < minimumLot) return(0);
+  if(lot > maximumLot) return(0);
+  double finiteMarginProbe = AccountFreeMarginCheck(Symbol(), orderType, lot);
+  if(!MathIsValidNumber(finiteMarginProbe)) return(0);
+  if(finiteMarginProbe <= 0) return(0);
+  return(lot);
+}
+
+double CalculateRiskLot(double entryPrice, double stopLoss,
+                        double spreadPoints, double slippagePoints,
+                        int orderType) {
+  double tickSize = MarketInfo(Symbol(), MODE_TICKSIZE);
+  double tickValue = MarketInfo(Symbol(), MODE_TICKVALUE);
+  double volumeStep = MarketInfo(Symbol(), MODE_LOTSTEP);
+  double minimumLot = MarketInfo(Symbol(), MODE_MINLOT);
+  double maximumLot = MarketInfo(Symbol(), MODE_MAXLOT);
+  if(!MathIsValidNumber(tickSize) || tickSize <= 0) return(0);
+  if(!MathIsValidNumber(tickValue) || tickValue <= 0) return(0);
+  if(!MathIsValidNumber(volumeStep) || volumeStep <= 0) return(0);
+  if(!MathIsValidNumber(minimumLot) || minimumLot <= 0) return(0);
+  if(!MathIsValidNumber(maximumLot) || maximumLot <= 0) return(0);
+  if(!MathIsValidNumber(entryPrice) || entryPrice <= 0) return(0);
+  if(!MathIsValidNumber(stopLoss) || stopLoss <= 0) return(0);
+  if(!MathIsValidNumber(spreadPoints) || spreadPoints < 0) return(0);
+  if(!MathIsValidNumber(slippagePoints) || slippagePoints < 0) return(0);
+  // MT4 MODE_TICKSIZE is expressed in points; convert it to price units once.
+  double priceTick = tickSize * Point;
+  if(!MathIsValidNumber(priceTick) || priceTick <= 0) return(0);
+  double stopDistance = MathAbs(entryPrice - stopLoss);
+  if(!MathIsValidNumber(stopDistance) || stopDistance <= 0) return(0);
+  double executionCostDistance = (spreadPoints + slippagePoints) * Point;
+  if(!MathIsValidNumber(executionCostDistance) || executionCostDistance < 0) return(0);
+  double worstCaseDistance = stopDistance + executionCostDistance;
+  if(!MathIsValidNumber(worstCaseDistance) || worstCaseDistance <= 0) return(0);
+  double riskMoney = AccountEquity() * RiskPercent / 100.0;
+  if(!MathIsValidNumber(riskMoney) || riskMoney <= 0) return(0);
+  double lossPerLotAtSL = (worstCaseDistance / priceTick) * tickValue;
+  if(!MathIsValidNumber(lossPerLotAtSL) || lossPerLotAtSL <= 0) return(0);
+  double flooredLot = MathFloor((riskMoney / lossPerLotAtSL) / volumeStep) * volumeStep;
+  if(!MathIsValidNumber(flooredLot) || flooredLot <= 0) return(0);
+  int volumeDigits = 0;
+  double scaledStep = volumeStep;
+  for(int digitAttempt=0; digitAttempt<8; digitAttempt++) {
+    if(MathAbs(scaledStep - MathRound(scaledStep)) <= 0.0000001) break;
+    scaledStep *= 10.0;
+    volumeDigits++;
+  }
+  double lot = NormalizeDouble(flooredLot, volumeDigits);
+  if(!MathIsValidNumber(lot) || lot <= 0) return(0);
+  if(MathAbs(lot / volumeStep - MathRound(lot / volumeStep)) > 0.0000001) return(0);
+  if(lot < minimumLot) return(0);
+  if(lot > maximumLot) return(0);
+  double worstCaseLoss = lot * lossPerLotAtSL;
+  if(!MathIsValidNumber(worstCaseLoss) || worstCaseLoss <= 0) return(0);
+  if(worstCaseLoss > riskMoney) return(0);
+  double finiteMarginProbe = AccountFreeMarginCheck(Symbol(), orderType, lot);
+  if(!MathIsValidNumber(finiteMarginProbe)) return(0);
+  if(finiteMarginProbe <= 0) return(0);
+  if(AccountFreeMarginCheck(Symbol(), orderType, lot) <= 0) return(0);
+  return(lot);
+}
+
+int ManageExistingOrders(int timeframe) {
+  int managementAction = MANAGED_ACTION_NONE;
+  RefreshRates();
+  double tickSize = MarketInfo(Symbol(), MODE_TICKSIZE);
+  if(!MathIsValidNumber(tickSize) || tickSize <= 0) return(managementAction);
+  // MT4 MODE_TICKSIZE is expressed in points; convert it to price units once.
+  double priceTick = tickSize * Point;
+  if(!MathIsValidNumber(priceTick) || priceTick <= 0) return(managementAction);
+  double stopLevel = MarketInfo(Symbol(), MODE_STOPLEVEL);
+  double freezeLevel = MarketInfo(Symbol(), MODE_FREEZELEVEL);
+  if(!MathIsValidNumber(stopLevel) || stopLevel < 0) return(managementAction);
+  if(!MathIsValidNumber(freezeLevel) || freezeLevel < 0) return(managementAction);
+  double brokerFloor = (MathMax(stopLevel, freezeLevel) + ExecutionBufferPoints) * Point;
+  if(!MathIsValidNumber(brokerFloor) || brokerFloor <= 0) return(managementAction);
+  string managedProfileTag = BuildManagedProfileTag(timeframe);
+  for(int orderIndex=OrdersTotal()-1; orderIndex>=0; orderIndex--) {
+    if(!OrderSelect(orderIndex, SELECT_BY_POS, MODE_TRADES)) continue;
+    if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
+    if(StringFind(OrderComment(), managedProfileTag, 0) != 0) continue;
+    if((OrderType() == OP_BUYSTOP || OrderType() == OP_SELLSTOP) &&
+       OrderExpiration() > 0 && TimeCurrent() >= OrderExpiration()) {
+      ResetLastError();
+      bool deleteSucceeded = OrderDelete(OrderTicket());
+      if(!deleteSucceeded) Print("Linda pending cancellation failed. error=", GetLastError());
+      if(deleteSucceeded) managementAction = MANAGED_ACTION_CANCELLED;
+      continue;
+    }
+    if(OrderType() == OP_BUY) {
+      int swingLowShift = iLowest(Symbol(), timeframe, MODE_LOW, SwingLookbackBars, 1);
+      if(swingLowShift < 1) continue;
+      double successiveSwingLow = iLow(Symbol(), timeframe, swingLowShift);
+      double successiveSwingStop = NormalizePriceDownToTick(successiveSwingLow - ExecutionBufferPoints * Point, priceTick);
+      if(successiveSwingStop <= 0 || successiveSwingStop >= Bid - brokerFloor) continue;
+      if(OrderStopLoss() > 0 && successiveSwingStop <= OrderStopLoss()) continue;
+      ResetLastError();
+      bool modifySucceeded = OrderModify(OrderTicket(), OrderOpenPrice(), successiveSwingStop,
+                                         OrderTakeProfit(), 0);
+      if(!modifySucceeded) Print("Linda long trailing stop failed. error=", GetLastError());
+    } else if(OrderType() == OP_SELL) {
+      int swingHighShift = iHighest(Symbol(), timeframe, MODE_HIGH, SwingLookbackBars, 1);
+      if(swingHighShift < 1) continue;
+      double successiveSwingHigh = iHigh(Symbol(), timeframe, swingHighShift);
+      double successiveSwingStop = NormalizePriceUpToTick(successiveSwingHigh + ExecutionBufferPoints * Point, priceTick);
+      if(successiveSwingStop <= Ask + brokerFloor) continue;
+      if(OrderStopLoss() > 0 && successiveSwingStop >= OrderStopLoss()) continue;
+      ResetLastError();
+      bool modifySucceeded = OrderModify(OrderTicket(), OrderOpenPrice(), successiveSwingStop,
+                                         OrderTakeProfit(), 0);
+      if(!modifySucceeded) Print("Linda short trailing stop failed. error=", GetLastError());
+    }
+  }
+  return(managementAction);
+}
+
+void OnTick() {
+  static datetime lastBar = 0;
+  int timeframe = SignalTimeframe;
+  if(timeframe <= 0) timeframe = Period();
+  datetime currentBar = iTime(Symbol(), timeframe, 0);
+  if(currentBar <= 0) return;
+  if(currentBar == lastBar) return;
+  if(lastBar == 0) { lastBar = currentBar; return; }
+  lastBar = currentBar;
+  int managementAction = ManageExistingOrders(timeframe);
+
+  if(PositionSizingMode < POSITION_SIZING_FIXED_LOT) return;
+  if(PositionSizingMode > POSITION_SIZING_PERCENT_EQUITY) return;
+  if(!TradeOnNewBar || BreakEven || PartialClose) return;
+  if(iBars(Symbol(), timeframe) < MathMax(ADXPeriod, SMAPeriod) + SwingLookbackBars + 4) return;
+  datetime latestClosedBar = iTime(Symbol(), timeframe, 1);
+  if(latestClosedBar <= 0) return;
+  double latestClosedPrice = iClose(Symbol(), timeframe, 1);
+  if(!MathIsValidNumber(latestClosedPrice) || latestClosedPrice <= 0) return;
+  double currentSpread = MarketInfo(Symbol(), MODE_SPREAD);
+  if(!MathIsValidNumber(currentSpread) || currentSpread < 0) return;
+  if(currentSpread > MaxSpreadPoints) return;
+  double adxCurrent = iADX(Symbol(), timeframe, ADXPeriod, PRICE_CLOSE, MODE_MAIN, SignalBarShift);
+  double adxPrevious = iADX(Symbol(), timeframe, ADXPeriod, PRICE_CLOSE, MODE_MAIN, SignalBarShift + 1);
+  double smaCurrent = iMA(Symbol(), timeframe, SMAPeriod, 0, MODE_SMA, PRICE_CLOSE, SignalBarShift);
+  double smaPrevious = iMA(Symbol(), timeframe, SMAPeriod, 0, MODE_SMA, PRICE_CLOSE, SignalBarShift + 1);
+  double signalHigh = iHigh(Symbol(), timeframe, SignalBarShift);
+  double signalLow = iLow(Symbol(), timeframe, SignalBarShift);
+  double signalClose = iClose(Symbol(), timeframe, SignalBarShift);
+  if(!MathIsValidNumber(adxCurrent) || adxCurrent <= 0) return;
+  if(!MathIsValidNumber(adxPrevious) || adxPrevious <= 0) return;
+  if(!MathIsValidNumber(smaCurrent) || smaCurrent <= 0) return;
+  if(!MathIsValidNumber(smaPrevious) || smaPrevious <= 0) return;
+  if(!MathIsValidNumber(signalHigh) || signalHigh <= 0) return;
+  if(!MathIsValidNumber(signalLow) || signalLow <= 0) return;
+  if(!MathIsValidNumber(signalClose) || signalClose <= 0) return;
+  int managedProfileState = GetManagedProfileState(timeframe);
+  if(managedProfileState == MANAGED_STATE_LIVE) {
+    SetStatusComment("In Position", adxCurrent, smaCurrent, currentSpread,
+                     CountManagedOrders());
+    return;
+  }
+  if(managedProfileState == MANAGED_STATE_BUY_STOP) {
+    SetStatusComment("Pending Buy Stop", adxCurrent, smaCurrent, currentSpread,
+                     CountManagedOrders());
+    return;
+  }
+  if(managedProfileState == MANAGED_STATE_SELL_STOP) {
+    SetStatusComment("Pending Sell Stop", adxCurrent, smaCurrent, currentSpread,
+                     CountManagedOrders());
+    return;
+  }
+  if(CountManagedOrders() >= MaxOpenPositionsPerSymbolMagic) {
+    SetStatusComment("Other Profile Active", adxCurrent, smaCurrent,
+                     currentSpread, CountManagedOrders());
+    return;
+  }
+  if(managementAction == MANAGED_ACTION_CANCELLED) {
+    SetStatusComment("Cancelled Pending Order", adxCurrent, smaCurrent,
+                     currentSpread, CountManagedOrders());
+    return;
+  }
+  // Re-entry is keyed to managed market-order history, so a pending-order
+  // cancellation never masquerades as exiting a live deal. On restart, an
+  // existing close fails closed unless bounded closed-bar history proves that
+  // ADX reset to/below the threshold after that close.
+  bool managedCloseFound = FindLatestManagedMarketClose(timeframe);
+  datetime latestManagedCloseTime = gDetectedManagedCloseTime;
+  int latestManagedCloseTicket = gDetectedManagedCloseTicket;
+  if(gManagedHistoryTruncated) {
+    SetStatusComment("History Review Required", adxCurrent, smaCurrent,
+                     currentSpread, CountManagedOrders());
+    return;
+  }
+  bool newManagedClose = managedCloseFound &&
+      (latestManagedCloseTime > gLastProcessedManagedCloseTime ||
+       (latestManagedCloseTime == gLastProcessedManagedCloseTime &&
+        latestManagedCloseTicket > gLastProcessedManagedCloseTicket));
+  if(!gAdxHistoryInitialized) {
+    gAdxHistoryInitialized = true;
+    if(managedCloseFound) {
+      gLastProcessedManagedCloseTime = latestManagedCloseTime;
+      gLastProcessedManagedCloseTicket = latestManagedCloseTicket;
+      gAdxResetObserved = HasClosedAdxResetAfter(
+          latestManagedCloseTime, timeframe);
+      gAdxRearmRequired = !gAdxResetObserved;
+    }
+  } else if(newManagedClose) {
+    gLastProcessedManagedCloseTime = latestManagedCloseTime;
+    gLastProcessedManagedCloseTicket = latestManagedCloseTicket;
+    gAdxRearmRequired = true;
+    gAdxResetObserved = false;
+  }
+  SetStatusComment("Waiting Trend", adxCurrent, smaCurrent, currentSpread, CountManagedOrders());
+  bool strongTrend = adxCurrent > ADXThreshold && adxCurrent > adxPrevious;
+  if(gAdxRearmRequired) {
+    if(adxCurrent <= ADXThreshold &&
+       latestClosedBar > gLastProcessedManagedCloseTime) {
+      gAdxResetObserved = true;
+      SetStatusComment("Waiting ADX Reset", adxCurrent, smaCurrent, currentSpread, CountManagedOrders());
+      return;
+    }
+    if(!gAdxResetObserved || !strongTrend) return;
+    gAdxRearmRequired = false;
+    gAdxResetObserved = false;
+  }
+  if(!strongTrend) return;
+  double pullbackTolerance = PullbackTolerancePoints * Point;
+  // IMPLEMENTATION_DEFAULT_NOT_SOURCE_FACT: SMA20 slope operationalizes the
+  // brief's "original trend direction" without adding a moving-average crossover.
+  bool directionalUptrend = smaCurrent > smaPrevious;
+  bool directionalDowntrend = smaCurrent < smaPrevious;
+  bool longPullback = directionalUptrend && signalClose > smaCurrent && signalLow <= smaCurrent + pullbackTolerance;
+  bool shortPullback = directionalDowntrend && signalClose < smaCurrent && signalHigh >= smaCurrent - pullbackTolerance;
+  int signal = SIGNAL_NONE;
+  if(longPullback) signal = OP_BUYSTOP;
+  if(shortPullback) signal = CERTIFIED_SELL_STOP_ORDER;
+  if(signal == SIGNAL_NONE) return;
+  SetStatusComment("Pullback Found", adxCurrent, smaCurrent, currentSpread, CountManagedOrders());
+  if(CountManagedOrders() >= MaxOpenPositionsPerSymbolMagic) return;
+
+  RefreshRates();
+  double tickSize = MarketInfo(Symbol(), MODE_TICKSIZE);
+  if(!MathIsValidNumber(tickSize) || tickSize <= 0) return;
+  // MT4 MODE_TICKSIZE is expressed in points; convert it to price units once.
+  double priceTick = tickSize * Point;
+  if(!MathIsValidNumber(priceTick) || priceTick <= 0) return;
+  double brokerStopFloor = (MarketInfo(Symbol(), MODE_STOPLEVEL) + ExecutionBufferPoints) * Point;
+  double brokerFreezeFloor = (MarketInfo(Symbol(), MODE_FREEZELEVEL) + ExecutionBufferPoints) * Point;
+  if(!MathIsValidNumber(brokerStopFloor) || brokerStopFloor <= 0) return;
+  if(!MathIsValidNumber(brokerFreezeFloor) || brokerFreezeFloor <= 0) return;
+  double brokerFloor = MathMax(brokerStopFloor, brokerFreezeFloor);
+  long expirationSeconds = (long)PendingExpirationDays * 86400;
+  if(expirationSeconds <= 0 || expirationSeconds > 315360000) return;
+  datetime pendingExpiration = (datetime)(TimeCurrent() + expirationSeconds);
+  if(pendingExpiration <= TimeCurrent()) return;
+
+  double entryPrice = 0;
+  double stopLoss = 0;
+  double takeProfit = 0;
+  double buyStopLoss = 0;
+  double sellStopLoss = 0;
+  double buyTakeProfit = 0;
+  double sellTakeProfit = 0;
+  string orderComment = BuildManagedProfileTag(timeframe);
+  if(signal == OP_BUYSTOP) {
+    double requestedEntry = signalHigh + ExecutionBufferPoints * Point;
+    entryPrice = NormalizePriceUpToTick(requestedEntry, priceTick);
+    int swingLowShift = iLowest(Symbol(), timeframe, MODE_LOW, SwingLookbackBars, 1);
+    double swingStop = 0;
+    if(swingLowShift >= 1) swingStop = iLow(Symbol(), timeframe, swingLowShift) - ExecutionBufferPoints * Point;
+    double protectedStopDistanceBuy = MathMax(StopLossPoints * Point, brokerFloor);
+    double protectedTakeDistanceBuy = MathMax(TakeProfitPoints * Point, brokerFloor);
+    double fallbackStopBuy = entryPrice - protectedStopDistanceBuy;
+    double rawStopBuy = swingStop;
+    if(rawStopBuy <= 0 || rawStopBuy >= entryPrice - brokerFloor) rawStopBuy = fallbackStopBuy;
+    buyStopLoss = NormalizePriceDownToTick(rawStopBuy, priceTick);
+    buyTakeProfit = NormalizePriceUpToTick(entryPrice + protectedTakeDistanceBuy, priceTick);
+    if(entryPrice <= Ask + brokerFloor || buyStopLoss <= 0 || buyStopLoss >= entryPrice) return;
+    if(buyTakeProfit <= entryPrice) return;
+    if(entryPrice - buyStopLoss < brokerFloor) return;
+    if(buyTakeProfit - entryPrice < brokerFloor) return;
+  } else if(signal == CERTIFIED_SELL_STOP_ORDER) {
+    double requestedEntry = signalLow - ExecutionBufferPoints * Point;
+    entryPrice = NormalizePriceDownToTick(requestedEntry, priceTick);
+    int swingHighShift = iHighest(Symbol(), timeframe, MODE_HIGH, SwingLookbackBars, 1);
+    double swingStop = 0;
+    if(swingHighShift >= 1) swingStop = iHigh(Symbol(), timeframe, swingHighShift) + ExecutionBufferPoints * Point;
+    double protectedStopDistanceSell = MathMax(StopLossPoints * Point, brokerFloor);
+    double protectedTakeDistanceSell = MathMax(TakeProfitPoints * Point, brokerFloor);
+    double fallbackStopSell = entryPrice + protectedStopDistanceSell;
+    double rawStopSell = swingStop;
+    if(rawStopSell <= entryPrice + brokerFloor) rawStopSell = fallbackStopSell;
+    sellStopLoss = NormalizePriceUpToTick(rawStopSell, priceTick);
+    sellTakeProfit = NormalizePriceDownToTick(entryPrice - protectedTakeDistanceSell, priceTick);
+    if(entryPrice <= 0 || entryPrice >= Bid - brokerFloor) return;
+    if(sellStopLoss <= entryPrice || sellTakeProfit <= 0 || sellTakeProfit >= entryPrice) return;
+    if(sellStopLoss - entryPrice < brokerFloor) return;
+    if(entryPrice - sellTakeProfit < brokerFloor) return;
+  }
+  double stopDistanceBuy = MathAbs(entryPrice - buyStopLoss);
+  double stopDistanceSell = MathAbs(sellStopLoss - entryPrice);
+  double takeDistanceBuy = MathAbs(buyTakeProfit - entryPrice);
+  double takeDistanceSell = MathAbs(entryPrice - sellTakeProfit);
+  double selectedStopDistance = signal == OP_BUYSTOP ? stopDistanceBuy : stopDistanceSell;
+  double selectedTakeDistance = signal == OP_BUYSTOP ? takeDistanceBuy : takeDistanceSell;
+  if(!MathIsValidNumber(selectedStopDistance) || selectedStopDistance <= 0) return;
+  if(!MathIsValidNumber(selectedTakeDistance) || selectedTakeDistance <= 0) return;
+  stopLoss = signal == OP_BUYSTOP ? entryPrice - stopDistanceBuy : entryPrice + stopDistanceSell;
+  takeProfit = signal == OP_BUYSTOP ? entryPrice + takeDistanceBuy : entryPrice - takeDistanceSell;
+  int marginSide = signal == OP_BUYSTOP ? OP_BUY : OP_SELL;
+  if(PositionSizingMode == POSITION_SIZING_FIXED_LOT)
+    gOrderLot = ValidateFixedLot(FixedLot, marginSide);
+  if(PositionSizingMode == POSITION_SIZING_PERCENT_EQUITY)
+    gOrderLot = CalculateRiskLot(entryPrice, stopLoss, currentSpread,
+                                 SlippagePoints, marginSide);
+  if(gOrderLot <= 0) return;
+  if(AccountFreeMarginCheck(Symbol(), marginSide, gOrderLot) <= 0) return;
+  if(CountManagedOrders() >= MaxOpenPositionsPerSymbolMagic) return;
+  if(signal == OP_BUYSTOP)
+    SetStatusComment("Submitting Buy Stop", adxCurrent, smaCurrent, currentSpread, CountManagedOrders());
+  if(signal == CERTIFIED_SELL_STOP_ORDER)
+    SetStatusComment("Submitting Sell Stop", adxCurrent, smaCurrent, currentSpread, CountManagedOrders());
+  ResetLastError();
+  int orderTicket = OrderSend(Symbol(), signal, gOrderLot, entryPrice, SlippagePoints,
+                              stopLoss, takeProfit, orderComment,
+                              MagicNumber, pendingExpiration);
+  if(orderTicket < 0) {
+    SetStatusComment("Order Failed", adxCurrent, smaCurrent, currentSpread, CountManagedOrders());
+    Print("Linda pending stop failed. error=", GetLastError());
+    return;
+  }
+  if(signal == OP_BUYSTOP)
+    SetStatusComment("Pending Buy Stop", adxCurrent, smaCurrent, currentSpread, CountManagedOrders());
+  if(signal == CERTIFIED_SELL_STOP_ORDER)
+    SetStatusComment("Pending Sell Stop", adxCurrent, smaCurrent, currentSpread, CountManagedOrders());
+}
+'''
+    source = source.replace("__BRIEF_DIGEST__", brief_digest).replace(
+        "__PROFILE_VERSION__",
+        EA_FACTORY_LINDA_HOLY_GRAIL_CERTIFIED_PROFILE_VERSION,
+    )
+    if len(source) > EA_FACTORY_SEMANTIC_REPAIR_SCAFFOLD_MAX_CHARS:
+        return ""
+    source_bytes = source.encode("utf-8", errors="strict")
+    manifest = build_compact_ea_source_manifest(
+        source,
+        strategy_brief=strategy_brief,
+        strategy_brief_digest=brief_digest,
+        strategy_spec_digest=spec_digest,
+        source_digest=hashlib.sha256(source_bytes).hexdigest(),
+        target_platform="mt4",
+    )
+    if manifest.get("complete") is not True:
+        return ""
+    if not _ea_factory_linda_holy_grail_scaffold_meets_mission(source):
+        return ""
+    return source
+
+
+def _build_ea_factory_source_semantic_repair_scaffold(
+    strategy_brief: object,
+    *,
+    strategy_brief_digest: object,
+    strategy_spec_digest: object,
+    target_platform: object,
+) -> str:
+    """Return a certified baseline only for an exact reviewed strategy profile."""
+
+    can_slim = _build_ea_factory_can_slim_source_semantic_repair_scaffold(
+        strategy_brief,
+        strategy_brief_digest=strategy_brief_digest,
+        strategy_spec_digest=strategy_spec_digest,
+        target_platform=target_platform,
+    )
+    if can_slim:
+        return can_slim
+    return _build_ea_factory_linda_holy_grail_source_semantic_repair_scaffold(
+        strategy_brief,
+        strategy_brief_digest=strategy_brief_digest,
+        strategy_spec_digest=strategy_spec_digest,
+        target_platform=target_platform,
+    )
+
+
+def _ea_factory_certified_scaffold_profile(
+    strategy_brief_digest: object,
+    source: object,
+) -> str:
+    """Return the attested profile version for a digest-bound scaffold."""
+
+    digest = str(strategy_brief_digest or "").strip().lower()
+    if (
+        digest == EA_FACTORY_CAN_SLIM_CERTIFIED_BRIEF_DIGEST
+        and _ea_factory_can_slim_scaffold_meets_mission(source)
+    ):
+        return EA_FACTORY_CAN_SLIM_CERTIFIED_PROFILE_VERSION
+    if (
+        digest == EA_FACTORY_LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST
+        and _ea_factory_linda_holy_grail_scaffold_meets_mission(source)
+    ):
+        return EA_FACTORY_LINDA_HOLY_GRAIL_CERTIFIED_PROFILE_VERSION
+    return ""
+
+
 class EAFactorySourceSemanticValidationError(ValueError):
     """Carry bounded validator context into exactly one in-memory repair attempt."""
 
@@ -8576,8 +9434,10 @@ def preflight_ea_factory_source_semantics(
     )
     explicit_mission_guardrails_required = bool(
         binding["platform"] == "mt4"
-        and binding["strategyBriefDigest"]
-        == EA_FACTORY_CAN_SLIM_CERTIFIED_BRIEF_DIGEST
+        and binding["strategyBriefDigest"] in {
+            EA_FACTORY_CAN_SLIM_CERTIFIED_BRIEF_DIGEST,
+            EA_FACTORY_LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST,
+        }
     )
     repair_scaffold = _build_ea_factory_source_semantic_repair_scaffold(
         binding["strategyBrief"],
@@ -10254,11 +11114,19 @@ def run_codex(
                             # preflight again here. This is not another AI attempt
                             # and never bypasses the semantic gate.
                             certified_raw = ""
+                            certified_profile_version = (
+                                _ea_factory_certified_scaffold_profile(
+                                    EA_FACTORY_CAN_SLIM_CERTIFIED_BRIEF_DIGEST,
+                                    error.repair_scaffold,
+                                )
+                                or _ea_factory_certified_scaffold_profile(
+                                    EA_FACTORY_LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST,
+                                    error.repair_scaffold,
+                                )
+                            )
                             if (
                                 error.repair_scaffold
-                                and _ea_factory_can_slim_scaffold_meets_mission(
-                                    error.repair_scaffold
-                                )
+                                and certified_profile_version
                                 and isinstance(error.validated_candidate, dict)
                                 and type(error.validated_candidate.get("fileName"))
                                 is str
@@ -10296,7 +11164,7 @@ def run_codex(
                                     "certifiedFallbackSucceeded": True,
                                     "sourceOrigin": "backend_certified_fallback",
                                     "certifiedFallbackProfileVersion": (
-                                        EA_FACTORY_CAN_SLIM_CERTIFIED_PROFILE_VERSION
+                                        certified_profile_version
                                     ),
                                     "certifiedFallbackSourceDigest": hashlib.sha256(
                                         error.repair_scaffold.encode(

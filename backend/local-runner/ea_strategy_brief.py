@@ -77,6 +77,28 @@ IMPLEMENTATION_DEFAULT_MARKER = "IMPLEMENTATION_DEFAULT_NOT_SOURCE_FACT"
 RECOVERY_POSITION_CAP_BINDING_MARKER = (
     "RECOVERY_POSITION_CAP_DERIVED_FROM_RECOVERY_RULES"
 )
+LINDA_HOLY_GRAIL_CERTIFIED_PROFILE_VERSION = (
+    "linda-holy-grail-mt4-certified-v3"
+)
+LINDA_HOLY_GRAIL_LEGACY_BRIEF_DIGEST = (
+    "8aac40a413af9c5fde16bde846715df202da6f16f68b968b3a8530b92b27e538"
+)
+LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST = (
+    "877de2f4dd4e6081fe7ea886eca309099da4e9c2134f433d9cd079f1b1f16a42"
+)
+LINDA_HOLY_GRAIL_DIRECTION_COMPONENT = "entryRules.direction"
+LINDA_HOLY_GRAIL_DIRECTION_RULE = (
+    f"[{IMPLEMENTATION_DEFAULT_MARKER}]"
+    f"[POLICY={LINDA_HOLY_GRAIL_CERTIFIED_PROFILE_VERSION}]"
+    f"[COMPONENT={LINDA_HOLY_GRAIL_DIRECTION_COMPONENT}] "
+    "แหล่งข้อมูลระบุให้เทรดตามทิศทางเดิมแต่ไม่ได้กำหนดสูตรแยกขาขึ้น/ขาลง "
+    "สำหรับ EA profile นี้ให้ operationalize ทิศทางเดิมด้วย slope ของ SMA(20) "
+    "บนแท่งปิดเท่านั้น: Long ต้องมี "
+    "smaCurrent=SMA20[SignalBarShift] > "
+    "smaPrevious=SMA20[SignalBarShift+1]; Short ต้องมี smaCurrent < smaPrevious. "
+    "ให้คงเงื่อนไข close อยู่เหนือ/ใต้ SMA และ pullback แตะหรือเข้าใกล้ SMA "
+    "เดิมร่วมกัน กฎนี้ไม่ใช่ moving-average crossover และไม่เพิ่ม +DI/-DI"
+)
 
 
 def _implementation_default_tag(component: str) -> str:
@@ -1388,6 +1410,81 @@ def compute_strategy_brief_digest(value: object) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def upgrade_linda_holy_grail_brief_for_certified_profile(value: object) -> dict:
+    """Derive the v3 Linda profile only from the exact historical brief.
+
+    This helper deliberately does not run from general brief normalization or
+    historical Build/Spec verification.  New-source ingestion may call it
+    before source identity is assigned, leaving all previously persisted
+    evidence immutable and digest-readable.
+    """
+
+    normalized = normalize_strategy_brief(value)
+    current_digest = compute_strategy_brief_digest(normalized)
+    if current_digest == LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST:
+        if LINDA_HOLY_GRAIL_DIRECTION_RULE not in normalized["entryRules"]:
+            raise StrategyBriefValidationError([
+                {
+                    "code": "LINDA_CERTIFIED_PROFILE_DIGEST_COLLISION",
+                    "path": "$.entryRules",
+                    "message": "Certified Linda digest has no exact direction rule",
+                }
+            ])
+        return normalized
+    if (
+        current_digest != LINDA_HOLY_GRAIL_LEGACY_BRIEF_DIGEST
+        or normalized.get("systemName")
+        != "Linda Bradford Raschke Holy Grail Pullback"
+    ):
+        return normalized
+    upgraded = dict(normalized)
+    upgraded["entryRules"] = (
+        str(normalized["entryRules"]).rstrip()
+        + "\n"
+        + LINDA_HOLY_GRAIL_DIRECTION_RULE
+    )
+    upgraded = normalize_strategy_brief(upgraded)
+    if (
+        compute_strategy_brief_digest(upgraded)
+        != LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST
+    ):
+        raise StrategyBriefValidationError([
+            {
+                "code": "LINDA_CERTIFIED_PROFILE_DIGEST_MISMATCH",
+                "path": "$.entryRules",
+                "message": "Derived Linda profile does not match its certified digest",
+            }
+        ])
+    return upgraded
+
+
+def linda_holy_grail_certified_profile_metadata(value: object) -> dict | None:
+    """Return exact v3 profile evidence, never a heuristic classification."""
+
+    try:
+        normalized = normalize_strategy_brief(value)
+    except StrategyBriefValidationError:
+        return None
+    if (
+        normalized.get("systemName")
+        != "Linda Bradford Raschke Holy Grail Pullback"
+        or compute_strategy_brief_digest(normalized)
+        != LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST
+        or LINDA_HOLY_GRAIL_DIRECTION_RULE not in normalized["entryRules"]
+    ):
+        return None
+    return {
+        "profileVersion": LINDA_HOLY_GRAIL_CERTIFIED_PROFILE_VERSION,
+        "derivedFromStrategyBriefDigest": LINDA_HOLY_GRAIL_LEGACY_BRIEF_DIGEST,
+        "strategyBriefDigest": LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST,
+        "classification": IMPLEMENTATION_DEFAULT_MARKER,
+        "component": LINDA_HOLY_GRAIL_DIRECTION_COMPONENT,
+        "rule": "SMA20_SLOPE",
+        "longPredicate": "smaCurrent > smaPrevious",
+        "shortPredicate": "smaCurrent < smaPrevious",
+    }
 
 
 def project_strategy_brief_contract(value: object) -> dict:
@@ -6042,6 +6139,11 @@ __all__ = [
     "CONTENT_FIELDS",
     "EA_SOURCE_MANIFEST_SCHEMA_VERSION",
     "INDICATOR_SOURCE_MANIFEST_SCHEMA_VERSION",
+    "LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST",
+    "LINDA_HOLY_GRAIL_CERTIFIED_PROFILE_VERSION",
+    "LINDA_HOLY_GRAIL_DIRECTION_COMPONENT",
+    "LINDA_HOLY_GRAIL_DIRECTION_RULE",
+    "LINDA_HOLY_GRAIL_LEGACY_BRIEF_DIGEST",
     "StrategyBriefValidationError",
     "analyze_compact_ea_source",
     "analyze_compact_indicator_source",
@@ -6049,5 +6151,7 @@ __all__ = [
     "build_compact_indicator_source_manifest",
     "normalize_strategy_brief",
     "compute_strategy_brief_digest",
+    "linda_holy_grail_certified_profile_metadata",
     "project_strategy_brief_contract",
+    "upgrade_linda_holy_grail_brief_for_certified_profile",
 ]

@@ -38,9 +38,11 @@ class EaFactoryFrontendTests(unittest.TestCase):
                 return candidate
         self.fail("Node.js runtime is required")
 
-    def test_factory_has_seven_manual_presentation_tabs_and_six_backend_stages(self):
+    def test_factory_has_three_operator_pages_and_keeps_seven_internal_stages(self):
         constants = self.block("const EA_FACTORY_STAGE_IDS", "const TRADING_RESEARCH_MAX_OHLC_ROWS")
-        ui_ids = re.findall(r'^\s+"([a-z_]+)",?$', constants[constants.index("Object.freeze(["):constants.index("]);", constants.index("Object.freeze(["))], re.M)
+        stage_start = constants.index("const EA_FACTORY_STAGE_IDS")
+        stage_end = constants.index("]);", stage_start)
+        ui_ids = re.findall(r'^\s+"([a-z_]+)",?$', constants[stage_start:stage_end], re.M)
         self.assertEqual(
             ui_ids,
             [
@@ -62,7 +64,83 @@ class EaFactoryFrontendTests(unittest.TestCase):
             "artifacts_report": "final_report",
         }.items():
             self.assertIn(f'{ui_id}: "{backend_id}"', constants)
-        self.assertIn("Manual Stage-by-Stage • ไม่มี Scheduler / Loop", self.main)
+        page_line = re.search(r"const EA_FACTORY_PAGE_IDS = Object\.freeze\(\[([^\]]+)\]\);", constants)
+        self.assertIsNotNone(page_line)
+        self.assertEqual(re.findall(r'"([a-z_]+)"', page_line.group(1)), ["source", "progress", "result"])
+        for label in (
+            "1 เลือกระบบและเริ่มเขียน",
+            "2 สถานะการทำงาน",
+            "3 ตรวจโค้ดและเสร็จสิ้น",
+        ):
+            self.assertIn(label, constants)
+        fallback = self.block("const WORKFLOW_DASHBOARD_FALLBACKS", "  right_tool_console: {")
+        self.assertIn("tabs: EA_FACTORY_PAGE_IDS.map", fallback)
+        self.assertNotIn("tabs: EA_FACTORY_STAGE_IDS.map", fallback)
+        dashboard = self.block("function normalizeWorkflowDashboard", "function getWorkflowSelectedTab")
+        self.assertIn("presentationTabs = EA_FACTORY_PAGE_IDS.map", dashboard)
+        self.assertNotIn("presentationTabs = EA_FACTORY_STAGE_IDS.map", dashboard)
+
+    def test_three_operator_pages_are_navigable_and_route_to_the_correct_content(self):
+        selected = self.block("function getWorkflowSelectedTab", "function renderWorkflowTabs")
+        self.assertIn("eaFactoryPreferredPageId", selected)
+        tabs = self.block("function renderWorkflowTabs", "function workflowAvailabilityCopy")
+        self.assertIn('dataset.eaFactoryPages = factoryPages ? "true" : "false"', tabs)
+        self.assertIn("const factoryLocked = false", tabs)
+        self.assertIn("button.disabled = Boolean(factoryLocked)", tabs)
+        panel = self.block("function renderEaFactoryPanel", "function validateEaFactoryBusyModel")
+        self.assertIn('tabId === "source"', panel)
+        self.assertIn('tabId === "progress"', panel)
+        self.assertIn('tabId === "result"', panel)
+        self.assertNotIn('tabId === "generate"', panel)
+        page_status = self.block("function eaFactoryPageStatus", "function eaFactoryPreferredPageId")
+        self.assertIn("if (!domain.authoritative)", page_status)
+        self.assertIn('pageId === "source" ? "blocked" : "unknown"', page_status)
+        preferred = self.block("function eaFactoryPreferredPageId", "function createEaFactoryPageHeader")
+        self.assertIn('if (domain.backendBusy) return "progress"', preferred)
+        self.assertIn('if (runStatus === "completed" || finalStatus === "completed") return "result"', preferred)
+        self.assertIn('return "source"', preferred)
+        self.assertNotIn('return "progress";', preferred[preferred.index("const runStatus"):])
+        self.assertIn('.workflow-tabs[data-ea-factory-pages="true"]', self.styles)
+        self.assertIn("grid-template-columns: repeat(3, minmax(0, 1fr))", self.styles)
+        tab_switch = self.block("function setWorkflowDashboardTab", "function workflowActionFormPayload")
+        self.assertIn(
+            "[EA_OPTIMIZATION_LAB_PROP_ID, EA_FACTORY_PROP_ID].includes(propId)",
+            tab_switch,
+        )
+        self.assertIn("scrollArea.scrollTop = 0", tab_switch)
+
+    def test_preferred_page_treats_noncompleted_busy_null_runs_as_history(self):
+        helper = self.block("function eaFactoryPreferredPageId", "function createEaFactoryPageHeader")
+        script = "\n".join([
+            helper,
+            "const page = (status, busy=null, finalStatus='locked') => eaFactoryPreferredPageId({backendBusy:busy,oneClick:{run:{status}},stages:[{id:'artifacts_report',status:finalStatus}]});",
+            "process.stdout.write(JSON.stringify({",
+            "  busy:page('running',{buildId:'live'}),",
+            "  failed:page('failed'), blocked:page('blocked'), awaiting:page('awaiting_visible_terminal'),",
+            "  queued:page('queued'), running:page('running'), completed:page('completed'), finalCompleted:page('idle',null,'completed'),",
+            "}));",
+        ])
+        completed = subprocess.run(
+            [self.node_binary(), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "busy": "progress",
+                "failed": "source",
+                "blocked": "source",
+                "awaiting": "source",
+                "queued": "source",
+                "running": "source",
+                "completed": "result",
+                "finalCompleted": "result",
+            },
+        )
 
     def test_sheet_source_uses_exact_a_j_strategy_brief_and_posts_opaque_source_record_id(self):
         constants = self.block("const EA_FACTORY_SHEET_COLUMNS", "const EA_FACTORY_LEGACY_SHEET_COLUMNS")
@@ -164,6 +242,8 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn('"manual_stage_by_stage"', self.main)
         self.assertIn("root.scheduled === false", normalizer)
         self.assertIn("dedicatedReadModelFresh", normalizer)
+        self.assertIn("state.eaFactoryReadModel.stale !== true", normalizer)
+        self.assertIn("root.snapshotStale !== true", normalizer)
         self.assertNotIn("report.eaFactory", normalizer)
         self.assertNotIn("latestReportMetrics", normalizer)
         self.assertIn("const canRun = raw?.canAdvance === true", self.main)
@@ -175,7 +255,8 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn('status: "locked"', normalizer)
 
         tabs = self.block("function renderWorkflowTabs", "function workflowAvailabilityCopy")
-        self.assertIn('["locked", "unknown"].includes(factoryStage.status)', tabs)
+        self.assertIn("eaFactoryPageStatus", tabs)
+        self.assertIn("const factoryLocked = false", tabs)
         self.assertIn("button.disabled = Boolean(factoryLocked)", tabs)
         operational = self.block("function renderEaFactoryOperationalStage", "function renderEaFactoryPanel")
         self.assertIn("stage?.canRun === true", operational)
@@ -195,14 +276,16 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn("Not Applicable สำหรับ Pine Script", operational)
         self.assertIn("ระบบไม่สร้างผล Backtest ทดแทน", operational)
 
-    def test_completed_or_attention_build_does_not_lock_factory_forever(self):
+    def test_only_authoritative_backend_busy_locks_new_factory_work(self):
         normalizer = self.block("function normalizeEaFactoryDomain", "function normalizeWorkflowDomainData")
-        self.assertIn('"completed"', normalizer)
-        self.assertIn('"attention_required"', normalizer)
-        self.assertIn('"blocked"', normalizer)
-        self.assertIn("canStartNewBuild", normalizer)
+        self.assertIn("const backendBusyActive = Object.keys(backendBusy).length > 0", normalizer)
+        self.assertIn("const busyBuild = backendBusyActive ? builds.find", normalizer)
         self.assertIn('const oneClickOwnsBuild = ["queued", "running", "waiting_ai", "awaiting_visible_terminal"]', normalizer)
-        self.assertIn("const canStartNewBuild = !backendBusyActive && !oneClickOwnsBuild", normalizer)
+        self.assertIn("const canStartNewBuild = !backendBusyActive", normalizer)
+        self.assertIn("historicalRunLooksActive: !backendBusyActive && oneClickOwnsBuild", normalizer)
+        self.assertNotIn("const canStartNewBuild = !backendBusyActive && !oneClickOwnsBuild", normalizer)
+        self.assertIn("backendBusyActive ? matchingBusyRootBuild : requestedBuild", normalizer)
+        self.assertIn("backendBusyActive ? null : builds[0]", normalizer)
         source = self.block("function renderEaFactorySourceStage", "function renderEaFactorySpecStage")
         spec = self.block("function renderEaFactorySpecStage", "function renderEaFactoryTerminalPicker")
         self.assertIn("if (domain.canStartNewBuild)", source)
@@ -211,10 +294,10 @@ class EaFactoryFrontendTests(unittest.TestCase):
 
     def test_running_build_keeps_its_exact_source_record_bound(self):
         selector = self.block("function eaFactorySelectedSource", "function createEaFactoryNotice")
-        self.assertIn("!domain.canStartNewBuild && domain.activeBuild?.sourceRecordId", selector)
-        self.assertIn("if (!domain.canStartNewBuild && requestedRecord) return requestedRecord", selector)
+        self.assertIn("domain.backendBusy && domain.activeBuild?.sourceRecordId", selector)
+        self.assertIn("if (domain.backendBusy && requestedRecord) return requestedRecord", selector)
         source = self.block("function renderEaFactorySourceStage", "function renderEaFactorySpecStage")
-        self.assertIn("select.disabled = !domain.canStartNewBuild", source)
+        self.assertIn("select.disabled = !domain.authoritative || !domain.canStartNewBuild", source)
 
     def test_legacy_and_non_ready_sources_are_read_only_and_never_selected_for_new_build(self):
         selector = self.block("function eaFactorySelectedSource", "function createEaFactoryNotice")
@@ -278,7 +361,7 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn("legacy", gate)
         self.assertNotIn("innerHTML", gate)
 
-    def test_build_history_is_selectable_and_terminal_status_is_read_only_in_left_rail(self):
+    def test_build_history_is_selectable_and_terminal_status_is_not_a_pending_task(self):
         self.assertIn('selectedBuildId: ""', self.main)
         normalizer = self.block("function normalizeEaFactoryDomain", "function normalizeWorkflowDomainData")
         self.assertIn("state.modal.eaFactory.selectedBuildId", normalizer)
@@ -293,15 +376,25 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn('row.setAttribute("aria-pressed"', operational)
         self.assertIn("state.modal.eaFactory.selectedBuildId = historyBuildId", operational)
         self.assertIn("กำลังดูไฟล์และประวัติแบบ Read-only", operational)
-        tabs = self.block("function renderWorkflowTabs", "function workflowAvailabilityCopy")
-        self.assertIn('tab.id === "artifacts_report"', tabs)
-        self.assertIn("factoryReadOnlyHistory", tabs)
-        navigation = self.block("function setWorkflowDashboardTab", "function workflowActionFormPayload")
-        self.assertIn("readOnlyHistory", navigation)
-        self.assertIn('selected.id === "artifacts_report"', navigation)
+        result = self.block("function renderEaFactoryResultPage", "function renderEaFactoryPanel")
+        self.assertIn('renderEaFactoryOperationalStage(section, "artifacts_report"', result)
+        self.assertIn("state.modal.workflowTabs[propId] = selected.id", self.main)
         rail = self.block("function renderWorkflowSettingsRail", "function getWorkflowHandoffReports")
         self.assertIn("subject?.id === EA_FACTORY_PROP_ID", rail)
+        self.assertIn("createEaFactoryRailTaskStatus", rail)
+        self.assertIn('selectedPageId === "progress" || factoryDomain.backendBusy', rail)
         self.assertIn("renderEaFactoryTerminalPicker(terminalRail", rail)
+        rail_status = self.block("function createEaFactoryRailTaskStatus", "function createFxNewsRailFact")
+        self.assertIn("ไม่มีงาน EA ค้างอยู่", rail_status)
+        self.assertIn("Backend ยืนยัน busy=null", rail_status)
+        self.assertIn("const staleBusy = hasBusySnapshot && domain.authoritative !== true", rail_status)
+        self.assertIn("const authorityPending = domain.authoritative !== true && !requestInFlight", rail_status)
+        self.assertIn('authorityPending ? "checking" : "ready"', rail_status)
+        self.assertIn("เป็นสถานะครั้งล่าสุดที่เคยยืนยัน ไม่ใช่สถานะสด", rail_status)
+        self.assertIn("readError?.message", rail_status)
+        self.assertIn("ข้อมูลล่าสุดที่เก็บไว้เมื่อ", rail_status)
+        self.assertIn("นี่คือสถานะ Terminal ไม่ใช่งาน EA ที่ค้าง", rail_status)
+        self.assertIn('.ea-factory-rail-task-status[data-status="checking"]', self.styles)
         picker = self.block("function renderEaFactoryTerminalPicker", "function renderEaFactoryOperationalStage")
         self.assertIn("เลือกชนิดโค้ดในขั้น Strategy Spec ก่อน", picker)
         self.assertIn("Array.isArray(domain.terminals)", picker)
@@ -318,12 +411,87 @@ class EaFactoryFrontendTests(unittest.TestCase):
         merge = self.block("function mergeEaFactoryReadModel", "async function loadEaFactoryReadModel")
         self.assertIn("state.eaFactoryReadModel.payload = model", merge)
         self.assertIn("state.eaFactoryReadModel.lastLoadedAt = Date.now()", merge)
-        self.assertIn("state.eaFactoryReadModel.stale = false", merge)
+        self.assertIn("state.eaFactoryReadModel.stale = backendSnapshotStale", merge)
         normalizer = self.block("function normalizeEaFactoryDomain", "function normalizeWorkflowDomainData")
         self.assertIn("eaFactoryFirstArray(activeBuildRaw?.files)", normalizer)
         self.assertNotIn("root.downloads", normalizer)
         self.assertNotIn("root.artifacts", normalizer)
         self.assertNotIn("root.files", normalizer)
+
+    def test_successful_fresh_read_clears_stale_error_but_preserves_working_action(self):
+        validator = self.block("function validateEaFactoryBusyModel", "function eaFactoryBusyContext")
+        merge = self.block("function mergeEaFactoryReadModel", "function mergeEaFactoryResponseReport")
+        self.assertIn("const staleActionError = !actionState.inFlight", merge)
+        self.assertIn('["error", "warning"].includes(state.modal.eaFactory.tone)', merge)
+        self.assertIn('actionState.tone = "neutral"', merge)
+
+        script = "\n".join([
+            "const EA_FACTORY_STAGE_IDS = Object.freeze(['source','spec','generate','review','compile_validate','backtest_recheck','artifacts_report']);",
+            "const EA_FACTORY_BACKEND_STAGE_BY_UI = Object.freeze({ spec:'strategy_spec', generate:'generate_source', review:'source_review', compile_validate:'compile_validate', backtest_recheck:'backtest_recheck', artifacts_report:'final_report' });",
+            "const EA_FACTORY_PROP_ID = 'right_server_racks';",
+            "const safeDashboardDisplayText = (value, fallback='') => String(value || fallback).slice(0, 240);",
+            "const workflowDomainObject = (...values) => values.find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {};",
+            "const state = { eaFactoryReadModel:{payload:null,lastLoadedAt:0,stale:false,lastError:null,busy:null}, modal:{eaFactory:{inFlight:false,stageId:'generate',message:'error เก่า',tone:'error'}}, propReports:{} };",
+            validator,
+            merge,
+            "mergeEaFactoryReadModel({eaFactory:{schemaVersion:'ea-factory-v1',busy:null}});",
+            "const cleared = {...state.modal.eaFactory};",
+            "state.modal.eaFactory = {inFlight:true,stageId:'one_click_run',message:'กำลังทำงาน',tone:'working'};",
+            "mergeEaFactoryReadModel({eaFactory:{schemaVersion:'ea-factory-v1',busy:null}});",
+            "const preserved = {...state.modal.eaFactory};",
+            "process.stdout.write(JSON.stringify({cleared,preserved}));",
+        ])
+        completed = subprocess.run(
+            [self.node_binary(), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        )
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["cleared"]["stageId"], "")
+        self.assertEqual(payload["cleared"]["message"], "")
+        self.assertEqual(payload["cleared"]["tone"], "neutral")
+        self.assertTrue(payload["preserved"]["inFlight"])
+        self.assertEqual(payload["preserved"]["stageId"], "one_click_run")
+        self.assertEqual(payload["preserved"]["message"], "กำลังทำงาน")
+        self.assertEqual(payload["preserved"]["tone"], "working")
+
+    def test_backend_stale_snapshot_disables_factory_authority_and_surfaces_refresh(self):
+        validator = self.block("function validateEaFactoryBusyModel", "function eaFactoryBusyContext")
+        merge = self.block("function mergeEaFactoryReadModel", "function mergeEaFactoryResponseReport")
+        normalizer = self.block("function normalizeEaFactoryDomain", "function normalizeWorkflowDomainData")
+        self.assertIn("const backendSnapshotStale = model.snapshotStale === true", merge)
+        self.assertIn("state.eaFactoryReadModel.stale = backendSnapshotStale", merge)
+        self.assertIn("กำลังรีเฟรชสถานะ EA Factory", merge)
+        self.assertIn("state.eaFactoryReadModel.stale !== true", normalizer)
+        self.assertIn("root.snapshotStale !== true", normalizer)
+
+        script = "\n".join([
+            "const EA_FACTORY_STAGE_IDS = Object.freeze(['source','spec','generate','review','compile_validate','backtest_recheck','artifacts_report']);",
+            "const EA_FACTORY_BACKEND_STAGE_BY_UI = Object.freeze({ spec:'strategy_spec', generate:'generate_source', review:'source_review', compile_validate:'compile_validate', backtest_recheck:'backtest_recheck', artifacts_report:'final_report' });",
+            "const EA_FACTORY_PROP_ID = 'right_server_racks';",
+            "const safeDashboardDisplayText = (value, fallback='') => String(value || fallback).slice(0, 240);",
+            "const workflowDomainObject = (...values) => values.find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {};",
+            "const state = { eaFactoryReadModel:{payload:null,lastLoadedAt:0,stale:false,lastError:null,busy:null}, modal:{eaFactory:{inFlight:false,stageId:'',message:'',tone:'neutral'}}, propReports:{} };",
+            validator,
+            merge,
+            "const merged = mergeEaFactoryReadModel({eaFactory:{schemaVersion:'ea-factory-v1',snapshotStale:true,busy:null}});",
+            "process.stdout.write(JSON.stringify({merged,stale:state.eaFactoryReadModel.stale,lastError:state.eaFactoryReadModel.lastError}));",
+        ])
+        completed = subprocess.run(
+            [self.node_binary(), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        )
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["merged"])
+        self.assertTrue(payload["stale"])
+        self.assertEqual(payload["lastError"]["kind"], "refreshing")
 
     def test_dedicated_read_model_is_polled_without_overlapping_requests(self):
         loader = self.block("async function loadEaFactoryReadModel", "function setEaFactoryActionState")
@@ -411,6 +579,137 @@ class EaFactoryFrontendTests(unittest.TestCase):
             },
         )
 
+    def test_factory_posts_have_a_bounded_timeout_and_reconcile_busy_after_failure(self):
+        helper = self.block("async function postEaFactoryJson", "async function runEaFactoryRequest")
+        self.assertIn("EA_FACTORY_ACTION_TIMEOUT_MS", helper)
+        self.assertIn("const controller = new AbortController()", helper)
+        self.assertIn("controller.abort(new FetchTimeoutError(path, timeoutMs))", helper)
+        self.assertIn("window.clearTimeout(timeoutId)", helper)
+        request = self.block("async function runEaFactoryRequest", "async function syncEaFactoryGoogleSheet")
+        self.assertIn("const refreshed = await loadEaFactoryReadModel({ forceFresh: true })", request)
+        self.assertIn("state.eaFactoryReadModel.busy", request)
+        self.assertIn("eaFactoryBusyPresentation(state.eaFactoryReadModel.busy)", request)
+        self.assertIn("const busyClearedByFreshRead = Boolean(refreshed)", request)
+        self.assertIn('failedRequestPresentation.kind === "busy"', request)
+        self.assertIn('kind: "busy_reconciled"', request)
+        self.assertIn("Backend ยืนยัน busy=null", request)
+        self.assertIn('stageId: busyClearedByFreshRead ? "" : stageId', request)
+        self.assertIn("if (refreshed)", request)
+        self.assertIn("state.eaFactoryReadModel.lastError = null", request)
+        self.assertIn("state.eaFactoryReadModel.stale = false", request)
+        self.assertIn("if (state.modal.eaFactory.inFlight", request)
+        self.assertIn("คำขอสิ้นสุดแล้ว", request)
+
+        script = "\n".join([
+            "const window = { setTimeout, clearTimeout };",
+            "const EA_FACTORY_ACTION_TIMEOUT_MS = 20;",
+            "class FetchTimeoutError extends Error { constructor(path, timeoutMs) { super(path); this.name='TimeoutError'; this.kind='fetch_timeout'; this.timeoutMs=timeoutMs; } }",
+            helper,
+            "globalThis.fetch = (_path, options) => new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), {once:true}));",
+            "postEaFactoryJson('/slow', {}, {timeoutMs:5}).then(() => process.exit(2)).catch((error) => process.stdout.write(JSON.stringify({name:error.name,kind:error.kind,timeoutMs:error.timeoutMs})));",
+        ])
+        completed = subprocess.run(
+            [self.node_binary(), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {"name": "TimeoutError", "kind": "fetch_timeout", "timeoutMs": 5},
+        )
+
+    def test_structured_factory_rejection_wins_over_generic_404_copy(self):
+        presentation = self.block(
+            "function eaFactoryReadModelFailurePresentation",
+            "function renderEaFactoryReadModelNotice",
+        )
+        self.assertIn("const structuredFactoryRejection", presentation)
+        self.assertIn('kind === "ea_factory_request_rejected"', presentation)
+        self.assertIn('String(body.code || "").startsWith("ea_factory_")', presentation)
+        self.assertLess(
+            presentation.index("if (structuredFactoryRejection)"),
+            presentation.index("if (status === 404)"),
+        )
+        self.assertIn("message: `${messageTh}${staleNote}`", presentation)
+
+    def test_integrity_409_surfaces_backend_thai_instead_of_transport_copy(self):
+        presentation = self.block(
+            "function eaFactoryReadModelFailurePresentation",
+            "function renderEaFactoryReadModelNotice",
+        )
+        message_th = (
+            "ตรวจพบว่าไฟล์หลักฐานของ EA Factory สูญหายหรือถูกเปลี่ยนแปลง "
+            "หากเพิ่งสั่งงานผ่านหน้าต่าง MT4 ให้ถือว่าผลลัพธ์ยังไม่แน่นอน"
+        )
+        script = "\n".join([
+            "const workflowDomainObject = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : {};",
+            "const safeDashboardDisplayText = (value, fallback='') => String(value || fallback).slice(0, 600);",
+            "const eaFactoryBusyContext = () => null;",
+            "const eaFactoryBusyPresentation = () => ({kind:'busy'});",
+            "const PROP_REPORT_FETCH_TIMEOUT_MS = 1000;",
+            presentation,
+            "const result = eaFactoryReadModelFailurePresentation({",
+            "  status: 409,",
+            "  kind: 'ea_factory_integrity_blocked',",
+            "  body: {",
+            "    kind: 'ea_factory_integrity_blocked',",
+            "    code: 'ea_factory_artifact_integrity_failed',",
+            f"    messageTh: {json.dumps(message_th, ensure_ascii=False)},",
+            "  },",
+            "});",
+            "process.stdout.write(JSON.stringify(result));",
+        ])
+        completed = subprocess.run(
+            [self.node_binary(), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["kind"], "request_rejected")
+        self.assertEqual(result["tone"], "error")
+        self.assertEqual(result["message"], message_th)
+        self.assertNotIn("ติดต่อ EA Factory Backend ไม่สำเร็จ", result["message"])
+
+    def test_busy_post_runtime_reconciles_to_fresh_busy_null(self):
+        request = self.block("async function runEaFactoryRequest", "async function syncEaFactoryGoogleSheet")
+        script = "\n".join([
+            "const state = { modal:{eaFactory:{inFlight:false,stageId:'',message:'',tone:'neutral'}}, eaFactoryReadModel:{payload:{schemaVersion:'ea-factory-v1'},busy:null,lastError:{kind:'busy'},stale:true} };",
+            "let refreshCalls = 0;",
+            "function setEaFactoryActionState(next) { Object.assign(state.modal.eaFactory, next); }",
+            "function eaFactoryReadModelFailurePresentation() { return {kind:'busy',tone:'warning',title:'งานเดิม',message:'งานเดิมกำลังทำ',busy:{buildId:'old-build'}}; }",
+            "async function loadEaFactoryReadModel() { refreshCalls += 1; state.eaFactoryReadModel.busy = null; return {eaFactory:{schemaVersion:'ea-factory-v1',busy:null}}; }",
+            "function eaFactoryBusyPresentation(busy) { return {kind:'busy',tone:'warning',title:'busy',message:String(busy.buildId),busy}; }",
+            request,
+            "(async () => {",
+            "  const result = await runEaFactoryRequest('one_click_run', async () => { throw new Error('HTTP 409'); }, 'ok');",
+            "  process.stdout.write(JSON.stringify({result,refreshCalls,action:state.modal.eaFactory,readModel:state.eaFactoryReadModel}));",
+            "})().catch((error) => { console.error(error); process.exit(1); });",
+        ])
+        completed = subprocess.run(
+            [self.node_binary(), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        )
+        payload = json.loads(completed.stdout)
+        self.assertIsNone(payload["result"])
+        self.assertEqual(payload["refreshCalls"], 1)
+        self.assertFalse(payload["action"]["inFlight"])
+        self.assertEqual(payload["action"]["stageId"], "")
+        self.assertEqual(payload["action"]["tone"], "ready")
+        self.assertIn("busy=null", payload["action"]["message"])
+        self.assertIsNone(payload["readModel"]["busy"])
+        self.assertIsNone(payload["readModel"]["lastError"])
+        self.assertFalse(payload["readModel"]["stale"])
+
     def test_busy_409_is_thai_structured_and_blocks_new_factory_actions(self):
         helpers = self.block("function validateEaFactoryBusyModel", "function mergeEaFactoryReadModel")
         for field in ("buildId", "displayName", "stageId", "status", "activeOperation"):
@@ -426,10 +725,44 @@ class EaFactoryFrontendTests(unittest.TestCase):
 
         normalizer = self.block("function normalizeEaFactoryDomain", "function normalizeWorkflowDomainData")
         self.assertIn("const backendBusy = workflowDomainObject(state.eaFactoryReadModel.busy)", normalizer)
-        self.assertIn("backendBusyActive ? { ...stage, canRun: false }", normalizer)
+        self.assertIn("applyEaFactoryStageAdmission(stage, authoritative, backendBusyActive)", normalizer)
         buttons = self.block("function createEaFactoryActionButton", "function renderEaFactoryStatusStrip")
         self.assertIn("Boolean(state.eaFactoryReadModel.busy)", buttons)
         self.assertIn("disabled || requestBusy || backendBusy", buttons)
+
+    def test_manual_stage_admission_fails_closed_for_stale_and_busy_models(self):
+        helper = self.block(
+            "function applyEaFactoryStageAdmission",
+            "function normalizeEaFactoryDomain",
+        )
+        script = "\n".join([
+            helper,
+            "const stage = {id:'generate',canRun:true,canRetry:true};",
+            "const pick = (authoritative,busy) => {",
+            "  const value = applyEaFactoryStageAdmission(stage,authoritative,busy);",
+            "  return {canRun:value.canRun,canRetry:value.canRetry};",
+            "};",
+            "process.stdout.write(JSON.stringify({",
+            "  ready:pick(true,false), stale:pick(false,false), busy:pick(true,true), both:pick(false,true),",
+            "}));",
+        ])
+        completed = subprocess.run(
+            [self.node_binary(), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "ready": {"canRun": True, "canRetry": True},
+                "stale": {"canRun": False, "canRetry": False},
+                "busy": {"canRun": False, "canRetry": False},
+                "both": {"canRun": False, "canRetry": False},
+            },
+        )
 
     def test_successful_poll_retains_validated_backend_busy_until_backend_clears_it(self):
         validator = self.block("function validateEaFactoryBusyModel", "function eaFactoryBusyContext")
@@ -491,6 +824,32 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn("readModelState.stale", notice)
         self.assertIn("ข้อมูลล่าสุดที่เก็บไว้เมื่อ", notice)
 
+        presentation = self.block(
+            "function eaFactoryReadModelFailurePresentation",
+            "function renderEaFactoryReadModelNotice",
+        )
+        script = "\n".join([
+            "const PROP_REPORT_FETCH_TIMEOUT_MS = 20000;",
+            "const workflowDomainObject = (...values) => values.find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {};",
+            "const safeDashboardDisplayText = (value,fallback='') => String(value || fallback);",
+            "const eaFactoryBusyContext = () => null;",
+            presentation,
+            "const result = eaFactoryReadModelFailurePresentation({status:503,kind:'transport',message:'connect ECONNREFUSED 127.0.0.1:8765'},{hasLastGood:true});",
+            "process.stdout.write(JSON.stringify(result));",
+        ])
+        completed = subprocess.run(
+            [self.node_binary(), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        )
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["kind"], "transport")
+        self.assertIn("connect ECONNREFUSED 127.0.0.1:8765", payload["message"])
+        self.assertIn("ข้อมูลล่าสุด", payload["message"])
+
     def test_stage_request_is_accepted_before_it_is_truthfully_completed(self):
         stage_normalizer = self.block("function normalizeEaFactoryStageStatus", "function normalizeEaFactoryTerminal")
         self.assertIn("reconcileEaFactoryStageWithMission", stage_normalizer)
@@ -546,6 +905,11 @@ class EaFactoryFrontendTests(unittest.TestCase):
 
         actions = self.block("async function advanceEaFactoryStage", "function connectionHubStatusGroup")
         self.assertIn("async function retryEaFactoryStage", actions)
+        self.assertEqual(actions.count("if (\n    domain.authoritative !== true"), 2)
+        self.assertEqual(actions.count("|| Boolean(domain.backendBusy)"), 2)
+        self.assertEqual(actions.count("|| state.modal.eaFactory.inFlight"), 2)
+        self.assertEqual(actions.count('messageKind: "local_preflight_rejected"'), 2)
+        self.assertEqual(actions.count("setEaFactoryActionState({"), 2)
         self.assertIn("/retry`", actions)
         self.assertIn("failedMissionId: stage.missionId", actions)
         self.assertIn("eaFactoryRetryableInvalidOutput(domain, stage)", actions)
@@ -553,6 +917,58 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn("raw?.canRetry === true", self.main)
         self.assertIn('.ea-factory-bound-report[data-tone="error"]', self.styles)
         self.assertIn('.ea-factory-bound-report > summary', self.styles)
+
+    def test_advance_and_retry_preflight_rejections_are_visible_without_posting(self):
+        actions = self.block("async function advanceEaFactoryStage", "function connectionHubStatusGroup")
+        script = "\n".join([
+            "const EA_FACTORY_PROP_ID = 'right_server_racks';",
+            "const EA_FACTORY_READ_MODEL_MAX_AGE_MS = 90000;",
+            "const EA_FACTORY_SUPPORTED_MODES = new Set(['one_click_with_manual_stage_recovery','manual_stage_by_stage']);",
+            "const EA_FACTORY_STAGE_COPY = {};",
+            "const state = {eaFactoryReadModel:{payload:{schemaVersion:'ea-factory-v1',mode:'one_click_with_manual_stage_recovery',scheduled:false}},propReports:{right_server_racks:{}},modal:{eaFactory:{inFlight:false}}};",
+            "const getModalSubject = () => ({id:EA_FACTORY_PROP_ID});",
+            "const getPropertyRole = () => ({});",
+            "const workflowDomainObject = (...values) => values.find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {};",
+            "const eaFactoryFirstArray = (...values) => values.find(Array.isArray) || [];",
+            self.block("function eaFactoryReadModelStateKey", "function mergeEaFactoryReadModel"),
+            "let mode = 'advance';",
+            "const normalizeWorkflowDashboard = () => mode === 'advance'",
+            "  ? {domainData:{eaFactory:{authoritative:false,backendBusy:false,currentStageId:'spec',activeBuild:{id:'build-1'},stages:[{id:'spec',backendId:'strategy_spec',canRun:true}]}}}",
+            "  : {domainData:{eaFactory:{authoritative:true,backendBusy:true,currentStageId:'generate',activeBuild:{id:'build-1'},stages:[{id:'generate',backendId:'generate_source',missionId:'mission-1',canRetry:true,failureCode:'invalid_output'}]}}};",
+            "const eaFactoryRetryableInvalidOutput = () => true;",
+            "const createWorkflowIdempotencyKey = () => 'unused';",
+            "let postCount = 0;",
+            "const postEaFactoryJson = async () => { postCount += 1; return {}; };",
+            "const runEaFactoryRequest = async () => { postCount += 1; return {}; };",
+            "function setEaFactoryActionState(next={}) { Object.assign(state.modal.eaFactory,next); }",
+            actions,
+            "(async () => {",
+            "  const advanceResult = await advanceEaFactoryStage('spec');",
+            "  const advanceAction = {...state.modal.eaFactory};",
+            "  mode = 'retry';",
+            "  const retryResult = await retryEaFactoryStage('generate');",
+            "  const retryAction = {...state.modal.eaFactory};",
+            "  process.stdout.write(JSON.stringify({advanceResult,retryResult,advanceAction,retryAction,postCount}));",
+            "})().catch((error) => { console.error(error); process.exit(1); });",
+        ])
+        completed = subprocess.run(
+            [self.node_binary(), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        )
+        payload = json.loads(completed.stdout)
+        self.assertIsNone(payload["advanceResult"])
+        self.assertIsNone(payload["retryResult"])
+        self.assertEqual(payload["postCount"], 0)
+        self.assertEqual(payload["advanceAction"]["messageKind"], "local_preflight_rejected")
+        self.assertEqual(payload["retryAction"]["messageKind"], "local_preflight_rejected")
+        self.assertTrue(payload["advanceAction"]["readModelStateKey"])
+        self.assertTrue(payload["retryAction"]["readModelStateKey"])
+        self.assertIn("Read Model", payload["advanceAction"]["message"])
+        self.assertIn("กำลังทำอยู่", payload["retryAction"]["message"])
 
     def test_invalid_output_retry_policy_executes_live_read_model_matrix(self):
         node = shutil.which("node")
@@ -648,7 +1064,7 @@ assert.equal(canRetry({{
         self.assertIn("supportedVisiblePlatforms: oneClickVisiblePlatforms", domain)
         self.assertIn("selectedPlatformSupported:", domain)
         self.assertIn("terminalRunning: oneClickCapability.terminalRunning === true", domain)
-        self.assertIn("terminalProcessLaunchAllowed: false", domain)
+        self.assertIn("terminalProcessLaunchAllowed: oneClickCapability.terminalProcessLaunchAllowed === true", domain)
 
     def test_one_click_ui_has_four_truthful_steps_and_visible_front_office_gate(self):
         one_click = self.block("function eaFactoryOneClickStatusLabel", "function eaFactoryRetryableInvalidOutput")
@@ -669,7 +1085,7 @@ assert.equal(canRetry({{
         self.assertIn("หลักฐาน ${stageResult.evidence.length} รายการ", one_click)
         self.assertIn('status === "awaiting_visible_terminal" && capability.canResume === true', one_click)
         self.assertIn('["failed", "blocked"].includes(status) && capability.canRetry === true', one_click)
-        self.assertIn("capability.selectedPlatform === domain.activeBuild.platform", one_click)
+        self.assertIn("capability.selectedPlatform === domain.activeBuild?.platform", one_click)
         self.assertIn("Retry จากปุ่มนี้ไม่ได้ • เปิดขั้นละเอียด", one_click)
         self.assertIn('appendEaFactoryFact(facts, "One-click Run", run.runId)', one_click)
         self.assertIn("capability.visibleAdapterConnected", one_click)
@@ -677,19 +1093,301 @@ assert.equal(canRetry({{
         self.assertIn('domain.activeBuild.platform !== "mt4"', one_click)
         self.assertIn("One-click แบบหน้าต่างจริงยังไม่รองรับ MT5", one_click)
         self.assertIn("ระบบจะไม่เปิด MetaEditor/MT5", one_click)
-        self.assertIn('const platformReady = domain.activeBuild.platform === "mt4"', one_click)
+        self.assertIn('const platformReady = domain.activeBuild?.platform === "mt4"', one_click)
         self.assertIn("capability.terminalRunning === true", one_click)
         self.assertIn("capability.terminalProcessLaunchAllowed === false", one_click)
+        self.assertIn("function eaFactoryExistingOneClickAdmission", one_click)
+        self.assertIn("domain.authoritative === true", one_click)
+        self.assertIn("!domain.backendBusy", one_click)
+        self.assertIn("!requestInFlight", one_click)
+        self.assertIn("Read Model ล่าสุดยังไม่ได้รับการยืนยันจาก Backend", one_click)
+        self.assertIn("ปุ่ม One-click ของ Build นี้จะเปิดเมื่อ Backend ยืนยันว่า busy=null", one_click)
+        self.assertIn("ปุ่มปิดไว้เพื่อป้องกันการส่งคำขอซ้ำ", one_click)
         self.assertNotIn("สำเร็จอัตโนมัติ", one_click)
 
-        panel = self.block("function renderEaFactoryPanel", "function mergeEaFactoryReadModel")
-        self.assertIn("renderEaFactoryOneClickPanel(section, domain)", panel)
+        progress = self.block("function renderEaFactoryProgressPage", "function renderEaFactoryResultPage")
+        self.assertIn("renderEaFactoryOneClickPanel(section, domain)", progress)
+        panel = self.block("function renderEaFactoryPanel", "function validateEaFactoryBusyModel")
+        self.assertNotIn("renderEaFactoryOneClickPanel(section, domain)", panel)
+        self.assertIn('const progressOwnsBusyNotice = tabId === "progress"', panel)
+        self.assertIn("eaFactoryBusyPresentation(domain.backendBusy).message", panel)
         source = self.block("function renderEaFactorySourceStage", "function renderEaFactorySpecStage")
         self.assertIn("renderEaFactoryOneClickSetup(section, domain, selected)", source)
-        self.assertIn("ตรวจ Strategy Spec / เปิดตัวเลือกขั้นสูง", source)
+        self.assertIn("ดู Strategy Brief เต็มและตัวเลือกขั้นสูง", source)
         spec = self.block("function renderEaFactorySpecStage", "function renderEaFactoryTerminalPicker")
-        self.assertIn("renderEaFactoryOneClickSetup(section, domain, source)", spec)
+        self.assertIn("if (!embedded) renderEaFactoryOneClickSetup(section, domain, source)", spec)
         self.assertIn("ตัวเลือกขั้นสูง • Indicator / TradingView / ทำทีละขั้น", spec)
+
+    def test_existing_one_click_admission_fails_closed_for_stale_busy_and_inflight_models(self):
+        helper = self.block(
+            "function eaFactoryExistingOneClickAdmission",
+            "function renderEaFactoryOneClickPanel",
+        )
+        script = "\n".join([
+            "const state = {modal:{eaFactory:{inFlight:false}}};",
+            helper,
+            "const base = {",
+            "  authoritative:true, backendBusy:null, currentStageId:'generate',",
+            "  activeBuild:{platform:'mt4'}, stages:[{id:'generate',status:'ready'}],",
+            "  oneClick:{enabled:true,canRun:true,selectedTerminalId:'mt4-a',selectedPlatform:'mt4',",
+            "    selectedPlatformSupported:true,terminalRunning:true,terminalProcessLaunchAllowed:false,run:{status:'idle'}},",
+            "};",
+            "const can = (patch={}) => eaFactoryExistingOneClickAdmission({...base,...patch}).canSubmit;",
+            "const result = {",
+            "  ready:can(),",
+            "  stale:can({authoritative:false}),",
+            "  busy:can({backendBusy:{buildId:'ea-build-live'}}),",
+            "  launchAllowed:can({oneClick:{...base.oneClick,terminalProcessLaunchAllowed:true}}),",
+            "};",
+            "state.modal.eaFactory.inFlight = true;",
+            "result.inFlight = can();",
+            "process.stdout.write(JSON.stringify(result));",
+        ])
+        completed = subprocess.run(
+            [self.node_binary(), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {"ready": True, "stale": False, "busy": False, "launchAllowed": False, "inFlight": False},
+        )
+
+    def test_progress_owns_one_click_result_summarizes_gates_and_create_opens_page_two(self):
+        progress = self.block("function renderEaFactoryProgressPage", "function renderEaFactoryResultPage")
+        self.assertIn("ไม่มีงาน EA ค้างอยู่", progress)
+        self.assertIn("Backend ยืนยัน busy=null", progress)
+        self.assertIn("else if (!domain.authoritative)", progress)
+        self.assertIn("กำลังตรวจสอบสถานะงาน EA", progress)
+        self.assertIn("ยังยืนยันไม่ได้ว่ามีงานค้างอยู่หรือพร้อมรับงานใหม่", progress)
+        self.assertIn("domain.historicalRunLooksActive", progress)
+        self.assertIn("จะไม่ใช้สถานะประวัตินี้ปิดปุ่มเริ่มงานใหม่", progress)
+        self.assertIn("กำลังรอรายละเอียด Build จาก Backend", progress)
+        self.assertIn("โดยไม่หยิบประวัติงานอื่นมาแสดงแทน", progress)
+        self.assertEqual(progress.count("renderEaFactoryOneClickPanel(section, domain)"), 1)
+
+        source = self.block("function renderEaFactorySourceStage", "function renderEaFactorySpecStage")
+        result = self.block("function renderEaFactoryResultPage", "function renderEaFactoryPanel")
+        self.assertNotIn("renderEaFactoryOneClickPanel", source)
+        for stage_id in ("review", "compile_validate", "backtest_recheck", "artifacts_report"):
+            self.assertIn(f'"{stage_id}"', result)
+        self.assertIn("ea-factory-result-summary", result)
+        self.assertIn("ตรวจ Source", result)
+        self.assertIn("Compile / Validate", result)
+        self.assertIn("Backtest / Recheck", result)
+        self.assertIn("ไฟล์และ Final Report", result)
+
+        create = self.block("async function createEaFactoryBuild", "function eaFactoryOneClickRequestKey")
+        self.assertIn("!domain.authoritative", create)
+        self.assertIn("Boolean(domain.backendBusy)", create)
+        self.assertIn("domain.canStartNewBuild !== true", create)
+        self.assertIn("state.modal.eaFactory.selectedBuildId = buildId", create)
+        self.assertIn('setWorkflowDashboardTab(EA_FACTORY_PROP_ID, "progress")', create)
+        self.assertIn("persists the selected page snapshot", create)
+        navigation = self.block("function setWorkflowDashboardTab", "function workflowActionFormPayload")
+        self.assertIn("renderWorkflowDashboard(subject, propertyRole, report)", navigation)
+        self.assertIn("saveSessionSnapshot()", navigation)
+
+    def test_successful_create_immediately_invokes_progress_navigation(self):
+        create = self.block("async function createEaFactoryBuild", "function eaFactoryOneClickRequestKey")
+        script = "\n".join([
+            "const EA_FACTORY_PROP_ID = 'right_server_racks';",
+            "const state = { propReports:{right_server_racks:{}}, modal:{eaFactory:{selectedBuildId:'',selectedArtifactKind:'',selectedPlatform:''}} };",
+            "const normalizeEaFactoryArtifactKind = (value) => value;",
+            "const normalizeEaFactoryPlatform = (value) => value;",
+            "const getModalSubject = () => ({id:EA_FACTORY_PROP_ID});",
+            "const getPropertyRole = () => ({});",
+            "const normalizeWorkflowDashboard = () => ({domainData:{eaFactory:{authoritative:true,backendBusy:null,canStartNewBuild:true,sourceCatalog:{records:[{sourceRecordId:'source-1',buildReady:true,compatiblePlatforms:['mt4']}]}}}});",
+            "const createWorkflowIdempotencyKey = () => 'workflow-test-key';",
+            "const postEaFactoryJson = async () => ({});",
+            "const runEaFactoryRequest = async () => ({build:{id:'ea-build-new'}});",
+            "let navigation = null;",
+            "function setWorkflowDashboardTab(propId, pageId) { navigation = {propId,pageId}; }",
+            create,
+            "(async () => {",
+            "  const response = await createEaFactoryBuild('source-1','expert_advisor','mt4','');",
+            "  process.stdout.write(JSON.stringify({response,selectedBuildId:state.modal.eaFactory.selectedBuildId,navigation}));",
+            "})().catch((error) => { console.error(error); process.exit(1); });",
+        ])
+        completed = subprocess.run(
+            [self.node_binary(), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        )
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["response"]["build"]["id"], "ea-build-new")
+        self.assertEqual(payload["selectedBuildId"], "ea-build-new")
+        self.assertEqual(
+            payload["navigation"],
+            {"propId": "right_server_racks", "pageId": "progress"},
+        )
+
+    def test_create_and_run_preflight_never_leaves_phantom_working_status(self):
+        create = self.block("async function createEaFactoryBuild", "function eaFactoryOneClickRequestKey")
+        flow = self.block("async function createAndRunEaFactoryBuild", "async function advanceEaFactoryStage")
+        state_key = self.block("function eaFactoryReadModelStateKey", "function mergeEaFactoryReadModel")
+        script = "\n".join([
+            "const EA_FACTORY_PROP_ID = 'right_server_racks';",
+            "const EA_FACTORY_READ_MODEL_MAX_AGE_MS = 90000;",
+            "const EA_FACTORY_SUPPORTED_MODES = new Set(['one_click_with_manual_stage_recovery','manual_stage_by_stage']);",
+            "const state = {eaFactoryReadModel:{payload:{schemaVersion:'ea-factory-v1',mode:'one_click_with_manual_stage_recovery',scheduled:false}},propReports:{right_server_racks:{}},modal:{eaFactory:{inFlight:false,message:'',tone:'neutral'}}};",
+            "const workflowDomainObject = (...values) => values.find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {};",
+            "const eaFactoryFirstArray = (...values) => values.find(Array.isArray) || [];",
+            "const normalizeEaFactoryArtifactKind = (value) => value;",
+            "const normalizeEaFactoryPlatform = (value) => value;",
+            "const getModalSubject = () => ({id:EA_FACTORY_PROP_ID});",
+            "const getPropertyRole = () => ({});",
+            "const normalizeWorkflowDashboard = () => ({domainData:{eaFactory:{authoritative:false,backendBusy:null,canStartNewBuild:false,sourceCatalog:{records:[{sourceRecordId:'source-1',buildReady:true,compatiblePlatforms:['mt4']}]}}}});",
+            "const createWorkflowIdempotencyKey = () => 'workflow-test-key';",
+            "let postCount = 0;",
+            "const postEaFactoryJson = async () => { postCount += 1; return {}; };",
+            "const runEaFactoryRequest = async () => { postCount += 1; return {}; };",
+            "const setWorkflowDashboardTab = () => {};",
+            "let oneClickCount = 0;",
+            "const runEaFactoryOneClick = async () => { oneClickCount += 1; return {}; };",
+            "function setEaFactoryActionState(next={}) { Object.assign(state.modal.eaFactory,next); }",
+            state_key,
+            create,
+            flow,
+            "(async () => {",
+            "  const result = await createAndRunEaFactoryBuild('source-1','mt4','');",
+            "  process.stdout.write(JSON.stringify({result,action:state.modal.eaFactory,postCount,oneClickCount}));",
+            "})().catch((error) => { console.error(error); process.exit(1); });",
+        ])
+        completed = subprocess.run(
+            [self.node_binary(), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        )
+        payload = json.loads(completed.stdout)
+        self.assertIsNone(payload["result"])
+        self.assertEqual(payload["postCount"], 0)
+        self.assertEqual(payload["oneClickCount"], 0)
+        self.assertFalse(payload["action"]["inFlight"])
+        self.assertEqual(payload["action"]["tone"], "warning")
+        self.assertEqual(payload["action"]["messageKind"], "local_preflight_rejected")
+        self.assertIn("Read Model", payload["action"]["message"])
+
+    def test_stale_busy_is_labeled_last_confirmed_with_transport_reason_in_left_rail(self):
+        rail = self.block("function createEaFactoryRailTaskStatus", "function createFxNewsRailFact")
+        progress = self.block("function renderEaFactoryProgressPage", "function renderEaFactoryResultPage")
+        read_notice = self.block("function renderEaFactoryReadModelNotice", "function eaFactoryReadModelStateKey")
+        panel = self.block("function renderEaFactoryPanel", "function validateEaFactoryBusyModel")
+        self.assertIn("งานล่าสุดที่ Backend เคยยืนยัน • ยังไม่ใช่สถานะสด", progress)
+        self.assertIn("Read Model เป็นข้อมูลเก่า", progress)
+        self.assertIn("readModelState.lastError", read_notice)
+        self.assertIn("domain.authoritative === true", panel)
+
+        script = "\n".join([
+            "const state = {modal:{eaFactory:{inFlight:false}},eaFactoryReadModel:{lastError:{message:'HTTP 503 exact transport reason'},lastLoadedAt:1700000000000}};",
+            "const workflowDomainObject = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : {};",
+            "const eaFactoryBusyStatusLabel = () => 'กำลังทำงาน';",
+            "const eaFactoryBusyOperationLabel = () => 'กำลังสร้าง Source Code';",
+            "const safeDashboardDisplayText = (value,fallback='') => String(value || fallback);",
+            "const formatThaiDateTime = () => '14 พ.ย. 2566 05:13';",
+            "const setWorkflowDashboardTab = () => {};",
+            "const document = {createElement:(tag) => ({tag,dataset:{},children:[],textContent:'',addEventListener(){},append(...nodes){this.children.push(...nodes);}})};",
+            rail,
+            "const card = createEaFactoryRailTaskStatus({authoritative:false,backendBusy:{buildId:'ea-build-stale',status:'running',activeOperation:'generate_source'},oneClick:{terminalRunning:true}});",
+            "process.stdout.write(JSON.stringify({status:card.dataset.status,title:card.children[0].textContent,detail:card.children[1].textContent,button:card.children[3].textContent}));",
+        ])
+        completed = subprocess.run(
+            [self.node_binary(), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        )
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["status"], "checking")
+        self.assertIn("ยังยืนยันไม่ได้", payload["title"])
+        self.assertIn("สถานะครั้งล่าสุด", payload["detail"])
+        self.assertIn("HTTP 503 exact transport reason", payload["detail"])
+        self.assertIn("14 พ.ย. 2566 05:13", payload["detail"])
+        self.assertIn("เหตุผล", payload["button"])
+
+    def test_structured_request_rejection_survives_identical_poll_until_state_transition(self):
+        validator = self.block("function validateEaFactoryBusyModel", "function eaFactoryBusyContext")
+        state_merge = self.block("function eaFactoryReadModelStateKey", "function mergeEaFactoryResponseReport")
+        setter = self.block("function setEaFactoryActionState", "async function postEaFactoryJson")
+        self.assertIn('messageKind = ""', setter)
+        self.assertIn('readModelStateKey = ""', setter)
+        script = "\n".join([
+            "const EA_FACTORY_STAGE_IDS = Object.freeze(['source','spec','generate','review','compile_validate','backtest_recheck','artifacts_report']);",
+            "const EA_FACTORY_BACKEND_STAGE_BY_UI = Object.freeze({spec:'strategy_spec',generate:'generate_source',review:'source_review',compile_validate:'compile_validate',backtest_recheck:'backtest_recheck',artifacts_report:'final_report'});",
+            "const EA_FACTORY_PROP_ID = 'right_server_racks';",
+            "const EA_FACTORY_READ_MODEL_MAX_AGE_MS = 90000;",
+            "const EA_FACTORY_SUPPORTED_MODES = new Set(['one_click_with_manual_stage_recovery','manual_stage_by_stage']);",
+            "const safeDashboardDisplayText = (value,fallback='') => String(value || fallback);",
+            "const workflowDomainObject = (...values) => values.find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {};",
+            "const eaFactoryFirstArray = (...values) => values.find(Array.isArray) || [];",
+            "const state = {eaFactoryReadModel:{payload:null,lastLoadedAt:Date.now(),stale:false,lastError:null,busy:null},modal:{eaFactory:{inFlight:false,stageId:'create_build',message:'Backend rejected exact reason',tone:'warning',messageKind:'local_preflight_rejected',readModelStateKey:''}},propReports:{}};",
+            validator,
+            state_merge,
+            "const initial = {schemaVersion:'ea-factory-v1',mode:'one_click_with_manual_stage_recovery',scheduled:false,busy:null,sourceCatalog:{records:[{sourceRecordId:'source-1',buildReady:false,verificationStatus:'blocked'}]},builds:[],terminalSelection:{},oneClick:{}};",
+            "state.modal.eaFactory.readModelStateKey = eaFactoryReadModelStateKey(initial);",
+            "mergeEaFactoryReadModel({eaFactory:initial});",
+            "const afterSame = {...state.modal.eaFactory};",
+            "const changed = {...initial,oneClick:{terminalProcessLaunchAllowed:true}};",
+            "mergeEaFactoryReadModel({eaFactory:changed});",
+            "const afterChanged = {...state.modal.eaFactory};",
+            "process.stdout.write(JSON.stringify({afterSame,afterChanged}));",
+        ])
+        completed = subprocess.run(
+            [self.node_binary(), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        )
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["afterSame"]["message"], "Backend rejected exact reason")
+        self.assertEqual(payload["afterSame"]["messageKind"], "local_preflight_rejected")
+        self.assertEqual(payload["afterChanged"]["message"], "")
+        self.assertEqual(payload["afterChanged"]["messageKind"], "")
+
+    def test_local_preflight_rejection_clears_when_identical_poll_refreshes_authority(self):
+        validator = self.block("function validateEaFactoryBusyModel", "function eaFactoryBusyContext")
+        state_merge = self.block("function eaFactoryReadModelStateKey", "function mergeEaFactoryResponseReport")
+        script = "\n".join([
+            "const EA_FACTORY_STAGE_IDS = Object.freeze(['source','spec','generate','review','compile_validate','backtest_recheck','artifacts_report']);",
+            "const EA_FACTORY_BACKEND_STAGE_BY_UI = Object.freeze({spec:'strategy_spec',generate:'generate_source',review:'source_review',compile_validate:'compile_validate',backtest_recheck:'backtest_recheck',artifacts_report:'final_report'});",
+            "const EA_FACTORY_PROP_ID = 'right_server_racks';",
+            "const EA_FACTORY_READ_MODEL_MAX_AGE_MS = 90000;",
+            "const EA_FACTORY_SUPPORTED_MODES = new Set(['one_click_with_manual_stage_recovery','manual_stage_by_stage']);",
+            "const safeDashboardDisplayText = (value,fallback='') => String(value || fallback);",
+            "const workflowDomainObject = (...values) => values.find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {};",
+            "const eaFactoryFirstArray = (...values) => values.find(Array.isArray) || [];",
+            "const model = {schemaVersion:'ea-factory-v1',mode:'one_click_with_manual_stage_recovery',scheduled:false,busy:null,sourceCatalog:{records:[]},builds:[],terminalSelection:{},oneClick:{}};",
+            "const state = {eaFactoryReadModel:{payload:model,lastLoadedAt:Date.now()-EA_FACTORY_READ_MODEL_MAX_AGE_MS-1,stale:false,lastError:null,busy:null},modal:{eaFactory:{inFlight:false,stageId:'create_build',message:'Read Model หมดอายุ',tone:'warning',messageKind:'local_preflight_rejected',readModelStateKey:''}},propReports:{}};",
+            validator,
+            state_merge,
+            "state.modal.eaFactory.readModelStateKey = eaFactoryReadModelStateKey(model);",
+            "mergeEaFactoryReadModel({eaFactory:model});",
+            "process.stdout.write(JSON.stringify(state.modal.eaFactory));",
+        ])
+        completed = subprocess.run(
+            [self.node_binary(), "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        )
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["message"], "")
+        self.assertEqual(payload["messageKind"], "")
 
     def test_one_click_uses_global_terminal_and_posts_exact_idempotent_run_contract(self):
         setup = self.block("function renderEaFactoryOneClickSetup", "function eaFactoryRetryableInvalidOutput")
@@ -718,7 +1416,11 @@ assert.equal(canRetry({{
         poller = self.block("async function pollOpenPropReport", "function startMissionPolling")
         self.assertIn("factoryOneClickActive", poller)
         self.assertIn('String(factoryDomain?.oneClick?.run?.status || "")', poller)
-        self.assertIn("force || factoryStageActive || factoryOneClickActive || factoryTtlExpired", poller)
+        self.assertIn('"awaiting_visible_terminal"', poller)
+        self.assertIn("const factoryBackendBusy = Boolean(factoryDomain?.backendBusy)", poller)
+        self.assertIn("const factoryStageActive = factoryBackendBusy", poller)
+        self.assertIn("const factoryOneClickActive = factoryBackendBusy", poller)
+        self.assertIn("force || factoryBackendBusy || factoryStageActive || factoryOneClickActive || factoryTtlExpired", poller)
 
     def test_one_click_request_key_executes_reload_and_fresh_build_matrix(self):
         node = shutil.which("node")

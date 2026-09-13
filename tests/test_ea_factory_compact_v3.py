@@ -13,6 +13,9 @@ from unittest import mock
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "bridge_server.py"
 RUNNER_PATH = PROJECT_ROOT / "runner" / "codex_cli_runner.py"
+LINDA_LEGACY_BRIEF_FIXTURE_PATH = (
+    PROJECT_ROOT / "tests" / "fixtures" / "linda_holy_grail_legacy_brief_v2.json"
+)
 
 
 def load_module(name: str, path: Path):
@@ -55,6 +58,10 @@ def compact_a_j_row() -> dict[str, str]:
     }
 
 
+def linda_legacy_brief() -> dict:
+    return json.loads(LINDA_LEGACY_BRIEF_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
 class EAFactoryCompactV3IntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -72,6 +79,137 @@ class EAFactoryCompactV3IntegrationTests(unittest.TestCase):
         self.assertIsInstance(record["strategyBrief"], dict)
         self.assertRegex(record["strategyBriefDigest"], r"^[0-9a-f]{64}$")
         return record
+
+    def test_linda_new_ingestion_derives_v3_without_rewriting_legacy_projection(self) -> None:
+        legacy = self.bridge.normalize_strategy_brief(linda_legacy_brief())
+        self.assertEqual(
+            self.bridge.compute_strategy_brief_digest(legacy),
+            self.bridge.LINDA_HOLY_GRAIL_LEGACY_BRIEF_DIGEST,
+        )
+        historical_projection = self.bridge._ea_factory_compact_strategy_brief({
+            "record_id": "deep-d36eec947ffbc48614bfef43",
+            "strategyBrief": legacy,
+        })
+        self.assertEqual(
+            historical_projection["digest"],
+            self.bridge.LINDA_HOLY_GRAIL_LEGACY_BRIEF_DIGEST,
+        )
+        self.assertNotIn(
+            self.bridge.LINDA_HOLY_GRAIL_DIRECTION_RULE,
+            historical_projection["brief"]["entryRules"],
+        )
+
+        record = self.bridge._ea_factory_normalize_record(
+            {
+                "record_id": "deep-d36eec947ffbc48614bfef43",
+                "strategyBrief": legacy,
+            },
+            source_kind="verified_deep_research",
+            source_key="auto-report-cab16df53b61d2f19ce4159f",
+            source_report_id="auto-report-cab16df53b61d2f19ce4159f",
+        )
+        self.assertIsInstance(record, dict)
+        self.assertEqual(
+            record["strategyBriefDigest"],
+            self.bridge.LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST,
+        )
+        self.assertIn(
+            self.bridge.LINDA_HOLY_GRAIL_DIRECTION_RULE,
+            record["strategyBrief"]["entryRules"],
+        )
+        self.assertEqual(
+            record["certifiedStrategyProfile"]["profileVersion"],
+            self.bridge.LINDA_HOLY_GRAIL_CERTIFIED_PROFILE_VERSION,
+        )
+        self.assertNotEqual(
+            record["sourceRecordId"],
+            self.bridge._ea_factory_normalized_source_record_id(
+                historical_projection["content"],
+                "verified_deep_research",
+                "auto-report-cab16df53b61d2f19ce4159f",
+                self.bridge.LINDA_HOLY_GRAIL_LEGACY_BRIEF_DIGEST,
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_id = "ea-build-linda-certified-v3"
+            with mock.patch.object(self.bridge, "PROJECT_ROOT", root):
+                workspace = self.bridge._ea_factory_create_build_workspace(
+                    build_id,
+                    record,
+                    "mt4",
+                    "expert_advisor",
+                )
+                spec_path = (
+                    root
+                    / "workspace"
+                    / "ea-factory"
+                    / build_id
+                    / "Source"
+                    / "strategy-spec-v01.json"
+                )
+                spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    spec["certifiedStrategyProfile"],
+                    record["certifiedStrategyProfile"],
+                )
+                build = {
+                    "id": build_id,
+                    "platform": "mt4",
+                    "artifactKind": "expert_advisor",
+                    "sourceRecordDigest": record["recordDigest"],
+                    "workspace": workspace,
+                    "brief": "",
+                    "stages": [
+                        {
+                            "id": "generate_source",
+                            "reportId": "auto-report-linda-generation",
+                        }
+                    ],
+                    "versions": [{"sourceDigest": "a" * 64}],
+                }
+                review_prompt = self.bridge._ea_factory_review_brief(build)
+                self.assertIn("Exact certified Linda v3 rule", review_prompt)
+                self.assertIn("PendingExpirationDays*86400", review_prompt)
+                self.assertIn("do not suppress any other high/critical", review_prompt)
+                self.assertEqual(review_prompt, " ".join(review_prompt.split()))
+
+                maximum_requirements = (
+                    "Linda v3 strict source review requirement with closed-bar safety "
+                    * 20
+                )[:900]
+                self.assertEqual(len(maximum_requirements), 900)
+                build["brief"] = maximum_requirements
+                maximum_review_prompt = self.bridge._ea_factory_review_brief(build)
+                self.assertLessEqual(len(maximum_review_prompt), 2400)
+                self.assertIn(
+                    f"[USER_BUILD_REQUIREMENTS]{maximum_requirements}"
+                    "[/USER_BUILD_REQUIREMENTS]",
+                    maximum_review_prompt,
+                )
+                self.assertIn(
+                    "Audit exact Strategy Brief A-J coverage only",
+                    maximum_review_prompt,
+                )
+                self.assertIn("Exact certified Linda v3 rule", maximum_review_prompt)
+                self.assertIn("Do not edit files", maximum_review_prompt)
+
+        mutated = copy.deepcopy(legacy)
+        mutated["entryRules"] += " Mutated research revision."
+        mutated_record = self.bridge._ea_factory_normalize_record(
+            {
+                "record_id": "deep-d36eec947ffbc48614bfef43",
+                "strategyBrief": mutated,
+            },
+            source_kind="verified_deep_research",
+            source_key="auto-report-cab16df53b61d2f19ce4159f",
+        )
+        self.assertNotEqual(
+            mutated_record["strategyBriefDigest"],
+            self.bridge.LINDA_HOLY_GRAIL_CERTIFIED_BRIEF_DIGEST,
+        )
+        self.assertIsNone(mutated_record["certifiedStrategyProfile"])
 
     def _create_initial_build(
         self,
@@ -137,6 +275,54 @@ class EAFactoryCompactV3IntegrationTests(unittest.TestCase):
             item["fileId"] for item in artifacts
         ]
         return record, build
+
+    def test_oauth_secret_forms_are_rejected_at_admission_and_review(self) -> None:
+        google_secret = "GOC" + "SPX-" + ("A" * 24)
+        secret_forms = (
+            "client_secret=REDACTED_PLACEHOLDER_12345",
+            "oauth_client_secret: REDACTED_PLACEHOLDER_12345",
+            google_secret,
+        )
+        for secret_form in secret_forms:
+            with self.subTest(secret_form=secret_form[:20]):
+                self.assertTrue(
+                    self.bridge.contains_potential_secret(secret_form)
+                )
+                self.assertNotIn(
+                    secret_form,
+                    self.bridge.redact_text(secret_form),
+                )
+                with self.assertRaises(self.bridge.RequestError) as caught:
+                    self.bridge.create_ea_factory_build({
+                        "sourceRecordId": "ea-source-secret-admission",
+                        "platform": "mt4",
+                        "artifactKind": "expert_advisor",
+                        "brief": secret_form,
+                    })
+                self.assertEqual(caught.exception.status, 422)
+                self.assertEqual(caught.exception.code, "ea_factory_brief_invalid")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(self.bridge, "PROJECT_ROOT", root):
+                for artifact_kind, secret_form in (
+                    ("expert_advisor", "client_secret=REDACTED_PLACEHOLDER_12345"),
+                    ("custom_indicator", google_secret),
+                ):
+                    with self.subTest(artifact_kind=artifact_kind):
+                        _record, build = self._create_initial_build(
+                            root,
+                            artifact_kind,
+                        )
+                        build["brief"] = secret_form
+                        self.bridge._ea_factory_stage_row(
+                            build,
+                            "generate_source",
+                        )["reportId"] = f"report-secret-{artifact_kind}"
+                        build["versions"] = [{"sourceDigest": "a" * 64}]
+                        with self.assertRaises(self.bridge.RequestError) as caught:
+                            self.bridge._ea_factory_review_brief(build)
+                        self.assertEqual(caught.exception.status, 422)
 
     @staticmethod
     def _compact_indicator_source(brief_digest: str) -> str:
@@ -409,6 +595,44 @@ void OnTick() {{
                     )
                 else:
                     self.assertNotIn("[EA_FACTORY_ARTIFACT_KIND:", prompt)
+
+    def test_compact_indicator_review_preserves_maximum_user_brief_and_gates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(self.bridge, "PROJECT_ROOT", root):
+                _record, build = self._create_initial_build(root, "custom_indicator")
+                generation = self.bridge._ea_factory_stage_row(
+                    build,
+                    "generate_source",
+                )
+                generation["reportId"] = "auto-report-compact-indicator"
+                build["versions"] = [{"sourceDigest": "a" * 64}]
+                requirements = (
+                    "Strict custom indicator closed-bar review requirement " * 20
+                )[:900]
+                self.assertEqual(len(requirements), 900)
+                build["brief"] = requirements
+
+                review = self.bridge._ea_factory_review_brief(build)
+
+        self.assertLessEqual(len(review), 2400)
+        self.assertIn(
+            f"[USER_BUILD_REQUIREMENTS]{requirements}[/USER_BUILD_REQUIREMENTS]",
+            review,
+        )
+        for required in (
+            "exact v3 A-J",
+            "sourceDigest=bare IMMUTABLE digest",
+            "OnCalculate",
+            "SetIndexBuffer",
+            "closed-bar/no-look-ahead",
+            "non-EMPTY signal writes",
+            "trading side effect",
+            "compileStatus exactly source_only",
+            "Do not edit files",
+            "backtest/attach/deploy/schedule/loop/trade",
+        ):
+            self.assertIn(required, review)
 
     def test_compact_ea_generation_and_review_use_exact_a_j_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

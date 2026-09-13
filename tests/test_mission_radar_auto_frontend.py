@@ -351,7 +351,7 @@ class MissionRadarAutoFrontendTests(unittest.TestCase):
         self.assertLess(submit.index(guard), submit.index("postJson("))
 
     def test_cache_version_includes_radar_truth_in_latest_build(self) -> None:
-        self.assertIn("20260912-ea-factory-guard-v0918", self.index)
+        self.assertIn("20260913-ea-factory-3page-state-v0919", self.index)
         self.assertNotIn("20260824-ea-optimization-lab-v072", self.index)
         self.assertNotIn("20260822-ai-meeting-chat-first-v068", self.index)
         self.assertNotIn("20260814-ai-meeting-preview-v063", self.index)
