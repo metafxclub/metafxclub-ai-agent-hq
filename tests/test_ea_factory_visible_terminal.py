@@ -408,10 +408,14 @@ class AdapterFixture:
             "bindingDigest": "a" * 64,
         }
         self.target = {
-            "terminalPath": str(self.terminal),
-            "compilerPath": str(self.metaeditor),
-            "installPath": str(self.install),
-            "dataPath": str(self.data),
+            # Hosted Windows runners can expose the temporary root through an
+            # 8.3 alias such as RUNNER~1.  Production target discovery already
+            # returns canonical paths, so keep the fixture faithful to that
+            # boundary before direct _fresh_raw_binding/_binding_pair tests.
+            "terminalPath": str(self.terminal.resolve(strict=True)),
+            "compilerPath": str(self.metaeditor.resolve(strict=True)),
+            "installPath": str(self.install.resolve(strict=True)),
+            "dataPath": str(self.data.resolve(strict=True)),
             "terminalExecutableSha256": sha256(self.terminal),
             "frontOfficeExecutableSha256": sha256(self.metaeditor),
         }
