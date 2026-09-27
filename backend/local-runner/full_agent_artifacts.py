@@ -625,7 +625,13 @@ class FullAgentArtifactStore:
         return _utc_from_epoch(self._now() + ttl)
 
     def _write_bytes(self, destination: Path, payload: bytes) -> None:
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_CREAT
+            | os.O_EXCL
+            | os.O_WRONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0)
+        )
         descriptor = os.open(destination, flags, 0o600)
         try:
             with os.fdopen(descriptor, "wb") as handle:
@@ -1064,10 +1070,18 @@ class FullAgentArtifactStore:
             )
 
     def _copy_source_to_stage(self, source: Path, destination: Path) -> None:
-        source_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        source_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0)
+        )
         source_descriptor = os.open(source, source_flags)
         destination_flags = (
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+            os.O_CREAT
+            | os.O_EXCL
+            | os.O_WRONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0)
         )
         destination_descriptor = -1
         try:
@@ -1082,6 +1096,7 @@ class FullAgentArtifactStore:
                 )
             destination_descriptor = os.open(destination, destination_flags, 0o600)
             total = 0
+            copied_digest = hashlib.sha256()
             while True:
                 chunk = os.read(source_descriptor, 1024 * 1024)
                 if not chunk:
@@ -1091,6 +1106,7 @@ class FullAgentArtifactStore:
                     raise FullAgentArtifactError(
                         "artifact_too_large", "Generated artifact exceeds the safe limit.", status=413
                     )
+                copied_digest.update(chunk)
                 view = memoryview(chunk)
                 while view:
                     written = os.write(destination_descriptor, view)
@@ -1098,11 +1114,33 @@ class FullAgentArtifactStore:
                         raise OSError("short artifact write")
                     view = view[written:]
             os.fsync(destination_descriptor)
+
+            # Verify a second snapshot from the same open descriptor.  This is
+            # stronger than trusting only mtime, and avoids false positives on
+            # Windows filesystems where timestamp metadata may settle after a
+            # newly-created file is first opened (observed on hosted runners).
+            os.lseek(source_descriptor, 0, os.SEEK_SET)
+            verified_total = 0
+            verified_digest = hashlib.sha256()
+            while True:
+                chunk = os.read(source_descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                verified_total += len(chunk)
+                if verified_total > MAX_OUTPUT_BYTES:
+                    raise FullAgentArtifactError(
+                        "artifact_too_large", "Generated artifact exceeds the safe limit.", status=413
+                    )
+                verified_digest.update(chunk)
             after = os.fstat(source_descriptor)
             if (
                 total != before.st_size
+                or verified_total != before.st_size
                 or after.st_size != before.st_size
-                or after.st_mtime_ns != before.st_mtime_ns
+                or after.st_mode != before.st_mode
+                or after.st_dev != before.st_dev
+                or after.st_ino != before.st_ino
+                or verified_digest.digest() != copied_digest.digest()
             ):
                 raise FullAgentArtifactError(
                     "artifact_changed", "Generated artifact changed during staging.", status=409

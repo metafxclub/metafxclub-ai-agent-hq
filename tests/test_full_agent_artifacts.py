@@ -6,6 +6,7 @@ import io
 import json
 import tempfile
 import struct
+import types
 import unittest
 import zipfile
 from pathlib import Path
@@ -235,6 +236,73 @@ class FullAgentArtifactStoreTests(unittest.TestCase):
                 allowed_roots=(),
             )
         self.assertEqual(unconfigured.exception.code, "unsafe_output_source")
+
+    def test_publish_output_tolerates_timestamp_jitter_after_content_verification(self) -> None:
+        output_root = self.root / "timestamp-jitter"
+        output_root.mkdir()
+        source = output_root / "result.txt"
+        source.write_text("stable\n", encoding="utf-8")
+        real_fstat = self.module.os.fstat
+        calls = [0]
+
+        def jittering_fstat(descriptor: int):
+            value = real_fstat(descriptor)
+            calls[0] += 1
+            return types.SimpleNamespace(
+                st_mode=value.st_mode,
+                st_size=value.st_size,
+                st_mtime_ns=value.st_mtime_ns + calls[0],
+                st_dev=value.st_dev,
+                st_ino=value.st_ino,
+            )
+
+        with mock.patch.object(self.module.os, "fstat", side_effect=jittering_fstat):
+            result = self.store.publish_output(
+                self.thread_id,
+                self.turn_id,
+                source,
+                allowed_roots=(output_root,),
+            )
+
+        published, _metadata = self.store.resolve(
+            self.thread_id, self.turn_id, result["id"]
+        )
+        self.assertEqual(published.read_text(encoding="utf-8"), "stable\n")
+        self.assertEqual(published.read_bytes(), source.read_bytes())
+
+    def test_publish_output_rejects_same_size_content_drift_between_snapshots(self) -> None:
+        output_root = self.root / "content-drift"
+        output_root.mkdir()
+        source = output_root / "result.txt"
+        source.write_bytes(b"safe\n")
+        real_read = self.module.os.read
+        real_lseek = self.module.os.lseek
+        verifying = [False]
+        verification_chunks = [b"evil\n", b""]
+
+        def tracked_lseek(descriptor: int, offset: int, whence: int):
+            verifying[0] = True
+            return real_lseek(descriptor, offset, whence)
+
+        def drifting_read(descriptor: int, size: int):
+            if verifying[0]:
+                return verification_chunks.pop(0)
+            return real_read(descriptor, size)
+
+        with (
+            mock.patch.object(self.module.os, "lseek", side_effect=tracked_lseek),
+            mock.patch.object(self.module.os, "read", side_effect=drifting_read),
+        ):
+            with self.assertRaises(self.module.FullAgentArtifactError) as drifted:
+                self.store.publish_output(
+                    self.thread_id,
+                    self.turn_id,
+                    source,
+                    allowed_roots=(output_root,),
+                )
+
+        self.assertEqual(drifted.exception.code, "artifact_changed")
+        self.assertEqual(list(self.store.root.glob("art_*.meta.json")), [])
 
     def test_manual_output_stage_is_owner_bound_and_finalized_atomically(self) -> None:
         stage = self.store.begin_output(
