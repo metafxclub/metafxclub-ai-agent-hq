@@ -426,6 +426,7 @@ class FullAgentBridgeApiTests(unittest.TestCase):
         *,
         message: str,
         key: str,
+        timeout: float = 5,
     ) -> tuple[dict, dict]:
         response = self.bridge.full_agent_request_turn(
             thread_id,
@@ -436,7 +437,8 @@ class FullAgentBridgeApiTests(unittest.TestCase):
             lambda: self.bridge.full_agent_get_thread(thread_id)["thread"][
                 "activeTurn"
             ]
-            is None
+            is None,
+            timeout=timeout,
         )
         return response, self.bridge.full_agent_get_thread(thread_id)["thread"]
 
@@ -1102,6 +1104,7 @@ class FullAgentBridgeApiTests(unittest.TestCase):
             thread["id"],
             message=first_payload["message"],
             key=first_payload["idempotencyKey"],
+            timeout=15,
         )
 
         self.gateway.reply_text = "second persisted reply"
@@ -1109,6 +1112,7 @@ class FullAgentBridgeApiTests(unittest.TestCase):
             thread["id"],
             message="Return the second distinct answer",
             key="replay-original-turn-0002",
+            timeout=15,
         )
         runtime = self.bridge._full_agent_runtime()
         for index in range(205):

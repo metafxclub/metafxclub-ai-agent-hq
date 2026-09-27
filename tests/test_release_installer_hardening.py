@@ -1658,36 +1658,62 @@ $venvRoot = Join-Path $installRoot 'runner\.venv'
 New-Item -ItemType Directory -Path $venvRoot -Force | Out-Null
 $lockedFile = Join-Path $venvRoot 'transient-lock.bin'
 [IO.File]::WriteAllBytes($lockedFile, [byte[]](1, 2, 3))
-$job = Start-Job -ScriptBlock {{
-    param($path)
-    $stream = [IO.File]::Open(
-        $path,
+$readyFile = Join-Path $installRoot 'transient-lock.ready'
+$lockHolderScript = @'
+$stream = [IO.File]::Open(
+        $env:METAFX_TEST_LOCKED_FILE,
         [IO.FileMode]::Open,
         [IO.FileAccess]::ReadWrite,
         [IO.FileShare]::None
     )
     try {{
-        Write-Output 'LOCKED'
+        [IO.File]::WriteAllText(
+            $env:METAFX_TEST_LOCK_READY,
+            'LOCKED',
+            [Text.UTF8Encoding]::new($false)
+        )
         Start-Sleep -Milliseconds 700
     }}
     finally {{
         $stream.Dispose()
     }}
-}} -ArgumentList $lockedFile
+'@
+$lockHolderCommand = [Convert]::ToBase64String(
+    [Text.Encoding]::Unicode.GetBytes($lockHolderScript)
+)
+$lockProcessInfo = [Diagnostics.ProcessStartInfo]::new()
+$lockProcessInfo.FileName = 'powershell.exe'
+$lockProcessInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -EncodedCommand $lockHolderCommand"
+$lockProcessInfo.UseShellExecute = $false
+$lockProcessInfo.CreateNoWindow = $true
+$lockProcessInfo.EnvironmentVariables['METAFX_TEST_LOCKED_FILE'] = $lockedFile
+$lockProcessInfo.EnvironmentVariables['METAFX_TEST_LOCK_READY'] = $readyFile
+$lockProcess = [Diagnostics.Process]::Start($lockProcessInfo)
 try {{
-    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {{
-        $jobOutput = @(Receive-Job -Job $job -Keep)
-        if ($jobOutput -contains 'LOCKED') {{ break }}
+        if (Test-Path -LiteralPath $readyFile -PathType Leaf) {{ break }}
+        if ($lockProcess.HasExited) {{
+            throw "Lock fixture exited early with code $($lockProcess.ExitCode)"
+        }}
         Start-Sleep -Milliseconds 50
     }} while ([DateTime]::UtcNow -lt $deadline)
-    if ($jobOutput -notcontains 'LOCKED') {{ throw 'Lock fixture did not start' }}
+    if (-not (Test-Path -LiteralPath $readyFile -PathType Leaf)) {{
+        throw 'Lock fixture did not start'
+    }}
     Remove-InstallerManagedDirectoryWithRetry -Path $venvRoot -Kind venv
     if (Test-Path -LiteralPath $venvRoot) {{ throw 'Venv remained after bounded retry' }}
 }}
 finally {{
-    Stop-Job -Job $job -ErrorAction SilentlyContinue
-    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    if ($lockProcess -and -not $lockProcess.HasExited) {{
+        $null = $lockProcess.WaitForExit(5000)
+    }}
+    if ($lockProcess -and -not $lockProcess.HasExited) {{
+        $lockProcess.Kill()
+        $lockProcess.WaitForExit()
+    }}
+    if ($lockProcess) {{ $lockProcess.Dispose() }}
+    Remove-Item -LiteralPath $readyFile -Force -ErrorAction SilentlyContinue
 }}
 $outside = Join-Path $env:LOCALAPPDATA 'outside'
 New-Item -ItemType Directory -Path $outside -Force | Out-Null
