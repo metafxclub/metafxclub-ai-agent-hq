@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import unittest
 from pathlib import Path
@@ -58,6 +59,155 @@ def compact_policy_lease_name(policy_digest: str, channel_digest: str) -> str:
 
 def snapshot_channel_digest(channel: str) -> str:
     return hashlib.sha256(channel.encode("ascii")).hexdigest()
+
+
+def risk_volume_model(
+    *,
+    capital: float,
+    balance: float,
+    risk_percent: float,
+    hard_cap_percent: float,
+    stop_distance: float,
+    point: float,
+    tick_size_points: float,
+    tick_value: float,
+    commission_per_lot: float,
+    slippage_points: int,
+    minimum: float,
+    maximum: float,
+    step: float,
+    max_managed_lots: float,
+    current_managed_lots: float,
+) -> tuple[float, float] | None:
+    tick_size_price = tick_size_points * point
+    loss_per_lot = (
+        (stop_distance + slippage_points * point)
+        / tick_size_price
+        * tick_value
+        + commission_per_lot
+    )
+    budget = min(
+        capital * risk_percent / 100.0,
+        balance * hard_cap_percent / 100.0,
+    )
+    ceiling = min(maximum, max_managed_lots - current_managed_lots)
+    raw_lots = budget / loss_per_lot
+    capped = min(raw_lots, ceiling)
+    if capped < minimum:
+        return None
+    step_count = math.floor((capped - minimum) / step + 1e-10)
+    lots = minimum + max(0, step_count) * step
+    while lots >= minimum and loss_per_lot * lots > budget:
+        lots -= step
+    if lots < minimum:
+        return None
+    return lots, loss_per_lot * lots
+
+
+def _legacy_loss_latch_scan_pass_model(
+    entries: list[tuple[str, bool, bool, bool]],
+    *,
+    cap: int = 256,
+    enumeration_error: bool = False,
+) -> tuple[bool, bool, bool, tuple[str, ...], str]:
+    if enumeration_error:
+        return (
+            False,
+            False,
+            False,
+            (),
+            "LEGACY_LOSS_LATCH_ENUMERATION_FAILED",
+        )
+    if len(entries) > cap:
+        return (
+            False,
+            False,
+            False,
+            (),
+            "LEGACY_LOSS_LATCH_ENUMERATION_LIMIT_EXCEEDED",
+        )
+    daily_found = False
+    weekly_found = False
+    channels: list[str] = []
+    for name, is_directory, has_daily, has_weekly in entries:
+        if name in {"locks", "account-policies"}:
+            continue
+        if not re.fullmatch(r"mtc-[A-Za-z0-9_-]{1,116}", name):
+            continue
+        if not is_directory:
+            return (
+                False,
+                False,
+                False,
+                (),
+                "LEGACY_LOSS_LATCH_ENUMERATION_AMBIGUOUS",
+            )
+        channels.append(name)
+        daily_found = daily_found or has_daily
+        weekly_found = weekly_found or has_weekly
+    return True, daily_found, weekly_found, tuple(sorted(channels)), ""
+
+
+def legacy_loss_latch_scan_model(
+    entries: list[tuple[str, bool, bool, bool]],
+    *,
+    cap: int = 256,
+    enumeration_error: bool = False,
+) -> tuple[bool, bool, bool, str]:
+    ok, daily, weekly, _channels, reason = _legacy_loss_latch_scan_pass_model(
+        entries,
+        cap=cap,
+        enumeration_error=enumeration_error,
+    )
+    return ok, daily, weekly, reason
+
+
+def legacy_loss_latch_migration_model(
+    first_entries: list[tuple[str, bool, bool, bool]],
+    second_entries: list[tuple[str, bool, bool, bool]],
+    *,
+    first_enumeration_error: bool = False,
+    second_enumeration_error: bool = False,
+    captured_periods: tuple[int, int] = (1_700_000_000, 1_699_747_200),
+    periods_before_activation: tuple[int, int] | None = None,
+    periods_after_activation: tuple[int, int] | None = None,
+    persistence_ok: bool = True,
+) -> tuple[bool, bool, bool, str]:
+    first = _legacy_loss_latch_scan_pass_model(
+        first_entries,
+        enumeration_error=first_enumeration_error,
+    )
+    if not first[0]:
+        return False, False, False, first[4]
+    second = _legacy_loss_latch_scan_pass_model(
+        second_entries,
+        enumeration_error=second_enumeration_error,
+    )
+    if not second[0]:
+        return False, False, False, second[4]
+    if first[3] != second[3]:
+        return False, False, False, "LEGACY_LOSS_LATCH_CHANNEL_SET_CHANGED"
+    before = periods_before_activation or captured_periods
+    after = periods_after_activation or captured_periods
+    if before != captured_periods or after != captured_periods:
+        return False, False, False, "LEGACY_LOSS_LATCH_PERIOD_CHANGED"
+    daily_found = first[1] or second[1]
+    weekly_found = first[2] or second[2]
+    if (daily_found or weekly_found) and not persistence_ok:
+        return False, daily_found, weekly_found, "LOSS_LATCH_PERSISTENCE_FAILED"
+    return True, daily_found, weekly_found, ""
+
+
+def legacy_loss_latch_marker_probe_model(
+    *,
+    is_regular_file: bool,
+    error_code: int,
+) -> tuple[bool, bool]:
+    if is_regular_file:
+        return True, True
+    if error_code in {0, 5020, 5023}:
+        return True, False
+    return False, False
 
 
 def compact_policy_lease_payload(
@@ -232,17 +382,28 @@ class MT4UnifiedEATests(unittest.TestCase):
         )
         self.assertRegex(
             self.code,
+            r"\binput\s+ENUM_MONEY_MANAGEMENT_MODE\s+MoneyManagementMode\s*=\s*MONEY_MANAGEMENT_FIXED_LOT\s*;",
+        )
+        self.assertRegex(
+            self.code,
             r"\binput\s+double\s+FixedLot\s*=\s*[0-9.]+\s*;",
+        )
+        self.assertRegex(
+            self.code,
+            r"\binput\s+double\s+RiskPercent\s*=\s*[0-9.]+\s*;",
         )
         command_fields = named_block(self.code, r"\bstruct\s+CommandPayload\b")
         self.assertTrue(command_fields, "CommandPayload must be present")
         self.assertIsNone(
-            re.search(r"(?i)\b(?:lot|volume|risk_percent|risk_pct|risk_amount)\b", command_fields),
+            re.search(
+                r"(?i)\b(?:lot|volume|risk_percent|risk_pct|risk_amount|money_management)\b",
+                command_fields,
+            ),
             "AI command payload must not own lot or risk sizing",
         )
         self.assertRegex(
             self.code,
-            r"OrderSend\s*\([^;]*?\bFixedLot\b[^;]*?\)",
+            r"OrderSend\s*\([^;]*?\bexpected_lots\b[^;]*?\)",
         )
         self.assertEqual(len(re.findall(r"\bOrderSend\s*\(", self.code)), 1)
 
@@ -316,8 +477,16 @@ class MT4UnifiedEATests(unittest.TestCase):
             "ValidateClosedBarBinding",
         ):
             self.assertIn(guard, runtime)
-        self.assertIn("AccountFreeMarginCheck", self.code)
-        self.assertIn("MODE_MARGINREQUIRED", self.code)
+        margin = named_block(
+            self.code,
+            r"\bbool\s+ValidateMarginPreflight\s*\([^)]*\)",
+        )
+        self.assertIn("AccountFreeMarginCheck", margin)
+        self.assertIn("current_free_margin = AccountFreeMargin()", margin)
+        self.assertIn("current_free_margin - free_after", margin)
+        self.assertIn("AccountMargin()", margin)
+        self.assertIn("current_margin + incremental_margin", margin)
+        self.assertNotIn("MODE_MARGINREQUIRED", margin)
 
     def test_shadow_runs_common_guards_and_never_calls_ordersend(self) -> None:
         runtime = named_block(self.code, r"\bbool\s+ValidateRuntime\s*\([^)]*\)")
@@ -372,15 +541,22 @@ class MT4UnifiedEATests(unittest.TestCase):
     def test_restart_reconciliation_never_guesses_or_resends_an_order(self) -> None:
         reconcile = named_block(self.code, r"\bvoid\s+ReconcileExecutingCommand\s*\([^)]*\)")
         finder = named_block(self.code, r"\bint\s+FindManagedCommandTicket\s*\([^)]*\)")
+        unknown = named_block(self.code, r"\bvoid\s+MarkRecoveryUnknown\s*\([^)]*\)")
         process = named_block(self.code, r"\bvoid\s+ProcessCommandFile\s*\([^)]*\)")
         self.assertIn("OrderMagicNumber", finder)
         self.assertIn("IsManagedMagic(OrderMagicNumber())", finder)
         self.assertNotIn("OrderMagicNumber() == MagicNumber", finder)
         self.assertIn("OrderComment", finder)
         self.assertIn("CurrentChannelOwnsCommandId(command.command_id)", finder)
+        self.assertGreaterEqual(finder.count("match_count = -1"), 2)
+        self.assertIn("RECOVERY_TELEMETRY_UNAVAILABLE", reconcile)
         self.assertIn("RECOVERED_ORDER_FOUND", reconcile)
         self.assertIn("EXECUTION_UNKNOWN", reconcile)
         self.assertIn("RESTART_RECONCILIATION_REQUIRED", reconcile)
+        self.assertGreaterEqual(reconcile.count("MarkRecoveryUnknown("), 3)
+        self.assertIn('g_ack_verification_status = "SELECT_FAILED"', unknown)
+        self.assertIn('g_ack_execution_state = "UNKNOWN"', unknown)
+        self.assertIn("ResetAckExecutionEvidence", unknown)
         self.assertIn('processed_status == "EXECUTING"', process)
         self.assertNotIn("OrderSend", reconcile)
 
@@ -389,9 +565,9 @@ class MT4UnifiedEATests(unittest.TestCase):
             self.code,
             r'input\s+string\s+ManagedMagicNumbers\s*=\s*"4186001"\s*;',
         )
-        managed = named_block(self.code, r"\bvoid\s+ReadManagedOpenState\s*\([^)]*\)")
-        daily = named_block(self.code, r"\bdouble\s+ManagedDailyPnl\s*\([^)]*\)")
-        weekly = named_block(self.code, r"\bdouble\s+ManagedWeeklyPnl\s*\([^)]*\)")
+        managed = named_block(self.code, r"\bbool\s+ReadManagedOpenState\s*\([^)]*\)")
+        daily = named_block(self.code, r"\bbool\s+ManagedDailyPnl\s*\([^)]*\)")
+        weekly = named_block(self.code, r"\bbool\s+ManagedWeeklyPnl\s*\([^)]*\)")
         self.assertIn("IsManagedMarketOrderSelected", managed)
         self.assertNotIn("OrderSymbol", managed)
         self.assertIn("IsManagedMarketOrderSelected", daily)
@@ -413,10 +589,446 @@ class MT4UnifiedEATests(unittest.TestCase):
         )
         self.assertNotIn("SnapshotChannel", account_lock)
 
+    def test_managed_telemetry_failures_are_fail_closed_at_the_order_gate(self) -> None:
+        readers = {
+            "open": (
+                named_block(
+                    self.code,
+                    r"\bbool\s+ReadManagedOpenState\s*\([^)]*\)",
+                ),
+                1,
+            ),
+            "trade_count": (
+                named_block(
+                    self.code,
+                    r"\bbool\s+CountManagedTradesToday\s*\([^)]*\)",
+                ),
+                2,
+            ),
+            "daily_pnl": (
+                named_block(
+                    self.code,
+                    r"\bbool\s+ManagedDailyPnl\s*\([^)]*\)",
+                ),
+                1,
+            ),
+            "weekly_pnl": (
+                named_block(
+                    self.code,
+                    r"\bbool\s+ManagedWeeklyPnl\s*\([^)]*\)",
+                ),
+                1,
+            ),
+            "loss_streak": (
+                named_block(
+                    self.code,
+                    r"\bbool\s+ReadManagedLossStreak\s*\([^)]*\)",
+                ),
+                1,
+            ),
+        }
+        for name, (block, expected_selects) in readers.items():
+            with self.subTest(reader=name):
+                self.assertTrue(block)
+                self.assertEqual(block.count("if(!OrderSelect"), expected_selects)
+                self.assertRegex(
+                    block,
+                    r"if\s*\(\s*!OrderSelect\([^)]*\)\s*\)\s*return\s+false\s*;",
+                )
+
+        for name in ("open", "daily_pnl", "weekly_pnl", "loss_streak"):
+            with self.subTest(finite_reader=name):
+                self.assertIn("MathIsValidNumber", readers[name][0])
+
+        current_risk = named_block(
+            self.code,
+            r"\bbool\s+ValidateCurrentRiskState\s*\([^)]*\)",
+        )
+        resolver = named_block(
+            self.code,
+            r"\bbool\s+ResolvePositionSize\s*\([^)]*\)",
+        )
+        telemetry = named_block(
+            self.code,
+            r"\bvoid\s+UpdateRiskTelemetry\s*\([^)]*\)",
+        )
+        self.assertIn('reason = "POSITION_TELEMETRY_UNAVAILABLE";', current_risk)
+        self.assertGreaterEqual(
+            current_risk.count('reason = "HISTORY_TELEMETRY_UNAVAILABLE";'),
+            4,
+        )
+        self.assertIn('reason = "POSITION_TELEMETRY_UNAVAILABLE";', resolver)
+        self.assertIn('reason = "POSITION_TELEMETRY_UNAVAILABLE";', telemetry)
+        self.assertIn('reason = "HISTORY_TELEMETRY_UNAVAILABLE";', telemetry)
+
+    def test_open_profit_cannot_offset_realized_daily_or_weekly_losses(self) -> None:
+        daily = named_block(self.code, r"\bbool\s+ManagedDailyPnl\s*\([^)]*\)")
+        weekly = named_block(self.code, r"\bbool\s+ManagedWeeklyPnl\s*\([^)]*\)")
+        adjusted = named_block(
+            self.code,
+            r"\bbool\s+ManagedRiskPnlIncludingFloatingLoss\s*\([^)]*\)",
+        )
+        current_risk = named_block(
+            self.code,
+            r"\bbool\s+ValidateCurrentRiskState\s*\([^)]*\)",
+        )
+        self.assertNotIn("MODE_TRADES", daily)
+        self.assertNotIn("MODE_TRADES", weekly)
+        self.assertIn("MathMin(0.0, floating_pnl)", adjusted)
+        self.assertIn("daily_risk_pnl", current_risk)
+        self.assertIn("weekly_risk_pnl", current_risk)
+        self.assertNotIn("daily_pnl <= -daily_loss_limit", current_risk)
+        self.assertNotIn("weekly_pnl <= -weekly_loss_limit", current_risk)
+
+    def test_loss_latches_are_account_wide_durable_and_fail_closed(self) -> None:
+        directory = named_block(
+            self.code,
+            r"\bbool\s+AccountLossLatchDirectoryPath\s*\([^)]*\)",
+        )
+        daily_path = named_block(
+            self.code,
+            r"\bbool\s+DailyLossLockPath\s*\([^)]*\)",
+        )
+        weekly_path = named_block(
+            self.code,
+            r"\bbool\s+WeeklyLossLockPath\s*\([^)]*\)",
+        )
+        self.assertIn("AccountPortfolioPolicyDirectoryPath", directory)
+        self.assertIn('"\\\\risk-latches"', directory)
+        for block in (directory, daily_path, weekly_path):
+            self.assertNotIn("BasePath()", block)
+            self.assertNotIn("SnapshotChannel", block)
+        self.assertIn("LegacyDailyLossLockPath", self.code)
+        self.assertIn("LegacyWeeklyLossLockPath", self.code)
+
+        daily_activate = named_block(
+            self.code,
+            r"\bbool\s+ActivateDailyLossLatch\s*\([^)]*\)",
+        )
+        weekly_activate = named_block(
+            self.code,
+            r"\bbool\s+ActivateWeeklyLossLatch\s*\([^)]*\)",
+        )
+        daily_persist = named_block(
+            self.code,
+            r"\bbool\s+PersistDailyLossLatchContext\s*\([^)]*\)",
+        )
+        weekly_persist = named_block(
+            self.code,
+            r"\bbool\s+PersistWeeklyLossLatchContext\s*\([^)]*\)",
+        )
+        for name, activate, persist in (
+            ("DAILY", daily_activate, daily_persist),
+            ("WEEKLY", weekly_activate, weekly_persist),
+        ):
+            with self.subTest(period=name):
+                memory_assignment = persist.find("latched_in_memory = true")
+                context_validation = persist.find("period_start <= 0")
+                durable_write = persist.find("WriteCommonTextAtomic")
+                self.assertGreaterEqual(memory_assignment, 0)
+                self.assertGreater(context_validation, memory_assignment)
+                self.assertGreater(durable_write, context_validation)
+                self.assertIn("GlobalVariableSet", persist)
+                self.assertIn("GlobalVariablesFlush", persist)
+                self.assertIn(f"{name}_LOSS_LATCH_PATH_UNAVAILABLE", persist)
+                self.assertIn(f"{name}_LOSS_LATCH_PERSISTENCE_FAILED", persist)
+                self.assertIn(
+                    f"{name}_LOSS_LATCH_ACCOUNT_PERSISTENCE_FAILED",
+                    persist,
+                )
+                self.assertIn(f"{name.title()}LossLatchContext", activate)
+                self.assertIn(f"Persist{name.title()}LossLatchContext", activate)
+
+        daily_gate = named_block(
+            self.code,
+            r"\bbool\s+DailyLossLatchAllowsTrading\s*\([^)]*\)",
+        )
+        weekly_gate = named_block(
+            self.code,
+            r"\bbool\s+WeeklyLossLatchAllowsTrading\s*\([^)]*\)",
+        )
+        for name, block in (("DAILY", daily_gate), ("WEEKLY", weekly_gate)):
+            with self.subTest(gate=name):
+                self.assertIn("GlobalVariableCheck", block)
+                self.assertIn("Legacy", block)
+                self.assertIn("latched_in_memory", block)
+                self.assertIn("MIGRATION_FAILED", block)
+                self.assertIn("LIMIT_LATCHED", block)
+                self.assertIn("Activate", block)
+
+        combined_gate = named_block(
+            self.code,
+            r"\bbool\s+LossLatchesAllowTrading\s*\([^)]*\)",
+        )
+        self.assertIn("DailyLossLatchAllowsTrading", combined_gate)
+        self.assertIn("WeeklyLossLatchAllowsTrading", combined_gate)
+        self.assertLess(
+            combined_gate.find("DailyLossLatchAllowsTrading"),
+            combined_gate.find("if(!daily_allows)"),
+        )
+        self.assertLess(
+            combined_gate.find("WeeklyLossLatchAllowsTrading"),
+            combined_gate.find("if(!daily_allows)"),
+        )
+        self.assertIn("GlobalVariablesFlush", daily_persist)
+        self.assertIn("GlobalVariablesFlush", weekly_persist)
+
+        current_risk = named_block(
+            self.code,
+            r"\bbool\s+ValidateCurrentRiskState\s*\([^)]*\)",
+        )
+        self.assertIn("if(!LossLatchesAllowTrading(reason))", current_risk)
+        self.assertLess(
+            current_risk.find("LossLatchesAllowTrading"),
+            current_risk.find("ReadManagedOpenState"),
+        )
+        self.assertRegex(
+            current_risk,
+            r"if\s*\(\s*!ActivateDailyLossLatch\(reason\)\s*\)\s*return\s+false",
+        )
+        self.assertRegex(
+            current_risk,
+            r"if\s*\(\s*!ActivateWeeklyLossLatch\(reason\)\s*\)\s*return\s+false",
+        )
+
+    def test_legacy_loss_latch_upgrade_barrier_scans_every_channel_fail_closed(self) -> None:
+        migration = named_block(
+            self.code,
+            r"\bbool\s+MigrateLegacyLossLatchesAcrossChannels\s*\([^)]*\)",
+        )
+        scanner = named_block(
+            self.code,
+            r"\bbool\s+ScanLegacyLossLatchesAcrossChannels\s*\([^)]*\)",
+        )
+        anchor = named_block(
+            self.code,
+            r"\bbool\s+EnsureLegacyLossLatchScanAnchor\s*\([^)]*\)",
+        )
+        classifier = named_block(
+            self.code,
+            r"\bbool\s+ClassifyLegacyLossLatchRootEntry\s*\([^)]*\)",
+        )
+        probe = named_block(
+            self.code,
+            r"\bbool\s+ProbeLegacyLossLatchMarker\s*\([^)]*\)",
+        )
+        self.assertIn("g_account_execution_lock_handle == INVALID_HANDLE", migration)
+        self.assertIn('FileFindFirst(\n      "MetafxHQ\\\\*"', scanner)
+        self.assertIn("FileFindNext", scanner)
+        self.assertIn("ResetLastError", scanner)
+        self.assertIn("LEGACY_LOSS_LATCH_SCAN_MAX_ENTRIES", scanner)
+        self.assertIn("LEGACY_LOSS_LATCH_ENUMERATION_LIMIT_EXCEEDED", scanner)
+        self.assertIn("LEGACY_LOSS_LATCH_ENUMERATION_FAILED", scanner)
+        self.assertGreaterEqual(scanner.count("FileFindClose(search_handle)"), 4)
+        self.assertIn("ClassifyLegacyLossLatchRootEntry", scanner)
+        self.assertIn('"MetafxHQ\\\\" + entry_name', scanner)
+        self.assertIn(
+            'entry_name != "legacy-loss-latch-scan-anchor-v1.txt"',
+            scanner,
+        )
+        self.assertIn("EnsureLegacyLossLatchScanAnchor", migration)
+        self.assertIn("WriteCommonTextAtomic", anchor)
+        self.assertIn("ReadCommonText", anchor)
+        self.assertIn("LegacyDailyLossLockFileNameForPeriod", migration)
+        self.assertIn("LegacyWeeklyLossLockFileNameForPeriod", migration)
+        self.assertNotIn("BasePath()", migration)
+        self.assertNotIn("SnapshotChannel", migration)
+        self.assertEqual(
+            migration.count("ScanLegacyLossLatchesAcrossChannels"),
+            2,
+        )
+        self.assertIn("SameStringArrays", migration)
+        self.assertIn("LEGACY_LOSS_LATCH_CHANNEL_SET_CHANGED", migration)
+        self.assertIn("first_daily_found || second_daily_found", migration)
+        self.assertIn("first_weekly_found || second_weekly_found", migration)
+        self.assertIn("PersistDailyLossLatchContext", migration)
+        self.assertIn("PersistWeeklyLossLatchContext", migration)
+        self.assertGreaterEqual(
+            migration.count("LEGACY_LOSS_LATCH_PERIOD_CHANGED"),
+            2,
+        )
+        self.assertGreaterEqual(migration.count("BrokerDayStart()"), 3)
+        self.assertGreaterEqual(
+            migration.count("BrokerWeekStartForDay"),
+            3,
+        )
+        self.assertIn("g_legacy_loss_latch_migration_ready = true", migration)
+        self.assertIn('entry_name == "locks"', classifier)
+        self.assertIn('entry_name == "account-policies"', classifier)
+        self.assertIn("IsSafeChannel(entry_name)", classifier)
+        self.assertIn("FILE_ERROR_IS_DIRECTORY", classifier)
+        self.assertIn("LEGACY_LOSS_LATCH_ENUMERATION_AMBIGUOUS", classifier)
+        self.assertIn("FILE_ERROR_NOT_EXIST", probe)
+        self.assertIn("FILE_ERROR_DIRECTORY_NOT_EXIST", probe)
+        self.assertIn("LEGACY_LOSS_LATCH_MARKER_PROBE_FAILED", probe)
+        self.assertNotRegex(migration + scanner, r"File(?:Delete|Move)\s*\(")
+
+        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        channel_lock = on_init.find("AcquireChannelLock")
+        account_lock = on_init.find("AcquireAccountExecutionLock")
+        policy_lease = on_init.find("AcquirePortfolioPolicyLease")
+        migrate = on_init.find("MigrateLegacyLossLatchesAcrossChannels")
+        release_lock = on_init.find("ReleaseAccountExecutionLock")
+        timer = on_init.find("EventSetTimer")
+        self.assertGreater(account_lock, channel_lock)
+        self.assertGreater(policy_lease, account_lock)
+        self.assertGreater(migrate, policy_lease)
+        self.assertGreater(migrate, account_lock)
+        self.assertGreater(release_lock, migrate)
+        self.assertGreater(timer, release_lock)
+        self.assertIn('"loss_latch_migration"', on_init)
+        self.assertIn("legacy_loss_latch_migration_reason", on_init)
+        migration_failure = on_init[on_init.find('"loss_latch_migration"') : timer]
+        self.assertIn("ReleasePortfolioPolicyLease", migration_failure)
+        self.assertIn("ReleaseChannelLock", migration_failure)
+
+        combined_gate = named_block(
+            self.code,
+            r"\bbool\s+LossLatchesAllowTrading\s*\([^)]*\)",
+        )
+        self.assertIn("g_legacy_loss_latch_migration_ready", combined_gate)
+        self.assertIn("LEGACY_LOSS_LATCH_MIGRATION_NOT_READY", combined_gate)
+
+        # Channel A is offline, but its legacy marker is still discovered when
+        # Channel B is the first v2.19 instance started after an upgrade.
+        first_entries = [
+            ("legacy-loss-latch-scan-anchor-v1.txt", False, False, False),
+            ("locks", True, True, True),
+            ("account-policies", True, True, True),
+            ("mtc-channel-a", True, True, False),
+            ("mtc-channel-b", True, False, False),
+        ]
+        migrated, daily, weekly, reason = legacy_loss_latch_migration_model(
+            first_entries,
+            list(reversed(first_entries)),
+        )
+        self.assertTrue(migrated)
+        self.assertTrue(daily)
+        self.assertFalse(weekly)
+        self.assertEqual(reason, "")
+
+        clean_entries = [
+            ("legacy-loss-latch-scan-anchor-v1.txt", False, False, False),
+            ("mtc-channel-b", True, False, False),
+        ]
+        clean = legacy_loss_latch_migration_model(clean_entries, clean_entries)
+        self.assertEqual(clean, (True, False, False, ""))
+        failed_first = legacy_loss_latch_migration_model(
+            clean_entries,
+            clean_entries,
+            first_enumeration_error=True,
+        )
+        self.assertEqual(
+            failed_first[3],
+            "LEGACY_LOSS_LATCH_ENUMERATION_FAILED",
+        )
+        failed_next = legacy_loss_latch_migration_model(
+            clean_entries,
+            clean_entries,
+            second_enumeration_error=True,
+        )
+        self.assertEqual(
+            failed_next[3],
+            "LEGACY_LOSS_LATCH_ENUMERATION_FAILED",
+        )
+
+        exactly_at_cap = legacy_loss_latch_scan_model(
+            [(f"junk-{index}", False, False, False) for index in range(256)]
+        )
+        self.assertEqual(exactly_at_cap, (True, False, False, ""))
+        overflow = legacy_loss_latch_scan_model(
+            [(f"junk-{index}", False, False, False) for index in range(257)]
+        )
+        self.assertEqual(
+            overflow[3],
+            "LEGACY_LOSS_LATCH_ENUMERATION_LIMIT_EXCEEDED",
+        )
+        ambiguous = legacy_loss_latch_scan_model(
+            [("mtc-channel-file", False, False, False)]
+        )
+        self.assertEqual(
+            ambiguous[3],
+            "LEGACY_LOSS_LATCH_ENUMERATION_AMBIGUOUS",
+        )
+
+        for absent_error in (0, 5020, 5023):
+            with self.subTest(absent_error=absent_error):
+                self.assertEqual(
+                    legacy_loss_latch_marker_probe_model(
+                        is_regular_file=False,
+                        error_code=absent_error,
+                    ),
+                    (True, False),
+                )
+        for unsafe_error in (5019, 5004, 5016):
+            with self.subTest(marker_probe_error=unsafe_error):
+                self.assertEqual(
+                    legacy_loss_latch_marker_probe_model(
+                        is_regular_file=False,
+                        error_code=unsafe_error,
+                    ),
+                    (False, False),
+                )
+
+        added_channel = legacy_loss_latch_migration_model(
+            clean_entries,
+            clean_entries + [("mtc-channel-c", True, False, False)],
+        )
+        self.assertEqual(
+            added_channel[3],
+            "LEGACY_LOSS_LATCH_CHANNEL_SET_CHANGED",
+        )
+        removed_channel = legacy_loss_latch_migration_model(
+            [
+                ("mtc-channel-a", True, False, False),
+                ("mtc-channel-b", True, False, False),
+            ],
+            [("mtc-channel-a", True, False, False)],
+        )
+        self.assertEqual(
+            removed_channel[3],
+            "LEGACY_LOSS_LATCH_CHANNEL_SET_CHANGED",
+        )
+        appeared_marker = legacy_loss_latch_migration_model(
+            [("mtc-channel-a", True, False, False)],
+            [("mtc-channel-a", True, True, False)],
+        )
+        self.assertEqual(appeared_marker, (True, True, False, ""))
+        disappeared_marker = legacy_loss_latch_migration_model(
+            [("mtc-channel-a", True, False, True)],
+            [("mtc-channel-a", True, False, False)],
+        )
+        self.assertEqual(disappeared_marker, (True, False, True, ""))
+
+        rollover = legacy_loss_latch_migration_model(
+            clean_entries,
+            clean_entries,
+            periods_before_activation=(1_700_086_400, 1_699_747_200),
+        )
+        self.assertEqual(
+            rollover[3],
+            "LEGACY_LOSS_LATCH_PERIOD_CHANGED",
+        )
+        monday_rollover = legacy_loss_latch_migration_model(
+            clean_entries,
+            clean_entries,
+            periods_after_activation=(1_700_000_000, 1_700_352_000),
+        )
+        self.assertEqual(
+            monday_rollover[3],
+            "LEGACY_LOSS_LATCH_PERIOD_CHANGED",
+        )
+        persistence_failure = legacy_loss_latch_migration_model(
+            [("mtc-channel-a", True, True, True)],
+            [("mtc-channel-a", True, True, True)],
+            persistence_ok=False,
+        )
+        self.assertEqual(persistence_failure[3], "LOSS_LATCH_PERSISTENCE_FAILED")
+
     def test_broker_order_time_arithmetic_stays_in_the_broker_clock_domain(self) -> None:
         loss_streak = named_block(
             self.code,
-            r"\bvoid\s+ReadManagedLossStreak\s*\([^)]*\)",
+            r"\bbool\s+ReadManagedLossStreak\s*\([^)]*\)",
         )
         current_risk = named_block(
             self.code,
@@ -650,13 +1262,16 @@ class MT4UnifiedEATests(unittest.TestCase):
     def test_order_send_is_verified_and_outcomes_are_refreshed(self) -> None:
         execute = named_block(self.code, r"\bvoid\s+ExecuteCommand\s*\([^)]*\)")
         verify = named_block(self.code, r"\bbool\s+CaptureSelectedOrderEvidence\s*\([^)]*\)")
+        filled_risk = named_block(
+            self.code,
+            r"\bstring\s+FilledRiskAssessmentCode\s*\([^)]*\)",
+        )
         ack = named_block(self.code, r"\bstring\s+BuildAckJson\s*\([^)]*\)")
         self.assertGreater(execute.find("CaptureSelectedOrderEvidence"), execute.find("OrderSend"))
         self.assertIn("OrderSelect", verify)
         for token in (
             "OrderOpenPrice",
-            "SlippagePoints",
-            "slippage_within_limit",
+            "FilledRiskAssessmentCode",
             "identity_matches",
             "OrderStopLoss",
             "OrderTakeProfit",
@@ -673,7 +1288,25 @@ class MT4UnifiedEATests(unittest.TestCase):
             "slippage_within_limit",
             verify[identity_start:identity_end],
         )
-        self.assertIn("ORDER_ACCEPTED_WITH_SLIPPAGE_WARNING", verify)
+        for token in (
+            "SlippagePoints",
+            "ReadBrokerRiskMetadata",
+            "actual_risk",
+            "SLIPPAGE_RESERVE_AND_RISK_ESTIMATE_EXCEEDED",
+            "RISK_ESTIMATE_EXCEEDED",
+            "SLIPPAGE_RESERVE_EXCEEDED",
+            "RISK_UNAVAILABLE",
+        ):
+            self.assertIn(token, filled_risk)
+        for token in (
+            "ORDER_VERIFIED_OPEN",
+            "ORDER_VERIFIED_CLOSED",
+            "_SLIPPAGE_RESERVE_AND_RISK_ESTIMATE_EXCEEDED",
+            "_RISK_ESTIMATE_EXCEEDED",
+            "_SLIPPAGE_RESERVE_EXCEEDED",
+            "_RISK_UNAVAILABLE",
+        ):
+            self.assertIn(token, verify)
         for field in (
             "filledPrice",
             "filledSlippagePoints",
@@ -684,6 +1317,11 @@ class MT4UnifiedEATests(unittest.TestCase):
             "verificationStatus",
             "executionState",
             "closedPnl",
+            "positionSizingMode",
+            "riskPercent",
+            "riskCapitalBase",
+            "riskCapitalAmount",
+            "estimatedRiskMoney",
         ):
             self.assertIn(field, ack)
         timer = named_block(self.code, r"\bvoid\s+OnTimer\s*\([^)]*\)")
@@ -843,6 +1481,13 @@ class MT4UnifiedEATests(unittest.TestCase):
             "currentManagedPositions",
             "maxManagedLots",
             "currentManagedLots",
+            "positionSizingMode",
+            "riskPercent",
+            "riskCapitalBase",
+            "estimatedCommissionPerLot",
+            "brokerVolumeMin",
+            "brokerVolumeMax",
+            "brokerVolumeStep",
             "maxTradesToday",
             "currentTradesToday",
             "maxLossPerTradePercent",
@@ -1081,7 +1726,7 @@ class MT4UnifiedEATests(unittest.TestCase):
         )
         process = named_block(self.code, r"\bvoid\s+ProcessCommandFile\s*\([^)]*\)")
         self.assertIn("ParseCommand(raw", process)
-        self.assertIn("ExecuteCommand(command, raw)", process)
+        self.assertIn("ExecuteCommand(command, raw, resolved_lots)", process)
 
     def test_demo_and_live_share_signed_ordersend_path_and_ack_v3(self) -> None:
         execute = named_block(self.code, r"\bvoid\s+ExecuteCommand\s*\([^)]*\)")
@@ -1091,16 +1736,292 @@ class MT4UnifiedEATests(unittest.TestCase):
         ack = named_block(self.code, r"\bstring\s+BuildAckJson\s*\([^)]*\)")
         self.assertIn("signatureVerificationStatus", ack)
         self.assertIn("metafx-hq-mt4-ack-v3", self.code)
-        self.assertIn('version   "2.18"', self.code)
-        self.assertIn('EA_VERSION = "2.18"', self.code)
+        self.assertIn('version   "2.19"', self.code)
+        self.assertIn('EA_VERSION = "2.19"', self.code)
         self.assertIn("JsonNumber(command.reference_price, 8)", ack)
 
-    def test_risk_estimate_normalizes_broker_tick_size_without_point_double_count(self) -> None:
-        estimate = named_block(self.code, r"\bbool\s+EstimateStopLossMoney\s*\([^)]*\)")
-        self.assertIn("tick_size_raw < 1.0", estimate)
-        self.assertIn("tick_size_raw * point", estimate)
-        self.assertNotIn("tick_size_points * point", estimate)
-        self.assertIn("risk_distance / tick_size_price * tick_value * FixedLot", estimate)
+    def test_risk_estimate_uses_documented_mt4_tick_size_points_and_local_fees(self) -> None:
+        estimate = named_block(
+            self.code,
+            r"\bbool\s+EstimateStopLossMoneyAtEntry\s*\([^)]*\)",
+        )
+        metadata = named_block(self.code, r"\bbool\s+ReadBrokerRiskMetadata\s*\([^)]*\)")
+        self.assertIn("MODE_TICKSIZE", metadata)
+        self.assertIn("tick_size_points * point", metadata)
+        self.assertNotIn("tick_size_points < 1.0", metadata)
+        self.assertIn("risk_distance / tick_size_price * tick_value", estimate)
+        self.assertIn("EstimatedCommissionPerLot", estimate)
+        self.assertIn("SlippagePoints * point", estimate)
+        self.assertIn("gross_reward_per_lot - EstimatedCommissionPerLot", estimate)
+        self.assertIn("net_reward_per_lot / loss_per_lot", estimate)
+        self.assertNotRegex(self.code, r"(?i)AccountName\s*\(")
+        self.assertNotRegex(self.code, r"(?i)(?:cent|pro.?cent)[^\r\n;]*\*\s*100")
+
+    def test_risk_percent_sizing_rounds_down_and_never_forces_broker_minimum(self) -> None:
+        normalize = named_block(
+            self.code,
+            r"\bbool\s+NormalizeRiskVolumeDown\s*\([^)]*\)",
+        )
+        resolve = named_block(self.code, r"\bbool\s+ResolvePositionSize\s*\([^)]*\)")
+        self.assertIn("MathFloor", normalize)
+        self.assertNotIn("MathRound", normalize)
+        self.assertIn("(capped_lots - minimum) / step", normalize)
+        broker_grid = named_block(
+            self.code,
+            r"\bbool\s+VolumeIsOnBrokerStep\s*\([^)]*\)",
+        )
+        lot_digits = named_block(self.code, r"\bint\s+LotDigits\s*\([^)]*\)")
+        self.assertIn("(lots - minimum) / step", broker_grid)
+        self.assertIn("MODE_LOTSTEP", lot_digits)
+        self.assertIn("MODE_MINLOT", lot_digits)
+        self.assertIn("MathMax", lot_digits)
+        self.assertIn("RISK_VOLUME_BELOW_BROKER_MINIMUM", normalize)
+        self.assertNotRegex(normalize, r"normalized_lots\s*=\s*minimum")
+        self.assertIn("while(estimated_risk_money > risk_budget)", resolve)
+        self.assertIn("resolved_lots - step", resolve)
+        self.assertIn("MaxManagedTotalLots - managed_lots", resolve)
+        self.assertIn("RISK_STOP_LOSS_CALCULATION_FAILED", resolve)
+        self.assertGreaterEqual(
+            resolve.count("RISK_ESTIMATE_BELOW_WIRE_MINIMUM"),
+            2,
+        )
+        self.assertGreaterEqual(
+            resolve.count("estimated_risk_money < 0.00000001"),
+            2,
+        )
+        self.assertIn("effective_risk_percent > MaxLossPerTradePercent", self.code)
+
+        on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
+        for input_name in (
+            "FixedLot",
+            "RiskPercent",
+            "EstimatedCommissionPerLot",
+            "MaxManagedTotalLots",
+            "MaxLossPerTradePercent",
+            "MaxDailyLossPercent",
+            "MaxManagedWeeklyLossPercent",
+            "MaxAccountEquityDrawdownPercent",
+            "MinRewardRiskRatio",
+            "MinProjectedMarginLevelPercent",
+        ):
+            with self.subTest(input_name=input_name):
+                self.assertIn(f"MathIsValidNumber({input_name})", on_init)
+
+        rounded = risk_volume_model(
+            capital=10_000.0,
+            balance=10_000.0,
+            risk_percent=1.0,
+            hard_cap_percent=1.0,
+            stop_distance=3.32,
+            point=0.01,
+            tick_size_points=1.0,
+            tick_value=1.0,
+            commission_per_lot=0.0,
+            slippage_points=1,
+            minimum=0.01,
+            maximum=100.0,
+            step=0.01,
+            max_managed_lots=100.0,
+            current_managed_lots=0.0,
+        )
+        self.assertIsNotNone(rounded)
+        assert rounded is not None
+        self.assertAlmostEqual(rounded[0], 0.30)
+        self.assertLessEqual(rounded[1], 100.0)
+
+        arbitrary_grid = risk_volume_model(
+            capital=6_100.0,
+            balance=6_100.0,
+            risk_percent=1.0,
+            hard_cap_percent=1.0,
+            stop_distance=1.0,
+            point=0.01,
+            tick_size_points=1.0,
+            tick_value=1.0,
+            commission_per_lot=0.0,
+            slippage_points=0,
+            minimum=0.10,
+            maximum=100.0,
+            step=0.25,
+            max_managed_lots=100.0,
+            current_managed_lots=0.0,
+        )
+        self.assertIsNotNone(arbitrary_grid)
+        assert arbitrary_grid is not None
+        self.assertAlmostEqual(arbitrary_grid[0], 0.60)
+        self.assertAlmostEqual((arbitrary_grid[0] - 0.10) / 0.25, 2.0)
+
+        below_minimum = risk_volume_model(
+            capital=100.0,
+            balance=100.0,
+            risk_percent=1.0,
+            hard_cap_percent=1.0,
+            stop_distance=5.0,
+            point=0.01,
+            tick_size_points=1.0,
+            tick_value=1.0,
+            commission_per_lot=0.0,
+            slippage_points=0,
+            minimum=0.01,
+            maximum=100.0,
+            step=0.01,
+            max_managed_lots=100.0,
+            current_managed_lots=0.0,
+        )
+        self.assertIsNone(below_minimum)
+
+    def test_standard_and_cent_account_units_produce_the_same_risk_volume(self) -> None:
+        common = dict(
+            risk_percent=1.0,
+            hard_cap_percent=1.0,
+            stop_distance=1.0,
+            point=0.01,
+            tick_size_points=1.0,
+            commission_per_lot=0.0,
+            slippage_points=3,
+            minimum=0.01,
+            maximum=100.0,
+            step=0.01,
+            max_managed_lots=100.0,
+            current_managed_lots=0.0,
+        )
+        standard = risk_volume_model(
+            capital=10_000.0,
+            balance=10_000.0,
+            tick_value=1.0,
+            **common,
+        )
+        cent = risk_volume_model(
+            capital=1_000_000.0,
+            balance=1_000_000.0,
+            tick_value=100.0,
+            **common,
+        )
+        self.assertIsNotNone(standard)
+        self.assertIsNotNone(cent)
+        assert standard is not None and cent is not None
+        self.assertEqual(standard[0], cent[0])
+        self.assertAlmostEqual(standard[1] / 10_000.0, cent[1] / 1_000_000.0)
+
+    def test_sizing_is_persisted_once_and_reused_for_restart_reconciliation(self) -> None:
+        process = named_block(self.code, r"\bvoid\s+ProcessCommandFile\s*\([^)]*\)")
+        execute = named_block(self.code, r"\bvoid\s+ExecuteCommand\s*\([^)]*\)")
+        reconcile = named_block(
+            self.code,
+            r"\bvoid\s+ReconcileExecutingCommand\s*\([^)]*\)",
+        )
+        persisted = named_block(
+            self.code,
+            r"\bbool\s+ReadPersistedSizingState\s*\([^)]*\)",
+        )
+        ack = named_block(self.code, r"\bstring\s+BuildAckJson\s*\([^)]*\)")
+        self.assertEqual(process.count("ResolvePositionSize"), 1)
+        self.assertNotIn("ResolvePositionSize", execute)
+        self.assertNotIn("ResolvePositionSize", reconcile)
+        self.assertLess(process.find("SetAckSizingEvidence"), process.find("ExecuteCommand"))
+        self.assertLess(execute.find("WriteExecutionMarkers"), execute.find("OrderSend"))
+        self.assertIn("ReadPersistedSizingState", reconcile)
+        self.assertIn("expected_lots", reconcile)
+        for field in (
+            "fixedLot",
+            "positionSizingMode",
+            "riskPercent",
+            "riskCapitalBase",
+            "estimatedCommissionPerLot",
+            "riskCapitalAmount",
+            "estimatedRiskMoney",
+        ):
+            self.assertIn(field, persisted)
+            self.assertIn(field, ack)
+        self.assertIn("expected_lots", execute)
+        self.assertNotIn("FixedLot", execute)
+
+    def test_fixed_mode_ignores_unused_risk_percent_and_ack_stays_schema_valid(self) -> None:
+        validate = named_block(
+            self.code,
+            r"\bbool\s+ValidateMoneyManagementConfiguration\s*\([^)]*\)",
+        )
+        self.assertRegex(
+            validate,
+            r"MoneyManagementMode\s*==\s*MONEY_MANAGEMENT_RISK_PERCENT[\s\S]*effective_risk_percent\s*<\s*0\.00000001",
+        )
+        ack = named_block(self.code, r"\bstring\s+BuildAckJson\s*\([^)]*\)")
+        self.assertIn("g_ack_has_sizing_evidence ? g_ack_requested_lots : 0.0", ack)
+        self.assertRegex(
+            ack,
+            r"g_ack_has_sizing_evidence\s*\?\s*g_ack_risk_percent\s*:\s*EffectiveRiskPercent\(\),\s*8",
+        )
+        self.assertIn("estimatedCommissionPerLot", ack)
+        self.assertIn("g_ack_estimated_commission_per_lot", ack)
+        self.assertIn("JsonNumber(g_ack_risk_capital_amount, 8)", ack)
+        self.assertIn("JsonNumber(g_ack_estimated_risk_money, 8)", ack)
+
+    def test_effective_risk_percent_is_identical_for_sizing_persistence_and_ack(self) -> None:
+        effective = named_block(
+            self.code,
+            r"\bdouble\s+EffectiveRiskPercent\s*\([^)]*\)",
+        )
+        resolve = named_block(
+            self.code,
+            r"\bbool\s+ResolvePositionSize\s*\([^)]*\)",
+        )
+        final_guard = named_block(
+            self.code,
+            r"\bbool\s+ValidateRiskEnvelopeAtEntry\s*\([^)]*\)",
+        )
+        process = named_block(
+            self.code,
+            r"\bvoid\s+ProcessCommandFile\s*\([^)]*\)",
+        )
+        self.assertIn("NormalizeDouble(RiskPercent, 8)", effective)
+        self.assertIn("EffectiveRiskPercent()", resolve)
+        self.assertIn("EffectiveRiskPercent()", final_guard)
+        self.assertIn("EffectiveRiskPercent()", process)
+
+    def test_final_risk_guard_uses_current_risk_budget_and_exact_submitted_quote(self) -> None:
+        guard = named_block(
+            self.code,
+            r"\bbool\s+ValidateRiskEnvelopeAtEntry\s*\([^)]*\)",
+        )
+        self.assertIn("EstimateStopLossMoneyAtEntry", guard)
+        self.assertIn("risk_capital * EffectiveRiskPercent() / 100.0", guard)
+        self.assertIn("persisted_risk_budget", guard)
+        self.assertIn("MathMin(risk_budget, persisted_risk_budget)", guard)
+        self.assertIn("final_estimated_risk_money = loss_money", guard)
+        self.assertIn("RISK_PERCENT_BUDGET_EXCEEDED", guard)
+        execute = named_block(self.code, r"\bvoid\s+ExecuteCommand\s*\([^)]*\)")
+        capture = "price = order_type == OP_BUY ? Ask : Bid"
+        validate = "ValidateRiskEnvelopeAtEntry"
+        send = "OrderSend"
+        self.assertLess(execute.find(capture), execute.find(validate))
+        self.assertLess(execute.find(validate), execute.find(send))
+        between_capture_and_send = execute[
+            execute.find(capture) : execute.find(send)
+        ]
+        self.assertEqual(between_capture_and_send.count("RefreshRates"), 0)
+
+        final_assignment = execute.find(
+            "g_ack_estimated_risk_money = final_estimated_risk_money"
+        )
+        final_payload = execute.find('"FINAL_RISK_VALIDATED"')
+        final_marker = execute.find(
+            "WriteExecutionMarkers(command, final_executing_payload)"
+        )
+        bar_claim = execute.find("WriteLastOrderBar(command.bar_time)")
+        self.assertGreater(final_assignment, execute.find(validate))
+        self.assertGreater(final_payload, final_assignment)
+        self.assertGreater(final_marker, final_payload)
+        self.assertGreater(bar_claim, final_marker)
+        self.assertGreater(execute.find(send), bar_claim)
+        self.assertIn("FINAL_RISK_STATE_WRITE_FAILED", execute)
+
+    def test_restart_order_identity_requires_exact_persisted_volume(self) -> None:
+        evidence = named_block(
+            self.code,
+            r"\bbool\s+CaptureSelectedOrderEvidence\s*\([^)]*\)",
+        )
+        self.assertIn("double lot_tolerance = 0.00000001", evidence)
+        self.assertNotIn("MODE_LOTSTEP) / 2.0", evidence)
 
     def test_broker_suffix_allowlist_still_requires_exact_attached_command_symbol(self) -> None:
         matcher = named_block(
@@ -1235,6 +2156,7 @@ class MT4UnifiedEATests(unittest.TestCase):
             "managedMagicNumbers",
             "maxManagedOpenPositions",
             "maxManagedTotalLots",
+            "estimatedCommissionPerLot",
             "maxTradesPerBrokerDay",
             "maxDailyLossPercent",
             "maxManagedWeeklyLossPercent",

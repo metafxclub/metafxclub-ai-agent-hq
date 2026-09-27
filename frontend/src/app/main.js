@@ -54,6 +54,34 @@ const OFFICE_AGENT_OVERLAP_Y = 2.5;
 const UI_SESSION_ENDPOINT = "/api/ui-session";
 const AGENT_EVENTS_ENDPOINT = "/api/agent-events";
 const AGENT_CHAT_ENDPOINT = "/api/agents/chat";
+const AGENT_RUNTIME_STATUS_ENDPOINT = "/api/agent-runtime/status";
+const AGENT_RUNTIME_MODELS_ENDPOINT = "/api/agent-runtime/models";
+const AGENT_RUNTIME_THREADS_ENDPOINT = "/api/agent-runtime/threads";
+const AGENT_RUNTIME_APPROVAL_PROTOCOL_VERSION = "1";
+const AGENT_RUNTIME_TURN_POLL_INTERVAL_MS = 1000;
+const AGENT_RUNTIME_TURN_POLL_TIMEOUT_MS = 9 * 60 * 1000;
+const AGENT_RUNTIME_ATTACHMENT_UPLOAD_TEMPLATE = "/api/agent-runtime/threads/{threadId}/attachments";
+const AGENT_RUNTIME_ATTACHMENT_HARD_MAX_FILES = 8;
+const AGENT_RUNTIME_ATTACHMENT_HARD_MAX_BYTES = 20 * 1024 * 1024;
+const AGENT_RUNTIME_CAPABILITY_MODES = Object.freeze([
+  { id: "chat", label: "Chat", description: "สนทนา/วิเคราะห์โดยไม่เรียก Tool" },
+  { id: "workspace", label: "Workspace", description: "ไฟล์และ Terminal ในพื้นที่ที่อนุญาต" },
+  { id: "computer", label: "Computer Use", description: "ควบคุมหน้าจอเมื่อ Backend ยืนยัน" },
+  { id: "full", label: "Full Agent", description: "Workspace + Computer Use + MCP/Plugin" },
+]);
+const AGENT_RUNTIME_BLOCKER_PRESENTATION = Object.freeze({
+  live_write_sentinel_failed_unapproved_write: "Safety test พบว่า Workspace เขียนได้โดยไม่ส่ง Approval จึงถูกล็อก",
+  live_write_sentinel_not_verified: "ยังไม่ผ่านการทดสอบว่า Workspace จะไม่เปลี่ยนไฟล์ก่อนผู้ใช้อนุมัติ",
+  durable_approval_journal_not_active: "Approval journal แบบคงทนยังไม่ถูกเปิดใช้ในงานจริง",
+  deferred_reader_adapter_not_live_verified: "Approval adapter ยังไม่ผ่านการทดสอบกับ Codex Runtime จริง",
+  approval_replay_tombstones_not_durable: "หลักฐานป้องกันการนำ Approval เดิมกลับมาใช้ซ้ำยังไม่คงอยู่หลังรีสตาร์ต",
+  opaque_file_change_approval_not_supported: "Backend ยังไม่ส่งรายละเอียดการเปลี่ยนไฟล์แบบปลอดภัยพอให้ยืนยัน",
+  approval_broker_not_ready: "ระบบ Approval แบบครั้งเดียวยังไม่พร้อม",
+  workspace_not_ready: "Workspace ที่ Backend ควบคุมยังไม่พร้อม",
+  computer_use_not_ready: "Computer Use ยังไม่พร้อม",
+  mcp_not_ready: "MCP ยังไม่พร้อม",
+  plugins_not_ready: "Plugin ยังไม่พร้อม",
+});
 const MEMORY_ENDPOINT = "/api/memory";
 const MEMORY_SEARCH_ENDPOINT = "/api/memory/search";
 const MEETINGS_ENDPOINT = "/api/meetings";
@@ -512,7 +540,7 @@ const GLOBAL_METATRADER_TARGETS = Object.freeze([
   {
     propId: AI_TRADE_COUNCIL_PROP_ID,
     labelTh: "สภา AI Trade",
-    supportedPlatforms: Object.freeze(["MT4"]),
+    supportedPlatforms: Object.freeze(["MT4", "MT5"]),
   },
   {
     propId: EA_FACTORY_PROP_ID,
@@ -1373,6 +1401,8 @@ const state = {
     checklists: {},
     readModel: null,
     choices: { MT4: "", MT5: "" },
+    platformChoice: "",
+    platformChoiceTouched: false,
     requestId: 0,
     lastReadCount: 0,
     lastLoadedAt: 0,
@@ -1508,6 +1538,17 @@ const state = {
     sessionIds: {},
     message: "พร้อมคุยกับ Codex ผ่าน Local Runner",
     tone: "neutral",
+  },
+  agentRuntime: {
+    statusLoaded: false,
+    statusInFlight: false,
+    status: null,
+    modelsLoaded: false,
+    models: [],
+    reasoningOptions: [],
+    profiles: {},
+    requestId: 0,
+    approvalCountdownTimer: null,
   },
   lastAutonomyMeetingAt: 0,
   agentRouteIndex: 0,
@@ -1829,6 +1870,12 @@ const els = {
   globalMetatraderStateBadge: document.getElementById("globalMetatraderStateBadge"),
   globalMetatraderMessage: document.getElementById("globalMetatraderMessage"),
   globalMetatraderScan: document.getElementById("globalMetatraderScan"),
+  globalMetatraderPlatformChoice: document.getElementById("globalMetatraderPlatformChoice"),
+  globalMetatraderPlatformMt4: document.getElementById("globalMetatraderPlatformMt4"),
+  globalMetatraderPlatformMt5: document.getElementById("globalMetatraderPlatformMt5"),
+  globalMetatraderPlatformHint: document.getElementById("globalMetatraderPlatformHint"),
+  globalMetatraderMt4Section: document.getElementById("globalMetatraderMt4Section"),
+  globalMetatraderMt5Section: document.getElementById("globalMetatraderMt5Section"),
   globalMetatraderMt4Select: document.getElementById("globalMetatraderMt4Select"),
   globalMetatraderMt4Apply: document.getElementById("globalMetatraderMt4Apply"),
   globalMetatraderMt5Select: document.getElementById("globalMetatraderMt5Select"),
@@ -1924,8 +1971,50 @@ const els = {
   researchSheetHubRetryFailed: document.getElementById("researchSheetHubRetryFailed"),
   researchSheetHubMessage: document.getElementById("researchSheetHubMessage"),
   modalChatLog: document.getElementById("modalChatLog"),
+  modalAgentRuntimeConsole: document.getElementById("modalAgentRuntimeConsole"),
+  modalAgentRuntimeState: document.getElementById("modalAgentRuntimeState"),
+  modalAgentRuntimeStatus: document.getElementById("modalAgentRuntimeStatus"),
+  modalAgentThreadSelect: document.getElementById("modalAgentThreadSelect"),
+  modalAgentRefreshThread: document.getElementById("modalAgentRefreshThread"),
+  modalAgentNewThread: document.getElementById("modalAgentNewThread"),
+  modalAgentArchiveThread: document.getElementById("modalAgentArchiveThread"),
+  modalAgentThreadMeta: document.getElementById("modalAgentThreadMeta"),
+  modalAgentModelSelect: document.getElementById("modalAgentModelSelect"),
+  modalAgentReasoningSelect: document.getElementById("modalAgentReasoningSelect"),
+  modalAgentCapabilityMode: document.getElementById("modalAgentCapabilityMode"),
+  modalAgentFullAccessButton: document.getElementById("modalAgentFullAccessButton"),
+  modalAgentFullAccessHelp: document.getElementById("modalAgentFullAccessHelp"),
+  modalAgentCapabilityMatrix: document.getElementById("modalAgentCapabilityMatrix"),
+  modalAgentLockGuidance: document.getElementById("modalAgentLockGuidance"),
+  modalAgentLockedReason: document.getElementById("modalAgentLockedReason"),
+  modalAgentNextAction: document.getElementById("modalAgentNextAction"),
+  modalAgentRuntimeBadge: document.getElementById("modalAgentRuntimeBadge"),
+  modalAgentWorkspaceBadge: document.getElementById("modalAgentWorkspaceBadge"),
+  modalAgentComputerUseBadge: document.getElementById("modalAgentComputerUseBadge"),
+  modalAgentMcpBadge: document.getElementById("modalAgentMcpBadge"),
+  modalAgentPluginBadge: document.getElementById("modalAgentPluginBadge"),
+  modalAgentAttachmentBadge: document.getElementById("modalAgentAttachmentBadge"),
+  modalAgentArtifactBadge: document.getElementById("modalAgentArtifactBadge"),
+  modalAgentApprovalPanel: document.getElementById("modalAgentApprovalPanel"),
+  modalAgentApprovalHeading: document.getElementById("modalAgentApprovalHeading"),
+  modalAgentApprovalTimer: document.getElementById("modalAgentApprovalTimer"),
+  modalAgentApprovalType: document.getElementById("modalAgentApprovalType"),
+  modalAgentApprovalSummary: document.getElementById("modalAgentApprovalSummary"),
+  modalAgentApprovalReason: document.getElementById("modalAgentApprovalReason"),
+  modalAgentApprovalBinding: document.getElementById("modalAgentApprovalBinding"),
+  modalAgentApprovalSafety: document.getElementById("modalAgentApprovalSafety"),
+  modalAgentApprovalDecline: document.getElementById("modalAgentApprovalDecline"),
+  modalAgentApprovalAccept: document.getElementById("modalAgentApprovalAccept"),
+  modalAgentActivityTimeline: document.getElementById("modalAgentActivityTimeline"),
   modalCommandInput: document.getElementById("modalCommandInput"),
+  modalAgentAttachmentComposer: document.getElementById("modalAgentAttachmentComposer"),
+  modalAgentAttachmentInput: document.getElementById("modalAgentAttachmentInput"),
+  modalAgentAttachButton: document.getElementById("modalAgentAttachButton"),
+  modalAgentAttachmentPolicy: document.getElementById("modalAgentAttachmentPolicy"),
+  modalAgentAttachmentDrafts: document.getElementById("modalAgentAttachmentDrafts"),
   modalSendButton: document.getElementById("modalSendButton"),
+  modalAgentStopButton: document.getElementById("modalAgentStopButton"),
+  modalAgentContinueButton: document.getElementById("modalAgentContinueButton"),
   modalAssignButton: document.getElementById("modalAssignButton"),
   modalMeetingButton: document.getElementById("modalMeetingButton"),
   modalDelegateButton: document.getElementById("modalDelegateButton"),
@@ -1979,6 +2068,7 @@ const els = {
   missionMeetingOpenMissionButton: document.getElementById("missionMeetingOpenMissionButton"),
   missionMeetingProposalStatus: document.getElementById("missionMeetingProposalStatus"),
   modalDashboardConnectionRail: document.getElementById("modalDashboardConnectionRail"),
+  modalDashboardConnectionDetails: document.getElementById("modalDashboardConnectionDetails"),
   modalGenericDashboardWorkspace: document.getElementById("modalGenericDashboardWorkspace"),
   modalWorkflowDashboardWorkspace: document.getElementById("modalWorkflowDashboardWorkspace"),
   workflowSettingsRail: document.getElementById("workflowSettingsRail"),
@@ -2032,13 +2122,13 @@ const els = {
   modalDashboardScheduleStatus: document.getElementById("modalDashboardScheduleStatus"),
   modalDashboardRefreshConnections: document.getElementById("modalDashboardRefreshConnections"),
   modalDashboardConnectionActionStatus: document.getElementById("modalDashboardConnectionActionStatus"),
-  modalAiTradeMt4QuickSetup: document.getElementById("modalAiTradeMt4QuickSetup"),
-  modalAiTradeMt4QuickBadge: document.getElementById("modalAiTradeMt4QuickBadge"),
-  modalAiTradeMt4QuickTerminal: document.getElementById("modalAiTradeMt4QuickTerminal"),
-  modalAiTradeMt4OpenGlobal: document.getElementById("modalAiTradeMt4OpenGlobal"),
-  modalAiTradeMt4QuickChannel: document.getElementById("modalAiTradeMt4QuickChannel"),
-  modalAiTradeMt4QuickCopy: document.getElementById("modalAiTradeMt4QuickCopy"),
-  modalAiTradeMt4QuickStatus: document.getElementById("modalAiTradeMt4QuickStatus"),
+  modalAiTradeTerminalSummary: document.getElementById("modalAiTradeTerminalSummary"),
+  modalAiTradeTerminalBadge: document.getElementById("modalAiTradeTerminalBadge"),
+  modalAiTradeActivePlatform: document.getElementById("modalAiTradeActivePlatform"),
+  modalAiTradeActiveTerminal: document.getElementById("modalAiTradeActiveTerminal"),
+  modalAiTradeFeedFreshness: document.getElementById("modalAiTradeFeedFreshness"),
+  modalAiTradeOpenGlobal: document.getElementById("modalAiTradeOpenGlobal"),
+  modalAiTradeTerminalStatus: document.getElementById("modalAiTradeTerminalStatus"),
   modalKanbanSearch: document.getElementById("modalKanbanSearch"),
   modalKanbanArchiveToggle: document.getElementById("modalKanbanArchiveToggle"),
   modalKanbanRefresh: document.getElementById("modalKanbanRefresh"),
@@ -2533,6 +2623,7 @@ function initializePollingLeadership() {
     stopResearchSheetGoogleAuthPolling({ closePopup: true });
     stopAutomaticPolling();
     releasePollingLeadership();
+    Object.values(state.agentRuntime?.profiles || {}).forEach(clearAgentAttachmentDrafts);
   });
   window.addEventListener("pageshow", () => {
     if (document.visibilityState === "visible") startAutomaticPolling();
@@ -3091,12 +3182,14 @@ function startCodexRateLimitPolling() {
   }
 }
 
-async function postJson(path, payload = {}) {
+async function postJson(path, payload = {}, options = {}) {
   const response = await fetch(path, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      ...(options.headers || {}),
     },
+    cache: options.cache || "no-store",
     body: JSON.stringify(payload),
   });
   const body = await response.json().catch(() => ({}));
@@ -5986,6 +6079,14 @@ function saveSessionSnapshot() {
         } : null,
       },
       agentChatSessions: { ...state.agentChat.sessionIds },
+      agentRuntimePreferences: Object.fromEntries(
+        Object.entries(state.agentRuntime.profiles).map(([agentId, profile]) => [agentId, {
+          selectedThreadId: String(profile?.selectedThreadId || "").slice(0, 160),
+          model: String(profile?.model || "").slice(0, 120),
+          reasoning: String(profile?.reasoning || "").slice(0, 40),
+          mode: AGENT_RUNTIME_CAPABILITY_MODES.some((item) => item.id === profile?.mode) ? profile.mode : "chat",
+        }]),
+      ),
       memoryStatus: state.memoryStatus,
       bridge: state.bridge,
     };
@@ -6064,6 +6165,32 @@ function applySessionSnapshot(snapshot) {
         ))
         .slice(0, EXPECTED_OFFICE_AGENT_COUNT),
     );
+  }
+  if (snapshot.agentRuntimePreferences && typeof snapshot.agentRuntimePreferences === "object" && !Array.isArray(snapshot.agentRuntimePreferences)) {
+    const knownAgentIds = new Set(officeAgentDefinitions.map((definition) => definition.id));
+    Object.entries(snapshot.agentRuntimePreferences)
+      .filter(([agentId, value]) => knownAgentIds.has(agentId) && value && typeof value === "object" && !Array.isArray(value))
+      .slice(0, EXPECTED_OFFICE_AGENT_COUNT)
+      .forEach(([agentId, value]) => {
+        const selectedThreadId = String(value.selectedThreadId || "");
+        state.agentRuntime.profiles[agentId] = {
+          agentId,
+          requestId: 0,
+          loading: false,
+          actionInFlight: false,
+          threadsLoaded: false,
+          threads: [],
+          selectedThreadId: /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(selectedThreadId) ? selectedThreadId : "",
+          model: String(value.model || "").slice(0, 120),
+          reasoning: String(value.reasoning || "").slice(0, 40),
+          mode: AGENT_RUNTIME_CAPABILITY_MODES.some((item) => item.id === value.mode) ? value.mode : "chat",
+          messagesByThread: {},
+          activitiesByThread: {},
+          detailLoadedByThread: {},
+          message: "กำลังตรวจสอบ Full Agent Runtime",
+          tone: "neutral",
+        };
+      });
   }
   if (snapshot.modal) {
     state.modal = {
@@ -6435,8 +6562,21 @@ function setAgentSpeech(agentId, message, visualState = null) {
   if (state.modal.open && state.modal.type === "agent" && state.modal.id === agent.id) renderGameModal();
 }
 
-function pushChatLine({ scopeType = state.modal.type || "agent", scopeId = state.modal.id || state.agent.id, speaker = "ระบบ", text = "", side = "agent", persist = true } = {}) {
-  if (!text) return null;
+function pushChatLine({
+  scopeType = state.modal.type || "agent",
+  scopeId = state.modal.id || state.agent.id,
+  speaker = "ระบบ",
+  text = "",
+  side = "agent",
+  attachmentNames = [],
+  artifacts = [],
+  persist = true,
+} = {}) {
+  const safeArtifacts = normalizeAgentRuntimeArtifacts(artifacts);
+  const safeAttachmentNames = (Array.isArray(attachmentNames) ? attachmentNames : [])
+    .slice(0, AGENT_RUNTIME_ATTACHMENT_HARD_MAX_FILES)
+    .map((name) => safeAgentAttachmentName(name, "ไฟล์แนบ"));
+  if (!text && !safeArtifacts.length && !safeAttachmentNames.length) return null;
   const line = {
     id: `chat-${Date.now()}-${Math.round(Math.random() * 1000)}`,
     time: new Date().toISOString(),
@@ -6445,6 +6585,8 @@ function pushChatLine({ scopeType = state.modal.type || "agent", scopeId = state
     speaker,
     text,
     side,
+    attachmentNames: safeAttachmentNames,
+    artifacts: safeArtifacts,
   };
   state.chatLog = [line, ...state.chatLog].slice(0, 100);
   if (persist) saveSessionSnapshot();
@@ -7107,8 +7249,85 @@ function renderStatusGrid(items) {
   });
 }
 
+function formatAgentAttachmentBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "ไม่ระบุขนาด";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+function appendAgentRuntimeArtifactCards(container, artifacts) {
+  if (state.agentRuntime.status?.attachments?.outputReady !== true) return;
+  const safeArtifacts = normalizeAgentRuntimeArtifacts(artifacts);
+  if (!safeArtifacts.length) return;
+  const gallery = document.createElement("div");
+  gallery.className = "agent-runtime-artifact-gallery";
+  gallery.setAttribute("role", "list");
+  gallery.setAttribute("aria-label", "รูปและไฟล์ผลลัพธ์จาก Agent");
+  safeArtifacts.forEach((artifact) => {
+    const card = document.createElement("article");
+    const link = document.createElement("a");
+    const copy = document.createElement("div");
+    const name = document.createElement("strong");
+    const meta = document.createElement("small");
+    const action = document.createElement("span");
+    card.className = `agent-runtime-artifact-card${artifact.imagePreview ? " image" : " file"}`;
+    card.setAttribute("role", "listitem");
+    link.href = artifact.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.setAttribute("aria-label", `เปิด ${artifact.name}`);
+    if (artifact.imagePreview) {
+      const image = document.createElement("img");
+      image.src = artifact.url;
+      image.alt = artifact.name;
+      image.loading = "lazy";
+      image.decoding = "async";
+      link.appendChild(image);
+    } else {
+      link.download = artifact.name;
+      const icon = document.createElement("span");
+      icon.className = "agent-runtime-artifact-icon";
+      icon.textContent = "FILE";
+      icon.setAttribute("aria-hidden", "true");
+      link.appendChild(icon);
+    }
+    name.textContent = artifact.name;
+    meta.textContent = `${artifact.kind} • ${artifact.mediaType} • ${formatAgentAttachmentBytes(artifact.byteSize)}`;
+    action.className = "agent-runtime-artifact-action";
+    action.textContent = artifact.imagePreview ? "เปิดตัวอย่างรูป" : "ดาวน์โหลดไฟล์";
+    copy.append(name, meta, action);
+    card.append(link, copy);
+    gallery.appendChild(card);
+  });
+  container.appendChild(gallery);
+}
+
+function appendAgentInputAttachmentNames(container, names) {
+  const safeNames = (Array.isArray(names) ? names : [])
+    .slice(0, AGENT_RUNTIME_ATTACHMENT_HARD_MAX_FILES)
+    .map((name) => safeAgentAttachmentName(name, "ไฟล์แนบ"));
+  if (!safeNames.length) return;
+  const list = document.createElement("div");
+  list.className = "agent-runtime-input-attachment-list";
+  list.setAttribute("aria-label", "ไฟล์ที่ส่งพร้อมข้อความนี้");
+  safeNames.forEach((name) => {
+    const chip = document.createElement("span");
+    chip.textContent = name;
+    list.appendChild(chip);
+  });
+  container.appendChild(list);
+}
+
 function renderChatLog(subject, type) {
   if (!els.modalChatLog) return;
+  const runtimeProfile = type === "agent" ? getAgentRuntimeProfile(subject?.id) : null;
+  const runtimeThreadId = runtimeProfile?.selectedThreadId || "";
+  const runtimeHistoryLoaded = Boolean(runtimeThreadId && runtimeProfile?.detailLoadedByThread?.[runtimeThreadId]);
+  const runtimeLines = runtimeHistoryLoaded
+    ? (runtimeProfile.messagesByThread[runtimeThreadId] || []).slice(-100)
+    : [];
   const scoped = state.chatLog
     .filter((line) => line.scopeType === type && line.scopeId === subject?.id)
     .slice(0, 16)
@@ -7126,7 +7345,7 @@ function renderChatLog(subject, type) {
         side: "agent",
       }))
     : [];
-  const lines = [...scoped, ...transcript];
+  const lines = runtimeHistoryLoaded ? runtimeLines : [...scoped, ...transcript];
   els.modalChatLog.innerHTML = "";
   if (!lines.length) {
     const welcome = document.createElement("div");
@@ -7134,7 +7353,9 @@ function renderChatLog(subject, type) {
     const speaker = document.createElement("strong");
     const message = document.createElement("span");
     speaker.textContent = type === "agent" ? subject.name : "รายงาน Mission";
-    message.textContent = type === "agent" ? getAgentSpeech(subject.id) : "กดดู Task หรือรายงาน หรือสั่งให้ Agent เดินมาตรวจอุปกรณ์นี้ได้เลยครับ";
+    message.textContent = runtimeHistoryLoaded
+      ? "เธรดนี้ยังไม่มีข้อความ"
+      : type === "agent" ? getAgentSpeech(subject.id) : "กดดู Task หรือรายงาน หรือสั่งให้ Agent เดินมาตรวจอุปกรณ์นี้ได้เลยครับ";
     welcome.append(speaker, message);
     els.modalChatLog.appendChild(welcome);
     return;
@@ -7147,6 +7368,8 @@ function renderChatLog(subject, type) {
     speaker.textContent = line.speaker || "Agent";
     text.textContent = line.text || "";
     item.append(speaker, text);
+    appendAgentInputAttachmentNames(item, line.attachmentNames);
+    appendAgentRuntimeArtifactCards(item, line.artifacts);
     els.modalChatLog.appendChild(item);
   });
   els.modalChatLog.scrollTop = els.modalChatLog.scrollHeight;
@@ -8920,7 +9143,12 @@ function globalMetatraderSystemModels() {
           ? platformModel.targets.filter((row) => row?.propId === target.propId)
           : [];
       });
-      const selectedRow = targetRows.find((row) => row?.selectedCandidate) || null;
+      const configuredRows = targetRows.filter((row) => (
+        row?.status === "configured" && row?.selectedCandidate
+      ));
+      // A dashboard supports only one active Terminal. If Backend ever returns
+      // more than one configured platform, fail closed instead of guessing.
+      const selectedRow = configuredRows.length === 1 ? configuredRows[0] : null;
       const selectedCandidate = normalizeMetatraderCandidate(selectedRow?.selectedCandidate);
       const selection = {
         candidates,
@@ -9003,7 +9231,31 @@ function globalMetatraderSuggestedChoice(platform, candidates, systems) {
   return candidates.length === 1 ? candidates[0].candidateId : "";
 }
 
-function renderGlobalMetatraderSelect(platform, select, button, systems, registry) {
+function activeGlobalMetatraderPlatform(systems = globalMetatraderSystemModels()) {
+  const hubChoice = String(state.globalMetatraderHub.platformChoice || "").toUpperCase();
+  if (["MT4", "MT5"].includes(hubChoice)) return hubChoice;
+  const councilPlatform = systems.find((system) => system.propId === AI_TRADE_COUNCIL_PROP_ID)
+    ?.selectedCandidate?.platform;
+  return ["MT4", "MT5"].includes(councilPlatform) ? councilPlatform : "MT4";
+}
+
+function setGlobalMetatraderPlatformChoice(platform, { focusTerminal = false } = {}) {
+  const normalized = String(platform || "").toUpperCase();
+  if (!["MT4", "MT5"].includes(normalized) || state.globalMetatraderHub.inFlight) return false;
+  state.globalMetatraderHub.platformChoice = normalized;
+  state.globalMetatraderHub.platformChoiceTouched = true;
+  state.globalMetatraderHub.message = `เลือก ${normalized} ไว้แต่ยังไม่บันทึก • เลือก Terminal แล้วกดใช้กับทุกระบบเพื่อยืนยัน`;
+  state.globalMetatraderHub.tone = "neutral";
+  renderGlobalMetatraderHubControl();
+  if (focusTerminal) {
+    window.requestAnimationFrame(() => (
+      normalized === "MT4" ? els.globalMetatraderMt4Select : els.globalMetatraderMt5Select
+    )?.focus());
+  }
+  return true;
+}
+
+function renderGlobalMetatraderSelect(platform, select, button, systems, registry, activePlatform) {
   if (!select || !button) return;
   const candidates = registry.filter((candidate) => candidate.platform === platform);
   const running = candidates.filter((candidate) => candidate.runningState === "platform_running_detected");
@@ -9043,9 +9295,12 @@ function renderGlobalMetatraderSelect(platform, select, button, systems, registr
     suggested && system.selectedCandidate?.candidateId === suggested
   )).length;
   const busy = state.globalMetatraderHub.inFlight;
-  select.disabled = busy || !candidates.length || ambiguous || lockedToUniqueRunning;
-  button.disabled = busy || ambiguous || !suggested || appliedCount === compatibleSystems.length;
-  button.textContent = ambiguous
+  const active = platform === activePlatform;
+  select.disabled = busy || !active || !candidates.length || ambiguous || lockedToUniqueRunning;
+  button.disabled = busy || !active || ambiguous || !suggested || appliedCount === compatibleSystems.length;
+  button.textContent = !active
+    ? `เลือก ${platform} Dashboard ด้านบนก่อน`
+    : ambiguous
     ? running.length
       ? `ปิด ${platform} ให้เหลือ 1 โปรแกรม แล้วสแกนใหม่`
       : `เปิด ${platform} ที่ต้องการ 1 โปรแกรม แล้วสแกนใหม่`
@@ -9063,6 +9318,8 @@ function renderGlobalMetatraderHubControl() {
   const hub = state.globalMetatraderHub;
   const systems = globalMetatraderSystemModels();
   const registry = globalMetatraderCandidateRegistry(systems);
+  const activePlatform = activeGlobalMetatraderPlatform(systems);
+  hub.platformChoice = activePlatform;
   const configuredCount = systems.filter((system) => system.configured).length;
   const totalCount = systems.length;
   const visualState = hub.inFlight
@@ -9125,12 +9382,33 @@ function renderGlobalMetatraderHubControl() {
         : "สแกนหา MT4 / MT5 ในเครื่อง";
   }
 
+  if (els.globalMetatraderPlatformMt4) {
+    els.globalMetatraderPlatformMt4.checked = activePlatform === "MT4";
+    els.globalMetatraderPlatformMt4.disabled = hub.inFlight;
+  }
+  if (els.globalMetatraderPlatformMt5) {
+    els.globalMetatraderPlatformMt5.checked = activePlatform === "MT5";
+    els.globalMetatraderPlatformMt5.disabled = hub.inFlight;
+  }
+  if (els.globalMetatraderMt4Section) {
+    els.globalMetatraderMt4Section.dataset.active = String(activePlatform === "MT4");
+  }
+  if (els.globalMetatraderMt5Section) {
+    els.globalMetatraderMt5Section.dataset.active = String(activePlatform === "MT5");
+  }
+  if (els.globalMetatraderPlatformHint) {
+    els.globalMetatraderPlatformHint.textContent = hub.platformChoiceTouched
+      ? `${activePlatform} ถูกเลือกไว้แต่ยังไม่บันทึก • ต้องกดใช้กับทุกระบบก่อนจึงจะแทนที่ค่ากลางเดิม`
+      : `${activePlatform} คือ Platform ที่บันทึกอยู่ • ใช้ได้ทีละหนึ่ง Platform`;
+  }
+
   renderGlobalMetatraderSelect(
     "MT4",
     els.globalMetatraderMt4Select,
     els.globalMetatraderMt4Apply,
     systems,
     registry,
+    activePlatform,
   );
   renderGlobalMetatraderSelect(
     "MT5",
@@ -9138,6 +9416,7 @@ function renderGlobalMetatraderHubControl() {
     els.globalMetatraderMt5Apply,
     systems,
     registry,
+    activePlatform,
   );
 
   if (els.globalMetatraderSystems) {
@@ -9203,9 +9482,9 @@ function openGlobalMetatraderHubFromDevice(event = null) {
       trigger.textContent = blockedMessage;
       trigger.setAttribute?.("title", blockedMessage);
     }
-    if (state.modal.id === AI_TRADE_COUNCIL_PROP_ID && els.modalAiTradeMt4QuickStatus) {
-      els.modalAiTradeMt4QuickStatus.dataset.tone = "warning";
-      els.modalAiTradeMt4QuickStatus.textContent = blockedMessage;
+    if (state.modal.id === AI_TRADE_COUNCIL_PROP_ID && els.modalAiTradeTerminalStatus) {
+      els.modalAiTradeTerminalStatus.dataset.tone = "warning";
+      els.modalAiTradeTerminalStatus.textContent = blockedMessage;
     }
     return false;
   }
@@ -9230,6 +9509,13 @@ function acceptGlobalMetatraderHubReadModel(payload) {
   state.globalMetatraderHub.backendAvailable = true;
   state.globalMetatraderHub.lastReadCount = GLOBAL_METATRADER_TARGETS.length;
   state.globalMetatraderHub.status = model.status === "partial" ? "partial" : "ready";
+  const selectedPlatform = String(model.selectedPlatform || "").toUpperCase();
+  if (
+    !state.globalMetatraderHub.platformChoiceTouched
+    && ["MT4", "MT5"].includes(selectedPlatform)
+  ) {
+    state.globalMetatraderHub.platformChoice = selectedPlatform;
+  }
   state.globalMetatraderHub.lastLoadedAt = Date.now();
   return model;
 }
@@ -9412,6 +9698,8 @@ async function applyGlobalMetatraderTarget(platform) {
       && verifiedPlatform?.selectedCandidate?.candidateId === candidateId
       && response?.atomic === true;
     if (!verified) throw new Error("global_selection_readback_failed");
+    hub.platformChoice = platform;
+    hub.platformChoiceTouched = false;
 
     const refreshes = targets
       .filter((target) => target.propId !== EA_FACTORY_PROP_ID)
@@ -9484,47 +9772,65 @@ async function applyGlobalMetatraderTarget(platform) {
     renderGlobalMetatraderHubControl();
   }
 }
-function renderAiTradeMt4QuickSetup(subject, checklist, canDiscoverMetatrader, report = null) {
-  if (!els.modalAiTradeMt4QuickSetup) return;
+function renderAiTradeTerminalSummary(subject, checklist, canDiscoverMetatrader, report = null) {
+  if (!els.modalAiTradeTerminalSummary) return;
   const applicable = subject?.id === AI_TRADE_COUNCIL_PROP_ID;
-  els.modalAiTradeMt4QuickSetup.hidden = !applicable;
+  els.modalAiTradeTerminalSummary.hidden = !applicable;
   if (!applicable) return;
 
   const selection = getMetatraderSelectionModel(checklist);
-  const selected = selection.selectedCandidate?.platform === "MT4"
+  const selected = ["MT4", "MT5"].includes(selection.selectedCandidate?.platform)
     ? selection.selectedCandidate
     : null;
-  const channelId = signalSnapshotChannel(report || {});
+  const platform = selected?.platform || "";
+  const market = signalMarketModel(report || {});
+  const stale = checklist?.stale === true;
   const configured = Boolean(selected);
+  const snapshotReady = configured && market.available === true && !stale;
+  const freshnessMinutes = Number.isFinite(Number(market.freshnessMinutes))
+    ? Number(market.freshnessMinutes)
+    : null;
+  const freshnessText = snapshotReady
+    ? freshnessMinutes === null
+      ? "Snapshot พร้อมใช้งาน"
+      : `Snapshot ล่าสุด ${freshnessMinutes} นาที`
+    : stale
+      ? "Snapshot เก่า • รอข้อมูลใหม่"
+      : configured
+        ? `รอ Snapshot จาก EA ${platform}`
+        : "ยังไม่มี Snapshot";
 
   setConnectionBadge(
-    els.modalAiTradeMt4QuickBadge,
-    channelId ? "connected" : configured ? "configured" : canDiscoverMetatrader ? "not_connected" : "checking",
-    channelId ? "พร้อมใช้" : configured ? "เลือกจากแถบกลางแล้ว" : canDiscoverMetatrader ? "รอเลือกจากแถบกลาง" : "รอตรวจระบบ",
+    els.modalAiTradeTerminalBadge,
+    snapshotReady ? "connected" : configured ? "configured" : canDiscoverMetatrader ? "not_connected" : "checking",
+    snapshotReady ? "ข้อมูลพร้อม" : configured ? "เลือกแล้ว • รอข้อมูล" : canDiscoverMetatrader ? "รอเลือก" : "รอตรวจระบบ",
   );
-  if (els.modalAiTradeMt4QuickTerminal) {
-    els.modalAiTradeMt4QuickTerminal.textContent = selected
-      ? `Terminal กลาง: ${selected.labelTh} (${selected.platform})${selected.detected ? " • ตรวจพบล่าสุด" : " • ไม่พบในการสแกนล่าสุด"}`
-      : "ยังไม่ได้เลือก MT4 จากแถบเชื่อม MT4 / MT5 ด้านบน";
+  if (els.modalAiTradeActivePlatform) {
+    els.modalAiTradeActivePlatform.textContent = platform || "ยังไม่ได้เลือก";
   }
-  if (els.modalAiTradeMt4QuickChannel) {
-    els.modalAiTradeMt4QuickChannel.textContent = channelId || "ยังไม่มี Channel ID";
+  if (els.modalAiTradeActiveTerminal) {
+    els.modalAiTradeActiveTerminal.textContent = selected
+      ? `${selected.labelTh}${selected.detected ? " • ตรวจพบล่าสุด" : " • ไม่พบในการสแกนล่าสุด"}`
+      : "ยังไม่ได้เลือกจากแถบกลาง";
   }
-  if (els.modalAiTradeMt4QuickCopy) {
-    els.modalAiTradeMt4QuickCopy.disabled = !channelId;
+  if (els.modalAiTradeFeedFreshness) {
+    els.modalAiTradeFeedFreshness.textContent = freshnessText;
   }
-  if (els.modalAiTradeMt4QuickStatus) {
-    els.modalAiTradeMt4QuickStatus.dataset.tone = channelId ? "success" : configured ? "neutral" : "warning";
-    els.modalAiTradeMt4QuickStatus.textContent = channelId
-      ? "อุปกรณ์นี้อ่าน Terminal ที่ยืนยันจากแถบกลางแล้ว • Channel ID พร้อมคัดลอกไปใส่ใน EA"
+  if (els.modalAiTradeTerminalStatus) {
+    els.modalAiTradeTerminalStatus.dataset.tone = snapshotReady ? "success" : configured ? "neutral" : "warning";
+    els.modalAiTradeTerminalStatus.textContent = snapshotReady
+      ? `สภาอ่านข้อมูลจาก ${platform} ที่ยืนยันจากแถบกลางเพียงแหล่งเดียว`
       : configured
-        ? "Terminal กลางถูกเลือกแล้ว แต่ Backend ยังไม่ส่ง Channel ID • ตรวจสถานะการเชื่อมต่อใหม่ได้โดยไม่เปลี่ยน Terminal"
-        : "สแกนและเลือก MT4 ได้จากแถบเชื่อม MT4 / MT5 ด้านบนเพียงจุดเดียว";
+        ? `เลือก ${platform} แล้ว • รอ EA ส่ง Snapshot โดยไม่สลับไปอ่านอีก Platform อัตโนมัติ`
+        : "สแกนและเลือก MT4 หรือ MT5 จากแถบเชื่อมด้านบนเพียงจุดเดียว";
   }
 }
 
 function renderDashboardConnectionPanel(subject, propertyRole = null) {
   if (!subject || !els.modalDashboardConnectionList) return;
+  if (els.modalDashboardConnectionDetails) {
+    els.modalDashboardConnectionDetails.open = subject.id !== AI_TRADE_COUNCIL_PROP_ID;
+  }
   const report = state.propReports[subject.id] || null;
   const rawChecklist = report?.connectionChecklist;
   const checklist = rawChecklist && (!rawChecklist.dashboardId || rawChecklist.dashboardId === subject.id)
@@ -9534,7 +9840,15 @@ function renderDashboardConnectionPanel(subject, propertyRole = null) {
   const operationMode = checklist?.operationMode || {};
   const aiSchedule = operationMode?.autoAnalysis || operationMode?.aiEveryTwoHours || {};
   const backendItems = Array.isArray(checklist?.items) ? checklist.items.slice(0, 20) : [];
-  const items = [...backendItems];
+  const councilSummaryItemIds = new Set([
+    "mt4_terminal",
+    "mt5_terminal",
+    "trading_state_adapter",
+    "mt4_trade_gateway",
+  ]);
+  const items = subject.id === AI_TRADE_COUNCIL_PROP_ID
+    ? backendItems.filter((item) => !councilSummaryItemIds.has(String(item?.id || "")))
+    : [...backendItems];
   const codexUsage = checklist?.codexUsage || {};
   const codexDependency = String(codexUsage?.dependency || "").trim().toLowerCase();
   const shouldShowCodexQuota = codexDependency
@@ -9594,7 +9908,7 @@ function renderDashboardConnectionPanel(subject, propertyRole = null) {
   }
 
   const canDiscoverMetatrader = backendItems.some((item) => item?.action === "discover_metatrader");
-  renderAiTradeMt4QuickSetup(subject, checklist, canDiscoverMetatrader, report);
+  renderAiTradeTerminalSummary(subject, checklist, canDiscoverMetatrader, report);
   const actionMatches = state.connectionAction.propId === subject.id;
   if (els.modalDashboardRefreshConnections) {
     els.modalDashboardRefreshConnections.disabled = state.connectionAction.inFlight;
@@ -10480,6 +10794,19 @@ function signalCommandMatchesCurrentRound(command = null, context = {}) {
     && commandSnapshotId === expectedSnapshotId;
 }
 
+function signalSelectedPlatform(report = {}) {
+  const selected = report?.connectionChecklist?.metatraderSelection?.selectedCandidate || {};
+  const council = signalCouncilModel(report);
+  const gateway = council.tradeGateway && typeof council.tradeGateway === "object"
+    ? council.tradeGateway
+    : {};
+  const normalized = safeDashboardDisplayText(
+    selected.platform || gateway.platform || gateway.terminalPlatform,
+    "",
+  ).toUpperCase();
+  return ["MT4", "MT5"].includes(normalized) ? normalized : "";
+}
+
 function getSignalRuntimeTruth(report = {}) {
   const council = signalCouncilModel(report);
   const supplied = council.runtimeTruth || {};
@@ -10548,6 +10875,7 @@ function getSignalRuntimeTruth(report = {}) {
     && supplied?.terminalSelected !== false
     && suppliedTerminal?.selected !== false,
   );
+  const selectedPlatform = signalSelectedPlatform(report);
   const tradingStateAvailable = (supplied?.tradingStateAvailable === true || suppliedTradingState?.available === true)
     && signalConnectionIsReady(tradingStateItem);
   const ensembleAvailable = (supplied?.ensembleAvailable === true || suppliedEnsemble?.available === true)
@@ -10610,11 +10938,25 @@ function getSignalRuntimeTruth(report = {}) {
     if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
     return Number.isFinite(Number(value)) ? Number(value) : null;
   };
+  const gatewayConcurrencyBoundary = safeDashboardDisplayText(
+    gateway.concurrencyBoundary,
+    "",
+  );
+  const gatewayCrossVpsDistributedLock = typeof gateway.crossVpsDistributedLock === "boolean"
+    ? gateway.crossVpsDistributedLock
+    : null;
+  const liveSafetyScope = selectedPlatform === "MT5"
+    && gateway.liveSafetyScope === "single_windows_user_file_common_only"
+    && gatewayConcurrencyBoundary === "same_windows_user_file_common"
+    && gatewayCrossVpsDistributedLock === false
+    ? "single_windows_user_file_common_only"
+    : "";
 
   return {
     scope: safeDashboardDisplayText(supplied?.scope, "terminal_detection_only"),
     terminalDetected,
     terminalSelected,
+    selectedPlatform,
     selectedCandidateId: gatewaySelectedCandidateId || checklistSelectedCandidateId,
     tradingStateAvailable,
     positionsAvailable: tradingStateAvailable && supplied?.positionsAvailable === true,
@@ -10627,6 +10969,8 @@ function getSignalRuntimeTruth(report = {}) {
     gatewayConnected,
     gatewayMode,
     gatewayLiveArmed: gateway.liveArmed === true,
+    singleHostLiveAcknowledged: gateway.singleHostLiveAcknowledged === true,
+    liveSafetyScope,
     signedCommandRequiredForLive: gatewayBackend.signedCommandRequiredForLive === true,
     backendSignedCommandVerificationAvailable: gatewayBackend.signedCommandVerificationAvailable === true,
     signedCommandVerificationAvailable: gateway.signedCommandVerificationAvailable === true,
@@ -10665,7 +11009,26 @@ function getSignalRuntimeTruth(report = {}) {
     gatewayIsDemoAccount,
     gatewayModeAccountMismatch: Boolean(gatewayModeAccountMismatchReason),
     gatewayModeAccountMismatchReason,
-    gatewayFixedLot: Number.isFinite(Number(gateway.fixedLot)) ? Number(gateway.fixedLot) : null,
+    gatewayFixedLot: gatewayNumber("fixedLot"),
+    gatewayPositionSizingMode: ["FIXED_LOT", "RISK_PERCENT"].includes(
+      safeDashboardDisplayText(gateway.positionSizingMode, "").trim().toUpperCase(),
+    )
+      ? safeDashboardDisplayText(gateway.positionSizingMode, "").trim().toUpperCase()
+      : "",
+    gatewayRiskPercent: gatewayNumber("riskPercent"),
+    gatewayRiskCapitalBase: ["EQUITY", "BALANCE"].includes(
+      safeDashboardDisplayText(gateway.riskCapitalBase, "").trim().toUpperCase(),
+    )
+      ? safeDashboardDisplayText(gateway.riskCapitalBase, "").trim().toUpperCase()
+      : "",
+    gatewayAccountCurrency: safeDashboardDisplayText(
+      council?.dailySummary?.currency,
+      "",
+    ).trim().toUpperCase(),
+    gatewayEstimatedCommissionPerLot: gatewayNumber("estimatedCommissionPerLot"),
+    gatewayBrokerVolumeMin: gatewayNumber("brokerVolumeMin"),
+    gatewayBrokerVolumeMax: gatewayNumber("brokerVolumeMax"),
+    gatewayBrokerVolumeStep: gatewayNumber("brokerVolumeStep"),
     gatewayExecutionGuardReady: gateway.executionGuardReady === true,
     gatewayExecutionGuardReason,
     gatewayRiskTelemetry: {
@@ -10673,10 +11036,8 @@ function getSignalRuntimeTruth(report = {}) {
       managedMagicNumbers: safeDashboardDisplayText(gateway.managedMagicNumbers, ""),
       allowedSymbols: safeDashboardDisplayText(gateway.allowedSymbols, ""),
       allowedTimeframes: safeDashboardDisplayText(gateway.allowedTimeframes, ""),
-      concurrencyBoundary: safeDashboardDisplayText(gateway.concurrencyBoundary, ""),
-      crossVpsDistributedLock: typeof gateway.crossVpsDistributedLock === "boolean"
-        ? gateway.crossVpsDistributedLock
-        : null,
+      concurrencyBoundary: gatewayConcurrencyBoundary,
+      crossVpsDistributedLock: gatewayCrossVpsDistributedLock,
       maxManagedPositions: gatewayNumber("maxManagedPositions"),
       currentManagedPositions: gatewayNumber("currentManagedPositions"),
       maxManagedLots: gatewayNumber("maxManagedLots"),
@@ -10810,6 +11171,15 @@ function signalDailySummaryModel(report = {}) {
     ? council.analysisReadiness
     : {};
   const available = source.available === true;
+  const selectedPlatform = safeDashboardDisplayText(
+    report?.connectionChecklist?.metatraderSelection?.selectedCandidate?.platform
+      || council.tradeGateway?.platform
+      || council.tradeGateway?.terminalPlatform,
+    "",
+  ).toUpperCase();
+  const platformLabel = ["MT4", "MT5"].includes(selectedPlatform)
+    ? selectedPlatform
+    : "MT4 / MT5";
   return {
     available,
     status: safeDashboardDisplayText(source.status, available ? "ready" : "adapter_missing"),
@@ -10845,8 +11215,8 @@ function signalDailySummaryModel(report = {}) {
     readinessMessage: safeDashboardDisplayText(
       readiness.messageTh || source.messageTh,
       available
-        ? "ได้รับข้อมูลจริงจาก MT4 ผ่าน Local Runner แล้ว"
-        : "ยังไม่มีข้อมูลบัญชีจากตัวอ่าน MT4 แบบ Read-only",
+        ? `ได้รับข้อมูลจริงจาก ${platformLabel} ผ่าน Local Runner แล้ว`
+        : `ยังไม่มีข้อมูลบัญชีจากตัวอ่าน ${platformLabel} แบบ Read-only`,
     ),
   };
 }
@@ -10887,6 +11257,15 @@ function signalCouncilAutomationModel(report = {}) {
     runtimeState.status || runtimeState.lastStatus || supplied.status,
     config.enabled ? "watching" : "disabled",
   ).toLowerCase();
+  const selectedPlatform = safeDashboardDisplayText(
+    report?.connectionChecklist?.metatraderSelection?.selectedCandidate?.platform
+      || council.tradeGateway?.platform
+      || council.tradeGateway?.terminalPlatform,
+    "",
+  ).toUpperCase();
+  const platformLabel = ["MT4", "MT5"].includes(selectedPlatform)
+    ? selectedPlatform
+    : "MT4 / MT5";
   const rawReason = safeDashboardDisplayText(
     runtimeState.reasonCode
       || runtimeState.reason
@@ -10929,10 +11308,10 @@ function signalCouncilAutomationModel(report = {}) {
     waiting_for_new_closed_bar: "แท่งปัจจุบันยังไม่ปิด • แท่งปิดใหม่จะเริ่มวิเคราะห์เมื่อระบบพร้อม",
     unsupported_timeframe: "กรอบเวลานี้ใช้ปุ่มวิเคราะห์เองเพื่อป้องกันการใช้ Rate Limit ถี่เกินไป",
     full_access_required: "เปิด Full Access ก่อน ระบบจึงจะสร้าง Mission อัตโนมัติได้",
-    terminal_not_selected: "กรุณาเลือก MT4 เป้าหมายก่อน",
-    snapshot_missing: "ยังไม่พบ Snapshot จาก MT4",
+    terminal_not_selected: "กรุณาเลือก MT4 หรือ MT5 เป้าหมายก่อน",
+    snapshot_missing: `ยังไม่พบ Snapshot จาก ${platformLabel}`,
     snapshot_not_ready: "Snapshot ยังไม่พร้อมสำหรับการวิเคราะห์",
-    snapshot_stale: "Snapshot เก่าเกินกำหนด กำลังรอข้อมูลใหม่จาก MT4",
+    snapshot_stale: `Snapshot เก่าเกินกำหนด กำลังรอข้อมูลใหม่จาก ${platformLabel}`,
     durable_snapshot_unavailable: "หยุดรอบอัตโนมัติชั่วคราว • Snapshot ถาวรของหัวคิวอ่านไม่ได้ จึงยังไม่เริ่มวิเคราะห์",
     snapshot_artifact_capture_failed: "หยุดรอบอัตโนมัติชั่วคราว • บันทึก Snapshot ถาวรไม่สำเร็จ",
     pending_queue_capacity_exceeded: "คิววิเคราะห์เต็ม • แท่งล่าสุดถูกข้ามและยังไม่เริ่มวิเคราะห์",
@@ -11046,7 +11425,7 @@ function signalCouncilAutomationModel(report = {}) {
       ? "ครบจำนวนรอบอัตโนมัติวันนี้"
       : "เปิดอยู่ • เฝ้าแท่งปิดใหม่",
     operator_mode: "พักจนกว่าจะเปิด Full Access",
-    snapshot_unavailable: "รอ Snapshot จาก MT4",
+    snapshot_unavailable: `รอ Snapshot จาก ${platformLabel}`,
     snapshot_stale: "รอ Snapshot ที่สด",
     skipped: "รอบล่าสุดถูกข้าม • ตรวจสาเหตุก่อนเริ่มวิเคราะห์รอบถัดไป",
     error: "ระบบเฝ้าดูมีปัญหา",
@@ -11383,6 +11762,26 @@ function renderSignalDailyPanel(report = {}) {
   if (!container) return;
   const runtime = getSignalRuntimeTruth(report);
   const daily = signalDailySummaryModel(report);
+  const activePlatform = runtime.selectedPlatform || signalSelectedPlatform(report);
+  const platformLabel = activePlatform || "MT4 / MT5";
+  const mqlFolder = activePlatform === "MT5"
+    ? "MQL5"
+    : activePlatform === "MT4"
+      ? "MQL4"
+      : "MQL4 หรือ MQL5";
+  const gatewaySource = activePlatform === "MT5"
+    ? "MetafxHQTradeGateway.mq5"
+    : activePlatform === "MT4"
+      ? "MetafxHQTradeGateway.mq4"
+      : "MetafxHQTradeGateway.mq4 หรือ MetafxHQTradeGateway.mq5";
+  const gatewayDownloadUrl = activePlatform === "MT5"
+    ? "/api/integrations/metatrader/gateway-source/mt5"
+    : activePlatform === "MT4"
+      ? "/api/integrations/metatrader/gateway-source/mt4"
+      : "";
+  const gatewayDownloadAttributes = gatewayDownloadUrl
+    ? `href="${gatewayDownloadUrl}" download="${gatewaySource}"`
+    : 'aria-disabled="true" tabindex="-1"';
   const currencySuffix = daily.currency ? ` ${daily.currency}` : "";
   const netTone = daily.net === null ? "muted" : daily.net > 0 ? "positive" : daily.net < 0 ? "negative" : "neutral";
   const statusTone = daily.available ? "ready" : runtime.terminalSelected ? "warning" : "blocked";
@@ -11445,7 +11844,7 @@ function renderSignalDailyPanel(report = {}) {
     <section class="signal-metric-scope" aria-label="ขอบเขตของตัวเลขการเทรด">
       <article data-tone="account">
         <span>ขอบเขตการ์ดด้านบน</span>
-        <strong>ทั้งบัญชี MT4 (Account-wide)</strong>
+        <strong>ทั้งบัญชี ${platformLabel} (Account-wide)</strong>
         <p>Balance, Equity, กำไร และจำนวน Position มาจาก Snapshot ของทั้งบัญชี ไม่ได้หมายถึงผลงานของ AI Council เพียงระบบเดียว</p>
       </article>
       <article data-tone="managed">
@@ -11473,7 +11872,7 @@ function renderSignalDailyPanel(report = {}) {
       <aside class="signal-daily-actions">
         <div>
           <span>สถานะข้อมูลจริง</span>
-          <strong>${daily.available ? "เชื่อมข้อมูล MT4 แล้ว" : "ยังรอตัวอ่าน MT4"}</strong>
+          <strong>${daily.available ? `เชื่อมข้อมูล ${platformLabel} แล้ว` : `ยังรอตัวอ่าน ${platformLabel}`}</strong>
           <p>Frontend แสดงเฉพาะข้อมูลที่ Local Runner ตรวจแล้ว และไม่รับรหัสบัญชี รหัสผ่าน หรือ Secret ใด ๆ</p>
           <p class="signal-execution-guard-summary" data-tone="${runtime.gatewayExecutionGuardReady ? "ready" : "warning"}">
             ${signalExecutionGuardSummary(runtime)}
@@ -11524,9 +11923,6 @@ function renderSignalDailyPanel(report = {}) {
               : "ไม่มีเพดานรายวัน"} • ประมวลผลคิวแท่งปิดตามลำดับ FIFO • รอบย้อนหลังใช้ตรวจสอบเท่านั้นและห้ามส่ง Order เก่า • รองรับ ${automation.supported.join(", ")}
           </small>
         </section>
-        <button type="button" class="signal-secondary-action" data-signal-open-metatrader>
-          เลือก MT4 ที่แถบเชื่อม MT4 / MT5
-        </button>
         <button type="button" class="signal-primary-action" data-signal-run-analysis ${daily.analysisReady && !analysisBusy ? "" : "disabled"}>
           ${activeCouncilRound ? "Specialist กำลังวิเคราะห์รอบปัจจุบัน" : analysisBusy ? "กำลังส่งงานให้ Specialist..." : "ให้ Specialist 3 ตัวลงคะแนนรอบนี้"}
         </button>
@@ -11537,7 +11933,7 @@ function renderSignalDailyPanel(report = {}) {
               <strong>${snapshotChannel ? "พร้อมนำไปใส่ใน SnapshotChannel" : "ยังไม่มี Channel ID"}</strong>
             </div>
             <span class="signal-state-badge ${snapshotChannel ? "ready" : "warning"}">
-              ${snapshotChannel ? "พร้อมคัดลอก" : "เลือก MT4 ที่แถบกลาง"}
+              ${snapshotChannel ? "พร้อมคัดลอก" : "เลือก MT4 หรือ MT5 ที่แถบกลาง"}
             </span>
           </div>
           <code data-signal-channel-code tabindex="0"></code>
@@ -11547,9 +11943,12 @@ function renderSignalDailyPanel(report = {}) {
           <p>เลข Port ใช้เปิดหน้า Dashboard ส่วน Channel ID คือรหัสที่ต้องใส่ในช่อง <b>SnapshotChannel</b> ของ EA โดยทั้งสองอย่างไม่ใช่รหัสบัญชีหรือ Secret</p>
           <details class="signal-adapter-guide" ${daily.available ? "" : "open"}>
             <summary>ดูขั้นตอนติดตั้งหรือเปลี่ยน EA</summary>
+            <a class="signal-gateway-source-download" data-signal-download-gateway-source ${gatewayDownloadAttributes}>
+              ${gatewayDownloadUrl ? `ดาวน์โหลด ${gatewaySource}` : "เลือก MT4 หรือ MT5 ก่อนดาวน์โหลด EA"}
+            </a>
             <ol>
-              <li>ใน MT4 เปิด File → Open Data Folder</li>
-              <li>นำไฟล์ MetafxHQTradeGateway.mq4 ไปไว้ใน MQL4 → Experts → Metafxclub → TradeGateway แล้ว Compile</li>
+              <li>ใน ${platformLabel} เปิด File → Open Data Folder</li>
+              <li>นำไฟล์ ${gatewaySource} ไปไว้ใน ${mqlFolder} → Experts → Metafxclub → TradeGateway แล้ว Compile</li>
               <li>ลาก EA ลงกราฟ แล้ววาง Channel ID ในช่อง SnapshotChannel</li>
               <li>เริ่มด้วย GatewayMode = Shadow และ LiveArmed = false</li>
             </ol>
@@ -11563,7 +11962,7 @@ function renderSignalDailyPanel(report = {}) {
   container.querySelector("[data-signal-daily-message]").textContent = daily.readinessMessage;
   container.querySelector("[data-signal-daily-observed]").textContent = daily.observedAt
     ? formatThaiDateTime(daily.observedAt)
-    : "ยังไม่มีข้อมูลจาก MT4";
+    : `ยังไม่มีข้อมูลจาก ${platformLabel}`;
   container.querySelector("[data-signal-daily-snapshot]").textContent = daily.snapshotId
     ? `Snapshot ${daily.snapshotId}`
     : "ยังไม่มี Snapshot ที่ยืนยันโดย Backend";
@@ -11588,7 +11987,7 @@ function renderSignalDailyPanel(report = {}) {
     ["กำไรลอยตัว", formatSignalNumber(daily.floating, { signed: true, suffix: currencySuffix }), daily.floating > 0 ? "positive" : daily.floating < 0 ? "negative" : "neutral", "จาก Position ที่ยังเปิดอยู่"],
     ["Balance / Equity", daily.balance === null && daily.equity === null
       ? "ยังไม่มีข้อมูล"
-      : `${formatSignalNumber(daily.balance)} / ${formatSignalNumber(daily.equity)}`, "neutral", daily.currency || "สกุลเงินจากบัญชี MT4"],
+      : `${formatSignalNumber(daily.balance)} / ${formatSignalNumber(daily.equity)}`, "neutral", daily.currency || `สกุลเงินจากบัญชี ${platformLabel}`],
     ["จำนวนการเทรดวันนี้", daily.trades === null ? "ยังไม่มีข้อมูล" : `${Math.trunc(daily.trades)} ครั้ง`, "neutral", daily.wins === null || daily.losses === null ? "รอข้อมูลชนะและแพ้" : `ชนะ ${Math.trunc(daily.wins)} • แพ้ ${Math.trunc(daily.losses)}`],
     ["Win Rate วันนี้", daily.winRate === null ? "ยังไม่มีข้อมูล" : `${daily.winRate.toFixed(1)}%`, "neutral", "คำนวณจากออเดอร์ที่ปิดวันนี้"],
     ["Drawdown วันนี้", daily.drawdownPercent === null ? "ยังไม่มีข้อมูล" : `${daily.drawdownPercent.toFixed(2)}%`, daily.drawdownPercent > 5 ? "negative" : "neutral", "ค่าที่ Local Runner อ่านและตรวจสอบได้"],
@@ -11636,9 +12035,6 @@ function renderSignalDailyPanel(report = {}) {
       }
     }
   });
-  container.querySelector("[data-signal-open-metatrader]")?.addEventListener("click", (event) => {
-    openGlobalMetatraderHubFromDevice(event);
-  });
   container.querySelector("[data-signal-auto-toggle]")?.addEventListener("change", (event) => {
     void setAiTradeCouncilAutomation(event.currentTarget.checked);
   });
@@ -11654,6 +12050,7 @@ async function setAiTradeCouncilAutomation(enabled, configOverrides = {}) {
     || state.aiTradeCouncilOrderLimit.inFlight
   ) return null;
   const report = state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {};
+  const platformLabel = signalSelectedPlatform(report) || "MT4 / MT5";
   const currentConfig = signalCouncilAutomationModel(report);
   const analysisBarCount = normalizeSignalAnalysisBars(
     configOverrides.analysisBarCount ?? currentConfig.analysisBarCount,
@@ -11680,7 +12077,7 @@ async function setAiTradeCouncilAutomation(enabled, configOverrides = {}) {
       ? `บันทึกแล้ว • AI จะใช้ ${analysisBarCount} แท่งปิดตั้งแต่รอบวิเคราะห์ถัดไป`
       : enabled
         ? "เปิดแล้ว • ระบบจะตั้งแท่งปัจจุบันเป็นจุดเริ่ม และวิเคราะห์เมื่อแท่งถัดไปปิด"
-        : "ปิดแล้ว • Snapshot จาก MT4 ยังอัปเดตตามปกติ แต่จะไม่เรียก Codex อัตโนมัติ";
+        : `ปิดแล้ว • Snapshot จาก ${platformLabel} ยังอัปเดตตามปกติ แต่จะไม่เรียก Codex อัตโนมัติ`;
     state.aiTradeCouncilAutomation.tone = "success";
     addBridgeEvent(
       analysisCountChanged
@@ -11819,6 +12216,9 @@ async function setAiTradeCouncilMaxManagedOrders(maxManagedOrders) {
 
 async function runAiTradeCouncilAnalysis(snapshotId = "") {
   if (state.aiTradeCouncilAnalysis.inFlight) return null;
+  const platformLabel = signalSelectedPlatform(
+    state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {},
+  ) || "MT4 / MT5";
   state.aiTradeCouncilAnalysis = {
     inFlight: true,
     message: "กำลังส่ง Snapshot เดียวกันให้ Specialist ทั้ง 3 ตัวผ่าน Local Runner",
@@ -11878,7 +12278,7 @@ async function runAiTradeCouncilAnalysis(snapshotId = "") {
   } catch (error) {
     state.aiTradeCouncilAnalysis.message = safeDashboardDisplayText(
       error?.body?.messageTh || error?.message,
-      "ยังเริ่มวิเคราะห์ไม่ได้ กรุณาตรวจการเชื่อมต่อ MT4 และ Snapshot ก่อน",
+      `ยังเริ่มวิเคราะห์ไม่ได้ กรุณาตรวจการเชื่อมต่อ ${platformLabel} และ Snapshot ก่อน`,
     );
     state.aiTradeCouncilAnalysis.tone = "error";
     return null;
@@ -11894,13 +12294,99 @@ async function runAiTradeCouncilAnalysis(snapshotId = "") {
   }
 }
 
+function signalGatewaySizingSummary(runtime = {}) {
+  const mode = safeDashboardDisplayText(runtime.gatewayPositionSizingMode, "").trim().toUpperCase();
+  const minimum = runtime.gatewayBrokerVolumeMin;
+  const maximum = runtime.gatewayBrokerVolumeMax;
+  const step = runtime.gatewayBrokerVolumeStep;
+  const maxLossPerTradePercent = runtime.gatewayRiskTelemetry?.maxLossPerTradePercent;
+  const brokerLimits = Number.isFinite(minimum) && Number.isFinite(maximum) && Number.isFinite(step)
+    ? ` • Broker Lot ${minimum}-${maximum} • Step ${step}`
+    : Number.isFinite(step)
+      ? ` • Lot Step ${step}`
+      : "";
+  const hardCap = Number.isFinite(maxLossPerTradePercent)
+    ? ` • เพดานไม่เกิน ${maxLossPerTradePercent}% ของ Balance`
+    : " • รอค่าเพดานต่อรายการจาก EA";
+  const estimateNote = " • ประมาณการถึง SL รวม Slippage/ค่าธรรมเนียมที่ตั้งไว้; Gap, Fill, Swap หรือค่าธรรมเนียมจริงอาจทำให้ผลต่าง";
+  if (mode === "RISK_PERCENT") {
+    const percent = runtime.gatewayRiskPercent;
+    const capital = runtime.gatewayRiskCapitalBase === "BALANCE" ? "Balance" : "Equity";
+    const commission = runtime.gatewayEstimatedCommissionPerLot;
+    const accountCurrency = safeDashboardDisplayText(runtime.gatewayAccountCurrency, "").trim().toUpperCase();
+    const commissionUnit = accountCurrency || "หน่วยเงินบัญชี";
+    return {
+      label: "Money Management",
+      value: percent === null
+        ? `Risk Percent • ${capital}`
+        : `เป้าหมาย Risk ${percent}% ของ ${capital}${hardCap}${brokerLimits}${commission === null || commission === 0 ? "" : ` • สำรองค่าธรรมเนียม ${commission} ${commissionUnit}/lot`}${estimateNote}`,
+      tone: percent === null ? "warning" : "ready",
+    };
+  }
+  if (mode === "FIXED_LOT" || runtime.gatewayFixedLot !== null) {
+    return {
+      label: "Money Management",
+      value: runtime.gatewayFixedLot === null
+        ? "Fixed Lot ตั้งค่าที่ EA"
+        : `Fixed Lot ${runtime.gatewayFixedLot}${hardCap}${brokerLimits}${estimateNote}`,
+      tone: runtime.gatewayFixedLot === null ? "muted" : "ready",
+    };
+  }
+  return {
+    label: "Money Management",
+    value: "รอสถานะจาก EA",
+    tone: "muted",
+  };
+}
+
+function signalGatewayAckSizingSummary(ack = null, accountCurrency = "") {
+  if (
+    !ack
+    || typeof ack !== "object"
+    || ack.sizingEvidenceSource !== "ea_ack_read_only"
+    || ack.sizingEvidenceAuthoritative !== false
+  ) return "";
+  const finiteNumber = (value) => {
+    if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const resolvedLot = finiteNumber(ack.resolvedLot);
+  if (resolvedLot === null || resolvedLot < 0) return "";
+  const mode = safeDashboardDisplayText(ack.positionSizingMode, "").trim().toUpperCase();
+  const riskPercent = finiteNumber(ack.riskPercent);
+  const riskCapital = finiteNumber(ack.riskCapitalAmount);
+  const estimatedRisk = finiteNumber(ack.estimatedRiskMoney);
+  const currency = safeDashboardDisplayText(accountCurrency, "หน่วยเงินบัญชี").trim().toUpperCase();
+  const parts = [
+    resolvedLot > 0 ? `หลักฐาน EA: Lot ที่คำนวณ ${resolvedLot}` : "หลักฐาน EA: ยังไม่มี Lot ที่คำนวณ",
+  ];
+  if (mode === "RISK_PERCENT" && riskPercent !== null) {
+    const base = safeDashboardDisplayText(ack.riskCapitalBase, "").trim().toUpperCase();
+    parts.push(`Risk ${riskPercent}%${base ? ` ของ ${base}` : ""}`);
+  } else if (mode === "FIXED_LOT") {
+    parts.push("Fixed Lot");
+  }
+  if (estimatedRisk !== null && riskCapital !== null && estimatedRisk >= 0 && riskCapital >= 0) {
+    parts.push(`ความเสี่ยงประมาณ ${estimatedRisk} ${currency} จากฐาน ${riskCapital} ${currency}`);
+  }
+  parts.push("ข้อมูลอ่านอย่างเดียวจาก EA; AI/Backend ไม่ได้กำหนด Lot");
+  return parts.join(" • ");
+}
+
 function renderSignalMarketStrip(container, report, runtime) {
   if (!container) return;
   const market = signalMarketModel(report);
   const stale = report?.connectionChecklist?.stale === true;
   const modeAccount = signalGatewayModeAccountStatus(runtime);
+  const effectiveGuardReason = signalEffectiveExecutionGuardReason(runtime);
+  const selectedPlatform = String(runtime.selectedPlatform || "").trim().toUpperCase();
+  const platformLabel = ["MT4", "MT5"].includes(selectedPlatform)
+    ? selectedPlatform
+    : "MT4 / MT5";
+  const sizing = signalGatewaySizingSummary(runtime);
   const items = [
-    ["MT4 / MT5 ที่เลือก", market.terminal, runtime.terminalSelected ? "ready" : "warning"],
+    [`${platformLabel} ที่เลือก`, market.terminal, runtime.terminalSelected ? "ready" : "warning"],
     ["สัญลักษณ์", market.symbol, market.available ? "ready" : "muted"],
     ["กรอบเวลา", market.timeframe, market.available ? "ready" : "muted"],
     ["แท่งเทียนล่าสุด", market.observedAt ? formatThaiDateTime(market.observedAt) : "รอ Adapter", market.observedAt ? "ready" : "warning"],
@@ -11917,7 +12403,7 @@ function renderSignalMarketStrip(container, report, runtime) {
       "สิทธิ์ส่ง Order",
       runtime.gatewayExecutionGuardReady
         ? "Execution Guard พร้อม"
-        : signalExecutionGuardReasonLabel(runtime.gatewayExecutionGuardReason),
+        : signalExecutionGuardReasonLabel(effectiveGuardReason),
       runtime.gatewayExecutionGuardReady ? "ready" : "warning",
     ],
     [
@@ -11927,7 +12413,7 @@ function renderSignalMarketStrip(container, report, runtime) {
         : "ยังไม่เชื่อม EA",
       runtime.gatewayConnected && !modeAccount.mismatch ? "info" : "warning",
     ],
-    ["Fixed Lot", runtime.gatewayFixedLot === null ? "ตั้งค่าที่ EA" : String(runtime.gatewayFixedLot), runtime.gatewayFixedLot === null ? "muted" : "ready"],
+    [sizing.label, sizing.value, sizing.tone],
   ];
   container.innerHTML = "";
   items.forEach(([label, value, tone]) => {
@@ -12069,7 +12555,7 @@ function signalMissionBlockerModel(mission = null) {
     "council_rate_limit_exceeds_round_deadline",
   ].includes(reasonCode)) {
     titleTh = "เวลาร่วมของสภา AI หมดก่อนวิเคราะห์ครบ";
-    causeTh = "Agent ทำงานไม่ครบภายในเวลาของ Snapshot เดียวกัน ระบบจึงยกเลิกรอบนี้และไม่ส่งคำสั่งไป MT4";
+    causeTh = "Agent ทำงานไม่ครบภายในเวลาของ Snapshot เดียวกัน ระบบจึงยกเลิกรอบนี้และไม่ส่งคำสั่งไปยัง EA ที่เลือก";
     steps = [
       "กดตรวจสถานะใหม่เพื่อยืนยันว่า Local Runner พร้อม",
       "รอ Snapshot ใหม่ แล้วเริ่ม Specialist ทั้ง 3 ตัวพร้อมกันอีกครั้ง",
@@ -12506,7 +12992,7 @@ function createSignalAgentBlockerPanel(view) {
     ["เวลาที่เคยนัดลองใหม่", blocker.retryAt ? formatThaiDateTime(blocker.retryAt) : "ไม่มีข้อมูล"],
     ["Mission", blocker.missionId],
     ["Snapshot", blocker.snapshotId ? signalSnapshotLabel(blocker.snapshotId) : "ไม่มีข้อมูล"],
-    ["ส่งคำสั่ง MT4", blocker.terminalActionBlocked ? "ไม่ได้ส่ง" : "ตรวจจาก Backend อีกครั้ง"],
+    ["ส่งคำสั่งไปยัง EA", blocker.terminalActionBlocked ? "ไม่ได้ส่ง" : "ตรวจจาก Backend อีกครั้ง"],
   ];
   technicalRows.forEach(([label, value]) => {
     const term = document.createElement("dt");
@@ -13287,7 +13773,7 @@ function signalTradeOperationsModel(report = {}, runtime = {}, consensus = {}) {
               ? "ไม่มี Fill ในรอบนี้"
               : "ยังไม่มีข้อมูล Fill",
         detail: exactClosedOutcome
-          ? `ปิดเวลา MT4 ${signalBrokerDateTime(exactClosedOutcome.closedAtBroker)} • Outcome ตรงกับ Command และ Ticket`
+          ? `ปิดเวลา Broker ${signalBrokerDateTime(exactClosedOutcome.closedAtBroker)} • Outcome ตรงกับ Command และ Ticket`
           : fillVerified
           ? safeDashboardDisplayText(fill?.ticket || fill?.orderId, "ยืนยันโดย Backend")
           : ackStatus === "EXECUTED"
@@ -13602,11 +14088,52 @@ function signalExecutionGuardReasonLabel(value) {
     READY: "ผ่านการตรวจความพร้อม",
     STARTING: "EA กำลังเริ่มระบบ",
     KILL_SWITCH_ACTIVE: "Kill Switch กำลังหยุดระบบ",
-    TERMINAL_NOT_CONNECTED: "MT4 ยังไม่เชื่อมต่อกับ Broker",
+    TERMINAL_NOT_CONNECTED: "Terminal ที่เลือกยังไม่เชื่อมต่อกับ Broker",
     QUOTE_NOT_AVAILABLE: "ยังไม่มีราคาล่าสุด",
     QUOTE_NOT_OBSERVED: "EA ยังไม่ส่งราคา Bid/Ask ที่ตรวจสอบได้",
     QUOTE_STALE: "ราคาล่าสุดเก่าเกินกำหนด",
     FIXED_LOT_CONFIGURATION_INVALID: "ค่า Fixed Lot ไม่ถูกต้อง",
+    MONEY_MANAGEMENT_MODE_INVALID: "โหมด Money Management ต้องเป็น Fixed Lot หรือ Risk Percent",
+    RISK_CAPITAL_BASE_INVALID: "ฐานคำนวณความเสี่ยงต้องเป็น Balance หรือ Equity",
+    RISK_PERCENT_INVALID_OR_ABOVE_HARD_CAP: "Risk Percent ไม่ถูกต้องหรือสูงกว่าเพดานความเสี่ยงต่อครั้ง",
+    ESTIMATED_COMMISSION_PER_LOT_INVALID: "ค่าธรรมเนียมสำรองต่อ Lot ไม่ถูกต้อง",
+    BROKER_VOLUME_LIMITS_UNAVAILABLE: "EA อ่าน Min/Max/Step Lot จาก Broker ไม่ได้",
+    BROKER_VOLUME_METADATA_INVALID: "EA อ่าน Min/Max/Step Lot จาก Broker ไม่ได้",
+    MANAGED_LOT_CAP_BELOW_BROKER_MINIMUM: "เพดาน Lot ของ EA ต่ำกว่า Min Lot ของ Broker",
+    FIXED_LOT_OUTSIDE_BROKER_LIMITS: "Fixed Lot อยู่นอก Min/Max Lot ของ Broker",
+    FIXED_LOT_OUTSIDE_BROKER_RANGE: "Fixed Lot อยู่นอก Min/Max Lot ของ Broker",
+    FIXED_LOT_NOT_ON_BROKER_STEP: "Fixed Lot ไม่ตรงกับ Lot Step ของ Broker",
+    RISK_CAPITAL_UNAVAILABLE: "EA อ่าน Balance/Equity สำหรับคำนวณความเสี่ยงไม่ได้",
+    RISK_CAPITAL_NOT_AVAILABLE: "EA อ่าน Balance/Equity สำหรับคำนวณความเสี่ยงไม่ได้",
+    BROKER_RISK_METADATA_UNAVAILABLE: "EA อ่านข้อมูล Tick Size/Tick Value สำหรับคำนวณความเสี่ยงไม่ได้",
+    BROKER_RISK_METADATA_INVALID: "EA อ่านข้อมูล Tick Size/Tick Value สำหรับคำนวณความเสี่ยงไม่ได้",
+    RISK_PRICE_GEOMETRY_INVALID: "ราคาเข้าและ Stop Loss ไม่สร้างระยะความเสี่ยงที่คำนวณได้",
+    RISK_LOT_CALCULATION_INVALID: "EA คำนวณ Lot ตามงบความเสี่ยงไม่สำเร็จ",
+    RISK_STOP_LOSS_CALCULATION_FAILED: "EA คำนวณมูลค่าขาดทุนถึง Stop Loss ไม่สำเร็จ",
+    BROKER_VOLUME_LIMIT_UNAVAILABLE: "EA อ่าน Volume Limit ของสัญลักษณ์ไม่ได้",
+    BROKER_VOLUME_EXPOSURE_UNAVAILABLE: "EA อ่าน Volume ที่เปิดอยู่ของสัญลักษณ์ไม่ได้",
+    FIXED_LOT_EXCEEDS_AVAILABLE_VOLUME_LIMIT: "Fixed Lot เกิน Volume ที่ Broker ยังอนุญาต",
+    RISK_BUDGET_INVALID: "งบความเสี่ยงที่คำนวณได้ไม่ถูกต้อง",
+    RISK_VOLUME_BELOW_BROKER_MINIMUM: "Lot ตาม Risk Percent ต่ำกว่า Min Lot ของ Broker จึงไม่เปิด Order",
+    RISK_ESTIMATE_BELOW_WIRE_MINIMUM: "เงินเสี่ยงที่คำนวณได้เล็กเกินกว่าจะบันทึกและตรวจสอบอย่างปลอดภัย จึงไม่เปิด Order",
+    ORDER_VOLUME_OUTSIDE_BROKER_LIMITS: "Lot ที่คำนวณได้อยู่นอก Min/Max ของ Broker",
+    ORDER_VOLUME_NOT_ON_BROKER_STEP: "Lot ที่คำนวณได้ไม่ตรง Lot Step ของ Broker",
+    ORDER_VOLUME_EXCEEDS_MANAGED_LOT_CAP: "Lot ที่คำนวณได้เกินเพดาน Lot ของ EA",
+    BROKER_RISK_CALCULATION_FAILED: "Broker API คำนวณมูลค่าความเสี่ยงไม่สำเร็จ",
+    BROKER_MARGIN_CALCULATION_FAILED_OR_INSUFFICIENT: "คำนวณ Margin ไม่สำเร็จหรือ Free Margin ไม่เพียงพอ",
+    BROKER_MARGIN_METADATA_INVALID: "EA อ่านข้อมูล Margin ของ Broker ไม่ได้",
+    FREE_MARGIN_CHECK_FAILED: "EA ตรวจ Free Margin ก่อนเปิด Order ไม่สำเร็จ",
+    NOT_ENOUGH_FREE_MARGIN: "Free Margin ไม่เพียงพอสำหรับ Lot ที่คำนวณได้",
+    PROJECTED_MARGIN_LEVEL_TOO_LOW: "Margin Level หลังเปิด Order จะต่ำกว่าเกณฑ์ที่กำหนด",
+    ORDER_SEND_INVALID_VOLUME_NO_RETRY: "Broker ปฏิเสธ Volume และ EA จะไม่ส่งคำสั่งซ้ำ",
+    MIN_REWARD_RISK_NOT_MET: "Reward/Risk ต่ำกว่าเกณฑ์ขั้นต่ำของ EA",
+    PROPOSED_VOLUME_INVALID: "Lot ที่เสนอไม่ผ่านการตรวจสอบ",
+    PROPOSED_LOT_INVALID: "Lot ที่คำนวณได้ไม่ผ่านการตรวจสอบ",
+    RESOLVED_LOT_INVALID: "Lot หลังปัดตาม Broker ไม่ผ่านการตรวจสอบ",
+    RESOLVED_LOT_OUTSIDE_BROKER_RANGE: "Lot หลังปัดอยู่นอก Min/Max ของ Broker",
+    RISK_ESTIMATE_INVALID: "ค่าประมาณเงินที่เสี่ยงไม่ถูกต้อง",
+    MAX_LOSS_PER_TRADE_EXCEEDED: "ความเสี่ยงถึง Stop Loss เกินเพดานต่อรายการ",
+    RISK_PERCENT_BUDGET_EXCEEDED: "ความเสี่ยงถึง Stop Loss เกินเปอร์เซ็นต์ที่กำหนด",
     MANAGED_POSITION_LIMIT_REACHED: "จำนวน Position ถึงขีดจำกัด",
     MAX_MANAGED_POSITIONS_REACHED: "จำนวน Position ถึงขีดจำกัด",
     MANAGED_LOT_LIMIT_REACHED: "ปริมาณ Lot ถึงขีดจำกัด",
@@ -13617,11 +14144,14 @@ function signalExecutionGuardReasonLabel(value) {
     DAILY_LOSS_LIMIT_LATCHED: "ขาดทุนวันนี้ถึงขีดจำกัดและ EA ล็อกการส่งคำสั่งแล้ว",
     ACCOUNT_DRAWDOWN_LIMIT_REACHED: "Drawdown ของบัญชีถึงขีดจำกัด",
     ACCOUNT_EQUITY_DRAWDOWN_LIMIT_REACHED: "Drawdown ของบัญชีถึงขีดจำกัด",
+    HISTORY_TELEMETRY_UNAVAILABLE: "MT5 อ่านประวัติการเทรดเพื่อคำนวณ Risk Cap ไม่ได้ ระบบจึงหยุดแบบปลอดภัย",
+    POSITION_TELEMETRY_UNAVAILABLE: "MT5 อ่าน Position และ Lot ปัจจุบันไม่ได้ ระบบจึงหยุดแบบปลอดภัย",
+    SINGLE_HOST_LIVE_ACK_REQUIRED: "MT5 LIVE ยังไม่เปิด เพราะต้องยืนยันว่าใช้บัญชีนี้บน Windows user และเครื่อง/VPS เดียวเท่านั้น",
     LIVE_NOT_ARMED: "ยังไม่ได้เปิด Live Armed ที่ EA",
-    LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT: "EA อยู่โหมด LIVE แต่ MT4 เป็นบัญชี Demo ให้เปลี่ยน EA เป็น DEMO หรือใช้บัญชีจริง",
-    DEMO_MODE_REQUIRES_DEMO_ACCOUNT: "EA อยู่โหมด DEMO แต่ MT4 เป็นบัญชีจริง ให้เปลี่ยน EA เป็น LIVE/SHADOW หรือใช้บัญชี Demo",
-    ACCOUNT_IDENTITY_UNAVAILABLE: "EA รุ่นเดิมยังไม่รายงานประเภทบัญชี กรุณา Refresh หรือถอดแล้วลาก MetafxHQTradeGateway v2.11 ลงกราฟใหม่",
-    GATEWAY_STATUS_ACCOUNT_IDENTITY_UNAVAILABLE: "EA รุ่นเดิมยังไม่รายงานประเภทบัญชี กรุณา Refresh หรือถอดแล้วลาก MetafxHQTradeGateway v2.11 ลงกราฟใหม่",
+    LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT: "EA อยู่โหมด LIVE แต่ Terminal ที่เลือกเป็นบัญชี Demo ให้เปลี่ยน EA เป็น DEMO หรือใช้บัญชีจริง",
+    DEMO_MODE_REQUIRES_DEMO_ACCOUNT: "EA อยู่โหมด DEMO แต่ Terminal ที่เลือกเป็นบัญชีจริง ให้เปลี่ยน EA เป็น LIVE/SHADOW หรือใช้บัญชี Demo",
+    ACCOUNT_IDENTITY_UNAVAILABLE: "EA รุ่นเดิมยังไม่รายงานประเภทบัญชี กรุณา Refresh หรือติด EA Gateway รุ่นล่าสุดที่ตรงกับ MT4 / MT5 ใหม่",
+    GATEWAY_STATUS_ACCOUNT_IDENTITY_UNAVAILABLE: "EA รุ่นเดิมยังไม่รายงานประเภทบัญชี กรุณา Refresh หรือติด EA Gateway รุ่นล่าสุดที่ตรงกับ MT4 / MT5 ใหม่",
     SIGNING_KEY_NOT_READY: "EA ยังเปิดใช้ Key สำหรับตรวจลายเซ็นไม่ได้",
     LIVE_SIGNING_KEY_NOT_PINNED: "โหมด Live ยังไม่ได้ปักหมุด Key ID ที่เชื่อถือใน EA",
     SIGNING_KEY_MISMATCH: "Key ID ของ Backend และ EA ไม่ตรงกัน",
@@ -13629,7 +14159,7 @@ function signalExecutionGuardReasonLabel(value) {
     SIGNATURE_INVALID: "ลายเซ็นคำสั่งไม่ถูกต้อง จึงถูก EA ปฏิเสธ",
     SIGNATURE_VERIFICATION_FAILED: "EA ตรวจลายเซ็นคำสั่งไม่ผ่าน",
     SIGNED_ENVELOPE_INVALID: "ซองคำสั่งที่ลงลายเซ็นมีรูปแบบไม่ถูกต้อง",
-    EA_TRADING_NOT_ALLOWED: "MT4 ยังไม่อนุญาตให้ EA ส่งคำสั่ง",
+    EA_TRADING_NOT_ALLOWED: "Terminal ที่เลือกยังไม่อนุญาตให้ EA ส่งคำสั่ง",
     EXECUTION_UNKNOWN: "EA ยังยืนยันผลการส่งคำสั่งไม่ได้ ต้องตรวจและกู้สถานะก่อนส่งซ้ำ",
     ACK_TIMEOUT: "หมดเวลารอ ACK จาก EA",
     PREVIOUS_COMMAND_UNRESOLVED: "คำสั่งก่อนหน้ายังไม่ทราบผล ระบบไม่ส่งซ้ำ",
@@ -13645,12 +14175,12 @@ function signalExecutionGuardReasonLabel(value) {
     EXECUTION_QUOTE_STALE_BEFORE_PUBLISH: "ราคาก่อน Publish เก่าเกินกำหนด • Backend ไม่ส่ง Command",
     EXECUTION_QUOTE_MARKET_CLOSED_BEFORE_PUBLISH: "ตลาดปิดอยู่ก่อน Publish • Backend ไม่ส่ง Command",
     EXECUTION_PROTECTIVE_PLAN_INVALID_BEFORE_PUBLISH: "SL/TP ไม่ผ่านการตรวจทิศทางก่อน Publish • Backend ไม่ส่ง Command",
-    TERMINAL_SELECTION_CHANGED_BEFORE_PUBLISH: "เป้าหมาย MT4 เปลี่ยนก่อน Publish • Backend ไม่ส่ง Command",
+    TERMINAL_SELECTION_CHANGED_BEFORE_PUBLISH: "เป้าหมาย MT4 / MT5 เปลี่ยนก่อน Publish • Backend ไม่ส่ง Command",
     ANALYSIS_QUOTE_TELEMETRY_UNAVAILABLE_BEFORE_PUBLISH: "ไม่มีราคา Bid/Ask ที่ตรวจสอบได้ก่อน Publish • Backend ไม่ส่ง Command",
     EXECUTION_QUOTE_TELEMETRY_UNAVAILABLE_BEFORE_PUBLISH: "ไม่มีราคา Bid/Ask ที่ตรวจสอบได้ก่อน Publish • Backend ไม่ส่ง Command",
     ANALYSIS_QUOTE_TELEMETRY_UNAVAILABLE: "ไม่มีราคา Bid/Ask ที่ตรวจสอบได้สำหรับรอบวิเคราะห์ • Backend ไม่ส่ง Command",
     EXECUTION_QUOTE_TELEMETRY_UNAVAILABLE: "ไม่มีราคา Bid/Ask ที่ตรวจสอบได้ก่อนส่งคำสั่ง • Backend ไม่ส่ง Command",
-    AUDIT_ONLY_BACKLOG_NEVER_DISPATCHES: "รอบนี้เป็น Audit-only • ไม่ส่งคำสั่งย้อนหลังไป MT4",
+    AUDIT_ONLY_BACKLOG_NEVER_DISPATCHES: "รอบนี้เป็น Audit-only • ไม่ส่งคำสั่งย้อนหลังไปยัง EA",
     NO_TRADE: "มติ NO TRADE จึงไม่มีคำสั่งไปยัง EA",
   };
   return labels[code]
@@ -13665,28 +14195,90 @@ function signalExecutionGuardRecoveryLabel(value) {
   const code = String(value || "").trim().toUpperCase();
   const recovery = {
     READY: "ไม่ต้องแก้ไข EA พร้อมตรวจคำสั่งรอบใหม่",
-    STARTING: "รอให้ EA เขียน Snapshot และสถานะรอบแรก แล้วกดตรวจข้อมูล MT4 ใหม่",
+    STARTING: "รอให้ EA เขียน Snapshot และสถานะรอบแรก แล้วกดตรวจข้อมูล Terminal ใหม่",
     TERMINAL_NOT_CONNECTED: "เข้าสู่ระบบ Broker ให้สำเร็จ และตรวจว่าราคาใน Market Watch เคลื่อนไหว",
     QUOTE_NOT_AVAILABLE: "เปิด Market Watch ให้มีราคา Bid/Ask แล้วรอ Snapshot รอบใหม่",
     QUOTE_NOT_OBSERVED: "หากตลาดปิดให้รอ Tick แรกหลังตลาดเปิด หากตลาดเปิดอยู่ให้ตรวจ Market Watch ว่าราคาเคลื่อนไหว และตรวจว่า EA อยู่บนกราฟ Symbol กับ Timeframe ที่อนุญาต แล้วรอ Snapshot รอบใหม่",
     QUOTE_STALE: "ตรวจอินเทอร์เน็ตและการเชื่อมต่อ Broker แล้วรอราคาและ Snapshot รอบใหม่",
     KILL_SWITCH_ACTIVE: "ตรวจสาเหตุที่เปิด Kill Switch ก่อน แล้วจึงปลดจาก EA เมื่อปลอดภัย",
     FIXED_LOT_CONFIGURATION_INVALID: "แก้ FixedLot ใน EA ให้มากกว่า 0 และไม่เกินเพดาน Lot ที่กำหนด",
+    MONEY_MANAGEMENT_MODE_INVALID: "เลือก MoneyManagementMode เป็น FIXED_LOT หรือ RISK_PERCENT ที่ EA",
+    RISK_CAPITAL_BASE_INVALID: "เลือก RiskCapitalBase เป็น EQUITY หรือ BALANCE ที่ EA",
+    RISK_PERCENT_INVALID_OR_ABOVE_HARD_CAP: "ตั้ง RiskPercent ให้มากกว่า 0 และไม่เกิน MaxLossPerTradePercent",
+    ESTIMATED_COMMISSION_PER_LOT_INVALID: "ตั้ง EstimatedCommissionPerLot เป็นค่าที่ไม่ติดลบตามหน่วยเงินบัญชี",
+    BROKER_VOLUME_LIMITS_UNAVAILABLE: "ตรวจ Symbol/การเชื่อมต่อ Broker แล้วรอให้ EA อ่าน Min/Max/Step Lot ได้ครบ",
+    BROKER_VOLUME_METADATA_INVALID: "ตรวจ Symbol/การเชื่อมต่อ Broker แล้วรอให้ EA อ่าน Min/Max/Step Lot ได้ครบ",
+    MANAGED_LOT_CAP_BELOW_BROKER_MINIMUM: "เพิ่ม MaxManagedTotalLots ให้ไม่น้อยกว่า Min Lot ของ Broker หรือเปลี่ยน Symbol/บัญชี",
+    FIXED_LOT_OUTSIDE_BROKER_LIMITS: "ตั้ง FixedLot ให้อยู่ในช่วง Min/Max Lot ของ Broker",
+    FIXED_LOT_OUTSIDE_BROKER_RANGE: "ตั้ง FixedLot ให้อยู่ในช่วง Min/Max Lot ของ Broker",
+    FIXED_LOT_NOT_ON_BROKER_STEP: "ตั้ง FixedLot ให้หารลงตัวตาม Lot Step ของ Broker",
+    RISK_CAPITAL_UNAVAILABLE: "ตรวจว่า Terminal อ่าน Balance และ Equity ได้ แล้วรอ Snapshot ใหม่",
+    RISK_CAPITAL_NOT_AVAILABLE: "ตรวจว่า Terminal อ่าน Balance และ Equity ได้ แล้วรอ Snapshot ใหม่",
+    BROKER_RISK_METADATA_UNAVAILABLE: "ตรวจ Symbol และการเชื่อมต่อ Broker; หากยังไม่หายให้ดู Experts/Journal",
+    BROKER_RISK_METADATA_INVALID: "ตรวจ Symbol และการเชื่อมต่อ Broker; หากยังไม่หายให้ดู Experts/Journal",
+    RISK_PRICE_GEOMETRY_INVALID: "ตรวจว่า SL อยู่คนละฝั่งกับราคาเข้าและมีระยะมากกว่าศูนย์ แล้วเริ่มรอบใหม่",
+    RISK_LOT_CALCULATION_INVALID: "ตรวจ RiskPercent, SL, Tick Size/Tick Value และค่าธรรมเนียม แล้วเริ่มรอบใหม่",
+    RISK_STOP_LOSS_CALCULATION_FAILED: "ตรวจว่า SL อยู่ถูกฝั่งและ Symbol มีราคาสด แล้วเริ่มรอบใหม่",
+    RISK_VOLUME_BELOW_BROKER_MINIMUM: "เพิ่ม RiskPercent/ระยะ SL อย่างระมัดระวังหรือใช้บัญชีที่รองรับ Min Lot เล็กลง; ระบบจะไม่ฝืนเปิด Min Lot",
+    RISK_ESTIMATE_BELOW_WIRE_MINIMUM: "ใช้ยอดเงิน/ความเสี่ยงที่มากพอให้ระบบบันทึกหลักฐานได้อย่างน้อย 0.00000001 หน่วยเงินของบัญชี แล้วเริ่มรอบใหม่",
+    BROKER_MARGIN_CALCULATION_FAILED_OR_INSUFFICIENT: "ลดความเสี่ยงหรือล็อต ตรวจ Leverage/Free Margin แล้วเริ่มรอบใหม่",
+    BROKER_MARGIN_METADATA_INVALID: "ตรวจ Symbol, Leverage และการเชื่อมต่อ Broker แล้วรอข้อมูล Margin รอบใหม่",
+    FREE_MARGIN_CHECK_FAILED: "ตรวจ Free Margin/Leverage และลด RiskPercent หรือ FixedLot ก่อนเริ่มรอบใหม่",
+    NOT_ENOUGH_FREE_MARGIN: "ลด RiskPercent หรือ FixedLot แล้วตรวจ Free Margin ก่อนเริ่มรอบใหม่",
+    PROJECTED_MARGIN_LEVEL_TOO_LOW: "ลด RiskPercent หรือ FixedLot ให้ Margin Level คาดการณ์ผ่านเกณฑ์ของ EA",
+    ORDER_SEND_INVALID_VOLUME_NO_RETRY: "ตรวจ Min/Max/Step Lot ในสถานะ EA และเริ่มรอบใหม่หลังแก้ค่าเท่านั้น",
+    MIN_REWARD_RISK_NOT_MET: "รอแผน SL/TP ใหม่ที่ Reward/Risk ผ่านเกณฑ์ แล้วเริ่มรอบใหม่",
+    RISK_PERCENT_BUDGET_EXCEEDED: "ลด RiskPercent หรือแก้ SL/ค่าธรรมเนียมสำรอง แล้วเริ่มรอบใหม่",
+    PROPOSED_LOT_INVALID: "ตรวจ RiskPercent/FixedLot และข้อมูล Lot ของ Broker แล้วเริ่มรอบใหม่",
+    RESOLVED_LOT_INVALID: "ตรวจ Min/Max/Step Lot ของ Broker แล้วเริ่มรอบใหม่",
+    RESOLVED_LOT_OUTSIDE_BROKER_RANGE: "ลด RiskPercent/FixedLot หรือเปลี่ยน Symbol/บัญชีที่รองรับ Lot ดังกล่าว",
+    MAX_LOSS_PER_TRADE_EXCEEDED: "ลด RiskPercent/FixedLot หรือเพิ่มระยะควบคุมที่เหมาะสมให้ไม่เกินเพดานต่อรายการ",
     EA_TRADING_NOT_ALLOWED: "เปิด AutoTrading และ Allow live trading ในคุณสมบัติ EA",
+    HISTORY_TELEMETRY_UNAVAILABLE: "ตรวจแท็บ Experts/Journal และประวัติบัญชีใน MT5 แล้วใช้ SHADOW หรือ DEMO จนกว่าข้อมูลประวัติจะอ่านได้ครบ",
+    POSITION_TELEMETRY_UNAVAILABLE: "ตรวจการเชื่อมต่อ Broker และแท็บ Experts/Journal แล้วรอให้ MT5 อ่าน Position ได้ครบก่อนเริ่มรอบใหม่",
+    SINGLE_HOST_LIVE_ACK_REQUIRED: "ตั้งค่า SingleHostLiveAcknowledged=true ใน EA เฉพาะเมื่อแน่ใจว่าบัญชีเดียวกันไม่ได้รัน EA นี้ใน Windows user อื่น เครื่องอื่น หรือ VPS อื่น",
     LIVE_NOT_ARMED: "เปิด LiveArmed ที่ EA เฉพาะเมื่อใช้บัญชีจริงและตรวจความเสี่ยงครบแล้ว",
     SIGNING_KEY_NOT_READY: "คัดลอก Key ID จาก Local Runner ไปใส่ TrustedSigningKeyId แล้วลาก EA ใหม่",
     LIVE_SIGNING_KEY_NOT_PINNED: "คัดลอก Key ID จาก Local Runner ไปใส่ TrustedSigningKeyId ของ EA",
     SIGNING_KEY_MISMATCH: "คัดลอก Key ID ล่าสุดจาก Local Runner ไปใส่ EA ให้ตรงกัน",
-    ACK_TIMEOUT: "ตรวจแท็บ Experts และ Journal ของ MT4 ก่อนสั่งรอบใหม่",
+    ACK_TIMEOUT: "ตรวจแท็บ Experts และ Journal ของ Terminal ที่เลือกก่อนสั่งรอบใหม่",
     PREVIOUS_COMMAND_UNRESOLVED: "ตรวจ ACK หรือสถานะ Order ของคำสั่งก่อนหน้าให้จบก่อนเริ่มรอบใหม่",
   };
   return recovery[code]
-    || "กดตรวจข้อมูล MT4 ใหม่ แล้วเปิดรายละเอียด EA หรือ Journal เพื่อดูสาเหตุล่าสุดก่อนเริ่มรอบใหม่";
+    || "กดตรวจข้อมูล Terminal ใหม่ แล้วเปิดรายละเอียด EA หรือ Journal เพื่อดูสาเหตุล่าสุดก่อนเริ่มรอบใหม่";
+}
+
+function signalEffectiveExecutionGuardReason(runtime = {}) {
+  const gatewayMode = safeDashboardDisplayText(runtime.gatewayMode, "").trim().toLowerCase();
+  const liveBlockReason = safeDashboardDisplayText(runtime.liveBlockReason, "").trim();
+  const selectedPlatform = safeDashboardDisplayText(runtime.selectedPlatform, "").trim().toUpperCase();
+  if (
+    gatewayMode === "live"
+    && selectedPlatform === "MT5"
+    && (
+      runtime.singleHostLiveAcknowledged !== true
+      || runtime.liveSafetyScope !== "single_windows_user_file_common_only"
+    )
+  ) return "SINGLE_HOST_LIVE_ACK_REQUIRED";
+  if (gatewayMode === "live" && liveBlockReason) return liveBlockReason;
+  return safeDashboardDisplayText(runtime.gatewayExecutionGuardReason, "").trim();
 }
 
 function signalExecutionGuardSummary(runtime = {}) {
+  const selectedPlatform = String(runtime.selectedPlatform || "").trim().toUpperCase();
+  const platformLabel = ["MT4", "MT5"].includes(selectedPlatform)
+    ? selectedPlatform
+    : "MT4 / MT5";
+  const effectiveReason = signalEffectiveExecutionGuardReason(runtime);
+  if (
+    String(runtime.gatewayMode || "").trim().toLowerCase() === "live"
+    && effectiveReason
+    && effectiveReason.toUpperCase() !== "READY"
+  ) {
+    return `${signalExecutionGuardReasonLabel(effectiveReason)} • วิธีแก้: ${signalExecutionGuardRecoveryLabel(effectiveReason)}`;
+  }
   if (runtime.gatewayConnected !== true) {
-    return "ยังไม่เชื่อม EA • วิธีแก้: ใส่ Channel ID ให้ตรงกัน แล้วกดตรวจข้อมูล MT4 ใหม่";
+    return `ยังไม่เชื่อม EA • วิธีแก้: ใส่ Channel ID ให้ตรงกัน แล้วกดตรวจข้อมูล ${platformLabel} ใหม่`;
   }
   if (runtime.gatewayExecutionGuardReady === true) {
     if (String(runtime.gatewayMode || "").toLowerCase() === "shadow") {
@@ -13694,7 +14286,7 @@ function signalExecutionGuardSummary(runtime = {}) {
     }
     return "Execution Guard พร้อมรับคำสั่งจากรอบวิเคราะห์ใหม่";
   }
-  return `${signalExecutionGuardReasonLabel(runtime.gatewayExecutionGuardReason)} • วิธีแก้: ${signalExecutionGuardRecoveryLabel(runtime.gatewayExecutionGuardReason)}`;
+  return `${signalExecutionGuardReasonLabel(effectiveReason)} • วิธีแก้: ${signalExecutionGuardRecoveryLabel(effectiveReason)}`;
 }
 
 const SIGNAL_SIGNING_KEY_ID_PATTERN = /^hk-[0-9a-f]{64}$/;
@@ -13752,6 +14344,60 @@ function signalSigningKeyCopyState(runtime = {}) {
   };
 }
 
+function signalLiveAccountStatus(runtime = {}, modeAccount = signalGatewayModeAccountStatus(runtime)) {
+  const guardReady = runtime.gatewayExecutionGuardReady === true;
+  const signedCommandReady = runtime.backendSignedCommandVerificationAvailable === true
+    && runtime.signedCommandVerificationAvailable === true
+    && runtime.signingKeyMatch === true;
+  const signedLiveReady = runtime.signedCommandRequiredForLive !== true
+    || (signedCommandReady && runtime.signingKeyPinned === true);
+  const effectiveGuardReason = signalEffectiveExecutionGuardReason(runtime);
+  const explicitLiveBlockReason = safeDashboardDisplayText(runtime.liveBlockReason, "").trim();
+  const mt5SingleHostLiveReady = String(runtime.selectedPlatform || "").trim().toUpperCase() !== "MT5"
+    || (
+      runtime.singleHostLiveAcknowledged === true
+      && runtime.liveSafetyScope === "single_windows_user_file_common_only"
+    );
+
+  if (modeAccount.mismatch) return modeAccount.value;
+  if (
+    runtime.gatewayMode === "live"
+    && explicitLiveBlockReason
+    && explicitLiveBlockReason.toUpperCase() !== "READY"
+  ) {
+    return `ยังไม่เทรดจริง • ${signalExecutionGuardReasonLabel(effectiveGuardReason)} • วิธีแก้: ${signalExecutionGuardRecoveryLabel(effectiveGuardReason)}`;
+  }
+  if (runtime.liveOrderExecutionAvailable && guardReady && mt5SingleHostLiveReady) {
+    return String(runtime.selectedPlatform || "").trim().toUpperCase() === "MT5"
+      ? "พร้อมส่ง Order บัญชีจริง • ใช้ได้เฉพาะ Windows user และเครื่อง/VPS เดียว"
+      : "พร้อมส่ง Order บัญชีจริง";
+  }
+  if (runtime.gatewayMode === "shadow") return "ยังไม่เทรดจริง • EA อยู่ SHADOW";
+  if (runtime.gatewayMode === "demo") return "ยังไม่เทรดจริง • EA อยู่ DEMO";
+  if (
+    runtime.gatewayMode === "live"
+    && effectiveGuardReason
+    && effectiveGuardReason.toUpperCase() !== "READY"
+  ) {
+    return `ยังไม่เทรดจริง • ${signalExecutionGuardReasonLabel(effectiveGuardReason)} • วิธีแก้: ${signalExecutionGuardRecoveryLabel(effectiveGuardReason)}`;
+  }
+  if (!runtime.gatewayConnected) return "ยังไม่เชื่อม EA";
+  if (runtime.gatewayMode === "live" && !runtime.gatewayLiveArmed) {
+    return "ยังไม่เทรดจริง • ต้องเปิด LiveArmed ที่ EA";
+  }
+  if (runtime.gatewayMode === "live" && !mt5SingleHostLiveReady) {
+    return `ยังไม่เทรดจริง • ${signalExecutionGuardReasonLabel("SINGLE_HOST_LIVE_ACK_REQUIRED")} • วิธีแก้: ${signalExecutionGuardRecoveryLabel("SINGLE_HOST_LIVE_ACK_REQUIRED")}`;
+  }
+  if (runtime.gatewayMode === "live" && runtime.signingKeyPinned !== true) {
+    return "ยังไม่เทรดจริง • ต้องปักหมุด Trusted Signing Key ID ที่ EA";
+  }
+  if (runtime.gatewayMode === "live" && runtime.signingKeyMatch !== true) {
+    return "ยังไม่เทรดจริง • Key ID ของ EA และ Local Runner ไม่ตรงกัน";
+  }
+  if (!signedLiveReady) return "ยังไม่เทรดจริง • ตัวตรวจลายเซ็น Live ยังไม่พร้อม";
+  return "ยังไม่พร้อม • ตรวจระบบป้องกันของ EA";
+}
+
 function renderSignalRiskList(container, runtime, managedOrderLimit = null) {
   if (!container) return;
   const telemetry = runtime.gatewayRiskTelemetry || {};
@@ -13764,29 +14410,15 @@ function renderSignalRiskList(container, runtime, managedOrderLimit = null) {
   const signedCommandReady = runtime.backendSignedCommandVerificationAvailable === true
     && runtime.signedCommandVerificationAvailable === true
     && runtime.signingKeyMatch === true;
-  const signedLiveReady = runtime.signedCommandRequiredForLive !== true
-    || (signedCommandReady && runtime.signingKeyPinned === true);
   const signingKey = signalSigningKeyCopyState(runtime);
   const modeAccount = signalGatewayModeAccountStatus(runtime);
-  const liveAccountStatus = modeAccount.mismatch
-    ? modeAccount.value
-    : runtime.liveOrderExecutionAvailable && guardReady
-    ? "พร้อมส่ง Order บัญชีจริง"
-    : !runtime.gatewayConnected
-      ? "ยังไม่เชื่อม EA"
-      : runtime.gatewayMode === "shadow"
-        ? "ยังไม่เทรดจริง • EA อยู่ SHADOW"
-        : runtime.gatewayMode === "demo"
-          ? "ยังไม่เทรดจริง • EA อยู่ DEMO"
-          : runtime.gatewayMode === "live" && !runtime.gatewayLiveArmed
-            ? "ยังไม่เทรดจริง • ต้องเปิด LiveArmed ที่ EA"
-            : runtime.gatewayMode === "live" && runtime.signingKeyPinned !== true
-              ? "ยังไม่เทรดจริง • ต้องปักหมุด Trusted Signing Key ID ที่ EA"
-              : runtime.gatewayMode === "live" && runtime.signingKeyMatch !== true
-                ? "ยังไม่เทรดจริง • Key ID ของ EA และ Local Runner ไม่ตรงกัน"
-                : !signedLiveReady
-                  ? "ยังไม่เทรดจริง • ตัวตรวจลายเซ็น Live ยังไม่พร้อม"
-                  : "ยังไม่พร้อม • ตรวจระบบป้องกันของ EA";
+  const liveAccountStatus = signalLiveAccountStatus(runtime, modeAccount);
+  const sizing = signalGatewaySizingSummary(runtime);
+  const selectedPlatform = String(runtime.selectedPlatform || "").trim().toUpperCase();
+  const mt5SingleHostLiveReady = runtime.singleHostLiveAcknowledged === true
+    && runtime.liveSafetyScope === "single_windows_user_file_common_only"
+    && telemetry.concurrencyBoundary === "same_windows_user_file_common"
+    && telemetry.crossVpsDistributedLock === false;
   const effectiveManagedLimit = managedOrderLimit?.effectiveMaxManagedOrders ?? null;
   const managedCurrent = managedOrderLimit?.currentManagedPositions
     ?? telemetry.currentManagedPositions;
@@ -13801,8 +14433,26 @@ function renderSignalRiskList(container, runtime, managedOrderLimit = null) {
         ? (runtime.gatewayMode === "shadow" ? "SHADOW • ไม่ส่ง Order" : runtime.gatewayMode.toUpperCase())
         : "ยังไม่เชื่อม",
     ],
+    [
+      "Money Management ของ EA",
+      runtime.gatewayPositionSizingMode === "FIXED_LOT"
+        ? runtime.gatewayFixedLot !== null
+        : runtime.gatewayPositionSizingMode === "RISK_PERCENT"
+          ? runtime.gatewayRiskPercent !== null
+          : false,
+      sizing.value,
+    ],
     ...(modeAccount.observed
       ? [["โหมด EA / ประเภทบัญชี", modeAccount.ready, modeAccount.value]]
+      : []),
+    ...(selectedPlatform === "MT5"
+      ? [[
+          "ขอบเขตความปลอดภัย MT5 LIVE",
+          mt5SingleHostLiveReady,
+          mt5SingleHostLiveReady
+            ? "ยืนยันแล้ว • ใช้ได้เฉพาะ Windows user เดียวบนเครื่อง/VPS เดียว • ห้ามรันบัญชีเดียวกันซ้ำที่ Windows user อื่น เครื่องอื่น หรือ VPS อื่น"
+            : "ต้องยืนยัน SingleHostLiveAcknowledged ที่ EA • ห้ามใช้บัญชีเดียวกันหลาย Windows user/เครื่อง/VPS",
+        ]]
       : []),
     ["Execution Guard ของ EA", guardReady, signalExecutionGuardSummary(runtime)],
     ["Position ของ Managed Magic ทั้งบัญชี", managedCurrent !== null, currentVsMax(managedCurrent, telemetry.maxManagedPositions)],
@@ -14138,7 +14788,7 @@ function signalDeepDataStatusMessage(context = signalDeepDisplayContext()) {
     return signalDeepUnavailableReasonLabel(data);
   }
   if (data.fresh !== true) {
-    return "โหลด Snapshot เก่าสำหรับตรวจสอบได้ แต่ยังใช้เริ่มรอบวิเคราะห์ AI ใหม่ไม่ได้ กรุณารอข้อมูล MT4 ล่าสุด";
+    return "โหลด Snapshot เก่าสำหรับตรวจสอบได้ แต่ยังใช้เริ่มรอบวิเคราะห์ AI ใหม่ไม่ได้ กรุณารอข้อมูลจาก Terminal ที่เลือกล่าสุด";
   }
   return "ข้อมูลชุดนี้มาจาก Snapshot ที่ Local Runner ยืนยันแล้ว";
 }
@@ -14471,7 +15121,7 @@ function renderSignalPriceActionDeepPanel() {
   if (!chartModel.bars.length) {
     body.appendChild(createSignalDeepEmptyState(
       "Snapshot นี้ไม่มีแท่ง OHLC ที่ใช้วาดกราฟ",
-      "ตรวจตัวอ่าน MT4 และขอบเขต analysisBarCount ที่ Backend รายงาน",
+      "ตรวจตัวอ่าน MT4 / MT5 และขอบเขต analysisBarCount ที่ Backend รายงาน",
     ));
   } else {
     const chartCard = document.createElement("section");
@@ -15561,7 +16211,7 @@ function renderSignalLivePanel(report = {}) {
         <section class="signal-council-card signal-order-card">
           <h4>MetafxHQ AI Council EA</h4>
           <button type="button" disabled data-signal-gateway-action>รอเชื่อม EA</button>
-          <p data-signal-gateway-detail>Fixed Lot และโหมด Shadow / Demo / Live ตั้งค่าที่ EA เท่านั้น</p>
+          <p data-signal-gateway-detail>Fixed Lot หรือ Risk Percent และโหมด Shadow / Demo / Live ตั้งค่าที่ EA เท่านั้น</p>
         </section>
       </aside>
     </div>
@@ -15634,12 +16284,14 @@ function renderSignalLivePanel(report = {}) {
     gatewayAction.dataset.ready = runtime.gatewayExecutionGuardReady && runtime.gatewayMode !== "shadow" ? "true" : "false";
   }
   if (gatewayDetail) {
-    const fixedLot = runtime.gatewayFixedLot === null
-      ? "Fixed Lot ตั้งค่าที่ EA"
-      : `Fixed Lot ${runtime.gatewayFixedLot}`;
+    const sizing = signalGatewaySizingSummary(runtime);
     const ackStatus = safeDashboardDisplayText(runtime.gatewayLastAck?.status, "ยังไม่มี ACK");
+    const ackSizing = signalGatewayAckSizingSummary(
+      runtime.gatewayLastAck,
+      runtime.gatewayAccountCurrency,
+    );
     const modeAccount = signalGatewayModeAccountStatus(runtime);
-    gatewayDetail.textContent = `${fixedLot} • ${signalExecutionGuardSummary(runtime)} • ${ackStatus}${modeAccount.mismatch ? ` • ${modeAccount.value}` : ""}`;
+    gatewayDetail.textContent = `${sizing.value} • ${signalExecutionGuardSummary(runtime)} • ${ackStatus}${ackSizing ? ` • ${ackSizing}` : ""}${modeAccount.mismatch ? ` • ${modeAccount.value}` : ""}`;
   }
 }
 
@@ -16763,7 +17415,7 @@ function signalHistoryOrderState(source, identity, orderItems = []) {
       closed && Number.isFinite(Number(matchedOrder.closedPnl))
         ? `P/L ${signalOrderSignedPnl(matchedOrder.closedPnl)}`
         : "",
-      closedAtBroker ? `ปิดเวลา MT4 ${closedAtBroker}` : "",
+      closedAtBroker ? `ปิดเวลา Broker ${closedAtBroker}` : "",
     ].filter(Boolean);
     return {
       tone: matchedOrder.verified === true ? "confirmed" : "attention",
@@ -17289,7 +17941,7 @@ function createSignalAnalysisHistoryRow(round) {
     timeDetail.textContent = `รอบสิ้นสุด • ได้ผล ${round.completeCount}/3`;
   } else {
     timeDetail.textContent = brokerTime
-      ? `แท่ง MT4 • ${round.completeCount}/3 ครบ`
+      ? `เวลาแท่ง Broker • ${round.completeCount}/3 ครบ`
       : `เวลาที่ Backend บันทึก • ${round.completeCount}/3 ครบ`;
   }
   if (round.roundTerminalPartial && (round.skippedCount || round.missingCount)) {
@@ -17379,7 +18031,7 @@ function createSignalOrderHistoryRow(order) {
   const localTime = document.createElement("b");
   const broker = document.createElement("small");
   localTime.textContent = `เวลาไทย ${signalThaiDateTime(order.openedAt || order.createdAt)}`;
-  broker.textContent = brokerTime ? `เวลา MT4 ${brokerTime}` : "ไม่มีเวลา MT4 แยก";
+  broker.textContent = brokerTime ? `เวลา Broker ${brokerTime}` : "ไม่มีเวลา Broker แยก";
   openedAt.append(localTime, broker);
 
   side.textContent = sideValue;
@@ -17429,7 +18081,7 @@ function createSignalOrderHistoryRow(order) {
     const closedAtBroker = signalBrokerDateTime(order.closedAtBroker);
     outcome.textContent = [
       Number.isFinite(closedPnl) ? `P/L ${signalOrderSignedPnl(closedPnl)}` : "",
-      closedAtBroker ? `ปิดเวลา MT4 ${closedAtBroker}` : "",
+      closedAtBroker ? `ปิดเวลา Broker ${closedAtBroker}` : "",
     ].filter(Boolean).join(" • ");
   }
   evidence.append(status, ticket, mode, mission);
@@ -17508,7 +18160,7 @@ function renderSignalHistoryPanelLegacy(report = {}, { focusSearch = false } = {
         <div class="signal-order-history-list" data-signal-history-list role="list"></div>
       </div>
     </div>
-    <p class="signal-order-history-note">เวลาแถวแรกเป็นเวลาไทยจาก ACK ของ Backend ส่วน “เวลา MT4” เป็นนาฬิกา Broker และจะแสดงแยกโดยไม่เดาเขตเวลา</p>
+    <p class="signal-order-history-note">เวลาแถวแรกเป็นเวลาไทยจาก ACK ของ Backend ส่วน “เวลา Broker” มาจาก Terminal ที่เลือกและจะแสดงแยกโดยไม่เดาเขตเวลา</p>
     <details class="signal-analysis-history-details">
       <summary>ประวัติการวิเคราะห์และ Task สำหรับตรวจสอบเชิงเทคนิค (${allEntries.length} รายการ)</summary>
       <div class="signal-history-table signal-analysis-history-table">
@@ -17734,7 +18386,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
         <span data-signal-order-page-status></span>
         <button type="button" data-signal-order-more data-next-cursor="" hidden>แสดงเพิ่ม</button>
       </div>
-      <p class="signal-order-history-note">เวลาแถวแรกเป็นเวลาไทยจาก ACK ของ Backend ส่วน “เวลา MT4” เป็นนาฬิกา Broker และจะแสดงแยกโดยไม่เดาเขตเวลา</p>
+      <p class="signal-order-history-note">เวลาแถวแรกเป็นเวลาไทยจาก ACK ของ Backend ส่วน “เวลา Broker” มาจาก Terminal ที่เลือกและจะแสดงแยกโดยไม่เดาเขตเวลา</p>
     </section>
     <section id="signalAnalysisHistoryPanel" class="signal-history-subpanel" data-signal-history-panel="analysis" role="tabpanel" aria-labelledby="signalAnalysisHistoryTab" tabindex="0" ${activeHistoryTab === "analysis" ? "" : "hidden"}>
       <div class="signal-history-heading signal-analysis-history-heading">
@@ -17769,7 +18421,7 @@ function renderSignalHistoryPanel(report = {}, { focusSearch = false } = {}) {
         <span data-signal-analysis-page-status></span>
         <button type="button" data-signal-analysis-more data-next-cursor="" hidden>แสดงเพิ่ม</button>
       </div>
-      <p class="signal-order-history-note">เวลาแท่ง MT4 แสดงตามนาฬิกา Broker โดยไม่เดาเขตเวลา หาก Backend ไม่มีตัวตนแท่งจะแสดงเวลาที่บันทึกผลวิเคราะห์แทน</p>
+      <p class="signal-order-history-note">เวลาแท่งจาก MT4 หรือ MT5 แสดงตามนาฬิกา Broker โดยไม่เดาเขตเวลา หาก Backend ไม่มีตัวตนแท่งจะแสดงเวลาที่บันทึกผลวิเคราะห์แทน</p>
     </section>
   `;
   container.querySelector("[data-signal-history-read-title]").textContent = readTitle;
@@ -34000,14 +34652,97 @@ function setModalTab(tabName) {
   saveSessionSnapshot();
 }
 
+function renderAgentAttachmentComposer(subject) {
+  if (!subject || !els.modalAgentAttachmentComposer) return;
+  const profile = getAgentRuntimeProfile(subject.id);
+  const selectedThread = getSelectedAgentRuntimeThread(profile);
+  const policy = state.agentRuntime.status?.attachments;
+  const selectedModel = state.agentRuntime.models.find((item) => item.id === profile.model);
+  const modelSupportsImage = Array.isArray(selectedModel?.inputModalities)
+    && selectedModel.inputModalities.includes("image");
+  const inputReady = policy?.inputReady === true
+    && modelSupportsImage
+    && !profile.runtimeEndpointUnavailable
+    && selectedThread?.archived !== true;
+  const busy = state.agentChat.inFlight || profile.actionInFlight || profile.attachmentUploadInFlight;
+  if (els.modalAgentAttachButton) {
+    els.modalAgentAttachButton.disabled = !inputReady || busy;
+    els.modalAgentAttachButton.textContent = profile.attachmentUploadInFlight ? "กำลังอัปโหลด..." : "แนบรูป";
+    els.modalAgentAttachButton.title = inputReady
+      ? "เลือกไฟล์จากเครื่อง ไฟล์จะอัปโหลดเมื่อกดส่งเท่านั้น"
+      : modelSupportsImage
+        ? "Backend ยังไม่ยืนยัน Attachment API"
+        : "โมเดลที่เลือกยังไม่ยืนยันการรับรูปภาพ";
+  }
+  if (els.modalAgentAttachmentInput) {
+    els.modalAgentAttachmentInput.disabled = !inputReady || busy;
+    els.modalAgentAttachmentInput.accept = inputReady ? policy.acceptedExtensions.join(",") : "";
+  }
+  if (els.modalAgentAttachmentPolicy) {
+    els.modalAgentAttachmentPolicy.textContent = inputReady
+      ? `สูงสุด ${policy.maxFiles} ไฟล์ • ไฟล์ละไม่เกิน ${formatAgentAttachmentBytes(policy.maxBytes)} • ${policy.acceptedExtensions.join(", ")}`
+      : "Locked • รอ Backend ยืนยันชนิด ขนาด และช่องทางอัปโหลด";
+  }
+  if (!els.modalAgentAttachmentDrafts) return;
+  const drafts = profile.attachmentDrafts || [];
+  els.modalAgentAttachmentDrafts.replaceChildren();
+  els.modalAgentAttachmentDrafts.hidden = drafts.length === 0;
+  drafts.forEach((draft) => {
+    const card = document.createElement("div");
+    const preview = document.createElement("div");
+    const copy = document.createElement("div");
+    const name = document.createElement("strong");
+    const meta = document.createElement("small");
+    const remove = document.createElement("button");
+    card.className = "agent-attachment-draft";
+    card.setAttribute("role", "listitem");
+    preview.className = "agent-attachment-draft-preview";
+    if (draft.imagePreview && draft.previewUrl) {
+      const image = document.createElement("img");
+      image.src = draft.previewUrl;
+      image.alt = "";
+      preview.appendChild(image);
+    } else {
+      preview.textContent = agentAttachmentExtension(draft.name).replace(".", "").toUpperCase() || "FILE";
+      preview.setAttribute("aria-hidden", "true");
+    }
+    copy.className = "agent-attachment-draft-copy";
+    name.textContent = draft.name;
+    meta.textContent = `${draft.mediaType} • ${formatAgentAttachmentBytes(draft.byteSize)}`;
+    copy.append(name, meta);
+    remove.type = "button";
+    remove.className = "agent-attachment-remove";
+    remove.textContent = "นำออก";
+    remove.disabled = busy;
+    remove.setAttribute("aria-label", `นำ ${draft.name} ออกจากข้อความ`);
+    remove.addEventListener("click", () => removeAgentAttachmentDraft(subject, draft.localId));
+    card.append(preview, copy, remove);
+    els.modalAgentAttachmentDrafts.appendChild(card);
+  });
+}
+
 function renderAgentComposer(subject) {
   if (!subject || !els.modalAgentComposer) return;
   const isCurrentChat = state.agentChat.agentId === subject.id;
   const chatBusy = state.agentChat.inFlight;
+  const runtimeProfile = getAgentRuntimeProfile(subject.id);
+  const selectedThread = getSelectedAgentRuntimeThread(runtimeProfile);
+  const runtimeModeReady = isAgentRuntimeModeReady(runtimeProfile, runtimeProfile.mode);
+  const limitedChatReady = runtimeProfile.mode === "chat" && runtimeProfile.runtimeEndpointUnavailable;
+  const sendBlocked = chatBusy
+    || runtimeProfile.loading
+    || runtimeProfile.actionInFlight
+    || runtimeProfile.attachmentUploadInFlight
+    || selectedThread?.archived === true
+    || (!runtimeModeReady && !limitedChatReady);
   if (els.modalComposerLabel) els.modalComposerLabel.textContent = `ข้อความถึง ${subject.name}`;
   if (els.modalSendButton) {
-    els.modalSendButton.disabled = chatBusy;
-    els.modalSendButton.textContent = chatBusy ? "กำลังคิด..." : "คุยกับ Codex";
+    els.modalSendButton.disabled = sendBlocked;
+    els.modalSendButton.textContent = chatBusy
+      ? "กำลังคิด..."
+      : runtimeProfile.mode === "chat"
+        ? limitedChatReady ? "คุยแบบจำกัด" : "คุยกับ Agent"
+        : `ส่งเข้า ${AGENT_RUNTIME_CAPABILITY_MODES.find((item) => item.id === runtimeProfile.mode)?.label || "Agent"}`;
   }
   if (els.modalAssignButton) els.modalAssignButton.textContent = "สร้าง Task ทางลัด";
   if (els.modalChatStatus) {
@@ -34015,17 +34750,26 @@ function renderAgentComposer(subject) {
       ? state.agentChat.message
       : chatBusy
         ? "Agent อีกตัวกำลังตอบผ่าน Codex กรุณารอให้คำตอบเดิมเสร็จก่อน"
-        : "พร้อมคุยกับ Codex ผ่าน Local Runner";
+        : selectedThread?.archived === true
+          ? "เธรดนี้อยู่ในคลัง • อ่านประวัติได้ และต้องนำออกจากคลังก่อนส่งข้อความใหม่"
+        : runtimeProfile.loading
+          ? "กำลังตรวจสอบ Full Agent Runtime ก่อนเปิดรับข้อความ"
+          : runtimeProfile.mode !== "chat" && !runtimeModeReady
+            ? "Backend ยังไม่ยืนยันโหมดที่เลือก จึงยังส่งข้อความไม่ได้"
+            : limitedChatReady
+              ? "limited_chat พร้อมใช้งาน • ไม่มี Computer Use, MCP หรือ Plugin"
+              : "Chat พร้อมจาก Backend แบบไม่เรียก Tool • Workspace/Computer/Full Access ล็อก";
     els.modalChatStatus.dataset.tone = isCurrentChat
       ? state.agentChat.tone
       : chatBusy ? "working" : "neutral";
   }
   if (els.modalChatUsageNote) {
-    const autoMode = state.operatorMode.mode === "auto_guarded" && state.operatorMode.autoExecute === true;
-    els.modalChatUsageNote.textContent = autoMode
-      ? "คุยได้ทั้งถามและสั่งงาน หาก Backend ยืนยันว่าเป็นงานอัตโนมัติที่ทำได้ ระบบจะสร้าง Mission เริ่มงาน และส่งรายงานไปยังอุปกรณ์เอง งานเงินจริง การส่งออกภายนอก Deploy และลบไฟล์ยังต้องอนุมัติ"
-      : "คุยได้ทั้งถามและสั่งงาน หากคำตอบสร้าง Task ระบบจะแสดงสถานะจริงจาก Backend งานที่ยังไม่ผ่านเกณฑ์จะรอตรวจสอบ สามารถใช้ปุ่ม “สร้าง Task ทางลัด” ได้เช่นกัน";
+    els.modalChatUsageNote.textContent = limitedChatReady
+      ? "โหมดสำรองนี้ส่งเฉพาะข้อความไปยัง /api/agents/chat และไม่อ้างว่าใช้ Tool หากต้องการไฟล์ Terminal Computer Use MCP หรือ Plugin ต้องรอ Backend ยืนยัน Full Agent Runtime"
+      : "Frontend ส่งเฉพาะข้อความและ Intent การตั้งค่า ไม่มี Token หรือ Secret การใช้ Tool และผลการทำงานจะแสดงเฉพาะเหตุการณ์ที่ Backend ยืนยัน";
   }
+  renderAgentAttachmentComposer(subject);
+  renderAgentRuntimeConsole(subject);
 }
 
 function renderGameModal() {
@@ -34091,6 +34835,7 @@ function renderGameModal() {
       ["Bridge", `${displayBridgeValue(state.bridge.mode)} / ${displayBridgeValue(state.bridge.status)}`],
       ["Memory", state.memoryStatus],
     ]);
+    renderAgentRuntimeConsole(subject);
     renderChatLog(subject, type);
     renderTaskList(els.modalTaskBoard, getRelevantMissionsForSubject(subject, type), "ยังไม่มี Task ที่มอบหมายให้ Agent นี้");
     renderAgentComposer(subject);
@@ -34212,6 +34957,7 @@ function closeGameModal() {
   if (els.dashboardResultDialog?.open) closeDashboardResultDetail({ restoreFocus: false });
   if (els.newsEventDialog?.open) closeFxNewsEventDetail({ restoreFocus: false });
   if (state.modal.workflowVoice.recognition) stopWorkflowVoiceDictation();
+  stopAgentRuntimeApprovalCountdown();
   stopMeetingRoomPolling();
   state.modal.open = false;
   document.body.classList.remove("modal-open");
@@ -34253,6 +34999,7 @@ function openAgentDialog(agentId, tab = "chat") {
     });
   }
   openGameModal("agent", agent.id, tab);
+  void loadAgentRuntimeWorkspace(agent.id, { force: true });
 }
 
 async function openPropDialog(propId, tab = null) {
@@ -34397,10 +35144,1934 @@ function getAgentChatSessionId(agentId) {
   return sessionId;
 }
 
+function getAgentRuntimeProfile(agentId) {
+  const safeAgentId = String(agentId || "").slice(0, 120);
+  if (!state.agentRuntime.profiles[safeAgentId]) {
+    state.agentRuntime.profiles[safeAgentId] = {
+      agentId: safeAgentId,
+      requestId: 0,
+      loading: false,
+      actionInFlight: false,
+      threadsLoaded: false,
+      threads: [],
+      selectedThreadId: "",
+      model: "",
+      reasoning: "",
+      mode: "chat",
+      messagesByThread: {},
+      activitiesByThread: {},
+      detailLoadedByThread: {},
+      pendingApproval: null,
+      approvalInFlight: false,
+      interruptInFlight: false,
+      attachmentDrafts: [],
+      attachmentUploadInFlight: false,
+      runtimeEndpointUnavailable: false,
+      message: "กำลังตรวจสอบ Full Agent Runtime",
+      tone: "neutral",
+    };
+  }
+  const profile = state.agentRuntime.profiles[safeAgentId];
+  if (!Object.prototype.hasOwnProperty.call(profile, "pendingApproval")) profile.pendingApproval = null;
+  if (!Object.prototype.hasOwnProperty.call(profile, "approvalInFlight")) profile.approvalInFlight = false;
+  if (!Object.prototype.hasOwnProperty.call(profile, "interruptInFlight")) profile.interruptInFlight = false;
+  if (!Object.prototype.hasOwnProperty.call(profile, "approvalDecisionAttempt")) profile.approvalDecisionAttempt = null;
+  if (!Array.isArray(profile.attachmentDrafts)) profile.attachmentDrafts = [];
+  if (!Object.prototype.hasOwnProperty.call(profile, "attachmentUploadInFlight")) profile.attachmentUploadInFlight = false;
+  return profile;
+}
+
+function agentAttachmentExtension(fileName) {
+  const match = safeAgentAttachmentName(fileName, "").toLowerCase().match(/(\.[a-z0-9]{1,12})$/);
+  return match?.[1] || "";
+}
+
+function agentAttachmentMediaType(file) {
+  const declared = String(file?.type || "").trim().toLowerCase();
+  if (/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(declared)) return declared.slice(0, 120);
+  return {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".csv": "text/csv",
+    ".json": "application/json",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  }[agentAttachmentExtension(file?.name)] || "application/octet-stream";
+}
+
+function revokeAgentAttachmentDraft(draft) {
+  if (draft?.previewUrl && String(draft.previewUrl).startsWith("blob:")) {
+    URL.revokeObjectURL(draft.previewUrl);
+  }
+}
+
+function clearAgentAttachmentDrafts(profile) {
+  if (!profile) return;
+  (profile.attachmentDrafts || []).forEach(revokeAgentAttachmentDraft);
+  profile.attachmentDrafts = [];
+  if (els.modalAgentAttachmentInput) els.modalAgentAttachmentInput.value = "";
+}
+
+function addAgentAttachmentDrafts(subject, fileList) {
+  if (!subject) return;
+  const profile = getAgentRuntimeProfile(subject.id);
+  const policy = state.agentRuntime.status?.attachments;
+  if (policy?.inputReady !== true) {
+    setAgentChatStatus(subject.id, "Backend ยังไม่ยืนยันช่องทางแนบไฟล์ จึงยังไม่ได้อ่านหรือส่งไฟล์", "error");
+    return;
+  }
+  const current = Array.isArray(profile.attachmentDrafts) ? profile.attachmentDrafts : [];
+  const files = Array.from(fileList || []);
+  let rejected = "";
+  files.forEach((file) => {
+    if (current.length >= policy.maxFiles) {
+      rejected = `แนบได้ไม่เกิน ${policy.maxFiles} ไฟล์ต่อข้อความ`;
+      return;
+    }
+    const extension = agentAttachmentExtension(file?.name);
+    const byteSize = Number(file?.size);
+    if (!extension || !policy.acceptedExtensions.includes(extension)) {
+      rejected = `รองรับเฉพาะ ${policy.acceptedExtensions.join(", ")}`;
+      return;
+    }
+    if (!Number.isFinite(byteSize) || byteSize <= 0 || byteSize > policy.maxBytes) {
+      rejected = `แต่ละไฟล์ต้องมีขนาดไม่เกิน ${formatAgentAttachmentBytes(policy.maxBytes)}`;
+      return;
+    }
+    const name = safeAgentAttachmentName(file.name, "ไฟล์แนบ");
+    const mediaType = agentAttachmentMediaType(file);
+    const imagePreview = /^(?:image\/(?:png|jpeg|webp))$/.test(mediaType);
+    current.push({
+      localId: createAgentChatOpaqueId("attachment-draft"),
+      file,
+      name,
+      mediaType,
+      byteSize,
+      previewUrl: imagePreview ? URL.createObjectURL(file) : "",
+      imagePreview,
+    });
+  });
+  profile.attachmentDrafts = current;
+  if (rejected) setAgentChatStatus(subject.id, rejected, "error");
+  else if (current.length) setAgentChatStatus(subject.id, `เตรียมแนบ ${current.length} ไฟล์ • ยังไม่อัปโหลดจนกว่าจะกดส่ง`, "neutral");
+  renderAgentAttachmentComposer(subject);
+}
+
+function removeAgentAttachmentDraft(subject, localId) {
+  if (!subject) return;
+  const profile = getAgentRuntimeProfile(subject.id);
+  if (profile.attachmentUploadInFlight) return;
+  const next = [];
+  (profile.attachmentDrafts || []).forEach((draft) => {
+    if (draft.localId === localId) revokeAgentAttachmentDraft(draft);
+    else next.push(draft);
+  });
+  profile.attachmentDrafts = next;
+  renderAgentAttachmentComposer(subject);
+}
+
+function readAgentAttachmentBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(Object.assign(new Error("attachment_read_failed"), { kind: "attachment_read_failed" }));
+    reader.onabort = () => reject(Object.assign(new Error("attachment_read_cancelled"), { kind: "attachment_read_cancelled" }));
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const commaIndex = result.indexOf(",");
+      const base64 = commaIndex >= 0 ? result.slice(commaIndex + 1) : "";
+      if (!base64 || !/^[A-Za-z0-9+/=]+$/.test(base64)) {
+        reject(Object.assign(new Error("attachment_encode_failed"), { kind: "attachment_encode_failed" }));
+        return;
+      }
+      resolve(base64);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function agentRuntimeAttachmentUploadEndpoint(threadId, uploadTemplate) {
+  if (uploadTemplate !== AGENT_RUNTIME_ATTACHMENT_UPLOAD_TEMPLATE) return "";
+  const safeThreadId = String(threadId || "");
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(safeThreadId)) return "";
+  return uploadTemplate.replace("{threadId}", encodeURIComponent(safeThreadId));
+}
+
+async function uploadAgentRuntimeAttachment(threadId, draft, policy) {
+  const endpoint = agentRuntimeAttachmentUploadEndpoint(threadId, policy?.uploadTemplate);
+  if (!endpoint || !draft?.file) throw Object.assign(new Error("attachment_upload_not_ready"), { kind: "attachment_upload_not_ready" });
+  const dataBase64 = await readAgentAttachmentBase64(draft.file);
+  const payload = await postJson(endpoint, {
+    fileName: draft.name,
+    mediaType: draft.mediaType,
+    dataBase64,
+  });
+  const attachment = payload?.attachment;
+  const id = String(attachment?.id || "");
+  if (
+    payload?.ok !== true
+    || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,179}$/.test(id)
+    || attachment?.modelInputReady !== true
+  ) {
+    throw Object.assign(new Error("attachment_upload_not_confirmed"), { kind: "attachment_upload_not_confirmed" });
+  }
+  return id;
+}
+
+async function uploadPendingAgentAttachments(subject) {
+  const profile = getAgentRuntimeProfile(subject?.id);
+  const drafts = [...(profile?.attachmentDrafts || [])];
+  if (!drafts.length) return { attachmentIds: [], attachmentNames: [] };
+  const policy = state.agentRuntime.status?.attachments;
+  if (policy?.inputReady !== true || profile.runtimeEndpointUnavailable) {
+    throw Object.assign(new Error("attachment_upload_not_ready"), { kind: "attachment_upload_not_ready" });
+  }
+  let thread = getSelectedAgentRuntimeThread(profile);
+  if (!thread) thread = await createAgentRuntimeThread(subject);
+  if (!thread) throw Object.assign(new Error("agent_runtime_thread_not_ready"), { kind: "agent_runtime_thread_not_ready" });
+  profile.attachmentUploadInFlight = true;
+  renderAgentAttachmentComposer(subject);
+  try {
+    const attachmentIds = [];
+    for (const draft of drafts) {
+      attachmentIds.push(await uploadAgentRuntimeAttachment(thread.id, draft, policy));
+    }
+    return { attachmentIds, attachmentNames: drafts.map((draft) => draft.name) };
+  } finally {
+    profile.attachmentUploadInFlight = false;
+  }
+}
+
+function isAgentRuntimeEndpointUnavailable(error) {
+  const kind = String(error?.body?.error?.code || error?.body?.kind || error?.kind || "").trim().toLowerCase();
+  return [404, 405, 501].includes(Number(error?.status))
+    || ["endpoint_not_found", "not_implemented", "runtime_unavailable"].includes(kind);
+}
+
+function normalizeAgentRuntimeOptionList(value, maximum = 50) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  return value.slice(0, maximum).map((item) => {
+    if (typeof item === "string") {
+      const id = item.trim().slice(0, 120);
+      return id ? { id, label: id, available: true, isDefault: false } : null;
+    }
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const id = String(item.id || item.value || item.name || "").trim().slice(0, 120);
+    if (!id) return null;
+    const supportedReasoningEfforts = Array.isArray(item.supportedReasoningEfforts)
+      ? [...new Set(item.supportedReasoningEfforts
+        .map((effort) => String(effort || "").trim().slice(0, 40))
+        .filter(Boolean))]
+      : [];
+    const inputModalities = Array.isArray(item.inputModalities)
+      ? [...new Set(item.inputModalities
+        .map((modality) => String(modality || "").trim().toLowerCase())
+        .filter((modality) => ["text", "image"].includes(modality)))]
+      : ["text"];
+    const reportedDefaultReasoning = String(item.defaultReasoningEffort || "").trim().slice(0, 40);
+    return {
+      id,
+      label: safeDashboardDisplayText(item.labelTh || item.label || item.displayName || id, id, { limit: 160 }),
+      available: item.available !== false && item.enabled !== false,
+      isDefault: item.default === true || item.isDefault === true,
+      defaultReasoningEffort: supportedReasoningEfforts.includes(reportedDefaultReasoning)
+        ? reportedDefaultReasoning
+        : "",
+      supportedReasoningEfforts,
+      inputModalities,
+    };
+  }).filter((item) => {
+    if (!item || seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
+
+function agentRuntimeReasoningOptionsForModel(modelId) {
+  const model = state.agentRuntime.models.find((item) => item.id === modelId && item.available);
+  if (!model || !model.supportedReasoningEfforts.length) return state.agentRuntime.reasoningOptions;
+  const supported = new Set(model.supportedReasoningEfforts);
+  return state.agentRuntime.reasoningOptions
+    .filter((item) => supported.has(item.id))
+    .map((item) => ({
+      ...item,
+      isDefault: item.id === model.defaultReasoningEffort,
+    }));
+}
+
+function agentRuntimeDefaultReasoningForModel(modelId) {
+  const options = agentRuntimeReasoningOptionsForModel(modelId).filter((item) => item.available);
+  return options.find((item) => item.isDefault)?.id || options[0]?.id || "";
+}
+
+function explicitAgentRuntimeCapabilityReady(source, keys = []) {
+  if (!source || typeof source !== "object" || Array.isArray(source)) return false;
+  return keys.some((key) => {
+    const value = source[key];
+    if (value === true) return true;
+    return Boolean(value && typeof value === "object" && !Array.isArray(value) && value.ready === true);
+  });
+}
+
+function normalizeAgentRuntimeStatus(payload) {
+  const runtime = payload?.runtime && typeof payload.runtime === "object" && !Array.isArray(payload.runtime)
+    ? payload.runtime
+    : null;
+  const validEnvelope = payload?.ok === true && runtime !== null;
+  const available = validEnvelope && runtime.available === true;
+  const executionEnabled = available && runtime.executionEnabled === true;
+  const readiness = runtime?.readiness && typeof runtime.readiness === "object" && !Array.isArray(runtime.readiness)
+    ? runtime.readiness
+    : {};
+  const capabilities = runtime?.capabilities && typeof runtime.capabilities === "object" && !Array.isArray(runtime.capabilities)
+    ? runtime.capabilities
+    : {};
+  const modeReadiness = Object.fromEntries(AGENT_RUNTIME_CAPABILITY_MODES.map((mode) => [mode.id, false]));
+  const readyModeCapabilities = new Set();
+  const rawModes = Array.isArray(runtime?.capabilityModes) ? runtime.capabilityModes : [];
+  rawModes.slice(0, 20).forEach((item) => {
+    const modeId = typeof item === "string"
+      ? item
+      : String(item?.id || item?.mode || item?.value || "");
+    if (!Object.prototype.hasOwnProperty.call(modeReadiness, modeId)) return;
+    const explicitlySupported = typeof item === "string"
+      || item?.ready === true
+      || item?.available === true
+      || item?.enabled === true
+      || item?.supported === true
+      || item?.toolExecutionEnabled === true;
+    modeReadiness[modeId] = executionEnabled && explicitlySupported;
+    if (modeReadiness[modeId] && Array.isArray(item?.capabilities)) {
+      item.capabilities.forEach((capability) => readyModeCapabilities.add(String(capability || "")));
+    }
+  });
+  if (executionEnabled && rawModes.length === 0) {
+    modeReadiness.chat = true;
+  }
+  const chatReady = executionEnabled
+    && modeReadiness.chat === true
+    && runtime?.chatReady !== false;
+  const toolExecutionEnabled = available && runtime?.toolExecutionEnabled === true;
+  const fullAgentReady = chatReady
+    && toolExecutionEnabled
+    && modeReadiness.full === true
+    && runtime?.fullAgentReady === true;
+  const attachmentContract = runtime?.attachments && typeof runtime.attachments === "object" && !Array.isArray(runtime.attachments)
+    ? runtime.attachments
+    : {};
+  const acceptedExtensions = Array.isArray(attachmentContract.acceptedExtensions)
+    ? [...new Set(attachmentContract.acceptedExtensions
+      .map((value) => String(value || "").trim().toLowerCase())
+      .map((value) => (value && !value.startsWith(".") ? `.${value}` : value))
+      .filter((value) => /^\.[a-z0-9]{1,12}$/.test(value)))]
+      .slice(0, 40)
+    : [];
+  const attachmentInputReady = chatReady
+    && attachmentContract.ready === true
+    && attachmentContract.uploadTemplate === AGENT_RUNTIME_ATTACHMENT_UPLOAD_TEMPLATE
+    && acceptedExtensions.length > 0;
+  const artifactContract = runtime?.artifacts && typeof runtime.artifacts === "object" && !Array.isArray(runtime.artifacts)
+    ? runtime.artifacts
+    : {};
+  const artifactOutputReady = chatReady && (
+    artifactContract.ready === true
+    || explicitAgentRuntimeCapabilityReady(capabilities, ["artifacts", "artifactOutput", "artifact_output"])
+    || explicitAgentRuntimeCapabilityReady(readiness, ["artifacts", "artifactOutput", "artifact_output"])
+  );
+  const explicitReady = (...keys) => (
+    explicitAgentRuntimeCapabilityReady(capabilities, keys)
+    || explicitAgentRuntimeCapabilityReady(readiness, keys)
+    || keys.some((key) => runtime?.[`${key}Ready`] === true)
+  );
+  const workspaceReady = explicitReady("workspace")
+    || modeReadiness.workspace
+    || readyModeCapabilities.has("workspace_read")
+    || readyModeCapabilities.has("workspace_write");
+  const computerUseReady = explicitReady("computerUse", "computer_use")
+    || modeReadiness.computer
+    || readyModeCapabilities.has("computer_use");
+  const mcpReady = explicitReady("mcp") || readyModeCapabilities.has("mcp");
+  const pluginsReady = explicitReady("plugins", "plugin") || readyModeCapabilities.has("plugin");
+  const rawActivationBlockers = Array.isArray(runtime?.workspaceActivationBlockers)
+    ? runtime.workspaceActivationBlockers.map((value) => String(value || "").trim()).filter(Boolean).slice(0, 20)
+    : [];
+  const activationBlockers = [...new Set(rawActivationBlockers
+    .filter((code) => Object.prototype.hasOwnProperty.call(AGENT_RUNTIME_BLOCKER_PRESENTATION, code)))];
+  return {
+    validEnvelope,
+    available,
+    executionEnabled,
+    chatReady,
+    fullAgentReady,
+    toolExecutionEnabled,
+    attachments: {
+      inputReady: attachmentInputReady,
+      outputReady: artifactOutputReady,
+      uploadTemplate: attachmentInputReady ? AGENT_RUNTIME_ATTACHMENT_UPLOAD_TEMPLATE : "",
+      maxFiles: attachmentInputReady
+        ? Math.max(1, Math.min(Number(attachmentContract.maxFiles) || 1, AGENT_RUNTIME_ATTACHMENT_HARD_MAX_FILES))
+        : 0,
+      maxBytes: attachmentInputReady
+        ? Math.max(1, Math.min(Number(attachmentContract.maxBytes) || 1, AGENT_RUNTIME_ATTACHMENT_HARD_MAX_BYTES))
+        : 0,
+      acceptedExtensions,
+    },
+    storageKind: safeDashboardDisplayText(runtime?.storageKind, "ยังไม่ยืนยัน", { limit: 100 }),
+    modeReadiness,
+    capabilities: {
+      workspace: workspaceReady,
+      computerUse: computerUseReady,
+      mcp: mcpReady,
+      plugins: pluginsReady,
+    },
+    approvalBrokerReady: runtime?.approvalBrokerReady === true,
+    workspaceSentinelVerified: runtime?.workspaceSentinelVerified === true,
+    workspaceApprovalReplayDurable: runtime?.workspaceApprovalReplayDurable === true,
+    activationBlockers,
+    hasUnknownActivationBlocker: rawActivationBlockers.length > activationBlockers.length,
+    message: safeDashboardDisplayText(
+      runtime?.messageTh || runtime?.message,
+      chatReady
+        ? "Chat พร้อมจาก Backend แบบไม่เรียก Tool • Workspace/Computer/Full Access ล็อก"
+        : available
+          ? "เชื่อม Runtime แล้ว แต่ Backend ยังไม่เปิดการลงมือทำ"
+          : "Backend ยังไม่ยืนยัน Full Agent Runtime",
+      { limit: 500 },
+    ),
+  };
+}
+
+function normalizeAgentRuntimeThread(item, fallbackAgentId = "") {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const id = String(item.id || item.threadId || "");
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(id)) return null;
+  const mode = AGENT_RUNTIME_CAPABILITY_MODES.some((entry) => entry.id === item.mode)
+    ? item.mode
+    : AGENT_RUNTIME_CAPABILITY_MODES.some((entry) => entry.id === item.capabilityMode)
+      ? item.capabilityMode
+      : "chat";
+  return {
+    id,
+    agentId: String(item.agentId || fallbackAgentId).slice(0, 120),
+    title: safeDashboardDisplayText(item.title, `Thread ${id.slice(0, 12)}`, { limit: 160 }),
+    updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : null,
+    lifecycle: String(item.lifecycle || item.status || "idle").trim().toLowerCase().slice(0, 40),
+    model: String(item.model || "").slice(0, 120),
+    reasoning: String(item.reasoning || item.reasoningEffort || "").slice(0, 40),
+    mode,
+    archived: item.archived === true,
+    revision: Number.isSafeInteger(item.revision) && item.revision >= 0 ? item.revision : null,
+    eventCount: Number.isFinite(Number(item.eventCount)) ? Number(item.eventCount) : null,
+    turnCount: Number.isFinite(Number(item.turnCount)) ? Number(item.turnCount) : null,
+    activeTurn: item.activeTurn && typeof item.activeTurn === "object" && !Array.isArray(item.activeTurn)
+      ? {
+        id: String(item.activeTurn.id || "").slice(0, 180),
+        status: String(item.activeTurn.status || "").trim().toLowerCase().slice(0, 40),
+        interruptRequested: item.activeTurn.interruptRequested === true,
+        errorCode: String(item.activeTurn.errorCode || "").slice(0, 100),
+      }
+      : null,
+    canInterrupt: item.canInterrupt === true,
+    canContinue: item.canContinue === true,
+    canArchive: item.canArchive === true,
+    canUpdateSettings: item.canUpdateSettings === true,
+  };
+}
+
+function safeAgentAttachmentName(value, fallback = "ไฟล์จาก Agent") {
+  const leaf = String(value || "")
+    .replace(/\u0000/g, "")
+    .split(/[\\/]/)
+    .pop()
+    ?.replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160);
+  return safeDashboardDisplayText(leaf, fallback, { limit: 160 });
+}
+
+function getSafeAgentRuntimeArtifactUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw, window.location.href);
+    if (parsed.origin !== window.location.origin || parsed.username || parsed.password || parsed.search || parsed.hash) return "";
+    const globalArtifact = /^\/api\/agent-runtime\/artifacts\/[a-zA-Z0-9._:-]{1,180}$/.test(parsed.pathname);
+    const threadArtifact = /^\/api\/agent-runtime\/threads\/[a-zA-Z0-9._:-]{1,160}\/(?:artifacts|downloads)\/[a-zA-Z0-9._:-]{1,180}$/.test(parsed.pathname);
+    return globalArtifact || threadArtifact ? parsed.href : "";
+  } catch {
+    return "";
+  }
+}
+
+function normalizeAgentRuntimeArtifacts(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  return value.slice(0, 24).map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item) || item.available !== true) return null;
+    const id = String(item.id || item.artifactRef || "").trim();
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,179}$/.test(id) || seen.has(id)) return null;
+    const url = getSafeAgentRuntimeArtifactUrl(item.url || item.previewUrl || item.downloadUrl);
+    if (!url) return null;
+    seen.add(id);
+    const mediaType = String(item.mediaType || item.contentType || "application/octet-stream")
+      .trim().toLowerCase().slice(0, 120);
+    return {
+      id,
+      available: true,
+      name: safeAgentAttachmentName(item.name || item.basename || item.fileName),
+      mediaType,
+      byteSize: Number.isFinite(Number(item.byteSize)) && Number(item.byteSize) >= 0
+        ? Math.min(Number(item.byteSize), Number.MAX_SAFE_INTEGER)
+        : null,
+      kind: safeDashboardDisplayText(item.kind, mediaType.startsWith("image/") ? "image" : "file", { limit: 60 }),
+      url,
+      imagePreview: /^(?:image\/(?:png|jpeg|webp))$/.test(mediaType),
+    };
+  }).filter(Boolean);
+}
+
+function agentRuntimeArtifactsFromItem(item) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+  return normalizeAgentRuntimeArtifacts(
+    item.artifacts
+    || item.metadata?.artifacts
+    || item.output?.artifacts
+    || [],
+  );
+}
+
+function normalizeAgentRuntimeMessages(value, subject) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(-100).map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const role = String(item.role || item.side || "assistant").trim().toLowerCase();
+    const rawContent = typeof item.content === "string"
+      ? item.content
+      : typeof item.text === "string"
+        ? item.text
+        : typeof item.message === "string"
+          ? item.message
+          : typeof item.reply === "string" ? item.reply : "";
+    const text = safeAgentChatReplyText(rawContent, "");
+    const artifacts = agentRuntimeArtifactsFromItem(item);
+    if (!text && !artifacts.length) return null;
+    const userSide = ["user", "human", "operator"].includes(role);
+    return {
+      id: String(item.id || item.turnId || `runtime-message-${index}`).slice(0, 180),
+      speaker: userSide
+        ? "คุณ"
+        : safeDashboardDisplayText(item.speaker || item.agentName, subject?.name || "Agent", { limit: 100 }),
+      text,
+      artifacts,
+      side: userSide ? "user" : "agent",
+      time: typeof item.createdAt === "string" ? item.createdAt : null,
+    };
+  }).filter(Boolean);
+}
+
+function normalizeAgentRuntimeActivities(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(-60).map((item, index) => {
+    if (typeof item === "string") {
+      return { id: `activity-${index}`, label: safeDashboardDisplayText(item, "กิจกรรมจาก Runtime", { limit: 300 }), status: "reported", time: null };
+    }
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const tool = safeDashboardDisplayText(item.toolName || item.tool || item.capability, "", { limit: 100 });
+    const eventType = safeDashboardDisplayText(item.type || item.eventType, "", { limit: 100 });
+    const content = typeof item.content === "string" ? item.content : "";
+    const label = safeDashboardDisplayText(
+      item.labelTh || item.label || item.message || item.summary || content,
+      tool || eventType || "กิจกรรมจาก Runtime",
+      { limit: 300 },
+    );
+    return {
+      id: String(item.id || item.eventId || `activity-${index}`).slice(0, 180),
+      label: tool && !label.includes(tool)
+        ? `${tool} • ${label}`
+        : eventType && !label.includes(eventType) ? `${eventType} • ${label}` : label,
+      status: String(item.status || item.state || (eventType === "error" ? "error" : "reported")).trim().toLowerCase().slice(0, 40),
+      time: typeof item.createdAt === "string" ? item.createdAt : typeof item.time === "string" ? item.time : null,
+    };
+  }).filter(Boolean);
+}
+
+function agentRuntimeEventsFromPayload(payload) {
+  const threadPayload = payload?.thread && typeof payload.thread === "object" ? payload.thread : payload;
+  const events = threadPayload?.events || payload?.events;
+  return Array.isArray(events) ? events.filter((event) => event && typeof event === "object" && !Array.isArray(event)) : [];
+}
+
+function agentRuntimeEventTurnId(event) {
+  return String(event?.metadata?.turnId || event?.turnId || "");
+}
+
+function agentRuntimeEventMatchesTurn(event, turnId, knownEventIds = new Set()) {
+  const eventTurnId = agentRuntimeEventTurnId(event);
+  if (turnId && eventTurnId) return eventTurnId === turnId;
+  const eventId = String(event?.id || event?.eventId || "");
+  return Boolean(eventId && !knownEventIds.has(eventId));
+}
+
+function latestAgentRuntimeEvent(events, predicate) {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (predicate(events[index])) return events[index];
+  }
+  return null;
+}
+
+function agentRuntimePersistedReply(events, turnId, knownEventIds = new Set()) {
+  const event = latestAgentRuntimeEvent(events, (item) => (
+    String(item.role || "").toLowerCase() === "assistant"
+    && typeof item.content === "string"
+    && agentRuntimeEventMatchesTurn(item, turnId, knownEventIds)
+  ));
+  return event ? safeAgentChatReplyText(event.content, "") : "";
+}
+
+function agentRuntimePersistedArtifacts(events, turnId, knownEventIds = new Set()) {
+  const artifacts = [];
+  const seen = new Set();
+  events.forEach((event) => {
+    if (!agentRuntimeEventMatchesTurn(event, turnId, knownEventIds)) return;
+    agentRuntimeArtifactsFromItem(event).forEach((artifact) => {
+      if (seen.has(artifact.id)) return;
+      seen.add(artifact.id);
+      artifacts.push(artifact);
+    });
+  });
+  return artifacts.slice(0, 24);
+}
+
+function agentRuntimePersistedFailure(events, turnId, knownEventIds = new Set()) {
+  const event = latestAgentRuntimeEvent(events, (item) => (
+    String(item.type || item.eventType || "").toLowerCase() === "error"
+    && agentRuntimeEventMatchesTurn(item, turnId, knownEventIds)
+  ));
+  if (!event) return null;
+  return {
+    code: String(event.metadata?.errorCode || event.errorCode || "agent_runtime_turn_failed").slice(0, 100),
+    message: safeAgentChatReplyText(event.content, "Full Agent Turn ไม่สำเร็จ"),
+  };
+}
+
+function createAgentRuntimeTurnError(kind, message) {
+  const error = new Error(kind);
+  error.kind = kind;
+  error.userMessage = safeAgentChatReplyText(message, "Full Agent Turn ไม่สำเร็จ");
+  return error;
+}
+
+function waitForAgentRuntimePollDelay(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, Math.max(0, milliseconds)));
+}
+
+function agentRuntimeThreadEndpoint(threadId, suffix = "") {
+  const id = String(threadId || "");
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(id)) return "";
+  return `${AGENT_RUNTIME_THREADS_ENDPOINT}/${encodeURIComponent(id)}${suffix}`;
+}
+
+function safeAgentRuntimeApprovalDetail(value, fallback, { limit = 1200 } = {}) {
+  const safe = safeDashboardDisplayText(value, fallback, { limit })
+    .replace(/\b(authorization|cookie|password|passphrase|client[_ -]?secret|access[_ -]?token|refresh[_ -]?token|api[_ -]?key)\s*[:=]\s*\S+/gi, "$1: [ซ่อน]")
+    .replace(/\b[A-Za-z]:\\(?:[^\s<>|"']+\\)*[^\s<>|"']*/g, "[พาธในเครื่องที่ซ่อน]")
+    .replace(/\/(?:Users|home|etc|var|opt)\/(?:[^\s<>"']+\/)*[^\s<>"']*/g, "[พาธในเครื่องที่ซ่อน]");
+  return safeDashboardDisplayText(safe, fallback, { limit });
+}
+
+function normalizeAgentRuntimeApproval(payload, expectedThreadId, expectedTurnId = "") {
+  if (payload?.ok !== true) return null;
+  const value = payload.approval;
+  if (value === null || value === undefined) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const safeId = (entry) => {
+    const text = String(entry || "");
+    return /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(text) ? text : "";
+  };
+  const requestId = safeId(value.requestId);
+  const threadId = safeId(value.threadId);
+  const turnId = safeId(value.turnId);
+  const missionId = safeId(value.missionId);
+  const gatewayThreadId = safeId(value.gatewayThreadId);
+  const gatewayTurnId = safeId(value.gatewayTurnId);
+  const gatewayGeneration = safeId(value.gatewayGeneration);
+  const itemId = safeId(value.itemId);
+  const requestDigest = String(value.requestDigest || "").toLowerCase();
+  const decisionNonce = String(value.decisionNonce || "").toLowerCase();
+  const actionType = String(value.actionType || "");
+  const method = String(value.method || "");
+  const createdAtMs = Date.parse(String(value.createdAt || ""));
+  const expiresAtMs = Date.parse(String(value.expiresAt || ""));
+  const bindingValid = Boolean(
+    requestId
+    && threadId
+    && turnId
+    && missionId
+    && gatewayThreadId
+    && gatewayTurnId
+    && gatewayGeneration
+    && itemId
+    && /^[a-f0-9]{64}$/.test(requestDigest)
+    && /^[a-f0-9]{32}$/.test(decisionNonce)
+    && ["command", "file_change"].includes(actionType)
+    && (
+      (actionType === "command" && method === "item/commandExecution/requestApproval")
+      || (actionType === "file_change" && method === "item/fileChange/requestApproval")
+    )
+    && Number.isFinite(createdAtMs)
+    && Number.isFinite(expiresAtMs)
+    && expiresAtMs > createdAtMs
+    && expiresAtMs - createdAtMs <= 5 * 60 * 1000 + 5000
+    && threadId === String(expectedThreadId || "")
+    && (!expectedTurnId || turnId === String(expectedTurnId))
+  );
+  if (!bindingValid) return null;
+  const commandSummary = safeAgentRuntimeApprovalDetail(
+    value.commandSummary,
+    actionType === "command" ? "Backend ไม่ได้ส่งสรุปคำสั่งที่ตรวจสอบได้" : "Codex ขอเปลี่ยนไฟล์ภายใน Workspace ที่กำหนด",
+    { limit: 2000 },
+  );
+  if (actionType === "command" && !String(value.commandSummary || "").trim()) return null;
+  return Object.freeze({
+    requestId,
+    threadId,
+    turnId,
+    missionId,
+    gatewayThreadId,
+    gatewayTurnId,
+    gatewayGeneration,
+    itemId,
+    requestDigest,
+    decisionNonce,
+    actionType,
+    method,
+    commandSummary,
+    cwdLabel: safeAgentRuntimeApprovalDetail(value.cwdLabel, "Workspace ที่ Backend อนุญาต", { limit: 160 }),
+    reason: safeAgentRuntimeApprovalDetail(value.reason, "Codex ขอสิทธิ์ลงมือทำขั้นตอนนี้", { limit: 800 }),
+    createdAt: new Date(createdAtMs).toISOString(),
+    expiresAt: new Date(expiresAtMs).toISOString(),
+    expiresAtMs,
+  });
+}
+
+async function loadAgentRuntimePendingApproval(profile, threadId, { render = true } = {}) {
+  const selected = getSelectedAgentRuntimeThread(profile);
+  const activeTurnId = selected?.activeTurn?.id || "";
+  const base = agentRuntimeThreadEndpoint(threadId);
+  if (!base || profile.selectedThreadId !== threadId || !activeTurnId) {
+    profile.pendingApproval = null;
+    profile.approvalDecisionAttempt = null;
+    return null;
+  }
+  try {
+    const payload = await fetchJson(`${base}/approvals/pending`, { timeoutMs: 12000 });
+    if (profile.selectedThreadId !== threadId) return null;
+    const approval = normalizeAgentRuntimeApproval(payload, threadId, activeTurnId);
+    profile.pendingApproval = approval;
+    if (!approval || profile.approvalDecisionAttempt?.requestId !== approval.requestId) {
+      profile.approvalDecisionAttempt = null;
+    }
+    if (render && state.modal.open && state.modal.type === "agent" && state.modal.id === profile.agentId) {
+      renderAgentRuntimeConsole(getOfficeAgent(profile.agentId));
+    }
+    return approval;
+  } catch {
+    // Approval state is authoritative only when this exact read succeeds.
+    // Never retain a stale button after a failed refresh.
+    profile.pendingApproval = null;
+    profile.approvalDecisionAttempt = null;
+    return null;
+  }
+}
+
+function stopAgentRuntimeApprovalCountdown() {
+  const timer = state.agentRuntime.approvalCountdownTimer;
+  if (timer?.id) window.clearInterval(timer.id);
+  state.agentRuntime.approvalCountdownTimer = null;
+}
+
+function updateAgentRuntimeApprovalCountdown(approval) {
+  if (!approval || !els.modalAgentApprovalTimer) return;
+  const remainingSeconds = Math.max(0, Math.ceil((approval.expiresAtMs - Date.now()) / 1000));
+  const expired = remainingSeconds <= 0;
+  els.modalAgentApprovalTimer.textContent = expired ? "หมดเวลาแล้ว" : `เหลือ ${remainingSeconds} วินาที`;
+  els.modalAgentApprovalTimer.dataset.state = expired ? "expired" : "pending";
+  if (expired) {
+    if (els.modalAgentApprovalDecline) els.modalAgentApprovalDecline.disabled = true;
+    if (els.modalAgentApprovalAccept) els.modalAgentApprovalAccept.disabled = true;
+    stopAgentRuntimeApprovalCountdown();
+  }
+}
+
+function startAgentRuntimeApprovalCountdown(profile, approval) {
+  updateAgentRuntimeApprovalCountdown(approval);
+  if (!approval || approval.expiresAtMs <= Date.now()) return;
+  const current = state.agentRuntime.approvalCountdownTimer;
+  if (current?.requestId === approval.requestId) return;
+  stopAgentRuntimeApprovalCountdown();
+  const id = window.setInterval(() => {
+    const selected = getSelectedAgentRuntimeThread(profile);
+    if (
+      !state.modal.open
+      || state.modal.type !== "agent"
+      || state.modal.id !== profile.agentId
+      || profile.pendingApproval?.requestId !== approval.requestId
+      || selected?.activeTurn?.id !== approval.turnId
+    ) {
+      stopAgentRuntimeApprovalCountdown();
+      return;
+    }
+    updateAgentRuntimeApprovalCountdown(approval);
+  }, 1000);
+  state.agentRuntime.approvalCountdownTimer = { id, requestId: approval.requestId };
+}
+
+function renderAgentRuntimeApproval(profile, selectedThread) {
+  const panel = els.modalAgentApprovalPanel;
+  if (!panel) return;
+  const approval = profile?.pendingApproval;
+  const exact = Boolean(
+    approval
+    && selectedThread?.mode === "workspace"
+    && approval.threadId === selectedThread.id
+    && approval.turnId === selectedThread.activeTurn?.id
+    && selectedThread.activeTurn?.status === "running"
+  );
+  panel.hidden = !exact;
+  if (!exact) {
+    stopAgentRuntimeApprovalCountdown();
+    return;
+  }
+  const remainingSeconds = Math.max(0, Math.ceil((approval.expiresAtMs - Date.now()) / 1000));
+  const expired = remainingSeconds <= 0;
+  if (els.modalAgentApprovalHeading) {
+    els.modalAgentApprovalHeading.textContent = approval.actionType === "command"
+      ? "Codex ขอรันคำสั่งหนึ่งครั้ง"
+      : "Codex ขอเปลี่ยนไฟล์หนึ่งครั้ง";
+  }
+  if (els.modalAgentApprovalTimer) {
+    updateAgentRuntimeApprovalCountdown(approval);
+  }
+  if (els.modalAgentApprovalType) {
+    els.modalAgentApprovalType.textContent = approval.actionType === "command"
+      ? `คำสั่งใน ${approval.cwdLabel}`
+      : `การเปลี่ยนไฟล์ใน ${approval.cwdLabel}`;
+  }
+  if (els.modalAgentApprovalSummary) els.modalAgentApprovalSummary.textContent = approval.commandSummary;
+  if (els.modalAgentApprovalReason) els.modalAgentApprovalReason.textContent = `เหตุผล: ${approval.reason}`;
+  if (els.modalAgentApprovalBinding) {
+    els.modalAgentApprovalBinding.textContent = [
+      `Thread ${approval.threadId.slice(0, 14)}`,
+      `Turn ${approval.turnId.slice(0, 14)}`,
+      `Mission ${approval.missionId.slice(0, 14)}`,
+      `Item ${approval.itemId.slice(0, 14)}`,
+      `Digest ${approval.requestDigest.slice(0, 12)}`,
+    ].join(" • ");
+  }
+  // Stop owns the UI once an interrupt begins.  A stale approval click must
+  // not race the Backend's decline-before-interrupt sequence.
+  const disabled = profile.approvalInFlight || profile.interruptInFlight || expired;
+  if (els.modalAgentApprovalDecline) els.modalAgentApprovalDecline.disabled = disabled;
+  if (els.modalAgentApprovalAccept) els.modalAgentApprovalAccept.disabled = disabled;
+  startAgentRuntimeApprovalCountdown(profile, approval);
+}
+
+async function resolveAgentRuntimeApproval(subject, decision) {
+  if (!subject || !["accept_once", "decline"].includes(decision)) return;
+  const profile = getAgentRuntimeProfile(subject.id);
+  const selected = getSelectedAgentRuntimeThread(profile);
+  const approval = profile.pendingApproval;
+  if (
+    profile.approvalInFlight
+    || profile.interruptInFlight
+    || !approval
+    || selected?.mode !== "workspace"
+    || selected.id !== approval.threadId
+    || selected.activeTurn?.id !== approval.turnId
+    || approval.expiresAtMs <= Date.now()
+  ) {
+    profile.pendingApproval = null;
+    renderAgentRuntimeConsole(subject);
+    return;
+  }
+  const priorAttempt = profile.approvalDecisionAttempt;
+  const idempotencyKey = priorAttempt?.requestId === approval.requestId
+    && priorAttempt?.decision === decision
+    ? priorAttempt.idempotencyKey
+    : createAgentChatOpaqueId("approval-decision");
+  profile.approvalDecisionAttempt = { requestId: approval.requestId, decision, idempotencyKey };
+  const body = {
+    threadId: approval.threadId,
+    turnId: approval.turnId,
+    missionId: approval.missionId,
+    gatewayThreadId: approval.gatewayThreadId,
+    gatewayTurnId: approval.gatewayTurnId,
+    gatewayGeneration: approval.gatewayGeneration,
+    itemId: approval.itemId,
+    requestDigest: approval.requestDigest,
+    decisionNonce: approval.decisionNonce,
+    decision,
+    idempotencyKey,
+  };
+  const endpoint = `${agentRuntimeThreadEndpoint(approval.threadId)}/approvals/${encodeURIComponent(approval.requestId)}/resolve`;
+  profile.approvalInFlight = true;
+  profile.message = decision === "accept_once"
+    ? "กำลังยืนยันการอนุมัติครั้งเดียวกับ Backend"
+    : "กำลังยืนยันการปฏิเสธกับ Backend";
+  profile.tone = "working";
+  renderAgentRuntimeConsole(subject);
+  try {
+    let result;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        result = await postJson(endpoint, body, {
+          headers: {
+            "X-Metafx-Approval-Version": AGENT_RUNTIME_APPROVAL_PROTOCOL_VERSION,
+            "X-Metafx-Approval-Nonce": approval.decisionNonce,
+          },
+          cache: "no-store",
+        });
+        break;
+      } catch (error) {
+        if (attempt === 1 || Number.isFinite(Number(error?.status))) throw error;
+      }
+    }
+    if (result?.ok !== true || result?.requestId !== approval.requestId) {
+      throw Object.assign(new Error("approval_resolution_not_confirmed"), { kind: "approval_resolution_not_confirmed" });
+    }
+    if (result.status === "resolution_pending" || result.committed === false) {
+      // The SDK handler is still settling the exact one-shot decision. Keep
+      // the immutable request and idempotency key in memory, make no success
+      // claim, and leave Stop available to force decline-before-interrupt.
+      profile.message = "Backend รับคำตอบแล้ว • กำลังรอหลักฐานยืนยันขั้นสุดท้าย คุณยังกดหยุดงานได้";
+      profile.tone = "working";
+      return;
+    }
+    if (result.status !== "resolution_committed" || result.committed !== true) {
+      throw Object.assign(new Error("approval_resolution_not_committed"), { kind: "approval_resolution_not_committed" });
+    }
+    profile.pendingApproval = null;
+    profile.approvalDecisionAttempt = null;
+    profile.message = decision === "accept_once"
+      ? "Backend บันทึกหลักฐานและอนุมัติคำขอนี้ครั้งเดียวแล้ว"
+      : "Backend บันทึกการปฏิเสธแล้ว • Tool จะไม่ได้รับสิทธิ์จากคำขอนี้";
+    profile.tone = decision === "accept_once" ? "ready" : "warning";
+    await loadAgentRuntimeThreadDetail(subject.id, approval.threadId, { render: false });
+    await loadAgentRuntimePendingApproval(profile, approval.threadId, { render: false });
+  } catch (error) {
+    profile.message = safeDashboardDisplayText(
+      error?.message,
+      "Backend ไม่ยืนยันการตัดสินใจ • คำขอนี้จะไม่ถูกอนุมัติแบบคาดเดา",
+      { limit: 500 },
+    );
+    profile.tone = "error";
+    await loadAgentRuntimePendingApproval(profile, approval.threadId, { render: false });
+  } finally {
+    profile.approvalInFlight = false;
+    if (state.modal.open && state.modal.type === "agent" && state.modal.id === subject.id) renderGameModal();
+  }
+}
+
+function getSelectedAgentRuntimeThread(profile) {
+  return profile?.threads?.find((thread) => thread.id === profile.selectedThreadId) || null;
+}
+
+function isAgentRuntimeModeReady(profile, mode = profile?.mode || "chat") {
+  const status = state.agentRuntime.status;
+  if (mode === "chat" && profile?.runtimeEndpointUnavailable) return true;
+  return Boolean(status?.available && status?.executionEnabled && status?.modeReadiness?.[mode] === true);
+}
+
+function setAgentRuntimeProfileStatus(profile, message, tone = "neutral") {
+  if (!profile) return;
+  profile.message = safeDashboardDisplayText(message, "กำลังตรวจสอบ Agent Runtime", { limit: 500 });
+  profile.tone = ["neutral", "working", "ready", "warning", "error"].includes(tone) ? tone : "neutral";
+  if (state.modal.open && state.modal.type === "agent" && state.modal.id === profile.agentId) {
+    renderAgentRuntimeConsole(getOfficeAgent(profile.agentId));
+  }
+}
+
+function appendAgentRuntimeMessage(profile, threadId, { speaker, text, side }) {
+  if (!profile || !threadId || !text) return;
+  const current = Array.isArray(profile.messagesByThread[threadId]) ? profile.messagesByThread[threadId] : [];
+  profile.messagesByThread[threadId] = [...current, {
+    id: createAgentChatOpaqueId("runtime-message"),
+    speaker: safeDashboardDisplayText(speaker, side === "user" ? "คุณ" : "Agent", { limit: 100 }),
+    text: safeAgentChatReplyText(text, ""),
+    side: side === "user" ? "user" : "agent",
+    time: new Date().toISOString(),
+  }].slice(-100);
+  profile.detailLoadedByThread[threadId] = true;
+}
+
+function agentRuntimeThreadLabel(thread) {
+  const stateLabel = safeDashboardDisplayText(thread?.lifecycle, "idle", { limit: 80 });
+  return `${thread?.archived ? "[คลัง] " : ""}${thread?.title || "Thread"} • ${stateLabel}`;
+}
+
+function applyAgentRuntimeThreadPayload(profile, payload, subject) {
+  const threadPayload = payload?.thread && typeof payload.thread === "object" ? payload.thread : payload;
+  const normalized = normalizeAgentRuntimeThread(threadPayload, profile.agentId);
+  if (!normalized) return null;
+  const existingIndex = profile.threads.findIndex((thread) => thread.id === normalized.id);
+  if (existingIndex >= 0) profile.threads.splice(existingIndex, 1, normalized);
+  else profile.threads.unshift(normalized);
+  const messages = threadPayload.messages || threadPayload.turns || payload?.messages || payload?.turns;
+  if (Array.isArray(messages)) {
+    profile.messagesByThread[normalized.id] = normalizeAgentRuntimeMessages(messages, subject);
+    profile.detailLoadedByThread[normalized.id] = true;
+  }
+  const activities = threadPayload.activities
+    || threadPayload.activityTimeline
+    || threadPayload.events
+    || payload?.activities
+    || payload?.activityTimeline
+    || payload?.events;
+  if (Array.isArray(activities)) {
+    profile.activitiesByThread[normalized.id] = normalizeAgentRuntimeActivities(activities);
+    if (!Array.isArray(messages)) {
+      const conversationEvents = activities.filter((event) => (
+        event
+        && typeof event === "object"
+        && (
+          (
+            ["user", "human", "operator", "assistant", "agent"].includes(String(event.role || "").toLowerCase())
+            && typeof event.content === "string"
+          )
+          || agentRuntimeArtifactsFromItem(event).length > 0
+        )
+      ));
+      profile.messagesByThread[normalized.id] = normalizeAgentRuntimeMessages(conversationEvents, subject);
+      profile.detailLoadedByThread[normalized.id] = true;
+    }
+  }
+  return normalized;
+}
+
+async function loadAgentRuntimeThreadDetail(agentId, threadId, { render = true } = {}) {
+  const profile = getAgentRuntimeProfile(agentId);
+  const path = agentRuntimeThreadEndpoint(threadId);
+  if (!path) return null;
+  try {
+    const payload = await fetchJson(path, { timeoutMs: 12000 });
+    if (payload?.ok !== true) throw Object.assign(new Error("invalid_agent_runtime_thread"), { kind: "invalid_agent_runtime_thread" });
+    const thread = applyAgentRuntimeThreadPayload(profile, payload, getOfficeAgent(agentId));
+    if (!thread) throw Object.assign(new Error("invalid_agent_runtime_thread"), { kind: "invalid_agent_runtime_thread" });
+    if (profile.selectedThreadId === thread.id) {
+      profile.model = thread.model || profile.model;
+      profile.reasoning = thread.reasoning || profile.reasoning;
+      profile.mode = thread.mode || profile.mode;
+      await loadAgentRuntimePendingApproval(profile, thread.id, { render: false });
+    }
+    if (render && state.modal.open && state.modal.type === "agent" && state.modal.id === agentId) renderGameModal();
+    return thread;
+  } catch (error) {
+    if (!isAgentRuntimeEndpointUnavailable(error)) {
+      setAgentRuntimeProfileStatus(profile, "โหลดประวัติเธรดไม่สำเร็จ • ยังไม่ได้เปลี่ยนเป็นข้อมูลจำลอง", "error");
+    }
+    return null;
+  }
+}
+
+async function loadAgentRuntimeWorkspace(agentId, { force = false } = {}) {
+  const profile = getAgentRuntimeProfile(agentId);
+  if (profile.loading) return;
+  if (!force && profile.threadsLoaded && state.agentRuntime.statusLoaded && state.agentRuntime.modelsLoaded) {
+    renderAgentRuntimeConsole(getOfficeAgent(agentId));
+    return;
+  }
+  const requestId = ++profile.requestId;
+  profile.loading = true;
+  profile.runtimeEndpointUnavailable = false;
+  setAgentRuntimeProfileStatus(profile, "กำลังตรวจสอบ Runtime, โมเดล และประวัติเธรดจาก Backend", "working");
+  const [statusResult, modelsResult, threadsResult] = await Promise.allSettled([
+    fetchJson(AGENT_RUNTIME_STATUS_ENDPOINT, { timeoutMs: 12000 }),
+    fetchJson(AGENT_RUNTIME_MODELS_ENDPOINT, { timeoutMs: 12000 }),
+    fetchJson(`${AGENT_RUNTIME_THREADS_ENDPOINT}?agentId=${encodeURIComponent(agentId)}&includeArchived=true`, { timeoutMs: 12000 }),
+  ]);
+  if (requestId !== profile.requestId) return;
+
+  if (statusResult.status === "fulfilled") {
+    state.agentRuntime.status = normalizeAgentRuntimeStatus(statusResult.value);
+    state.agentRuntime.statusLoaded = true;
+  } else {
+    state.agentRuntime.status = normalizeAgentRuntimeStatus(null);
+    state.agentRuntime.statusLoaded = true;
+    profile.runtimeEndpointUnavailable = isAgentRuntimeEndpointUnavailable(statusResult.reason) || statusResult.reason?.kind === "fetch_timeout";
+  }
+
+  if (modelsResult.status === "fulfilled" && modelsResult.value?.ok === true) {
+    const modelSource = modelsResult.value.models || modelsResult.value.runtime?.modelOptions;
+    const reasoningSource = modelsResult.value.reasoningOptions
+      || modelsResult.value.reasoning
+      || modelsResult.value.runtime?.reasoningOptions;
+    state.agentRuntime.models = normalizeAgentRuntimeOptionList(modelSource);
+    state.agentRuntime.reasoningOptions = normalizeAgentRuntimeOptionList(reasoningSource, 20);
+    state.agentRuntime.modelsLoaded = true;
+    if (!profile.model) profile.model = state.agentRuntime.models.find((item) => item.isDefault && item.available)?.id || "";
+    if (!profile.reasoning) profile.reasoning = agentRuntimeDefaultReasoningForModel(profile.model);
+  } else {
+    const statusRuntime = statusResult.status === "fulfilled" && statusResult.value?.runtime;
+    state.agentRuntime.models = normalizeAgentRuntimeOptionList(statusRuntime?.modelOptions);
+    state.agentRuntime.reasoningOptions = normalizeAgentRuntimeOptionList(statusRuntime?.reasoningOptions, 20);
+    state.agentRuntime.modelsLoaded = true;
+    if (!profile.model) profile.model = state.agentRuntime.models.find((item) => item.isDefault && item.available)?.id || "";
+    if (!profile.reasoning) profile.reasoning = agentRuntimeDefaultReasoningForModel(profile.model);
+    if (modelsResult.status === "rejected") {
+      profile.runtimeEndpointUnavailable = profile.runtimeEndpointUnavailable || isAgentRuntimeEndpointUnavailable(modelsResult.reason);
+    }
+  }
+
+  if (threadsResult.status === "fulfilled" && threadsResult.value?.ok === true && Array.isArray(threadsResult.value.threads)) {
+    profile.threads = threadsResult.value.threads
+      .map((thread) => normalizeAgentRuntimeThread(thread, agentId))
+      .filter(Boolean)
+      .slice(0, 100);
+    profile.threadsLoaded = true;
+    if (!profile.threads.some((thread) => thread.id === profile.selectedThreadId)) {
+      profile.selectedThreadId = profile.threads[0]?.id || "";
+    }
+  } else {
+    profile.threads = [];
+    profile.threadsLoaded = true;
+    if (threadsResult.status === "rejected") {
+      profile.runtimeEndpointUnavailable = profile.runtimeEndpointUnavailable || isAgentRuntimeEndpointUnavailable(threadsResult.reason);
+    }
+  }
+
+  profile.loading = false;
+  const status = state.agentRuntime.status;
+  if (status?.chatReady) {
+    profile.message = status.message;
+    profile.tone = "ready";
+  } else if (profile.runtimeEndpointUnavailable) {
+    profile.mode = "chat";
+    profile.message = "Full Agent endpoint ยังไม่มีใน Backend เวอร์ชันนี้ • ใช้ limited_chat ผ่าน /api/agents/chat โดยไม่มี Computer Use, MCP หรือ Plugin";
+    profile.tone = "warning";
+  } else {
+    profile.message = status?.message || "Backend ยังไม่ยืนยันสิทธิ์ลงมือทำ • Frontend จึงไม่เปิด Tool";
+    profile.tone = status?.available ? "warning" : "error";
+  }
+  const selectedThread = getSelectedAgentRuntimeThread(profile);
+  if (selectedThread) {
+    profile.model = selectedThread.model || profile.model;
+    profile.reasoning = selectedThread.reasoning || profile.reasoning;
+    profile.mode = selectedThread.mode || profile.mode;
+    await loadAgentRuntimeThreadDetail(agentId, selectedThread.id, { render: false });
+  }
+  if (state.modal.open && state.modal.type === "agent" && state.modal.id === agentId) renderGameModal();
+  saveSessionSnapshot();
+}
+
+function setAgentRuntimeBadge(element, label, ready, unavailableLabel = "ยังไม่ยืนยัน", unavailableState = "unknown") {
+  if (!element) return;
+  element.textContent = `${label}: ${ready ? "พร้อม" : unavailableLabel}`;
+  element.dataset.state = ready ? "ready" : unavailableState;
+}
+
+function agentRuntimeCapabilityTruth(status) {
+  const chatReady = status?.available === true
+    && status?.executionEnabled === true
+    && status?.modeReadiness?.chat === true
+    && status?.chatReady === true;
+  const workspaceReady = chatReady
+    && status?.toolExecutionEnabled === true
+    && status?.modeReadiness?.workspace === true
+    && status?.capabilities?.workspace === true
+    && status?.approvalBrokerReady === true;
+  const fullReady = workspaceReady
+    && status?.fullAgentReady === true
+    && status?.modeReadiness?.full === true
+    && status?.capabilities?.computerUse === true
+    && status?.capabilities?.mcp === true
+    && status?.capabilities?.plugins === true;
+  return { chatReady, workspaceReady, fullReady };
+}
+
+function agentRuntimeLockPresentation(status, truth) {
+  if (truth.fullReady) {
+    return {
+      state: "ready",
+      reason: "Full Access ผ่าน Capability และ Approval Gate ครบแล้ว",
+      nextAction: "เลือก Full Agent หรือกดเปิด Full Access สำหรับ Agent ตัวนี้",
+    };
+  }
+  if (status?.available !== true) {
+    return {
+      state: "locked",
+      reason: "ยังไม่ได้รับสถานะ Agent Runtime ที่ตรวจสอบได้จาก Backend",
+      nextAction: "เปิด Local Runner แล้วกดรีเฟรชสถานะ โดย Frontend จะไม่เปิด Tool เอง",
+    };
+  }
+  if (!truth.chatReady) {
+    return {
+      state: "locked",
+      reason: "Runtime เชื่อมแล้ว แต่ Chat/Auth/Model ยังไม่พร้อมทำงาน",
+      nextAction: "ตรวจการลงชื่อเข้าใช้ Codex และรายการโมเดล แล้วกดรีเฟรชสถานะ",
+    };
+  }
+  const blockerLabels = (status?.activationBlockers || [])
+    .map((code) => AGENT_RUNTIME_BLOCKER_PRESENTATION[code])
+    .filter(Boolean);
+  if (status?.hasUnknownActivationBlocker === true) blockerLabels.push("Backend รายงานเงื่อนไขความปลอดภัยเพิ่มเติมที่ Frontend ไม่แสดงรายละเอียดดิบ");
+  if (!blockerLabels.length) {
+    if (status?.approvalBrokerReady !== true) blockerLabels.push(AGENT_RUNTIME_BLOCKER_PRESENTATION.approval_broker_not_ready);
+    if (status?.capabilities?.workspace !== true) blockerLabels.push(AGENT_RUNTIME_BLOCKER_PRESENTATION.workspace_not_ready);
+    if (status?.capabilities?.computerUse !== true) blockerLabels.push(AGENT_RUNTIME_BLOCKER_PRESENTATION.computer_use_not_ready);
+    if (status?.capabilities?.mcp !== true) blockerLabels.push(AGENT_RUNTIME_BLOCKER_PRESENTATION.mcp_not_ready);
+    if (status?.capabilities?.plugins !== true) blockerLabels.push(AGENT_RUNTIME_BLOCKER_PRESENTATION.plugins_not_ready);
+  }
+  return {
+    state: "locked",
+    reason: blockerLabels.slice(0, 3).join(" • ") || "Backend ยังไม่ยืนยัน Full Access",
+    nextAction: truth.workspaceReady
+      ? "รอ Backend ยืนยัน Computer Use, MCP และ Plugin ครบก่อนเปิด Full Access"
+      : "ใช้ Chat ได้ตามปกติ • ห้ามปลดล็อก Workspace/Full Access จนกว่า release ใหม่จะผ่าน safety sentinel",
+  };
+}
+
+function renderAgentRuntimeCapabilityMatrix(status, selectedThread) {
+  const truth = agentRuntimeCapabilityTruth(status);
+  if (els.modalAgentCapabilityMatrix) {
+    els.modalAgentCapabilityMatrix.replaceChildren();
+    [
+      {
+        id: "chat",
+        label: "Chat",
+        ready: truth.chatReady,
+        description: truth.chatReady
+          ? "สนทนาและวิเคราะห์รูปที่ Backend อนุญาต • ไม่มี Tool Call"
+          : "ยังไม่พร้อมส่ง Turn ผ่าน Codex App Server",
+      },
+      {
+        id: "workspace",
+        label: "Workspace",
+        ready: truth.workspaceReady,
+        description: truth.workspaceReady
+          ? "ไฟล์/Terminal ภายในขอบเขตพร้อม และทุกการเปลี่ยนแปลงต้องขออนุมัติครั้งเดียว"
+          : "ล็อก • ไม่มีการรันคำสั่งหรือแก้ไฟล์",
+      },
+      {
+        id: "full",
+        label: "Full Agent",
+        ready: truth.fullReady,
+        description: truth.fullReady
+          ? "Workspace + Computer Use + MCP/Plugin ผ่าน Backend ครบ"
+          : "ล็อก • ไม่ควบคุมคอม ไม่เรียก MCP/Plugin",
+      },
+    ].forEach((mode) => {
+      const row = document.createElement("article");
+      const copy = document.createElement("div");
+      const label = document.createElement("strong");
+      const description = document.createElement("span");
+      const stateLabel = document.createElement("b");
+      row.dataset.state = mode.ready ? "ready" : "locked";
+      row.dataset.active = String(selectedThread?.mode === mode.id);
+      row.setAttribute("role", "listitem");
+      label.textContent = mode.label;
+      description.textContent = mode.description;
+      stateLabel.textContent = mode.ready ? "พร้อม" : "ล็อก";
+      copy.append(label, description);
+      row.append(copy, stateLabel);
+      els.modalAgentCapabilityMatrix.appendChild(row);
+    });
+  }
+  const guidance = agentRuntimeLockPresentation(status, truth);
+  if (els.modalAgentLockGuidance) els.modalAgentLockGuidance.dataset.state = guidance.state;
+  if (els.modalAgentLockedReason) els.modalAgentLockedReason.textContent = guidance.reason;
+  if (els.modalAgentNextAction) els.modalAgentNextAction.textContent = `ขั้นตอนถัดไป: ${guidance.nextAction}`;
+  return truth;
+}
+
+function agentRuntimeThreadMetaText(thread) {
+  if (!thread) return "ยังไม่มีเธรดที่ Backend ยืนยัน";
+  const parts = [
+    thread.archived ? "อยู่ในคลัง • อ่านประวัติได้" : "พร้อมใช้งาน",
+    `สถานะ ${safeDashboardDisplayText(thread.lifecycle, "idle", { limit: 40 })}`,
+    Number.isFinite(thread.turnCount) ? `${thread.turnCount} Turn` : "",
+    Number.isFinite(thread.eventCount) ? `${thread.eventCount} Event` : "",
+    thread.updatedAt ? `อัปเดต ${formatThaiDateTime(thread.updatedAt)}` : "",
+  ].filter(Boolean);
+  return parts.join(" • ");
+}
+
+function populateAgentRuntimeSelect(select, options, selectedValue, placeholder) {
+  if (!select) return;
+  select.innerHTML = "";
+  const available = options.filter((item) => item.available);
+  if (!available.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = placeholder;
+    select.appendChild(option);
+    select.disabled = true;
+    return;
+  }
+  available.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.textContent = item.label;
+    select.appendChild(option);
+  });
+  const resolved = available.some((item) => item.id === selectedValue)
+    ? selectedValue
+    : available.find((item) => item.isDefault)?.id || available[0].id;
+  select.value = resolved;
+  select.disabled = false;
+}
+
+function renderAgentRuntimeActivity(profile) {
+  if (!els.modalAgentActivityTimeline) return;
+  els.modalAgentActivityTimeline.innerHTML = "";
+  const threadId = profile?.selectedThreadId || "";
+  const activities = threadId && Array.isArray(profile.activitiesByThread[threadId])
+    ? profile.activitiesByThread[threadId]
+    : [];
+  if (!activities.length) {
+    const empty = document.createElement("li");
+    empty.dataset.state = "empty";
+    empty.textContent = profile?.runtimeEndpointUnavailable
+      ? "limited_chat: ไม่มี Tool Call, Computer Use, MCP หรือ Plugin ในโหมดสำรอง"
+      : "ยังไม่มีกิจกรรมที่ Backend ยืนยัน — Frontend จะไม่สร้าง Tool Call จำลอง";
+    els.modalAgentActivityTimeline.appendChild(empty);
+    return;
+  }
+  activities.forEach((activity) => {
+    const item = document.createElement("li");
+    item.dataset.state = activity.status || "reported";
+    const label = document.createElement("span");
+    label.textContent = activity.label;
+    const meta = document.createElement("small");
+    meta.textContent = [activity.status, activity.time ? formatThaiDateTime(activity.time) : ""].filter(Boolean).join(" • ");
+    item.append(label, meta);
+    els.modalAgentActivityTimeline.appendChild(item);
+  });
+}
+
+function renderAgentRuntimeConsole(subject) {
+  if (!subject || !els.modalAgentRuntimeConsole) return;
+  const profile = getAgentRuntimeProfile(subject.id);
+  const status = state.agentRuntime.status;
+  const selectedThread = getSelectedAgentRuntimeThread(profile);
+  const capabilityTruth = agentRuntimeCapabilityTruth(status);
+  const chatReady = capabilityTruth.chatReady;
+  const fullAgentReady = capabilityTruth.fullReady;
+  if (els.modalAgentRuntimeState) {
+    els.modalAgentRuntimeState.textContent = profile.loading
+      ? "กำลังตรวจสอบ Backend"
+      : fullAgentReady
+        ? "Full Agent พร้อมจาก Backend"
+        : chatReady
+          ? "Chat พร้อม • Workspace/Computer/Full Access ล็อกโดย Backend"
+        : profile.runtimeEndpointUnavailable
+          ? "limited_chat"
+          : status?.available ? "เชื่อมแล้ว • ยังไม่เปิด Tool" : "ยังไม่ยืนยัน Runtime";
+    els.modalAgentRuntimeState.dataset.state = profile.loading
+      ? "checking"
+      : (fullAgentReady || chatReady) ? "ready" : profile.runtimeEndpointUnavailable ? "limited" : "unknown";
+  }
+  if (els.modalAgentRuntimeStatus) {
+    els.modalAgentRuntimeStatus.textContent = profile.message;
+    els.modalAgentRuntimeStatus.dataset.tone = profile.tone || "neutral";
+  }
+
+  if (els.modalAgentThreadSelect) {
+    els.modalAgentThreadSelect.innerHTML = "";
+    if (profile.threads.length) {
+      profile.threads.forEach((thread) => {
+        const option = document.createElement("option");
+        option.value = thread.id;
+        option.textContent = agentRuntimeThreadLabel(thread);
+        els.modalAgentThreadSelect.appendChild(option);
+      });
+      els.modalAgentThreadSelect.value = profile.selectedThreadId;
+    } else {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = profile.loading
+        ? "กำลังโหลดประวัติ..."
+        : profile.runtimeEndpointUnavailable ? "แชทจำกัดปัจจุบัน (ไม่ใช่ Full Agent Thread)" : "ยังไม่มีเธรด";
+      els.modalAgentThreadSelect.appendChild(option);
+    }
+    els.modalAgentThreadSelect.disabled = profile.loading || profile.actionInFlight || !profile.threads.length;
+  }
+  if (els.modalAgentThreadMeta) els.modalAgentThreadMeta.textContent = agentRuntimeThreadMetaText(selectedThread);
+  if (els.modalAgentRefreshThread) {
+    els.modalAgentRefreshThread.disabled = profile.loading || profile.actionInFlight;
+    els.modalAgentRefreshThread.title = selectedThread
+      ? "อ่านสถานะ Runtime โมเดล เธรด และ Approval ล่าสุดจาก Backend"
+      : "อ่านสถานะ Runtime และรายการเธรดล่าสุดจาก Backend";
+  }
+  if (els.modalAgentNewThread) els.modalAgentNewThread.disabled = profile.loading || profile.actionInFlight;
+  if (els.modalAgentArchiveThread) {
+    const revisionReady = Number.isSafeInteger(selectedThread?.revision) && selectedThread.revision >= 0;
+    const canToggleArchive = selectedThread?.archived === true || selectedThread?.canArchive === true;
+    els.modalAgentArchiveThread.textContent = selectedThread?.archived === true ? "นำออกจากคลัง" : "เก็บเธรด";
+    els.modalAgentArchiveThread.disabled = profile.actionInFlight || !revisionReady || !canToggleArchive;
+    els.modalAgentArchiveThread.title = !revisionReady
+      ? "ต้องโหลด revision ล่าสุดจาก Backend ก่อน"
+      : selectedThread?.archived === true
+        ? "นำเธรดนี้ออกจากคลังและกลับมาใช้งาน"
+        : selectedThread?.canArchive === true
+          ? "เก็บเธรดนี้เข้าคลังโดยไม่ลบประวัติ"
+          : "Backend ยังไม่ยืนยันสิทธิ์เก็บเธรด";
+  }
+
+  populateAgentRuntimeSelect(els.modalAgentModelSelect, state.agentRuntime.models, profile.model, "รอรายการโมเดลจาก Backend");
+  if (els.modalAgentModelSelect && !els.modalAgentModelSelect.disabled) profile.model = els.modalAgentModelSelect.value;
+  const modelReasoningOptions = agentRuntimeReasoningOptionsForModel(profile.model);
+  populateAgentRuntimeSelect(els.modalAgentReasoningSelect, modelReasoningOptions, profile.reasoning, "รอระดับการคิดจาก Backend");
+  if (els.modalAgentReasoningSelect && !els.modalAgentReasoningSelect.disabled) profile.reasoning = els.modalAgentReasoningSelect.value;
+  const settingsLocked = Boolean(selectedThread && selectedThread.canUpdateSettings !== true);
+  if (settingsLocked) {
+    if (els.modalAgentModelSelect) els.modalAgentModelSelect.disabled = true;
+    if (els.modalAgentReasoningSelect) els.modalAgentReasoningSelect.disabled = true;
+  }
+
+  if (els.modalAgentCapabilityMode) {
+    [...els.modalAgentCapabilityMode.options].forEach((option) => {
+      const definition = AGENT_RUNTIME_CAPABILITY_MODES.find((item) => item.id === option.value);
+      const ready = option.value === "chat" || status?.modeReadiness?.[option.value] === true;
+      option.disabled = !ready;
+      if (definition) option.textContent = `${definition.label} — ${ready ? definition.description : "ล็อกโดย Backend"}`;
+    });
+    els.modalAgentCapabilityMode.value = AGENT_RUNTIME_CAPABILITY_MODES.some((item) => item.id === profile.mode)
+      ? profile.mode
+      : "chat";
+    els.modalAgentCapabilityMode.disabled = profile.actionInFlight || settingsLocked;
+  }
+  renderAgentRuntimeCapabilityMatrix(status, selectedThread);
+  if (els.modalAgentFullAccessButton) {
+    const fullAccessActive = fullAgentReady && profile.mode === "full";
+    els.modalAgentFullAccessButton.textContent = fullAccessActive
+      ? "Full Access · ON"
+      : fullAgentReady ? "เปิด Full Access" : "Full Access · Locked";
+    els.modalAgentFullAccessButton.dataset.state = fullAccessActive ? "active" : fullAgentReady ? "ready" : "locked";
+    els.modalAgentFullAccessButton.setAttribute("aria-pressed", String(fullAccessActive));
+    els.modalAgentFullAccessButton.setAttribute("aria-disabled", String(!fullAgentReady || settingsLocked));
+    els.modalAgentFullAccessButton.disabled = profile.actionInFlight || !fullAgentReady || settingsLocked;
+  }
+  if (els.modalAgentFullAccessHelp) {
+    els.modalAgentFullAccessHelp.textContent = fullAgentReady
+      ? profile.mode === "full"
+        ? "Full Access เปิดสำหรับ Agent ตัวนี้แล้ว แต่ทุกคำสั่งเสี่ยงสูงยังต้องผ่าน Approval Gate"
+        : "Backend ยืนยัน Full Agent แล้ว กดเพื่อเปิดเฉพาะ Agent ตัวนี้"
+      : "Locked • Chat ใช้ได้ แต่ Backend ปิด Workspace, Computer Use, MCP/Plugin และ Full Access เพราะยังไม่ผ่าน Safety Gate";
+  }
+
+  setAgentRuntimeBadge(els.modalAgentRuntimeBadge, "Chat Runtime", chatReady, status?.available ? "ยังไม่เปิด Chat" : "ยังไม่ยืนยัน");
+  setAgentRuntimeBadge(els.modalAgentWorkspaceBadge, "Workspace", status?.capabilities?.workspace === true, "ล็อก", "locked");
+  setAgentRuntimeBadge(els.modalAgentComputerUseBadge, "Computer Use", status?.capabilities?.computerUse === true, "ล็อก", "locked");
+  setAgentRuntimeBadge(els.modalAgentMcpBadge, "MCP", status?.capabilities?.mcp === true, "ล็อก", "locked");
+  setAgentRuntimeBadge(els.modalAgentPluginBadge, "Plugin", status?.capabilities?.plugins === true, "ล็อก", "locked");
+  setAgentRuntimeBadge(els.modalAgentAttachmentBadge, "แนบไฟล์", status?.attachments?.inputReady === true);
+  setAgentRuntimeBadge(els.modalAgentArtifactBadge, "ไฟล์ผลลัพธ์", status?.attachments?.outputReady === true);
+  renderAgentRuntimeApproval(profile, selectedThread);
+  renderAgentRuntimeActivity(profile);
+
+  if (els.modalAgentStopButton) {
+    // Stop remains available while an approval POST is settling.  Backend
+    // cancelRequested is authoritative and converts any uncommitted accept to
+    // decline before the SDK interrupt is sent.
+    els.modalAgentStopButton.disabled = profile.interruptInFlight || selectedThread?.canInterrupt !== true;
+    els.modalAgentStopButton.title = selectedThread?.canInterrupt === true
+      ? "ส่งคำขอ Interrupt ไปยัง Backend"
+      : "Backend ยังไม่ยืนยันว่าเธรดนี้หยุดได้";
+  }
+  if (els.modalAgentContinueButton) {
+    els.modalAgentContinueButton.disabled = profile.actionInFlight || selectedThread?.canContinue !== true;
+    els.modalAgentContinueButton.title = selectedThread?.canContinue === true
+      ? "ส่ง Turn ขอทำงานต่อจากสถานะล่าสุด"
+      : "Backend ยังไม่ยืนยันว่าเธรดนี้ทำต่อได้";
+  }
+}
+
+function startNewLimitedAgentChat(subject, profile) {
+  delete state.agentChat.sessionIds[subject.id];
+  state.chatLog = state.chatLog.filter((line) => !(line.scopeType === "agent" && line.scopeId === subject.id));
+  profile.selectedThreadId = "";
+  getAgentChatSessionId(subject.id);
+  pushChatLine({
+    scopeType: "agent",
+    scopeId: subject.id,
+    speaker: subject.name,
+    text: getAgentSpeech(subject.id, "idle"),
+    side: "agent",
+  });
+  setAgentRuntimeProfileStatus(
+    profile,
+    "เริ่ม limited_chat ใหม่แล้ว • โหมดนี้ไม่ใช้ Workspace, Computer Use, MCP หรือ Plugin",
+    "warning",
+  );
+  renderGameModal();
+}
+
+async function createAgentRuntimeThread(subject) {
+  if (!subject) return null;
+  const profile = getAgentRuntimeProfile(subject.id);
+  if (profile.actionInFlight) return null;
+  if (profile.mode !== "chat" && !isAgentRuntimeModeReady(profile, profile.mode)) {
+    setAgentRuntimeProfileStatus(profile, "Backend ยังไม่ยืนยันโหมดนี้ จึงยังสร้าง Full Agent Thread ไม่ได้", "error");
+    return null;
+  }
+  if (profile.runtimeEndpointUnavailable) {
+    startNewLimitedAgentChat(subject, profile);
+    return null;
+  }
+  profile.actionInFlight = true;
+  setAgentRuntimeProfileStatus(profile, "กำลังขอสร้างเธรดถาวรจาก Backend", "working");
+  renderAgentRuntimeConsole(subject);
+  try {
+    const payload = await postJson(AGENT_RUNTIME_THREADS_ENDPOINT, {
+      agentId: subject.id,
+      title: `${subject.name} • ${new Date().toLocaleDateString("th-TH")}`,
+      model: profile.model || null,
+      reasoning: profile.reasoning || null,
+      mode: profile.mode || "chat",
+    });
+    if (payload?.ok !== true) throw Object.assign(new Error("invalid_agent_runtime_thread"), { kind: "invalid_agent_runtime_thread" });
+    const thread = applyAgentRuntimeThreadPayload(profile, payload, subject);
+    if (!thread) throw Object.assign(new Error("invalid_agent_runtime_thread"), { kind: "invalid_agent_runtime_thread" });
+    profile.selectedThreadId = thread.id;
+    profile.pendingApproval = null;
+    profile.approvalDecisionAttempt = null;
+    profile.threadsLoaded = true;
+    profile.message = `สร้างเธรด ${thread.title} แล้ว • รอคำสั่งจากคุณ`;
+    profile.tone = "ready";
+    await loadAgentRuntimeThreadDetail(subject.id, thread.id, { render: false });
+    saveSessionSnapshot();
+    return thread;
+  } catch (error) {
+    if (profile.mode === "chat" && isAgentRuntimeEndpointUnavailable(error)) {
+      profile.runtimeEndpointUnavailable = true;
+      startNewLimitedAgentChat(subject, profile);
+      return null;
+    }
+    setAgentRuntimeProfileStatus(profile, "สร้าง Full Agent Thread ไม่สำเร็จ • ระบบไม่ได้สร้างเธรดจำลอง", "error");
+    return null;
+  } finally {
+    profile.actionInFlight = false;
+    if (state.modal.open && state.modal.type === "agent" && state.modal.id === subject.id) renderGameModal();
+  }
+}
+
+async function archiveSelectedAgentRuntimeThread(subject) {
+  if (!subject) return;
+  const profile = getAgentRuntimeProfile(subject.id);
+  const thread = getSelectedAgentRuntimeThread(profile);
+  const path = agentRuntimeThreadEndpoint(thread?.id, "/archive");
+  const revisionReady = Number.isSafeInteger(thread?.revision) && thread.revision >= 0;
+  const nextArchived = thread?.archived !== true;
+  const canToggleArchive = thread?.archived === true || thread?.canArchive === true;
+  if (!path || !revisionReady || !canToggleArchive || profile.actionInFlight) {
+    if (thread && !revisionReady) {
+      setAgentRuntimeProfileStatus(profile, "ยังไม่มี revision ล่าสุด จึงไม่เปลี่ยนสถานะคลัง กรุณารีเฟรชก่อน", "warning");
+    }
+    return;
+  }
+  profile.actionInFlight = true;
+  setAgentRuntimeProfileStatus(
+    profile,
+    nextArchived ? "กำลังขอเก็บเธรดเข้าคลัง" : "กำลังขอนำเธรดออกจากคลัง",
+    "working",
+  );
+  try {
+    const payload = await postJson(path, {
+      archived: nextArchived,
+      expectedRevision: thread.revision,
+    });
+    if (payload?.ok !== true) throw Object.assign(new Error("archive_not_confirmed"), { kind: "archive_not_confirmed" });
+    const updated = applyAgentRuntimeThreadPayload(profile, payload, subject);
+    if (!updated || updated.archived !== nextArchived) {
+      throw Object.assign(new Error("archive_not_confirmed"), { kind: "archive_not_confirmed" });
+    }
+    profile.selectedThreadId = updated.id;
+    profile.pendingApproval = null;
+    profile.approvalDecisionAttempt = null;
+    profile.message = nextArchived
+      ? "Backend ยืนยันว่าเก็บเธรดเข้าคลังแล้ว • ประวัติยังเปิดอ่านและนำกลับมาใช้ได้"
+      : "Backend ยืนยันให้นำเธรดออกจากคลังและกลับมาใช้งานแล้ว";
+    profile.tone = "ready";
+    saveSessionSnapshot();
+  } catch (error) {
+    if (error?.kind === "revision_conflict" || error?.code === "revision_conflict") {
+      await loadAgentRuntimeThreadDetail(subject.id, thread.id, { render: false });
+      setAgentRuntimeProfileStatus(profile, "Thread เปลี่ยนจากอีกคำขอแล้ว • โหลด revision ล่าสุดให้แล้ว กรุณาตรวจสอบก่อนลองใหม่", "warning");
+    } else {
+      setAgentRuntimeProfileStatus(profile, "Backend ยังไม่ยืนยันการเปลี่ยนสถานะคลัง • รายการเดิมยังคงอยู่", "error");
+    }
+  } finally {
+    profile.actionInFlight = false;
+    if (state.modal.open && state.modal.type === "agent" && state.modal.id === subject.id) renderGameModal();
+  }
+}
+
+async function saveAgentRuntimeThreadSettings(subject, changedField, value) {
+  if (!subject) return;
+  const profile = getAgentRuntimeProfile(subject.id);
+  const previous = profile[changedField];
+  const previousReasoning = profile.reasoning;
+  if (changedField === "mode" && !AGENT_RUNTIME_CAPABILITY_MODES.some((item) => item.id === value)) return;
+  profile[changedField] = String(value || "").slice(0, changedField === "model" ? 120 : 40);
+  if (changedField === "model") {
+    profile.reasoning = agentRuntimeDefaultReasoningForModel(profile.model);
+  }
+  const thread = getSelectedAgentRuntimeThread(profile);
+  if (thread && thread.canUpdateSettings !== true) {
+    profile[changedField] = previous;
+    if (changedField === "model") profile.reasoning = previousReasoning;
+    setAgentRuntimeProfileStatus(profile, "Backend ยังไม่อนุญาตให้เปลี่ยนการตั้งค่าขณะเธรดกำลังทำงาน", "warning");
+    return;
+  }
+  if (thread && (!Number.isSafeInteger(thread.revision) || thread.revision < 0)) {
+    profile[changedField] = previous;
+    if (changedField === "model") profile.reasoning = previousReasoning;
+    setAgentRuntimeProfileStatus(profile, "ยังไม่มี revision ล่าสุด จึงไม่บันทึกการตั้งค่า กรุณารีเฟรชก่อน", "warning");
+    return;
+  }
+  saveSessionSnapshot();
+  if (!thread || profile.runtimeEndpointUnavailable) {
+    if (changedField === "mode" && profile.mode !== "chat") profile.mode = "chat";
+    renderAgentRuntimeConsole(subject);
+    return;
+  }
+  const path = agentRuntimeThreadEndpoint(thread.id, "/settings");
+  if (!path || profile.actionInFlight) return;
+  profile.actionInFlight = true;
+  setAgentRuntimeProfileStatus(profile, "กำลังบันทึกการตั้งค่าเธรดกับ Backend", "working");
+  try {
+    const payload = await postJson(path, {
+      model: profile.model || null,
+      reasoning: profile.reasoning || null,
+      mode: profile.mode || "chat",
+      expectedRevision: thread.revision,
+    });
+    if (payload?.ok !== true) throw Object.assign(new Error("settings_not_confirmed"), { kind: "settings_not_confirmed" });
+    const updated = applyAgentRuntimeThreadPayload(profile, payload, subject);
+    if (updated) {
+      profile.model = updated.model || profile.model;
+      profile.reasoning = updated.reasoning || profile.reasoning;
+      profile.mode = updated.mode || profile.mode;
+    }
+    profile.message = "Backend ยืนยันการตั้งค่าเธรดแล้ว";
+    profile.tone = "ready";
+    saveSessionSnapshot();
+  } catch (error) {
+    profile[changedField] = previous;
+    if (changedField === "model") profile.reasoning = previousReasoning;
+    if (error?.kind === "revision_conflict" || error?.code === "revision_conflict") {
+      await loadAgentRuntimeThreadDetail(subject.id, thread.id, { render: false });
+      profile.message = "Thread เปลี่ยนจากอีกคำขอแล้ว • โหลด revision ล่าสุดให้แล้ว กรุณาตรวจสอบก่อนลองใหม่";
+      profile.tone = "warning";
+    } else {
+      profile.message = "Backend ไม่ยืนยันการตั้งค่า • ระบบคืนค่าเดิมแล้ว";
+      profile.tone = "error";
+    }
+  } finally {
+    profile.actionInFlight = false;
+    if (state.modal.open && state.modal.type === "agent" && state.modal.id === subject.id) renderGameModal();
+  }
+}
+
+async function interruptAgentRuntimeThread(subject) {
+  if (!subject) return;
+  const profile = getAgentRuntimeProfile(subject.id);
+  const thread = getSelectedAgentRuntimeThread(profile);
+  const path = agentRuntimeThreadEndpoint(thread?.id, "/interrupt");
+  if (!path || thread?.canInterrupt !== true || profile.interruptInFlight) return;
+  profile.interruptInFlight = true;
+  setAgentRuntimeProfileStatus(profile, "กำลังส่งคำขอหยุดไปยัง Backend", "working");
+  try {
+    const payload = await postJson(path, {});
+    if (payload?.ok !== true) throw Object.assign(new Error("interrupt_not_confirmed"), { kind: "interrupt_not_confirmed" });
+    applyAgentRuntimeThreadPayload(profile, payload, subject);
+    profile.message = "Backend ยืนยันคำขอหยุดแล้ว • กำลังอ่านสถานะล่าสุด";
+    profile.tone = "ready";
+    await loadAgentRuntimeThreadDetail(subject.id, thread.id, { render: false });
+  } catch {
+    setAgentRuntimeProfileStatus(profile, "Backend ยังไม่ยืนยันการหยุด • Frontend จะไม่แสดงว่าหยุดสำเร็จ", "error");
+  } finally {
+    profile.interruptInFlight = false;
+    if (state.modal.open && state.modal.type === "agent" && state.modal.id === subject.id) renderGameModal();
+  }
+}
+
+function validateAgentRuntimeTurnResponse(payload, subject, expectedThreadId, knownEventIds = new Set()) {
+  if (payload?.ok !== true) throw Object.assign(new Error("invalid_agent_runtime_turn"), { kind: "invalid_agent_runtime_turn" });
+  const returnedThreadId = String(payload.threadId || payload.thread?.id || expectedThreadId || "");
+  if (returnedThreadId !== expectedThreadId) {
+    throw Object.assign(new Error("agent_runtime_thread_mismatch"), { kind: "agent_runtime_thread_mismatch" });
+  }
+  const turnId = String(payload.turn?.id || payload.activeTurn?.id || payload.thread?.activeTurn?.id || "").slice(0, 180);
+  const events = agentRuntimeEventsFromPayload(payload);
+  const persistedReply = agentRuntimePersistedReply(events, turnId, knownEventIds);
+  const persistedArtifacts = agentRuntimePersistedArtifacts(events, turnId, knownEventIds);
+  const reply = safeAgentChatReplyText(
+    persistedReply || payload.reply || payload.turn?.reply || payload.outputText || payload.message || "",
+    "",
+  );
+  const lifecycle = String(
+    payload.turn?.status
+    || payload.lifecycle
+    || payload.status
+    || payload.thread?.activeTurn?.status
+    || payload.thread?.lifecycle
+    || payload.thread?.status
+    || "",
+  ).trim().toLowerCase();
+  const acceptedWithoutReply = ["accepted", "queued", "running", "interrupt_requested", "waiting_approval", "interrupted"].includes(lifecycle);
+  if (!reply && !persistedArtifacts.length && !acceptedWithoutReply) {
+    throw Object.assign(new Error("invalid_agent_runtime_turn"), { kind: "invalid_agent_runtime_turn" });
+  }
+  return {
+    turnId,
+    reply,
+    persistedReply,
+    persistedArtifacts,
+    lifecycle,
+    acceptedWithoutReply,
+    events,
+    messages: payload.messages || payload.thread?.messages || payload.turns || payload.thread?.turns,
+    activities: payload.activities || payload.activityTimeline || payload.events || payload.thread?.activities || payload.thread?.events,
+    thread: payload.thread || null,
+  };
+}
+
+async function pollAgentRuntimeTurn(subject, profile, threadId, {
+  turnId,
+  knownEventIds = new Set(),
+} = {}) {
+  const path = agentRuntimeThreadEndpoint(threadId);
+  if (!path) throw createAgentRuntimeTurnError("agent_runtime_thread_not_ready", "ไม่พบเธรดที่ต้องติดตาม");
+  const startedAt = Date.now();
+  let consecutiveReadErrors = 0;
+  let lastLifecycle = "queued";
+
+  while (Date.now() - startedAt < AGENT_RUNTIME_TURN_POLL_TIMEOUT_MS) {
+    const beforeDelayRemaining = AGENT_RUNTIME_TURN_POLL_TIMEOUT_MS - (Date.now() - startedAt);
+    await waitForAgentRuntimePollDelay(Math.min(AGENT_RUNTIME_TURN_POLL_INTERVAL_MS, Math.max(0, beforeDelayRemaining)));
+    const remaining = AGENT_RUNTIME_TURN_POLL_TIMEOUT_MS - (Date.now() - startedAt);
+    if (remaining <= 0) break;
+
+    let payload;
+    try {
+      payload = await fetchJson(path, { timeoutMs: Math.max(1, Math.min(12000, remaining)) });
+      if (payload?.ok !== true) {
+        throw Object.assign(new Error("invalid_agent_runtime_thread"), { kind: "invalid_agent_runtime_thread" });
+      }
+      consecutiveReadErrors = 0;
+    } catch (error) {
+      consecutiveReadErrors += 1;
+      profile.message = `อ่านสถานะ Turn ไม่สำเร็จ (${consecutiveReadErrors}/3) • ระบบไม่ได้ส่ง Turn ซ้ำ`;
+      profile.tone = "warning";
+      setAgentChatStatus(subject.id, profile.message, "working");
+      if (state.modal.open && state.modal.type === "agent" && state.modal.id === subject.id) renderGameModal();
+      if (consecutiveReadErrors >= 3 || isAgentRuntimeEndpointUnavailable(error)) {
+        throw createAgentRuntimeTurnError(
+          "agent_runtime_turn_status_unavailable",
+          "อ่านสถานะ Full Agent Turn จาก Backend ไม่สำเร็จ จึงยังยืนยันไม่ได้ว่างานเสร็จ ระบบไม่ได้ส่งคำสั่งซ้ำ",
+        );
+      }
+      continue;
+    }
+
+    const rawThread = payload.thread && typeof payload.thread === "object" ? payload.thread : payload;
+    if (String(rawThread.id || rawThread.threadId || "") !== threadId) {
+      throw createAgentRuntimeTurnError("agent_runtime_thread_mismatch", "Backend ส่งสถานะกลับมาคนละเธรด ระบบจึงหยุดติดตาม");
+    }
+    const thread = applyAgentRuntimeThreadPayload(profile, payload, subject);
+    if (!thread) {
+      throw createAgentRuntimeTurnError("invalid_agent_runtime_thread", "Backend ส่งข้อมูลเธรดไม่ครบ ระบบจึงหยุดติดตาม");
+    }
+    await loadAgentRuntimePendingApproval(profile, threadId, { render: false });
+
+    const events = agentRuntimeEventsFromPayload(payload);
+    const persistedReply = agentRuntimePersistedReply(events, turnId, knownEventIds);
+    const persistedArtifacts = agentRuntimePersistedArtifacts(events, turnId, knownEventIds);
+    const persistedFailure = agentRuntimePersistedFailure(events, turnId, knownEventIds);
+    const activeTurn = rawThread.activeTurn && typeof rawThread.activeTurn === "object" ? rawThread.activeTurn : null;
+    const activeTurnMatches = Boolean(activeTurn && (!turnId || String(activeTurn.id || "") === turnId));
+    const activeStatus = activeTurnMatches ? String(activeTurn.status || "").trim().toLowerCase() : "";
+    const lifecycle = String(thread.lifecycle || activeStatus || "idle").trim().toLowerCase();
+    const effectiveStatus = activeStatus || lifecycle;
+    const isActive = activeTurnMatches && ["accepted", "queued", "running", "interrupt_requested", "waiting_approval"].includes(activeStatus);
+    const isFailed = ["failed", "cancelled", "canceled", "interrupted", "aborted"].includes(effectiveStatus);
+    const isTerminal = !isActive && (["idle", "completed", "failed", "cancelled", "canceled", "interrupted", "aborted"].includes(lifecycle)
+      || ["completed", "failed", "cancelled", "canceled", "interrupted", "aborted"].includes(activeStatus));
+    lastLifecycle = effectiveStatus || lastLifecycle;
+
+    if (persistedFailure || isFailed) {
+      const failureMessage = persistedFailure?.message
+        || safeAgentChatReplyText(
+          latestAgentRuntimeEvent(events, (event) => (
+            String(event.role || "").toLowerCase() === "system"
+            && agentRuntimeEventMatchesTurn(event, turnId, knownEventIds)
+          ))?.content,
+          `Full Agent Turn สิ้นสุดด้วยสถานะ ${effectiveStatus || "failed"}`,
+        );
+      profile.message = failureMessage;
+      profile.tone = "error";
+      setAgentChatStatus(subject.id, failureMessage, "error");
+      if (state.modal.open && state.modal.type === "agent" && state.modal.id === subject.id) renderGameModal();
+      if (isTerminal || persistedFailure) {
+        throw createAgentRuntimeTurnError(persistedFailure?.code || "agent_runtime_turn_failed", failureMessage);
+      }
+    } else {
+      profile.message = profile.pendingApproval
+        ? "Turn ยังทำงานอยู่ • รอการตัดสินใจคำขอ Tool แบบครั้งเดียว"
+        : isActive
+          ? `Turn กำลังทำงาน • สถานะ ${effectiveStatus} • ปุ่มหยุดจะเปิดเมื่อ Backend อนุญาต`
+        : `Backend อัปเดต Turn เป็น ${effectiveStatus || "กำลังตรวจสอบ"}`;
+      profile.tone = isActive ? "working" : "neutral";
+      setAgentChatStatus(subject.id, profile.message, isActive ? "working" : "neutral");
+      if (state.modal.open && state.modal.type === "agent" && state.modal.id === subject.id) renderGameModal();
+    }
+
+    if (isTerminal) {
+      if (persistedReply || persistedArtifacts.length) {
+        profile.message = "Turn เสร็จแล้ว • โหลดคำตอบที่ Backend บันทึกไว้เรียบร้อย";
+        profile.tone = "ready";
+        return { handled: true, reply: persistedReply, artifacts: persistedArtifacts, lifecycle: "completed", completed: true };
+      }
+      const systemEvent = latestAgentRuntimeEvent(events, (event) => (
+        String(event.role || "").toLowerCase() === "system"
+        && agentRuntimeEventMatchesTurn(event, turnId, knownEventIds)
+      ));
+      const systemDetail = typeof systemEvent?.content === "string" ? ` • ${safeAgentChatReplyText(systemEvent.content, "")}` : "";
+      profile.message = `Backend ปิด Turn แล้วแต่ไม่มีคำตอบของ Agent ที่บันทึกไว้${systemDetail}`;
+      profile.tone = "error";
+      if (state.modal.open && state.modal.type === "agent" && state.modal.id === subject.id) renderGameModal();
+      throw createAgentRuntimeTurnError(
+        "agent_runtime_reply_missing",
+        profile.message,
+      );
+    }
+  }
+
+  profile.message = `หมดเวลาติดตาม Turn ที่สถานะ ${lastLifecycle} • ยังยืนยันผลไม่ได้และระบบไม่ได้ส่งคำสั่งซ้ำ`;
+  profile.tone = "warning";
+  if (state.modal.open && state.modal.type === "agent" && state.modal.id === subject.id) renderGameModal();
+  throw createAgentRuntimeTurnError(
+    "agent_runtime_turn_poll_timeout",
+    "Full Agent Turn ยังไม่ยืนยันผลภายในเวลาติดตาม 9 นาที ระบบไม่ได้ส่งคำสั่งซ้ำ กรุณาดูสถานะเธรดก่อนดำเนินการต่อ",
+  );
+}
+
+async function postAgentRuntimeTurn(subject, message, { continuation = false, attachmentIds = [] } = {}) {
+  const profile = getAgentRuntimeProfile(subject.id);
+  if (!isAgentRuntimeModeReady(profile, profile.mode)) {
+    if (profile.mode === "chat" && profile.runtimeEndpointUnavailable) return { handled: false };
+    throw Object.assign(new Error("agent_runtime_mode_not_ready"), { kind: "agent_runtime_mode_not_ready" });
+  }
+  let thread = getSelectedAgentRuntimeThread(profile);
+  if (!thread) thread = await createAgentRuntimeThread(subject);
+  if (!thread) {
+    if (profile.mode === "chat" && profile.runtimeEndpointUnavailable) return { handled: false };
+    throw Object.assign(new Error("agent_runtime_thread_not_ready"), { kind: "agent_runtime_thread_not_ready" });
+  }
+  const path = agentRuntimeThreadEndpoint(thread.id, "/turn");
+  if (!path) throw Object.assign(new Error("agent_runtime_thread_not_ready"), { kind: "agent_runtime_thread_not_ready" });
+  if (!profile.detailLoadedByThread[thread.id]) {
+    await loadAgentRuntimeThreadDetail(subject.id, thread.id, { render: false });
+    thread = getSelectedAgentRuntimeThread(profile) || thread;
+  }
+  const knownEventIds = new Set(
+    (profile.activitiesByThread[thread.id] || []).map((activity) => String(activity?.id || "")).filter(Boolean),
+  );
+  try {
+    const safeAttachmentIds = [...new Set((Array.isArray(attachmentIds) ? attachmentIds : [])
+      .map((value) => String(value || ""))
+      .filter((value) => /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,179}$/.test(value)))]
+      .slice(0, AGENT_RUNTIME_ATTACHMENT_HARD_MAX_FILES);
+    const payload = await postJson(path, {
+      message,
+      attachmentIds: safeAttachmentIds,
+      idempotencyKey: createAgentChatOpaqueId(continuation ? "agent-runtime-continue" : "agent-runtime-turn"),
+    });
+    const validated = validateAgentRuntimeTurnResponse(payload, subject, thread.id, knownEventIds);
+    if (validated.thread) applyAgentRuntimeThreadPayload(profile, payload, subject);
+    if (Array.isArray(validated.messages)) {
+      profile.messagesByThread[thread.id] = normalizeAgentRuntimeMessages(validated.messages, subject);
+      profile.detailLoadedByThread[thread.id] = true;
+    }
+    if (Array.isArray(validated.activities)) profile.activitiesByThread[thread.id] = normalizeAgentRuntimeActivities(validated.activities);
+    const initialFailure = agentRuntimePersistedFailure(validated.events, validated.turnId, knownEventIds);
+    const terminalFailure = ["failed", "cancelled", "canceled", "interrupted", "aborted"].includes(validated.lifecycle);
+    if (initialFailure || terminalFailure) {
+      const failureMessage = initialFailure?.message || validated.reply || `Full Agent Turn สิ้นสุดด้วยสถานะ ${validated.lifecycle}`;
+      profile.message = failureMessage;
+      profile.tone = "error";
+      if (state.modal.open && state.modal.type === "agent" && state.modal.id === subject.id) renderGameModal();
+      throw createAgentRuntimeTurnError(
+        initialFailure?.code || "agent_runtime_turn_failed",
+        failureMessage,
+      );
+    }
+    if (state.modal.open && state.modal.type === "agent" && state.modal.id === subject.id) renderGameModal();
+    const asynchronous = ["accepted", "queued", "running", "interrupt_requested", "waiting_approval"].includes(validated.lifecycle);
+    if (asynchronous || (!validated.persistedReply && !validated.persistedArtifacts.length)) {
+      profile.message = `Backend รับ Turn แล้ว • สถานะ ${validated.lifecycle || "queued"} • กำลังติดตามผลที่บันทึกจริง`;
+      profile.tone = "working";
+      return await pollAgentRuntimeTurn(subject, profile, thread.id, {
+        turnId: validated.turnId,
+        knownEventIds,
+      });
+    }
+    return {
+      handled: true,
+      reply: validated.persistedReply,
+      artifacts: validated.persistedArtifacts,
+      lifecycle: "completed",
+      completed: true,
+    };
+  } catch (error) {
+    if (profile.mode === "chat" && isAgentRuntimeEndpointUnavailable(error)) {
+      profile.runtimeEndpointUnavailable = true;
+      profile.selectedThreadId = "";
+      setAgentRuntimeProfileStatus(
+        profile,
+        "Turn endpoint ยังไม่มี • สลับเป็น limited_chat โดยไม่อ้างว่า Tool ทำงาน",
+        "warning",
+      );
+      return { handled: false };
+    }
+    throw error;
+  }
+}
+
+async function continueAgentRuntimeThread(subject) {
+  if (!subject) return;
+  const profile = getAgentRuntimeProfile(subject.id);
+  const thread = getSelectedAgentRuntimeThread(profile);
+  if (!thread || thread.canContinue !== true || profile.actionInFlight) return;
+  profile.actionInFlight = true;
+  setAgentRuntimeProfileStatus(profile, "กำลังส่ง Turn ขอทำงานต่อจากสถานะล่าสุด", "working");
+  try {
+    const result = await postAgentRuntimeTurn(subject, "ดำเนินงานต่อจากสถานะล่าสุด", { continuation: true });
+    if (result.handled !== true) throw Object.assign(new Error("continue_not_confirmed"), { kind: "continue_not_confirmed" });
+    profile.message = result.completed
+      ? "Agent ทำ Turn ต่อและส่งคำตอบกลับแล้ว"
+      : `Backend รับคำขอทำต่อแล้ว • สถานะ ${result.lifecycle || "กำลังตรวจสอบ"}`;
+    profile.tone = result.completed ? "ready" : "working";
+  } catch {
+    profile.message = "Backend ยังไม่ยืนยันการทำต่อ • ไม่มีการแสดงผลสำเร็จจำลอง";
+    profile.tone = "error";
+  } finally {
+    profile.actionInFlight = false;
+    if (state.modal.open && state.modal.type === "agent" && state.modal.id === subject.id) renderGameModal();
+  }
+}
+
 function setAgentChatStatus(agentId, message, tone = "neutral") {
   state.agentChat.agentId = agentId || null;
   state.agentChat.message = safeDashboardDisplayText(message, "กำลังตรวจสอบสถานะแชท");
-  state.agentChat.tone = ["neutral", "working", "ready", "error"].includes(tone) ? tone : "neutral";
+  state.agentChat.tone = ["neutral", "working", "ready", "warning", "error"].includes(tone) ? tone : "neutral";
   if (state.modal.open && state.modal.type === "agent" && state.modal.id === agentId && els.modalChatStatus) {
     els.modalChatStatus.textContent = state.agentChat.message;
     els.modalChatStatus.dataset.tone = state.agentChat.tone;
@@ -34502,6 +37173,9 @@ async function syncAgentChatCreatedTasks(subject, validated) {
 
 function agentChatErrorMessage(error) {
   const kind = String(error?.body?.kind || error?.kind || "").trim().toLowerCase();
+  if (typeof error?.userMessage === "string" && error.userMessage.trim()) {
+    return safeAgentChatReplyText(error.userMessage, "Full Agent Turn ไม่สำเร็จ");
+  }
   if (error?.status === 429 || ["rate_limited", "codex_limit_reached"].includes(kind)) {
     return "โควตา Codex ยังไม่พร้อมสำหรับข้อความนี้ กรุณารอตามเวลาที่ระบบกำหนดแล้วลองใหม่";
   }
@@ -34529,6 +37203,24 @@ function agentChatErrorMessage(error) {
   if (kind === "invalid_agent_chat_response") {
     return "Backend ส่งผลแชทกลับมาไม่ครบตามสัญญาความปลอดภัย จึงไม่แสดงคำตอบนี้";
   }
+  if (["agent_runtime_mode_not_ready", "agent_runtime_thread_not_ready"].includes(kind)) {
+    return "Full Agent Runtime ยังไม่พร้อมสำหรับโหมดนี้ ระบบจึงไม่ส่งคำสั่งไปยัง Tool และไม่ลดระดับสิทธิ์โดยอัตโนมัติ";
+  }
+  if (["invalid_agent_runtime_turn", "agent_runtime_thread_mismatch"].includes(kind)) {
+    return "Backend ส่งผล Full Agent กลับมาไม่ครบหรือไม่ตรงเธรด ระบบจึงหยุดแสดงผลเพื่อป้องกันประวัติผิดห้อง";
+  }
+  if (kind === "agent_runtime_turn_poll_timeout") {
+    return "Full Agent Turn ยังไม่ยืนยันผลภายในเวลาติดตาม ระบบไม่ได้ส่งคำสั่งซ้ำ กรุณาดูสถานะเธรดก่อนดำเนินการต่อ";
+  }
+  if (["attachment_upload_not_ready", "attachment_turn_endpoint_unavailable"].includes(kind)) {
+    return "Backend ยังไม่ยืนยันช่องทางแนบไฟล์สำหรับเธรดนี้ ระบบจึงไม่ส่งไฟล์และไม่ลดระดับไปใช้ limited_chat";
+  }
+  if (["attachment_read_failed", "attachment_read_cancelled", "attachment_encode_failed"].includes(kind)) {
+    return "อ่านไฟล์ที่เลือกไม่สำเร็จ ไฟล์ยังไม่ถูกส่ง กรุณานำไฟล์ออกแล้วเลือกใหม่";
+  }
+  if (kind === "attachment_upload_not_confirmed") {
+    return "Backend ยังไม่ยืนยันว่าไฟล์อัปโหลดและพร้อมส่งเข้าโมเดล จึงยังไม่เริ่ม Turn";
+  }
   if (error?.status >= 500) {
     return "Agent ยังตอบไม่ได้เพราะ Local Runner มีปัญหาชั่วคราว กรุณาเปิด Mission Table ตรวจว่ามี Task ถูกสร้างไว้หรือไม่ก่อนส่งข้อความซ้ำ";
   }
@@ -34538,6 +37230,16 @@ function agentChatErrorMessage(error) {
 async function handleModalSend() {
   const subject = getModalSubject();
   if (!subject || state.modal.type !== "agent" || state.agentChat.inFlight) return;
+  const runtimeProfile = getAgentRuntimeProfile(subject.id);
+  if (runtimeProfile.loading || runtimeProfile.actionInFlight) {
+    setAgentChatStatus(subject.id, "กรุณารอให้การตรวจ Full Agent Runtime หรือคำขอก่อนหน้าเสร็จก่อน", "working");
+    return;
+  }
+  if (runtimeProfile.mode !== "chat" && !isAgentRuntimeModeReady(runtimeProfile, runtimeProfile.mode)) {
+    setAgentChatStatus(subject.id, "Backend ยังไม่ยืนยันโหมดนี้ จึงยังไม่ส่งข้อความหรือเรียก Tool", "error");
+    renderGameModal();
+    return;
+  }
   const prompt = getPromptFromModal();
   if (!prompt) {
     setAgentChatStatus(subject.id, "กรุณาพิมพ์ข้อความที่ต้องการคุยกับ Agent ก่อนส่ง", "error");
@@ -34549,13 +37251,11 @@ async function handleModalSend() {
     renderGameModal();
     return;
   }
-  pushChatLine({
-    scopeType: state.modal.type,
-    scopeId: subject.id,
-    speaker: "คุณ",
-    text: prompt,
-    side: "user",
-  });
+  const attachmentDrafts = [...(runtimeProfile.attachmentDrafts || [])];
+  if (attachmentDrafts.length && (runtimeProfile.runtimeEndpointUnavailable || isMetatraderDiscoveryIntent(prompt))) {
+    setAgentChatStatus(subject.id, "ไฟล์แนบส่งได้เฉพาะ Agent Runtime ที่ Backend ยืนยัน ไม่ส่งผ่าน limited_chat หรือคำสั่งสแกน MT4/MT5", "error");
+    return;
+  }
 
   state.agentChat.inFlight = true;
   state.agentChat.agentId = subject.id;
@@ -34567,8 +37267,25 @@ async function handleModalSend() {
   setAgentChatStatus(subject.id, "Agent กำลังตอบและให้ Backend ตรวจว่าคำสั่งนี้ควรสร้าง Task หรือไม่", "working");
   setAgentSpeech(subject.id, "กำลังคิดคำตอบให้คุณครับ", "working");
   let reply = "";
+  let replyArtifacts = [];
+  let requestSubmitted = false;
   let openCentralMetatraderHub = false;
   try {
+    let attachmentIds = [];
+    let attachmentNames = [];
+    if (attachmentDrafts.length) {
+      setAgentChatStatus(subject.id, `กำลังอัปโหลด ${attachmentDrafts.length} ไฟล์ผ่าน Local Runner`, "working");
+      ({ attachmentIds, attachmentNames } = await uploadPendingAgentAttachments(subject));
+    }
+    pushChatLine({
+      scopeType: state.modal.type,
+      scopeId: subject.id,
+      speaker: "คุณ",
+      text: prompt,
+      attachmentNames,
+      side: "user",
+    });
+    requestSubmitted = true;
     if (isMetatraderDiscoveryIntent(prompt)) {
       setAgentChatStatus(subject.id, "กำลังส่งคำสั่งตรวจ MT4 / MT5 แบบอ่านอย่างเดียวไปยัง Local Runner โดยไม่ใช้โควตา Codex", "working");
       const result = await runMetatraderDiscoveryIntent(subject);
@@ -34582,6 +37299,32 @@ async function handleModalSend() {
         result.ok ? "ready" : "error",
       );
     } else {
+      const runtimeResult = await postAgentRuntimeTurn(subject, prompt, { attachmentIds });
+      if (runtimeResult.handled) {
+        replyArtifacts = normalizeAgentRuntimeArtifacts(runtimeResult.artifacts);
+        reply = runtimeResult.reply || (replyArtifacts.length ? "Agent ส่งรูปหรือไฟล์ผลลัพธ์ที่ Backend ยืนยันแล้ว" : "");
+        clearAgentAttachmentDrafts(runtimeProfile);
+        setAgentChatStatus(
+          subject.id,
+          runtimeResult.completed
+            ? replyArtifacts.length
+              ? `Agent Runtime ส่งคำตอบพร้อมไฟล์ผลลัพธ์ ${replyArtifacts.length} รายการ`
+              : runtimeProfile.mode === "chat"
+                ? "Chat Runtime ส่งคำตอบกลับแล้ว • โหมดนี้ไม่เปิด Tool"
+                : `${AGENT_RUNTIME_CAPABILITY_MODES.find((item) => item.id === runtimeProfile.mode)?.label || "Agent Runtime"} ส่งคำตอบกลับแล้ว`
+            : `Backend รับ Turn แล้ว • สถานะ ${runtimeResult.lifecycle || "กำลังตรวจสอบ"}`,
+          runtimeResult.completed ? "ready" : "working",
+        );
+        runtimeProfile.message = runtimeResult.completed
+          ? "Turn เสร็จแล้ว • โหมด Chat นี้ไม่เปิด Tool"
+          : `Turn อยู่ในสถานะ ${runtimeResult.lifecycle || "กำลังตรวจสอบ"}`;
+        runtimeProfile.tone = runtimeResult.completed ? "ready" : "working";
+        void refreshCodexRateLimits({ manual: true });
+        saveSessionSnapshot();
+      } else {
+      if (attachmentIds.length) {
+        throw Object.assign(new Error("attachment_turn_endpoint_unavailable"), { kind: "attachment_turn_endpoint_unavailable" });
+      }
       const response = await postJson(AGENT_CHAT_ENDPOINT, {
         agentId: subject.id,
         message: prompt,
@@ -34602,8 +37345,13 @@ async function handleModalSend() {
           "ready",
         );
       }
+      runtimeProfile.message = validated.toolsExecuted
+        ? "Backend แบบเก่ารายงานว่ามี Tool ทำงาน แต่หน้า limited_chat จะไม่ยกระดับเป็น Full Agent โดยไม่มี Runtime contract"
+        : "limited_chat ตอบแล้ว • ไม่มี Computer Use, MCP หรือ Plugin";
+      runtimeProfile.tone = validated.toolsExecuted ? "warning" : "ready";
       void refreshCodexRateLimits({ manual: true });
       saveSessionSnapshot();
+      }
     }
   } catch (error) {
     reply = agentChatErrorMessage(error);
@@ -34611,14 +37359,20 @@ async function handleModalSend() {
   } finally {
     state.agentChat.inFlight = false;
     renderAgentStatusPanel();
-    state.modal.lastPrompt = "";
-    if (els.modalCommandInput) els.modalCommandInput.value = "";
-    setAgentSpeech(subject.id, reply, "talking");
-    pushChatLine({ scopeType: "agent", scopeId: subject.id, speaker: subject.name, text: reply, side: "agent" });
-    if (els.modalSendButton) {
-      els.modalSendButton.disabled = false;
-      els.modalSendButton.textContent = "คุยกับ Codex";
+    if (requestSubmitted) {
+      state.modal.lastPrompt = "";
+      if (els.modalCommandInput) els.modalCommandInput.value = "";
     }
+    setAgentSpeech(subject.id, reply, "talking");
+    pushChatLine({
+      scopeType: "agent",
+      scopeId: subject.id,
+      speaker: subject.name,
+      text: reply,
+      artifacts: replyArtifacts,
+      side: "agent",
+    });
+    renderAgentComposer(subject);
     if (openCentralMetatraderHub) openGlobalMetatraderHubFromDevice();
     else renderGameModal();
   }
@@ -37729,19 +40483,29 @@ els.globalMetatraderScan?.addEventListener("click", () => {
   void scanGlobalMetatraderHub();
 });
 
+els.globalMetatraderPlatformChoice?.addEventListener("change", (event) => {
+  const radio = event.target.closest('input[name="globalMetatraderPlatform"]');
+  if (!radio?.checked) return;
+  setGlobalMetatraderPlatformChoice(radio.value, { focusTerminal: true });
+});
+
 els.globalMetatraderMt4Select?.addEventListener("change", () => {
+  state.globalMetatraderHub.platformChoice = "MT4";
+  state.globalMetatraderHub.platformChoiceTouched = true;
   state.globalMetatraderHub.choices.MT4 = String(els.globalMetatraderMt4Select.value || "");
   state.globalMetatraderHub.message = state.globalMetatraderHub.choices.MT4
-    ? "เลือก MT4 แล้ว • กดปุ่มสีเขียวเพื่อส่งค่าให้ทั้ง 3 ระบบ"
+    ? "เลือก MT4 ไว้แต่ยังไม่บันทึก • กดปุ่มสีเขียวเพื่อส่งค่าให้ทั้ง 3 ระบบ"
     : "กรุณาเลือก MT4 ที่ต้องการใช้";
   state.globalMetatraderHub.tone = "neutral";
   renderGlobalMetatraderHubControl();
 });
 
 els.globalMetatraderMt5Select?.addEventListener("change", () => {
+  state.globalMetatraderHub.platformChoice = "MT5";
+  state.globalMetatraderHub.platformChoiceTouched = true;
   state.globalMetatraderHub.choices.MT5 = String(els.globalMetatraderMt5Select.value || "");
   state.globalMetatraderHub.message = state.globalMetatraderHub.choices.MT5
-    ? "เลือก MT5 แล้ว • กดปุ่มสีเขียวเพื่อส่งค่าให้โรงงานและห้องทดลอง"
+    ? "เลือก MT5 ไว้แต่ยังไม่บันทึก • กดปุ่มสีเขียวเพื่อส่งค่าให้ทั้ง 3 ระบบ"
     : "กรุณาเลือก MT5 ที่ต้องการใช้";
   state.globalMetatraderHub.tone = "neutral";
   renderGlobalMetatraderHubControl();
@@ -38167,6 +40931,128 @@ els.modalCommandInput?.addEventListener("input", () => {
   state.modal.lastPrompt = els.modalCommandInput.value;
 });
 
+els.modalCommandInput?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  if (!els.modalSendButton?.disabled) void handleModalSend();
+});
+
+els.modalAgentAttachButton?.addEventListener("click", () => {
+  if (els.modalAgentAttachButton.disabled) return;
+  els.modalAgentAttachmentInput?.click();
+});
+
+els.modalAgentAttachmentInput?.addEventListener("change", () => {
+  const subject = getModalSubject();
+  if (!subject || state.modal.type !== "agent") return;
+  addAgentAttachmentDrafts(subject, els.modalAgentAttachmentInput.files);
+  els.modalAgentAttachmentInput.value = "";
+});
+
+els.modalAgentThreadSelect?.addEventListener("change", async () => {
+  const subject = getModalSubject();
+  if (!subject || state.modal.type !== "agent") return;
+  const profile = getAgentRuntimeProfile(subject.id);
+  const threadId = String(els.modalAgentThreadSelect.value || "");
+  if (!profile.threads.some((thread) => thread.id === threadId)) return;
+  profile.selectedThreadId = threadId;
+  profile.pendingApproval = null;
+  profile.approvalDecisionAttempt = null;
+  const thread = getSelectedAgentRuntimeThread(profile);
+  profile.model = thread?.model || profile.model;
+  profile.reasoning = thread?.reasoning || profile.reasoning;
+  profile.mode = thread?.mode || profile.mode;
+  profile.message = `กำลังโหลดประวัติ ${thread?.title || "Thread"}`;
+  profile.tone = "working";
+  renderGameModal();
+  await loadAgentRuntimeThreadDetail(subject.id, threadId);
+  saveSessionSnapshot();
+});
+
+els.modalAgentNewThread?.addEventListener("click", () => {
+  const subject = getModalSubject();
+  if (state.modal.type !== "agent") return;
+  void createAgentRuntimeThread(subject);
+});
+
+els.modalAgentRefreshThread?.addEventListener("click", () => {
+  const subject = getModalSubject();
+  if (!subject || state.modal.type !== "agent") return;
+  const profile = getAgentRuntimeProfile(subject.id);
+  setAgentRuntimeProfileStatus(profile, "กำลังอ่านสถานะ Runtime, เธรด และ Approval ล่าสุดจาก Backend", "working");
+  renderAgentRuntimeConsole(subject);
+  void loadAgentRuntimeWorkspace(subject.id, { force: true });
+});
+
+els.modalAgentArchiveThread?.addEventListener("click", () => {
+  const subject = getModalSubject();
+  if (state.modal.type !== "agent") return;
+  void archiveSelectedAgentRuntimeThread(subject);
+});
+
+els.modalAgentModelSelect?.addEventListener("change", () => {
+  const subject = getModalSubject();
+  if (state.modal.type !== "agent") return;
+  void saveAgentRuntimeThreadSettings(subject, "model", els.modalAgentModelSelect.value);
+});
+
+els.modalAgentReasoningSelect?.addEventListener("change", () => {
+  const subject = getModalSubject();
+  if (state.modal.type !== "agent") return;
+  void saveAgentRuntimeThreadSettings(subject, "reasoning", els.modalAgentReasoningSelect.value);
+});
+
+els.modalAgentCapabilityMode?.addEventListener("change", () => {
+  const subject = getModalSubject();
+  if (state.modal.type !== "agent") return;
+  void saveAgentRuntimeThreadSettings(subject, "mode", els.modalAgentCapabilityMode.value);
+});
+
+els.modalAgentFullAccessButton?.addEventListener("click", () => {
+  const subject = getModalSubject();
+  if (!subject || state.modal.type !== "agent") return;
+  const profile = getAgentRuntimeProfile(subject.id);
+  const selectedThread = getSelectedAgentRuntimeThread(profile);
+  const fullAgentReady = agentRuntimeCapabilityTruth(state.agentRuntime.status).fullReady;
+  if (!fullAgentReady) {
+    setAgentRuntimeProfileStatus(
+      profile,
+      "Full Access ยัง Locked • Backend ยังไม่ยืนยันความสามารถและ Approval Gate ครบ จึงไม่มีการข้ามสิทธิ์",
+      "warning",
+    );
+    return;
+  }
+  if (selectedThread && selectedThread.canUpdateSettings !== true) {
+    setAgentRuntimeProfileStatus(profile, "เธรดกำลังทำงานอยู่ จึงยังเปลี่ยน Full Access ไม่ได้", "warning");
+    return;
+  }
+  void saveAgentRuntimeThreadSettings(subject, "mode", profile.mode === "full" ? "chat" : "full");
+});
+
+els.modalAgentStopButton?.addEventListener("click", () => {
+  const subject = getModalSubject();
+  if (state.modal.type !== "agent") return;
+  void interruptAgentRuntimeThread(subject);
+});
+
+els.modalAgentContinueButton?.addEventListener("click", () => {
+  const subject = getModalSubject();
+  if (state.modal.type !== "agent") return;
+  void continueAgentRuntimeThread(subject);
+});
+
+els.modalAgentApprovalDecline?.addEventListener("click", () => {
+  const subject = getModalSubject();
+  if (state.modal.type !== "agent") return;
+  void resolveAgentRuntimeApproval(subject, "decline");
+});
+
+els.modalAgentApprovalAccept?.addEventListener("click", () => {
+  const subject = getModalSubject();
+  if (state.modal.type !== "agent") return;
+  void resolveAgentRuntimeApproval(subject, "accept_once");
+});
+
 els.modalSendButton?.addEventListener("click", handleModalSend);
 els.modalAssignButton?.addEventListener("click", handleModalAssignTask);
 els.modalMeetingButton?.addEventListener("click", async () => {
@@ -38227,31 +41113,8 @@ els.modalDashboardRefreshConnections?.addEventListener("click", () => {
   void refreshDashboardConnections(state.modal.id);
 });
 
-els.modalAiTradeMt4OpenGlobal?.addEventListener("click", (event) => {
+els.modalAiTradeOpenGlobal?.addEventListener("click", (event) => {
   openGlobalMetatraderHubFromDevice(event);
-});
-
-els.modalAiTradeMt4QuickCopy?.addEventListener("click", async () => {
-  const channelId = signalSnapshotChannel(state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {});
-  if (!channelId) return;
-  try {
-    await navigator.clipboard.writeText(channelId);
-    if (els.modalAiTradeMt4QuickStatus) {
-      els.modalAiTradeMt4QuickStatus.dataset.tone = "success";
-      els.modalAiTradeMt4QuickStatus.textContent = "คัดลอก Channel ID แล้ว • วางในช่อง SnapshotChannel ของ EA ได้เลย";
-    }
-  } catch {
-    const range = document.createRange();
-    const selection = window.getSelection();
-    range.selectNodeContents(els.modalAiTradeMt4QuickChannel);
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    els.modalAiTradeMt4QuickChannel.focus();
-    if (els.modalAiTradeMt4QuickStatus) {
-      els.modalAiTradeMt4QuickStatus.dataset.tone = "neutral";
-      els.modalAiTradeMt4QuickStatus.textContent = "เลือก Channel ID ให้แล้ว • กด Ctrl+C เพื่อคัดลอก";
-    }
-  }
 });
 
 els.modalKanbanSearch?.addEventListener("input", () => {

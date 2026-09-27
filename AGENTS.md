@@ -25,7 +25,7 @@ Metafxclub AI Agent HQ เป็น Visual Office แบบ Local-first:
 5. ตรวจว่ามี `1-INSTALL-HQ.bat` และ `installer/install.ps1` อยู่จริง หากขาดไฟล์ใด ให้ถือว่า Source ไม่สมบูรณ์และหยุดอย่างปลอดภัย
 6. ก่อนหยุด Bridge เดิม คัดลอกไฟล์ หรือสร้าง Runtime ให้เรียก `installer/install.ps1 -ListAvailableEndpoints` ซึ่งเป็นการตรวจแบบอ่านอย่างเดียว
 7. ถ้า Prompt ยืนยัน `127.0.0.1:4186` ล่วงหน้าแล้ว ให้ตรวจว่า candidate นี้มี `available: true` และส่ง `-Port 4186 -EndpointConfirmed` ได้โดยไม่ถามซ้ำ หากไม่ว่างให้หยุด ห้ามสลับ Port หรือปิด Process อื่นเอง
-8. เรียก `installer/install.ps1` โดยตรงเพียงรอบเดียวโดยไม่ส่ง `GoogleClientJsonPath` หรือ `ExpectedGoogleClientId`; Installer ต้องตรวจและใช้ native-app client configuration กลางจาก `backend/local-runner/google_oauth_native_client.txt` เอง ห้ามสร้างขั้นตอน `pip install`, คัดลอก `.venv` หรือนำเข้า Credential เอง หาก Client กลางไม่พร้อมให้หยุดและรายงานว่า Release ไม่สมบูรณ์ ห้ามขอ JSON หรือ Client ID จากนักเรียนมาแก้แบบเงียบ ๆ
+8. เรียก `installer/install.ps1` โดยตรงเพียงรอบเดียวพร้อม `-ResetGoogleOAuthToCentralRelease` และไม่ส่ง `GoogleClientJsonPath` หรือ `ExpectedGoogleClientId`; Installer ต้องลบเฉพาะ Advanced/Recovery OAuth override กับ authorization เก่าที่ไม่ตรง Client กลางของ Windows User นี้แบบ fail-closed แล้วตรวจและใช้ native-app client configuration กลางจาก `backend/local-runner/google_oauth_native_client.txt` เอง หากเป็น authorization ที่ผูกกับ Client กลางรุ่นเดียวกันอยู่แล้วต้องเก็บไว้ ห้ามสร้างขั้นตอน `pip install`, คัดลอก `.venv` หรือนำเข้า Credential เอง หาก Client กลางไม่พร้อม มี Environment override ขัดแย้ง หรือผลสุดท้ายไม่ใช่ `central_release` ให้หยุดและรายงานว่า Release/เครื่องยังไม่ผ่าน ห้ามขอ JSON หรือ Client ID จากนักเรียนมาแก้แบบเงียบ ๆ
 9. ตรวจสถานะด้วย `scripts/status-local-bridge.cmd` จาก Runtime ที่ติดตั้งจริง
 10. อ่าน `health_url` จาก `data/runtime/bridge-endpoint.json` และตรวจว่า Health ส่ง `ok: true`, `status: "ready"`, Host/Port ตรงกับไฟล์
 11. ตรวจหน้าเว็บ, Google Client status ว่า `clientConfigured=true` และผลติดตั้งเป็น `ready_central` จาก `central_release`, Scheduled Task, Codex login และ Rate Limit ตามเกณฑ์ใน Prompt โดยไม่แสดงค่า Client เต็ม
@@ -62,7 +62,7 @@ $health | Select-Object ok, status, agentCount, agentRosterComplete, version
 - URL ใน `data/runtime/bridge-endpoint.json` เปิดได้
 - URL/Port ตรงกับค่าที่ผู้ใช้ยืนยัน
 - มีรายงานสถานะ Codex และ Rate Limit ของบัญชีเครื่องนี้ หรือแจ้ง `auth_required`/`config_error` อย่างชัดเจน
-- `data/runtime/install-result.json` มีเฉพาะสถานะที่อนุญาตและไม่เก็บข้อมูลระบุตัวบัญชี
+- `data/runtime/install-result.json` ของเส้นทางห้องเรียนต้องเป็น `ready_central` จาก `central_release` เท่านั้น มีเฉพาะสถานะที่อนุญาตและไม่เก็บข้อมูลระบุตัวบัญชี
 - ไม่มีการเปิด Live Trading, Telegram จริง หรือ Real execution ใดระหว่างการติดตั้ง
 
 รายงานผลให้นักเรียนด้วยภาษาง่าย ๆ โดยระบุเวอร์ชัน ตำแหน่งโปรแกรม สถานะ Bridge, Health และลิงก์เปิดใช้งาน หากยังมี `auth_required` ของ Codex ให้แยกเป็น “ขั้นตอน Login บัญชีของนักเรียน” ไม่ควรกล่าวว่าการติดตั้ง HQ ล้มเหลวหากส่วน Demo และ Health พร้อมแล้ว

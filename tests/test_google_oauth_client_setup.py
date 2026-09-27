@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from unittest import mock
 from urllib.parse import parse_qs
@@ -61,6 +61,55 @@ def central_native_client(
     client_secret: str = CLIENT_SECRET,
 ) -> str:
     return f"client_id={client_id}\nclient_secret={client_secret}\n"
+
+
+@contextmanager
+def isolated_central_oauth_store():
+    """Provide deterministic encrypted OAuth artifacts and a valid release client."""
+
+    with tempfile.TemporaryDirectory(prefix="mfxhq-central-migration-") as directory:
+        root = Path(directory)
+        credential_root = root / "credentials"
+        refresh_path = credential_root / "google-sheets-refresh.dpapi"
+        client_path = credential_root / "google-oauth-client.dpapi"
+        central_path = root / "google_oauth_native_client.txt"
+        central_path.write_text(central_native_client(), encoding="utf-8")
+        with (
+            mock.patch.object(hub, "GOOGLE_OAUTH_NATIVE_CLIENT_PATH", central_path),
+            mock.patch.object(store, "credential_path", return_value=refresh_path),
+            mock.patch.object(
+                store,
+                "client_configuration_path",
+                return_value=client_path,
+            ),
+            mock.patch.object(
+                store,
+                "_protect",
+                side_effect=lambda value: b"refresh-cipher:" + value[::-1],
+            ),
+            mock.patch.object(
+                store,
+                "_unprotect",
+                side_effect=lambda value: value.removeprefix(b"refresh-cipher:")[::-1],
+            ),
+            mock.patch.object(
+                store,
+                "_protect_client_configuration",
+                side_effect=lambda value: b"client-cipher:" + value[::-1],
+            ),
+            mock.patch.object(
+                store,
+                "_unprotect_client_configuration",
+                side_effect=lambda value: value.removeprefix(b"client-cipher:")[::-1],
+            ),
+            mock.patch.dict(os.environ, {}, clear=True),
+        ):
+            yield {
+                "refreshPath": refresh_path,
+                "clientPath": client_path,
+                "centralPath": central_path,
+                "central": hub._central_release_oauth_client(),
+            }
 
 
 class GoogleOAuthClientStoreTests(unittest.TestCase):
@@ -199,6 +248,97 @@ class GoogleOAuthClientStoreTests(unittest.TestCase):
                     ),
                     refresh,
                 )
+
+    def test_oauth_artifact_cleanup_restores_refresh_when_client_delete_fails(self) -> None:
+        refresh = "ROLLBACK_REFRESH_TOKEN_MUST_NOT_LEAK"
+        custom_secret = "ROLLBACK_CLIENT_SECRET_MUST_NOT_LEAK"
+        with isolated_central_oauth_store() as isolated:
+            generation = store.save_client_configuration(
+                OTHER_CLIENT_ID,
+                custom_secret,
+            )
+            store.save_refresh_token(
+                refresh,
+                client_generation=generation,
+            )
+            refresh_before = isolated["refreshPath"].read_bytes()
+            client_before = isolated["clientPath"].read_bytes()
+            failure = store.SecureStoreError(
+                "secure_store_delete_failed",
+                "safe generic client delete failure",
+            )
+
+            with (
+                store.oauth_store_transaction(),
+                mock.patch.object(
+                    store,
+                    "delete_client_configuration",
+                    side_effect=failure,
+                ) as delete_client,
+            ):
+                with self.assertRaises(store.SecureStoreError) as caught:
+                    store.remove_oauth_artifacts_with_rollback(
+                        remove_refresh=True,
+                        remove_client=True,
+                    )
+
+            self.assertEqual(caught.exception.code, "secure_store_delete_failed")
+            delete_client.assert_called_once_with()
+            self.assertEqual(isolated["refreshPath"].read_bytes(), refresh_before)
+            self.assertEqual(isolated["clientPath"].read_bytes(), client_before)
+            self.assertEqual(
+                store.load_client_configuration(),
+                {"clientId": OTHER_CLIENT_ID, "clientSecret": custom_secret},
+            )
+            self.assertEqual(
+                store.load_refresh_token(expected_client_generation=generation),
+                refresh,
+            )
+
+    def test_oauth_artifact_cleanup_reports_incomplete_rollback_fail_closed(self) -> None:
+        refresh = "INCOMPLETE_ROLLBACK_REFRESH_MUST_NOT_LEAK"
+        custom_secret = "INCOMPLETE_ROLLBACK_SECRET_MUST_NOT_LEAK"
+        with isolated_central_oauth_store():
+            generation = store.save_client_configuration(
+                OTHER_CLIENT_ID,
+                custom_secret,
+            )
+            store.save_refresh_token(
+                refresh,
+                client_generation=generation,
+            )
+            delete_failure = store.SecureStoreError(
+                "secure_store_delete_failed",
+                "safe generic client delete failure",
+            )
+            restore_failure = store.SecureStoreError(
+                "secure_store_write_failed",
+                "safe generic restore failure",
+            )
+
+            with (
+                store.oauth_store_transaction(),
+                mock.patch.object(
+                    store,
+                    "delete_client_configuration",
+                    side_effect=delete_failure,
+                ),
+                mock.patch.object(
+                    store,
+                    "_write_protected_payload",
+                    side_effect=restore_failure,
+                ),
+            ):
+                with self.assertRaises(store.SecureStoreError) as caught:
+                    store.remove_oauth_artifacts_with_rollback(
+                        remove_refresh=True,
+                        remove_client=True,
+                    )
+
+            self.assertEqual(caught.exception.code, "secure_store_rollback_failed")
+            serialized = f"{caught.exception.code}:{caught.exception.message}"
+            self.assertNotIn(refresh, serialized)
+            self.assertNotIn(custom_secret, serialized)
 
 
 class GoogleOAuthClientParserTests(unittest.TestCase):
@@ -522,6 +662,225 @@ class GoogleOAuthClientConfigurationTests(unittest.TestCase):
                 hub.remove_google_oauth_client_configuration({})
         delete_client.assert_not_called()
 
+    def test_central_migration_rejects_environment_override_before_mutation(self) -> None:
+        environment_names = (
+            "METAFX_GOOGLE_OAUTH_CLIENT_ID",
+            "METAFX_GOOGLE_OAUTH_CLIENT_SECRET",
+            "METAFX_GOOGLE_OAUTH_REFRESH_TOKEN",
+            "METAFX_GOOGLE_SHEETS_ACCESS_TOKEN",
+        )
+        for name in environment_names:
+            with self.subTest(name=name):
+                with (
+                    mock.patch.object(hub, "_central_release_oauth_client") as central,
+                    mock.patch.object(hub, "_invalidate_pending_oauth_flows") as invalidate,
+                    mock.patch.object(store, "remove_oauth_artifacts_with_rollback") as remove,
+                ):
+                    with self.assertRaises(hub.GoogleSheetHubError) as caught:
+                        hub.migrate_google_oauth_to_central_release({name: "active"})
+                self.assertEqual(
+                    caught.exception.code,
+                    "oauth_environment_override_active",
+                )
+                central.assert_not_called()
+                invalidate.assert_not_called()
+                remove.assert_not_called()
+
+    def test_central_migration_rejects_missing_release_before_mutation(self) -> None:
+        missing = {
+            "clientId": "",
+            "clientSecret": "",
+            "clientGeneration": "",
+            "source": "not_configured",
+        }
+        with (
+            mock.patch.object(
+                hub,
+                "_central_release_oauth_client",
+                return_value=missing,
+            ),
+            mock.patch.object(hub, "_invalidate_pending_oauth_flows") as invalidate,
+            mock.patch.object(store, "remove_oauth_artifacts_with_rollback") as remove,
+        ):
+            with self.assertRaises(hub.GoogleSheetHubError) as caught:
+                hub.migrate_google_oauth_to_central_release({})
+        self.assertEqual(
+            caught.exception.code,
+            "oauth_central_release_unavailable",
+        )
+        invalidate.assert_not_called()
+        remove.assert_not_called()
+
+    def test_central_migration_removes_custom_client_and_its_refresh_token(self) -> None:
+        refresh = "CUSTOM_OVERRIDE_REFRESH_TOKEN_MUST_NOT_LEAK"
+        custom_secret = "CUSTOM_OVERRIDE_CLIENT_SECRET_MUST_NOT_LEAK"
+        with isolated_central_oauth_store() as isolated:
+            custom_generation = store.save_client_configuration(
+                OTHER_CLIENT_ID,
+                custom_secret,
+            )
+            store.save_refresh_token(
+                refresh,
+                client_generation=custom_generation,
+            )
+            with hub._OAUTH_FLOW_LOCK:
+                hub._PENDING_OAUTH_FLOWS["obsolete-classroom-flow"] = {
+                    "verifier": "private"
+                }
+
+            result = hub.migrate_google_oauth_to_central_release()
+            resolved = hub.oauth_client_configuration()
+
+            self.assertFalse(isolated["clientPath"].exists())
+            self.assertFalse(isolated["refreshPath"].exists())
+            self.assertTrue(result["migrated"])
+            self.assertFalse(result["authorizationPreserved"])
+            self.assertEqual(result["store"], "central_release")
+            self.assertEqual(resolved["source"], "central_release")
+            self.assertEqual(resolved["clientId"], CLIENT_ID)
+            with hub._OAUTH_FLOW_LOCK:
+                self.assertEqual(hub._PENDING_OAUTH_FLOWS, {})
+            serialized = json.dumps(result)
+            for private_value in (
+                CLIENT_ID,
+                CLIENT_SECRET,
+                OTHER_CLIENT_ID,
+                custom_secret,
+                refresh,
+            ):
+                self.assertNotIn(private_value, serialized)
+
+    def test_central_migration_rolls_back_when_postcondition_rejects_source(self) -> None:
+        refresh = "POSTCONDITION_ROLLBACK_REFRESH_MUST_NOT_LEAK"
+        custom_secret = "POSTCONDITION_ROLLBACK_SECRET_MUST_NOT_LEAK"
+        with isolated_central_oauth_store() as isolated:
+            custom_generation = store.save_client_configuration(
+                OTHER_CLIENT_ID,
+                custom_secret,
+            )
+            store.save_refresh_token(
+                refresh,
+                client_generation=custom_generation,
+            )
+            refresh_before = isolated["refreshPath"].read_bytes()
+            client_before = isolated["clientPath"].read_bytes()
+            unexpected = {
+                "clientId": CLIENT_ID,
+                "clientSecret": CLIENT_SECRET,
+                "clientGeneration": isolated["central"]["clientGeneration"],
+                "source": "environment",
+            }
+
+            with mock.patch.object(
+                hub,
+                "oauth_client_configuration",
+                return_value=unexpected,
+            ):
+                with self.assertRaises(hub.GoogleSheetHubError) as caught:
+                    hub.migrate_google_oauth_to_central_release()
+
+            self.assertEqual(
+                caught.exception.code,
+                "oauth_central_release_not_selected",
+            )
+            self.assertEqual(isolated["refreshPath"].read_bytes(), refresh_before)
+            self.assertEqual(isolated["clientPath"].read_bytes(), client_before)
+            self.assertEqual(
+                store.load_refresh_token(
+                    expected_client_generation=custom_generation,
+                ),
+                refresh,
+            )
+            self.assertEqual(
+                store.load_client_configuration(),
+                {"clientId": OTHER_CLIENT_ID, "clientSecret": custom_secret},
+            )
+
+    def test_central_migration_preserves_refresh_bound_to_release_client(self) -> None:
+        refresh = "CENTRAL_BOUND_REFRESH_TOKEN_MUST_NOT_LEAK"
+        with isolated_central_oauth_store() as isolated:
+            central_generation = isolated["central"]["clientGeneration"]
+            store.save_refresh_token(
+                refresh,
+                client_generation=central_generation,
+            )
+
+            result = hub.migrate_google_oauth_to_central_release()
+
+            self.assertFalse(isolated["clientPath"].exists())
+            self.assertTrue(isolated["refreshPath"].is_file())
+            self.assertFalse(result["migrated"])
+            self.assertTrue(result["authorizationPreserved"])
+            self.assertEqual(result["store"], "central_release")
+            self.assertEqual(
+                store.load_refresh_token(
+                    expected_client_generation=central_generation,
+                ),
+                refresh,
+            )
+            self.assertNotIn(refresh, json.dumps(result))
+
+    def test_central_migration_removes_matching_override_but_preserves_bound_refresh(self) -> None:
+        refresh = "MATCHING_CENTRAL_REFRESH_TOKEN_MUST_NOT_LEAK"
+        with isolated_central_oauth_store() as isolated:
+            central_generation = isolated["central"]["clientGeneration"]
+            store.save_client_configuration(
+                CLIENT_ID,
+                CLIENT_SECRET,
+                client_generation=central_generation,
+            )
+            store.save_refresh_token(
+                refresh,
+                client_generation=central_generation,
+            )
+
+            result = hub.migrate_google_oauth_to_central_release()
+            resolved = hub.oauth_client_configuration()
+
+            self.assertFalse(isolated["clientPath"].exists())
+            self.assertTrue(isolated["refreshPath"].is_file())
+            self.assertTrue(result["migrated"])
+            self.assertTrue(result["authorizationPreserved"])
+            self.assertEqual(result["store"], "central_release")
+            self.assertEqual(resolved["source"], "central_release")
+            self.assertEqual(
+                store.load_refresh_token(
+                    expected_client_generation=central_generation,
+                ),
+                refresh,
+            )
+            self.assertNotIn(refresh, json.dumps(result))
+
+    def test_central_migration_removes_legacy_or_mismatched_refresh_token(self) -> None:
+        cases = (
+            ("legacy_unbound", ""),
+            ("client_mismatch", "m" * 64),
+        )
+        for expected_status, generation in cases:
+            with self.subTest(expected_status=expected_status):
+                with isolated_central_oauth_store() as isolated:
+                    refresh = f"{expected_status.upper()}_REFRESH_MUST_NOT_LEAK"
+                    store.save_refresh_token(
+                        refresh,
+                        client_generation=generation,
+                    )
+                    self.assertEqual(
+                        store.refresh_token_binding_status(
+                            expected_client_generation=isolated["central"][
+                                "clientGeneration"
+                            ],
+                        )["status"],
+                        expected_status,
+                    )
+
+                    result = hub.migrate_google_oauth_to_central_release()
+
+                    self.assertFalse(isolated["refreshPath"].exists())
+                    self.assertTrue(result["migrated"])
+                    self.assertFalse(result["authorizationPreserved"])
+                    self.assertEqual(result["store"], "central_release")
+                    self.assertNotIn(refresh, json.dumps(result))
+
     def test_stored_client_drives_status_oauth_start_and_refresh_grant(self) -> None:
         stored_client = {
             "clientId": CLIENT_ID,
@@ -810,6 +1169,56 @@ class GoogleOAuthClientCliAndFrontendTests(unittest.TestCase):
         self.assertEqual(removed["store"], "central_release")
         self.assertNotIn(CLIENT_ID, output.getvalue())
         self.assertNotIn(CLIENT_SECRET, output.getvalue())
+
+    def test_cli_central_migration_emits_only_safe_summary(self) -> None:
+        refresh = "CLI_MIGRATION_REFRESH_TOKEN_MUST_NOT_LEAK"
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                cli.google_sheet_hub,
+                "migrate_google_oauth_to_central_release",
+                return_value={
+                    "migrated": True,
+                    "authorizationPreserved": False,
+                    "clientId": CLIENT_ID,
+                    "clientSecret": CLIENT_SECRET,
+                    "refreshToken": refresh,
+                },
+            ) as migrate,
+            mock.patch.object(
+                cli.google_sheet_hub,
+                "oauth_client_configuration",
+                return_value={
+                    "clientId": CLIENT_ID,
+                    "clientSecret": CLIENT_SECRET,
+                    "source": "central_release",
+                },
+            ),
+            redirect_stdout(output),
+        ):
+            exit_code = cli.main(["--migrate-to-central-release"])
+
+        self.assertEqual(exit_code, 0)
+        migrate.assert_called_once_with()
+        payload = json.loads(output.getvalue())
+        self.assertEqual(
+            set(payload),
+            {
+                "ok",
+                "configured",
+                "clientHint",
+                "store",
+                "migrated",
+                "authorizationPreserved",
+            },
+        )
+        self.assertTrue(payload["configured"])
+        self.assertEqual(payload["store"], "central_release")
+        self.assertTrue(payload["migrated"])
+        self.assertFalse(payload["authorizationPreserved"])
+        serialized = output.getvalue()
+        for private_value in (CLIENT_ID, CLIENT_SECRET, refresh):
+            self.assertNotIn(private_value, serialized)
 
     def test_frontend_receives_only_safe_client_status_and_connect_action(self) -> None:
         source = (ROOT / "frontend" / "src" / "app" / "main.js").read_text(

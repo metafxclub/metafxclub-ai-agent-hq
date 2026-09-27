@@ -1,5 +1,5 @@
 #property strict
-#property version   "2.18"
+#property version   "2.19"
 #property description "Metafxclub AI Agent HQ Unified MT4 Gateway"
 #property description "Snapshot publisher plus guarded FILE_COMMON command adapter"
 
@@ -18,11 +18,27 @@ enum ENUM_POSITION_LIFECYCLE_MODE
    LIFECYCLE_MAX_HOLDING_AND_SESSION_CLOSE = 3
 };
 
+enum ENUM_MONEY_MANAGEMENT_MODE
+{
+   MONEY_MANAGEMENT_FIXED_LOT = 0,
+   MONEY_MANAGEMENT_RISK_PERCENT = 1
+};
+
+enum ENUM_RISK_CAPITAL_BASE
+{
+   RISK_CAPITAL_BALANCE = 0,
+   RISK_CAPITAL_EQUITY = 1
+};
+
 input string SnapshotChannel = "mtc-set-from-hq";
 input ENUM_GATEWAY_MODE GatewayMode = GATEWAY_SHADOW;
 input bool LiveArmed = false;
 input string TrustedSigningKeyId = "";
+input ENUM_MONEY_MANAGEMENT_MODE MoneyManagementMode = MONEY_MANAGEMENT_FIXED_LOT;
 input double FixedLot = 0.01;
+input double RiskPercent = 1.0;
+input ENUM_RISK_CAPITAL_BASE RiskCapitalBase = RISK_CAPITAL_EQUITY;
+input double EstimatedCommissionPerLot = 0.0;
 input int MagicNumber = 4186001;
 input string ManagedMagicNumbers = "4186001";
 input int PollIntervalSeconds = 1;
@@ -67,10 +83,14 @@ string ACK_SCHEMA = "metafx-hq-mt4-ack-v3";
 string STATUS_SCHEMA = "metafx-hq-mt4-status-v5";
 string SNAPSHOT_SCHEMA = "metafx-hq-mt4-snapshot-v1";
 string EA_PROFILE = "special";
-string EA_VERSION = "2.18";
+string EA_VERSION = "2.19";
 const int ATOMIC_WRITE_MAX_ATTEMPTS = 3;
 const int ATOMIC_WRITE_BACKOFF_MILLIS = 25;
 const int LEGACY_BACKFILL_MAX_ACKS = 256;
+const int LEGACY_LOSS_LATCH_SCAN_MAX_ENTRIES = 256;
+const int FILE_ERROR_IS_DIRECTORY = 5019;
+const int FILE_ERROR_NOT_EXIST = 5020;
+const int FILE_ERROR_DIRECTORY_NOT_EXIST = 5023;
 const int PORTFOLIO_POLICY_PREFIX_HEX_LENGTH = 16;
 const int PORTFOLIO_POLICY_MAX_EXPANDED_PATH_LENGTH = 259;
 int g_last_snapshot_attempt_at = 0;
@@ -92,6 +112,10 @@ string g_portfolio_policy_digest = "";
 int g_portfolio_policy_lease_open_error = 0;
 int g_portfolio_policy_lease_scan_error = 0;
 int g_portfolio_policy_lease_expanded_path_length = 0;
+bool g_legacy_loss_latch_migration_ready = false;
+int g_legacy_loss_latch_scan_error = 0;
+int g_legacy_loss_latch_scan_entries = 0;
+int g_legacy_loss_latch_scan_channels = 0;
 uint g_last_tick_millis = 0;
 int g_risk_cache_at = 0;
 int g_cached_managed_positions = 0;
@@ -105,8 +129,20 @@ double g_cached_account_drawdown_percent = 0.0;
 double g_cached_margin_level_percent = 0.0;
 bool g_cached_execution_guard_ready = false;
 string g_cached_execution_guard_reason = "STARTING";
+bool g_daily_loss_latched_in_memory = false;
+bool g_weekly_loss_latched_in_memory = false;
+int g_daily_loss_latch_period = 0;
+int g_weekly_loss_latch_period = 0;
 int g_last_outcome_refresh_at = 0;
 bool g_ack_has_execution_evidence = false;
+bool g_ack_has_sizing_evidence = false;
+double g_ack_requested_lots = 0.0;
+string g_ack_position_sizing_mode = "";
+double g_ack_risk_percent = 0.0;
+string g_ack_risk_capital_base = "";
+double g_ack_estimated_commission_per_lot = 0.0;
+double g_ack_risk_capital_amount = 0.0;
+double g_ack_estimated_risk_money = 0.0;
 double g_ack_filled_price = 0.0;
 double g_ack_filled_slippage_points = 0.0;
 double g_ack_actual_stop_loss = 0.0;
@@ -929,26 +965,94 @@ bool AccountPortfolioPolicyPath(string &path)
 }
 
 
-string DailyLossLockPath()
+bool AccountLossLatchDirectoryPath(string &path)
 {
-   return BasePath() + "\\state\\daily-loss-" +
-      TimeToString(BrokerDayStart(), TIME_DATE) + ".lock";
+   path = "";
+   string policy_directory = "";
+   if(!AccountPortfolioPolicyDirectoryPath(policy_directory))
+      return false;
+   path = policy_directory + "\\risk-latches";
+   return true;
 }
 
 
-datetime BrokerWeekStart()
+string LegacyDailyLossLockFileNameForPeriod(const datetime period_start)
 {
+   return "daily-loss-" + TimeToString(period_start, TIME_DATE) +
+      ".lock";
+}
+
+
+string LegacyDailyLossLockFileName()
+{
+   return LegacyDailyLossLockFileNameForPeriod(BrokerDayStart());
+}
+
+
+string LegacyDailyLossLockPath()
+{
+   return BasePath() + "\\state\\" + LegacyDailyLossLockFileName();
+}
+
+
+bool DailyLossLockPath(string &path)
+{
+   path = "";
    datetime day_start = BrokerDayStart();
+   string directory = "";
+   if(day_start <= 0 || !AccountLossLatchDirectoryPath(directory))
+      return false;
+   path = directory + "\\daily-loss-" +
+      IntegerToString((int)day_start) + ".lock";
+   return true;
+}
+
+
+datetime BrokerWeekStartForDay(const datetime day_start)
+{
+   if(day_start <= 0)
+      return 0;
    int day_of_week = TimeDayOfWeek(day_start);
    int days_since_monday = (day_of_week + 6) % 7;
    return day_start - days_since_monday * 86400;
 }
 
 
-string WeeklyLossLockPath()
+datetime BrokerWeekStart()
 {
-   return BasePath() + "\\state\\weekly-loss-" +
-      IntegerToString((int)BrokerWeekStart()) + ".lock";
+   return BrokerWeekStartForDay(BrokerDayStart());
+}
+
+
+string LegacyWeeklyLossLockFileNameForPeriod(const datetime period_start)
+{
+   return "weekly-loss-" + IntegerToString((int)period_start) +
+      ".lock";
+}
+
+
+string LegacyWeeklyLossLockFileName()
+{
+   return LegacyWeeklyLossLockFileNameForPeriod(BrokerWeekStart());
+}
+
+
+string LegacyWeeklyLossLockPath()
+{
+   return BasePath() + "\\state\\" + LegacyWeeklyLossLockFileName();
+}
+
+
+bool WeeklyLossLockPath(string &path)
+{
+   path = "";
+   datetime week_start = BrokerWeekStart();
+   string directory = "";
+   if(week_start <= 0 || !AccountLossLatchDirectoryPath(directory))
+      return false;
+   path = directory + "\\weekly-loss-" +
+      IntegerToString((int)week_start) + ".lock";
+   return true;
 }
 
 
@@ -993,6 +1097,9 @@ void EnsureFolders()
    string account_policy_directory = "";
    if(AccountPortfolioPolicyDirectoryPath(account_policy_directory))
       EnsureFolder(account_policy_directory);
+   string account_loss_latch_directory = "";
+   if(AccountLossLatchDirectoryPath(account_loss_latch_directory))
+      EnsureFolder(account_loss_latch_directory);
    EnsureFolder("MetafxHQ\\" + SnapshotChannel);
    EnsureFolder(BasePath());
    EnsureFolder(BasePath() + "\\acks");
@@ -1878,6 +1985,8 @@ bool BuildPortfolioPolicyCanonical(
       IntegerToString(MaxManagedOpenPositions);
    canonical += "|maxManagedTotalLots=" +
       DoubleToString(MaxManagedTotalLots, 8);
+   canonical += "|estimatedCommissionPerLot=" +
+      DoubleToString(EstimatedCommissionPerLot, 8);
    canonical += "|maxTradesPerBrokerDay=" +
       IntegerToString(MaxTradesPerBrokerDay);
    canonical += "|maxDailyLossPercent=" +
@@ -2352,6 +2461,29 @@ bool PositionLifecycleModeIsValid()
 }
 
 
+bool MoneyManagementModeIsValid()
+{
+   return MoneyManagementMode == MONEY_MANAGEMENT_FIXED_LOT ||
+      MoneyManagementMode == MONEY_MANAGEMENT_RISK_PERCENT;
+}
+
+
+bool RiskCapitalBaseIsValid()
+{
+   return RiskCapitalBase == RISK_CAPITAL_EQUITY ||
+      RiskCapitalBase == RISK_CAPITAL_BALANCE;
+}
+
+
+double EffectiveRiskPercent()
+{
+   // RiskPercent is part of persisted/ACK evidence with eight decimal places.
+   // Use that exact normalized value for sizing too, so restart/backend budget
+   // reconstruction can never differ from the value that authorized the lot.
+   return NormalizeDouble(RiskPercent, 8);
+}
+
+
 bool ValidateConfiguredModes(string &reason)
 {
    if(!GatewayModeIsValid())
@@ -2362,6 +2494,16 @@ bool ValidateConfiguredModes(string &reason)
    if(!PositionLifecycleModeIsValid())
    {
       reason = "POSITION_LIFECYCLE_MODE_INVALID";
+      return false;
+   }
+   if(!MoneyManagementModeIsValid())
+   {
+      reason = "MONEY_MANAGEMENT_MODE_INVALID";
+      return false;
+   }
+   if(!RiskCapitalBaseIsValid())
+   {
+      reason = "RISK_CAPITAL_BASE_INVALID";
       return false;
    }
    reason = "READY";
@@ -2476,6 +2618,40 @@ bool WriteCapabilitiesSnapshot()
 }
 
 
+void ResetAckSizingEvidence()
+{
+   g_ack_has_sizing_evidence = false;
+   g_ack_requested_lots = 0.0;
+   g_ack_position_sizing_mode = "";
+   g_ack_risk_percent = 0.0;
+   g_ack_risk_capital_base = "";
+   g_ack_estimated_commission_per_lot = 0.0;
+   g_ack_risk_capital_amount = 0.0;
+   g_ack_estimated_risk_money = 0.0;
+}
+
+
+void SetAckSizingEvidence(
+   const double requested_lots,
+   const string sizing_mode,
+   const double risk_percent,
+   const string capital_base,
+   const double estimated_commission_per_lot,
+   const double capital_amount,
+   const double estimated_risk_money
+)
+{
+   g_ack_has_sizing_evidence = true;
+   g_ack_requested_lots = requested_lots;
+   g_ack_position_sizing_mode = sizing_mode;
+   g_ack_risk_percent = risk_percent;
+   g_ack_risk_capital_base = capital_base;
+   g_ack_estimated_commission_per_lot = estimated_commission_per_lot;
+   g_ack_risk_capital_amount = capital_amount;
+   g_ack_estimated_risk_money = estimated_risk_money;
+}
+
+
 void ResetAckExecutionEvidence()
 {
    g_ack_has_execution_evidence = false;
@@ -2515,6 +2691,9 @@ string BuildStatusJson()
       status_config_valid &&
       g_portfolio_policy_lease_handle != INVALID_HANDLE &&
       IsSha256Hex(g_portfolio_policy_digest);
+   double broker_volume_minimum = MarketInfo(Symbol(), MODE_MINLOT);
+   double broker_volume_maximum = MarketInfo(Symbol(), MODE_MAXLOT);
+   double broker_volume_step = MarketInfo(Symbol(), MODE_LOTSTEP);
    string payload = "{";
    payload += "\"schemaVersion\":" + JsonString(STATUS_SCHEMA) + ",";
    payload += "\"eaVersion\":" + JsonString(EA_VERSION) + ",";
@@ -2525,6 +2704,17 @@ string BuildStatusJson()
    payload += "\"accountMode\":" + JsonString(AccountModeName()) + ",";
    payload += "\"liveArmed\":" + JsonBoolean(LiveArmed) + ",";
    payload += "\"fixedLot\":" + DoubleToString(FixedLot, LotDigits()) + ",";
+   payload += "\"positionSizingMode\":" + JsonString(PositionSizingModeName()) + ",";
+   payload += "\"riskPercent\":" + JsonNumber(EffectiveRiskPercent(), 8) + ",";
+   payload += "\"riskCapitalBase\":" + JsonString(RiskCapitalBaseName()) + ",";
+   payload += "\"estimatedCommissionPerLot\":" +
+      JsonNumber(EstimatedCommissionPerLot, 8) + ",";
+   payload += "\"brokerVolumeMin\":" +
+      JsonNumber(broker_volume_minimum, LotDigits()) + ",";
+   payload += "\"brokerVolumeMax\":" +
+      JsonNumber(broker_volume_maximum, LotDigits()) + ",";
+   payload += "\"brokerVolumeStep\":" +
+      JsonNumber(broker_volume_step, LotDigits()) + ",";
    payload += "\"symbol\":" + JsonString(Symbol()) + ",";
    payload += "\"timeframe\":" + JsonString(CurrentTimeframeName()) + ",";
    payload += "\"observedAt\":" + IntegerToString(NowUtc()) + ",";
@@ -2582,6 +2772,36 @@ bool WriteStatusSnapshot()
 }
 
 
+string PositionSizingModeName()
+{
+   if(MoneyManagementMode == MONEY_MANAGEMENT_FIXED_LOT)
+      return "FIXED_LOT";
+   if(MoneyManagementMode == MONEY_MANAGEMENT_RISK_PERCENT)
+      return "RISK_PERCENT";
+   return "INVALID";
+}
+
+
+string RiskCapitalBaseName()
+{
+   if(RiskCapitalBase == RISK_CAPITAL_EQUITY)
+      return "EQUITY";
+   if(RiskCapitalBase == RISK_CAPITAL_BALANCE)
+      return "BALANCE";
+   return "INVALID";
+}
+
+
+double RiskCapitalAmount()
+{
+   if(RiskCapitalBase == RISK_CAPITAL_EQUITY)
+      return AccountEquity();
+   if(RiskCapitalBase == RISK_CAPITAL_BALANCE)
+      return AccountBalance();
+   return 0.0;
+}
+
+
 void InvalidatePublishedRuntimeState()
 {
    // A chart symbol/timeframe change deinitializes the EA before the new chart
@@ -2597,19 +2817,31 @@ void InvalidatePublishedRuntimeState()
 }
 
 
-int LotDigits()
+int DecimalDigitsForValue(const double value)
 {
-   double step = MarketInfo(Symbol(), MODE_LOTSTEP);
-   if(step <= 0.0)
-      return 2;
+   if(!MathIsValidNumber(value) || value <= 0.0)
+      return 0;
    int digits = 0;
-   double scaled = step;
+   double scaled = value;
    while(digits < 8 && MathAbs(scaled - MathRound(scaled)) > 0.00000001)
    {
       scaled *= 10.0;
       digits++;
    }
    return digits;
+}
+
+
+int LotDigits()
+{
+   double step = MarketInfo(Symbol(), MODE_LOTSTEP);
+   if(!MathIsValidNumber(step) || step <= 0.0)
+      return 2;
+   double minimum = MarketInfo(Symbol(), MODE_MINLOT);
+   return (int)MathMax(
+      DecimalDigitsForValue(step),
+      DecimalDigitsForValue(minimum)
+   );
 }
 
 
@@ -2659,7 +2891,42 @@ string BuildAckJson(
    payload += "\"action\":" + JsonString(command.action) + ",";
    payload += "\"symbol\":" + JsonString(command.symbol) + ",";
    payload += "\"timeframe\":" + JsonString(command.timeframe) + ",";
-   payload += "\"fixedLot\":" + DoubleToString(FixedLot, LotDigits()) + ",";
+   payload += "\"fixedLot\":" + JsonNumber(
+      g_ack_has_sizing_evidence ? g_ack_requested_lots : 0.0,
+      LotDigits()
+   ) + ",";
+   payload += "\"positionSizingMode\":" + JsonString(
+      g_ack_has_sizing_evidence
+         ? g_ack_position_sizing_mode
+         : PositionSizingModeName()
+   ) + ",";
+   payload += "\"riskPercent\":" + JsonNumber(
+      g_ack_has_sizing_evidence ? g_ack_risk_percent : EffectiveRiskPercent(),
+       8
+   ) + ",";
+   payload += "\"riskCapitalBase\":" + JsonString(
+      g_ack_has_sizing_evidence
+         ? g_ack_risk_capital_base
+         : RiskCapitalBaseName()
+   ) + ",";
+   payload += "\"estimatedCommissionPerLot\":" + JsonNumber(
+      g_ack_has_sizing_evidence
+         ? g_ack_estimated_commission_per_lot
+         : EstimatedCommissionPerLot,
+      8
+   ) + ",";
+   if(g_ack_has_sizing_evidence)
+   {
+      payload += "\"riskCapitalAmount\":" +
+         JsonNumber(g_ack_risk_capital_amount, 8) + ",";
+      payload += "\"estimatedRiskMoney\":" +
+         JsonNumber(g_ack_estimated_risk_money, 8) + ",";
+   }
+   else
+   {
+      payload += "\"riskCapitalAmount\":null,";
+      payload += "\"estimatedRiskMoney\":null,";
+   }
    payload += "\"observedAt\":" + IntegerToString(NowUtc()) + ",";
    if(ticket >= 0)
       payload += "\"ticket\":" + IntegerToString(ticket) + ",";
@@ -3259,29 +3526,190 @@ void PublishSnapshotIfDue(const bool force)
 }
 
 
+bool ReadBrokerVolumeMetadata(
+   double &minimum,
+   double &maximum,
+   double &step,
+   string &reason
+)
+{
+   minimum = MarketInfo(Symbol(), MODE_MINLOT);
+   maximum = MarketInfo(Symbol(), MODE_MAXLOT);
+   step = MarketInfo(Symbol(), MODE_LOTSTEP);
+   if(!MathIsValidNumber(minimum) ||
+      !MathIsValidNumber(maximum) ||
+      !MathIsValidNumber(step) ||
+      minimum <= 0.0 || maximum < minimum || step <= 0.0 || step > maximum)
+   {
+      reason = "BROKER_VOLUME_LIMITS_UNAVAILABLE";
+      return false;
+   }
+   return true;
+}
+
+
+bool VolumeIsOnBrokerStep(
+   const double lots,
+   const double minimum,
+   const double step
+)
+{
+   if(!MathIsValidNumber(lots) || !MathIsValidNumber(minimum) ||
+      lots <= 0.0 || minimum <= 0.0 || step <= 0.0)
+      return false;
+   double step_count = MathRound((lots - minimum) / step);
+   double normalized = NormalizeDouble(
+      minimum + step_count * step,
+      LotDigits()
+   );
+   return MathAbs(normalized - lots) <= 0.00000001;
+}
+
+
+bool ValidateResolvedVolume(const double lots, string &reason)
+{
+   double minimum = 0.0;
+   double maximum = 0.0;
+   double step = 0.0;
+   if(!ReadBrokerVolumeMetadata(minimum, maximum, step, reason))
+      return false;
+   if(!MathIsValidNumber(lots) || lots <= 0.0 ||
+      lots < minimum - 0.00000001 || lots > maximum + 0.00000001)
+   {
+      reason = "ORDER_VOLUME_OUTSIDE_BROKER_LIMITS";
+      return false;
+   }
+   if(!VolumeIsOnBrokerStep(lots, minimum, step))
+   {
+      reason = "ORDER_VOLUME_NOT_ON_BROKER_STEP";
+      return false;
+   }
+   return true;
+}
+
+
 bool ValidateFixedLot(string &reason)
 {
-   double minimum = MarketInfo(Symbol(), MODE_MINLOT);
-   double maximum = MarketInfo(Symbol(), MODE_MAXLOT);
-   double step = MarketInfo(Symbol(), MODE_LOTSTEP);
-   if(FixedLot <= 0.0 || minimum <= 0.0 || maximum <= 0.0 || step <= 0.0)
+   double minimum = 0.0;
+   double maximum = 0.0;
+   double step = 0.0;
+   if(!ReadBrokerVolumeMetadata(minimum, maximum, step, reason))
+      return false;
+   if(!MathIsValidNumber(FixedLot) || FixedLot <= 0.0)
    {
       reason = "FIXED_LOT_CONFIGURATION_INVALID";
       return false;
    }
    if(FixedLot < minimum - 0.00000001 || FixedLot > maximum + 0.00000001)
    {
-      reason = "FIXED_LOT_OUTSIDE_BROKER_RANGE";
+      reason = "FIXED_LOT_OUTSIDE_BROKER_LIMITS";
       return false;
    }
-   double steps = MathRound((FixedLot - minimum) / step);
-   double normalized = NormalizeDouble(minimum + steps * step, LotDigits());
-   if(MathAbs(normalized - FixedLot) > 0.00000001)
+   if(!VolumeIsOnBrokerStep(FixedLot, minimum, step))
    {
       reason = "FIXED_LOT_NOT_ON_BROKER_STEP";
       return false;
    }
    return true;
+}
+
+
+bool NormalizeRiskVolumeDown(
+   const double raw_lots,
+   const double portfolio_ceiling,
+   double &normalized_lots,
+   string &reason
+)
+{
+   normalized_lots = 0.0;
+   double minimum = 0.0;
+   double maximum = 0.0;
+   double step = 0.0;
+   if(!ReadBrokerVolumeMetadata(minimum, maximum, step, reason))
+      return false;
+   if(!MathIsValidNumber(raw_lots) || !MathIsValidNumber(portfolio_ceiling) ||
+      raw_lots <= 0.0 || portfolio_ceiling <= 0.0)
+   {
+      reason = "RISK_LOT_CALCULATION_INVALID";
+      return false;
+   }
+   double capped_lots = MathMin(raw_lots, MathMin(maximum, portfolio_ceiling));
+   if(capped_lots < minimum)
+   {
+      reason = "RISK_VOLUME_BELOW_BROKER_MINIMUM";
+      return false;
+   }
+   double step_count = MathFloor(
+      (capped_lots - minimum) / step + 0.0000000001
+   );
+   normalized_lots = NormalizeDouble(
+      minimum + MathMax(0.0, step_count) * step,
+      LotDigits()
+   );
+   while(normalized_lots > capped_lots + 0.00000001 &&
+      normalized_lots - step >= minimum - 0.00000001)
+      normalized_lots = NormalizeDouble(normalized_lots - step, LotDigits());
+   if(normalized_lots < minimum ||
+      normalized_lots > maximum ||
+      normalized_lots > portfolio_ceiling ||
+      !VolumeIsOnBrokerStep(normalized_lots, minimum, step))
+   {
+      normalized_lots = 0.0;
+      reason = "RISK_VOLUME_BELOW_BROKER_MINIMUM";
+      return false;
+   }
+   return true;
+}
+
+
+bool ValidateMoneyManagementConfiguration(string &reason)
+{
+   if(!MoneyManagementModeIsValid())
+   {
+      reason = "MONEY_MANAGEMENT_MODE_INVALID";
+      return false;
+   }
+   if(!RiskCapitalBaseIsValid())
+   {
+      reason = "RISK_CAPITAL_BASE_INVALID";
+      return false;
+   }
+   if(!MathIsValidNumber(FixedLot) || FixedLot < 0.0 || FixedLot > 1000.0)
+   {
+      reason = "FIXED_LOT_CONFIGURATION_INVALID";
+      return false;
+   }
+   if(!MathIsValidNumber(RiskPercent) ||
+      RiskPercent < 0.0 || RiskPercent > 100.0)
+   {
+      reason = "RISK_PERCENT_INVALID_OR_ABOVE_HARD_CAP";
+      return false;
+   }
+   if(!MathIsValidNumber(EstimatedCommissionPerLot) ||
+      EstimatedCommissionPerLot < 0.0 ||
+      EstimatedCommissionPerLot > 1000000.0)
+   {
+      reason = "ESTIMATED_COMMISSION_PER_LOT_INVALID";
+      return false;
+   }
+   double effective_risk_percent = EffectiveRiskPercent();
+   if(MoneyManagementMode == MONEY_MANAGEMENT_RISK_PERCENT &&
+      (effective_risk_percent < 0.00000001 ||
+       effective_risk_percent > MaxLossPerTradePercent))
+   {
+      reason = "RISK_PERCENT_INVALID_OR_ABOVE_HARD_CAP";
+      return false;
+   }
+   if(MoneyManagementMode == MONEY_MANAGEMENT_FIXED_LOT)
+      return ValidateFixedLot(reason);
+   double minimum = 0.0;
+   double maximum = 0.0;
+   double step = 0.0;
+   if(!ReadBrokerVolumeMetadata(minimum, maximum, step, reason))
+      return false;
+   double tick_value = 0.0;
+   double tick_size_price = 0.0;
+   return ReadBrokerRiskMetadata(tick_value, tick_size_price, reason);
 }
 
 
@@ -3376,95 +3804,156 @@ bool ValidateQuoteFreshness(string &reason)
 }
 
 
-void ReadManagedOpenState(int &positions, double &lots, double &floating_pnl)
+bool ReadManagedOpenState(int &positions, double &lots, double &floating_pnl)
 {
    positions = 0;
    lots = 0.0;
    floating_pnl = 0.0;
-   for(int index = OrdersTotal() - 1; index >= 0; index--)
+   int total = OrdersTotal();
+   if(total < 0)
+      return false;
+   for(int index = total - 1; index >= 0; index--)
    {
       if(!OrderSelect(index, SELECT_BY_POS, MODE_TRADES))
-         continue;
+         return false;
       if(!IsManagedMarketOrderSelected())
          continue;
+      double order_lots = OrderLots();
+      double order_profit = OrderProfit();
+      double order_swap = OrderSwap();
+      double order_commission = OrderCommission();
+      if(!MathIsValidNumber(order_lots) || order_lots <= 0.0 ||
+         !MathIsValidNumber(order_profit) ||
+         !MathIsValidNumber(order_swap) ||
+         !MathIsValidNumber(order_commission))
+         return false;
       positions++;
-      lots += OrderLots();
-      floating_pnl += OrderProfit() + OrderSwap() + OrderCommission();
+      lots += order_lots;
+      floating_pnl += order_profit + order_swap + order_commission;
+      if(!MathIsValidNumber(lots) || !MathIsValidNumber(floating_pnl))
+         return false;
    }
+   return true;
 }
 
 
-int CountManagedTradesToday()
+bool CountManagedTradesToday(int &count)
 {
    datetime day_start = BrokerDayStart();
-   int count = 0;
-   for(int index = OrdersHistoryTotal() - 1; index >= 0; index--)
+   count = 0;
+   int history_total = OrdersHistoryTotal();
+   int open_total = OrdersTotal();
+   if(day_start <= 0 || history_total < 0 || open_total < 0)
+      return false;
+   for(int index = history_total - 1; index >= 0; index--)
    {
       if(!OrderSelect(index, SELECT_BY_POS, MODE_HISTORY))
+         return false;
+      if(!IsManagedMarketOrderSelected())
          continue;
-      if(IsManagedMarketOrderSelected() && OrderOpenTime() >= day_start)
+      datetime opened_at = OrderOpenTime();
+      if(opened_at <= 0)
+         return false;
+      if(opened_at >= day_start)
          count++;
    }
-   for(int open_index = OrdersTotal() - 1; open_index >= 0; open_index--)
+   for(int open_index = open_total - 1; open_index >= 0; open_index--)
    {
       if(!OrderSelect(open_index, SELECT_BY_POS, MODE_TRADES))
+         return false;
+      if(!IsManagedMarketOrderSelected())
          continue;
-      if(IsManagedMarketOrderSelected() && OrderOpenTime() >= day_start)
+      datetime opened_at = OrderOpenTime();
+      if(opened_at <= 0)
+         return false;
+      if(opened_at >= day_start)
          count++;
    }
-   return count;
+   return count >= 0;
 }
 
 
-double ManagedDailyPnl()
+bool ManagedDailyPnl(double &pnl)
 {
    datetime day_start = BrokerDayStart();
-   double pnl = 0.0;
-   for(int index = OrdersHistoryTotal() - 1; index >= 0; index--)
+   pnl = 0.0;
+   int history_total = OrdersHistoryTotal();
+   if(day_start <= 0 || history_total < 0)
+      return false;
+   for(int index = history_total - 1; index >= 0; index--)
    {
       if(!OrderSelect(index, SELECT_BY_POS, MODE_HISTORY))
+         return false;
+      if(!IsManagedMarketOrderSelected())
          continue;
-      if(IsManagedMarketOrderSelected() && OrderCloseTime() >= day_start)
-         pnl += OrderProfit() + OrderSwap() + OrderCommission();
-   }
-   for(int open_index = OrdersTotal() - 1; open_index >= 0; open_index--)
-   {
-      if(!OrderSelect(open_index, SELECT_BY_POS, MODE_TRADES))
+      datetime closed_at = OrderCloseTime();
+      if(closed_at <= 0)
+         return false;
+      if(closed_at < day_start)
          continue;
-      if(IsManagedMarketOrderSelected())
-         pnl += OrderProfit() + OrderSwap() + OrderCommission();
+      double result = OrderProfit() + OrderSwap() + OrderCommission();
+      if(!MathIsValidNumber(result))
+         return false;
+      pnl += result;
+      if(!MathIsValidNumber(pnl))
+         return false;
    }
-   return pnl;
+   return true;
 }
 
 
-double ManagedWeeklyPnl()
+bool ManagedWeeklyPnl(double &pnl)
 {
    datetime week_start = BrokerWeekStart();
-   double pnl = 0.0;
-   for(int index = OrdersHistoryTotal() - 1; index >= 0; index--)
+   pnl = 0.0;
+   int history_total = OrdersHistoryTotal();
+   if(week_start <= 0 || history_total < 0)
+      return false;
+   for(int index = history_total - 1; index >= 0; index--)
    {
       if(!OrderSelect(index, SELECT_BY_POS, MODE_HISTORY))
+         return false;
+      if(!IsManagedMarketOrderSelected())
          continue;
-      if(IsManagedMarketOrderSelected() && OrderCloseTime() >= week_start)
-         pnl += OrderProfit() + OrderSwap() + OrderCommission();
-   }
-   for(int open_index = OrdersTotal() - 1; open_index >= 0; open_index--)
-   {
-      if(!OrderSelect(open_index, SELECT_BY_POS, MODE_TRADES))
+      datetime closed_at = OrderCloseTime();
+      if(closed_at <= 0)
+         return false;
+      if(closed_at < week_start)
          continue;
-      if(IsManagedMarketOrderSelected())
-         pnl += OrderProfit() + OrderSwap() + OrderCommission();
+      double result = OrderProfit() + OrderSwap() + OrderCommission();
+      if(!MathIsValidNumber(result))
+         return false;
+      pnl += result;
+      if(!MathIsValidNumber(pnl))
+         return false;
    }
-   return pnl;
+   return true;
 }
 
 
-void ReadManagedLossStreak(int &loss_count, int &cooldown_until)
+bool ManagedRiskPnlIncludingFloatingLoss(
+   const double realized_pnl,
+   const double floating_pnl,
+   double &risk_pnl
+)
+{
+   if(!MathIsValidNumber(realized_pnl) ||
+      !MathIsValidNumber(floating_pnl))
+      return false;
+   // Open managed losses consume daily and weekly loss budgets. Floating
+   // profit is not realized and must never relax either fail-closed guard.
+   risk_pnl = realized_pnl + MathMin(0.0, floating_pnl);
+   return MathIsValidNumber(risk_pnl);
+}
+
+
+bool ReadManagedLossStreak(int &loss_count, int &cooldown_until)
 {
    loss_count = 0;
    cooldown_until = 0;
    int history_total = OrdersHistoryTotal();
+   if(history_total < 0)
+      return false;
    datetime before_time = (datetime)2147483647;
    int before_ticket = 2147483647;
    int maximum_rows = MathMin(history_total, MaxConsecutiveManagedLosses + 1);
@@ -3476,11 +3965,15 @@ void ReadManagedLossStreak(int &loss_count, int &cooldown_until)
       double newest_result = 0.0;
       for(int index = 0; index < history_total; index++)
       {
-         if(!OrderSelect(index, SELECT_BY_POS, MODE_HISTORY) ||
-            !IsManagedMarketOrderSelected() || OrderCloseTime() <= 0)
+         if(!OrderSelect(index, SELECT_BY_POS, MODE_HISTORY))
+            return false;
+         if(!IsManagedMarketOrderSelected())
             continue;
          datetime closed_at = OrderCloseTime();
          int ticket = OrderTicket();
+         double result = OrderProfit() + OrderSwap() + OrderCommission();
+         if(closed_at <= 0 || ticket <= 0 || !MathIsValidNumber(result))
+            return false;
          bool before_cursor = closed_at < before_time ||
             (closed_at == before_time && ticket < before_ticket);
          bool newer_than_best = closed_at > newest_time ||
@@ -3490,7 +3983,7 @@ void ReadManagedLossStreak(int &loss_count, int &cooldown_until)
             found = true;
             newest_time = closed_at;
             newest_ticket = ticket;
-            newest_result = OrderProfit() + OrderSwap() + OrderCommission();
+            newest_result = result;
          }
       }
       if(!found || newest_result >= 0.0)
@@ -3501,6 +3994,7 @@ void ReadManagedLossStreak(int &loss_count, int &cooldown_until)
       before_time = newest_time;
       before_ticket = newest_ticket;
    }
+   return true;
 }
 
 
@@ -3522,78 +4016,732 @@ double CurrentMarginLevelPercent()
 }
 
 
-bool LatchDailyLoss()
+bool LossLatchGlobalName(
+   const string period_kind,
+   const int period_start,
+   string &name
+)
 {
-   if(FileIsExist(DailyLossLockPath(), FILE_COMMON))
+   name = "";
+   string account_digest = "";
+   if(period_start <= 0 || !AccountIdentityDigest(account_digest))
+      return false;
+   // Terminal global variables bridge every chart/channel in this terminal
+   // while the FILE_COMMON account marker is being retried.  The full digest
+   // remains in the authoritative file path; 128 bits are enough to keep this
+   // secondary name below MT4's 63-character global-variable limit.
+   name = "MFXHQ_" + period_kind + "_" +
+      StringSubstr(account_digest, 0, 32) + "_" +
+      IntegerToString(period_start);
+   return StringLen(name) <= 63;
+}
+
+
+bool DailyLossLatchContext(
+   int &period_start,
+   string &shared_path,
+   string &global_name
+)
+{
+   period_start = (int)BrokerDayStart();
+   shared_path = "";
+   global_name = "";
+   return period_start > 0 &&
+      DailyLossLockPath(shared_path) &&
+      LossLatchGlobalName("DL", period_start, global_name);
+}
+
+
+bool WeeklyLossLatchContext(
+   int &period_start,
+   string &shared_path,
+   string &global_name
+)
+{
+   period_start = (int)BrokerWeekStart();
+   shared_path = "";
+   global_name = "";
+   return period_start > 0 &&
+      WeeklyLossLockPath(shared_path) &&
+      LossLatchGlobalName("WL", period_start, global_name);
+}
+
+
+bool PersistDailyLossLatchContext(
+   const int period_start,
+   const string shared_path,
+   const string global_name,
+   string &reason
+)
+{
+   // Set process-local state first: even if every persistence mechanism fails,
+   // this EA cannot reopen trading merely because floating P/L later recovers.
+   g_daily_loss_latched_in_memory = true;
+   if(period_start <= 0 || StringLen(shared_path) < 1 ||
+      StringLen(global_name) < 1)
+   {
+      if(period_start > 0)
+         g_daily_loss_latch_period = period_start;
+      reason = "DAILY_LOSS_LATCH_PATH_UNAVAILABLE";
+      return false;
+   }
+   g_daily_loss_latch_period = period_start;
+   bool terminal_latch_written = GlobalVariableSet(global_name, 1.0) > 0;
+   if(terminal_latch_written)
+      GlobalVariablesFlush();
+   if(FileIsExist(shared_path, FILE_COMMON))
       return true;
-   return WriteCommonTextAtomic(
-      DailyLossLockPath(),
-      "DAILY_LOSS_LIMIT_LATCHED|" + IntegerToString(NowUtc())
+   if(WriteCommonTextAtomic(
+         shared_path,
+         "DAILY_LOSS_LIMIT_LATCHED|" + IntegerToString(NowUtc())
+      ))
+      return true;
+   reason = terminal_latch_written
+      ? "DAILY_LOSS_LATCH_ACCOUNT_PERSISTENCE_FAILED"
+      : "DAILY_LOSS_LATCH_PERSISTENCE_FAILED";
+   return false;
+}
+
+
+bool ActivateDailyLossLatch(string &reason)
+{
+   int period_start = 0;
+   string shared_path = "";
+   string global_name = "";
+   if(!DailyLossLatchContext(period_start, shared_path, global_name))
+   {
+      g_daily_loss_latched_in_memory = true;
+      if(period_start > 0)
+         g_daily_loss_latch_period = period_start;
+      reason = "DAILY_LOSS_LATCH_PATH_UNAVAILABLE";
+      return false;
+   }
+   return PersistDailyLossLatchContext(
+      period_start,
+      shared_path,
+      global_name,
+      reason
    );
 }
 
 
-bool LatchWeeklyLoss()
+bool PersistWeeklyLossLatchContext(
+   const int period_start,
+   const string shared_path,
+   const string global_name,
+   string &reason
+)
 {
-   if(FileIsExist(WeeklyLossLockPath(), FILE_COMMON))
+   g_weekly_loss_latched_in_memory = true;
+   if(period_start <= 0 || StringLen(shared_path) < 1 ||
+      StringLen(global_name) < 1)
+   {
+      if(period_start > 0)
+         g_weekly_loss_latch_period = period_start;
+      reason = "WEEKLY_LOSS_LATCH_PATH_UNAVAILABLE";
+      return false;
+   }
+   g_weekly_loss_latch_period = period_start;
+   bool terminal_latch_written = GlobalVariableSet(global_name, 1.0) > 0;
+   if(terminal_latch_written)
+      GlobalVariablesFlush();
+   if(FileIsExist(shared_path, FILE_COMMON))
       return true;
-   return WriteCommonTextAtomic(
-      WeeklyLossLockPath(),
-      "WEEKLY_LOSS_LIMIT_LATCHED|" + IntegerToString(NowUtc())
+   if(WriteCommonTextAtomic(
+         shared_path,
+         "WEEKLY_LOSS_LIMIT_LATCHED|" + IntegerToString(NowUtc())
+      ))
+      return true;
+   reason = terminal_latch_written
+      ? "WEEKLY_LOSS_LATCH_ACCOUNT_PERSISTENCE_FAILED"
+      : "WEEKLY_LOSS_LATCH_PERSISTENCE_FAILED";
+   return false;
+}
+
+
+bool ActivateWeeklyLossLatch(string &reason)
+{
+   int period_start = 0;
+   string shared_path = "";
+   string global_name = "";
+   if(!WeeklyLossLatchContext(period_start, shared_path, global_name))
+   {
+      g_weekly_loss_latched_in_memory = true;
+      if(period_start > 0)
+         g_weekly_loss_latch_period = period_start;
+      reason = "WEEKLY_LOSS_LATCH_PATH_UNAVAILABLE";
+      return false;
+   }
+   return PersistWeeklyLossLatchContext(
+      period_start,
+      shared_path,
+      global_name,
+      reason
    );
 }
 
 
-bool ValidateCurrentRiskState(string &reason)
+bool DailyLossLatchAllowsTrading(string &reason)
 {
+   int period_start = 0;
+   string shared_path = "";
+   string global_name = "";
+   if(!DailyLossLatchContext(period_start, shared_path, global_name))
+   {
+      g_daily_loss_latched_in_memory = true;
+      if(period_start > 0)
+         g_daily_loss_latch_period = period_start;
+      reason = "DAILY_LOSS_LATCH_PATH_UNAVAILABLE";
+      return false;
+   }
+   if(g_daily_loss_latch_period != period_start)
+   {
+      g_daily_loss_latch_period = period_start;
+      g_daily_loss_latched_in_memory = false;
+   }
+   bool shared_latched = FileIsExist(shared_path, FILE_COMMON);
+   bool legacy_latched = FileIsExist(
+      LegacyDailyLossLockPath(),
+      FILE_COMMON
+   );
+   bool terminal_latched = GlobalVariableCheck(global_name);
+   if(!shared_latched && !legacy_latched && !terminal_latched &&
+      !g_daily_loss_latched_in_memory)
+      return true;
+   g_daily_loss_latched_in_memory = true;
+   if(!ActivateDailyLossLatch(reason))
+   {
+      if(legacy_latched)
+         reason = "DAILY_LOSS_LATCH_MIGRATION_FAILED";
+      return false;
+   }
+   reason = "DAILY_LOSS_LIMIT_LATCHED";
+   return false;
+}
+
+
+bool WeeklyLossLatchAllowsTrading(string &reason)
+{
+   int period_start = 0;
+   string shared_path = "";
+   string global_name = "";
+   if(!WeeklyLossLatchContext(period_start, shared_path, global_name))
+   {
+      g_weekly_loss_latched_in_memory = true;
+      if(period_start > 0)
+         g_weekly_loss_latch_period = period_start;
+      reason = "WEEKLY_LOSS_LATCH_PATH_UNAVAILABLE";
+      return false;
+   }
+   if(g_weekly_loss_latch_period != period_start)
+   {
+      g_weekly_loss_latch_period = period_start;
+      g_weekly_loss_latched_in_memory = false;
+   }
+   bool shared_latched = FileIsExist(shared_path, FILE_COMMON);
+   bool legacy_latched = FileIsExist(
+      LegacyWeeklyLossLockPath(),
+      FILE_COMMON
+   );
+   bool terminal_latched = GlobalVariableCheck(global_name);
+   if(!shared_latched && !legacy_latched && !terminal_latched &&
+      !g_weekly_loss_latched_in_memory)
+      return true;
+   g_weekly_loss_latched_in_memory = true;
+   if(!ActivateWeeklyLossLatch(reason))
+   {
+      if(legacy_latched)
+         reason = "WEEKLY_LOSS_LATCH_MIGRATION_FAILED";
+      return false;
+   }
+   reason = "WEEKLY_LOSS_LIMIT_LATCHED";
+   return false;
+}
+
+
+bool ProbeLegacyLossLatchMarker(
+   const string path,
+   bool &exists,
+   string &reason
+)
+{
+   exists = false;
+   ResetLastError();
+   if(FileIsExist(path, FILE_COMMON))
+   {
+      exists = true;
+      return true;
+   }
+   int probe_error = GetLastError();
+   if(probe_error == 0 || probe_error == FILE_ERROR_NOT_EXIST ||
+      probe_error == FILE_ERROR_DIRECTORY_NOT_EXIST)
+      return true;
+   g_legacy_loss_latch_scan_error = probe_error;
+   reason = "LEGACY_LOSS_LATCH_MARKER_PROBE_FAILED";
+   return false;
+}
+
+
+bool ClassifyLegacyLossLatchRootEntry(
+   const string entry_name,
+   bool &is_channel_directory,
+   string &reason
+)
+{
+   is_channel_directory = false;
+   // These are current account-wide infrastructure directories, never legacy
+   // channel directories.  IsSafeChannel also rejects them, but keep the
+   // exclusion explicit so future naming changes cannot broaden the scan.
+   if(entry_name == "locks" || entry_name == "account-policies")
+      return true;
+   if(!IsSafeChannel(entry_name))
+      return true;
+
+   string root_entry_path = "MetafxHQ\\" + entry_name;
+   ResetLastError();
+   bool is_regular_file = FileIsExist(root_entry_path, FILE_COMMON);
+   int probe_error = GetLastError();
+   if(!is_regular_file && probe_error == FILE_ERROR_IS_DIRECTORY)
+   {
+      is_channel_directory = true;
+      return true;
+   }
+
+   // A safe mtc-* name returned by enumeration must be provably a directory.
+   // A regular file, a vanished/racing entry, or any other probe error is
+   // ambiguous and therefore blocks startup rather than hiding a latch.
+   g_legacy_loss_latch_scan_error = probe_error;
+   reason = "LEGACY_LOSS_LATCH_ENUMERATION_AMBIGUOUS";
+   return false;
+}
+
+
+bool EnsureLegacyLossLatchScanAnchor(string &reason)
+{
+   string anchor_path = "MetafxHQ\\legacy-loss-latch-scan-anchor-v1.txt";
+   string expected = "MetafxHQLegacyLossLatchScanAnchorV1";
+   ResetLastError();
+   bool anchor_exists = FileIsExist(anchor_path, FILE_COMMON);
+   int probe_error = GetLastError();
+   if(!anchor_exists)
+   {
+      if(probe_error != 0 && probe_error != FILE_ERROR_NOT_EXIST &&
+         probe_error != FILE_ERROR_DIRECTORY_NOT_EXIST)
+      {
+         g_legacy_loss_latch_scan_error = probe_error;
+         reason = "LEGACY_LOSS_LATCH_SCAN_ANCHOR_INVALID";
+         return false;
+      }
+      if(!WriteCommonTextAtomic(anchor_path, expected))
+      {
+         reason = "LEGACY_LOSS_LATCH_SCAN_ANCHOR_WRITE_FAILED";
+         return false;
+      }
+   }
+   string observed = "";
+   if(!ReadCommonText(anchor_path, 128, observed) ||
+      Trimmed(observed) != expected)
+   {
+      reason = "LEGACY_LOSS_LATCH_SCAN_ANCHOR_INVALID";
+      return false;
+   }
+   return true;
+}
+
+
+void SortStringsAscending(string &values[])
+{
+   for(int left = 0; left < ArraySize(values) - 1; left++)
+   {
+      for(int right = left + 1; right < ArraySize(values); right++)
+      {
+         if(StringCompare(values[right], values[left]) < 0)
+         {
+            string temporary = values[left];
+            values[left] = values[right];
+            values[right] = temporary;
+         }
+      }
+   }
+}
+
+
+bool SameStringArrays(const string &left[], const string &right[])
+{
+   if(ArraySize(left) != ArraySize(right))
+      return false;
+   for(int index = 0; index < ArraySize(left); index++)
+   {
+      if(left[index] != right[index])
+         return false;
+   }
+   return true;
+}
+
+
+bool ScanLegacyLossLatchesAcrossChannels(
+   const string daily_file_name,
+   const string weekly_file_name,
+   string &channels[],
+   bool &daily_found,
+   bool &weekly_found,
+   int &entry_count,
+   string &reason
+)
+{
+   ArrayResize(channels, 0);
+   daily_found = false;
+   weekly_found = false;
+   entry_count = 0;
+   string entry_name = "";
+   ResetLastError();
+   long search_handle = FileFindFirst(
+      "MetafxHQ\\*",
+      entry_name,
+      FILE_COMMON
+   );
+   if(search_handle == INVALID_HANDLE)
+   {
+      g_legacy_loss_latch_scan_error = GetLastError();
+      reason = "LEGACY_LOSS_LATCH_ENUMERATION_FAILED";
+      return false;
+   }
+
+   while(true)
+   {
+      entry_count++;
+      if(entry_count > LEGACY_LOSS_LATCH_SCAN_MAX_ENTRIES)
+      {
+         FileFindClose(search_handle);
+         reason = "LEGACY_LOSS_LATCH_ENUMERATION_LIMIT_EXCEEDED";
+         return false;
+      }
+
+      bool is_channel_directory = false;
+      if(entry_name != "legacy-loss-latch-scan-anchor-v1.txt" &&
+         !ClassifyLegacyLossLatchRootEntry(
+            entry_name,
+            is_channel_directory,
+            reason
+         ))
+      {
+         FileFindClose(search_handle);
+         return false;
+      }
+      if(is_channel_directory)
+      {
+         int channel_count = ArraySize(channels);
+         ArrayResize(channels, channel_count + 1);
+         channels[channel_count] = entry_name;
+         string legacy_state_path = "MetafxHQ\\" + entry_name +
+            "\\trade-gateway\\state\\";
+         bool marker_exists = false;
+         if(!ProbeLegacyLossLatchMarker(
+               legacy_state_path + daily_file_name,
+               marker_exists,
+               reason
+            ))
+         {
+            FileFindClose(search_handle);
+            return false;
+         }
+         if(marker_exists)
+            daily_found = true;
+         if(!ProbeLegacyLossLatchMarker(
+               legacy_state_path + weekly_file_name,
+               marker_exists,
+               reason
+            ))
+         {
+            FileFindClose(search_handle);
+            return false;
+         }
+         if(marker_exists)
+            weekly_found = true;
+      }
+
+      ResetLastError();
+      bool has_next = FileFindNext(search_handle, entry_name);
+      int find_next_error = GetLastError();
+      if(has_next)
+         continue;
+      FileFindClose(search_handle);
+      if(find_next_error != 0)
+      {
+         g_legacy_loss_latch_scan_error = find_next_error;
+         reason = "LEGACY_LOSS_LATCH_ENUMERATION_FAILED";
+         return false;
+      }
+      break;
+   }
+
+   SortStringsAscending(channels);
+   return true;
+}
+
+
+bool MigrateLegacyLossLatchesAcrossChannels(string &reason)
+{
+   reason = "";
+   g_legacy_loss_latch_migration_ready = false;
+   g_legacy_loss_latch_scan_error = 0;
+   g_legacy_loss_latch_scan_entries = 0;
+   g_legacy_loss_latch_scan_channels = 0;
+   if(g_account_execution_lock_handle == INVALID_HANDLE)
+   {
+      reason = "LEGACY_LOSS_LATCH_MIGRATION_LOCK_REQUIRED";
+      return false;
+   }
+
+   datetime captured_day_start = BrokerDayStart();
+   datetime captured_week_start = BrokerWeekStartForDay(captured_day_start);
+   int daily_period = (int)captured_day_start;
+   int weekly_period = (int)captured_week_start;
+   string daily_account_path = "";
+   string weekly_account_path = "";
+   string daily_global_name = "";
+   string weekly_global_name = "";
+   string account_latch_directory = "";
+   if(daily_period <= 0 || weekly_period <= 0 ||
+      !AccountLossLatchDirectoryPath(account_latch_directory) ||
+      !LossLatchGlobalName("DL", daily_period, daily_global_name) ||
+      !LossLatchGlobalName("WL", weekly_period, weekly_global_name))
+   {
+      reason = "LEGACY_LOSS_LATCH_ACCOUNT_CONTEXT_INVALID";
+      return false;
+   }
+   daily_account_path = account_latch_directory + "\\daily-loss-" +
+      IntegerToString(daily_period) + ".lock";
+   weekly_account_path = account_latch_directory + "\\weekly-loss-" +
+      IntegerToString(weekly_period) + ".lock";
+
+   // The legacy source names and canonical account targets must describe one
+   // immutable broker-period snapshot. Recomputing either name mid-scan could
+   // silently mix two days or weeks at midnight/Monday rollover.
+   string daily_file_name = LegacyDailyLossLockFileNameForPeriod(
+      captured_day_start
+   );
+   string weekly_file_name = LegacyWeeklyLossLockFileNameForPeriod(
+      captured_week_start
+   );
+   if(StringLen(daily_file_name) < 1 || StringLen(weekly_file_name) < 1)
+   {
+      reason = "LEGACY_LOSS_LATCH_PERIOD_INVALID";
+      return false;
+   }
+   if(!EnsureLegacyLossLatchScanAnchor(reason))
+      return false;
+
+   string first_channels[];
+   string second_channels[];
+   bool first_daily_found = false;
+   bool first_weekly_found = false;
+   bool second_daily_found = false;
+   bool second_weekly_found = false;
+   int first_entry_count = 0;
+   int second_entry_count = 0;
+   if(!ScanLegacyLossLatchesAcrossChannels(
+         daily_file_name,
+         weekly_file_name,
+         first_channels,
+         first_daily_found,
+         first_weekly_found,
+         first_entry_count,
+         reason
+      ) ||
+      !ScanLegacyLossLatchesAcrossChannels(
+         daily_file_name,
+         weekly_file_name,
+         second_channels,
+         second_daily_found,
+         second_weekly_found,
+         second_entry_count,
+         reason
+      ))
+      return false;
+
+   g_legacy_loss_latch_scan_entries = first_entry_count > second_entry_count
+      ? first_entry_count
+      : second_entry_count;
+   g_legacy_loss_latch_scan_channels = ArraySize(second_channels);
+   if(!SameStringArrays(first_channels, second_channels))
+   {
+      reason = "LEGACY_LOSS_LATCH_CHANNEL_SET_CHANGED";
+      return false;
+   }
+
+   datetime observed_day_start = BrokerDayStart();
+   datetime observed_week_start = BrokerWeekStartForDay(observed_day_start);
+   if(observed_day_start != captured_day_start ||
+      observed_week_start != captured_week_start)
+   {
+      reason = "LEGACY_LOSS_LATCH_PERIOD_CHANGED";
+      return false;
+   }
+
+   bool daily_found = first_daily_found || second_daily_found;
+   bool weekly_found = first_weekly_found || second_weekly_found;
+   // Legacy latch files did not carry account identity. If any safe channel
+   // contains a current-period marker in either pass, conservatively attribute
+   // it to this account. This can over-block after an account switch, but it
+   // can never bypass a loss limit.
+   // Upgrade contract: stop every pre-account-latch gateway before starting
+   // this build. A legacy gateway does not honor the account execution lock
+   // and could create new foreign-channel evidence after this bounded barrier.
+   if(daily_found && !PersistDailyLossLatchContext(
+         daily_period,
+         daily_account_path,
+         daily_global_name,
+         reason
+      ))
+      return false;
+   if(weekly_found && !PersistWeeklyLossLatchContext(
+         weekly_period,
+         weekly_account_path,
+         weekly_global_name,
+         reason
+      ))
+      return false;
+   observed_day_start = BrokerDayStart();
+   observed_week_start = BrokerWeekStartForDay(observed_day_start);
+   if(observed_day_start != captured_day_start ||
+      observed_week_start != captured_week_start)
+   {
+      reason = "LEGACY_LOSS_LATCH_PERIOD_CHANGED";
+      return false;
+   }
+   g_legacy_loss_latch_migration_ready = true;
+   return true;
+}
+
+
+bool LossLatchesAllowTrading(string &reason)
+{
+   if(!g_legacy_loss_latch_migration_ready)
+   {
+      reason = "LEGACY_LOSS_LATCH_MIGRATION_NOT_READY";
+      return false;
+   }
+   // Probe both periods on every guard pass.  This makes persistence retries
+   // independent of other portfolio blockers and prevents a daily latch from
+   // starving repair of an already-active weekly latch (or vice versa).
+   string daily_reason = "";
+   string weekly_reason = "";
+   bool daily_allows = DailyLossLatchAllowsTrading(daily_reason);
+   bool weekly_allows = WeeklyLossLatchAllowsTrading(weekly_reason);
+   if(!daily_allows)
+   {
+      reason = daily_reason;
+      return false;
+   }
+   if(!weekly_allows)
+   {
+      reason = weekly_reason;
+      return false;
+   }
+   return true;
+}
+
+
+bool ValidateCurrentRiskState(
+   const double proposed_lots,
+   string &reason
+)
+{
+   // Latch state has priority over transient telemetry/limit reasons.  Once a
+   // loss limit trips, status stays truthful and every guard pass retries the
+   // account-wide durable marker before any later order can be considered.
+   if(!LossLatchesAllowTrading(reason))
+      return false;
    int positions = 0;
    double lots = 0.0;
    double floating_pnl = 0.0;
-   ReadManagedOpenState(positions, lots, floating_pnl);
+   if(!ReadManagedOpenState(positions, lots, floating_pnl))
+   {
+      reason = "POSITION_TELEMETRY_UNAVAILABLE";
+      return false;
+   }
    if(positions >= MaxManagedOpenPositions)
    {
       reason = "MAX_MANAGED_POSITIONS_REACHED";
       return false;
    }
-   if(lots + FixedLot > MaxManagedTotalLots + 0.00000001)
+   if(!MathIsValidNumber(proposed_lots) || proposed_lots < 0.0)
+   {
+      reason = "PROPOSED_LOT_INVALID";
+      return false;
+   }
+   if(lots + proposed_lots > MaxManagedTotalLots + 0.00000001)
    {
       reason = "MAX_MANAGED_LOTS_EXCEEDED";
       return false;
    }
-   if(CountManagedTradesToday() >= MaxTradesPerBrokerDay)
+   int trades_today = 0;
+   if(!CountManagedTradesToday(trades_today))
+   {
+      reason = "HISTORY_TELEMETRY_UNAVAILABLE";
+      return false;
+   }
+   if(trades_today >= MaxTradesPerBrokerDay)
    {
       reason = "MAX_TRADES_PER_DAY_REACHED";
       return false;
    }
-   if(FileIsExist(DailyLossLockPath(), FILE_COMMON))
+   double daily_pnl = 0.0;
+   if(!ManagedDailyPnl(daily_pnl))
    {
-      reason = "DAILY_LOSS_LIMIT_LATCHED";
+      reason = "HISTORY_TELEMETRY_UNAVAILABLE";
       return false;
    }
-   double daily_pnl = ManagedDailyPnl();
-   double daily_loss_limit = AccountBalance() * MaxDailyLossPercent / 100.0;
-   if(AccountBalance() <= 0.0 || daily_pnl <= -daily_loss_limit)
+   double daily_risk_pnl = 0.0;
+   if(!ManagedRiskPnlIncludingFloatingLoss(
+         daily_pnl,
+         floating_pnl,
+         daily_risk_pnl
+      ))
    {
-      LatchDailyLoss();
+      reason = "POSITION_TELEMETRY_UNAVAILABLE";
+      return false;
+   }
+   double daily_loss_limit = AccountBalance() * MaxDailyLossPercent / 100.0;
+   if(AccountBalance() <= 0.0 || daily_risk_pnl <= -daily_loss_limit)
+   {
+      if(!ActivateDailyLossLatch(reason))
+         return false;
       reason = "DAILY_LOSS_LIMIT_REACHED";
       return false;
    }
-   if(FileIsExist(WeeklyLossLockPath(), FILE_COMMON))
+   double weekly_pnl = 0.0;
+   if(!ManagedWeeklyPnl(weekly_pnl))
    {
-      reason = "WEEKLY_LOSS_LIMIT_LATCHED";
+      reason = "HISTORY_TELEMETRY_UNAVAILABLE";
       return false;
    }
-   double weekly_pnl = ManagedWeeklyPnl();
-   double weekly_loss_limit = AccountBalance() * MaxManagedWeeklyLossPercent / 100.0;
-   if(AccountBalance() <= 0.0 || weekly_pnl <= -weekly_loss_limit)
+   double weekly_risk_pnl = 0.0;
+   if(!ManagedRiskPnlIncludingFloatingLoss(
+         weekly_pnl,
+         floating_pnl,
+         weekly_risk_pnl
+      ))
    {
-      LatchWeeklyLoss();
+      reason = "POSITION_TELEMETRY_UNAVAILABLE";
+      return false;
+   }
+   double weekly_loss_limit = AccountBalance() * MaxManagedWeeklyLossPercent / 100.0;
+   if(AccountBalance() <= 0.0 || weekly_risk_pnl <= -weekly_loss_limit)
+   {
+      if(!ActivateWeeklyLossLatch(reason))
+         return false;
       reason = "WEEKLY_LOSS_LIMIT_REACHED";
       return false;
    }
    int consecutive_losses = 0;
    int cooldown_until = 0;
-   ReadManagedLossStreak(consecutive_losses, cooldown_until);
+   if(!ReadManagedLossStreak(consecutive_losses, cooldown_until))
+   {
+      reason = "HISTORY_TELEMETRY_UNAVAILABLE";
+      return false;
+   }
    int broker_now = (int)TimeCurrent();
    if(consecutive_losses >= MaxConsecutiveManagedLosses &&
       broker_now < cooldown_until)
@@ -3651,38 +4799,86 @@ bool ValidateClosedBarBinding(const CommandPayload &command, string &reason)
 }
 
 
-bool EstimateStopLossMoney(
+bool ReadBrokerRiskMetadata(
+   double &tick_value,
+   double &tick_size_price,
+   string &reason
+)
+{
+   RefreshRates();
+   tick_value = MarketInfo(Symbol(), MODE_TICKVALUE);
+   double tick_size_points = MarketInfo(Symbol(), MODE_TICKSIZE);
+   double point = MarketInfo(Symbol(), MODE_POINT);
+   // MT4 MODE_TICKSIZE is expressed in points. MODE_TICKVALUE and account
+   // equity/balance are already in the broker account's own currency units.
+   // This intentionally needs no broker-name detection and no cent/pro-cent
+   // x100 scaling: the account-unit scale cancels in risk-percent sizing.
+   tick_size_price = tick_size_points * point;
+   if(!MathIsValidNumber(tick_value) ||
+      !MathIsValidNumber(tick_size_points) ||
+      !MathIsValidNumber(point) ||
+      !MathIsValidNumber(tick_size_price) ||
+      tick_value <= 0.0 || tick_size_points <= 0.0 ||
+      point <= 0.0 || tick_size_price <= 0.0)
+   {
+      reason = "BROKER_RISK_METADATA_INVALID";
+      return false;
+   }
+   return true;
+}
+
+
+bool EstimateStopLossMoneyAtEntry(
    const CommandPayload &command,
+   const double lots,
+   const double entry_price,
    double &loss_money,
    double &reward_risk,
    string &reason
 )
 {
-   RefreshRates();
-   double entry_price = command.action == "BUY" ? Ask : Bid;
-   double stop_loss = NormalizeSymbolPrice(command.stop_loss);
-   double take_profit = NormalizeSymbolPrice(command.take_profit);
-   double risk_distance = MathAbs(entry_price - stop_loss);
-   double reward_distance = MathAbs(take_profit - entry_price);
-   double tick_value = MarketInfo(Symbol(), MODE_TICKVALUE);
-   double tick_size_raw = MarketInfo(Symbol(), MODE_TICKSIZE);
-   double point = MarketInfo(Symbol(), MODE_POINT);
-   // MetaTrader documents MODE_TICKSIZE as points, but some CFD brokers
-   // expose the price-sized value (for example 0.01 for XAUUSD).  A positive
-   // value below one point cannot be a valid count of displayed points, so
-   // treat it as price units; otherwise convert documented points to price.
-   double tick_size_price = tick_size_raw < 1.0
-      ? tick_size_raw
-      : tick_size_raw * point;
-   if(entry_price <= 0.0 || risk_distance <= 0.0 || reward_distance <= 0.0 ||
-      tick_value <= 0.0 || tick_size_price <= 0.0)
+   loss_money = 0.0;
+   reward_risk = 0.0;
+   if(!MathIsValidNumber(lots) || lots <= 0.0)
    {
-      reason = "BROKER_RISK_METADATA_INVALID";
+      reason = "RESOLVED_LOT_INVALID";
       return false;
    }
-   loss_money = risk_distance / tick_size_price * tick_value * FixedLot;
-   reward_risk = reward_distance / risk_distance;
-   if(!MathIsValidNumber(loss_money) || !MathIsValidNumber(reward_risk))
+   double tick_value = 0.0;
+   double tick_size_price = 0.0;
+   if(!ReadBrokerRiskMetadata(tick_value, tick_size_price, reason))
+      return false;
+   double point = MarketInfo(Symbol(), MODE_POINT);
+   double adverse_entry_price = command.action == "BUY"
+      ? entry_price + SlippagePoints * point
+      : entry_price - SlippagePoints * point;
+   double stop_loss = NormalizeSymbolPrice(command.stop_loss);
+   double take_profit = NormalizeSymbolPrice(command.take_profit);
+   double risk_distance = command.action == "BUY"
+      ? adverse_entry_price - stop_loss
+      : stop_loss - adverse_entry_price;
+   double reward_distance = command.action == "BUY"
+      ? take_profit - adverse_entry_price
+      : adverse_entry_price - take_profit;
+   if(entry_price <= 0.0 || adverse_entry_price <= 0.0 ||
+      risk_distance <= 0.0 || reward_distance <= 0.0)
+   {
+      reason = "RISK_PRICE_GEOMETRY_INVALID";
+      return false;
+   }
+   double gross_loss_per_lot =
+      risk_distance / tick_size_price * tick_value;
+   double gross_reward_per_lot =
+      reward_distance / tick_size_price * tick_value;
+   double loss_per_lot = gross_loss_per_lot + EstimatedCommissionPerLot;
+   double net_reward_per_lot =
+      gross_reward_per_lot - EstimatedCommissionPerLot;
+   loss_money = loss_per_lot * lots;
+   reward_risk = net_reward_per_lot / loss_per_lot;
+   if(!MathIsValidNumber(loss_per_lot) || loss_per_lot <= 0.0 ||
+      !MathIsValidNumber(net_reward_per_lot) || net_reward_per_lot <= 0.0 ||
+      !MathIsValidNumber(loss_money) || loss_money <= 0.0 ||
+      !MathIsValidNumber(reward_risk) || reward_risk <= 0.0)
    {
       reason = "RISK_ESTIMATE_INVALID";
       return false;
@@ -3691,30 +4887,278 @@ bool EstimateStopLossMoney(
 }
 
 
-bool ValidateRiskEnvelope(const CommandPayload &command, string &reason)
+bool EstimateStopLossMoney(
+   const CommandPayload &command,
+   const double lots,
+   double &loss_money,
+   double &reward_risk,
+   string &reason
+)
 {
-   if(!ValidateCurrentRiskState(reason))
+   RefreshRates();
+   double entry_price = command.action == "BUY" ? Ask : Bid;
+   return EstimateStopLossMoneyAtEntry(
+      command,
+      lots,
+      entry_price,
+      loss_money,
+      reward_risk,
+      reason
+   );
+}
+
+
+bool ResolvePositionSize(
+   const CommandPayload &command,
+   double &resolved_lots,
+   double &risk_capital_amount,
+   double &estimated_risk_money,
+   double &reward_risk,
+   string &reason
+)
+{
+   resolved_lots = 0.0;
+   risk_capital_amount = 0.0;
+   estimated_risk_money = 0.0;
+   reward_risk = 0.0;
+   if(!ValidateMoneyManagementConfiguration(reason))
+      return false;
+   if(command.action != "BUY" && command.action != "SELL")
+   {
+      reason = "ACTION_NOT_ALLOWED";
+      return false;
+   }
+   if(Uppercase(Symbol()) != command.symbol)
+   {
+      reason = "SYMBOL_NOT_ALLOWED_OR_NOT_ATTACHED";
+      return false;
+   }
+   risk_capital_amount = RiskCapitalAmount();
+   if(!MathIsValidNumber(risk_capital_amount) || risk_capital_amount <= 0.0)
+   {
+      reason = "RISK_CAPITAL_UNAVAILABLE";
+      return false;
+   }
+   if(MoneyManagementMode == MONEY_MANAGEMENT_FIXED_LOT)
+   {
+      resolved_lots = FixedLot;
+      if(!EstimateStopLossMoney(
+            command,
+            resolved_lots,
+            estimated_risk_money,
+            reward_risk,
+            reason
+         ))
+         return false;
+      if(!MathIsValidNumber(estimated_risk_money) ||
+         estimated_risk_money < 0.00000001)
+      {
+         reason = "RISK_ESTIMATE_BELOW_WIRE_MINIMUM";
+         return false;
+      }
+      return true;
+   }
+   if(!MathIsValidNumber(command.stop_loss) || command.stop_loss <= 0.0)
+   {
+      reason = "RISK_STOP_LOSS_CALCULATION_FAILED";
+      return false;
+   }
+
+   double loss_per_lot = 0.0;
+   if(!EstimateStopLossMoney(
+         command,
+         1.0,
+         loss_per_lot,
+         reward_risk,
+         reason
+      ))
+      return false;
+   double requested_risk_budget =
+      risk_capital_amount * EffectiveRiskPercent() / 100.0;
+   double balance_risk_cap = AccountBalance() * MaxLossPerTradePercent / 100.0;
+   double risk_budget = MathMin(requested_risk_budget, balance_risk_cap);
+   if(!MathIsValidNumber(risk_budget) || risk_budget < 0.00000001 ||
+      !MathIsValidNumber(loss_per_lot) || loss_per_lot <= 0.0)
+   {
+      reason = "RISK_BUDGET_INVALID";
+      return false;
+   }
+   int managed_positions = 0;
+   double managed_lots = 0.0;
+   double managed_floating_pnl = 0.0;
+   if(!ReadManagedOpenState(
+         managed_positions,
+         managed_lots,
+         managed_floating_pnl
+      ))
+   {
+      reason = "POSITION_TELEMETRY_UNAVAILABLE";
+      return false;
+   }
+   double remaining_portfolio_lots = MaxManagedTotalLots - managed_lots;
+   if(remaining_portfolio_lots <= 0.0)
+   {
+      reason = "MAX_MANAGED_LOTS_EXCEEDED";
+      return false;
+   }
+   double raw_lots = risk_budget / loss_per_lot;
+   if(!NormalizeRiskVolumeDown(
+         raw_lots,
+         remaining_portfolio_lots,
+         resolved_lots,
+         reason
+      ))
+      return false;
+
+   double minimum = 0.0;
+   double maximum = 0.0;
+   double step = 0.0;
+   if(!ReadBrokerVolumeMetadata(minimum, maximum, step, reason))
+      return false;
+   if(!EstimateStopLossMoney(
+         command,
+         resolved_lots,
+         estimated_risk_money,
+         reward_risk,
+         reason
+      ))
+      return false;
+   while(estimated_risk_money > risk_budget)
+   {
+      resolved_lots = NormalizeDouble(resolved_lots - step, LotDigits());
+      if(resolved_lots < minimum)
+      {
+         resolved_lots = 0.0;
+         estimated_risk_money = 0.0;
+         reason = "RISK_VOLUME_BELOW_BROKER_MINIMUM";
+         return false;
+      }
+      if(!EstimateStopLossMoney(
+            command,
+            resolved_lots,
+            estimated_risk_money,
+            reward_risk,
+            reason
+         ))
+         return false;
+   }
+   if(!MathIsValidNumber(estimated_risk_money) ||
+      estimated_risk_money < 0.00000001)
+   {
+      reason = "RISK_ESTIMATE_BELOW_WIRE_MINIMUM";
+      return false;
+   }
+   return ValidateResolvedVolume(resolved_lots, reason);
+}
+
+
+bool ValidateRiskEnvelopeAtEntry(
+   const CommandPayload &command,
+   const double proposed_lots,
+   const double entry_price,
+   double &final_estimated_risk_money,
+   string &reason
+)
+{
+   final_estimated_risk_money = 0.0;
+   if(!ValidateCurrentRiskState(proposed_lots, reason))
       return false;
    double loss_money = 0.0;
    double reward_risk = 0.0;
-   if(!EstimateStopLossMoney(command, loss_money, reward_risk, reason))
+   if(!EstimateStopLossMoneyAtEntry(
+         command,
+         proposed_lots,
+         entry_price,
+         loss_money,
+         reward_risk,
+         reason
+      ))
       return false;
+   if(!MathIsValidNumber(loss_money) || loss_money < 0.00000001)
+   {
+      reason = "RISK_ESTIMATE_BELOW_WIRE_MINIMUM";
+      return false;
+   }
    double balance = AccountBalance();
-   if(balance <= 0.0 || loss_money / balance * 100.0 > MaxLossPerTradePercent)
+   if(!MathIsValidNumber(balance) || balance <= 0.0 ||
+      loss_money / balance * 100.0 > MaxLossPerTradePercent)
    {
       reason = "MAX_LOSS_PER_TRADE_EXCEEDED";
       return false;
+   }
+   if(MoneyManagementMode == MONEY_MANAGEMENT_RISK_PERCENT)
+   {
+      double risk_capital = RiskCapitalAmount();
+      if(!MathIsValidNumber(risk_capital) || risk_capital <= 0.0)
+      {
+         reason = "RISK_CAPITAL_UNAVAILABLE";
+         return false;
+      }
+      double risk_budget =
+         risk_capital * EffectiveRiskPercent() / 100.0;
+      // The backend validates the final estimate against the already-declared
+      // sizing capital. Equity can move between the sizing tick and this final
+      // under-lock tick, so enforce the lower of the live and persisted budgets
+      // to keep the durable ACK both safe and contract-valid.
+      if(g_ack_has_sizing_evidence &&
+         g_ack_position_sizing_mode == "RISK_PERCENT" &&
+         MathIsValidNumber(g_ack_risk_capital_amount) &&
+         g_ack_risk_capital_amount > 0.0 &&
+         MathIsValidNumber(g_ack_risk_percent) &&
+         g_ack_risk_percent >= 0.00000001)
+      {
+         double persisted_risk_budget =
+            g_ack_risk_capital_amount * g_ack_risk_percent / 100.0;
+         if(!MathIsValidNumber(persisted_risk_budget) ||
+            persisted_risk_budget < 0.00000001)
+         {
+            reason = "RISK_BUDGET_INVALID";
+            return false;
+         }
+         risk_budget = MathMin(risk_budget, persisted_risk_budget);
+      }
+      double tolerance = risk_budget * 0.000000001;
+      if(!MathIsValidNumber(risk_budget) || risk_budget < 0.00000001 ||
+         loss_money > risk_budget + tolerance)
+      {
+         reason = "RISK_PERCENT_BUDGET_EXCEEDED";
+         return false;
+      }
    }
    if(reward_risk + 0.00000001 < MinRewardRiskRatio)
    {
       reason = "MIN_REWARD_RISK_NOT_MET";
       return false;
    }
+   final_estimated_risk_money = loss_money;
    return true;
 }
 
 
-bool ValidateMarginPreflight(const CommandPayload &command, string &reason)
+bool ValidateRiskEnvelope(
+   const CommandPayload &command,
+   const double proposed_lots,
+   string &reason
+)
+{
+   RefreshRates();
+   double entry_price = command.action == "BUY" ? Ask : Bid;
+   double ignored_estimated_risk_money = 0.0;
+   return ValidateRiskEnvelopeAtEntry(
+      command,
+      proposed_lots,
+      entry_price,
+      ignored_estimated_risk_money,
+      reason
+   );
+}
+
+
+bool ValidateMarginPreflight(
+   const CommandPayload &command,
+   const double proposed_lots,
+   string &reason
+)
 {
    if(MarketInfo(Symbol(), MODE_TRADEALLOWED) <= 0.0)
    {
@@ -3729,7 +5173,11 @@ bool ValidateMarginPreflight(const CommandPayload &command, string &reason)
    }
    int order_type = command.action == "BUY" ? OP_BUY : OP_SELL;
    ResetLastError();
-   double free_after = AccountFreeMarginCheck(Symbol(), order_type, FixedLot);
+   double free_after = AccountFreeMarginCheck(
+      Symbol(),
+      order_type,
+      proposed_lots
+   );
    int margin_error = GetLastError();
    if(margin_error != 0 || free_after <= 0.0)
    {
@@ -3743,17 +5191,38 @@ bool ValidateMarginPreflight(const CommandPayload &command, string &reason)
          reason = "FREE_MARGIN_CHECK_FAILED";
       return false;
    }
-   double margin_per_lot = MarketInfo(Symbol(), MODE_MARGINREQUIRED);
-   if(margin_per_lot <= 0.0 || AccountEquity() <= 0.0)
+   // AccountFreeMarginCheck is direction-aware and applies the broker's actual
+   // hedge/asymmetric margin rules for this BUY or SELL.  MODE_MARGINREQUIRED
+   // is documented as the margin for one lot BUY and can understate a SELL or
+   // hedged order, so derive the projected margin from the broker's returned
+   // free-margin delta instead.
+   double current_free_margin = AccountFreeMargin();
+   double current_margin = AccountMargin();
+   double current_equity = AccountEquity();
+   if(!MathIsValidNumber(current_free_margin) ||
+      !MathIsValidNumber(current_margin) ||
+      !MathIsValidNumber(current_equity) ||
+      current_free_margin < 0.0 || current_margin < 0.0 ||
+      current_equity <= 0.0)
    {
       reason = "BROKER_MARGIN_METADATA_INVALID";
       return false;
    }
-   double projected_margin = AccountMargin() + margin_per_lot * FixedLot;
-   double projected_level = projected_margin > 0.0
-      ? AccountEquity() / projected_margin * 100.0
+   double incremental_margin = current_free_margin - free_after;
+   double projected_margin = current_margin + incremental_margin;
+   if(!MathIsValidNumber(incremental_margin) ||
+      !MathIsValidNumber(projected_margin) || projected_margin < -0.00000001)
+   {
+      reason = "BROKER_MARGIN_METADATA_INVALID";
+      return false;
+   }
+   if(projected_margin < 0.0)
+      projected_margin = 0.0;
+   double projected_level = projected_margin > 0.00000001
+      ? current_equity / projected_margin * 100.0
       : 999999.0;
-   if(projected_level < MinProjectedMarginLevelPercent)
+   if(!MathIsValidNumber(projected_level) ||
+      projected_level < MinProjectedMarginLevelPercent)
    {
       reason = "PROJECTED_MARGIN_LEVEL_TOO_LOW";
       return false;
@@ -3791,9 +5260,22 @@ bool EvaluateExecutionGuard(string &reason)
    }
    if(!ValidateQuoteFreshness(reason))
       return false;
-   if(!ValidateFixedLot(reason))
+   if(!ValidateMoneyManagementConfiguration(reason))
       return false;
-   if(!ValidateCurrentRiskState(reason))
+   double guard_probe_lots = FixedLot;
+   if(MoneyManagementMode == MONEY_MANAGEMENT_RISK_PERCENT)
+   {
+      double broker_maximum = 0.0;
+      double broker_step = 0.0;
+      if(!ReadBrokerVolumeMetadata(
+            guard_probe_lots,
+            broker_maximum,
+            broker_step,
+            reason
+         ))
+         return false;
+   }
+   if(!ValidateCurrentRiskState(guard_probe_lots, reason))
       return false;
    if(IsRolloverEntryWindow())
    {
@@ -3840,23 +5322,67 @@ void UpdateRiskTelemetry(const bool force)
    int now = NowUtc();
    if(!force && g_risk_cache_at > 0 && now >= g_risk_cache_at && now - g_risk_cache_at < 5)
       return;
+   int managed_positions = 0;
+   double managed_lots = 0.0;
    double floating_pnl = 0.0;
-   ReadManagedOpenState(
-      g_cached_managed_positions,
-      g_cached_managed_lots,
+   int trades_today = 0;
+   double daily_pnl = 0.0;
+   double weekly_pnl = 0.0;
+   int consecutive_losses = 0;
+   int cooldown_until = 0;
+   bool position_telemetry_ready = ReadManagedOpenState(
+      managed_positions,
+      managed_lots,
       floating_pnl
    );
-   g_cached_trades_today = CountManagedTradesToday();
-   g_cached_managed_daily_pnl = ManagedDailyPnl();
-   g_cached_managed_weekly_pnl = ManagedWeeklyPnl();
-   ReadManagedLossStreak(
-      g_cached_consecutive_losses,
-      g_cached_cooldown_until
-   );
+   bool history_telemetry_ready =
+      CountManagedTradesToday(trades_today) &&
+      ManagedDailyPnl(daily_pnl) &&
+      ManagedWeeklyPnl(weekly_pnl) &&
+      ReadManagedLossStreak(consecutive_losses, cooldown_until);
+   if(position_telemetry_ready)
+   {
+      g_cached_managed_positions = managed_positions;
+      g_cached_managed_lots = managed_lots;
+   }
+   else
+   {
+      g_cached_managed_positions = 0;
+      g_cached_managed_lots = 0.0;
+   }
+   if(history_telemetry_ready)
+   {
+      g_cached_trades_today = trades_today;
+      g_cached_managed_daily_pnl = daily_pnl;
+      g_cached_managed_weekly_pnl = weekly_pnl;
+      g_cached_consecutive_losses = consecutive_losses;
+      g_cached_cooldown_until = cooldown_until;
+   }
+   else
+   {
+      g_cached_trades_today = 0;
+      g_cached_managed_daily_pnl = 0.0;
+      g_cached_managed_weekly_pnl = 0.0;
+      g_cached_consecutive_losses = 0;
+      g_cached_cooldown_until = 0;
+   }
    g_cached_account_drawdown_percent = CurrentAccountDrawdownPercent();
    g_cached_margin_level_percent = CurrentMarginLevelPercent();
    string reason = "";
-   g_cached_execution_guard_ready = EvaluateExecutionGuard(reason);
+   if(!position_telemetry_ready)
+   {
+      g_cached_execution_guard_ready = false;
+      reason = "POSITION_TELEMETRY_UNAVAILABLE";
+   }
+   else if(!history_telemetry_ready)
+   {
+      g_cached_execution_guard_ready = false;
+      reason = "HISTORY_TELEMETRY_UNAVAILABLE";
+   }
+   else
+   {
+      g_cached_execution_guard_ready = EvaluateExecutionGuard(reason);
+   }
    g_cached_execution_guard_reason = reason;
    g_risk_cache_at = now;
 }
@@ -4008,6 +5534,7 @@ bool ValidateHeartbeat(
 
 bool ValidateRuntime(
    const CommandPayload &command,
+   const double proposed_lots,
    string &reason
 )
 {
@@ -4066,7 +5593,9 @@ bool ValidateRuntime(
    }
    if(!ValidateHeartbeat(command, reason))
       return false;
-   if(!ValidateFixedLot(reason))
+   if(!ValidateMoneyManagementConfiguration(reason))
+      return false;
+   if(!ValidateResolvedVolume(proposed_lots, reason))
       return false;
    if(!IsConnected())
    {
@@ -4085,9 +5614,9 @@ bool ValidateRuntime(
    }
    if(!ValidateStops(command, reason))
       return false;
-   if(!ValidateRiskEnvelope(command, reason))
+   if(!ValidateRiskEnvelope(command, proposed_lots, reason))
       return false;
-   if(!ValidateMarginPreflight(command, reason))
+   if(!ValidateMarginPreflight(command, proposed_lots, reason))
       return false;
 
    int last_bar = 0;
@@ -4234,6 +5763,102 @@ bool ReadProcessedCommandStatus(
 }
 
 
+bool ReadPersistedSizingState(
+   const CommandPayload &command,
+   double &expected_lots,
+   string &reason
+)
+{
+   expected_lots = 0.0;
+   string payload = "";
+   if(!ReadCommonText(CommandLedgerPath(command.command_id), MaxCommandBytes, payload))
+   {
+      reason = "PERSISTED_SIZING_STATE_UNAVAILABLE";
+      return false;
+   }
+   string keys[];
+   string values[];
+   int quoted[];
+   if(!ParseFlatJson(payload, keys, values, quoted, reason))
+   {
+      reason = "PERSISTED_SIZING_STATE_INVALID";
+      return false;
+   }
+   string stored_command_id = "";
+   string stored_channel_id = "";
+   string sizing_mode = "";
+   string capital_base = "";
+   double risk_percent = 0.0;
+   double estimated_commission_per_lot = 0.0;
+   double capital_amount = 0.0;
+   double estimated_risk_money = 0.0;
+   if(!ReadRequiredString(
+         keys, values, quoted, "commandId", stored_command_id, reason
+      ) ||
+      !ReadRequiredString(
+         keys, values, quoted, "channelId", stored_channel_id, reason
+      ) ||
+      !ReadRequiredDouble(
+         keys, values, quoted, "fixedLot", expected_lots, reason
+      ) ||
+      !ReadRequiredString(
+         keys, values, quoted, "positionSizingMode", sizing_mode, reason
+      ) ||
+      !ReadRequiredDouble(
+         keys, values, quoted, "riskPercent", risk_percent, reason
+      ) ||
+       !ReadRequiredString(
+          keys, values, quoted, "riskCapitalBase", capital_base, reason
+       ) ||
+       !ReadRequiredDouble(
+          keys,
+          values,
+          quoted,
+          "estimatedCommissionPerLot",
+          estimated_commission_per_lot,
+          reason
+       ) ||
+       !ReadRequiredDouble(
+         keys, values, quoted, "riskCapitalAmount", capital_amount, reason
+      ) ||
+      !ReadRequiredDouble(
+         keys, values, quoted, "estimatedRiskMoney", estimated_risk_money, reason
+      ))
+   {
+      reason = "PERSISTED_SIZING_STATE_INVALID";
+      return false;
+   }
+   if(stored_command_id != command.command_id ||
+      stored_channel_id != SnapshotChannel ||
+       (sizing_mode != "FIXED_LOT" && sizing_mode != "RISK_PERCENT") ||
+       (capital_base != "EQUITY" && capital_base != "BALANCE") ||
+       !MathIsValidNumber(expected_lots) || expected_lots <= 0.0 ||
+       !MathIsValidNumber(risk_percent) ||
+       risk_percent < 0.0 || risk_percent > 100.0 ||
+       (sizing_mode == "RISK_PERCENT" && risk_percent <= 0.0) ||
+       !MathIsValidNumber(estimated_commission_per_lot) ||
+       estimated_commission_per_lot < 0.0 ||
+       estimated_commission_per_lot > 1000000.0 ||
+       !MathIsValidNumber(capital_amount) || capital_amount <= 0.0 ||
+      !MathIsValidNumber(estimated_risk_money) || estimated_risk_money <= 0.0)
+   {
+      reason = "PERSISTED_SIZING_STATE_INVALID";
+      return false;
+   }
+   SetAckSizingEvidence(
+      expected_lots,
+      sizing_mode,
+      risk_percent,
+      capital_base,
+      estimated_commission_per_lot,
+      capital_amount,
+      estimated_risk_money
+   );
+   reason = "READY";
+   return true;
+}
+
+
 bool IsGatewayOrderComment(const string comment, string &command_id)
 {
    command_id = "";
@@ -4326,7 +5951,8 @@ bool IsAllowedTicketMapKey(const string key)
 
 bool WriteTicketCommandMap(
    const CommandPayload &command,
-   const int ticket
+   const int ticket,
+   const double expected_lots
 )
 {
    if(ticket <= 0 || !IsCommandIdentifier(command.command_id))
@@ -4338,7 +5964,7 @@ bool WriteTicketCommandMap(
    payload += "\"ticket\":" + IntegerToString(ticket) + ",";
    payload += "\"symbol\":" + JsonString(command.symbol) + ",";
    payload += "\"action\":" + JsonString(command.action) + ",";
-   payload += "\"lots\":" + JsonNumber(FixedLot, LotDigits()) + ",";
+   payload += "\"lots\":" + JsonNumber(expected_lots, LotDigits()) + ",";
    payload += "\"stopLoss\":" +
       JsonNumber(NormalizeSymbolPrice(command.stop_loss), SymbolPriceDigits()) + ",";
    payload += "\"takeProfit\":" +
@@ -4813,9 +6439,76 @@ void RefreshManagedOutcomeFiles(const bool force)
 }
 
 
+string FilledRiskAssessmentCode(
+   const string action,
+   const double volume,
+   const double requested_entry,
+   const double filled_entry,
+   const double stop_loss,
+   const double estimated_commission_per_lot,
+   const double pre_send_estimated_risk
+)
+{
+   if(!MathIsValidNumber(volume) || volume <= 0.0 ||
+      !MathIsValidNumber(filled_entry) || filled_entry <= 0.0 ||
+      !MathIsValidNumber(stop_loss) || stop_loss <= 0.0 ||
+      !MathIsValidNumber(estimated_commission_per_lot) ||
+      estimated_commission_per_lot < 0.0 ||
+      !MathIsValidNumber(pre_send_estimated_risk) ||
+      pre_send_estimated_risk < 0.00000001)
+      return "RISK_UNAVAILABLE";
+
+   double tick_value = 0.0;
+   double tick_size_price = 0.0;
+   string metadata_reason = "";
+   if(!ReadBrokerRiskMetadata(
+         tick_value,
+         tick_size_price,
+         metadata_reason
+      ))
+      return "RISK_UNAVAILABLE";
+
+   double normalized_stop = NormalizeSymbolPrice(stop_loss);
+   double risk_distance = action == "BUY"
+      ? filled_entry - normalized_stop
+      : normalized_stop - filled_entry;
+   if(!MathIsValidNumber(risk_distance) || risk_distance <= 0.0)
+      return "RISK_UNAVAILABLE";
+
+   double actual_risk =
+      (risk_distance / tick_size_price * tick_value +
+       estimated_commission_per_lot) * volume;
+   if(!MathIsValidNumber(actual_risk) || actual_risk < 0.00000001)
+      return "RISK_UNAVAILABLE";
+
+   bool slippage_reserve_exceeded = false;
+   double point = MarketInfo(Symbol(), MODE_POINT);
+   if(MathIsValidNumber(requested_entry) && requested_entry > 0.0 &&
+      MathIsValidNumber(point) && point > 0.0)
+   {
+      double adverse_slippage_points = action == "BUY"
+         ? MathMax(0.0, filled_entry - requested_entry) / point
+         : MathMax(0.0, requested_entry - filled_entry) / point;
+      if(adverse_slippage_points >
+         (double)SlippagePoints + 0.00000001)
+         slippage_reserve_exceeded = true;
+   }
+
+   double risk_tolerance = pre_send_estimated_risk * 0.000000001;
+   if(actual_risk > pre_send_estimated_risk + risk_tolerance)
+      return slippage_reserve_exceeded
+         ? "SLIPPAGE_RESERVE_AND_RISK_ESTIMATE_EXCEEDED"
+         : "RISK_ESTIMATE_EXCEEDED";
+   if(slippage_reserve_exceeded)
+      return "SLIPPAGE_RESERVE_EXCEEDED";
+   return "WITHIN_ESTIMATE";
+}
+
+
 bool CaptureSelectedOrderEvidence(
    const CommandPayload &command,
    const int ticket,
+   const double expected_lots,
    const double submitted_price,
    string &reason
 )
@@ -4849,11 +6542,8 @@ bool CaptureSelectedOrderEvidence(
    }
    int expected_type = command.action == "BUY" ? OP_BUY : OP_SELL;
    string expected_comment = "HQ:" + command.command_id;
-   double lot_tolerance = MathMax(0.00000001, MarketInfo(command.symbol, MODE_LOTSTEP) / 2.0);
+   double lot_tolerance = 0.00000001;
    double price_tolerance = MathMax(0.00000001, point / 2.0);
-   bool slippage_observed = point > 0.0 && submitted_price > 0.0;
-   bool slippage_within_limit = !slippage_observed ||
-      g_ack_filled_slippage_points <= (double)SlippagePoints + 0.001;
    bool comment_matches = OrderComment() == expected_comment;
    if(!comment_matches && is_closed)
       comment_matches = IsBrokerClosedGatewayComment(
@@ -4866,7 +6556,7 @@ bool CaptureSelectedOrderEvidence(
    bool identity_matches = OrderTicket() == ticket &&
       Uppercase(OrderSymbol()) == command.symbol &&
       OrderType() == expected_type &&
-      MathAbs(OrderLots() - FixedLot) <= lot_tolerance &&
+      MathAbs(OrderLots() - expected_lots) <= lot_tolerance &&
       OrderMagicNumber() == MagicNumber &&
       comment_matches &&
       MathAbs(OrderStopLoss() - NormalizeSymbolPrice(command.stop_loss)) <= price_tolerance &&
@@ -4878,11 +6568,42 @@ bool CaptureSelectedOrderEvidence(
       WriteSelectedOrderOutcome(command.command_id);
       return false;
    }
+   string risk_assessment = FilledRiskAssessmentCode(
+      command.action,
+      expected_lots,
+      submitted_price,
+      OrderOpenPrice(),
+      OrderStopLoss(),
+      g_ack_estimated_commission_per_lot,
+      g_ack_estimated_risk_money
+   );
+   string verified_prefix = is_closed
+      ? "ORDER_VERIFIED_CLOSED"
+      : "ORDER_VERIFIED_OPEN";
    g_ack_verification_status = is_closed ? "VERIFIED_CLOSED" : "VERIFIED_OPEN";
    WriteSelectedOrderOutcome(command.command_id);
-   reason = slippage_within_limit
-      ? "ORDER_ACCEPTED"
-      : "ORDER_ACCEPTED_WITH_SLIPPAGE_WARNING";
+   if(risk_assessment ==
+      "SLIPPAGE_RESERVE_AND_RISK_ESTIMATE_EXCEEDED")
+   {
+      reason = verified_prefix +
+         "_SLIPPAGE_RESERVE_AND_RISK_ESTIMATE_EXCEEDED";
+   }
+   else if(risk_assessment == "RISK_ESTIMATE_EXCEEDED")
+   {
+      reason = verified_prefix + "_RISK_ESTIMATE_EXCEEDED";
+   }
+   else if(risk_assessment == "SLIPPAGE_RESERVE_EXCEEDED")
+   {
+      reason = verified_prefix + "_SLIPPAGE_RESERVE_EXCEEDED";
+   }
+   else if(risk_assessment == "RISK_UNAVAILABLE")
+   {
+      reason = verified_prefix + "_RISK_UNAVAILABLE";
+   }
+   else
+   {
+      reason = verified_prefix;
+   }
    return true;
 }
 
@@ -4894,7 +6615,10 @@ int FindManagedCommandTicket(const CommandPayload &command, int &match_count)
    for(int index = OrdersTotal() - 1; index >= 0; index--)
    {
       if(!OrderSelect(index, SELECT_BY_POS, MODE_TRADES))
-         continue;
+      {
+         match_count = -1;
+         return -1;
+      }
       int order_type = OrderType();
       string resolved_command_id = "";
       bool command_reference_matches =
@@ -4912,7 +6636,10 @@ int FindManagedCommandTicket(const CommandPayload &command, int &match_count)
    for(int history_index = OrdersHistoryTotal() - 1; history_index >= 0; history_index--)
    {
       if(!OrderSelect(history_index, SELECT_BY_POS, MODE_HISTORY))
-         continue;
+      {
+         match_count = -1;
+         return -1;
+      }
       int history_type = OrderType();
       string history_command_id = "";
       bool history_reference_matches =
@@ -4937,17 +6664,43 @@ int FindManagedCommandTicket(const CommandPayload &command, int &match_count)
 }
 
 
+void MarkRecoveryUnknown(
+   const CommandPayload &command,
+   const string reason,
+   const int ticket,
+   const int error_code
+)
+{
+   ResetAckExecutionEvidence();
+   g_ack_verification_status = "SELECT_FAILED";
+   g_ack_execution_state = "UNKNOWN";
+   FinalizeCommand(
+      command,
+      "EXECUTION_UNKNOWN",
+      reason,
+      ticket,
+      error_code
+   );
+}
+
+
 void ReconcileExecutingCommand(const CommandPayload &command)
 {
+   double expected_lots = 0.0;
+   string sizing_reason = "";
+   if(!ReadPersistedSizingState(command, expected_lots, sizing_reason))
+   {
+      MarkRecoveryUnknown(command, sizing_reason, -1, 0);
+      return;
+   }
    int match_count = 0;
    int ticket = FindManagedCommandTicket(command, match_count);
    if(match_count == 1 && ticket >= 0)
    {
-      if(!WriteTicketCommandMap(command, ticket))
+      if(!WriteTicketCommandMap(command, ticket, expected_lots))
       {
-         FinalizeCommand(
+         MarkRecoveryUnknown(
             command,
-            "EXECUTION_UNKNOWN",
             "TICKET_COMMAND_MAP_WRITE_FAILED",
             ticket,
             GetLastError()
@@ -4958,6 +6711,7 @@ void ReconcileExecutingCommand(const CommandPayload &command)
       if(!CaptureSelectedOrderEvidence(
          command,
          ticket,
+         expected_lots,
          0.0,
          verification_reason
       ))
@@ -4980,12 +6734,13 @@ void ReconcileExecutingCommand(const CommandPayload &command)
       );
       return;
    }
-   FinalizeCommand(
+   MarkRecoveryUnknown(
       command,
-      "EXECUTION_UNKNOWN",
-      match_count > 1
-         ? "MULTIPLE_RECOVERY_MATCHES"
-         : "RESTART_RECONCILIATION_REQUIRED",
+      match_count < 0
+         ? "RECOVERY_TELEMETRY_UNAVAILABLE"
+         : (match_count > 1
+            ? "MULTIPLE_RECOVERY_MATCHES"
+            : "RESTART_RECONCILIATION_REQUIRED"),
       -1,
       0
    );
@@ -5020,7 +6775,8 @@ string BrokerSendFailureReason(const int error_code)
 
 void ExecuteCommand(
    const CommandPayload &command,
-   const string signed_raw
+   const string signed_raw,
+   const double expected_lots
 )
 {
    string reason = "";
@@ -5029,7 +6785,7 @@ void ExecuteCommand(
       FinalizeCommand(command, "REJECTED", reason, -1, 0);
       return;
    }
-   if(!ValidateRuntime(command, reason))
+      if(!ValidateRuntime(command, expected_lots, reason))
    {
       FinalizeCommand(command, "REJECTED", reason, -1, 0);
       return;
@@ -5080,7 +6836,7 @@ void ExecuteCommand(
    {
       // Re-run every mutable guard while the account lock is held. There is no
       // automatic retry: uncertainty always stops this command.
-      if(!ValidateRuntime(command, reason))
+       if(!ValidateRuntime(command, expected_lots, reason))
       {
          FinalizeCommand(command, "REJECTED", reason, -1, 0);
          break;
@@ -5099,8 +6855,8 @@ void ExecuteCommand(
          !ValidateQuoteFreshness(reason) ||
          !ValidateClosedBarBinding(command, reason) ||
          !ValidateStops(command, reason) ||
-         !ValidateRiskEnvelope(command, reason) ||
-         !ValidateMarginPreflight(command, reason))
+         !ValidateRiskEnvelope(command, expected_lots, reason) ||
+         !ValidateMarginPreflight(command, expected_lots, reason))
       {
          FinalizeCommand(command, "REJECTED", reason, -1, 0);
          break;
@@ -5119,7 +6875,7 @@ void ExecuteCommand(
          break;
       }
       int order_type = command.action == "BUY" ? OP_BUY : OP_SELL;
-      double price = order_type == OP_BUY ? Ask : Bid;
+      double price = 0.0;
       double stop_loss = NormalizeSymbolPrice(command.stop_loss);
       double take_profit = NormalizeSymbolPrice(command.take_profit);
       // commandId is 28 ASCII characters; the HQ: prefix keeps the MT4 comment
@@ -5133,6 +6889,70 @@ void ExecuteCommand(
          FinalizeCommand(command, "REJECTED", reason, -1, 0);
          break;
       }
+      // Capture one final quote and use the exact same requested entry for the
+      // risk envelope and OrderSend. Allowed broker slippage is already added
+      // adversely inside EstimateStopLossMoneyAtEntry().
+      RefreshRates();
+      price = order_type == OP_BUY ? Ask : Bid;
+      if(!MathIsValidNumber(price) || price <= 0.0)
+      {
+         FinalizeCommand(command, "REJECTED", "QUOTE_UNAVAILABLE", -1, 0);
+         break;
+      }
+      if((int)MarketInfo(Symbol(), MODE_SPREAD) > MaxSpreadPoints)
+      {
+         FinalizeCommand(
+            command,
+            "REJECTED",
+            "SPREAD_LIMIT_EXCEEDED",
+            -1,
+            0
+         );
+         break;
+      }
+      // Reprice the risk and margin envelopes with the persisted lot at the
+      // irreversible boundary. The lot itself is never recalculated here.
+      double final_estimated_risk_money = 0.0;
+      if(!ValidateRiskEnvelopeAtEntry(
+            command,
+            expected_lots,
+            price,
+            final_estimated_risk_money,
+            reason
+         ) ||
+         !ValidateMarginPreflight(command, expected_lots, reason))
+      {
+         FinalizeCommand(command, "REJECTED", reason, -1, 0);
+         break;
+      }
+      // Persist the exact estimate validated against this submitted quote.
+      // Recovery and the backend must never observe the earlier sizing-tick
+      // estimate after execution has crossed this final under-lock gate.
+      g_ack_estimated_risk_money = final_estimated_risk_money;
+      string final_executing_payload = BuildAckJson(
+         command,
+         "EXECUTING",
+         "FINAL_RISK_VALIDATED",
+         -1,
+         0,
+         true
+      );
+      if(!WriteExecutionMarkers(command, final_executing_payload))
+      {
+         FinalizeCommand(
+            command,
+            "FAILED_FINAL",
+            "FINAL_RISK_STATE_WRITE_FAILED",
+            -1,
+            GetLastError()
+         );
+         break;
+      }
+      WriteCommonTextAtomic(
+         AckPath(command.command_id),
+         final_executing_payload
+      );
+      AppendAudit(final_executing_payload);
       // Claim only this channel + symbol + timeframe stream after every
       // pre-send check, but before OrderSend, so crash recovery cannot resend.
       if(!WriteLastOrderBar(command.bar_time))
@@ -5170,7 +6990,7 @@ void ExecuteCommand(
       int ticket = OrderSend(
          Symbol(),
          order_type,
-         FixedLot,
+         expected_lots,
          price,
          SlippagePoints,
          stop_loss,
@@ -5192,16 +7012,17 @@ void ExecuteCommand(
          );
          break;
       }
-      if(!WriteTicketCommandMap(command, ticket))
+      if(!WriteTicketCommandMap(command, ticket, expected_lots))
       {
          int ticket_map_error = GetLastError();
          // OrderSend has succeeded, but missing durable identity must remain
          // uncertain. No automatic retry is ever attempted.
          string ignored_verification_reason = "";
          CaptureSelectedOrderEvidence(
-            command,
-            ticket,
-            price,
+             command,
+             ticket,
+             expected_lots,
+             price,
             ignored_verification_reason
          );
          FinalizeCommand(
@@ -5217,6 +7038,7 @@ void ExecuteCommand(
       if(!CaptureSelectedOrderEvidence(
          command,
          ticket,
+         expected_lots,
          price,
          verification_reason
       ))
@@ -5248,6 +7070,7 @@ void ExecuteCommand(
 void ProcessCommandFile()
 {
    ResetAckExecutionEvidence();
+   ResetAckSizingEvidence();
    string raw = "";
    if(!ReadCommonText(CommandPath(), MaxCommandBytes, raw))
       return;
@@ -5289,7 +7112,32 @@ void ProcessCommandFile()
       return;
    }
 
-   if(!ValidateRuntime(command, reason))
+   double resolved_lots = 0.0;
+   double risk_capital_amount = 0.0;
+   double estimated_risk_money = 0.0;
+   double reward_risk = 0.0;
+   if(!ResolvePositionSize(
+         command,
+         resolved_lots,
+         risk_capital_amount,
+         estimated_risk_money,
+         reward_risk,
+         reason
+      ))
+   {
+      FinalizeCommand(command, "REJECTED", reason, -1, 0);
+      return;
+   }
+   SetAckSizingEvidence(
+      resolved_lots,
+      PositionSizingModeName(),
+      EffectiveRiskPercent(),
+      RiskCapitalBaseName(),
+      EstimatedCommissionPerLot,
+      risk_capital_amount,
+      estimated_risk_money
+   );
+   if(!ValidateRuntime(command, resolved_lots, reason))
    {
       FinalizeCommand(command, "REJECTED", reason, -1, 0);
       return;
@@ -5305,7 +7153,7 @@ void ProcessCommandFile()
       );
       return;
    }
-   ExecuteCommand(command, raw);
+   ExecuteCommand(command, raw, resolved_lots);
 }
 
 
@@ -5608,7 +7456,10 @@ void UpdateChartStatus()
       "Snapshot: ", snapshot_state,
       " / every ", IntegerToString(SnapshotIntervalSeconds), " sec\n",
        "Command + heartbeat poll: every 1 sec\n",
-       "Fixed Lot: ", DoubleToString(FixedLot, LotDigits()), "\n",
+       "Money Management: ", PositionSizingModeName(), "\n",
+       "Fixed Lot / Risk %: ", DoubleToString(FixedLot, LotDigits()),
+        " / ", DoubleToString(EffectiveRiskPercent(), 8), "% ",
+       RiskCapitalBaseName(), "\n",
        "Risk Guard: ", g_cached_execution_guard_reason, "\n",
        "Atomic Write: ", write_health, "\n",
        "Legacy Recovery: scanned ",
@@ -5628,6 +7479,7 @@ void UpdateChartStatus()
 int OnInit()
 {
    g_init_warning_code = "";
+   g_legacy_loss_latch_migration_ready = false;
    g_trusted_signing_key_id = NormalizeSigningKeyId(TrustedSigningKeyId);
    string supplied_signing_key_id = Trimmed(TrustedSigningKeyId);
    if(!IsSafeChannel(SnapshotChannel))
@@ -5646,7 +7498,7 @@ int OnInit()
          INIT_PARAMETERS_INCORRECT,
          "inputs",
          configured_mode_reason,
-         "MetafxHQ: GatewayMode or PositionLifecycleMode is outside the supported enum range."
+         "MetafxHQ: Gateway, lifecycle, money-management, or risk-capital mode is outside the supported enum range."
       );
    }
    if(StringLen(supplied_signing_key_id) > 0 &&
@@ -5704,17 +7556,29 @@ int OnInit()
       MagicNumber <= 0 ||
       MaxSnapshotAgeSeconds < 5 || MaxSnapshotAgeSeconds > 900 ||
       MaxSignalDriftPoints <= 0 ||
-      MaxQuoteAgeSeconds < 1 || MaxQuoteAgeSeconds > 120 ||
-      MaxManagedOpenPositions < 1 ||
-      MaxManagedTotalLots <= 0.0 || FixedLot > MaxManagedTotalLots ||
-      MaxTradesPerBrokerDay < 1 ||
+       MaxQuoteAgeSeconds < 1 || MaxQuoteAgeSeconds > 120 ||
+       MaxManagedOpenPositions < 1 ||
+       !MathIsValidNumber(FixedLot) ||
+       !MathIsValidNumber(RiskPercent) ||
+       !MathIsValidNumber(EstimatedCommissionPerLot) ||
+       !MathIsValidNumber(MaxManagedTotalLots) ||
+       !MathIsValidNumber(MaxLossPerTradePercent) ||
+       !MathIsValidNumber(MaxDailyLossPercent) ||
+       !MathIsValidNumber(MaxManagedWeeklyLossPercent) ||
+       !MathIsValidNumber(MaxAccountEquityDrawdownPercent) ||
+       !MathIsValidNumber(MinRewardRiskRatio) ||
+       !MathIsValidNumber(MinProjectedMarginLevelPercent) ||
+       MaxManagedTotalLots <= 0.0 ||
+        (MoneyManagementMode == MONEY_MANAGEMENT_FIXED_LOT &&
+         FixedLot > MaxManagedTotalLots) ||
+       MaxTradesPerBrokerDay < 1 ||
        MaxLossPerTradePercent <= 0.0 || MaxLossPerTradePercent > 100.0 ||
        MaxDailyLossPercent <= 0.0 || MaxDailyLossPercent > 100.0 ||
        MaxManagedWeeklyLossPercent <= 0.0 || MaxManagedWeeklyLossPercent > 100.0 ||
        MaxConsecutiveManagedLosses < 1 || MaxConsecutiveManagedLosses > 100 ||
        ConsecutiveLossCooldownMinutes < 1 || ConsecutiveLossCooldownMinutes > 10080 ||
        MaxAccountEquityDrawdownPercent <= 0.0 ||
-      MaxAccountEquityDrawdownPercent > 100.0 ||
+       MaxAccountEquityDrawdownPercent > 100.0 ||
        MinRewardRiskRatio <= 0.0 ||
        MinProjectedMarginLevelPercent < 100.0 ||
        MaxHoldingMinutes < 0 ||
@@ -5761,14 +7625,14 @@ int OnInit()
          "MetafxHQ: Attach the EA to an allowed symbol and timeframe M5 or higher."
       );
    }
-   string lot_reason = "";
-   if(!ValidateFixedLot(lot_reason))
+   string money_management_reason = "";
+   if(!ValidateMoneyManagementConfiguration(money_management_reason))
    {
       return InitFailure(
          INIT_PARAMETERS_INCORRECT,
-         "fixed_lot",
-         lot_reason,
-         "MetafxHQ: " + lot_reason
+         "money_management",
+         money_management_reason,
+         "MetafxHQ: " + money_management_reason
       );
    }
    string managed_magic_reason = "";
@@ -5859,6 +7723,15 @@ int OnInit()
    bool portfolio_policy_ready = AcquirePortfolioPolicyLease(
       portfolio_policy_reason
    );
+   string legacy_loss_latch_migration_reason = "";
+   bool legacy_loss_latch_migration_ready = false;
+   if(portfolio_policy_ready)
+   {
+      legacy_loss_latch_migration_ready =
+         MigrateLegacyLossLatchesAcrossChannels(
+            legacy_loss_latch_migration_reason
+         );
+   }
    ReleaseAccountExecutionLock();
    if(!portfolio_policy_ready)
    {
@@ -5868,6 +7741,19 @@ int OnInit()
          portfolio_policy_reason,
          "MetafxHQ: Account portfolio policy is inconsistent: " +
          portfolio_policy_reason
+      );
+      ReleasePortfolioPolicyLease();
+      ReleaseChannelLock();
+      return INIT_FAILED;
+   }
+   if(!legacy_loss_latch_migration_ready)
+   {
+      InitFailure(
+         INIT_FAILED,
+         "loss_latch_migration",
+         legacy_loss_latch_migration_reason,
+         "MetafxHQ: Legacy account loss-latch migration stopped fail-closed: " +
+         legacy_loss_latch_migration_reason
       );
       ReleasePortfolioPolicyLease();
       ReleaseChannelLock();

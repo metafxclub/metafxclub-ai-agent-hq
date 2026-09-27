@@ -19,11 +19,11 @@ Release สำหรับห้องเรียนมี Google OAuth native/
 
 ระหว่างที่ Google ยังตรวจสอบ Sensitive Scope ของแอปกลาง ผู้ใช้ใหม่อาจเห็นหน้า `Google ยังไม่ได้ยืนยันแอปนี้` และจำนวนผู้ใช้ใหม่อาจอยู่ภายใต้ OAuth unverified user cap ของ Project กลาง เมื่อ Google อนุมัติ Scope ที่ระบบขอแล้ว คำเตือนและเพดานนี้จะไม่ใช้กับ Scope ที่ได้รับอนุมัติ ดู [Google Auth Platform — Audience](https://support.google.com/cloud/answer/15549945)
 
-`2-SETUP-GOOGLE-HQ.bat` และ Desktop OAuth JSON ยังคงมีไว้เฉพาะ **Advanced/Recovery custom override** สำหรับเจ้าของระบบที่ตั้งใจใช้ OAuth Project ของตนเอง ไม่ใช่ขั้นตอนติดตั้งของนักเรียน หากใช้โหมดนี้ต้องใช้ JSON ของ Project ที่ตนควบคุมเอง ห้ามส่งให้ผู้อื่น และไฟล์ต้นฉบับจะไม่ถูกลบอัตโนมัติ
+`2-SETUP-GOOGLE-HQ.bat` และ Desktop OAuth JSON ยังคงมีไว้เฉพาะ **Advanced/Recovery custom override** สำหรับเจ้าของระบบที่ตั้งใจใช้ OAuth Project ของตนเอง ไม่ใช่ขั้นตอนติดตั้งของนักเรียน หากใช้โหมดนี้ต้องใช้ JSON ของ Project ที่ตนควบคุมเอง ห้ามส่งให้ผู้อื่น และไฟล์ต้นฉบับจะไม่ถูกลบอัตโนมัติ การติดตั้งทั่วไปที่ไม่ส่ง `-ResetGoogleOAuthToCentralRelease` จะรักษา custom override เดิมไว้ตามเจตนาของผู้ดูแล; เฉพาะ Prompt ห้องเรียนเท่านั้นที่ส่ง Switch นี้เพื่อล้าง override/authorization เก่าและบังคับกลับไปใช้ Client กลาง
 
 ## ติดตั้งด้วย Prompt เดียวผ่าน Codex
 
-เส้นทางหลักสำหรับห้องเรียนคือ [Prompt ติดตั้งอัตโนมัติ](docs/prompts/install-github-google-auto-th.md) ซึ่งล็อก Repository, Git Tag และ Version ไว้แล้ว ผู้เรียนวาง Prompt ทั้งชุดใน Codex ได้ทันทีโดยไม่ต้องกรอก Client ID หรือ Path ของ OAuth JSON Codex จะตรวจและใช้ Git/Python เดิมก่อน ติดตั้งเฉพาะตัวที่ขาดผ่าน WinGet แบบ current-user, Clone Tag ที่กำหนดจาก GitHub ลงพื้นที่ชั่วคราว, ตรวจ Source, ดาวน์โหลด Release ZIP กับ `.sha256` ที่ตรง Tag, ตรวจ hash แล้ว extract เฉพาะไฟล์ Client กลางที่ GitHub Actions inject เข้า SOURCE_DIR ก่อนเรียก Installer ตัว Installer จะตรวจ SHA-256 และ Bootstrap `pip==26.2.1` จากไฟล์ Offline ก่อนเชื่อม PyPI เพื่อใช้ Windows certificate store โดยไม่ปิด TLS จากนั้นตรวจ Bridge/Health/หน้าเว็บ เปิด Watchdog หลัง Login และเปิด HQ ที่ `http://127.0.0.1:4186/` โดยผู้เรียนไม่ต้องติดตั้ง Git/Python ล่วงหน้า ไม่ต้องดาวน์โหลด ZIP เอง และไม่ต้องกด BAT
+เส้นทางหลักสำหรับห้องเรียนคือ [Prompt ติดตั้งอัตโนมัติ](docs/prompts/install-github-google-auto-th.md) ซึ่งล็อก Repository, Git Tag และ Version ไว้แล้ว ผู้เรียนวาง Prompt ทั้งชุดใน Codex ได้ทันทีโดยไม่ต้องกรอก Client ID หรือ Path ของ OAuth JSON Codex จะตรวจและใช้ Git/Python เดิมก่อน ติดตั้งเฉพาะตัวที่ขาดผ่าน WinGet แบบ current-user, Clone Tag ที่กำหนดจาก GitHub ลงพื้นที่ชั่วคราว, ตรวจ Source, ดาวน์โหลด Release ZIP กับ `.sha256` ที่ตรง Tag, ตรวจ hash แล้ว extract เฉพาะไฟล์ Client กลางที่ GitHub Actions inject เข้า SOURCE_DIR ก่อนเรียก Installer ตัว Installer จะตรวจ SHA-256 และ Bootstrap `pip==26.2.1` จากไฟล์ Offline ก่อนเชื่อม PyPI เพื่อใช้ Windows certificate store โดยไม่ปิด TLS จากนั้นใช้โหมดห้องเรียนแบบ explicit เพื่อลบเฉพาะ OAuth custom override/refresh authorization เก่าของ Windows User หากมีและตรวจให้ได้ `central_release`, ตรวจ Bridge/Health/หน้าเว็บ เปิด Watchdog หลัง Login และเปิด HQ ที่ `http://127.0.0.1:4186/` โดยผู้เรียนไม่ต้องติดตั้ง Git/Python ล่วงหน้า ไม่ต้องดาวน์โหลด ZIP เอง และไม่ต้องกด BAT การย้าย OAuth นี้อาจทำให้ต้องกดเชื่อม Google ใหม่หนึ่งครั้ง แต่ไม่ลบ Mission, Report, Sheet หรือไฟล์งาน
 
 ขั้นตอนที่ระบบไม่ทำแทนคือการ Login/เลือกบัญชี/กดอนุญาตในหน้าทางการของ Google ผู้เรียนเหลือเพียงกด **เชื่อมบัญชี Google ครั้งเดียว** ใน HQ เท่านั้น
 
@@ -91,15 +91,23 @@ Plain clone ข้างต้นไม่ใช่ Runtime ที่ติด�
 
 การ Login Codex เป็นขั้นตอนแยก ผู้เรียนต้อง Login ด้วยบัญชีของตนเอง ระบบจะไม่แจกหรือคัดลอกบัญชีของผู้สอน หาก Codex แสดง `auth_required` แต่หน้า Office และ Health พร้อม แปลว่า HQ ติดตั้งสำเร็จแล้วและเหลือเพียง Login บัญชี Codex
 
-Agent Chat ไม่มีสิทธิ์เรียก Tool เอง โดยจะคืนเฉพาะคำตอบและประเภทคำขอให้ Backend หากเป็นคำสั่งงาน Backend จึงค่อยสร้าง Mission และให้ Worker ทำงานผ่าน Local Runner ภายใต้สิทธิ์ของโหมดที่เลือก ปัจจุบัน Computer Use, MCP execution, Plugin execution, Telegram จริง และ MT4/MT5 execution adapter ยังไม่เปิดใช้งาน
+Agent Chat ไม่มีสิทธิ์เรียก Tool หรือส่งคำสั่งเทรดเอง โดยจะคืนเฉพาะคำตอบและประเภทคำขอให้ Backend หากเป็นคำสั่งงาน Backend จึงค่อยสร้าง Mission และให้ Worker ทำงานผ่าน Local Runner ภายใต้สิทธิ์ของโหมดที่เลือก การเทรด MT4/MT5 ใช้เส้นทาง AI Trade Council Gateway ที่มี Shadow/Demo/Live guard แยกต่างหากเท่านั้น; Computer Use, MCP execution, Plugin execution และ Telegram จริงยังไม่เปิดให้ Agent Chat เรียกโดยตรง
 
 ## เชื่อม MT4 / MT5 จากแถบกลาง
 
 - แท็บเดิม `Agent คุยกันเอง` ถูกแทนด้วย `เชื่อม MT4 / MT5`; ตาราง Agent คุยกันเองแบบตั้งเวลาถูกปิดใช้งานและไม่ใช้โควตา Codex เบื้องหลัง
 - ปุ่มสแกนตรวจเฉพาะตำแหน่งติดตั้งมาตรฐานและสถานะโปรแกรมแบบอ่านอย่างเดียว ไม่เปิด Terminal และไม่อ่านเลขบัญชี รหัสผ่าน หรือข้อมูล Broker
 - หากพบ Terminal แพลตฟอร์มเดียวกันหลายตัว ต้องเปิดตัวที่ต้องการเพียงหนึ่งตัวแล้วสแกนใหม่ ระบบจึงจะยอม Apply เพื่อลดความเสี่ยงเลือกผิดโปรแกรม
-- การ Apply หนึ่งครั้งบันทึกค่ากลางแบบ atomic: MT4 ส่งให้สภา AI Trade, โรงงานสร้าง EA และห้องทดลอง; MT5 ส่งให้โรงงานสร้าง EA และห้องทดลองที่รองรับ
+- การ Apply หนึ่งครั้งบันทึกค่ากลางแบบ atomic: MT4 หรือ MT5 ส่งให้สภา AI Trade, โรงงานสร้าง EA และห้องทดลองที่รองรับ โดยเลือกใช้งานจริงได้ครั้งละแพลตฟอร์มเดียว
 - หน้าของอุปกรณ์แต่ละห้องแสดงสถานะจาก Backend แบบอ่านอย่างเดียว การเลือก Terminal ทำได้เฉพาะแถบกลาง และไม่เปิด Demo, Live Trading หรือการส่งคำสั่งเทรดให้อัตโนมัติ
+
+### Money Management ของ AI Council EA (MT4 / MT5)
+
+- ตั้ง `MoneyManagementMode=MONEY_MANAGEMENT_FIXED_LOT` เพื่อใช้ `FixedLot` หรือเลือก `MONEY_MANAGEMENT_RISK_PERCENT` เพื่อให้ EA คำนวณ Lot จาก `RiskPercent` ของ `EQUITY`/`BALANCE` ตาม `RiskCapitalBase`; AI, Frontend และคำสั่งจาก Backend เปลี่ยนค่ากลุ่มนี้ไม่ได้
+- ค่าเริ่มต้นของ Risk Percent ใช้ Equity และรองรับ `EstimatedCommissionPerLot` เพื่อกันงบค่าธรรมเนียมตามหน่วยเงินที่ Terminal รายงาน
+- Standard, Cent และ Pro-Cent ใช้สูตรเดียวกันจากข้อมูลสัญญาและหน่วยเงินที่ Broker รายงาน (`TickSize`/`TickValue` ใน MT4 และ `OrderCalcProfit` ใน MT5) โดยไม่เดาจากชื่อบัญชีและไม่คูณ/หาร 100 เอง
+- EA ปัด Lot ลงตาม Min/Max/Step ของ Symbol เท่านั้น หาก Lot ตามความเสี่ยงต่ำกว่า Min Lot จะไม่เปิด Order และจะไม่บังคับปัดขึ้นเป็น Min Lot เช่น `0.0001` ใช้ได้เฉพาะเมื่อ Broker รายงานว่า Min/Step รองรับ
+- Risk Percent คือเพดานขาดทุนที่วางแผนไว้ ณ ราคา/SL ที่ตรวจสอบก่อนส่งคำสั่ง ไม่รับประกันผลขาดทุนจริงแบบเป๊ะ เพราะ Gap, Slippage, Commission, Swap และการ Fill ของ Broker อาจทำให้ผลจริงต่างออกไป ต้องทดสอบ Demo ก่อน Live เสมอ
 
 ## โหมดการทำงานมุมขวาบน
 
@@ -115,7 +123,9 @@ Agent Chat ไม่มีสิทธิ์เรียก Tool เอง โ�
 - Bridge รับการเชื่อมต่อเฉพาะ `127.0.0.1`; ตัวติดตั้งเสนอ Port ว่างให้ผู้ใช้ยืนยัน และบันทึก Port หลัง Health check ผ่านเท่านั้น
 - งานทั่วไปในโหมดอัตโนมัติผ่านการตรวจสิทธิ์และ Risk Guard ของ Backend แบบผูกกับ Mission โดยไม่ต้องกดอนุมัติซ้ำ
 - งานเสี่ยงยังคงแยกการอนุมัติออกจากการ Execute และต้องผ่าน Risk Guard/Approval Gate
-- Live Trading ปิดโดยค่าเริ่มต้น และเปิดได้เฉพาะใน MT4 EA เมื่อผ่าน Shadow/Demo, Risk limit, Kill Switch, Signed Envelope, Key pin/match และตั้ง `GatewayMode=GATEWAY_LIVE` กับ `LiveArmed=true`; ไม่ต้องอนุมัติทีละ Order และ AI/Frontend เปลี่ยนค่านี้ไม่ได้
+- Live Trading ปิดโดยค่าเริ่มต้นทั้ง MT4 และ MT5 และต้องทดสอบตามลำดับ **Shadow -> Demo -> Live** ก่อนใช้งานบัญชีจริง เมื่อ Risk limit, Kill Switch, Signed Envelope และ Key pin/match ผ่านแล้ว ผู้ใช้จึงตั้ง EA Inputs ด้วยตนเองเป็น `GatewayMode=GATEWAY_LIVE`, `LiveArmed=true` และ `TrustedSigningKeyId` ให้ตรงกับ Active Signing Key ID ของ Local Runner; สำหรับ MT5 ต้องตั้ง `SingleHostLiveAcknowledged=true` เพิ่มอีกหนึ่งค่า AI/Frontend เปลี่ยนค่าเหล่านี้ไม่ได้ และไม่ต้องอนุมัติทีละ Order
+- MT5 Live รุ่นนี้มีขอบเขต `single_windows_user_file_common_only`: ต้องมี Windows user เดียว, HQ Local Runner เดียว และ EA ที่ใช้งานบัญชี Broker นั้นเพียงชุดเดียว ห้ามเปิดบัญชีเดียวกันพร้อมกันบน Windows user อื่น เครื่องอื่น หรือ VPS อื่น ค่า `crossVpsDistributedLock=false` เป็นข้อจำกัดที่ตั้งใจรายงานตามจริง ไม่ใช่ Distributed Lock หรือ Fencing Token
+- ชุดตรวจอัตโนมัติและ Compile proof ไม่ส่งออร์เดอร์จริงไปยังโบรกเกอร์ จึงต้องทดลองด้วยบัญชี Demo และตรวจสถานะ/ข้อจำกัดทั้งหมดด้วยตนเองก่อนตัดสินใจเปิด Live; เอกสารนี้ไม่อ้างว่าได้ทดสอบคำสั่งซื้อขายจริงแล้ว
 - ห้ามนำ `.env`, `.venv`, `data/runtime`, Log, Memory หรือ `%USERPROFILE%\.codex` ของบุคคลอื่นมาใส่ในชุดติดตั้ง
 
 การถอนด้วย `UNINSTALL-HQ.bat` แบบปกติจะเก็บ Mission/Report/Memory/Log และ durable Google grant ที่เข้ารหัสไว้ เพื่อให้ติดตั้งใหม่แล้วใช้ต่อได้ การลบข้อมูลทั้งหมดต้องเรียก `scripts\uninstall-hq.ps1 -RemoveUserData -ConfirmUserDataRemoval DELETE-METAFX-DATA` โดยตรง จึงจะลบ durable grant และ OAuth Client แบบ custom override ผ่าน Backend CLI ด้วย ส่วน Client กลางเป็นส่วนหนึ่งของ Release และ Environment variable/OAuth JSON ต้นฉบับที่ผู้ดูแลตั้งเองในโหมด Advanced จะไม่ถูกลบอัตโนมัติ

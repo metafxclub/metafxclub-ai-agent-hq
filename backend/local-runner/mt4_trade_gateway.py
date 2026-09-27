@@ -20,7 +20,7 @@ import stat
 import threading
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable
 
@@ -128,6 +128,31 @@ ACK_ALLOWED_FIELDS = frozenset({
     "closedPnl",
     "errorCode",
     "statePersisted",
+    "positionSizingMode",
+    "riskPercent",
+    "riskCapitalBase",
+    "estimatedCommissionPerLot",
+    "riskCapitalAmount",
+    "estimatedRiskMoney",
+})
+ACK_OPTIONAL_SIZING_FIELDS = frozenset({
+    "positionSizingMode",
+    "riskPercent",
+    "riskCapitalBase",
+    "estimatedCommissionPerLot",
+    "riskCapitalAmount",
+    "estimatedRiskMoney",
+})
+ACK_NORMALIZED_SIZING_FIELDS = frozenset({
+    "resolvedLot",
+    "positionSizingMode",
+    "riskPercent",
+    "riskCapitalBase",
+    "estimatedCommissionPerLot",
+    "riskCapitalAmount",
+    "estimatedRiskMoney",
+    "sizingEvidenceSource",
+    "sizingEvidenceAuthoritative",
 })
 OUTCOME_FIELDS = (
     "schemaVersion",
@@ -195,6 +220,28 @@ ACK_VERIFICATION_STATUSES = frozenset({
 })
 ACK_EXECUTION_STATES = frozenset({"NONE", "UNKNOWN", "OPEN", "CLOSED"})
 BROKER_CLOSE_COMMENT_SUFFIXES = ("[tp]", "[sl]")
+MT5_NULL_EVIDENCE_UNCERTAINTY_REASONS = frozenset({
+    "ORDER_SEND_RESULT_PERSIST_FAILED",
+    "ORDER_SEND_API_UNCERTAIN",
+    "DEAL_TICKET_MISSING",
+    "DEAL_HISTORY_SELECT_FAILED",
+    "DEAL_EXECUTION_EVIDENCE_MISMATCH",
+    "POSITION_EVIDENCE_NOT_VISIBLE",
+    "POSITION_EXECUTION_EVIDENCE_MISMATCH",
+    "EXECUTION_ATTEMPT_UNREADABLE",
+    "EXECUTION_ATTEMPT_SCHEMA_INVALID",
+    "EXECUTION_ATTEMPT_IDENTITY_MISMATCH",
+    "RECONCILIATION_LOCK_UNAVAILABLE",
+    "RECOVERY_POSITION_TELEMETRY_UNAVAILABLE",
+    "RECOVERY_POSITION_IDENTITY_MISMATCH",
+    "RECOVERY_ORDER_TELEMETRY_UNAVAILABLE",
+    "RECOVERY_ORDER_IDENTITY_MISMATCH",
+    "RECOVERY_HISTORY_TELEMETRY_UNAVAILABLE",
+    "RECOVERY_HISTORY_ORDER_IDENTITY_MISMATCH",
+    "RECOVERY_HISTORY_DEAL_IDENTITY_MISMATCH",
+    "MULTIPLE_OR_MISMATCHED_RECOVERY_EVIDENCE",
+    "RESTART_RECONCILIATION_REQUIRED",
+})
 
 SAFE_CHANNEL_PATTERN = re.compile(r"mtc-[A-Za-z0-9_-]{1,116}")
 SAFE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,119}")
@@ -203,6 +250,22 @@ SAFE_REASON_PATTERN = re.compile(r"[A-Z0-9][A-Z0-9_]{0,119}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 COMMAND_ID_PATTERN = re.compile(r"cmd-[0-9a-f]{24}")
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"idem-[0-9a-f]{32}")
+MT5_BROKER_RETCODE_REASON_PATTERN = re.compile(r"BROKER_RETCODE_[0-9]{1,10}")
+
+
+def _is_mt5_null_evidence_uncertainty_reason(value: object) -> bool:
+    """Accept only uncertainty reasons the MT5 EA can actually emit.
+
+    Broker retcodes are decimal uint values emitted by BrokerRetcodeReason;
+    every other accepted value is a closed list of post-OrderSend evidence or
+    durable-recovery failures. This predicate must not become a general reason
+    prefix check because it gates the narrow null-evidence recovery exception.
+    """
+    reason = str(value or "")
+    return (
+        reason in MT5_NULL_EVIDENCE_UNCERTAINTY_REASONS
+        or MT5_BROKER_RETCODE_REASON_PATTERN.fullmatch(reason) is not None
+    )
 
 
 def _broker_comment_matches_command(
@@ -418,6 +481,8 @@ def _signed_envelope_preimage(
     key_id: str,
     channel_id: str,
     payload_hex: str,
+    wire_platform: str | None = None,
+    wire_account_binding_id: str | None = None,
 ) -> bytes:
     normalized_kind = str(kind or "").strip().lower()
     if normalized_kind not in {"command", "heartbeat"}:
@@ -443,9 +508,27 @@ def _signed_envelope_preimage(
             "Signed envelope payload hex is invalid.",
             code="invalid_signed_payload_hex",
         )
+    if wire_platform is None and wire_account_binding_id is None:
+        # Preserve the byte-for-byte MT4 preimage for deployed gateways.
+        return (
+            f"METAFXHQ|MT4|{normalized_kind.upper()}|HMAC-SHA256|V1\n"
+            f"{key_id}\n{channel_id}\n{payload_hex}"
+        ).encode("ascii")
+    if (
+        wire_platform != "mt5"
+        or not isinstance(wire_account_binding_id, str)
+        or not SHA256_PATTERN.fullmatch(wire_account_binding_id)
+    ):
+        raise GatewaySafetyError(
+            "The MT5 signed-envelope account binding is invalid.",
+            code="wire_account_binding_invalid",
+        )
+    # Keep the legacy envelope/inner schema field names while domain-separating
+    # MT5 from MT4 and binding every command/heartbeat signature to the opaque
+    # identity reported independently in both MT5 snapshot and status files.
     return (
-        f"METAFXHQ|MT4|{normalized_kind.upper()}|HMAC-SHA256|V1\n"
-        f"{key_id}\n{channel_id}\n{payload_hex}"
+        f"METAFXHQ|MT5|{normalized_kind.upper()}|HMAC-SHA256|V1\n"
+        f"{key_id}\n{channel_id}\n{wire_account_binding_id}\n{payload_hex}"
     ).encode("ascii")
 
 
@@ -465,6 +548,8 @@ def _signed_envelope_signature(
     key_id: str,
     channel_id: str,
     payload_hex: str,
+    wire_platform: str | None = None,
+    wire_account_binding_id: str | None = None,
 ) -> str:
     if _signing_key_id(key) != key_id:
         raise GatewaySafetyError(
@@ -478,6 +563,8 @@ def _signed_envelope_signature(
             key_id=key_id,
             channel_id=channel_id,
             payload_hex=payload_hex,
+            wire_platform=wire_platform,
+            wire_account_binding_id=wire_account_binding_id,
         ),
     )
 
@@ -488,6 +575,8 @@ def _build_signed_envelope(
     channel_id: str,
     payload: bytes,
     key: bytes,
+    wire_platform: str | None = None,
+    wire_account_binding_id: str | None = None,
 ) -> dict[str, str]:
     if not isinstance(payload, bytes) or not 0 < len(payload) <= MAX_SIGNED_PAYLOAD_BYTES:
         raise GatewayValidationError(
@@ -514,6 +603,8 @@ def _build_signed_envelope(
             key_id=key_id,
             channel_id=channel_id,
             payload_hex=payload_hex,
+            wire_platform=wire_platform,
+            wire_account_binding_id=wire_account_binding_id,
         ),
     }
 
@@ -759,6 +850,8 @@ class MT4TradeGateway:
         command_ttl_seconds: int = 30,
         heartbeat_ttl_seconds: int = 30,
         clock: Callable[[], datetime] = _utc_now,
+        wire_platform: str | None = None,
+        wire_account_binding_id: str | None = None,
     ):
         if (
             isinstance(command_ttl_seconds, bool)
@@ -775,11 +868,25 @@ class MT4TradeGateway:
                 "Heartbeat TTL must be 1-60 seconds.",
                 code="invalid_heartbeat_ttl",
             )
+        if not (
+            (wire_platform is None and wire_account_binding_id is None)
+            or (
+                wire_platform == "mt5"
+                and isinstance(wire_account_binding_id, str)
+                and SHA256_PATTERN.fullmatch(wire_account_binding_id)
+            )
+        ):
+            raise GatewaySafetyError(
+                "The MT5 gateway wire binding is invalid.",
+                code="wire_account_binding_invalid",
+            )
         self.file_common_root = Path(file_common_root)
         self.state_root = Path(state_root)
         self.command_ttl_seconds = command_ttl_seconds
         self.heartbeat_ttl_seconds = heartbeat_ttl_seconds
         self.clock = clock
+        self.wire_platform = wire_platform
+        self.wire_account_binding_id = wire_account_binding_id
         self._lock = threading.RLock()
         self._ledger_path = self.state_root / "mt4-trade-gateway-ledger.json"
         self._ledger_backup_path = self.state_root / "mt4-trade-gateway-ledger.json.bak"
@@ -968,6 +1075,8 @@ class MT4TradeGateway:
             channel_id=channel_id,
             payload=self._compact_inner_payload(payload, fields),
             key=key,
+            wire_platform=self.wire_platform,
+            wire_account_binding_id=self.wire_account_binding_id,
         )
         _flat_json(envelope, exact_fields=SIGNED_ENVELOPE_FIELDS)
         return envelope
@@ -1023,6 +1132,8 @@ class MT4TradeGateway:
             key_id=key_id,
             channel_id=channel_id,
             payload_hex=payload_hex,
+            wire_platform=self.wire_platform,
+            wire_account_binding_id=self.wire_account_binding_id,
         )
         if not hmac.compare_digest(signature_hex, expected):
             raise GatewaySafetyError(
@@ -1158,10 +1269,113 @@ class MT4TradeGateway:
             if entry["outstanding"]:
                 outstanding_ids.append(command_id)
             stored_ack = entry.get("ack")
-            if isinstance(stored_ack, dict) and "fixedLot" in stored_ack:
-                raise LedgerIntegrityError(
-                    "Trade ledger contains unsanitized EA sizing data."
-                )
+            if isinstance(stored_ack, dict):
+                if "fixedLot" in stored_ack:
+                    raise LedgerIntegrityError(
+                        "Trade ledger contains unsanitized EA sizing data."
+                    )
+                # ACK v3 keeps ``fixedLot`` as its wire name, but durable
+                # storage uses the unambiguous ``resolvedLot`` name.  Older
+                # ledgers legitimately have none of these fields.  New
+                # records must carry the complete, explicitly non-authority
+                # audit projection so a corrupt/partial ledger never becomes
+                # plausible sizing truth on read.
+                stored_sizing_fields = set(stored_ack) & ACK_NORMALIZED_SIZING_FIELDS
+                if stored_sizing_fields:
+                    if stored_sizing_fields != ACK_NORMALIZED_SIZING_FIELDS:
+                        raise LedgerIntegrityError(
+                            "Trade ledger contains incomplete EA sizing evidence."
+                        )
+                    resolved_lot = stored_ack.get("resolvedLot")
+                    if (
+                        isinstance(resolved_lot, bool)
+                        or not isinstance(resolved_lot, (int, float))
+                        or not math.isfinite(float(resolved_lot))
+                        or not 0 <= float(resolved_lot) <= 1_000_000
+                        or stored_ack.get("sizingEvidenceSource")
+                        != "ea_ack_read_only"
+                        or stored_ack.get("sizingEvidenceAuthoritative") is not False
+                    ):
+                        raise LedgerIntegrityError(
+                            "Trade ledger contains invalid EA sizing evidence."
+                        )
+                    stored_mode = stored_ack.get("positionSizingMode")
+                    stored_base = stored_ack.get("riskCapitalBase")
+                    stored_numeric = {
+                        "riskPercent": stored_ack.get("riskPercent"),
+                        "estimatedCommissionPerLot": stored_ack.get(
+                            "estimatedCommissionPerLot"
+                        ),
+                        "riskCapitalAmount": stored_ack.get("riskCapitalAmount"),
+                        "estimatedRiskMoney": stored_ack.get("estimatedRiskMoney"),
+                    }
+                    if stored_mode is None:
+                        if stored_base is not None or any(
+                            value is not None for value in stored_numeric.values()
+                        ):
+                            raise LedgerIntegrityError(
+                                "Trade ledger contains inconsistent legacy sizing evidence."
+                            )
+                    else:
+                        if (
+                            stored_mode not in {"FIXED_LOT", "RISK_PERCENT"}
+                            or stored_base not in {"EQUITY", "BALANCE"}
+                            or any(
+                                isinstance(value, bool)
+                                or not isinstance(value, (int, float))
+                                or not math.isfinite(float(value))
+                                or abs(float(value)) > 1_000_000_000
+                                for value in stored_numeric.values()
+                                if value is not None
+                            )
+                            or stored_numeric["riskPercent"] is None
+                            or not 0 <= float(stored_numeric["riskPercent"]) <= 100
+                            or (
+                                stored_mode == "RISK_PERCENT"
+                                and float(stored_numeric["riskPercent"]) <= 0
+                            )
+                            or stored_numeric["estimatedCommissionPerLot"] is None
+                            or not 0 <= float(
+                                stored_numeric["estimatedCommissionPerLot"]
+                            ) <= 1_000_000
+                            or (
+                                float(resolved_lot) > 0
+                                and (
+                                    stored_numeric["riskCapitalAmount"] is None
+                                    or stored_numeric["estimatedRiskMoney"] is None
+                                    or float(stored_numeric["riskCapitalAmount"]) <= 0
+                                    or float(stored_numeric["estimatedRiskMoney"]) <= 0
+                                )
+                            )
+                            or (
+                                float(resolved_lot) == 0
+                                and (
+                                    stored_numeric["riskCapitalAmount"] is not None
+                                    or stored_numeric["estimatedRiskMoney"] is not None
+                                )
+                            )
+                        ):
+                            raise LedgerIntegrityError(
+                                "Trade ledger contains invalid EA sizing evidence."
+                            )
+                        if stored_mode == "RISK_PERCENT" and float(resolved_lot) > 0:
+                            stored_budget = (
+                                Decimal(str(stored_numeric["riskCapitalAmount"]))
+                                * Decimal(str(stored_numeric["riskPercent"]))
+                                / Decimal("100")
+                            )
+                            stored_budget_ceiling = stored_budget.quantize(
+                                Decimal("0.00000001"),
+                                rounding=ROUND_CEILING,
+                            )
+                            if (
+                                stored_budget < Decimal("0.00000001")
+                                or Decimal(str(stored_numeric["estimatedRiskMoney"]))
+                                > stored_budget_ceiling
+                            ):
+                                raise LedgerIntegrityError(
+                                    "Trade ledger contains over-budget EA sizing evidence."
+                                )
             if (
                 entry.get("status") == "expired_waiting_ack"
                 and entry.get("outstanding") is True
@@ -1798,7 +2012,11 @@ class MT4TradeGateway:
                 f"Unknown ACK fields: {', '.join(unknown)}",
                 code="unknown_ack_field",
             )
-        required = set(ACK_ALLOWED_FIELDS)
+        # Sizing evidence was added after the v3 ACK envelope shipped. Keep
+        # legacy EA ACKs compatible, but require the complete extension when
+        # any sizing field is present so partial or ambiguous risk telemetry
+        # is rejected fail-closed.
+        required = set(ACK_ALLOWED_FIELDS - ACK_OPTIONAL_SIZING_FIELDS)
         missing = sorted(required - set(ack))
         if missing:
             raise AckValidationError(
@@ -1930,9 +2148,14 @@ class MT4TradeGateway:
                 "ACK statePersisted must be boolean.",
                 code="invalid_ack_state_persisted",
             )
-        # The EA reports its own FixedLot. Validate that it is a finite
-        # positive scalar, then deliberately discard the value. It can only
-        # become a read-only "reported" status and can never enter a command.
+        # The EA reports the resolved order volume in the legacy ``fixedLot``
+        # field (the wire name is retained for ACK v3 compatibility).  A
+        # command may be rejected or found duplicate before sizing runs, in
+        # which case current gateways report 0.  Execution-capable states must
+        # always carry a positive resolved volume.  ``fixedLot`` is never
+        # persisted under that ambiguous wire name; the validated value is
+        # retained as read-only ``resolvedLot`` audit evidence.  It never
+        # becomes a command input or Backend/AI sizing authority.
         try:
             ea_lot = Decimal(str(ack.get("fixedLot")))
         except (InvalidOperation, ValueError) as error:
@@ -1940,11 +2163,129 @@ class MT4TradeGateway:
                 "ACK EA sizing status is invalid.",
                 code="invalid_ack_ea_sizing",
             ) from error
-        if not ea_lot.is_finite() or ea_lot <= 0:
+        if not ea_lot.is_finite() or ea_lot < 0 or ea_lot > Decimal("1000000"):
             raise AckValidationError(
                 "ACK EA sizing status is invalid.",
                 code="invalid_ack_ea_sizing",
             )
+        sizing_resolved = ea_lot > 0
+        if status in {
+            "SHADOWED",
+            "EXECUTING",
+            "EXECUTED",
+            "EXECUTION_UNKNOWN",
+        } and not sizing_resolved:
+            raise AckValidationError(
+                "ACK execution state requires a positive resolved volume.",
+                code="missing_ack_resolved_volume",
+            )
+        sizing_fields_present = set(ack) & ACK_OPTIONAL_SIZING_FIELDS
+        position_sizing_mode = ""
+        risk_percent: int | float | None = None
+        risk_capital_base = ""
+        estimated_commission_per_lot: int | float | None = None
+        risk_capital_amount: int | float | None = None
+        estimated_risk_money: int | float | None = None
+        if sizing_fields_present:
+            missing_sizing = sorted(ACK_OPTIONAL_SIZING_FIELDS - set(ack))
+            if missing_sizing:
+                raise AckValidationError(
+                    "ACK sizing evidence is incomplete.",
+                    code="incomplete_ack_sizing_evidence",
+                )
+            position_sizing_mode = str(ack.get("positionSizingMode") or "").upper()
+            if position_sizing_mode not in {"FIXED_LOT", "RISK_PERCENT"}:
+                raise AckValidationError(
+                    "ACK positionSizingMode is invalid.",
+                    code="invalid_ack_position_sizing_mode",
+                )
+            risk_capital_base = str(ack.get("riskCapitalBase") or "").upper()
+            if risk_capital_base not in {"EQUITY", "BALANCE"}:
+                raise AckValidationError(
+                    "ACK riskCapitalBase is invalid.",
+                    code="invalid_ack_risk_capital_base",
+                )
+            risk_percent = self._ack_optional_number(
+                ack.get("riskPercent"),
+                field="risk_percent",
+                minimum=(
+                    Decimal("0.00000001")
+                    if position_sizing_mode == "RISK_PERCENT"
+                    else Decimal("0")
+                ),
+                maximum=Decimal("100"),
+            )
+            estimated_commission_per_lot = self._ack_optional_number(
+                ack.get("estimatedCommissionPerLot"),
+                field="estimated_commission_per_lot",
+                minimum=Decimal("0"),
+                maximum=Decimal("1000000"),
+            )
+            risk_capital_amount = self._ack_optional_number(
+                ack.get("riskCapitalAmount"),
+                field="risk_capital_amount",
+                minimum=Decimal("0"),
+            )
+            estimated_risk_money = self._ack_optional_number(
+                ack.get("estimatedRiskMoney"),
+                field="estimated_risk_money",
+                minimum=Decimal("0"),
+            )
+            if risk_percent is None or estimated_commission_per_lot is None:
+                raise AckValidationError(
+                    "ACK sizing policy values cannot be null.",
+                    code="invalid_ack_sizing_policy",
+                )
+            wire_quantum = Decimal("0.00000001")
+            if sizing_resolved:
+                if (
+                    risk_capital_amount is None
+                    or estimated_risk_money is None
+                    or Decimal(str(risk_capital_amount)) <= 0
+                    or Decimal(str(estimated_risk_money)) < wire_quantum
+                ):
+                    raise AckValidationError(
+                        "Resolved ACK lacks representable monetary risk evidence.",
+                        code="invalid_ack_risk_evidence",
+                    )
+            if position_sizing_mode == "RISK_PERCENT" and sizing_resolved:
+                risk_budget = (
+                    Decimal(str(risk_capital_amount))
+                    * Decimal(str(risk_percent))
+                    / Decimal("100")
+                )
+                # Current gateways serialize monetary sizing evidence with
+                # eight decimals so tiny cent-account values survive restart.
+                # A positive budget below that wire quantum cannot be proven
+                # without rounding the evidence up or down to zero, so reject
+                # it fail-closed instead of granting an unbounded absolute
+                # exception that could dwarf the declared budget.  For a
+                # representable budget, compare against that budget rounded
+                # upward to the same eight-decimal wire quantum.  This avoids
+                # rejecting a truthful EA ACK merely because its positive
+                # monetary estimate rounded to the nearest wire unit, while
+                # still allowing no more than one serialization quantum.
+                if risk_budget < wire_quantum:
+                    raise AckValidationError(
+                        "Resolved risk-percent ACK budget is below the evidence wire precision.",
+                        code="ack_risk_budget_unrepresentable",
+                    )
+                wire_budget_ceiling = risk_budget.quantize(
+                    wire_quantum,
+                    rounding=ROUND_CEILING,
+                )
+                if Decimal(str(estimated_risk_money)) > wire_budget_ceiling:
+                    raise AckValidationError(
+                        "Resolved risk-percent ACK exceeds its declared risk budget.",
+                        code="ack_risk_budget_exceeded",
+                    )
+            elif not sizing_resolved and (
+                risk_capital_amount is not None or estimated_risk_money is not None
+            ):
+                raise AckValidationError(
+                    "Unsized ACK cannot claim monetary sizing evidence.",
+                    code="unexpected_ack_risk_evidence",
+                )
         execution_evidence = (
             filled_price,
             filled_slippage_points,
@@ -2042,9 +2383,22 @@ class MT4TradeGateway:
             "closedPnl": closed_pnl,
             "errorCode": error_code,
             "statePersisted": ack["statePersisted"],
+            # Audit-only EA observation.  The legacy ACK-v3 wire field is
+            # named ``fixedLot`` even in Risk Percent mode, where it actually
+            # contains the resolved order volume.  Rename it durably and mark
+            # its provenance/authority explicitly.
+            "resolvedLot": _json_number(ea_lot.normalize()),
+            "positionSizingMode": position_sizing_mode or None,
+            "riskPercent": risk_percent,
+            "riskCapitalBase": risk_capital_base or None,
+            "estimatedCommissionPerLot": estimated_commission_per_lot,
+            "riskCapitalAmount": risk_capital_amount,
+            "estimatedRiskMoney": estimated_risk_money,
+            "sizingEvidenceSource": "ea_ack_read_only",
+            "sizingEvidenceAuthoritative": False,
         }
         _flat_json(normalized)
-        return normalized, True
+        return normalized, sizing_resolved
 
     def _bind_ack(
         self,
@@ -2206,7 +2560,11 @@ class MT4TradeGateway:
                     "status": str(entry.get("status") or "unknown"),
                     "outstandingReleased": not bool(entry.get("outstanding")),
                     "ack": dict(entry.get("ack") or normalized),
-                    "eaSizingStatus": "reported_read_only",
+                    "eaSizingStatus": (
+                        "reported_read_only"
+                        if entry.get("eaSizingReported")
+                        else "not_reported"
+                    ),
                     "referencePriceBinding": reference_price_binding,
                 }
             current_status = str(entry.get("status") or "")
@@ -2214,6 +2572,7 @@ class MT4TradeGateway:
             current_ack = entry.get("ack")
             persisted_upgrade = False
             unknown_reconciliation_upgrade = False
+            mt5_null_evidence_recovery_upgrade = False
             recovered_lifecycle_upgrade = False
             if (
                 isinstance(current_ack, dict)
@@ -2282,6 +2641,68 @@ class MT4TradeGateway:
                         ),
                         "actualComment": current_ack.get("actualComment"),
                     }
+            if (
+                isinstance(current_ack, dict)
+                and self.wire_platform == "mt5"
+                and isinstance(self.wire_account_binding_id, str)
+                and SHA256_PATTERN.fullmatch(self.wire_account_binding_id)
+                and current_status == "ack_EXECUTION_UNKNOWN"
+                and current_ack.get("status") == "EXECUTION_UNKNOWN"
+                and current_ack.get("statePersisted") is True
+                and _is_mt5_null_evidence_uncertainty_reason(
+                    current_ack.get("reasonCode")
+                )
+                and current_ack.get("verificationStatus")
+                in {"SELECT_FAILED", "MISMATCH"}
+                and current_ack.get("executionState") == "UNKNOWN"
+                and current_ack.get("ticket") is None
+                and current_ack.get("filledPrice") is None
+                and current_ack.get("filledSlippagePoints") is None
+                and current_ack.get("actualStopLoss") is None
+                and current_ack.get("actualTakeProfit") is None
+                and current_ack.get("actualMagicNumber") is None
+                and current_ack.get("actualComment") == ""
+                and current_ack.get("closedAt") is None
+                and current_ack.get("closedPnl") is None
+                and next_status == "EXECUTED"
+                and normalized.get("reasonCode") == "RECOVERED_ORDER_FOUND"
+                and normalized.get("statePersisted") is True
+                and normalized.get("signatureVerificationStatus") == "VERIFIED"
+                and normalized.get("verificationStatus")
+                in {"VERIFIED_OPEN", "VERIFIED_CLOSED"}
+                and normalized.get("executionState") in {"OPEN", "CLOSED"}
+                and isinstance(normalized.get("ticket"), int)
+                and not isinstance(normalized.get("ticket"), bool)
+                and int(normalized["ticket"]) > 0
+                and all(
+                    normalized.get(field) is not None
+                    for field in (
+                        "filledPrice",
+                        "filledSlippagePoints",
+                        "actualStopLoss",
+                        "actualTakeProfit",
+                        "actualMagicNumber",
+                    )
+                )
+                and _broker_comment_matches_command(
+                    normalized.get("actualComment"),
+                    command_id,
+                    allow_close_suffix=normalized.get("executionState") == "CLOSED",
+                )
+            ):
+                # This exception is deliberately MT5-only. The configured
+                # account-bound command-envelope domain proves that the
+                # command belongs to this MT5 account stream. The ACK itself is
+                # not HMAC-signed; it is accepted only after exact command
+                # binding, the EA's canonical recovery reason, and complete
+                # broker evidence. Generic/MT4 null-evidence UNKNOWN ACKs
+                # remain quarantined.
+                mt5_null_evidence_recovery_upgrade = True
+                normalized = {
+                    **normalized,
+                    "reasonCode": "EXECUTION_RECONCILED_WITH_WARNING",
+                    "observedAt": current_ack.get("observedAt"),
+                }
             recovery = entry.get("recovery")
             if (
                 isinstance(current_ack, dict)
@@ -2340,6 +2761,7 @@ class MT4TradeGateway:
                 and not entry.get("outstanding")
                 and not persisted_upgrade
                 and not unknown_reconciliation_upgrade
+                and not mt5_null_evidence_recovery_upgrade
                 and not recovered_lifecycle_upgrade
             ):
                 raise AckConflictError("Command already has a different terminal ACK.")
@@ -2350,6 +2772,7 @@ class MT4TradeGateway:
                 and current_status != "ack_EXECUTING"
                 and not persisted_upgrade
                 and not unknown_reconciliation_upgrade
+                and not mt5_null_evidence_recovery_upgrade
                 and not recovered_lifecycle_upgrade
             ):
                 raise AckConflictError("Command already has a terminal ACK.")
@@ -2373,6 +2796,21 @@ class MT4TradeGateway:
                     "originalFilledSlippagePoints": current_ack.get(
                         "filledSlippagePoints"
                     ),
+                    "barClaimRetained": True,
+                    "recoveredAt": _iso(self._now()),
+                }
+            elif mt5_null_evidence_recovery_upgrade:
+                entry["recovery"] = {
+                    "action": "reconcile_mt5_null_evidence_terminal_ack",
+                    "reasonCode": "MT5_ACCOUNT_BOUND_RECOVERY_EVIDENCE_VERIFIED",
+                    "provenance": "mt5_account_bound_command_envelope",
+                    "originalAckStatus": "EXECUTION_UNKNOWN",
+                    "originalAckReasonCode": str(
+                        current_ack.get("reasonCode") or ""
+                    ),
+                    "originalAckObservedAt": current_ack.get("observedAt"),
+                    "terminalRecoveryReasonCode": "RECOVERED_ORDER_FOUND",
+                    "executionQuality": "warning",
                     "barClaimRetained": True,
                     "recoveredAt": _iso(self._now()),
                 }
@@ -2931,6 +3369,12 @@ class MT4TradeGateway:
                 (stored_ack.get("actualStopLoss"), outcome.get("stopLoss")),
                 (stored_ack.get("actualTakeProfit"), outcome.get("takeProfit")),
                 (stored_ack.get("actualMagicNumber"), outcome.get("magicNumber")),
+                # New ACKs retain the EA-resolved volume as read-only audit
+                # evidence.  Bind the independently refreshed outcome to it
+                # so a forged/stale outcome cannot replace the verified lot.
+                # Legacy durable ACKs legitimately omit ``resolvedLot`` and
+                # continue through the existing identity checks above.
+                (stored_ack.get("resolvedLot"), outcome.get("lots")),
             )
             if any(
                 expected is not None and not _same_decimal(expected, actual)
@@ -3218,7 +3662,7 @@ class MT4TradeGateway:
                 "latestCommandId": latest_command_id,
                 "singleOutstanding": True,
                 "eaOwnsExecutionPolicy": True,
-                "eaSizingPolicy": "ea_input_only",
+                "eaSizingPolicy": "ea_money_management_inputs_only",
                 "signedCommandRequiredForLive": True,
                 "signedCommandVerificationAvailable": True,
                 "liveExecutionAvailable": True,

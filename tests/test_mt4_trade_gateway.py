@@ -550,6 +550,61 @@ class MT4TradeGatewayTests(unittest.TestCase):
             },
         )
 
+    def test_mt5_wire_signature_is_platform_and_account_bound(self) -> None:
+        binding = "a" * 64
+        payload = b'{"schemaVersion":"metafx-hq-mt4-command-v2"}'
+        envelope = self.gateway_module._build_signed_envelope(
+            kind="command",
+            channel_id="mtc-demo-01",
+            payload=payload,
+            key=bytes(range(32)),
+            wire_platform="mt5",
+            wire_account_binding_id=binding,
+        )
+        self.assertEqual(
+            envelope["signatureHex"],
+            "696a44edd69a0e1852096634ffae68737655c5aa4d12cb26c03039f72aa94753",
+        )
+        legacy = self.gateway_module._build_signed_envelope(
+            kind="command",
+            channel_id="mtc-demo-01",
+            payload=payload,
+            key=bytes(range(32)),
+        )
+        other_account = self.gateway_module._build_signed_envelope(
+            kind="command",
+            channel_id="mtc-demo-01",
+            payload=payload,
+            key=bytes(range(32)),
+            wire_platform="mt5",
+            wire_account_binding_id="b" * 64,
+        )
+        self.assertNotEqual(envelope["signatureHex"], legacy["signatureHex"])
+        self.assertNotEqual(envelope["signatureHex"], other_account["signatureHex"])
+
+        mt5_gateway = self.gateway(
+            wire_platform="mt5",
+            wire_account_binding_id=binding,
+        )
+        mt5_gateway.queue_trade_intent(self.intent())
+        self.assertIsNotNone(mt5_gateway._read_command_slot("mtc-demo-01"))
+        with self.assertRaises(self.gateway_module.OutstandingCommandError) as wrong_platform:
+            self.gateway()._read_command_slot("mtc-demo-01")
+        self.assertEqual(
+            wrong_platform.exception.code,
+            "signed_envelope_signature_invalid",
+        )
+        with self.assertRaises(self.gateway_module.OutstandingCommandError) as wrong_account:
+            self.gateway(
+                wire_platform="mt5",
+                wire_account_binding_id="b" * 64,
+            )._read_command_slot("mtc-demo-01")
+        self.assertEqual(
+            wrong_account.exception.code,
+            "signed_envelope_signature_invalid",
+        )
+        self.assertNotIn(binding, json.dumps(mt5_gateway.status(), sort_keys=True))
+
     def test_signing_key_is_stable_private_and_never_returned(self) -> None:
         gateway = self.gateway()
         created = gateway.ensure_signing_key("mtc-demo-01")
@@ -1209,7 +1264,7 @@ class MT4TradeGatewayTests(unittest.TestCase):
         )
         self.assertEqual(replacement_inner, replacement)
 
-    def test_ack_is_bound_and_fixed_lot_is_sanitized_to_status_only(self) -> None:
+    def test_ack_is_bound_and_wire_fixed_lot_is_preserved_only_as_audit_resolved_lot(self) -> None:
         gateway = self.gateway()
         command = gateway.queue_trade_intent(self.intent())["command"]
 
@@ -1240,14 +1295,432 @@ class MT4TradeGatewayTests(unittest.TestCase):
         self.assertTrue(result["outstandingReleased"])
         self.assertEqual(result["eaSizingStatus"], "reported_read_only")
         self.assertNotIn("fixedLot", result["ack"])
+        self.assertEqual(result["ack"]["resolvedLot"], 123.45)
+        self.assertEqual(
+            result["ack"]["sizingEvidenceSource"],
+            "ea_ack_read_only",
+        )
+        self.assertIs(result["ack"]["sizingEvidenceAuthoritative"], False)
         stored = gateway.read_command(str(command["commandId"]))
         self.assertEqual(stored["eaSizingStatus"], "reported_read_only")
         self.assertNotIn("fixedLot", stored["ack"])
+        self.assertEqual(stored["ack"]["resolvedLot"], 123.45)
         ledger_text = (
             self.state_root / "mt4-trade-gateway-ledger.json"
         ).read_text(encoding="ascii")
         self.assertNotIn('"fixedLot"', ledger_text)
-        self.assertNotIn("123.45", ledger_text)
+        ledger = json.loads(ledger_text)
+        durable_ack = ledger["commands"][command["commandId"]]["ack"]
+        self.assertEqual(durable_ack["resolvedLot"], 123.45)
+        self.assertIs(durable_ack["sizingEvidenceAuthoritative"], False)
+        for forbidden in ("resolvedLot", "positionSizingMode", "riskPercent"):
+            self.assertNotIn(forbidden, command)
+
+    def test_ack_persists_complete_money_management_evidence_as_audit_only(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        sizing = {
+            "positionSizingMode": "RISK_PERCENT",
+            "riskPercent": 1.0,
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 7.5,
+            "riskCapitalAmount": 1000.0,
+            "estimatedRiskMoney": 9.98,
+        }
+
+        result = gateway.ingest_ack(self.ack(command, **sizing))
+
+        self.assertTrue(result["outstandingReleased"])
+        self.assertEqual(result["ack"]["resolvedLot"], 0.01)
+        for field, expected in sizing.items():
+            self.assertEqual(result["ack"][field], expected)
+        self.assertEqual(result["ack"]["sizingEvidenceSource"], "ea_ack_read_only")
+        self.assertIs(result["ack"]["sizingEvidenceAuthoritative"], False)
+        stored = gateway.read_command(str(command["commandId"]))
+        self.assertEqual(stored["ack"], result["ack"])
+
+    def test_legacy_ack_without_extended_sizing_fields_remains_compatible(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+
+        result = gateway.ingest_ack(self.ack(command, fixedLot=0.02))
+
+        self.assertEqual(result["ack"]["resolvedLot"], 0.02)
+        for field in self.gateway_module.ACK_OPTIONAL_SIZING_FIELDS:
+            self.assertIsNone(result["ack"][field])
+        self.assertEqual(result["ack"]["sizingEvidenceSource"], "ea_ack_read_only")
+        self.assertIs(result["ack"]["sizingEvidenceAuthoritative"], False)
+
+    def test_legacy_durable_ack_without_normalized_sizing_projection_still_loads(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        gateway.ingest_ack(self.ack(command))
+        ledger_path = self.state_root / "mt4-trade-gateway-ledger.json"
+        ledger = json.loads(ledger_path.read_text(encoding="ascii"))
+        durable_ack = ledger["commands"][command["commandId"]]["ack"]
+        for field in self.gateway_module.ACK_NORMALIZED_SIZING_FIELDS:
+            durable_ack.pop(field, None)
+        ledger["commands"][command["commandId"]]["eaSizingReported"] = False
+        ledger_path.write_text(json.dumps(ledger), encoding="ascii")
+
+        stored = gateway.read_command(str(command["commandId"]))
+
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["eaSizingStatus"], "not_reported")
+        self.assertFalse(
+            set(stored["ack"]) & self.gateway_module.ACK_NORMALIZED_SIZING_FIELDS
+        )
+
+    def test_durable_ack_rejects_authoritative_or_partial_sizing_projection(self) -> None:
+        for index, mutation in enumerate((
+            {"sizingEvidenceAuthoritative": True},
+            {"drop": "estimatedRiskMoney"},
+        )):
+            with self.subTest(mutation=mutation):
+                root = self.state_root / f"corrupt-sizing-{index}"
+                gateway = self.gateway(
+                    state_root=root,
+                    file_common_root=self.file_common / f"corrupt-sizing-{index}",
+                )
+                command = gateway.queue_trade_intent(self.intent())["command"]
+                gateway.ingest_ack(self.ack(command))
+                ledger_path = root / "mt4-trade-gateway-ledger.json"
+                ledger = json.loads(ledger_path.read_text(encoding="ascii"))
+                durable_ack = ledger["commands"][command["commandId"]]["ack"]
+                if "drop" in mutation:
+                    durable_ack.pop(mutation["drop"])
+                else:
+                    durable_ack.update(mutation)
+                ledger_path.write_text(json.dumps(ledger), encoding="ascii")
+
+                with self.assertRaises(self.gateway_module.LedgerIntegrityError):
+                    gateway.read_command(str(command["commandId"]))
+
+    def test_ack_rejects_unbounded_resolved_lot(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+
+        with self.assertRaises(self.gateway_module.AckValidationError) as raised:
+            gateway.ingest_ack(self.ack(command, fixedLot=1_000_000.00000001))
+
+        self.assertEqual(raised.exception.code, "invalid_ack_ea_sizing")
+
+    def test_mt4_post_fill_risk_reason_codes_are_backend_compatible_and_replayable(self) -> None:
+        reasons = (
+            "ORDER_VERIFIED_OPEN",
+            "ORDER_VERIFIED_OPEN_SLIPPAGE_RESERVE_AND_RISK_ESTIMATE_EXCEEDED",
+            "ORDER_VERIFIED_OPEN_RISK_ESTIMATE_EXCEEDED",
+            "ORDER_VERIFIED_OPEN_SLIPPAGE_RESERVE_EXCEEDED",
+            "ORDER_VERIFIED_OPEN_RISK_UNAVAILABLE",
+        )
+        for index, reason_code in enumerate(reasons):
+            with self.subTest(reason_code=reason_code):
+                gateway = self.gateway(
+                    file_common_root=self.file_common / f"post-fill-{index}",
+                    state_root=self.state_root / f"post-fill-{index}",
+                )
+                command = gateway.queue_trade_intent(self.intent())["command"]
+                ack = self.ack(
+                    command,
+                    status="EXECUTED",
+                    reasonCode=reason_code,
+                    mode="live",
+                    ticket=983283721 + index,
+                    positionSizingMode="FIXED_LOT",
+                    riskPercent=0.0,
+                    riskCapitalBase="EQUITY",
+                    estimatedCommissionPerLot=0.0,
+                    riskCapitalAmount=1000.0,
+                    estimatedRiskMoney=5.0,
+                )
+                accepted = gateway.ingest_ack(ack)
+                self.assertTrue(accepted["outstandingReleased"])
+                replay = gateway.ingest_ack(ack)
+                self.assertTrue(replay["idempotentReplay"])
+                self.assertEqual(replay["ack"]["reasonCode"], reason_code)
+
+    def test_pre_sizing_rejection_accepts_zero_volume_without_claiming_sizing(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        sizing = {
+            "positionSizingMode": "RISK_PERCENT",
+            "riskPercent": 1.0,
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 0.0,
+            "riskCapitalAmount": None,
+            "estimatedRiskMoney": None,
+        }
+
+        result = gateway.ingest_ack(
+            self.ack(
+                command,
+                status="REJECTED",
+                reasonCode="RISK_VOLUME_BELOW_BROKER_MINIMUM",
+                fixedLot=0.0,
+                **sizing,
+            )
+        )
+
+        self.assertTrue(result["outstandingReleased"])
+        self.assertEqual(result["eaSizingStatus"], "not_reported")
+        replay = gateway.ingest_ack(
+            self.ack(
+                command,
+                status="REJECTED",
+                reasonCode="RISK_VOLUME_BELOW_BROKER_MINIMUM",
+                fixedLot=0.0,
+                **sizing,
+            )
+        )
+        self.assertTrue(replay["idempotentReplay"])
+        self.assertEqual(replay["eaSizingStatus"], "not_reported")
+
+    def test_execution_capable_ack_requires_positive_resolved_volume(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        sizing = {
+            "positionSizingMode": "RISK_PERCENT",
+            "riskPercent": 1.0,
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 0.0,
+            "riskCapitalAmount": None,
+            "estimatedRiskMoney": None,
+        }
+
+        for status, overrides in (
+            ("SHADOWED", {}),
+            (
+                "EXECUTION_UNKNOWN",
+                {
+                    "reasonCode": "ORDER_POST_SEND_SELECT_FAILED",
+                    "mode": "demo",
+                    "ticket": 123456,
+                },
+            ),
+        ):
+            with self.subTest(status=status):
+                with self.assertRaises(self.gateway_module.AckValidationError) as raised:
+                    gateway.ingest_ack(
+                        self.ack(
+                            command,
+                            status=status,
+                            fixedLot=0.0,
+                            **overrides,
+                            **sizing,
+                        )
+                    )
+                self.assertEqual(
+                    raised.exception.code,
+                    "missing_ack_resolved_volume",
+                )
+
+    def test_fixed_lot_ack_does_not_require_a_positive_unused_risk_percent(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        sizing = {
+            "positionSizingMode": "FIXED_LOT",
+            "riskPercent": 0.0,
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 0.0,
+            "riskCapitalAmount": 1000.0,
+            "estimatedRiskMoney": 5.0,
+        }
+
+        result = gateway.ingest_ack(self.ack(command, **sizing))
+
+        self.assertTrue(result["outstandingReleased"])
+        self.assertEqual(result["eaSizingStatus"], "reported_read_only")
+
+    def test_executed_fixed_and_risk_modes_preserve_resolved_audit_evidence(self) -> None:
+        cases = (
+            ("FIXED_LOT", 0.0, 0.02, 5.0),
+            ("RISK_PERCENT", 1.0, 0.0123, 9.95),
+        )
+        for index, (mode, risk_percent, resolved_lot, risk_money) in enumerate(cases):
+            with self.subTest(mode=mode):
+                gateway = self.gateway(
+                    state_root=self.state_root / f"executed-sizing-{index}",
+                    file_common_root=self.file_common / f"executed-sizing-{index}",
+                )
+                command = gateway.queue_trade_intent(self.intent())["command"]
+                accepted = gateway.ingest_ack(self.ack(
+                    command,
+                    status="EXECUTED",
+                    mode="live",
+                    ticket=9_800_000 + index,
+                    fixedLot=resolved_lot,
+                    positionSizingMode=mode,
+                    riskPercent=risk_percent,
+                    riskCapitalBase="EQUITY",
+                    estimatedCommissionPerLot=7.0,
+                    riskCapitalAmount=1000.0,
+                    estimatedRiskMoney=risk_money,
+                ))
+
+                self.assertEqual(accepted["ack"]["resolvedLot"], resolved_lot)
+                self.assertEqual(accepted["ack"]["positionSizingMode"], mode)
+                self.assertEqual(accepted["ack"]["estimatedRiskMoney"], risk_money)
+                self.assertIs(
+                    accepted["ack"]["sizingEvidenceAuthoritative"],
+                    False,
+                )
+
+    def test_resolved_fixed_lot_ack_requires_wire_representable_risk_evidence(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        sizing = {
+            "positionSizingMode": "FIXED_LOT",
+            "riskPercent": 0.0,
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 0.0,
+            "riskCapitalAmount": 1000.0,
+            "estimatedRiskMoney": 0.0,
+        }
+
+        with self.assertRaises(self.gateway_module.AckValidationError) as raised:
+            gateway.ingest_ack(self.ack(command, **sizing))
+
+        self.assertEqual(raised.exception.code, "invalid_ack_risk_evidence")
+
+    def test_ack_rejects_partial_or_invalid_money_management_evidence(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+
+        with self.assertRaises(self.gateway_module.AckValidationError) as incomplete:
+            gateway.ingest_ack(
+                self.ack(command, positionSizingMode="RISK_PERCENT")
+            )
+        self.assertEqual(
+            incomplete.exception.code,
+            "incomplete_ack_sizing_evidence",
+        )
+
+        invalid = {
+            "positionSizingMode": "RISK_PERCENT",
+            "riskPercent": 0.0,
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 0.0,
+            "riskCapitalAmount": None,
+            "estimatedRiskMoney": None,
+        }
+        with self.assertRaises(self.gateway_module.AckValidationError) as invalid_policy:
+            gateway.ingest_ack(self.ack(command, **invalid))
+        self.assertEqual(invalid_policy.exception.code, "invalid_ack_risk_percent")
+
+    def test_executed_risk_percent_ack_cannot_claim_over_budget_risk(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        sizing = {
+            "positionSizingMode": "RISK_PERCENT",
+            "riskPercent": 1.0,
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 0.0,
+            "riskCapitalAmount": 1000.0,
+            "estimatedRiskMoney": 10.03,
+        }
+
+        with self.assertRaises(self.gateway_module.AckValidationError) as over_budget:
+            gateway.ingest_ack(
+                self.ack(command, status="EXECUTED", mode="live", **sizing)
+            )
+        self.assertEqual(over_budget.exception.code, "ack_risk_budget_exceeded")
+
+    def test_rejected_risk_percent_ack_cannot_claim_over_budget_risk(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        sizing = {
+            "positionSizingMode": "RISK_PERCENT",
+            "riskPercent": 1.0,
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 0.0,
+            "riskCapitalAmount": 1000.0,
+            "estimatedRiskMoney": 10.00000002,
+        }
+
+        with self.assertRaises(self.gateway_module.AckValidationError) as over_budget:
+            gateway.ingest_ack(
+                self.ack(
+                    command,
+                    status="REJECTED",
+                    reasonCode="ORDER_SEND_FAILED",
+                    fixedLot=0.01,
+                    **sizing,
+                )
+            )
+        self.assertEqual(over_budget.exception.code, "ack_risk_budget_exceeded")
+
+    def test_sub_wire_quantum_risk_budget_is_rejected_fail_closed(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        sizing = {
+            "positionSizingMode": "RISK_PERCENT",
+            "riskPercent": 1.0,
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 0.0,
+            "riskCapitalAmount": 0.00000001,
+            "estimatedRiskMoney": 0.00000001,
+        }
+
+        with self.assertRaises(self.gateway_module.AckValidationError) as raised:
+            gateway.ingest_ack(self.ack(command, fixedLot=0.0001, **sizing))
+        self.assertEqual(
+            raised.exception.code,
+            "ack_risk_budget_unrepresentable",
+        )
+
+    def test_wire_rounded_risk_evidence_does_not_false_reject_a_valid_ack(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        sizing = {
+            "positionSizingMode": "RISK_PERCENT",
+            "riskPercent": 1.0,
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 0.0,
+            "riskCapitalAmount": 1.00000051,
+            # The true estimate 0.0100000050 is within the budget
+            # 0.0100000051, but both gateways serialize monetary evidence to
+            # eight decimals and therefore report 0.01000001.
+            "estimatedRiskMoney": 0.01000001,
+        }
+
+        accepted = gateway.ingest_ack(
+            self.ack(command, fixedLot=0.0001, **sizing)
+        )
+        self.assertTrue(accepted["outstandingReleased"])
+        self.assertEqual(accepted["eaSizingStatus"], "reported_read_only")
+
+    def test_tiny_cent_account_risk_evidence_keeps_eight_decimal_precision(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        sizing = {
+            "positionSizingMode": "RISK_PERCENT",
+            "riskPercent": 1.0,
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 0.0,
+            "riskCapitalAmount": 0.0001,
+            "estimatedRiskMoney": 0.000001,
+        }
+
+        accepted = gateway.ingest_ack(
+            self.ack(command, fixedLot=0.0001, **sizing)
+        )
+        self.assertTrue(accepted["outstandingReleased"])
+        self.assertEqual(accepted["eaSizingStatus"], "reported_read_only")
+
+        second_gateway = self.gateway()
+        second_command = second_gateway.queue_trade_intent(self.intent())["command"]
+        with self.assertRaises(self.gateway_module.AckValidationError) as raised:
+            second_gateway.ingest_ack(
+                self.ack(
+                    second_command,
+                    fixedLot=0.0001,
+                    **{
+                        **sizing,
+                        "estimatedRiskMoney": 0.00000102,
+                    },
+                )
+            )
+        self.assertEqual(raised.exception.code, "ack_risk_budget_exceeded")
 
     def test_ack_must_echo_snapshot_and_match_the_ea_closed_bar(self) -> None:
         gateway = self.gateway()
@@ -1426,6 +1899,185 @@ class MT4TradeGatewayTests(unittest.TestCase):
                 statePersisted=True,
                 observedAt=int(self.clock.current.timestamp()),
             ))
+
+    def test_mt5_account_bound_null_unknown_accepts_only_verified_ea_recovery(self) -> None:
+        gateway = self.gateway(
+            wire_platform="mt5",
+            wire_account_binding_id="a" * 64,
+        )
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        unknown_ack = self.ack(
+            command,
+            status="EXECUTION_UNKNOWN",
+            reasonCode="ORDER_SEND_API_UNCERTAIN",
+            mode="demo",
+            statePersisted=True,
+        )
+        unknown = gateway.ingest_ack(unknown_ack)
+        self.assertEqual(unknown["status"], "ack_EXECUTION_UNKNOWN")
+        self.assertFalse(unknown["outstandingReleased"])
+
+        self.clock.advance(1)
+        recovered = gateway.ingest_ack(self.ack(
+            command,
+            status="EXECUTED",
+            reasonCode="RECOVERED_ORDER_FOUND",
+            mode="demo",
+            ticket=983283721,
+            filledPrice=3300.25,
+            filledSlippagePoints=0.0,
+            actualStopLoss=command["stopLoss"],
+            actualTakeProfit=command["takeProfit"],
+            actualMagicNumber=4186001,
+            actualComment=f"HQ:{command['commandId']}",
+            verificationStatus="VERIFIED_OPEN",
+            executionState="OPEN",
+            observedAt=int(self.clock.current.timestamp()),
+        ))
+
+        self.assertTrue(recovered["outstandingReleased"])
+        self.assertEqual(recovered["status"], "ack_EXECUTED")
+        self.assertEqual(
+            recovered["ack"]["reasonCode"],
+            "EXECUTION_RECONCILED_WITH_WARNING",
+        )
+        self.assertEqual(recovered["ack"]["ticket"], 983283721)
+        self.assertEqual(recovered["ack"]["filledPrice"], 3300.25)
+        self.assertEqual(recovered["ack"]["observedAt"], unknown_ack["observedAt"])
+        persisted = json.loads(
+            (self.state_root / "mt4-trade-gateway-ledger.json").read_text(
+                encoding="ascii"
+            )
+        )["commands"][command["commandId"]]
+        self.assertEqual(
+            persisted["recovery"]["action"],
+            "reconcile_mt5_null_evidence_terminal_ack",
+        )
+        self.assertEqual(
+            persisted["recovery"]["provenance"],
+            "mt5_account_bound_command_envelope",
+        )
+        self.assertTrue(persisted["recovery"]["barClaimRetained"])
+        self.assertIsNone(gateway.status()["activeCommandId"])
+        with self.assertRaises(self.gateway_module.OneOrderPerBarError):
+            gateway.queue_trade_intent(self.intent(
+                snapshotId="d" * 64,
+                missionId="mission-20260731-mt5-retry",
+            ))
+
+    def test_mt5_null_unknown_rejects_noncanonical_terminal_reason(self) -> None:
+        gateway = self.gateway(
+            wire_platform="mt5",
+            wire_account_binding_id="a" * 64,
+        )
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        gateway.ingest_ack(self.ack(
+            command,
+            status="EXECUTION_UNKNOWN",
+            reasonCode="RESTART_RECONCILIATION_REQUIRED",
+            mode="demo",
+        ))
+        with self.assertRaises(self.gateway_module.AckConflictError):
+            gateway.ingest_ack(self.ack(
+                command,
+                status="EXECUTED",
+                reasonCode="ORDER_SEND_SUCCEEDED",
+                mode="demo",
+                ticket=983283721,
+            ))
+        current = gateway.read_command(str(command["commandId"]))
+        self.assertEqual(current["status"], "ack_EXECUTION_UNKNOWN")
+        self.assertTrue(current["outstanding"])
+
+    def test_generic_mt4_null_unknown_rejects_canonical_mt5_recovery(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        gateway.ingest_ack(self.ack(
+            command,
+            status="EXECUTION_UNKNOWN",
+            reasonCode="ORDER_SEND_API_UNCERTAIN",
+            mode="demo",
+        ))
+        with self.assertRaises(self.gateway_module.AckConflictError):
+            gateway.ingest_ack(self.ack(
+                command,
+                status="EXECUTED",
+                reasonCode="RECOVERED_ORDER_FOUND",
+                mode="demo",
+                ticket=983283721,
+            ))
+        current = gateway.read_command(str(command["commandId"]))
+        self.assertEqual(current["status"], "ack_EXECUTION_UNKNOWN")
+        self.assertTrue(current["outstanding"])
+
+    def test_mt5_null_unknown_rejects_arbitrary_unknown_provenance_reason(self) -> None:
+        gateway = self.gateway(
+            wire_platform="mt5",
+            wire_account_binding_id="a" * 64,
+        )
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        gateway.ingest_ack(self.ack(
+            command,
+            status="EXECUTION_UNKNOWN",
+            reasonCode="ARBITRARY_UNKNOWN_REASON",
+            mode="demo",
+        ))
+        with self.assertRaises(self.gateway_module.AckConflictError):
+            gateway.ingest_ack(self.ack(
+                command,
+                status="EXECUTED",
+                reasonCode="RECOVERED_ORDER_FOUND",
+                mode="demo",
+                ticket=983283721,
+            ))
+        current = gateway.read_command(str(command["commandId"]))
+        self.assertEqual(current["status"], "ack_EXECUTION_UNKNOWN")
+        self.assertTrue(current["outstanding"])
+
+    def test_mt5_null_recovery_reason_predicate_matches_ea_uncertainty_families(self) -> None:
+        emitted_reasons = (
+            "ORDER_SEND_RESULT_PERSIST_FAILED",
+            "ORDER_SEND_API_UNCERTAIN",
+            "BROKER_RETCODE_10010",
+            "DEAL_TICKET_MISSING",
+            "DEAL_HISTORY_SELECT_FAILED",
+            "DEAL_EXECUTION_EVIDENCE_MISMATCH",
+            "POSITION_EVIDENCE_NOT_VISIBLE",
+            "POSITION_EXECUTION_EVIDENCE_MISMATCH",
+            "EXECUTION_ATTEMPT_UNREADABLE",
+            "EXECUTION_ATTEMPT_SCHEMA_INVALID",
+            "EXECUTION_ATTEMPT_IDENTITY_MISMATCH",
+            "RECONCILIATION_LOCK_UNAVAILABLE",
+            "RECOVERY_POSITION_TELEMETRY_UNAVAILABLE",
+            "RECOVERY_POSITION_IDENTITY_MISMATCH",
+            "RECOVERY_ORDER_TELEMETRY_UNAVAILABLE",
+            "RECOVERY_ORDER_IDENTITY_MISMATCH",
+            "RECOVERY_HISTORY_TELEMETRY_UNAVAILABLE",
+            "RECOVERY_HISTORY_ORDER_IDENTITY_MISMATCH",
+            "RECOVERY_HISTORY_DEAL_IDENTITY_MISMATCH",
+            "MULTIPLE_OR_MISMATCHED_RECOVERY_EVIDENCE",
+            "RESTART_RECONCILIATION_REQUIRED",
+        )
+        for reason in emitted_reasons:
+            with self.subTest(reason=reason):
+                self.assertTrue(
+                    self.gateway_module._is_mt5_null_evidence_uncertainty_reason(
+                        reason
+                    )
+                )
+        for reason in (
+            "ORDER_SEND_SUCCEEDED",
+            "BROKER_RETCODE_",
+            "BROKER_RETCODE_12X",
+            "BROKER_RETCODE_12345678901",
+            "ARBITRARY_UNKNOWN_REASON",
+        ):
+            with self.subTest(reason=reason):
+                self.assertFalse(
+                    self.gateway_module._is_mt5_null_evidence_uncertainty_reason(
+                        reason
+                    )
+                )
 
     def test_expiry_preserves_unknown_and_repairs_legacy_overwrite(self) -> None:
         gateway = self.gateway(command_ttl_seconds=1)
@@ -1866,6 +2518,53 @@ class MT4TradeGatewayTests(unittest.TestCase):
         self.assertEqual(observed["ticket"], 123456)
         self.assertEqual(observed["executionState"], "CLOSED")
         self.assertEqual(observed["closedPnl"], 4.25)
+
+    def test_outcome_lot_must_match_durable_ea_resolved_lot(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        gateway.ingest_ack(self.ack(
+            command,
+            status="EXECUTED",
+            reasonCode="ORDER_ACCEPTED",
+            mode="demo",
+            ticket=123456,
+            fixedLot=0.01,
+        ))
+
+        self.write_outcome(command, lots=0.99)
+        with self.assertRaises(self.gateway_module.GatewayValidationError) as raised:
+            gateway.read_outcome(str(command["commandId"]))
+        self.assertEqual(raised.exception.code, "invalid_mt4_outcome")
+
+        expected = self.write_outcome(command, lots=0.01)
+        self.assertEqual(
+            gateway.read_outcome(str(command["commandId"])),
+            expected,
+        )
+
+    def test_legacy_durable_ack_without_resolved_lot_keeps_outcome_compatibility(self) -> None:
+        gateway = self.gateway()
+        command = gateway.queue_trade_intent(self.intent())["command"]
+        gateway.ingest_ack(self.ack(
+            command,
+            status="EXECUTED",
+            reasonCode="ORDER_ACCEPTED",
+            mode="demo",
+            ticket=123456,
+        ))
+        ledger_path = self.state_root / "mt4-trade-gateway-ledger.json"
+        ledger = json.loads(ledger_path.read_text(encoding="ascii"))
+        durable_ack = ledger["commands"][command["commandId"]]["ack"]
+        for field in self.gateway_module.ACK_NORMALIZED_SIZING_FIELDS:
+            durable_ack.pop(field, None)
+        ledger["commands"][command["commandId"]]["eaSizingReported"] = False
+        ledger_path.write_text(json.dumps(ledger), encoding="ascii")
+
+        expected = self.write_outcome(command, lots=0.02)
+        self.assertEqual(
+            gateway.read_outcome(str(command["commandId"])),
+            expected,
+        )
 
     def test_execution_unknown_can_only_be_quarantined_fail_closed(self) -> None:
         gateway = self.gateway()

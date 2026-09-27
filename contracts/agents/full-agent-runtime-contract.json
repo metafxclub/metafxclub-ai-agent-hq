@@ -1,0 +1,131 @@
+{
+  "schemaVersion": "metafx-full-agent-runtime-v1",
+  "title": "Metafxclub AI Pixel HQ Full Agent Runtime",
+  "transport": {
+    "browserToBridge": "same-origin JSON over the loopback-only Local Bridge",
+    "bridgeToCodex": "Codex app-server over private stdio",
+    "publicNetworkListenerAllowed": false,
+    "frontendCredentialsAllowed": false,
+    "mutationContentType": "application/json",
+    "mutationOriginRequired": true,
+    "mutationOriginMustMatchRequestAuthority": true,
+    "localProcessAuthenticationClaimed": false
+  },
+  "endpoints": {
+    "GET /api/agent-runtime/status": "Return capability truth and fail-closed readiness for Chat, Workspace, Computer Use, MCP and plugins.",
+    "GET /api/agent-runtime/models": "Return only models and reasoning levels reported by the local Codex app-server and filtered by the backend allowlist.",
+    "GET /api/agent-runtime/threads?agentId={agentId}": "List the selected Agent's bounded sanitized thread summaries; includeArchived=true explicitly includes reversible archived history.",
+    "POST /api/agent-runtime/threads": "Create one durable Agent thread from exactly agentId, title, model, reasoning and mode.",
+    "GET /api/agent-runtime/threads/{threadId}": "Read one bounded thread and its sanitized event timeline.",
+    "POST /api/agent-runtime/threads/{threadId}/settings": "Update the allowlisted model, reasoning level or capability mode while no turn is running; the exact current expectedRevision is required.",
+    "POST /api/agent-runtime/threads/{threadId}/attachments": "Upload one bounded image or file as strict base64 into the backend-owned immutable store. The browser never supplies or receives a filesystem path; only validated images may enter Chat turns.",
+    "GET /api/agent-runtime/threads/{threadId}/artifacts/{artifactId}": "Return one thread-bound opaque artifact with no-store and nosniff headers. Cross-thread IDs return not found.",
+    "POST /api/agent-runtime/threads/{threadId}/turn": "Queue one idempotent user turn with optional opaque attachmentIds. Attachment IDs and hashes are part of the persisted turn request. Every real execution must be bound to a Mission, owner Agent, Audit events and a Report.",
+    "POST /api/agent-runtime/threads/{threadId}/interrupt": "Request interruption of the exact active Codex turn and persist the request/result without inventing completion.",
+    "POST /api/agent-runtime/threads/{threadId}/archive": "Set archived true or false without deleting history; the exact current expectedRevision is required."
+  },
+  "modes": {
+    "chat": {
+      "description": "Tool-free conversation compatible with the existing guarded Agent Chat.",
+      "sandbox": "read-only",
+      "tools": false,
+      "externalEffects": false
+    },
+    "workspace": {
+      "description": "Workspace is visible but remains fail-closed until a one-shot user approval broker and UI bind every write or escalation.",
+      "sandbox": "read-only-until-approved",
+      "defaultReady": false,
+      "approvalRequired": true,
+      "approvalPolicy": "explicit-once-required",
+      "network": false,
+      "externalApps": false,
+      "dangerFullAccess": false
+    },
+    "computer": {
+      "description": "Computer Use is enabled only after an implemented HQ approval adapter can surface, bind and decide each request.",
+      "defaultReady": false,
+      "approvalRequired": true,
+      "silentApprovalAllowed": false
+    },
+    "full": {
+      "description": "Workspace, MCP, plugins and Computer Use combined only when every adapter is verified and the HQ approval surface is active.",
+      "defaultReady": false,
+      "approvalRequired": true,
+      "silentApprovalAllowed": false
+    }
+  },
+  "approvalPolicy": {
+    "sdkDefaultApprovalHandlerAllowed": false,
+    "commandExecutionDefaultDecision": "decline",
+    "fileChangeDefaultDecision": "decline",
+    "permissionEscalationDefault": "grant_nothing",
+    "mcpElicitationDefaultDecision": "decline",
+    "dynamicClientToolDefault": "fail",
+    "unknownServerRequestDefault": "deny",
+    "dangerFullAccessAllowed": false,
+    "workspaceWriteWithoutInteractiveBrokerAllowed": false
+  },
+  "media": {
+    "chatImageInput": {
+      "readyWhen": "The app-server is authenticated, an allowlisted selected model advertises image input, and the immutable artifact store is ready.",
+      "acceptedExtensions": [
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp"
+      ],
+      "maxFilesPerTurn": 4,
+      "maxBytesPerFile": 8388608,
+      "remoteImageUrlAllowed": false,
+      "browserFilesystemPathAllowed": false
+    },
+    "fileAndSlideInput": {
+      "chatReady": false,
+      "requiresVerifiedToolMode": true
+    },
+    "generatedArtifacts": {
+      "chatReady": false,
+      "requiresVerifiedToolMode": true,
+      "arbitraryLocalFilePublicationAllowed": false,
+      "sameOriginOpaqueDownloadOnly": true
+    }
+  },
+  "persistence": {
+    "store": "backend-owned atomic JSON under data/runtime",
+    "browserLocalStorageAuthoritative": false,
+    "eventsBounded": true,
+    "secretsRejectedBeforePersistence": true,
+    "filesystemPathsExposedToFrontend": false,
+    "archiveDeletesHistory": false
+  },
+  "threadMutationPolicy": {
+    "settingsExpectedRevisionRequired": true,
+    "archiveExpectedRevisionRequired": true,
+    "archiveIsReversible": true,
+    "archivedHistoryListableWithIncludeArchived": true
+  },
+  "httpProjection": {
+    "maximumStringCharacters": 32768,
+    "assistantReplyMaximumCharacters": 32000,
+    "validRuntimeContentMayBeSilentlyClippedAtGenericDashboardLimit": false,
+    "fullAgentSerializerIsEndpointSpecific": true
+  },
+  "workspaceActivation": {
+    "ready": false,
+    "liveSentinelStatus": "failed_unapproved_write",
+    "failedSentinelMayBeOverriddenByFrontend": false,
+    "wholeWorkspacePreTurnGrantSupported": false
+  },
+  "executionEvidence": {
+    "missionRequired": true,
+    "ownerAgentRequired": true,
+    "auditRequired": true,
+    "reportRequired": true,
+    "successTerminalProof": "turn/completed notification OR authoritative thread/read reconciliation",
+    "successRequiresTurnTerminalProof": true,
+    "interruptAcknowledgementCountsAsTermination": false,
+    "unconfirmedTimeoutRequiresGatewayQuarantine": true,
+    "timeoutMayMasqueradeAsSuccess": false,
+    "capabilityUnavailableMayMasqueradeAsSuccess": false
+  }
+}

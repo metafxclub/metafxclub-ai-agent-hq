@@ -18,6 +18,7 @@ import time
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 
 _STORE_MAGIC = b"METAFX-GOOGLE-OAUTH-DPAPI\x00\x01"
@@ -299,11 +300,7 @@ def save_refresh_token(
     _write_protected_payload(target, payload)
 
 
-def load_refresh_token(
-    *,
-    expected_client_generation: str = "",
-    path: Path | None = None,
-) -> str | None:
+def _load_refresh_token_record(*, path: Path | None = None) -> dict[str, str] | None:
     target = Path(path) if path is not None else credential_path()
     with _STORE_LOCK:
         try:
@@ -344,17 +341,10 @@ def load_refresh_token(
                 generation = _validate_client_generation(record["clientGeneration"])
             except SecureStoreError as error:
                 raise ValueError("invalid refresh client generation") from error
-            expected = str(expected_client_generation or "").strip()
-            if expected:
-                expected = _validate_client_generation(expected)
-                if not secrets.compare_digest(generation, expected):
-                    raise SecureStoreError(
-                        "secure_store_client_mismatch",
-                        "The saved Google authorization belongs to a different OAuth client and must be reconnected.",
-                    )
             token = record["refreshToken"].strip()
         else:
             token = cleartext.decode("utf-8", errors="strict").strip()
+            generation = ""
     except SecureStoreError:
         raise
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
@@ -367,7 +357,54 @@ def load_refresh_token(
             "secure_store_invalid",
             "The saved Google authorization is invalid and must be reconnected.",
         )
-    return token
+    return {
+        "refreshToken": token,
+        "clientGeneration": generation,
+    }
+
+
+def load_refresh_token(
+    *,
+    expected_client_generation: str = "",
+    path: Path | None = None,
+) -> str | None:
+    record = _load_refresh_token_record(path=path)
+    if record is None:
+        return None
+    expected = str(expected_client_generation or "").strip()
+    generation = str(record.get("clientGeneration") or "").strip()
+    if expected:
+        expected = _validate_client_generation(expected)
+        # Preserve read compatibility for the legacy unbound v1 token. The
+        # classroom migration checks binding separately and removes it before
+        # claiming that the release client is active.
+        if generation and not secrets.compare_digest(generation, expected):
+            raise SecureStoreError(
+                "secure_store_client_mismatch",
+                "The saved Google authorization belongs to a different OAuth client and must be reconnected.",
+            )
+    return record["refreshToken"]
+
+
+def refresh_token_binding_status(*, expected_client_generation: str) -> dict:
+    """Return only whether the stored token is cryptographically client-bound."""
+
+    expected = _validate_client_generation(expected_client_generation)
+    try:
+        record = _load_refresh_token_record()
+    except SecureStoreError as error:
+        return {
+            "stored": False,
+            "status": error.code,
+        }
+    if record is None:
+        return {"stored": False, "status": "empty"}
+    generation = str(record.get("clientGeneration") or "").strip()
+    if not generation:
+        return {"stored": True, "status": "legacy_unbound"}
+    if not secrets.compare_digest(generation, expected):
+        return {"stored": True, "status": "client_mismatch"}
+    return {"stored": True, "status": "bound"}
 
 
 def delete_refresh_token(*, path: Path | None = None) -> bool:
@@ -560,6 +597,83 @@ def delete_client_configuration(*, path: Path | None = None) -> bool:
                 "secure_store_delete_failed",
                 "The saved Google OAuth client configuration could not be removed.",
             ) from error
+
+
+def remove_oauth_artifacts_with_rollback(
+    *,
+    remove_refresh: bool,
+    remove_client: bool,
+    verify: Callable[[], None] | None = None,
+) -> dict[str, bool]:
+    """Remove selected DPAPI artifacts and restore their bytes on failure.
+
+    Callers must hold ``oauth_store_transaction`` so Bridge callbacks and the
+    setup CLI cannot publish a new grant during the migration.  ``verify`` is
+    executed before the snapshots are discarded, so a failed postcondition is
+    rolled back as one operation.  Snapshots stay encrypted; neither the client
+    metadata nor refresh token is returned.
+    """
+
+    selected: list[tuple[str, Path]] = []
+    if remove_refresh:
+        selected.append(("refresh", credential_path()))
+    if remove_client:
+        selected.append(("client", client_configuration_path()))
+
+    snapshots: dict[str, tuple[Path, bytes | None]] = {}
+    with _STORE_LOCK:
+        for name, target in selected:
+            try:
+                payload: bytes | None = target.read_bytes()
+            except FileNotFoundError:
+                payload = None
+            except OSError as error:
+                raise SecureStoreError(
+                    "secure_store_read_failed",
+                    "The saved Google authorization could not be prepared for migration.",
+                ) from error
+            snapshots[name] = (target, payload)
+
+        try:
+            refresh_removed = delete_refresh_token() if remove_refresh else False
+            client_removed = (
+                delete_client_configuration() if remove_client else False
+            )
+            if verify is not None:
+                verify()
+        except SecureStoreError as original_error:
+            try:
+                for target, payload in snapshots.values():
+                    if payload is None:
+                        try:
+                            target.unlink()
+                        except FileNotFoundError:
+                            pass
+                        except OSError as error:
+                            raise SecureStoreError(
+                                "secure_store_rollback_failed",
+                                "The Google authorization migration failed and its local rollback was incomplete.",
+                            ) from error
+                        continue
+                    try:
+                        current = target.read_bytes()
+                    except FileNotFoundError:
+                        current = None
+                    except OSError:
+                        current = None
+                    if current != payload:
+                        _write_protected_payload(target, payload)
+            except SecureStoreError as rollback_error:
+                raise SecureStoreError(
+                    "secure_store_rollback_failed",
+                    "The Google authorization migration failed and its local rollback was incomplete.",
+                ) from rollback_error
+            raise original_error
+
+    return {
+        "refreshRemoved": refresh_removed,
+        "clientRemoved": client_removed,
+    }
 
 
 def client_id_hint(client_id: str) -> str:

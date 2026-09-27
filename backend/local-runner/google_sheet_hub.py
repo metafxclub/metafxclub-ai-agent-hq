@@ -473,8 +473,12 @@ def remove_google_oauth_client_configuration(
         with google_oauth_store.oauth_store_transaction(
             timeout_seconds=OAUTH_STORE_REQUEST_LEASE_TIMEOUT_SECONDS,
         ):
-            refresh_removed = google_oauth_store.delete_refresh_token()
-            client_removed = google_oauth_store.delete_client_configuration()
+            removed = google_oauth_store.remove_oauth_artifacts_with_rollback(
+                remove_refresh=True,
+                remove_client=True,
+            )
+            refresh_removed = removed["refreshRemoved"]
+            client_removed = removed["clientRemoved"]
     except google_oauth_store.SecureStoreError as error:
         raise GoogleSheetHubError(error.code, error.message, 503) from error
     environment_fallback = bool(
@@ -495,6 +499,146 @@ def remove_google_oauth_client_configuration(
         "clientRemoved": client_removed,
         "authorizationRemoved": refresh_removed,
         "environmentFallbackActive": environment_fallback,
+    }
+
+
+def migrate_google_oauth_to_central_release(
+    environ: dict[str, str] | None = None,
+) -> dict:
+    """Explicitly migrate this Windows user to the packaged release client.
+
+    This is the classroom-only path.  It preserves an existing refresh grant
+    only when that grant is generation-bound to the exact packaged client.
+    Advanced/recovery overrides keep their normal priority unless the caller
+    deliberately invokes this operation.
+    """
+
+    env = environ if isinstance(environ, dict) else os.environ
+    environment_names = (
+        "METAFX_GOOGLE_OAUTH_CLIENT_ID",
+        "METAFX_GOOGLE_OAUTH_CLIENT_SECRET",
+        "METAFX_GOOGLE_OAUTH_REFRESH_TOKEN",
+        "METAFX_GOOGLE_SHEETS_ACCESS_TOKEN",
+    )
+    if any(str(env.get(name) or "").strip() for name in environment_names):
+        raise GoogleSheetHubError(
+            "oauth_environment_override_active",
+            "A Google OAuth environment override is active. Remove it before selecting the classroom release client.",
+            409,
+        )
+
+    central = _central_release_oauth_client()
+    if (
+        str(central.get("source") or "") != "central_release"
+        or not str(central.get("clientId") or "").strip()
+        or not str(central.get("clientSecret") or "").strip()
+        or not str(central.get("clientGeneration") or "").strip()
+    ):
+        raise GoogleSheetHubError(
+            "oauth_central_release_unavailable",
+            "The packaged Metafxclub Google OAuth release client is unavailable.",
+            503,
+        )
+
+    _invalidate_pending_oauth_flows()
+    try:
+        with google_oauth_store.oauth_store_transaction(
+            timeout_seconds=OAUTH_STORE_REQUEST_LEASE_TIMEOUT_SECONDS,
+        ):
+            custom_client_present = google_oauth_store.client_configuration_path().exists()
+            custom_matches_central = False
+            if custom_client_present:
+                try:
+                    custom = google_oauth_store.load_client_configuration_record()
+                except google_oauth_store.SecureStoreError:
+                    custom = None
+                custom_matches_central = bool(
+                    isinstance(custom, dict)
+                    and secrets.compare_digest(
+                        str(custom.get("clientId") or ""),
+                        str(central.get("clientId") or ""),
+                    )
+                    and secrets.compare_digest(
+                        str(custom.get("clientSecret") or ""),
+                        str(central.get("clientSecret") or ""),
+                    )
+                    and secrets.compare_digest(
+                        str(custom.get("clientGeneration") or ""),
+                        str(central.get("clientGeneration") or ""),
+                    )
+                )
+            binding = google_oauth_store.refresh_token_binding_status(
+                expected_client_generation=central["clientGeneration"],
+            )
+            binding_status = str(binding.get("status") or "")
+            remove_refresh = binding_status not in {
+                "bound",
+                "empty",
+            } or (custom_client_present and not custom_matches_central)
+
+            binding_after: dict = {}
+
+            def verify_central_release_selected() -> None:
+                nonlocal binding_after
+                if google_oauth_store.client_configuration_path().exists():
+                    raise google_oauth_store.SecureStoreError(
+                        "secure_store_delete_failed",
+                        "The saved Google OAuth client override is still present.",
+                    )
+                binding_after = google_oauth_store.refresh_token_binding_status(
+                    expected_client_generation=central["clientGeneration"],
+                )
+                if str(binding_after.get("status") or "") not in {"bound", "empty"}:
+                    raise google_oauth_store.SecureStoreError(
+                        "secure_store_delete_failed",
+                        "The saved Google authorization is not bound to the release client.",
+                    )
+
+                try:
+                    resolved = oauth_client_configuration()
+                except GoogleSheetHubError as error:
+                    raise google_oauth_store.SecureStoreError(
+                        "oauth_central_release_not_selected",
+                        "The runtime did not select the packaged Google OAuth release client.",
+                    ) from error
+                if (
+                    str(resolved.get("source") or "") != "central_release"
+                    or not secrets.compare_digest(
+                        str(resolved.get("clientId") or ""),
+                        str(central.get("clientId") or ""),
+                    )
+                    or not secrets.compare_digest(
+                        str(resolved.get("clientSecret") or ""),
+                        str(central.get("clientSecret") or ""),
+                    )
+                    or not secrets.compare_digest(
+                        str(resolved.get("clientGeneration") or ""),
+                        str(central.get("clientGeneration") or ""),
+                    )
+                ):
+                    raise google_oauth_store.SecureStoreError(
+                        "oauth_central_release_not_selected",
+                        "The runtime did not select the packaged Google OAuth release client.",
+                    )
+
+            removed = google_oauth_store.remove_oauth_artifacts_with_rollback(
+                remove_refresh=remove_refresh,
+                remove_client=custom_client_present,
+                verify=verify_central_release_selected,
+            )
+    except google_oauth_store.SecureStoreError as error:
+        raise GoogleSheetHubError(error.code, error.message, 503) from error
+
+    return {
+        "ok": True,
+        "kind": "google_oauth_central_release_selected",
+        "configured": True,
+        "clientHint": google_oauth_store.client_id_hint(central["clientId"]),
+        "store": "central_release",
+        "migrated": bool(
+            removed.get("refreshRemoved") or removed.get("clientRemoved")
+        ),
+        "authorizationPreserved": str(binding_after.get("status") or "") == "bound",
     }
 
 

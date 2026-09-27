@@ -254,8 +254,8 @@
         "failurePolicy": "fail_closed_no_trade"
       },
       "actionableFields": ["direction", "stopLossPrice", "takeProfitPrice"],
-      "forbiddenAiFields": ["lot", "lots", "fixedLot", "volume", "positionSize", "riskPercent"],
-      "lotSource": "mt4_ea_input_only"
+      "forbiddenAiFields": ["lot", "lots", "fixedLot", "moneyManagementMode", "volume", "positionSize", "riskPercent", "riskCapitalBase", "estimatedCommissionPerLot", "mode"],
+      "lotSource": "mt4_mt5_ea_money_management_inputs"
     },
     "decisionHorizonPolicy": {
       "validUntilBarTimeDomain": "mt4_broker_clock",
@@ -308,8 +308,8 @@
     "postConsensusGateway": {
       "adapter": "MetafxHQTradeGateway",
       "defaultMode": "shadow",
-      "executionModeSource": "mt4_ea_input_only",
-      "fixedLotSource": "mt4_ea_input_only",
+      "executionModeSource": "mt4_mt5_ea_input_only",
+      "fixedLotSource": "mt4_mt5_ea_money_management_inputs",
       "commandTransport": "FILE_COMMON_flat_json",
       "requiresFreshHeartbeat": true,
       "oneOrderPerBar": true,

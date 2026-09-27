@@ -1,5 +1,7 @@
 # MetafxHQ Unified MT4 Snapshot + Trade Gateway
 
+> อัปเดต v2.19 — Money Management: ผู้ใช้เลือกที่ Inputs ของ EA ได้ระหว่าง `MONEY_MANAGEMENT_FIXED_LOT` และ `MONEY_MANAGEMENT_RISK_PERCENT` โดยโหมด Risk Percent คำนวณ Lot จาก `RiskPercent` ของ Equity หรือ Balance, เผื่อ Slippage/ค่าธรรมเนียมที่กำหนด และปัด Lot ลงตาม Min/Max/Step ที่ Broker รายงาน หาก Lot ที่ปลอดภัยต่ำกว่า Min Lot จะปฏิเสธคำสั่งแทนการฝืนเปิด Min Lot ใช้หลักเดียวกันกับบัญชี Standard, Cent และ Pro-Cent โดยไม่เดาจากชื่อบัญชีและไม่คูณ/หาร 100 เอง
+
 > อัปเดต v2.16: การย้าย EA ไป Symbol/Timeframe ใหม่จะล้างสถานะ Runtime เก่าทันที, ผูก Stream/Bar Claim ด้วย Channel + ชื่อ Symbol เต็ม + Timeframe, แยกประวัติ/Outcome ตาม Channel อย่างเคร่งครัด และใช้ OS file-handle lock ระดับบัญชีครอบ Guard + Bar Claim + `OrderSend()` เพื่อไม่ให้หลาย Channel ที่ทำงานพร้อมกันทะลุ Max Order
 
 > อัปเดต v2.18 — Enum fail-closed: `GatewayMode` ยอมรับเฉพาะ `GATEWAY_SHADOW`, `GATEWAY_DEMO`, `GATEWAY_LIVE` และ `PositionLifecycleMode` ยอมรับเฉพาะ 4 ค่าในรายการ Inputs เท่านั้น ค่าอื่นจากไฟล์ SET ที่ถูกแก้ไขจะทำให้ `OnInit()` หยุดด้วย Reason Code ชัดเจน และถูกตรวจซ้ำก่อน `OrderSend()`/`OrderClose()`; Optional Position Lifecycle ตรวจ Signing readiness ซ้ำทั้ง Demo และ Live ที่ขอบ `OrderClose()`
@@ -19,14 +21,14 @@
 - ส่ง `snapshot.json` ให้ Dashboard อ่านข้อมูลกราฟและข้อมูลสรุปบัญชี
 - รับคำสั่งซื้อขายแบบ Flat JSON จาก Local Runner แล้วตรวจ Guard ก่อนส่ง Order
 
-เวอร์ชันปัจจุบัน `2.18` รวมหน้าที่ของ Snapshot Indicator เดิมเข้ามาใน Gateway EA แล้ว จึงติดกราฟเพียง EA ตัวเดียวได้ โดยยังคง Contract `metafx-hq-mt4-snapshot-v1` สำหรับข้อมูลอ่านอย่างเดียว และใช้ Signed Envelope รอบ Command/Heartbeat สำหรับเส้นทางส่งคำสั่งทั้ง Shadow, Demo และ Live
+เวอร์ชันปัจจุบัน `2.19` รวมหน้าที่ของ Snapshot Indicator เดิมเข้ามาใน Gateway EA แล้ว จึงติดกราฟเพียง EA ตัวเดียวได้ โดยยังคง Contract `metafx-hq-mt4-snapshot-v1` สำหรับข้อมูลอ่านอย่างเดียว และใช้ Signed Envelope รอบ Command/Heartbeat สำหรับเส้นทางส่งคำสั่งทั้ง Shadow, Demo และ Live Source ที่ใช้งานจริงใน Release ปัจจุบันอยู่ที่ `artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/MetafxHQTradeGateway.mq4` (ชื่อโฟลเดอร์เดิมคงไว้เพื่อไม่ทำลายพาธติดตั้งและชุดทดสอบ)
 
 - Timer มีเพียงตัวเดียวและทำงานทุก 1 วินาที
 - คำสั่ง, Heartbeat, `status.json` และ Kill Switch ถูกตรวจทุก 1 วินาที
 - Snapshot ส่งตาม `SnapshotIntervalSeconds` ค่าเริ่มต้นทุก 5 วินาที
 - Snapshot ทุก 5 วินาทีไม่ได้หมายความว่า Codex ถูกเรียกทุก 5 วินาที การเรียก AI เป็นหน้าที่ของ Backend และควร Trigger เฉพาะแท่งปิดใหม่
 - Frontend และ AI ไม่มีสิทธิ์กำหนด Lot, Risk, Mode, Spread, Slippage หรือ Magic Number
-- Lot มาจาก `FixedLot` ใน Inputs ของ EA เท่านั้น
+- Lot มาจาก Money Management Inputs ของ EA เท่านั้น: ใช้ `FixedLot` ในโหมด Fixed Lot หรือคำนวณจาก `RiskPercent` และ `RiskCapitalBase` ในโหมด Risk Percent
 - ค่าเริ่มต้นเป็น `Shadow` และไม่เรียก `OrderSend()`
 
 ## สิ่งที่เสริมในรอบ Operational Hardening
@@ -49,7 +51,7 @@
 - Snapshot แยกสรุป `ACCOUNT_WIDE` ออกจาก `MANAGED_MAGIC_NUMBERS_ACCOUNT_WIDE` และรายงาน `marketOpen` จากสถานะ Connection, Broker trade flag และความสดของ Tick เท่านั้น โดยไม่เดาชื่อ Session ตลาด
 - ตัวเลขรายวัน รายสัปดาห์ และจำนวนแพ้ต่อเนื่องอ้างอิงเฉพาะประวัติบัญชีที่ MT4 โหลดไว้ (`MT4_LOADED_ACCOUNT_HISTORY`) จึงควรตั้งแท็บ Account History เป็น All History ก่อนใช้ Guard ใน Demo
 
-> Source ไม่ติดตั้งหรือเปิด MT4 ให้อัตโนมัติในเครื่องใหม่ ผู้ใช้ต้องเลือก Terminal เป้าหมายก่อนเสมอ Source v2.18 ต้อง Compile ให้ผ่าน `0 errors, 0 warnings` และตรวจ Hash ของ EX4 ก่อนติดตั้งแทนรุ่นเดิม การมีโค้ด Live ไม่ได้หมายความว่าบัญชีจริงถูกเปิดอัตโนมัติ
+> Source ไม่ติดตั้งหรือเปิด MT4 ให้อัตโนมัติในเครื่องใหม่ ผู้ใช้ต้องเลือก Terminal เป้าหมายก่อนเสมอ Source v2.19 ต้อง Compile ให้ผ่าน `0 errors, 0 warnings` และตรวจ Hash ของ EX4 ก่อนติดตั้งแทนรุ่นเดิม การมีโค้ด Live ไม่ได้หมายความว่าบัญชีจริงถูกเปิดอัตโนมัติ
 
 ## ความเข้ากันได้กับ Indicator เดิม
 
@@ -101,7 +103,11 @@ Gateway ใช้ Strict Allowlist ของ Field ดังนั้น Field �
 | `GatewayMode` | `GATEWAY_SHADOW` | Shadow, Demo หรือ Live |
 | `LiveArmed` | `false` | สวิตช์ Arm สำหรับบัญชี Live |
 | `TrustedSigningKeyId` | ค่าว่าง | Key ID แบบไม่เป็นความลับ; ระบบตัดช่องว่างและแปลงเป็นตัวพิมพ์เล็ก Demo/Shadow ใช้ Active Key ของ Backend ต่อได้แม้ Optional Pin ผิดหรือไม่ตรง ส่วน Live ที่ยังไม่ Arm จะคง EA ไว้และรายงานคำเตือน แต่ก่อนตั้ง `LiveArmed=true` ต้องกรอก Key ID ให้ถูกและตรง |
-| `FixedLot` | `0.01` | Lot คงที่จาก EA เท่านั้น |
+| `MoneyManagementMode` | `MONEY_MANAGEMENT_FIXED_LOT` | เลือก Fixed Lot หรือ Risk Percent ที่ EA เท่านั้น; Backend/AI เปลี่ยนค่าไม่ได้ |
+| `FixedLot` | `0.01` | Lot คงที่เมื่อเลือก `MONEY_MANAGEMENT_FIXED_LOT` |
+| `RiskPercent` | `1.0` | งบขาดทุนที่วางแผนไว้ถึง SL เป็นเปอร์เซ็นต์ของฐานเงินที่เลือก และต้องไม่เกิน `MaxLossPerTradePercent` |
+| `RiskCapitalBase` | `RISK_CAPITAL_EQUITY` | เลือกฐานคำนวณเป็น Equity (แนะนำ) หรือ Balance |
+| `EstimatedCommissionPerLot` | `0.0` | ค่าธรรมเนียมไป-กลับโดยประมาณต่อ 1 Lot ในหน่วยเงินที่บัญชีรายงาน ใช้เป็นเงินสำรองในสูตร Risk Percent |
 | `MagicNumber` | `4186001` | Magic Number ของ Gateway |
 | `PollIntervalSeconds` | `1` | รอบตรวจคำสั่งและ Heartbeat; เวอร์ชันนี้บังคับเป็น 1 วินาที |
 | `SnapshotIntervalSeconds` | `5` | รอบส่ง Snapshot ปรับได้ 2–60 วินาที |
@@ -116,7 +122,7 @@ Gateway ใช้ Strict Allowlist ของ Field ดังนั้น Field �
 | `MaxManagedOpenPositions` | `1` | จำนวน Position สูงสุดรวมทั้งบัญชีของ Magic ที่ระบุใน `ManagedMagicNumbers` |
 | `MaxManagedTotalLots` | `0.10` | Lot รวมสูงสุดทั้งบัญชีของ Magic ที่ระบุใน `ManagedMagicNumbers` |
 | `MaxTradesPerBrokerDay` | `6` | จำนวนการเปิดเทรดสูงสุดต่อวัน Broker |
-| `MaxLossPerTradePercent` | `1.0` | Loss ประมาณการจาก Fixed Lot ถึง SL สูงสุดต่อครั้ง |
+| `MaxLossPerTradePercent` | `1.0` | เพดาน Loss ประมาณการถึง SL ต่อครั้ง ไม่ว่าใช้ Fixed Lot หรือ Risk Percent |
 | `MaxDailyLossPercent` | `3.0` | Daily Loss สูงสุด; เมื่อชนแล้ว Latch จนเปลี่ยนวัน Broker |
 | `MaxAccountEquityDrawdownPercent` | `10.0` | Drawdown ปัจจุบันของบัญชีสูงสุดสำหรับคำสั่งใหม่ |
 | `MinRewardRiskRatio` | `1.0` | Reward/Risk ขั้นต่ำจาก SL/TP ที่ AI เสนอ |
@@ -125,7 +131,9 @@ Gateway ใช้ Strict Allowlist ของ Field ดังนั้น Field �
 | `AllowedTimeframes` | `M5,...,MN1` | Timeframe Allowlist; ไม่รองรับ M1 |
 | `RequireHeartbeat` | `true` | Fail-closed เมื่อไม่มี Heartbeat |
 
-`FixedLot` ต้องตรงกับ Min/Max/Lot Step ของ Broker หากไม่ตรง EA จะไม่เริ่มทำงาน
+ในโหมด Fixed Lot ค่า `FixedLot` ต้องตรงกับ Min/Max/Lot Step ของ Broker หากไม่ตรง EA จะไม่เริ่มทำงาน ในโหมด Risk Percent EA คำนวณขาดทุนต่อ 1 Lot จาก Tick Size/Tick Value ที่ Terminal รายงาน รวมระยะเผื่อ Slippage และ `EstimatedCommissionPerLot` แล้วปัด Lot ลงเท่านั้น หากผลต่ำกว่า Min Lot จะไม่เปิด Order ค่า `0.0001` จึงใช้ได้เฉพาะ Symbol/บัญชีที่ Broker รายงานว่า Min/Step รองรับจริง
+
+บัญชี Standard, Cent และ Pro-Cent ใช้สูตรเดียวกัน เพราะ Balance/Equity และ Tick Value อยู่ในหน่วยเงินบัญชีที่ Broker รายงานอยู่แล้ว ห้ามคูณหรือหาร 100 จากชื่อบัญชีเอง อย่างไรก็ตาม Risk Percent เป็นเพียงความเสี่ยงที่วางแผนไว้ก่อนส่งคำสั่ง ไม่รับประกันผลขาดทุนจริงแบบเป๊ะ เพราะ Gap, Slippage ที่มากกว่าค่าที่เผื่อ, Commission, Swap และการ Fill ของ Broker อาจทำให้ผลจริงต่างออกไป ต้องผ่าน Shadow และ Demo ก่อนเปิด Live เสมอ
 
 ## ตำแหน่งไฟล์ใน FILE_COMMON
 
@@ -185,6 +193,9 @@ profile
 mode
 liveArmed
 fixedLot
+positionSizingMode / riskPercent / riskCapitalBase
+estimatedCommissionPerLot
+brokerVolumeMin / brokerVolumeMax / brokerVolumeStep
 symbol
 timeframe
 observedAt
@@ -318,7 +329,7 @@ FAILED_FINAL
 - `init-status.json` สำหรับสถานะเริ่มต้นล่าสุด ส่วน Audit จะเก็บประวัติคำเตือนและสาเหตุที่เริ่มไม่สำเร็จ
 - Experts Log ของ MT4
 
-หาก EA หายจากกราฟทันที ให้เปิด `init-status.json` ก่อน สาเหตุที่ทำให้ `OnInit()` ล้มเหลวได้แก่ Channel ไม่ถูกต้อง, ค่า Gateway/Lifecycle Mode นอก Enum ที่รองรับ, Input/Magic/Lot/Symbol/Timeframe ไม่ผ่าน, Channel ถูก EA อีกตัวครอบครอง, HMAC Self-test, Signing Key ไม่พร้อมขณะ `LiveArmed=true`, สร้าง Timer ไม่สำเร็จ หรือเขียน Snapshot/Status/Capabilities ไม่ได้ การเลือก Live โดยยังไม่ Arm จะไม่ถอด EA แต่จะเขียนคำเตือนและคง Execution Guard เป็น `LIVE_NOT_ARMED` เมื่อ EA ถูกถอด, Terminal ปิด หรือเปลี่ยนกราฟ รุ่น v2.18 จะลบ `status.json`, `capabilities.json` และ `snapshot.json` เก่าก่อนปล่อย Channel Lock เพื่อไม่ให้ Backend เห็นสถานะ READY ของกราฟเดิม ส่วน `init-status.json` ยังคงบอก Stage/Reason Code ที่แน่นอน
+หาก EA หายจากกราฟทันที ให้เปิด `init-status.json` ก่อน สาเหตุที่ทำให้ `OnInit()` ล้มเหลวได้แก่ Channel ไม่ถูกต้อง, ค่า Gateway/Lifecycle/Money Management Mode นอก Enum ที่รองรับ, Input/Magic/Lot/Symbol/Timeframe ไม่ผ่าน, Channel ถูก EA อีกตัวครอบครอง, HMAC Self-test, Signing Key ไม่พร้อมขณะ `LiveArmed=true`, สร้าง Timer ไม่สำเร็จ หรือเขียน Snapshot/Status/Capabilities ไม่ได้ การเลือก Live โดยยังไม่ Arm จะไม่ถอด EA แต่จะเขียนคำเตือนและคง Execution Guard เป็น `LIVE_NOT_ARMED` เมื่อ EA ถูกถอด, Terminal ปิด หรือเปลี่ยนกราฟ รุ่น v2.19 จะลบ `status.json`, `capabilities.json` และ `snapshot.json` เก่าก่อนปล่อย Channel Lock เพื่อไม่ให้ Backend เห็นสถานะ READY ของกราฟเดิม ส่วน `init-status.json` ยังคงบอก Stage/Reason Code ที่แน่นอน
 
 ## Preflight ก่อนย้าย Symbol / Timeframe / Terminal
 
@@ -326,19 +337,19 @@ FAILED_FINAL
 2. ตรวจชื่อ Symbol **เต็มตาม Broker** เช่น `XAUUSD.r` และเพิ่มชื่อฐานใน `AllowedSymbols`; ตรวจ Timeframe อยู่ใน `AllowedTimeframes` และตั้งแต่ M5 ขึ้นไป
 3. ใช้ `SnapshotChannel` ไม่ซ้ำสำหรับแต่ละ EA/กราฟ/Terminal หากย้าย EA ตัวเดิมให้คง Channel เดิมได้ แต่ Backend จะตั้ง Baseline ของ Stream ใหม่และไม่เอางานค้างจาก Stream เดิมมาส่ง
 4. กำหนด Magic แบบแยก Channel แล้วให้ EA ทุกตัวประกาศ `ManagedMagicNumbers` ชุดเดียวกัน เพื่อให้ `MaxManagedOpenPositions` และ Lot/Loss Guard นับทั้ง Portfolio ตรงกัน
-5. Reload/Attach v2.18 แล้วรอ `init-status.json = INIT_SUCCEEDED`, `status.json` และ `snapshot.json` แสดง Channel + Symbol + Timeframe ใหม่ตรงกันก่อนเปิด Automation
+5. Reload/Attach v2.19 แล้วรอ `init-status.json = INIT_SUCCEEDED`, `status.json` และ `snapshot.json` แสดง Channel + Symbol + Timeframe ใหม่ตรงกันก่อนเปิด Automation
 6. ทดสอบ Shadow ก่อน Demo และห้ามเปิด Live ระหว่างการย้ายกราฟหรือระหว่างที่สถานะทั้งสามไฟล์ยังไม่ตรงกัน
 
 Stream identity และ `command.symbol` ใช้ชื่อ Symbol เต็มหลังตัดช่องว่างและแปลงเป็นตัวพิมพ์ใหญ่เสมอ เช่น Snapshot `eurusd#` ต้องคำนวณด้วย `EURUSD#`; สูตรคือ `SHA256(channelId + "\n" + UPPERCASE(fullSymbol) + "\n" + UPPERCASE(timeframe))` การใช้ตัวพิมพ์จาก Display โดยไม่ Normalize จะถูกปฏิเสธแบบ fail-closed อย่างไรก็ตาม EA ส่ง Order ด้วย `Symbol()` ของกราฟที่ Attach จริง จึงคงชื่อ/case ที่ Broker ใช้ใน execution ไว้
 
-## ข้อสมมติและขอบเขตของ v2.18
+## ข้อสมมติและขอบเขตของ v2.19
 
 - รองรับ Market Order `BUY` และ `SELL` เท่านั้น
 - SL/TP เป็นราคา Absolute ไม่ใช่ Points
 - หนึ่ง Channel มี Gateway EA เจ้าของเพียงตัวเดียว
 - Local Runner Publish คำสั่งทีละรายการ
 - FILE_COMMON เป็น Local Trust Boundary และ Signed Envelope ใช้ Shared Secret ภายใน Windows User เดียวกัน; ก่อน Live ควรจำกัด ACL และใช้ Windows User/VPS เฉพาะ
-- Backend ไม่มีคำสั่ง Close, Modify, Pending Order, Martingale, Grid หรือ Hedge; EA จะเรียก `OrderClose()` ได้เฉพาะ Optional Position Lifecycle (Max Holding/Session Close) ที่ผู้ใช้เปิดเองและผ่าน Mode, Account, Signing (ทั้ง Demo/Live), LiveArmed (เมื่อเป็น Live) และ Safety Guard ครบ โดยถือ Account Execution Lock เดียวกับ `OrderSend()` และตรวจซ้ำภายใต้ Lock ที่ขอบก่อนปิด Order ส่วน Shadow/Tester/Optimizer ห้ามปิดอัตโนมัติ และ Recovery ใน v2.18 เป็นการกู้หลักฐาน Ticket/Outcome แบบอ่านอย่างเดียวโดยไม่สร้างคำสั่งซื้อขาย
+- Backend ไม่มีคำสั่ง Close, Modify, Pending Order, Martingale, Grid หรือ Hedge; EA จะเรียก `OrderClose()` ได้เฉพาะ Optional Position Lifecycle (Max Holding/Session Close) ที่ผู้ใช้เปิดเองและผ่าน Mode, Account, Signing (ทั้ง Demo/Live), LiveArmed (เมื่อเป็น Live) และ Safety Guard ครบ โดยถือ Account Execution Lock เดียวกับ `OrderSend()` และตรวจซ้ำภายใต้ Lock ที่ขอบก่อนปิด Order ส่วน Shadow/Tester/Optimizer ห้ามปิดอัตโนมัติ และ Recovery ใน v2.19 เป็นการกู้หลักฐาน Ticket/Outcome แบบอ่านอย่างเดียวโดยไม่สร้างคำสั่งซื้อขาย
 - ไม่มีการ Retry `OrderSend()` อัตโนมัติ และไม่มีโหมดเปิด Order แบบไม่ใส่ SL/TP สำหรับ Broker แบบ ECN; หาก Broker ไม่ยอมรับ SL/TP ตอนเปิด คำสั่งจะจบแบบ Fail-closed
 - EA หนึ่งตัวดูแล Symbol และ Timeframe ของกราฟที่ติดอยู่เพียงชุดเดียว การใช้หลาย Symbol ต้องแยก Channel/EA และต้องกำหนด `ManagedMagicNumbers` ให้ครอบคลุมพอร์ตที่ต้องการคุมร่วมกัน
 - ขอบเขต Concurrency/Portfolio Lock รองรับเฉพาะ MT4 Terminal ที่รันด้วย Windows User เดียวกันและมองเห็น `FILE_COMMON` เดียวกันเท่านั้น การรันบัญชี Broker เดียวกันข้าม VPS/Windows คนละเครื่องไม่แชร์ Lock และยังไม่รองรับ Active Trading พร้อมกัน ต้องกำหนดให้มี Active Execution Owner เพียงเครื่องเดียว
@@ -373,7 +384,7 @@ Stream identity และ `command.symbol` ใช้ชื่อ Symbol เต�
 - ใช้บัญชี Demo เท่านั้น
 - `GatewayMode=GATEWAY_DEMO`
 - `LiveArmed=false`
-- ใช้ `FixedLot` ต่ำและตรวจผล Signed Envelope, ACK/Ticket/Journal ต่อเนื่อง Demo ใช้เส้นทางลายเซ็นเดียวกับ Live
+- เลือก Fixed Lot ต่ำหรือ Risk Percent ต่ำตามนโยบายทดสอบ แล้วตรวจ Lot ที่คำนวณ, Signed Envelope, ACK/Ticket/Journal ต่อเนื่อง Demo ใช้เส้นทางลายเซ็นเดียวกับ Live
 
 ### ระยะ 3 — Live
 

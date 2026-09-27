@@ -47,7 +47,9 @@ class GlobalMetatraderBackendTests(unittest.TestCase):
         self.mt4_id = "mtc-" + ("m" * 26)
         self.mt5_id = "mtc-" + ("n" * 26)
         self.original_cache = dict(self.bridge.METATRADER_CACHE)
+        self.original_common_files_dir = self.bridge.METATRADER_COMMON_FILES_DIR
         self.bridge.RUNTIME_DIR = self.runtime
+        self.bridge.METATRADER_COMMON_FILES_DIR = self.root / "common"
         self._write_store()
         terminal_model = self.bridge.metatrader_status_read_model(
             {"mt4": 1, "mt5": 1},
@@ -70,6 +72,7 @@ class GlobalMetatraderBackendTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.bridge.METATRADER_CACHE.clear()
         self.bridge.METATRADER_CACHE.update(self.original_cache)
+        self.bridge.METATRADER_COMMON_FILES_DIR = self.original_common_files_dir
         self.temp.cleanup()
 
     def _candidate_record(
@@ -112,6 +115,122 @@ class GlobalMetatraderBackendTests(unittest.TestCase):
             self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME,
             store,
         )
+
+    def _write_gateway_ledger(
+        self,
+        *,
+        active_command_id: str | None = None,
+        execution_unknown: bool = False,
+        completed_command_id: str | None = None,
+        quarantined_execution_unknown: bool = False,
+        channel_id: str | None = None,
+    ) -> Path:
+        commands = {}
+        command_id = active_command_id or completed_command_id
+        idempotency = {}
+        bar_claims = {}
+        if command_id:
+            gateway = self.bridge._load_mt4_trade_gateway_module()
+            request_digest = "1" * 64
+            bar_key = "2" * 64
+            selected_channel = channel_id or self.mt4_id
+            heartbeat_id = "hb-" + ("3" * 24)
+            command = {
+                field: None
+                for field in gateway.COMMAND_FIELDS
+            }
+            command.update({
+                "schemaVersion": gateway.COMMAND_SCHEMA_VERSION,
+                "commandId": command_id,
+                "idempotencyKey": "idem-test",
+                "channelId": selected_channel,
+                "missionId": "mission-test",
+                "councilDecisionId": "decision-test",
+                "ownerAgentId": "risk_guard",
+                "snapshotId": "snapshot-test",
+                "snapshotObservedAt": "2026-09-07T00:00:00Z",
+                "barTime": 1_788_739_200,
+                "referencePrice": 2300.0,
+                "action": "BUY",
+                "symbol": "XAUUSD",
+                "timeframe": "M15",
+                "stopLoss": 2290.0,
+                "takeProfit": 2320.0,
+                "issuedAt": 1_788_739_200,
+                "expiresAt": 1_788_739_230,
+                "heartbeatId": heartbeat_id,
+            })
+            heartbeat = {
+                field: None
+                for field in gateway.HEARTBEAT_FIELDS
+            }
+            heartbeat.update({
+                "schemaVersion": gateway.HEARTBEAT_SCHEMA_VERSION,
+                "channelId": selected_channel,
+                "heartbeatId": heartbeat_id,
+                "issuedAt": 1_788_739_200,
+                "expiresAt": 1_788_739_230,
+            })
+            quarantined = quarantined_execution_unknown
+            unknown = execution_unknown or quarantined
+            entry = {
+                "wireSchemaVersion": gateway.COMMAND_SCHEMA_VERSION,
+                "command": command,
+                "heartbeat": heartbeat,
+                "backendIdentity": {
+                    "snapshotId": "snapshot-test",
+                    "streamKey": "XAUUSD|M15",
+                    "snapshotObservedAt": "2026-09-07T00:00:00Z",
+                    "barTime": 1_788_739_200,
+                    "referencePrice": 2300.0,
+                    "barKey": bar_key,
+                },
+                "requestDigest": request_digest,
+                "barKey": bar_key,
+                "status": (
+                    "quarantined_execution_unknown"
+                    if quarantined
+                    else "ack_EXECUTION_UNKNOWN"
+                    if unknown
+                    else "published"
+                    if active_command_id
+                    else "ack_EXECUTED"
+                ),
+                "outstanding": bool(active_command_id),
+                "createdAt": "2026-09-07T00:00:00Z",
+                "updatedAt": "2026-09-07T00:00:01Z",
+                "ack": ({"status": "EXECUTION_UNKNOWN"} if unknown else None),
+                "ackDigests": [],
+                "eaSizingReported": False,
+            }
+            if quarantined:
+                entry["outstanding"] = False
+                entry["recovery"] = {
+                    "action": "quarantine",
+                    "reasonCode": "EXECUTION_UNKNOWN_REQUIRES_OPERATOR_RECONCILIATION",
+                    "killSwitchActive": True,
+                    "barClaimRetained": True,
+                    "recoveredAt": "2026-09-07T00:00:02Z",
+                }
+            commands[command_id] = entry
+            idempotency[request_digest] = command_id
+            bar_claims[bar_key] = command_id
+        ledger = {
+            "schemaVersion": self.bridge.MT4_TRADE_GATEWAY_LEDGER_SCHEMA_VERSION,
+            "revision": 1,
+            "activeCommandId": active_command_id,
+            "commands": commands,
+            "idempotency": idempotency,
+            "barClaims": bar_claims,
+            "updatedAt": "2026-09-07T00:00:00Z",
+        }
+        path = (
+            self.runtime
+            / self.bridge.MT4_TRADE_GATEWAY_STATE_DIRNAME
+            / self.bridge.MT4_TRADE_GATEWAY_LEDGER_FILENAME
+        )
+        self.bridge.write_json(path, ledger)
+        return path
 
     def _add_second_mt4_candidate(
         self,
@@ -461,7 +580,7 @@ class GlobalMetatraderBackendTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 409)
         write_store.assert_not_called()
 
-    def test_mt5_selection_targets_only_factory_and_lab(self) -> None:
+    def test_mt5_selection_targets_council_factory_and_lab(self) -> None:
         with self._action_patches():
             result = self.bridge.select_global_metatrader_target(
                 "mt5",
@@ -470,14 +589,21 @@ class GlobalMetatraderBackendTests(unittest.TestCase):
 
         self.assertEqual(
             result["targetPropIds"],
-            ["right_server_racks", "right_tool_console"],
+            [
+                "left_analytics_console",
+                "right_server_racks",
+                "right_tool_console",
+            ],
         )
         stored = json.loads(
             (self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME).read_text(
                 encoding="utf-8"
             )
         )
-        self.assertNotIn("left_analytics_console", stored["selections"])
+        self.assertEqual(
+            stored["selections"]["left_analytics_console"]["candidateId"],
+            self.mt5_id,
+        )
         self.assertEqual(
             stored["selections"]["right_server_racks"]["candidateId"],
             self.mt5_id,
@@ -524,7 +650,7 @@ class GlobalMetatraderBackendTests(unittest.TestCase):
         with mock.patch.object(self.bridge, "create_mission") as create_mission:
             with self.assertRaises(self.bridge.RequestError) as caught:
                 self.bridge.select_metatrader_target_compatibility_alias(
-                    "left_analytics_console",
+                    "terminal_workstation",
                     self.mt5_id,
                 )
         self.assertEqual(caught.exception.status, 422)
@@ -547,7 +673,398 @@ class GlobalMetatraderBackendTests(unittest.TestCase):
         self.assertEqual(hub["status"], "configured")
         self.assertEqual(hub["selectedPlatform"], "mt5")
         self.assertEqual(hub["platforms"]["mt5"]["configurationStatus"], "configured")
-        self.assertEqual(hub["platforms"]["mt4"]["configurationStatus"], "partial")
+        self.assertEqual(hub["platforms"]["mt4"]["configurationStatus"], "not_configured")
+        stored = json.loads(
+            (self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME).read_text(
+                encoding="utf-8"
+            )
+        )
+        council_selection = stored["selections"]["left_analytics_console"]
+        self.assertEqual(council_selection["candidateId"], self.mt5_id)
+        self.assertEqual(council_selection["selectionRevision"], 3)
+
+    def test_switching_mt4_to_mt5_is_blocked_by_outstanding_command(self) -> None:
+        initial = {
+            prop_id: {
+                "candidateId": self.mt4_id,
+                "selectedAt": "2026-09-07T00:00:00Z",
+                "selectionRevision": 2,
+            }
+            for prop_id in self.bridge.GLOBAL_METATRADER_SELECTION_TARGETS["mt4"]
+        }
+        self._write_store(initial)
+        self._write_gateway_ledger(active_command_id="cmd-" + ("a" * 24))
+        store_path = self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME
+        before = store_path.read_bytes()
+
+        with self._action_patches():
+            with self.assertRaises(self.bridge.RequestError) as caught:
+                self.bridge.select_global_metatrader_target("mt5", self.mt5_id)
+
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(caught.exception.code, "target_switch_outstanding_command")
+        self.assertEqual(
+            caught.exception.response_payload["kind"],
+            "ai_trade_council_target_switch_blocked",
+        )
+        self.assertEqual(store_path.read_bytes(), before)
+
+    def test_switching_mt4_to_mt5_is_blocked_by_execution_unknown(self) -> None:
+        initial = {
+            prop_id: {
+                "candidateId": self.mt4_id,
+                "selectedAt": "2026-09-07T00:00:00Z",
+                "selectionRevision": 2,
+            }
+            for prop_id in self.bridge.GLOBAL_METATRADER_SELECTION_TARGETS["mt4"]
+        }
+        self._write_store(initial)
+        self._write_gateway_ledger(
+            active_command_id="cmd-" + ("b" * 24),
+            execution_unknown=True,
+        )
+        store_path = self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME
+        before = store_path.read_bytes()
+
+        with self._action_patches():
+            with self.assertRaises(self.bridge.RequestError) as caught:
+                self.bridge.select_global_metatrader_target("mt5", self.mt5_id)
+
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(caught.exception.code, "target_switch_execution_unknown")
+        self.assertEqual(store_path.read_bytes(), before)
+
+    def test_switching_mt4_to_mt5_is_blocked_by_durable_quarantined_unknown(self) -> None:
+        initial = {
+            prop_id: {
+                "candidateId": self.mt4_id,
+                "selectedAt": "2026-09-07T00:00:00Z",
+                "selectionRevision": 2,
+            }
+            for prop_id in self.bridge.GLOBAL_METATRADER_SELECTION_TARGETS["mt4"]
+        }
+        self._write_store(initial)
+        self._write_gateway_ledger(
+            completed_command_id="cmd-" + ("d" * 24),
+            quarantined_execution_unknown=True,
+            channel_id=self.mt4_id,
+        )
+
+        with self._action_patches():
+            with self.assertRaises(self.bridge.RequestError) as caught:
+                self.bridge.select_global_metatrader_target("mt5", self.mt5_id)
+
+        self.assertEqual(
+            caught.exception.code,
+            "target_switch_execution_unknown_quarantined",
+        )
+
+    def test_switching_mt4_to_mt5_is_blocked_by_managed_open_positions(self) -> None:
+        initial = {
+            prop_id: {
+                "candidateId": self.mt4_id,
+                "selectedAt": "2026-09-07T00:00:00Z",
+                "selectionRevision": 2,
+            }
+            for prop_id in self.bridge.GLOBAL_METATRADER_SELECTION_TARGETS["mt4"]
+        }
+        self._write_store(initial)
+        store_path = self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME
+        before = store_path.read_bytes()
+
+        with self._action_patches(), mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_ea_status",
+            return_value=({"currentManagedPositions": 1}, "ready"),
+        ):
+            with self.assertRaises(self.bridge.RequestError) as caught:
+                self.bridge.select_global_metatrader_target("mt5", self.mt5_id)
+
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(caught.exception.code, "target_switch_managed_positions_open")
+        self.assertEqual(store_path.read_bytes(), before)
+
+    def test_switching_mt4_to_mt5_is_blocked_by_any_stale_status(self) -> None:
+        initial = {
+            prop_id: {
+                "candidateId": self.mt4_id,
+                "selectedAt": "2026-09-07T00:00:00Z",
+                "selectionRevision": 2,
+            }
+            for prop_id in self.bridge.GLOBAL_METATRADER_SELECTION_TARGETS["mt4"]
+        }
+        self._write_store(initial)
+        store_path = self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME
+        before = store_path.read_bytes()
+
+        with self._action_patches(), mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_ea_status",
+            return_value=(
+                {"currentManagedPositions": 2},
+                "gateway_status_stale",
+            ),
+        ) as read_status:
+            with self.assertRaises(self.bridge.RequestError) as caught:
+                self.bridge.select_global_metatrader_target("mt5", self.mt5_id)
+
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(caught.exception.code, "target_switch_state_unavailable")
+        read_status.assert_called_once_with(
+            mock.ANY,
+            include_stale=True,
+        )
+        self.assertEqual(store_path.read_bytes(), before)
+
+    def test_switching_mt4_to_mt5_is_blocked_by_stale_zero_after_possible_fill(self) -> None:
+        initial = {
+            prop_id: {
+                "candidateId": self.mt4_id,
+                "selectedAt": "2026-09-07T00:00:00Z",
+                "selectionRevision": 2,
+            }
+            for prop_id in self.bridge.GLOBAL_METATRADER_SELECTION_TARGETS["mt4"]
+        }
+        self._write_store(initial)
+        with self._action_patches(), mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_ea_status",
+            return_value=(
+                {"currentManagedPositions": 0, "executionGuardReason": "READY"},
+                "gateway_status_stale",
+            ),
+        ):
+            with self.assertRaises(self.bridge.RequestError) as caught:
+                self.bridge.select_global_metatrader_target("mt5", self.mt5_id)
+
+        self.assertEqual(caught.exception.code, "target_switch_state_unavailable")
+
+    def test_switching_mt4_to_mt5_is_blocked_when_position_telemetry_failed_at_zero(self) -> None:
+        initial = {
+            prop_id: {
+                "candidateId": self.mt4_id,
+                "selectedAt": "2026-09-07T00:00:00Z",
+                "selectionRevision": 2,
+            }
+            for prop_id in self.bridge.GLOBAL_METATRADER_SELECTION_TARGETS["mt4"]
+        }
+        self._write_store(initial)
+        with self._action_patches(), mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_ea_status",
+            return_value=(
+                {
+                    "currentManagedPositions": 0,
+                    "executionGuardReason": "POSITION_TELEMETRY_UNAVAILABLE",
+                },
+                "ready",
+            ),
+        ):
+            with self.assertRaises(self.bridge.RequestError) as caught:
+                self.bridge.select_global_metatrader_target("mt5", self.mt5_id)
+
+        self.assertEqual(caught.exception.code, "target_switch_state_unavailable")
+
+    def test_switching_mt4_to_mt5_is_blocked_when_history_telemetry_failed_at_zero(self) -> None:
+        initial = {
+            prop_id: {
+                "candidateId": self.mt4_id,
+                "selectedAt": "2026-09-07T00:00:00Z",
+                "selectionRevision": 2,
+            }
+            for prop_id in self.bridge.GLOBAL_METATRADER_SELECTION_TARGETS["mt4"]
+        }
+        self._write_store(initial)
+        with self._action_patches(), mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_ea_status",
+            return_value=(
+                {
+                    "currentManagedPositions": 0,
+                    "executionGuardReason": "HISTORY_TELEMETRY_UNAVAILABLE",
+                },
+                "ready",
+            ),
+        ):
+            with self.assertRaises(self.bridge.RequestError) as caught:
+                self.bridge.select_global_metatrader_target("mt5", self.mt5_id)
+
+        self.assertEqual(caught.exception.code, "target_switch_state_unavailable")
+
+    def test_switching_is_blocked_when_status_disappears_after_channel_command_history(self) -> None:
+        initial = {
+            prop_id: {
+                "candidateId": self.mt4_id,
+                "selectedAt": "2026-09-07T00:00:00Z",
+                "selectionRevision": 2,
+            }
+            for prop_id in self.bridge.GLOBAL_METATRADER_SELECTION_TARGETS["mt4"]
+        }
+        self._write_store(initial)
+        self._write_gateway_ledger(
+            completed_command_id="cmd-" + ("c" * 24),
+            channel_id=self.mt4_id,
+        )
+        with self._action_patches(), mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_ea_status",
+            return_value=(None, "gateway_status_not_observed"),
+        ):
+            with self.assertRaises(self.bridge.RequestError) as caught:
+                self.bridge.select_global_metatrader_target("mt5", self.mt5_id)
+
+        self.assertEqual(caught.exception.code, "target_switch_state_unavailable")
+
+    def test_switching_mt4_to_mt5_fails_closed_when_old_status_is_corrupt(self) -> None:
+        initial = {
+            prop_id: {
+                "candidateId": self.mt4_id,
+                "selectedAt": "2026-09-07T00:00:00Z",
+                "selectionRevision": 2,
+            }
+            for prop_id in self.bridge.GLOBAL_METATRADER_SELECTION_TARGETS["mt4"]
+        }
+        self._write_store(initial)
+        store_path = self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME
+        before = store_path.read_bytes()
+        status_path = self.bridge._mt4_trade_gateway_status_path(self.mt4_id)
+        self.assertIsNotNone(status_path)
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        status_path.write_text("{", encoding="ascii")
+
+        with self._action_patches():
+            with self.assertRaises(self.bridge.RequestError) as caught:
+                self.bridge.select_global_metatrader_target("mt5", self.mt5_id)
+
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(caught.exception.code, "target_switch_state_unavailable")
+        self.assertEqual(store_path.read_bytes(), before)
+
+    def test_switching_mt4_to_mt5_allows_never_observed_old_status(self) -> None:
+        initial = {
+            prop_id: {
+                "candidateId": self.mt4_id,
+                "selectedAt": "2026-09-07T00:00:00Z",
+                "selectionRevision": 2,
+            }
+            for prop_id in self.bridge.GLOBAL_METATRADER_SELECTION_TARGETS["mt4"]
+        }
+        self._write_store(initial)
+
+        with self._action_patches(), mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_ea_status",
+            return_value=(None, "gateway_status_not_observed"),
+        ):
+            result = self.bridge.select_global_metatrader_target(
+                "mt5",
+                self.mt5_id,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["globalMetatraderHub"]["selectedPlatform"],
+            "mt5",
+        )
+
+    def test_switch_guard_reads_empty_legacy_ledger_without_migrating_it(self) -> None:
+        initial = {
+            prop_id: {
+                "candidateId": self.mt4_id,
+                "selectedAt": "2026-09-07T00:00:00Z",
+                "selectionRevision": 2,
+            }
+            for prop_id in self.bridge.GLOBAL_METATRADER_SELECTION_TARGETS["mt4"]
+        }
+        self._write_store(initial)
+        ledger_path = (
+            self.runtime
+            / self.bridge.MT4_TRADE_GATEWAY_STATE_DIRNAME
+            / self.bridge.MT4_TRADE_GATEWAY_LEDGER_FILENAME
+        )
+        self.bridge.write_json(
+            ledger_path,
+            {
+                "schemaVersion": (
+                    self.bridge.MT4_TRADE_GATEWAY_LEGACY_LEDGER_SCHEMA_VERSION
+                ),
+                "revision": 7,
+                "activeCommandId": None,
+                "commands": {},
+                "idempotency": {},
+                "barClaims": {},
+                "updatedAt": "2026-09-07T00:00:00Z",
+            },
+        )
+        before = ledger_path.read_bytes()
+
+        with self._action_patches():
+            result = self.bridge.select_global_metatrader_target("mt5", self.mt5_id)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(ledger_path.read_bytes(), before)
+
+    def test_switch_guard_blocks_corrupt_ledger_without_changing_selection(self) -> None:
+        initial = {
+            prop_id: {
+                "candidateId": self.mt4_id,
+                "selectedAt": "2026-09-07T00:00:00Z",
+                "selectionRevision": 2,
+            }
+            for prop_id in self.bridge.GLOBAL_METATRADER_SELECTION_TARGETS["mt4"]
+        }
+        self._write_store(initial)
+        ledger_path = (
+            self.runtime
+            / self.bridge.MT4_TRADE_GATEWAY_STATE_DIRNAME
+            / self.bridge.MT4_TRADE_GATEWAY_LEDGER_FILENAME
+        )
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        ledger_path.write_text("{", encoding="ascii")
+        store_path = self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME
+        before = store_path.read_bytes()
+
+        with self._action_patches():
+            with self.assertRaises(self.bridge.RequestError) as caught:
+                self.bridge.select_global_metatrader_target("mt5", self.mt5_id)
+
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(caught.exception.code, "target_switch_state_unavailable")
+        self.assertEqual(store_path.read_bytes(), before)
+
+    def test_stale_mt5_selection_revision_cannot_publish_to_gateway(self) -> None:
+        self._write_store({
+            self.bridge.AI_TRADE_COUNCIL_PROP_ID: {
+                "candidateId": self.mt5_id,
+                "selectedAt": "2026-09-07T00:00:00Z",
+                "selectionRevision": 3,
+            }
+        })
+        with mock.patch.object(
+            self.bridge,
+            "metatrader_snapshot_read_model",
+        ) as snapshot_read, mock.patch.object(
+            self.bridge,
+            "_mt4_trade_gateway_instance",
+        ) as gateway:
+            result = self.bridge._mt4_trade_gateway_publish_for_selection(
+                {},
+                expected_candidate_id=self.mt5_id,
+                expected_selection_revision=2,
+                expected_closed_bar_identity={},
+                analysis_context={},
+                maximum_signal_drift_points=10,
+                minimum_reward_risk_ratio=1,
+                maximum_snapshot_age_seconds=20,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["reasonCode"],
+            "terminal_selection_changed_before_publish",
+        )
+        snapshot_read.assert_not_called()
+        gateway.assert_not_called()
 
     def test_write_failure_leaves_every_consumer_on_previous_selection(self) -> None:
         initial = {
@@ -1420,7 +1937,7 @@ class GlobalMetatraderBackendTests(unittest.TestCase):
         self.assertFalse(hub["legacyPerDashboardEndpointMayWriteSingleConsumer"])
 
         bridge_contract = json.loads(BRIDGE_CONTRACT_PATH.read_text(encoding="utf-8"))
-        self.assertEqual(bridge_contract["version"], "bridge-contract-v021")
+        self.assertEqual(bridge_contract["version"], "bridge-contract-v022")
         endpoints = bridge_contract["endpoints"]
         for endpoint in (
             "GET /api/integrations/metatrader/global",

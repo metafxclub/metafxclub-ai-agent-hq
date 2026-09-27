@@ -360,7 +360,7 @@ class GlobalMetatraderConsumerProjectionTests(unittest.TestCase):
         self.assertTrue(lab["gate"]["backendBound"])
         self.assertFalse(lab["gate"]["ready"])
 
-    def test_mt5_reaches_only_factory_and_lab_without_false_council_binding(self) -> None:
+    def test_mt5_reaches_council_factory_and_lab_as_one_atomic_binding(self) -> None:
         with self._selection_action_patches():
             applied = self.bridge.select_global_metatrader_target(
                 "mt5",
@@ -369,24 +369,29 @@ class GlobalMetatraderConsumerProjectionTests(unittest.TestCase):
 
         self.assertEqual(
             set(applied["targetPropIds"]),
-            {"right_server_racks", "right_tool_console"},
+            {
+                "left_analytics_console",
+                "right_server_racks",
+                "right_tool_console",
+            },
         )
         stored = self.bridge.read_json(
             self.runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME,
             {},
         )
-        self.assertNotIn("left_analytics_console", stored["selections"])
+        self.assertEqual(
+            stored["selections"]["left_analytics_console"]["candidateId"],
+            self.mt5_id,
+        )
 
         council = self._dashboard_checklist("left_analytics_console")
         council_selection = council["metatraderSelection"]
-        self.assertEqual(council_selection["configurationStatus"], "not_configured")
-        self.assertIsNone(council_selection["selectedCandidate"])
-        self.assertTrue(
-            all(
-                candidate["platform"] == "mt4"
-                for candidate in council_selection["candidates"]
-            )
+        self.assertEqual(council_selection["configurationStatus"], "configured")
+        self.assertEqual(
+            council_selection["selectedCandidate"]["candidateId"],
+            self.mt5_id,
         )
+        self.assertEqual(council_selection["selectedCandidate"]["platform"], "mt5")
 
         factory = self._ea_factory_read_model()
         self.assertEqual(factory["terminalSelection"]["selectedTerminalId"], self.mt5_id)

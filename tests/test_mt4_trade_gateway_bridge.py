@@ -329,7 +329,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
                 "direction": "BUY",
                 "stopLossPrice": 95.0,
                 "takeProfitPrice": 110.0,
-                "lotPolicy": "ea_fixed_lot_only",
+                "lotPolicy": "ea_owned_fixed_or_risk_percent",
                 "aiLotAllowed": False,
             },
         }
@@ -442,6 +442,213 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.assertTrue(status["shadowValidationAvailable"])
         self.assertFalse(status["demoOrderExecutionAvailable"])
         self.assertFalse(status["liveOrderExecutionAvailable"])
+
+    def test_mt4_status_example_documents_complete_money_management_telemetry(self) -> None:
+        example = json.loads(
+            (
+                PROJECT_ROOT
+                / "integrations"
+                / "mt4-trade-gateway"
+                / "status.example.json"
+            ).read_text(encoding="utf-8")
+        )
+        fields = set(example)
+        fields.discard("eaVersion")
+        self.assertEqual(fields, set(self.bridge.MT4_TRADE_GATEWAY_STATUS_FIELDS))
+        self.assertEqual(example["positionSizingMode"], "FIXED_LOT")
+        self.assertEqual(example["riskCapitalBase"], "EQUITY")
+        self.assertGreater(example["brokerVolumeStep"], 0)
+
+    def test_gateway_status_reads_complete_risk_percent_policy_as_read_only_state(self) -> None:
+        self.write_ea_status(
+            fixedLot=0.01,
+            positionSizingMode="RISK_PERCENT",
+            riskPercent=1.25,
+            riskCapitalBase="EQUITY",
+            estimatedCommissionPerLot=7.0,
+            brokerVolumeMin=0.001,
+            brokerVolumeMax=100.0,
+            brokerVolumeStep=0.001,
+        )
+
+        with self.selected_candidate():
+            status = self.bridge.mt4_trade_gateway_status_read_model()
+
+        self.assertTrue(status["connected"])
+        self.assertEqual(status["positionSizingMode"], "RISK_PERCENT")
+        self.assertEqual(status["riskPercent"], 1.25)
+        self.assertEqual(status["riskCapitalBase"], "EQUITY")
+        self.assertEqual(status["estimatedCommissionPerLot"], 7.0)
+        self.assertEqual(status["brokerVolumeMin"], 0.001)
+        self.assertEqual(status["brokerVolumeMax"], 100.0)
+        self.assertEqual(status["brokerVolumeStep"], 0.001)
+        self.assertEqual(status["sizingSource"], "ea_input_read_only")
+        self.assertFalse(status["aiCanSetLotOrRisk"])
+
+    def test_gateway_status_allows_zero_only_for_the_inactive_sizing_input(self) -> None:
+        complete = {
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 0.0,
+            "brokerVolumeMin": 0.0001,
+            "brokerVolumeMax": 100.0,
+            "brokerVolumeStep": 0.0001,
+        }
+        cases = (
+            {
+                **complete,
+                "positionSizingMode": "RISK_PERCENT",
+                "fixedLot": 0.0,
+                "riskPercent": 1.0,
+            },
+            {
+                **complete,
+                "positionSizingMode": "FIXED_LOT",
+                "fixedLot": 0.01,
+                "riskPercent": 0.0,
+            },
+        )
+
+        for overrides in cases:
+            with self.subTest(mode=overrides["positionSizingMode"]):
+                self.write_ea_status(**overrides)
+                parsed, reason = self.bridge._read_mt4_trade_gateway_ea_status(
+                    self.candidate
+                )
+                self.assertEqual(reason, "ready")
+                self.assertIsNotNone(parsed)
+                self.assertEqual(
+                    parsed["positionSizingMode"],
+                    overrides["positionSizingMode"],
+                )
+
+    def test_gateway_status_rejects_partial_or_invalid_sizing_policy(self) -> None:
+        complete = {
+            "positionSizingMode": "RISK_PERCENT",
+            "riskPercent": 1.0,
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 0.0,
+            "brokerVolumeMin": 0.01,
+            "brokerVolumeMax": 100.0,
+            "brokerVolumeStep": 0.01,
+        }
+        invalid_cases = (
+            ({"positionSizingMode": "RISK_PERCENT"}, "gateway_status_schema_invalid"),
+            ({**complete, "positionSizingMode": "PERCENT"}, "gateway_status_sizing_policy_invalid"),
+            ({**complete, "riskPercent": 0.0}, "gateway_status_sizing_policy_invalid"),
+            (
+                {
+                    **complete,
+                    "positionSizingMode": "FIXED_LOT",
+                    "fixedLot": 0.0,
+                },
+                "gateway_status_sizing_policy_invalid",
+            ),
+            ({**complete, "riskCapitalBase": "CENTS"}, "gateway_status_sizing_policy_invalid"),
+            ({**complete, "brokerVolumeMin": 1.0, "brokerVolumeMax": 0.1}, "gateway_status_sizing_policy_invalid"),
+            ({**complete, "brokerVolumeStep": 101.0}, "gateway_status_sizing_policy_invalid"),
+        )
+        for overrides, expected_reason in invalid_cases:
+            with self.subTest(overrides=overrides):
+                self.write_ea_status(**overrides)
+                parsed, reason = self.bridge._read_mt4_trade_gateway_ea_status(
+                    self.candidate
+                )
+                self.assertIsNone(parsed)
+                self.assertEqual(reason, expected_reason)
+
+    def test_gateway_status_requires_mt5_platform_and_account_binding(self) -> None:
+        self.candidate["platform"] = "mt5"
+        account_binding_id = "b" * 64
+        self.write_ea_status(
+            fixedLot=0.05,
+            terminalPlatform="mt5",
+            accountBindingId=account_binding_id,
+            singleHostLiveAcknowledged=False,
+            liveSafetyScope="single_windows_user_file_common_only",
+        )
+
+        parsed, reason = self.bridge._read_mt4_trade_gateway_ea_status(
+            self.candidate
+        )
+
+        self.assertEqual(reason, "ready")
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed["fixedLot"], 0.05)
+        self.assertEqual(parsed["_wirePlatform"], "mt5")
+        self.assertEqual(parsed["_wireAccountBindingId"], account_binding_id)
+        self.assertFalse(parsed["singleHostLiveAcknowledged"])
+        self.assertEqual(
+            parsed["liveSafetyScope"],
+            "single_windows_user_file_common_only",
+        )
+
+        for invalid_overrides, expected_reason in (
+            ({
+                "terminalPlatform": "mt4",
+                "accountBindingId": account_binding_id,
+                "singleHostLiveAcknowledged": False,
+                "liveSafetyScope": "single_windows_user_file_common_only",
+            }, "gateway_status_schema_invalid"),
+            ({
+                "terminalPlatform": "mt5",
+                "accountBindingId": "not-a-digest",
+                "singleHostLiveAcknowledged": False,
+                "liveSafetyScope": "single_windows_user_file_common_only",
+            }, "gateway_status_schema_invalid"),
+            ({
+                "terminalPlatform": "mt5",
+                "accountBindingId": account_binding_id,
+                "singleHostLiveAcknowledged": "yes",
+                "liveSafetyScope": "single_windows_user_file_common_only",
+            }, "gateway_status_schema_invalid"),
+            ({
+                "terminalPlatform": "mt5",
+                "accountBindingId": account_binding_id,
+                "singleHostLiveAcknowledged": False,
+                "liveSafetyScope": "distributed",
+            }, "gateway_status_live_safety_scope_invalid"),
+        ):
+            with self.subTest(invalid_overrides=invalid_overrides):
+                self.write_ea_status(**invalid_overrides)
+                invalid, invalid_reason = (
+                    self.bridge._read_mt4_trade_gateway_ea_status(self.candidate)
+                )
+                self.assertIsNone(invalid)
+                self.assertEqual(invalid_reason, expected_reason)
+
+        self.candidate["platform"] = "mt4"
+        self.write_ea_status(
+            terminalPlatform="mt5",
+            accountBindingId=account_binding_id,
+        )
+        wrong_direction, wrong_direction_reason = (
+            self.bridge._read_mt4_trade_gateway_ea_status(self.candidate)
+        )
+        self.assertIsNone(wrong_direction)
+        self.assertEqual(
+            wrong_direction_reason,
+            "gateway_status_schema_invalid",
+        )
+
+    def test_gateway_status_rejects_mt5_status_without_single_host_live_fields(self) -> None:
+        self.candidate["platform"] = "mt5"
+        payload = self.write_ea_status(
+            terminalPlatform="mt5",
+            accountBindingId="b" * 64,
+            singleHostLiveAcknowledged=False,
+            liveSafetyScope="single_windows_user_file_common_only",
+        )
+        payload.pop("singleHostLiveAcknowledged")
+        payload.pop("liveSafetyScope")
+        self.status_path().write_text(json.dumps(payload), encoding="ascii")
+
+        parsed, reason = self.bridge._read_mt4_trade_gateway_ea_status(
+            self.candidate
+        )
+
+        self.assertIsNone(parsed)
+        self.assertEqual(reason, "gateway_status_schema_invalid")
 
     def test_gateway_status_fails_closed_if_selection_changes_during_ea_status_read(self) -> None:
         self.write_ea_status()
@@ -560,6 +767,134 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             "CLOSED_BAR_IDENTITY_MISMATCH",
         )
         self.assertIsNone(projected["code"])
+
+    def test_ack_event_projection_exposes_sizing_as_non_authoritative_audit_only(self) -> None:
+        evidence = {
+            "resolvedLot": 0.0123,
+            "positionSizingMode": "RISK_PERCENT",
+            "riskPercent": 1.0,
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 7.0,
+            "riskCapitalAmount": 1000.0,
+            "estimatedRiskMoney": 9.95,
+            "sizingEvidenceSource": "ea_ack_read_only",
+            "sizingEvidenceAuthoritative": False,
+        }
+
+        projected = self.bridge._mt4_trade_gateway_ack_event_read_model({
+            "ok": True,
+            "kind": "mt4_trade_ack_ingested",
+            "commandId": "cmd-safe-sizing-audit",
+            "status": "ack_EXECUTED",
+            "ack": {"reasonCode": "ORDER_VERIFIED_OPEN", **evidence},
+        })
+
+        for field, expected in evidence.items():
+            self.assertEqual(projected[field], expected)
+        self.assertNotIn("fixedLot", projected)
+
+    def test_command_summary_keeps_legacy_ack_compatible_without_inventing_sizing(self) -> None:
+        summary = self.bridge._mt4_trade_gateway_command_summary({
+            "command": {
+                "commandId": "cmd-legacy-summary",
+                "missionId": "mission-legacy-summary",
+                "snapshotId": "a" * 64,
+                "councilDecisionId": "decision-legacy-summary",
+                "action": "BUY",
+                "symbol": "XAUUSD",
+                "timeframe": "M5",
+                "stopLoss": 2300.0,
+                "takeProfit": 2350.0,
+            },
+            "status": "ack_EXECUTED",
+            "outstanding": False,
+            "ack": {
+                "status": "EXECUTED",
+                "reasonCode": "ORDER_VERIFIED_OPEN",
+                "mode": "live",
+                "observedAt": 1_800_000_000,
+                "ticket": 42,
+                "statePersisted": True,
+            },
+            "eaSizingStatus": "not_reported",
+        })
+
+        self.assertIsNotNone(summary)
+        self.assertIsNone(summary["ack"]["resolvedLot"])
+        self.assertIsNone(summary["ack"]["sizingEvidenceSource"])
+        self.assertIs(summary["ack"]["sizingEvidenceAuthoritative"], False)
+        self.assertNotIn("fixedLot", summary["ack"])
+
+    def test_order_history_preserves_ea_sizing_evidence_as_audit_only(self) -> None:
+        command_id = "cmd-history-sizing-audit"
+        evidence = {
+            "resolvedLot": 0.0123,
+            "positionSizingMode": "RISK_PERCENT",
+            "riskPercent": 1.0,
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 7.0,
+            "riskCapitalAmount": 1000.0,
+            "estimatedRiskMoney": 9.95,
+            "sizingEvidenceSource": "ea_ack_read_only",
+            "sizingEvidenceAuthoritative": False,
+        }
+        record = {
+            "command": {
+                "commandId": command_id,
+                "channelId": self.candidate["candidateId"],
+                "missionId": "mission-history-sizing",
+                "snapshotId": "a" * 64,
+                "councilDecisionId": "decision-history-sizing",
+                "action": "BUY",
+                "symbol": "XAUUSD",
+                "timeframe": "M5",
+                "stopLoss": 2300.0,
+                "takeProfit": 2350.0,
+            },
+            "status": "ack_EXECUTED",
+            "outstanding": False,
+            "ack": {
+                "status": "EXECUTED",
+                "reasonCode": "ORDER_VERIFIED_OPEN",
+                "mode": "live",
+                "observedAt": 1_800_000_000,
+                "ticket": 42,
+                "filledPrice": 2325.0,
+                "filledSlippagePoints": 0.0,
+                "actualStopLoss": 2300.0,
+                "actualTakeProfit": 2350.0,
+                "actualMagicNumber": 4186001,
+                "actualComment": f"HQ:{command_id}",
+                "verificationStatus": "VERIFIED_OPEN",
+                "executionState": "OPEN",
+                "closedAt": None,
+                "closedPnl": None,
+                "errorCode": 0,
+                "statePersisted": True,
+                **evidence,
+            },
+            "eaSizingStatus": "reported_read_only",
+            "createdAt": "2027-01-15T00:00:00Z",
+            "updatedAt": "2027-01-15T00:00:01Z",
+        }
+        fake_gateway = mock.Mock()
+        fake_gateway.list_commands_page = None
+        fake_gateway.list_commands.return_value = [record]
+        fake_gateway.read_outcome.return_value = None
+
+        history = self.bridge._mt4_trade_gateway_order_history(
+            fake_gateway,
+            selected_candidate_id=self.candidate["candidateId"],
+        )
+
+        self.assertTrue(history["available"])
+        self.assertEqual(history["totalExecuted"], 1)
+        self.assertEqual(len(history["items"]), 1)
+        item = history["items"][0]
+        self.assertEqual(item["lot"], evidence["resolvedLot"])
+        for field, expected in evidence.items():
+            self.assertEqual(item[field], expected)
+        self.assertNotIn("fixedLot", item)
 
     def test_gateway_status_exposes_sanitized_on_init_error_without_replacing_status(self) -> None:
         self.write_ea_init_status()
@@ -781,6 +1116,68 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
                 self.assertIn(expected, message)
                 self.assertIn("EA ยังคงติดกราฟโดยไม่ส่งคำสั่งเทรด", message)
 
+    def test_mt5_live_init_diagnostics_have_actionable_thai_labels(self) -> None:
+        cases = (
+            (
+                "account_mode",
+                "LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT",
+                "โหมด Live ต้องใช้บัญชีจริง",
+            ),
+            (
+                "account_mode",
+                "MT5_HEDGING_ACCOUNT_REQUIRED",
+                "MT5 ต้องใช้บัญชีแบบ Hedging",
+            ),
+            (
+                "live_account_owner_lock",
+                "LIVE_ACCOUNT_OWNER_LOCK_UNAVAILABLE",
+                "ถือสิทธิ์บัญชีนี้อยู่แล้ว",
+            ),
+            (
+                "account_execution_lock",
+                "ACCOUNT_EXECUTION_LOCK_UNAVAILABLE",
+                "ล็อกสิทธิ์ส่งคำสั่ง",
+            ),
+        )
+        for stage, reason_code, expected in cases:
+            with self.subTest(reason_code=reason_code):
+                message = self.bridge._mt4_trade_gateway_init_status_message_th({
+                    "available": True,
+                    "severity": "error",
+                    "stage": stage,
+                    "reasonCode": reason_code,
+                    "warningCode": "",
+                    "stale": False,
+                    "supersededByLiveStatus": False,
+                })
+                self.assertIn("EA เริ่มทำงานไม่สำเร็จ", message)
+                self.assertIn(expected, message)
+
+    def test_money_management_init_diagnostics_cover_mt4_and_mt5_reason_names(self) -> None:
+        cases = (
+            ("BROKER_VOLUME_METADATA_INVALID", "Min/Max/Step Lot"),
+            ("BROKER_VOLUME_LIMITS_UNAVAILABLE", "Min/Max/Step Lot"),
+            ("FIXED_LOT_OUTSIDE_BROKER_RANGE", "Fixed Lot"),
+            ("FIXED_LOT_OUTSIDE_BROKER_LIMITS", "Fixed Lot"),
+            ("RISK_CAPITAL_NOT_AVAILABLE", "Balance/Equity"),
+            ("RISK_CAPITAL_UNAVAILABLE", "Balance/Equity"),
+            ("BROKER_RISK_METADATA_INVALID", "Tick Size/Tick Value"),
+            ("BROKER_RISK_METADATA_UNAVAILABLE", "Tick Size/Tick Value"),
+        )
+        for reason_code, expected in cases:
+            with self.subTest(reason_code=reason_code):
+                message = self.bridge._mt4_trade_gateway_init_status_message_th({
+                    "available": True,
+                    "severity": "error",
+                    "stage": "money_management",
+                    "reasonCode": reason_code,
+                    "warningCode": "",
+                    "stale": False,
+                    "supersededByLiveStatus": False,
+                })
+                self.assertIn("EA เริ่มทำงานไม่สำเร็จ", message)
+                self.assertIn(expected, message)
+
     def test_gateway_status_exposes_v5_portfolio_policy_and_execution_state(self) -> None:
         self.write_ea_status(
             eaVersion="2.12",
@@ -900,6 +1297,27 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.assertEqual(status["status"], "awaiting_ea")
         self.assertEqual(status["reasonCode"], "gateway_status_stale")
 
+    def test_switch_guard_can_read_managed_positions_from_valid_stale_status(self) -> None:
+        self.write_ea_status(
+            observedAt=int(time.time()) - 60,
+            currentManagedPositions=2,
+            currentManagedLots=0.06,
+        )
+
+        normal_status, normal_reason = self.bridge._read_mt4_trade_gateway_ea_status(
+            self.candidate,
+        )
+        guard_status, guard_reason = self.bridge._read_mt4_trade_gateway_ea_status(
+            self.candidate,
+            include_stale=True,
+        )
+
+        self.assertIsNone(normal_status)
+        self.assertEqual(normal_reason, "gateway_status_stale")
+        self.assertEqual(guard_reason, "gateway_status_stale")
+        self.assertEqual(guard_status["currentManagedPositions"], 2)
+        self.assertEqual(guard_status["currentManagedLots"], 0.06)
+
     def test_live_status_is_ready_only_when_backend_and_ea_signing_keys_match(self) -> None:
         self.write_ea_status(
             mode="live",
@@ -923,6 +1341,84 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             str(status["backend"]["activeSigningKeyId"]),
             r"^hk-[0-9a-f]{64}$",
         )
+
+    def test_mt5_live_status_is_ready_with_explicit_single_host_acknowledgement(self) -> None:
+        self.candidate["platform"] = "mt5"
+        account_binding_id = "b" * 64
+        self.write_ea_status(
+            mode="live",
+            demoAccount=False,
+            accountMode="live",
+            liveArmed=True,
+            autoTradingAllowed=True,
+            tradeAllowed=True,
+            terminalPlatform="mt5",
+            accountBindingId=account_binding_id,
+            singleHostLiveAcknowledged=True,
+            liveSafetyScope="single_windows_user_file_common_only",
+        )
+        with self.selected_candidate(), mock.patch.object(
+            self.bridge,
+            "_validated_mt5_wire_binding",
+            return_value=(account_binding_id, "ready"),
+        ):
+            status = self.bridge.mt4_trade_gateway_status_read_model()
+
+        self.assertTrue(status["connected"])
+        self.assertEqual(status["status"], "live_ready")
+        self.assertEqual(status["reasonCode"], "ready")
+        self.assertTrue(status["executionGuardReady"])
+        self.assertTrue(status["liveOrderExecutionAvailable"])
+        self.assertTrue(status["singleHostLiveAcknowledged"])
+        self.assertEqual(
+            status["liveSafetyScope"],
+            "single_windows_user_file_common_only",
+        )
+        self.assertEqual(
+            status["concurrencyBoundary"],
+            "same_windows_user_file_common",
+        )
+        self.assertFalse(status["crossVpsDistributedLock"])
+
+    def test_mt5_live_status_blocks_until_single_host_acknowledgement(self) -> None:
+        self.candidate["platform"] = "mt5"
+        account_binding_id = "b" * 64
+        self.write_ea_status(
+            mode="live",
+            demoAccount=False,
+            accountMode="live",
+            liveArmed=True,
+            autoTradingAllowed=True,
+            tradeAllowed=True,
+            executionGuardReady=False,
+            executionGuardReason="SINGLE_HOST_LIVE_ACK_REQUIRED",
+            terminalPlatform="mt5",
+            accountBindingId=account_binding_id,
+            singleHostLiveAcknowledged=False,
+            liveSafetyScope="single_windows_user_file_common_only",
+        )
+        with self.selected_candidate(), mock.patch.object(
+            self.bridge,
+            "_validated_mt5_wire_binding",
+            return_value=(account_binding_id, "ready"),
+        ):
+            status = self.bridge.mt4_trade_gateway_status_read_model()
+
+        self.assertTrue(status["connected"])
+        self.assertEqual(status["status"], "execution_guard_blocked")
+        self.assertEqual(
+            status["executionGuardReason"],
+            "SINGLE_HOST_LIVE_ACK_REQUIRED",
+        )
+        self.assertEqual(status["reasonCode"], "single_host_live_ack_required")
+        self.assertFalse(status["executionGuardReady"])
+        self.assertFalse(status["liveOrderExecutionAvailable"])
+        self.assertFalse(status["singleHostLiveAcknowledged"])
+        self.assertEqual(
+            status["liveSafetyScope"],
+            "single_windows_user_file_common_only",
+        )
+        self.assertFalse(status["crossVpsDistributedLock"])
 
     def test_live_status_blocks_unverified_unpinned_or_mismatched_ea_key(self) -> None:
         provisioned_key_id = self.signing_key_id()
@@ -1072,7 +1568,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             self.bridge.MT4_TRADE_GATEWAY_STATUS_FIELDS
             - self.bridge.MT4_TRADE_GATEWAY_V4_STATUS_FIELDS
         ):
-            payload.pop(field)
+            payload.pop(field, None)
         self.status_path().write_text(json.dumps(payload), encoding="ascii")
         with self.selected_candidate():
             status = self.bridge.mt4_trade_gateway_status_read_model()
@@ -1097,7 +1593,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             self.bridge.MT4_TRADE_GATEWAY_STATUS_FIELDS
             - self.bridge.MT4_TRADE_GATEWAY_V4_STATUS_FIELDS
         ):
-            payload.pop(field)
+            payload.pop(field, None)
         payload.pop("demoAccount")
         payload.pop("accountMode")
         self.status_path().write_text(json.dumps(payload), encoding="ascii")
@@ -1715,10 +2211,13 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         }
         with self.selected_candidate(), mock.patch.object(
             self.bridge,
-            "_metatrader_selection_token",
+            "_selected_metatrader_candidate_context",
             return_value={
-                "candidateId": self.candidate["candidateId"],
-                "selectionRevision": 2,
+                "record": dict(self.candidate),
+                "token": {
+                    "candidateId": self.candidate["candidateId"],
+                    "selectionRevision": 2,
+                },
             },
         ), mock.patch.object(
             self.bridge,
@@ -1829,7 +2328,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertNotRegex(source, r"<input[^>]+(?:fixedLot|liveArmed|gatewayMode)")
         self.assertNotRegex(source, r"fetch\([^)]*(?:fixedLot|liveArmed|gatewayMode)")
-        self.assertIn("Fixed Lot ตั้งค่าที่ EA", source)
+        self.assertIn("Fixed Lot หรือ Risk Percent", source)
         self.assertIn('awaiting_ea: "รอเชื่อม EA"', source)
         self.assertIn('waiting_snapshot: "รอข้อมูลกราฟรอบใหม่"', source)
         self.assertIn("gatewayExecutionGuardReady", source)

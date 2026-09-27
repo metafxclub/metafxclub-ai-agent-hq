@@ -1,6 +1,6 @@
-PackageVersion: 2.18
+PackageVersion: 2.19
 Source: MetafxHQTradeGateway.mq4
-SourceSHA256: E053CD85E0F252E8DCC42C334D17EB9A7F0C26DE4C42A38ABB4B6D45C9C204DA
+SourceSHA256: 5267C06FB193A23C9CE4CEF2E8C1D02CBB4599F1331DFE31BEBD463C9B277D62
 MetaEditorVisible: true
 MetaEditorVersion: 5.0.0.2418
 CompileMode: VISIBLE_FRONT_OFFICE_F7
@@ -8,19 +8,19 @@ CompileAttempted: true
 CompileResult: PASS
 CompileErrors: 0
 CompileWarnings: 0
-CompileElapsedMilliseconds: 126
-CompiledAtUTC: 2026-08-31T09:54:50Z
-ReleaseCompileMode: VISIBLE_METAEDITOR_EXACT_SOURCE
+CompileElapsedMilliseconds: 114
+CompiledAtUTC: 2026-09-27T08:17:35Z
+ReleaseCompileMode: METAEDITOR_COMMAND_LINE_EXACT_SOURCE
 ReleaseCompileResult: PASS
 ReleaseCompileErrors: 0
 ReleaseCompileWarnings: 0
-ReleaseCompileElapsedMilliseconds: 126
-ReleaseCompiledAtUTC: 2026-08-31T09:54:50Z
+ReleaseCompileElapsedMilliseconds: 120
+ReleaseCompiledAtUTC: 2026-09-27T08:10:24Z
 BinaryIncluded: true
-BinaryBytes: 381010
-BinarySHA256: 8961E60D128D8755DE9999AFFF00FD03FA91359AF48E33ADED41516AE936A181
+BinaryBytes: 452008
+BinarySHA256: AB880514CA8A435325D8322803A7551DB38AB2DD1FA6EE6764BB1D289F3C2DCC
 CompileProof: COMPILE_PROOF.png
-CompileProofSHA256: A224542552ABA5A68C2176002B42DDF27E3436B8CFAD98FFF03792CA8F836C3B
+CompileProofSHA256: 30AA0F3EA1DEE77C4CCF073D794203286AF90271AFBD7E799043437E9DBE8969
 StaticTestCommand: python -m unittest tests.test_mt4_unified_ea
-StaticTestResult: PASS (53 tests)
-Safety: Source was compiled from the isolated Experts/MetafxHQReleaseBuild/v2.18-final-account-lock folder. The existing v2.17 EA and EX4 were not overwritten. MT4 remained open. No chart input, account, gateway mode, LiveArmed value, order, or trade command was changed.
+StaticTestResult: PASS (64 tests)
+Safety: The visible proof compiled a byte-identical v2.19 source copy in MetaEditor. The release EX4 was rebuilt from the artifact source with the same MetaEditor compiler by command line. No terminal, chart input, account, gateway mode, LiveArmed value, order, or trade command was changed.

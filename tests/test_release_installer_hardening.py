@@ -93,7 +93,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
 
         artifact_manifest = json.loads((ARTIFACT / "MANIFEST.json").read_text(encoding="utf-8"))
         self.assertEqual("metafx-hq-mt4-ea-artifact-v1", artifact_manifest["schemaVersion"])
-        self.assertEqual("2.18", artifact_manifest["packageVersion"])
+        self.assertEqual("2.19", artifact_manifest["packageVersion"])
         self.assertEqual("ready_visible_metaeditor_compiled", artifact_manifest["candidateStatus"])
         self.assertEqual(source_digest, artifact_manifest["sourceSha256"])
         self.assertEqual(manifest["MetafxHQTradeGateway.ex4"], artifact_manifest["binarySha256"])
@@ -110,7 +110,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertEqual("COMPILE_PROOF.png", compile_evidence["screenshot"])
         self.assertEqual(manifest["COMPILE_PROOF.png"], compile_evidence["screenshotSha256"])
         release_compile = compile_evidence["releaseCompile"]
-        self.assertEqual("visible_metaeditor_exact_source", release_compile["mode"])
+        self.assertEqual("metaeditor_command_line_exact_source", release_compile["mode"])
         self.assertEqual(0, release_compile["errors"])
         self.assertEqual(0, release_compile["warnings"])
         self.assertEqual(manifest["MetafxHQTradeGateway.mq4"], release_compile["sourceSha256"])
@@ -118,7 +118,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertEqual(b"\x89PNG\r\n\x1a\n", (ARTIFACT / "COMPILE_PROOF.png").read_bytes()[:8])
 
         build_log = (ARTIFACT / "BUILD_LOG.txt").read_text(encoding="utf-8")
-        self.assertIn("PackageVersion: 2.18", build_log)
+        self.assertIn("PackageVersion: 2.19", build_log)
         self.assertIn("CompileResult: PASS", build_log)
         self.assertIn("CompileErrors: 0", build_log)
         self.assertIn("CompileWarnings: 0", build_log)
@@ -152,7 +152,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIsNone(re.search(r"(?m)^[^#\r\n]*\bGet-FileHash\b", installer))
         self.assertIn("$artifactSourceHash = Get-Sha256Hex -LiteralPath $artifactSource", installer)
         self.assertIn("หลักฐาน Compile ของ EA ไม่ตรงกับ Source/Binary", installer)
-        self.assertIn("MANIFEST/Compile proof ของ EA v2.18", installer)
+        self.assertIn("MANIFEST/Compile proof ของ EA v2.19", installer)
         self.assertIn('install_root = "%LOCALAPPDATA%\\Metafxclub\\AI-Agent-HQ"', installer)
         self.assertIn("install_scope = \"current_windows_user\"", installer)
 
@@ -320,7 +320,24 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         requirements = (ROOT / "requirements-runner.txt").read_text(encoding="utf-8")
         self.assertGreaterEqual(requirements.count("--hash=sha256:"), 11)
         requirement_blocks = [block for block in re.split(r"\n(?=[A-Za-z0-9_.-]+==)", requirements) if "==" in block]
-        self.assertEqual(8, len(requirement_blocks))
+        requirement_names = {
+            block.split("==", 1)[0].strip().lower()
+            for block in requirement_blocks
+        }
+        self.assertEqual(
+            {
+                "annotated-types",
+                "openai-codex",
+                "openai-codex-cli-bin",
+                "packaging",
+                "pydantic",
+                "pydantic-core",
+                "typing-inspection",
+                "typing-extensions",
+                "tzdata",
+            },
+            requirement_names,
+        )
         self.assertTrue(all("--hash=sha256:" in block for block in requirement_blocks))
         self.assertIn("[int]$details.minor -gt 14", installer)
         for selector in ("-3.14", "-3.13", "-3.12", "-3.11", "-3.10"):
@@ -551,6 +568,7 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
 
     def test_release_workflow_never_skips_current_archive_smoke(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "publish-release.yml").read_text(encoding="utf-8")
+        installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
         regression_runner = (ROOT / "scripts" / "run-regression-suite.ps1").read_text(
             encoding="utf-8"
         )
@@ -607,6 +625,10 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             2,
         )
         self.assertIn("legacy-listener upgrade smoke failed", workflow)
+        self.assertIn("/api/agent-runtime/status", workflow)
+        self.assertIn("Release Runtime Full Agent status contract failed", workflow)
+        self.assertIn("automaticExternalEffects -ne $false", workflow)
+        self.assertIn("Verified Git Runtime is missing a release-critical file", workflow)
         self.assertIn('runner\\.venv\\Scripts\\python.exe', workflow)
         self.assertIn("print(sys._base_executable)", workflow)
         self.assertIn("$fixturePythonProbe.Count -ne 1", workflow)
@@ -657,6 +679,21 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             ),
             2,
         )
+        release_critical_files = (
+            r"backend\local-runner\full_agent_artifacts.py",
+            r"backend\local-runner\full_agent_runtime.py",
+            r"contracts\agents\full-agent-runtime-contract.json",
+            r"runner\codex_app_server_gateway.py",
+            r"scripts\verify-full-agent-workspace-sentinel.py",
+            r"integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4",
+            r"integrations\mt5-trade-gateway\MetafxHQTradeGateway.mq5",
+            r"tests\test_full_agent_runtime.py",
+            r"tests\test_mt5_trade_gateway_static.py",
+        )
+        for release_critical_file in release_critical_files:
+            with self.subTest(release_critical_file=release_critical_file):
+                self.assertIn(f'"{release_critical_file}"', installer)
+                self.assertIn(f'"{release_critical_file}"', workflow)
         self.assertIn("gh release upload $tag $archive $checksum", workflow)
         self.assertIn("--clobber", workflow)
         self.assertIn("gh api \"repos/$env:GITHUB_REPOSITORY/releases/tags/$tag\"", workflow)
@@ -730,6 +767,50 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn('[string]$verifiedAuth.status -cne "authorization_required"', workflow)
         self.assertIn('[string]$verifiedAuth.clientSource -cne "central_release"', workflow)
         self.assertIn("Verified Git Runtime central OAuth clean-profile contract failed", workflow)
+
+        # The release gate must also reproduce an upgrade from the exact
+        # current-user DPAPI state that escaped the clean-profile smoke test.
+        for migration_fragment in (
+            "google_oauth_store.save_client_configuration(",
+            "google_oauth_store.save_refresh_token(",
+            "google-oauth-client.dpapi",
+            "google-sheets-refresh.dpapi",
+            "-PackageSmoke -PackageUpgradeSmoke -ResetGoogleOAuthToCentralRelease",
+            "post_install.google_oauth_client.status",
+            "post_install.google_oauth_client.source",
+            '"ready_central"',
+            '"central_release"',
+            "/api/props/mission_strategy_table/research-sheet/auth",
+            "verifiedRuntimeAuth.status",
+            "verifiedRuntimeAuth.clientSource",
+            '"authorization_required"',
+            "Classroom OAuth migration left a legacy DPAPI artifact behind",
+        ):
+            with self.subTest(migration_fragment=migration_fragment):
+                self.assertIn(migration_fragment, workflow)
+
+        migration_seed = workflow.index("google_oauth_store.save_client_configuration(")
+        migration_install = workflow.index(
+            "-PackageSmoke -PackageUpgradeSmoke -ResetGoogleOAuthToCentralRelease",
+            migration_seed,
+        )
+        migration_absence_check = workflow.index(
+            "Classroom OAuth migration left a legacy DPAPI artifact behind",
+            migration_install,
+        )
+        migration_install_result = workflow.index(
+            "post_install.google_oauth_client.status",
+            migration_absence_check,
+        )
+        migration_live_api = workflow.index(
+            "/api/props/mission_strategy_table/research-sheet/auth",
+            migration_install_result,
+        )
+        self.assertLess(migration_seed, migration_install)
+        self.assertLess(migration_install, migration_absence_check)
+        self.assertLess(migration_absence_check, migration_install_result)
+        self.assertLess(migration_install_result, migration_live_api)
+
         self.assertIn("https://github.com/metafxclub/metafxclub-ai-agent-hq.git", workflow)
         self.assertIn("git -C $verifiedClone fetch --depth 1 origin $env:GITHUB_SHA", workflow)
         self.assertIn("git -C $verifiedClone checkout --detach $env:GITHUB_SHA", workflow)
@@ -982,6 +1063,16 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
 
     def test_central_default_is_noninteractive_and_advanced_inputs_validate_before_mutation(self) -> None:
         installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("[switch]$ResetGoogleOAuthToCentralRelease", installer)
+        self.assertIn(
+            "$ResetGoogleOAuthToCentralRelease -and\n"
+            "    -not [string]::IsNullOrWhiteSpace($GoogleClientJsonPath)",
+            installer,
+        )
+        self.assertIn(
+            "$ResetGoogleOAuthToCentralRelease -and ($SkipGoogleSetup -or $SkipLaunch)",
+            installer,
+        )
         validator = installer[
             installer.index("function Assert-GoogleOAuthOneRunInputs") :
             installer.index("function Test-PythonCommand")
@@ -1019,6 +1110,29 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             normal_main.index("$stagingRoot = New-StagedApplication"),
         )
 
+        package_upgrade_gate = installer[
+            installer.index("$packageGoogleModeValid = (") :
+            installer.index("if ($SkipLaunch", installer.index("$packageGoogleModeValid = ("))
+        ]
+        self.assertIn(
+            "($SkipGoogleSetup -and -not $ResetGoogleOAuthToCentralRelease)",
+            package_upgrade_gate,
+        )
+        self.assertIn(
+            "(-not $SkipGoogleSetup -and $ResetGoogleOAuthToCentralRelease)",
+            package_upgrade_gate,
+        )
+        self.assertEqual(package_upgrade_gate.count("-or"), 1)
+
+        reset_function = installer[
+            installer.index("function Reset-GoogleOAuthCurrentUserToCentralRelease") :
+            installer.index("function Invoke-GoogleOAuthFirstRunSetup")
+        ]
+        self.assertIn('"--migrate-to-central-release"', reset_function)
+        self.assertIn('[string]$removal.store -cne "central_release"', reset_function)
+        self.assertIn('[string]$verified.store -cne "central_release"', reset_function)
+        self.assertIn("google-oauth-client.dpapi", reset_function)
+
         first_run = installer[
             installer.index("function Invoke-GoogleOAuthFirstRunSetup") :
             installer.index("function Invoke-BridgeLifecycleProcess")
@@ -1026,7 +1140,12 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("Get-GoogleOAuthDeploymentStatus -CandidateRoot", first_run)
         self.assertIn('"central_release"', first_run)
         self.assertIn('$script:googleSetupStatus = "ready_central"', first_run)
+        self.assertIn('$script:googleSetupSource = "central_release"', first_run)
         self.assertIn('$script:googleSetupStatus = "ready_existing_override"', first_run)
+        self.assertLess(
+            first_run.index("if ($ResetGoogleOAuthToCentralRelease"),
+            first_run.index("if ($alreadyConfigured -and -not $explicitClientSetup)"),
+        )
         self.assertIn("if (-not $explicitClientSetup)", first_run)
         self.assertNotIn("Read-Host", first_run)
         self.assertIn('$setupArguments += "-NonInteractive"', first_run)

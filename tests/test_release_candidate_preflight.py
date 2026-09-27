@@ -47,6 +47,8 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
             "2-SETUP-GOOGLE-HQ.bat",
             "docs/prompts/install-github-google-auto-th.md",
             "backend/local-runner/bridge_server.py",
+            "backend/local-runner/full_agent_artifacts.py",
+            "backend/local-runner/full_agent_runtime.py",
             "backend/local-runner/ea_factory_blueprint_coverage.py",
             "backend/local-runner/ea_factory_visible_terminal.py",
             "backend/local-runner/ea_factory_visible_terminal.ps1",
@@ -57,17 +59,78 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
             "backend/local-runner/google_sheet_hub.py",
             "frontend/index.html",
             "frontend/src/app/main.js",
+            "contracts/agents/full-agent-runtime-contract.json",
+            "integrations/mt4-trade-gateway/MetafxHQTradeGateway.mq4",
+            "integrations/mt4-trade-gateway/README_TH.md",
+            "integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5",
+            "integrations/mt5-trade-gateway/README_TH.md",
+            "runner/codex_app_server_gateway.py",
             "runner/codex_cli_runner.py",
+            "scripts/verify-full-agent-workspace-sentinel.py",
             "scripts/start-local-bridge.ps1",
             "scripts/setup-google-oauth.ps1",
             "docs/research-sheet-hub-setup-th.md",
             "contracts/research/ea-implementation-blueprint-v2.schema.json",
             "contracts/workflows/ea-factory-contract.json",
+            "tests/test_codex_app_server_gateway.py",
+            "tests/test_full_agent_artifacts.py",
+            "tests/test_full_agent_bridge_api.py",
+            "tests/test_full_agent_contract.py",
+            "tests/test_full_agent_frontend.py",
+            "tests/test_full_agent_http_api.py",
+            "tests/test_full_agent_runtime.py",
+            "tests/test_full_agent_workspace_sentinel.py",
+            "tests/test_metatrader_gateway_source_delivery.py",
+            "tests/test_metatrader_money_management_contract.py",
+            "tests/test_mt5_single_host_live_contracts.py",
+            "tests/test_mt5_trade_gateway_static.py",
         )
         if not _is_source_checkout():
             required += (CENTRAL_NATIVE_CLIENT_RELATIVE_PATH.as_posix(),)
         missing = [path for path in required if not (PROJECT_ROOT / path).is_file()]
         self.assertEqual(missing, [])
+
+    def test_mt5_gateway_release_is_source_only(self) -> None:
+        gateway_root = PROJECT_ROOT / "integrations" / "mt5-trade-gateway"
+        binaries = sorted(
+            path.name
+            for path in gateway_root.rglob("*")
+            if path.is_file() and path.suffix.lower() == ".ex5"
+        )
+        self.assertEqual(binaries, [])
+
+    def test_local_visual_qa_captures_are_root_ignored_and_not_distributed(self) -> None:
+        captures = (
+            "tmp-expert-popup.png",
+            "tmp-mt4-current.png",
+            "tmp-mt4-current2.png",
+        )
+        ignored = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8-sig")
+        for capture in captures:
+            with self.subTest(capture=capture):
+                self.assertIn(f"/{capture}", ignored.splitlines())
+                if not _is_source_checkout():
+                    self.assertFalse((PROJECT_ROOT / capture).exists())
+                    continue
+                result = subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        f"safe.directory={PROJECT_ROOT.as_posix()}",
+                        "check-ignore",
+                        "--quiet",
+                        "--",
+                        capture,
+                    ],
+                    cwd=PROJECT_ROOT,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=20,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_offline_pip_bootstrap_is_the_exact_verified_universal_wheel(self) -> None:
         self.assertTrue(PIP_BOOTSTRAP_PATH.is_file())

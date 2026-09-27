@@ -20,13 +20,13 @@ Client กลางมี `client_id` และ `client_secret` ของ native
 
 > **ระหว่างรอ Google ตรวจสอบ:** ผู้ใช้ใหม่อาจเห็นหน้า `Google ยังไม่ได้ยืนยันแอปนี้` และ Project กลางอาจอยู่ภายใต้ OAuth unverified user cap ให้ทำตามคำแนะนำของอาจารย์และอนุญาตเฉพาะแอปชื่อ Metafxclub Agent HQ เท่านั้น เมื่อ Scope ได้รับอนุมัติแล้ว คำเตือนและเพดานนี้จะไม่ใช้กับ Scope ที่ได้รับอนุมัติ ดูรายละเอียดจาก [Google Auth Platform — Audience](https://support.google.com/cloud/answer/15549945)
 
-`2-SETUP-GOOGLE-HQ.bat` และ OAuth JSON เป็นโหมด **Advanced/Recovery custom override** เท่านั้น ใช้เมื่อเจ้าของ Project ต้องการ Client ของตนเองหรือผู้ดูแลสั่งให้กู้การตั้งค่า ไม่ใช่ขั้นตอนปกติของนักเรียน หากจำเป็นต้องใช้ ให้ใช้ JSON ของ Project ที่ตนควบคุมเองและห้ามวาง JSON หรือค่า Client แบบเต็มในหน้าเว็บ, Mission หรือ Chat
+`2-SETUP-GOOGLE-HQ.bat` และ OAuth JSON เป็นโหมด **Advanced/Recovery custom override** เท่านั้น ใช้เมื่อเจ้าของ Project ต้องการ Client ของตนเองหรือผู้ดูแลสั่งให้กู้การตั้งค่า ไม่ใช่ขั้นตอนปกติของนักเรียน หากจำเป็นต้องใช้ ให้ใช้ JSON ของ Project ที่ตนควบคุมเองและห้ามวาง JSON หรือค่า Client แบบเต็มในหน้าเว็บ, Mission หรือ Chat การติดตั้งทั่วไปที่ไม่ส่ง `-ResetGoogleOAuthToCentralRelease` จะรักษา custom override เดิมไว้; Prompt ห้องเรียนเป็นเส้นทางที่ส่ง Switch นี้เพื่อบังคับใช้ Client กลาง
 
 ## วิธีที่ง่ายที่สุด: Prompt เดียว ไม่ต้องกด BAT
 
 1. เปิด [Prompt ติดตั้งอัตโนมัติ](docs/prompts/install-github-google-auto-th.md)
 2. Repository, Git Tag, Version และ Client กลางถูกเตรียมไว้แล้ว ห้ามแก้ Client ID และไม่ต้องเติม Path ของ OAuth JSON
-3. วาง Prompt ทั้งชุดลงใน Codex แล้วรอให้ Codex ตรวจ/ติดตั้งเฉพาะ Git หรือ Python ที่ขาด, Clone Tag ที่กำหนด, ตรวจ Source, ดาวน์โหลด Release ZIP กับ `.sha256`, ตรวจ hash และ extract เฉพาะ Client กลางจาก Asset เข้า Source ชั่วคราว จากนั้นเรียก Installer โดยตรงรอบเดียว ตรวจ Client กลาง/Health/หน้าเว็บ เปิด Watchdog และเปิด Agent HQ ที่ `http://127.0.0.1:4186/`
+3. วาง Prompt ทั้งชุดลงใน Codex แล้วรอให้ Codex ตรวจ/ติดตั้งเฉพาะ Git หรือ Python ที่ขาด, Clone Tag ที่กำหนด, ตรวจ Source, ดาวน์โหลด Release ZIP กับ `.sha256`, ตรวจ hash และ extract เฉพาะ Client กลางจาก Asset เข้า Source ชั่วคราว จากนั้นเรียก Installer โดยตรงรอบเดียวในโหมดห้องเรียน หากมี OAuth custom override/refresh authorization เก่าค้างใน Windows User ระบบจะลบเฉพาะสองรายการนั้นและตรวจให้กลับมาใช้ `central_release` จึงอาจต้องกดเชื่อม Google ใหม่หนึ่งครั้ง แต่จะไม่ลบ Mission, Report, Sheet หรือไฟล์งาน แล้วจึงตรวจ Health/หน้าเว็บ เปิด Watchdog และเปิด Agent HQ ที่ `http://127.0.0.1:4186/`
 4. เมื่อหน้า HQ เปิด ให้กด **เชื่อมบัญชี Google ครั้งเดียว** แล้ว Login/กดอนุญาตในหน้าทางการของ Google
 
 Prompt เป็นคำยืนยันล่วงหน้าให้ Codex ใช้ `127.0.0.1:4186` และติดตั้งเฉพาะ Git/Python ที่ขาดแบบ current-user จึงไม่ต้องหยุดถามเลือก Port และไม่ต้องให้ผู้เรียนดาวน์โหลด ZIP หรือกด `1-INSTALL-HQ.bat`/`2-SETUP-GOOGLE-HQ.bat` เอง หาก WinGet/Bootstrap ไม่สำเร็จ, Git/Tag/Version ไม่ตรง, พอร์ต 4186 ถูกใช้อยู่ หรือ Client กลางใน Release, Deployment Preflight, Health หรือหน้าเว็บไม่ผ่าน Codex ต้องหยุดและบอกสาเหตุตามจริงพร้อมวิธีแก้หนึ่งขั้น
@@ -41,6 +41,26 @@ Codex ต้อง Clone ลงโฟลเดอร์ชั่วคราว�
 4. หากมี MT4 หรือ MT5 หลายตัว ระบบจะไม่เดาว่าตัวใดถูกต้อง ให้ปิดตัวอื่นจนเหลือตัวที่ต้องการหนึ่งตัวแล้วสแกนใหม่
 
 การสแกนและเลือกนี้ไม่เปิด Terminal ให้เอง ไม่อ่านเลขบัญชี/รหัสผ่าน และไม่เปิด Demo หรือ Live Trading หน้าสภา AI Trade, โรงงานสร้าง EA และห้องทดลองจะแสดงสถานะจาก Backend เดียวกันโดยไม่มีปุ่มเลือก Terminal ซ้ำภายในอุปกรณ์
+
+## ตั้ง Money Management ที่ EA (เหมือนกันทั้ง MT4 / MT5)
+
+1. ถ้าต้องการ Lot คงที่ เลือก `MoneyManagementMode=MONEY_MANAGEMENT_FIXED_LOT` แล้วตั้ง `FixedLot`
+2. ถ้าต้องการเสี่ยงเป็นเปอร์เซ็นต์ เลือก `MoneyManagementMode=MONEY_MANAGEMENT_RISK_PERCENT`, ตั้ง `RiskPercent` เช่น `1.0` และเลือก `RiskCapitalBase=RISK_CAPITAL_EQUITY` (แนะนำ) หรือ `RISK_CAPITAL_BALANCE`
+3. ตั้ง `EstimatedCommissionPerLot` เป็นค่าธรรมเนียมไป-กลับโดยประมาณต่อ 1 Lot ตามหน่วยเงินของบัญชี; ถ้าไม่ต้องการสำรองให้ใช้ `0`
+4. ตรวจที่ Dashboard ว่าแสดงโหมด, Risk Percent, Min/Max/Step Lot ตรงกับ EA ก่อนเริ่ม Demo
+
+บัญชี Standard, Cent และ Pro-Cent รองรับโดยอาศัยค่าที่ Terminal/Broker รายงาน ไม่ต้องคูณหรือหาร 100 เอง หาก Lot ที่คำนวณต่ำกว่า Min Lot ระบบจะหยุดและไม่ฝืนเปิด Min Lot ดังนั้น `0.0001` จะใช้ได้เฉพาะ Broker ที่รองรับจริงเท่านั้น เปอร์เซ็นต์เป็นความเสี่ยงที่วางแผนไว้ถึง SL ก่อนส่งคำสั่ง ผลจริงอาจต่างจาก Gap, Slippage, Commission, Swap หรือการ Fill ของ Broker จึงต้องทดลอง Demo ก่อน Live
+
+## ลำดับทดสอบ MT4 / MT5 ก่อนเปิด Live: Shadow -> Demo -> Live
+
+1. เริ่มที่ **Shadow** โดยคง `GatewayMode=GATEWAY_SHADOW` และ `LiveArmed=false` เพื่อตรวจ Snapshot, Channel, Signed Envelope, Risk Guard และ Kill Switch โดยไม่ส่ง Order
+2. เปลี่ยนเป็น **Demo** ด้วย `GatewayMode=GATEWAY_DEMO` บนบัญชี Demo เท่านั้น แล้วตรวจผลการส่งคำสั่งและการกู้สถานะหลัง Restart ให้ครบ
+3. เปิด **Live** เฉพาะเมื่อ Shadow และ Demo ผ่านแล้ว โดยตั้ง EA Inputs ด้วยตนเองเป็น `GatewayMode=GATEWAY_LIVE`, `LiveArmed=true` และ `TrustedSigningKeyId` ให้ตรงทุกตัวอักษรกับ Active Signing Key ID ที่ Local Runner แสดง
+4. สำหรับ MT5 ต้องตั้ง `SingleHostLiveAcknowledged=true` เพิ่มด้วย ค่านี้หมายความว่าผู้ใช้ยืนยันว่าจะใช้บัญชี Broker นี้กับ Windows user เดียว, HQ Local Runner เดียว และ EA ชุดนี้เพียงจุดเดียว
+
+> **ข้อจำกัดสำคัญของ MT5 Live:** ขอบเขตป้องกันปัจจุบันคือ `single_windows_user_file_common_only` และระบบรายงาน `crossVpsDistributedLock=false` จึงห้ามเปิดบัญชีเดียวกันพร้อมกันบน Windows user อื่น เครื่องอื่น หรือ VPS อื่น ระบบไม่ได้อ้างว่ามี Distributed Lock/Fencing Token ข้ามเครื่อง หากต้องใช้งานหลายเครื่องให้หยุด Live และขอผู้ดูแลออกแบบระบบล็อกส่วนกลางก่อน
+
+ชุดตรวจอัตโนมัติและ Compile proof ของ Release **ไม่ส่งออร์เดอร์จริงไปยังโบรกเกอร์** การผ่านชุดตรวจจึงไม่ใช่หลักฐานว่าบัญชีจริงเคยส่ง Order สำเร็จ ต้องทดสอบบน Demo ก่อนและผู้ใช้เป็นผู้ตัดสินใจเปิด Live ด้วยตนเองเท่านั้น
 
 ## วิธีติดตั้งเองเมื่อไม่ได้ใช้ Codex
 

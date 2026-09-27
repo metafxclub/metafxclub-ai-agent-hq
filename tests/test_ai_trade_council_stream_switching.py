@@ -805,7 +805,105 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
         self.assertEqual(model["items"][0]["candidateId"], "mtc-historical-channel")
         self.assertEqual(gateway.channels, [None])
 
-    def test_active_order_history_still_requires_selected_mt4_terminal(self) -> None:
+    def test_active_order_history_accepts_selected_mt5_terminal(self) -> None:
+        candidate_id = "mtc-" + ("5" * 28)
+        stream_key = self.bridge._ai_trade_council_stream_key(
+            candidate_id,
+            "EURUSD",
+            "H1",
+        )
+        scope = {
+            "mode": "active",
+            "authoritative": True,
+            "candidateId": candidate_id,
+            "channelId": candidate_id,
+            "streamKey": stream_key,
+            "symbol": "EURUSD",
+            "timeframe": "H1",
+        }
+        command_id = "cmd-" + ("5" * 24)
+        record = {
+            "command": {
+                "commandId": command_id,
+                "channelId": candidate_id,
+                "action": "BUY",
+                "symbol": "EURUSD",
+                "timeframe": "H1",
+            },
+            "status": "ack_EXECUTED",
+            "outstanding": False,
+            "createdAt": "2026-08-11T01:00:00Z",
+            "updatedAt": "2026-08-11T01:00:01Z",
+            "ack": {
+                "status": "EXECUTED",
+                "reasonCode": "ORDER_ACCEPTED",
+                "observedAt": 1_786_435_200,
+                "ticket": 5_000_000_001,
+                "fixedLot": 0.01,
+                "filledPrice": 1.15,
+                "actualStopLoss": 1.14,
+                "actualTakeProfit": 1.17,
+                "actualMagicNumber": 4_186_001,
+                "actualComment": f"HQ:{command_id}",
+                "verificationStatus": "VERIFIED_OPEN",
+                "statePersisted": True,
+                "mode": "shadow",
+            },
+        }
+
+        class FakeGateway:
+            def __init__(self) -> None:
+                self.channels: list[str | None] = []
+
+            def list_commands_page(
+                self,
+                *,
+                limit: int,
+                cursor: str | None,
+                channel_id: str | None,
+            ) -> dict:
+                self.channels.append(channel_id)
+                return {
+                    "records": [record],
+                    "total": 1,
+                    "hasMore": False,
+                    "nextCursor": None,
+                    "cursorFound": True,
+                    "channelId": channel_id,
+                }
+
+            def read_outcome(self, _command_id: str) -> None:
+                return None
+
+        gateway = FakeGateway()
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_selected_metatrader_candidate_record",
+                return_value={"candidateId": candidate_id, "platform": "mt5"},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_public_metatrader_candidate",
+                return_value={"candidateId": candidate_id, "platform": "mt5"},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_mt4_trade_gateway_instance",
+                return_value=gateway,
+            ),
+            mock.patch.object(self.bridge, "load_missions", return_value=[]),
+        ):
+            model = self.bridge.ai_trade_council_order_history_page_read_model(
+                scope=scope,
+            )
+
+        self.assertTrue(model["available"])
+        self.assertEqual(model["summary"]["total"], 1)
+        self.assertEqual(model["items"][0]["candidateId"], candidate_id)
+        self.assertEqual(gateway.channels, [candidate_id])
+
+    def test_active_order_history_requires_selected_metatrader_terminal(self) -> None:
         scope = {
             "mode": "active",
             "authoritative": True,
@@ -829,7 +927,7 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
             )
 
         self.assertFalse(model["available"])
-        self.assertEqual(model["reasonCode"], "selected_mt4_channel_missing")
+        self.assertEqual(model["reasonCode"], "selected_metatrader_channel_missing")
 
     def test_active_order_history_fails_closed_when_selection_changes_mid_read(self) -> None:
         scope = {
@@ -874,7 +972,7 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
 
         self.assertFalse(model["available"])
         self.assertEqual(model["items"], [])
-        self.assertEqual(model["reasonCode"], "selected_mt4_channel_changed")
+        self.assertEqual(model["reasonCode"], "selected_metatrader_channel_changed")
 
     def test_consensus_stream_identity_fails_closed_on_provenance_mismatch(self) -> None:
         snapshot_id = "a" * 64

@@ -1,4 +1,4 @@
-# Strategy Spec — MetafxHQ Unified MT4 Gateway v2.18
+# Strategy Spec — MetafxHQ Unified MT4 Gateway v2.19
 
 ## โปรไฟล์และขอบเขต
 

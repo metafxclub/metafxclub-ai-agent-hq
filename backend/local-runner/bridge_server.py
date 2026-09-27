@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import csv
 import hashlib
@@ -107,6 +108,21 @@ from ea_factory_visible_terminal import (  # noqa: E402 - visible MT4 front offi
 )
 import fx_news_direct  # noqa: E402 - isolated deterministic official-source service
 import google_sheet_hub  # noqa: E402 - backend-only authenticated Sheets adapter
+from full_agent_runtime import (  # noqa: E402 - persistent secret-free Agent threads
+    DEFAULT_MODEL_ALLOWLIST as FULL_AGENT_MODEL_ALLOWLIST,
+    MAX_CONTENT_CHARS as FULL_AGENT_MAX_CONTENT_CHARS,
+    FullAgentApprovalJournal,
+    FullAgentRuntime,
+    FullAgentRuntimeError,
+)
+from full_agent_artifacts import (  # noqa: E402 - path-opaque Agent media store
+    MAX_ATTACHMENTS_PER_TURN as FULL_AGENT_MAX_ATTACHMENTS_PER_TURN,
+    MAX_OUTPUT_BYTES as FULL_AGENT_MAX_OUTPUT_BYTES,
+    MAX_UPLOAD_BYTES as FULL_AGENT_MAX_UPLOAD_BYTES,
+    MAX_UPLOAD_REQUEST_BYTES as FULL_AGENT_MAX_UPLOAD_REQUEST_BYTES,
+    FullAgentArtifactError,
+    FullAgentArtifactStore,
+)
 from ohlc_import import (  # noqa: E402 - bounded local-only CSV/XLSX parser
     MAX_FILE_BYTES as MAX_OHLC_FILE_BYTES,
     MAX_ROWS as MAX_OHLC_ROWS,
@@ -122,7 +138,7 @@ from radar_image_adapter import (  # noqa: E402 - public HTTPS publisher-image e
     verify_radar_entry_artifact,
 )
 
-BRIDGE_RUNTIME_VERSION = "0.9.20"
+BRIDGE_RUNTIME_VERSION = "0.9.21"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_STARTED_MONOTONIC = time.monotonic()
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
@@ -141,6 +157,9 @@ BRIDGE_CONTROL_PATH = RUNTIME_DIR / "bridge-control.json"
 AUDIT_PATH = RUNTIME_DIR / "bridge-audit.jsonl"
 UI_SESSION_PATH = RUNTIME_DIR / "ui-session.json"
 AGENT_EVENTS_PATH = RUNTIME_DIR / "agent-events.jsonl"
+FULL_AGENT_RUNTIME_DIR = RUNTIME_DIR / "full-agent-runtime"
+FULL_AGENT_ARTIFACTS_DIR = RUNTIME_DIR / "full-agent-media"
+FULL_AGENT_GATEWAY_MODULE_PATH = PROJECT_ROOT / "runner" / "codex_app_server_gateway.py"
 MEMORY_DIR = PROJECT_ROOT / "data" / "memory"
 MEMORY_INDEX_PATH = MEMORY_DIR / "memory-index.json"
 MEETING_TRANSCRIPTS_PATH = MEMORY_DIR / "meetings" / "meeting-transcripts.jsonl"
@@ -244,6 +263,21 @@ METATRADER_CACHE_LOCK = threading.Lock()
 METATRADER_TARGETS_LOCK = threading.RLock()
 AGENT_CHAT_LOCK = threading.RLock()
 AGENT_CHAT_INFLIGHT: set[str] = set()
+FULL_AGENT_RUNTIME_LOCK = threading.RLock()
+FULL_AGENT_ARTIFACTS_LOCK = threading.RLock()
+FULL_AGENT_GATEWAY_LOCK = threading.RLock()
+FULL_AGENT_ACTIVE_LOCK = threading.RLock()
+FULL_AGENT_RUN_SEMAPHORE = threading.BoundedSemaphore(value=1)
+FULL_AGENT_RUNTIME_INSTANCE: FullAgentRuntime | None = None
+FULL_AGENT_ARTIFACT_STORE_INSTANCE: FullAgentArtifactStore | None = None
+FULL_AGENT_GATEWAY_INSTANCE = None
+FULL_AGENT_GATEWAY_MODULE = None
+FULL_AGENT_GATEWAY_QUARANTINED = False
+FULL_AGENT_GATEWAY_GENERATION: str | None = None
+FULL_AGENT_GATEWAY_GENERATION_OWNER = None
+FULL_AGENT_ACTIVE_TURNS: dict[str, dict[str, object]] = {}
+FULL_AGENT_APPROVAL_TOMBSTONES: dict[str, dict[str, object]] = {}
+FULL_AGENT_RUNTIME_RECONCILED = False
 REAL_RUN_SEMAPHORE = threading.BoundedSemaphore(value=1)
 AI_TRADE_COUNCIL_RUN_SEMAPHORE = threading.BoundedSemaphore(value=3)
 MISSION_WORKER_LOCK = threading.RLock()
@@ -585,6 +619,25 @@ METATRADER_UNIFIED_EA_SOURCE_PATH = (
     / "mt4-ai-council-ea-v2.18-enum-fail-closed-readiness"
     / "MetafxHQTradeGateway.mq4"
 )
+METATRADER_MT5_UNIFIED_EA_SOURCE_PATH = (
+    PROJECT_ROOT
+    / "integrations"
+    / "mt5-trade-gateway"
+    / "MetafxHQTradeGateway.mq5"
+)
+METATRADER_GATEWAY_SOURCE_DOWNLOADS = {
+    "mt4": (
+        METATRADER_UNIFIED_EA_SOURCE_PATH,
+        "MetafxHQTradeGateway.mq4",
+        "text/plain; charset=utf-8",
+    ),
+    "mt5": (
+        METATRADER_MT5_UNIFIED_EA_SOURCE_PATH,
+        "MetafxHQTradeGateway.mq5",
+        "text/plain; charset=utf-8",
+    ),
+}
+METATRADER_GATEWAY_SOURCE_MAX_BYTES = 2 * 1024 * 1024
 METATRADER_SNAPSHOT_FALLBACK_SOURCE_PATH = (
     PROJECT_ROOT
     / "integrations"
@@ -605,6 +658,10 @@ MT4_TRADE_GATEWAY_MODULE_PATH = (
     PROJECT_ROOT / "backend" / "local-runner" / "mt4_trade_gateway.py"
 )
 MT4_TRADE_GATEWAY_STATE_DIRNAME = "mt4-trade-gateway"
+MT4_TRADE_GATEWAY_LEDGER_FILENAME = "mt4-trade-gateway-ledger.json"
+MT4_TRADE_GATEWAY_LEDGER_SWITCH_GUARD_MAX_BYTES = 64 * 1024 * 1024
+MT4_TRADE_GATEWAY_LEDGER_SCHEMA_VERSION = "metafx-mt4-trade-ledger-v3"
+MT4_TRADE_GATEWAY_LEGACY_LEDGER_SCHEMA_VERSION = "metafx-mt4-trade-ledger-v2"
 MT4_TRADE_GATEWAY_STATUS_SCHEMA_VERSION = "metafx-hq-mt4-status-v5"
 MT4_TRADE_GATEWAY_V4_STATUS_SCHEMA_VERSION = "metafx-hq-mt4-status-v4"
 MT4_TRADE_GATEWAY_LEGACY_STATUS_SCHEMA_VERSION = "metafx-hq-mt4-status-v3"
@@ -682,7 +739,7 @@ MT4_TRADE_GATEWAY_V4_STATUS_FIELDS = frozenset({
     "maxSignalDriftPoints",
     "maxQuoteAgeSeconds",
 })
-MT4_TRADE_GATEWAY_STATUS_FIELDS = MT4_TRADE_GATEWAY_V4_STATUS_FIELDS | {
+MT4_TRADE_GATEWAY_V5_LEGACY_STATUS_FIELDS = MT4_TRADE_GATEWAY_V4_STATUS_FIELDS | {
     "portfolioPolicyStatus",
     "portfolioPolicyDigest",
     "portfolioGuardScope",
@@ -692,6 +749,33 @@ MT4_TRADE_GATEWAY_STATUS_FIELDS = MT4_TRADE_GATEWAY_V4_STATUS_FIELDS | {
     "concurrencyBoundary",
     "crossVpsDistributedLock",
 }
+MT4_TRADE_GATEWAY_SIZING_STATUS_FIELDS = frozenset({
+    "positionSizingMode",
+    "riskPercent",
+    "riskCapitalBase",
+    "estimatedCommissionPerLot",
+    "brokerVolumeMin",
+    "brokerVolumeMax",
+    "brokerVolumeStep",
+})
+MT4_TRADE_GATEWAY_STATUS_FIELDS = (
+    MT4_TRADE_GATEWAY_V5_LEGACY_STATUS_FIELDS
+    | MT4_TRADE_GATEWAY_SIZING_STATUS_FIELDS
+)
+MT5_TRADE_GATEWAY_PLATFORM_STATUS_FIELDS = frozenset({
+    "terminalPlatform",
+    "accountBindingId",
+    "singleHostLiveAcknowledged",
+    "liveSafetyScope",
+})
+MT5_TRADE_GATEWAY_LEGACY_STATUS_FIELDS = (
+    MT4_TRADE_GATEWAY_V5_LEGACY_STATUS_FIELDS
+    | MT5_TRADE_GATEWAY_PLATFORM_STATUS_FIELDS
+)
+MT5_TRADE_GATEWAY_STATUS_FIELDS = (
+    MT4_TRADE_GATEWAY_STATUS_FIELDS
+    | MT5_TRADE_GATEWAY_PLATFORM_STATUS_FIELDS
+)
 MT4_TRADE_GATEWAY_LEGACY_STATUS_FIELDS = (
     MT4_TRADE_GATEWAY_V4_STATUS_FIELDS - {"demoAccount", "accountMode"}
 )
@@ -718,6 +802,7 @@ GLOBAL_METATRADER_SELECTION_TARGETS = {
         "right_tool_console",
     ),
     "mt5": (
+        "left_analytics_console",
         "right_server_racks",
         "right_tool_console",
     ),
@@ -2357,6 +2442,68 @@ def redact_text(value: str, limit: int = 8000) -> str:
     if home:
         text = text.replace(home, "%USERPROFILE%")
     return text[:limit]
+
+
+_FULL_AGENT_HTTP_URL_PATTERN = re.compile(
+    r"(?i)\bhttps?://[^\s<>\"'`]+"
+)
+_FULL_AGENT_PUBLIC_API_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9._~-])/api(?:/[^\s<>\"'`]*)?"
+)
+_FULL_AGENT_LOCAL_PATH_PATTERNS = (
+    # File URIs must be removed before generic slash handling.
+    re.compile(r"(?i)\bfile:(?://|\\\\)[^\s<>\"'`]+"),
+    # Drive-letter paths support both native and forward-slash rendering.
+    re.compile(r"(?i)(?<![A-Za-z0-9])(?:[A-Z]:[\\/])[^\s<>\"'`]+"),
+    # UNC paths emitted with either Windows or URI-style separators.
+    re.compile(r"(?<!\\)\\\\[^\\/\s<>\"'`]+[\\/][^\s<>\"'`]+"),
+    re.compile(r"(?<![:/])//[^/\s<>\"'`]+/[^\s<>\"'`]+"),
+    # Any remaining absolute POSIX path, including WSL /mnt/<drive>/... .
+    # Public /api routes are protected separately and restored unchanged.
+    re.compile(r"(?<![A-Za-z0-9._~:/-])/(?!/|api(?:/|$))[^\s<>\"'`]+", re.I),
+)
+
+
+def _full_agent_redact_response_text(value: object, limit: int = 32000) -> str:
+    """Redact local filesystem locations from Full Agent public text only.
+
+    HTTP(S) links and the bridge's public ``/api`` paths are temporarily
+    protected so path filtering cannot corrupt legitimate URLs.
+    """
+
+    raw = str(value or "")
+    bounded_limit = max(0, int(limit))
+    text = raw
+    protected: list[str] = []
+
+    def protect(match: re.Match) -> str:
+        safe_value = match.group(0)
+        # Preserve URL/path structure, but never exempt credentials embedded
+        # in a query or fragment from the normal secret patterns.
+        for secret_pattern in SECRET_PATTERNS:
+            safe_value = secret_pattern.sub("[REDACTED_SECRET]", safe_value)
+        protected.append(safe_value)
+        # Pipes are an existing redact_text path delimiter, preventing an
+        # earlier local path on the same line from consuming this placeholder.
+        return f"|FULLAGENTSAFEREF{len(protected) - 1}TOKEN|"
+
+    text = _FULL_AGENT_HTTP_URL_PATTERN.sub(protect, text)
+    text = _FULL_AGENT_PUBLIC_API_PATH_PATTERN.sub(protect, text)
+    text = redact_text(text, max(len(text) + 1, bounded_limit + 1))
+
+    def redact_path(match: re.Match) -> str:
+        token = match.group(0)
+        trailing = ""
+        while token and token[-1] in ".,;:!?)]}":
+            trailing = token[-1] + trailing
+            token = token[:-1]
+        return ("[REDACTED_PATH]" if token else "") + trailing
+
+    for pattern in _FULL_AGENT_LOCAL_PATH_PATTERNS:
+        text = pattern.sub(redact_path, text)
+    for index, safe_value in enumerate(protected):
+        text = text.replace(f"|FULLAGENTSAFEREF{index}TOKEN|", safe_value)
+    return text[:bounded_limit]
 
 
 class StructuredCommandTransportError(DataIntegrityError):
@@ -14227,6 +14374,29 @@ def report_attachment_roots() -> tuple[Path, ...]:
     )
 
 
+def resolve_metatrader_gateway_source(platform: object) -> tuple[Path, str, str] | None:
+    """Resolve one exact, packaged gateway source without accepting a path."""
+
+    platform_key = str(platform or "").strip().lower()
+    allowed = METATRADER_GATEWAY_SOURCE_DOWNLOADS.get(platform_key)
+    if allowed is None:
+        return None
+    configured_path, file_name, media_type = allowed
+    try:
+        resolved = configured_path.resolve(strict=True)
+        resolved.relative_to(PROJECT_ROOT.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not resolved.is_file() or resolved.name != file_name:
+        return None
+    try:
+        if resolved.stat().st_size > METATRADER_GATEWAY_SOURCE_MAX_BYTES:
+            return None
+    except OSError:
+        return None
+    return resolved, media_type, file_name
+
+
 def report_download_roots() -> tuple[Path, ...]:
     return (
         PROJECT_ROOT / "workspace",
@@ -14972,7 +15142,7 @@ def _mission_blocker_read_model(mission: dict) -> dict | None:
     elif root_cause_code in {"codex_limit_reached", "codex_rate_limited"}:
         title_th = "Codex ถึงขีดจำกัดการใช้งานของรอบนี้"
         cause_th = (
-            "Local Runner ตรวจพบว่าโควตา Codex ยังไม่พร้อม จึงไม่ได้เริ่มงานวิเคราะห์และไม่ได้ส่งคำสั่งไป MT4"
+            "Local Runner ตรวจพบว่าโควตา Codex ยังไม่พร้อม จึงไม่ได้เริ่มงานวิเคราะห์และไม่ได้ส่งคำสั่งไปยัง EA ที่เลือก"
         )
         resolution_steps_th = [
             "รอให้หน้า Rate Limit แสดงว่ามีโควตาใช้งาน",
@@ -15022,7 +15192,7 @@ def _mission_blocker_read_model(mission: dict) -> dict | None:
         "council_runner_backoff_exceeds_round_deadline",
     }:
         title_th = "เวลาร่วมของสภา AI หมดก่อนวิเคราะห์ครบ 3 ตัว"
-        cause_th = "Agent ทำงานไม่ครบภายในเวลาของ Snapshot เดียวกัน ระบบจึงยกเลิกรอบนี้และไม่ส่งคำสั่งไป MT4"
+        cause_th = "Agent ทำงานไม่ครบภายในเวลาของ Snapshot เดียวกัน ระบบจึงยกเลิกรอบนี้และไม่ส่งคำสั่งไปยัง EA ที่เลือก"
         resolution_steps_th = [
             "กดตรวจสถานะใหม่เพื่อยืนยันว่า Local Runner พร้อม",
             "รอ Snapshot ใหม่ แล้วเริ่ม Specialist ทั้ง 3 ตัวพร้อมกันอีกครั้ง",
@@ -50194,21 +50364,22 @@ def _ai_trade_council_read_model(
     if trade_gateway.get("connected") is True:
         gateway_mode = str(trade_gateway.get("mode") or "unknown")
         gateway_reason = str(trade_gateway.get("executionGuardReason") or "")
+        sizing_summary = _trade_gateway_sizing_summary_th(trade_gateway)
         if trade_gateway.get("executionGuardReady") is True:
             truth_message += (
                 f" Trade Gateway EA เชื่อมแล้วในโหมด {gateway_mode} และพร้อมรับคำสั่งตาม Guard; "
-                "Fixed Lot อ่านจาก Inputs ของ EA เท่านั้น"
+                f"{sizing_summary}"
             )
         elif gateway_reason == "QUOTE_NOT_OBSERVED":
             truth_message += (
                 f" Trade Gateway EA เชื่อมแล้วในโหมด {gateway_mode} และกำลังรอ Quote สดจาก Broker; "
-                "Fixed Lot อ่านจาก Inputs ของ EA เท่านั้น"
+                f"{sizing_summary}"
             )
         else:
             truth_message += (
                 f" Trade Gateway EA เชื่อมแล้วในโหมด {gateway_mode} แต่ Execution Guard ยังไม่พร้อม"
                 + (f" ({gateway_reason})" if gateway_reason else "")
-                + "; Fixed Lot อ่านจาก Inputs ของ EA เท่านั้น"
+                + f"; {sizing_summary}"
             )
     else:
         truth_message += (
@@ -50397,7 +50568,7 @@ def _ai_trade_council_read_model(
                         "direction": None,
                         "stopLossPrice": None,
                         "takeProfitPrice": None,
-                        "lotPolicy": "ea_fixed_lot_only",
+                        "lotPolicy": "ea_owned_fixed_or_risk_percent",
                         "aiLotAllowed": False,
                     }
                 ),
@@ -50486,7 +50657,7 @@ def _ai_trade_council_read_model(
                     ),
                     "protectivePlanFallbackUsed": False,
                     "protectivePlanProvenance": None,
-                    "lotPolicy": "ea_fixed_lot_only",
+                    "lotPolicy": "ea_owned_fixed_or_risk_percent",
                     "aiLotAllowed": False,
                 },
                 "riskGuard": {
@@ -51083,14 +51254,14 @@ def ai_trade_council_order_history_page_read_model(
             # switch cannot race this read into returning mislabeled history.
             if not include_all_channels and (
                 not public_candidate
-                or public_candidate.get("platform") != "mt4"
+                or public_candidate.get("platform") not in {"mt4", "mt5"}
             ):
                 return _ai_trade_order_history_read_model(
                     {
                         "available": False,
                         "items": [],
                         "hasMore": False,
-                        "reasonCode": "selected_mt4_channel_missing",
+                        "reasonCode": "selected_metatrader_channel_missing",
                     },
                     [],
                 )
@@ -51104,7 +51275,7 @@ def ai_trade_council_order_history_page_read_model(
                         "available": False,
                         "items": [],
                         "hasMore": False,
-                        "reasonCode": "selected_mt4_channel_changed",
+                        "reasonCode": "selected_metatrader_channel_changed",
                     },
                     [],
                 )
@@ -53884,7 +54055,11 @@ def _metatrader_allowed_platforms_for_prop(prop_id: str) -> set[str]:
         elif item_id == "mt5_terminal":
             allowed.add("mt5")
     if prop_id == AI_TRADE_COUNCIL_PROP_ID:
-        return {"mt4"} if "mt4" in allowed else set()
+        # The installed connection profile may lag one release while the
+        # Backend and MT5 EA are upgraded together.  Council selection is
+        # nevertheless an exact one-candidate binding, so accepting MT5 here
+        # does not permit simultaneous MT4+MT5 execution.
+        return {"mt4", "mt5"} if "mt4" in allowed else set()
     return allowed
 
 
@@ -54745,8 +54920,18 @@ def _mt4_trade_gateway_publish_for_selection(
 ) -> dict:
     """Atomically revalidate target/bar identity and cross the publish boundary."""
     with MT4_TRADE_GATEWAY_LOCK:
-        current_selection = _metatrader_selection_token(
+        current_context = _selected_metatrader_candidate_context(
             AI_TRADE_COUNCIL_PROP_ID
+        )
+        current_selection = (
+            current_context.get("token")
+            if isinstance(current_context, dict)
+            else None
+        )
+        current_record = (
+            current_context.get("record")
+            if isinstance(current_context, dict)
+            else None
         )
         if (
             not isinstance(current_selection, dict)
@@ -54835,7 +55020,43 @@ def _mt4_trade_gateway_publish_for_selection(
                 "published": None,
                 "command": None,
             }
-        gateway = _mt4_trade_gateway_instance()
+        mt5_account_binding_id = None
+        selected_candidate = (
+            _public_metatrader_candidate(current_record)
+            if isinstance(current_record, dict)
+            else None
+        )
+        if (
+            isinstance(selected_candidate, dict)
+            and selected_candidate.get("platform") == "mt5"
+        ):
+            expected_snapshot_id = safe_reference(
+                current_chart.get("snapshotId")
+            )
+            if not expected_snapshot_id:
+                return {
+                    "ok": False,
+                    "reasonCode": "gateway_snapshot_identity_unavailable",
+                    "published": None,
+                    "command": None,
+                }
+            mt5_account_binding_id, binding_reason = (
+                _validated_mt5_wire_binding(
+                    current_record,
+                    selected_candidate,
+                    expected_snapshot_id=expected_snapshot_id,
+                )
+            )
+            if not mt5_account_binding_id:
+                return {
+                    "ok": False,
+                    "reasonCode": binding_reason,
+                    "published": None,
+                    "command": None,
+                }
+        gateway = _mt4_trade_gateway_instance(
+            mt5_account_binding_id=mt5_account_binding_id
+        )
         published = gateway.queue_trade_intent(intent)
         command_id = safe_reference(
             (published.get("command") or {}).get("commandId")
@@ -54875,14 +55096,292 @@ def _load_mt4_trade_gateway_module():
     return module
 
 
-def _mt4_trade_gateway_instance():
+def _mt4_trade_gateway_instance(*, mt5_account_binding_id: str | None = None):
     module = _load_mt4_trade_gateway_module()
+    mt5_binding = str(mt5_account_binding_id or "")
+    wire_options = (
+        {
+            "wire_platform": "mt5",
+            "wire_account_binding_id": mt5_binding,
+        }
+        if mt5_binding
+        else {}
+    )
     return module.MT4TradeGateway(
         file_common_root=METATRADER_COMMON_FILES_DIR,
         state_root=RUNTIME_DIR / MT4_TRADE_GATEWAY_STATE_DIRNAME,
         command_ttl_seconds=30,
         heartbeat_ttl_seconds=30,
+        **wire_options,
     )
+
+
+def _mt4_trade_gateway_switch_guard_state() -> dict:
+    """Read the durable command slot without migrating or repairing its ledger.
+
+    Target selection shares ``MT4_TRADE_GATEWAY_LOCK`` with command publish, so
+    this deliberately read-only projection is stable for the duration of the
+    selection transaction.  Do not replace it with ``gateway.status()``:
+    loading gateway state may migrate a legacy ledger, repair an old unknown
+    status, ingest an ACK, expire a command, or provision signing material.
+    """
+
+    ledger_path = (
+        RUNTIME_DIR
+        / MT4_TRADE_GATEWAY_STATE_DIRNAME
+        / MT4_TRADE_GATEWAY_LEDGER_FILENAME
+    )
+    try:
+        if ledger_path.is_symlink():
+            raise DataIntegrityError("Trade gateway ledger must be a regular local file.")
+        if not ledger_path.exists():
+            return {
+                "activeCommandId": None,
+                "executionUnknown": False,
+                "quarantinedExecutionUnknown": False,
+                "commandChannelIds": [],
+            }
+        stat = ledger_path.stat()
+        if (
+            not ledger_path.is_file()
+            or stat.st_size <= 0
+            or stat.st_size > MT4_TRADE_GATEWAY_LEDGER_SWITCH_GUARD_MAX_BYTES
+        ):
+            raise DataIntegrityError("Trade gateway ledger has an invalid size.")
+        raw = ledger_path.read_bytes()
+    except DataIntegrityError:
+        raise
+    except (OSError, PermissionError) as error:
+        raise DataIntegrityError("Trade gateway ledger is unreadable.") from error
+
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+        decoded = {}
+        for key, value in pairs:
+            if key in decoded:
+                raise ValueError("duplicate JSON field")
+            decoded[key] = value
+        return decoded
+
+    def reject_non_finite(_value: str):
+        raise ValueError("non-finite JSON number")
+
+    try:
+        ledger = json.loads(
+            raw.decode("ascii"),
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_non_finite,
+        )
+    except (UnicodeError, ValueError, json.JSONDecodeError, RecursionError) as error:
+        raise DataIntegrityError("Trade gateway ledger is invalid JSON.") from error
+    if not isinstance(ledger, dict):
+        raise DataIntegrityError("Trade gateway ledger has an invalid shape.")
+
+    expected_fields = {
+        "schemaVersion",
+        "revision",
+        "activeCommandId",
+        "commands",
+        "idempotency",
+        "barClaims",
+        "updatedAt",
+    }
+    revision = ledger.get("revision")
+    common_shape_valid = bool(
+        set(ledger) == expected_fields
+        and isinstance(revision, int)
+        and not isinstance(revision, bool)
+        and revision >= 0
+        and isinstance(ledger.get("commands"), dict)
+        and isinstance(ledger.get("idempotency"), dict)
+        and isinstance(ledger.get("barClaims"), dict)
+        and isinstance(ledger.get("updatedAt"), str)
+    )
+    schema_version = ledger.get("schemaVersion")
+    if schema_version == MT4_TRADE_GATEWAY_LEGACY_LEDGER_SCHEMA_VERSION:
+        if not (
+            common_shape_valid
+            and ledger.get("activeCommandId") is None
+            and ledger.get("commands") == {}
+            and ledger.get("idempotency") == {}
+            and ledger.get("barClaims") == {}
+        ):
+            raise DataIntegrityError(
+                "A non-empty legacy trade gateway ledger cannot be trusted during target selection."
+            )
+        return {
+            "activeCommandId": None,
+            "executionUnknown": False,
+            "quarantinedExecutionUnknown": False,
+            "commandChannelIds": [],
+        }
+    if schema_version != MT4_TRADE_GATEWAY_LEDGER_SCHEMA_VERSION or not common_shape_valid:
+        raise DataIntegrityError("Trade gateway ledger schema is unsupported.")
+
+    commands = ledger["commands"]
+    gateway_module = _load_mt4_trade_gateway_module()
+    required_entry_fields = {
+        "wireSchemaVersion",
+        "command",
+        "heartbeat",
+        "backendIdentity",
+        "requestDigest",
+        "barKey",
+        "status",
+        "outstanding",
+        "createdAt",
+        "updatedAt",
+        "ack",
+        "ackDigests",
+        "eaSizingReported",
+    }
+    allowed_entry_fields = required_entry_fields | {"recovery", "statusMigration"}
+    outstanding_ids = []
+    command_channel_ids: set[str] = set()
+    quarantined_execution_unknown = False
+    for command_id, entry in commands.items():
+        command = entry.get("command") if isinstance(entry, dict) else None
+        heartbeat = entry.get("heartbeat") if isinstance(entry, dict) else None
+        backend_identity = (
+            entry.get("backendIdentity") if isinstance(entry, dict) else None
+        )
+        if (
+            not isinstance(command_id, str)
+            or not gateway_module.COMMAND_ID_PATTERN.fullmatch(command_id)
+            or not isinstance(entry, dict)
+            or not required_entry_fields.issubset(set(entry))
+            or not set(entry).issubset(allowed_entry_fields)
+            or not isinstance(command, dict)
+            or set(command) != set(gateway_module.COMMAND_FIELDS)
+            or command.get("schemaVersion")
+            != gateway_module.COMMAND_SCHEMA_VERSION
+            or command.get("commandId") != command_id
+            or not gateway_module.SAFE_CHANNEL_PATTERN.fullmatch(
+                str(command.get("channelId") or "")
+            )
+            or not isinstance(heartbeat, dict)
+            or set(heartbeat) != set(gateway_module.HEARTBEAT_FIELDS)
+            or heartbeat.get("schemaVersion")
+            != gateway_module.HEARTBEAT_SCHEMA_VERSION
+            or heartbeat.get("channelId") != command.get("channelId")
+            or heartbeat.get("heartbeatId") != command.get("heartbeatId")
+            or not isinstance(backend_identity, dict)
+            or set(backend_identity)
+            != {
+                "snapshotId",
+                "streamKey",
+                "snapshotObservedAt",
+                "barTime",
+                "referencePrice",
+                "barKey",
+            }
+            or entry.get("wireSchemaVersion")
+            != gateway_module.COMMAND_SCHEMA_VERSION
+            or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("requestDigest") or ""))
+            or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("barKey") or ""))
+            or ledger["idempotency"].get(entry.get("requestDigest")) != command_id
+            or ledger["barClaims"].get(entry.get("barKey")) != command_id
+            or not isinstance(entry.get("status"), str)
+            or not isinstance(entry.get("outstanding"), bool)
+            or not isinstance(entry.get("createdAt"), str)
+            or not isinstance(entry.get("updatedAt"), str)
+            or not isinstance(entry.get("ackDigests"), list)
+            or not all(
+                isinstance(value, str)
+                and re.fullmatch(r"[0-9a-f]{64}", value)
+                for value in entry["ackDigests"]
+            )
+            or not isinstance(entry.get("eaSizingReported"), bool)
+            or (
+                entry.get("ack") is not None
+                and not isinstance(entry.get("ack"), dict)
+            )
+            or (
+                "recovery" in entry
+                and not isinstance(entry.get("recovery"), dict)
+            )
+            or (
+                "statusMigration" in entry
+                and not isinstance(entry.get("statusMigration"), dict)
+            )
+        ):
+            raise DataIntegrityError("Trade gateway ledger command state is invalid.")
+        command_channel_ids.add(command["channelId"])
+        if entry["outstanding"]:
+            outstanding_ids.append(command_id)
+        if entry["status"] == "quarantined_execution_unknown":
+            recovery = entry.get("recovery")
+            ack = entry.get("ack")
+            if (
+                entry["outstanding"] is not False
+                or not isinstance(ack, dict)
+                or ack.get("status") != "EXECUTION_UNKNOWN"
+                or not isinstance(recovery, dict)
+                or set(recovery)
+                != {
+                    "action",
+                    "reasonCode",
+                    "killSwitchActive",
+                    "barClaimRetained",
+                    "recoveredAt",
+                }
+                or recovery.get("action") != "quarantine"
+                or recovery.get("reasonCode")
+                != "EXECUTION_UNKNOWN_REQUIRES_OPERATOR_RECONCILIATION"
+                or recovery.get("killSwitchActive") is not True
+                or recovery.get("barClaimRetained") is not True
+                or not isinstance(recovery.get("recoveredAt"), str)
+            ):
+                raise DataIntegrityError(
+                    "Trade gateway quarantine state is invalid."
+                )
+            quarantined_execution_unknown = True
+    expected_idempotency = {
+        entry["requestDigest"]: command_id
+        for command_id, entry in commands.items()
+    }
+    expected_bar_claims = {
+        entry["barKey"]: command_id
+        for command_id, entry in commands.items()
+    }
+    if (
+        ledger["idempotency"] != expected_idempotency
+        or ledger["barClaims"] != expected_bar_claims
+    ):
+        raise DataIntegrityError("Trade gateway ledger indexes are inconsistent.")
+    active_command_id = ledger.get("activeCommandId")
+    if active_command_id is not None and not isinstance(active_command_id, str):
+        raise DataIntegrityError("Trade gateway ledger active command is invalid.")
+    if (
+        len(outstanding_ids) > 1
+        or (outstanding_ids and active_command_id != outstanding_ids[0])
+        or (not outstanding_ids and active_command_id is not None)
+        or (active_command_id is not None and active_command_id not in commands)
+    ):
+        raise DataIntegrityError(
+            "Trade gateway ledger violates the single outstanding command invariant."
+        )
+    if active_command_id is None:
+        return {
+            "activeCommandId": None,
+            "executionUnknown": False,
+            "quarantinedExecutionUnknown": quarantined_execution_unknown,
+            "commandChannelIds": sorted(command_channel_ids),
+        }
+    active_entry = commands[active_command_id]
+    stored_ack = (
+        active_entry.get("ack")
+        if isinstance(active_entry.get("ack"), dict)
+        else {}
+    )
+    return {
+        "activeCommandId": active_command_id,
+        "executionUnknown": bool(
+            active_entry.get("status") == "ack_EXECUTION_UNKNOWN"
+            or stored_ack.get("status") == "EXECUTION_UNKNOWN"
+        ),
+        "quarantinedExecutionUnknown": quarantined_execution_unknown,
+        "commandChannelIds": sorted(command_channel_ids),
+    }
 
 
 def _mt4_trade_gateway_status_path(channel_id: str) -> Path | None:
@@ -55153,7 +55652,34 @@ def _mt4_trade_gateway_init_status_message_th(init_status: dict) -> str:
         "OPTIONAL_SIGNING_KEY_PIN_INVALID_IGNORED": "Key ID ที่ใส่ใน Demo หรือ Shadow ไม่ถูกต้อง ระบบจึงไม่ใช้ค่านี้",
         "OPTIONAL_SIGNING_KEY_PIN_MISMATCH_IGNORED": "Key ID ที่ใส่ใน Demo หรือ Shadow ไม่ตรงกับ Backend ระบบจึงใช้ค่าจาก Backend",
         "CRYPTO_SELF_TEST_FAILED": "การตรวจระบบลายเซ็น HMAC-SHA256 ไม่ผ่าน",
+        "GATEWAY_MODE_INVALID": "โหมด Gateway ของ EA ไม่ถูกต้อง",
+        "POSITION_LIFECYCLE_MODE_INVALID": "โหมดจัดการ Position ไม่ถูกต้อง",
+        "MT5_POSITION_LIFECYCLE_UNSUPPORTED": "MT5 รุ่นนี้รองรับการปิดงานด้วย SL/TP เท่านั้น",
+        "LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT": "โหมด Live ต้องใช้บัญชีจริง หากเป็นบัญชีทดลองให้ใช้โหมด Demo",
+        "MT5_HEDGING_ACCOUNT_REQUIRED": "MT5 ต้องใช้บัญชีแบบ Hedging; บัญชี Netting หรือ Exchange จะไม่เริ่ม EA",
+        "LIVE_ACCOUNT_OWNER_LOCK_UNAVAILABLE": "มี MT5 Live Gateway อื่นในเครื่องนี้ถือสิทธิ์บัญชีนี้อยู่แล้ว",
+        "LIVE_ACCOUNT_BINDING_CHANGED": "บัญชีหรือ Server ของ MT5 เปลี่ยนหลังเริ่ม EA จึงปิดการส่งคำสั่ง",
+        "ACCOUNT_EXECUTION_LOCK_UNAVAILABLE": "EA ไม่สามารถล็อกสิทธิ์ส่งคำสั่งของบัญชีนี้ได้",
         "GATEWAY_INPUT_CONFIGURATION_INVALID": "ค่าตั้งต้นของ EA ไม่ผ่านการตรวจสอบ",
+        "MONEY_MANAGEMENT_MODE_INVALID": "โหมด Money Management ต้องเป็น Fixed Lot หรือ Risk Percent",
+        "RISK_CAPITAL_BASE_INVALID": "ฐานคำนวณความเสี่ยงต้องเป็น Balance หรือ Equity",
+        "RISK_PERCENT_INVALID_OR_ABOVE_HARD_CAP": "Risk Percent ไม่ถูกต้องหรือสูงกว่าเพดาน MaxLossPerTradePercent",
+        "ESTIMATED_COMMISSION_PER_LOT_INVALID": "ค่าธรรมเนียมสำรองต่อ Lot ไม่ถูกต้อง",
+        "BROKER_VOLUME_LIMITS_UNAVAILABLE": "EA อ่าน Min/Max/Step Lot จาก Broker ไม่ได้",
+        "BROKER_VOLUME_METADATA_INVALID": "EA อ่าน Min/Max/Step Lot จาก Broker ไม่ได้",
+        "MANAGED_LOT_CAP_BELOW_BROKER_MINIMUM": "เพดาน Lot ของ EA ต่ำกว่า Min Lot ของ Broker",
+        "FIXED_LOT_OUTSIDE_BROKER_LIMITS": "Fixed Lot อยู่นอก Min/Max Lot ของ Broker",
+        "FIXED_LOT_OUTSIDE_BROKER_RANGE": "Fixed Lot อยู่นอก Min/Max Lot ของ Broker",
+        "FIXED_LOT_NOT_ON_BROKER_STEP": "Fixed Lot ไม่ตรงกับ Lot Step ของ Broker",
+        "RISK_CAPITAL_UNAVAILABLE": "EA อ่าน Balance/Equity สำหรับคำนวณความเสี่ยงไม่ได้",
+        "RISK_CAPITAL_NOT_AVAILABLE": "EA อ่าน Balance/Equity สำหรับคำนวณความเสี่ยงไม่ได้",
+        "BROKER_RISK_METADATA_UNAVAILABLE": "EA อ่านข้อมูล Tick Size/Tick Value สำหรับคำนวณความเสี่ยงไม่ได้",
+        "BROKER_RISK_METADATA_INVALID": "EA อ่านข้อมูล Tick Size/Tick Value สำหรับคำนวณความเสี่ยงไม่ได้",
+        "RISK_PRICE_GEOMETRY_INVALID": "ราคาเข้าและ Stop Loss ไม่สร้างระยะความเสี่ยงที่คำนวณได้",
+        "RISK_LOT_CALCULATION_INVALID": "EA คำนวณ Lot ตามงบความเสี่ยงไม่สำเร็จ",
+        "RISK_STOP_LOSS_CALCULATION_FAILED": "EA คำนวณมูลค่าขาดทุนถึง Stop Loss ไม่สำเร็จ",
+        "RISK_VOLUME_BELOW_BROKER_MINIMUM": "Lot ตาม Risk Percent ต่ำกว่า Min Lot ของ Broker จึงไม่เปิด Order",
+        "RISK_ESTIMATE_BELOW_WIRE_MINIMUM": "เงินเสี่ยงที่คำนวณได้เล็กเกินกว่าจะบันทึกเป็นหลักฐาน 8 ตำแหน่ง จึงไม่เปิด Order",
         "SYMBOL_OR_TIMEFRAME_NOT_ALLOWED": "คู่เงินหรือ Timeframe ของกราฟไม่อยู่ในรายการที่อนุญาต",
         "PORTFOLIO_POLICY_MISMATCH": "นโยบายพอร์ตของ EA ไม่ตรงกับ Channel นี้",
         "PORTFOLIO_POLICY_STATE_INVALID": "ไฟล์สถานะนโยบายพอร์ตของ EA ไม่ถูกต้อง",
@@ -55164,6 +55690,7 @@ def _mt4_trade_gateway_init_status_message_th(init_status: dict) -> str:
         "INITIAL_SNAPSHOT_WRITE_FAILED": "EA เขียน Snapshot แรกไม่สำเร็จ",
         "INITIAL_CAPABILITIES_WRITE_FAILED": "EA เขียนข้อมูลความสามารถเริ่มต้นไม่สำเร็จ",
         "INITIAL_STATUS_WRITE_FAILED": "EA เขียนสถานะเริ่มต้นไม่สำเร็จ",
+        "INITIAL_PUBLICATION_FAILED": "EA เขียนข้อมูลเริ่มต้นไม่สำเร็จ",
     }
     stage_labels = {
         "channel": "การตั้งค่า Channel ID",
@@ -55171,8 +55698,12 @@ def _mt4_trade_gateway_init_status_message_th(init_status: dict) -> str:
         "crypto": "การตรวจระบบลายเซ็น",
         "inputs": "การตั้งค่า Inputs ของ EA",
         "chart": "คู่เงินและ Timeframe ของกราฟ",
+        "account_mode": "ประเภทบัญชี MT5 และโหมด Live/Demo",
+        "live_account_owner_lock": "สิทธิ์เจ้าของบัญชี MT5 Live บนเครื่องนี้",
+        "account_execution_lock": "ล็อกการส่งคำสั่งระดับบัญชี",
         "portfolio_policy": "การยืนยันนโยบายพอร์ตร่วมของ EA",
         "fixed_lot": "การตั้งค่า Fixed Lot",
+        "money_management": "การตั้งค่า Money Management",
         "managed_magic_numbers": "การตั้งค่า Magic Number",
         "channel_lock": "การใช้ Channel ID ซ้ำ",
         "timer": "การเริ่มระบบจับเวลา",
@@ -55213,6 +55744,11 @@ def _empty_mt4_trade_gateway_status(
 ) -> dict:
     candidate_id = safe_reference((selected_candidate or {}).get("candidateId"))
     platform = str((selected_candidate or {}).get("platform") or "") or None
+    ea_source_path = (
+        METATRADER_MT5_UNIFIED_EA_SOURCE_PATH
+        if platform == "mt5"
+        else METATRADER_UNIFIED_EA_SOURCE_PATH
+    )
     init_reason_code = str((init_status or {}).get("reasonCode") or "")
     fresh_init_status = bool(
         isinstance(init_status, dict)
@@ -55234,9 +55770,7 @@ def _empty_mt4_trade_gateway_status(
     return {
         "schemaVersion": "metafx-hq-mt4-trade-gateway-read-model-v1",
         "sourceReady": MT4_TRADE_GATEWAY_MODULE_PATH.is_file(),
-        "eaSourceReady": (
-            METATRADER_UNIFIED_EA_SOURCE_PATH
-        ).is_file(),
+        "eaSourceReady": ea_source_path.is_file(),
         "connected": False,
         "status": status,
         "reasonCode": reason_code,
@@ -55252,6 +55786,14 @@ def _empty_mt4_trade_gateway_status(
         "liveArmed": False,
         "fixedLot": None,
         "fixedLotSource": "ea_input_read_only",
+        "positionSizingMode": None,
+        "riskPercent": None,
+        "riskCapitalBase": None,
+        "estimatedCommissionPerLot": None,
+        "brokerVolumeMin": None,
+        "brokerVolumeMax": None,
+        "brokerVolumeStep": None,
+        "sizingSource": "ea_input_read_only",
         "aiCanSetLotOrRisk": False,
         "symbol": None,
         "timeframe": None,
@@ -55279,6 +55821,8 @@ def _empty_mt4_trade_gateway_status(
         "allowedTimeframes": None,
         "concurrencyBoundary": None,
         "crossVpsDistributedLock": None,
+        "singleHostLiveAcknowledged": False,
+        "liveSafetyScope": None,
         "maxManagedPositions": None,
         "currentManagedPositions": None,
         "maxManagedLots": None,
@@ -55304,7 +55848,7 @@ def _empty_mt4_trade_gateway_status(
             "status": "not_initialized",
             "activeCommandId": None,
             "singleOutstanding": True,
-            "eaSizingPolicy": "ea_input_only",
+            "eaSizingPolicy": "ea_money_management_inputs_only",
             "signedCommandRequiredForLive": True,
             "signedCommandVerificationAvailable": False,
             "activeSigningKeyId": None,
@@ -55331,8 +55875,32 @@ def _empty_mt4_trade_gateway_status(
     }
 
 
+def _trade_gateway_sizing_summary_th(gateway: dict) -> str:
+    """Describe read-only EA sizing truth without implying Backend control."""
+    mode = str(gateway.get("positionSizingMode") or "").upper()
+    if mode == "RISK_PERCENT":
+        risk_percent = gateway.get("riskPercent")
+        risk_base = str(gateway.get("riskCapitalBase") or "").upper()
+        try:
+            risk_text = f"{float(risk_percent):g}%"
+        except (TypeError, ValueError, OverflowError):
+            risk_text = "ตามค่า Input"
+        base_text = "Equity" if risk_base == "EQUITY" else "Balance"
+        return f"Risk Percent {risk_text} ของ {base_text} จาก Inputs ของ EA"
+    if mode == "FIXED_LOT" or not mode:
+        fixed_lot = gateway.get("fixedLot")
+        try:
+            lot_text = f"{float(fixed_lot):g}"
+        except (TypeError, ValueError, OverflowError):
+            lot_text = "ตามค่า Input"
+        return f"Fixed Lot {lot_text} จาก Inputs ของ EA"
+    return "Money Management จาก Inputs ของ EA"
+
+
 def _read_mt4_trade_gateway_ea_status(
     selected_candidate: dict,
+    *,
+    include_stale: bool = False,
 ) -> tuple[dict | None, str]:
     candidate_id = str(selected_candidate.get("candidateId") or "")
     status_path = _mt4_trade_gateway_status_path(candidate_id)
@@ -55356,18 +55924,34 @@ def _read_mt4_trade_gateway_ea_status(
         return None, "gateway_status_json_invalid"
     if not isinstance(payload, dict):
         return None, "gateway_status_schema_invalid"
+    is_mt5 = str(selected_candidate.get("platform") or "").lower() == "mt5"
     status_schema_version = str(payload.get("schemaVersion") or "")
     status_fields = set(payload)
     status_fields.discard("eaVersion")
+    expected_v5_status_fields = (
+        {
+            frozenset(MT5_TRADE_GATEWAY_STATUS_FIELDS),
+            frozenset(MT5_TRADE_GATEWAY_LEGACY_STATUS_FIELDS),
+        }
+        if is_mt5
+        else {
+            frozenset(MT4_TRADE_GATEWAY_STATUS_FIELDS),
+            frozenset(MT4_TRADE_GATEWAY_V5_LEGACY_STATUS_FIELDS),
+        }
+    )
     portfolio_status_schema = bool(
         status_schema_version == MT4_TRADE_GATEWAY_STATUS_SCHEMA_VERSION
-        and status_fields == MT4_TRADE_GATEWAY_STATUS_FIELDS
+        and frozenset(status_fields) in expected_v5_status_fields
     )
     v4_status_schema = bool(
+        not is_mt5
+        and
         status_schema_version == MT4_TRADE_GATEWAY_V4_STATUS_SCHEMA_VERSION
         and status_fields == MT4_TRADE_GATEWAY_V4_STATUS_FIELDS
     )
     legacy_status_schema = bool(
+        not is_mt5
+        and
         status_schema_version == MT4_TRADE_GATEWAY_LEGACY_STATUS_SCHEMA_VERSION
         and set(payload) == MT4_TRADE_GATEWAY_LEGACY_STATUS_FIELDS
     )
@@ -55381,6 +55965,16 @@ def _read_mt4_trade_gateway_ea_status(
         or payload.get("channelId") != candidate_id
         or payload.get("profile") != "special"
         or payload.get("mode") not in {"shadow", "demo", "live"}
+        or (
+            is_mt5
+            and (
+                payload.get("terminalPlatform") != "mt5"
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(payload.get("accountBindingId") or ""),
+                )
+            )
+        )
     ):
         return None, "gateway_status_schema_invalid"
     boolean_fields = [
@@ -55396,6 +55990,8 @@ def _read_mt4_trade_gateway_ea_status(
         boolean_fields.append("demoAccount")
     if portfolio_status_schema:
         boolean_fields.append("crossVpsDistributedLock")
+    if is_mt5:
+        boolean_fields.append("singleHostLiveAcknowledged")
     for field in boolean_fields:
         if not isinstance(payload.get(field), bool):
             return None, "gateway_status_schema_invalid"
@@ -55447,6 +56043,8 @@ def _read_mt4_trade_gateway_ea_status(
     allowed_timeframes = None
     concurrency_boundary = None
     cross_vps_distributed_lock = None
+    single_host_live_acknowledged = None
+    live_safety_scope = None
     if portfolio_status_schema:
         portfolio_policy_status = str(payload.get("portfolioPolicyStatus") or "")
         portfolio_policy_digest = str(payload.get("portfolioPolicyDigest") or "")
@@ -55502,6 +56100,13 @@ def _read_mt4_trade_gateway_ea_status(
             or cross_vps_distributed_lock is not False
         ):
             return None, "gateway_status_portfolio_policy_invalid"
+    if is_mt5:
+        single_host_live_acknowledged = payload.get(
+            "singleHostLiveAcknowledged"
+        )
+        live_safety_scope = str(payload.get("liveSafetyScope") or "")
+        if live_safety_scope != "single_windows_user_file_common_only":
+            return None, "gateway_status_live_safety_scope_invalid"
 
     def strict_status_count(field: str, *, minimum: int = 0, maximum: int = 1_000_000) -> int | None:
         value = payload.get(field)
@@ -55546,11 +56151,87 @@ def _read_mt4_trade_gateway_ea_status(
     }
     if any(value is None for value in (*status_counts.values(), *status_numbers.values())):
         return None, "gateway_status_value_invalid"
+    # ``fixedLot`` remains on the v5 wire for backwards compatibility.  It is
+    # an active constraint only in FIXED_LOT mode; a risk-percent profile may
+    # legitimately set the unused input to zero.
     fixed_lot = _safe_snapshot_number(
         payload.get("fixedLot"),
-        minimum=0.00000001,
+        minimum=0,
         maximum=1000,
     )
+    sizing_fields_present = any(
+        field in payload
+        for field in (
+            "positionSizingMode",
+            "riskPercent",
+            "riskCapitalBase",
+            "estimatedCommissionPerLot",
+            "brokerVolumeMin",
+            "brokerVolumeMax",
+            "brokerVolumeStep",
+        )
+    )
+    if sizing_fields_present:
+        position_sizing_mode = str(payload.get("positionSizingMode") or "")
+        risk_percent = strict_status_number(
+            "riskPercent",
+            minimum=(
+                0.00000001
+                if position_sizing_mode == "RISK_PERCENT"
+                else 0
+            ),
+            maximum=100,
+        )
+        risk_capital_base = str(payload.get("riskCapitalBase") or "")
+        estimated_commission_per_lot = strict_status_number(
+            "estimatedCommissionPerLot",
+            minimum=0,
+            maximum=1_000_000,
+        )
+        broker_volume_min = strict_status_number(
+            "brokerVolumeMin",
+            minimum=0.00000001,
+            maximum=1_000_000,
+        )
+        broker_volume_max = strict_status_number(
+            "brokerVolumeMax",
+            minimum=0.00000001,
+            maximum=1_000_000,
+        )
+        broker_volume_step = strict_status_number(
+            "brokerVolumeStep",
+            minimum=0.00000001,
+            maximum=1_000_000,
+        )
+        if (
+            position_sizing_mode not in {"FIXED_LOT", "RISK_PERCENT"}
+            or risk_capital_base not in {"EQUITY", "BALANCE"}
+            or risk_percent is None
+            or estimated_commission_per_lot is None
+            or broker_volume_min is None
+            or broker_volume_max is None
+            or broker_volume_step is None
+            or broker_volume_max < broker_volume_min
+            or broker_volume_step > broker_volume_max
+            or (
+                position_sizing_mode == "FIXED_LOT"
+                and (fixed_lot is None or fixed_lot <= 0)
+            )
+        ):
+            return None, "gateway_status_sizing_policy_invalid"
+    else:
+        # Status v5 senders released before percent-risk sizing remain readable.
+        # They are represented truthfully as legacy Fixed Lot until the EA is
+        # upgraded; this fallback never enables Backend/AI sizing control.
+        position_sizing_mode = "FIXED_LOT"
+        risk_percent = None
+        risk_capital_base = None
+        estimated_commission_per_lot = None
+        broker_volume_min = None
+        broker_volume_max = None
+        broker_volume_step = None
+        if fixed_lot is None or fixed_lot <= 0:
+            return None, "gateway_status_value_invalid"
     symbol = _safe_snapshot_symbol(payload.get("symbol"))
     timeframe = _safe_snapshot_timeframe(payload.get("timeframe"))
     observed_at = payload.get("observedAt")
@@ -55578,12 +56259,7 @@ def _read_mt4_trade_gateway_ea_status(
     if clock_delta < -10:
         return None, "gateway_status_clock_skew"
     age_seconds = max(0, clock_delta)
-    if (
-        age_seconds > MT4_TRADE_GATEWAY_STATUS_FRESH_SECONDS
-        or file_age > MT4_TRADE_GATEWAY_STATUS_FRESH_SECONDS
-    ):
-        return None, "gateway_status_stale"
-    return {
+    parsed_status = {
         "profile": "special",
         "mode": str(payload["mode"]),
         "demoAccount": (
@@ -55596,6 +56272,13 @@ def _read_mt4_trade_gateway_ea_status(
         "eaVersion": ea_version or None,
         "liveArmed": bool(payload["liveArmed"]),
         "fixedLot": fixed_lot,
+        "positionSizingMode": position_sizing_mode,
+        "riskPercent": risk_percent,
+        "riskCapitalBase": risk_capital_base,
+        "estimatedCommissionPerLot": estimated_commission_per_lot,
+        "brokerVolumeMin": broker_volume_min,
+        "brokerVolumeMax": broker_volume_max,
+        "brokerVolumeStep": broker_volume_step,
         "symbol": symbol,
         "timeframe": timeframe,
         "observedAt": datetime.fromtimestamp(
@@ -55625,9 +56308,21 @@ def _read_mt4_trade_gateway_ea_status(
         "allowedTimeframes": allowed_timeframes,
         "concurrencyBoundary": concurrency_boundary,
         "crossVpsDistributedLock": cross_vps_distributed_lock,
+        "singleHostLiveAcknowledged": single_host_live_acknowledged,
+        "liveSafetyScope": live_safety_scope,
+        "_wirePlatform": "mt5" if is_mt5 else None,
+        "_wireAccountBindingId": (
+            str(payload.get("accountBindingId") or "") if is_mt5 else None
+        ),
         **status_counts,
         **status_numbers,
-    }, "ready"
+    }
+    if (
+        age_seconds > MT4_TRADE_GATEWAY_STATUS_FRESH_SECONDS
+        or file_age > MT4_TRADE_GATEWAY_STATUS_FRESH_SECONDS
+    ):
+        return (parsed_status if include_stale else None), "gateway_status_stale"
+    return parsed_status, "ready"
 
 
 def _mt4_trade_gateway_command_summary(
@@ -55645,6 +56340,7 @@ def _mt4_trade_gateway_command_summary(
         if isinstance(command_record.get("ack"), dict)
         else {}
     )
+    sizing_evidence = _mt4_trade_gateway_sizing_evidence_read_model(ack)
     return {
         "commandId": safe_reference(command.get("commandId")),
         "missionId": safe_reference(command.get("missionId")),
@@ -55670,10 +56366,7 @@ def _mt4_trade_gateway_command_summary(
                 "mode": str(ack.get("mode") or "") or None,
                 "observedAt": ack.get("observedAt"),
                 "ticket": ack.get("ticket"),
-                "fixedLot": _safe_snapshot_number(
-                    ack.get("fixedLot"),
-                    minimum=0.00000001,
-                ),
+                **sizing_evidence,
                 "filledPrice": _safe_snapshot_number(
                     ack.get("filledPrice"),
                     minimum=0.00000001,
@@ -55721,6 +56414,72 @@ def _mt4_trade_gateway_command_summary(
         ),
         "createdAt": command_record.get("createdAt"),
         "updatedAt": command_record.get("updatedAt"),
+    }
+
+
+def _mt4_trade_gateway_sizing_evidence_read_model(ack: dict) -> dict:
+    """Expose EA-observed sizing evidence as non-authoritative audit data.
+
+    ``fixedLot`` is the historical ACK-v3 wire name even when the EA uses
+    Risk Percent.  The gateway normalizes it to ``resolvedLot`` before
+    persistence.  This projection never falls back to status/config inputs
+    and is never consumed when publishing a trade command.
+    """
+    empty = {
+        "resolvedLot": None,
+        "positionSizingMode": None,
+        "riskPercent": None,
+        "riskCapitalBase": None,
+        "estimatedCommissionPerLot": None,
+        "riskCapitalAmount": None,
+        "estimatedRiskMoney": None,
+        "sizingEvidenceSource": None,
+        "sizingEvidenceAuthoritative": False,
+    }
+    if not isinstance(ack, dict):
+        return empty
+    source = str(ack.get("sizingEvidenceSource") or "")
+    if source != "ea_ack_read_only" or ack.get("sizingEvidenceAuthoritative") is not False:
+        # Legacy durable ACKs intentionally project no sizing evidence rather
+        # than inventing it from EA status or current Inputs.
+        return empty
+    resolved_lot = _safe_snapshot_number(
+        ack.get("resolvedLot"),
+        minimum=0,
+        maximum=1_000_000,
+    )
+    if resolved_lot is None:
+        return empty
+    mode = str(ack.get("positionSizingMode") or "").upper() or None
+    risk_capital_base = str(ack.get("riskCapitalBase") or "").upper() or None
+    if mode is not None and mode not in {"FIXED_LOT", "RISK_PERCENT"}:
+        return empty
+    if risk_capital_base is not None and risk_capital_base not in {"EQUITY", "BALANCE"}:
+        return empty
+    return {
+        "resolvedLot": resolved_lot,
+        "positionSizingMode": mode,
+        "riskPercent": _safe_snapshot_number(
+            ack.get("riskPercent"),
+            minimum=0,
+            maximum=100,
+        ),
+        "riskCapitalBase": risk_capital_base,
+        "estimatedCommissionPerLot": _safe_snapshot_number(
+            ack.get("estimatedCommissionPerLot"),
+            minimum=0,
+            maximum=1_000_000,
+        ),
+        "riskCapitalAmount": _safe_snapshot_number(
+            ack.get("riskCapitalAmount"),
+            minimum=0,
+        ),
+        "estimatedRiskMoney": _safe_snapshot_number(
+            ack.get("estimatedRiskMoney"),
+            minimum=0,
+        ),
+        "sizingEvidenceSource": source,
+        "sizingEvidenceAuthoritative": False,
     }
 
 
@@ -55787,7 +56546,7 @@ def _mt4_trade_gateway_order_history(
             "items": [],
             "totalExecuted": 0,
             "hasMore": False,
-            "reasonCode": "selected_mt4_channel_missing",
+            "reasonCode": "selected_metatrader_channel_missing",
             "sourceScope": "durable_gateway_ledger_executed_ack_only",
         }
     command_records: list[dict] = []
@@ -55917,6 +56676,12 @@ def _mt4_trade_gateway_order_history(
             continue
         summary = _mt4_trade_gateway_command_summary(command_record)
         ack = summary.get("ack") if isinstance(summary, dict) else None
+        raw_ack = (
+            command_record.get("ack")
+            if isinstance(command_record, dict)
+            and isinstance(command_record.get("ack"), dict)
+            else {}
+        )
         ack_status = str((ack or {}).get("status") or "").upper()
         if (
             not isinstance(summary, dict)
@@ -56022,12 +56787,23 @@ def _mt4_trade_gateway_order_history(
             if outcome_identity_verified and execution_state == "CLOSED"
             else raw_verification_status or None
         )
+        # New durable ACKs rename the legacy ACK-v3 wire field ``fixedLot``
+        # to the unambiguous, audit-only ``resolvedLot``.  Historical
+        # read-model fixtures/ledgers may still carry ``fixedLot``; retain
+        # that value only as a display fallback when no identity-verified
+        # outcome exists.  It never feeds a command or sizing decision.
+        legacy_or_resolved_lot = (
+            ack.get("resolvedLot")
+            if ack.get("resolvedLot") is not None
+            else raw_ack.get("fixedLot")
+        )
         lot = _safe_snapshot_number(
             (outcome or {}).get("lots")
             if outcome_identity_verified
-            else ack.get("fixedLot"),
+            else legacy_or_resolved_lot,
             minimum=0.00000001,
         )
+        sizing_evidence = _mt4_trade_gateway_sizing_evidence_read_model(ack)
         opened_at_utc = _mt4_trade_gateway_epoch_iso(ack.get("observedAt"))
         opened_at_source = "ea_ack_observed_at" if opened_at_utc else None
         # Legacy reconciliation (before EA/bridge v2.15) replaced the original
@@ -56070,6 +56846,9 @@ def _mt4_trade_gateway_order_history(
             "timeframe": order_timeframe,
             "ticket": int(ack["ticket"]),
             "lot": lot,
+            # This is the EA's historical sizing observation only.  The
+            # Backend never uses these values to create a command.
+            **sizing_evidence,
             "openPrice": _safe_snapshot_number(
                 (outcome or {}).get("openPrice")
                 if outcome_identity_verified
@@ -56213,6 +56992,7 @@ def _mt4_trade_gateway_ack_event_read_model(item: dict) -> dict:
             str(item.get("reasonCode") or ack.get("reasonCode") or ""),
             96,
         ) or None,
+        **_mt4_trade_gateway_sizing_evidence_read_model(ack),
     }
 
 
@@ -56232,11 +57012,11 @@ def mt4_trade_gateway_status_read_model() -> dict:
             status="not_selected",
             reason_code="selected_mt4_terminal_missing",
         )
-    if public_candidate.get("platform") != "mt4":
+    if public_candidate.get("platform") not in {"mt4", "mt5"}:
         return _empty_mt4_trade_gateway_status(
             selected_candidate=public_candidate,
             status="unsupported_platform",
-            reason_code="mt4_trade_gateway_required",
+            reason_code="metatrader_trade_gateway_required",
         )
     selection_token = (
         selection_context.get("token")
@@ -56275,6 +57055,9 @@ def mt4_trade_gateway_status_read_model() -> dict:
     active_command = None
     latest_command = None
     signing_key_metadata: dict = {}
+    preloaded_ea_status = None
+    preloaded_ea_status_reason = "gateway_status_not_observed"
+    mt5_account_binding_id = None
     order_history = {
         "schemaVersion": "metafx-hq-mt4-order-history-v1",
         "available": False,
@@ -56301,7 +57084,34 @@ def mt4_trade_gateway_status_read_model() -> dict:
                     reason_code="terminal_selection_changed_during_status_read",
                     init_status=init_status,
                 )
-            gateway = _mt4_trade_gateway_instance()
+            if public_candidate.get("platform") == "mt5":
+                preloaded_ea_status, preloaded_ea_status_reason = (
+                    _read_mt4_trade_gateway_ea_status(public_candidate)
+                )
+                if preloaded_ea_status is None:
+                    return _empty_mt4_trade_gateway_status(
+                        selected_candidate=public_candidate,
+                        status="awaiting_ea",
+                        reason_code=preloaded_ea_status_reason,
+                        init_status=init_status,
+                    )
+                mt5_account_binding_id, binding_reason = (
+                    _validated_mt5_wire_binding(
+                        record,
+                        public_candidate,
+                        ea_status=preloaded_ea_status,
+                    )
+                )
+                if not mt5_account_binding_id:
+                    return _empty_mt4_trade_gateway_status(
+                        selected_candidate=public_candidate,
+                        status="execution_guard_blocked",
+                        reason_code=binding_reason,
+                        init_status=init_status,
+                    )
+            gateway = _mt4_trade_gateway_instance(
+                mt5_account_binding_id=mt5_account_binding_id
+            )
             # Key provisioning is backend-owned and returns only public
             # metadata.  The key material and filesystem path never enter this
             # read model, an audit event, or the Frontend response.
@@ -56390,7 +57200,13 @@ def mt4_trade_gateway_status_read_model() -> dict:
             })
         except Exception:
             note_observability_failure("command_expired_audit_failed")
-    ea_status, reason_code = _read_mt4_trade_gateway_ea_status(public_candidate)
+    if preloaded_ea_status is not None:
+        ea_status, reason_code = (
+            preloaded_ea_status,
+            preloaded_ea_status_reason,
+        )
+    else:
+        ea_status, reason_code = _read_mt4_trade_gateway_ea_status(public_candidate)
     init_status = _reconcile_mt4_trade_gateway_init_status(init_status, ea_status)
     backend_signing_key_id = str(signing_key_metadata.get("keyId") or "")
     backend_signature_algorithm = str(
@@ -56427,7 +57243,7 @@ def mt4_trade_gateway_status_read_model() -> dict:
             1_000_000,
         ),
         "singleOutstanding": backend_status.get("singleOutstanding") is True,
-        "eaSizingPolicy": "ea_input_only",
+        "eaSizingPolicy": "ea_money_management_inputs_only",
         "ledgerRevision": clamp_int(
             backend_status.get("ledgerRevision"),
             0,
@@ -56507,6 +57323,24 @@ def mt4_trade_gateway_status_read_model() -> dict:
         == "same_windows_user_file_common"
         and ea_status.get("crossVpsDistributedLock") is False
     )
+    live_safety_scope = (
+        "single_windows_user_file_common_only"
+        if public_candidate.get("platform") == "mt5"
+        and ea_status.get("liveSafetyScope")
+        == "single_windows_user_file_common_only"
+        and ea_status.get("concurrencyBoundary")
+        == "same_windows_user_file_common"
+        and ea_status.get("crossVpsDistributedLock") is False
+        else None
+    )
+    single_host_live_acknowledgement_ready = bool(
+        public_candidate.get("platform") != "mt5"
+        or (
+            ea_status.get("singleHostLiveAcknowledged") is True
+            and live_safety_scope
+            == "single_windows_user_file_common_only"
+        )
+    )
     base_trade_ready = (
         ea_status["autoTradingAllowed"] is True
         and ea_status["tradeAllowed"] is True
@@ -56566,6 +57400,7 @@ def mt4_trade_gateway_status_read_model() -> dict:
         and base_trade_ready
         and live_signed_execution_ready
         and backend_public["liveExecutionAvailable"] is True
+        and single_host_live_acknowledgement_ready
     )
     public_status = (
         "legacy_status_read_only"
@@ -56605,6 +57440,11 @@ def mt4_trade_gateway_status_read_model() -> dict:
             "barClaimWillBeRetained": True,
             "automaticRetry": False,
         }
+    public_ea_status = {
+        key: value
+        for key, value in ea_status.items()
+        if not str(key).startswith("_wire")
+    }
     result = {
         **_empty_mt4_trade_gateway_status(
             selected_candidate=public_candidate,
@@ -56612,7 +57452,7 @@ def mt4_trade_gateway_status_read_model() -> dict:
             init_status=init_status,
             order_history=order_history,
         ),
-        **ea_status,
+        **public_ea_status,
         "selectionRevision": selection_revision,
         "connected": True,
         "status": public_status,
@@ -56620,16 +57460,31 @@ def mt4_trade_gateway_status_read_model() -> dict:
             ea_status["executionGuardReady"] is True
             and portfolio_policy_evidence_ready
             and (mode == "shadow" or account_identity_available)
+            and (
+                mode != "live"
+                or public_candidate.get("platform") != "mt5"
+                or single_host_live_acknowledgement_ready
+            )
         ),
         "executionGuardReason": (
             "PORTFOLIO_POLICY_EVIDENCE_REQUIRED"
             if not portfolio_policy_evidence_ready
+            else "SINGLE_HOST_LIVE_ACK_REQUIRED"
+            if (
+                public_candidate.get("platform") == "mt5"
+                and mode == "live"
+                and not single_host_live_acknowledgement_ready
+            )
             else str(ea_status["executionGuardReason"])
             if account_identity_available
             else "ACCOUNT_IDENTITY_UNAVAILABLE"
         ),
         "accountModeMatchesGateway": account_mode_matches_gateway,
         "signingKeyMatch": signing_key_match,
+        "singleHostLiveAcknowledged": (
+            ea_status.get("singleHostLiveAcknowledged") is True
+        ),
+        "liveSafetyScope": live_safety_scope,
         "reasonCode": (
             "ready"
             if public_status in {"shadow", "demo_ready", "live_ready", "ready"}
@@ -56641,6 +57496,10 @@ def mt4_trade_gateway_status_read_model() -> dict:
             if mode == "demo" and demo_account is False
             else "live_mode_requires_non_demo_account"
             if mode == "live" and demo_account is True
+            else "single_host_live_ack_required"
+            if public_candidate.get("platform") == "mt5"
+            and mode == "live"
+            and not single_host_live_acknowledgement_ready
             else "execution_guard_not_ready"
             if public_status == "execution_guard_blocked"
             else "live_arm_not_enabled"
@@ -56839,7 +57698,7 @@ def _ai_trade_council_pending_matches_current_closed_bar(
 ) -> bool:
     """Bind trade eligibility to immutable stream/bar identity, not tick state.
 
-    ``snapshotId`` intentionally covers the complete MT4 snapshot, including
+    ``snapshotId`` intentionally covers the complete MetaTrader snapshot, including
     quote/risk fields that can change on every EA publication.  A Council round
     analyzes the durable artifact captured for one closed bar; it remains the
     current bar while candidate, stream, broker symbol, timeframe, and closed
@@ -58134,7 +58993,17 @@ def _empty_metatrader_snapshot_read_model(
 ) -> dict:
     candidate_id = safe_reference((selected_candidate or {}).get("candidateId"))
     platform = str((selected_candidate or {}).get("platform") or "") or None
-    source_ready = METATRADER_SNAPSHOT_SOURCE_PATH.is_file()
+    source_path = (
+        METATRADER_MT5_UNIFIED_EA_SOURCE_PATH
+        if platform == "mt5"
+        else METATRADER_SNAPSHOT_SOURCE_PATH
+    )
+    source_ready = source_path.is_file()
+    source_asset = (
+        "integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5"
+        if platform == "mt5"
+        else "artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/MetafxHQTradeGateway.mq4"
+    )
     requested_analysis_bars = _configured_ai_trade_council_analysis_bar_count()
     empty_analysis_window = {
         "requestedBars": requested_analysis_bars,
@@ -58176,19 +59045,28 @@ def _empty_metatrader_snapshot_read_model(
             "ready": False,
             "status": status,
             "mode": "read_only",
-            "source": "mt4_file_common_snapshot",
+            "source": f"{platform or 'mt4'}_file_common_snapshot",
             "freshnessSeconds": METATRADER_SNAPSHOT_FRESH_SECONDS,
             "reasonCode": reason_code,
             "orderSubmissionAvailable": False,
         },
         "installPreparation": {
             "sourceReady": source_ready,
-            "sourceAsset": "artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/MetafxHQTradeGateway.mq4",
+            "sourceAsset": source_asset,
+            "sourceDownloadUrl": (
+                f"/api/integrations/metatrader/gateway-source/{platform}"
+                if platform in {"mt4", "mt5"}
+                else None
+            ),
             "sourceDisplayName": "MetafxHQ AI Council EA",
             "installKind": "expert_advisor",
             "defaultGatewayMode": "shadow",
             "provides": ["snapshot_telemetry", "guarded_trade_command_gateway"],
-            "fallbackSourceAsset": "integrations/mt4-readonly/MetafxHQReadOnlySnapshot.mq4",
+            "fallbackSourceAsset": (
+                None
+                if platform == "mt5"
+                else "integrations/mt4-readonly/MetafxHQReadOnlySnapshot.mq4"
+            ),
             "snapshotChannel": candidate_id,
             "requiresVisibleAttach": True,
             "automaticAttachAvailable": False,
@@ -58302,12 +59180,14 @@ def _metatrader_snapshot_file(candidate_id: str) -> Path | None:
 
 
 def _legacy_metatrader_snapshot_file(record: dict, candidate_id: str) -> Path | None:
-    """Resolve only the selected terminal's old MQL4/Files snapshot location."""
+    """Resolve only the selected terminal's platform-specific legacy snapshot."""
     if not candidate_id.startswith("mtc-") or not SAFE_ID_PATTERN.fullmatch(candidate_id):
         return None
     data_path_value = str(record.get("dataPath") or "").strip()
     local_path_value = str(record.get("localPath") or "").strip()
-    if not data_path_value or not local_path_value:
+    platform = str(record.get("platform") or "").strip().lower()
+    platform_directory = {"mt4": "MQL4", "mt5": "MQL5"}.get(platform)
+    if not data_path_value or not local_path_value or not platform_directory:
         return None
     try:
         data_path = Path(data_path_value).resolve(strict=False)
@@ -58315,10 +59195,10 @@ def _legacy_metatrader_snapshot_file(record: dict, candidate_id: str) -> Path | 
         if (
             data_path != local_path
             or not data_path.is_dir()
-            or not (data_path / "MQL4").is_dir()
+            or not (data_path / platform_directory).is_dir()
         ):
             return None
-        files_root = (data_path / "MQL4" / "Files").resolve(strict=False)
+        files_root = (data_path / platform_directory / "Files").resolve(strict=False)
         snapshot_path = (
             files_root
             / "MetafxHQ"
@@ -58338,11 +59218,109 @@ def _metatrader_snapshot_source_files(
     sources = []
     common_path = _metatrader_snapshot_file(candidate_id)
     if common_path is not None:
-        sources.append(("mt4_file_common_snapshot", common_path))
+        platform = str(record.get("platform") or "").strip().lower()
+        sources.append((f"{platform}_file_common_snapshot", common_path))
     legacy_path = _legacy_metatrader_snapshot_file(record, candidate_id)
     if legacy_path is not None and legacy_path != common_path:
-        sources.append(("mt4_terminal_local_snapshot_legacy", legacy_path))
+        platform = str(record.get("platform") or "").strip().lower()
+        sources.append((f"{platform}_terminal_local_snapshot_legacy", legacy_path))
     return sources
+
+
+def _read_mt5_snapshot_wire_binding(
+    record: dict,
+    candidate_id: str,
+) -> tuple[dict | None, str]:
+    """Read the newest MT5 snapshot's private platform/account binding.
+
+    The opaque digest is used only to authenticate the local wire.  It must
+    never be copied into a frontend model, audit event, log, or report.
+    """
+
+    observed_sources = []
+    unreadable_source = False
+    for _source_name, source_path in _metatrader_snapshot_source_files(
+        record,
+        candidate_id,
+    ):
+        try:
+            stat = source_path.stat()
+            if source_path.is_file():
+                observed_sources.append((stat.st_mtime_ns, source_path, stat))
+        except FileNotFoundError:
+            continue
+        except (OSError, PermissionError):
+            unreadable_source = True
+    if not observed_sources:
+        return None, (
+            "gateway_account_binding_snapshot_unreadable"
+            if unreadable_source
+            else "gateway_account_binding_snapshot_not_observed"
+        )
+    _, snapshot_path, snapshot_stat = max(observed_sources)
+    if (
+        snapshot_stat.st_size <= 0
+        or snapshot_stat.st_size > METATRADER_SNAPSHOT_MAX_BYTES
+    ):
+        return None, "gateway_account_binding_snapshot_invalid"
+    try:
+        raw = snapshot_path.read_bytes()
+        payload = json.loads(raw.decode("utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None, "gateway_account_binding_snapshot_invalid"
+    binding_id = str(payload.get("accountBindingId") or "") if isinstance(payload, dict) else ""
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schemaVersion") != METATRADER_SNAPSHOT_SCHEMA_VERSION
+        or payload.get("adapterId") != candidate_id
+        or payload.get("mode") != "read_only"
+        or payload.get("terminalPlatform") != "mt5"
+        or not re.fullmatch(r"[0-9a-f]{64}", binding_id)
+        or _snapshot_has_forbidden_keys(payload)
+    ):
+        return None, "gateway_account_binding_snapshot_invalid"
+    return {
+        "terminalPlatform": "mt5",
+        "accountBindingId": binding_id,
+        "snapshotId": hashlib.sha256(raw).hexdigest(),
+    }, "ready"
+
+
+def _validated_mt5_wire_binding(
+    record: dict,
+    selected_candidate: dict,
+    *,
+    ea_status: dict | None = None,
+    expected_snapshot_id: str | None = None,
+) -> tuple[str | None, str]:
+    if str(selected_candidate.get("platform") or "").lower() != "mt5":
+        return None, "gateway_account_binding_platform_invalid"
+    status = ea_status
+    if status is None:
+        status, status_reason = _read_mt4_trade_gateway_ea_status(
+            selected_candidate
+        )
+        if status is None:
+            return None, status_reason
+    candidate_id = str(selected_candidate.get("candidateId") or "")
+    snapshot_binding, snapshot_reason = _read_mt5_snapshot_wire_binding(
+        record,
+        candidate_id,
+    )
+    if snapshot_binding is None:
+        return None, snapshot_reason
+    status_platform = status.get("_wirePlatform")
+    status_binding = str(status.get("_wireAccountBindingId") or "")
+    if status_platform != "mt5" or not re.fullmatch(r"[0-9a-f]{64}", status_binding):
+        return None, "gateway_account_binding_status_invalid"
+    if status_binding != snapshot_binding["accountBindingId"]:
+        return None, "gateway_account_binding_mismatch"
+    if (
+        expected_snapshot_id is not None
+        and expected_snapshot_id != snapshot_binding["snapshotId"]
+    ):
+        return None, "gateway_snapshot_changed_before_publish"
+    return status_binding, "ready"
 
 
 def metatrader_snapshot_read_model(prop_id: str) -> dict:
@@ -58386,11 +59364,11 @@ def metatrader_snapshot_read_model(prop_id: str) -> dict:
             "not_selected",
             "selected_terminal_missing",
         ))
-    if candidate_public.get("platform") != "mt4":
+    if candidate_public.get("platform") not in {"mt4", "mt5"}:
         return stable_snapshot_result(_empty_metatrader_snapshot_read_model(
             prop_id,
             "unsupported_platform",
-            "mt4_snapshot_adapter_required",
+            "metatrader_snapshot_adapter_required",
             selected_candidate=candidate_public,
         ))
     candidate_id = str(candidate_public["candidateId"])
@@ -58420,7 +59398,7 @@ def metatrader_snapshot_read_model(prop_id: str) -> dict:
         if source_is_file:
             observed_sources.append((
                 source_stat.st_mtime_ns,
-                source_name == "mt4_file_common_snapshot",
+                source_name.endswith("_file_common_snapshot"),
                 source_name,
                 source_path,
                 source_stat,
@@ -58458,11 +59436,29 @@ def metatrader_snapshot_read_model(prop_id: str) -> dict:
             "snapshot_json_invalid",
             selected_candidate=candidate_public,
         ))
+    selected_platform = str(candidate_public.get("platform") or "").lower()
     if (
         not isinstance(payload, dict)
         or payload.get("schemaVersion") != METATRADER_SNAPSHOT_SCHEMA_VERSION
         or payload.get("adapterId") != candidate_id
         or payload.get("mode") != "read_only"
+        or (
+            selected_platform == "mt5"
+            and (
+                payload.get("terminalPlatform") != "mt5"
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(payload.get("accountBindingId") or ""),
+                )
+            )
+        )
+        or (
+            selected_platform == "mt4"
+            and (
+                "terminalPlatform" in payload
+                or "accountBindingId" in payload
+            )
+        )
         or _snapshot_has_forbidden_keys(payload)
     ):
         return stable_snapshot_result(_empty_metatrader_snapshot_read_model(
@@ -58548,13 +59544,16 @@ def metatrader_snapshot_read_model(prop_id: str) -> dict:
         reason_code,
         selected_candidate=candidate_public,
     )
+    legacy_snapshot_source = snapshot_source.endswith(
+        "_terminal_local_snapshot_legacy"
+    )
     result["adapter"].update({
         "ready": snapshot_fresh,
         "status": status,
         "reasonCode": reason_code,
         "source": snapshot_source,
-        "legacyFallback": snapshot_source == "mt4_terminal_local_snapshot_legacy",
-        "migrationNeeded": snapshot_source == "mt4_terminal_local_snapshot_legacy",
+        "legacyFallback": legacy_snapshot_source,
+        "migrationNeeded": legacy_snapshot_source,
         "observedAt": modified_at.isoformat().replace("+00:00", "Z"),
         "ageSeconds": round(age_seconds, 1),
     })
@@ -61940,6 +62939,14 @@ def dashboard_connection_checklist(
             break
     if prop_id == AI_TRADE_COUNCIL_PROP_ID:
         snapshot_model = metatrader_snapshot_read_model(prop_id)
+        selected_platform = str(
+            snapshot_model.get("selectedPlatform") or ""
+        ).strip().upper()
+        platform_label = (
+            selected_platform
+            if selected_platform in {"MT4", "MT5"}
+            else "MT4 / MT5"
+        )
         snapshot_adapter = (
             snapshot_model.get("adapter")
             if isinstance(snapshot_model.get("adapter"), dict)
@@ -61990,13 +62997,13 @@ def dashboard_connection_checklist(
                         "รับ Snapshot กราฟและสรุปประจำวันจาก MetafxHQ AI Council EA แล้ว"
                         if snapshot_ready
                         else {
-                            "stale": "Snapshot ล่าสุดเก่าเกินกำหนด กรุณาตรวจ MetafxHQ AI Council EA ที่กราฟ MT4",
-                            "not_selected": "ยังไม่ได้เลือก MT4 เป้าหมายสำหรับ Analytics Console",
-                            "unsupported_platform": "จุดนี้ต้องเลือก MT4 สำหรับ MetafxHQ AI Council EA รุ่นปัจจุบัน",
+                            "stale": f"Snapshot ล่าสุดเก่าเกินกำหนด กรุณาตรวจ MetafxHQ AI Council EA ที่กราฟ {platform_label}",
+                            "not_selected": "ยังไม่ได้เลือก MT4 หรือ MT5 เป้าหมายสำหรับ Analytics Console",
+                            "unsupported_platform": "จุดนี้รองรับเฉพาะ MT4 หรือ MT5 สำหรับ MetafxHQ AI Council EA",
                             "invalid_snapshot": "พบไฟล์ Snapshot แต่ข้อมูลไม่ผ่าน Schema ความปลอดภัย",
                         }.get(
                             str(snapshot_adapter.get("status") or ""),
-                            "รอ Snapshot แรกจาก MetafxHQ AI Council EA บนกราฟ MT4 (ค่าเริ่มต้น Shadow ไม่ส่ง Order)",
+                            f"รอ Snapshot แรกจาก MetafxHQ AI Council EA บนกราฟ {platform_label} (ค่าเริ่มต้น Shadow ไม่ส่ง Order)",
                         )
                     ),
                     "checkedAt": chart_snapshot.get("observedAt"),
@@ -62034,9 +63041,9 @@ def dashboard_connection_checklist(
                 gateway_connected = trade_gateway.get("connected") is True
                 gateway_detail = (
                     f"MetafxHQ AI Council EA เชื่อมแล้วในโหมด {trade_gateway.get('mode')} "
-                    f"และใช้ Fixed Lot {trade_gateway.get('fixedLot')} จาก Inputs ของ EA"
+                    f"และใช้ {_trade_gateway_sizing_summary_th(trade_gateway)}"
                     if gateway_connected
-                    else "Source พร้อมแล้ว แต่ยังต้อง Compile และติด MetafxHQ AI Council EA ที่ MT4 เป้าหมาย"
+                    else f"Source พร้อมแล้ว แต่ยังต้อง Compile และติด MetafxHQ AI Council EA ที่ {platform_label} เป้าหมาย"
                 )
                 if gateway_init_message:
                     gateway_detail = f"{gateway_detail} • {gateway_init_message}"
@@ -62248,8 +63255,8 @@ def dashboard_connection_checklist(
         automation_enabled = bool(automation_config.get("enabled"))
         automation_reason = str(automation_state.get("reason") or "")
         reason_labels = {
-            "snapshot_stale": "เปิดอยู่ • รอ Snapshot ใหม่จาก MT4",
-            "snapshot_unavailable": "เปิดอยู่ • รอ Snapshot จาก MT4",
+            "snapshot_stale": f"เปิดอยู่ • รอ Snapshot ใหม่จาก {platform_label}",
+            "snapshot_unavailable": f"เปิดอยู่ • รอ Snapshot จาก {platform_label}",
             "baseline_required": "เปิดอยู่ • กำลังตั้งแท่งปัจจุบันเป็นจุดเริ่มต้น",
             "waiting_next_closed_bar": "เปิดอยู่ • รอแท่งใหม่ปิด",
             "unsupported_timeframe": "เปิดอยู่ • Timeframe นี้ใช้ปุ่มวิเคราะห์เอง",
@@ -62659,6 +63666,137 @@ def _assert_global_metatrader_selection_contract(
             )
 
 
+def _raise_ai_trade_council_target_switch_blocked(
+    code: str,
+    message_th: str,
+) -> None:
+    raise RequestError(
+        message_th,
+        409,
+        code=code,
+        response_payload={
+            "kind": "ai_trade_council_target_switch_blocked",
+            "code": code,
+            "messageTh": message_th,
+            "busy": True,
+        },
+    )
+
+
+def _assert_ai_trade_council_target_switch_safe_unlocked(
+    store: dict,
+    next_candidate_id: str,
+) -> None:
+    """Block split-brain Council target changes while execution is unresolved.
+
+    The caller must hold ``METATRADER_TARGETS_LOCK``.  That lock is also the
+    trade-gateway publish lock, so no command can cross the publish boundary
+    between this check and the durable selection revision update.
+    """
+
+    current_selection = store.get("selections", {}).get(AI_TRADE_COUNCIL_PROP_ID)
+    current_candidate_id = (
+        safe_reference(current_selection.get("candidateId"))
+        if isinstance(current_selection, dict)
+        else None
+    )
+    if not current_candidate_id or current_candidate_id == next_candidate_id:
+        return
+
+    try:
+        ledger_state = _mt4_trade_gateway_switch_guard_state()
+    except DataIntegrityError:
+        _raise_ai_trade_council_target_switch_blocked(
+            "target_switch_state_unavailable",
+            "ยังยืนยันสถานะคำสั่งเทรดเดิมไม่ได้ จึงยังไม่สลับ MT4 / MT5 เพื่อป้องกันคำสั่งซ้ำ",
+        )
+    if ledger_state.get("quarantinedExecutionUnknown") is True:
+        _raise_ai_trade_council_target_switch_blocked(
+            "target_switch_execution_unknown_quarantined",
+            "ยังมีคำสั่งที่ไม่ทราบผลจริงถูกกักกันไว้ ต้องตรวจสอบและ Reconcile ให้ชัดเจนก่อนสลับ MT4 / MT5",
+        )
+    if ledger_state.get("activeCommandId"):
+        if ledger_state.get("executionUnknown") is True:
+            _raise_ai_trade_council_target_switch_blocked(
+                "target_switch_execution_unknown",
+                "คำสั่งเดิมยังไม่ทราบผลการส่งจริง กรุณาตรวจสอบและ Reconcile ก่อนสลับ MT4 / MT5",
+            )
+        _raise_ai_trade_council_target_switch_blocked(
+            "target_switch_outstanding_command",
+            "ระบบยังมีคำสั่งเทรดเดิมค้างอยู่ กรุณารอให้จบหรือยกเลิกอย่างปลอดภัยก่อนสลับ MT4 / MT5",
+        )
+
+    current_record = store.get("candidates", {}).get(current_candidate_id)
+    current_candidate = (
+        _public_metatrader_candidate(current_record)
+        if isinstance(current_record, dict)
+        else None
+    )
+    if not current_candidate:
+        # Discovery availability may have changed since the binding was made,
+        # but an EA can still have left a channel status behind.  The status
+        # path is derived only from the already-validated opaque candidate id.
+        current_candidate = {
+            "candidateId": current_candidate_id,
+            "platform": str((current_record or {}).get("platform") or "")
+            if isinstance(current_record, dict)
+            else None,
+        }
+    ea_status, status_reason = _read_mt4_trade_gateway_ea_status(
+        current_candidate,
+        include_stale=True,
+    )
+    if status_reason == "gateway_status_not_observed":
+        # Missing status is safe only for a channel that has never crossed the
+        # durable command boundary.  An EA can be detached after a fill; its
+        # OnDeinit cleanup removes status/snapshot but cannot prove positions
+        # were closed, so command history makes absence fail closed.
+        command_channels = ledger_state.get("commandChannelIds")
+        if (
+            isinstance(command_channels, list)
+            and current_candidate_id not in command_channels
+        ):
+            return
+        _raise_ai_trade_council_target_switch_blocked(
+            "target_switch_state_unavailable",
+            "ไม่พบสถานะ EA เป้าหมายเดิมหลังเคยส่งคำสั่งแล้ว จึงยังไม่สลับ MT4 / MT5 จนกว่าจะยืนยันว่าไม่มีสถานะเปิด",
+        )
+    if (
+        status_reason != "ready"
+        or not isinstance(ea_status, dict)
+    ):
+        _raise_ai_trade_council_target_switch_blocked(
+            "target_switch_state_unavailable",
+            "สถานะ EA เป้าหมายเดิมไม่สดหรืออ่านไม่ได้ จึงยังไม่สลับ MT4 / MT5 เพื่อป้องกันสถานะซ้ำ",
+        )
+    telemetry_reason = str(
+        ea_status.get("executionGuardReason") or ""
+    ).strip().upper()
+    if telemetry_reason in {
+        "POSITION_TELEMETRY_UNAVAILABLE",
+        "HISTORY_TELEMETRY_UNAVAILABLE",
+    }:
+        _raise_ai_trade_council_target_switch_blocked(
+            "target_switch_state_unavailable",
+            "EA เป้าหมายเดิมยังยืนยัน Position และประวัติความเสี่ยงไม่ได้ จึงยังไม่สลับ MT4 / MT5",
+        )
+    managed_positions = ea_status.get("currentManagedPositions")
+    if (
+        not isinstance(managed_positions, int)
+        or isinstance(managed_positions, bool)
+        or managed_positions < 0
+    ):
+        _raise_ai_trade_council_target_switch_blocked(
+            "target_switch_state_unavailable",
+            "EA เป้าหมายเดิมยังไม่ยืนยันจำนวน Position ที่ดูแล จึงยังไม่สลับ MT4 / MT5",
+        )
+    if managed_positions > 0:
+        _raise_ai_trade_council_target_switch_blocked(
+            "target_switch_managed_positions_open",
+            "EA เป้าหมายเดิมยังดูแลสถานะเปิดอยู่ กรุณาปิดหรือย้ายสถานะอย่างปลอดภัยก่อนสลับ MT4 / MT5",
+        )
+
+
 def _assert_unambiguous_metatrader_candidate_unlocked(
     store: dict,
     platform: str,
@@ -62835,6 +63973,11 @@ def select_global_metatrader_target(platform: str, candidate_id: str) -> dict:
             selected_candidate = _public_metatrader_candidate(record)
             if not selected_candidate:
                 raise RequestError("เป้าหมายนี้ไม่พร้อมให้เลือก", 409)
+            if AI_TRADE_COUNCIL_PROP_ID in target_prop_ids:
+                _assert_ai_trade_council_target_switch_safe_unlocked(
+                    store,
+                    candidate_id,
+                )
             previous_store = copy.deepcopy(store)
 
             for prop_id in target_prop_ids:
@@ -62946,16 +64089,13 @@ def select_global_metatrader_target(platform: str, candidate_id: str) -> dict:
         except Exception:
             observability_warnings.append("mission_write_failed")
 
-        if normalized_platform == "mt4":
-            next_actions = [
-                "ใช้ Channel ID เดียวกันใน SnapshotChannel ของ MetafxHQ AI Council EA",
-                "โรงงาน EA และห้องทดลองยังต้องรอ Adapter/หลักฐาน Compile หรือ Strategy Tester จริง",
-            ]
-        else:
-            next_actions = [
-                "โรงงาน EA และห้องทดลองรับ MT5 เป้าหมายกลางแล้ว",
-                "ยังต้องรอ Adapter/หลักฐาน Compile หรือ Strategy Tester จริงก่อนอ้างว่ารันสำเร็จ",
-            ]
+        next_actions = [
+            (
+                f"Compile และติด MetafxHQ AI Council EA สำหรับ "
+                f"{normalized_platform.upper()} ที่เลือก แล้วใช้ Channel ID เดียวกันใน SnapshotChannel"
+            ),
+            "โรงงาน EA และห้องทดลองยังต้องรอ Adapter/หลักฐาน Compile หรือ Strategy Tester จริง",
+        ]
         # The selection and its authoritative read-back above are the committed
         # operation. Reports, mission bookkeeping, and audit logs are useful
         # observability, but a later disk/logging failure must never turn a
@@ -63280,7 +64420,7 @@ def select_metatrader_target(prop_id: str, candidate_id: str) -> dict:
                 "adapterReady": snapshot_adapter.get("ready") is True,
             },
             "risks": ["การเลือกเป้าหมายไม่เท่ากับเชื่อมต่อเพื่อ Backtest, Optimization หรือ Trading"],
-            "nextActions": ["Compile และติดตั้ง MetafxHQ AI Council EA บนกราฟ MT4 ที่เลือก", "เริ่มด้วย Shadow Mode แล้วรอ Snapshot ล่าสุด", "ยังไม่เปิด Demo/Live จนกว่าจะทดสอบ Gateway"],
+            "nextActions": [f"Compile และติดตั้ง MetafxHQ AI Council EA บนกราฟ {selected_candidate['platform'].upper()} ที่เลือก", "เริ่มด้วย Shadow Mode แล้วรอ Snapshot ล่าสุด", "ยังไม่เปิด Demo/Live จนกว่าจะทดสอบ Gateway"],
             "safety": {"approvalRequired": False, "publicShareable": False},
         })
         _complete_diagnostic_mission(mission, report, "บันทึกเป้าหมาย MT4 / MT5 ใน Local Runner แล้ว โดยยังไม่ได้เปิดหรือสั่งงาน Terminal")
@@ -63378,7 +64518,7 @@ def _run_ai_trade_council_analysis_unlocked(
     automation_context: dict | None = None,
     _snapshot_model: dict | None = None,
 ) -> dict:
-    """Queue exactly three snapshot-bound Codex analyses; never control MT4."""
+    """Queue three snapshot-bound analyses without controlling MT4 or MT5."""
     if not isinstance(payload, dict) or set(payload) - {
         "propId",
         "snapshotId",
@@ -63416,6 +64556,14 @@ def _run_ai_trade_council_analysis_unlocked(
         if isinstance(_snapshot_model, dict)
         else metatrader_snapshot_read_model(prop_id)
     )
+    selected_platform = str(
+        snapshot_model.get("selectedPlatform") or ""
+    ).strip().upper()
+    platform_label = (
+        selected_platform
+        if selected_platform in {"MT4", "MT5"}
+        else "MT4 / MT5"
+    )
     if _snapshot_model is None:
         try:
             evaluate_ai_trade_council_outcomes(snapshot_model)
@@ -63432,7 +64580,7 @@ def _run_ai_trade_council_analysis_unlocked(
         or not re.fullmatch(r"[0-9a-f]{64}", str(chart.get("snapshotId") or ""))
     ):
         raise RequestError(
-            "ยังไม่มี Snapshot กราฟ MT4 ที่สดพอสำหรับ Agent ทั้ง 3 ตัว กรุณาติดตั้ง MetafxHQ AI Council EA ในโหมด Shadow แล้วรอข้อมูลล่าสุด",
+            f"ยังไม่มี Snapshot กราฟ {platform_label} ที่สดพอสำหรับ Agent ทั้ง 3 ตัว กรุณาติดตั้ง MetafxHQ AI Council EA ในโหมด Shadow แล้วรอข้อมูลล่าสุด",
             409,
         )
     requested_snapshot_id = str(payload.get("snapshotId") or "").strip()
@@ -71651,7 +72799,8 @@ def ai_trade_council_consensus(parent: dict, children: list[dict]) -> dict:
     )
     if not horizon_identity_valid:
         quality_reasons.append("decision_horizon_identity_invalid")
-    # validUntilBarTime remains in MT4 broker-clock domain for exact vote/bar
+    # validUntilBarTime remains in the selected MetaTrader broker-clock domain
+    # for exact vote/bar
     # binding.  Never compare it to UTC.  The UTC round deadline is the sole
     # authoritative expiry gate for both consensus and command dispatch.
     horizon_expired = round_expired
@@ -71998,7 +73147,7 @@ def ai_trade_council_consensus(parent: dict, children: list[dict]) -> dict:
             "protectivePlanProvenance": protective_plan.get(
                 "protectivePlanProvenance"
             ),
-            "lotPolicy": "ea_fixed_lot_only",
+            "lotPolicy": "ea_owned_fixed_or_risk_percent",
             "aiLotAllowed": False,
         }
         if decision in {"BUY", "SELL"}
@@ -72027,7 +73176,7 @@ def ai_trade_council_consensus(parent: dict, children: list[dict]) -> dict:
             "protectivePlanProvenance": protective_plan.get(
                 "protectivePlanProvenance"
             ),
-            "lotPolicy": "ea_fixed_lot_only",
+            "lotPolicy": "ea_owned_fixed_or_risk_percent",
             "aiLotAllowed": False,
         }
     )
@@ -72293,6 +73442,14 @@ def _ai_trade_council_gateway_result(
         "mode": observed_gateway.get("mode"),
         "fixedLot": observed_gateway.get("fixedLot"),
         "fixedLotSource": "ea_input_read_only",
+        "positionSizingMode": observed_gateway.get("positionSizingMode"),
+        "riskPercent": observed_gateway.get("riskPercent"),
+        "riskCapitalBase": observed_gateway.get("riskCapitalBase"),
+        "estimatedCommissionPerLot": observed_gateway.get("estimatedCommissionPerLot"),
+        "brokerVolumeMin": observed_gateway.get("brokerVolumeMin"),
+        "brokerVolumeMax": observed_gateway.get("brokerVolumeMax"),
+        "brokerVolumeStep": observed_gateway.get("brokerVolumeStep"),
+        "sizingSource": "ea_input_read_only",
         "aiCanSetLotOrRisk": False,
         "liveArmed": observed_gateway.get("liveArmed") is True,
         "killSwitchActive": observed_gateway.get("killSwitchActive") is True,
@@ -72322,7 +73479,7 @@ def dispatch_ai_trade_council_trade_plan(
     parent: dict,
     consensus: dict,
 ) -> dict:
-    """Publish only a threshold-qualified Direction+SL+TP plan to the selected MT4 EA."""
+    """Publish a qualified Direction+SL+TP plan to the selected MetaTrader EA."""
     context = (
         parent.get("analysisContext")
         if isinstance(parent.get("analysisContext"), dict)
@@ -72947,7 +74104,7 @@ def dispatch_ai_trade_council_trade_plan(
         **managed_order_limit,
         "scope": "account_managed_magic_numbers",
         "eaInputUnchanged": True,
-        "fixedLotSource": "ea_input_only",
+        "fixedLotSource": "ea_money_management_inputs",
         "aiLotAllowed": False,
         "idempotentReplay": published.get("idempotentReplay") is True,
     })
@@ -73296,7 +74453,7 @@ def _refresh_parent_mission_locked(parent_mission_id: str | None) -> dict | None
                 gateway_message = (
                     "ผลโหวตหรือ Quality Gate ยังไม่ผ่านเกณฑ์ "
                     f"{council_consensus.get('requiredVotes') or 3}/3 "
-                    "จึงไม่มีคำสั่งส่งไป MT4"
+                    "จึงไม่มีคำสั่งส่งไปยัง EA ที่เลือก"
                 )
                 gateway_reason = str(
                     trade_gateway_result.get("reasonCode") or ""
@@ -73304,7 +74461,7 @@ def _refresh_parent_mission_locked(parent_mission_id: str | None) -> dict | None
                 if gateway_reason == "audit_only_backlog_never_dispatches":
                     gateway_message = (
                         "รอบนี้วิเคราะห์เพื่อ Audit เท่านั้น เพราะแท่งปิดไม่ใช่แท่ง"
-                        "ปัจจุบันแล้ว จึงไม่ส่งคำสั่งย้อนหลังไป MT4"
+                        "ปัจจุบันแล้ว จึงไม่ส่งคำสั่งย้อนหลังไปยัง EA ที่เลือก"
                     )
             elif trade_gateway_result.get("orderExecutionConfirmed") is True:
                 gateway_message = "EA ยืนยันการส่ง Order แล้ว และบันทึก ACK กลับสู่ Audit"
@@ -73319,7 +74476,7 @@ def _refresh_parent_mission_locked(parent_mission_id: str | None) -> dict | None
                 gateway_message = "แผนพร้อมแล้ว แต่กำลังรอให้ติดตั้งและเชื่อม Trade Gateway EA"
             else:
                 gateway_message = (
-                    "ยังไม่ส่งคำสั่งไป MT4 เพราะระบบป้องกันของ Trade Gateway "
+                    "ยังไม่ส่งคำสั่งไปยัง EA ที่เลือก เพราะระบบป้องกันของ Trade Gateway "
                     f"หยุดไว้ที่ {trade_gateway_result.get('reasonCode') or 'ไม่ทราบสาเหตุ'}"
                 )
             parent["result"] = (
@@ -78021,7 +79178,7 @@ def _expire_ai_trade_council_vote_mission(
             mission["errorCode"] = reason_code
             mission["result"] = (
                 "รอบวิเคราะห์สภา AI หมดเวลาก่อนเริ่มหรือก่อนจบ Agent จึงยกเลิกผลรอบนี้ "
-                "และไม่ส่งคำสั่งไป MT4"
+                "และไม่ส่งคำสั่งไปยัง EA ที่เลือก"
             )
             completed_at = utc_now()
             mission["completedAt"] = completed_at
@@ -78845,7 +80002,7 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                     "ok": False,
                     "workStatus": "blocked",
                     "status": "auto_claim_identity_changed",
-                    "message": "ข้อมูล Mission เปลี่ยนระหว่างรับงาน ระบบจึงหยุดก่อนเปิด Codex และไม่ส่งคำสั่งไป MT4",
+                    "message": "ข้อมูล Mission เปลี่ยนระหว่างรับงาน ระบบจึงหยุดก่อนเปิด Codex และไม่ส่งคำสั่งไปยัง EA ที่เลือก",
                     "blockedCapability": "auto_claim_identity_changed",
                 },
             )
@@ -79179,7 +80336,7 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                     "ok": False,
                     "workStatus": "blocked",
                     "status": "council_claim_context_invalid",
-                    "message": "ข้อมูลกำกับรอบวิเคราะห์สภา AI ไม่ครบหรือไม่ตรงกัน ระบบจึงหยุดก่อนหักโควตา เปิด Codex หรือส่งคำสั่งไป MT4",
+                    "message": "ข้อมูลกำกับรอบวิเคราะห์สภา AI ไม่ครบหรือไม่ตรงกัน ระบบจึงหยุดก่อนหักโควตา เปิด Codex หรือส่งคำสั่งไปยัง EA ที่เลือก",
                     "blockedCapability": "council_claim_context_invalid",
                 },
             )
@@ -79222,7 +80379,7 @@ def process_auto_mission(worker_id: str, mission: dict) -> None:
                     "ok": False,
                     "workStatus": "blocked",
                     "status": "local_rate_limited_after_claim",
-                    "message": "โควตาการทำงานภายในถูกใช้โดยงานอื่นหลังรับสิทธิ์ ระบบจึงหยุดก่อนเปิด Codex และไม่ส่งคำสั่งไป MT4",
+                    "message": "โควตาการทำงานภายในถูกใช้โดยงานอื่นหลังรับสิทธิ์ ระบบจึงหยุดก่อนเปิด Codex และไม่ส่งคำสั่งไปยัง EA ที่เลือก",
                     "blockedCapability": "local_rate_limited_after_claim",
                     "retryAfterSeconds": retry_after,
                 },
@@ -80915,6 +82072,3418 @@ def run_agent_chat_request(payload: dict) -> dict:
             AGENT_CHAT_INFLIGHT.discard(scope_digest)
 
 
+FULL_AGENT_REASONING_ALLOWLIST = (
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+)
+# Chat is the only executable mode until the Workspace approval surface can
+# bind every write/escalation to an explicit, one-shot human decision.  Merely
+# bounding writable roots is not sufficient because approvalPolicy=never can
+# still permit destructive changes inside those roots.
+FULL_AGENT_EXECUTABLE_MODES = frozenset({"chat"})
+# The live Codex write sentinel failed: workspace-write changed the sentinel
+# file without first emitting an approval request.  This must remain False
+# until a later pinned SDK is retested and proves that every mutation asks
+# first and a decline leaves the workspace unchanged.  A durable approval
+# journal and bounded deferred-reader adapter exist, but scaffolding alone is
+# never a reason to infer Workspace readiness after restart.
+FULL_AGENT_INTERACTIVE_APPROVAL_BROKER_ENABLED = False
+FULL_AGENT_TURN_TIMEOUT_SECONDS = 10 * 60
+FULL_AGENT_INTERRUPT_GRACE_SECONDS = 30
+FULL_AGENT_HTTP_RESPONSE_STRING_LIMIT = FULL_AGENT_MAX_CONTENT_CHARS
+FULL_AGENT_HTTP_RESPONSE_COLLECTION_LIMIT = 1000
+FULL_AGENT_MAX_OUTPUT_ARTIFACTS_PER_TURN = 12
+FULL_AGENT_MAX_OUTPUT_DIRECTORIES_PER_TURN = 64
+FULL_AGENT_MAX_OUTPUT_DEPTH = 4
+FULL_AGENT_MAX_OUTPUT_TOTAL_BYTES = 100 * 1024 * 1024
+FULL_AGENT_WORKSPACE_ROOTS = tuple(
+    path
+    for path in (
+        PROJECT_ROOT / "workspace",
+        PROJECT_ROOT / "frontend",
+        PROJECT_ROOT / "docs",
+        PROJECT_ROOT / "assets-source",
+    )
+    if path.exists() and path.is_dir()
+)
+
+
+def _full_agent_runtime_error(error: FullAgentRuntimeError) -> RequestError:
+    messages = {
+        "unknown_agent": "ไม่พบ Agent นี้ในรายชื่อที่ Backend อนุญาต",
+        "thread_not_found": "ไม่พบ Full Agent Thread นี้",
+        "thread_busy": "Agent กำลังทำ Turn ก่อนหน้าอยู่ กรุณารอหรือกดหยุดก่อน",
+        "thread_archived": "Thread นี้ถูกเก็บเข้าคลังแล้วและไม่รับงานใหม่",
+        "revision_conflict": "Thread มีการเปลี่ยนแปลงจากอีกคำขอ กรุณาโหลดข้อมูลล่าสุดแล้วลองใหม่",
+        "secret_blocked": "Risk Guard ปฏิเสธข้อความที่อาจมี Credential หรือข้อมูลลับ",
+        "idempotency_conflict": "รหัสคำขอนี้ถูกใช้กับข้อมูลอีกชุดหนึ่งแล้ว",
+        "invalid_request": "ข้อมูล Full Agent Runtime ไม่ครบหรือไม่อยู่ในรูปแบบที่อนุญาต",
+    }
+    code = str(getattr(error, "code", "full_agent_runtime_error") or "full_agent_runtime_error")
+    message = messages.get(code, "Full Agent Runtime ปฏิเสธคำขอนี้แบบ Fail Closed")
+    return RequestError(
+        message,
+        int(getattr(error, "status", 400) or 400),
+        code=code,
+        response_payload={"kind": code, "code": code, "messageTh": message},
+    )
+
+
+def _full_agent_gateway_error(error: Exception, *, default_code: str = "app_server_unavailable") -> RequestError:
+    raw_code = str(getattr(error, "code", "") or "")
+    code = raw_code if re.fullmatch(r"[a-z][a-z0-9_]{1,79}", raw_code) else default_code
+    status = 503
+    if code in {
+        "invalid_agent",
+        "invalid_mode",
+        "invalid_model",
+        "invalid_reasoning",
+        "invalid_prompt",
+        "invalid_workspace",
+        "secret_blocked",
+        "model_unavailable",
+        "reasoning_unavailable",
+    }:
+        status = 422
+    elif code in {
+        "thread_busy",
+        "approval_broker_required",
+        "approval_binding_mismatch",
+        "approval_decision_conflict",
+        "approval_expired",
+        "approval_not_pending",
+    }:
+        status = 409
+    messages = {
+        "sdk_missing": "Local Runner ยังไม่มี Codex App Server SDK ที่รองรับ",
+        "codex_binary_missing": "Local Runner ยังไม่พบ Codex Runtime ในเครื่อง",
+        "auth_required": "Codex Runtime ยังไม่ได้เข้าสู่ระบบ",
+        "model_unavailable": "โมเดลที่เลือกไม่พร้อมใช้งานใน Codex Runtime นี้",
+        "reasoning_unavailable": "ระดับ Reasoning นี้ไม่รองรับกับโมเดลที่เลือก",
+        "approval_broker_required": "โหมดนี้ต้องมีหน้าต่างอนุมัติ Tool แบบครั้งต่อครั้งก่อน",
+        "thread_busy": "Codex Thread นี้กำลังทำ Turn อื่นอยู่",
+        "secret_blocked": "Risk Guard ปฏิเสธข้อความที่อาจมี Credential หรือข้อมูลลับ",
+    }
+    message = messages.get(code, "Codex App Server ยังไม่พร้อมสำหรับคำขอนี้")
+    return RequestError(
+        message,
+        status,
+        code=code,
+        response_payload={"kind": code, "code": code, "messageTh": message},
+    )
+
+
+def _full_agent_runtime() -> FullAgentRuntime:
+    global FULL_AGENT_RUNTIME_INSTANCE, FULL_AGENT_RUNTIME_RECONCILED
+    with FULL_AGENT_RUNTIME_LOCK:
+        if FULL_AGENT_RUNTIME_INSTANCE is None:
+            FULL_AGENT_RUNTIME_INSTANCE = FullAgentRuntime(
+                FULL_AGENT_RUNTIME_DIR,
+                allowed_agents=EXPECTED_AGENT_IDS,
+                model_allowlist=FULL_AGENT_MODEL_ALLOWLIST,
+                reasoning_allowlist=FULL_AGENT_REASONING_ALLOWLIST,
+                default_model="gpt-6-sol",
+                default_reasoning="medium",
+                default_mode="chat",
+            )
+        runtime = FULL_AGENT_RUNTIME_INSTANCE
+        if not FULL_AGENT_RUNTIME_RECONCILED:
+            recovered = 0
+            recovered_missions = 0
+            recovered_completed_turns = 0
+            recovered_failed_turns = 0
+            report_fallbacks = 0
+            missing_missions = 0
+            try:
+                rows = runtime.list_threads(include_archived=True, limit=200)
+                for row in rows:
+                    active_turn = row.get("activeTurn") if isinstance(row, dict) else None
+                    if not isinstance(active_turn, dict):
+                        continue
+                    if active_turn.get("status") not in {"queued", "running", "interrupt_requested"}:
+                        continue
+                    thread_id = str(row.get("id") or "")
+                    turn_id = str(active_turn.get("id") or "")
+                    mission = find_mission_by_idempotency(
+                        f"full-agent-turn:{turn_id}"
+                    )
+                    recovered_turn_status = "failed"
+                    recovered_error_code = "bridge_restarted"
+                    if isinstance(mission, dict):
+                        mission_id = str(mission.get("id") or "")
+                        try:
+                            recovered_result = _full_agent_recover_mission_after_restart(
+                                mission,
+                                row,
+                            )
+                            recovered_turn_status = str(
+                                recovered_result.get("turnStatus") or "failed"
+                            )
+                            recovered_error_code = str(
+                                recovered_result.get("errorCode") or ""
+                            ) or None
+                            if recovered_result.get("reportFallback") is True:
+                                report_fallbacks += 1
+                            recovered_missions += 1
+                        except Exception:
+                            # Report persistence may fail independently from
+                            # the durable Mission store.  Terminalize the
+                            # Mission and emit the explicit report-failed
+                            # audit rather than leaving a permanent running
+                            # task after restart.
+                            _full_agent_fail_mission_without_report(
+                                mission_id,
+                                code="bridge_restarted",
+                                summary=_full_agent_error_message("bridge_restarted"),
+                            )
+                            report_fallbacks += 1
+                    else:
+                        missing_missions += 1
+                        append_audit({
+                            "type": "full_agent.restart_mission_missing",
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                            "idempotencyKeyDigest": payload_digest(
+                                f"full-agent-turn:{turn_id}"
+                            )[:16],
+                        })
+                    if recovered_turn_status == "completed":
+                        runtime.append_event(
+                            thread_id,
+                            role="system",
+                            content="Local Bridge เริ่มใหม่หลังบันทึกผลสำเร็จ และยืนยัน Turn จาก Mission/Report/Audit เดิมแล้ว",
+                            event_type="system_notice",
+                            metadata={"turnId": turn_id, "restartRecovered": True},
+                            idempotency_key=f"restart-completed:{turn_id}",
+                        )
+                        runtime.update_turn_state(
+                            thread_id,
+                            turn_id,
+                            status="completed",
+                        )
+                        recovered_completed_turns += 1
+                    else:
+                        error_code = recovered_error_code or "bridge_restarted"
+                        runtime.append_event(
+                            thread_id,
+                            role="system",
+                            content=_full_agent_error_message(error_code),
+                            event_type="error",
+                            metadata={"errorCode": error_code, "turnId": turn_id},
+                            idempotency_key=f"restart:{turn_id}:{error_code}",
+                        )
+                        runtime.update_turn_state(
+                            thread_id,
+                            turn_id,
+                            status="failed",
+                            error_code=error_code,
+                        )
+                        recovered_failed_turns += 1
+                    recovered += 1
+                if recovered:
+                    append_audit({
+                        "type": "full_agent.restart_reconciled",
+                        "recoveredTurns": recovered,
+                        "recoveredMissions": recovered_missions,
+                        "recoveredCompletedTurns": recovered_completed_turns,
+                        "recoveredFailedTurns": recovered_failed_turns,
+                        "reportFallbacks": report_fallbacks,
+                        "missingMissions": missing_missions,
+                    })
+            except Exception:
+                append_audit({
+                    "type": "full_agent.restart_reconcile_failed",
+                    "recoveredTurns": recovered,
+                })
+                raise
+            else:
+                FULL_AGENT_RUNTIME_RECONCILED = True
+        return runtime
+
+
+def _full_agent_artifact_store() -> FullAgentArtifactStore:
+    global FULL_AGENT_ARTIFACT_STORE_INSTANCE
+    with FULL_AGENT_ARTIFACTS_LOCK:
+        if FULL_AGENT_ARTIFACT_STORE_INSTANCE is None:
+            FULL_AGENT_ARTIFACT_STORE_INSTANCE = FullAgentArtifactStore(
+                FULL_AGENT_ARTIFACTS_DIR
+            )
+        return FULL_AGENT_ARTIFACT_STORE_INSTANCE
+
+
+def _full_agent_artifact_error(error: FullAgentArtifactError) -> RequestError:
+    message_th = {
+        "invalid_file_name": "ชื่อไฟล์แนบไม่ถูกต้อง",
+        "unsupported_file_type": "ชนิดไฟล์นี้ยังไม่รองรับ",
+        "upload_too_large": "ไฟล์แนบมีขนาดใหญ่เกินขอบเขตที่กำหนด",
+        "media_type_mismatch": "ชนิดข้อมูลของไฟล์ไม่ตรงกับนามสกุล",
+        "invalid_file_content": "เนื้อหาไฟล์ไม่ตรงกับรูปแบบที่ระบุ",
+        "artifact_store_full": "พื้นที่ไฟล์ของ Full Agent ถึงขอบเขตความปลอดภัยแล้ว",
+        "artifact_not_found": "ไม่พบไฟล์นี้ใน Thread",
+        "artifact_integrity_failed": "ไฟล์ไม่ผ่านการตรวจสอบความสมบูรณ์",
+    }.get(error.code, "Local Runner ปฏิเสธไฟล์นี้เพื่อความปลอดภัย")
+    return RequestError(
+        message_th,
+        int(error.status),
+        code=error.code,
+        response_payload={
+            "kind": error.code,
+            "code": error.code,
+            "messageTh": message_th,
+        },
+    )
+
+
+def _full_agent_path_is_link_or_reparse(path: Path) -> bool:
+    """Reject both POSIX links and Windows junction/reparse points."""
+
+    try:
+        if path.is_symlink():
+            return True
+        attributes = int(getattr(os.lstat(path), "st_file_attributes", 0) or 0)
+        return bool(attributes & 0x400)
+    except OSError:
+        return False
+
+
+def _full_agent_artifact_private_binding(artifact_id: object) -> dict:
+    """Read only the private owner tuple needed to call the bound store API.
+
+    Public artifact URLs intentionally contain no filesystem path and no owner
+    turn.  The immutable metadata file is therefore the durable authority used
+    to recover the exact ``threadId`` + ``turnId`` tuple before ``resolve`` or
+    ``download_metadata`` is called.  Any malformed record is indistinguishable
+    from a missing opaque id.
+    """
+
+    identifier = str(artifact_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,179}", identifier):
+        raise FullAgentArtifactError(
+            "artifact_not_found", "Artifact was not found.", status=404
+        )
+    store = _full_agent_artifact_store()
+    root = Path(store.root).resolve(strict=True)
+    metadata_path = root / f"{identifier}.meta.json"
+    try:
+        if (
+            metadata_path.parent.resolve(strict=True) != root
+            or not metadata_path.is_file()
+            or _full_agent_path_is_link_or_reparse(metadata_path)
+            or metadata_path.stat().st_size > 64 * 1024
+        ):
+            raise OSError("unsafe artifact metadata")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise FullAgentArtifactError(
+            "artifact_not_found", "Artifact was not found.", status=404
+        ) from error
+    thread_id = str(metadata.get("threadId") or "") if isinstance(metadata, dict) else ""
+    turn_id = str(metadata.get("turnId") or "") if isinstance(metadata, dict) else ""
+    direction = str(metadata.get("direction") or "") if isinstance(metadata, dict) else ""
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("id") != identifier
+        or metadata.get("state") != "ready"
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,179}", thread_id)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,179}", turn_id)
+        or direction not in {"input", "output"}
+    ):
+        raise FullAgentArtifactError(
+            "artifact_not_found", "Artifact was not found.", status=404
+        )
+    return {
+        "threadId": thread_id,
+        "turnId": turn_id,
+        "direction": direction,
+    }
+
+
+def _full_agent_workspace_output_directory(
+    thread_id: str,
+    turn_id: str,
+) -> tuple[Path, str]:
+    """Create one backend-owned, path-opaque output directory for a Turn."""
+
+    workspace_root = next(
+        (
+            Path(candidate)
+            for candidate in FULL_AGENT_WORKSPACE_ROOTS
+            if Path(candidate).name.casefold() == "workspace"
+        ),
+        None,
+    )
+    if workspace_root is None:
+        raise FullAgentArtifactError(
+            "unsafe_output_source", "Workspace output root is unavailable.", status=409
+        )
+    try:
+        resolved_workspace = workspace_root.resolve(strict=True)
+        if (
+            not resolved_workspace.is_dir()
+            or resolved_workspace == Path(resolved_workspace.anchor)
+            or _full_agent_path_is_link_or_reparse(workspace_root)
+            or _full_agent_path_is_link_or_reparse(resolved_workspace)
+        ):
+            raise OSError("unsafe workspace root")
+        managed_root = resolved_workspace / ".full-agent-outputs"
+        managed_root.mkdir(mode=0o700, exist_ok=True)
+        if (
+            managed_root.resolve(strict=True).parent != resolved_workspace
+            or _full_agent_path_is_link_or_reparse(managed_root)
+        ):
+            raise OSError("unsafe managed output root")
+        thread_component = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:32]
+        turn_component = hashlib.sha256(turn_id.encode("utf-8")).hexdigest()[:32]
+        thread_root = managed_root / thread_component
+        thread_root.mkdir(mode=0o700, exist_ok=True)
+        if (
+            thread_root.resolve(strict=True).parent != managed_root.resolve(strict=True)
+            or _full_agent_path_is_link_or_reparse(thread_root)
+        ):
+            raise OSError("unsafe thread output root")
+        turn_root = thread_root / turn_component
+        turn_root.mkdir(mode=0o700, exist_ok=True)
+        if (
+            turn_root.resolve(strict=True).parent != thread_root.resolve(strict=True)
+            or _full_agent_path_is_link_or_reparse(turn_root)
+        ):
+            raise OSError("unsafe turn output root")
+        # Reusing a non-empty directory could publish stale files after a crash
+        # or an id collision.  Fail closed instead of deleting user data.
+        if any(turn_root.iterdir()):
+            raise FullAgentArtifactError(
+                "output_directory_not_pristine",
+                "Generated artifact directory is not pristine.",
+                status=409,
+            )
+        relative = turn_root.relative_to(resolved_workspace).as_posix()
+        return turn_root.resolve(strict=True), relative
+    except FullAgentArtifactError:
+        raise
+    except OSError as error:
+        raise FullAgentArtifactError(
+            "unsafe_output_source", "Workspace output root is unavailable.", status=409
+        ) from error
+
+
+def _full_agent_output_files(turn_root: Path) -> list[Path]:
+    """Return a bounded, link-free snapshot of files below one Turn root."""
+
+    try:
+        resolved_root = turn_root.resolve(strict=True)
+    except OSError as error:
+        raise FullAgentArtifactError(
+            "unsafe_output_source", "Generated artifact root is unavailable.", status=409
+        ) from error
+    if (
+        not resolved_root.is_dir()
+        or _full_agent_path_is_link_or_reparse(turn_root)
+        or _full_agent_path_is_link_or_reparse(resolved_root)
+    ):
+        raise FullAgentArtifactError(
+            "unsafe_output_source", "Generated artifact root is unsafe.", status=409
+        )
+    files: list[Path] = []
+    directory_count = 0
+    total_bytes = 0
+    pending: list[tuple[Path, int]] = [(resolved_root, 0)]
+    try:
+        while pending:
+            directory, depth = pending.pop()
+            if _full_agent_path_is_link_or_reparse(directory):
+                raise FullAgentArtifactError(
+                    "unsafe_output_source", "Generated artifact tree contains a link.", status=409
+                )
+            entries = sorted(os.scandir(directory), key=lambda item: item.name.casefold())
+            for entry in entries:
+                path = Path(entry.path)
+                if entry.is_symlink() or _full_agent_path_is_link_or_reparse(path):
+                    raise FullAgentArtifactError(
+                        "unsafe_output_source", "Generated artifact tree contains a link.", status=409
+                    )
+                if entry.is_dir(follow_symlinks=False):
+                    directory_count += 1
+                    if (
+                        directory_count > FULL_AGENT_MAX_OUTPUT_DIRECTORIES_PER_TURN
+                        or depth + 1 > FULL_AGENT_MAX_OUTPUT_DEPTH
+                    ):
+                        raise FullAgentArtifactError(
+                            "too_many_output_artifacts",
+                            "Generated artifact directory tree exceeds the safe limit.",
+                            status=413,
+                        )
+                    pending.append((path, depth + 1))
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    raise FullAgentArtifactError(
+                        "unsafe_output_source", "Generated artifact tree contains an unsafe entry.", status=409
+                    )
+                resolved_file = path.resolve(strict=True)
+                resolved_file.relative_to(resolved_root)
+                size = int(entry.stat(follow_symlinks=False).st_size)
+                if size <= 0 or size > FULL_AGENT_MAX_OUTPUT_BYTES:
+                    raise FullAgentArtifactError(
+                        "artifact_too_large", "Generated artifact exceeds the safe limit.", status=413
+                    )
+                total_bytes += size
+                files.append(resolved_file)
+                if (
+                    len(files) > FULL_AGENT_MAX_OUTPUT_ARTIFACTS_PER_TURN
+                    or total_bytes > FULL_AGENT_MAX_OUTPUT_TOTAL_BYTES
+                ):
+                    raise FullAgentArtifactError(
+                        "too_many_output_artifacts",
+                        "Generated artifacts exceed the safe per-turn limit.",
+                        status=413,
+                    )
+    except FullAgentArtifactError:
+        raise
+    except (OSError, ValueError) as error:
+        raise FullAgentArtifactError(
+            "unsafe_output_source", "Generated artifact tree is unavailable.", status=409
+        ) from error
+    return sorted(files, key=lambda path: path.relative_to(resolved_root).as_posix().casefold())
+
+
+def _full_agent_cleanup_output_directory(
+    turn_root: Path | None,
+    *,
+    strict: bool,
+    thread_id: str | None = None,
+    turn_id: str | None = None,
+) -> bool:
+    """Remove only the exact backend-owned per-Turn directory, never a root."""
+
+    if turn_root is None or not turn_root.exists():
+        return True
+    try:
+        lexical_root = Path(turn_root)
+        resolved_root = lexical_root.resolve(strict=True)
+        thread_root = resolved_root.parent
+        managed_root = thread_root.parent
+        if (
+            not re.fullmatch(r"[0-9a-f]{32}", resolved_root.name)
+            or not re.fullmatch(r"[0-9a-f]{32}", thread_root.name)
+            or managed_root.name != ".full-agent-outputs"
+            or resolved_root == Path(resolved_root.anchor)
+            or _full_agent_path_is_link_or_reparse(lexical_root)
+            or _full_agent_path_is_link_or_reparse(resolved_root)
+            or _full_agent_path_is_link_or_reparse(thread_root)
+            or _full_agent_path_is_link_or_reparse(managed_root)
+        ):
+            raise OSError("output directory identity mismatch")
+
+        files: list[Path] = []
+        directories: list[Path] = []
+        pending = [resolved_root]
+        inspected = 0
+        while pending:
+            directory = pending.pop()
+            if _full_agent_path_is_link_or_reparse(directory):
+                raise OSError("linked output directory")
+            with os.scandir(directory) as iterator:
+                entries = list(iterator)
+            for entry in entries:
+                inspected += 1
+                if inspected > 512:
+                    raise OSError("output cleanup entry limit exceeded")
+                path = Path(entry.path)
+                if entry.is_symlink() or _full_agent_path_is_link_or_reparse(path):
+                    raise OSError("linked output entry")
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(resolved_root)
+                if entry.is_dir(follow_symlinks=False):
+                    directories.append(resolved)
+                    pending.append(resolved)
+                elif entry.is_file(follow_symlinks=False):
+                    files.append(resolved)
+                else:
+                    raise OSError("unsafe output entry")
+
+        for path in files:
+            if _full_agent_path_is_link_or_reparse(path):
+                raise OSError("output file changed before cleanup")
+            path.unlink()
+        for directory in sorted(
+            directories,
+            key=lambda value: len(value.relative_to(resolved_root).parts),
+            reverse=True,
+        ):
+            if _full_agent_path_is_link_or_reparse(directory):
+                raise OSError("output directory changed before cleanup")
+            directory.rmdir()
+        resolved_root.rmdir()
+        try:
+            thread_root.rmdir()
+        except OSError:
+            pass
+        append_audit({
+            "type": "full_agent.output_workspace_cleaned",
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "fileCount": len(files),
+            "directoryCount": len(directories) + 1,
+            "filesystemPathExposed": False,
+        })
+        return True
+    except (OSError, ValueError) as error:
+        append_audit({
+            "type": "full_agent.output_workspace_cleanup_failed",
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "reason": "unsafe_or_changed_output_tree",
+            "filesystemPathExposed": False,
+        })
+        if strict:
+            raise FullAgentArtifactError(
+                "output_cleanup_failed",
+                "Generated artifact workspace could not be cleaned safely.",
+                status=500,
+            ) from error
+        return False
+
+
+def _full_agent_publish_turn_outputs(
+    thread_id: str,
+    turn_id: str,
+    turn_root: Path | None,
+) -> list[dict]:
+    if turn_root is None:
+        return []
+    store = _full_agent_artifact_store()
+    published: list[dict] = []
+    try:
+        files = _full_agent_output_files(turn_root)
+        artifacts = store.publish_outputs(
+            thread_id,
+            turn_id,
+            files,
+            file_names=tuple(path.name for path in files),
+            allowed_roots=(turn_root,),
+        )
+        for artifact in artifacts:
+            public = _full_agent_artifact_public_model(thread_id, artifact)
+            published.append(public)
+        # Emit visibility/audit only after the complete batch is durable.
+        for public in published:
+            append_audit({
+                "type": "full_agent.artifact_published",
+                "threadId": thread_id,
+                "turnId": turn_id,
+                "artifactId": public.get("id"),
+                "mediaType": public.get("mediaType"),
+                "kind": public.get("kind"),
+                "byteSize": public.get("byteSize"),
+                "sha256": public.get("sha256"),
+                "expiresAt": public.get("expiresAt"),
+                "filesystemPathExposed": False,
+            })
+    except Exception:
+        _full_agent_cleanup_output_directory(
+            turn_root,
+            strict=False,
+            thread_id=thread_id,
+            turn_id=turn_id,
+        )
+        raise
+    _full_agent_cleanup_output_directory(
+        turn_root,
+        strict=True,
+        thread_id=thread_id,
+        turn_id=turn_id,
+    )
+    return published
+
+
+def _load_full_agent_gateway_module():
+    global FULL_AGENT_GATEWAY_MODULE
+    with FULL_AGENT_GATEWAY_LOCK:
+        if FULL_AGENT_GATEWAY_MODULE is not None:
+            return FULL_AGENT_GATEWAY_MODULE
+        if not FULL_AGENT_GATEWAY_MODULE_PATH.is_file():
+            raise RequestError(
+                "Local Runner ยังไม่มี Codex App Server Gateway",
+                503,
+                response_payload={
+                    "kind": "gateway_missing",
+                    "code": "gateway_missing",
+                    "messageTh": "Local Runner ยังไม่มี Codex App Server Gateway",
+                },
+            )
+        module_name = "metafx_codex_app_server_gateway"
+        spec = importlib.util.spec_from_file_location(module_name, FULL_AGENT_GATEWAY_MODULE_PATH)
+        if spec is None or spec.loader is None:
+            raise RequestError("โหลด Codex App Server Gateway ไม่สำเร็จ", 503)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(module_name, None)
+            raise RequestError(
+                "โหลด Codex App Server Gateway ไม่สำเร็จ",
+                503,
+                response_payload={
+                    "kind": "gateway_import_failed",
+                    "code": "gateway_import_failed",
+                    "messageTh": "โหลด Codex App Server Gateway ไม่สำเร็จ",
+                },
+            )
+        FULL_AGENT_GATEWAY_MODULE = module
+        return module
+
+
+def _full_agent_match_active_approval(
+    gateway_generation: str,
+    request: dict,
+) -> tuple[str, dict]:
+    gateway_thread_id = str(request.get("threadId") or "")
+    gateway_turn_id = str(request.get("turnId") or "")
+    request_id = str(request.get("requestId") or "")
+    with FULL_AGENT_ACTIVE_LOCK:
+        matches = []
+        for local_turn_id, active in FULL_AGENT_ACTIVE_TURNS.items():
+            if not isinstance(active, dict):
+                continue
+            # A server-initiated approval during Chat is a protocol/policy
+            # violation.  Never let it reach the browser merely because the
+            # shared gateway has an approval callback installed in a test.
+            if (
+                active.get("mode") != "workspace"
+                or "workspace" not in FULL_AGENT_EXECUTABLE_MODES
+                or not FULL_AGENT_INTERACTIVE_APPROVAL_BROKER_ENABLED
+            ):
+                continue
+            if active.get("gatewayGeneration") != gateway_generation:
+                continue
+            if active.get("gatewayThreadId") != gateway_thread_id:
+                continue
+            bound_gateway_turn = active.get("gatewayTurnId")
+            if bound_gateway_turn not in {None, gateway_turn_id}:
+                continue
+            if active.get("cancelRequested") is True:
+                continue
+            matches.append((local_turn_id, active))
+        if len(matches) != 1:
+            raise DataIntegrityError(
+                "Approval request is not bound to exactly one active HQ turn."
+            )
+        local_turn_id, active = matches[0]
+        bound_gateway_turn = active.get("gatewayTurnId")
+        if active.get("pendingApproval") is not None or active.get("approvalPreparing") is not None:
+            raise DataIntegrityError(
+                "Only one approval request may be pending for an HQ turn."
+            )
+        if bound_gateway_turn is None:
+            active["gatewayTurnId"] = gateway_turn_id
+        active["approvalPreparing"] = request_id
+        return local_turn_id, dict(active)
+
+
+def _full_agent_approval_pending(
+    gateway_generation: str,
+    request_value: object,
+) -> bool:
+    if not isinstance(request_value, dict):
+        raise DataIntegrityError("Approval request projection is invalid.")
+    request = copy.deepcopy(request_value)
+    local_turn_id, active_snapshot = _full_agent_match_active_approval(
+        gateway_generation,
+        request,
+    )
+    local_thread_id = str(active_snapshot.get("threadId") or "")
+    mission_id = str(active_snapshot.get("missionId") or "")
+    request_id = str(request.get("requestId") or "")
+    request_digest = str(request.get("requestDigest") or "")
+    try:
+        runtime = _full_agent_runtime()
+        runtime.append_event(
+            local_thread_id,
+            role="system",
+            content="Codex ขออนุมัติการลงมือทำหนึ่งครั้ง • ตรวจรายละเอียดแล้วเลือกอนุมัติหรือปฏิเสธ",
+            event_type="approval_request",
+            metadata={
+                "turnId": local_turn_id,
+                "missionId": mission_id,
+                "requestId": request_id,
+                "requestDigest": request_digest,
+                "actionType": str(request.get("actionType") or ""),
+                "expiresAt": str(request.get("expiresAt") or ""),
+            },
+            idempotency_key=f"tool-approval-request:{request_id}",
+        )
+        audit_event_id = "full-agent-approval-request-" + payload_digest(
+            gateway_generation,
+            local_thread_id,
+            local_turn_id,
+            mission_id,
+            request_id,
+            request_digest,
+        )[:24]
+        append_audit_once({
+            "eventId": audit_event_id,
+            "type": "full_agent.approval_requested",
+            "threadId": local_thread_id,
+            "turnId": local_turn_id,
+            "missionId": mission_id,
+            "requestId": request_id,
+            "requestDigest": request_digest,
+            "gatewayThreadId": request.get("threadId"),
+            "gatewayTurnId": request.get("turnId"),
+            "itemId": request.get("itemId"),
+            "gatewayGeneration": gateway_generation,
+            "actionType": request.get("actionType"),
+            "expiresAt": request.get("expiresAt"),
+            "rawParamsPersisted": False,
+            "absolutePathsPersisted": False,
+        })
+        binding = {
+            **request,
+            "localThreadId": local_thread_id,
+            "localTurnId": local_turn_id,
+            "missionId": mission_id,
+            "gatewayGeneration": gateway_generation,
+        }
+        with FULL_AGENT_ACTIVE_LOCK:
+            current = FULL_AGENT_ACTIVE_TURNS.get(local_turn_id)
+            if (
+                not isinstance(current, dict)
+                or current.get("approvalPreparing") != request_id
+                or current.get("cancelRequested") is True
+                or current.get("gatewayGeneration") != gateway_generation
+            ):
+                raise DataIntegrityError(
+                    "Approval request binding changed before publication."
+                )
+            current["pendingApproval"] = binding
+            current["approvalPreparing"] = None
+        return True
+    except Exception:
+        with FULL_AGENT_ACTIVE_LOCK:
+            current = FULL_AGENT_ACTIVE_TURNS.get(local_turn_id)
+            if isinstance(current, dict) and current.get("approvalPreparing") == request_id:
+                current["approvalPreparing"] = None
+        raise
+
+
+def _full_agent_prune_approval_tombstones_locked() -> None:
+    now = time.monotonic()
+    stale = [
+        request_id
+        for request_id, tombstone in FULL_AGENT_APPROVAL_TOMBSTONES.items()
+        if now - float(tombstone.get("resolvedMonotonic") or 0.0) > 600.0
+    ]
+    for request_id in stale:
+        FULL_AGENT_APPROVAL_TOMBSTONES.pop(request_id, None)
+    while len(FULL_AGENT_APPROVAL_TOMBSTONES) > 512:
+        oldest = next(iter(FULL_AGENT_APPROVAL_TOMBSTONES))
+        FULL_AGENT_APPROVAL_TOMBSTONES.pop(oldest, None)
+
+
+def _full_agent_approval_resolved(
+    gateway_generation: str,
+    request_value: object,
+    outcome_value: object,
+) -> bool:
+    if not isinstance(request_value, dict) or not isinstance(outcome_value, dict):
+        return False
+    request = copy.deepcopy(request_value)
+    outcome = copy.deepcopy(outcome_value)
+    request_id = str(request.get("requestId") or "")
+    request_digest = str(request.get("requestDigest") or "")
+    decision = str(outcome.get("decision") or "decline")
+    if decision not in {"accept_once", "decline"}:
+        decision = "decline"
+    idempotency_key = str(outcome.get("idempotencyKey") or "")
+    if not SAFE_IDEMPOTENCY_PATTERN.fullmatch(idempotency_key):
+        return False
+    reason = redact_text(str(outcome.get("reason") or "unknown"), 80)
+    # Serialize cancel-vs-decision through the same lock from the final binding
+    # check through the durable event/audit commit.  If Stop marked the turn
+    # first, accept_once is rejected and the gateway converts it to decline. If
+    # the decision commit acquired the lock first, it is the first terminal
+    # decision and Stop observes the resulting tombstone/pending removal.
+    with FULL_AGENT_ACTIVE_LOCK:
+        matches = []
+        for local_turn_id, active in FULL_AGENT_ACTIVE_TURNS.items():
+            pending = active.get("pendingApproval") if isinstance(active, dict) else None
+            if not isinstance(pending, dict):
+                continue
+            if (
+                active.get("mode") == "workspace"
+                and "workspace" in FULL_AGENT_EXECUTABLE_MODES
+                and FULL_AGENT_INTERACTIVE_APPROVAL_BROKER_ENABLED
+                and (decision == "decline" or active.get("cancelRequested") is not True)
+                and pending.get("requestId") == request_id
+                and pending.get("requestDigest") == request_digest
+                and pending.get("gatewayGeneration") == gateway_generation
+                and pending.get("threadId") == request.get("threadId")
+                and pending.get("turnId") == request.get("turnId")
+                and pending.get("itemId") == request.get("itemId")
+                and pending.get("decisionNonce") == request.get("decisionNonce")
+            ):
+                matches.append((local_turn_id, active, pending))
+        if len(matches) != 1:
+            return False
+        local_turn_id, current, pending = matches[0]
+        local_thread_id = str(current.get("threadId") or "")
+        mission_id = str(current.get("missionId") or "")
+        audit_event_id = "full-agent-approval-decision-" + payload_digest(
+            gateway_generation,
+            local_thread_id,
+            local_turn_id,
+            mission_id,
+            request_id,
+            request_digest,
+            decision,
+            reason,
+        )[:24]
+        try:
+            # This fsync-backed audit row is the single authoritative decision
+            # commit.  It occurs before the in-memory tombstone and before the
+            # SDK can receive accept.  The UI runtime event below is only a
+            # best-effort projection and can never turn a committed approval
+            # into a forced decline or create partial approved evidence.
+            append_audit_once({
+                "eventId": audit_event_id,
+                "type": "full_agent.approval_decided",
+                "threadId": local_thread_id,
+                "turnId": local_turn_id,
+                "missionId": mission_id,
+                "requestId": request_id,
+                "requestDigest": request_digest,
+                "gatewayThreadId": request.get("threadId"),
+                "gatewayTurnId": request.get("turnId"),
+                "itemId": request.get("itemId"),
+                "gatewayGeneration": gateway_generation,
+                "decision": decision,
+                "reason": reason,
+                "idempotencyKeyDigest": payload_digest(idempotency_key)[:16],
+                "oneShot": True,
+            })
+            FULL_AGENT_APPROVAL_TOMBSTONES[request_id] = {
+                "requestId": request_id,
+                "requestDigest": request_digest,
+                "decisionNonce": pending.get("decisionNonce"),
+                "decision": decision,
+                "idempotencyKey": idempotency_key,
+                "threadId": local_thread_id,
+                "turnId": local_turn_id,
+                "missionId": mission_id,
+                "gatewayThreadId": request.get("threadId"),
+                "gatewayTurnId": request.get("turnId"),
+                "gatewayGeneration": gateway_generation,
+                "itemId": request.get("itemId"),
+                "resolvedMonotonic": time.monotonic(),
+            }
+            _full_agent_prune_approval_tombstones_locked()
+            current["pendingApproval"] = None
+            current["approvalDecisionCount"] = int(
+                current.get("approvalDecisionCount") or 0
+            ) + 1
+        except Exception:
+            return False
+        try:
+            _full_agent_runtime().append_event(
+                local_thread_id,
+                role="system",
+                content=(
+                    "อนุมัติให้ Codex ลงมือทำคำขอนี้หนึ่งครั้งแล้ว"
+                    if decision == "accept_once"
+                    else "ปฏิเสธหรือหมดเวลาคำขอลงมือทำ • Codex จะไม่ได้รับสิทธิ์จากคำขอนี้"
+                ),
+                event_type="approval_decision",
+                metadata={
+                    "turnId": local_turn_id,
+                    "missionId": mission_id,
+                    "requestId": request_id,
+                    "requestDigest": request_digest,
+                    "decision": decision,
+                    "reason": reason,
+                    "idempotencyKeyDigest": payload_digest(idempotency_key)[:16],
+                    "authoritativeAuditEventId": audit_event_id,
+                },
+                idempotency_key=f"tool-approval-decision:{request_id}:{decision}:{reason}",
+            )
+        except Exception:
+            # Audit already committed; a presentation failure must not reverse
+            # the decision or make the endpoint report a false failure.
+            pass
+        return True
+
+
+def _full_agent_gateway():
+    global FULL_AGENT_GATEWAY_INSTANCE, FULL_AGENT_GATEWAY_GENERATION, FULL_AGENT_GATEWAY_GENERATION_OWNER
+    with FULL_AGENT_GATEWAY_LOCK:
+        if FULL_AGENT_GATEWAY_QUARANTINED:
+            raise RequestError(
+                "Codex App Server ถูกกักหลังการหยุด Turn ที่ยืนยันไม่ได้ กรุณาเริ่ม Local Bridge ใหม่",
+                503,
+                response_payload={
+                    "kind": "gateway_quarantined",
+                    "code": "gateway_quarantined",
+                    "messageTh": "Codex App Server ถูกกักหลังการหยุด Turn ที่ยืนยันไม่ได้ กรุณาเริ่ม Local Bridge ใหม่",
+                },
+            )
+        if FULL_AGENT_GATEWAY_INSTANCE is None:
+            module = _load_full_agent_gateway_module()
+            generation = f"fgw_{secrets.token_hex(16)}"
+            gateway_options = {
+                "cwd": str(PROJECT_ROOT),
+                # Only backend-owned, validated uploads may become localImage
+                # inputs.  Browser-supplied paths never reach the gateway.
+                "attachment_roots": (str(FULL_AGENT_ARTIFACTS_DIR),),
+            }
+            if FULL_AGENT_INTERACTIVE_APPROVAL_BROKER_ENABLED:
+                broker = module.ExplicitApprovalBroker(
+                    timeout_seconds=120.0,
+                    on_pending=lambda request, generation=generation: _full_agent_approval_pending(
+                        generation,
+                        request,
+                    ),
+                    on_resolved=lambda request, outcome, generation=generation: _full_agent_approval_resolved(
+                        generation,
+                        request,
+                        outcome,
+                    ),
+                    approval_journal=FullAgentApprovalJournal(
+                        FULL_AGENT_RUNTIME_DIR
+                    ),
+                )
+                gateway_options["approval_broker"] = broker
+                gateway_options["deferred_server_requests_supported"] = True
+            FULL_AGENT_GATEWAY_INSTANCE = module.CodexAppServerGateway(
+                **gateway_options,
+            )
+            FULL_AGENT_GATEWAY_GENERATION = generation
+            FULL_AGENT_GATEWAY_GENERATION_OWNER = FULL_AGENT_GATEWAY_INSTANCE
+        elif (
+            not FULL_AGENT_GATEWAY_GENERATION
+            or FULL_AGENT_GATEWAY_GENERATION_OWNER is not FULL_AGENT_GATEWAY_INSTANCE
+        ):
+            # Test doubles and a legacy in-process instance may be injected
+            # before this release's generation binding existed.  Assign a
+            # fresh opaque generation before returning the instance; never
+            # operate an unbound gateway.
+            FULL_AGENT_GATEWAY_GENERATION = f"fgw_{secrets.token_hex(16)}"
+            FULL_AGENT_GATEWAY_GENERATION_OWNER = FULL_AGENT_GATEWAY_INSTANCE
+        return FULL_AGENT_GATEWAY_INSTANCE
+
+
+def close_full_agent_gateway() -> None:
+    global FULL_AGENT_GATEWAY_INSTANCE, FULL_AGENT_GATEWAY_GENERATION, FULL_AGENT_GATEWAY_GENERATION_OWNER
+    with FULL_AGENT_GATEWAY_LOCK:
+        gateway = FULL_AGENT_GATEWAY_INSTANCE
+        FULL_AGENT_GATEWAY_INSTANCE = None
+        FULL_AGENT_GATEWAY_GENERATION = None
+        FULL_AGENT_GATEWAY_GENERATION_OWNER = None
+    if gateway is not None:
+        try:
+            gateway.close()
+        except Exception:
+            pass
+
+
+def _quarantine_full_agent_gateway(expected_gateway) -> bool:
+    """Detach and stop the exact timed-out gateway before capacity is reused.
+
+    ``turn/interrupt`` acknowledges only the request.  A gateway is reusable
+    only after its process is closed; otherwise a late completion waiter could
+    race a new Turn on the same SDK session.  If close cannot be confirmed the
+    bridge keeps the gateway quarantined until process restart.
+    """
+
+    global FULL_AGENT_GATEWAY_INSTANCE, FULL_AGENT_GATEWAY_QUARANTINED, FULL_AGENT_GATEWAY_GENERATION, FULL_AGENT_GATEWAY_GENERATION_OWNER
+    with FULL_AGENT_GATEWAY_LOCK:
+        if FULL_AGENT_GATEWAY_INSTANCE is expected_gateway:
+            FULL_AGENT_GATEWAY_INSTANCE = None
+            FULL_AGENT_GATEWAY_GENERATION = None
+            FULL_AGENT_GATEWAY_GENERATION_OWNER = None
+        FULL_AGENT_GATEWAY_QUARANTINED = True
+    closed = False
+    try:
+        expected_gateway.close()
+        process_state = getattr(expected_gateway, "process_state", None)
+        status = str(getattr(getattr(process_state, "status", None), "value", "") or "")
+        closed = status in {"stopped", "failed"} or process_state is None
+    except Exception:
+        closed = False
+    with FULL_AGENT_GATEWAY_LOCK:
+        if closed:
+            FULL_AGENT_GATEWAY_QUARANTINED = False
+    append_audit({
+        "type": "full_agent.gateway_quarantined",
+        "closed": closed,
+    })
+    return closed
+
+
+def _full_agent_sanitize_public_value(value: object, depth: int = 0):
+    if depth > JSON_RESPONSE_MAX_DEPTH:
+        return "[TRUNCATED]"
+    if isinstance(value, str):
+        return _full_agent_redact_response_text(
+            value,
+            FULL_AGENT_HTTP_RESPONSE_STRING_LIMIT,
+        )
+    if isinstance(value, list):
+        return [
+            _full_agent_sanitize_public_value(item, depth + 1)
+            for item in value[:FULL_AGENT_HTTP_RESPONSE_COLLECTION_LIMIT]
+        ]
+    if isinstance(value, dict):
+        cleaned = {}
+        for key, item in list(value.items())[:FULL_AGENT_HTTP_RESPONSE_COLLECTION_LIMIT]:
+            safe_key = str(key)[:120]
+            cleaned[safe_key] = (
+                None
+                if item is None
+                else "[REDACTED_SECRET]"
+            ) if is_sensitive_field_name(safe_key) else _full_agent_sanitize_public_value(
+                item,
+                depth + 1,
+            )
+        return cleaned
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _full_agent_redact_response_text(
+        value,
+        min(1000, FULL_AGENT_HTTP_RESPONSE_STRING_LIMIT),
+    )
+
+
+def _full_agent_public_thread(thread: dict) -> dict:
+    public = _full_agent_sanitize_public_value(copy.deepcopy(thread))
+    public["lifecycle"] = str(public.get("status") or "idle")
+    public["toolExecutionEnabled"] = bool(
+        public.get("mode") == "workspace"
+        and "workspace" in FULL_AGENT_EXECUTABLE_MODES
+    )
+    return public
+
+
+def full_agent_pending_approval(thread_id: str) -> dict:
+    try:
+        thread = _full_agent_runtime().get_thread(thread_id, include_events=False)
+    except FullAgentRuntimeError as error:
+        raise _full_agent_runtime_error(error)
+    active_turn = thread.get("activeTurn") if isinstance(thread, dict) else None
+    local_turn_id = str((active_turn or {}).get("id") or "")
+    if not local_turn_id:
+        return {"ok": True, "status": "ready", "approval": None}
+    with FULL_AGENT_ACTIVE_LOCK:
+        active = FULL_AGENT_ACTIVE_TURNS.get(local_turn_id)
+        pending = (
+            copy.deepcopy(active.get("pendingApproval"))
+            if isinstance(active, dict) and isinstance(active.get("pendingApproval"), dict)
+            else None
+        )
+    if not isinstance(pending, dict):
+        return {"ok": True, "status": "ready", "approval": None}
+    with FULL_AGENT_GATEWAY_LOCK:
+        gateway = FULL_AGENT_GATEWAY_INSTANCE
+        current_generation = FULL_AGENT_GATEWAY_GENERATION
+    if gateway is None or current_generation != pending.get("gatewayGeneration"):
+        return {"ok": True, "status": "ready", "approval": None}
+    try:
+        listed = gateway.approval_list(
+            thread_id=str(pending.get("threadId") or ""),
+            turn_id=str(pending.get("turnId") or ""),
+        )
+    except Exception:
+        return {"ok": True, "status": "ready", "approval": None}
+    exact = next(
+        (
+            item
+            for item in listed.get("approvals", [])
+            if isinstance(item, dict)
+            and item.get("requestId") == pending.get("requestId")
+            and item.get("requestDigest") == pending.get("requestDigest")
+            and item.get("decisionNonce") == pending.get("decisionNonce")
+            and item.get("itemId") == pending.get("itemId")
+        ),
+        None,
+    )
+    if not isinstance(exact, dict):
+        return {"ok": True, "status": "ready", "approval": None}
+    approval = {
+        **exact,
+        "localThreadId": thread_id,
+        "localTurnId": local_turn_id,
+        "missionId": pending.get("missionId"),
+        "gatewayThreadId": exact.get("threadId"),
+        "gatewayTurnId": exact.get("turnId"),
+        "gatewayGeneration": pending.get("gatewayGeneration"),
+    }
+    # Avoid ambiguous names at the browser boundary: threadId/turnId always
+    # mean the durable HQ identifiers; gateway identifiers have explicit keys.
+    approval["threadId"] = thread_id
+    approval["turnId"] = local_turn_id
+    return {"ok": True, "status": "waiting_approval", "approval": approval}
+
+
+def full_agent_resolve_approval(
+    thread_id: str,
+    request_id: str,
+    payload: dict,
+) -> dict:
+    required = {
+        "threadId",
+        "turnId",
+        "missionId",
+        "gatewayThreadId",
+        "gatewayTurnId",
+        "gatewayGeneration",
+        "itemId",
+        "requestDigest",
+        "decisionNonce",
+        "decision",
+        "idempotencyKey",
+    }
+    _full_agent_validate_exact_payload(payload, required=required)
+    if (
+        not FULL_AGENT_INTERACTIVE_APPROVAL_BROKER_ENABLED
+        or "workspace" not in FULL_AGENT_EXECUTABLE_MODES
+    ):
+        raise RequestError(
+            "Interactive Workspace approval is not enabled in this release.",
+            409,
+            response_payload={
+                "kind": "approval_broker_required",
+                "code": "approval_broker_required",
+                "messageTh": "รุ่นนี้ยังไม่เปิดอนุมัติ Workspace แบบครั้งต่อครั้ง",
+            },
+        )
+    if payload.get("threadId") != thread_id:
+        raise RequestError("Approval thread binding does not match the endpoint.", 409)
+    decision = str(payload.get("decision") or "")
+    if decision not in {"accept_once", "decline"}:
+        raise RequestError("Approval decision must be accept_once or decline.", 422)
+    idempotency_key = str(payload.get("idempotencyKey") or "")
+    identifiers = (
+        thread_id,
+        request_id,
+        str(payload.get("turnId") or ""),
+        str(payload.get("missionId") or ""),
+        str(payload.get("gatewayThreadId") or ""),
+        str(payload.get("gatewayTurnId") or ""),
+        str(payload.get("gatewayGeneration") or ""),
+        str(payload.get("itemId") or ""),
+        idempotency_key,
+    )
+    if (
+        any(not SAFE_IDEMPOTENCY_PATTERN.fullmatch(value) for value in identifiers)
+        or not re.fullmatch(r"[a-fA-F0-9]{64}", str(payload.get("requestDigest") or ""))
+        or not re.fullmatch(r"[a-f0-9]{32}", str(payload.get("decisionNonce") or ""))
+    ):
+        raise RequestError("Approval decision binding is invalid.", 422)
+    local_turn_id = str(payload.get("turnId") or "")
+    with FULL_AGENT_ACTIVE_LOCK:
+        _full_agent_prune_approval_tombstones_locked()
+        tombstone = copy.deepcopy(FULL_AGENT_APPROVAL_TOMBSTONES.get(request_id))
+        active = FULL_AGENT_ACTIVE_TURNS.get(local_turn_id)
+        pending = active.get("pendingApproval") if isinstance(active, dict) else None
+        exact = bool(
+            isinstance(active, dict)
+            and isinstance(pending, dict)
+            and active.get("mode") == "workspace"
+            and (decision == "decline" or active.get("cancelRequested") is not True)
+            and active.get("threadId") == thread_id
+            and active.get("missionId") == payload.get("missionId")
+            and active.get("gatewayGeneration") == payload.get("gatewayGeneration")
+            and pending.get("requestId") == request_id
+            and pending.get("requestDigest") == payload.get("requestDigest")
+            and pending.get("decisionNonce") == payload.get("decisionNonce")
+            and pending.get("itemId") == payload.get("itemId")
+            and pending.get("threadId") == payload.get("gatewayThreadId")
+            and pending.get("turnId") == payload.get("gatewayTurnId")
+        )
+    if isinstance(tombstone, dict):
+        replay_matches = all(
+            tombstone.get(field) == payload.get(field)
+            for field in (
+                "turnId",
+                "missionId",
+                "gatewayThreadId",
+                "gatewayTurnId",
+                "gatewayGeneration",
+                "itemId",
+                "requestDigest",
+                "decisionNonce",
+                "decision",
+                "idempotencyKey",
+            )
+        ) and tombstone.get("threadId") == thread_id
+        if replay_matches:
+            return {
+                "ok": True,
+                "status": "resolution_committed",
+                "threadId": thread_id,
+                "turnId": local_turn_id,
+                "requestId": request_id,
+                "decision": decision,
+                "idempotentReplay": True,
+                "committed": True,
+            }
+        raise RequestError(
+            "Approval request already received a different decision.",
+            409,
+            response_payload={
+                "kind": "approval_decision_conflict",
+                "code": "approval_decision_conflict",
+                "messageTh": "คำขออนุมัตินี้ได้รับคำตอบที่ต่างกันไปแล้ว",
+            },
+        )
+    if not exact:
+        raise RequestError(
+            "Approval binding is stale or does not match this exact request.",
+            409,
+            response_payload={
+                "kind": "approval_binding_mismatch",
+                "code": "approval_binding_mismatch",
+                "messageTh": "คำขออนุมัตินี้ไม่ตรงกับ Thread/Turn ปัจจุบันแล้ว",
+            },
+        )
+    with FULL_AGENT_GATEWAY_LOCK:
+        gateway = FULL_AGENT_GATEWAY_INSTANCE
+        generation = FULL_AGENT_GATEWAY_GENERATION
+    if gateway is None or generation != payload.get("gatewayGeneration"):
+        raise RequestError("Approval gateway generation is no longer active.", 409)
+    try:
+        result = gateway.approval_resolve(
+            request_id,
+            decision,
+            idempotency_key=idempotency_key,
+            thread_id=str(payload.get("gatewayThreadId") or ""),
+            turn_id=str(payload.get("gatewayTurnId") or ""),
+            item_id=str(payload.get("itemId") or ""),
+            request_digest=str(payload.get("requestDigest") or ""),
+            decision_nonce=str(payload.get("decisionNonce") or ""),
+        )
+    except Exception as error:
+        raise _full_agent_gateway_error(error, default_code="approval_binding_mismatch")
+    if result.get("status") == "resolution_pending":
+        # Non-terminal by construction: the SDK handler may still commit the
+        # exact decision.  Report pending (never failure/committed) so the
+        # browser can safely retry the same idempotency key or press Stop.
+        return {
+            "ok": True,
+            "status": "resolution_pending",
+            "threadId": thread_id,
+            "turnId": local_turn_id,
+            "requestId": request_id,
+            "decision": decision,
+            "idempotentReplay": False,
+            "committed": False,
+        }
+    if result.get("ok") is not True:
+        raise RequestError(
+            "Approval request is no longer pending.",
+            409,
+            response_payload={
+                "kind": "approval_not_pending",
+                "code": "approval_not_pending",
+                "messageTh": "คำขออนุมัตินี้ถูกตอบหรือหมดเวลาแล้ว",
+            },
+        )
+    return {
+        "ok": True,
+        "status": "resolution_committed",
+        "threadId": thread_id,
+        "turnId": local_turn_id,
+        "requestId": request_id,
+        "decision": decision,
+        "idempotentReplay": False,
+        "committed": True,
+    }
+
+
+def _full_agent_decline_pending_for_turn(
+    local_turn_id: str,
+    *,
+    reason: str,
+) -> tuple[bool, bool]:
+    deadline = time.monotonic() + 5.0
+    active: dict | None = None
+    while time.monotonic() < deadline:
+        with FULL_AGENT_ACTIVE_LOCK:
+            current = FULL_AGENT_ACTIVE_TURNS.get(local_turn_id)
+            if not isinstance(current, dict):
+                return False, True
+            preparing = current.get("approvalPreparing")
+            pending = (
+                copy.deepcopy(current.get("pendingApproval"))
+                if isinstance(current.get("pendingApproval"), dict)
+                else None
+            )
+            active = dict(current)
+        if preparing is None:
+            break
+        time.sleep(0.01)
+    else:
+        return True, False
+    if not isinstance(pending, dict):
+        return False, True
+    with FULL_AGENT_GATEWAY_LOCK:
+        gateway = FULL_AGENT_GATEWAY_INSTANCE
+        generation = FULL_AGENT_GATEWAY_GENERATION
+    if gateway is None or generation != pending.get("gatewayGeneration"):
+        return True, False
+    try:
+        result = gateway.approval_resolve(
+            str(pending.get("requestId") or ""),
+            "decline",
+            idempotency_key=f"stop:{str(pending.get('requestId') or '')}",
+            thread_id=str(pending.get("threadId") or ""),
+            turn_id=str(pending.get("turnId") or ""),
+            item_id=str(pending.get("itemId") or ""),
+            request_digest=str(pending.get("requestDigest") or ""),
+            decision_nonce=str(pending.get("decisionNonce") or ""),
+        )
+    except Exception:
+        return True, False
+    append_audit({
+        "type": "full_agent.pending_approval_decline_requested",
+        "threadId": active.get("threadId") if isinstance(active, dict) else None,
+        "turnId": local_turn_id,
+        "missionId": active.get("missionId") if isinstance(active, dict) else None,
+        "reason": redact_text(reason, 80),
+        "resolved": bool(
+            result.get("ok") is True
+            and result.get("committed") is True
+            and result.get("status") == "resolution_accepted"
+        ),
+    })
+    decline_committed = bool(
+        result.get("ok") is True
+        and result.get("committed") is True
+        and result.get("status") == "resolution_accepted"
+    )
+    return True, decline_committed
+
+
+def full_agent_runtime_status() -> dict:
+    runtime = _full_agent_runtime()
+    core = runtime.runtime_status()
+    gateway_ready = False
+    gateway_process_status = "unavailable"
+    gateway_failure_code = None
+    approval_broker_ready = False
+    artifact_store_ready = False
+    approved_models: list[dict] = []
+    try:
+        _full_agent_artifact_store()
+        artifact_store_ready = True
+    except Exception:
+        artifact_store_ready = False
+    try:
+        gateway = _full_agent_gateway()
+        with FULL_AGENT_GATEWAY_LOCK:
+            gateway_generation = (
+                FULL_AGENT_GATEWAY_GENERATION
+                if FULL_AGENT_GATEWAY_INSTANCE is gateway
+                else None
+            )
+        if not gateway_generation:
+            raise RuntimeError("app_server_unavailable")
+        gateway_status = gateway.status()
+        authentication = (
+            gateway_status.get("authentication")
+            if isinstance(gateway_status.get("authentication"), dict)
+            else {}
+        )
+        authenticated = authentication.get("authenticated") is True
+        catalog = gateway.models() if authenticated else {"models": []}
+        approved_models = [
+            row
+            for row in catalog.get("models", [])
+            if isinstance(row, dict)
+            and str(row.get("model") or row.get("id") or "") in set(FULL_AGENT_MODEL_ALLOWLIST)
+        ]
+        gateway_ready = bool(
+            gateway_status.get("ok") is True
+            and gateway_status.get("status") == "ready"
+            and authenticated
+            and approved_models
+        )
+        approval_broker_ready = bool(
+            gateway_status.get("approvalBrokerReady") is True
+            and gateway_status.get("approvalHandler") == "explicit_one_shot"
+        )
+        gateway_process_status = str(
+            ((gateway_status.get("process") or {}).get("status"))
+            or gateway_status.get("status")
+            or "unknown"
+        )
+    except Exception as error:
+        raw_code = str(getattr(error, "code", "") or "")
+        gateway_failure_code = (
+            raw_code if re.fullmatch(r"[a-z][a-z0-9_]{1,79}", raw_code) else "app_server_unavailable"
+        )
+    # The broker and UI are implemented behind this production gate. Workspace
+    # remains unavailable because the live sentinel observed a write without
+    # an approval request. Unit tests or a configured broker alone cannot
+    # override that failed end-to-end safety result.
+    workspace_ready = False
+    artifact_output_ready = bool(workspace_ready and artifact_store_ready)
+    modes = []
+    for mode in ("chat", "workspace", "computer", "full"):
+        ready = bool(
+            gateway_ready
+            and (mode == "chat" or (mode == "workspace" and workspace_ready))
+        )
+        modes.append({
+            "id": mode,
+            "ready": ready,
+            "available": ready,
+            "toolExecutionEnabled": bool(ready and mode == "workspace"),
+            "capabilities": next(
+                (
+                    list(item.get("capabilities") or [])
+                    for item in core.get("capabilityModes", [])
+                    if item.get("id") == mode
+                ),
+                [],
+            ),
+        })
+    message = (
+        "Chat พร้อมใช้งานแบบไม่เรียก Tool • Workspace, Computer Use และ Full Access "
+        "ถูกล็อกโดย Backend เพราะ live safety sentinel พบการเขียนโดยไม่มี Approval"
+        if gateway_ready
+        else "เก็บ Thread ได้แล้ว แต่ Codex App Server/Auth/Model ยังไม่พร้อม จึงยังไม่เปิดการลงมือทำ"
+    )
+    return {
+        "ok": True,
+        "runtime": {
+            **core,
+            "available": True,
+            "executionEnabled": gateway_ready,
+            # ``executionEnabled`` currently means tool-free Chat turns only.
+            # Publish explicit capability truth so clients never promote Chat
+            # readiness into a Full Agent or Tool readiness claim.
+            "chatReady": gateway_ready,
+            "fullAgentReady": False,
+            "toolExecutionEnabled": False,
+            "toolExecutionState": "unavailable",
+            # The persisted runtime owns the allowlist, but readiness must only
+            # advertise options that this authenticated App Server actually
+            # exposes now.  This prevents a stale gpt-* allowlist from looking
+            # selectable when the live account catalog has changed.
+            "modelOptions": [
+                str(row.get("model") or row.get("id") or "")
+                for row in approved_models
+            ] if gateway_ready else [],
+            "reasoningOptions": [
+                effort
+                for effort in FULL_AGENT_REASONING_ALLOWLIST
+                if any(
+                    effort in list(row.get("supportedReasoningEfforts") or [])
+                    for row in approved_models
+                )
+            ] if gateway_ready else [],
+            "capabilityModes": modes,
+            # These top-level contracts are intentionally duplicated outside
+            # ``capabilities`` because the frontend treats them as transport
+            # contracts, not broad tool grants.
+            "attachments": {
+                "ready": bool(
+                    gateway_ready
+                    and artifact_store_ready
+                    and any(
+                        isinstance(row.get("inputModalities"), list)
+                        and "image" in row.get("inputModalities", [])
+                        for row in approved_models
+                    )
+                ),
+                "imageInputReady": bool(
+                    gateway_ready
+                    and artifact_store_ready
+                    and any(
+                        isinstance(row.get("inputModalities"), list)
+                        and "image" in row.get("inputModalities", [])
+                        for row in approved_models
+                    )
+                ),
+                "fileInputRequiresFullAccess": True,
+                "outputReady": artifact_output_ready,
+                "uploadTemplate": "/api/agent-runtime/threads/{threadId}/attachments",
+                "maxFiles": FULL_AGENT_MAX_ATTACHMENTS_PER_TURN,
+                "maxBytes": FULL_AGENT_MAX_UPLOAD_BYTES,
+                "acceptedExtensions": [".jpeg", ".jpg", ".png", ".webp"],
+            },
+            "artifacts": {
+                # Output files require a reviewed tool-capable mode.  The
+                # immutable store and route exist, but Chat alone must not be
+                # advertised as a slide/file generator.
+                "ready": artifact_output_ready,
+                "downloadTemplate": "/api/agent-runtime/threads/{threadId}/artifacts/{artifactId}",
+                "filesystemPathsExposed": False,
+            },
+            "capabilities": {
+                "workspace": {"ready": workspace_ready},
+                "computerUse": {"ready": False},
+                "mcp": {"ready": False},
+                "plugins": {"ready": False},
+                "attachments": {
+                    "ready": bool(
+                        gateway_ready
+                        and artifact_store_ready
+                        and any(
+                            isinstance(row.get("inputModalities"), list)
+                            and "image" in row.get("inputModalities", [])
+                            for row in approved_models
+                        )
+                    ),
+                    "imageInputReady": bool(
+                        gateway_ready
+                        and artifact_store_ready
+                        and any(
+                            isinstance(row.get("inputModalities"), list)
+                            and "image" in row.get("inputModalities", [])
+                            for row in approved_models
+                        )
+                    ),
+                    "fileInputRequiresFullAccess": True,
+                    "uploadTemplate": "/api/agent-runtime/threads/{threadId}/attachments",
+                    "maxFiles": FULL_AGENT_MAX_ATTACHMENTS_PER_TURN,
+                    "maxBytes": FULL_AGENT_MAX_UPLOAD_BYTES,
+                    "acceptedExtensions": [".jpeg", ".jpg", ".png", ".webp"],
+                },
+                "artifactOutputs": {
+                    "ready": artifact_output_ready,
+                    "downloadTemplate": "/api/agent-runtime/threads/{threadId}/artifacts/{artifactId}",
+                    "filesystemPathsExposed": False,
+                },
+            },
+            "readiness": {
+                "chat": {"ready": gateway_ready},
+                "workspace": {"ready": workspace_ready},
+                "computerUse": {"ready": False},
+                "mcp": {"ready": False},
+                "plugins": {"ready": False},
+            },
+            "gatewayProcessStatus": gateway_process_status,
+            "gatewayFailureCode": gateway_failure_code,
+            "approvalBrokerReady": approval_broker_ready,
+            "workspaceSentinelVerified": False,
+            "workspaceSentinelStatus": "failed_unapproved_write",
+            "workspaceApprovalReplayDurable": False,
+            "responseStringLimitChars": FULL_AGENT_HTTP_RESPONSE_STRING_LIMIT,
+            "workspaceActivationBlockers": [
+                "live_write_sentinel_failed_unapproved_write",
+                "approval_broker_not_ready",
+                "durable_approval_journal_not_active",
+                "deferred_reader_adapter_not_live_verified",
+                "opaque_file_change_approval_not_supported",
+            ],
+            "automaticExternalEffects": False,
+            "messageTh": message,
+        },
+    }
+
+
+def full_agent_runtime_models() -> dict:
+    try:
+        result = _full_agent_gateway().models()
+    except RequestError:
+        raise
+    except Exception as error:
+        raise _full_agent_gateway_error(error)
+    allowed = set(FULL_AGENT_MODEL_ALLOWLIST)
+    models = []
+    efforts: set[str] = set()
+    for row in result.get("models", []):
+        if not isinstance(row, dict):
+            continue
+        model_id = str(row.get("model") or row.get("id") or "")
+        if model_id not in allowed:
+            continue
+        supported = [
+            item
+            for item in row.get("supportedReasoningEfforts", [])
+            if item in FULL_AGENT_REASONING_ALLOWLIST
+        ]
+        raw_modalities = row.get("inputModalities")
+        input_modalities = [
+            modality
+            for modality in (
+                raw_modalities if isinstance(raw_modalities, list) else ["text"]
+            )
+            if modality in {"text", "image"}
+        ]
+        reported_default = str(row.get("defaultReasoningEffort") or "")
+        default_reasoning = (
+            reported_default
+            if reported_default in supported
+            else "medium"
+            if "medium" in supported
+            else supported[0]
+            if supported
+            else ""
+        )
+        efforts.update(supported)
+        models.append({
+            "id": model_id,
+            "label": redact_text(str(row.get("displayName") or model_id), 160),
+            "displayName": redact_text(str(row.get("displayName") or model_id), 160),
+            "available": True,
+            "isDefault": bool(row.get("isDefault")),
+            "defaultReasoningEffort": default_reasoning,
+            "supportedReasoningEfforts": supported,
+            "inputModalities": input_modalities,
+        })
+    if not models:
+        raise RequestError(
+            "Codex App Server ไม่ได้ส่งโมเดลที่ Backend อนุญาตกลับมา",
+            503,
+            response_payload={
+                "kind": "model_catalog_unavailable",
+                "code": "model_catalog_unavailable",
+                "messageTh": "Codex App Server ไม่ได้ส่งโมเดลที่ Backend อนุญาตกลับมา",
+            },
+        )
+    default_indexes = [index for index, row in enumerate(models) if row.get("isDefault") is True]
+    selected_default = default_indexes[0] if default_indexes else 0
+    for index, row in enumerate(models):
+        row["isDefault"] = index == selected_default
+    default_reasoning = str(
+        models[selected_default].get("defaultReasoningEffort") or ""
+    )
+    reasoning_options = [
+        {
+            "id": effort,
+            "label": effort,
+            "available": effort in efforts,
+            "isDefault": effort == default_reasoning,
+        }
+        for effort in FULL_AGENT_REASONING_ALLOWLIST
+        if effort in efforts
+    ]
+    return {"ok": True, "models": models, "reasoningOptions": reasoning_options}
+
+
+def _full_agent_resolve_live_settings(
+    model_value: object,
+    reasoning_value: object,
+) -> tuple[str, str]:
+    """Resolve and validate settings against the exact live App Server catalog."""
+
+    catalog = full_agent_runtime_models()
+    models = [row for row in catalog.get("models", []) if isinstance(row, dict)]
+    requested_model = str(model_value or "").strip()
+    selected = next((row for row in models if row.get("id") == requested_model), None)
+    if not requested_model:
+        selected = next((row for row in models if row.get("isDefault") is True), None)
+        selected = selected or (models[0] if models else None)
+    if not isinstance(selected, dict):
+        raise RequestError(
+            "โมเดลที่เลือกไม่พร้อมใช้งานใน Codex Runtime นี้",
+            422,
+            response_payload={
+                "kind": "model_unavailable",
+                "code": "model_unavailable",
+                "messageTh": "โมเดลที่เลือกไม่พร้อมใช้งานใน Codex Runtime นี้",
+            },
+        )
+    model = str(selected.get("id") or "")
+    supported = [
+        item
+        for item in selected.get("supportedReasoningEfforts", [])
+        if item in FULL_AGENT_REASONING_ALLOWLIST
+    ]
+    requested_reasoning = str(reasoning_value or "").strip()
+    model_default_reasoning = str(
+        selected.get("defaultReasoningEffort") or ""
+    )
+    reasoning = requested_reasoning or (
+        model_default_reasoning
+        if model_default_reasoning in supported
+        else "medium"
+        if "medium" in supported
+        else supported[0]
+        if supported
+        else ""
+    )
+    if not reasoning or reasoning not in supported:
+        raise RequestError(
+            "ระดับ Reasoning นี้ไม่รองรับกับโมเดลที่เลือก",
+            422,
+            response_payload={
+                "kind": "reasoning_unavailable",
+                "code": "reasoning_unavailable",
+                "messageTh": "ระดับ Reasoning นี้ไม่รองรับกับโมเดลที่เลือก",
+            },
+        )
+    return model, reasoning
+
+
+def _full_agent_require_dispatch_ready(gateway, thread: dict) -> list[dict]:
+    """Revalidate App Server auth and its live model catalog before dispatch.
+
+    Thread creation can happen well before its worker obtains capacity.  Auth,
+    account entitlements, or the model catalog may change in that interval, so
+    the durable thread settings are not sufficient proof that a real Codex
+    request is still safe to start.
+    """
+
+    status = gateway.status()
+    authentication = (
+        status.get("authentication")
+        if isinstance(status, dict) and isinstance(status.get("authentication"), dict)
+        else {}
+    )
+    if authentication.get("authenticated") is not True:
+        raise RequestError(
+            "Codex Runtime ยังไม่ได้เข้าสู่ระบบ",
+            503,
+            code="auth_required",
+        )
+    if not isinstance(status, dict) or status.get("ok") is not True or status.get("status") != "ready":
+        raise RequestError(
+            "Codex App Server ยังไม่ยืนยันสถานะพร้อมใช้งาน",
+            503,
+            code="app_server_unavailable",
+        )
+
+    catalog = gateway.models()
+    allowed = set(FULL_AGENT_MODEL_ALLOWLIST)
+    approved_models = [
+        row
+        for row in (catalog.get("models", []) if isinstance(catalog, dict) else [])
+        if isinstance(row, dict)
+        and str(row.get("model") or row.get("id") or "") in allowed
+    ]
+    if (
+        not isinstance(catalog, dict)
+        or catalog.get("ok") is not True
+        or not approved_models
+    ):
+        raise RequestError(
+            "Codex App Server ไม่ได้ส่งโมเดลที่ Backend อนุญาตกลับมา",
+            503,
+            code="model_catalog_unavailable",
+        )
+    selected_model = str(thread.get("model") or "")
+    selected = next(
+        (
+            row
+            for row in approved_models
+            if str(row.get("model") or row.get("id") or "") == selected_model
+        ),
+        None,
+    )
+    if not isinstance(selected, dict):
+        raise RequestError(
+            "โมเดลที่เลือกไม่พร้อมใช้งานใน Codex Runtime นี้",
+            422,
+            code="model_unavailable",
+        )
+    supported = {
+        str(item)
+        for item in selected.get("supportedReasoningEfforts", [])
+        if str(item) in FULL_AGENT_REASONING_ALLOWLIST
+    }
+    if str(thread.get("reasoning") or "") not in supported:
+        raise RequestError(
+            "ระดับ Reasoning นี้ไม่รองรับกับโมเดลที่เลือก",
+            422,
+            code="reasoning_unavailable",
+        )
+    return approved_models
+
+
+def _full_agent_validate_exact_payload(
+    payload: dict,
+    *,
+    required: set[str],
+    allowed: set[str] | None = None,
+) -> None:
+    if not isinstance(payload, dict):
+        raise RequestError("Full Agent payload must be an object.", 422)
+    allowed = allowed or required
+    if not required.issubset(set(payload)) or not set(payload).issubset(allowed):
+        raise RequestError(
+            "Full Agent payload fields do not match the endpoint contract.",
+            422,
+            response_payload={
+                "kind": "invalid_request",
+                "code": "invalid_request",
+                "messageTh": "ข้อมูล Full Agent ไม่ตรงตามสัญญาของ Endpoint",
+            },
+        )
+
+
+def full_agent_create_thread(payload: dict) -> dict:
+    _full_agent_validate_exact_payload(
+        payload,
+        required={"agentId", "title", "model", "reasoning", "mode"},
+    )
+    mode = str(payload.get("mode") or "chat")
+    if mode not in {"chat", "workspace", "computer", "full"}:
+        raise RequestError("Unknown Full Agent mode.", 422)
+    if mode not in FULL_AGENT_EXECUTABLE_MODES:
+        raise RequestError(
+            "โหมดนี้ยังไม่มีหน้าต่างอนุมัติ Tool แบบครั้งต่อครั้ง จึงยังไม่เปิดใช้งาน",
+            409,
+            response_payload={
+                "kind": "approval_broker_required",
+                "code": "approval_broker_required",
+                "messageTh": "โหมดนี้ยังไม่มีหน้าต่างอนุมัติ Tool แบบครั้งต่อครั้ง จึงยังไม่เปิดใช้งาน",
+            },
+        )
+    if mode == "workspace":
+        permission = evaluate_tool_permission(
+            str(payload.get("agentId") or ""),
+            "codex_cli_task",
+        )
+        if permission.get("allowed") is not True:
+            raise RequestError(
+                "Agent นี้ยังไม่ได้รับสิทธิ์ Workspace Tool จาก Backend",
+                403,
+                response_payload={
+                    "kind": "agent_not_allowed",
+                    "code": "agent_not_allowed",
+                    "messageTh": "Agent นี้ยังไม่ได้รับสิทธิ์ Workspace Tool จาก Backend",
+                },
+            )
+    model, reasoning = _full_agent_resolve_live_settings(
+        payload.get("model"),
+        payload.get("reasoning"),
+    )
+    try:
+        result = _full_agent_runtime().create_thread(
+            str(payload.get("agentId") or ""),
+            title=str(payload.get("title") or ""),
+            model=model,
+            reasoning=reasoning,
+            mode=mode,
+        )
+    except FullAgentRuntimeError as error:
+        raise _full_agent_runtime_error(error)
+    return {
+        "ok": True,
+        "thread": _full_agent_public_thread(result["thread"]),
+        "idempotentReplay": bool(result.get("idempotentReplay")),
+    }
+
+
+def full_agent_list_threads(agent_id: str, *, include_archived: bool = False) -> dict:
+    try:
+        rows = _full_agent_runtime().list_threads(
+            agent_id=agent_id,
+            include_archived=include_archived,
+            limit=100,
+        )
+    except FullAgentRuntimeError as error:
+        raise _full_agent_runtime_error(error)
+    return {"ok": True, "threads": [_full_agent_public_thread(row) for row in rows]}
+
+
+def full_agent_get_thread(thread_id: str) -> dict:
+    try:
+        thread = _full_agent_runtime().get_thread(thread_id, include_events=True)
+    except FullAgentRuntimeError as error:
+        raise _full_agent_runtime_error(error)
+    return {"ok": True, "thread": _full_agent_public_thread(thread)}
+
+
+def _full_agent_artifact_public_model(thread_id: str, artifact: dict) -> dict:
+    artifact_id = str(artifact.get("id") or "")
+    url = (
+        f"/api/agent-runtime/threads/{quote(thread_id, safe='')}"
+        f"/artifacts/{quote(artifact_id, safe='')}"
+    )
+    return {
+        **artifact,
+        "available": True,
+        "url": url,
+        "previewUrl": url if artifact.get("kind") == "image" else None,
+        "downloadUrl": url,
+    }
+
+
+def full_agent_upload_attachment(thread_id: str, payload: dict) -> dict:
+    _full_agent_validate_exact_payload(
+        payload,
+        required={"fileName", "mediaType", "dataBase64"},
+    )
+    runtime = _full_agent_runtime()
+    try:
+        thread = runtime.get_thread(thread_id, include_events=False)
+    except FullAgentRuntimeError as error:
+        raise _full_agent_runtime_error(error)
+    if thread.get("archived") is True or thread.get("activeTurn") is not None:
+        raise RequestError(
+            "แนบไฟล์ได้เมื่อ Thread ว่างและยังไม่ถูกเก็บถาวรเท่านั้น",
+            409,
+            code="thread_busy",
+        )
+    try:
+        # Uploads happen before the Runtime allocates its durable Turn id.  Bind
+        # each draft to a unique backend-only owner turn now; the request path
+        # revalidates and atomically copies it into the real Turn owner before
+        # dispatch.  The private draft binding never reaches the browser.
+        upload_turn_id = f"turn_upload_{secrets.token_hex(16)}"
+        artifact = _full_agent_artifact_store().save_upload(
+            thread_id,
+            upload_turn_id,
+            file_name=payload.get("fileName"),
+            media_type=payload.get("mediaType"),
+            data_base64=payload.get("dataBase64"),
+        )
+    except FullAgentArtifactError as error:
+        raise _full_agent_artifact_error(error)
+    public = _full_agent_artifact_public_model(thread_id, artifact)
+    append_audit({
+        "type": "full_agent.attachment_uploaded",
+        "threadId": thread_id,
+        "agentId": thread.get("agentId"),
+        "attachmentId": public.get("id"),
+        "mediaType": public.get("mediaType"),
+        "kind": public.get("kind"),
+        "byteSize": public.get("byteSize"),
+        "sha256": public.get("sha256"),
+        "filesystemPathExposed": False,
+    })
+    return {"ok": True, "attachment": public}
+
+
+def _full_agent_resolve_turn_attachments(
+    thread: dict,
+    attachment_ids: object,
+) -> list[dict]:
+    if attachment_ids is None:
+        return []
+    if not isinstance(attachment_ids, list):
+        raise RequestError("attachmentIds ต้องเป็นรายการ", 422, code="invalid_request")
+    if len(attachment_ids) > FULL_AGENT_MAX_ATTACHMENTS_PER_TURN:
+        raise RequestError(
+            f"แนบไฟล์ได้ไม่เกิน {FULL_AGENT_MAX_ATTACHMENTS_PER_TURN} รายการต่อ Turn",
+            413,
+            code="too_many_attachments",
+        )
+    normalized = [str(value or "").strip() for value in attachment_ids]
+    if any(not value for value in normalized) or len(set(normalized)) != len(normalized):
+        raise RequestError("attachmentIds ไม่ถูกต้องหรือซ้ำกัน", 422, code="invalid_request")
+    resolved: list[dict] = []
+    store = _full_agent_artifact_store()
+    for attachment_id in normalized:
+        try:
+            binding = _full_agent_artifact_private_binding(attachment_id)
+            if binding.get("threadId") != str(thread.get("id") or ""):
+                raise FullAgentArtifactError(
+                    "artifact_not_found", "Artifact was not found.", status=404
+                )
+            path, metadata = store.resolve(
+                str(thread.get("id") or ""),
+                str(binding.get("turnId") or ""),
+                attachment_id,
+            )
+        except FullAgentArtifactError as error:
+            raise _full_agent_artifact_error(error)
+        if metadata.get("direction") != "input":
+            raise RequestError("ใช้ได้เฉพาะไฟล์แนบขาเข้า", 422, code="invalid_attachment")
+        if thread.get("mode") == "chat" and metadata.get("modelInputReady") is not True:
+            raise RequestError(
+                "ไฟล์ชนิดนี้ต้องใช้ Full Access ที่ผ่าน Approval ก่อน ส่วน Chat รองรับรูปภาพเท่านั้น",
+                409,
+                code="attachment_requires_full_access",
+                response_payload={
+                    "kind": "attachment_requires_full_access",
+                    "code": "attachment_requires_full_access",
+                    "messageTh": "ไฟล์ชนิดนี้ต้องใช้ Full Access ที่ผ่าน Approval ก่อน ส่วน Chat รองรับรูปภาพเท่านั้น",
+                },
+            )
+        public = store.read_model(metadata)
+        resolved.append({
+            **public,
+            "path": path,
+            "ownerTurnId": str(binding.get("turnId") or ""),
+        })
+    return resolved
+
+
+def _full_agent_bind_turn_attachments(
+    thread_id: str,
+    turn_id: str,
+    attachments: list[dict],
+) -> list[dict]:
+    """Copy validated upload drafts into the exact durable Runtime Turn."""
+
+    if not attachments:
+        return []
+    store = _full_agent_artifact_store()
+    created: list[tuple[dict, Path, dict]] = []
+    try:
+        # Clone and validate the complete batch before consuming any draft.
+        for attachment in attachments:
+            source = Path(attachment.get("path") or "")
+            payload = source.read_bytes()
+            artifact = store.save_upload(
+                thread_id,
+                turn_id,
+                file_name=attachment.get("name"),
+                media_type=attachment.get("mediaType"),
+                data_base64=base64.b64encode(payload).decode("ascii"),
+            )
+            path, metadata = store.resolve(thread_id, turn_id, artifact.get("id"))
+            created.append((store.read_model(metadata), path, attachment))
+        consumed_batch = store.consume_inputs(
+            tuple(
+                (
+                    thread_id,
+                    str(attachment.get("ownerTurnId") or ""),
+                    attachment.get("id"),
+                )
+                for _public, _path, attachment in created
+            )
+        )
+    except (FullAgentArtifactError, OSError) as error:
+        for public, _path, _attachment in reversed(created):
+            try:
+                store.revoke_artifact(
+                    thread_id,
+                    turn_id,
+                    public.get("id"),
+                    direction="input",
+                )
+            except FullAgentArtifactError:
+                pass
+        if isinstance(error, FullAgentArtifactError):
+            raise
+        raise FullAgentArtifactError(
+            "artifact_unavailable", "Attachment could not be bound to the Turn.", status=404
+        ) from error
+
+    rebound: list[dict] = []
+    for (public, path, attachment), consumed in zip(created, consumed_batch):
+        rebound.append({**public, "path": path, "ownerTurnId": turn_id})
+        append_audit({
+            "type": "full_agent.attachment_bound",
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "attachmentId": public.get("id"),
+            "sourceAttachmentId": attachment.get("id"),
+            "sourceConsumedAt": consumed.get("consumedAt"),
+            "sourcePayloadCleanupComplete": consumed.get("payloadCleanupComplete") is True,
+            "sha256": public.get("sha256"),
+            "filesystemPathExposed": False,
+        })
+    return rebound
+
+
+def full_agent_resolve_artifact(
+    thread_id: str,
+    artifact_id: str,
+) -> tuple[Path, dict] | None:
+    try:
+        _full_agent_runtime().get_thread(thread_id, include_events=False)
+        binding = _full_agent_artifact_private_binding(artifact_id)
+        if binding.get("threadId") != thread_id:
+            return None
+        return _full_agent_artifact_store().resolve(
+            thread_id,
+            str(binding.get("turnId") or ""),
+            artifact_id,
+        )
+    except (FullAgentRuntimeError, FullAgentArtifactError):
+        return None
+
+
+def full_agent_update_thread(thread_id: str, payload: dict) -> dict:
+    _full_agent_validate_exact_payload(
+        payload,
+        required={"model", "reasoning", "mode", "expectedRevision"},
+    )
+    mode = str(payload.get("mode") or "chat")
+    if mode not in FULL_AGENT_EXECUTABLE_MODES:
+        raise RequestError(
+            "โหมดนี้ยังไม่มีหน้าต่างอนุมัติ Tool แบบครั้งต่อครั้ง จึงยังไม่เปิดใช้งาน",
+            409,
+            response_payload={
+                "kind": "approval_broker_required",
+                "code": "approval_broker_required",
+                "messageTh": "โหมดนี้ยังไม่มีหน้าต่างอนุมัติ Tool แบบครั้งต่อครั้ง จึงยังไม่เปิดใช้งาน",
+            },
+        )
+    model, reasoning = _full_agent_resolve_live_settings(
+        payload.get("model"),
+        payload.get("reasoning"),
+    )
+    runtime = _full_agent_runtime()
+    if mode == "workspace":
+        try:
+            current = runtime.get_thread(thread_id, include_events=False)
+        except FullAgentRuntimeError as error:
+            raise _full_agent_runtime_error(error)
+        permission = evaluate_tool_permission(
+            str(current.get("agentId") or ""),
+            "codex_cli_task",
+        )
+        if permission.get("allowed") is not True:
+            raise RequestError(
+                "Agent นี้ยังไม่ได้รับสิทธิ์ Workspace Tool จาก Backend",
+                403,
+                response_payload={
+                    "kind": "agent_not_allowed",
+                    "code": "agent_not_allowed",
+                    "messageTh": "Agent นี้ยังไม่ได้รับสิทธิ์ Workspace Tool จาก Backend",
+                },
+            )
+    try:
+        thread = runtime.update_settings(
+            thread_id,
+            model=model,
+            reasoning=reasoning,
+            mode=mode,
+            expected_revision=payload.get("expectedRevision"),
+        )
+    except FullAgentRuntimeError as error:
+        raise _full_agent_runtime_error(error)
+    return {"ok": True, "thread": _full_agent_public_thread(thread)}
+
+
+def full_agent_archive_thread(thread_id: str, payload: dict) -> dict:
+    _full_agent_validate_exact_payload(
+        payload,
+        required={"archived", "expectedRevision"},
+    )
+    try:
+        thread = _full_agent_runtime().archive_thread(
+            thread_id,
+            archived=payload.get("archived"),
+            expected_revision=payload.get("expectedRevision"),
+        )
+    except FullAgentRuntimeError as error:
+        raise _full_agent_runtime_error(error)
+    append_audit({
+        "type": (
+            "full_agent.thread_archived"
+            if thread.get("archived") is True
+            else "full_agent.thread_unarchived"
+        ),
+        "threadId": thread_id,
+        "archived": thread.get("archived") is True,
+        "revision": thread.get("revision"),
+    })
+    return {"ok": True, "thread": _full_agent_public_thread(thread)}
+
+
+def _full_agent_policy(thread: dict) -> dict:
+    mode = str(thread.get("mode") or "chat")
+    if mode == "chat":
+        return {
+            "agentId": thread["agentId"],
+            "mode": "chat",
+            "model": thread["model"],
+            "reasoningEffort": thread["reasoning"],
+            "sandbox": "read-only",
+            "approvalMode": "deny_all",
+            "externalEffects": "approval-required",
+            "autoExternalEffects": False,
+        }
+    if mode == "workspace":
+        if not FULL_AGENT_WORKSPACE_ROOTS:
+            raise RequestError("ไม่พบ Workspace ที่ Backend อนุญาต", 503)
+        return {
+            "agentId": thread["agentId"],
+            "mode": "workspace",
+            "model": thread["model"],
+            "reasoningEffort": thread["reasoning"],
+            "workspaceRoots": [str(path) for path in FULL_AGENT_WORKSPACE_ROOTS],
+            "sandbox": (
+                "workspace-write"
+                if FULL_AGENT_INTERACTIVE_APPROVAL_BROKER_ENABLED
+                and "workspace" in FULL_AGENT_EXECUTABLE_MODES
+                else "read-only"
+            ),
+            "approvalMode": "explicit",
+            "externalEffects": "approval-required",
+            "autoExternalEffects": False,
+        }
+    raise RequestError(
+        "โหมดนี้ต้องมี Approval Broker ก่อนจึงจะเริ่ม Turn ได้",
+        409,
+        response_payload={"kind": "approval_broker_required", "code": "approval_broker_required"},
+    )
+
+
+def _full_agent_error_message(code: str) -> str:
+    return {
+        "runner_busy": "Codex Runner กำลังทำงานอื่น Turn นี้จึงหยุดโดยไม่ลองซ้ำอัตโนมัติ",
+        "quota_unavailable": "โควตา Codex ยังไม่พร้อม Turn นี้จึงหยุดก่อนเรียกโมเดล",
+        "approval_required": "งานนี้ต้องผ่าน Mission Approval ก่อน จึงยังไม่ได้เรียก Tool",
+        "approval_path_unsupported": "Mission เดิมร้องขอการอนุมัติคนละชนิดกับ Tool Approval ระบบจึงหยุดแบบ Fail Closed",
+        "high_impact_blocked": "Risk Guard ปฏิเสธงานผลกระทบสูง โหมด Workspace ไม่ยกระดับสิทธิ์ด้วย Tool Approval",
+        "capability_unavailable": "ความสามารถที่เลือกยังไม่พร้อมใช้งานจริง",
+        "turn_timeout": "Codex Turn ใช้เวลาเกินขอบเขต ระบบส่งคำขอหยุดและไม่อ้างว่างานสำเร็จ",
+        "turn_interrupted": "ผู้ใช้ส่งคำขอหยุด Turn นี้แล้ว",
+        "empty_model_response": "Codex จบ Turn โดยไม่มีคำตอบที่ยืนยันได้",
+        "unexpected_tool_activity": "Chat Turn รายงานกิจกรรม Tool ที่โหมดนี้ไม่อนุญาต ระบบจึงไม่ยืนยันผลสำเร็จ",
+        "mission_create_failed": "Backend สร้าง Mission สำหรับ Turn นี้ไม่สำเร็จ จึงไม่ได้เรียก Codex",
+        "mission_evidence_missing": "Backend ไม่พบ Mission/Report/Audit หลักฐานครบถ้วน จึงไม่ยืนยันว่า Turn สำเร็จ",
+        "bridge_restarted": "Local Bridge เริ่มใหม่ก่อน Turn เดิมยืนยันผล",
+        "auth_required": "Codex Runtime ยังไม่ได้เข้าสู่ระบบ Turn นี้จึงหยุดก่อนเรียกโมเดล",
+        "model_catalog_unavailable": "Codex App Server ไม่ได้ยืนยันรายการโมเดลที่ Backend อนุญาต",
+        "model_unavailable": "โมเดลของ Thread นี้ไม่พร้อมใช้งานใน Codex Runtime ปัจจุบัน",
+        "reasoning_unavailable": "ระดับ Reasoning ของ Thread นี้ไม่รองรับใน Codex Runtime ปัจจุบัน",
+        "app_server_unavailable": "Codex App Server ไม่ยืนยันผล Turn นี้",
+        "approval_binding_mismatch": "คำขออนุมัติไม่ตรงกับ Thread/Turn ที่กำลังทำงาน ระบบจึงปฏิเสธแบบ Fail Closed",
+        "artifact_not_found": "ไม่พบไฟล์แนบที่ผูกกับ Thread/Turn นี้ จึงยังไม่ส่งงานให้ Codex",
+        "artifact_unavailable": "ไฟล์แนบไม่พร้อมหรือเปลี่ยนแปลงระหว่างการผูกกับ Turn",
+        "artifact_cleanup_failed": "ไฟล์แนบร่างถูกปิดใช้แล้ว แต่ระบบล้าง Payload เดิมไม่สำเร็จ จึงหยุดแบบ Fail Closed",
+        "unsafe_output_source": "โฟลเดอร์ไฟล์ผลลัพธ์ไม่ผ่านขอบเขตความปลอดภัยของ Workspace",
+        "output_directory_not_pristine": "โฟลเดอร์ไฟล์ผลลัพธ์ของ Turn มีข้อมูลเดิม ระบบจึงไม่เผยแพร่ไฟล์ซ้ำ",
+        "too_many_output_artifacts": "จำนวนหรือขนาดรวมของไฟล์ผลลัพธ์เกินขอบเขตต่อ Turn",
+        "artifact_too_large": "ไฟล์ผลลัพธ์มีขนาดเกินขอบเขตที่อนุญาต",
+        "unsupported_file_type": "ชนิดไฟล์ผลลัพธ์ยังไม่อยู่ในรายการที่ Backend อนุญาต",
+        "invalid_file_content": "ไฟล์ผลลัพธ์ไม่ผ่านการตรวจสอบรูปแบบหรือความปลอดภัย",
+        "output_cleanup_failed": "ระบบเผยแพร่ไฟล์ผลลัพธ์แล้วแต่ล้างพื้นที่ทำงานชั่วคราวไม่สำเร็จ จึงหยุดแบบ Fail Closed",
+    }.get(code, "Full Agent Turn ไม่สำเร็จและหยุดแบบ Fail Closed")
+
+
+def _full_agent_safe_error_code(error: Exception, default: str = "app_server_unavailable") -> str:
+    candidate = str(getattr(error, "code", "") or "")
+    if re.fullmatch(r"[a-z][a-z0-9_]{1,79}", candidate):
+        return candidate
+    return default
+
+
+def _full_agent_terminal_identity(
+    mission_id: str,
+    *,
+    succeeded: bool,
+    code: str,
+) -> tuple[str, str]:
+    turn_status = "completed" if succeeded else "failed"
+    terminal_digest = payload_digest(
+        "full-agent-terminal-v1",
+        mission_id,
+        turn_status,
+        "" if succeeded else code,
+    )
+    return (
+        f"report-full-agent-{terminal_digest[:24]}",
+        f"full-agent-terminal-{terminal_digest[:24]}",
+    )
+
+
+def _full_agent_recover_mission_after_restart(mission: dict, thread: dict) -> dict:
+    """Reconcile one durable active Turn without contradicting terminal proof.
+
+    Mission evidence is committed before the Turn lifecycle.  A process may
+    therefore stop after committing a terminal Mission/Report/Audit while the
+    durable Turn still says running.  Preserve and heal exact deterministic
+    terminal evidence; only an actually non-terminal or inconsistent Mission
+    is failed with ``bridge_restarted``.
+    """
+
+    mission_id = safe_reference(mission.get("id"))
+    if not mission_id:
+        raise DataIntegrityError("Interrupted Full Agent Mission identity is invalid.")
+    status = str(mission.get("status") or "")
+    phase = str(mission.get("phase") or "")
+    report_ids = mission.get("reportIds")
+
+    if status == "completed" and phase == "completed" and not mission.get("errorCode"):
+        report_id, _ = _full_agent_terminal_identity(
+            mission_id,
+            succeeded=True,
+            code="completed",
+        )
+        if report_ids != [report_id]:
+            raise DataIntegrityError(
+                "Completed Full Agent Mission is missing its exact terminal Report."
+            )
+        evidence = _full_agent_update_mission_terminal(
+            mission_id,
+            succeeded=True,
+            code="completed",
+            summary="Codex App Server ทำ Turn เสร็จและบันทึกคำตอบใน Thread แล้ว",
+            thread=thread,
+        )
+        if not isinstance(evidence, dict):
+            raise DataIntegrityError(
+                "Completed Full Agent Mission lost its terminal evidence."
+            )
+        return {
+            "turnStatus": "completed",
+            "errorCode": None,
+            "reportFallback": False,
+        }
+
+    existing_code = str(mission.get("errorCode") or "")
+    if (
+        status == "failed"
+        and phase == "failed"
+        and re.fullmatch(r"[a-z][a-z0-9_]{1,79}", existing_code)
+    ):
+        if report_ids == []:
+            _full_agent_fail_mission_without_report(
+                mission_id,
+                code=existing_code,
+                summary=_full_agent_error_message(existing_code),
+            )
+            return {
+                "turnStatus": "failed",
+                "errorCode": existing_code,
+                "reportFallback": True,
+            }
+        report_id, _ = _full_agent_terminal_identity(
+            mission_id,
+            succeeded=False,
+            code=existing_code,
+        )
+        if report_ids != [report_id]:
+            raise DataIntegrityError(
+                "Failed Full Agent Mission is missing its exact terminal Report."
+            )
+        evidence = _full_agent_update_mission_terminal(
+            mission_id,
+            succeeded=False,
+            code=existing_code,
+            summary=_full_agent_error_message(existing_code),
+            thread=thread,
+        )
+        if not isinstance(evidence, dict):
+            raise DataIntegrityError(
+                "Failed Full Agent Mission lost its terminal evidence."
+            )
+        return {
+            "turnStatus": "failed",
+            "errorCode": existing_code,
+            "reportFallback": False,
+        }
+
+    code = "bridge_restarted"
+    evidence = _full_agent_update_mission_terminal(
+        mission_id,
+        succeeded=False,
+        code=code,
+        summary=_full_agent_error_message(code),
+        thread=thread,
+    )
+    if not isinstance(evidence, dict):
+        raise DataIntegrityError(
+            "Interrupted Full Agent Mission lost its report evidence."
+        )
+    return {
+        "turnStatus": "failed",
+        "errorCode": code,
+        "reportFallback": False,
+    }
+
+
+def _full_agent_update_mission_terminal(
+    mission_id: str,
+    *,
+    succeeded: bool,
+    code: str,
+    summary: str,
+    thread: dict,
+    duration_ms: int | None = None,
+) -> dict | None:
+    mission = find_mission(mission_id)
+    if not isinstance(mission, dict):
+        return None
+    report_status = "ready" if succeeded else "blocked"
+    turn_status = "completed" if succeeded else "failed"
+    report_id, audit_event_id = _full_agent_terminal_identity(
+        mission_id,
+        succeeded=succeeded,
+        code=code,
+    )
+    report_payload = {
+        "id": report_id,
+        "type": mission.get("reportType") or "prop_report",
+        "title": f"Full Agent Turn • {thread.get('title') or thread.get('agentId')}",
+        "summary": redact_text(summary, 1200),
+        "ownerAgentId": thread.get("agentId"),
+        "linkedMissionId": mission_id,
+        "linkedPropId": mission.get("targetId"),
+        "status": report_status,
+        "findings": [
+            "Codex App Server ยืนยัน Turn แล้ว" if succeeded else _full_agent_error_message(code)
+        ],
+        "metrics": {
+            "runtime": "codex_app_server",
+            "mode": thread.get("mode"),
+            "model": thread.get("model"),
+            "reasoning": thread.get("reasoning"),
+            "turnStatus": turn_status,
+            "errorCode": None if succeeded else code,
+            "durationMs": duration_ms,
+        },
+        "risks": [] if succeeded else [code],
+        "nextActions": [],
+        "safety": {
+            "approvalRequired": thread.get("mode") == "workspace",
+            "publicShareable": False,
+        },
+    }
+    report_path = RUNTIME_REPORTS_DIR / f"{report_id}.json"
+    with REPORTS_LOCK:
+        report_exists = report_path.exists()
+        if report_path.is_symlink():
+            raise DataIntegrityError(
+                "Full Agent terminal Report path must be a regular local file."
+            )
+        existing_report = read_json(report_path, None) if report_exists else None
+        if report_exists:
+            metrics = (
+                existing_report.get("metrics")
+                if isinstance(existing_report, dict)
+                and isinstance(existing_report.get("metrics"), dict)
+                else {}
+            )
+            if (
+                not isinstance(existing_report, dict)
+                or existing_report.get("id") != report_id
+                or existing_report.get("type") != report_payload["type"]
+                or existing_report.get("ownerAgentId") != str(thread.get("agentId") or "manager")
+                or existing_report.get("linkedMissionId") != mission_id
+                or existing_report.get("linkedPropId") != mission.get("targetId")
+                or existing_report.get("status") != report_status
+                or metrics.get("runtime") != "codex_app_server"
+                or metrics.get("mode") != thread.get("mode")
+                or metrics.get("model") != thread.get("model")
+                or metrics.get("reasoning") != thread.get("reasoning")
+                or metrics.get("turnStatus") != turn_status
+                or metrics.get("errorCode") != (None if succeeded else code)
+            ):
+                raise DataIntegrityError(
+                    "Full Agent terminal Report identity collided with different evidence."
+                )
+            report = existing_report
+        else:
+            report = create_report(
+                report_payload,
+                queue_research_sheet=False,
+            )
+    now = utc_now()
+    mission["status"] = "completed" if succeeded else "failed"
+    mission["result"] = redact_text(summary, 1600)
+    mission["reportIds"] = [report["id"]]
+    mission["updatedAt"] = now
+    mission["completedAt"] = now
+    mission["phase"] = "completed" if succeeded else "failed"
+    mission["errorCode"] = None if succeeded else code
+    replace_mission(mission)
+    persisted_metrics = (
+        report.get("metrics")
+        if isinstance(report, dict) and isinstance(report.get("metrics"), dict)
+        else {}
+    )
+    append_audit_once({
+        "eventId": audit_event_id,
+        "type": "full_agent.turn_completed" if succeeded else "full_agent.turn_failed",
+        "missionId": mission_id,
+        "threadId": thread.get("id"),
+        "ownerAgentId": thread.get("agentId"),
+        "reportId": report.get("id"),
+        "status": mission["status"],
+        "errorCode": None if succeeded else code,
+        "durationMs": persisted_metrics.get("durationMs"),
+    })
+    return report
+
+
+def _full_agent_fail_mission_without_report(
+    mission_id: str,
+    *,
+    code: str,
+    summary: str,
+) -> None:
+    """Best-effort terminalization when durable report creation itself fails.
+
+    A failed report write must never leave the Mission looking active.  This
+    fallback intentionally does not fabricate a report id; the audit record
+    makes the missing evidence explicit for an operator.
+    """
+
+    try:
+        mission = find_mission(mission_id)
+        if not isinstance(mission, dict):
+            return
+        now = utc_now()
+        mission["status"] = "failed"
+        mission["result"] = redact_text(summary, 1600)
+        mission["reportIds"] = []
+        mission["updatedAt"] = now
+        mission["completedAt"] = now
+        mission["phase"] = "failed"
+        mission["errorCode"] = code
+        replace_mission(mission)
+    except Exception:
+        pass
+    failure_digest = payload_digest(
+        "full-agent-report-failed-v1",
+        mission_id,
+        code,
+    )
+    append_audit_once({
+        "eventId": f"full-agent-report-failed-{failure_digest[:24]}",
+        "type": "full_agent.report_failed",
+        "missionId": mission_id,
+        "errorCode": code,
+    })
+
+
+def _full_agent_append_error(
+    runtime: FullAgentRuntime,
+    thread_id: str,
+    turn_id: str,
+    code: str,
+) -> None:
+    try:
+        runtime.append_event(
+            thread_id,
+            role="system",
+            content=_full_agent_error_message(code),
+            event_type="error",
+            metadata={"errorCode": code, "turnId": turn_id},
+            idempotency_key=f"error:{turn_id}:{code}",
+        )
+    except FullAgentRuntimeError:
+        pass
+
+
+def _full_agent_mark_turn_failed(
+    runtime: FullAgentRuntime,
+    thread_id: str,
+    turn_id: str,
+    code: str,
+) -> dict:
+    _full_agent_append_error(runtime, thread_id, turn_id, code)
+    try:
+        result = runtime.update_turn_state(
+            thread_id,
+            turn_id,
+            status="failed",
+            error_code=code,
+        )
+        return result["thread"]
+    except FullAgentRuntimeError:
+        return runtime.get_thread(thread_id, include_events=True)
+
+
+def _full_agent_wait_for_gateway_turn(
+    gateway,
+    gateway_thread_id: str,
+    gateway_turn_id: str,
+) -> tuple[dict | None, Exception | None, bool]:
+    holder: dict[str, object] = {}
+    completed = threading.Event()
+
+    def wait_target() -> None:
+        try:
+            holder["result"] = gateway.turn_wait(
+                gateway_turn_id,
+                thread_id=gateway_thread_id,
+            )
+        except Exception as error:  # stored only in memory; never serialized raw
+            holder["error"] = error
+        finally:
+            completed.set()
+
+    waiter = threading.Thread(
+        target=wait_target,
+        name=f"full-agent-wait-{gateway_turn_id[:12]}",
+        daemon=True,
+    )
+    waiter.start()
+    if completed.wait(FULL_AGENT_TURN_TIMEOUT_SECONDS):
+        return (
+            holder.get("result") if isinstance(holder.get("result"), dict) else None,
+            holder.get("error") if isinstance(holder.get("error"), Exception) else None,
+            False,
+        )
+    try:
+        gateway.turn_interrupt(gateway_thread_id, gateway_turn_id)
+    except Exception:
+        pass
+    stopped_in_grace = completed.wait(FULL_AGENT_INTERRUPT_GRACE_SECONDS)
+    if not stopped_in_grace:
+        closed = _quarantine_full_agent_gateway(gateway)
+        if closed:
+            # The SDK close path terminates the local app-server process and
+            # wakes pending response waiters.  Join briefly so no stale waiter
+            # can mutate the detached gateway's in-memory session state.
+            waiter.join(timeout=5.0)
+    return (
+        holder.get("result") if isinstance(holder.get("result"), dict) else None,
+        holder.get("error") if isinstance(holder.get("error"), Exception) else None,
+        True,
+    )
+
+
+def _full_agent_record_gateway_items(
+    runtime: FullAgentRuntime,
+    thread_id: str,
+    turn_id: str,
+    items: object,
+) -> None:
+    if not isinstance(items, list):
+        return
+    for index, item in enumerate(items[:60]):
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "codex_item")
+        if item_type in {"agentMessage", "userMessage", "reasoning"}:
+            continue
+        tool_name = re.sub(r"[^A-Za-z0-9._:-]", "_", item_type)[:120] or "codex_item"
+        status = redact_text(str(item.get("status") or "reported"), 40)
+        try:
+            runtime.append_event(
+                thread_id,
+                role="tool",
+                content=f"Codex รายงานกิจกรรม {tool_name} • สถานะ {status}",
+                event_type="tool_result",
+                tool_name=tool_name,
+                metadata={"turnId": turn_id, "itemType": item_type, "status": status},
+                idempotency_key=f"tool:{turn_id}:{index}",
+            )
+        except FullAgentRuntimeError:
+            continue
+
+
+def _full_agent_validate_gateway_items(
+    mode: str,
+    items: object,
+    *,
+    items_truncated: bool = False,
+) -> None:
+    """Reject any non-conversation evidence from a tool-free Chat turn."""
+
+    if mode != "chat":
+        return
+    if items_truncated or not isinstance(items, list):
+        raise RuntimeError("unexpected_tool_activity")
+    allowed_types = {"agentMessage", "userMessage", "reasoning"}
+    for item in items:
+        if not isinstance(item, dict):
+            raise RuntimeError("unexpected_tool_activity")
+        if str(item.get("type") or "") not in allowed_types:
+            raise RuntimeError("unexpected_tool_activity")
+
+
+def _run_full_agent_turn(
+    thread_id: str,
+    turn_id: str,
+    mission_id: str,
+    prompt: str,
+    attachments: list[dict],
+) -> None:
+    runtime = _full_agent_runtime()
+    acquired_full = FULL_AGENT_RUN_SEMAPHORE.acquire(blocking=False)
+    acquired_real = False
+    gateway = None
+    output_turn_root: Path | None = None
+    started_monotonic = time.monotonic()
+    try:
+        if not acquired_full:
+            raise RuntimeError("runner_busy")
+        acquired_real = REAL_RUN_SEMAPHORE.acquire(blocking=False)
+        if not acquired_real:
+            raise RuntimeError("runner_busy")
+        thread = runtime.get_thread(thread_id, include_events=False)
+        active_turn = thread.get("activeTurn") if isinstance(thread, dict) else None
+        if not isinstance(active_turn, dict) or active_turn.get("id") != turn_id:
+            raise RuntimeError("turn_interrupted")
+        if active_turn.get("interruptRequested") is True:
+            raise RuntimeError("turn_interrupted")
+        runtime.update_turn_state(thread_id, turn_id, status="running")
+        runtime.append_event(
+            thread_id,
+            role="system",
+            content="Codex App Server รับ Turn แล้ว • กำลังทำงานในขอบเขตที่ Backend อนุญาต",
+            event_type="system_notice",
+            metadata={"turnId": turn_id, "missionId": mission_id},
+            idempotency_key=f"started:{turn_id}",
+        )
+        quota = codex_rate_limits()
+        quota_gate = _collaboration_quota_gate({}, refresh=False, quota=quota)
+        if quota_gate.get("allowed") is not True:
+            raise RuntimeError("quota_unavailable")
+
+        gateway = _full_agent_gateway()
+        with FULL_AGENT_GATEWAY_LOCK:
+            gateway_generation = (
+                FULL_AGENT_GATEWAY_GENERATION
+                if FULL_AGENT_GATEWAY_INSTANCE is gateway
+                else None
+            )
+        if not gateway_generation:
+            raise RuntimeError("app_server_unavailable")
+        with FULL_AGENT_ACTIVE_LOCK:
+            active = FULL_AGENT_ACTIVE_TURNS.get(turn_id)
+            if not isinstance(active, dict) or active.get("cancelRequested") is True:
+                raise RuntimeError("turn_interrupted")
+            active["gatewayGeneration"] = gateway_generation
+        # Auth and model entitlement may have changed after thread creation.
+        # Revalidate both against the exact running App Server immediately
+        # before any thread/resume/turn dispatch reaches Codex.
+        _full_agent_require_dispatch_ready(gateway, thread)
+        policy = _full_agent_policy(thread)
+        backend_thread_id = runtime.get_backend_thread_id(thread_id)
+        if backend_thread_id:
+            gateway.thread_resume(backend_thread_id, policy)
+        else:
+            start = gateway.thread_start(policy)
+            backend_thread_id = str(((start.get("thread") or {}).get("id")) or "")
+            runtime.set_backend_thread_id(thread_id, backend_thread_id)
+
+        with FULL_AGENT_ACTIVE_LOCK:
+            active = FULL_AGENT_ACTIVE_TURNS.get(turn_id)
+            if not isinstance(active, dict) or active.get("cancelRequested") is True:
+                raise RuntimeError("turn_interrupted")
+            active["gatewayThreadId"] = backend_thread_id
+
+        output_instruction = ""
+        if thread.get("mode") == "workspace":
+            output_turn_root, output_relative = _full_agent_workspace_output_directory(
+                thread_id,
+                turn_id,
+            )
+            output_instruction = (
+                "If the user requested a generated image, document, slide deck, "
+                "spreadsheet, source file, archive, or other downloadable deliverable, "
+                f"write only finalized deliverable files below `{output_relative}` "
+                "(relative to the granted workspace). Do not place temporary files, "
+                "credentials, or unrelated workspace files there. Files outside that "
+                "exact per-turn directory will not be published to the user.\n\n"
+            )
+        guarded_prompt = (
+            "This is an HQ chat-only turn. Do not use tools or change files.\n\n"
+            if thread.get("mode") == "chat"
+            else (
+                "Work only inside the workspace roots granted by the HQ gateway. "
+                "Do not access credentials, external apps, networks, live trading, "
+                "or perform destructive file operations. Every command execution "
+                "and file change requires a fresh one-shot human approval; never "
+                "request session-wide approval or expanded permissions.\n\n"
+            )
+        ) + output_instruction + prompt
+        input_items = [
+            {"type": "localImage", "path": str(attachment["path"])}
+            for attachment in attachments
+            if attachment.get("modelInputReady") is True
+        ]
+        started = gateway.turn_start(
+            backend_thread_id,
+            guarded_prompt,
+            input_items=input_items or None,
+            policy_value=policy,
+            wait=False,
+        )
+        gateway_turn_id = str(((started.get("turn") or {}).get("id")) or "")
+        with FULL_AGENT_ACTIVE_LOCK:
+            active = FULL_AGENT_ACTIVE_TURNS.get(turn_id)
+            if isinstance(active, dict):
+                already_bound_turn = active.get("gatewayTurnId")
+                if already_bound_turn not in {None, gateway_turn_id}:
+                    active["cancelRequested"] = True
+                    raise RuntimeError("approval_binding_mismatch")
+                active["gatewayTurnId"] = gateway_turn_id
+                cancel_requested = active.get("cancelRequested") is True
+            else:
+                cancel_requested = True
+        if cancel_requested:
+            try:
+                gateway.turn_interrupt(backend_thread_id, gateway_turn_id)
+            except Exception:
+                pass
+
+        completed, wait_error, timed_out = _full_agent_wait_for_gateway_turn(
+            gateway,
+            backend_thread_id,
+            gateway_turn_id,
+        )
+        if timed_out:
+            try:
+                runtime.clear_backend_thread_id(
+                    thread_id,
+                    expected_backend_thread_id=backend_thread_id,
+                )
+            except FullAgentRuntimeError:
+                pass
+            raise RuntimeError("turn_timeout")
+        if wait_error is not None:
+            raise wait_error
+        completed = completed if isinstance(completed, dict) else {}
+        projected_turn = completed.get("turn") if isinstance(completed.get("turn"), dict) else {}
+        gateway_status = str(projected_turn.get("status") or completed.get("status") or "")
+        with FULL_AGENT_ACTIVE_LOCK:
+            active = FULL_AGENT_ACTIVE_TURNS.get(turn_id)
+            cancel_requested = bool(isinstance(active, dict) and active.get("cancelRequested") is True)
+        if cancel_requested or gateway_status in {"cancelled", "canceled", "interrupted", "aborted"}:
+            raise RuntimeError("turn_interrupted")
+        if completed.get("ok") is not True or gateway_status != "completed":
+            error_value = projected_turn.get("error") if isinstance(projected_turn.get("error"), dict) else {}
+            error_code = str(error_value.get("code") or "app_server_unavailable")
+            raise RuntimeError(error_code)
+        projected_items = projected_turn.get("items")
+        _full_agent_validate_gateway_items(
+            str(thread.get("mode") or "chat"),
+            projected_items,
+            items_truncated=projected_turn.get("itemsTruncated") is True,
+        )
+        reply = _full_agent_redact_response_text(
+            str(projected_turn.get("assistantText") or "").strip(), 32000
+        )
+        if not reply:
+            raise RuntimeError("empty_model_response")
+        _full_agent_record_gateway_items(
+            runtime,
+            thread_id,
+            turn_id,
+            projected_items,
+        )
+        artifacts = _full_agent_publish_turn_outputs(
+            thread_id,
+            turn_id,
+            output_turn_root if thread.get("mode") == "workspace" else None,
+        )
+        runtime.append_event(
+            thread_id,
+            role="assistant",
+            content=reply,
+            event_type="message",
+            metadata={
+                "turnId": turn_id,
+                "missionId": mission_id,
+                "artifacts": artifacts,
+                "artifactCount": len(artifacts),
+            },
+            idempotency_key=f"assistant:{turn_id}",
+        )
+        duration_ms = max(0, int((time.monotonic() - started_monotonic) * 1000))
+        current_thread = runtime.get_thread(thread_id, include_events=False)
+        evidence = _full_agent_update_mission_terminal(
+            mission_id,
+            succeeded=True,
+            code="completed",
+            summary=(
+                "Codex App Server ทำ Turn เสร็จและบันทึกคำตอบใน Thread แล้ว"
+                if not artifacts
+                else f"Codex App Server ทำ Turn เสร็จและเผยแพร่ไฟล์ผลลัพธ์ {len(artifacts)} รายการแล้ว"
+            ),
+            thread=current_thread,
+            duration_ms=duration_ms,
+        )
+        if not isinstance(evidence, dict):
+            raise RuntimeError("mission_evidence_missing")
+        # Publish the durable Turn as completed only after its Mission, Report
+        # and Audit evidence have all been persisted successfully.
+        runtime.update_turn_state(thread_id, turn_id, status="completed")
+    except Exception as error:
+        raw = str(error or "")
+        if raw in {
+            "runner_busy",
+            "quota_unavailable",
+            "turn_interrupted",
+            "turn_timeout",
+            "empty_model_response",
+            "unexpected_tool_activity",
+            "mission_evidence_missing",
+            "app_server_unavailable",
+            "approval_binding_mismatch",
+        }:
+            code = raw
+        else:
+            code = _full_agent_safe_error_code(error)
+        duration_ms = max(0, int((time.monotonic() - started_monotonic) * 1000))
+        try:
+            failed_thread = runtime.get_thread(thread_id, include_events=False)
+            evidence = _full_agent_update_mission_terminal(
+                mission_id,
+                succeeded=False,
+                code=code,
+                summary=_full_agent_error_message(code),
+                thread=failed_thread,
+                duration_ms=duration_ms,
+            )
+            if not isinstance(evidence, dict):
+                raise RuntimeError("mission_evidence_missing")
+        except Exception:
+            _full_agent_fail_mission_without_report(
+                mission_id,
+                code=code,
+                summary=_full_agent_error_message(code),
+            )
+        # Publish the durable Turn as failed only after its linked Mission has
+        # terminal evidence (or the explicit report-failed fallback).  This
+        # prevents readers from observing an idle Thread while its Mission is
+        # still incorrectly shown as running.
+        _full_agent_mark_turn_failed(
+            runtime,
+            thread_id,
+            turn_id,
+            code,
+        )
+    finally:
+        try:
+            had_pending, pending_declined = _full_agent_decline_pending_for_turn(
+                turn_id,
+                reason="turn_terminal",
+            )
+        except Exception:
+            had_pending, pending_declined = True, False
+        if had_pending and not pending_declined and gateway is not None:
+            _quarantine_full_agent_gateway(gateway)
+        _full_agent_cleanup_output_directory(
+            output_turn_root,
+            strict=False,
+            thread_id=thread_id,
+            turn_id=turn_id,
+        )
+        with FULL_AGENT_ACTIVE_LOCK:
+            FULL_AGENT_ACTIVE_TURNS.pop(turn_id, None)
+        if acquired_real:
+            REAL_RUN_SEMAPHORE.release()
+        if acquired_full:
+            FULL_AGENT_RUN_SEMAPHORE.release()
+        invalidate_codex_rate_limit_cache()
+
+
+def _full_agent_reject_turn(
+    runtime: FullAgentRuntime,
+    thread_id: str,
+    turn_id: str,
+    *,
+    code: str,
+    lifecycle: str = "failed",
+    mission_id: str | None = None,
+) -> dict:
+    thread = _full_agent_mark_turn_failed(runtime, thread_id, turn_id, code)
+    append_audit({
+        "type": "full_agent.turn_rejected",
+        "threadId": thread_id,
+        "turnId": turn_id,
+        "missionId": mission_id,
+        "reason": code,
+    })
+    result = {
+        "ok": True,
+        "threadId": thread_id,
+        "thread": _full_agent_public_thread(runtime.get_thread(thread_id, include_events=True)),
+        "status": lifecycle,
+        "lifecycle": lifecycle,
+    }
+    if mission_id:
+        result["missionId"] = mission_id
+    if lifecycle == "failed":
+        result["reply"] = _full_agent_error_message(code)
+    return result
+
+
+def full_agent_request_turn(thread_id: str, payload: dict) -> dict:
+    _full_agent_validate_exact_payload(
+        payload,
+        required={"message", "idempotencyKey"},
+        allowed={"message", "idempotencyKey", "attachmentIds"},
+    )
+    message = str(payload.get("message") or "").strip()
+    if not message or len(message) > 8000:
+        raise RequestError(
+            "ข้อความ Full Agent ต้องมี 1-8,000 ตัวอักษร",
+            422,
+            response_payload={"kind": "invalid_request", "code": "invalid_request"},
+        )
+    runtime = _full_agent_runtime()
+    try:
+        current_thread = runtime.get_thread(thread_id, include_events=False)
+    except FullAgentRuntimeError as error:
+        raise _full_agent_runtime_error(error)
+    attachments = _full_agent_resolve_turn_attachments(
+        current_thread,
+        payload.get("attachmentIds"),
+    )
+    # The Runtime creates the durable Turn ID. Persist only stable, path-free
+    # descriptors at this point; draft IDs are never written to history.
+    attachment_request_metadata = [
+        {
+            key: value
+            for key, value in attachment.items()
+            if key in {"name", "mediaType", "kind", "byteSize", "sha256"}
+        }
+        for attachment in attachments
+    ]
+    try:
+        requested = runtime.request_turn(
+            thread_id,
+            content=message,
+            idempotency_key=str(payload.get("idempotencyKey") or ""),
+            metadata={
+                "source": "local_dashboard",
+                "attachmentRequests": attachment_request_metadata,
+                "attachmentCount": len(attachment_request_metadata),
+            },
+        )
+    except FullAgentRuntimeError as error:
+        raise _full_agent_runtime_error(error)
+    turn = requested["turn"]
+    thread = requested["thread"]
+    turn_id = str(turn.get("id") or "")
+    if requested.get("idempotentReplay") is True:
+        replay = {
+            "ok": True,
+            "threadId": thread_id,
+            "thread": _full_agent_public_thread(thread),
+            "turn": turn,
+            "status": str(turn.get("status") or "queued"),
+            "lifecycle": str(turn.get("status") or "queued"),
+            "idempotentReplay": True,
+        }
+        if turn.get("status") in {"completed", "failed", "cancelled"}:
+            if turn.get("status") == "completed":
+                replay_events = (
+                    requested.get("turnEvents")
+                    if isinstance(requested.get("turnEvents"), list)
+                    else thread.get("events", [])
+                )
+                assistant_events = [
+                    event
+                    for event in replay_events
+                    if isinstance(event, dict)
+                    and event.get("role") == "assistant"
+                    and isinstance(event.get("metadata"), dict)
+                    and event["metadata"].get("turnId") == turn_id
+                ]
+                replay["reply"] = _full_agent_redact_response_text(
+                    (
+                        str(assistant_events[-1].get("content") or "")
+                        if assistant_events
+                        else _full_agent_error_message("empty_model_response")
+                    ),
+                    32000,
+                )
+                replay["artifacts"] = (
+                    list((assistant_events[-1].get("metadata") or {}).get("artifacts") or [])
+                    if assistant_events
+                    and isinstance(assistant_events[-1].get("metadata"), dict)
+                    and isinstance(assistant_events[-1]["metadata"].get("artifacts"), list)
+                    else []
+                )
+            else:
+                replay["reply"] = _full_agent_error_message(
+                    str(turn.get("errorCode") or "app_server_unavailable")
+                )
+        return replay
+    mode = str(thread.get("mode") or "chat")
+    if mode not in FULL_AGENT_EXECUTABLE_MODES:
+        return _full_agent_reject_turn(
+            runtime,
+            thread_id,
+            turn_id,
+            code="capability_unavailable",
+        )
+    tool_id = "agent_collaboration" if mode == "chat" and thread.get("agentId") == "ceo" else "codex_cli_task"
+    permission = evaluate_tool_permission(str(thread.get("agentId") or ""), tool_id)
+    if permission.get("allowed") is not True:
+        return _full_agent_reject_turn(
+            runtime,
+            thread_id,
+            turn_id,
+            code="capability_unavailable",
+        )
+    if mode == "workspace":
+        classification = runtime.classify_action(
+            {
+                "capability": "workspace_write",
+                "operation": message,
+                "externalSideEffect": False,
+                "destructive": False,
+                "credentialAccess": False,
+                "financialOrLiveTrade": False,
+            },
+            mode=mode,
+        )
+        high_impact = list(
+            dict.fromkeys(
+                [
+                    *classification.get("reasonCodes", []),
+                    *_high_impact_reasons("codex_cli_task", message, "medium"),
+                ]
+            )
+        )
+        if classification.get("policyBlocked") is True:
+            return _full_agent_reject_turn(
+                runtime,
+                thread_id,
+                turn_id,
+                code="capability_unavailable",
+            )
+        if high_impact:
+            runtime.append_event(
+                thread_id,
+                role="system",
+                content="Risk Guard ปฏิเสธงานผลกระทบสูง • คำขอ Tool แบบครั้งเดียวไม่ได้ใช้แทนการอนุมัติงานเสี่ยงสูง",
+                event_type="error",
+                metadata={"turnId": turn_id, "reasonCodes": high_impact[:20]},
+                idempotency_key=f"high-impact-blocked:{turn_id}",
+            )
+            return _full_agent_reject_turn(
+                runtime,
+                thread_id,
+                turn_id,
+                code="high_impact_blocked",
+            )
+
+    try:
+        attachments = _full_agent_bind_turn_attachments(
+            thread_id,
+            turn_id,
+            attachments,
+        )
+    except FullAgentArtifactError as error:
+        return _full_agent_reject_turn(
+            runtime,
+            thread_id,
+            turn_id,
+            code=(
+                error.code
+                if re.fullmatch(r"[a-z][a-z0-9_]{1,79}", str(error.code or ""))
+                else "artifact_unavailable"
+            ),
+        )
+    bound_attachment_metadata = [
+        {
+            key: value
+            for key, value in attachment.items()
+            if key in {"id", "name", "mediaType", "kind", "byteSize", "sha256"}
+        }
+        for attachment in attachments
+    ]
+    if bound_attachment_metadata:
+        append_audit({
+            "type": "full_agent.turn_attachments_bound",
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "attachmentIds": [item.get("id") for item in bound_attachment_metadata],
+            "attachmentDigests": [item.get("sha256") for item in bound_attachment_metadata],
+            "attachmentCount": len(bound_attachment_metadata),
+            "filesystemPathExposed": False,
+        })
+    try:
+        rebound_prompt = runtime.update_turn_prompt_metadata(
+            thread_id,
+            turn_id,
+            metadata={
+                "source": "local_dashboard",
+                "turnId": turn_id,
+                "attachments": bound_attachment_metadata,
+                "attachmentCount": len(bound_attachment_metadata),
+            },
+        )
+        thread = rebound_prompt["thread"]
+    except FullAgentRuntimeError:
+        return _full_agent_reject_turn(
+            runtime,
+            thread_id,
+            turn_id,
+            code="artifact_unavailable",
+        )
+
+    mission_detail = message if mode == "workspace" else (
+        "Run one persistent read-only HQ chat turn with no tools. "
+        f"Prompt digest {payload_digest(message)}; prompt characters {len(message)}."
+    )
+    try:
+        mission = create_mission(
+            {
+                "title": f"Full Agent Turn • {thread.get('title')}",
+                "prompt": mission_detail,
+                "agentId": thread.get("agentId"),
+                "requester": "human",
+                "toolId": tool_id,
+                "targetId": role_default_target_id(str(thread.get("agentId") or "manager")),
+                "risk": "low" if mode == "chat" else "medium",
+                "reportType": "prop_report",
+                "idempotencyKey": f"full-agent-turn:{turn_id}",
+            },
+            status="running",
+        )
+    except Exception:
+        return _full_agent_reject_turn(
+            runtime,
+            thread_id,
+            turn_id,
+            code="mission_create_failed",
+        )
+    if (
+        mission.get("status") != "running"
+        or mission.get("requiresHumanApproval") is True
+        or ((mission.get("approval") or {}).get("state") not in {None, "not_required"})
+    ):
+        mission_id = str(mission.get("id") or "")
+        try:
+            _full_agent_update_mission_terminal(
+                mission_id,
+                succeeded=False,
+                code="approval_path_unsupported",
+                summary=_full_agent_error_message("approval_path_unsupported"),
+                thread=thread,
+            )
+        except Exception:
+            _full_agent_fail_mission_without_report(
+                mission_id,
+                code="approval_path_unsupported",
+                summary=_full_agent_error_message("approval_path_unsupported"),
+            )
+        return _full_agent_reject_turn(
+            runtime,
+            thread_id,
+            turn_id,
+            code="approval_path_unsupported",
+            mission_id=mission_id,
+        )
+    with FULL_AGENT_ACTIVE_LOCK:
+        FULL_AGENT_ACTIVE_TURNS[turn_id] = {
+            "threadId": thread_id,
+            "missionId": mission["id"],
+            "mode": mode,
+            "gatewayThreadId": None,
+            "gatewayTurnId": None,
+            "gatewayGeneration": None,
+            "approvalPreparing": None,
+            "pendingApproval": None,
+            "approvalDecisionCount": 0,
+            "cancelRequested": False,
+            "attachmentIds": [item.get("id") for item in bound_attachment_metadata],
+        }
+    try:
+        worker = threading.Thread(
+            target=_run_full_agent_turn,
+            args=(thread_id, turn_id, mission["id"], message, attachments),
+            name=f"full-agent-turn-{turn_id[:12]}",
+            daemon=True,
+        )
+        worker.start()
+    except Exception:
+        with FULL_AGENT_ACTIVE_LOCK:
+            FULL_AGENT_ACTIVE_TURNS.pop(turn_id, None)
+        _full_agent_update_mission_terminal(
+            mission["id"],
+            succeeded=False,
+            code="app_server_unavailable",
+            summary=_full_agent_error_message("app_server_unavailable"),
+            thread=thread,
+        )
+        return _full_agent_reject_turn(
+            runtime,
+            thread_id,
+            turn_id,
+            code="app_server_unavailable",
+            mission_id=mission["id"],
+        )
+    append_audit({
+        "type": "full_agent.turn_queued",
+        "threadId": thread_id,
+        "turnId": turn_id,
+        "missionId": mission["id"],
+        "ownerAgentId": thread.get("agentId"),
+        "mode": mode,
+        "model": thread.get("model"),
+        "reasoning": thread.get("reasoning"),
+        "promptDigest": payload_digest(message),
+        "promptChars": len(message),
+        "attachmentCount": len(attachments),
+        "attachmentIds": [item.get("id") for item in bound_attachment_metadata],
+    })
+    return {
+        "ok": True,
+        "threadId": thread_id,
+        "thread": _full_agent_public_thread(runtime.get_thread(thread_id, include_events=True)),
+        "turn": turn,
+        "missionId": mission["id"],
+        "status": "queued",
+        "lifecycle": "queued",
+    }
+
+
+def full_agent_interrupt_thread(thread_id: str, payload: dict) -> dict:
+    _full_agent_validate_exact_payload(payload, required=set())
+    runtime = _full_agent_runtime()
+    try:
+        thread = runtime.get_thread(thread_id, include_events=False)
+        active_turn = thread.get("activeTurn") if isinstance(thread, dict) else None
+        if not isinstance(active_turn, dict):
+            raise FullAgentRuntimeError("no_active_turn", "No active turn.", status=409)
+        turn_id = str(active_turn.get("id") or "")
+    except FullAgentRuntimeError as error:
+        raise _full_agent_runtime_error(error)
+    gateway_thread_id = None
+    gateway_turn_id = None
+    mission_id = None
+    # Stop and an approval callback are terminal decisions competing for the
+    # same turn.  Publish the cancel marker through the callback's own lock
+    # before any fallible persistence call.  Otherwise accept_once can commit
+    # in the gap after the durable interrupt request begins but before the
+    # in-memory marker is visible.  A later persistence failure deliberately
+    # leaves this marker set: fail-closed is safer than releasing a tool after
+    # the user has already pressed Stop.
+    with FULL_AGENT_ACTIVE_LOCK:
+        active = FULL_AGENT_ACTIVE_TURNS.get(turn_id)
+        if isinstance(active, dict):
+            active["cancelRequested"] = True
+            gateway_thread_id = active.get("gatewayThreadId")
+            gateway_turn_id = active.get("gatewayTurnId")
+            mission_id = active.get("missionId")
+    try:
+        runtime.request_interrupt(
+            thread_id,
+            turn_id=turn_id,
+            idempotency_key=f"interrupt:{turn_id}",
+        )
+    except FullAgentRuntimeError as error:
+        # The cancel marker remains authoritative for the in-process approval
+        # callback even when durable runtime persistence is unavailable.
+        raise _full_agent_runtime_error(error)
+    try:
+        had_pending, pending_declined = _full_agent_decline_pending_for_turn(
+            turn_id,
+            reason="user_interrupt",
+        )
+    except Exception:
+        had_pending, pending_declined = True, False
+    adapter_confirmed = False
+    if had_pending and not pending_declined:
+        with FULL_AGENT_GATEWAY_LOCK:
+            gateway = FULL_AGENT_GATEWAY_INSTANCE
+        if gateway is not None:
+            _quarantine_full_agent_gateway(gateway)
+    elif gateway_thread_id and gateway_turn_id:
+        try:
+            result = _full_agent_gateway().turn_interrupt(
+                str(gateway_thread_id),
+                str(gateway_turn_id),
+            )
+            adapter_confirmed = result.get("ok") is True
+        except Exception:
+            adapter_confirmed = False
+    append_audit({
+        "type": "full_agent.interrupt_requested",
+        "threadId": thread_id,
+        "turnId": turn_id,
+        "missionId": mission_id,
+        "adapterConfirmed": adapter_confirmed,
+        "pendingApprovalDeclined": pending_declined if had_pending else None,
+    })
+    return {
+        "ok": True,
+        "threadId": thread_id,
+        "thread": _full_agent_public_thread(runtime.get_thread(thread_id, include_events=True)),
+        "turnId": turn_id,
+        "status": "interrupt_requested",
+        "adapterConfirmed": adapter_confirmed,
+    }
+
+
 def update_collaboration_runtime_state(**values: object) -> None:
     with COLLABORATION_STATE_LOCK:
         COLLABORATION_STATE.update(values)
@@ -81996,12 +86565,33 @@ class BridgeHandler(SimpleHTTPRequestHandler):
         body = json.dumps(safe_payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_preencoded_json(body, status=status)
 
+    def send_full_agent_json(self, payload, status: int = 200) -> None:
+        """Send a Full Agent projection without clipping valid Runtime content.
+
+        The durable Runtime accepts event content up to 32,768 characters and
+        the Codex adapter already bounds assistant text below that ceiling.
+        The generic dashboard serializer intentionally uses a lower 20,000
+        character limit, so routing Agent responses through it silently
+        corrupted otherwise valid history.  Keep this endpoint-specific
+        serializer bounded to the Runtime contract while retaining the
+        response redaction and nesting guards.
+        """
+
+        safe_payload = _full_agent_sanitize_public_value(copy.deepcopy(payload))
+        body = json.dumps(safe_payload, ensure_ascii=False, indent=2).encode("utf-8")
+        self.send_preencoded_json(
+            body,
+            status=status,
+            response_string_limit=FULL_AGENT_HTTP_RESPONSE_STRING_LIMIT,
+        )
+
     def send_preencoded_json(
         self,
         body: bytes,
         *,
         status: int = 200,
         projection_cache_hit: bool | None = None,
+        response_string_limit: int | None = None,
     ) -> None:
         """Send JSON bytes produced by a trusted backend serializer only."""
 
@@ -82014,6 +86604,11 @@ class BridgeHandler(SimpleHTTPRequestHandler):
             self.send_header(
                 "X-Metafx-Projection-Cache",
                 "hit" if projection_cache_hit else "miss",
+            )
+        if response_string_limit is not None:
+            self.send_header(
+                "X-Metafx-Response-String-Limit",
+                str(max(0, int(response_string_limit))),
             )
         self.end_headers()
         self.wfile.write(body)
@@ -82097,6 +86692,54 @@ class BridgeHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             shutil.copyfileobj(handle, self.wfile, length=64 * 1024)
 
+    def send_full_agent_artifact(self, thread_id: str, artifact_id: str) -> None:
+        resolved = full_agent_resolve_artifact(thread_id, artifact_id)
+        if not resolved:
+            raise RequestError("Unknown Full Agent artifact.", 404)
+        path, metadata = resolved
+        try:
+            binding = _full_agent_artifact_private_binding(artifact_id)
+            download = _full_agent_artifact_store().download_metadata(
+                thread_id,
+                str(binding.get("turnId") or ""),
+                artifact_id,
+            )
+            byte_size = int(download.get("contentLength") or 0)
+            handle = path.open("rb")
+        except (OSError, FullAgentArtifactError) as error:
+            raise RequestError("Full Agent artifact is unavailable.", 404) from error
+        kind = str(metadata.get("kind") or "file")
+        direction = str(metadata.get("direction") or "input")
+        disposition = str(download.get("contentDisposition") or "attachment")
+        if kind == "image" and disposition.startswith("attachment;"):
+            disposition = "inline;" + disposition[len("attachment;"):]
+        append_audit({
+            "type": "full_agent.artifact_opened",
+            "threadId": thread_id,
+            "turnId": binding.get("turnId"),
+            "artifactId": artifact_id,
+            "direction": direction,
+            "kind": kind,
+            "byteSize": byte_size,
+            "filesystemPathExposed": False,
+        })
+        with handle:
+            self.send_response(200)
+            self.send_header(
+                "Content-Type",
+                str(download.get("contentType") or "application/octet-stream"),
+            )
+            self.send_header("Content-Length", str(byte_size))
+            self.send_header("Content-Disposition", disposition)
+            self.send_header("Cache-Control", str(download.get("cacheControl") or "private, no-store"))
+            self.send_header(
+                "X-Content-Type-Options",
+                str(download.get("contentTypeOptions") or "nosniff"),
+            )
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.end_headers()
+            shutil.copyfileobj(handle, self.wfile, length=64 * 1024)
+
     def send_report_download(self, report_id: str, artifact_id: str) -> None:
         resolved = resolve_report_download(report_id, artifact_id)
         if not resolved:
@@ -82121,6 +86764,32 @@ class BridgeHandler(SimpleHTTPRequestHandler):
             self.send_header("Content-Disposition", f'attachment; filename="source-output{path.suffix.lower()}"')
             self.end_headers()
             shutil.copyfileobj(handle, self.wfile, length=64 * 1024)
+
+    def send_metatrader_gateway_source(self, platform: str) -> None:
+        resolved = resolve_metatrader_gateway_source(platform)
+        if not resolved:
+            raise RequestError("Unknown or unavailable MetaTrader gateway source.", 404)
+        path, media_type, file_name = resolved
+        try:
+            payload = path.read_bytes()
+        except OSError as error:
+            raise RequestError("MetaTrader gateway source is unavailable.", 404) from error
+        if len(payload) > METATRADER_GATEWAY_SOURCE_MAX_BYTES:
+            raise RequestError("MetaTrader gateway source is too large.", 413)
+        append_audit({
+            "type": "metatrader.gateway_source_downloaded",
+            "platform": str(platform).strip().lower(),
+            "byteSize": len(payload),
+            "filesystemPathExposed": False,
+        })
+        self.send_response(200)
+        self.send_header("Content-Type", media_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Content-Disposition", f'attachment; filename="{file_name}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(payload)
 
     def send_ea_factory_file(self, build_id: str, file_id: str) -> None:
         resolved = resolve_ea_factory_file(build_id, file_id)
@@ -82177,6 +86846,102 @@ class BridgeHandler(SimpleHTTPRequestHandler):
                 raise RequestError("Cross-origin requests are not allowed.", 403)
         if str(self.headers.get("Sec-Fetch-Site") or "").lower() == "cross-site":
             raise RequestError("Cross-site requests are not allowed.", 403)
+
+    def validate_full_agent_mutation_request(self, path: str) -> None:
+        """Bind Agent mutations to the served HQ origin and JSON transport.
+
+        Loopback is a network boundary, not an authentication boundary.  This
+        guard is intentionally scoped to browser-facing Full Agent mutations:
+        it blocks drive-by form/fetch requests and host/origin alias confusion
+        without changing installer health checks or other local integrations.
+        A malicious process already running as the same Windows user remains
+        outside this CSRF boundary and is not claimed to be stopped here.
+        """
+
+        if not str(path or "").startswith("/api/agent-runtime/"):
+            return
+        media_type = str(self.headers.get("Content-Type") or "").split(";", 1)[0]
+        if media_type.strip().lower() != "application/json":
+            raise RequestError(
+                "Full Agent mutations require application/json.",
+                415,
+                response_payload={
+                    "kind": "invalid_transport",
+                    "code": "invalid_transport",
+                    "messageTh": "คำขอเปลี่ยนแปลง Full Agent ต้องมาจาก HQ ผ่าน JSON เท่านั้น",
+                },
+            )
+
+        host_header = str(self.headers.get("Host") or "").strip()
+        origin = str(self.headers.get("Origin") or "").strip()
+        if not origin:
+            raise RequestError(
+                "Full Agent mutations require the HQ Origin header.",
+                403,
+                response_payload={
+                    "kind": "same_origin_required",
+                    "code": "same_origin_required",
+                    "messageTh": "Backend ปฏิเสธคำขอ Full Agent ที่ไม่ได้มาจากหน้า HQ เดียวกัน",
+                },
+            )
+        try:
+            request_authority = urlparse(f"//{host_header}")
+            origin_authority = urlparse(origin)
+            request_host = str(request_authority.hostname or "").lower()
+            origin_host = str(origin_authority.hostname or "").lower()
+            request_port = request_authority.port or int(self.server.server_port)
+            origin_port = origin_authority.port or 80
+        except ValueError as error:
+            raise RequestError("Full Agent request origin is invalid.", 403) from error
+        if (
+            origin_authority.scheme != "http"
+            or request_host not in {"127.0.0.1", "localhost", "::1"}
+            or origin_host != request_host
+            or request_port != int(self.server.server_port)
+            or origin_port != request_port
+        ):
+            raise RequestError(
+                "Full Agent mutations require the exact HQ origin.",
+                403,
+                response_payload={
+                    "kind": "same_origin_required",
+                    "code": "same_origin_required",
+                    "messageTh": "Backend ปฏิเสธคำขอ Full Agent ที่ Origin ไม่ตรงกับหน้า HQ",
+                },
+            )
+
+        fetch_site = str(self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if fetch_site and fetch_site != "same-origin":
+            raise RequestError("Full Agent mutations require a same-origin request.", 403)
+        fetch_mode = str(self.headers.get("Sec-Fetch-Mode") or "").strip().lower()
+        if fetch_mode and fetch_mode not in {"cors", "same-origin"}:
+            raise RequestError("Full Agent mutation fetch mode is invalid.", 403)
+        fetch_dest = str(self.headers.get("Sec-Fetch-Dest") or "").strip().lower()
+        if fetch_dest and fetch_dest != "empty":
+            raise RequestError("Full Agent mutation fetch destination is invalid.", 403)
+
+    def validate_full_agent_approval_decision_request(self, payload: dict) -> None:
+        expected_origin = f"http://127.0.0.1:{int(self.server.server_port)}"
+        origin = str(self.headers.get("Origin") or "").strip()
+        if origin != expected_origin:
+            raise RequestError("Approval decisions require the exact HQ origin.", 403)
+        if str(self.headers.get("Sec-Fetch-Site") or "").strip().lower() != "same-origin":
+            raise RequestError("Approval decisions require a same-origin browser request.", 403)
+        if str(self.headers.get("Sec-Fetch-Mode") or "").strip().lower() != "cors":
+            raise RequestError("Approval decisions require the expected browser fetch mode.", 403)
+        fetch_dest = str(self.headers.get("Sec-Fetch-Dest") or "").strip().lower()
+        if fetch_dest not in {"empty", ""}:
+            raise RequestError("Approval decisions require the expected browser destination.", 403)
+        if str(self.headers.get("X-Metafx-Approval-Version") or "").strip() != "1":
+            raise RequestError("Approval decision protocol version is invalid.", 409)
+        header_nonce = str(self.headers.get("X-Metafx-Approval-Nonce") or "").strip()
+        payload_nonce = str(payload.get("decisionNonce") or "").strip()
+        if (
+            not header_nonce
+            or not payload_nonce
+            or not secrets.compare_digest(header_nonce, payload_nonce)
+        ):
+            raise RequestError("Approval decision nonce is invalid.", 409)
 
     def validate_google_oauth_callback_request(self) -> None:
         # OAuth redirects are cross-site top-level navigations by design.  This
@@ -82422,6 +87187,51 @@ class BridgeHandler(SimpleHTTPRequestHandler):
                 message_th=str(result.get("messageTh") or "เชื่อมต่อ Google Sheets สำเร็จแล้ว"),
             )
             return
+        if path == "/api/agent-runtime/status":
+            self.send_full_agent_json(full_agent_runtime_status())
+            return
+        if path == "/api/agent-runtime/models":
+            self.send_full_agent_json(full_agent_runtime_models())
+            return
+        if path == "/api/agent-runtime/threads":
+            agent_id = str(query.get("agentId", [""])[0] or "")
+            include_value = str(query.get("includeArchived", ["false"])[0] or "false").lower()
+            if include_value not in {"true", "false"}:
+                raise RequestError("includeArchived must be true or false.", 422)
+            self.send_full_agent_json(
+                full_agent_list_threads(
+                    agent_id,
+                    include_archived=include_value == "true",
+                )
+            )
+            return
+        full_agent_pending_approval_match = re.fullmatch(
+            r"/api/agent-runtime/threads/([^/]+)/approvals/pending",
+            path,
+        )
+        if full_agent_pending_approval_match:
+            self.send_full_agent_json(
+                full_agent_pending_approval(
+                    unquote(full_agent_pending_approval_match.group(1))
+                )
+            )
+            return
+        full_agent_artifact_match = re.fullmatch(
+            r"/api/agent-runtime/threads/([^/]+)/artifacts/([^/]+)",
+            path,
+        )
+        if full_agent_artifact_match:
+            self.send_full_agent_artifact(
+                unquote(full_agent_artifact_match.group(1)),
+                unquote(full_agent_artifact_match.group(2)),
+            )
+            return
+        full_agent_thread_read = re.fullmatch(r"/api/agent-runtime/threads/([^/]+)", path)
+        if full_agent_thread_read:
+            self.send_full_agent_json(
+                full_agent_get_thread(unquote(full_agent_thread_read.group(1)))
+            )
+            return
         if path == "/api/health":
             health = runtime_health()
             health["endpoint"] = {
@@ -82433,6 +87243,15 @@ class BridgeHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/bridge/status":
             self.send_json(bridge_status_read_model())
+            return
+        gateway_source_match = re.fullmatch(
+            r"/api/integrations/metatrader/gateway-source/([^/]+)",
+            path,
+        )
+        if gateway_source_match:
+            self.send_metatrader_gateway_source(
+                unquote(gateway_source_match.group(1)),
+            )
             return
         if path == "/api/props/right_server_racks/ea-factory":
             self.send_result(ea_factory_read_result())
@@ -82841,10 +87660,19 @@ class BridgeHandler(SimpleHTTPRequestHandler):
         try:
             self.validate_local_request()
             path = urlparse(self.path).path
+            self.validate_full_agent_mutation_request(path)
+            full_agent_attachment_upload = re.fullmatch(
+                r"/api/agent-runtime/threads/([^/]+)/attachments",
+                path,
+            )
             payload = self.read_payload(
-                MAX_OHLC_REQUEST_BYTES
-                if path == "/api/props/left_server_racks/ohlc/import"
-                else MAX_REQUEST_BYTES
+                (
+                    MAX_OHLC_REQUEST_BYTES
+                    if path == "/api/props/left_server_racks/ohlc/import"
+                    else FULL_AGENT_MAX_UPLOAD_REQUEST_BYTES
+                    if full_agent_attachment_upload
+                    else MAX_REQUEST_BYTES
+                )
             )
             if path == "/api/admin/shutdown":
                 provided_token = str(
@@ -82890,6 +87718,55 @@ class BridgeHandler(SimpleHTTPRequestHandler):
                     })
                 else:
                     self.send_result(queue_collaboration_session("manual"))
+                return
+            if path == "/api/agent-runtime/threads":
+                self.send_full_agent_json(full_agent_create_thread(payload), status=201)
+                return
+            if full_agent_attachment_upload:
+                self.send_full_agent_json(
+                    full_agent_upload_attachment(
+                        unquote(full_agent_attachment_upload.group(1)),
+                        payload,
+                    ),
+                    status=201,
+                )
+                return
+            full_agent_approval_decision = re.fullmatch(
+                r"/api/agent-runtime/threads/([^/]+)/approvals/([^/]+)/resolve",
+                path,
+            )
+            if full_agent_approval_decision:
+                self.validate_full_agent_approval_decision_request(payload)
+                self.send_full_agent_json(
+                    full_agent_resolve_approval(
+                        unquote(full_agent_approval_decision.group(1)),
+                        unquote(full_agent_approval_decision.group(2)),
+                        payload,
+                    ),
+                    status=202,
+                )
+                return
+            full_agent_thread_action = re.fullmatch(
+                r"/api/agent-runtime/threads/([^/]+)/(settings|turn|interrupt|archive)",
+                path,
+            )
+            if full_agent_thread_action:
+                thread_id = unquote(full_agent_thread_action.group(1))
+                action = full_agent_thread_action.group(2)
+                if action == "settings":
+                    self.send_full_agent_json(full_agent_update_thread(thread_id, payload))
+                elif action == "turn":
+                    self.send_full_agent_json(
+                        full_agent_request_turn(thread_id, payload),
+                        status=202,
+                    )
+                elif action == "interrupt":
+                    self.send_full_agent_json(
+                        full_agent_interrupt_thread(thread_id, payload),
+                        status=202,
+                    )
+                else:
+                    self.send_full_agent_json(full_agent_archive_thread(thread_id, payload))
                 return
             if path == "/api/agents/chat":
                 self.send_result(run_agent_chat_request(payload))
@@ -83343,6 +88220,11 @@ def main() -> int:
         retire_hidden_collaboration_schedule()
         ensure_interactive_meeting_sessions_store()
         ensure_ai_trade_council_automation_store()
+        # Reconcile durable Full Agent turns before the generic Mission
+        # recovery passes.  Their running Missions use a dedicated
+        # idempotency binding and must receive terminal Report/Audit evidence
+        # even when no browser opens the Full Agent surface after restart.
+        _full_agent_runtime()
         reconciled_approval_count = reconcile_stale_approval_missions()
         reconciled_radar_report_commit_count = (
             reconcile_pending_radar_batch_report_commits()
@@ -83423,6 +88305,7 @@ def main() -> int:
         pass
     finally:
         RADAR_IMAGE_ADAPTER_RUNTIME_ENABLED = False
+        close_full_agent_gateway()
         if httpd is not None:
             httpd.server_close()
             stop_ai_trade_council_automation_scheduler()

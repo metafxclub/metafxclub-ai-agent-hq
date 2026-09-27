@@ -66,7 +66,8 @@ def main(argv: list[str] | None = None) -> int:
     if arguments in (["--help"], ["-h"]):
         print(
             "usage: configure_google_oauth_client.py --status | "
-            "--file <desktop-client.json> [--expected-client-id <id>] | --remove"
+            "--file <desktop-client.json> [--expected-client-id <id>] | "
+            "--remove | --migrate-to-central-release"
         )
         return 0
     try:
@@ -76,6 +77,13 @@ def main(argv: list[str] | None = None) -> int:
             removed = google_sheet_hub.remove_google_oauth_client_configuration()
             result = _safe_status()
             result["removed"] = removed.get("removed") is True
+        elif arguments == ["--migrate-to-central-release"]:
+            migrated = google_sheet_hub.migrate_google_oauth_to_central_release()
+            result = _safe_status()
+            result["migrated"] = migrated.get("migrated") is True
+            result["authorizationPreserved"] = (
+                migrated.get("authorizationPreserved") is True
+            )
         elif (
             len(arguments) in {2, 4}
             and arguments[0] == "--file"
@@ -98,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
                     "ok": False,
                     "configured": False,
                     "kind": "invalid_arguments",
-                    "message": "Use --status, --file with one Desktop OAuth JSON file and optional expected Client ID, or --remove.",
+                    "message": "Use --status, --file with one Desktop OAuth JSON file and optional expected Client ID, --remove, or --migrate-to-central-release.",
                 }
             )
             return 1

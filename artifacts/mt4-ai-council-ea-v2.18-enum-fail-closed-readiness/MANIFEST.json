@@ -1,12 +1,12 @@
 {
   "schemaVersion": "metafx-hq-mt4-ea-artifact-v1",
-  "packageVersion": "2.18",
+  "packageVersion": "2.19",
   "candidateStatus": "ready_visible_metaeditor_compiled",
   "sourceFile": "MetafxHQTradeGateway.mq4",
-  "sourceSha256": "E053CD85E0F252E8DCC42C334D17EB9A7F0C26DE4C42A38ABB4B6D45C9C204DA",
+  "sourceSha256": "5267C06FB193A23C9CE4CEF2E8C1D02CBB4599F1331DFE31BEBD463C9B277D62",
   "binaryFile": "MetafxHQTradeGateway.ex4",
-  "binarySha256": "8961E60D128D8755DE9999AFFF00FD03FA91359AF48E33ADED41516AE936A181",
-  "binaryBytes": 381010,
+  "binarySha256": "AB880514CA8A435325D8322803A7551DB38AB2DD1FA6EE6764BB1D289F3C2DCC",
+  "binaryBytes": 452008,
   "ex4Included": true,
   "compileEvidence": {
     "status": "passed",
@@ -14,25 +14,25 @@
     "compilerVersion": "5.0.0.2418",
     "errors": 0,
     "warnings": 0,
-    "elapsedMs": 126,
-    "compiledAtUtc": "2026-08-31T09:54:50Z",
+    "elapsedMs": 114,
+    "compiledAtUtc": "2026-09-27T08:17:35Z",
     "screenshot": "COMPILE_PROOF.png",
-    "screenshotSha256": "A224542552ABA5A68C2176002B42DDF27E3436B8CFAD98FFF03792CA8F836C3B",
+    "screenshotSha256": "30AA0F3EA1DEE77C4CCF073D794203286AF90271AFBD7E799043437E9DBE8969",
     "releaseCompile": {
-      "mode": "visible_metaeditor_exact_source",
+      "mode": "metaeditor_command_line_exact_source",
       "errors": 0,
       "warnings": 0,
-      "elapsedMs": 126,
-      "compiledAtUtc": "2026-08-31T09:54:50Z",
-      "sourceSha256": "E053CD85E0F252E8DCC42C334D17EB9A7F0C26DE4C42A38ABB4B6D45C9C204DA",
-      "binarySha256": "8961E60D128D8755DE9999AFFF00FD03FA91359AF48E33ADED41516AE936A181"
+      "elapsedMs": 120,
+      "compiledAtUtc": "2026-09-27T08:10:24Z",
+      "sourceSha256": "5267C06FB193A23C9CE4CEF2E8C1D02CBB4599F1331DFE31BEBD463C9B277D62",
+      "binarySha256": "AB880514CA8A435325D8322803A7551DB38AB2DD1FA6EE6764BB1D289F3C2DCC"
     }
   },
   "tests": [
     {
       "command": "python -m unittest tests.test_mt4_unified_ea",
       "result": "passed",
-      "count": 53
+      "count": 64
     }
   ]
 }

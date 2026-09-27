@@ -4,6 +4,7 @@ param(
     [switch]$SkipLaunch,
     [switch]$SkipShortcuts,
     [switch]$SkipGoogleSetup,
+    [switch]$ResetGoogleOAuthToCentralRelease,
     [switch]$SkipAutostart,
     [string]$GoogleClientJsonPath = "",
     [string]$ExpectedGoogleClientId = "",
@@ -110,6 +111,15 @@ if (
     $ExpectedGoogleClientId.Trim() -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{8,240}\.apps\.googleusercontent\.com$'
 ) {
     throw "ExpectedGoogleClientId ไม่ใช่ Google OAuth Client ID ที่รองรับ"
+}
+if (
+    $ResetGoogleOAuthToCentralRelease -and
+    -not [string]::IsNullOrWhiteSpace($GoogleClientJsonPath)
+) {
+    throw "ห้ามใช้ ResetGoogleOAuthToCentralRelease ร่วมกับ GoogleClientJsonPath เพราะเป็น OAuth คนละโหมด"
+}
+if ($ResetGoogleOAuthToCentralRelease -and ($SkipGoogleSetup -or $SkipLaunch)) {
+    throw "ResetGoogleOAuthToCentralRelease ต้องรัน Google setup และเปิด Runtime เพื่อตรวจผลจริง"
 }
 
 if ($Port -ne 0 -and $Port -lt 1024) {
@@ -916,6 +926,8 @@ function Assert-SafeSource {
         "VERSION",
         "backend\local-runner\bridge_server.py",
         "backend\local-runner\configure_google_oauth_client.py",
+        "backend\local-runner\full_agent_artifacts.py",
+        "backend\local-runner\full_agent_runtime.py",
         "backend\local-runner\ea_factory_blueprint_coverage.py",
         "backend\local-runner\ea_factory_indicator_coverage.py",
         "backend\local-runner\ea_factory_metaeditor_compile.py",
@@ -924,7 +936,12 @@ function Assert-SafeSource {
         "backend\local-runner\ea_research_blueprint.py",
         "backend\local-runner\ea_strategy_brief.py",
         "contracts\research\ea-implementation-blueprint-v2.schema.json",
+        "contracts\agents\full-agent-runtime-contract.json",
         "frontend\index.html",
+        "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4",
+        "integrations\mt4-trade-gateway\README_TH.md",
+        "integrations\mt5-trade-gateway\MetafxHQTradeGateway.mq5",
+        "integrations\mt5-trade-gateway\README_TH.md",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MetafxHQTradeGateway.mq4",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MetafxHQTradeGateway.ex4",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\README_TH.md",
@@ -934,13 +951,27 @@ function Assert-SafeSource {
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MANIFEST.json",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\COMPILE_PROOF.png",
         "runner\codex_cli_runner.py",
+        "runner\codex_app_server_gateway.py",
         "scripts\register-bridge-autostart.ps1",
         "scripts\run-bridge-watchdog-hidden.vbs",
         "scripts\setup-google-oauth.ps1",
         "scripts\start-local-bridge.ps1",
+        "scripts\verify-full-agent-workspace-sentinel.py",
         "2-SETUP-GOOGLE-HQ.bat",
         "docs\prompts\install-github-google-auto-th.md",
         "tests\release_secret_scan.py",
+        "tests\test_codex_app_server_gateway.py",
+        "tests\test_full_agent_artifacts.py",
+        "tests\test_full_agent_bridge_api.py",
+        "tests\test_full_agent_contract.py",
+        "tests\test_full_agent_frontend.py",
+        "tests\test_full_agent_http_api.py",
+        "tests\test_full_agent_runtime.py",
+        "tests\test_full_agent_workspace_sentinel.py",
+        "tests\test_metatrader_gateway_source_delivery.py",
+        "tests\test_metatrader_money_management_contract.py",
+        "tests\test_mt5_single_host_live_contracts.py",
+        "tests\test_mt5_trade_gateway_static.py",
         "tests\test_release_candidate_preflight.py",
         "tests\test_runtime_integrity.py",
         $requirementsName,
@@ -1053,7 +1084,7 @@ function Assert-EaArtifactIntegrity {
         "README_TH.md"
     )
     if ($expectedHashes.Count -ne $hashedArtifactFiles.Count) {
-        throw "Manifest SHA-256 ของ EA ต้องครอบคลุมไฟล์หลักฐาน v2.18 ครบถ้วนและไม่มีรายการแทรก"
+        throw "Manifest SHA-256 ของ EA ต้องครอบคลุมไฟล์หลักฐาน v2.19 ครบถ้วนและไม่มีรายการแทรก"
     }
     foreach ($fileName in $hashedArtifactFiles) {
         if (-not $expectedHashes.ContainsKey($fileName)) {
@@ -1086,7 +1117,7 @@ function Assert-EaArtifactIntegrity {
     }
     if (
         [string]$artifactManifest.schemaVersion -cne "metafx-hq-mt4-ea-artifact-v1" -or
-        [string]$artifactManifest.packageVersion -cne "2.18" -or
+        [string]$artifactManifest.packageVersion -cne "2.19" -or
         [string]$artifactManifest.candidateStatus -cne "ready_visible_metaeditor_compiled" -or
         [string]$artifactManifest.sourceFile -cne "MetafxHQTradeGateway.mq4" -or
         [string]$artifactManifest.sourceSha256 -cne $artifactSourceHash -or
@@ -1102,13 +1133,13 @@ function Assert-EaArtifactIntegrity {
         [string]$artifactManifest.compileEvidence.screenshotSha256 -cne [string]$expectedHashes["COMPILE_PROOF.png"] -or
         $pngSignature -cne "89504E470D0A1A0A"
     ) {
-        throw "หยุดติดตั้ง: MANIFEST/Compile proof ของ EA v2.18 ไม่ตรงกับ Source, Binary หรือผล Compile ที่อนุมัติ"
+        throw "หยุดติดตั้ง: MANIFEST/Compile proof ของ EA v2.19 ไม่ตรงกับ Source, Binary หรือผล Compile ที่อนุมัติ"
     }
 
     $buildLogPath = Join-Path $artifactDirectory "BUILD_LOG.txt"
     $buildLog = Get-Content -LiteralPath $buildLogPath -Raw -Encoding UTF8
     if (
-        $buildLog -notmatch '(?m)^PackageVersion:\s*2\.18\s*$' -or
+        $buildLog -notmatch '(?m)^PackageVersion:\s*2\.19\s*$' -or
         $buildLog -notmatch '(?m)^CompileResult:\s*PASS\s*$' -or
         $buildLog -notmatch '(?m)^CompileErrors:\s*0\s*$' -or
         $buildLog -notmatch '(?m)^CompileWarnings:\s*0\s*$' -or
@@ -1135,7 +1166,7 @@ function Assert-NoEmbeddedHighConfidenceSecrets {
         throw "ชุดติดตั้งไม่สมบูรณ์: ไม่พบ $centralGoogleOAuthClientRelativePath"
     }
     $productionRoots = @(".github", "backend", "contracts", "docs", "frontend", "installer", "integrations", "runner", "scripts", "tests")
-    $textExtensions = @(".bat", ".cmd", ".css", ".html", ".js", ".json", ".md", ".mq4", ".ps1", ".py", ".txt", ".vbs", ".yaml", ".yml")
+    $textExtensions = @(".bat", ".cmd", ".css", ".html", ".js", ".json", ".md", ".mq4", ".mq5", ".ps1", ".py", ".txt", ".vbs", ".yaml", ".yml")
     $secretPatterns = @(
         '(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{32,}',
         '(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{30,}',
@@ -2275,6 +2306,50 @@ function Test-GoogleOAuthDeploymentConfigured {
     return $null -ne $status -and $status.configured -eq $true
 }
 
+function Reset-GoogleOAuthCurrentUserToCentralRelease {
+    param([Parameter(Mandatory = $true)][string]$CandidateRoot)
+
+    $configureCli = Join-Path $CandidateRoot "backend\local-runner\configure_google_oauth_client.py"
+    if (-not (Test-Path -LiteralPath $configureCli -PathType Leaf)) {
+        throw "ไม่พบตัวจัดการ Google OAuth ใน Runtime ที่ติดตั้งแล้ว"
+    }
+
+    $python = Resolve-SystemPython
+    $arguments = @($python.PrefixArguments) + @($configureCli, "--migrate-to-central-release")
+    $output = @(& $python.FilePath @arguments 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw "ย้าย Google OAuth ของ Windows User นี้ไป Client กลางไม่สำเร็จ"
+    }
+    $jsonLine = @($output | ForEach-Object { [string]$_ } | Where-Object { $_.TrimStart().StartsWith("{") }) | Select-Object -Last 1
+    if (-not $jsonLine) {
+        throw "ตัวจัดการ Google OAuth ไม่ได้ยืนยันผลการย้ายไป Client กลาง"
+    }
+    try {
+        $removal = $jsonLine | ConvertFrom-Json
+    }
+    catch {
+        throw "ผลการย้าย Google OAuth ไป Client กลางไม่ใช่ JSON ที่สมบูรณ์"
+    }
+    if ($removal.ok -ne $true -or $removal.configured -ne $true -or [string]$removal.store -cne "central_release") {
+        throw "ล้าง OAuth override แล้วแต่ Runtime ยังไม่ได้เลือก Client กลางจาก Release"
+    }
+
+    $customClientPath = Join-Path $env:LOCALAPPDATA "Metafxclub\AgentHQ\credentials\google-oauth-client.dpapi"
+    if (Test-Path -LiteralPath $customClientPath) {
+        throw "ย้าย OAuth แล้วแต่ไฟล์ custom client ของ Windows User ยังหลงเหลืออยู่"
+    }
+
+    $verified = Get-GoogleOAuthDeploymentStatus -CandidateRoot $CandidateRoot
+    if (
+        $null -eq $verified -or
+        $verified.configured -ne $true -or
+        [string]$verified.store -cne "central_release"
+    ) {
+        throw "ตรวจซ้ำแล้ว Runtime ยังไม่ได้ใช้ Google OAuth Client กลางจาก Release"
+    }
+    return $removal
+}
+
 function Invoke-GoogleOAuthFirstRunSetup {
     param([Parameter(Mandatory = $true)][string]$CandidateRoot)
 
@@ -2292,6 +2367,18 @@ function Invoke-GoogleOAuthFirstRunSetup {
     }
 
     $deploymentStatus = Get-GoogleOAuthDeploymentStatus -CandidateRoot $CandidateRoot
+    if ($ResetGoogleOAuthToCentralRelease -and -not $explicitClientSetup) {
+        $deploymentStatus = Reset-GoogleOAuthCurrentUserToCentralRelease -CandidateRoot $CandidateRoot
+        if ($deploymentStatus.migrated -eq $true) {
+            Write-Host "ย้ายเครื่องห้องเรียนจาก OAuth override เดิมมาใช้ Client กลางของ Metafxclub แล้ว กรุณาเชื่อมบัญชี Google ใหม่หนึ่งครั้ง" -ForegroundColor Green
+        }
+        else {
+            Write-Host "Google OAuth Client กลางของ Metafxclub พร้อมแล้ว และไม่มี OAuth override เก่าค้างอยู่" -ForegroundColor Green
+        }
+        $script:googleSetupStatus = "ready_central"
+        $script:googleSetupSource = "central_release"
+        return
+    }
     $alreadyConfigured = $null -ne $deploymentStatus -and $deploymentStatus.configured -eq $true
     if ($alreadyConfigured -and -not $explicitClientSetup) {
         $store = [string]$deploymentStatus.store
@@ -2733,8 +2820,12 @@ try {
     $selectedBridgePort = Confirm-BridgeEndpoint
     if ($PackageSmoke) {
         if ($PackageUpgradeSmoke) {
-            if ($SkipLaunch -or -not ($SkipShortcuts -and $SkipAutostart -and $SkipGoogleSetup)) {
-                throw "PackageUpgradeSmoke ต้องเปิด Bridge แต่ต้องข้าม Shortcut, Autostart และ Google setup"
+            $packageGoogleModeValid = (
+                ($SkipGoogleSetup -and -not $ResetGoogleOAuthToCentralRelease) -or
+                (-not $SkipGoogleSetup -and $ResetGoogleOAuthToCentralRelease)
+            )
+            if ($SkipLaunch -or -not ($SkipShortcuts -and $SkipAutostart) -or -not $packageGoogleModeValid) {
+                throw "PackageUpgradeSmoke ต้องเปิด Bridge, ข้าม Shortcut/Autostart และเลือกข้าม Google setup หรือทดสอบย้ายไป Client กลางอย่างใดอย่างหนึ่ง"
             }
         }
         elseif (-not ($SkipLaunch -and $SkipShortcuts)) {

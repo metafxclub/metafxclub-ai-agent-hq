@@ -111,8 +111,147 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn("ตรวจ Market Watch ว่าราคาเคลื่อนไหว", recovery)
         self.assertIn("Symbol กับ Timeframe ที่อนุญาต", recovery)
         self.assertIn("วิธีแก้:", summary)
-        self.assertIn("signalExecutionGuardReasonLabel(runtime.gatewayExecutionGuardReason)", summary)
-        self.assertIn("signalExecutionGuardRecoveryLabel(runtime.gatewayExecutionGuardReason)", summary)
+        self.assertIn("signalEffectiveExecutionGuardReason(runtime)", summary)
+        self.assertIn("signalExecutionGuardReasonLabel(effectiveReason)", summary)
+        self.assertIn("signalExecutionGuardRecoveryLabel(effectiveReason)", summary)
+
+    def test_mt4_and_mt5_money_management_reason_aliases_are_actionable(self) -> None:
+        reason = function_block(self.main, "function signalExecutionGuardReasonLabel(value)")
+        recovery = function_block(self.main, "function signalExecutionGuardRecoveryLabel(value)")
+        for code in (
+            "BROKER_VOLUME_METADATA_INVALID",
+            "FIXED_LOT_OUTSIDE_BROKER_RANGE",
+            "RISK_CAPITAL_NOT_AVAILABLE",
+            "BROKER_RISK_METADATA_INVALID",
+            "RISK_PRICE_GEOMETRY_INVALID",
+            "RISK_LOT_CALCULATION_INVALID",
+            "PROPOSED_LOT_INVALID",
+            "RESOLVED_LOT_INVALID",
+            "RESOLVED_LOT_OUTSIDE_BROKER_RANGE",
+            "BROKER_MARGIN_METADATA_INVALID",
+            "FREE_MARGIN_CHECK_FAILED",
+            "NOT_ENOUGH_FREE_MARGIN",
+            "PROJECTED_MARGIN_LEVEL_TOO_LOW",
+            "ORDER_SEND_INVALID_VOLUME_NO_RETRY",
+            "MIN_REWARD_RISK_NOT_MET",
+        ):
+            with self.subTest(code=code):
+                self.assertIn(f"{code}:", reason)
+                self.assertIn(f"{code}:", recovery)
+
+    def test_missing_fixed_lot_is_not_coerced_to_zero_or_ready(self) -> None:
+        runtime = function_block(self.main, "function getSignalRuntimeTruth(report = {})")
+        sizing = function_block(self.main, "function signalGatewaySizingSummary(runtime = {})")
+        self.assertIn('gatewayFixedLot: gatewayNumber("fixedLot")', runtime)
+        self.assertNotIn("Number.isFinite(Number(gateway.fixedLot))", runtime)
+
+        script = "\n".join(
+            [
+                "function safeDashboardDisplayText(value, fallback = '') {",
+                "  if (value === null || value === undefined) return fallback;",
+                "  const text = String(value).trim();",
+                "  return text || fallback;",
+                "}",
+                sizing,
+                "process.stdout.write(JSON.stringify(signalGatewaySizingSummary({ gatewayFixedLot: null, gatewayPositionSizingMode: '' })));",
+            ]
+        )
+        result = self.run_node_json(script)
+        self.assertEqual(result["value"], "รอสถานะจาก EA")
+        self.assertEqual(result["tone"], "muted")
+
+    def test_money_management_summary_shows_broker_min_max_and_step(self) -> None:
+        sizing = function_block(self.main, "function signalGatewaySizingSummary(runtime = {})")
+        script = "\n".join(
+            [
+                "function safeDashboardDisplayText(value, fallback = '') {",
+                "  if (value === null || value === undefined) return fallback;",
+                "  const text = String(value).trim();",
+                "  return text || fallback;",
+                "}",
+                sizing,
+                "const common = { gatewayBrokerVolumeMin: 0.0001, gatewayBrokerVolumeMax: 50, gatewayBrokerVolumeStep: 0.0001, gatewayEstimatedCommissionPerLot: 0 };",
+                "const fixed = signalGatewaySizingSummary({ ...common, gatewayPositionSizingMode: 'FIXED_LOT', gatewayFixedLot: 0.01 });",
+                "const risk = signalGatewaySizingSummary({ ...common, gatewayPositionSizingMode: 'RISK_PERCENT', gatewayRiskPercent: 1, gatewayRiskCapitalBase: 'EQUITY' });",
+                "process.stdout.write(JSON.stringify({ fixed, risk }));",
+            ]
+        )
+        result = self.run_node_json(script)
+        for key in ("fixed", "risk"):
+            self.assertIn("Broker Lot 0.0001-50", result[key]["value"])
+            self.assertIn("Step 0.0001", result[key]["value"])
+
+    def test_money_management_commission_always_shows_account_currency_unit(self) -> None:
+        runtime = function_block(self.main, "function getSignalRuntimeTruth(report = {})")
+        sizing = function_block(self.main, "function signalGatewaySizingSummary(runtime = {})")
+        self.assertIn("gatewayAccountCurrency", runtime)
+        self.assertIn("council?.dailySummary?.currency", runtime)
+
+        script = "\n".join(
+            [
+                "function safeDashboardDisplayText(value, fallback = '') {",
+                "  if (value === null || value === undefined) return fallback;",
+                "  const text = String(value).trim();",
+                "  return text || fallback;",
+                "}",
+                sizing,
+                "const common = { gatewayPositionSizingMode: 'RISK_PERCENT', gatewayRiskPercent: 1, gatewayRiskCapitalBase: 'EQUITY', gatewayEstimatedCommissionPerLot: 50, gatewayBrokerVolumeMin: 0.01, gatewayBrokerVolumeMax: 100, gatewayBrokerVolumeStep: 0.01 };",
+                "const cents = signalGatewaySizingSummary({ ...common, gatewayAccountCurrency: 'USC' });",
+                "const unknown = signalGatewaySizingSummary(common);",
+                "process.stdout.write(JSON.stringify({ cents, unknown }));",
+            ]
+        )
+        result = self.run_node_json(script)
+        self.assertIn("50 USC/lot", result["cents"]["value"])
+        self.assertIn("50 หน่วยเงินบัญชี/lot", result["unknown"]["value"])
+
+    def test_money_management_summary_shows_effective_balance_cap_and_estimate_warning(self) -> None:
+        sizing = function_block(self.main, "function signalGatewaySizingSummary(runtime = {})")
+        script = "\n".join(
+            [
+                "function safeDashboardDisplayText(value, fallback = '') {",
+                "  if (value === null || value === undefined) return fallback;",
+                "  const text = String(value).trim();",
+                "  return text || fallback;",
+                "}",
+                sizing,
+                "const common = { gatewayRiskTelemetry: { maxLossPerTradePercent: 1 }, gatewayBrokerVolumeMin: 0.01, gatewayBrokerVolumeMax: 100, gatewayBrokerVolumeStep: 0.01, gatewayEstimatedCommissionPerLot: 0 };",
+                "const risk = signalGatewaySizingSummary({ ...common, gatewayPositionSizingMode: 'RISK_PERCENT', gatewayRiskPercent: 1, gatewayRiskCapitalBase: 'EQUITY' });",
+                "const fixed = signalGatewaySizingSummary({ ...common, gatewayPositionSizingMode: 'FIXED_LOT', gatewayFixedLot: 0.1 });",
+                "process.stdout.write(JSON.stringify({ risk, fixed }));",
+            ]
+        )
+        result = self.run_node_json(script)
+        self.assertIn("เป้าหมาย Risk 1% ของ Equity", result["risk"]["value"])
+        for key in ("risk", "fixed"):
+            self.assertIn("เพดานไม่เกิน 1% ของ Balance", result[key]["value"])
+            self.assertIn("ประมาณการถึง SL", result[key]["value"])
+            self.assertIn("Gap, Fill, Swap", result[key]["value"])
+
+    def test_ack_sizing_evidence_is_visible_only_as_read_only_ea_audit_data(self) -> None:
+        ack_sizing = function_block(self.main, "function signalGatewayAckSizingSummary(ack = null")
+        live_panel = function_block(self.main, "function renderSignalLivePanel(report = {})")
+        script = "\n".join(
+            [
+                "function safeDashboardDisplayText(value, fallback = '') {",
+                "  if (value === null || value === undefined) return fallback;",
+                "  const text = String(value).trim();",
+                "  return text || fallback;",
+                "}",
+                ack_sizing,
+                "const evidence = signalGatewayAckSizingSummary({ sizingEvidenceSource: 'ea_ack_read_only', sizingEvidenceAuthoritative: false, resolvedLot: 0.12, positionSizingMode: 'RISK_PERCENT', riskPercent: 1, riskCapitalBase: 'EQUITY', riskCapitalAmount: 100000, estimatedRiskMoney: 995 }, 'USC');",
+                "const invented = signalGatewayAckSizingSummary({ sizingEvidenceSource: 'backend', sizingEvidenceAuthoritative: true, resolvedLot: 99 }, 'USD');",
+                "process.stdout.write(JSON.stringify({ evidence, invented }));",
+            ]
+        )
+        result = self.run_node_json(script)
+        self.assertIn("Lot ที่คำนวณ 0.12", result["evidence"])
+        self.assertIn("Risk 1% ของ EQUITY", result["evidence"])
+        self.assertIn("995 USC จากฐาน 100000 USC", result["evidence"])
+        self.assertIn("AI/Backend ไม่ได้กำหนด Lot", result["evidence"])
+        self.assertEqual(result["invented"], "")
+        self.assertIn("signalGatewayAckSizingSummary(", live_panel)
+        self.assertIn("runtime.gatewayLastAck", live_panel)
 
     def test_connected_gateway_is_not_presented_as_ready_when_guard_is_blocked(self) -> None:
         runtime = function_block(self.main, "function getSignalRuntimeTruth(report = {})")
@@ -132,10 +271,62 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn("runtime.gatewayExecutionGuardReady", live)
         self.assertIn("เชื่อม EA แล้ว • ยังไม่พร้อมส่ง Order", live)
         self.assertIn("signalExecutionGuardSummary(runtime)", live)
-        self.assertIn("runtime.liveOrderExecutionAvailable && guardReady", risk_list)
+        self.assertIn("signalLiveAccountStatus(runtime, modeAccount)", risk_list)
         self.assertIn("signalTradeGatewayHeadlineLabel(", decision)
         self.assertIn("ยังไม่ส่ง Order •", headline)
         self.assertIn("signalExecutionGuardReasonLabel(runtime.gatewayExecutionGuardReason)", headline)
+
+    def test_mt5_live_requires_truthful_single_host_acknowledgement(self) -> None:
+        runtime_truth = function_block(self.main, "function getSignalRuntimeTruth(report = {})")
+        reason = function_block(self.main, "function signalExecutionGuardReasonLabel(value)")
+        recovery = function_block(self.main, "function signalExecutionGuardRecoveryLabel(value)")
+        effective = function_block(self.main, "function signalEffectiveExecutionGuardReason(runtime = {})")
+        summary = function_block(self.main, "function signalExecutionGuardSummary(runtime = {})")
+        account = function_block(self.main, "function signalLiveAccountStatus(runtime = {}")
+        risk_list = function_block(self.main, "function renderSignalRiskList(")
+        self.assertIn("SINGLE_HOST_LIVE_ACK_REQUIRED", reason)
+        self.assertIn("SINGLE_HOST_LIVE_ACK_REQUIRED", recovery)
+        self.assertNotIn("DISTRIBUTED_ACCOUNT_LEASE_REQUIRED", reason)
+        self.assertNotIn("DISTRIBUTED_ACCOUNT_LEASE_REQUIRED", recovery)
+        self.assertIn("singleHostLiveAcknowledged", runtime_truth)
+        self.assertIn("single_windows_user_file_common_only", runtime_truth)
+        self.assertIn("gatewayCrossVpsDistributedLock === false", runtime_truth)
+        self.assertIn("signalLiveAccountStatus(runtime, modeAccount)", risk_list)
+        self.assertIn("ขอบเขตความปลอดภัย MT5 LIVE", risk_list)
+        self.assertIn("ห้ามใช้บัญชีเดียวกันหลาย Windows user/เครื่อง/VPS", risk_list)
+
+        script = "\n".join(
+            [
+                "function safeDashboardDisplayText(value, fallback = '') {",
+                "  if (value === null || value === undefined) return fallback;",
+                "  const text = String(value).trim();",
+                "  return text || fallback;",
+                "}",
+                reason,
+                recovery,
+                effective,
+                summary,
+                account,
+                "const blockedRuntime = {",
+                "  selectedPlatform: 'mt5', gatewayMode: 'live', gatewayConnected: true,",
+                "  gatewayExecutionGuardReady: true, gatewayExecutionGuardReason: 'READY',",
+                "  liveOrderExecutionAvailable: true, liveBlockReason: '',",
+                "  singleHostLiveAcknowledged: false,",
+                "  liveSafetyScope: 'single_windows_user_file_common_only',",
+                "};",
+                "const readyRuntime = { ...blockedRuntime, singleHostLiveAcknowledged: true };",
+                "const summaryText = signalExecutionGuardSummary(blockedRuntime);",
+                "const accountText = signalLiveAccountStatus(blockedRuntime, { mismatch: false, value: '' });",
+                "const readyAccountText = signalLiveAccountStatus(readyRuntime, { mismatch: false, value: '' });",
+                "process.stdout.write(JSON.stringify({ summaryText, accountText, readyAccountText }));",
+            ]
+        )
+        result = self.run_node_json(script)
+        self.assertIn("Windows user", result["summaryText"])
+        self.assertIn("Windows user", result["accountText"])
+        self.assertNotIn("พร้อมส่ง Order", result["accountText"])
+        self.assertIn("พร้อมส่ง Order บัญชีจริง", result["readyAccountText"])
+        self.assertIn("เครื่อง/VPS เดียว", result["readyAccountText"])
 
     def test_shadow_and_closed_bar_rejections_are_not_presented_as_real_orders(self) -> None:
         reason = function_block(self.main, "function signalExecutionGuardReasonLabel(value)")
@@ -347,7 +538,7 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertEqual(result["linked"]["label"], "ปิด SELL")
         self.assertIn("Ticket 22", result["linked"]["detail"])
         self.assertIn("P/L +4.25", result["linked"]["detail"])
-        self.assertIn("ปิดเวลา MT4", result["linked"]["detail"])
+        self.assertIn("ปิดเวลา Broker", result["linked"]["detail"])
         self.assertNotIn("Ticket 11", result["linked"]["detail"])
         self.assertIn("ผลคำสั่งยังไม่ชัดเจน", result["unknown"]["label"])
         self.assertIn("Ticket ที่ต้องตรวจ 33", result["unknown"]["detail"])
@@ -666,7 +857,7 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn('String(order.verificationStatus || "").toUpperCase() === "VERIFIED_CLOSED"', row)
         self.assertIn("order.closedPnl", row)
         self.assertIn("order.closedAtBroker", row)
-        self.assertIn("ปิดเวลา MT4", row)
+        self.assertIn("ปิดเวลา Broker", row)
         self.assertIn("order.mode", row)
         self.assertIn("String(order.mode).toUpperCase()", row)
         self.assertIn("signalOrderOpenedTime(right) - signalOrderOpenedTime(left)", panel)

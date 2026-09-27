@@ -177,14 +177,17 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
             "unknown",
         )
 
-    def test_ai_trade_council_contract_requires_mt4_not_mt5(self) -> None:
+    def test_ai_trade_council_contract_accepts_exactly_one_mt4_or_mt5(self) -> None:
         profile = self.bridge.find_dashboard_connection_profile(
             self.bridge.AI_TRADE_COUNCIL_PROP_ID,
         )
         connection_ids = {item["id"] for item in profile["connections"]}
-        self.assertEqual(profile["connectionRequirements"]["anyOf"], ["mt4_terminal"])
+        self.assertEqual(
+            profile["connectionRequirements"]["anyOf"],
+            ["mt4_terminal", "mt5_terminal"],
+        )
         self.assertIn("mt4_terminal", connection_ids)
-        self.assertNotIn("mt5_terminal", connection_ids)
+        self.assertIn("mt5_terminal", connection_ids)
 
     def test_status_unions_verified_running_mt4_before_candidate_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -225,12 +228,12 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
             )
             self.assertNotIn(str(install), json.dumps(status, ensure_ascii=False))
 
-    def test_ai_trade_council_selection_is_mt4_only(self) -> None:
+    def test_ai_trade_council_selection_accepts_mt4_and_mt5(self) -> None:
         self.assertEqual(
             self.bridge._metatrader_allowed_platforms_for_prop(
                 self.bridge.AI_TRADE_COUNCIL_PROP_ID,
             ),
-            {"mt4"},
+            {"mt4", "mt5"},
         )
         model = self.bridge._metatrader_selection_read_model(
             self.bridge.AI_TRADE_COUNCIL_PROP_ID,
@@ -254,34 +257,10 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
             },
             target_store=self.bridge._empty_metatrader_target_store(),
         )
-        self.assertEqual([item["platform"] for item in model["candidates"]], ["mt4"])
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            mt5_install = root / "MT5"
-            mt5_install.mkdir()
-            (mt5_install / "terminal64.exe").write_bytes(b"MZ")
-            self.bridge.RUNTIME_DIR = root / "runtime"
-            running = self.bridge.discover_running_metatrader(
-                process_locations={"mt4": [], "mt5": [str(mt5_install)]},
-            )
-            candidates = self.bridge._sync_metatrader_candidate_registry(
-                [
-                    {
-                        "platform": "mt5",
-                        "localPath": str(mt5_install),
-                        "installPath": str(mt5_install),
-                        "dataPath": None,
-                    },
-                ],
-                running,
-            )
-            with self.assertRaises(self.bridge.RequestError) as rejected:
-                self.bridge.select_metatrader_target(
-                    self.bridge.AI_TRADE_COUNCIL_PROP_ID,
-                    candidates[0]["candidateId"],
-                )
-            self.assertEqual(rejected.exception.status, 422)
+        self.assertEqual(
+            [item["platform"] for item in model["candidates"]],
+            ["mt4", "mt5"],
+        )
 
     def test_decision_horizon_preserves_broker_clock_identity_across_offsets(self) -> None:
         observed = datetime(2026, 8, 13, 3, 0, 2, tzinfo=timezone.utc)
@@ -399,6 +378,57 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
             }
             self.bridge._write_metatrader_target_store_unlocked(store)
         return candidate["candidateId"]
+
+    def _configure_selected_mt5(self, root: Path) -> str:
+        runtime = root / "runtime"
+        common = root / "common"
+        data = root / "AppData" / "MetaQuotes" / "Terminal" / "MT5HASH"
+        (data / "MQL5").mkdir(parents=True)
+        candidate_id = "mtc-" + ("v" * 26)
+        local_path = self.bridge._canonical_metatrader_location(data)
+        record = {
+            "candidateId": candidate_id,
+            "identityKey": self.bridge._metatrader_identity_key("mt5", local_path),
+            "platform": "mt5",
+            "ordinal": 1,
+            "localPath": local_path,
+            "installPath": None,
+            "dataPath": local_path,
+            "firstSeenAt": "2026-09-07T00:00:00Z",
+            "lastSeenAt": "2026-09-07T00:00:00Z",
+            "available": True,
+            "runningState": "not_running_detected",
+        }
+
+        self.bridge.RUNTIME_DIR = runtime
+        self.bridge.MISSIONS_PATH = runtime / "missions.json"
+        self.bridge.AUDIT_PATH = runtime / "bridge-audit.jsonl"
+        self.bridge.AGENT_EVENTS_PATH = runtime / "agent-events.jsonl"
+        self.bridge.RUNTIME_REPORTS_DIR = runtime / "reports"
+        self.bridge.METATRADER_COMMON_FILES_DIR = common
+        self.bridge.PROJECT_ROOT = root
+        self.bridge.AI_TRADE_COUNCIL_WORKSPACE_DIR = root / "workspace"
+        self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR = (
+            self.bridge.AI_TRADE_COUNCIL_WORKSPACE_DIR
+            / "ai-trade-council"
+            / "snapshots"
+        )
+        self.bridge.write_json(
+            runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME,
+            {
+                "schemaVersion": self.bridge.METATRADER_TARGET_STORE_SCHEMA_VERSION,
+                "candidates": {candidate_id: record},
+                "selections": {
+                    self.bridge.AI_TRADE_COUNCIL_PROP_ID: {
+                        "candidateId": candidate_id,
+                        "selectedAt": self.bridge.utc_now(),
+                        "selectionRevision": 1,
+                    }
+                },
+                "updatedAt": self.bridge.utc_now(),
+            },
+        )
+        return candidate_id
 
     def test_broker_branded_discovery_pairs_origin_with_exact_running_process(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -688,6 +718,79 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
                     candidate_id,
                 )
             )
+
+    def test_mt5_snapshot_reader_uses_only_selected_file_common_channel(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected_id = self._configure_selected_mt5(root)
+            unselected_id = "mtc-" + ("u" * 26)
+            selected_file = self.bridge._metatrader_snapshot_file(selected_id)
+            unselected_file = self.bridge._metatrader_snapshot_file(unselected_id)
+            self.assertIsNotNone(selected_file)
+            self.assertIsNotNone(unselected_file)
+            selected_file.parent.mkdir(parents=True)
+            unselected_file.parent.mkdir(parents=True)
+
+            selected_payload = snapshot_payload(selected_id)
+            selected_payload["terminalPlatform"] = "mt5"
+            selected_payload["accountBindingId"] = "a" * 64
+            selected_payload["chart"]["symbol"] = "XAUUSD"
+            selected_file.write_text(
+                json.dumps(selected_payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            unselected_payload = snapshot_payload(unselected_id)
+            unselected_payload["chart"]["symbol"] = "EURUSD"
+            unselected_file.write_text(
+                json.dumps(unselected_payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            newer = selected_file.stat().st_mtime + 5
+            os.utime(unselected_file, (newer, newer))
+
+            model = self.bridge.metatrader_snapshot_read_model(
+                self.bridge.AI_TRADE_COUNCIL_PROP_ID
+            )
+
+            self.assertTrue(model["adapter"]["ready"])
+            self.assertEqual(model["selectedCandidateId"], selected_id)
+            self.assertEqual(model["selectedPlatform"], "mt5")
+            self.assertEqual(model["adapter"]["source"], "mt5_file_common_snapshot")
+            self.assertEqual(model["chartSnapshot"]["symbol"], "XAUUSD")
+
+    def test_mt5_snapshot_reader_supports_selected_mql5_legacy_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate_id = self._configure_selected_mt5(root)
+            with self.bridge.METATRADER_TARGETS_LOCK:
+                store = self.bridge._load_metatrader_target_store_unlocked()
+                record = dict(store["candidates"][candidate_id])
+            legacy_file = self.bridge._legacy_metatrader_snapshot_file(
+                record,
+                candidate_id,
+            )
+            self.assertIsNotNone(legacy_file)
+            self.assertIn("MQL5", legacy_file.parts)
+            legacy_file.parent.mkdir(parents=True)
+            legacy_payload = snapshot_payload(candidate_id)
+            legacy_payload["terminalPlatform"] = "mt5"
+            legacy_payload["accountBindingId"] = "b" * 64
+            legacy_file.write_text(
+                json.dumps(legacy_payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            model = self.bridge.metatrader_snapshot_read_model(
+                self.bridge.AI_TRADE_COUNCIL_PROP_ID
+            )
+
+            self.assertTrue(model["adapter"]["ready"])
+            self.assertEqual(
+                model["adapter"]["source"],
+                "mt5_terminal_local_snapshot_legacy",
+            )
+            self.assertTrue(model["adapter"]["legacyFallback"])
+            self.assertTrue(model["adapter"]["migrationNeeded"])
 
     def test_analyze_endpoint_queues_exact_three_snapshot_bound_guarded_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

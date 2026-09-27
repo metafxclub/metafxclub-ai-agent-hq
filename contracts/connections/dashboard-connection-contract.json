@@ -149,8 +149,10 @@
       "discoveryCapabilityProfilePropId": "right_server_racks",
       "selectionFanOutByPlatform": {
         "mt4": ["left_analytics_console", "right_server_racks", "right_tool_console"],
-        "mt5": ["right_server_racks", "right_tool_console"]
+        "mt5": ["left_analytics_console", "right_server_racks", "right_tool_console"]
       },
+      "platformSelectionMode": "single_exclusive_radio",
+      "oneActivePlatformPerDashboard": true,
       "backendAtomicFanOut": true,
       "frontendFanOutForbidden": true,
       "backendReadBackVerificationRequired": true,
@@ -285,7 +287,7 @@
     },
     "left_analytics_console": {
       "moduleNameTh": "สภา AI Trade",
-      "availability": {"ui": "ready", "data": "partial", "execution": "guarded_trade_gateway", "mt4Execution": "source_ready_requires_ea_install", "liveTrading": "ea_controlled_off_by_default"},
+      "availability": {"ui": "ready", "data": "partial", "execution": "guarded_trade_gateway", "mt4Execution": "source_ready_requires_ea_install", "mt5Execution": "source_ready_requires_ea_install", "liveTrading": "ea_controlled_off_by_default"},
       "localTabs": [
         {"id": "daily_summary", "labelTh": "สรุปวันนี้"},
         {"id": "live_analysis", "labelTh": "กราฟและบทวิเคราะห์สด"},
@@ -302,17 +304,18 @@
       "connections": [
         {"id": "local_bridge", "labelTh": "Local Bridge", "required": true, "adapterStatus": "implemented"},
         {"id": "mt4_terminal", "labelTh": "โปรแกรม MT4 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
+        {"id": "mt5_terminal", "labelTh": "โปรแกรม MT5 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
         {"id": "trading_state_adapter", "labelTh": "ข้อมูลกราฟและสถานะจาก MetafxHQ AI Council EA", "required": true, "adapterStatus": "implemented_unified_ea_snapshot", "action": "refresh_mt4_snapshot"},
         {"id": "ai_trader_ensemble", "labelTh": "ผู้เชี่ยวชาญ 3 ตัวลงคะแนนบน Snapshot และ Horizon เดียวกัน", "required": true, "adapterStatus": "implemented_guarded_closed_bar", "action": "run_ai_trade_council_analysis"},
         {"id": "risk_policy", "labelTh": "Council Quality Gate + Risk Guard + EA Gate", "required": true, "adapterStatus": "implemented"},
-        {"id": "mt4_trade_gateway", "labelTh": "ช่องรับคำสั่งของ MetafxHQ AI Council EA (Fixed Lot ที่ EA)", "required": true, "adapterStatus": "source_ready_requires_ea_install", "action": "inspect_trade_gateway"},
+        {"id": "mt4_trade_gateway", "labelTh": "ช่องรับคำสั่งของ MetafxHQ AI Council EA (Fixed Lot หรือ Risk Percent ตั้งที่ EA)", "required": true, "adapterStatus": "source_ready_requires_ea_install", "action": "inspect_trade_gateway"},
         {"id": "kill_switch_adapter", "labelTh": "Kill Switch Adapter", "required": true, "adapterStatus": "implemented_in_trade_gateway"},
         {"id": "live_trading", "labelTh": "ส่งคำสั่ง Live Trading", "required": false, "adapterStatus": "ea_local_arm_required"},
         {"id": "codex_runner", "labelTh": "Codex สำหรับช่วยวิเคราะห์", "required": false, "adapterStatus": "runtime_detected"},
         {"id": "codex_quota", "labelTh": "Rate Limit เมื่อใช้ AI วิเคราะห์", "required": false, "adapterStatus": "runtime_detected"},
         {"id": "report_routing", "labelTh": "ส่งผล Council กลับจอ Analysis", "required": true, "adapterStatus": "implemented"}
       ],
-      "connectionRequirements": {"anyOf": ["mt4_terminal"]},
+      "connectionRequirements": {"anyOf": ["mt4_terminal", "mt5_terminal"]},
       "chartWindowPolicy": {
         "displayBars": {"owner": "frontend_client_only", "allowedValues": [40, 60, 120, 240, 500, 1000], "affectsAnalysis": false},
         "analysisBarCount": {"owner": "backend_audited_setting", "allowedValues": [120, 180, 240, 300, 500, 1000], "default": 120, "requestedAndUsedMustMatch": true},
@@ -331,9 +334,9 @@
         "requiresKillSwitchAdapter": true,
         "signedEnvelopeRequired": true,
         "signingKeySource": "backend_and_ea_local_storage_only",
-        "trustedSigningKeyIdSource": "mt4_ea_input_only_for_live",
+        "trustedSigningKeyIdSource": "selected_metatrader_ea_input_only_for_live",
         "requiresMatchingPinnedSigningKeyId": true,
-        "fixedLotSource": "mt4_ea_input_only",
+        "fixedLotSource": "selected_metatrader_ea_money_management_inputs",
         "aiMaySetLotOrRisk": false,
         "protectivePricePolicy": "price_action_is_primary_ai_proposer_or_backend_builds_same_snapshot_deterministic_fallback_on_hold",
         "aiMaySetStopLossAndTakeProfit": true,

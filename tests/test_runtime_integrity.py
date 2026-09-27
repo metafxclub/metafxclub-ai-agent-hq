@@ -280,7 +280,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn("function signalTradeOperationsModel(", main)
         self.assertIn("function signalRoundHealthModel(", main)
         self.assertIn("Specialist 3 ตัว ลงคะแนน", main)
-        self.assertIn("ทั้งบัญชี MT4 (Account-wide)", main)
+        self.assertIn("ทั้งบัญชี ${platformLabel} (Account-wide)", main)
         self.assertIn("เฉพาะ AI Council (Council-managed)", main)
         self.assertIn("ACK EXECUTED ไม่ถูกตีความเป็น Fill ที่ตรวจแล้ว", main)
         self.assertIn(".signal-assurance-grid", styles)
@@ -1123,9 +1123,11 @@ class RuntimeIntegrityTests(unittest.TestCase):
         items = {item["id"]: item for item in checklist["items"]}
 
         self.assertEqual(items["mt4_terminal"]["status"], "detected")
-        self.assertNotIn("mt5_terminal", items)
+        self.assertEqual(items["mt5_terminal"]["status"], "detected")
         self.assertFalse(items["mt4_terminal"]["adapterReady"])
         self.assertEqual(items["mt4_terminal"]["executionAdapterStatus"], "coming_soon")
+        self.assertFalse(items["mt5_terminal"]["adapterReady"])
+        self.assertEqual(items["mt5_terminal"]["executionAdapterStatus"], "coming_soon")
         self.assertEqual(items["trading_state_adapter"]["status"], "not_selected")
         self.assertEqual(items["ai_trader_ensemble"]["status"], "waiting_snapshot")
         self.assertEqual(items["mt4_trade_gateway"]["status"], "not_selected")
@@ -1143,7 +1145,10 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertEqual(execution_policy["orderSubmissionEnabled"], "ea_mode_only")
         self.assertFalse(execution_policy["frontendMayEnableExecution"])
         self.assertFalse(execution_policy["aiMaySetLotOrRisk"])
-        self.assertEqual(execution_policy["fixedLotSource"], "mt4_ea_input_only")
+        self.assertEqual(
+            execution_policy["fixedLotSource"],
+            "selected_metatrader_ea_money_management_inputs",
+        )
         self.assertEqual(execution_policy["minimumAutomaticTimeframe"], "M5")
         self.assertEqual(execution_policy["defaultGatewayMode"], "shadow")
 
@@ -1440,9 +1445,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
         council_profile = profiles["left_analytics_console"]
         council_connection_ids = {item["id"] for item in council_profile["connections"]}
         council_any_of = council_profile.get("connectionRequirements", {}).get("anyOf")
-        self.assertEqual(council_any_of, ["mt4_terminal"])
+        self.assertEqual(council_any_of, ["mt4_terminal", "mt5_terminal"])
         self.assertIn("mt4_terminal", council_connection_ids)
-        self.assertNotIn("mt5_terminal", council_connection_ids)
+        self.assertIn("mt5_terminal", council_connection_ids)
 
         lab_profile = profiles["right_tool_console"]
         lab_connection_ids = {item["id"] for item in lab_profile["connections"]}
@@ -2012,7 +2017,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertEqual(missing["connectionRequirements"]["status"], "needs_attention")
         self.assertEqual(missing["overallStatus"], "needs_attention")
 
-    def test_ai_trade_council_mt5_only_does_not_satisfy_mt4_requirement(self) -> None:
+    def test_ai_trade_council_mt5_only_satisfies_shared_terminal_requirement(self) -> None:
         fake_bridge = {
             "mode": "Codex Runner Ready",
             "status": "guarded",
@@ -2032,11 +2037,14 @@ class RuntimeIntegrityTests(unittest.TestCase):
         )
         item_ids = {item["id"] for item in checklist["items"]}
         self.assertIn("mt4_terminal", item_ids)
-        self.assertNotIn("mt5_terminal", item_ids)
-        self.assertEqual(checklist["connectionRequirements"]["anyOf"], ["mt4_terminal"])
-        self.assertFalse(checklist["connectionRequirements"]["anyOfSatisfied"])
-        self.assertEqual(checklist["connectionRequirements"]["status"], "needs_attention")
-        self.assertIn("MT4", checklist["connectionRequirements"]["detailTh"])
+        self.assertIn("mt5_terminal", item_ids)
+        self.assertEqual(
+            checklist["connectionRequirements"]["anyOf"],
+            ["mt4_terminal", "mt5_terminal"],
+        )
+        self.assertTrue(checklist["connectionRequirements"]["anyOfSatisfied"])
+        self.assertEqual(checklist["connectionRequirements"]["status"], "ready")
+        self.assertIn("MT4 / MT5", checklist["connectionRequirements"]["detailTh"])
 
     def test_optional_implemented_sheet_adapter_keeps_auth_required_dashboard_partial(self) -> None:
         fake_bridge = {
@@ -2557,7 +2565,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             self.assertNotIn(forbidden, normalize_block)
 
         apply_start = main.index("async function applyGlobalMetatraderTarget(platform)")
-        apply_end = main.index("\nfunction renderAiTradeMt4QuickSetup", apply_start)
+        apply_end = main.index("\nfunction renderAiTradeTerminalSummary", apply_start)
         apply_block = main[apply_start:apply_end]
         self.assertEqual(
             apply_block.count('postJson("/api/integrations/metatrader/global/select"'),
@@ -3040,7 +3048,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertNotIn("submitManagerCommand", block)
 
     def test_agent_chat_runtime_version_and_executive_tiers(self) -> None:
-        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.20")
+        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.21")
         self.assertEqual(self.bridge.role_default_model_tier("ceo"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("manager"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("risk_guard"), "risk_quality")
@@ -4271,7 +4279,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         )
         registry_text = registry_path.read_text(encoding="utf-8-sig")
         attributes = (PROJECT_ROOT / ".gitattributes").read_text(encoding="utf-8-sig")
-        self.assertEqual(version, "0.9.20")
+        self.assertEqual(version, "0.9.21")
         self.assertNotRegex(registry_text, r"(?i)[a-z]:\\\\users\\\\")
         self.assertIn("*.mq4 text eol=lf", attributes)
         self.assertIn("*.mq5 text eol=lf", attributes)
@@ -5066,7 +5074,10 @@ class RuntimeIntegrityTests(unittest.TestCase):
             "price_action_agent",
         )
         self.assertFalse(complete["tradePlan"]["protectivePlanFallbackUsed"])
-        self.assertEqual(complete["tradePlan"]["lotPolicy"], "ea_fixed_lot_only")
+        self.assertEqual(
+            complete["tradePlan"]["lotPolicy"],
+            "ea_owned_fixed_or_risk_percent",
+        )
         self.assertFalse(complete["tradePlan"]["aiLotAllowed"])
 
     def test_ai_trade_council_automation_rejects_m1_and_supports_m5(self) -> None:

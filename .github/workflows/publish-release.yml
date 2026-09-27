@@ -298,16 +298,37 @@ jobs:
               "backend\local-runner\ea_research_blueprint.py",
               "backend\local-runner\ea_strategy_brief.py",
               "backend\local-runner\configure_google_oauth_client.py",
+              "backend\local-runner\full_agent_artifacts.py",
+              "backend\local-runner\full_agent_runtime.py",
               "backend\local-runner\google_oauth_native_client.txt",
               "backend\local-runner\google_oauth_store.py",
               "backend\local-runner\google_sheet_hub.py",
               "contracts\research\ea-implementation-blueprint-v2.schema.json",
+              "contracts\agents\full-agent-runtime-contract.json",
               "contracts\workflows\ea-factory-contract.json",
               "docs\research-sheet-hub-setup-th.md",
               "tests\test_release_candidate_preflight.py",
               "tests\test_runtime_integrity.py",
               "tests\fixtures\legacy_degraded_bridge.py",
               "scripts\run-bridge-watchdog-hidden.vbs",
+              "scripts\verify-full-agent-workspace-sentinel.py",
+              "runner\codex_app_server_gateway.py",
+              "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4",
+              "integrations\mt4-trade-gateway\README_TH.md",
+              "integrations\mt5-trade-gateway\MetafxHQTradeGateway.mq5",
+              "integrations\mt5-trade-gateway\README_TH.md",
+              "tests\test_codex_app_server_gateway.py",
+              "tests\test_full_agent_artifacts.py",
+              "tests\test_full_agent_bridge_api.py",
+              "tests\test_full_agent_contract.py",
+              "tests\test_full_agent_frontend.py",
+              "tests\test_full_agent_http_api.py",
+              "tests\test_full_agent_runtime.py",
+              "tests\test_full_agent_workspace_sentinel.py",
+              "tests\test_metatrader_gateway_source_delivery.py",
+              "tests\test_metatrader_money_management_contract.py",
+              "tests\test_mt5_single_host_live_contracts.py",
+              "tests\test_mt5_trade_gateway_static.py",
               "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MetafxHQTradeGateway.mq4",
               "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MetafxHQTradeGateway.ex4",
               "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\README_TH.md",
@@ -566,9 +587,16 @@ jobs:
                 ".gitignore",
                 "VERSION",
                 "backend\local-runner\google_oauth_native_client.txt",
+                "backend\local-runner\full_agent_artifacts.py",
+                "backend\local-runner\full_agent_runtime.py",
                 "backend\local-runner\ea_strategy_brief.py",
                 "backend\local-runner\ea_factory_visible_terminal.py",
-                "backend\local-runner\ea_factory_visible_terminal.ps1"
+                "backend\local-runner\ea_factory_visible_terminal.ps1",
+                "contracts\agents\full-agent-runtime-contract.json",
+                "runner\codex_app_server_gateway.py",
+                "scripts\verify-full-agent-workspace-sentinel.py",
+                "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4",
+                "integrations\mt5-trade-gateway\MetafxHQTradeGateway.mq5"
               )) {
                 if (-not (Test-Path -LiteralPath (Join-Path $installedRoot $requiredInstalledFile) -PathType Leaf)) {
                   throw "Installed Runtime is missing required file: $requiredInstalledFile"
@@ -588,6 +616,22 @@ jobs:
                   -TimeoutSec 5
                 if ($health.ok -ne $true -or [string]$health.status -cne "ready") {
                   throw "Legacy operator-mode upgrade smoke did not reach ready Health."
+                }
+                $agentRuntime = Invoke-RestMethod `
+                  -Uri "http://127.0.0.1:$smokePort/api/agent-runtime/status" `
+                  -Method Get `
+                  -TimeoutSec 15
+                if ($agentRuntime.ok -ne $true -or $null -eq $agentRuntime.runtime) {
+                  throw "Release Runtime Full Agent status contract failed."
+                }
+                $agentModeIds = @($agentRuntime.runtime.capabilityModes | ForEach-Object { [string]$_.id })
+                $expectedAgentModeIds = @("chat", "workspace", "computer", "full")
+                if (
+                  $agentRuntime.runtime.automaticExternalEffects -ne $false -or
+                  @($agentModeIds | Sort-Object -Unique).Count -ne 4 -or
+                  @($expectedAgentModeIds | Where-Object { $agentModeIds -cnotcontains $_ }).Count -ne 0
+                ) {
+                  throw "Release Runtime Full Agent status contract failed."
                 }
               }
               finally {
@@ -752,6 +796,19 @@ jobs:
             if (Test-Path -LiteralPath (Join-Path $verifiedInstalledRoot "data\runtime\ci-ignored-source-sentinel.txt")) {
               throw "Verified Git staging copied an ignored worktree file into Runtime."
             }
+            foreach ($verifiedRuntimeFile in @(
+              "backend\local-runner\full_agent_artifacts.py",
+              "backend\local-runner\full_agent_runtime.py",
+              "contracts\agents\full-agent-runtime-contract.json",
+              "runner\codex_app_server_gateway.py",
+              "scripts\verify-full-agent-workspace-sentinel.py",
+              "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4",
+              "integrations\mt5-trade-gateway\MetafxHQTradeGateway.mq5"
+            )) {
+              if (-not (Test-Path -LiteralPath (Join-Path $verifiedInstalledRoot $verifiedRuntimeFile) -PathType Leaf)) {
+                throw "Verified Git Runtime is missing a release-critical file: $verifiedRuntimeFile"
+              }
+            }
             $verifiedPython = Join-Path $verifiedInstalledRoot "runner\.venv\Scripts\python.exe"
             $env:METAFX_VERIFIED_RUNNER_PATH = Join-Path $verifiedInstalledRoot "backend\local-runner"
             $verifiedAuthJson = @(& $verifiedPython -c @'
@@ -774,6 +831,116 @@ jobs:
             ) {
               throw "Verified Git Runtime central OAuth clean-profile contract failed."
             }
+
+            # Reproduce the real classroom upgrade that exposed the v0.9.20
+            # defect: an older Advanced/Recovery client and its refresh grant
+            # survive application reinstall in the Windows current-user DPAPI
+            # store.  The classroom switch must remove that pair atomically,
+            # select the packaged central client, and report only ready_central.
+            $env:METAFX_MIGRATION_RUNNER_PATH = Join-Path $verifiedInstalledRoot "backend\local-runner"
+            & $verifiedPython -I -c @'
+          import os
+          import sys
+          sys.path.insert(0, os.environ["METAFX_MIGRATION_RUNNER_PATH"])
+          import google_oauth_store
+          generation = google_oauth_store.save_client_configuration(
+              "123456789012-release-migration-smoke.apps.googleusercontent.com",
+              "TEST_ONLY_RELEASE_MIGRATION_SECRET",
+          )
+          google_oauth_store.save_refresh_token(
+              "TEST_ONLY_RELEASE_MIGRATION_REFRESH",
+              client_generation=generation,
+          )
+          '@
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not seed the isolated legacy OAuth upgrade fixture."
+            }
+            $verifiedCredentialRoot = Join-Path $verifiedLocalAppData "Metafxclub\AgentHQ\credentials"
+            $verifiedCustomClient = Join-Path $verifiedCredentialRoot "google-oauth-client.dpapi"
+            $verifiedRefreshGrant = Join-Path $verifiedCredentialRoot "google-sheets-refresh.dpapi"
+            if (
+              -not (Test-Path -LiteralPath $verifiedCustomClient -PathType Leaf) -or
+              -not (Test-Path -LiteralPath $verifiedRefreshGrant -PathType Leaf)
+            ) {
+              throw "The isolated legacy OAuth upgrade fixture was not stored."
+            }
+
+            & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+              -File (Join-Path $packageRoot "installer\install.ps1") `
+              -Port $verifiedPort -EndpointConfirmed -SkipShortcuts -SkipAutostart `
+              -PackageSmoke -PackageUpgradeSmoke -ResetGoogleOAuthToCentralRelease
+            if ($LASTEXITCODE -ne 0) {
+              throw "Classroom OAuth central migration installation smoke failed with exit code $LASTEXITCODE."
+            }
+            if (
+              (Test-Path -LiteralPath $verifiedCustomClient) -or
+              (Test-Path -LiteralPath $verifiedRefreshGrant)
+            ) {
+              throw "Classroom OAuth migration left a legacy DPAPI artifact behind."
+            }
+
+            $verifiedInstallResultPath = Join-Path $verifiedInstalledRoot "data\runtime\install-result.json"
+            $verifiedInstallResult = Get-Content -LiteralPath $verifiedInstallResultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if (
+              $verifiedInstallResult.post_install.complete -ne $true -or
+              [int]$verifiedInstallResult.post_install.exit_code -ne 0 -or
+              [string]$verifiedInstallResult.post_install.google_oauth_client.status -cne "ready_central" -or
+              [string]$verifiedInstallResult.post_install.google_oauth_client.source -cne "central_release"
+            ) {
+              throw "Classroom OAuth migration install-result contract failed."
+            }
+
+            $verifiedRuntimeAuth = Invoke-RestMethod `
+              -Uri ("http://127.0.0.1:{0}/api/props/mission_strategy_table/research-sheet/auth" -f $verifiedPort) `
+              -TimeoutSec 15
+            if (
+              $verifiedRuntimeAuth.clientConfigured -ne $true -or
+              $verifiedRuntimeAuth.connected -ne $false -or
+              [string]$verifiedRuntimeAuth.status -cne "authorization_required" -or
+              [string]$verifiedRuntimeAuth.clientSource -cne "central_release"
+            ) {
+              throw "Classroom OAuth migration live Runtime contract failed."
+            }
+
+            # A user who is already connected through this exact packaged
+            # client must not be forced to authorize again on every update.
+            & $verifiedPython -I -c @'
+          import os
+          import sys
+          sys.path.insert(0, os.environ["METAFX_MIGRATION_RUNNER_PATH"])
+          import google_oauth_store
+          import google_sheet_hub
+          central = google_sheet_hub.oauth_client_configuration()
+          if central.get("source") != "central_release":
+              raise SystemExit(1)
+          google_oauth_store.save_refresh_token(
+              "TEST_ONLY_CENTRAL_RELEASE_REFRESH",
+              client_generation=central["clientGeneration"],
+          )
+          '@
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not seed the isolated central OAuth preservation fixture."
+            }
+            $centralMigrationJson = @(
+              & $verifiedPython `
+                (Join-Path $verifiedInstalledRoot "backend\local-runner\configure_google_oauth_client.py") `
+                --migrate-to-central-release 2>$null
+            ) | Select-Object -Last 1
+            if ($LASTEXITCODE -ne 0 -or -not $centralMigrationJson) {
+              throw "The already-central OAuth preservation probe failed."
+            }
+            $centralMigration = $centralMigrationJson | ConvertFrom-Json
+            if (
+              $centralMigration.ok -ne $true -or
+              $centralMigration.configured -ne $true -or
+              $centralMigration.authorizationPreserved -ne $true -or
+              [string]$centralMigration.store -cne "central_release" -or
+              -not (Test-Path -LiteralPath $verifiedRefreshGrant -PathType Leaf) -or
+              (Test-Path -LiteralPath $verifiedCustomClient)
+            ) {
+              throw "The already-central OAuth authorization was not preserved."
+            }
+            Remove-Item Env:METAFX_MIGRATION_RUNNER_PATH -ErrorAction SilentlyContinue
             Remove-Item Env:METAFX_VERIFIED_RUNNER_PATH -ErrorAction SilentlyContinue
             node --check (Join-Path $verifiedInstalledRoot "frontend\src\app\main.js")
             if ($LASTEXITCODE -ne 0) {
@@ -817,6 +984,7 @@ jobs:
           ห้ามใช้ Clone main + BAT เป็นขั้นตอนห้องเรียน เพราะไม่ได้ล็อก Tag/Commit แบบ Prompt อัตโนมัติ
 
           หลังติดตั้ง ระบบตรวจ Health, Codex และ Rate Limit ของบัญชีที่ Login อยู่ในเครื่องนั้น
+          ชุด Release มี Agent thread/history/artifact runtime แบบ fail-closed และ Source Gateway สำหรับ MT4/MT5; สิทธิ์ Tool/Computer/Live ต้องผ่าน Gate ที่ Runtime ยืนยันจริงก่อนเท่านั้น
           ระบบเริ่มต้นในโหมด Demo/Read-only และไม่รวม Token, Password, Auth, Log, Memory หรือข้อมูลส่วนตัวจากเครื่องผู้พัฒนา
           '@
 

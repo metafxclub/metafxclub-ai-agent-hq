@@ -230,8 +230,28 @@
               <button class="metatrader-hub-scan" id="globalMetatraderScan" type="button">
                 สแกนหา MT4 / MT5 ในเครื่อง
               </button>
+              <fieldset class="metatrader-hub-platform-choice" id="globalMetatraderPlatformChoice">
+                <legend>เลือก Dashboard เทรดที่ใช้งาน</legend>
+                <div class="metatrader-hub-platform-choice-options">
+                  <label data-platform="MT4">
+                    <input id="globalMetatraderPlatformMt4" type="radio" name="globalMetatraderPlatform" value="MT4" checked>
+                    <span>
+                      <strong>MT4 Dashboard</strong>
+                      <small>MQL4 / EA สำหรับ MT4</small>
+                    </span>
+                  </label>
+                  <label data-platform="MT5">
+                    <input id="globalMetatraderPlatformMt5" type="radio" name="globalMetatraderPlatform" value="MT5">
+                    <span>
+                      <strong>MT5 Dashboard</strong>
+                      <small>MQL5 / EA สำหรับ MT5</small>
+                    </span>
+                  </label>
+                </div>
+                <p id="globalMetatraderPlatformHint">ใช้ได้ทีละหนึ่ง Platform เท่านั้น • เลือกใหม่จะแทนที่ค่ากลางเดิมของระบบที่รองรับ</p>
+              </fieldset>
               <div class="metatrader-hub-platforms">
-                <section class="metatrader-hub-platform" data-platform="MT4">
+                <section class="metatrader-hub-platform" id="globalMetatraderMt4Section" data-platform="MT4" data-active="true">
                   <header>
                     <span>MT4</span>
                     <small>ใช้กับ 3 ระบบ</small>
@@ -244,10 +264,10 @@
                   </label>
                   <button id="globalMetatraderMt4Apply" type="button" disabled>ใช้ MT4 นี้กับทุกระบบ</button>
                 </section>
-                <section class="metatrader-hub-platform" data-platform="MT5">
+                <section class="metatrader-hub-platform" id="globalMetatraderMt5Section" data-platform="MT5" data-active="false">
                   <header>
                     <span>MT5</span>
-                    <small>ใช้กับ 2 ระบบที่รองรับ</small>
+                    <small>ใช้กับ 3 ระบบ</small>
                   </header>
                   <label>
                     <span>เลือกโปรแกรม MT5</span>
@@ -479,38 +499,51 @@
                 </div>
                 <span class="connection-badge" id="modalDashboardModuleAvailability" data-status="checking">กำลังตรวจสอบ</span>
               </div>
-              <section class="ai-trade-mt4-quick-card" id="modalAiTradeMt4QuickSetup" aria-labelledby="modalAiTradeMt4QuickHeading" hidden>
-                <div class="ai-trade-mt4-quick-heading">
+              <section class="ai-trade-terminal-summary" id="modalAiTradeTerminalSummary" aria-labelledby="modalAiTradeTerminalHeading" hidden>
+                <div class="ai-trade-terminal-summary-heading">
                   <div>
-                    <span>TERMINAL กลาง + CHANNEL ID</span>
-                    <strong id="modalAiTradeMt4QuickHeading">สถานะ MT4 ของสภา AI Trade</strong>
+                    <span>TERMINAL กลาง • อ่านอย่างเดียว</span>
+                    <strong id="modalAiTradeTerminalHeading">สถานะแหล่งข้อมูลของสภา AI Trade</strong>
                   </div>
-                  <span class="connection-badge" id="modalAiTradeMt4QuickBadge" data-status="not_connected">ยังไม่พร้อม</span>
+                  <span class="connection-badge" id="modalAiTradeTerminalBadge" data-status="not_connected">ยังไม่พร้อม</span>
                 </div>
-                <p class="ai-trade-mt4-quick-terminal" id="modalAiTradeMt4QuickTerminal">ยังไม่ได้เลือก MT4 จากแถบเชื่อม MT4 / MT5 ด้านบน</p>
-                <button class="modal-action primary" id="modalAiTradeMt4OpenGlobal" type="button">ไปที่แถบเชื่อม MT4 / MT5</button>
-                <div class="ai-trade-mt4-quick-channel">
-                  <span>Channel ID สำหรับช่อง SnapshotChannel ของ EA</span>
-                  <code id="modalAiTradeMt4QuickChannel" tabindex="0">ยังไม่มี Channel ID</code>
-                  <button id="modalAiTradeMt4QuickCopy" type="button" disabled>คัดลอก Channel ID</button>
-                </div>
-                <p class="ai-trade-mt4-quick-status" id="modalAiTradeMt4QuickStatus" role="status" aria-live="polite">อุปกรณ์นี้อ่าน Terminal ที่ยืนยันจากแถบกลางเท่านั้น</p>
+                <dl class="ai-trade-terminal-summary-grid">
+                  <div>
+                    <dt>Platform ที่ใช้งาน</dt>
+                    <dd id="modalAiTradeActivePlatform">ยังไม่ได้เลือก</dd>
+                  </div>
+                  <div>
+                    <dt>Terminal กลาง</dt>
+                    <dd id="modalAiTradeActiveTerminal">ยังไม่ได้เลือก</dd>
+                  </div>
+                  <div>
+                    <dt>ความสดของข้อมูล</dt>
+                    <dd id="modalAiTradeFeedFreshness">ยังไม่มี Snapshot</dd>
+                  </div>
+                </dl>
+                <button class="modal-action primary" id="modalAiTradeOpenGlobal" type="button">เปลี่ยน MT4 / MT5 ที่แถบกลาง</button>
+                <p class="ai-trade-terminal-status" id="modalAiTradeTerminalStatus" role="status" aria-live="polite">อุปกรณ์นี้อ่าน Terminal ที่ยืนยันจากแถบกลางเท่านั้น</p>
               </section>
-              <div class="connection-mode-grid">
-                <div>
-                  <span>รูปแบบการทำงาน</span>
-                  <strong id="modalDashboardOperationMode">สั่งทำงานเอง</strong>
+              <details class="dashboard-connection-details" id="modalDashboardConnectionDetails">
+                <summary>รายละเอียดสถานะระบบ</summary>
+                <div class="dashboard-connection-details-body">
+                  <div class="connection-mode-grid">
+                    <div>
+                      <span>รูปแบบการทำงาน</span>
+                      <strong id="modalDashboardOperationMode">สั่งทำงานเอง</strong>
+                    </div>
+                    <div>
+                      <span>AI ตรวจตามรอบเวลา</span>
+                      <strong id="modalDashboardScheduleStatus">ยังไม่เปิดใช้งาน</strong>
+                    </div>
+                  </div>
+                  <div class="connection-checklist" id="modalDashboardConnectionList" aria-live="polite"></div>
+                  <div class="connection-actions">
+                    <button class="modal-action" id="modalDashboardRefreshConnections" type="button">ตรวจสถานะระบบใหม่</button>
+                  </div>
+                  <p class="connection-action-status" id="modalDashboardConnectionActionStatus" role="status">ส่งคำขอแบบอ่านอย่างเดียวไปยัง Local Runner โดยไม่เปิดเผยข้อมูลลับ</p>
                 </div>
-                <div>
-                  <span>AI ตรวจตามรอบเวลา</span>
-                  <strong id="modalDashboardScheduleStatus">ยังไม่เปิดใช้งาน</strong>
-                </div>
-              </div>
-              <div class="connection-checklist" id="modalDashboardConnectionList" aria-live="polite"></div>
-              <div class="connection-actions">
-                <button class="modal-action" id="modalDashboardRefreshConnections" type="button">ตรวจการเชื่อมต่อใหม่</button>
-              </div>
-              <p class="connection-action-status" id="modalDashboardConnectionActionStatus" role="status">ส่งคำขอแบบอ่านอย่างเดียวไปยัง Local Runner โดยไม่เปิดเผยข้อมูลลับ</p>
+              </details>
             </section>
             <section class="workflow-settings-rail" id="workflowSettingsRail" aria-labelledby="workflowSettingsRailTitle" hidden>
               <header>
@@ -580,6 +613,110 @@
               </div>
             </div>
             <div class="modal-tab-panel active" id="modalChatPanel" data-panel="chat" data-surfaces="agent">
+              <section class="agent-runtime-console" id="modalAgentRuntimeConsole" aria-labelledby="modalAgentRuntimeHeading">
+                <header class="agent-runtime-console-heading">
+                  <div>
+                    <p class="modal-eyebrow">FULL AGENT RUNTIME</p>
+                    <strong id="modalAgentRuntimeHeading">เธรด เครื่องมือ และสิทธิ์ของ Agent</strong>
+                  </div>
+                  <span class="agent-runtime-state" id="modalAgentRuntimeState" data-state="checking">กำลังตรวจสอบ Backend</span>
+                </header>
+                <div class="agent-runtime-thread-row">
+                  <label class="agent-runtime-field agent-runtime-thread-field" for="modalAgentThreadSelect">
+                    <span>ประวัติและเธรด</span>
+                    <select id="modalAgentThreadSelect" aria-describedby="modalAgentRuntimeStatus">
+                      <option value="">กำลังตรวจสอบเธรด...</option>
+                    </select>
+                  </label>
+                  <button class="modal-action" id="modalAgentRefreshThread" type="button">รีเฟรชสถานะ</button>
+                  <button class="modal-action" id="modalAgentNewThread" type="button">+ เธรดใหม่</button>
+                  <button class="modal-action" id="modalAgentArchiveThread" type="button" disabled>เก็บเธรด</button>
+                </div>
+                <p class="agent-runtime-thread-meta" id="modalAgentThreadMeta" aria-live="polite">ยังไม่มีเธรดที่ Backend ยืนยัน</p>
+                <div class="agent-runtime-settings" aria-label="การตั้งค่า Agent Runtime">
+                  <label class="agent-runtime-field" for="modalAgentModelSelect">
+                    <span>โมเดล</span>
+                    <select id="modalAgentModelSelect" disabled>
+                      <option value="">รอรายการจาก Backend</option>
+                    </select>
+                  </label>
+                  <label class="agent-runtime-field" for="modalAgentReasoningSelect">
+                    <span>ระดับการคิด</span>
+                    <select id="modalAgentReasoningSelect" disabled>
+                      <option value="">รอรายการจาก Backend</option>
+                    </select>
+                  </label>
+                  <label class="agent-runtime-field" for="modalAgentCapabilityMode">
+                    <span>โหมดความสามารถ</span>
+                    <select id="modalAgentCapabilityMode">
+                      <option value="chat">Chat — สนทนา/วิเคราะห์โดยไม่เรียก Tool</option>
+                      <option value="workspace" disabled>Workspace — ล็อกโดย Backend</option>
+                      <option value="computer" disabled>Computer Use — ล็อกโดย Backend</option>
+                      <option value="full" disabled>Full Agent — ล็อกโดย Backend</option>
+                    </select>
+                  </label>
+                  <div class="agent-runtime-full-access">
+                    <span>สิทธิ์ของ Agent ตัวนี้</span>
+                    <button
+                      class="modal-action"
+                      id="modalAgentFullAccessButton"
+                      type="button"
+                      data-state="locked"
+                      aria-pressed="false"
+                      aria-disabled="true"
+                      aria-describedby="modalAgentFullAccessHelp"
+                    >Full Access · Locked</button>
+                    <small id="modalAgentFullAccessHelp">รุ่นนี้เปิดได้เฉพาะ Chat • Workspace, Computer Use, MCP/Plugin และ Full Access ยังล็อกโดย Backend</small>
+                  </div>
+                </div>
+                <section class="agent-runtime-capability-matrix" aria-labelledby="modalAgentCapabilityMatrixHeading">
+                  <header>
+                    <div>
+                      <strong id="modalAgentCapabilityMatrixHeading">ความสามารถตามที่ Backend ยืนยัน</strong>
+                      <small>พร้อม = ใช้งานได้จริงในเธรดนี้ • ล็อก = ไม่มีการเรียก Tool</small>
+                    </div>
+                  </header>
+                  <div id="modalAgentCapabilityMatrix" role="list" aria-live="polite"></div>
+                  <div class="agent-runtime-lock-guidance" id="modalAgentLockGuidance" data-state="locked">
+                    <strong id="modalAgentLockedReason">กำลังตรวจสอบเหตุผลที่ Full Access ยังล็อก</strong>
+                    <span id="modalAgentNextAction">รอข้อมูลความพร้อมจาก Backend</span>
+                  </div>
+                </section>
+                <div class="agent-runtime-readiness" id="modalAgentRuntimeReadiness" aria-label="สถานะความพร้อมที่ Backend ยืนยัน">
+                  <span id="modalAgentRuntimeBadge" data-state="unknown">Runtime: ยังไม่ยืนยัน</span>
+                  <span id="modalAgentWorkspaceBadge" data-state="locked">Workspace: ล็อก</span>
+                  <span id="modalAgentComputerUseBadge" data-state="locked">Computer Use: ล็อก</span>
+                  <span id="modalAgentMcpBadge" data-state="locked">MCP: ล็อก</span>
+                  <span id="modalAgentPluginBadge" data-state="locked">Plugin: ล็อก</span>
+                  <span id="modalAgentAttachmentBadge" data-state="unknown">แนบไฟล์: ยังไม่ยืนยัน</span>
+                  <span id="modalAgentArtifactBadge" data-state="unknown">ไฟล์ผลลัพธ์: ยังไม่ยืนยัน</span>
+                </div>
+                <p class="agent-runtime-status" id="modalAgentRuntimeStatus" data-tone="neutral" role="status" aria-live="polite">Frontend จะไม่แสดงว่า Tool พร้อม จนกว่า Backend จะยืนยันสถานะจริง</p>
+                <section class="agent-runtime-approval" id="modalAgentApprovalPanel" role="alertdialog" aria-modal="false" aria-labelledby="modalAgentApprovalHeading" aria-describedby="modalAgentApprovalReason modalAgentApprovalSafety" hidden>
+                  <header>
+                    <div>
+                      <p class="modal-eyebrow">ONE-SHOT TOOL APPROVAL</p>
+                      <strong id="modalAgentApprovalHeading">Codex ขออนุมัติการลงมือทำหนึ่งครั้ง</strong>
+                    </div>
+                    <span id="modalAgentApprovalTimer" data-state="pending">รอการตัดสินใจ</span>
+                  </header>
+                  <p id="modalAgentApprovalType">กำลังอ่านรายละเอียดจาก Backend</p>
+                  <pre id="modalAgentApprovalSummary"></pre>
+                  <p id="modalAgentApprovalReason"></p>
+                  <small id="modalAgentApprovalBinding">คำขอต้องตรงกับ Thread, Turn, Mission และ Item ปัจจุบันเท่านั้น</small>
+                  <small id="modalAgentApprovalSafety">รายละเอียดถูกจำกัดและซ่อน Secret/พาธในเครื่องก่อนแสดง • การอนุมัติมีผลครั้งเดียวกับคำขอนี้</small>
+                  <div class="agent-runtime-approval-actions">
+                    <button class="modal-action" id="modalAgentApprovalDecline" type="button">ปฏิเสธ</button>
+                    <button class="modal-action primary" id="modalAgentApprovalAccept" type="button">อนุมัติครั้งเดียว</button>
+                  </div>
+                </section>
+                <details class="agent-runtime-activity" id="modalAgentActivityDetails">
+                  <summary>กิจกรรม Tool / Agent ในเธรดนี้</summary>
+                  <ol id="modalAgentActivityTimeline" aria-live="polite">
+                    <li data-state="empty">ยังไม่มีกิจกรรมจาก Runtime — Frontend จะไม่สร้าง Tool Call จำลอง</li>
+                  </ol>
+                </details>
+              </section>
               <div class="chat-log" id="modalChatLog"></div>
             </div>
             <div class="modal-tab-panel" id="modalTasksPanel" data-panel="tasks" data-surfaces="agent">
@@ -1075,9 +1212,17 @@
                 <span id="modalComposerLabel">ข้อความถึง Agent</span>
                 <textarea id="modalCommandInput" rows="3" maxlength="4000" spellcheck="false"></textarea>
               </label>
+              <div class="agent-attachment-composer" id="modalAgentAttachmentComposer">
+                <input id="modalAgentAttachmentInput" type="file" multiple hidden>
+                <button class="modal-action" id="modalAgentAttachButton" type="button" aria-describedby="modalAgentAttachmentPolicy">แนบรูป</button>
+                <span id="modalAgentAttachmentPolicy">รอ Backend ยืนยันชนิดและขนาดไฟล์ที่รองรับ</span>
+              </div>
+              <div class="agent-attachment-drafts" id="modalAgentAttachmentDrafts" role="list" aria-label="รูปและไฟล์ที่รอส่ง" hidden></div>
               <p class="agent-chat-status" id="modalChatStatus" data-tone="neutral" role="status" aria-live="polite">พร้อมคุยกับ Codex ผ่าน Local Runner</p>
               <div class="modal-actions">
                 <button class="modal-action primary" id="modalSendButton" type="button">คุยกับ Codex</button>
+                <button class="modal-action danger" id="modalAgentStopButton" type="button" disabled>หยุดงาน</button>
+                <button class="modal-action" id="modalAgentContinueButton" type="button" disabled>ทำต่อ</button>
                 <button class="modal-action" id="modalAssignButton" type="button">สร้าง Task ทางลัด</button>
                 <button class="modal-action manager-only-action" id="modalMeetingButton" type="button">เรียกประชุม</button>
                 <button class="modal-action manager-only-action" id="modalDelegateButton" type="button">กระจายงานเข้าคิว</button>

@@ -319,7 +319,7 @@
       "shows": ["daily trading summary", "latest read-only chart", "news evidence", "specialist votes", "confidence and horizon gate", "data quality and event risk", "decision pipeline", "decision history", "risk policy", "command acknowledgement and recovery", "kill switch readiness"],
       "accepts": ["วิเคราะห์ระบบ Auto Trade", "ให้ Agent ช่วยกันวิเคราะห์และโหวต", "วิเคราะห์กราฟและข่าว", "ใช้ Backtest เป็นหลักฐาน", "ดูขั้นตอนตัดสินใจ", "ดูประวัติ"],
       "actions": ["Inspect council analysis", "Inspect Trade Gateway status", "Inspect decision trail", "Inspect linked reports", "Send summary to Mission Table"],
-      "dataSources": ["backend-validated MT4 read-only snapshots", "MT4 FILE_COMMON Trade Gateway status and ACK", "data/runtime/reports/", "Codex web research with sources", "data/runtime/agent-events.jsonl"],
+      "dataSources": ["backend-validated MT4/MT5 read-only snapshots", "MT4/MT5 FILE_COMMON Trade Gateway status and ACK", "data/runtime/reports/", "Codex web research with sources", "data/runtime/agent-events.jsonl"],
       "doNotShow": ["profit guarantee", "account number", "broker password", "investor password", "secret keys"],
       "executionPolicy": {
         "mode": "guarded_trade_gateway",
@@ -328,7 +328,7 @@
         "orderSubmissionEnabled": "ea_mode_only",
         "frontendMayEnableExecution": false,
         "aiMaySetLotOrRisk": false,
-        "fixedLotSource": "mt4_ea_input_only",
+        "fixedLotSource": "selected_metatrader_ea_money_management_inputs",
         "protectivePlanFallback": {
           "source": "backend_deterministic_fallback",
           "policyVersion": "metafx-protective-plan-atr-structure-v1",
@@ -338,12 +338,12 @@
           "failClosed": true
         },
         "signedEnvelopeRequired": true,
-        "trustedSigningKeyIdSource": "mt4_ea_input_only_for_live",
+        "trustedSigningKeyIdSource": "selected_metatrader_ea_input_only_for_live",
         "signingSecretVisibleToFrontend": false,
         "minimumAutomaticTimeframe": "M5",
         "defaultGatewayMode": "shadow"
       },
-      "openingMessage": "จอนี้คือสภา AI Trade ครับ ผู้เชี่ยวชาญ 3 ตัวจะลงคะแนนจาก Indicator, กราฟเปล่า และข่าวบน Snapshot เดียวกัน ผู้ใช้เลือกเกณฑ์ 1/3, 2/3 หรือ 3/3 ได้ แต่ถ้ามีทั้ง BUY และ SELL ระบบจะไม่เทรด และมติยังต้องผ่าน Council Quality Gate, Risk Guard และ EA Gate ก่อนส่งคำสั่ง Price Action เป็น AI ผู้เสนอ SL/TP หลัก หากเลือก HOLD แต่เสียงทิศทางผ่าน Backend จะคำนวณ SL/TP สำรองจาก Snapshot เดิมโดยไม่เรียก AI เพิ่ม ส่วน Fixed Lot และโหมด Shadow/Demo/Live ตั้งที่ EA เท่านั้น"
+      "openingMessage": "จอนี้คือสภา AI Trade ครับ ผู้เชี่ยวชาญ 3 ตัวจะลงคะแนนจาก Indicator, กราฟเปล่า และข่าวบน Snapshot เดียวกัน ผู้ใช้เลือกเกณฑ์ 1/3, 2/3 หรือ 3/3 ได้ แต่ถ้ามีทั้ง BUY และ SELL ระบบจะไม่เทรด และมติยังต้องผ่าน Council Quality Gate, Risk Guard และ EA Gate ก่อนส่งคำสั่ง Price Action เป็น AI ผู้เสนอ SL/TP หลัก หากเลือก HOLD แต่เสียงทิศทางผ่าน Backend จะคำนวณ SL/TP สำรองจาก Snapshot เดิมโดยไม่เรียก AI เพิ่ม ส่วนโหมด Fixed Lot/Risk Percent และโหมด Shadow/Demo/Live ตั้งที่ EA เท่านั้น"
     },
     "right_tool_console": {
       "functionName": "EA Experiment Lab",

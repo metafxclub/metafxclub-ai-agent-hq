@@ -991,6 +991,75 @@ h1 {
   opacity: 0.5;
 }
 
+.metatrader-hub-platform-choice {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  margin: 10px 0 0;
+  padding: 9px;
+  border: 1px solid rgba(39, 212, 255, 0.34);
+  background: rgba(2, 14, 23, 0.82);
+}
+
+.metatrader-hub-platform-choice legend {
+  padding: 0 5px;
+  color: var(--cyan);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.metatrader-hub-platform-choice-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.metatrader-hub-platform-choice-options label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(84, 119, 142, 0.46);
+  background: rgba(4, 17, 27, 0.82);
+  cursor: pointer;
+}
+
+.metatrader-hub-platform-choice-options label:has(input:checked) {
+  border-color: rgba(37, 215, 122, 0.72);
+  background: rgba(8, 58, 43, 0.58);
+  box-shadow: inset 0 0 0 1px rgba(37, 215, 122, 0.12);
+}
+
+.metatrader-hub-platform-choice-options input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--green);
+}
+
+.metatrader-hub-platform-choice-options strong,
+.metatrader-hub-platform-choice-options small {
+  display: block;
+}
+
+.metatrader-hub-platform-choice-options strong {
+  color: var(--text);
+  font-size: 10px;
+}
+
+.metatrader-hub-platform-choice-options small,
+.metatrader-hub-platform-choice > p {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.metatrader-hub-platform-choice > p {
+  margin: 0;
+}
+
 .metatrader-hub-platforms {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1003,6 +1072,15 @@ h1 {
   padding: 10px;
   border: 1px solid rgba(84, 119, 142, 0.42);
   background: rgba(4, 17, 27, 0.82);
+}
+
+.metatrader-hub-platform[data-active="true"] {
+  border-color: rgba(37, 215, 122, 0.62);
+  box-shadow: inset 0 0 0 1px rgba(37, 215, 122, 0.08);
+}
+
+.metatrader-hub-platform[data-active="false"] {
+  opacity: 0.62;
 }
 
 .metatrader-hub-platform > header {
@@ -2843,6 +2921,483 @@ h1 {
   margin-top: 0;
 }
 
+#modalChatPanel.active {
+  display: grid;
+  grid-template-rows: auto minmax(120px, 1fr);
+  gap: 10px;
+  overflow: auto;
+}
+
+.agent-runtime-console {
+  display: grid;
+  gap: 9px;
+  padding: 11px;
+  border: 1px solid rgba(39, 212, 255, 0.28);
+  background: linear-gradient(180deg, rgba(7, 28, 42, 0.96), rgba(3, 14, 22, 0.96));
+}
+
+.agent-runtime-console-heading,
+.agent-runtime-thread-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-runtime-console-heading > div {
+  min-width: 0;
+}
+
+.agent-runtime-console-heading .modal-eyebrow {
+  margin: 0 0 3px;
+}
+
+.agent-runtime-console-heading strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.agent-runtime-state {
+  flex: 0 0 auto;
+  max-width: 240px;
+  padding: 5px 8px;
+  border: 1px solid rgba(84, 119, 142, 0.44);
+  background: rgba(5, 17, 26, 0.86);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+  text-align: center;
+}
+
+.agent-runtime-state[data-state="ready"] {
+  border-color: rgba(37, 215, 122, 0.62);
+  color: #a9f3cb;
+}
+
+.agent-runtime-state[data-state="limited"] {
+  border-color: rgba(255, 178, 63, 0.64);
+  color: #ffd287;
+}
+
+.agent-runtime-state[data-state="checking"] {
+  border-color: rgba(39, 212, 255, 0.54);
+  color: #bfefff;
+}
+
+.agent-runtime-thread-row {
+  align-items: end;
+}
+
+.agent-runtime-thread-field {
+  flex: 1 1 320px;
+}
+
+.agent-runtime-thread-meta {
+  min-height: 16px;
+  margin: -2px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.agent-runtime-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.agent-runtime-field > span {
+  color: var(--cyan);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.agent-runtime-field select {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 28px 6px 8px;
+  border: 1px solid rgba(84, 119, 142, 0.46);
+  background: rgba(4, 13, 20, 0.94);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  outline: none;
+}
+
+.agent-runtime-field select:focus-visible {
+  border-color: rgba(39, 212, 255, 0.86);
+  box-shadow: 0 0 0 1px rgba(39, 212, 255, 0.2);
+}
+
+.agent-runtime-field select:disabled {
+  cursor: not-allowed;
+  color: var(--muted);
+  opacity: 0.72;
+}
+
+.agent-runtime-settings {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.agent-runtime-full-access {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.agent-runtime-full-access > span {
+  color: var(--cyan);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.agent-runtime-full-access .modal-action {
+  min-height: 36px;
+  width: 100%;
+}
+
+.agent-runtime-full-access .modal-action[data-state="locked"] {
+  border-color: rgba(255, 178, 63, 0.46);
+  color: #ffd287;
+}
+
+.agent-runtime-full-access .modal-action[data-state="ready"] {
+  border-color: rgba(39, 212, 255, 0.78);
+  color: #bfefff;
+}
+
+.agent-runtime-full-access .modal-action[data-state="active"] {
+  border-color: rgba(37, 215, 122, 0.78);
+  background: rgba(17, 83, 55, 0.82);
+  color: #bfffe0;
+}
+
+.agent-runtime-full-access small {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.agent-runtime-capability-matrix {
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid rgba(84, 119, 142, 0.34);
+  background: rgba(2, 12, 20, 0.62);
+}
+
+.agent-runtime-capability-matrix > header strong,
+.agent-runtime-capability-matrix > header small {
+  display: block;
+}
+
+.agent-runtime-capability-matrix > header strong {
+  color: #d8f8ff;
+  font-size: 11px;
+}
+
+.agent-runtime-capability-matrix > header small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.35;
+}
+
+#modalAgentCapabilityMatrix {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+#modalAgentCapabilityMatrix article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 7px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid rgba(84, 119, 142, 0.36);
+  background: rgba(5, 17, 26, 0.72);
+}
+
+#modalAgentCapabilityMatrix article[data-active="true"] {
+  box-shadow: inset 0 0 0 1px rgba(39, 212, 255, 0.42);
+}
+
+#modalAgentCapabilityMatrix article[data-state="ready"] {
+  border-color: rgba(37, 215, 122, 0.5);
+}
+
+#modalAgentCapabilityMatrix article strong,
+#modalAgentCapabilityMatrix article span {
+  display: block;
+}
+
+#modalAgentCapabilityMatrix article strong {
+  color: var(--text);
+  font-size: 10px;
+}
+
+#modalAgentCapabilityMatrix article span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.4;
+}
+
+#modalAgentCapabilityMatrix article b {
+  padding: 3px 5px;
+  border: 1px solid rgba(255, 178, 63, 0.42);
+  color: #ffd287;
+  font-size: 8px;
+}
+
+#modalAgentCapabilityMatrix article[data-state="ready"] b {
+  border-color: rgba(37, 215, 122, 0.5);
+  color: #a9f3cb;
+}
+
+.agent-runtime-lock-guidance {
+  display: grid;
+  gap: 3px;
+  padding: 7px 8px;
+  border-left: 3px solid #ffb23f;
+  background: rgba(48, 31, 8, 0.48);
+}
+
+.agent-runtime-lock-guidance strong,
+.agent-runtime-lock-guidance span {
+  overflow-wrap: anywhere;
+}
+
+.agent-runtime-lock-guidance strong {
+  color: #ffe0a8;
+  font-size: 9px;
+}
+
+.agent-runtime-lock-guidance span {
+  color: #d8e8f1;
+  font-size: 8px;
+  line-height: 1.4;
+}
+
+.agent-runtime-lock-guidance[data-state="ready"] {
+  border-left-color: var(--green);
+  background: rgba(10, 49, 38, 0.5);
+}
+
+.agent-runtime-readiness {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agent-runtime-readiness span {
+  padding: 4px 7px;
+  border: 1px solid rgba(84, 119, 142, 0.4);
+  background: rgba(5, 17, 26, 0.76);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.agent-runtime-readiness span[data-state="ready"] {
+  border-color: rgba(37, 215, 122, 0.58);
+  color: #a9f3cb;
+}
+
+.agent-runtime-readiness span[data-state="locked"] {
+  border-color: rgba(255, 174, 61, 0.58);
+  background: rgba(65, 39, 5, 0.42);
+  color: #ffd69a;
+}
+
+.agent-runtime-status {
+  min-height: 20px;
+  margin: 0;
+  padding: 6px 8px;
+  border-left: 3px solid rgba(84, 119, 142, 0.58);
+  background: rgba(1, 8, 13, 0.7);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.agent-runtime-status[data-tone="ready"] {
+  border-left-color: var(--green);
+  color: #a9f3cb;
+}
+
+.agent-runtime-status[data-tone="working"] {
+  border-left-color: var(--cyan);
+  color: #bfefff;
+}
+
+.agent-runtime-status[data-tone="warning"] {
+  border-left-color: #ffb23f;
+  color: #ffd287;
+}
+
+.agent-runtime-status[data-tone="error"] {
+  border-left-color: var(--red);
+  color: #ffb2b6;
+}
+
+.agent-runtime-approval {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(255, 178, 63, 0.72);
+  background: linear-gradient(180deg, rgba(48, 31, 8, 0.94), rgba(17, 13, 7, 0.96));
+  box-shadow: inset 0 0 24px rgba(255, 178, 63, 0.06);
+}
+
+.agent-runtime-approval > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.agent-runtime-approval > header strong {
+  color: #ffe0a8;
+  font-size: 12px;
+}
+
+.agent-runtime-approval > header span {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border: 1px solid rgba(255, 178, 63, 0.58);
+  color: #ffd287;
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.agent-runtime-approval > header span[data-state="expired"] {
+  border-color: rgba(255, 98, 104, 0.58);
+  color: #ffb2b6;
+}
+
+.agent-runtime-approval > p,
+.agent-runtime-approval > small {
+  margin: 0;
+  color: #d8e8f1;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.agent-runtime-approval > small {
+  color: var(--muted);
+}
+
+.agent-runtime-approval pre {
+  max-height: 120px;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid rgba(84, 119, 142, 0.42);
+  background: rgba(1, 8, 13, 0.86);
+  color: #cdefff;
+  font: 10px/1.45 Consolas, "Courier New", monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-runtime-approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.agent-runtime-approval-actions .primary {
+  border-color: rgba(255, 178, 63, 0.82);
+  color: #ffe0a8;
+}
+
+.agent-runtime-activity {
+  border-top: 1px solid rgba(84, 119, 142, 0.28);
+  padding-top: 7px;
+}
+
+.agent-runtime-activity summary {
+  color: var(--cyan);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.agent-runtime-activity ol {
+  display: grid;
+  gap: 5px;
+  max-height: 120px;
+  margin: 7px 0 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.agent-runtime-activity li {
+  display: grid;
+  gap: 2px;
+  padding: 6px 7px;
+  border-left: 2px solid rgba(39, 212, 255, 0.44);
+  background: rgba(5, 17, 26, 0.76);
+  color: #d8e8f1;
+  font-size: 10px;
+}
+
+.agent-runtime-activity li[data-state="empty"] {
+  border-left-color: rgba(84, 119, 142, 0.46);
+  color: var(--muted);
+}
+
+.agent-runtime-activity li small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+@media (max-width: 980px) {
+  .agent-runtime-settings {
+    grid-template-columns: 1fr;
+  }
+
+  #modalAgentCapabilityMatrix {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-attachment-drafts,
+  .agent-runtime-artifact-gallery {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-attachment-composer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .agent-attachment-composer .modal-action {
+    width: 100%;
+  }
+
+  .agent-runtime-thread-row {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .agent-runtime-thread-field {
+    flex-basis: 100%;
+  }
+
+  .agent-runtime-console-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 .agent-chat-status {
   min-height: 22px;
   margin: 8px 0 0;
@@ -2867,6 +3422,196 @@ h1 {
 .agent-chat-status[data-tone="error"] {
   border-left-color: var(--red);
   color: #ffb2b6;
+}
+
+.agent-chat-status[data-tone="warning"] {
+  border-left-color: #ffb23f;
+  color: #ffd287;
+}
+
+.agent-attachment-composer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.agent-attachment-composer > span {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.agent-attachment-drafts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.agent-attachment-drafts[hidden] {
+  display: none !important;
+}
+
+.agent-attachment-draft {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid rgba(39, 212, 255, 0.28);
+  background: rgba(5, 17, 26, 0.78);
+}
+
+.agent-attachment-draft-preview {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 42px;
+  overflow: hidden;
+  border: 1px solid rgba(84, 119, 142, 0.42);
+  background: rgba(1, 8, 13, 0.88);
+  color: var(--cyan);
+  font: 900 9px/1 Consolas, monospace;
+}
+
+.agent-attachment-draft-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.agent-attachment-draft-copy {
+  min-width: 0;
+}
+
+.agent-attachment-draft-copy strong,
+.agent-attachment-draft-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-attachment-draft-copy strong {
+  color: var(--text);
+  font-size: 10px;
+}
+
+.agent-attachment-draft-copy small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.agent-attachment-remove {
+  min-height: 32px;
+  padding: 5px 7px;
+  border: 1px solid rgba(255, 98, 104, 0.48);
+  background: rgba(74, 17, 25, 0.58);
+  color: #ffb2b6;
+  cursor: pointer;
+  font: inherit;
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.agent-runtime-input-attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.chat-line .agent-runtime-input-attachment-list > span {
+  display: inline-block;
+  width: auto;
+  padding: 3px 6px;
+  border: 1px solid rgba(39, 212, 255, 0.36);
+  background: rgba(9, 39, 54, 0.68);
+  color: #bfefff;
+  font-size: 9px;
+  white-space: normal;
+}
+
+.agent-runtime-artifact-gallery {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.agent-runtime-artifact-card {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid rgba(37, 215, 122, 0.36);
+  background: rgba(6, 30, 25, 0.72);
+}
+
+.agent-runtime-artifact-card > a {
+  display: grid;
+  place-items: center;
+  width: 72px;
+  height: 58px;
+  overflow: hidden;
+  border: 1px solid rgba(84, 119, 142, 0.46);
+  background: rgba(1, 8, 13, 0.9);
+  color: var(--cyan);
+  text-decoration: none;
+}
+
+.agent-runtime-artifact-card > a:focus-visible,
+.agent-attachment-remove:focus-visible {
+  outline: 2px solid rgba(39, 212, 255, 0.82);
+  outline-offset: 2px;
+}
+
+.agent-runtime-artifact-card img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.agent-runtime-artifact-icon {
+  font: 900 10px/1 Consolas, monospace;
+}
+
+.agent-runtime-artifact-card > div {
+  min-width: 0;
+}
+
+.agent-runtime-artifact-card strong,
+.agent-runtime-artifact-card small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.agent-runtime-artifact-card strong {
+  margin: 0;
+  color: var(--text);
+  font-size: 10px;
+}
+
+.agent-runtime-artifact-card small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.4;
+}
+
+.agent-runtime-artifact-action {
+  display: inline-block;
+  margin-top: 6px;
+  color: #a9f3cb;
+  font-size: 8px;
+  font-weight: 900;
 }
 
 .chat-log,
@@ -3061,7 +3806,7 @@ h1 {
   flex: 1 1 130px;
 }
 
-.ai-trade-mt4-quick-card {
+.ai-trade-terminal-summary {
   display: grid;
   gap: 8px;
   padding: 10px;
@@ -3071,23 +3816,22 @@ h1 {
   box-shadow: inset 0 0 0 1px rgba(37, 215, 122, 0.08);
 }
 
-.ai-trade-mt4-quick-card[hidden] {
+.ai-trade-terminal-summary[hidden] {
   display: none !important;
 }
 
-.ai-trade-mt4-quick-heading {
+.ai-trade-terminal-summary-heading {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
 }
 
-.ai-trade-mt4-quick-heading > div {
+.ai-trade-terminal-summary-heading > div {
   min-width: 0;
 }
 
-.ai-trade-mt4-quick-heading span:not(.connection-badge),
-.ai-trade-mt4-quick-channel > span {
+.ai-trade-terminal-summary-heading span:not(.connection-badge) {
   display: block;
   color: #7cf4b5;
   font-size: 8px;
@@ -3095,7 +3839,7 @@ h1 {
   letter-spacing: 0.04em;
 }
 
-.ai-trade-mt4-quick-heading strong {
+.ai-trade-terminal-summary-heading strong {
   display: block;
   margin-top: 2px;
   color: var(--text);
@@ -3103,133 +3847,86 @@ h1 {
   line-height: 1.35;
 }
 
-.ai-trade-mt4-quick-card > .modal-action {
+.ai-trade-terminal-summary > .modal-action {
   width: 100%;
   min-height: 34px;
 }
 
-.ai-trade-mt4-quick-terminal {
-  margin: 0;
-  padding: 8px 9px;
-  border: 1px solid rgba(39, 212, 255, 0.28);
-  background: rgba(2, 11, 18, 0.65);
-  color: #ccecf4;
-  font-size: 9px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-
-.ai-trade-mt4-quick-candidates {
+.ai-trade-terminal-summary-grid {
   display: grid;
+  grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.3fr);
   gap: 6px;
-  max-height: 180px;
-  overflow: auto;
-}
-
-.ai-trade-mt4-quick-candidates[hidden] {
-  display: none !important;
-}
-
-.ai-trade-mt4-quick-candidate {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 7px;
-  padding: 7px;
-  border: 1px solid rgba(84, 119, 142, 0.38);
-  background: rgba(2, 11, 18, 0.72);
-  cursor: pointer;
-}
-
-.ai-trade-mt4-quick-candidate.selected {
-  border-color: rgba(37, 215, 122, 0.72);
-  background: rgba(10, 49, 38, 0.54);
-}
-
-.ai-trade-mt4-quick-candidate > input {
-  width: 14px;
-  height: 14px;
   margin: 0;
-  accent-color: var(--green);
-}
-
-.ai-trade-mt4-quick-candidate-copy {
   min-width: 0;
 }
 
-.ai-trade-mt4-quick-candidate-copy strong,
-.ai-trade-mt4-quick-candidate-copy small {
-  display: block;
-  overflow-wrap: anywhere;
+.ai-trade-terminal-summary-grid > div:last-child {
+  grid-column: 1 / -1;
 }
 
-.ai-trade-mt4-quick-candidate-copy strong {
-  color: var(--text);
-  font-size: 9px;
-}
-
-.ai-trade-mt4-quick-candidate-copy small {
-  margin-top: 2px;
-  color: var(--muted);
-  font-size: 8px;
-  line-height: 1.35;
-}
-
-.ai-trade-mt4-quick-channel {
+.ai-trade-terminal-summary-grid > div {
   display: grid;
-  gap: 5px;
+  gap: 3px;
   min-width: 0;
-  padding: 7px;
+  padding: 7px 8px;
   border: 1px solid rgba(39, 212, 255, 0.25);
   background: rgba(2, 11, 18, 0.65);
 }
 
-.ai-trade-mt4-quick-channel code {
+.ai-trade-terminal-summary-grid dt {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.ai-trade-terminal-summary-grid dd {
+  margin: 0;
   color: #d8f8ff;
   font-size: 9px;
-  overflow-wrap: anywhere;
-  user-select: all;
-}
-
-.ai-trade-mt4-quick-channel button {
-  justify-self: start;
-  min-height: 28px;
-  padding: 4px 8px;
-  border: 1px solid rgba(39, 212, 255, 0.44);
-  background: rgba(12, 54, 72, 0.54);
-  color: #a9efff;
-  font: inherit;
-  font-size: 8px;
   font-weight: 900;
-  cursor: pointer;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
-.ai-trade-mt4-quick-channel button:disabled {
-  cursor: not-allowed;
-  opacity: 0.46;
-}
-
-.ai-trade-mt4-quick-status {
+.ai-trade-terminal-status {
   margin: 0;
   color: var(--muted);
   font-size: 9px;
   line-height: 1.45;
 }
 
-.ai-trade-mt4-quick-status[data-tone="working"] {
+.ai-trade-terminal-status[data-tone="working"] {
   color: var(--cyan);
 }
 
-.ai-trade-mt4-quick-status[data-tone="success"] {
+.ai-trade-terminal-status[data-tone="success"] {
   color: var(--green);
 }
 
-.ai-trade-mt4-quick-status[data-tone="error"] {
+.ai-trade-terminal-status[data-tone="error"] {
   color: #ff9ca0;
 }
 
-.ai-trade-mt4-quick-status[data-tone="warning"] {
+.ai-trade-terminal-status[data-tone="warning"] {
   color: var(--amber);
+}
+
+.dashboard-connection-details {
+  border: 1px solid rgba(84, 119, 142, 0.34);
+  background: rgba(2, 12, 20, 0.46);
+}
+
+.dashboard-connection-details > summary {
+  padding: 8px 9px;
+  color: #a9efff;
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.dashboard-connection-details-body {
+  display: grid;
+  gap: 8px;
+  padding: 0 8px 8px;
 }
 
 .workflow-settings-rail {
@@ -15271,6 +15968,28 @@ button:disabled {
   font-weight: 900;
 }
 
+.signal-gateway-source-download {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  margin-top: 9px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(39, 212, 255, 0.6);
+  background: rgba(0, 61, 82, 0.68);
+  color: #d9f7ff;
+  font: inherit;
+  font-weight: 900;
+  text-align: center;
+  text-decoration: none;
+}
+
+.signal-gateway-source-download[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.48;
+  pointer-events: none;
+}
+
 .signal-primary-action,
 .signal-secondary-action {
   min-height: 39px;
@@ -19046,6 +19765,7 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .metatrader-hub-platform-choice-options,
   .metatrader-hub-platforms,
   .metatrader-hub-system {
     grid-template-columns: minmax(0, 1fr);

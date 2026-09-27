@@ -369,6 +369,16 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
     def test_installer_uses_central_default_and_keeps_advanced_json_override(self) -> None:
         installer = INSTALLER.read_text(encoding="utf-8-sig")
         self.assertIn("[switch]$SkipGoogleSetup", installer)
+        self.assertIn("[switch]$ResetGoogleOAuthToCentralRelease", installer)
+        self.assertIn(
+            "$ResetGoogleOAuthToCentralRelease -and\n"
+            "    -not [string]::IsNullOrWhiteSpace($GoogleClientJsonPath)",
+            installer,
+        )
+        self.assertIn(
+            "$ResetGoogleOAuthToCentralRelease -and ($SkipGoogleSetup -or $SkipLaunch)",
+            installer,
+        )
         self.assertIn("function Invoke-GoogleOAuthFirstRunSetup", installer)
         package_exit = installer.index('Write-Step "Package Smoke')
         first_run = installer.index("Invoke-GoogleOAuthFirstRunSetup -CandidateRoot")
@@ -386,8 +396,22 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertIn("Get-GoogleOAuthDeploymentStatus -CandidateRoot", first_run_function)
         self.assertIn('"central_release"', first_run_function)
         self.assertIn('$script:googleSetupStatus = "ready_central"', first_run_function)
+        self.assertIn('$script:googleSetupSource = "central_release"', first_run_function)
         self.assertIn('$script:googleSetupStatus = "ready_existing_override"', first_run_function)
+        self.assertLess(
+            first_run_function.index("if ($ResetGoogleOAuthToCentralRelease"),
+            first_run_function.index("if ($alreadyConfigured -and -not $explicitClientSetup)"),
+        )
         self.assertNotIn("Read-Host", first_run_function)
+
+        reset_function = installer[
+            installer.index("function Reset-GoogleOAuthCurrentUserToCentralRelease") :
+            installer.index("function Invoke-GoogleOAuthFirstRunSetup")
+        ]
+        self.assertIn('"--migrate-to-central-release"', reset_function)
+        self.assertIn('[string]$removal.store -cne "central_release"', reset_function)
+        self.assertIn('[string]$verified.store -cne "central_release"', reset_function)
+        self.assertIn("google-oauth-client.dpapi", reset_function)
 
         # Explicit JSON import remains an advanced/recovery override and must
         # still go through the canonical backend-only setup script.
@@ -424,6 +448,7 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
             self.assertIn("public Git", text)
         for text in (readme, quickstart, setup_doc):
             self.assertIn("DPAPI", text)
+            self.assertIn("ResetGoogleOAuthToCentralRelease", text)
         self.assertIn("ไม่ต้อง Restart Bridge", setup_doc)
 
         # Advanced custom JSON remains documented as recovery/admin-only, but
@@ -512,6 +537,7 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertIn("-ListAvailableEndpoints", prompt)
         self.assertIn("available=true", prompt)
         self.assertIn("-Port 4186 -EndpointConfirmed", prompt)
+        self.assertIn("อนุญาตล่วงหน้า", prompt)
         self.assertIn("-ExpectedGitRepository", prompt)
         self.assertIn("-ExpectedGitTag", prompt)
         self.assertIn("-ExpectedSourceVersion", prompt)
@@ -521,6 +547,7 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
             prompt.index("10. ")
         ]
         self.assertNotIn("-EndpointConfirmed -SkipGoogleSetup", primary_install)
+        self.assertIn("-ResetGoogleOAuthToCentralRelease", primary_install)
         self.assertIn("ห้ามใช้ `-SkipLaunch`", prompt)
         self.assertNotIn("-SkipGoogleSetup -SkipLaunch", prompt)
         self.assertIn("Client กลาง", prompt)
@@ -531,7 +558,8 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertIn("post_install.google_oauth_client.requested=true", prompt)
         self.assertIn('post_install.google_oauth_client.status="ready_central"', prompt)
         self.assertIn('post_install.google_oauth_client.source="central_release"', prompt)
-        self.assertIn("ready_existing_override", prompt)
+        self.assertIn("ห้ามยอมรับ `ready_existing_override`", prompt)
+        self.assertNotIn('status="ready_existing_override"', prompt)
         self.assertIn("2=Google OAuth", prompt)
         self.assertIn("3=Watchdog", prompt)
         self.assertIn("partial", prompt)

@@ -523,7 +523,7 @@ class EaFactoryFrontendTests(unittest.TestCase):
         self.assertIn("mergeEaFactoryResponseReport(response)", request)
         self.assertIn("if (!mergeEaFactoryReadModel(response))", request)
 
-        global_apply = self.block("async function applyGlobalMetatraderTarget", "function renderAiTradeMt4QuickSetup")
+        global_apply = self.block("async function applyGlobalMetatraderTarget", "function renderAiTradeTerminalSummary")
         self.assertIn(".filter((target) => target.propId !== EA_FACTORY_PROP_ID)", global_apply)
 
     def test_fetch_timeout_and_parent_abort_are_typed_separately(self):
