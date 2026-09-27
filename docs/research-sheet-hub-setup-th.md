@@ -71,7 +71,7 @@ Token ที่หมดอายุ เก่า ถูกใช้แล้ว
 
 ห้ามวาง access token, refresh token, authorization code, รหัสผ่าน หรือ Secret ที่เป็นข้อมูลผู้ใช้/Confidential server secret ในหน้าเว็บ ใน Mission ใน Dashboard settings ใน Audit หรือในไฟล์ที่ commit เข้า Git Native-app client configuration กลางต้องถูก GitHub Actions inject จาก Release secrets ตอน build Asset เท่านั้นและห้าม commit ค่าจริงลง public Git tree ผู้ใช้ตั้งสิทธิ์แบบปกติด้วยปุ่ม **เชื่อม Google** เพียงครั้งเดียว:
 
-เส้นทางหลักสำหรับนักเรียนใช้ Google OAuth native/installed-app client configuration กลางของ Metafxclub ที่ Release workflow inject เป็น `backend/local-runner/google_oauth_native_client.txt` ภายใน Asset แล้วตรวจโดยอัตโนมัติ Public Git Source ไม่มีไฟล์จริงนี้ ไฟล์ใน Release มี `client_id` และ `client_secret` ของ native app ซึ่งเป็น app metadata ที่ต้องแจกพร้อม installed app ไม่ใช่ Credential ของ Gmail นักเรียน ระบบไม่แสดงค่า Client กลางเต็มผ่าน Browser/Frontend/Report/Audit นักเรียนไม่ต้องสร้าง Google Cloud Project/OAuth Client, เพิ่ม Gmail เป็น Test user, ดาวน์โหลดหรือส่ง OAuth JSON และไม่ต้องกรอกหรือแก้ Client ID กลาง Prompt ห้องเรียนใช้ `-ResetGoogleOAuthToCentralRelease` โดยได้รับอนุญาตจากผู้ใช้ล่วงหน้า เพื่อลบเฉพาะ custom override และ refresh authorization เก่าของ Windows User หากมี แล้วตรวจ `clientSource=central_release`; การติดตั้ง/ถอนโปรแกรมรุ่นเก่าอาจเก็บ DPAPI user data ไว้จึงห้ามอนุมานว่า reinstall เท่ากับ OAuth profile ใหม่
+เส้นทางหลักสำหรับนักเรียนใช้ Google OAuth native/installed-app client configuration กลางของ Metafxclub ที่ Release workflow inject เป็น `backend/local-runner/google_oauth_native_client.txt` ภายใน Asset แล้วตรวจโดยอัตโนมัติ Public Git Source ไม่มีไฟล์จริงนี้ ไฟล์ใน Release มี `client_id` และ `client_secret` ของ native app ซึ่งเป็น app metadata ที่ต้องแจกพร้อม installed app ไม่ใช่ Credential ของ Gmail นักเรียน ระบบไม่แสดงค่า Client กลางเต็มผ่าน Browser/Frontend/Report/Audit นักเรียนไม่ต้องสร้าง Google Cloud Project/OAuth Client, เพิ่ม Gmail เป็น Test user, ดาวน์โหลดหรือส่ง OAuth JSON และไม่ต้องกรอกหรือแก้ Client ID กลาง Prompt ห้องเรียนใช้ `-ResetGoogleOAuthToCentralRelease` โดยได้รับอนุญาตจากผู้ใช้ล่วงหน้า เพื่อลบ custom override/refresh authorization ใน DPAPI และ Environment fallback รุ่นเก่า 4 ชื่อจาก Process/Current User แล้วตรวจ `clientSource=central_release`; DPAPI กับ marker ถูกย้ายแบบ transaction เดียว Environment จะถูกคืนเมื่อการย้ายล้มก่อน commit และหลัง commit จะไม่ชุบค่าเก่ากลับมา หาก Restart/Health ล้มจะรายงาน Repair ตามจริง หากพบ Override ระดับ Machine ระบบจะหยุดโดยไม่แก้ค่าระดับ Machine การติดตั้ง/ถอนโปรแกรมรุ่นเก่าอาจเก็บข้อมูล OAuth ไว้จึงห้ามอนุมานว่า reinstall เท่ากับ OAuth profile ใหม่
 
 หลังติดตั้ง Release ที่ผ่านการตรวจแล้ว เปิด Agent HQ และกด **เชื่อมบัญชี Google ครั้งเดียว** ได้ทันที ผู้ใช้ต้องเลือกบัญชีและยืนยัน Consent ด้วยตนเองใน System Browser จากนั้นขั้นตอนประจำวันเหลือเพียงกรอก Sheet ID และตรวจ/ยืนยัน Sheet
 
@@ -79,9 +79,9 @@ Token ที่หมดอายุ เก่า ถูกใช้แล้ว
 
 ระหว่างที่ Sensitive Scope ของแอปกลางยังอยู่ระหว่างตรวจสอบ ผู้ใช้ใหม่อาจเห็นหน้า `Google ยังไม่ได้ยืนยันแอปนี้` และ Project กลางอาจอยู่ภายใต้ OAuth unverified user cap เมื่อ Google อนุมัติ Scope ที่ระบบขอแล้ว คำเตือนและเพดานนี้จะไม่ใช้กับ Scope ที่ได้รับอนุมัติ ดู [Google Auth Platform — Audience](https://support.google.com/cloud/answer/15549945)
 
-`2-SETUP-GOOGLE-HQ.bat` และการนำเข้า Desktop OAuth JSON ยังคงมีไว้เฉพาะ **Advanced/Recovery custom override** สำหรับเจ้าของระบบที่ตั้งใจใช้ OAuth Project ของตนเองหรือกู้การตั้งค่าเดิม ไม่ใช่ UX หลักของนักเรียน โหมดนี้ให้ Backend ตรวจและเก็บ Client configuration ด้วย Windows current-user DPAPI โดยไม่ส่ง JSON/Client Secret ผ่าน Frontend และไม่คัดลอกหรือลบไฟล์ต้นฉบับ ผู้ใช้ Advanced ต้องใช้ JSON ของ Project ที่ตนควบคุมเอง ห้ามใช้ไฟล์ของผู้สอนหรือเพื่อน และต้องรับผิดชอบ Publishing status/Test users/Verification ของ Project นั้นเอง Installer ที่ไม่ส่ง `-ResetGoogleOAuthToCentralRelease` จะรักษา override นี้ไว้ตามค่าเริ่มต้น; การล้าง override/refresh authorization เก่าเกิดขึ้นเฉพาะเมื่อตั้งใจเลือกโหมดห้องเรียนด้วย Switch ดังกล่าว
+`2-SETUP-GOOGLE-HQ.bat` และการนำเข้า Desktop OAuth JSON ยังคงมีไว้เฉพาะ **Advanced/Recovery custom override** สำหรับเจ้าของระบบที่ตั้งใจใช้ OAuth Project ของตนเองหรือกู้การตั้งค่าเดิม ไม่ใช่ UX หลักของนักเรียน โหมดนี้ให้ Backend ตรวจและเก็บ Client configuration ด้วย Windows current-user DPAPI โดยไม่ส่ง JSON/Client Secret ผ่าน Frontend และไม่คัดลอกหรือลบไฟล์ต้นฉบับ ผู้ใช้ Advanced ต้องใช้ JSON ของ Project ที่ตนควบคุมเอง ห้ามใช้ไฟล์ของผู้สอนหรือเพื่อน และต้องรับผิดชอบ Publishing status/Test users/Verification ของ Project นั้นเอง Installer ที่ไม่ส่ง `-ResetGoogleOAuthToCentralRelease` จะรักษา override นี้ไว้ตามค่าเริ่มต้น; การล้าง override/refresh authorization และ Environment fallback รุ่นเก่าใน Process/Current User เกิดขึ้นเฉพาะเมื่อตั้งใจเลือกโหมดห้องเรียนด้วย Switch ดังกล่าว
 
-Environment variable เป็น fallback สำหรับผู้ดูแลหรือการย้ายระบบเดิมเท่านั้น ไม่ใช่ UX หลักของนักเรียน ตัวอย่างบันทึก Client metadata แบบ manual แล้วค่อย Restart Bridge โดยใช้เฉพาะค่าจาก OAuth Project ที่ผู้ดูแลควบคุมเอง:
+Environment variable เป็น fallback สำหรับผู้ดูแลหรือการย้ายระบบเดิมเท่านั้น ไม่ใช่ UX หลักของนักเรียน หาก Windows User เคยเลือก Client กลางด้วย Prompt ห้องเรียน marker จะตั้งใจ suppress Environment รุ่นเก่าที่อาจค้างใน Explorer/Terminal; ผู้ดูแลต้องเลือกโหมด Advanced อย่างชัดเจนด้วย `2-SETUP-GOOGLE-HQ.bat` และ Desktop OAuth JSON (แนะนำ) หรือเรียก Backend CLI `configure_google_oauth_client.py --remove` เพื่อลบ grant/custom client/marker ก่อนตั้ง Environment ใหม่และ Restart Bridge ตัวอย่างบันทึก Client metadata แบบ manual โดยใช้เฉพาะค่าจาก OAuth Project ที่ผู้ดูแลควบคุมเอง:
 
 ```powershell
 [Environment]::SetEnvironmentVariable(
@@ -113,7 +113,7 @@ OAuth callback เป็นข้อมูลอ่อนไหว: Local Runner
 Audit เก็บได้เฉพาะ internal kind ที่กำหนดไว้ล่วงหน้าและคำแนะนำภาษาไทยทั่วไป:
 
 - `oauth_invalid_client` — Client กลางใน Release หรือ custom override ไม่ใช่ค่าที่ Google ยอมรับ ให้ผู้ดูแลตรวจแหล่งตั้งค่าโดยไม่แสดง Client ID เต็ม แล้วรีสตาร์ต Local Runner
-- `oauth_client_secret_required` — Client metadata ที่กำลังใช้อยู่ไม่มี `client_secret` ที่ Google กำหนด หากเป็น Client กลางให้ผู้ดูแลแก้ Release; หากเป็น Advanced/Recovery custom override ให้ผู้ดูแลตั้ง `METAFX_GOOGLE_OAUTH_CLIENT_SECRET` ที่ Backend แล้วเริ่มเชื่อมใหม่ ห้ามขอค่านี้จากนักเรียน
+- `oauth_client_secret_required` — Client metadata ที่กำลังใช้อยู่ไม่มี `client_secret` ที่ Google กำหนด หากเป็น Client กลางให้ผู้ดูแลแก้ Release; หากเป็น Advanced/Recovery custom override ให้ผู้ดูแลนำเข้า Desktop OAuth JSON ผ่าน `2-SETUP-GOOGLE-HQ.bat` (แนะนำ) หรือใช้ Environment หลังลบ marker อย่างชัดเจน แล้วเริ่มเชื่อมใหม่ ห้ามขอค่านี้จากนักเรียน
 - `oauth_code_invalid_or_expired` — code หมดอายุ, ถูกใช้แล้ว หรือ PKCE ไม่ผ่าน ให้เริ่มเชื่อมใหม่เพื่อออก code ใหม่
 - `oauth_redirect_mismatch` — callback ไม่ตรง ให้ใช้ Desktop OAuth Client และ loopback ของ Local Runner
 - `oauth_scope_missing` — Consent Screen/Client ยังไม่อนุญาต Google Sheets scope
@@ -123,12 +123,12 @@ Audit เก็บได้เฉพาะ internal kind ที่กำหน�
 - `oauth_unavailable` — Google OAuth ไม่พร้อมชั่วคราว
 - `oauth_exchange_rejected` — fallback สำหรับ provider error ที่ไม่รู้จัก, body ผิดรูปแบบ หรือ body เกินขนาด; ห้ามนำค่าจาก provider มาสร้าง kind ใหม่
 
-Environment credential เดิมยังเป็น fallback สำหรับผู้ดูแลระบบและการย้ายรุ่น โดยไม่ต้องกรอกผ่าน Frontend:
+Environment credential เดิมยังเป็น fallback สำหรับผู้ดูแลระบบและการย้ายรุ่น โดยไม่ต้องกรอกผ่าน Frontend แต่จะไม่ชนะ marker ของโหมดห้องเรียนจนกว่าผู้ดูแลจะเลือกออกจาก Client กลางอย่างชัดเจนตามขั้นตอนด้านบน:
 
 - Access token ชั่วคราว: `METAFX_GOOGLE_SHEETS_ACCESS_TOKEN`
 - OAuth refresh token: ต้องมี `METAFX_GOOGLE_OAUTH_CLIENT_ID` และ `METAFX_GOOGLE_OAUTH_REFRESH_TOKEN`; `METAFX_GOOGLE_OAUTH_CLIENT_SECRET` เป็นตัวเลือกสำหรับ Client ที่กำหนดให้ใช้
 
-ถ้ามีทั้ง durable OAuth grant และ Environment fallback ให้สถานะปลอดภัยของ Backend ระบุวิธีที่กำลังใช้อยู่ตามจริง แต่ห้ามเปิดเผยค่า Credential การ Disconnect ลบเฉพาะ grant ใน secure store ไม่แก้ Environment ของเครื่อง ดังนั้น Environment fallback ที่ตั้งแยกไว้ยังใช้งานได้
+ถ้ามีทั้ง durable OAuth grant และ Environment fallback ให้สถานะปลอดภัยของ Backend ระบุวิธีที่กำลังใช้อยู่ตามจริง แต่ห้ามเปิดเผยค่า Credential ปุ่ม Disconnect ในหน้า HQ ลบเฉพาะ grant ใน secure store ไม่แก้ Environment และไม่ลบ marker เลือก Client กลาง จึงยัง suppress Environment ต่อในโหมดห้องเรียน ส่วน CLI `--remove` สำหรับผู้ดูแล/การลบข้อมูลทั้งหมดจะลบ grant, custom client และ marker แบบ rollback ได้ แล้ว Environment ที่ตั้งไว้อย่างเจตนาจึงกลับมาเป็น fallback
 
 Adapter รุ่นปัจจุบันยังไม่รองรับ Service Account JSON/JWT หรือ `GOOGLE_APPLICATION_CREDENTIALS`; การเก็บ Service Account key ไว้ฝั่ง Backend อย่างเดียวไม่ได้ทำให้เชื่อมได้จนกว่าจะมี Adapter รองรับโดยตรง
 
@@ -136,7 +136,7 @@ Adapter รุ่นปัจจุบันยังไม่รองรับ
 
 Backend ตรวจหัวคอลัมน์ทุกช่องที่แต่ละ Report จะเขียนจริง ไม่ได้ตรวจเพียงคอลัมน์รหัสหลัก และตรวจ `Deep_Research` ให้ตรง Strategy Brief 10 หัว A-J ก่อนให้โรงงานอ่าน หากแท็บใดผิด schema จะแจ้งเฉพาะแท็บนั้น โดยแท็บอื่นที่ตรวจผ่านยังอ่านได้ แต่สถานะรวมจะยังไม่เป็นพร้อมทั้งหมด
 
-หลัง OAuth สำเร็จ (หรือหลังตั้ง Environment fallback แล้วรีสตาร์ต Local Bridge) ให้เปิดโต๊ะวางแผน Mission แล้วกด Apply/ตรวจอีกครั้ง ระบบจะแสดงสถานะตามจริง:
+หลัง OAuth สำเร็จ (หรือหลังออกจาก marker กลางอย่างชัดเจน ตั้ง Environment fallback แล้วรีสตาร์ต Local Bridge) ให้เปิดโต๊ะวางแผน Mission แล้วกด Apply/ตรวจอีกครั้ง ระบบจะแสดงสถานะตามจริง:
 
 - `oauth_client_not_configured` — Local Runner ไม่พบ Client กลางจาก Release หรือ custom override ที่ถูกต้อง จึงยังเปิด System Browser เพื่อเชื่อมไม่ได้ สำหรับเครื่องนักเรียนให้หยุดและตรวจ Release ห้ามขอ Client ID/JSON มาแก้ใน flow หลัก
 - `authorization_required` — Client พร้อมแล้วแต่ยังไม่มี durable grant ให้กดเชื่อม Google หนึ่งครั้ง

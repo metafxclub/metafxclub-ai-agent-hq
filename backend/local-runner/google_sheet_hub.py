@@ -152,6 +152,31 @@ def _environment_oauth_client(env: dict[str, str]) -> dict[str, str]:
     }
 
 
+_LEGACY_OAUTH_ENVIRONMENT_NAMES = (
+    "METAFX_GOOGLE_OAUTH_CLIENT_ID",
+    "METAFX_GOOGLE_OAUTH_CLIENT_SECRET",
+    "METAFX_GOOGLE_OAUTH_REFRESH_TOKEN",
+    "METAFX_GOOGLE_SHEETS_ACCESS_TOKEN",
+)
+
+
+def _runtime_oauth_environment(
+    environ: dict[str, str] | None = None,
+) -> dict[str, str]:
+    if isinstance(environ, dict):
+        return environ
+    try:
+        central_selected = google_oauth_store.central_release_selected()
+    except google_oauth_store.SecureStoreError as error:
+        raise GoogleSheetHubError(error.code, error.message, 503) from error
+    if not central_selected:
+        return os.environ
+    effective = dict(os.environ)
+    for name in _LEGACY_OAUTH_ENVIRONMENT_NAMES:
+        effective.pop(name, None)
+    return effective
+
+
 def _central_release_oauth_client() -> dict[str, str]:
     """Load the native-app credential injected into the verified release.
 
@@ -283,7 +308,7 @@ def oauth_client_configuration(environ: dict[str, str] | None = None) -> dict[st
             "clientGeneration": str(stored.get("clientGeneration") or "").strip(),
             "source": "secure_store",
         }
-    environment = _environment_oauth_client(os.environ)
+    environment = _environment_oauth_client(_runtime_oauth_environment())
     if environment["clientId"]:
         return environment
     return _central_release_oauth_client()
@@ -446,6 +471,7 @@ def configure_google_oauth_client_json(
                     else ""
                 ),
             )
+            google_oauth_store.clear_central_release_selection()
     except google_oauth_store.SecureStoreError as error:
         raise GoogleSheetHubError(error.code, error.message, 503) from error
     _invalidate_pending_oauth_flows()
@@ -463,9 +489,8 @@ def configure_google_oauth_client_json(
 def remove_google_oauth_client_configuration(
     environ: dict[str, str] | None = None,
 ) -> dict:
-    """Explicitly remove both durable OAuth artifacts for this Windows user."""
+    """Explicitly remove every durable OAuth artifact for this Windows user."""
 
-    env = environ if isinstance(environ, dict) else os.environ
     # Consume every in-flight callback before deleting either durable value so
     # a late browser redirect cannot recreate a refresh grant after removal.
     _invalidate_pending_oauth_flows()
@@ -476,11 +501,17 @@ def remove_google_oauth_client_configuration(
             removed = google_oauth_store.remove_oauth_artifacts_with_rollback(
                 remove_refresh=True,
                 remove_client=True,
+                remove_central_selection=True,
             )
             refresh_removed = removed["refreshRemoved"]
             client_removed = removed["clientRemoved"]
+            central_selection_removed = removed["centralSelectionRemoved"]
     except google_oauth_store.SecureStoreError as error:
         raise GoogleSheetHubError(error.code, error.message, 503) from error
+    # Re-resolve after deleting the central-selection marker.  A deliberately
+    # configured environment fallback must be reported truthfully instead of
+    # being hidden by the pre-removal selection state.
+    env = _runtime_oauth_environment(environ)
     environment_fallback = bool(
         str(env.get("METAFX_GOOGLE_OAUTH_CLIENT_ID") or "").strip()
         or str(env.get("METAFX_GOOGLE_OAUTH_REFRESH_TOKEN") or "").strip()
@@ -495,9 +526,12 @@ def remove_google_oauth_client_configuration(
         "configured": bool(fallback_client_id),
         "clientHint": google_oauth_store.client_id_hint(fallback_client_id),
         "store": fallback_source if fallback_client_id else "empty",
-        "removed": bool(refresh_removed or client_removed),
+        "removed": bool(
+            refresh_removed or client_removed or central_selection_removed
+        ),
         "clientRemoved": client_removed,
         "authorizationRemoved": refresh_removed,
+        "centralSelectionRemoved": central_selection_removed,
         "environmentFallbackActive": environment_fallback,
     }
 
@@ -514,13 +548,10 @@ def migrate_google_oauth_to_central_release(
     """
 
     env = environ if isinstance(environ, dict) else os.environ
-    environment_names = (
-        "METAFX_GOOGLE_OAUTH_CLIENT_ID",
-        "METAFX_GOOGLE_OAUTH_CLIENT_SECRET",
-        "METAFX_GOOGLE_OAUTH_REFRESH_TOKEN",
-        "METAFX_GOOGLE_SHEETS_ACCESS_TOKEN",
-    )
-    if any(str(env.get(name) or "").strip() for name in environment_names):
+    if any(
+        str(env.get(name) or "").strip()
+        for name in _LEGACY_OAUTH_ENVIRONMENT_NAMES
+    ):
         raise GoogleSheetHubError(
             "oauth_environment_override_active",
             "A Google OAuth environment override is active. Remove it before selecting the classroom release client.",
@@ -624,6 +655,7 @@ def migrate_google_oauth_to_central_release(
             removed = google_oauth_store.remove_oauth_artifacts_with_rollback(
                 remove_refresh=remove_refresh,
                 remove_client=custom_client_present,
+                select_central_release_client=True,
                 verify=verify_central_release_selected,
             )
     except google_oauth_store.SecureStoreError as error:
@@ -643,7 +675,7 @@ def migrate_google_oauth_to_central_release(
 
 
 def credential_status(environ: dict[str, str] | None = None) -> dict:
-    env = environ if isinstance(environ, dict) else os.environ
+    env = _runtime_oauth_environment(environ)
     direct = bool(str(env.get("METAFX_GOOGLE_SHEETS_ACCESS_TOKEN") or "").strip())
     environment_client_id = bool(str(env.get("METAFX_GOOGLE_OAUTH_CLIENT_ID") or "").strip())
     environment_client_secret = bool(str(env.get("METAFX_GOOGLE_OAUTH_CLIENT_SECRET") or "").strip())
@@ -1191,7 +1223,7 @@ def _resolve_access_token_context(
     *,
     open_url: Callable = urlopen,
 ) -> _AccessTokenContext:
-    env = environ if isinstance(environ, dict) else os.environ
+    env = _runtime_oauth_environment(environ)
     direct = str(env.get("METAFX_GOOGLE_SHEETS_ACCESS_TOKEN") or "").strip()
     if direct:
         return _AccessTokenContext(token=direct)

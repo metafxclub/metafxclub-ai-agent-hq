@@ -26,6 +26,7 @@ _REFRESH_RECORD_MAGIC = b"METAFX-GOOGLE-OAUTH-REFRESH-RECORD\x00\x02"
 _DPAPI_ENTROPY = b"Metafxclub.AgentHQ.GoogleSheets.RefreshToken.v1"
 _CLIENT_STORE_MAGIC = b"METAFX-GOOGLE-OAUTH-CLIENT-DPAPI\x00\x01"
 _CLIENT_DPAPI_ENTROPY = b"Metafxclub.AgentHQ.GoogleSheets.DesktopClient.v1"
+_CENTRAL_RELEASE_SELECTION_MAGIC = b"METAFX-GOOGLE-OAUTH-CENTRAL-RELEASE\x00\x01"
 _STORE_LOCK = threading.RLock()
 _CRYPTPROTECT_UI_FORBIDDEN = 0x01
 _CLIENT_GENERATION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
@@ -60,6 +61,75 @@ def client_configuration_path() -> Path:
     local_app_data = str(os.environ.get("LOCALAPPDATA") or "").strip()
     base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
     return base / "Metafxclub" / "AgentHQ" / "credentials" / "google-oauth-client.dpapi"
+
+
+def central_release_selection_path() -> Path:
+    return client_configuration_path().parent / "google-oauth-central-release.selected"
+
+
+def central_release_selected(*, path: Path | None = None) -> bool:
+    """Return whether this Windows user explicitly selected the release client.
+
+    The marker contains no credential material.  It prevents a stale ancestor
+    process from resurrecting legacy OAuth environment values after the
+    classroom installer has removed those values from CurrentUser scope.
+    """
+
+    try:
+        target = Path(path) if path is not None else central_release_selection_path()
+    except (OSError, RuntimeError) as error:
+        raise SecureStoreError(
+            "secure_store_read_failed",
+            "The saved Google OAuth client selection could not be read.",
+        ) from error
+    with _STORE_LOCK:
+        try:
+            payload = target.read_bytes()
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise SecureStoreError(
+                "secure_store_read_failed",
+                "The saved Google OAuth client selection could not be read.",
+            ) from error
+    if not secrets.compare_digest(payload, _CENTRAL_RELEASE_SELECTION_MAGIC):
+        raise SecureStoreError(
+            "secure_store_invalid",
+            "The saved Google OAuth client selection is invalid and must be repaired.",
+        )
+    return True
+
+
+def select_central_release(*, path: Path | None = None) -> None:
+    try:
+        target = Path(path) if path is not None else central_release_selection_path()
+    except (OSError, RuntimeError) as error:
+        raise SecureStoreError(
+            "secure_store_write_failed",
+            "The Google OAuth client selection could not be saved for this Windows user.",
+        ) from error
+    _write_protected_payload(target, _CENTRAL_RELEASE_SELECTION_MAGIC)
+
+
+def clear_central_release_selection(*, path: Path | None = None) -> bool:
+    try:
+        target = Path(path) if path is not None else central_release_selection_path()
+    except (OSError, RuntimeError) as error:
+        raise SecureStoreError(
+            "secure_store_delete_failed",
+            "The saved Google OAuth client selection could not be removed.",
+        ) from error
+    with _STORE_LOCK:
+        try:
+            target.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise SecureStoreError(
+                "secure_store_delete_failed",
+                "The saved Google OAuth client selection could not be removed.",
+            ) from error
 
 
 def _transaction_lock_path() -> Path:
@@ -603,24 +673,37 @@ def remove_oauth_artifacts_with_rollback(
     *,
     remove_refresh: bool,
     remove_client: bool,
+    remove_central_selection: bool = False,
+    select_central_release_client: bool = False,
     verify: Callable[[], None] | None = None,
 ) -> dict[str, bool]:
-    """Remove selected DPAPI artifacts and restore their bytes on failure.
+    """Remove selected per-user OAuth artifacts and restore them on failure.
 
     Callers must hold ``oauth_store_transaction`` so Bridge callbacks and the
     setup CLI cannot publish a new grant during the migration.  ``verify`` is
     executed before the snapshots are discarded, so a failed postcondition is
-    rolled back as one operation.  Snapshots stay encrypted; neither the client
-    metadata nor refresh token is returned.
+    rolled back as one operation.  Credential snapshots stay encrypted and the
+    central-selection marker contains no credential material; none is returned.
     """
+
+    if remove_central_selection and select_central_release_client:
+        raise ValueError(
+            "central selection cannot be removed and selected in one transaction"
+        )
 
     selected: list[tuple[str, Path]] = []
     if remove_refresh:
         selected.append(("refresh", credential_path()))
     if remove_client:
         selected.append(("client", client_configuration_path()))
+    if remove_central_selection or select_central_release_client:
+        selected.append(("central_selection", central_release_selection_path()))
 
     snapshots: dict[str, tuple[Path, bytes | None]] = {}
+    refresh_removed = False
+    client_removed = False
+    central_selection_removed = False
+    central_selection_selected = False
     with _STORE_LOCK:
         for name, target in selected:
             try:
@@ -635,9 +718,17 @@ def remove_oauth_artifacts_with_rollback(
             snapshots[name] = (target, payload)
 
         try:
+            if select_central_release_client:
+                select_central_release()
+                central_selection_selected = True
             refresh_removed = delete_refresh_token() if remove_refresh else False
             client_removed = (
                 delete_client_configuration() if remove_client else False
+            )
+            central_selection_removed = (
+                clear_central_release_selection()
+                if remove_central_selection
+                else False
             )
             if verify is not None:
                 verify()
@@ -673,6 +764,8 @@ def remove_oauth_artifacts_with_rollback(
     return {
         "refreshRemoved": refresh_removed,
         "clientRemoved": client_removed,
+        "centralSelectionRemoved": central_selection_removed,
+        "centralSelectionSelected": central_selection_selected,
     }
 
 

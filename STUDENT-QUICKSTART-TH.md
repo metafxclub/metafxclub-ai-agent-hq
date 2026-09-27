@@ -20,7 +20,7 @@ Client กลางมี `client_id` และ `client_secret` ของ native
 
 > **ระหว่างรอ Google ตรวจสอบ:** ผู้ใช้ใหม่อาจเห็นหน้า `Google ยังไม่ได้ยืนยันแอปนี้` และ Project กลางอาจอยู่ภายใต้ OAuth unverified user cap ให้ทำตามคำแนะนำของอาจารย์และอนุญาตเฉพาะแอปชื่อ Metafxclub Agent HQ เท่านั้น เมื่อ Scope ได้รับอนุมัติแล้ว คำเตือนและเพดานนี้จะไม่ใช้กับ Scope ที่ได้รับอนุมัติ ดูรายละเอียดจาก [Google Auth Platform — Audience](https://support.google.com/cloud/answer/15549945)
 
-`2-SETUP-GOOGLE-HQ.bat` และ OAuth JSON เป็นโหมด **Advanced/Recovery custom override** เท่านั้น ใช้เมื่อเจ้าของ Project ต้องการ Client ของตนเองหรือผู้ดูแลสั่งให้กู้การตั้งค่า ไม่ใช่ขั้นตอนปกติของนักเรียน หากจำเป็นต้องใช้ ให้ใช้ JSON ของ Project ที่ตนควบคุมเองและห้ามวาง JSON หรือค่า Client แบบเต็มในหน้าเว็บ, Mission หรือ Chat การติดตั้งทั่วไปที่ไม่ส่ง `-ResetGoogleOAuthToCentralRelease` จะรักษา custom override เดิมไว้; Prompt ห้องเรียนเป็นเส้นทางที่ส่ง Switch นี้เพื่อบังคับใช้ Client กลาง
+`2-SETUP-GOOGLE-HQ.bat` และ OAuth JSON เป็นโหมด **Advanced/Recovery custom override** เท่านั้น ใช้เมื่อเจ้าของ Project ต้องการ Client ของตนเองหรือผู้ดูแลสั่งให้กู้การตั้งค่า ไม่ใช่ขั้นตอนปกติของนักเรียน หากจำเป็นต้องใช้ ให้ใช้ JSON ของ Project ที่ตนควบคุมเองและห้ามวาง JSON หรือค่า Client แบบเต็มในหน้าเว็บ, Mission หรือ Chat การติดตั้งทั่วไปที่ไม่ส่ง `-ResetGoogleOAuthToCentralRelease` จะรักษา custom override เดิมไว้; Prompt ห้องเรียนเป็นเส้นทางที่ส่ง Switch นี้เพื่อล้าง DPAPI override/authorization และ Environment fallback รุ่นเก่า 4 ชื่อใน Process/Current User แล้วบังคับใช้ Client กลาง การลบ DPAPI/marker เป็น transaction และ Environment จะถูกคืนเฉพาะเมื่อการย้ายยังไม่ commit; หาก Bridge/Health หลัง commit ไม่ผ่าน ระบบจะแจ้งให้ Repair โดยไม่ชุบค่าเก่ากลับมา
 
 ## วิธีที่ง่ายที่สุด: Prompt เดียว ไม่ต้องกด BAT
 
@@ -121,7 +121,7 @@ Task เปิดเฉพาะ Bridge ไม่เปิด Browser หรื�
 
 - ดับเบิลคลิก `UNINSTALL-HQ.bat` เป็นการถอนแบบปกติ: เก็บ Mission, Report, Memory, Log และการยืนยัน Google ที่เข้ารหัสไว้ เพื่อใช้ต่อเมื่อติดตั้งใหม่
 - หากต้องการลบข้อมูลทั้งหมดจริง ต้องเรียก `scripts\uninstall-hq.ps1` พร้อม `-RemoveUserData -ConfirmUserDataRemoval DELETE-METAFX-DATA` ระบบจึงจะให้ Backend CLI ลบ durable Google grant และ OAuth Client แบบ custom override
-- Client กลางเป็นส่วนหนึ่งของ Release ส่วน Environment variable และ OAuth JSON ต้นฉบับที่ผู้ดูแลตั้งเองในโหมด Advanced จะไม่ถูกลบอัตโนมัติ
+- Client กลางเป็นส่วนหนึ่งของ Release ส่วน Environment variable และ OAuth JSON ต้นฉบับที่ผู้ดูแลตั้งเองในโหมด Advanced จะไม่ถูกลบอัตโนมัติ เว้นแต่ตั้งใจใช้ `-ResetGoogleOAuthToCentralRelease` ซึ่งลบเฉพาะ fallback รุ่นเก่า 4 ชื่อใน Process/Current User เพื่อย้ายกลับ Client กลาง และจะหยุดหากพบ Override ระดับ Machine
 
 ## โหมดเริ่มต้นที่ปลอดภัย
 

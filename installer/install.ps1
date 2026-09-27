@@ -56,8 +56,13 @@ $watchdogFailure = $false
 $googleSetupFailure = $false
 $googleSetupStatus = "not_requested"
 $googleSetupSource = "not_checked"
+$googleSetupLiveClientSource = "not_configured"
+$googleSetupRequiresBridgeRestart = $false
 $validatedSourceCommit = ""
 $validatedGoogleClientJsonPath = ""
+$preservedRepairSource = $null
+$selectedBridgePort = 0
+$previousBridgeRestored = $false
 
 $gitProvenanceValues = @($ExpectedGitRepository, $ExpectedGitTag, $ExpectedSourceVersion)
 $gitProvenanceValueCount = @($gitProvenanceValues | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
@@ -2314,40 +2319,121 @@ function Reset-GoogleOAuthCurrentUserToCentralRelease {
         throw "ไม่พบตัวจัดการ Google OAuth ใน Runtime ที่ติดตั้งแล้ว"
     }
 
-    $python = Resolve-SystemPython
-    $arguments = @($python.PrefixArguments) + @($configureCli, "--migrate-to-central-release")
-    $output = @(& $python.FilePath @arguments 2>$null)
-    if ($LASTEXITCODE -ne 0) {
-        throw "ย้าย Google OAuth ของ Windows User นี้ไป Client กลางไม่สำเร็จ"
+    # Legacy classroom installs could leave these exact fallback names in the
+    # Process/User environment.  The lifecycle launcher intentionally
+    # rehydrates User values for Advanced mode, so selecting the central client
+    # must remove them transactionally or the live Bridge will silently switch
+    # back to the old project after the installer reports ready_central.
+    $legacyEnvironmentNames = @(
+        "METAFX_GOOGLE_OAUTH_CLIENT_ID",
+        "METAFX_GOOGLE_OAUTH_CLIENT_SECRET",
+        "METAFX_GOOGLE_OAUTH_REFRESH_TOKEN",
+        "METAFX_GOOGLE_SHEETS_ACCESS_TOKEN"
+    )
+    $machineOverrides = @(
+        $legacyEnvironmentNames | Where-Object {
+            -not [string]::IsNullOrWhiteSpace(
+                [Environment]::GetEnvironmentVariable($_, [EnvironmentVariableTarget]::Machine)
+            )
+        }
+    )
+    if ($machineOverrides.Count -gt 0) {
+        throw "พบ Google OAuth Environment override ระดับ Machine จึงหยุดแบบปลอดภัย กรุณาให้ผู้ดูแลลบค่าระดับ Machine ก่อนเลือก Client กลาง"
     }
-    $jsonLine = @($output | ForEach-Object { [string]$_ } | Where-Object { $_.TrimStart().StartsWith("{") }) | Select-Object -Last 1
-    if (-not $jsonLine) {
-        throw "ตัวจัดการ Google OAuth ไม่ได้ยืนยันผลการย้ายไป Client กลาง"
+
+    $environmentSnapshots = @{}
+    $environmentOverrideWasPresent = $false
+    foreach ($target in @(
+        [EnvironmentVariableTarget]::Process,
+        [EnvironmentVariableTarget]::User
+    )) {
+        foreach ($name in $legacyEnvironmentNames) {
+            $key = "{0}::{1}" -f [string]$target, $name
+            $value = [Environment]::GetEnvironmentVariable($name, $target)
+            $environmentSnapshots[$key] = $value
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                $environmentOverrideWasPresent = $true
+            }
+        }
     }
+
+    $backendMigrationCommitted = $false
     try {
-        $removal = $jsonLine | ConvertFrom-Json
-    }
-    catch {
-        throw "ผลการย้าย Google OAuth ไป Client กลางไม่ใช่ JSON ที่สมบูรณ์"
-    }
-    if ($removal.ok -ne $true -or $removal.configured -ne $true -or [string]$removal.store -cne "central_release") {
-        throw "ล้าง OAuth override แล้วแต่ Runtime ยังไม่ได้เลือก Client กลางจาก Release"
-    }
+        foreach ($target in @(
+            [EnvironmentVariableTarget]::Process,
+            [EnvironmentVariableTarget]::User
+        )) {
+            foreach ($name in $legacyEnvironmentNames) {
+                [Environment]::SetEnvironmentVariable($name, $null, $target)
+            }
+        }
 
-    $customClientPath = Join-Path $env:LOCALAPPDATA "Metafxclub\AgentHQ\credentials\google-oauth-client.dpapi"
-    if (Test-Path -LiteralPath $customClientPath) {
-        throw "ย้าย OAuth แล้วแต่ไฟล์ custom client ของ Windows User ยังหลงเหลืออยู่"
-    }
+        $python = Resolve-SystemPython
+        $arguments = @($python.PrefixArguments) + @($configureCli, "--migrate-to-central-release")
+        $output = @(& $python.FilePath @arguments 2>$null)
+        if ($LASTEXITCODE -ne 0) {
+            throw "ย้าย Google OAuth ของ Windows User นี้ไป Client กลางไม่สำเร็จ"
+        }
+        $jsonLine = @($output | ForEach-Object { [string]$_ } | Where-Object { $_.TrimStart().StartsWith("{") }) | Select-Object -Last 1
+        if (-not $jsonLine) {
+            throw "ตัวจัดการ Google OAuth ไม่ได้ยืนยันผลการย้ายไป Client กลาง"
+        }
+        try {
+            $removal = $jsonLine | ConvertFrom-Json
+        }
+        catch {
+            throw "ผลการย้าย Google OAuth ไป Client กลางไม่ใช่ JSON ที่สมบูรณ์"
+        }
+        if ($removal.ok -ne $true -or $removal.configured -ne $true -or [string]$removal.store -cne "central_release") {
+            throw "ล้าง OAuth override แล้วแต่ Runtime ยังไม่ได้เลือก Client กลางจาก Release"
+        }
+        # The Backend transaction has now durably removed incompatible DPAPI
+        # artifacts and selected the release client. From this point onward,
+        # restoring stale environment values would create a split-brain state
+        # that cannot restore the deleted DPAPI data, so later failures must be
+        # repaired against the committed central selection instead.
+        $backendMigrationCommitted = $true
 
-    $verified = Get-GoogleOAuthDeploymentStatus -CandidateRoot $CandidateRoot
-    if (
-        $null -eq $verified -or
-        $verified.configured -ne $true -or
-        [string]$verified.store -cne "central_release"
-    ) {
-        throw "ตรวจซ้ำแล้ว Runtime ยังไม่ได้ใช้ Google OAuth Client กลางจาก Release"
+        $customClientPath = Join-Path $env:LOCALAPPDATA "Metafxclub\AgentHQ\credentials\google-oauth-client.dpapi"
+        if (Test-Path -LiteralPath $customClientPath) {
+            throw "ย้าย OAuth แล้วแต่ไฟล์ custom client ของ Windows User ยังหลงเหลืออยู่"
+        }
+
+        $verified = Get-GoogleOAuthDeploymentStatus -CandidateRoot $CandidateRoot
+        if (
+            $null -eq $verified -or
+            $verified.configured -ne $true -or
+            [string]$verified.store -cne "central_release"
+        ) {
+            throw "ตรวจซ้ำแล้ว Runtime ยังไม่ได้ใช้ Google OAuth Client กลางจาก Release"
+        }
+        foreach ($target in @(
+            [EnvironmentVariableTarget]::Process,
+            [EnvironmentVariableTarget]::User
+        )) {
+            foreach ($name in $legacyEnvironmentNames) {
+                if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name, $target))) {
+                    throw "ย้าย OAuth แล้วแต่ Environment override ของ Windows User ยังหลงเหลืออยู่"
+                }
+            }
+        }
+
+        $removal | Add-Member -NotePropertyName environmentOverridesRemoved -NotePropertyValue $environmentOverrideWasPresent -Force
+        return $removal
     }
-    return $removal
+    finally {
+        if (-not $backendMigrationCommitted) {
+            foreach ($target in @(
+                [EnvironmentVariableTarget]::Process,
+                [EnvironmentVariableTarget]::User
+            )) {
+                foreach ($name in $legacyEnvironmentNames) {
+                    $key = "{0}::{1}" -f [string]$target, $name
+                    [Environment]::SetEnvironmentVariable($name, $environmentSnapshots[$key], $target)
+                }
+            }
+        }
+    }
 }
 
 function Invoke-GoogleOAuthFirstRunSetup {
@@ -2369,7 +2455,10 @@ function Invoke-GoogleOAuthFirstRunSetup {
     $deploymentStatus = Get-GoogleOAuthDeploymentStatus -CandidateRoot $CandidateRoot
     if ($ResetGoogleOAuthToCentralRelease -and -not $explicitClientSetup) {
         $deploymentStatus = Reset-GoogleOAuthCurrentUserToCentralRelease -CandidateRoot $CandidateRoot
-        if ($deploymentStatus.migrated -eq $true) {
+        if (
+            $deploymentStatus.migrated -eq $true -or
+            $deploymentStatus.environmentOverridesRemoved -eq $true
+        ) {
             Write-Host "ย้ายเครื่องห้องเรียนจาก OAuth override เดิมมาใช้ Client กลางของ Metafxclub แล้ว กรุณาเชื่อมบัญชี Google ใหม่หนึ่งครั้ง" -ForegroundColor Green
         }
         else {
@@ -2377,6 +2466,8 @@ function Invoke-GoogleOAuthFirstRunSetup {
         }
         $script:googleSetupStatus = "ready_central"
         $script:googleSetupSource = "central_release"
+        $script:googleSetupLiveClientSource = "central_release"
+        $script:googleSetupRequiresBridgeRestart = $true
         return
     }
     $alreadyConfigured = $null -ne $deploymentStatus -and $deploymentStatus.configured -eq $true
@@ -2427,8 +2518,13 @@ function Invoke-GoogleOAuthFirstRunSetup {
     }
     $deploymentStatus = Get-GoogleOAuthDeploymentStatus -CandidateRoot $CandidateRoot
     if ($null -ne $deploymentStatus -and $deploymentStatus.configured -eq $true) {
+        if ([string]$deploymentStatus.store -cne "windows_current_user_secure_store") {
+            throw "นำเข้า OAuth Client แบบ Advanced แล้วแต่ Environment override อื่นยังมีลำดับเหนือ Windows secure store"
+        }
         $script:googleSetupStatus = "ready_imported"
         $script:googleSetupSource = [string]$deploymentStatus.store
+        $script:googleSetupLiveClientSource = "secure_store"
+        $script:googleSetupRequiresBridgeRestart = $true
     }
     else {
         throw "ตัวตั้งค่า Google OAuth จบโดยไม่ยืนยัน Client ที่นำเข้า"
@@ -2437,7 +2533,7 @@ function Invoke-GoogleOAuthFirstRunSetup {
 
 function Invoke-BridgeLifecycleProcess {
     param(
-        [Parameter(Mandatory = $true)][ValidateSet("Start", "Stop")][string]$Action,
+        [Parameter(Mandatory = $true)][ValidateSet("Start", "Stop", "Restart")][string]$Action,
         [Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$ConfirmedPort
     )
 
@@ -2454,7 +2550,7 @@ function Invoke-BridgeLifecycleProcess {
         "-Port",
         [string]$ConfirmedPort
     )
-    if ($Action -ceq "Start") {
+    if ($Action -in @("Start", "Restart")) {
         $arguments += @("-HealthTimeoutSeconds", "45")
     }
 
@@ -2475,6 +2571,50 @@ function Invoke-BridgeLifecycleProcess {
         throw "คำสั่งจัดการ Local Bridge ไม่จบภายใน 60 วินาที"
     }
     return [int]$process.ExitCode
+}
+
+function Restart-And-VerifyBridgeGoogleOAuth {
+    param(
+        [Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$ConfirmedPort,
+        [Parameter(Mandatory = $true)][ValidateSet("central_release", "secure_store")][string]$ExpectedSource
+    )
+
+    Write-Step "กำลัง Restart Local Bridge เพื่อยืนยัน Google OAuth ที่เพิ่งตั้งค่า"
+    $restartExitCode = Invoke-BridgeLifecycleProcess -Action Restart -ConfirmedPort $ConfirmedPort
+    if ($restartExitCode -ne 0) {
+        throw "ตั้งค่า Google OAuth แล้ว แต่ Restart Local Bridge ไม่สำเร็จ"
+    }
+
+    $endpoint = Get-ConfirmedBridgeEndpoint
+    if ([int]$endpoint.Port -ne $ConfirmedPort) {
+        throw "Restart Local Bridge แล้ว endpoint ไม่ตรงกับพอร์ตที่ยืนยัน"
+    }
+    $health = Invoke-RestMethod -Uri $endpoint.HealthUrl -Method Get -TimeoutSec 10
+    if ($health.ok -ne $true -or [string]$health.status -cne "ready") {
+        throw "Restart Local Bridge แล้ว Health check ยังไม่พร้อม"
+    }
+
+    $authEnvelope = Invoke-RestMethod `
+        -Uri ("{0}api/props/mission_strategy_table/research-sheet/auth" -f $endpoint.Url) `
+        -Method Get `
+        -TimeoutSec 10
+    if ($authEnvelope.ok -ne $true -or $null -eq $authEnvelope.auth) {
+        throw "Restart Local Bridge แล้ว Google OAuth endpoint ไม่คืน response envelope ที่รองรับ"
+    }
+    $auth = $authEnvelope.auth
+    if (
+        $auth.clientConfigured -ne $true -or
+        [string]$auth.clientSource -cne $ExpectedSource
+    ) {
+        $safeSummary = [ordered]@{
+            clientConfigured = $auth.clientConfigured
+            connected = $auth.connected
+            status = [string]$auth.status
+            clientSource = [string]$auth.clientSource
+        } | ConvertTo-Json -Compress
+        throw "Restart Local Bridge แล้ว Google OAuth source ไม่ตรงกับที่ตั้งค่า: $safeSummary"
+    }
+    return $endpoint
 }
 
 function Test-IsolatedInstalledBridge {
@@ -2718,13 +2858,75 @@ function Show-CodexReadiness {
         $Readiness.CodexStatus, $Readiness.RateStatus, $Readiness.RemainingPercent, $Readiness.Stale, $Readiness.LimitReached)
 }
 
+function Get-VerifiedInstallSourceForRepair {
+    if (-not (Test-Path -LiteralPath $installResultPath -PathType Leaf)) {
+        Write-Warning "Repair นี้ไม่มี install-result.json เดิม จึงไม่สามารถรักษา GitHub Release provenance ได้"
+        Write-InstallLog -Message "Repair เริ่มจากการติดตั้งรุ่นเก่าหรือแบบ Local ที่ไม่มี provenance receipt"
+        return $null
+    }
+
+    try {
+        $receipt = Get-Content -LiteralPath $installResultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $source = $receipt.source
+        $provenance = [string]$source.provenance
+        if ($provenance -ceq "unverified_archive_or_local_source") {
+            Write-Warning "Repair นี้มาจาก Source แบบ Local/Archive ที่ไม่ยืนยัน จึงคง provenance เดิมไว้ตามจริง"
+            Write-InstallLog -Message "Repair รักษาสถานะ Source แบบ unverified_archive_or_local_source"
+            return $null
+        }
+        if ($provenance -cne "verified_remote_git_tag") {
+            throw "unsupported-provenance"
+        }
+
+        $versionPath = Join-Path $installRoot "VERSION"
+        if (-not (Test-Path -LiteralPath $versionPath -PathType Leaf)) {
+            throw "missing-version"
+        }
+        $installedVersion = (Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8).Trim()
+        $receiptVersion = [string]$receipt.application_version
+        $repository = [string]$source.repository
+        $tag = [string]$source.tag
+        $commit = [string]$source.commit
+        if (
+            [int]$receipt.version -ne 2 -or
+            $installedVersion -notmatch '^\d+\.\d+\.\d+$' -or
+            $receiptVersion -cne $installedVersion -or
+            $repository -cne "https://github.com/metafxclub/metafxclub-ai-agent-hq.git" -or
+            $tag -notmatch '^v\d+\.\d+\.\d+$' -or
+            $tag.Substring(1) -cne $installedVersion -or
+            $commit -notmatch '^[A-Fa-f0-9]{40,64}$'
+        ) {
+            throw "invalid-provenance"
+        }
+
+        return [pscustomobject]@{
+            provenance = "verified_remote_git_tag"
+            repository = $repository
+            tag = $tag
+            commit = $commit.ToLowerInvariant()
+        }
+    }
+    catch {
+        throw "หยุด Repair: install-result.json ที่อ้างว่าเป็น GitHub Release ที่ยืนยันแล้วไม่สมบูรณ์ กรุณาติดตั้งซ้ำจาก Release ทางการ"
+    }
+}
+
 function Write-InstallResult {
     param(
-        [Parameter(Mandatory = $true)]$Endpoint,
-        [Parameter(Mandatory = $true)]$Readiness,
+        [AllowNull()]$Endpoint,
+        [AllowNull()]$Readiness,
+        [Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$ConfirmedPort,
+        [Parameter(Mandatory = $true)][ValidateSet("ready", "not_checked", "repair_required")][string]$RuntimeHealth,
         [Parameter(Mandatory = $true)][string]$WatchdogStatus,
         [Parameter(Mandatory = $true)][ValidateRange(0, 4)][int]$PostInstallExitCode
     )
+
+    if ($RuntimeHealth -ceq "ready" -and ($null -eq $Endpoint -or $null -eq $Readiness)) {
+        throw "ห้ามบันทึก Runtime ว่าพร้อมเมื่อไม่มี Endpoint และ Readiness ที่ผ่านการตรวจจริง"
+    }
+    if ($null -ne $Endpoint -and [int]$Endpoint.Port -ne $ConfirmedPort) {
+        throw "Endpoint ที่ผ่าน Health check ไม่ตรงกับพอร์ตที่ผู้ใช้ยืนยัน"
+    }
 
     $versionPath = Join-Path $installRoot "VERSION"
     $version = if (Test-Path -LiteralPath $versionPath -PathType Leaf) {
@@ -2733,51 +2935,109 @@ function Write-InstallResult {
     else {
         "unknown"
     }
+    $sourceRecord = if ($PrePublishVerification) {
+        [ordered]@{
+            provenance = "verified_official_commit_pre_release"
+            repository = "https://github.com/metafxclub/metafxclub-ai-agent-hq.git"
+            tag = $ExpectedGitTag.Trim()
+            commit = $validatedSourceCommit
+        }
+    }
+    elseif ($validatedSourceCommit) {
+        [ordered]@{
+            provenance = "verified_remote_git_tag"
+            repository = "https://github.com/metafxclub/metafxclub-ai-agent-hq.git"
+            tag = $ExpectedGitTag.Trim()
+            commit = $validatedSourceCommit
+        }
+    }
+    elseif ($RepairOnly -and $null -ne $script:preservedRepairSource) {
+        [ordered]@{
+            provenance = [string]$script:preservedRepairSource.provenance
+            repository = [string]$script:preservedRepairSource.repository
+            tag = [string]$script:preservedRepairSource.tag
+            commit = [string]$script:preservedRepairSource.commit
+        }
+    }
+    else {
+        [ordered]@{
+            provenance = "unverified_archive_or_local_source"
+            repository = $null
+            tag = $null
+            commit = $null
+        }
+    }
+    $runtimeReady = $RuntimeHealth -ceq "ready"
+    $postInstallComplete = $PostInstallExitCode -eq 0 -and $runtimeReady
+    $advancedGoogleRepairRequired = (
+        $googleSetupFailure -and
+        -not [string]::IsNullOrWhiteSpace($validatedGoogleClientJsonPath)
+    )
+    $repairGoogleMode = $(if ($googleSetupFailure -and $ResetGoogleOAuthToCentralRelease) {
+        " -ResetGoogleOAuthToCentralRelease"
+    } else {
+        ""
+    })
+    $repairInstallerPath = Join-Path $installRoot "installer\install.ps1"
+    $repairCommand = $(if ($postInstallComplete -or $advancedGoogleRepairRequired) {
+        $null
+    } else {
+        'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}" -RepairOnly -Port {1} -EndpointConfirmed{2} -SkipShortcuts' -f `
+            $repairInstallerPath, $ConfirmedPort, $repairGoogleMode
+    })
+    $codexStatus = "not_checked"
+    $codexVersion = $null
+    $rateStatus = "not_checked"
+    $usedPercent = $null
+    $remainingPercent = $null
+    $resetsAt = $null
+    $stale = $false
+    $limitReached = $false
+    if ($runtimeReady -and $null -ne $Readiness) {
+        $codexStatus = [string]$Readiness.CodexStatus
+        $codexVersion = $Readiness.CodexVersion
+        $rateStatus = [string]$Readiness.RateStatus
+        $usedPercent = $Readiness.UsedPercent
+        $remainingPercent = $Readiness.RemainingPercent
+        $resetsAt = $Readiness.ResetsAt
+        $stale = [bool]$Readiness.Stale
+        $limitReached = [bool]$Readiness.LimitReached
+    }
     $result = [ordered]@{
         version = 2
         installed_at = [DateTime]::UtcNow.ToString("o")
         application_version = $version
         install_root = "%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ"
         install_scope = "current_windows_user"
-        source = [ordered]@{
-            provenance = $(if ($PrePublishVerification) {
-                "verified_official_commit_pre_release"
-            } elseif ($validatedSourceCommit) {
-                "verified_remote_git_tag"
-            } else {
-                "unverified_archive_or_local_source"
-            })
-            repository = $(if ($validatedSourceCommit) { "https://github.com/metafxclub/metafxclub-ai-agent-hq.git" } else { $null })
-            tag = $(if ($validatedSourceCommit) { $ExpectedGitTag.Trim() } else { $null })
-            commit = $(if ($validatedSourceCommit) { $validatedSourceCommit } else { $null })
-        }
+        source = $sourceRecord
         endpoint = [ordered]@{
             host = "127.0.0.1"
-            port = [int]$Endpoint.Port
-            url = [string]$Endpoint.Url
-            health_url = [string]$Endpoint.HealthUrl
-            health = "ready"
+            port = $ConfirmedPort
+            url = "http://127.0.0.1:$ConfirmedPort/"
+            health_url = "http://127.0.0.1:$ConfirmedPort/api/health"
+            health = $RuntimeHealth
         }
         codex = [ordered]@{
-            status = [string]$Readiness.CodexStatus
-            version = $Readiness.CodexVersion
-            rate_limit_status = [string]$Readiness.RateStatus
-            used_percent = $Readiness.UsedPercent
-            remaining_percent = $Readiness.RemainingPercent
-            resets_at = $Readiness.ResetsAt
-            stale = [bool]$Readiness.Stale
-            limit_reached = [bool]$Readiness.LimitReached
+            status = $codexStatus
+            version = $codexVersion
+            rate_limit_status = $rateStatus
+            used_percent = $usedPercent
+            remaining_percent = $remainingPercent
+            resets_at = $resetsAt
+            stale = $stale
+            limit_reached = $limitReached
             account_identity_stored = $false
         }
         post_install = [ordered]@{
-            complete = $PostInstallExitCode -eq 0
+            complete = $postInstallComplete
             exit_code = $PostInstallExitCode
+            repair_command = $repairCommand
             watchdog = [ordered]@{
                 status = $WatchdogStatus
                 task_name = $bridgeTaskName
-                port = [int]$Endpoint.Port
+                port = $ConfirmedPort
                 repair_command = $(if ($WatchdogStatus -ceq "repair_required") {
-                    'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\Metafxclub\AI-Agent-HQ\installer\install.ps1" -RepairOnly -Port {0} -EndpointConfirmed -SkipGoogleSetup -SkipShortcuts' -f [int]$Endpoint.Port
+                    $repairCommand
                 } else {
                     $null
                 })
@@ -2806,6 +3066,9 @@ try {
     # staging, stopping an existing Bridge, or mutating the installation.
     Assert-GoogleOAuthOneRunInputs
     Assert-SafeSource
+    if ($RepairOnly -and [string]::IsNullOrWhiteSpace($validatedSourceCommit)) {
+        $script:preservedRepairSource = Get-VerifiedInstallSourceForRepair
+    }
     if ($ListAvailableEndpoints) {
         $candidates = @(Get-AvailableBridgeEndpointCandidates -Count 3)
         [pscustomobject]@{
@@ -2971,13 +3234,28 @@ try {
         }
         try {
             Invoke-GoogleOAuthFirstRunSetup -CandidateRoot $installRoot
+            if ($script:googleSetupRequiresBridgeRestart -and -not $SkipLaunch) {
+                $bridgeEndpoint = $null
+                $bridgeEndpoint = Restart-And-VerifyBridgeGoogleOAuth `
+                    -ConfirmedPort $selectedBridgePort `
+                    -ExpectedSource $script:googleSetupLiveClientSource
+                $codexReadiness = Get-SafeCodexReadiness -Endpoint $bridgeEndpoint
+                Show-CodexReadiness -Readiness $codexReadiness
+            }
         }
         catch {
             $googleSetupFailure = $true
-            $googleMessage = $(if (-not [string]::IsNullOrWhiteSpace($GoogleClientJsonPath)) {
-                "Agent HQ ติดตั้งและเปิดใช้งานแล้ว แต่ยังนำเข้า Google OAuth Client แบบ Advanced ไม่สำเร็จ กรุณาตรวจ JSON/Client ID แล้วเปิด 2-SETUP-GOOGLE-HQ.bat"
+            $script:googleSetupStatus = "repair_required"
+            $script:googleSetupSource = "not_verified"
+            $runtimeStatePrefix = $(if ($bridgeEndpoint) {
+                "Agent HQ ติดตั้งและ Local Bridge ยังเปิดใช้งานอยู่ แต่"
             } else {
-                "Agent HQ ติดตั้งและเปิดใช้งานแล้ว แต่ Google OAuth Client กลางไม่พร้อม กรุณารัน Repair จากชุด Release ที่ถูกต้อง"
+                "ติดตั้งไฟล์ Agent HQ แล้ว แต่ Local Bridge ยังไม่พร้อมใช้งาน และ"
+            })
+            $googleMessage = $(if (-not [string]::IsNullOrWhiteSpace($GoogleClientJsonPath)) {
+                "$runtimeStatePrefix ยังนำเข้า Google OAuth Client แบบ Advanced ไม่สำเร็จ กรุณาตรวจ JSON/Client ID แล้วเปิด 2-SETUP-GOOGLE-HQ.bat"
+            } else {
+                "$runtimeStatePrefix Google OAuth Client กลางไม่พร้อม กรุณารัน Repair จากชุด Release ที่ถูกต้อง"
             })
             [void]$postInstallFailures.Add($googleMessage)
             Write-Warning "${googleMessage}: $($_.Exception.Message)"
@@ -2987,7 +3265,7 @@ try {
                 Install-Shortcuts
             }
             catch {
-                Write-Warning "ติดตั้งและตรวจระบบสำเร็จ แต่สร้าง Shortcut ไม่สำเร็จ: $($_.Exception.Message)"
+                Write-Warning "สร้าง Shortcut ไม่สำเร็จ: $($_.Exception.Message)"
             }
         }
         if ($bridgeEndpoint -and -not $PackageSmoke) {
@@ -3080,36 +3358,81 @@ try {
     else {
         0
     }
-    if ($bridgeEndpoint) {
-        Write-InstallResult `
-            -Endpoint $bridgeEndpoint `
-            -Readiness $codexReadiness `
-            -WatchdogStatus $watchdogStatus `
-            -PostInstallExitCode $postInstallExitCode
-    }
+    $runtimeHealth = $(if ($bridgeEndpoint) {
+        "ready"
+    } elseif ($SkipLaunch) {
+        "not_checked"
+    } else {
+        "repair_required"
+    })
+    Write-InstallResult `
+        -Endpoint $bridgeEndpoint `
+        -Readiness $codexReadiness `
+        -ConfirmedPort $selectedBridgePort `
+        -RuntimeHealth $runtimeHealth `
+        -WatchdogStatus $watchdogStatus `
+        -PostInstallExitCode $postInstallExitCode
 
-    Write-Step "ติดตั้ง Runtime และตรวจ Health สำเร็จ ข้อมูลเริ่มต้นเป็นแบบ Local/Demo และไม่ได้ Login หรือเปิด Live Trading ให้อัตโนมัติ"
+    if ($bridgeEndpoint) {
+        Write-Step "ติดตั้ง Runtime และตรวจ Health สำเร็จ ข้อมูลเริ่มต้นเป็นแบบ Local/Demo และไม่ได้ Login หรือเปิด Live Trading ให้อัตโนมัติ"
+    }
+    elseif ($SkipLaunch) {
+        Write-Step "ติดตั้งไฟล์ Runtime สำเร็จ และข้ามการเปิด Local Bridge/Health ตามคำสั่ง -SkipLaunch"
+    }
+    else {
+        Write-Step "ติดตั้งไฟล์ Runtime แล้ว แต่ Local Bridge/Health ยังไม่พร้อมใช้งาน ต้อง Repair ก่อนใช้งาน"
+    }
     Write-Host "ตำแหน่งโปรแกรม: $installRoot" -ForegroundColor Green
     if ($bridgeEndpoint) {
         Write-Host "หน้าโปรแกรม: $($bridgeEndpoint.Url)" -ForegroundColor Green
         Write-Host "รายงานการติดตั้ง: $installResultPath" -ForegroundColor Green
     }
-    else {
+    elseif ($SkipLaunch) {
         Write-Host "ยังไม่ได้เปิด Bridge ในขั้นตอนนี้ ให้เปิดจาก Shortcut เพื่อเลือกและยืนยัน Local endpoint" -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "Local Bridge/Health ยังไม่พร้อมใช้งาน กรุณารัน Repair ก่อนเปิด Agent HQ" -ForegroundColor Red
     }
     if ($postInstallFailures.Count -gt 0) {
         $combinedFailure = ($postInstallFailures.ToArray() -join " | ")
-        Write-InstallLog -Message ("ติดตั้ง Runtime สำเร็จแต่ขั้นตอนหลังติดตั้งยังไม่ครบ: {0}" -f $combinedFailure)
+        $runtimePostInstallState = $(if ($bridgeEndpoint) {
+            "Local Bridge/Health ยังพร้อมใช้งาน"
+        } elseif ($SkipLaunch) {
+            "ข้ามการเปิด Local Bridge/Health ตามคำสั่ง"
+        } else {
+            "Local Bridge/Health ยังไม่พร้อมและต้อง Repair"
+        })
+        Write-InstallLog -Message ("ติดตั้งไฟล์ Runtime แล้ว แต่ขั้นตอนหลังติดตั้งยังไม่ครบ ({0}): {1}" -f $runtimePostInstallState, $combinedFailure)
         foreach ($failure in $postInstallFailures) {
             Write-Host $failure -ForegroundColor Red
         }
-        if ($watchdogFailure) {
-            $repairCommand = 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}" -RepairOnly -Port {1} -EndpointConfirmed -SkipGoogleSetup -SkipShortcuts' -f `
-                (Join-Path $installRoot "installer\install.ps1"), $selectedBridgePort
-            Write-Host "คำสั่ง Repair Watchdog (ไม่ติดตั้ง Source ซ้ำ):" -ForegroundColor Yellow
+        $advancedGoogleRepairRequired = (
+            $googleSetupFailure -and
+            -not [string]::IsNullOrWhiteSpace($validatedGoogleClientJsonPath)
+        )
+        if (
+            ($watchdogFailure -or $googleSetupFailure -or -not $bridgeEndpoint) -and
+            -not $advancedGoogleRepairRequired
+        ) {
+            $repairGoogleMode = $(if ($googleSetupFailure -and $ResetGoogleOAuthToCentralRelease) {
+                " -ResetGoogleOAuthToCentralRelease"
+            } else {
+                ""
+            })
+            $repairCommand = 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}" -RepairOnly -Port {1} -EndpointConfirmed{2} -SkipShortcuts' -f `
+                (Join-Path $installRoot "installer\install.ps1"), $selectedBridgePort, $repairGoogleMode
+            Write-Host "คำสั่ง Repair ขั้นตอนหลังติดตั้ง (ไม่ติดตั้ง Source ซ้ำ):" -ForegroundColor Yellow
             Write-Host $repairCommand -ForegroundColor Cyan
         }
-        Write-Host ("Runtime ยังเปิดใช้ได้และไม่ถูก Rollback; รหัสผลลัพธ์ {0}: 2=Google, 3=Watchdog, 4=ทั้งสองส่วน" -f $postInstallExitCode) -ForegroundColor Yellow
+        if ($bridgeEndpoint) {
+            Write-Host ("Runtime ยังเปิดใช้ได้และไม่ถูก Rollback; รหัสผลลัพธ์ {0}: 2=Google, 3=Watchdog, 4=ทั้งสองส่วน" -f $postInstallExitCode) -ForegroundColor Yellow
+        }
+        elseif ($SkipLaunch) {
+            Write-Host ("ติดตั้งไฟล์ Runtime แล้วและข้ามการเปิด Bridge ตามคำสั่ง; รหัสผลลัพธ์ {0}: 2=Google, 3=Watchdog, 4=ทั้งสองส่วน" -f $postInstallExitCode) -ForegroundColor Yellow
+        }
+        else {
+            Write-Host ("ติดตั้งไฟล์ Runtime แล้ว แต่ Local Bridge/Health ยังไม่พร้อมและต้อง Repair; รหัสผลลัพธ์ {0}: 2=Google, 3=Watchdog, 4=ทั้งสองส่วน" -f $postInstallExitCode) -ForegroundColor Red
+        }
         exit $postInstallExitCode
     }
     Write-Host "หากต้องใช้ Codex ให้นักเรียน Login ด้วยบัญชีของตนเองภายหลัง" -ForegroundColor Yellow
@@ -3119,6 +3442,27 @@ catch {
     $message = [string]$_.Exception.Message
     $safeMessage = $message -replace '(?i)(token|password|secret|cookie|authorization)\s*[:=]\s*\S+', '$1=[REDACTED]'
     Write-InstallLog -Message ("ล้มเหลว: {0}" -f $safeMessage)
+    if (
+        $RepairOnly -and
+        $selectedBridgePort -ge 1024 -and
+        (Test-Path -LiteralPath $installRoot -PathType Container) -and
+        -not $previousBridgeRestored
+    ) {
+        try {
+            # A failed Repair must not leave a previous complete=true receipt
+            # looking current when no healthy previous Bridge was restored.
+            Write-InstallResult `
+                -Endpoint $null `
+                -Readiness $null `
+                -ConfirmedPort $selectedBridgePort `
+                -RuntimeHealth "repair_required" `
+                -WatchdogStatus "repair_required" `
+                -PostInstallExitCode 1
+        }
+        catch {
+            Write-Warning "Repair ล้มเหลวและไม่สามารถอัปเดต install-result.json ได้ กรุณาอย่าอ้างอิง receipt เดิม"
+        }
+    }
     Write-Error $safeMessage
     exit 1
 }

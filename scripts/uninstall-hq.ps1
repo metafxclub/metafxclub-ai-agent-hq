@@ -60,16 +60,21 @@ function Remove-GoogleOAuthUserConfiguration {
         throw "Backend คืนสถานะ Google OAuth หลังลบที่ไม่ปลอดภัย จึงยังไม่ถอนข้อมูลผู้ใช้"
     }
 
-    # Independently prove that both current-user DPAPI artifacts are gone.
-    # This catches a partial or stale CLI result even when a central fallback
-    # makes the resolved OAuth status report configured=true.
+    # Independently prove that both current-user DPAPI artifacts and the
+    # non-secret central-selection marker are gone. This catches a partial or
+    # stale CLI result even when a central fallback makes the resolved OAuth
+    # status report configured=true.
     $remainingOAuthArtifacts = @(
-        @("google-oauth-client.dpapi", "google-sheets-refresh.dpapi") |
+        @(
+            "google-oauth-client.dpapi",
+            "google-sheets-refresh.dpapi",
+            "google-oauth-central-release.selected"
+        ) |
             ForEach-Object { Join-Path $googleOAuthCredentialRoot $_ } |
             Where-Object { Test-Path -LiteralPath $_ }
     )
     if ($remainingOAuthArtifacts.Count -gt 0) {
-        throw "Backend ยังลบ OAuth Client หรือการยืนยัน Google แบบ DPAPI ของ Windows User นี้ไม่ครบ จึงยังไม่ถอนข้อมูลผู้ใช้"
+        throw "Backend ยังลบ OAuth Client, การยืนยัน Google หรือสถานะเลือก Client กลางของ Windows User นี้ไม่ครบ จึงยังไม่ถอนข้อมูลผู้ใช้"
     }
 }
 

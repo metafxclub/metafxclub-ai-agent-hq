@@ -18,11 +18,11 @@
    powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\installer\install.ps1 -ListAvailableEndpoints
 5. นำ Local URL ที่ผลลัพธ์ระบุว่า available=true มาเสนอให้ผม 3 ตัวเลือก แล้วหยุดรอให้ผมเลือกก่อน
 6. อธิบายด้วยภาษาง่าย ๆ ว่า IP จะเป็น 127.0.0.1 เหมือนกันทุกตัว เพราะเปิดเฉพาะเครื่องนี้ สิ่งที่เลือกคือหมายเลข Port เช่น 4186
-7. เมื่อผมเลือกแล้ว ให้ตรวจว่าพอร์ตนั้นยังว่าง จากนั้นเรียก:
-   .\1-INSTALL-HQ.bat -Port PORT_ที่ผมเลือก -EndpointConfirmed
+7. เมื่อผมเลือกแล้ว ให้ตรวจว่าพอร์ตนั้นยังว่าง จากนั้นเรียกโหมดห้องเรียนที่ล้างเฉพาะ OAuth override เก่าของ Windows User นี้และยืนยัน Client กลางใหม่:
+   .\1-INSTALL-HQ.bat -Port PORT_ที่ผมเลือก -EndpointConfirmed -ResetGoogleOAuthToCentralRelease
 8. ห้ามเปลี่ยนไปใช้ Port หรือ URL อื่นเอง หากพอร์ตถูกแย่งระหว่างติดตั้ง ให้หยุดและกลับมาเสนอ URL ว่างชุดใหม่
 9. หลังติดตั้ง ให้อ่าน URL และ health_url จาก data/runtime/bridge-endpoint.json ห้ามเดาเลข Port และต้องตรวจว่า Health ตอบ ok=true, status=ready, host=127.0.0.1 และ Port ตรงกัน
-10. ตรวจ GET `{url}api/props/mission_strategy_table/research-sheet/auth` ต้องได้ `clientConfigured=true` จาก native-app client configuration กลางใน Release โดยไม่แสดงค่า Client เต็ม หาก Client กลางไม่พร้อมให้หยุดและรายงานว่า Release ไม่สมบูรณ์ ห้ามขอ OAuth JSON, Client ID หรือ Client Secret จากนักเรียนแทน
+10. ตรวจ GET `{url}api/props/mission_strategy_table/research-sheet/auth` ต้องได้ envelope `ok=true` และ object `auth`; ตรวจภายใน object เท่านั้นว่ามี `auth.clientConfigured=true` และ `auth.clientSource="central_release"` จาก native-app client configuration กลางใน Release ห้ามอ่าน field จาก top-level และห้ามยอมรับ `secure_store`, `windows_current_user_secure_store`, `environment` หรือ source อื่น หาก Client กลางไม่พร้อมให้หยุดและรายงานว่า Release ไม่สมบูรณ์ ห้ามขอ OAuth JSON, Client ID หรือ Client Secret จากนักเรียนแทน
 11. เรียก scripts/check-codex-readiness.cmd เพื่อตรวจ Codex และ Rate Limit ของบัญชีที่ Login อยู่ใน Windows User เครื่องนี้
 12. ถ้าขึ้น auth_required ให้แจ้งว่าต้อง Login ด้วยบัญชีของนักเรียนเอง ห้ามอ่าน คัดลอก หรือแสดง Token, Cookie, API key, Auth file หรือข้อมูลบัญชี
 13. ถ้าขึ้น config_error ให้รายงานว่า Codex CLI มีค่า Config ที่ไม่รองรับ ห้ามแก้โดยเดาหรือคัดลอก Config จากเครื่องอื่น

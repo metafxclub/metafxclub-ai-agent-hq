@@ -412,6 +412,24 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertIn('[string]$removal.store -cne "central_release"', reset_function)
         self.assertIn('[string]$verified.store -cne "central_release"', reset_function)
         self.assertIn("google-oauth-client.dpapi", reset_function)
+        self.assertIn("METAFX_GOOGLE_OAUTH_REFRESH_TOKEN", reset_function)
+        self.assertIn("METAFX_GOOGLE_SHEETS_ACCESS_TOKEN", reset_function)
+        self.assertIn("[EnvironmentVariableTarget]::Machine", reset_function)
+        self.assertIn("[EnvironmentVariableTarget]::Process", reset_function)
+        self.assertIn("[EnvironmentVariableTarget]::User", reset_function)
+        self.assertIn("$environmentSnapshots", reset_function)
+        self.assertIn("$backendMigrationCommitted", reset_function)
+        self.assertIn("environmentOverridesRemoved", reset_function)
+        self.assertIn("Environment override ระดับ Machine", reset_function)
+        backend_result_check = reset_function.index(
+            '$removal.ok -ne $true -or $removal.configured -ne $true'
+        )
+        backend_commit = reset_function.index("$backendMigrationCommitted = $true")
+        post_commit_check = reset_function.index("$customClientPath =")
+        self.assertLess(backend_result_check, backend_commit)
+        self.assertLess(backend_commit, post_commit_check)
+        self.assertIn("if (-not $backendMigrationCommitted)", reset_function)
+        self.assertNotIn("$environmentResetCommitted", reset_function)
 
         # Explicit JSON import remains an advanced/recovery override and must
         # still go through the canonical backend-only setup script.
@@ -421,6 +439,15 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertIn("-SkipBridgeEnsure", first_run_function)
         self.assertIn("-SkipOpen", first_run_function)
         self.assertIn('$script:googleSetupStatus = "ready_imported"', first_run_function)
+        self.assertIn(
+            '[string]$deploymentStatus.store -cne "windows_current_user_secure_store"',
+            first_run_function,
+        )
+        self.assertIn('$script:googleSetupLiveClientSource = "secure_store"', first_run_function)
+        self.assertEqual(
+            first_run_function.count('$script:googleSetupRequiresBridgeRestart = $true'),
+            2,
+        )
         post_commit = installer[installer.index("Remove-ApplicationRollbackSnapshot -RollbackState") :]
         self.assertLess(
             post_commit.index("Register-NewBridgeScheduledTask"),
@@ -431,6 +458,20 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertIn("$googleSetupFailure = $true", post_commit)
         self.assertIn("exit $postInstallExitCode", post_commit)
         self.assertIn("Runtime ยังเปิดใช้ได้และไม่ถูก Rollback", post_commit)
+        self.assertIn("Local Bridge/Health ยังไม่พร้อมและต้อง Repair", post_commit)
+        self.assertIn("elseif ($SkipLaunch)", post_commit)
+        self.assertIn("Restart-And-VerifyBridgeGoogleOAuth", post_commit)
+        self.assertIn("-ExpectedSource $script:googleSetupLiveClientSource", post_commit)
+        self.assertIn('$script:googleSetupStatus = "repair_required"', post_commit)
+        restart_helper = installer[
+            installer.index("function Restart-And-VerifyBridgeGoogleOAuth") :
+            installer.index("function Test-IsolatedInstalledBridge")
+        ]
+        self.assertIn("Invoke-BridgeLifecycleProcess -Action Restart", restart_helper)
+        self.assertIn("$endpoint.HealthUrl", restart_helper)
+        self.assertIn("research-sheet/auth", restart_helper)
+        self.assertIn("$authEnvelope.auth", restart_helper)
+        self.assertIn("$auth.clientSource -cne $ExpectedSource", restart_helper)
 
     def test_student_docs_use_central_client_without_per_student_oauth_setup(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -554,6 +595,12 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertIn("GitHub Actions inject จาก Release secrets", prompt)
         self.assertIn("ห้าม commit ค่าจริงลง public Source", prompt)
         self.assertIn("authorization_required", prompt)
+        self.assertIn("envelope `ok=true`", prompt)
+        self.assertIn("`auth.clientConfigured=true`", prompt)
+        self.assertIn('`auth.clientSource="central_release"`', prompt)
+        self.assertIn("`auth.connected=false`", prompt)
+        self.assertIn("`auth.status=authorization_required`", prompt)
+        self.assertIn("ห้ามอ่าน field เหล่านี้จาก top-level", prompt)
         self.assertIn('source.provenance="verified_remote_git_tag"', prompt)
         self.assertIn("post_install.google_oauth_client.requested=true", prompt)
         self.assertIn('post_install.google_oauth_client.status="ready_central"', prompt)
@@ -618,6 +665,7 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertIn("--remove", removal)
         self.assertIn("google-oauth-client.dpapi", removal)
         self.assertIn("google-sheets-refresh.dpapi", removal)
+        self.assertIn("google-oauth-central-release.selected", removal)
         self.assertIn("Test-Path -LiteralPath", removal)
         call = uninstaller.index("    Remove-GoogleOAuthUserConfiguration")
         delete_application = uninstaller.index('foreach ($directoryName in @(')
@@ -640,12 +688,12 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         self.assertNotIn('$result.configured -ne $false', removal)
 
         # The safe fallback must not be confused with a surviving per-user
-        # override: both canonical DPAPI artifacts are checked independently.
+        # override: both canonical DPAPI artifacts and the central-selection
+        # marker are checked independently.
         self.assertIn('"Metafxclub\\AgentHQ\\credentials"', removal)
-        self.assertIn(
-            '@("google-oauth-client.dpapi", "google-sheets-refresh.dpapi")',
-            removal,
-        )
+        self.assertIn('"google-oauth-client.dpapi"', removal)
+        self.assertIn('"google-sheets-refresh.dpapi"', removal)
+        self.assertIn('"google-oauth-central-release.selected"', removal)
         self.assertIn("Where-Object { Test-Path -LiteralPath $_ }", removal)
         self.assertIn("$remainingOAuthArtifacts.Count -gt 0", removal)
         self.assertIn('"not_configured", "empty"', removal)
@@ -660,7 +708,11 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
         cli_invocation = '    $output = @(& $pythonPath $configureCli --remove 2>$null)'
         self.assertEqual(removal.count(cli_invocation), 1)
 
-        def run_case(*, leave_client_override: bool) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+        def run_case(
+            *,
+            leave_client_override: bool,
+            leave_central_selection: bool = False,
+        ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
             temporary = tempfile.TemporaryDirectory(prefix="mfxhq-uninstall-oauth-")
             self.addCleanup(temporary.cleanup)
             local_app_data = Path(temporary.name) / "LocalAppData"
@@ -676,8 +728,10 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
             credential_root.mkdir(parents=True)
             client_override = credential_root / "google-oauth-client.dpapi"
             refresh_token = credential_root / "google-sheets-refresh.dpapi"
+            central_selection = credential_root / "google-oauth-central-release.selected"
             client_override.write_bytes(b"encrypted client override")
             refresh_token.write_bytes(b"encrypted refresh token")
+            central_selection.write_bytes(b"non-secret central selection")
 
             simulated_cli = [
                 '    Remove-Item -LiteralPath (Join-Path $googleOAuthCredentialRoot "google-sheets-refresh.dpapi") -Force',
@@ -685,6 +739,10 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
             if not leave_client_override:
                 simulated_cli.append(
                     '    Remove-Item -LiteralPath (Join-Path $googleOAuthCredentialRoot "google-oauth-client.dpapi") -Force'
+                )
+            if not leave_central_selection:
+                simulated_cli.append(
+                    '    Remove-Item -LiteralPath (Join-Path $googleOAuthCredentialRoot "google-oauth-central-release.selected") -Force'
                 )
             simulated_cli.extend(
                 (
@@ -725,18 +783,33 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
                 check=False,
                 env=environment,
             )
-            return completed, client_override, refresh_token
+            return completed, client_override, refresh_token, central_selection
 
-        completed, client_override, refresh_token = run_case(leave_client_override=False)
+        completed, client_override, refresh_token, central_selection = run_case(
+            leave_client_override=False
+        )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertFalse(client_override.exists())
         self.assertFalse(refresh_token.exists())
+        self.assertFalse(central_selection.exists())
 
-        partial, client_override, refresh_token = run_case(leave_client_override=True)
+        partial, client_override, refresh_token, central_selection = run_case(
+            leave_client_override=True
+        )
         self.assertNotEqual(partial.returncode, 0)
         self.assertTrue(client_override.exists())
         self.assertFalse(refresh_token.exists())
-        self.assertIn("DPAPI", partial.stdout + partial.stderr)
+        self.assertFalse(central_selection.exists())
+
+        marker_partial, client_override, refresh_token, central_selection = run_case(
+            leave_client_override=False,
+            leave_central_selection=True,
+        )
+        self.assertNotEqual(marker_partial.returncode, 0)
+        self.assertFalse(client_override.exists())
+        self.assertFalse(refresh_token.exists())
+        self.assertTrue(central_selection.exists())
+        self.assertIn("สถานะเลือก Client กลาง", marker_partial.stdout + marker_partial.stderr)
 
 
 if __name__ == "__main__":

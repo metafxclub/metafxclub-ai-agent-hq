@@ -242,7 +242,11 @@ class GoogleOAuthModuleSecurityTests(unittest.TestCase):
                     "GOOGLE_OAUTH_NATIVE_CLIENT_PATH",
                     central_path,
                 ),
-                patch.dict(os.environ, {}, clear=True),
+                patch.dict(
+                    os.environ,
+                    {"LOCALAPPDATA": directory},
+                    clear=True,
+                ),
                 redirect_stderr(log),
             ):
                 first = self.hub.oauth_client_configuration()

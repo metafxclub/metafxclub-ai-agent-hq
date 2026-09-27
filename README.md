@@ -19,7 +19,7 @@ Release สำหรับห้องเรียนมี Google OAuth native/
 
 ระหว่างที่ Google ยังตรวจสอบ Sensitive Scope ของแอปกลาง ผู้ใช้ใหม่อาจเห็นหน้า `Google ยังไม่ได้ยืนยันแอปนี้` และจำนวนผู้ใช้ใหม่อาจอยู่ภายใต้ OAuth unverified user cap ของ Project กลาง เมื่อ Google อนุมัติ Scope ที่ระบบขอแล้ว คำเตือนและเพดานนี้จะไม่ใช้กับ Scope ที่ได้รับอนุมัติ ดู [Google Auth Platform — Audience](https://support.google.com/cloud/answer/15549945)
 
-`2-SETUP-GOOGLE-HQ.bat` และ Desktop OAuth JSON ยังคงมีไว้เฉพาะ **Advanced/Recovery custom override** สำหรับเจ้าของระบบที่ตั้งใจใช้ OAuth Project ของตนเอง ไม่ใช่ขั้นตอนติดตั้งของนักเรียน หากใช้โหมดนี้ต้องใช้ JSON ของ Project ที่ตนควบคุมเอง ห้ามส่งให้ผู้อื่น และไฟล์ต้นฉบับจะไม่ถูกลบอัตโนมัติ การติดตั้งทั่วไปที่ไม่ส่ง `-ResetGoogleOAuthToCentralRelease` จะรักษา custom override เดิมไว้ตามเจตนาของผู้ดูแล; เฉพาะ Prompt ห้องเรียนเท่านั้นที่ส่ง Switch นี้เพื่อล้าง override/authorization เก่าและบังคับกลับไปใช้ Client กลาง
+`2-SETUP-GOOGLE-HQ.bat` และ Desktop OAuth JSON ยังคงมีไว้เฉพาะ **Advanced/Recovery custom override** สำหรับเจ้าของระบบที่ตั้งใจใช้ OAuth Project ของตนเอง ไม่ใช่ขั้นตอนติดตั้งของนักเรียน หากใช้โหมดนี้ต้องใช้ JSON ของ Project ที่ตนควบคุมเอง ห้ามส่งให้ผู้อื่น และไฟล์ต้นฉบับจะไม่ถูกลบอัตโนมัติ การติดตั้งทั่วไปที่ไม่ส่ง `-ResetGoogleOAuthToCentralRelease` จะรักษา custom override เดิมไว้ตามเจตนาของผู้ดูแล; เฉพาะ Prompt ห้องเรียนเท่านั้นที่ส่ง Switch นี้เพื่อล้าง DPAPI override/authorization และ Environment fallback รุ่นเก่า 4 ชื่อใน Process/Current User แล้วบังคับกลับไปใช้ Client กลาง การลบ DPAPI กับ marker เลือก Client กลางทำใน transaction เดียวและ Environment จะถูกคืนหากการย้ายยังไม่ถึงจุด commit; เมื่อ commit แล้วระบบจะไม่ชุบค่าเก่ากลับมา แม้การ Restart/Health ภายหลังล้มเหลว แต่จะคืนรหัส `repair_required` ตามจริง โดยจะหยุดหากพบ Override ระดับ Machine
 
 ## ติดตั้งด้วย Prompt เดียวผ่าน Codex
 
@@ -128,7 +128,7 @@ Agent Chat ไม่มีสิทธิ์เรียก Tool หรือส
 - ชุดตรวจอัตโนมัติและ Compile proof ไม่ส่งออร์เดอร์จริงไปยังโบรกเกอร์ จึงต้องทดลองด้วยบัญชี Demo และตรวจสถานะ/ข้อจำกัดทั้งหมดด้วยตนเองก่อนตัดสินใจเปิด Live; เอกสารนี้ไม่อ้างว่าได้ทดสอบคำสั่งซื้อขายจริงแล้ว
 - ห้ามนำ `.env`, `.venv`, `data/runtime`, Log, Memory หรือ `%USERPROFILE%\.codex` ของบุคคลอื่นมาใส่ในชุดติดตั้ง
 
-การถอนด้วย `UNINSTALL-HQ.bat` แบบปกติจะเก็บ Mission/Report/Memory/Log และ durable Google grant ที่เข้ารหัสไว้ เพื่อให้ติดตั้งใหม่แล้วใช้ต่อได้ การลบข้อมูลทั้งหมดต้องเรียก `scripts\uninstall-hq.ps1 -RemoveUserData -ConfirmUserDataRemoval DELETE-METAFX-DATA` โดยตรง จึงจะลบ durable grant และ OAuth Client แบบ custom override ผ่าน Backend CLI ด้วย ส่วน Client กลางเป็นส่วนหนึ่งของ Release และ Environment variable/OAuth JSON ต้นฉบับที่ผู้ดูแลตั้งเองในโหมด Advanced จะไม่ถูกลบอัตโนมัติ
+การถอนด้วย `UNINSTALL-HQ.bat` แบบปกติจะเก็บ Mission/Report/Memory/Log, durable Google grant ที่เข้ารหัส และสถานะเลือก Client กลางไว้ เพื่อให้ติดตั้งใหม่แล้วใช้ต่อได้ การลบข้อมูลทั้งหมดต้องเรียก `scripts\uninstall-hq.ps1 -RemoveUserData -ConfirmUserDataRemoval DELETE-METAFX-DATA` โดยตรง จึงจะลบ durable grant, OAuth Client แบบ custom override และ marker เลือก Client กลางผ่าน Backend CLI ด้วย ส่วน Client กลางเป็นส่วนหนึ่งของ Release และ Environment variable/OAuth JSON ต้นฉบับที่ผู้ดูแลตั้งเองในโหมด Advanced จะไม่ถูกลบอัตโนมัติ ยกเว้นเมื่อตั้งใจเรียก Installer ด้วย `-ResetGoogleOAuthToCentralRelease` ซึ่งลบเฉพาะ Environment fallback รุ่นเก่า 4 ชื่อใน Process/Current User เพื่อย้ายกลับ Client กลาง
 
 ## โครงสร้างระบบสำหรับผู้พัฒนา
 

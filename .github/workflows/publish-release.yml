@@ -735,6 +735,19 @@ jobs:
           $verifiedClone = Join-Path $verifiedRoot "source"
           $verifiedLocalAppData = Join-Path $verifiedRoot "LocalAppData"
           $verifiedOriginalLocalAppData = $env:LOCALAPPDATA
+          $verifiedLegacyOAuthEnvironmentNames = @(
+            "METAFX_GOOGLE_OAUTH_CLIENT_ID",
+            "METAFX_GOOGLE_OAUTH_CLIENT_SECRET",
+            "METAFX_GOOGLE_OAUTH_REFRESH_TOKEN",
+            "METAFX_GOOGLE_SHEETS_ACCESS_TOKEN"
+          )
+          $verifiedOriginalLegacyOAuthUserEnvironment = @{}
+          foreach ($name in $verifiedLegacyOAuthEnvironmentNames) {
+            $verifiedOriginalLegacyOAuthUserEnvironment[$name] = [Environment]::GetEnvironmentVariable(
+              $name,
+              [EnvironmentVariableTarget]::User
+            )
+          }
           try {
             New-Item -ItemType Directory -Path $verifiedClone -Force | Out-Null
             git -C $verifiedClone init
@@ -865,6 +878,30 @@ jobs:
               throw "The isolated legacy OAuth upgrade fixture was not stored."
             }
 
+            # Reproduce the second persistence channel used by pre-central
+            # installers. Process scope stays clean, while a newly launched
+            # lifecycle helper can rehydrate these CurrentUser values.
+            [Environment]::SetEnvironmentVariable(
+              "METAFX_GOOGLE_OAUTH_CLIENT_ID",
+              "123456789012-release-user-env-smoke.apps.googleusercontent.com",
+              [EnvironmentVariableTarget]::User
+            )
+            [Environment]::SetEnvironmentVariable(
+              "METAFX_GOOGLE_OAUTH_CLIENT_SECRET",
+              "TEST_ONLY_RELEASE_USER_ENV_SECRET",
+              [EnvironmentVariableTarget]::User
+            )
+            [Environment]::SetEnvironmentVariable(
+              "METAFX_GOOGLE_OAUTH_REFRESH_TOKEN",
+              "TEST_ONLY_RELEASE_USER_ENV_REFRESH",
+              [EnvironmentVariableTarget]::User
+            )
+            [Environment]::SetEnvironmentVariable(
+              "METAFX_GOOGLE_SHEETS_ACCESS_TOKEN",
+              "TEST_ONLY_RELEASE_USER_ENV_ACCESS",
+              [EnvironmentVariableTarget]::User
+            )
+
             & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
               -File (Join-Path $packageRoot "installer\install.ps1") `
               -Port $verifiedPort -EndpointConfirmed -SkipShortcuts -SkipAutostart `
@@ -878,6 +915,14 @@ jobs:
             ) {
               throw "Classroom OAuth migration left a legacy DPAPI artifact behind."
             }
+            foreach ($name in $verifiedLegacyOAuthEnvironmentNames) {
+              if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable(
+                $name,
+                [EnvironmentVariableTarget]::User
+              ))) {
+                throw "Classroom OAuth migration left a legacy CurrentUser environment override behind."
+              }
+            }
 
             $verifiedInstallResultPath = Join-Path $verifiedInstalledRoot "data\runtime\install-result.json"
             $verifiedInstallResult = Get-Content -LiteralPath $verifiedInstallResultPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -890,16 +935,29 @@ jobs:
               throw "Classroom OAuth migration install-result contract failed."
             }
 
-            $verifiedRuntimeAuth = Invoke-RestMethod `
+            $verifiedRuntimeAuthEnvelope = Invoke-RestMethod `
               -Uri ("http://127.0.0.1:{0}/api/props/mission_strategy_table/research-sheet/auth" -f $verifiedPort) `
               -TimeoutSec 15
+            if (
+              $verifiedRuntimeAuthEnvelope.ok -ne $true -or
+              $null -eq $verifiedRuntimeAuthEnvelope.auth
+            ) {
+              throw "Classroom OAuth migration live Runtime response envelope failed."
+            }
+            $verifiedRuntimeAuth = $verifiedRuntimeAuthEnvelope.auth
             if (
               $verifiedRuntimeAuth.clientConfigured -ne $true -or
               $verifiedRuntimeAuth.connected -ne $false -or
               [string]$verifiedRuntimeAuth.status -cne "authorization_required" -or
               [string]$verifiedRuntimeAuth.clientSource -cne "central_release"
             ) {
-              throw "Classroom OAuth migration live Runtime contract failed."
+              $verifiedRuntimeAuthSummary = [ordered]@{
+                clientConfigured = $verifiedRuntimeAuth.clientConfigured
+                connected = $verifiedRuntimeAuth.connected
+                status = [string]$verifiedRuntimeAuth.status
+                clientSource = [string]$verifiedRuntimeAuth.clientSource
+              } | ConvertTo-Json -Compress
+              throw "Classroom OAuth migration live Runtime contract failed: $verifiedRuntimeAuthSummary"
             }
 
             # A user who is already connected through this exact packaged
@@ -948,6 +1006,13 @@ jobs:
             }
           }
           finally {
+            foreach ($name in $verifiedLegacyOAuthEnvironmentNames) {
+              [Environment]::SetEnvironmentVariable(
+                $name,
+                $verifiedOriginalLegacyOAuthUserEnvironment[$name],
+                [EnvironmentVariableTarget]::User
+              )
+            }
             $env:LOCALAPPDATA = $verifiedOriginalLocalAppData
           }
 

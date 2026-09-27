@@ -544,6 +544,10 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("post_install", result_writer)
         self.assertIn("repair_command", result_writer)
         self.assertIn("PostInstallExitCode", result_writer)
+        self.assertIn("RuntimeHealth", result_writer)
+        self.assertIn("ConfirmedPort", result_writer)
+        self.assertIn("complete = $postInstallComplete", result_writer)
+        self.assertIn("health = $RuntimeHealth", result_writer)
         self.assertIn('status = $WatchdogStatus', result_writer)
         self.assertIn('2=Google, 3=Watchdog, 4=ทั้งสองส่วน', installer)
         self.assertIn('exit $postInstallExitCode', installer)
@@ -563,8 +567,24 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn("2=Google OAuth", prompt)
         self.assertIn("3=Watchdog", prompt)
         self.assertIn("4=ทั้ง Google OAuth กับ Watchdog", prompt)
-        self.assertIn("-RepairOnly -Port <PORT> -EndpointConfirmed -SkipGoogleSetup -SkipShortcuts", prompt)
+        self.assertIn(
+            "-RepairOnly -Port <PORT> -EndpointConfirmed "
+            "-ResetGoogleOAuthToCentralRelease -SkipShortcuts",
+            prompt,
+        )
+        self.assertNotIn(
+            "-RepairOnly -Port <PORT> -EndpointConfirmed -SkipGoogleSetup",
+            prompt,
+        )
         self.assertIn('post_install.watchdog.status="ready"', prompt)
+
+        endpoint_prompt = (ROOT / "docs" / "prompts" / "install-local-endpoint-th.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("-EndpointConfirmed -ResetGoogleOAuthToCentralRelease", endpoint_prompt)
+        self.assertIn('auth.clientConfigured=true', endpoint_prompt)
+        self.assertIn('auth.clientSource="central_release"', endpoint_prompt)
+        self.assertIn("ห้ามอ่าน field จาก top-level", endpoint_prompt)
 
     def test_release_workflow_never_skips_current_archive_smoke(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "publish-release.yml").read_text(encoding="utf-8")
@@ -781,15 +801,27 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             '"ready_central"',
             '"central_release"',
             "/api/props/mission_strategy_table/research-sheet/auth",
+            "verifiedRuntimeAuthEnvelope.ok",
+            "verifiedRuntimeAuthEnvelope.auth",
+            "verifiedRuntimeAuth = $verifiedRuntimeAuthEnvelope.auth",
             "verifiedRuntimeAuth.status",
             "verifiedRuntimeAuth.clientSource",
             '"authorization_required"',
+            "verifiedRuntimeAuthSummary",
+            "verifiedLegacyOAuthEnvironmentNames",
+            "verifiedOriginalLegacyOAuthUserEnvironment",
+            "Classroom OAuth migration left a legacy CurrentUser environment override behind",
             "Classroom OAuth migration left a legacy DPAPI artifact behind",
         ):
             with self.subTest(migration_fragment=migration_fragment):
                 self.assertIn(migration_fragment, workflow)
 
         migration_seed = workflow.index("google_oauth_store.save_client_configuration(")
+        environment_snapshot = workflow.index(
+            "$verifiedOriginalLegacyOAuthUserEnvironment[$name] = [Environment]::GetEnvironmentVariable("
+        )
+        verified_smoke_try = workflow.index("          try {", workflow.index("$verifiedRoot ="))
+        self.assertLess(environment_snapshot, verified_smoke_try)
         migration_install = workflow.index(
             "-PackageSmoke -PackageUpgradeSmoke -ResetGoogleOAuthToCentralRelease",
             migration_seed,
@@ -1132,6 +1164,21 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn('[string]$removal.store -cne "central_release"', reset_function)
         self.assertIn('[string]$verified.store -cne "central_release"', reset_function)
         self.assertIn("google-oauth-client.dpapi", reset_function)
+        self.assertIn("[EnvironmentVariableTarget]::Machine", reset_function)
+        self.assertIn("[EnvironmentVariableTarget]::Process", reset_function)
+        self.assertIn("[EnvironmentVariableTarget]::User", reset_function)
+        self.assertIn("$environmentSnapshots", reset_function)
+        self.assertIn("$backendMigrationCommitted", reset_function)
+        self.assertIn("environmentOverridesRemoved", reset_function)
+        backend_result_check = reset_function.index(
+            '$removal.ok -ne $true -or $removal.configured -ne $true'
+        )
+        backend_commit = reset_function.index("$backendMigrationCommitted = $true")
+        post_commit_check = reset_function.index("$customClientPath =")
+        self.assertLess(backend_result_check, backend_commit)
+        self.assertLess(backend_commit, post_commit_check)
+        self.assertIn("if (-not $backendMigrationCommitted)", reset_function)
+        self.assertNotIn("$environmentResetCommitted", reset_function)
 
         first_run = installer[
             installer.index("function Invoke-GoogleOAuthFirstRunSetup") :
@@ -1152,6 +1199,15 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertIn('"-ClientJsonPath", $validatedGoogleClientJsonPath', first_run)
         self.assertIn('"-ExpectedClientId", $ExpectedGoogleClientId', first_run)
         self.assertIn('$script:googleSetupStatus = "ready_imported"', first_run)
+        self.assertIn(
+            '[string]$deploymentStatus.store -cne "windows_current_user_secure_store"',
+            first_run,
+        )
+        self.assertIn('$script:googleSetupLiveClientSource = "secure_store"', first_run)
+        self.assertEqual(
+            first_run.count('$script:googleSetupRequiresBridgeRestart = $true'),
+            2,
+        )
         self.assertLess(
             first_run.index("if ($SkipGoogleSetup -and -not $explicitClientSetup)"),
             first_run.index("$deploymentStatus = Get-GoogleOAuthDeploymentStatus"),
@@ -1162,13 +1218,42 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
             installer.rindex("catch {")
         ]
         self.assertLess(completion.index("Write-InstallResult"), completion.index("exit 0"))
+        self.assertIn('-RuntimeHealth $runtimeHealth', completion)
+        self.assertIn('-ConfirmedPort $selectedBridgePort', completion)
+        self.assertNotIn("if ($bridgeEndpoint) {\n        Write-InstallResult", completion)
         self.assertLess(completion.index("if ($postInstallFailures.Count -gt 0)"), completion.index("exit 0"))
         self.assertIn("exit $postInstallExitCode", completion)
+        fatal_repair = installer[installer.index("catch {\n    $message = [string]$_.Exception.Message") :]
+        self.assertIn("$RepairOnly", fatal_repair)
+        self.assertIn("-not $previousBridgeRestored", fatal_repair)
+        self.assertIn('-RuntimeHealth "repair_required"', fatal_repair)
+        self.assertIn("-PostInstallExitCode 1", fatal_repair)
+        self.assertIn("อย่าอ้างอิง receipt เดิม", fatal_repair)
         result_writer = installer[
             installer.index("function Write-InstallResult") :
             installer.index("try {\n    # Validate explicit classroom onboarding inputs")
         ]
         self.assertIn("google_oauth_client", result_writer)
+        self.assertIn("Get-VerifiedInstallSourceForRepair", installer)
+        self.assertIn('$RepairOnly -and $null -ne $script:preservedRepairSource', result_writer)
+        self.assertIn('provenance = "verified_remote_git_tag"', installer)
+        self.assertIn("postInstallComplete", result_writer)
+        self.assertIn("repairGoogleMode", result_writer)
+        self.assertIn('" -ResetGoogleOAuthToCentralRelease"', result_writer)
+        self.assertNotIn("elseif ($SkipGoogleSetup)", result_writer)
+        self.assertIn("advancedGoogleRepairRequired", result_writer)
+        restart_helper = installer[
+            installer.index("function Restart-And-VerifyBridgeGoogleOAuth") :
+            installer.index("function Test-IsolatedInstalledBridge")
+        ]
+        self.assertIn("Invoke-BridgeLifecycleProcess -Action Restart", restart_helper)
+        self.assertIn("$endpoint.HealthUrl", restart_helper)
+        self.assertIn("research-sheet/auth", restart_helper)
+        self.assertIn("$authEnvelope.auth", restart_helper)
+        self.assertIn("$auth.clientSource -cne $ExpectedSource", restart_helper)
+        post_commit = installer[installer.index("Remove-ApplicationRollbackSnapshot -RollbackState") :]
+        self.assertIn("Restart-And-VerifyBridgeGoogleOAuth", post_commit)
+        self.assertIn('$script:googleSetupStatus = "repair_required"', post_commit)
         self.assertIn("requested = -not ($SkipGoogleSetup -or $SkipLaunch)", result_writer)
         self.assertIn('status = $(if ($googleSetupFailure) { "repair_required" } else { $googleSetupStatus })', result_writer)
         self.assertIn("source = $googleSetupSource", result_writer)
@@ -1208,6 +1293,190 @@ class ReleaseInstallerHardeningTests(unittest.TestCase):
         self.assertNotIn("Start-Process -Verb RunAs", registration)
         self.assertIn("Register-ScheduledTask", registration)
         self.assertIn("Unregister-ScheduledTask", registration)
+
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell repair receipt semantics")
+    def test_repair_receipt_preserves_verified_release_and_overwrites_stale_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temporary_root = Path(directory)
+            install_root = temporary_root / "AI-Agent-HQ"
+            installer_path = str(ROOT / "installer" / "install.ps1").replace("'", "''")
+            install_root_path = str(install_root).replace("'", "''")
+            script = rf"""
+$ErrorActionPreference = 'Stop'
+$installerPath = '{installer_path}'
+$tokens = $null
+$parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    $installerPath,
+    [ref]$tokens,
+    [ref]$parseErrors
+)
+if ($parseErrors.Count -ne 0) {{ throw 'Installer parse failed' }}
+foreach ($name in @('Get-VerifiedInstallSourceForRepair', 'Write-InstallResult')) {{
+    $node = $ast.Find({{
+        param($candidate)
+        $candidate -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $candidate.Name -ceq $name
+    }}, $true)
+    if (-not $node) {{ throw "Function missing: $name" }}
+    Invoke-Expression $node.Extent.Text
+}}
+$installRoot = '{install_root_path}'
+$installResultPath = Join-Path $installRoot 'data\runtime\install-result.json'
+New-Item -ItemType Directory -Path (Split-Path -Parent $installResultPath) -Force | Out-Null
+[IO.File]::WriteAllText(
+    (Join-Path $installRoot 'VERSION'),
+    "0.9.21`n",
+    (New-Object Text.UTF8Encoding($false))
+)
+$commit = 'abcdef0123456789abcdef0123456789abcdef01'
+$initial = [ordered]@{{
+    version = 2
+    application_version = '0.9.21'
+    source = [ordered]@{{
+        provenance = 'verified_remote_git_tag'
+        repository = 'https://github.com/metafxclub/metafxclub-ai-agent-hq.git'
+        tag = 'v0.9.21'
+        commit = $commit
+    }}
+    endpoint = [ordered]@{{ health = 'ready' }}
+    post_install = [ordered]@{{ complete = $true; exit_code = 0 }}
+}}
+$utf8 = New-Object Text.UTF8Encoding($false)
+[IO.File]::WriteAllText(
+    $installResultPath,
+    ($initial | ConvertTo-Json -Depth 6),
+    $utf8
+)
+$RepairOnly = $true
+$PrePublishVerification = $false
+$validatedSourceCommit = ''
+$ExpectedGitTag = ''
+$ResetGoogleOAuthToCentralRelease = $true
+$SkipGoogleSetup = $false
+$SkipLaunch = $false
+$googleSetupFailure = $true
+$googleSetupStatus = 'repair_required'
+$googleSetupSource = 'not_verified'
+$validatedGoogleClientJsonPath = ''
+$bridgeTaskName = 'Metafxclub AI Agent HQ Bridge'
+$script:preservedRepairSource = Get-VerifiedInstallSourceForRepair
+if ($script:preservedRepairSource.commit -cne $commit) {{ throw 'Verified source was not preserved' }}
+
+$corrupt = $initial | ConvertTo-Json -Depth 6 | ConvertFrom-Json
+$corrupt.source.commit = 'not-a-commit'
+[IO.File]::WriteAllText(
+    $installResultPath,
+    ($corrupt | ConvertTo-Json -Depth 6),
+    $utf8
+)
+$corruptRejected = $false
+try {{
+    $null = Get-VerifiedInstallSourceForRepair
+}}
+catch {{
+    $corruptRejected = $true
+}}
+if (-not $corruptRejected) {{ throw 'Corrupt verified provenance was accepted' }}
+
+[IO.File]::WriteAllText(
+    $installResultPath,
+    ($initial | ConvertTo-Json -Depth 6),
+    $utf8
+)
+$script:preservedRepairSource = Get-VerifiedInstallSourceForRepair
+$ResetGoogleOAuthToCentralRelease = $false
+$SkipGoogleSetup = $true
+$SkipLaunch = $true
+$googleSetupFailure = $false
+$googleSetupStatus = 'skipped_no_launch'
+$googleSetupSource = 'not_checked'
+Write-InstallResult `
+    -Endpoint $null `
+    -Readiness $null `
+    -ConfirmedPort 4186 `
+    -RuntimeHealth 'not_checked' `
+    -WatchdogStatus 'skipped_no_launch' `
+    -PostInstallExitCode 0
+$notChecked = Get-Content -LiteralPath $installResultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($notChecked.endpoint.health -cne 'not_checked' -or $notChecked.post_install.complete -ne $false) {{
+    throw 'SkipLaunch-like receipt retained a stale success state'
+}}
+if ([string]$notChecked.post_install.repair_command -match '-SkipGoogleSetup') {{
+    throw 'Repair command propagated SkipGoogleSetup'
+}}
+
+$SkipGoogleSetup = $false
+$SkipLaunch = $false
+$googleSetupFailure = $true
+$validatedGoogleClientJsonPath = 'C:\Advanced\desktop-client.json'
+$googleSetupStatus = 'repair_required'
+$googleSetupSource = 'not_verified'
+Write-InstallResult `
+    -Endpoint $null `
+    -Readiness $null `
+    -ConfirmedPort 4186 `
+    -RuntimeHealth 'repair_required' `
+    -WatchdogStatus 'ready' `
+    -PostInstallExitCode 2
+$advancedFailure = Get-Content -LiteralPath $installResultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($null -ne $advancedFailure.post_install.repair_command) {{
+    throw 'Advanced OAuth failure exposed a repair command that could select another client'
+}}
+
+$ResetGoogleOAuthToCentralRelease = $true
+$SkipGoogleSetup = $false
+$SkipLaunch = $false
+$googleSetupFailure = $true
+$googleSetupStatus = 'repair_required'
+$googleSetupSource = 'not_verified'
+$validatedGoogleClientJsonPath = ''
+Write-InstallResult `
+    -Endpoint $null `
+    -Readiness $null `
+    -ConfirmedPort 4186 `
+    -RuntimeHealth 'repair_required' `
+    -WatchdogStatus 'ready' `
+    -PostInstallExitCode 2
+Get-Content -LiteralPath $installResultPath -Raw -Encoding UTF8
+"""
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    script,
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            receipt = json.loads(completed.stdout)
+            self.assertEqual("verified_remote_git_tag", receipt["source"]["provenance"])
+            self.assertEqual("v0.9.21", receipt["source"]["tag"])
+            self.assertEqual("abcdef0123456789abcdef0123456789abcdef01", receipt["source"]["commit"])
+            self.assertEqual("repair_required", receipt["endpoint"]["health"])
+            self.assertEqual("not_checked", receipt["codex"]["status"])
+            self.assertFalse(receipt["post_install"]["complete"])
+            self.assertEqual(2, receipt["post_install"]["exit_code"])
+            repair_command = receipt["post_install"]["repair_command"]
+            self.assertIn("-ResetGoogleOAuthToCentralRelease", repair_command)
+            self.assertNotIn("-SkipGoogleSetup", repair_command)
+            self.assertNotIn("%LOCALAPPDATA%", repair_command)
+            self.assertIn(str(install_root / "installer" / "install.ps1"), repair_command)
+            self.assertTrue(receipt["post_install"]["google_oauth_client"]["requested"])
+            self.assertEqual(
+                "repair_required",
+                receipt["post_install"]["google_oauth_client"]["status"],
+            )
 
     @unittest.skipUnless(os.name == "nt", "Windows PowerShell installer preflight")
     def test_explicit_google_inputs_validate_noninteractively_before_endpoint_listing(self) -> None:
