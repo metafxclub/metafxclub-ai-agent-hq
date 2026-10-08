@@ -64,6 +64,12 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
             "integrations/mt4-trade-gateway/README_TH.md",
             "integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5",
             "integrations/mt5-trade-gateway/README_TH.md",
+            "artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/README_TH.md",
+            "artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/AUDIT_TH.md",
+            "artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/SHA256SUMS.txt",
+            "artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/BUILD_LOG.txt",
+            "artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/MANIFEST.json",
+            "artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/COMPILE_PROOF.png",
             "runner/codex_app_server_gateway.py",
             "runner/codex_cli_runner.py",
             "scripts/verify-full-agent-workspace-sentinel.py",
@@ -91,11 +97,17 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
         self.assertEqual(missing, [])
 
     def test_mt5_gateway_release_is_source_only(self) -> None:
-        gateway_root = PROJECT_ROOT / "integrations" / "mt5-trade-gateway"
+        gateway_roots = (
+            PROJECT_ROOT / "integrations" / "mt5-trade-gateway",
+            PROJECT_ROOT
+            / "artifacts"
+            / "mt5-trade-gateway-v1.03-visible-compile-readiness",
+        )
         binaries = sorted(
-            path.name
+            path.relative_to(PROJECT_ROOT).as_posix()
+            for gateway_root in gateway_roots
             for path in gateway_root.rglob("*")
-            if path.is_file() and path.suffix.lower() == ".ex5"
+            if path.is_file() and path.suffix.casefold() == ".ex5"
         )
         self.assertEqual(binaries, [])
 

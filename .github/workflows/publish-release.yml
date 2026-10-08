@@ -336,7 +336,13 @@ jobs:
               "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\SHA256SUMS.txt",
               "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\BUILD_LOG.txt",
               "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MANIFEST.json",
-              "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\COMPILE_PROOF.png"
+              "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\COMPILE_PROOF.png",
+              "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\README_TH.md",
+              "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\AUDIT_TH.md",
+              "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\SHA256SUMS.txt",
+              "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\BUILD_LOG.txt",
+              "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\MANIFEST.json",
+              "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\COMPILE_PROOF.png"
           )) {
             if (-not (Test-Path -LiteralPath (Join-Path $packageRoot $requiredFile) -PathType Leaf)) {
               throw "Release package is missing required file: $requiredFile"
@@ -596,7 +602,13 @@ jobs:
                 "runner\codex_app_server_gateway.py",
                 "scripts\verify-full-agent-workspace-sentinel.py",
                 "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4",
-                "integrations\mt5-trade-gateway\MetafxHQTradeGateway.mq5"
+                "integrations\mt5-trade-gateway\MetafxHQTradeGateway.mq5",
+                "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\README_TH.md",
+                "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\AUDIT_TH.md",
+                "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\SHA256SUMS.txt",
+                "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\BUILD_LOG.txt",
+                "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\MANIFEST.json",
+                "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\COMPILE_PROOF.png"
               )) {
                 if (-not (Test-Path -LiteralPath (Join-Path $installedRoot $requiredInstalledFile) -PathType Leaf)) {
                   throw "Installed Runtime is missing required file: $requiredInstalledFile"
@@ -816,7 +828,13 @@ jobs:
               "runner\codex_app_server_gateway.py",
               "scripts\verify-full-agent-workspace-sentinel.py",
               "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4",
-              "integrations\mt5-trade-gateway\MetafxHQTradeGateway.mq5"
+              "integrations\mt5-trade-gateway\MetafxHQTradeGateway.mq5",
+              "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\README_TH.md",
+              "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\AUDIT_TH.md",
+              "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\SHA256SUMS.txt",
+              "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\BUILD_LOG.txt",
+              "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\MANIFEST.json",
+              "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\COMPILE_PROOF.png"
             )) {
               if (-not (Test-Path -LiteralPath (Join-Path $verifiedInstalledRoot $verifiedRuntimeFile) -PathType Leaf)) {
                 throw "Verified Git Runtime is missing a release-critical file: $verifiedRuntimeFile"

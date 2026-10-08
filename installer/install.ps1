@@ -955,6 +955,12 @@ function Assert-SafeSource {
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\BUILD_LOG.txt",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MANIFEST.json",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\COMPILE_PROOF.png",
+        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\README_TH.md",
+        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\AUDIT_TH.md",
+        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\SHA256SUMS.txt",
+        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\BUILD_LOG.txt",
+        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\MANIFEST.json",
+        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\COMPILE_PROOF.png",
         "runner\codex_cli_runner.py",
         "runner\codex_app_server_gateway.py",
         "scripts\register-bridge-autostart.ps1",
@@ -1060,6 +1066,7 @@ function Assert-SafeSource {
     }
 
     Assert-EaArtifactIntegrity
+    Assert-Mt5CompileArtifactIntegrity
     Assert-NoEmbeddedHighConfidenceSecrets
 }
 
@@ -1184,6 +1191,123 @@ function Assert-EaArtifactIntegrity {
     }
 }
 
+function Assert-Mt5CompileArtifactIntegrity {
+    param([string]$CandidateRoot = $sourceRoot)
+
+    $artifactRelativePath = "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness"
+    $artifactDirectory = Join-Path $CandidateRoot $artifactRelativePath
+    $checksumPath = Join-Path $artifactDirectory "SHA256SUMS.txt"
+    $expectedHashes = @{}
+    foreach ($line in Get-Content -LiteralPath $checksumPath -Encoding UTF8) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+        if ($line -notmatch '^([A-Fa-f0-9]{64})\s+([^\\/]+)$') {
+            throw "Manifest SHA-256 ของหลักฐาน Compile MT5 มีรูปแบบไม่ถูกต้อง"
+        }
+        $fileName = [string]$Matches[2]
+        if ($expectedHashes.ContainsKey($fileName)) {
+            throw "Manifest SHA-256 ของหลักฐาน Compile MT5 มีรายการซ้ำ: $fileName"
+        }
+        $expectedHashes[$fileName] = $Matches[1].ToUpperInvariant()
+    }
+
+    $hashedArtifactFiles = @(
+        "AUDIT_TH.md",
+        "BUILD_LOG.txt",
+        "COMPILE_PROOF.png",
+        "MANIFEST.json",
+        "README_TH.md"
+    )
+    if ($expectedHashes.Count -ne $hashedArtifactFiles.Count) {
+        throw "Manifest SHA-256 ของหลักฐาน Compile MT5 ต้องครอบคลุมไฟล์ครบถ้วนและไม่มีรายการแทรก"
+    }
+    foreach ($fileName in $hashedArtifactFiles) {
+        if (-not $expectedHashes.ContainsKey($fileName)) {
+            throw "Manifest SHA-256 ของหลักฐาน Compile MT5 ไม่มีรายการ $fileName"
+        }
+        $artifactPath = Join-Path $artifactDirectory $fileName
+        $actualHash = Get-Sha256Hex -LiteralPath $artifactPath
+        if ($actualHash -cne [string]$expectedHashes[$fileName]) {
+            throw "หยุดติดตั้ง: SHA-256 ของหลักฐาน Compile MT5 $fileName ไม่ตรงกับ Manifest"
+        }
+    }
+
+    $unexpectedBinary = @(
+        Get-ChildItem -LiteralPath $artifactDirectory -Recurse -File -Filter "*.ex5" -ErrorAction SilentlyContinue
+        Get-ChildItem -LiteralPath (Join-Path $CandidateRoot "integrations\mt5-trade-gateway") -Recurse -File -Filter "*.ex5" -ErrorAction SilentlyContinue
+    )
+    if ($unexpectedBinary.Count -gt 0) {
+        throw "หยุดติดตั้ง: Release MT5 ต้องเป็น Source-only และห้ามบรรจุไฟล์ EX5"
+    }
+
+    $sourcePath = Join-Path $CandidateRoot "integrations\mt5-trade-gateway\MetafxHQTradeGateway.mq5"
+    $sourceHash = Get-Sha256Hex -LiteralPath $sourcePath
+    $sourceBytes = [long](Get-Item -LiteralPath $sourcePath).Length
+    $manifestPath = Join-Path $artifactDirectory "MANIFEST.json"
+    try {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    catch {
+        throw "หยุดติดตั้ง: MANIFEST.json ของหลักฐาน Compile MT5 ไม่ใช่ JSON ที่สมบูรณ์"
+    }
+
+    $proofPath = Join-Path $artifactDirectory "COMPILE_PROOF.png"
+    $proofBytes = [IO.File]::ReadAllBytes($proofPath)
+    $pngSignature = if ($proofBytes.Length -ge 8) {
+        (($proofBytes[0..7] | ForEach-Object { $_.ToString("X2") }) -join "")
+    } else {
+        ""
+    }
+    if (
+        [string]$manifest.schemaVersion -cne "metafx-hq-mt5-ea-compile-proof-v1" -or
+        [string]$manifest.packageVersion -cne "1.03" -or
+        [string]$manifest.candidateStatus -cne "compile_verified_source_only" -or
+        [string]$manifest.sourceFile -cne "integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5" -or
+        [string]$manifest.sourceSha256 -cne $sourceHash -or
+        [long]$manifest.sourceBytes -ne $sourceBytes -or
+        [string]$manifest.releasePolicy -cne "source_only" -or
+        $manifest.compiledBinaryIncluded -ne $false -or
+        $manifest.compiledBinaryEligibleForDistribution -ne $false -or
+        [string]$manifest.compileEvidence.status -cne "passed" -or
+        [string]$manifest.compileEvidence.mode -cne "visible_metaeditor64_exact_source" -or
+        [int]$manifest.compileEvidence.errors -ne 0 -or
+        [int]$manifest.compileEvidence.warnings -ne 0 -or
+        [string]$manifest.compileEvidence.compiledSourceSha256 -cne $sourceHash -or
+        $manifest.compileEvidence.currentSourceMatchesCompiledSource -ne $true -or
+        [string]$manifest.compileEvidence.screenshot -cne "COMPILE_PROOF.png" -or
+        [string]$manifest.compileEvidence.screenshotSha256 -cne [string]$expectedHashes["COMPILE_PROOF.png"] -or
+        $manifest.safety.eaAttachedToChart -ne $false -or
+        $manifest.safety.algoTradingChanged -ne $false -or
+        $manifest.safety.orderOrTradeCommandSent -ne $false -or
+        $manifest.safety.demoExecutionValidated -ne $false -or
+        $manifest.safety.liveExecutionValidated -ne $false -or
+        $pngSignature -cne "89504E470D0A1A0A"
+    ) {
+        throw "หยุดติดตั้ง: MANIFEST/Compile proof ของ MT5 v1.03 ไม่ตรงกับ Source หรือหลักฐานที่อนุมัติ"
+    }
+
+    $buildLog = Get-Content -LiteralPath (Join-Path $artifactDirectory "BUILD_LOG.txt") -Raw -Encoding UTF8
+    if (
+        $buildLog -notmatch '(?m)^PackageVersion:\s*1\.03\s*$' -or
+        $buildLog -notmatch '(?m)^CandidateStatus:\s*COMPILE_VERIFIED_SOURCE_ONLY\s*$' -or
+        $buildLog -notmatch '(?m)^CompileResult:\s*PASS\s*$' -or
+        $buildLog -notmatch '(?m)^CompileMode:\s*VISIBLE_METAEDITOR64_EXACT_SOURCE\s*$' -or
+        $buildLog -notmatch '(?m)^CompileErrors:\s*0\s*$' -or
+        $buildLog -notmatch '(?m)^CompileWarnings:\s*0\s*$' -or
+        $buildLog -notmatch ("(?m)^SourceSHA256:\s*{0}\s*$" -f [regex]::Escape($sourceHash)) -or
+        $buildLog -notmatch ("(?m)^CompileProofSHA256:\s*{0}\s*$" -f [regex]::Escape([string]$expectedHashes["COMPILE_PROOF.png"])) -or
+        $buildLog -notmatch '(?m)^ReleasePolicy:\s*SOURCE_ONLY\s*$' -or
+        $buildLog -notmatch '(?m)^CompiledBinaryIncluded:\s*false\s*$' -or
+        $buildLog -notmatch '(?m)^CompiledBinaryEligibleForDistribution:\s*false\s*$'
+    ) {
+        throw "หยุดติดตั้ง: หลักฐาน Compile MT5 ไม่ตรงกับ Source/Proof หรือ Source-only policy"
+    }
+    if ($buildLog -match '(?i)(?:[A-Z]:\\|/Users/|/home/)') {
+        throw "หยุดติดตั้ง: BUILD_LOG ของ MT5 มี Absolute local path"
+    }
+}
+
 function Assert-NoEmbeddedHighConfidenceSecrets {
     param([string]$CandidateRoot = $sourceRoot)
 
@@ -1249,7 +1373,12 @@ function Assert-NoEmbeddedHighConfidenceSecrets {
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\AUDIT_TH.md",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\BUILD_LOG.txt",
         "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\SHA256SUMS.txt",
-        "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MANIFEST.json"
+        "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness\MANIFEST.json",
+        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\README_TH.md",
+        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\AUDIT_TH.md",
+        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\BUILD_LOG.txt",
+        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\SHA256SUMS.txt",
+        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness\MANIFEST.json"
     )
     foreach ($relativePath in $additionalTextFiles) {
         $path = Join-Path $CandidateRoot $relativePath
@@ -1633,6 +1762,7 @@ function Copy-ApplicationFiles {
         Sync-Directory -DirectoryName $directoryName -DestinationRoot $DestinationRoot
     }
     Sync-Directory -DirectoryName "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness" -DestinationRoot $DestinationRoot
+    Sync-Directory -DirectoryName "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness" -DestinationRoot $DestinationRoot
 
     $rootFiles = @(
         "index.html", "Open Metafx Agent HQ.cmd", "README.md", $requirementsName,
@@ -1663,6 +1793,7 @@ function Export-VerifiedGitSource {
     $releasePaths = @(
         ".github", "backend", "contracts", "docs", "frontend", "installer", "integrations", "runner", "scripts", "tests",
         "artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness",
+        "artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness",
         "index.html", "Open Metafx Agent HQ.cmd", "README.md", $requirementsName,
         "1-INSTALL-HQ.bat", "UPDATE-HQ.bat", "REPAIR-HQ.bat", "UNINSTALL-HQ.bat", "2-SETUP-GOOGLE-HQ.bat",
         "AGENTS.md", ".gitattributes", ".gitignore", "SECURITY.md", "VERSION", "STUDENT-QUICKSTART-TH.md"
@@ -2063,6 +2194,7 @@ function New-StagedApplication {
             }
         }
         Assert-EaArtifactIntegrity -CandidateRoot $stagingRoot
+        Assert-Mt5CompileArtifactIntegrity -CandidateRoot $stagingRoot
         Assert-NoEmbeddedHighConfidenceSecrets -CandidateRoot $stagingRoot
         # The staged copy deliberately excludes runner/.venv and all user
         # state. Run only the dependency-free candidate preflight here. The
@@ -2107,13 +2239,17 @@ function Publish-StagedApplication {
             throw "Publish staged directory $directoryName ไม่สำเร็จ (Robocopy รหัส $LASTEXITCODE)"
         }
     }
-    $artifactDirectory = "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness"
-    $artifactSource = Join-Path $StagingRoot $artifactDirectory
-    $artifactDestination = Join-Path $installRoot $artifactDirectory
-    New-Item -ItemType Directory -Path $artifactDestination -Force | Out-Null
-    & robocopy.exe $artifactSource $artifactDestination /MIR /XJ /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-    if ($LASTEXITCODE -gt 7) {
-        throw "Publish staged EA artifact ไม่สำเร็จ (Robocopy รหัส $LASTEXITCODE)"
+    foreach ($artifactDirectory in @(
+        "artifacts\mt4-ai-council-ea-v2.18-enum-fail-closed-readiness",
+        "artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness"
+    )) {
+        $artifactSource = Join-Path $StagingRoot $artifactDirectory
+        $artifactDestination = Join-Path $installRoot $artifactDirectory
+        New-Item -ItemType Directory -Path $artifactDestination -Force | Out-Null
+        & robocopy.exe $artifactSource $artifactDestination /MIR /XJ /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($LASTEXITCODE -gt 7) {
+            throw "Publish staged EA artifact $artifactDirectory ไม่สำเร็จ (Robocopy รหัส $LASTEXITCODE)"
+        }
     }
     foreach ($file in Get-ChildItem -LiteralPath $StagingRoot -File) {
         Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $installRoot $file.Name) -Force

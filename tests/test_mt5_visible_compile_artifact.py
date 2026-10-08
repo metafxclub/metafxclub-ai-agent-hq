@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -99,6 +103,125 @@ class Mt5VisibleCompileArtifactTests(unittest.TestCase):
         self.assertIs(safety["eaAttachedToChart"], False)
         self.assertIs(safety["algoTradingChanged"], False)
         self.assertIs(safety["orderOrTradeCommandSent"], False)
+
+    def test_release_and_installer_preserve_the_complete_mt5_proof(self) -> None:
+        installer = (ROOT / "installer" / "install.ps1").read_text(
+            encoding="utf-8-sig"
+        )
+        workflow = (ROOT / ".github" / "workflows" / "publish-release.yml").read_text(
+            encoding="utf-8"
+        )
+        artifact_windows = (
+            r"artifacts\mt5-trade-gateway-v1.03-visible-compile-readiness"
+        )
+        expected_files = {
+            path.name for path in ARTIFACT_DIR.iterdir() if path.is_file()
+        }
+        self.assertEqual(
+            expected_files,
+            {
+                "AUDIT_TH.md",
+                "BUILD_LOG.txt",
+                "COMPILE_PROOF.png",
+                "MANIFEST.json",
+                "README_TH.md",
+                "SHA256SUMS.txt",
+            },
+        )
+        self.assertIn("Assert-Mt5CompileArtifactIntegrity", installer)
+        self.assertGreaterEqual(installer.count(artifact_windows), 4)
+        for filename in expected_files:
+            relative_path = f"{artifact_windows}\\{filename}"
+            with self.subTest(filename=filename):
+                self.assertIn(relative_path, installer)
+                self.assertIn(relative_path, workflow)
+
+        ignored = (ROOT / ".gitignore").read_text(encoding="utf-8-sig")
+        self.assertIn(
+            "!artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/",
+            ignored,
+        )
+        self.assertIn(
+            "!artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/**",
+            ignored,
+        )
+
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell installer gate")
+    def test_installer_rejects_a_tampered_mt5_compile_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_root = Path(directory)
+            staged_artifact = (
+                candidate_root
+                / "artifacts"
+                / "mt5-trade-gateway-v1.03-visible-compile-readiness"
+            )
+            staged_source = (
+                candidate_root
+                / "integrations"
+                / "mt5-trade-gateway"
+                / "MetafxHQTradeGateway.mq5"
+            )
+            shutil.copytree(ARTIFACT_DIR, staged_artifact)
+            staged_source.parent.mkdir(parents=True)
+            shutil.copy2(SOURCE_PATH, staged_source)
+            with (staged_artifact / "README_TH.md").open("ab") as handle:
+                handle.write(b"\ntampered\n")
+
+            installer_path = str(ROOT / "installer" / "install.ps1").replace(
+                "'", "''"
+            )
+            candidate_path = str(candidate_root).replace("'", "''")
+            script = rf"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    '{installer_path}',
+    [ref]$tokens,
+    [ref]$parseErrors
+)
+if ($parseErrors.Count -ne 0) {{ throw 'Installer parse failed' }}
+foreach ($name in @('Get-Sha256Hex', 'Assert-Mt5CompileArtifactIntegrity')) {{
+    $node = $ast.Find({{
+        param($candidate)
+        $candidate -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $candidate.Name -ceq $name
+    }}, $true)
+    if (-not $node) {{ throw "Function missing: $name" }}
+    Invoke-Expression $node.Extent.Text
+}}
+$rejected = $false
+try {{
+    Assert-Mt5CompileArtifactIntegrity -CandidateRoot '{candidate_path}'
+}}
+catch {{
+    if ($_.Exception.Message -notmatch 'SHA-256.*MT5') {{ throw }}
+    $rejected = $true
+}}
+if (-not $rejected) {{ throw 'Tampered MT5 proof was accepted' }}
+"""
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    script,
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stdout + completed.stderr,
+            )
 
 
 if __name__ == "__main__":

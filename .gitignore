@@ -65,6 +65,8 @@ artifacts/mt4-ai-council-ea-v2.16-stream-transition-hardening/*.log
 !artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/
 !artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/**
 artifacts/mt4-ai-council-ea-v2.18-enum-fail-closed-readiness/*.log
+!artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/
+!artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/**
 integrations/mt4-trade-gateway/*.ex4
 integrations/mt5-trade-gateway/*.ex5
 /tmp-expert-popup.png
