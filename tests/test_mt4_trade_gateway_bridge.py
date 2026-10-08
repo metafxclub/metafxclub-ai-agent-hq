@@ -1954,22 +1954,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
 
     def test_signal_drift_above_boundary_blocks_without_publish_or_retry(self) -> None:
         parent = self.parent()
-        intent = {
-            "channelId": self.candidate["candidateId"],
-            "streamKey": parent["analysisContext"]["closedBarIdentity"]["streamKey"],
-            "snapshotId": "a" * 64,
-            "snapshotObservedAt": int(time.time()),
-            "barTime": self.current_closed_bar_time,
-            "missionId": parent["id"],
-            "councilDecisionId": "council-test",
-            "ownerAgentId": "manager",
-            "action": "BUY",
-            "symbol": "XAUUSD",
-            "timeframe": "M5",
-            "referencePrice": 100.1,
-            "stopLoss": 95.0,
-            "takeProfit": 110.0,
-        }
+        intent = self.trade_intent(parent)
         fake_gateway = mock.Mock()
         with self.selected_candidate(bid=100.91, ask=101.11), mock.patch.object(
             self.bridge,
@@ -2072,22 +2057,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
 
     def test_quote_without_authoritative_point_is_blocked_before_gateway(self) -> None:
         parent = self.parent()
-        intent = {
-            "channelId": self.candidate["candidateId"],
-            "streamKey": parent["analysisContext"]["closedBarIdentity"]["streamKey"],
-            "snapshotId": "a" * 64,
-            "snapshotObservedAt": int(time.time()),
-            "barTime": self.current_closed_bar_time,
-            "missionId": parent["id"],
-            "councilDecisionId": "council-test",
-            "ownerAgentId": "manager",
-            "action": "BUY",
-            "symbol": "XAUUSD",
-            "timeframe": "M5",
-            "referencePrice": 100.1,
-            "stopLoss": 95.0,
-            "takeProfit": 110.0,
-        }
+        intent = self.trade_intent(parent)
         fake_gateway = mock.Mock()
         with self.selected_candidate(
             bid=100.0,
@@ -2370,22 +2340,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
     def test_selection_revision_race_blocks_before_gateway_queue(self) -> None:
         parent = self.parent()
         fake_gateway = mock.Mock()
-        intent = {
-            "channelId": self.candidate["candidateId"],
-            "streamKey": parent["analysisContext"]["closedBarIdentity"]["streamKey"],
-            "snapshotId": "a" * 64,
-            "snapshotObservedAt": int(time.time()),
-            "barTime": self.current_closed_bar_time,
-            "missionId": parent["id"],
-            "councilDecisionId": "council-test",
-            "ownerAgentId": "manager",
-            "action": "BUY",
-            "symbol": "XAUUSD",
-            "timeframe": "M5",
-            "referencePrice": 100.1,
-            "stopLoss": 95.0,
-            "takeProfit": 110.0,
-        }
+        intent = self.trade_intent(parent)
         with self.selected_candidate(), mock.patch.object(
             self.bridge,
             "_selected_metatrader_candidate_context",
