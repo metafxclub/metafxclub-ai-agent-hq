@@ -153,9 +153,23 @@ class GlobalMetatraderHubFrontendTests(unittest.TestCase):
         self.assertTrue(hub["backendAtomicFanOut"])
         self.assertTrue(hub["frontendFanOutForbidden"])
         self.assertTrue(hub["backendReadBackVerificationRequired"])
-        self.assertEqual(hub["interactiveSelectionSurface"], "central_header_only")
-        self.assertFalse(hub["deviceDashboardSelectionControlsAllowed"])
-        self.assertTrue(hub["deviceDashboardSelectionStatusReadOnly"])
+        self.assertEqual(hub["interactiveSelectionSurface"], "central_header_and_ai_trade_left_rail")
+        self.assertTrue(hub["deviceDashboardSelectionControlsAllowed"])
+        self.assertEqual(hub["deviceDashboardSelectionControlPropIds"], ["left_analytics_console"])
+        self.assertFalse(hub["deviceDashboardSelectionStatusReadOnly"])
+        self.assertTrue(hub["deviceDashboardSelectionUsesGlobalAtomicEndpoint"])
+        heartbeat = hub["platformHeartbeatProjection"]
+        self.assertEqual(heartbeat["states"], ["connected", "waiting", "error"])
+        self.assertTrue(heartbeat["connectedRequiresFreshValidatedEaHeartbeat"])
+        self.assertFalse(heartbeat["terminalDetectionAloneMayShowConnected"])
+        self.assertTrue(
+            heartbeat["connectionHealthIndependentFromBackendExecutionReadiness"]
+        )
+        self.assertTrue(heartbeat["oneResponseUsesSingleSelectionGeneration"])
+        self.assertTrue(heartbeat["bothPlatformsMayBeConnected"])
+        self.assertTrue(heartbeat["atMostOnePlatformAuthoritativeForDashboardAndCommands"])
+        self.assertTrue(heartbeat["exactlyOnePlatformAuthoritativeWhenGloballyConfigured"])
+        self.assertTrue(heartbeat["errorIncludesReasonAndRemediation"])
         self.assertTrue(hub["selectionDoesNotLaunchTerminal"])
         self.assertTrue(hub["selectionDoesNotEnableLiveTrading"])
         self.assertNotIn("terminal_workstation", json.dumps(hub["selectionFanOutByPlatform"]))
@@ -218,6 +232,56 @@ class GlobalMetatraderHubFrontendTests(unittest.TestCase):
         self.assertIsNone(payload["selectedCandidate"])
         self.assertFalse(payload["adapterReady"])
 
+    def test_selected_connection_health_expires_and_rejects_candidate_or_report_drift(self) -> None:
+        health_source = function_source(self.main, "signalSelectedPlatformConnectionHealth")
+        script = "\n".join([
+            "const AI_TRADE_COUNCIL_PROP_ID='left_analytics_console';",
+            "const AI_TRADE_HEARTBEAT_FRESH_SECONDS=20;",
+            "const OPEN_PROP_REPORT_POLL_TTL_MS=30000;",
+            "const candidateId='mtc-55555555555555555555555555555555';",
+            "const hubCandidate={candidateId,platform:'MT5'};",
+            "const state={globalMetatraderHub:{readModel:{selectedPlatform:'MT5',selectedCandidate:hubCandidate,platforms:{mt5:{selectedCandidate:hubCandidate,targets:[]}}}},propReportLoadState:{left_analytics_console:{status:'ready'}},propReportLoadedAt:{left_analytics_console:Date.now()}};",
+            "function safeDashboardDisplayText(value,fallback=''){return String(value ?? fallback);}",
+            "function signalCouncilModel(report={}){return report?.aiTradeCouncil&&typeof report.aiTradeCouncil==='object'?report.aiTradeCouncil:{};}",
+            health_source,
+            r'''const makeReport = ({reportedCandidateId=candidateId,ageSeconds=1,freshForSeconds=20}={}) => ({
+  connectionChecklist:{stale:false,metatraderSelection:{selectedCandidate:{candidateId,platform:'MT5'}}},
+  aiTradeCouncil:{
+    platformConnections:{
+      active:{platform:'MT5',candidateId},
+      items:[{platform:'MT5',candidateId:reportedCandidateId,selected:true,connectionState:'connected',reasonCode:'ready',observedAt:new Date(Date.now()-(ageSeconds*1000)).toISOString(),ageSeconds,freshForSeconds}],
+    },
+    tradeGateway:{connected:true,platform:'MT5',selectedCandidateId:candidateId,observedAt:new Date().toISOString(),ageSeconds:0},
+  },
+});
+const fresh=signalSelectedPlatformConnectionHealth(makeReport());
+const mismatch=signalSelectedPlatformConnectionHealth(makeReport({reportedCandidateId:'mtc-other'}));
+const stale=signalSelectedPlatformConnectionHealth(makeReport({ageSeconds:25}));
+state.propReportLoadState.left_analytics_console={status:'error'};
+const failed=signalSelectedPlatformConnectionHealth(makeReport());
+state.propReportLoadState.left_analytics_console={status:'ready'};
+state.propReportLoadedAt.left_analytics_console=Date.now()-31000;
+const expired=signalSelectedPlatformConnectionHealth(makeReport({freshForSeconds:60}));
+process.stdout.write(JSON.stringify({fresh,mismatch,stale,failed,expired}));''',
+        ])
+        payload = self.run_node(script)
+        self.assertTrue(payload["fresh"]["connected"])
+        self.assertEqual(payload["fresh"]["state"], "connected")
+        self.assertEqual(payload["fresh"]["source"], "platform_projection")
+        self.assertGreater(payload["fresh"]["expiresInSeconds"], 0)
+        self.assertFalse(payload["mismatch"]["connected"])
+        self.assertFalse(payload["mismatch"]["candidateMatches"])
+        self.assertEqual(payload["mismatch"]["reasonCode"], "selected_candidate_heartbeat_pending")
+        self.assertFalse(payload["stale"]["connected"])
+        self.assertTrue(payload["stale"]["heartbeatExpired"])
+        self.assertEqual(payload["stale"]["reasonCode"], "gateway_status_stale")
+        self.assertFalse(payload["failed"]["connected"])
+        self.assertTrue(payload["failed"]["reportLoadFailed"])
+        self.assertEqual(payload["failed"]["reasonCode"], "council_report_refresh_failed")
+        self.assertFalse(payload["expired"]["connected"])
+        self.assertTrue(payload["expired"]["reportLoadExpired"])
+        self.assertEqual(payload["expired"]["reasonCode"], "council_report_expired")
+
     def test_scan_is_read_only_and_uses_the_global_backend_endpoint(self) -> None:
         block = source_block(
             self.main,
@@ -260,57 +324,22 @@ class GlobalMetatraderHubFrontendTests(unittest.TestCase):
         self.assertIn("hub.requestId += 1;", scan)
         self.assertIn("hub.requestId += 1;", apply)
 
-    def test_device_cta_cannot_be_closed_by_the_same_bubbling_click(self) -> None:
-        opener = function_source(self.main, "openGlobalMetatraderHubFromDevice")
-        self.assertIn("event?.stopPropagation?.();", opener)
-        self.assertLess(
-            opener.index("event?.stopPropagation?.();"),
-            opener.index("setGlobalMetatraderPanelOpen(true)"),
-        )
-        self.assertLess(
-            opener.index("setGlobalMetatraderPanelOpen(true)"),
-            opener.index("closeGameModal()"),
-        )
-        self.assertIn("Google Sheet กำลังมีขั้นตอนที่ยังไม่จบ", opener)
-        listeners = source_block(
-            self.main,
-            'els.modalAiTradeOpenGlobal?.addEventListener("click"',
-            'els.modalKanbanSearch?.addEventListener("input"',
-        )
-        self.assertIn("openGlobalMetatraderHubFromDevice(event)", listeners)
-
-    def test_sheet_busy_block_keeps_device_modal_open_and_explains_the_next_step(self) -> None:
-        opener = function_source(self.main, "openGlobalMetatraderHubFromDevice")
-        script = "\n".join([
-            'const AI_TRADE_COUNCIL_PROP_ID = "left_analytics_console";',
-            "const state = {modal:{open:true,id:AI_TRADE_COUNCIL_PROP_ID}};",
-            "const status = {dataset:{},textContent:''};",
-            "const scan = {focus(){}};",
-            "const els = {modalAiTradeTerminalStatus:status,globalMetatraderScan:scan};",
-            "const window = {requestAnimationFrame(callback){callback();}};",
-            "let allowOpen = false; let closeCalls = 0; let prepareCalls = 0;",
-            "function setGlobalMetatraderPanelOpen(){return allowOpen;}",
-            "function closeGameModal(){closeCalls += 1; state.modal.open=false;}",
-            "function prepareGlobalMetatraderHubOnOpen(){prepareCalls += 1;}",
-            opener,
-            r'''const trigger={textContent:'เดิม',title:'',setAttribute(name,value){this[name]=value;}};
-const event={currentTarget:trigger,stopPropagation(){}};
-const blocked=openGlobalMetatraderHubFromDevice(event);
-const blockedSnapshot={blocked,modalOpen:state.modal.open,closeCalls,text:trigger.textContent,status:status.textContent};
-allowOpen=true;
-const opened=openGlobalMetatraderHubFromDevice(event);
-process.stdout.write(JSON.stringify({blockedSnapshot,opened,modalOpen:state.modal.open,closeCalls,prepareCalls}));''',
-        ])
-        payload = self.run_node(script)
-        self.assertFalse(payload["blockedSnapshot"]["blocked"])
-        self.assertTrue(payload["blockedSnapshot"]["modalOpen"])
-        self.assertEqual(payload["blockedSnapshot"]["closeCalls"], 0)
-        self.assertIn("Google Sheet", payload["blockedSnapshot"]["text"])
-        self.assertIn("Google Sheet", payload["blockedSnapshot"]["status"])
-        self.assertTrue(payload["opened"])
-        self.assertFalse(payload["modalOpen"])
-        self.assertEqual(payload["closeCalls"], 1)
-        self.assertEqual(payload["prepareCalls"], 1)
+    def test_ai_trade_left_rail_replaces_old_open_global_cta(self) -> None:
+        self.assertNotIn('id="modalAiTradeOpenGlobal"', self.index)
+        self.assertNotIn('els.modalAiTradeOpenGlobal?.addEventListener("click"', self.main)
+        for element_id in (
+            "modalAiTradeMt4StatusCard",
+            "modalAiTradeMt5StatusCard",
+            "modalAiTradePlatformChoice",
+            "modalAiTradePlatformMt4",
+            "modalAiTradePlatformMt5",
+            "modalAiTradeCandidateSelect",
+            "modalAiTradeApplySelection",
+            "modalAiTradeRefreshPlatforms",
+            "modalAiTradeSelectionStatus",
+        ):
+            self.assertIn(f'id="{element_id}"', self.index)
+        self.assertEqual(self.index.count('name="modalAiTradePlatform"'), 2)
 
     def test_manager_scan_intent_returns_to_central_hub_not_a_device_picker(self) -> None:
         submit = function_source(self.main, "submitManagerCommand")
@@ -710,7 +739,7 @@ process.stdout.write(JSON.stringify({blockedSnapshot,opened,modalOpen:state.moda
                 msg=f"{retired_device_action} must not own terminal discovery/selection anymore",
             )
 
-    def test_device_dashboard_markup_has_no_terminal_candidate_or_apply_controls(self) -> None:
+    def test_ai_trade_dashboard_has_one_shared_candidate_and_apply_control(self) -> None:
         for retired_element_id in (
             "modalAiTradeMt4QuickAction",
             "modalAiTradeMt4QuickCandidates",
@@ -718,24 +747,39 @@ process.stdout.write(JSON.stringify({blockedSnapshot,opened,modalOpen:state.moda
             "modalDashboardDiscoverMetatrader",
             "modalDashboardMetatraderCandidates",
             "modalDashboardConfirmMetatrader",
+            "modalAiTradeOpenGlobal",
         ):
             self.assertNotIn(f'id="{retired_element_id}"', self.index)
+        for shared_element_id in (
+            "modalAiTradeCandidateSelect",
+            "modalAiTradeApplySelection",
+            "modalAiTradeRefreshPlatforms",
+        ):
+            self.assertEqual(self.index.count(f'id="{shared_element_id}"'), 1)
+        self.assertNotIn('id="modalAiTradeMt4CandidateSelect"', self.index)
+        self.assertNotIn('id="modalAiTradeMt5CandidateSelect"', self.index)
+        self.assertNotIn('id="modalAiTradeMt4ApplySelection"', self.index)
+        self.assertNotIn('id="modalAiTradeMt5ApplySelection"', self.index)
 
-    def test_device_renderers_are_read_only_for_installed_terminal_selection(self) -> None:
+    def test_ai_trade_selector_reuses_atomic_global_selection_without_frontend_fanout(self) -> None:
         generic_selection = optional_function_source(self.main, "renderMetatraderSelection")
         ai_trade = function_source(self.main, "renderAiTradeTerminalSummary")
+        ai_trade_selector = function_source(self.main, "renderAiTradePlatformSelector")
         connection_panel = function_source(self.main, "renderDashboardConnectionPanel")
         factory = optional_function_source(self.main, "renderEaFactoryTerminalPicker")
         lab_source = function_source(self.main, "renderEaOptimizationLabSourceStage")
 
-        for block_name, block in (
-            ("generic dashboard terminal renderer", generic_selection),
-            ("AI Trade terminal renderer", ai_trade),
-        ):
+        for block_name, block in (("generic dashboard terminal renderer", generic_selection),):
             self.assertNotIn('input.type = "radio"', block, msg=block_name)
             self.assertNotIn("modalDashboardConfirmMetatrader", block, msg=block_name)
             self.assertNotIn("modalAiTradeMt4QuickConfirm", block, msg=block_name)
             self.assertNotIn("postJson(", block, msg=block_name)
+        self.assertIn("renderAiTradePlatformSelector", ai_trade)
+        self.assertIn("globalMetatraderCandidateRegistry", ai_trade_selector)
+        self.assertIn("modalAiTradeCandidateSelect", ai_trade_selector)
+        self.assertIn("modalAiTradeApplySelection", ai_trade_selector)
+        self.assertNotIn("postJson(", ai_trade)
+        self.assertNotIn("postJson(", ai_trade_selector)
         self.assertNotIn("modalDashboardDiscoverMetatrader", connection_panel)
 
         self.assertNotIn('document.createElement("select")', factory)
@@ -755,7 +799,7 @@ process.stdout.write(JSON.stringify({blockedSnapshot,opened,modalOpen:state.moda
         ):
             self.assertNotIn(forbidden, lab_source)
 
-    def test_device_modal_has_no_handlers_for_terminal_discovery_or_selection(self) -> None:
+    def test_ai_trade_modal_has_one_selector_apply_and_refresh_handler(self) -> None:
         listeners = source_block(
             self.main,
             'els.modalDashboardRefreshConnections?.addEventListener("click"',
@@ -770,8 +814,15 @@ process.stdout.write(JSON.stringify({blockedSnapshot,opened,modalOpen:state.moda
             "confirmAiTradeMt4QuickSelection",
             "discoverMetatraderConnections",
             "confirmMetatraderSelection",
+            "modalAiTradeOpenGlobal",
         ):
             self.assertNotIn(retired_handler, listeners)
+        self.assertEqual(listeners.count('els.modalAiTradePlatformChoice?.addEventListener("change"'), 1)
+        self.assertEqual(listeners.count('els.modalAiTradeApplySelection?.addEventListener("click"'), 1)
+        self.assertEqual(listeners.count('els.modalAiTradeRefreshPlatforms?.addEventListener("click"'), 1)
+        self.assertIn('input[name="modalAiTradePlatform"]', listeners)
+        self.assertIn("await applyGlobalMetatraderTarget(platform)", listeners)
+        self.assertIn("await scanGlobalMetatraderHub()", listeners)
 
     def test_opening_terminal_hub_never_discards_sheet_preview_or_overlaps_busy_sheet(self) -> None:
         panel = function_source(self.main, "setGlobalMetatraderPanelOpen")

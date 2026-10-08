@@ -1,0 +1,26 @@
+PackageVersion: 1.03
+CandidateStatus: COMPILE_VERIFIED_SOURCE_ONLY
+Source: integrations/mt5-trade-gateway/MetafxHQTradeGateway.mq5
+SourceSHA256: 42CB8A410DDE98E608307C12FC272513ED30F1E23F5B3267F7DCDF128A69175C
+SourceBytes: 241508
+CompileResult: PASS
+CompileMode: VISIBLE_METAEDITOR64_EXACT_SOURCE
+MetaEditorVersion: 5.0.0.6230
+CompileErrors: 0
+CompileWarnings: 0
+CompileElapsedMilliseconds: 9358
+CompileCpuTarget: AVX2+FMA3
+CompiledAtUTC: 2026-10-08T16:59:36.712Z
+CompiledSourceSHA256: 42CB8A410DDE98E608307C12FC272513ED30F1E23F5B3267F7DCDF128A69175C
+CurrentSourceMatchesCompiledSource: true
+LocalCompileBinaryBytes: 287818
+LocalCompileBinarySHA256: 8E221E7A860BDA9778AA4B57E21F9AC043D0084C43B2F1784C68043616F27FBA
+CompileProof: COMPILE_PROOF.png
+CompileProofSHA256: D13FE16FE8E60C35A8F32AA261D49F44E8B9716628B5F9ED3DF783CAE7E19332
+ReleasePolicy: SOURCE_ONLY
+CompiledBinaryIncluded: false
+CompiledBinaryEligibleForDistribution: false
+FocusedStaticAndContractTests: PASS (153 tests, 0 failures, 0 errors, 0 skipped)
+DemoExecutionValidated: false
+LiveExecutionValidated: false
+Safety: The selected MT5 Demo terminal remained open. No EA was attached to a chart, no Algo Trading setting was changed, and no order or trade command was sent.

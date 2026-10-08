@@ -244,7 +244,7 @@
     "left_analytics_console": {
       "functionName": "AI Trade Council",
       "displayTitle": "สภา AI Trade",
-      "purpose": "ศูนย์วิเคราะห์ระบบเทรดจากผู้เชี่ยวชาญ 3 บทบาทบน Snapshot และกรอบเวลาเดียวกัน จากนั้น Council Quality Gate, Risk Guard และ EA จะตรวจแผนตามลำดับก่อนส่งคำสั่ง โดย Price Action เป็น AI ผู้เสนอ SL/TP หลัก หาก Price Action เลือก HOLD แต่เสียงทิศทางผ่าน Backend จึงคำนวณแผนสำรองจาก ATR และโครงสร้างราคาใน Snapshot เดิมแบบตายตัว ส่วน Lot, โหมดบัญชี และการเปิด Live ถูกควบคุมที่ Inputs ของ EA เท่านั้น",
+      "purpose": "ศูนย์วิเคราะห์ระบบเทรดจากผู้เชี่ยวชาญ 3 บทบาทบน Snapshot และกรอบเวลาเดียวกัน ผู้ใช้เลือก MT4 หรือ MT5 ได้เพียงหนึ่งแพลตฟอร์มสำหรับ Dashboard และการส่งคำสั่ง อีกแพลตฟอร์มอาจเชื่อมอยู่แต่จะไม่ถูกนำมาวิเคราะห์หรือเทรดจนกว่าจะยืนยันการสลับผ่าน Backend จากนั้น Council Quality Gate, Risk Guard และ EA จะตรวจแผนตามลำดับก่อนส่งคำสั่ง โดย Price Action เป็น AI ผู้เสนอ SL/TP หลัก หาก Price Action เลือก HOLD แต่เสียงทิศทางผ่าน Backend จึงคำนวณแผนสำรองจาก ATR และโครงสร้างราคาใน Snapshot เดิมแบบตายตัว ส่วน Lot, โหมดบัญชี และการเปิด Live ถูกควบคุมที่ Inputs ของ EA เท่านั้น",
       "interactionMode": "dashboard",
       "connectionProfileId": "left_analytics_console",
       "departmentId": "ai_trade_research",

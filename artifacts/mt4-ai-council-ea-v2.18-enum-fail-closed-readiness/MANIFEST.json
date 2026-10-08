@@ -3,36 +3,41 @@
   "packageVersion": "2.19",
   "candidateStatus": "ready_visible_metaeditor_compiled",
   "sourceFile": "MetafxHQTradeGateway.mq4",
-  "sourceSha256": "5267C06FB193A23C9CE4CEF2E8C1D02CBB4599F1331DFE31BEBD463C9B277D62",
+  "sourceSha256": "CAEA0CB1627636FF3E532B9E2A893CB686CD1D43D4B04B5B48B0F5A48DECC2FD",
   "binaryFile": "MetafxHQTradeGateway.ex4",
-  "binarySha256": "AB880514CA8A435325D8322803A7551DB38AB2DD1FA6EE6764BB1D289F3C2DCC",
-  "binaryBytes": 452008,
+  "binarySha256": "66437C7F14167C4510F54E408F05927D1B8F05A0514E8D678062DB3292F6F4A4",
+  "binaryBytes": 456326,
   "ex4Included": true,
+  "binaryEligibleForInstall": true,
   "compileEvidence": {
     "status": "passed",
     "mode": "visible_metaeditor_front_office",
+    "compiledSourceSha256": "CAEA0CB1627636FF3E532B9E2A893CB686CD1D43D4B04B5B48B0F5A48DECC2FD",
+    "currentSourceMatchesCompiledSource": true,
     "compilerVersion": "5.0.0.2418",
     "errors": 0,
     "warnings": 0,
-    "elapsedMs": 114,
-    "compiledAtUtc": "2026-09-27T08:17:35Z",
+    "elapsedMs": 107,
+    "compiledAtUtc": "2026-10-08T07:54:58.093Z",
     "screenshot": "COMPILE_PROOF.png",
-    "screenshotSha256": "30AA0F3EA1DEE77C4CCF073D794203286AF90271AFBD7E799043437E9DBE8969",
+    "screenshotSha256": "F1E3A004177FE9FCC950D3FEF5C7AB02FD3397B69538EE24C0301A102114B1DB",
     "releaseCompile": {
-      "mode": "metaeditor_command_line_exact_source",
+      "status": "passed",
+      "mode": "visible_metaeditor_exact_source",
+      "compilerVersion": "5.0.0.2418",
       "errors": 0,
       "warnings": 0,
-      "elapsedMs": 120,
-      "compiledAtUtc": "2026-09-27T08:10:24Z",
-      "sourceSha256": "5267C06FB193A23C9CE4CEF2E8C1D02CBB4599F1331DFE31BEBD463C9B277D62",
-      "binarySha256": "AB880514CA8A435325D8322803A7551DB38AB2DD1FA6EE6764BB1D289F3C2DCC"
+      "elapsedMs": 107,
+      "compiledAtUtc": "2026-10-08T07:54:58.093Z",
+      "sourceSha256": "CAEA0CB1627636FF3E532B9E2A893CB686CD1D43D4B04B5B48B0F5A48DECC2FD",
+      "binarySha256": "66437C7F14167C4510F54E408F05927D1B8F05A0514E8D678062DB3292F6F4A4"
     }
   },
   "tests": [
     {
       "command": "python -m unittest tests.test_mt4_unified_ea",
       "result": "passed",
-      "count": 64
+      "count": 65
     }
   ]
 }

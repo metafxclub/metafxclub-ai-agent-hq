@@ -1,19 +1,14 @@
 # รายงานตรวจรับ MetafxHQTradeGateway v2.19
 
-วันที่ตรวจ: 27 กันยายน 2569
+วันที่ตรวจรับ: 8 ตุลาคม 2569
 
-- Source SHA-256: `5267C06FB193A23C9CE4CEF2E8C1D02CBB4599F1331DFE31BEBD463C9B277D62`
-- EX4 SHA-256: `AB880514CA8A435325D8322803A7551DB38AB2DD1FA6EE6764BB1D289F3C2DCC`
-- ยืนยัน Version ใน Source ทั้ง `#property version` และ `EA_VERSION` เป็น `2.19`
-- ยืนยัน Allowlist ของ Gateway Mode 3 ค่าและ Position Lifecycle Mode 4 ค่าแบบ explicit
-- ยืนยัน `OnInit()`, Execution Guard และ Runtime Guard ปฏิเสธ Enum ที่ไม่รู้จัก
-- ยืนยันตรวจซ้ำตรงขอบก่อน `OrderSend()` และ `OrderClose()`
-- ยืนยัน Position Lifecycle บังคับ Signing ทั้ง Demo และ Live และหยุดอัตโนมัติใน Shadow/Tester/Optimizer
-- ยืนยัน Position Lifecycle ใช้ Account-wide execution lock, ตรวจ Guard ซ้ำภายใต้ Lock และปล่อย Lock ทุกเส้นทางก่อนออกจากฟังก์ชัน
-- Static regression `tests.test_mt4_unified_ea` ผ่าน 64 tests
-- ภาพ `COMPILE_PROOF.png` แสดง Source v2.19 ที่มี SHA-256 ตรงกับ Artifact และผล `0 errors, 0 warnings, 114 msec elapsed`
-- คอมไพล์ Release EX4 ใหม่จาก Source ใน Artifact โดยตรงด้วย MetaEditor command line: `0 errors, 0 warnings, 120 msec elapsed`
-- ไม่ได้เปิดหรือเปลี่ยน MT4 Terminal, Inputs, Chart, บัญชี, Gateway Mode หรือ `LiveArmed`
-- ไม่มีการส่ง Order หรือคำสั่งซื้อขายระหว่างการ Compile
+- Source ปัจจุบันและ Source ที่ใช้ Compile เป็นไฟล์เดียวกันทุกไบต์ SHA-256: `CAEA0CB1627636FF3E532B9E2A893CB686CD1D43D4B04B5B48B0F5A48DECC2FD`
+- Compile ผ่าน MetaEditor 5.0.0.2418 แบบมองเห็นบนหน้าจอจริง ผล `0 errors, 0 warnings` ใช้เวลา 107 ms
+- EX4 สร้างใหม่จาก Source ข้างต้นในโฟลเดอร์ staging ของ Terminal ที่เลือก ขนาด 456326 bytes, SHA-256: `66437C7F14167C4510F54E408F05927D1B8F05A0514E8D678062DB3292F6F4A4`
+- ภาพหลักฐาน `COMPILE_PROOF.png` แสดงชื่อไฟล์ เวอร์ชัน 2.19 และผล Compile จริง SHA-256: `F1E3A004177FE9FCC950D3FEF5C7AB02FD3397B69538EE24C0301A102114B1DB`
+- ตรวจ Source hash ซ้ำหลัง Compile แล้วไม่เปลี่ยน และไม่ได้กด Save ใน MetaEditor
+- Static regression `python -m unittest tests.test_mt4_unified_ea` ผ่าน 65 tests กับ Source ปัจจุบัน
+- ระหว่างตรวจรับ Terminal ยังคงเปิดอยู่ ไม่มีการติด EA ลงกราฟ เปลี่ยน Inputs/บัญชี/Gateway Mode/`LiveArmed` หรือส่ง Order/คำสั่งซื้อขาย
+- หลักฐานนี้ยืนยันความพร้อมระดับ Source และ Compile เท่านั้น ไม่ใช่การรับรองผลกำไรหรือยืนยันว่า Broker/บัญชีจริงทุกประเภทจะรับคำสั่ง ต้องผ่าน Shadow และ Demo ของ Broker เป้าหมายก่อน Live
 
 สถานะ: `READY_VISIBLE_METAEDITOR_COMPILED`

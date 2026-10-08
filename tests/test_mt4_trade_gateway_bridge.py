@@ -191,6 +191,20 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         path.write_text(json.dumps(payload), encoding="ascii")
         return payload
 
+    @staticmethod
+    def confirmed_live_policy_status() -> dict:
+        """Current EA-owned Live commission/symbol policy evidence."""
+        return {
+            "positionSizingMode": "RISK_PERCENT",
+            "riskPercent": 1.0,
+            "riskCapitalBase": "EQUITY",
+            "estimatedCommissionPerLot": 7.0,
+            "commissionFreeAccountConfirmed": False,
+            "brokerVolumeMin": 0.01,
+            "brokerVolumeMax": 100.0,
+            "brokerVolumeStep": 0.01,
+        }
+
     def write_ea_init_status(self, **overrides) -> dict:
         payload = {
             "schemaVersion": "metafx-hq-mt4-init-status-v1",
@@ -443,6 +457,25 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.assertFalse(status["demoOrderExecutionAvailable"])
         self.assertFalse(status["liveOrderExecutionAvailable"])
 
+    def test_fresh_ea_heartbeat_remains_visible_when_backend_ledger_is_unavailable(self) -> None:
+        self.write_ea_status(executionGuardReady=True, executionGuardReason="READY")
+        with self.selected_candidate(), mock.patch.object(
+            self.bridge,
+            "_mt4_trade_gateway_instance",
+            side_effect=OSError("ledger unavailable"),
+        ):
+            status = self.bridge.mt4_trade_gateway_status_read_model()
+
+        self.assertFalse(status["connected"])
+        self.assertEqual(status["status"], "backend_blocked")
+        self.assertEqual(status["reasonCode"], "gateway_backend_unavailable")
+        self.assertTrue(status["eaHeartbeat"]["connected"])
+        self.assertEqual(status["eaHeartbeat"]["reasonCode"], "ready")
+        self.assertEqual(status["eaHeartbeat"]["mode"], "shadow")
+        self.assertTrue(status["eaHeartbeat"]["executionGuardReady"])
+        self.assertFalse(status["demoOrderExecutionAvailable"])
+        self.assertFalse(status["liveOrderExecutionAvailable"])
+
     def test_mt4_status_example_documents_complete_money_management_telemetry(self) -> None:
         example = json.loads(
             (
@@ -457,6 +490,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.assertEqual(fields, set(self.bridge.MT4_TRADE_GATEWAY_STATUS_FIELDS))
         self.assertEqual(example["positionSizingMode"], "FIXED_LOT")
         self.assertEqual(example["riskCapitalBase"], "EQUITY")
+        self.assertIs(example["commissionFreeAccountConfirmed"], False)
         self.assertGreater(example["brokerVolumeStep"], 0)
 
     def test_gateway_status_reads_complete_risk_percent_policy_as_read_only_state(self) -> None:
@@ -466,6 +500,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             riskPercent=1.25,
             riskCapitalBase="EQUITY",
             estimatedCommissionPerLot=7.0,
+            commissionFreeAccountConfirmed=False,
             brokerVolumeMin=0.001,
             brokerVolumeMax=100.0,
             brokerVolumeStep=0.001,
@@ -479,6 +514,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.assertEqual(status["riskPercent"], 1.25)
         self.assertEqual(status["riskCapitalBase"], "EQUITY")
         self.assertEqual(status["estimatedCommissionPerLot"], 7.0)
+        self.assertIs(status["commissionFreeAccountConfirmed"], False)
         self.assertEqual(status["brokerVolumeMin"], 0.001)
         self.assertEqual(status["brokerVolumeMax"], 100.0)
         self.assertEqual(status["brokerVolumeStep"], 0.001)
@@ -1163,6 +1199,8 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             ("RISK_CAPITAL_UNAVAILABLE", "Balance/Equity"),
             ("BROKER_RISK_METADATA_INVALID", "Tick Size/Tick Value"),
             ("BROKER_RISK_METADATA_UNAVAILABLE", "Tick Size/Tick Value"),
+            ("LIVE_COMMISSION_POLICY_UNCONFIRMED", "ค่าคอมมิชชัน"),
+            ("LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST", "AllowedSymbols"),
         )
         for reason_code, expected in cases:
             with self.subTest(reason_code=reason_code):
@@ -1320,6 +1358,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
 
     def test_live_status_is_ready_only_when_backend_and_ea_signing_keys_match(self) -> None:
         self.write_ea_status(
+            **self.confirmed_live_policy_status(),
             mode="live",
             demoAccount=False,
             accountMode="live",
@@ -1342,10 +1381,146 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             r"^hk-[0-9a-f]{64}$",
         )
 
+    def test_pre_commission_policy_live_status_is_compatible_only_with_positive_reserve(self) -> None:
+        cases = (
+            ("positive reserve remains compatible", 7.0, "live_ready", "ready"),
+            (
+                "zero reserve without the new attestation fails closed",
+                0.0,
+                "execution_guard_blocked",
+                "live_commission_policy_unconfirmed",
+            ),
+        )
+        for label, commission, expected_status, expected_reason in cases:
+            with self.subTest(label=label):
+                policy_status = {
+                    **self.confirmed_live_policy_status(),
+                    "estimatedCommissionPerLot": commission,
+                }
+                payload = self.write_ea_status(
+                    **policy_status,
+                    mode="live",
+                    demoAccount=False,
+                    accountMode="live",
+                    liveArmed=True,
+                    autoTradingAllowed=True,
+                    tradeAllowed=True,
+                )
+                payload.pop("commissionFreeAccountConfirmed")
+                self.status_path().write_text(
+                    json.dumps(payload),
+                    encoding="ascii",
+                )
+
+                parsed, parse_reason = self.bridge._read_mt4_trade_gateway_ea_status(
+                    self.candidate
+                )
+                self.assertEqual(parse_reason, "ready")
+                self.assertIsNotNone(parsed)
+                self.assertIsNone(parsed["commissionFreeAccountConfirmed"])
+                with self.selected_candidate():
+                    status = self.bridge.mt4_trade_gateway_status_read_model()
+
+                self.assertTrue(status["connected"])
+                self.assertEqual(status["status"], expected_status)
+                self.assertEqual(status["reasonCode"], expected_reason)
+                self.assertIs(
+                    status["liveOrderExecutionAvailable"],
+                    expected_status == "live_ready",
+                )
+
+    def test_live_commission_policy_accepts_only_positive_reserve_or_explicit_free_account(self) -> None:
+        cases = (
+            ("positive reserve", 7.0, False, True),
+            ("explicit commission-free account", 0.0, True, True),
+            ("unconfirmed zero", 0.0, False, False),
+            ("sub-precision reserve", 0.000000001, False, False),
+        )
+        for label, commission, commission_free, expected_ready in cases:
+            with self.subTest(label=label):
+                policy_status = {
+                    **self.confirmed_live_policy_status(),
+                    "estimatedCommissionPerLot": commission,
+                    "commissionFreeAccountConfirmed": commission_free,
+                }
+                self.write_ea_status(
+                    **policy_status,
+                    mode="live",
+                    demoAccount=False,
+                    accountMode="live",
+                    liveArmed=True,
+                    autoTradingAllowed=True,
+                    tradeAllowed=True,
+                )
+                with self.selected_candidate():
+                    status = self.bridge.mt4_trade_gateway_status_read_model()
+
+                self.assertTrue(status["connected"])
+                self.assertIs(status["liveOrderExecutionAvailable"], expected_ready)
+                if expected_ready:
+                    self.assertEqual(status["status"], "live_ready")
+                    self.assertEqual(status["reasonCode"], "ready")
+                else:
+                    self.assertEqual(status["status"], "execution_guard_blocked")
+                    self.assertEqual(
+                        status["executionGuardReason"],
+                        "LIVE_COMMISSION_POLICY_UNCONFIRMED",
+                    )
+                    self.assertEqual(
+                        status["reasonCode"],
+                        "live_commission_policy_unconfirmed",
+                    )
+
+    def test_live_symbol_policy_requires_exact_attached_broker_token(self) -> None:
+        cases = (
+            (
+                "canonical base alone cannot authorize a broker-affixed live chart",
+                "XAUUSD",
+                False,
+            ),
+            (
+                "exact broker token authorizes the attached live chart",
+                "XAUUSD,MXAUUSD.PRO",
+                True,
+            ),
+        )
+        for label, allowed_symbols, expected_ready in cases:
+            with self.subTest(label=label):
+                self.write_ea_status(
+                    **self.confirmed_live_policy_status(),
+                    symbol="mXAUUSD.pro",
+                    allowedSymbols=allowed_symbols,
+                    mode="live",
+                    demoAccount=False,
+                    accountMode="live",
+                    liveArmed=True,
+                    autoTradingAllowed=True,
+                    tradeAllowed=True,
+                )
+                with self.selected_candidate():
+                    status = self.bridge.mt4_trade_gateway_status_read_model()
+
+                self.assertTrue(status["connected"])
+                self.assertIs(status["liveOrderExecutionAvailable"], expected_ready)
+                if expected_ready:
+                    self.assertEqual(status["status"], "live_ready")
+                    self.assertEqual(status["reasonCode"], "ready")
+                else:
+                    self.assertEqual(status["status"], "execution_guard_blocked")
+                    self.assertEqual(
+                        status["executionGuardReason"],
+                        "LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST",
+                    )
+                    self.assertEqual(
+                        status["reasonCode"],
+                        "live_symbol_requires_exact_allowlist",
+                    )
+
     def test_mt5_live_status_is_ready_with_explicit_single_host_acknowledgement(self) -> None:
         self.candidate["platform"] = "mt5"
         account_binding_id = "b" * 64
         self.write_ea_status(
+            **self.confirmed_live_policy_status(),
             mode="live",
             demoAccount=False,
             accountMode="live",
@@ -1384,6 +1559,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         self.candidate["platform"] = "mt5"
         account_binding_id = "b" * 64
         self.write_ea_status(
+            **self.confirmed_live_policy_status(),
             mode="live",
             demoAccount=False,
             accountMode="live",
@@ -1442,6 +1618,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         for overrides, expected_reason in cases:
             with self.subTest(expected_reason=expected_reason):
                 self.write_ea_status(
+                    **self.confirmed_live_policy_status(),
                     mode="live",
                     demoAccount=False,
                     accountMode="live",

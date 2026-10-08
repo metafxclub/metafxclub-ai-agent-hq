@@ -134,6 +134,8 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
             "PROJECTED_MARGIN_LEVEL_TOO_LOW",
             "ORDER_SEND_INVALID_VOLUME_NO_RETRY",
             "MIN_REWARD_RISK_NOT_MET",
+            "LIVE_COMMISSION_POLICY_UNCONFIRMED",
+            "LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST",
         ):
             with self.subTest(code=code):
                 self.assertIn(f"{code}:", reason)
@@ -262,8 +264,14 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         decision = function_block(self.main, "function renderSignalDecisionPanel(report = {})")
         headline = function_block(self.main, "function signalTradeGatewayHeadlineLabel(")
 
-        self.assertIn("&& (gatewayMode === \"shadow\" || gateway.executionGuardReady === true)", runtime)
-        self.assertIn("gateway.executionGuardReady === true", runtime)
+        self.assertIn(
+            "const gatewayExecutionGuardReady = gatewayConnected && gateway.executionGuardReady === true",
+            runtime,
+        )
+        self.assertIn(
+            '&& (gatewayMode === "shadow" || gatewayExecutionGuardReady)',
+            runtime,
+        )
         self.assertNotIn('gatewayConnected ? "ready" : "not_connected"', runtime)
         self.assertIn("signalExecutionGuardSummary(runtime)", daily)
         self.assertIn('"สิทธิ์ส่ง Order"', market_strip)
@@ -546,8 +554,15 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
 
     def test_terminal_runtime_uses_connected_gateway_as_authoritative_truth(self) -> None:
         runtime = function_block(self.main, "function getSignalRuntimeTruth(report = {})")
-        self.assertIn("gatewaySelectedCandidateId || checklistSelectedCandidateId", runtime)
-        self.assertIn("selectedCandidateId: gatewaySelectedCandidateId || checklistSelectedCandidateId", runtime)
+        self.assertIn(
+            "const selectedConnectionHealth = signalSelectedPlatformConnectionHealth(report)",
+            runtime,
+        )
+        self.assertIn(
+            "const gatewayConnected = gatewayReportedConnected && selectedConnectionHealth.connected === true",
+            runtime,
+        )
+        self.assertIn("selectedCandidateId: selectedConnectionHealth.candidateId", runtime)
         self.assertNotIn("function renderMetatraderSelection(", self.main)
         central = function_block(self.main, "function renderGlobalMetatraderHubControl()")
         self.assertIn("Snapshot พร้อม (อ่านอย่างเดียว)", central)

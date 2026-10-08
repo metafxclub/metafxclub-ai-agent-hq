@@ -1004,6 +1004,7 @@
             "riskPercent": null,
             "riskCapitalBase": null,
             "estimatedCommissionPerLot": null,
+            "commissionFreeAccountConfirmed": null,
             "brokerVolumeMin": null,
             "brokerVolumeMax": null,
             "brokerVolumeStep": null,

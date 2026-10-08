@@ -502,27 +502,66 @@
               <section class="ai-trade-terminal-summary" id="modalAiTradeTerminalSummary" aria-labelledby="modalAiTradeTerminalHeading" hidden>
                 <div class="ai-trade-terminal-summary-heading">
                   <div>
-                    <span>TERMINAL กลาง • อ่านอย่างเดียว</span>
-                    <strong id="modalAiTradeTerminalHeading">สถานะแหล่งข้อมูลของสภา AI Trade</strong>
+                    <span>EA HEARTBEAT • เลือกใช้ทีละหนึ่งแพลตฟอร์ม</span>
+                    <strong id="modalAiTradeTerminalHeading">สถานะ MT4 / MT5 ของสภา AI Trade</strong>
                   </div>
                   <span class="connection-badge" id="modalAiTradeTerminalBadge" data-status="not_connected">ยังไม่พร้อม</span>
                 </div>
-                <dl class="ai-trade-terminal-summary-grid">
-                  <div>
-                    <dt>Platform ที่ใช้งาน</dt>
-                    <dd id="modalAiTradeActivePlatform">ยังไม่ได้เลือก</dd>
+                <div class="ai-trade-platform-status-grid" id="modalAiTradePlatformStatuses">
+                  <article class="ai-trade-platform-card" id="modalAiTradeMt4StatusCard" data-platform="MT4" data-state="waiting" data-selected="false">
+                    <header>
+                      <div>
+                        <strong>MT4</strong>
+                        <span class="ai-trade-selected-badge" id="modalAiTradeMt4SelectedBadge" hidden>กำลังเลือกใช้งาน</span>
+                      </div>
+                      <span class="ai-trade-platform-health" id="modalAiTradeMt4Health" data-state="waiting">รอเชื่อม</span>
+                    </header>
+                    <p id="modalAiTradeMt4Summary">กำลังตรวจ heartbeat จาก EA</p>
+                    <small id="modalAiTradeMt4Reason">รอข้อมูลจาก Local Runner</small>
+                    <details class="ai-trade-platform-fix" id="modalAiTradeMt4Fix" hidden>
+                      <summary>วิธีแก้</summary>
+                      <p id="modalAiTradeMt4FixText"></p>
+                    </details>
+                  </article>
+                  <article class="ai-trade-platform-card" id="modalAiTradeMt5StatusCard" data-platform="MT5" data-state="waiting" data-selected="false">
+                    <header>
+                      <div>
+                        <strong>MT5</strong>
+                        <span class="ai-trade-selected-badge" id="modalAiTradeMt5SelectedBadge" hidden>กำลังเลือกใช้งาน</span>
+                      </div>
+                      <span class="ai-trade-platform-health" id="modalAiTradeMt5Health" data-state="waiting">รอเชื่อม</span>
+                    </header>
+                    <p id="modalAiTradeMt5Summary">กำลังตรวจ heartbeat จาก EA</p>
+                    <small id="modalAiTradeMt5Reason">รอข้อมูลจาก Local Runner</small>
+                    <details class="ai-trade-platform-fix" id="modalAiTradeMt5Fix" hidden>
+                      <summary>วิธีแก้</summary>
+                      <p id="modalAiTradeMt5FixText"></p>
+                    </details>
+                  </article>
+                </div>
+                <fieldset class="ai-trade-platform-selector" id="modalAiTradePlatformChoice">
+                  <legend>เลือก Dashboard ที่จะรับข้อมูลและเทรด</legend>
+                  <div class="ai-trade-platform-radio-row">
+                    <label for="modalAiTradePlatformMt4">
+                      <input id="modalAiTradePlatformMt4" type="radio" name="modalAiTradePlatform" value="MT4">
+                      <span>ใช้ MT4</span>
+                    </label>
+                    <label for="modalAiTradePlatformMt5">
+                      <input id="modalAiTradePlatformMt5" type="radio" name="modalAiTradePlatform" value="MT5">
+                      <span>ใช้ MT5</span>
+                    </label>
                   </div>
-                  <div>
-                    <dt>Terminal กลาง</dt>
-                    <dd id="modalAiTradeActiveTerminal">ยังไม่ได้เลือก</dd>
+                  <label class="ai-trade-candidate-field" for="modalAiTradeCandidateSelect">
+                    <span>Terminal ที่จะใช้</span>
+                    <select id="modalAiTradeCandidateSelect" aria-label="เลือก Terminal สำหรับแพลตฟอร์มที่กำลังเลือก"></select>
+                  </label>
+                  <div class="ai-trade-selector-actions">
+                    <button class="modal-action primary" id="modalAiTradeApplySelection" type="button">ยืนยันแพลตฟอร์มที่เลือก</button>
+                    <button class="modal-action" id="modalAiTradeRefreshPlatforms" type="button">ตรวจสถานะใหม่</button>
                   </div>
-                  <div>
-                    <dt>ความสดของข้อมูล</dt>
-                    <dd id="modalAiTradeFeedFreshness">ยังไม่มี Snapshot</dd>
-                  </div>
-                </dl>
-                <button class="modal-action primary" id="modalAiTradeOpenGlobal" type="button">เปลี่ยน MT4 / MT5 ที่แถบกลาง</button>
-                <p class="ai-trade-terminal-status" id="modalAiTradeTerminalStatus" role="status" aria-live="polite">อุปกรณ์นี้อ่าน Terminal ที่ยืนยันจากแถบกลางเท่านั้น</p>
+                  <p id="modalAiTradeSelectionStatus" role="status" aria-live="polite">เลือกได้ทีละหนึ่งแพลตฟอร์มเท่านั้น</p>
+                </fieldset>
+                <p class="ai-trade-terminal-status" id="modalAiTradeTerminalStatus" role="status" aria-live="polite">ระบบจะอ่านข้อมูลและส่งคำสั่งผ่านแพลตฟอร์มที่ Backend ยืนยันเพียงหนึ่งรายการ</p>
               </section>
               <details class="dashboard-connection-details" id="modalDashboardConnectionDetails">
                 <summary>รายละเอียดสถานะระบบ</summary>

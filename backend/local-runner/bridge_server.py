@@ -138,7 +138,7 @@ from radar_image_adapter import (  # noqa: E402 - public HTTPS publisher-image e
     verify_radar_entry_artifact,
 )
 
-BRIDGE_RUNTIME_VERSION = "0.9.21"
+BRIDGE_RUNTIME_VERSION = "0.9.22"
 SERVER_STARTED_AT = datetime.now(timezone.utc).isoformat()
 SERVER_STARTED_MONOTONIC = time.monotonic()
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
@@ -754,6 +754,7 @@ MT4_TRADE_GATEWAY_SIZING_STATUS_FIELDS = frozenset({
     "riskPercent",
     "riskCapitalBase",
     "estimatedCommissionPerLot",
+    "commissionFreeAccountConfirmed",
     "brokerVolumeMin",
     "brokerVolumeMax",
     "brokerVolumeStep",
@@ -761,6 +762,9 @@ MT4_TRADE_GATEWAY_SIZING_STATUS_FIELDS = frozenset({
 MT4_TRADE_GATEWAY_STATUS_FIELDS = (
     MT4_TRADE_GATEWAY_V5_LEGACY_STATUS_FIELDS
     | MT4_TRADE_GATEWAY_SIZING_STATUS_FIELDS
+)
+MT4_TRADE_GATEWAY_PRE_COMMISSION_POLICY_STATUS_FIELDS = (
+    MT4_TRADE_GATEWAY_STATUS_FIELDS - {"commissionFreeAccountConfirmed"}
 )
 MT5_TRADE_GATEWAY_PLATFORM_STATUS_FIELDS = frozenset({
     "terminalPlatform",
@@ -775,6 +779,9 @@ MT5_TRADE_GATEWAY_LEGACY_STATUS_FIELDS = (
 MT5_TRADE_GATEWAY_STATUS_FIELDS = (
     MT4_TRADE_GATEWAY_STATUS_FIELDS
     | MT5_TRADE_GATEWAY_PLATFORM_STATUS_FIELDS
+)
+MT5_TRADE_GATEWAY_PRE_COMMISSION_POLICY_STATUS_FIELDS = (
+    MT5_TRADE_GATEWAY_STATUS_FIELDS - {"commissionFreeAccountConfirmed"}
 )
 MT4_TRADE_GATEWAY_LEGACY_STATUS_FIELDS = (
     MT4_TRADE_GATEWAY_V4_STATUS_FIELDS - {"demoAccount", "accountMode"}
@@ -50096,6 +50103,415 @@ def _ai_trade_council_consensus_stream_identity(
     }
 
 
+def _ai_trade_council_platform_connections_read_model(
+    connection_checklist: dict,
+    *,
+    selected_gateway_snapshot: dict | None = None,
+    global_metatrader_snapshot: dict | None = None,
+) -> dict:
+    """Project both EA heartbeat channels without changing the active target.
+
+    Terminal discovery and EA connectivity are deliberately different facts.
+    A platform is green only when its candidate-specific Gateway status passes
+    the strict wire validator and is fresh.  Reading the inactive platform is
+    side-effect free: this helper must never call the selected-only Gateway
+    read model because that model also reconciles durable command state.
+    """
+
+    selection = (
+        connection_checklist.get("metatraderSelection")
+        if isinstance(connection_checklist.get("metatraderSelection"), dict)
+        else {}
+    )
+    global_authority_supplied = isinstance(global_metatrader_snapshot, dict)
+    if global_authority_supplied:
+        global_selected_candidate = global_metatrader_snapshot.get("selectedCandidate")
+        global_selected_platform = str(
+            global_metatrader_snapshot.get("selectedPlatform") or ""
+        ).lower()
+        selected_candidate = (
+            global_selected_candidate
+            if (
+                isinstance(global_selected_candidate, dict)
+                and global_selected_platform in {"mt4", "mt5"}
+                and str(global_selected_candidate.get("platform") or "").lower()
+                == global_selected_platform
+            )
+            else None
+        )
+        raw_candidates = global_metatrader_snapshot.get("candidates") or []
+    else:
+        selected_candidate = (
+            selection.get("selectedCandidate")
+            if isinstance(selection.get("selectedCandidate"), dict)
+            else None
+        )
+        raw_candidates = selection.get("candidates") or []
+    selected_candidate_id = safe_reference((selected_candidate or {}).get("candidateId"))
+    selected_platform = str((selected_candidate or {}).get("platform") or "").lower()
+    if selected_platform not in {"mt4", "mt5"}:
+        selected_platform = ""
+
+    candidates: list[dict] = []
+    seen_candidate_ids: set[str] = set()
+    for raw_candidate in raw_candidates:
+        if not isinstance(raw_candidate, dict):
+            continue
+        candidate_id = safe_reference(raw_candidate.get("candidateId"))
+        platform = str(raw_candidate.get("platform") or "").lower()
+        if (
+            not candidate_id
+            or not candidate_id.startswith("mtc-")
+            or candidate_id in seen_candidate_ids
+            or platform not in {"mt4", "mt5"}
+        ):
+            continue
+        running_state = str(raw_candidate.get("runningState") or "unknown")
+        if running_state not in {
+            "unknown",
+            "platform_running_detected",
+            "not_running_detected",
+        }:
+            running_state = "unknown"
+        candidates.append({
+            "candidateId": candidate_id,
+            "platform": platform,
+            "runningState": running_state,
+        })
+        seen_candidate_ids.add(candidate_id)
+
+    if selected_candidate_id and selected_platform and selected_candidate_id not in seen_candidate_ids:
+        selected_running_state = str(
+            (selected_candidate or {}).get("runningState") or "unknown"
+        )
+        if selected_running_state not in {
+            "unknown",
+            "platform_running_detected",
+            "not_running_detected",
+        }:
+            selected_running_state = "unknown"
+        candidates.append({
+            "candidateId": selected_candidate_id,
+            "platform": selected_platform,
+            "runningState": selected_running_state,
+        })
+
+    def waiting_copy(platform_label: str, reason_code: str) -> tuple[str, str]:
+        if reason_code == "terminal_not_detected":
+            return (
+                f"ยังไม่พบ {platform_label} ในเครื่องนี้",
+                f"เปิดหรือติดตั้ง {platform_label} แล้วกดตรวจสถานะใหม่",
+            )
+        if reason_code == "terminal_candidate_ambiguous":
+            return (
+                f"พบ {platform_label} มากกว่าหนึ่งชุดและยังไม่ได้เลือกเป้าหมาย",
+                f"เปิด {platform_label} ที่ต้องการเพียงหนึ่งชุด แล้วเลือกเป็น Dashboard ที่ใช้งาน",
+            )
+        if reason_code == "gateway_status_stale":
+            return (
+                f"เคยได้รับ heartbeat จาก EA {platform_label} แต่ข้อมูลล่าสุดหมดอายุแล้ว",
+                "ตรวจว่า Terminal เปิดอยู่, EA ยังอยู่บนกราฟ, AutoTrading/Algo Trading เปิด และ Channel ID ตรงกัน",
+            )
+        return (
+            f"พบ {platform_label} แล้ว แต่ยังไม่ได้รับ heartbeat จาก EA",
+            "ติดตั้งหรือลาก MetafxHQTradeGateway ลงกราฟ ใส่ Channel ID ให้ตรง แล้วกดตรวจสถานะใหม่",
+        )
+
+    def error_copy(platform_label: str, reason_code: str) -> tuple[str, str]:
+        return (
+            f"อ่านสถานะ EA {platform_label} ไม่สำเร็จ ({reason_code})",
+            "ตรวจไฟล์ EA ให้ตรงรุ่น Compile ใหม่ ตรวจ Channel ID แล้วกดตรวจสถานะใหม่",
+        )
+
+    def init_error_remediation(reason_code: str) -> str:
+        code = str(reason_code or "").upper()
+        if code == "LIVE_COMMISSION_POLICY_UNCONFIRMED":
+            return (
+                "ตั้ง EstimatedCommissionPerLot เป็นค่าไป-กลับต่อ 1.0 Lot ในหน่วยเงินบัญชี "
+                "หรือยืนยัน CommissionFreeAccountConfirmed=true เฉพาะบัญชีไม่มีค่าคอมมิชชันจริง"
+            )
+        if code == "LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST":
+            return "คัดลอกชื่อ Symbol เต็มจากกราฟรวม prefix/suffix ทุกตัวอักษรไปใส่ AllowedSymbols แล้วเริ่ม EA ใหม่"
+        if "CHANNEL" in code:
+            return "ตรวจ SnapshotChannel ให้ตรงกับ Channel ID ของ Dashboard และห้ามใช้ Channel ซ้ำกับ EA อื่น"
+        if any(token in code for token in ("SIGNING", "CRYPTO", "KEY_")):
+            return "ตรวจ TrustedSigningKeyId ให้ตรงกับ Active Key ของ Local Runner แล้วลาก EA ลงกราฟใหม่"
+        if any(token in code for token in ("ACCOUNT", "LIVE_MODE", "DEMO_MODE", "HEDGING")):
+            return "ตรวจประเภทบัญชีและ GatewayMode ให้ตรงกัน; MT5 ต้องเป็นบัญชี Hedging ตามข้อกำหนดของ EA"
+        if any(token in code for token in ("MONEY", "RISK", "LOT", "VOLUME", "MARGIN")):
+            return "แก้ Inputs ของ Money Management และค่า Min/Max/Step Lot ให้ผ่านข้อจำกัดของ Broker ก่อนเริ่ม EA ใหม่"
+        if "PORTFOLIO_POLICY" in code:
+            return "ตรวจ Portfolio Policy, Magic Number และ EA ทุกตัวในบัญชีให้ใช้นโยบายเดียวกัน แล้วเริ่ม EA ใหม่"
+        return "เปิดแท็บ Experts/Journal ตรวจขั้นตอนและ Input ที่ EA ระบุ แก้แล้วกดตรวจสถานะใหม่"
+
+    items = []
+    for platform, platform_label in (("mt4", "MT4"), ("mt5", "MT5")):
+        platform_candidates = [
+            candidate for candidate in candidates
+            if candidate["platform"] == platform
+        ]
+        is_selected = bool(selected_platform == platform and selected_candidate_id)
+        selected_row = next(
+            (
+                candidate for candidate in platform_candidates
+                if candidate["candidateId"] == selected_candidate_id
+            ),
+            None,
+        ) if is_selected else None
+        running_candidates = [
+            candidate
+            for candidate in platform_candidates
+            if candidate["runningState"] == "platform_running_detected"
+        ]
+        if selected_row is not None:
+            probe_candidate = selected_row
+            candidate_state = "selected"
+        elif len(platform_candidates) == 1:
+            probe_candidate = platform_candidates[0]
+            candidate_state = "unique"
+        elif len(running_candidates) == 1:
+            probe_candidate = running_candidates[0]
+            candidate_state = "unique_running"
+        elif platform_candidates:
+            probe_candidate = None
+            candidate_state = "ambiguous"
+        else:
+            probe_candidate = None
+            candidate_state = "none"
+
+        connection_state = "waiting"
+        tone = "warning"
+        reason_code = "terminal_not_detected"
+        message_th, remediation_th = waiting_copy(platform_label, reason_code)
+        observed_at = None
+        age_seconds = None
+        gateway_mode = None
+        execution_guard_ready = None
+        execution_guard_reason = None
+
+        if candidate_state == "ambiguous":
+            reason_code = "terminal_candidate_ambiguous"
+            message_th, remediation_th = waiting_copy(platform_label, reason_code)
+        elif probe_candidate is not None:
+            canonical_gateway_matches = bool(
+                is_selected
+                and isinstance(selected_gateway_snapshot, dict)
+                and safe_reference(selected_gateway_snapshot.get("selectedCandidateId"))
+                == probe_candidate.get("candidateId")
+                and str(selected_gateway_snapshot.get("selectedPlatform") or "").lower()
+                == platform
+            )
+            if canonical_gateway_matches:
+                heartbeat_status = (
+                    selected_gateway_snapshot.get("eaHeartbeat")
+                    if isinstance(
+                        selected_gateway_snapshot.get("eaHeartbeat"),
+                        dict,
+                    )
+                    else None
+                )
+                if heartbeat_status is not None:
+                    ea_status = dict(heartbeat_status)
+                    status_reason = (
+                        "ready"
+                        if heartbeat_status.get("connected") is True
+                        else str(
+                            heartbeat_status.get("reasonCode")
+                            or "gateway_status_not_observed"
+                        )
+                    )
+                else:
+                    # Backwards-compatible fallback for one report refresh
+                    # while an older Local Runner is being upgraded.
+                    ea_status = dict(selected_gateway_snapshot)
+                    status_reason = (
+                        "ready"
+                        if selected_gateway_snapshot.get("connected") is True
+                        else str(
+                            selected_gateway_snapshot.get("reasonCode")
+                            or "gateway_status_not_observed"
+                        )
+                    )
+                init_status = (
+                    dict(selected_gateway_snapshot.get("initStatus"))
+                    if isinstance(selected_gateway_snapshot.get("initStatus"), dict)
+                    else {}
+                )
+            else:
+                ea_status, status_reason = _read_mt4_trade_gateway_ea_status(
+                    probe_candidate,
+                    include_stale=True,
+                )
+                init_status = _read_mt4_trade_gateway_init_status(probe_candidate)
+            init_status = _reconcile_mt4_trade_gateway_init_status(
+                init_status,
+                ea_status,
+            )
+            reason_code = status_reason
+            if isinstance(ea_status, dict):
+                observed_at = ea_status.get("observedAt")
+                age_seconds = ea_status.get("ageSeconds")
+                gateway_mode = ea_status.get("mode")
+                guard_source = (
+                    selected_gateway_snapshot
+                    if canonical_gateway_matches
+                    else ea_status
+                )
+                execution_guard_ready = (
+                    guard_source.get("executionGuardReady") is True
+                )
+                execution_guard_reason = redact_text(
+                    str(
+                        guard_source.get("executionGuardReason")
+                        or (
+                            guard_source.get("reasonCode")
+                            if canonical_gateway_matches
+                            and execution_guard_ready is not True
+                            else ""
+                        )
+                    ),
+                    120,
+                ) or None
+            init_read_status = str(init_status.get("readStatus") or "")
+            init_severity = str(init_status.get("severity") or "")
+            init_read_failure = init_read_status in {
+                "invalid",
+                "invalid_channel",
+                "unreadable",
+            }
+            init_is_actionable_error = bool(
+                (
+                    init_read_failure
+                    and status_reason != "ready"
+                    and init_status.get("supersededByLiveStatus") is not True
+                )
+                or (
+                    init_status.get("available") is True
+                    and init_status.get("stale") is not True
+                    and init_status.get("supersededByLiveStatus") is not True
+                    and init_severity == "error"
+                )
+            )
+            if init_is_actionable_error:
+                connection_state = "error"
+                tone = "error"
+                reason_code = str(
+                    init_status.get("readReasonCode")
+                    or init_status.get("reasonCode")
+                    or "gateway_init_status_invalid"
+                    if init_read_failure
+                    else init_status.get("reasonCode")
+                    or init_status.get("readReasonCode")
+                    or "gateway_init_status_invalid"
+                )
+                observed_at = init_status.get("observedAt") or observed_at
+                age_seconds = (
+                    init_status.get("ageSeconds")
+                    if init_status.get("ageSeconds") is not None
+                    else age_seconds
+                )
+                gateway_mode = init_status.get("gatewayMode") or gateway_mode
+                diagnostic = _mt4_trade_gateway_init_status_message_th(init_status)
+                message_th = diagnostic or f"EA {platform_label} เริ่มทำงานไม่สำเร็จ ({reason_code})"
+                remediation_th = init_error_remediation(reason_code)
+            elif status_reason == "ready" and isinstance(ea_status, dict):
+                connection_state = "connected"
+                tone = "success"
+                message_th = f"EA {platform_label} ส่ง heartbeat สดและผ่านการตรวจรูปแบบแล้ว"
+                remediation_th = None
+            elif status_reason in {"gateway_status_not_observed", "gateway_status_stale"}:
+                message_th, remediation_th = waiting_copy(platform_label, reason_code)
+            else:
+                connection_state = "error"
+                tone = "error"
+                message_th, remediation_th = error_copy(platform_label, reason_code)
+
+        running_states = sorted({
+            candidate["runningState"] for candidate in platform_candidates
+        })
+        running_state = (
+            probe_candidate.get("runningState")
+            if probe_candidate is not None
+            else running_states[0]
+            if len(running_states) == 1
+            else "unknown"
+        )
+        unique_running_count = sum(
+            candidate["runningState"] == "platform_running_detected"
+            for candidate in platform_candidates
+        )
+        items.append({
+            "platform": platform,
+            "label": platform_label,
+            "selected": is_selected,
+            "authoritativeForDashboard": is_selected,
+            "candidateState": candidate_state,
+            "candidateId": probe_candidate.get("candidateId") if probe_candidate else None,
+            "candidateCount": len(platform_candidates),
+            "runningState": running_state,
+            "canSelect": bool(
+                len(platform_candidates) == 1
+                or (len(platform_candidates) > 1 and unique_running_count == 1)
+            ),
+            "connectionState": connection_state,
+            "tone": tone,
+            "reasonCode": reason_code,
+            "messageTh": message_th,
+            "remediationTh": remediation_th,
+            "observedAt": observed_at if parse_iso(str(observed_at or "")) else None,
+            "ageSeconds": (
+                max(0, float(age_seconds))
+                if isinstance(age_seconds, (int, float)) and not isinstance(age_seconds, bool)
+                else None
+            ),
+            "freshForSeconds": MT4_TRADE_GATEWAY_STATUS_FRESH_SECONDS,
+            "mode": gateway_mode if gateway_mode in {"shadow", "demo", "live"} else None,
+            "executionGuardReady": execution_guard_ready,
+            "executionGuardReason": execution_guard_reason,
+        })
+
+    return sanitize_json_value({
+        "schemaVersion": "metafx-hq-ai-trade-platform-connections-v1",
+        "selectionMode": "single_exclusive",
+        "selectionScope": (
+            "global_compatible_consumers"
+            if global_authority_supplied
+            else "dashboard_checklist_compatibility"
+        ),
+        "authorityStatus": (
+            str(global_metatrader_snapshot.get("status") or "not_configured")
+            if global_authority_supplied
+            else "compatibility_fallback"
+        ),
+        "freshForSeconds": MT4_TRADE_GATEWAY_STATUS_FRESH_SECONDS,
+        "active": {
+            "platform": selected_platform or None,
+            "candidateId": selected_candidate_id,
+        },
+        "items": items,
+        "safety": {
+            "bothMayBeConnected": True,
+            "atMostOneExecutionTarget": sum(item["selected"] for item in items) <= 1,
+            "exactlyOneExecutionTarget": sum(item["selected"] for item in items) == 1,
+            "exactlyOneWhenGloballyConfigured": (
+                sum(item["selected"] for item in items) == 1
+                if (
+                    global_authority_supplied
+                    and global_metatrader_snapshot.get("status") == "configured"
+                )
+                else sum(item["selected"] for item in items) == 0
+                if global_authority_supplied
+                else True
+            ),
+            "selectionDoesNotArmTrading": True,
+            "pathsExposed": False,
+            "processIdsExposed": False,
+            "accountDataExposed": False,
+        },
+        "updatedAt": utc_now(),
+    }, collection_limit=100, string_limit=1000)
+
+
 def _ai_trade_council_read_model(
     missions: list[dict],
     reports: list[dict],
@@ -50105,6 +50521,8 @@ def _ai_trade_council_read_model(
     history_limit: int | None = AI_TRADE_COUNCIL_HISTORY_DEFAULT_LIMIT,
     history_cursor: str | None = None,
     gateway_snapshot: dict | None = None,
+    global_metatrader_snapshot: dict | None = None,
+    platform_connections_snapshot: dict | None = None,
 ) -> dict:
     """Expose only backend-observed trading facts; missing adapters remain unavailable."""
     selection = (
@@ -50387,11 +50805,22 @@ def _ai_trade_council_read_model(
             "แต่ยังไม่ส่งคำสั่งซื้อขาย"
         )
 
+    platform_connections = (
+        copy.deepcopy(platform_connections_snapshot)
+        if isinstance(platform_connections_snapshot, dict)
+        else _ai_trade_council_platform_connections_read_model(
+            connection_checklist,
+            selected_gateway_snapshot=trade_gateway,
+            global_metatrader_snapshot=global_metatrader_snapshot,
+        )
+    )
+
     return {
         "schemaVersion": "ai-trade-council-v2",
         "tabOrder": ["dailySummary", "liveAnalysis", "decisionPipeline", "history"],
         "autoAnalysis": ai_trade_council_automation_read_model(),
         "tradeGateway": trade_gateway,
+        "platformConnections": platform_connections,
         "runtimeTruth": {
             "scope": "read_only_snapshot" if terminal_adapter_ready else "terminal_detection_only",
             "terminalDetection": {
@@ -50721,6 +51150,8 @@ def _auto_trading_status_read_model(
     connection_checklist: dict,
     *,
     gateway_snapshot: dict | None = None,
+    global_metatrader_snapshot: dict | None = None,
+    platform_connections_snapshot: dict | None = None,
 ) -> dict:
     """Monitor the canonical Council runtime without copying its decisions."""
     unavailable_runtime = _ai_trade_council_read_model(
@@ -50729,6 +51160,8 @@ def _auto_trading_status_read_model(
         connection_checklist,
         prop_id=AI_TRADE_COUNCIL_PROP_ID,
         gateway_snapshot=gateway_snapshot,
+        global_metatrader_snapshot=global_metatrader_snapshot,
+        platform_connections_snapshot=platform_connections_snapshot,
     )
     runtime_truth = {
         key: value
@@ -51095,24 +51528,57 @@ def prop_report(
     connection_source_profile = find_dashboard_connection_profile(
         connection_source_prop_id
     )
-    # The Gateway status file can change while MT4 is starting, deploying, or
-    # switching modes.  Capture it once so checklist, Council and legacy status
-    # projections cannot expose mutually contradictory states in one response.
-    gateway_snapshot = (
-        mt4_trade_gateway_status_read_model()
-        if connection_source_prop_id == AI_TRADE_COUNCIL_PROP_ID
-        else None
-    )
-    connection_checklist = (
-        dashboard_connection_checklist(
-            connection_source_prop_id,
-            bridge=live_bridge_status,
-            missions=all_missions,
-            gateway_snapshot=gateway_snapshot,
+    # Capture Gateway, central selector and checklist as one reconciled
+    # generation. A bounded retry handles a user switching MT4/MT5 between
+    # any two reads; a second mismatch removes all execution authority.
+    if connection_source_prop_id == AI_TRADE_COUNCIL_PROP_ID:
+        connection_checklist = {}
+        for _attempt in range(2):
+            gateway_snapshot, global_metatrader_snapshot = (
+                _capture_ai_trade_runtime_snapshots()
+            )
+            connection_checklist = (
+                dashboard_connection_checklist(
+                    connection_source_prop_id,
+                    bridge=live_bridge_status,
+                    missions=all_missions,
+                    gateway_snapshot=gateway_snapshot,
+                )
+                if connection_source_profile
+                else {}
+            )
+            if (
+                not connection_source_profile
+                or _ai_trade_checklist_matches_global_snapshot(
+                    connection_checklist,
+                    global_metatrader_snapshot,
+                )
+            ):
+                break
+        else:
+            connection_checklist, global_metatrader_snapshot = (
+                _fail_closed_ai_trade_selection_snapshots(
+                    connection_checklist,
+                    global_metatrader_snapshot,
+                )
+            )
+            gateway_snapshot = _empty_mt4_trade_gateway_status(
+                status="selection_changed",
+                reason_code="terminal_selection_changed_during_status_read",
+            )
+    else:
+        gateway_snapshot = None
+        global_metatrader_snapshot = None
+        connection_checklist = (
+            dashboard_connection_checklist(
+                connection_source_prop_id,
+                bridge=live_bridge_status,
+                missions=all_missions,
+                gateway_snapshot=gateway_snapshot,
+            )
+            if connection_source_profile
+            else {}
         )
-        if connection_source_profile
-        else {}
-    )
     response = {
         "prop": prop,
         "propertyRole": property_role,
@@ -51179,11 +51645,16 @@ def prop_report(
             history_limit=history_limit,
             history_cursor=history_cursor,
             gateway_snapshot=gateway_snapshot,
+            global_metatrader_snapshot=global_metatrader_snapshot,
         )
         response["autoTradingStatus"] = _auto_trading_status_read_model(
             council_reports,
             connection_checklist,
             gateway_snapshot=gateway_snapshot,
+            global_metatrader_snapshot=global_metatrader_snapshot,
+            platform_connections_snapshot=(
+                response["aiTradeCouncil"].get("platformConnections")
+            ),
         )
     elif prop_id == AUTO_TRADING_STATUS_PROP_ID:
         status_reports = [
@@ -51195,6 +51666,7 @@ def prop_report(
             status_reports,
             connection_checklist,
             gateway_snapshot=gateway_snapshot,
+            global_metatrader_snapshot=global_metatrader_snapshot,
         )
     if is_global_mission_view:
         response.update({
@@ -54097,6 +54569,7 @@ def _metatrader_selection_read_model(
     candidate_map = {item["candidateId"]: item for item in candidates}
     selected_candidate = None
     selected_at = None
+    selection_revision = None
     stale_selection = False
     if isinstance(target_store, dict):
         store = target_store
@@ -54117,6 +54590,14 @@ def _metatrader_selection_read_model(
             if not current_selection:
                 selected_candidate = None
             stale_selection = bool(selected_id and not current_selection)
+            raw_revision = raw_selection.get("selectionRevision")
+            if (
+                selected_candidate
+                and isinstance(raw_revision, int)
+                and not isinstance(raw_revision, bool)
+                and raw_revision >= 1
+            ):
+                selection_revision = raw_revision
             parsed_selected_at = parse_iso(str(raw_selection.get("selectedAt") or ""))
             if selected_candidate and parsed_selected_at:
                 selected_at = parsed_selected_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -54152,6 +54633,7 @@ def _metatrader_selection_read_model(
         "candidates": candidates,
         "selectedCandidate": selected_candidate,
         "selectedAt": selected_at,
+        "selectionRevision": selection_revision,
         "staleSelection": stale_selection,
         "adapterConnection": "coming_soon",
         "adapterReady": False,
@@ -54516,6 +54998,190 @@ def global_metatrader_hub_read_model(terminals: dict | None = None) -> dict:
         },
         "updatedAt": utc_now(),
     }, collection_limit=1000, string_limit=2000)
+
+
+def _global_metatrader_ai_trade_selection_token(
+    snapshot: dict | None,
+) -> dict | None:
+    """Return the Council consumer's exact generation from one Hub snapshot."""
+    if not isinstance(snapshot, dict) or snapshot.get("status") != "configured":
+        return None
+    selected_platform = str(snapshot.get("selectedPlatform") or "").lower()
+    selected_candidate = (
+        snapshot.get("selectedCandidate")
+        if isinstance(snapshot.get("selectedCandidate"), dict)
+        else {}
+    )
+    selected_candidate_id = safe_reference(selected_candidate.get("candidateId"))
+    if selected_platform not in {"mt4", "mt5"} or not selected_candidate_id:
+        return None
+    platforms = snapshot.get("platforms")
+    platform_model = (
+        platforms.get(selected_platform)
+        if isinstance(platforms, dict)
+        and isinstance(platforms.get(selected_platform), dict)
+        else {}
+    )
+    for target in platform_model.get("targets") or []:
+        if (
+            not isinstance(target, dict)
+            or target.get("propId") != AI_TRADE_COUNCIL_PROP_ID
+            or target.get("status") != "configured"
+        ):
+            continue
+        target_candidate = (
+            target.get("selectedCandidate")
+            if isinstance(target.get("selectedCandidate"), dict)
+            else {}
+        )
+        target_candidate_id = safe_reference(target_candidate.get("candidateId"))
+        selection_revision = target.get("selectionRevision")
+        if (
+            target_candidate_id != selected_candidate_id
+            or isinstance(selection_revision, bool)
+            or not isinstance(selection_revision, int)
+            or selection_revision < 1
+        ):
+            return None
+        return {
+            "candidateId": target_candidate_id,
+            "selectionRevision": selection_revision,
+            "platform": selected_platform,
+        }
+    return None
+
+
+def _ai_trade_runtime_snapshots_consistent(
+    gateway_snapshot: dict | None,
+    global_metatrader_snapshot: dict | None,
+    current_selection_token: dict | None,
+) -> bool:
+    """Reject a response assembled across two terminal-selection generations."""
+    gateway = gateway_snapshot if isinstance(gateway_snapshot, dict) else {}
+    current = (
+        current_selection_token
+        if isinstance(current_selection_token, dict)
+        else None
+    )
+    hub_token = _global_metatrader_ai_trade_selection_token(
+        global_metatrader_snapshot
+    )
+    if current is None:
+        return (
+            hub_token is None
+            and safe_reference(gateway.get("selectedCandidateId")) is None
+            and gateway.get("connected") is not True
+        )
+    normalized_current = {
+        "candidateId": safe_reference(current.get("candidateId")),
+        "selectionRevision": current.get("selectionRevision"),
+    }
+    if (
+        not normalized_current["candidateId"]
+        or isinstance(normalized_current["selectionRevision"], bool)
+        or not isinstance(normalized_current["selectionRevision"], int)
+        or normalized_current["selectionRevision"] < 1
+        or hub_token is None
+        or {
+            "candidateId": hub_token.get("candidateId"),
+            "selectionRevision": hub_token.get("selectionRevision"),
+        } != normalized_current
+        or safe_reference(gateway.get("selectedCandidateId"))
+        != normalized_current["candidateId"]
+    ):
+        return False
+    if gateway.get("connected") is True:
+        if gateway.get("selectionRevision") != normalized_current["selectionRevision"]:
+            return False
+        selected_platform = str(gateway.get("selectedPlatform") or "").lower()
+        if selected_platform != hub_token.get("platform"):
+            return False
+    return True
+
+
+def _ai_trade_checklist_matches_global_snapshot(
+    connection_checklist: dict | None,
+    global_metatrader_snapshot: dict | None,
+) -> bool:
+    """Bind the checklist selection to the same Hub generation as the Gateway."""
+    checklist = (
+        connection_checklist
+        if isinstance(connection_checklist, dict)
+        else {}
+    )
+    selection = (
+        checklist.get("metatraderSelection")
+        if isinstance(checklist.get("metatraderSelection"), dict)
+        else {}
+    )
+    selected_candidate = (
+        selection.get("selectedCandidate")
+        if isinstance(selection.get("selectedCandidate"), dict)
+        else {}
+    )
+    selected_candidate_id = safe_reference(selected_candidate.get("candidateId"))
+    selection_revision = selection.get("selectionRevision")
+    hub_token = _global_metatrader_ai_trade_selection_token(
+        global_metatrader_snapshot
+    )
+    if hub_token is None:
+        return selected_candidate_id is None and selection_revision is None
+    return bool(
+        selected_candidate_id == hub_token.get("candidateId")
+        and selection_revision == hub_token.get("selectionRevision")
+    )
+
+
+def _fail_closed_ai_trade_selection_snapshots(
+    connection_checklist: dict,
+    global_metatrader_snapshot: dict,
+) -> tuple[dict, dict]:
+    """Remove all authority when three read models cannot share one generation."""
+    checklist = copy.deepcopy(connection_checklist)
+    selection = (
+        checklist.get("metatraderSelection")
+        if isinstance(checklist.get("metatraderSelection"), dict)
+        else {}
+    )
+    checklist["metatraderSelection"] = {
+        **selection,
+        "status": "not_selected",
+        "configurationStatus": "not_configured",
+        "selectedCandidate": None,
+        "selectedAt": None,
+        "selectionRevision": None,
+        "staleSelection": True,
+        "detailTh": "เป้าหมายเปลี่ยนระหว่างอ่านสถานะ กรุณารอการอัปเดตรอบถัดไป",
+    }
+    hub = copy.deepcopy(global_metatrader_snapshot)
+    hub.update({
+        "status": "partial",
+        "selectedPlatform": None,
+        "selectedCandidate": None,
+    })
+    return checklist, hub
+
+
+def _capture_ai_trade_runtime_snapshots() -> tuple[dict, dict]:
+    """Capture one coherent Gateway/Hub generation, retrying one bounded time."""
+    global_snapshot: dict = {}
+    for _attempt in range(2):
+        gateway_snapshot = mt4_trade_gateway_status_read_model()
+        global_snapshot = global_metatrader_hub_read_model()
+        current_token = _metatrader_selection_token(AI_TRADE_COUNCIL_PROP_ID)
+        if _ai_trade_runtime_snapshots_consistent(
+            gateway_snapshot,
+            global_snapshot,
+            current_token,
+        ):
+            return gateway_snapshot, global_snapshot
+    return (
+        _empty_mt4_trade_gateway_status(
+            status="selection_changed",
+            reason_code="terminal_selection_changed_during_status_read",
+        ),
+        global_snapshot,
+    )
 
 
 def _ai_trade_council_utc_epoch_now() -> int:
@@ -55665,6 +56331,8 @@ def _mt4_trade_gateway_init_status_message_th(init_status: dict) -> str:
         "RISK_CAPITAL_BASE_INVALID": "ฐานคำนวณความเสี่ยงต้องเป็น Balance หรือ Equity",
         "RISK_PERCENT_INVALID_OR_ABOVE_HARD_CAP": "Risk Percent ไม่ถูกต้องหรือสูงกว่าเพดาน MaxLossPerTradePercent",
         "ESTIMATED_COMMISSION_PER_LOT_INVALID": "ค่าธรรมเนียมสำรองต่อ Lot ไม่ถูกต้อง",
+        "LIVE_COMMISSION_POLICY_UNCONFIRMED": "โหมด Live ยังไม่ยืนยันค่าคอมมิชชันไป-กลับหรือบัญชีปลอดค่าคอมมิชชัน",
+        "LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST": "โหมด Live ต้องใส่ชื่อ Symbol ของกราฟแบบตรงตัวใน AllowedSymbols",
         "BROKER_VOLUME_LIMITS_UNAVAILABLE": "EA อ่าน Min/Max/Step Lot จาก Broker ไม่ได้",
         "BROKER_VOLUME_METADATA_INVALID": "EA อ่าน Min/Max/Step Lot จาก Broker ไม่ได้",
         "MANAGED_LOT_CAP_BELOW_BROKER_MINIMUM": "เพดาน Lot ของ EA ต่ำกว่า Min Lot ของ Broker",
@@ -55733,6 +56401,42 @@ def _mt4_trade_gateway_init_status_message_th(init_status: dict) -> str:
     return f"EA เริ่มทำงานแล้ว แต่มีคำเตือน: {detail}.{age_note}".strip()
 
 
+def _mt4_trade_gateway_ea_heartbeat_read_model(
+    ea_status: dict | None,
+    reason_code: str,
+) -> dict:
+    """Expose connection health independently from Backend execution readiness."""
+    status = ea_status if isinstance(ea_status, dict) else {}
+    reason = str(reason_code or "gateway_status_not_observed")
+    return {
+        "schemaVersion": "metafx-hq-ea-heartbeat-read-model-v1",
+        "connected": bool(status and reason == "ready"),
+        "reasonCode": reason,
+        "observedAt": (
+            status.get("observedAt")
+            if parse_iso(str(status.get("observedAt") or ""))
+            else None
+        ),
+        "ageSeconds": (
+            max(0, float(status["ageSeconds"]))
+            if isinstance(status.get("ageSeconds"), (int, float))
+            and not isinstance(status.get("ageSeconds"), bool)
+            else None
+        ),
+        "freshForSeconds": MT4_TRADE_GATEWAY_STATUS_FRESH_SECONDS,
+        "mode": (
+            status.get("mode")
+            if status.get("mode") in {"shadow", "demo", "live"}
+            else None
+        ),
+        "executionGuardReady": status.get("executionGuardReady") is True,
+        "executionGuardReason": redact_text(
+            str(status.get("executionGuardReason") or ""),
+            120,
+        ) or None,
+    }
+
+
 def _empty_mt4_trade_gateway_status(
     *,
     selected_candidate: dict | None = None,
@@ -55741,6 +56445,8 @@ def _empty_mt4_trade_gateway_status(
     backend_status: dict | None = None,
     init_status: dict | None = None,
     order_history: dict | None = None,
+    ea_status: dict | None = None,
+    ea_status_reason: str = "gateway_status_not_observed",
 ) -> dict:
     candidate_id = safe_reference((selected_candidate or {}).get("candidateId"))
     platform = str((selected_candidate or {}).get("platform") or "") or None
@@ -55790,6 +56496,7 @@ def _empty_mt4_trade_gateway_status(
         "riskPercent": None,
         "riskCapitalBase": None,
         "estimatedCommissionPerLot": None,
+        "commissionFreeAccountConfirmed": None,
         "brokerVolumeMin": None,
         "brokerVolumeMax": None,
         "brokerVolumeStep": None,
@@ -55857,6 +56564,10 @@ def _empty_mt4_trade_gateway_status(
             "liveExecutionAvailable": False,
             "liveBlockReason": "signing_key_not_initialized",
         },
+        "eaHeartbeat": _mt4_trade_gateway_ea_heartbeat_read_model(
+            ea_status,
+            ea_status_reason,
+        ),
         "initStatus": init_status or _empty_mt4_trade_gateway_init_status(),
         "activeCommand": None,
         "latestCommand": None,
@@ -55931,11 +56642,13 @@ def _read_mt4_trade_gateway_ea_status(
     expected_v5_status_fields = (
         {
             frozenset(MT5_TRADE_GATEWAY_STATUS_FIELDS),
+            frozenset(MT5_TRADE_GATEWAY_PRE_COMMISSION_POLICY_STATUS_FIELDS),
             frozenset(MT5_TRADE_GATEWAY_LEGACY_STATUS_FIELDS),
         }
         if is_mt5
         else {
             frozenset(MT4_TRADE_GATEWAY_STATUS_FIELDS),
+            frozenset(MT4_TRADE_GATEWAY_PRE_COMMISSION_POLICY_STATUS_FIELDS),
             frozenset(MT4_TRADE_GATEWAY_V5_LEGACY_STATUS_FIELDS),
         }
     )
@@ -55990,6 +56703,8 @@ def _read_mt4_trade_gateway_ea_status(
         boolean_fields.append("demoAccount")
     if portfolio_status_schema:
         boolean_fields.append("crossVpsDistributedLock")
+    if "commissionFreeAccountConfirmed" in payload:
+        boolean_fields.append("commissionFreeAccountConfirmed")
     if is_mt5:
         boolean_fields.append("singleHostLiveAcknowledged")
     for field in boolean_fields:
@@ -56166,6 +56881,7 @@ def _read_mt4_trade_gateway_ea_status(
             "riskPercent",
             "riskCapitalBase",
             "estimatedCommissionPerLot",
+            "commissionFreeAccountConfirmed",
             "brokerVolumeMin",
             "brokerVolumeMax",
             "brokerVolumeStep",
@@ -56187,6 +56903,11 @@ def _read_mt4_trade_gateway_ea_status(
             "estimatedCommissionPerLot",
             minimum=0,
             maximum=1_000_000,
+        )
+        commission_free_account_confirmed = (
+            payload.get("commissionFreeAccountConfirmed")
+            if "commissionFreeAccountConfirmed" in payload
+            else None
         )
         broker_volume_min = strict_status_number(
             "brokerVolumeMin",
@@ -56227,6 +56948,7 @@ def _read_mt4_trade_gateway_ea_status(
         risk_percent = None
         risk_capital_base = None
         estimated_commission_per_lot = None
+        commission_free_account_confirmed = None
         broker_volume_min = None
         broker_volume_max = None
         broker_volume_step = None
@@ -56276,6 +56998,7 @@ def _read_mt4_trade_gateway_ea_status(
         "riskPercent": risk_percent,
         "riskCapitalBase": risk_capital_base,
         "estimatedCommissionPerLot": estimated_commission_per_lot,
+        "commissionFreeAccountConfirmed": commission_free_account_confirmed,
         "brokerVolumeMin": broker_volume_min,
         "brokerVolumeMax": broker_volume_max,
         "brokerVolumeStep": broker_volume_step,
@@ -57026,20 +57749,21 @@ def mt4_trade_gateway_status_read_model() -> dict:
     selection_revision = selection_token.get("selectionRevision")
     observability_warnings: list[str] = []
 
-    def stable_gateway_result(result: dict) -> dict:
-        current_context = _selected_metatrader_candidate_context(
-            AI_TRADE_COUNCIL_PROP_ID
-        )
-        current_token = (
-            current_context.get("token")
-            if isinstance(current_context, dict)
-            else None
-        )
-        if current_token != selection_token:
-            result = _empty_mt4_trade_gateway_status(
-                status="selection_changed",
-                reason_code="terminal_selection_changed_during_status_read",
+    def stable_gateway_result(result: dict, *, recheck: bool = True) -> dict:
+        if recheck:
+            current_context = _selected_metatrader_candidate_context(
+                AI_TRADE_COUNCIL_PROP_ID
             )
+            current_token = (
+                current_context.get("token")
+                if isinstance(current_context, dict)
+                else None
+            )
+            if current_token != selection_token:
+                result = _empty_mt4_trade_gateway_status(
+                    status="selection_changed",
+                    reason_code="terminal_selection_changed_during_status_read",
+                )
         result["observabilityStatus"] = (
             "degraded" if observability_warnings else "complete"
         )
@@ -57051,12 +57775,16 @@ def mt4_trade_gateway_status_read_model() -> dict:
             observability_warnings.append(code)
 
     init_status = _read_mt4_trade_gateway_init_status(public_candidate)
+    # Read and validate the EA heartbeat once before touching the Backend
+    # ledger. Connection health remains observable even when signing/ledger
+    # initialization fails, while command readiness stays fail-closed.
+    preloaded_ea_status, preloaded_ea_status_reason = (
+        _read_mt4_trade_gateway_ea_status(public_candidate)
+    )
     ack_events: list[dict] = []
     active_command = None
     latest_command = None
     signing_key_metadata: dict = {}
-    preloaded_ea_status = None
-    preloaded_ea_status_reason = "gateway_status_not_observed"
     mt5_account_binding_id = None
     order_history = {
         "schemaVersion": "metafx-hq-mt4-order-history-v1",
@@ -57078,23 +57806,24 @@ def mt4_trade_gateway_status_read_model() -> dict:
                 else None
             )
             if current_token != selection_token:
-                return _empty_mt4_trade_gateway_status(
+                return stable_gateway_result(_empty_mt4_trade_gateway_status(
                     selected_candidate=public_candidate,
                     status="selection_changed",
                     reason_code="terminal_selection_changed_during_status_read",
                     init_status=init_status,
-                )
+                    ea_status=preloaded_ea_status,
+                    ea_status_reason=preloaded_ea_status_reason,
+                ), recheck=False)
             if public_candidate.get("platform") == "mt5":
-                preloaded_ea_status, preloaded_ea_status_reason = (
-                    _read_mt4_trade_gateway_ea_status(public_candidate)
-                )
                 if preloaded_ea_status is None:
-                    return _empty_mt4_trade_gateway_status(
+                    return stable_gateway_result(_empty_mt4_trade_gateway_status(
                         selected_candidate=public_candidate,
                         status="awaiting_ea",
                         reason_code=preloaded_ea_status_reason,
                         init_status=init_status,
-                    )
+                        ea_status=preloaded_ea_status,
+                        ea_status_reason=preloaded_ea_status_reason,
+                    ))
                 mt5_account_binding_id, binding_reason = (
                     _validated_mt5_wire_binding(
                         record,
@@ -57103,12 +57832,14 @@ def mt4_trade_gateway_status_read_model() -> dict:
                     )
                 )
                 if not mt5_account_binding_id:
-                    return _empty_mt4_trade_gateway_status(
+                    return stable_gateway_result(_empty_mt4_trade_gateway_status(
                         selected_candidate=public_candidate,
                         status="execution_guard_blocked",
                         reason_code=binding_reason,
                         init_status=init_status,
-                    )
+                        ea_status=preloaded_ea_status,
+                        ea_status_reason=preloaded_ea_status_reason,
+                    ))
             gateway = _mt4_trade_gateway_instance(
                 mt5_account_binding_id=mt5_account_binding_id
             )
@@ -57149,12 +57880,14 @@ def mt4_trade_gateway_status_read_model() -> dict:
             if module is not None
             else "gateway_backend_unavailable"
         )
-        return _empty_mt4_trade_gateway_status(
+        return stable_gateway_result(_empty_mt4_trade_gateway_status(
             selected_candidate=public_candidate,
             status="backend_blocked",
             reason_code=code,
             init_status=init_status,
-        )
+            ea_status=preloaded_ea_status,
+            ea_status_reason=preloaded_ea_status_reason,
+        ))
     for event in ack_events:
         if (
             isinstance(event, dict)
@@ -57200,13 +57933,10 @@ def mt4_trade_gateway_status_read_model() -> dict:
             })
         except Exception:
             note_observability_failure("command_expired_audit_failed")
-    if preloaded_ea_status is not None:
-        ea_status, reason_code = (
-            preloaded_ea_status,
-            preloaded_ea_status_reason,
-        )
-    else:
-        ea_status, reason_code = _read_mt4_trade_gateway_ea_status(public_candidate)
+    ea_status, reason_code = (
+        preloaded_ea_status,
+        preloaded_ea_status_reason,
+    )
     init_status = _reconcile_mt4_trade_gateway_init_status(init_status, ea_status)
     backend_signing_key_id = str(signing_key_metadata.get("keyId") or "")
     backend_signature_algorithm = str(
@@ -57297,6 +58027,8 @@ def mt4_trade_gateway_status_read_model() -> dict:
             backend_status=backend_public,
             init_status=init_status,
             order_history=order_history,
+            ea_status=ea_status,
+            ea_status_reason=reason_code,
         ))
     mode = str(ea_status["mode"])
     demo_account = ea_status.get("demoAccount")
@@ -57341,12 +58073,38 @@ def mt4_trade_gateway_status_read_model() -> dict:
             == "single_windows_user_file_common_only"
         )
     )
+    estimated_commission_per_lot = ea_status.get("estimatedCommissionPerLot")
+    commission_policy_ready = bool(
+        isinstance(estimated_commission_per_lot, (int, float))
+        and not isinstance(estimated_commission_per_lot, bool)
+        and math.isfinite(float(estimated_commission_per_lot))
+        and float(estimated_commission_per_lot) >= 0.00000001
+    ) or ea_status.get("commissionFreeAccountConfirmed") is True
+    exact_symbol_allowlist_ready = bool(
+        str(ea_status.get("symbol") or "").strip()
+        and str(ea_status.get("symbol") or "").strip().upper()
+        in {
+            token.strip().upper()
+            for token in str(ea_status.get("allowedSymbols") or "").split(",")
+            if token.strip()
+        }
+    )
+    live_local_policy_enforcement_required = bool(
+        mode == "live"
+        and demo_account is False
+        and ea_status.get("liveArmed") is True
+    )
+    live_local_policy_ready = bool(
+        not live_local_policy_enforcement_required
+        or (commission_policy_ready and exact_symbol_allowlist_ready)
+    )
     base_trade_ready = (
         ea_status["autoTradingAllowed"] is True
         and ea_status["tradeAllowed"] is True
         and ea_status["killSwitchActive"] is False
         and ea_status["executionGuardReady"] is True
         and portfolio_policy_evidence_ready
+        and live_local_policy_ready
     )
     backend_signer_ready = (
         backend_public["signedCommandVerificationAvailable"] is True
@@ -57451,6 +58209,8 @@ def mt4_trade_gateway_status_read_model() -> dict:
             backend_status=backend_public,
             init_status=init_status,
             order_history=order_history,
+            ea_status=ea_status,
+            ea_status_reason=reason_code,
         ),
         **public_ea_status,
         "selectionRevision": selection_revision,
@@ -57459,6 +58219,7 @@ def mt4_trade_gateway_status_read_model() -> dict:
         "executionGuardReady": bool(
             ea_status["executionGuardReady"] is True
             and portfolio_policy_evidence_ready
+            and live_local_policy_ready
             and (mode == "shadow" or account_identity_available)
             and (
                 mode != "live"
@@ -57475,6 +58236,12 @@ def mt4_trade_gateway_status_read_model() -> dict:
                 and mode == "live"
                 and not single_host_live_acknowledgement_ready
             )
+            else "LIVE_COMMISSION_POLICY_UNCONFIRMED"
+            if live_local_policy_enforcement_required
+            and not commission_policy_ready
+            else "LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST"
+            if live_local_policy_enforcement_required
+            and not exact_symbol_allowlist_ready
             else str(ea_status["executionGuardReason"])
             if account_identity_available
             else "ACCOUNT_IDENTITY_UNAVAILABLE"
@@ -57500,10 +58267,16 @@ def mt4_trade_gateway_status_read_model() -> dict:
             if public_candidate.get("platform") == "mt5"
             and mode == "live"
             and not single_host_live_acknowledgement_ready
-            else "execution_guard_not_ready"
-            if public_status == "execution_guard_blocked"
             else "live_arm_not_enabled"
             if mode == "live" and ea_status["liveArmed"] is not True
+            else "live_commission_policy_unconfirmed"
+            if live_local_policy_enforcement_required
+            and not commission_policy_ready
+            else "live_symbol_requires_exact_allowlist"
+            if live_local_policy_enforcement_required
+            and not exact_symbol_allowlist_ready
+            else "execution_guard_not_ready"
+            if public_status == "execution_guard_blocked"
             else signed_verification_block_reason
             if mode == "demo" and not signed_command_verification_ready
             else live_signature_block_reason

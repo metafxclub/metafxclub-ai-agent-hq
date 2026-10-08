@@ -44,7 +44,7 @@ if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
     throw "ชุด Source ไม่สมบูรณ์: ไม่พบ installer\install.ps1"
 }
 
-$statusLines = @(Invoke-GitChecked -Arguments @("status", "--porcelain", "--untracked-files=normal") -FailureMessage "ตรวจสถานะ Git ไม่สำเร็จ" -Capture)
+$statusLines = @(Invoke-GitChecked -Arguments @("status", "--porcelain", "--untracked-files=all") -FailureMessage "ตรวจสถานะ Git ไม่สำเร็จ" -Capture)
 if ($statusLines.Count -gt 0) {
     throw "พบไฟล์ที่แก้หรือไฟล์ใหม่ใน Source จึงหยุดก่อนอัปเดต กรุณา Commit, Stash หรือสำรองงานของตนเองก่อน"
 }
@@ -107,11 +107,20 @@ if ($SkipLaunch) {
 Write-Host "กำลังนำ Source ที่อัปเดตแล้วไปติดตั้งในตำแหน่งถาวร" -ForegroundColor Cyan
 & powershell.exe @installerArguments
 $installExitCode = $LASTEXITCODE
-if ($installExitCode -ne 0) {
+if ($installExitCode -notin @(0, 2, 3, 4)) {
     throw "Source อัปเดตแล้ว แต่ติดตั้ง Runtime ไม่สำเร็จ (รหัส $installExitCode) กรุณารัน 1-INSTALL-HQ.bat อีกครั้ง"
 }
 
 $commit = ((Invoke-GitChecked -Arguments @("rev-parse", "--short", "HEAD") -FailureMessage "อ่าน Commit หลังอัปเดตไม่สำเร็จ" -Capture) | Select-Object -Last 1).Trim()
+if ($installExitCode -in @(2, 3, 4)) {
+    $repairScope = switch ($installExitCode) {
+        2 { "Google OAuth" }
+        3 { "Watchdog" }
+        4 { "Google OAuth และ Watchdog" }
+    }
+    Write-Warning ("อัปเดต Source และ Runtime แล้ว: Branch {0} • Commit {1} แต่ {2} ยังต้อง Repair ตามคำสั่งใน install-result.json (รหัส {3}); ห้ามติดตั้ง Source ซ้ำ" -f $branch, $commit, $repairScope, $installExitCode)
+    exit $installExitCode
+}
 Write-Host "อัปเดตสำเร็จ: Branch $branch • Commit $commit" -ForegroundColor Green
 Write-Host "ข้อมูล Mission, Memory, Log และ Codex Login ของผู้ใช้ไม่ได้ถูกส่งขึ้น GitHub"
 exit 0

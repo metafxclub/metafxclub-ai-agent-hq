@@ -289,6 +289,72 @@ class ConservativeMoneyManagementModelTests(unittest.TestCase):
         self.assertEqual(standard.volume, Decimal("0.1"))
         self.assertEqual(cent.volume, standard.volume)
 
+    def test_standard_and_cent_commission_scaling_preserves_lot_and_wrong_units_overrisk(self) -> None:
+        """Commission must use the same native account-money unit as P/L."""
+
+        standard_gross_stop_loss = Decimal("930")
+        standard_round_trip_commission = Decimal("7")
+        cent_scale = Decimal("100")
+        common = {
+            "mode": "risk_percent",
+            "risk_percent": "1",
+            "minimum": "0.001",
+            "maximum": "100",
+            "step": "0.001",
+        }
+
+        standard = conservative_volume(
+            **common,
+            balance="10000",
+            equity="10000",
+            loss_per_lot=(
+                standard_gross_stop_loss + standard_round_trip_commission
+            ),
+        )
+        cent = conservative_volume(
+            **common,
+            balance="1000000",
+            equity="1000000",
+            loss_per_lot=(
+                standard_gross_stop_loss * cent_scale
+                + standard_round_trip_commission * cent_scale
+            ),
+        )
+
+        self.assertEqual(standard.volume, Decimal("0.106"))
+        self.assertEqual(cent.volume, standard.volume)
+        self.assertEqual(cent.risk_budget, standard.risk_budget * cent_scale)
+        self.assertEqual(
+            cent.projected_loss,
+            standard.projected_loss * cent_scale,
+        )
+
+        # Supplying `7` to an account whose terminal reports money in cents
+        # means seven cents, not USD 7.  It produces a larger lot.  Revalue that
+        # lot with the actual 700-cent round-trip cost to demonstrate the risk
+        # budget overrun caused by the unit mistake.
+        cent_with_wrong_unscaled_commission = conservative_volume(
+            **common,
+            balance="1000000",
+            equity="1000000",
+            loss_per_lot=(
+                standard_gross_stop_loss * cent_scale
+                + standard_round_trip_commission
+            ),
+        )
+        self.assertGreater(
+            cent_with_wrong_unscaled_commission.volume,
+            cent.volume,
+        )
+        actual_cent_loss = cent_with_wrong_unscaled_commission.volume * (
+            standard_gross_stop_loss * cent_scale
+            + standard_round_trip_commission * cent_scale
+        )
+        self.assertGreater(
+            actual_cent_loss,
+            cent_with_wrong_unscaled_commission.risk_budget,
+        )
+
     def test_supported_volume_steps_always_round_down(self) -> None:
         expected = {
             "0.1": "1.2",

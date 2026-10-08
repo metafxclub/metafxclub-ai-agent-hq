@@ -130,6 +130,19 @@ class FrontendSymbolTimeframeContextTests(unittest.TestCase):
         self.assertIn("activeHistoryPageState.sourceReportUpdatedAt !== reportUpdatedAt", render)
         self.assertIn("!activeHistoryPageState.errorMessage", render)
 
+    def test_daily_uses_compact_market_line_while_live_and_history_keep_context_banner(self) -> None:
+        daily = function_block(self.main, "function renderSignalDailyPanel(report = {})")
+        live = function_block(self.main, "function renderSignalLivePanel(report = {})")
+        history = function_block(self.main, "function renderSignalHistoryPanel(")
+        self.assertIn("data-signal-daily-market-line", daily)
+        self.assertIn("`Platform ${platformLabel}`", daily)
+        self.assertIn("`คู่เงิน ${market.symbol", daily)
+        self.assertIn("`Timeframe ${market.timeframe", daily)
+        self.assertNotIn("createSignalStreamContextBanner", daily)
+        self.assertIn("createSignalStreamContextBanner(report)", live)
+        self.assertIn("createSignalStreamContextBanner(report, { historyControls: true })", history)
+        self.assertIn(".signal-daily-market-line", self.styles)
+
     def test_context_card_has_focus_mobile_and_alert_styles(self) -> None:
         self.assertIn(".signal-stream-context", self.styles)
         self.assertIn('.signal-stream-prerequisite[data-tone="error"]', self.styles)

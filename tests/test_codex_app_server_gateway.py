@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -428,31 +429,57 @@ class LaunchAndDiscoveryTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_default_factory_uses_bounded_deferred_reader_only_when_enabled(self) -> None:
-        deferred = gateway_module._default_client_factory(
-            approval_handler=gateway_module.fail_closed_approval_handler,
-            codex_bin=None,
-            cwd=str(self.root),
-            environment={},
-            deferred_server_requests_supported=True,
-        )
-        ordinary = gateway_module._default_client_factory(
-            approval_handler=gateway_module.fail_closed_approval_handler,
-            codex_bin=None,
-            cwd=str(self.root),
-            environment={},
-            deferred_server_requests_supported=False,
-        )
-        try:
-            self.assertIsInstance(
-                deferred, gateway_module._DeferredServerRequestReaderMixin
+        sdk_module = types.ModuleType("openai_codex")
+        sdk_module.__path__ = []
+        client_module = types.ModuleType("openai_codex.client")
+
+        class StubCodexConfig:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+
+        class StubCodexClient:
+            def __init__(self, config, *, approval_handler) -> None:
+                self.config = config
+                self.approval_handler = approval_handler
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        sdk_module.CodexConfig = StubCodexConfig
+        client_module.CodexClient = StubCodexClient
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "openai_codex": sdk_module,
+                "openai_codex.client": client_module,
+            },
+        ):
+            deferred = gateway_module._default_client_factory(
+                approval_handler=gateway_module.fail_closed_approval_handler,
+                codex_bin=None,
+                cwd=str(self.root),
+                environment={},
+                deferred_server_requests_supported=True,
             )
-            self.assertNotIsInstance(
-                ordinary, gateway_module._DeferredServerRequestReaderMixin
+            ordinary = gateway_module._default_client_factory(
+                approval_handler=gateway_module.fail_closed_approval_handler,
+                codex_bin=None,
+                cwd=str(self.root),
+                environment={},
+                deferred_server_requests_supported=False,
             )
-            self.assertEqual(deferred._MAX_SERVER_REQUEST_WORKERS, 4)
-        finally:
-            deferred.close()
-            ordinary.close()
+            try:
+                self.assertIsInstance(
+                    deferred, gateway_module._DeferredServerRequestReaderMixin
+                )
+                self.assertNotIsInstance(
+                    ordinary, gateway_module._DeferredServerRequestReaderMixin
+                )
+                self.assertEqual(deferred._MAX_SERVER_REQUEST_WORKERS, 4)
+            finally:
+                deferred.close()
+                ordinary.close()
 
     def test_stdio_launch_is_process_authenticated_and_strict(self) -> None:
         spec = gateway_module.build_app_server_launch_spec(

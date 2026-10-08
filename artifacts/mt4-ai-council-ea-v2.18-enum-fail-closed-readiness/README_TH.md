@@ -107,7 +107,8 @@ Gateway ใช้ Strict Allowlist ของ Field ดังนั้น Field �
 | `FixedLot` | `0.01` | Lot คงที่เมื่อเลือก `MONEY_MANAGEMENT_FIXED_LOT` |
 | `RiskPercent` | `1.0` | งบขาดทุนที่วางแผนไว้ถึง SL เป็นเปอร์เซ็นต์ของฐานเงินที่เลือก และต้องไม่เกิน `MaxLossPerTradePercent` |
 | `RiskCapitalBase` | `RISK_CAPITAL_EQUITY` | เลือกฐานคำนวณเป็น Equity (แนะนำ) หรือ Balance |
-| `EstimatedCommissionPerLot` | `0.0` | ค่าธรรมเนียมไป-กลับโดยประมาณต่อ 1 Lot ในหน่วยเงินที่บัญชีรายงาน ใช้เป็นเงินสำรองในสูตร Risk Percent |
+| `EstimatedCommissionPerLot` | `0.0` | ค่าคอมมิชชันไป-กลับแบบเผื่อความปลอดภัยต่อ 1.0 Lot ในหน่วยเงินที่บัญชีรายงาน (ไม่ใช่ USD เสมอ) ใช้ทั้ง Fixed Lot และ Risk Percent |
+| `CommissionFreeAccountConfirmed` | `false` | เปิดเฉพาะเมื่อบัญชีไม่มีค่าคอมมิชชันจริง โหมด Live จะไม่พร้อมหากค่าคอมมิชชันหลังปัด 8 ตำแหน่งต่ำกว่า `0.00000001` และไม่ได้ยืนยันค่านี้ |
 | `MagicNumber` | `4186001` | Magic Number ของ Gateway |
 | `PollIntervalSeconds` | `1` | รอบตรวจคำสั่งและ Heartbeat; เวอร์ชันนี้บังคับเป็น 1 วินาที |
 | `SnapshotIntervalSeconds` | `5` | รอบส่ง Snapshot ปรับได้ 2–60 วินาที |
@@ -127,13 +128,13 @@ Gateway ใช้ Strict Allowlist ของ Field ดังนั้น Field �
 | `MaxAccountEquityDrawdownPercent` | `10.0` | Drawdown ปัจจุบันของบัญชีสูงสุดสำหรับคำสั่งใหม่ |
 | `MinRewardRiskRatio` | `1.0` | Reward/Risk ขั้นต่ำจาก SL/TP ที่ AI เสนอ |
 | `MinProjectedMarginLevelPercent` | `300.0` | Margin Level คาดการณ์ขั้นต่ำหลังเปิด Order |
-| `AllowedSymbols` | `XAUUSD` | รายการ Symbol คั่นด้วยจุลภาค; ชื่อฐานยอมรับ suffix ของ Broker ที่เป็นตัวอักษร/ตัวเลข/`.`/`_`/`#`/`-` ยาวไม่เกิน 8 ตัว แต่คำสั่งต้องใช้ชื่อเต็มตรงกับกราฟ เช่น `XAUUSD.m` หรือ `EURUSD#` (`+` ไม่รองรับ) |
+| `AllowedSymbols` | `XAUUSD` | รายการ Symbol คั่นด้วยจุลภาค; Shadow/Demo ยอมรับ prefix/suffix ของ Broker แบบมีขอบเขต แต่ Live ต้องมีชื่อเต็มของ Symbol บนกราฟเป็น token ตรงตัว เช่น `mXAUUSD`, `XAUUSD.m` หรือ `EURUSD#` (`+` ไม่รองรับ) |
 | `AllowedTimeframes` | `M5,...,MN1` | Timeframe Allowlist; ไม่รองรับ M1 |
 | `RequireHeartbeat` | `true` | Fail-closed เมื่อไม่มี Heartbeat |
 
-ในโหมด Fixed Lot ค่า `FixedLot` ต้องตรงกับ Min/Max/Lot Step ของ Broker หากไม่ตรง EA จะไม่เริ่มทำงาน ในโหมด Risk Percent EA คำนวณขาดทุนต่อ 1 Lot จาก Tick Size/Tick Value ที่ Terminal รายงาน รวมระยะเผื่อ Slippage และ `EstimatedCommissionPerLot` แล้วปัด Lot ลงเท่านั้น หากผลต่ำกว่า Min Lot จะไม่เปิด Order ค่า `0.0001` จึงใช้ได้เฉพาะ Symbol/บัญชีที่ Broker รายงานว่า Min/Step รองรับจริง
+ในโหมด Fixed Lot ค่า `FixedLot` ต้องตรงกับ Min/Max/Lot Step ของ Broker หากไม่ตรง EA จะไม่เริ่มทำงาน ในโหมด Risk Percent EA คำนวณขาดทุนต่อ 1 Lot จาก Tick Size/Tick Value ที่ Terminal รายงาน รวมระยะเผื่อ Slippage และ `EstimatedCommissionPerLot` แล้วปัด Lot ลงเท่านั้น หากผลต่ำกว่า Min Lot จะไม่เปิด Order ค่า `0.0001` จึงใช้ได้เฉพาะ Symbol/บัญชีที่ Broker รายงานว่า Min/Step รองรับจริง โหมด Live ทั้งสองแบบต้องตั้งค่าคอมมิชชันไป-กลับ หรือยืนยัน `CommissionFreeAccountConfirmed=true` เฉพาะบัญชีที่ไม่มีค่าคอมมิชชันจริง มิฉะนั้นจะหยุดด้วย `LIVE_COMMISSION_POLICY_UNCONFIRMED`
 
-บัญชี Standard, Cent และ Pro-Cent ใช้สูตรเดียวกัน เพราะ Balance/Equity และ Tick Value อยู่ในหน่วยเงินบัญชีที่ Broker รายงานอยู่แล้ว ห้ามคูณหรือหาร 100 จากชื่อบัญชีเอง อย่างไรก็ตาม Risk Percent เป็นเพียงความเสี่ยงที่วางแผนไว้ก่อนส่งคำสั่ง ไม่รับประกันผลขาดทุนจริงแบบเป๊ะ เพราะ Gap, Slippage ที่มากกว่าค่าที่เผื่อ, Commission, Swap และการ Fill ของ Broker อาจทำให้ผลจริงต่างออกไป ต้องผ่าน Shadow และ Demo ก่อนเปิด Live เสมอ
+บัญชี Standard, Cent และ Pro-Cent ใช้สูตรเดียวกัน เพราะ Balance/Equity, Tick Value และค่าคอมมิชชันต้องอยู่ในหน่วยเงินบัญชีที่ Broker รายงานอยู่แล้ว ห้ามคูณหรือหาร 100 จากชื่อบัญชีเอง ตัวอย่าง: ถ้าบัญชี Cent รายงานเงินเป็น USC และค่าคอมมิชชันจริงเทียบเท่า USD 7 ต่อ 1 Lot ต้องกรอก `700` USC ไม่ใช่ `7` อย่างไรก็ตาม Risk Percent เป็นเพียงความเสี่ยงที่วางแผนไว้ก่อนส่งคำสั่ง ไม่รับประกันผลขาดทุนจริงแบบเป๊ะ เพราะ Gap, Slippage ที่มากกว่าค่าที่เผื่อ, Commission, Swap และการ Fill ของ Broker อาจทำให้ผลจริงต่างออกไป ต้องผ่าน Shadow และ Demo ก่อนเปิด Live เสมอ
 
 ## ตำแหน่งไฟล์ใน FILE_COMMON
 
@@ -390,6 +391,8 @@ Stream identity และ `command.symbol` ใช้ชื่อ Symbol เต�
 
 - ใช้บัญชีจริงเฉพาะหลัง Shadow และ Demo ผ่านครบ รวมถึง Restart, Duplicate, Expired Command, Heartbeat, Key mismatch และ Kill Switch
 - เลือก `GATEWAY_LIVE` โดยคง `LiveArmed=false` ก่อนได้ EA ต้องยังอยู่บนกราฟและ Dashboard ต้องแสดงว่า Live ยังไม่ Arm พร้อมสาเหตุของ Key แบบอ่านอย่างเดียว
+- ใส่ชื่อ Symbol เต็มที่ MT4 แสดงบนกราฟเป็น token ตรงตัวใน `AllowedSymbols` รวม prefix/suffix ของ Broker ทุกตัวอักษร
+- ตั้ง `EstimatedCommissionPerLot` เป็นค่าคอมมิชชันไป-กลับแบบเผื่อความปลอดภัยต่อ 1.0 Lot ในหน่วยเงินของบัญชี หรือเปิด `CommissionFreeAccountConfirmed` เฉพาะบัญชีที่ไม่มีค่าคอมมิชชันจริง
 - คัดลอกเฉพาะ Active Key ID ที่ Dashboard แสดงไปใส่ `TrustedSigningKeyId` ใน EA; ห้ามคัดลอก Secret Key
 - ตั้ง `GatewayMode=GATEWAY_LIVE`, `LiveArmed=true` และตรวจว่า Dashboard แสดง Backend signer, EA verifier, Key match/pin และ Execution Guard พร้อมทั้งหมด
 - `OrderSend()` จะทำงานได้เมื่อคะแนนถึงเกณฑ์ที่ผู้ใช้เลือก `1/3`, `2/3` หรือ `3/3`, ไม่มีเสียง BUY/SELL ตรงข้ามกัน, Price Action ส่ง SL/TP ที่ผ่าน Gate, ข่าวไม่ VETO และ Guard ทุกชั้นผ่าน

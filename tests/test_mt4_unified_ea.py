@@ -14,6 +14,12 @@ UNIFIED_EA_PATH = (
     / "mt4-ai-council-ea-v2.18-enum-fail-closed-readiness"
     / "MetafxHQTradeGateway.mq4"
 )
+MT5_GATEWAY_PATH = (
+    PROJECT_ROOT
+    / "integrations"
+    / "mt5-trade-gateway"
+    / "MetafxHQTradeGateway.mq5"
+)
 STANDALONE_INDICATOR_PATH = (
     PROJECT_ROOT
     / "integrations"
@@ -102,6 +108,43 @@ def risk_volume_model(
     if lots < minimum:
         return None
     return lots, loss_per_lot * lots
+
+
+def broker_symbol_match_model(csv: str, candidate: str) -> bool:
+    """Mirror the bounded MT4 canonical-symbol/affix policy for edge cases."""
+
+    normalized_candidate = candidate.strip().upper()
+    allowed_affix = re.compile(r"^[A-Z0-9._#-]*$")
+    for raw_allowed in csv.split(","):
+        allowed = raw_allowed.strip().upper()
+        if allowed == normalized_candidate:
+            return True
+        if len(allowed) < 6 or len(normalized_candidate) <= len(allowed):
+            continue
+        if len(normalized_candidate) > len(allowed) + 16:
+            continue
+        matches = [
+            start
+            for start in range(len(normalized_candidate) - len(allowed) + 1)
+            if normalized_candidate[start : start + len(allowed)] == allowed
+        ]
+        if len(matches) != 1:
+            continue
+        for prefix_length in range(9):
+            suffix_length = len(normalized_candidate) - prefix_length - len(allowed)
+            if suffix_length < 0 or suffix_length > 8:
+                continue
+            if normalized_candidate[
+                prefix_length : prefix_length + len(allowed)
+            ] != allowed:
+                continue
+            prefix = normalized_candidate[:prefix_length]
+            suffix = normalized_candidate[prefix_length + len(allowed) :]
+            if prefix and not (len(prefix) == 1 or prefix[-1] in "._#-"):
+                continue
+            if allowed_affix.fullmatch(prefix) and allowed_affix.fullmatch(suffix):
+                return True
+    return False
 
 
 def _legacy_loss_latch_scan_pass_model(
@@ -1101,10 +1144,13 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("LifecycleAttemptPath", lifecycle)
         self.assertIn("automaticRetry", lifecycle)
         self.assertIn("LiveArmed", close_guard)
-        self.assertIn("GatewayMode == GATEWAY_DEMO && !IsDemo()", close_guard)
+        self.assertIn(
+            "GatewayMode == GATEWAY_DEMO && !IsNonRealAccount()",
+            close_guard,
+        )
         self.assertRegex(
             close_guard,
-            r"GatewayMode\s*==\s*GATEWAY_LIVE[\s\S]*?IsDemo\s*\(\s*\)[\s\S]*?!LiveArmed",
+            r"GatewayMode\s*==\s*GATEWAY_LIVE[\s\S]*?IsNonRealAccount\s*\(\s*\)[\s\S]*?!LiveArmed",
         )
         self.assertIn("LifecycleCloseGuard", lifecycle)
 
@@ -1123,9 +1169,9 @@ class MT4UnifiedEATests(unittest.TestCase):
             "GATEWAY_SHADOW",
             "IsTesting()",
             "IsOptimization()",
-            "GatewayMode == GATEWAY_DEMO && !IsDemo()",
+            "GatewayMode == GATEWAY_DEMO && !IsNonRealAccount()",
             "GatewayMode == GATEWAY_LIVE",
-            "IsDemo()",
+            "IsNonRealAccount()",
             "LiveArmed",
             "SignedCommandVerificationAvailable",
         ):
@@ -1485,6 +1531,7 @@ class MT4UnifiedEATests(unittest.TestCase):
             "riskPercent",
             "riskCapitalBase",
             "estimatedCommissionPerLot",
+            "commissionFreeAccountConfirmed",
             "brokerVolumeMin",
             "brokerVolumeMax",
             "brokerVolumeStep",
@@ -1560,7 +1607,15 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("g_trusted_signing_key_id", capabilities)
         self.assertNotIn("TrustedSigningKeyId", capabilities)
         self.assertIn("GatewayMode == GATEWAY_LIVE", capabilities)
-        self.assertIn("!demo_account && signed_ready && explicit_live_pin && LiveArmed", capabilities)
+        for live_guard in (
+            "!demo_account",
+            "signed_ready",
+            "explicit_live_pin",
+            "live_commission_policy_confirmed",
+            "live_symbol_exact_allowlist_confirmed",
+            "LiveArmed",
+        ):
+            self.assertIn(live_guard, capabilities)
 
     def test_optional_pin_is_normalized_and_only_armed_live_fails_closed(self) -> None:
         lowercase = named_block(self.code, r"\bstring\s+Lowercase\s*\([^)]*\)")
@@ -1665,7 +1720,14 @@ class MT4UnifiedEATests(unittest.TestCase):
 
     def test_capabilities_report_demo_and_live_readiness_from_actual_account(self) -> None:
         account_mode = named_block(self.code, r"\bstring\s+AccountModeName\s*\([^)]*\)")
-        self.assertIn("IsDemo()", account_mode)
+        self.assertIn("IsNonRealAccount()", account_mode)
+        non_real = named_block(
+            self.code,
+            r"\bbool\s+IsNonRealAccount\s*\([^)]*\)",
+        )
+        self.assertIn("AccountInfoInteger(ACCOUNT_TRADE_MODE)", non_real)
+        self.assertIn("mode != ACCOUNT_TRADE_MODE_REAL", non_real)
+        self.assertNotIn("IsDemo()", non_real)
         self.assertIn('return "demo"', account_mode)
         self.assertIn('return "live"', account_mode)
 
@@ -1685,7 +1747,7 @@ class MT4UnifiedEATests(unittest.TestCase):
         )
         self.assertRegex(
             capabilities,
-            r"live_ready\s*=\s*GatewayMode\s*==\s*GATEWAY_LIVE\s*&&\s*!demo_account\s*&&\s*signed_ready\s*&&\s*explicit_live_pin\s*&&\s*LiveArmed",
+            r"live_ready\s*=\s*GatewayMode\s*==\s*GATEWAY_LIVE[\s\S]*?!demo_account[\s\S]*?signed_ready[\s\S]*?explicit_live_pin[\s\S]*?live_commission_policy_confirmed[\s\S]*?live_symbol_exact_allowlist_confirmed[\s\S]*?LiveArmed",
         )
         self.assertIn("LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT", capabilities)
         self.assertLess(
@@ -1750,9 +1812,9 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("tick_size_points * point", metadata)
         self.assertNotIn("tick_size_points < 1.0", metadata)
         self.assertIn("risk_distance / tick_size_price * tick_value", estimate)
-        self.assertIn("EstimatedCommissionPerLot", estimate)
+        self.assertIn("EffectiveEstimatedCommissionPerLot", estimate)
         self.assertIn("SlippagePoints * point", estimate)
-        self.assertIn("gross_reward_per_lot - EstimatedCommissionPerLot", estimate)
+        self.assertIn("gross_reward_per_lot - effective_commission", estimate)
         self.assertIn("net_reward_per_lot / loss_per_lot", estimate)
         self.assertNotRegex(self.code, r"(?i)AccountName\s*\(")
         self.assertNotRegex(self.code, r"(?i)(?:cent|pro.?cent)[^\r\n;]*\*\s*100")
@@ -1956,6 +2018,41 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("JsonNumber(g_ack_risk_capital_amount, 8)", ack)
         self.assertIn("JsonNumber(g_ack_estimated_risk_money, 8)", ack)
 
+    def test_live_commission_policy_is_explicit_and_precision_safe(self) -> None:
+        self.assertIn("input bool CommissionFreeAccountConfirmed = false;", self.code)
+        self.assertIn(
+            "Conservative round-trip commission for 1.0 lot in native account currency.",
+            UNIFIED_EA_PATH.read_text(encoding="utf-8"),
+        )
+        effective = named_block(
+            self.code,
+            r"\bdouble\s+EffectiveEstimatedCommissionPerLot\s*\([^)]*\)",
+        )
+        self.assertIn("NormalizeDouble(EstimatedCommissionPerLot, 8)", effective)
+        policy = named_block(
+            self.code,
+            r"\bbool\s+LiveCommissionPolicyConfirmed\s*\([^)]*\)",
+        )
+        self.assertIn("EffectiveEstimatedCommissionPerLot() >= 0.00000001", policy)
+        self.assertIn("CommissionFreeAccountConfirmed", policy)
+        validate = named_block(
+            self.code,
+            r"\bbool\s+ValidateMoneyManagementConfiguration\s*\([^)]*\)",
+        )
+        self.assertIn("GatewayMode == GATEWAY_LIVE", validate)
+        self.assertIn("LIVE_COMMISSION_POLICY_UNCONFIRMED", validate)
+        capabilities = named_block(
+            self.code,
+            r"\bstring\s+BuildCapabilitiesJson\s*\([^)]*\)",
+        )
+        self.assertIn("LiveCommissionPolicyConfirmed", capabilities)
+        self.assertIn("LIVE_COMMISSION_POLICY_UNCONFIRMED", capabilities)
+        estimate = named_block(
+            self.code,
+            r"\bbool\s+EstimateStopLossMoneyAtEntry\s*\([^)]*\)",
+        )
+        self.assertIn("EffectiveEstimatedCommissionPerLot()", estimate)
+
     def test_effective_risk_percent_is_identical_for_sizing_persistence_and_ack(self) -> None:
         effective = named_block(
             self.code,
@@ -2023,27 +2120,82 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("double lot_tolerance = 0.00000001", evidence)
         self.assertNotIn("MODE_LOTSTEP) / 2.0", evidence)
 
-    def test_broker_suffix_allowlist_still_requires_exact_attached_command_symbol(self) -> None:
+    def test_broker_affix_allowlist_still_requires_exact_attached_command_symbol(self) -> None:
         matcher = named_block(
             self.code,
             r"\bbool\s+IsAllowedBrokerSymbol\s*\([^)]*\)",
         )
         self.assertIn("base_length < 6", matcher)
+        self.assertIn("HasSingleBrokerBaseOccurrence", matcher)
+        self.assertIn("prefix_length <= 8", matcher)
         self.assertIn("suffix_length > 8", matcher)
         self.assertIn("IsBrokerSuffixCharacter", matcher)
+        self.assertIn("IsAllowedBrokerPrefix", matcher)
         suffix_character = named_block(
             self.code,
             r"\bbool\s+IsBrokerSuffixCharacter\s*\([^)]*\)",
         )
         self.assertIn("code == '#'", suffix_character)
         self.assertNotIn("code == '+'", suffix_character)
+        namespace_delimiter = named_block(
+            self.code,
+            r"\bbool\s+IsBrokerNamespaceDelimiter\s*\([^)]*\)",
+        )
+        self.assertIn("code == '.'", namespace_delimiter)
+        prefix_policy = named_block(
+            self.code,
+            r"\bbool\s+IsAllowedBrokerPrefix\s*\([^)]*\)",
+        )
+        self.assertIn("prefix_length == 1", prefix_policy)
+        self.assertIn("IsBrokerNamespaceDelimiter", prefix_policy)
+        single_occurrence = named_block(
+            self.code,
+            r"\bbool\s+HasSingleBrokerBaseOccurrence\s*\([^)]*\)",
+        )
+        self.assertIn("StringFind(candidate, allowed)", single_occurrence)
+        self.assertIn("StringFind(candidate, allowed, first + 1)", single_occurrence)
         runtime = named_block(self.code, r"\bbool\s+ValidateRuntime\s*\([^)]*\)")
         self.assertIn("IsAllowedBrokerSymbol(AllowedSymbols, command.symbol)", runtime)
+        self.assertIn("CsvContains(AllowedSymbols, command.symbol)", runtime)
+        self.assertIn("LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST", runtime)
         self.assertIn("Uppercase(Symbol()) != command.symbol", runtime)
         execute = named_block(self.code, r"\bvoid\s+ExecuteCommand\s*\([^)]*\)")
         self.assertRegex(execute, r"OrderSend\s*\(\s*Symbol\s*\(\s*\)")
         on_init = named_block(self.code, r"\bint\s+OnInit\s*\([^)]*\)")
         self.assertIn("IsAllowedBrokerSymbol(AllowedSymbols, Symbol())", on_init)
+        self.assertIn("LiveSymbolExactAllowlistConfirmed()", on_init)
+        self.assertIn("LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST", on_init)
+        exact_live = named_block(
+            self.code,
+            r"\bbool\s+LiveSymbolExactAllowlistConfirmed\s*\([^)]*\)",
+        )
+        self.assertIn("CsvContains(AllowedSymbols, Symbol())", exact_live)
+
+        accepted = (
+            "XAUUSD",
+            "XAUUSD.m",
+            "XAUUSD#",
+            "XAUUSDpro",
+            "mXAUUSD",
+            "GOLD.XAUUSD",
+            "mXAUUSD.pro",
+        )
+        rejected = (
+            "XAUUSD+",
+            "123456789XAUUSD",
+            "XAUUSD123456789",
+            "XAUUSDXAUUSD",
+            "mXAUUSDXAUUSD.pro",
+            "FOOXAUUSD",
+            "GOLDXAUUSD",
+            "EURUSD",
+        )
+        for symbol in accepted:
+            with self.subTest(accepted=symbol):
+                self.assertTrue(broker_symbol_match_model("XAUUSD", symbol))
+        for symbol in rejected:
+            with self.subTest(rejected=symbol):
+                self.assertFalse(broker_symbol_match_model("XAUUSD", symbol))
 
     def test_command_identity_matches_backend_comment_and_replay_contract(self) -> None:
         runtime = named_block(self.code, r"\bbool\s+ValidateRuntime\s*\([^)]*\)")
@@ -2154,6 +2306,10 @@ class MT4UnifiedEATests(unittest.TestCase):
         self.assertIn("values[sorted_index] == values[sorted_index - 1]", normalize)
         for field in (
             "managedMagicNumbers",
+            "positionSizingMode",
+            "riskPercent",
+            "riskCapitalBase",
+            "commissionFreeAccountConfirmed",
             "maxManagedOpenPositions",
             "maxManagedTotalLots",
             "estimatedCommissionPerLot",
@@ -2165,6 +2321,34 @@ class MT4UnifiedEATests(unittest.TestCase):
             "maxAccountEquityDrawdownPercent",
         ):
             self.assertIn(field, policy)
+        mt5_policy = named_block(
+            MT5_GATEWAY_PATH.read_text(encoding="utf-8"),
+            r"\bbool\s+BuildPortfolioPolicyCanonical\s*\([^)]*\)",
+        )
+        policy_fields = re.findall(r'canonical\s*\+=\s*"\|([^=]+)=', policy)
+        mt5_policy_fields = re.findall(
+            r'canonical\s*\+=\s*"\|([^=]+)=', mt5_policy
+        )
+        self.assertEqual(
+            policy_fields,
+            [
+                "managedMagicNumbers",
+                "positionSizingMode",
+                "riskPercent",
+                "riskCapitalBase",
+                "estimatedCommissionPerLot",
+                "commissionFreeAccountConfirmed",
+                "maxManagedOpenPositions",
+                "maxManagedTotalLots",
+                "maxTradesPerBrokerDay",
+                "maxDailyLossPercent",
+                "maxManagedWeeklyLossPercent",
+                "maxConsecutiveManagedLosses",
+                "consecutiveLossCooldownMinutes",
+                "maxAccountEquityDrawdownPercent",
+            ],
+        )
+        self.assertEqual(policy_fields, mt5_policy_fields)
         self.assertIn("Sha256TextHex", policy)
         self.assertIn("AccountIdentityDigest", directory)
         self.assertNotIn("SnapshotChannel", directory)

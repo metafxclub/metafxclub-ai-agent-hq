@@ -860,9 +860,11 @@ class AiTradeCouncilFailureInjectionTests(unittest.TestCase):
             checklist_gateway_snapshots.append(_kwargs.get("gateway_snapshot"))
             return {
                 "metatraderSelection": {
-                    "status": "not_selected",
-                    "candidates": [],
-                    "selectedCandidate": None,
+                    "status": "selected",
+                    "configurationStatus": "configured",
+                    "candidates": [candidate],
+                    "selectedCandidate": candidate,
+                    "selectionRevision": 1,
                 },
                 "items": [],
             }
@@ -875,15 +877,40 @@ class AiTradeCouncilFailureInjectionTests(unittest.TestCase):
                 "selected_terminal_missing",
             )
 
+        candidate_id = "mtc-" + ("a" * 26)
         gateway_snapshot = self.bridge._empty_mt4_trade_gateway_status()
         gateway_snapshot.update({
             "connected": True,
             "status": "shadow",
             "reasonCode": "ready",
+            "selectedCandidateId": candidate_id,
+            "selectedPlatform": "mt4",
+            "selectionRevision": 1,
             "executionGuardReady": True,
             "executionGuardReason": "ATOMIC_SNAPSHOT_TEST",
             "portfolioPolicyStatus": "ready",
         })
+        candidate = {
+            "candidateId": candidate_id,
+            "platform": "mt4",
+            "runningState": "platform_running_detected",
+        }
+        global_snapshot = {
+            "status": "configured",
+            "selectedPlatform": "mt4",
+            "selectedCandidate": candidate,
+            "candidates": [candidate],
+            "platforms": {
+                "mt4": {
+                    "targets": [{
+                        "propId": self.bridge.AI_TRADE_COUNCIL_PROP_ID,
+                        "status": "configured",
+                        "selectedCandidate": candidate,
+                        "selectionRevision": 1,
+                    }],
+                },
+            },
+        }
 
         with (
             mock.patch.object(self.bridge, "load_missions", return_value=[]),
@@ -917,6 +944,19 @@ class AiTradeCouncilFailureInjectionTests(unittest.TestCase):
                 "mt4_trade_gateway_status_read_model",
                 return_value=gateway_snapshot,
             ) as gateway_reader,
+            mock.patch.object(
+                self.bridge,
+                "global_metatrader_hub_read_model",
+                return_value=global_snapshot,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_metatrader_selection_token",
+                return_value={
+                    "candidateId": candidate_id,
+                    "selectionRevision": 1,
+                },
+            ),
             mock.patch.object(
                 self.bridge,
                 "load_ai_trade_council_automation_store",

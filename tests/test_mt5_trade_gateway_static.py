@@ -279,6 +279,71 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
         self.assertIn('"MT4|" + StringFormat("%I64d", account_login)', self.code)
         self.assertIn('"MetafxHQ\\\\locks\\\\account-execution-"', self.code)
 
+    def test_broker_symbol_matching_accepts_bounded_prefix_and_suffix_only(self) -> None:
+        matcher = re.search(
+            r"(?s)bool\s+IsAllowedBrokerSymbol\s*\([^)]*\)\s*\{(.*?)\n\}\n\n\nbool\s+IsManagedMagic",
+            self.code,
+        )
+        self.assertIsNotNone(matcher)
+        body = matcher.group(1)
+        for token in (
+            "prefix_length <= 8",
+            "suffix_length > 8",
+            "IsAllowedBrokerPrefix(",
+            "HasSingleBrokerBaseOccurrence(normalized_candidate, allowed)",
+            "prefix_length + base_length",
+            "IsBrokerSuffixCharacter(",
+        ):
+            self.assertIn(token, body)
+
+        prefix = re.search(
+            r"(?s)bool\s+IsAllowedBrokerPrefix\s*\([^)]*\)\s*\{(.*?)\n\}",
+            self.code,
+        )
+        self.assertIsNotNone(prefix)
+        self.assertIn("prefix_length == 1", prefix.group(1))
+        self.assertIn("IsBrokerNamespaceDelimiter(", prefix.group(1))
+        self.assertIn("prefix_length - 1", prefix.group(1))
+
+        uniqueness = re.search(
+            r"(?s)bool\s+HasSingleBrokerBaseOccurrence\s*\([^)]*\)\s*\{(.*?)\n\}",
+            self.code,
+        )
+        self.assertIsNotNone(uniqueness)
+        self.assertIn("StringFind(candidate, allowed)", uniqueness.group(1))
+        self.assertIn("StringFind(candidate, allowed, first + 1) < 0", uniqueness.group(1))
+
+        runtime = re.search(
+            r"(?s)bool\s+ValidateRuntime\s*\([^)]*\)\s*\{(.*?)\n\}\n\n\nbool\s+UpdateRiskTelemetry",
+            self.code,
+        )
+        self.assertIsNotNone(runtime)
+        self.assertIn("IsAllowedBrokerSymbol(AllowedSymbols, command.symbol)", runtime.group(1))
+        self.assertIn("Uppercase(_Symbol) != command.symbol", runtime.group(1))
+
+    def test_broker_symbol_matching_rejects_repeated_canonical_base(self) -> None:
+        uniqueness = re.search(
+            r"(?s)bool\s+HasSingleBrokerBaseOccurrence\s*\([^)]*\)\s*\{(.*?)\n\}",
+            self.code,
+        )
+        self.assertIsNotNone(uniqueness)
+        self.assertIn("XAUUSDXAUUSD", self.source)
+        self.assertIn("int first = StringFind(candidate, allowed)", uniqueness.group(1))
+        self.assertIn("StringFind(candidate, allowed, first + 1) < 0", uniqueness.group(1))
+
+        matcher = re.search(
+            r"(?s)bool\s+IsAllowedBrokerSymbol\s*\([^)]*\)\s*\{(.*?)\n\}\n\n\nbool\s+IsManagedMagic",
+            self.code,
+        )
+        self.assertIsNotNone(matcher)
+        body = matcher.group(1)
+        uniqueness_gate = body.find(
+            "!HasSingleBrokerBaseOccurrence(normalized_candidate, allowed)"
+        )
+        affix_loop = body.find("for(int prefix_length = 0; prefix_length <= 8; prefix_length++)")
+        self.assertGreaterEqual(uniqueness_gate, 0)
+        self.assertGreater(affix_loop, uniqueness_gate)
+
     def test_snapshot_uses_closed_copy_rates_and_deal_history(self) -> None:
         self.assertIn("CopyRates(_Symbol, _Period, 1, requested, rates)", self.code)
         self.assertIn(
@@ -490,6 +555,7 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
             "input double RiskPercent = 1.0;",
             "input ENUM_RISK_CAPITAL_BASE RiskCapitalBase = RISK_CAPITAL_EQUITY;",
             "input double EstimatedCommissionPerLot = 0.0;",
+            "input bool CommissionFreeAccountConfirmed = false;",
             "effective_risk_percent > MaxLossPerTradePercent",
         ):
             self.assertIn(token, self.code)
@@ -526,8 +592,107 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
             "effective_risk_percent > MaxLossPerTradePercent",
             "MoneyManagementMode == MONEY_MANAGEMENT_FIXED_LOT",
             "!ValidateFixedLot(reason)",
+            "GatewayMode == GATEWAY_LIVE && !LiveCommissionPolicyConfirmed()",
+            'reason = "LIVE_COMMISSION_POLICY_UNCONFIRMED"',
         ):
             self.assertIn(token, body)
+
+    def test_live_requires_explicit_commission_policy_and_exact_symbol_token(self) -> None:
+        effective_commission = re.search(
+            r"(?s)double\s+EffectiveEstimatedCommissionPerLot\s*\([^)]*\)\s*\{(.*?)\n\}",
+            self.code,
+        )
+        self.assertIsNotNone(effective_commission)
+        for token in (
+            "MathIsValidNumber(EstimatedCommissionPerLot)",
+            "NormalizeDouble(EstimatedCommissionPerLot, 8)",
+        ):
+            self.assertIn(token, effective_commission.group(1))
+
+        commission_policy = re.search(
+            r"(?s)bool\s+LiveCommissionPolicyConfirmed\s*\([^)]*\)\s*\{(.*?)\n\}",
+            self.code,
+        )
+        self.assertIsNotNone(commission_policy)
+        for token in (
+            "EstimatedCommissionPerLot >= 0.0",
+            "EstimatedCommissionPerLot <= 1000000.0",
+            "EffectiveEstimatedCommissionPerLot() >= 0.00000001",
+            "CommissionFreeAccountConfirmed",
+        ):
+            self.assertIn(token, commission_policy.group(1))
+        self.assertNotIn("EstimatedCommissionPerLot > 0.0", commission_policy.group(1))
+
+        exact_symbol = re.search(
+            r"(?s)bool\s+LiveSymbolExactAllowlistConfirmed\s*\([^)]*\)\s*\{(.*?)\n\}",
+            self.code,
+        )
+        self.assertIsNotNone(exact_symbol)
+        self.assertIn("CsvContains(AllowedSymbols, _Symbol)", exact_symbol.group(1))
+        self.assertNotIn("IsAllowedBrokerSymbol", exact_symbol.group(1))
+
+        canonical = re.search(
+            r"(?s)bool\s+BuildPortfolioPolicyCanonical\s*\([^)]*\)\s*\{(.*?)\n\}",
+            self.code,
+        )
+        self.assertIsNotNone(canonical)
+        canonical_body = canonical.group(1)
+        commission_index = canonical_body.find('"|estimatedCommissionPerLot="')
+        confirmation_index = canonical_body.find('"|commissionFreeAccountConfirmed="')
+        position_cap_index = canonical_body.find('"|maxManagedOpenPositions="')
+        self.assertGreaterEqual(commission_index, 0)
+        self.assertGreater(confirmation_index, commission_index)
+        self.assertGreater(position_cap_index, confirmation_index)
+        self.assertIn("DoubleToString(EffectiveEstimatedCommissionPerLot(), 8)", canonical_body)
+
+        capabilities = re.search(
+            r"(?s)string\s+BuildCapabilitiesJson\s*\([^)]*\)\s*\{(.*?)\n\}",
+            self.code,
+        )
+        self.assertIsNotNone(capabilities)
+        for token in (
+            "LiveCommissionPolicyConfirmed()",
+            "LiveSymbolExactAllowlistConfirmed()",
+            "LIVE_COMMISSION_POLICY_UNCONFIRMED",
+            "LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST",
+        ):
+            self.assertIn(token, capabilities.group(1))
+
+        status = re.search(
+            r"(?s)string\s+BuildStatusJson\s*\([^)]*\)\s*\{(.*?)\n\}",
+            self.code,
+        )
+        self.assertIsNotNone(status)
+        self.assertIn(r'\"commissionFreeAccountConfirmed\":', status.group(1))
+        self.assertIn("JsonBoolean(CommissionFreeAccountConfirmed)", status.group(1))
+        self.assertIn("JsonNumber(EffectiveEstimatedCommissionPerLot(), 8)", status.group(1))
+
+        runtime = re.search(
+            r"(?s)bool\s+ValidateRuntime\s*\([^)]*\)\s*\{(.*?)\n\}\n\n\nbool\s+UpdateRiskTelemetry",
+            self.code,
+        )
+        self.assertIsNotNone(runtime)
+        for token in (
+            "GatewayMode == GATEWAY_LIVE",
+            "!CsvContains(AllowedSymbols, command.symbol)",
+            'reason = "LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST"',
+            "GatewayMode != GATEWAY_LIVE",
+            "!IsAllowedBrokerSymbol(AllowedSymbols, command.symbol)",
+            "Uppercase(_Symbol) != command.symbol",
+        ):
+            self.assertIn(token, runtime.group(1))
+
+        on_init = re.search(r"(?s)int\s+OnInit\s*\(\s*\)\s*\{(.*)\Z", self.code)
+        self.assertIsNotNone(on_init)
+        on_init_body = on_init.group(1)
+        self.assertIn("!LiveSymbolExactAllowlistConfirmed()", on_init_body)
+        self.assertIn("LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST", on_init_body)
+        exact_gate_index = on_init_body.find("!LiveSymbolExactAllowlistConfirmed()")
+        broker_match_index = on_init_body.find(
+            "!IsAllowedBrokerSymbol(AllowedSymbols, _Symbol)"
+        )
+        self.assertGreaterEqual(exact_gate_index, 0)
+        self.assertGreater(broker_match_index, exact_gate_index)
 
     def test_risk_sizing_uses_broker_units_floors_volume_and_reserves_fees(self) -> None:
         sizing = re.search(
@@ -552,7 +717,7 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
             "MathMin(requested_risk_budget, balance_risk_cap)",
             "risk_budget < 0.00000001",
             "risk_budget / loss_per_lot",
-            "EstimatedCommissionPerLot * volume",
+            "EffectiveEstimatedCommissionPerLot() * volume",
             "estimated_risk_money < 0.00000001",
             'reason = "RISK_ESTIMATE_BELOW_WIRE_MINIMUM"',
             "MathFloor(",
@@ -894,6 +1059,7 @@ class Mt5TradeGatewayStaticTests(unittest.TestCase):
             r'\"riskCapitalAmount\":',
             r'\"estimatedRiskMoney\":',
             r'\"estimatedCommissionPerLot\":',
+            r'\"commissionFreeAccountConfirmed\":',
         ):
             self.assertIn(field, self.code)
         ack = re.search(

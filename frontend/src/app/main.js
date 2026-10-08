@@ -102,6 +102,7 @@ const OPERATOR_MODE_POLL_MS = 30000;
 const AGENT_COLLABORATION_POLL_MS = 15000;
 const MISSION_POLL_MS = 30000;
 const GLOBAL_METATRADER_POLL_MS = 15000;
+const AI_TRADE_HEARTBEAT_FRESH_SECONDS = 20;
 const MISSION_FETCH_TIMEOUT_MS = 25000;
 const OPEN_PROP_REPORT_POLL_TTL_MS = 30000;
 const EA_FACTORY_READ_MODEL_MAX_AGE_MS = 90000;
@@ -1408,6 +1409,7 @@ const state = {
     lastLoadedAt: 0,
     lastScannedAt: 0,
     pollTimer: null,
+    councilHeartbeatTimer: null,
   },
   modal: {
     open: false,
@@ -2124,10 +2126,27 @@ const els = {
   modalDashboardConnectionActionStatus: document.getElementById("modalDashboardConnectionActionStatus"),
   modalAiTradeTerminalSummary: document.getElementById("modalAiTradeTerminalSummary"),
   modalAiTradeTerminalBadge: document.getElementById("modalAiTradeTerminalBadge"),
-  modalAiTradeActivePlatform: document.getElementById("modalAiTradeActivePlatform"),
-  modalAiTradeActiveTerminal: document.getElementById("modalAiTradeActiveTerminal"),
-  modalAiTradeFeedFreshness: document.getElementById("modalAiTradeFeedFreshness"),
-  modalAiTradeOpenGlobal: document.getElementById("modalAiTradeOpenGlobal"),
+  modalAiTradeMt4StatusCard: document.getElementById("modalAiTradeMt4StatusCard"),
+  modalAiTradeMt4SelectedBadge: document.getElementById("modalAiTradeMt4SelectedBadge"),
+  modalAiTradeMt4Health: document.getElementById("modalAiTradeMt4Health"),
+  modalAiTradeMt4Summary: document.getElementById("modalAiTradeMt4Summary"),
+  modalAiTradeMt4Reason: document.getElementById("modalAiTradeMt4Reason"),
+  modalAiTradeMt4Fix: document.getElementById("modalAiTradeMt4Fix"),
+  modalAiTradeMt4FixText: document.getElementById("modalAiTradeMt4FixText"),
+  modalAiTradeMt5StatusCard: document.getElementById("modalAiTradeMt5StatusCard"),
+  modalAiTradeMt5SelectedBadge: document.getElementById("modalAiTradeMt5SelectedBadge"),
+  modalAiTradeMt5Health: document.getElementById("modalAiTradeMt5Health"),
+  modalAiTradeMt5Summary: document.getElementById("modalAiTradeMt5Summary"),
+  modalAiTradeMt5Reason: document.getElementById("modalAiTradeMt5Reason"),
+  modalAiTradeMt5Fix: document.getElementById("modalAiTradeMt5Fix"),
+  modalAiTradeMt5FixText: document.getElementById("modalAiTradeMt5FixText"),
+  modalAiTradePlatformChoice: document.getElementById("modalAiTradePlatformChoice"),
+  modalAiTradePlatformMt4: document.getElementById("modalAiTradePlatformMt4"),
+  modalAiTradePlatformMt5: document.getElementById("modalAiTradePlatformMt5"),
+  modalAiTradeCandidateSelect: document.getElementById("modalAiTradeCandidateSelect"),
+  modalAiTradeApplySelection: document.getElementById("modalAiTradeApplySelection"),
+  modalAiTradeRefreshPlatforms: document.getElementById("modalAiTradeRefreshPlatforms"),
+  modalAiTradeSelectionStatus: document.getElementById("modalAiTradeSelectionStatus"),
   modalAiTradeTerminalStatus: document.getElementById("modalAiTradeTerminalStatus"),
   modalKanbanSearch: document.getElementById("modalKanbanSearch"),
   modalKanbanArchiveToggle: document.getElementById("modalKanbanArchiveToggle"),
@@ -2559,12 +2578,16 @@ function stopAutomaticPolling() {
   if (state.agentCollaboration.timer) window.clearInterval(state.agentCollaboration.timer);
   if (state.missionSync.timer) window.clearInterval(state.missionSync.timer);
   if (state.globalMetatraderHub.pollTimer) window.clearInterval(state.globalMetatraderHub.pollTimer);
+  if (state.globalMetatraderHub.councilHeartbeatTimer) {
+    window.clearTimeout(state.globalMetatraderHub.councilHeartbeatTimer);
+  }
   if (state.pollingLeadership.renewalTimer) window.clearInterval(state.pollingLeadership.renewalTimer);
   state.codexRate.timer = null;
   state.operatorMode.timer = null;
   state.agentCollaboration.timer = null;
   state.missionSync.timer = null;
   state.globalMetatraderHub.pollTimer = null;
+  state.globalMetatraderHub.councilHeartbeatTimer = null;
   state.pollingLeadership.renewalTimer = null;
   abortAutomaticPollingRequests();
 }
@@ -2578,6 +2601,17 @@ function startGlobalMetatraderPolling() {
   hub.pollTimer = window.setInterval(() => {
     if (document.visibilityState !== "visible" || hub.inFlight) return;
     void loadGlobalMetatraderHub({ preserveMessage: true });
+    // The central selector and the Council heartbeat projection are separate
+    // read models. Refresh both while the Council is open so a green card
+    // cannot outlive the EA heartbeat or remain bound to a replaced Terminal.
+    if (
+      state.modal.open
+      && state.modal.type === "prop"
+      && state.modal.id === AI_TRADE_COUNCIL_PROP_ID
+    ) {
+      void loadPropReport(AI_TRADE_COUNCIL_PROP_ID)
+        .finally(() => renderOpenAiTradeTerminalSummary());
+    }
   }, GLOBAL_METATRADER_POLL_MS);
 }
 
@@ -9445,6 +9479,7 @@ function renderGlobalMetatraderHubControl() {
       els.globalMetatraderSystems.appendChild(row);
     });
   }
+  renderOpenAiTradeTerminalSummary();
 }
 
 function setGlobalMetatraderPanelOpen(open) {
@@ -9624,6 +9659,14 @@ async function scanGlobalMetatraderHub() {
         hub.status = "error";
       }
     }
+    // A failed scan without an authoritative read-back invalidates the old
+    // candidate registry. Keeping it would allow Apply against stale targets.
+    hub.readModel = null;
+    hub.checklists = {};
+    hub.choices = { MT4: "", MT5: "" };
+    hub.backendAvailable = false;
+    hub.lastReadCount = 0;
+    hub.status = "error";
     hub.message = safeDashboardDisplayText(
       error?.body?.messageTh || error?.message,
       "สแกน MT4 / MT5 ไม่สำเร็จ • ตรวจว่า Local Runner เปิดอยู่แล้วลองอีกครั้ง",
@@ -9732,6 +9775,8 @@ async function applyGlobalMetatraderTarget(platform) {
       ? await reconcileGlobalMetatraderSelection(platform, candidateId)
       : null;
     if (reconciled) {
+      hub.platformChoice = platform;
+      hub.platformChoiceTouched = false;
       const refreshes = targets
         .filter((target) => target.propId !== EA_FACTORY_PROP_ID)
         .map((target) => loadPropReport(target.propId, { forceFresh: true }));
@@ -9772,64 +9817,465 @@ async function applyGlobalMetatraderTarget(platform) {
     renderGlobalMetatraderHubControl();
   }
 }
+function aiTradePlatformConnectionModels(report = {}, checklist = {}) {
+  const council = signalCouncilModel(report);
+  const projection = council?.platformConnections && typeof council.platformConnections === "object"
+    ? council.platformConnections
+    : {};
+  const projectedItems = Array.isArray(projection.items) ? projection.items : [];
+  const runtime = getSignalRuntimeTruth(report);
+  const selectedConnectionHealth = runtime.selectedConnectionHealth
+    || signalSelectedPlatformConnectionHealth(report);
+  const market = signalMarketModel(report);
+  const rawHubModel = state.globalMetatraderHub.readModel;
+  const hubModelPresent = Boolean(
+    rawHubModel && typeof rawHubModel === "object" && !Array.isArray(rawHubModel),
+  );
+  const hubModel = hubModelPresent ? rawHubModel : {};
+  const hubSelectedPlatform = safeDashboardDisplayText(
+    hubModel.selectedPlatform,
+    "",
+  ).toUpperCase();
+  const hubSelectedCandidateId = safeDashboardDisplayText(
+    hubModel.selectedCandidate?.candidateId,
+    "",
+  );
+  const selectedPlatform = hubModelPresent
+    ? (["MT4", "MT5"].includes(hubSelectedPlatform) ? hubSelectedPlatform : "")
+    : safeDashboardDisplayText(
+      projection?.active?.platform || signalSelectedPlatform(report),
+      "",
+    ).toUpperCase();
+  const registry = globalMetatraderCandidateRegistry();
+  const reportLoadState = state.propReportLoadState?.[AI_TRADE_COUNCIL_PROP_ID] || {};
+  const projectionRefreshFailed = reportLoadState.status === "error";
+
+  return ["MT4", "MT5"].map((platform) => {
+    const key = platform.toLowerCase();
+    const supplied = projectedItems.find((item) => (
+      String(item?.platform || "").toLowerCase() === key
+    ));
+    if (supplied) {
+      let stateValue = ["connected", "waiting", "error"].includes(supplied.connectionState)
+        ? supplied.connectionState
+        : "waiting";
+      const suppliedCandidateId = safeDashboardDisplayText(supplied.candidateId, "");
+      const selected = hubModelPresent
+        ? hubSelectedPlatform === platform && Boolean(hubSelectedCandidateId)
+        : supplied.selected === true;
+      const selectedCandidateChanged = Boolean(
+        hubModelPresent
+        && selected
+        && (!suppliedCandidateId || suppliedCandidateId !== hubSelectedCandidateId),
+      );
+      const observedAtMs = Date.parse(String(supplied.observedAt || ""));
+      const declaredAgeSeconds = Number(supplied.ageSeconds);
+      const clockAgeSeconds = Number.isFinite(observedAtMs)
+        ? Math.max(0, (Date.now() - observedAtMs) / 1000)
+        : Number.POSITIVE_INFINITY;
+      const effectiveAgeSeconds = Number.isFinite(declaredAgeSeconds)
+        ? Math.max(0, declaredAgeSeconds, clockAgeSeconds)
+        : clockAgeSeconds;
+      const declaredFreshForSeconds = Number(supplied.freshForSeconds);
+      const freshForSeconds = Number.isFinite(declaredFreshForSeconds) && declaredFreshForSeconds > 0
+        ? declaredFreshForSeconds
+        : AI_TRADE_HEARTBEAT_FRESH_SECONDS;
+      const heartbeatExpired = stateValue === "connected"
+        && (!Number.isFinite(effectiveAgeSeconds) || effectiveAgeSeconds > freshForSeconds);
+      const refreshUnavailable = projectionRefreshFailed && stateValue !== "waiting";
+      const selectedConnectionUnavailable = stateValue === "connected"
+        && selected
+        && selectedConnectionHealth.platform === platform
+        && selectedConnectionHealth.connected !== true;
+      if (
+        selectedCandidateChanged
+        || heartbeatExpired
+        || refreshUnavailable
+        || selectedConnectionUnavailable
+      ) stateValue = "waiting";
+
+      const failClosedReason = selectedCandidateChanged
+        ? "selected_candidate_heartbeat_pending"
+        : projectionRefreshFailed
+          ? "council_report_refresh_failed"
+          : selectedConnectionUnavailable
+            ? safeDashboardDisplayText(
+              selectedConnectionHealth.reasonCode,
+              "selected_connection_not_connected",
+            )
+            : heartbeatExpired
+              ? "gateway_status_stale"
+              : "";
+      return {
+        platform,
+        candidateId: selectedCandidateChanged ? hubSelectedCandidateId : suppliedCandidateId,
+        selected,
+        state: stateValue,
+        reasonCode: failClosedReason || safeDashboardDisplayText(supplied.reasonCode, stateValue),
+        messageTh: selectedCandidateChanged
+          ? `เลือก Terminal ${platform} ใหม่แล้ว • รอ heartbeat จาก EA เป้าหมายนี้`
+          : projectionRefreshFailed
+            ? `ยังยืนยันสถานะ EA ${platform} ล่าสุดไม่ได้ • รอ Local Runner เชื่อมกลับมา`
+            : selectedConnectionUnavailable
+              ? `สถานะ EA ${platform} ล่าสุดหมดอายุหรือยังยืนยันกับ Terminal ที่เลือกไม่ได้`
+              : heartbeatExpired
+                ? `เคยได้รับ heartbeat จาก EA ${platform} แต่ข้อมูลล่าสุดหมดอายุแล้ว`
+                : safeDashboardDisplayText(
+                  supplied.messageTh,
+                  stateValue === "connected" ? `EA ${platform} เชื่อมแล้ว` : `EA ${platform} รอเชื่อม`,
+                ),
+        remediationTh: selectedCandidateChanged
+          ? "ตรวจว่า EA อยู่บน Terminal ที่เพิ่งเลือกและ Channel ID ตรงกัน แล้วรอ heartbeat รอบใหม่"
+          : projectionRefreshFailed
+            ? "เปิดหรือซ่อม Local Runner แล้วกดตรวจสถานะใหม่ ระบบจะไม่ใช้ข้อมูลเขียวเดิมระหว่างที่ยืนยันไม่ได้"
+            : selectedConnectionUnavailable
+              ? "ตรวจว่า Local Runner และ EA ยังส่ง heartbeat จาก Terminal ที่เลือก แล้วกดตรวจสถานะใหม่"
+              : heartbeatExpired
+                ? "ตรวจว่า Terminal เปิดอยู่, EA ยังอยู่บนกราฟ, AutoTrading/Algo Trading เปิด และ Channel ID ตรงกัน"
+                : safeDashboardDisplayText(supplied.remediationTh, ""),
+        observedAt: selectedCandidateChanged ? "" : safeDashboardDisplayText(supplied.observedAt, ""),
+        ageSeconds: Number.isFinite(effectiveAgeSeconds) ? effectiveAgeSeconds : null,
+        freshForSeconds,
+        candidateCount: Math.max(0, Math.trunc(Number(supplied.candidateCount) || 0)),
+        candidateState: safeDashboardDisplayText(supplied.candidateState, "none"),
+        mode: selectedCandidateChanged ? "" : safeDashboardDisplayText(supplied.mode, ""),
+        executionGuardReady: !selectedCandidateChanged
+          && !selectedConnectionUnavailable
+          && supplied.executionGuardReady === true,
+        executionGuardReason: selectedCandidateChanged || selectedConnectionUnavailable
+          ? ""
+          : safeDashboardDisplayText(supplied.executionGuardReason, ""),
+      };
+    }
+
+    // Compatibility fallback for an older Local Runner.  Only the selected
+    // platform may inherit the selected-only Gateway heartbeat; the inactive
+    // platform remains amber instead of being guessed green from a process.
+    const selected = selectedPlatform === platform;
+    const candidates = registry.filter((candidate) => candidate.platform === platform);
+    const stale = checklist?.stale === true;
+    const reportPlatform = safeDashboardDisplayText(
+      runtime.selectedPlatform || signalSelectedPlatform(report),
+      "",
+    ).toUpperCase();
+    const reportCandidateId = safeDashboardDisplayText(runtime.selectedCandidateId, "");
+    const expectedCandidateId = selected
+      ? hubSelectedCandidateId || safeDashboardDisplayText(projection?.active?.candidateId, "")
+      : "";
+    const reportAuthorityMatches = selected
+      && reportPlatform === platform
+      && Boolean(reportCandidateId)
+      && (!expectedCandidateId || reportCandidateId === expectedCandidateId);
+    const gatewayObservedAtMs = Date.parse(String(runtime.gatewayObservedAt || ""));
+    const gatewayDeclaredAgeSeconds = Number(runtime.gatewayAgeSeconds);
+    const gatewayClockAgeSeconds = Number.isFinite(gatewayObservedAtMs)
+      ? Math.max(0, (Date.now() - gatewayObservedAtMs) / 1000)
+      : Number.POSITIVE_INFINITY;
+    const gatewayEffectiveAgeSeconds = Number.isFinite(gatewayDeclaredAgeSeconds)
+      ? Math.max(0, gatewayDeclaredAgeSeconds, gatewayClockAgeSeconds)
+      : gatewayClockAgeSeconds;
+    const gatewayHeartbeatFresh = Number.isFinite(gatewayEffectiveAgeSeconds)
+      && gatewayEffectiveAgeSeconds <= AI_TRADE_HEARTBEAT_FRESH_SECONDS;
+    const explicitError = reportAuthorityMatches && (
+      runtime.gatewayInitStatus?.readStatus === "invalid"
+      || runtime.gatewayInitStatus?.readStatus === "unreadable"
+      || runtime.gatewayInitStatus?.severity === "error"
+    );
+    const connected = reportAuthorityMatches
+      && runtime.gatewayConnected === true
+      && market.available === true
+      && !stale
+      && gatewayHeartbeatFresh;
+    const stateValue = explicitError ? "error" : connected ? "connected" : "waiting";
+    return {
+      platform,
+      candidateId: selected
+        ? expectedCandidateId
+        : safeDashboardDisplayText(candidates[0]?.candidateId, ""),
+      selected,
+      state: projectionRefreshFailed ? "waiting" : stateValue,
+      reasonCode: projectionRefreshFailed
+        ? "council_report_refresh_failed"
+        : explicitError
+        ? safeDashboardDisplayText(runtime.gatewayInitStatus?.reasonCode, "gateway_status_error")
+        : connected
+          ? "ready"
+          : selected && !reportAuthorityMatches
+            ? "selected_candidate_heartbeat_pending"
+            : stale || (selected && runtime.gatewayConnected === true && !gatewayHeartbeatFresh)
+            ? "gateway_status_stale"
+            : candidates.length
+              ? "gateway_status_not_observed"
+              : "terminal_not_detected",
+      messageTh: projectionRefreshFailed
+        ? `ยังยืนยันสถานะ EA ${platform} ล่าสุดไม่ได้ • รอ Local Runner เชื่อมกลับมา`
+        : explicitError
+        ? `EA ${platform} รายงานข้อผิดพลาด`
+        : connected
+          ? `EA ${platform} ส่ง heartbeat สดแล้ว`
+          : selected && !reportAuthorityMatches
+            ? `เลือก Terminal ${platform} ใหม่แล้ว • รอ heartbeat จาก EA เป้าหมายนี้`
+            : candidates.length
+            ? `พบ ${platform} แล้ว • รอ heartbeat จาก EA`
+            : `ยังไม่พบ ${platform} ในเครื่องนี้`,
+      remediationTh: projectionRefreshFailed
+        ? "เปิดหรือซ่อม Local Runner แล้วกดตรวจสถานะใหม่ ระบบจะไม่ใช้ข้อมูลเขียวเดิมระหว่างที่ยืนยันไม่ได้"
+        : connected
+        ? ""
+        : explicitError
+          ? "เปิด Experts/Journal แก้ข้อผิดพลาดของ EA แล้วกดตรวจสถานะใหม่"
+          : selected && !reportAuthorityMatches
+            ? "ตรวจว่า EA อยู่บน Terminal ที่เพิ่งเลือกและ Channel ID ตรงกัน แล้วรอ heartbeat รอบใหม่"
+          : "ตรวจว่า Terminal เปิดอยู่, EA อยู่บนกราฟ และ Channel ID ตรงกัน",
+      observedAt: connected ? safeDashboardDisplayText(runtime.gatewayObservedAt, "") : "",
+      ageSeconds: Number.isFinite(gatewayEffectiveAgeSeconds) ? gatewayEffectiveAgeSeconds : null,
+      freshForSeconds: AI_TRADE_HEARTBEAT_FRESH_SECONDS,
+      candidateCount: candidates.length,
+      candidateState: candidates.length === 1 ? "unique" : candidates.length ? "ambiguous" : "none",
+      mode: connected ? safeDashboardDisplayText(runtime.gatewayMode, "") : "",
+      executionGuardReady: connected && runtime.gatewayExecutionGuardReady === true,
+      executionGuardReason: connected ? safeDashboardDisplayText(runtime.gatewayExecutionGuardReason, "") : "",
+    };
+  });
+}
+
+function renderAiTradePlatformStatusCard(model) {
+  const suffix = model.platform === "MT5" ? "Mt5" : "Mt4";
+  const card = els[`modalAiTrade${suffix}StatusCard`];
+  const selectedBadge = els[`modalAiTrade${suffix}SelectedBadge`];
+  const health = els[`modalAiTrade${suffix}Health`];
+  const summary = els[`modalAiTrade${suffix}Summary`];
+  const reason = els[`modalAiTrade${suffix}Reason`];
+  const fix = els[`modalAiTrade${suffix}Fix`];
+  const fixText = els[`modalAiTrade${suffix}FixText`];
+  if (!card || !health || !summary || !reason || !fix || !fixText) return;
+
+  const healthLabels = { connected: "เชื่อมแล้ว", waiting: "รอเชื่อม", error: "ผิดพลาด" };
+  card.dataset.state = model.state;
+  card.dataset.selected = String(model.selected);
+  if (selectedBadge) selectedBadge.hidden = !model.selected;
+  health.dataset.state = model.state;
+  health.textContent = healthLabels[model.state] || "รอเชื่อม";
+  summary.textContent = model.messageTh;
+  const context = [];
+  if (model.observedAt) context.push(`ล่าสุด ${formatThaiDateTime(model.observedAt)}`);
+  if (model.mode) context.push(`โหมด ${model.mode}`);
+  if (model.reasonCode && model.reasonCode !== "ready") context.push(model.reasonCode);
+  if (
+    model.state === "connected"
+    && model.executionGuardReady !== true
+    && model.executionGuardReason
+    && String(model.executionGuardReason).toUpperCase() !== "READY"
+  ) {
+    context.push(signalExecutionGuardReasonLabel(model.executionGuardReason));
+  }
+  reason.textContent = context.join(" • ") || (model.selected ? "แพลตฟอร์มที่ Backend ยืนยัน" : "ยังไม่ได้เลือกใช้เทรด");
+  const remediation = model.remediationTh || (
+    model.state === "connected"
+    && model.executionGuardReady !== true
+    && model.executionGuardReason
+    && String(model.executionGuardReason).toUpperCase() !== "READY"
+      ? signalExecutionGuardRecoveryLabel(model.executionGuardReason)
+      : ""
+  );
+  fix.hidden = !remediation;
+  if (!remediation) fix.open = false;
+  fixText.textContent = remediation;
+}
+
+function scheduleAiTradeHeartbeatExpiry(connectionModels = [], report = {}) {
+  const hub = state.globalMetatraderHub;
+  if (hub.councilHeartbeatTimer) window.clearTimeout(hub.councilHeartbeatTimer);
+  hub.councilHeartbeatTimer = null;
+  const selectedConnectionHealth = signalSelectedPlatformConnectionHealth(report);
+  const connectionExpiryMs = connectionModels
+    .filter((item) => item.state === "connected")
+    .map((item) => (
+      (Number(item.freshForSeconds) - Number(item.ageSeconds)) * 1000
+    ))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  const selectedExpiryMs = selectedConnectionHealth.connected === true
+    && Number.isFinite(Number(selectedConnectionHealth.expiresInSeconds))
+    ? [Number(selectedConnectionHealth.expiresInSeconds) * 1000]
+    : [];
+  const remainingMs = [...connectionExpiryMs, ...selectedExpiryMs]
+    .sort((left, right) => left - right)[0];
+  if (!Number.isFinite(remainingMs)) return;
+  hub.councilHeartbeatTimer = window.setTimeout(() => {
+    hub.councilHeartbeatTimer = null;
+    renderOpenAiTradeCouncilRuntimeStatus();
+  }, Math.max(25, Math.ceil(remainingMs) + 25));
+}
+
+function renderAiTradePlatformSelector(connectionModels = []) {
+  const hub = state.globalMetatraderHub;
+  const systems = globalMetatraderSystemModels();
+  const registry = globalMetatraderCandidateRegistry(systems);
+  const hubModelPresent = Boolean(
+    hub.readModel && typeof hub.readModel === "object" && !Array.isArray(hub.readModel),
+  );
+  const backendSelectedPlatform = hubModelPresent
+    ? safeDashboardDisplayText(hub.readModel?.selectedPlatform, "").toUpperCase()
+    : safeDashboardDisplayText(
+      connectionModels.find((item) => item.selected)?.platform,
+      "",
+    ).toUpperCase();
+  const availablePlatforms = [...new Set(registry.map((candidate) => candidate.platform))];
+  let draftPlatform = safeDashboardDisplayText(hub.platformChoice, "").toUpperCase();
+  if (!["MT4", "MT5"].includes(draftPlatform)) {
+    draftPlatform = ["MT4", "MT5"].includes(backendSelectedPlatform)
+      ? backendSelectedPlatform
+      : availablePlatforms.length === 1
+        ? availablePlatforms[0]
+        : "MT4";
+  }
+  hub.platformChoice = draftPlatform;
+
+  if (els.modalAiTradePlatformMt4) {
+    els.modalAiTradePlatformMt4.checked = draftPlatform === "MT4";
+    els.modalAiTradePlatformMt4.disabled = hub.inFlight;
+  }
+  if (els.modalAiTradePlatformMt5) {
+    els.modalAiTradePlatformMt5.checked = draftPlatform === "MT5";
+    els.modalAiTradePlatformMt5.disabled = hub.inFlight;
+  }
+
+  const select = els.modalAiTradeCandidateSelect;
+  const apply = els.modalAiTradeApplySelection;
+  if (!select || !apply) return;
+  const candidates = registry.filter((candidate) => candidate.platform === draftPlatform);
+  const running = candidates.filter((candidate) => candidate.runningState === "platform_running_detected");
+  const ambiguous = candidates.length > 1 && running.length !== 1;
+  const uniqueRunning = candidates.length > 1 && running.length === 1;
+  const suggested = globalMetatraderSuggestedChoice(draftPlatform, candidates, systems);
+  hub.choices[draftPlatform] = suggested;
+
+  select.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = ambiguous
+    ? `พบ ${draftPlatform} หลายชุด • เปิดให้เหลือหนึ่งชุดแล้วตรวจใหม่`
+    : candidates.length
+      ? `เลือก ${draftPlatform} Terminal`
+      : `ยังไม่พบ ${draftPlatform}`;
+  select.appendChild(placeholder);
+  candidates.forEach((candidate) => {
+    const option = document.createElement("option");
+    option.value = candidate.candidateId;
+    option.textContent = `${candidate.labelTh}${candidate.runningState === "platform_running_detected" ? " • กำลังเปิด" : ""}`;
+    select.appendChild(option);
+  });
+  select.value = suggested;
+  select.disabled = hub.inFlight || !candidates.length || ambiguous || uniqueRunning;
+
+  const backendSelectedCandidateId = hubModelPresent
+    ? safeDashboardDisplayText(hub.readModel?.selectedCandidate?.candidateId, "")
+    : safeDashboardDisplayText(
+      connectionModels.find((item) => item.selected)?.candidateId,
+      "",
+    );
+  const alreadyApplied = backendSelectedPlatform === draftPlatform
+    && Boolean(suggested)
+    && backendSelectedCandidateId === suggested;
+  apply.disabled = !hub.backendAvailable || hub.inFlight || ambiguous || !suggested || alreadyApplied;
+  apply.textContent = hub.inFlight
+    ? "กำลังยืนยันกับ Backend..."
+    : alreadyApplied
+      ? `กำลังใช้ ${draftPlatform} อยู่`
+      : `ยืนยันใช้ ${draftPlatform} เป็น Dashboard ที่เทรด`;
+  if (els.modalAiTradeRefreshPlatforms) {
+    els.modalAiTradeRefreshPlatforms.disabled = hub.inFlight;
+    els.modalAiTradeRefreshPlatforms.textContent = hub.inFlight && hub.operation === "scan"
+      ? "กำลังตรวจสถานะ..."
+      : "ตรวจสถานะใหม่";
+  }
+  if (els.modalAiTradeSelectionStatus) {
+    const pendingMessage = hub.platformChoiceTouched && backendSelectedPlatform !== draftPlatform
+      ? `เลือก ${draftPlatform} ไว้แล้ว แต่ Backend ยังใช้ ${backendSelectedPlatform || "ไม่มีแพลตฟอร์ม"} จนกว่าจะกดยืนยัน`
+      : hub.message || "เลือกได้ทีละหนึ่งแพลตฟอร์ม • อีกแพลตฟอร์มจะไม่ถูกใช้วิเคราะห์หรือส่งคำสั่ง";
+    els.modalAiTradeSelectionStatus.dataset.tone = hub.tone || "neutral";
+    els.modalAiTradeSelectionStatus.textContent = safeDashboardDisplayText(pendingMessage);
+  }
+}
+
 function renderAiTradeTerminalSummary(subject, checklist, canDiscoverMetatrader, report = null) {
   if (!els.modalAiTradeTerminalSummary) return;
   const applicable = subject?.id === AI_TRADE_COUNCIL_PROP_ID;
   els.modalAiTradeTerminalSummary.hidden = !applicable;
   if (!applicable) return;
 
-  const selection = getMetatraderSelectionModel(checklist);
-  const selected = ["MT4", "MT5"].includes(selection.selectedCandidate?.platform)
-    ? selection.selectedCandidate
-    : null;
-  const platform = selected?.platform || "";
-  const market = signalMarketModel(report || {});
-  const stale = checklist?.stale === true;
-  const configured = Boolean(selected);
-  const snapshotReady = configured && market.available === true && !stale;
-  const freshnessMinutes = Number.isFinite(Number(market.freshnessMinutes))
-    ? Number(market.freshnessMinutes)
-    : null;
-  const freshnessText = snapshotReady
-    ? freshnessMinutes === null
-      ? "Snapshot พร้อมใช้งาน"
-      : `Snapshot ล่าสุด ${freshnessMinutes} นาที`
-    : stale
-      ? "Snapshot เก่า • รอข้อมูลใหม่"
-      : configured
-        ? `รอ Snapshot จาก EA ${platform}`
-        : "ยังไม่มี Snapshot";
-
-  setConnectionBadge(
-    els.modalAiTradeTerminalBadge,
-    snapshotReady ? "connected" : configured ? "configured" : canDiscoverMetatrader ? "not_connected" : "checking",
-    snapshotReady ? "ข้อมูลพร้อม" : configured ? "เลือกแล้ว • รอข้อมูล" : canDiscoverMetatrader ? "รอเลือก" : "รอตรวจระบบ",
-  );
-  if (els.modalAiTradeActivePlatform) {
-    els.modalAiTradeActivePlatform.textContent = platform || "ยังไม่ได้เลือก";
-  }
-  if (els.modalAiTradeActiveTerminal) {
-    els.modalAiTradeActiveTerminal.textContent = selected
-      ? `${selected.labelTh}${selected.detected ? " • ตรวจพบล่าสุด" : " • ไม่พบในการสแกนล่าสุด"}`
-      : "ยังไม่ได้เลือกจากแถบกลาง";
-  }
-  if (els.modalAiTradeFeedFreshness) {
-    els.modalAiTradeFeedFreshness.textContent = freshnessText;
+  const connectionModels = aiTradePlatformConnectionModels(report || {}, checklist || {});
+  connectionModels.forEach(renderAiTradePlatformStatusCard);
+  scheduleAiTradeHeartbeatExpiry(connectionModels, report || {});
+  renderAiTradePlatformSelector(connectionModels);
+  const selected = connectionModels.find((item) => item.selected) || null;
+  const otherConnected = connectionModels.find((item) => item.state === "connected" && !item.selected);
+  els.modalAiTradeTerminalSummary.dataset.state = selected?.state || "waiting";
+  if (selected?.state === "connected") {
+    setConnectionBadge(els.modalAiTradeTerminalBadge, "connected", `${selected.platform} พร้อม`);
+  } else if (selected?.state === "error") {
+    setConnectionBadge(els.modalAiTradeTerminalBadge, "error", `${selected.platform} ผิดพลาด`);
+  } else {
+    setConnectionBadge(
+      els.modalAiTradeTerminalBadge,
+      selected ? "partial" : canDiscoverMetatrader ? "not_connected" : "checking",
+      selected
+        ? `${selected.platform} รอข้อมูล`
+        : canDiscoverMetatrader
+          ? "รอเลือก"
+          : "กำลังตรวจระบบ",
+    );
   }
   if (els.modalAiTradeTerminalStatus) {
-    els.modalAiTradeTerminalStatus.dataset.tone = snapshotReady ? "success" : configured ? "neutral" : "warning";
-    els.modalAiTradeTerminalStatus.textContent = snapshotReady
-      ? `สภาอ่านข้อมูลจาก ${platform} ที่ยืนยันจากแถบกลางเพียงแหล่งเดียว`
-      : configured
-        ? `เลือก ${platform} แล้ว • รอ EA ส่ง Snapshot โดยไม่สลับไปอ่านอีก Platform อัตโนมัติ`
-        : "สแกนและเลือก MT4 หรือ MT5 จากแถบเชื่อมด้านบนเพียงจุดเดียว";
+    els.modalAiTradeTerminalStatus.dataset.tone = selected?.state === "connected"
+      ? "success"
+      : selected?.state === "error"
+        ? "error"
+        : "warning";
+    els.modalAiTradeTerminalStatus.textContent = selected
+      ? `${selected.platform} คือแพลตฟอร์มเดียวที่ใช้กับ Dashboard และคำสั่งเทรด${otherConnected ? ` • ${otherConnected.platform} ยังเชื่อมอยู่แต่ไม่ถูกนำมาใช้` : ""}`
+      : "ยังไม่ได้เลือกแพลตฟอร์ม • ระบบจะไม่วิเคราะห์หรือส่งคำสั่งเทรดจนกว่า Backend จะยืนยันหนึ่งรายการ";
   }
+}
+
+function renderOpenAiTradeTerminalSummary() {
+  if (
+    !state.modal.open
+    || state.modal.type !== "prop"
+    || state.modal.id !== AI_TRADE_COUNCIL_PROP_ID
+  ) return;
+  const subject = getModalSubject();
+  const report = state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {};
+  const checklist = report?.connectionChecklist || {};
+  const canDiscover = Array.isArray(checklist?.items)
+    && checklist.items.some((item) => item?.action === "discover_metatrader");
+  renderAiTradeTerminalSummary(subject, checklist, canDiscover, report);
+}
+
+function renderOpenAiTradeCouncilRuntimeStatus() {
+  renderOpenAiTradeTerminalSummary();
+  if (
+    !state.modal.open
+    || state.modal.type !== "prop"
+    || state.modal.id !== AI_TRADE_COUNCIL_PROP_ID
+  ) return;
+  const activeTab = state.modal.signalTab;
+  const runtimeSensitiveTab = activeTab === "daily_summary"
+    || activeTab === "decision_pipeline"
+    || (activeTab === "live_analysis" && state.modal.signalLiveTab === "chart_overview");
+  if (!runtimeSensitiveTab) return;
+  renderSignalConsensusPanel(
+    activeTab,
+    state.propReports[AI_TRADE_COUNCIL_PROP_ID] || {},
+  );
 }
 
 function renderDashboardConnectionPanel(subject, propertyRole = null) {
   if (!subject || !els.modalDashboardConnectionList) return;
   if (els.modalDashboardConnectionDetails) {
-    els.modalDashboardConnectionDetails.open = subject.id !== AI_TRADE_COUNCIL_PROP_ID;
+    const isAiTradeCouncil = subject.id === AI_TRADE_COUNCIL_PROP_ID;
+    els.modalDashboardConnectionDetails.hidden = isAiTradeCouncil;
+    els.modalDashboardConnectionDetails.open = !isAiTradeCouncil;
   }
   const report = state.propReports[subject.id] || null;
   const rawChecklist = report?.connectionChecklist;
@@ -10807,6 +11253,233 @@ function signalSelectedPlatform(report = {}) {
   return ["MT4", "MT5"].includes(normalized) ? normalized : "";
 }
 
+function signalSelectedPlatformConnectionHealth(report = {}) {
+  const council = signalCouncilModel(report);
+  const projection = council?.platformConnections && typeof council.platformConnections === "object"
+    ? council.platformConnections
+    : {};
+  const projectedItems = Array.isArray(projection.items) ? projection.items : [];
+  const checklist = report?.connectionChecklist || {};
+  const checklistSelected = checklist?.metatraderSelection?.selectedCandidate || {};
+  const gateway = council.tradeGateway && typeof council.tradeGateway === "object"
+    ? council.tradeGateway
+    : (council?.runtimeTruth?.tradeGateway && typeof council.runtimeTruth.tradeGateway === "object"
+      ? council.runtimeTruth.tradeGateway
+      : {});
+  const rawHubModel = state.globalMetatraderHub?.readModel;
+  const hubModelPresent = Boolean(
+    rawHubModel && typeof rawHubModel === "object" && !Array.isArray(rawHubModel),
+  );
+  const hubPlatform = safeDashboardDisplayText(rawHubModel?.selectedPlatform, "").toUpperCase();
+  const normalizedHubPlatform = ["MT4", "MT5"].includes(hubPlatform) ? hubPlatform : "";
+  const hubPlatformModel = normalizedHubPlatform
+    ? rawHubModel?.platforms?.[normalizedHubPlatform.toLowerCase()] || {}
+    : {};
+  const hubTarget = Array.isArray(hubPlatformModel?.targets)
+    ? hubPlatformModel.targets.find((item) => (
+      item?.propId === AI_TRADE_COUNCIL_PROP_ID
+      && item?.status === "configured"
+      && item?.selectedCandidate
+    ))
+    : null;
+  const hubCandidateId = safeDashboardDisplayText(
+    hubPlatformModel?.selectedCandidate?.candidateId
+      || hubTarget?.selectedCandidate?.candidateId,
+    "",
+  );
+  const fallbackPlatform = safeDashboardDisplayText(
+    projection?.active?.platform
+      || checklistSelected.platform
+      || gateway.platform
+      || gateway.terminalPlatform,
+    "",
+  ).toUpperCase();
+  const platform = hubModelPresent
+    ? normalizedHubPlatform
+    : (["MT4", "MT5"].includes(fallbackPlatform) ? fallbackPlatform : "");
+  let expectedCandidateId = hubModelPresent
+    ? hubCandidateId
+    : safeDashboardDisplayText(
+      projection?.active?.candidateId
+        || checklistSelected.candidateId
+        || gateway.selectedCandidateId,
+      "",
+    );
+  const reportLoadState = state.propReportLoadState?.[AI_TRADE_COUNCIL_PROP_ID] || {};
+  const reportLoadedAt = Number(state.propReportLoadedAt?.[AI_TRADE_COUNCIL_PROP_ID] || 0);
+  const reportAgeMs = Number.isFinite(reportLoadedAt) && reportLoadedAt > 0
+    ? Math.max(0, Date.now() - reportLoadedAt)
+    : null;
+  const reportLoadFailed = reportLoadState.status === "error";
+  const reportLoadExpired = Number.isFinite(reportAgeMs)
+    && reportAgeMs >= OPEN_PROP_REPORT_POLL_TTL_MS;
+  const reportUnavailable = reportLoadFailed || reportLoadExpired;
+  const reportExpirySeconds = Number.isFinite(reportAgeMs)
+    ? Math.max(0, (OPEN_PROP_REPORT_POLL_TTL_MS - reportAgeMs) / 1000)
+    : null;
+  const base = {
+    platform,
+    candidateId: expectedCandidateId,
+    connected: false,
+    state: "waiting",
+    reasonCode: "selected_connection_not_observed",
+    source: "none",
+    observedAt: "",
+    ageSeconds: null,
+    freshForSeconds: AI_TRADE_HEARTBEAT_FRESH_SECONDS,
+    expiresInSeconds: null,
+    candidateMatches: false,
+    heartbeatExpired: false,
+    reportLoadFailed,
+    reportLoadExpired,
+    reportUnavailable,
+  };
+  if (!platform) {
+    return {
+      ...base,
+      reasonCode: hubModelPresent ? "selected_platform_not_configured" : "selected_platform_not_observed",
+    };
+  }
+  if (!expectedCandidateId && hubModelPresent) {
+    return { ...base, reasonCode: "selected_candidate_not_configured" };
+  }
+
+  const supplied = projectedItems.find((item) => (
+    safeDashboardDisplayText(item?.platform, "").toUpperCase() === platform
+  ));
+  if (supplied) {
+    const suppliedCandidateId = safeDashboardDisplayText(supplied.candidateId, "");
+    if (!expectedCandidateId && supplied.selected === true) expectedCandidateId = suppliedCandidateId;
+    const candidateMatches = Boolean(
+      expectedCandidateId
+      && suppliedCandidateId
+      && expectedCandidateId === suppliedCandidateId,
+    );
+    const observedAt = safeDashboardDisplayText(supplied.observedAt, "");
+    const observedAtMs = Date.parse(observedAt);
+    const declaredAgeSeconds = Number(supplied.ageSeconds);
+    const clockAgeSeconds = Number.isFinite(observedAtMs)
+      ? Math.max(0, (Date.now() - observedAtMs) / 1000)
+      : Number.POSITIVE_INFINITY;
+    const ageSeconds = Number.isFinite(declaredAgeSeconds)
+      ? Math.max(0, declaredAgeSeconds, clockAgeSeconds)
+      : clockAgeSeconds;
+    const declaredFreshForSeconds = Number(supplied.freshForSeconds);
+    const freshForSeconds = Number.isFinite(declaredFreshForSeconds) && declaredFreshForSeconds > 0
+      ? declaredFreshForSeconds
+      : AI_TRADE_HEARTBEAT_FRESH_SECONDS;
+    const reportsConnected = supplied.connectionState === "connected";
+    const heartbeatExpired = reportsConnected
+      && (!Number.isFinite(ageSeconds) || ageSeconds > freshForSeconds);
+    const connected = reportsConnected
+      && candidateMatches
+      && !heartbeatExpired
+      && !reportUnavailable;
+    const heartbeatExpirySeconds = connected
+      ? Math.max(0, freshForSeconds - ageSeconds)
+      : null;
+    const expiresInSeconds = connected
+      ? [heartbeatExpirySeconds, reportExpirySeconds]
+        .filter((value) => Number.isFinite(value))
+        .sort((left, right) => left - right)[0] ?? null
+      : null;
+    const reasonCode = reportLoadFailed
+      ? "council_report_refresh_failed"
+      : reportLoadExpired
+        ? "council_report_expired"
+        : !candidateMatches
+          ? "selected_candidate_heartbeat_pending"
+          : heartbeatExpired
+            ? "gateway_status_stale"
+            : connected
+              ? "ready"
+              : safeDashboardDisplayText(supplied.reasonCode, "selected_connection_not_connected");
+    return {
+      ...base,
+      platform,
+      candidateId: expectedCandidateId || suppliedCandidateId,
+      connected,
+      state: supplied.connectionState === "error" && !reportUnavailable ? "error" : connected ? "connected" : "waiting",
+      reasonCode,
+      source: "platform_projection",
+      observedAt,
+      ageSeconds: Number.isFinite(ageSeconds) ? ageSeconds : null,
+      freshForSeconds,
+      expiresInSeconds,
+      candidateMatches,
+      heartbeatExpired,
+    };
+  }
+
+  const gatewayPlatform = safeDashboardDisplayText(
+    gateway.platform || gateway.terminalPlatform || checklistSelected.platform,
+    "",
+  ).toUpperCase();
+  const gatewayCandidateId = safeDashboardDisplayText(
+    gateway.selectedCandidateId || checklistSelected.candidateId,
+    "",
+  );
+  if (!expectedCandidateId) expectedCandidateId = gatewayCandidateId;
+  const candidateMatches = Boolean(
+    expectedCandidateId
+    && gatewayCandidateId
+    && expectedCandidateId === gatewayCandidateId,
+  );
+  const platformMatches = gatewayPlatform === platform;
+  const observedAt = safeDashboardDisplayText(gateway.observedAt, "");
+  const observedAtMs = Date.parse(observedAt);
+  const declaredAgeSeconds = Number(gateway.ageSeconds);
+  const clockAgeSeconds = Number.isFinite(observedAtMs)
+    ? Math.max(0, (Date.now() - observedAtMs) / 1000)
+    : Number.POSITIVE_INFINITY;
+  const ageSeconds = Number.isFinite(declaredAgeSeconds)
+    ? Math.max(0, declaredAgeSeconds, clockAgeSeconds)
+    : clockAgeSeconds;
+  const heartbeatExpired = gateway.connected === true
+    && (!Number.isFinite(ageSeconds) || ageSeconds > AI_TRADE_HEARTBEAT_FRESH_SECONDS);
+  const connected = gateway.connected === true
+    && platformMatches
+    && candidateMatches
+    && checklist.stale !== true
+    && !heartbeatExpired
+    && !reportUnavailable;
+  const heartbeatExpirySeconds = connected
+    ? Math.max(0, AI_TRADE_HEARTBEAT_FRESH_SECONDS - ageSeconds)
+    : null;
+  const expiresInSeconds = connected
+    ? [heartbeatExpirySeconds, reportExpirySeconds]
+      .filter((value) => Number.isFinite(value))
+      .sort((left, right) => left - right)[0] ?? null
+    : null;
+  const reasonCode = reportLoadFailed
+    ? "council_report_refresh_failed"
+    : reportLoadExpired
+      ? "council_report_expired"
+      : !platformMatches
+        ? "selected_platform_heartbeat_pending"
+        : !candidateMatches
+          ? "selected_candidate_heartbeat_pending"
+          : heartbeatExpired || checklist.stale === true
+            ? "gateway_status_stale"
+            : connected
+              ? "ready"
+              : "selected_connection_not_connected";
+  return {
+    ...base,
+    platform,
+    candidateId: expectedCandidateId || gatewayCandidateId,
+    connected,
+    state: connected ? "connected" : "waiting",
+    reasonCode,
+    source: "legacy_gateway",
+    observedAt,
+    ageSeconds: Number.isFinite(ageSeconds) ? ageSeconds : null,
+    expiresInSeconds,
+    candidateMatches,
+    heartbeatExpired,
+  };
+}
+
 function getSignalRuntimeTruth(report = {}) {
   const council = signalCouncilModel(report);
   const supplied = council.runtimeTruth || {};
@@ -10875,17 +11548,23 @@ function getSignalRuntimeTruth(report = {}) {
     && supplied?.terminalSelected !== false
     && suppliedTerminal?.selected !== false,
   );
-  const selectedPlatform = signalSelectedPlatform(report);
+  const selectedConnectionHealth = signalSelectedPlatformConnectionHealth(report);
+  const selectedPlatform = selectedConnectionHealth.platform || signalSelectedPlatform(report);
   const tradingStateAvailable = (supplied?.tradingStateAvailable === true || suppliedTradingState?.available === true)
     && signalConnectionIsReady(tradingStateItem);
   const ensembleAvailable = (supplied?.ensembleAvailable === true || suppliedEnsemble?.available === true)
     && signalConnectionIsReady(ensembleItem);
-  const gatewayConnected = gateway.connected === true;
+  const gatewayReportedConnected = gateway.connected === true;
+  const gatewayConnected = gatewayReportedConnected && selectedConnectionHealth.connected === true;
   const gatewayMode = safeDashboardDisplayText(gateway.mode, "not_observed").toLowerCase();
-  const gatewayExecutionGuardReason = safeDashboardDisplayText(
+  const gatewayReportedExecutionGuardReason = safeDashboardDisplayText(
     gateway.executionGuardReason,
     "ยังไม่ได้รับสถานะจาก EA",
   );
+  const gatewayExecutionGuardReady = gatewayConnected && gateway.executionGuardReady === true;
+  const gatewayExecutionGuardReason = gatewayConnected
+    ? gatewayReportedExecutionGuardReason
+    : "TERMINAL_NOT_CONNECTED";
   const gatewayAccount = gateway.account && typeof gateway.account === "object"
     ? gateway.account
     : {};
@@ -10932,7 +11611,7 @@ function getSignalRuntimeTruth(report = {}) {
   const tradingKillSwitchAvailable = gateway.killSwitchAvailable === true
     || supplied?.tradingKillSwitchAvailable === true
     || signalConnectionIsReady(killSwitchItem);
-  const liveTradingEnabled = gateway.liveOrderExecutionAvailable === true;
+  const liveTradingEnabled = gatewayConnected && gateway.liveOrderExecutionAvailable === true;
   const gatewayNumber = (name) => {
     const value = gateway?.[name];
     if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
@@ -10957,7 +11636,12 @@ function getSignalRuntimeTruth(report = {}) {
     terminalDetected,
     terminalSelected,
     selectedPlatform,
-    selectedCandidateId: gatewaySelectedCandidateId || checklistSelectedCandidateId,
+    selectedCandidateId: selectedConnectionHealth.candidateId
+      || gatewaySelectedCandidateId
+      || checklistSelectedCandidateId,
+    selectedConnectionHealth,
+    gatewayObservedAt: safeDashboardDisplayText(gateway.observedAt, ""),
+    gatewayAgeSeconds: Number.isFinite(Number(gateway.ageSeconds)) ? Number(gateway.ageSeconds) : null,
     tradingStateAvailable,
     positionsAvailable: tradingStateAvailable && supplied?.positionsAvailable === true,
     latestSignalAvailable: tradingStateAvailable && supplied?.latestSignalAvailable === true,
@@ -10991,7 +11675,9 @@ function getSignalRuntimeTruth(report = {}) {
       gatewayBackend.liveBlockReason || gateway.liveBlockReason,
       "",
     ),
-    gatewayStatus: safeDashboardDisplayText(gateway.status, gatewayConnected ? "connected" : "not_connected"),
+    gatewayStatus: gatewayConnected
+      ? safeDashboardDisplayText(gateway.status, "connected")
+      : "not_connected",
     gatewayInitStatus: {
       available: gatewayInit.available === true,
       readStatus: safeDashboardDisplayText(gatewayInit.readStatus, "not_observed"),
@@ -11026,10 +11712,11 @@ function getSignalRuntimeTruth(report = {}) {
       "",
     ).trim().toUpperCase(),
     gatewayEstimatedCommissionPerLot: gatewayNumber("estimatedCommissionPerLot"),
+    gatewayCommissionFreeAccountConfirmed: gateway.commissionFreeAccountConfirmed === true,
     gatewayBrokerVolumeMin: gatewayNumber("brokerVolumeMin"),
     gatewayBrokerVolumeMax: gatewayNumber("brokerVolumeMax"),
     gatewayBrokerVolumeStep: gatewayNumber("brokerVolumeStep"),
-    gatewayExecutionGuardReady: gateway.executionGuardReady === true,
+    gatewayExecutionGuardReady,
     gatewayExecutionGuardReason,
     gatewayRiskTelemetry: {
       portfolioPolicyStatus: safeDashboardDisplayText(gateway.portfolioPolicyStatus, "not_observed"),
@@ -11062,7 +11749,7 @@ function getSignalRuntimeTruth(report = {}) {
     gatewayCommandStatus: safeDashboardDisplayText(
       gatewayCommand?.status || consensusGateway.status,
       gatewayConnected
-        ? gateway.executionGuardReady === true
+        ? gatewayExecutionGuardReady
           ? "พร้อมรับคำสั่งรอบใหม่"
           : signalExecutionGuardReasonLabel(gatewayExecutionGuardReason)
         : "ยังไม่เชื่อม EA",
@@ -11073,10 +11760,10 @@ function getSignalRuntimeTruth(report = {}) {
     liveTradingEnabled,
     orderSubmissionAvailable: gatewayConnected
       && !killSwitchActive
-      && (gatewayMode === "shadow" || gateway.executionGuardReady === true),
-    demoOrderExecutionAvailable: gateway.demoOrderExecutionAvailable === true,
+      && (gatewayMode === "shadow" || gatewayExecutionGuardReady),
+    demoOrderExecutionAvailable: gatewayConnected && gateway.demoOrderExecutionAvailable === true,
     shadowValidationAvailable: gateway.shadowValidationAvailable === true,
-    liveOrderExecutionAvailable: gateway.liveOrderExecutionAvailable === true,
+    liveOrderExecutionAvailable: gatewayConnected && gateway.liveOrderExecutionAvailable === true,
     summaryTh: safeDashboardDisplayText(
       supplied?.summaryTh || supplied?.messageTh,
       terminalDetected
@@ -11762,7 +12449,14 @@ function renderSignalDailyPanel(report = {}) {
   if (!container) return;
   const runtime = getSignalRuntimeTruth(report);
   const daily = signalDailySummaryModel(report);
-  const activePlatform = runtime.selectedPlatform || signalSelectedPlatform(report);
+  const market = signalMarketModel(report);
+  const hubReadModel = state.globalMetatraderHub.readModel;
+  const hubModelPresent = Boolean(
+    hubReadModel && typeof hubReadModel === "object" && !Array.isArray(hubReadModel),
+  );
+  const activePlatform = hubModelPresent
+    ? safeDashboardDisplayText(hubReadModel.selectedPlatform, "").toUpperCase()
+    : runtime.selectedPlatform || signalSelectedPlatform(report);
   const platformLabel = activePlatform || "MT4 / MT5";
   const mqlFolder = activePlatform === "MT5"
     ? "MQL5"
@@ -11832,6 +12526,7 @@ function renderSignalDailyPanel(report = {}) {
       <div>
         <span>Daily Trading Dashboard</span>
         <h3>ภาพรวมการเทรดวันนี้</h3>
+        <p class="signal-daily-market-line" data-signal-daily-market-line></p>
         <p data-signal-daily-message></p>
       </div>
       <div class="signal-daily-observed">
@@ -11933,12 +12628,12 @@ function renderSignalDailyPanel(report = {}) {
               <strong>${snapshotChannel ? "พร้อมนำไปใส่ใน SnapshotChannel" : "ยังไม่มี Channel ID"}</strong>
             </div>
             <span class="signal-state-badge ${snapshotChannel ? "ready" : "warning"}">
-              ${snapshotChannel ? "พร้อมคัดลอก" : "เลือก MT4 หรือ MT5 ที่แถบกลาง"}
+              ${snapshotChannel ? "พร้อมคัดลอก" : "รอเลือกแพลตฟอร์มด้านซ้าย"}
             </span>
           </div>
           <code data-signal-channel-code tabindex="0"></code>
           <button type="button" data-signal-copy-channel ${snapshotChannel ? "" : "disabled"}>
-            ${snapshotChannel ? "คัดลอก Channel ID" : "เลือก Terminal จากแถบด้านบนก่อน"}
+            ${snapshotChannel ? "คัดลอก Channel ID" : "เลือกแพลตฟอร์มและ Terminal ด้านซ้ายก่อน"}
           </button>
           <p>เลข Port ใช้เปิดหน้า Dashboard ส่วน Channel ID คือรหัสที่ต้องใส่ในช่อง <b>SnapshotChannel</b> ของ EA โดยทั้งสองอย่างไม่ใช่รหัสบัญชีหรือ Secret</p>
           <details class="signal-adapter-guide" ${daily.available ? "" : "open"}>
@@ -11958,7 +12653,14 @@ function renderSignalDailyPanel(report = {}) {
       </aside>
     </div>
   `;
-  container.querySelector(".signal-daily-hero")?.after(createSignalStreamContextBanner(report));
+  const dailyMarketLine = container.querySelector("[data-signal-daily-market-line]");
+  if (dailyMarketLine) {
+    dailyMarketLine.textContent = [
+      `Platform ${platformLabel}`,
+      `คู่เงิน ${market.symbol || automation.currentSymbol || "รอข้อมูล"}`,
+      `Timeframe ${market.timeframe || automation.currentTimeframe || "รอข้อมูล"}`,
+    ].join(" • ");
+  }
   container.querySelector("[data-signal-daily-message]").textContent = daily.readinessMessage;
   container.querySelector("[data-signal-daily-observed]").textContent = daily.observedAt
     ? formatThaiDateTime(daily.observedAt)
@@ -12300,6 +13002,16 @@ function signalGatewaySizingSummary(runtime = {}) {
   const maximum = runtime.gatewayBrokerVolumeMax;
   const step = runtime.gatewayBrokerVolumeStep;
   const maxLossPerTradePercent = runtime.gatewayRiskTelemetry?.maxLossPerTradePercent;
+  const commission = runtime.gatewayEstimatedCommissionPerLot;
+  const commissionFreeConfirmed = runtime.gatewayCommissionFreeAccountConfirmed === true;
+  const accountCurrency = safeDashboardDisplayText(runtime.gatewayAccountCurrency, "").trim().toUpperCase();
+  const commissionUnit = accountCurrency || "หน่วยเงินบัญชี";
+  const commissionPolicy = Number.isFinite(commission) && commission > 0
+    ? ` • สำรองค่าธรรมเนียม ${commission} ${commissionUnit}/lot`
+    : commissionFreeConfirmed
+      ? " • ยืนยันบัญชีไม่มีค่าคอมมิชชัน"
+      : " • ยังไม่ยืนยันนโยบายค่าคอมมิชชัน (Live ถูกบล็อก)";
+  const commissionPolicyReady = (Number.isFinite(commission) && commission > 0) || commissionFreeConfirmed;
   const brokerLimits = Number.isFinite(minimum) && Number.isFinite(maximum) && Number.isFinite(step)
     ? ` • Broker Lot ${minimum}-${maximum} • Step ${step}`
     : Number.isFinite(step)
@@ -12312,15 +13024,12 @@ function signalGatewaySizingSummary(runtime = {}) {
   if (mode === "RISK_PERCENT") {
     const percent = runtime.gatewayRiskPercent;
     const capital = runtime.gatewayRiskCapitalBase === "BALANCE" ? "Balance" : "Equity";
-    const commission = runtime.gatewayEstimatedCommissionPerLot;
-    const accountCurrency = safeDashboardDisplayText(runtime.gatewayAccountCurrency, "").trim().toUpperCase();
-    const commissionUnit = accountCurrency || "หน่วยเงินบัญชี";
     return {
       label: "Money Management",
       value: percent === null
         ? `Risk Percent • ${capital}`
-        : `เป้าหมาย Risk ${percent}% ของ ${capital}${hardCap}${brokerLimits}${commission === null || commission === 0 ? "" : ` • สำรองค่าธรรมเนียม ${commission} ${commissionUnit}/lot`}${estimateNote}`,
-      tone: percent === null ? "warning" : "ready",
+        : `เป้าหมาย Risk ${percent}% ของ ${capital}${hardCap}${brokerLimits}${commissionPolicy}${estimateNote}`,
+      tone: percent === null || !commissionPolicyReady ? "warning" : "ready",
     };
   }
   if (mode === "FIXED_LOT" || runtime.gatewayFixedLot !== null) {
@@ -12328,8 +13037,10 @@ function signalGatewaySizingSummary(runtime = {}) {
       label: "Money Management",
       value: runtime.gatewayFixedLot === null
         ? "Fixed Lot ตั้งค่าที่ EA"
-        : `Fixed Lot ${runtime.gatewayFixedLot}${hardCap}${brokerLimits}${estimateNote}`,
-      tone: runtime.gatewayFixedLot === null ? "muted" : "ready",
+        : `Fixed Lot ${runtime.gatewayFixedLot}${hardCap}${brokerLimits}${commissionPolicy}${estimateNote}`,
+      tone: runtime.gatewayFixedLot === null
+        ? "muted"
+        : commissionPolicyReady ? "ready" : "warning",
     };
   }
   return {
@@ -14097,6 +14808,8 @@ function signalExecutionGuardReasonLabel(value) {
     RISK_CAPITAL_BASE_INVALID: "ฐานคำนวณความเสี่ยงต้องเป็น Balance หรือ Equity",
     RISK_PERCENT_INVALID_OR_ABOVE_HARD_CAP: "Risk Percent ไม่ถูกต้องหรือสูงกว่าเพดานความเสี่ยงต่อครั้ง",
     ESTIMATED_COMMISSION_PER_LOT_INVALID: "ค่าธรรมเนียมสำรองต่อ Lot ไม่ถูกต้อง",
+    LIVE_COMMISSION_POLICY_UNCONFIRMED: "โหมด LIVE ยังไม่ยืนยันค่าคอมมิชชันไป-กลับหรือบัญชีปลอดค่าคอมมิชชัน",
+    LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST: "โหมด LIVE ต้องใส่ชื่อ Symbol ของกราฟแบบตรงตัวใน AllowedSymbols",
     BROKER_VOLUME_LIMITS_UNAVAILABLE: "EA อ่าน Min/Max/Step Lot จาก Broker ไม่ได้",
     BROKER_VOLUME_METADATA_INVALID: "EA อ่าน Min/Max/Step Lot จาก Broker ไม่ได้",
     MANAGED_LOT_CAP_BELOW_BROKER_MINIMUM: "เพดาน Lot ของ EA ต่ำกว่า Min Lot ของ Broker",
@@ -14206,6 +14919,8 @@ function signalExecutionGuardRecoveryLabel(value) {
     RISK_CAPITAL_BASE_INVALID: "เลือก RiskCapitalBase เป็น EQUITY หรือ BALANCE ที่ EA",
     RISK_PERCENT_INVALID_OR_ABOVE_HARD_CAP: "ตั้ง RiskPercent ให้มากกว่า 0 และไม่เกิน MaxLossPerTradePercent",
     ESTIMATED_COMMISSION_PER_LOT_INVALID: "ตั้ง EstimatedCommissionPerLot เป็นค่าที่ไม่ติดลบตามหน่วยเงินบัญชี",
+    LIVE_COMMISSION_POLICY_UNCONFIRMED: "ตั้ง EstimatedCommissionPerLot เป็นค่าคอมมิชชันไป-กลับแบบเผื่อความปลอดภัยต่อ 1.0 Lot ในหน่วยเงินบัญชี หรือยืนยัน CommissionFreeAccountConfirmed=true เฉพาะบัญชีที่ไม่มีค่าคอมมิชชันจริง",
+    LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST: "คัดลอกชื่อ Symbol เต็มจากกราฟรวม prefix/suffix ทุกตัวอักษรไปใส่ AllowedSymbols แล้วเริ่ม EA ใหม่",
     BROKER_VOLUME_LIMITS_UNAVAILABLE: "ตรวจ Symbol/การเชื่อมต่อ Broker แล้วรอให้ EA อ่าน Min/Max/Step Lot ได้ครบ",
     BROKER_VOLUME_METADATA_INVALID: "ตรวจ Symbol/การเชื่อมต่อ Broker แล้วรอให้ EA อ่าน Min/Max/Step Lot ได้ครบ",
     MANAGED_LOT_CAP_BELOW_BROKER_MINIMUM: "เพิ่ม MaxManagedTotalLots ให้ไม่น้อยกว่า Min Lot ของ Broker หรือเปลี่ยน Symbol/บัญชี",
@@ -41113,8 +41828,49 @@ els.modalDashboardRefreshConnections?.addEventListener("click", () => {
   void refreshDashboardConnections(state.modal.id);
 });
 
-els.modalAiTradeOpenGlobal?.addEventListener("click", (event) => {
-  openGlobalMetatraderHubFromDevice(event);
+els.modalAiTradePlatformChoice?.addEventListener("change", (event) => {
+  const radio = event.target.closest('input[name="modalAiTradePlatform"]');
+  if (radio) {
+    const platform = String(radio.value || "").toUpperCase();
+    if (!["MT4", "MT5"].includes(platform) || state.globalMetatraderHub.inFlight) return;
+    state.globalMetatraderHub.platformChoice = platform;
+    state.globalMetatraderHub.platformChoiceTouched = true;
+    state.globalMetatraderHub.message = `เลือก ${platform} ไว้แล้ว • ตรวจ Terminal แล้วกดยืนยันเพื่อเปลี่ยนค่าที่ Backend`;
+    state.globalMetatraderHub.tone = "neutral";
+    renderGlobalMetatraderHubControl();
+    return;
+  }
+  if (event.target === els.modalAiTradeCandidateSelect) {
+    const platform = String(state.globalMetatraderHub.platformChoice || "").toUpperCase();
+    if (!["MT4", "MT5"].includes(platform) || state.globalMetatraderHub.inFlight) return;
+    state.globalMetatraderHub.choices[platform] = String(event.target.value || "");
+    state.globalMetatraderHub.message = event.target.value
+      ? `เลือก Terminal ${platform} แล้ว • กดยืนยันเพื่อบันทึกค่าจริงที่ Backend`
+      : `กรุณาเลือก Terminal ${platform} ที่ต้องการใช้`;
+    state.globalMetatraderHub.tone = "neutral";
+    renderOpenAiTradeTerminalSummary();
+  }
+});
+
+els.modalAiTradeApplySelection?.addEventListener("click", async () => {
+  const platform = String(
+    els.modalAiTradePlatformChoice?.querySelector('input[name="modalAiTradePlatform"]:checked')?.value || "",
+  ).toUpperCase();
+  if (!["MT4", "MT5"].includes(platform) || state.globalMetatraderHub.inFlight) return;
+  state.globalMetatraderHub.choices[platform] = String(els.modalAiTradeCandidateSelect?.value || "");
+  await applyGlobalMetatraderTarget(platform);
+  renderOpenAiTradeTerminalSummary();
+});
+
+els.modalAiTradeRefreshPlatforms?.addEventListener("click", async () => {
+  if (state.globalMetatraderHub.inFlight) return;
+  await scanGlobalMetatraderHub();
+  await loadPropReport(AI_TRADE_COUNCIL_PROP_ID, { forceFresh: true });
+  if (
+    state.modal.open
+    && state.modal.type === "prop"
+    && state.modal.id === AI_TRADE_COUNCIL_PROP_ID
+  ) renderGameModal();
 });
 
 els.modalKanbanSearch?.addEventListener("input", () => {

@@ -38,7 +38,9 @@ input ENUM_MONEY_MANAGEMENT_MODE MoneyManagementMode = MONEY_MANAGEMENT_FIXED_LO
 input double FixedLot = 0.01;
 input double RiskPercent = 1.0;
 input ENUM_RISK_CAPITAL_BASE RiskCapitalBase = RISK_CAPITAL_EQUITY;
+// Conservative round-trip commission for 1.0 lot in native account currency.
 input double EstimatedCommissionPerLot = 0.0;
+input bool CommissionFreeAccountConfirmed = false;
 input int MagicNumber = 4186001;
 input string ManagedMagicNumbers = "4186001";
 input int PollIntervalSeconds = 1;
@@ -1981,12 +1983,22 @@ bool BuildPortfolioPolicyCanonical(
       return false;
    canonical = "schema=metafx-hq-account-portfolio-policy-v1";
    canonical += "|managedMagicNumbers=" + normalized_magics;
+   // This account-wide policy is shared with the MT5 gateway through
+   // FILE_COMMON.  Keep both the fields and their byte order identical to the
+   // MT5 canonical payload so equal policies can coexist on the same broker
+   // account while any real sizing mismatch still fails closed.
+   canonical += "|positionSizingMode=" + PositionSizingModeName();
+   canonical += "|riskPercent=" +
+      DoubleToString(EffectiveRiskPercent(), 8);
+   canonical += "|riskCapitalBase=" + RiskCapitalBaseName();
+   canonical += "|estimatedCommissionPerLot=" +
+      DoubleToString(EffectiveEstimatedCommissionPerLot(), 8);
+   canonical += "|commissionFreeAccountConfirmed=" +
+      (CommissionFreeAccountConfirmed ? "true" : "false");
    canonical += "|maxManagedOpenPositions=" +
       IntegerToString(MaxManagedOpenPositions);
    canonical += "|maxManagedTotalLots=" +
       DoubleToString(MaxManagedTotalLots, 8);
-   canonical += "|estimatedCommissionPerLot=" +
-      DoubleToString(EstimatedCommissionPerLot, 8);
    canonical += "|maxTradesPerBrokerDay=" +
       IntegerToString(MaxTradesPerBrokerDay);
    canonical += "|maxDailyLossPercent=" +
@@ -2452,6 +2464,30 @@ bool GatewayModeIsValid()
 }
 
 
+double EffectiveEstimatedCommissionPerLot()
+{
+   if(!MathIsValidNumber(EstimatedCommissionPerLot))
+      return 0.0;
+   return NormalizeDouble(EstimatedCommissionPerLot, 8);
+}
+
+
+bool LiveCommissionPolicyConfirmed()
+{
+   return MathIsValidNumber(EstimatedCommissionPerLot) &&
+      EstimatedCommissionPerLot >= 0.0 &&
+      EstimatedCommissionPerLot <= 1000000.0 &&
+      (EffectiveEstimatedCommissionPerLot() >= 0.00000001 ||
+       CommissionFreeAccountConfirmed);
+}
+
+
+bool LiveSymbolExactAllowlistConfirmed()
+{
+   return CsvContains(AllowedSymbols, Symbol());
+}
+
+
 bool PositionLifecycleModeIsValid()
 {
    return PositionLifecycleMode == LIFECYCLE_SLTP_ONLY ||
@@ -2525,9 +2561,20 @@ string ModeName()
 
 string AccountModeName()
 {
-   if(IsDemo())
+   if(IsNonRealAccount())
       return "demo";
    return "live";
+}
+
+
+bool IsNonRealAccount()
+{
+   // IsDemo() does not distinguish every non-real account type consistently
+   // across MT4 builds.  Contest and unknown modes must never enter the armed
+   // Live path, so only ACCOUNT_TRADE_MODE_REAL is treated as live.
+   ENUM_ACCOUNT_TRADE_MODE mode =
+      (ENUM_ACCOUNT_TRADE_MODE)AccountInfoInteger(ACCOUNT_TRADE_MODE);
+   return mode != ACCOUNT_TRADE_MODE_REAL;
 }
 
 
@@ -2564,13 +2611,18 @@ string BuildCapabilitiesJson()
 {
    string signing_reason = "";
    bool signed_ready = RefreshSigningReadiness(signing_reason);
-   bool demo_account = IsDemo();
+   bool demo_account = IsNonRealAccount();
    bool demo_ready = GatewayMode == GATEWAY_DEMO &&
       demo_account && signed_ready;
    bool explicit_live_pin = StringLen(g_trusted_signing_key_id) > 0 &&
       g_trusted_signing_key_id == g_active_signing_key_id;
+   bool live_commission_policy_confirmed = LiveCommissionPolicyConfirmed();
+   bool live_symbol_exact_allowlist_confirmed =
+      LiveSymbolExactAllowlistConfirmed();
    bool live_ready = GatewayMode == GATEWAY_LIVE &&
-      !demo_account && signed_ready && explicit_live_pin && LiveArmed;
+      !demo_account && signed_ready && explicit_live_pin &&
+      live_commission_policy_confirmed &&
+      live_symbol_exact_allowlist_confirmed && LiveArmed;
    string live_block_reason = "";
    if(demo_account)
       live_block_reason = "LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT";
@@ -2580,6 +2632,10 @@ string BuildCapabilitiesJson()
       live_block_reason = signing_reason;
    else if(!explicit_live_pin)
       live_block_reason = "LIVE_SIGNING_KEY_NOT_PINNED";
+   else if(!live_commission_policy_confirmed)
+      live_block_reason = "LIVE_COMMISSION_POLICY_UNCONFIRMED";
+   else if(!live_symbol_exact_allowlist_confirmed)
+      live_block_reason = "LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST";
    else if(!LiveArmed)
       live_block_reason = "LIVE_NOT_ARMED";
    string payload = "{";
@@ -2673,7 +2729,7 @@ string BuildStatusJson()
 {
    UpdateRiskTelemetry(false);
    bool signed_ready = SignedCommandVerificationAvailable();
-   bool demo_account = IsDemo();
+   bool demo_account = IsNonRealAccount();
    string normalized_managed_magics = "";
    string normalized_allowed_symbols = "";
    string normalized_allowed_timeframes = "";
@@ -2708,7 +2764,9 @@ string BuildStatusJson()
    payload += "\"riskPercent\":" + JsonNumber(EffectiveRiskPercent(), 8) + ",";
    payload += "\"riskCapitalBase\":" + JsonString(RiskCapitalBaseName()) + ",";
    payload += "\"estimatedCommissionPerLot\":" +
-      JsonNumber(EstimatedCommissionPerLot, 8) + ",";
+      JsonNumber(EffectiveEstimatedCommissionPerLot(), 8) + ",";
+   payload += "\"commissionFreeAccountConfirmed\":" +
+      JsonBoolean(CommissionFreeAccountConfirmed) + ",";
    payload += "\"brokerVolumeMin\":" +
       JsonNumber(broker_volume_minimum, LotDigits()) + ",";
    payload += "\"brokerVolumeMax\":" +
@@ -2912,7 +2970,7 @@ string BuildAckJson(
    payload += "\"estimatedCommissionPerLot\":" + JsonNumber(
       g_ack_has_sizing_evidence
          ? g_ack_estimated_commission_per_lot
-         : EstimatedCommissionPerLot,
+         : EffectiveEstimatedCommissionPerLot(),
       8
    ) + ",";
    if(g_ack_has_sizing_evidence)
@@ -3081,6 +3139,53 @@ bool IsBrokerSuffixCharacter(const int code)
 }
 
 
+bool IsBrokerNamespaceDelimiter(const int code)
+{
+   return code == '.' || code == '_' || code == '#' || code == '-';
+}
+
+
+bool IsAllowedBrokerPrefix(
+   const string candidate,
+   const int prefix_length
+)
+{
+   if(prefix_length < 1 || prefix_length > 8 ||
+      prefix_length > StringLen(candidate))
+      return false;
+   for(int index = 0; index < prefix_length; index++)
+   {
+      if(!IsBrokerSuffixCharacter(
+            StringGetCharacter(candidate, index)
+         ))
+         return false;
+   }
+
+   // A single leading marker (for example mXAUUSD) is common at brokers.
+   // Longer namespace prefixes must end in a delimiter, for example
+   // GOLD.XAUUSD. This rejects ambiguous embedded names such as FOOXAUUSD.
+   if(prefix_length == 1)
+      return true;
+   return IsBrokerNamespaceDelimiter(
+      StringGetCharacter(candidate, prefix_length - 1)
+   );
+}
+
+
+bool HasSingleBrokerBaseOccurrence(
+   const string candidate,
+   const string allowed
+)
+{
+   // Affixes may surround one canonical base, but repeated bases such as
+   // XAUUSDXAUUSD are ambiguous and must never be treated as a broker suffix.
+   int first = StringFind(candidate, allowed);
+   if(first < 0)
+      return false;
+   return StringFind(candidate, allowed, first + 1) < 0;
+}
+
+
 bool IsAllowedBrokerSymbol(const string csv, const string candidate)
 {
    string parts[];
@@ -3092,31 +3197,53 @@ bool IsAllowedBrokerSymbol(const string csv, const string candidate)
       if(allowed == normalized_candidate)
          return true;
 
-      // A six-character base such as EURUSD or XAUUSD may match a short
-      // broker suffix (for example EURUSD.m, EURUSD#, XAUUSDpro or XAUUSD-ECN).
-      // The command must still name the exact chart Symbol(), so this never
-      // permits a command to cross from one attached broker symbol to another.
+      // A six-character base such as EURUSD or XAUUSD may match a bounded
+      // broker prefix/suffix (for example mXAUUSD, GOLD.XAUUSD, EURUSD.m,
+      // XAUUSDpro or mXAUUSD-ECN). The command must still name the exact chart
+      // Symbol(), so this never permits a command to cross from one attached
+      // broker symbol to another.
       int base_length = StringLen(allowed);
       int actual_length = StringLen(normalized_candidate);
-      int suffix_length = actual_length - base_length;
-      if(base_length < 6 || suffix_length < 1 || suffix_length > 8 ||
-         StringSubstr(normalized_candidate, 0, base_length) != allowed)
+      if(base_length < 6 || actual_length <= base_length ||
+         actual_length > base_length + 16 ||
+         !HasSingleBrokerBaseOccurrence(normalized_candidate, allowed))
          continue;
-      bool suffix_valid = true;
-      for(int suffix_index = base_length;
-         suffix_index < actual_length;
-         suffix_index++)
+
+      for(int prefix_length = 0; prefix_length <= 8; prefix_length++)
       {
-         if(!IsBrokerSuffixCharacter(
-            StringGetCharacter(normalized_candidate, suffix_index)
-         ))
+         int suffix_length = actual_length - prefix_length - base_length;
+         if(suffix_length < 0 || suffix_length > 8 ||
+            (prefix_length == 0 && suffix_length == 0) ||
+            StringSubstr(
+               normalized_candidate,
+               prefix_length,
+               base_length
+            ) != allowed)
+            continue;
+         if(prefix_length > 0 &&
+            !IsAllowedBrokerPrefix(
+               normalized_candidate,
+               prefix_length
+            ))
+            continue;
+
+         bool suffix_valid = true;
+         int suffix_start = prefix_length + base_length;
+         for(int suffix_index = suffix_start;
+            suffix_index < actual_length;
+            suffix_index++)
          {
-            suffix_valid = false;
-            break;
+            if(!IsBrokerSuffixCharacter(
+               StringGetCharacter(normalized_candidate, suffix_index)
+            ))
+            {
+               suffix_valid = false;
+               break;
+            }
          }
+         if(suffix_valid)
+            return true;
       }
-      if(suffix_valid)
-         return true;
    }
    return false;
 }
@@ -3690,6 +3817,11 @@ bool ValidateMoneyManagementConfiguration(string &reason)
       EstimatedCommissionPerLot > 1000000.0)
    {
       reason = "ESTIMATED_COMMISSION_PER_LOT_INVALID";
+      return false;
+   }
+   if(GatewayMode == GATEWAY_LIVE && !LiveCommissionPolicyConfirmed())
+   {
+      reason = "LIVE_COMMISSION_POLICY_UNCONFIRMED";
       return false;
    }
    double effective_risk_percent = EffectiveRiskPercent();
@@ -4870,9 +5002,10 @@ bool EstimateStopLossMoneyAtEntry(
       risk_distance / tick_size_price * tick_value;
    double gross_reward_per_lot =
       reward_distance / tick_size_price * tick_value;
-   double loss_per_lot = gross_loss_per_lot + EstimatedCommissionPerLot;
+   double effective_commission = EffectiveEstimatedCommissionPerLot();
+   double loss_per_lot = gross_loss_per_lot + effective_commission;
    double net_reward_per_lot =
-      gross_reward_per_lot - EstimatedCommissionPerLot;
+      gross_reward_per_lot - effective_commission;
    loss_money = loss_per_lot * lots;
    reward_risk = net_reward_per_lot / loss_per_lot;
    if(!MathIsValidNumber(loss_per_lot) || loss_per_lot <= 0.0 ||
@@ -5287,12 +5420,12 @@ bool EvaluateExecutionGuard(string &reason)
       reason = "SESSION_CLOSE_ENTRY_WINDOW_BLOCKED";
       return false;
    }
-   if(GatewayMode == GATEWAY_DEMO && !IsDemo())
+   if(GatewayMode == GATEWAY_DEMO && !IsNonRealAccount())
    {
       reason = "DEMO_MODE_REQUIRES_DEMO_ACCOUNT";
       return false;
    }
-   if(GatewayMode == GATEWAY_LIVE && IsDemo())
+   if(GatewayMode == GATEWAY_LIVE && IsNonRealAccount())
    {
       reason = "LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT";
       return false;
@@ -5567,8 +5700,15 @@ bool ValidateRuntime(
       reason = "KILL_SWITCH_ACTIVE";
       return false;
    }
-   if(!IsAllowedBrokerSymbol(AllowedSymbols, command.symbol) ||
-       Uppercase(Symbol()) != command.symbol)
+   if(GatewayMode == GATEWAY_LIVE &&
+      !CsvContains(AllowedSymbols, command.symbol))
+   {
+      reason = "LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST";
+      return false;
+   }
+   if((GatewayMode != GATEWAY_LIVE &&
+       !IsAllowedBrokerSymbol(AllowedSymbols, command.symbol)) ||
+      Uppercase(Symbol()) != command.symbol)
    {
       reason = "SYMBOL_NOT_ALLOWED_OR_NOT_ATTACHED";
       return false;
@@ -5658,14 +5798,14 @@ bool ValidateRuntime(
       reason = "TESTER_EXECUTION_DISABLED";
       return false;
    }
-   if(GatewayMode == GATEWAY_DEMO && !IsDemo())
+   if(GatewayMode == GATEWAY_DEMO && !IsNonRealAccount())
    {
       reason = "DEMO_MODE_REQUIRES_DEMO_ACCOUNT";
       return false;
    }
    if(GatewayMode == GATEWAY_LIVE)
    {
-      if(IsDemo())
+      if(IsNonRealAccount())
       {
          reason = "LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT";
          return false;
@@ -7133,7 +7273,7 @@ void ProcessCommandFile()
       PositionSizingModeName(),
       EffectiveRiskPercent(),
       RiskCapitalBaseName(),
-      EstimatedCommissionPerLot,
+      EffectiveEstimatedCommissionPerLot(),
       risk_capital_amount,
       estimated_risk_money
    );
@@ -7199,14 +7339,14 @@ bool LifecycleCloseGuard(string &reason)
       reason = "TESTER_EXECUTION_DISABLED";
       return false;
    }
-   if(GatewayMode == GATEWAY_DEMO && !IsDemo())
+   if(GatewayMode == GATEWAY_DEMO && !IsNonRealAccount())
    {
       reason = "DEMO_MODE_REQUIRES_DEMO_ACCOUNT";
       return false;
    }
    if(GatewayMode == GATEWAY_LIVE)
    {
-      if(IsDemo())
+      if(IsNonRealAccount())
       {
          reason = "LIVE_MODE_REQUIRES_NON_DEMO_ACCOUNT";
          return false;
@@ -7612,6 +7752,16 @@ int OnInit()
          "inputs",
          "ALLOWED_CHART_LIST_INVALID",
          "MetafxHQ: AllowedSymbols or AllowedTimeframes is invalid."
+      );
+   }
+   if(GatewayMode == GATEWAY_LIVE &&
+      !LiveSymbolExactAllowlistConfirmed())
+   {
+      return InitFailure(
+         INIT_PARAMETERS_INCORRECT,
+         "chart",
+         "LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST",
+         "MetafxHQ: Live AllowedSymbols must include the exact attached broker Symbol() token."
       );
    }
    if(Period() < PERIOD_M5 ||

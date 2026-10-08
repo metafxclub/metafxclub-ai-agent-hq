@@ -8,7 +8,9 @@
 - ค่าเริ่มต้นคือ `GatewayMode = GATEWAY_SHADOW`, `LiveArmed = false` และ `SingleHostLiveAcknowledged = false`
 - รองรับคำสั่งตลาด `BUY` และ `SELL` ที่มี SL/TP เท่านั้น
 - เลือก Money Management จาก Input ของ EA ได้ 2 แบบ: `MONEY_MANAGEMENT_FIXED_LOT` ใช้ `FixedLot` และ `MONEY_MANAGEMENT_RISK_PERCENT` คำนวณ Lot จาก `RiskPercent` ของ `BALANCE` หรือ `EQUITY` ตาม `RiskCapitalBase`; คำสั่งจาก Backend/AI ไม่มีสิทธิ์กำหนด Lot, Risk หรือโหมด Money Management
-- โหมด Risk Percent คิดขาดทุนถึง SL ด้วย `OrderCalcProfit` ในหน่วยเงินของบัญชี เพิ่มระยะเผื่อราคาเสียเปรียบตาม `SlippagePoints` และสำรองค่าธรรมเนียมไป-กลับจาก `EstimatedCommissionPerLot` จึงใช้หลักเดียวกันกับบัญชี Standard, Cent หรือ Pro-Cent โดยไม่มีการเดาชื่อบัญชีหรือคูณ/หาร 100
+- โหมด Risk Percent คิดขาดทุนถึง SL ด้วย `OrderCalcProfit` ในหน่วยเงินของบัญชี เพิ่มระยะเผื่อราคาเสียเปรียบตาม `SlippagePoints` และสำรองค่าธรรมเนียมจาก `EstimatedCommissionPerLot` ซึ่งหมายถึง **ค่าคอมมิชชันไป-กลับแบบเผื่อความปลอดภัยต่อ 1.0 Lot ในหน่วยเงินของบัญชี** (ไม่ใช่ค่าต่อขาและไม่ใช่ USD เสมอ) ค่านี้ถูกปัดเป็น 8 ตำแหน่งก่อนใช้ใน Policy, Status และการคำนวณ จึงใช้หลักเดียวกันกับบัญชี Standard, Cent หรือ Pro-Cent โดยไม่มีการเดาชื่อบัญชีหรือคูณ/หาร 100
+- โหมด Live ทุกแบบจะไม่พร้อมทำงานถ้า `EstimatedCommissionPerLot` ที่ปัด 8 ตำแหน่งต่ำกว่า `0.00000001` เว้นแต่บัญชีนั้นไม่มีค่าคอมมิชชันจริงและผู้ควบคุมยืนยันด้วย `CommissionFreeAccountConfirmed = true`; หากยังไม่ยืนยันจะ fail-closed ด้วย `LIVE_COMMISSION_POLICY_UNCONFIRMED`
+- โหมด Shadow/Demo อนุญาตการจับคู่ชื่อ Symbol แบบ prefix/suffix ที่มีขอบเขตเพื่อช่วยทดสอบกับชื่อโบรกเกอร์ แต่โหมด Live ต้องใส่ชื่อเต็มของกราฟปัจจุบัน (เช่น `mXAUUSD` หรือ `XAUUSD.a`) เป็น token ตรงตัวใน `AllowedSymbols`; มิฉะนั้นจะ fail-closed ด้วย `LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST`
 - Lot ที่คำนวณได้จะปัดลงตาม `SYMBOL_VOLUME_MIN/MAX/STEP`, ไม่ฝืนส่งขั้นต่ำหาก Risk Budget ต่ำกว่า Lot ขั้นต่ำ, เคารพ `SYMBOL_VOLUME_LIMIT`, `MaxManagedTotalLots`, Margin และ `OrderCheck`; ถ้าคำนวณ SL, มูลค่าความเสี่ยง หรือข้อมูลโบรกเกอร์ไม่ได้ ระบบจะ fail-closed
 - ขนาด Lot จะคำนวณเพียงครั้งเดียวต่อคำสั่งและบันทึกลง execution-attempt ก่อน `OrderSend`; หาก EA/Terminal รีสตาร์ต การตรวจหลักฐานจะใช้ Lot ที่บันทึกไว้นั้น ไม่คำนวณใหม่จาก Equity หรือ Tick ที่เปลี่ยนไป
 - ไม่มีการส่งคำสั่งซ้ำอัตโนมัติ หากผลการส่งไม่สามารถพิสูจน์ได้จะตอบ `EXECUTION_UNKNOWN` และใช้สถานะ one-order-per-bar ที่บันทึกไว้เพื่อป้องกันการยิงซ้ำ
@@ -46,7 +48,8 @@ EA ใช้ `FILE_COMMON` ภายใต้ `MetafxHQ\\<SnapshotChannel>` เ�
 5. ใส่ Channel ID จาก AI Agent HQ ใน `SnapshotChannel`
 6. เลือก `MoneyManagementMode`:
    - `MONEY_MANAGEMENT_FIXED_LOT`: ตั้ง `FixedLot`
-   - `MONEY_MANAGEMENT_RISK_PERCENT`: ตั้ง `RiskPercent` (ต้องไม่เกิน `MaxLossPerTradePercent`), เลือก `RiskCapitalBase` เป็น `EQUITY` หรือ `BALANCE` และตั้ง `EstimatedCommissionPerLot` เป็นค่าประมาณค่าธรรมเนียมไป-กลับต่อ 1.0 Lot ในหน่วยเงินของบัญชี
+   - `MONEY_MANAGEMENT_RISK_PERCENT`: ตั้ง `RiskPercent` (ต้องไม่เกิน `MaxLossPerTradePercent`) และเลือก `RiskCapitalBase` เป็น `EQUITY` หรือ `BALANCE`
+   - ทั้งสองโหมด: ตั้ง `EstimatedCommissionPerLot` เป็นค่าคอมมิชชันไป-กลับแบบเผื่อความปลอดภัยต่อ 1.0 Lot ในหน่วยเงินของบัญชี หากบัญชีไม่มีค่าคอมมิชชันจริงเท่านั้นจึงตั้ง `0` และเปิด `CommissionFreeAccountConfirmed`
 7. เริ่มด้วย `GATEWAY_SHADOW` และตรวจว่า Snapshot, Status และ Shadow ACK ปรากฏครบ รวมถึง `positionSizingMode`, `riskPercent`, `riskCapitalBase` และ Broker volume limits
 8. ใช้บัญชี Demo เปลี่ยนเป็น `GATEWAY_DEMO` แล้วทดสอบคำสั่งจริงแบบมองเห็นได้ก่อนเสมอ
 
@@ -57,12 +60,14 @@ EA ใช้ `FILE_COMMON` ภายใต้ `MetafxHQ\\<SnapshotChannel>` เ�
 1. ตรวจว่า Dashboard เลือก MT5 Terminal/Channel ที่ต้องการเพียงตัวเดียว และ Login + Server ตรงกับบัญชีจริงที่จะใช้
 2. ใช้บัญชี MT5 แบบ **Real + Hedging** เท่านั้น เปิด Algo Trading และอนุญาต EA ให้เทรด
 3. ตั้ง `GatewayMode = GATEWAY_LIVE`
-4. ตั้ง `TrustedSigningKeyId` เป็น Key ID ที่ Local Runner ใช้อยู่จริง ห้ามเว้นว่าง และต้องผ่าน HMAC verification
-5. ตั้ง `LiveArmed = true`
-6. อ่านข้อจำกัด Single-host ด้านบน แล้วตั้ง `SingleHostLiveAcknowledged = true` เฉพาะเมื่อยืนยันว่าจะไม่รันบัญชีเดียวกันบน Windows user/เครื่อง/VPS อื่น
-7. ตรวจข้อความบนกราฟให้เป็น `Live Owner Lock: ready`, `Risk Guard: READY` และยืนยันว่าแสดง `Cross-VPS Distributed Lock: false` ก่อนเริ่ม
+4. ใส่ชื่อ Symbol เต็มที่ MT5 แสดงในกราฟปัจจุบันเป็น token ตรงตัวใน `AllowedSymbols` รวม prefix/suffix ของโบรกเกอร์ทุกตัวอักษร
+5. ตั้ง `EstimatedCommissionPerLot` เป็นค่าคอมมิชชันไป-กลับแบบเผื่อความปลอดภัยต่อ 1.0 Lot ในสกุลเงิน/หน่วยเงินของบัญชี หรือเปิด `CommissionFreeAccountConfirmed` เฉพาะบัญชีที่ไม่มีค่าคอมมิชชันจริง
+6. ตั้ง `TrustedSigningKeyId` เป็น Key ID ที่ Local Runner ใช้อยู่จริง ห้ามเว้นว่าง และต้องผ่าน HMAC verification
+7. ตั้ง `LiveArmed = true`
+8. อ่านข้อจำกัด Single-host ด้านบน แล้วตั้ง `SingleHostLiveAcknowledged = true` เฉพาะเมื่อยืนยันว่าจะไม่รันบัญชีเดียวกันบน Windows user/เครื่อง/VPS อื่น
+9. ตรวจข้อความบนกราฟให้เป็น `Live Owner Lock: ready`, `Risk Guard: READY` และยืนยันว่าแสดง `Cross-VPS Distributed Lock: false` ก่อนเริ่ม
 
-หากขาด Real account, `LiveArmed`, acknowledgement, signing pin/HMAC, heartbeat, owner lock หรือ Risk Guard ใด ๆ EA จะ fail-closed และไม่เรียก `OrderSend`
+หากขาด Real account, ค่าคอมมิชชัน/คำยืนยันบัญชีปลอดค่าคอมมิชชัน, exact Symbol allowlist, `LiveArmed`, acknowledgement, signing pin/HMAC, heartbeat, owner lock หรือ Risk Guard ใด ๆ EA จะ fail-closed และไม่เรียก `OrderSend`
 
 การเลือก Terminal ใหม่ที่ Backend จะต้องทำเมื่อไม่มีคำสั่งค้าง/สถานะไม่แน่นอน/Position ที่ระบบดูแลอยู่เท่านั้น แต่ account-owner lock รุ่นนี้ครอบคลุมเฉพาะ Local Gateway ที่รองรับ lock ภายใต้ Windows user และ host เดียว ไม่ได้พิสูจน์ความเป็นเจ้าของข้าม VPS
 
@@ -78,6 +83,6 @@ EA ใช้ `FILE_COMMON` ภายใต้ `MetafxHQ\\<SnapshotChannel>` เ�
 
 เปิด MetaEditor 5 จาก MT5 ที่ต้องการใช้งาน เปิดไฟล์ `MetafxHQTradeGateway.mq5` จากโฟลเดอร์ `MQL5\Experts\Metafxclub\TradeGateway` แล้วกด **Compile** จากนั้นตรวจผลใน Toolbox ว่าไม่มี Error หรือ Warning ก่อนนำ EA ไปวางบนกราฟ
 
-ผลที่ตรวจล่าสุด: `0 errors, 0 warnings` บน `X64 Regular`
+หมายเหตุหลักฐาน: source ปัจจุบัน SHA-256 `42CB8A410DDE98E608307C12FC272513ED30F1E23F5B3267F7DCDF128A69175C` ผ่าน Visible Compile ด้วย MetaEditor64 `5.0.0.6230` ผล `0 errors, 0 warnings` ภายใน 9358 ms บน `AVX2+FMA3` แล้ว หลักฐานอยู่ที่ `artifacts/mt5-trade-gateway-v1.03-visible-compile-readiness/` และตรวจ Source hash ซ้ำหลัง Compile ว่าไม่เปลี่ยน Release ยังคงเป็นแบบ Source-only และไม่บรรจุ `.ex5`
 
 ผล Compile เป็นเพียง `compile_verified` ยังไม่ใช่หลักฐานว่าได้ส่งคำสั่งจริงบนบัญชี Demo หรือ Live ต้องทดสอบแบบมองเห็นได้บน MT5 Demo อีกครั้งก่อนใช้งานเงินจริง และระบบนี้ไม่ใช่การรับประกันผลกำไร

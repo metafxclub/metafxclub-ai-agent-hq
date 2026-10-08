@@ -11,6 +11,7 @@
   "riskPercent": 1.0,
   "riskCapitalBase": "EQUITY",
   "estimatedCommissionPerLot": 0.0,
+  "commissionFreeAccountConfirmed": false,
   "brokerVolumeMin": 0.01,
   "brokerVolumeMax": 100.0,
   "brokerVolumeStep": 0.01,

@@ -1303,10 +1303,19 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 "analysisReadiness",
                 "autoAnalysis",
                 "tradeGateway",
+                "platformConnections",
                 "liveAnalysis",
                 "decisionPipeline",
                 "history",
             },
+        )
+        self.assertEqual(
+            council["platformConnections"]["schemaVersion"],
+            "metafx-hq-ai-trade-platform-connections-v1",
+        )
+        self.assertEqual(
+            {item["platform"] for item in council["platformConnections"]["items"]},
+            {"mt4", "mt5"},
         )
         runtime_truth = council["runtimeTruth"]
         self.assertEqual(runtime_truth["scope"], "terminal_detection_only")
@@ -3048,7 +3057,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertNotIn("submitManagerCommand", block)
 
     def test_agent_chat_runtime_version_and_executive_tiers(self) -> None:
-        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.21")
+        self.assertEqual(self.bridge.BRIDGE_RUNTIME_VERSION, "0.9.22")
         self.assertEqual(self.bridge.role_default_model_tier("ceo"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("manager"), "manager_quality")
         self.assertEqual(self.bridge.role_default_model_tier("risk_guard"), "risk_quality")
@@ -4159,11 +4168,21 @@ class RuntimeIntegrityTests(unittest.TestCase):
     def test_student_git_updater_is_fast_forward_only_and_never_pushes_or_overwrites_dirty_source(self) -> None:
         updater = UPDATE_SCRIPT_PATH.read_text(encoding="utf-8-sig")
 
-        self.assertIn('@("status", "--porcelain", "--untracked-files=normal")', updater)
+        self.assertIn('@("status", "--porcelain", "--untracked-files=all")', updater)
         self.assertIn('@("fetch", "--all", "--prune")', updater)
         self.assertIn('@("merge", "--ff-only", $upstream)', updater)
         self.assertIn('"Metafxclub\\AI-Agent-HQ"', updater)
         self.assertIn("-EndpointConfirmed", updater)
+        self.assertIn('$installExitCode -notin @(0, 2, 3, 4)', updater)
+        self.assertIn('ห้ามติดตั้ง Source ซ้ำ', updater)
+        update_launcher = (PROJECT_ROOT / "UPDATE-HQ.bat").read_text(
+            encoding="utf-8-sig"
+        )
+        for partial_exit_code in (2, 3, 4):
+            self.assertIn(
+                f'if "%UPDATE_EXIT%"=="{partial_exit_code}"', update_launcher
+            )
+        self.assertIn("post_install.repair_command", update_launcher)
         self.assertNotIn("reset --hard", updater.lower())
         self.assertNotIn("git push", updater.lower())
         self.assertNotIn("git.exe -C $projectRoot push", updater)
@@ -4279,7 +4298,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         )
         registry_text = registry_path.read_text(encoding="utf-8-sig")
         attributes = (PROJECT_ROOT / ".gitattributes").read_text(encoding="utf-8-sig")
-        self.assertEqual(version, "0.9.21")
+        self.assertEqual(version, "0.9.22")
         self.assertNotRegex(registry_text, r"(?i)[a-z]:\\\\users\\\\")
         self.assertIn("*.mq4 text eol=lf", attributes)
         self.assertIn("*.mq5 text eol=lf", attributes)

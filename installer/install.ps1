@@ -1112,6 +1112,22 @@ function Assert-EaArtifactIntegrity {
     catch {
         throw "หยุดติดตั้ง: MANIFEST.json ของ EA ไม่ใช่ JSON ที่สมบูรณ์"
     }
+    if ([string]$artifactManifest.candidateStatus -ceq "blocked_visible_metaeditor_recompile_required") {
+        if (
+            [string]$artifactManifest.schemaVersion -cne "metafx-hq-mt4-ea-artifact-v1" -or
+            [string]$artifactManifest.packageVersion -cne "2.19" -or
+            [string]$artifactManifest.sourceFile -cne "MetafxHQTradeGateway.mq4" -or
+            [string]$artifactManifest.sourceSha256 -cne $artifactSourceHash -or
+            $artifactManifest.binaryEligibleForInstall -ne $false -or
+            [string]$artifactManifest.compileEvidence.status -cne "stale" -or
+            [string]$artifactManifest.compileEvidence.reason -cne "SOURCE_CHANGED_AFTER_COMPILE" -or
+            [string]$artifactManifest.compileEvidence.compiledSourceSha256 -ceq $artifactSourceHash -or
+            $artifactManifest.compileEvidence.currentSourceMatchesCompiledSource -ne $false
+        ) {
+            throw "หยุดติดตั้ง: สถานะหลักฐาน Compile ที่รอสร้างใหม่ของ EA v2.19 ไม่สมบูรณ์"
+        }
+        throw "หยุดติดตั้ง: Source ของ EA v2.19 เปลี่ยนหลังหลักฐาน Compile ล่าสุด ต้อง Compile Source ปัจจุบันแบบมองเห็นใน MetaEditor และสร้าง EX4/Proof ใหม่ก่อนเผยแพร่"
+    }
     $binaryPath = Join-Path $artifactDirectory "MetafxHQTradeGateway.ex4"
     $proofPath = Join-Path $artifactDirectory "COMPILE_PROOF.png"
     $proofBytes = [IO.File]::ReadAllBytes($proofPath)
@@ -1130,12 +1146,21 @@ function Assert-EaArtifactIntegrity {
         [string]$artifactManifest.binarySha256 -cne [string]$expectedHashes["MetafxHQTradeGateway.ex4"] -or
         [long]$artifactManifest.binaryBytes -ne [long](Get-Item -LiteralPath $binaryPath).Length -or
         $artifactManifest.ex4Included -ne $true -or
+        $artifactManifest.binaryEligibleForInstall -ne $true -or
         [string]$artifactManifest.compileEvidence.status -cne "passed" -or
         [string]$artifactManifest.compileEvidence.mode -cne "visible_metaeditor_front_office" -or
+        [string]$artifactManifest.compileEvidence.compiledSourceSha256 -cne $artifactSourceHash -or
+        $artifactManifest.compileEvidence.currentSourceMatchesCompiledSource -ne $true -or
         [int]$artifactManifest.compileEvidence.errors -ne 0 -or
         [int]$artifactManifest.compileEvidence.warnings -ne 0 -or
         [string]$artifactManifest.compileEvidence.screenshot -cne "COMPILE_PROOF.png" -or
         [string]$artifactManifest.compileEvidence.screenshotSha256 -cne [string]$expectedHashes["COMPILE_PROOF.png"] -or
+        [string]$artifactManifest.compileEvidence.releaseCompile.status -cne "passed" -or
+        [string]$artifactManifest.compileEvidence.releaseCompile.mode -cne "visible_metaeditor_exact_source" -or
+        [int]$artifactManifest.compileEvidence.releaseCompile.errors -ne 0 -or
+        [int]$artifactManifest.compileEvidence.releaseCompile.warnings -ne 0 -or
+        [string]$artifactManifest.compileEvidence.releaseCompile.sourceSha256 -cne $artifactSourceHash -or
+        [string]$artifactManifest.compileEvidence.releaseCompile.binarySha256 -cne [string]$expectedHashes["MetafxHQTradeGateway.ex4"] -or
         $pngSignature -cne "89504E470D0A1A0A"
     ) {
         throw "หยุดติดตั้ง: MANIFEST/Compile proof ของ EA v2.19 ไม่ตรงกับ Source, Binary หรือผล Compile ที่อนุมัติ"
@@ -3065,11 +3090,12 @@ try {
     # Validate explicit classroom onboarding inputs before endpoint selection,
     # staging, stopping an existing Bridge, or mutating the installation.
     Assert-GoogleOAuthOneRunInputs
-    Assert-SafeSource
-    if ($RepairOnly -and [string]::IsNullOrWhiteSpace($validatedSourceCommit)) {
-        $script:preservedRepairSource = Get-VerifiedInstallSourceForRepair
-    }
     if ($ListAvailableEndpoints) {
+        # Endpoint discovery is a read-only onboarding operation. It validates
+        # explicit OAuth input above, but it must not pretend that the whole
+        # release (including the independently gated EA binary) is installable.
+        # The full source and artifact gates still run before any install,
+        # repair, staging, process stop, or filesystem mutation below.
         $candidates = @(Get-AvailableBridgeEndpointCandidates -Count 3)
         [pscustomobject]@{
             ok = $true
@@ -3078,6 +3104,10 @@ try {
             candidates = $candidates
         } | ConvertTo-Json -Depth 5
         exit 0
+    }
+    Assert-SafeSource
+    if ($RepairOnly -and [string]::IsNullOrWhiteSpace($validatedSourceCommit)) {
+        $script:preservedRepairSource = Get-VerifiedInstallSourceForRepair
     }
 
     $selectedBridgePort = Confirm-BridgeEndpoint

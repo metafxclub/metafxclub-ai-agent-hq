@@ -254,7 +254,7 @@
         "failurePolicy": "fail_closed_no_trade"
       },
       "actionableFields": ["direction", "stopLossPrice", "takeProfitPrice"],
-      "forbiddenAiFields": ["lot", "lots", "fixedLot", "moneyManagementMode", "volume", "positionSize", "riskPercent", "riskCapitalBase", "estimatedCommissionPerLot", "mode"],
+      "forbiddenAiFields": ["lot", "lots", "fixedLot", "moneyManagementMode", "volume", "positionSize", "riskPercent", "riskCapitalBase", "estimatedCommissionPerLot", "commissionFreeAccountConfirmed", "mode"],
       "lotSource": "mt4_mt5_ea_money_management_inputs"
     },
     "decisionHorizonPolicy": {

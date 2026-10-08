@@ -116,6 +116,48 @@ class GlobalMetatraderBackendTests(unittest.TestCase):
             store,
         )
 
+    def _platform_connection_checklist(
+        self,
+        *,
+        selected_platform: str | None = "mt4",
+    ) -> dict:
+        candidates = [
+            {
+                "candidateId": self.mt4_id,
+                "platform": "mt4",
+                "runningState": "platform_running_detected",
+                # Deliberately hostile/private source fields.  The Council
+                # projection must copy only its explicit public allowlist.
+                "localPath": "C:\\private\\mt4",
+                "processId": 4104,
+                "accountNumber": "private-account-4",
+                "broker": "private-broker-4",
+            },
+            {
+                "candidateId": self.mt5_id,
+                "platform": "mt5",
+                "runningState": "platform_running_detected",
+                "installPath": "C:\\private\\mt5",
+                "pid": 5105,
+                "account": "private-account-5",
+                "clientSecret": "private-secret-5",
+            },
+        ]
+        selected_candidate = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate["platform"] == selected_platform
+            ),
+            None,
+        )
+        return {
+            "metatraderSelection": {
+                "candidates": candidates,
+                "selectedCandidate": selected_candidate,
+            }
+        }
+
     def _write_gateway_ledger(
         self,
         *,
@@ -708,6 +750,625 @@ class GlobalMetatraderBackendTests(unittest.TestCase):
             "ai_trade_council_target_switch_blocked",
         )
         self.assertEqual(store_path.read_bytes(), before)
+
+    def test_platform_connections_projects_both_fresh_heartbeats_with_one_active_target(self) -> None:
+        checklist = self._platform_connection_checklist(selected_platform="mt4")
+
+        def ea_status(candidate: dict, *, include_stale: bool = False):
+            self.assertTrue(include_stale)
+            platform = str(candidate.get("platform") or "")
+            return (
+                {
+                    "observedAt": "2026-10-07T02:00:00Z",
+                    "ageSeconds": 2 if platform == "mt4" else 3,
+                    "mode": "demo",
+                    "executionGuardReady": True,
+                    "executionGuardReason": "READY",
+                    "accountNumber": f"private-{platform}",
+                    "broker": f"private-broker-{platform}",
+                    "password": "must-not-leak",
+                },
+                "ready",
+            )
+
+        with mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_ea_status",
+            side_effect=ea_status,
+        ) as read_status, mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_init_status",
+            return_value={},
+        ) as read_init:
+            model = self.bridge._ai_trade_council_platform_connections_read_model(
+                checklist
+            )
+
+        self.assertEqual(
+            model["schemaVersion"],
+            "metafx-hq-ai-trade-platform-connections-v1",
+        )
+        self.assertEqual(model["selectionMode"], "single_exclusive")
+        self.assertEqual(
+            model["freshForSeconds"],
+            self.bridge.MT4_TRADE_GATEWAY_STATUS_FRESH_SECONDS,
+        )
+        self.assertEqual(model["active"], {
+            "platform": "mt4",
+            "candidateId": self.mt4_id,
+        })
+        self.assertEqual(read_status.call_count, 2)
+        self.assertEqual(read_init.call_count, 2)
+        by_platform = {item["platform"]: item for item in model["items"]}
+        self.assertEqual(set(by_platform), {"mt4", "mt5"})
+        self.assertEqual(
+            {platform: item["connectionState"] for platform, item in by_platform.items()},
+            {"mt4": "connected", "mt5": "connected"},
+        )
+        self.assertTrue(by_platform["mt4"]["selected"])
+        self.assertTrue(by_platform["mt4"]["authoritativeForDashboard"])
+        self.assertFalse(by_platform["mt5"]["selected"])
+        self.assertFalse(by_platform["mt5"]["authoritativeForDashboard"])
+        self.assertEqual(
+            {item["freshForSeconds"] for item in model["items"]},
+            {self.bridge.MT4_TRADE_GATEWAY_STATUS_FRESH_SECONDS},
+        )
+        self.assertEqual(
+            sum(item["selected"] for item in model["items"]),
+            1,
+        )
+        self.assertTrue(model["safety"]["bothMayBeConnected"])
+        self.assertTrue(model["safety"]["exactlyOneExecutionTarget"])
+        self.assertTrue(model["safety"]["selectionDoesNotArmTrading"])
+
+        observed_keys = set()
+        observed_values = []
+
+        def collect(value) -> None:
+            if isinstance(value, dict):
+                observed_keys.update(value)
+                for child in value.values():
+                    collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+            elif isinstance(value, str):
+                observed_values.append(value)
+
+        collect(model)
+        self.assertTrue({
+            "localPath",
+            "installPath",
+            "processId",
+            "pid",
+            "account",
+            "accountNumber",
+            "broker",
+            "clientSecret",
+            "password",
+        }.isdisjoint(observed_keys))
+        self.assertNotIn("must-not-leak", observed_values)
+        self.assertFalse(any(value.startswith("private-") for value in observed_values))
+
+    def test_platform_connections_keeps_stale_and_missing_heartbeats_waiting(self) -> None:
+        checklist = self._platform_connection_checklist(selected_platform="mt5")
+
+        def ea_status(candidate: dict, *, include_stale: bool = False):
+            self.assertTrue(include_stale)
+            if candidate.get("platform") == "mt4":
+                return (
+                    {
+                        "observedAt": "2026-10-07T01:00:00Z",
+                        "ageSeconds": 181,
+                        "mode": "demo",
+                        "executionGuardReady": False,
+                        "executionGuardReason": "HEARTBEAT_STALE",
+                    },
+                    "gateway_status_stale",
+                )
+            return None, "gateway_status_not_observed"
+
+        with mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_ea_status",
+            side_effect=ea_status,
+        ), mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_init_status",
+            return_value={},
+        ):
+            model = self.bridge._ai_trade_council_platform_connections_read_model(
+                checklist
+            )
+
+        by_platform = {item["platform"]: item for item in model["items"]}
+        self.assertEqual(by_platform["mt4"]["connectionState"], "waiting")
+        self.assertEqual(by_platform["mt4"]["tone"], "warning")
+        self.assertEqual(by_platform["mt4"]["reasonCode"], "gateway_status_stale")
+        self.assertEqual(by_platform["mt4"]["ageSeconds"], 181.0)
+        self.assertIn("หมดอายุ", by_platform["mt4"]["messageTh"])
+        self.assertTrue(by_platform["mt4"]["remediationTh"])
+        self.assertEqual(by_platform["mt5"]["connectionState"], "waiting")
+        self.assertEqual(
+            by_platform["mt5"]["reasonCode"],
+            "gateway_status_not_observed",
+        )
+        self.assertIsNone(by_platform["mt5"]["observedAt"])
+        self.assertTrue(by_platform["mt5"]["selected"])
+        self.assertTrue(by_platform["mt5"]["remediationTh"])
+        self.assertTrue(model["safety"]["exactlyOneExecutionTarget"])
+
+    def test_platform_connections_reuses_canonical_selected_gateway_snapshot(self) -> None:
+        checklist = self._platform_connection_checklist(selected_platform="mt4")
+        global_snapshot = {
+            "status": "configured",
+            "selectedPlatform": "mt4",
+            "selectedCandidate": {
+                "candidateId": self.mt4_id,
+                "platform": "mt4",
+                "runningState": "platform_running_detected",
+            },
+            "candidates": checklist["metatraderSelection"]["candidates"],
+        }
+        canonical_gateway = {
+            "connected": True,
+            "selectedCandidateId": self.mt4_id,
+            "selectedPlatform": "mt4",
+            "observedAt": "2026-10-07T02:00:05+00:00",
+            "ageSeconds": 1,
+            "mode": "demo",
+            "executionGuardReady": False,
+            "executionGuardReason": "QUOTE_NOT_OBSERVED",
+            "initStatus": {},
+        }
+
+        def inactive_status(candidate: dict, *, include_stale: bool = False):
+            self.assertTrue(include_stale)
+            self.assertEqual(candidate["candidateId"], self.mt5_id)
+            return ({
+                "observedAt": "2026-10-07T02:00:04+00:00",
+                "ageSeconds": 2,
+                "mode": "demo",
+                "executionGuardReady": True,
+                "executionGuardReason": "READY",
+            }, "ready")
+
+        with mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_ea_status",
+            side_effect=inactive_status,
+        ) as read_status, mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_init_status",
+            return_value={},
+        ) as read_init:
+            model = self.bridge._ai_trade_council_platform_connections_read_model(
+                checklist,
+                selected_gateway_snapshot=canonical_gateway,
+                global_metatrader_snapshot=global_snapshot,
+            )
+
+        self.assertEqual(read_status.call_count, 1)
+        self.assertEqual(read_init.call_count, 1)
+        by_platform = {item["platform"]: item for item in model["items"]}
+        self.assertEqual(by_platform["mt4"]["connectionState"], "connected")
+        self.assertFalse(by_platform["mt4"]["executionGuardReady"])
+        self.assertEqual(
+            by_platform["mt4"]["executionGuardReason"],
+            "QUOTE_NOT_OBSERVED",
+        )
+        self.assertEqual(by_platform["mt5"]["connectionState"], "connected")
+        self.assertEqual(model["selectionScope"], "global_compatible_consumers")
+        self.assertTrue(model["safety"]["exactlyOneWhenGloballyConfigured"])
+
+    def test_runtime_snapshot_capture_retries_selection_race_then_fails_closed(self) -> None:
+        def gateway(candidate_id: str, platform: str, revision: int) -> dict:
+            return {
+                "connected": True,
+                "selectedCandidateId": candidate_id,
+                "selectedPlatform": platform,
+                "selectionRevision": revision,
+                "reasonCode": "ready",
+            }
+
+        def hub(candidate_id: str, platform: str, revision: int) -> dict:
+            candidate = {
+                "candidateId": candidate_id,
+                "platform": platform,
+                "runningState": "platform_running_detected",
+            }
+            return {
+                "status": "configured",
+                "selectedPlatform": platform,
+                "selectedCandidate": candidate,
+                "platforms": {
+                    platform: {
+                        "targets": [{
+                            "propId": self.bridge.AI_TRADE_COUNCIL_PROP_ID,
+                            "status": "configured",
+                            "selectedCandidate": candidate,
+                            "selectionRevision": revision,
+                        }],
+                    },
+                },
+            }
+
+        mt4_gateway = gateway(self.mt4_id, "mt4", 1)
+        mt5_gateway = gateway(self.mt5_id, "mt5", 2)
+        mt5_hub = hub(self.mt5_id, "mt5", 2)
+        mt5_token = {
+            "candidateId": self.mt5_id,
+            "selectionRevision": 2,
+        }
+        with mock.patch.object(
+            self.bridge,
+            "mt4_trade_gateway_status_read_model",
+            side_effect=[mt4_gateway, mt5_gateway],
+        ) as gateway_reader, mock.patch.object(
+            self.bridge,
+            "global_metatrader_hub_read_model",
+            return_value=mt5_hub,
+        ) as hub_reader, mock.patch.object(
+            self.bridge,
+            "_metatrader_selection_token",
+            return_value=mt5_token,
+        ):
+            captured_gateway, captured_hub = (
+                self.bridge._capture_ai_trade_runtime_snapshots()
+            )
+
+        self.assertEqual(gateway_reader.call_count, 2)
+        self.assertEqual(hub_reader.call_count, 2)
+        self.assertEqual(captured_gateway["selectedCandidateId"], self.mt5_id)
+        self.assertEqual(captured_gateway["selectionRevision"], 2)
+        self.assertIs(captured_hub, mt5_hub)
+
+        with mock.patch.object(
+            self.bridge,
+            "mt4_trade_gateway_status_read_model",
+            return_value=mt4_gateway,
+        ) as gateway_reader, mock.patch.object(
+            self.bridge,
+            "global_metatrader_hub_read_model",
+            return_value=mt5_hub,
+        ), mock.patch.object(
+            self.bridge,
+            "_metatrader_selection_token",
+            return_value=mt5_token,
+        ):
+            blocked_gateway, _captured_hub = (
+                self.bridge._capture_ai_trade_runtime_snapshots()
+            )
+
+        self.assertEqual(gateway_reader.call_count, 2)
+        self.assertFalse(blocked_gateway["connected"])
+        self.assertEqual(blocked_gateway["status"], "selection_changed")
+        self.assertEqual(
+            blocked_gateway["reasonCode"],
+            "terminal_selection_changed_during_status_read",
+        )
+
+        stale_checklist = {
+            "metatraderSelection": {
+                "status": "selected",
+                "configurationStatus": "configured",
+                "selectedCandidate": {
+                    "candidateId": self.mt4_id,
+                    "platform": "mt4",
+                },
+                "selectionRevision": 1,
+            },
+        }
+        self.assertFalse(
+            self.bridge._ai_trade_checklist_matches_global_snapshot(
+                stale_checklist,
+                mt5_hub,
+            )
+        )
+        closed_checklist, closed_hub = (
+            self.bridge._fail_closed_ai_trade_selection_snapshots(
+                stale_checklist,
+                mt5_hub,
+            )
+        )
+        self.assertIsNone(
+            closed_checklist["metatraderSelection"]["selectedCandidate"]
+        )
+        self.assertIsNone(closed_hub["selectedPlatform"])
+        self.assertIsNone(closed_hub["selectedCandidate"])
+
+    def test_selected_platform_connection_uses_heartbeat_not_backend_ledger_health(self) -> None:
+        checklist = self._platform_connection_checklist(selected_platform="mt4")
+        canonical_gateway = {
+            "connected": False,
+            "status": "backend_blocked",
+            "reasonCode": "gateway_backend_unavailable",
+            "selectedCandidateId": self.mt4_id,
+            "selectedPlatform": "mt4",
+            "executionGuardReady": False,
+            "executionGuardReason": None,
+            "eaHeartbeat": {
+                "connected": True,
+                "reasonCode": "ready",
+                "observedAt": "2026-10-07T02:00:05+00:00",
+                "ageSeconds": 1,
+                "mode": "demo",
+                "executionGuardReady": True,
+                "executionGuardReason": "READY",
+            },
+            "initStatus": {},
+        }
+        with mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_ea_status",
+            return_value=(None, "gateway_status_not_observed"),
+        ), mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_init_status",
+            return_value={},
+        ):
+            model = self.bridge._ai_trade_council_platform_connections_read_model(
+                checklist,
+                selected_gateway_snapshot=canonical_gateway,
+            )
+
+        mt4 = next(item for item in model["items"] if item["platform"] == "mt4")
+        self.assertEqual(mt4["connectionState"], "connected")
+        self.assertEqual(mt4["tone"], "success")
+        self.assertFalse(mt4["executionGuardReady"])
+        self.assertEqual(
+            mt4["executionGuardReason"],
+            "gateway_backend_unavailable",
+        )
+
+    def test_platform_connections_reconciles_newer_and_older_init_errors(self) -> None:
+        checklist = self._platform_connection_checklist(selected_platform="mt4")
+
+        cases = (
+            (
+                "newer init error overrides older live heartbeat",
+                "ready",
+                "2026-10-07T02:00:00+00:00",
+                "2026-10-07T02:00:05+00:00",
+                "error",
+            ),
+            (
+                "older init error stays superseded when newer live heartbeat becomes stale",
+                "gateway_status_stale",
+                "2026-10-07T02:00:05+00:00",
+                "2026-10-07T02:00:00+00:00",
+                "waiting",
+            ),
+        )
+        for label, live_reason, live_at, init_at, expected_state in cases:
+            with self.subTest(label=label):
+                def ea_status(candidate: dict, *, include_stale: bool = False):
+                    self.assertTrue(include_stale)
+                    if candidate.get("platform") == "mt4":
+                        return ({
+                            "observedAt": live_at,
+                            "ageSeconds": 1 if live_reason == "ready" else 60,
+                            "mode": "demo",
+                            "executionGuardReady": True,
+                            "executionGuardReason": "READY",
+                        }, live_reason)
+                    return None, "gateway_status_not_observed"
+
+                def init_status(candidate: dict) -> dict:
+                    if candidate.get("platform") != "mt4":
+                        return {}
+                    return {
+                        "available": True,
+                        "stale": False,
+                        "readStatus": "invalid",
+                        "severity": "error",
+                        "reasonCode": "SNAPSHOT_CHANNEL_INVALID",
+                        "observedAt": init_at,
+                        "ageSeconds": 1,
+                        "gatewayMode": "demo",
+                    }
+
+                with mock.patch.object(
+                    self.bridge,
+                    "_read_mt4_trade_gateway_ea_status",
+                    side_effect=ea_status,
+                ), mock.patch.object(
+                    self.bridge,
+                    "_read_mt4_trade_gateway_init_status",
+                    side_effect=init_status,
+                ):
+                    model = self.bridge._ai_trade_council_platform_connections_read_model(
+                        checklist
+                    )
+
+                mt4 = next(item for item in model["items"] if item["platform"] == "mt4")
+                self.assertEqual(mt4["connectionState"], expected_state)
+                if expected_state == "error":
+                    self.assertEqual(mt4["reasonCode"], "SNAPSHOT_CHANNEL_INVALID")
+                else:
+                    self.assertEqual(mt4["reasonCode"], "gateway_status_stale")
+
+    def test_platform_connections_global_partial_state_has_no_authoritative_target(self) -> None:
+        checklist = self._platform_connection_checklist(selected_platform="mt4")
+        global_snapshot = {
+            "status": "partial",
+            "selectedPlatform": None,
+            "selectedCandidate": None,
+            "candidates": checklist["metatraderSelection"]["candidates"],
+        }
+        with mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_ea_status",
+            return_value=(None, "gateway_status_not_observed"),
+        ), mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_init_status",
+            return_value={},
+        ):
+            model = self.bridge._ai_trade_council_platform_connections_read_model(
+                checklist,
+                global_metatrader_snapshot=global_snapshot,
+            )
+
+        self.assertEqual(model["active"], {"platform": None, "candidateId": None})
+        self.assertEqual(sum(item["selected"] for item in model["items"]), 0)
+        self.assertTrue(model["safety"]["atMostOneExecutionTarget"])
+        self.assertTrue(model["safety"]["exactlyOneWhenGloballyConfigured"])
+
+    def test_platform_connections_projects_wire_and_init_failures_as_error(self) -> None:
+        checklist = self._platform_connection_checklist(selected_platform="mt4")
+
+        def ea_status(candidate: dict, *, include_stale: bool = False):
+            self.assertTrue(include_stale)
+            if candidate.get("platform") == "mt4":
+                return None, "gateway_status_json_invalid"
+            return None, "gateway_status_not_observed"
+
+        def init_status(candidate: dict) -> dict:
+            if candidate.get("platform") == "mt5":
+                return {
+                    "available": True,
+                    "stale": False,
+                    "supersededByLiveStatus": False,
+                    "readStatus": "invalid",
+                    "severity": "error",
+                    "reasonCode": "LIVE_SIGNING_KEY_PIN_REQUIRED",
+                    "observedAt": "2026-10-07T02:00:00Z",
+                    "ageSeconds": 4,
+                    "gatewayMode": "shadow",
+                    "localPath": "C:\\private\\gateway",
+                    "accountNumber": "private-account",
+                }
+            return {}
+
+        with mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_ea_status",
+            side_effect=ea_status,
+        ), mock.patch.object(
+            self.bridge,
+            "_read_mt4_trade_gateway_init_status",
+            side_effect=init_status,
+        ):
+            model = self.bridge._ai_trade_council_platform_connections_read_model(
+                checklist
+            )
+
+        by_platform = {item["platform"]: item for item in model["items"]}
+        self.assertEqual(by_platform["mt4"]["connectionState"], "error")
+        self.assertEqual(by_platform["mt4"]["tone"], "error")
+        self.assertEqual(
+            by_platform["mt4"]["reasonCode"],
+            "gateway_status_json_invalid",
+        )
+        self.assertIn("อ่านสถานะ EA MT4 ไม่สำเร็จ", by_platform["mt4"]["messageTh"])
+        self.assertTrue(by_platform["mt4"]["remediationTh"])
+        self.assertEqual(by_platform["mt5"]["connectionState"], "error")
+        self.assertEqual(by_platform["mt5"]["tone"], "error")
+        self.assertEqual(
+            by_platform["mt5"]["reasonCode"],
+            "LIVE_SIGNING_KEY_PIN_REQUIRED",
+        )
+        self.assertEqual(by_platform["mt5"]["mode"], "shadow")
+        self.assertIn("เริ่มทำงานไม่สำเร็จ", by_platform["mt5"]["messageTh"])
+        self.assertIn("TrustedSigningKeyId", by_platform["mt5"]["remediationTh"])
+        serialized = json.dumps(model, ensure_ascii=False)
+        self.assertNotIn("C:\\private", serialized)
+        self.assertNotIn("private-account", serialized)
+
+    def test_init_transport_failure_is_red_without_heartbeat_but_not_with_fresh_heartbeat(self) -> None:
+        checklist = self._platform_connection_checklist(selected_platform="mt4")
+        broken_init = {
+            "available": False,
+            "readStatus": "invalid",
+            "readReasonCode": "gateway_init_status_json_invalid",
+            "severity": None,
+            "reasonCode": None,
+            "stale": False,
+            "supersededByLiveStatus": False,
+        }
+        cases = (
+            (None, "gateway_status_not_observed", "error"),
+            ({
+                "observedAt": "2026-10-07T02:00:05+00:00",
+                "ageSeconds": 1,
+                "mode": "demo",
+                "executionGuardReady": True,
+                "executionGuardReason": "READY",
+            }, "ready", "connected"),
+        )
+        for ea_status, status_reason, expected_state in cases:
+            with self.subTest(expected_state=expected_state), mock.patch.object(
+                self.bridge,
+                "_read_mt4_trade_gateway_ea_status",
+                side_effect=lambda candidate, include_stale=False: (
+                    (ea_status, status_reason)
+                    if candidate.get("platform") == "mt4"
+                    else (None, "gateway_status_not_observed")
+                ),
+            ), mock.patch.object(
+                self.bridge,
+                "_read_mt4_trade_gateway_init_status",
+                side_effect=lambda candidate: (
+                    broken_init if candidate.get("platform") == "mt4" else {}
+                ),
+            ):
+                model = self.bridge._ai_trade_council_platform_connections_read_model(
+                    checklist
+                )
+
+            mt4 = next(item for item in model["items"] if item["platform"] == "mt4")
+            self.assertEqual(mt4["connectionState"], expected_state)
+            if expected_state == "error":
+                self.assertEqual(
+                    mt4["reasonCode"],
+                    "gateway_init_status_json_invalid",
+                )
+                self.assertTrue(mt4["remediationTh"])
+            else:
+                self.assertEqual(mt4["reasonCode"], "ready")
+
+    def test_platform_connections_live_local_policy_failures_have_specific_recovery(self) -> None:
+        checklist = self._platform_connection_checklist(selected_platform="mt4")
+        cases = (
+            ("LIVE_COMMISSION_POLICY_UNCONFIRMED", "EstimatedCommissionPerLot"),
+            ("LIVE_SYMBOL_REQUIRES_EXACT_ALLOWLIST", "AllowedSymbols"),
+        )
+        for reason_code, expected_recovery in cases:
+            with self.subTest(reason_code=reason_code), mock.patch.object(
+                self.bridge,
+                "_read_mt4_trade_gateway_ea_status",
+                side_effect=lambda candidate, include_stale=False: (
+                    (None, "gateway_status_not_observed")
+                ),
+            ), mock.patch.object(
+                self.bridge,
+                "_read_mt4_trade_gateway_init_status",
+                side_effect=lambda candidate: (
+                    {
+                        "available": True,
+                        "stale": False,
+                        "supersededByLiveStatus": False,
+                        "readStatus": "valid",
+                        "severity": "error",
+                        "stage": "money_management",
+                        "reasonCode": reason_code,
+                        "observedAt": "2026-10-07T02:00:00Z",
+                        "ageSeconds": 1,
+                        "gatewayMode": "live",
+                    }
+                    if candidate.get("platform") == "mt4"
+                    else {}
+                ),
+            ):
+                model = self.bridge._ai_trade_council_platform_connections_read_model(
+                    checklist
+                )
+
+            mt4 = next(item for item in model["items"] if item["platform"] == "mt4")
+            self.assertEqual(mt4["connectionState"], "error")
+            self.assertEqual(mt4["reasonCode"], reason_code)
+            self.assertIn(expected_recovery, mt4["remediationTh"])
 
     def test_switching_mt4_to_mt5_is_blocked_by_execution_unknown(self) -> None:
         initial = {
@@ -1927,9 +2588,44 @@ class GlobalMetatraderBackendTests(unittest.TestCase):
         self.assertTrue(hub["postCommitObservabilityBestEffort"])
         self.assertTrue(hub["frontendReconcileIndeterminateResponse"])
         self.assertFalse(hub["frontendAutomaticMutationRetryAllowed"])
-        self.assertEqual(hub["interactiveSelectionSurface"], "central_header_only")
-        self.assertFalse(hub["deviceDashboardSelectionControlsAllowed"])
-        self.assertTrue(hub["deviceDashboardSelectionStatusReadOnly"])
+        self.assertEqual(
+            hub["interactiveSelectionSurface"],
+            "central_header_and_ai_trade_left_rail",
+        )
+        self.assertTrue(hub["deviceDashboardSelectionControlsAllowed"])
+        self.assertEqual(
+            hub["deviceDashboardSelectionControlPropIds"],
+            ["left_analytics_console"],
+        )
+        self.assertFalse(hub["deviceDashboardSelectionStatusReadOnly"])
+        self.assertTrue(hub["deviceDashboardSelectionUsesGlobalAtomicEndpoint"])
+        heartbeat = hub["platformHeartbeatProjection"]
+        self.assertEqual(
+            heartbeat["schemaVersion"],
+            "metafx-hq-ai-trade-platform-connections-v1",
+        )
+        self.assertEqual(
+            heartbeat["states"],
+            ["connected", "waiting", "error"],
+        )
+        self.assertTrue(heartbeat["connectedRequiresFreshValidatedEaHeartbeat"])
+        self.assertEqual(heartbeat["freshnessSeconds"], 20)
+        self.assertTrue(heartbeat["frontendFailsClosedWhenHeartbeatExpires"])
+        self.assertTrue(heartbeat["frontendFailsClosedWhenReportRefreshFails"])
+        self.assertTrue(heartbeat["frontendRejectsHeartbeatFromReplacedCandidate"])
+        self.assertFalse(heartbeat["terminalDetectionAloneMayShowConnected"])
+        self.assertTrue(
+            heartbeat["connectionHealthIndependentFromBackendExecutionReadiness"]
+        )
+        self.assertTrue(heartbeat["oneResponseUsesSingleSelectionGeneration"])
+        self.assertTrue(heartbeat["bothPlatformsMayBeConnected"])
+        self.assertTrue(
+            heartbeat["atMostOnePlatformAuthoritativeForDashboardAndCommands"]
+        )
+        self.assertTrue(
+            heartbeat["exactlyOnePlatformAuthoritativeWhenGloballyConfigured"]
+        )
+        self.assertTrue(heartbeat["errorIncludesReasonAndRemediation"])
         self.assertEqual(
             hub["legacyPerDashboardEndpointBehavior"],
             "backend_alias_to_platform_atomic_fanout",
