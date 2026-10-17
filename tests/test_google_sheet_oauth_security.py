@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL_RUNNER = ROOT / "backend" / "local-runner"
-HUB_PATH = LOCAL_RUNNER / "google_sheet_hub.py"
+HUB_PATH = LOCAL_RUNNER / "hq_backend/google/google_sheet_hub.py"
 BRIDGE_PATH = LOCAL_RUNNER / "bridge_server.py"
 CONTRACT_PATH = ROOT / "contracts" / "bridge" / "bridge-contract.json"
 SETUP_DOC_PATH = ROOT / "docs" / "research-sheet-hub-setup-th.md"
@@ -878,7 +878,7 @@ class GoogleOAuthSecureStoreTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.store_module = load_module(
-            LOCAL_RUNNER / "google_oauth_store.py",
+            LOCAL_RUNNER / "hq_backend/google/google_oauth_store.py",
             "google_oauth_security_store",
         )
 

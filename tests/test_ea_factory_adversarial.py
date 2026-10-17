@@ -34,6 +34,39 @@ class EaFactoryAdversarialTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.bridge = load_bridge()
 
+    def setUp(self) -> None:
+        self.global_platform_context = mock.patch.object(
+            self.bridge,
+            "_ea_factory_require_top_header_locks",
+            side_effect=self._dual_locked_platform_context,
+        )
+        self.global_platform_context.start()
+        self.addCleanup(self.global_platform_context.stop)
+
+    @staticmethod
+    def _dual_locked_platform_context(
+        platform: object,
+        *,
+        require_all_platforms: bool = True,
+    ) -> dict | None:
+        normalized = str(platform or "").strip().lower()
+        if normalized not in {"mt4", "mt5"}:
+            return None
+        candidate_id = f"mtc-adversarial-{normalized}"
+        return {
+            "record": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "available": True,
+                "runningState": "platform_running_detected",
+            },
+            "token": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "selectionRevision": 7,
+            },
+        }
+
     def valid_values(self, *, verification_status: str = "verified") -> dict:
         return {
             "record_id": "system-adversarial-001",

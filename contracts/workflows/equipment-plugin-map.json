@@ -161,7 +161,7 @@
         "oneUserActionAdvancesOneStage": false,
         "oneUserClickAdvancesVerifiedStageChain": true,
         "oneCoordinatorIterationAdvancesAtMostOneStage": true,
-        "oneClick": {"endpoint": "/api/props/right_server_racks/ea-factory/builds/{buildId}/run", "requestFields": ["idempotencyKey"], "supportedVisiblePlatforms": ["mt4"], "mt5Mode": "manual_stage_by_stage_only", "selectedTerminalMustAlreadyBeRunning": true, "terminalProcessLaunchAllowed": false, "sameKeyResume": true, "phaseGateBypassAllowed": false, "visibleMetaEditorRequired": true, "visibleStrategyTesterRequired": true, "visualModeRequired": true, "liveTradingAllowed": false},
+        "oneClick": {"endpoint": "/api/props/right_server_racks/ea-factory/builds/{buildId}/run", "requestFields": ["idempotencyKey"], "supportedVisiblePlatforms": ["mt4", "mt5"], "mt5Mode": "one_click_visible_fail_closed", "selectedTerminalMustAlreadyBeRunning": true, "terminalProcessLaunchAllowed": false, "sameKeyResume": true, "phaseGateBypassAllowed": false, "visibleMetaEditorRequired": true, "visibleStrategyTesterRequired": true, "visualModeRequired": true, "liveTradingAllowed": false},
         "artifactKinds": {
           "default": "expert_advisor",
           "expert_advisor": {"platforms": ["mt4", "mt5", "tradingview"], "backtestApplicable": true},
@@ -176,8 +176,8 @@
           {"id": "strategy_spec", "requires": ["source_record"], "ownerAgentId": "ea_developer"},
           {"id": "generate_source", "requires": ["strategy_spec_confirmed"], "ownerAgentId": "ea_developer", "actionId": "build_strategy_code"},
           {"id": "source_review", "requires": ["source_artifact_and_digest"], "ownerAgentId": "ea_developer", "actionId": "review_source_code"},
-          {"id": "compile_validate", "requires": ["source_review_passed"], "ownerAgentId": "ea_developer", "platformPolicy": {"mt4": "one_click_visible_metaeditor_or_manual_stage_by_stage", "mt5": "manual_stage_by_stage_visible_metaeditor", "tradingview": "static_pine_validation"}, "oneClickTerminalLaunchAllowed": false, "selectedTerminalMustAlreadyBeRunning": true, "manualTerminalLaunchAllowed": false, "backtestAllowed": false, "frontendPathOrArgsAllowed": false},
-          {"id": "backtest_recheck", "requires": ["compile_validate_passed"], "ownerAgentId": "backtest_analyst", "platformPolicy": {"mt4": "one_click_visible_strategy_tester_proof_for_expert_advisor", "mt5": "manual_stage_by_stage_visible_strategy_tester", "tradingview": "not_applicable"}, "artifactKindPolicy": {"custom_indicator": "not_applicable_no_trade_execution"}},
+          {"id": "compile_validate", "requires": ["source_review_passed"], "ownerAgentId": "ea_developer", "platformPolicy": {"mt4": "one_click_visible_metaeditor_or_manual_stage_by_stage", "mt5": "one_click_visible_metaeditor_or_manual_stage_by_stage", "tradingview": "static_pine_validation"}, "oneClickTerminalLaunchAllowed": false, "selectedTerminalMustAlreadyBeRunning": true, "manualTerminalLaunchAllowed": false, "backtestAllowed": false, "frontendPathOrArgsAllowed": false},
+          {"id": "backtest_recheck", "requires": ["compile_validate_passed"], "ownerAgentId": "backtest_analyst", "platformPolicy": {"mt4": "one_click_visible_strategy_tester_proof_for_expert_advisor", "mt5": "one_click_visible_strategy_tester_proof_for_expert_advisor", "tradingview": "not_applicable"}, "artifactKindPolicy": {"custom_indicator": "not_applicable_no_trade_execution"}},
           {"id": "final_report", "requires": ["all_applicable_prior_stages_passed"], "ownerAgentId": "mission_archivist"}
         ],
         "workspaceFolders": ["Source", "EA_Versions", "Reports", "Sets", "Screenshots", "Summaries"],
@@ -317,14 +317,16 @@
           "pluginSelectionField": "platform",
           "pluginCandidates": [
             {"pluginSkillId": "backend-optimization-plan-mt4", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-optimization-lab-mt4", "referencePluginVersion": "0.1.4+codex.20260607131357", "values": ["mt4"]},
-            {"pluginSkillId": "backend-optimization-plan-mt5", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-optimization-lab-mt5", "referencePluginVersion": "0.1.1+codex.20260616", "values": ["mt5"]}
+            {"pluginSkillId": "backend-optimization-session-mt5", "pluginVersion": "backend-v1", "procedureKind": "backend_procedure", "referencePluginSkillId": "metafx-optimization-lab-mt5", "referencePluginVersion": "0.1.1+codex.20260616", "values": ["mt5"]}
           ],
           "automationMode": "mission_interactive",
-          "executionMode": "plan_only",
+          "executionMode": "backend_authoritative_mt5_visible_session",
           "planPreparationAvailable": true,
-          "realExecutionAvailable": false,
+          "realExecutionAvailable": true,
+          "realExecutionPlatforms": ["mt5"],
+          "planOnlyPlatforms": ["mt4"],
           "requiredInputs": ["sourceReportId"],
-          "inputPreset": {"platform": "mt4", "timeframe": "H1", "validationMethod": "walk_forward"},
+          "inputPreset": {"platform": "mt5", "timeframe": "H1", "validationMethod": "single_verified_run"},
           "outputFields": ["parameterRanges", "startStepStop", "selectionCriteria", "overfitGuards", "validationSplit", "candidateGroups", "nextRanges"],
           "optionalResultFieldsV2": ["runId", "roundId", "platform", "terminalId", "testerSettings", "warnings", "executionEvidence", "passCount", "profitablePassCount", "returnedPassCount", "allPassRows", "allPassRowsTruncated", "currentBands", "nextParameterPlan", "candidateGroups"],
           "outputAliases": {
@@ -340,9 +342,18 @@
           "evidenceRequired": ["source_reference", "parameter_plan", "overfit_guard", "adapter_status_truth"],
           "completionEvidenceRequired": ["terminal_identity", "optimization_settings", "tester_log", "result_report", "set_files", "screenshots"],
           "verifiedCompletionFields": ["runId", "roundId", "platform", "terminalId", "executionEvidence.visibleTester.verified", "executionEvidence.mtExecutionVerified", "executionEvidence.optimizationProofVerified", "executionEvidence.resultReport.sha256", "executionEvidence.artifactManifest.sha256", "passCount", "profitablePassCount", "testerSettings", "warnings"],
-          "adapterStatus": "plan_ready_terminal_runner_not_connected",
+          "adapterStatus": "implemented_mt5_visible_fail_closed",
+          "sessionApi": {"read": "GET /api/ea-optimization-lab", "create": "POST /api/ea-optimization-lab/sessions", "resume": "POST /api/ea-optimization-lab/sessions/:sessionId/resume", "cancel": "POST /api/ea-optimization-lab/sessions/:sessionId/cancel"},
+          "backendAuthoritativeBindings": ["buildId", "sourceDigest", "baselineReportSha256", "terminalCandidateId", "terminalSelectionRevision", "terminalBindingDigest"],
+          "frontendFilesystemPathsAllowed": false,
+          "frontendEvidenceClaimsAllowed": false,
+          "oneActiveSessionAtATime": true,
+          "durableRestartRecovery": true,
+          "noDoubleStart": true,
+          "testShutdownTerminalAllowed": false,
+          "liveTradingAllowed": false,
           "reportType": "ea_experiment_report",
-          "failureHelpTh": "ปัจจุบันสร้างแผนได้ก่อน งาน Optimization จริงต้องเลือก Terminal และเชื่อม Strategy Tester Adapter"
+          "failureHelpTh": "งาน MT5 Optimization จะเริ่มได้เมื่อ Backend ตรวจ Build, Baseline Report, Terminal ที่กำลังรัน และหลักฐาน Adapter ตรงกันทั้งหมด; หากไม่ตรงระบบจะหยุดแบบ Fail-closed โดยไม่กด Start ซ้ำ"
         },
         "prepare_ea_discovery_plan": {
           "pluginSkillId": "backend-ea-discovery-plan-mt4",

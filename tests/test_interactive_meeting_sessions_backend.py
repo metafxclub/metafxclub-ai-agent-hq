@@ -95,6 +95,19 @@ class InteractiveMeetingBackendTests(unittest.TestCase):
                 return_value=(True, 0),
             )
         )
+        # These tests isolate the interactive-meeting approval and execution
+        # contracts.  The generic implementation Mission is routed through the
+        # EA Developer workstation, so the project-wide MT4+MT5 lock guard now
+        # classifies it as MetaTrader-capable.  Keep that independent guard
+        # satisfied here; dedicated lock-gate regressions cover the fail-closed
+        # incomplete-lock path.
+        self.stack.enter_context(
+            mock.patch.object(
+                self.bridge,
+                "_metatrader_scope_header_locks_ready",
+                return_value=True,
+            )
+        )
         self.reserve_slots = self.stack.enter_context(
             mock.patch.object(
                 self.bridge,

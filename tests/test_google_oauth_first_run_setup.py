@@ -140,7 +140,7 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
                     (
                         "import json,sys;"
                         f"sys.path.insert(0,{str(runner)!r});"
-                        "import google_sheet_hub as h;"
+                        "from hq_backend.google import google_sheet_hub as h;"
                         "print(json.dumps(h.google_oauth_status(),sort_keys=True))"
                     ),
                 ],
@@ -310,7 +310,7 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
                     (
                         "import os,sys;"
                         f"sys.path.insert(0,{str(runner)!r});"
-                        "import google_oauth_store as s;"
+                        "from hq_backend.google import google_oauth_store as s;"
                         "s.save_refresh_token(os.environ['METAFX_TEST_REFRESH'])"
                     ),
                 ],
@@ -334,7 +334,7 @@ class GoogleOAuthFirstRunSetupTests(unittest.TestCase):
                     (
                         "import json,sys;"
                         f"sys.path.insert(0,{str(runner)!r});"
-                        "import google_sheet_hub as h;"
+                        "from hq_backend.google import google_sheet_hub as h;"
                         "print(json.dumps(h.google_oauth_status(),sort_keys=True))"
                     ),
                 ],

@@ -926,23 +926,56 @@ function Assert-SafeSource {
     Assert-ExpectedGitSource
 
     $requiredFiles = @(
+        "backend\local-runner\hq_backend\__init__.py",
+        "backend\local-runner\hq_backend\chat\__init__.py",
+        "backend\local-runner\hq_backend\chat\full_agent_artifacts.py",
+        "backend\local-runner\hq_backend\chat\full_agent_runtime.py",
+        "backend\local-runner\hq_backend\ea\__init__.py",
+        "backend\local-runner\hq_backend\ea\ea_factory_blueprint_coverage.py",
+        "backend\local-runner\hq_backend\ea\ea_factory_indicator_coverage.py",
+        "backend\local-runner\hq_backend\ea\ea_factory_metaeditor_compile.py",
+        "backend\local-runner\hq_backend\ea\ea_factory_optimization.py",
+        "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal.ps1",
+        "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal.py",
+        "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal_mt5.ps1",
+        "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal_mt5.py",
+        "backend\local-runner\hq_backend\ea\ea_research_blueprint.py",
+        "backend\local-runner\hq_backend\ea\ea_strategy_brief.py",
+        "backend\local-runner\hq_backend\google\__init__.py",
+        "backend\local-runner\hq_backend\google\google_oauth_store.py",
+        "backend\local-runner\hq_backend\google\google_sheet_hub.py",
+        "backend\local-runner\hq_backend\paths.py",
+        "backend\local-runner\hq_backend\research\__init__.py",
+        "backend\local-runner\hq_backend\research\fx_news_direct.py",
+        "backend\local-runner\hq_backend\research\radar_image_adapter.py",
+        "backend\local-runner\hq_backend\runtime\__init__.py",
+        "backend\local-runner\hq_backend\runtime\manager_parallel.py",
+        "backend\local-runner\hq_backend\runtime\manager_analysis.py",
+        "backend\local-runner\hq_backend\trading\__init__.py",
+        "backend\local-runner\hq_backend\trading\council_analysis.py",
+        "backend\local-runner\hq_backend\trading\mt4_market_watch.py",
+        "backend\local-runner\hq_backend\trading\mt4_trade_gateway.py",
+        "backend\local-runner\hq_backend\trading\ohlc_import.py",
+        "backend\local-runner\hq_backend\workflows\__init__.py",
+        "backend\local-runner\hq_backend\workflows\equipment_workflow_profiles.py",
         ".gitattributes",
         ".gitignore",
         "VERSION",
         "backend\local-runner\bridge_server.py",
         "backend\local-runner\configure_google_oauth_client.py",
-        "backend\local-runner\full_agent_artifacts.py",
-        "backend\local-runner\full_agent_runtime.py",
-        "backend\local-runner\ea_factory_blueprint_coverage.py",
-        "backend\local-runner\ea_factory_indicator_coverage.py",
-        "backend\local-runner\ea_factory_metaeditor_compile.py",
-        "backend\local-runner\ea_factory_visible_terminal.py",
-        "backend\local-runner\ea_factory_visible_terminal.ps1",
-        "backend\local-runner\ea_research_blueprint.py",
-        "backend\local-runner\ea_strategy_brief.py",
         "contracts\research\ea-implementation-blueprint-v2.schema.json",
         "contracts\agents\full-agent-runtime-contract.json",
         "frontend\index.html",
+        "frontend\src\app\main.js",
+        "frontend\src\styles\main.css",
+        "frontend\src\styles\workspace.css",
+        "frontend\src\styles\agent-workspace.css",
+        "frontend\src\styles\dashboard-workspace.css",
+        "frontend\src\styles\home.css",
+        "frontend\src\styles\home-panels.css",
+        "frontend\src\features\research\research-sheet.js",
+        "frontend\src\features\chat\meeting-session.js",
+        "frontend\src\features\quota\codex-rate.js",
         "integrations\mt4-trade-gateway\MetafxHQTradeGateway.mq4",
         "integrations\mt4-trade-gateway\README_TH.md",
         "integrations\mt5-trade-gateway\MetafxHQTradeGateway.mq5",
@@ -2712,7 +2745,7 @@ function Invoke-BridgeLifecycleProcess {
         [string]$ConfirmedPort
     )
     if ($Action -in @("Start", "Restart")) {
-        $arguments += @("-HealthTimeoutSeconds", "45")
+        $arguments += @("-HealthTimeoutSeconds", "60")
     }
 
     # A native PowerShell pipeline can retain a descendant's inherited pipe
@@ -2838,6 +2871,28 @@ function Install-Shortcuts {
     New-HqShortcut -ShortcutPath (Join-Path $programs "Metafxclub\Metafxclub AI Agent HQ.lnk") -TargetPath $target
 }
 
+function Assert-FrontendModulesAvailable {
+    param([Parameter(Mandatory = $true)][string]$BaseUrl)
+
+    # main.js imports these files directly; a healthy Bridge alone cannot prove
+    # that the browser can load its complete module graph.
+    foreach ($modulePath in @(
+        "frontend/src/features/research/research-sheet.js",
+        "frontend/src/features/chat/meeting-session.js",
+        "frontend/src/features/quota/codex-rate.js"
+    )) {
+        $moduleUrl = "{0}{1}" -f $BaseUrl, $modulePath
+        $moduleResponse = Invoke-WebRequest -Uri $moduleUrl -Method Get -UseBasicParsing -TimeoutSec 10
+        if (
+            [int]$moduleResponse.StatusCode -ne 200 -or
+            [int]$moduleResponse.RawContentLength -le 0 -or
+            [string]$moduleResponse.Headers["Content-Type"] -notmatch '^(?:text|application)/(?:javascript|ecmascript)(?:\s*;|$)'
+        ) {
+            throw "Frontend module is unavailable or has an invalid JavaScript response: $modulePath"
+        }
+    }
+}
+
 function Start-And-TestBridge {
     param([Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$ConfirmedPort)
 
@@ -2909,11 +2964,13 @@ function Start-And-TestBridge {
     if (
         [int]$mainJs.StatusCode -ne 200 -or
         [int]$mainJs.RawContentLength -le 0 -or
+        [string]$mainJs.Headers["Content-Type"] -notmatch '^(?:text|application)/(?:javascript|ecmascript)(?:\s*;|$)' -or
         [string]$mainJs.Content -notmatch 'window\.MetafxHqBoot' -or
         [string]$mainJs.Content -notmatch 'init\(\)\.catch'
     ) {
         throw "หน้า Agent HQ ตอบกลับ แต่ไฟล์เริ่มระบบ main.js ยังโหลดหรือยืนยันโครงสร้างไม่ได้"
     }
+    Assert-FrontendModulesAvailable -BaseUrl $endpoint.Url
     return $endpoint
 }
 

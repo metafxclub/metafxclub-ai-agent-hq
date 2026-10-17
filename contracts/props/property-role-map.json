@@ -348,7 +348,7 @@
     "right_tool_console": {
       "functionName": "EA Experiment Lab",
       "displayTitle": "ห้องทดลอง EA อัตโนมัติ",
-      "purpose": "เตรียมและติดตามงาน Auto Backtest, Auto Optimization และ EA Discovery จาก Source Code หรือระบบต้นฉบับที่เลือก โดยแยกผลกำไร Drawdown จำนวน Order และหลักฐานการทดสอบอย่างชัดเจน ปัจจุบันเตรียมแผนและ Mission ได้ แต่ Adapter ที่ควบคุม Strategy Tester และ Plugin จริงยังเป็น Coming Soon",
+      "purpose": "เตรียมและติดตามงาน Auto Backtest, Auto Optimization และ EA Discovery จาก Source Code หรือระบบต้นฉบับที่เลือก โดย MT5 Auto Optimization ใช้ Session ที่ Backend ตรวจ Build, Baseline Report, Terminal binding และหลักฐานจาก Strategy Tester แบบมองเห็นจริงก่อนยืนยันผล ส่วน MT4 Optimization, Backtest นอก EA Factory และ EA Discovery ยังเป็นแผนเท่านั้น",
       "interactionMode": "dashboard",
       "researchSheetHub": {"included": false, "reason": "explicitly_excluded"},
       "connectionProfileId": "right_tool_console",
@@ -362,7 +362,7 @@
       "acceptedReportTypes": ["ea_experiment_report", "backtest_report", "optimization_report", "ea_discovery_report", "ea_build_report", "ea_compile_report", "dashboard_connection_report", "terminal_discovery_report", "terminal_selection_report"],
       "localTabs": [
         {"id": "backtest", "labelTh": "Auto Backtest", "purpose": "กำหนด EA ตลาด กรอบเวลา ช่วงทดสอบ และเกณฑ์ผลลัพธ์", "actionIds": ["prepare_backtest_plan"]},
-        {"id": "optimization", "labelTh": "Auto Optimization", "purpose": "กำหนด Parameter เป้าหมาย และ Guard ป้องกัน Overfit", "actionIds": ["prepare_optimization_plan"]},
+        {"id": "optimization", "labelTh": "MT5 Run • MT4 Plan", "purpose": "กำหนด Parameter และ Guard กัน Overfit; MT5 รันจริง ส่วน MT4 วางแผนเท่านั้น", "actionIds": ["prepare_optimization_plan"]},
         {"id": "ea_discovery", "labelTh": "EA Discovery", "purpose": "กำหนดกำไร Drawdown จำนวน Order และระบบต้นแบบ", "actionIds": ["prepare_ea_discovery_plan"]},
         {"id": "history", "labelTh": "ประวัติและรายงาน", "purpose": "ดู Mission, Report, หลักฐาน และสถานะการทดลอง", "actionIds": [], "viewOnly": true}
       ],
@@ -376,15 +376,16 @@
         "transferPolicy": {"mode": "agent_mission_only", "requiredRecordFields": ["sourceReportId", "sourcePropId", "sourceMissionId", "transferAgentId"], "frontendMaySubmitFields": ["sourceReportId"], "backendDerivesLineage": true, "missionStrategyTableRole": "global_ledger_only"},
         "experimentModes": [
           {"id": "backtest", "planPreparation": "ready", "strategyTesterAdapter": "coming_soon"},
-          {"id": "optimization", "planPreparation": "ready", "optimizationAdapter": "coming_soon"},
+          {"id": "optimization", "planPreparation": "ready", "optimizationAdapter": "mt5_visible_session_ready_mt4_plan_only"},
           {"id": "ea_discovery", "planPreparation": "ready", "discoveryPluginAdapter": "coming_soon"}
         ],
         "objectiveFields": ["platform", "symbol", "timeframe", "date_range", "profit_target", "maximum_drawdown", "minimum_trade_count", "source_or_inspiration", "parameter_ranges", "validation_method"],
-        "readiness": {"missionPlanReportAudit": "ready", "strategyTesterBacktest": "coming_soon", "metatraderOptimization": "coming_soon", "eaDiscoveryPlugin": "coming_soon"}
+        "readiness": {"missionPlanReportAudit": "ready", "strategyTesterBacktest": "plan_only_outside_factory", "metatraderOptimization": "mt5_visible_session_ready_mt4_plan_only", "eaDiscoveryPlugin": "coming_soon"}
       },
       "dashboardSections": ["source_selection", "backtest", "optimization", "ea_discovery", "experiment_queue", "results", "evidence", "overfit_warnings", "history", "recent_audit"],
       "allowedDashboardActions": ["discover_metatrader", "select_metatrader_target", "prepare_backtest_plan", "prepare_optimization_plan", "prepare_ea_discovery_plan"],
-      "plannedDashboardActions": ["run_strategy_tester", "run_optimization", "run_ea_discovery_plugin"],
+      "plannedDashboardActions": ["run_strategy_tester", "run_ea_discovery_plugin"],
+      "directApiActions": ["run_optimization"],
       "reportType": "ea_experiment_report",
       "ownerAgents": ["backtest_analyst", "optimization_agent", "ea_developer", "codex_mcp_operator", "risk_guard"],
       "defaultTab": "backtest",
@@ -403,9 +404,9 @@
       "shows": ["แผน Auto Backtest", "แผน Auto Optimization", "เป้าหมาย EA Discovery", "คิวทดลอง", "ผลกำไรและ Drawdown", "จำนวน Order", "หลักฐานและคำเตือน Overfit"],
       "accepts": ["เตรียม Auto Backtest", "เตรียม Auto Optimization", "ตั้งโจทย์ EA Discovery", "เลือก Inspiration จากเรดาร์หรืองานวิจัย", "เปิดผลทดลองย้อนหลัง"],
       "actions": ["สร้าง Mission เตรียม Backtest", "สร้าง Mission เตรียม Optimization", "สร้าง Mission เตรียม EA Discovery", "เปิด Report และหลักฐาน"],
-      "dataSources": ["linked ea_build_report", "linked trading_system_discovery_report", "linked trading_system_research_report", "data/runtime/missions.json", "data/runtime/reports/", "future Strategy Tester, Optimization, and EA Discovery adapters"],
+      "dataSources": ["linked ea_build_report", "linked trading_system_discovery_report", "linked trading_system_research_report", "data/runtime/missions.json", "data/runtime/reports/", "MT5 Visible Strategy Tester optimization session adapter", "future MT4 Optimization and EA Discovery adapters"],
       "doNotShow": ["broker credentials", "account number", "terminal path", "API keys", "plugin secrets"],
-      "openingMessage": "ห้องทดลองนี้ใช้เตรียม Backtest, Optimization และ EA Discovery ครับ ตอนนี้สร้างแผน Mission/Report/Audit ได้จริง แต่การสั่ง Strategy Tester หรือ Plugin ทำงานจริงยังเป็น Coming Soon จนกว่า Adapter จะพร้อม"
+      "openingMessage": "ห้องทดลองนี้ใช้เตรียม Backtest, Optimization และ EA Discovery ครับ EA Factory รองรับ Visible MetaEditor Compile และ Visible Strategy Tester Backtest สำหรับ MT4/MT5 แล้ว และ MT5 Auto Optimization ใช้ Session ที่ Backend ตรวจ Build, Baseline Report, Terminal binding, Inputs และหลักฐานจาก Strategy Tester ก่อนยืนยันผล ส่วน MT4 Optimization, Backtest นอก EA Factory และ EA Discovery ยังเป็นแผนเท่านั้น ทุกเส้นทางไม่เปิด Live Trading ไม่สลับ Algo Trading ไม่ Attach EA เข้ากราฟ และไม่ปิด Terminal"
     },
     "mission_strategy_table": {
       "functionName": "Mission Strategy Table",

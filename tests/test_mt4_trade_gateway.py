@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-GATEWAY_PATH = PROJECT_ROOT / "backend" / "local-runner" / "mt4_trade_gateway.py"
+GATEWAY_PATH = PROJECT_ROOT / "backend" / "local-runner" / "hq_backend" / "trading" / "mt4_trade_gateway.py"
 EA_ROOT = PROJECT_ROOT / "integrations" / "mt4-trade-gateway"
 
 

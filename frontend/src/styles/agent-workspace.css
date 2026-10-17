@@ -1,0 +1,1205 @@
+/* Agent conversation and meeting presentation. Visibility and execution stay
+   with the existing active, hidden, disabled and Backend-owned state bindings. */
+
+.game-modal.agent-modal .agent-runtime-console {
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+  scrollbar-gutter: stable;
+}
+
+.game-modal.agent-modal .agent-runtime-console-heading {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--ui-line);
+}
+
+.game-modal.agent-modal .agent-runtime-console-heading strong {
+  color: var(--ui-text);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+.game-modal.agent-modal .agent-runtime-console-heading .modal-eyebrow {
+  margin-bottom: 5px;
+  color: var(--ui-accent);
+  font-size: 10px;
+  letter-spacing: 0.09em;
+}
+
+.game-modal.agent-modal .agent-runtime-state,
+.game-modal.agent-modal .agent-runtime-readiness span {
+  padding: 5px 9px;
+  border: 1px solid var(--ui-line);
+  border-radius: 7px;
+  background: var(--ui-bg);
+  color: var(--ui-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.game-modal.agent-modal .agent-runtime-state[data-state="ready"],
+.game-modal.agent-modal .agent-runtime-readiness span[data-state="ready"] {
+  border-color: rgba(94, 231, 213, 0.3);
+  background: rgba(94, 231, 213, 0.07);
+  color: var(--ui-accent);
+}
+
+.game-modal.agent-modal .agent-runtime-state[data-state="limited"],
+.game-modal.agent-modal .agent-runtime-readiness span[data-state="locked"] {
+  border-color: rgba(242, 188, 102, 0.3);
+  background: rgba(242, 188, 102, 0.06);
+  color: var(--ui-warning);
+}
+
+.game-modal.agent-modal .agent-runtime-state[data-state="checking"] {
+  border-color: rgba(101, 169, 255, 0.35);
+  color: var(--ui-blue);
+}
+
+.game-modal.agent-modal .agent-runtime-thread-row {
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.game-modal.agent-modal .agent-runtime-thread-field {
+  flex-basis: 100%;
+}
+
+.game-modal.agent-modal .agent-runtime-thread-row > button {
+  flex: 1 1 auto;
+  min-height: 34px;
+  padding: 7px 10px;
+  font-size: 11px;
+}
+
+.game-modal.agent-modal .agent-runtime-settings {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 12px 10px;
+}
+
+.game-modal.agent-modal .agent-runtime-field,
+.game-modal.agent-modal .agent-runtime-full-access {
+  gap: 6px;
+}
+
+.game-modal.agent-modal .agent-runtime-field > span,
+.game-modal.agent-modal .agent-runtime-full-access > span {
+  color: var(--ui-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.game-modal.agent-modal .agent-runtime-field select {
+  min-height: 39px;
+  padding: 8px 26px 8px 10px;
+  border-color: var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-bg);
+  color: var(--ui-text);
+  font-size: 12px;
+  line-height: 1.5;
+  color-scheme: dark;
+}
+
+.game-modal.agent-modal .agent-runtime-full-access .modal-action {
+  min-height: 39px;
+  font-size: 11px;
+}
+
+.game-modal.agent-modal .agent-runtime-full-access .modal-action[data-state="locked"] {
+  border-color: rgba(242, 188, 102, 0.3);
+  background: rgba(242, 188, 102, 0.06);
+  color: var(--ui-warning);
+}
+
+.game-modal.agent-modal .agent-runtime-full-access .modal-action[data-state="ready"] {
+  border-color: rgba(101, 169, 255, 0.4);
+  color: var(--ui-blue);
+}
+
+.game-modal.agent-modal .agent-runtime-full-access .modal-action[data-state="active"] {
+  border-color: rgba(94, 231, 213, 0.45);
+  background: rgba(94, 231, 213, 0.12);
+  color: var(--ui-accent);
+}
+
+.game-modal.agent-modal .agent-runtime-thread-meta,
+.game-modal.agent-modal .agent-runtime-full-access small,
+.game-modal.agent-modal .agent-runtime-capability-matrix > header small {
+  color: var(--ui-muted);
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.game-modal.agent-modal .agent-runtime-capability-matrix {
+  gap: 10px;
+  padding: 12px;
+  border-color: var(--ui-line);
+  border-radius: 10px;
+  background: var(--ui-bg);
+}
+
+.game-modal.agent-modal .agent-runtime-capability-matrix > header strong {
+  margin-bottom: 3px;
+  color: var(--ui-text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.game-modal.agent-modal #modalAgentCapabilityMatrix {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.game-modal.agent-modal #modalAgentCapabilityMatrix article {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 7px;
+  padding: 10px;
+  border-color: var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-panel);
+}
+
+.game-modal.agent-modal #modalAgentCapabilityMatrix article strong {
+  color: var(--ui-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.game-modal.agent-modal #modalAgentCapabilityMatrix article span {
+  color: var(--ui-muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.game-modal.agent-modal #modalAgentCapabilityMatrix article b {
+  justify-self: start;
+  padding: 3px 7px;
+  border-color: rgba(242, 188, 102, 0.3);
+  border-radius: 5px;
+  color: var(--ui-warning);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.game-modal.agent-modal #modalAgentCapabilityMatrix article[data-state="ready"],
+.game-modal.agent-modal #modalAgentCapabilityMatrix article[data-state="ready"] b {
+  border-color: rgba(94, 231, 213, 0.3);
+  color: var(--ui-accent);
+}
+
+.game-modal.agent-modal #modalAgentCapabilityMatrix article[data-active="true"] {
+  background: rgba(94, 231, 213, 0.06);
+  box-shadow: inset 2px 0 0 var(--ui-accent);
+}
+
+.game-modal.agent-modal .agent-runtime-lock-guidance {
+  gap: 5px;
+  padding: 10px 12px;
+  border-left: 2px solid var(--ui-warning);
+  border-radius: 0 8px 8px 0;
+  background: rgba(242, 188, 102, 0.06);
+}
+
+.game-modal.agent-modal .agent-runtime-lock-guidance strong {
+  color: var(--ui-warning);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.game-modal.agent-modal .agent-runtime-lock-guidance span {
+  color: var(--ui-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.game-modal.agent-modal .agent-runtime-lock-guidance[data-state="ready"] {
+  border-left-color: var(--ui-accent);
+  background: rgba(94, 231, 213, 0.06);
+}
+
+.game-modal.agent-modal .agent-runtime-lock-guidance[data-state="ready"] strong {
+  color: var(--ui-accent);
+}
+
+.game-modal.agent-modal .agent-runtime-status,
+.game-modal.agent-modal .agent-chat-status {
+  padding: 10px 12px;
+  border-left: 2px solid var(--ui-line);
+  border-radius: 0 8px 8px 0;
+  background: var(--ui-bg);
+  color: var(--ui-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.game-modal.agent-modal :is(.agent-runtime-status, .agent-chat-status)[data-tone="ready"] {
+  border-left-color: var(--ui-accent);
+  color: var(--ui-accent);
+}
+
+.game-modal.agent-modal :is(.agent-runtime-status, .agent-chat-status)[data-tone="working"] {
+  border-left-color: var(--ui-blue);
+  color: var(--ui-blue);
+}
+
+.game-modal.agent-modal :is(.agent-runtime-status, .agent-chat-status)[data-tone="warning"] {
+  border-left-color: var(--ui-warning);
+  color: var(--ui-warning);
+}
+
+.game-modal.agent-modal :is(.agent-runtime-status, .agent-chat-status)[data-tone="error"] {
+  border-left-color: var(--ui-danger);
+  color: var(--ui-danger);
+}
+
+.game-modal.agent-modal .agent-runtime-approval {
+  gap: 12px;
+  padding: 14px;
+  border-color: rgba(242, 188, 102, 0.5);
+  border-radius: 10px;
+  background: #211d19;
+}
+
+.game-modal.agent-modal .agent-runtime-approval > header {
+  flex-wrap: wrap;
+}
+
+.game-modal.agent-modal .agent-runtime-approval > header strong {
+  color: var(--ui-warning);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.game-modal.agent-modal .agent-runtime-approval > p,
+.game-modal.agent-modal .agent-runtime-approval > small {
+  color: var(--ui-text);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.game-modal.agent-modal .agent-runtime-approval pre {
+  border-color: var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-bg);
+  color: var(--ui-text);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.game-modal.agent-modal .agent-runtime-activity {
+  padding-top: 12px;
+  border-top-color: var(--ui-line);
+}
+
+.game-modal.agent-modal .agent-runtime-activity summary {
+  padding: 4px 0;
+  color: var(--ui-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.game-modal.agent-modal .agent-runtime-activity li {
+  padding: 10px;
+  border-color: var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-bg);
+  color: var(--ui-text);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.game-modal.agent-modal .agent-runtime-activity li small {
+  color: var(--ui-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.game-modal.agent-modal .chat-log {
+  align-content: start;
+  gap: 14px;
+  max-height: none;
+  padding: 16px;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-bg);
+  scrollbar-gutter: stable;
+}
+
+.game-modal.agent-modal .chat-line {
+  justify-self: start;
+  width: min(100%, 62ch);
+  min-width: 0;
+  padding: 13px 15px;
+  border-color: var(--ui-line);
+  border-radius: 3px 12px 12px;
+  background: var(--ui-panel);
+}
+
+.game-modal.agent-modal .chat-line.user {
+  justify-self: end;
+  border-color: rgba(101, 169, 255, 0.28);
+  border-radius: 12px 3px 12px 12px;
+  background: #14263d;
+}
+
+.game-modal.agent-modal .chat-line strong {
+  margin-bottom: 7px;
+  color: var(--ui-accent);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.game-modal.agent-modal .chat-line.user strong {
+  color: var(--ui-blue);
+}
+
+.game-modal.agent-modal .chat-line > span {
+  color: var(--ui-text);
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+/* Agent and Mission board cards share presentation and existing status bindings. */
+.game-modal.agent-modal .task-board {
+  align-content: start;
+  gap: 12px;
+  max-height: none;
+  padding: 3px 5px 5px 3px;
+  scrollbar-gutter: stable;
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card {
+  --task-accent: var(--ui-muted);
+  gap: 10px;
+  padding: 16px 18px;
+  border: 1px solid var(--ui-line);
+  border-left: 3px solid var(--task-accent);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel);
+  color: var(--ui-text);
+  box-shadow: none;
+  transform: none;
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card:is(.queued, .waiting_approval) {
+  --task-accent: var(--ui-warning);
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card.running {
+  --task-accent: var(--ui-blue);
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card.blocked {
+  --task-accent: #ef9d70;
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card.completed {
+  --task-accent: var(--ui-accent);
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card.failed {
+  --task-accent: var(--ui-danger);
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card.archived {
+  --task-accent: var(--ui-muted);
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card.auto-eligible {
+  background: linear-gradient(110deg, rgba(94, 231, 213, 0.04), transparent 55%), var(--ui-panel);
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card:hover:not(:disabled):not([aria-disabled="true"]) {
+  border-color: color-mix(in srgb, var(--task-accent) 45%, var(--ui-line));
+  border-left-color: var(--task-accent);
+  background: var(--ui-panel-raised);
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card:focus-visible {
+  outline: 2px solid var(--ui-blue);
+  outline-offset: 2px;
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card > .task-card-topline {
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-status-badge {
+  min-height: 26px;
+  padding: 4px 8px;
+  border-color: color-mix(in srgb, var(--task-accent) 35%, var(--ui-line));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--task-accent) 8%, var(--ui-bg));
+  color: var(--task-accent);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card > .task-card-title {
+  color: var(--ui-text);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card .task-card-meta {
+  flex: 1 1 150px;
+  color: var(--ui-muted);
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card > .task-card-summary {
+  color: var(--ui-muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.6;
+}
+
+:is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card.auto-eligible > .task-card-summary {
+  color: var(--ui-accent);
+}
+
+.game-modal.agent-modal .task-board .board-card.empty {
+  padding: 22px;
+  border: 1px dashed var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel);
+}
+
+.game-modal.agent-modal .task-board .board-card.empty strong {
+  margin-bottom: 7px;
+  color: var(--ui-text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.game-modal.agent-modal .task-board .board-card.empty span {
+  color: var(--ui-muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.game-modal.kanban-modal .kanban-board {
+  gap: 14px;
+  padding: 3px 5px 8px 3px;
+}
+
+.game-modal.kanban-modal .kanban-column {
+  border-color: var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-bg);
+}
+
+.game-modal.kanban-modal .kanban-column.status-running { --status-accent: var(--ui-blue); }
+.game-modal.kanban-modal .kanban-column.status-completed { --status-accent: var(--ui-accent); }
+.game-modal.kanban-modal .kanban-column.status-blocked { --status-accent: #ef9d70; }
+.game-modal.kanban-modal .kanban-column.status-failed { --status-accent: var(--ui-danger); }
+.game-modal.kanban-modal .kanban-column.status-queued { --status-accent: var(--ui-warning); }
+.game-modal.kanban-modal .kanban-column.status-archived { --status-accent: var(--ui-muted); }
+
+.game-modal.kanban-modal .kanban-column-heading {
+  padding: 14px;
+  border-top-width: 2px;
+  border-bottom-color: var(--ui-line);
+  border-radius: 11px 11px 0 0;
+  background: var(--ui-panel-raised);
+}
+
+.game-modal.kanban-modal .kanban-column-heading strong {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.game-modal.kanban-modal .kanban-column-heading span {
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.game-modal.kanban-modal .kanban-column-list {
+  gap: 12px;
+  padding: 12px 9px 12px 12px;
+}
+
+.game-modal.kanban-modal .kanban-column-list .task-card.selected {
+  border-color: var(--ui-blue);
+  border-left-color: var(--task-accent);
+  box-shadow: inset 0 0 0 1px rgba(101, 169, 255, 0.25);
+}
+
+.game-modal.kanban-modal .task-card > .task-card-destination {
+  color: var(--ui-blue);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.game-modal.kanban-modal .kanban-empty {
+  padding: 24px 12px;
+  color: var(--ui-muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+/* The native Task dialog is outside .game-modal; keep its open/hidden rules. */
+#taskDetailDialog.task-detail-dialog {
+  border-color: var(--ui-line);
+  border-radius: 16px;
+  background: var(--ui-bg);
+  color: var(--ui-text);
+}
+
+#taskDetailDialog .task-detail-shell { background: var(--ui-bg); }
+#taskDetailDialog .task-detail-heading {
+  border-bottom-color: var(--ui-line);
+  background: var(--ui-panel-raised);
+}
+
+#taskDetailDialog #modalKanbanDetailTitle {
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+#taskDetailDialog :is(.task-detail-fact, .task-detail-section, .task-technical-result, .task-system-disclosure) {
+  border-radius: 9px;
+  background: var(--ui-panel);
+}
+
+#taskDetailDialog :is(.task-detail-fact > span, .task-detail-label, .kanban-detail-grid dt) {
+  color: var(--ui-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+#taskDetailDialog :is(.task-detail-fact > strong, .task-detail-section h3, .task-detail-section > strong) {
+  color: var(--ui-text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+#taskDetailDialog :is(.task-detail-section p, .task-detail-section > span, .kanban-detail-grid dd, .kanban-detail-body > p) {
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+#taskDetailDialog :is(.task-technical-result, .task-system-disclosure) > summary {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+#taskDetailDialog .kanban-detail-actions {
+  border-top-color: var(--ui-line);
+  background: var(--ui-panel);
+  box-shadow: none;
+}
+
+#taskDetailDialog :is(.detail-close, .modal-action) {
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+#taskDetailDialog .modal-action:not(.approval-only-action):not(.execute-only-action):not(.danger) {
+  border-color: var(--ui-line);
+  background: var(--ui-panel-raised);
+  color: var(--ui-text);
+}
+
+#taskDetailDialog :is(.mission-execute-confirmation, .kanban-readonly-notice) {
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+#taskDetailDialog .mission-execute-confirmation input { border-radius: 7px; }
+#taskDetailDialog :is(button, input, summary):focus-visible {
+  outline: 2px solid var(--ui-blue);
+  outline-offset: 2px;
+}
+
+#taskDetailDialog button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+  box-shadow: none;
+}
+
+.game-modal.agent-modal .agent-composer {
+  padding-top: 14px;
+  border-top-color: var(--ui-line);
+}
+
+.game-modal.agent-modal .agent-composer textarea {
+  min-height: 86px;
+  padding: 12px 14px;
+  border-color: var(--ui-line);
+  border-radius: 10px;
+  background: var(--ui-bg);
+  color: var(--ui-text);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.game-modal.agent-modal .agent-attachment-composer > span,
+.game-modal.agent-modal .agent-composer .surface-note {
+  color: var(--ui-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.game-modal.agent-modal .agent-attachment-draft,
+.game-modal.agent-modal .agent-runtime-artifact-card {
+  border-color: var(--ui-line);
+  border-radius: 9px;
+  background: var(--ui-panel-raised);
+}
+
+.game-modal.agent-modal .agent-attachment-draft-preview,
+.game-modal.agent-modal .agent-runtime-artifact-card > a {
+  border-radius: 7px;
+  background: var(--ui-bg);
+}
+
+.game-modal.agent-modal .agent-attachment-draft-copy strong,
+.game-modal.agent-modal .agent-runtime-artifact-card strong {
+  color: var(--ui-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.game-modal.agent-modal .agent-attachment-draft-copy small,
+.game-modal.agent-modal .agent-runtime-artifact-card small {
+  color: var(--ui-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.game-modal.agent-modal .agent-runtime-artifact-action {
+  color: var(--ui-accent);
+  font-size: 11px;
+}
+
+/* Meeting setup and the transcript keep their existing independent scrolling. */
+.game-modal.kanban-modal .mission-chat-shell {
+  border-color: var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-bg);
+}
+
+.game-modal.kanban-modal .mission-chat-layout {
+  gap: 14px;
+  padding: 14px;
+}
+
+.game-modal.kanban-modal .mission-chat-sidebar {
+  gap: 12px;
+}
+
+.game-modal.kanban-modal .mission-chat-sidebar :is(label > span, textarea, select, button, legend) {
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.game-modal.kanban-modal :is(.mission-meeting-start-form, .mission-meeting-session-picker, .mission-chat-participants, .mission-chat-conversation) {
+  border-color: var(--ui-line);
+  border-radius: 10px;
+  background: var(--ui-panel);
+}
+
+.game-modal.kanban-modal :is(.mission-meeting-start-form, .mission-meeting-session-picker) {
+  gap: 12px;
+  padding: 14px;
+}
+
+.game-modal.kanban-modal .mission-chat-section-heading > strong,
+.game-modal.kanban-modal .mission-chat-section-heading > div > strong,
+.game-modal.kanban-modal .mission-chat-participants > header strong,
+.game-modal.kanban-modal .mission-chat-conversation-heading strong {
+  color: var(--ui-text);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.55;
+}
+
+.game-modal.kanban-modal .mission-chat-section-heading > span,
+.game-modal.kanban-modal .mission-chat-section-heading > div > span,
+.game-modal.kanban-modal .mission-chat-participants > header span,
+.game-modal.kanban-modal .mission-chat-conversation-heading > div > span {
+  color: var(--ui-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.6;
+}
+
+.game-modal.kanban-modal .mission-meeting-field > span,
+.game-modal.kanban-modal .mission-meeting-participant-fieldset legend {
+  color: var(--ui-text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.game-modal.kanban-modal .mission-meeting-field > small,
+.game-modal.kanban-modal .mission-meeting-session-picker > p,
+.game-modal.kanban-modal .mission-chat-conversation-heading small,
+.game-modal.kanban-modal .mission-chat-participant-note {
+  color: var(--ui-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.game-modal.kanban-modal .mission-meeting-field :is(textarea, select) {
+  padding: 10px 12px;
+  border-color: var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-bg);
+  color: var(--ui-text);
+  font-size: 13px;
+  line-height: 1.6;
+  color-scheme: dark;
+}
+
+.game-modal.kanban-modal .mission-meeting-field select {
+  min-height: 40px;
+}
+
+.game-modal.kanban-modal .mission-meeting-participant-options {
+  gap: 7px;
+  padding-right: 3px;
+}
+
+.game-modal.kanban-modal .mission-meeting-participant-options label {
+  gap: 8px;
+  padding: 9px;
+  border-color: var(--ui-line);
+  border-radius: 7px;
+  background: var(--ui-bg);
+}
+
+.game-modal.kanban-modal .mission-meeting-participant-options label:has(input:checked) {
+  border-color: rgba(94, 231, 213, 0.35);
+  background: rgba(94, 231, 213, 0.06);
+}
+
+.game-modal.kanban-modal .mission-meeting-participant-options input {
+  accent-color: var(--ui-accent);
+}
+
+.game-modal.kanban-modal .mission-meeting-participant-options strong {
+  color: var(--ui-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.game-modal.kanban-modal .mission-meeting-participant-options small {
+  color: var(--ui-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.game-modal.kanban-modal .mission-chat-participants > header,
+.game-modal.kanban-modal .mission-chat-conversation-heading {
+  padding: 14px 16px;
+  border-bottom-color: var(--ui-line);
+  border-radius: 10px 10px 0 0;
+  background: var(--ui-panel-raised);
+}
+
+.game-modal.kanban-modal .mission-chat-participants > header b,
+.game-modal.kanban-modal .mission-meeting-progress span {
+  padding: 4px 8px;
+  border-color: rgba(101, 169, 255, 0.3);
+  border-radius: 6px;
+  background: rgba(101, 169, 255, 0.06);
+  color: var(--ui-blue);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.game-modal.kanban-modal .mission-chat-participant-list {
+  gap: 8px;
+  padding: 10px;
+}
+
+.game-modal.kanban-modal .mission-chat-participant {
+  padding: 9px;
+  border-color: var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-bg);
+}
+
+.game-modal.kanban-modal .mission-chat-avatar {
+  border-color: var(--ui-line);
+  border-radius: 9px;
+  background: var(--ui-bg);
+}
+
+.game-modal.kanban-modal .mission-chat-participant-copy strong {
+  color: var(--ui-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.game-modal.kanban-modal .mission-chat-participant-copy small {
+  color: var(--ui-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.game-modal.kanban-modal .mission-chat-participant > b {
+  color: var(--ui-warning);
+  font-weight: 600;
+}
+
+.game-modal.kanban-modal .mission-chat-participant-note {
+  padding: 10px 12px;
+  border-top-color: var(--ui-line);
+}
+
+.game-modal.kanban-modal .mission-chat-status-chip {
+  padding: 5px 9px;
+  border-color: rgba(242, 188, 102, 0.3);
+  border-radius: 7px;
+  background: rgba(242, 188, 102, 0.06);
+  color: var(--ui-warning) !important;
+  font-size: 11px !important;
+  line-height: 1.5;
+  white-space: normal;
+}
+
+.game-modal.kanban-modal .mission-chat-status-chip:is([data-status="active"], [data-status="running"], [data-status="in_progress"]) {
+  border-color: rgba(94, 231, 213, 0.3);
+  background: rgba(94, 231, 213, 0.07);
+  color: var(--ui-accent) !important;
+}
+
+.game-modal.kanban-modal .mission-meeting-progress {
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom-color: var(--ui-line);
+  background: var(--ui-bg);
+}
+
+.game-modal.kanban-modal .mission-chat-message-list {
+  gap: 16px;
+  padding: 18px;
+  background: var(--ui-bg);
+}
+
+.game-modal.kanban-modal .mission-chat-message {
+  gap: 12px;
+  width: min(94%, 820px);
+  padding: 14px;
+  border-color: var(--ui-line);
+  border-radius: 3px 12px 12px;
+  background: var(--ui-panel);
+}
+
+.game-modal.kanban-modal .mission-chat-message.user {
+  border-color: rgba(101, 169, 255, 0.28);
+  border-radius: 12px 3px 12px 12px;
+  background: #14263d;
+}
+
+.game-modal.kanban-modal .mission-chat-message-identity strong {
+  color: var(--ui-accent);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.game-modal.kanban-modal .mission-chat-message.user .mission-chat-message-identity strong {
+  color: var(--ui-blue);
+}
+
+.game-modal.kanban-modal .mission-chat-message-identity small,
+.game-modal.kanban-modal .mission-chat-message time {
+  color: var(--ui-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.game-modal.kanban-modal .mission-chat-message p {
+  margin-top: 9px;
+  color: var(--ui-text);
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+.game-modal.kanban-modal .mission-meeting-empty {
+  color: var(--ui-muted);
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.game-modal.kanban-modal .mission-meeting-empty.transcript {
+  width: min(100%, 48ch);
+  padding: 26px;
+  border-color: var(--ui-line);
+  border-radius: 10px;
+  background: var(--ui-panel);
+}
+
+.game-modal.kanban-modal .mission-meeting-message-form {
+  gap: 12px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--ui-line);
+  background: var(--ui-panel);
+  box-shadow: none;
+}
+
+.game-modal.kanban-modal .mission-meeting-message-form .modal-action {
+  min-height: 44px;
+}
+
+.game-modal.kanban-modal .mission-meeting-decision,
+.game-modal.kanban-modal .mission-meeting-proposal {
+  margin: 12px 16px;
+  border-color: var(--ui-line);
+  border-radius: 9px;
+  background: var(--ui-bg);
+}
+
+.game-modal.kanban-modal .mission-meeting-decision {
+  padding: 14px;
+  border-left: 2px solid var(--ui-accent);
+}
+
+.game-modal.kanban-modal .mission-meeting-decision > p,
+.game-modal.kanban-modal .mission-meeting-proposal-body > p {
+  color: var(--ui-text);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.game-modal.kanban-modal .mission-meeting-proposal > summary {
+  padding: 14px;
+  border-radius: 9px;
+  background: var(--ui-panel-raised);
+}
+
+.game-modal.kanban-modal .mission-meeting-proposal > summary strong {
+  color: var(--ui-text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.game-modal.kanban-modal .mission-meeting-proposal > summary small {
+  color: var(--ui-muted);
+  font-size: 11px;
+}
+
+.game-modal.kanban-modal .mission-meeting-proposal > summary b {
+  padding: 5px 8px;
+  border-color: var(--ui-line);
+  border-radius: 6px;
+  color: var(--ui-blue);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.game-modal.kanban-modal .mission-meeting-proposal-body {
+  gap: 14px;
+  padding: 14px;
+  border-top-color: var(--ui-line);
+}
+
+.game-modal.kanban-modal .mission-meeting-proposal-binding > div {
+  padding: 11px;
+  border-color: var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-panel);
+}
+
+.game-modal.kanban-modal .mission-meeting-proposal-binding dt {
+  color: var(--ui-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.game-modal.kanban-modal .mission-meeting-proposal-binding dd {
+  color: var(--ui-text);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.game-modal.kanban-modal .mission-meeting-proposal-status,
+.game-modal.kanban-modal .mission-meeting-safety-note {
+  border-radius: 8px;
+  font-size: 12px !important;
+  line-height: 1.65;
+}
+
+.game-modal.kanban-modal .mission-meeting-proposal-status {
+  border-left-color: var(--ui-blue);
+  background: rgba(101, 169, 255, 0.06);
+  color: var(--ui-blue) !important;
+}
+
+.game-modal.kanban-modal .mission-meeting-safety-note {
+  border-color: rgba(242, 188, 102, 0.3);
+  background: rgba(242, 188, 102, 0.06);
+  color: var(--ui-warning) !important;
+}
+
+.game-modal.agent-modal :is(select, textarea, summary, button, a):focus-visible,
+.game-modal.kanban-modal .mission-chat-shell :is(select, textarea, summary, button, a):focus-visible,
+.game-modal.kanban-modal .mission-meeting-participant-options input:focus-visible + span {
+  outline: 2px solid var(--ui-blue);
+  outline-offset: 3px;
+  box-shadow: none;
+}
+
+.game-modal.agent-modal :is(button, select, textarea):disabled,
+.game-modal.agent-modal button[aria-disabled="true"],
+.game-modal.kanban-modal .mission-chat-shell :is(button, select, textarea, input):disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+@media (min-width: 1440px) {
+  .game-modal.agent-modal #modalChatPanel.active {
+    grid-template-columns: minmax(300px, 0.9fr) minmax(0, 1.2fr);
+    grid-template-rows: minmax(0, 1fr);
+    gap: 14px;
+    overflow: hidden;
+  }
+
+  .game-modal.agent-modal .agent-runtime-console,
+  .game-modal.agent-modal .chat-log {
+    min-height: 0;
+    overflow-y: auto;
+  }
+}
+
+@media (min-width: 901px) {
+  .game-modal.kanban-modal .mission-chat-layout {
+    grid-template-columns: clamp(320px, 24vw, 420px) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 1000px) {
+  .game-modal.agent-modal .modal-content-panel {
+    height: auto;
+    min-height: 0;
+    grid-template-rows: auto auto auto auto;
+    overflow: visible;
+  }
+
+  .game-modal.agent-modal #modalChatPanel.active {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .game-modal.agent-modal .agent-runtime-console {
+    min-height: 0;
+    max-height: 420px;
+    overflow-y: auto;
+  }
+
+  .game-modal.agent-modal .chat-log {
+    min-height: 140px;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .game-modal.agent-modal .modal-tab-panel:not(#modalChatPanel) {
+    max-height: 480px;
+  }
+}
+
+@media (max-width: 640px) {
+  .game-modal.agent-modal .agent-runtime-console,
+  .game-modal.agent-modal .chat-log {
+    padding: 12px;
+  }
+
+  .game-modal.agent-modal .agent-runtime-settings,
+  .game-modal.agent-modal #modalAgentCapabilityMatrix {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .game-modal.agent-modal .chat-line {
+    width: 100%;
+    padding: 12px;
+  }
+
+  :is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card {
+    padding: 13px 14px;
+  }
+
+  :is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card > .task-card-topline {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  :is(.game-modal.agent-modal .task-board, .game-modal.kanban-modal .kanban-column-list) .task-card .task-card-meta {
+    flex: 0 1 auto;
+    justify-content: flex-start;
+    text-align: left;
+  }
+
+  .game-modal.kanban-modal .mission-chat-layout {
+    gap: 10px;
+    padding: 8px;
+  }
+
+  .game-modal.kanban-modal .mission-chat-conversation-heading {
+    flex-wrap: wrap;
+    gap: 9px;
+    padding: 12px;
+  }
+
+  .game-modal.kanban-modal .mission-chat-message-list {
+    gap: 12px;
+    padding: 12px;
+  }
+
+  .game-modal.kanban-modal .mission-chat-message {
+    width: 100%;
+    gap: 8px;
+    padding: 11px;
+  }
+
+  .game-modal.kanban-modal .mission-meeting-message-form {
+    padding: 12px;
+  }
+
+  .game-modal.kanban-modal .mission-meeting-decision,
+  .game-modal.kanban-modal .mission-meeting-proposal {
+    margin: 10px 12px;
+  }
+}

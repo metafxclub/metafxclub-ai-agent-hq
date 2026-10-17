@@ -511,11 +511,14 @@ class BridgeStructuredTransportRegressionTests(unittest.TestCase):
         self.assertTrue(timeout_result["processTreeTerminated"])
 
         cancel_event = self.bridge.threading.Event()
-        cancel_event.set()
         termination_observed = self.bridge.threading.Event()
         cancel_process = mock.Mock()
         cancel_process.pid = 43212
         cancel_process.poll.return_value = 0
+
+        def start_then_cancel(*args, **kwargs):
+            cancel_event.set()
+            return cancel_process
 
         def terminate_for_cancel(_process, _job_holder):
             termination_observed.set()
@@ -530,7 +533,7 @@ class BridgeStructuredTransportRegressionTests(unittest.TestCase):
             mock.patch.object(
                 self.bridge.subprocess,
                 "Popen",
-                return_value=cancel_process,
+                side_effect=start_then_cancel,
             ),
             mock.patch.object(
                 self.bridge,
@@ -564,6 +567,22 @@ class BridgeStructuredTransportRegressionTests(unittest.TestCase):
         self._assert_structured_process_failure(cancel_result, "cancelled")
         self.assertTrue(cancel_result["processStarted"])
         self.assertTrue(cancel_result["processTreeTerminated"])
+
+    def test_already_cancelled_command_returns_structured_failure_without_starting(self):
+        cancel_event = self.bridge.threading.Event()
+        cancel_event.set()
+        with mock.patch.object(self.bridge.subprocess, "Popen") as popen:
+            result = self.bridge.run_safe_command(
+                ["fixture-runner", "--structured-output"],
+                timeout=1,
+                output_limit=1024,
+                kill_process_tree_on_timeout=True,
+                cancel_event=cancel_event,
+                structured_json_output=True,
+            )
+        popen.assert_not_called()
+        self._assert_structured_process_failure(result, "cancelled")
+        self.assertFalse(result["processStarted"])
 
 
 if __name__ == "__main__":

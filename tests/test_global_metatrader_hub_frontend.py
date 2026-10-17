@@ -10,8 +10,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INDEX_PATH = PROJECT_ROOT / "frontend" / "index.html"
 MAIN_JS_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "main.js"
-STYLES_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "styles.css"
+STYLES_PATH = PROJECT_ROOT / "frontend" / "src" / "styles" / "main.css"
 CONTRACT_PATH = PROJECT_ROOT / "contracts" / "connections" / "dashboard-connection-contract.json"
+README_PATH = PROJECT_ROOT / "README.md"
+STUDENT_QUICKSTART_PATH = PROJECT_ROOT / "STUDENT-QUICKSTART-TH.md"
+EQUIPMENT_WORKFLOWS_PATH = PROJECT_ROOT / "docs" / "equipment-workflows-v1-th.md"
 
 
 def source_block(source: str, start: str, end: str) -> str:
@@ -46,6 +49,9 @@ class GlobalMetatraderHubFrontendTests(unittest.TestCase):
         cls.main = MAIN_JS_PATH.read_text(encoding="utf-8")
         cls.styles = STYLES_PATH.read_text(encoding="utf-8")
         cls.contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+        cls.readme = README_PATH.read_text(encoding="utf-8")
+        cls.student_quickstart = STUDENT_QUICKSTART_PATH.read_text(encoding="utf-8")
+        cls.equipment_workflows = EQUIPMENT_WORKFLOWS_PATH.read_text(encoding="utf-8")
 
     def node_binary(self) -> str:
         candidates = [
@@ -103,14 +109,14 @@ class GlobalMetatraderHubFrontendTests(unittest.TestCase):
             "globalMetatraderSystems",
         ):
             self.assertIn(f'id="{element_id}"', self.index)
-        self.assertIn("เชื่อม MT4 / MT5", self.index)
-        self.assertIn('aria-label="เชื่อม MT4 / MT5"', self.index)
+        self.assertIn("ล็อก MT4 + MT5", self.index)
+        self.assertIn('aria-label="ล็อก MT4 และ MT5 ให้ครบ 2/2"', self.index)
         self.assertIn('class="metatrader-hub-compact-mark"', self.index)
         self.assertIn("ไม่เปิด Terminal", self.index)
         self.assertIn("ไม่อ่านเลขบัญชี", self.index)
         self.assertIn("ไม่เปิด Demo / Live", self.index)
 
-    def test_platform_switch_is_one_native_radio_group_owned_by_central_header(self) -> None:
+    def test_active_platform_choice_is_separate_from_two_header_locks(self) -> None:
         radio_pattern = re.compile(
             r'<input\s+id="(globalMetatraderPlatformMt[45])"\s+type="radio"\s+'
             r'name="globalMetatraderPlatform"\s+value="(MT[45])"',
@@ -123,7 +129,7 @@ class GlobalMetatraderHubFrontendTests(unittest.TestCase):
             ],
         )
         self.assertEqual(self.index.count('name="globalMetatraderPlatform"'), 2)
-        self.assertIn("ใช้ได้ทีละหนึ่ง Platform เท่านั้น", self.index)
+        self.assertNotIn("ใช้ได้ทีละหนึ่ง Platform เท่านั้น", self.index)
         listeners = source_block(
             self.main,
             'els.globalMetatraderButton?.addEventListener("click"',
@@ -133,13 +139,35 @@ class GlobalMetatraderHubFrontendTests(unittest.TestCase):
         self.assertIn("setGlobalMetatraderPlatformChoice(radio.value", listeners)
         self.assertEqual(self.index.count('type="radio" name="globalMetatraderPlatform"'), 2)
 
-    def test_contract_fans_either_platform_to_all_three_systems_exclusively(self) -> None:
+    def test_operator_docs_require_two_independent_locks_and_current_factory_flow(self) -> None:
+        self.assertIn("ล็อก MT4 และ MT5 แยกกัน", self.readme)
+        self.assertIn("ครบ 2/2", self.readme)
+        self.assertIn("Dashboard ที่กำลังใช้งาน", self.readme)
+        self.assertNotIn("ทุกระบบอ่าน Terminal เป้าหมายเดียวกัน", self.readme)
+        self.assertNotIn("การ Apply หนึ่งครั้งบันทึกค่ากลางแบบ atomic: MT4 หรือ MT5", self.readme)
+
+        self.assertIn("ล็อก MT4 นี้", self.student_quickstart)
+        self.assertIn("ล็อก MT5 นี้", self.student_quickstart)
+        self.assertIn("ครบ `2/2`", self.student_quickstart)
+        self.assertIn("โรงงานสร้าง EA และ Optimization Lab ใช้ล็อกของแพลตฟอร์มงานโดยตรง", self.student_quickstart)
+
+        self.assertIn("อินเทอร์เฟซผู้ปฏิบัติงานมี 3 หน้า", self.equipment_workflows)
+        self.assertIn("One-click พร้อม Manual stage recovery", self.equipment_workflows)
+        self.assertIn("Final Report", self.equipment_workflows)
+        self.assertIn("Factory จะไม่ส่งต่อหรือ Resume งาน Optimization อัตโนมัติ", self.equipment_workflows)
+        self.assertNotIn("ทำงานแบบ Manual stage-by-stage เท่านั้น", self.equipment_workflows)
+
+    def test_contract_declares_independent_dual_locks_and_separate_active_platform(self) -> None:
         terminal_contract = self.contract["terminalTargetSelection"]
         hub = terminal_contract["centralHeaderControl"]
         self.assertEqual(hub["labelTh"], "เชื่อม MT4 / MT5")
         self.assertEqual(hub["statusEndpoint"], "GET /api/integrations/metatrader/global")
         self.assertEqual(hub["discoveryEndpoint"], "POST /api/integrations/metatrader/global/discover")
         self.assertEqual(hub["selectionEndpoint"], "POST /api/integrations/metatrader/global/select")
+        self.assertEqual(hub["activationEndpoint"], "POST /api/integrations/metatrader/global/activate")
+        self.assertEqual(hub["activationRequestFields"], ["platform"])
+        self.assertTrue(hub["activationRequiresBothPlatformLocks"])
+        self.assertTrue(hub["activationRunsAiTradeTargetSwitchSafety"])
         self.assertEqual(
             hub["selectionFanOutByPlatform"]["mt4"],
             ["left_analytics_console", "right_server_racks", "right_tool_console"],
@@ -148,8 +176,13 @@ class GlobalMetatraderHubFrontendTests(unittest.TestCase):
             hub["selectionFanOutByPlatform"]["mt5"],
             ["left_analytics_console", "right_server_racks", "right_tool_console"],
         )
-        self.assertEqual(hub["platformSelectionMode"], "single_exclusive_radio")
-        self.assertTrue(hub["oneActivePlatformPerDashboard"])
+        self.assertEqual(hub["platformSelectionMode"], "independent_platform_locks")
+        self.assertEqual(hub["requiredPlatformLocks"], ["mt4", "mt5"])
+        self.assertTrue(hub["bothPlatformLocksRequiredBeforeMtWork"])
+        self.assertFalse(hub["oneActivePlatformPerDashboard"])
+        self.assertTrue(hub["activePlatformIsSeparateFromLocks"])
+        self.assertTrue(hub["activePlatformChangeDoesNotReplaceEitherLock"])
+        self.assertTrue(hub["platformLockChangeDoesNotImplicitlyChangeActivePlatform"])
         self.assertTrue(hub["backendAtomicFanOut"])
         self.assertTrue(hub["frontendFanOutForbidden"])
         self.assertTrue(hub["backendReadBackVerificationRequired"])
@@ -167,8 +200,10 @@ class GlobalMetatraderHubFrontendTests(unittest.TestCase):
         )
         self.assertTrue(heartbeat["oneResponseUsesSingleSelectionGeneration"])
         self.assertTrue(heartbeat["bothPlatformsMayBeConnected"])
-        self.assertTrue(heartbeat["atMostOnePlatformAuthoritativeForDashboardAndCommands"])
-        self.assertTrue(heartbeat["exactlyOnePlatformAuthoritativeWhenGloballyConfigured"])
+        self.assertTrue(heartbeat["bothPlatformsMustBeLockedBeforeMtWork"])
+        self.assertTrue(heartbeat["matchingPlatformLockAuthoritativeForEachMtOperation"])
+        self.assertTrue(heartbeat["atMostOnePlatformAuthoritativeForAiTradeCommands"])
+        self.assertTrue(heartbeat["activePlatformIsIndependentFromPlatformLocks"])
         self.assertTrue(heartbeat["errorIncludesReasonAndRemediation"])
         self.assertTrue(hub["selectionDoesNotLaunchTerminal"])
         self.assertTrue(hub["selectionDoesNotEnableLiveTrading"])
@@ -213,7 +248,7 @@ class GlobalMetatraderHubFrontendTests(unittest.TestCase):
         payload = self.run_node(script)
         self.assertEqual(payload, {"platform": "MT4", "configured": True})
 
-    def test_configured_row_selection_fails_closed_when_both_platforms_are_bound(self) -> None:
+    def test_both_platform_locks_remain_configured_with_separate_active_platform(self) -> None:
         normalize_source = function_source(self.main, "normalizeMetatraderCandidate")
         system_source = function_source(self.main, "globalMetatraderSystemModels")
         script = "\n".join([
@@ -221,16 +256,48 @@ class GlobalMetatraderHubFrontendTests(unittest.TestCase):
             "const mt4={candidateId:'mtc-44444444444444444444444444444444',platform:'MT4',labelTh:'MT4',detected:true,runningState:'platform_running_detected'};",
             "const mt5={candidateId:'mtc-55555555555555555555555555555555',platform:'MT5',labelTh:'MT5',detected:true,runningState:'platform_running_detected'};",
             "const row=(candidate)=>({propId:'left_analytics_console',status:'configured',selectedCandidate:candidate,adapterReady:true});",
-            "const state={globalMetatraderHub:{readModel:{candidates:[mt4,mt5],platforms:{mt4:{targets:[row(mt4)]},mt5:{targets:[row(mt5)]}}},checklists:{}}};",
+            "const state={globalMetatraderHub:{readModel:{status:'configured',allPlatformsLocked:true,activePlatform:'MT4',selectedPlatform:'MT4',selectedCandidate:mt4,candidates:[mt4,mt5],platforms:{mt4:{configurationStatus:'configured',selectedCandidate:mt4,targets:[row(mt4)]},mt5:{configurationStatus:'configured',selectedCandidate:mt5,targets:[row(mt5)]}}},checklists:{}}};",
             "function safeDashboardDisplayText(value,fallback=''){return String(value||fallback);}",
             normalize_source,
             system_source,
             "const system=globalMetatraderSystemModels()[0];process.stdout.write(JSON.stringify({configured:system.configured,selectedCandidate:system.selectedCandidate,adapterReady:system.selection.adapterReady}));",
         ])
         payload = self.run_node(script)
+        self.assertTrue(payload["configured"])
+        self.assertEqual(
+            payload["selectedCandidate"]["candidateId"],
+            "mtc-44444444444444444444444444444444",
+        )
+        self.assertTrue(payload["adapterReady"])
+
+    def test_legacy_consumer_rows_cannot_manufacture_authoritative_platform_locks(self) -> None:
+        normalize_source = function_source(self.main, "normalizeMetatraderCandidate")
+        lock_source = function_source(self.main, "globalMetatraderPlatformLockModels")
+        script = "\n".join([
+            "const candidate={candidateId:'mtc-44444444444444444444444444444444',platform:'MT4',labelTh:'MT4',detected:true};",
+            "const state={globalMetatraderHub:{readModel:null}};",
+            "function safeDashboardDisplayText(value,fallback=''){return String(value||fallback);}",
+            normalize_source,
+            lock_source,
+            "const locks=globalMetatraderPlatformLockModels({platforms:{mt4:{targets:[{propId:'left_analytics_console',status:'configured',selectedCandidate:candidate,adapterReady:true}]},mt5:{targets:[]}}});process.stdout.write(JSON.stringify({configured:locks.MT4.configured,candidate:locks.MT4.selectedCandidate,targetCount:locks.MT4.targets.length,adapterReady:locks.MT4.adapterReady}));",
+        ])
+        payload = self.run_node(script)
         self.assertFalse(payload["configured"])
-        self.assertIsNone(payload["selectedCandidate"])
+        self.assertIsNone(payload["candidate"])
+        self.assertEqual(payload["targetCount"], 1)
         self.assertFalse(payload["adapterReady"])
+
+    def test_active_dashboard_is_never_inferred_from_legacy_selection_or_locks(self) -> None:
+        active_source = function_source(self.main, "activeGlobalMetatraderPlatform")
+        script = "\n".join([
+            "const state={globalMetatraderHub:{readModel:{selectedPlatform:'MT5',platforms:{mt4:{configurationStatus:'configured'},mt5:{configurationStatus:'configured'}}},platformChoice:'MT4',platformChoiceTouched:false}};",
+            active_source,
+            "const legacyOnly=activeGlobalMetatraderPlatform([]);state.globalMetatraderHub.readModel.activePlatform='mt5';const authoritative=activeGlobalMetatraderPlatform([]);delete state.globalMetatraderHub.readModel.activePlatform;state.globalMetatraderHub.platformChoiceTouched=true;const pending=activeGlobalMetatraderPlatform([]);process.stdout.write(JSON.stringify({legacyOnly,authoritative,pending}));",
+        ])
+        payload = self.run_node(script)
+        self.assertEqual(payload["legacyOnly"], "")
+        self.assertEqual(payload["authoritative"], "MT5")
+        self.assertEqual(payload["pending"], "MT4")
 
     def test_selected_connection_health_expires_and_rejects_candidate_or_report_drift(self) -> None:
         health_source = function_source(self.main, "signalSelectedPlatformConnectionHealth")
@@ -240,7 +307,7 @@ class GlobalMetatraderHubFrontendTests(unittest.TestCase):
             "const OPEN_PROP_REPORT_POLL_TTL_MS=30000;",
             "const candidateId='mtc-55555555555555555555555555555555';",
             "const hubCandidate={candidateId,platform:'MT5'};",
-            "const state={globalMetatraderHub:{readModel:{selectedPlatform:'MT5',selectedCandidate:hubCandidate,platforms:{mt5:{selectedCandidate:hubCandidate,targets:[]}}}},propReportLoadState:{left_analytics_console:{status:'ready'}},propReportLoadedAt:{left_analytics_console:Date.now()}};",
+            "const state={globalMetatraderHub:{readModel:{activePlatform:'MT5',selectedPlatform:'MT5',selectedCandidate:hubCandidate,platforms:{mt5:{selectedCandidate:hubCandidate,targets:[]}}}},propReportLoadState:{left_analytics_console:{status:'ready'}},propReportLoadedAt:{left_analytics_console:Date.now()}};",
             "function safeDashboardDisplayText(value,fallback=''){return String(value ?? fallback);}",
             "function signalCouncilModel(report={}){return report?.aiTradeCouncil&&typeof report.aiTradeCouncil==='object'?report.aiTradeCouncil:{};}",
             health_source,
@@ -302,13 +369,17 @@ process.stdout.write(JSON.stringify({fresh,mismatch,stale,failed,expired}));''',
             "function renderAiTradeTerminalSummary(",
         )
         self.assertEqual(block.count('postJson("/api/integrations/metatrader/global/select"'), 1)
+        self.assertEqual(block.count('postJson("/api/integrations/metatrader/global/activate"'), 1)
         self.assertIn("platform: platform.toLowerCase()", block)
         self.assertIn("candidateId", block)
         self.assertIn("acceptGlobalMetatraderHubReadModel(response)", block)
         self.assertIn('response?.atomic === true', block)
         self.assertIn('configurationStatus === "configured"', block)
         self.assertIn("global_selection_readback_failed", block)
-        self.assertIn("reconcileGlobalMetatraderSelection(platform, candidateId)", block)
+        self.assertIn(
+            "reconcileGlobalMetatraderSelection(platform, candidateId, { requireActive: activateOnly })",
+            block,
+        )
         self.assertNotIn("ค่าเดิมของทุกระบบยังคงอยู่", block)
         self.assertIn(".filter((target) => target.propId !== EA_FACTORY_PROP_ID)", block)
         self.assertIn("loadPropReport(target.propId, { forceFresh: true })", block)
@@ -430,7 +501,8 @@ process.stdout.write(JSON.stringify({fresh,mismatch,stale,failed,expired}));''',
             "const mt4 = {candidateId:'mtc-44444444444444444444444444444444',platform:'MT4',labelTh:'MT4 หลัก',detected:true,runningState:'platform_running_detected'};",
             "const mt5 = {candidateId:'mtc-55555555555555555555555555555555',platform:'MT5',labelTh:'MT5 หลัก',detected:true,runningState:'not_running_detected'};",
             "const makeTarget = (propId, selectedCandidate=null) => ({propId,status:selectedCandidate?'configured':'not_configured',selectedCandidate,adapterReady:false});",
-            "const makeModel = (platform='', candidate=null) => ({status:platform?'configured':'not_configured',candidates:[mt4,mt5],platforms:{mt4:{configurationStatus:platform==='mt4'?'configured':'not_configured',selectedCandidate:platform==='mt4'?candidate:null,targets:GLOBAL_METATRADER_TARGETS.map((target)=>makeTarget(target.propId,platform==='mt4'&&target.supportedPlatforms.includes('MT4')?candidate:null))},mt5:{configurationStatus:platform==='mt5'?'configured':'not_configured',selectedCandidate:platform==='mt5'?candidate:null,targets:GLOBAL_METATRADER_TARGETS.filter((target)=>target.supportedPlatforms.includes('MT5')).map((target)=>makeTarget(target.propId,platform==='mt5'?candidate:null))}}});",
+            "const backendState = {locks:{mt4:null,mt5:null},activePlatform:''};",
+            "const makeModel = () => { const active=backendState.activePlatform; const selected=active?backendState.locks[active]:null; const lockedCount=['mt4','mt5'].filter((key)=>backendState.locks[key]).length; return {status:lockedCount===2?'configured':(lockedCount===1?'partial':'not_configured'),allPlatformsLocked:lockedCount===2,activePlatform:active||null,selectedPlatform:active||null,selectedCandidate:selected,candidates:[mt4,mt5],platforms:{mt4:{configurationStatus:backendState.locks.mt4?'configured':'not_configured',selectedCandidate:backendState.locks.mt4,targets:GLOBAL_METATRADER_TARGETS.map((target)=>makeTarget(target.propId,active==='mt4'&&target.supportedPlatforms.includes('MT4')?backendState.locks.mt4:null))},mt5:{configurationStatus:backendState.locks.mt5?'configured':'not_configured',selectedCandidate:backendState.locks.mt5,targets:GLOBAL_METATRADER_TARGETS.filter((target)=>target.supportedPlatforms.includes('MT5')).map((target)=>makeTarget(target.propId,active==='mt5'?backendState.locks.mt5:null))}}}; };",
             "const initialModel = makeModel();",
             "const state = {globalMetatraderHub:{readModel:initialModel,checklists:{},choices:{MT4:mt4.candidateId,MT5:mt5.candidateId},inFlight:false,operation:'',message:'',tone:'neutral',lastReadCount:3,lastLoadedAt:0},modal:{open:false,type:'',id:'',eaFactory:{},eaOptimizationLab:{}}};",
             "let posts = []; let reads = 0; let fail = false; let failStatus = null; let failMessage = 'forced'; let commitBeforeThrow = false; let backendReadModel = initialModel;",
@@ -438,7 +510,8 @@ process.stdout.write(JSON.stringify({fresh,mismatch,stale,failed,expired}));''',
             "function renderGlobalMetatraderHubControl() {}",
             "function addBridgeEvent() {}",
             "function safeDashboardDisplayText(value, fallback='') { return String(value || fallback); }",
-            "async function postJson(url, body) { posts.push({url,body}); const candidate=body.platform==='mt4'?mt4:mt5; if (fail) { if (commitBeforeThrow) backendReadModel=makeModel(body.platform,candidate); const error=new Error(failMessage); if (Number.isInteger(failStatus)) { error.status=failStatus; error.body={error:failMessage}; } throw error; } backendReadModel=makeModel(body.platform,candidate); return {ok:true,atomic:true,globalMetatraderHub:backendReadModel}; }",
+            "function commitMutation(url, body) { const platform=body.platform; const candidate=platform==='mt4'?mt4:mt5; if (url.endsWith('/activate')) { if (!backendState.locks.mt4 || !backendState.locks.mt5) throw new Error('locks incomplete'); backendState.activePlatform=platform; } else { backendState.locks[platform]=candidate; } backendReadModel=makeModel(); }",
+            "async function postJson(url, body) { posts.push({url,body}); if (fail) { if (commitBeforeThrow) commitMutation(url,body); const error=new Error(failMessage); if (Number.isInteger(failStatus)) { error.status=failStatus; error.body={error:failMessage}; } throw error; } commitMutation(url,body); return {ok:true,atomic:true,globalMetatraderHub:backendReadModel}; }",
             "async function fetchJson(url) { reads += 1; if (url !== '/api/integrations/metatrader/global') throw new Error('wrong endpoint'); return {ok:true,globalMetatraderHub:backendReadModel}; }",
             "async function loadPropReport() { return {}; }",
             "async function loadEaFactoryReadModel() { return {}; }",
@@ -451,25 +524,31 @@ process.stdout.write(JSON.stringify({fresh,mismatch,stale,failed,expired}));''',
             r'''(async () => {
   const mt4Result = await applyGlobalMetatraderTarget('MT4');
   const afterMt4 = state.globalMetatraderHub.readModel.platforms.mt4;
+  const activeAfterMt4 = state.globalMetatraderHub.readModel.activePlatform;
   const postsAfterMt4 = posts.length;
+  const mt5Result = await applyGlobalMetatraderTarget('MT5');
+  const afterMt5 = state.globalMetatraderHub.readModel.platforms.mt5;
+  const activeAfterMt5 = state.globalMetatraderHub.readModel.activePlatform;
+  const postsAfterMt5 = posts.length;
+  const activateMt4 = await applyGlobalMetatraderTarget('MT4');
+  const activeAfterActivation = state.globalMetatraderHub.readModel.activePlatform;
+  const postsAfterActivation = posts.length;
   const repeatedMt4 = await applyGlobalMetatraderTarget('MT4');
   const postsAfterRepeatedMt4 = posts.length;
   const readsAfterRepeatedMt4 = reads;
-  const mt5Result = await applyGlobalMetatraderTarget('MT5');
-  const afterMt5 = state.globalMetatraderHub.readModel.platforms.mt5;
   const stableModel = state.globalMetatraderHub.readModel;
-  state.globalMetatraderHub.choices.MT4 = mt4.candidateId;
+  state.globalMetatraderHub.choices.MT5 = mt5.candidateId;
   fail = true;
   posts = [];
-  const failed = await applyGlobalMetatraderTarget('MT4');
+  const failed = await applyGlobalMetatraderTarget('MT5');
   const failedTone = state.globalMetatraderHub.tone;
   const failedPosts = [...posts];
   const modelUnchanged = state.globalMetatraderHub.readModel===stableModel;
   commitBeforeThrow = true;
   posts = [];
-  const reconciled = await applyGlobalMetatraderTarget('MT4');
+  const reconciled = await applyGlobalMetatraderTarget('MT5');
   const reconciledTone = state.globalMetatraderHub.tone;
-  const reconciledCandidate = state.globalMetatraderHub.readModel.platforms.mt4.selectedCandidate?.candidateId;
+  const reconciledCandidate = state.globalMetatraderHub.readModel.platforms.mt5.selectedCandidate?.candidateId;
   const reconciledPosts = [...posts];
   failStatus = 409;
   failMessage = 'กรุณาปิด MT4 อื่น เปิดเฉพาะ MT4 ที่ต้องการ กดสแกนใหม่';
@@ -485,18 +564,24 @@ process.stdout.write(JSON.stringify({fresh,mismatch,stale,failed,expired}));''',
   const readsBeforeAmbiguous503 = reads;
   const ambiguous503 = await applyGlobalMetatraderTarget('MT4');
   const ambiguous503Result = {result:ambiguous503,tone:state.globalMetatraderHub.tone,reads:reads-readsBeforeAmbiguous503,posts:[...posts]};
-  process.stdout.write(JSON.stringify({mt4Result,afterMt4,postsAfterMt4,repeatedMt4,postsAfterRepeatedMt4,readsAfterRepeatedMt4,mt5Result,afterMt5,failed,failedTone,failedPosts,modelUnchanged,reconciled,reconciledTone,reconciledCandidate,reconciledPosts,known409Result,ambiguous503Result}));
+  process.stdout.write(JSON.stringify({mt4Result,afterMt4,activeAfterMt4,postsAfterMt4,mt5Result,afterMt5,activeAfterMt5,postsAfterMt5,activateMt4,activeAfterActivation,postsAfterActivation,repeatedMt4,postsAfterRepeatedMt4,readsAfterRepeatedMt4,failed,failedTone,failedPosts,modelUnchanged,reconciled,reconciledTone,reconciledCandidate,reconciledPosts,known409Result,ambiguous503Result}));
 })().catch((error) => { console.error(error); process.exit(1); });''',
         ])
         payload = self.run_node(script)
         self.assertEqual(payload["mt4Result"], {"ok": True, "atomic": True, "succeeded": 3, "total": 3})
         self.assertEqual(payload["afterMt4"]["configurationStatus"], "configured")
+        self.assertIsNone(payload["activeAfterMt4"])
         self.assertEqual(payload["postsAfterMt4"], 1)
-        self.assertEqual(payload["repeatedMt4"], {"ok": True, "atomic": True, "succeeded": 3, "total": 3})
-        self.assertEqual(payload["postsAfterRepeatedMt4"], 2)
-        self.assertEqual(payload["readsAfterRepeatedMt4"], 0)
         self.assertEqual(payload["mt5Result"], {"ok": True, "atomic": True, "succeeded": 3, "total": 3})
         self.assertEqual(payload["afterMt5"]["configurationStatus"], "configured")
+        self.assertIsNone(payload["activeAfterMt5"])
+        self.assertEqual(payload["postsAfterMt5"], 2)
+        self.assertEqual(payload["activateMt4"], {"ok": True, "atomic": True, "succeeded": 3, "total": 3})
+        self.assertEqual(payload["activeAfterActivation"], "mt4")
+        self.assertEqual(payload["postsAfterActivation"], 3)
+        self.assertEqual(payload["repeatedMt4"], {"ok": True, "atomic": True, "succeeded": 3, "total": 3})
+        self.assertEqual(payload["postsAfterRepeatedMt4"], 4)
+        self.assertEqual(payload["readsAfterRepeatedMt4"], 0)
         self.assertIsNone(payload["failed"])
         self.assertEqual(payload["failedTone"], "error")
         self.assertEqual(len(payload["failedPosts"]), 1)
@@ -506,7 +591,7 @@ process.stdout.write(JSON.stringify({fresh,mismatch,stale,failed,expired}));''',
             {"ok": True, "atomic": True, "reconciled": True, "succeeded": 3, "total": 3},
         )
         self.assertEqual(payload["reconciledTone"], "success")
-        self.assertEqual(payload["reconciledCandidate"], "mtc-44444444444444444444444444444444")
+        self.assertEqual(payload["reconciledCandidate"], "mtc-55555555555555555555555555555555")
         self.assertEqual(len(payload["reconciledPosts"]), 1)
         self.assertIsNone(payload["known409Result"]["result"])
         self.assertEqual(payload["known409Result"]["tone"], "error")
@@ -662,7 +747,7 @@ process.stdout.write(JSON.stringify({fresh,mismatch,stale,failed,expired}));''',
             "];",
             "const candidate = {candidateId:'mtc-44444444444444444444444444444444',platform:'MT4',labelTh:'MT4 หลัก',detected:true,runningState:'platform_running_detected'};",
             "const checklist = {metatraderSelection:{candidates:[candidate],selectedCandidate:candidate,canSelect:true}};",
-            "const model = {status:'configured',selectedPlatform:'MT4',candidates:[candidate],platforms:{mt4:{configurationStatus:'configured',selectedCandidate:candidate,targets:GLOBAL_METATRADER_TARGETS.map((target)=>({propId:target.propId,status:'configured',selectedCandidate:candidate,adapterReady:false}))},mt5:{configurationStatus:'not_configured',selectedCandidate:null,targets:GLOBAL_METATRADER_TARGETS.map((target)=>({propId:target.propId,status:'configured_other_platform',selectedCandidate:candidate,adapterReady:false}))}}};",
+            "const model = {status:'partial',allPlatformsLocked:false,activePlatform:'mt4',selectedPlatform:'mt4',selectedCandidate:candidate,candidates:[candidate],platforms:{mt4:{configurationStatus:'configured',selectedCandidate:candidate,targets:GLOBAL_METATRADER_TARGETS.map((target)=>({propId:target.propId,status:'configured',selectedCandidate:candidate,adapterReady:false}))},mt5:{configurationStatus:'not_configured',selectedCandidate:null,targets:GLOBAL_METATRADER_TARGETS.map((target)=>({propId:target.propId,status:'not_configured',selectedCandidate:null,adapterReady:false}))}}};",
             "const state = {globalMetatraderHub:{readModel:null,status:'ready',backendAvailable:true,inFlight:false,operation:'',message:'old',tone:'success',checklists:{left_analytics_console:checklist,right_server_racks:checklist,right_tool_console:checklist},choices:{MT4:'',MT5:''},platformChoice:'',platformChoiceTouched:false,requestId:0,lastReadCount:3,lastLoadedAt:1,lastScannedAt:0}};",
             "function getMetatraderSelectionModel(value) { return value?.metatraderSelection || {candidates:[],selectedCandidate:null,canSelect:false}; }",
             "function safeDashboardDisplayText(value, fallback='') { return String(value || fallback); }",
@@ -681,16 +766,16 @@ process.stdout.write(JSON.stringify({fresh,mismatch,stale,failed,expired}));''',
         payload = self.run_node(script)
         self.assertEqual(payload["keys"], [])
         self.assertTrue(payload["hasModel"])
-        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["status"], "partial")
         self.assertEqual(payload["lastReadCount"], 3)
-        self.assertIn("ครบทุกระบบ", payload["message"])
-        self.assertEqual(payload["tone"], "success")
+        self.assertIn("ต้องล็อกอีกแพลตฟอร์ม", payload["message"])
+        self.assertEqual(payload["tone"], "warning")
         self.assertEqual(
             payload["available"],
             [
-                ["left_analytics_console", True, True],
-                ["right_server_racks", True, True],
-                ["right_tool_console", True, True],
+                ["left_analytics_console", True, False],
+                ["right_server_racks", True, False],
+                ["right_tool_console", True, False],
             ],
         )
 
@@ -788,8 +873,8 @@ process.stdout.write(JSON.stringify({fresh,mismatch,stale,failed,expired}));''',
 
         # The platform field describes source/build compatibility and must remain editable.
         self.assertIn('"แพลตฟอร์ม"', lab_source)
-        self.assertIn('["MT4", "MT4 / MQL4"]', lab_source)
-        self.assertIn('["MT5", "MT5 / MQL5"]', lab_source)
+        self.assertIn('["MT4", "MT4 / MQL4 • วางแผนเท่านั้น"]', lab_source)
+        self.assertIn('["MT5", "MT5 / MQL5 • รันจริงผ่าน Visible Tester"]', lab_source)
         # The concrete installed Terminal comes only from the central hub/backend selection.
         for forbidden in (
             '"Terminal ที่ตรวจพบ"',
@@ -833,15 +918,16 @@ process.stdout.write(JSON.stringify({fresh,mismatch,stale,failed,expired}));''',
         self.assertIn("closeResearchSheetHubPopover({ discardPreview: false, focusToggle: false })", panel)
         self.assertNotIn("discardPreview: true", panel)
 
-    def test_snapshot_readiness_is_not_labeled_as_live_adapter_readiness(self) -> None:
+    def test_platform_lock_status_is_not_labeled_as_live_adapter_readiness(self) -> None:
         render = function_source(self.main, "renderGlobalMetatraderHubControl")
-        self.assertIn("Snapshot พร้อม (อ่านอย่างเดียว)", render)
+        self.assertIn("ล็อกแล้ว", render)
+        self.assertIn("รอเชื่อม", render)
         self.assertNotIn('"Adapter พร้อม"', render)
 
-    def test_partial_status_describes_binding_drift_not_read_failure(self) -> None:
+    def test_partial_status_describes_incomplete_dual_locks_not_read_failure(self) -> None:
         render = function_source(self.main, "renderGlobalMetatraderHubControl")
-        self.assertIn("ตั้งค่าไม่ครบ ${configuredCount}/${totalCount} ระบบ", render)
-        self.assertIn("พบ Terminal บางระบบไม่ตรงกัน", render)
+        self.assertIn("ล็อกแล้ว ${lockedCount}/${requiredCount} แพลตฟอร์ม", render)
+        self.assertIn("รออีก ${requiredCount - lockedCount}", render)
         self.assertNotIn("อ่านสถานะได้ ${hub.lastReadCount}/${totalCount} ระบบ", render)
 
     def test_control_has_ready_partial_error_and_mobile_layout_states(self) -> None:

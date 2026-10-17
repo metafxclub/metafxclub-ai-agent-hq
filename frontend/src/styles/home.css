@@ -1,0 +1,177 @@
+/* Game-first home: one compact header, the complete room, optional status. */
+html, body { overflow: hidden; }
+body { background: #070f19; }
+.app-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas: "header" "room";
+  height: 100dvh;
+  gap: 6px;
+  padding: 8px;
+}
+.app-shell > .topbar, .app-shell > .stage-wrap {
+  position: relative;
+  inset: auto;
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  transform: none;
+}
+.app-shell > .topbar {
+  grid-area: header;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto;
+  gap: 12px;
+  align-items: center;
+  padding: 9px 14px;
+  background: #101c2c;
+  border: 1px solid var(--ui-line);
+  border-radius: 12px;
+  overflow: visible;
+  backdrop-filter: none;
+}
+.app-shell > .topbar > .topbar-brand { display: flex; align-items: center; gap: 10px; grid-column: 1; grid-row: 1; }
+.home-brand-mark {
+  display: flex; flex-direction: column; justify-content: center; align-items: center;
+  flex: 0 0 36px; height: 40px; border: 1px solid #427a82; border-radius: 10px;
+  background: linear-gradient(145deg, #244c57, #152839); color: var(--ui-accent);
+  font: 800 22px/1 "Segoe UI", sans-serif; letter-spacing: -.08em;
+}
+.home-brand-mark span { font-size: 8px; letter-spacing: .16em; margin-top: 2px; }
+.topbar-brand .eyebrow { margin: 0 0 3px; font-size: 9px; letter-spacing: .06em; }
+.topbar .topbar-brand h1 { margin: 0; font-size: 22px; line-height: 1.15; }
+.home-brand-description { display: none; }
+
+/* Sheet selection and connection controls share one header row. */
+.topbar > .topbar-research-sheet-hub {
+  grid-column: 2; grid-row: 1; background: #0b1625; border: 1px solid var(--ui-line); border-radius: 8px; box-shadow: none;
+}
+.topbar .research-sheet-hub-toolbar {
+  grid-template-columns: minmax(100px, 130px) minmax(80px, 1fr) auto auto;
+  gap: 7px; align-items: center; min-height: 48px; padding: 5px 7px;
+}
+.topbar .research-sheet-hub-heading { gap: 2px; }
+.topbar .research-sheet-hub-heading span { display: none; }
+.topbar .research-sheet-hub-heading strong { display: block; font-size: 12px; }
+.topbar .research-sheet-hub-heading b { max-width: 100%; font-size: 9px; border-radius: 4px; }
+.topbar .research-sheet-hub-input > span {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+.topbar .research-sheet-hub-input input {
+  min-width: 0; height: 34px; min-height: 34px; padding: 6px 8px;
+  border: 1px solid var(--ui-line); border-radius: 6px; background: #111f31; font-size: 11px;
+}
+.topbar .research-sheet-hub-apply, .topbar .research-sheet-hub-details-toggle {
+  align-self: center; width: auto; min-width: 0; max-width: none; min-height: 34px; height: 34px;
+  padding: 6px 9px; border-radius: 6px; font-size: 11px; line-height: 1.4; white-space: nowrap;
+}
+.topbar .research-sheet-hub-apply { background: #174a47; border-color: #327c73; color: #d6fff5; }
+.topbar .research-sheet-hub-details-toggle { background: #16263a; border-color: var(--ui-line); }
+.topbar .research-sheet-hub-details-toggle > span { position: static; width: auto; height: auto; margin: 0; clip: auto; overflow: visible; }
+.topbar .topbar-actions { z-index: 3; grid-column: 3; grid-row: 1; display: flex; gap: 8px; width: auto; }
+.topbar .topbar-actions .agent-collab-control { width: 186px; }
+.topbar .topbar-actions .operator-mode-control { width: 136px; }
+.topbar .topbar-actions :is(.agent-collab-button, .operator-mode-button) {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px;
+  height: 48px; min-height: 48px; padding: 6px 9px; border-radius: 8px; background: #132438; box-shadow: none;
+}
+.topbar .topbar-actions :is(.agent-collab-button, .operator-mode-button) > span:nth-child(2) { display: block; min-width: 0; }
+.topbar .topbar-actions :is(.agent-collab-button, .operator-mode-button) small { display: block; font-size: 9px; font-weight: 500; }
+.topbar .topbar-actions :is(.agent-collab-button, .operator-mode-button) strong { display: block; font-size: 11px; line-height: 1.5; }
+.topbar .metatrader-hub-compact-mark { display: none; }
+.topbar :is(.research-sheet-hub-popover, .metatrader-hub-panel, .operator-mode-panel) {
+  border: 1px solid #3d5a77; border-radius: 12px; background: #101e30;
+  box-shadow: 0 24px 80px #0009; padding: 18px; max-height: calc(100dvh - 100px);
+  overflow-y: auto; scrollbar-width: thin; scrollbar-color: #40546d transparent;
+}
+.topbar .research-sheet-hub-popover { top: calc(100% + 12px); left: 50%; transform: translateX(-50%); }
+.topbar :is(.metatrader-hub-panel, .operator-mode-panel) { right: 0; top: calc(100% + 12px); }
+.topbar :is(.research-sheet-hub-popover, .metatrader-hub-panel, .operator-mode-panel) :is(input, select, button) { border-radius: 7px; }
+.topbar :is(button, input, select, summary):focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
+
+/* Preserve room coordinates and use every remaining pixel of the viewport. */
+.app-shell > .stage-wrap {
+  grid-area: room; z-index: var(--z-office-scene); isolation: isolate; display: flex;
+  flex-direction: column; align-items: stretch;
+  padding: 0; overflow: hidden; border: 0; border-radius: 10px;
+  background: radial-gradient(ellipse at 50% 46%, #112334, #040a11 75%);
+}
+.home-room-viewport {
+  container-type: size; position: relative; flex: 1 1 0; min-width: 0; min-height: 0;
+  display: grid; place-items: center; overflow: hidden;
+}
+.stage-wrap .room-stage, .stage-wrap .room-stage.cover {
+  width: min(100cqw, calc(100cqh * 1672 / 941)); height: auto; max-width: none;
+  aspect-ratio: 1672 / 941; margin: 0; padding: 0; border: 0; transform: none; transition: none;
+}
+
+/* Status stays available on demand and reserves no space beside the game. */
+.home-status-menu { position: relative; z-index: 4; grid-column: 4; grid-row: 1; }
+.home-status-menu > summary {
+  display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 48px;
+  padding: 8px 12px; border: 1px solid var(--ui-line); border-radius: 8px; background: #16263a;
+  color: var(--ui-text); cursor: pointer; list-style: none; white-space: nowrap; font-size: 12px;
+}
+.home-status-menu > summary::-webkit-details-marker { display: none; }
+.home-status-menu[open] > summary { border-color: var(--ui-accent); color: var(--ui-accent); }
+.home-status-drawer {
+  position: fixed; top: 84px; right: 12px; bottom: 12px; width: min(430px, calc(100vw - 24px));
+  display: flex; flex-direction: column; gap: 12px; padding: 14px;
+  overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #40546d transparent;
+  border: 1px solid #3d5a77; border-radius: 14px; background: #0c1726; box-shadow: 0 24px 80px #000b;
+}
+.home-status-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 2px 2px; }
+.home-status-heading strong { font-size: 16px; }
+.home-status-heading button { width: 34px; height: 34px; border: 1px solid var(--ui-line); border-radius: 7px; background: #16263a; color: var(--ui-text); font: 22px/1 sans-serif; cursor: pointer; }
+.home-status-drawer > :is(.codex-rate-tab, .agent-status-panel, .today-work-panel),
+.home-status-drawer > .codex-rate-tab:has(.codex-rate-secondary:not([hidden])) ~ .agent-status-panel {
+  position: relative; inset: auto; width: 100%; height: auto; min-width: 0; max-width: none;
+  max-height: none; margin: 0; flex: 0 0 auto; transform: none; backdrop-filter: none;
+}
+.home-status-drawer > .agent-status-panel { height: 440px; }
+.home-status-drawer > .today-work-panel { height: 480px; }
+
+@media (max-width: 1350px) {
+  .app-shell > .topbar { gap: 8px; padding: 8px 10px; }
+  .topbar-brand .eyebrow { max-width: 160px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .topbar .topbar-brand h1 { font-size: 20px; }
+  .topbar .research-sheet-hub-toolbar { grid-template-columns: minmax(80px, 1fr) auto auto; }
+  .topbar .research-sheet-hub-heading { display: none; }
+  .topbar .topbar-actions .agent-collab-control { width: 178px; }
+  .topbar .topbar-actions .operator-mode-control { width: 126px; }
+}
+@media (max-width: 1050px) {
+  .app-shell > .topbar { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .topbar .topbar-actions { grid-column: 2; }
+  .home-status-menu { grid-column: 3; }
+  .topbar > .topbar-research-sheet-hub { grid-column: 1 / -1; grid-row: 2; }
+  .topbar .research-sheet-hub-toolbar { grid-template-columns: 130px minmax(80px, 1fr) auto auto; min-height: 42px; padding: 3px 6px; }
+  .topbar .research-sheet-hub-heading { display: grid; }
+  .home-status-drawer { top: 140px; }
+}
+@media (max-width: 650px) {
+  .app-shell { padding: 4px; gap: 4px; }
+  .app-shell > .topbar { grid-template-columns: minmax(0, 1fr) auto; gap: 6px; padding: 7px; }
+  .app-shell > .topbar > .topbar-brand { gap: 7px; }
+  .home-brand-mark { flex-basis: 30px; height: 34px; font-size: 19px; }
+  .topbar .topbar-brand h1 { font-size: 18px; }
+  .topbar-brand .eyebrow { font-size: 8px; }
+  .home-status-menu { grid-column: 2; }
+  .home-status-menu > summary { min-height: 38px; padding: 7px; font-size: 11px; }
+  .topbar .topbar-actions { grid-column: 1 / -1; grid-row: 3; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .topbar .topbar-actions :is(.agent-collab-control, .operator-mode-control) { width: 100%; }
+  .topbar .topbar-actions :is(.agent-collab-button, .operator-mode-button) { min-height: 42px; height: 42px; padding: 4px 7px; gap: 5px; }
+  .topbar .topbar-actions :is(.agent-collab-button, .operator-mode-button) strong { font-size: 10px; }
+  .topbar .topbar-actions :is(.agent-collab-button, .operator-mode-button) small { font-size: 8px; }
+  .topbar .research-sheet-hub-toolbar { grid-template-columns: minmax(0, 1fr) auto auto; gap: 5px; }
+  .topbar .research-sheet-hub-heading { display: none; }
+  .topbar .research-sheet-hub-apply, .topbar .research-sheet-hub-details-toggle { font-size: 10px; padding: 5px 6px; }
+  .topbar :is(.research-sheet-hub-popover, .metatrader-hub-panel, .operator-mode-panel) { position: fixed; inset: 8px 8px auto; transform: none; width: auto; max-height: calc(100dvh - 16px); }
+  .home-status-drawer { top: 58px; right: 8px; bottom: 8px; width: calc(100vw - 16px); padding: 10px; }
+}

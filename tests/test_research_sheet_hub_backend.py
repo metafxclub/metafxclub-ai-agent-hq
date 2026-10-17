@@ -2491,9 +2491,36 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             self.bridge._sync_ea_factory_google_sheet_serial({"tabName": "Custom_Tab"})
         self.assertEqual(wrong_tab.exception.status, 422)
 
-        with self.assertRaises(self.bridge.RequestError) as stale_revision:
-            self.bridge._sync_ea_factory_google_sheet_serial({"configRevision": 8})
+        with patch.object(self.bridge, "create_mission") as create_mission, patch.object(
+            self.bridge,
+            "create_report",
+        ) as create_report, patch.object(
+            self.bridge,
+            "append_audit",
+        ) as append_audit, patch.object(
+            self.bridge,
+            "_ea_factory_read_deep_research_values",
+        ) as read_values, patch.object(
+            self.bridge,
+            "_write_ea_factory_state_unlocked",
+        ) as write_factory_state:
+            with self.assertRaises(self.bridge.RequestError) as missing_revision:
+                self.bridge._sync_ea_factory_google_sheet_serial({})
+            self.assertEqual(missing_revision.exception.status, 422)
+            create_mission.assert_not_called()
+            create_report.assert_not_called()
+            append_audit.assert_not_called()
+            read_values.assert_not_called()
+            write_factory_state.assert_not_called()
+
+            with self.assertRaises(self.bridge.RequestError) as stale_revision:
+                self.bridge._sync_ea_factory_google_sheet_serial({"configRevision": 8})
         self.assertEqual(stale_revision.exception.status, 409)
+        create_mission.assert_not_called()
+        create_report.assert_not_called()
+        append_audit.assert_not_called()
+        read_values.assert_not_called()
+        write_factory_state.assert_not_called()
 
         with patch.object(
             self.bridge,
@@ -2501,7 +2528,7 @@ class ResearchSheetHubBackendTests(unittest.TestCase):
             side_effect=StopAfterEaFactoryValidation("validated"),
         ) as create_mission:
             with self.assertRaises(StopAfterEaFactoryValidation):
-                self.bridge._sync_ea_factory_google_sheet_serial({})
+                self.bridge._sync_ea_factory_google_sheet_serial({"configRevision": 9})
         intent = create_mission.call_args.args[0]
         self.assertEqual(intent["targetId"], "right_server_racks")
         self.assertEqual(intent["toolId"], "ea_factory_google_sheet_read")

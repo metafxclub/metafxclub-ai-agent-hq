@@ -88,6 +88,71 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
     def setUp(self) -> None:
         self.bridge = load_bridge()
         self.runner = load_runner()
+        self._install_dual_lock_fixture()
+
+    @staticmethod
+    def _locked_terminal_context(candidate_id: str, platform: str) -> dict:
+        return {
+            "record": {
+                "candidateId": candidate_id,
+                "platform": platform,
+                "available": True,
+                "runningState": "platform_running_detected",
+            },
+            "token": {
+                "candidateId": candidate_id,
+                "platform": platform,
+                "selectionRevision": 1,
+            },
+            "selectedAt": "2026-10-16T09:00:00+07:00",
+        }
+
+    def _install_dual_lock_fixture(self) -> None:
+        """Keep legacy Council selections behind a valid 2/2 header lock."""
+
+        selected_reader = self.bridge._selected_metatrader_candidate_context
+        fallbacks = {
+            "mt4": self._locked_terminal_context("mtc-" + ("a" * 26), "mt4"),
+            "mt5": self._locked_terminal_context("mtc-" + ("b" * 26), "mt5"),
+        }
+
+        def selected_context() -> dict | None:
+            context = selected_reader(self.bridge.AI_TRADE_COUNCIL_PROP_ID)
+            if not isinstance(context, dict):
+                return None
+            record = dict(context.get("record") or {})
+            platform = str(record.get("platform") or "").strip().lower()
+            if platform not in {"mt4", "mt5"}:
+                return None
+            token = dict(context.get("token") or {})
+            token["platform"] = platform
+            return {
+                **context,
+                "record": record,
+                "token": token,
+            }
+
+        def platform_context(
+            platform: object,
+            *,
+            require_all_platforms: bool = True,
+        ) -> dict | None:
+            normalized = str(platform or "").strip().lower()
+            if normalized not in fallbacks:
+                return None
+            selected = selected_context()
+            if (
+                isinstance(selected, dict)
+                and selected["record"].get("platform") == normalized
+            ):
+                return selected
+            return fallbacks[normalized]
+
+        def active_context(*, require_all_platforms: bool = True) -> dict:
+            return selected_context() or fallbacks["mt4"]
+
+        self.bridge._global_metatrader_platform_context = platform_context
+        self.bridge._active_global_metatrader_context = active_context
 
     def test_running_mt4_outside_standard_roots_becomes_opaque_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -177,15 +242,22 @@ class Mt4ReadOnlyCouncilTests(unittest.TestCase):
             "unknown",
         )
 
-    def test_ai_trade_council_contract_accepts_exactly_one_mt4_or_mt5(self) -> None:
+    def test_ai_trade_council_contract_requires_both_top_header_platform_locks(self) -> None:
         profile = self.bridge.find_dashboard_connection_profile(
             self.bridge.AI_TRADE_COUNCIL_PROP_ID,
         )
         connection_ids = {item["id"] for item in profile["connections"]}
+        requirements = profile["connectionRequirements"]
+        self.assertNotIn("anyOf", requirements)
         self.assertEqual(
-            profile["connectionRequirements"]["anyOf"],
+            requirements["allOf"],
             ["mt4_terminal", "mt5_terminal"],
         )
+        self.assertEqual(
+            requirements["allOfSource"],
+            "top_header_platform_locks",
+        )
+        self.assertTrue(requirements["allOfRequiredForMtWork"])
         self.assertIn("mt4_terminal", connection_ids)
         self.assertIn("mt5_terminal", connection_ids)
 

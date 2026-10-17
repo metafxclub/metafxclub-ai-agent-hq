@@ -19,7 +19,18 @@ BRIDGE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "bridge_server.py"
 RUNNER_PATH = PROJECT_ROOT / "runner" / "codex_cli_runner.py"
 FRONTEND_INDEX_PATH = PROJECT_ROOT / "frontend" / "index.html"
 FRONTEND_MAIN_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "main.js"
-FRONTEND_STYLES_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "styles.css"
+FRONTEND_STYLES_PATH = PROJECT_ROOT / "frontend" / "src" / "styles" / "main.css"
+FRONTEND_WORKSPACE_STYLE_PATHS = tuple(
+    PROJECT_ROOT / "frontend" / "src" / "styles" / filename
+    for filename in (
+        "workspace.css", "agent-workspace.css", "dashboard-workspace.css",
+        "home.css", "home-panels.css",
+    )
+)
+FRONTEND_MODEL_PATHS = tuple(
+    PROJECT_ROOT / "frontend" / "src" / "features" / domain / filename
+    for domain, filename in (("research", "research-sheet.js"), ("chat", "meeting-session.js"), ("quota", "codex-rate.js"))
+)
 LIFECYCLE_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "start-local-bridge.ps1"
 AUTOSTART_REGISTER_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "register-bridge-autostart.ps1"
 AUTOSTART_UNREGISTER_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "unregister-bridge-autostart.ps1"
@@ -40,6 +51,58 @@ def load_module(name: str, path: Path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def global_metatrader_lock_snapshot(
+    *,
+    mt4_locked: bool = False,
+    mt5_locked: bool = False,
+    terminal_status: str = "detected",
+) -> dict:
+    """Build a deterministic public top-header lock snapshot for checklist tests."""
+
+    def platform_model(platform: str, locked: bool) -> dict:
+        selected_candidate = (
+            {
+                "candidateId": f"mtc-{platform}-test-lock",
+                "platform": platform,
+                "labelTh": platform.upper(),
+                "detected": True,
+                "runningState": "platform_running_detected",
+            }
+            if locked
+            else None
+        )
+        return {
+            "platform": platform,
+            "configurationStatus": "configured" if locked else "not_configured",
+            "candidateCount": 1,
+            "selectedCandidate": selected_candidate,
+        }
+
+    configured_count = int(mt4_locked) + int(mt5_locked)
+    active_platform = "mt4" if mt4_locked else "mt5" if mt5_locked else None
+    return {
+        "status": (
+            "configured"
+            if configured_count == 2
+            else "partial"
+            if configured_count
+            else "not_checked"
+            if terminal_status == "not_checked"
+            else "not_configured"
+        ),
+        "configuredPlatformCount": configured_count,
+        "requiredPlatformCount": 2,
+        "allPlatformsLocked": configured_count == 2,
+        "activePlatform": active_platform,
+        "selectedPlatform": active_platform,
+        "platforms": {
+            "mt4": platform_model("mt4", mt4_locked),
+            "mt5": platform_model("mt5", mt5_locked),
+        },
+        "terminalStatus": {"status": terminal_status},
+    }
 
 
 class RuntimeIntegrityTests(unittest.TestCase):
@@ -207,7 +270,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn("DEMO_MODE_REQUIRES_DEMO_ACCOUNT", main)
         self.assertIn("ACCOUNT_IDENTITY_UNAVAILABLE", main)
         self.assertIn("DECISION_DISPATCH_WINDOW_EXPIRED", main)
-        self.assertIn("20260808-workflow-transfer-v050", index)
+        self.assertIn("20261017-world-radar-rows-v0922-r2", index)
 
     def test_ai_trade_council_shows_protective_plan_source_and_thai_block_reason(self) -> None:
         main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
@@ -254,7 +317,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn("fallback_snapshot_digest_missing", main)
         self.assertIn("fallback_snapshot_digest_mismatch", main)
         self.assertIn('.signal-protective-plan-provenance[data-state="blocked"]', styles)
-        self.assertIn("20260808-workflow-transfer-v050", index)
+        self.assertIn("20261017-world-radar-rows-v0922-r2", index)
 
     def test_daily_council_frontend_consumes_v2_votes_and_finishes_read_only_pipeline(self) -> None:
         main = FRONTEND_MAIN_PATH.read_text(encoding="utf-8")
@@ -1116,14 +1179,21 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 bridge=fake_bridge,
                 quota={"ok": True, "status": "ready", "primary": {"usedPercent": 15, "remainingPercent": 85}},
                 terminals=terminals,
+                global_metatrader=global_metatrader_lock_snapshot(),
             )
         finally:
             for name, value in originals.items():
                 setattr(self.bridge, name, value)
         items = {item["id"]: item for item in checklist["items"]}
 
-        self.assertEqual(items["mt4_terminal"]["status"], "detected")
-        self.assertEqual(items["mt5_terminal"]["status"], "detected")
+        self.assertEqual(items["mt4_terminal"]["status"], "not_configured")
+        self.assertEqual(items["mt5_terminal"]["status"], "not_configured")
+        self.assertEqual(items["mt4_terminal"]["detectionStatus"], "detected")
+        self.assertEqual(items["mt5_terminal"]["detectionStatus"], "detected")
+        self.assertEqual(
+            items["mt4_terminal"]["statusSource"],
+            "top_header_platform_lock",
+        )
         self.assertFalse(items["mt4_terminal"]["adapterReady"])
         self.assertEqual(items["mt4_terminal"]["executionAdapterStatus"], "coming_soon")
         self.assertFalse(items["mt5_terminal"]["adapterReady"])
@@ -1453,19 +1523,46 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertTrue({"partial", "needs_attention"}.issubset(set(contract["statusVocabulary"])))
         council_profile = profiles["left_analytics_console"]
         council_connection_ids = {item["id"] for item in council_profile["connections"]}
-        council_any_of = council_profile.get("connectionRequirements", {}).get("anyOf")
-        self.assertEqual(council_any_of, ["mt4_terminal", "mt5_terminal"])
+        council_requirements = council_profile.get("connectionRequirements", {})
+        self.assertNotIn("anyOf", council_requirements)
+        self.assertEqual(
+            council_requirements["allOf"],
+            ["mt4_terminal", "mt5_terminal"],
+        )
+        self.assertEqual(
+            council_requirements["allOfSource"],
+            "top_header_platform_locks",
+        )
+        self.assertTrue(council_requirements["allOfRequiredForMtWork"])
         self.assertIn("mt4_terminal", council_connection_ids)
         self.assertIn("mt5_terminal", council_connection_ids)
 
         lab_profile = profiles["right_tool_console"]
         lab_connection_ids = {item["id"] for item in lab_profile["connections"]}
-        lab_any_of = lab_profile.get("connectionRequirements", {}).get("anyOf")
-        self.assertEqual(lab_any_of, ["mt4_terminal", "mt5_terminal"])
-        self.assertTrue(set(lab_any_of).issubset(lab_connection_ids))
+        lab_requirements = lab_profile.get("connectionRequirements", {})
+        self.assertNotIn("anyOf", lab_requirements)
+        self.assertEqual(
+            lab_requirements["allOf"],
+            ["mt4_terminal", "mt5_terminal"],
+        )
+        self.assertEqual(
+            lab_requirements["allOfSource"],
+            "top_header_platform_locks",
+        )
+        self.assertTrue(lab_requirements["allOfRequiredForMtWork"])
+        self.assertTrue(set(lab_requirements["allOf"]).issubset(lab_connection_ids))
 
         factory_requirements = profiles["right_server_racks"]["connectionRequirements"]
         self.assertNotIn("anyOf", factory_requirements)
+        self.assertEqual(
+            factory_requirements["allOf"],
+            ["mt4_terminal", "mt5_terminal"],
+        )
+        self.assertEqual(
+            factory_requirements["allOfSource"],
+            "top_header_platform_locks",
+        )
+        self.assertTrue(factory_requirements["allOfRequiredForMtWork"])
         self.assertEqual(factory_requirements["requiredForSourceGeneration"], ["codex_workspace"])
         self.assertEqual(
             factory_requirements["requiredForMt4Compile"],
@@ -1852,7 +1949,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 for name, value in originals.items():
                     setattr(self.bridge, name, value)
 
-    def test_terminal_target_selection_persists_per_prop_with_mission_report_and_audit(self) -> None:
+    def test_legacy_terminal_selection_alias_locks_platform_without_activation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             runtime = root / "runtime"
@@ -1892,49 +1989,68 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 with self.bridge.METATRADER_CACHE_LOCK:
                     self.bridge.METATRADER_CACHE.update({"payload": discovered, "fetchedMonotonic": time.monotonic()})
                 candidate = discovered["candidates"][0]
-                results = [
-                    self.bridge.select_metatrader_target("right_server_racks", candidate["candidateId"]),
-                    self.bridge.select_metatrader_target("right_tool_console", candidate["candidateId"]),
-                ]
+                with mock.patch.object(
+                    self.bridge,
+                    "_assert_unambiguous_metatrader_candidate_unlocked",
+                ):
+                    results = [
+                        self.bridge.select_metatrader_target("right_server_racks", candidate["candidateId"]),
+                        self.bridge.select_metatrader_target("right_tool_console", candidate["candidateId"]),
+                    ]
 
                 for result, prop_id in zip(results, ("right_server_racks", "right_tool_console")):
                     self.assertTrue(result["ok"])
                     self.assertEqual(result["status"], "completed")
+                    self.assertEqual(result["compatibilityMode"], "central_atomic_alias")
+                    self.assertEqual(result["legacyRequestPropId"], prop_id)
                     self.assertEqual(result["selection"]["propId"], prop_id)
-                    self.assertEqual(result["selection"]["status"], "selected")
-                    self.assertEqual(result["selection"]["configurationStatus"], "configured")
-                    self.assertEqual(result["selection"]["adapterConnection"], "read_only_snapshot")
+                    self.assertEqual(result["selection"]["status"], "configured")
                     self.assertFalse(result["selection"]["adapterReady"])
-                    self.assertEqual(set(result["selection"]["selectedCandidate"]), {"candidateId", "platform", "labelTh", "detected", "runningState"})
-                    self.assertEqual(result["report"]["type"], "terminal_selection_report")
-                    self.assertEqual(result["report"]["linkedPropId"], prop_id)
-                    selection_model = result["connectionChecklist"]["metatraderSelection"]
-                    self.assertEqual(selection_model["configurationStatus"], "configured")
-                    self.assertEqual(selection_model["adapterConnection"], "coming_soon")
-                    selected_item = next(
-                        item for item in result["connectionChecklist"]["items"]
-                        if item["id"] == "mt4_terminal"
+                    self.assertEqual(result["selection"]["source"], "top_header_platform_lock")
+                    self.assertEqual(
+                        set(result["selection"]["selectedCandidate"]),
+                        {"candidateId", "platform", "labelTh", "detected", "runningState"},
                     )
-                    self.assertEqual(selected_item["detectionStatus"], "detected")
-                    self.assertEqual(selected_item["configurationStatus"], "configured")
-                    self.assertEqual(selected_item["executionAdapterStatus"], "read_only_snapshot")
-                    self.assertFalse(selected_item["adapterReady"])
+                    self.assertEqual(result["report"]["type"], "terminal_selection_report")
+                    self.assertEqual(
+                        result["report"]["linkedPropId"],
+                        self.bridge.GLOBAL_METATRADER_DISCOVERY_PROP_ID,
+                    )
+                    self.assertEqual(
+                        result["globalMetatraderHub"]["platforms"]["mt4"]["selectedCandidate"]["candidateId"],
+                        candidate["candidateId"],
+                    )
 
                 persisted = json.loads((runtime / self.bridge.METATRADER_TARGET_STORE_FILENAME).read_text(encoding="utf-8"))
-                self.assertEqual(set(persisted["selections"]), {"right_server_racks", "right_tool_console"})
-                self.assertEqual(persisted["selections"]["right_server_racks"]["candidateId"], candidate["candidateId"])
-                self.assertEqual(persisted["selections"]["right_tool_console"]["candidateId"], candidate["candidateId"])
+                self.assertIsNone(persisted["activePlatform"])
+                self.assertEqual(
+                    persisted["platformSelections"]["mt4"]["candidateId"],
+                    candidate["candidateId"],
+                )
+                self.assertEqual(persisted["selections"], {})
 
                 missions = self.bridge.load_missions()
                 self.assertEqual(len(missions), 2)
                 self.assertTrue(all(mission["toolId"] == "terminal_target_select" for mission in missions))
                 self.assertTrue(all(mission["status"] == "completed" for mission in missions))
                 reports = [report for report in self.bridge.load_runtime_reports() if report["type"] == "terminal_selection_report"]
-                self.assertEqual({report["linkedPropId"] for report in reports}, {"right_server_racks", "right_tool_console"})
+                self.assertEqual(
+                    {report["linkedPropId"] for report in reports},
+                    {self.bridge.GLOBAL_METATRADER_DISCOVERY_PROP_ID},
+                )
                 audit = self.bridge.tail_jsonl(self.bridge.AUDIT_PATH)
-                selected_events = [item for item in audit if item.get("type") == "terminal.target_selected"]
-                self.assertEqual({item["dashboardId"] for item in selected_events}, {"right_server_racks", "right_tool_console"})
-                self.assertTrue(all(item["adapterConnection"] == "read_only_snapshot" and item["adapterReady"] is False for item in selected_events))
+                selected_events = [
+                    item
+                    for item in audit
+                    if item.get("type") == "terminal.global_target_selected"
+                ]
+                self.assertEqual(len(selected_events), 2)
+                self.assertTrue(
+                    all(item["platform"] == "mt4" for item in selected_events)
+                )
+                self.assertTrue(
+                    all(item["liveTradingEnabled"] is False for item in selected_events)
+                )
 
                 serialized_public = json.dumps(results, ensure_ascii=False).lower()
                 self.assertNotIn(str(terminal_root).lower(), serialized_public)
@@ -1963,22 +2079,37 @@ class RuntimeIntegrityTests(unittest.TestCase):
             bridge=fake_bridge,
             quota={"ok": True, "status": "ready", "primary": {"usedPercent": 15, "remainingPercent": 85}},
             terminals=terminals,
+            global_metatrader=global_metatrader_lock_snapshot(),
         )
         items = {item["id"]: item for item in checklist["items"]}
-        self.assertEqual(items["mt4_terminal"]["status"], "detected")
-        self.assertEqual(items["mt5_terminal"]["status"], "detected")
+        self.assertEqual(items["mt4_terminal"]["status"], "not_configured")
+        self.assertEqual(items["mt5_terminal"]["status"], "not_configured")
+        self.assertEqual(items["mt4_terminal"]["detectionStatus"], "detected")
+        self.assertEqual(items["mt5_terminal"]["detectionStatus"], "detected")
+        self.assertTrue(items["mt4_terminal"]["topHeaderAuthoritative"])
         self.assertEqual(items["mt4_terminal"]["adapterStatus"], "runtime_detected")
         self.assertEqual(items["mt4_terminal"]["executionAdapterStatus"], "coming_soon")
         self.assertEqual(items["metaeditor_compile_adapter"]["status"], "not_connected")
         self.assertEqual(items["strategy_tester_adapter"]["status"], "not_connected")
-        self.assertEqual(checklist["connectionRequirements"]["anyOf"], [])
-        self.assertTrue(checklist["connectionRequirements"]["anyOfSatisfied"])
-        self.assertEqual(checklist["connectionRequirements"]["status"], "not_required")
+        self.assertNotIn("anyOf", checklist["connectionRequirements"])
+        self.assertEqual(
+            checklist["connectionRequirements"]["allOf"],
+            ["mt4_terminal", "mt5_terminal"],
+        )
+        self.assertFalse(checklist["connectionRequirements"]["allOfSatisfied"])
+        self.assertEqual(checklist["connectionRequirements"]["satisfiedCount"], 0)
+        self.assertEqual(checklist["connectionRequirements"]["requiredCount"], 2)
+        self.assertEqual(checklist["connectionRequirements"]["status"], "needs_attention")
         self.assertEqual(
             checklist["connectionRequirements"]["requiredForMt4Compile"],
             ["mt4_terminal", "metaeditor_compile_adapter"],
         )
-        self.assertEqual(checklist["overallStatus"], "partial")
+        self.assertTrue(
+            checklist["connectionRequirements"][
+                "notRequiredForPineSourceGenerationOrValidation"
+            ]
+        )
+        self.assertEqual(checklist["overallStatus"], "needs_attention")
         self.assertEqual(checklist["operationMode"]["aiEveryTwoHours"]["status"], "not_required")
         self.assertFalse(checklist["operationMode"]["aiEveryTwoHours"]["enabled"])
 
@@ -1987,12 +2118,13 @@ class RuntimeIntegrityTests(unittest.TestCase):
             bridge=fake_bridge,
             quota={"ok": True, "status": "ready", "primary": {"usedPercent": 15, "remainingPercent": 85}},
             terminals=terminals,
+            global_metatrader=global_metatrader_lock_snapshot(),
         )
         experiment_items = {item["id"]: item for item in experiment_checklist["items"]}
-        self.assertEqual(experiment_items["optimization_adapter"]["status"], "coming_soon")
-        self.assertEqual(experiment_items["strategy_tester_adapter"]["status"], "coming_soon")
+        self.assertEqual(experiment_items["optimization_adapter"]["status"], "not_connected")
+        self.assertEqual(experiment_items["strategy_tester_adapter"]["status"], "not_connected")
 
-    def test_mt_any_of_requirement_accepts_one_platform_and_rejects_none(self) -> None:
+    def test_mt_all_of_requirement_requires_both_top_header_platform_locks(self) -> None:
         fake_bridge = {
             "mode": "Codex Runner Ready",
             "status": "guarded",
@@ -2000,33 +2132,51 @@ class RuntimeIntegrityTests(unittest.TestCase):
             "mcp": {"status": "config_present", "configPresent": True},
             "time": "2026-07-23T00:00:00+00:00",
         }
-        mt4_only = self.bridge.metatrader_status_read_model(
-            {"mt4": 1, "mt5": 0},
-            {"supported": True, "mt4": 0, "mt5": 0},
+        terminals = self.bridge.metatrader_status_read_model(
+            {"mt4": 1, "mt5": 1},
+            {"supported": True, "mt4": 1, "mt5": 1},
         )
-        one_found = self.bridge.dashboard_connection_checklist(
+        one_locked = self.bridge.dashboard_connection_checklist(
             "right_tool_console",
             bridge=fake_bridge,
-            terminals=mt4_only,
+            terminals=terminals,
+            global_metatrader=global_metatrader_lock_snapshot(mt4_locked=True),
         )
-        self.assertTrue(one_found["connectionRequirements"]["anyOfSatisfied"])
-        self.assertEqual(one_found["connectionRequirements"]["status"], "ready")
-        self.assertEqual(one_found["overallStatus"], "partial")
+        self.assertFalse(one_locked["connectionRequirements"]["allOfSatisfied"])
+        self.assertEqual(one_locked["connectionRequirements"]["satisfiedCount"], 1)
+        self.assertEqual(one_locked["connectionRequirements"]["requiredCount"], 2)
+        self.assertEqual(one_locked["connectionRequirements"]["status"], "needs_attention")
+        self.assertEqual(one_locked["overallStatus"], "needs_attention")
+        self.assertIn("1/2", one_locked["connectionRequirements"]["detailTh"])
 
-        none_found = self.bridge.metatrader_status_read_model(
-            {"mt4": 0, "mt5": 0},
-            {"supported": True, "mt4": 0, "mt5": 0},
+        both_locked = self.bridge.dashboard_connection_checklist(
+            "right_tool_console",
+            bridge=fake_bridge,
+            terminals=terminals,
+            global_metatrader=global_metatrader_lock_snapshot(
+                mt4_locked=True,
+                mt5_locked=True,
+            ),
         )
+        self.assertTrue(both_locked["connectionRequirements"]["allOfSatisfied"])
+        self.assertEqual(both_locked["connectionRequirements"]["satisfiedCount"], 2)
+        self.assertEqual(both_locked["connectionRequirements"]["status"], "ready")
+        self.assertEqual(both_locked["metatraderLocks"]["configuredPlatformCount"], 2)
+        self.assertTrue(both_locked["metatraderLocks"]["allPlatformsLocked"])
+        self.assertEqual(both_locked["overallStatus"], "partial")
+
         missing = self.bridge.dashboard_connection_checklist(
             "right_tool_console",
             bridge=fake_bridge,
-            terminals=none_found,
+            terminals=terminals,
+            global_metatrader=global_metatrader_lock_snapshot(),
         )
-        self.assertFalse(missing["connectionRequirements"]["anyOfSatisfied"])
+        self.assertFalse(missing["connectionRequirements"]["allOfSatisfied"])
+        self.assertEqual(missing["connectionRequirements"]["satisfiedCount"], 0)
         self.assertEqual(missing["connectionRequirements"]["status"], "needs_attention")
         self.assertEqual(missing["overallStatus"], "needs_attention")
 
-    def test_ai_trade_council_mt5_only_satisfies_shared_terminal_requirement(self) -> None:
+    def test_ai_trade_council_mt5_only_does_not_satisfy_dual_lock_requirement(self) -> None:
         fake_bridge = {
             "mode": "Codex Runner Ready",
             "status": "guarded",
@@ -2043,17 +2193,21 @@ class RuntimeIntegrityTests(unittest.TestCase):
             bridge=fake_bridge,
             quota={"ok": True, "status": "ready"},
             terminals=mt5_only,
+            global_metatrader=global_metatrader_lock_snapshot(mt5_locked=True),
         )
         item_ids = {item["id"] for item in checklist["items"]}
         self.assertIn("mt4_terminal", item_ids)
         self.assertIn("mt5_terminal", item_ids)
         self.assertEqual(
-            checklist["connectionRequirements"]["anyOf"],
+            checklist["connectionRequirements"]["allOf"],
             ["mt4_terminal", "mt5_terminal"],
         )
-        self.assertTrue(checklist["connectionRequirements"]["anyOfSatisfied"])
-        self.assertEqual(checklist["connectionRequirements"]["status"], "ready")
-        self.assertIn("MT4 / MT5", checklist["connectionRequirements"]["detailTh"])
+        self.assertFalse(checklist["connectionRequirements"]["allOfSatisfied"])
+        self.assertEqual(checklist["connectionRequirements"]["satisfiedCount"], 1)
+        self.assertEqual(checklist["connectionRequirements"]["requiredCount"], 2)
+        self.assertEqual(checklist["connectionRequirements"]["status"], "needs_attention")
+        self.assertIn("1/2", checklist["connectionRequirements"]["detailTh"])
+        self.assertIn("MT4", checklist["connectionRequirements"]["detailTh"])
 
     def test_optional_implemented_sheet_adapter_keeps_auth_required_dashboard_partial(self) -> None:
         fake_bridge = {
@@ -2112,6 +2266,9 @@ class RuntimeIntegrityTests(unittest.TestCase):
             "right_tool_console",
             bridge=fake_bridge,
             terminals=terminals_not_checked,
+            global_metatrader=global_metatrader_lock_snapshot(
+                terminal_status="not_checked",
+            ),
         )
         items = {item["id"]: item for item in checklist["items"]}
         self.assertEqual(items["local_bridge"]["checkedAt"], "2026-07-23T00:00:00Z")
@@ -2562,7 +2719,11 @@ class RuntimeIntegrityTests(unittest.TestCase):
             "modalDashboardConfirmMetatrader",
         ):
             self.assertNotIn(f'id="{retired_id}"', html)
-        for thai_copy in ("เชื่อม MT4 / MT5", "เลือกโปรแกรม MT4", "เลือกโปรแกรม MT5"):
+        for thai_copy in (
+            "ล็อก MT4 + MT5 • ต้องครบ 2/2",
+            "เลือกโปรแกรม MT4",
+            "เลือกโปรแกรม MT5",
+        ):
             self.assertIn(thai_copy, html)
 
         normalize_start = main.index("function normalizeMetatraderCandidate(candidate)")
@@ -2578,6 +2739,10 @@ class RuntimeIntegrityTests(unittest.TestCase):
         apply_block = main[apply_start:apply_end]
         self.assertEqual(
             apply_block.count('postJson("/api/integrations/metatrader/global/select"'),
+            1,
+        )
+        self.assertEqual(
+            apply_block.count('postJson("/api/integrations/metatrader/global/activate"'),
             1,
         )
         self.assertIn("platform: platform.toLowerCase()", apply_block)
@@ -3011,7 +3176,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn("!userIsEditing && !taskDetailInUse", main)
 
     def test_thai_localization_keeps_machine_statuses_and_utf8_integrity(self) -> None:
-        frontend_paths = (FRONTEND_INDEX_PATH, FRONTEND_MAIN_PATH, FRONTEND_STYLES_PATH)
+        frontend_paths = (FRONTEND_INDEX_PATH, FRONTEND_MAIN_PATH, FRONTEND_STYLES_PATH, *FRONTEND_WORKSPACE_STYLE_PATHS, *FRONTEND_MODEL_PATHS)
         for path in frontend_paths:
             with self.subTest(path=path.relative_to(PROJECT_ROOT)):
                 decoded = path.read_bytes().decode("utf-8")
@@ -3136,7 +3301,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
             self.runner.run_chat_command = original_run
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["model"], "gpt-5.5")
+        self.assertEqual(result["model"], "gpt-5.6-sol")
         self.assertEqual(result["modelTier"], "manager_quality")
         self.assertEqual(result["usage"]["contextTurns"], 16)
         self.assertTrue(result["quotaAttempted"])
@@ -3152,7 +3317,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertIn("--ignore-user-config", captured["command"])
         self.assertIn("--strict-config", captured["command"])
         self.assertIn("read-only", captured["command"])
-        self.assertIn("gpt-5.5", captured["command"])
+        self.assertIn("gpt-5.6-sol", captured["command"])
         for feature in self.runner.CHAT_DISABLED_FEATURES:
             self.assertIn(feature, captured["command"])
         self.assertIn("ชื่อ: CEO", captured["stdin"])
@@ -3424,7 +3589,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 "agentName": agent_id,
                 "durationMs": 11,
                 "modelTier": model_tier,
-                "model": "gpt-5.5",
+                "model": "gpt-5.6-sol",
                 "reasoningEffort": "high" if model_tier == "manager_quality" else "low",
                 "quotaAttempted": True,
                 "quotaConsumption": "confirmed",
@@ -3797,7 +3962,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 "taskGoal": task_goal,
                 "durationMs": 5,
                 "modelTier": model_tier,
-                "model": "gpt-5.5",
+                "model": "gpt-5.6-sol",
                 "quotaAttempted": True,
                 "quotaConsumption": "confirmed",
                 "usage": {"outputChars": 20, "contextTurns": 0},
@@ -3899,7 +4064,16 @@ class RuntimeIntegrityTests(unittest.TestCase):
                     self.assertGreaterEqual(len(children), 1)
                     self.assertTrue(all(item["owner"] != "manager" for item in children))
 
-                risky = chat("backtest_analyst", "high-impact", "high-impact")
+                # This case verifies the independent high-impact approval gate.
+                # The central dual-lock admission gate is covered separately,
+                # so provide its prerequisite here rather than letting it mask
+                # the approval behavior under test.
+                with mock.patch.object(
+                    self.bridge,
+                    "_metatrader_scope_header_locks_ready",
+                    return_value=True,
+                ):
+                    risky = chat("backtest_analyst", "high-impact", "high-impact")
                 self.assertTrue(risky["taskCreated"])
                 self.assertEqual(len(risky["taskMissionIds"]), 1)
                 self.assertFalse(risky["autoExecute"])
@@ -4060,6 +4234,42 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertTrue(all(health["assetIntegrity"]["propImages"].values()))
         self.assertFalse(health["policy"]["frontendSecrets"])
         self.assertEqual(health["policy"]["realExecution"], "guarded")
+
+    def test_missing_required_module_degrades_health_without_touching_files(self) -> None:
+        modules = {
+            "frontendWorkspaceStyles": FRONTEND_WORKSPACE_STYLE_PATHS[0],
+            "frontendAgentWorkspaceStyles": FRONTEND_WORKSPACE_STYLE_PATHS[1],
+            "frontendDashboardWorkspaceStyles": FRONTEND_WORKSPACE_STYLE_PATHS[2],
+            "frontendHomeStyles": FRONTEND_WORKSPACE_STYLE_PATHS[3],
+            "frontendHomePanelsStyles": FRONTEND_WORKSPACE_STYLE_PATHS[4],
+            "frontendResearchSheetModel": FRONTEND_MODEL_PATHS[0],
+            "frontendMeetingSessionModel": FRONTEND_MODEL_PATHS[1],
+            "frontendCodexRateModel": FRONTEND_MODEL_PATHS[2],
+            "backendCouncilAnalysis": PROJECT_ROOT / "backend" / "local-runner" / "hq_backend" / "trading" / "council_analysis.py",
+        }
+        real_is_file = Path.is_file
+        for name, missing_path in modules.items():
+            with self.subTest(module=name):
+                self.assertTrue(real_is_file(missing_path))
+                with mock.patch.object(
+                    Path,
+                    "is_file",
+                    lambda path: False if path == missing_path else real_is_file(path),
+                ):
+                    health = self.bridge.runtime_health()
+                self.assertFalse(health["criticalFiles"][name])
+                self.assertFalse(health["coreRuntimeReady"])
+                self.assertFalse(health["ok"])
+                self.assertEqual(health["status"], "degraded")
+                self.assertFalse(health["policy"]["frontendSecrets"])
+                self.assertEqual(health["policy"]["realExecution"], "guarded")
+
+    def test_frontend_modules_have_deterministic_javascript_mime(self) -> None:
+        handler = object.__new__(self.bridge.BridgeHandler)
+        with mock.patch.dict("mimetypes.types_map", {".js": "text/plain"}):
+            for path in (FRONTEND_MAIN_PATH, *FRONTEND_MODEL_PATHS):
+                with self.subTest(module=path.name):
+                    self.assertEqual(handler.guess_type(str(path)), "text/javascript")
 
     def test_http_server_is_restart_friendly(self) -> None:
         self.assertTrue(self.bridge.BridgeHTTPServer.allow_reuse_address)
@@ -4295,7 +4505,8 @@ class RuntimeIntegrityTests(unittest.TestCase):
             / "frontend"
             / "public"
             / "assets"
-            / "agents"
+            / "images"
+            / "characters"
             / "male-roster-set-a-core-command-operators-v001"
             / "registry"
             / "asset-registry.json"
@@ -5156,30 +5367,38 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.bridge.AUDIT_PATH = Path(directory) / "audit.jsonl"
                 self.bridge.metatrader_snapshot_read_model = snapshot_model
 
-                self.bridge._save_ai_trade_council_automation_store(store_for("M1"))
-                m1_result = self.bridge.ai_trade_council_automation_tick()
-                self.assertFalse(m1_result["ok"])
-                self.assertEqual(
-                    m1_result["kind"],
-                    "ai_trade_council_automation_unsupported_timeframe",
-                )
-                self.assertEqual(
-                    m1_result["automation"]["state"]["status"],
-                    "unsupported_timeframe",
-                )
+                with mock.patch.object(
+                    self.bridge,
+                    "_active_global_metatrader_context",
+                    return_value={
+                        "platform": "mt4",
+                        "token": {"candidateId": candidate_id},
+                    },
+                ):
+                    self.bridge._save_ai_trade_council_automation_store(store_for("M1"))
+                    m1_result = self.bridge.ai_trade_council_automation_tick()
+                    self.assertFalse(m1_result["ok"])
+                    self.assertEqual(
+                        m1_result["kind"],
+                        "ai_trade_council_automation_unsupported_timeframe",
+                    )
+                    self.assertEqual(
+                        m1_result["automation"]["state"]["status"],
+                        "unsupported_timeframe",
+                    )
 
-                current_timeframe["value"] = "M5"
-                self.bridge._save_ai_trade_council_automation_store(store_for("M5"))
-                m5_result = self.bridge.ai_trade_council_automation_tick()
-                self.assertTrue(m5_result["ok"])
-                self.assertEqual(
-                    m5_result["kind"],
-                    "ai_trade_council_automation_idle",
-                )
-                self.assertNotEqual(
-                    m5_result["automation"]["state"]["status"],
-                    "unsupported_timeframe",
-                )
+                    current_timeframe["value"] = "M5"
+                    self.bridge._save_ai_trade_council_automation_store(store_for("M5"))
+                    m5_result = self.bridge.ai_trade_council_automation_tick()
+                    self.assertTrue(m5_result["ok"])
+                    self.assertEqual(
+                        m5_result["kind"],
+                        "ai_trade_council_automation_idle",
+                    )
+                    self.assertNotEqual(
+                        m5_result["automation"]["state"]["status"],
+                        "unsupported_timeframe",
+                    )
             finally:
                 self.bridge.RUNTIME_DIR = original_runtime
                 self.bridge.AUDIT_PATH = original_audit
@@ -6389,7 +6608,10 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 self.assertTrue(self.bridge.set_operator_mode({"mode": "auto_guarded"})["ok"])
                 result = self.bridge.manager_delegate({
                     "agentId": "manager",
-                    "goal": "Analyze this backtest drawdown and optimize the parameter range",
+                    "goal": (
+                        "Analyze this existing backtest report and existing optimization "
+                        "report for drawdown and parameter sensitivity"
+                    ),
                     "idempotencyKey": "delegation-regression-test",
                 })
                 self.assertTrue(result["ok"])
@@ -7798,7 +8020,7 @@ class RuntimeIntegrityTests(unittest.TestCase):
                 "agentName": "EA Developer",
                 "durationMs": 12,
                 "modelTier": "specialist_fast",
-                "model": "gpt-5.5",
+                "model": "gpt-5.6-sol",
                 "reasoningEffort": "low",
                 "quotaAttempted": True,
                 "quotaConsumption": "confirmed",
@@ -8301,6 +8523,13 @@ class RuntimeIntegrityTests(unittest.TestCase):
         self.assertTrue(allowed(None, "/frontend/index.html"))
         self.assertTrue(allowed(None, "/contracts/agents/agents.json"))
         self.assertFalse(allowed(None, "/backend/local-runner/bridge_server.py"))
+        self.assertFalse(allowed(None, "/backend/local-runner/hq_backend/trading/council_analysis.py"))
+        for path in FRONTEND_MODEL_PATHS:
+            public_path = "/" + path.relative_to(PROJECT_ROOT).as_posix()
+            with self.subTest(module=path.name):
+                self.assertTrue(allowed(None, public_path))
+                self.assertTrue(allowed(None, public_path + "?v=module-test"))
+        self.assertFalse(allowed(None, "/frontend/src/features/chat/../../../../backend/local-runner/hq_backend/trading/council_analysis.py"))
         self.assertFalse(allowed(None, "/runner/codex_cli_runner.py"))
         self.assertFalse(allowed(None, "/data/runtime/bridge-audit.jsonl"))
         self.assertFalse(allowed(None, "/.gitignore"))

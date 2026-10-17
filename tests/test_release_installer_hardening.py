@@ -10,12 +10,53 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.test_release_candidate_preflight import REQUIRED_BACKEND_PACKAGE_FILES
+
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT = ROOT / "artifacts" / "mt4-ai-council-ea-v2.18-enum-fail-closed-readiness"
 
 
 class ReleaseInstallerHardeningTests(unittest.TestCase):
+    def test_backend_package_inventory_is_complete_at_every_install_boundary(self) -> None:
+        package_root = ROOT / "backend" / "local-runner" / "hq_backend"
+        actual = {
+            path.relative_to(ROOT).as_posix()
+            for path in package_root.rglob("*")
+            if path.is_file() and path.suffix in {".py", ".ps1"}
+        }
+        self.assertEqual(actual, set(REQUIRED_BACKEND_PACKAGE_FILES))
+        installer = (ROOT / "installer" / "install.ps1").read_text(encoding="utf-8-sig")
+        workflow = (ROOT / ".github" / "workflows" / "publish-release.yml").read_text(encoding="utf-8-sig")
+        boundaries = {
+            "source": installer[
+                installer.index("$requiredFiles = @("):
+                installer.index("foreach ($relativePath in $requiredFiles)")
+            ],
+        }
+        for marker in (
+            "foreach ($requiredFile in @(",
+            "foreach ($requiredInstalledFile in @(",
+            "foreach ($verifiedRuntimeFile in @(",
+        ):
+            start = workflow.index(marker)
+            boundaries[marker] = workflow[start:workflow.index(")) {", start)]
+        required = (*REQUIRED_BACKEND_PACKAGE_FILES,
+            "frontend/src/features/research/research-sheet.js",
+            "frontend/src/features/chat/meeting-session.js",
+            "frontend/src/features/quota/codex-rate.js",
+            "frontend/src/styles/main.css",
+            "frontend/src/styles/workspace.css",
+            "frontend/src/styles/agent-workspace.css",
+            "frontend/src/styles/dashboard-workspace.css",
+            "frontend/src/styles/home.css",
+            "frontend/src/styles/home-panels.css",
+        )
+        for boundary, source in boundaries.items():
+            for relative in required:
+                with self.subTest(boundary=boundary, file=relative):
+                    self.assertIn('"' + relative.replace("/", "\\") + '"', source)
+
     def test_v218_curated_artifact_is_complete_and_not_ignored(self) -> None:
         required = {
             "MetafxHQTradeGateway.mq4",
@@ -332,23 +373,39 @@ if (-not $rejected) {{ throw 'Synthetic stale EA candidate was accepted' }}
         ]
         self.assertIn("Assert-ExpectedGitSource", safe_source)
         self.assertIn(
-            '"backend\\local-runner\\ea_factory_indicator_coverage.py"',
+            '"backend\\local-runner\\hq_backend\\ea\\ea_factory_indicator_coverage.py"',
             safe_source,
         )
         self.assertIn(
-            '"backend\\local-runner\\ea_factory_metaeditor_compile.py"',
+            '"backend\\local-runner\\hq_backend\\ea\\ea_factory_metaeditor_compile.py"',
             safe_source,
         )
         self.assertIn(
-            '"backend\\local-runner\\ea_factory_visible_terminal.py"',
+            '"backend\\local-runner\\hq_backend\\ea\\ea_factory_optimization.py"',
             safe_source,
         )
         self.assertIn(
-            '"backend\\local-runner\\ea_factory_visible_terminal.ps1"',
+            '"backend\\local-runner\\hq_backend\\ea\\ea_factory_visible_terminal.py"',
             safe_source,
         )
         self.assertIn(
-            '"backend\\local-runner\\ea_strategy_brief.py"',
+            '"backend\\local-runner\\hq_backend\\ea\\ea_factory_visible_terminal.ps1"',
+            safe_source,
+        )
+        self.assertIn(
+            '"backend\\local-runner\\hq_backend\\ea\\ea_factory_visible_terminal_mt5.py"',
+            safe_source,
+        )
+        self.assertIn(
+            '"backend\\local-runner\\hq_backend\\ea\\ea_factory_visible_terminal_mt5.ps1"',
+            safe_source,
+        )
+        self.assertIn(
+            '"backend\\local-runner\\hq_backend\\trading\\mt4_market_watch.py"',
+            safe_source,
+        )
+        self.assertIn(
+            '"backend\\local-runner\\hq_backend\\ea\\ea_strategy_brief.py"',
             safe_source,
         )
         self.assertIn("function Export-VerifiedGitSource", installer)
@@ -390,6 +447,7 @@ if (-not $rejected) {{ throw 'Synthetic stale EA candidate was accepted' }}
         self.assertIn('$mainJsUrl = "{0}frontend/src/app/main.js"', installer)
         self.assertIn("window\\.MetafxHqBoot", installer)
         self.assertIn("init\\(\\)\\.catch", installer)
+        self.assertIn("Assert-FrontendModulesAvailable -BaseUrl $endpoint.Url", installer)
         self.assertIn("struct.calcsize('P')*8", installer)
         self.assertIn("[int]$details.bits -ne 64", installer)
         candidate_stop = installer[
@@ -778,7 +836,7 @@ if (-not $rejected) {{ throw 'Synthetic stale EA candidate was accepted' }}
         self.assertLess(injection.index("client_id=$($env:"), injection.index("Get-FileHash -LiteralPath $archive"))
         self.assertNotIn("--output=$archive HEAD", injection)
         self.assertGreaterEqual(
-            workflow.count('"backend\\local-runner\\ea_strategy_brief.py"'),
+            workflow.count('"backend\\local-runner\\hq_backend\\ea\\ea_strategy_brief.py"'),
             2,
         )
         self.assertIn("legacy-listener upgrade smoke failed", workflow)
@@ -817,28 +875,62 @@ if (-not $rejected) {{ throw 'Synthetic stale EA candidate was accepted' }}
         self.assertIn("Release fixture cleanup was not confirmed", workflow)
         self.assertIn("Bump VERSION instead of reusing the tag", workflow)
         self.assertIn(
-            '"backend\\local-runner\\ea_factory_indicator_coverage.py"',
+            '"backend\\local-runner\\hq_backend\\ea\\ea_factory_indicator_coverage.py"',
             workflow,
         )
         self.assertIn(
-            '"backend\\local-runner\\ea_factory_metaeditor_compile.py"',
+            '"backend\\local-runner\\hq_backend\\ea\\ea_factory_metaeditor_compile.py"',
             workflow,
         )
         self.assertGreaterEqual(
             workflow.count(
-                '"backend\\local-runner\\ea_factory_visible_terminal.py"'
+                '"backend\\local-runner\\hq_backend\\ea\\ea_factory_optimization.py"'
             ),
             2,
         )
         self.assertGreaterEqual(
             workflow.count(
-                '"backend\\local-runner\\ea_factory_visible_terminal.ps1"'
+                '"backend\\local-runner\\hq_backend\\ea\\ea_factory_visible_terminal.py"'
             ),
             2,
         )
+        self.assertGreaterEqual(
+            workflow.count(
+                '"backend\\local-runner\\hq_backend\\ea\\ea_factory_visible_terminal.ps1"'
+            ),
+            2,
+        )
+        self.assertGreaterEqual(
+            workflow.count(
+                '"backend\\local-runner\\hq_backend\\ea\\ea_factory_visible_terminal_mt5.py"'
+            ),
+            2,
+        )
+        self.assertGreaterEqual(
+            workflow.count(
+                '"backend\\local-runner\\hq_backend\\ea\\ea_factory_visible_terminal_mt5.ps1"'
+            ),
+            2,
+        )
+        self.assertGreaterEqual(
+            workflow.count('"backend\\local-runner\\hq_backend\\trading\\mt4_market_watch.py"'),
+            2,
+        )
         release_critical_files = (
-            r"backend\local-runner\full_agent_artifacts.py",
-            r"backend\local-runner\full_agent_runtime.py",
+            *(path.replace("/", "\\") for path in REQUIRED_BACKEND_PACKAGE_FILES),
+            r"frontend\src\styles\main.css",
+            r"frontend\src\styles\workspace.css",
+            r"frontend\src\styles\agent-workspace.css",
+            r"frontend\src\styles\dashboard-workspace.css",
+            r"frontend\src\styles\home.css",
+            r"frontend\src\styles\home-panels.css",
+            r"backend\local-runner\hq_backend\trading\council_analysis.py",
+            r"frontend\src\features\research\research-sheet.js",
+            r"frontend\src\features\chat\meeting-session.js",
+            r"frontend\src\features\quota\codex-rate.js",
+            r"backend\local-runner\hq_backend\chat\full_agent_artifacts.py",
+            r"backend\local-runner\hq_backend\chat\full_agent_runtime.py",
+            r"backend\local-runner\hq_backend\trading\mt4_market_watch.py",
             r"contracts\agents\full-agent-runtime-contract.json",
             r"runner\codex_app_server_gateway.py",
             r"scripts\verify-full-agent-workspace-sentinel.py",
@@ -914,7 +1006,7 @@ if (-not $rejected) {{ throw 'Synthetic stale EA candidate was accepted' }}
             "          import os\n"
             "          import sys\n"
             '          sys.path.insert(0, os.environ["METAFX_VERIFIED_RUNNER_PATH"])\n'
-            "          import google_sheet_hub\n"
+            "          from hq_backend.google import google_sheet_hub\n"
             "          print(json.dumps(google_sheet_hub.google_oauth_status(), sort_keys=True))\n"
             "          '@ 2>$null) | Select-Object -Last 1\n",
             workflow,
@@ -1891,6 +1983,91 @@ Write-Output 'MANAGED_CLEANUP_OK'
             )
             self.assertEqual(0, completed.returncode, completed.stderr)
             self.assertIn("MANAGED_CLEANUP_OK", completed.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell installer behavior")
+    def test_frontend_module_http_gate_rejects_missing_empty_and_non_javascript(self) -> None:
+        installer_path = str(ROOT / "installer" / "install.ps1").replace("'", "''")
+        script = rf"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    '{installer_path}', [ref]$tokens, [ref]$parseErrors
+)
+if ($parseErrors.Count -ne 0) {{ throw 'Installer parse failed' }}
+$node = $ast.Find({{
+    param($candidate)
+    $candidate -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $candidate.Name -ceq 'Assert-FrontendModulesAvailable'
+}}, $true)
+if (-not $node) {{ throw 'Frontend module gate missing' }}
+# Evaluate only this pure HTTP-check helper, never the installer entry point.
+Invoke-Expression $node.Extent.Text
+$script:requests = [Collections.Generic.List[string]]::new()
+$script:badModule = ''
+$script:badResponse = ''
+$script:validMime = 'text/javascript'
+function Invoke-WebRequest {{
+    param([string]$Uri, [string]$Method, [switch]$UseBasicParsing, [int]$TimeoutSec)
+    if ($Method -cne 'Get' -or -not $UseBasicParsing -or $TimeoutSec -ne 10) {{
+        throw 'Unexpected module request'
+    }}
+    $script:requests.Add($Uri)
+    $status = 200
+    $length = 20
+    $mime = $script:validMime
+    if ($Uri.EndsWith($script:badModule) -and $script:badModule) {{
+        switch ($script:badResponse) {{
+            'missing' {{ $status = 404 }}
+            'empty' {{ $length = 0 }}
+            'html' {{ $mime = 'text/html; charset=utf-8' }}
+            'plain' {{ $mime = 'text/plain' }}
+        }}
+    }}
+    return [pscustomobject]@{{
+        StatusCode = $status
+        RawContentLength = $length
+        Headers = @{{ 'Content-Type' = $mime }}
+    }}
+}}
+$modulePaths = @('research/research-sheet.js', 'chat/meeting-session.js', 'quota/codex-rate.js')
+foreach ($validMime in @('text/javascript', 'application/javascript; charset=utf-8')) {{
+    $script:validMime = $validMime
+    $script:requests.Clear()
+    Assert-FrontendModulesAvailable -BaseUrl 'http://127.0.0.1:4186/'
+    if ($script:requests.Count -ne $modulePaths.Count) {{ throw 'Incomplete module graph check' }}
+    foreach ($name in $modulePaths) {{
+        if (-not $script:requests.Contains("http://127.0.0.1:4186/frontend/src/features/$name")) {{
+            throw "Module never checked: $name"
+        }}
+    }}
+}}
+foreach ($name in $modulePaths) {{
+    $script:badModule = $name
+    foreach ($badResponse in @('missing', 'empty', 'html', 'plain')) {{
+        $script:badResponse = $badResponse
+        $rejected = $false
+        try {{ Assert-FrontendModulesAvailable -BaseUrl 'http://127.0.0.1:4186/' }}
+        catch {{ $rejected = $true }}
+        if (-not $rejected) {{ throw "Accepted broken module $name / $badResponse" }}
+    }}
+}}
+Write-Output 'FRONTEND_MODULE_GATE_OK'
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-Command", script,
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("FRONTEND_MODULE_GATE_OK", completed.stdout)
 
     @unittest.skipUnless(os.name == "nt", "Windows PowerShell installer behavior")
     def test_skip_google_setup_does_not_probe_current_user_oauth_store(self) -> None:

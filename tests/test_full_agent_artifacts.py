@@ -15,7 +15,7 @@ from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = (
-    PROJECT_ROOT / "backend" / "local-runner" / "full_agent_artifacts.py"
+    PROJECT_ROOT / "backend" / "local-runner" / "hq_backend" / "chat" / "full_agent_artifacts.py"
 )
 
 

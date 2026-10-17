@@ -52,6 +52,12 @@ class AiTradeCouncilPerBarAutomationTests(unittest.TestCase):
         self.closed_bar_time = 1_786_470_000
         self.snapshot_id = "a" * 64
         self.calls: list[dict] = []
+        self.bridge._global_metatrader_platform_context = (
+            self._dual_locked_platform_context
+        )
+        self.bridge._active_global_metatrader_context = (
+            lambda **kwargs: self._dual_locked_platform_context("mt4", **kwargs)
+        )
 
         self.bridge.evaluate_ai_trade_council_outcomes = (
             lambda: {"updated": 0, "pending": 0}
@@ -83,6 +89,35 @@ class AiTradeCouncilPerBarAutomationTests(unittest.TestCase):
             }
 
         self.bridge.run_ai_trade_council_analysis = fake_council
+
+    def _dual_locked_platform_context(
+        self,
+        platform: object,
+        *,
+        require_all_platforms: bool = True,
+    ) -> dict | None:
+        normalized = str(platform or "").strip().lower()
+        if normalized not in {"mt4", "mt5"}:
+            return None
+        candidate_id = (
+            self.candidate_id
+            if normalized == "mt4"
+            else "mtc-per-bar-mt5-locked"
+        )
+        return {
+            "record": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "available": True,
+                "runningState": "platform_running_detected",
+            },
+            "token": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "selectionRevision": 1,
+            },
+            "selectedAt": "2026-10-16T09:00:00+07:00",
+        }
 
     def tearDown(self) -> None:
         self.temp_directory.cleanup()

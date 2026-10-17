@@ -36,7 +36,7 @@ RUNNER = _load(
 )
 COVERAGE = _load(
     "ea_factory_coverage_public_helpers",
-    ROOT / "backend" / "local-runner" / "ea_factory_blueprint_coverage.py",
+    ROOT / "backend" / "local-runner" / "hq_backend" / "ea" / "ea_factory_blueprint_coverage.py",
 )
 
 

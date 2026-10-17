@@ -446,7 +446,12 @@
         "maximumDrawdown": null,
         "minimumTradeCount": null,
         "parameterRanges": [],
-        "validationMethod": null
+        "validationMethod": null,
+        "riskThresholds": {
+          "targetProfitPercent": null,
+          "maxDrawdownPercent": null,
+          "minimumTrades": null
+        }
       },
       "testerSettings": {
         "eaName": null,
@@ -467,11 +472,31 @@
       },
       "execution": {
         "available": false,
-        "status": "plan_only|coming_soon|queued|running|completed|failed|incomplete",
-        "mode": "plan_only",
+        "status": "plan_only|queued|running|awaiting_visible_terminal|collecting|completed|failed|cancelled|incomplete",
+        "mode": "plan_or_backend_authoritative_mt5_visible_session",
         "realExecutionAvailable": false,
+        "realExecutionAvailabilityByMode": {"auto_backtest": "plan_only_outside_factory", "auto_optimization": "mt5_only", "ea_discovery": "plan_only"},
         "adapterId": null,
         "backendVerificationId": null
+      },
+      "optimizationSession": {
+        "schemaVersion": 1,
+        "id": null,
+        "state": "queued|running|awaiting_visible_terminal|collecting|completed|failed|cancelled|null",
+        "stage": "validate_baseline|prepare_ranges|run_round|verify_report|analyze|complete|null",
+        "buildId": null,
+        "sourceDigest": null,
+        "baselineReportSha256": null,
+        "terminalBinding": {"candidateId": null, "platform": "mt5|null", "selectionRevision": null, "bindingDigest": null},
+        "requestDigest": null,
+        "round": {"index": null, "number": null, "count": null, "id": null, "combinationCount": null},
+        "progress": {"roundNumber": null, "roundCount": null, "passCount": null, "returnedPassCount": null, "percent": null, "rowsTruncated": null},
+        "recovery": {"startBoundaryCommitted": false, "receiptPresent": false, "receiptRecoveryRequired": false, "beforeStartRetryAllowed": false},
+        "oneActiveSessionAtATime": true,
+        "durableRestartRecovery": true,
+        "noDoubleStart": true,
+        "liveTradingAllowed": false,
+        "testShutdownTerminal": false
       },
       "executionEvidence": {
         "runId": null,
@@ -499,11 +524,14 @@
         "tradeCount": null,
         "passCount": null,
         "profitablePassCount": null,
+        "eligiblePassCount": null,
         "returnedPassCount": 0,
+        "storedPassRowCount": 0,
+        "allPassRowsSha256": null,
         "allPassRows": [],
         "allPassRowsTruncated": false,
         "allPassRowsPolicy": {
-          "maxItems": 5000,
+          "maxItems": 100,
           "overflow": "truncate_frontend_rows_preserve_full_hashed_artifact",
           "completenessRule": "complete only when allPassRowsTruncated is false and returnedPassCount equals passCount"
         },
@@ -520,6 +548,18 @@
         },
         "currentBands": [],
         "nextParameterPlan": [],
+        "nextParameterPlanAvailable": false,
+        "nextParameterPlanReasonCode": null,
+        "analysisStatus": "available|unavailable",
+        "analysisReasonCode": null,
+        "analysisUnavailableReasons": [],
+        "analysisSha256": null,
+        "analysisSourceRowsSha256": null,
+        "riskThresholds": {
+          "targetProfitPercent": null,
+          "maxDrawdownPercent": null,
+          "minimumTrades": null
+        },
         "candidateGroups": {
           "maxProfit": [],
           "lowestDrawdown": [],
@@ -536,19 +576,22 @@
         "nextRanges": "nextParameterPlan",
         "candidates": "candidateGroups"
       },
-      "runtimeReadiness": {"missionPlanReportAudit": "ready", "strategyTesterBacktest": "coming_soon", "metatraderOptimization": "coming_soon", "eaDiscoveryPlugin": "coming_soon"},
+      "runtimeReadiness": {"missionPlanReportAudit": "ready", "strategyTesterBacktest": "plan_only_outside_factory", "metatraderOptimization": "mt5_visible_session_ready_mt4_plan_only", "eaDiscoveryPlugin": "coming_soon"},
       "truthRules": [
         "A prepared plan is not a completed Backtest, Optimization, or Discovery run.",
         "Results remain unavailable and null until a matching Backend execution audit and evidence artifact exist.",
-        "The default and currently available execution mode is plan_only; real MT4/MT5 execution remains disabled until a verified front-office adapter is connected.",
-        "A completed MT4/MT5 Optimization requires matching runId, roundId, platform, terminalId, visible Tester evidence, mtExecutionVerified, optimizationProofVerified, a SHA-256 result report, and a SHA-256 artifact manifest.",
+        "MT5 Auto Optimization is available only through the Backend-authoritative durable visible session. MT4 Optimization, Backtest outside EA Factory, and EA Discovery remain plan-only in this contract revision.",
+        "The browser never supplies source/report digests, terminal bindings, filesystem paths, receipts, or evidence claims; Backend derives and revalidates them from the eligible immutable Factory build and current terminal selection.",
+        "A completed MT5 Optimization requires matching session, operation and round identity, exact terminal binding, a committed Start boundary and adapter receipt, visible Tester evidence, mtExecutionVerified, optimizationProofVerified, a SHA-256 result report, and a SHA-256 artifact manifest.",
+        "A committed Start boundary without a receipt requires recovery or collection and can never trigger a second Start; only a verified before-Start outcome permits a bounded retry.",
         "passCount and profitablePassCount must come from the same verified Tester report or log; a displayed subset must never be used as the denominator for all passes.",
-        "allPassRows is bounded to 5000 frontend rows; truncation must be explicit and the complete result must remain available only as a hashed Backend artifact.",
+        "allPassRows is bounded to 100 canonical Report rows; truncation must be explicit and the complete result must remain available only as a hashed Backend artifact.",
         "currentBands describe the ranges actually tested; nextParameterPlan is a recommendation for a later round and is never proof that those ranges were tested.",
         "candidateGroups must preserve Max Profit, Lowest Drawdown with sufficient trades, and Most Stable as separate analytical groups.",
         "Tester warnings, including unmatched-data, generating, modeling-quality, zero-trade, and incomplete-report warnings, must be preserved.",
         "testShutdownTerminal must remain false; a run that closes the selected terminal is incomplete.",
-        "Profit targets are experiment objectives, not promises or fabricated results."
+        "Profit targets are experiment objectives, not promises or fabricated results.",
+        "Candidate groups, profitablePassCount, eligiblePassCount, and nextParameterPlan come only from immutable Backend analysis bound to the exact session, round, and allPassRowsSha256; incomplete verified rows make analysisStatus unavailable."
       ]
     },
     "ea_discovery_report": {

@@ -1,0 +1,360 @@
+/* Shared presentation for the installed HQ workspaces.
+   Behavior, visibility, permissions and data remain owned by main.js/main.css. */
+:root {
+  color-scheme: dark;
+  --ui-bg: #0a111d;
+  --ui-panel: #111d2e;
+  --ui-panel-raised: #16253a;
+  --ui-line: #273a51;
+  --ui-text: #edf5ff;
+  --ui-muted: #9baec5;
+  --ui-accent: #5ee7d5;
+  --ui-blue: #65a9ff;
+  --ui-warning: #f2bc66;
+  --ui-danger: #ff8391;
+  --ui-radius: 12px;
+  --text: var(--ui-text);
+  --muted: var(--ui-muted);
+  --cyan: var(--ui-blue);
+  --green: var(--ui-accent);
+  --amber: var(--ui-warning);
+  --red: var(--ui-danger);
+  --line: var(--ui-line);
+}
+
+body {
+  font-family: "Noto Sans Thai", "Leelawadee UI", "Segoe UI", Tahoma, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.topbar,
+.today-work-panel,
+.agent-status-panel,
+.codex-rate-widget {
+  border-color: rgba(119, 153, 193, 0.24);
+  border-radius: 12px;
+  background-color: rgba(10, 18, 31, 0.92);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+}
+
+.topbar-brand h1 { letter-spacing: -0.025em; }
+.topbar-brand .eyebrow { color: var(--ui-accent); letter-spacing: 0.1em; }
+.topbar :is(input, button, select),
+.codex-rate-widget :is(input, button) { border-radius: 6px; }
+
+.game-modal-backdrop {
+  background: rgba(2, 7, 16, 0.72);
+  backdrop-filter: blur(7px) saturate(0.65);
+}
+
+.game-modal,
+.game-modal:is(.agent-modal, .prop-modal, .dashboard-modal, .workflow-dashboard-modal, .signal-consensus-modal, .kanban-modal) {
+  position: fixed;
+  top: 16px;
+  bottom: 16px;
+  width: min(1920px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  display: grid;
+  grid-template-rows: 72px minmax(0, 1fr);
+  border: 1px solid #34485e;
+  border-radius: 18px;
+  background: var(--ui-bg);
+  box-shadow: 0 40px 100px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.03);
+  color: var(--ui-text);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.workspace-chrome {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 20px;
+  padding: 12px 76px 12px 24px;
+  border-bottom: 1px solid var(--ui-line);
+  background: linear-gradient(110deg, #17273a, #101c2d 62%, #122335);
+}
+
+.workspace-heading { min-width: 0; }
+.workspace-section {
+  margin: 0 0 3px;
+  color: var(--ui-accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  line-height: 1.4;
+}
+
+.workspace-heading h2 {
+  margin: 0;
+  color: var(--ui-text);
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-context {
+  flex-shrink: 0;
+  display: grid;
+  gap: 3px;
+  justify-items: end;
+  color: var(--ui-muted);
+  font-size: 9px;
+  letter-spacing: 0.13em;
+}
+.workspace-context span:first-child { color: #d5e2f3; font-size: 11px; font-weight: 700; }
+
+.game-modal .modal-close {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid #344960;
+  border-radius: 9px;
+  background: #1a2a3e;
+  color: #c3d1e2;
+  font: 26px/1 "Segoe UI", sans-serif;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+.game-modal .modal-close:hover { background: #283b54; border-color: var(--ui-blue); color: white; }
+
+.game-modal .game-modal-body,
+.game-modal:is(.agent-modal, .prop-modal, .dashboard-modal, .workflow-dashboard-modal, .signal-consensus-modal) .game-modal-body {
+  grid-template-columns: clamp(340px, 24vw, 420px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.game-modal.kanban-modal .game-modal-body { grid-template-columns: minmax(0, 1fr); }
+
+.game-modal .modal-portrait-panel,
+.game-modal:is(.prop-modal, .workflow-dashboard-modal, .signal-consensus-modal) .modal-portrait-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  min-width: 0;
+  padding: 24px;
+  border-right: 1px solid var(--ui-line);
+  background: linear-gradient(180deg, #122236, #0c1726 52%);
+  scrollbar-gutter: stable;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.game-modal .portrait-frame,
+.game-modal:is(.prop-modal, .dashboard-modal, .signal-consensus-modal) .portrait-frame {
+  float: none;
+  width: auto;
+  flex: 0 0 auto;
+  min-height: 140px;
+  height: 140px;
+  margin: 0 0 20px;
+  padding: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(123, 157, 193, 0.18);
+  border-radius: 14px;
+  background: radial-gradient(ellipse at 50% 70%, rgba(64, 131, 176, 0.18), transparent 70%), #0c1725;
+}
+.game-modal.kanban-modal .modal-portrait-panel { display: none; }
+.game-modal .portrait-frame::before { opacity: 0.35; }
+.game-modal .portrait-frame img,
+.game-modal:is(.prop-modal, .dashboard-modal, .signal-consensus-modal) .portrait-frame img {
+  max-height: 116px;
+  max-width: 90%;
+  opacity: 1;
+  filter: drop-shadow(0 10px 12px rgba(0, 0, 0, 0.4));
+}
+.game-modal.agent-modal .portrait-frame { height: 200px; }
+.game-modal.agent-modal .portrait-frame img { max-height: 176px; }
+
+.game-modal .modal-eyebrow {
+  color: var(--ui-accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  line-height: 1.6;
+}
+.game-modal .modal-portrait-panel h2 { color: var(--ui-text); font-size: 21px; font-weight: 650; line-height: 1.4; }
+.game-modal #modalSubtitle,
+.game-modal.prop-modal #modalSubtitle,
+.game-modal.dashboard-modal #modalSubtitle {
+  margin: 10px 0 22px;
+  max-height: none;
+  overflow: visible;
+  color: var(--ui-muted);
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.game-modal .modal-status-grid { gap: 8px; }
+.game-modal .modal-status-item,
+.game-modal.prop-modal .modal-status-item {
+  grid-template-columns: 76px minmax(0, 1fr);
+  padding: 12px;
+  border-color: #26394e;
+  border-radius: 8px;
+  background: #111f30;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.game-modal .modal-status-item span:first-child { color: #93a9c2; font-weight: 500; }
+
+.game-modal .modal-content-panel,
+.game-modal:is(.dashboard-modal, .workflow-dashboard-modal, .signal-consensus-modal, .kanban-modal) .modal-content-panel {
+  min-height: 0;
+  padding: 22px;
+  background: var(--ui-bg);
+}
+
+.game-modal .dialogue-box {
+  min-height: 74px;
+  margin-right: 0;
+  padding: 15px 18px;
+  border-color: #2a4356;
+  border-left: 3px solid var(--ui-accent);
+  border-radius: 10px;
+  background: linear-gradient(100deg, #142b37, #111d2d);
+}
+.game-modal .speaker-name { color: var(--ui-accent); font-size: 11px; font-weight: 650; }
+.game-modal #modalDialogue { font-size: 13px; }
+
+.game-modal .modal-tabs { gap: 6px; margin: 16px 0; padding: 4px; border: 1px solid var(--ui-line); border-radius: 10px; background: #0d1827; }
+.game-modal .modal-tab {
+  min-height: 38px;
+  padding: 8px 18px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ui-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.game-modal .modal-tab.active { border-color: #36606d; background: #17343e; color: #8af2e2; box-shadow: none; }
+.game-modal .modal-tab:hover:not(.active) { border-color: #33485f; background: #1b2b40; color: var(--ui-text); }
+
+.game-modal :where(button, input, select, textarea) { font-family: inherit; }
+.game-modal :where(input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
+  border-radius: 8px;
+  border-color: #33465d;
+  background-color: #0d1828;
+  color: var(--ui-text);
+  font-size: 12px;
+  line-height: 1.6;
+  accent-color: var(--ui-accent);
+}
+.game-modal :where(input, select) { min-height: 38px; }
+.game-modal :where(input[type="checkbox"], input[type="radio"]) { min-height: 0; accent-color: var(--ui-accent); }
+.game-modal :where(textarea) { padding: 12px; }
+.game-modal :where(input, textarea)::placeholder { color: #8296ad; opacity: 1; }
+.game-modal :where(button, input, select, textarea, summary, a):focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 3px;
+}
+
+.game-modal .modal-action {
+  min-height: 36px;
+  padding: 8px 13px;
+  border-color: #3a5069;
+  border-radius: 8px;
+  background: #1a2b40;
+  color: #e0eafa;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+.game-modal .modal-action.primary { border-color: #55cbb9; background: #237568; color: #f3fffc; }
+.game-modal .modal-action:hover:not(:disabled) { border-color: var(--ui-accent); background: #234055; }
+.game-modal .modal-action.primary:hover:not(:disabled) { background: #2b8979; }
+.game-modal .modal-action.danger {
+  border-color: #75404e;
+  background: #39232f;
+  color: #ffb5be;
+}
+.game-modal .modal-action.danger:hover:not(:disabled) { border-color: var(--ui-danger); background: #532b3b; color: #ffd7dd; }
+.game-modal :where(button):disabled {
+  cursor: not-allowed;
+  box-shadow: none;
+}
+.game-modal .modal-action:disabled { background: #172333; border-color: #2d4056; color: #8797ac; opacity: 0.65; }
+
+.game-modal :where(table) { font-size: 12px; font-variant-numeric: tabular-nums; }
+.game-modal :where(th) { color: #a7bbd2; font-size: 11px; font-weight: 600; }
+.game-modal :where(pre, code) { font-family: Consolas, "Cascadia Code", monospace; font-size: 12px; }
+.game-modal :where(summary) { cursor: pointer; }
+.game-modal :where(small) { line-height: 1.6; }
+.game-modal :where(button, input, select, textarea, a) { transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease; }
+
+.game-modal * { scrollbar-width: thin; scrollbar-color: #425770 transparent; }
+.game-modal *::-webkit-scrollbar { width: 7px; height: 7px; }
+.game-modal *::-webkit-scrollbar-track { background: transparent; }
+.game-modal *::-webkit-scrollbar-thumb { border: 1px solid transparent; border-radius: 8px; background: #425770; background-clip: padding-box; }
+.game-modal *::-webkit-scrollbar-thumb:hover { background: #5a7492; }
+
+@media (max-width: 1180px) {
+  .game-modal .game-modal-body,
+  .game-modal:is(.agent-modal, .prop-modal, .dashboard-modal, .workflow-dashboard-modal, .signal-consensus-modal) .game-modal-body { grid-template-columns: 320px minmax(0, 1fr); }
+  .game-modal.kanban-modal .game-modal-body { grid-template-columns: minmax(0, 1fr); }
+  .game-modal .modal-portrait-panel,
+  .game-modal:is(.prop-modal, .workflow-dashboard-modal, .signal-consensus-modal) .modal-portrait-panel { padding: 16px; }
+  .game-modal .modal-content-panel,
+  .game-modal:is(.dashboard-modal, .workflow-dashboard-modal, .signal-consensus-modal, .kanban-modal) .modal-content-panel { padding: 16px; }
+}
+
+@media (max-width: 1000px) {
+  .game-modal,
+  .game-modal:is(.agent-modal, .prop-modal, .dashboard-modal, .workflow-dashboard-modal, .signal-consensus-modal, .kanban-modal) {
+    top: 8px;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    width: calc(100vw - 16px);
+    max-height: calc(100dvh - 16px);
+    grid-template-rows: 64px minmax(0, 1fr);
+    border-radius: 12px;
+    transform: translateY(18px);
+  }
+  .game-modal.open,
+  .game-modal:is(.agent-modal, .prop-modal, .dashboard-modal, .workflow-dashboard-modal, .signal-consensus-modal, .kanban-modal).open { transform: translateY(0); }
+  .workspace-chrome { gap: 8px; padding: 10px 56px 10px 16px; }
+  .workspace-heading h2 { font-size: 15px; }
+  .workspace-section { font-size: 9px; }
+  .workspace-context { display: none; }
+  .game-modal .modal-close { top: 14px; right: 12px; width: 34px; height: 34px; }
+  .game-modal .game-modal-body,
+  .game-modal:is(.agent-modal, .prop-modal, .dashboard-modal, .workflow-dashboard-modal, .signal-consensus-modal) .game-modal-body {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .game-modal.kanban-modal .game-modal-body { display: grid; overflow: hidden; }
+  .game-modal .modal-portrait-panel,
+  .game-modal:is(.prop-modal, .workflow-dashboard-modal, .signal-consensus-modal) .modal-portrait-panel {
+    flex: 0 0 auto;
+    max-height: none;
+    padding: 16px;
+    border-right: 0;
+    border-bottom: 1px solid var(--ui-line);
+    overflow: visible;
+  }
+  .game-modal .portrait-frame,
+  .game-modal:is(.agent-modal, .prop-modal, .dashboard-modal, .signal-consensus-modal) .portrait-frame { min-height: 100px; height: 100px; margin-bottom: 12px; }
+  .game-modal .portrait-frame img,
+  .game-modal:is(.agent-modal, .prop-modal, .dashboard-modal, .signal-consensus-modal) .portrait-frame img { max-height: 82px; }
+  .game-modal .modal-content-panel,
+  .game-modal:is(.dashboard-modal, .workflow-dashboard-modal, .signal-consensus-modal) .modal-content-panel { flex: 0 0 auto; min-height: 640px; height: 75dvh; padding: 12px; }
+  .game-modal.kanban-modal .modal-content-panel { min-height: 0; height: 100%; padding: 12px; }
+  .game-modal .modal-tab { padding: 8px 10px; font-size: 11px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .game-modal, .game-modal-backdrop, .game-modal * { transition: none; scroll-behavior: auto; }
+}

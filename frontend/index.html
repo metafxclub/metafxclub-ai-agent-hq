@@ -3,18 +3,27 @@
   <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="metafx-hq-previous-build" content="20260808-workflow-transfer-v050" />
+  <meta name="metafx-hq-previous-build" content="20260913-ea-factory-3page-state-v0919" />
     <title>Metafxclub AI Pixel HQ - ห้องทำงาน Agent Codex/MCP</title>
   <link rel="icon" href="data:," />
   <base href="../" />
-  <link rel="stylesheet" href="./frontend/src/app/styles.css?v=20260913-ea-factory-3page-state-v0919" />
+  <link rel="stylesheet" href="./frontend/src/styles/main.css?v=20261017-world-radar-rows-v0922-r2" />
+  <link rel="stylesheet" href="./frontend/src/styles/workspace.css?v=20261017-world-radar-rows-v0922-r2" />
+  <link rel="stylesheet" href="./frontend/src/styles/agent-workspace.css?v=20261017-world-radar-rows-v0922-r2" />
+  <link rel="stylesheet" href="./frontend/src/styles/dashboard-workspace.css?v=20261017-world-radar-rows-v0922-r2" />
+  <link rel="stylesheet" href="./frontend/src/styles/home.css?v=20261017-world-radar-rows-v0922-r2" />
+  <link rel="stylesheet" href="./frontend/src/styles/home-panels.css?v=20261017-world-radar-rows-v0922-r2" />
   </head>
   <body>
     <main class="app-shell">
       <header class="topbar">
         <div class="topbar-brand">
-          <p class="eyebrow">Metafxclub AI Pixel HQ</p>
-          <h1>ห้องทำงาน Agent Codex/MCP</h1>
+          <span class="home-brand-mark" aria-hidden="true">M<span>FX</span></span>
+          <div>
+            <p class="eyebrow">METAFXCLUB / AUTOMATED TRADING</p>
+            <h1>AI Trading HQ</h1>
+            <p class="home-brand-description">ห้องทำงาน Agent Codex/MCP</p>
+          </div>
         </div>
         <section
           class="research-sheet-hub topbar-research-sheet-hub"
@@ -203,35 +212,35 @@
               class="agent-collab-button metatrader-hub-button"
               id="globalMetatraderButton"
               type="button"
-              aria-label="เชื่อม MT4 / MT5"
+              aria-label="ล็อก MT4 และ MT5 ให้ครบ 2/2"
               aria-expanded="false"
               aria-controls="globalMetatraderPanel"
-              title="เชื่อม MT4 / MT5"
+              title="ล็อก MT4 และ MT5 ให้ครบ 2/2"
             >
               <span class="agent-collab-dot" aria-hidden="true"></span>
               <span>
-                <small>เชื่อม MT4 / MT5</small>
+                <small>ล็อก MT4 + MT5 • ต้องครบ 2/2</small>
                 <strong id="globalMetatraderLabel">กำลังตรวจสอบ...</strong>
               </span>
               <span class="metatrader-hub-compact-mark" aria-hidden="true">MT</span>
               <span class="agent-collab-chevron" aria-hidden="true">▾</span>
             </button>
-            <section class="agent-collab-panel metatrader-hub-panel" id="globalMetatraderPanel" aria-label="เลือก MT4 หรือ MT5 กลางสำหรับอุปกรณ์ HQ" hidden>
+            <section class="agent-collab-panel metatrader-hub-panel" id="globalMetatraderPanel" aria-label="ล็อก MT4 และ MT5 กลางแบบแยกกันสำหรับอุปกรณ์ HQ" hidden>
               <div class="agent-collab-panel-heading">
                 <div>
                   <p class="eyebrow">TERMINAL กลาง • LOCAL RUNNER</p>
-                  <strong id="globalMetatraderPanelTitle">เลือก Terminal ครั้งเดียวแล้วใช้กับระบบที่รองรับ</strong>
+                  <strong id="globalMetatraderPanelTitle">ล็อก Terminal MT4 และ MT5 แยกกันให้ครบ 2/2</strong>
                 </div>
                 <span class="agent-collab-state-badge" id="globalMetatraderStateBadge">กำลังตรวจสอบ</span>
               </div>
               <p class="agent-collab-message metatrader-hub-message" id="globalMetatraderMessage" data-tone="neutral" aria-live="polite">
-                กดสแกนเพื่อค้นหาโปรแกรมในเครื่องแบบอ่านอย่างเดียว แล้วเลือก Terminal ที่ต้องการใช้
+                กดสแกนแล้วล็อก MT4 หนึ่งรายการและ MT5 หนึ่งรายการ ระบบงาน MetaTrader จะเริ่มได้เมื่อครบ 2/2 เท่านั้น
               </p>
               <button class="metatrader-hub-scan" id="globalMetatraderScan" type="button">
                 สแกนหา MT4 / MT5 ในเครื่อง
               </button>
               <fieldset class="metatrader-hub-platform-choice" id="globalMetatraderPlatformChoice">
-                <legend>เลือก Dashboard เทรดที่ใช้งาน</legend>
+                <legend>เลือก Dashboard ที่กำลังใช้งาน</legend>
                 <div class="metatrader-hub-platform-choice-options">
                   <label data-platform="MT4">
                     <input id="globalMetatraderPlatformMt4" type="radio" name="globalMetatraderPlatform" value="MT4" checked>
@@ -248,7 +257,7 @@
                     </span>
                   </label>
                 </div>
-                <p id="globalMetatraderPlatformHint">ใช้ได้ทีละหนึ่ง Platform เท่านั้น • เลือกใหม่จะแทนที่ค่ากลางเดิมของระบบที่รองรับ</p>
+                <p id="globalMetatraderPlatformHint">Dashboard ที่กำลังใช้งานเลือกได้ทีละหนึ่งแพลตฟอร์ม แต่ไม่ลบหรือแทนที่ล็อก MT4/MT5 ที่บันทึกไว้</p>
               </fieldset>
               <div class="metatrader-hub-platforms">
                 <section class="metatrader-hub-platform" id="globalMetatraderMt4Section" data-platform="MT4" data-active="true">
@@ -262,7 +271,7 @@
                       <option value="">ยังไม่พบ MT4</option>
                     </select>
                   </label>
-                  <button id="globalMetatraderMt4Apply" type="button" disabled>ใช้ MT4 นี้กับทุกระบบ</button>
+                  <button id="globalMetatraderMt4Apply" type="button" disabled>ล็อก MT4 นี้</button>
                 </section>
                 <section class="metatrader-hub-platform" id="globalMetatraderMt5Section" data-platform="MT5" data-active="false">
                   <header>
@@ -275,12 +284,12 @@
                       <option value="">ยังไม่พบ MT5</option>
                     </select>
                   </label>
-                  <button id="globalMetatraderMt5Apply" type="button" disabled>ใช้ MT5 นี้กับระบบที่รองรับ</button>
+                  <button id="globalMetatraderMt5Apply" type="button" disabled>ล็อก MT5 นี้</button>
                 </section>
               </div>
               <div class="metatrader-hub-systems" id="globalMetatraderSystems" aria-label="ระบบที่รับค่า Terminal กลาง"></div>
               <p class="agent-collab-safety metatrader-hub-safety">
-                การตั้งค่านี้บันทึกเฉพาะ Terminal เป้าหมายใน Local Runner ไม่เปิด Terminal ไม่อ่านเลขบัญชีหรือข้อมูลโบรกเกอร์ และไม่เปิด Demo / Live Trading
+                ล็อกทั้งสองรายการจะถูกเก็บแยกกันอย่างถาวรใน Local Runner การสลับ Dashboard ไม่ลบล็อกใด และการตั้งค่านี้ไม่เปิด Terminal ไม่อ่านเลขบัญชีหรือข้อมูลโบรกเกอร์ และไม่เปิด Demo / Live Trading
               </p>
             </section>
           </div>
@@ -314,8 +323,10 @@
             </section>
           </div>
         </div>
-      </header>
-
+        <details class="home-status-menu" id="homeStatusMenu">
+          <summary id="homeStatusToggle" aria-label="เปิดสถานะระบบ โควตา Agent และงานวันนี้">สถานะระบบ <span aria-hidden="true">▾</span></summary>
+          <div class="home-status-drawer" aria-label="สถานะระบบและงาน">
+            <div class="home-status-heading"><strong>สถานะระบบและงาน</strong><button id="homeStatusClose" type="button" aria-label="ปิดสถานะระบบ">×</button></div>
       <aside
         class="codex-rate-tab"
         id="codexRateWidget"
@@ -354,6 +365,8 @@
           <span id="codexRateFreshness">กำลังตรวจสอบ</span>
         </div>
         <form class="codex-rate-reserve" id="codexRateReserveForm">
+          <details class="home-quota-settings">
+            <summary>ตั้งค่าเกณฑ์โควตาให้ AI ทำงาน</summary>
           <label for="codexRateReserveInput">ให้ AI ทำงานเมื่อคงเหลืออย่างน้อย</label>
           <div class="codex-rate-reserve-controls">
             <input
@@ -370,6 +383,7 @@
             <button id="codexRateReserveSave" type="submit">บันทึก</button>
           </div>
           <small id="codexRateReserveHint">0 = ใช้ได้จนโควตาหมด • ค่านี้ใช้ร่วมกันทุกระบบ</small>
+          </details>
           <output id="codexRateReserveStatus" for="codexRateReserveInput" aria-live="polite">เกณฑ์ส่วนกลาง 15%</output>
         </form>
         <div class="codex-rate-secondary" id="codexRateSecondary" hidden>
@@ -403,23 +417,6 @@
         </div>
         <div id="agentStatusList" class="agent-status-list"></div>
       </aside>
-
-      <section class="stage-wrap" aria-label="ฉากห้องแบบโต้ตอบ">
-        <div class="room-stage layered" id="roomStage">
-          <img
-            id="roomImage"
-            class="room-image"
-            src="./frontend/public/assets/maps/command-room/metafx-aihq-room-codex-mcp-agent-workroom-wide-symmetric-v002.png"
-            alt="พื้นหลังห้องทำงาน Agent Codex/MCP แบบมุมมองไอโซเมตริก"
-            draggable="false"
-          />
-          <div id="propLayer" class="prop-layer" aria-label="อุปกรณ์ภายในห้องที่กดได้"></div>
-          <svg id="pathLayer" class="path-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg>
-          <div id="agentLayer" class="agent-layer" aria-label="เลเยอร์ตัวละคร Agent ที่เดินได้"></div>
-          <div id="scanLayer" class="scan-layer" aria-hidden="true"></div>
-        </div>
-      </section>
-
       <aside class="today-work-panel" id="todayWorkPanel" aria-label="อัปเดตงานวันนี้" aria-live="polite" tabindex="-1">
         <div class="panel-heading">
           <p class="eyebrow">อัปเดตล่าสุด</p>
@@ -448,6 +445,27 @@
         </section>
         <p class="today-work-hint">กดการ์ดงานเพื่อเปิดรายละเอียด ผู้รับผิดชอบ สถานะ และอุปกรณ์รับรายงาน</p>
       </aside>
+          </div>
+        </details>
+      </header>
+
+      <section class="stage-wrap" aria-label="ฉากห้องแบบโต้ตอบ">
+        <div class="home-room-viewport">
+        <div class="room-stage layered" id="roomStage">
+          <img
+            id="roomImage"
+            class="room-image"
+            src="./frontend/public/assets/images/rooms/command-room/metafx-aihq-room-codex-mcp-agent-workroom-wide-symmetric-v002.png"
+            alt="พื้นหลังห้องทำงาน Agent Codex/MCP แบบมุมมองไอโซเมตริก"
+            draggable="false"
+          />
+          <div id="propLayer" class="prop-layer" aria-label="อุปกรณ์ภายในห้องที่กดได้"></div>
+          <svg id="pathLayer" class="path-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg>
+          <div id="agentLayer" class="agent-layer" aria-label="เลเยอร์ตัวละคร Agent ที่เดินได้"></div>
+          <div id="scanLayer" class="scan-layer" aria-hidden="true"></div>
+        </div>
+        </div>
+      </section>
 
       <div id="legacySidebarBindings" hidden aria-hidden="true">
         <div id="layerList"></div>
@@ -474,7 +492,17 @@
 
       <div class="game-modal-backdrop" id="gameModalBackdrop" aria-hidden="true"></div>
       <section class="game-modal" id="gameModal" aria-modal="true" aria-hidden="true" aria-labelledby="modalTitle" role="dialog" tabindex="-1" inert>
-        <button class="modal-close" id="modalCloseButton" type="button" aria-label="ปิดหน้าต่าง">x</button>
+        <header class="workspace-chrome">
+          <div class="workspace-heading">
+            <p class="workspace-section" id="workspaceSection">METAFXCLUB / WORKSPACE</p>
+            <h2 id="workspaceTitle">Metafxclub AI Agent HQ</h2>
+          </div>
+          <div class="workspace-context" aria-label="พื้นที่ทำงานในเครื่อง">
+            <span>METAFXCLUB HQ</span>
+            <span>LOCAL WORKSPACE</span>
+          </div>
+          <button class="modal-close" id="modalCloseButton" type="button" aria-label="ปิดหน้าต่าง">×</button>
+        </header>
         <div class="game-modal-body">
           <aside class="modal-portrait-panel" id="modalPortraitPanel">
             <div class="portrait-frame">
@@ -1354,7 +1382,7 @@
     (() => {
       "use strict";
 
-      const RUNTIME_BUILD_VERSION = "20260913-ea-factory-3page-state-v0919";
+      const RUNTIME_BUILD_VERSION = "20261017-world-radar-rows-v0922-r2";
       const EXPECTED_AGENT_COUNT = 10;
       const RUNTIME_PATH = "./frontend/src/app/main.js";
       const diagnostic = document.getElementById("bootDiagnostic");
@@ -1514,7 +1542,7 @@
           });
           return;
         }
-        if (event.filename?.includes("main.js")) {
+        if (event.filename?.includes("/frontend/src/")) {
           reportFailure({
             failedResource: event.filename,
             detail: event.message || "ระบบหน้าเว็บหยุดทำงานระหว่างเริ่มต้น",
@@ -1524,6 +1552,7 @@
       }, true);
 
       const runtimeScript = document.createElement("script");
+      runtimeScript.type = "module";
       runtimeScript.async = false;
       runtimeScript.dataset.build = RUNTIME_BUILD_VERSION;
       runtimeScript.src = `${RUNTIME_PATH}?v=${encodeURIComponent(RUNTIME_BUILD_VERSION)}`;

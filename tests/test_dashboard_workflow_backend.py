@@ -2538,6 +2538,11 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
         with (
             mock.patch.object(self.bridge, "find_room_prop", return_value={"id": "right_server_racks"}),
             mock.patch.object(self.bridge, "_workflow_transfer_sources", return_value=delivered),
+            mock.patch.object(
+                self.bridge,
+                "_global_metatrader_platform_context",
+                return_value={"platform": "mt4", "allPlatformsReady": True},
+            ),
             mock.patch.object(self.bridge, "run_bridge_task", side_effect=fake_run_bridge_task),
             mock.patch.object(self.bridge, "append_audit"),
         ):
@@ -3800,6 +3805,11 @@ class DashboardWorkflowBackendTests(unittest.TestCase):
             mock.patch.object(self.bridge, "find_room_prop", return_value={"id": "any"}),
             mock.patch.object(self.bridge, "_workflow_action_contract_gate", return_value={"allowed": True}),
             mock.patch.object(self.bridge, "run_bridge_task", side_effect=fake_run),
+            mock.patch.object(
+                self.bridge,
+                "_global_metatrader_platform_context",
+                return_value={"platform": "mt4", "allPlatformsReady": True},
+            ),
             mock.patch.object(self.bridge, "append_audit"),
             mock.patch.object(self.bridge, "load_runtime_reports", return_value=[{
                 "id": "news-report-1",

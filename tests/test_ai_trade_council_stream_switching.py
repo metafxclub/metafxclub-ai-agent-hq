@@ -42,9 +42,40 @@ class AiTradeCouncilStreamSwitchingTests(unittest.TestCase):
         self.bridge.evaluate_ai_trade_council_outcomes = (
             lambda: {"updated": 0, "pending": 0}
         )
+        self.bridge._global_metatrader_platform_context = (
+            self._dual_locked_platform_context
+        )
+        self.bridge._active_global_metatrader_context = (
+            lambda **kwargs: self._dual_locked_platform_context("mt4", **kwargs)
+        )
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    @staticmethod
+    def _dual_locked_platform_context(
+        platform: object,
+        *,
+        require_all_platforms: bool = True,
+    ) -> dict | None:
+        normalized = str(platform or "").strip().lower()
+        if normalized not in {"mt4", "mt5"}:
+            return None
+        candidate_id = f"mtc-stream-switching-{normalized}-locked"
+        return {
+            "record": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "available": True,
+                "runningState": "platform_running_detected",
+            },
+            "token": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "selectionRevision": 1,
+            },
+            "selectedAt": "2026-10-16T09:00:00+07:00",
+        }
 
     def _record(
         self,

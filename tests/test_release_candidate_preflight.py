@@ -27,6 +27,42 @@ PIP_BOOTSTRAP_SHA256 = (
 PIP_BOOTSTRAP_SIZE = 1_816_632
 
 
+REQUIRED_BACKEND_PACKAGE_FILES = (
+    "backend/local-runner/hq_backend/__init__.py",
+    "backend/local-runner/hq_backend/chat/__init__.py",
+    "backend/local-runner/hq_backend/chat/full_agent_artifacts.py",
+    "backend/local-runner/hq_backend/chat/full_agent_runtime.py",
+    "backend/local-runner/hq_backend/ea/__init__.py",
+    "backend/local-runner/hq_backend/ea/ea_factory_blueprint_coverage.py",
+    "backend/local-runner/hq_backend/ea/ea_factory_indicator_coverage.py",
+    "backend/local-runner/hq_backend/ea/ea_factory_metaeditor_compile.py",
+    "backend/local-runner/hq_backend/ea/ea_factory_optimization.py",
+    "backend/local-runner/hq_backend/ea/ea_factory_visible_terminal.ps1",
+    "backend/local-runner/hq_backend/ea/ea_factory_visible_terminal.py",
+    "backend/local-runner/hq_backend/ea/ea_factory_visible_terminal_mt5.ps1",
+    "backend/local-runner/hq_backend/ea/ea_factory_visible_terminal_mt5.py",
+    "backend/local-runner/hq_backend/ea/ea_research_blueprint.py",
+    "backend/local-runner/hq_backend/ea/ea_strategy_brief.py",
+    "backend/local-runner/hq_backend/google/__init__.py",
+    "backend/local-runner/hq_backend/google/google_oauth_store.py",
+    "backend/local-runner/hq_backend/google/google_sheet_hub.py",
+    "backend/local-runner/hq_backend/paths.py",
+    "backend/local-runner/hq_backend/research/__init__.py",
+    "backend/local-runner/hq_backend/research/fx_news_direct.py",
+    "backend/local-runner/hq_backend/research/radar_image_adapter.py",
+    "backend/local-runner/hq_backend/runtime/__init__.py",
+    "backend/local-runner/hq_backend/runtime/manager_parallel.py",
+    "backend/local-runner/hq_backend/runtime/manager_analysis.py",
+    "backend/local-runner/hq_backend/trading/__init__.py",
+    "backend/local-runner/hq_backend/trading/council_analysis.py",
+    "backend/local-runner/hq_backend/trading/mt4_market_watch.py",
+    "backend/local-runner/hq_backend/trading/mt4_trade_gateway.py",
+    "backend/local-runner/hq_backend/trading/ohlc_import.py",
+    "backend/local-runner/hq_backend/workflows/__init__.py",
+    "backend/local-runner/hq_backend/workflows/equipment_workflow_profiles.py",
+)
+
+
 def _is_source_checkout() -> bool:
     return (PROJECT_ROOT / ".git").exists()
 
@@ -36,6 +72,7 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
 
     def test_required_student_release_files_are_present(self) -> None:
         required = (
+            *REQUIRED_BACKEND_PACKAGE_FILES,
             ".gitattributes",
             ".gitignore",
             "VERSION",
@@ -47,18 +84,18 @@ class ReleaseCandidatePreflightTests(unittest.TestCase):
             "2-SETUP-GOOGLE-HQ.bat",
             "docs/prompts/install-github-google-auto-th.md",
             "backend/local-runner/bridge_server.py",
-            "backend/local-runner/full_agent_artifacts.py",
-            "backend/local-runner/full_agent_runtime.py",
-            "backend/local-runner/ea_factory_blueprint_coverage.py",
-            "backend/local-runner/ea_factory_visible_terminal.py",
-            "backend/local-runner/ea_factory_visible_terminal.ps1",
-            "backend/local-runner/ea_research_blueprint.py",
-            "backend/local-runner/ea_strategy_brief.py",
             "backend/local-runner/configure_google_oauth_client.py",
-            "backend/local-runner/google_oauth_store.py",
-            "backend/local-runner/google_sheet_hub.py",
             "frontend/index.html",
             "frontend/src/app/main.js",
+            "frontend/src/styles/main.css",
+            "frontend/src/styles/workspace.css",
+            "frontend/src/styles/agent-workspace.css",
+            "frontend/src/styles/dashboard-workspace.css",
+            "frontend/src/styles/home.css",
+            "frontend/src/styles/home-panels.css",
+            "frontend/src/features/research/research-sheet.js",
+            "frontend/src/features/chat/meeting-session.js",
+            "frontend/src/features/quota/codex-rate.js",
             "contracts/agents/full-agent-runtime-contract.json",
             "integrations/mt4-trade-gateway/MetafxHQTradeGateway.mq4",
             "integrations/mt4-trade-gateway/README_TH.md",

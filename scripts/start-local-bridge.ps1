@@ -4,7 +4,10 @@ param(
     [string]$Action = "Start",
 
     [ValidateRange(5, 120)]
-    [int]$HealthTimeoutSeconds = 25,
+    # Loading the full EA Factory runtime can legitimately take more than
+    # 25 seconds on a cold Windows start. Keep the launcher fail-closed, but
+    # do not terminate its own verified child before that import can finish.
+    [int]$HealthTimeoutSeconds = 60,
 
     [ValidateRange(0, 65535)]
     [int]$Port = 0

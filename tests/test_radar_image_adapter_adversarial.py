@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "backend" / "local-runner" / "radar_image_adapter.py"
+MODULE_PATH = ROOT / "backend" / "local-runner" / "hq_backend" / "research" / "radar_image_adapter.py"
 SPEC = importlib.util.spec_from_file_location("radar_image_adapter_adversarial", MODULE_PATH)
 radar = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader

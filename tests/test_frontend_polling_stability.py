@@ -136,15 +136,23 @@ class FrontendPollingStabilityTests(unittest.TestCase):
         )
 
         executable_poll = f"async {open_report_poll}"
+        optimization_session_active = function_block(
+            self.main,
+            "eaOptimizationLabSessionIsActive",
+        )
         script = "\n".join([
             "const OPEN_PROP_REPORT_POLL_TTL_MS = 30000;",
             "const EA_FACTORY_PROP_ID = 'right_server_racks';",
+            "const EA_OPTIMIZATION_LAB_PROP_ID = 'right_tool_console';",
+            "const EA_OPTIMIZATION_LAB_ACTIVE_POLL_MS = 3000;",
+            "const EA_OPTIMIZATION_LAB_IDLE_POLL_MS = 30000;",
             "let loadCount = 0; let renderCount = 0;",
             "let focused = true;",
             "const document = { visibilityState: 'visible', hasFocus: () => focused, activeElement: { matches: () => false } };",
             "const state = { modal: { open: true, type: 'prop', id: 'left_analytics_console' }, propReportLoadedAt: { left_analytics_console: 0 }, propReports: {} };",
             "const loadPropReport = async (id) => { loadCount += 1; state.propReportLoadedAt[id] = Date.now(); state.propReports[id] = { generation: loadCount }; return state.propReports[id]; };",
             "const renderGameModal = () => { renderCount += 1; };",
+            optimization_session_active,
             executable_poll,
             "(async () => {",
             "  await pollOpenPropReport();",

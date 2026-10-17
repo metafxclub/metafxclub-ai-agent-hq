@@ -1,0 +1,986 @@
+/* Equipment workspaces. Loaded after main.css; behavior and state remain in JS. */
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace, .dashboard-report-workspace) {
+  container: hq-dashboard / inline-size;
+  color: var(--ui-text);
+  font-size: 14px;
+  line-height: 1.65;
+  gap: 16px;
+  min-width: 0;
+  --workflow-identity-accent: var(--ui-accent);
+  --workflow-identity-glow: color-mix(in srgb, var(--ui-accent) 10%, transparent);
+}
+
+.workflow-dashboard-workspace[data-dashboard-identity] {
+  --workflow-identity-accent: var(--ui-accent);
+  --workflow-identity-glow: color-mix(in srgb, var(--ui-accent) 10%, transparent);
+}
+
+.workflow-dashboard-workspace .workflow-command-deck {
+  padding: 0 0 14px;
+  border-color: var(--ui-line);
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(
+  .workflow-tabs, .signal-consensus-tabs, .signal-live-analysis-tabs,
+  .signal-history-subtabs, .workflow-news-impact-filters, .workflow-connection-hub-filters
+) {
+  gap: 8px;
+  padding: 4px;
+  border-radius: var(--ui-radius);
+  background: var(--ui-bg);
+  scrollbar-color: var(--ui-line) transparent;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(
+  .workflow-tab, .signal-consensus-tab, .signal-live-analysis-tab,
+  .workflow-connection-filter, .workflow-news-impact-filters button, .signal-history-subtabs button
+) {
+  min-height: 44px;
+  padding: 10px 14px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ui-muted);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  box-shadow: none;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(
+  .workflow-tab, .signal-consensus-tab, .signal-live-analysis-tab,
+  .workflow-connection-filter, .workflow-news-impact-filters button, .signal-history-subtabs button
+):is(.active, [aria-selected="true"], [aria-pressed="true"]) {
+  border-color: color-mix(in srgb, var(--ui-accent) 40%, var(--ui-line));
+  background: color-mix(in srgb, var(--ui-accent) 10%, var(--ui-panel));
+  color: var(--ui-accent);
+  box-shadow: inset 0 -2px 0 var(--ui-accent);
+}
+
+.workflow-dashboard-workspace .workflow-tab > small {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.workflow-dashboard-workspace .workflow-dashboard-scroll {
+  gap: 20px;
+  padding: 0 6px 12px 0;
+  scrollbar-color: var(--ui-line) transparent;
+}
+
+.workflow-dashboard-workspace :is(.workflow-tab-content, .workflow-results) {
+  gap: 20px;
+  padding: clamp(16px, 2vw, 24px);
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-bg);
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace, .dashboard-report-workspace) :is(h3, h4, h5, h6) {
+  color: var(--ui-text);
+  line-height: 1.5;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace, .dashboard-report-workspace) :is(h3, h4) {
+  font-size: clamp(17px, 1.5vw, 21px);
+  font-weight: 650;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace, .dashboard-report-workspace) :is(h5, h6) {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace, .dashboard-report-workspace) :is(p, li) {
+  font-size: 13px;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace, .dashboard-report-workspace) :is(small, dt) {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(
+  .workflow-tab-heading, .workflow-results-heading, .workflow-trading-system-portal-heading,
+  .workflow-radar-heading, .workflow-research-lab-heading, .ea-optimization-lab-heading,
+  .workflow-connection-hub-heading, .workflow-fx-bias-summary, .signal-section-heading,
+  .signal-council-overview-heading, .signal-deep-header
+) {
+  gap: 16px;
+  align-items: flex-start;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--ui-line);
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(
+  .workflow-tab-heading p, .workflow-results-heading > p, .workflow-radar-heading p,
+  .workflow-trading-system-portal-heading p, .ea-optimization-lab-heading p
+) {
+  color: var(--ui-muted);
+  font-size: 13px;
+  line-height: 1.75;
+  max-width: 72ch;
+  text-align: start;
+}
+
+/* Shared surfaces across Radar, Research, Factory, Optimization, Dev and FX. */
+.workflow-dashboard-workspace :is(
+  .workflow-action-card, .workflow-domain-panel, .workflow-source-card,
+  .workflow-catalog-card, .workflow-trading-system-card, .workflow-radar-card,
+  .workflow-indicator-card, .workflow-fx-bias-card, .workflow-news-group,
+  .workflow-news-history-card, .workflow-connection-hub-card,
+  .workflow-research-selection, .workflow-research-selection-preview,
+  .workflow-research-chart-card, .workflow-research-source-snapshot,
+  .workflow-research-strategy-brief-card, .workflow-research-blueprint-definition-card,
+  .workflow-research-blueprint-management-card, .workflow-research-blueprint-protection-card,
+  .workflow-research-backtest-result, .workflow-research-confirmation,
+  .ea-factory-choice-section, .ea-factory-record-import, .ea-factory-imported-summary,
+  .ea-factory-source-detail, .ea-factory-sheet-sync, .ea-factory-spec-form,
+  .ea-factory-terminal-picker, .ea-factory-one-click, .ea-factory-operation-progress,
+  .ea-factory-game-progress, .ea-factory-result-screen, .ea-factory-result-artifacts,
+  .ea-optimization-lab-card, .ea-optimization-lab-candidate,
+  .ea-optimization-lab-round-card, .ea-optimization-lab-next-plan,
+  .workflow-primary-report-card, .dashboard-task-card, .dashboard-report-card
+) {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 8%);
+}
+
+.workflow-dashboard-workspace :is(
+  .workflow-action-grid, .workflow-radar-grid,
+  .workflow-indicator-grid, .workflow-connection-hub-grid,
+  .workflow-primary-report-list, .workflow-research-supporting-grid,
+  .workflow-research-strategy-brief-grid, .workflow-research-blueprint-card-grid,
+  .workflow-research-blueprint-protection-grid, .workflow-catalog-grid,
+  .ea-optimization-lab-candidates, .ea-optimization-lab-bands-grid
+) {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 16px;
+  align-items: stretch;
+}
+
+/* Read the three World Radar systems in order, one wide card per row. */
+.workflow-dashboard-workspace .workflow-trading-system-portal > .workflow-trading-system-grid {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+}
+
+.workflow-dashboard-workspace .workflow-trading-system-card {
+  gap: 16px;
+}
+
+.workflow-dashboard-workspace .workflow-trading-system-card .workflow-trading-system-heading h5 {
+  font-size: 18px;
+  line-height: 1.5;
+}
+
+.workflow-dashboard-workspace .workflow-trading-system-card .workflow-trading-system-rules {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+  gap: 12px;
+}
+
+.workflow-dashboard-workspace .workflow-trading-system-card .workflow-trading-system-notes {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: 12px;
+}
+
+.workflow-dashboard-workspace .workflow-trading-system-card .workflow-trading-system-risk dl {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 10px;
+}
+
+.workflow-dashboard-workspace .workflow-trading-system-card :is(
+  .workflow-trading-system-identity p, .workflow-trading-system-section ul,
+  .workflow-trading-system-section ol, .workflow-trading-system-risk dd
+) {
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+.workflow-dashboard-workspace :is(
+  .workflow-domain-panel, .workflow-trading-research-lab, .ea-factory-panel,
+  .ea-optimization-lab-panel, .workflow-radar-website-tool, .workflow-primary-overview,
+  .workflow-research-deep-result, .workflow-research-blueprint-sections,
+  .workflow-source-list, .workflow-news-calendar-list, .workflow-news-history-list
+) {
+  gap: 20px;
+  min-width: 0;
+}
+
+.workflow-dashboard-workspace :is(
+  .workflow-result-summary, .workflow-hq-facts, .workflow-news-counts,
+  .workflow-research-selection-facts, .workflow-research-source-snapshot-facts,
+  .workflow-research-backtest-metrics, .workflow-research-confirmation-facts,
+  .workflow-trading-system-facts, .workflow-connection-services,
+  .ea-factory-source-facts, .ea-factory-stage-facts, .ea-factory-backtest-result,
+  .ea-factory-one-click-facts, .ea-factory-record-preview-grid,
+  .ea-optimization-lab-file-facts, .ea-optimization-lab-status-strip,
+  .ea-optimization-lab-input-summary
+) {
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 155px), 1fr));
+}
+
+.workflow-dashboard-workspace :is(
+  .workflow-result-summary, .workflow-hq-facts, .workflow-news-counts,
+  .workflow-research-selection-facts, .workflow-research-backtest-metrics,
+  .workflow-trading-system-facts, .workflow-connection-services,
+  .ea-factory-source-facts, .ea-factory-stage-facts, .ea-factory-backtest-result,
+  .ea-factory-record-preview-grid, .ea-optimization-lab-file-facts
+) > div {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-panel-raised);
+}
+
+.workflow-dashboard-workspace :is(
+  .workflow-result-summary, .workflow-hq-facts, .workflow-news-counts,
+  .workflow-research-selection-facts, .workflow-research-backtest-metrics,
+  .workflow-trading-system-facts, .workflow-connection-services,
+  .ea-factory-source-facts, .ea-factory-stage-facts, .ea-factory-backtest-result,
+  .ea-factory-record-preview-grid, .ea-optimization-lab-file-facts
+) :is(dd, strong) {
+  margin: 6px 0 0;
+  font-size: 16px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* Source forms and actions share dimensions without changing native control semantics. */
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]),
+  select, textarea
+) {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-bg);
+  color: var(--ui-text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) textarea {
+  min-height: 112px;
+  resize: vertical;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(label, legend) {
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(button, .workflow-external-link) {
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(
+  .workflow-submit, .workflow-open-device-button, .workflow-open-connection-hub,
+  .workflow-research-run-button, .workflow-primary-empty-cta,
+  .ea-factory-stage-action, .ea-factory-start-button, .ea-factory-one-click-action,
+  .ea-factory-game-action, .ea-factory-terminal-confirm, .ea-optimization-lab-button,
+  .signal-primary-action, .signal-secondary-action, .workflow-radar-retry
+) {
+  min-height: 44px;
+  padding: 10px 16px;
+  border: 1px solid color-mix(in srgb, var(--ui-accent) 50%, var(--ui-line));
+  background: color-mix(in srgb, var(--ui-accent) 9%, var(--ui-panel));
+  color: var(--ui-accent);
+  box-shadow: none;
+  white-space: normal;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(button, a):not(:disabled):not([aria-disabled="true"]):hover {
+  border-color: var(--ui-blue);
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(button, a, input, select, textarea, summary):focus-visible {
+  outline: 2px solid var(--ui-blue);
+  outline-offset: 3px;
+}
+
+/* Tables retain their true columns and scroll locally at narrow widths. */
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(
+  .workflow-table-scroll, .ea-optimization-lab-table-wrap, .signal-deep-table-viewport,
+  .signal-analysis-history-scroll, .signal-order-history-scroll
+) {
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  border: 1px solid var(--ui-line);
+  border-radius: 10px;
+  scrollbar-color: var(--ui-line) transparent;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(th, td) {
+  padding: 12px 14px;
+  border-color: var(--ui-line);
+  font-size: 12px;
+  line-height: 1.6;
+  vertical-align: top;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) th {
+  background: var(--ui-panel-raised);
+  color: var(--ui-muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) tbody tr:nth-child(even) {
+  background: rgb(255 255 255 / 2%);
+}
+
+/* Factory choices and stage tracks keep selection, progress and cancellation distinct. */
+.workflow-dashboard-workspace :is(.ea-factory-intake-hero, .ea-factory-stage-heading, .ea-factory-one-click-heading) {
+  gap: 18px;
+  padding: 20px;
+  border-radius: var(--ui-radius);
+  border-color: var(--ui-line);
+  background: linear-gradient(115deg, color-mix(in srgb, var(--ui-accent) 8%, var(--ui-panel)), var(--ui-panel));
+}
+
+.workflow-dashboard-workspace .ea-factory-choice-grid {
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+}
+
+.workflow-dashboard-workspace .ea-factory-choice-button {
+  min-height: 92px;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--ui-line);
+  background: var(--ui-bg);
+  color: var(--ui-text);
+  text-align: start;
+}
+
+.workflow-dashboard-workspace .ea-factory-choice-button[aria-pressed="true"] {
+  border-color: var(--ui-accent);
+  background: color-mix(in srgb, var(--ui-accent) 10%, var(--ui-panel));
+  box-shadow: inset 3px 0 0 var(--ui-accent);
+}
+
+.workflow-dashboard-workspace :is(.ea-factory-one-click-progress, .ea-factory-game-stage-track, .ea-factory-result-stage-track) {
+  gap: 10px;
+  padding: 0;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
+}
+
+.workflow-dashboard-workspace :is(.ea-factory-one-click-progress, .ea-factory-game-stage-track, .ea-factory-result-stage-track) li {
+  padding: 14px;
+  border-radius: 8px;
+  border-color: var(--ui-line);
+  background: var(--ui-panel-raised);
+}
+
+/* State selectors must outrank the shared track surface, including its li type. */
+.workflow-dashboard-workspace :is(.ea-factory-one-click-progress, .ea-factory-game-stage-track, .ea-factory-result-stage-track) li[data-current="true"] {
+  border-color: var(--ui-blue);
+  border-top-color: var(--ui-blue);
+  background: color-mix(in srgb, var(--ui-blue) 12%, var(--ui-panel));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ui-blue) 40%, transparent);
+  opacity: 1;
+}
+
+.workflow-dashboard-workspace :is(.ea-factory-one-click-progress, .ea-factory-game-stage-track, .ea-factory-result-stage-track) li:is([data-status="running"], [data-status="ready"]) {
+  border-color: color-mix(in srgb, var(--ui-blue) 60%, var(--ui-line));
+  border-top-color: var(--ui-blue);
+  background: color-mix(in srgb, var(--ui-blue) 9%, var(--ui-panel));
+  opacity: 1;
+}
+
+.workflow-dashboard-workspace :is(.ea-factory-one-click-progress, .ea-factory-game-stage-track, .ea-factory-result-stage-track) li:is([data-status="completed"], [data-status="not_applicable"], [data-status="skipped"]) {
+  border-color: color-mix(in srgb, var(--ui-accent) 60%, var(--ui-line));
+  border-top-color: var(--ui-accent);
+  background: color-mix(in srgb, var(--ui-accent) 9%, var(--ui-panel));
+  opacity: 1;
+}
+
+.workflow-dashboard-workspace :is(.ea-factory-one-click-progress, .ea-factory-game-stage-track, .ea-factory-result-stage-track) li:is([data-status="waiting"], [data-status="queued"], [data-status="cancelling"], [data-status="cancelled"]) {
+  border-color: color-mix(in srgb, var(--ui-warning) 65%, var(--ui-line));
+  border-top-color: var(--ui-warning);
+  background: color-mix(in srgb, var(--ui-warning) 9%, var(--ui-panel));
+  opacity: 1;
+}
+
+.workflow-dashboard-workspace :is(.ea-factory-one-click-progress, .ea-factory-game-stage-track, .ea-factory-result-stage-track) li:is([data-status="failed"], [data-status="blocked"]) {
+  border-color: color-mix(in srgb, var(--ui-danger) 65%, var(--ui-line));
+  border-top-color: var(--ui-danger);
+  background: color-mix(in srgb, var(--ui-danger) 10%, var(--ui-panel));
+  box-shadow: none;
+  opacity: 1;
+}
+
+.workflow-dashboard-workspace .ea-factory-one-click[data-one-click-status="completed"] {
+  border-color: color-mix(in srgb, var(--ui-accent) 60%, var(--ui-line));
+  border-left: 3px solid var(--ui-accent);
+  background: color-mix(in srgb, var(--ui-accent) 6%, var(--ui-panel));
+}
+
+.workflow-dashboard-workspace .ea-factory-one-click:is([data-one-click-status="failed"], [data-one-click-status="blocked"]) {
+  border-color: color-mix(in srgb, var(--ui-danger) 65%, var(--ui-line));
+  border-left: 3px solid var(--ui-danger);
+  background: color-mix(in srgb, var(--ui-danger) 7%, var(--ui-panel));
+}
+
+.workflow-dashboard-workspace .ea-factory-one-click:is([data-one-click-status="cancelling"], [data-one-click-status="cancelled"]),
+.workflow-dashboard-workspace .ea-factory-operation-progress:is([data-status="cancelling"], [data-status="cancelled"]) {
+  border-color: color-mix(in srgb, var(--ui-warning) 65%, var(--ui-line));
+  border-left: 3px solid var(--ui-warning);
+  background: color-mix(in srgb, var(--ui-warning) 7%, var(--ui-panel));
+}
+
+.workflow-dashboard-workspace :is(.ea-factory-status-strip, .ea-optimization-lab-status-strip) {
+  gap: 8px;
+  padding-bottom: 4px;
+}
+
+.workflow-dashboard-workspace :is(.ea-factory-status-strip, .ea-optimization-lab-status-strip) > * {
+  padding: 9px 12px;
+  border-radius: 8px;
+  border-color: var(--ui-line);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.workflow-dashboard-workspace :is(.ea-factory-panel, .ea-optimization-lab-panel) progress {
+  height: 8px;
+  border: 0;
+  border-radius: 8px;
+  overflow: hidden;
+  accent-color: var(--ui-accent);
+}
+
+.workflow-dashboard-workspace :is(.ea-factory-panel, .ea-optimization-lab-panel) progress::-webkit-progress-bar {
+  background: var(--ui-line);
+}
+
+.workflow-dashboard-workspace :is(.ea-factory-panel, .ea-optimization-lab-panel) progress::-webkit-progress-value {
+  background: var(--ui-accent);
+}
+
+.workflow-dashboard-workspace .ea-optimization-lab-dropzone {
+  padding: 24px;
+  border: 1px dashed var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-bg);
+}
+
+.workflow-dashboard-workspace .ea-optimization-lab-dropzone:is(:hover, :focus-visible, [data-dragging="true"]),
+.workflow-dashboard-workspace .ea-optimization-lab-round-card[data-ready="true"] {
+  border-color: var(--ui-blue);
+  background: color-mix(in srgb, var(--ui-blue) 9%, var(--ui-panel));
+}
+
+/* Radar imagery remains the original evidence; text and provenance get room to breathe. */
+.workflow-dashboard-workspace .workflow-radar-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.workflow-dashboard-workspace .workflow-radar-card-body {
+  padding: 18px;
+  gap: 14px;
+}
+
+.workflow-dashboard-workspace :is(.workflow-radar-card-media, .workflow-research-chart-card) {
+  border-color: var(--ui-line);
+  background-color: var(--ui-bg);
+}
+
+.workflow-dashboard-workspace :is(.workflow-radar-card-summary, .workflow-trading-system-notes, .workflow-trading-system-rules) {
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.workflow-dashboard-workspace .workflow-fx-bias-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+  gap: 12px;
+}
+
+.workflow-dashboard-workspace .workflow-news-event {
+  padding: 12px;
+  border: 1px solid var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-bg);
+}
+
+.workflow-dashboard-workspace .workflow-news-event-button {
+  gap: 12px;
+  text-align: start;
+}
+
+.workflow-dashboard-workspace :is(.workflow-news-event-time, .workflow-news-event-figures, .workflow-fx-horizons) {
+  font-size: 12px;
+  line-height: 1.65;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Council workspace: market facts, analysis and risk gates share the equipment template. */
+.signal-consensus-workspace :is(
+  .signal-council-card, .signal-chart-card, .signal-snapshot-card, .signal-deep-feature-card,
+  .signal-deep-news-card, .signal-assurance-card, .signal-auto-analysis-card,
+  .signal-council-agent-card, .signal-daily-hero, .signal-daily-team,
+  .signal-stream-prerequisite, .signal-run-summary, .signal-trade-plan
+) {
+  min-width: 0;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 8%);
+}
+
+.signal-consensus-workspace :is(.signal-market-strip, .signal-daily-metrics, .signal-vote-grid, .signal-council-agent-metrics) {
+  gap: 10px;
+}
+
+.signal-consensus-workspace :is(.signal-market-stat, .signal-daily-metric, .signal-vote-count) {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-panel-raised);
+  font-variant-numeric: tabular-nums;
+}
+
+.signal-consensus-workspace :is(.signal-market-stat, .signal-daily-metric, .signal-vote-count) strong {
+  font-size: 20px;
+  line-height: 1.4;
+}
+
+.signal-consensus-workspace :is(.signal-council-overview-grid, .signal-deep-feature-grid, .signal-deep-news-grid, .signal-assurance-grid) {
+  gap: 16px;
+}
+
+.signal-consensus-workspace :is(.signal-live-layout, .signal-council-overview-layout) {
+  gap: 20px;
+  grid-template-columns: minmax(0, 1fr) minmax(250px, 310px);
+}
+
+.signal-consensus-workspace :is(.signal-consensus-rail, .signal-council-overview-rail, .signal-live-main) {
+  gap: 16px;
+  min-width: 0;
+}
+
+.signal-consensus-workspace :is(.signal-deep-header, .signal-deep-package,
+  .signal-deep-price-chart-card, .signal-deep-global-sources, .signal-deep-table-scope) {
+  border-color: var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel);
+}
+
+.signal-consensus-workspace .signal-deep-meta {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 155px), 1fr));
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.signal-consensus-workspace .signal-deep-meta > div {
+  padding: 14px;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel-raised);
+}
+
+.signal-consensus-workspace :is(.signal-deep-meta span, .signal-deep-package span, .signal-deep-table-scope span) {
+  color: var(--ui-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.signal-consensus-workspace :is(.signal-deep-meta strong, .signal-deep-package strong, .signal-deep-table-scope strong) {
+  font-size: 14px;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+
+.signal-consensus-workspace .signal-deep-status {
+  margin-block: 14px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--ui-panel);
+}
+
+.signal-consensus-workspace .signal-deep-package {
+  grid-template-columns: minmax(0, 0.4fr) minmax(0, 0.6fr);
+  padding: 16px;
+  gap: 10px 16px;
+}
+
+.signal-consensus-workspace .signal-deep-technical-toolbar {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 12px;
+}
+
+.signal-consensus-workspace .signal-deep-news-snapshot-status {
+  padding: 10px 12px;
+  border-radius: 8px;
+}
+
+.signal-consensus-workspace .signal-deep-news-card[data-tone="buy"] { border-top: 3px solid var(--ui-accent); }
+.signal-consensus-workspace .signal-deep-news-card[data-tone="sell"] { border-top: 3px solid var(--ui-danger); }
+.signal-consensus-workspace .signal-deep-news-card[data-tone="hold"] { border-top: 3px solid var(--ui-warning); }
+
+/* Equipment-only connection, automation and handoff rails. */
+.dashboard-modal :is(.workflow-settings-rail, .workflow-agent-handoff, .dashboard-connection-rail, .dashboard-connection-details) {
+  padding: 16px;
+  gap: 14px;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel);
+  color: var(--ui-text);
+  --workflow-identity-accent: var(--ui-accent);
+  --workflow-identity-glow: color-mix(in srgb, var(--ui-accent) 10%, transparent);
+}
+
+.dashboard-modal :is(.workflow-settings-rail, .workflow-agent-handoff, .dashboard-connection-rail) :is(p, label, small, dt, dd, select, button, input) {
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.dashboard-modal :is(.workflow-settings-rail, .workflow-agent-handoff, .dashboard-connection-rail) :is(select, button, input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"])) {
+  min-height: 44px;
+  border-radius: 8px;
+}
+
+.dashboard-modal :is(.connection-profile-row, .connection-check-item, .connection-mode-grid > div,
+  .workflow-fx-news-settings, .workflow-fx-news-service, .workflow-radar-schedule,
+  .workflow-radar-run-state, .ai-trade-platform-card, .ai-trade-platform-selector) {
+  min-width: 0;
+  padding: 12px;
+  border-color: var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-bg);
+}
+
+.dashboard-modal :is(.connection-profile-copy > strong, .connection-check-heading > strong,
+  .workflow-agent-handoff h4, .workflow-settings-rail strong, .ai-trade-platform-card > header strong) {
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.dashboard-modal :is(.connection-badge, .connection-required-badge, .ai-trade-selected-badge, .ai-trade-platform-health) {
+  padding: 4px 7px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: normal;
+}
+
+/* The left rail is a readable overview and settings surface on every device. */
+.dashboard-modal .modal-portrait-panel > section { flex-shrink: 0; }
+.dashboard-modal :is(.dashboard-connection-rail-heading, .ai-trade-terminal-summary-heading,
+  .workflow-settings-rail > header, .connection-profile-row, .workflow-research-sheet-consumer > div) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.dashboard-modal :is(.dashboard-connection-rail-heading, .ai-trade-terminal-summary-heading,
+  .connection-profile-row) > :first-child { flex: 1 1 180px; min-width: 0; }
+.dashboard-modal .modal-portrait-panel :is(p, small, strong, label, dt, dd) {
+  overflow-wrap: anywhere;
+}
+.dashboard-modal .workflow-settings-rail > header .modal-eyebrow,
+.dashboard-modal .dashboard-connection-rail-heading .modal-eyebrow { font-size: 13px; }
+.dashboard-modal .workflow-settings-rail-content { gap: 16px; }
+.dashboard-modal .workflow-rail-action-card {
+  padding: 14px;
+  gap: 14px;
+  border: 1px solid var(--ui-line);
+  border-radius: 10px;
+  background: var(--ui-bg);
+}
+.dashboard-modal .workflow-settings-rail .workflow-plugin-profile {
+  border-color: var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-panel);
+}
+.dashboard-modal .workflow-settings-rail .workflow-plugin-profile summary { font-size: 12px; line-height: 1.7; }
+.dashboard-modal .workflow-action-heading h4 { font-size: 15px; line-height: 1.65; }
+.dashboard-modal .workflow-open-connection-hub {
+  width: 100%;
+  padding: 10px 12px;
+  border-color: var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-bg);
+  color: var(--ui-muted);
+}
+.dashboard-modal .workflow-research-sheet-consumer,
+.dashboard-modal :is(.ea-factory-rail-settings, .ea-factory-rail-task-status) {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--ui-line);
+  border-radius: 10px;
+  background: var(--ui-bg);
+}
+.dashboard-modal .ea-factory-rail-facts { display: grid; gap: 10px; margin: 0; }
+.dashboard-modal .ea-factory-rail-facts > div {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  gap: 10px;
+}
+.dashboard-modal .ea-factory-rail-facts dt { color: var(--ui-muted); }
+.dashboard-modal .ea-factory-rail-facts dd { margin: 0; font-weight: 600; }
+.dashboard-modal .ea-factory-rail-task-status :is(p, small) { margin: 0; }
+.dashboard-modal .ea-factory-rail-task-status button { border-radius: 8px; padding: 10px 12px; }
+.dashboard-modal .ai-trade-terminal-summary-heading span:not(.connection-badge) { font-size: 12px; }
+.dashboard-modal .ai-trade-terminal-summary-heading strong { font-size: 14px; }
+.dashboard-modal .ai-trade-platform-card > header { flex-wrap: wrap; gap: 8px; }
+
+/* Stack the sidebar actions so the auto-sized refresh label cannot squeeze Apply. */
+.dashboard-modal .ai-trade-selector-actions {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.dashboard-modal .ai-trade-selector-actions .modal-action {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 10px 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+/* Existing empty and guard messages stay visible and keep their actual state labels. */
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(
+  .workflow-truth-empty, .workflow-primary-empty, .workflow-empty-message,
+  .ea-factory-game-empty,
+  .signal-empty-state, .signal-deep-empty, .signal-chart-empty
+) {
+  padding: 24px;
+  border: 1px dashed var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel);
+  color: var(--ui-muted);
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(
+  .workflow-adapter-notice, .workflow-freshness-banner, .workflow-research-notice,
+  .workflow-research-blueprint-readiness, .workflow-research-blueprint-missing,
+  .ea-factory-notice, .ea-factory-research-gate, .ea-factory-readiness-issues,
+  .ea-factory-mode-unavailable, .ea-optimization-lab-notice,
+  .ea-optimization-lab-gate, .ea-optimization-lab-run-gate,
+  .signal-gate-note, .signal-consensus-gate-note, .signal-execution-guard-summary,
+  .workflow-connection-remedy, .workflow-action-status
+) {
+  padding: 14px 16px;
+  border: 1px solid var(--ui-line);
+  border-left: 3px solid var(--ui-blue);
+  border-radius: 8px;
+  background: var(--ui-panel);
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.workflow-dashboard-workspace :is(
+  .workflow-freshness-banner, .workflow-research-blueprint-missing,
+  .ea-factory-readiness-issues, .ea-factory-mode-unavailable
+) {
+  border-color: color-mix(in srgb, var(--ui-warning) 45%, var(--ui-line));
+  border-left-color: var(--ui-warning);
+  background: color-mix(in srgb, var(--ui-warning) 6%, var(--ui-panel));
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace, .dashboard-connection-rail) :is(
+  [data-tone="error"], [data-tone="blocked"], [data-status="error"], [data-status="failed"], [data-status="blocked"],
+  [data-state="error"], [data-state="blocked"], [data-connection-status="attention"]
+) {
+  border-color: color-mix(in srgb, var(--ui-danger) 60%, var(--ui-line));
+  color: var(--ui-danger);
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace, .dashboard-connection-rail) :is(
+  [data-tone="success"], [data-tone="ready"], [data-status="completed"],
+  [data-status="connected"], [data-connection-status="ready"]
+) {
+  border-color: color-mix(in srgb, var(--ui-accent) 55%, var(--ui-line));
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace, .dashboard-connection-rail) :is(
+  [data-tone="warning"], [data-status="waiting"], [data-status="partial"], [data-state="waiting"]
+) {
+  border-color: color-mix(in srgb, var(--ui-warning) 55%, var(--ui-line));
+}
+
+/* Stateful notices and connection cards likewise outrank their neutral surfaces. */
+.workflow-dashboard-workspace :is(.ea-factory-notice, .ea-factory-research-gate,
+  .ea-optimization-lab-notice, .workflow-research-notice,
+  .workflow-research-blueprint-readiness, .workflow-research-confirmation):is([data-tone="ready"], [data-tone="success"]),
+.dashboard-modal .connection-check-item[data-status="connected"],
+.dashboard-modal .ai-trade-platform-card[data-state="connected"] {
+  border-color: color-mix(in srgb, var(--ui-accent) 55%, var(--ui-line));
+  border-left: 3px solid var(--ui-accent);
+  background: color-mix(in srgb, var(--ui-accent) 7%, var(--ui-panel));
+}
+
+.workflow-dashboard-workspace :is(.ea-factory-notice, .ea-factory-research-gate,
+  .ea-optimization-lab-notice, .workflow-research-notice,
+  .workflow-research-blueprint-readiness, .workflow-research-confirmation):is([data-tone="warning"], [data-tone="working"], [data-tone="waiting"], [data-tone="simulation"]),
+.dashboard-modal .connection-check-item[data-status="partial"] {
+  border-color: color-mix(in srgb, var(--ui-warning) 55%, var(--ui-line));
+  border-left: 3px solid var(--ui-warning);
+  background: color-mix(in srgb, var(--ui-warning) 7%, var(--ui-panel));
+}
+
+.workflow-dashboard-workspace .workflow-research-notice[data-tone="loading"],
+.dashboard-modal .connection-check-item[data-status="checking"] {
+  border-color: color-mix(in srgb, var(--ui-blue) 55%, var(--ui-line));
+  border-left: 3px solid var(--ui-blue);
+  background: color-mix(in srgb, var(--ui-blue) 7%, var(--ui-panel));
+}
+
+.workflow-dashboard-workspace :is(.ea-factory-notice, .ea-factory-research-gate,
+  .ea-optimization-lab-notice, .workflow-research-notice,
+  .workflow-research-blueprint-readiness, .workflow-research-confirmation):is([data-tone="error"], [data-tone="blocked"]),
+.signal-consensus-workspace .signal-stream-prerequisite[data-tone="error"],
+.dashboard-modal .connection-check-item:is([data-status="error"], [data-status="not_connected"]),
+.dashboard-modal .ai-trade-platform-card[data-state="error"] {
+  border-color: color-mix(in srgb, var(--ui-danger) 60%, var(--ui-line));
+  border-left: 3px solid var(--ui-danger);
+  background: color-mix(in srgb, var(--ui-danger) 8%, var(--ui-panel));
+}
+
+:is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(:disabled, [aria-disabled="true"]) {
+  opacity: 0.55;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.dashboard-modal :is(.workflow-dashboard-workspace, .signal-consensus-workspace,
+  .dashboard-report-workspace, .workflow-settings-rail, .workflow-agent-handoff,
+  .dashboard-connection-rail)[hidden],
+.dashboard-modal :is(.workflow-dashboard-workspace, .signal-consensus-workspace,
+  .dashboard-report-workspace, .workflow-settings-rail, .workflow-agent-handoff,
+  .dashboard-connection-rail) [hidden] {
+  display: none !important;
+}
+
+@container hq-dashboard (max-width: 880px) {
+  .signal-consensus-workspace .signal-deep-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .signal-consensus-workspace .signal-deep-actions {
+    justify-content: flex-start;
+    max-width: 100%;
+  }
+
+  .signal-consensus-workspace :is(.signal-live-layout, .signal-council-overview-layout),
+  .workflow-dashboard-workspace :is(.ea-optimization-lab-source-layout,
+    .workflow-research-selection, .workflow-research-supporting-grid,
+    .ea-factory-game-progress-hero, .ea-factory-result-hero) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .signal-consensus-workspace :is(.signal-consensus-rail, .signal-council-overview-rail) {
+    position: static;
+  }
+
+  .workflow-dashboard-workspace :is(.workflow-result-columns, .workflow-catalog-grid,
+    .ea-factory-source-rules, .ea-optimization-lab-form-grid, .ea-optimization-lab-plan-grid) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@container hq-dashboard (max-width: 560px) {
+  .workflow-dashboard-workspace .workflow-trading-system-card :is(
+    .workflow-trading-system-facts, .workflow-trading-system-rules,
+    .workflow-trading-system-notes, .workflow-trading-system-risk dl
+  ) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workflow-dashboard-workspace .ea-factory-intake-hero {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 16px;
+  }
+
+  .workflow-dashboard-workspace .ea-factory-intake-hero > * { grid-column: 1; }
+  .workflow-dashboard-workspace .ea-factory-intake-progress {
+    grid-row: auto;
+    justify-self: stretch;
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+
+  .workflow-dashboard-workspace :is(.workflow-tab-content, .workflow-results) {
+    padding: 14px;
+    gap: 16px;
+  }
+
+  .workflow-dashboard-workspace :is(.workflow-tab-heading, .workflow-results-heading,
+    .workflow-trading-system-portal-heading, .workflow-radar-heading,
+    .workflow-connection-hub-heading, .workflow-fx-bias-summary,
+    .ea-factory-stage-heading, .ea-factory-one-click-heading) {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .workflow-dashboard-workspace .workflow-tabs[data-ea-factory-pages="true"] {
+    display: flex;
+    overflow-x: auto;
+  }
+
+  .workflow-dashboard-workspace .workflow-tabs[data-ea-factory-pages="true"] .workflow-tab {
+    flex: 1 0 145px;
+  }
+
+  .workflow-dashboard-workspace :is(.workflow-field-grid, .ea-factory-spec-form,
+    .ea-factory-terminal-picker, .ea-factory-record-import-row,
+    .ea-factory-sheet-sync-fields, .workflow-research-confirmation-controls),
+  .signal-consensus-workspace :is(.signal-deep-feature-grid, .signal-deep-news-grid, .signal-assurance-grid) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .signal-consensus-workspace .signal-deep-package {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workflow-dashboard-workspace :is(.ea-factory-spec-form > button, .ea-factory-terminal-picker h5) {
+    grid-column: 1 / -1;
+  }
+
+  :is(.workflow-dashboard-workspace, .signal-consensus-workspace) :is(th, td) {
+    padding: 10px;
+  }
+}

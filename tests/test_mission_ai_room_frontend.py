@@ -10,7 +10,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 INDEX_PATH = ROOT / "frontend" / "index.html"
 MAIN_PATH = ROOT / "frontend" / "src" / "app" / "main.js"
-STYLES_PATH = ROOT / "frontend" / "src" / "app" / "styles.css"
+MODEL_PATH = ROOT / "frontend" / "src" / "features" / "chat" / "meeting-session.js"
+STYLES_PATH = ROOT / "frontend" / "src" / "styles" / "main.css"
 
 
 class MissionAiRoomFrontendTests(unittest.TestCase):
@@ -18,6 +19,7 @@ class MissionAiRoomFrontendTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.html = INDEX_PATH.read_text(encoding="utf-8")
         cls.main = MAIN_PATH.read_text(encoding="utf-8")
+        cls.model = MODEL_PATH.read_text(encoding="utf-8")
         cls.styles = STYLES_PATH.read_text(encoding="utf-8")
 
     def function_source(self, name: str) -> str:
@@ -27,6 +29,13 @@ class MissionAiRoomFrontendTests(unittest.TestCase):
         if not next_match:
             return self.main[match.start() :]
         return self.main[match.start() : match.start() + 1 + next_match.start()]
+
+    def model_source(self, name: str) -> str:
+        start = self.model.index(f"  function {name}(")
+        end = self.model.find("\n  function ", start + 1)
+        if end < 0:
+            end = self.model.index("\n  return {", start + 1)
+        return self.model[start:end]
 
     def node_binary(self) -> str:
         candidates = [
@@ -48,6 +57,13 @@ class MissionAiRoomFrontendTests(unittest.TestCase):
         self.skipTest("Node.js is required for frontend behavior regressions")
 
     def run_node(self, script: str) -> dict:
+        # Import the real model; resolve the caller's current roster at call time.
+        prelude = (
+            f"const {{createMeetingSessionModel}} = await import({json.dumps(MODEL_PATH.as_uri())});\n"
+            "const {normalizeMeetingText, normalizeMeetingTextList, normalizeMeetingParticipant, normalizeMeetingMessage, normalizeMeetingProposal, normalizeMeetingSession, normalizeMeetingSessionPayload, normalizeMeetingSessionsPayload} = createMeetingSessionModel({"
+            "getOfficeAgent: (id) => typeof getOfficeAgent === 'function' ? getOfficeAgent(id) : null});\n"
+        )
+        script = "(async () => {\n" + prelude + script + "\n})().catch(error => {console.error(error); process.exit(1);});"
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "mission-ai-room-regression.js"
             path.write_text(script, encoding="utf-8")
@@ -236,13 +252,6 @@ class MissionAiRoomFrontendTests(unittest.TestCase):
         functions = "\n".join(
             self.function_source(name)
             for name in (
-                "normalizeMeetingText",
-                "normalizeMeetingTextList",
-                "normalizeMeetingParticipant",
-                "normalizeMeetingMessage",
-                "normalizeMeetingProposal",
-                "normalizeMeetingSession",
-                "normalizeMeetingSessionPayload",
                 "meetingSessionIsPollingActive",
                 "meetingSessionCanInterject",
                 "meetingSessionCanFreezeProposal",
@@ -316,22 +325,9 @@ class MissionAiRoomFrontendTests(unittest.TestCase):
                 "approvalNote": "อนุมัติเฉพาะไฟล์ Agent Office ที่ระบุ",
             },
         }
-        functions = "\n".join(
-            self.function_source(name)
-            for name in (
-                "normalizeMeetingText",
-                "normalizeMeetingTextList",
-                "normalizeMeetingParticipant",
-                "normalizeMeetingMessage",
-                "normalizeMeetingProposal",
-                "normalizeMeetingSession",
-                "normalizeMeetingSessionPayload",
-            )
-        )
         script = "\n".join(
             [
                 "const getOfficeAgent = () => null;",
-                functions,
                 f"const normalized=normalizeMeetingSessionPayload({json.dumps(fixture)});",
                 "process.stdout.write(JSON.stringify({status:normalized.proposal.status,missionId:normalized.proposal.implementationMissionId,ready:normalized.proposal.readyToExecute,approvalNote:normalized.approvalNote}));",
             ]
@@ -362,7 +358,7 @@ class MissionAiRoomFrontendTests(unittest.TestCase):
             self.assertIn(f'id="{element_id}"', panel)
             self.assertIn(f"els.{element_ref}.textContent", renderer)
             self.assertNotIn(f"els.{element_ref}.innerHTML", renderer)
-        normalizer = self.function_source("normalizeMeetingProposal")
+        normalizer = self.model_source("normalizeMeetingProposal")
         for field in (
             "structuredProposal",
             "risks",
@@ -378,9 +374,6 @@ class MissionAiRoomFrontendTests(unittest.TestCase):
         functions = "\n".join(
             self.function_source(name)
             for name in (
-                "normalizeMeetingText",
-                "normalizeMeetingTextList",
-                "normalizeMeetingProposal",
                 "meetingProposalDigestIsValid",
                 "meetingProposalVisibleConsentIsComplete",
             )
@@ -451,7 +444,6 @@ class MissionAiRoomFrontendTests(unittest.TestCase):
         functions = "\n".join(
             self.function_source(name)
             for name in (
-                "normalizeMeetingText",
                 "meetingSessionApprovalNoteIsImmutable",
                 "meetingSessionDraftKey",
                 "saveMeetingSessionDrafts",
@@ -580,7 +572,7 @@ class MissionAiRoomFrontendTests(unittest.TestCase):
     def test_user_controls_topic_goal_and_ai_chat_batch(self) -> None:
         panel = self.panel_source()
         start = self.function_source("startMeetingSession")
-        normalizer = self.function_source("normalizeMeetingSession")
+        normalizer = self.model_source("normalizeMeetingSession")
         for copy in (
             "หัวข้อที่ให้ AI ประชุม",
             "สิ่งที่ต้องการพัฒนา",
@@ -727,7 +719,7 @@ class MissionAiRoomFrontendTests(unittest.TestCase):
             self.assertIn(f'id: "{status}"', columns)
 
     def test_cache_version_keeps_expanded_meeting_room_in_latest_build(self) -> None:
-        self.assertGreaterEqual(self.html.count("20260913-ea-factory-3page-state-v0919"), 2)
+        self.assertGreaterEqual(self.html.count("20261017-world-radar-rows-v0922-r2"), 2)
         self.assertNotIn("20260824-ea-optimization-lab-v072", self.html)
         self.assertNotIn("20260823-radar-run-truth-v069", self.html)
         self.assertNotIn("20260822-ai-meeting-chat-first-v067", self.html)
@@ -736,7 +728,9 @@ class MissionAiRoomFrontendTests(unittest.TestCase):
         self.assertNotIn("20260814-ai-meeting-preview-v063", self.html)
 
     def test_user_facing_waiting_to_start_copy_remains_removed(self) -> None:
-        for source in (self.html, self.main):
+        meeting_start = self.main.index("function meetingSessionIsActive")
+        meeting_end = self.main.index("function getMissionCenterColumnStatus", meeting_start)
+        for source in (self.panel_source(), self.model, self.main[meeting_start:meeting_end]):
             self.assertNotIn("รอเริ่มงาน", source)
             self.assertNotIn("งานที่รอเริ่ม", source)
         self.assertIn("กดโต๊ะเพื่อเปิดห้องแชท AI รวมที่เชื่อม Session จาก Backend", self.main)

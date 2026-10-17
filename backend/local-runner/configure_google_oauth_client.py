@@ -11,8 +11,8 @@ import json
 import sys
 from pathlib import Path
 
-import google_oauth_store
-import google_sheet_hub
+from hq_backend.google import google_oauth_store
+from hq_backend.google import google_sheet_hub
 
 
 def _safe_status() -> dict:

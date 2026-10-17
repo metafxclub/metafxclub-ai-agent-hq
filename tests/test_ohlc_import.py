@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "backend" / "local-runner" / "ohlc_import.py"
+MODULE_PATH = ROOT / "backend" / "local-runner" / "hq_backend" / "trading" / "ohlc_import.py"
 SPEC = importlib.util.spec_from_file_location("ohlc_import_under_test", MODULE_PATH)
 ohlc = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader

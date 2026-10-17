@@ -7,7 +7,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_INDEX = PROJECT_ROOT / "frontend" / "index.html"
 FRONTEND_MAIN = PROJECT_ROOT / "frontend" / "src" / "app" / "main.js"
-FRONTEND_STYLES = PROJECT_ROOT / "frontend" / "src" / "app" / "styles.css"
+FRONTEND_STYLES = PROJECT_ROOT / "frontend" / "src" / "styles" / "main.css"
 
 
 def function_block(source: str, signature: str) -> str:
@@ -169,7 +169,8 @@ class AiTradeCouncilTerminalSummaryTests(unittest.TestCase):
         )
         self.assertNotIn("getSignalRuntimeTruth", health)
         self.assertNotIn("aiTradePlatformConnectionModels", health)
-        self.assertIn("rawHubModel?.selectedPlatform", health)
+        self.assertIn("rawHubModel?.activePlatform", health)
+        self.assertNotIn("rawHubModel?.selectedPlatform", health)
         self.assertIn("hubPlatformModel?.selectedCandidate?.candidateId", health)
         self.assertIn("council?.platformConnections", health)
         self.assertIn("expectedCandidateId === suppliedCandidateId", health)
@@ -238,7 +239,8 @@ class AiTradeCouncilTerminalSummaryTests(unittest.TestCase):
         self.assertNotIn("openGlobalMetatraderHubFromDevice(event)", daily)
         self.assertNotIn("prepareAiTradeMt4Channel()", daily)
         self.assertIn("const hubModelPresent = Boolean(", daily)
-        self.assertIn("hubReadModel.selectedPlatform", daily)
+        self.assertIn("hubReadModel.activePlatform", daily)
+        self.assertNotIn("hubReadModel.selectedPlatform", daily)
         self.assertIn('const platformLabel = activePlatform || "MT4 / MT5";', daily)
         self.assertIn('"MetafxHQTradeGateway.mq5"', daily)
         self.assertIn('"MQL5"', daily)

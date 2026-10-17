@@ -9,7 +9,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "backend" / "local-runner" / "ea_research_blueprint.py"
+LOCAL_RUNNER = ROOT / "backend" / "local-runner"
+MODULE_PATH = ROOT / "backend" / "local-runner" / "hq_backend" / "ea" / "ea_research_blueprint.py"
 SCHEMA_PATH = ROOT / "contracts" / "research" / "ea-implementation-blueprint-v2.schema.json"
 
 
@@ -19,7 +20,15 @@ def load_contract_module():
         raise AssertionError("Could not load EA research blueprint module")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    runner = str(LOCAL_RUNNER)
+    added = runner not in sys.path
+    if added:
+        sys.path.insert(0, runner)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if added:
+            sys.path.remove(runner)
     return module
 
 

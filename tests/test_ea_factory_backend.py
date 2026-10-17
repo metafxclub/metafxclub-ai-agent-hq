@@ -75,6 +75,46 @@ class EaFactoryBackendTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.bridge = load_bridge()
 
+    def setUp(self) -> None:
+        # These tests exercise Factory behavior after the operator has locked
+        # both authoritative top-header terminals.  The dedicated dual-lock
+        # suites cover the fail-closed 0/2 and 1/2 paths; keeping this fixture
+        # ready lets validation-specific tests reach their intended gate.
+        self.top_header_locks = mock.patch.object(
+            self.bridge,
+            "_global_metatrader_platform_context",
+            side_effect=self._dual_locked_platform_context,
+        )
+        self.top_header_locks.start()
+
+    def tearDown(self) -> None:
+        self.top_header_locks.stop()
+
+    @staticmethod
+    def _dual_locked_platform_context(
+        platform: object,
+        *,
+        require_all_platforms: bool = True,
+    ) -> dict | None:
+        normalized = str(platform or "").strip().lower()
+        if normalized not in {"mt4", "mt5"}:
+            return None
+        candidate_id = f"mtc-ea-factory-{normalized}-locked"
+        return {
+            "record": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "available": True,
+                "runningState": "platform_running_detected",
+            },
+            "token": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "selectionRevision": 7,
+            },
+            "selectedAt": "2026-10-16T09:00:00+07:00",
+        }
+
     @staticmethod
     def exact_indicator_source(requirements: dict) -> str:
         semantic_markers = {
@@ -1551,6 +1591,7 @@ int OnCalculate(const int rates_total, const int prev_calculated,
                 "id": failed_mission_id,
                 "status": "failed",
                 "errorCode": "invalid_output",
+                "result": "Source ไม่ผ่าน Validator และไม่ได้ถูกส่งต่อไป Compile",
                 "updatedAt": "2026-09-11T18:33:25+07:00",
             }],
             reports=[],
@@ -1568,6 +1609,10 @@ int OnCalculate(const int rates_total, const int prev_calculated,
         self.assertEqual(projected_build["status"], "attention_required")
         self.assertEqual(projected_stage["status"], "failed")
         self.assertEqual(projected_stage["blockedReasonCode"], "invalid_output")
+        self.assertEqual(
+            projected_stage["detailTh"],
+            "Source ไม่ผ่าน Validator และไม่ได้ถูกส่งต่อไป Compile",
+        )
         self.assertTrue(projected_stage["canRetry"])
         self.assertEqual(projected_stage["retryAttemptCount"], 0)
         self.assertEqual(
@@ -1960,14 +2005,14 @@ int OnCalculate(const int rates_total, const int prev_calculated,
         self.assertFalse(model["safety"]["syntheticCompileOrBacktestSuccessAllowed"])
         self.assertTrue(model["safety"]["automaticLoop"])
         self.assertIn("oneClick", model)
-        self.assertTrue(model["oneClick"]["enabled"])
+        self.assertFalse(model["oneClick"]["enabled"])
         self.assertFalse(model["oneClick"]["liveTradingAllowed"])
         self.assertEqual(
             model["endpoints"]["downloadArtifactTemplate"],
             "/api/props/right_server_racks/ea-factory/builds/{buildId}/files/{fileId}",
         )
 
-    def test_read_model_marks_mt5_as_manual_only_and_never_launches_terminal(self) -> None:
+    def test_read_model_enables_selected_running_mt5_without_launching_terminal(self) -> None:
         empty_state = self.bridge._empty_ea_factory_state()
         selected = {
             "candidateId": "mtc-mt5-manual-only",
@@ -2001,6 +2046,13 @@ int OnCalculate(const int rates_total, const int prev_calculated,
                 "readReady": False,
             }],
         }
+        class BothVisiblePlatforms:
+            supported_platforms = frozenset({"mt4", "mt5"})
+
+            def capability_provider(self, **_kwargs):
+                return {}
+
+        adapter = BothVisiblePlatforms()
         with (
             mock.patch.object(self.bridge, "_load_ea_factory_state_unlocked", return_value=empty_state),
             mock.patch.object(self.bridge, "load_missions", return_value=[]),
@@ -2017,26 +2069,38 @@ int OnCalculate(const int rates_total, const int prev_calculated,
                 },
             ),
             mock.patch.object(self.bridge, "_ea_factory_terminal_gate", side_effect=gate),
+            mock.patch.object(
+                self.bridge,
+                "EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER",
+                adapter.capability_provider,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER",
+                lambda **_kwargs: {},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER",
+                lambda **_kwargs: {},
+            ),
         ):
             model = self.bridge.ea_factory_read_model()
-        self.assertFalse(model["oneClick"]["enabled"])
-        self.assertFalse(model["oneClick"]["canRun"])
-        self.assertFalse(model["oneClick"]["canCreateAndRun"])
-        self.assertFalse(model["oneClick"]["selectedPlatformSupported"])
-        self.assertEqual(model["oneClick"]["supportedVisiblePlatforms"], ["mt4"])
-        self.assertEqual(
-            model["oneClick"]["unsupportedReasonCode"],
-            "one_click_visible_mt5_not_implemented",
-        )
+        self.assertTrue(model["oneClick"]["enabled"])
+        self.assertTrue(model["oneClick"]["canRun"])
+        self.assertTrue(model["oneClick"]["canCreateAndRun"])
+        self.assertTrue(model["oneClick"]["selectedPlatformSupported"])
+        self.assertEqual(model["oneClick"]["supportedVisiblePlatforms"], ["mt4", "mt5"])
+        self.assertIsNone(model["oneClick"]["unsupportedReasonCode"])
         self.assertTrue(model["oneClick"]["terminalRunning"])
         self.assertFalse(model["oneClick"]["terminalProcessLaunchAllowed"])
-        self.assertFalse(model["terminalSelection"]["terminalExecutionAllowed"])
+        self.assertTrue(model["terminalSelection"]["terminalExecutionAllowed"])
         mt5 = next(row for row in model["platforms"] if row["id"] == "mt5")
-        self.assertFalse(mt5["oneClickVisibleAvailable"])
-        self.assertEqual(mt5["compileMode"], "manual_stage_by_stage_visible_metaeditor")
+        self.assertTrue(mt5["oneClickVisibleAvailable"])
+        self.assertEqual(mt5["compileMode"], "one_click_visible_metaeditor_or_manual_stage_by_stage")
         self.assertEqual(
             mt5["backtestMode"],
-            "manual_stage_by_stage_visible_strategy_tester",
+            "one_click_visible_strategy_tester_or_manual_stage_by_stage",
         )
         self.assertTrue(mt5["terminalMustAlreadyBeRunning"])
         self.assertFalse(mt5["terminalProcessLaunchAllowed"])
@@ -2073,6 +2137,14 @@ int OnCalculate(const int rates_total, const int prev_calculated,
             "idempotentReplay": False,
             "workerStarted": True,
         }
+        cancel_result = {
+            "ok": True,
+            "kind": "ea_factory_one_click_cancel_pending",
+            "buildId": "ea-build-route",
+            "oneClickRun": {"status": "cancelling"},
+            "idempotentReplay": False,
+            "cancelPending": True,
+        }
         with (
             mock.patch.object(self.bridge, "ea_factory_read_model", return_value=factory_model),
             mock.patch.object(self.bridge, "create_ea_factory_build", return_value=create_result) as create,
@@ -2087,6 +2159,11 @@ int OnCalculate(const int rates_total, const int prev_calculated,
                 "run_ea_factory_build_one_click",
                 return_value=run_result,
             ) as run,
+            mock.patch.object(
+                self.bridge,
+                "cancel_ea_factory_build_one_click",
+                return_value=cancel_result,
+            ) as cancel,
         ):
             server = self.bridge.BridgeHTTPServer(("127.0.0.1", 0), self.bridge.BridgeHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -2131,6 +2208,17 @@ int OnCalculate(const int rates_total, const int prev_calculated,
                 )
                 self.assertEqual(status, 200)
                 self.assertEqual(body["kind"], "ea_factory_one_click_started")
+                status, body = self.request(
+                    server.server_port,
+                    "POST",
+                    "/api/props/right_server_racks/ea-factory/builds/ea-build-route/cancel",
+                    {
+                        "runId": "ea-run-route",
+                        "idempotencyKey": "ea-one-click-route",
+                    },
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(body["kind"], "ea_factory_one_click_cancel_pending")
                 create.assert_called_once()
                 advance.assert_called_once_with("ea-build-route", {"stageId": "generate_source"})
                 retry.assert_called_once_with(
@@ -2144,6 +2232,13 @@ int OnCalculate(const int rates_total, const int prev_calculated,
                 run.assert_called_once_with(
                     "ea-build-route",
                     {"idempotencyKey": "ea-one-click-route"},
+                )
+                cancel.assert_called_once_with(
+                    "ea-build-route",
+                    {
+                        "runId": "ea-run-route",
+                        "idempotencyKey": "ea-one-click-route",
+                    },
                 )
             finally:
                 server.shutdown()

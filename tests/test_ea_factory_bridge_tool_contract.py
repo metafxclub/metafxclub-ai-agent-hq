@@ -27,11 +27,14 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
     def test_factory_control_endpoints_and_safe_download_are_declared(self):
         core_expected = {
             "GET /api/props/right_server_racks/ea-factory",
+            "GET /api/props/right_server_racks/ea-factory/market-watch",
+            "GET /api/props/right_server_racks/ea-factory/sources/google-sheet/catalog",
             "POST /api/props/right_server_racks/ea-factory/sources/google-sheet/sync",
             "POST /api/props/right_server_racks/ea-factory/builds",
             "POST /api/props/right_server_racks/ea-factory/builds/:buildId/advance",
             "POST /api/props/right_server_racks/ea-factory/builds/:buildId/retry",
             "POST /api/props/right_server_racks/ea-factory/builds/:buildId/run",
+            "POST /api/props/right_server_racks/ea-factory/builds/:buildId/restart-backtest",
         }
         download = "GET /api/props/right_server_racks/ea-factory/builds/:buildId/files/:fileId"
         declared = {
@@ -71,6 +74,17 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
         shapes = factory["endpointShapes"]
         self.assertEqual(shapes["read"]["requestBody"], "none")
         self.assertFalse(shapes["read"]["sideEffects"])
+        catalog = shapes["googleSheetCatalog"]
+        self.assertEqual(catalog["requestBody"], "none")
+        self.assertEqual(catalog["optionalQueryFields"], ["recordId"])
+        self.assertFalse(catalog["sideEffects"])
+        self.assertTrue(catalog["externalReads"])
+        self.assertFalse(catalog["externalWrites"])
+        self.assertTrue(catalog["stableDoubleReadRequired"])
+        self.assertTrue(catalog["googleAuthorizationBindingRequired"])
+        self.assertFalse(catalog["staleFallbackAllowed"])
+        self.assertNotIn("sheetId", catalog["frontendSafeFields"])
+        self.assertIn("accessToken", catalog["forbiddenFields"])
         self.assertEqual(
             shapes["syncGoogleSheet"]["allowedRequestFields"],
             ["configRevision", "idempotencyKey", "googleSheetUrlOrId", "tabName"],
@@ -81,9 +95,38 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
         )
         self.assertEqual(shapes["runBuild"]["allowedRequestFields"], ["idempotencyKey"])
         self.assertEqual(shapes["runBuild"]["requiredRequestFields"], ["idempotencyKey"])
+        self.assertEqual(
+            shapes["runBuild"]["supportedVisiblePlatforms"],
+            ["mt4", "mt5"],
+        )
         self.assertTrue(shapes["runBuild"]["sameKeyResumesAwaitingVisibleTerminal"])
         self.assertFalse(shapes["runBuild"]["phaseGateBypassAllowed"])
         self.assertFalse(shapes["runBuild"]["liveTradingAllowed"])
+        restart = shapes["restartBacktest"]
+        self.assertEqual(
+            restart["allowedRequestFields"],
+            ["runId", "idempotencyKey"],
+        )
+        self.assertEqual(restart["requiredRequestFields"], restart["allowedRequestFields"])
+        self.assertEqual(
+            restart["eligibleRunStatuses"],
+            ["cancelled", "failed", "awaiting_visible_terminal"],
+        )
+        self.assertTrue(restart["exactTesterIdleProbeBeforeCommit"])
+        self.assertFalse(restart["canRestartReadModelIsTesterIdleProof"])
+        self.assertEqual(
+            restart["archiveSchemaVersion"],
+            "ea-factory-backtest-restart-archive-v1",
+        )
+        self.assertEqual(restart["archiveMaximumEntriesPerBuild"], 8)
+        self.assertEqual(restart["threadStartFailureDurableStatus"], "failed")
+        self.assertEqual(
+            restart["sameKeyAfterThreadStartFailure"],
+            "replay_failed_run_without_starting_worker",
+        )
+        self.assertFalse(restart["sourceRegenerated"])
+        self.assertFalse(restart["compileRepeated"])
+        self.assertFalse(restart["liveTradingAllowed"])
         self.assertEqual(
             shapes["syncGoogleSheet"]["defaults"],
             {
@@ -94,7 +137,12 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
         self.assertEqual(
             shapes["createBuild"]["allowedRequestFields"],
             [
+                "recordId",
                 "sourceRecordId",
+                "recordDigest",
+                "catalogDigest",
+                "snapshotDigest",
+                "configRevision",
                 "artifactKind",
                 "platform",
                 "brief",
@@ -104,6 +152,26 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
         self.assertEqual(
             shapes["createBuild"]["requiredRequestFields"],
             ["sourceRecordId", "platform"],
+        )
+        self.assertEqual(
+            shapes["createBuild"]["sheetSourceRequiredRequestFields"],
+            [
+                "recordId",
+                "sourceRecordId",
+                "recordDigest",
+                "catalogDigest",
+                "snapshotDigest",
+                "configRevision",
+            ],
+        )
+        self.assertTrue(shapes["createBuild"]["sheetBindingAtomic"])
+        self.assertTrue(
+            shapes["createBuild"]["authoritativeLiveCatalogPrecondition"]
+        )
+        self.assertFalse(shapes["createBuild"]["catalogCacheAllowedForPrecondition"])
+        self.assertEqual(shapes["createBuild"]["staleBindingStatus"], 409)
+        self.assertFalse(
+            shapes["createBuild"]["sideEffectsBeforeLivePreconditionAllowed"]
         )
         self.assertEqual(
             shapes["createBuild"]["platformValues"],
@@ -228,14 +296,34 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
         self.assertIn("terminalRunning", model["oneClickFields"])
         self.assertIn("terminalMustAlreadyBeRunning", model["oneClickFields"])
         self.assertIn("terminalProcessLaunchAllowed", model["oneClickFields"])
+        self.assertIn("restartBacktestEndpointTemplate", model["oneClickFields"])
         self.assertIn("idempotencyKey", model["oneClickRunFields"])
         self.assertIn("canResume", model["oneClickRunFields"])
+        self.assertIn("canRestartBacktest", model["oneClickRunFields"])
+        self.assertIn("restartBacktestEndpoint", model["oneClickRunFields"])
+        self.assertIn("restartOfRunId", model["oneClickRunFields"])
+        self.assertIn("restartArchiveDigest", model["oneClickRunFields"])
+        self.assertIn("executionContractDigest", model["oneClickRunFields"])
+        self.assertIn("canCancel", model["oneClickRunFields"])
+        self.assertIn("progressPercent", model["oneClickRunFields"])
+        self.assertIn("cancelEndpoint", model["oneClickRunFields"])
+        self.assertIn("resumeKind", model["oneClickRunFields"])
         self.assertIn(
             "requiresExplicitResume",
             model["oneClickVisibleActionFields"],
         )
         self.assertIn("downloadArtifactTemplate", model["endpointFields"])
         self.assertIn("retryBuildStageTemplate", model["endpointFields"])
+        self.assertIn("restartBacktestTemplate", model["endpointFields"])
+        smoke = factory["platformProof"]["mt5TechnicalSmokePolicy"]
+        self.assertEqual(smoke["purpose"], "technical_execution_smoke_not_full_strategy_evaluation_or_optimization")
+        self.assertEqual(smoke["clock"], "UTC")
+        self.assertTrue(smoke["useDate"])
+        self.assertEqual(smoke["toDate"], "previous_utc_calendar_day")
+        self.assertEqual(smoke["inclusiveCalendarDays"], 90)
+        self.assertEqual(smoke["fromDateOffsetDaysFromToDate"], -89)
+        self.assertFalse(smoke["optimizationEnabled"])
+        self.assertFalse(smoke["shutdownTerminalAfterTest"])
         self.assertNotIn("sheetId", model["frontendForbiddenFields"])
         self.assertNotIn("rawSheetId", model["frontendForbiddenFields"])
         self.assertIn("serviceAccountKey", model["frontendForbiddenFields"])
@@ -279,7 +367,7 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
         self.assertFalse(read_tool["scheduled"])
         self.assertFalse(read_tool["automaticLoop"])
 
-    def test_compile_only_adapter_is_guarded_and_strategy_tester_remains_unavailable(self):
+    def test_compile_and_visible_strategy_tester_are_guarded_and_fail_closed(self):
         compile_tool = self.tools["compile_strategy_code"]
         tester_tool = self.tools["run_strategy_tester"]
         self.assertEqual(compile_tool["label"], "Compile MQL4 / MQL5")
@@ -314,9 +402,13 @@ class EaFactoryBridgeToolContractTests(unittest.TestCase):
         )
 
         self.assertIn("right_server_racks", tester_tool["linkedPropIds"])
-        self.assertEqual(tester_tool["adapterStatus"], "coming_soon")
-        self.assertFalse(tester_tool["realExecutionAvailable"])
-        self.assertFalse(tester_tool["autoRunnable"])
+        self.assertEqual(
+            tester_tool["adapterStatus"],
+            "implemented_visible_fail_closed_for_ea_factory",
+        )
+        self.assertTrue(tester_tool["realExecutionAvailable"])
+        self.assertTrue(tester_tool["autoRunnable"])
+        self.assertEqual(tester_tool["supportedTargets"], ["mt4", "mt5"])
         self.assertTrue(tester_tool["requiresExactSelectedTerminalPlatform"])
         self.assertTrue(tester_tool["requiresVerifiedFrontOfficeAdapter"])
         self.assertFalse(tester_tool["terminalSelectionIsExecutionProof"])

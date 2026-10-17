@@ -1,5 +1,5 @@
 {
-  "version": "dashboard-connection-contract-v009",
+  "version": "dashboard-connection-contract-v010",
   "purpose": "กำหนด Checklist การเชื่อมต่อ ความพร้อม โหมดทำงาน และเส้นทางรายงานของ Dashboard ทั้ง 9 จุด โดยให้ Backend เป็นผู้ตรวจสถานะจริง",
   "statusVocabulary": [
     "connected",
@@ -144,15 +144,26 @@
       "statusEndpoint": "GET /api/integrations/metatrader/global",
       "discoveryEndpoint": "POST /api/integrations/metatrader/global/discover",
       "selectionEndpoint": "POST /api/integrations/metatrader/global/select",
+      "activationEndpoint": "POST /api/integrations/metatrader/global/activate",
+      "eaFactoryMarketWatchEndpoint": "GET /api/props/right_server_racks/ea-factory/market-watch",
       "selectionRequestFields": ["platform", "candidateId"],
+      "activationRequestFields": ["platform"],
+      "activationRequiresBothPlatformLocks": true,
+      "activationRunsAiTradeTargetSwitchSafety": true,
       "missionReportTargetPropId": "mission_strategy_table",
       "discoveryCapabilityProfilePropId": "right_server_racks",
       "selectionFanOutByPlatform": {
         "mt4": ["left_analytics_console", "right_server_racks", "right_tool_console"],
         "mt5": ["left_analytics_console", "right_server_racks", "right_tool_console"]
       },
-      "platformSelectionMode": "single_exclusive_radio",
-      "oneActivePlatformPerDashboard": true,
+      "platformSelectionMode": "independent_platform_locks",
+      "requiredPlatformLocks": ["mt4", "mt5"],
+      "bothPlatformLocksRequiredBeforeMtWork": true,
+      "oneActivePlatformPerDashboard": false,
+      "activePlatformIsSeparateFromLocks": true,
+      "activePlatformPurpose": "ai_trade_council_execution_only",
+      "activePlatformChangeDoesNotReplaceEitherLock": true,
+      "platformLockChangeDoesNotImplicitlyChangeActivePlatform": true,
       "backendAtomicFanOut": true,
       "frontendFanOutForbidden": true,
       "backendReadBackVerificationRequired": true,
@@ -183,21 +194,31 @@
         "connectionHealthIndependentFromBackendExecutionReadiness": true,
         "oneResponseUsesSingleSelectionGeneration": true,
         "bothPlatformsMayBeConnected": true,
-        "atMostOnePlatformAuthoritativeForDashboardAndCommands": true,
-        "exactlyOnePlatformAuthoritativeWhenGloballyConfigured": true,
+        "bothPlatformsMustBeLockedBeforeMtWork": true,
+        "matchingPlatformLockAuthoritativeForEachMtOperation": true,
+        "atMostOnePlatformAuthoritativeForAiTradeCommands": true,
+        "activePlatformIsIndependentFromPlatformLocks": true,
         "errorIncludesReasonAndRemediation": true
       },
       "legacyPerDashboardEndpointsRetainedForCompatibility": true,
       "legacyPerDashboardEndpointBehavior": "backend_alias_to_platform_atomic_fanout",
       "legacyPerDashboardEndpointMayWriteSingleConsumer": false,
-      "terminalWorkstationExcludedReason": "EA Development Studio creates and reviews source; compile, backtest and optimization terminal selection belongs to EA Factory and EA Lab.",
+      "terminalWorkstationExcludedReason": "All MT4/MT5 work, including EA Development Studio, EA Factory and the separate EA Optimization Lab, consumes only the independent MT4/MT5 locks owned by the central header.",
       "selectionDoesNotLaunchTerminal": true,
-      "selectionDoesNotEnableLiveTrading": true
+      "selectionDoesNotEnableLiveTrading": true,
+      "eaFactoryMarketWatchRules": {
+        "platform": "mt4",
+        "exactSelectedCandidateAndRevisionRequired": true,
+        "visibleRowCountMustMatchExactlyOneProfile": true,
+        "terminalOrRevisionChangeInvalidatesCatalog": true,
+        "automaticFirstSymbolSelectionAllowed": false,
+        "pathsProcessAccountBrokerQuotesAndTradesExposed": false
+      }
     },
     "selectionSubstateVocabulary": ["selected", "not_selected", "not_required"],
     "configurationSubstateVocabulary": ["configured", "not_configured", "not_required"],
     "selectionSubstateIsOverallStatus": false,
-    "persistence": "backend_atomic_fanout_to_per_prop_consumer_bindings",
+    "persistence": "backend_authoritative_dual_platform_locks_with_compatibility_per_prop_projection",
     "selectionIsConnection": false,
     "selectionEnablesLiveTrading": false,
     "eaSnapshotChannelUi": {
@@ -274,7 +295,7 @@
     },
     "right_server_racks": {
       "moduleNameTh": "โรงงานสร้าง EA และ Indicator",
-      "availability": {"ui": "ready", "data": "research_and_public_sheet_catalog_ready", "execution": "mt4_one_click_with_manual_stage_recovery_mt5_manual_stage_by_stage", "compile": "mt4_injected_visible_adapter_mt5_manual_stage_by_stage", "backtest": "mt4_injected_visible_adapter_mt5_manual_stage_by_stage"},
+      "availability": {"ui": "ready", "data": "research_and_public_sheet_catalog_ready", "execution": "mt4_mt5_one_click_with_manual_stage_recovery", "compile": "mt4_mt5_injected_visible_adapter", "backtest": "mt4_mt5_injected_visible_adapter"},
       "localTabs": [
         {"id": "source", "labelTh": "1 เลือกระบบ", "actionIds": [], "viewOnly": false},
         {"id": "strategy_spec", "labelTh": "2 ตรวจ Strategy Spec", "actionIds": []},
@@ -291,16 +312,16 @@
         {"id": "codex_workspace", "labelTh": "พื้นที่สร้าง Source Code ผ่าน Codex", "required": true, "adapterStatus": "implemented", "mode": "guarded_workspace"},
         {"id": "mt4_terminal", "labelTh": "โปรแกรม MT4 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
         {"id": "mt5_terminal", "labelTh": "โปรแกรม MT5 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
-        {"id": "metaeditor_compile_adapter", "labelTh": "Compile ผ่าน MetaEditor ที่มองเห็นจริง โดย Backend ผูกกับ Terminal ที่เลือก", "required": false, "adapterStatus": "guarded_requires_selected_matching_terminal_and_proof", "verifiedOneClickPlatforms": ["mt4"], "mt5Status": "manual_stage_by_stage_only", "selectedTerminalMustAlreadyBeRunning": true, "oneClickTerminalLaunchAllowed": false, "manualRecoveryTerminalLaunchAllowed": false, "frontendPathOrArgsAllowed": false, "successEvidence": ["visible_metaeditor_window", "fresh_process_window_binding", "fresh_unicode_log_exact_zero_zero", "source_compiler_selection_digests", "compiled_binary_sha256", "immutable_receipt"]},
-        {"id": "strategy_tester_adapter", "labelTh": "Visual Backtest ผ่าน Strategy Tester ที่มองเห็นจริง พร้อม Source-contract Recheck", "required": false, "adapterStatus": "guarded_requires_selected_matching_terminal_and_proof", "verifiedPlatforms": ["mt4"], "mt5Status": "awaiting_verified_visible_adapter", "successEvidence": ["settings_screenshot", "result_screenshot", "tester_report_proof", "parsed_tester_report", "nonzero_trade_count", "tester_trade_rows", "history_quality_attention", "static_ten_column_source_contract", "static_six_group_source_contract", "logic_recheck_digest", "dynamic_six_group_not_claimed", "immutable_receipt"]},
+        {"id": "metaeditor_compile_adapter", "labelTh": "Compile ผ่าน MetaEditor ที่มองเห็นจริง โดย Backend ผูกกับ Terminal ที่เลือก", "required": false, "adapterStatus": "guarded_requires_selected_matching_terminal_and_proof", "verifiedOneClickPlatforms": ["mt4", "mt5"], "mt5Status": "one_click_visible_fail_closed", "selectedTerminalMustAlreadyBeRunning": true, "oneClickTerminalLaunchAllowed": false, "manualRecoveryTerminalLaunchAllowed": false, "frontendPathOrArgsAllowed": false, "successEvidence": ["visible_metaeditor_window", "fresh_process_window_binding", "fresh_unicode_log_exact_zero_zero", "source_compiler_selection_digests", "compiled_binary_sha256", "immutable_receipt"]},
+        {"id": "strategy_tester_adapter", "labelTh": "Visual Backtest ผ่าน Strategy Tester ที่มองเห็นจริง พร้อม Source-contract Recheck", "required": false, "adapterStatus": "guarded_requires_selected_matching_terminal_and_proof", "verifiedPlatforms": ["mt4", "mt5"], "mt5Status": "one_click_visible_fail_closed", "successEvidence": ["settings_screenshot", "result_screenshot", "tester_report_proof", "parsed_tester_report", "nonzero_trade_count", "tester_trade_rows", "history_quality_attention", "static_ten_column_source_contract", "static_six_group_source_contract", "logic_recheck_digest", "dynamic_six_group_not_claimed", "immutable_receipt"]},
         {"id": "pine_validation_adapter", "labelTh": "ตรวจโครงสร้าง Pine Script", "required": false, "adapterStatus": "implemented_static_validation_only"},
         {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit", "required": true, "adapterStatus": "implemented"},
         {"id": "report_routing", "labelTh": "ส่งผล Build กลับโรงงานและ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
-      "connectionRequirements": {"requiredForSourceGeneration": ["codex_workspace"], "requiredForGoogleSheetSource": ["google_sheets_adapter"], "requiredForMt4Compile": ["mt4_terminal", "metaeditor_compile_adapter"], "requiredForMt5Compile": ["mt5_terminal", "metaeditor_compile_adapter"], "requiredForMt4OrMt5Backtest": ["strategy_tester_adapter"], "notRequiredForPineSourceGenerationOrValidation": true},
+      "connectionRequirements": {"allOf": ["mt4_terminal", "mt5_terminal"], "allOfSource": "top_header_platform_locks", "allOfRequiredForMtWork": true, "requiredForSourceGeneration": ["codex_workspace"], "requiredForGoogleSheetSource": ["google_sheets_adapter"], "requiredForMt4Compile": ["mt4_terminal", "metaeditor_compile_adapter"], "requiredForMt5Compile": ["mt5_terminal", "metaeditor_compile_adapter"], "requiredForMt4OrMt5Backtest": ["strategy_tester_adapter"], "notRequiredForPineSourceGenerationOrValidation": true},
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
       "operation": {"defaultMode": "one_click_with_manual_stage_recovery", "allowedModes": ["one_click_with_manual_stage_recovery", "manual_stage_by_stage"], "plannedModes": [], "intervalMinutes": null, "scheduled": false, "automaticLoop": true, "oneUserActionAdvancesOneStage": false, "oneUserClickAdvancesVerifiedStageChain": true, "oneCoordinatorIterationAdvancesAtMostOneStage": true},
-      "workflowReadiness": {"researchCatalog": "ready_backend_verified", "googleSheetsReadOnly": "implemented_central_adapter_runtime_status_required", "codexSourceGenerationWorkspace": "ready_guarded", "sourceCodeReview": "ready_guarded", "pineStaticValidation": "ready", "missionReportAudit": "ready", "metaEditorCompile": "mt4_one_click_visible_adapter_mt5_manual_only", "visualBacktest": "mt4_one_click_visible_adapter_mt5_manual_only"},
+      "workflowReadiness": {"researchCatalog": "ready_backend_verified", "googleSheetsReadOnly": "implemented_central_adapter_runtime_status_required", "codexSourceGenerationWorkspace": "ready_guarded", "sourceCodeReview": "ready_guarded", "pineStaticValidation": "ready", "missionReportAudit": "ready", "metaEditorCompile": "mt4_mt5_one_click_visible_fail_closed", "visualBacktest": "mt4_mt5_one_click_visible_fail_closed"},
       "reportRoute": {"targetPropId": "right_server_racks", "primaryReportType": "ea_build_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "left_analytics_console": {
@@ -333,7 +354,7 @@
         {"id": "codex_quota", "labelTh": "Rate Limit เมื่อใช้ AI วิเคราะห์", "required": false, "adapterStatus": "runtime_detected"},
         {"id": "report_routing", "labelTh": "ส่งผล Council กลับจอ Analysis", "required": true, "adapterStatus": "implemented"}
       ],
-      "connectionRequirements": {"anyOf": ["mt4_terminal", "mt5_terminal"]},
+      "connectionRequirements": {"allOf": ["mt4_terminal", "mt5_terminal"], "allOfSource": "top_header_platform_locks", "allOfRequiredForMtWork": true},
       "chartWindowPolicy": {
         "displayBars": {"owner": "frontend_client_only", "allowedValues": [40, 60, 120, 240, 500, 1000], "affectsAnalysis": false},
         "analysisBarCount": {"owner": "backend_audited_setting", "allowedValues": [120, 180, 240, 300, 500, 1000], "default": 120, "requestedAndUsedMustMatch": true},
@@ -397,13 +418,20 @@
     "right_tool_console": {
       "moduleNameTh": "ห้องทดลอง EA อัตโนมัติ",
       "researchSheetHub": {"included": false, "reason": "explicitly_excluded_from_google_sheet_pipeline"},
-      "availability": {"ui": "ready", "data": "plan_inputs_ready", "execution": "plan_only", "strategyTester": "coming_soon", "optimization": "coming_soon", "eaDiscovery": "coming_soon"},
+      "availability": {"ui": "ready", "data": "plan_inputs_and_eligible_factory_builds_ready", "execution": "mt5_visible_optimization_session_fail_closed", "strategyTester": "mt5_optimization_session_only", "optimization": "mt5_visible_session_ready", "eaDiscovery": "coming_soon"},
       "executionPolicy": {
-        "mode": "plan_only",
+        "mode": "backend_authoritative_mt5_visible_session",
         "planPreparationAvailable": true,
-        "realExecutionAvailable": false,
+        "realExecutionAvailable": true,
+        "realExecutionPlatforms": ["mt5"],
+        "planOnlyPlatforms": ["mt4"],
         "frontendMayClaimExecution": false,
-        "completedOptimizationRequiresVerifiedEvidence": true
+        "completedOptimizationRequiresVerifiedEvidence": true,
+        "oneActiveSessionAtATime": true,
+        "durableRestartRecovery": true,
+        "noDoubleStart": true,
+        "testShutdownTerminalAllowed": false,
+        "liveTradingAllowed": false
       },
       "reportContract": {
         "schemaVersion": "ea-experiment-report-v2",
@@ -417,7 +445,7 @@
       },
       "localTabs": [
         {"id": "backtest", "labelTh": "Auto Backtest", "actionIds": ["prepare_backtest_plan"]},
-        {"id": "optimization", "labelTh": "Auto Optimization", "actionIds": ["prepare_optimization_plan"]},
+        {"id": "optimization", "labelTh": "MT5 Run • MT4 Plan", "actionIds": ["prepare_optimization_plan"]},
         {"id": "ea_discovery", "labelTh": "EA Discovery", "actionIds": ["prepare_ea_discovery_plan"]},
         {"id": "history", "labelTh": "ผลทดลองและประวัติ", "actionIds": [], "viewOnly": true}
       ],
@@ -426,16 +454,16 @@
         {"id": "source_catalog", "labelTh": "Source Code และ Inspiration จาก 3 จุดก่อนหน้า", "required": true, "adapterStatus": "implemented", "mode": "backend_contract"},
         {"id": "mt4_terminal", "labelTh": "โปรแกรม MT4 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
         {"id": "mt5_terminal", "labelTh": "โปรแกรม MT5 ในเครื่อง", "required": false, "adapterStatus": "runtime_detected", "action": "discover_metatrader"},
-        {"id": "strategy_tester_adapter", "labelTh": "ตัวรัน Strategy Tester / Auto Backtest", "required": false, "adapterStatus": "coming_soon"},
-        {"id": "optimization_adapter", "labelTh": "ตัวรัน Auto Optimization", "required": false, "adapterStatus": "coming_soon"},
+        {"id": "strategy_tester_adapter", "labelTh": "ตัวรัน Strategy Tester สำหรับ MT5 Optimization", "required": false, "adapterStatus": "guarded_requires_selected_matching_terminal_and_proof", "verifiedPlatforms": ["mt5"], "frontendPathOrArgsAllowed": false},
+        {"id": "optimization_adapter", "labelTh": "ตัวรัน Auto Optimization แบบ Session", "required": false, "adapterStatus": "guarded_requires_selected_matching_terminal_and_proof", "verifiedPlatforms": ["mt5"], "backendAuthoritative": true, "durable": true, "noDoubleStart": true, "frontendEvidenceClaimsAllowed": false},
         {"id": "ea_discovery_plugin", "labelTh": "Plugin EA Discovery", "required": false, "adapterStatus": "coming_soon"},
         {"id": "mission_report_audit", "labelTh": "Mission / Report / Audit สำหรับแผนทดลอง", "required": true, "adapterStatus": "implemented"},
         {"id": "report_routing", "labelTh": "ส่งผลกลับห้องทดลองและ Mission Table", "required": true, "adapterStatus": "implemented"}
       ],
-      "connectionRequirements": {"anyOf": ["mt4_terminal", "mt5_terminal"], "anyOfForFutureMetatraderRun": ["mt4_terminal", "mt5_terminal"], "notRequiredForPlanPreparation": true},
+      "connectionRequirements": {"allOf": ["mt4_terminal", "mt5_terminal"], "allOfSource": "top_header_platform_locks", "allOfRequiredForMtWork": true, "requiredForMt5Optimization": ["mt5_terminal", "strategy_tester_adapter", "optimization_adapter"], "notRequiredForPlanPreparation": true},
       "codexUsage": {"dependency": "conditional_for_ai", "blockAiRunWhenLimitReached": true, "keepReadOnlyDashboardAvailable": true},
       "operation": {"defaultMode": "manual", "allowedModes": ["manual"], "plannedModes": [], "intervalMinutes": null, "scheduleBackendOwned": true, "scheduleDefaultEnabled": false},
-      "workflowReadiness": {"missionPlanReportAudit": "ready", "strategyTesterBacktest": "coming_soon", "metatraderOptimization": "coming_soon", "eaDiscoveryPlugin": "coming_soon", "executionMode": "plan_only", "verifiedOptimizationReportV2": "contract_ready_adapter_missing"},
+      "workflowReadiness": {"missionPlanReportAudit": "ready", "strategyTesterBacktest": "plan_only_outside_factory", "metatraderOptimization": "mt5_visible_session_ready_mt4_plan_only", "eaDiscoveryPlugin": "coming_soon", "executionMode": "backend_authoritative_mt5_visible_session", "verifiedOptimizationReportV2": "required_before_completion"},
       "reportRoute": {"targetPropId": "right_tool_console", "primaryReportType": "ea_experiment_report", "summaryTargetPropId": "mission_strategy_table"}
     },
     "terminal_workstation": {

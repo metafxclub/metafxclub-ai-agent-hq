@@ -84,7 +84,7 @@ Plain clone ข้างต้นไม่ใช่ Runtime ที่ติด�
 - เปิด Dashboard ของอุปกรณ์ 9 จุดผ่าน 3 แท็บ: `การเชื่อมต่อ`, `งานของอุปกรณ์` และ `ผลลัพธ์งาน`
 - กดหัวข้อ Task หรือ Report เพื่อเปิดรายละเอียด และดู Mission ทั้งหมดที่โต๊ะ Mission Kanban
 - ตรวจ Bridge, Codex/MCP status และ Codex Rate Limit ของบัญชีที่ Login อยู่ในเครื่อง
-- สแกนและเลือก MT4 / MT5 จากแถบกลาง หรือเลือกจากแถบซ้ายของสภา AI Trade แล้วให้ Backend ยืนยันค่ากลางแบบ atomic; ทุกระบบอ่าน Terminal เป้าหมายเดียวกัน
+- สแกนจากแถบมุมขวาบน แล้วล็อก MT4 และ MT5 แยกกันอย่างละหนึ่งรายการให้ครบ 2/2 ก่อนเริ่มงานที่เกี่ยวกับ MetaTrader; แต่ละงานใช้ล็อกที่ตรงกับแพลตฟอร์มของงาน ส่วน Dashboard ที่กำลังใช้งานเป็นตัวเลือกแยกและไม่ลบล็อกทั้งสอง
 - ทุกงานจริงมี Mission ID, เจ้าของงาน, สถานะ, Audit log และ Report
 
 หน้า `สภา AI Trade` มีหน้าวิเคราะห์เพิ่มสำหรับ Price Action, ตาราง Technical ย้อนหลัง 300 แท่ง และข่าว/แนวโน้ม การเปิดดูหรือสร้างแพ็กเกจ Local ไม่เรียก Codex; จะใช้ Rate Limit เมื่อกดให้ AI วิเคราะห์หรือ Trigger วิเคราะห์เมื่อเกิดแท่งใหม่เท่านั้น รายละเอียดข้อมูลจริงที่ส่งให้ Specialist อยู่ที่ [docs/ai-trade-deep-analysis-300-th.md](docs/ai-trade-deep-analysis-300-th.md)
@@ -93,13 +93,13 @@ Plain clone ข้างต้นไม่ใช่ Runtime ที่ติด�
 
 Agent Chat ไม่มีสิทธิ์เรียก Tool หรือส่งคำสั่งเทรดเอง โดยจะคืนเฉพาะคำตอบและประเภทคำขอให้ Backend หากเป็นคำสั่งงาน Backend จึงค่อยสร้าง Mission และให้ Worker ทำงานผ่าน Local Runner ภายใต้สิทธิ์ของโหมดที่เลือก การเทรด MT4/MT5 ใช้เส้นทาง AI Trade Council Gateway ที่มี Shadow/Demo/Live guard แยกต่างหากเท่านั้น; Computer Use, MCP execution, Plugin execution และ Telegram จริงยังไม่เปิดให้ Agent Chat เรียกโดยตรง
 
-## เชื่อม MT4 / MT5 จากแถบกลาง
+## ล็อก MT4 + MT5 จากมุมขวาบนให้ครบ 2/2
 
-- แท็บเดิม `Agent คุยกันเอง` ถูกแทนด้วย `เชื่อม MT4 / MT5`; ตาราง Agent คุยกันเองแบบตั้งเวลาถูกปิดใช้งานและไม่ใช้โควตา Codex เบื้องหลัง
+- ตัวควบคุม `เชื่อม MT4 / MT5` อยู่ที่มุมขวาบน; ตาราง Agent คุยกันเองแบบตั้งเวลาถูกปิดใช้งานและไม่ใช้โควตา Codex เบื้องหลัง
 - ปุ่มสแกนตรวจเฉพาะตำแหน่งติดตั้งมาตรฐานและสถานะโปรแกรมแบบอ่านอย่างเดียว ไม่เปิด Terminal และไม่อ่านเลขบัญชี รหัสผ่าน หรือข้อมูล Broker
 - หากพบ Terminal แพลตฟอร์มเดียวกันหลายตัว ต้องเปิดตัวที่ต้องการเพียงหนึ่งตัวแล้วสแกนใหม่ ระบบจึงจะยอม Apply เพื่อลดความเสี่ยงเลือกผิดโปรแกรม
-- การ Apply หนึ่งครั้งบันทึกค่ากลางแบบ atomic: MT4 หรือ MT5 ส่งให้สภา AI Trade, โรงงานสร้าง EA และห้องทดลองที่รองรับ โดยเลือกใช้งานจริงได้ครั้งละแพลตฟอร์มเดียว
-- หน้าของอุปกรณ์ทั่วไปแสดงสถานะจาก Backend แบบอ่านอย่างเดียว ส่วนสภา AI Trade มีตัวเลือก MT4/MT5 แบบหนึ่งแพลตฟอร์มพร้อมสถานะ heartbeat แยกสองฝั่ง และเรียก Backend endpoint เดียวกับแถบกลาง การเลือกแพลตฟอร์มไม่เปิด Demo, Live Trading หรือการส่งคำสั่งเทรดให้อัตโนมัติ
+- ปุ่ม `ล็อก MT4 นี้` และ `ล็อก MT5 นี้` บันทึกคนละรายการแบบ atomic; การเปลี่ยนล็อกของแพลตฟอร์มหนึ่งต้องคงล็อกของอีกแพลตฟอร์มไว้ และงาน MT4/MT5 จะเริ่มได้เมื่อ Backend ยืนยันครบ 2/2 เท่านั้น
+- `Dashboard ที่กำลังใช้งาน` เลือกได้ทีละหนึ่งแพลตฟอร์มสำหรับสภา AI Trade ผ่านการยืนยันแยกจากการล็อก Terminal; การสลับ Dashboard ไม่เปลี่ยนล็อกที่ EA Factory หรือ Optimization Lab ใช้ และไม่เปิด Demo, Live Trading หรือส่งคำสั่งเทรดให้อัตโนมัติ
 
 ### Money Management ของ AI Council EA (MT4 / MT5)
 
@@ -132,13 +132,57 @@ Agent Chat ไม่มีสิทธิ์เรียก Tool หรือส
 
 ## โครงสร้างระบบสำหรับผู้พัฒนา
 
-1. `frontend/` — ห้อง ตัวละคร การเคลื่อนไหว และ Dashboard
-2. `contracts/` — บทบาท Agent, Mission, Report, Permission และ Approval
-3. `backend/local-runner/bridge_server.py` — Local API, Queue, Policy gate, Audit และ Report routing
-4. `runner/codex_cli_runner.py` — เรียก Codex CLI หลังผ่านเงื่อนไขที่กำหนด
-5. `data/runtime/` — Mission, Report และ Audit ของเครื่องผู้ใช้
-6. `data/memory/` — Memory card, Summary และ Meeting transcript ที่ไม่ใช่ข้อมูลลับ
-7. `tests/` — ชุดตรวจ Contract, Asset, Health, Approval boundary และ Secret redaction
+```text
+frontend/
+  public/assets/images/
+    characters/          ภาพตัวละคร Sprite, Portrait และทะเบียนภาพ
+    rooms/               ฉากห้อง Layers และ Walkable masks
+    props/               ภาพอุปกรณ์และทะเบียนตำแหน่ง
+  src/
+    app/main.js          เริ่ม UI, State, DOM และส่ง Intent ไป Backend
+    features/chat/       ข้อมูลการประชุมและข้อเสนอที่แสดงในแชต
+    features/research/   ข้อมูล Research Sheet และสถานะการเชื่อมต่อ
+    features/quota/      ข้อมูลโควตา Codex
+    styles/main.css      รูปแบบหน้าจอ
+backend/local-runner/
+  bridge_server.py        Local API, Queue, Guard, Audit และ Report routing
+  configure_google_oauth_client.py  CLI ตั้งค่า Google ที่ Installer เรียก
+  hq_backend/
+    chat/                Durable chat, Approval และไฟล์แนบของแชต
+    ea/                  EA/Indicator, Blueprint, Compile และ Optimization
+    trading/             Council analysis, Market Watch, Gateway และ OHLC
+    research/            ข่าวและรูปประกอบงานวิจัย
+    google/              OAuth และ Google Sheets
+    workflows/           Contract ของขั้นตอนงานอุปกรณ์
+    paths.py             จุดอ้างอิงรากโปรเจกต์สำหรับโมดูล Backend
+runner/                  Adapter เรียก Codex CLI และ app-server
+integrations/            EA/Indicator และ Gateway สำหรับ MT4/MT5
+contracts/               ข้อตกลง Agent, Mission, Report, Permission และ Approval
+installer/               ตัวติดตั้งและ Offline pip bootstrap
+scripts/                 คำสั่ง Start/Stop/Status/Repair และ Regression
+tests/                   ชุดทดสอบและ Fixtures; ดูหมวดใน tests/README.md
+docs/                    คู่มือปัจจุบันและดัชนีเอกสาร
+  prompts/               Prompt ติดตั้งที่ล็อกเวอร์ชัน
+  history/               บันทึกการตรวจและการพัฒนารุ่นก่อน
+data/                    Runtime state, Memory และข้อมูลนำเข้า
+workspace/               ไฟล์งานที่ Agent สร้างและหลักฐานของ Mission
+outputs/                 ผลงานเดิมและไฟล์ส่งมอบในเครื่องนี้
+artifacts/               หลักฐานการตรวจและชุดส่งมอบที่มีแหล่งที่มา
+validation/              ผลตรวจเฉพาะเครื่องที่ยังเก็บใช้อ้างอิง
+```
+
+ไฟล์เปิดโปรแกรมและ BAT ที่รากโปรเจกต์เป็น Entry point ของผู้ใช้ จึงคงตำแหน่งเดิม `runner/.venv/` เป็น Python environment ที่ใช้รัน tests; `data/`, `workspace/` และผลงานใน `outputs/` เป็นข้อมูลจริงที่ต้องแยกจาก cache และห้ามล้างเหมารวม รูปต้นฉบับกับ Asset รุ่นเก่าที่มีทะเบียนอ้างอิงยังเก็บไว้ในหมวดภาพของตน
+
+Backend ใช้ชื่อแพ็กเกจ `hq_backend` แทนการเพิ่มแต่ละโฟลเดอร์ย่อยเข้า `sys.path` ไฟล์ใหม่ควรอยู่ในหมวดที่รับผิดชอบจริง ไม่สร้างโฟลเดอร์เปล่าสำหรับสิ่งที่ยังไม่มี และไม่วางรูป Log หรือผลทดลองไว้ที่รากโปรเจกต์
+
+โมดูลที่แยกจากไฟล์หลัก:
+
+- `backend/local-runner/hq_backend/trading/council_analysis.py` — สูตร Technical/Price Action และค่ารุ่นของสูตร ใช้ข้อมูลที่ส่งเข้ามาเท่านั้น ไม่มี I/O, Cache, Mission หรือสิทธิ์ส่งคำสั่งเทรด; Bridge ยังคงตรวจ Snapshot/MT binding, ถือ Lock/Cache และบังคับ Policy ก่อนเรียกใช้
+- `frontend/src/features/research/research-sheet.js` — แปลงข้อมูล Research Sheet จาก Backend เพื่อแสดงสถานะและผลตรวจ โดยรับค่าตั้งต้นและตัวกรองข้อความจากหน้าจอหลัก
+- `frontend/src/features/chat/meeting-session.js` — จัดรูปข้อมูล Meeting/Proposal/Approval โดยรับตัวค้นหา Agent จากหน้าจอหลัก ไม่ถือสำเนา Roster ที่อาจล้าสมัย
+- `frontend/src/features/quota/codex-rate.js` — จัดรูปข้อมูลโควตา Codex และเปอร์เซ็นต์ที่ Backend ส่งกลับมา
+
+`main.js` โหลดโมดูลผ่าน ES imports และยังเป็นเจ้าของ UI state, DOM, HTTP intents และ Polling โมดูลข้อมูลไม่เรียก API หรืออนุมัติ/Execute งานเอง การเพิ่มโมดูลที่จำเป็นต่อการเริ่มระบบต้องเพิ่มใน Runtime health, Installer/Release file inventories และ syntax/import tests ด้วย เพื่อให้ไฟล์ที่ขาดถูกตรวจพบก่อนรายงานว่าพร้อมใช้งาน
 
 คำสั่งดูแลระบบ:
 

@@ -13,6 +13,13 @@
 
 งานจริงทุกครั้งต้องเริ่มจาก Intent บน Frontend แล้วผ่าน Local Runner เพื่อสร้าง Mission, Audit และ Report เท่านั้น Frontend ไม่รับ Token, API Key, Cookie, Broker Password หรือ Secret
 
+### กติกา Terminal กลางแบบ Dual Lock
+
+- ก่อนเริ่มงานใด ๆ ที่เกี่ยวข้องกับ MT4/MT5 ผู้ใช้ต้องสแกนและล็อก Terminal จากมุมขวาบนให้ครบ **MT4 1 รายการ + MT5 1 รายการ (2/2)** ก่อนเสมอ หากขาดแพลตฟอร์มใด Backend ต้องหยุดแบบ Fail-closed ก่อนสร้าง Mission, Build หรือไฟล์
+- ล็อก MT4 และ MT5 เป็นคนละช่องและคงอยู่แยกกัน การล็อกหรือเปลี่ยน Terminal ของแพลตฟอร์มหนึ่งต้องไม่ลบหรือแทนที่ล็อกของอีกแพลตฟอร์ม
+- Dashboard ที่กำลังใช้งานเป็นตัวเลือกอีกชั้นหนึ่ง เลือกได้ทีละแพลตฟอร์มเพื่อกำหนดมุมมอง/งานปัจจุบัน แต่การสลับ Dashboard ต้องไม่แก้หรือลบล็อก MT4/MT5
+- EA Factory, สภา AI Trade, Optimization Lab และงาน Agent/Manager ที่ต้องใช้ MetaTrader ต้องอ้าง Terminal จาก Dual Lock มุมขวาบนเท่านั้น ห้ามรับ Candidate หรือ Terminal เป้าหมายจากฟอร์มย่อยเพื่อข้ามกติกานี้
+
 ## ความสัมพันธ์กับ Custom Plugin
 
 - Local Runner อ่านสัญญา `contracts/workflows/equipment-plugin-map.json` เพื่อเลือกขั้นตอน เจ้าของงาน ค่าเริ่มต้น ผลลัพธ์ และหลักฐานที่ต้องมี
@@ -68,10 +75,10 @@
 - แสดงโครงสร้างข้อมูลมาตรฐาน 42 ช่องสำหรับนำไปใช้กับ Google Sheet
 - เปิดค้นหาอัตโนมัติเวลา 09:00 น. Asia/Bangkok วันละหนึ่งรอบแบบคงที่ เมื่อ Gate พร้อม Scheduler จะสร้าง Mission ภายใน, Audit และ Report จริงโดยไม่รออนุมัติ คำขอ Manual ถูกปฏิเสธก่อนสร้าง Mission และไม่ใช้โควตารอบรายวัน
 - ป้องกันงานซ้ำด้วย Slot Key และ Idempotency Key; หลัง Bridge กลับมาระบบชดเชยเฉพาะรอบล่าสุดที่พลาดในวันเดียวกัน และไม่ย้อนรอบที่อยู่ก่อนเวลาที่เพิ่งเปิดหรือแก้ตาราง
+- Google Sheets Adapter รองรับการ Sync Report ที่ตรวจแล้วผ่าน Research Sheet Hub กลาง โดยพร้อมใช้งานเฉพาะเมื่อ Backend ตรวจ Credential, schema และหลักฐาน write/read-back ของ revision เดียวกันผ่าน หาก Gate ไม่พร้อมต้องแสดงสถานะตามจริง
 
 ยังไม่ทำงานจริง:
 
-- Google Sheets Adapter และการ Sync อัตโนมัติ
 - Screenshot Adapter สำหรับจับภาพเว็บไซต์จริง
 
 ## 2. คลังวิจัยระบบเทรดเชิงลึก — ห้องวิจัยอิสระ
@@ -93,38 +100,38 @@
 
 ## 3. โรงงานสร้าง EA และ Indicator — ห้องผลิตอิสระ
 
-แท็บ:
+อินเทอร์เฟซผู้ปฏิบัติงานมี 3 หน้า:
 
-- 1 เลือกระบบจากคลังวิจัยหรือ Google Sheets
-- 2 ตรวจและยืนยัน Strategy Spec
-- 3 สร้างโค้ด
-- 4 ตรวจ Source Code
-- 5 Compile / Validate
-- 6 Visual Backtest / Source-contract Recheck (ตรวจ Static 10 ช่อง/6 กลุ่มแยกจากรายการเทรด และไม่อ้างว่า 6 กลุ่มถูกกระตุ้นครบแบบ Dynamic)
-- 7 ไฟล์และ Report
+- หน้า 1 `เลือกระบบและเริ่มเขียน`: เลือก Source, แพลตฟอร์ม และชนิดงาน แล้วตรวจ Strategy Spec ก่อนเริ่ม
+- หน้า 2 `สถานะการทำงาน`: แสดงความคืบหน้าของสายงาน AI เขียนโค้ด → ตรวจ Source → Compile → Visual Backtest/ตรวจหลักฐานจุดเข้าและตรรกะ → จัดเตรียมไฟล์และ Final Report โดยไม่ให้ผู้ใช้ติ๊ก Gate เอง
+- หน้า 3 `ตรวจโค้ดและเสร็จสิ้น`: แสดงผลตรวจ Source, Backtest Report, Final Summary และ Artifact ที่ Backend ยืนยันแล้ว
 
 ทำได้แล้ว:
 
 - เลือก Record ที่ Backend ยืนยันจากคลังวิจัยเชิงลึก หรือ Sync แถวที่ผ่านเกณฑ์จากแท็บ `Deep_Research` ของ Google Sheet กลางโดยไม่รับ Credential แล้วอ่าน Strategy Brief 10 ช่อง A-J เป็นข้อมูลต้นทาง
 - แสดง `record_id`, `system_name`, `system_overview`, `entry_rules`, `recovery_rules`, `exit_rules`, `money_management`, `order_execution`, `display_requirements` และ `additional_notes` ตามลำดับ A-J; ชุด A-AW/49 ช่องเดิมเป็นเพียงสำรองแบบอ่านอย่างเดียว ไม่ใช่ Gate สำหรับงานใหม่
 - เลือก MT4/MQL4, MT5/MQL5 หรือ TradingView/Pine Script และยืนยัน Strategy Spec ก่อนเริ่มสร้างไฟล์
-- ทำงานแบบ Manual stage-by-stage เท่านั้น หนึ่งปุ่มเลื่อนได้ไม่เกินหนึ่งขั้น ไม่มี Scheduler และไม่มี Loop สร้าง-แก้อัตโนมัติ
+- โหมดหลักเป็น One-click พร้อม Manual stage recovery: การกดเริ่มหนึ่งครั้งให้ Coordinator เดินต่อเฉพาะ Stage ที่ผ่าน Gate แล้วตามลำดับ โดยหนึ่งรอบของ Coordinator เปลี่ยนได้ไม่เกินหนึ่ง Stage และหยุดเมื่อรอหน้าต่างจริง, หลักฐาน, ข้อผิดพลาด หรือการกู้ต่อ; ไม่มี Scheduler เบื้องหลัง
 - สร้าง Source แต่ละเวอร์ชันใน `workspace/ea-factory/<build-id>` โดยไม่ทับเวอร์ชันเดิม พร้อมโฟลเดอร์ Source, EA_Versions, Reports, Sets, Screenshots และ Summaries
 - ก่อนเขียน Source จริง Backend ตรวจ semantic ของ EA กับ Strategy Brief A-J; ถ้าผลรอบแรกไม่ผ่าน จะส่งเฉพาะรหัสข้อผิดพลาดจาก Validator ให้ Codex สร้างใหม่ได้หนึ่งรอบภายใต้ Strategy Spec เดิม และยังไม่เขียนไฟล์จนกว่าจะผ่าน
 - หากรอบซ่อมยังจบเป็น `invalid_output` และยังไม่มี Source/Version หน้าโรงงานจะแสดงปุ่ม Retry ที่สร้าง Mission ใหม่จาก Strategy Spec เดิมได้สูงสุด 3 ครั้ง พร้อม Audit; Source Review และขั้นหลังจากนั้น Retry ด้วยเส้นทางนี้ไม่ได้
 - ตรวจ Source Code แบบ Static พร้อม Signal Guard, order lifecycle, look-ahead/repaint, Money Management, error handling และ source digest
 - Pine Script จบสาย execution หลัง Source validation แล้วเข้าสรุป Report โดยไม่อ้างว่าเผยแพร่หรือ Backtest บน TradingView
-- MT4/MT5 ต้องเลือก Terminal ให้ตรงแพลตฟอร์มก่อน และจะถือว่า Compile/Backtest ผ่านได้เฉพาะเมื่อมีหลักฐานหน้าบ้านจาก MetaEditor/Strategy Tester ที่ผูกกับ Source digest และ Audit ของ Build เดียวกัน
+- MT4/MT5 ต้องมี Dual Lock มุมขวาบนครบ 2/2 ก่อนสร้าง Build และ Factory ต้องใช้ล็อกของแพลตฟอร์มที่เลือกเท่านั้น จะถือว่า Compile/Visual Backtest ผ่านได้เฉพาะเมื่อมีหลักฐานหน้าบ้านจาก MetaEditor/Strategy Tester ที่ผูกกับ Source digest และ Audit ของ Build เดียวกัน
+- ขอบเขต EA Factory จบที่ `Source → Review → Compile → Visual Backtest → ตรวจหลักฐานจุดเข้า/ตรรกะ → บันทึก Backtest Report → Final Summary` และต้องไม่สร้าง ส่งต่อ เริ่มต่อ หรือ Resume Optimization โดยอัตโนมัติ
+- งาน Optimization อยู่ที่อุปกรณ์ Optimization Lab (`right_tool_console`) แยกต่างหาก ผู้ใช้ต้องเปิดและเริ่ม Session จากอุปกรณ์นั้นเอง
 - ดาวน์โหลด Source และไฟล์ผลลัพธ์ได้ผ่าน URL same-origin ที่ Backend อนุญาต โดยไม่เปิดเผย Path จริง
 
 กติกาหยุดแบบ Fail-closed:
 
 - หาก Google Sheet เป็น Private, หัวคอลัมน์ A-J ไม่ตรง, Record ID ซ้ำ หรือข้อมูล Strategy Brief สำคัญขาด ระบบต้องหยุดก่อนสร้าง Build; ห้ามบล็อกเพียงเพราะไม่มี Blueprint 49 ช่องเดิม
-- หากยังไม่ได้เลือก MT4/MT5 ที่ตรงแพลตฟอร์ม หรือยังไม่มีหลักฐาน MetaEditor/Visual Mode ระบบต้องแสดง `blocked` และห้ามแสดง Passed
+- หาก Dual Lock มุมขวาบนยังไม่ครบ MT4+MT5 (2/2), ล็อกไม่ตรงแพลตฟอร์มของ Build หรือยังไม่มีหลักฐาน MetaEditor/Visual Mode ระบบต้องแสดง `blocked` และห้ามแสดง Passed
 - Process exit code, Static review, ไฟล์ `.set` หรือ `.ini` อย่างเดียวไม่ใช่หลักฐาน Compile/Backtest
 - หาก Build ขั้นอื่นไม่ผ่าน ผู้ใช้เป็นผู้กดสร้างเวอร์ชันถัดไป ไม่มีการเปิด Loop แก้ซ้ำเอง; ข้อยกเว้นมีเฉพาะการซ่อม semantic ภายในหนึ่งรอบและปุ่ม Retry `generate_source` แบบจำกัดที่อธิบายด้านบน
 
 ## 4. ห้องทดลอง EA — ห้องทดสอบอิสระ
+
+อุปกรณ์นี้แยกจาก EA Factory อย่างชัดเจน Factory จะไม่ส่งต่อหรือ Resume งาน Optimization อัตโนมัติ การเริ่ม Optimization ทุกครั้งต้องเป็น Intent ใหม่จากห้องทดลองนี้และยังต้องผ่าน Dual Lock มุมขวาบนครบ 2/2
 
 แท็บ:
 
@@ -138,13 +145,14 @@
 - เลือก Source หรือ Report ที่ Agent นำส่งเข้าห้องทดลองตามรายการที่ Backend อนุญาต
 - สร้าง Mission วางแผน Backtest พร้อม Platform, Symbol, Timeframe, ช่วงวันที่ และเกณฑ์ผลลัพธ์
 - สร้าง Mission วางแผน Optimization พร้อม Parameter Range, Objective และกติกาป้องกัน Overfit
+- รองรับ MT5 Auto Optimization ผ่าน guarded visible session เมื่อ Backend ยืนยัน Dual Lock 2/2, Build/Baseline Report, Terminal binding และ Inputs แล้ว ผลสำเร็จต้องมีหลักฐานจาก Strategy Tester ที่ Backend ตรวจครบ ไม่ถือว่าพร้อมจากการมี Adapter ในโค้ดเพียงอย่างเดียว
 - สร้าง Mission วางแผน EA Discovery จากแรงบันดาลใจ เป้าหมายกำไร Drawdown และจำนวนการเทรด
 
 ยังไม่ทำงานจริง:
 
-- MetaTrader Strategy Tester Adapter
-- Optimization Adapter
-- Discovery Plugin Adapter
+- Backtest นอก EA Factory ยังเป็น plan-only
+- MT4 Optimization ยังเป็น plan-only
+- Discovery Plugin Adapter ยังเป็น coming soon
 
 ระบบห้ามสร้างผลกำไร, Drawdown, Backtest หรือ Optimization จำลองแล้วแสดงว่าเป็นผลจริง
 
@@ -270,16 +278,16 @@ Google Sheets Adapter ทำงานหลัง Local Runner เท่าน�
 
 - `codex_mcp_portal`: Google Sheets Sync ใช้ Adapter กลางได้แล้วและต้องแสดงสถานะ OAuth/schema/write-readback ตาม Backend จริง; ส่วน Screenshot เต็มหน้าจากเว็บไซต์ยังไม่เชื่อมและห้ามสร้างภาพแทน
 - `left_server_racks`: Screenshot/Browser evidence สำหรับงานวิจัยเชิงลึก เมื่อยังไม่มี Adapter ให้ใช้ URL และหลักฐานข้อความที่ Backend ตรวจได้
-- `right_server_racks`: การควบคุม MetaEditor/Strategy Tester อัตโนมัติจะพร้อมเฉพาะเครื่องที่มี Adapter หน้าบ้านและหลักฐานตรงกับ Terminal ที่ผู้ใช้เลือก; หาก Adapter ไม่พร้อม Stage จะหยุดแบบ `blocked` ไม่สร้างผลจำลอง
-- `right_tool_console`: Strategy Tester, Optimization และ Discovery runner; ปัจจุบันสร้างแผนได้ แต่สถานะสัญญายังเป็น `plan_ready_terminal_runner_not_connected` หรือ `plan_ready_discovery_runner_not_connected`
+- `right_server_racks`: EA Factory รองรับ Source, Review, Visible MetaEditor Compile, Visible Strategy Tester Backtest, การตรวจหลักฐานจุดเข้า/ตรรกะ, การบันทึก Backtest Report และ Final Summary สำหรับ MT4/MT5 เฉพาะเครื่องที่มี Dual Lock มุมขวาบนครบ 2/2 และหลักฐานตรงกับ Terminal ที่ล็อกไว้; หาก Adapter ไม่พร้อม Stage จะหยุดแบบ `blocked` ไม่สร้างผลจำลอง และ Factory จะไม่เริ่มหรือ Resume Optimization
+- `right_tool_console`: Optimization Lab เป็นอุปกรณ์แยกจาก EA Factory; MT5 Auto Optimization ใช้ Session ที่ผู้ใช้เริ่มจากอุปกรณ์นี้และ Backend ตรวจ Dual Lock 2/2, Build, Baseline Report, Terminal binding, Inputs และหลักฐานจาก Visible Strategy Tester ก่อนยืนยันผล ส่วน MT4 Optimization, Backtest นอก EA Factory และ EA Discovery ยังคงเป็นแผนเท่านั้น
 - `left_audit_crystals`: Screenshot หน้าเว็บไซต์จริงสำหรับรายการ Indicator
 - `left_signal_cube`: Economic Calendar Feed โดยตรง และการต่อข่าวไปสร้าง FX Bias อัตโนมัติ
-- `terminal_workstation`: Direct Import จาก Frontend, Compiler/MetaEditor และ Backtest/Optimization อัตโนมัติ
+- `terminal_workstation`: Direct Import จาก Frontend และการทำ Backtest/Optimization นอกขอบเขต EA Factory/MT5 Auto Optimization Session ที่ยืนยันแล้ว
 - `right_status_crystals`: VPS Metrics ภายนอกสำหรับ CPU, RAM, Disk, Uptime และ Latency
 
-รายการข้างต้นต้องแสดงสถานะตาม Backend จริง หาก Adapter ยังไม่เชื่อม ระบบต้องคง `Coming Soon` หรือ `ยังไม่มีข้อมูล` และห้ามสร้างภาพ, ผล Compile, Backtest, Optimization หรือค่าระบบจำลองขึ้นมาแทน
+รายการข้างต้นต้องแสดงสถานะตาม Backend จริง หาก Adapter ที่เกี่ยวข้องยังไม่เชื่อม ระบบต้องคง `Coming Soon` หรือ `ยังไม่มีข้อมูล` และห้ามสร้างภาพ, ผล Compile, Backtest, Optimization หรือค่าระบบจำลองขึ้นมาแทน เส้นทางที่พร้อมแล้วต้องยังคงปิด Live Trading ไม่สลับ Algo Trading ไม่ Attach EA เข้ากราฟ และไม่ปิด Terminal
 
-การที่ Codex Runner สร้างคำอธิบาย, Source Code หรือแผนการทดสอบได้ ไม่ได้แปลว่า Adapter ภายนอกเชื่อมแล้ว สถานะ `completed` ของ Mission จะยืนยันได้เฉพาะผลลัพธ์และหลักฐานที่ Backend ตรวจได้ในขอบเขตปัจจุบัน Google Sheets Adapter กลางถือว่าพร้อมเฉพาะแท็บที่ Backend ตรวจ OAuth, schema และ write/read-back ผ่าน ส่วน Screenshot, MetaEditor/Compiler, Strategy Tester, Optimization/Discovery runner, Economic Calendar Feed และ VPS Telemetry ยังต้องคงสถานะตามรายการ `Coming Soon` ข้างต้น
+การที่ Codex Runner สร้างคำอธิบาย, Source Code หรือแผนการทดสอบได้ ไม่ได้แปลว่า Adapter ภายนอกเชื่อมแล้ว สถานะ `completed` ของ Mission จะยืนยันได้เฉพาะผลลัพธ์และหลักฐานที่ Backend ตรวจได้ในขอบเขตปัจจุบัน Google Sheets Adapter กลางถือว่าพร้อมเฉพาะแท็บที่ Backend ตรวจ OAuth, schema และ write/read-back ผ่าน; EA Factory MT4/MT5 จบที่ Compile/Visual Backtest/ตรวจหลักฐาน/บันทึก Backtest Report/Final Summary และ MT5 Auto Optimization ที่เป็น Session แยกใน `right_tool_console` ถือว่าพร้อมเฉพาะเมื่อ Backend ตรวจ Dual Lock 2/2, Terminal, Inputs, Build, Report และหลักฐานครบ ส่วน Screenshot ภายนอก, MT4 Optimization, Backtest นอก EA Factory, EA Discovery runner, Economic Calendar Feed และ VPS Telemetry ยังต้องคงสถานะตามรายการ `Coming Soon` ข้างต้น
 
 ### โต๊ะวางแผน Mission (`mission_strategy_table`)
 

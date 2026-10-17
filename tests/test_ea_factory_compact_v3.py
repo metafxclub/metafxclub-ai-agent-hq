@@ -284,7 +284,24 @@ class EAFactoryCompactV3IntegrationTests(unittest.TestCase):
             google_secret,
         )
         for secret_form in secret_forms:
-            with self.subTest(secret_form=secret_form[:20]):
+            with (
+                self.subTest(secret_form=secret_form[:20]),
+                mock.patch.object(
+                    self.bridge,
+                    "_global_metatrader_platform_context",
+                    return_value={
+                        "record": {
+                            "candidateId": "mtc-compact-v3-mt4",
+                            "platform": "mt4",
+                        },
+                        "token": {
+                            "candidateId": "mtc-compact-v3-mt4",
+                            "platform": "mt4",
+                            "selectionRevision": 1,
+                        },
+                    },
+                ),
+            ):
                 self.assertTrue(
                     self.bridge.contains_potential_secret(secret_form)
                 )
@@ -1013,6 +1030,21 @@ void OnTick() {{
 
         empty_state = self.bridge._empty_ea_factory_state()
         with (
+            mock.patch.object(
+                self.bridge,
+                "_global_metatrader_platform_context",
+                return_value={
+                    "record": {
+                        "candidateId": "mtc-compact-v3-mt4",
+                        "platform": "mt4",
+                    },
+                    "token": {
+                        "candidateId": "mtc-compact-v3-mt4",
+                        "platform": "mt4",
+                        "selectionRevision": 1,
+                    },
+                },
+            ),
             mock.patch.object(self.bridge, "load_missions", return_value=[]),
             mock.patch.object(self.bridge, "load_runtime_reports", return_value=[]),
             mock.patch.object(

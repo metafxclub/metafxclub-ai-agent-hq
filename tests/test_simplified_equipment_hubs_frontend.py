@@ -13,7 +13,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.main = (ROOT / "frontend" / "src" / "app" / "main.js").read_text(encoding="utf-8")
-        cls.styles = (ROOT / "frontend" / "src" / "app" / "styles.css").read_text(encoding="utf-8")
+        cls.styles = (ROOT / "frontend" / "src" / "styles" / "main.css").read_text(encoding="utf-8")
 
     def function_block(self, name: str, next_name: str) -> str:
         start = self.main.index(f"function {name}(")
@@ -127,7 +127,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
         self.assertIn('signal-consensus-modal", surface === "dashboard" && subject.id === AI_TRADE_COUNCIL_PROP_ID', modal)
 
     def test_daily_news_uses_a_direct_backend_only_left_rail(self):
-        rail_actions = self.function_block("workflowRailActions", "createWorkflowUseGuideCard")
+        rail_actions = self.function_block("workflowRailActions", "createWorkflowConnectionLink")
         self.assertIn('["codex_mcp_portal", INDICATOR_SCOUT_PROP_ID].includes(subject?.id)', rail_actions)
         self.assertIn("return [];", rail_actions)
         self.assertNotIn("INDICATOR_SCOUT_RAIL_ACTION_IDS", rail_actions)
@@ -143,7 +143,8 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
         self.assertIn("renderFxNewsSettingsRail(dashboard, identity)", settings)
         self.assertIn("return;", settings)
         self.assertIn("workflowRailActions(subject, dashboard)", settings)
-        self.assertIn("createWorkflowUseGuideCard(subject)", settings)
+        self.assertIn("createWorkflowConnectionLink()", settings)
+        self.assertNotIn("createWorkflowUseGuideCard", self.main)
         self.assertIn("els.workflowSettingsRail.hidden = false", settings)
 
     def test_connection_guidance_points_to_the_central_hub_and_news_schedule_caps_two_times(self):
@@ -161,7 +162,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             ".workflow-connection-hub-card",
             ".workflow-connection-hub-filters",
             ".workflow-connection-remedy",
-            ".workflow-use-guide",
+            ".workflow-open-connection-hub",
         ):
             self.assertIn(selector, self.styles)
         self.assertIn("@media (max-width: 520px)", self.styles)
@@ -189,7 +190,6 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
             '.workflow-settings-rail .workflow-field input:not([type="checkbox"]),': "font-size: 12px",
             ".workflow-settings-rail .workflow-field > span,": "font-size: 10px",
             ".workflow-settings-rail .workflow-action-footer p {": "font-size: 12px",
-            ".workflow-use-guide ol {": "font-size: 12px",
             ".workflow-freshness-banner > strong {": "font-size: 13px",
             ".workflow-freshness-banner > p {": "font-size: 12px",
         }
@@ -495,7 +495,7 @@ class SimplifiedEquipmentHubsFrontendTests(unittest.TestCase):
         self.assertIn("เหตุการณ์ตลอดวัน", self.main)
 
         html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-        self.assertIn("20260913-ea-factory-3page-state-v0919", html)
+        self.assertIn("20261017-world-radar-rows-v0922-r2", html)
         self.assertNotIn("20260814-ai-meeting-preview-v063", html)
         self.assertNotIn("20260814-radar-contract-v062", html)
         self.assertNotIn("20260814-daily-news-direct-v060", html)

@@ -6,7 +6,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_MAIN_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "main.js"
-FRONTEND_STYLES_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "styles.css"
+FRONTEND_STYLES_PATH = PROJECT_ROOT / "frontend" / "src" / "styles" / "main.css"
 
 
 class FrontendGatewayInitStatusTests(unittest.TestCase):

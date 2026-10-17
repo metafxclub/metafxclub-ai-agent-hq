@@ -36,6 +36,56 @@ class EaFactoryContractTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
         )
 
+    def test_operator_presentation_has_three_read_only_pages(self):
+        presentation = self.contract["operatorPresentation"]
+        self.assertEqual(
+            presentation["schemaVersion"],
+            "ea-factory-operator-presentation-v1",
+        )
+        self.assertEqual(presentation["pageCount"], 3)
+        self.assertEqual(
+            presentation["pages"],
+            ["source", "progress", "result"],
+        )
+        self.assertEqual(
+            presentation["selectionAndConfigurationPage"],
+            "source",
+        )
+
+        progress = presentation["progressPage"]
+        self.assertTrue(progress["readOnly"])
+        self.assertEqual(
+            progress["visualStageIds"],
+            [
+                "generate",
+                "review",
+                "compile_validate",
+                "backtest_recheck",
+                "artifacts_report",
+            ],
+        )
+        self.assertTrue(progress["showsBackendProgressPercent"])
+        self.assertTrue(progress["percentageIsApproximate"])
+        self.assertTrue(progress["showsExactRunCancel"])
+        for forbidden_feature in (
+            "manualStageFormsAllowed",
+            "terminalPickerAllowed",
+            "auditTimelineAllowed",
+            "buildHistoryAllowed",
+        ):
+            self.assertFalse(progress[forbidden_feature])
+
+        result = presentation["resultPage"]
+        self.assertTrue(result["readOnly"])
+        self.assertTrue(result["showsGateSummary"])
+        self.assertTrue(result["showsManifestBoundArtifactLinks"])
+        for forbidden_feature in (
+            "manualStageFormsAllowed",
+            "auditTimelineAllowed",
+            "buildHistoryAllowed",
+        ):
+            self.assertFalse(result[forbidden_feature])
+
     def test_factory_has_one_click_coordinator_and_manual_recovery(self):
         self.assertEqual(self.contract["mode"], "one_click_with_manual_stage_recovery")
         self.assertFalse(self.contract["scheduled"])
@@ -45,20 +95,101 @@ class EaFactoryContractTests(unittest.TestCase):
         self.assertTrue(
             self.contract["oneCoordinatorIterationAdvancesAtMostOneStage"]
         )
+        self.assertEqual(self.contract["completionBoundary"], "final_report")
+        self.assertFalse(self.contract["optimizationIncluded"])
+        self.assertEqual(
+            self.contract["optimizationOwner"],
+            "separate_ea_optimization_lab",
+        )
         one_click = self.contract["oneClick"]
         self.assertEqual(
             one_click["endpoint"],
             "POST /api/props/right_server_racks/ea-factory/builds/:buildId/run",
         )
         self.assertEqual(one_click["requestFields"], ["idempotencyKey"])
+        self.assertEqual(
+            one_click["cancelEndpoint"],
+            "POST /api/props/right_server_racks/ea-factory/builds/:buildId/cancel",
+        )
+        self.assertEqual(
+            one_click["cancelRequestFields"],
+            ["runId", "idempotencyKey"],
+        )
+        restart = one_click["backtestRestart"]
+        self.assertEqual(
+            restart["endpoint"],
+            "POST /api/props/right_server_racks/ea-factory/builds/:buildId/restart-backtest",
+        )
+        self.assertEqual(restart["requestFields"], ["runId", "idempotencyKey"])
+        self.assertEqual(
+            restart["eligibleRunStatuses"],
+            ["cancelled", "failed", "awaiting_visible_terminal"],
+        )
+        self.assertEqual(
+            restart["canRestartBacktestMeaning"],
+            "durable_backend_eligibility_only",
+        )
+        self.assertTrue(restart["exactTesterIdleProbeOnRequest"])
+        self.assertEqual(restart["testerIdleStateRequired"], "Start")
+        self.assertFalse(restart["sourceRegenerated"])
+        self.assertFalse(restart["compileRepeated"])
+        self.assertTrue(restart["finalReportMustBeUntouched"])
+        archive = restart["archive"]
+        self.assertEqual(
+            archive["schemaVersion"],
+            "ea-factory-backtest-restart-archive-v1",
+        )
+        self.assertEqual(archive["maximumEntriesPerBuild"], 8)
+        self.assertEqual(
+            archive["frontendExposure"],
+            "current_run_linkage_and_archive_digest_only",
+        )
+        self.assertEqual(restart["threadStartFailure"]["durableStatus"], "failed")
+        self.assertEqual(
+            restart["threadStartFailure"]["sameKeyBehavior"],
+            "idempotent_replay_of_failed_run_without_worker_start",
+        )
+        self.assertEqual(
+            one_click["cancelScope"],
+            "current_one_click_coordinator_and_exact_trusted_factory_mission_process_tree_only",
+        )
+        self.assertEqual(
+            one_click["cancelNeverStops"],
+            ["bridge", "mt4", "mt5", "unrelated_missions"],
+        )
+        self.assertTrue(one_click["cancelTerminalOnlyAfterCoordinatorReturns"])
+        submission_stop = one_click["submissionStop"]
+        self.assertEqual(submission_stop["scope"], "current_frontend_request_wait")
+        self.assertEqual(submission_stop["immediateAction"], "abort_local_http_wait")
+        self.assertEqual(
+            submission_stop["reconciliation"],
+            "force_fresh_local_read_model_then_cancel_exact_backend_run_if_accepted",
+        )
+        self.assertFalse(submission_stop["mayClaimBackendCancelledWithoutRunIdentity"])
+        progress = one_click["progress"]
+        self.assertEqual(progress["source"], "durable_local_phase_gates")
+        self.assertEqual(progress["stageCount"], 5)
+        self.assertTrue(progress["percentageIsApproximate"])
+        self.assertTrue(progress["completedGateCountIsDurable"])
+        self.assertFalse(progress["pollingUsesModelQuota"])
+        self.assertEqual(one_click["completionBoundary"], "final_report")
+        self.assertFalse(one_click["optimizationHandoffAllowed"])
+        self.assertFalse(one_click["optimizationSessionCreateOrResumeAllowed"])
+        self.assertFalse(one_click["optimizationProgressExposed"])
+        self.assertTrue(one_click["optimizationLabIsSeparateDevice"])
+        for removed_factory_optimizer_field in (
+            "sameKeyResumesRevalidatedFailedMt5OptimizationHandoff",
+            "revalidatedFailedMt5OptimizationHandoffRequiresSourceBoundRanges",
+            "legacyPreMetadataOptimizationRangeMigration",
+            "revalidatedFailedMt5OptimizationHandoffNeverReplaysFactoryStages",
+            "revalidatedFailedMt5OptimizationHandoffRequiresExplicitRequest",
+        ):
+            self.assertNotIn(removed_factory_optimizer_field, one_click)
         self.assertFalse(one_click["phaseGateBypassAllowed"])
         self.assertTrue(one_click["visibleMetaEditorRequired"])
         self.assertTrue(one_click["visibleStrategyTesterRequired"])
-        self.assertEqual(one_click["supportedVisiblePlatforms"], ["mt4"])
-        self.assertEqual(
-            one_click["unsupportedVisiblePlatforms"]["mt5"],
-            "manual_stage_by_stage_only_until_verified_visible_adapter_exists",
-        )
+        self.assertEqual(one_click["supportedVisiblePlatforms"], ["mt4", "mt5"])
+        self.assertEqual(one_click["unsupportedVisiblePlatforms"], {})
         self.assertTrue(one_click["selectedTerminalMustAlreadyBeRunning"])
         self.assertFalse(one_click["terminalProcessLaunchAllowed"])
         self.assertTrue(one_click["visualModeRequired"])
@@ -103,6 +234,22 @@ class EaFactoryContractTests(unittest.TestCase):
         self.assertTrue(
             one_click["testerPolicy"]["combinedAttentionReasonDeterministic"]
         )
+        smoke = one_click["testerPolicy"]["mt5TechnicalSmoke"]
+        self.assertEqual(smoke["scope"], "one_click_backtest_recheck")
+        self.assertEqual(
+            smoke["purpose"],
+            "technical_execution_smoke_not_full_strategy_evaluation_or_optimization",
+        )
+        self.assertEqual(smoke["clock"], "UTC")
+        self.assertTrue(smoke["useDate"])
+        self.assertEqual(smoke["toDate"], "previous_utc_calendar_day")
+        self.assertEqual(smoke["inclusiveCalendarDays"], 90)
+        self.assertEqual(smoke["fromDateOffsetDaysFromToDate"], -89)
+        self.assertEqual(smoke["period"], "H1")
+        self.assertEqual(smoke["model"], "every_tick")
+        self.assertFalse(smoke["optimizationEnabled"])
+        self.assertFalse(smoke["shutdownTerminalAfterTest"])
+        self.assertFalse(smoke["liveTradingAllowed"])
         self.assertFalse(one_click["testerPolicy"]["shutdownTerminalAfterTest"])
         preset = one_click["testerPolicy"]["canSlimExternalFactsSimulation"]
         self.assertEqual(preset["scope"], "mt4_strategy_tester_only")
@@ -137,6 +284,22 @@ class EaFactoryContractTests(unittest.TestCase):
         self.assertEqual(
             self.contract["api"]["runBuild"],
             "POST /api/props/right_server_racks/ea-factory/builds/:buildId/run",
+        )
+        self.assertEqual(
+            self.contract["api"]["cancelBuild"],
+            "POST /api/props/right_server_racks/ea-factory/builds/:buildId/cancel",
+        )
+        self.assertEqual(
+            self.contract["api"]["cancelBuildFields"],
+            ["runId", "idempotencyKey"],
+        )
+        self.assertEqual(
+            self.contract["api"]["restartBacktest"],
+            "POST /api/props/right_server_racks/ea-factory/builds/:buildId/restart-backtest",
+        )
+        self.assertEqual(
+            self.contract["api"]["restartBacktestFields"],
+            ["runId", "idempotencyKey"],
         )
         self.assertEqual(self.contract["requestLimits"]["createBuildBriefMaxCharacters"], 900)
 
@@ -271,7 +434,7 @@ class EaFactoryContractTests(unittest.TestCase):
         self.assertFalse(self.contract["platforms"]["tradingview"]["terminalRequired"])
         self.assertFalse(self.contract["platforms"]["tradingview"]["backtestRequired"])
 
-    def test_visible_one_click_is_mt4_only_and_never_launches_terminal(self):
+    def test_visible_one_click_supports_mt4_and_mt5_without_launching_terminal(self):
         mt4 = self.contract["platforms"]["mt4"]
         mt5 = self.contract["platforms"]["mt5"]
         self.assertTrue(mt4["oneClickVisibleAvailable"])
@@ -279,21 +442,34 @@ class EaFactoryContractTests(unittest.TestCase):
         self.assertFalse(mt4["terminalProcessLaunchRequired"])
         self.assertIn("one_click_visible", mt4["compileMode"])
         self.assertIn("one_click_visible", mt4["backtestMode"])
-        self.assertFalse(mt5["oneClickVisibleAvailable"])
-        self.assertEqual(
-            mt5["oneClickBlockedReasonCode"],
-            "one_click_visible_mt5_not_implemented",
-        )
+        self.assertTrue(mt5["oneClickVisibleAvailable"])
+        self.assertNotIn("oneClickBlockedReasonCode", mt5)
         self.assertTrue(mt5["terminalMustAlreadyBeRunning"])
         self.assertFalse(mt5["terminalProcessLaunchRequired"])
-        self.assertEqual(mt5["compileMode"], "manual_stage_by_stage_visible_metaeditor")
-        self.assertEqual(
-            mt5["backtestMode"],
-            "manual_stage_by_stage_visible_strategy_tester",
-        )
+        self.assertIn("one_click_visible", mt5["compileMode"])
+        self.assertIn("one_click_visible", mt5["backtestMode"])
         self.assertFalse(
             self.contract["security"]["oneClickMayLaunchSelectedTerminalProcess"]
         )
+
+    def test_mt_work_uses_dual_global_locks_and_not_active_platform(self):
+        binding = self.contract["globalTerminalBinding"]
+        self.assertEqual(binding["source"], "central_header_global_metatrader_hub")
+        self.assertEqual(binding["storeSchemaVersion"], 4)
+        self.assertEqual(binding["requiredPlatformLocks"], ["mt4", "mt5"])
+        self.assertTrue(binding["bothPlatformLocksRequiredBeforeMtWork"])
+        self.assertTrue(binding["requestedPlatformUsesMatchingLock"])
+        self.assertFalse(binding["activePlatformAffectsFactory"])
+        self.assertFalse(binding["legacyPerPropSelectionAuthoritative"])
+        self.assertFalse(binding["frontendTerminalOverrideAllowed"])
+        self.assertTrue(binding["revalidateBeforeEveryMtStageAndResume"])
+        self.assertTrue(binding["tradingviewExempt"])
+
+        security = self.contract["security"]
+        self.assertTrue(security["bothGlobalPlatformLocksRequiredBeforeMtWork"])
+        self.assertTrue(security["requestedPlatformGlobalLockIsAuthoritative"])
+        self.assertTrue(security["activePlatformDoesNotSelectFactoryTerminal"])
+        self.assertFalse(security["legacyPerPropSelectionAuthoritative"])
 
     def test_source_repair_and_manual_retry_are_bounded(self):
         generation = self.contract["stages"][1]
@@ -372,23 +548,29 @@ class EaFactoryContractTests(unittest.TestCase):
         self.assertTrue(
             profile["operation"]["oneUserClickAdvancesVerifiedStageChain"]
         )
-        self.assertEqual(mapped_flow["oneClick"]["supportedVisiblePlatforms"], ["mt4"])
-        self.assertEqual(mapped_flow["oneClick"]["mt5Mode"], "manual_stage_by_stage_only")
+        self.assertEqual(
+            mapped_flow["oneClick"]["supportedVisiblePlatforms"],
+            ["mt4", "mt5"],
+        )
+        self.assertEqual(mapped_flow["oneClick"]["mt5Mode"], "one_click_visible_fail_closed")
         self.assertFalse(mapped_flow["oneClick"]["terminalProcessLaunchAllowed"])
         compile_stage = next(
             row for row in mapped_flow["stages"] if row["id"] == "compile_validate"
         )
         self.assertEqual(
             compile_stage["platformPolicy"]["mt5"],
-            "manual_stage_by_stage_visible_metaeditor",
+            "one_click_visible_metaeditor_or_manual_stage_by_stage",
         )
         self.assertFalse(compile_stage["oneClickTerminalLaunchAllowed"])
         compile_connection = next(
             row for row in profile["connections"]
             if row["id"] == "metaeditor_compile_adapter"
         )
-        self.assertEqual(compile_connection["verifiedOneClickPlatforms"], ["mt4"])
-        self.assertEqual(compile_connection["mt5Status"], "manual_stage_by_stage_only")
+        self.assertEqual(
+            compile_connection["verifiedOneClickPlatforms"],
+            ["mt4", "mt5"],
+        )
+        self.assertEqual(compile_connection["mt5Status"], "one_click_visible_fail_closed")
         self.assertFalse(compile_connection["oneClickTerminalLaunchAllowed"])
 
     def test_runner_output_contract_carries_factory_integrity_bindings(self):

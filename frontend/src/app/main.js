@@ -1,6 +1,10 @@
-const PROJECT_ASSET_ROOT = "./frontend/public/assets";
-const MANAGER_EXEC_ASSET_ROOT = `${PROJECT_ASSET_ROOT}/agents/agent-manager-exec-v001`;
-const MALE_ROSTER_ASSET_ROOT = `${PROJECT_ASSET_ROOT}/agents/male-roster-set-a-core-command-operators-v001`;
+import { createResearchSheetModel } from "../features/research/research-sheet.js";
+import { createMeetingSessionModel } from "../features/chat/meeting-session.js";
+import { createCodexRateModel } from "../features/quota/codex-rate.js";
+
+const PROJECT_ASSET_ROOT = "./frontend/public/assets/images";
+const MANAGER_EXEC_ASSET_ROOT = `${PROJECT_ASSET_ROOT}/characters/agent-manager-exec-v001`;
+const MALE_ROSTER_ASSET_ROOT = `${PROJECT_ASSET_ROOT}/characters/male-roster-set-a-core-command-operators-v001`;
 const AGENT_ASSET_VERSION = "20260612-multi-agent-roster-v001";
 const MANAGER_STATIC_FRAME = `${MALE_ROSTER_ASSET_ROOT}/characters/02-hq-manager-male-static-v001.png`;
 const SESSION_STORAGE_KEY = "metafx-ai-agent-hq-session-v001";
@@ -107,6 +111,17 @@ const MISSION_FETCH_TIMEOUT_MS = 25000;
 const OPEN_PROP_REPORT_POLL_TTL_MS = 30000;
 const EA_FACTORY_READ_MODEL_MAX_AGE_MS = 90000;
 const EA_FACTORY_ACTION_TIMEOUT_MS = 45000;
+const EA_FACTORY_ACTIVE_POLL_MS = 3000;
+const EA_FACTORY_GOOGLE_SHEET_CATALOG_ENDPOINT = "/api/props/right_server_racks/ea-factory/sources/google-sheet/catalog";
+const EA_FACTORY_CUSTOM_SOURCE_ENDPOINT = "/api/props/right_server_racks/ea-factory/sources/custom";
+const EA_FACTORY_GOOGLE_SHEET_CATALOG_SCHEMA_VERSION = "ea-factory-deep-research-catalog-v1";
+const EA_FACTORY_GOOGLE_SHEET_CATALOG_REFRESH_MS = 75000;
+const EA_FACTORY_GOOGLE_SHEET_CATALOG_INTERACTION_GRACE_MS = 5000;
+const EA_OPTIMIZATION_LAB_ENDPOINT = "/api/ea-optimization-lab";
+const EA_OPTIMIZATION_LAB_ACTIVE_POLL_MS = 3000;
+const EA_OPTIMIZATION_LAB_IDLE_POLL_MS = 30000;
+const EA_OPTIMIZATION_LAB_ACTION_TIMEOUT_MS = 45000;
+const EA_OPTIMIZATION_LAB_READ_MODEL_MAX_AGE_MS = 60000;
 // Accept the current one-click contract plus the immediately preceding mode
 // while Backend/Frontend versions roll forward independently. Unknown modes
 // remain fail-closed so an incompatible coordinator cannot expose actions.
@@ -441,7 +456,7 @@ const WORKFLOW_DASHBOARD_IDENTITIES = Object.freeze({
     id: "experiment-lab",
     mark: "LAB",
     labelTh: "EXPERIMENT LAB",
-    eyebrowTh: "ห้องทดลอง Optimization EA สำหรับ MT4/MT5",
+    eyebrowTh: "Optimization จริงบน MT5 • MT4 วางแผนเท่านั้น",
     handoffAgentId: "manager",
   },
   left_audit_crystals: {
@@ -495,7 +510,7 @@ const WORKFLOW_DASHBOARD_PRIMARY_TABS = Object.freeze({
   },
   right_tool_console: {
     labelTh: "1 เลือก EA",
-    descriptionTh: "เลือก MT4 หรือ MT5 แล้วนำเข้า EA เพื่ออ่าน Inputs ก่อนกำหนดช่วง Optimization",
+    descriptionTh: "เลือก MT5 สำหรับรันจริง หรือ MT4 สำหรับวางแผนเท่านั้น แล้วนำเข้า EA เพื่ออ่าน Inputs ก่อนกำหนดช่วง Optimization",
     overviewTitleTh: "เตรียม EA สำหรับ Optimization",
     emptyMessageTh: "เลือก EA และแพลตฟอร์มเพื่อเริ่มเตรียมแผน Optimization",
   },
@@ -584,6 +599,47 @@ const RESEARCH_SHEET_LINKED_SYSTEMS = Object.freeze([
 ]);
 const RESEARCH_SHEET_CONSUMER_PROP_IDS = new Set(RESEARCH_SHEET_CONSUMERS.map((item) => item.propId));
 const RESEARCH_SHEET_LINKED_PROP_IDS = new Set([...RESEARCH_SHEET_CONSUMER_PROP_IDS, EA_FACTORY_PROP_ID]);
+// Read-model boundaries receive explicit dependencies; they cannot dispatch actions.
+const {
+  normalizeResearchSheetReference,
+  researchSheetAuthoritativeLifecycleMatches,
+  boundedResearchSheetCount,
+  normalizeResearchSheetHeaderList,
+  normalizeResearchSheetQueryText,
+  normalizeResearchSheetQueryResult,
+  normalizeResearchSheetHub,
+  normalizeResearchSheetGoogleAuth,
+  normalizeResearchSheetAuthorizationUrl,
+  researchSheetGoogleAuthFailureReason,
+  researchSheetGoogleAuthIsTerminalStatus,
+  normalizeResearchSheetInspection,
+} = createResearchSheetModel({
+  safeDashboardDisplayText,
+  consumers: RESEARCH_SHEET_CONSUMERS,
+  linkedSystems: RESEARCH_SHEET_LINKED_SYSTEMS,
+  queryMaxMatches: RESEARCH_SHEET_QUERY_MAX_MATCHES,
+  queryMaxColumnsPerTab: RESEARCH_SHEET_QUERY_MAX_COLUMNS_PER_TAB,
+});
+
+const {
+  normalizeMeetingText,
+  normalizeMeetingSessionPayload,
+  normalizeMeetingSessionsPayload,
+} = createMeetingSessionModel({
+  getOfficeAgent,
+});
+
+const {
+  normalizeCodexRateReservePercent,
+  normalizeCodexRatePayload,
+  codexRateReservePresentation,
+  getCodexRateDisplayState,
+  getCodexRateSeverity,
+} = createCodexRateModel({
+  clamp,
+  formatCodexRatePercent,
+});
+
 const INDICATOR_SCOUT_PRESENTATION_TAB_IDS = Object.freeze(["discoveries", "archive"]);
 const INDICATOR_SCOUT_DEFAULT_TIME = "09:00";
 const INDICATOR_SCOUT_TIMEZONE = "Asia/Bangkok";
@@ -611,15 +667,15 @@ const EA_OPTIMIZATION_LAB_STAGE_IDS = Object.freeze([
 const EA_OPTIMIZATION_LAB_STAGE_COPY = Object.freeze({
   backtest: {
     labelTh: "1 เลือก EA",
-    descriptionTh: "เลือก MT4 หรือ MT5 แล้วลาก Source/Binary ของ EA และไฟล์ .set (ถ้ามี) เพื่อตรวจชื่อไฟล์และ Inputs ในเบราว์เซอร์",
+    descriptionTh: "เลือก MT5 สำหรับรันจริง หรือ MT4 สำหรับวางแผนเท่านั้น แล้วลาก Source/Binary ของ EA และไฟล์ .set (ถ้ามี) เพื่ออ่าน Inputs ในเบราว์เซอร์",
   },
   optimization: {
     labelTh: "2 Inputs / Ranges",
     descriptionTh: "ตรวจ Input ที่อ่านจาก .mq4/.mq5 หรือ .set แล้วกำหนด Start, Step, Stop; Input แบบ Mode จะถูกคงเป็นค่าหมวดหมู่",
   },
   ea_discovery: {
-    labelTh: "3 แผนหลายรอบ",
-    descriptionTh: "วาง Round 1 สำรวจช่วงกว้าง, Round 2 ขยายผลคลัสเตอร์ และ Round 3 ตรวจ Out-of-sample แบบ Case-by-case",
+    labelTh: "3 แผน Session",
+    descriptionTh: "วาง Current Bands สำหรับ 1 Session; การปรับรอบถัดไปต้องเริ่มจาก Report จริงที่ Backend ยืนยันแล้ว ส่วน MT4 บันทึกแผนได้แต่ไม่สั่งรัน",
   },
   history: {
     labelTh: "4 วิเคราะห์ผล / Report",
@@ -634,8 +690,8 @@ const EA_OPTIMIZATION_LAB_STAGE_PRESENTATION = Object.freeze(
   })),
 );
 const EA_OPTIMIZATION_LAB_MAX_FILE_BYTES = 2 * 1024 * 1024;
-const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 1_000_000;
-const EA_OPTIMIZATION_LAB_MAX_INPUTS = 80;
+const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 100_000;
+const EA_OPTIMIZATION_LAB_MAX_INPUTS = 64;
 const EA_OPTIMIZATION_LAB_MAX_REPORTS = 100;
 const EA_OPTIMIZATION_LAB_MAX_PASSES = 5000;
 const EA_OPTIMIZATION_LAB_SOURCE_EXTENSIONS = Object.freeze([".mq4", ".mq5", ".ex4", ".ex5", ".set"]);
@@ -654,6 +710,41 @@ const EA_FACTORY_ONE_CLICK_STAGE_IDS = Object.freeze([
   "compile_validate",
   "backtest_recheck",
 ]);
+const EA_FACTORY_VISUAL_STAGE_IDS = Object.freeze([
+  "generate",
+  "review",
+  "compile_validate",
+  "backtest_recheck",
+  "artifacts_report",
+]);
+const EA_FACTORY_VISUAL_ASSET_ROOT = `${PROJECT_ASSET_ROOT}/props/custom-props-registered-v011`;
+const EA_FACTORY_STAGE_VISUALS = Object.freeze({
+  generate: {
+    shortTitleTh: "AI เขียนโค้ด",
+    image: `${EA_FACTORY_VISUAL_ASSET_ROOT}/metafx-aihq-registered-mission_strategy_table-v011.png`,
+    imageAltTh: "โต๊ะวางแผนกำลังส่ง Strategy ให้ AI เขียน Source Code",
+  },
+  review: {
+    shortTitleTh: "ตรวจโค้ด",
+    image: `${EA_FACTORY_VISUAL_ASSET_ROOT}/metafx-aihq-registered-left_audit_crystals-v011.png`,
+    imageAltTh: "Audit Crystals กำลังตรวจ Source Code",
+  },
+  compile_validate: {
+    shortTitleTh: "Compile",
+    image: `${EA_FACTORY_VISUAL_ASSET_ROOT}/metafx-aihq-registered-terminal_workstation-v011.png`,
+    imageAltTh: "เครื่อง Terminal สำหรับ Compile EA",
+  },
+  backtest_recheck: {
+    shortTitleTh: "Backtest",
+    image: `${EA_FACTORY_VISUAL_ASSET_ROOT}/metafx-aihq-registered-left_analytics_console-v011.png`,
+    imageAltTh: "Analytics Console กำลังทดสอบ EA",
+  },
+  artifacts_report: {
+    shortTitleTh: "จัดเตรียมไฟล์",
+    image: `${EA_FACTORY_VISUAL_ASSET_ROOT}/metafx-aihq-registered-right_status_crystals-v011.png`,
+    imageAltTh: "Status Crystals กำลังจัดเตรียมไฟล์ EA",
+  },
+});
 // The backend contract intentionally keeps its seven auditable stages. The
 // operator-facing factory is condensed into three pages so a user can always
 // answer: what did I select, what is running now, and what was produced?
@@ -661,18 +752,18 @@ const EA_FACTORY_PAGE_IDS = Object.freeze(["source", "progress", "result"]);
 const EA_FACTORY_PAGE_COPY = Object.freeze({
   source: {
     labelTh: "1 เลือกระบบและเริ่มเขียน",
-    titleTh: "เลือกระบบจาก Google Sheets แล้วเริ่มเขียน EA",
-    descriptionTh: "เลือก Strategy Brief ที่ Backend ตรวจแล้ว ตรวจ Terminal กลาง และเริ่มงานจากหน้าเดียว",
+    titleTh: "ตั้งค่างานใหม่",
+    descriptionTh: "เลือกแพลตฟอร์ม ประเภทผลงาน และต้นทางของระบบจากหน้าเดียว",
   },
   progress: {
     labelTh: "2 สถานะการทำงาน",
-    titleTh: "ติดตามการเขียน Source, MetaEditor และ Compile",
-    descriptionTh: "ดูงานที่ Backend กำลังทำจริง พร้อมขั้นปัจจุบัน Mission และจุดที่ต้องเปิดโปรแกรมหน้าบ้าน",
+    titleTh: "กำลังสร้าง EA ของคุณ",
+    descriptionTh: "ดูขั้นที่กำลังทำ เปอร์เซ็นต์ และหยุดงานได้จากหน้าจอเดียว",
   },
   result: {
     labelTh: "3 ตรวจโค้ดและเสร็จสิ้น",
-    titleTh: "ตรวจผลโค้ด หลักฐาน และไฟล์ที่สร้าง",
-    descriptionTh: "สรุป Source Review, Compile, Backtest, Artifact และ Final Report ของ Build ที่เลือก",
+    titleTh: "งานเสร็จแล้ว",
+    descriptionTh: "สรุปผลสำคัญและดาวน์โหลดไฟล์ที่พร้อมใช้งาน",
   },
 });
 const EA_FACTORY_STAGE_COPY = Object.freeze({
@@ -1024,12 +1115,12 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
   },
   right_tool_console: {
     titleTh: "ห้องทดลอง EA อัตโนมัติ",
-    summaryTh: "นำเข้า EA สำหรับ MT4/MT5 อ่าน Inputs วาง Start-Step-Stop และเตรียม Optimization หลายรอบแบบ Case-by-case โดยไม่อ้างว่ารัน Terminal จนกว่า Adapter จะยืนยันพร้อม",
+    summaryTh: "นำเข้า EA เพื่อวาง Start-Step-Stop แบบ Case-by-case; รัน Optimization จริงได้เฉพาะ MT5 ผ่าน Backend และ Visible Strategy Tester ส่วน MT4 เป็น Plan-only",
     tabs: [
       {
         id: "backtest",
         labelTh: "1 เลือก EA",
-        descriptionTh: "เลือก MT4 หรือ MT5 แล้วลาก Source/Binary ของ EA และไฟล์ .set (ถ้ามี) เพื่อตรวจชื่อไฟล์และ Inputs ในเบราว์เซอร์",
+        descriptionTh: "เลือก MT5 สำหรับรันจริง หรือ MT4 สำหรับวางแผนเท่านั้น แล้วลาก Source/Binary ของ EA และไฟล์ .set (ถ้ามี) เพื่ออ่าน Inputs ในเบราว์เซอร์",
         actionIds: [],
       },
       {
@@ -1040,8 +1131,8 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
       },
       {
         id: "ea_discovery",
-        labelTh: "3 แผนหลายรอบ",
-        descriptionTh: "วาง Round 1 สำรวจช่วงกว้าง, Round 2 ขยายผลคลัสเตอร์ และ Round 3 ตรวจ Out-of-sample แบบ Case-by-case",
+        labelTh: "3 แผน Session",
+        descriptionTh: "วาง Current Bands สำหรับ 1 Session และสร้างรอบถัดไปจาก Report จริงที่ Backend ยืนยันแล้ว; MT4 เป็น Plan-only",
         actionIds: [],
       },
       {
@@ -1070,7 +1161,7 @@ const WORKFLOW_DASHBOARD_FALLBACKS = Object.freeze({
         id: "prepare_optimization_plan",
         tabId: "optimization",
         labelTh: "เตรียมแผน Auto Optimization",
-        descriptionTh: "สร้าง Mission วางช่วงค่า เป้าหมาย และหลักเกณฑ์กัน Overfit ก่อนรันจริง",
+        descriptionTh: "สร้าง Mission วางช่วงค่า เป้าหมาย และหลักเกณฑ์กัน Overfit; MT5 เชื่อม Session เพื่อรันจริงได้เมื่อผ่าน Gate ส่วน MT4 บันทึกแผนเท่านั้น",
         sourceRequired: true,
         availability: { status: "configuration_required" },
         formFields: [
@@ -1306,7 +1397,7 @@ function createFallbackRoomData() {
       id: "codex_mcp_agent_workroom_fallback",
       name: "ห้องทำงาน Codex/MCP Agent",
       version: "frontend-fallback-v001",
-      image: `${PROJECT_ASSET_ROOT}/maps/command-room/metafx-aihq-room-codex-mcp-agent-workroom-wide-symmetric-v002.png`,
+      image: `${PROJECT_ASSET_ROOT}/rooms/command-room/metafx-aihq-room-codex-mcp-agent-workroom-wide-symmetric-v002.png`,
     },
     navigation: {
       maskMode: "fallback",
@@ -1454,10 +1545,59 @@ const state = {
       selectedSourceId: "",
       selectedBuildId: "",
       selectedPlatform: "",
-      selectedArtifactKind: "expert_advisor",
+      selectedArtifactKind: "",
+      sourceMode: "",
+      sheetRecordId: "",
+      importedSourceId: "",
+      importedRecordDigest: "",
+      importedCatalogDigest: "",
+      importedSnapshotDigest: "",
+      googleSheetCatalog: {
+        schemaVersion: "",
+        status: "idle",
+        configRevision: null,
+        tabName: "",
+        catalogDigest: "",
+        snapshotDigest: "",
+        observedAt: null,
+        totalCount: 0,
+        systems: [],
+        selectedRecord: null,
+        reasonCode: "",
+        message: "",
+        lastLoadedAt: 0,
+        lastInteractionAt: 0,
+        inFlight: false,
+        requestId: 0,
+      },
+      additionalBrief: "",
+      customSystemName: "",
+      customConditions: "",
+      customTemplateId: "",
+      discoveryTargetProfitPercent: "",
+      discoveryMaxDrawdownPercent: "",
+      discoveryBacktestYears: "",
+      discoverySymbol: "",
+      discoverySymbolBinding: "",
+      discoveryMarketWatch: {
+        schemaVersion: "",
+        status: "idle",
+        candidateId: "",
+        selectionRevision: null,
+        symbols: [],
+        symbolCount: 0,
+        catalogDigest: "",
+        reasonCode: "",
+        message: "",
+        observedAt: null,
+        inFlight: false,
+        requestId: 0,
+      },
       selectedTerminalId: "",
       inFlight: false,
       stageId: "",
+      createIdempotencyKey: "",
+      createFormSignature: "",
       idempotencyKey: "",
       formSignature: "",
       oneClickBuildId: "",
@@ -1469,6 +1609,9 @@ const state = {
     eaOptimizationLab: {
       platform: "",
       sourceReportId: "",
+      selectedBuildId: "",
+      activeSessionId: "",
+      startIdempotencyKey: "",
       selectedTerminalId: "",
       eaFile: null,
       setFile: null,
@@ -1480,11 +1623,11 @@ const state = {
       timeframe: "H1",
       dateFrom: "",
       dateTo: "",
-      validationMethod: "walk_forward",
+      validationMethod: "single_verified_run",
       targetProfitPercent: "",
       maxDrawdownPercent: "20",
       minimumTrades: "100",
-      roundCount: "3",
+      roundCount: "1",
       plan: null,
       message: "",
       tone: "neutral",
@@ -1640,6 +1783,16 @@ const state = {
     stale: false,
     lastError: null,
     busy: null,
+  },
+  eaOptimizationLabReadModel: {
+    inFlight: false,
+    actionInFlight: false,
+    operation: "",
+    lastLoadedAt: 0,
+    payload: null,
+    stale: false,
+    lastError: null,
+    pollTimer: null,
   },
   todayWorkView: {
     dateKey: "",
@@ -1816,6 +1969,12 @@ const state = {
 
 const propReportInFlight = new Map();
 let eaFactoryReadModelInFlight = null;
+let eaFactoryGoogleSheetCatalogInFlight = null;
+let eaFactoryGoogleSheetCatalogAbortController = null;
+let eaFactoryGoogleSheetCatalogRefreshTimer = null;
+let eaFactoryGoogleSheetCatalogRefreshDueAt = 0;
+let eaFactoryActiveProgressPollTimer = null;
+let eaFactoryActiveActionAbortController = null;
 
 const PROP_HIT_ALPHA_THRESHOLD = 42;
 const DEFAULT_WALK_SPEED = {
@@ -1832,6 +1991,9 @@ const els = {
   propLayer: document.getElementById("propLayer"),
   pathLayer: document.getElementById("pathLayer"),
   agentLayer: document.getElementById("agentLayer"),
+  homeStatusMenu: document.getElementById("homeStatusMenu"),
+  homeStatusToggle: document.getElementById("homeStatusToggle"),
+  homeStatusClose: document.getElementById("homeStatusClose"),
   agentStatusPanel: document.getElementById("agentStatusPanel"),
   agentStatusList: document.getElementById("agentStatusList"),
   todayWorkPanel: document.getElementById("todayWorkPanel"),
@@ -1930,6 +2092,8 @@ const els = {
   modalPortrait: document.getElementById("modalPortrait"),
   modalKind: document.getElementById("modalKind"),
   modalTitle: document.getElementById("modalTitle"),
+  workspaceTitle: document.getElementById("workspaceTitle"),
+  workspaceSection: document.getElementById("workspaceSection"),
   modalSubtitle: document.getElementById("modalSubtitle"),
   modalStatusGrid: document.getElementById("modalStatusGrid"),
   modalSpeaker: document.getElementById("modalSpeaker"),
@@ -2179,6 +2343,7 @@ let taskDetailReturnFocus = null;
 let taskDetailShouldRestoreFocus = true;
 let taskDetailReturnMissionId = null;
 let taskDetailReturnContainerId = null;
+let missionSummaryRequest = null;
 let dashboardResultReturnFocus = null;
 let dashboardResultShouldRestoreFocus = true;
 let newsEventReturnFocus = null;
@@ -2739,176 +2904,6 @@ async function fetchJson(path, { timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, signal = 
   }
 }
 
-function normalizeCodexRateTimestamp(value) {
-  if (value === null || value === undefined || value === "") return null;
-  const numericValue = typeof value === "number" || /^\d+(?:\.\d+)?$/.test(String(value).trim())
-    ? Number(value)
-    : null;
-  const milliseconds = Number.isFinite(numericValue)
-    ? (numericValue < 1_000_000_000_000 ? numericValue * 1000 : numericValue)
-    : value;
-  const date = new Date(milliseconds);
-  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
-}
-
-function normalizeCodexRateWindow(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const parsePercent = (raw) => {
-    if (raw === null || raw === undefined || raw === "" || typeof raw === "boolean") return Number.NaN;
-    const numeric = Number(raw);
-    return Number.isFinite(numeric) && numeric >= 0 && numeric <= 100 ? numeric : Number.NaN;
-  };
-  const hasUsed = Object.prototype.hasOwnProperty.call(value, "usedPercent");
-  const hasRemaining = Object.prototype.hasOwnProperty.call(value, "remainingPercent");
-  const rawUsed = parsePercent(value.usedPercent);
-  const rawRemaining = parsePercent(value.remainingPercent);
-  if ((hasUsed && !Number.isFinite(rawUsed)) || (hasRemaining && !Number.isFinite(rawRemaining))) return null;
-  if (!Number.isFinite(rawUsed) && !Number.isFinite(rawRemaining)) return null;
-  if (Number.isFinite(rawUsed) && Number.isFinite(rawRemaining) && Math.abs((rawUsed + rawRemaining) - 100) > 1) return null;
-  const usedPercent = clamp(Number.isFinite(rawUsed) ? rawUsed : 100 - rawRemaining, 0, 100);
-  const durationValue = Number(value.windowDurationMinutes ?? value.windowDurationMins);
-  return {
-    usedPercent,
-    remainingPercent: clamp(100 - usedPercent, 0, 100),
-    windowDurationMinutes: Number.isFinite(durationValue) && durationValue > 0
-      ? Math.round(durationValue)
-      : null,
-    resetsAt: normalizeCodexRateTimestamp(value.resetsAt),
-  };
-}
-
-function normalizeCodexRateReservePercent(...values) {
-  for (const value of values) {
-    if (
-      value === null
-      || value === undefined
-      || typeof value === "boolean"
-      || typeof value === "object"
-      || String(value).trim() === ""
-    ) continue;
-    const numeric = Number(value);
-    if (Number.isInteger(numeric) && numeric >= 0 && numeric <= 100) return numeric;
-  }
-  return null;
-}
-
-function codexRateLimitWasReached(value) {
-  if (value === true) return true;
-  if (typeof value !== "string") return false;
-  const normalized = value.trim().toLowerCase();
-  return Boolean(normalized && !["none", "null", "false", "available"].includes(normalized));
-}
-
-function normalizeCodexRatePayload(payload) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return { status: "unavailable", primary: null, secondary: null };
-  }
-
-  const buckets = Array.isArray(payload.buckets) ? payload.buckets : [];
-  const canonicalBucket = buckets.find((item) => String(item?.id || item?.limitId || "").toLowerCase() === "codex")
-    || buckets[0]
-    || null;
-  const nestedSnapshot = canonicalBucket
-    || payload.rateLimit
-    || payload.rateLimits
-    || payload.snapshot
-    || payload;
-  const windows = nestedSnapshot?.windows && typeof nestedSnapshot.windows === "object"
-    ? nestedSnapshot.windows
-    : nestedSnapshot;
-  const primary = normalizeCodexRateWindow(windows?.primary);
-  const secondary = normalizeCodexRateWindow(windows?.secondary);
-  const primaryProvided = windows?.primary !== null && windows?.primary !== undefined;
-  const secondaryProvided = windows?.secondary !== null && windows?.secondary !== undefined;
-  const invalidQuotaWindow = (primaryProvided && !primary) || (secondaryProvided && !secondary);
-  const rawStatus = String(payload.status || nestedSnapshot?.status || "").trim().toLowerCase();
-  const stale = Boolean(payload.stale || nestedSnapshot?.stale || rawStatus === "stale");
-  const reachedValue = nestedSnapshot?.limitReached
-    ?? nestedSnapshot?.rateLimitReached
-    ?? nestedSnapshot?.rateLimitReachedType;
-  const policy = payload.policy && typeof payload.policy === "object" ? payload.policy : {};
-  const automationPolicy = payload.automationPolicy && typeof payload.automationPolicy === "object"
-    ? payload.automationPolicy
-    : {};
-  const settings = payload.settings && typeof payload.settings === "object" ? payload.settings : {};
-  const preferences = payload.agentPreferences && typeof payload.agentPreferences === "object"
-    ? payload.agentPreferences
-    : {};
-  const nestedPolicy = nestedSnapshot?.policy && typeof nestedSnapshot.policy === "object"
-    ? nestedSnapshot.policy
-    : {};
-  const rateReservePercent = normalizeCodexRateReservePercent(
-    payload.rateReservePercent,
-    payload.minRemainingPercent,
-    policy.rateReservePercent,
-    policy.minRemainingPercent,
-    automationPolicy.rateReservePercent,
-    automationPolicy.minRemainingPercent,
-    settings.rateReservePercent,
-    preferences.rateReservePercent,
-    nestedSnapshot?.rateReservePercent,
-    nestedSnapshot?.minRemainingPercent,
-    nestedPolicy.rateReservePercent,
-    nestedPolicy.minRemainingPercent,
-  );
-
-  return {
-    status: primary && !invalidQuotaWindow
-      ? (stale ? "stale" : "ready")
-      : (["auth_required", "config_error", "timeout", "missing", "unavailable"].includes(rawStatus) ? rawStatus : "unavailable"),
-    source: "codex_app_server",
-    meter: "codex",
-    primary: invalidQuotaWindow ? null : primary,
-    secondary: invalidQuotaWindow ? null : secondary,
-    quotaWindowsValid: !invalidQuotaWindow,
-    limitReached: codexRateLimitWasReached(reachedValue),
-    rateReservePercent,
-    checkedAt: normalizeCodexRateTimestamp(
-      payload.capturedAt
-      || payload.checkedAt
-      || payload.updatedAt
-      || nestedSnapshot?.capturedAt
-      || new Date().toISOString(),
-    ),
-  };
-}
-
-function codexRatePolicyRemainingPercent(snapshot) {
-  if (snapshot?.quotaWindowsValid === false) return null;
-  const windows = [snapshot?.primary];
-  if (snapshot?.secondary !== null && snapshot?.secondary !== undefined) windows.push(snapshot.secondary);
-  if (!windows[0] || windows.some((windowData) => !windowData || typeof windowData !== "object")) return null;
-  const remaining = windows.map((windowData) => windowData.remainingPercent);
-  if (remaining.some((value) => (
-    typeof value !== "number"
-    || !Number.isFinite(value)
-    || value < 0
-    || value > 100
-  ))) return null;
-  return Math.min(...remaining);
-}
-
-function codexRateReservePresentation(snapshot, reservePercent) {
-  const threshold = normalizeCodexRateReservePercent(reservePercent) ?? 15;
-  const remaining = codexRatePolicyRemainingPercent(snapshot);
-  if (snapshot?.limitReached === true) {
-    return { tone: "error", text: `โควตาถึงขีดจำกัด • เกณฑ์ส่วนกลาง ≥ ${threshold}%` };
-  }
-  if (remaining === null) {
-    return { tone: "neutral", text: `เกณฑ์ส่วนกลาง ≥ ${threshold}% • รอข้อมูลโควตา` };
-  }
-  if (remaining < threshold) {
-    return {
-      tone: "warning",
-      text: `พักคิวที่ ${formatCodexRatePercent(remaining)} • ต้องเหลืออย่างน้อย ${threshold}%`,
-    };
-  }
-  return {
-    tone: "ready",
-    text: `พร้อมเริ่มงาน • ต่ำสุด ${formatCodexRatePercent(remaining)} ≥ ${threshold}%`,
-  };
-}
-
 function renderCodexRateReserve(snapshot = state.codexRate.snapshot) {
   const input = els.codexRateReserveInput;
   const submit = els.codexRateReserveSave;
@@ -2973,23 +2968,6 @@ function updateCodexRateProgress(track, progress, windowData, label) {
   progress.style.width = `${usedPercent}%`;
   track.setAttribute("aria-valuenow", String(Math.round(usedPercent)));
   track.setAttribute("aria-valuetext", `${label} ใช้แล้ว ${formatCodexRatePercent(usedPercent)}`);
-}
-
-function getCodexRateDisplayState(snapshot) {
-  if (!snapshot?.primary) return snapshot?.status === "loading" ? "loading" : "unavailable";
-  if (snapshot.status === "stale") return "stale";
-  return getCodexRateSeverity(snapshot);
-}
-
-function getCodexRateSeverity(snapshot) {
-  if (!snapshot?.primary) return "unavailable";
-  const usedPercent = Math.max(
-    Number(snapshot.primary?.usedPercent) || 0,
-    Number(snapshot.secondary?.usedPercent) || 0,
-  );
-  if (snapshot.limitReached || usedPercent >= 90) return "critical";
-  if (usedPercent >= 70) return "warning";
-  return "ready";
 }
 
 function renderCodexRateLimit(snapshot = state.codexRate.snapshot) {
@@ -3236,416 +3214,6 @@ async function postJson(path, payload = {}, options = {}) {
     throw error;
   }
   return body;
-}
-
-function normalizeResearchSheetReference(value) {
-  const raw = String(value || "").replace(/\u0000/g, "").trim();
-  if (!raw || raw.length > 500) return "";
-  if (/^[A-Za-z0-9_-]{20,160}$/.test(raw)) return raw;
-  try {
-    const parsed = new URL(raw);
-    if (parsed.protocol !== "https:" || parsed.hostname.toLowerCase() !== "docs.google.com") return "";
-    const match = parsed.pathname.match(/^\/spreadsheets\/d\/([A-Za-z0-9_-]{20,160})(?:\/|$)/);
-    return match?.[1] || "";
-  } catch {
-    return "";
-  }
-}
-
-function researchSheetAuthoritativeLifecycleMatches(hub = {}, nextData = {}) {
-  if (hub.dirty !== true) return true;
-  const authoritativeSheetId = normalizeResearchSheetReference(nextData.sheetId);
-  const attemptedSheetId = normalizeResearchSheetReference(
-    hub.draftReference || hub.submittedReference,
-  );
-  return Boolean(
-    authoritativeSheetId
-    && attemptedSheetId
-    && authoritativeSheetId === attemptedSheetId
-  );
-}
-
-function boundedResearchSheetCount(value, maximum = 999_999) {
-  const count = Number(value);
-  return Number.isInteger(count) && count >= 0 ? Math.min(count, maximum) : 0;
-}
-
-function normalizeResearchSheetOutbox(value = {}) {
-  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  return {
-    pending: boundedResearchSheetCount(source.pending),
-    failed: boundedResearchSheetCount(source.failed),
-    synced: boundedResearchSheetCount(source.synced),
-    deferred: boundedResearchSheetCount(source.deferred),
-  };
-}
-
-function normalizeResearchSheetTimestamp(value) {
-  if (typeof value !== "string" || !value.trim()) return null;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
-}
-
-function normalizeResearchSheetHeaderList(value) {
-  if (!Array.isArray(value)) return [];
-  return [...new Set(
-    value
-      .slice(0, 100)
-      .map((header) => safeDashboardDisplayText(header, "").slice(0, 120))
-      .filter(Boolean),
-  )].slice(0, 100);
-}
-
-function normalizeResearchSheetQueryText(value, maximum = 200) {
-  return safeDashboardDisplayText(value, "")
-    .replace(/\u0000/g, "")
-    .trim()
-    .slice(0, maximum);
-}
-
-function normalizeResearchSheetQueryResult(payload = {}) {
-  const root = payload?.query && typeof payload.query === "object" && !Array.isArray(payload.query)
-    ? payload.query
-    : (payload?.result && typeof payload.result === "object" && !Array.isArray(payload.result)
-        ? payload.result
-        : (payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {}));
-  const rawMatches = Array.isArray(root.matches) ? root.matches : [];
-  const matches = rawMatches.slice(0, RESEARCH_SHEET_QUERY_MAX_MATCHES).map((item) => ({
-    tabName: normalizeResearchSheetQueryText(item?.tabName, 80),
-    columnName: normalizeResearchSheetQueryText(item?.columnName || root.columnName, 120),
-    rowNumber: boundedResearchSheetCount(item?.rowNumber, 10_000_000),
-    recordKey: normalizeResearchSheetQueryText(item?.recordKey, 240),
-    value: normalizeResearchSheetQueryText(item?.value, 1_000),
-  }));
-  const rawSearchedTabs = Array.isArray(root.searchedTabs) ? root.searchedTabs : [];
-  const searchedTabs = rawSearchedTabs.slice(0, RESEARCH_SHEET_CONSUMERS.length).map((item) => ({
-    tabName: normalizeResearchSheetQueryText(item?.tabName, 80),
-    rowCount: boundedResearchSheetCount(item?.rowCount, 10_000_000),
-    observedAt: normalizeResearchSheetTimestamp(item?.observedAt),
-    availableColumns: normalizeResearchSheetHeaderList(item?.availableColumns)
-      .slice(0, RESEARCH_SHEET_QUERY_MAX_COLUMNS_PER_TAB),
-  }));
-  if (!searchedTabs.length && Array.isArray(root.availableColumns)) {
-    searchedTabs.push({
-      tabName: normalizeResearchSheetQueryText(root.tabName, 80) || "แท็บที่เลือก",
-      rowCount: 0,
-      observedAt: null,
-      availableColumns: normalizeResearchSheetHeaderList(root.availableColumns)
-        .slice(0, RESEARCH_SHEET_QUERY_MAX_COLUMNS_PER_TAB),
-    });
-  }
-  return {
-    ok: root.ok === true,
-    kind: /^[a-zA-Z0-9_.:-]{1,120}$/.test(String(root.kind || "")) ? String(root.kind) : "",
-    columnName: normalizeResearchSheetQueryText(root.columnName, 120),
-    contains: normalizeResearchSheetQueryText(root.contains, 200),
-    limit: Math.max(1, boundedResearchSheetCount(root.limit, RESEARCH_SHEET_QUERY_MAX_MATCHES) || 50),
-    matchCount: boundedResearchSheetCount(root.matchCount, RESEARCH_SHEET_QUERY_MAX_MATCHES),
-    matches,
-    searchedTabs,
-    freshRead: root.freshRead === true,
-    readOnly: root.readOnly === true,
-    observedAt: normalizeResearchSheetTimestamp(root.observedAt),
-    messageTh: normalizeResearchSheetQueryText(root.messageTh || root.message || root.error, 400),
-  };
-}
-
-function normalizeResearchSheetHub(payload = {}) {
-  const root = payload?.researchSheet && typeof payload.researchSheet === "object" && !Array.isArray(payload.researchSheet)
-    ? payload.researchSheet
-    : {};
-  const rawSheetIdAllowed = root.rawSheetIdExposed === true;
-  const sheetId = rawSheetIdAllowed
-    ? normalizeResearchSheetReference(root.sheetId || root.sheetDisplayValue || root.canonicalUrl)
-    : "";
-  const rawTabs = root.tabs && typeof root.tabs === "object" && !Array.isArray(root.tabs) ? root.tabs : {};
-  const tabs = Object.fromEntries(RESEARCH_SHEET_CONSUMERS.map(({ tabKey }) => [
-    tabKey,
-    safeDashboardDisplayText(rawTabs[tabKey], ""),
-  ]));
-  const rawConsumers = Array.isArray(root.consumers) ? root.consumers : [];
-  const consumerMap = new Map();
-  rawConsumers.slice(0, 20).forEach((item) => {
-    const propId = String(item?.propId || "").trim();
-    if (!RESEARCH_SHEET_CONSUMER_PROP_IDS.has(propId) || consumerMap.has(propId)) return;
-    consumerMap.set(propId, {
-      propId,
-      tabName: safeDashboardDisplayText(item?.tabName, ""),
-      status: String(item?.status || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
-      readReady: item?.readReady === true,
-      writeReady: item?.writeReady === true,
-      configurationApplied: item?.configurationApplied === true,
-      rowCount: boundedResearchSheetCount(item?.rowCount),
-      cachedRowCount: boundedResearchSheetCount(item?.cachedRowCount),
-      observedAt: normalizeResearchSheetTimestamp(item?.observedAt || item?.rowsObservedAt),
-      configRevision: safeDashboardDisplayText(item?.configRevision, ""),
-      outbox: normalizeResearchSheetOutbox(item?.outbox),
-    });
-  });
-  const consumers = RESEARCH_SHEET_CONSUMERS.map((definition) => {
-    const supplied = consumerMap.get(definition.propId) || {};
-    return {
-      ...definition,
-      propId: definition.propId,
-      tabName: supplied.tabName || tabs[definition.tabKey] || "",
-      status: supplied.status || "not_reported",
-      readReady: supplied.readReady === true,
-      writeReady: supplied.writeReady === true,
-      configurationApplied: supplied.configurationApplied === true,
-      rowCount: supplied.rowCount || 0,
-      cachedRowCount: supplied.cachedRowCount || 0,
-      observedAt: supplied.observedAt || null,
-      configRevision: supplied.configRevision || "",
-      outbox: normalizeResearchSheetOutbox(supplied.outbox),
-    };
-  });
-  const consumerByPropId = new Map(consumers.map((consumer) => [consumer.propId, consumer]));
-  const rawLinkedSystems = Array.isArray(root.linkedSystems) ? root.linkedSystems : [];
-  const suppliedLinkedSystems = new Map();
-  rawLinkedSystems.slice(0, 12).forEach((item) => {
-    const systemId = String(item?.systemId || item?.id || "").trim();
-    if (!RESEARCH_SHEET_LINKED_SYSTEMS.some((definition) => definition.systemId === systemId)) return;
-    suppliedLinkedSystems.set(systemId, item);
-  });
-  const linkedSystems = RESEARCH_SHEET_LINKED_SYSTEMS.map((definition) => {
-    const supplied = suppliedLinkedSystems.get(definition.systemId) || {};
-    const source = consumerByPropId.get(definition.sourcePropId) || {};
-    return {
-      ...definition,
-      tabName: safeDashboardDisplayText(supplied.tabName || supplied.sourceTabName, "") || source.tabName || "",
-      status: String(supplied.status || source.status || "not_reported").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
-      ready: supplied.ready === true || (!Object.keys(supplied).length && source.readReady === true),
-      rowCount: boundedResearchSheetCount(supplied.rowCount ?? source.rowCount),
-      cachedRowCount: boundedResearchSheetCount(supplied.cachedRowCount ?? source.cachedRowCount),
-      observedAt: normalizeResearchSheetTimestamp(
-        supplied.observedAt || supplied.rowsObservedAt || source.observedAt,
-      ),
-      configRevision: safeDashboardDisplayText(supplied.configRevision, "") || source.configRevision || "",
-      outbox: normalizeResearchSheetOutbox(supplied.outbox || source.outbox),
-    };
-  });
-  const rawOutbox = root.outbox && typeof root.outbox === "object" && !Array.isArray(root.outbox) ? root.outbox : {};
-  const configRevision = safeDashboardDisplayText(root.configRevision, "");
-  const activeConfigRevision = safeDashboardDisplayText(root.activeConfigRevision, "");
-  return {
-    schemaVersion: safeDashboardDisplayText(root.schemaVersion, ""),
-    configured: root.configured === true,
-    active: root.active === true,
-    operational: root.operational === true,
-    sheetId,
-    canonicalUrl: sheetId ? `https://docs.google.com/spreadsheets/d/${sheetId}` : "",
-    sheetReferenceMasked: safeDashboardDisplayText(root.sheetReferenceMasked, ""),
-    sheetTitle: safeDashboardDisplayText(root.sheetTitle, ""),
-    applyPhase: String(root.applyPhase || "idle").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
-    applyStatus: String(root.applyStatus || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
-    verificationStatus: String(root.verificationStatus || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
-    totalConsumerCount: boundedResearchSheetCount(root.totalConsumerCount, consumers.length) || consumers.length,
-    appliedConsumerCount: boundedResearchSheetCount(root.appliedConsumerCount, consumers.length),
-    verifiedConsumerCount: boundedResearchSheetCount(root.verifiedConsumerCount, consumers.length),
-    allConsumersApplied: root.allConsumersApplied === true,
-    allConsumersVerified: root.allConsumersVerified === true,
-    connected: root.connected === true,
-    readReady: root.readReady === true,
-    writeReady: root.writeReady === true,
-    adapterStatus: String(root.adapterStatus || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
-    authStatus: String(root.authStatus || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
-    credentialMode: String(root.credentialMode || root.authMode || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
-    configRevision,
-    activeConfigRevision,
-    savedAt: normalizeResearchSheetTimestamp(root.savedAt),
-    activationConfirmedAt: normalizeResearchSheetTimestamp(root.activationConfirmedAt),
-    lastVerifiedAt: normalizeResearchSheetTimestamp(root.lastVerifiedAt),
-    lastErrorCode: /^[a-zA-Z0-9_.:-]{1,120}$/.test(String(root.lastErrorCode || ""))
-      ? String(root.lastErrorCode)
-      : "",
-    tabs,
-    consumers,
-    linkedSystems,
-    outbox: normalizeResearchSheetOutbox(rawOutbox),
-    credentialsAcceptedByFrontend: false,
-    rawSheetIdExposed: Boolean(rawSheetIdAllowed && sheetId),
-  };
-}
-
-function normalizeResearchSheetGoogleAuth(payload = {}) {
-  const candidates = [
-    payload?.googleAuth,
-    payload?.researchSheetAuth,
-    payload?.auth,
-    payload?.researchSheet?.googleAuth,
-    payload?.researchSheet?.auth,
-    payload,
-  ];
-  const root = candidates.find((item) => item && typeof item === "object" && !Array.isArray(item)) || {};
-  const status = String(
-    root.status || root.authStatus || root.connectionStatus || payload?.authStatus || "unknown",
-  ).trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80);
-  const connectedStatuses = new Set(["connected", "authenticated", "authorized", "ready"]);
-  const adminSetupStatuses = new Set([
-    "admin_setup_required",
-    "backend_client_missing",
-    "client_not_configured",
-    "oauth_client_not_configured",
-    "not_configured",
-  ]);
-  const connected = root.connected === true
-    || root.authenticated === true
-    || root.authorized === true
-    || connectedStatuses.has(status);
-  const clientConfigured = connected
-    || root.clientConfigured === true
-    || root.oauthClientConfigured === true
-    || root.providerConfigured === true;
-  const requiresAdminSetup = root.requiresAdminSetup === true
-    || root.adminSetupRequired === true
-    || (!clientConfigured && adminSetupStatuses.has(status));
-  const explicitStartAvailable = root.startAvailable ?? root.canStartOAuth ?? root.authorizationAvailable;
-  const startAvailable = connected || (
-    explicitStartAvailable === true
-    || (explicitStartAvailable !== false && clientConfigured && !requiresAdminSetup)
-  );
-  return {
-    status,
-    connected,
-    clientConfigured,
-    requiresAdminSetup,
-    startAvailable,
-    accountHint: safeDashboardDisplayText(
-      root.accountHint || root.accountEmailMasked || root.emailMasked || root.accountLabel,
-      "",
-    ),
-    messageTh: safeDashboardDisplayText(root.messageTh || root.message, ""),
-    connectedAt: normalizeResearchSheetTimestamp(root.connectedAt || root.authorizedAt),
-    clientHint: safeDashboardDisplayText(
-      root.clientHint || root.oauthClientHint,
-      "",
-    ),
-    clientSource: String(root.clientSource || root.oauthClientSource || "not_configured")
-      .trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
-    credentialsAcceptedByFrontend: false,
-  };
-}
-
-function normalizeResearchSheetAuthorizationUrl(value) {
-  try {
-    const parsed = new URL(String(value || ""));
-    if (parsed.protocol !== "https:" || parsed.hostname.toLowerCase() !== "accounts.google.com") return "";
-    if (parsed.username || parsed.password || (parsed.port && parsed.port !== "443")) return "";
-    return parsed.toString();
-  } catch {
-    return "";
-  }
-}
-
-function researchSheetGoogleAuthFailureReason(error = null) {
-  const body = error?.body && typeof error.body === "object" && !Array.isArray(error.body)
-    ? error.body
-    : {};
-  const code = String(
-    body.code || body.errorCode || body.kind || body.error || error?.code || "auth_unavailable",
-  ).trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 120);
-  const reasons = {
-    access_denied: "คุณยกเลิกสิทธิ์ หรือ Google ไม่อนุญาตการเชื่อมต่อบัญชีนี้ • ลองใหม่ด้วยบัญชี Google ที่ถูกต้อง หากยังไม่ผ่านให้ติดต่อผู้สอน",
-    admin_setup_required: "ผู้ดูแลยังไม่ได้ตั้ง Google OAuth Client ที่ Local Bridge",
-    auth_expired: "สิทธิ์ Google หมดอายุ กรุณาเชื่อมบัญชีใหม่",
-    backend_client_missing: "ผู้ดูแลยังไม่ได้ตั้ง Google OAuth Client ที่ Local Bridge",
-    client_not_configured: "ผู้ดูแลยังไม่ได้ตั้ง Google OAuth Client ที่ Local Bridge",
-    oauth_client_not_configured: "ผู้ดูแลยังไม่ได้ตั้ง Google OAuth Client ที่ Local Bridge",
-    oauth_failed: "Google ไม่สามารถยืนยันการเชื่อมต่อครั้งนี้ได้",
-    oauth_error: "Google ไม่สามารถยืนยันการเชื่อมต่อครั้งนี้ได้",
-    popup_blocked: "Browser บล็อกหน้าต่าง Google กรุณาอนุญาต Pop-up แล้วลองใหม่",
-    popup_closed: "หน้าต่าง Google ถูกปิดก่อนยืนยันเสร็จ",
-    state_invalid: "คำขอเชื่อมต่อหมดอายุหรือไม่ตรงกับ Session นี้",
-    timeout: "รอการยืนยันจาก Google เกิน 2 นาที กรุณาลองใหม่",
-  };
-  return reasons[code]
-    || safeDashboardDisplayText(body.messageTh || body.message || error?.message, "")
-    || "ยังตรวจสถานะบัญชี Google จาก Backend ไม่ได้";
-}
-
-function researchSheetGoogleAuthIsTerminalStatus(status) {
-  return new Set([
-    "access_denied",
-    "admin_setup_required",
-    "backend_client_missing",
-    "callback_failed",
-    "client_not_configured",
-    "oauth_client_not_configured",
-    "oauth_error",
-    "oauth_failed",
-    "state_invalid",
-  ]).has(String(status || "").trim().toLowerCase());
-}
-
-function normalizeResearchSheetInspection(payload = {}) {
-  const root = payload?.verificationPreview && typeof payload.verificationPreview === "object" && !Array.isArray(payload.verificationPreview)
-    ? payload.verificationPreview
-    : {};
-  const sheetId = normalizeResearchSheetReference(root.sheetId || root.canonicalUrl);
-  const rawConsumers = Array.isArray(root.consumers) ? root.consumers : [];
-  const consumerMap = new Map();
-  rawConsumers.slice(0, 12).forEach((item) => {
-    const propId = String(item?.propId || "").trim();
-    if (!RESEARCH_SHEET_CONSUMER_PROP_IDS.has(propId) || consumerMap.has(propId)) return;
-    const evidence = item?.probeEvidence && typeof item.probeEvidence === "object" && !Array.isArray(item.probeEvidence)
-      ? item.probeEvidence
-      : {};
-    consumerMap.set(propId, {
-      propId,
-      tabName: safeDashboardDisplayText(item?.tabName, ""),
-      status: String(item?.status || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
-      readReady: item?.readReady === true,
-      rowCount: boundedResearchSheetCount(item?.rowCount),
-      cachedRowCount: boundedResearchSheetCount(item?.cachedRowCount),
-      observedAt: normalizeResearchSheetTimestamp(item?.observedAt || item?.rowsObservedAt),
-      missingHeaders: normalizeResearchSheetHeaderList(item?.missingHeaders),
-      duplicateHeaders: normalizeResearchSheetHeaderList(item?.duplicateHeaders),
-      probeEvidence: {
-        kind: safeDashboardDisplayText(evidence.kind, ""),
-        range: safeDashboardDisplayText(evidence.range, ""),
-        confirmed: evidence.confirmed === true,
-      },
-    });
-  });
-  const consumers = RESEARCH_SHEET_CONSUMERS.map((definition) => ({
-    ...definition,
-    ...(consumerMap.get(definition.propId) || {
-      tabName: "",
-      status: "not_reported",
-      readReady: false,
-      rowCount: 0,
-      cachedRowCount: 0,
-      observedAt: null,
-      missingHeaders: [],
-      duplicateHeaders: [],
-      probeEvidence: { kind: "", range: "", confirmed: false },
-    }),
-  }));
-  const verificationToken = typeof root.verificationToken === "string"
-    && /^[A-Za-z0-9_-]{32,128}$/.test(root.verificationToken)
-    ? root.verificationToken
-    : "";
-  const verifiedConsumerCount = boundedResearchSheetCount(root.verifiedConsumerCount, consumers.length);
-  const allConsumersReady = consumers.every((consumer) => (
-    consumer.readReady === true && consumer.probeEvidence.confirmed === true
-  ));
-  return {
-    sheetId,
-    canonicalUrl: sheetId ? `https://docs.google.com/spreadsheets/d/${sheetId}` : "",
-    sheetTitle: safeDashboardDisplayText(root.sheetTitle, ""),
-    baseConfigRevision: boundedResearchSheetCount(root.baseConfigRevision, 999_999),
-    status: String(root.status || "unknown").trim().toLowerCase().replace(/[ -]+/g, "_").slice(0, 80),
-    expiresAt: normalizeResearchSheetTimestamp(root.expiresAt),
-    verificationToken,
-    totalConsumerCount: boundedResearchSheetCount(root.totalConsumerCount, consumers.length) || consumers.length,
-    verifiedConsumerCount,
-    consumers,
-    readyForConfirmation: root.readyForConfirmation === true
-      && Boolean(sheetId)
-      && Boolean(verificationToken)
-      && verifiedConsumerCount === consumers.length
-      && allConsumersReady,
-  };
 }
 
 function researchSheetHubConfiguredReference(data = state.researchSheetHub.data) {
@@ -5303,6 +4871,7 @@ async function activateResearchSheetHub() {
     }
     addBridgeEvent("เปิดใช้ Google Sheet กลางแล้ว", "Backend ตรวจจริง 3 แท็บและ Apply ให้ 4 ระบบ • โรงงาน EA อ่านร่วม Deep_Research");
     updateDecisionLog("Google Sheet กลางผ่านการตรวจและถูกเปิดใช้จากแถบกลางด้านบนแล้ว");
+    void invalidateEaFactoryGoogleSheetCatalogAfterActivation();
     return activeData;
   } catch (error) {
     hub.status = hub.data ? "ready" : "error";
@@ -5992,7 +5561,7 @@ function serializeEaOptimizationLabSession(session = {}) {
       needsReattach: true,
     };
   };
-  const inputs = (Array.isArray(session.inputs) ? session.inputs : []).slice(0, 80).map((input, index) => ({
+  const inputs = (Array.isArray(session.inputs) ? session.inputs : []).slice(0, EA_OPTIMIZATION_LAB_MAX_INPUTS).map((input, index) => ({
     id: String(input?.id || `input_${index + 1}`).slice(0, 80),
     name: String(input?.name || `Input ${index + 1}`).slice(0, 100),
     type: String(input?.type || "unknown").slice(0, 60),
@@ -6013,9 +5582,18 @@ function serializeEaOptimizationLabSession(session = {}) {
     source: String(input?.source || "draft").slice(0, 80),
   }));
   return {
-    version: 1,
+    version: 2,
     platform: ["MT4", "MT5"].includes(session.platform) ? session.platform : "",
     sourceReportId: String(session.sourceReportId || "").slice(0, 220),
+    selectedBuildId: /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(String(session.selectedBuildId || ""))
+      ? String(session.selectedBuildId)
+      : "",
+    activeSessionId: /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(String(session.activeSessionId || ""))
+      ? String(session.activeSessionId)
+      : "",
+    startIdempotencyKey: /^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,199}$/.test(String(session.startIdempotencyKey || ""))
+      ? String(session.startIdempotencyKey)
+      : "",
     selectedTerminalId: String(session.selectedTerminalId || "").slice(0, 180),
     eaFile: sanitizeFile(session.eaFile),
     setFile: sanitizeFile(session.setFile),
@@ -6025,11 +5603,11 @@ function serializeEaOptimizationLabSession(session = {}) {
     timeframe: String(session.timeframe || "H1").slice(0, 10),
     dateFrom: String(session.dateFrom || "").slice(0, 10),
     dateTo: String(session.dateTo || "").slice(0, 10),
-    validationMethod: String(session.validationMethod || "walk_forward").slice(0, 40),
+    validationMethod: "single_verified_run",
     targetProfitPercent: String(session.targetProfitPercent ?? "").slice(0, 30),
     maxDrawdownPercent: String(session.maxDrawdownPercent ?? "20").slice(0, 30),
     minimumTrades: String(session.minimumTrades ?? "100").slice(0, 30),
-    roundCount: String(session.roundCount ?? "3").slice(0, 2),
+    roundCount: "1",
     draftSaved: session.plan?.ok === true,
   };
 }
@@ -6049,7 +5627,7 @@ function restoreEaOptimizationLabSession(value, fallback = {}) {
     fileRequestId: 0,
     restoredDraft: true,
     message: draftSaved
-      ? "กู้ Draft จาก Session แล้ว • กรุณาตรวจค่าและแนบไฟล์เดิมอีกครั้งก่อนเชื่อมขั้นรันจริง"
+      ? "กู้ Draft จาก Session แล้ว • ระบบจะตรวจสถานะ Session จริงกับ Backend อีกครั้งก่อนอนุญาตให้เริ่มหรือทำต่อ"
       : "กู้ค่าห้องทดลองจาก Session แล้ว • ไฟล์ต้นฉบับไม่ได้ถูกเก็บใน Browser storage",
     tone: "warning",
   };
@@ -6334,19 +5912,22 @@ function resolveProjectAssetPath(path) {
   if (!normalized.startsWith("assets/")) return path;
 
   const assetPath = normalized.replace(/^assets\//, "");
+  if (assetPath.startsWith("images/")) {
+    return `${PROJECT_ASSET_ROOT}/${assetPath.replace(/^images\//, "")}`;
+  }
   if (assetPath.startsWith("custom-props") || assetPath.startsWith("prop-sheets")) {
     return `${PROJECT_ASSET_ROOT}/props/${assetPath}`;
   }
   if (assetPath.startsWith("navigation/")) {
-    return `${PROJECT_ASSET_ROOT}/maps/command-room/${assetPath}`;
+    return `${PROJECT_ASSET_ROOT}/rooms/command-room/${assetPath}`;
   }
   if (assetPath.startsWith("exact-scene-layers")) {
-    return `${PROJECT_ASSET_ROOT}/maps/command-room/layers/${assetPath}`;
+    return `${PROJECT_ASSET_ROOT}/rooms/command-room/layers/${assetPath}`;
   }
   if (assetPath.startsWith("agents/")) {
-    return `${PROJECT_ASSET_ROOT}/agents/legacy-prototype-agents/${assetPath.replace(/^agents\//, "")}`;
+    return `${PROJECT_ASSET_ROOT}/characters/legacy-prototype-agents/${assetPath.replace(/^agents\//, "")}`;
   }
-  return `${PROJECT_ASSET_ROOT}/maps/command-room/${assetPath}`;
+  return `${PROJECT_ASSET_ROOT}/rooms/command-room/${assetPath}`;
 }
 
 function resolveAgentPackagePath(path) {
@@ -6655,6 +6236,21 @@ function getSubjectImage(subject, type) {
 function getPropertyRole(subject) {
   if (!subject?.id) return null;
   return state.propReports[subject.id]?.propertyRole || null;
+}
+
+function getEquipmentPurpose(subject, fallback = "") {
+  const purposes = {
+    codex_mcp_portal: "ค้นหาระบบเทรดจากแหล่งสาธารณะ พร้อมหลักฐานและผลตรวจ เพื่อเลือกนำไปวิจัยต่อ",
+    [TRADING_RESEARCH_LAB_PROP_ID]: "วิเคราะห์ระบบเทรดเชิงลึก จัดทำ Strategy Brief และบันทึกลง Google Sheet เพื่อส่งต่อให้โรงงาน EA",
+    [EA_FACTORY_PROP_ID]: "สร้าง EA และ Indicator จากระบบที่เลือก พร้อมติดตามการเขียนโค้ด การตรวจสอบ และผลงานที่พร้อมดาวน์โหลด",
+    [AI_TRADE_COUNCIL_PROP_ID]: "รวมข้อมูลบัญชี MT4 / MT5 และมุมมองจากที่ปรึกษา AI เพื่อวิเคราะห์และติดตามการตัดสินใจตามสิทธิ์ที่ระบบยืนยัน",
+    [EA_OPTIMIZATION_LAB_PROP_ID]: "วางแผนและติดตามการทดสอบ EA พร้อมช่วงพารามิเตอร์และผลวิเคราะห์ โดย MT4 ใช้วางแผน และ MT5 ใช้รันเมื่อระบบพร้อม",
+    terminal_workstation: "พัฒนา Source MQL4 / MQL5 ที่ได้รับอนุญาต พร้อม Brief เป้าหมายประสิทธิภาพ และรายงานผลงาน",
+    [INDICATOR_SCOUT_PROP_ID]: "รวบรวม Indicator, EA และเครื่องมือจากเว็บไซต์สาธารณะ พร้อมหลักฐาน ผลย้อนหลัง และสถานะแหล่งข้อมูล",
+    [FX_NEWS_BIAS_PROP_ID]: "ติดตามข่าวและแนวโน้ม 28 คู่เงินในระยะสั้น กลาง และยาว พร้อมกำหนดเวลาอัปเดตข่าว โดยไม่ส่งคำสั่งเทรด",
+    [HQ_CONNECTION_HUB_PROP_ID]: "ตรวจความพร้อมและจุดติดขัดของอุปกรณ์ทั้งหมดใน HQ พร้อมเปิดอุปกรณ์ที่ต้องการตั้งค่าหรือตรวจสอบ",
+  };
+  return purposes[subject?.id] || fallback;
 }
 
 function listText(items, fallback = "-") {
@@ -7073,13 +6669,134 @@ function appendDashboardSourceLinks(container, evidence) {
   container.appendChild(section);
 }
 
+function normalizeManagerExecutiveSummary(report) {
+  const summary = report?.managerSummary;
+  if (report?.type !== "executive_summary" || report.ownerAgentId !== "manager" || summary?.schemaVersion !== "manager-summary-v1") return null;
+  const text = (value, limit) => typeof value === "string" && value.trim().length > 0 && value.length <= limit;
+  const identifier = (value) => typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,119}$/.test(value);
+  const source = (value) => value && [value.sourceReportId, value.recordId].every((id) => typeof id === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,119}$/.test(id))
+    && typeof value.snapshotDigest === "string" && /^[a-f0-9]{64}$/.test(value.snapshotDigest);
+  const list = (values, maximum, limit = 1200) => Array.isArray(values) && values.length <= maximum && values.every((value) => text(value, limit));
+  const points = (values, minimum, maximum) => Array.isArray(values) && values.length >= minimum && values.length <= maximum
+    && values.every((point) => point && ["fact", "inference", "unknown"].includes(point.kind)
+      && text(point.statement, 1200)
+      && (point.topic === undefined || text(point.topic, 120))
+      && Array.isArray(point.evidenceIds) && point.evidenceIds.length >= 1 && point.evidenceIds.length <= 8
+      && point.evidenceIds.every((id) => text(id, 120)));
+  const roleOwners = { technical: "optimization_agent", price_action: "backtest_analyst", risk: "risk_guard" };
+  if (!source(summary.sourceReference) || !text(summary.overallSummary, 6000)
+    || !points(summary.keyPoints || [], 0, 24) || !list(summary.blockers, 24, 1240) || !list(summary.nextSteps, 24, 1240)
+    || !Array.isArray(summary.agents) || summary.agents.length < 1 || summary.agents.length > 3) return null;
+  const validAgents = summary.agents.every((agent) => agent && roleOwners[agent.roleId] === agent.ownerAgentId
+    && identifier(agent.missionId) && identifier(agent.reportId)
+    && text(agent.summary, 1600) && points(agent.keyPoints, 3, 8)
+    && list(agent.blockers, 8) && list(agent.nextSteps, 8) && source(agent.sourceReference)
+    && ["sourceReportId", "recordId", "snapshotDigest"].every((key) => agent.sourceReference[key] === summary.sourceReference[key]));
+  if (!validAgents || ["missionId", "reportId", "ownerAgentId", "roleId"].some((key) => new Set(summary.agents.map((agent) => agent[key])).size !== summary.agents.length)) return null;
+  return summary;
+}
+
+function managerSummaryDisplayText(value) {
+  // The structured contract bounds each complete point to 1,200 characters.
+  // Keep those points intact instead of the generic dashboard's 600-char preview.
+  return safeDashboardDisplayText(value, "", { limit: 12000, markTruncated: true });
+}
+
+function appendManagerSummaryPoints(container, titleText, points) {
+  if (!points.length) return;
+  const section = document.createElement("section");
+  const title = document.createElement("h3");
+  const list = document.createElement("ul");
+  const labels = { fact: "ข้อเท็จจริงจากแหล่งข้อมูล", inference: "ข้อวิเคราะห์", unknown: "ยังไม่ยืนยัน" };
+  section.className = "dashboard-result-section";
+  title.textContent = titleText;
+  points.forEach((point) => {
+    const row = document.createElement("li");
+    const kind = document.createElement("strong");
+    const statement = document.createElement("p");
+    const evidence = document.createElement("small");
+    kind.textContent = labels[point.kind];
+    statement.textContent = managerSummaryDisplayText(point.statement);
+    evidence.textContent = `หลักฐานอ้างอิง: ${point.evidenceIds.map(managerSummaryDisplayText).join(", ")}`;
+    row.append(kind, statement, evidence);
+    list.appendChild(row);
+  });
+  section.append(title, list);
+  container.appendChild(section);
+}
+
+function appendManagerSummaryList(container, titleText, values, emptyText, className = "") {
+  const section = document.createElement("section");
+  const title = document.createElement("h3");
+  section.className = `dashboard-result-section ${className}`.trim();
+  title.textContent = titleText;
+  section.appendChild(title);
+  if (values.length) {
+    const list = document.createElement("ul");
+    values.forEach((value) => {
+      const row = document.createElement("li");
+      row.textContent = managerSummaryDisplayText(value);
+      list.appendChild(row);
+    });
+    section.appendChild(list);
+  } else {
+    const empty = document.createElement("p");
+    empty.textContent = emptyText;
+    section.appendChild(empty);
+  }
+  container.appendChild(section);
+}
+
+function appendManagerExecutiveSummary(container, summary) {
+  const provenance = document.createElement("section");
+  const title = document.createElement("h3");
+  const facts = document.createElement("dl");
+  provenance.className = "dashboard-result-section";
+  title.textContent = "แหล่งข้อมูลของสรุปนี้";
+  facts.className = "kanban-detail-grid";
+  appendDashboardResultFact(facts, "Source Report ID", summary.sourceReference.sourceReportId);
+  appendDashboardResultFact(facts, "Record ID", summary.sourceReference.recordId);
+  appendDashboardResultFact(facts, "Snapshot digest", summary.sourceReference.snapshotDigest);
+  provenance.append(title, facts);
+  container.appendChild(provenance);
+  appendManagerSummaryPoints(container, "ประเด็นสรุปของ Manager", summary.keyPoints || []);
+  appendManagerSummaryList(container, "ข้อขัดข้องที่ต้องจัดการ", summary.blockers, "ไม่มีรายการข้อขัดข้องที่ระบุในรายงานนี้", "risks");
+  appendManagerSummaryList(container, "ขั้นตอนถัดไปที่ Manager รวบรวม", summary.nextSteps, "ไม่มีขั้นตอนถัดไปที่ระบุในรายงานนี้", "next-actions");
+  const roleLabels = { technical: "วิเคราะห์ Technical", price_action: "วิเคราะห์ Price Action", risk: "ตรวจความเสี่ยง" };
+  summary.agents.forEach((agent, index) => {
+    const panel = document.createElement("article");
+    const heading = document.createElement("h3");
+    const overview = document.createElement("p");
+    const disclosure = document.createElement("details");
+    const disclosureTitle = document.createElement("summary");
+    const identity = document.createElement("dl");
+    panel.className = "dashboard-result-section manager-summary-agent";
+    heading.textContent = `${index + 1}. ${displayAgentName(agent.ownerAgentId)} · ${roleLabels[agent.roleId]}`;
+    overview.className = "dashboard-result-detail-summary";
+    overview.textContent = managerSummaryDisplayText(agent.summary);
+    disclosureTitle.textContent = "รหัสงานและแหล่งข้อมูลของ Agent";
+    identity.className = "kanban-detail-grid";
+    [["Owner Agent ID", agent.ownerAgentId], ["Role ID", agent.roleId], ["Mission ID", agent.missionId], ["Report ID", agent.reportId],
+      ["Source Report ID", agent.sourceReference.sourceReportId], ["Record ID", agent.sourceReference.recordId], ["Snapshot digest", agent.sourceReference.snapshotDigest]]
+      .forEach(([label, value]) => appendDashboardResultFact(identity, label, value));
+    disclosure.append(disclosureTitle, identity);
+    panel.append(heading, overview, disclosure);
+    appendManagerSummaryPoints(panel, "ประเด็นจาก Agent", agent.keyPoints);
+    appendManagerSummaryList(panel, "ข้อขัดข้องของงานนี้", agent.blockers, "ไม่มีรายการข้อขัดข้องที่ระบุในรายงานนี้", "risks");
+    appendManagerSummaryList(panel, "ขั้นตอนถัดไปของงานนี้", agent.nextSteps, "ไม่มีขั้นตอนถัดไปที่ระบุในรายงานนี้", "next-actions");
+    container.appendChild(panel);
+  });
+}
+
 function openDashboardResultDetail(item, trigger = null) {
   if (!item || !els.dashboardResultDialog || !els.dashboardResultDetailBody) return;
   const title = safeDashboardDisplayText(item.title, "รายงานผล Task");
-  const summary = safeDashboardDisplayText(
-    item.summary || item.detail || item.result,
-    "ยังไม่มีรายละเอียดเพิ่มเติมจาก Local Runner",
-  );
+  const managerSummary = normalizeManagerExecutiveSummary(item);
+  const summary = managerSummary
+    ? managerSummaryDisplayText(managerSummary.overallSummary)
+    : item.managerSummary != null
+      ? "ยังไม่แสดงสรุปที่ตรวจสอบแหล่งข้อมูลไม่ได้"
+      : safeDashboardDisplayText(item.summary || item.detail || item.result, "ยังไม่มีรายละเอียดเพิ่มเติมจาก Local Runner");
   const facts = document.createElement("dl");
   const summaryText = document.createElement("p");
   dashboardResultShouldRestoreFocus = true;
@@ -7104,10 +6821,19 @@ function openDashboardResultDetail(item, trigger = null) {
     appendDashboardResultFact(facts, "ขอบเขตผลลัพธ์", executionScope.label);
   }
   els.dashboardResultDetailBody.append(summaryText, facts);
-  appendDashboardMetricSection(els.dashboardResultDetailBody, item.metrics);
-  appendDashboardDetailList(els.dashboardResultDetailBody, "สิ่งที่พบ", item.findings, "findings");
-  appendDashboardDetailList(els.dashboardResultDetailBody, "ความเสี่ยงหรือข้อควรระวัง", item.risks, "risks");
-  appendDashboardDetailList(els.dashboardResultDetailBody, "ขั้นตอนถัดไป", item.nextActions, "next-actions");
+  if (managerSummary) {
+    appendManagerExecutiveSummary(els.dashboardResultDetailBody, managerSummary);
+  } else if (item.managerSummary != null) {
+    const notice = document.createElement("p");
+    notice.className = "kanban-readonly-notice";
+    notice.textContent = "ข้อมูลสรุปของ Manager ไม่ครบหรือแหล่งข้อมูลไม่ตรงกัน จึงยังไม่แสดงข้อสรุป กรุณาตรวจรายงานจาก Backend";
+    els.dashboardResultDetailBody.appendChild(notice);
+  } else {
+    appendDashboardMetricSection(els.dashboardResultDetailBody, item.metrics);
+    appendDashboardDetailList(els.dashboardResultDetailBody, "สิ่งที่พบ", item.findings, "findings");
+    appendDashboardDetailList(els.dashboardResultDetailBody, "ความเสี่ยงหรือข้อควรระวัง", item.risks, "risks");
+    appendDashboardDetailList(els.dashboardResultDetailBody, "ขั้นตอนถัดไป", item.nextActions, "next-actions");
+  }
   appendDashboardVisualEvidence(
     els.dashboardResultDetailBody,
     Array.isArray(item.attachments) ? item.attachments : item.visualEvidence,
@@ -7211,7 +6937,8 @@ function closeDashboardResultDetail({ restoreFocus = true } = {}) {
 
 function createTaskCard(mission = {}, options = {}) {
   const { variant = "board-card", source = "list", statusOverride = null } = options;
-  const status = statusOverride || getMissionPresentationStatus(mission);
+  const status = getMissionPresentationStatus(mission);
+  const waiting = getMissionWaitingPresentation(mission);
   const autoEligible = isBackendAutoEligibleMission(mission);
   const card = document.createElement("button");
   const topline = document.createElement("span");
@@ -7222,7 +6949,7 @@ function createTaskCard(mission = {}, options = {}) {
   const hint = document.createElement("span");
 
   card.type = "button";
-  card.className = `task-card ${variant} ${status}`;
+  card.className = `task-card ${variant} ${statusOverride || status}`;
   card.classList.toggle("auto-eligible", autoEligible);
   card.dataset.taskMissionId = mission.id || "";
   card.setAttribute("aria-haspopup", "dialog");
@@ -7234,7 +6961,7 @@ function createTaskCard(mission = {}, options = {}) {
 
   topline.className = "task-card-topline";
   badge.className = "task-status-badge";
-  badge.textContent = displayStatus(status);
+  badge.textContent = waiting?.label || displayStatus(status);
   owner.className = "task-card-meta";
   owner.textContent = `ผู้รับผิดชอบ: ${displayAgentName(getAgentIdFromOwner(mission.owner) || mission.owner, "ยังไม่ได้มอบหมาย")}`;
   topline.append(badge, owner);
@@ -7244,13 +6971,13 @@ function createTaskCard(mission = {}, options = {}) {
   destination.className = "task-card-destination";
   destination.textContent = `รายงานที่: ${displayPropName(mission.targetId || "mission_strategy_table")}`;
   hint.className = "task-card-summary";
-  hint.textContent = status === "completed"
+  hint.textContent = waiting?.detail || (status === "completed"
     ? (autoEligible ? "งานอัตโนมัติเสร็จแล้ว • เปิดดูรายงาน" : "เปิดดูผลลัพธ์และรายงาน")
     : ["blocked", "failed"].includes(status)
       ? "เปิดดูสาเหตุและรายละเอียด"
       : autoEligible
         ? "Backend ดูแลงานนี้อัตโนมัติ"
-        : "กดเพื่อดูรายละเอียด";
+        : "กดเพื่อดูรายละเอียด");
   card.append(topline, title);
   if (source === "kanban") card.appendChild(destination);
   card.appendChild(hint);
@@ -7424,379 +7151,6 @@ function escapeHtml(value) {
     '"': "&quot;",
     "'": "&#039;",
   })[character]);
-}
-
-function normalizeMeetingText(value, maxLength = 4000) {
-  if (value === null || value === undefined) return "";
-  return String(value).replace(/\u0000/g, "").trim().slice(0, maxLength);
-}
-
-function normalizeMeetingTextList(value, maximumItems, maximumChars) {
-  if (!Array.isArray(value)) return [];
-  return value
-    .slice(0, Math.max(0, Number(maximumItems) || 0))
-    .filter((item) => ["string", "number"].includes(typeof item))
-    .map((item) => normalizeMeetingText(item, maximumChars))
-    .filter(Boolean);
-}
-
-function normalizeMeetingParticipant(value) {
-  const raw = value && typeof value === "object" && !Array.isArray(value)
-    ? value
-    : { agentId: value };
-  const agentId = normalizeMeetingText(raw.agentId || raw.id || raw.participantAgentId, 160);
-  const agent = agentId ? getOfficeAgent(agentId) : null;
-  const name = normalizeMeetingText(raw.name || raw.displayName || raw.agentName, 160)
-    || normalizeMeetingText(agent?.name, 160)
-    || agentId
-    || "Backend ไม่ระบุชื่อ";
-  return {
-    agentId,
-    name,
-    role: normalizeMeetingText(raw.role || raw.agentRole, 160)
-      || normalizeMeetingText(agent?.role, 160)
-      || "Backend ไม่ระบุบทบาท",
-    status: normalizeMeetingText(raw.status || raw.participantStatus, 80),
-  };
-}
-
-function normalizeMeetingMessage(value, index = 0) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const text = normalizeMeetingText(value.message ?? value.text ?? value.content ?? value.body, 12000);
-  if (!text) return null;
-  const speakerAgentId = normalizeMeetingText(
-    value.speakerAgentId || value.agentId || value.fromAgentId || value.speakerId,
-    160,
-  );
-  const agent = speakerAgentId ? getOfficeAgent(speakerAgentId) : null;
-  const rawSpeakerKind = normalizeMeetingText(
-    value.speakerType || value.authorType || value.senderType || value.role,
-    80,
-  ).toLowerCase();
-  const isUser = value.isUser === true || ["user", "human", "operator"].includes(rawSpeakerKind);
-  return {
-    id: normalizeMeetingText(value.id || value.messageId || value.turnId, 200) || `message-${index}`,
-    speakerAgentId,
-    speakerName: normalizeMeetingText(value.speakerName || value.speakerLabel || value.authorName, 160)
-      || (isUser ? "คุณ" : normalizeMeetingText(agent?.name, 160))
-      || "Backend ไม่ระบุผู้พูด",
-    speakerRole: normalizeMeetingText(value.speakerRole || value.agentRole || value.authorRole, 160)
-      || (isUser ? "ผู้ใช้" : normalizeMeetingText(agent?.role, 160))
-      || "Backend ไม่ระบุบทบาท",
-    speakerStatus: normalizeMeetingText(value.status || value.turnStatus, 80),
-    createdAt: normalizeMeetingText(value.createdAt || value.timestamp || value.time, 80),
-    text,
-    isUser,
-  };
-}
-
-function normalizeMeetingProposal(rawSession = {}) {
-  const canonicalSessionProposal = rawSession.proposal
-    && typeof rawSession.proposal === "object"
-    && !Array.isArray(rawSession.proposal)
-    ? rawSession.proposal
-    : null;
-  const nested = canonicalSessionProposal
-    || (rawSession.implementationProposal
-      && typeof rawSession.implementationProposal === "object"
-      && !Array.isArray(rawSession.implementationProposal)
-      ? rawSession.implementationProposal
-      : {});
-  const implementationMission = nested.implementationMission && typeof nested.implementationMission === "object"
-    ? nested.implementationMission
-    : rawSession.implementationMission && typeof rawSession.implementationMission === "object"
-      ? rawSession.implementationMission
-      : {};
-  const approval = rawSession.approval && typeof rawSession.approval === "object"
-    ? rawSession.approval
-    : nested.approval && typeof nested.approval === "object"
-      ? nested.approval
-      : {};
-  const sessionManagerDecision = rawSession.managerDecision
-    && typeof rawSession.managerDecision === "object"
-    && !Array.isArray(rawSession.managerDecision)
-    ? rawSession.managerDecision
-    : {};
-  const nestedManagerDecision = nested.managerDecision
-    && typeof nested.managerDecision === "object"
-    && !Array.isArray(nested.managerDecision)
-    ? nested.managerDecision
-    : sessionManagerDecision.decision
-      && typeof sessionManagerDecision.decision === "object"
-      && !Array.isArray(sessionManagerDecision.decision)
-      ? sessionManagerDecision.decision
-      : {};
-  const structuredProposal = [
-    nested.proposal,
-    nested.structuredProposal,
-    rawSession.structuredProposal,
-    sessionManagerDecision.proposal,
-  ].find((candidate) => (
-    ["string", "number"].includes(typeof candidate)
-    && String(candidate).trim()
-  ));
-  const risks = Array.isArray(nested.risks) ? nested.risks : sessionManagerDecision.risks;
-  const acceptanceChecks = Array.isArray(nested.acceptanceChecks)
-    ? nested.acceptanceChecks
-    : sessionManagerDecision.acceptanceChecks;
-  const summary = normalizeMeetingText(
-    nested.text
-    || nested.summary
-    || nested.plan
-    || rawSession.proposalSummary
-    || (typeof rawSession.proposal === "string" ? rawSession.proposal : ""),
-    8000,
-  );
-  const normalizedStructuredProposal = normalizeMeetingText(structuredProposal, 700);
-  const normalizedRisks = normalizeMeetingTextList(risks, 3, 240);
-  const normalizedAcceptanceChecks = normalizeMeetingTextList(acceptanceChecks, 4, 240);
-  const managerDecisionStatus = normalizeMeetingText(nestedManagerDecision.status, 80).toLowerCase();
-  const managerDecisionSummary = normalizeMeetingText(nestedManagerDecision.summary, 360);
-  const digest = normalizeMeetingText(
-    nested.digest || nested.proposalDigest || rawSession.proposalDigest,
-    256,
-  );
-  const digestVersion = normalizeMeetingText(nested.digestVersion, 120);
-  const managerTurnId = normalizeMeetingText(
-    nested.managerTurnId || sessionManagerDecision.turnId,
-    200,
-  );
-  const risksAreComplete = Array.isArray(nested.risks)
-    && nested.risks.length <= 3
-    && normalizedRisks.length === nested.risks.length
-    && nested.risks.every((item, index) => (
-      typeof item === "string"
-      && normalizeMeetingText(item, 240) === item
-      && normalizedRisks[index] === item
-    ));
-  const checksAreComplete = Array.isArray(nested.acceptanceChecks)
-    && nested.acceptanceChecks.length <= 4
-    && normalizedAcceptanceChecks.length === nested.acceptanceChecks.length
-    && nested.acceptanceChecks.every((item, index) => (
-      typeof item === "string"
-      && normalizeMeetingText(item, 240) === item
-      && normalizedAcceptanceChecks[index] === item
-    ));
-  const managerDecisionIsComplete = nested.managerDecision
-    && typeof nested.managerDecision === "object"
-    && !Array.isArray(nested.managerDecision)
-    && Object.keys(nested.managerDecision).sort().join(",") === "status,summary"
-    && ["accepted", "revision_required", "rejected", "deferred"].includes(managerDecisionStatus)
-    && managerDecisionStatus === nested.managerDecision.status
-    && Boolean(managerDecisionSummary)
-    && managerDecisionSummary === nested.managerDecision.summary;
-  const optionalAliasesAreConsistent = (
-    (!Object.prototype.hasOwnProperty.call(nested, "structuredProposal")
-      || nested.structuredProposal === nested.proposal)
-    && (!Object.prototype.hasOwnProperty.call(nested, "summary")
-      || nested.summary === nested.text)
-    && (!Object.prototype.hasOwnProperty.call(nested, "plan")
-      || nested.plan === nested.text)
-    && (!Object.prototype.hasOwnProperty.call(nested, "proposalDigest")
-      || nested.proposalDigest === nested.digest)
-  );
-  const visibleConsentPacketComplete = Boolean(
-    canonicalSessionProposal
-    && typeof nested.text === "string"
-    && summary
-    && summary === nested.text
-    && typeof nested.proposal === "string"
-    && normalizedStructuredProposal
-    && normalizedStructuredProposal === nested.proposal
-    && risksAreComplete
-    && checksAreComplete
-    && managerDecisionIsComplete
-    && optionalAliasesAreConsistent
-    && typeof nested.digest === "string"
-    && /^[0-9a-f]{64}$/.test(digest)
-    && digest === nested.digest
-    && typeof nested.digestVersion === "string"
-    && digestVersion === "interactive-meeting-proposal-v2"
-    && digestVersion === nested.digestVersion
-    && typeof nested.managerTurnId === "string"
-    && managerTurnId
-    && managerTurnId === nested.managerTurnId
-  );
-  return {
-    summary,
-    structuredProposal: normalizedStructuredProposal,
-    risks: normalizedRisks,
-    acceptanceChecks: normalizedAcceptanceChecks,
-    managerDecision: {
-      status: managerDecisionStatus,
-      summary: managerDecisionSummary,
-    },
-    digest,
-    digestVersion,
-    managerTurnId,
-    visibleConsentPacketComplete,
-    implementationMissionId: normalizeMeetingText(
-      nested.implementationMissionId
-      || rawSession.implementationMissionId
-      || approval.implementationMissionId
-      || implementationMission.id
-      || implementationMission.missionId,
-      200,
-    ),
-    status: normalizeMeetingText(
-      nested.status
-      || rawSession.proposalStatus
-      || approval.status
-      || rawSession.approvalStatus
-      || rawSession.status,
-      80,
-    ).toLowerCase(),
-    readyToExecute: nested.readyToExecute === true
-      || rawSession.readyToExecute === true
-      || approval.readyToExecute === true
-      || implementationMission.readyToExecute === true,
-    frozenAt: normalizeMeetingText(nested.frozenAt || nested.createdAt || rawSession.proposalFrozenAt, 80),
-  };
-}
-
-function normalizeMeetingSession(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const id = normalizeMeetingText(value.id || value.sessionId, 200);
-  if (!id) return null;
-  const participantSource = Array.isArray(value.participants)
-    ? value.participants
-    : Array.isArray(value.participantAgentIds)
-      ? value.participantAgentIds
-      : [];
-  const messageSource = Array.isArray(value.messages)
-    ? value.messages
-    : Array.isArray(value.transcript)
-      ? value.transcript
-      : Array.isArray(value.turns)
-        ? value.turns
-        : [];
-  const progress = value.progress && typeof value.progress === "object" && !Array.isArray(value.progress)
-    ? value.progress
-    : {};
-  const latestManagerDecisionTurn = [...messageSource].reverse().find((item) => (
-    item
-    && typeof item === "object"
-    && !Array.isArray(item)
-    && item.role === "agent"
-    && item.speakerAgentId === "manager"
-    && item.intent === "decision"
-  ));
-  const decision = value.managerDecision
-    ?? value.decision
-    ?? value.decisionSummary
-    ?? latestManagerDecisionTurn?.message;
-  const nestedDecision = decision
-    && typeof decision === "object"
-    && !Array.isArray(decision)
-    && decision.decision
-    && typeof decision.decision === "object"
-    && !Array.isArray(decision.decision)
-    ? decision.decision
-    : {};
-  const decisionText = decision && typeof decision === "object" && !Array.isArray(decision)
-    ? [
-        decision.message,
-        decision.summary,
-        decision.text,
-        nestedDecision.summary,
-        nestedDecision.message,
-        typeof decision.decision === "string" ? decision.decision : "",
-        latestManagerDecisionTurn?.message,
-      ].find((candidate) => (
-        ["string", "number"].includes(typeof candidate)
-        && String(candidate).trim()
-      )) || ""
-    : decision;
-  const roundCount = Number.isFinite(Number(progress.currentRound ?? value.currentRound ?? value.roundCount))
-    ? Math.max(0, Math.floor(Number(progress.currentRound ?? value.currentRound ?? value.roundCount)))
-    : null;
-  const currentRoundTurns = roundCount === null
-    ? []
-    : messageSource.filter((item) => Number(item?.roundNumber) === roundCount);
-  const configuredAiTurns = Number(
-    value.aiTurnsPerRound
-    ?? value.ai_turns_per_round
-    ?? progress.aiTurnsPerRound
-    ?? value.maxTurnsPerRound,
-  );
-  const agenda = normalizeMeetingText(value.agenda || value.topic || value.title, 2400);
-  const developmentGoal = normalizeMeetingText(
-    value.developmentGoal || value.development_goal || value.goal || value.developmentObjective,
-    2400,
-  );
-  const visibleMeetingContextComplete = Boolean(
-    typeof value.agenda === "string"
-    && agenda
-    && agenda === value.agenda
-    && typeof value.developmentGoal === "string"
-    && developmentGoal
-    && developmentGoal === value.developmentGoal
-    && Number.isInteger(value.aiTurnsPerRound)
-    && value.aiTurnsPerRound >= 2
-    && value.aiTurnsPerRound <= 8
-    && configuredAiTurns === value.aiTurnsPerRound
-  );
-  return {
-    id,
-    agenda,
-    developmentGoal,
-    aiTurnsPerRound: Number.isInteger(configuredAiTurns) && configuredAiTurns >= 2 && configuredAiTurns <= 8
-      ? configuredAiTurns
-      : null,
-    status: normalizeMeetingText(value.status || value.sessionStatus, 80).toLowerCase() || "unknown",
-    participants: participantSource.map(normalizeMeetingParticipant),
-    messages: messageSource.map(normalizeMeetingMessage).filter(Boolean),
-    currentRound: roundCount,
-    totalRounds: Number.isFinite(Number(progress.totalRounds ?? value.totalRounds ?? value.maxRounds))
-      ? Math.max(0, Math.floor(Number(progress.totalRounds ?? value.totalRounds ?? value.maxRounds)))
-      : null,
-    currentTurn: Number.isFinite(Number(progress.currentTurn ?? value.currentTurn))
-      ? Math.max(0, Math.floor(Number(progress.currentTurn ?? value.currentTurn)))
-      : roundCount !== null
-        ? currentRoundTurns.length
-      : null,
-    totalTurns: Number.isFinite(Number(progress.totalTurns ?? value.totalTurns ?? value.maxTurnsPerRound))
-      ? Math.max(0, Math.floor(Number(progress.totalTurns ?? value.totalTurns ?? value.maxTurnsPerRound)))
-      : null,
-    managerDecision: normalizeMeetingText(decisionText, 8000),
-    managerDecisionAt: normalizeMeetingText(
-      (decision && typeof decision === "object" ? decision.createdAt || decision.decidedAt : "")
-      || latestManagerDecisionTurn?.createdAt
-      || value.decisionAt,
-      80,
-    ),
-    proposal: normalizeMeetingProposal(value),
-    visibleMeetingContextComplete,
-    approvalNote: normalizeMeetingText(value.approvalNote, 1200),
-    createdAt: normalizeMeetingText(value.createdAt || value.startedAt, 80),
-    updatedAt: normalizeMeetingText(value.updatedAt || value.completedAt || value.createdAt, 80),
-  };
-}
-
-function normalizeMeetingSessionPayload(payload) {
-  const value = payload?.session ?? payload?.data?.session ?? payload?.data ?? payload;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const envelope = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
-  return normalizeMeetingSession({
-    ...value,
-    status: envelope.status ?? value.status,
-    implementationMissionId: envelope.implementationMissionId ?? value.implementationMissionId,
-    implementationMission: envelope.mission ?? value.implementationMission,
-    readyToExecute: envelope.readyToExecute ?? value.readyToExecute,
-  });
-}
-
-function normalizeMeetingSessionsPayload(payload) {
-  const values = Array.isArray(payload)
-    ? payload
-    : Array.isArray(payload?.sessions)
-      ? payload.sessions
-      : Array.isArray(payload?.items)
-        ? payload.items
-        : Array.isArray(payload?.data?.sessions)
-          ? payload.data.sessions
-          : [];
-  return values.map(normalizeMeetingSession).filter(Boolean);
 }
 
 function meetingSessionIsActive(session = state.meetingRoom.session) {
@@ -8838,6 +8192,36 @@ function getMissionPresentationStatus(mission = {}) {
   return present(storedStatus);
 }
 
+function getMissionWaitingPresentation(mission = {}) {
+  const status = getMissionPresentationStatus(mission);
+  if (mission.toolId === "manager_delegate" && mission.phase === "awaiting_specialist_start"
+    && ["queued", "running"].includes(status)
+    && Number(mission.delegation?.subtaskStatusCounts?.running || 0) === 0) {
+    return {
+      label: "Manager รอ Agent เริ่มงาน",
+      detail: "งานย่อยยังรอเริ่มจาก Backend จึงยังไม่มีผลจาก Agent สำหรับสรุปรวม เปิดงานย่อยเพื่อดูสาเหตุที่รอ",
+    };
+  }
+  if (status !== "queued") return null;
+  const execution = mission.execution || {};
+  const reason = String(mission.runnerStatus || execution.lastDeferredReason || "");
+  const queuedDetail = execution.processStarted === false
+    ? "Backend ยังไม่ได้เริ่มรันในรอบนี้"
+    : "งานยังรอคิวจาก Backend";
+  if (mission.phase === "auto_guarded_deferred") {
+    return reason === "codex_limit_reached"
+      ? {
+          label: "รอโควตา Codex",
+          detail: `โควตา Codex ยังไม่พร้อม (codex_limit_reached) • ${queuedDetail} และยังไม่มีผลใหม่ รอ Backend ตรวจโควตาอีกครั้ง`,
+        }
+      : {
+          label: "พักคิวชั่วคราว",
+          detail: `${queuedDetail}${reason ? ` • ${safeDashboardDisplayText(reason)}` : ""} รอเงื่อนไขจาก Backend พร้อมก่อนเริ่มงาน`,
+        };
+  }
+  return { label: "รอเริ่มงาน", detail: "Backend รับงานเข้าคิวแล้ว ยังรอ Agent เริ่มทำงาน" };
+}
+
 function isBackendAutoEligibleMission(mission) {
   const policyAutoEligible = isBackendAutoSafeMission(mission);
   const directlyAutoEligible = Boolean(
@@ -9161,45 +8545,136 @@ function getMetatraderSelectionModel(checklist) {
   };
 }
 
+function globalMetatraderPlatformLockModels(readModel = state.globalMetatraderHub.readModel) {
+  const model = readModel && typeof readModel === "object" && !Array.isArray(readModel)
+    ? readModel
+    : {};
+  const platforms = model.platforms && typeof model.platforms === "object"
+    ? model.platforms
+    : {};
+  const platformStatuses = model.platformStatuses && typeof model.platformStatuses === "object"
+    ? model.platformStatuses
+    : {};
+  const platformLocks = model.platformLocks && typeof model.platformLocks === "object"
+    ? model.platformLocks
+    : (model.platformSelections && typeof model.platformSelections === "object"
+      ? model.platformSelections
+      : {});
+  return Object.fromEntries(["MT4", "MT5"].map((platform) => {
+    const key = platform.toLowerCase();
+    const platformModel = platforms[key] && typeof platforms[key] === "object"
+      ? platforms[key]
+      : {};
+    const rawStatusModel = platformStatuses[key] ?? platformStatuses[platform];
+    const statusModel = rawStatusModel && typeof rawStatusModel === "object"
+      ? rawStatusModel
+      : {};
+    const lockModel = platformLocks[key] && typeof platformLocks[key] === "object"
+      ? platformLocks[key]
+      : (platformLocks[platform] && typeof platformLocks[platform] === "object"
+        ? platformLocks[platform]
+        : {});
+    // Per-consumer target rows remain available below for compatibility
+    // display only. They must never manufacture either authoritative header
+    // lock when the v3 platform lock fields are absent.
+    const selectedCandidate = normalizeMetatraderCandidate(
+      platformModel.selectedCandidate
+      || statusModel.selectedCandidate
+      || lockModel.selectedCandidate
+      || lockModel.candidate
+      || lockModel,
+    );
+    const declaredConfigurationStatus = String(
+      platformModel.configurationStatus
+      || statusModel.configurationStatus
+      || statusModel.status
+      || (typeof rawStatusModel === "string" ? rawStatusModel : "")
+      || lockModel.configurationStatus
+      || lockModel.status
+      || (platformModel.configured === true || statusModel.configured === true || lockModel.configured === true
+        ? "configured"
+        : "")
+      || "",
+    ).trim().toLowerCase();
+    const configurationStatus = declaredConfigurationStatus || "not_configured";
+    return [platform, {
+      platform,
+      configurationStatus,
+      selectedCandidate,
+      configured: configurationStatus === "configured" && Boolean(selectedCandidate),
+      adapterReady: platformModel.adapterReady === true
+        || statusModel.adapterReady === true
+        || lockModel.adapterReady === true,
+      targets: Array.isArray(platformModel.targets) ? platformModel.targets : [],
+    }];
+  }));
+}
+
+function globalMetatraderLockSummary(readModel = state.globalMetatraderHub.readModel) {
+  const locks = globalMetatraderPlatformLockModels(readModel);
+  const lockedPlatforms = ["MT4", "MT5"].filter((platform) => locks[platform].configured);
+  return {
+    locks,
+    lockedPlatforms,
+    lockedCount: lockedPlatforms.length,
+    requiredCount: 2,
+    ready: lockedPlatforms.length === 2,
+  };
+}
+
 function globalMetatraderSystemModels() {
   const readModel = state.globalMetatraderHub.readModel;
   if (readModel && typeof readModel === "object") {
-    const candidates = (Array.isArray(readModel.candidates) ? readModel.candidates : [])
+    const candidates = [
+      ...(Array.isArray(readModel.candidates) ? readModel.candidates : []),
+      ...(Array.isArray(readModel.platforms?.mt4?.candidates) ? readModel.platforms.mt4.candidates : []),
+      ...(Array.isArray(readModel.platforms?.mt5?.candidates) ? readModel.platforms.mt5.candidates : []),
+    ]
       .map(normalizeMetatraderCandidate)
-      .filter(Boolean);
-    const platforms = readModel.platforms && typeof readModel.platforms === "object"
-      ? readModel.platforms
-      : {};
-    return GLOBAL_METATRADER_TARGETS.map((target) => {
-      const targetRows = target.supportedPlatforms.flatMap((platform) => {
-        const platformModel = platforms[platform.toLowerCase()];
-        return Array.isArray(platformModel?.targets)
-          ? platformModel.targets.filter((row) => row?.propId === target.propId)
-          : [];
-      });
-      const configuredRows = targetRows.filter((row) => (
-        row?.status === "configured" && row?.selectedCandidate
+      .filter((candidate, index, items) => (
+        candidate && items.findIndex((item) => item?.candidateId === candidate.candidateId) === index
       ));
-      // A dashboard supports only one active Terminal. If Backend ever returns
-      // more than one configured platform, fail closed instead of guessing.
-      const selectedRow = configuredRows.length === 1 ? configuredRows[0] : null;
-      const selectedCandidate = normalizeMetatraderCandidate(selectedRow?.selectedCandidate);
+    const platformLocks = typeof globalMetatraderPlatformLockModels === "function"
+      ? globalMetatraderPlatformLockModels(readModel)
+      : Object.fromEntries(["MT4", "MT5"].map((platform) => {
+        const platformModel = readModel.platforms?.[platform.toLowerCase()] || {};
+        const selectedCandidate = normalizeMetatraderCandidate(platformModel.selectedCandidate);
+        return [platform, {
+          platform,
+          selectedCandidate,
+          configured: platformModel.configurationStatus === "configured" && Boolean(selectedCandidate),
+          adapterReady: platformModel.adapterReady === true,
+          targets: Array.isArray(platformModel.targets) ? platformModel.targets : [],
+        }];
+      }));
+    const activePlatform = String(readModel.activePlatform || "").toUpperCase();
+    return GLOBAL_METATRADER_TARGETS.map((target) => {
+      const targetLocks = Object.fromEntries(target.supportedPlatforms.map((platform) => {
+        const lock = platformLocks[platform];
+        const targetRow = lock.targets.find((row) => row?.propId === target.propId);
+        return [platform, {
+          ...lock,
+          adapterReady: targetRow?.adapterReady === true || lock.adapterReady,
+        }];
+      }));
+      const selectedCandidate = targetLocks[activePlatform]?.selectedCandidate || null;
       const selection = {
         candidates,
         selectedCandidate,
         candidateCount: candidates.length,
         canSelect: candidates.length > 0,
-        adapterReady: selectedRow?.adapterReady === true,
+        adapterReady: targetLocks[activePlatform]?.adapterReady === true,
         adapterConnection: "",
-        detailTh: "เลือก Terminal เป้าหมายจากแถบเชื่อม MT4 / MT5 ด้านบน",
+        detailTh: "ล็อก MT4 และ MT5 แยกกันจากแถบเชื่อมด้านบนก่อนเริ่มงาน",
       };
       return {
         ...target,
         checklist: null,
         selection,
         selectedCandidate,
+        platformLocks: targetLocks,
         available: true,
-        configured: Boolean(selectedCandidate?.detected),
+        configured: target.supportedPlatforms.every((platform) => targetLocks[platform]?.configured),
       };
     });
   }
@@ -9249,6 +8724,13 @@ function globalMetatraderSuggestedChoice(platform, candidates, systems) {
   const currentChoice = String(state.globalMetatraderHub.choices[platform] || "");
   if (candidates.some((candidate) => candidate.candidateId === currentChoice)) return currentChoice;
 
+  const lockedCandidateId = systems
+    .map((system) => system.platformLocks?.[platform]?.selectedCandidate?.candidateId)
+    .find(Boolean);
+  if (lockedCandidateId && candidates.some((candidate) => candidate.candidateId === lockedCandidateId)) {
+    return lockedCandidateId;
+  }
+
   const selectedCounts = new Map();
   systems
     .filter((system) => system.supportedPlatforms.includes(platform))
@@ -9266,11 +8748,20 @@ function globalMetatraderSuggestedChoice(platform, candidates, systems) {
 }
 
 function activeGlobalMetatraderPlatform(systems = globalMetatraderSystemModels()) {
+  // Keep the argument for callers that already calculated the display models,
+  // but never derive active Dashboard authority from locks or legacy consumer
+  // projections. Only an explicit pending operator choice or Backend
+  // activePlatform may select the Dashboard.
+  void systems;
   const hubChoice = String(state.globalMetatraderHub.platformChoice || "").toUpperCase();
-  if (["MT4", "MT5"].includes(hubChoice)) return hubChoice;
-  const councilPlatform = systems.find((system) => system.propId === AI_TRADE_COUNCIL_PROP_ID)
-    ?.selectedCandidate?.platform;
-  return ["MT4", "MT5"].includes(councilPlatform) ? councilPlatform : "MT4";
+  if (state.globalMetatraderHub.platformChoiceTouched && ["MT4", "MT5"].includes(hubChoice)) {
+    return hubChoice;
+  }
+  const backendActive = String(
+    state.globalMetatraderHub.readModel?.activePlatform || "",
+  ).toUpperCase();
+  if (["MT4", "MT5"].includes(backendActive)) return backendActive;
+  return "";
 }
 
 function setGlobalMetatraderPlatformChoice(platform, { focusTerminal = false } = {}) {
@@ -9278,7 +8769,7 @@ function setGlobalMetatraderPlatformChoice(platform, { focusTerminal = false } =
   if (!["MT4", "MT5"].includes(normalized) || state.globalMetatraderHub.inFlight) return false;
   state.globalMetatraderHub.platformChoice = normalized;
   state.globalMetatraderHub.platformChoiceTouched = true;
-  state.globalMetatraderHub.message = `เลือก ${normalized} ไว้แต่ยังไม่บันทึก • เลือก Terminal แล้วกดใช้กับทุกระบบเพื่อยืนยัน`;
+  state.globalMetatraderHub.message = `เลือก ${normalized} เป็น Dashboard หลักไว้แต่ยังไม่บันทึก • การสลับนี้จะไม่ลบล็อกของอีกแพลตฟอร์ม`;
   state.globalMetatraderHub.tone = "neutral";
   renderGlobalMetatraderHubControl();
   if (focusTerminal) {
@@ -9310,41 +8801,45 @@ function renderGlobalMetatraderSelect(platform, select, button, systems, registr
   select.appendChild(placeholder);
   candidates.forEach((candidate) => {
     const option = document.createElement("option");
-    const inUseCount = systems.filter((system) => (
-      system.selectedCandidate?.candidateId === candidate.candidateId
-    )).length;
+    const lockedHere = systems.some((system) => (
+      system.platformLocks?.[platform]?.selectedCandidate?.candidateId === candidate.candidateId
+      || system.selectedCandidate?.candidateId === candidate.candidateId
+    ));
     const runningLabel = candidate.runningState === "platform_running_detected"
       ? " • กำลังเปิดอยู่"
       : candidate.runningState === "not_running_detected"
         ? " • ตรวจพบแต่ยังไม่เปิด"
         : "";
     option.value = candidate.candidateId;
-    option.textContent = `${candidate.labelTh}${runningLabel}${inUseCount ? ` • ใช้ ${inUseCount} ระบบ` : ""}`;
+    option.textContent = `${candidate.labelTh}${runningLabel}${lockedHere ? " • ล็อกอยู่" : ""}`;
     select.appendChild(option);
   });
   select.value = suggested;
 
-  const compatibleSystems = systems.filter((system) => system.supportedPlatforms.includes(platform));
-  const appliedCount = compatibleSystems.filter((system) => (
-    suggested && system.selectedCandidate?.candidateId === suggested
-  )).length;
   const busy = state.globalMetatraderHub.inFlight;
-  const active = platform === activePlatform;
-  select.disabled = busy || !active || !candidates.length || ambiguous || lockedToUniqueRunning;
-  button.disabled = busy || !active || ambiguous || !suggested || appliedCount === compatibleSystems.length;
-  button.textContent = !active
-    ? `เลือก ${platform} Dashboard ด้านบนก่อน`
-    : ambiguous
+  const backendActivePlatform = String(
+    state.globalMetatraderHub.readModel?.activePlatform || "",
+  ).toUpperCase();
+  const active = platform === backendActivePlatform;
+  const lockedCandidate = systems
+    .map((system) => system.platformLocks?.[platform]?.selectedCandidate)
+    .find(Boolean)
+    || systems.find((system) => system.selectedCandidate?.platform === platform)?.selectedCandidate
+    || null;
+  const lockedToSuggested = Boolean(suggested && lockedCandidate?.candidateId === suggested);
+  select.disabled = busy || !candidates.length || ambiguous || lockedToUniqueRunning;
+  button.disabled = busy || ambiguous || !suggested || (lockedToSuggested && active);
+  button.textContent = ambiguous
     ? running.length
       ? `ปิด ${platform} ให้เหลือ 1 โปรแกรม แล้วสแกนใหม่`
       : `เปิด ${platform} ที่ต้องการ 1 โปรแกรม แล้วสแกนใหม่`
     : busy && state.globalMetatraderHub.operation === `apply_${platform.toLowerCase()}`
     ? `กำลังตั้งค่า ${platform} ให้ทุกระบบ...`
-    : suggested && appliedCount === compatibleSystems.length
-      ? `${platform} นี้ใช้อยู่ครบ ${compatibleSystems.length} ระบบ`
-      : platform === "MT4"
-        ? `ใช้ MT4 นี้กับทั้ง ${compatibleSystems.length} ระบบ`
-        : `ใช้ MT5 นี้กับ ${compatibleSystems.length} ระบบที่รองรับ`;
+    : lockedToSuggested && !active
+      ? `ใช้ ${platform} เป็น Dashboard หลัก`
+    : lockedToSuggested
+        ? `${platform} เป็น Dashboard หลักแล้ว`
+        : `ล็อก ${platform} นี้ให้ทุกระบบ`;
 }
 
 function renderGlobalMetatraderHubControl() {
@@ -9354,8 +8849,9 @@ function renderGlobalMetatraderHubControl() {
   const registry = globalMetatraderCandidateRegistry(systems);
   const activePlatform = activeGlobalMetatraderPlatform(systems);
   hub.platformChoice = activePlatform;
-  const configuredCount = systems.filter((system) => system.configured).length;
-  const totalCount = systems.length;
+  const lockSummary = globalMetatraderLockSummary();
+  const lockedCount = lockSummary.lockedCount;
+  const requiredCount = lockSummary.requiredCount;
   const visualState = hub.inFlight
     ? "working"
     : hub.status === "loading"
@@ -9364,9 +8860,9 @@ function renderGlobalMetatraderHubControl() {
         ? "error"
         : hub.status === "partial"
           ? "partial"
-          : configuredCount === totalCount
+          : lockSummary.ready
             ? "ready"
-            : configuredCount
+            : lockedCount
               ? "partial"
               : registry.length
                 ? "detected"
@@ -9375,8 +8871,8 @@ function renderGlobalMetatraderHubControl() {
     loading: "กำลังตรวจสอบ...",
     working: hub.operation === "scan" ? "กำลังสแกนเครื่อง..." : "กำลัง Apply ทุกระบบ...",
     error: "Local Runner ไม่พร้อม",
-    ready: `ตั้งค่าแล้ว ${configuredCount}/${totalCount} ระบบ`,
-    partial: `ตั้งค่าไม่ครบ ${configuredCount}/${totalCount} ระบบ`,
+    ready: `ล็อกแล้ว ${lockedCount}/${requiredCount} แพลตฟอร์ม`,
+    partial: `ล็อกแล้ว ${lockedCount}/${requiredCount} แพลตฟอร์ม`,
     detected: `พบ Terminal ${registry.length} รายการ`,
     empty: "ยังไม่พบ MT4 / MT5",
   };
@@ -9384,8 +8880,8 @@ function renderGlobalMetatraderHubControl() {
     loading: "กำลังตรวจ",
     working: "กำลังทำงาน",
     error: "ตรวจไม่ได้",
-    ready: `พร้อม ${configuredCount}/${totalCount}`,
-    partial: `ต้องซ่อม ${configuredCount}/${totalCount}`,
+    ready: `พร้อม ${lockedCount}/${requiredCount}`,
+    partial: `รออีก ${requiredCount - lockedCount}`,
     detected: `พบ ${registry.length} รายการ`,
     empty: "ยังไม่พบ",
   };
@@ -9397,11 +8893,13 @@ function renderGlobalMetatraderHubControl() {
     els.globalMetatraderStateBadge.textContent = badgeLabels[visualState];
   }
   if (els.globalMetatraderPanelTitle) {
-    els.globalMetatraderPanelTitle.textContent = hub.status === "partial"
-      ? "พบ Terminal บางระบบไม่ตรงกัน • เลือกใหม่หนึ่งครั้งเพื่อซ่อมทั้งหมด"
-      : configuredCount === totalCount
-        ? "Terminal เป้าหมายถูกส่งให้ครบทั้ง 3 ระบบแล้ว"
-        : "เลือก Terminal ครั้งเดียวแล้วส่งให้ทุกระบบที่รองรับ";
+    els.globalMetatraderPanelTitle.textContent = lockSummary.ready
+      ? activePlatform
+        ? `ล็อก MT4 และ MT5 ครบแล้ว • Dashboard หลักคือ ${activePlatform}`
+        : "ล็อก MT4 และ MT5 ครบแล้ว • ยังไม่ได้เลือก Dashboard หลัก"
+      : lockedCount
+        ? `ล็อกแล้ว ${lockSummary.lockedPlatforms.join(" / ")} • ต้องล็อกให้ครบ MT4 และ MT5 ก่อนเริ่มงาน`
+        : "ล็อก MT4 และ MT5 แยกกันก่อนเริ่มงานที่เกี่ยวกับ MetaTrader";
   }
   if (els.globalMetatraderMessage) {
     els.globalMetatraderMessage.dataset.tone = hub.tone;
@@ -9432,8 +8930,10 @@ function renderGlobalMetatraderHubControl() {
   }
   if (els.globalMetatraderPlatformHint) {
     els.globalMetatraderPlatformHint.textContent = hub.platformChoiceTouched
-      ? `${activePlatform} ถูกเลือกไว้แต่ยังไม่บันทึก • ต้องกดใช้กับทุกระบบก่อนจึงจะแทนที่ค่ากลางเดิม`
-      : `${activePlatform} คือ Platform ที่บันทึกอยู่ • ใช้ได้ทีละหนึ่ง Platform`;
+      ? `${activePlatform} ถูกเลือกเป็น Dashboard หลักไว้แต่ยังไม่บันทึก • ล็อก MT4/MT5 เดิมจะไม่ถูกลบ`
+      : activePlatform
+        ? `${activePlatform} คือ Dashboard หลัก • MT4 และ MT5 ล็อกแยกกันและระบบจะใช้ล็อกให้ตรงกับงาน`
+        : "ยังไม่ได้เลือก Dashboard หลัก • ล็อก MT4 และ MT5 ยังคงแยกกันและไม่ถูกนำมาเดาแทน";
   }
 
   renderGlobalMetatraderSelect(
@@ -9469,11 +8969,15 @@ function renderGlobalMetatraderHubControl() {
           : "not_configured";
       name.textContent = system.labelTh;
       support.textContent = `รองรับ ${system.supportedPlatforms.join(" / ")}`;
+      const lockLabels = system.supportedPlatforms.map((platform) => {
+        const lock = system.platformLocks?.[platform] || lockSummary.locks[platform];
+        return lock?.configured && lock.selectedCandidate
+          ? `${platform} ล็อกแล้ว`
+          : `${platform} รอเชื่อม`;
+      });
       status.textContent = !system.available
         ? "อ่านสถานะไม่ได้"
-        : system.selectedCandidate
-          ? `${system.selectedCandidate.labelTh} • ${system.selection.adapterReady ? "Snapshot พร้อม (อ่านอย่างเดียว)" : "ตั้งเป็นเป้าหมายแล้ว"}`
-          : "ยังไม่ได้เลือก";
+        : lockLabels.join(" • ");
       copy.append(name, support);
       row.append(copy, status);
       els.globalMetatraderSystems.appendChild(row);
@@ -9543,8 +9047,13 @@ function acceptGlobalMetatraderHubReadModel(payload) {
   state.globalMetatraderHub.checklists = {};
   state.globalMetatraderHub.backendAvailable = true;
   state.globalMetatraderHub.lastReadCount = GLOBAL_METATRADER_TARGETS.length;
-  state.globalMetatraderHub.status = model.status === "partial" ? "partial" : "ready";
-  const selectedPlatform = String(model.selectedPlatform || "").toUpperCase();
+  const modelStatus = String(model.status || "not_configured").trim().toLowerCase();
+  state.globalMetatraderHub.status = ["configured", "ready"].includes(modelStatus)
+    ? "ready"
+    : modelStatus === "partial"
+      ? "partial"
+      : modelStatus;
+  const selectedPlatform = String(model.activePlatform || "").toUpperCase();
   if (
     !state.globalMetatraderHub.platformChoiceTouched
     && ["MT4", "MT5"].includes(selectedPlatform)
@@ -9569,21 +9078,30 @@ async function loadGlobalMetatraderHub({ signal = null, preserveMessage = false 
     if (requestId !== hub.requestId) return null;
     acceptGlobalMetatraderHubReadModel(response);
     const systems = globalMetatraderSystemModels();
-    const configuredCount = systems.filter((system) => system.configured).length;
+    const lockSummary = typeof globalMetatraderLockSummary === "function"
+      ? globalMetatraderLockSummary()
+      : (() => {
+        const lockedPlatforms = ["MT4", "MT5"].filter((platform) => {
+          const item = hub.readModel?.platforms?.[platform.toLowerCase()];
+          return item?.configurationStatus === "configured" && item?.selectedCandidate;
+        });
+        return {
+          lockedPlatforms,
+          lockedCount: lockedPlatforms.length,
+          requiredCount: 2,
+          ready: lockedPlatforms.length === 2,
+        };
+      })();
     const candidateCount = globalMetatraderCandidateRegistry(systems).length;
     if (!preserveMessage) {
-      hub.message = hub.status === "partial"
-        ? "พบค่าจากระบบรุ่นเก่าที่ผูกไม่ครบ • เลือก Terminal ใหม่หนึ่งครั้งเพื่อซ่อมทุกระบบแบบ atomic"
-        : configuredCount === systems.length
-          ? "Terminal เป้าหมายถูกบันทึกครบทุกระบบแล้ว เลือกใหม่ได้ตลอดเมื่อเปลี่ยน MT4 / MT5"
+      hub.message = lockSummary.ready
+        ? `ล็อก MT4 และ MT5 ครบ ${lockSummary.lockedCount}/${lockSummary.requiredCount} แล้ว • ทุกอุปกรณ์จะใช้ Terminal ให้ตรงกับแพลตฟอร์มของงาน`
+        : lockSummary.lockedCount
+          ? `ล็อกแล้ว ${lockSummary.lockedPlatforms.join(" / ")} • ต้องล็อกอีกแพลตฟอร์มก่อนเริ่ม EA, Backtest, AI Trade หรือ Optimization`
           : candidateCount
-            ? `พบ Terminal ${candidateCount} รายการ • เลือก MT4 หรือ MT5 แล้วกดยืนยันจากแถบนี้`
+            ? `พบ Terminal ${candidateCount} รายการ • ล็อก MT4 และ MT5 ให้ครบ 2/2 จากแถบนี้`
             : "กดสแกนเพื่อค้นหา MT4 / MT5 ในเครื่องแบบอ่านอย่างเดียว";
-      hub.tone = hub.status === "partial"
-        ? "error"
-        : configuredCount === systems.length
-          ? "success"
-          : "neutral";
+      hub.tone = lockSummary.ready ? "success" : (lockSummary.lockedCount ? "warning" : "neutral");
     }
     renderGlobalMetatraderHubControl();
     return systems;
@@ -9622,14 +9140,11 @@ async function scanGlobalMetatraderHub() {
     const registry = globalMetatraderCandidateRegistry();
     const mt4Count = registry.filter((candidate) => candidate.platform === "MT4").length;
     const mt5Count = registry.filter((candidate) => candidate.platform === "MT5").length;
-    hub.message = hub.status === "partial"
-      ? "สแกนแล้วและพบค่ารุ่นเก่าที่ผูกไม่ครบ • เลือก Terminal แล้ว Apply หนึ่งครั้งเพื่อซ่อมทุกระบบ"
-      : registry.length
-          ? `สแกนสำเร็จ • พบ MT4 ${mt4Count} รายการ และ MT5 ${mt5Count} รายการ • เลือกแล้วกดใช้กับทุกระบบ`
+    const lockSummary = globalMetatraderLockSummary();
+    hub.message = registry.length
+          ? `สแกนสำเร็จ • พบ MT4 ${mt4Count} รายการ และ MT5 ${mt5Count} รายการ • ล็อกคงอยู่ ${lockSummary.lockedCount}/2`
           : "สแกนสำเร็จแต่ยังไม่พบ MT4 / MT5 • ติดตั้งหรือเปิด Terminal แล้วลองอีกครั้ง";
-    hub.tone = hub.status === "partial"
-      ? "error"
-      : registry.length
+    hub.tone = registry.length
         ? "success"
         : "neutral";
     addBridgeEvent("สแกน MT4 / MT5 แล้ว", `พบ Terminal ที่เลือกได้ ${registry.length} รายการ โดยไม่เปิดโปรแกรมและไม่อ่านบัญชี`);
@@ -9689,7 +9204,11 @@ async function prepareGlobalMetatraderHubOnOpen() {
   return systems;
 }
 
-async function reconcileGlobalMetatraderSelection(platform, candidateId) {
+async function reconcileGlobalMetatraderSelection(
+  platform,
+  candidateId,
+  { requireActive = false } = {},
+) {
   try {
     // Read the Backend truth directly. This intentionally bypasses
     // loadGlobalMetatraderHub's in-flight guard because it is used only after
@@ -9698,7 +9217,10 @@ async function reconcileGlobalMetatraderSelection(platform, candidateId) {
     const model = acceptGlobalMetatraderHubReadModel(response);
     const platformModel = model?.platforms?.[String(platform || "").toLowerCase()];
     const selectedId = platformModel?.selectedCandidate?.candidateId;
-    return platformModel?.configurationStatus === "configured" && selectedId === candidateId
+    const activePlatform = String(model?.activePlatform || "").toUpperCase();
+    return platformModel?.configurationStatus === "configured"
+      && selectedId === candidateId
+      && (!requireActive || activePlatform === String(platform || "").toUpperCase())
       ? model
       : null;
   } catch {
@@ -9722,23 +9244,36 @@ async function applyGlobalMetatraderTarget(platform) {
     renderGlobalMetatraderHubControl();
     return null;
   }
+  const platformModel = hub.readModel?.platforms?.[platform.toLowerCase()];
+  const lockedCandidateId = String(platformModel?.selectedCandidate?.candidateId || "");
+  const backendActivePlatform = String(
+    hub.readModel?.activePlatform || "",
+  ).toUpperCase();
+  const activateOnly = lockedCandidateId === candidateId && backendActivePlatform !== platform;
   hub.inFlight = true;
   // Block and invalidate stale status GETs until this atomic selection has
   // returned its authoritative read-back model.
   hub.requestId += 1;
-  hub.operation = `apply_${platform.toLowerCase()}`;
-  hub.message = `กำลังบันทึก ${candidate.labelTh} ให้ ${targets.length} ระบบในการยืนยันครั้งเดียว`;
+  hub.operation = activateOnly ? `activate_${platform.toLowerCase()}` : `apply_${platform.toLowerCase()}`;
+  hub.message = activateOnly
+    ? `กำลังเลือก ${platform} เป็น Dashboard หลัก • ล็อก MT4/MT5 จะคงเดิมทั้งคู่`
+    : `กำลังล็อก ${candidate.labelTh} ให้ ${targets.length} ระบบ • ล็อกของอีกแพลตฟอร์มจะคงเดิม`;
   hub.tone = "working";
   renderGlobalMetatraderHubControl();
   try {
-    const response = await postJson("/api/integrations/metatrader/global/select", {
-      platform: platform.toLowerCase(),
-      candidateId,
-    });
+    const response = activateOnly
+      ? await postJson("/api/integrations/metatrader/global/activate", {
+        platform: platform.toLowerCase(),
+      })
+      : await postJson("/api/integrations/metatrader/global/select", {
+        platform: platform.toLowerCase(),
+        candidateId,
+      });
     acceptGlobalMetatraderHubReadModel(response);
     const verifiedPlatform = hub.readModel?.platforms?.[platform.toLowerCase()];
     const verified = verifiedPlatform?.configurationStatus === "configured"
       && verifiedPlatform?.selectedCandidate?.candidateId === candidateId
+      && (!activateOnly || String(hub.readModel?.activePlatform || "").toUpperCase() === platform)
       && response?.atomic === true;
     if (!verified) throw new Error("global_selection_readback_failed");
     hub.platformChoice = platform;
@@ -9761,18 +9296,26 @@ async function applyGlobalMetatraderTarget(platform) {
     const observabilityNote = response?.observabilityStatus === "degraded"
       ? " • ตั้งค่าสำเร็จ แต่บันทึกรายงานระบบบางส่วนขัดข้อง"
       : "";
-    hub.message = `ตั้งค่า ${candidate.labelTh} ครบ ${targets.length}/${targets.length} ระบบแบบ atomic แล้ว • อุปกรณ์ทั้งหมดอ่านค่านี้โดยอัตโนมัติ${observabilityNote}`;
-    hub.tone = "success";
+    const lockedCount = ["mt4", "mt5"].filter((key) => (
+      hub.readModel?.platforms?.[key]?.configurationStatus === "configured"
+      && hub.readModel?.platforms?.[key]?.selectedCandidate
+    )).length;
+    hub.message = activateOnly
+      ? `เลือก ${platform} เป็น Dashboard หลักแล้ว • ล็อก MT4/MT5 ยังอยู่ครบ ${lockedCount}/2${observabilityNote}`
+      : `ล็อก ${candidate.labelTh} แล้ว • สถานะรวม ${lockedCount}/2 แพลตฟอร์ม • ล็อกของอีกแพลตฟอร์มไม่ถูกลบ${observabilityNote}`;
+    hub.tone = lockedCount === 2 ? "success" : "warning";
     addBridgeEvent(
-      `Apply ${platform} จากแถบกลางแล้ว`,
-      `${candidate.labelTh} ถูกบันทึกให้ ${targets.length} ระบบในการเขียนครั้งเดียว`,
+      activateOnly ? `เลือก Dashboard หลักเป็น ${platform} แล้ว` : `Apply ${platform} จากแถบกลางแล้ว`,
+      activateOnly
+        ? `สภา AI Trade ใช้ ${platform} โดยคงล็อก MT4/MT5 เดิมทั้งคู่`
+        : `${candidate.labelTh} ถูกล็อกให้ ${targets.length} ระบบในการเขียนครั้งเดียว โดยคงล็อกอีกแพลตฟอร์มไว้`,
     );
     return { ok: true, atomic: true, succeeded: targets.length, total: targets.length };
   } catch (error) {
     const httpStatus = Number(error?.status);
     const responseOutcomeIndeterminate = !Number.isInteger(httpStatus) || httpStatus >= 500;
     const reconciled = responseOutcomeIndeterminate
-      ? await reconcileGlobalMetatraderSelection(platform, candidateId)
+      ? await reconcileGlobalMetatraderSelection(platform, candidateId, { requireActive: activateOnly })
       : null;
     if (reconciled) {
       hub.platformChoice = platform;
@@ -9791,8 +9334,14 @@ async function applyGlobalMetatraderTarget(platform) {
       ) {
         renderGameModal();
       }
-      hub.message = `Backend บันทึก ${candidate.labelTh} ครบ ${targets.length}/${targets.length} ระบบแล้ว • ตรวจยืนยันค่าจริงกลับมาได้แม้คำตอบ Apply เดิมขาดหาย`;
-      hub.tone = "success";
+      const lockedCount = ["mt4", "mt5"].filter((key) => (
+        hub.readModel?.platforms?.[key]?.configurationStatus === "configured"
+        && hub.readModel?.platforms?.[key]?.selectedCandidate
+      )).length;
+      hub.message = activateOnly
+        ? `Backend เลือก ${platform} เป็น Dashboard หลักแล้ว • ล็อก MT4/MT5 ยังอยู่ครบ ${lockedCount}/2`
+        : `Backend ล็อก ${candidate.labelTh} แล้ว • ตรวจยืนยันสถานะ ${lockedCount}/2 แพลตฟอร์มได้แม้คำตอบ Apply เดิมขาดหาย`;
+      hub.tone = lockedCount === 2 ? "success" : "warning";
       addBridgeEvent(
         `ยืนยัน ${platform} จาก Backend แล้ว`,
         `${candidate.labelTh} ถูกบันทึกครบหลังตรวจสถานะซ้ำโดยไม่ส่ง Apply ซ้ำ`,
@@ -9833,11 +9382,12 @@ function aiTradePlatformConnectionModels(report = {}, checklist = {}) {
   );
   const hubModel = hubModelPresent ? rawHubModel : {};
   const hubSelectedPlatform = safeDashboardDisplayText(
-    hubModel.selectedPlatform,
+    hubModel.activePlatform,
     "",
   ).toUpperCase();
   const hubSelectedCandidateId = safeDashboardDisplayText(
-    hubModel.selectedCandidate?.candidateId,
+    hubModel.selectedCandidate?.candidateId
+      || hubModel.platforms?.[hubSelectedPlatform.toLowerCase()]?.selectedCandidate?.candidateId,
     "",
   );
   const selectedPlatform = hubModelPresent
@@ -10115,7 +9665,10 @@ function renderAiTradePlatformSelector(connectionModels = []) {
     hub.readModel && typeof hub.readModel === "object" && !Array.isArray(hub.readModel),
   );
   const backendSelectedPlatform = hubModelPresent
-    ? safeDashboardDisplayText(hub.readModel?.selectedPlatform, "").toUpperCase()
+    ? safeDashboardDisplayText(
+      hub.readModel?.activePlatform,
+      "",
+    ).toUpperCase()
     : safeDashboardDisplayText(
       connectionModels.find((item) => item.selected)?.platform,
       "",
@@ -11270,7 +10823,10 @@ function signalSelectedPlatformConnectionHealth(report = {}) {
   const hubModelPresent = Boolean(
     rawHubModel && typeof rawHubModel === "object" && !Array.isArray(rawHubModel),
   );
-  const hubPlatform = safeDashboardDisplayText(rawHubModel?.selectedPlatform, "").toUpperCase();
+  const hubPlatform = safeDashboardDisplayText(
+    rawHubModel?.activePlatform,
+    "",
+  ).toUpperCase();
   const normalizedHubPlatform = ["MT4", "MT5"].includes(hubPlatform) ? hubPlatform : "";
   const hubPlatformModel = normalizedHubPlatform
     ? rawHubModel?.platforms?.[normalizedHubPlatform.toLowerCase()] || {}
@@ -12455,7 +12011,7 @@ function renderSignalDailyPanel(report = {}) {
     hubReadModel && typeof hubReadModel === "object" && !Array.isArray(hubReadModel),
   );
   const activePlatform = hubModelPresent
-    ? safeDashboardDisplayText(hubReadModel.selectedPlatform, "").toUpperCase()
+    ? safeDashboardDisplayText(hubReadModel.activePlatform, "").toUpperCase()
     : runtime.selectedPlatform || signalSelectedPlatform(report);
   const platformLabel = activePlatform || "MT4 / MT5";
   const mqlFolder = activePlatform === "MT5"
@@ -20059,8 +19615,16 @@ function getWorkflowSelectedTab(propId, dashboard) {
   const tabs = Array.isArray(dashboard?.tabs) ? dashboard.tabs : [];
   const requested = state.modal.workflowTabs[propId];
   if (propId === EA_FACTORY_PROP_ID) {
+    const factoryDomain = dashboard?.domainData?.eaFactory || {};
+    const preferredPageId = eaFactoryPreferredPageId(factoryDomain);
+    // Recovery/action-required states belong to the exact selected Build.
+    // Keep that Build on page 2 after a refresh even when Backend busy=null;
+    // otherwise a persisted page-1 selection hides the exact Resume action.
+    if (preferredPageId === "progress" && eaFactoryRunNeedsProgressPage(factoryDomain)) {
+      return tabs.find((tab) => tab.id === preferredPageId) || tabs[0] || null;
+    }
     return tabs.find((tab) => tab.id === requested)
-      || tabs.find((tab) => tab.id === eaFactoryPreferredPageId(dashboard?.domainData?.eaFactory || {}))
+      || tabs.find((tab) => tab.id === preferredPageId)
       || tabs[0]
       || null;
   }
@@ -20071,7 +19635,13 @@ function renderWorkflowTabs(propId, dashboard, selectedTab) {
   if (!els.workflowDashboardTabs) return;
   els.workflowDashboardTabs.innerHTML = "";
   const factoryPages = propId === EA_FACTORY_PROP_ID;
+  // All three operator pages remain visible during intake, dispatch and
+  // execution.  A user must never lose access to the live status page while
+  // the initial Build request is still in flight.
+  const factoryIntake = false;
+  els.workflowDashboardTabs.hidden = false;
   els.workflowDashboardTabs.dataset.eaFactoryPages = factoryPages ? "true" : "false";
+  els.workflowDashboardTabs.dataset.eaFactoryIntake = factoryIntake ? "true" : "false";
   dashboard.tabs.forEach((tab) => {
     const button = document.createElement("button");
     const active = tab.id === selectedTab?.id;
@@ -20717,8 +20287,8 @@ function createWorkflowActionCard(action, dashboard) {
     });
   }
   profileTop.append(plugin, mode);
-  profileDetails.append(profileSummary, profileGrid);
-  profile.append(profileTop, flow, profileDetails);
+  profileDetails.append(profileSummary, flow, profileGrid);
+  profile.append(profileTop, profileDetails);
   footer.className = "workflow-action-footer";
   truth.textContent = availabilityCopy.detail;
   submit.type = "submit";
@@ -21320,6 +20890,11 @@ function getRadarTodayRunState(domain = {}, now = Date.now()) {
     service.status,
   ].map((value) => normalizeRadarRunStatus(value)).filter(Boolean);
   const hasStatus = (...values) => statusValues.some((status) => values.includes(status));
+  const quarantined = hasStatus("radar_retry_quarantined") || repair.status === "quarantined";
+  // A terminal daily-run decision takes precedence over stale active/retry
+  // markers. Ordinary failed output can still have an authorized repair queued.
+  const terminalBlockedToday = (lastRunToday || schedule.runsReservedToday === 1)
+    && (quarantined || hasStatus("blocked"));
   const correctiveInProgress = statusValues.some((status) => (
     (status.includes("correct") || status.includes("recover") || status.includes("repair") || status.includes("retry"))
     && (status.includes("running") || status.includes("queued") || status.includes("pending") || status.includes("progress"))
@@ -21339,7 +20914,7 @@ function getRadarTodayRunState(domain = {}, now = Date.now()) {
   const correctiveRunning = statusValues.some((status) => (
     status.includes("correct") || status.includes("recover") || status.includes("repair") || status.includes("retry")
   )) || repairInProgress;
-  if (running) {
+  if (running && !terminalBlockedToday) {
     const correctiveNextAttemptAt = repairInProgress ? repair.nextAttemptAt : null;
     return {
       state: correctiveRunning ? "corrective_running" : "running",
@@ -21367,7 +20942,7 @@ function getRadarTodayRunState(domain = {}, now = Date.now()) {
     "repair_failed",
     "retry_failed",
   );
-  if (failed && (lastRunToday || schedule.runsReservedToday === 1)) {
+  if ((failed || quarantined) && (lastRunToday || schedule.runsReservedToday === 1)) {
     const error = safeDashboardDisplayText(
       schedule.lastResultKind || schedule.lastError || service.lastResultKind || service.lastError,
       "Backend ไม่รับผลรอบล่าสุด",
@@ -21375,8 +20950,10 @@ function getRadarTodayRunState(domain = {}, now = Date.now()) {
     return {
       state: "corrective_failed",
       tone: "error",
-      title: "รอบวันนี้ยังไม่ผ่านการตรวจ จึงยังไม่มีรายงาน",
-      detail: "Backend ปฏิเสธผลที่รูปแบบหรือหลักฐานยังไม่ครบ ระบบต้องทำขั้นตรวจแก้ให้สำเร็จก่อนจึงจะแสดงรายการ โดยไม่ใช้ผลที่ตรวจไม่ผ่านแทน",
+      title: quarantined ? "รอบวันนี้ถูกหยุดไว้ จึงยังไม่มีรายงาน" : "รอบวันนี้ยังไม่ผ่านการตรวจ จึงยังไม่มีรายงาน",
+      detail: terminalBlockedToday
+        ? "Backend หยุดรอบนี้แล้ว จึงยังไม่เผยแพร่ผลที่ไม่ผ่านการตรวจ ให้ตรวจสาเหตุและรอบถัดไปตามข้อมูลจาก Backend"
+        : "Backend ปฏิเสธผลที่รูปแบบหรือหลักฐานยังไม่ครบ ระบบต้องทำขั้นตรวจแก้ให้สำเร็จก่อนจึงจะแสดงรายการ โดยไม่ใช้ผลที่ตรวจไม่ผ่านแทน",
       lastRunAt,
       nextRunAt: schedule.nextRunAt,
       error,
@@ -23735,11 +23312,6 @@ function normalizeEaFactoryPlatform(value) {
   return "";
 }
 
-// Frontend defense-in-depth: the installed production front-office adapter is
-// verified only for MT4.  A future Backend may advertise more platforms, but
-// this release must not turn MT5 into a one-click action by copy or fallback.
-const EA_FACTORY_ONE_CLICK_VISIBLE_PLATFORMS = Object.freeze(["mt4"]);
-
 function normalizeEaFactoryArtifactKind(value) {
   const normalized = String(value || "").trim().toLowerCase().replaceAll("-", "_");
   if (["custom_indicator", "indicator", "customindicator"].includes(normalized)) return "custom_indicator";
@@ -23881,6 +23453,7 @@ function normalizeEaFactorySourceRecord(item = {}, index = 0) {
   const recordId = safeDashboardDisplayText(
     item?.recordId || item?.record_id || columns.recordId || columns.record_id,
     "ยังไม่มี Record ID",
+    { limit: 160 },
   );
   const sourceUrls = eaFactoryFirstArray(
     item?.sourceUrls,
@@ -23946,11 +23519,12 @@ function normalizeEaFactorySourceRecord(item = {}, index = 0) {
     systemName: safeDashboardDisplayText(
       strategyBrief.system_name || item?.systemName || item?.system_name || columns.systemName || columns.system_name,
       `ระบบเทรด ${index + 1}`,
+      { limit: 8000, markTruncated: true },
     ),
     systemOverview: safeDashboardDisplayText(
       strategyBrief.system_overview,
       "ยังไม่มีภาพรวมระบบจาก Backend",
-      { limit: 5000, markTruncated: true },
+      { limit: 8000, markTruncated: true },
     ),
     strategyFamily: safeDashboardDisplayText(
       item?.strategyFamily || item?.strategy_family || columns.strategyFamily || columns.strategy_family,
@@ -23975,9 +23549,9 @@ function normalizeEaFactorySourceRecord(item = {}, index = 0) {
     specialConditions: normalizeEaFactoryTextList(
       item?.specialConditions || item?.special_conditions || columns.specialConditions || columns.special_conditions,
     ),
-    orderExecution: safeDashboardDisplayText(strategyBrief.order_execution, "ยังไม่ระบุวิธีส่งคำสั่ง", { limit: 5000, markTruncated: true }),
-    displayRequirements: safeDashboardDisplayText(strategyBrief.display_requirements, "ยังไม่ระบุข้อกำหนดหน้าจอ", { limit: 5000, markTruncated: true }),
-    additionalNotes: safeDashboardDisplayText(strategyBrief.additional_notes, "ยังไม่มีหมายเหตุเพิ่มเติม", { limit: 5000, markTruncated: true }),
+    orderExecution: safeDashboardDisplayText(strategyBrief.order_execution, "ยังไม่ระบุวิธีส่งคำสั่ง", { limit: 8000, markTruncated: true }),
+    displayRequirements: safeDashboardDisplayText(strategyBrief.display_requirements, "ยังไม่ระบุข้อกำหนดหน้าจอ", { limit: 8000, markTruncated: true }),
+    additionalNotes: safeDashboardDisplayText(strategyBrief.additional_notes, "ยังไม่มีหมายเหตุเพิ่มเติม", { limit: 8000, markTruncated: true }),
     strategyBrief,
     sourceUrls: sourceUrls.slice(0, 10).map((value) => String(value || "").trim()).filter(Boolean),
     verificationStatus: safeDashboardDisplayText(
@@ -24014,6 +23588,9 @@ function normalizeEaFactorySourceRecord(item = {}, index = 0) {
       compatiblePlatforms,
       readinessIssues: compatibilityIssues,
     },
+    recordDigest: /^[0-9a-f]{64}$/.test(String(item?.recordDigest || "").trim().toLowerCase())
+      ? String(item.recordDigest).trim().toLowerCase()
+      : "",
     briefDigest: eaResearch.briefDigest,
     blueprintDigest: eaResearch.blueprintDigest,
     eaResearch,
@@ -24039,6 +23616,13 @@ function eaFactoryMissionForStage(stage = {}) {
 }
 
 function reconcileEaFactoryStageWithMission(stage = {}) {
+  // The dedicated EA Factory stage record is the durable gate truth. A linked
+  // Codex Mission may contain a failed first attempt even after Backend has
+  // accepted a certified fallback and completed the stage. Never let that
+  // historical Mission state repaint a terminal Backend gate as failed.
+  if (["completed", "not_applicable", "failed", "blocked", "cancelled", "skipped"].includes(stage.status)) {
+    return stage;
+  }
   const mission = eaFactoryMissionForStage(stage);
   if (!mission) return stage;
   const missionStates = [
@@ -24129,6 +23713,295 @@ function normalizeEaFactoryTerminal(item = {}) {
   };
 }
 
+function eaFactoryDiscoveryTerminalBinding(platform = "mt4") {
+  const normalizedPlatform = normalizeEaFactoryPlatform(platform);
+  if (normalizedPlatform !== "mt4") return null;
+  const hub = state.globalMetatraderHub.readModel;
+  const platformModel = hub?.platforms?.mt4;
+  const targets = Array.isArray(platformModel?.targets) ? platformModel.targets : [];
+  const matches = targets.filter((target) => (
+    target?.propId === EA_FACTORY_PROP_ID
+    && target?.status === "configured"
+    && target?.selectedCandidate
+  ));
+  if (matches.length !== 1) return null;
+  const candidate = normalizeMetatraderCandidate(matches[0].selectedCandidate);
+  const selectionRevision = Number(matches[0].selectionRevision);
+  if (
+    !candidate
+    || candidate.platform !== "MT4"
+    || !Number.isInteger(selectionRevision)
+    || selectionRevision < 1
+  ) return null;
+  return {
+    platform: "mt4",
+    candidateId: candidate.candidateId,
+    selectionRevision,
+  };
+}
+
+function eaFactoryDiscoveryTerminalBindingKey(binding) {
+  if (!binding) return "";
+  return `${binding.platform}:${binding.candidateId}:${binding.selectionRevision}`;
+}
+
+function normalizeEaFactoryDiscoveryMarketWatch(payload = {}) {
+  const raw = payload?.marketWatch && typeof payload.marketWatch === "object"
+    ? payload.marketWatch
+    : payload;
+  const allowedStatuses = new Set([
+    "ready",
+    "terminal_not_selected",
+    "unsupported_platform",
+    "terminal_not_running",
+    "unavailable",
+    "empty",
+    "error",
+    "stale_selection",
+    "stale_market_watch",
+  ]);
+  const status = allowedStatuses.has(String(raw?.status || ""))
+    ? String(raw.status)
+    : "error";
+  const candidateId = String(raw?.candidateId || "").trim();
+  const selectionRevision = Number(raw?.selectionRevision);
+  const rawSymbols = Array.isArray(raw?.symbols) ? raw.symbols.slice(0, 513) : [];
+  const symbols = [];
+  const seen = new Set();
+  let validSymbols = rawSymbols.length <= 512;
+  rawSymbols.forEach((value) => {
+    const symbol = typeof value === "string" ? value : "";
+    const key = symbol.toLowerCase();
+    const printable = symbol.length >= 1
+      && symbol.length <= 12
+      && symbol === symbol.trim()
+      && [...symbol].every((character) => {
+        const code = character.charCodeAt(0);
+        return code >= 33 && code <= 126;
+      });
+    if (!printable || seen.has(key)) {
+      validSymbols = false;
+      return;
+    }
+    seen.add(key);
+    symbols.push(symbol);
+  });
+  const declaredCount = Number(raw?.symbolCount);
+  const catalogDigest = String(raw?.catalogDigest || "").trim().toLowerCase();
+  const readyContractValid = status !== "ready" || (
+    raw?.schemaVersion === "metafx-hq-mt4-market-watch-v1"
+    && /^mtc-[a-zA-Z0-9._:-]{1,155}$/.test(candidateId)
+    && Number.isInteger(selectionRevision)
+    && selectionRevision >= 1
+    && validSymbols
+    && symbols.length > 0
+    && Number.isInteger(declaredCount)
+    && declaredCount === symbols.length
+    && /^[a-f0-9]{64}$/.test(catalogDigest)
+    && raw?.privacy?.pathsExposed === false
+    && raw?.privacy?.processIdsExposed === false
+    && raw?.privacy?.accountDataExposed === false
+    && raw?.privacy?.quotesOrTradesExposed === false
+  );
+  if (!readyContractValid) {
+    return {
+      schemaVersion: "",
+      status: "error",
+      candidateId: "",
+      selectionRevision: null,
+      symbols: [],
+      symbolCount: 0,
+      catalogDigest: "",
+      reasonCode: "invalid_market_watch_read_model",
+      message: "Backend ส่งรายการ Market Watch ที่ตรวจสอบรูปแบบไม่ได้",
+      observedAt: null,
+      inFlight: false,
+      requestId: 0,
+    };
+  }
+  return {
+    schemaVersion: String(raw?.schemaVersion || ""),
+    status,
+    candidateId: /^mtc-[a-zA-Z0-9._:-]{1,155}$/.test(candidateId) ? candidateId : "",
+    selectionRevision: Number.isInteger(selectionRevision) && selectionRevision >= 1
+      ? selectionRevision
+      : null,
+    symbols: status === "ready" ? symbols : [],
+    symbolCount: status === "ready" ? symbols.length : 0,
+    catalogDigest: status === "ready" ? catalogDigest : "",
+    reasonCode: safeDashboardDisplayText(raw?.reasonCode, "", { limit: 120 }),
+    message: safeDashboardDisplayText(
+      raw?.messageTh,
+      status === "ready" ? `อ่านคู่เงินจาก Market Watch แล้ว ${symbols.length} รายการ` : "ยังอ่าน Market Watch ไม่สำเร็จ",
+      { limit: 500 },
+    ),
+    observedAt: raw?.observedAt || null,
+    inFlight: false,
+    requestId: 0,
+  };
+}
+
+function resetEaFactoryDiscoveryMarketWatch({
+  status = "idle",
+  reasonCode = "",
+  message = "",
+} = {}) {
+  const current = state.modal.eaFactory.discoveryMarketWatch || {};
+  state.modal.eaFactory.discoveryMarketWatch = {
+    schemaVersion: "",
+    status,
+    candidateId: "",
+    selectionRevision: null,
+    symbols: [],
+    symbolCount: 0,
+    catalogDigest: "",
+    reasonCode,
+    message,
+    observedAt: null,
+    inFlight: false,
+    requestId: Number(current.requestId || 0) + 1,
+  };
+  state.modal.eaFactory.discoverySymbol = "";
+  state.modal.eaFactory.discoverySymbolBinding = "";
+  return state.modal.eaFactory.discoveryMarketWatch;
+}
+
+function rerenderEaFactoryDiscoveryMarketWatch() {
+  if (
+    state.modal.open
+    && state.modal.type === "prop"
+    && state.modal.id === EA_FACTORY_PROP_ID
+    && state.modal.eaFactory.sourceMode === "discovery"
+  ) {
+    renderWorkflowDashboard(
+      getModalSubject(),
+      getPropertyRole(getModalSubject()),
+      state.propReports[EA_FACTORY_PROP_ID] || {},
+    );
+  }
+}
+
+async function loadEaFactoryDiscoveryMarketWatch({ force = false } = {}) {
+  const factory = state.modal.eaFactory;
+  const platform = normalizeEaFactoryPlatform(factory.selectedPlatform);
+  if (platform !== "mt4") {
+    resetEaFactoryDiscoveryMarketWatch({
+      status: "unsupported_platform",
+      reasonCode: "selected_platform_not_mt4",
+      message: "การอ่านคู่เงินจาก Market Watch อัตโนมัติรอบนี้รองรับ MT4 ที่เลือกเท่านั้น",
+    });
+    rerenderEaFactoryDiscoveryMarketWatch();
+    return null;
+  }
+  if (!state.globalMetatraderHub.readModel) {
+    await loadGlobalMetatraderHub({ preserveMessage: true });
+  }
+  const binding = eaFactoryDiscoveryTerminalBinding(platform);
+  if (!binding) {
+    resetEaFactoryDiscoveryMarketWatch({
+      status: "terminal_not_selected",
+      reasonCode: "selected_terminal_missing",
+      message: "กรุณาเลือก MT4 ที่แถบเชื่อมด้านบนก่อน",
+    });
+    rerenderEaFactoryDiscoveryMarketWatch();
+    return null;
+  }
+  const current = factory.discoveryMarketWatch || {};
+  const bindingKey = eaFactoryDiscoveryTerminalBindingKey(binding);
+  const currentBindingKey = eaFactoryDiscoveryTerminalBindingKey({
+    platform: "mt4",
+    candidateId: current.candidateId,
+    selectionRevision: current.selectionRevision,
+  });
+  if (!force && current.status === "ready" && currentBindingKey === bindingKey) {
+    return current;
+  }
+  if (current.inFlight && currentBindingKey === bindingKey) return null;
+
+  const requestId = Number(current.requestId || 0) + 1;
+  factory.discoveryMarketWatch = {
+    ...current,
+    status: "loading",
+    candidateId: binding.candidateId,
+    selectionRevision: binding.selectionRevision,
+    symbols: [],
+    symbolCount: 0,
+    catalogDigest: "",
+    reasonCode: "",
+    message: "กำลังอ่านคู่เงินจาก Market Watch ของ MT4 ที่เลือก…",
+    observedAt: null,
+    inFlight: true,
+    requestId,
+  };
+  factory.discoverySymbol = "";
+  factory.discoverySymbolBinding = "";
+  rerenderEaFactoryDiscoveryMarketWatch();
+
+  try {
+    const response = await fetchJson(
+      "/api/props/right_server_racks/ea-factory/market-watch",
+    );
+    if (factory.discoveryMarketWatch.requestId !== requestId) return null;
+    const model = normalizeEaFactoryDiscoveryMarketWatch(response);
+    const latestBinding = eaFactoryDiscoveryTerminalBinding(platform);
+    const responseBindingKey = eaFactoryDiscoveryTerminalBindingKey({
+      platform: "mt4",
+      candidateId: model.candidateId,
+      selectionRevision: model.selectionRevision,
+    });
+    if (!latestBinding || eaFactoryDiscoveryTerminalBindingKey(latestBinding) !== bindingKey) {
+      resetEaFactoryDiscoveryMarketWatch({
+        status: "stale_selection",
+        reasonCode: "terminal_selection_changed_during_read",
+        message: "Terminal ที่เลือกเปลี่ยนระหว่างอ่าน Market Watch กรุณากดอ่านรายการใหม่",
+      });
+      return null;
+    }
+    if (model.status === "ready" && responseBindingKey !== bindingKey) {
+      resetEaFactoryDiscoveryMarketWatch({
+        status: "stale_selection",
+        reasonCode: "market_watch_binding_mismatch",
+        message: "รายการคู่เงินไม่ตรงกับ MT4 ที่เลือก จึงไม่นำมาใช้",
+      });
+      return null;
+    }
+    factory.discoveryMarketWatch = { ...model, requestId, inFlight: false };
+    const symbolStillValid = model.status === "ready"
+      && factory.discoverySymbolBinding === model.catalogDigest
+      && model.symbols.includes(factory.discoverySymbol);
+    if (!symbolStillValid) {
+      factory.discoverySymbol = "";
+      factory.discoverySymbolBinding = "";
+    }
+    return model;
+  } catch (error) {
+    if (factory.discoveryMarketWatch.requestId !== requestId) return null;
+    factory.discoveryMarketWatch = {
+      schemaVersion: "",
+      status: "error",
+      candidateId: binding.candidateId,
+      selectionRevision: binding.selectionRevision,
+      symbols: [],
+      symbolCount: 0,
+      catalogDigest: "",
+      reasonCode: "market_watch_request_failed",
+      message: safeDashboardDisplayText(
+        error?.body?.messageTh || error?.message,
+        "อ่าน Market Watch ไม่สำเร็จ กรุณาตรวจ Local Runner แล้วลองใหม่",
+        { limit: 500 },
+      ),
+      observedAt: null,
+      inFlight: false,
+      requestId,
+    };
+    factory.discoverySymbol = "";
+    factory.discoverySymbolBinding = "";
+    return null;
+  } finally {
+    rerenderEaFactoryDiscoveryMarketWatch();
+  }
+}
+
 function normalizeEaFactoryArtifact(item = {}) {
   if (!item || typeof item !== "object" || Array.isArray(item)) return null;
   const fileId = String(item.fileId || item.id || "").trim();
@@ -24146,7 +24019,8 @@ function normalizeEaFactoryArtifact(item = {}) {
 
 function normalizeEaFactoryOneClickRun(item = {}) {
   const raw = item && typeof item === "object" && !Array.isArray(item) ? item : {};
-  const requestedStatus = String(raw.status || raw.state || "idle").trim().toLowerCase();
+  const requestedStatusRaw = String(raw.status || raw.state || "idle").trim().toLowerCase();
+  const requestedStatus = requestedStatusRaw === "canceled" ? "cancelled" : requestedStatusRaw;
   const status = [
     "idle",
     "queued",
@@ -24155,9 +24029,23 @@ function normalizeEaFactoryOneClickRun(item = {}) {
     "awaiting_visible_terminal",
     "blocked",
     "failed",
+    "cancelling",
+    "cancelled",
     "completed",
   ].includes(requestedStatus) ? requestedStatus : "idle";
   const key = String(raw.idempotencyKey || raw.resumeKey || "").trim();
+  const requestedResumeKind = String(raw.resumeKind || "").trim().toLowerCase();
+  const resumeKind = requestedResumeKind === "visible_terminal" ? requestedResumeKind : "";
+  const unsupportedResumeKind = Boolean(requestedResumeKind && !resumeKind);
+  const rawProgressPercent = raw.progressPercent === null || raw.progressPercent === undefined
+    ? Number.NaN
+    : Number(raw.progressPercent);
+  const rawProgressStageIndex = raw.progressStageIndex === null || raw.progressStageIndex === undefined
+    ? Number.NaN
+    : Number(raw.progressStageIndex);
+  const rawProgressStageCount = raw.progressStageCount === null || raw.progressStageCount === undefined
+    ? Number.NaN
+    : Number(raw.progressStageCount);
   return {
     runId: String(raw.runId || "").trim(),
     status,
@@ -24175,8 +24063,28 @@ function normalizeEaFactoryOneClickRun(item = {}) {
     startedAt: raw.startedAt || null,
     updatedAt: raw.updatedAt || null,
     completedAt: raw.completedAt || null,
-    canResume: raw.canResume === true,
-    canRetry: raw.canRetry === true,
+    canResume: raw.canResume === true && resumeKind === "visible_terminal",
+    resumeKind,
+    canRetry: raw.canRetry === true && !unsupportedResumeKind,
+    canRestartBacktest: raw.canRestartBacktest === true,
+    restartBacktestEndpoint: String(raw.restartBacktestEndpoint || "").trim(),
+    restartOfRunId: String(raw.restartOfRunId || "").trim(),
+    restartArchiveDigest: String(raw.restartArchiveDigest || "").trim(),
+    executionContractDigest: String(raw.executionContractDigest || "").trim(),
+    canCancel: raw.canCancel === true,
+    progressPercent: Number.isFinite(rawProgressPercent)
+      ? Math.max(0, Math.min(100, Math.round(rawProgressPercent)))
+      : null,
+    progressStageIndex: Number.isFinite(rawProgressStageIndex)
+      ? Math.max(0, Math.round(rawProgressStageIndex))
+      : null,
+    progressStageCount: Number.isFinite(rawProgressStageCount) && rawProgressStageCount > 0
+      ? Math.max(1, Math.round(rawProgressStageCount))
+      : null,
+    progressIsApproximate: raw.progressIsApproximate !== false,
+    progressSource: safeDashboardDisplayText(raw.progressSource, "durable_local_phase_gates", { limit: 160 }),
+    progressBasis: safeDashboardDisplayText(raw.progressBasis, "", { limit: 160 }),
+    cancelReason: safeDashboardDisplayText(raw.cancelReason, "", { limit: 500 }),
     idempotencyKey: /^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,199}$/.test(key) ? key : "",
     stageResults: eaFactoryFirstArray(raw.stageResults, raw.results).slice(0, 12).map((result) => ({
       stageId: EA_FACTORY_UI_STAGE_BY_BACKEND[String(result?.stageId || result?.id || "").trim()]
@@ -24288,7 +24196,7 @@ function normalizeEaFactoryDomain(backend = {}) {
     oneClickRun: normalizeEaFactoryOneClickRun(activeBuildRaw?.oneClickRun),
     raw: activeBuildRaw,
   } : null;
-  const oneClickOwnsBuild = ["queued", "running", "waiting_ai", "awaiting_visible_terminal"]
+  const oneClickOwnsBuild = ["queued", "running", "waiting_ai", "awaiting_visible_terminal", "cancelling"]
     .includes(activeBuild?.oneClickRun?.status);
   // Only the dedicated Backend busy model owns admission. Historical Build
   // and oneClickRun statuses remain visible for diagnosis but can never leave
@@ -24380,9 +24288,7 @@ function normalizeEaFactoryDomain(backend = {}) {
   const advertisedOneClickPlatforms = eaFactoryFirstArray(
     oneClickCapability.supportedVisiblePlatforms,
   ).map(normalizeEaFactoryPlatform).filter(Boolean);
-  const oneClickVisiblePlatforms = EA_FACTORY_ONE_CLICK_VISIBLE_PLATFORMS.filter(
-    (platform) => advertisedOneClickPlatforms.includes(platform),
-  );
+  const oneClickVisiblePlatforms = [...new Set(advertisedOneClickPlatforms)];
   const oneClickRun = activeBuild?.oneClickRun || normalizeEaFactoryOneClickRun(root.oneClickRun);
   return {
     authoritative,
@@ -24428,8 +24334,9 @@ function normalizeEaFactoryDomain(backend = {}) {
       enabled: oneClickCapability.enabled === true || oneClickCapability.available === true,
       canRun: oneClickCapability.canRun === true,
       canCreateAndRun: oneClickCapability.canCreateAndRun === true,
-      canResume: oneClickCapability.canResume === true || oneClickRun.canResume,
-      canRetry: oneClickCapability.canRetry === true || oneClickRun.canRetry,
+      canResume: oneClickRun.canResume === true,
+      canRetry: oneClickRun.canRetry === true,
+      canCancel: oneClickCapability.canCancel === true || oneClickRun.canCancel,
       supportedVisiblePlatforms: oneClickVisiblePlatforms,
       selectedPlatformSupported: oneClickCapability.selectedPlatformSupported === true
         && oneClickVisiblePlatforms.includes(oneClickPlatform),
@@ -24443,7 +24350,7 @@ function normalizeEaFactoryDomain(backend = {}) {
         oneClickCapability.selectedTerminalLabel || globalSelectedTerminal?.label,
         "",
       ),
-      terminalReady: oneClickCapability.terminalReady === true || globalSelectedTerminal?.ready === true,
+      terminalReady: oneClickCapability.terminalReady === true,
       terminalRunning: oneClickCapability.terminalRunning === true,
       terminalMustAlreadyBeRunning: oneClickCapability.terminalMustAlreadyBeRunning !== false,
       terminalProcessLaunchAllowed: oneClickCapability.terminalProcessLaunchAllowed === true,
@@ -24486,7 +24393,14 @@ function normalizeEaOptimizationCandidate(item = {}, index = 0) {
   );
   const trades = eaOptimizationLabNullableNumber(item.trades, item.tradeCount, metrics.trades, metrics.tradeCount);
   const profitFactor = eaOptimizationLabNullableNumber(item.profitFactor, metrics.profitFactor);
-  const stability = eaOptimizationLabNullableNumber(item.stabilityScore, item.stability, metrics.stabilityScore, metrics.stability);
+  const stability = eaOptimizationLabNullableNumber(
+    item.stabilityScore,
+    item.stability,
+    item.sharpeRatio,
+    metrics.stabilityScore,
+    metrics.stability,
+    metrics.sharpeRatio,
+  );
   if ([profit, drawdown, trades, profitFactor, stability].every((value) => value === null)) return null;
   return {
     id: safeDashboardDisplayText(item.id || item.passId || item.pass || item.name, `pass-${index + 1}`),
@@ -24502,15 +24416,45 @@ function normalizeEaOptimizationCandidate(item = {}, index = 0) {
 
 function normalizeEaOptimizationReport(item = {}, index = 0) {
   if (!item || typeof item !== "object" || Array.isArray(item)) return null;
-  const plan = workflowDomainObject(item.plan);
-  const execution = workflowDomainObject(item.execution);
-  const results = workflowDomainObject(item.results, item.resultMetrics);
-  const metrics = workflowDomainObject(item.metrics, item.optimization, results);
-  const candidateGroups = workflowDomainObject(item.candidateGroups, results.candidateGroups, metrics.candidateGroups);
+  // Canonical reports arrive through report_read_model_item() with the
+  // experiment payload nested under `metrics`.  Keep the historical top-level
+  // aliases for old reports, but consume the real Backend wire shape first so
+  // a verified terminal report is not mistaken for a plan-only record.
+  const metrics = workflowDomainObject(item.metrics, item.optimization);
+  const plan = workflowDomainObject(metrics.plan, item.plan);
+  const execution = workflowDomainObject(metrics.execution, item.execution);
+  const results = workflowDomainObject(
+    metrics.results,
+    item.results,
+    item.resultMetrics,
+  );
+  const analysisStatus = safeDashboardDisplayText(results.analysisStatus, "unavailable").toLowerCase();
+  const analysisSha256 = /^[a-f0-9]{64}$/i.test(String(results.analysisSha256 || ""))
+    ? String(results.analysisSha256).toLowerCase()
+    : "";
+  const analysisSourceRowsSha256 = /^[a-f0-9]{64}$/i.test(String(results.analysisSourceRowsSha256 || ""))
+    ? String(results.analysisSourceRowsSha256).toLowerCase()
+    : "";
+  const allPassRowsSha256 = /^[a-f0-9]{64}$/i.test(String(results.allPassRowsSha256 || ""))
+    ? String(results.allPassRowsSha256).toLowerCase()
+    : "";
+  const analysisVerified = analysisStatus === "available"
+    && Boolean(analysisSha256)
+    && Boolean(analysisSourceRowsSha256)
+    && analysisSourceRowsSha256 === allPassRowsSha256;
+  const candidateGroups = workflowDomainObject(results.candidateGroups, metrics.candidateGroups, item.candidateGroups);
+  const normalizedCandidateGroups = {
+    maxProfit: (Array.isArray(candidateGroups.maxProfit) ? candidateGroups.maxProfit : [])
+      .slice(0, 20).map(normalizeEaOptimizationCandidate).filter(Boolean),
+    lowestDrawdown: (Array.isArray(candidateGroups.lowestDrawdown) ? candidateGroups.lowestDrawdown : [])
+      .slice(0, 20).map(normalizeEaOptimizationCandidate).filter(Boolean),
+    mostStable: (Array.isArray(candidateGroups.mostStable) ? candidateGroups.mostStable : [])
+      .slice(0, 20).map(normalizeEaOptimizationCandidate).filter(Boolean),
+  };
   const groupedCandidates = [
-    ...(Array.isArray(candidateGroups.maxProfit) ? candidateGroups.maxProfit : []),
-    ...(Array.isArray(candidateGroups.lowestDrawdown) ? candidateGroups.lowestDrawdown : []),
-    ...(Array.isArray(candidateGroups.mostStable) ? candidateGroups.mostStable : []),
+    ...normalizedCandidateGroups.maxProfit,
+    ...normalizedCandidateGroups.lowestDrawdown,
+    ...normalizedCandidateGroups.mostStable,
   ];
   const rawPasses = eaOptimizationLabFirstArray(
     item.passes,
@@ -24531,7 +24475,11 @@ function normalizeEaOptimizationReport(item = {}, index = 0) {
   );
   const candidateSource = rawPasses.length ? rawPasses : rawCandidateSummaries;
   const candidates = candidateSource.slice(0, 5000)
-    .map(normalizeEaOptimizationCandidate)
+    .map((candidate, candidateIndex) => (
+      candidate?.parameters && Object.hasOwn(candidate, "profit")
+        ? candidate
+        : normalizeEaOptimizationCandidate(candidate, candidateIndex)
+    ))
     .filter(Boolean);
   const rawBands = eaOptimizationLabFirstArray(
     item.currentBands,
@@ -24540,9 +24488,12 @@ function normalizeEaOptimizationReport(item = {}, index = 0) {
     results.parameterBands,
     metrics.currentBands,
     metrics.parameterBands,
+    // The canonical publisher binds the exact ranges that were run under the
+    // plan. They are therefore valid Current Bands, not a future suggestion.
+    plan.parameterRanges,
   );
   const currentBands = rawBands.slice(0, 80).map((band) => ({
-    name: safeDashboardDisplayText(band?.name || band?.input || band?.parameter, "Input"),
+    name: safeDashboardDisplayText(band?.name || band?.inputName || band?.input || band?.parameter, "Input"),
     kind: Array.isArray(band?.values) ? "categorical" : "numeric",
     start: eaOptimizationLabNullableNumber(band?.start),
     step: eaOptimizationLabNullableNumber(band?.step),
@@ -24561,7 +24512,7 @@ function normalizeEaOptimizationReport(item = {}, index = 0) {
     results.nextRanges,
   );
   const nextParameterPlan = rawNextPlan.slice(0, 80).map((band) => ({
-    name: safeDashboardDisplayText(band?.name || band?.input || band?.parameter, "Input"),
+    name: safeDashboardDisplayText(band?.name || band?.inputName || band?.input || band?.parameter, "Input"),
     kind: Array.isArray(band?.values) ? "categorical" : "numeric",
     start: eaOptimizationLabNullableNumber(band?.start),
     step: eaOptimizationLabNullableNumber(band?.step),
@@ -24580,11 +24531,19 @@ function normalizeEaOptimizationReport(item = {}, index = 0) {
     metrics.passCount,
     metrics.totalPasses,
   );
-  const profitablePassCount = eaOptimizationLabNullableNumber(
+  const passesTruncated = item.passesTruncated === true
+    || results.passesTruncated === true
+    || item.allPassRowsTruncated === true
+    || results.allPassRowsTruncated === true
+    || rawPasses.length > 5000;
+  const reportedProfitablePassCount = eaOptimizationLabNullableNumber(
     item.profitablePassCount,
     results.profitablePassCount,
     metrics.profitablePassCount,
   );
+  // This count is an analytical result, not a presentation convenience.  The
+  // browser never recomputes it from the displayed (possibly bounded) rows.
+  const profitablePassCount = reportedProfitablePassCount;
   const explicitProfitablePercent = eaOptimizationLabNullableNumber(
     item.profitablePercent,
     results.profitablePercent,
@@ -24640,15 +24599,39 @@ function normalizeEaOptimizationReport(item = {}, index = 0) {
     typeof warning === "object" && warning !== null ? (warning.detailTh || warning.message || warning.code) : warning,
     "",
   )).filter(Boolean);
-  const sourceReference = workflowDomainObject(item.sourceReference);
+  const sourceReference = workflowDomainObject(
+    item.sourceReference,
+    metrics.sourceReference,
+  );
+  const riskThresholdModel = workflowDomainObject(results.riskThresholds, plan.riskThresholds);
+  const riskThresholds = {
+    targetProfitPercent: eaOptimizationLabNullableNumber(riskThresholdModel.targetProfitPercent),
+    maxDrawdownPercent: eaOptimizationLabNullableNumber(riskThresholdModel.maxDrawdownPercent),
+    minimumTrades: eaOptimizationLabNullableNumber(riskThresholdModel.minimumTrades),
+  };
+  const analysisUnavailableReasons = (Array.isArray(results.analysisUnavailableReasons)
+    ? results.analysisUnavailableReasons
+    : [])
+    .slice(0, 20)
+    .map((reason) => safeDashboardDisplayText(reason, ""))
+    .filter(Boolean);
   return {
     id: String(item.id || `optimization-report-${index + 1}`),
     title: safeDashboardDisplayText(item.title, "รายงาน Optimization"),
     summary: safeDashboardDisplayText(item.summary || results.summary || item.result, "Backend ส่งรายงานแล้ว แต่ยังไม่มีข้อความสรุป"),
     status: safeDashboardDisplayText(item.status, "reported"),
     updatedAt: item.updatedAt || item.createdAt || null,
-    eaName: safeDashboardDisplayText(item.eaName || item.sourceName || plan.eaName, "EA จาก Backend Report"),
-    platform: safeDashboardDisplayText(item.platform || plan.platform, "ยังไม่ระบุแพลตฟอร์ม"),
+    eaName: safeDashboardDisplayText(
+      item.eaName
+        || item.sourceName
+        || plan.eaName
+        || sourceReference.artifactId,
+      "EA จาก Backend Report",
+    ),
+    platform: safeDashboardDisplayText(
+      item.platform || plan.platform || metrics.platform,
+      "ยังไม่ระบุแพลตฟอร์ม",
+    ).toUpperCase(),
     sourceReferenceId: safeDashboardDisplayText(
       sourceReference.artifactId || sourceReference.reportId || sourceReference.recordId,
       "",
@@ -24670,27 +24653,357 @@ function normalizeEaOptimizationReport(item = {}, index = 0) {
         ? String(artifactManifestEvidence.sha256).toLowerCase()
         : "",
     },
-    runId: safeDashboardDisplayText(item.runId || executionEvidence.runId, ""),
-    roundId: safeDashboardDisplayText(item.roundId || executionEvidence.roundId, ""),
+    runId: safeDashboardDisplayText(
+      item.runId || executionEvidence.runId || metrics.runId,
+      "",
+    ),
+    roundId: safeDashboardDisplayText(
+      item.roundId || executionEvidence.roundId || metrics.roundId,
+      "",
+    ),
     terminalId: safeDashboardDisplayText(item.terminalId || executionEvidence.terminalId || executionEvidence.terminalCandidateId, ""),
     executionVerified,
     actualResultsAvailable,
     passCount: passCount === null ? (rawPasses.length || null) : passCount,
     profitablePassCount,
+    eligiblePassCount: eaOptimizationLabNullableNumber(results.eligiblePassCount),
     profitablePercent,
-    passesTruncated: item.passesTruncated === true
-      || results.passesTruncated === true
-      || item.allPassRowsTruncated === true
-      || results.allPassRowsTruncated === true
-      || rawPasses.length > 5000,
+    passesTruncated,
+    analysisStatus,
+    analysisVerified,
+    analysisReasonCode: safeDashboardDisplayText(results.analysisReasonCode, ""),
+    analysisUnavailableReasons,
+    analysisSha256,
+    analysisSourceRowsSha256,
+    allPassRowsSha256,
+    riskThresholds,
     warnings,
     candidates,
+    candidateGroups: normalizedCandidateGroups,
     currentBands,
     nextParameterPlan,
+    nextParameterPlanAvailable: results.nextParameterPlanAvailable === true,
+    nextParameterPlanReasonCode: safeDashboardDisplayText(results.nextParameterPlanReasonCode, ""),
   };
 }
 
-function normalizeEaOptimizationLabDomain(backend = {}, report = {}) {
+function normalizeEaOptimizationLabBuild(item = {}) {
+  const buildId = String(item?.buildId || item?.id || "").trim();
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(buildId)) return null;
+  const platform = String(item?.platform || item?.targetPlatform || "").trim().toUpperCase();
+  const status = String(item?.status || "").trim().toLowerCase();
+  const completed = item?.completed === true || status === "completed";
+  const immutable = item?.immutable === true || item?.artifactImmutable === true;
+  const artifactKind = String(item?.artifactKind || item?.kind || "").trim().toLowerCase();
+  return {
+    buildId,
+    platform: ["MT4", "MT5"].includes(platform) ? platform : "",
+    status,
+    completed,
+    immutable,
+    eligible: completed && immutable && ["expert_advisor", "ea"].includes(artifactKind),
+    label: safeDashboardDisplayText(
+      item?.label || item?.title || item?.fileName || item?.artifactName,
+      buildId,
+    ),
+    artifactSha256: /^[a-f0-9]{64}$/i.test(String(item?.artifactSha256 || item?.sha256 || ""))
+      ? String(item?.artifactSha256 || item?.sha256).toLowerCase()
+      : "",
+  };
+}
+
+function eaOptimizationLabSha256(value) {
+  const digest = String(value || "").trim().toLowerCase();
+  return /^[a-f0-9]{64}$/.test(digest) ? digest : "";
+}
+
+function normalizeEaOptimizationLabArtifactEvidence(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const ref = safeDashboardDisplayText(value.ref || value.artifactId || value.id, "");
+  const sha256 = eaOptimizationLabSha256(value.sha256);
+  const byteSize = eaOptimizationLabNullableNumber(value.byteSize, value.size);
+  if (!ref || !sha256 || byteSize === null || byteSize < 1) return null;
+  return { ref, sha256, byteSize };
+}
+
+function normalizeEaOptimizationLabSessionEvidence(item = {}, index = 0) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const rawRows = Array.isArray(item.resultRows) ? item.resultRows : [];
+  const candidates = rawRows.slice(0, 5000)
+    .map(normalizeEaOptimizationCandidate)
+    .filter(Boolean);
+  const passCount = eaOptimizationLabNullableNumber(item.passCount);
+  const returnedPassCount = eaOptimizationLabNullableNumber(item.returnedPassCount);
+  const report = normalizeEaOptimizationLabArtifactEvidence(item.report);
+  const manifest = normalizeEaOptimizationLabArtifactEvidence(item.manifest);
+  const testerSettingsSha256 = eaOptimizationLabSha256(item.testerSettingsSha256);
+  const visibleEvidenceSha256 = eaOptimizationLabSha256(item.visibleEvidenceSha256);
+  const resultRowsSha256 = eaOptimizationLabSha256(item.resultRowsSha256);
+  const evidenceDocumentSha256 = eaOptimizationLabSha256(item.evidenceDocumentSha256);
+  const analysisSha256 = eaOptimizationLabSha256(item.analysisSha256);
+  const rowsTruncated = item.rowsTruncated === true;
+  const publicResultRowsTruncated = item.publicResultRowsTruncated === true;
+  const rawAnalysis = workflowDomainObject(item.analysis);
+  const rawCandidateGroups = workflowDomainObject(rawAnalysis.candidateGroups);
+  const analysisCandidateGroups = {
+    maxProfit: (Array.isArray(rawCandidateGroups.maxProfit) ? rawCandidateGroups.maxProfit : [])
+      .slice(0, 20).map(normalizeEaOptimizationCandidate).filter(Boolean),
+    lowestDrawdown: (Array.isArray(rawCandidateGroups.lowestDrawdown) ? rawCandidateGroups.lowestDrawdown : [])
+      .slice(0, 20).map(normalizeEaOptimizationCandidate).filter(Boolean),
+    mostStable: (Array.isArray(rawCandidateGroups.mostStable) ? rawCandidateGroups.mostStable : [])
+      .slice(0, 20).map(normalizeEaOptimizationCandidate).filter(Boolean),
+  };
+  const normalizeAnalysisBands = (bands, includeReason = false) => (
+    (Array.isArray(bands) ? bands : []).slice(0, 80).map((band) => ({
+      name: safeDashboardDisplayText(band?.name || band?.inputName || band?.input || band?.parameter, "Input"),
+      kind: Array.isArray(band?.values) ? "categorical" : "numeric",
+      start: eaOptimizationLabNullableNumber(band?.start),
+      step: eaOptimizationLabNullableNumber(band?.step),
+      stop: eaOptimizationLabNullableNumber(band?.stop),
+      values: (Array.isArray(band?.values) ? band.values : [])
+        .slice(0, 30)
+        .map((value) => safeDashboardDisplayText(value, ""))
+        .filter(Boolean),
+      ...(includeReason ? {
+        reason: safeDashboardDisplayText(band?.reason, "ช่วงที่ Backend แนะนำจากผลรอบก่อนหน้า"),
+      } : {}),
+    })).filter((band) => band.name)
+  );
+  const analysisStatus = safeDashboardDisplayText(rawAnalysis.status, "").toLowerCase();
+  const analysisSourceRowsSha256 = eaOptimizationLabSha256(rawAnalysis.sourceResultRowsSha256);
+  const analysis = ["available", "unavailable"].includes(analysisStatus) ? {
+    sessionId: safeDashboardDisplayText(rawAnalysis.sessionId, ""),
+    roundId: safeDashboardDisplayText(rawAnalysis.roundId, ""),
+    status: analysisStatus,
+    reasonCode: safeDashboardDisplayText(rawAnalysis.reasonCode, ""),
+    unavailableReasons: (Array.isArray(rawAnalysis.unavailableReasons) ? rawAnalysis.unavailableReasons : [])
+      .slice(0, 20).map((reason) => safeDashboardDisplayText(reason, "")).filter(Boolean),
+    sourceResultRowsSha256: analysisSourceRowsSha256,
+    passCount: eaOptimizationLabNullableNumber(rawAnalysis.passCount),
+    returnedPassCount: eaOptimizationLabNullableNumber(rawAnalysis.returnedPassCount),
+    rowsTruncated: rawAnalysis.rowsTruncated === true,
+    profitablePassCount: eaOptimizationLabNullableNumber(rawAnalysis.profitablePassCount),
+    eligiblePassCount: eaOptimizationLabNullableNumber(rawAnalysis.eligiblePassCount),
+    riskThresholds: {
+      targetProfitPercent: eaOptimizationLabNullableNumber(rawAnalysis.riskThresholds?.targetProfitPercent),
+      maxDrawdownPercent: eaOptimizationLabNullableNumber(rawAnalysis.riskThresholds?.maxDrawdownPercent),
+      minimumTrades: eaOptimizationLabNullableNumber(rawAnalysis.riskThresholds?.minimumTrades),
+    },
+    candidateGroups: analysisCandidateGroups,
+    currentBands: normalizeAnalysisBands(rawAnalysis.currentBands),
+    nextParameterPlan: normalizeAnalysisBands(rawAnalysis.nextParameterPlan, true),
+    nextParameterPlanAvailable: rawAnalysis.nextParameterPlanAvailable === true,
+    nextParameterPlanReasonCode: safeDashboardDisplayText(rawAnalysis.nextParameterPlanReasonCode, ""),
+  } : null;
+  const countsValid = Number.isInteger(passCount)
+    && passCount >= 2
+    && Number.isInteger(returnedPassCount)
+    && returnedPassCount >= 1
+    && returnedPassCount <= passCount
+    && rowsTruncated === (returnedPassCount < passCount)
+    && (
+      publicResultRowsTruncated
+        ? rawRows.length < returnedPassCount
+        : rawRows.length === returnedPassCount
+    );
+  const verified = item.analyzed === true
+    && countsValid
+    && Boolean(report && manifest)
+    && Boolean(testerSettingsSha256)
+    && Boolean(visibleEvidenceSha256)
+    && Boolean(resultRowsSha256)
+    && Boolean(evidenceDocumentSha256)
+    && Boolean(analysisSha256)
+    && Boolean(analysis)
+    && analysis.sourceResultRowsSha256 === resultRowsSha256
+    && analysis.passCount === passCount
+    && analysis.returnedPassCount === returnedPassCount
+    && analysis.rowsTruncated === rowsTruncated;
+  return {
+    roundId: safeDashboardDisplayText(item.roundId, `round-${index + 1}`),
+    roundNumber: eaOptimizationLabNullableNumber(item.roundNumber) ?? index + 1,
+    combinationCount: eaOptimizationLabNullableNumber(item.combinationCount),
+    passCount,
+    returnedPassCount,
+    rowsTruncated,
+    publicResultRowsTruncated,
+    report,
+    manifest,
+    testerSettingsSha256,
+    visibleEvidenceSha256,
+    resultRowsSha256,
+    evidenceDocumentSha256,
+    analysisSha256,
+    analysis,
+    analyzed: item.analyzed === true,
+    verified,
+    warnings: (Array.isArray(item.warnings) ? item.warnings : [])
+      .slice(0, 30)
+      .map((warning) => safeDashboardDisplayText(
+        typeof warning === "object" && warning !== null
+          ? (warning.messageTh || warning.message || warning.code)
+          : warning,
+        "",
+      ))
+      .filter(Boolean),
+    candidates,
+  };
+}
+
+function normalizeEaOptimizationLabSession(item = {}) {
+  const sessionId = String(item?.sessionId || item?.id || "").trim();
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(sessionId)) return null;
+  const status = String(item?.status || item?.state || "unknown").trim().toLowerCase();
+  const progressModel = workflowDomainObject(item?.progress);
+  const rawProgress = Number(item?.progressPercent ?? progressModel?.percent ?? item?.progress ?? 0);
+  const failureModel = workflowDomainObject(item?.failure);
+  const terminalBinding = workflowDomainObject(item?.terminalBinding);
+  const active = eaOptimizationLabSessionIsActive({ status });
+  const rawEvidence = eaOptimizationLabFirstArray(item?.evidence, item?.artifacts, item?.reports)
+    .slice(0, 30);
+  const evidenceRecords = rawEvidence
+    .map(normalizeEaOptimizationLabSessionEvidence)
+    .filter(Boolean);
+  const evidence = rawEvidence
+    .map((entry) => safeDashboardDisplayText(
+      typeof entry === "object"
+        ? (
+          entry?.label
+          || entry?.title
+          || entry?.fileName
+          || entry?.ref
+          || entry?.sha256
+          || (entry?.roundId
+            ? `${entry.roundId}${Number.isFinite(Number(entry?.passCount)) ? ` • ${Number(entry.passCount)} passes` : ""}`
+            : "")
+        )
+        : entry,
+      "",
+    ))
+    .filter(Boolean);
+  return {
+    sessionId,
+    buildId: String(item?.buildId || "").trim(),
+    platform: String(item?.platform || "").trim().toUpperCase(),
+    terminalId: safeDashboardDisplayText(
+      item?.terminalId || terminalBinding?.candidateId || terminalBinding?.terminalCandidateId,
+      "",
+    ),
+    status,
+    stage: safeDashboardDisplayText(item?.stage || item?.currentStage || item?.stageId, "รอสถานะ Backend"),
+    progressPercent: Number.isFinite(rawProgress) ? Math.max(0, Math.min(100, rawProgress)) : 0,
+    message: safeDashboardDisplayText(item?.messageTh || item?.message || item?.detail, ""),
+    failureCode: safeDashboardDisplayText(item?.failureCode || item?.errorCode || failureModel?.code, ""),
+    failureMessage: safeDashboardDisplayText(item?.failureMessage || item?.errorMessage || failureModel?.message, ""),
+    canResume: typeof item?.canResume === "boolean"
+      ? item.canResume
+      : active && item?.cancelRequested !== true,
+    canCancel: typeof item?.canCancel === "boolean"
+      ? item.canCancel
+      : active && item?.cancelRequested !== true,
+    cancelReason: safeDashboardDisplayText(item?.cancelReason, ""),
+    evidence,
+    evidenceRecords,
+    updatedAt: item?.updatedAt || item?.heartbeatAt || item?.completedAt || item?.createdAt || null,
+  };
+}
+
+function eaOptimizationLabSessionIsActive(session = null) {
+  return Boolean(session && [
+    "queued",
+    "running",
+    "resuming",
+    "cancelling",
+    "waiting_ai",
+    "awaiting_visible_terminal",
+    "collecting",
+    "optimizing",
+    "validating",
+  ].includes(String(session.status || "")));
+}
+
+function normalizeEaOptimizationLabSessionReport(session = null, index = 0) {
+  if (!session || session.status !== "completed" || !session.evidenceRecords?.length) return null;
+  const evidence = session.evidenceRecords.at(-1);
+  const analysis = evidence.analysis;
+  const sessionEvidenceVerified = session.evidenceRecords.every((entry) => (
+    entry.verified === true
+    && entry.analysis?.sessionId === session.sessionId
+    && entry.analysis?.roundId === entry.roundId
+  ));
+  const profitablePassCount = sessionEvidenceVerified
+    ? analysis.profitablePassCount
+    : null;
+  const profitablePercent = profitablePassCount !== null && evidence.passCount > 0
+    ? Number(((profitablePassCount / evidence.passCount) * 100).toFixed(2))
+    : null;
+  return {
+    id: `optimization-session-${session.sessionId}-${index + 1}`,
+    title: "หลักฐานผลจาก Backend Session",
+    summary: `Session ${session.sessionId} เสร็จสิ้นพร้อมหลักฐานแบบ hash จาก Visible MT5 Strategy Tester`,
+    status: session.status,
+    updatedAt: session.updatedAt,
+    eaName: session.buildId || "EA Factory Build",
+    platform: session.platform || "MT5",
+    sourceReferenceId: "",
+    executionStatus: "completed",
+    executionEvidence: {
+      sourceKind: "mt5_visible_optimization_session",
+      backendVerificationId: session.sessionId,
+      mtExecutionVerified: false,
+      compileProofVerified: false,
+      visualBacktestProofVerified: Boolean(evidence.visibleEvidenceSha256),
+      optimizationProofVerified: sessionEvidenceVerified,
+      resultReportArtifactId: evidence.report?.ref || "",
+      resultReportSha256: evidence.report?.sha256 || "",
+      artifactManifestId: evidence.manifest?.ref || "",
+      artifactManifestSha256: evidence.manifest?.sha256 || "",
+      testerSettingsSha256: evidence.testerSettingsSha256,
+      visibleEvidenceSha256: evidence.visibleEvidenceSha256,
+      resultRowsSha256: evidence.resultRowsSha256,
+      evidenceDocumentSha256: evidence.evidenceDocumentSha256,
+      analysisSha256: evidence.analysisSha256,
+    },
+    runId: session.sessionId,
+    roundId: evidence.roundId,
+    terminalId: session.terminalId,
+    executionVerified: false,
+    sessionEvidenceVerified,
+    actualResultsAvailable: sessionEvidenceVerified && evidence.candidates.length > 0,
+    passCount: evidence.passCount,
+    profitablePassCount,
+    eligiblePassCount: sessionEvidenceVerified ? analysis.eligiblePassCount : null,
+    profitablePercent,
+    passesTruncated: evidence.rowsTruncated || evidence.publicResultRowsTruncated,
+    analysisStatus: sessionEvidenceVerified ? analysis.status : "unavailable",
+    analysisReasonCode: sessionEvidenceVerified ? analysis.reasonCode : "session_analysis_binding_invalid",
+    analysisUnavailableReasons: sessionEvidenceVerified
+      ? analysis.unavailableReasons
+      : ["session_analysis_binding_invalid"],
+    analysisSha256: evidence.analysisSha256,
+    analysisSourceRowsSha256: analysis?.sourceResultRowsSha256 || "",
+    riskThresholds: analysis?.riskThresholds || {
+      targetProfitPercent: null,
+      maxDrawdownPercent: null,
+      minimumTrades: null,
+    },
+    warnings: evidence.warnings,
+    candidates: evidence.candidates,
+    candidateGroups: analysis?.candidateGroups || {
+      maxProfit: [],
+      lowestDrawdown: [],
+      mostStable: [],
+    },
+    currentBands: analysis?.currentBands || [],
+    nextParameterPlan: analysis?.nextParameterPlan || [],
+    nextParameterPlanAvailable: analysis?.nextParameterPlanAvailable === true,
+    nextParameterPlanReasonCode: analysis?.nextParameterPlanReasonCode || "session_analysis_binding_invalid",
+    reportSource: "backend_session",
+  };
+}
+
+function normalizeEaOptimizationLabDomain(backend = {}, report = {}, readState = {}) {
+  const root = workflowDomainObject(backend?.eaOptimizationLab, backend);
   const checklist = workflowDomainObject(report.connectionChecklist);
   const terminalSelection = getMetatraderSelectionModel(checklist);
   const optimizationAdapter = (Array.isArray(checklist.items) ? checklist.items : [])
@@ -24701,23 +25014,105 @@ function normalizeEaOptimizationLabDomain(backend = {}, report = {}) {
     .filter(Boolean)
     .sort((left, right) => Date.parse(right.updatedAt || 0) - Date.parse(left.updatedAt || 0))
     .slice(0, 100);
+  const builds = eaOptimizationLabFirstArray(root?.eligibleBuilds, root?.builds, root?.eaFactoryBuilds)
+    .slice(0, 100)
+    .map(normalizeEaOptimizationLabBuild)
+    .filter(Boolean);
+  const sessions = eaOptimizationLabFirstArray(root?.sessions)
+    .slice(0, 100)
+    .map(normalizeEaOptimizationLabSession)
+    .filter(Boolean);
+  const directSession = normalizeEaOptimizationLabSession(
+    root?.activeSession
+    || root?.session
+    || (root?.id && root?.state ? root : {}),
+  );
+  const sessionTimeline = [directSession, ...sessions]
+    .filter(Boolean)
+    .filter((item, itemIndex, values) => (
+      values.findIndex((candidate) => candidate.sessionId === item.sessionId) === itemIndex
+    ))
+    .sort((left, right) => Date.parse(right.updatedAt || 0) - Date.parse(left.updatedAt || 0));
+  const activeSession = sessionTimeline.find(eaOptimizationLabSessionIsActive)
+    || null;
+  const latestSession = sessionTimeline[0] || null;
+  const displaySession = activeSession || latestSession;
+  // Results are current only for the session the UI is actually displaying.
+  // An older completed session must not bleed into a new active/failed run.
+  const completedSession = displaySession?.status === "completed" ? displaySession : null;
+  const sessionReport = normalizeEaOptimizationLabSessionReport(completedSession);
+  const admission = workflowDomainObject(root?.admission, root?.readiness);
+  const selectedTerminalRaw = workflowDomainObject(root?.selectedTerminal, terminalSelection.selectedCandidate);
+  const selectedTerminalId = String(selectedTerminalRaw?.candidateId || selectedTerminalRaw?.id || "").trim();
+  const selectedTerminal = selectedTerminalId ? {
+    ...selectedTerminalRaw,
+    candidateId: selectedTerminalId,
+    platform: String(selectedTerminalRaw?.platform || "").trim().toUpperCase(),
+    detected: selectedTerminalRaw?.detected === true,
+    labelTh: safeDashboardDisplayText(
+      selectedTerminalRaw?.labelTh || selectedTerminalRaw?.label,
+      selectedTerminalId,
+    ),
+  } : null;
+  const readModelStale = readState?.stale === true || Boolean(readState?.lastError);
+  const authoritative = root?.schemaVersion === "ea-optimization-lab-v1"
+    && root?.scheduled === false
+    && !readModelStale;
+  const latestHistoricalReport = reports.find((item) => item.actualResultsAvailable) || null;
+  const routedReport = completedSession
+    ? reports.find((item) => (
+      item.actualResultsAvailable
+      && item.runId === completedSession.sessionId
+      && (!completedSession.buildId || item.sourceReferenceId === completedSession.buildId)
+      && (!completedSession.platform || item.platform === completedSession.platform)
+    )) || null
+    : null;
   return {
+    authoritative,
+    readModelStale,
+    readModelError: safeDashboardDisplayText(readState?.lastError?.message || readState?.lastError, ""),
+    schemaVersion: safeDashboardDisplayText(root?.schemaVersion, ""),
     terminals: terminalSelection.candidates,
-    selectedTerminal: terminalSelection.selectedCandidate,
-    adapterReady: terminalSelection.adapterReady === true
-      && normalizeConnectionStatus(optimizationAdapter?.status) === "connected",
+    selectedTerminal,
+    adapterReady: root?.visibleAdapterConnected === true,
+    terminalReady: root?.terminalReady === true,
+    selectedPlatformSupported: root?.selectedPlatformSupported === true,
+    visibleAdapterConnected: root?.visibleAdapterConnected === true,
+    canStart: authoritative && (root?.canStart === true || admission?.canStart === true),
+    busy: Boolean(root?.busy) || eaOptimizationLabSessionIsActive(activeSession),
     adapterStatus: safeDashboardDisplayText(
-      optimizationAdapter?.status || terminalSelection.adapterConnection,
-      "coming_soon",
+      root?.adapterStatus || optimizationAdapter?.status || terminalSelection.adapterConnection,
+      "unknown",
     ),
     adapterDetail: safeDashboardDisplayText(
-      optimizationAdapter?.detailTh || terminalSelection.detailTh,
-      "Optimization Adapter ยังไม่พร้อม จึงเตรียมแผนได้แต่ยังไม่สั่ง Strategy Tester",
+      root?.adapterDetailTh || root?.adapterDetail || optimizationAdapter?.detailTh || terminalSelection.detailTh,
+      "Backend ยังไม่ได้ยืนยัน Optimization Adapter",
     ),
+    readinessIssues: eaOptimizationLabFirstArray(
+      admission?.issues,
+      root?.readinessIssues,
+      root?.blockingIssues,
+    )
+      .slice(0, 30)
+      .map((entry) => safeDashboardDisplayText(
+        typeof entry === "object"
+          ? (entry?.messageTh || entry?.message || entry?.detail || entry?.code)
+          : entry,
+        "",
+      ))
+      .filter(Boolean),
+    builds,
+    sessions,
+    activeSession,
+    latestSession,
+    displaySession,
+    completedSession,
+    sessionReport,
     reports,
-    latestPlanReport: reports.find((item) => !item.actualResultsAvailable) || reports[0] || null,
-    latestReport: reports.find((item) => item.actualResultsAvailable) || null,
-    backendMode: safeDashboardDisplayText(backend.stage || backend.mode, "plan_only"),
+    latestHistoricalReport,
+    latestPlanReport: reports.find((item) => !item.actualResultsAvailable) || null,
+    latestReport: routedReport || (sessionReport?.sessionEvidenceVerified ? sessionReport : null),
+    backendMode: safeDashboardDisplayText(root?.stage || root?.mode, "unknown"),
   };
 }
 
@@ -24919,7 +25314,7 @@ function eaOptimizationLabParseSourceInputs(sourceText, setRanges = new Map()) {
   const enumMap = eaOptimizationLabEnumMap(sourceText);
   const cleaned = eaOptimizationLabStripComments(sourceText);
   const inputPattern = /^\s*(input|extern|sinput)\s+(?!group\b)([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*=\s*([^;]+);/gm;
-  const inputLimit = typeof EA_OPTIMIZATION_LAB_MAX_INPUTS === "number" ? EA_OPTIMIZATION_LAB_MAX_INPUTS : 80;
+  const inputLimit = typeof EA_OPTIMIZATION_LAB_MAX_INPUTS === "number" ? EA_OPTIMIZATION_LAB_MAX_INPUTS : 64;
   const inputs = [];
   const seen = new Set();
   let match;
@@ -25014,7 +25409,7 @@ function eaOptimizationLabPlanValidation(session = state.modal.eaOptimizationLab
     const count = eaOptimizationLabRangeCount(input);
     if (count < 1) issues.push(`${input.name}: ช่วงค่าหรือรายการ Mode ยังไม่ถูกต้อง`);
     if (count > EA_OPTIMIZATION_LAB_MAX_COMBINATIONS) {
-      issues.push(`${input.name}: มีค่ามากกว่า 1,000,000 ค่า กรุณาลดช่วงหรือเพิ่ม Step`);
+      issues.push(`${input.name}: มีค่ามากกว่า 100,000 ค่า กรุณาลดช่วงหรือเพิ่ม Step`);
     }
     if (
       input.kind === "numeric"
@@ -25047,8 +25442,11 @@ function eaOptimizationLabPlanValidation(session = state.modal.eaOptimizationLab
   optimized.forEach((input) => {
     combinations *= BigInt(Math.max(1, eaOptimizationLabRangeCount(input)));
   });
+  if (combinations < 2n) {
+    issues.push("Optimization ต้องมีอย่างน้อย 2 Combination เพื่อยืนยันว่า Strategy Tester ได้รัน Optimization จริง");
+  }
   if (combinations > BigInt(EA_OPTIMIZATION_LAB_MAX_COMBINATIONS)) {
-    issues.push("จำนวน Combination เกิน 1,000,000 ค่า กรุณาลดช่วงหรือแยกเป็นหลายรอบ");
+    issues.push("จำนวน Combination เกิน 100,000 ค่า กรุณาลดช่วงหรือแยกเป็นหลายรอบ");
   }
   return { issues, optimized, combinations };
 }
@@ -25059,7 +25457,9 @@ function eaOptimizationLabBuildPlan(session = state.modal.eaOptimizationLab, dom
   const terminalGate = typeof getEaOptimizationLabTerminalGate === "function"
     ? getEaOptimizationLabTerminalGate(domain, session)
     : { effectiveTerminalId: String(session.selectedTerminalId || "") };
-  const roundCount = Math.max(1, Math.min(5, Number.parseInt(session.roundCount, 10) || 3));
+  // One backend session deliberately owns one visible MT5 Strategy Tester run.
+  // A later refinement must be created from the verified report of this run;
+  // repeating the same browser ranges as several alleged rounds is not analysis.
   const sourceReferenceParts = String(session.sourceReportId || "").split(":");
   const sourceReferenceKind = sourceReferenceParts.length > 1 ? sourceReferenceParts.shift() : "";
   const sourceReferenceId = sourceReferenceParts.join(":");
@@ -25081,24 +25481,6 @@ function eaOptimizationLabBuildPlan(session = state.modal.eaOptimizationLab, dom
       gate: "ต้องมี Tester Report จริงครบทุก Pass ก่อนสร้างรอบถัดไป",
     },
   ];
-  if (roundCount >= 2) rounds.push({
-    index: 2,
-    title: "Stable Cluster Zoom / Split",
-    detail: "ลด Step รอบคลัสเตอร์กำไรที่ต่อเนื่อง หรือแยกหลายช่วงเมื่อพบหลายเกาะ; ตั้งเป้าประมาณ 10 ค่าหรือน้อยกว่าต่อ Input",
-    gate: "สร้าง Next Parameter Plan จากผลรอบ 1 เท่านั้น ไม่คัดจาก Top Profit จุดเดียว",
-  });
-  if (roundCount >= 3) rounds.push({
-    index: 3,
-    title: "Out-of-sample Confirmation",
-    detail: "ทดสอบ Candidate กับช่วงข้อมูลที่ไม่ใช้สร้างพารามิเตอร์ และตรวจ Drawdown, จำนวน Trade และความคงเส้นคงวา",
-    gate: "ยังไม่ถือว่าพร้อม Live จนกว่า Backtest/Forward Test และหลักฐาน Terminal จะผ่าน",
-  });
-  for (let index = 4; index <= roundCount; index += 1) rounds.push({
-    index,
-    title: `Validation Round ${index}`,
-    detail: "รอบเสริมแบบ Case-by-case ใช้เมื่อผลก่อนหน้ามีหลายคลัสเตอร์หรือยังไม่ผ่านเกณฑ์เสถียรภาพ",
-    gate: "ต้องมีเหตุผลจาก Report รอบก่อนหน้าและผู้ใช้กดเริ่มเอง",
-  });
   return {
     ok: true,
     createdAt: new Date().toISOString(),
@@ -25120,7 +25502,7 @@ function eaOptimizationLabBuildPlan(session = state.modal.eaOptimizationLab, dom
     timeframe: session.timeframe,
     dateFrom: session.dateFrom,
     dateTo: session.dateTo,
-    validationMethod: session.validationMethod,
+    validationMethod: "single_verified_run",
     targetProfitPercent: session.targetProfitPercent === "" ? null : Number(session.targetProfitPercent),
     maxDrawdownPercent: session.maxDrawdownPercent === "" ? null : Number(session.maxDrawdownPercent),
     minimumTrades: session.minimumTrades === "" ? null : Number(session.minimumTrades),
@@ -25150,6 +25532,282 @@ function rerenderEaOptimizationLab() {
       }
     }
   }
+}
+
+function invalidateEaOptimizationLabExecutionDraft(session = state.modal.eaOptimizationLab) {
+  session.plan = null;
+  session.startIdempotencyKey = "";
+}
+
+function eaOptimizationLabReadModelIsStale(readModel = state.eaOptimizationLabReadModel, now = Date.now()) {
+  const lastLoadedAt = Number(readModel?.lastLoadedAt || 0);
+  return readModel?.stale === true
+    || Boolean(readModel?.lastError)
+    || !readModel?.payload
+    || !Number.isFinite(lastLoadedAt)
+    || lastLoadedAt <= 0
+    || now - lastLoadedAt > EA_OPTIMIZATION_LAB_READ_MODEL_MAX_AGE_MS;
+}
+
+function eaOptimizationLabReadState(readModel = state.eaOptimizationLabReadModel) {
+  return {
+    stale: eaOptimizationLabReadModelIsStale(readModel),
+    lastError: readModel?.lastError || null,
+  };
+}
+
+function scheduleEaOptimizationLabPolling(domain = null) {
+  const readModel = state.eaOptimizationLabReadModel;
+  if (readModel.pollTimer) {
+    window.clearTimeout(readModel.pollTimer);
+    readModel.pollTimer = null;
+  }
+  if (
+    !state.modal.open
+    || state.modal.type !== "prop"
+    || state.modal.id !== EA_OPTIMIZATION_LAB_PROP_ID
+    || document.visibilityState !== "visible"
+  ) return;
+  const normalized = domain || normalizeEaOptimizationLabDomain(
+    readModel.payload || {},
+    state.propReports[EA_OPTIMIZATION_LAB_PROP_ID] || {},
+    eaOptimizationLabReadState(readModel),
+  );
+  const delay = eaOptimizationLabSessionIsActive(normalized.activeSession)
+    ? EA_OPTIMIZATION_LAB_ACTIVE_POLL_MS
+    : EA_OPTIMIZATION_LAB_IDLE_POLL_MS;
+  readModel.pollTimer = window.setTimeout(() => {
+    readModel.pollTimer = null;
+    void loadEaOptimizationLabReadModel();
+  }, delay);
+}
+
+async function loadEaOptimizationLabReadModel({ signal = null } = {}) {
+  const readModel = state.eaOptimizationLabReadModel;
+  if (readModel.inFlight) return readModel.payload;
+  readModel.inFlight = true;
+  try {
+    const payload = await fetchJson(EA_OPTIMIZATION_LAB_ENDPOINT, {
+      timeoutMs: EA_OPTIMIZATION_LAB_ACTION_TIMEOUT_MS,
+      signal,
+    });
+    readModel.payload = payload;
+    readModel.lastLoadedAt = Date.now();
+    readModel.stale = false;
+    readModel.lastError = null;
+    const domain = normalizeEaOptimizationLabDomain(
+      payload,
+      state.propReports[EA_OPTIMIZATION_LAB_PROP_ID] || {},
+      eaOptimizationLabReadState(readModel),
+    );
+    if (domain.activeSession?.sessionId) {
+      state.modal.eaOptimizationLab.activeSessionId = domain.activeSession.sessionId;
+    }
+    if (state.modal.open && state.modal.type === "prop" && state.modal.id === EA_OPTIMIZATION_LAB_PROP_ID) {
+      rerenderEaOptimizationLab();
+    }
+    scheduleEaOptimizationLabPolling(domain);
+    return payload;
+  } catch (error) {
+    if (error?.kind === "parent_abort") return readModel.payload;
+    readModel.stale = true;
+    readModel.lastError = error;
+    state.modal.eaOptimizationLab.message = safeDashboardDisplayText(
+      error?.message,
+      "โหลดสถานะ Optimization จาก Backend ไม่สำเร็จ",
+    );
+    state.modal.eaOptimizationLab.tone = "error";
+    if (state.modal.open && state.modal.type === "prop" && state.modal.id === EA_OPTIMIZATION_LAB_PROP_ID) {
+      rerenderEaOptimizationLab();
+    }
+    scheduleEaOptimizationLabPolling();
+    return null;
+  } finally {
+    readModel.inFlight = false;
+  }
+}
+
+async function postEaOptimizationLabJson(path, payload) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), EA_OPTIMIZATION_LAB_ACTION_TIMEOUT_MS);
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(body.messageTh || body.message || body.error || `ส่งคำขอ Optimization ไม่สำเร็จ (HTTP ${response.status})`);
+      error.status = response.status;
+      error.body = body;
+      error.code = body.code || "";
+      throw error;
+    }
+    return body;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function eaOptimizationLabSelectedBuild(domain = {}, session = state.modal.eaOptimizationLab) {
+  return (Array.isArray(domain.builds) ? domain.builds : []).find((build) => (
+    build.buildId === session.selectedBuildId
+    && build.platform === session.platform
+    && build.completed === true
+    && build.immutable === true
+    && build.eligible === true
+  )) || null;
+}
+
+function eaOptimizationLabExecutionPayload(domain = {}, draft = {}, session = state.modal.eaOptimizationLab) {
+  const build = eaOptimizationLabSelectedBuild(domain, session);
+  if (
+    !build
+    || draft?.ok !== true
+    || build.platform !== "MT5"
+    || String(draft.platform || "").toUpperCase() !== "MT5"
+    || String(session.platform || "").toUpperCase() !== "MT5"
+  ) return null;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,199}$/.test(session.startIdempotencyKey || "")) {
+    session.startIdempotencyKey = createWorkflowIdempotencyKey();
+  }
+  return {
+    buildId: build.buildId,
+    idempotencyKey: session.startIdempotencyKey,
+    platform: draft.platform,
+    symbol: draft.symbol,
+    timeframe: draft.timeframe,
+    dateRange: { from: draft.dateFrom, to: draft.dateTo },
+    validation: { method: "single_verified_run" },
+    roundCount: 1,
+    riskThresholds: {
+      targetProfitPercent: draft.targetProfitPercent,
+      maxDrawdownPercent: draft.maxDrawdownPercent,
+      minimumTrades: draft.minimumTrades,
+    },
+    ranges: draft.ranges.map((range) => ({
+      name: range.name,
+      kind: range.kind,
+      start: range.kind === "numeric" ? range.start : null,
+      step: range.kind === "numeric" ? range.step : null,
+      stop: range.kind === "numeric" ? range.stop : null,
+      values: range.kind === "categorical" ? [...range.values] : [],
+    })),
+  };
+}
+
+async function runEaOptimizationLabAction(operation, request) {
+  const readModel = state.eaOptimizationLabReadModel;
+  if (readModel.actionInFlight) return null;
+  readModel.actionInFlight = true;
+  readModel.operation = operation;
+  state.modal.eaOptimizationLab.message = operation === "cancel"
+    ? "กำลังส่งคำขอยกเลิก Session ไปยัง Backend"
+    : "กำลังส่งคำขอ Optimization ไปยัง Backend";
+  state.modal.eaOptimizationLab.tone = "working";
+  rerenderEaOptimizationLab();
+  try {
+    const response = await request();
+    if (operation === "start") state.modal.eaOptimizationLab.startIdempotencyKey = "";
+    const responseSession = normalizeEaOptimizationLabSession(
+      response?.activeSession || response?.session || response || {},
+    );
+    if (responseSession?.sessionId) state.modal.eaOptimizationLab.activeSessionId = responseSession.sessionId;
+    state.modal.eaOptimizationLab.message = operation === "cancel"
+      ? "Backend รับคำขอยกเลิกแล้ว กำลังรอสถานะยืนยัน"
+      : "Backend รับคำขอแล้ว กำลังติดตามสถานะ Session จริง";
+    state.modal.eaOptimizationLab.tone = "success";
+    return response;
+  } catch (error) {
+    state.modal.eaOptimizationLab.message = safeDashboardDisplayText(
+      error?.message,
+      "ส่งคำขอ Optimization ไม่สำเร็จ",
+    );
+    state.modal.eaOptimizationLab.tone = "error";
+    return null;
+  } finally {
+    readModel.actionInFlight = false;
+    readModel.operation = "";
+    saveSessionSnapshot();
+    await loadEaOptimizationLabReadModel();
+    rerenderEaOptimizationLab();
+  }
+}
+
+async function startEaOptimizationLabSession(domain = null) {
+  const normalized = domain || normalizeEaOptimizationLabDomain(
+    state.eaOptimizationLabReadModel.payload || {},
+    state.propReports[EA_OPTIMIZATION_LAB_PROP_ID] || {},
+    eaOptimizationLabReadState(),
+  );
+  const session = state.modal.eaOptimizationLab;
+  const draft = eaOptimizationLabBuildPlan(session, normalized);
+  const payload = eaOptimizationLabExecutionPayload(normalized, draft, session);
+  const ready = normalized.authoritative === true
+    && normalized.readModelStale !== true
+    && !eaOptimizationLabReadModelIsStale()
+    && normalized.canStart === true
+    && normalized.busy !== true
+    && !eaOptimizationLabSessionIsActive(normalized.activeSession)
+    && normalized.selectedPlatformSupported === true
+    && normalized.terminalReady === true
+    && normalized.visibleAdapterConnected === true
+    && Boolean(payload);
+  if (!ready) {
+    session.message = session.platform === "MT4"
+      ? "MT4 เป็น Plan-only ในรุ่นนี้ การรัน Optimization จริงรองรับเฉพาะ MT5 Visible Strategy Tester"
+      : "ยังเริ่ม Optimization ไม่ได้: ต้องมีสถานะ Backend ที่สด ใช้ Build MT5 completed+immutable และผ่าน canStart, selectedPlatformSupported, terminalReady และ visibleAdapterConnected";
+    session.tone = "warning";
+    rerenderEaOptimizationLab();
+    return null;
+  }
+  return runEaOptimizationLabAction("start", () => postEaOptimizationLabJson(
+    `${EA_OPTIMIZATION_LAB_ENDPOINT}/sessions`,
+    payload,
+  ));
+}
+
+async function resumeEaOptimizationLabSession(sessionId) {
+  const domain = normalizeEaOptimizationLabDomain(
+    state.eaOptimizationLabReadModel.payload || {},
+    state.propReports[EA_OPTIMIZATION_LAB_PROP_ID] || {},
+    eaOptimizationLabReadState(),
+  );
+  const activeSession = domain.activeSession;
+  if (
+    domain.readModelStale === true
+    || eaOptimizationLabReadModelIsStale()
+    || !activeSession
+    || activeSession.sessionId !== sessionId
+    || activeSession.canResume !== true
+  ) return null;
+  return runEaOptimizationLabAction("resume", () => postEaOptimizationLabJson(
+    `${EA_OPTIMIZATION_LAB_ENDPOINT}/sessions/${encodeURIComponent(sessionId)}/resume`,
+    { idempotencyKey: createWorkflowIdempotencyKey() },
+  ));
+}
+
+async function cancelEaOptimizationLabSession(sessionId) {
+  const domain = normalizeEaOptimizationLabDomain(
+    state.eaOptimizationLabReadModel.payload || {},
+    state.propReports[EA_OPTIMIZATION_LAB_PROP_ID] || {},
+    eaOptimizationLabReadState(),
+  );
+  const activeSession = domain.activeSession;
+  if (
+    domain.readModelStale === true
+    || eaOptimizationLabReadModelIsStale()
+    || !activeSession
+    || activeSession.sessionId !== sessionId
+    || activeSession.canCancel !== true
+  ) return null;
+  return runEaOptimizationLabAction("cancel", () => postEaOptimizationLabJson(
+    `${EA_OPTIMIZATION_LAB_ENDPOINT}/sessions/${encodeURIComponent(sessionId)}/cancel`,
+    { idempotencyKey: createWorkflowIdempotencyKey() },
+  ));
 }
 
 async function eaOptimizationLabReadTextFile(file) {
@@ -25252,7 +25910,7 @@ async function processEaOptimizationLabFiles(fileList) {
     session.setText = setText;
     session.programKind = programKind;
     session.inputs = inputs;
-    session.plan = null;
+    invalidateEaOptimizationLabExecutionDraft(session);
     session.restoredDraft = false;
     if (["indicator", "script"].includes(programKind)) {
       session.message = "ไฟล์นี้ถูกตรวจพบว่าเป็น Indicator หรือ Script • ห้องทดลองนี้รับเฉพาะ Expert Advisor";
@@ -25297,7 +25955,13 @@ function normalizeWorkflowDomainData(propId, backend = {}, report = {}) {
     return { eaFactory: normalizeEaFactoryDomain(state.eaFactoryReadModel.payload || {}) };
   }
   if (propId === EA_OPTIMIZATION_LAB_PROP_ID) {
-    return { eaOptimizationLab: normalizeEaOptimizationLabDomain(backend, report) };
+    return {
+      eaOptimizationLab: normalizeEaOptimizationLabDomain(
+        state.eaOptimizationLabReadModel.payload || backend,
+        report,
+        eaOptimizationLabReadState(),
+      ),
+    };
   }
   if (propId === "right_status_crystals") return { vpsHqStatus: normalizeVpsHqDomain(backend, report) };
   return {};
@@ -26465,18 +27129,40 @@ function eaFactoryStageStatusLabel(status) {
     ready: "พร้อมให้กดทำขั้นนี้",
     failed: "ไม่สำเร็จ",
     blocked: "ติดขัด",
+    cancelled: "ผู้ใช้ยกเลิกแล้ว",
     not_applicable: "ไม่ใช้กับเป้าหมายนี้",
     locked: "รอขั้นก่อนหน้า",
     unknown: "รอสถานะ Backend",
   }[status] || "รอสถานะ Backend";
 }
 
+function eaFactoryCertifiedDeliveryCompleted(domain = {}) {
+  const run = domain.oneClick?.run || {};
+  const finalStage = domain.stages?.find((stage) => stage.id === "artifacts_report");
+  if (run.runId || run.idempotencyKey) return run.status === "completed";
+  return finalStage?.status === "completed";
+}
+
+function eaFactoryRunNeedsProgressPage(domain = {}) {
+  if (!domain.activeBuild) return false;
+  const run = domain.oneClick?.run || {};
+  const status = String(run.status || "idle").trim().toLowerCase();
+  if (["queued", "awaiting_visible_terminal"].includes(status) || run.canResume === true) return true;
+  return ["running", "waiting_ai", "cancelling", "failed", "blocked"].includes(status);
+}
+
 function eaFactoryPageStatus(domain = {}, pageId = "") {
   const stages = Array.isArray(domain.stages) ? domain.stages : [];
-  const finalStage = stages.find((stage) => stage.id === "artifacts_report");
   const runStatus = String(domain.oneClick?.run?.status || "idle").trim().toLowerCase();
   if (!domain.authoritative) {
     return pageId === "source" ? "blocked" : "unknown";
+  }
+  // Historical stage/run rows can remain in the read model after Backend is
+  // idle.  Page 2 and Page 3 must describe the currently selected Build only;
+  // without one, showing a historical failure here contradicts the clean
+  // empty state rendered inside the page.
+  if (["progress", "result"].includes(pageId) && !domain.activeBuild) {
+    return "locked";
   }
   if (pageId === "source") {
     if (domain.backendBusy) return "completed";
@@ -26485,14 +27171,18 @@ function eaFactoryPageStatus(domain = {}, pageId = "") {
       : "blocked";
   }
   if (pageId === "progress") {
+    if (["queued", "awaiting_visible_terminal"].includes(runStatus)) return "blocked";
     if (domain.backendBusy) return "running";
     if (["failed", "blocked"].includes(runStatus)) return "failed";
+    if (runStatus === "cancelled") return "blocked";
     if (runStatus === "awaiting_visible_terminal") return "blocked";
-    if (runStatus === "completed") return "completed";
+    if (runStatus === "completed") {
+      return eaFactoryCertifiedDeliveryCompleted(domain) ? "completed" : "blocked";
+    }
     return domain.activeBuild ? "ready" : "locked";
   }
   if (pageId === "result") {
-    if (finalStage?.status === "completed" || runStatus === "completed") return "completed";
+    if (eaFactoryCertifiedDeliveryCompleted(domain)) return "completed";
     if (stages.some((stage) => stage.attentionRequired === true)) return "blocked";
     if (stages.some((stage) => stage.status === "failed")) return "failed";
     if (domain.backendBusy) return "running";
@@ -26503,11 +27193,13 @@ function eaFactoryPageStatus(domain = {}, pageId = "") {
 
 function eaFactoryPreferredPageId(domain = {}) {
   if (domain.backendBusy) return "progress";
-  const runStatus = String(domain.oneClick?.run?.status || "idle").trim().toLowerCase();
   const finalStatus = domain.stages?.find((stage) => stage.id === "artifacts_report")?.status;
-  if (runStatus === "completed" || finalStatus === "completed") return "result";
-  // Every non-completed run marker is historical once Backend busy=null,
-  // including failed, blocked and awaiting-visible-terminal states.
+  if (eaFactoryCertifiedDeliveryCompleted(domain)) return "result";
+  if (eaFactoryRunNeedsProgressPage(domain)) return "progress";
+  // A stage-only/manual Build may still finish without a one-click Run.
+  if (!(domain.oneClick?.run?.runId || domain.oneClick?.run?.idempotencyKey)
+    && finalStatus === "completed") return "result";
+  // Other non-completed markers are historical once Backend busy=null.
   return "source";
 }
 
@@ -26560,8 +27252,16 @@ function eaFactorySelectedSource(domain = {}) {
   if (domain.backendBusy && requestedRecord) return requestedRecord;
   const selectableRecords = records.filter(eaFactorySourceIsBuildSelectable);
   return selectableRecords.find((record) => record.sourceRecordId === requested)
-    || selectableRecords[0]
     || null;
+}
+
+function eaFactoryFindSourceByExactRecordId(records = [], rawRecordId = "") {
+  const expected = String(rawRecordId || "").trim().toLowerCase();
+  if (!expected) return null;
+  const matches = (Array.isArray(records) ? records : []).filter((record) => (
+    String(record?.recordId || "").trim().toLowerCase() === expected
+  ));
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function createEaFactoryNotice(tone, titleText, detailText) {
@@ -26911,7 +27611,7 @@ function renderEaFactoryGoogleSheetSync(container, domain = {}) {
   card.append(heading, central, submit, note);
   card.addEventListener("submit", (event) => {
     event.preventDefault();
-    void syncEaFactoryGoogleSheet();
+    void syncEaFactoryGoogleSheet(hub?.configRevision);
   });
   container.appendChild(card);
 }
@@ -26980,7 +27680,7 @@ function renderEaFactoryResearchGate(container, source, { showBrief = false } = 
   }
 }
 
-function renderEaFactorySourceStage(section, domain) {
+function renderEaFactoryLegacySourceStage(section, domain) {
   section.appendChild(createEaFactoryPageHeader("source", domain));
   renderEaFactoryGoogleSheetSync(section, domain);
   renderEaFactorySheetSchema(section, domain);
@@ -27076,6 +27776,1299 @@ function renderEaFactorySourceStage(section, domain) {
       `${busy.buildId ? `Build ${busy.buildId} • ` : ""}${eaFactoryBusyOperationLabel(busy.activeOperation)} • เปิดหน้า 2 สถานะการทำงานเพื่อติดตามงานเดิมก่อนเริ่มงานใหม่`,
     ));
   }
+}
+
+function renderEaFactoryChoiceSection(
+  container,
+  headingText,
+  helperText,
+  choices,
+  selectedValue,
+  onSelect,
+) {
+  const block = document.createElement("section");
+  const heading = document.createElement("header");
+  const headingTitle = document.createElement("h4");
+  const helper = document.createElement("p");
+  const grid = document.createElement("div");
+  block.className = "ea-factory-choice-section";
+  heading.className = "ea-factory-choice-heading";
+  headingTitle.textContent = headingText;
+  helper.textContent = helperText;
+  heading.append(headingTitle, helper);
+  grid.className = "ea-factory-choice-grid";
+  choices.forEach((choice) => {
+    const button = document.createElement("button");
+    const label = document.createElement("strong");
+    const detail = document.createElement("small");
+    const capability = document.createElement("span");
+    button.type = "button";
+    button.className = "ea-factory-choice-button";
+    button.dataset.value = choice.value;
+    button.dataset.eaFactoryFocusKey = `choice:${choice.value}`;
+    button.disabled = Boolean(choice.disabled);
+    button.setAttribute("aria-pressed", choice.value === selectedValue ? "true" : "false");
+    label.textContent = choice.label;
+    detail.textContent = choice.detail;
+    capability.className = "capability";
+    capability.dataset.tone = choice.tone || "neutral";
+    capability.textContent = choice.capability || "เลือกได้";
+    button.append(label, detail, capability);
+    button.addEventListener("click", () => {
+      if (!button.disabled) onSelect(choice.value);
+    });
+    grid.appendChild(button);
+  });
+  block.append(heading, grid);
+  container.appendChild(block);
+}
+
+function eaFactoryGoogleSheetCatalogRecords(catalog = {}) {
+  const catalogObject = catalog && typeof catalog === "object" && !Array.isArray(catalog)
+    ? catalog
+    : null;
+  if (
+    catalogObject
+    && (
+      catalogObject.schemaVersion !== EA_FACTORY_GOOGLE_SHEET_CATALOG_SCHEMA_VERSION
+      || catalogObject.status !== "ready"
+    )
+  ) return [];
+  const systems = Array.isArray(catalog) ? catalog : catalogObject?.systems;
+  if (!Array.isArray(systems) || systems.length > 1000) return [];
+  const normalized = [];
+  const recordIds = new Set();
+  let invalid = false;
+  systems.forEach((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      invalid = true;
+      return;
+    }
+    const recordId = String(item.recordId || "").trim();
+    const systemName = String(item.systemName ?? "");
+    const displayLabel = String(item.displayLabel ?? "");
+    const sourceRecordId = String(item.sourceRecordId || "").trim();
+    const recordDigest = String(item.recordDigest || "").trim().toLowerCase();
+    const recordKey = recordId.toLowerCase();
+    const exactValue = String(item.value ?? recordId).trim();
+    const validRecordId = recordId.length >= 1
+      && recordId.length <= 160
+      && !/[\u0000-\u001f\u007f-\u009f]/.test(recordId);
+    if (
+      !validRecordId
+      || !systemName.trim()
+      || systemName.length > 8000
+      || (displayLabel && (!displayLabel.trim() || displayLabel.length > 8163))
+      || exactValue !== recordId
+      || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(sourceRecordId)
+      || !/^[0-9a-f]{64}$/.test(recordDigest)
+      || recordIds.has(recordKey)
+    ) {
+      invalid = true;
+      return;
+    }
+    recordIds.add(recordKey);
+    normalized.push({
+      value: recordId,
+      recordId,
+      systemName,
+      displayLabel,
+      label: displayLabel || systemName,
+      sourceRecordId,
+      recordDigest,
+      briefDigest: recordDigest,
+      buildReady: item.buildReady === true,
+      sourceKind: "verified_deep_research_sheet",
+    });
+  });
+  if (
+    invalid
+    || (
+      catalogObject
+      && Number.isInteger(catalogObject.totalCount)
+      && catalogObject.totalCount !== normalized.length
+    )
+  ) return [];
+  const nameCounts = new Map();
+  normalized.forEach((record) => {
+    const key = record.systemName.toLowerCase();
+    nameCounts.set(key, Number(nameCounts.get(key) || 0) + 1);
+  });
+  return normalized.map((record) => ({
+    ...record,
+    label: record.displayLabel
+      || (nameCounts.get(record.systemName.toLowerCase()) > 1
+        ? `${record.systemName} — ${record.recordId}`
+        : record.systemName),
+  }));
+}
+
+function eaFactoryGoogleSheetCatalogKey(catalog = {}) {
+  if (
+    catalog?.schemaVersion !== EA_FACTORY_GOOGLE_SHEET_CATALOG_SCHEMA_VERSION
+    || catalog?.status !== "ready"
+  ) return "";
+  const records = eaFactoryGoogleSheetCatalogRecords(catalog);
+  if (Number(catalog.totalCount) !== records.length) return "";
+  return JSON.stringify({
+    schemaVersion: catalog.schemaVersion,
+    status: catalog.status,
+    configRevision: catalog.configRevision ?? null,
+    tabName: String(catalog.tabName || ""),
+    catalogDigest: String(catalog.catalogDigest || ""),
+    snapshotDigest: String(catalog.snapshotDigest || ""),
+    records: records.map((record) => ({
+      recordId: record.recordId,
+      systemName: record.systemName,
+      sourceRecordId: record.sourceRecordId,
+      recordDigest: record.recordDigest,
+      briefDigest: record.briefDigest,
+      buildReady: record.buildReady,
+    })),
+  });
+}
+
+function clearEaFactoryGoogleSheetImport(factory = state.modal.eaFactory, { clearSelection = false } = {}) {
+  factory.selectedSourceId = "";
+  factory.importedSourceId = "";
+  factory.importedRecordDigest = "";
+  factory.importedCatalogDigest = "";
+  factory.importedSnapshotDigest = "";
+  if (clearSelection) factory.sheetRecordId = "";
+}
+
+function reconcileEaFactoryGoogleSheetSelection(
+  catalog = {},
+  factory = state.modal.eaFactory,
+  sourceRecords = null,
+) {
+  const wasImported = Boolean(factory.importedSourceId);
+  const selectedRecordId = String(factory.sheetRecordId || "").trim();
+  const pending = catalog?.inFlight === true
+    || ["idle", "scheduled", "loading", "refreshing"].includes(String(catalog?.status || "idle"));
+  if (pending) {
+    const retainedRecords = eaFactoryGoogleSheetCatalogRecords(
+      Array.isArray(catalog?.systems) ? catalog.systems : [],
+    );
+    const retainedRecord = retainedRecords.find((item) => (
+      item.recordId.toLowerCase() === selectedRecordId.toLowerCase()
+    )) || null;
+    return {
+      record: retainedRecord,
+      imported: wasImported && Boolean(retainedRecord),
+      invalidated: false,
+      selectionRemoved: false,
+      pending: true,
+    };
+  }
+  const ready = catalog?.schemaVersion === EA_FACTORY_GOOGLE_SHEET_CATALOG_SCHEMA_VERSION
+    && catalog?.status === "ready"
+    && catalog?.inFlight !== true;
+  const records = ready ? eaFactoryGoogleSheetCatalogRecords(catalog) : [];
+  if (!ready || Number(catalog.totalCount) !== records.length) {
+    clearEaFactoryGoogleSheetImport(factory, { clearSelection: true });
+    return { record: null, imported: false, invalidated: wasImported, selectionRemoved: Boolean(selectedRecordId) };
+  }
+  if (!selectedRecordId) {
+    clearEaFactoryGoogleSheetImport(factory);
+    return { record: null, imported: false, invalidated: wasImported, selectionRemoved: false };
+  }
+  const record = records.find((item) => item.recordId.toLowerCase() === selectedRecordId.toLowerCase()) || null;
+  if (!record) {
+    clearEaFactoryGoogleSheetImport(factory, { clearSelection: true });
+    return { record: null, imported: false, invalidated: wasImported, selectionRemoved: true };
+  }
+  factory.sheetRecordId = record.recordId;
+  if (!wasImported) {
+    factory.selectedSourceId = "";
+    return { record, imported: false, invalidated: false, selectionRemoved: false };
+  }
+  const sourceRows = Array.isArray(sourceRecords) ? sourceRecords : null;
+  const source = sourceRows
+    ? sourceRows.find((item) => String(item?.sourceRecordId || item?.source_record_id || "").trim() === record.sourceRecordId)
+    : null;
+  const sourceRecordId = String(source?.sourceRecordId || source?.source_record_id || "").trim();
+  const sourceRecordDigest = String(source?.recordDigest || "").trim().toLowerCase();
+  const bindingMatches = factory.selectedSourceId === record.sourceRecordId
+    && factory.importedSourceId === record.sourceRecordId
+    && factory.importedRecordDigest === record.recordDigest
+    && factory.importedCatalogDigest === String(catalog.catalogDigest || "")
+    && factory.importedSnapshotDigest === String(catalog.snapshotDigest || "")
+    && (!sourceRows || (
+      sourceRecordId === record.sourceRecordId
+      && sourceRecordDigest === record.recordDigest
+    ));
+  if (!bindingMatches) {
+    clearEaFactoryGoogleSheetImport(factory);
+    return { record, imported: false, invalidated: true, selectionRemoved: false };
+  }
+  return { record, imported: true, invalidated: false, selectionRemoved: false };
+}
+
+function surfaceEaFactoryGoogleSheetInvalidation(
+  reconciliation,
+  catalog = state.modal.eaFactory.googleSheetCatalog || {},
+  factory = state.modal.eaFactory,
+) {
+  let message = "";
+  let messageKind = "";
+  if (reconciliation?.selectionRemoved) {
+    message = "ระบบที่เลือกถูกลบหรือเปลี่ยน record_id กรุณาเลือกระบบใหม่";
+    messageKind = "google_sheet_selection_removed";
+  } else if (reconciliation?.invalidated) {
+    message = "Google Sheet Revision เปลี่ยนหลัง Import กรุณา Import ระบบที่เลือกอีกครั้ง";
+    messageKind = "google_sheet_changed_after_import";
+  }
+  if (!message) return false;
+  if (catalog?.status === "ready") catalog.message = message;
+  if (!factory.inFlight) {
+    factory.stageId = "sheet_import";
+    factory.message = message;
+    factory.tone = "warning";
+    factory.messageKind = messageKind;
+    factory.readModelStateKey = "";
+  }
+  return true;
+}
+
+function stopEaFactoryGoogleSheetCatalogAutoRefresh() {
+  if (eaFactoryGoogleSheetCatalogRefreshTimer !== null) {
+    window.clearTimeout(eaFactoryGoogleSheetCatalogRefreshTimer);
+    eaFactoryGoogleSheetCatalogRefreshTimer = null;
+  }
+  eaFactoryGoogleSheetCatalogRefreshDueAt = 0;
+}
+
+function invalidateEaFactoryGoogleSheetCatalogAfterActivation() {
+  const factory = state.modal.eaFactory;
+  const current = factory.googleSheetCatalog || {};
+  const currentRequestId = Number(current.requestId);
+  const requestId = (Number.isSafeInteger(currentRequestId) && currentRequestId >= 0
+    ? currentRequestId
+    : 0) + 1;
+  const importedSourceId = String(factory.importedSourceId || "");
+  const selectedSourceId = String(factory.selectedSourceId || "");
+  const selectedSourceWasSheetImport = Boolean(importedSourceId)
+    && selectedSourceId === importedSourceId;
+  const factoryOpenInGoogleSheetMode = state.modal.open
+    && state.modal.type === "prop"
+    && state.modal.id === EA_FACTORY_PROP_ID
+    && factory.sourceMode === "google_sheet";
+
+  stopEaFactoryGoogleSheetCatalogAutoRefresh();
+  if (eaFactoryGoogleSheetCatalogAbortController) {
+    eaFactoryGoogleSheetCatalogAbortController.abort();
+    eaFactoryGoogleSheetCatalogAbortController = null;
+  }
+  // Detach the superseded promise before starting the new Revision request.
+  // Its requestId guard still prevents a late response from mutating state even
+  // when a test transport or browser cannot cancel the underlying fetch.
+  eaFactoryGoogleSheetCatalogInFlight = null;
+  factory.sheetRecordId = "";
+  factory.importedSourceId = "";
+  factory.importedRecordDigest = "";
+  factory.importedCatalogDigest = "";
+  factory.importedSnapshotDigest = "";
+  if (factory.sourceMode === "google_sheet" || selectedSourceWasSheetImport) {
+    factory.selectedSourceId = "";
+  }
+  factory.googleSheetCatalog = {
+    schemaVersion: "",
+    status: "idle",
+    configRevision: null,
+    tabName: "",
+    catalogDigest: "",
+    snapshotDigest: "",
+    observedAt: null,
+    totalCount: 0,
+    systems: [],
+    selectedRecord: null,
+    reasonCode: "",
+    message: factoryOpenInGoogleSheetMode
+      ? "เปิดใช้ Google Sheet ใหม่แล้ว • กำลังอ่านรายชื่อจาก Deep_Research Revision ล่าสุด…"
+      : "เปิดใช้ Google Sheet ใหม่แล้ว • รายการเดิมถูกล้างและจะโหลดใหม่เมื่อเปิดแหล่ง Google Sheet",
+    lastLoadedAt: 0,
+    lastInteractionAt: 0,
+    inFlight: false,
+    requestId,
+  };
+  if (!factory.inFlight) {
+    factory.stageId = "sheet_import";
+    factory.message = factory.googleSheetCatalog.message;
+    factory.tone = factoryOpenInGoogleSheetMode ? "working" : "warning";
+    factory.messageKind = "research_sheet_activated";
+    factory.readModelStateKey = "";
+  }
+  if (!factoryOpenInGoogleSheetMode) return null;
+  return ensureEaFactoryGoogleSheetCatalog({ force: true, reason: "activation" });
+}
+
+function eaFactoryGoogleSheetCatalogIsFresh(catalog = {}, now = Date.now()) {
+  const lastLoadedAt = Number(catalog?.lastLoadedAt || 0);
+  return catalog?.schemaVersion === EA_FACTORY_GOOGLE_SHEET_CATALOG_SCHEMA_VERSION
+    && catalog?.status === "ready"
+    && catalog?.inFlight !== true
+    && lastLoadedAt > 0
+    && Number(now) - lastLoadedAt >= 0
+    && Number(now) - lastLoadedAt < EA_FACTORY_GOOGLE_SHEET_CATALOG_REFRESH_MS;
+}
+
+function eaFactoryGoogleSheetImportBindingReady(
+  source,
+  catalog = state.modal.eaFactory.googleSheetCatalog || {},
+  factory = state.modal.eaFactory,
+) {
+  if (!source || !eaFactoryGoogleSheetCatalogIsFresh(catalog)) return false;
+  const catalogRecord = eaFactoryGoogleSheetCatalogRecords(catalog).find((record) => (
+    record.recordId.toLowerCase() === String(source.recordId || "").trim().toLowerCase()
+  )) || null;
+  return catalogRecord?.sourceRecordId === source.sourceRecordId
+    && catalogRecord?.recordDigest === source.recordDigest
+    && factory.importedSourceId === source.sourceRecordId
+    && factory.importedRecordDigest === catalogRecord.recordDigest
+    && factory.importedCatalogDigest === catalog.catalogDigest
+    && factory.importedSnapshotDigest === catalog.snapshotDigest;
+}
+
+function eaFactoryCreateSourceBinding(
+  source,
+  catalog = state.modal.eaFactory.googleSheetCatalog || {},
+  factory = state.modal.eaFactory,
+) {
+  const required = source?.sourceKind === "verified_deep_research_sheet";
+  if (!required) return { required: false, ready: true, fields: {} };
+  const catalogRecord = eaFactoryGoogleSheetCatalogRecords(catalog).find((item) => (
+    item.recordId === source?.recordId
+    && item.sourceRecordId === source?.sourceRecordId
+  )) || null;
+  const ready = Boolean(catalogRecord)
+    && eaFactoryGoogleSheetImportBindingReady(source, catalog, factory);
+  return {
+    required: true,
+    ready,
+    fields: ready ? {
+      recordId: catalogRecord.recordId,
+      recordDigest: catalogRecord.recordDigest,
+      catalogDigest: catalog.catalogDigest,
+      snapshotDigest: catalog.snapshotDigest,
+      configRevision: catalog.configRevision,
+    } : {},
+  };
+}
+
+function rerenderEaFactoryDashboardPreservingFocus(focusKey = "") {
+  const activeFocusKey = String(
+    focusKey || document.activeElement?.dataset?.eaFactoryFocusKey || "",
+  );
+  renderWorkflowDashboard(
+    getModalSubject(),
+    getPropertyRole(getModalSubject()),
+    state.propReports[EA_FACTORY_PROP_ID] || {},
+  );
+  if (!activeFocusKey) return;
+  queueMicrotask(() => {
+    const controls = els.workflowDashboardContent?.querySelectorAll?.("[data-ea-factory-focus-key]") || [];
+    const nextControl = Array.from(controls).find((control) => (
+      control.dataset?.eaFactoryFocusKey === activeFocusKey
+    ));
+    nextControl?.focus?.({ preventScroll: true });
+  });
+}
+
+function eaFactoryGoogleSheetCatalogUserIsEditing() {
+  const active = document.activeElement;
+  return Boolean(
+    active
+    && els.workflowDashboardContent?.contains(active)
+    && active.matches?.("input, select, textarea, [contenteditable='true']"),
+  );
+}
+
+function scheduleEaFactoryGoogleSheetCatalogAutoRefresh(delayMs = EA_FACTORY_GOOGLE_SHEET_CATALOG_REFRESH_MS) {
+  if (
+    !state.modal.open
+    || state.modal.type !== "prop"
+    || state.modal.id !== EA_FACTORY_PROP_ID
+    || state.modal.eaFactory.sourceMode !== "google_sheet"
+  ) {
+    stopEaFactoryGoogleSheetCatalogAutoRefresh();
+    return;
+  }
+  const delay = Math.max(5000, Math.min(EA_FACTORY_GOOGLE_SHEET_CATALOG_REFRESH_MS, Number(delayMs) || 0));
+  const dueAt = Date.now() + delay;
+  if (
+    eaFactoryGoogleSheetCatalogRefreshTimer !== null
+    && eaFactoryGoogleSheetCatalogRefreshDueAt > 0
+    && eaFactoryGoogleSheetCatalogRefreshDueAt <= dueAt
+  ) return;
+  if (eaFactoryGoogleSheetCatalogRefreshTimer !== null) {
+    window.clearTimeout(eaFactoryGoogleSheetCatalogRefreshTimer);
+  }
+  eaFactoryGoogleSheetCatalogRefreshDueAt = dueAt;
+  eaFactoryGoogleSheetCatalogRefreshTimer = window.setTimeout(() => {
+    eaFactoryGoogleSheetCatalogRefreshTimer = null;
+    eaFactoryGoogleSheetCatalogRefreshDueAt = 0;
+    if (
+      !state.modal.open
+      || state.modal.type !== "prop"
+      || state.modal.id !== EA_FACTORY_PROP_ID
+      || state.modal.eaFactory.sourceMode !== "google_sheet"
+    ) return;
+    const catalog = state.modal.eaFactory.googleSheetCatalog || {};
+    const recentlyInteracted = Date.now() - Number(catalog.lastInteractionAt || 0)
+      < EA_FACTORY_GOOGLE_SHEET_CATALOG_INTERACTION_GRACE_MS;
+    if (catalog.inFlight || state.modal.eaFactory.inFlight || recentlyInteracted || eaFactoryGoogleSheetCatalogUserIsEditing()) {
+      scheduleEaFactoryGoogleSheetCatalogAutoRefresh(10000);
+      return;
+    }
+    void ensureEaFactoryGoogleSheetCatalog({
+      force: true,
+      reason: "auto",
+    });
+  }, delay);
+}
+
+function renderEaFactorySourceStage(section, domain) {
+  const intake = document.createElement("div");
+  const hero = document.createElement("header");
+  const kicker = document.createElement("span");
+  const title = document.createElement("h3");
+  const description = document.createElement("p");
+  const progress = document.createElement("div");
+  const platform = normalizeEaFactoryPlatform(state.modal.eaFactory.selectedPlatform);
+  const artifactKind = ["expert_advisor", "custom_indicator"].includes(
+    state.modal.eaFactory.selectedArtifactKind,
+  ) ? state.modal.eaFactory.selectedArtifactKind : "";
+  const sourceMode = ["google_sheet", "discovery", "custom"].includes(
+    state.modal.eaFactory.sourceMode,
+  ) ? state.modal.eaFactory.sourceMode : "";
+  const rerender = () => rerenderEaFactoryDashboardPreservingFocus();
+
+  intake.className = "ea-factory-intake";
+  hero.className = "ea-factory-intake-hero";
+  kicker.className = "ea-factory-intake-kicker";
+  kicker.textContent = "EA & INDICATOR FACTORY";
+  title.textContent = "เริ่มงานใหม่แบบง่ายในหน้าเดียว";
+  description.textContent = "เลือก 3 อย่างตามลำดับ แล้วระบบจะแสดงเฉพาะข้อมูลที่จำเป็นก่อนเริ่มงาน";
+  progress.className = "ea-factory-intake-progress";
+  [
+    ["1", "แพลตฟอร์ม", Boolean(platform)],
+    ["2", "ผลงาน", Boolean(artifactKind)],
+    ["3", "ต้นทางระบบ", Boolean(sourceMode)],
+  ].forEach(([number, label, complete]) => {
+    const item = document.createElement("span");
+    item.dataset.complete = String(complete);
+    item.textContent = `${number} ${label}`;
+    progress.appendChild(item);
+  });
+  hero.append(kicker, title, description, progress);
+  intake.appendChild(hero);
+
+  renderEaFactoryChoiceSection(
+    intake,
+    "1. ต้องการสร้างบนแพลตฟอร์มไหน?",
+    "เลือกเป้าหมายก่อน ระบบจะไม่เปลี่ยนแพลตฟอร์มตาม Terminal ให้เอง",
+    [
+      { value: "mt4", label: "MT4", detail: "MQL4 • MetaEditor 4", capability: "EA + Indicator", tone: "ready" },
+      { value: "mt5", label: "MT5", detail: "MQL5 • MetaEditor 5", capability: "EA + Indicator", tone: "ready" },
+      { value: "tradingview", label: "TradingView", detail: "Pine Script • Static validation", capability: "Strategy เท่านั้น", tone: "warning" },
+    ],
+    platform,
+    (value) => {
+      if (state.modal.eaFactory.selectedPlatform !== value) {
+        resetEaFactoryDiscoveryMarketWatch();
+      }
+      state.modal.eaFactory.selectedPlatform = value;
+      if (value === "tradingview" && state.modal.eaFactory.selectedArtifactKind === "custom_indicator") {
+        state.modal.eaFactory.selectedArtifactKind = "";
+      }
+      if (
+        state.modal.eaFactory.sourceMode === "discovery"
+        && !["mt4", "mt5"].includes(value)
+      ) {
+        state.modal.eaFactory.sourceMode = "";
+      }
+      rerender();
+    },
+  );
+  renderEaFactoryChoiceSection(
+    intake,
+    "2. ต้องการสร้างอะไร?",
+    platform ? "เลือกชนิดไฟล์ที่ต้องการให้โรงงานสร้าง" : "เลือกแพลตฟอร์มก่อน",
+    [
+      {
+        value: "expert_advisor",
+        label: platform === "tradingview" ? "Pine Strategy" : "EA",
+        detail: platform === "tradingview" ? "สร้างกลยุทธ์ Pine Script" : "สร้างระบบส่งคำสั่งซื้อขาย",
+        capability: platform ? "พร้อมเลือก" : "รอแพลตฟอร์ม",
+        tone: platform ? "ready" : "neutral",
+        disabled: !platform,
+      },
+      {
+        value: "custom_indicator",
+        label: "Indicator",
+        detail: "สร้างสัญญาณและ Buffer โดยไม่ส่งคำสั่งซื้อขาย",
+        capability: platform === "tradingview"
+          ? "ยังไม่รองรับ Pine Indicator"
+          : (platform ? "MT4 / MT5" : "รอแพลตฟอร์ม"),
+        tone: platform === "tradingview" ? "blocked" : (platform ? "ready" : "neutral"),
+        disabled: !platform || platform === "tradingview",
+      },
+    ],
+    artifactKind,
+    (value) => {
+      state.modal.eaFactory.selectedArtifactKind = value;
+      if (value !== "expert_advisor" && state.modal.eaFactory.sourceMode === "discovery") {
+        state.modal.eaFactory.sourceMode = "";
+      }
+      rerender();
+    },
+  );
+  renderEaFactoryChoiceSection(
+    intake,
+    "3. ระบบเทรดมาจากไหน?",
+    platform && artifactKind ? "เลือกวิธีนำกติกาเข้ามาในโรงงาน" : "เลือกแพลตฟอร์มและชนิดผลงานก่อน",
+    [
+      {
+        value: "google_sheet",
+        label: "Google Sheet",
+        detail: "เลือกชื่อระบบจากแท็บ Deep_Research แล้ว Import ข้อมูล A-J",
+        capability: "พร้อมใช้งานจริง",
+        tone: "ready",
+        disabled: !platform || !artifactKind,
+      },
+      {
+        value: "discovery",
+        label: "EA Discovery",
+        detail: "กำหนดกำไรต่อปี Drawdown จำนวนปี และคู่เงินให้ AI ค้นหา",
+        capability: artifactKind === "expert_advisor" && ["mt4", "mt5"].includes(platform)
+          ? "เตรียมฟอร์มแล้ว • Runner ยังไม่เชื่อม"
+          : "รองรับเฉพาะ EA บน MT4 / MT5",
+        tone: "warning",
+        disabled: !platform || !artifactKind
+          || artifactKind !== "expert_advisor"
+          || !["mt4", "mt5"].includes(platform),
+      },
+      {
+        value: "custom",
+        label: "เขียนเงื่อนไขเอง",
+        detail: "พิมพ์ Entry, Exit และ Money Management ด้วยตนเอง",
+        capability: "พร้อมสร้าง Source Contract",
+        tone: "ready",
+        disabled: !platform || !artifactKind,
+      },
+    ],
+    sourceMode,
+    (value) => {
+      state.modal.eaFactory.sourceMode = value;
+      if (value !== "google_sheet") {
+        clearEaFactoryGoogleSheetImport(state.modal.eaFactory, { clearSelection: true });
+        stopEaFactoryGoogleSheetCatalogAutoRefresh();
+      } else {
+        const catalog = state.modal.eaFactory.googleSheetCatalog || {};
+        catalog.lastInteractionAt = Date.now();
+      }
+      rerender();
+      if (value === "google_sheet") {
+        queueMicrotask(() => void ensureEaFactoryGoogleSheetCatalog({ force: true, reason: "open" }));
+      }
+    },
+  );
+
+  if (sourceMode === "google_sheet") {
+    renderEaFactoryRecordImport(intake, domain, { platform, artifactKind });
+    scheduleEaFactoryGoogleSheetCatalogAutoRefresh();
+  } else if (sourceMode === "discovery") {
+    stopEaFactoryGoogleSheetCatalogAutoRefresh();
+    renderEaFactoryDiscoveryPreview(intake, { platform });
+  } else if (sourceMode === "custom") {
+    stopEaFactoryGoogleSheetCatalogAutoRefresh();
+    renderEaFactoryCustomSourcePreview(intake, domain, { platform, artifactKind });
+  } else {
+    stopEaFactoryGoogleSheetCatalogAutoRefresh();
+  }
+  section.appendChild(intake);
+}
+
+function renderEaFactoryRecordImport(container, domain, { platform, artifactKind }) {
+  const wrapper = document.createElement("section");
+  const form = document.createElement("form");
+  const label = document.createElement("label");
+  const row = document.createElement("div");
+  const select = document.createElement("select");
+  const submit = document.createElement("button");
+  const refresh = document.createElement("button");
+  const help = document.createElement("p");
+  const status = document.createElement("div");
+  const factory = state.modal.eaFactory;
+  const catalog = factory.googleSheetCatalog || {};
+  const records = catalog.inFlight
+    ? eaFactoryGoogleSheetCatalogRecords(Array.isArray(catalog.systems) ? catalog.systems : [])
+    : eaFactoryGoogleSheetCatalogRecords(catalog);
+  const reconciliation = reconcileEaFactoryGoogleSheetSelection(
+    catalog,
+    factory,
+    domain?.sourceCatalog?.records,
+  );
+  surfaceEaFactoryGoogleSheetInvalidation(reconciliation, catalog, factory);
+  const catalogFresh = eaFactoryGoogleSheetCatalogIsFresh(catalog);
+  const catalogNeedsOpenRefresh = !catalog.inFlight && (
+    ["idle", "scheduled"].includes(catalog.status)
+    || (catalog.status === "ready" && !catalogFresh)
+  );
+  if (catalogNeedsOpenRefresh) {
+    if (["idle", "scheduled"].includes(catalog.status)) catalog.status = "scheduled";
+    queueMicrotask(() => void ensureEaFactoryGoogleSheetCatalog({ force: true, reason: "open" }));
+  }
+  const imported = reconciliation.imported
+    ? (domain?.sourceCatalog?.records || []).find((record) => (
+      record.sourceRecordId === factory.importedSourceId
+      && String(record.recordId || "").trim().toLowerCase() === String(factory.sheetRecordId || "").trim().toLowerCase()
+    )) || null
+    : null;
+  wrapper.className = "ea-factory-source-form";
+  if (imported) {
+    renderEaFactoryImportedSummary(wrapper, domain, imported, {
+      platform,
+      artifactKind,
+      selectedRecord: catalog.selectedRecord,
+    });
+    container.appendChild(wrapper);
+    return;
+  }
+  form.className = "ea-factory-record-import";
+  label.textContent = "เลือกระบบจาก Google Sheet (system_name)";
+  label.htmlFor = "ea-factory-google-sheet-record";
+  row.className = "ea-factory-record-import-row";
+  select.id = "ea-factory-google-sheet-record";
+  select.dataset.eaFactoryFocusKey = "google-sheet-record";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = catalog.inFlight || ["idle", "scheduled", "loading", "refreshing"].includes(catalog.status)
+    ? (records.length ? "กำลังตรวจ Revision ล่าสุด…" : "กำลังอ่านรายชื่อจาก Deep_Research…")
+    : (records.length ? "— เลือกระบบเทรด —" : "ยังไม่มีระบบที่เลือกได้");
+  select.appendChild(placeholder);
+  records.forEach((record) => {
+    const option = document.createElement("option");
+    option.value = record.recordId;
+    option.textContent = record.label;
+    option.dataset.sourceRecordId = record.sourceRecordId;
+    option.dataset.recordDigest = record.recordDigest;
+    select.appendChild(option);
+  });
+  select.required = true;
+  select.dataset.eaFactoryRecordId = "true";
+  select.disabled = catalog.status !== "ready"
+    || catalog.inFlight === true
+    || !records.length
+    || factory.inFlight;
+  const selectedCatalogRecord = records.find((record) => (
+    record.recordId.toLowerCase() === String(factory.sheetRecordId || "").trim().toLowerCase()
+  )) || null;
+  select.value = selectedCatalogRecord?.recordId || "";
+  select.dataset.sourceRecordId = selectedCatalogRecord?.sourceRecordId || "";
+  select.addEventListener("focus", () => {
+    catalog.lastInteractionAt = Date.now();
+  });
+  select.addEventListener("change", () => {
+    catalog.lastInteractionAt = Date.now();
+    clearEaFactoryGoogleSheetImport(factory);
+    factory.sheetRecordId = select.value;
+    catalog.selectedRecord = null;
+    rerenderEaFactoryDashboardPreservingFocus("google-sheet-record");
+  });
+  submit.type = "submit";
+  submit.className = "modal-action primary";
+  submit.dataset.eaFactoryFocusKey = "google-sheet-import";
+  submit.disabled = !domain.authoritative
+    || !domain.sourceCatalog?.googleSheets?.canSync
+    || factory.inFlight
+    || catalog.status !== "ready"
+    || catalog.inFlight === true
+    || !catalogFresh
+    || !selectedCatalogRecord
+    || String(selectedCatalogRecord.sourceRecordId || "") === "";
+  submit.textContent = factory.inFlight && factory.stageId === "sheet_import"
+    ? "กำลัง Import..."
+    : "Import ข้อมูล";
+  refresh.type = "button";
+  refresh.className = "modal-action ea-factory-catalog-refresh";
+  refresh.dataset.eaFactoryFocusKey = "google-sheet-refresh";
+  refresh.disabled = catalog.inFlight === true || factory.inFlight;
+  refresh.textContent = catalog.inFlight ? "กำลังรีเฟรช…" : "รีเฟรชรายชื่อ";
+  refresh.addEventListener("click", () => {
+    catalog.lastInteractionAt = Date.now();
+    void ensureEaFactoryGoogleSheetCatalog({
+      force: true,
+      reason: "manual",
+    });
+  });
+  help.textContent = "แสดง system_name แต่ผูกค่าจริงด้วย record_id จาก Deep_Research • ไม่เลือกรายการแรกให้อัตโนมัติ • อัปเดตรายชื่ออัตโนมัติเมื่อ Sheet เปลี่ยน";
+  help.id = "ea-factory-google-sheet-record-help";
+  status.id = "ea-factory-google-sheet-catalog-status";
+  select.setAttribute("aria-describedby", `${help.id} ${status.id}`);
+  row.append(select, submit, refresh);
+  form.append(label, row, help);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!form.reportValidity() || submit.disabled) return;
+    void importEaFactorySourceRecord(select.value);
+  });
+  wrapper.appendChild(form);
+  status.className = "ea-factory-catalog-status";
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  status.setAttribute("aria-atomic", "true");
+  status.dataset.tone = catalog.status === "ready" && catalogFresh
+    ? "ready"
+    : (catalog.status === "error" ? "error" : "working");
+  if (catalog.status === "ready") {
+    const readyDetail = `Deep_Research Revision ${catalog.configRevision ?? "ไม่ระบุ"} • ${records.length} ระบบ • อ่านล่าสุด ${catalog.observedAt ? formatThaiDateTime(catalog.observedAt) : "เมื่อสักครู่"}`;
+    status.textContent = catalogFresh
+      ? `${catalog.message ? `${catalog.message} • ` : ""}${readyDetail}`
+      : `${catalog.message ? `${catalog.message} • ` : ""}รายการหมดอายุแล้ว กำลังตรวจ Revision ล่าสุดก่อนอนุญาตให้ Import หรือเริ่มงาน`;
+  } else if (catalog.status === "error") {
+    status.textContent = catalog.message || "อ่านรายชื่อจาก Deep_Research ไม่สำเร็จ ระบบล้างรายการเดิมแล้วเพื่อป้องกันข้อมูลค้าง";
+  } else {
+    status.textContent = "กำลังตรวจ Google Sheet ล่าสุดจาก Backend…";
+  }
+  wrapper.appendChild(status);
+  if (catalog.status === "error") {
+    wrapper.appendChild(createEaFactoryNotice(
+      "error",
+      "ยังใช้รายการ Google Sheet ไม่ได้",
+      `${catalog.message || "Backend ปฏิเสธการอ่าน catalog"}${catalog.reasonCode ? ` • ${catalog.reasonCode}` : ""}`,
+    ));
+  } else if (catalog.status === "ready" && !records.length) {
+    wrapper.appendChild(createEaFactoryNotice(
+      "warning",
+      "Deep_Research ยังไม่มีระบบที่เลือกได้",
+      "เพิ่มข้อมูล A-J ให้ครบใน Google Sheet แล้วกดรีเฟรชรายชื่ออีกครั้ง",
+    ));
+  }
+  container.appendChild(wrapper);
+}
+
+function renderEaFactoryImportedSummary(
+  container,
+  domain,
+  source,
+  { platform = "", artifactKind = "", selectedRecord = null } = {},
+) {
+  const summary = document.createElement("section");
+  const header = document.createElement("header");
+  const copy = document.createElement("div");
+  const eyebrow = document.createElement("span");
+  const title = document.createElement("h4");
+  const detail = document.createElement("p");
+  const back = document.createElement("button");
+  const fields = selectedRecord?.fields && typeof selectedRecord.fields === "object"
+    ? selectedRecord.fields
+    : (source.strategyBrief || {});
+  const strategyBrief = {
+    record_id: fields.record_id || source.recordId,
+    system_name: fields.system_name || source.systemName,
+    system_overview: fields.system_overview || source.strategyBrief?.system_overview || source.systemOverview,
+    entry_rules: fields.entry_rules || source.strategyBrief?.entry_rules || source.entryRules,
+    recovery_rules: fields.recovery_rules || source.strategyBrief?.recovery_rules || source.recovery,
+    exit_rules: fields.exit_rules || source.strategyBrief?.exit_rules || source.exitRules,
+    money_management: fields.money_management || source.strategyBrief?.money_management || source.lotRisk,
+    order_execution: fields.order_execution || source.strategyBrief?.order_execution || source.orderExecution,
+    display_requirements: fields.display_requirements || source.strategyBrief?.display_requirements || source.displayRequirements,
+    additional_notes: fields.additional_notes || source.strategyBrief?.additional_notes || source.additionalNotes,
+  };
+  summary.className = "ea-factory-imported-summary";
+  header.className = "ea-factory-imported-summary-heading";
+  eyebrow.textContent = "IMPORT สำเร็จ • ตรวจข้อมูล A-J ก่อนเริ่ม";
+  title.textContent = safeDashboardDisplayText(
+    strategyBrief.system_name,
+    "ระบบเทรดที่เลือก",
+    { limit: 8000, markTruncated: true },
+  );
+  detail.textContent = `record_id: ${safeDashboardDisplayText(strategyBrief.record_id, "ไม่ระบุ", { limit: 160 })} • ข้อมูลผูกกับ Deep_Research Revision ล่าสุดแล้ว`;
+  copy.append(eyebrow, title, detail);
+  back.type = "button";
+  back.className = "modal-action ea-factory-summary-back";
+  back.dataset.eaFactoryFocusKey = "google-sheet-summary-back";
+  back.textContent = "กลับไปเลือกระบบ";
+  back.addEventListener("click", () => {
+    const factory = state.modal.eaFactory;
+    clearEaFactoryGoogleSheetImport(factory);
+    factory.googleSheetCatalog.lastInteractionAt = Date.now();
+    rerenderEaFactoryDashboardPreservingFocus("google-sheet-record");
+  });
+  header.append(copy, back);
+  summary.appendChild(header);
+  summary.appendChild(createTradingResearchStrategyBrief({
+    canonical: source.eaResearch?.validated === true && source.eaResearch?.digestMatched === true,
+    legacy: source.eaResearch?.legacy === true,
+    schemaVersion: source.eaResearch?.schemaVersion || TRADING_RESEARCH_STRATEGY_BRIEF_SCHEMA_VERSION,
+    brief: strategyBrief,
+  }, {
+    id: source.sourceReportId || source.sourceRecordId,
+  }));
+  renderEaFactoryStartControls(summary, domain, source, { platform, artifactKind });
+  container.appendChild(summary);
+}
+
+function renderEaFactoryStartControls(container, domain, source, { platform, artifactKind }) {
+  const label = document.createElement("label");
+  const brief = document.createElement("textarea");
+  const actions = document.createElement("div");
+  const submit = document.createElement("button");
+  const compatible = Array.isArray(source.compatiblePlatforms)
+    && source.compatiblePlatforms.includes(platform);
+  const terminalOneClick = artifactKind === "expert_advisor" && ["mt4", "mt5"].includes(platform);
+  const capability = domain.oneClick || {};
+  const oneClickReady = terminalOneClick
+    && capability.selectedPlatform === platform
+    && capability.selectedPlatformSupported === true
+    && Array.isArray(capability.supportedVisiblePlatforms)
+    && capability.supportedVisiblePlatforms.includes(platform)
+    && capability.terminalReady === true
+    && capability.terminalRunning === true
+    && capability.visibleAdapterConnected === true
+    && capability.canCreateAndRun === true;
+  const unsupportedCombination = artifactKind === "custom_indicator" && platform === "tradingview";
+  const catalog = state.modal.eaFactory.googleSheetCatalog || {};
+  const importBindingReady = eaFactoryGoogleSheetImportBindingReady(source, catalog);
+  const canStart = domain.authoritative
+    && domain.canStartNewBuild
+    && !domain.backendBusy
+    && !state.modal.eaFactory.inFlight
+    && eaFactorySourceIsBuildSelectable(source)
+    && importBindingReady
+    && compatible
+    && !unsupportedCombination
+    && (!terminalOneClick || oneClickReady);
+  label.className = "ea-factory-intake-brief";
+  label.textContent = "ต้องการปรับหรือเพิ่มอะไรจากระบบต้นทางไหม? (ไม่บังคับ)";
+  brief.rows = 4;
+  brief.maxLength = 900;
+  brief.value = state.modal.eaFactory.additionalBrief;
+  brief.placeholder = "เช่น ชื่อไฟล์, Input ที่ต้องเปิดให้ปรับ หรือข้อจำกัดเพิ่มเติม โดยไม่ใส่ Credential/Secret";
+  brief.addEventListener("input", () => {
+    state.modal.eaFactory.additionalBrief = brief.value;
+  });
+  label.appendChild(brief);
+  actions.className = "ea-factory-intake-actions";
+  submit.type = "button";
+  submit.className = "modal-action primary ea-factory-start-button";
+  submit.dataset.eaFactoryFocusKey = "google-sheet-start";
+  submit.disabled = !canStart;
+  submit.textContent = state.modal.eaFactory.inFlight
+    ? "กำลังเริ่มงาน..."
+    : (artifactKind === "custom_indicator"
+      ? "เริ่มเขียน Indicator"
+      : (platform === "tradingview" ? "เริ่มสร้าง Pine Strategy" : "เริ่มเขียน EA และรันกระบวนการ"));
+  submit.addEventListener("click", async () => {
+    if (submit.disabled) return;
+    let latestCatalog = state.modal.eaFactory.googleSheetCatalog || {};
+    if (!eaFactoryGoogleSheetCatalogIsFresh(latestCatalog)) {
+      submit.disabled = true;
+      await ensureEaFactoryGoogleSheetCatalog({ force: true, reason: "start" });
+      latestCatalog = state.modal.eaFactory.googleSheetCatalog || {};
+    }
+    const importedRecordStillMatches = eaFactoryGoogleSheetImportBindingReady(
+      source,
+      latestCatalog,
+      state.modal.eaFactory,
+    )
+      && state.modal.eaFactory.sheetRecordId.trim().toLowerCase()
+        === String(source.recordId || "").trim().toLowerCase();
+    if (!importedRecordStillMatches) {
+      setEaFactoryActionState({
+        inFlight: false,
+        stageId: "sheet_import",
+        message: "ข้อมูล Google Sheet เปลี่ยนหลัง Import กรุณากด Import ข้อมูลอีกครั้งก่อนเริ่มงาน",
+        tone: "warning",
+        messageKind: "google_sheet_changed_after_import",
+      });
+      return;
+    }
+    if (terminalOneClick) {
+      void createAndRunEaFactoryBuild(
+        source.sourceRecordId,
+        artifactKind,
+        platform,
+        brief.value,
+      );
+      return;
+    }
+    void createEaFactoryBuild(
+      source.sourceRecordId,
+      artifactKind,
+      platform,
+      brief.value,
+    );
+  });
+  actions.appendChild(submit);
+  if (terminalOneClick && !oneClickReady) {
+    const openTerminal = document.createElement("button");
+    openTerminal.type = "button";
+    openTerminal.className = "modal-action";
+    openTerminal.textContent = `ไปเลือกและเชื่อม ${platform.toUpperCase()} ที่แถบกลาง`;
+    openTerminal.addEventListener("click", openGlobalMetatraderHubFromDevice);
+    actions.appendChild(openTerminal);
+  }
+  container.append(label, actions);
+  if (!eaFactoryGoogleSheetCatalogIsFresh(catalog)) {
+    container.appendChild(createEaFactoryNotice(
+      "warning",
+      "กำลังตรวจ Google Sheet Revision ล่าสุด",
+      "รายการเดิมหมดอายุชั่วคราว ปุ่มเริ่มงานจะเปิดอีกครั้งเมื่อ Backend ยืนยัน record_id และ digest ล่าสุดแล้ว",
+    ));
+  } else if (!importBindingReady) {
+    container.appendChild(createEaFactoryNotice(
+      "warning",
+      "ข้อมูลที่ Import ไม่ตรงกับ Revision ล่าสุด",
+      "เลือกและ Import ระบบอีกครั้งก่อนเริ่มงาน เพื่อผูก record_id, source record และ digest ให้ตรงกัน",
+    ));
+  } else if (!compatible) {
+    container.appendChild(createEaFactoryNotice(
+      "warning",
+      "ระบบนี้ยังไม่รองรับแพลตฟอร์มที่เลือก",
+      `Strategy Record นี้รองรับ ${source.compatiblePlatforms.map(eaFactoryPlatformLabel).join(", ") || "ยังไม่มีแพลตฟอร์มที่ผ่าน Gate"} กรุณาเลือกแพลตฟอร์มใหม่หรือกลับไปแก้ Revision ต้นทาง`,
+    ));
+  } else if (terminalOneClick && !oneClickReady) {
+    container.appendChild(createEaFactoryNotice(
+      "warning",
+      `ยังเริ่ม One-click ${platform.toUpperCase()} ไม่ได้`,
+      `ต้องเลือก ${platform.toUpperCase()} เป็น Terminal กลาง เปิดโปรแกรมไว้ และให้ Backend ยืนยัน terminalReady กับ visibleAdapterConnected ก่อน`,
+    ));
+  } else if (artifactKind === "custom_indicator") {
+    container.appendChild(createEaFactoryNotice(
+      "neutral",
+      "Indicator ใช้กระบวนการตรวจแบบ Fail-closed",
+      "ระบบจะสร้าง Build แล้วไปหน้าสถานะเพื่อทำ Source, Review, Compile และ Final Report โดยข้าม Backtest ซึ่งไม่ใช้กับ Indicator",
+    ));
+  } else if (platform === "tradingview") {
+    container.appendChild(createEaFactoryNotice(
+      "neutral",
+      "TradingView ใช้ Static Validation",
+      "ระบบจะสร้าง Pine Strategy และตรวจ Source Contract แต่ยังไม่ Publish หรือ Backtest บน TradingView ให้อัตโนมัติ",
+    ));
+  }
+}
+
+function renderEaFactoryDiscoveryPreview(container, { platform = "" } = {}) {
+  const block = document.createElement("section");
+  const grid = document.createElement("div");
+  const symbolLabel = document.createElement("label");
+  const symbolSelect = document.createElement("select");
+  const symbolHelp = document.createElement("small");
+  const actions = document.createElement("div");
+  const refresh = document.createElement("button");
+  const start = document.createElement("button");
+  const marketWatch = state.modal.eaFactory.discoveryMarketWatch || {};
+  const terminalBinding = eaFactoryDiscoveryTerminalBinding(platform);
+  const currentBindingKey = eaFactoryDiscoveryTerminalBindingKey({
+    platform: "mt4",
+    candidateId: marketWatch.candidateId,
+    selectionRevision: marketWatch.selectionRevision,
+  });
+  const expectedBindingKey = eaFactoryDiscoveryTerminalBindingKey(terminalBinding);
+  const shouldLoad = platform === "mt4" && marketWatch.inFlight !== true && (
+    marketWatch.status === "idle"
+    || (terminalBinding && currentBindingKey !== expectedBindingKey)
+    || (!terminalBinding && !["terminal_not_selected", "loading", "scheduled"].includes(marketWatch.status))
+  );
+  if (shouldLoad) {
+    marketWatch.status = "scheduled";
+    queueMicrotask(() => void loadEaFactoryDiscoveryMarketWatch());
+  }
+  block.className = "ea-factory-source-form ea-factory-discovery-preview";
+  grid.className = "ea-factory-record-preview-grid";
+  [
+    ["กำไรเป้าหมายต่อปี (%)", "discoveryTargetProfitPercent", "เช่น 20"],
+    ["Drawdown สูงสุด (%)", "discoveryMaxDrawdownPercent", "เช่น 10"],
+    ["จำนวนปี Backtest", "discoveryBacktestYears", "เช่น 5"],
+  ].forEach(([labelText, stateKey, placeholder]) => {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    label.textContent = labelText;
+    input.type = "number";
+    input.required = true;
+    input.min = stateKey === "discoveryBacktestYears" ? "1" : "0.1";
+    input.step = stateKey === "discoveryBacktestYears" ? "1" : "0.1";
+    if (stateKey === "discoveryMaxDrawdownPercent") input.max = "100";
+    input.placeholder = placeholder;
+    input.value = state.modal.eaFactory[stateKey];
+    input.addEventListener("input", () => {
+      state.modal.eaFactory[stateKey] = input.value;
+    });
+    label.appendChild(input);
+    grid.appendChild(label);
+  });
+
+  symbolLabel.textContent = "คู่เงิน / Symbol จาก Market Watch";
+  symbolSelect.required = true;
+  symbolSelect.dataset.eaFactoryDiscoverySymbol = "true";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  const status = platform === "mt4" ? String(marketWatch.status || "idle") : "unsupported_platform";
+  const ready = status === "ready"
+    && terminalBinding
+    && currentBindingKey === expectedBindingKey
+    && Array.isArray(marketWatch.symbols)
+    && marketWatch.symbols.length > 0;
+  placeholder.textContent = ready
+    ? "เลือกคู่เงิน…"
+    : status === "loading" || status === "scheduled"
+      ? "กำลังอ่านคู่เงินจาก MT4 ที่เลือก…"
+      : status === "terminal_not_selected"
+        ? "กรุณาเลือก MT4 ที่แถบเชื่อมด้านบน"
+        : status === "terminal_not_running"
+          ? "เปิด MT4 ที่เลือกและ Market Watch ก่อน"
+          : status === "empty"
+            ? "ไม่พบคู่เงินใน Market Watch"
+            : status === "unsupported_platform"
+              ? "รายการอัตโนมัติรอบนี้รองรับ MT4"
+              : "อ่าน Market Watch ไม่สำเร็จ";
+  symbolSelect.appendChild(placeholder);
+  if (ready) {
+    marketWatch.symbols.forEach((symbol) => {
+      const option = document.createElement("option");
+      option.value = symbol;
+      option.textContent = symbol;
+      symbolSelect.appendChild(option);
+    });
+  }
+  const selectedSymbolIsCurrent = ready
+    && state.modal.eaFactory.discoverySymbolBinding === marketWatch.catalogDigest
+    && marketWatch.symbols.includes(state.modal.eaFactory.discoverySymbol);
+  if (!selectedSymbolIsCurrent) {
+    state.modal.eaFactory.discoverySymbol = "";
+    state.modal.eaFactory.discoverySymbolBinding = "";
+  }
+  symbolSelect.value = selectedSymbolIsCurrent ? state.modal.eaFactory.discoverySymbol : "";
+  symbolSelect.disabled = !ready;
+  symbolSelect.addEventListener("change", () => {
+    const symbol = symbolSelect.value;
+    if (!marketWatch.symbols.includes(symbol)) {
+      state.modal.eaFactory.discoverySymbol = "";
+      state.modal.eaFactory.discoverySymbolBinding = "";
+      return;
+    }
+    state.modal.eaFactory.discoverySymbol = symbol;
+    state.modal.eaFactory.discoverySymbolBinding = marketWatch.catalogDigest;
+  });
+  symbolHelp.textContent = ready
+    ? `พบ ${marketWatch.symbolCount} คู่เงินจาก MT4 ที่เลือก • เก็บชื่อและ suffix ของโบรกเกอร์ตามจริง`
+    : (platform === "mt4"
+      ? (marketWatch.message || "ระบบจะอ่านเฉพาะรายการที่แสดงอยู่ใน Market Watch ของ MT4 ที่เลือก")
+      : "เลือก MT4 หากต้องการดึงคู่เงินจาก Market Watch อัตโนมัติ");
+  symbolLabel.append(symbolSelect, symbolHelp);
+  grid.appendChild(symbolLabel);
+
+  actions.className = "ea-factory-intake-actions ea-factory-discovery-actions";
+  refresh.type = "button";
+  refresh.className = "modal-action";
+  refresh.textContent = marketWatch.inFlight ? "กำลังอ่าน Market Watch…" : "อ่าน Market Watch ใหม่";
+  refresh.disabled = platform !== "mt4" || marketWatch.inFlight === true;
+  refresh.addEventListener("click", () => {
+    if (!refresh.disabled) void loadEaFactoryDiscoveryMarketWatch({ force: true });
+  });
+  start.type = "button";
+  start.className = "modal-action primary ea-factory-start-button";
+  start.disabled = true;
+  start.textContent = "EA Discovery Runner ยังไม่เปิดใช้งาน";
+  actions.append(refresh, start);
+  block.append(grid, actions, createEaFactoryNotice(
+    "warning",
+    "EA Discovery Runner จริงยังไม่เชื่อมกับโรงงาน",
+    "กำไรต่อปีเป็นเป้าหมายสำหรับค้นหา ไม่ใช่การรับประกันผลตอบแทน และ Backend รุ่นนี้ยังไม่มี Session ที่ Compile, Backtest และ Optimize วนทั้งคืน จึงปิดปุ่มเริ่มไว้เพื่อไม่รายงานผลลวง",
+  ));
+  container.appendChild(block);
+}
+
+function eaFactoryEmaSmokeCustomSourcePayload() {
+  return {
+    platform: "mt5",
+    artifactKind: "expert_advisor",
+    systemName: "EMA 10/60 Closed-Bar Smoke EA",
+    systemOverview: "Deterministic MT5 smoke strategy using EMA 10 and EMA 60 on the chart symbol and timeframe.",
+    entryRules: "On one new bar only, BUY when EMA(10) at closed bar 2 is less than or equal to EMA(60) and EMA(10) at closed bar 1 is greater than EMA(60). SELL on the exact inverse closed-bar crossover.",
+    recoveryRules: "No recovery, grid, martingale, averaging, pyramiding, or hedging.",
+    exitRules: "StopLossPips and TakeProfitPips are positive EA inputs. Close an existing position on the opposite confirmed crossover before opening the reverse direction.",
+    moneyManagement: "Use one normalized tester-safe fixed lot of 0.01 and never hold more than one position for this symbol and magic number.",
+    orderExecution: "Use market orders in Strategy Tester only after closed-bar confirmation; normalize price and broker stop distance and reject invalid orders safely.",
+    displayRequirements: "Show fast and slow EMA values plus BUY signals, SELL signals, BUY orders, SELL orders, and the latest execution result.",
+    additionalNotes: "The acceptance loop must compile, run a Visual backtest, verify entry markers against the crossover, save the Backtest report, and then finish. Optimization belongs to the separate Optimization Lab.",
+  };
+}
+
+function eaFactoryCustomSourcePayload({ platform, artifactKind, systemName, conditions, templateId = "" } = {}) {
+  const normalizedPlatform = normalizeEaFactoryPlatform(platform);
+  const normalizedArtifactKind = normalizeEaFactoryArtifactKind(artifactKind);
+  const normalizedName = String(systemName || "").trim().replace(/\s+/g, " ").slice(0, 300);
+  const prompt = String(conditions || "").trim().replace(/\u0000/g, " ").replace(/\s+/g, " ").slice(0, 6000);
+  if (
+    templateId === "ema_10_60_smoke_v1"
+    && normalizedPlatform === "mt5"
+    && normalizedArtifactKind === "expert_advisor"
+  ) return eaFactoryEmaSmokeCustomSourcePayload();
+  const clip = (value, limit) => String(value || "").trim().slice(0, limit).trim();
+  return {
+    platform: normalizedPlatform,
+    artifactKind: normalizedArtifactKind,
+    systemName: normalizedName,
+    systemOverview: clip(`Operator-authored strategy requirements: ${prompt}`, 5000),
+    entryRules: clip(prompt, 8000),
+    recoveryRules: clip(`Follow only recovery rules explicitly written by the operator. If none are specified, recovery, grid, martingale, averaging and pyramiding are disabled. Operator requirements: ${prompt}`, 6000),
+    exitRules: clip(`Implement every exit, stop loss, take profit and opposite-signal rule in the operator requirements: ${prompt}`, 8000),
+    moneyManagement: clip(`Implement only the position sizing and money-management rules in the operator requirements; otherwise use one conservative tester-safe fixed lot and one Symbol+Magic position: ${prompt}`, 5000),
+    orderExecution: clip(`Use deterministic closed-bar execution unless the operator explicitly states otherwise. Normalize broker prices, volume and stop distance, and reject invalid orders safely. Operator requirements: ${prompt}`, 4000),
+    displayRequirements: "Show the current signal state, relevant indicator values, expected BUY/SELL signals, executed BUY/SELL entries, rejected requests and the latest execution result for Visual verification.",
+    additionalNotes: clip(`This immutable custom source must compile, run a Visual backtest, verify that actual entries match the specified conditions, save the Backtest report, and then finish. Optimization is handled only by the separate Optimization Lab. Operator requirements: ${prompt}`, 4000),
+  };
+}
+
+function eaFactoryTopHeaderLockPreflight(platform = "") {
+  const normalizedPlatform = normalizeEaFactoryPlatform(platform);
+  if (normalizedPlatform === "tradingview") {
+    return { ready: true, platform: normalizedPlatform, lockedCount: 0, requiredCount: 0 };
+  }
+  const platformKey = normalizedPlatform.toUpperCase();
+  const summary = globalMetatraderLockSummary();
+  const targetLock = summary.locks[platformKey];
+  return {
+    ready: state.globalMetatraderHub.backendAvailable === true
+      && summary.ready
+      && targetLock?.configured === true
+      && Boolean(targetLock.selectedCandidate),
+    platform: normalizedPlatform,
+    lockedCount: summary.lockedCount,
+    requiredCount: summary.requiredCount,
+  };
+}
+
+function rejectEaFactoryMissingTopHeaderLocks(stageId, platform = "") {
+  const lock = eaFactoryTopHeaderLockPreflight(platform);
+  if (lock.ready) return false;
+  setEaFactoryActionState({
+    inFlight: false,
+    stageId,
+    message: `ยังเริ่มงาน MetaTrader ไม่ได้ • ต้องเชื่อมและล็อก MT4 กับ MT5 ที่มุมขวาบนให้ครบ ${lock.lockedCount}/${lock.requiredCount} ก่อน`,
+    tone: "warning",
+    messageKind: "global_metatrader_locks_required",
+  });
+  return true;
+}
+
+async function createEaFactoryCustomSourceAndStart({ platform, artifactKind } = {}) {
+  if (
+    typeof rejectEaFactoryMissingTopHeaderLocks === "function"
+    && rejectEaFactoryMissingTopHeaderLocks("custom_source", platform)
+  ) return null;
+  const factory = state.modal.eaFactory;
+  const payload = eaFactoryCustomSourcePayload({
+    platform,
+    artifactKind,
+    systemName: factory.customSystemName,
+    conditions: factory.customConditions,
+    templateId: factory.customTemplateId,
+  });
+  const response = await runEaFactoryRequest("custom_source", (signal) => postEaFactoryJson(
+    EA_FACTORY_CUSTOM_SOURCE_ENDPOINT,
+    payload,
+    { signal },
+  ), "สร้าง Strategy Source แบบตรวจสอบย้อนหลังได้แล้ว");
+  const sourceRecordId = String(response?.sourceRecordId || "").trim();
+  if (!sourceRecordId) return response;
+  factory.selectedSourceId = sourceRecordId;
+  await loadEaFactoryReadModel({ forceFresh: true });
+  if (
+    normalizeEaFactoryArtifactKind(artifactKind) === "expert_advisor"
+    && ["mt4", "mt5"].includes(normalizeEaFactoryPlatform(platform))
+  ) {
+    return createAndRunEaFactoryBuild(sourceRecordId, artifactKind, platform, "");
+  }
+  return createEaFactoryBuild(sourceRecordId, artifactKind, platform, "");
+}
+
+function renderEaFactoryCustomSourcePreview(container, domain, { platform, artifactKind } = {}) {
+  const block = document.createElement("section");
+  const nameLabel = document.createElement("label");
+  const nameInput = document.createElement("input");
+  const label = document.createElement("label");
+  const textarea = document.createElement("textarea");
+  const actions = document.createElement("div");
+  const smoke = document.createElement("button");
+  const start = document.createElement("button");
+  const factory = state.modal.eaFactory;
+  const normalizedPlatform = normalizeEaFactoryPlatform(platform);
+  const normalizedArtifactKind = normalizeEaFactoryArtifactKind(artifactKind);
+  const globalLocksReady = typeof eaFactoryTopHeaderLockPreflight !== "function"
+    || eaFactoryTopHeaderLockPreflight(normalizedPlatform).ready;
+  const canStart = Boolean(
+    domain?.authoritative === true
+    && domain?.canStartNewBuild === true
+    && !domain?.backendBusy
+    && !factory.inFlight
+    && normalizedPlatform
+    && normalizedArtifactKind
+    && globalLocksReady
+    && String(factory.customSystemName || "").trim().length >= 3
+    && String(factory.customConditions || "").trim().length >= 20
+  );
+  block.className = "ea-factory-source-form";
+  nameLabel.textContent = "ชื่อระบบ";
+  nameInput.type = "text";
+  nameInput.maxLength = 300;
+  nameInput.placeholder = "เช่น EMA 10/60 Closed-Bar EA";
+  nameInput.value = factory.customSystemName;
+  nameInput.dataset.eaFactoryFocusKey = "custom:system-name";
+  nameInput.addEventListener("input", () => {
+    factory.customSystemName = nameInput.value;
+    factory.customTemplateId = "";
+  });
+  nameLabel.appendChild(nameInput);
+  label.textContent = "เขียนเงื่อนไข Entry, Exit, Stop Loss, Take Profit และ Money Management";
+  textarea.rows = 8;
+  textarea.maxLength = 6000;
+  textarea.placeholder = "อธิบายระบบให้ครบ โดยไม่ใส่รหัสผ่าน Token หรือ Credential";
+  textarea.value = factory.customConditions;
+  textarea.dataset.eaFactoryFocusKey = "custom:conditions";
+  textarea.addEventListener("input", () => {
+    factory.customConditions = textarea.value;
+    factory.customTemplateId = "";
+  });
+  label.appendChild(textarea);
+  actions.className = "ea-factory-intake-actions";
+  smoke.type = "button";
+  smoke.className = "modal-action";
+  smoke.textContent = "ใช้ชุดทดสอบ EMA 10/60";
+  smoke.disabled = normalizedPlatform !== "mt5" || normalizedArtifactKind !== "expert_advisor" || factory.inFlight;
+  smoke.addEventListener("click", () => {
+    const draft = eaFactoryEmaSmokeCustomSourcePayload();
+    factory.customSystemName = draft.systemName;
+    factory.customConditions = [
+      draft.systemOverview,
+      draft.entryRules,
+      draft.exitRules,
+      draft.moneyManagement,
+      draft.orderExecution,
+    ].join("\n\n");
+    factory.customTemplateId = "ema_10_60_smoke_v1";
+    rerenderEaFactoryDashboardPreservingFocus("custom:conditions");
+  });
+  start.type = "button";
+  start.className = "modal-action primary ea-factory-start-button";
+  start.disabled = !canStart;
+  start.textContent = normalizedArtifactKind === "expert_advisor" && ["mt4", "mt5"].includes(normalizedPlatform)
+    ? "สร้าง Source และเริ่มเขียน EA"
+    : "สร้าง Strategy Source";
+  start.addEventListener("click", () => {
+    if (!start.disabled) void createEaFactoryCustomSourceAndStart({ platform, artifactKind });
+  });
+  actions.append(smoke, start);
+  block.append(nameLabel, label, actions, createEaFactoryNotice(
+    "ready",
+    "Backend จะสร้าง Strategy Source ก่อนเขียนโค้ด",
+    "ข้อความนี้จะถูกผูกเป็น Source Record แบบ immutable แล้วจึงเข้าลูป AI → Review → MetaEditor Compile → Visual Backtest → ตรวจจุดเข้า → Report โดยไม่เปิด Live Trading",
+  ));
+  container.appendChild(block);
 }
 
 function renderEaFactorySpecStage(section, domain, { embedded = false } = {}) {
@@ -27232,9 +29225,7 @@ function renderEaFactoryTerminalPicker(container, domain) {
   const openGlobal = document.createElement("button");
   wrapper.className = "ea-factory-terminal-picker";
   title.textContent = platform && platform !== "tradingview"
-    ? (platform === "mt5"
-      ? "MT5 • ขั้นละเอียดแบบ Manual"
-      : `MetaEditor และ Visual Strategy Tester สำหรับ ${eaFactoryPlatformLabel(platform)}`)
+    ? `MetaEditor และ Visual Strategy Tester สำหรับ ${eaFactoryPlatformLabel(platform)}`
     : "การเชื่อม MT4 / MT5";
   wrapper.appendChild(title);
 
@@ -27250,18 +29241,6 @@ function renderEaFactoryTerminalPicker(container, domain) {
       "Pine Script ใช้ Code Validation เท่านั้น",
       "ขั้นนี้ไม่ใช้ MT4/MT5 และ Backtest จะเป็น Not Applicable ตามผลจาก Backend",
     ));
-  } else if (platform === "mt5") {
-    const terminals = (Array.isArray(domain.terminals) ? domain.terminals : [])
-      .filter((terminal) => terminal.platform === "mt5");
-    const selectedId = String(domain.selectedTerminalId || "");
-    const selected = terminals.find((terminal) => terminal.id === selectedId) || null;
-    wrapper.appendChild(createEaFactoryNotice(
-      selected ? "warning" : "neutral",
-      "MT5 ยังไม่เปิด One-click แบบหน้าต่างจริง",
-      selected
-        ? `เลือก ${selected.label} แล้วสำหรับงานทีละขั้น • รุ่นนี้จะไม่เปิด MT5 อัตโนมัติ ให้ใช้แท็บ Compile และ Backtest แบบ Manual`
-        : "ยังเลือก MT5 กลางไว้ใช้กับขั้นละเอียดได้ แต่ One-click รุ่นนี้รองรับเฉพาะ MT4 และจะไม่เปิดโปรแกรม MT5",
-    ));
   } else {
     const terminals = (Array.isArray(domain.terminals) ? domain.terminals : [])
       .filter((terminal) => terminal.platform === platform);
@@ -27272,7 +29251,7 @@ function renderEaFactoryTerminalPicker(container, domain) {
       selected ? `กำลังใช้ ${selected.label}` : `ยังไม่ได้เลือก ${eaFactoryPlatformLabel(platform)} จากแถบกลาง`,
       selected
         ? `สถานะ ${selected.status} • หลักฐาน ${selected.proofStatus} • ขั้น Compile ต้องเปิด MetaEditor ให้เห็นจริง และขั้น Backtest ต้องเปิด ${eaFactoryPlatformLabel(platform)} พร้อม Visual Strategy Tester ให้เห็นจริง`
-        : "เปิดแถบเชื่อม MT4 / MT5 ด้านบนเพื่อสแกน เลือก และยืนยัน Terminal เพียงจุดเดียว",
+        : "เปิดแถบเชื่อม MT4 / MT5 มุมขวาบน แล้วล็อก MT4 และ MT5 แยกกันให้ครบ 2/2",
     ));
     if (selectedId && !domain.adapterReady) {
       const indicatorBuild = domain.activeBuild?.artifactKind === "custom_indicator";
@@ -27299,17 +29278,207 @@ function renderEaFactoryTerminalPicker(container, domain) {
 function eaFactoryOneClickStatusLabel(status) {
   return {
     idle: "พร้อมเริ่ม",
-    queued: "รับคำขอแล้ว",
+    queued: "รับคำขอแล้ว • รอเริ่มงาน",
     running: "กำลังทำงาน",
     waiting_ai: "กำลังรอ AI เขียนหรือแก้โค้ด",
-    awaiting_visible_terminal: "รอเปิดโปรแกรมหน้าบ้าน",
+    awaiting_visible_terminal: "รอเปิดโปรแกรมหน้าบ้านแล้วกดทำต่อ",
+    cancelling: "กำลังหยุดงาน",
+    cancelled: "ยกเลิกแล้ว",
     blocked: "ติดขัด",
     failed: "ไม่สำเร็จ",
     completed: "ครบขั้นและมีหลักฐานแล้ว",
   }[status] || "รอสถานะ Backend";
 }
 
-function eaFactoryOneClickStepCopy(stageId) {
+function eaFactoryPhaseGateProgress(domain = {}) {
+  const run = domain.oneClick?.run || {};
+  const phaseIds = EA_FACTORY_VISUAL_STAGE_IDS;
+  const completedCount = phaseIds.filter((stageId) => (
+    ["completed", "not_applicable", "skipped"].includes(
+      eaFactoryOneClickStageStatus(domain, stageId),
+    )
+  )).length;
+  const stageCount = phaseIds.length;
+  const backendStageIndex = run.progressStageIndex === null || run.progressStageIndex === undefined
+    ? Number.NaN
+    : Number(run.progressStageIndex);
+  const completedStageIndex = Math.max(0, Math.min(stageCount, completedCount));
+  let stageIndex = Number.isFinite(backendStageIndex)
+    ? Math.max(completedStageIndex, Math.max(0, Math.min(stageCount, Math.round(backendStageIndex))))
+    : completedStageIndex;
+  const backendPercent = run.progressPercent === null || run.progressPercent === undefined
+    ? Number.NaN
+    : Number(run.progressPercent);
+  const completedPercent = Math.round((completedCount / Math.max(1, stageCount)) * 100);
+  const percent = Number.isFinite(backendPercent)
+    ? Math.max(0, Math.min(100, Math.round(backendPercent)))
+    : completedPercent;
+  const status = String(run.status || "idle").trim().toLowerCase();
+  const actionInFlight = state.modal.eaFactory.inFlight === true;
+  const waiting = !actionInFlight && ["queued", "awaiting_visible_terminal"].includes(status);
+  const active = !waiting && (
+    actionInFlight
+    || Boolean(domain.backendBusy)
+    || ["running", "waiting_ai", "cancelling"].includes(status)
+  );
+  const shouldPoll = active
+    || waiting
+    || ["queued", "awaiting_visible_terminal"].includes(status);
+  const currentStageId = run.currentStageId
+    || domain.currentStageId
+    || "";
+  const currentStageUiId = EA_FACTORY_UI_STAGE_BY_BACKEND[currentStageId] || currentStageId;
+  const currentStageLabel = currentStageId
+    ? (EA_FACTORY_STAGE_COPY[currentStageUiId]?.titleTh || currentStageId)
+    : (actionInFlight ? "กำลังส่งคำขอไปยัง Local Runner" : "รอขั้นถัดไปจาก Backend");
+  return {
+    active,
+    waiting,
+    attention: waiting,
+    shouldPoll,
+    status,
+    stageCount,
+    stageIndex,
+    percent: eaFactoryCertifiedDeliveryCompleted(domain) ? 100 : Math.min(99, percent),
+    determinate: Boolean(domain.activeBuild) && (
+      Number.isFinite(backendPercent)
+      || completedCount > 0
+      || status === "completed"
+    ),
+    approximate: run.progressIsApproximate !== false,
+    source: run.progressSource || "durable_local_phase_gates",
+    currentStageLabel,
+  };
+}
+
+function stopEaFactoryActiveProgressPolling() {
+  if (eaFactoryActiveProgressPollTimer !== null) {
+    window.clearTimeout(eaFactoryActiveProgressPollTimer);
+    eaFactoryActiveProgressPollTimer = null;
+  }
+}
+
+function scheduleEaFactoryActiveProgressPolling(domain = {}) {
+  const progress = eaFactoryPhaseGateProgress(domain);
+  const shouldPoll = progress.shouldPoll
+    && state.modal.open
+    && state.modal.id === EA_FACTORY_PROP_ID
+    && document.visibilityState === "visible";
+  if (!shouldPoll) {
+    stopEaFactoryActiveProgressPolling();
+    return;
+  }
+  if (eaFactoryActiveProgressPollTimer !== null) return;
+  eaFactoryActiveProgressPollTimer = window.setTimeout(async () => {
+    eaFactoryActiveProgressPollTimer = null;
+    if (
+      !state.modal.open
+      || state.modal.id !== EA_FACTORY_PROP_ID
+      || document.visibilityState !== "visible"
+    ) return;
+    await loadEaFactoryReadModel({ forceFresh: true });
+    if (state.modal.open && state.modal.id === EA_FACTORY_PROP_ID) renderGameModal();
+  }, EA_FACTORY_ACTIVE_POLL_MS);
+}
+
+async function refreshEaFactoryProgressStatus() {
+  await loadEaFactoryReadModel({ forceFresh: true });
+  if (state.modal.open && state.modal.id === EA_FACTORY_PROP_ID) renderGameModal();
+}
+
+function createEaFactoryStopButton(domain = {}) {
+  const run = domain.oneClick?.run || {};
+  const stop = document.createElement("button");
+  const canCancel = domain.authoritative === true
+    && run.canCancel === true
+    && Boolean(domain.activeBuild?.id)
+    && Boolean(run.runId)
+    && Boolean(run.idempotencyKey)
+    && state.modal.eaFactory.inFlight !== true;
+  const canAbortSubmission = state.modal.eaFactory.inFlight === true
+    && state.modal.eaFactory.stageId !== "cancel_one_click"
+    && eaFactoryActiveActionAbortController instanceof AbortController
+    && eaFactoryActiveActionAbortController.signal.aborted !== true;
+  const isStopping = String(run.status || "").toLowerCase() === "cancelling"
+    || state.modal.eaFactory.stageId === "cancel_one_click"
+    || state.modal.eaFactory.stageId === "cancel_submitting";
+  stop.type = "button";
+  stop.className = "modal-action ea-factory-stop-action";
+  stop.disabled = (!canCancel && !canAbortSubmission) || isStopping;
+  stop.textContent = isStopping
+    ? "กำลังหยุดงานนี้…"
+    : ((canCancel || canAbortSubmission) ? "หยุดงานทันที" : "รอ Backend ยืนยัน Run");
+  stop.setAttribute("aria-label", "หยุดเฉพาะงาน EA Factory ที่กำลังทำอยู่");
+  if (canCancel && !isStopping) {
+    stop.addEventListener("click", () => void cancelEaFactoryOneClick(domain.activeBuild.id, run));
+  } else if (canAbortSubmission && !isStopping) {
+    stop.addEventListener("click", cancelEaFactorySubmittingRequest);
+  }
+  return stop;
+}
+
+function renderEaFactoryOperationProgress(container, domain = {}) {
+  const run = domain.oneClick?.run || {};
+  const progressState = eaFactoryPhaseGateProgress(domain);
+  const show = progressState.active || progressState.waiting || progressState.status === "cancelled";
+  if (!show) return;
+  const card = document.createElement("section");
+  const heading = document.createElement("header");
+  const copy = document.createElement("div");
+  const title = document.createElement("h4");
+  const detail = document.createElement("p");
+  const badge = document.createElement("strong");
+  const progress = document.createElement("progress");
+  const meta = document.createElement("p");
+  const actions = document.createElement("div");
+  const stop = createEaFactoryStopButton(domain);
+  card.className = "ea-factory-operation-progress";
+  card.dataset.status = progressState.status;
+  card.setAttribute("aria-busy", progressState.active ? "true" : "false");
+  heading.className = "ea-factory-operation-progress-heading";
+  title.textContent = progressState.active
+    ? "ระบบกำลังดำเนินงาน"
+    : (progressState.waiting ? "งานกำลังรอการดำเนินการ" : eaFactoryOneClickStatusLabel(progressState.status));
+  detail.textContent = progressState.currentStageLabel;
+  badge.textContent = progressState.determinate
+    ? `${progressState.percent}%`
+    : "กำลังเตรียมงาน";
+  copy.append(title, detail);
+  heading.append(copy, badge);
+  progress.max = 100;
+  if (progressState.determinate) progress.value = progressState.percent;
+  progress.setAttribute("aria-label", "ความคืบหน้างาน EA Factory");
+  progress.setAttribute(
+    "aria-valuetext",
+    progressState.determinate
+      ? `ผ่านตาม Phase Gate ${progressState.stageIndex} จาก ${progressState.stageCount} ขั้น ${progressState.percent} เปอร์เซ็นต์`
+      : "กำลังรอ Backend ยืนยันขั้นแรก",
+  );
+  meta.className = "ea-factory-operation-progress-meta";
+  meta.textContent = progressState.determinate
+    ? `ความคืบหน้าตาม Phase Gate ${progressState.stageIndex}/${progressState.stageCount} • ตรวจสถานะจาก Local Runner ทุก 3 วินาที ไม่เรียก AI และไม่หักโควตาโมเดล`
+    : "กำลังสร้าง Build และรอ Backend ยืนยัน • การตรวจสถานะนี้เป็น Local HTTP ไม่เรียก AI และไม่หักโควตาโมเดล";
+  actions.className = "ea-factory-operation-progress-actions";
+  if (progressState.active || progressState.status === "cancelling") actions.appendChild(stop);
+  if (progressState.waiting) {
+    actions.appendChild(createEaFactoryGameAction(
+      "ตรวจสถานะล่าสุด",
+      () => void refreshEaFactoryProgressStatus(),
+    ));
+  }
+  card.append(heading, progress, meta, actions);
+  if (progressState.status === "cancelled") {
+    card.appendChild(createEaFactoryNotice(
+      "warning",
+      "Backend ยืนยันยกเลิกงานแล้ว",
+      run.cancelReason || run.message || "หยุดเฉพาะงาน EA Factory นี้ โดยไม่ปิด Local Runner หรือ MT4/MT5",
+    ));
+  }
+  container.appendChild(card);
+}
+
+function eaFactoryOneClickStepCopy(stageId, platform = "") {
+  const platformLabel = eaFactoryPlatformLabel(platform) || "MetaTrader";
   return {
     generate: {
       title: "1 AI เขียน EA",
@@ -27324,8 +29493,12 @@ function eaFactoryOneClickStepCopy(stageId) {
       detail: "ต้องเห็น MetaEditor ของ Terminal ที่เลือกและยืนยันผล Compile จากหน้าต่างจริง",
     },
     backtest_recheck: {
-      title: "4 เปิด MT4 ทำ Visual Backtest",
-      detail: "ต้องเห็น MT4 Strategy Tester และ Visual mode; 0 ออเดอร์ถือว่ารันทดสอบจบ แต่ยังประเมินประสิทธิภาพไม่ได้และระบบจะขึ้นคำเตือน",
+      title: `4 เปิด ${platformLabel} ทำ Visual Backtest`,
+      detail: `ต้องเห็น ${platformLabel} Strategy Tester และ Visual mode; 0 ออเดอร์ถือว่ารันทดสอบจบ แต่ยังประเมินประสิทธิภาพไม่ได้และระบบจะขึ้นคำเตือน`,
+    },
+    artifacts_report: {
+      title: "5 จัดทำ Final Report",
+      detail: "รวบรวม Source, Compile, Visual Backtest, จุดเข้า และ Audit ของ Build แล้วบันทึกรายงาน Backtest เพื่อสรุปงาน",
     },
   }[stageId] || { title: stageId, detail: "รอข้อมูลจาก Backend" };
 }
@@ -27340,7 +29513,7 @@ function eaFactoryExistingOneClickAdmission(domain = {}) {
   const capability = domain.oneClick || {};
   const run = capability.run || {};
   const status = run.status || "idle";
-  const active = ["queued", "running", "waiting_ai"].includes(status);
+  const active = ["queued", "running", "waiting_ai", "cancelling"].includes(status);
   const resumable = status === "awaiting_visible_terminal" && capability.canResume === true;
   const retryable = ["failed", "blocked"].includes(status) && capability.canRetry === true;
   const currentStage = domain.stages?.find((item) => item.id === domain.currentStageId);
@@ -27348,10 +29521,13 @@ function eaFactoryExistingOneClickAdmission(domain = {}) {
     && capability.canRun === true
     && !["failed", "blocked"].includes(currentStage?.status);
   const selectedTerminal = Boolean(capability.selectedTerminalId || domain.selectedTerminalId);
-  const platformReady = domain.activeBuild?.platform === "mt4"
-    && capability.selectedPlatformSupported === true;
+  const platformReady = capability.selectedPlatformSupported === true
+    && Array.isArray(capability.supportedVisiblePlatforms)
+    && capability.supportedVisiblePlatforms.includes(domain.activeBuild?.platform);
   const terminalMatchesBuild = selectedTerminal
     && capability.selectedPlatform === domain.activeBuild?.platform;
+  const globalLocksReady = typeof eaFactoryTopHeaderLockPreflight !== "function"
+    || eaFactoryTopHeaderLockPreflight(domain.activeBuild?.platform).ready;
   const requestInFlight = state.modal.eaFactory.inFlight === true;
   const canSubmit = domain.authoritative === true
     && !domain.backendBusy
@@ -27359,8 +29535,11 @@ function eaFactoryExistingOneClickAdmission(domain = {}) {
     && capability.enabled === true
     && terminalMatchesBuild
     && platformReady
+    && capability.terminalReady === true
     && capability.terminalRunning === true
+    && capability.visibleAdapterConnected === true
     && capability.terminalProcessLaunchAllowed === false
+    && globalLocksReady
     && !active
     && status !== "completed"
     && (initial || resumable || retryable);
@@ -27376,20 +29555,25 @@ function eaFactoryExistingOneClickAdmission(domain = {}) {
 
 function renderEaFactoryOneClickPanel(container, domain = {}) {
   if (!domain.activeBuild || domain.activeBuild.artifactKind !== "expert_advisor") return;
-  if (domain.activeBuild.platform !== "mt4") {
-    if (domain.activeBuild.platform !== "mt5") return;
+  const capability = domain.oneClick || {};
+  const platform = domain.activeBuild.platform;
+  if (!["mt4", "mt5"].includes(platform)) return;
+  const platformLabel = eaFactoryPlatformLabel(platform);
+  const backendSupportsPlatform = capability.selectedPlatformSupported === true
+    && Array.isArray(capability.supportedVisiblePlatforms)
+    && capability.supportedVisiblePlatforms.includes(platform);
+  if (!backendSupportsPlatform) {
     const manualOnly = document.createElement("section");
     manualOnly.className = "ea-factory-one-click ea-factory-one-click-manual-only";
     manualOnly.dataset.oneClickStatus = "unsupported";
     manualOnly.appendChild(createEaFactoryNotice(
       "warning",
-      "One-click แบบหน้าต่างจริงยังไม่รองรับ MT5",
-      "Build MT5 นี้ยังทำต่อได้จากแท็บขั้นละเอียดแบบ Manual แต่ระบบจะไม่เปิด MetaEditor/MT5 หรือกด Strategy Tester ให้อัตโนมัติ",
+      `Backend ยังไม่อนุญาต One-click สำหรับ ${platformLabel}`,
+      `${capability.unsupportedReasonCode ? `${capability.unsupportedReasonCode} • ` : ""}Build นี้ยังทำต่อได้จากแท็บขั้นละเอียด แต่หน้าบ้านจะไม่เดาความพร้อมหรือเปิด MetaEditor/Strategy Tester จนกว่า Backend จะประกาศ capability ครบ`,
     ));
     container.appendChild(manualOnly);
     return;
   }
-  const capability = domain.oneClick || {};
   const run = capability.run || {};
   const status = run.status || "idle";
   const panel = document.createElement("section");
@@ -27413,7 +29597,7 @@ function renderEaFactoryOneClickPanel(container, domain = {}) {
   progress.className = "ea-factory-one-click-progress";
   EA_FACTORY_ONE_CLICK_STAGE_IDS.forEach((stageId) => {
     const item = document.createElement("li");
-    const itemCopy = eaFactoryOneClickStepCopy(stageId);
+    const itemCopy = eaFactoryOneClickStepCopy(stageId, platform);
     const stageResult = domain.oneClick?.run?.stageResults?.find((result) => result.stageId === stageId);
     const itemTitle = document.createElement("strong");
     const itemDetail = document.createElement("span");
@@ -27448,7 +29632,7 @@ function renderEaFactoryOneClickPanel(container, domain = {}) {
   facts.className = "ea-factory-stage-facts ea-factory-one-click-facts";
   appendEaFactoryFact(facts, "Terminal กลาง", `${terminalLabel} • ${eaFactoryPlatformLabel(domain.activeBuild.platform)}`);
   appendEaFactoryFact(facts, "Build", domain.activeBuild.id);
-  if (run.currentStageId) appendEaFactoryFact(facts, "ขั้นปัจจุบัน", eaFactoryOneClickStepCopy(run.currentStageId).title);
+  if (run.currentStageId) appendEaFactoryFact(facts, "ขั้นปัจจุบัน", eaFactoryOneClickStepCopy(run.currentStageId, platform).title);
   if (run.runId) appendEaFactoryFact(facts, "One-click Run", run.runId);
   if (run.missionId) appendEaFactoryFact(facts, "Mission", run.missionId);
   if (run.reportId) appendEaFactoryFact(facts, "Report", run.reportId);
@@ -27462,18 +29646,18 @@ function renderEaFactoryOneClickPanel(container, domain = {}) {
       : "Compile และ Backtest ต้องทำผ่านหน้าต่างที่มองเห็น",
     capability.visibleAdapterConnected
       ? "Backend จะเปิดและควบคุม MetaEditor/Strategy Tester ผ่าน adapter ที่ยืนยันแล้ว แต่จะถือว่าผ่านเมื่อมีหลักฐานหน้าบ้านจริงเท่านั้น"
-      : "ระบบจะหยุดรอที่ Compile/Backtest: ต้องเปิด MT4 ที่เลือกไว้ก่อนแล้วกดตรวจซ้ำ ระบบจะไม่เปิด Terminal ให้เองและไม่ใช้ผลหลังบ้านมาอ้างว่าผ่าน",
+       : `ระบบจะหยุดรอที่ Compile/Backtest: ต้องเปิด ${platformLabel} ที่เลือกไว้ก่อนแล้วกดตรวจซ้ำ ระบบจะไม่เปิด Terminal ให้เองและไม่ใช้ผลหลังบ้านมาอ้างว่าผ่าน`,
   ));
 
   if (["failed", "blocked"].includes(status) || run.failureCode) {
     panel.appendChild(createEaFactoryNotice(
       "error",
-      `หยุดที่ ${run.currentStageId ? eaFactoryOneClickStepCopy(run.currentStageId).title : "ขั้นที่ Backend ระบุ"}`,
+      `หยุดที่ ${run.currentStageId ? eaFactoryOneClickStepCopy(run.currentStageId, platform).title : "ขั้นที่ Backend ระบุ"}`,
       `${run.failureCode ? `${run.failureCode} • ` : ""}${run.message || "Backend ยังไม่ส่งรายละเอียดข้อผิดพลาด"}`,
     ));
   } else if (run.message) {
     panel.appendChild(createEaFactoryNotice(
-      ["queued", "running", "waiting_ai", "awaiting_visible_terminal"].includes(status) ? "working" : "ready",
+      ["queued", "running", "waiting_ai", "awaiting_visible_terminal", "cancelling"].includes(status) ? "working" : "ready",
       eaFactoryOneClickStatusLabel(status),
       run.message,
     ));
@@ -27481,6 +29665,7 @@ function renderEaFactoryOneClickPanel(container, domain = {}) {
 
   const {
     active,
+    resumable,
     retryable,
     terminalMatchesBuild,
     requestInFlight,
@@ -27490,8 +29675,8 @@ function renderEaFactoryOneClickPanel(container, domain = {}) {
     ? "กำลังทำงาน • รอผลจาก Backend"
     : (status === "awaiting_visible_terminal"
       ? (capability.visibleAdapterConnected
-        ? "เปิด MetaEditor / MT4 แล้วทำต่อ"
-        : "เปิด MT4 ให้พร้อม แล้วกดตรวจซ้ำ")
+        ? `เปิด MetaEditor / ${platformLabel} แล้วทำต่อ`
+        : `เปิด ${platformLabel} ให้พร้อม แล้วกดตรวจซ้ำ`)
       : (["failed", "blocked"].includes(status)
         ? (retryable
           ? "แก้และลองใหม่จากขั้นที่ติดขัด"
@@ -27531,8 +29716,8 @@ function renderEaFactoryOneClickPanel(container, domain = {}) {
     openGlobal.type = "button";
     openGlobal.className = "modal-action ea-factory-terminal-central-link";
     openGlobal.textContent = selectedTerminal
-      ? "เลือก MT4 ให้ตรงกับ Build นี้"
-      : "เลือกและเปิด MT4 ที่แถบเชื่อมต่อกลางก่อน";
+      ? `เลือก ${platformLabel} ให้ตรงกับ Build นี้`
+      : `เลือกและเปิด ${platformLabel} ที่แถบเชื่อมต่อกลางก่อน`;
     openGlobal.addEventListener("click", openGlobalMetatraderHubFromDevice);
     panel.appendChild(openGlobal);
   } else if (!capability.enabled) {
@@ -27545,23 +29730,262 @@ function renderEaFactoryOneClickPanel(container, domain = {}) {
     panel.appendChild(createEaFactoryNotice(
       "warning",
       "เลือก Terminal แล้ว แต่ One-click Gate ยังไม่พร้อม",
-      "ตรวจว่า MT4 ที่เลือกกำลังเปิดอยู่และ Front-office adapter พร้อม ระบบจะไม่เปิด MT4 หรือเดาว่า MetaEditor/Strategy Tester พร้อม",
+      `ตรวจว่า ${platformLabel} ที่เลือกกำลังเปิดอยู่, terminalReady=true และ visibleAdapterConnected=true ระบบจะไม่เดาว่า MetaEditor/Strategy Tester พร้อม`,
     ));
   }
+  container.appendChild(panel);
+}
+
+function eaFactoryCurrentVisualStageId(domain = {}) {
+  const run = domain.oneClick?.run || {};
+  const rawStageId = String(
+    run.currentStageId
+      || domain.backendBusy?.stageId
+      || domain.currentStageId
+      || "",
+  ).trim();
+  const mappedStageId = EA_FACTORY_UI_STAGE_BY_BACKEND[rawStageId] || rawStageId;
+  if (EA_FACTORY_VISUAL_STAGE_IDS.includes(mappedStageId)) return mappedStageId;
+  if (String(run.status || "").toLowerCase() === "completed") return "artifacts_report";
+  return EA_FACTORY_VISUAL_STAGE_IDS.find((stageId) => (
+    eaFactoryOneClickStageStatus(domain, stageId) !== "completed"
+  )) || "artifacts_report";
+}
+
+function eaFactoryVisualStageStatus(domain = {}, stageId = "", currentStageId = "", progressState = {}) {
+  const backendStatus = String(eaFactoryOneClickStageStatus(domain, stageId) || "unknown").toLowerCase();
+  if (domain.authoritative !== true) return "unknown";
+  const runStatus = String(domain.oneClick?.run?.status || "").trim().toLowerCase();
+  if (stageId === currentStageId) {
+    if (runStatus === "failed") return "failed";
+    if (runStatus === "blocked") return "blocked";
+    if (["cancelled", "cancelling"].includes(runStatus)) return runStatus;
+  }
+  if (
+    stageId === currentStageId
+    && progressState.active
+    && ["unknown", "locked", "pending", "ready", "queued"].includes(backendStatus)
+  ) return "running";
+  if (stageId === "artifacts_report" && progressState.status === "completed") {
+    return domain.stages?.find((stage) => stage.id === "artifacts_report")?.status || backendStatus;
+  }
+  return backendStatus;
+}
+
+function eaFactoryVisualStageStatusLabel(status = "unknown", current = false) {
+  if (current && status === "running") return "กำลังทำขั้นนี้";
+  return {
+    completed: "เสร็จแล้ว",
+    running: "กำลังทำ",
+    ready: "พร้อมทำ",
+    blocked: "ติดขัด",
+    failed: "ไม่สำเร็จ",
+    cancelled: "ยกเลิกแล้ว",
+    cancelling: "กำลังหยุด",
+    not_applicable: "ไม่ต้องทำ",
+    skipped: "ข้ามขั้นนี้",
+    locked: "รอขั้นก่อนหน้า",
+    pending: "รอขั้นก่อนหน้า",
+    queued: "อยู่ในคิว",
+    waiting: "รอดำเนินการต่อ",
+    unknown: "รอสถานะ",
+  }[status] || eaFactoryStageStatusLabel(status);
+}
+
+function createEaFactoryGameAction(label, handler, className = "") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `modal-action ea-factory-game-action ${className}`.trim();
+  button.textContent = label;
+  button.addEventListener("click", handler);
+  return button;
+}
+
+function renderEaFactoryGameProgressPanel(container, domain = {}) {
+  if (!domain.activeBuild) return;
+  const run = domain.oneClick?.run || {};
+  const progressState = eaFactoryPhaseGateProgress(domain);
+  const currentStageId = eaFactoryCurrentVisualStageId(domain);
+  const currentVisual = EA_FACTORY_STAGE_VISUALS[currentStageId] || EA_FACTORY_STAGE_VISUALS.generate;
+  const platformLabel = eaFactoryPlatformLabel(domain.activeBuild.platform) || "แพลตฟอร์มที่เลือก";
+  const artifactLabel = eaFactoryArtifactKindLabel(domain.activeBuild.artifactKind);
+  const currentStageNumber = EA_FACTORY_VISUAL_STAGE_IDS.indexOf(currentStageId) + 1;
+  const panel = document.createElement("section");
+  const heading = document.createElement("header");
+  const headingCopy = document.createElement("div");
+  const eyebrow = document.createElement("span");
+  const title = document.createElement("h4");
+  const subtitle = document.createElement("p");
+  const percentage = document.createElement("strong");
+  const hero = document.createElement("div");
+  const visual = document.createElement("figure");
+  const image = document.createElement("img");
+  const stageCopy = document.createElement("div");
+  const stageCounter = document.createElement("span");
+  const stageTitle = document.createElement("h5");
+  const stageDetail = document.createElement("p");
+  const progress = document.createElement("progress");
+  const track = document.createElement("ol");
+  const footer = document.createElement("footer");
+  const localStatus = document.createElement("p");
+  const actions = document.createElement("div");
+  const live = domain.authoritative === true;
+  const status = String(run.status || "idle").toLowerCase();
+  const systemName = safeDashboardDisplayText(
+    domain.activeBuild.sourceDisplayName || domain.activeBuild.systemName,
+    "ระบบที่เลือกจากหน้า 1",
+    { limit: 100 },
+  );
+  panel.className = "ea-factory-game-progress";
+  panel.dataset.status = live ? status : "checking";
+  panel.dataset.currentStage = currentStageId;
+  panel.setAttribute("aria-label", "สถานะการสร้าง EA แบบภาพรวม");
+  panel.setAttribute("aria-busy", progressState.active && live ? "true" : "false");
+
+  heading.className = "ea-factory-game-progress-heading";
+  eyebrow.textContent = `${artifactLabel} • ${platformLabel}`;
+  title.textContent = progressState.status === "completed"
+    && eaFactoryCertifiedDeliveryCompleted(domain)
+    ? "สร้างงานเสร็จแล้ว"
+    : (["failed", "blocked"].includes(status)
+      ? "งานหยุดที่ขั้นที่ต้องตรวจสอบ"
+      : (status === "cancelled"
+        ? "ยกเลิกงานแล้ว"
+        : (progressState.waiting ? "งานกำลังรอให้ดำเนินการต่อ" : "ระบบกำลังสร้างงานของคุณ")));
+  subtitle.textContent = systemName;
+  percentage.textContent = live && progressState.determinate
+    ? `${progressState.approximate ? "ประมาณ " : ""}${progressState.percent}%`
+    : (live ? "กำลังเตรียม" : "กำลังเชื่อมต่อ");
+  headingCopy.append(eyebrow, title, subtitle);
+  heading.append(headingCopy, percentage);
+
+  hero.className = "ea-factory-game-progress-hero";
+  visual.className = "ea-factory-game-progress-visual";
+  image.src = currentVisual.image;
+  image.alt = currentVisual.imageAltTh;
+  image.decoding = "async";
+  visual.appendChild(image);
+  stageCopy.className = "ea-factory-game-progress-copy";
+  stageCounter.textContent = `ขั้น ${Math.max(1, currentStageNumber)} จาก ${EA_FACTORY_VISUAL_STAGE_IDS.length}`;
+  stageTitle.textContent = currentVisual.shortTitleTh;
+  stageDetail.textContent = !live
+    ? "กำลังขอสถานะล่าสุดจาก Local Runner ระบบจะไม่เดาความคืบหน้าแทน Backend"
+    : (run.message
+      ? safeDashboardDisplayText(run.message, EA_FACTORY_STAGE_COPY[currentStageId]?.descriptionTh, { limit: 260 })
+      : (EA_FACTORY_STAGE_COPY[currentStageId]?.descriptionTh || progressState.currentStageLabel));
+  progress.max = 100;
+  if (live && progressState.determinate) progress.value = progressState.percent;
+  progress.setAttribute("aria-label", "เปอร์เซ็นต์ความคืบหน้าการสร้าง EA");
+  progress.setAttribute(
+    "aria-valuetext",
+    live && progressState.determinate
+      ? `${progressState.approximate ? "ประมาณ " : ""}${progressState.percent} เปอร์เซ็นต์ ขั้น ${currentStageNumber} จาก ${EA_FACTORY_VISUAL_STAGE_IDS.length}`
+      : "กำลังรอสถานะล่าสุดจาก Backend",
+  );
+  stageCopy.append(stageCounter, stageTitle, stageDetail, progress);
+  hero.append(visual, stageCopy);
+
+  track.className = "ea-factory-game-stage-track";
+  EA_FACTORY_VISUAL_STAGE_IDS.forEach((stageId, index) => {
+    const stageVisual = EA_FACTORY_STAGE_VISUALS[stageId];
+    const item = document.createElement("li");
+    const stageImage = document.createElement("img");
+    const stageText = document.createElement("div");
+    const number = document.createElement("span");
+    const label = document.createElement("strong");
+    const stageStatus = document.createElement("small");
+    const current = stageId === currentStageId;
+    const visualStatus = eaFactoryVisualStageStatus(domain, stageId, currentStageId, progressState);
+    item.dataset.status = visualStatus;
+    item.dataset.current = current ? "true" : "false";
+    if (current) item.setAttribute("aria-current", "step");
+    stageImage.src = stageVisual.image;
+    stageImage.alt = "";
+    stageImage.setAttribute("aria-hidden", "true");
+    stageImage.decoding = "async";
+    number.textContent = String(index + 1);
+    label.textContent = stageVisual.shortTitleTh;
+    stageStatus.textContent = eaFactoryVisualStageStatusLabel(visualStatus, current);
+    stageText.append(number, label, stageStatus);
+    item.append(stageImage, stageText);
+    track.appendChild(item);
+  });
+
+  footer.className = "ea-factory-game-progress-footer";
+  localStatus.textContent = live
+    ? (run.canRestartBacktest === true
+      ? "รอบ Backend หยุดแล้ว • ระบบจะตรวจว่า Strategy Tester ว่างจริงตอนกดเริ่ม โดยเก็บ Source, Version และ Compile เดิมทั้งหมด"
+      : "อัปเดตจาก Local Runner ทุก 3 วินาที • ไม่เรียก AI เพิ่มและไม่หักโควตาโมเดล")
+    : "กำลังรอสถานะที่ยืนยันจาก Backend";
+  actions.className = "ea-factory-game-progress-actions";
+  const admission = eaFactoryExistingOneClickAdmission(domain);
+  const canResumeOrRetry = admission.canSubmit
+    && (admission.resumable || admission.retryable);
+  const canRestartBacktest = live
+    && run.canRestartBacktest === true
+    && !domain.backendBusy
+    && !state.modal.eaFactory.inFlight;
+  if (progressState.active || status === "cancelling") {
+    actions.appendChild(createEaFactoryStopButton(domain));
+  }
+  if (progressState.waiting) {
+    actions.appendChild(createEaFactoryGameAction(
+      "ตรวจสถานะล่าสุด",
+      () => void refreshEaFactoryProgressStatus(),
+    ));
+  }
+  if (canRestartBacktest) {
+    actions.appendChild(createEaFactoryGameAction(
+      "เริ่ม Backtest ใหม่ • ใช้ Source/Compile เดิม",
+      () => void restartEaFactoryBacktestOnly(domain.activeBuild.id, run),
+      "ea-factory-game-action-primary",
+    ));
+  }
+  if (canResumeOrRetry) {
+    const continueLabel = admission.retryable ? "ลองใหม่จากขั้นที่ติดขัด" : "ทำขั้นนี้ต่อ";
+    actions.appendChild(createEaFactoryGameAction(
+      continueLabel,
+      () => void runEaFactoryOneClick(domain.activeBuild.id),
+      canRestartBacktest ? "" : "ea-factory-game-action-primary",
+    ));
+  } else if (status === "completed" && eaFactoryCertifiedDeliveryCompleted(domain)) {
+    actions.appendChild(createEaFactoryPageNavigation("ดูผลลัพธ์และไฟล์", "result"));
+  } else if (status === "completed") {
+    actions.appendChild(createEaFactoryGameAction(
+      "ตรวจการ Finalize ล่าสุด",
+      () => void refreshEaFactoryProgressStatus(),
+      "ea-factory-game-action-primary",
+    ));
+  } else if (
+    !progressState.active
+    && !canRestartBacktest
+    && !["completed", "cancelling"].includes(status)
+  ) {
+    actions.appendChild(createEaFactoryPageNavigation("กลับไปตั้งค่างานหน้า 1", "source"));
+  }
+  footer.append(localStatus, actions);
+  panel.append(heading, hero, track, footer);
   container.appendChild(panel);
 }
 
 function renderEaFactoryOneClickSetup(container, domain = {}, source = {}) {
   const capability = domain.oneClick || {};
   const platform = capability.selectedPlatform;
+  const platformLabel = eaFactoryPlatformLabel(platform) || "MT4 / MT5";
   const selectedTerminal = capability.selectedTerminalId || domain.selectedTerminalId;
-  const platformSupported = platform === "mt4"
-    && capability.selectedPlatformSupported === true
+  const globalLocksReady = typeof eaFactoryTopHeaderLockPreflight !== "function"
+    || eaFactoryTopHeaderLockPreflight(platform).ready;
+  const platformSupported = capability.selectedPlatformSupported === true
+    && Array.isArray(capability.supportedVisiblePlatforms)
+    && capability.supportedVisiblePlatforms.includes(platform)
     && Array.isArray(source.compatiblePlatforms)
     && source.compatiblePlatforms.includes(platform);
   const oneClickReady = selectedTerminal
+    && globalLocksReady
     && platformSupported
+    && capability.terminalReady === true
     && capability.terminalRunning === true
+    && capability.visibleAdapterConnected === true
     && capability.terminalProcessLaunchAllowed === false
     && capability.enabled === true
     && capability.canCreateAndRun === true;
@@ -27579,8 +30003,8 @@ function renderEaFactoryOneClickSetup(container, domain = {}, source = {}) {
   form.dataset.eaFactoryOneClickSetup = "true";
   heading.className = "ea-factory-one-click-heading";
   eyebrow.textContent = "ONE-CLICK EA • ใช้ Terminal กลางอัตโนมัติ";
-  title.textContent = "สร้าง EA MT4 แล้วเดินงานถึง Visual Backtest";
-  detail.textContent = "ใช้ Strategy Brief A-J ทั้ง 10 ช่องที่ Backend ตรวจแล้ว และจัดเป็น 6 กลุ่มกฎสำหรับ AI โดยไม่ต้องเลือก MT4 ซ้ำในอุปกรณ์นี้";
+  title.textContent = `สร้าง EA ${platformLabel}, Compile, Visual Backtest และบันทึกรายงาน`;
+  detail.textContent = `ใช้ Strategy Brief A-J ทั้ง 10 ช่องที่ Backend ตรวจแล้ว และจัดเป็น 6 กลุ่มกฎสำหรับ AI โดยไม่ต้องเลือก ${platformLabel} ซ้ำในอุปกรณ์นี้`;
   badge.textContent = oneClickReady
     ? "พร้อมเริ่ม"
     : (selectedTerminal ? "Terminal Gate ยังไม่พร้อม" : "ต้องเลือก Terminal กลาง");
@@ -27591,7 +30015,7 @@ function renderEaFactoryOneClickSetup(container, domain = {}, source = {}) {
   brief.rows = 3;
   brief.maxLength = 900;
   brief.dataset.eaFactoryOneClickBrief = "true";
-  brief.placeholder = "เช่น ชื่อไฟล์หรือ Input ที่ต้องเปิดให้ Optimize โดยห้ามใส่ Credential/Secret";
+  brief.placeholder = "เช่น ชื่อไฟล์, Input หรือจุดเข้าที่ต้องตรวจเพิ่ม โดยห้ามใส่ Credential/Secret";
   briefLabel.appendChild(brief);
   submit.type = "submit";
   submit.className = "modal-action primary ea-factory-stage-action ea-factory-one-click-action";
@@ -27602,31 +30026,32 @@ function renderEaFactoryOneClickSetup(container, domain = {}, source = {}) {
   submit.textContent = state.modal.eaFactory.inFlight
     && ["one_click_create_run", "create_build", "one_click_run"].includes(state.modal.eaFactory.stageId)
     ? "กำลังสร้าง Build และเริ่มงาน..."
-    : "เริ่มเขียน EA → เปิด MetaEditor → Compile → Visual Backtest";
+    : "เริ่มเขียน EA → Compile → Visual Backtest → Save Report";
   form.append(heading, briefLabel, submit);
   form.appendChild(createEaFactoryNotice(
     oneClickReady ? "neutral" : "warning",
     selectedTerminal && platform
       ? `ใช้ ${capability.selectedTerminalLabel || selectedTerminal} • ${eaFactoryPlatformLabel(platform)}`
-      : (platform === "mt5" ? "MT5 ใช้ขั้นละเอียดแบบ Manual" : "ยังไม่ได้เลือกและเปิด MT4 กลาง"),
+      : `ยังไม่ได้เลือกและเปิด ${platformLabel} กลาง`,
     oneClickReady
       ? "ปุ่มนี้เริ่มงานในคลิกเดียว แต่ไม่ได้รับรองว่าทุกขั้นจะผ่านเอง หากต้องให้ผู้ใช้เห็น MetaEditor/Strategy Tester หรือพบ Error ระบบจะหยุดแสดงสถานะและให้ทำต่อหรือ Retry จากจุดเดิม"
-      : (platform === "mt5"
-        ? "One-click แบบหน้าต่างจริงรองรับเฉพาะ MT4 ในรุ่นนี้ ระบบจะไม่เปิด MT5 อัตโนมัติ; ใช้แท็บขั้นละเอียดสำหรับงาน MT5"
-        : "ตรวจว่า MT4 กลางกำลังเปิดอยู่และ Front-office adapter ยืนยัน canCreateAndRun=true ก่อน ระบบจะไม่เปิด Terminal หรือเดาความพร้อมเอง"),
+      : `ตรวจว่า Backend ประกาศ ${platformLabel} ใน supportedVisiblePlatforms และยืนยัน selectedPlatformSupported, terminalReady, visibleAdapterConnected และ canCreateAndRun=true ก่อน ระบบจะไม่เปิด Terminal หรือเดาความพร้อมเอง`,
   ));
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     if (!form.reportValidity() || submit.disabled) return;
-    void createAndRunEaFactoryBuild(source.sourceRecordId, platform, brief.value);
+    void createAndRunEaFactoryBuild(
+      source.sourceRecordId,
+      "expert_advisor",
+      platform,
+      brief.value,
+    );
   });
   if (!selectedTerminal || !platformSupported) {
     const openGlobal = document.createElement("button");
     openGlobal.type = "button";
     openGlobal.className = "modal-action ea-factory-terminal-central-link";
-    openGlobal.textContent = platform === "mt5"
-      ? "เลือก MT4 เพื่อใช้ One-click หรือทำ MT5 จากแท็บขั้นละเอียด"
-      : "สแกน เลือก และเปิด MT4 ที่แถบกลาง";
+    openGlobal.textContent = `สแกน เลือก และเปิด ${platformLabel} ที่แถบกลาง`;
     openGlobal.addEventListener("click", openGlobalMetatraderHubFromDevice);
     form.appendChild(openGlobal);
   }
@@ -27656,9 +30081,10 @@ function eaFactoryActionPresentation(domain = {}, session = state.modal.eaFactor
     message: safeDashboardDisplayText(session?.message, ""),
   };
   const stageId = String(session?.stageId || "").trim();
-  if (["one_click_run", "one_click_create_run"].includes(stageId)) {
+  if (["one_click_run", "one_click_create_run", "cancel_one_click"].includes(stageId)) {
     const run = domain?.oneClick?.run || {};
     const status = run.status || "idle";
+    const platformLabel = eaFactoryPlatformLabel(domain?.activeBuild?.platform) || "MT4 / MT5";
     if (["failed", "blocked"].includes(status)) {
       return {
         tone: "error",
@@ -27670,7 +30096,7 @@ function eaFactoryActionPresentation(domain = {}, session = state.modal.eaFactor
       return {
         tone: "warning",
         title: "รอทำต่อผ่านหน้าต่างที่มองเห็น",
-        message: run.message || "เปิด MT4 ที่เลือกไว้ แล้วกดทำต่อเพื่อให้ Backend เปิด MetaEditor หรือ MT4 Strategy Tester แบบหน้าบ้าน ระบบจะไม่เปิด Terminal ให้เองและยังไม่ถือว่า Compile หรือ Backtest ผ่าน",
+        message: run.message || `เปิด ${platformLabel} ที่เลือกไว้ แล้วกดทำต่อเพื่อให้ Backend เปิด MetaEditor หรือ ${platformLabel} Strategy Tester แบบหน้าบ้าน ระบบจะไม่เปิด Terminal ให้เองและยังไม่ถือว่า Compile หรือ Backtest ผ่าน`,
       };
     }
     if (status === "completed") {
@@ -27680,7 +30106,14 @@ function eaFactoryActionPresentation(domain = {}, session = state.modal.eaFactor
         message: run.message || "สร้าง Source, ตรวจโค้ด, Compile และ Visual Backtest ผ่าน Gate พร้อม Mission/Report ที่ผูกกับ Build นี้แล้ว",
       };
     }
-    if (["queued", "running", "waiting_ai"].includes(status) || session?.inFlight) {
+    if (status === "cancelled") {
+      return {
+        tone: "warning",
+        title: "ยกเลิกงาน EA Factory แล้ว",
+        message: run.cancelReason || run.message || "Backend ยืนยันว่าเลิกทำงานนี้แล้ว โดยไม่ปิด Terminal หรือ Local Runner",
+      };
+    }
+    if (["queued", "running", "waiting_ai", "cancelling"].includes(status) || session?.inFlight) {
       return {
         tone: "working",
         title: eaFactoryOneClickStatusLabel(status),
@@ -27808,7 +30241,7 @@ function renderEaFactoryOperationalStage(section, stageId, domain, report) {
       zeroTradeAttention && historyQualityAttention
         ? "ระบบเก็บหลักฐานการรันไว้ครบและจะไม่กด Start ซ้ำ แต่ยังไม่อนุญาตให้ประเมินประสิทธิภาพ กรุณาแก้ Mismatched chart errors แล้วตรวจช่วงทดสอบ Symbol และเงื่อนไขเข้าเทรด"
         : zeroTradeAttention
-        ? "ระบบเก็บหลักฐานการรันไว้ครบและจะไม่กด Start ซ้ำ กรุณาตรวจคุณภาพข้อมูลย้อนหลัง ช่วงทดสอบ Symbol และเงื่อนไขเข้าเทรดก่อน Optimization"
+        ? "ระบบเก็บหลักฐานการรันไว้ครบและจะไม่กด Start ซ้ำ กรุณาตรวจคุณภาพข้อมูลย้อนหลัง ช่วงทดสอบ Symbol และเงื่อนไขเข้าเทรดก่อนนำ Build ไปเริ่ม Session ใหม่ด้วยตนเองใน Optimization Lab แยกต่างหาก"
         : historyQualityAttention
         ? "รายงานพบ Mismatched chart errors ระบบจึงเก็บงานเป็นสำเร็จแบบต้องตรวจสอบ และงดการประเมินประสิทธิภาพจนกว่าจะแก้ข้อมูลย้อนหลัง"
         : "ค่าผลทดสอบจะแสดงผ่าน Report และ Evidence ที่ผูก Mission, Terminal และ Stage นี้เท่านั้น ระบบไม่อ่าน metric นอกสัญญา และระบบจะไม่แสดง Win Rate, Profit Factor หรือ Drawdown จากข้อมูลจำลอง",
@@ -27938,154 +30371,160 @@ function createEaFactoryPageNavigation(label, pageId) {
 }
 
 function renderEaFactoryProgressPage(section, domain = {}, report = {}) {
-  section.appendChild(createEaFactoryPageHeader("progress", domain));
-  const actionInFlight = state.modal.eaFactory.inFlight === true;
-  if (domain.backendBusy) {
-    const busy = eaFactoryBusyPresentation(domain.backendBusy);
-    section.appendChild(createEaFactoryNotice(
-      busy.tone,
-      domain.authoritative ? busy.title : "งานล่าสุดที่ Backend เคยยืนยัน • ยังไม่ใช่สถานะสด",
-      domain.authoritative
-        ? busy.message
-        : `${busy.message} • ขณะนี้ Read Model เป็นข้อมูลเก่า จึงยังยืนยันไม่ได้ว่างานนี้ทำต่ออยู่หรือสิ้นสุดแล้ว`,
-    ));
-  } else if (actionInFlight) {
-    section.appendChild(createEaFactoryNotice(
-      "working",
-      "กำลังส่งคำขอไปยัง Local Runner",
-      state.modal.eaFactory.message || "รอ Backend รับคำขอและยืนยัน Build ที่กำลังทำ",
-    ));
-  } else if (!domain.authoritative) {
-    section.appendChild(createEaFactoryNotice(
-      "neutral",
-      "กำลังตรวจสอบสถานะงาน EA",
-      "ยังไม่ได้รับ Read Model ปัจจุบันจาก Backend จึงยังยืนยันไม่ได้ว่ามีงานค้างอยู่หรือพร้อมรับงานใหม่ กรุณารอการตรวจซ้ำ",
-    ));
-  } else {
-    section.appendChild(createEaFactoryNotice(
-      "ready",
-      "ไม่มีงาน EA ค้างอยู่",
-      "Backend ยืนยัน busy=null จึงพร้อมรับงานใหม่ สถานะ MT4 เปิดอยู่เป็นเพียงสถานะโปรแกรมและไม่ใช่งาน EA ที่กำลังค้าง",
-    ));
-    if (domain.historicalRunLooksActive) {
-      section.appendChild(createEaFactoryNotice(
-        "neutral",
-        "Build ล่าสุดมีสถานะเดิมค้างในประวัติ",
-        "หน้าจอเก็บสถานะเดิมไว้เพื่อวินิจฉัยเท่านั้น แต่จะไม่ใช้สถานะประวัตินี้ปิดปุ่มเริ่มงานใหม่ เพราะ Backend ไม่ได้รายงานงานที่กำลังทำ",
-      ));
-    }
-  }
   if (!domain.activeBuild) {
-    if (domain.backendBusy) {
-      section.appendChild(createEaFactoryNotice(
-        domain.authoritative ? "working" : "warning",
-        domain.authoritative
-          ? "กำลังรอรายละเอียด Build จาก Backend"
-          : "รายละเอียด Build จากสถานะล่าสุดยังยืนยันไม่ได้",
-        domain.authoritative
-          ? `${domain.backendBusy.buildId ? `Backend ยืนยัน Build ${domain.backendBusy.buildId}` : "Backend ยืนยันว่ามีงานกำลังทำ"} แต่รายการ Build ยังซิงก์มาไม่ครบ หน้าจอจะตรวจซ้ำอัตโนมัติโดยไม่หยิบประวัติงานอื่นมาแสดงแทน`
-          : `${domain.backendBusy.buildId ? `ข้อมูลล่าสุดระบุ Build ${domain.backendBusy.buildId}` : "ข้อมูลล่าสุดระบุว่ามีงาน"} แต่ Read Model ปัจจุบันอ่านไม่สำเร็จ จึงไม่แสดงข้อมูลนี้เป็นงานที่กำลังทำสด`,
-      ));
-    } else {
-      section.appendChild(createWorkflowTruthEmpty("ยังไม่มี Build ให้ติดตาม เลือกระบบและเริ่มเขียนจากหน้า 1"));
-      section.appendChild(createEaFactoryPageNavigation("กลับไปหน้า 1 เลือกระบบ", "source"));
+    const empty = document.createElement("div");
+    const title = document.createElement("h4");
+    const detail = document.createElement("p");
+    empty.className = "ea-factory-game-empty";
+    title.textContent = domain.backendBusy
+      ? (domain.authoritative ? "กำลังรับข้อมูลงานจาก Local Runner" : "กำลังตรวจสอบงานล่าสุด")
+      : "ยังไม่มีงานที่กำลังสร้าง";
+    detail.textContent = domain.backendBusy
+      ? (domain.authoritative
+        ? "Backend ยืนยันว่ามีงานอยู่ แต่รายละเอียด Build ยังซิงก์มาไม่ครบ หน้านี้จะอัปเดตให้อัตโนมัติ"
+        : "มีข้อมูลสถานะเดิมที่เคยได้รับ แต่ยังยืนยันสถานะสดไม่ได้ หน้านี้จะตรวจ Local Runner ซ้ำโดยไม่เดาความคืบหน้า")
+      : "เลือกแพลตฟอร์ม ประเภทงาน และระบบเทรดให้ครบจากหน้า 1 แล้วกดเริ่มเพียงครั้งเดียว";
+    empty.append(title, detail);
+    if (!domain.backendBusy) {
+      empty.appendChild(createEaFactoryPageNavigation("กลับไปเลือกงานหน้า 1", "source"));
     }
+    section.appendChild(empty);
     return;
   }
-  renderEaFactoryOneClickPanel(section, domain);
-  const busyStageId = EA_FACTORY_UI_STAGE_BY_BACKEND[String(domain.backendBusy?.stageId || "").trim()]
-    || String(domain.backendBusy?.stageId || "").trim();
-  const currentStageId = busyStageId
-    || domain.oneClick?.run?.currentStageId
-    || domain.currentStageId;
-  if (["generate", "review", "compile_validate", "backtest_recheck", "artifacts_report"].includes(currentStageId)) {
-    const stage = domain.stages.find((item) => item.id === currentStageId);
-    const details = document.createElement("details");
-    const summary = document.createElement("summary");
-    const body = document.createElement("div");
-    details.className = "ea-factory-manual-details ea-factory-current-stage-details";
-    details.open = Boolean(domain.backendBusy) || ["failed", "blocked"].includes(stage?.status);
-    summary.textContent = `ดูรายละเอียดและวิธีทำต่อ • ${EA_FACTORY_STAGE_COPY[currentStageId]?.titleTh || currentStageId}`;
-    body.className = "ea-factory-current-stage-body";
-    renderEaFactoryOperationalStage(body, currentStageId, domain, report);
-    details.append(summary, body);
-    section.appendChild(details);
-  }
-  if (!domain.backendBusy && domain.oneClick?.run?.status === "completed") {
-    section.appendChild(createEaFactoryPageNavigation("ไปหน้า 3 ตรวจโค้ดและผลลัพธ์", "result"));
-  }
+  renderEaFactoryGameProgressPanel(section, domain);
 }
 
 function renderEaFactoryResultPage(section, domain = {}, report = {}) {
-  section.appendChild(createEaFactoryPageHeader("result", domain));
   if (!domain.activeBuild) {
-    section.appendChild(createWorkflowTruthEmpty("ยังไม่มี Build สำหรับตรวจผล เลือกระบบและเริ่มเขียนจากหน้า 1 ก่อน"));
-    section.appendChild(createEaFactoryPageNavigation("กลับไปหน้า 1 เลือกระบบ", "source"));
+    const empty = document.createElement("div");
+    const title = document.createElement("h4");
+    const detail = document.createElement("p");
+    empty.className = "ea-factory-game-empty";
+    title.textContent = "ยังไม่มีผลลัพธ์ให้ตรวจ";
+    detail.textContent = "เริ่มสร้างงานจากหน้า 1 ก่อน เมื่อ Backend ตรวจครบแล้วไฟล์จะปรากฏในหน้านี้";
+    empty.append(title, detail, createEaFactoryPageNavigation("กลับไปเลือกงานหน้า 1", "source"));
+    section.appendChild(empty);
     return;
   }
-  const finalStage = domain.stages.find((item) => item.id === "artifacts_report");
-  const attention = domain.stages.some((stage) => stage.attentionRequired === true);
-  const completed = finalStage?.status === "completed" || domain.oneClick?.run?.status === "completed";
-  section.appendChild(createEaFactoryNotice(
-    attention ? "warning" : (completed ? "success" : "neutral"),
-    attention
-      ? "งานเสร็จแบบต้องตรวจสอบคำเตือน"
-      : (completed ? "EA Factory ทำงานครบตามหลักฐาน Backend" : "ผลลัพธ์ยังไม่ครบทุก Gate"),
-    attention
-      ? "ตรวจคำเตือน Backtest และคุณภาพข้อมูลก่อนนำไฟล์ไปใช้งานจริง"
+  const live = domain.authoritative === true;
+  const attention = live && domain.stages.some((stage) => stage.attentionRequired === true);
+  const completed = live && eaFactoryCertifiedDeliveryCompleted(domain);
+  const failed = live && domain.stages.some((stage) => ["failed", "blocked"].includes(stage.status));
+  const result = document.createElement("section");
+  const hero = document.createElement("header");
+  const visual = document.createElement("figure");
+  const image = document.createElement("img");
+  const copy = document.createElement("div");
+  const eyebrow = document.createElement("span");
+  const title = document.createElement("h4");
+  const detail = document.createElement("p");
+  const badge = document.createElement("strong");
+  const summary = document.createElement("ol");
+  const artifacts = document.createElement("section");
+  const artifactTitle = document.createElement("h5");
+  const artifactHint = document.createElement("p");
+  const actions = document.createElement("div");
+  const currentStageId = eaFactoryCurrentVisualStageId(domain);
+  const visualConfig = completed
+    ? EA_FACTORY_STAGE_VISUALS.artifacts_report
+    : (EA_FACTORY_STAGE_VISUALS[currentStageId] || EA_FACTORY_STAGE_VISUALS.generate);
+  result.className = "ea-factory-result-screen";
+  result.dataset.status = !live ? "checking" : (failed ? "failed" : (attention ? "attention" : (completed ? "completed" : "pending")));
+  hero.className = "ea-factory-result-hero";
+  visual.className = "ea-factory-result-visual";
+  image.src = visualConfig.image;
+  image.alt = visualConfig.imageAltTh;
+  image.decoding = "async";
+  visual.appendChild(image);
+  copy.className = "ea-factory-result-copy";
+  eyebrow.textContent = `${eaFactoryArtifactKindLabel(domain.activeBuild.artifactKind)} • ${eaFactoryPlatformLabel(domain.activeBuild.platform)}`;
+  title.textContent = !live
+    ? "กำลังตรวจสอบผลลัพธ์ล่าสุด"
+    : (completed
+      ? (attention ? "สร้างเสร็จแล้ว • มีจุดที่ต้องตรวจ" : "สร้างและตรวจสอบเสร็จแล้ว")
+      : (failed ? "งานหยุดที่ขั้นตรวจสอบ" : "งานนี้ยังทำไม่ครบทุกขั้น"));
+  detail.textContent = !live
+    ? "ยังไม่ได้รับ Read Model ปัจจุบันจาก Backend จึงไม่แสดงข้อมูลเดิมเป็นผลสำเร็จสด"
+    : (attention
+      ? "Backend เก็บผลลัพธ์ไว้แล้ว แต่ควรตรวจคำเตือน Backtest หรือคุณภาพข้อมูลก่อนนำไปใช้งาน"
       : (completed
-        ? "ตรวจ Source Review, Compile, Backtest และไฟล์ที่ Backend อนุญาตด้านล่าง"
-        : "ดูสถานะแต่ละส่วนได้ทันที และกลับไปหน้า 2 หากงานยังดำเนินอยู่หรือรอโปรแกรมหน้าบ้าน"),
-  ));
-  const summary = document.createElement("div");
-  summary.className = "ea-factory-result-summary";
-  ["review", "compile_validate", "backtest_recheck", "artifacts_report"].forEach((stageId) => {
-    const stage = domain.stages.find((item) => item.id === stageId) || { status: "unknown", evidence: [] };
-    const card = document.createElement("article");
-    const title = document.createElement("strong");
-    const status = document.createElement("span");
-    const detail = document.createElement("small");
-    card.dataset.status = stage.status;
-    title.textContent = {
-      review: "ตรวจ Source",
-      compile_validate: "Compile / Validate",
-      backtest_recheck: "Backtest / Recheck",
-      artifacts_report: "ไฟล์และ Final Report",
-    }[stageId];
-    status.textContent = eaFactoryStageStatusLabel(stage.status);
-    detail.textContent = stage.reportId
-      ? `Report ${stage.reportId}`
-      : (stage.evidence?.length ? `หลักฐาน ${stage.evidence.length} รายการ` : (stage.detail || "รอหลักฐานจาก Backend"));
-    card.append(title, status, detail);
-    summary.appendChild(card);
+        ? "ไฟล์ทั้งหมดด้านล่างมาจาก Build ที่ Backend ยืนยันและอนุญาตให้ดาวน์โหลด"
+        : "กลับไปหน้า 2 เพื่อดูขั้นปัจจุบัน ทำต่อ หรือลองใหม่จากจุดที่ติดขัด"));
+  badge.textContent = !live
+    ? "กำลังเชื่อมต่อ"
+    : (completed ? (attention ? "ตรวจคำเตือน" : "เสร็จสมบูรณ์") : (failed ? "ต้องแก้ไข" : "ยังไม่เสร็จ"));
+  copy.append(eyebrow, title, detail);
+  hero.append(visual, copy, badge);
+
+  summary.className = "ea-factory-result-stage-track";
+  EA_FACTORY_VISUAL_STAGE_IDS.forEach((stageId, index) => {
+    const stageStatusValue = eaFactoryVisualStageStatus(
+      domain,
+      stageId,
+      currentStageId,
+      eaFactoryPhaseGateProgress(domain),
+    );
+    const item = document.createElement("li");
+    const number = document.createElement("span");
+    const label = document.createElement("strong");
+    const status = document.createElement("small");
+    item.dataset.status = stageStatusValue;
+    number.textContent = String(index + 1);
+    label.textContent = EA_FACTORY_STAGE_VISUALS[stageId].shortTitleTh;
+    status.textContent = eaFactoryVisualStageStatusLabel(stageStatusValue);
+    item.append(number, label, status);
+    summary.appendChild(item);
   });
-  section.appendChild(summary);
-  renderEaFactoryOperationalStage(section, "artifacts_report", domain, report);
+
+  artifacts.className = "ea-factory-result-artifacts";
+  artifactTitle.textContent = "ไฟล์จากงานนี้";
+  artifactHint.textContent = !live
+    ? "รายการนี้เป็นข้อมูลล่าสุดที่เคยได้รับ กรุณารอสถานะปัจจุบันก่อนใช้ไฟล์"
+    : (completed
+      ? "เลือกเปิดหรือดาวน์โหลดเฉพาะไฟล์ที่ Backend ผูกกับ Build นี้"
+      : "ไฟล์จะครบเมื่อทุกขั้นผ่าน Gate แล้ว");
+  artifacts.append(artifactTitle, artifactHint);
+  if (!appendDashboardArtifactLinks(artifacts, domain.activeBuild.artifacts, { limit: 12 })) {
+    artifacts.appendChild(createWorkflowTruthEmpty("ยังไม่มีไฟล์ที่ Backend อนุญาตให้ดาวน์โหลด"));
+  }
+
+  actions.className = "ea-factory-result-actions";
+  if (completed) {
+    actions.appendChild(createEaFactoryPageNavigation("สร้างงานใหม่จากหน้า 1", "source"));
+  } else {
+    actions.appendChild(createEaFactoryPageNavigation("กลับไปดูสถานะหน้า 2", "progress"));
+  }
+  result.append(hero, summary, artifacts, actions);
+  section.appendChild(result);
 }
 
 function renderEaFactoryPanel(container, tabId, domain = {}, report = {}) {
   const section = document.createElement("section");
   section.className = "workflow-domain-panel ea-factory-panel";
-  renderEaFactoryStatusStrip(section, domain);
-  const progressOwnsBusyNotice = tabId === "progress"
-    && Boolean(domain.backendBusy)
-    && domain.authoritative === true;
-  const readModelNoticeMessage = progressOwnsBusyNotice
-    ? eaFactoryBusyPresentation(domain.backendBusy).message
-    : renderEaFactoryReadModelNotice(section);
-  if (!domain.authoritative) {
-    section.appendChild(createEaFactoryNotice(
-      "warning",
-      "ยังไม่ได้รับ EA Factory Read Model ที่ยืนยัน",
-      "ต้องได้รับ schemaVersion ea-factory-v1, mode one_click_with_manual_stage_recovery (หรือโหมดเดิมระหว่างอัปเดต) และ scheduled=false จาก Backend ก่อน ปุ่มทุกขั้นจึงเปิดได้",
-    ));
+  section.dataset.page = tabId;
+  scheduleEaFactoryActiveProgressPolling(domain);
+  let readModelNoticeMessage = "";
+  if (tabId === "source") {
+    readModelNoticeMessage = renderEaFactoryReadModelNotice(section);
+    if (!domain.authoritative) {
+      section.appendChild(createEaFactoryNotice(
+        "warning",
+        "ยังไม่ได้รับ EA Factory Read Model ที่ยืนยัน",
+        "ต้องได้รับ schemaVersion ea-factory-v1 และสถานะปัจจุบันจาก Backend ก่อน ปุ่มเริ่มงานจึงเปิดได้",
+      ));
+    }
+    renderEaFactoryOperationProgress(section, domain);
   }
   if (tabId === "source") renderEaFactorySourceStage(section, domain);
   else if (tabId === "progress") renderEaFactoryProgressPage(section, domain, report);
   else if (tabId === "result") renderEaFactoryResultPage(section, domain, report);
   else section.appendChild(createWorkflowTruthEmpty("ไม่พบหน้าโรงงานที่รองรับ"));
   const actionPresentation = eaFactoryActionPresentation(domain);
-  if (actionPresentation.message && actionPresentation.message !== readModelNoticeMessage) {
+  if (
+    tabId === "source"
+    && actionPresentation.message
+    && actionPresentation.message !== readModelNoticeMessage
+  ) {
     section.appendChild(createEaFactoryNotice(
       actionPresentation.tone,
       actionPresentation.title,
@@ -28107,7 +30546,7 @@ function validateEaFactoryBusyModel(value) {
     ...EA_FACTORY_STAGE_IDS,
     ...Object.values(EA_FACTORY_BACKEND_STAGE_BY_UI),
   ]);
-  const supportedStatuses = new Set(["queued", "running", "waiting_ai", "awaiting_visible_terminal"]);
+  const supportedStatuses = new Set(["queued", "running", "waiting_ai", "awaiting_visible_terminal", "cancelling"]);
   const supportedOperations = new Set([
     "create_build",
     "sync_google_sheet",
@@ -28325,8 +30764,12 @@ function eaFactoryReadModelStateKey(payload = {}) {
       String(run.status || ""),
       String(run.currentStageId || ""),
       String(run.failureCode || ""),
+      String(run.message || run.messageTh || ""),
       run.canResume === true,
       run.canRetry === true,
+      String(run.resumeKind || ""),
+      run.canCancel === true,
+      run.progressPercent ?? null,
       [
         terminalGate.ready === true,
         terminalGate.adapterReady === true,
@@ -28338,7 +30781,8 @@ function eaFactoryReadModelStateKey(payload = {}) {
         String(stage?.status || ""),
         String(stage?.missionId || ""),
         String(stage?.reportId || ""),
-        String(stage?.failureCode || ""),
+        String(stage?.failureCode || stage?.errorCode || stage?.blockedReasonCode || ""),
+        String(stage?.detailTh || stage?.detail || stage?.messageTh || stage?.message || ""),
         stage?.canAdvance === true || stage?.canRun === true,
         stage?.canRetry === true,
         stage?.attentionRequired === true,
@@ -28422,7 +30866,12 @@ function mergeEaFactoryReadModel(payload = {}) {
   } : null;
   state.eaFactoryReadModel.busy = busyValidation.busy;
   const actionState = state.modal.eaFactory;
-  const stickyActionRejection = ["request_rejected", "local_preflight_rejected"]
+  const stickyActionRejection = [
+    "request_rejected",
+    "local_preflight_rejected",
+    "google_sheet_changed_after_import",
+    "google_sheet_selection_removed",
+  ]
     .includes(actionState.messageKind);
   const authoritativeStateChanged = stickyActionRejection
     && Boolean(actionState.readModelStateKey)
@@ -28449,6 +30898,18 @@ function mergeEaFactoryReadModel(payload = {}) {
       eaFactory: model,
     },
   };
+  if (actionState.sourceMode === "google_sheet") {
+    const reconciliation = reconcileEaFactoryGoogleSheetSelection(
+      actionState.googleSheetCatalog || {},
+      actionState,
+      eaFactoryFirstArray(model?.sourceCatalog?.records),
+    );
+    surfaceEaFactoryGoogleSheetInvalidation(
+      reconciliation,
+      actionState.googleSheetCatalog || {},
+      actionState,
+    );
+  }
   return true;
 }
 
@@ -28553,8 +31014,19 @@ function setEaFactoryActionState({
   }
 }
 
-async function postEaFactoryJson(path, payload = {}, { timeoutMs = EA_FACTORY_ACTION_TIMEOUT_MS } = {}) {
+async function postEaFactoryJson(path, payload = {}, {
+  timeoutMs = EA_FACTORY_ACTION_TIMEOUT_MS,
+  signal = null,
+} = {}) {
   const controller = new AbortController();
+  const parentSignal = signal && typeof signal.addEventListener === "function" ? signal : null;
+  const abortFromParent = () => {
+    if (!controller.signal.aborted) {
+      controller.abort(parentSignal?.reason || new DOMException("EA Factory request cancelled", "AbortError"));
+    }
+  };
+  if (parentSignal?.aborted) abortFromParent();
+  else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
   const timeoutId = window.setTimeout(() => {
     if (!controller.signal.aborted) controller.abort(new FetchTimeoutError(path, timeoutMs));
   }, timeoutMs);
@@ -28577,17 +31049,21 @@ async function postEaFactoryJson(path, payload = {}, { timeoutMs = EA_FACTORY_AC
     return body;
   } catch (error) {
     if (controller.signal.reason instanceof FetchTimeoutError) throw controller.signal.reason;
+    if (parentSignal?.aborted && parentSignal.reason) throw parentSignal.reason;
     throw error;
   } finally {
     window.clearTimeout(timeoutId);
+    parentSignal?.removeEventListener("abort", abortFromParent);
   }
 }
 
 async function runEaFactoryRequest(stageId, request, successMessage, { terminalAware = false } = {}) {
   if (state.modal.eaFactory.inFlight) return null;
+  const actionController = new AbortController();
+  eaFactoryActiveActionAbortController = actionController;
   setEaFactoryActionState({ inFlight: true, stageId, message: "กำลังส่งคำขอไปยัง Local Runner", tone: "working" });
   try {
-    const response = await request();
+    const response = await request(actionController.signal);
     if (response?.mission) mergeBackendMission(response.mission);
     mergeEaFactoryResponseReport(response);
     if (!mergeEaFactoryReadModel(response)) await loadEaFactoryReadModel({ forceFresh: true });
@@ -28624,6 +31100,46 @@ async function runEaFactoryRequest(stageId, request, successMessage, { terminalA
     }
     return response;
   } catch (error) {
+    if (error?.kind === "ea_factory_operator_cancelled_request") {
+      if (eaFactoryActiveActionAbortController === actionController) {
+        eaFactoryActiveActionAbortController = null;
+      }
+      const refreshed = await loadEaFactoryReadModel({ forceFresh: true });
+      const report = state.propReports[EA_FACTORY_PROP_ID] || {};
+      const dashboard = normalizeWorkflowDashboard(
+        getModalSubject(),
+        getPropertyRole(getModalSubject()),
+        report,
+      );
+      const domain = dashboard.domainData.eaFactory;
+      const run = domain.oneClick?.run || {};
+      const buildId = String(domain.activeBuild?.id || "").trim();
+      const backendRunCanCancel = Boolean(
+        refreshed
+        && domain.authoritative === true
+        && run.canCancel === true
+        && buildId
+        && run.runId
+        && run.idempotencyKey
+      );
+      setEaFactoryActionState({
+        inFlight: false,
+        stageId: backendRunCanCancel ? "cancel_one_click" : "",
+        message: backendRunCanCancel
+          ? "หยุดรอคำตอบของคำขอเดิมแล้ว • พบ Run ที่ Backend รับไว้ จึงกำลังยกเลิกรอบนั้นต่อแบบ fail-closed"
+          : (refreshed
+            ? "ยกเลิกคำขอที่กำลังส่งแล้ว • Backend ไม่พบ Run ที่ต้องหยุด"
+            : "ยกเลิกการรอคำตอบบนหน้าจอแล้ว แต่ยังตรวจ Backend ไม่สำเร็จ กรุณาดูสถานะอีกครั้ง"),
+        tone: backendRunCanCancel ? "working" : (refreshed ? "warning" : "error"),
+        messageKind: "operator_cancelled_request",
+      });
+      if (backendRunCanCancel) {
+        window.setTimeout(() => {
+          void cancelEaFactoryOneClick(buildId, run);
+        }, 0);
+      }
+      return null;
+    }
     const hasLastGood = Boolean(state.eaFactoryReadModel.payload);
     const failedRequestPresentation = eaFactoryReadModelFailurePresentation(error, { hasLastGood });
     const refreshed = await loadEaFactoryReadModel({ forceFresh: true });
@@ -28671,6 +31187,9 @@ async function runEaFactoryRequest(stageId, request, successMessage, { terminalA
     });
     return null;
   } finally {
+    if (eaFactoryActiveActionAbortController === actionController) {
+      eaFactoryActiveActionAbortController = null;
+    }
     if (state.modal.eaFactory.inFlight && state.modal.eaFactory.stageId === stageId) {
       setEaFactoryActionState({
         inFlight: false,
@@ -28682,19 +31201,375 @@ async function runEaFactoryRequest(stageId, request, successMessage, { terminalA
   }
 }
 
-async function syncEaFactoryGoogleSheet() {
+async function syncEaFactoryGoogleSheet(configRevision) {
+  const normalizedConfigRevision = Number(configRevision);
+  if (
+    !Number.isInteger(normalizedConfigRevision)
+    || normalizedConfigRevision < 1
+    || normalizedConfigRevision > 999999
+  ) {
+    setEaFactoryActionState({
+      inFlight: false,
+      stageId: "sheet_sync",
+      message: "ยังซิงก์ Google Sheet ไม่ได้ เพราะไม่มี Revision ที่ Backend ยืนยัน กรุณารีเฟรชรายชื่อก่อนลองใหม่",
+      tone: "warning",
+      messageKind: "google_sheet_revision_missing",
+    });
+    return null;
+  }
   const idempotencyKey = createWorkflowIdempotencyKey();
-  const response = await runEaFactoryRequest("sheet_sync", () => postEaFactoryJson(
+  const response = await runEaFactoryRequest("sheet_sync", (signal) => postEaFactoryJson(
     "/api/props/right_server_racks/ea-factory/sources/google-sheet/sync",
-    { idempotencyKey },
+    { configRevision: normalizedConfigRevision, idempotencyKey },
+    { signal },
   ), "Backend อ่าน Google Sheets และอัปเดต Strategy Record แล้ว");
   if (response) await loadResearchSheetHub({ force: true });
   return response;
 }
 
+function normalizeEaFactoryGoogleSheetCatalog(payload = {}) {
+  const raw = payload?.ok === true && payload?.catalog && typeof payload.catalog === "object"
+    ? payload.catalog
+    : null;
+  const catalogDigest = String(raw?.catalogDigest || "").trim().toLowerCase();
+  const snapshotDigest = String(raw?.snapshotDigest || "").trim().toLowerCase();
+  const configRevision = raw?.configRevision;
+  const totalCount = raw?.totalCount;
+  const systems = raw ? eaFactoryGoogleSheetCatalogRecords(raw) : [];
+  const contractValid = raw
+    && raw.schemaVersion === EA_FACTORY_GOOGLE_SHEET_CATALOG_SCHEMA_VERSION
+    && raw.status === "ready"
+    && Number.isInteger(configRevision)
+    && configRevision >= 1
+    && configRevision <= 999999
+    && raw.tabName === "Deep_Research"
+    && /^[0-9a-f]{64}$/.test(catalogDigest)
+    && /^[0-9a-f]{64}$/.test(snapshotDigest)
+    && Number.isInteger(totalCount)
+    && totalCount >= 0
+    && totalCount === systems.length
+    && (raw.selectedRecord === null || raw.selectedRecord === undefined);
+  if (!contractValid) {
+    const error = new Error("Backend ส่ง Google Sheet catalog ที่ตรวจสอบรูปแบบไม่ได้");
+    error.kind = "ea_factory_google_sheet_catalog_schema_mismatch";
+    error.code = "schema_mismatch";
+    throw error;
+  }
+  return {
+    schemaVersion: raw.schemaVersion,
+    status: "ready",
+    configRevision,
+    tabName: raw.tabName,
+    catalogDigest,
+    snapshotDigest,
+    observedAt: raw.observedAt || null,
+    totalCount,
+    systems,
+    selectedRecord: null,
+    reasonCode: "",
+    message: totalCount
+      ? `อ่านรายชื่อระบบจาก Deep_Research แล้ว ${totalCount} ระบบ`
+      : "Deep_Research ยังไม่มีระบบที่เลือกได้",
+  };
+}
+
+function rerenderEaFactoryGoogleSheetCatalog() {
+  if (
+    state.modal.open
+    && state.modal.type === "prop"
+    && state.modal.id === EA_FACTORY_PROP_ID
+    && state.modal.eaFactory.sourceMode === "google_sheet"
+  ) {
+    rerenderEaFactoryDashboardPreservingFocus();
+  }
+}
+
+async function ensureEaFactoryGoogleSheetCatalog({ force = false, reason = "auto" } = {}) {
+  const factory = state.modal.eaFactory;
+  const current = factory.googleSheetCatalog || {};
+  const fresh = eaFactoryGoogleSheetCatalogIsFresh(current);
+  if (!force && fresh) {
+    scheduleEaFactoryGoogleSheetCatalogAutoRefresh(
+      EA_FACTORY_GOOGLE_SHEET_CATALOG_REFRESH_MS - (Date.now() - Number(current.lastLoadedAt)),
+    );
+    return current;
+  }
+  if (eaFactoryGoogleSheetCatalogInFlight || current.inFlight) {
+    return eaFactoryGoogleSheetCatalogInFlight;
+  }
+  const requestId = Number(current.requestId || 0) + 1;
+  factory.googleSheetCatalog = {
+    schemaVersion: String(current.schemaVersion || ""),
+    status: current.status === "ready" ? "refreshing" : "loading",
+    configRevision: current.configRevision ?? null,
+    tabName: String(current.tabName || ""),
+    catalogDigest: String(current.catalogDigest || ""),
+    snapshotDigest: String(current.snapshotDigest || ""),
+    observedAt: current.observedAt || null,
+    totalCount: Number.isInteger(Number(current.totalCount)) ? Number(current.totalCount) : 0,
+    systems: Array.isArray(current.systems) ? current.systems : [],
+    selectedRecord: null,
+    reasonCode: "",
+    message: reason === "manual"
+      ? "กำลังรีเฟรชรายชื่อจาก Deep_Research…"
+      : (reason === "start"
+        ? "กำลังตรวจ Google Sheet Revision ล่าสุดก่อนเริ่มงาน…"
+        : "กำลังอ่านรายชื่อระบบจาก Deep_Research…"),
+    lastLoadedAt: 0,
+    lastInteractionAt: Number(current.lastInteractionAt || 0),
+    inFlight: true,
+    requestId,
+  };
+  rerenderEaFactoryGoogleSheetCatalog();
+  const abortController = new AbortController();
+  const request = (async () => {
+    try {
+      // Intentionally omit recordId: Sheet record_id may contain characters that
+      // are valid in the authoritative Sheet contract but not in a URL-safe id.
+      const payload = await fetchJson(EA_FACTORY_GOOGLE_SHEET_CATALOG_ENDPOINT, {
+        timeoutMs: EA_FACTORY_ACTION_TIMEOUT_MS,
+        signal: abortController.signal,
+      });
+      if (factory.googleSheetCatalog.requestId !== requestId) return null;
+      const model = normalizeEaFactoryGoogleSheetCatalog(payload);
+      factory.googleSheetCatalog = {
+        ...model,
+        lastLoadedAt: Date.now(),
+        lastInteractionAt: Number(current.lastInteractionAt || 0),
+        inFlight: false,
+        requestId,
+      };
+      const report = state.propReports[EA_FACTORY_PROP_ID] || {};
+      const dashboard = normalizeWorkflowDashboard(
+        getModalSubject(),
+        getPropertyRole(getModalSubject()),
+        report,
+      );
+      const reconciliation = reconcileEaFactoryGoogleSheetSelection(
+        factory.googleSheetCatalog,
+        factory,
+        dashboard.domainData.eaFactory?.sourceCatalog?.records,
+      );
+      surfaceEaFactoryGoogleSheetInvalidation(
+        reconciliation,
+        factory.googleSheetCatalog,
+        factory,
+      );
+      return factory.googleSheetCatalog;
+    } catch (error) {
+      if (factory.googleSheetCatalog.requestId !== requestId) return null;
+      const code = String(error?.body?.code || error?.code || error?.kind || "catalog_request_failed");
+      const knownBlockedCodes = new Set([
+        "auth_required",
+        "permission_denied",
+        "schema_mismatch",
+        "deep_research_schema_mismatch",
+        "research_sheet_binding_changed",
+        "deep_research_changed_during_read",
+      ]);
+      factory.googleSheetCatalog = {
+        schemaVersion: "",
+        status: "error",
+        configRevision: null,
+        tabName: "",
+        catalogDigest: "",
+        snapshotDigest: "",
+        observedAt: null,
+        totalCount: 0,
+        systems: [],
+        selectedRecord: null,
+        reasonCode: knownBlockedCodes.has(code) ? code : "catalog_request_failed",
+        message: safeDashboardDisplayText(
+          error?.body?.messageTh || error?.message,
+          "อ่าน Deep_Research ไม่สำเร็จ ระบบล้างรายการเดิมแล้ว กรุณาตรวจ OAuth, สิทธิ์ และ Header A-J",
+          { limit: 700, markTruncated: true },
+        ),
+        lastLoadedAt: 0,
+        lastInteractionAt: Number(current.lastInteractionAt || 0),
+        inFlight: false,
+        requestId,
+      };
+      const reconciliation = reconcileEaFactoryGoogleSheetSelection(factory.googleSheetCatalog, factory, []);
+      surfaceEaFactoryGoogleSheetInvalidation(
+        reconciliation,
+        factory.googleSheetCatalog,
+        factory,
+      );
+      return null;
+    } finally {
+      if (factory.googleSheetCatalog.requestId === requestId) {
+        factory.googleSheetCatalog.inFlight = false;
+      }
+      rerenderEaFactoryGoogleSheetCatalog();
+      scheduleEaFactoryGoogleSheetCatalogAutoRefresh();
+    }
+  })();
+  eaFactoryGoogleSheetCatalogAbortController = abortController;
+  eaFactoryGoogleSheetCatalogInFlight = request;
+  try {
+    return await request;
+  } finally {
+    if (eaFactoryGoogleSheetCatalogAbortController === abortController) {
+      eaFactoryGoogleSheetCatalogAbortController = null;
+    }
+    if (eaFactoryGoogleSheetCatalogInFlight === request) {
+      eaFactoryGoogleSheetCatalogInFlight = null;
+    }
+  }
+}
+
+async function importEaFactorySourceRecord(rawRecordId) {
+  const recordId = String(rawRecordId || "").trim();
+  state.modal.eaFactory.sheetRecordId = recordId;
+  clearEaFactoryGoogleSheetImport(state.modal.eaFactory);
+  if (!recordId) {
+    setEaFactoryActionState({
+      inFlight: false,
+      stageId: "sheet_import",
+      message: "กรุณาเลือกระบบจากรายชื่อ Deep_Research ก่อน Import",
+      tone: "warning",
+      messageKind: "local_preflight_rejected",
+    });
+    return null;
+  }
+  const currentCatalog = state.modal.eaFactory.googleSheetCatalog || {};
+  const selectedCatalogRecord = eaFactoryGoogleSheetCatalogRecords(currentCatalog).find((record) => (
+    record.recordId.toLowerCase() === recordId.toLowerCase()
+  )) || null;
+  if (
+    currentCatalog.status !== "ready"
+    || currentCatalog.inFlight === true
+    || !selectedCatalogRecord
+  ) {
+    setEaFactoryActionState({
+      inFlight: false,
+      stageId: "sheet_import",
+      message: "รายการ Deep_Research เปลี่ยนหรือยังโหลดไม่ครบ กรุณากดรีเฟรชรายชื่อแล้วเลือกระบบอีกครั้ง",
+      tone: "warning",
+      messageKind: "google_sheet_catalog_not_ready",
+    });
+    return null;
+  }
+  const response = await syncEaFactoryGoogleSheet(currentCatalog.configRevision);
+  if (!response) return null;
+  const refreshedCatalog = await ensureEaFactoryGoogleSheetCatalog({
+    force: true,
+    reason: "import",
+  });
+  const refreshedCatalogRecord = eaFactoryGoogleSheetCatalogRecords(refreshedCatalog || {}).find((record) => (
+    record.recordId.toLowerCase() === recordId.toLowerCase()
+  )) || null;
+  if (!refreshedCatalogRecord) {
+    setEaFactoryActionState({
+      inFlight: false,
+      stageId: "sheet_import",
+      message: "หลัง Sync แล้วไม่พบระบบที่เลือกใน Deep_Research Revision ล่าสุด กรุณาเลือกรายการใหม่",
+      tone: "warning",
+      messageKind: "record_removed_after_sync",
+    });
+    return null;
+  }
+  const report = state.propReports[EA_FACTORY_PROP_ID] || {};
+  const dashboard = normalizeWorkflowDashboard(
+    getModalSubject(),
+    getPropertyRole(getModalSubject()),
+    report,
+  );
+  const domain = dashboard.domainData.eaFactory;
+  const source = eaFactoryFindSourceByExactRecordId(domain.sourceCatalog.records, recordId);
+  if (
+    !source
+    || source.sourceRecordId !== refreshedCatalogRecord.sourceRecordId
+    || source.recordDigest !== refreshedCatalogRecord.recordDigest
+  ) {
+    setEaFactoryActionState({
+      inFlight: false,
+      stageId: "sheet_import",
+      message: `ข้อมูล record_id “${safeDashboardDisplayText(recordId, "รหัสนี้", { limit: 160 })}” จาก Sync และ Catalog ไม่ตรง Revision กัน จึงยังไม่เปิดเริ่มงาน กรุณารีเฟรชแล้ว Import ใหม่`,
+      tone: "warning",
+      messageKind: "record_id_not_found",
+      readModelStateKey: eaFactoryReadModelStateKey(state.eaFactoryReadModel.payload || domain),
+    });
+    return null;
+  }
+  state.modal.eaFactory.selectedSourceId = source.sourceRecordId;
+  state.modal.eaFactory.importedSourceId = source.sourceRecordId;
+  state.modal.eaFactory.importedRecordDigest = refreshedCatalogRecord.recordDigest;
+  state.modal.eaFactory.importedCatalogDigest = refreshedCatalog.catalogDigest;
+  state.modal.eaFactory.importedSnapshotDigest = refreshedCatalog.snapshotDigest;
+  setEaFactoryActionState({
+    inFlight: false,
+    stageId: "sheet_import",
+    message: eaFactorySourceIsBuildSelectable(source)
+      ? `Import ${source.recordId} แล้ว • ตรวจข้อมูลและเริ่มงานได้`
+      : `Import ${source.recordId} แล้ว แต่ Strategy Brief ยังไม่ผ่าน Gate จึงเปิดอ่านได้อย่างเดียว`,
+    tone: eaFactorySourceIsBuildSelectable(source) ? "success" : "warning",
+    messageKind: eaFactorySourceIsBuildSelectable(source) ? "record_imported" : "record_read_only",
+  });
+  return source;
+}
+
+function eaFactoryCreateBuildFormSignature(requestPayload = {}) {
+  const normalizedBrief = String(requestPayload.brief || "")
+    .replace(/\u0000/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+  const digest = (field) => {
+    const value = String(requestPayload[field] || "").trim().toLowerCase();
+    return /^[0-9a-f]{64}$/.test(value) ? value : null;
+  };
+  return JSON.stringify({
+    sourceRecordId: String(requestPayload.sourceRecordId || "").trim(),
+    artifactKind: String(requestPayload.artifactKind || ""),
+    platform: String(requestPayload.platform || ""),
+    brief: normalizedBrief,
+    recordId: Object.prototype.hasOwnProperty.call(requestPayload, "recordId")
+      ? String(requestPayload.recordId)
+      : null,
+    recordDigest: digest("recordDigest"),
+    catalogDigest: digest("catalogDigest"),
+    snapshotDigest: digest("snapshotDigest"),
+    configRevision: Number.isInteger(requestPayload.configRevision)
+      ? requestPayload.configRevision
+      : null,
+  });
+}
+
+function eaFactoryCreateBuildRequestIdentity(requestPayload = {}) {
+  const factory = state.modal.eaFactory;
+  const formSignature = eaFactoryCreateBuildFormSignature(requestPayload);
+  const currentKey = String(factory.createIdempotencyKey || "").trim();
+  if (
+    factory.createFormSignature !== formSignature
+    || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,199}$/.test(currentKey)
+  ) {
+    factory.createFormSignature = formSignature;
+    factory.createIdempotencyKey = createWorkflowIdempotencyKey();
+  }
+  return {
+    formSignature,
+    idempotencyKey: factory.createIdempotencyKey,
+  };
+}
+
+function completeEaFactoryCreateBuildRequest(identity = {}) {
+  const factory = state.modal.eaFactory;
+  if (
+    factory.createFormSignature === identity.formSignature
+    && factory.createIdempotencyKey === identity.idempotencyKey
+  ) {
+    factory.createFormSignature = "";
+    factory.createIdempotencyKey = "";
+  }
+}
+
 async function createEaFactoryBuild(sourceRecordId, artifactKind, platform, brief) {
   const normalizedArtifactKind = normalizeEaFactoryArtifactKind(artifactKind);
   const normalizedPlatform = normalizeEaFactoryPlatform(platform);
+  if (
+    typeof rejectEaFactoryMissingTopHeaderLocks === "function"
+    && rejectEaFactoryMissingTopHeaderLocks("create_build", normalizedPlatform)
+  ) return null;
   const report = state.propReports[EA_FACTORY_PROP_ID] || {};
   const dashboard = normalizeWorkflowDashboard(
     getModalSubject(),
@@ -28705,6 +31580,12 @@ async function createEaFactoryBuild(sourceRecordId, artifactKind, platform, brie
     (item) => item.sourceRecordId === sourceRecordId,
   );
   const domain = dashboard.domainData.eaFactory;
+  const catalog = state.modal.eaFactory.googleSheetCatalog || {};
+  const sourceBinding = eaFactoryCreateSourceBinding(
+    source,
+    catalog,
+    state.modal.eaFactory,
+  );
   if (
     !domain.authoritative
     || Boolean(domain.backendBusy)
@@ -28712,6 +31593,7 @@ async function createEaFactoryBuild(sourceRecordId, artifactKind, platform, brie
     || !sourceRecordId
     || !source
     || source.buildReady !== true
+    || !sourceBinding.ready
     || !normalizedPlatform
     || !source.compatiblePlatforms.includes(normalizedPlatform)
     || (normalizedArtifactKind === "custom_indicator" && normalizedPlatform === "tradingview")
@@ -28733,19 +31615,23 @@ async function createEaFactoryBuild(sourceRecordId, artifactKind, platform, brie
   state.modal.eaFactory.selectedBuildId = "";
   state.modal.eaFactory.selectedArtifactKind = normalizedArtifactKind;
   state.modal.eaFactory.selectedPlatform = normalizedPlatform;
-  const idempotencyKey = createWorkflowIdempotencyKey();
-  const response = await runEaFactoryRequest("create_build", () => postEaFactoryJson(
+  const requestPayload = {
+    sourceRecordId,
+    artifactKind: normalizedArtifactKind,
+    platform: normalizedPlatform,
+    brief: String(brief || "").trim().slice(0, 900),
+    ...(sourceBinding.required ? sourceBinding.fields : {}),
+  };
+  const createIdentity = eaFactoryCreateBuildRequestIdentity(requestPayload);
+  requestPayload.idempotencyKey = createIdentity.idempotencyKey;
+  const response = await runEaFactoryRequest("create_build", (signal) => postEaFactoryJson(
     "/api/props/right_server_racks/ea-factory/builds",
-    {
-      sourceRecordId,
-      artifactKind: normalizedArtifactKind,
-      platform: normalizedPlatform,
-      brief: String(brief || "").trim().slice(0, 900),
-      idempotencyKey,
-    },
+    requestPayload,
+    { signal },
   ), "สร้าง Build แล้ว ตรวจ Strategy Spec ก่อนกดทำขั้นถัดไป");
   const buildId = String(response?.build?.id || response?.build?.buildId || "").trim();
   if (buildId) {
+    completeEaFactoryCreateBuildRequest(createIdentity);
     state.modal.eaFactory.selectedBuildId = buildId;
     // Render page 2 now, before a one-click preflight can stop locally.
     // setWorkflowDashboardTab also persists the selected page snapshot.
@@ -28775,6 +31661,60 @@ function eaFactoryOneClickRequestKey(buildId, run = {}) {
   return state.modal.eaFactory.idempotencyKey;
 }
 
+function eaFactoryBacktestRestartRequestKey(buildId, runId) {
+  const signature = `restart-backtest:${buildId}:${runId}`;
+  if (
+    state.modal.eaFactory.oneClickBuildId !== buildId
+    || state.modal.eaFactory.formSignature !== signature
+    || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,199}$/.test(state.modal.eaFactory.idempotencyKey)
+  ) {
+    state.modal.eaFactory.oneClickBuildId = buildId;
+    state.modal.eaFactory.formSignature = signature;
+    state.modal.eaFactory.idempotencyKey = createWorkflowIdempotencyKey();
+  }
+  return state.modal.eaFactory.idempotencyKey;
+}
+
+async function restartEaFactoryBacktestOnly(buildIdOverride = "", runOverride = {}) {
+  const report = state.propReports[EA_FACTORY_PROP_ID] || {};
+  const dashboard = normalizeWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()), report);
+  const domain = dashboard.domainData.eaFactory;
+  const buildId = String(buildIdOverride || domain.activeBuild?.id || "").trim();
+  if (
+    typeof rejectEaFactoryMissingTopHeaderLocks === "function"
+    && rejectEaFactoryMissingTopHeaderLocks("restart_backtest", domain.activeBuild?.platform)
+  ) return null;
+  const run = runOverride && typeof runOverride === "object" ? runOverride : (domain.oneClick?.run || {});
+  const runId = String(run.runId || "").trim();
+  const endpoint = `/api/props/right_server_racks/ea-factory/builds/${encodeURIComponent(buildId)}/restart-backtest`;
+  const allowed = domain.authoritative === true
+    && domain.activeBuild?.id === buildId
+    && run.canRestartBacktest === true
+    && ["cancelled", "failed", "awaiting_visible_terminal"].includes(String(run.status || ""))
+    && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(buildId)
+    && /^ea-run-[a-zA-Z0-9._:-]+$/.test(runId)
+    && !domain.backendBusy
+    && !state.modal.eaFactory.inFlight;
+  if (!allowed) {
+    setEaFactoryActionState({
+      inFlight: false,
+      stageId: "restart_backtest",
+      message: "ยังเริ่ม Backtest ใหม่ไม่ได้ เพราะ Backend ยังไม่ยืนยันว่ารอบเดิมหยุดสนิทและ Source/Compile เดิมปลอดภัย",
+      tone: "warning",
+      messageKind: "local_preflight_rejected",
+      readModelStateKey: eaFactoryReadModelStateKey(state.eaFactoryReadModel.payload || domain),
+    });
+    return null;
+  }
+  const idempotencyKey = eaFactoryBacktestRestartRequestKey(buildId, runId);
+  setWorkflowDashboardTab(EA_FACTORY_PROP_ID, "progress");
+  return runEaFactoryRequest("restart_backtest", (signal) => postEaFactoryJson(
+    endpoint,
+    { runId, idempotencyKey },
+    { signal },
+  ), "เก็บรอบเดิมแล้ว • เริ่มเฉพาะ Backtest ใหม่โดยใช้ Source และ Compile เดิม", { terminalAware: true });
+}
+
 async function runEaFactoryOneClick(buildIdOverride = "", { allowFreshBuild = false } = {}) {
   const report = state.propReports[EA_FACTORY_PROP_ID] || {};
   const dashboard = normalizeWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()), report);
@@ -28794,7 +31734,7 @@ async function runEaFactoryOneClick(buildIdOverride = "", { allowFreshBuild = fa
   const matchingBuild = domain.activeBuild?.id === buildId ? domain.activeBuild : null;
   const capability = domain.oneClick || {};
   const run = matchingBuild?.oneClickRun || capability.run || {};
-  const active = ["queued", "running", "waiting_ai"].includes(run.status);
+  const active = ["queued", "running", "waiting_ai", "cancelling"].includes(run.status);
   const currentStage = domain.stages?.find((item) => item.id === domain.currentStageId);
   const permitted = allowFreshBuild
     || (run.status === "idle"
@@ -28805,14 +31745,23 @@ async function runEaFactoryOneClick(buildIdOverride = "", { allowFreshBuild = fa
   const terminalSelected = Boolean(capability.selectedTerminalId || domain.selectedTerminalId);
   const platform = matchingBuild?.platform || capability.selectedPlatform;
   if (
+    typeof rejectEaFactoryMissingTopHeaderLocks === "function"
+    && rejectEaFactoryMissingTopHeaderLocks("one_click_run", platform)
+  ) return null;
+  const platformSupported = capability.selectedPlatformSupported === true
+    && Array.isArray(capability.supportedVisiblePlatforms)
+    && capability.supportedVisiblePlatforms.includes(platform);
+  const platformLabel = eaFactoryPlatformLabel(platform) || "MT4 / MT5";
+  if (
     active
     || !domain.authoritative
     || Boolean(domain.backendBusy)
     || capability.enabled !== true
     || !terminalSelected
-    || platform !== "mt4"
-    || capability.selectedPlatformSupported !== true
+    || !platformSupported
+    || capability.terminalReady !== true
     || capability.terminalRunning !== true
+    || capability.visibleAdapterConnected !== true
     || capability.terminalProcessLaunchAllowed === true
     || capability.selectedPlatform !== platform
     || (!allowFreshBuild && !matchingBuild)
@@ -28824,8 +31773,8 @@ async function runEaFactoryOneClick(buildIdOverride = "", { allowFreshBuild = fa
         ? "Backend ยืนยันว่ามีงาน EA กำลังทำอยู่ กรุณาติดตามงานเดิมในหน้า 2 ก่อนเริ่มงานใหม่"
         : (active
           ? "Build นี้กำลังทำงานอยู่แล้ว กรุณาติดตามความคืบหน้าในหน้า 2"
-          : (!terminalSelected || capability.terminalRunning !== true
-            ? "ยังเริ่ม One-click ไม่ได้ เพราะ MT4 ที่เลือกยังไม่พร้อม กรุณาเปิด MT4 และตรวจการเชื่อมต่ออีกครั้ง"
+          : (!terminalSelected || capability.terminalReady !== true || capability.terminalRunning !== true || capability.visibleAdapterConnected !== true
+            ? `ยังเริ่ม One-click ไม่ได้ เพราะ ${platformLabel} ที่เลือกหรือ Visible Adapter ยังไม่พร้อม กรุณาเปิด ${platformLabel} และตรวจการเชื่อมต่ออีกครั้ง`
             : "เงื่อนไข One-click ของ Build นี้ยังไม่ผ่าน กรุณาดูเหตุผลและขั้นปัจจุบันในหน้า 2")));
     setEaFactoryActionState({
       inFlight: false,
@@ -28838,19 +31787,93 @@ async function runEaFactoryOneClick(buildIdOverride = "", { allowFreshBuild = fa
     return null;
   }
   const idempotencyKey = eaFactoryOneClickRequestKey(buildId, run);
-  return runEaFactoryRequest("one_click_run", () => postEaFactoryJson(
+  return runEaFactoryRequest("one_click_run", (signal) => postEaFactoryJson(
     `/api/props/right_server_racks/ea-factory/builds/${encodeURIComponent(buildId)}/run`,
     { idempotencyKey },
+    { signal },
   ), "Local Runner รับ One-click EA Flow แล้ว", { terminalAware: true });
 }
 
-async function createAndRunEaFactoryBuild(sourceRecordId, platform, brief) {
+function cancelEaFactorySubmittingRequest() {
+  const controller = eaFactoryActiveActionAbortController;
+  if (
+    !(controller instanceof AbortController)
+    || controller.signal.aborted
+    || state.modal.eaFactory.inFlight !== true
+  ) return false;
+  const error = new Error("ผู้ใช้กดหยุดคำขอ EA Factory ที่กำลังส่ง");
+  error.name = "AbortError";
+  error.kind = "ea_factory_operator_cancelled_request";
+  controller.abort(error);
+  setEaFactoryActionState({
+    inFlight: true,
+    stageId: "cancel_submitting",
+    message: "รับคำสั่งหยุดแล้ว • กำลังยกเลิกการรอคำตอบและตรวจว่ามี Run ถูกสร้างใน Backend หรือไม่",
+    tone: "working",
+    messageKind: "operator_cancel_requested",
+  });
+  return true;
+}
+
+async function cancelEaFactoryOneClick(buildIdOverride = "", runOverride = {}) {
+  const report = state.propReports[EA_FACTORY_PROP_ID] || {};
+  const dashboard = normalizeWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()), report);
+  const domain = dashboard.domainData.eaFactory;
+  const buildId = String(buildIdOverride || domain.activeBuild?.id || "").trim();
+  const run = runOverride && typeof runOverride === "object" ? runOverride : (domain.oneClick?.run || {});
+  const runId = String(run.runId || "").trim();
+  const idempotencyKey = String(run.idempotencyKey || "").trim();
+  const canCancel = domain.authoritative === true
+    && run.canCancel === true
+    && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(buildId)
+    && /^ea-run-[a-zA-Z0-9._:-]+$/.test(runId)
+    && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,199}$/.test(idempotencyKey);
+  if (!canCancel || state.modal.eaFactory.inFlight) {
+    setEaFactoryActionState({
+      inFlight: false,
+      stageId: "cancel_one_click",
+      message: "ยังหยุดงานไม่ได้ เพราะ Backend ยังไม่ยืนยัน Build, Run หรือสิทธิ์ยกเลิกของงานปัจจุบัน",
+      tone: "warning",
+      messageKind: "local_preflight_rejected",
+      readModelStateKey: eaFactoryReadModelStateKey(state.eaFactoryReadModel.payload || domain),
+    });
+    return null;
+  }
+  setWorkflowDashboardTab(EA_FACTORY_PROP_ID, "progress");
+  return runEaFactoryRequest("cancel_one_click", (signal) => postEaFactoryJson(
+    `/api/props/right_server_racks/ea-factory/builds/${encodeURIComponent(buildId)}/cancel`,
+    { runId, idempotencyKey },
+    { signal },
+  ), "Backend ยืนยันคำสั่งหยุดงาน EA Factory แล้ว", { terminalAware: true });
+}
+
+async function createAndRunEaFactoryBuild(sourceRecordId, artifactKind, platform, brief) {
   const normalizedPlatform = normalizeEaFactoryPlatform(platform);
-  if (normalizedPlatform !== "mt4") {
+  const normalizedArtifactKind = normalizeEaFactoryArtifactKind(artifactKind);
+  if (
+    typeof rejectEaFactoryMissingTopHeaderLocks === "function"
+    && rejectEaFactoryMissingTopHeaderLocks("one_click_create_run", normalizedPlatform)
+  ) return null;
+  const report = state.propReports[EA_FACTORY_PROP_ID] || {};
+  const dashboard = normalizeWorkflowDashboard(getModalSubject(), getPropertyRole(getModalSubject()), report);
+  const domain = dashboard.domainData.eaFactory;
+  const capability = domain.oneClick || {};
+  const platformSupported = capability.selectedPlatform === normalizedPlatform
+    && capability.selectedPlatformSupported === true
+    && Array.isArray(capability.supportedVisiblePlatforms)
+    && capability.supportedVisiblePlatforms.includes(normalizedPlatform)
+    && capability.terminalReady === true
+    && capability.visibleAdapterConnected === true;
+  if (
+    normalizedArtifactKind !== "expert_advisor"
+    || !["mt4", "mt5"].includes(normalizedPlatform)
+    || !platformSupported
+  ) {
+    const platformLabel = normalizedPlatform ? normalizedPlatform.toUpperCase() : "แพลตฟอร์มนี้";
     setEaFactoryActionState({
       inFlight: false,
       stageId: "one_click_create_run",
-      message: "One-click EA รองรับ MT4 เท่านั้น กรุณาเลือก MT4 หรือใช้ตัวเลือกขั้นสูงสำหรับแพลตฟอร์มอื่น",
+      message: `${platformLabel} ยังไม่ผ่าน One-click capability จาก Backend กรุณาตรวจ supportedVisiblePlatforms, selectedPlatformSupported, terminalReady และ visibleAdapterConnected หรือใช้ตัวเลือกขั้นสูง`,
       tone: "warning",
       messageKind: "local_preflight_rejected",
       readModelStateKey: eaFactoryReadModelStateKey(state.eaFactoryReadModel.payload || {}),
@@ -28859,7 +31882,7 @@ async function createAndRunEaFactoryBuild(sourceRecordId, platform, brief) {
   }
   const created = await createEaFactoryBuild(
     sourceRecordId,
-    "expert_advisor",
+    normalizedArtifactKind,
     normalizedPlatform,
     brief,
   );
@@ -28875,6 +31898,10 @@ async function advanceEaFactoryStage(uiStageId) {
   const domain = dashboard.domainData.eaFactory;
   const stage = domain.stages.find((item) => item.id === uiStageId);
   const buildId = domain.activeBuild?.id;
+  if (
+    typeof rejectEaFactoryMissingTopHeaderLocks === "function"
+    && rejectEaFactoryMissingTopHeaderLocks(uiStageId, domain.activeBuild?.platform)
+  ) return null;
   if (
     domain.authoritative !== true
     || Boolean(domain.backendBusy)
@@ -28908,9 +31935,10 @@ async function advanceEaFactoryStage(uiStageId) {
     return null;
   }
   const idempotencyKey = createWorkflowIdempotencyKey();
-  return runEaFactoryRequest(uiStageId, () => postEaFactoryJson(
+  return runEaFactoryRequest(uiStageId, (signal) => postEaFactoryJson(
     `/api/props/right_server_racks/ea-factory/builds/${encodeURIComponent(buildId)}/advance`,
     { stageId: stage.backendId, idempotencyKey },
+    { signal },
   ), `Local Runner รับขั้น ${EA_FACTORY_STAGE_COPY[uiStageId]?.titleTh || uiStageId} แล้ว`, { terminalAware: true });
 }
 
@@ -28920,6 +31948,10 @@ async function retryEaFactoryStage(uiStageId) {
   const domain = dashboard.domainData.eaFactory;
   const stage = domain.stages.find((item) => item.id === uiStageId);
   const buildId = domain.activeBuild?.id;
+  if (
+    typeof rejectEaFactoryMissingTopHeaderLocks === "function"
+    && rejectEaFactoryMissingTopHeaderLocks(uiStageId, domain.activeBuild?.platform)
+  ) return null;
   if (
     domain.authoritative !== true
     || Boolean(domain.backendBusy)
@@ -28950,13 +31982,14 @@ async function retryEaFactoryStage(uiStageId) {
     return null;
   }
   const idempotencyKey = createWorkflowIdempotencyKey();
-  return runEaFactoryRequest(uiStageId, () => postEaFactoryJson(
+  return runEaFactoryRequest(uiStageId, (signal) => postEaFactoryJson(
     `/api/props/right_server_racks/ea-factory/builds/${encodeURIComponent(buildId)}/retry`,
     {
       stageId: stage.backendId,
       failedMissionId: stage.missionId,
       idempotencyKey,
     },
+    { signal },
   ), "Local Runner รับคำขอลองสร้าง Source ใหม่แล้ว", { terminalAware: true });
 }
 
@@ -29971,18 +33004,18 @@ function tradingResearchBlueprintObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
-function tradingResearchStrategyBriefField(root, aliases, { legacy = false } = {}) {
+function tradingResearchStrategyBriefField(root, aliases, { legacy = false, limit = 8000 } = {}) {
   for (const alias of aliases) {
     if (!Object.prototype.hasOwnProperty.call(root, alias)) continue;
     const value = root[alias];
     if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-      return safeDashboardDisplayText(value, "", { limit: 5000, markTruncated: true });
+      return safeDashboardDisplayText(value, "", { limit, markTruncated: true });
     }
     if (legacy && value !== null && value !== undefined) {
       return safeDashboardDisplayText(
         eaFactoryReadableValue(value, "", 60),
         "",
-        { limit: 5000, markTruncated: true },
+        { limit, markTruncated: true },
       );
     }
   }
@@ -29993,7 +33026,10 @@ function normalizeTradingResearchStrategyBrief(value, { legacy = false } = {}) {
   const root = tradingResearchBlueprintObject(value);
   const brief = {};
   TRADING_RESEARCH_STRATEGY_BRIEF_FIELDS.forEach((field) => {
-    brief[field.key] = tradingResearchStrategyBriefField(root, field.aliases, { legacy });
+    brief[field.key] = tradingResearchStrategyBriefField(root, field.aliases, {
+      legacy,
+      limit: field.key === "record_id" ? 160 : 8000,
+    });
   });
   return brief;
 }
@@ -30002,7 +33038,7 @@ function tradingResearchBriefJoined(value, fallback) {
   return safeDashboardDisplayText(
     eaFactoryReadableValue(value, fallback, 80),
     fallback,
-    { limit: 5000, markTruncated: true },
+    { limit: 8000, markTruncated: true },
   );
 }
 
@@ -31293,7 +34329,11 @@ function createTradingResearchStrategyBrief(readModel, report = {}) {
   root.className = "workflow-research-strategy-brief";
   root.dataset.mode = model.canonical ? "canonical" : (model.legacy ? "legacy" : "unverified");
   eyebrow.textContent = "EA STRATEGY BRIEF • 10 หัวข้อ";
-  title.textContent = safeDashboardDisplayText(brief.system_name, "ระบบเทรดที่เลือก");
+  title.textContent = safeDashboardDisplayText(
+    brief.system_name,
+    "ระบบเทรดที่เลือก",
+    { limit: 8000, markTruncated: true },
+  );
   detail.textContent = model.legacy
     ? "ข้อมูลรุ่นเดิมถูกย่อเป็น 10 หัวข้อเพื่อให้อ่านได้เท่านั้น ต้องวิจัย Revision ใหม่ก่อนบันทึกหรือส่งโรงงาน EA"
     : `Schema ${safeDashboardDisplayText(model.schemaVersion, TRADING_RESEARCH_STRATEGY_BRIEF_SCHEMA_VERSION)} • Report ${safeDashboardDisplayText(report.id, "ไม่ระบุ")} • Timeframe ในภาพรวมเป็นข้อมูลต้นทาง ไม่ได้ล็อกการนำไปใช้งาน`;
@@ -31313,7 +34353,7 @@ function createTradingResearchStrategyBrief(readModel, report = {}) {
     value.textContent = safeDashboardDisplayText(
       brief[field.key],
       "Backend ยังไม่ระบุข้อมูลหัวข้อนี้",
-      { limit: 5000, markTruncated: true },
+      { limit: field.key === "record_id" ? 160 : 8000, markTruncated: true },
     );
     card.append(label, value);
     grid.appendChild(card);
@@ -32363,12 +35403,18 @@ function createEaOptimizationLabStageHeader(tabId, domain = {}) {
 
 function getEaOptimizationLabTerminalGate(domain = {}, session = state.modal.eaOptimizationLab) {
   const effectiveTerminalId = String(domain.selectedTerminal?.candidateId || "");
+  const backendSelected = domain.selectedTerminal;
   const candidate = (Array.isArray(domain.terminals) ? domain.terminals : []).find((item) => (
     item.candidateId === effectiveTerminalId
     && item.detected === true
     && (!session.platform || item.platform === session.platform)
-  )) || null;
-  const backendSelected = domain.selectedTerminal;
+  )) || (
+    backendSelected?.candidateId === effectiveTerminalId
+    && backendSelected?.detected === true
+    && (!session.platform || backendSelected?.platform === session.platform)
+      ? backendSelected
+      : null
+  );
   const backendBound = Boolean(
     candidate
     && backendSelected?.candidateId === candidate.candidateId
@@ -32379,7 +35425,14 @@ function getEaOptimizationLabTerminalGate(domain = {}, session = state.modal.eaO
     candidate,
     effectiveTerminalId,
     backendBound,
-    ready: domain.adapterReady === true && backendBound,
+    ready: domain.authoritative === true
+      && domain.readModelStale !== true
+      && session.platform === "MT5"
+      && domain.adapterReady === true
+      && domain.terminalReady === true
+      && domain.selectedPlatformSupported === true
+      && domain.visibleAdapterConnected === true
+      && backendBound,
   };
 }
 
@@ -32391,9 +35444,16 @@ function renderEaOptimizationLabStatusStrip(section, domain = {}) {
   const activeInputs = session.inputs.filter((input) => input.optimize);
   const facts = [
     ["Platform", session.platform || "ยังไม่เลือก"],
-    ["EA", session.eaFile?.name || (session.sourceReportId ? "เลือกจาก Backend แล้ว" : "ยังไม่เลือก")],
+    ["Execution", session.platform === "MT5"
+      ? "MT5 Visible Strategy Tester"
+      : (session.platform === "MT4" ? "MT4 Plan-only • ไม่สั่งรัน" : "เลือก MT5 เพื่อรันจริง")],
+    ["EA Preview", session.eaFile?.name || (session.sourceReportId ? "เลือก Source สำหรับวางแผนแล้ว" : "ยังไม่เลือก")],
+    ["Run Build", session.selectedBuildId || "ยังไม่เลือก completed+immutable Build"],
     ["Inputs", session.inputs.length ? `${session.inputs.length} ค่า • Optimize ${activeInputs.length}` : "ยังไม่อ่าน Inputs"],
     ["Terminal", selectedTerminal?.labelTh || "ยังไม่เลือก Terminal"],
+    ["Session", domain.displaySession
+      ? `${domain.displaySession.sessionId} • ${domain.displaySession.status}`
+      : "ยังไม่มี Session จาก Backend"],
   ];
   strip.className = "ea-optimization-lab-status-strip";
   facts.forEach(([labelText, valueText]) => {
@@ -32532,18 +35592,44 @@ function renderEaOptimizationLabSourceStage(section, domain, dashboard) {
     [["", "ยังไม่เลือก Source จาก Backend"], ...backendSources.map((item) => [item.value, item.label])],
     (value) => {
       session.sourceReportId = value;
-      session.plan = null;
+      invalidateEaOptimizationLabExecutionDraft(session);
       rerenderEaOptimizationLab();
     },
   );
   addSelect(
     "แพลตฟอร์ม",
     session.platform,
-    [["", "เลือก MT4 หรือ MT5"], ["MT4", "MT4 / MQL4"], ["MT5", "MT5 / MQL5"]],
+    [["", "เลือกแพลตฟอร์ม"], ["MT4", "MT4 / MQL4 • วางแผนเท่านั้น"], ["MT5", "MT5 / MQL5 • รันจริงผ่าน Visible Tester"]],
     (value) => {
       session.platform = value;
       session.selectedTerminalId = "";
-      session.plan = null;
+      session.selectedBuildId = "";
+      invalidateEaOptimizationLabExecutionDraft(session);
+      rerenderEaOptimizationLab();
+    },
+  );
+  const executionBuilds = (Array.isArray(domain.builds) ? domain.builds : [])
+    .filter((build) => (
+      build.eligible === true
+      && build.platform === "MT5"
+      && (!session.platform || build.platform === session.platform)
+    ));
+  if (!executionBuilds.some((build) => build.buildId === session.selectedBuildId)) {
+    session.selectedBuildId = "";
+  }
+  addSelect(
+    "EA Factory Build สำหรับรันจริง (เฉพาะ MT5)",
+    session.selectedBuildId,
+    [
+      ["", "เลือก Build ที่ completed + immutable"],
+      ...executionBuilds.map((build) => [
+        build.buildId,
+        `${build.label} • ${build.platform} • ${build.buildId}`,
+      ]),
+    ],
+    (value) => {
+      session.selectedBuildId = value;
+      invalidateEaOptimizationLabExecutionDraft(session);
       rerenderEaOptimizationLab();
     },
   );
@@ -32580,7 +35666,7 @@ function renderEaOptimizationLabSourceStage(section, domain, dashboard) {
     ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"].map((value) => [value, value]),
     (value) => {
       session.timeframe = value;
-      session.plan = null;
+      invalidateEaOptimizationLabExecutionDraft(session);
     },
   );
   const symbolLabel = document.createElement("label");
@@ -32594,13 +35680,13 @@ function renderEaOptimizationLabSourceStage(section, domain, dashboard) {
   symbolInput.dataset.eaLabFocusKey = "setup-symbol";
   symbolInput.addEventListener("input", () => {
     session.symbol = symbolInput.value.trim().toUpperCase();
-    session.plan = null;
+    invalidateEaOptimizationLabExecutionDraft(session);
   });
   symbolLabel.append(symbolCaption, symbolInput);
   setupGrid.appendChild(symbolLabel);
   setupCard.append(setupTitle, setupGrid);
   const backendSourceHelp = document.createElement("p");
-  backendSourceHelp.textContent = "Source จาก Backend ใช้ผูก lineage เท่านั้นในเวอร์ชันนี้ • หากต้องการเห็น Inputs ต้องแนบ .mq4/.mq5 หรือ .set สำหรับ Preview เพิ่ม";
+  backendSourceHelp.textContent = "ไฟล์ .mq4/.mq5/.set ใน Browser ใช้อ่าน Inputs เพื่อวางแผนเท่านั้น • MT4 เป็น Plan-only และไม่มีปุ่มรันจริง • MT5 Start ส่งเฉพาะ buildId ของ EA Factory Build ที่ Backend ยืนยัน completed+immutable พร้อมค่าจาก Draft ที่ตรวจแล้ว";
   setupCard.appendChild(backendSourceHelp);
   const next = createEaOptimizationLabButton(
     "ไปตั้งค่า Inputs / Ranges",
@@ -32621,7 +35707,9 @@ function renderEaOptimizationLabSourceStage(section, domain, dashboard) {
   const terminalGate = getEaOptimizationLabTerminalGate(domain, session);
   const checks = [
     [Boolean(session.eaFile || session.sourceReportId), "เลือก EA แล้ว", "ยังไม่ได้เลือก EA"],
+    [Boolean(eaOptimizationLabSelectedBuild(domain, session)), "เลือก Build ที่ Backend ยืนยันแล้ว", "ยังไม่ได้เลือก Build completed+immutable ที่ตรงแพลตฟอร์ม"],
     [Boolean(session.platform), "เลือกแพลตฟอร์มแล้ว", "ยังไม่ได้เลือก MT4/MT5"],
+    [session.platform === "MT5", "แพลตฟอร์มรองรับ Execution จริง", "MT4 รองรับวางแผนเท่านั้น • การรันจริงเปิดเฉพาะ MT5"],
     [Boolean(!filePlatform || filePlatform === session.platform), "Platform ตรงกับไฟล์", "Platform ไม่ตรงกับนามสกุลไฟล์"],
     [
       !["indicator", "script"].includes(session.programKind)
@@ -32706,7 +35794,7 @@ function renderEaOptimizationLabInputsStage(section) {
     toggle.setAttribute("aria-label", `เลือก ${input.name} สำหรับ Optimization`);
     toggle.addEventListener("change", () => {
       session.inputs[index].optimize = input.canOptimize === false ? false : toggle.checked;
-      session.plan = null;
+      invalidateEaOptimizationLabExecutionDraft(session);
       rerenderEaOptimizationLab();
     });
     toggleCell.appendChild(toggle);
@@ -32739,11 +35827,11 @@ function renderEaOptimizationLabInputsStage(section) {
       control.setAttribute("aria-invalid", String(input.optimize && eaOptimizationLabRangeCount(input) < 1));
       control.addEventListener("input", () => {
         session.inputs[index][field] = control.value === "" ? null : Number(control.value);
-        session.plan = null;
+        invalidateEaOptimizationLabExecutionDraft(session);
       });
       control.addEventListener("change", () => {
         session.inputs[index][field] = control.value === "" ? null : Number(control.value);
-        session.plan = null;
+        invalidateEaOptimizationLabExecutionDraft(session);
         rerenderEaOptimizationLab();
       });
       cell.appendChild(control);
@@ -32763,11 +35851,11 @@ function renderEaOptimizationLabInputsStage(section) {
       values.setAttribute("aria-invalid", String(input.optimize && eaOptimizationLabRangeCount(input) < 1));
       values.addEventListener("input", () => {
         session.inputs[index].categoryValues = [...new Set(values.value.split(/[,\n]+/).map((value) => value.trim()).filter(Boolean))].slice(0, 30);
-        session.plan = null;
+        invalidateEaOptimizationLabExecutionDraft(session);
       });
       values.addEventListener("change", () => {
         session.inputs[index].categoryValues = [...new Set(values.value.split(/[,\n]+/).map((value) => value.trim()).filter(Boolean))].slice(0, 30);
-        session.plan = null;
+        invalidateEaOptimizationLabExecutionDraft(session);
         rerenderEaOptimizationLab();
       });
       stopCell.appendChild(values);
@@ -32782,11 +35870,11 @@ function renderEaOptimizationLabInputsStage(section) {
       control.setAttribute("aria-invalid", String(input.optimize && eaOptimizationLabRangeCount(input) < 1));
       control.addEventListener("input", () => {
         session.inputs[index].stop = control.value === "" ? null : Number(control.value);
-        session.plan = null;
+        invalidateEaOptimizationLabExecutionDraft(session);
       });
       control.addEventListener("change", () => {
         session.inputs[index].stop = control.value === "" ? null : Number(control.value);
-        session.plan = null;
+        invalidateEaOptimizationLabExecutionDraft(session);
         rerenderEaOptimizationLab();
       });
       stopCell.appendChild(control);
@@ -32815,7 +35903,7 @@ function renderEaOptimizationLabInputsStage(section) {
     () => setWorkflowDashboardTab(EA_OPTIMIZATION_LAB_PROP_ID, "backtest", { focus: true }),
   ));
   actions.appendChild(createEaOptimizationLabButton(
-    "ไปวางแผนหลายรอบ",
+    "ไปวางแผน Session",
     () => setWorkflowDashboardTab(EA_OPTIMIZATION_LAB_PROP_ID, "ea_discovery", { focus: true }),
     { primary: true, disabled: !optimized.length },
   ));
@@ -32876,6 +35964,106 @@ function createEaOptimizationRoundCard(round, ready) {
   return card;
 }
 
+function renderEaOptimizationLabBackendSession(section, domain = {}) {
+  const backendSession = domain.displaySession;
+  const readModelStale = domain.readModelStale === true || eaOptimizationLabReadModelIsStale();
+  if (readModelStale) {
+    section.appendChild(createEaOptimizationLabNotice(
+      "error",
+      "สถานะ Backend เก่าหรือ Poll ไม่สำเร็จ • ปิดคำสั่งทั้งหมด",
+      domain.readModelError || "ยังแสดง Session ที่ cache ไว้เพื่อไม่ให้หลักฐานหาย แต่ห้าม Start, Resume หรือ Cancel จนกว่าจะอ่าน Backend สำเร็จอีกครั้ง",
+    ));
+  }
+  if (!backendSession) {
+    return;
+  }
+  const card = document.createElement("section");
+  const title = document.createElement("h5");
+  const facts = document.createElement("dl");
+  const progress = document.createElement("progress");
+  const actions = document.createElement("div");
+  card.className = "ea-optimization-lab-card ea-optimization-lab-backend-session";
+  card.dataset.sessionStatus = backendSession.status;
+  title.textContent = `Backend Session ${backendSession.sessionId}`;
+  facts.className = "ea-factory-stage-facts";
+  appendEaFactoryFact(facts, "สถานะ", backendSession.status);
+  appendEaFactoryFact(facts, "ขั้นปัจจุบัน", backendSession.stage);
+  appendEaFactoryFact(facts, "ความคืบหน้า", `${backendSession.progressPercent}%`);
+  appendEaFactoryFact(facts, "Build", backendSession.buildId || "Backend ยังไม่ส่ง buildId");
+  if (backendSession.terminalId) appendEaFactoryFact(facts, "Terminal", backendSession.terminalId);
+  if (backendSession.updatedAt) appendEaFactoryFact(facts, "อัปเดตล่าสุด", formatThaiDateTime(backendSession.updatedAt));
+  progress.max = 100;
+  progress.value = backendSession.progressPercent;
+  progress.setAttribute("aria-label", `Optimization progress ${backendSession.progressPercent}%`);
+  card.append(title, facts, progress);
+  if (backendSession.message) {
+    card.appendChild(createEaOptimizationLabNotice(
+      eaOptimizationLabSessionIsActive(backendSession) ? "working" : "neutral",
+      "ข้อความจาก Backend",
+      backendSession.message,
+    ));
+  }
+  if (backendSession.failureCode || backendSession.failureMessage || ["failed", "blocked"].includes(backendSession.status)) {
+    card.appendChild(createEaOptimizationLabNotice(
+      "error",
+      `Session หยุด${backendSession.failureCode ? ` • ${backendSession.failureCode}` : ""}`,
+      backendSession.failureMessage || backendSession.message || "Backend ยังไม่ส่งรายละเอียดข้อผิดพลาด",
+    ));
+  }
+  if (backendSession.status === "cancelled") {
+    card.appendChild(createEaOptimizationLabNotice(
+      "warning",
+      "Session ถูกยกเลิกแล้ว",
+      backendSession.cancelReason || "Backend ยืนยันสถานะ cancelled โดยไม่ปิด Terminal และไม่อ้างว่าหยุด Tester เกินหลักฐานที่มี",
+    ));
+  }
+  if (backendSession.status === "completed") {
+    const verifiedRounds = backendSession.evidenceRecords.filter((entry) => entry.verified).length;
+    card.appendChild(createEaOptimizationLabNotice(
+      verifiedRounds === backendSession.evidenceRecords.length && verifiedRounds > 0 ? "success" : "warning",
+      "Session เสร็จสิ้น • เก็บหลักฐานไว้ให้ตรวจต่อ",
+      backendSession.evidenceRecords.length
+        ? `${verifiedRounds}/${backendSession.evidenceRecords.length} รอบมี Report, Manifest, Visible Tester และ Evidence Document hash ครบ`
+        : "Backend ยังไม่ส่ง Evidence record ที่ Dashboard ตรวจรูปแบบได้",
+    ));
+  }
+  if (backendSession.evidence.length) {
+    const evidenceTitle = document.createElement("strong");
+    const evidenceList = document.createElement("ul");
+    evidenceTitle.textContent = "หลักฐานจาก Backend";
+    backendSession.evidence.forEach((entry) => {
+      const item = document.createElement("li");
+      item.textContent = entry;
+      evidenceList.appendChild(item);
+    });
+    card.append(evidenceTitle, evidenceList);
+  }
+  const latestEvidence = backendSession.evidenceRecords.at(-1);
+  if (latestEvidence) {
+    appendEaFactoryFact(facts, "Pass", latestEvidence.passCount ?? "—");
+    appendEaFactoryFact(facts, "Report SHA-256", latestEvidence.report?.sha256 || "—");
+    appendEaFactoryFact(facts, "Manifest SHA-256", latestEvidence.manifest?.sha256 || "—");
+    appendEaFactoryFact(facts, "Visible Evidence SHA-256", latestEvidence.visibleEvidenceSha256 || "—");
+  }
+  actions.className = "ea-optimization-lab-actions";
+  if (backendSession.canResume) {
+    actions.appendChild(createEaOptimizationLabButton(
+      "ทำ Session เดิมต่อ",
+      () => void resumeEaOptimizationLabSession(backendSession.sessionId),
+      { primary: true, disabled: state.eaOptimizationLabReadModel.actionInFlight || readModelStale },
+    ));
+  }
+  if (backendSession.canCancel) {
+    actions.appendChild(createEaOptimizationLabButton(
+      "ยกเลิก Session",
+      () => void cancelEaOptimizationLabSession(backendSession.sessionId),
+      { disabled: state.eaOptimizationLabReadModel.actionInFlight || readModelStale },
+    ));
+  }
+  if (actions.childElementCount) card.appendChild(actions);
+  section.appendChild(card);
+}
+
 function renderEaOptimizationLabRoundsStage(section, domain) {
   const session = state.modal.eaOptimizationLab;
   const terminalGate = getEaOptimizationLabTerminalGate(domain, session);
@@ -32885,26 +36073,23 @@ function renderEaOptimizationLabRoundsStage(section, domain) {
   settings.className = "ea-optimization-lab-card";
   title.textContent = "เงื่อนไขการทดลอง";
   grid.className = "ea-optimization-lab-plan-grid";
-  appendEaOptimizationLabPlanField(grid, "วันเริ่มทดสอบ", "date", session.dateFrom, (value) => { session.dateFrom = value; session.plan = null; });
-  appendEaOptimizationLabPlanField(grid, "วันสิ้นสุดทดสอบ", "date", session.dateTo, (value) => { session.dateTo = value; session.plan = null; });
-  appendEaOptimizationLabPlanField(grid, "Validation", "select", session.validationMethod, (value) => { session.validationMethod = value; session.plan = null; }, [
-    ["train_test", "Train / Test Split"],
-    ["walk_forward", "Walk-forward"],
-    ["out_of_sample", "Out-of-sample"],
-    ["monte_carlo", "Monte Carlo"],
+  appendEaOptimizationLabPlanField(grid, "วันเริ่มทดสอบ", "date", session.dateFrom, (value) => { session.dateFrom = value; invalidateEaOptimizationLabExecutionDraft(session); });
+  appendEaOptimizationLabPlanField(grid, "วันสิ้นสุดทดสอบ", "date", session.dateTo, (value) => { session.dateTo = value; invalidateEaOptimizationLabExecutionDraft(session); });
+  appendEaOptimizationLabPlanField(grid, "รูปแบบการรัน", "select", "single_verified_run", (value) => { session.validationMethod = value; invalidateEaOptimizationLabExecutionDraft(session); }, [
+    ["single_verified_run", "1 Session จริง • อย่างน้อย 2 Pass พร้อมหลักฐาน MT5"],
   ]);
-  appendEaOptimizationLabPlanField(grid, "จำนวนรอบสูงสุด", "select", session.roundCount, (value) => { session.roundCount = value; session.plan = null; }, [1, 2, 3, 4, 5].map((value) => [String(value), `${value} รอบ`]));
-  appendEaOptimizationLabPlanField(grid, "เป้าหมายกำไร (%)", "number", session.targetProfitPercent, (value) => { session.targetProfitPercent = value; session.plan = null; });
-  appendEaOptimizationLabPlanField(grid, "Drawdown สูงสุด (%)", "number", session.maxDrawdownPercent, (value) => { session.maxDrawdownPercent = value; session.plan = null; });
-  appendEaOptimizationLabPlanField(grid, "จำนวน Trade ขั้นต่ำ", "number", session.minimumTrades, (value) => { session.minimumTrades = value; session.plan = null; });
+  appendEaOptimizationLabPlanField(grid, "จำนวนรอบต่อ Session", "select", "1", (value) => { session.roundCount = value; invalidateEaOptimizationLabExecutionDraft(session); }, [
+    ["1", "1 Session (รอบปรับถัดไปเริ่มจาก Report จริง)"],
+  ]);
+  appendEaOptimizationLabPlanField(grid, "เป้าหมายกำไร (%)", "number", session.targetProfitPercent, (value) => { session.targetProfitPercent = value; invalidateEaOptimizationLabExecutionDraft(session); });
+  appendEaOptimizationLabPlanField(grid, "Drawdown สูงสุด (%)", "number", session.maxDrawdownPercent, (value) => { session.maxDrawdownPercent = value; invalidateEaOptimizationLabExecutionDraft(session); });
+  appendEaOptimizationLabPlanField(grid, "จำนวน Trade ขั้นต่ำ", "number", session.minimumTrades, (value) => { session.minimumTrades = value; invalidateEaOptimizationLabExecutionDraft(session); });
   settings.append(title, grid);
   section.appendChild(settings);
   const draft = session.plan?.ok ? session.plan : eaOptimizationLabBuildPlan(session, domain);
   const rounds = draft.ok ? draft.rounds : [
     { index: 1, title: "Broad Scan", detail: "รอข้อมูล EA, Inputs และช่วงทดสอบให้ครบ", gate: "กรอกข้อมูลที่ยังขาดก่อนบันทึกแผน" },
-    { index: 2, title: "Stable Cluster Zoom / Split", detail: "สร้างหลังมี Report รอบแรกเท่านั้น", gate: "ห้ามสร้างช่วงจาก Top Profit จุดเดียว" },
-    { index: 3, title: "Out-of-sample Confirmation", detail: "ยืนยัน Candidate บนข้อมูลที่ไม่ใช้ Optimize", gate: "ต้องมีหลักฐาน Tester จริง" },
-  ].slice(0, Math.max(1, Number.parseInt(session.roundCount, 10) || 3));
+  ];
   const timeline = document.createElement("div");
   timeline.className = "ea-optimization-lab-rounds";
   rounds.forEach((round, index) => timeline.appendChild(createEaOptimizationRoundCard(round, draft.ok && index === 0)));
@@ -32919,19 +36104,44 @@ function renderEaOptimizationLabRoundsStage(section, domain) {
     section.appendChild(createEaOptimizationLabNotice(
       session.plan?.ok ? "success" : "ready",
       session.plan?.ok ? "บันทึก Draft Plan แล้ว" : "พร้อมบันทึก Draft Plan",
-      `${draft.ranges.length} Inputs • ${draft.combinations} combinations ใน Current Bands • รอบถัดไปจะสร้างหลังได้รับ Report จริงของรอบก่อนหน้า`,
+      `${draft.ranges.length} Inputs • ${draft.combinations} combinations ใน Current Bands • Session นี้ต้องมีอย่างน้อย 2 Pass จริง และรอบปรับถัดไปต้องสร้างจาก Report ที่ Backend ยืนยันแล้ว`,
     ));
   }
+  renderEaOptimizationLabBackendSession(section, domain);
+  const executableBuild = eaOptimizationLabSelectedBuild(domain, session);
+  const backendSessionActive = eaOptimizationLabSessionIsActive(domain.activeSession);
+  const actionInFlight = state.eaOptimizationLabReadModel.actionInFlight === true;
+  const readModelStale = domain.readModelStale === true || eaOptimizationLabReadModelIsStale();
+  const startReady = draft.ok === true
+    && session.platform === "MT5"
+    && Boolean(executableBuild)
+    && terminalGate.ready === true
+    && domain.authoritative === true
+    && domain.canStart === true
+    && domain.busy !== true
+    && !backendSessionActive
+    && !readModelStale
+    && !actionInFlight;
   const runGate = document.createElement("div");
   const runTitle = document.createElement("strong");
   const runCopy = document.createElement("p");
   const buttons = document.createElement("div");
   runGate.className = "ea-optimization-lab-run-gate";
-  runGate.dataset.ready = String(terminalGate.ready);
-  runTitle.textContent = terminalGate.ready ? "Terminal และ Adapter พร้อมตรวจขั้นรัน" : "ยังไม่เปิด Strategy Tester จริง";
-  runCopy.textContent = terminalGate.ready
-    ? "ก่อนรันจริงยังต้องยืนยัน Source ที่ Backend ลงทะเบียน, Terminal, Output workspace, idempotency และหลักฐาน Report"
-    : `${domain.adapterDetail} • ห้องนี้จะไม่สร้างผลจำลองหรืออ้างว่ารัน MT4/MT5 แล้ว`;
+  runGate.dataset.ready = String(startReady);
+  runTitle.textContent = session.platform === "MT4"
+    ? "MT4 รองรับวางแผนเท่านั้น • ไม่มี Execution"
+    : backendSessionActive
+    ? "Optimization Session กำลังทำงาน"
+    : (startReady ? "พร้อมเริ่ม Optimization จริง" : "ยังไม่ผ่าน Gate สำหรับ Strategy Tester จริง");
+  runCopy.textContent = session.platform === "MT4"
+    ? "คุณบันทึก Current Bands และแผนทดสอบ MT4 ได้ แต่รุ่นนี้ไม่ส่งคำสั่ง Start/Resume/Cancel ไปยัง MT4; การรันจริงรองรับเฉพาะ MT5 Visible Strategy Tester"
+    : readModelStale
+      ? "สถานะ Backend เก่าหรือ Poll ล้มเหลว ระบบจึงปิด Start แบบ fail-closed จนกว่าจะอ่านสถานะล่าสุดสำเร็จ"
+      : backendSessionActive
+    ? `ติดตาม ${domain.activeSession.sessionId} • ${domain.activeSession.stage} • ${domain.activeSession.progressPercent}% และปิดการเริ่มซ้ำจนกว่า Backend จะยืนยันสถานะสิ้นสุด`
+    : (startReady
+      ? `จะรัน Build ${executableBuild.buildId} ซึ่ง Backend ยืนยัน completed+immutable โดยส่งเฉพาะค่าจาก Draft ที่ตรวจแล้วและ idempotencyKey`
+      : `${domain.adapterDetail} • Browser preview, local path และ bytes ไม่สามารถอนุญาต Execution ได้`);
   buttons.className = "ea-optimization-lab-actions";
   buttons.appendChild(createEaOptimizationLabButton("บันทึก Draft Plan", () => {
     const nextPlan = eaOptimizationLabBuildPlan(session, domain);
@@ -32947,22 +36157,12 @@ function renderEaOptimizationLabRoundsStage(section, domain) {
     rerenderEaOptimizationLab();
   }, { primary: true, disabled: !draft.ok }));
   buttons.appendChild(createEaOptimizationLabButton(
-    "เริ่ม Optimization จริง",
-    () => {},
-    { disabled: true },
+    "เริ่ม Optimization จริงบน MT5",
+    () => void startEaOptimizationLabSession(domain),
+    { disabled: !startReady },
   ));
   runGate.append(runTitle, runCopy, buttons);
   section.appendChild(runGate);
-}
-
-function eaOptimizationLabCandidateBy(candidates, selector, direction = "max") {
-  const eligible = candidates.filter((item) => Number.isFinite(selector(item)));
-  if (!eligible.length) return null;
-  return eligible.reduce((best, item) => {
-    const value = selector(item);
-    const bestValue = selector(best);
-    return direction === "min" ? (value < bestValue ? item : best) : (value > bestValue ? item : best);
-  });
 }
 
 function createEaOptimizationCandidateCard(titleText, candidate, tone) {
@@ -33011,19 +36211,18 @@ function createEaOptimizationCandidateCard(titleText, candidate, tone) {
 function renderEaOptimizationLabAnalysisStage(section, domain, dashboard) {
   const session = state.modal.eaOptimizationLab;
   const report = domain.latestReport;
-  const candidates = report?.candidates || [];
+  const candidateGroups = report?.analysisVerified || report?.sessionEvidenceVerified
+    ? report.candidateGroups
+    : {
+    maxProfit: [],
+    lowestDrawdown: [],
+    mostStable: [],
+  };
   const profitablePercent = report?.profitablePercent ?? null;
   const passCount = report?.passCount ?? null;
-  const minimumTrades = eaOptimizationLabNullableNumber(session.minimumTrades);
-  const maxDrawdownPercent = eaOptimizationLabNullableNumber(session.maxDrawdownPercent);
-  const eligibleCandidates = candidates.filter((item) => (
-    (minimumTrades === null || (item.trades !== null && item.trades >= minimumTrades))
-    && (maxDrawdownPercent === null || (item.drawdown !== null && item.drawdown <= maxDrawdownPercent))
-    && (item.profitFactor === null || item.profitFactor > 1)
-  ));
-  const resultState = profitablePercent === null
-    ? "รอข้อมูล Pass ครบ"
-    : `${profitablePercent}% Pass มีกำไร • ยังต้องตรวจคลัสเตอร์ต่อเนื่องและเกณฑ์ความเสี่ยง`;
+  const resultState = report?.analysisStatus !== "available"
+    ? `Analysis ไม่พร้อม • ${report?.analysisReasonCode || "รอ Backend"}`
+    : `${profitablePercent ?? "—"}% Pass มีกำไร • ${report.eligiblePassCount ?? 0} Pass ผ่านเกณฑ์ Risk`;
   const profile = document.createElement("div");
   profile.className = "ea-optimization-lab-profile";
   [
@@ -33043,7 +36242,16 @@ function renderEaOptimizationLabAnalysisStage(section, domain, dashboard) {
     profile.appendChild(card);
   });
   section.appendChild(profile);
-  if (report?.executionVerified) {
+  if (report?.sessionEvidenceVerified) {
+    const reportDigest = report.executionEvidence.resultReportSha256;
+    const manifestDigest = report.executionEvidence.artifactManifestSha256;
+    const visibleDigest = report.executionEvidence.visibleEvidenceSha256;
+    section.appendChild(createEaOptimizationLabNotice(
+      "success",
+      "รับผลและหลักฐานจาก Backend Session แล้ว",
+      `Session ${report.runId} • Report SHA-256 ${reportDigest || "—"} • Manifest SHA-256 ${manifestDigest || "—"} • Visible Evidence SHA-256 ${visibleDigest || "—"} • หน้านี้แสดง Session evidence โดยตรงจนกว่า routed ea_experiment_report จะมาถึง`,
+    ));
+  } else if (report?.executionVerified) {
     const reportDigest = report.executionEvidence.resultReportSha256;
     const manifestDigest = report.executionEvidence.artifactManifestSha256;
     section.appendChild(createEaOptimizationLabNotice(
@@ -33059,11 +36267,22 @@ function renderEaOptimizationLabAnalysisStage(section, domain, dashboard) {
       "Dashboard จะไม่สร้างกำไร Drawdown หรือ Candidate จำลอง เมื่อ Backend ยืนยันผลจาก Terminal แล้วจึงวิเคราะห์ Pass และแสดงผลในหน้านี้",
     ));
   }
+  if (report && report.analysisStatus !== "available") {
+    section.appendChild(createEaOptimizationLabNotice(
+      "warning",
+      "Backend ไม่สามารถวิเคราะห์ผลรอบนี้ได้อย่างปลอดภัย",
+      (report.analysisUnavailableReasons || []).join(" • ")
+        || report.analysisReasonCode
+        || "หลักฐานผลไม่ครบ จึงไม่สร้าง Candidate หรือ Next Parameter Plan แทน",
+    ));
+  }
   if (report?.passesTruncated) {
     section.appendChild(createEaOptimizationLabNotice(
       "warning",
       "Backend ส่ง Pass มากกว่าขีดจำกัดการแสดงผล",
-      "Candidate ด้านล่างคำนวณเฉพาะชุดที่ Dashboard โหลดมา จึงไม่อ้างว่าเป็นค่าสูงสุดหรือต่ำสุดของผลทั้งหมด",
+      report.analysisStatus === "available"
+        ? "ตาราง Pass ใน Dashboard เป็นเพียงตัวอย่าง แต่ Candidate ด้านล่างมาจาก Backend Analysis ที่ผูกกับผลครบชุดและ SHA-256 เดียวกัน"
+        : "Backend ไม่สร้าง Candidate จากข้อมูลที่ไม่ครบ จึงแสดงสถานะ Analysis unavailable แบบ fail-closed",
     ));
   }
   if (report?.warnings?.length) {
@@ -33075,11 +36294,11 @@ function renderEaOptimizationLabAnalysisStage(section, domain, dashboard) {
   }
   const candidateGrid = document.createElement("div");
   candidateGrid.className = "ea-optimization-lab-candidates";
-  const candidateScope = `${report?.passesTruncated ? " (ในชุดที่โหลด)" : ""} • ผ่านเกณฑ์ Risk`;
+  const candidateScope = " • Backend verified thresholds";
   candidateGrid.append(
-    createEaOptimizationCandidateCard(`Highest Profit${candidateScope}`, eaOptimizationLabCandidateBy(eligibleCandidates, (item) => item.profit), "profit"),
-    createEaOptimizationCandidateCard(`Lowest Drawdown${candidateScope}`, eaOptimizationLabCandidateBy(eligibleCandidates, (item) => item.drawdown, "min"), "drawdown"),
-    createEaOptimizationCandidateCard(`Most Stable${candidateScope}`, eaOptimizationLabCandidateBy(eligibleCandidates, (item) => item.stability), "stable"),
+    createEaOptimizationCandidateCard(`Highest Profit${candidateScope}`, candidateGroups.maxProfit?.[0], "profit"),
+    createEaOptimizationCandidateCard(`Lowest Drawdown${candidateScope}`, candidateGroups.lowestDrawdown?.[0], "drawdown"),
+    createEaOptimizationCandidateCard(`Most Stable${candidateScope}`, candidateGroups.mostStable?.[0], "stable"),
   );
   section.appendChild(candidateGrid);
   const bandsGrid = document.createElement("div");
@@ -33105,9 +36324,17 @@ function renderEaOptimizationLabAnalysisStage(section, domain, dashboard) {
     });
     currentBands.appendChild(list);
   } else {
-    currentBands.appendChild(createWorkflowTruthEmpty("ยังไม่มี Tested Bands จาก Report • Draft Plan ไม่ถูกนับเป็นผลทดสอบ"));
+    currentBands.appendChild(createWorkflowTruthEmpty(
+      report?.reportSource === "backend_session"
+        ? "Backend Session ส่งผล Pass และ hash แล้ว แต่ยังไม่มี Tested Bands ใน public session; Draft Plan ไม่ถูกนับเป็นผลทดสอบ"
+        : "ยังไม่มี Tested Bands จาก Report • Draft Plan ไม่ถูกนับเป็นผลทดสอบ",
+    ));
   }
-  if (report?.nextParameterPlan?.length) {
+  if (
+    (report?.analysisVerified || report?.sessionEvidenceVerified)
+    && report?.nextParameterPlanAvailable
+    && report?.nextParameterPlan?.length
+  ) {
     const list = document.createElement("ul");
     report.nextParameterPlan.forEach((band) => {
       const item = document.createElement("li");
@@ -33120,7 +36347,7 @@ function renderEaOptimizationLabAnalysisStage(section, domain, dashboard) {
   } else {
     nextPlan.appendChild(createWorkflowTruthEmpty(
       report
-        ? "รอ Backend วิเคราะห์คลัสเตอร์ต่อเนื่องจาก Pass ทั้งหมดก่อนเสนอ Start / Step / Stop รอบถัดไป"
+        ? `Backend ไม่เสนอรอบถัดไป • ${report.nextParameterPlanReasonCode || report.analysisReasonCode || "ยังไม่มีผลครบชุดที่ผ่านเกณฑ์"}`
         : "ต้องมี Current Bands และผล Pass ก่อน จึงจะสร้างคำแนะนำรอบถัดไปได้",
     ));
   }
@@ -33196,7 +36423,7 @@ function renderTradingResearchLabPanel(container, tabId, domain) {
 function renderWorkflowDomainPanel(container, subject, selectedTab, dashboard, report) {
   if (!container || !subject || !selectedTab) return false;
   if (subject.id === "codex_mcp_portal") {
-    if (selectedTab.id === "catalog") return false;
+    if (selectedTab.id === "catalog" || WORKFLOW_DASHBOARD_HISTORY_TAB_IDS.has(selectedTab.id)) return false;
     renderTradingSystemPortalPanel(
       container,
       selectedTab.id,
@@ -33408,7 +36635,7 @@ function renderWorkflowActionStatus(propId, dashboard = null) {
   if (propId === EA_OPTIMIZATION_LAB_PROP_ID) {
     const labStatus = state.modal.eaOptimizationLab;
     els.workflowActionStatus.textContent = labStatus.message
-      || "เตรียม Draft Plan แบบ Case-by-case ได้ใน Browser • การ Optimization จริงยังปิดไว้จนกว่า Backend จะยืนยัน Source, Terminal, Adapter และหลักฐานครบ";
+      || "Draft ใน Browser ใช้วางแผนเท่านั้น • การรันจริงใช้ immutable EA Factory Build และสถานะ Session จาก Backend พร้อม polling 3 วินาทีระหว่างทำงาน";
     els.workflowActionStatus.dataset.tone = labStatus.message ? labStatus.tone : "neutral";
     return;
   }
@@ -33589,9 +36816,9 @@ function renderRadarSettingsRail(dashboard, identity) {
   if (els.workflowSettingsRailTitle) els.workflowSettingsRailTitle.textContent = "Radar อัตโนมัติ";
   els.workflowSettingsRailContent.innerHTML = "";
   els.workflowSettingsRailContent.append(
-    createWorkflowUseGuideCard({ id: INDICATOR_SCOUT_PROP_ID }),
     createBackendOwnedDailyScheduleCard(dashboard, "Radar ทำงานอัตโนมัติวันละครั้ง"),
     createRadarRailTruthCard(dashboard),
+    createWorkflowConnectionLink(),
   );
   if (actionState.propId === INDICATOR_SCOUT_PROP_ID && actionState.message) {
     const status = document.createElement("p");
@@ -33635,63 +36862,51 @@ function createResearchSheetConsumerCard(propId, titleText = "Google Sheet ก�
   return card;
 }
 
-function createWorkflowUseGuideCard(subject) {
-  const guides = {
-    codex_mcp_portal: [
-      "ดูระบบเทรด 3 ตระกูลที่ Backend ค้นและตรวจหลักฐานล่าสุด",
-      "Backend ค้นอัตโนมัติวันละครั้งเวลา 09:00 น. ตามเวลา Asia/Bangkok",
-      "ดูผลเดิม รอบถัดไป และสถานะ Scheduler แบบ Read-only",
-    ],
-    [INDICATOR_SCOUT_PROP_ID]: [
-      "ดูรายการ Indicator, EA และ Tool ที่ Radar พบในหน้าหลัก",
-      "Backend ค้นอัตโนมัติวันละครั้งเวลา 09:00 น. ตามเวลา Asia/Bangkok",
-      "ตรวจสุขภาพ Adapter แหล่งข้อมูล ผลล่าสุด และรอบถัดไปแบบ Read-only",
-    ],
-    [TRADING_RESEARCH_LAB_PROP_ID]: [
-      "ขั้นที่ 1 เลือกระบบจาก Radar ระบบเทรดโลก แล้วกดวิเคราะห์เชิงลึก",
-      "ขั้นที่ 2 อ่าน Strategy Brief 10 หัวข้อสำหรับเขียน EA",
-      "กดบันทึกระบบนี้ลง Deep_Research แล้วโรงงาน EA จะโหลดข้อมูลชุดเดียวกัน",
-    ],
-    [HQ_CONNECTION_HUB_PROP_ID]: [
-      "กรองอุปกรณ์ตามสถานะ พร้อม ต้องแก้ หรือรอตรวจ",
-      "อ่านจุดติดขัดและคำแนะนำบนการ์ด",
-      "กดเปิดอุปกรณ์เพื่อดูรายละเอียดหรือขอผลตรวจใหม่",
-    ],
-    [EA_FACTORY_PROP_ID]: [
-      "หน้า 1 เลือก Strategy Brief จาก Google Sheets และกดเริ่มเขียน EA",
-      "หน้า 2 ดูสถานะจริง: เขียน Source, เปิด MetaEditor, Compile และ Backtest",
-      "หน้า 3 ตรวจโค้ด หลักฐาน Final Report และดาวน์โหลดไฟล์ที่ Backend อนุญาต",
-    ],
-    [EA_OPTIMIZATION_LAB_PROP_ID]: [
-      "เลือก EA สำหรับ MT4 หรือ MT5 แล้วอ่าน Inputs จาก Source หรือไฟล์ .set",
-      "เลือกเฉพาะ Input ที่ต้อง Optimize และกำหนด Start / Step / Stop เอง ระบบจะไม่เดาช่วงให้",
-      "วางแผนหลายรอบแบบ Case-by-case และอ่านผลจริงจาก Backend โดยแยก Tested Bands กับ Next Parameter Plan",
-    ],
-  };
-  const steps = guides[subject?.id] || [
-    "ดูผลงานหรือข้อมูลล่าสุดในพื้นที่หลัก",
-    "ตั้งค่าหรือเริ่มงานจากคำสั่งด้านล่าง",
-    "ตรวจสถานะการเชื่อมต่อรวมที่คริสตัลสถานะ HQ",
-  ];
-  const card = document.createElement("article");
+function createWorkflowConnectionLink() {
+  const openHub = document.createElement("button");
+  openHub.type = "button";
+  openHub.className = "workflow-open-connection-hub";
+  openHub.dataset.openConnectionHub = "true";
+  openHub.textContent = "ดูการเชื่อมต่อทุกอุปกรณ์";
+  return openHub;
+}
+
+function createEaFactoryRailSettings() {
+  const selection = state.modal.eaFactory;
+  const platform = normalizeEaFactoryPlatform(selection.selectedPlatform);
+  const artifactKind = ["expert_advisor", "custom_indicator"].includes(selection.selectedArtifactKind)
+    ? selection.selectedArtifactKind : "";
+  const artifactLabel = platform === "tradingview" && artifactKind === "expert_advisor"
+    ? "Pine Strategy"
+    : (artifactKind ? eaFactoryArtifactKindLabel(artifactKind) : "ยังไม่เลือก");
+  const sourceLabels = { google_sheet: "Google Sheet", discovery: "EA Discovery", custom: "เงื่อนไขของคุณ" };
+  const card = document.createElement("section");
   const title = document.createElement("strong");
-  const list = document.createElement("ol");
-  card.className = "workflow-use-guide";
-  title.textContent = "ใช้งานอย่างไร";
-  steps.forEach((step) => {
-    const item = document.createElement("li");
-    item.textContent = step;
-    list.appendChild(item);
+  const facts = document.createElement("dl");
+  const openSource = document.createElement("button");
+  card.className = "ea-factory-rail-settings";
+  title.textContent = "ตั้งค่างานใหม่";
+  facts.className = "ea-factory-rail-facts";
+  [
+    ["แพลตฟอร์ม", platform ? eaFactoryPlatformLabel(platform) : "ยังไม่เลือก"],
+    ["ผลงาน", artifactLabel],
+    ["ต้นทางระบบ", sourceLabels[selection.sourceMode] || "ยังไม่เลือก"],
+  ].forEach(([labelText, valueText]) => {
+    const row = document.createElement("div");
+    const label = document.createElement("dt");
+    const value = document.createElement("dd");
+    label.textContent = labelText;
+    value.textContent = valueText;
+    row.append(label, value);
+    facts.appendChild(row);
   });
-  card.append(title, list);
-  if (subject?.id !== HQ_CONNECTION_HUB_PROP_ID) {
-    const openHub = document.createElement("button");
-    openHub.type = "button";
-    openHub.className = "workflow-open-connection-hub";
-    openHub.dataset.openConnectionHub = "true";
-    openHub.textContent = "ดูการเชื่อมต่อทุกอุปกรณ์";
-    card.appendChild(openHub);
-  }
+  openSource.type = "button";
+  openSource.className = "modal-action";
+  openSource.textContent = "เปิดการตั้งค่างาน";
+  openSource.addEventListener("click", () => {
+    setWorkflowDashboardTab(EA_FACTORY_PROP_ID, "source", { focus: true });
+  });
+  card.append(title, facts, openSource);
   return card;
 }
 
@@ -34011,6 +37226,7 @@ function renderFxNewsSettingsRail(dashboard, identity) {
 
 function renderWorkflowSettingsRail(subject, dashboard, identity = getWorkflowDashboardIdentity(subject?.id)) {
   if (!els.workflowSettingsRail || !els.workflowSettingsRailContent) return;
+  els.workflowSettingsRail.dataset.eaFactoryIntake = "false";
   if (subject?.id === FX_NEWS_BIAS_PROP_ID) {
     renderFxNewsSettingsRail(dashboard, identity);
     return;
@@ -34024,16 +37240,15 @@ function renderWorkflowSettingsRail(subject, dashboard, identity = getWorkflowDa
   els.workflowSettingsRail.dataset.dashboardIdentity = identity.id;
   if (els.workflowSettingsRailTitle) {
     els.workflowSettingsRailTitle.textContent = subject?.id === EA_FACTORY_PROP_ID
-      ? "โรงงาน EA • 3 หน้า"
-      : "วิธีใช้และคำสั่ง";
+      ? "งานและการเชื่อมต่อ"
+      : "การตั้งค่าและสถานะ";
   }
   els.workflowSettingsRailContent.innerHTML = "";
   if (subject?.id === EA_FACTORY_PROP_ID) {
     els.workflowSettingsRailContent.appendChild(
-      createEaFactoryRailTaskStatus(dashboard?.domainData?.eaFactory || {}),
+      createEaFactoryRailSettings(),
     );
   }
-  els.workflowSettingsRailContent.appendChild(createWorkflowUseGuideCard(subject));
   if (RESEARCH_SHEET_CONSUMER_PROP_IDS.has(subject?.id)) {
     els.workflowSettingsRailContent.appendChild(createResearchSheetConsumerCard(subject.id));
   } else if (subject?.id === EA_FACTORY_PROP_ID) {
@@ -34042,14 +37257,9 @@ function renderWorkflowSettingsRail(subject, dashboard, identity = getWorkflowDa
     );
   }
   if (subject?.id === EA_FACTORY_PROP_ID) {
-    const selectedPageId = getWorkflowSelectedTab(subject.id, dashboard)?.id;
-    const factoryDomain = dashboard?.domainData?.eaFactory || {};
-    if (selectedPageId === "progress" || factoryDomain.backendBusy) {
-      const terminalRail = document.createElement("div");
-      terminalRail.className = "ea-factory-rail-terminal";
-      renderEaFactoryTerminalPicker(terminalRail, factoryDomain);
-      els.workflowSettingsRailContent.appendChild(terminalRail);
-    }
+    els.workflowSettingsRailContent.appendChild(
+      createEaFactoryRailTaskStatus(dashboard?.domainData?.eaFactory || {}),
+    );
   }
   if (subject?.id === "codex_mcp_portal") {
     els.workflowSettingsRailContent.appendChild(
@@ -34061,6 +37271,9 @@ function renderWorkflowSettingsRail(subject, dashboard, identity = getWorkflowDa
     card.classList.add("workflow-rail-action-card");
     els.workflowSettingsRailContent.appendChild(card);
   });
+  if (subject?.id !== HQ_CONNECTION_HUB_PROP_ID) {
+    els.workflowSettingsRailContent.appendChild(createWorkflowConnectionLink());
+  }
 }
 
 function getWorkflowHandoffReports(report = {}) {
@@ -34891,6 +38104,8 @@ function appendTaskEvidenceSection(container, evidence) {
 }
 
 function getMissionNextStep(mission) {
+  const waiting = getMissionWaitingPresentation(mission);
+  if (waiting) return waiting.detail;
   const status = getMissionPresentationStatus(mission);
   const storedStatus = normalizeMissionStatus(mission?.status);
   const autoEligible = isBackendAutoEligibleMission(mission);
@@ -34939,6 +38154,99 @@ function getMissionNextStep(mission) {
   return "รอข้อมูลขั้นตอนถัดไปจาก Manager Agent";
 }
 
+function getMissionExecutiveSummaryId(mission) {
+  const reportId = mission?.delegation?.finalReportId;
+  if (
+    mission?.toolId !== "manager_delegate"
+    || mission.owner !== "manager"
+    || mission.targetId !== "mission_strategy_table"
+    || mission.status !== "completed"
+    || mission.phase !== "synthesized"
+    || mission.delegation?.state !== "synthesized"
+    || typeof reportId !== "string"
+    || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,119}$/.test(reportId)
+    || !Array.isArray(mission.reportIds)
+    || !mission.reportIds.includes(reportId)
+  ) return null;
+  return reportId;
+}
+
+function cancelMissionSummaryRequest() {
+  missionSummaryRequest?.controller.abort();
+  missionSummaryRequest = null;
+}
+
+async function openMissionExecutiveSummary(missionId, trigger, statusNode) {
+  const mission = getActiveTaskDetailMission();
+  const reportId = getMissionExecutiveSummaryId(mission);
+  if (!reportId || mission?.id !== missionId || !els.taskDetailDialog?.open || missionSummaryRequest) return;
+  const request = { missionId, reportId, controller: new AbortController(), trigger, statusNode };
+  missionSummaryRequest = request;
+  trigger.disabled = true;
+  trigger.textContent = "กำลังโหลดรายงานสรุป…";
+  statusNode.textContent = "กำลังเปิดรายงานที่ Manager ส่งกลับมาสำหรับ Mission นี้";
+  const isCurrent = () => missionSummaryRequest === request
+    && els.taskDetailDialog?.open
+    && getActiveTaskDetailMission()?.id === missionId
+    && getMissionExecutiveSummaryId(getActiveTaskDetailMission()) === reportId;
+  try {
+    const response = await fetchJson(`/api/reports/${encodeURIComponent(reportId)}`, {
+      timeoutMs: PROP_REPORT_FETCH_TIMEOUT_MS,
+      signal: request.controller.signal,
+    });
+    if (!isCurrent()) return;
+    const report = response?.report;
+    if (
+      response?.ok !== true
+      || response.readModel !== "report_detail_v1"
+      || report?.id !== reportId
+      || report.type !== "executive_summary"
+      || report.ownerAgentId !== "manager"
+      || report.linkedMissionId !== missionId
+      || report.linkedPropId !== "mission_strategy_table"
+      || report.status !== "ready"
+    ) {
+      request.statusNode.textContent = "รายงานสรุปยังไม่พร้อม หรือข้อมูลไม่ตรงกับ Mission นี้ กรุณารีเฟรช Mission แล้วลองอีกครั้ง";
+      return;
+    }
+    request.statusNode.textContent = "";
+    openDashboardResultDetail(report, request.trigger);
+  } catch {
+    if (isCurrent()) request.statusNode.textContent = "โหลดรายงานสรุปไม่สำเร็จ กรุณาลองอีกครั้ง";
+  } finally {
+    if (missionSummaryRequest === request) {
+      missionSummaryRequest = null;
+      request.trigger.disabled = false;
+      request.trigger.textContent = "เปิดรายงานสรุปรวม";
+    }
+  }
+}
+
+function appendMissionExecutiveSummary(container, mission) {
+  const reportId = getMissionExecutiveSummaryId(mission);
+  if (!reportId) return;
+  const section = document.createElement("section");
+  const title = document.createElement("h3");
+  const button = document.createElement("button");
+  const status = document.createElement("p");
+  section.className = "task-detail-section";
+  title.textContent = "สรุปรวมจาก Manager";
+  button.type = "button";
+  button.className = "modal-action";
+  button.dataset.missionSummaryReport = reportId;
+  button.setAttribute("aria-haspopup", "dialog");
+  const loading = missionSummaryRequest?.missionId === mission.id && missionSummaryRequest.reportId === reportId;
+  button.disabled = loading;
+  button.textContent = loading ? "กำลังโหลดรายงานสรุป…" : "เปิดรายงานสรุปรวม";
+  status.className = "kanban-readonly-notice";
+  status.setAttribute("role", "status");
+  status.textContent = loading ? "กำลังเปิดรายงานที่ Manager ส่งกลับมาสำหรับ Mission นี้" : "ดูผลที่รวบรวมจาก Agent ทุกงานใน Mission นี้";
+  if (loading) Object.assign(missionSummaryRequest, { trigger: button, statusNode: status });
+  button.addEventListener("click", () => { void openMissionExecutiveSummary(mission.id, button, status); });
+  section.append(title, button, status);
+  container.appendChild(section);
+}
+
 function renderMissionDetail(mission) {
   if (!els.modalKanbanDetailTitle || !els.modalKanbanDetailBody) return;
   els.modalKanbanDetailBody.innerHTML = "";
@@ -34966,7 +38274,7 @@ function renderMissionDetail(mission) {
   const presentationStatus = getMissionPresentationStatus(mission);
   const autoEligible = isBackendAutoEligibleMission(mission);
   const explicitHumanApproval = missionRequiresExplicitHumanApproval(mission);
-  appendMissionDetailRow(facts, "สถานะ", displayStatus(presentationStatus));
+  appendMissionDetailRow(facts, "สถานะ", getMissionWaitingPresentation(mission)?.label || displayStatus(presentationStatus));
   appendMissionDetailRow(facts, "ผู้รับผิดชอบ", displayAgentName(getAgentIdFromOwner(mission.owner) || mission.owner, "ยังไม่ได้มอบหมาย"));
   appendMissionDetailRow(facts, "จุดแสดงผล", displayPropName(mission.targetId || "mission_strategy_table"));
   appendMissionDetailRow(facts, "ความเสี่ยง", displayRisk(mission.risk));
@@ -34993,6 +38301,7 @@ function renderMissionDetail(mission) {
   friendly.appendChild(facts);
   appendTaskDetailSection(friendly, "สิ่งที่ได้รับมอบหมาย", mission.detail || "ยังไม่มีคำอธิบายเพิ่มเติม", "task-detail-instruction");
   if (mission.result) appendTaskDetailSection(friendly, "ผลล่าสุด", mission.result, "task-detail-result");
+  appendMissionExecutiveSummary(friendly, mission);
   appendTaskEvidenceSection(friendly, mission.evidence);
   nextStep.className = "task-detail-section task-detail-next-step";
   nextTitle.textContent = "ขั้นตอนถัดไป";
@@ -35084,6 +38393,7 @@ function renderMissionDetail(mission) {
 function openTaskDetail(missionId, trigger = null, options = {}) {
   const mission = state.missions.find((item) => item.id === missionId);
   if (!mission || !els.taskDetailDialog) return;
+  cancelMissionSummaryRequest();
   state.taskDetailMissionId = mission.id;
   state.taskDetailSource = options.source || "list";
   taskDetailShouldRestoreFocus = true;
@@ -35102,6 +38412,7 @@ function openTaskDetail(missionId, trigger = null, options = {}) {
 }
 
 function closeTaskDetail({ restoreFocus = true } = {}) {
+  cancelMissionSummaryRequest();
   taskDetailShouldRestoreFocus = restoreFocus;
   if (els.taskDetailDialog?.open) {
     els.taskDetailDialog.close();
@@ -35181,7 +38492,10 @@ function renderMissionKanban({ preserveScroll = true } = {}) {
     section.className = `kanban-column status-${column.id}`;
     section.dataset.status = column.id;
     heading.className = "kanban-column-heading";
-    label.textContent = column.label;
+    const waitingCount = columnMissions.filter((mission) => Boolean(getMissionWaitingPresentation(mission))).length;
+    label.textContent = column.id === "running" && waitingCount
+      ? waitingCount === columnMissions.length ? "รอเริ่มงาน" : "กำลังทำงาน / รอคิว"
+      : column.label;
     count.textContent = String(columnMissions.length);
     heading.append(label, count);
     list.className = "kanban-column-list";
@@ -35329,7 +38643,7 @@ function updateMissionCenterTabCopy() {
   if (els.modalDialogue) {
     els.modalDialogue.textContent = isMeetingRoom
       ? "ห้องประชุมกลางเชื่อม Session จริงจาก Backend แสดงผู้พูด บทบาท เวลา สถานะ ข้อสรุป และข้อเสนอโดยไม่สร้าง Mission จนกว่าคุณจะอนุมัติ"
-      : "รวม Mission ของทุก Agent เป็น 4 สถานะ โดยงานที่ Backend รับแล้วจะแสดงรวมอยู่ในกำลังทำงาน";
+      : "รวม Mission ของทุก Agent เป็น 4 กลุ่ม โดยแยกป้ายรอคิวออกจากงานที่กำลังรันจริงบนแต่ละการ์ด";
   }
 }
 
@@ -35511,7 +38825,7 @@ function renderGameModal() {
     ? (subject.summary || "")
     : isKanban
       ? "ห้องประชุม AI ที่เชื่อม Backend พร้อมคิว Mission ของ Agent ทุกตัว"
-      : (propertyRole?.purpose || subject.summary || "");
+      : getEquipmentPurpose(subject, propertyRole?.purpose || subject.summary || "");
   const speech = isAgent
     ? getAgentSpeech(subject.id, "idle", subject.status)
     : isKanban
@@ -35520,6 +38834,10 @@ function renderGameModal() {
 
   els.modalKind.textContent = isAgent ? "พื้นที่ทำงานของ Agent" : isKanban ? "ห้องประชุมและ Mission" : "Dashboard ของอุปกรณ์";
   els.modalTitle.textContent = title;
+  if (els.workspaceTitle) els.workspaceTitle.textContent = title;
+  if (els.workspaceSection) {
+    els.workspaceSection.textContent = isAgent ? "AGENT WORKSPACE" : isKanban ? "MISSION CONTROL" : "TRADING WORKSPACE";
+  }
   els.modalSubtitle.textContent = isAgent ? `${role} | ${summary}` : summary;
   els.modalSpeaker.textContent = isAgent ? title : isKanban ? "คิว Mission ทั้งหมด" : `Dashboard: ${title}`;
   els.modalDialogue.textContent = isAgent ? (subject.status || speech) : speech;
@@ -35602,8 +38920,8 @@ function trapGameModalFocus(event) {
   if (els.taskDetailDialog?.open || els.dashboardResultDialog?.open || els.newsEventDialog?.open) return;
   if (event.key === "Escape") {
     event.preventDefault();
+    event.stopPropagation();
     if (researchSheetHubPopoverIsOpen()) {
-      event.stopPropagation();
       closeResearchSheetHubPopover();
       return;
     }
@@ -35668,6 +38986,9 @@ function openGameModal(type, id, tab = "chat") {
 function closeGameModal() {
   const closingType = state.modal.type;
   const closingId = state.modal.id;
+  if (closingType === "prop" && closingId === EA_FACTORY_PROP_ID) {
+    stopEaFactoryGoogleSheetCatalogAutoRefresh();
+  }
   if (els.taskDetailDialog?.open) closeTaskDetail({ restoreFocus: false });
   if (els.dashboardResultDialog?.open) closeDashboardResultDetail({ restoreFocus: false });
   if (els.newsEventDialog?.open) closeFxNewsEventDetail({ restoreFocus: false });
@@ -35722,6 +39043,9 @@ async function openPropDialog(propId, tab = null) {
   const eaFactoryRequest = propId === EA_FACTORY_PROP_ID
     ? loadEaFactoryReadModel()
     : Promise.resolve(null);
+  const eaOptimizationLabRequest = propId === EA_OPTIMIZATION_LAB_PROP_ID
+    ? loadEaOptimizationLabReadModel()
+    : Promise.resolve(null);
   const reportRequest = propId === EA_FACTORY_PROP_ID
     ? Promise.resolve(null)
     : loadPropReport(propId);
@@ -35736,6 +39060,16 @@ async function openPropDialog(propId, tab = null) {
     : Promise.resolve(null);
   openGameModal("prop", propId, tab || (propId === "mission_strategy_table" ? "mission-chat" : "dashboard"));
   await eaFactoryRequest;
+  if (
+    propId === EA_FACTORY_PROP_ID
+    && state.modal.open
+    && state.modal.type === "prop"
+    && state.modal.id === EA_FACTORY_PROP_ID
+    && state.modal.eaFactory.sourceMode === "google_sheet"
+  ) {
+    await ensureEaFactoryGoogleSheetCatalog({ force: true, reason: "open" });
+  }
+  await eaOptimizationLabRequest;
   await reportRequest;
   await portalReportRequest;
   await researchSheetRequest;
@@ -40908,18 +44242,35 @@ async function pollOpenPropReport({ force = false, signal = null } = {}) {
   const factoryStageActive = factoryBackendBusy
     && factoryDomain?.stages?.some((stage) => ["running"].includes(stage.status)) === true;
   const factoryOneClickActive = factoryBackendBusy
-    && ["queued", "running", "waiting_ai", "awaiting_visible_terminal"].includes(
+    && ["queued", "running", "waiting_ai", "awaiting_visible_terminal", "cancelling"].includes(
       String(factoryDomain?.oneClick?.run?.status || ""),
     );
   const factoryTtlExpired = propId === "right_server_racks" && (
     !Number.isFinite(Number(state.eaFactoryReadModel.lastLoadedAt))
     || Date.now() - Number(state.eaFactoryReadModel.lastLoadedAt || 0) >= OPEN_PROP_REPORT_POLL_TTL_MS
   );
+  const optimizationDomain = propId === EA_OPTIMIZATION_LAB_PROP_ID
+    ? normalizeEaOptimizationLabDomain(
+      state.eaOptimizationLabReadModel.payload || {},
+      state.propReports[EA_OPTIMIZATION_LAB_PROP_ID] || {},
+      eaOptimizationLabReadState(),
+    )
+    : null;
+  const optimizationPollMs = eaOptimizationLabSessionIsActive(optimizationDomain?.activeSession)
+    ? EA_OPTIMIZATION_LAB_ACTIVE_POLL_MS
+    : EA_OPTIMIZATION_LAB_IDLE_POLL_MS;
+  const optimizationTtlExpired = propId === EA_OPTIMIZATION_LAB_PROP_ID && (
+    !Number.isFinite(Number(state.eaOptimizationLabReadModel.lastLoadedAt))
+    || Date.now() - Number(state.eaOptimizationLabReadModel.lastLoadedAt || 0) >= optimizationPollMs
+  );
   const shouldRefreshReport = propId !== EA_FACTORY_PROP_ID && (force || reportTtlExpired);
   const shouldRefreshFactory = propId === "right_server_racks"
     && (force || factoryBackendBusy || factoryStageActive || factoryOneClickActive || factoryTtlExpired);
-  if (!shouldRefreshReport && !shouldRefreshFactory) return state.propReports[propId] || null;
+  const shouldRefreshOptimization = propId === EA_OPTIMIZATION_LAB_PROP_ID
+    && (force || optimizationTtlExpired);
+  if (!shouldRefreshReport && !shouldRefreshFactory && !shouldRefreshOptimization) return state.propReports[propId] || null;
   if (shouldRefreshFactory && !signal?.aborted) await loadEaFactoryReadModel({ signal });
+  if (shouldRefreshOptimization && !signal?.aborted) await loadEaOptimizationLabReadModel({ signal });
   const reports = shouldRefreshReport
     ? await Promise.all(
       dependencyPropIds.map(async (dependencyPropId) => (
@@ -41025,6 +44376,36 @@ function runOfficeAutonomyTick() {
   routeAgentToTargetId(agent.id, nextTarget || homeTarget, "กำลังตรวจพื้นที่", { persist: false });
 }
 
+async function handleModalDelegate() {
+  const subject = getModalSubject();
+  if (state.modal.type !== "agent" || !isManagerWorkspace(subject) || state.managerCommandInFlight) return;
+  const goal = getPromptFromModal();
+  if (!goal) {
+    setAgentChatStatus(subject.id, "กรุณาพิมพ์เป้าหมายก่อนให้ Manager กระจายงานเข้าคิว", "error");
+    els.modalCommandInput?.focus();
+    return;
+  }
+  if (els.modalDelegateButton) els.modalDelegateButton.disabled = true;
+  setAgentChatStatus(subject.id, "กำลังส่งคำขอให้ Backend ตรวจและกระจายงานเข้าคิว", "working");
+  try {
+    const result = await submitManagerCommand(goal, subject.id);
+    if (!state.modal.open || state.modal.type !== "agent" || state.modal.id !== subject.id) return;
+    if (result?.ok !== true) {
+      const message = result?.messageTh || result?.message || result?.error || result?.reply
+        || (result?.kind === "secret_blocked"
+          ? "Risk Guard หยุดข้อความที่อาจมีข้อมูลลับ กรุณาตรวจข้อความก่อนส่งใหม่"
+          : "Backend ยังไม่ยืนยันการสร้างงาน กรุณาตรวจสถานะก่อนส่งซ้ำ");
+      setAgentChatStatus(subject.id, message, "error");
+      return;
+    }
+    setAgentChatStatus(subject.id, result.reply || result.parent?.result || "Backend รับคำขอแล้ว", "ready");
+    if (result.parent?.id) state.modal.activeTab = "tasks";
+    renderGameModal();
+  } finally {
+    if (els.modalDelegateButton) els.modalDelegateButton.disabled = false;
+  }
+}
+
 async function submitManagerCommand(goalOverride = "", requesterAgentId = "manager") {
   const requester = ["manager", "ceo"].includes(requesterAgentId) ? requesterAgentId : "manager";
   const goal = String(goalOverride || els.managerCommandInput?.value || "ตรวจสถานะ Codex/MCP Bridge และเตรียม Mission ถัดไปแบบปลอดภัย").trim();
@@ -41089,6 +44470,7 @@ async function submitManagerCommand(goalOverride = "", requesterAgentId = "manag
       goal,
       idempotencyKey: `visual-manager-${Date.now()}-${Math.round(Math.random() * 100000)}`,
     });
+    if (result?.ok !== true) return result;
     mergeBackendMission(result.parent);
     (result.subtasks || []).forEach((mission) => mergeBackendMission(mission));
     const autoTaskCount = (result.subtasks || []).filter((mission) => isBackendAutoEligibleMission(mission)).length;
@@ -41287,6 +44669,33 @@ document.addEventListener("click", (event) => {
   if (els.agentCollabPanel?.hidden || els.agentCollabControl?.contains(event.target)) return;
   setAgentCollaborationPanelOpen(false);
 });
+
+// This disclosure only changes presentation; the existing controls keep their guards.
+els.homeStatusClose?.addEventListener("click", () => {
+  els.homeStatusMenu.open = false;
+  els.homeStatusToggle?.focus();
+});
+els.homeStatusMenu?.addEventListener("toggle", () => {
+  if (!els.homeStatusMenu.open) return;
+  if (researchSheetHubPopoverIsOpen()) {
+    const sheetMustStayVisible = Boolean(state.researchSheetHub.preview)
+      || state.researchSheetHub.inFlight
+      || researchSheetGoogleAuthIsBusy()
+      || researchSheetHubQueryIsBusy();
+    if (sheetMustStayVisible) {
+      els.homeStatusMenu.open = false;
+      return;
+    }
+    closeResearchSheetHubPopover({ discardPreview: false, focusToggle: false });
+  }
+  setGlobalMetatraderPanelOpen(false);
+  setOperatorModePanelOpen(false);
+});
+document.addEventListener("click", (event) => {
+  if (!els.homeStatusMenu?.open || els.homeStatusMenu.contains(event.target)) return;
+  if (state.modal.open || els.taskDetailDialog?.open || els.dashboardResultDialog?.open || els.newsEventDialog?.open) return;
+  els.homeStatusMenu.open = false;
+}, true);
 
 els.modalCloseButton?.addEventListener("click", closeGameModal);
 els.gameModalBackdrop?.addEventListener("click", closeGameModal);
@@ -41809,19 +45218,7 @@ els.modalMeetingButton?.addEventListener("click", async () => {
   }
 });
 
-els.modalDelegateButton?.addEventListener("click", async () => {
-  const subject = getModalSubject();
-  if (state.modal.type !== "agent" || !isManagerWorkspace(subject) || state.managerCommandInFlight) return;
-  const goal = getPromptFromModal();
-  if (!goal) {
-    setAgentChatStatus(subject.id, "กรุณาพิมพ์เป้าหมายก่อนให้ Manager กระจายงานเข้าคิว", "error");
-    els.modalCommandInput?.focus();
-    return;
-  }
-  await submitManagerCommand(goal, subject.id);
-  state.modal.activeTab = "tasks";
-  renderGameModal();
-});
+els.modalDelegateButton?.addEventListener("click", handleModalDelegate);
 
 els.modalDashboardRefreshConnections?.addEventListener("click", () => {
   if (state.modal.type !== "prop" || getModalSurface() !== "dashboard") return;
@@ -41909,6 +45306,7 @@ els.taskDetailDialog?.addEventListener("click", (event) => {
 });
 
 els.taskDetailDialog?.addEventListener("close", () => {
+  cancelMissionSummaryRequest();
   state.taskDetailMissionId = null;
   state.taskDetailSource = null;
   syncMissionExecutionControls(null, false);
@@ -42004,17 +45402,17 @@ document.addEventListener("keydown", (event) => {
     closeFxNewsEventDetail();
     return;
   }
-  if (!els.globalMetatraderPanel?.hidden) {
+  if (els.globalMetatraderPanel?.hidden === false) {
     setGlobalMetatraderPanelOpen(false);
     els.globalMetatraderButton?.focus();
     return;
   }
-  if (!els.agentCollabPanel?.hidden) {
+  if (els.agentCollabPanel?.hidden === false) {
     setAgentCollaborationPanelOpen(false);
     els.agentCollabButton?.focus();
     return;
   }
-  if (!els.operatorModePanel?.hidden) {
+  if (els.operatorModePanel?.hidden === false) {
     setOperatorModePanelOpen(false);
     els.operatorModeButton?.focus();
     return;
@@ -42029,6 +45427,12 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     event.stopPropagation();
     closeTaskDetail();
+    return;
+  }
+  if (!state.modal.open && els.homeStatusMenu?.open) {
+    event.preventDefault();
+    els.homeStatusMenu.open = false;
+    els.homeStatusToggle?.focus();
     return;
   }
   if (state.modal.open) closeGameModal();

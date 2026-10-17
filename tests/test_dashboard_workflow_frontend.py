@@ -25,7 +25,7 @@ class DashboardWorkflowFrontendTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.index = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
         cls.main = (ROOT / "frontend" / "src" / "app" / "main.js").read_text(encoding="utf-8")
-        cls.styles = (ROOT / "frontend" / "src" / "app" / "styles.css").read_text(encoding="utf-8")
+        cls.styles = (ROOT / "frontend" / "src" / "styles" / "main.css").read_text(encoding="utf-8")
         cls.role_map = json.loads(
             (ROOT / "contracts" / "props" / "property-role-map.json").read_text(encoding="utf-8")
         )["properties"]
@@ -424,7 +424,7 @@ const TRADING_RESEARCH_SIMULATION_REGIMES = Object.freeze([
         brief_end = self.main.index("function renderTradingResearchDetail", brief_start)
         brief = self.main[brief_start:brief_end]
         self.assertIn("markTruncated: true", brief)
-        self.assertIn("limit: 5000", brief)
+        self.assertIn("limit: field.key === \"record_id\" ? 160 : 8000", brief)
         self.assertIn("TRADING_RESEARCH_STRATEGY_BRIEF_FIELDS.forEach", brief)
 
     def test_research_management_cards_show_scope_and_provenance_even_when_disabled(self):
@@ -768,7 +768,7 @@ console.log(JSON.stringify({
         self.assertIn("ระยะห่างแท่งไม่ตรงกับ", validation)
 
     def test_frontend_timeframes_match_local_runner_ohlc_contract(self):
-        backend = (ROOT / "backend" / "local-runner" / "ohlc_import.py").read_text(encoding="utf-8")
+        backend = (ROOT / "backend" / "local-runner" / "hq_backend" / "trading" / "ohlc_import.py").read_text(encoding="utf-8")
         match = re.search(r"ALLOWED_TIMEFRAMES\s*=\s*frozenset\(\{([^}]+)\}\)", backend)
         self.assertIsNotNone(match)
         backend_timeframes = set(re.findall(r'"([A-Z0-9]+)"', match.group(1)))
@@ -1117,7 +1117,7 @@ console.log(JSON.stringify({ ordered, reversed, activeId: active?.id || null }))
         self.assertIn("requestedActionIds.filter((actionId) => actionMap.has(actionId))", normalize)
 
         rail_start = self.main.index("function workflowRailActions")
-        rail_end = self.main.index("function createWorkflowUseGuideCard", rail_start)
+        rail_end = self.main.index("function createWorkflowConnectionLink", rail_start)
         rail = self.main[rail_start:rail_end]
         self.assertIn('["codex_mcp_portal", INDICATOR_SCOUT_PROP_ID].includes(subject?.id)', rail)
         self.assertIn("return [];", rail)
@@ -1364,7 +1364,8 @@ console.log(JSON.stringify({ ordered, reversed, activeId: active?.id || null }))
         self.assertIn("function workflowRailActions", self.main)
         self.assertIn("WORKFLOW_DASHBOARD_SETTING_ACTION_IDS.has(left.id)", self.main)
         self.assertIn("els.workflowSettingsRail.hidden = false", settings)
-        self.assertIn("createWorkflowUseGuideCard(subject)", settings)
+        self.assertIn("createWorkflowConnectionLink()", settings)
+        self.assertNotIn("createWorkflowUseGuideCard", settings)
         self.assertIn("els.workflowSettingsRailContent.innerHTML = \"\"", settings)
         self.assertIn("els.workflowAgentHandoffRail.hidden = !selectedRoute", handoff)
         self.assertIn("getWorkflowReportTransferRoutes(subject.id, selectedReport)", handoff)

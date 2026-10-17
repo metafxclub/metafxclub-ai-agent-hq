@@ -33,7 +33,7 @@ class DeepResearchSemanticRepairTests(unittest.TestCase):
         )
         cls.brief_support = load_module(
             "metafx_deep_research_semantic_repair_brief_support",
-            ROOT / "backend" / "local-runner" / "ea_strategy_brief.py",
+            ROOT / "backend" / "local-runner" / "hq_backend" / "ea" / "ea_strategy_brief.py",
         )
 
     @staticmethod

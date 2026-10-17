@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DIRECT_PATH = PROJECT_ROOT / "backend" / "local-runner" / "fx_news_direct.py"
+DIRECT_PATH = PROJECT_ROOT / "backend" / "local-runner" / "hq_backend" / "research" / "fx_news_direct.py"
 MARKET_DATE = "2026-08-14"
 CHECKED_AT = "2026-08-14T04:00:00Z"
 NOW_UTC = datetime(2026, 8, 14, 4, 0, tzinfo=timezone.utc)

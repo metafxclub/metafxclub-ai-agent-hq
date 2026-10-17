@@ -6,7 +6,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MAIN_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "main.js"
-STYLES_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "styles.css"
+STYLES_PATH = PROJECT_ROOT / "frontend" / "src" / "styles" / "main.css"
 
 
 def function_block(source: str, signature: str) -> str:

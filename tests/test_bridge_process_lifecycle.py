@@ -13,6 +13,7 @@ from unittest import mock
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "bridge_server.py"
 START_SCRIPT_PATH = PROJECT_ROOT / "scripts" / "start-local-bridge.ps1"
+INSTALLER_PATH = PROJECT_ROOT / "installer" / "install.ps1"
 
 
 def load_bridge(name: str):
@@ -25,6 +26,13 @@ def load_bridge(name: str):
 
 
 class BridgeProcessLifecycleTests(unittest.TestCase):
+    def test_cold_start_health_window_does_not_kill_a_slow_verified_bridge(self) -> None:
+        script = START_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        installer = INSTALLER_PATH.read_text(encoding="utf-8-sig")
+
+        self.assertIn("[int]$HealthTimeoutSeconds = 60", script)
+        self.assertIn('$arguments += @("-HealthTimeoutSeconds", "60")', installer)
+
     def test_restart_loads_only_allowlisted_google_client_config_from_user_scope(self) -> None:
         script = START_SCRIPT_PATH.read_text(encoding="utf-8-sig")
         helper_start = script.index("function Start-BridgeChildProcess")

@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ADAPTER_PATH = PROJECT_ROOT / "backend" / "local-runner" / "radar_image_adapter.py"
+ADAPTER_PATH = PROJECT_ROOT / "backend" / "local-runner" / "hq_backend" / "research" / "radar_image_adapter.py"
 
 
 def load_adapter():

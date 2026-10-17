@@ -85,9 +85,74 @@ class AiTradeCouncilFailureInjectionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self._configure_runtime_paths(self.bridge, self.root)
+        self._install_dual_lock_fixture()
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    @staticmethod
+    def _locked_terminal_context(candidate_id: str, platform: str) -> dict:
+        return {
+            "record": {
+                "candidateId": candidate_id,
+                "platform": platform,
+                "available": True,
+                "runningState": "platform_running_detected",
+            },
+            "token": {
+                "candidateId": candidate_id,
+                "platform": platform,
+                "selectionRevision": 1,
+            },
+            "selectedAt": "2026-10-16T09:00:00+07:00",
+        }
+
+    def _install_dual_lock_fixture(self) -> None:
+        """Expose the current legacy candidate behind a valid 2/2 header lock."""
+
+        selected_reader = self.bridge._selected_metatrader_candidate_context
+        fallbacks = {
+            "mt4": self._locked_terminal_context("mtc-" + ("a" * 26), "mt4"),
+            "mt5": self._locked_terminal_context("mtc-" + ("b" * 26), "mt5"),
+        }
+
+        def selected_context() -> dict | None:
+            context = selected_reader(self.bridge.AI_TRADE_COUNCIL_PROP_ID)
+            if not isinstance(context, dict):
+                return None
+            record = dict(context.get("record") or {})
+            platform = str(record.get("platform") or "").strip().lower()
+            if platform not in {"mt4", "mt5"}:
+                return None
+            token = dict(context.get("token") or {})
+            token["platform"] = platform
+            return {
+                **context,
+                "record": record,
+                "token": token,
+            }
+
+        def platform_context(
+            platform: object,
+            *,
+            require_all_platforms: bool = True,
+        ) -> dict | None:
+            normalized = str(platform or "").strip().lower()
+            if normalized not in fallbacks:
+                return None
+            selected = selected_context()
+            if (
+                isinstance(selected, dict)
+                and selected["record"].get("platform") == normalized
+            ):
+                return selected
+            return fallbacks[normalized]
+
+        def active_context(*, require_all_platforms: bool = True) -> dict:
+            return selected_context() or fallbacks["mt4"]
+
+        self.bridge._global_metatrader_platform_context = platform_context
+        self.bridge._active_global_metatrader_context = active_context
 
     @staticmethod
     def _configure_runtime_paths(bridge, root: Path) -> None:

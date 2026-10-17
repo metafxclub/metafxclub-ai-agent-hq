@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "backend" / "local-runner" / "ea_strategy_brief.py"
+MODULE_PATH = ROOT / "backend" / "local-runner" / "hq_backend" / "ea" / "ea_strategy_brief.py"
 RUNNER_PATH = ROOT / "runner" / "codex_cli_runner.py"
 
 

@@ -134,8 +134,53 @@ class AiTradeCouncilDeepAnalysisTests(unittest.TestCase):
         cls.bridge = load_bridge()
 
     def setUp(self) -> None:
+        # Deep-analysis tests exercise Council behavior after the operator has
+        # locked both authoritative top-header terminals.  The dedicated
+        # dual-lock gate suite owns the fail-closed 0/2 and 1/2 cases.
+        self.global_platform_context = mock.patch.object(
+            self.bridge,
+            "_global_metatrader_platform_context",
+            side_effect=self._dual_locked_platform_context,
+        )
+        self.active_global_context = mock.patch.object(
+            self.bridge,
+            "_active_global_metatrader_context",
+            side_effect=lambda **kwargs: self._dual_locked_platform_context(
+                "mt4",
+                **kwargs,
+            ),
+        )
+        self.global_platform_context.start()
+        self.active_global_context.start()
+        self.addCleanup(self.active_global_context.stop)
+        self.addCleanup(self.global_platform_context.stop)
         with self.bridge.AI_TRADE_COUNCIL_ANALYSIS_CACHE_LOCK:
             self.bridge.AI_TRADE_COUNCIL_ANALYSIS_CACHE.clear()
+
+    @staticmethod
+    def _dual_locked_platform_context(
+        platform: object,
+        *,
+        require_all_platforms: bool = True,
+    ) -> dict | None:
+        normalized = str(platform or "").strip().lower()
+        if normalized not in {"mt4", "mt5"}:
+            return None
+        candidate_id = f"mtc-deep-analysis-{normalized}-locked"
+        return {
+            "record": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "available": True,
+                "runningState": "platform_running_detected",
+            },
+            "token": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "selectionRevision": 1,
+            },
+            "selectedAt": "2026-10-16T09:00:00+07:00",
+        }
 
     def build(self, model: dict) -> dict:
         snapshot_id = model["chartSnapshot"]["snapshotId"]

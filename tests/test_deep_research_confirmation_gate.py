@@ -832,26 +832,55 @@ class DeepResearchConfirmationGateTests(unittest.TestCase):
                 "_ea_factory_source_catalog",
                 return_value=[record],
             ),
+            mock.patch.object(
+                self.bridge,
+                "_global_metatrader_platform_context",
+                side_effect=lambda platform, require_all_platforms=True: {
+                    "platform": platform,
+                    "allPlatformsReady": require_all_platforms,
+                },
+            ),
             mock.patch.object(self.bridge, "peek_metatrader_status", return_value={}),
             mock.patch.object(
                 self.bridge.google_sheet_hub,
                 "credential_status",
                 return_value={"configured": True, "mode": "access_token"},
             ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_verify_live_sheet_create_binding",
+                return_value={},
+            ) as verify_live_sheet_binding,
         ):
             for platform in ("mt4", "mt5"):
                 with self.subTest(platform=platform):
-                    created = self.bridge.create_ea_factory_build(
-                        {
-                            "sourceRecordId": record["sourceRecordId"],
-                            "platform": platform,
-                            "artifactKind": "expert_advisor",
-                            "brief": "สร้างตาม Strategy Brief โดยไม่เดากฎเพิ่ม",
-                            "idempotencyKey": f"handoff-round-trip-{platform}",
-                        }
-                    )
+                    request = {
+                        "recordId": record["recordId"],
+                        "sourceRecordId": record["sourceRecordId"],
+                        "recordDigest": record["recordDigest"],
+                        "catalogDigest": "c" * 64,
+                        "snapshotDigest": "d" * 64,
+                        "configRevision": 1,
+                        "platform": platform,
+                        "artifactKind": "expert_advisor",
+                        "brief": "สร้างตาม Strategy Brief โดยไม่เดากฎเพิ่ม",
+                        "idempotencyKey": f"handoff-round-trip-{platform}",
+                    }
+                    created = self.bridge.create_ea_factory_build(request)
                     self.assertTrue(created["ok"])
                     self.assertEqual(created["build"]["platform"], platform)
+                    replayed = self.bridge.create_ea_factory_build(request)
+                    self.assertTrue(replayed["idempotentReplay"])
+                    self.assertEqual(replayed["build"]["id"], created["build"]["id"])
+                    conflicting = copy.deepcopy(request)
+                    conflicting["catalogDigest"] = "e" * 64
+                    with self.assertRaises(self.bridge.RequestError) as conflict:
+                        self.bridge.create_ea_factory_build(conflicting)
+                    self.assertEqual(conflict.exception.status, 409)
+                    self.assertEqual(
+                        conflict.exception.code,
+                        "ea_factory_create_key_conflict",
+                    )
                     build_dir = self.bridge._ea_factory_build_directory(
                         created["build"]["id"]
                     )
@@ -871,6 +900,24 @@ class DeepResearchConfirmationGateTests(unittest.TestCase):
                         spec["strategyBriefDigest"],
                         record["strategyBriefDigest"],
                     )
+            self.assertEqual(verify_live_sheet_binding.call_count, 2)
+
+        persisted = self.bridge.read_json(self.bridge.EA_FACTORY_STATE_PATH, {})
+        self.assertEqual(len(persisted.get("builds") or []), 2)
+        expected_binding = {
+            "recordId": record["recordId"],
+            "sourceRecordId": record["sourceRecordId"],
+            "recordDigest": record["recordDigest"],
+            "catalogDigest": "c" * 64,
+            "snapshotDigest": "d" * 64,
+            "configRevision": 1,
+        }
+        for persisted_build in persisted["builds"]:
+            self.assertEqual(
+                persisted_build.get("createSheetBinding"),
+                expected_binding,
+            )
+            self.bridge._ea_factory_revalidated_build(persisted_build)
 
     def test_current_revision_projects_one_compact_upsert_row_for_factory(self) -> None:
         self.configure_active_sheet()
@@ -1103,16 +1150,32 @@ class DeepResearchConfirmationGateTests(unittest.TestCase):
                 "_ea_factory_source_catalog",
                 return_value=[record],
             ),
+            mock.patch.object(
+                self.bridge,
+                "_global_metatrader_platform_context",
+                return_value={"platform": "mt5", "allPlatformsReady": True},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_verify_live_sheet_create_binding",
+                return_value={},
+            ) as verify_live_sheet_binding,
         ):
             created = self.bridge.create_ea_factory_build(
                 {
+                    "recordId": record["recordId"],
                     "sourceRecordId": record["sourceRecordId"],
+                    "recordDigest": record["recordDigest"],
+                    "catalogDigest": "c" * 64,
+                    "snapshotDigest": "d" * 64,
+                    "configRevision": 1,
                     "platform": "mt5",
                     "idempotencyKey": "compact-brief-mt5-choice",
                 }
             )
         self.assertTrue(created["ok"])
         self.assertEqual(created["build"]["platform"], "mt5")
+        verify_live_sheet_binding.assert_called_once()
 
     def test_legacy_predicate_shape_does_not_block_compact_prose_handoff(self) -> None:
         self.configure_active_sheet()

@@ -10,7 +10,7 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.main = (ROOT / "frontend" / "src" / "app" / "main.js").read_text(encoding="utf-8")
-        cls.styles = (ROOT / "frontend" / "src" / "app" / "styles.css").read_text(encoding="utf-8")
+        cls.styles = (ROOT / "frontend" / "src" / "styles" / "main.css").read_text(encoding="utf-8")
 
     def fallback_prop_block(self, prop_id: str, next_prop_id: str | None = None) -> str:
         start = self.main.index(f"  {prop_id}: {{", self.main.index("const WORKFLOW_DASHBOARD_FALLBACKS"))
@@ -206,7 +206,7 @@ class DashboardEquipmentFrontendTests(unittest.TestCase):
     def test_radar_manual_and_schedule_actions_are_filtered_from_every_ui_surface(self):
         rail = self.main[
             self.main.index("function workflowRailActions"):
-            self.main.index("function createWorkflowUseGuideCard", self.main.index("function workflowRailActions"))
+            self.main.index("function createWorkflowConnectionLink", self.main.index("function workflowRailActions"))
         ]
         normalize = self.main[
             self.main.index("function normalizeWorkflowDashboard"):

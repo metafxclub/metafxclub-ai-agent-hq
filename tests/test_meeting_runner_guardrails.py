@@ -40,7 +40,7 @@ def chat_result(reply: str, name: str = "EA Developer") -> dict:
         "agentName": name,
         "durationMs": 12,
         "modelTier": "specialist_fast",
-        "model": "gpt-5.5",
+        "model": "gpt-5.6-sol",
         "reasoningEffort": "low",
         "quotaAttempted": True,
         "quotaConsumption": "confirmed",

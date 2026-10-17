@@ -264,7 +264,7 @@ def _load_live_gateway(run_root: Path, controller: ApprovalController) -> Gatewa
         if entry not in sys.path:
             sys.path.insert(0, entry)
     from codex_app_server_gateway import CodexAppServerGateway, ExplicitApprovalBroker
-    from full_agent_runtime import FullAgentApprovalJournal
+    from hq_backend.chat.full_agent_runtime import FullAgentApprovalJournal
 
     journal = FullAgentApprovalJournal(run_root / "approval-journal")
     broker = ExplicitApprovalBroker(

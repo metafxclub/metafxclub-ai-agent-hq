@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+MODEL_PATH = ROOT / "frontend" / "src" / "features" / "research" / "research-sheet.js"
 
 
 class ResearchSheetHubFrontendTests(unittest.TestCase):
@@ -14,11 +15,17 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
     def setUpClass(cls):
         cls.html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
         cls.main = (ROOT / "frontend" / "src" / "app" / "main.js").read_text(encoding="utf-8")
-        cls.styles = (ROOT / "frontend" / "src" / "app" / "styles.css").read_text(encoding="utf-8")
+        cls.model = MODEL_PATH.read_text(encoding="utf-8")
+        cls.styles = (ROOT / "frontend" / "src" / "styles" / "main.css").read_text(encoding="utf-8")
 
     def block(self, start, end):
         start_index = self.main.index(start)
         return self.main[start_index:self.main.index(end, start_index)]
+
+    def model_block(self, start, end=None):
+        start_index = self.model.index(start)
+        end_index = self.model.index(end, start_index) if end else self.model.index("\n  return {", start_index)
+        return self.model[start_index:end_index]
 
     def run_node_json(self, source: str) -> dict:
         bundled_node = (
@@ -109,7 +116,7 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
         self.assertIn('window.open(\n    "about:blank"', start)
         self.assertLess(start.index("window.open("), start.index("await postJson("))
         self.assertIn("normalizeResearchSheetAuthorizationUrl", start)
-        self.assertIn("accounts.google.com", self.main)
+        self.assertIn("accounts.google.com", self.model)
         self.assertIn("if (!popup.closed) popup.close()", start)
         self.assertIn("postJson(RESEARCH_SHEET_GOOGLE_AUTH_START_ENDPOINT, {})", start)
         self.assertIn("postJson(RESEARCH_SHEET_GOOGLE_AUTH_DISCONNECT_ENDPOINT, {})", disconnect)
@@ -160,7 +167,7 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
         self.assertIn("if (!hub.data?.active || hub.inFlight) return hub.data", recovery)
 
     def test_google_oauth_missing_central_release_client_is_explicit_and_fail_closed(self):
-        normalize = self.block("function normalizeResearchSheetGoogleAuth", "function normalizeResearchSheetAuthorizationUrl")
+        normalize = self.model_block("function normalizeResearchSheetGoogleAuth", "function normalizeResearchSheetAuthorizationUrl")
         presentation = self.block("function researchSheetGoogleAuthPresentation", "function renderResearchSheetGoogleAuth")
         render = self.block("function renderResearchSheetGoogleAuth", "function researchSheetHubSummaryPresentation")
         self.assertIn("requiresAdminSetup", normalize)
@@ -174,7 +181,7 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
         self.assertNotIn('"configured", "ready"', normalize)
 
     def test_google_oauth_access_denied_does_not_assume_testing_audience(self):
-        reason = self.block(
+        reason = self.model_block(
             "function researchSheetGoogleAuthFailureReason",
             "function researchSheetGoogleAuthIsTerminalStatus",
         )
@@ -305,9 +312,10 @@ class ResearchSheetHubFrontendTests(unittest.TestCase):
         self.assertNotIn("hub.data.active = true", authoritative_branch)
 
     def test_authoritative_get_preserves_failed_new_sheet_draft_until_identity_matches(self):
-        helpers = self.block(
-            "function normalizeResearchSheetReference",
-            "function boundedResearchSheetCount",
+        helpers = (
+            f"const {{createResearchSheetModel}} = await import({json.dumps(MODEL_PATH.as_uri())});\n"
+            "const {researchSheetAuthoritativeLifecycleMatches} = createResearchSheetModel({"
+            "safeDashboardDisplayText: String, consumers: [], linkedSystems: [], queryMaxMatches: 100, queryMaxColumnsPerTab: 100});\n"
         )
         sheet_a = "1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         sheet_b = "1BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
@@ -357,9 +365,9 @@ console.log(JSON.stringify({{
         self.assertNotIn("hub.submittedReference = sheetId", inspect)
 
     def test_preview_requires_real_three_tab_evidence_before_confirmation(self):
-        normalize = self.block("function normalizeResearchSheetInspection", "function researchSheetHubConfiguredReference")
+        normalize = self.model_block("function normalizeResearchSheetInspection")
         render = self.block("function renderResearchSheetHubInspection", "function researchSheetHubSummaryPresentation")
-        header_normalizer = self.block("function normalizeResearchSheetHeaderList", "function normalizeResearchSheetHub")
+        header_normalizer = self.model_block("function normalizeResearchSheetHeaderList", "function normalizeResearchSheetHub")
         header_summary = self.block("function researchSheetHeaderIssueSummary", "function renderResearchSheetHubInspection")
         self.assertIn("verificationToken", normalize)
         self.assertIn("/^[A-Za-z0-9_-]{32,128}$/", normalize)
@@ -413,7 +421,7 @@ console.log(JSON.stringify({{
         self.assertIn("ไม่รับ A1 Range", query_markup)
 
         constants = self.block("const RESEARCH_SHEET_HUB_ENDPOINT", "const RESEARCH_SHEET_CONSUMERS")
-        normalize = self.block("function normalizeResearchSheetQueryResult", "function normalizeResearchSheetHub")
+        normalize = self.model_block("function normalizeResearchSheetQueryResult", "function normalizeResearchSheetHub")
         can_run = self.block("function researchSheetHubQueryCanRun", "function researchSheetHubQueryIsBusy")
         render = self.block("function renderResearchSheetHubQuery", "function researchSheetHeaderIssueSummary")
         request = self.block("async function queryResearchSheetHub", "async function loadResearchSheetGoogleAuth")
@@ -478,7 +486,7 @@ console.log(JSON.stringify({{
         self.assertIn("ยังไม่มีข้อมูลและพร้อมรับข้อมูลแรก", linked)
 
     def test_outbox_pending_and_failure_presentations_are_truthful_and_isolated(self):
-        normalize = self.block(
+        normalize = self.model_block(
             "function normalizeResearchSheetOutbox",
             "function normalizeResearchSheetInspection",
         )
@@ -627,7 +635,7 @@ console.log(JSON.stringify({{
         self.assertIn("hub.submittedReference = configuredSheetId", render)
 
     def test_active_read_model_is_fail_closed_and_includes_linked_truth(self):
-        normalize = self.block("function normalizeResearchSheetHub", "function normalizeResearchSheetInspection")
+        normalize = self.model_block("function normalizeResearchSheetHub", "function normalizeResearchSheetInspection")
         self.assertIn("root.rawSheetIdExposed === true", normalize)
         self.assertIn("rawSheetIdExposed: Boolean(rawSheetIdAllowed && sheetId)", normalize)
         self.assertIn("active: root.active === true", normalize)
@@ -646,7 +654,7 @@ console.log(JSON.stringify({{
         factory = self.block("function renderEaFactoryGoogleSheetSync", "function renderEaFactorySourceStage")
         world = self.block("function renderWorkflowCatalog", "function getWorkflowDashboardEntries")
         radar = self.block("function createRadarRailTruthCard", "function createBackendOwnedDailyScheduleCard")
-        card = self.block("function createResearchSheetConsumerCard", "function createWorkflowUseGuideCard")
+        card = self.block("function createResearchSheetConsumerCard", "function createWorkflowConnectionLink")
         self.assertIn("data.sheetId || data.sheetReferenceMasked", identity)
         self.assertIn("configRevision", identity)
         self.assertIn("Config r", identity)
@@ -664,7 +672,11 @@ console.log(JSON.stringify({{
         self.assertIn("Deep_Research", self.main)
         self.assertNotIn('createElement("input")', renderer)
         self.assertNotIn('name = "googleSheetUrlOrId"', renderer)
-        self.assertIn("{ idempotencyKey }", sync)
+        self.assertIn(
+            "{ configRevision: normalizedConfigRevision, idempotencyKey }",
+            sync,
+        )
+        self.assertIn("syncEaFactoryGoogleSheet(currentCatalog.configRevision)", sync)
         self.assertNotIn("googleSheetUrlOrId", sync)
         self.assertIn("sheetSchema.sourceRequiredHeaders", schema_renderer)
         self.assertIn("sheetSchema.sheetTabDefault", schema_renderer)

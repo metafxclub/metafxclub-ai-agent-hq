@@ -1251,6 +1251,11 @@ class FullAgentBridgeApiTests(unittest.TestCase):
                 "FULL_AGENT_WORKSPACE_ROOTS",
                 (self.workspace_dir,),
             ),
+            mock.patch.object(
+                self.bridge,
+                "_metatrader_scope_header_locks_ready",
+                return_value=True,
+            ),
         ):
             thread = self._create_thread(agent_id="ea_developer", mode="workspace")
             queued, finished = self._request_and_wait(

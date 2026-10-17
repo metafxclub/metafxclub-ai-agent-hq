@@ -10,6 +10,8 @@ import threading
 import time
 import unittest
 import zlib
+from contextlib import ExitStack
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -34,6 +36,495 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.bridge = load_bridge()
+
+    def setUp(self) -> None:
+        # One-click tests exercise behavior after the global header has already
+        # locked both terminals.  The lock gate itself is covered explicitly
+        # below; every other test gets one current context for the requested
+        # platform and must not depend on Council ``activePlatform``.
+        self.original_require_top_header_locks = (
+            self.bridge._ea_factory_require_top_header_locks
+        )
+        self.global_platform_context = mock.patch.object(
+            self.bridge,
+            "_ea_factory_require_top_header_locks",
+            side_effect=self._dual_locked_platform_context,
+        )
+        self.global_platform_context.start()
+        self.current_terminal_binding = mock.patch.object(
+            self.bridge,
+            "_ea_factory_one_click_terminal_binding_current",
+            return_value=True,
+        )
+        self.current_terminal_binding.start()
+
+    def tearDown(self) -> None:
+        self.current_terminal_binding.stop()
+        self.global_platform_context.stop()
+
+    def _dual_locked_platform_context(
+        self,
+        platform: object,
+        *,
+        require_all_platforms: bool = True,
+    ) -> dict | None:
+        normalized = str(platform or "").strip().lower()
+        if normalized not in {"mt4", "mt5"}:
+            return None
+        candidate_id = "mtc-one-click-terminal"
+        return {
+            "record": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "available": True,
+                "runningState": "platform_running_detected",
+            },
+            "token": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "selectionRevision": 7,
+            },
+        }
+
+    def test_mt5_read_validation_preserves_existing_set_and_never_repairs_evidence(self) -> None:
+        source = b"input double Lots = 0.01;\ninput int MagicNumber = 4186;\nvoid OnTick(){}\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            (build_dir / "Sets").mkdir()
+            context = {
+                "buildDir": build_dir,
+                "sourceBytes": source,
+                "sourceDigest": hashlib.sha256(source).hexdigest(),
+            }
+            manifest = self.bridge._ea_factory_mt5_optimization_input_manifest(context)
+            reference = self.bridge._ea_factory_write_mt5_set_reference(
+                context, "read-only-proof.set", manifest, []
+            )
+            path = build_dir / reference["relativePath"]
+            original = path.read_bytes()
+            original_mtime = path.stat().st_mtime_ns
+            with mock.patch.object(self.bridge.os, "open", side_effect=AssertionError("Read validation must not attempt creation")):
+                observed = self.bridge._ea_factory_write_mt5_set_reference(
+                    context, "read-only-proof.set", manifest, [], materialize=False
+                )
+            self.assertEqual(observed, reference)
+            self.assertEqual(path.stat().st_mtime_ns, original_mtime)
+            self.assertEqual(path.read_bytes(), original)
+
+            for changed_payload in (b"tampered input set", None):
+                with self.subTest(changed_payload=changed_payload):
+                    if changed_payload is None:
+                        path.unlink()
+                    else:
+                        path.write_bytes(changed_payload)
+                    with mock.patch.object(self.bridge.os, "open", side_effect=AssertionError("Missing proof must not be regenerated")):
+                        with self.assertRaises(self.bridge.OptimizationDomainError) as caught:
+                            self.bridge._ea_factory_write_mt5_set_reference(
+                                context, "read-only-proof.set", manifest, [], materialize=False
+                            )
+                    self.assertEqual(caught.exception.code, "immutable_set_conflict")
+                    self.assertEqual(path.read_bytes() if path.exists() else None, changed_payload)
+
+    def test_mt5_read_binding_propagates_read_only_and_rejects_missing_set(self) -> None:
+        source = b"input double Lots = 0.01;\nvoid OnTick(){}\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            (build_dir / "Sets").mkdir()
+            context = {"buildDir": build_dir, "sourceBytes": source, "sourceDigest": hashlib.sha256(source).hexdigest()}
+            with (
+                mock.patch.object(self.bridge, "_ea_factory_mt5_input_context", return_value=context),
+                mock.patch.object(self.bridge, "_ea_factory_mt5_tester_input_preset", return_value={}),
+                mock.patch.object(self.bridge, "_ea_factory_mt5_tester_fixed_overrides", return_value={}),
+                mock.patch.object(self.bridge, "_ea_factory_mt5_compiled_deployment_binding", return_value={}) as deployment,
+                mock.patch.object(self.bridge.os, "open", side_effect=AssertionError("Validation must not create a missing set")),
+            ):
+                with self.assertRaises(self.bridge.RequestError):
+                    self.bridge._ea_factory_mt5_backtest_input_binding(
+                        {}, "ea-visible-read-only", {}, materialize=False
+                    )
+                deployment.assert_not_called()
+            self.assertEqual(list((build_dir / "Sets").iterdir()), [])
+
+    def test_one_click_rejects_mt_work_before_side_effects_when_dual_locks_missing(
+        self,
+    ) -> None:
+        build = self.build()
+        state = self.state(build)
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_global_metatrader_platform_context",
+                return_value=None,
+            ) as global_context,
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_require_top_header_locks",
+                side_effect=self.original_require_top_header_locks,
+            ) as lock_gate,
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=state,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_metaeditor_target_context",
+            ) as resolve_target,
+            mock.patch.object(
+                self.bridge,
+                "_start_ea_factory_one_click_thread",
+            ) as start,
+            mock.patch.object(
+                self.bridge,
+                "_write_ea_factory_state_unlocked",
+            ) as write,
+            self.assertRaises(self.bridge.RequestError) as raised,
+        ):
+            self.bridge.run_ea_factory_build_one_click(
+                build["id"],
+                {"idempotencyKey": "one-click-lock-gate"},
+            )
+
+        self.assertEqual(raised.exception.status, 409)
+        self.assertEqual(
+            raised.exception.code,
+            "global_metatrader_locks_incomplete",
+        )
+        lock_gate.assert_called_once_with("mt4")
+        global_context.assert_called_once_with("mt4", require_all_platforms=True)
+        resolve_target.assert_not_called()
+        start.assert_not_called()
+        write.assert_not_called()
+
+    def test_compile_result_contract_accepts_canonical_and_native_mt5_rows(self) -> None:
+        accepted = (
+            "Result: 0 errors, 0 warnings",
+            "0 errors, 0 warnings, 785 ms elapsed, cpu='AVX2 + FMA3'",
+        )
+        for line in accepted:
+            with self.subTest(line=line):
+                self.assertIsNotNone(
+                    self.bridge.EA_FACTORY_ZERO_COMPILE_RESULT.fullmatch(line)
+                )
+        for line in (
+            "Result: 1 errors, 0 warnings",
+            "0 errors, 1 warnings",
+            "0 errors, 0 warnings, accepted without native evidence",
+        ):
+            with self.subTest(rejected=line):
+                self.assertIsNone(
+                    self.bridge.EA_FACTORY_ZERO_COMPILE_RESULT.fullmatch(line)
+                )
+
+    def test_visible_capability_failure_preserves_machine_reason_code(self) -> None:
+        capability = {
+            "ready": False,
+            "reasonCode": "mt5_tester_controls_not_verified",
+        }
+        request = {
+            "stageId": "backtest_recheck",
+            "platform": "mt5",
+            "terminalBinding": {},
+            "visibleOperation": {},
+            "resolvedTarget": {},
+            "testerSettings": {},
+        }
+        with (
+            mock.patch.object(
+                self.bridge,
+                "EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER",
+                return_value=capability,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER",
+                lambda **_kwargs: {},
+            ),
+            self.assertRaises(self.bridge.RequestError) as raised,
+        ):
+            self.bridge._ea_factory_invoke_visible_front_office_handler_unlocked(
+                request
+            )
+        self.assertEqual(raised.exception.status, 409)
+        self.assertEqual(
+            raised.exception.code,
+            "mt5_tester_controls_not_verified",
+        )
+        self.assertTrue(raised.exception.retryable)
+
+    def _default_tester_settings_at(
+        self,
+        now_utc: datetime,
+        *,
+        build: dict | None = None,
+    ) -> dict:
+        selected_build = build or self.build()
+        if build is None:
+            selected_build["platform"] = "mt5"
+        binary_suffix = (
+            ".ex5" if selected_build.get("platform") == "mt5" else ".ex4"
+        )
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_backtest_binary",
+                return_value={"fileName": "Rolling_Window" + binary_suffix},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_mt4_tester_input_preset",
+                return_value=None,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_mt5_tester_input_preset",
+                return_value=None,
+            ),
+        ):
+            return self.bridge._ea_factory_default_tester_settings(
+                selected_build,
+                now_utc=now_utc,
+            )
+
+    def test_default_tester_settings_use_previous_utc_day_for_90_inclusive_days(self) -> None:
+        settings = self._default_tester_settings_at(
+            datetime(2026, 10, 15, 23, 59, 59, tzinfo=timezone.utc)
+        )
+
+        self.assertTrue(settings["useDate"])
+        self.assertEqual(settings["fromDate"], "2026-07-17")
+        self.assertEqual(settings["toDate"], "2026-10-14")
+        start = date.fromisoformat(settings["fromDate"])
+        end = date.fromisoformat(settings["toDate"])
+        self.assertEqual((end - start).days + 1, 90)
+
+    def test_default_tester_settings_normalize_to_utc_before_previous_day(self) -> None:
+        settings = self._default_tester_settings_at(
+            datetime(
+                2026,
+                10,
+                15,
+                0,
+                30,
+                tzinfo=timezone(timedelta(hours=7)),
+            )
+        )
+
+        self.assertEqual(settings["toDate"], "2026-10-13")
+        self.assertEqual(settings["fromDate"], "2026-07-16")
+
+    def test_default_tester_settings_handle_leap_day_in_90_day_window(self) -> None:
+        settings = self._default_tester_settings_at(
+            datetime(2024, 3, 1, 12, 0, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(settings["toDate"], "2024-02-29")
+        self.assertEqual(settings["fromDate"], "2023-12-02")
+        start = date.fromisoformat(settings["fromDate"])
+        end = date.fromisoformat(settings["toDate"])
+        self.assertEqual((end - start).days + 1, 90)
+
+    def test_default_tester_settings_preserve_mt4_full_history_contract(self) -> None:
+        build = self.build()
+
+        settings = self._default_tester_settings_at(
+            datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc),
+            build=build,
+        )
+
+        self.assertEqual(settings["expertFileName"], "Rolling_Window.ex4")
+        self.assertFalse(settings["useDate"])
+        self.assertIsNone(settings["fromDate"])
+        self.assertIsNone(settings["toDate"])
+
+    def _resolved_tester_settings(
+        self,
+        *,
+        use_date: bool,
+        from_date: str | None,
+        to_date: str | None,
+    ) -> dict:
+        return {
+            "schemaVersion": self.bridge.EA_FACTORY_RESOLVED_TESTER_SETTINGS_SCHEMA_VERSION,
+            "expertFileName": "Rolling_Window.ex5",
+            "symbol": "XAUUSD",
+            "period": "H1",
+            "model": "every_tick",
+            "spread": "current",
+            "useDate": use_date,
+            "fromDate": from_date,
+            "toDate": to_date,
+            "deposit": 10_000.0,
+            "visualMode": True,
+            "optimizationEnabled": False,
+            "shutdownTerminalAfterTest": False,
+        }
+
+    def test_resolved_tester_settings_accept_exact_mt5_90_day_request(self) -> None:
+        request = {
+            "useDate": True,
+            "fromDate": "2026-07-17",
+            "toDate": "2026-10-14",
+        }
+        resolved = self._resolved_tester_settings(
+            use_date=True,
+            from_date="2026-07-17",
+            to_date="2026-10-14",
+        )
+
+        self.assertTrue(
+            self.bridge._ea_factory_resolved_tester_settings_valid(
+                resolved,
+                expert_file_name="Rolling_Window.ex5",
+                expected_request_settings=request,
+            )
+        )
+        self.assertTrue(
+            self.bridge._ea_factory_resolved_tester_settings_valid(
+                resolved,
+                expert_file_name="Rolling_Window.ex5",
+            )
+        )
+
+    def test_resolved_tester_settings_reject_mismatch_and_malformed_window(self) -> None:
+        request = {
+            "useDate": True,
+            "fromDate": "2026-07-17",
+            "toDate": "2026-10-14",
+        }
+        mismatched = self._resolved_tester_settings(
+            use_date=True,
+            from_date="2026-07-18",
+            to_date="2026-10-14",
+        )
+        malformed = self._resolved_tester_settings(
+            use_date=True,
+            from_date="2026-10-15",
+            to_date="2025-10-14",
+        )
+
+        self.assertFalse(
+            self.bridge._ea_factory_resolved_tester_settings_valid(
+                mismatched,
+                expert_file_name="Rolling_Window.ex5",
+                expected_request_settings=request,
+            )
+        )
+        self.assertFalse(
+            self.bridge._ea_factory_resolved_tester_settings_valid(
+                malformed,
+                expert_file_name="Rolling_Window.ex5",
+                expected_request_settings={
+                    "useDate": True,
+                    "fromDate": "2026-10-15",
+                    "toDate": "2025-10-14",
+                },
+            )
+        )
+
+    def test_resolved_tester_settings_preserve_legacy_optimization_baseline(self) -> None:
+        legacy_request = {
+            "useDate": False,
+            "fromDate": None,
+            "toDate": None,
+        }
+        resolved = self._resolved_tester_settings(
+            use_date=False,
+            from_date=None,
+            to_date=None,
+        )
+
+        self.assertTrue(
+            self.bridge._ea_factory_resolved_tester_settings_valid(
+                resolved,
+                expert_file_name="Rolling_Window.ex5",
+                expected_request_settings=legacy_request,
+            )
+        )
+        self.assertTrue(
+            self.bridge._ea_factory_resolved_tester_settings_valid(
+                resolved,
+                expert_file_name="Rolling_Window.ex5",
+            )
+        )
+
+    def test_default_tester_settings_reservation_anchor_keeps_request_digest_stable(self) -> None:
+        build = self.build()
+        build["platform"] = "mt5"
+        build["oneClickRun"] = {
+            "visibleAction": {
+                "stageId": "backtest_recheck",
+                "reservedAt": "2024-03-01T00:00:00Z",
+            },
+            "terminalBinding": {
+                "platform": "mt5",
+                "candidateId": "mtc-one-click-terminal",
+                "selectionRevision": 7,
+                "bindingDigest": "c" * 64,
+            },
+        }
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_backtest_binary",
+                return_value={
+                    "fileId": "compiled-binary",
+                    "fileName": "Rolling_Window.ex5",
+                    "sha256": "a" * 64,
+                },
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_mt5_tester_input_preset",
+                return_value=None,
+            ),
+        ):
+            first = self.bridge._ea_factory_default_tester_settings(build)
+            second = self.bridge._ea_factory_default_tester_settings(build)
+            request = {
+                "visibleOperation": {"operationId": "ea-visible-test"},
+                "testerSettings": copy.deepcopy(first),
+            }
+            result = {
+                "artifactSpecifications": [
+                    {"alias": "tester_settings"},
+                ],
+                "metrics": {},
+            }
+            artifact_rows = [
+                {
+                    "fileId": "settings-proof",
+                    "relativePath": "Screenshots/settings.png",
+                    "byteSize": 2048,
+                    "sha256": "b" * 64,
+                    "stageId": "backtest_recheck",
+                    "reportId": "report-test",
+                    "artifactKind": "screenshot_evidence",
+                }
+            ]
+            metrics = self.bridge._ea_factory_visible_result_metrics(
+                build,
+                "backtest_recheck",
+                request,
+                result,
+                artifact_rows,
+            )
+
+        expected_digest = self.bridge.payload_digest(
+            "ea-factory-tester-settings-request-v1",
+            first,
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(first["fromDate"], "2023-12-02")
+        self.assertEqual(first["toDate"], "2024-02-29")
+        self.assertEqual(metrics["testerSettingsRequestDigest"], expected_digest)
+        self.assertEqual(
+            self.bridge.payload_digest(
+                "ea-factory-tester-settings-request-v1",
+                second,
+            ),
+            expected_digest,
+        )
 
     def build(self) -> dict:
         stages = []
@@ -81,6 +572,620 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
             "createReservations": [],
             "updatedAt": None,
         }
+
+    def backtest_restart_build(self, *, status: str = "failed") -> dict:
+        build = self.build()
+        for stage in build["stages"]:
+            if stage["id"] in {
+                "strategy_spec",
+                "generate_source",
+                "source_review",
+                "compile_validate",
+            }:
+                stage.update({
+                    "status": "completed",
+                    "missionId": f"mission-{stage['id']}",
+                    "reportId": f"report-{stage['id']}",
+                    "evidenceVerified": True,
+                })
+            elif stage["id"] == "backtest_recheck":
+                stage.update({
+                    "status": "pending",
+                    "missionId": "mission-old-backtest",
+                    "reportId": None,
+                    "evidenceVerified": False,
+                })
+        build["workspace"]["strategySpecDigest"] = "e" * 64
+        build["versions"] = [{
+            "version": 4,
+            "fileName": "Guarded_Backtest.mq4",
+            "sourceFile": "Source/Guarded_Backtest.mq4",
+            "versionFile": "EA_Versions/Guarded_Backtest-v04.mq4",
+            "sourceDigest": "d" * 64,
+        }]
+        now = "2026-10-15T00:00:00Z"
+        terminal_statuses = {"failed", "cancelled"}
+        build["oneClickRun"] = {
+            "schemaVersion": self.bridge.EA_FACTORY_ONE_CLICK_SCHEMA_VERSION,
+            "runId": "ea-run-old-backtest",
+            "idempotencyKey": "one-click-old-backtest",
+            "requestDigest": self.bridge._ea_factory_one_click_request_digest(build),
+            "status": status,
+            "currentStageId": "backtest_recheck",
+            "terminalBinding": {
+                "platform": "mt4",
+                "candidateId": "mtc-one-click-terminal",
+                "selectionRevision": 7,
+                "bindingDigest": "c" * 64,
+            },
+            "failureCode": "visible_backtest_failed" if status in terminal_statuses else None,
+            "messageTh": "รอบเดิมหยุดก่อนมีหลักฐาน Backtest ที่ผ่าน Gate",
+            "startedAt": now,
+            "updatedAt": now,
+            "completedAt": now if status in terminal_statuses else None,
+        }
+        return build
+
+    def backtest_restart_mt5_manifest_fixture(
+        self,
+        root: Path,
+    ) -> tuple[dict, list[dict], Path]:
+        build = self.backtest_restart_build()
+        build["platform"] = "mt5"
+        build["versions"] = [{
+            "version": 4,
+            "fileName": "Guarded_Backtest.mq5",
+            "sourceFile": "Source/Guarded_Backtest.mq5",
+            "versionFile": "EA_Versions/Guarded_Backtest-v04.mq5",
+            "sourceDigest": "d" * 64,
+        }]
+        build_dir = root / "workspace" / "ea-factory" / build["id"]
+        for folder_name in ("EA_Versions", "Reports", "Screenshots"):
+            (build_dir / folder_name).mkdir(parents=True, exist_ok=True)
+        binary_path = build_dir / "EA_Versions" / "Guarded_Backtest-v04.ex5"
+        binary_path.write_bytes(b"compiled mt5 regression fixture")
+        (build_dir / "Reports" / "compile.txt").write_text(
+            "Result: 0 errors, 0 warnings\n",
+            encoding="utf-8",
+        )
+        (build_dir / "Reports" / "compile-receipt.json").write_text(
+            json.dumps({"result": "0 errors, 0 warnings"}),
+            encoding="utf-8",
+        )
+        (build_dir / "Screenshots" / "compile.png").write_bytes(
+            b"\x89PNG\r\n\x1a\ncompile evidence"
+        )
+        compile_stage = next(
+            row for row in build["stages"] if row["id"] == "compile_validate"
+        )
+        registered = self.bridge._ea_factory_register_artifacts(
+            build,
+            [
+                {
+                    "relativePath": "EA_Versions/Guarded_Backtest-v04.ex5",
+                    "stageId": "compile_validate",
+                    "reportId": compile_stage["reportId"],
+                    "artifactKind": "compile_evidence",
+                },
+                {
+                    "relativePath": "Screenshots/compile.png",
+                    "stageId": "compile_validate",
+                    "reportId": compile_stage["reportId"],
+                    "artifactKind": "screenshot_evidence",
+                },
+                {
+                    "relativePath": "Reports/compile.txt",
+                    "stageId": "compile_validate",
+                    "reportId": compile_stage["reportId"],
+                    "artifactKind": "compile_evidence",
+                },
+                {
+                    "relativePath": "Reports/compile-receipt.json",
+                    "stageId": "compile_validate",
+                    "reportId": compile_stage["reportId"],
+                    "artifactKind": "compile_evidence",
+                },
+            ],
+        )
+        compile_stage["artifacts"] = [row["fileId"] for row in registered]
+        return build, registered, binary_path
+
+    def backtest_restart_contract(self, digest: str = "f" * 64) -> dict:
+        return {
+            "schemaVersion": "ea-factory-backtest-restart-contract-v1",
+            "buildId": "ea-build-one-click-test",
+            "versions": [{"sourceDigest": "d" * 64}],
+            "compileEvidence": {"artifacts": [{"sha256": "a" * 64}]},
+            "contractDigest": digest,
+        }
+
+    def backtest_restart_patch_stack(
+        self,
+        state: dict,
+        *,
+        contract_side_effect: object = None,
+        coordinator_alive: bool = False,
+        terminal_current: bool = True,
+    ) -> tuple[ExitStack, dict[str, mock.Mock]]:
+        stack = ExitStack()
+        contract = self.backtest_restart_contract()
+        contract_patch = (
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_backtest_restart_contract",
+                side_effect=contract_side_effect,
+            )
+            if contract_side_effect is not None
+            else mock.patch.object(
+                self.bridge,
+                "_ea_factory_backtest_restart_contract",
+                return_value=contract,
+            )
+        )
+        handles = {
+            "write": stack.enter_context(
+                mock.patch.object(self.bridge, "_write_ea_factory_state_unlocked")
+            ),
+            "start": stack.enter_context(
+                mock.patch.object(
+                    self.bridge,
+                    "_start_ea_factory_one_click_thread",
+                    return_value=True,
+                )
+            ),
+            "idle": stack.enter_context(
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_backtest_restart_idle_probe",
+                    return_value={"testerStartState": "Start"},
+                )
+            ),
+            "advance": stack.enter_context(
+                mock.patch.object(self.bridge, "advance_ea_factory_build")
+            ),
+            "ai": stack.enter_context(
+                mock.patch.object(self.bridge, "run_dashboard_workflow_action")
+            ),
+        }
+        stack.enter_context(
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=state,
+            )
+        )
+        stack.enter_context(mock.patch.object(self.bridge, "load_missions", return_value=[]))
+        stack.enter_context(
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_active_worker_payload",
+                return_value=None,
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_any_one_click_coordinator_alive",
+                return_value=coordinator_alive,
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_one_click_terminal_binding_current",
+                return_value=terminal_current,
+            )
+        )
+        stack.enter_context(contract_patch)
+        stack.enter_context(mock.patch.object(self.bridge, "append_audit"))
+        stack.enter_context(
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_one_click_read_model",
+                side_effect=lambda row: {
+                    "runId": row["oneClickRun"]["runId"],
+                    "status": row["oneClickRun"]["status"],
+                },
+            )
+        )
+        return stack, handles
+
+    def restart_revalidation_fixture(
+        self,
+        root: Path,
+        reports_dir: Path,
+    ) -> tuple[dict, dict, dict]:
+        compact_values = {
+            "record_id": "restart-history-row-001",
+            "system_name": "Restart history EMA crossover",
+            "system_overview": (
+                "Closed-bar trend system for a selected liquid market and timeframe."
+            ),
+            "entry_rules": (
+                "Buy on a confirmed EMA fast cross above slow; sell on the inverse."
+            ),
+            "recovery_rules": "No recovery, grid, martingale, averaging, or hedging.",
+            "exit_rules": (
+                "Close on the opposite signal with bounded stop loss and take profit."
+            ),
+            "money_management": (
+                "Use a positive fixed lot and at most one managed position."
+            ),
+            "order_execution": (
+                "Use market buy and sell orders on a new confirmed bar."
+            ),
+            "display_requirements": (
+                "Display system name, signal, Balance, Equity, and Spread."
+            ),
+            "additional_notes": "Compile and backtest separately before use.",
+        }
+        record = self.bridge._ea_factory_normalize_record(
+            compact_values,
+            source_kind="verified_deep_research_sheet",
+            source_key="sheet-restart-history",
+        )
+        self.assertIsInstance(record, dict)
+        build_id = "ea-build-restart-history-revalidation"
+        workspace = self.bridge._ea_factory_create_build_workspace(
+            build_id,
+            record,
+            "mt4",
+            "expert_advisor",
+        )
+        strategy_mission = {"id": "mission-restart-history-spec"}
+        strategy_report = {"id": "report-restart-history-spec"}
+        now = "2026-10-15T00:00:00Z"
+        build = {
+            "schemaVersion": "ea-factory-build-v1",
+            "id": build_id,
+            "sourceRecordId": record["sourceRecordId"],
+            "sourceDisplayName": record["displayName"],
+            "sourceRecordDigest": record["recordDigest"],
+            "sourceReportId": strategy_report["id"],
+            "sourceMissionId": strategy_mission["id"],
+            "platform": "mt4",
+            "artifactKind": "expert_advisor",
+            "brief": "",
+            "status": "ready",
+            "workspace": workspace,
+            "stages": self.bridge._ea_factory_initial_stages(
+                "mt4",
+                strategy_mission,
+                strategy_report,
+                "expert_advisor",
+            ),
+            "versions": [],
+            "createIdempotencyKey": None,
+            "createIdempotencyKeys": [],
+            "createRequestDigest": self.bridge._ea_factory_create_request_digest(
+                record["sourceRecordId"],
+                "mt4",
+                "",
+                "expert_advisor",
+            ),
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        strategy_artifacts = self.bridge._ea_factory_register_artifacts(
+            build,
+            [{
+                "relativePath": workspace["strategySpecFile"],
+                "stageId": "strategy_spec",
+                "reportId": strategy_report["id"],
+                "artifactKind": "strategy_spec",
+            }],
+        )
+        self.bridge._ea_factory_stage_row(build, "strategy_spec")["artifacts"] = [
+            row["fileId"] for row in strategy_artifacts
+        ]
+
+        spec_path = (
+            root
+            / "workspace"
+            / "ea-factory"
+            / build_id
+            / "Source"
+            / "strategy-spec-v01.json"
+        )
+        spec = self.bridge.read_json(spec_path, None)
+        source_text = f'''#property strict
+#property description "EA_STRATEGY_BRIEF_SHA256:{spec["strategyBriefDigest"]}"
+#define SIGNAL_NONE -1
+input double FixedLot = 0.01;
+input int MagicNumber = 4186001;
+int OnInit() {{ return(INIT_SUCCEEDED); }}
+int CountManagedPositions() {{
+  int count = 0;
+  for(int pos=OrdersTotal()-1; pos>=0; pos--) {{
+    if(!OrderSelect(pos, SELECT_BY_POS, MODE_TRADES)) continue;
+    if(OrderSymbol() == Symbol() && OrderMagicNumber() == MagicNumber) count++;
+  }}
+  return(count);
+}}
+bool CloseOpposite(const int signal) {{
+  for(int pos=OrdersTotal()-1; pos>=0; pos--) {{
+    if(!OrderSelect(pos, SELECT_BY_POS, MODE_TRADES)) continue;
+    bool opposite = (signal == OP_BUY && OrderType() == OP_SELL)
+                 || (signal == OP_SELL && OrderType() == OP_BUY);
+    if(opposite && !OrderClose(OrderTicket(), OrderLots(),
+                              OrderType() == OP_BUY ? Bid : Ask, 3)) return(false);
+  }}
+  return(true);
+}}
+void OnTick() {{
+  static datetime lastBar = 0;
+  datetime currentBar = Time[0];
+  if(currentBar <= 0 || currentBar == lastBar) return;
+  lastBar = currentBar;
+  if(Bars < 3 || FixedLot <= 0.0) return;
+  int signal = SIGNAL_NONE;
+  if(Close[2] <= Open[2] && Close[1] > Open[1]) signal = OP_BUY;
+  if(Close[2] >= Open[2] && Close[1] < Open[1]) signal = OP_SELL;
+  Comment("Restart history EMA crossover signal=", signal,
+          " Balance=", AccountBalance(), " Equity=", AccountEquity(),
+          " Spread=", MarketInfo(Symbol(), MODE_SPREAD));
+  if(signal == SIGNAL_NONE || !CloseOpposite(signal)) return;
+  if(CountManagedPositions() >= 1) return;
+  double entryPrice = signal == OP_BUY ? Ask : Bid;
+  double stopLoss = signal == OP_BUY ? entryPrice - 100 * Point : entryPrice + 100 * Point;
+  double takeProfit = signal == OP_BUY ? entryPrice + 200 * Point : entryPrice - 200 * Point;
+  OrderSend(Symbol(), signal, FixedLot, entryPrice, 3, stopLoss, takeProfit,
+            "Restart lineage", MagicNumber, 0);
+}}
+'''
+        build_dir = root / "workspace" / "ea-factory" / build_id
+        source_path = build_dir / "Source" / "RestartLineage.mq4"
+        version_path = build_dir / "EA_Versions" / "RestartLineage_v01.mq4"
+        source_path.write_text(source_text, encoding="utf-8", newline="\n")
+        version_path.write_text(source_text, encoding="utf-8", newline="\n")
+        source_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        coverage = self.bridge.build_compact_ea_source_manifest(
+            source_text,
+            strategy_brief=spec["strategyBrief"],
+            strategy_brief_digest=spec["strategyBriefDigest"],
+            strategy_spec_digest=workspace["strategySpecDigest"],
+            source_digest=source_digest,
+            target_platform="mt4",
+        )
+        self.assertTrue(coverage["complete"], coverage)
+        generation_report_id = "report-restart-history-generation"
+        build["versions"] = [{
+            "version": 1,
+            "fileName": version_path.name,
+            "sourceDigest": source_digest,
+            "sourceFile": "Source/RestartLineage.mq4",
+            "versionFile": "EA_Versions/RestartLineage_v01.mq4",
+            "sourceReportId": generation_report_id,
+            "immutable": True,
+            "createdAt": now,
+        }]
+        build["blueprintCoverageManifest"] = copy.deepcopy(coverage)
+        source_artifacts = self.bridge._ea_factory_register_artifacts(
+            build,
+            [
+                {
+                    "relativePath": "Source/RestartLineage.mq4",
+                    "stageId": "generate_source",
+                    "reportId": generation_report_id,
+                    "artifactKind": "generated_source",
+                },
+                {
+                    "relativePath": "EA_Versions/RestartLineage_v01.mq4",
+                    "stageId": "generate_source",
+                    "reportId": generation_report_id,
+                    "artifactKind": "immutable_version",
+                },
+            ],
+        )
+        generation_stage = self.bridge._ea_factory_stage_row(
+            build,
+            "generate_source",
+        )
+        generation_stage.update({
+            "status": "completed",
+            "missionId": "mission-restart-history-generation",
+            "reportId": generation_report_id,
+            "evidenceVerified": True,
+            "artifacts": [row["fileId"] for row in source_artifacts],
+            "blueprintCoverageManifest": copy.deepcopy(coverage),
+        })
+        self.bridge._ea_factory_stage_row(build, "source_review").update({
+            "status": "completed",
+            "missionId": "mission-restart-history-review",
+            "reportId": "report-restart-history-review",
+            "evidenceVerified": True,
+        })
+
+        original_run = {
+            "schemaVersion": self.bridge.EA_FACTORY_ONE_CLICK_SCHEMA_VERSION,
+            "runId": "ea-run-restart-history-original",
+            "idempotencyKey": "restart-history-original-0001",
+            "requestDigest": self.bridge._ea_factory_one_click_request_digest(build),
+            "status": "failed",
+            "currentStageId": "backtest_recheck",
+            "terminalBinding": {
+                "platform": "mt4",
+                "candidateId": "mtc-restart-history-terminal",
+                "selectionRevision": 7,
+                "bindingDigest": "c" * 64,
+            },
+            "failureCode": "visible_backtest_failed",
+            "messageTh": "รอบเดิมหยุดก่อน Backtest สำเร็จ",
+            "startedAt": now,
+            "updatedAt": now,
+            "completedAt": now,
+        }
+        build["oneClickRun"] = original_run
+        operation_id = self.bridge._ea_factory_one_click_visible_operation_id(
+            build,
+            original_run,
+            "compile_validate",
+        )
+        binary_path = build_dir / "EA_Versions" / "RestartLineage_v01.ex4"
+        binary_path.write_bytes(b"compiled restart history fixture")
+        binary_digest = hashlib.sha256(binary_path.read_bytes()).hexdigest()
+        screenshot_path = build_dir / "Screenshots" / "compile-restart.png"
+        screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nrestart history")
+        log_path = build_dir / "Reports" / "compile-restart.txt"
+        result_line = "Result: 0 errors, 0 warnings"
+        log_path.write_text(
+            f"{result_line}\n{source_digest}\n{binary_digest}\n",
+            encoding="utf-8",
+        )
+        receipt_path = build_dir / "Reports" / "compile-restart.json"
+        receipt_path.write_text("{}\n", encoding="utf-8")
+        compile_report_id = "report-restart-history-compile"
+        compile_artifacts = self.bridge._ea_factory_register_artifacts(
+            build,
+            [
+                {
+                    "relativePath": "EA_Versions/RestartLineage_v01.ex4",
+                    "stageId": "compile_validate",
+                    "reportId": compile_report_id,
+                    "artifactKind": "compile_evidence",
+                },
+                {
+                    "relativePath": "Screenshots/compile-restart.png",
+                    "stageId": "compile_validate",
+                    "reportId": compile_report_id,
+                    "artifactKind": "screenshot_evidence",
+                },
+                {
+                    "relativePath": "Reports/compile-restart.txt",
+                    "stageId": "compile_validate",
+                    "reportId": compile_report_id,
+                    "artifactKind": "compile_evidence",
+                },
+                {
+                    "relativePath": "Reports/compile-restart.json",
+                    "stageId": "compile_validate",
+                    "reportId": compile_report_id,
+                    "artifactKind": "compile_evidence",
+                },
+            ],
+        )
+        by_path = {
+            row["relativePath"]: row for row in compile_artifacts
+        }
+        process_binding = {
+            "schemaVersion": "ea-factory-front-office-process-binding-v1",
+            "observedAt": now,
+            "stageId": "compile_validate",
+            "terminalCandidateId": "mtc-restart-history-terminal",
+            "terminalSelectionRevision": 7,
+            "terminalBindingDigest": "c" * 64,
+            "terminalProcessId": 123,
+            "terminalExecutableSha256": "4" * 64,
+            "terminalWindowHandle": 456,
+            "terminalWindowOwnerProcessId": 123,
+            "terminalWindowTitleSha256": "5" * 64,
+            "terminalWindowClassSha256": "6" * 64,
+            "frontOfficeKind": "metaeditor",
+            "frontOfficeProcessId": 124,
+            "frontOfficeExecutableSha256": "7" * 64,
+            "frontOfficeWindowHandle": 457,
+            "frontOfficeWindowOwnerProcessId": 124,
+            "frontOfficeWindowTitleSha256": "8" * 64,
+            "frontOfficeWindowClassSha256": "9" * 64,
+            "processBindingDigest": "",
+        }
+        process_binding["processBindingDigest"] = (
+            self.bridge._ea_factory_front_office_process_binding_digest(
+                process_binding
+            )
+        )
+        stage_manifest_digest = (
+            self.bridge._ea_factory_visible_stage_manifest_digest(
+                compile_artifacts
+            )
+        )
+        metrics = {
+            "evidenceMode": self.bridge.EA_FACTORY_VISIBLE_EVIDENCE_MODE,
+            "operationId": operation_id,
+            "eaFactoryStage": "compile_validate",
+            "platform": "mt4",
+            "terminalCandidateId": "mtc-restart-history-terminal",
+            "terminalSelectionRevision": 7,
+            "terminalBindingDigest": "c" * 64,
+            "processBinding": copy.deepcopy(process_binding),
+            "processBindingDigest": process_binding["processBindingDigest"],
+            "postProcessBinding": copy.deepcopy(process_binding),
+            "postProcessBindingDigest": process_binding["processBindingDigest"],
+            "capabilityCheckedAt": now,
+            "liveTradingExecuted": False,
+            "autoTradingToggled": False,
+            "autoTradingStateBefore": True,
+            "autoTradingStateAfter": True,
+            "chartAttached": False,
+            "terminalClosedByAdapter": False,
+            "terminalStillRunning": True,
+            "terminalStillOpen": True,
+            "processId": 124,
+            "windowHandle": 457,
+            "evidenceArtifactIds": [
+                row["fileId"] for row in compile_artifacts
+            ],
+            "stageArtifactManifestDigest": stage_manifest_digest,
+            "sourceDigest": source_digest,
+            "compiledBinaryFileId": by_path[
+                "EA_Versions/RestartLineage_v01.ex4"
+            ]["fileId"],
+            "compiledBinarySha256": binary_digest,
+            "visibleWindowEvidenceFileId": by_path[
+                "Screenshots/compile-restart.png"
+            ]["fileId"],
+            "visibleWindowEvidenceSha256": by_path[
+                "Screenshots/compile-restart.png"
+            ]["sha256"],
+            "compileLogFileId": by_path["Reports/compile-restart.txt"][
+                "fileId"
+            ],
+            "compileLogSha256": by_path["Reports/compile-restart.txt"][
+                "sha256"
+            ],
+            "adapterReceiptFileId": by_path[
+                "Reports/compile-restart.json"
+            ]["fileId"],
+            "adapterReceiptSha256": by_path[
+                "Reports/compile-restart.json"
+            ]["sha256"],
+            "resultLine": result_line,
+            "visibleMetaEditor": True,
+            "compileVerified": True,
+            "compileExecuted": True,
+            "recoveredExistingReceipt": False,
+            "zeroErrors": True,
+            "zeroWarnings": True,
+            "backtestExecuted": False,
+        }
+        compile_stage = self.bridge._ea_factory_stage_row(
+            build,
+            "compile_validate",
+        )
+        compile_stage.update({
+            "status": "completed",
+            "missionId": "mission-restart-history-compile",
+            "reportId": compile_report_id,
+            "evidenceVerified": True,
+            "artifacts": [row["fileId"] for row in compile_artifacts],
+            "visibleEvidenceMode": self.bridge.EA_FACTORY_VISIBLE_EVIDENCE_MODE,
+            "visibleOperationId": operation_id,
+            "visibleEvidenceDigest": stage_manifest_digest,
+            "terminalExecutableSha256": "4" * 64,
+            "frontOfficeExecutableSha256": "7" * 64,
+        })
+        compile_report = {
+            "id": compile_report_id,
+            "status": "ready",
+            "linkedMissionId": compile_stage["missionId"],
+            "metrics": metrics,
+        }
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        (reports_dir / f"{compile_report_id}.json").write_text(
+            json.dumps(compile_report),
+            encoding="utf-8",
+        )
+        return build, compile_stage, compile_report
 
     def compact_ea_manifest(self, source_digest: str = "d" * 64) -> dict:
         manifest = {
@@ -518,6 +1623,310 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
         uncertain_write.assert_called_once()
         uncertain_start.assert_not_called()
 
+    def _legacy_same_key_resumes_revalidated_mt5_handoff_without_stage_replay(self) -> None:
+        build = self.build()
+        build["platform"] = "mt5"
+        build["status"] = "completed"
+        for stage in build["stages"]:
+            stage.update({
+                "status": "completed",
+                "missionId": stage.get("missionId") or f"mission-{stage['id']}",
+                "reportId": stage.get("reportId") or f"report-{stage['id']}",
+                "blockedReasonCode": None,
+                "evidenceVerified": True,
+            })
+        now = "2026-10-15T13:54:39Z"
+        build["oneClickRun"] = {
+            "schemaVersion": self.bridge.EA_FACTORY_ONE_CLICK_SCHEMA_VERSION,
+            "runId": "ea-run-repaired-mt5-handoff",
+            "idempotencyKey": "one-click-repaired-handoff-001",
+            "requestDigest": self.bridge._ea_factory_one_click_request_digest(build),
+            "status": "failed",
+            "currentStageId": None,
+            "terminalBinding": {
+                "platform": "mt5",
+                "candidateId": "mtc-one-click-terminal",
+                "selectionRevision": 7,
+                "bindingDigest": "c" * 64,
+            },
+            "failureCode": "verified_baseline_settings_required",
+            "messageTh": "older verifier rejected a valid baseline",
+            "startedAt": now,
+            "updatedAt": now,
+            "completedAt": now,
+        }
+        original_run_id = build["oneClickRun"]["runId"]
+        original_stages = copy.deepcopy(build["stages"])
+        state = self.state(build)
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=state,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_sync_build_status",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_one_click_repaired_optimization_handoff_available",
+                return_value=True,
+            ) as revalidate,
+            mock.patch.object(
+                self.bridge,
+                "_write_ea_factory_state_unlocked",
+            ) as write_state,
+            mock.patch.object(
+                self.bridge,
+                "_start_ea_factory_one_click_thread",
+                return_value=True,
+            ) as start,
+            mock.patch.object(self.bridge, "advance_ea_factory_build") as advance,
+            mock.patch.object(self.bridge, "append_audit"),
+        ):
+            resumed = self.bridge.run_ea_factory_build_one_click(
+                build["id"],
+                {"idempotencyKey": "one-click-repaired-handoff-001"},
+            )
+
+        self.assertEqual(resumed["kind"], "ea_factory_one_click_resumed")
+        self.assertTrue(resumed["workerStarted"])
+        self.assertEqual(build["oneClickRun"]["runId"], original_run_id)
+        self.assertEqual(build["oneClickRun"]["status"], "queued")
+        self.assertIsNone(build["oneClickRun"]["currentStageId"])
+        self.assertIsNone(build["oneClickRun"]["failureCode"])
+        self.assertIsNone(build["oneClickRun"]["completedAt"])
+        self.assertEqual(build["stages"], original_stages)
+        revalidate.assert_called_once_with(build, mock.ANY)
+        write_state.assert_called_once()
+        start.assert_called_once()
+        advance.assert_not_called()
+
+        failed_build = copy.deepcopy(build)
+        failed_build["oneClickRun"].update({
+            "status": "failed",
+            "failureCode": "verified_baseline_settings_required",
+            "completedAt": now,
+        })
+        failed_state = self.state(failed_build)
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=failed_state,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_sync_build_status",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_one_click_repaired_optimization_handoff_available",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_start_ea_factory_one_click_thread",
+            ) as blocked_start,
+            mock.patch.object(self.bridge, "append_audit"),
+        ):
+            replayed = self.bridge.run_ea_factory_build_one_click(
+                failed_build["id"],
+                {"idempotencyKey": "one-click-repaired-handoff-001"},
+            )
+        self.assertEqual(replayed["kind"], "ea_factory_one_click_replayed")
+        self.assertFalse(replayed["workerStarted"])
+        blocked_start.assert_not_called()
+
+    def _legacy_repaired_mt5_handoff_read_model_requires_full_revalidation(self) -> None:
+        build = self.build()
+        build["platform"] = "mt5"
+        build["status"] = "completed"
+        for stage in build["stages"]:
+            stage.update({"status": "completed", "evidenceVerified": True})
+        now = "2026-10-15T13:54:39Z"
+        run = {
+            "status": "failed",
+            "currentStageId": None,
+            "failureCode": "verified_baseline_settings_required",
+            "terminalBinding": {
+                "platform": "mt5",
+                "candidateId": "mtc-one-click-terminal",
+                "selectionRevision": 7,
+                "bindingDigest": "c" * 64,
+            },
+            "completedAt": now,
+        }
+        backtest_stage = next(
+            stage for stage in build["stages"] if stage["id"] == "backtest_recheck"
+        )
+        backtest_stage["visibleOperationId"] = "ea-visible-repaired-handoff"
+        run["visibleAction"] = {
+            "stageId": "backtest_recheck",
+            "operationId": "ea-visible-repaired-handoff",
+            "state": "completed",
+            "attemptCount": 3,
+        }
+        build["oneClickRun"] = run
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_one_click_terminal_binding_current",
+                return_value=True,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_optimization_build_context",
+                return_value={"build": {"id": build["id"]}},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_mt5_optimization_input_manifest",
+                return_value={"entries": [{"inputName": "SafeRange"}]},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_source_bound_auto_optimization_ranges",
+                return_value=[{
+                    "name": "SafeRange",
+                    "kind": "numeric",
+                    "start": "1",
+                    "step": "1",
+                    "stop": "2",
+                }],
+            ),
+        ):
+            self.assertTrue(
+                self.bridge._ea_factory_one_click_repaired_optimization_handoff_available(
+                    build,
+                    run,
+                )
+            )
+            run["failureCode"] = "source_bound_optimization_ranges_unavailable"
+            self.assertTrue(
+                self.bridge._ea_factory_one_click_repaired_optimization_handoff_available(
+                    build,
+                    run,
+                )
+            )
+            run["failureCode"] = "verified_baseline_settings_required"
+        run["visibleAction"]["state"] = "uncertain"
+        with mock.patch.object(
+            self.bridge,
+            "_ea_factory_optimization_build_context",
+        ) as context:
+            self.assertFalse(
+                self.bridge._ea_factory_one_click_repaired_optimization_handoff_available(
+                    build,
+                    run,
+                )
+            )
+        context.assert_not_called()
+        run["visibleAction"]["state"] = "completed"
+        run["visibleAction"]["operationId"] = "ea-visible-wrong-operation"
+        with mock.patch.object(
+            self.bridge,
+            "_ea_factory_optimization_build_context",
+        ) as context:
+            self.assertFalse(
+                self.bridge._ea_factory_one_click_repaired_optimization_handoff_available(
+                    build,
+                    run,
+                )
+            )
+        context.assert_not_called()
+        run["visibleAction"]["operationId"] = "ea-visible-repaired-handoff"
+        run["failureCode"] = "immutable_source_invalid"
+        with mock.patch.object(
+            self.bridge,
+            "_ea_factory_optimization_build_context",
+        ) as context:
+            self.assertFalse(
+                self.bridge._ea_factory_one_click_repaired_optimization_handoff_available(
+                    build,
+                    run,
+                )
+            )
+        context.assert_not_called()
+
+    def test_mt5_factory_completes_at_final_report_without_optimizer_handoff(self) -> None:
+        build = self.build()
+        build["platform"] = "mt5"
+        build["status"] = "completed"
+        for stage in build["stages"]:
+            stage.update({
+                "status": "completed",
+                "evidenceVerified": True,
+                "missionId": stage.get("missionId") or f"mission-{stage['id']}",
+                "reportId": stage.get("reportId") or f"report-{stage['id']}",
+            })
+        build["oneClickRun"] = self._run(build, current_stage=None)
+        build["oneClickRun"]["status"] = "running"
+        state = self.state(build)
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=state,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_sync_build_status",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_write_ea_factory_state_unlocked",
+            ) as write_state,
+            mock.patch.object(self.bridge, "load_missions", return_value=[]),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_report_rows_snapshot",
+                return_value=[],
+            ),
+        ):
+            action = self.bridge._ea_factory_one_click_next_action(build["id"])
+
+        self.assertEqual(action["kind"], "completed")
+        self.assertEqual(build["oneClickRun"]["status"], "completed")
+        self.assertEqual(
+            build["oneClickRun"]["completionBoundary"],
+            "final_report",
+        )
+        self.assertFalse(build["oneClickRun"]["optimizationIncluded"])
+        self.assertNotIn("optimizationHandoff", build["oneClickRun"])
+        write_state.assert_called_once()
+
+    def test_factory_read_model_drops_legacy_optimizer_fields(self) -> None:
+        build = self.build()
+        build["platform"] = "mt5"
+        build["status"] = "completed"
+        for stage in build["stages"]:
+            stage.update({"status": "completed", "evidenceVerified": True})
+        build["oneClickRun"] = self._run(build, current_stage=None)
+        build["oneClickRun"].update({
+            "status": "completed",
+            "optimizationProgressPercent": 75,
+            "optimizationHandoff": {
+                "sessionId": "legacy-optimization-session",
+                "state": "failed",
+            },
+        })
+
+        model = self.bridge._ea_factory_one_click_read_model(build)
+
+        self.assertEqual(model["status"], "completed")
+        self.assertEqual(model["completionBoundary"], "final_report")
+        self.assertFalse(model["optimizationIncluded"])
+        self.assertNotIn("optimizationHandoff", model)
+        self.assertNotIn("optimizationProgressPercent", model)
+        self.assertFalse(model["canResume"])
+        self.assertIsNone(model["resumeKind"])
+        self.assertEqual(model["progressPercent"], 100)
+
     def test_coordinator_advances_only_next_pending_stage(self) -> None:
         build = self.build()
         build["oneClickRun"] = self._run(build, current_stage="generate_source")
@@ -611,13 +2020,16 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
         ):
             self.assertEqual(
                 self.bridge._ea_factory_front_office_supported_platforms(),
-                frozenset({"mt4"}),
+                frozenset({"mt4", "mt5"}),
             )
 
-    def test_mt5_one_click_is_rejected_before_terminal_or_worker_action(self) -> None:
+    def test_mt5_one_click_reserves_exact_running_terminal_and_worker(self) -> None:
         build = self.build()
         build["platform"] = "mt5"
         state = self.state(build)
+        context, target = self.target()
+        context["record"]["platform"] = "mt5"
+        target["platform"] = "mt5"
         with (
             mock.patch.object(
                 self.bridge,
@@ -627,24 +2039,26 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
             mock.patch.object(
                 self.bridge,
                 "_ea_factory_metaeditor_target_context",
+                return_value=(context, target),
             ) as resolve_target,
             mock.patch.object(
                 self.bridge,
                 "_start_ea_factory_one_click_thread",
+                return_value=True,
             ) as start,
             mock.patch.object(self.bridge, "_write_ea_factory_state_unlocked") as write,
+            mock.patch.object(self.bridge, "append_audit"),
         ):
-            with self.assertRaises(self.bridge.RequestError) as error:
-                self.bridge.run_ea_factory_build_one_click(
-                    build["id"],
-                    {"idempotencyKey": "one-click-ui-001"},
-                )
-        self.assertEqual(error.exception.status, 409)
-        self.assertIn("manual stage-by-stage MT5", str(error.exception))
-        resolve_target.assert_not_called()
-        start.assert_not_called()
-        write.assert_not_called()
-        self.assertNotIn("oneClickRun", build)
+            result = self.bridge.run_ea_factory_build_one_click(
+                build["id"],
+                {"idempotencyKey": "one-click-ui-001"},
+            )
+        self.assertEqual(result["kind"], "ea_factory_one_click_started")
+        self.assertTrue(result["workerStarted"])
+        self.assertEqual(build["oneClickRun"]["terminalBinding"]["platform"], "mt5")
+        resolve_target.assert_called_once_with("mt5")
+        start.assert_called_once()
+        write.assert_called_once()
 
     def test_mt4_one_click_requires_terminal_process_already_running(self) -> None:
         build = self.build()
@@ -679,7 +2093,7 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
         write.assert_not_called()
         self.assertNotIn("oneClickRun", build)
 
-    def test_persisted_mt5_one_click_is_blocked_without_dispatch(self) -> None:
+    def test_persisted_mt5_one_click_advances_through_same_phase_gate(self) -> None:
         build = self.build()
         build["platform"] = "mt5"
         build["oneClickRun"] = self._run(build, current_stage="generate_source")
@@ -698,13 +2112,10 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
             mock.patch.object(self.bridge, "_ea_factory_sync_build_status") as sync,
         ):
             action = self.bridge._ea_factory_one_click_next_action(build["id"])
-        self.assertEqual(action["kind"], "blocked")
-        self.assertEqual(
-            action["reasonCode"],
-            "one_click_visible_mt5_not_implemented",
-        )
-        self.assertEqual(build["oneClickRun"]["status"], "blocked")
-        sync.assert_not_called()
+        self.assertEqual(action["kind"], "advance")
+        self.assertEqual(action["stageId"], "generate_source")
+        self.assertNotEqual(build["oneClickRun"]["status"], "blocked")
+        sync.assert_called_once()
         write.assert_called_once()
 
     def test_source_invalid_output_uses_existing_bounded_retry_path(self) -> None:
@@ -728,6 +2139,110 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
         self.assertEqual(action["kind"], "retry_source")
         self.assertEqual(action["failedMissionId"], "mission-source-failed")
         self.assertEqual(action["attempt"], 2)
+
+    def test_same_run_key_restarts_stale_running_source_retry_coordinator(self) -> None:
+        build = self.build()
+        build["platform"] = "mt5"
+        build["status"] = "attention_required"
+        source = next(
+            row for row in build["stages"] if row["id"] == "generate_source"
+        )
+        source.update({
+            "status": "failed",
+            "blockedReasonCode": "invalid_output",
+            "missionId": "mission-source-invalid-output",
+            "manualRetryCount": 0,
+            "manualRetryHistory": [],
+        })
+        build["oneClickRun"] = self._run(
+            build,
+            current_stage="generate_source",
+        )
+        build["oneClickRun"]["status"] = "running"
+        build["oneClickRun"]["terminalBinding"]["platform"] = "mt5"
+        build["oneClickRun"]["requestDigest"] = (
+            self.bridge._ea_factory_one_click_request_digest(build)
+        )
+        state = self.state(build)
+
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=state,
+            ),
+            mock.patch.object(self.bridge, "load_missions", return_value=[]),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_active_worker_payload",
+                return_value=None,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_start_ea_factory_one_click_thread",
+                return_value=True,
+            ) as start,
+            mock.patch.object(self.bridge, "append_audit"),
+        ):
+            replay = self.bridge.run_ea_factory_build_one_click(
+                build["id"],
+                {"idempotencyKey": "one-click-ui-001"},
+            )
+        self.assertEqual(replay["kind"], "ea_factory_one_click_replayed")
+        self.assertTrue(replay["idempotentReplay"])
+        self.assertTrue(replay["workerStarted"])
+        start.assert_called_once()
+        self.assertEqual(build["oneClickRun"]["status"], "running")
+        self.assertEqual(
+            build["oneClickRun"]["currentStageId"],
+            "generate_source",
+        )
+
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=state,
+            ),
+            mock.patch.object(self.bridge, "_write_ea_factory_state_unlocked"),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_sync_build_status",
+                return_value=False,
+            ),
+        ):
+            action = self.bridge._ea_factory_one_click_next_action(build["id"])
+        self.assertEqual(action["kind"], "retry_source")
+        self.assertEqual(
+            action["failedMissionId"],
+            "mission-source-invalid-output",
+        )
+        self.assertEqual(action["attempt"], 1)
+
+    def test_model_unavailable_stops_without_blind_retry_and_explains_reason(self) -> None:
+        build = self.build()
+        source = next(row for row in build["stages"] if row["id"] == "generate_source")
+        source.update({
+            "status": "failed",
+            "blockedReasonCode": "model_unavailable",
+            "missionId": "mission-source-model-unavailable",
+            "manualRetryCount": 0,
+            "manualRetryHistory": [],
+        })
+        build["oneClickRun"] = self._run(build, current_stage="generate_source")
+        state = self.state(build)
+        with (
+            mock.patch.object(self.bridge, "_load_ea_factory_state_unlocked", return_value=state),
+            mock.patch.object(self.bridge, "_write_ea_factory_state_unlocked"),
+            mock.patch.object(self.bridge, "_ea_factory_sync_build_status", return_value=False),
+        ):
+            action = self.bridge._ea_factory_one_click_next_action(build["id"])
+
+        self.assertEqual(action["kind"], "blocked")
+        self.assertEqual(action["reasonCode"], "model_unavailable")
+        self.assertEqual(build["oneClickRun"]["status"], "failed")
+        self.assertFalse(build["oneClickRun"].get("canRetry", False))
+        self.assertIn("ไม่รองรับบัญชีเครื่องนี้", build["oneClickRun"]["messageTh"])
 
     def test_restart_at_reserved_visible_stage_pauses_without_replaying_ui(self) -> None:
         build = self.build()
@@ -826,11 +2341,21 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
 
     def test_finish_persists_uncertain_visible_state_when_immutable_version_is_missing(self) -> None:
         build = self.build()
+        create_sheet_binding = {
+            "recordId": "deep-one-click-sheet",
+            "sourceRecordId": build["sourceRecordId"],
+            "recordDigest": build["sourceRecordDigest"],
+            "catalogDigest": "c" * 64,
+            "snapshotDigest": "d" * 64,
+            "configRevision": 7,
+        }
+        build["createSheetBinding"] = create_sheet_binding
         build["createRequestDigest"] = self.bridge._ea_factory_create_request_digest(
             build["sourceRecordId"],
             build["platform"],
             build["brief"],
             build["artifactKind"],
+            create_sheet_binding,
         )
         build["versions"] = [{
             "version": 1,
@@ -1120,8 +2645,11 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
         self.assertFalse(result["oneClick"]["commandsAllowed"])
         self.assertEqual(result["oneClick"]["visibleActionState"], "uncertain")
         self.assertTrue(result["oneClick"]["requiresExplicitRecovery"])
-        self.assertIn("ไฟล์หลักฐาน", result["messageTh"])
-        self.assertIn("ไม่แน่นอน", result["messageTh"])
+        self.assertIn("หลักฐานหรือสัญญาของ Build", result["messageTh"])
+        self.assertIn("ไม่ผ่านการตรวจสอบกับรุ่นปัจจุบัน", result["messageTh"])
+        self.assertNotIn("สูญหาย", result["messageTh"])
+        self.assertNotIn("ถูกเปลี่ยนแปลง", result["messageTh"])
+        self.assertFalse(result["liveTradingAllowed"])
         self.assertNotIn("eaFactory", result)
 
     def test_visible_handler_receives_immutable_request_dto(self) -> None:
@@ -1137,6 +2665,7 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
         request = {
             "stageId": "compile_validate",
             "platform": "mt4",
+            "runSnapshotDigest": "a" * 64,
             "terminalBinding": copy.deepcopy(
                 build["oneClickRun"]["terminalBinding"]
             ),
@@ -1144,6 +2673,7 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
         }
 
         def complete(**kwargs):
+            self.assertNotIn("runSnapshotDigest", kwargs["request"])
             kwargs["request"]["visibleOperation"]["operationId"] = "mutated-copy"
             return {
                 "schemaVersion": self.bridge.EA_FACTORY_VISIBLE_RESULT_SCHEMA_VERSION,
@@ -1220,6 +2750,7 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
             request["visibleOperation"]["operationId"],
             operation_id,
         )
+        self.assertEqual(request["runSnapshotDigest"], "a" * 64)
         self.assertTrue(result["metrics"]["compileVerified"])
         self.assertEqual(result["metrics"]["processId"], 123)
 
@@ -1557,6 +3088,482 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
                     )
                 )
 
+    def test_mt5_compile_prestart_recovery_requires_exact_pre_f7_checkpoint(self) -> None:
+        build = self.build()
+        build["platform"] = "mt5"
+        build["oneClickRun"] = self._run(build, current_stage="compile_validate")
+        run = build["oneClickRun"]
+        run["status"] = "awaiting_visible_terminal"
+        run["terminalBinding"] = {
+            "platform": "mt5",
+            "candidateId": "mtc-one-click-terminal",
+            "selectionRevision": 7,
+            "bindingDigest": "c" * 64,
+        }
+        self.assertTrue(
+            self.bridge._ea_factory_one_click_reserve_visible_action(
+                build,
+                run,
+                "compile_validate",
+            )
+        )
+        action = run["visibleAction"]
+        action.update({
+            "attemptCount": self.bridge.EA_FACTORY_ONE_CLICK_VISIBLE_RETRY_LIMIT,
+            "state": "uncertain",
+            "lastFailureCode": "mt5_metaeditor_compile_result_not_ready",
+            "requiresExplicitResume": True,
+        })
+        operation_id = action["operationId"]
+        token = operation_id.removeprefix("ea-visible-")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build_root = root / "build"
+            data_root = root / "terminal-data"
+            for name in ("EA_Versions", "Reports", "Screenshots", "Summaries"):
+                (build_root / name).mkdir(parents=True, exist_ok=True)
+            version_path = build_root / "EA_Versions" / "ExactMT5_v01.mq5"
+            version_path.write_text("#property strict\nvoid OnTick(){}\n", encoding="utf-8")
+            source_digest = hashlib.sha256(version_path.read_bytes()).hexdigest()
+            build["versions"] = [{
+                "version": 1,
+                "fileName": version_path.name,
+                "versionFile": f"EA_Versions/{version_path.name}",
+                "sourceDigest": source_digest,
+                "immutable": True,
+            }]
+            work_root = (
+                data_root
+                / "MQL5"
+                / "Experts"
+                / "Metafxclub"
+                / "AgentHQ"
+                / operation_id
+            )
+            work_root.mkdir(parents=True)
+            working_source = work_root / f"agenthq_{token}.mq5"
+            working_source.write_bytes(version_path.read_bytes())
+            expected_intent = {
+                "schemaVersion": "ea-factory-visible-front-office-action-intent-v1",
+                "operationId": operation_id,
+                "stageId": "compile_validate",
+                "terminalCandidateId": "mtc-one-click-terminal",
+                "terminalSelectionRevision": 7,
+                "terminalBindingDigest": "c" * 64,
+                "sourceDigest": source_digest,
+                "platform": "mt5",
+            }
+            intent_path = (
+                build_root / "Summaries" / f"{operation_id}-compile-intent.json"
+            )
+            intent_path.write_text(
+                json.dumps(expected_intent, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            resolved_target = {
+                "candidateId": "mtc-one-click-terminal",
+                "selectionRevision": 7,
+                "bindingDigest": "c" * 64,
+                "platform": "mt5",
+                "dataPath": str(data_root),
+            }
+
+            with (
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_build_directory",
+                    return_value=build_root,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_one_click_terminal_binding_current",
+                    return_value=True,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_visible_adapter_target_resolver",
+                    return_value=resolved_target,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_file_catalog",
+                    return_value=[],
+                ),
+            ):
+                self.assertTrue(
+                    self.bridge._ea_factory_one_click_compile_prestart_recovery_available(
+                        build, "compile_validate", action
+                    )
+                )
+                model = self.bridge._ea_factory_one_click_read_model(build)
+                self.assertTrue(model["canResume"])
+                self.assertEqual(
+                    model["visibleAction"]["attemptLimit"],
+                    self.bridge.EA_FACTORY_ONE_CLICK_PRESTART_RECOVERY_LIMIT,
+                )
+
+                working_source.write_text("changed", encoding="utf-8")
+                self.assertFalse(
+                    self.bridge._ea_factory_one_click_compile_prestart_recovery_available(
+                        build, "compile_validate", action
+                    )
+                )
+                working_source.write_bytes(version_path.read_bytes())
+
+                working_binary = working_source.with_suffix(".ex5")
+                working_binary.write_bytes(b"not-a-real-binary")
+                self.assertFalse(
+                    self.bridge._ea_factory_one_click_compile_prestart_recovery_available(
+                        build, "compile_validate", action
+                    )
+                )
+                working_binary.unlink()
+
+                intent_path.write_text("{}", encoding="utf-8")
+                self.assertFalse(
+                    self.bridge._ea_factory_one_click_compile_prestart_recovery_available(
+                        build, "compile_validate", action
+                    )
+                )
+                intent_path.write_text(
+                    json.dumps(expected_intent, sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+
+                self.assertTrue(
+                    self.bridge._ea_factory_one_click_reserve_visible_action(
+                        build,
+                        run,
+                        "compile_validate",
+                        explicit_resume=True,
+                    )
+                )
+                self.assertEqual(
+                    action["attemptCount"],
+                    self.bridge.EA_FACTORY_ONE_CLICK_PRESTART_RECOVERY_LIMIT,
+                )
+                action.update({
+                    "state": "uncertain",
+                    "lastFailureCode": "mt5_metaeditor_compile_result_not_ready",
+                    "requiresExplicitResume": True,
+                })
+                self.assertFalse(
+                    self.bridge._ea_factory_one_click_reserve_visible_action(
+                        build,
+                        run,
+                        "compile_validate",
+                        explicit_resume=True,
+                    )
+                )
+
+    def test_mt5_backtest_prestart_recovery_is_exact_and_allows_one_fourth_attempt(self) -> None:
+        build = self.build()
+        build["platform"] = "mt5"
+        build["versions"] = [{
+            "version": 1,
+            "fileName": "ExactMT5_v01.mq5",
+            "versionFile": "EA_Versions/ExactMT5_v01.mq5",
+            "sourceDigest": "d" * 64,
+            "immutable": True,
+        }]
+        build["oneClickRun"] = self._run(
+            build,
+            current_stage="backtest_recheck",
+        )
+        run = build["oneClickRun"]
+        run["terminalBinding"]["platform"] = "mt5"
+        self.assertTrue(
+            self.bridge._ea_factory_one_click_reserve_visible_action(
+                build,
+                run,
+                "backtest_recheck",
+            )
+        )
+        action = run["visibleAction"]
+        action.update({
+            "attemptCount": self.bridge.EA_FACTORY_ONE_CLICK_VISIBLE_RETRY_LIMIT,
+            "state": "uncertain",
+            "lastFailureCode": "mt5_tester_controls_not_verified",
+            "requiresExplicitResume": True,
+        })
+        run["status"] = "awaiting_visible_terminal"
+        operation_id = action["operationId"]
+        binding = run["terminalBinding"]
+        binary = {
+            "fileName": "ExactMT5_v01.ex5",
+            "relativePath": "EA_Versions/ExactMT5_v01.ex5",
+            "sha256": "e" * 64,
+        }
+        tester_settings = {
+            "schemaVersion": self.bridge.EA_FACTORY_TESTER_SETTINGS_SCHEMA_VERSION,
+            "expertFileName": binary["fileName"],
+            "visualMode": True,
+        }
+        manifest = {"manifestDigest": "a" * 64}
+        expected_entries = [{
+            "ordinal": 0,
+            "inputName": "RiskPercent",
+            "current": "1.0",
+            "start": "1.0",
+            "step": "0.0",
+            "stop": "1.0",
+            "enabled": False,
+        }]
+        preset_bytes = self.bridge._ea_factory_mt5_set_payload(expected_entries)
+        compiled_deployment = {
+            "deploymentRef": "mt5deploy_exact",
+            "bindingDigest": "f" * 64,
+        }
+        relative_preset = f"Sets/{operation_id}-tester-input-preset.set"
+        preset_core = {
+            "schemaVersion": "ea-factory-mt5-set-ref-v1",
+            "relativePath": relative_preset,
+            "sha256": hashlib.sha256(preset_bytes).hexdigest(),
+            "inputManifestDigest": manifest["manifestDigest"],
+            "entryCount": len(expected_entries),
+            "expectedReadbackEntries": expected_entries,
+            "expectedReadbackEntriesDigest": (
+                self.bridge._ea_factory_optimization_json_sha256(expected_entries)
+            ),
+        }
+        preset_ref_digest = self.bridge._ea_factory_optimization_json_sha256(
+            preset_core
+        )
+        identity_suffix = self.bridge.payload_digest(
+            "ea-factory-visible-front-office-stage-v1",
+            build["id"],
+            "backtest_recheck",
+            operation_id,
+        )[:24]
+        intent = {
+            "schemaVersion": "ea-factory-visible-front-office-action-intent-v1",
+            "operationId": operation_id,
+            "stageId": "backtest_recheck",
+            "terminalCandidateId": binding["candidateId"],
+            "terminalSelectionRevision": binding["selectionRevision"],
+            "terminalBindingDigest": binding["bindingDigest"],
+            "sourceDigest": build["versions"][0]["sourceDigest"],
+            "compiledBinarySha256": binary["sha256"],
+            "compiledDeploymentRef": compiled_deployment["deploymentRef"],
+            "compiledDeploymentDigest": compiled_deployment["bindingDigest"],
+            "inputBindingRefDigest": preset_ref_digest,
+            "optimizationSetRefDigest": None,
+            "baselinePresetRefDigest": None,
+            "optimizationMode": None,
+            "optimizationCriterion": None,
+            "platform": "mt5",
+        }
+        safety = {
+            "liveTradingAllowed": False,
+            "autoTradingMayBeToggled": False,
+            "chartAttachmentAllowed": False,
+            "terminalShutdownAllowed": False,
+            "visualModeRequired": True,
+            "optimizationAllowed": False,
+        }
+        action_request = {
+            "schemaVersion": "ea-factory-visible-mt5-action-request-v1",
+            "operationId": operation_id,
+            "stageId": "backtest_recheck",
+            "buildId": build["id"],
+            "missionId": f"mission-eaf-{identity_suffix}",
+            "reportId": f"report-eaf-{identity_suffix}",
+            "terminalCandidateId": binding["candidateId"],
+            "terminalSelectionRevision": binding["selectionRevision"],
+            "terminalBindingDigest": binding["bindingDigest"],
+            "sourceDigest": build["versions"][0]["sourceDigest"],
+            "compiledBinarySha256": binary["sha256"],
+            "testerSettingsDigest": (
+                self.bridge._ea_factory_canonical_json_sha256(tester_settings)
+            ),
+            "optimizationRangesDigest": None,
+            "optimizationSetDigest": None,
+            "compiledDeploymentDigest": compiled_deployment["bindingDigest"],
+            "inputBindingRefDigest": preset_ref_digest,
+            "optimizationSetRefDigest": None,
+            "baselinePresetRefDigest": None,
+            "optimizationMode": None,
+            "optimizationCriterion": None,
+            "safetyPolicyDigest": self.bridge._ea_factory_canonical_json_sha256(
+                safety
+            ),
+        }
+        action_request["actionRequestDigest"] = (
+            self.bridge._ea_factory_canonical_json_sha256(action_request)
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            build_root = Path(temporary)
+            for name in ("Summaries", "Screenshots", "Reports", "Sets"):
+                (build_root / name).mkdir()
+            intent_path = build_root / "Summaries" / (
+                f"{operation_id}-backtest-intent.json"
+            )
+            action_path = build_root / "Summaries" / (
+                f"{operation_id}-backtest-action.json"
+            )
+            preset_path = build_root / "Sets" / (
+                f"{operation_id}-tester-input-preset.set"
+            )
+            intent_path.write_text(
+                json.dumps(intent, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            action_path.write_text(
+                json.dumps(action_request, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            preset_path.write_bytes(preset_bytes)
+
+            patches = (
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_build_directory",
+                    return_value=build_root,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_one_click_terminal_binding_current",
+                    return_value=True,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_mt5_input_context",
+                    return_value={"build": build},
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_mt5_optimization_input_manifest",
+                    return_value=manifest,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_mt5_tester_input_preset",
+                    return_value={},
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_mt5_tester_fixed_overrides",
+                    return_value={},
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_mt5_expected_set_entries",
+                    return_value=expected_entries,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_backtest_binary",
+                    return_value=binary,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_default_tester_settings",
+                    return_value=tester_settings,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_mt5_compiled_deployment_binding",
+                    return_value=compiled_deployment,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_file_catalog",
+                    return_value=[],
+                ),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10]:
+                self.assertTrue(
+                    self.bridge._ea_factory_one_click_mt5_prestart_recovery_available(
+                        build,
+                        "backtest_recheck",
+                        action,
+                    )
+                )
+                self.assertTrue(
+                    self.bridge._ea_factory_one_click_prestart_recovery_available(
+                        build,
+                        "backtest_recheck",
+                        action,
+                    )
+                )
+                model = self.bridge._ea_factory_one_click_read_model(build)
+                self.assertTrue(model["canResume"])
+                self.assertEqual(
+                    model["visibleAction"]["attemptLimit"],
+                    self.bridge.EA_FACTORY_ONE_CLICK_PRESTART_RECOVERY_LIMIT,
+                )
+
+                forbidden_paths = (
+                    build_root / "Summaries" / f"{operation_id}-backtest-start-boundary.json",
+                    build_root / "Summaries" / f"{operation_id}-backtest-start-boundary.json.dispatch-confirmed",
+                    build_root / "Summaries" / f"{operation_id}-backtest-receipt.json",
+                    build_root / "Summaries" / f"{operation_id}-backtest-ui.json",
+                    build_root / "Summaries" / f"{operation_id}-backtest-ui-backtest.json",
+                    build_root / "Summaries" / f"{operation_id}-backtest-completion-checkpoint.json",
+                    build_root / "Summaries" / f"{operation_id}-backtest-expert-catalog-refresh-boundary.json",
+                    build_root / "Screenshots" / f"{operation_id}-backtest-settings.png",
+                    build_root / "Screenshots" / f"{operation_id}-backtest-result.png",
+                    build_root / "Screenshots" / f"{operation_id}-backtest-report.png",
+                    build_root / "Screenshots" / f"{operation_id}-tester-input-preset.png",
+                    build_root / "Reports" / f"{operation_id}-backtest-mt5.htm",
+                    build_root / "Reports" / f"{operation_id}-backtest-mt5-viewer.htm",
+                    build_root / "Sets" / f"{operation_id}-tester-input-readback.set",
+                )
+                for forbidden_path in forbidden_paths:
+                    with self.subTest(forbidden_artifact=forbidden_path.name):
+                        forbidden_path.write_bytes(b"post-start-evidence")
+                        self.assertFalse(
+                            self.bridge._ea_factory_one_click_mt5_prestart_recovery_available(
+                                build,
+                                "backtest_recheck",
+                                action,
+                            )
+                        )
+                        forbidden_path.unlink()
+
+                preset_path.write_bytes(preset_bytes + b"Changed=1||1||0||1||N\r\n")
+                self.assertFalse(
+                    self.bridge._ea_factory_one_click_mt5_prestart_recovery_available(
+                        build,
+                        "backtest_recheck",
+                        action,
+                    )
+                )
+                preset_path.write_bytes(preset_bytes)
+
+                changed_action = dict(action_request)
+                changed_action["missionId"] = "mission-tampered"
+                action_path.write_text(
+                    json.dumps(changed_action, sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                self.assertFalse(
+                    self.bridge._ea_factory_one_click_mt5_prestart_recovery_available(
+                        build,
+                        "backtest_recheck",
+                        action,
+                    )
+                )
+                action_path.write_text(
+                    json.dumps(action_request, sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+
+                self.assertTrue(
+                    self.bridge._ea_factory_one_click_reserve_visible_action(
+                        build,
+                        run,
+                        "backtest_recheck",
+                        explicit_resume=True,
+                    )
+                )
+                self.assertEqual(
+                    action["attemptCount"],
+                    self.bridge.EA_FACTORY_ONE_CLICK_PRESTART_RECOVERY_LIMIT,
+                )
+
     def test_visible_retry_budget_allows_only_one_gated_prestart_recovery(self) -> None:
         self.assertEqual(self.bridge.EA_FACTORY_ONE_CLICK_VISIBLE_RETRY_LIMIT, 3)
         self.assertEqual(self.bridge.EA_FACTORY_ONE_CLICK_PRESTART_RECOVERY_LIMIT, 4)
@@ -1631,6 +3638,70 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
             action["attemptCount"],
             self.bridge.EA_FACTORY_ONE_CLICK_PRESTART_RECOVERY_LIMIT,
         )
+
+    def test_mt5_durable_receipt_request_is_forced_to_no_start_recovery(self) -> None:
+        build = self.build()
+        build["platform"] = "mt5"
+        build["oneClickRun"] = self._run(
+            build,
+            current_stage="backtest_recheck",
+        )
+        run = build["oneClickRun"]
+        run["status"] = "running"
+        self.assertTrue(
+            self.bridge._ea_factory_one_click_reserve_visible_action(
+                build,
+                run,
+                "backtest_recheck",
+            )
+        )
+        stage = next(
+            row for row in build["stages"] if row["id"] == "backtest_recheck"
+        )
+        with (
+            mock.patch.object(
+                self.bridge,
+                "EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER",
+                lambda **_kwargs: {},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_visible_handler",
+                return_value=lambda **_kwargs: {},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_one_click_terminal_binding_current",
+                return_value=True,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_resolved_front_office_target",
+                return_value={},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_default_tester_settings",
+                return_value={},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_mt5_backtest_input_binding",
+                return_value=({}, {}, {}),
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_one_click_durable_receipt_recovery_available",
+                return_value=True,
+            ),
+        ):
+            request = self.bridge._ea_factory_prepare_visible_front_office_request(
+                build,
+                stage,
+            )
+        self.assertEqual(request["safety"]["serviceAction"], "recover_round")
+        self.assertTrue(request["safety"]["neverStart"])
+        self.assertFalse(request["safety"]["liveTradingAllowed"])
 
     def test_prestart_recovery_gate_requires_exact_artifacts_and_no_start_boundary(self) -> None:
         build = self.build()
@@ -2213,6 +4284,618 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "visible_ui_timeout")
         self.assertTrue(raised.exception.retryable)
 
+    def test_visible_handler_owns_and_propagates_evidence_received_at(self) -> None:
+        operation_id = "ea-visible-evidence-arrival-time"
+        request = {
+            "stageId": "compile_validate",
+            "platform": "mt4",
+            "terminalBinding": {
+                "platform": "mt4",
+                "candidateId": "mtc-one-click-terminal",
+                "selectionRevision": 7,
+                "bindingDigest": "c" * 64,
+            },
+            "visibleOperation": {"operationId": operation_id},
+        }
+        capability = {
+            "ready": True,
+            "freshProcessProbe": True,
+            "foregroundInteraction": True,
+            "visibleEvidenceCapture": True,
+            "terminalSelectionBound": True,
+            "liveTradingAllowed": False,
+            "terminalProcessMayRemainOpen": True,
+            "processAndWindowBinding": True,
+            "idempotentOperationBinding": True,
+            "durableReceiptRecovery": True,
+            "terminalShutdownAllowed": False,
+            "autoTradingMayBeToggled": False,
+            "chartAttachmentAllowed": False,
+            "visibleMetaEditorCompile": True,
+        }
+        raw = {
+            "schemaVersion": self.bridge.EA_FACTORY_VISIBLE_RESULT_SCHEMA_VERSION,
+            "operationId": operation_id,
+            "metrics": {"evidenceReceivedAt": "2099-01-01T00:00:00+00:00"},
+            "artifactSpecifications": [
+                {"alias": "compiled_binary", "relativePath": "EA_Versions/test.ex4", "artifactKind": "compile_evidence"},
+                {"alias": "visible_window", "relativePath": "Screenshots/compile.png", "artifactKind": "screenshot_evidence"},
+                {"alias": "compile_log", "relativePath": "Reports/compile.txt", "artifactKind": "compile_evidence"},
+                {"alias": "adapter_receipt", "relativePath": "Reports/compile.json", "artifactKind": "compile_evidence"},
+            ],
+        }
+        capability_time = "2026-10-15T08:26:00+00:00"
+        received_time = "2026-10-15T08:26:09.924000+00:00"
+        with (
+            mock.patch.object(
+                self.bridge,
+                "EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER",
+                return_value=raw,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER",
+                return_value=capability,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "utc_now",
+                side_effect=[capability_time, received_time],
+            ),
+        ):
+            result = self.bridge._ea_factory_invoke_visible_front_office_handler_unlocked(
+                request
+            )
+
+        self.assertEqual(
+            result["backendInvocation"],
+            {
+                "capabilityCheckedAt": capability_time,
+                "evidenceReceivedAt": received_time,
+            },
+        )
+        build = self.build()
+        build["oneClickRun"] = self._run(
+            build,
+            current_stage="compile_validate",
+        )
+        artifact_rows = [
+            {"fileId": f"ea-file-{index}", "sha256": str(index) * 64}
+            for index in range(1, 5)
+        ]
+        stored = self.bridge._ea_factory_visible_result_metrics(
+            build,
+            "compile_validate",
+            request,
+            result,
+            artifact_rows,
+        )
+        self.assertEqual(stored["evidenceReceivedAt"], received_time)
+        self.assertNotEqual(
+            stored["evidenceReceivedAt"],
+            raw["metrics"]["evidenceReceivedAt"],
+        )
+
+    def test_post_process_freshness_uses_backend_receipt_time(self) -> None:
+        now = self.bridge.datetime.now(self.bridge.timezone.utc)
+        capability_checked_at = now - self.bridge.timedelta(seconds=40)
+        evidence_received_at = now - self.bridge.timedelta(seconds=30)
+        post_observed_at = evidence_received_at - self.bridge.timedelta(seconds=1)
+        metrics = {
+            "recoveredExistingReceipt": False,
+            "evidenceReceivedAt": evidence_received_at.isoformat(),
+        }
+        post_binding = {"observedAt": post_observed_at.isoformat()}
+
+        # Commit is already over 15 seconds after observation, but the bridge
+        # received the evidence one second after it was observed.
+        self.assertGreater(
+            now - post_observed_at,
+            self.bridge.timedelta(
+                seconds=self.bridge.EA_FACTORY_FRONT_OFFICE_PROBE_FRESH_SECONDS
+            ),
+        )
+        self.assertTrue(
+            self.bridge._ea_factory_post_process_binding_fresh_on_receipt(
+                metrics,
+                post_binding,
+                capability_checked_at,
+                require_fresh=True,
+            )
+        )
+
+        rejected = {
+            "stale_on_arrival": (
+                metrics,
+                {
+                    "observedAt": (
+                        evidence_received_at
+                        - self.bridge.timedelta(
+                            seconds=self.bridge.EA_FACTORY_FRONT_OFFICE_PROBE_FRESH_SECONDS
+                            + 1
+                        )
+                    ).isoformat()
+                },
+                capability_checked_at,
+            ),
+            "post_observation_future_of_receipt": (
+                metrics,
+                {
+                    "observedAt": (
+                        evidence_received_at + self.bridge.timedelta(seconds=3)
+                    ).isoformat()
+                },
+                capability_checked_at,
+            ),
+            "receipt_time_future_of_backend": (
+                {
+                    **metrics,
+                    "evidenceReceivedAt": (
+                        now + self.bridge.timedelta(seconds=3)
+                    ).isoformat(),
+                },
+                {"observedAt": now.isoformat()},
+                capability_checked_at,
+            ),
+            "receipt_before_capability": (
+                {
+                    **metrics,
+                    "evidenceReceivedAt": (
+                        capability_checked_at - self.bridge.timedelta(seconds=1)
+                    ).isoformat(),
+                },
+                {
+                    "observedAt": (
+                        capability_checked_at - self.bridge.timedelta(seconds=1)
+                    ).isoformat()
+                },
+                capability_checked_at,
+            ),
+            "malformed_receipt_time": (
+                {**metrics, "evidenceReceivedAt": "tampered"},
+                post_binding,
+                capability_checked_at,
+            ),
+        }
+        for name, (candidate_metrics, candidate_binding, checked_at) in rejected.items():
+            with self.subTest(case=name):
+                self.assertFalse(
+                    self.bridge._ea_factory_post_process_binding_fresh_on_receipt(
+                        candidate_metrics,
+                        candidate_binding,
+                        checked_at,
+                        require_fresh=True,
+                    )
+                )
+
+        self.assertTrue(
+            self.bridge._ea_factory_post_process_binding_fresh_on_receipt(
+                {"recoveredExistingReceipt": True},
+                {"observedAt": "2020-01-01T00:00:00+00:00"},
+                capability_checked_at,
+                require_fresh=True,
+            )
+        )
+
+    def test_mt5_no_start_recovery_requires_exact_lifecycle_tuple(self) -> None:
+        metrics = {
+            "platform": "mt5",
+            "backtestExecuted": False,
+            "recoveredExistingReceipt": False,
+            "recoveredWithoutStart": True,
+            "startInvoked": False,
+            "recoveryIssuedStart": False,
+        }
+        self.assertTrue(
+            self.bridge._ea_factory_mt5_recovered_without_start_valid(metrics)
+        )
+        tampered_values = {
+            "platform": "mt4",
+            "backtestExecuted": True,
+            "recoveredExistingReceipt": True,
+            "recoveredWithoutStart": False,
+            "startInvoked": True,
+            "recoveryIssuedStart": True,
+        }
+        for field, value in tampered_values.items():
+            with self.subTest(field=field):
+                tampered = copy.deepcopy(metrics)
+                tampered[field] = value
+                self.assertFalse(
+                    self.bridge._ea_factory_mt5_recovered_without_start_valid(
+                        tampered
+                    )
+                )
+        for field in metrics:
+            with self.subTest(missing=field):
+                missing = copy.deepcopy(metrics)
+                missing.pop(field)
+                self.assertFalse(
+                    self.bridge._ea_factory_mt5_recovered_without_start_valid(
+                        missing
+                    )
+                )
+
+    def test_mt5_no_start_recovery_is_cross_bound_to_adapter_receipt(self) -> None:
+        receipt = {
+            "schemaVersion": "ea-factory-visible-front-office-receipt-v1",
+            "operationId": "ea-visible-recovery-contract",
+            "stageId": "backtest_recheck",
+            "terminalCandidateId": "mtc-recovery-contract",
+            "status": "verified",
+            "processBindingDigest": "1" * 64,
+            "postProcessBindingDigest": "2" * 64,
+            "sourceDigest": "3" * 64,
+            "compiledBinarySha256": "4" * 64,
+            "visualMode": True,
+            "optimizationEnabled": False,
+            "shutdownTerminalAfterTest": False,
+            "liveTradingExecuted": False,
+            "recoveredWithoutStart": True,
+            "startInvoked": False,
+            "recoveryIssuedStart": False,
+        }
+
+        def valid(value: dict) -> bool:
+            return self.bridge._ea_factory_visible_receipt_valid(
+                json.dumps(value).encode("utf-8"),
+                stage_id="backtest_recheck",
+                operation_id="ea-visible-recovery-contract",
+                terminal_candidate_id="mtc-recovery-contract",
+                process_binding_digest="1" * 64,
+                post_process_binding_digest="2" * 64,
+                source_digest="3" * 64,
+                compiled_binary_sha256="4" * 64,
+                recovered_without_start=True,
+                start_invoked=False,
+                recovery_issued_start=False,
+            )
+
+        self.assertTrue(valid(receipt))
+        for field, value in {
+            "recoveredWithoutStart": False,
+            "startInvoked": True,
+            "recoveryIssuedStart": True,
+        }.items():
+            with self.subTest(field=field):
+                tampered = copy.deepcopy(receipt)
+                tampered[field] = value
+                self.assertFalse(valid(tampered))
+
+    def test_mt5_backtest_receipt_cryptographically_binds_completion_proof(self) -> None:
+        operation_id = "ea-visible-mt5-completion-proof"
+        binary_digest = "4" * 64
+        expert_file_name = "BoundExpert.ex5"
+        deployment_ref = "mt5deploy_" + "a" * 24
+        deployment = {
+            "deploymentRef": deployment_ref,
+            "expertFileName": expert_file_name,
+            "binarySha256": binary_digest,
+            "bindingDigest": "b" * 64,
+        }
+        resolved_settings = {
+            "expertFileName": expert_file_name,
+            "symbol": "EURUSD",
+            "period": "H1",
+        }
+        mt5_input_binding = {
+            "inputManifestDigest": "c" * 64,
+            "refDigest": "d" * 64,
+            "expectedReadbackEntriesDigest": "e" * 64,
+        }
+
+        def text_sha256(value: str) -> str:
+            return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+        start_log_path = "1" * 64
+        completion_log_path = "2" * 64
+        start_source = "3" * 64
+        completion_source = "5" * 64
+        core_sources = sorted({start_source, completion_source})
+        completion_thread = text_sha256(
+            f"{completion_log_path}\n{completion_source}"
+        )
+        core_threads = [completion_thread]
+        expert_ui_path = (
+            "Metafxclub\\AgentHQ\\Deployments\\"
+            f"{deployment_ref}\\{Path(expert_file_name).stem}"
+        )
+        expert_ui_path_digest = text_sha256(expert_ui_path)
+        expert_symbol_period_digest = text_sha256("\n".join((
+            expert_file_name,
+            binary_digest,
+            expert_ui_path_digest,
+            resolved_settings["symbol"],
+            resolved_settings["period"],
+        )))
+        log_identity_digest = text_sha256("\n".join((
+            start_log_path,
+            completion_log_path,
+            start_source,
+            completion_source,
+        )))
+        core_sources_digest = text_sha256("\n".join(core_sources))
+        core_threads_digest = text_sha256("\n".join(core_threads))
+        start_line_digest = "6" * 64
+        completion_line_digest = "7" * 64
+        start_ordinal = 41
+        completion_ordinal = 9
+        execution_thread_digest = text_sha256("\n".join((
+            log_identity_digest,
+            str(start_ordinal),
+            str(completion_ordinal),
+            core_threads_digest,
+        )))
+        run_identity_digest = text_sha256("\n".join((
+            operation_id,
+            "thread_finished",
+            expert_symbol_period_digest,
+            log_identity_digest,
+            core_sources_digest,
+            core_threads_digest,
+            start_line_digest,
+            completion_line_digest,
+            str(start_ordinal),
+            str(completion_ordinal),
+            "",
+        )))
+        now = datetime.now(timezone.utc)
+        evidence = {
+            "schemaVersion": "ea-factory-mt5-tester-completion-evidence-v2",
+            "source": "fresh_tester_log_completion",
+            "boundaryCreatedAt": (now - timedelta(minutes=3)).isoformat(),
+            "runStartedAt": (now - timedelta(minutes=2)).isoformat(),
+            "runCompletedAt": (now - timedelta(minutes=1)).isoformat(),
+            "startLineSha256": start_line_digest,
+            "completionLineSha256": completion_line_digest,
+            "completionMarker": "thread_finished",
+            # Production may start in the terminal journal and finish in an
+            # agent journal. The identity digests, not path equality, bind it.
+            "startLogPathSha256": start_log_path,
+            "completionLogPathSha256": completion_log_path,
+            "startSourceSha256": start_source,
+            "completionSourceSha256": completion_source,
+            "coreSourceCount": len(core_sources),
+            "coreSourceSha256s": core_sources,
+            "coreSourcesSha256": core_sources_digest,
+            "coreThreadCount": len(core_threads),
+            "coreThreadIdentitySha256s": core_threads,
+            "coreThreadIdentitiesSha256": core_threads_digest,
+            "startLineOrdinal": start_ordinal,
+            "completionLineOrdinal": completion_ordinal,
+            "expertUiPathSha256": expert_ui_path_digest,
+            "deployedExpertSha256": binary_digest,
+            "expertSymbolPeriodSha256": expert_symbol_period_digest,
+            "logIdentitySha256": log_identity_digest,
+            "executionThreadIdentitySha256": execution_thread_digest,
+            "runIdentitySha256": run_identity_digest,
+            "completionPassCount": None,
+            "coreDisconnectObserved": False,
+            "verified": True,
+        }
+
+        def canonical_digest(value: object) -> str:
+            return hashlib.sha256(json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")).hexdigest()
+
+        evidence_digest = canonical_digest(evidence)
+        resolved_digest = self.bridge.payload_digest(
+            "ea-factory-resolved-tester-settings-v1",
+            resolved_settings,
+        )
+        receipt = {
+            "schemaVersion": "ea-factory-visible-front-office-receipt-v1",
+            "operationId": operation_id,
+            "stageId": "backtest_recheck",
+            "platform": "mt5",
+            "terminalCandidateId": "mtc-completion-proof",
+            "status": "verified",
+            "processBindingDigest": "8" * 64,
+            "postProcessBindingDigest": "9" * 64,
+            "sourceDigest": "0" * 64,
+            "compiledBinarySha256": binary_digest,
+            "resolvedTesterSettings": copy.deepcopy(resolved_settings),
+            "resolvedTesterSettingsDigest": resolved_digest,
+            "testerInputManifestDigest": mt5_input_binding[
+                "inputManifestDigest"
+            ],
+            "testerInputPresetRefDigest": mt5_input_binding["refDigest"],
+            "testerInputExpectedReadbackEntriesDigest": mt5_input_binding[
+                "expectedReadbackEntriesDigest"
+            ],
+            "testerInputReadbackEntriesDigest": mt5_input_binding[
+                "expectedReadbackEntriesDigest"
+            ],
+            "compiledDeploymentRef": deployment_ref,
+            "compiledDeploymentDigest": deployment["bindingDigest"],
+            "testerCompletionEvidence": copy.deepcopy(evidence),
+            "testerCompletionEvidenceDigest": evidence_digest,
+            "testerCompletionEvidenceCheckpointSha256": evidence_digest,
+            "visualMode": True,
+            "optimizationEnabled": False,
+            "shutdownTerminalAfterTest": False,
+            "liveTradingExecuted": False,
+        }
+
+        def valid(
+            receipt_value: dict,
+            *,
+            metrics_evidence: object = evidence,
+            metrics_digest: object = evidence_digest,
+            metrics_checkpoint_digest: object = evidence_digest,
+        ) -> bool:
+            return self.bridge._ea_factory_visible_receipt_valid(
+                json.dumps(receipt_value).encode("utf-8"),
+                stage_id="backtest_recheck",
+                operation_id=operation_id,
+                terminal_candidate_id="mtc-completion-proof",
+                process_binding_digest="8" * 64,
+                post_process_binding_digest="9" * 64,
+                source_digest="0" * 64,
+                compiled_binary_sha256=binary_digest,
+                resolved_tester_settings_digest=resolved_digest,
+                resolved_tester_settings=resolved_settings,
+                mt5_input_binding=mt5_input_binding,
+                compiled_deployment=deployment,
+                platform="mt5",
+                tester_completion_evidence=metrics_evidence,
+                tester_completion_evidence_digest=metrics_digest,
+                tester_completion_evidence_checkpoint_sha256=(
+                    metrics_checkpoint_digest
+                ),
+                expert_file_name=expert_file_name,
+            )
+
+        self.assertTrue(valid(receipt))
+
+        for missing_field in (
+            "testerCompletionEvidence",
+            "testerCompletionEvidenceDigest",
+            "testerCompletionEvidenceCheckpointSha256",
+        ):
+            with self.subTest(missing_receipt_field=missing_field):
+                missing = copy.deepcopy(receipt)
+                missing.pop(missing_field)
+                self.assertFalse(valid(missing))
+
+        stale_digest = copy.deepcopy(receipt)
+        stale_digest["testerCompletionEvidence"]["completionLineSha256"] = (
+            "f" * 64
+        )
+        self.assertFalse(valid(stale_digest))
+
+        coherent_outer_digests = copy.deepcopy(receipt)
+        coherent_outer_digests["testerCompletionEvidence"][
+            "completionLineSha256"
+        ] = "f" * 64
+        forged_digest = canonical_digest(
+            coherent_outer_digests["testerCompletionEvidence"]
+        )
+        coherent_outer_digests["testerCompletionEvidenceDigest"] = forged_digest
+        coherent_outer_digests[
+            "testerCompletionEvidenceCheckpointSha256"
+        ] = forged_digest
+        self.assertFalse(valid(
+            coherent_outer_digests,
+            metrics_evidence=coherent_outer_digests[
+                "testerCompletionEvidence"
+            ],
+            metrics_digest=forged_digest,
+            metrics_checkpoint_digest=forged_digest,
+        ))
+
+        checkpoint_tampered = copy.deepcopy(receipt)
+        checkpoint_tampered[
+            "testerCompletionEvidenceCheckpointSha256"
+        ] = "f" * 64
+        self.assertFalse(valid(
+            checkpoint_tampered,
+            metrics_checkpoint_digest="f" * 64,
+        ))
+
+        self.assertFalse(valid(
+            receipt,
+            metrics_evidence={**evidence, "verified": False},
+        ))
+        self.assertFalse(valid(receipt, metrics_evidence=None))
+        self.assertFalse(valid(receipt, metrics_digest="f" * 64))
+        self.assertFalse(valid(receipt, metrics_digest=None))
+        self.assertFalse(valid(
+            receipt,
+            metrics_checkpoint_digest="f" * 64,
+        ))
+        self.assertFalse(valid(receipt, metrics_checkpoint_digest=None))
+
+    def test_legacy_mt4_backtest_receipt_does_not_require_mt5_completion_proof(
+        self,
+    ) -> None:
+        receipt = {
+            "schemaVersion": "ea-factory-visible-front-office-receipt-v1",
+            "operationId": "ea-visible-mt4-legacy-proof",
+            "stageId": "backtest_recheck",
+            "terminalCandidateId": "mtc-mt4-legacy-proof",
+            "status": "verified",
+            "processBindingDigest": "1" * 64,
+            "postProcessBindingDigest": "2" * 64,
+            "sourceDigest": "3" * 64,
+            "compiledBinarySha256": "4" * 64,
+            "visualMode": True,
+            "optimizationEnabled": False,
+            "shutdownTerminalAfterTest": False,
+            "liveTradingExecuted": False,
+        }
+        self.assertTrue(self.bridge._ea_factory_visible_receipt_valid(
+            json.dumps(receipt).encode("utf-8"),
+            stage_id="backtest_recheck",
+            operation_id="ea-visible-mt4-legacy-proof",
+            terminal_candidate_id="mtc-mt4-legacy-proof",
+            process_binding_digest="1" * 64,
+            post_process_binding_digest="2" * 64,
+            source_digest="3" * 64,
+            compiled_binary_sha256="4" * 64,
+            platform="mt4",
+        ))
+
+    def test_visible_receipt_allows_only_contract_owned_positive_process_ids(self) -> None:
+        receipt = {
+            "schemaVersion": "ea-factory-visible-front-office-receipt-v1",
+            "operationId": "ea-visible-compile-receipt",
+            "stageId": "compile_validate",
+            "terminalCandidateId": "mtc-compile-receipt",
+            "status": "verified",
+            "processBindingDigest": "1" * 64,
+            "postProcessBindingDigest": "2" * 64,
+            "sourceDigest": "3" * 64,
+            "compiledBinarySha256": "4" * 64,
+            "processBinding": {
+                "terminalProcessId": 102,
+                "terminalWindowOwnerProcessId": 102,
+                "frontOfficeProcessId": 103,
+                "frontOfficeWindowOwnerProcessId": 103,
+            },
+            "postProcessBinding": {
+                "terminalProcessId": 102,
+                "terminalWindowOwnerProcessId": 102,
+                "frontOfficeProcessId": 103,
+                "frontOfficeWindowOwnerProcessId": 103,
+            },
+            "zeroErrors": True,
+            "zeroWarnings": True,
+            "liveTradingExecuted": False,
+        }
+
+        def valid(value: dict) -> bool:
+            return self.bridge._ea_factory_visible_receipt_valid(
+                json.dumps(value).encode("utf-8"),
+                stage_id="compile_validate",
+                operation_id="ea-visible-compile-receipt",
+                terminal_candidate_id="mtc-compile-receipt",
+                process_binding_digest="1" * 64,
+                post_process_binding_digest="2" * 64,
+                source_digest="3" * 64,
+                compiled_binary_sha256="4" * 64,
+            )
+
+        self.assertTrue(valid(receipt))
+
+        tampered_cases = {
+            "string_pid": ("processBinding", "terminalProcessId", "102"),
+            "zero_pid": ("processBinding", "frontOfficeProcessId", 0),
+            "unknown_pid_key": ("processBinding", "workerProcessId", 104),
+            "account_identifier": ("processBinding", "accountNumber", 123456),
+            "public_metrics_pid": ("processBinding", "processId", 101),
+        }
+        for name, (container, field, value) in tampered_cases.items():
+            with self.subTest(case=name):
+                tampered = copy.deepcopy(receipt)
+                tampered[container][field] = value
+                self.assertFalse(valid(tampered))
+
     def test_backtest_evidence_accepts_consistent_zero_with_attention_and_nonzero(self) -> None:
         build = self.build()
         build["blueprintCoverageManifest"] = self.compact_ea_manifest()
@@ -2565,14 +5248,21 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
                 # A legitimate visual test may take far longer than the
                 # 15-second probe window. The immutable pre-action proof is
                 # kept, while only the post-action proof must be fresh.
+                commit_clock = self.bridge.datetime.now(self.bridge.timezone.utc)
+                evidence_received_at = commit_clock - self.bridge.timedelta(
+                    seconds=30
+                )
                 fresh_post = copy.deepcopy(process_binding)
-                fresh_post["observedAt"] = self.bridge.utc_now()
+                fresh_post["observedAt"] = (
+                    evidence_received_at - self.bridge.timedelta(seconds=1)
+                ).isoformat()
                 fresh_post["processBindingDigest"] = ""
                 fresh_post["processBindingDigest"] = (
                     self.bridge._ea_factory_front_office_process_binding_digest(
                         fresh_post
                     )
                 )
+                metrics["evidenceReceivedAt"] = evidence_received_at.isoformat()
                 metrics["postProcessBinding"] = fresh_post
                 metrics["postProcessBindingDigest"] = fresh_post[
                     "processBindingDigest"
@@ -2724,6 +5414,388 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
         write_state.assert_not_called()
         self.assertEqual(stage["status"], "pending")
         self.assertIsNone(stage["reportId"])
+
+    def _commit_backtest_acceptance_case(
+        self,
+        *,
+        metrics: dict,
+        strategy_spec: dict | None,
+        canonical_custom_ema_profile: bool = False,
+    ) -> dict:
+        build = self.backtest_restart_build(status="awaiting_visible_terminal")
+        if canonical_custom_ema_profile:
+            record = self.bridge._ea_factory_custom_source_record(
+                copy.deepcopy(
+                    self.bridge.EA_FACTORY_CUSTOM_EMA_SMOKE_PROFILE_PAYLOAD
+                )
+            )
+            build.update({
+                "platform": "mt5",
+                "artifactKind": "expert_advisor",
+                "sourceRecordId": record["sourceRecordId"],
+                "sourceRecordDigest": record["recordDigest"],
+            })
+            strategy_spec = {
+                "schemaVersion": "ea-factory-strategy-spec-v3",
+                "buildId": build["id"],
+                "sourceRecordId": record["sourceRecordId"],
+                "recordDigest": record["recordDigest"],
+                "sourceKind": record["sourceKind"],
+                "sourceKey": record["sourceKey"],
+                "core": copy.deepcopy(record["core"]),
+                "artifactKind": "expert_advisor",
+                "targetPlatform": "mt5",
+                "language": "mql5",
+                "strategySchemaVersion": (
+                    self.bridge.EA_STRATEGY_BRIEF_SCHEMA_VERSION
+                ),
+                "strategyBrief": copy.deepcopy(record["strategyBrief"]),
+                "strategyBriefDigest": record["strategyBriefDigest"],
+                "immutable": True,
+            }
+            build["oneClickRun"]["terminalBinding"]["platform"] = "mt5"
+            build["oneClickRun"]["requestDigest"] = (
+                self.bridge._ea_factory_one_click_request_digest(build)
+            )
+        self.assertIsInstance(strategy_spec, dict)
+        run = build["oneClickRun"]
+        run["status"] = "running"
+        self.bridge._ea_factory_one_click_reserve_visible_action(
+            build,
+            run,
+            "backtest_recheck",
+        )
+        stage = next(
+            row for row in build["stages"] if row["id"] == "backtest_recheck"
+        )
+        stage.update({
+            "missionId": None,
+            "reportId": None,
+            "requestIdempotencyKey": "backtest-acceptance-stage-request",
+            "missionIdempotencyKey": "backtest-acceptance-stage-mission",
+        })
+        request = {
+            "schemaVersion": "ea-factory-visible-front-office-request-v1",
+            "buildId": build["id"],
+            "stageId": "backtest_recheck",
+            "runSnapshotDigest": self.bridge.payload_digest(
+                "ea-factory-one-click-run-snapshot-v1",
+                run,
+            ),
+            "terminalBinding": copy.deepcopy(run["terminalBinding"]),
+            "visibleOperation": copy.deepcopy(run["visibleAction"]),
+            "missionId": "mission-backtest-acceptance",
+            "reportId": "report-backtest-acceptance",
+            "resolvedTarget": {
+                "terminalExecutableSha256": "1" * 64,
+                "frontOfficeExecutableSha256": "2" * 64,
+            },
+        }
+        result = {"metrics": {}, "artifactSpecifications": []}
+        state = self.state(build)
+        complete_metrics = {
+            "stageArtifactManifestDigest": "3" * 64,
+            "attentionRequired": False,
+            "attentionReasonCode": None,
+            **copy.deepcopy(metrics),
+        }
+        mission = {"id": request["missionId"], "status": "running"}
+        report = {
+            "id": request["reportId"],
+            "status": "ready",
+            "linkedMissionId": request["missionId"],
+            "metrics": copy.deepcopy(complete_metrics),
+        }
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=state,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_register_artifacts",
+                return_value=[],
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_visible_result_metrics",
+                return_value=complete_metrics,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_review_strategy_spec",
+                return_value=strategy_spec,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_one_click_terminal_binding_current",
+                return_value=True,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_visible_front_office_evidence_valid",
+                return_value=True,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_success_record_snapshot",
+                return_value={
+                    "missionIndex": None,
+                    "mission": None,
+                    "report": None,
+                },
+            ),
+            mock.patch.object(
+                self.bridge,
+                "create_mission",
+                return_value=mission,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "create_report",
+                return_value=report,
+            ),
+            mock.patch.object(self.bridge, "_ea_factory_complete_local_mission"),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_sync_build_status",
+                return_value=False,
+            ),
+            mock.patch.object(self.bridge, "_write_ea_factory_state_unlocked"),
+        ):
+            self.bridge._ea_factory_commit_visible_front_office_result(
+                request,
+                result,
+            )
+        return state["builds"][0]
+
+    def test_zero_trade_backtest_stops_before_final_report(self) -> None:
+        build = self._commit_backtest_acceptance_case(
+            metrics={
+                "zeroTrade": True,
+                "tradeCount": 0,
+                "tradeRowCount": 0,
+                "buyTradeCount": 0,
+                "sellTradeCount": 0,
+                "historyQualityIssue": False,
+            },
+            strategy_spec={
+                "sourceKind": "verified_deep_research_sheet",
+                "strategyBrief": {"entryRules": "Long only"},
+            },
+        )
+
+        run = build["oneClickRun"]
+        final_stage = next(
+            row for row in build["stages"] if row["id"] == "final_report"
+        )
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["currentStageId"], "backtest_recheck")
+        self.assertEqual(
+            run["failureCode"],
+            "backtest_acceptance_zero_trades",
+        )
+        self.assertIsNotNone(run["completedAt"])
+        self.assertEqual(final_stage["status"], "pending")
+        self.assertIsNone(final_stage["requestIdempotencyKey"])
+        self.assertFalse(
+            self.bridge._ea_factory_stage_can_advance(build, "final_report")
+        )
+        model = self.bridge._ea_factory_one_click_read_model(build)
+        self.assertTrue(model["canRestartBacktest"])
+        self.assertEqual(
+            model["failureCode"],
+            "backtest_acceptance_zero_trades",
+        )
+        self.assertEqual(
+            self.bridge._ea_factory_revalidated_one_click_run(build)[
+                "failureCode"
+            ],
+            "backtest_acceptance_zero_trades",
+        )
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=self.state(build),
+            ),
+            mock.patch.object(self.bridge, "load_missions", return_value=[]),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_report_rows_snapshot",
+                return_value=[],
+            ),
+        ):
+            next_action = self.bridge._ea_factory_one_click_next_action(
+                build["id"]
+            )
+        self.assertEqual(next_action["kind"], "stop")
+        self.assertEqual(
+            next_action["reasonCode"],
+            "backtest_acceptance_zero_trades",
+        )
+
+    def test_bidirectional_custom_ema_requires_buy_and_sell_trades(self) -> None:
+        build = self._commit_backtest_acceptance_case(
+            metrics={
+                "zeroTrade": False,
+                "tradeCount": 3,
+                "tradeRowCount": 3,
+                "buyTradeCount": 3,
+                "sellTradeCount": 0,
+                "historyQualityIssue": False,
+            },
+            strategy_spec=None,
+            canonical_custom_ema_profile=True,
+        )
+
+        run = build["oneClickRun"]
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(
+            run["failureCode"],
+            "backtest_acceptance_required_trade_direction_missing",
+        )
+        self.assertTrue(
+            self.bridge._ea_factory_one_click_read_model(build)[
+                "canRestartBacktest"
+            ]
+        )
+        self.assertFalse(
+            self.bridge._ea_factory_stage_can_advance(build, "final_report")
+        )
+
+    def test_history_quality_issue_stops_even_when_trades_exist(self) -> None:
+        build = self._commit_backtest_acceptance_case(
+            metrics={
+                "zeroTrade": False,
+                "tradeCount": 6,
+                "tradeRowCount": 6,
+                "buyTradeCount": 3,
+                "sellTradeCount": 3,
+                "historyQualityIssue": True,
+            },
+            strategy_spec={
+                "sourceKind": "verified_deep_research_sheet",
+                "strategyBrief": {"entryRules": "BUY and SELL"},
+            },
+        )
+
+        self.assertEqual(build["oneClickRun"]["status"], "failed")
+        self.assertEqual(
+            build["oneClickRun"]["failureCode"],
+            "backtest_acceptance_history_quality_issue",
+        )
+        self.assertFalse(
+            self.bridge._ea_factory_stage_can_advance(build, "final_report")
+        )
+
+    def test_acceptance_rejected_backtest_can_use_existing_restart_endpoint(self) -> None:
+        build = self._commit_backtest_acceptance_case(
+            metrics={
+                "zeroTrade": True,
+                "tradeCount": 0,
+                "tradeRowCount": 0,
+                "buyTradeCount": 0,
+                "sellTradeCount": 0,
+                "historyQualityIssue": False,
+            },
+            strategy_spec={
+                "sourceKind": "verified_deep_research_sheet",
+                "strategyBrief": {"entryRules": "Long only"},
+            },
+        )
+        previous_run_id = build["oneClickRun"]["runId"]
+        state = self.state(build)
+        stack, handles = self.backtest_restart_patch_stack(state)
+        with stack:
+            restarted = self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": previous_run_id,
+                    "idempotencyKey": "restart-after-acceptance-gate",
+                },
+            )
+
+        self.assertEqual(restarted["kind"], "ea_factory_backtest_restarted")
+        self.assertEqual(build["oneClickRun"]["status"], "queued")
+        self.assertEqual(
+            build["oneClickRun"]["currentStageId"],
+            "backtest_recheck",
+        )
+        restarted_stage = next(
+            row for row in build["stages"] if row["id"] == "backtest_recheck"
+        )
+        self.assertEqual(restarted_stage["status"], "pending")
+        self.assertFalse(restarted_stage["evidenceVerified"])
+        self.assertEqual(len(build["oneClickRunHistory"]), 1)
+        self.assertEqual(
+            build["oneClickRunHistory"][0]["backtestStage"]["status"],
+            "completed",
+        )
+        self.assertTrue(
+            build["oneClickRunHistory"][0]["backtestStage"][
+                "evidenceVerified"
+            ]
+        )
+        handles["start"].assert_called_once()
+
+    def test_compliant_bidirectional_custom_ema_can_advance_to_final(self) -> None:
+        build = self._commit_backtest_acceptance_case(
+            metrics={
+                "zeroTrade": False,
+                "tradeCount": 4,
+                "tradeRowCount": 4,
+                "buyTradeCount": 2,
+                "sellTradeCount": 2,
+                "historyQualityIssue": False,
+            },
+            strategy_spec=None,
+            canonical_custom_ema_profile=True,
+        )
+
+        self.assertEqual(build["oneClickRun"]["status"], "running")
+        self.assertIsNone(build["oneClickRun"]["failureCode"])
+        self.assertEqual(
+            next(
+                row
+                for row in build["stages"]
+                if row["id"] == "backtest_recheck"
+            )["status"],
+            "completed",
+        )
+        self.assertTrue(
+            self.bridge._ea_factory_stage_can_advance(build, "final_report")
+        )
+
+    def test_generic_custom_source_is_not_forced_to_trade_both_directions(self) -> None:
+        build = self.build()
+        metrics = {
+            "zeroTrade": False,
+            "tradeCount": 2,
+            "tradeRowCount": 2,
+            "buyTradeCount": 2,
+            "sellTradeCount": 0,
+            "historyQualityIssue": False,
+        }
+        with mock.patch.object(
+            self.bridge,
+            "_ea_factory_review_strategy_spec",
+            return_value={
+                "sourceKind": "custom_operator",
+                "strategyBrief": {
+                    "systemName": "Long-only breakout",
+                    "systemOverview": "One-direction breakout",
+                    "entryRules": "BUY on a new high; never open SELL",
+                },
+            },
+        ):
+            self.assertIsNone(
+                self.bridge._ea_factory_backtest_acceptance_failure(
+                    build,
+                    metrics,
+                )
+            )
 
     def test_final_report_invalid_visible_proof_creates_no_success_records(self) -> None:
         build = self.build()
@@ -3110,6 +6182,98 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
             )
         )
 
+    def test_native_mt5_report_uses_strict_shared_payload_verifier(self) -> None:
+        settings = {
+            "schemaVersion": "ea-factory-resolved-tester-settings-v1",
+            "expertFileName": "CertifiedCanSlimMT5_v01.ex5",
+            "symbol": "EURUSD",
+            "period": "H1",
+            "model": "every_tick",
+            "spread": "current",
+            "useDate": True,
+            "fromDate": "2026-07-17",
+            "toDate": "2026-10-14",
+            "deposit": 10000,
+            "visualMode": True,
+            "optimizationEnabled": False,
+            "shutdownTerminalAfterTest": False,
+        }
+        preset = {
+            "assumptions": [
+                {
+                    "inputName": "RiskPercent",
+                    "inputType": "double",
+                    "testerValue": 1.0,
+                }
+            ]
+        }
+        payload = b"""<html><head><title>Strategy Tester Report</title></head>
+        <body><table>
+        <tr><td>Strategy Tester Report</td></tr>
+        <tr><td>RoboForex-Pro (Build 6230)</td></tr>
+        <tr><td>Settings</td></tr>
+        <tr><td>Expert:</td><td>CertifiedCanSlimMT5_v01</td></tr>
+        <tr><td>Symbol:</td><td>EURUSD</td></tr>
+        <tr><td>Period:</td><td>H1 (2026.07.17 - 2026.10.14)</td></tr>
+        <tr><td>Inputs:</td><td>RiskPercent=1</td></tr>
+        <tr><td>Results</td></tr>
+        <tr><td>History Quality:</td><td>100%</td></tr>
+        <tr><td>Bars:</td><td>1512</td><td>Ticks:</td><td>2811166</td>
+            <td>Symbols:</td><td>0</td></tr>
+        <tr><td>Total Net Profit:</td><td>0.00</td>
+            <td>Balance Drawdown Absolute:</td><td>0.00</td>
+            <td>Equity Drawdown Absolute:</td><td>0.00</td></tr>
+        <tr><td>Gross Profit:</td><td>0.00</td>
+            <td>Balance Drawdown Maximal:</td><td>0.00 (0.00%)</td>
+            <td>Equity Drawdown Maximal:</td><td>0.00 (0.00%)</td></tr>
+        <tr><td>Gross Loss:</td><td>0.00</td>
+            <td>Balance Drawdown Relative:</td><td>0.00% (0.00)</td>
+            <td>Equity Drawdown Relative:</td><td>0.00% (0.00)</td></tr>
+        <tr><td>AHPR:</td><td>0.0000 (0.00%)</td>
+            <td>OnTester result:</td><td>0</td></tr>
+        <tr><td>Total Trades:</td><td>0</td>
+            <td>Short Trades (won %):</td><td>0 (0.00%)</td>
+            <td>Long Trades (won %):</td><td>0 (0.00%)</td></tr>
+        <tr><td>Total Deals:</td><td>0</td></tr>
+        </table></body></html>"""
+
+        self.assertTrue(
+            self.bridge._ea_factory_tester_report_matches(
+                payload,
+                settings,
+                trade_count=0,
+                buy_trade_count=0,
+                sell_trade_count=0,
+                mismatched_chart_errors=0,
+                tester_input_preset=preset,
+                platform="mt5",
+            )
+        )
+        self.assertFalse(
+            self.bridge._ea_factory_tester_report_matches(
+                payload,
+                settings,
+                trade_count=1,
+                buy_trade_count=1,
+                sell_trade_count=0,
+                mismatched_chart_errors=0,
+                tester_input_preset=preset,
+                platform="mt5",
+            )
+        )
+        self.assertFalse(
+            self.bridge._ea_factory_tester_report_matches(
+                payload.replace(b"</head>", b"<script>1</script></head>"),
+                settings,
+                trade_count=0,
+                buy_trade_count=0,
+                sell_trade_count=0,
+                mismatched_chart_errors=0,
+                tester_input_preset=preset,
+                platform="mt5",
+            )
+        )
+
     def test_tester_report_accepts_unique_mt4_title_when_expert_row_is_absent(self) -> None:
         settings = {
             "expertFileName": "CAN_SLIM_SourceOnly_v01.ex4",
@@ -3248,8 +6412,13 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
             "missionIdempotencyKey": "stage-mission-key",
         })
         request = {
+            "schemaVersion": "ea-factory-visible-front-office-request-v1",
             "buildId": build["id"],
             "stageId": "compile_validate",
+            "runSnapshotDigest": self.bridge.payload_digest(
+                "ea-factory-one-click-run-snapshot-v1",
+                build["oneClickRun"],
+            ),
             "terminalBinding": copy.deepcopy(
                 build["oneClickRun"]["terminalBinding"]
             ),
@@ -3285,6 +6454,1247 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
         ]
         return build, self.state(build), request, result, artifact_rows
 
+    def test_one_click_progress_is_local_and_counts_only_completed_gates(self) -> None:
+        build = self.build()
+        run = self._run(build, current_stage="generate_source")
+        run["status"] = "running"
+        build["oneClickRun"] = run
+
+        queued = self.bridge._ea_factory_one_click_read_model(build)
+        self.assertTrue(queued["canCancel"])
+        self.assertEqual(queued["progressPercent"], 10)
+        self.assertEqual(queued["progressStageIndex"], 0)
+        self.assertEqual(queued["progressStageCount"], 5)
+        self.assertEqual(queued["progressSource"], "durable_phase_gate")
+
+        generate = next(
+            row for row in build["stages"] if row["id"] == "generate_source"
+        )
+        generate["status"] = "completed"
+        generate["evidenceVerified"] = True
+        run["currentStageId"] = "source_review"
+        advanced = self.bridge._ea_factory_one_click_read_model(build)
+        self.assertEqual(advanced["progressPercent"], 30)
+        self.assertEqual(advanced["progressStageIndex"], 1)
+
+        run["status"] = "cancelled"
+        run["failureCode"] = "operator_cancelled"
+        run["completedAt"] = "2026-09-11T00:01:00Z"
+        cancelled = self.bridge._ea_factory_one_click_read_model(build)
+        self.assertFalse(cancelled["canCancel"])
+        self.assertEqual(cancelled["progressPercent"], 20)
+        self.assertEqual(cancelled["progressStageIndex"], 1)
+
+    def test_cancel_targets_exact_run_mission_and_process_without_terminal_shutdown(self) -> None:
+        build = self.build()
+        build["oneClickRun"] = self._run(build, current_stage="generate_source")
+        build["oneClickRun"]["status"] = "waiting_ai"
+        state = self.state(build)
+        cancel_event = threading.Event()
+
+        class StoppedCoordinator:
+            @staticmethod
+            def is_alive():
+                return False
+
+        owned_mission = {"id": "mission-eaf-owned"}
+        self.bridge.EA_FACTORY_ONE_CLICK_THREADS[build["id"]] = StoppedCoordinator()
+        self.bridge.EA_FACTORY_ONE_CLICK_CANCEL_EVENTS[build["id"]] = cancel_event
+        try:
+            with (
+                mock.patch.object(
+                    self.bridge,
+                    "_load_ea_factory_state_unlocked",
+                    return_value=state,
+                ),
+                mock.patch.object(self.bridge, "_write_ea_factory_state_unlocked"),
+                mock.patch.object(self.bridge, "load_missions", return_value=[]),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_active_stage_mission_for_cancel",
+                    return_value=owned_mission,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_cancel_owned_mission",
+                    return_value={
+                        "missionId": owned_mission["id"],
+                        "persisted": True,
+                        "previousStatus": "running",
+                    },
+                ) as cancel_mission,
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_terminate_owned_mission_process",
+                    return_value={
+                        "missionProcessFound": True,
+                        "missionProcessTerminated": True,
+                    },
+                ) as terminate_process,
+                mock.patch.object(self.bridge, "append_audit"),
+                mock.patch.object(self.bridge, "save_missions"),
+            ):
+                result = self.bridge.cancel_ea_factory_build_one_click(
+                    build["id"],
+                    {
+                        "runId": build["oneClickRun"]["runId"],
+                        "idempotencyKey": build["oneClickRun"]["idempotencyKey"],
+                    },
+                )
+            self.assertTrue(cancel_event.is_set())
+            self.assertEqual(result["kind"], "ea_factory_one_click_cancelled")
+            self.assertEqual(result["oneClickRun"]["status"], "cancelled")
+            self.assertFalse(result["cancelPending"])
+            self.assertFalse(result["bridgeStopped"])
+            self.assertFalse(result["terminalShutdownAllowed"])
+            cancel_mission.assert_called_once_with(
+                owned_mission["id"],
+                build_id=build["id"],
+                stage_id="generate_source",
+            )
+            terminate_process.assert_called_once_with(owned_mission["id"])
+        finally:
+            self.bridge.EA_FACTORY_ONE_CLICK_THREADS.pop(build["id"], None)
+            self.bridge.EA_FACTORY_ONE_CLICK_CANCEL_EVENTS.pop(build["id"], None)
+            self.bridge.EA_FACTORY_ONE_CLICK_CANCEL_CONTEXTS.pop(build["id"], None)
+
+    def test_cancel_stays_pending_until_visible_coordinator_returns(self) -> None:
+        build = self.build()
+        build["oneClickRun"] = self._run(build, current_stage="compile_validate")
+        build["oneClickRun"]["status"] = "running"
+        self.bridge._ea_factory_one_click_reserve_visible_action(
+            build,
+            build["oneClickRun"],
+            "compile_validate",
+        )
+        state = self.state(build)
+        cancel_event = threading.Event()
+
+        class RunningCoordinator:
+            @staticmethod
+            def is_alive():
+                return True
+
+        self.bridge.EA_FACTORY_ONE_CLICK_THREADS[build["id"]] = RunningCoordinator()
+        self.bridge.EA_FACTORY_ONE_CLICK_CANCEL_EVENTS[build["id"]] = cancel_event
+        try:
+            with (
+                mock.patch.object(
+                    self.bridge,
+                    "_load_ea_factory_state_unlocked",
+                    return_value=state,
+                ),
+                mock.patch.object(self.bridge, "_write_ea_factory_state_unlocked"),
+                mock.patch.object(self.bridge, "load_missions", return_value=[]),
+                mock.patch.object(self.bridge, "append_audit"),
+            ):
+                pending = self.bridge.cancel_ea_factory_build_one_click(
+                    build["id"],
+                    {
+                        "runId": build["oneClickRun"]["runId"],
+                        "idempotencyKey": build["oneClickRun"]["idempotencyKey"],
+                    },
+                )
+                self.assertEqual(
+                    pending["kind"],
+                    "ea_factory_one_click_cancel_pending",
+                )
+                self.assertEqual(pending["oneClickRun"]["status"], "cancelling")
+                self.assertTrue(pending["cancelPending"])
+                self.assertTrue(pending["visibleActionWasInFlight"])
+                self.assertFalse(pending["visibleActionInterruptionConfirmed"])
+                self.assertIsNone(build["oneClickRun"]["completedAt"])
+
+                self.bridge.EA_FACTORY_ONE_CLICK_THREADS.pop(build["id"], None)
+                self.bridge.EA_FACTORY_ONE_CLICK_CANCEL_EVENTS.pop(build["id"], None)
+                finalized = (
+                    self.bridge._ea_factory_finalize_one_click_cancel_after_worker(
+                        build["id"],
+                        build["oneClickRun"]["runId"],
+                        coordinator_returned=True,
+                        owned_process_stop_confirmed=True,
+                    )
+                )
+            self.assertTrue(finalized)
+            self.assertEqual(build["oneClickRun"]["status"], "cancelled")
+            self.assertIsNotNone(build["oneClickRun"]["completedAt"])
+        finally:
+            self.bridge.EA_FACTORY_ONE_CLICK_THREADS.pop(build["id"], None)
+            self.bridge.EA_FACTORY_ONE_CLICK_CANCEL_EVENTS.pop(build["id"], None)
+            self.bridge.EA_FACTORY_ONE_CLICK_CANCEL_CONTEXTS.pop(build["id"], None)
+
+    def test_cancel_rejects_stale_run_identity_without_mutation(self) -> None:
+        build = self.build()
+        build["oneClickRun"] = self._run(build, current_stage="generate_source")
+        state = self.state(build)
+        before = copy.deepcopy(build["oneClickRun"])
+        with mock.patch.object(
+            self.bridge,
+            "_load_ea_factory_state_unlocked",
+            return_value=state,
+        ):
+            with self.assertRaises(self.bridge.RequestError) as rejected:
+                self.bridge.cancel_ea_factory_build_one_click(
+                    build["id"],
+                    {
+                        "runId": "ea-run-stale-request",
+                        "idempotencyKey": before["idempotencyKey"],
+                    },
+                )
+        self.assertEqual(rejected.exception.status, 409)
+        self.assertEqual(build["oneClickRun"], before)
+
+    def test_cancelled_run_replay_is_idempotent(self) -> None:
+        build = self.build()
+        build["oneClickRun"] = self._run(build, current_stage="generate_source")
+        self.bridge._ea_factory_one_click_update(
+            build["oneClickRun"],
+            status="cancelled",
+            current_stage_id="generate_source",
+            failure_code="operator_cancelled",
+            message_th="cancelled",
+        )
+        state = self.state(build)
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=state,
+            ),
+            mock.patch.object(self.bridge, "append_audit"),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_terminate_owned_mission_process",
+            ) as terminate_process,
+        ):
+            replay = self.bridge.cancel_ea_factory_build_one_click(
+                build["id"],
+                {
+                    "runId": build["oneClickRun"]["runId"],
+                    "idempotencyKey": build["oneClickRun"]["idempotencyKey"],
+                },
+            )
+        self.assertEqual(replay["kind"], "ea_factory_one_click_cancel_replayed")
+        self.assertTrue(replay["idempotentReplay"])
+        self.assertEqual(replay["oneClickRun"]["status"], "cancelled")
+        terminate_process.assert_not_called()
+
+    def test_cancelled_visible_request_is_rejected_before_adapter_invocation(self) -> None:
+        build, state, request, _result, _artifact_rows = (
+            self._visible_commit_fixture()
+        )
+        self.bridge._ea_factory_one_click_update(
+            build["oneClickRun"],
+            status="cancelling",
+            current_stage_id="compile_validate",
+            failure_code=None,
+            message_th="stopping",
+        )
+        provider = mock.Mock(return_value={"ready": True})
+        handler = mock.Mock(return_value={})
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+                return_value=state,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER",
+                provider,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER",
+                handler,
+            ),
+        ):
+            with self.assertRaises(self.bridge.RequestError) as rejected:
+                self.bridge._ea_factory_invoke_visible_front_office_handler(request)
+        self.assertEqual(rejected.exception.status, 409)
+        provider.assert_not_called()
+        handler.assert_not_called()
+
+    def test_cancelled_run_snapshot_rejects_late_visible_commit(self) -> None:
+        build, state, request, result, _artifact_rows = self._visible_commit_fixture()
+        self.bridge._ea_factory_one_click_update(
+            build["oneClickRun"],
+            status="cancelling",
+            current_stage_id="compile_validate",
+            failure_code=None,
+            message_th="stopping",
+        )
+        with mock.patch.object(
+            self.bridge,
+            "_load_ea_factory_state_unlocked",
+            return_value=state,
+        ):
+            with self.assertRaises(self.bridge.RequestError) as rejected:
+                self.bridge._ea_factory_commit_visible_front_office_result(
+                    request,
+                    result,
+                )
+        self.assertEqual(rejected.exception.status, 409)
+        stage = next(
+            row for row in build["stages"] if row["id"] == "compile_validate"
+        )
+        self.assertEqual(stage["status"], "pending")
+
+    def test_backtest_only_restart_is_idempotent_and_preserves_source_compile(self) -> None:
+        build = self.backtest_restart_build()
+        state = self.state(build)
+        source_before = copy.deepcopy(build["versions"])
+        completed_before = {
+            stage["id"]: copy.deepcopy(stage)
+            for stage in build["stages"]
+            if stage["id"] in {
+                "strategy_spec",
+                "generate_source",
+                "source_review",
+                "compile_validate",
+            }
+        }
+        stack, handles = self.backtest_restart_patch_stack(state)
+        with stack:
+            first = self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": "ea-run-old-backtest",
+                    "idempotencyKey": "restart-backtest-0001",
+                },
+            )
+            replay = self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": "ea-run-old-backtest",
+                    "idempotencyKey": "restart-backtest-0001",
+                },
+            )
+            validated_history = (
+                self.bridge._ea_factory_revalidated_backtest_restart_history(
+                    build
+                )
+            )
+            validated_run = self.bridge._ea_factory_revalidated_one_click_run(
+                build
+            )
+
+        self.assertEqual(first["kind"], "ea_factory_backtest_restarted")
+        self.assertEqual(replay["kind"], "ea_factory_backtest_restart_replayed")
+        self.assertTrue(replay["idempotentReplay"])
+        self.assertNotEqual(build["oneClickRun"]["runId"], "ea-run-old-backtest")
+        self.assertEqual(build["oneClickRun"]["currentStageId"], "backtest_recheck")
+        self.assertEqual(build["versions"], source_before)
+        for stage_id, previous in completed_before.items():
+            self.assertEqual(
+                next(row for row in build["stages"] if row["id"] == stage_id),
+                previous,
+            )
+        self.assertEqual(len(build["oneClickRunHistory"]), 1)
+        self.assertEqual(len(validated_history), 1)
+        self.assertEqual(validated_run["runId"], build["oneClickRun"]["runId"])
+        archived = build["oneClickRunHistory"][0]
+        self.assertEqual(archived["previousRun"]["runId"], "ea-run-old-backtest")
+        self.assertEqual(
+            archived["backtestStage"]["missionId"],
+            "mission-old-backtest",
+        )
+        self.assertRegex(archived["archiveDigest"], r"^[0-9a-f]{64}$")
+        handles["start"].assert_called_once()
+        handles["idle"].assert_called_once()
+        handles["advance"].assert_not_called()
+        handles["ai"].assert_not_called()
+
+    def test_backtest_restart_revalidation_rejects_current_key_tampering(
+        self,
+    ) -> None:
+        build = self.backtest_restart_build()
+        state = self.state(build)
+        stack, _handles = self.backtest_restart_patch_stack(state)
+        with stack:
+            self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": "ea-run-old-backtest",
+                    "idempotencyKey": "restart-key-binding-0001",
+                },
+            )
+            tampered = copy.deepcopy(build)
+            tampered["oneClickRun"]["idempotencyKey"] = (
+                "restart-key-tampered-9999"
+            )
+
+            with self.assertRaises(self.bridge.DataIntegrityError):
+                self.bridge._ea_factory_revalidated_one_click_run(tampered)
+            with self.assertRaises(self.bridge.DataIntegrityError):
+                self.bridge._ea_factory_revalidated_backtest_restart_history(
+                    tampered
+                )
+
+    def test_backtest_restart_revalidation_rejects_current_binding_tampering(
+        self,
+    ) -> None:
+        build = self.backtest_restart_build()
+        state = self.state(build)
+        stack, _handles = self.backtest_restart_patch_stack(state)
+        with stack:
+            self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": "ea-run-old-backtest",
+                    "idempotencyKey": "restart-binding-leaf-0001",
+                },
+            )
+            tampered = copy.deepcopy(build)
+            current_run = tampered["oneClickRun"]
+            current_run["terminalBinding"] = {
+                "platform": "mt4",
+                "candidateId": "mtc-different-terminal",
+                "selectionRevision": 999,
+                "bindingDigest": "9" * 64,
+            }
+            current_run["visibleAction"]["operationId"] = (
+                self.bridge._ea_factory_one_click_visible_operation_id(
+                    tampered,
+                    current_run,
+                    "backtest_recheck",
+                )
+            )
+
+            with self.assertRaises(self.bridge.DataIntegrityError):
+                self.bridge._ea_factory_revalidated_one_click_run(tampered)
+            with self.assertRaises(self.bridge.DataIntegrityError):
+                self.bridge._ea_factory_revalidated_backtest_restart_history(
+                    tampered
+                )
+
+    def test_visible_action_stage_is_cross_bound_to_current_stage(self) -> None:
+        build = self.backtest_restart_build(status="awaiting_visible_terminal")
+        run = build["oneClickRun"]
+        self.assertTrue(
+            self.bridge._ea_factory_one_click_reserve_visible_action(
+                build,
+                run,
+                "backtest_recheck",
+            )
+        )
+        self.assertIsInstance(
+            self.bridge._ea_factory_revalidated_one_click_run(build),
+            dict,
+        )
+
+        mismatched = copy.deepcopy(build)
+        mismatched["oneClickRun"]["currentStageId"] = "compile_validate"
+        with self.assertRaises(self.bridge.DataIntegrityError):
+            self.bridge._ea_factory_revalidated_one_click_run(mismatched)
+
+        advanced = copy.deepcopy(build)
+        advanced_run = advanced["oneClickRun"]
+        advanced_run["status"] = "queued"
+        advanced_run["currentStageId"] = "final_report"
+        advanced_run["visibleAction"]["state"] = "completed"
+        backtest_stage = self.bridge._ea_factory_stage_row(
+            advanced,
+            "backtest_recheck",
+        )
+        backtest_stage.update({
+            "status": "completed",
+            "evidenceVerified": True,
+        })
+        self.assertIsInstance(
+            self.bridge._ea_factory_revalidated_one_click_run(advanced),
+            dict,
+        )
+
+    def test_backtest_restart_revalidation_rejects_coherent_leaf_stage_tampering(
+        self,
+    ) -> None:
+        build = self.backtest_restart_build()
+        state = self.state(build)
+        stack, _handles = self.backtest_restart_patch_stack(state)
+        with stack:
+            self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": "ea-run-old-backtest",
+                    "idempotencyKey": "restart-leaf-stage-binding-0001",
+                },
+            )
+            tampered = copy.deepcopy(build)
+            current_run = tampered["oneClickRun"]
+            current_run["currentStageId"] = "compile_validate"
+            current_run["visibleAction"]["stageId"] = "compile_validate"
+            current_run["visibleAction"]["operationId"] = (
+                self.bridge._ea_factory_one_click_visible_operation_id(
+                    tampered,
+                    current_run,
+                    "compile_validate",
+                )
+            )
+
+            with self.assertRaises(self.bridge.DataIntegrityError):
+                self.bridge._ea_factory_revalidated_one_click_run(tampered)
+            with self.assertRaises(self.bridge.DataIntegrityError):
+                self.bridge._ea_factory_revalidated_backtest_restart_history(
+                    tampered
+                )
+
+            advanced = copy.deepcopy(build)
+            advanced_run = advanced["oneClickRun"]
+            advanced_run["status"] = "queued"
+            advanced_run["currentStageId"] = "final_report"
+            advanced_run["visibleAction"]["state"] = "completed"
+            self.bridge._ea_factory_stage_row(
+                advanced,
+                "backtest_recheck",
+            ).update({
+                "status": "completed",
+                "evidenceVerified": True,
+            })
+            self.assertIsInstance(
+                self.bridge._ea_factory_revalidated_one_click_run(advanced),
+                dict,
+            )
+            self.assertEqual(
+                len(
+                    self.bridge._ea_factory_revalidated_backtest_restart_history(
+                        advanced
+                    )
+                ),
+                1,
+            )
+
+    def test_backtest_only_restart_rejects_run_stage_mismatch(self) -> None:
+        build = self.backtest_restart_build()
+        build["oneClickRun"]["currentStageId"] = "compile_validate"
+        state = self.state(build)
+        stack, handles = self.backtest_restart_patch_stack(state)
+
+        with stack, self.assertRaises(self.bridge.RequestError) as raised:
+            self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": "ea-run-old-backtest",
+                    "idempotencyKey": "restart-stage-mismatch-0001",
+                },
+            )
+
+        self.assertEqual(
+            raised.exception.code,
+            "backtest_restart_run_stage_mismatch",
+        )
+        handles["idle"].assert_not_called()
+        handles["write"].assert_not_called()
+        handles["start"].assert_not_called()
+
+    def test_backtest_restart_history_rejects_digest_coherent_stage_tampering(
+        self,
+    ) -> None:
+        build = self.backtest_restart_build()
+        state = self.state(build)
+        stack, _handles = self.backtest_restart_patch_stack(state)
+        with stack:
+            self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": "ea-run-old-backtest",
+                    "idempotencyKey": "restart-stage-binding-0001",
+                },
+            )
+            tampered = copy.deepcopy(build)
+            archive = tampered["oneClickRunHistory"][0]
+            archive["previousRun"]["currentStageId"] = "compile_validate"
+            archive["previousRunDigest"] = self.bridge.payload_digest(
+                "ea-factory-archived-one-click-run-v1",
+                archive["previousRun"],
+            )
+            archive["archiveDigest"] = (
+                self.bridge._ea_factory_backtest_restart_archive_digest(archive)
+            )
+            tampered["oneClickRun"]["restartArchiveDigest"] = archive[
+                "archiveDigest"
+            ]
+
+            with self.assertRaises(self.bridge.DataIntegrityError):
+                self.bridge._ea_factory_revalidated_backtest_restart_history(
+                    tampered
+                )
+
+    def test_backtest_restart_history_rejects_digest_coherent_binding_hop(
+        self,
+    ) -> None:
+        build = self.backtest_restart_build()
+        state = self.state(build)
+        stack, _handles = self.backtest_restart_patch_stack(state)
+        with stack:
+            first = self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": "ea-run-old-backtest",
+                    "idempotencyKey": "restart-binding-hop-0001",
+                },
+            )
+            self.bridge._ea_factory_one_click_update(
+                build["oneClickRun"],
+                status="failed",
+                current_stage_id="backtest_recheck",
+                failure_code="visible_backtest_failed",
+                message_th="first restarted Backtest stopped",
+            )
+            self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": first["oneClickRun"]["runId"],
+                    "idempotencyKey": "restart-binding-hop-0002",
+                },
+            )
+            tampered = copy.deepcopy(build)
+            second_archive = tampered["oneClickRunHistory"][1]
+            intermediate_run = second_archive["previousRun"]
+            changed_binding = {
+                "platform": "mt4",
+                "candidateId": "mtc-different-terminal",
+                "selectionRevision": 999,
+                "bindingDigest": "9" * 64,
+            }
+            intermediate_run["terminalBinding"] = copy.deepcopy(changed_binding)
+            intermediate_run["visibleAction"]["operationId"] = (
+                self.bridge._ea_factory_one_click_visible_operation_id(
+                    tampered,
+                    intermediate_run,
+                    "backtest_recheck",
+                )
+            )
+            second_archive["previousRunDigest"] = self.bridge.payload_digest(
+                "ea-factory-archived-one-click-run-v1",
+                intermediate_run,
+            )
+            second_archive["archiveDigest"] = (
+                self.bridge._ea_factory_backtest_restart_archive_digest(
+                    second_archive
+                )
+            )
+            current_run = tampered["oneClickRun"]
+            current_run["terminalBinding"] = copy.deepcopy(changed_binding)
+            current_run["visibleAction"]["operationId"] = (
+                self.bridge._ea_factory_one_click_visible_operation_id(
+                    tampered,
+                    current_run,
+                    "backtest_recheck",
+                )
+            )
+            current_run["restartArchiveDigest"] = second_archive[
+                "archiveDigest"
+            ]
+
+            self.assertIsInstance(
+                self.bridge._ea_factory_revalidated_one_click_run(tampered),
+                dict,
+            )
+            with self.assertRaises(self.bridge.DataIntegrityError):
+                self.bridge._ea_factory_revalidated_backtest_restart_history(
+                    tampered
+                )
+
+    def test_restart_revalidation_uses_archived_compile_run_and_current_backtest_run(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reports_dir = root / "data" / "runtime" / "reports"
+            with mock.patch.object(self.bridge, "PROJECT_ROOT", root):
+                build, compile_stage, _compile_report = (
+                    self.restart_revalidation_fixture(root, reports_dir)
+                )
+                original_run = copy.deepcopy(build["oneClickRun"])
+                state = self.state(build)
+                with (
+                    mock.patch.object(
+                        self.bridge,
+                        "_load_ea_factory_state_unlocked",
+                        return_value=state,
+                    ),
+                    mock.patch.object(self.bridge, "load_missions", return_value=[]),
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_active_worker_payload",
+                        return_value=None,
+                    ),
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_any_one_click_coordinator_alive",
+                        return_value=False,
+                    ),
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_one_click_terminal_binding_current",
+                        return_value=True,
+                    ),
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_backtest_restart_idle_probe",
+                        return_value={"testerStartState": "Start"},
+                    ),
+                    mock.patch.object(
+                        self.bridge,
+                        "_start_ea_factory_one_click_thread",
+                        return_value=True,
+                    ),
+                    mock.patch.object(self.bridge, "append_audit"),
+                ):
+                    restarted = (
+                        self.bridge.restart_ea_factory_build_backtest_only(
+                            build["id"],
+                            {
+                                "runId": original_run["runId"],
+                                "idempotencyKey": (
+                                    "restart-history-revalidation-0001"
+                                ),
+                            },
+                        )
+                    )
+
+                current_run = copy.deepcopy(build["oneClickRun"])
+                self.assertNotEqual(current_run["runId"], original_run["runId"])
+                self.assertEqual(restarted["oneClickRun"]["runId"], current_run["runId"])
+                self.assertEqual(len(build["oneClickRunHistory"]), 1)
+                archived_run = build["oneClickRunHistory"][0]["previousRun"]
+                self.assertEqual(archived_run, original_run)
+
+                with (
+                    mock.patch.object(
+                        self.bridge,
+                        "RUNTIME_REPORTS_DIR",
+                        reports_dir,
+                    ),
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_visible_png_valid",
+                        return_value=True,
+                    ),
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_visible_receipt_valid",
+                        return_value=True,
+                    ),
+                ):
+                    validated = self.bridge._ea_factory_revalidated_build(build)
+                    read_model = self.bridge._ea_factory_one_click_read_model(
+                        validated
+                    )
+
+                resolved_compile_run = (
+                    self.bridge._ea_factory_visible_evidence_run_snapshot(
+                        build,
+                        compile_stage,
+                        compile_stage["visibleOperationId"],
+                    )
+                )
+                self.assertEqual(
+                    resolved_compile_run["runId"],
+                    original_run["runId"],
+                )
+                self.assertEqual(read_model["runId"], current_run["runId"])
+                backtest_stage = self.bridge._ea_factory_stage_row(
+                    build,
+                    "backtest_recheck",
+                )
+                current_backtest_operation = current_run["visibleAction"][
+                    "operationId"
+                ]
+                resolved_backtest_run = (
+                    self.bridge._ea_factory_visible_evidence_run_snapshot(
+                        build,
+                        backtest_stage,
+                        current_backtest_operation,
+                    )
+                )
+                self.assertEqual(
+                    resolved_backtest_run["runId"],
+                    current_run["runId"],
+                )
+                archived_backtest_operation = (
+                    self.bridge._ea_factory_one_click_visible_operation_id(
+                        build,
+                        original_run,
+                        "backtest_recheck",
+                    )
+                )
+                self.assertIsNone(
+                    self.bridge._ea_factory_visible_evidence_run_snapshot(
+                        build,
+                        backtest_stage,
+                        archived_backtest_operation,
+                    )
+                )
+
+                tampered = copy.deepcopy(build)
+                tampered["oneClickRunHistory"][0]["archiveDigest"] = "0" * 64
+                with (
+                    mock.patch.object(
+                        self.bridge,
+                        "RUNTIME_REPORTS_DIR",
+                        reports_dir,
+                    ),
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_visible_png_valid",
+                        return_value=True,
+                    ),
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_visible_receipt_valid",
+                        return_value=True,
+                    ),
+                    self.assertRaises(self.bridge.DataIntegrityError),
+                ):
+                    self.bridge._ea_factory_revalidated_build(tampered)
+
+                missing_history = copy.deepcopy(build)
+                missing_history["oneClickRunHistory"] = []
+                with (
+                    mock.patch.object(
+                        self.bridge,
+                        "RUNTIME_REPORTS_DIR",
+                        reports_dir,
+                    ),
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_visible_png_valid",
+                        return_value=True,
+                    ),
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_visible_receipt_valid",
+                        return_value=True,
+                    ),
+                    self.assertRaises(self.bridge.DataIntegrityError),
+                ):
+                    self.bridge._ea_factory_revalidated_build(missing_history)
+
+    def test_backtest_restart_contract_accepts_real_mt5_compile_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.object(self.bridge, "PROJECT_ROOT", root):
+                build, registered, binary_path = (
+                    self.backtest_restart_mt5_manifest_fixture(root)
+                )
+                binary = next(
+                    row for row in registered if row["extension"] == ".ex5"
+                )
+
+                contract = self.bridge._ea_factory_backtest_restart_contract(build)
+
+                self.assertEqual(binary["artifactKind"], "compile_evidence")
+                self.assertEqual(binary["stageId"], "compile_validate")
+                self.assertEqual(
+                    binary["reportId"],
+                    next(
+                        row
+                        for row in build["stages"]
+                        if row["id"] == "compile_validate"
+                    )["reportId"],
+                )
+                self.assertIn(
+                    binary["fileId"],
+                    {
+                        row["fileId"]
+                        for row in contract["compileEvidence"]["artifacts"]
+                    },
+                )
+
+                binary_path.write_bytes(b"tampered compiled mt5 fixture")
+                with self.assertRaises(self.bridge.RequestError) as tampered:
+                    self.bridge._ea_factory_backtest_restart_contract(build)
+                self.assertEqual(
+                    tampered.exception.code,
+                    "backtest_restart_compile_digest_changed",
+                )
+
+    def test_backtest_restart_contract_rejects_non_binary_compile_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.object(self.bridge, "PROJECT_ROOT", root):
+                build, registered, _binary_path = (
+                    self.backtest_restart_mt5_manifest_fixture(root)
+                )
+                compile_stage = next(
+                    row
+                    for row in build["stages"]
+                    if row["id"] == "compile_validate"
+                )
+                compile_log = next(
+                    row
+                    for row in registered
+                    if row["relativePath"] == "Reports/compile.txt"
+                )
+                compile_stage["artifacts"] = [compile_log["fileId"]]
+
+                with self.assertRaises(self.bridge.RequestError) as rejected:
+                    self.bridge._ea_factory_backtest_restart_contract(build)
+
+                self.assertEqual(
+                    rejected.exception.code,
+                    "backtest_restart_compile_digest_changed",
+                )
+
+    def test_backtest_restart_thread_start_failure_is_durable_and_retry_safe(self) -> None:
+        build = self.backtest_restart_build()
+        state = self.state(build)
+        stack, handles = self.backtest_restart_patch_stack(state)
+        handles["start"].side_effect = [RuntimeError("native thread unavailable"), True]
+
+        with stack:
+            failed_start = self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": "ea-run-old-backtest",
+                    "idempotencyKey": "restart-start-failure-0001",
+                },
+            )
+            failed_run_id = build["oneClickRun"]["runId"]
+            failed_snapshot = copy.deepcopy(build["oneClickRun"])
+
+            replay = self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": "ea-run-old-backtest",
+                    "idempotencyKey": "restart-start-failure-0001",
+                },
+            )
+            with self.assertRaises(self.bridge.RequestError) as reused_key:
+                self.bridge.restart_ea_factory_build_backtest_only(
+                    build["id"],
+                    {
+                        "runId": failed_run_id,
+                        "idempotencyKey": "restart-start-failure-0001",
+                    },
+                )
+            retry = self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": failed_run_id,
+                    "idempotencyKey": "restart-start-failure-0002",
+                },
+            )
+            validated_history = (
+                self.bridge._ea_factory_revalidated_backtest_restart_history(
+                    build
+                )
+            )
+            validated_run = self.bridge._ea_factory_revalidated_one_click_run(
+                build
+            )
+
+        self.assertFalse(failed_start["workerStarted"])
+        self.assertEqual(failed_snapshot["status"], "failed")
+        self.assertEqual(
+            failed_snapshot["failureCode"],
+            "backtest_restart_worker_not_started",
+        )
+        self.assertIsNotNone(failed_snapshot["completedAt"])
+        self.assertEqual(replay["kind"], "ea_factory_backtest_restart_replayed")
+        self.assertTrue(replay["idempotentReplay"])
+        self.assertEqual(replay["oneClickRun"]["status"], "failed")
+        self.assertFalse(replay["sourceRegenerated"])
+        self.assertFalse(replay["compileRepeated"])
+        self.assertEqual(reused_key.exception.code, "backtest_restart_key_reused")
+        self.assertTrue(retry["workerStarted"])
+        self.assertEqual(retry["oneClickRun"]["status"], "queued")
+        self.assertEqual(len(build["oneClickRunHistory"]), 2)
+        self.assertEqual(len(validated_history), 2)
+        self.assertEqual(validated_run["runId"], build["oneClickRun"]["runId"])
+        self.assertEqual(handles["start"].call_count, 2)
+        # First commit + durable failure, then the fresh-key retry commit.
+        self.assertEqual(handles["write"].call_count, 3)
+
+
+    def test_backtest_restart_read_model_exposes_only_exact_terminal_state(self) -> None:
+        build = self.backtest_restart_build()
+        with mock.patch.object(
+            self.bridge,
+            "_ea_factory_file_catalog",
+            return_value=[],
+        ):
+            model = self.bridge._ea_factory_one_click_read_model(build)
+        self.assertTrue(model["canRestartBacktest"])
+        self.assertEqual(
+            model["restartBacktestEndpoint"],
+            "/api/props/right_server_racks/ea-factory/builds/"
+            "ea-build-one-click-test/restart-backtest",
+        )
+        build["oneClickRun"]["status"] = "running"
+        build["oneClickRun"]["completedAt"] = None
+        with mock.patch.object(
+            self.bridge,
+            "_ea_factory_file_catalog",
+            return_value=[],
+        ):
+            active_model = self.bridge._ea_factory_one_click_read_model(build)
+        self.assertFalse(active_model["canRestartBacktest"])
+
+    def test_backtest_only_restart_rejects_active_cancelling_and_active_coordinator(self) -> None:
+        expected_codes = {
+            "queued": "backtest_restart_run_not_terminal",
+            "running": "backtest_restart_run_not_terminal",
+            "cancelling": "backtest_restart_cancellation_pending",
+        }
+        for status, expected_code in expected_codes.items():
+            with self.subTest(status=status):
+                build = self.backtest_restart_build(status=status)
+                state = self.state(build)
+                with mock.patch.object(
+                    self.bridge,
+                    "_load_ea_factory_state_unlocked",
+                    return_value=state,
+                ):
+                    with self.assertRaises(self.bridge.RequestError) as raised:
+                        self.bridge.restart_ea_factory_build_backtest_only(
+                            build["id"],
+                            {
+                                "runId": "ea-run-old-backtest",
+                                "idempotencyKey": f"restart-{status}-0001",
+                            },
+                        )
+                self.assertEqual(raised.exception.status, 409)
+                self.assertEqual(raised.exception.code, expected_code)
+
+        build = self.backtest_restart_build()
+        state = self.state(build)
+        stack, handles = self.backtest_restart_patch_stack(
+            state,
+            coordinator_alive=True,
+        )
+        with stack, self.assertRaises(self.bridge.RequestError) as raised:
+            self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": "ea-run-old-backtest",
+                    "idempotencyKey": "restart-coordinator-0001",
+                },
+            )
+        self.assertEqual(raised.exception.code, "backtest_restart_worker_active")
+        handles["write"].assert_not_called()
+        handles["start"].assert_not_called()
+
+    def test_backtest_only_restart_rejects_coverage_upgrade_required_build(self) -> None:
+        build = self.backtest_restart_build()
+        build["coverageUpgradeRequired"] = True
+        build["status"] = "coverage_upgrade_required"
+        state = self.state(build)
+        with mock.patch.object(
+            self.bridge,
+            "_load_ea_factory_state_unlocked",
+            return_value=state,
+        ):
+            with self.assertRaises(self.bridge.RequestError) as raised:
+                self.bridge.restart_ea_factory_build_backtest_only(
+                    build["id"],
+                    {
+                        "runId": "ea-run-old-backtest",
+                        "idempotencyKey": "restart-coverage-upgrade-0001",
+                    },
+                )
+        self.assertEqual(raised.exception.status, 409)
+        self.assertEqual(
+            raised.exception.code,
+            "backtest_restart_coverage_upgrade_required",
+        )
+
+    def test_backtest_only_restart_rejects_stale_binding_touched_final_and_stop_state(self) -> None:
+        build = self.backtest_restart_build()
+        state = self.state(build)
+        stack, handles = self.backtest_restart_patch_stack(
+            state,
+            terminal_current=False,
+        )
+        with stack, self.assertRaises(self.bridge.RequestError) as stale:
+            self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": "ea-run-old-backtest",
+                    "idempotencyKey": "restart-stale-terminal-0001",
+                },
+            )
+        self.assertEqual(stale.exception.code, "terminal_selection_changed")
+        handles["write"].assert_not_called()
+
+        touched = self.backtest_restart_build()
+        final_stage = next(
+            row for row in touched["stages"] if row["id"] == "final_report"
+        )
+        final_stage.update({
+            "status": "failed",
+            "missionId": "mission-final-touched",
+            "blockedReasonCode": "final_failed",
+        })
+        touched_state = self.state(touched)
+        stack, handles = self.backtest_restart_patch_stack(touched_state)
+        with stack, self.assertRaises(self.bridge.RequestError) as final_error:
+            self.bridge.restart_ea_factory_build_backtest_only(
+                touched["id"],
+                {
+                    "runId": "ea-run-old-backtest",
+                    "idempotencyKey": "restart-final-touched-0001",
+                },
+            )
+        self.assertEqual(final_error.exception.code, "backtest_restart_stage_not_pristine")
+        handles["write"].assert_not_called()
+
+        stop_build = self.backtest_restart_build()
+        with (
+            mock.patch.object(
+                self.bridge,
+                "EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER",
+                return_value={"ready": True, "testerStartState": "Stop"},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER",
+                lambda **_kwargs: {},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_front_office_capability_ready",
+                return_value=True,
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_resolved_front_office_target",
+                return_value={},
+            ),
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_default_tester_settings",
+                return_value={},
+            ),
+            self.assertRaises(self.bridge.RequestError) as stop_error,
+        ):
+            self.bridge._ea_factory_backtest_restart_idle_probe(stop_build)
+        self.assertEqual(stop_error.exception.code, "strategy_tester_still_running")
+
+    def test_backtest_only_restart_rejects_source_or_compile_contract_drift(self) -> None:
+        build = self.backtest_restart_build()
+        state = self.state(build)
+        first_contract = self.backtest_restart_contract("1" * 64)
+        changed_contract = self.backtest_restart_contract("2" * 64)
+        stack, handles = self.backtest_restart_patch_stack(
+            state,
+            contract_side_effect=[first_contract, changed_contract],
+        )
+        with stack, self.assertRaises(self.bridge.RequestError) as raised:
+            self.bridge.restart_ea_factory_build_backtest_only(
+                build["id"],
+                {
+                    "runId": "ea-run-old-backtest",
+                    "idempotencyKey": "restart-contract-drift-0001",
+                },
+            )
+        self.assertEqual(raised.exception.code, "backtest_restart_contract_changed")
+        handles["write"].assert_not_called()
+        handles["start"].assert_not_called()
+
+    def test_backtest_restart_mints_distinct_artifact_paths_and_rejects_old_late_commit(self) -> None:
+        build = self.backtest_restart_build()
+        old_run = build["oneClickRun"]
+        self.assertTrue(
+            self.bridge._ea_factory_one_click_reserve_visible_action(
+                build,
+                old_run,
+                "backtest_recheck",
+            )
+        )
+        state = self.state(build)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            visible_patches = (
+                mock.patch.object(
+                    self.bridge,
+                    "EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER",
+                    lambda **_kwargs: {},
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER",
+                    lambda **_kwargs: {},
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_one_click_terminal_binding_current",
+                    return_value=True,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_build_directory",
+                    return_value=root,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_resolved_front_office_target",
+                    return_value={},
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_default_tester_settings",
+                    return_value={},
+                ),
+            )
+            with ExitStack() as visible_stack:
+                for patcher in visible_patches:
+                    visible_stack.enter_context(patcher)
+                old_request = self.bridge._ea_factory_prepare_visible_front_office_request(
+                    build,
+                    next(
+                        row
+                        for row in build["stages"]
+                        if row["id"] == "backtest_recheck"
+                    ),
+                )
+
+                restart_stack, handles = self.backtest_restart_patch_stack(state)
+                with restart_stack:
+                    result = self.bridge.restart_ea_factory_build_backtest_only(
+                        build["id"],
+                        {
+                            "runId": "ea-run-old-backtest",
+                            "idempotencyKey": "restart-artifact-paths-0001",
+                        },
+                    )
+                new_request = self.bridge._ea_factory_prepare_visible_front_office_request(
+                    build,
+                    next(
+                        row
+                        for row in build["stages"]
+                        if row["id"] == "backtest_recheck"
+                    ),
+                )
+
+            old_operation = old_request["visibleOperation"]["operationId"]
+            new_operation = new_request["visibleOperation"]["operationId"]
+            self.assertNotEqual(old_operation, new_operation)
+            self.assertNotEqual(old_request["missionId"], new_request["missionId"])
+            self.assertNotEqual(old_request["reportId"], new_request["reportId"])
+            self.assertNotEqual(
+                root / "Reports" / f"{old_operation}-tester.htm",
+                root / "Reports" / f"{new_operation}-tester.htm",
+            )
+            self.assertEqual(result["oneClickRun"]["runId"], build["oneClickRun"]["runId"])
+            handles["advance"].assert_not_called()
+            handles["ai"].assert_not_called()
+
+            with (
+                mock.patch.object(
+                    self.bridge,
+                    "_load_ea_factory_state_unlocked",
+                    return_value=state,
+                ),
+                self.assertRaises(self.bridge.RequestError) as stale,
+            ):
+                self.bridge._ea_factory_assert_visible_front_office_request_current(
+                    old_request
+                )
+            self.assertEqual(stale.exception.status, 409)
+
     def test_production_visible_adapter_is_wired_fail_closed_at_runtime(self) -> None:
         class Adapter:
             supported_platforms = frozenset({"mt4"})
@@ -3302,6 +7712,7 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
             self.bridge.EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER,
             self.bridge.EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER,
             self.bridge.EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER,
+            self.bridge.EA_FACTORY_VISIBLE_OPTIMIZATION_HANDLER,
         )
         adapter = Adapter()
         try:
@@ -3311,6 +7722,11 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
                     "create_production_visible_front_office_adapter",
                     return_value=adapter,
                 ) as factory,
+                mock.patch.object(
+                    self.bridge,
+                    "create_production_visible_front_office_adapter_mt5",
+                    side_effect=RuntimeError("mt5 adapter unavailable"),
+                ) as mt5_factory,
                 mock.patch.object(self.bridge, "append_audit") as audit,
             ):
                 configured = (
@@ -3322,14 +7738,16 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
                     self.bridge._ea_factory_visible_adapter_target_resolver
                 )
             )
-            self.assertIs(
-                self.bridge.EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER.__self__,
-                adapter,
+            mt5_factory.assert_called_once_with(
+                target_resolver=(
+                    self.bridge._ea_factory_visible_adapter_target_resolver
+                )
             )
             self.assertEqual(
                 self.bridge._ea_factory_front_office_supported_platforms(),
                 frozenset({"mt4"}),
             )
+            self.assertIsNone(self.bridge.EA_FACTORY_VISIBLE_OPTIMIZATION_HANDLER)
             self.assertEqual(
                 audit.call_args.args[0]["type"],
                 "ea_factory.visible_front_office_adapter_configured",
@@ -3339,6 +7757,7 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
                 self.bridge.EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER,
                 self.bridge.EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER,
                 self.bridge.EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER,
+                self.bridge.EA_FACTORY_VISIBLE_OPTIMIZATION_HANDLER,
             ) = previous
 
     def test_visible_adapter_configuration_failure_clears_all_handlers(self) -> None:
@@ -3346,11 +7765,13 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
             self.bridge.EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER,
             self.bridge.EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER,
             self.bridge.EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER,
+            self.bridge.EA_FACTORY_VISIBLE_OPTIMIZATION_HANDLER,
         )
         try:
             self.bridge.EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER = lambda **_kwargs: {}
             self.bridge.EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER = lambda **_kwargs: {}
             self.bridge.EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER = lambda **_kwargs: {}
+            self.bridge.EA_FACTORY_VISIBLE_OPTIMIZATION_HANDLER = lambda **_kwargs: {}
             with (
                 mock.patch.object(
                     self.bridge,
@@ -3372,6 +7793,9 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
             self.assertIsNone(
                 self.bridge.EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER
             )
+            self.assertIsNone(
+                self.bridge.EA_FACTORY_VISIBLE_OPTIMIZATION_HANDLER
+            )
             self.assertEqual(
                 audit.call_args.args[0]["type"],
                 "ea_factory.visible_front_office_adapter_unavailable",
@@ -3381,6 +7805,7 @@ class EaFactoryOneClickBackendTests(unittest.TestCase):
                 self.bridge.EA_FACTORY_FRONT_OFFICE_CAPABILITY_PROVIDER,
                 self.bridge.EA_FACTORY_VISIBLE_METAEDITOR_COMPILE_HANDLER,
                 self.bridge.EA_FACTORY_VISIBLE_STRATEGY_TESTER_HANDLER,
+                self.bridge.EA_FACTORY_VISIBLE_OPTIMIZATION_HANDLER,
             ) = previous
 
     def test_visible_adapter_resolver_uses_only_current_backend_binding(self) -> None:

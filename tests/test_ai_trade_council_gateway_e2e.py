@@ -41,11 +41,8 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
         self.original_status_reader = (
             self.bridge.mt4_trade_gateway_status_read_model
         )
-        self.original_selection_token_reader = (
-            self.bridge._metatrader_selection_token
-        )
-        self.original_selection_context_reader = (
-            self.bridge._selected_metatrader_candidate_context
+        self.original_active_global_context_reader = (
+            self.bridge._active_global_metatrader_context
         )
         self.original_snapshot_reader = self.bridge.metatrader_snapshot_read_model
         self.original_snapshot_dir = self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR
@@ -56,11 +53,7 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
             self.root / "ai-trade-council" / "snapshots"
         )
         self.bridge.MT4_TRADE_GATEWAY_MODULE = None
-        self.bridge._metatrader_selection_token = lambda _prop_id: {
-            "candidateId": "mtc-safe-e2e-test",
-            "selectionRevision": 1,
-        }
-        self.bridge._selected_metatrader_candidate_context = lambda _prop_id: {
+        self.bridge._active_global_metatrader_context = lambda **_kwargs: {
             "record": {
                 "candidateId": "mtc-safe-e2e-test",
                 "platform": "mt4",
@@ -68,7 +61,9 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
             "token": {
                 "candidateId": "mtc-safe-e2e-test",
                 "selectionRevision": 1,
+                "platform": "mt4",
             },
+            "selectedAt": "2026-10-16T00:00:00+00:00",
         }
         self.current_broker_closed_bar = 1_785_466_800
         self.bridge.metatrader_snapshot_read_model = self.current_snapshot
@@ -81,11 +76,8 @@ class AiTradeCouncilGatewayE2ETests(unittest.TestCase):
         self.bridge.mt4_trade_gateway_status_read_model = (
             self.original_status_reader
         )
-        self.bridge._metatrader_selection_token = (
-            self.original_selection_token_reader
-        )
-        self.bridge._selected_metatrader_candidate_context = (
-            self.original_selection_context_reader
+        self.bridge._active_global_metatrader_context = (
+            self.original_active_global_context_reader
         )
         self.bridge.metatrader_snapshot_read_model = self.original_snapshot_reader
         self.bridge.AI_TRADE_COUNCIL_SNAPSHOT_DIR = self.original_snapshot_dir

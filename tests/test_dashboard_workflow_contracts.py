@@ -397,19 +397,28 @@ class DashboardWorkflowContractTests(unittest.TestCase):
             "connections",
         )
 
-    def test_unavailable_external_adapters_remain_explicitly_disabled(self) -> None:
+    def test_unavailable_and_visible_adapters_are_truthfully_partitioned(self) -> None:
         tools = {
             item["id"]: item
             for item in self.permissions["tools"]
             if isinstance(item, dict) and item.get("id")
         }
-        for tool_id in (
-            "run_strategy_tester",
-            "run_optimization",
-            "run_ea_discovery_plugin",
-        ):
-            self.assertEqual(tools[tool_id]["adapterStatus"], "coming_soon")
-            self.assertFalse(tools[tool_id]["realExecutionAvailable"])
+        discovery = tools["run_ea_discovery_plugin"]
+        self.assertEqual(discovery["adapterStatus"], "coming_soon")
+        self.assertFalse(discovery["realExecutionAvailable"])
+        tester = tools["run_strategy_tester"]
+        self.assertEqual(
+            tester["adapterStatus"],
+            "implemented_visible_fail_closed_for_ea_factory",
+        )
+        self.assertTrue(tester["realExecutionAvailable"])
+        optimization = tools["run_optimization"]
+        self.assertEqual(
+            optimization["adapterStatus"],
+            "implemented_mt5_visible_fail_closed",
+        )
+        self.assertTrue(optimization["realExecutionAvailable"])
+        self.assertEqual(optimization["supportedTargets"], ["mt5"])
         compile_tool = tools["compile_strategy_code"]
         self.assertEqual(
             compile_tool["adapterStatus"],

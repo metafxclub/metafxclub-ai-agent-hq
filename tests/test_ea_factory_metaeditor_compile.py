@@ -17,9 +17,12 @@ MODULE_PATH = (
     PROJECT_ROOT
     / "backend"
     / "local-runner"
+    / "hq_backend"
+    / "ea"
     / "ea_factory_metaeditor_compile.py"
 )
 BRIDGE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "bridge_server.py"
+RUNNER_PATH = PROJECT_ROOT / "runner" / "codex_cli_runner.py"
 
 
 def load_module():
@@ -41,6 +44,18 @@ def load_bridge():
     )
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Unable to import {BRIDGE_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_runner():
+    spec = importlib.util.spec_from_file_location(
+        "ea_factory_metaeditor_compile_integration_runner",
+        RUNNER_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to import {RUNNER_PATH}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -389,6 +404,63 @@ class EaFactoryMetaEditorCompileTests(unittest.TestCase):
                     self.compile(process_runner=runner)
                 self.assertEqual(raised.exception.code, expected)
 
+    def test_compile_log_requires_exact_filename_and_compile_event(self) -> None:
+        for label in ("OtherSafe_v01.mq4", "Safe_v01.mq4.bak", "Safe_v01.mq4.other"):
+            with self.subTest(label=label):
+                with self.assertRaises(self.adapter.MetaEditorCompileError) as raised:
+                    self.compile(source_label=label)
+                self.assertEqual(raised.exception.code, "metaeditor_log_source_mismatch")
+                self.assertFalse(self.source.with_suffix(".ex4").exists())
+
+        logs = (
+            "Different.mq4 : information: compiling 'Different.mq4'\n"
+            "Safe_v01.mq4 : information: including Helper.mqh\n",
+            "Safe_v01.mq4 : information: compiling 'Different.mq4'\n",
+            "Different.mq4 : information: compiling 'Safe_v01.mq4'\n",
+            f"{self.root / 'other' / self.source.name} : information: compiling "
+            f"'{self.root / 'other' / self.source.name}'\n",
+            "Safe_v01.mq4 : information: compiling 'Safe_v01.mq4'\n"
+            "Different.mq4 : information: compiling 'Different.mq4'\n",
+        )
+        for log in logs:
+            with self.subTest(log=log):
+                valid_runner = self.runner()
+
+                def mismatched_log(command: list[str], cwd: Path, timeout: int) -> dict:
+                    result = valid_runner(command, cwd, timeout)
+                    self.raw_log.write_text(log + "Result: 0 errors, 0 warnings\n", encoding="utf-16")
+                    return result
+
+                with self.assertRaises(self.adapter.MetaEditorCompileError) as raised:
+                    self.compile(process_runner=mismatched_log)
+                self.assertEqual(raised.exception.code, "metaeditor_log_source_mismatch")
+                self.assertFalse(self.source.with_suffix(".ex4").exists())
+
+    def test_compile_log_accepts_real_metaeditor_source_identity_formats(self) -> None:
+        for source_label, target_label in (
+            (str(self.source), f"'{self.source.name}'"),
+            (str(self.source), str(self.source)),
+            (str(self.source), f'"{self.source}"'),
+            (self.source.name.upper(), f"'{self.source.name.upper()}'"),
+        ):
+            with self.subTest(source_label=source_label, target_label=target_label):
+                valid_runner = self.runner()
+
+                def real_format_log(command: list[str], cwd: Path, timeout: int) -> dict:
+                    result = valid_runner(command, cwd, timeout)
+                    self.raw_log.write_text(
+                        f"{source_label} : information: compiling {target_label}\n"
+                        f"{self.source} : information: including Trade.mqh\n"
+                        "Result: 0 errors, 0 warnings, 84 msec elapsed\n",
+                        encoding="utf-16",
+                    )
+                    return result
+
+                result = self.compile(process_runner=real_format_log)
+                self.assertEqual(result["sourceDigest"], self.source_digest)
+                self.assertEqual(result["compiledFileName"], "Safe_v01.ex4")
+                self.source.with_suffix(".ex4").unlink()
+
     def test_spoofed_process_result_cannot_pass(self) -> None:
         for process_started, exit_code in ((False, 0), (True, True)):
             with self.subTest(
@@ -471,6 +543,7 @@ class EaFactoryRealMetaEditorSmokeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.adapter = load_module()
+        cls.runner = load_runner()
 
     def matching_data_path(self, install: Path, platform: str) -> Path | None:
         appdata = os.environ.get("APPDATA")
@@ -516,6 +589,28 @@ class EaFactoryRealMetaEditorSmokeTests(unittest.TestCase):
                 Path(r"C:\Program Files\RoboForex MT5 Terminal"),
                 ea_fixtures / "MetafxSmokeEA.mq5",
             ),
+            (
+                "mt5",
+                Path(r"C:\Program Files\RoboForex MT5 Terminal"),
+                ea_fixtures / "MetafxOptimizationSmokeEA.mq5",
+            ),
+            (
+                "mt5",
+                Path(r"C:\Program Files\RoboForex MT5 Terminal"),
+                ea_fixtures / "MetafxEmaCrossoverSmokeEA.mq5",
+            ),
+            (
+                "mt5",
+                Path(r"C:\Program Files\RoboForex MT5 Terminal"),
+                (
+                    "CertifiedCustomEmaSmokeMT5.mq5",
+                    self.runner._render_ea_factory_custom_ema_smoke_certified_source(
+                        source_record_digest="1" * 64,
+                        strategy_spec_digest="2" * 64,
+                        strategy_brief_digest="3" * 64,
+                    ),
+                ),
+            ),
         )
         for platform, install, fixture in matrix:
             with self.subTest(platform=platform), tempfile.TemporaryDirectory() as raw:
@@ -524,8 +619,12 @@ class EaFactoryRealMetaEditorSmokeTests(unittest.TestCase):
                 reports = root / "Reports"
                 versions.mkdir()
                 reports.mkdir()
-                source = versions / fixture.name
-                shutil.copy2(fixture, source)
+                if isinstance(fixture, tuple):
+                    source = versions / fixture[0]
+                    source.write_text(fixture[1], encoding="utf-8")
+                else:
+                    source = versions / fixture.name
+                    shutil.copy2(fixture, source)
                 data_path = self.matching_data_path(install, platform)
                 if platform == "mt5" and b"#include" in source.read_bytes():
                     self.assertIsNotNone(

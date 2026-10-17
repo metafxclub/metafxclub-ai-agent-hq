@@ -2,7 +2,7 @@
   "version": "v009-agent-surfaces-and-guarded-tools",
   "bridge_mode": "local_runner_guarded",
   "runtime": {
-    "visual_roster_root": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001",
+    "visual_roster_root": "./frontend/public/assets/images/characters/male-roster-set-a-core-command-operators-v001",
     "primary_room": "codex_mcp_agent_workroom",
     "frontend_agent_ids": [
       "manager",
@@ -52,7 +52,7 @@
       "output_format": "mission_plan_and_summary",
       "visual": {
         "asset_package": "male-roster-set-a-core-command-operators-v001",
-        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/02-hq-manager-male-static-v001.png",
+        "static_image": "./frontend/public/assets/images/characters/male-roster-set-a-core-command-operators-v001/characters/02-hq-manager-male-static-v001.png",
         "default_target": "mission_strategy_table"
       }
     },
@@ -69,7 +69,7 @@
       "output_format": "executive_summary",
       "visual": {
         "asset_package": "male-roster-set-a-core-command-operators-v001",
-        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/01-ceo-male-static-v001.png",
+        "static_image": "./frontend/public/assets/images/characters/male-roster-set-a-core-command-operators-v001/characters/01-ceo-male-static-v001.png",
         "default_target": "mission_strategy_table"
       }
     },
@@ -86,7 +86,7 @@
       "output_format": "code_change_report",
       "visual": {
         "asset_package": "male-roster-set-a-core-command-operators-v001",
-        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/06-ea-developer-male-static-v001.png",
+        "static_image": "./frontend/public/assets/images/characters/male-roster-set-a-core-command-operators-v001/characters/06-ea-developer-male-static-v001.png",
         "default_target": "terminal_workstation"
       }
     },
@@ -120,7 +120,7 @@
       },
       "visual": {
         "asset_package": "male-roster-set-a-core-command-operators-v001",
-        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/03-backtest-analyst-male-static-v001.png",
+        "static_image": "./frontend/public/assets/images/characters/male-roster-set-a-core-command-operators-v001/characters/03-backtest-analyst-male-static-v001.png",
         "default_target": "left_analytics_console"
       }
     },
@@ -155,7 +155,7 @@
       },
       "visual": {
         "asset_package": "male-roster-set-a-core-command-operators-v001",
-        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/05-optimization-agent-male-static-v001.png",
+        "static_image": "./frontend/public/assets/images/characters/male-roster-set-a-core-command-operators-v001/characters/05-optimization-agent-male-static-v001.png",
         "default_target": "right_tool_console"
       }
     },
@@ -172,7 +172,7 @@
       "output_format": "ops_status",
       "visual": {
         "asset_package": "male-roster-set-a-core-command-operators-v001",
-        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/08-vps-watch-male-static-v001.png",
+        "static_image": "./frontend/public/assets/images/characters/male-roster-set-a-core-command-operators-v001/characters/08-vps-watch-male-static-v001.png",
         "default_target": "right_status_crystals"
       }
     },
@@ -189,7 +189,7 @@
       "output_format": "alert_summary",
       "visual": {
         "asset_package": "male-roster-set-a-core-command-operators-v001",
-        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/04-telegram-ops-male-static-v001.png",
+        "static_image": "./frontend/public/assets/images/characters/male-roster-set-a-core-command-operators-v001/characters/04-telegram-ops-male-static-v001.png",
         "default_target": "mission_strategy_table"
       }
     },
@@ -206,7 +206,7 @@
       "output_format": "risk_review",
       "visual": {
         "asset_package": "male-roster-set-a-core-command-operators-v001",
-        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/09-risk-guard-male-static-v001.png",
+        "static_image": "./frontend/public/assets/images/characters/male-roster-set-a-core-command-operators-v001/characters/09-risk-guard-male-static-v001.png",
         "default_target": "mission_strategy_table"
       }
     },
@@ -240,7 +240,7 @@
       },
       "visual": {
         "asset_package": "male-roster-set-a-core-command-operators-v001",
-        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/07-codex-mcp-operator-male-static-v001.png",
+        "static_image": "./frontend/public/assets/images/characters/male-roster-set-a-core-command-operators-v001/characters/07-codex-mcp-operator-male-static-v001.png",
         "default_target": "codex_mcp_portal"
       }
     },
@@ -257,7 +257,7 @@
       "output_format": "memory_recall_packet",
       "visual": {
         "asset_package": "male-roster-set-a-core-command-operators-v001",
-        "static_image": "./frontend/public/assets/agents/male-roster-set-a-core-command-operators-v001/characters/10-mission-archivist-male-static-v001.png",
+        "static_image": "./frontend/public/assets/images/characters/male-roster-set-a-core-command-operators-v001/characters/10-mission-archivist-male-static-v001.png",
         "default_target": "left_server_racks"
       }
     }

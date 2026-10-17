@@ -7,8 +7,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN_PATH = ROOT / "frontend" / "src" / "app" / "main.js"
+MODEL_PATH = ROOT / "frontend" / "src" / "features" / "quota" / "codex-rate.js"
 INDEX_PATH = ROOT / "frontend" / "index.html"
-STYLES_PATH = ROOT / "frontend" / "src" / "app" / "styles.css"
+STYLES_PATH = ROOT / "frontend" / "src" / "styles" / "main.css"
 
 
 def function_block(source: str, name: str) -> str:
@@ -69,6 +70,14 @@ class CodexReserveFrontendTests(unittest.TestCase):
             raise RuntimeError("Node.js runtime is required")
 
     def run_node(self, script: str) -> dict:
+        # Exercise the shipped module, keeping UI save/refresh functions isolated below.
+        prelude = "\n".join([
+            function_block(self.main, "clamp"),
+            function_block(self.main, "formatCodexRatePercent"),
+            f"const {{createCodexRateModel}} = await import({json.dumps(MODEL_PATH.as_uri())});",
+            "const {normalizeCodexRateTimestamp, normalizeCodexRateWindow, normalizeCodexRateReservePercent, codexRateLimitWasReached, normalizeCodexRatePayload, codexRatePolicyRemainingPercent, codexRateReservePresentation, getCodexRateDisplayState, getCodexRateSeverity} = createCodexRateModel({clamp, formatCodexRatePercent});",
+        ])
+        script = "(async () => {\n" + prelude + "\n" + script + "\n})().catch(error => {console.error(error); process.exit(1);});"
         result = subprocess.run(
             [self.node, "-e", script],
             check=True,
@@ -95,11 +104,6 @@ class CodexReserveFrontendTests(unittest.TestCase):
 
     def test_policy_presentation_uses_lowest_window_and_allows_equality(self) -> None:
         script = "\n".join([
-            "const clamp=(value,min,max)=>Math.min(max,Math.max(min,value));",
-            function_block(self.main, "normalizeCodexRateReservePercent"),
-            function_block(self.main, "formatCodexRatePercent"),
-            function_block(self.main, "codexRatePolicyRemainingPercent"),
-            function_block(self.main, "codexRateReservePresentation"),
             "const snapshot={primary:{remainingPercent:20},secondary:{remainingPercent:10},limitReached:false};",
             "const equal=codexRateReservePresentation(snapshot,10);",
             "const below=codexRateReservePresentation(snapshot,11);",
@@ -122,7 +126,6 @@ class CodexReserveFrontendTests(unittest.TestCase):
 
     def test_reserve_normalizer_rejects_coerced_non_numeric_values(self) -> None:
         script = "\n".join([
-            function_block(self.main, "normalizeCodexRateReservePercent"),
             "const values={validZero:normalizeCodexRateReservePercent('0'),validHundred:normalizeCodexRateReservePercent(100),booleanValue:normalizeCodexRateReservePercent(true),objectValue:normalizeCodexRateReservePercent({value:15}),arrayValue:normalizeCodexRateReservePercent([15]),outOfRange:normalizeCodexRateReservePercent(101)};",
             "process.stdout.write(JSON.stringify(values));",
         ])
@@ -136,12 +139,6 @@ class CodexReserveFrontendTests(unittest.TestCase):
 
     def test_rate_payload_preserves_policy_but_rejects_any_malformed_window(self) -> None:
         script = "\n".join([
-            "const clamp=(value,min,max)=>Math.min(max,Math.max(min,value));",
-            function_block(self.main, "normalizeCodexRateTimestamp"),
-            function_block(self.main, "normalizeCodexRateWindow"),
-            function_block(self.main, "normalizeCodexRateReservePercent"),
-            function_block(self.main, "codexRateLimitWasReached"),
-            function_block(self.main, "normalizeCodexRatePayload"),
             "const malformedSecondary=normalizeCodexRatePayload({status:'ready',automationPolicy:{rateReservePercent:0},primary:{usedPercent:80,remainingPercent:20},secondary:{remainingPercent:'bad'}});",
             "const booleanPrimary=normalizeCodexRatePayload({status:'ready',rateReservePercent:10,primary:{usedPercent:true}});",
             "const booleanPolicy=normalizeCodexRatePayload({status:'ready',rateReservePercent:true,primary:{remainingPercent:20}});",
@@ -172,7 +169,6 @@ class CodexReserveFrontendTests(unittest.TestCase):
             "const pollMissionReadModel=async()=>{missionRefresh+=1;};",
             "const pollOpenPropReport=async()=>{};",
             "const safeDashboardDisplayText=(value,fallback)=>String(value||fallback);",
-            function_block(self.main, "normalizeCodexRateReservePercent"),
             function_block(self.main, "readCodexRateReserveInput"),
             save,
             "(async()=>{await saveCodexRateReserve({preventDefault(){}});await Promise.resolve();process.stdout.write(JSON.stringify({posted,rateRefresh,missionRefresh,reserve:state.codexRate.reservePercent,inputValue:input.value,message:state.codexRate.reserveMessage,tone:state.codexRate.reserveTone}));})().catch(error=>{console.error(error);process.exit(1);});",

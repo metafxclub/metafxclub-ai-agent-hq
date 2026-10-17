@@ -396,6 +396,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         selection_token = {
             "candidateId": self.candidate["candidateId"],
             "selectionRevision": 1,
+            "platform": self.candidate["platform"],
         }
         chart_snapshot = {
             "available": chart_available,
@@ -414,6 +415,14 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         if include_market_open:
             chart_snapshot["marketOpen"] = market_open
         with mock.patch.object(
+            self.bridge,
+            "_active_global_metatrader_context",
+            return_value={
+                "record": dict(self.candidate),
+                "token": dict(selection_token),
+                "selectedAt": "2026-10-16T00:00:00+00:00",
+            },
+        ), mock.patch.object(
             self.bridge,
             "_selected_metatrader_candidate_record",
             return_value=dict(self.candidate),
@@ -693,6 +702,7 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             "token": {
                 "candidateId": self.candidate["candidateId"],
                 "selectionRevision": 1,
+                "platform": self.candidate["platform"],
             },
         }
         replacement_id = "mtc-replacement-channel"
@@ -705,11 +715,12 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
             "token": {
                 "candidateId": replacement_id,
                 "selectionRevision": 2,
+                "platform": self.candidate["platform"],
             },
         }
         with mock.patch.object(
             self.bridge,
-            "_selected_metatrader_candidate_context",
+            "_active_global_metatrader_context",
             side_effect=[first_context, first_context, replacement_context],
         ):
             status = self.bridge.mt4_trade_gateway_status_read_model()
@@ -2343,12 +2354,13 @@ class Mt4TradeGatewayBridgeTests(unittest.TestCase):
         intent = self.trade_intent(parent)
         with self.selected_candidate(), mock.patch.object(
             self.bridge,
-            "_selected_metatrader_candidate_context",
+            "_active_global_metatrader_context",
             return_value={
                 "record": dict(self.candidate),
                 "token": {
                     "candidateId": self.candidate["candidateId"],
                     "selectionRevision": 2,
+                    "platform": self.candidate["platform"],
                 },
             },
         ), mock.patch.object(

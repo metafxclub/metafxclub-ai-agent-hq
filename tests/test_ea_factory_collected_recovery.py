@@ -10,7 +10,7 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "backend" / "local-runner" / "ea_factory_visible_terminal.py"
+MODULE_PATH = ROOT / "backend" / "local-runner" / "hq_backend" / "ea" / "ea_factory_visible_terminal.py"
 HELPERS_PATH = ROOT / "tests" / "test_ea_factory_visible_terminal.py"
 
 

@@ -2,6 +2,7 @@ import copy
 import json
 import importlib.util
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,9 +10,10 @@ from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+LOCAL_RUNNER = PROJECT_ROOT / "backend" / "local-runner"
 PLUGIN_MAP_PATH = PROJECT_ROOT / "contracts" / "workflows" / "equipment-plugin-map.json"
 ROLE_MAP_PATH = PROJECT_ROOT / "contracts" / "props" / "property-role-map.json"
-PROFILE_MODULE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "equipment_workflow_profiles.py"
+PROFILE_MODULE_PATH = PROJECT_ROOT / "backend" / "local-runner" / "hq_backend" / "workflows" / "equipment_workflow_profiles.py"
 
 EXPECTED_PROPS = {
     "codex_mcp_portal",
@@ -34,7 +36,15 @@ class EquipmentPluginMapTests(unittest.TestCase):
         if spec is None or spec.loader is None:
             raise RuntimeError("equipment workflow profile module unavailable")
         cls.profile_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cls.profile_module)
+        runner = str(LOCAL_RUNNER)
+        added = runner not in sys.path
+        if added:
+            sys.path.insert(0, runner)
+        try:
+            spec.loader.exec_module(cls.profile_module)
+        finally:
+            if added:
+                sys.path.remove(runner)
 
     def test_contract_is_backend_owned_and_safe_by_default(self) -> None:
         security = self.plugin_map["security"]
@@ -204,7 +214,7 @@ class EquipmentPluginMapTests(unittest.TestCase):
         cases = (
             ("right_server_racks", "build_strategy_code", {"platform": "mt5"}, "backend-mql5-source-builder", "metafx-system6-ea-builder-mt5", "0.1.1+codex.20260616"),
             ("right_tool_console", "prepare_backtest_plan", {"platform": "mt5"}, "backend-backtest-plan-mt5", "metafx-ea-full-cycle-mt5", "0.1.1+codex.20260616"),
-            ("right_tool_console", "prepare_optimization_plan", {"platform": "mt5"}, "backend-optimization-plan-mt5", "metafx-optimization-lab-mt5", "0.1.1+codex.20260616"),
+            ("right_tool_console", "prepare_optimization_plan", {"platform": "mt5"}, "backend-optimization-session-mt5", "metafx-optimization-lab-mt5", "0.1.1+codex.20260616"),
             ("right_tool_console", "prepare_ea_discovery_plan", {"platform": "mt5"}, "backend-ea-discovery-plan-mt5", "metafx-ea-discovery-lab-mt5", "0.1.4+codex.20260616liveguard"),
             ("terminal_workstation", "develop_ea_source", {"platform": "mql5"}, "backend-mql5-source-developer", "metafx-ea-full-cycle-mt5", "0.1.1+codex.20260616"),
         )

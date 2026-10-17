@@ -33,6 +33,18 @@ class EaFactoryBackendAdmissionAndCacheTests(unittest.TestCase):
         cls.bridge = load_bridge()
 
     def setUp(self) -> None:
+        self.global_platform_context = mock.patch.object(
+            self.bridge,
+            "_ea_factory_require_top_header_locks",
+            side_effect=self._dual_locked_platform_context,
+        )
+        self.global_platform_context.start()
+        self.current_terminal_binding = mock.patch.object(
+            self.bridge,
+            "_ea_factory_one_click_terminal_binding_current",
+            return_value=True,
+        )
+        self.current_terminal_binding.start()
         self.bridge.EA_FACTORY_ONE_CLICK_THREADS.clear()
         self.bridge.EA_FACTORY_REPORT_ROWS_CACHE.update({
             "signature": None,
@@ -50,6 +62,32 @@ class EaFactoryBackendAdmissionAndCacheTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.bridge.EA_FACTORY_ONE_CLICK_THREADS.clear()
+        self.current_terminal_binding.stop()
+        self.global_platform_context.stop()
+
+    @staticmethod
+    def _dual_locked_platform_context(
+        platform: object,
+        *,
+        require_all_platforms: bool = True,
+    ) -> dict | None:
+        normalized = str(platform or "").strip().lower()
+        if normalized not in {"mt4", "mt5"}:
+            return None
+        candidate_id = f"mtc-admission-{normalized}"
+        return {
+            "record": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "available": True,
+                "runningState": "platform_running_detected",
+            },
+            "token": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "selectionRevision": 7,
+            },
+        }
 
     def state(self, *builds: dict) -> dict:
         return {

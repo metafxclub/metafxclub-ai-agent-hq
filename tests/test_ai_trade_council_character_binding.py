@@ -73,7 +73,7 @@ class AiTradeCouncilCharacterBindingTests(unittest.TestCase):
 
     def test_asset_registry_exposes_dashboard_click_and_status_binding(self):
         registry = load_json(
-            "frontend/public/assets/agents/"
+            "frontend/public/assets/images/characters/"
             "male-roster-set-a-core-command-operators-v001/registry/asset-registry.json"
         )
         entries = {asset["agent_id"]: asset for asset in registry["assets"]}
@@ -89,7 +89,7 @@ class AiTradeCouncilCharacterBindingTests(unittest.TestCase):
 
     def test_frontend_uses_real_agent_dialog_and_backend_work_state(self):
         source = (ROOT / "frontend/src/app/main.js").read_text(encoding="utf-8")
-        styles = (ROOT / "frontend/src/app/styles.css").read_text(encoding="utf-8")
+        styles = (ROOT / "frontend/src/styles/main.css").read_text(encoding="utf-8")
 
         for agent_id in COUNCIL_BINDINGS:
             self.assertIn(f'"{agent_id}"', source)

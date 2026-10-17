@@ -30,6 +30,9 @@ backend/local-runner/google_oauth_native_client.txt
 **/service_account*.json
 *.dpapi
 
+# This test uses synthetic fixtures; keep the credential-binding regression in source.
+!tests/test_google_sheet_credential_binding.py
+
 # Runtime state, audit logs, imported reports, and user memory
 data/runtime/**
 !data/runtime/.gitkeep

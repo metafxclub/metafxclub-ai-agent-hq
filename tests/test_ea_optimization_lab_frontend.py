@@ -9,7 +9,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN_PATH = ROOT / "frontend" / "src" / "app" / "main.js"
-STYLES_PATH = ROOT / "frontend" / "src" / "app" / "styles.css"
+STYLES_PATH = ROOT / "frontend" / "src" / "styles" / "main.css"
 INDEX_PATH = ROOT / "frontend" / "index.html"
 
 
@@ -91,7 +91,7 @@ class EaOptimizationLabFrontendTests(unittest.TestCase):
         for label in (
             "1 เลือก EA",
             "2 Inputs / Ranges",
-            "3 แผนหลายรอบ",
+            "3 แผน Session",
             "4 วิเคราะห์ผล / Report",
         ):
             self.assertIn(f'labelTh: "{label}"', stage_copy)
@@ -116,7 +116,7 @@ class EaOptimizationLabFrontendTests(unittest.TestCase):
             "eaOptimizationLabParseSourceInputs",
             "eaOptimizationLabRangeCount",
         )
-        script = "const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 1_000_000;\n"
+        script = "const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 100_000;\n"
         script += "\n".join(self.function_source(name) for name in helper_names)
         script += r'''
 const source = `
@@ -209,7 +209,7 @@ process.stdout.write(JSON.stringify({
             "eaOptimizationLabPlanValidation",
             "eaOptimizationLabBuildPlan",
         )
-        script = "const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 1_000_000;\n"
+        script = "const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 100_000;\n"
         script += "\n".join(self.function_source(name) for name in helper_names)
         script += r'''
 const session = {
@@ -256,6 +256,13 @@ process.stdout.write(JSON.stringify({
             "eaOptimizationLabNullableNumber",
             "normalizeEaOptimizationCandidate",
             "normalizeEaOptimizationReport",
+            "normalizeEaOptimizationLabBuild",
+            "eaOptimizationLabSha256",
+            "normalizeEaOptimizationLabArtifactEvidence",
+            "normalizeEaOptimizationLabSessionEvidence",
+            "normalizeEaOptimizationLabSession",
+            "eaOptimizationLabSessionIsActive",
+            "normalizeEaOptimizationLabSessionReport",
             "normalizeEaOptimizationLabDomain",
         )
         script = "\n".join([
@@ -305,6 +312,7 @@ process.stdout.write(JSON.stringify({
   verifiedActual: verifiedReport.actualResultsAvailable,
   unverifiedLatest: unverifiedDomain.latestReport?.id || null,
   verifiedLatest: verifiedDomain.latestReport?.id || null,
+  verifiedHistorical: verifiedDomain.latestHistoricalReport?.id || null,
 }));
 ''',
         ])
@@ -312,7 +320,131 @@ process.stdout.write(JSON.stringify({
         self.assertFalse(payload["unverifiedActual"])
         self.assertTrue(payload["verifiedActual"])
         self.assertIsNone(payload["unverifiedLatest"])
-        self.assertEqual(payload["verifiedLatest"], "verified")
+        self.assertIsNone(payload["verifiedLatest"])
+        self.assertEqual(payload["verifiedHistorical"], "verified")
+
+    def test_canonical_report_wire_shape_exposes_verified_results_and_current_bands(self) -> None:
+        helper_names = (
+            "eaOptimizationLabFirstArray",
+            "eaOptimizationLabNullableNumber",
+            "normalizeEaOptimizationCandidate",
+            "normalizeEaOptimizationReport",
+            "normalizeEaOptimizationLabBuild",
+            "eaOptimizationLabSha256",
+            "normalizeEaOptimizationLabArtifactEvidence",
+            "normalizeEaOptimizationLabSessionEvidence",
+            "normalizeEaOptimizationLabSession",
+            "eaOptimizationLabSessionIsActive",
+            "normalizeEaOptimizationLabSessionReport",
+            "normalizeEaOptimizationLabDomain",
+        )
+        script = "\n".join([
+            "function workflowDomainObject(...values) { return values.find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {}; }",
+            "function safeDashboardDisplayText(value, fallback = '') { const text = String(value ?? '').trim(); return text || fallback; }",
+            "function getMetatraderSelectionModel() { return {candidates:[],selectedCandidate:null,adapterReady:false,adapterConnection:'coming_soon',detailTh:''}; }",
+            "function normalizeConnectionStatus(value) { return String(value || '').toLowerCase(); }",
+            *(self.function_source(name) for name in helper_names),
+            r'''
+const canonical = {
+  id: "report-eaopt-wire",
+  type: "ea_experiment_report",
+  title: "MT5 Auto Optimization opts_wire",
+  status: "ready",
+  updatedAt: "2026-08-24T10:00:00Z",
+  metrics: {
+    schemaVersion: "ea-experiment-report-v2",
+    experimentMode: "auto_optimization",
+    runId: "opts_wire",
+    roundId: "round_wire",
+    platform: "mt5",
+    sourceReference: {artifactId: "ea-build-mt5-wire"},
+    plan: {
+      available: true,
+      platform: "mt5",
+      parameterRanges: [{name:"Risk",kind:"numeric",start:0.5,step:0.5,stop:2}],
+    },
+    execution: {
+      available: true,
+      status: "completed",
+      backendVerificationId: "mtverify_wire",
+    },
+    results: {
+      available: true,
+      passCount: 2,
+      returnedPassCount: 2,
+      analysisStatus: "available",
+      analysisSha256: "c".repeat(64),
+      analysisSourceRowsSha256: "d".repeat(64),
+      allPassRowsSha256: "d".repeat(64),
+      riskThresholds: {targetProfitPercent:5,maxDrawdownPercent:10,minimumTrades:30},
+      profitablePassCount: 1,
+      eligiblePassCount: 1,
+      candidateGroups: {
+        maxProfit: [{pass:1,netProfit:10,drawdownPercent:4,trades:40,stability:1.2,parameters:{Risk:0.5}}],
+        lowestDrawdown: [{pass:1,netProfit:10,drawdownPercent:4,trades:40,stability:1.2,parameters:{Risk:0.5}}],
+        mostStable: [{pass:1,netProfit:10,drawdownPercent:4,trades:40,stability:1.2,parameters:{Risk:0.5}}],
+      },
+      nextParameterPlan: [{name:"Risk",kind:"numeric",start:0.5,step:"0.5",stop:0.5,reason:"eligible range"}],
+      nextParameterPlanAvailable: true,
+      allPassRows: [
+        {pass:1,netProfit:10,drawdownPercent:4,trades:40},
+        {pass:2,netProfit:-1,drawdownPercent:7,trades:30},
+      ],
+      allPassRowsTruncated: false,
+      warnings: [],
+    },
+  },
+  executionEvidence: {
+    sourceKind: "mt5_visible_run",
+    runId: "opts_wire",
+    roundId: "round_wire",
+    terminalId: "mtterm_wire",
+    backendVerificationId: "mtverify_wire",
+    mtExecutionVerified: true,
+    optimizationProofVerified: true,
+    resultReport: {artifactId:"optreport_wire",sha256:"a".repeat(64)},
+    artifactManifest: {artifactId:"optmanifest_wire",sha256:"b".repeat(64)},
+  },
+};
+const report = normalizeEaOptimizationReport(canonical);
+const domain = normalizeEaOptimizationLabDomain({}, {reports:[canonical]});
+process.stdout.write(JSON.stringify({
+  actual: report.actualResultsAvailable,
+  latestId: domain.latestReport?.id || null,
+  historicalId: domain.latestHistoricalReport?.id || null,
+  passCount: report.passCount,
+  candidateCount: report.candidates.length,
+  profitablePercent: report.profitablePercent,
+  currentBandNames: report.currentBands.map((item) => item.name),
+  maxProfitPass: report.candidateGroups.maxProfit[0]?.id || null,
+  eligiblePassCount: report.eligiblePassCount,
+  nextStart: report.nextParameterPlan[0]?.start ?? null,
+  minimumTrades: report.riskThresholds.minimumTrades,
+  analysisStatus: report.analysisStatus,
+  analysisVerified: report.analysisVerified,
+  platform: report.platform,
+  runId: report.runId,
+  resultReportSha256: report.executionEvidence.resultReportSha256,
+}));
+''',
+        ])
+        payload = self.run_node(script)
+        self.assertTrue(payload["actual"])
+        self.assertIsNone(payload["latestId"])
+        self.assertEqual(payload["historicalId"], "report-eaopt-wire")
+        self.assertEqual(payload["passCount"], 2)
+        self.assertEqual(payload["candidateCount"], 2)
+        self.assertEqual(payload["profitablePercent"], 50)
+        self.assertEqual(payload["currentBandNames"], ["Risk"])
+        self.assertEqual(payload["maxProfitPass"], "1")
+        self.assertEqual(payload["eligiblePassCount"], 1)
+        self.assertEqual(payload["nextStart"], 0.5)
+        self.assertEqual(payload["minimumTrades"], 30)
+        self.assertEqual(payload["analysisStatus"], "available")
+        self.assertTrue(payload["analysisVerified"])
+        self.assertEqual(payload["platform"], "MT5")
+        self.assertEqual(payload["runId"], "opts_wire")
+        self.assertEqual(payload["resultReportSha256"], "a" * 64)
 
     def test_empty_top_level_arrays_do_not_shadow_nonempty_nested_results(self) -> None:
         helper_names = (
@@ -399,6 +531,11 @@ process.stdout.write(JSON.stringify({
         analysis = self.function_source("renderEaOptimizationLabAnalysisStage")
         self.assertNotIn("calculatedProfitablePercent", analysis)
         self.assertNotRegex(analysis, r"candidates\.filter\([^\n]*profit")
+        self.assertNotIn("session.minimumTrades", analysis)
+        self.assertNotIn("session.maxDrawdownPercent", analysis)
+        self.assertIn("candidateGroups.maxProfit", analysis)
+        self.assertIn("candidateGroups.lowestDrawdown", analysis)
+        self.assertIn("candidateGroups.mostStable", analysis)
 
     def test_domain_sorts_before_limiting_reports_so_newest_survives(self) -> None:
         helper_names = (
@@ -406,6 +543,13 @@ process.stdout.write(JSON.stringify({
             "eaOptimizationLabNullableNumber",
             "normalizeEaOptimizationCandidate",
             "normalizeEaOptimizationReport",
+            "normalizeEaOptimizationLabBuild",
+            "eaOptimizationLabSha256",
+            "normalizeEaOptimizationLabArtifactEvidence",
+            "normalizeEaOptimizationLabSessionEvidence",
+            "normalizeEaOptimizationLabSession",
+            "eaOptimizationLabSessionIsActive",
+            "normalizeEaOptimizationLabSessionReport",
             "normalizeEaOptimizationLabDomain",
         )
         script = "\n".join([
@@ -440,6 +584,7 @@ process.stdout.write(JSON.stringify({
   reportCount: domain.reports.length,
   latestPlanId: domain.latestPlanReport?.id || null,
   latestRealId: domain.latestReport?.id || null,
+  latestHistoricalId: domain.latestHistoricalReport?.id || null,
   containsNewest: domain.reports.some((item) => item.id === "newest-report"),
 }));
 ''',
@@ -447,8 +592,9 @@ process.stdout.write(JSON.stringify({
         payload = self.run_node(script)
         self.assertEqual(payload["reportCount"], 100)
         self.assertTrue(payload["containsNewest"])
-        self.assertEqual(payload["latestPlanId"], "newest-report")
-        self.assertEqual(payload["latestRealId"], "newest-report")
+        self.assertIsNone(payload["latestPlanId"])
+        self.assertIsNone(payload["latestRealId"])
+        self.assertEqual(payload["latestHistoricalId"], "newest-report")
 
     def test_backend_selected_terminal_is_effective_for_gate_and_saved_draft(self) -> None:
         helper_names = (
@@ -459,7 +605,7 @@ process.stdout.write(JSON.stringify({
             "eaOptimizationLabBuildPlan",
             "getEaOptimizationLabTerminalGate",
         )
-        script = "const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 1_000_000;\n"
+        script = "const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 100_000;\n"
         script += "\n".join(self.function_source(name) for name in helper_names)
         script += r'''
 const session = {
@@ -480,7 +626,15 @@ const session = {
   roundCount: "3",
 };
 const selected = {candidateId:"terminal-backend-mt4",platform:"MT4",detected:true,labelTh:"RoboForex MT4"};
-const domain = {terminals:[selected],selectedTerminal:selected,adapterReady:true};
+const domain = {
+  authoritative:true,
+  terminals:[selected],
+  selectedTerminal:selected,
+  adapterReady:true,
+  terminalReady:true,
+  selectedPlatformSupported:true,
+  visibleAdapterConnected:true,
+};
 const gate = getEaOptimizationLabTerminalGate(domain, session);
 const plan = eaOptimizationLabBuildPlan(session, domain);
 process.stdout.write(JSON.stringify({
@@ -492,7 +646,7 @@ process.stdout.write(JSON.stringify({
 '''
         payload = self.run_node(script)
         self.assertEqual(payload["effectiveTerminalId"], "terminal-backend-mt4")
-        self.assertTrue(payload["gateReady"])
+        self.assertFalse(payload["gateReady"])
         self.assertTrue(payload["planOk"])
         self.assertEqual(payload["planTerminalId"], "terminal-backend-mt4")
 
@@ -509,7 +663,7 @@ process.stdout.write(JSON.stringify({
             "eaOptimizationLabRangeCount",
             "eaOptimizationLabPlanValidation",
         )
-        script = "const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 1_000_000;\n"
+        script = "const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 100_000;\n"
         script += "\n".join(self.function_source(name) for name in helper_names)
         script += r'''
 const source = `
@@ -561,7 +715,7 @@ process.stdout.write(JSON.stringify({
             "eaOptimizationLabPlanValidation",
             "eaOptimizationLabBuildPlan",
         )
-        script = "const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 1_000_000;\n"
+        script = "const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 100_000;\n"
         script += "\n".join(self.function_source(name) for name in helper_names)
         script += r'''
 const session = {
@@ -690,7 +844,8 @@ process.stdout.write(JSON.stringify({
             "serializeEaOptimizationLabSession",
             "restoreEaOptimizationLabSession",
         )
-        script = "\n".join(self.function_source(name) for name in helper_names)
+        script = "const EA_OPTIMIZATION_LAB_MAX_INPUTS = 64;\n"
+        script += "\n".join(self.function_source(name) for name in helper_names)
         script += r'''
 const raw = {
   platform: "MT4",
@@ -878,6 +1033,13 @@ process.stdout.write(JSON.stringify({
             "eaOptimizationLabNullableNumber",
             "normalizeEaOptimizationCandidate",
             "normalizeEaOptimizationReport",
+            "normalizeEaOptimizationLabBuild",
+            "eaOptimizationLabSha256",
+            "normalizeEaOptimizationLabArtifactEvidence",
+            "normalizeEaOptimizationLabSessionEvidence",
+            "normalizeEaOptimizationLabSession",
+            "eaOptimizationLabSessionIsActive",
+            "normalizeEaOptimizationLabSessionReport",
             "normalizeEaOptimizationLabDomain",
         )
         script = "\n".join([
@@ -922,6 +1084,7 @@ process.stdout.write(JSON.stringify({
   currentBand:normalized.currentBands[0] || null,
   nextBand:normalized.nextParameterPlan[0] || null,
   latestId:domain.latestReport?.id || null,
+  historicalId:domain.latestHistoricalReport?.id || null,
 }));
 ''',
         ])
@@ -935,7 +1098,8 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(payload["currentBand"]["name"], "Risk")
         self.assertEqual(payload["nextBand"]["kind"], "categorical")
         self.assertEqual(payload["nextBand"]["values"], ["trend", "counter"])
-        self.assertEqual(payload["latestId"], "experiment-v2")
+        self.assertIsNone(payload["latestId"])
+        self.assertEqual(payload["historicalId"], "experiment-v2")
 
     def test_plan_only_report_is_not_promoted_to_latest_real_result(self) -> None:
         helper_names = (
@@ -943,6 +1107,13 @@ process.stdout.write(JSON.stringify({
             "eaOptimizationLabNullableNumber",
             "normalizeEaOptimizationCandidate",
             "normalizeEaOptimizationReport",
+            "normalizeEaOptimizationLabBuild",
+            "eaOptimizationLabSha256",
+            "normalizeEaOptimizationLabArtifactEvidence",
+            "normalizeEaOptimizationLabSessionEvidence",
+            "normalizeEaOptimizationLabSession",
+            "eaOptimizationLabSessionIsActive",
+            "normalizeEaOptimizationLabSessionReport",
             "normalizeEaOptimizationLabDomain",
         )
         script = "\n".join([
@@ -984,10 +1155,11 @@ process.stdout.write(JSON.stringify({
   planRealLatest: planDomain.latestReport,
   mixedPlanId: mixedDomain.latestPlanReport?.id || null,
   mixedRealId: mixedDomain.latestReport?.id || null,
+  mixedHistoricalId: mixedDomain.latestHistoricalReport?.id || null,
   mixedPlanEa: mixedDomain.latestPlanReport?.eaName || null,
-  mixedRealEa: mixedDomain.latestReport?.eaName || null,
+  mixedRealEa: mixedDomain.latestHistoricalReport?.eaName || null,
   mixedPlanActual: mixedDomain.latestPlanReport?.actualResultsAvailable,
-  mixedRealActual: mixedDomain.latestReport?.actualResultsAvailable,
+  mixedRealActual: mixedDomain.latestHistoricalReport?.actualResultsAvailable,
 }));
 ''',
         ])
@@ -995,11 +1167,94 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(payload["planLatestId"], "ea-experiment-report-v1")
         self.assertIsNone(payload["planRealLatest"])
         self.assertEqual(payload["mixedPlanId"], "ea-experiment-report-v1")
-        self.assertEqual(payload["mixedRealId"], "optimization-real-v1")
+        self.assertIsNone(payload["mixedRealId"])
+        self.assertEqual(payload["mixedHistoricalId"], "optimization-real-v1")
         self.assertEqual(payload["mixedPlanEa"], "Plan Identity EA")
         self.assertEqual(payload["mixedRealEa"], "Real Identity EA")
         self.assertFalse(payload["mixedPlanActual"])
         self.assertTrue(payload["mixedRealActual"])
+
+    def test_current_report_requires_exact_completed_session_and_build_binding(self) -> None:
+        helper_names = (
+            "eaOptimizationLabFirstArray",
+            "eaOptimizationLabNullableNumber",
+            "normalizeEaOptimizationCandidate",
+            "normalizeEaOptimizationReport",
+            "normalizeEaOptimizationLabBuild",
+            "eaOptimizationLabSha256",
+            "normalizeEaOptimizationLabArtifactEvidence",
+            "normalizeEaOptimizationLabSessionEvidence",
+            "normalizeEaOptimizationLabSession",
+            "eaOptimizationLabSessionIsActive",
+            "normalizeEaOptimizationLabSessionReport",
+            "normalizeEaOptimizationLabDomain",
+        )
+        script = "\n".join([
+            "function workflowDomainObject(...values) { return values.find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {}; }",
+            "function safeDashboardDisplayText(value, fallback = '') { const text = String(value ?? '').trim(); return text || fallback; }",
+            "function getMetatraderSelectionModel() { return {candidates:[],selectedCandidate:null,adapterReady:false,adapterConnection:'coming_soon',detailTh:''}; }",
+            *(self.function_source(name) for name in helper_names),
+            r'''
+const proof = {
+  sourceKind:"mt5_visible_run",backendVerificationId:"verify-1",
+  mtExecutionVerified:true,optimizationProofVerified:true,
+};
+const makeReport = (id, runId, buildId, updatedAt) => ({
+  id,type:"ea_experiment_report",updatedAt,runId,platform:"MT5",
+  sourceReference:{artifactId:buildId},executionEvidence:proof,
+  results:{available:true,passes:[{pass:1,profit:1,drawdownPercent:1,trades:1}]},
+});
+const exact = makeReport("exact","opts_new","build-new","2026-10-13T01:00:00Z");
+const wrongBuild = makeReport("wrong-build","opts_new","build-old","2026-10-13T03:00:00Z");
+const staleRun = makeReport("stale-run","opts_old","build-new","2026-10-13T02:00:00Z");
+const domainFor = (state) => normalizeEaOptimizationLabDomain({eaOptimizationLab:{
+  schemaVersion:"ea-optimization-lab-v1",scheduled:false,sessions:[{
+    id:"opts_new",state,buildId:"build-new",platform:"mt5",updatedAt:"2026-10-13T04:00:00Z",evidence:[],
+  }],
+}}, {reports:[wrongBuild,staleRun,exact]});
+const active = domainFor("running");
+const failed = domainFor("failed");
+const completed = domainFor("completed");
+process.stdout.write(JSON.stringify({
+  activeCurrent:active.latestReport?.id || null,
+  failedCurrent:failed.latestReport?.id || null,
+  completedCurrent:completed.latestReport?.id || null,
+  historical:completed.latestHistoricalReport?.id || null,
+}));
+''',
+        ])
+        payload = self.run_node(script)
+        self.assertIsNone(payload["activeCurrent"])
+        self.assertIsNone(payload["failedCurrent"])
+        self.assertEqual(payload["completedCurrent"], "exact")
+        self.assertEqual(payload["historical"], "wrong-build")
+
+    def test_input_parser_and_snapshot_match_backend_sixty_four_input_limit(self) -> None:
+        helper_names = (
+            "eaOptimizationLabRoundNumber",
+            "eaOptimizationLabDefaultNumericRange",
+            "eaOptimizationLabParseLiteral",
+            "eaOptimizationLabNullableNumber",
+            "eaOptimizationLabStripComments",
+            "eaOptimizationLabEnumMap",
+            "eaOptimizationLabInputModel",
+            "eaOptimizationLabParseSourceInputs",
+        )
+        script = "const EA_OPTIMIZATION_LAB_MAX_INPUTS = 64;\n"
+        script += "\n".join(self.function_source(name) for name in helper_names)
+        script += r'''
+const source = Array.from({length: 70}, (_, index) => `input int Param${index} = ${index};`).join("\n");
+const inputs = eaOptimizationLabParseSourceInputs(source, new Map());
+process.stdout.write(JSON.stringify({count:inputs.length,last:inputs.at(-1).name}));
+'''
+        payload = self.run_node(script)
+        self.assertEqual(payload, {"count": 64, "last": "Param63"})
+        self.assertIn("const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 100_000;", self.main)
+        self.assertIn("const EA_OPTIMIZATION_LAB_MAX_INPUTS = 64;", self.main)
+        self.assertIn(
+            ".slice(0, EA_OPTIMIZATION_LAB_MAX_INPUTS).map((input, index) => ({",
+            self.function_source("serializeEaOptimizationLabSession"),
+        )
 
     def test_utf16_reader_handles_bom_and_uses_array_buffer_decoder(self) -> None:
         reader = self.function_source("eaOptimizationLabReadTextFile")
@@ -1034,14 +1289,14 @@ process.stdout.write(JSON.stringify({
             rail_source,
         )
 
-    def test_plan_validation_caps_combinations_at_one_million(self) -> None:
+    def test_plan_validation_matches_backend_limits(self) -> None:
         helper_names = (
             "eaOptimizationLabPlatformForExtension",
             "eaOptimizationLabNullableNumber",
             "eaOptimizationLabRangeCount",
             "eaOptimizationLabPlanValidation",
         )
-        script = "const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 1_000_000;\n"
+        script = "const EA_OPTIMIZATION_LAB_MAX_COMBINATIONS = 100_000;\n"
         script += "\n".join(self.function_source(name) for name in helper_names)
         script += r'''
 const numericInput = (name) => ({
@@ -1072,21 +1327,36 @@ const oversized = eaOptimizationLabPlanValidation({
   dateFrom: "2024-01-01",
   dateTo: "2025-01-01",
 });
+const singlePass = eaOptimizationLabPlanValidation({
+  platform: "MT5",
+  eaFile: { name: "CaseStudy.mq5", extension: ".mq5" },
+  sourceReportId: "",
+  inputs: [{ ...numericInput("OnlyOne"), stop: 0 }],
+  symbol: "XAUUSD",
+  timeframe: "M15",
+  dateFrom: "2024-01-01",
+  dateTo: "2025-01-01",
+});
 process.stdout.write(JSON.stringify({
   issues: result.issues,
   combinations: result.combinations.toString(),
   oversizedIssues: oversized.issues,
+  singlePassIssues: singlePass.issues,
 }));
 '''
         payload = self.run_node(script)
         self.assertEqual(payload["combinations"], "1030301")
         self.assertIn(
-            "จำนวน Combination เกิน 1,000,000 ค่า กรุณาลดช่วงหรือแยกเป็นหลายรอบ",
+            "จำนวน Combination เกิน 100,000 ค่า กรุณาลดช่วงหรือแยกเป็นหลายรอบ",
             payload["issues"],
         )
         self.assertIn(
-            "Huge: มีค่ามากกว่า 1,000,000 ค่า กรุณาลดช่วงหรือเพิ่ม Step",
+            "Huge: มีค่ามากกว่า 100,000 ค่า กรุณาลดช่วงหรือเพิ่ม Step",
             payload["oversizedIssues"],
+        )
+        self.assertIn(
+            "Optimization ต้องมีอย่างน้อย 2 Combination เพื่อยืนยันว่า Strategy Tester ได้รัน Optimization จริง",
+            payload["singlePassIssues"],
         )
 
     def test_file_import_copy_is_truthful_about_binary_and_browser_only_state(self) -> None:
@@ -1107,22 +1377,493 @@ process.stdout.write(JSON.stringify({
             self.main,
         )
 
-    def test_real_run_stays_disabled_and_results_are_never_fabricated(self) -> None:
+    def test_real_run_uses_backend_session_api_and_results_are_never_fabricated(self) -> None:
         rounds = self.function_source("renderEaOptimizationLabRoundsStage")
         analysis = self.function_source("renderEaOptimizationLabAnalysisStage")
-        self.assertIn('"เริ่ม Optimization จริง"', rounds)
-        self.assertRegex(
-            rounds,
-            r'"เริ่ม Optimization จริง",\s*\(\) => \{\},\s*\{ disabled: true \}',
-        )
-        self.assertIn("ยังไม่เปิด Strategy Tester จริง", rounds)
-        self.assertIn("ห้องนี้จะไม่สร้างผลจำลองหรืออ้างว่ารัน MT4/MT5 แล้ว", rounds)
+        loader = self.function_source("loadEaOptimizationLabReadModel")
+        poster = self.function_source("postEaOptimizationLabJson")
+        start = self.function_source("startEaOptimizationLabSession")
+        resume = self.function_source("resumeEaOptimizationLabSession")
+        cancel = self.function_source("cancelEaOptimizationLabSession")
+        backend_session = self.function_source("renderEaOptimizationLabBackendSession")
+        self.assertIn('"เริ่ม Optimization จริงบน MT5"', rounds)
+        self.assertIn("() => void startEaOptimizationLabSession(domain)", rounds)
+        self.assertIn("{ disabled: !startReady }", rounds)
+        self.assertIn("const backendSessionActive = eaOptimizationLabSessionIsActive(domain.activeSession)", rounds)
+        self.assertIn("&& !backendSessionActive", rounds)
+        self.assertIn("completed+immutable", rounds)
+        self.assertIn("local path และ bytes ไม่สามารถอนุญาต Execution ได้", rounds)
+        self.assertIn("fetchJson(EA_OPTIMIZATION_LAB_ENDPOINT", loader)
+        self.assertIn('method: "POST"', poster)
+        self.assertIn('`${EA_OPTIMIZATION_LAB_ENDPOINT}/sessions`', start)
+        self.assertIn('/sessions/${encodeURIComponent(sessionId)}/resume`', resume)
+        self.assertIn('/sessions/${encodeURIComponent(sessionId)}/cancel`', cancel)
+        self.assertIn("normalized.busy !== true", start)
+        self.assertIn("!eaOptimizationLabSessionIsActive(normalized.activeSession)", start)
+        self.assertIn("response?.activeSession || response?.session || response || {}", self.function_source("runEaOptimizationLabAction"))
+        self.assertIn("Backend Session ${backendSession.sessionId}", backend_session)
+        self.assertIn("backendSession.failureCode", backend_session)
+        self.assertIn("หลักฐานจาก Backend", backend_session)
+        self.assertIn("resumeEaOptimizationLabSession(backendSession.sessionId)", backend_session)
+        self.assertIn("cancelEaOptimizationLabSession(backendSession.sessionId)", backend_session)
+        self.assertIn("const EA_OPTIMIZATION_LAB_ACTIVE_POLL_MS = 3000;", self.main)
+        self.assertIn("const EA_OPTIMIZATION_LAB_IDLE_POLL_MS = 30000;", self.main)
         self.assertIn("ยังไม่มี Optimization Report จริง", analysis)
         self.assertIn("Dashboard จะไม่สร้างกำไร Drawdown หรือ Candidate จำลอง", analysis)
         self.assertIn("Current Bands • ช่วงที่ทดสอบจริง", analysis)
         self.assertIn("Next Parameter Plan • รอบถัดไป", analysis)
         self.assertIn("Draft Plan ไม่ถูกนับเป็นผลทดสอบ", analysis)
         self.assertNotIn("Math.random", rounds + analysis)
+
+    def test_execution_payload_uses_only_immutable_build_and_validated_draft_values(self) -> None:
+        selected_build = self.function_source("eaOptimizationLabSelectedBuild")
+        execution_payload = self.function_source("eaOptimizationLabExecutionPayload")
+        script = "\n".join([
+            "function createWorkflowIdempotencyKey() { return 'workflow-idempotency-1234'; }",
+            selected_build,
+            execution_payload,
+            r'''
+const domain = {builds:[{
+  buildId:"ea-build-mt5-001",
+  platform:"MT5",
+  completed:true,
+  immutable:true,
+  eligible:true,
+}]};
+const session = {
+  selectedBuildId:"ea-build-mt5-001",
+  platform:"MT5",
+  startIdempotencyKey:"",
+  eaFile:{name:"Preview.mq5",localPath:"C:\\Users\\student\\Preview.mq5",bytes:[1,2,3]},
+};
+const draft = {
+  ok:true,
+  platform:"MT5",
+  symbol:"XAUUSD",
+  timeframe:"M15",
+  dateFrom:"2024-01-01",
+  dateTo:"2025-01-01",
+  validationMethod:"walk_forward",
+  targetProfitPercent:15,
+  maxDrawdownPercent:20,
+  minimumTrades:100,
+  rounds:[{index:1},{index:2},{index:3}],
+  ranges:[
+    {name:"Risk",kind:"numeric",start:0.5,step:0.5,stop:2,values:[],localPath:"C:\\secret.set"},
+    {name:"EntryMode",kind:"categorical",start:null,step:null,stop:null,values:["trend","counter"],bytes:[9]},
+  ],
+  sourceReference:{eaFileName:"Preview.mq5",localPath:"C:\\Users\\student\\Preview.mq5",sourceText:"secret source"},
+};
+const payload = eaOptimizationLabExecutionPayload(domain, draft, session);
+const mt4Session = {...session,platform:"MT4",selectedBuildId:"ea-build-mt4-001",startIdempotencyKey:""};
+const mt4Domain = {builds:[{
+  buildId:"ea-build-mt4-001",platform:"MT4",completed:true,immutable:true,eligible:true,
+}]};
+const mt4Payload = eaOptimizationLabExecutionPayload(
+  mt4Domain,
+  {...draft,platform:"MT4"},
+  mt4Session,
+);
+process.stdout.write(JSON.stringify({payload,mt4Payload,serialized:JSON.stringify(payload)}));
+''',
+        ])
+        result = self.run_node(script)
+        payload = result["payload"]
+        self.assertEqual(
+            sorted(payload),
+            [
+                "buildId",
+                "dateRange",
+                "idempotencyKey",
+                "platform",
+                "ranges",
+                "riskThresholds",
+                "roundCount",
+                "symbol",
+                "timeframe",
+                "validation",
+            ],
+        )
+        self.assertEqual(payload["buildId"], "ea-build-mt5-001")
+        self.assertEqual(payload["platform"], "MT5")
+        self.assertEqual(payload["roundCount"], 1)
+        self.assertEqual(payload["validation"], {"method": "single_verified_run"})
+        self.assertEqual(payload["ranges"][1]["values"], ["trend", "counter"])
+        self.assertIsNone(result["mt4Payload"])
+        for forbidden in ("localPath", "sourceText", "bytes", "Preview.mq5", "secret.set"):
+            self.assertNotIn(forbidden, result["serialized"])
+
+    def test_start_idempotency_is_stable_in_flight_but_rotates_after_acceptance_or_draft_change(self) -> None:
+        invalidate = self.function_source("invalidateEaOptimizationLabExecutionDraft")
+        selected_build = self.function_source("eaOptimizationLabSelectedBuild")
+        execution_payload = self.function_source("eaOptimizationLabExecutionPayload")
+        action = self.function_source("runEaOptimizationLabAction")
+        script = "\n".join([
+            r'''
+const generatedKeys = ["workflow-run-one-0001", "workflow-run-two-0002"];
+function createWorkflowIdempotencyKey() { return generatedKeys.shift(); }
+function normalizeEaOptimizationLabSession(value) { return value && value.sessionId ? value : null; }
+function safeDashboardDisplayText(value, fallback = "") { return String(value || fallback); }
+function rerenderEaOptimizationLab() {}
+function saveSessionSnapshot() {}
+async function loadEaOptimizationLabReadModel() {}
+const state = {
+  modal: {eaOptimizationLab: {plan:null,startIdempotencyKey:"",message:"",tone:"",activeSessionId:""}},
+  eaOptimizationLabReadModel: {actionInFlight:false,operation:""},
+};
+''',
+            invalidate,
+            selected_build,
+            execution_payload,
+            action,
+            r'''
+(async () => {
+  const session = state.modal.eaOptimizationLab;
+  const domain = {builds:[{buildId:"ea-build-mt5-001",platform:"MT5",completed:true,immutable:true,eligible:true}]};
+  const draft = {
+    ok:true,platform:"MT5",symbol:"XAUUSD",timeframe:"M15",dateFrom:"2024-01-01",dateTo:"2025-01-01",
+    targetProfitPercent:15,maxDrawdownPercent:20,minimumTrades:100,
+    ranges:[{name:"Risk",kind:"numeric",start:0.5,step:0.5,stop:2,values:[]}],
+  };
+  session.selectedBuildId = "ea-build-mt5-001";
+  session.platform = "MT5";
+  const firstPayload = eaOptimizationLabExecutionPayload(domain, draft, session);
+  let acceptedCalls = 0;
+  await runEaOptimizationLabAction("start", async () => {
+    acceptedCalls += 1;
+    return {session:{sessionId:"opt-session-1"}};
+  });
+  const keyAfterAcceptedStart = session.startIdempotencyKey;
+  const secondPayload = eaOptimizationLabExecutionPayload(domain, draft, session);
+
+  state.eaOptimizationLabReadModel.actionInFlight = true;
+  let duplicateCalls = 0;
+  const duplicateResult = await runEaOptimizationLabAction("start", async () => {
+    duplicateCalls += 1;
+    return {session:{sessionId:"should-not-run"}};
+  });
+  state.eaOptimizationLabReadModel.actionInFlight = false;
+
+  session.startIdempotencyKey = "workflow-retry-key-0003";
+  await runEaOptimizationLabAction("start", async () => { throw new Error("network failure"); });
+  const keyAfterFailure = session.startIdempotencyKey;
+
+  session.plan = {ok:true};
+  session.startIdempotencyKey = "workflow-stale-draft-0004";
+  invalidateEaOptimizationLabExecutionDraft(session);
+  process.stdout.write(JSON.stringify({
+    acceptedCalls,
+    firstKey:firstPayload.idempotencyKey,
+    keyAfterAcceptedStart,
+    secondKey:secondPayload.idempotencyKey,
+    duplicateCalls,
+    duplicateResult,
+    keyAfterFailure,
+    keyAfterDraftChange:session.startIdempotencyKey,
+    planAfterDraftChange:session.plan,
+  }));
+})().catch((error) => { console.error(error); process.exit(1); });
+''',
+        ])
+        payload = self.run_node(script)
+        self.assertEqual(payload["acceptedCalls"], 1)
+        self.assertEqual(payload["firstKey"], "workflow-run-one-0001")
+        self.assertEqual(payload["keyAfterAcceptedStart"], "")
+        self.assertEqual(payload["secondKey"], "workflow-run-two-0002")
+        self.assertNotEqual(payload["firstKey"], payload["secondKey"])
+        self.assertEqual(payload["duplicateCalls"], 0)
+        self.assertIsNone(payload["duplicateResult"])
+        self.assertEqual(payload["keyAfterFailure"], "workflow-retry-key-0003")
+        self.assertEqual(payload["keyAfterDraftChange"], "")
+        self.assertIsNone(payload["planAfterDraftChange"])
+        self.assertEqual(self.main.count("session.plan = null;"), 1)
+
+    def test_backend_capabilities_fail_closed_but_advertised_mt5_build_is_eligible(self) -> None:
+        helper_names = (
+            "eaOptimizationLabFirstArray",
+            "eaOptimizationLabNullableNumber",
+            "normalizeEaOptimizationCandidate",
+            "normalizeEaOptimizationLabBuild",
+            "eaOptimizationLabSha256",
+            "normalizeEaOptimizationLabArtifactEvidence",
+            "normalizeEaOptimizationLabSessionEvidence",
+            "normalizeEaOptimizationLabSession",
+            "eaOptimizationLabSessionIsActive",
+            "normalizeEaOptimizationLabSessionReport",
+            "normalizeEaOptimizationLabDomain",
+        )
+        script = "\n".join([
+            "function workflowDomainObject(...values) { return values.find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {}; }",
+            "function safeDashboardDisplayText(value, fallback = '') { const text = String(value ?? '').trim(); return text || fallback; }",
+            "function getMetatraderSelectionModel() { return {candidates:[],selectedCandidate:null,adapterReady:false,adapterConnection:'coming_soon',detailTh:''}; }",
+            "function normalizeEaOptimizationReport(value) { return value; }",
+            *(self.function_source(name) for name in helper_names),
+            r'''
+const missing = normalizeEaOptimizationLabDomain({}, {});
+const advertised = normalizeEaOptimizationLabDomain({eaOptimizationLab:{
+  schemaVersion:"ea-optimization-lab-v1",
+  scheduled:false,
+  canStart:true,
+  selectedPlatformSupported:true,
+  terminalReady:true,
+  visibleAdapterConnected:true,
+  eligibleBuilds:[{
+    buildId:"ea-build-mt5-immutable",
+    platform:"MT5",
+    status:"completed",
+    immutable:true,
+    artifactKind:"expert_advisor",
+  }],
+}}, {});
+process.stdout.write(JSON.stringify({
+  missing:{authoritative:missing.authoritative,canStart:missing.canStart,terminalReady:missing.terminalReady,adapter:missing.visibleAdapterConnected},
+  advertised:{authoritative:advertised.authoritative,canStart:advertised.canStart,platform:advertised.builds[0]?.platform,eligible:advertised.builds[0]?.eligible},
+}));
+''',
+        ])
+        payload = self.run_node(script)
+        self.assertEqual(
+            payload["missing"],
+            {"authoritative": False, "canStart": False, "terminalReady": False, "adapter": False},
+        )
+        self.assertEqual(
+            payload["advertised"],
+            {"authoritative": True, "canStart": True, "platform": "MT5", "eligible": True},
+        )
+
+    def test_service_public_session_shape_normalizes_progress_failure_and_recovery_actions(self) -> None:
+        helper_names = (
+            "eaOptimizationLabFirstArray",
+            "eaOptimizationLabNullableNumber",
+            "normalizeEaOptimizationCandidate",
+            "eaOptimizationLabSha256",
+            "normalizeEaOptimizationLabArtifactEvidence",
+            "normalizeEaOptimizationLabSessionEvidence",
+            "normalizeEaOptimizationLabSession",
+            "eaOptimizationLabSessionIsActive",
+        )
+        script = "\n".join([
+            "function workflowDomainObject(...values) { return values.find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {}; }",
+            "function safeDashboardDisplayText(value, fallback = '') { const text = String(value ?? '').trim(); return text || fallback; }",
+            *(self.function_source(name) for name in helper_names),
+            r'''
+const active = normalizeEaOptimizationLabSession({
+  schemaVersion:1,
+  id:"opts_service_public_1",
+  state:"collecting",
+  stage:"run_round",
+  buildId:"ea-build-mt5-001",
+  platform:"mt5",
+  progress:{percent:42.5,passCount:120},
+  heartbeatAt:"2026-10-13T02:03:04Z",
+  cancelRequested:false,
+  failure:null,
+  evidence:[{roundId:"round-01",passCount:120}],
+});
+const failed = normalizeEaOptimizationLabSession({
+  id:"opts_service_public_2",
+  state:"failed",
+  stage:"verify_report",
+  progress:{percent:73},
+  cancelRequested:false,
+  failure:{code:"tester_report_invalid",message:"Tester report failed verification."},
+});
+process.stdout.write(JSON.stringify({active,failed,isActive:eaOptimizationLabSessionIsActive(active)}));
+''',
+        ])
+        payload = self.run_node(script)
+        self.assertTrue(payload["isActive"])
+        self.assertEqual(payload["active"]["sessionId"], "opts_service_public_1")
+        self.assertEqual(payload["active"]["platform"], "MT5")
+        self.assertEqual(payload["active"]["progressPercent"], 42.5)
+        self.assertEqual(payload["active"]["evidence"], ["round-01 • 120 passes"])
+        self.assertTrue(payload["active"]["canResume"])
+        self.assertTrue(payload["active"]["canCancel"])
+        self.assertEqual(payload["failed"]["failureCode"], "tester_report_invalid")
+        self.assertEqual(payload["failed"]["failureMessage"], "Tester report failed verification.")
+        self.assertFalse(payload["failed"]["canResume"])
+        self.assertFalse(payload["failed"]["canCancel"])
+
+    def test_terminal_sessions_remain_visible_and_completed_evidence_becomes_analysis_report(self) -> None:
+        helper_names = (
+            "eaOptimizationLabFirstArray",
+            "eaOptimizationLabNullableNumber",
+            "normalizeEaOptimizationCandidate",
+            "normalizeEaOptimizationLabBuild",
+            "eaOptimizationLabSha256",
+            "normalizeEaOptimizationLabArtifactEvidence",
+            "normalizeEaOptimizationLabSessionEvidence",
+            "normalizeEaOptimizationLabSession",
+            "eaOptimizationLabSessionIsActive",
+            "normalizeEaOptimizationLabSessionReport",
+            "normalizeEaOptimizationLabDomain",
+        )
+        script = "\n".join([
+            "function workflowDomainObject(...values) { return values.find((value) => value && typeof value === 'object' && !Array.isArray(value)) || {}; }",
+            "function safeDashboardDisplayText(value, fallback = '') { const text = String(value ?? '').trim(); return text || fallback; }",
+            "function getMetatraderSelectionModel() { return {candidates:[],selectedCandidate:null,adapterReady:false,adapterConnection:'coming_soon',detailTh:''}; }",
+            "function normalizeEaOptimizationReport(value) { return value; }",
+            *(self.function_source(name) for name in helper_names),
+            r'''
+const digest = (character) => character.repeat(64);
+const completedSession = {
+  schemaVersion:1,
+  id:"opts_completed_visible",
+  state:"completed",
+  stage:"complete",
+  buildId:"ea-build-mt5-001",
+  platform:"mt5",
+  terminalBinding:{candidateId:"terminal-mt5"},
+  progress:{percent:100,passCount:2},
+  heartbeatAt:"2026-10-13T02:03:04Z",
+  cancelRequested:false,
+  failure:null,
+  evidence:[{
+    roundId:"round-01",
+    roundNumber:1,
+    combinationCount:2,
+    passCount:2,
+    returnedPassCount:2,
+    rowsTruncated:false,
+    publicResultRowsTruncated:false,
+    analyzed:true,
+    resultRows:[
+      {pass:1,profit:120,drawdownPercent:4,trades:20,parameters:{Risk:1}},
+      {pass:2,profit:-10,drawdownPercent:7,trades:18,parameters:{Risk:2}},
+    ],
+    report:{ref:"report_round_01",sha256:digest("a"),byteSize:4096},
+    manifest:{ref:"manifest_round_01",sha256:digest("b"),byteSize:1024},
+    testerSettingsSha256:digest("c"),
+    visibleEvidenceSha256:digest("d"),
+    resultRowsSha256:digest("e"),
+    evidenceDocumentSha256:digest("f"),
+    analysisSha256:digest("0"),
+    analysis:{
+      sessionId:"opts_completed_visible",
+      roundId:"round-01",
+      status:"available",
+      reasonCode:null,
+      unavailableReasons:[],
+      sourceResultRowsSha256:digest("e"),
+      passCount:2,
+      returnedPassCount:2,
+      rowsTruncated:false,
+      profitablePassCount:1,
+      eligiblePassCount:1,
+      riskThresholds:{targetProfitPercent:1,maxDrawdownPercent:10,minimumTrades:10},
+      candidateGroups:{
+        maxProfit:[{pass:1,netProfit:120,drawdownPercent:4,trades:20,stability:1.2,parameters:{Risk:1}}],
+        lowestDrawdown:[{pass:1,netProfit:120,drawdownPercent:4,trades:20,stability:1.2,parameters:{Risk:1}}],
+        mostStable:[{pass:1,netProfit:120,drawdownPercent:4,trades:20,stability:1.2,parameters:{Risk:1}}],
+      },
+      currentBands:[{name:"Risk",kind:"numeric",start:"1",step:"1",stop:"2"}],
+      nextParameterPlan:[{name:"Risk",kind:"numeric",start:1,step:"1",stop:1,reason:"eligible range"}],
+      nextParameterPlanAvailable:true,
+      nextParameterPlanReasonCode:null,
+    },
+    warnings:[],
+  }],
+};
+const makeDomain = (session) => normalizeEaOptimizationLabDomain({eaOptimizationLab:{
+  schemaVersion:"ea-optimization-lab-v1",
+  scheduled:false,
+  sessions:[session],
+}}, {});
+const completed = makeDomain(completedSession);
+const failed = makeDomain({
+  id:"opts_failed_visible",state:"failed",stage:"verify_report",platform:"mt5",
+  progress:{percent:70},failure:{code:"tester_report_invalid",message:"proof rejected"},evidence:[],
+});
+const cancelled = makeDomain({
+  id:"opts_cancelled_visible",state:"cancelled",stage:"run_round",platform:"mt5",
+  progress:{percent:25},cancelReason:"operator_cancelled",failure:null,evidence:[],
+});
+process.stdout.write(JSON.stringify({
+  completedDisplay:completed.displaySession?.status || null,
+  failedDisplay:failed.displaySession?.status || null,
+  cancelledDisplay:cancelled.displaySession?.status || null,
+  completedActive:completed.activeSession?.sessionId || null,
+  sessionEvidenceVerified:completed.sessionReport?.sessionEvidenceVerified || false,
+  latestReportId:completed.latestReport?.id || null,
+  passCount:completed.latestReport?.passCount || null,
+  profitablePercent:completed.latestReport?.profitablePercent ?? null,
+  candidateProfit:completed.latestReport?.candidates?.[0]?.profit ?? null,
+  reportSha256:completed.latestReport?.executionEvidence?.resultReportSha256 || null,
+}));
+''',
+        ])
+        payload = self.run_node(script)
+        self.assertEqual(payload["completedDisplay"], "completed")
+        self.assertEqual(payload["failedDisplay"], "failed")
+        self.assertEqual(payload["cancelledDisplay"], "cancelled")
+        self.assertIsNone(payload["completedActive"])
+        self.assertTrue(payload["sessionEvidenceVerified"])
+        self.assertTrue(payload["latestReportId"].startswith("optimization-session-opts_completed_visible"))
+        self.assertEqual(payload["passCount"], 2)
+        self.assertEqual(payload["profitablePercent"], 50)
+        self.assertEqual(payload["candidateProfit"], 120)
+        self.assertEqual(payload["reportSha256"], "a" * 64)
+
+        renderer = self.function_source("renderEaOptimizationLabBackendSession")
+        self.assertIn("domain.displaySession", renderer)
+        self.assertIn('backendSession.status === "completed"', renderer)
+        self.assertIn('backendSession.status === "cancelled"', renderer)
+        self.assertIn("Report SHA-256", renderer)
+
+    def test_stale_or_failed_poll_closes_all_execution_actions_without_hiding_cached_session(self) -> None:
+        read_stale = self.function_source("eaOptimizationLabReadModelIsStale")
+        read_state = self.function_source("eaOptimizationLabReadState")
+        loader = self.function_source("loadEaOptimizationLabReadModel")
+        rounds = self.function_source("renderEaOptimizationLabRoundsStage")
+        backend_session = self.function_source("renderEaOptimizationLabBackendSession")
+        start = self.function_source("startEaOptimizationLabSession")
+        resume = self.function_source("resumeEaOptimizationLabSession")
+        cancel = self.function_source("cancelEaOptimizationLabSession")
+        script = "\n".join([
+            "const EA_OPTIMIZATION_LAB_READ_MODEL_MAX_AGE_MS = 60000;",
+            "const state = {eaOptimizationLabReadModel:{}};",
+            read_stale,
+            read_state,
+            r'''
+const now = 100000;
+const payload = {eaOptimizationLab:{schemaVersion:"ea-optimization-lab-v1"}};
+const fresh = {payload,lastLoadedAt:99999,stale:false,lastError:null};
+const old = {payload,lastLoadedAt:1,stale:false,lastError:null};
+const failed = {payload,lastLoadedAt:99999,stale:true,lastError:new Error("poll failed")};
+process.stdout.write(JSON.stringify({
+  fresh:eaOptimizationLabReadModelIsStale(fresh, now),
+  old:eaOptimizationLabReadModelIsStale(old, now),
+  failed:eaOptimizationLabReadModelIsStale(failed, now),
+  failedState:eaOptimizationLabReadState(failed).stale,
+}));
+''',
+        ])
+        payload = self.run_node(script)
+        self.assertEqual(
+            payload,
+            {"fresh": False, "old": True, "failed": True, "failedState": True},
+        )
+        failure_branch = loader.split("} catch (error) {", 1)[1]
+        self.assertIn("readModel.stale = true", failure_branch)
+        self.assertIn("rerenderEaOptimizationLab()", failure_branch)
+        self.assertIn("!readModelStale", rounds)
+        self.assertIn("domain.displaySession", backend_session)
+        self.assertIn("ปิดคำสั่งทั้งหมด", backend_session)
+        for action_source in (start, resume, cancel):
+            self.assertIn("eaOptimizationLabReadModelIsStale()", action_source)
+
+    def test_optimization_lab_copy_and_execution_gate_are_mt5_only_with_mt4_plan_only(self) -> None:
+        execution_payload = self.function_source("eaOptimizationLabExecutionPayload")
+        source_stage = self.function_source("renderEaOptimizationLabSourceStage")
+        rounds = self.function_source("renderEaOptimizationLabRoundsStage")
+        self.assertIn("Optimization จริงบน MT5 • MT4 วางแผนเท่านั้น", self.main)
+        self.assertIn("MT4 / MQL4 • วางแผนเท่านั้น", source_stage)
+        self.assertIn("MT5 / MQL5 • รันจริงผ่าน Visible Tester", source_stage)
+        self.assertIn('build.platform !== "MT5"', execution_payload)
+        self.assertIn('session.platform === "MT5"', rounds)
+        self.assertIn("MT4 รองรับวางแผนเท่านั้น • ไม่มี Execution", rounds)
+        self.assertNotIn("ห้องทดลอง Optimization EA สำหรับ MT4/MT5", self.main)
+        self.assertNotIn("วาง Round 1 สำรวจช่วงกว้าง, Round 2", self.main)
 
     def test_domain_renderer_routes_right_tool_console_to_the_lab(self) -> None:
         domain_normalizer = self.function_source("normalizeWorkflowDomainData")
@@ -1133,7 +1874,7 @@ process.stdout.write(JSON.stringify({
             domain_normalizer,
         )
         self.assertIn(
-            "return { eaOptimizationLab: normalizeEaOptimizationLabDomain(backend, report) };",
+            "state.eaOptimizationLabReadModel.payload || backend",
             domain_normalizer,
         )
         self.assertIn(
@@ -1166,12 +1907,12 @@ process.stdout.write(JSON.stringify({
         )
 
     def test_frontend_cache_version_is_bumped_for_the_lab_and_matches_runtime(self) -> None:
-        stylesheet_match = re.search(r"styles\.css\?v=([^\"']+)", self.index)
+        stylesheet_match = re.search(r"frontend/src/styles/main\.css\?v=([^\"']+)", self.index)
         runtime_match = re.search(r'RUNTIME_BUILD_VERSION\s*=\s*"([^"]+)"', self.index)
         self.assertIsNotNone(stylesheet_match)
         self.assertIsNotNone(runtime_match)
         self.assertEqual(stylesheet_match.group(1), runtime_match.group(1))
-        self.assertEqual(runtime_match.group(1), "20260913-ea-factory-3page-state-v0919")
+        self.assertEqual(runtime_match.group(1), "20261017-world-radar-rows-v0922-r2")
 
 
 if __name__ == "__main__":

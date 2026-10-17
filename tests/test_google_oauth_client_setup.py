@@ -19,8 +19,8 @@ if str(RUNNER) not in sys.path:
     sys.path.insert(0, str(RUNNER))
 
 import configure_google_oauth_client as cli  # noqa: E402
-import google_oauth_store as store  # noqa: E402
-import google_sheet_hub as hub  # noqa: E402
+from hq_backend.google import google_oauth_store as store  # noqa: E402
+from hq_backend.google import google_sheet_hub as hub  # noqa: E402
 
 
 CLIENT_ID = (
@@ -1410,16 +1410,20 @@ class GoogleOAuthClientCliAndFrontendTests(unittest.TestCase):
         auth_start = html.index('id="researchSheetGoogleAuth"')
         auth_end = html.index("</section>", auth_start)
         auth_markup = html[auth_start:auth_end]
-        self.assertIn("clientHint", source)
-        self.assertIn("clientSource", source)
+        research_model = (ROOT / "frontend" / "src" / "features" / "research" / "research-sheet.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("clientHint", research_model)
+        self.assertIn("clientSource", research_model)
         self.assertIn("Credential ไม่ผ่าน Browser", source)
         self.assertNotIn('type="file"', auth_markup)
         self.assertNotIn("oauthClientJson", source)
+        self.assertNotIn("oauthClientJson", research_model)
         self.assertIn("researchSheetGoogleConnect", auth_markup)
 
-        failure_reason = source[
-            source.index("function researchSheetGoogleAuthFailureReason") :
-            source.index("function researchSheetGoogleAuthIsTerminalStatus")
+        failure_reason = research_model[
+            research_model.index("function researchSheetGoogleAuthFailureReason") :
+            research_model.index("function researchSheetGoogleAuthIsTerminalStatus")
         ]
         presentation = source[
             source.index("function researchSheetGoogleAuthPresentation") :

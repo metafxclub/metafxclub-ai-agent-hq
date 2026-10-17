@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -30,6 +32,55 @@ class EaFactoryFollowupHardeningTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.bridge = load_bridge()
+
+    def setUp(self) -> None:
+        self.global_platform_context = mock.patch.object(
+            self.bridge,
+            "_ea_factory_require_top_header_locks",
+            side_effect=self._dual_locked_platform_context,
+        )
+        self.global_platform_context.start()
+        self.current_terminal_binding = mock.patch.object(
+            self.bridge,
+            "_ea_factory_one_click_terminal_binding_current",
+            return_value=True,
+        )
+        self.current_terminal_binding.start()
+        self.mission_lock_readiness = mock.patch.object(
+            self.bridge,
+            "_metatrader_scope_header_locks_ready",
+            return_value=True,
+        )
+        self.mission_lock_readiness.start()
+
+    def tearDown(self) -> None:
+        self.mission_lock_readiness.stop()
+        self.current_terminal_binding.stop()
+        self.global_platform_context.stop()
+
+    @staticmethod
+    def _dual_locked_platform_context(
+        platform: object,
+        *,
+        require_all_platforms: bool = True,
+    ) -> dict | None:
+        normalized = str(platform or "").strip().lower()
+        if normalized not in {"mt4", "mt5"}:
+            return None
+        candidate_id = f"mtc-followup-{normalized}"
+        return {
+            "record": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "available": True,
+                "runningState": "platform_running_detected",
+            },
+            "token": {
+                "candidateId": candidate_id,
+                "platform": normalized,
+                "selectionRevision": 7,
+            },
+        }
 
     def valid_values(self) -> dict:
         return {
@@ -75,6 +126,27 @@ class EaFactoryFollowupHardeningTests(unittest.TestCase):
         self.assertIsInstance(record, dict)
         self.assertTrue(record["buildReady"])
         return record
+
+    def verified_sheet_record(self, *, source_key: str = "deep-sheet-followup") -> dict:
+        record = self.bridge._ea_factory_normalize_record(
+            self.valid_values(),
+            source_kind="verified_deep_research_sheet",
+            source_key=source_key,
+        )
+        self.assertIsInstance(record, dict)
+        self.assertTrue(record["buildReady"])
+        return record
+
+    @staticmethod
+    def verified_sheet_binding(record: dict) -> dict:
+        return {
+            "recordId": record["recordId"],
+            "sourceRecordId": record["sourceRecordId"],
+            "recordDigest": record["recordDigest"],
+            "catalogDigest": "c" * 64,
+            "snapshotDigest": "d" * 64,
+            "configRevision": 7,
+        }
 
     def empty_state(self) -> dict:
         return {
@@ -325,6 +397,84 @@ class EaFactoryFollowupHardeningTests(unittest.TestCase):
             plugin_profile=profile,
         )
         return build, brief, lineage
+
+    def materialize_live_sized_source_review_fixture(
+        self,
+        build_root: Path,
+        build_id: str = "ea-build-1792035402024-35116e",
+        *,
+        spec_byte_size: int = 31 * 1024,
+        source_byte_size: int = 16054,
+    ) -> tuple[dict, str, str]:
+        """Create the exact-sized immutable inputs from the live failure class."""
+
+        build, _brief, _lineage = self.factory_review_fixture(build_id)
+        build["platform"] = "mt5"
+        build["artifactKind"] = "expert_advisor"
+
+        spec = {
+            "schemaVersion": "ea-factory-strategy-spec-v3",
+            "buildId": build_id,
+            "targetPlatform": "mt5",
+            "recordDigest": build["sourceRecordDigest"],
+            "immutable": True,
+            "reviewFixturePadding": "",
+        }
+        empty_spec = json.dumps(
+            spec,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        padding_size = spec_byte_size - len(empty_spec.encode("utf-8"))
+        self.assertGreater(padding_size, 0)
+        spec["reviewFixturePadding"] = "x" * padding_size
+        spec_text = json.dumps(
+            spec,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.assertEqual(len(spec_text.encode("utf-8")), spec_byte_size)
+
+        source_prefix = "#property strict\nvoid OnTick() {}\n// review fixture\n"
+        source_text = source_prefix + (
+            "x" * (source_byte_size - len(source_prefix.encode("utf-8")))
+        )
+        self.assertEqual(len(source_text.encode("utf-8")), source_byte_size)
+
+        build_dir = build_root / build_id
+        source_dir = build_dir / "Source"
+        version_dir = build_dir / "EA_Versions"
+        source_dir.mkdir(parents=True)
+        version_dir.mkdir(parents=True)
+        (source_dir / "strategy-spec-v01.json").write_text(
+            spec_text,
+            encoding="utf-8",
+            newline="",
+        )
+        (source_dir / "strategy.mq5").write_text(
+            source_text,
+            encoding="utf-8",
+            newline="",
+        )
+        (version_dir / "strategy-v01.mq5").write_text(
+            source_text,
+            encoding="utf-8",
+            newline="",
+        )
+        spec_digest = hashlib.sha256(spec_text.encode("utf-8")).hexdigest()
+        source_digest = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+        build["workspace"]["strategySpecDigest"] = spec_digest
+        build["versions"] = [{
+            "versionId": "v01",
+            "sourceDigest": source_digest,
+            "sourceFile": "Source/strategy.mq5",
+            "versionFile": "EA_Versions/strategy-v01.mq5",
+            "sourceReportId": "report-worker-generation",
+            "immutable": True,
+        }]
+        return build, spec_text, source_text
 
     @staticmethod
     def strict_mql_review_requirements() -> str:
@@ -636,6 +786,342 @@ void OnTick()
         )
         self.assertEqual(preferences["outputLimitChars"], 12000)
         self.assertEqual(preferences["timeoutSeconds"], 180)
+
+    def test_source_review_packet_carries_complete_live_sized_spec_and_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            build_root = Path(temporary) / "workspace" / "ea-factory"
+            build_root.mkdir(parents=True)
+            build, spec_text, source_text = (
+                self.materialize_live_sized_source_review_fixture(build_root)
+            )
+            with mock.patch.object(
+                self.bridge,
+                "_ea_factory_build_root",
+                return_value=build_root,
+            ):
+                transport = self.bridge._ea_factory_source_review_input_packet(
+                    build
+                )
+
+        prompt_block = transport["promptBlock"]
+        encoded = prompt_block.split(
+            self.bridge.EA_FACTORY_SOURCE_REVIEW_PACKET_START,
+            1,
+        )[1].split(
+            self.bridge.EA_FACTORY_SOURCE_REVIEW_PACKET_END,
+            1,
+        )[0].strip()
+        packet = json.loads(encoded)
+        self.assertEqual(transport["strategySpecBytes"], 31 * 1024)
+        self.assertEqual(transport["sourceBytes"], 16054)
+        self.assertEqual(packet["strategySpecContent"], spec_text)
+        self.assertEqual(packet["sources"][0]["content"], source_text)
+        self.assertTrue(packet["complete"])
+        self.assertFalse(packet["sourceContextTruncated"])
+        self.assertEqual(
+            transport["packetDigest"],
+            hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        )
+        self.assertLessEqual(
+            transport["packetChars"],
+            self.bridge.EA_FACTORY_SOURCE_REVIEW_PACKET_MAX_CHARS,
+        )
+
+    def test_stable_file_reader_rejects_hardlinks_and_never_reads_growth_unbounded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.mq5"
+            alias = root / "source-alias.mq5"
+            source.write_bytes(b"0123456789abcdef")
+            try:
+                os.link(source, alias)
+            except OSError as error:
+                self.skipTest(f"hardlinks unavailable: {error}")
+            self.assertIsNone(
+                self.bridge._ea_factory_read_stable_file(source, 32)
+            )
+            alias.unlink()
+
+            real_open = Path.open
+            read_sizes: list[int] = []
+            grown = False
+
+            class GrowthDuringRead:
+                def __init__(self, raw):
+                    self.raw = raw
+
+                def __enter__(self):
+                    self.raw.__enter__()
+                    return self
+
+                def __exit__(self, *args):
+                    return self.raw.__exit__(*args)
+
+                def fileno(self):
+                    return self.raw.fileno()
+
+                def seek(self, *args):
+                    return self.raw.seek(*args)
+
+                def read(self, size=-1):
+                    nonlocal grown
+                    read_sizes.append(size)
+                    if size < 0:
+                        raise AssertionError("stable reader attempted an unbounded read")
+                    if not grown:
+                        grown = True
+                        with real_open(source, "ab") as writer:
+                            writer.write(b"x" * 64)
+                    return self.raw.read(size)
+
+            def racing_open(candidate, mode="r", *args, **kwargs):
+                return GrowthDuringRead(
+                    real_open(candidate, mode, *args, **kwargs)
+                )
+
+            with mock.patch.object(Path, "open", new=racing_open):
+                self.assertIsNone(
+                    self.bridge._ea_factory_read_stable_file(source, 32)
+                )
+
+            self.assertTrue(read_sizes)
+            self.assertTrue(all(0 < size <= 33 for size in read_sizes))
+
+    def test_stable_file_reader_rejects_same_size_content_change_with_restored_mtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source.mq5"
+            original = b"a" * 64
+            replacement = b"b" * len(original)
+            source.write_bytes(original)
+            before = source.stat()
+            real_open = Path.open
+            replaced = False
+
+            class ReplaceAfterFirstRead:
+                def __init__(self, raw):
+                    self.raw = raw
+
+                def __enter__(self):
+                    self.raw.__enter__()
+                    return self
+
+                def __exit__(self, *args):
+                    return self.raw.__exit__(*args)
+
+                def fileno(self):
+                    return self.raw.fileno()
+
+                def seek(self, *args):
+                    return self.raw.seek(*args)
+
+                def read(self, size=-1):
+                    nonlocal replaced
+                    payload = self.raw.read(size)
+                    if not replaced:
+                        replaced = True
+                        with real_open(source, "wb") as writer:
+                            writer.write(replacement)
+                        os.utime(
+                            source,
+                            ns=(before.st_atime_ns, before.st_mtime_ns),
+                        )
+                    return payload
+
+            def racing_open(candidate, mode="r", *args, **kwargs):
+                return ReplaceAfterFirstRead(
+                    real_open(candidate, mode, *args, **kwargs)
+                )
+
+            with mock.patch.object(Path, "open", new=racing_open):
+                self.assertIsNone(
+                    self.bridge._ea_factory_read_stable_file(source, 128)
+                )
+
+    def test_stable_file_reader_accepts_executable_path_stat_mode_variance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = Path(temporary) / "metaeditor.exe"
+            payload = b"trusted compiler fixture"
+            executable.write_bytes(payload)
+
+            stable = self.bridge._ea_factory_read_stable_file(
+                executable,
+                1024,
+            )
+
+        self.assertIsNotNone(stable)
+        self.assertEqual(stable[0], payload)
+        self.assertEqual(stable[1], hashlib.sha256(payload).hexdigest())
+
+    def test_source_review_secret_scan_is_parsed_key_aware_and_covers_quoted_values(self) -> None:
+        cases = (
+            "escaped_sensitive_spec_key",
+            "embedded_sensitive_spec_key",
+            "quoted_secret_in_spec_text",
+            "quoted_secret_in_source",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                build_root = Path(temporary) / "workspace" / "ea-factory"
+                build_root.mkdir(parents=True)
+                build, spec_text, source_text = (
+                    self.materialize_live_sized_source_review_fixture(
+                        build_root,
+                        f"ea-build-review-{case.replace('_', '-')}",
+                    )
+                )
+                source_root = build_root / build["id"] / "Source"
+                version_root = build_root / build["id"] / "EA_Versions"
+                if case == "escaped_sensitive_spec_key":
+                    spec_text = spec_text.replace(
+                        "{",
+                        '{"pass\\u0077ord":null,',
+                        1,
+                    )
+                    spec_path = source_root / "strategy-spec-v01.json"
+                    spec_path.write_text(spec_text, encoding="utf-8", newline="")
+                    build["workspace"]["strategySpecDigest"] = hashlib.sha256(
+                        spec_text.encode("utf-8")
+                    ).hexdigest()
+                elif case == "embedded_sensitive_spec_key":
+                    spec = json.loads(spec_text)
+                    spec["authorizationHeader"] = None
+                    spec_text = json.dumps(
+                        spec,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    spec_path = source_root / "strategy-spec-v01.json"
+                    spec_path.write_text(spec_text, encoding="utf-8", newline="")
+                    build["workspace"]["strategySpecDigest"] = hashlib.sha256(
+                        spec_text.encode("utf-8")
+                    ).hexdigest()
+                elif case == "quoted_secret_in_spec_text":
+                    spec = json.loads(spec_text)
+                    spec["additionalNotes"] = (
+                        'password = "a b c d e f g h"'
+                    )
+                    spec_text = json.dumps(
+                        spec,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    spec_path = source_root / "strategy-spec-v01.json"
+                    spec_path.write_text(spec_text, encoding="utf-8", newline="")
+                    build["workspace"]["strategySpecDigest"] = hashlib.sha256(
+                        spec_text.encode("utf-8")
+                    ).hexdigest()
+                else:
+                    source_text = (
+                        source_text[:-80]
+                        + 'input string password = "a b c d e f g h";\n'
+                    )
+                    (source_root / "strategy.mq5").write_text(
+                        source_text,
+                        encoding="utf-8",
+                        newline="",
+                    )
+                    (version_root / "strategy-v01.mq5").write_text(
+                        source_text,
+                        encoding="utf-8",
+                        newline="",
+                    )
+                    build["versions"][0]["sourceDigest"] = hashlib.sha256(
+                        source_text.encode("utf-8")
+                    ).hexdigest()
+
+                with (
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_build_root",
+                        return_value=build_root,
+                    ),
+                    self.assertRaises(self.bridge.DataIntegrityError),
+                ):
+                    self.bridge._ea_factory_source_review_input_packet(build)
+
+    def test_source_review_packet_digest_bounds_and_secrets_fail_closed(self) -> None:
+        cases = (
+            "source_digest_mismatch",
+            "strategy_spec_too_large",
+            "source_too_large",
+            "packet_too_large",
+            "potential_secret",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                build_root = Path(temporary) / "workspace" / "ea-factory"
+                build_root.mkdir(parents=True)
+                spec_size = (
+                    self.bridge.EA_FACTORY_SOURCE_REVIEW_SPEC_MAX_BYTES + 1
+                    if case == "strategy_spec_too_large"
+                    else 31 * 1024
+                )
+                source_size = (
+                    self.bridge.EA_FACTORY_SOURCE_REVIEW_SOURCE_MAX_BYTES + 1
+                    if case == "source_too_large"
+                    else 16054
+                )
+                build, _spec_text, source_text = (
+                    self.materialize_live_sized_source_review_fixture(
+                        build_root,
+                        f"ea-build-review-{case.replace('_', '-')}",
+                        spec_byte_size=spec_size,
+                        source_byte_size=source_size,
+                    )
+                )
+                source_path = (
+                    build_root / build["id"] / "Source" / "strategy.mq5"
+                )
+                version_path = (
+                    build_root
+                    / build["id"]
+                    / "EA_Versions"
+                    / "strategy-v01.mq5"
+                )
+                if case == "source_digest_mismatch":
+                    source_path.write_text(
+                        source_text[:-1] + "y",
+                        encoding="utf-8",
+                        newline="",
+                    )
+                elif case == "potential_secret":
+                    secret_source = (
+                        source_text[:-40]
+                        + '// api_key = "live-review-secret-1234567890"\n'
+                    )
+                    source_path.write_text(
+                        secret_source,
+                        encoding="utf-8",
+                        newline="",
+                    )
+                    version_path.write_text(
+                        secret_source,
+                        encoding="utf-8",
+                        newline="",
+                    )
+                    build["versions"][0]["sourceDigest"] = hashlib.sha256(
+                        secret_source.encode("utf-8")
+                    ).hexdigest()
+                packet_bound = (
+                    128 if case == "packet_too_large"
+                    else self.bridge.EA_FACTORY_SOURCE_REVIEW_PACKET_MAX_CHARS
+                )
+                with (
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_build_root",
+                        return_value=build_root,
+                    ),
+                    mock.patch.object(
+                        self.bridge,
+                        "EA_FACTORY_SOURCE_REVIEW_PACKET_MAX_CHARS",
+                        packet_bound,
+                    ),
+                    self.assertRaises(self.bridge.DataIntegrityError),
+                ):
+                    self.bridge._ea_factory_source_review_input_packet(build)
 
     def test_source_review_preserves_maximum_accepted_build_brief(self) -> None:
         build, _brief, _lineage = self.factory_review_fixture(
@@ -1085,6 +1571,69 @@ void OnTick()
         self.assertEqual(raised.exception.status, 404)
         self.assertNotIn("reserved Backend marker", str(raised.exception))
 
+    def test_create_rejects_absolute_path_brief_before_any_factory_side_effect(self) -> None:
+        with (
+            mock.patch.object(
+                self.bridge,
+                "_load_ea_factory_state_unlocked",
+            ) as load_state,
+            mock.patch.object(
+                self.bridge,
+                "_write_ea_factory_state_unlocked",
+            ) as write_state,
+            mock.patch.object(self.bridge, "safe_id") as allocate_id,
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_create_build_workspace",
+            ) as create_workspace,
+            mock.patch.object(
+                self.bridge,
+                "_ea_factory_source_report",
+            ) as create_source_report,
+            mock.patch.object(self.bridge, "append_audit") as append_audit,
+        ):
+            for path_brief in (
+                r"Load exact rules from C:\Users\Trader\strategy.txt",
+                "Load exact rules from /home/trader/strategy.txt",
+            ):
+                with self.subTest(path_brief=path_brief), self.assertRaises(
+                    self.bridge.RequestError
+                ) as raised:
+                    self.bridge.create_ea_factory_build({
+                        "sourceRecordId": "ea-source-path-brief",
+                        "platform": "mt4",
+                        "artifactKind": "expert_advisor",
+                        "brief": path_brief,
+                    })
+
+                self.assertEqual(raised.exception.status, 422)
+                self.assertEqual(
+                    raised.exception.code,
+                    "ea_factory_brief_invalid",
+                )
+                self.assertEqual(
+                    str(raised.exception),
+                    "EA Factory brief is too long or contains content that cannot be stored exactly.",
+                )
+                self.assertEqual(
+                    raised.exception.response_payload,
+                    {
+                        "kind": "ea_factory_request_rejected",
+                        "code": "ea_factory_brief_invalid",
+                        "messageTh": (
+                            "ข้อกำหนดเพิ่มเติมยาวเกินไปหรือมี Credential/Secret/พาธไฟล์ในเครื่อง "
+                            "กรุณาลบข้อมูลดังกล่าวแล้วลองใหม่"
+                        ),
+                    },
+                )
+
+        load_state.assert_not_called()
+        write_state.assert_not_called()
+        allocate_id.assert_not_called()
+        create_workspace.assert_not_called()
+        create_source_report.assert_not_called()
+        append_audit.assert_not_called()
+
     def test_create_non_ready_blueprint_reports_readiness_issue_instead_of_blank_suffix(self) -> None:
         record = self.normalized_record(source_key="research-needs-clarification")
         record["buildReady"] = False
@@ -1155,6 +1704,10 @@ void OnTick()
         self.assertEqual(review_scope["stageId"], "source_review")
         self.assertTrue(review_scope["readOnly"])
         self.assertEqual(review_scope["writeRoots"], [])
+        self.assertEqual(
+            review_scope["resultProfile"],
+            self.bridge.EA_FACTORY_SOURCE_REVIEW_RESULT_PROFILE,
+        )
 
         for field, value in (
             ("owner", "manager"),
@@ -1227,6 +1780,50 @@ void OnTick()
             "{}",
         )
 
+    def test_compact_non_linda_review_brief_survives_mission_sanitization(self) -> None:
+        with mock.patch.object(
+            self.bridge,
+            "_ea_factory_review_strategy_spec",
+            return_value={"schemaVersion": "ea-factory-strategy-spec-v3"},
+        ):
+            _build, brief, lineage = self.factory_review_fixture(
+                "ea-build-worker-review-whitespace"
+            )
+
+        self.assertIn("excluding shift-0. Req:", brief)
+        self.assertNotIn("excluding shift-0.  Req:", brief)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            self.bridge,
+            "MISSIONS_PATH",
+            Path(temporary) / "missions.json",
+        ), mock.patch.object(
+            self.bridge,
+            "AUDIT_PATH",
+            Path(temporary) / "bridge-audit.jsonl",
+        ), mock.patch.object(
+            self.bridge,
+            "load_operator_mode_record",
+            return_value={"mode": "auto_guarded"},
+        ):
+            mission = self.create_factory_worker_mission(
+                "review_source_code",
+                brief,
+                lineage,
+                "ea-factory-worker-review-whitespace",
+            )
+
+        stored_brief = mission["workflowContext"]["inputs"]["brief"]
+        self.assertEqual(stored_brief, brief)
+        self.assertIn("excluding shift-0. Req:", stored_brief)
+        self.assertEqual(mission["status"], "queued")
+        self.assertTrue(mission["autoEligible"])
+        self.assertEqual(mission["executionMode"], "auto_guarded")
+        sandbox = self.bridge._trusted_backend_ea_factory_worker_sandbox(mission)
+        self.assertIsNotNone(sandbox)
+        self.assertEqual(sandbox["stageId"], "source_review")
+        self.assertTrue(sandbox["readOnly"])
+
     def test_factory_worker_commands_and_audit_use_exact_stage_sandboxes(self) -> None:
         build, _stage, generation_brief, generation_lineage = (
             self.factory_generation_fixture("ea-build-worker-command")
@@ -1235,9 +1832,11 @@ void OnTick()
             self.factory_review_fixture("ea-build-worker-review-command")
         )
         captured_commands: list[list[str]] = []
+        captured_inputs: list[str] = []
 
-        def fake_runner(command, **_kwargs):
+        def fake_runner(command, **kwargs):
             captured_commands.append([str(item) for item in command])
+            captured_inputs.append(str(kwargs.get("input_text") or ""))
             return {
                 "ok": False,
                 "exitCode": 1,
@@ -1297,6 +1896,19 @@ void OnTick()
                 side_effect=fake_runner,
             ), mock.patch.object(
                 self.bridge,
+                "_ea_factory_source_review_transport_for_mission",
+                return_value={
+                    "promptBlock": (
+                        "\n[EA_FACTORY_SOURCE_REVIEW_INPUT_V1]\n{}\n"
+                        "[/EA_FACTORY_SOURCE_REVIEW_INPUT_V1]"
+                    ),
+                    "packetDigest": "f" * 64,
+                    "packetChars": 2,
+                    "strategySpecBytes": 31 * 1024,
+                    "sourceBytes": 16054,
+                },
+            ), mock.patch.object(
+                self.bridge,
                 "finish_auto_mission",
             ), mock.patch.object(
                 self.bridge,
@@ -1327,6 +1939,22 @@ void OnTick()
         )
         self.assertIn("--read-only-work", review_command)
         self.assertNotIn("--scoped-workspace-write-root", review_command)
+        self.assertIn("--result-profile", review_command)
+        self.assertEqual(
+            review_command[review_command.index("--result-profile") + 1],
+            self.bridge.EA_FACTORY_SOURCE_REVIEW_RESULT_PROFILE,
+        )
+        self.assertNotIn(
+            self.bridge.EA_FACTORY_SOURCE_REVIEW_PACKET_START,
+            captured_inputs[0],
+        )
+        self.assertEqual(
+            captured_inputs[1].count(
+                self.bridge.EA_FACTORY_SOURCE_REVIEW_PACKET_START
+            ),
+            1,
+        )
+        self.assertIn(review_brief, captured_inputs[1])
         self.assertIn("--result-profile", generation_command)
         self.assertEqual(
             generation_command[generation_command.index("--result-profile") + 1],
@@ -1351,6 +1979,12 @@ void OnTick()
         self.assertEqual(starts[1]["workingDirectory"], "workspace")
         self.assertEqual(starts[1]["writeRoots"], [])
         self.assertEqual(starts[1]["eaFactoryStageId"], "source_review")
+        self.assertEqual(starts[1]["sourceReviewInputPacketDigest"], "f" * 64)
+        self.assertEqual(starts[1]["sourceReviewInputSourceBytes"], 16054)
+        self.assertEqual(
+            starts[1]["sourceReviewInputStrategySpecBytes"],
+            31 * 1024,
+        )
 
     def test_factory_worker_tampered_owner_tool_or_input_digest_never_starts_runner(self) -> None:
         _build, _stage, brief, lineage = self.factory_generation_fixture(
@@ -2693,6 +3327,296 @@ void OnTick()
             state["builds"][0]["createIdempotencyKey"],
             reservation["idempotencyKey"],
         )
+
+    def test_sheet_create_reservation_survives_crash_reload_recovery_and_replay(self) -> None:
+        record = self.verified_sheet_record(source_key="sheet-bound-crash-recovery")
+        binding = self.verified_sheet_binding(record)
+        build_id = "ea-build-sheet-bound-crash-recovery"
+        request = {
+            **binding,
+            "artifactKind": "expert_advisor",
+            "platform": "mt4",
+            "brief": "recover exact Sheet-bound create",
+            "idempotencyKey": "sheet-bound-crash-recovery",
+        }
+        mission, report = self.strategy_stage_entities()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            reports = runtime / "reports"
+            workspaces = runtime / "workspaces"
+            reports.mkdir(parents=True)
+            workspaces.mkdir(parents=True)
+            with (
+                mock.patch.object(self.bridge, "RUNTIME_DIR", runtime),
+                mock.patch.object(self.bridge, "RUNTIME_REPORTS_DIR", reports),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_build_root",
+                    return_value=workspaces,
+                ),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_verify_live_sheet_create_binding",
+                    return_value={},
+                ) as verify_live_binding,
+            ):
+                self.bridge._invalidate_ea_factory_state_cache()
+                with (
+                    mock.patch.object(self.bridge, "load_missions", return_value=[]),
+                    mock.patch.object(self.bridge, "load_runtime_reports", return_value=[]),
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_source_catalog",
+                        return_value=[record],
+                    ),
+                    mock.patch.object(self.bridge, "safe_id", return_value=build_id),
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_create_build_workspace",
+                        side_effect=RuntimeError("simulated crash after Sheet reservation"),
+                    ),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                        self.bridge.create_ea_factory_build(request)
+
+                persisted = self.bridge.read_json(
+                    self.bridge._ea_factory_state_path(),
+                    {},
+                )
+                self.assertEqual(len(persisted.get("createReservations") or []), 1)
+                reservation = persisted["createReservations"][0]
+                self.assertEqual(reservation["buildId"], build_id)
+                self.assertEqual(reservation["createSheetBinding"], binding)
+                self.assertEqual(
+                    reservation["requestDigest"],
+                    self.bridge._ea_factory_create_request_digest(
+                        record["sourceRecordId"],
+                        "mt4",
+                        request["brief"],
+                        "expert_advisor",
+                        binding,
+                    ),
+                )
+
+                # Simulate a fresh Bridge process: discard the validated cache
+                # and reload the durable reservation through the strict loader.
+                self.bridge._invalidate_ea_factory_state_cache()
+                reloaded = self.bridge._load_ea_factory_state_uncached()
+                self.assertEqual(
+                    reloaded["createReservations"][0]["createSheetBinding"],
+                    binding,
+                )
+
+                with (
+                    mock.patch.object(self.bridge, "load_missions", return_value=[]),
+                    mock.patch.object(self.bridge, "load_runtime_reports", return_value=[]),
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_source_catalog",
+                        return_value=[record],
+                    ),
+                    mock.patch.object(self.bridge, "safe_id") as allocate_new_id,
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_create_build_workspace",
+                        return_value=self.workspace_stub(build_id),
+                    ) as create_workspace,
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_source_report",
+                        return_value=(mission, report),
+                    ) as create_source_report,
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_register_artifacts",
+                        return_value=[],
+                    ),
+                    mock.patch.object(self.bridge, "append_audit"),
+                    mock.patch.object(
+                        self.bridge,
+                        "ea_factory_read_model",
+                        return_value={"builds": [{"id": build_id}]},
+                    ),
+                    mock.patch.object(
+                        self.bridge,
+                        "mission_read_model_item",
+                        side_effect=lambda item: item,
+                    ),
+                ):
+                    recovered = self.bridge.create_ea_factory_build(request)
+
+                allocate_new_id.assert_not_called()
+                create_workspace.assert_called_once_with(
+                    build_id,
+                    record,
+                    "mt4",
+                    "expert_advisor",
+                )
+                create_source_report.assert_called_once()
+                self.assertEqual(recovered["build"]["id"], build_id)
+                recovered_state = self.bridge.read_json(
+                    self.bridge._ea_factory_state_path(),
+                    {},
+                )
+                self.assertEqual(recovered_state.get("createReservations"), [])
+                self.assertEqual(
+                    recovered_state["builds"][0]["createSheetBinding"],
+                    binding,
+                )
+
+                # A completed exact replay must not re-read the Sheet or repeat
+                # workspace/Mission side effects. The binding remains part of
+                # the request digest used by the idempotency comparison.
+                replay_state = copy.deepcopy(recovered_state)
+                replay_state["builds"][0]["coverageStatus"] = "compact_current"
+                with (
+                    mock.patch.object(
+                        self.bridge,
+                        "_load_ea_factory_state_unlocked",
+                        return_value=replay_state,
+                    ),
+                    mock.patch.object(
+                        self.bridge,
+                        "ea_factory_read_model",
+                        return_value={"builds": [{"id": build_id}]},
+                    ),
+                    mock.patch.object(self.bridge, "load_missions") as replay_missions,
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_create_build_workspace",
+                    ) as replay_workspace,
+                    mock.patch.object(
+                        self.bridge,
+                        "_ea_factory_source_report",
+                    ) as replay_source_report,
+                ):
+                    replayed = self.bridge.create_ea_factory_build(request)
+
+                self.assertTrue(replayed["idempotentReplay"])
+                self.assertEqual(replayed["build"]["id"], build_id)
+                replay_missions.assert_not_called()
+                replay_workspace.assert_not_called()
+                replay_source_report.assert_not_called()
+                self.assertEqual(verify_live_binding.call_count, 2)
+
+    def test_create_reservation_loader_rejects_bad_sheet_binding_and_keeps_legacy(self) -> None:
+        sheet_record = self.verified_sheet_record(
+            source_key="sheet-bound-loader-integrity"
+        )
+        binding = self.verified_sheet_binding(sheet_record)
+        brief = "validate durable create reservation"
+
+        def reservation_for(record: dict, sheet_binding: dict | None) -> dict:
+            request_digest = self.bridge._ea_factory_create_request_digest(
+                record["sourceRecordId"],
+                "mt4",
+                brief,
+                "expert_advisor",
+                sheet_binding,
+            )
+            return {
+                "idempotencyKey": "loader-create-reservation",
+                "idempotencyKeys": ["loader-create-reservation"],
+                "requestDigest": request_digest,
+                "buildId": "ea-build-loader-create-reservation",
+                "sourceRecordId": record["sourceRecordId"],
+                "sourceRecordDigest": record["recordDigest"],
+                "platform": "mt4",
+                "artifactKind": "expert_advisor",
+                "brief": brief,
+                **(
+                    {"createSheetBinding": copy.deepcopy(sheet_binding)}
+                    if sheet_binding is not None
+                    else {}
+                ),
+                "status": "reserved",
+                "createdAt": "2026-10-14T01:00:00+00:00",
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            runtime.mkdir(parents=True, exist_ok=True)
+            with (
+                mock.patch.object(self.bridge, "RUNTIME_DIR", runtime),
+                mock.patch.object(
+                    self.bridge,
+                    "_ea_factory_build_root",
+                    return_value=runtime / "workspaces",
+                ),
+            ):
+                legacy_record = self.normalized_record(
+                    source_key="legacy-non-sheet-loader-integrity"
+                )
+                legacy_state = self.empty_state()
+                legacy_state["createReservations"] = [
+                    reservation_for(legacy_record, None)
+                ]
+                self.bridge.write_json(
+                    self.bridge._ea_factory_state_path(),
+                    legacy_state,
+                )
+                loaded_legacy = self.bridge._load_ea_factory_state_uncached()
+                self.assertNotIn(
+                    "createSheetBinding",
+                    loaded_legacy["createReservations"][0],
+                )
+
+                valid_sheet_reservation = reservation_for(sheet_record, binding)
+                missing_binding_state = self.empty_state()
+                missing_binding_reservation = copy.deepcopy(valid_sheet_reservation)
+                missing_binding_reservation.pop("createSheetBinding")
+                missing_binding_state["createReservations"] = [
+                    missing_binding_reservation
+                ]
+                self.bridge.write_json(
+                    self.bridge._ea_factory_state_path(),
+                    missing_binding_state,
+                )
+                with self.assertRaises(self.bridge.DataIntegrityError):
+                    self.bridge._load_ea_factory_state_uncached()
+
+                invalid_bindings = (
+                    None,
+                    {"recordId": binding["recordId"]},
+                    {**binding, "unexpected": "not-canonical"},
+                )
+                for invalid_binding in invalid_bindings:
+                    with self.subTest(invalid_binding=invalid_binding):
+                        invalid_state = self.empty_state()
+                        invalid_reservation = copy.deepcopy(valid_sheet_reservation)
+                        invalid_reservation["createSheetBinding"] = invalid_binding
+                        invalid_state["createReservations"] = [invalid_reservation]
+                        self.bridge.write_json(
+                            self.bridge._ea_factory_state_path(),
+                            invalid_state,
+                        )
+                        with self.assertRaises(self.bridge.DataIntegrityError):
+                            self.bridge._load_ea_factory_state_uncached()
+
+                mismatched_binding = {
+                    **binding,
+                    "recordDigest": "e" * 64,
+                }
+                mismatched_reservation = copy.deepcopy(valid_sheet_reservation)
+                mismatched_reservation["createSheetBinding"] = mismatched_binding
+                mismatched_reservation["requestDigest"] = (
+                    self.bridge._ea_factory_create_request_digest(
+                        sheet_record["sourceRecordId"],
+                        "mt4",
+                        brief,
+                        "expert_advisor",
+                        mismatched_binding,
+                    )
+                )
+                mismatched_state = self.empty_state()
+                mismatched_state["createReservations"] = [mismatched_reservation]
+                self.bridge.write_json(
+                    self.bridge._ea_factory_state_path(),
+                    mismatched_state,
+                )
+                with self.assertRaises(self.bridge.DataIntegrityError):
+                    self.bridge._load_ea_factory_state_uncached()
 
     def test_pending_advance_retry_new_key_preserves_original_reservation_and_mission_key(self) -> None:
         build_id = "ea-build-pending-advance-retry"

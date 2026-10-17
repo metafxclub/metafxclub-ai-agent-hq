@@ -89,7 +89,26 @@
     "allowedRequesters": ["manager", "ceo"],
     "plannerMode": "deterministic_guarded_mission_queue",
     "defaultSubtaskToolId": "codex_cli_task",
-    "optionalRequestFields": ["requestedOwnerAgentId", "requestedTargetId"],
+    "optionalRequestFields": ["requestedOwnerAgentId", "requestedTargetId", "sourceReference"],
+    "sourceAnalysis": {
+      "sourceReference": {"sourceReportId": "exact safe report id", "recordId": "exact full trading-system record id including suffix"},
+      "goalSelectors": "An explicit sourceReportId=... and recordId=... pair in goal is accepted as untrusted selectors only; ambiguous, missing or conflicting pairs fail closed.",
+      "sourceAuthority": "Ready Radar Report plus completed source Mission, matching receipt and canonical record validation. Partial evidence is analysis-only and is never promoted to verified or EA-ready.",
+      "assignmentSchema": "manager-analysis-assignment-v1",
+      "authorizationBinding": "managerAnalysisContext includes immutable source packet, exact sourceReference snapshotDigest, owner/role, parent id and parent goal digest; all included in Mission authorization digest.",
+      "resultProfile": "manager_specialist_analysis",
+      "resultSchema": "manager-specialist-analysis-v1",
+      "supportedRoles": {"optimization_agent": "technical", "backtest_analyst": "price_action", "risk_guard": "risk"},
+      "outputFields": ["schemaVersion", "ownerAgentId", "roleId", "sourceReference", "summary", "keyPoints", "blockers", "nextSteps"],
+      "pointFields": ["topic", "kind", "statement", "evidenceIds"],
+      "pointKinds": ["fact", "inference", "unknown"],
+      "validation": "Exact owner, role topics, references, evidence ids and full output bounds; fact statements must exactly match one bound fact quote. Invalid output blocks completion without silently fixing citations.",
+      "execution": "Auto-guarded, offline, read-only with all chat-disabled tool features; no Shell, Web, external apps or file access. Existing quotas, approvals, rate, timeout, audit and concurrency guards remain in force.",
+      "summaryField": "Report.managerSummary",
+      "summarySchema": "manager-summary-v1",
+      "summaryBehavior": "Deterministic overview of complete role conclusions plus complete per-role classified key points, blockers, next steps and exact child Mission/Report/source identities. No 600-character slices and no claim of LLM synthesis.",
+      "legacyBehavior": "Delegations without explicit source selectors retain their existing workflow."
+    },
     "backendSelectsTargetFromAgentAndGoalWhenOmitted": true,
     "realExecutionRequiresBackendAuthorization": true,
     "maxSubtasks": 6,
@@ -405,7 +424,7 @@
   "modelTiers": {
     "manager_quality": {
       "reasoningEffort": "high",
-      "model": "gpt-5.5",
+      "model": "gpt-5.6-sol",
       "maxSeconds": 300,
       "maxOutputChars": 16000,
       "maxRunsPerHour": 6,
@@ -413,7 +432,7 @@
     },
     "risk_quality": {
       "reasoningEffort": "high",
-      "model": "gpt-5.5",
+      "model": "gpt-5.6-sol",
       "maxSeconds": 240,
       "maxOutputChars": 12000,
       "maxRunsPerHour": 10,
@@ -421,7 +440,7 @@
     },
     "specialist_balanced": {
       "reasoningEffort": "medium",
-      "model": "gpt-5.5",
+      "model": "gpt-5.6-sol",
       "maxSeconds": 180,
       "maxOutputChars": 10000,
       "maxRunsPerHour": 16,
@@ -429,7 +448,7 @@
     },
     "specialist_fast": {
       "reasoningEffort": "low",
-      "model": "gpt-5.5",
+      "model": "gpt-5.6-sol",
       "maxSeconds": 120,
       "maxOutputChars": 7000,
       "maxRunsPerHour": 24,
@@ -473,7 +492,17 @@
   },
   "missionWorker": {
     "queueStore": "data/runtime/missions.json",
-    "singleWorker": true,
+    "singleWorker": false,
+    "generalConcurrencyLimit": 1,
+    "managerReadOnlyConcurrencyLimit": 3,
+    "managerReadOnlyParallelPolicy": {
+      "eligibility": "Backend-linked manager_delegate children in a fully committed parent manifest with explicit read-only or text-only intent and unchanged authorization; excludes workflow, analysis, meeting, native and approval-required work.",
+      "sandbox": "OS read-only; backend forces --read-only-work",
+      "lease": "One parent cohort holds the existing general semaphore until its final child exits; at most three distinct owners. General/manual workspace work remains exclusive.",
+      "publication": "Do not claim partially assembled delegations or synthesize success before all child reports are committed.",
+      "health": ["activeMissionIds", "activeCount", "managerReadOnlyConcurrencyLimit", "managerReadOnlyActiveCount", "managerReadOnlyWorkerCount", "managerReadOnlyWorkersAlive", "managerReadOnlyOperational"],
+      "guards": "Preserve authorization digest, approval, operator mode, quota, rate, budget, timeout, audit, cancellation and process-tree shutdown checks for every child."
+    },
     "idlePollSeconds": 5,
     "heartbeatSeconds": 10,
     "reconcileIntervalSeconds": 60,

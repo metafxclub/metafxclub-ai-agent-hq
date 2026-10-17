@@ -1,5 +1,5 @@
 {
-  "version": "bridge-contract-v022",
+  "version": "bridge-contract-v023",
   "purpose": "Local backend boundary for Codex CLI, MCP, filesystem, VPS, MT4/MT5, Telegram, and other real tools.",
   "base_url": "http://127.0.0.1:4186",
   "base_url_semantics": "Preferred first-run URL only; the confirmed runtime URL comes from runtime_endpoint.source.",
@@ -23,7 +23,7 @@
     "maxManagedOrders is a human-selected Backend dispatch cap with allowed values 1, 3, 5, or 10. The effective cap is the lower of this value and the fresh EA MaxManagedOpenPositions telemetry. Current usage is the higher of fresh EA telemetry and selected-channel OPEN or not-yet-reconciled Orders proven by durable EXECUTED ACK, preventing status-publish lag from exceeding the cap. It never changes the EA input, never closes an existing position, and fails closed when telemetry is unavailable."
   ],
   "endpoints": {
-    "GET /api/health": "Fast side-effect-free Bridge and critical UI readiness check. It does not invoke Codex CLI or MCP.",
+    "GET /api/health": "Fast side-effect-free Bridge and critical UI readiness check, including required frontend data modules and the backend Council analysis module. Missing required modules keep readiness false. It does not invoke Codex CLI or MCP.",
     "GET /api/bridge/status": "Detect local runner, Codex auth state, MCP config, and approval policy.",
     "GET /api/operator-mode": "Read manual_guarded or auto_guarded mode, Thai label, auto-execution policy, worker state, and updated time.",
     "POST /api/operator-mode": "Accept exactly one mode field, persist the local operator mode, and write an audit record. The installation default is auto_guarded; a legacy v1 manual_guarded record is migrated only when its persisted source proves it came from contract_default, while local_operator_api choices are preserved.",
@@ -61,10 +61,11 @@
     "GET /api/props/:id/connections": "Read the cached/backend-computed Connection Checklist for one Dashboard without durable writes or frontend readiness inference.",
     "POST /api/props/:id/connections/refresh": "Accept an explicit frontend intent, then run a cooldown-guarded read-only connection diagnostic with mission id, owner, status, audit, and a report routed back to that Dashboard.",
     "POST /api/integrations/metatrader/discover": "Search bounded standard locations and process image names for MT4/MT5 in read-only mode. It never launches, closes, attaches, trades, or returns paths, PIDs, account, broker, or credentials.",
-    "POST /api/integrations/metatrader/select": "Compatibility alias for older clients. Accept only propId plus an opaque candidateId, resolve the candidate platform in Backend state, and delegate to the same atomic all-compatible-consumer transaction as the central selector. It can never write only one dashboard, attach to a Terminal, enable an adapter, or enable live trading.",
-    "GET /api/integrations/metatrader/global": "Read the sanitized central MT4/MT5 candidate registry and authoritative selection state for AI Trade Council, EA Factory, and EA Optimization Lab. It performs no discovery, launch, attachment, account access, adapter enablement, or trading action.",
+    "POST /api/integrations/metatrader/select": "Compatibility alias for older clients. Accept only propId plus an opaque candidateId, resolve the candidate platform in Backend state, and delegate to the same atomic top-header platform-lock transaction as the central selector. It can never set or change activePlatform, write a per-device-only selection, attach to a Terminal, enable an adapter, or enable live trading. Any legacy per-prop rows remain a non-authoritative projection of an already-explicit activePlatform.",
+    "GET /api/integrations/metatrader/global": "Read the sanitized central MT4/MT5 candidate registry, the two independent authoritative platform locks, and the separate activePlatform used only by AI Trade Council execution. Both valid MT4 and MT5 locks are required before any MT-related work. Reading performs no discovery, launch, attachment, account access, adapter enablement, or trading action.",
     "POST /api/integrations/metatrader/global/discover": "Accept exactly an empty JSON object, run one bounded read-only MT4/MT5 discovery, and return the refreshed central read model without exposing paths, process ids, account data, broker data, or credentials. Checklist projection plus Report, Mission, and Audit persistence after the registry refresh are best-effort observability; response loss is reconciled by one global GET and never causes an automatic duplicate scan.",
-    "POST /api/integrations/metatrader/global/select": "Accept exactly platform plus one opaque candidateId, then persist that candidate to every compatible consumer in one Backend-locked durable write with read-back verification. When a platform has multiple opaque installations, Backend accepts only the uniquely running candidate; zero or multiple running candidates fail closed until the user leaves one desired Terminal open and scans again. Report, Mission, and Audit persistence after the verified commit are best-effort observability and cannot reverse or falsely fail the selection; the response exposes observabilityStatus and bounded warning codes. The Frontend never fans out per device and reconciles an indeterminate response with the global GET before allowing a retry. Selection does not launch a Terminal, enable an adapter, or enable Demo/Live trading.",
+    "POST /api/integrations/metatrader/global/select": "Accept exactly platform plus one opaque candidateId, then persist only that platform's authoritative lock while preserving the other platform lock and perform one Backend-locked durable write with read-back verification. activePlatform is separate; linking or relinking either platform never sets or changes activePlatform and never replaces the other lock. Legacy per-prop compatibility state follows only an already-explicit activePlatform. After both locks are valid, activePlatform can change only through POST /api/integrations/metatrader/global/activate. When a platform has multiple opaque installations, Backend accepts only the uniquely running candidate; zero or multiple running candidates fail closed until the user leaves one desired Terminal open and scans again. Report, Mission, and Audit persistence after the verified commit are best-effort observability and cannot reverse or falsely fail the selection; the response exposes observabilityStatus and bounded warning codes. The Frontend never fans out per device and reconciles an indeterminate response with the global GET before allowing a retry. Selection does not launch a Terminal, enable an adapter, or enable Demo/Live trading.",
+    "POST /api/integrations/metatrader/global/activate": "Accept exactly platform after both independent MT4 and MT5 locks are valid, run the AI Trade Council outstanding-command and open-position target-switch safety checks, and update only activePlatform. It never relinks either platform, changes a platform selectionRevision, launches a Terminal, enables an adapter, or enables Demo/Live trading.",
     "GET /api/ai-trade-council/status": "Read the sanitized Council state, current selected MetaTrader snapshot readiness, latest consensus, and backend-owned new-closed-bar automation status without running Codex. liveAnalysis.consensus exposes identityValid plus candidateId/channelId, canonical streamKey, exact display symbol, timeframe, snapshotId, closedBarIdentity, and streamIdentity only when the immutable parent context and decision provenance agree exactly; a mismatch nulls the identity fields so the Frontend can fail closed.",
     "GET /api/ai-trade-council/history": "Read a bounded cursor page with kind=analysis or kind=orders. scope=all is the default and Order history scans every durable Gateway channel page even when no MetaTrader target is currently selected; scope=active resolves the Backend-owned current candidateId, uppercase-canonical streamKey, exact display symbol and timeframe before filtering, summary calculation, and pagination and still requires the exact selected MT4 or MT5 channel. Optional candidateId, streamKey, symbol and timeframe are validated optimistic-concurrency guards and never select an arbitrary historical stream. Analysis identity is attemptId first and closed-bar identity second; Order linkage uses exact mission id, with Snapshot fallback only for legacy ACK records that have no mission id. Response scope is authoritative and Order historyWindow truthfully declares scan completeness, ledger command count, and whether older rows remain.",
     "GET /api/ai-trade-council/automation": "Read whether automatic analysis is enabled, its supported timeframes, Backend-audited analysisBarCount, durable FIFO/coverage cursor, pending count, daily count, quota reserve, and pause reason. This endpoint never creates a Mission.",
@@ -93,12 +94,19 @@
     "POST /api/props/mission_strategy_table/research-sheet/verify": "Accept exactly an empty JSON object after a successful Google reconnect, re-probe the already-active fixed Sheet and all three tab contracts, refresh its bounded cache, reopen only eligible current-revision auth or permission failures after live verification, backfill bounded recent reports, and return the frontend-safe Hub state. It never changes the active Sheet id and never accepts credentials.",
     "POST /api/props/mission_strategy_table/research-sheet/flush": "Accept an empty JSON object to flush pending Backend-owned report projections, or {retryFailed:true} to requeue a bounded batch from the active configuration revision before flushing. Failed-row requeue is audited, capped per item, never revives stale revisions, and every write remains idempotent by tab key, read back, and fail-closed when auth, schema, or write verification is unavailable.",
     "GET /api/props/right_server_racks/ea-factory": "Read the frontend-safe EA Factory read model only. The request has no body and performs no external read or tool action. It may display the central Sheet id and config revision already owned by the Mission Strategy Table; it never exposes OAuth/service-account credentials, terminal paths, account data, broker data, process ids, or absolute filesystem paths.",
-    "POST /api/props/right_server_racks/ea-factory/sources/google-sheet/sync": "Read Strategy Brief rows from the fixed Deep_Research tab in the central Sheet configured at the Mission Strategy Table. The authoritative source is exactly A-J with record_id, system_name, system_overview, entry_rules, recovery_rules, exit_rules, money_management, order_execution, display_requirements, and additional_notes. Current clients send optional configRevision and idempotencyKey only; legacy googleSheetUrlOrId or tabName values are accepted solely when they match the central contract. Legacy A-AW/49-header snapshots remain read-only backup compatibility. Backend may use public CSV or Backend-only auth, creates Mission/report/audit lineage, never writes from the factory, and never advances an EA build.",
-    "POST /api/props/right_server_racks/ea-factory/builds": "Accept exactly sourceRecordId, platform, optional brief, and optional idempotencyKey. Backend resolves the opaque source record, creates one manual EA Factory build and immutable Strategy Spec inside the managed Workspace, and does not generate, compile, backtest, schedule, loop, or trade inline.",
+    "GET /api/props/right_server_racks/ea-factory/market-watch": "Read a bounded symbol catalog from the Market Watch of the exact globally selected, already-running MT4 for EA Factory. Backend binds the visible row count to exactly one local symbols.sel profile, rechecks the terminal selection and visible count, preserves exact broker symbol spelling, and fails closed when evidence is missing, stale, or ambiguous. It never returns paths, process ids, account/broker data, prices, trades, credentials, or raw terminal files.",
+    "GET /api/props/right_server_racks/ea-factory/sources/google-sheet/catalog": "Read a current frontend-safe dropdown catalog from the exact active Deep_Research A-J contract. The option label is system_name and the opaque value is record_id. Backend performs stable live reads bound to the active Sheet revision and current Google authorization, rejects incomplete, duplicate, changing, oversized, or credential-bearing rows, and returns no stale fallback. Optional recordId returns the same digest-bound ten-field Strategy Brief summary that a later explicit import will consume. The endpoint never writes the Sheet, creates a build, accepts credentials, logs query values, or exposes OAuth/service-account material.",
+    "POST /api/props/right_server_racks/ea-factory/sources/google-sheet/sync": "Read Strategy Brief rows from the fixed Deep_Research tab in the central Sheet configured at the Mission Strategy Table. The authoritative source is exactly A-J with record_id, system_name, system_overview, entry_rules, recovery_rules, exit_rules, money_management, order_execution, display_requirements, and additional_notes. Current clients must send the exact selected configRevision and may send idempotencyKey; Backend rejects a missing, invalid, or stale revision before Mission/report/audit/read side effects. Legacy googleSheetUrlOrId or tabName values are accepted solely when they match the central contract. Legacy A-AW/49-header snapshots remain read-only backup compatibility. Backend may use public CSV or Backend-only auth, creates Mission/report/audit lineage, never writes from the factory, and never advances an EA build.",
+    "POST /api/props/right_server_racks/ea-factory/builds": "Accept a sourceRecordId, platform, optional artifactKind/brief/idempotencyKey, and the atomic recordId, recordDigest, catalogDigest, snapshotDigest, and configRevision precondition for a verified_deep_research_sheet source. Before any reservation, Workspace, Mission, Report, or build side effect, Backend bypasses the catalog cache, performs an authoritative stable live Deep_Research read for that exact recordId, and rejects 409 when any imported binding changed. Historical non-Sheet sources remain compatible. The endpoint never generates, compiles, backtests, schedules, loops, or trades inline.",
     "POST /api/props/right_server_racks/ea-factory/builds/:buildId/advance": "Accept exactly stageId and optional idempotencyKey. Backend resolves the opaque build id and may advance at most the exact next stage once; it rejects skipped, repeated, concurrent, or out-of-order stages and never treats static review, process exit, or terminal selection as Compile/Strategy Tester proof.",
     "POST /api/props/right_server_racks/ea-factory/builds/:buildId/retry": "Accept exactly generate_source stageId, the currently failed failedMissionId, and a required idempotencyKey. Backend allows a fresh Mission only for terminal invalid_output with no Source program or immutable Version, records the replaced Mission, and caps manual retries at three. It never retries source_review or a later stage, overwrites a Source, loops automatically, compiles, backtests, or trades.",
-    "POST /api/props/right_server_racks/ea-factory/builds/:buildId/run": "Accept exactly one required idempotencyKey for an MT4 Expert Advisor build and persist one automatic EA run bound to the immutable compact A-J Strategy Brief plus the exact globally selected, already-running MT4 terminal revision. This endpoint never launches the selected terminal process. Backend advances only the next verified phase, reuses the existing source/review/compile/backtest handlers, and retries only eligible source invalid_output failures. Compile requires a visible MetaEditor-capable adapter; Backtest requires a visible MT4 Strategy Tester with Visual Mode, settings/result screenshots, and logic-recheck evidence. MT5 remains available only through the manual stage-by-stage workflow until a verified MT5 visible adapter exists, and an MT5 request to this endpoint is rejected fail-closed. If the MT4 adapter is unavailable the run remains awaiting_visible_terminal, never invents success, never bypasses a gate, and never permits live trading. Reposting the same key safely resumes the paused run; a different key is rejected.",
+    "POST /api/props/right_server_racks/ea-factory/builds/:buildId/run": "Accept exactly one required idempotencyKey for an MT4 or MT5 Expert Advisor build only after both central MT4 and MT5 locks are valid, then persist one automatic EA run bound to the immutable compact A-J Strategy Brief plus the exact requested-platform lock and already-running terminal revision. activePlatform does not choose the Factory terminal. This endpoint never launches the selected terminal process. Backend advances only Source generation, Source review, Compile, Visual Backtest, entry/logic verification, Backtest report saving, and final_report. If the matching adapter is unavailable the run remains awaiting_visible_terminal, never invents success, never bypasses a gate, and never permits live trading. Reposting the same key safely resumes the paused Factory phase. Factory never creates, hands off, resumes, or exposes Optimization; Optimization Lab remains a separate device. A different key is rejected.",
+    "POST /api/props/right_server_racks/ea-factory/builds/:buildId/restart-backtest": "Accept exactly the current terminal runId plus a fresh idempotencyKey to restart only backtest_recheck after a failed, cancelled, or awaiting-visible run. canRestartBacktest proves only durable Backend eligibility; this request independently probes the exact selected Strategy Tester for the visible Start/idle state before commit. Backend preserves Source, immutable Versions, Source Review, and Compile evidence, archives the previous run plus Backtest stage under a digest-bound maximum-eight-entry ledger, mints new Mission/Report/artifact identities, and never regenerates Source, recompiles, launches or closes MetaTrader, or enables trading. Exact-key replay is side-effect free. If coordinator Thread.start fails after the restart commit, Backend durably marks the new run failed; the same key replays that failed run and a retry requires the current runId plus a fresh key.",
     "GET /api/props/right_server_racks/ea-factory/builds/:buildId/files/:fileId": "Stream one allowlisted EA Factory artifact through opaque buildId and fileId values. This same-origin read has no request body or domain/external side effects; Backend appends a local audit event when the stream is requested. It never returns a local/absolute path, directory listing, secret, credential, terminal metadata, or unsupported file type.",
+    "GET /api/ea-optimization-lab": "Read the frontend-safe MT5 Optimization Lab projection, eligible immutable Factory builds, current Backend-selected terminal, bounded session history, active-session admission state, progress, failures, and hashed evidence. It never starts MetaTrader, exposes paths or credentials, or treats browser values as source, report, terminal-binding, or completion proof.",
+    "POST /api/ea-optimization-lab/sessions": "Accept one bounded optimization intent, then Backend revalidates the eligible completed MT5 Factory build, immutable source digest, baseline report digest, exact selected running MT5 terminal revision and binding, tester settings, ranges, and visible adapter capability. It creates at most one durable active session, is strictly idempotent, and never accepts filesystem paths, evidence claims, live-trading flags, or terminal-shutdown flags from the browser.",
+    "POST /api/ea-optimization-lab/sessions/:sessionId/resume": "Accept an empty object or exactly one optional idempotencyKey, then resume one exact durable MT5 optimization session after Backend revalidates its immutable bindings. A committed Start boundary without a receipt enters recovery/collection and can never press Start a second time; only a cryptographically proven before-Start outcome permits another bounded attempt.",
+    "POST /api/ea-optimization-lab/sessions/:sessionId/cancel": "Accept an empty object or exactly one optional idempotencyKey, then request cancellation of one exact durable session. Cancellation never closes the selected Terminal, never enables trading, and never claims the underlying tester stopped unless the visible adapter proves a terminal state.",
     "GET /api/tools": "Read the sanitized tool permission matrix.",
     "GET /api/orchestration": "Read Manager delegation, model tier, budget, and approval policy.",
     "GET /api/mission-strategy-table": "Read a compact cursor page of Mission and report summaries by default. scope=all, admin, or full explicitly returns the complete frontend-safe diagnostic archive.",
@@ -246,6 +254,36 @@
       "factoryConsumerNeverWrites": true
     }
   },
+  "global_metatrader_binding": {
+    "schemaVersion": "metafx-hq-global-metatrader-binding-v3",
+    "storeSchemaVersion": 4,
+    "authoritativeSelectionFields": ["platformSelections", "activePlatform"],
+    "platformSelections": {
+      "mt4": {"independent": true, "requiredBeforeAnyMtWork": true},
+      "mt5": {"independent": true, "requiredBeforeAnyMtWork": true}
+    },
+    "bothPlatformLocksRequiredBeforeMtWork": true,
+    "activePlatformSeparateFromLocks": true,
+    "activePlatformPurpose": "ai_trade_council_execution_only",
+    "platformLockChangeDoesNotSetOrChangeActivePlatform": true,
+    "activePlatformChangesOnlyThroughExplicitActivation": true,
+    "selectingOnePlatformPreservesOtherPlatformLock": true,
+    "changingActivePlatformPreservesBothPlatformLocks": true,
+    "activationEndpoint": "POST /api/integrations/metatrader/global/activate",
+    "activationRequestFields": ["platform"],
+    "activationRequiresBothPlatformLocks": true,
+    "activationRunsAiTradeTargetSwitchSafety": true,
+    "operationUsesRequestedPlatformLock": true,
+    "legacyPerPropSelections": "compatibility_projection_only",
+    "legacyAliasMayChangeActivePlatform": false,
+    "legacyAliasMayWriteSingleDeviceSelectionState": false,
+    "frontendTerminalOverrideAllowed": false,
+    "bindingFields": ["candidateId", "selectionRevision", "catalogDigest"],
+    "revalidateBeforeMtWorkAndResume": true,
+    "partialMissingStaleOrChangedLockBehavior": "fail_closed_before_workspace_mission_report_audit_or_domain_state_mutation",
+    "consumers": ["ai_trade_council", "ea_factory", "ea_optimization_lab", "ea_development_studio", "mt4_market_watch"],
+    "tradingviewExempt": true
+  },
   "ea_factory": {
     "schemaVersion": "ea-factory-v1",
     "propId": "right_server_racks",
@@ -260,6 +298,12 @@
       "scheduled": false,
       "schedulerEnabled": false,
       "automaticLoop": true,
+      "completionBoundary": "final_report",
+      "completionRequires": ["source_generated", "source_review_passed", "compile_verified", "visual_backtest_verified", "entry_logic_rechecked", "backtest_report_saved", "final_summary_saved"],
+      "optimizationIncluded": false,
+      "optimizationHandoffAllowed": false,
+      "optimizationSessionCreateOrResumeAllowed": false,
+      "optimizationOwner": "separate_ea_optimization_lab",
       "oneRequestAdvancesAtMostOneStage": true,
       "oneClickCoordinatorAdvancesVerifiedStages": true,
       "visibleTerminalStagesRequireExplicitCrashResume": true,
@@ -292,6 +336,33 @@
         "sideEffects": false,
         "responseEnvelopeFields": ["ok", "eaFactory"]
       },
+      "marketWatch": {
+        "method": "GET",
+        "path": "/api/props/right_server_racks/ea-factory/market-watch",
+        "requestBody": "none",
+        "sideEffects": false,
+        "selectedTerminalOwnedByBackend": true,
+        "supportedPlatforms": ["mt4"],
+        "responseEnvelopeFields": ["ok", "marketWatch", "updatedAt"],
+        "frontendSafeFields": ["schemaVersion", "status", "platform", "candidateId", "selectionRevision", "symbols", "symbolCount", "catalogDigest", "observedAt", "reasonCode", "messageTh", "verification", "privacy"],
+        "forbiddenFields": ["path", "dataPath", "installPath", "processId", "windowHandle", "accountNumber", "brokerServer", "quotes", "trades", "rawFile"]
+      },
+      "googleSheetCatalog": {
+        "method": "GET",
+        "path": "/api/props/right_server_racks/ea-factory/sources/google-sheet/catalog",
+        "requestBody": "none",
+        "optionalQueryFields": ["recordId"],
+        "sideEffects": false,
+        "externalReads": true,
+        "externalWrites": false,
+        "stableDoubleReadRequired": true,
+        "activeSheetRevisionBindingRequired": true,
+        "googleAuthorizationBindingRequired": true,
+        "staleFallbackAllowed": false,
+        "responseEnvelopeFields": ["ok", "catalog"],
+        "frontendSafeFields": ["schemaVersion", "status", "configRevision", "tabName", "sheetReferenceMasked", "catalogDigest", "snapshotDigest", "observedAt", "totalCount", "systems", "selectedRecord", "selectionField", "displayField", "sourceRange", "refreshMode", "importEndpoint", "externalWrites", "credentialsExposed"],
+        "forbiddenFields": ["sheetId", "accessToken", "refreshToken", "serviceAccountKey", "privateKey", "cookie", "authorization", "absolutePath"]
+      },
       "syncGoogleSheet": {
         "method": "POST",
         "path": "/api/props/right_server_racks/ea-factory/sources/google-sheet/sync",
@@ -304,8 +375,18 @@
       "createBuild": {
         "method": "POST",
         "path": "/api/props/right_server_racks/ea-factory/builds",
-        "allowedRequestFields": ["sourceRecordId", "artifactKind", "platform", "brief", "idempotencyKey"],
+        "allowedRequestFields": ["recordId", "sourceRecordId", "recordDigest", "catalogDigest", "snapshotDigest", "configRevision", "artifactKind", "platform", "brief", "idempotencyKey"],
         "requiredRequestFields": ["sourceRecordId", "platform"],
+        "sheetSourceKind": "verified_deep_research_sheet",
+        "sheetSourceRequiredRequestFields": ["recordId", "sourceRecordId", "recordDigest", "catalogDigest", "snapshotDigest", "configRevision"],
+        "sheetBindingAtomic": true,
+        "authoritativeLiveCatalogPrecondition": true,
+        "catalogCacheAllowedForPrecondition": false,
+        "staleBindingStatus": 409,
+        "sideEffectsBeforeLivePreconditionAllowed": false,
+        "bothGlobalPlatformLocksRequiredForMtBuild": true,
+        "requestedPlatformLockAuthoritative": true,
+        "activePlatformDoesNotSelectFactoryTerminal": true,
         "platformValues": ["mt4", "mt5", "tradingview"],
         "limits": {"briefMaxCharacters": 900},
         "responseEnvelopeFields": ["ok", "kind", "mission", "build", "eaFactory", "idempotentReplay"]
@@ -336,13 +417,42 @@
         "method": "POST",
         "path": "/api/props/right_server_racks/ea-factory/builds/:buildId/run",
         "pathParameters": ["buildId"],
+        "supportedVisiblePlatforms": ["mt4", "mt5"],
         "allowedRequestFields": ["idempotencyKey"],
         "requiredRequestFields": ["idempotencyKey"],
         "sameKeyResumesAwaitingVisibleTerminal": true,
+        "completionBoundary": "final_report",
+        "optimizationHandoffAllowed": false,
+        "optimizationSessionCreateOrResumeAllowed": false,
+        "bothGlobalPlatformLocksRequired": true,
+        "requestedPlatformLockAuthoritative": true,
+        "activePlatformDoesNotSelectFactoryTerminal": true,
         "differentKeyForExistingBuild": "reject_conflict",
         "phaseGateBypassAllowed": false,
         "liveTradingAllowed": false,
         "responseEnvelopeFields": ["ok", "kind", "buildId", "oneClickRun", "idempotentReplay", "workerStarted"]
+      },
+      "restartBacktest": {
+        "method": "POST",
+        "path": "/api/props/right_server_racks/ea-factory/builds/:buildId/restart-backtest",
+        "pathParameters": ["buildId"],
+        "allowedRequestFields": ["runId", "idempotencyKey"],
+        "requiredRequestFields": ["runId", "idempotencyKey"],
+        "eligibleRunStatuses": ["cancelled", "failed", "awaiting_visible_terminal"],
+        "eligibleStageId": "backtest_recheck",
+        "exactTesterIdleProbeBeforeCommit": true,
+        "canRestartReadModelIsTesterIdleProof": false,
+        "sourceRegenerated": false,
+        "compileRepeated": false,
+        "archiveSchemaVersion": "ea-factory-backtest-restart-archive-v1",
+        "archiveMaximumEntriesPerBuild": 8,
+        "archiveFrontendExposure": "current_run_linkage_and_archive_digest_only",
+        "threadStartFailureDurableStatus": "failed",
+        "threadStartFailureCode": "backtest_restart_worker_not_started",
+        "sameKeyAfterThreadStartFailure": "replay_failed_run_without_starting_worker",
+        "freshKeyRetryIdentity": "current_failed_run_id_plus_fresh_idempotency_key",
+        "liveTradingAllowed": false,
+        "responseEnvelopeFields": ["ok", "kind", "buildId", "oneClickRun", "archiveDigest", "idempotentReplay", "workerStarted", "sourceRegenerated", "compileRepeated"]
       },
       "downloadArtifact": {
         "method": "GET",
@@ -374,7 +484,7 @@
       "sourceRecordFields": ["sourceRecordId", "sourceKind", "displayName", "recordId", "core", "downstream", "sourceUrls", "missingCoreFields", "buildReady", "recordDigest", "sourceReportId", "sourceMissionId"],
       "buildFields": ["id", "sourceRecordId", "sourceDisplayName", "platform", "language", "status", "brief", "workspace", "stages", "versions", "files", "artifactLineage", "terminalGate", "oneClickRun", "createdAt", "updatedAt"],
       "workspaceFields": ["workspaceId", "folderNames", "strategySpecFile", "rawFilesystemPathExposed"],
-      "stageFields": ["id", "labelTh", "status", "missionId", "reportId", "blockedReasonCode", "evidenceVerified", "artifacts", "updatedAt", "canAdvance", "canRetry", "retryAttemptCount", "retryAttemptLimit"],
+      "stageFields": ["id", "labelTh", "status", "missionId", "reportId", "blockedReasonCode", "detailTh", "evidenceVerified", "artifacts", "updatedAt", "canAdvance", "canRetry", "retryAttemptCount", "retryAttemptLimit"],
       "versionFields": ["version", "fileName", "sourceDigest", "sourceFile", "versionFile", "sourceReportId", "immutable", "createdAt"],
       "fileFields": ["fileId", "fileName", "folder", "extension", "byteSize", "sha256", "stageId", "reportId", "artifactKind", "immutable", "downloadUrl"],
       "artifactLineageFields": ["sourceRecordId", "sourceRecordDigest", "strategySpecFile", "stageMissionReportPairs", "versionDigests", "artifactManifestDigest", "fileDigests"],
@@ -383,10 +493,10 @@
       "terminalSelectionFields": ["candidates", "selectedTerminalId", "adapterReady", "compileOnly", "terminalExecutionAllowed"],
       "terminalCandidateFields": ["candidateId", "platform", "labelTh", "detected", "runningState"],
       "terminalGateFields": ["required", "ready", "platform", "candidateId", "selectionRevision", "adapterReady", "reasonCode"],
-      "oneClickFields": ["enabled", "canRun", "canCreateAndRun", "supportedVisiblePlatforms", "selectedPlatformSupported", "unsupportedReasonCode", "selectedPlatform", "selectedTerminalId", "selectedTerminalLabel", "terminalReady", "terminalRunning", "terminalMustAlreadyBeRunning", "terminalProcessLaunchAllowed", "visibleAdapterConnected", "requiresVisibleTerminal", "manualOnly", "visualModeRequired", "liveTradingAllowed", "runEndpoint", "runEndpointTemplate"],
-      "oneClickRunFields": ["schemaVersion", "runId", "idempotencyKey", "status", "currentStageId", "missionId", "reportId", "failureCode", "messageTh", "startedAt", "updatedAt", "completedAt", "stageResults", "evidence", "visibleAction", "canResume", "canRetry", "liveTradingAllowed", "visualModeRequired"],
+      "oneClickFields": ["enabled", "canRun", "canCreateAndRun", "supportedVisiblePlatforms", "selectedPlatformSupported", "unsupportedReasonCode", "selectedPlatform", "selectedTerminalId", "selectedTerminalLabel", "terminalReady", "terminalRunning", "terminalMustAlreadyBeRunning", "terminalProcessLaunchAllowed", "visibleAdapterConnected", "requiresVisibleTerminal", "manualOnly", "visualModeRequired", "liveTradingAllowed", "runEndpoint", "runEndpointTemplate", "restartBacktestEndpointTemplate"],
+      "oneClickRunFields": ["schemaVersion", "runId", "idempotencyKey", "status", "currentStageId", "missionId", "reportId", "failureCode", "messageTh", "startedAt", "updatedAt", "completedAt", "restartOfRunId", "restartArchiveDigest", "executionContractDigest", "canRestartBacktest", "restartBacktestEndpoint", "canCancel", "progressPercent", "progressStageIndex", "progressStageCount", "progressIsApproximate", "progressSource", "cancelEndpoint", "stageResults", "evidence", "visibleAction", "canResume", "resumeKind", "canRetry", "liveTradingAllowed", "visualModeRequired"],
       "oneClickVisibleActionFields": ["stageId", "operationId", "state", "attemptCount", "attemptLimit", "requiresExplicitResume"],
-      "endpointFields": ["read", "syncGoogleSheet", "createBuild", "advanceBuildTemplate", "retryBuildStageTemplate", "runBuildTemplate", "downloadArtifactTemplate"],
+      "endpointFields": ["read", "marketWatch", "googleSheetCatalog", "syncGoogleSheet", "createBuild", "advanceBuildTemplate", "retryBuildStageTemplate", "runBuildTemplate", "restartBacktestTemplate", "downloadArtifactTemplate"],
       "frontendForbiddenFields": ["accessToken", "refreshToken", "serviceAccountKey", "cookie", "authorization", "terminalPath", "processId", "accountNumber", "brokerServer", "absolutePath"]
     },
     "googleSheets": {
@@ -411,17 +521,95 @@
     },
     "platformProof": {
       "mt4": "One-click is available only when the exact selected MT4 terminal is already running and has verified visible front-office adapter evidence; the coordinator never launches the terminal process.",
-      "mt5": "MT5 remains available through the manual stage-by-stage flow only. One-click visible execution is disabled and rejected fail-closed until a verified MT5 adapter exists.",
+      "mt5": "One-click is available only when the exact selected MT5 terminal is already running and has verified visible MetaEditor plus Strategy Tester evidence; the coordinator never launches or closes the terminal process.",
       "tradingview": "Pine Script uses source/static validation only; MetaTrader Compile and Strategy Tester are not applicable.",
       "terminalSelectionIsExecutionProof": false,
       "processExitIsExecutionProof": false,
       "staticReviewIsCompileProof": false,
       "syntheticSuccessAllowed": false
+      ,"bothGlobalPlatformLocksRequiredBeforeMtWork": true
+      ,"requestedPlatformLockAuthoritative": true
+      ,"activePlatformDoesNotSelectFactoryTerminal": true
+      ,"factoryCompletionBoundary": "final_report"
+      ,"factoryOptimizationIncluded": false
+      ,"factoryOptimizationHandoffAllowed": false
+      ,"optimizationLabSeparate": true
       ,"oneClickCoordinator": "persisted_phase_gated_same_key_resumable"
       ,"oneClickVisibleAdapterUnavailableStatus": "awaiting_visible_terminal"
-      ,"oneClickSupportedVisiblePlatforms": ["mt4"]
+      ,"oneClickSupportedVisiblePlatforms": ["mt4", "mt5"]
       ,"oneClickTerminalProcessLaunchAllowed": false
       ,"oneClickLiveTradingAllowed": false
+      ,"mt5TechnicalSmokePolicy": {"scope": "one_click_backtest_recheck", "purpose": "technical_execution_smoke_not_full_strategy_evaluation_or_optimization", "clock": "UTC", "useDate": true, "toDate": "previous_utc_calendar_day", "inclusiveCalendarDays": 90, "fromDateOffsetDaysFromToDate": -89, "period": "H1", "model": "every_tick", "spreadPolicy": "current", "visualMode": true, "optimizationEnabled": false, "shutdownTerminalAfterTest": false, "liveTradingAllowed": false}
+    }
+  },
+  "ea_optimization_lab": {
+    "schemaVersion": "ea-optimization-lab-v1",
+    "supportedRealExecutionPlatforms": ["mt5"],
+    "planOnlyPlatforms": ["mt4"],
+    "networkBoundary": {"loopbackOnly": true, "allowedHost": "127.0.0.1", "frontendIntentOnly": true, "crossOriginRequestsAllowed": false},
+    "execution": {
+      "backendAuthoritative": true,
+      "separateFromEaFactory": true,
+      "factoryMayCreateOrResumeSession": false,
+      "globalMt5PlatformLockAuthoritative": true,
+      "bothGlobalPlatformLocksRequiredBeforeMtWork": true,
+      "activePlatformDoesNotSelectOptimizationTerminal": true,
+      "oneActiveSessionAtATime": true,
+      "durableRestartRecovery": true,
+      "noDoubleStart": true,
+      "selectedTerminalMustAlreadyBeRunning": true,
+      "terminalProcessLaunchAllowed": false,
+      "testShutdownTerminalAllowed": false,
+      "liveTradingAllowed": false,
+      "states": ["queued", "running", "awaiting_visible_terminal", "collecting", "completed", "failed", "cancelled"],
+      "stages": ["validate_baseline", "prepare_ranges", "run_round", "verify_report", "analyze", "complete"]
+    },
+    "requestPolicy": {
+      "unknownFields": "reject",
+      "browserIntentFields": ["buildId", "idempotencyKey", "platform", "symbol", "timeframe", "dateRange", "validation", "roundCount", "riskThresholds", "ranges"],
+      "backendResolvedFields": ["sourceDigest", "baselineReportSha256", "terminalCandidateId", "terminalSelectionRevision", "terminalBindingDigest", "testerSettings"],
+      "frontendMaySendFilesystemPaths": false,
+      "frontendMaySendCredentials": false,
+      "frontendMaySendDigestsOrTerminalBindings": false,
+      "frontendMayClaimEvidenceOrSuccess": false,
+      "strictIdempotency": true
+    },
+    "eligibility": {
+      "artifactKind": "expert_advisor",
+      "platform": "mt5",
+      "completedFactoryBuildRequired": true,
+      "immutableSourceDigestRequired": true,
+      "verifiedCompileAndBaselineBacktestRequired": true,
+      "baselineReportSha256Required": true,
+      "exactSelectedRunningTerminalBindingRequired": true,
+      "visibleOptimizationCapabilityRequired": true
+    },
+    "endpointShapes": {
+      "read": {"method": "GET", "path": "/api/ea-optimization-lab", "requestBody": "none", "sideEffects": false, "responseEnvelopeFields": ["ok", "eaOptimizationLab"]},
+      "createSession": {"method": "POST", "path": "/api/ea-optimization-lab/sessions", "allowedRequestFields": ["buildId", "idempotencyKey", "platform", "symbol", "timeframe", "dateRange", "validation", "roundCount", "riskThresholds", "ranges"], "requiredRequestFields": ["buildId", "idempotencyKey", "platform", "symbol", "timeframe", "dateRange", "validation", "roundCount", "riskThresholds", "ranges"], "responseEnvelopeFields": ["ok", "session", "workerStarted"]},
+      "resumeSession": {"method": "POST", "path": "/api/ea-optimization-lab/sessions/:sessionId/resume", "pathParameters": ["sessionId"], "allowedRequestFields": ["idempotencyKey"], "requiredRequestFields": [], "responseEnvelopeFields": ["ok", "session", "workerStarted"]},
+      "cancelSession": {"method": "POST", "path": "/api/ea-optimization-lab/sessions/:sessionId/cancel", "pathParameters": ["sessionId"], "allowedRequestFields": ["idempotencyKey"], "requiredRequestFields": [], "responseEnvelopeFields": ["ok", "session"]}
+    },
+    "completionEvidence": {
+      "matchingSessionRoundOperationReceiptRequired": true,
+      "visibleTesterEvidenceSha256Required": true,
+      "testerSettingsSha256Required": true,
+      "resultReportSha256Required": true,
+      "artifactManifestSha256Required": true,
+      "passCountsFromVerifiedReportRequired": true,
+      "initialDepositFromResolvedTesterSettingsRequired": true,
+      "immutableDeterministicAnalysisRequired": true,
+      "analysisBoundToExactSessionRoundAndResultRowsSha256": true,
+      "analysisUnavailableWhenVerifiedRowsIncomplete": true,
+      "boundedResultRowsMaxItems": 5000,
+      "syntheticSuccessAllowed": false
+    },
+    "readModelShape": {
+      "envelopeFields": ["ok", "eaOptimizationLab"],
+      "topLevelFields": ["schemaVersion", "scheduled", "eligibleBuilds", "sessions", "activeSession", "selectedTerminal", "visibleAdapterConnected", "terminalReady", "selectedPlatformSupported", "canStart", "admission", "busy", "adapter", "updatedAt"],
+      "sessionFields": ["schemaVersion", "id", "state", "stage", "buildId", "sourceDigest", "baselineReportSha256", "platform", "terminalBinding", "requestDigest", "round", "testerSettings", "riskThresholds", "progress", "heartbeatAt", "deadlineAt", "cancelRequested", "cancelReason", "failure", "recovery", "evidence", "liveTradingAllowed", "testShutdownTerminal"],
+      "evidenceAnalysisFields": ["analysis", "analysisSha256", "initialDeposit"],
+      "analysisFields": ["sessionId", "roundId", "sourceResultDocumentSha256", "sourceResultRowsSha256", "passCount", "returnedPassCount", "rowsTruncated", "riskThresholds", "initialDeposit", "status", "reasonCode", "unavailableReasons", "profitablePassCount", "eligiblePassCount", "candidateGroups", "currentBands", "nextParameterPlan", "nextParameterPlanAvailable", "nextParameterPlanReasonCode"]
     }
   },
   "approval_required_actions": [

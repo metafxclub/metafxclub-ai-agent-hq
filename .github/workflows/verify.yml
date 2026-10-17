@@ -65,4 +65,11 @@ jobs:
             -PythonPath .\runner\.venv\Scripts\python.exe `
             -LogPath (Join-Path $env:RUNNER_TEMP "verify-regression-${{ matrix.python-version }}.log")
       - name: ตรวจไวยากรณ์ JavaScript
-        run: node --check frontend/src/app/main.js
+        shell: pwsh
+        run: |
+          foreach ($frontendSource in Get-ChildItem -LiteralPath "frontend/src" -Recurse -File -Filter "*.js") {
+            node --check $frontendSource.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Frontend syntax check failed: $($frontendSource.Name)"
+            }
+          }

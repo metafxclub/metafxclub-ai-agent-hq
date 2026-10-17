@@ -141,6 +141,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Frontend syntax check failed with exit code $LASTEXITCODE"
           }
+          foreach ($frontendModule in Get-ChildItem -LiteralPath "frontend/src" -Recurse -File -Filter "*.js") {
+            node --check $frontendModule.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Frontend module syntax check failed: $($frontendModule.Name)"
+            }
+          }
 
       - name: Build release package
         shell: pwsh
@@ -279,6 +285,44 @@ jobs:
           }
           Expand-Archive -LiteralPath $archive -DestinationPath $smokeRoot -Force
           foreach ($requiredFile in @(
+              "frontend\src\styles\main.css",
+              "frontend\src\styles\workspace.css",
+              "frontend\src\styles\agent-workspace.css",
+              "frontend\src\styles\dashboard-workspace.css",
+              "frontend\src\styles\home.css",
+              "frontend\src\styles\home-panels.css",
+              "backend\local-runner\hq_backend\__init__.py",
+              "backend\local-runner\hq_backend\chat\__init__.py",
+              "backend\local-runner\hq_backend\chat\full_agent_artifacts.py",
+              "backend\local-runner\hq_backend\chat\full_agent_runtime.py",
+              "backend\local-runner\hq_backend\ea\__init__.py",
+              "backend\local-runner\hq_backend\ea\ea_factory_blueprint_coverage.py",
+              "backend\local-runner\hq_backend\ea\ea_factory_indicator_coverage.py",
+              "backend\local-runner\hq_backend\ea\ea_factory_metaeditor_compile.py",
+              "backend\local-runner\hq_backend\ea\ea_factory_optimization.py",
+              "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal.ps1",
+              "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal.py",
+              "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal_mt5.ps1",
+              "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal_mt5.py",
+              "backend\local-runner\hq_backend\ea\ea_research_blueprint.py",
+              "backend\local-runner\hq_backend\ea\ea_strategy_brief.py",
+              "backend\local-runner\hq_backend\google\__init__.py",
+              "backend\local-runner\hq_backend\google\google_oauth_store.py",
+              "backend\local-runner\hq_backend\google\google_sheet_hub.py",
+              "backend\local-runner\hq_backend\paths.py",
+              "backend\local-runner\hq_backend\research\__init__.py",
+              "backend\local-runner\hq_backend\research\fx_news_direct.py",
+              "backend\local-runner\hq_backend\research\radar_image_adapter.py",
+              "backend\local-runner\hq_backend\runtime\__init__.py",
+              "backend\local-runner\hq_backend\runtime\manager_parallel.py",
+              "backend\local-runner\hq_backend\runtime\manager_analysis.py",
+              "backend\local-runner\hq_backend\trading\__init__.py",
+              "backend\local-runner\hq_backend\trading\council_analysis.py",
+              "backend\local-runner\hq_backend\trading\mt4_market_watch.py",
+              "backend\local-runner\hq_backend\trading\mt4_trade_gateway.py",
+              "backend\local-runner\hq_backend\trading\ohlc_import.py",
+              "backend\local-runner\hq_backend\workflows\__init__.py",
+              "backend\local-runner\hq_backend\workflows\equipment_workflow_profiles.py",
               ".gitattributes",
               ".gitignore",
               "VERSION",
@@ -290,19 +334,11 @@ jobs:
               "docs\prompts\install-github-google-auto-th.md",
               "scripts\setup-google-oauth.ps1",
               "scripts\start-local-bridge.ps1",
-              "backend\local-runner\ea_factory_blueprint_coverage.py",
-              "backend\local-runner\ea_factory_indicator_coverage.py",
-              "backend\local-runner\ea_factory_metaeditor_compile.py",
-              "backend\local-runner\ea_factory_visible_terminal.py",
-              "backend\local-runner\ea_factory_visible_terminal.ps1",
-              "backend\local-runner\ea_research_blueprint.py",
-              "backend\local-runner\ea_strategy_brief.py",
+              "frontend\src\features\research\research-sheet.js",
+              "frontend\src\features\chat\meeting-session.js",
+              "frontend\src\features\quota\codex-rate.js",
               "backend\local-runner\configure_google_oauth_client.py",
-              "backend\local-runner\full_agent_artifacts.py",
-              "backend\local-runner\full_agent_runtime.py",
               "backend\local-runner\google_oauth_native_client.txt",
-              "backend\local-runner\google_oauth_store.py",
-              "backend\local-runner\google_sheet_hub.py",
               "contracts\research\ea-implementation-blueprint-v2.schema.json",
               "contracts\agents\full-agent-runtime-contract.json",
               "contracts\workflows\ea-factory-contract.json",
@@ -589,15 +625,51 @@ jobs:
               }
 
               foreach ($requiredInstalledFile in @(
+                "frontend\src\styles\main.css",
+                "frontend\src\styles\workspace.css",
+                "frontend\src\styles\agent-workspace.css",
+                "frontend\src\styles\dashboard-workspace.css",
+                "frontend\src\styles\home.css",
+                "frontend\src\styles\home-panels.css",
+                "backend\local-runner\hq_backend\__init__.py",
+                "backend\local-runner\hq_backend\chat\__init__.py",
+                "backend\local-runner\hq_backend\chat\full_agent_artifacts.py",
+                "backend\local-runner\hq_backend\chat\full_agent_runtime.py",
+                "backend\local-runner\hq_backend\ea\__init__.py",
+                "backend\local-runner\hq_backend\ea\ea_factory_blueprint_coverage.py",
+                "backend\local-runner\hq_backend\ea\ea_factory_indicator_coverage.py",
+                "backend\local-runner\hq_backend\ea\ea_factory_metaeditor_compile.py",
+                "backend\local-runner\hq_backend\ea\ea_factory_optimization.py",
+                "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal.ps1",
+                "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal.py",
+                "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal_mt5.ps1",
+                "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal_mt5.py",
+                "backend\local-runner\hq_backend\ea\ea_research_blueprint.py",
+                "backend\local-runner\hq_backend\ea\ea_strategy_brief.py",
+                "backend\local-runner\hq_backend\google\__init__.py",
+                "backend\local-runner\hq_backend\google\google_oauth_store.py",
+                "backend\local-runner\hq_backend\google\google_sheet_hub.py",
+                "backend\local-runner\hq_backend\paths.py",
+                "backend\local-runner\hq_backend\research\__init__.py",
+                "backend\local-runner\hq_backend\research\fx_news_direct.py",
+                "backend\local-runner\hq_backend\research\radar_image_adapter.py",
+                "backend\local-runner\hq_backend\runtime\__init__.py",
+                "backend\local-runner\hq_backend\runtime\manager_parallel.py",
+                "backend\local-runner\hq_backend\runtime\manager_analysis.py",
+                "backend\local-runner\hq_backend\trading\__init__.py",
+                "backend\local-runner\hq_backend\trading\council_analysis.py",
+                "backend\local-runner\hq_backend\trading\mt4_market_watch.py",
+                "backend\local-runner\hq_backend\trading\mt4_trade_gateway.py",
+                "backend\local-runner\hq_backend\trading\ohlc_import.py",
+                "backend\local-runner\hq_backend\workflows\__init__.py",
+                "backend\local-runner\hq_backend\workflows\equipment_workflow_profiles.py",
                 ".gitattributes",
                 ".gitignore",
                 "VERSION",
                 "backend\local-runner\google_oauth_native_client.txt",
-                "backend\local-runner\full_agent_artifacts.py",
-                "backend\local-runner\full_agent_runtime.py",
-                "backend\local-runner\ea_strategy_brief.py",
-                "backend\local-runner\ea_factory_visible_terminal.py",
-                "backend\local-runner\ea_factory_visible_terminal.ps1",
+                "frontend\src\features\research\research-sheet.js",
+                "frontend\src\features\chat\meeting-session.js",
+                "frontend\src\features\quota\codex-rate.js",
                 "contracts\agents\full-agent-runtime-contract.json",
                 "runner\codex_app_server_gateway.py",
                 "scripts\verify-full-agent-workspace-sentinel.py",
@@ -679,6 +751,12 @@ jobs:
               node --check (Join-Path $installedRoot "frontend\src\app\main.js")
               if ($LASTEXITCODE -ne 0) {
                 throw "Installed Runtime frontend syntax check failed with exit code $LASTEXITCODE"
+              }
+              foreach ($frontendModule in Get-ChildItem -LiteralPath (Join-Path $installedRoot "frontend\src") -Recurse -File -Filter "*.js") {
+                node --check $frontendModule.FullName
+                if ($LASTEXITCODE -ne 0) {
+                  throw "Installed Runtime frontend module syntax check failed: $($frontendModule.Name)"
+                }
               }
             }
             finally {
@@ -822,8 +900,47 @@ jobs:
               throw "Verified Git staging copied an ignored worktree file into Runtime."
             }
             foreach ($verifiedRuntimeFile in @(
-              "backend\local-runner\full_agent_artifacts.py",
-              "backend\local-runner\full_agent_runtime.py",
+              "frontend\src\styles\main.css",
+              "frontend\src\styles\workspace.css",
+              "frontend\src\styles\agent-workspace.css",
+              "frontend\src\styles\dashboard-workspace.css",
+              "frontend\src\styles\home.css",
+              "frontend\src\styles\home-panels.css",
+              "backend\local-runner\hq_backend\__init__.py",
+              "backend\local-runner\hq_backend\chat\__init__.py",
+              "backend\local-runner\hq_backend\chat\full_agent_artifacts.py",
+              "backend\local-runner\hq_backend\chat\full_agent_runtime.py",
+              "backend\local-runner\hq_backend\ea\__init__.py",
+              "backend\local-runner\hq_backend\ea\ea_factory_blueprint_coverage.py",
+              "backend\local-runner\hq_backend\ea\ea_factory_indicator_coverage.py",
+              "backend\local-runner\hq_backend\ea\ea_factory_metaeditor_compile.py",
+              "backend\local-runner\hq_backend\ea\ea_factory_optimization.py",
+              "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal.ps1",
+              "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal.py",
+              "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal_mt5.ps1",
+              "backend\local-runner\hq_backend\ea\ea_factory_visible_terminal_mt5.py",
+              "backend\local-runner\hq_backend\ea\ea_research_blueprint.py",
+              "backend\local-runner\hq_backend\ea\ea_strategy_brief.py",
+              "backend\local-runner\hq_backend\google\__init__.py",
+              "backend\local-runner\hq_backend\google\google_oauth_store.py",
+              "backend\local-runner\hq_backend\google\google_sheet_hub.py",
+              "backend\local-runner\hq_backend\paths.py",
+              "backend\local-runner\hq_backend\research\__init__.py",
+              "backend\local-runner\hq_backend\research\fx_news_direct.py",
+              "backend\local-runner\hq_backend\research\radar_image_adapter.py",
+              "backend\local-runner\hq_backend\runtime\__init__.py",
+              "backend\local-runner\hq_backend\runtime\manager_parallel.py",
+              "backend\local-runner\hq_backend\runtime\manager_analysis.py",
+              "backend\local-runner\hq_backend\trading\__init__.py",
+              "backend\local-runner\hq_backend\trading\council_analysis.py",
+              "backend\local-runner\hq_backend\trading\mt4_market_watch.py",
+              "backend\local-runner\hq_backend\trading\mt4_trade_gateway.py",
+              "backend\local-runner\hq_backend\trading\ohlc_import.py",
+              "backend\local-runner\hq_backend\workflows\__init__.py",
+              "backend\local-runner\hq_backend\workflows\equipment_workflow_profiles.py",
+              "frontend\src\features\research\research-sheet.js",
+              "frontend\src\features\chat\meeting-session.js",
+              "frontend\src\features\quota\codex-rate.js",
               "contracts\agents\full-agent-runtime-contract.json",
               "runner\codex_app_server_gateway.py",
               "scripts\verify-full-agent-workspace-sentinel.py",
@@ -847,7 +964,7 @@ jobs:
           import os
           import sys
           sys.path.insert(0, os.environ["METAFX_VERIFIED_RUNNER_PATH"])
-          import google_sheet_hub
+          from hq_backend.google import google_sheet_hub
           print(json.dumps(google_sheet_hub.google_oauth_status(), sort_keys=True))
           '@ 2>$null) | Select-Object -Last 1
             if ($LASTEXITCODE -ne 0 -or -not $verifiedAuthJson) {
@@ -873,7 +990,7 @@ jobs:
           import os
           import sys
           sys.path.insert(0, os.environ["METAFX_MIGRATION_RUNNER_PATH"])
-          import google_oauth_store
+          from hq_backend.google import google_oauth_store
           generation = google_oauth_store.save_client_configuration(
               "123456789012-release-migration-smoke.apps.googleusercontent.com",
               "TEST_ONLY_RELEASE_MIGRATION_SECRET",
@@ -984,8 +1101,8 @@ jobs:
           import os
           import sys
           sys.path.insert(0, os.environ["METAFX_MIGRATION_RUNNER_PATH"])
-          import google_oauth_store
-          import google_sheet_hub
+          from hq_backend.google import google_oauth_store
+          from hq_backend.google import google_sheet_hub
           central = google_sheet_hub.oauth_client_configuration()
           if central.get("source") != "central_release":
               raise SystemExit(1)
@@ -1021,6 +1138,12 @@ jobs:
             node --check (Join-Path $verifiedInstalledRoot "frontend\src\app\main.js")
             if ($LASTEXITCODE -ne 0) {
               throw "Verified Git Runtime frontend syntax check failed with exit code $LASTEXITCODE."
+            }
+            foreach ($frontendModule in Get-ChildItem -LiteralPath (Join-Path $verifiedInstalledRoot "frontend\src") -Recurse -File -Filter "*.js") {
+              node --check $frontendModule.FullName
+              if ($LASTEXITCODE -ne 0) {
+                throw "Verified Git Runtime frontend module syntax check failed: $($frontendModule.Name)"
+              }
             }
           }
           finally {

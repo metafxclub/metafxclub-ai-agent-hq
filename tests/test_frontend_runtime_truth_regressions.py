@@ -10,7 +10,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_MAIN_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "main.js"
-FRONTEND_STYLES_PATH = PROJECT_ROOT / "frontend" / "src" / "app" / "styles.css"
+FRONTEND_STYLES_PATH = PROJECT_ROOT / "frontend" / "src" / "styles" / "main.css"
 FRONTEND_INDEX_PATH = PROJECT_ROOT / "frontend" / "index.html"
 
 
@@ -565,7 +565,10 @@ class FrontendRuntimeTruthRegressionTests(unittest.TestCase):
         self.assertIn("selectedCandidateId: selectedConnectionHealth.candidateId", runtime)
         self.assertNotIn("function renderMetatraderSelection(", self.main)
         central = function_block(self.main, "function renderGlobalMetatraderHubControl()")
-        self.assertIn("Snapshot พร้อม (อ่านอย่างเดียว)", central)
+        self.assertIn(
+            "ล็อก MT4 และ MT5 แยกกันก่อนเริ่มงานที่เกี่ยวกับ MetaTrader",
+            central,
+        )
         self.assertNotIn('"Adapter พร้อม"', central)
 
     def test_max_managed_orders_control_is_an_ai_dispatch_cap_not_an_ea_ack(self) -> None:

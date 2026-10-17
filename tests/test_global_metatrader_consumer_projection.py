@@ -289,13 +289,23 @@ class GlobalMetatraderConsumerProjectionTests(unittest.TestCase):
             "normalizeMetatraderCandidate",
             "getMetatraderSelectionModel",
             "workflowDomainObject",
+            "eaOptimizationLabFirstArray",
+            "eaOptimizationLabNullableNumber",
+            "normalizeEaOptimizationCandidate",
+            "normalizeEaOptimizationReport",
+            "normalizeEaOptimizationLabBuild",
+            "eaOptimizationLabSha256",
+            "normalizeEaOptimizationLabArtifactEvidence",
+            "normalizeEaOptimizationLabSessionEvidence",
+            "normalizeEaOptimizationLabSession",
+            "eaOptimizationLabSessionIsActive",
+            "normalizeEaOptimizationLabSessionReport",
             "normalizeEaOptimizationLabDomain",
             "getEaOptimizationLabTerminalGate",
         ]
         script = "\n".join(
             [
                 "const state = {modal:{eaOptimizationLab:{platform:''}}};",
-                "function normalizeEaOptimizationReport(value) { return value; }",
                 *(function_source(self.main_source, name) for name in helpers),
                 f"const checklist = {json.dumps(checklist, ensure_ascii=False)};",
                 f"const session = {{platform:{json.dumps(platform)}}};",
@@ -316,12 +326,20 @@ class GlobalMetatraderConsumerProjectionTests(unittest.TestCase):
             )
         return json.loads(result.stdout)
 
-    def test_one_mt4_selection_reaches_all_three_consumers(self) -> None:
-        with self._selection_action_patches():
+    def test_dual_locks_with_mt4_active_reach_all_three_consumers(self) -> None:
+        with self._selection_action_patches(), mock.patch.object(
+            self.bridge,
+            "_assert_ai_trade_council_target_switch_safe_unlocked",
+        ):
             applied = self.bridge.select_global_metatrader_target(
                 "mt4",
                 self.mt4_id,
             )
+            self.bridge.select_global_metatrader_target(
+                "mt5",
+                self.mt5_id,
+            )
+            self.bridge.activate_global_metatrader_platform("mt4")
 
         self.assertEqual(
             set(applied["targetPropIds"]),
@@ -360,12 +378,20 @@ class GlobalMetatraderConsumerProjectionTests(unittest.TestCase):
         self.assertTrue(lab["gate"]["backendBound"])
         self.assertFalse(lab["gate"]["ready"])
 
-    def test_mt5_reaches_council_factory_and_lab_as_one_atomic_binding(self) -> None:
-        with self._selection_action_patches():
+    def test_dual_locks_with_mt5_active_reach_all_three_consumers(self) -> None:
+        with self._selection_action_patches(), mock.patch.object(
+            self.bridge,
+            "_assert_ai_trade_council_target_switch_safe_unlocked",
+        ):
             applied = self.bridge.select_global_metatrader_target(
                 "mt5",
                 self.mt5_id,
             )
+            self.bridge.select_global_metatrader_target(
+                "mt4",
+                self.mt4_id,
+            )
+            self.bridge.activate_global_metatrader_platform("mt5")
 
         self.assertEqual(
             set(applied["targetPropIds"]),

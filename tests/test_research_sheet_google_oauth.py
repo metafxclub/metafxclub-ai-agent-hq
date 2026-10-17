@@ -21,8 +21,8 @@ BRIDGE_PATH = RUNNER / "bridge_server.py"
 if str(RUNNER) not in sys.path:
     sys.path.insert(0, str(RUNNER))
 
-import google_oauth_store as store  # noqa: E402
-import google_sheet_hub as hub  # noqa: E402
+from hq_backend.google import google_oauth_store as store  # noqa: E402
+from hq_backend.google import google_sheet_hub as hub  # noqa: E402
 
 REAL_STORE_SAVE = store.save_refresh_token
 REAL_STORE_LOAD = store.load_refresh_token

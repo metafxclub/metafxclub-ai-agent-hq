@@ -331,12 +331,12 @@
       "layer": "workstations",
       "label": "ห้องทดลอง EA อัตโนมัติ",
       "status": "ready",
-      "summary": "เตรียม Auto Backtest, Auto Optimization และ EA Discovery พร้อมเป้าหมายกำไร Drawdown จำนวน Order และหลักฐาน โดย Adapter ที่รันโปรแกรมจริงยังเป็น Coming Soon",
+      "summary": "เตรียม Auto Backtest, Auto Optimization และ EA Discovery พร้อมเป้าหมายกำไร Drawdown จำนวน Order และหลักฐาน โดย MT5 Auto Optimization ใช้ Backend Session กับ Strategy Tester แบบมองเห็นจริงและ Fail-closed ส่วนงานที่ยังไม่มี Adapter คงอยู่ในโหมดแผน",
       "metrics": {
         "Backtest Plan": "พร้อมใช้งาน",
         "Optimization Plan": "พร้อมใช้งาน",
         "EA Discovery Plan": "พร้อมใช้งาน",
-        "ตัวรันจริง": "Coming Soon"
+        "ตัวรันจริง": "MT5 Optimization Session พร้อมแบบ Fail-closed · งานอื่นคงโหมดแผน"
       },
       "missions": [
         {
