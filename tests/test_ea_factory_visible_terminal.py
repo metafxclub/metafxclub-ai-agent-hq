@@ -599,6 +599,35 @@ class VisibleTerminalAdapterTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_parse_utc_accepts_powershell_round_trip_fractions_on_every_python(self) -> None:
+        # PowerShell ToString("o") emits seven fractional digits; Python 3.10
+        # only parses three or six, so the adapter must normalize itself.
+        parsed = self.module._parse_utc("2026-10-17T16:23:22.6133192Z")
+        self.assertEqual(parsed.tzinfo, timezone.utc)
+        self.assertEqual(parsed.microsecond, 613319)
+        self.assertEqual(
+            self.module._parse_utc("2026-10-17T16:23:22.6133192+00:00"), parsed
+        )
+        self.assertEqual(
+            self.module._parse_utc("2026-10-17T16:23:22.6Z").microsecond, 600000
+        )
+        self.assertEqual(
+            self.module._parse_utc("2026-10-17T16:23:22Z"),
+            datetime(2026, 10, 17, 16, 23, 22, tzinfo=timezone.utc),
+        )
+        for invalid in (
+            "",
+            "2026-10-17T16:23:22.6133192",
+            "2026-10-17T16:23:22.61x3192Z",
+            "not-a-time",
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    self.module.VisibleTerminalAdapterError,
+                    "process_observation_time_invalid",
+                ):
+                    self.module._parse_utc(invalid)
+
     def prime(self, adapter, request: dict) -> None:
         with mock.patch.object(
             self.module,

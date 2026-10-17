@@ -1225,10 +1225,46 @@ class Mt5AdapterFixture:
 class TestVisibleTerminalMt5(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="metafx-mt5-visible-test-")
-        self.fixture = Mt5AdapterFixture(Path(self.temporary.name))
+        # Hosted Windows runners expose the temporary root through an 8.3
+        # alias such as RUNNER~1. Production resolves the workspace root
+        # (_resolved_directory) before validating optimization intents, so
+        # keep the fixture canonical for the direct _validate_* tests too.
+        self.fixture = Mt5AdapterFixture(Path(self.temporary.name).resolve(strict=True))
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_parse_utc_accepts_powershell_round_trip_fractions_on_every_python(self) -> None:
+        # PowerShell ToString("o") emits seven fractional digits; Python 3.10
+        # only parses three or six, so the adapter must normalize itself.
+        parsed = mt5._parse_utc("2026-10-17T16:23:22.6133192Z")
+        self.assertEqual(parsed.tzinfo, timezone.utc)
+        self.assertEqual(parsed.microsecond, 613319)
+        self.assertEqual(
+            mt5._parse_utc("2026-10-17T16:23:22.6133192+00:00"), parsed
+        )
+        self.assertEqual(
+            mt5._parse_utc("2026-10-17T16:23:22.6Z").microsecond, 600000
+        )
+        self.assertEqual(
+            mt5._parse_utc("2026-10-17T16:23:22Z"),
+            datetime(2026, 10, 17, 16, 23, 22, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            mt5._parse_utc("2026-10-17T16:23:22.6133192123Z").microsecond, 613319
+        )
+        for invalid in (
+            "",
+            "2026-10-17T16:23:22.6133192",
+            "2026-10-17T16:23:22.61x3192Z",
+            "not-a-time",
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    mt5.VisibleTerminalAdapterError,
+                    "process_observation_time_invalid",
+                ):
+                    mt5._parse_utc(invalid)
 
     def test_certified_ema_strategy_execution_proof_is_bidirectional_and_exact(self) -> None:
         source_digest = "a" * 64

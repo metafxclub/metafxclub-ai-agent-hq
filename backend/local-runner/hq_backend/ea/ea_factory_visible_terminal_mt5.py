@@ -5161,10 +5161,26 @@ def _read_cached_start_response(
     return payload, digest, path
 
 
+_ISO_FRACTION = re.compile(
+    r"^(.*\d{2}:\d{2}:\d{2})\.(\d+)([+-]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?)?$"
+)
+
+
 def _parse_utc(value: object) -> datetime:
     text = str(value or "")
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
+    # PowerShell's round-trip format ("o") carries seven fractional digits.
+    # Python 3.11+ truncates any fraction to microseconds, but Python 3.10
+    # accepts only three or six digits, so normalize to six first and keep
+    # the supported 3.10-3.14 matrix fail-closed on everything else.
+    fraction = _ISO_FRACTION.fullmatch(text)
+    if fraction is not None:
+        text = "{0}.{1}{2}".format(
+            fraction.group(1),
+            fraction.group(2)[:6].ljust(6, "0"),
+            fraction.group(3) or "",
+        )
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError as error:
